@@ -1323,10 +1323,12 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertRegex(self.policy, r"export const APP_ROLES\b[^=]*=\s*new Set\(\[\.\.\.LEGACY_APP_ROLES, CLINICIAN_ROLE\]\);")
         self.assertEqual(ts_array(self.policy, "CLINICIAN_SESSION_ROUTES"), FIXTURES["session_routes"])
         self.assertEqual(ts_array(self.policy, "CLINICIAN_BUSINESS_ROUTES"), FIXTURES["business_routes"])
-        # U1a shipped an empty business allowlist; U1b adds read rows only. The single non-GET row is the viewer's
-        # SOP lookup (answers an Orthanc instance id, writes nothing); anything else that is not a GET is a new decision.
+        # U1a shipped an empty business allowlist; U1b adds read rows only. The non-GET rows are the viewer's SOP lookup
+        # (answers an Orthanc instance id, writes nothing) and the three S5-U4a question writes (decision D33: create,
+        # reply, close; the service decides each action's role); anything else that is not a GET is a new decision.
         self.assertEqual(len(FIXTURES["business_routes"]), len(set(FIXTURES["business_routes"])))
-        self.assertEqual([k for k in FIXTURES["business_routes"] if not k.startswith("GET ")], ["POST dicom/lookup"])
+        self.assertEqual([k for k in FIXTURES["business_routes"] if not k.startswith("GET ")],
+                         ["POST dicom/lookup", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close"])
         self.assertTrue({"GET authz/dicom", "POST dicom/lookup"} <= set(FIXTURES["business_routes"]),
                         "the viewer read pair is allowed together or not at all")
         self.assertTrue(set(FIXTURES["must_stay_denied"]).isdisjoint(ALLOWED))
@@ -2448,7 +2450,7 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (110, 4, 2, 5, 99), "the real inventory is unchanged: 110 = 4 + 2 + 5 + 99")
+                         (116, 4, 2, 11, 99), "the real inventory is unchanged: 116 = 4 + 2 + 11 + 99 (S5-U4a added 6 business rows)")
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
@@ -2697,7 +2699,7 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (110, 4, 2, 5, 99), "the real inventory is unchanged: 110 = 4 + 2 + 5 + 99")
+                         (116, 4, 2, 11, 99), "the real inventory is unchanged: 116 = 4 + 2 + 11 + 99 (S5-U4a added 6 business rows)")
         contract = CONTRACT["regex_or_division"]
         self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
                           sorted(UNREAD_PUNCT)),

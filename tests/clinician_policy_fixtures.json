@@ -4,8 +4,10 @@
   "legacy_roles": ["radiologist", "technician", "admin"],
   "clinician_role": "clinician",
   "session_routes": ["GET me", "POST auth/logout"],
-  "business_routes": ["GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report"],
-  "allowed_additions": ["GET clinician/studies", "GET clinician/studies/:uid/report"],
+  "business_routes": ["GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report",
+    "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close"],
+  "allowed_additions": ["GET clinician/studies", "GET clinician/studies/:uid/report",
+    "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close"],
   "must_stay_denied": [
     "GET studies", "GET bootstrap", "GET prefs", "GET audit", "GET studies/:uid/report-preview",
     "GET studies/:uid/report/versions", "GET studies/:uid/report/citations", "GET studies/:uid/report/structure",
@@ -77,7 +79,13 @@
     {"method": 1, "controller": "/", "handler": "clinician/studies", "key": "POST clinician/studies", "allowed": false},
     {"method": 0, "controller": "/", "handler": "studies", "key": "GET studies", "allowed": false},
     {"method": 0, "controller": "/", "handler": "bootstrap", "key": "GET bootstrap", "allowed": false},
-    {"method": 0, "controller": "/", "handler": "audit", "key": "GET audit", "allowed": false}
+    {"method": 0, "controller": "/", "handler": "audit", "key": "GET audit", "allowed": false},
+    {"method": 0, "controller": "/", "handler": "questions", "key": "GET questions", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "questions/:id", "key": "GET questions/:id", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "studies/:uid/questions", "key": "GET studies/:uid/questions", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "studies/:uid/questions", "key": "POST studies/:uid/questions", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "questions/:id/entries", "key": "POST questions/:id/entries", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "questions/:id/close", "key": "POST questions/:id/close", "allowed": true}
   ],
   "baseline_inventory": {
     "source_sha": "d914a9a8441819301cac28299063bdd6e721c10b",
@@ -119,7 +127,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 110, "public": 4, "session": 2, "business": 5, "denied": 99},
+    "counts": {"routes": 116, "public": 4, "session": 2, "business": 11, "denied": 99},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -183,7 +191,13 @@
       "POST studies/:uid/dictation": {"decision": "denied", "unit": "S3-ASR", "commit": "7bc6ffc", "basis": "report writer path: dictationGate runs the report-draft write refusals and every attempt is audited; a clinician writes no report text"},
       "POST gateway/receipt": {"decision": "denied", "unit": "S4-U3", "commit": "3955e38", "basis": "gateway client-credentials transmission receipt (needExact gateway)"},
       "GET gateway/retry-requests": {"decision": "denied", "unit": "S4-U4", "commit": "6dbc01b", "basis": "gateway client-credentials pull of pending Now Retry UIDs (needExact gateway)"},
-      "POST studies/:uid/gateway-retry": {"decision": "denied", "unit": "S4-U4", "commit": "6dbc01b", "basis": "technician Now Retry request (need technician, owning institution only)"}
+      "POST studies/:uid/gateway-retry": {"decision": "denied", "unit": "S4-U4", "commit": "6dbc01b", "basis": "technician Now Retry request (need technician, owning institution only)"},
+      "GET questions": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "question list: view=mine is the clinician's own threads, view=inbox needs radiologist or admin (service 403 otherwise); owning institution and StudyAccess only, no count; declared in allowed_additions"},
+      "GET questions/:id": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "one thread: a clinician-only member reads only its own (404 otherwise), radiologist/admin the owning institution's; entries carry rs and version only, never report text; declared in allowed_additions"},
+      "GET studies/:uid/questions": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "thread summaries of one owned study (tele institution 404), the clinician's own only; declared in allowed_additions"},
+      "POST studies/:uid/questions": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "question create (clinician role, owning institution, attribution from the token only, per-request receipt and one audit row); declared in allowed_additions"},
+      "POST questions/:id/entries": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "author follow-up (clinician) or answer (radiologist, never admin alone), decided by the server; replay returns the stored receipt; declared in allowed_additions"},
+      "POST questions/:id/close": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "close by the author (note optional) or by a radiologist/admin with a note; replay returns the stored receipt; declared in allowed_additions"}
     }
   },
   "controller_decorators": {
