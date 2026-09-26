@@ -6,7 +6,7 @@ REQ-S5-U1a-ROLE-DEFAULT-DENY -> RISK-S5-CLINICIAN-WRITER-LEAK/UNCLASSIFIED-ROUTE
 REQ-S5-U1b-CLINICIAN-READ -> RISK-S5-U1b-DRAFT-LEAK/NONFINAL-BODY/WRITER-FIELD/COUNT-LEAK/TENANT-UID
 -> this file (allowlist == fixture, declared additions only, source pins), TEST-S5-U1b-PURE
 (clinician_read_serializer_test.cjs) and TEST-S5-U1b-LIVE (clinician_read_live.py).
-REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-20
+REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-21
 here) and TEST-S5-U1c-LIVE-MATRIX (clinician_policy_live.py test_01/test_04/test_05): every controller route has exactly one
 route_matrix row, nothing is denied by subtraction, and review notes D3/D5/D6/D8 of S5-U1a are closed by pins.
 
@@ -22,8 +22,10 @@ No Node, no Nest, no browser, no stack. Three kinds of evidence and nothing more
      decorator name is bound once by 'import { Name }' from its listed module and nothing renames, re-exports under
      another name or shadows it, and Public ends at its declaration in auth.guard.ts; a route, Controller,
      RequestMapping, Public or SetMetadata name occurs in code only as its import and as a decorator the runs read, and
-     no Reflect metadata writer, decorator factory or loader of Nest or a project file reaches that metadata another way)
-     compared with the invariants_live ROUTES table read as text,
+     no Reflect metadata writer, decorator factory or loader of Nest or a project file reaches that metadata another way;
+     tests/clinician_policy_fixtures.json source_contract is the closed list of forms that reach a loader, an evaluator,
+     a metadata writer or a class prototype, and every other form is refused) compared with the invariants_live ROUTES
+     table read as text,
      with the 104-row planning baseline and with the route matrix: every current route is public, a listed session or
      business row, or a denied row with a named basis, and every route added since the baseline has its own row.
   3. Source pins that guard, member console, Keycloak client and realm carry the same role list and that
@@ -148,14 +150,42 @@ STRICT_MODULE = {**{name: DECORATOR_MODULE.get(name, "@nestjs/common") for name 
 STRICT_NAME = re.compile(rf"(?:{'|'.join(sorted(STRICT_NAMES))})(?![\w$])")
 # what writes the same metadata under none of those names: reflect-metadata ('Reflect.defineMetadata('path', ...)' is a
 # route) and Nest's decorator factory ('Reflector.createDecorator({ key: 'public' })' is a @Public()). Reflect occurs only
-# as 'Reflect.<member>' of a member that writes nothing, so it is not handed on either.
+# as 'Reflect.<member>' of a member source_contract lists, so it is not handed on either.
 METADATA_WRITERS = frozenset({"defineMetadata", "decorate", "createDecorator"})
-REFLECT_WRITERS = METADATA_WRITERS | {"metadata"}
 WRITER_NAME = re.compile(rf"(?:{'|'.join(sorted(METADATA_WRITERS))})(?![\w$])")
 REFLECT_NAME = re.compile(r"Reflect(?![\w$])")
 # a loader hands back a module object whose members no name check reads: require('@nestjs/common')['Put'] is a route
 LOADER_NAME = re.compile(r"(require|import)(?![\w$])")
 IDENTIFIER_CHAR = re.compile(r"[\w$]")
+# S5-U1c-F06: the closed source contract. A loader, an evaluator, a metadata writer and a class prototype are reached
+# only in the forms source_contract lists and every other form is refused; its rule field is what the checks implement.
+CONTRACT = FIXTURES["source_contract"]
+PACKAGES = frozenset(CONTRACT["packages"])
+LOADED_PACKAGES = frozenset(CONTRACT["loaded_packages"])
+REFLECT_MEMBERS = frozenset(CONTRACT["reflect_members"])
+PROCESS_MEMBERS = frozenset(CONTRACT["process_members"])
+PROTOTYPE_OWNERS = frozenset(CONTRACT["prototype_owners"])
+SEALED_WORD = re.compile(rf"(?:{'|'.join(sorted(map(re.escape, CONTRACT['sealed_words'])))})(?![\w$])")
+OWNER_NAME = re.compile(rf"(?:{'|'.join(sorted(PROTOTYPE_OWNERS))})(?![\w$])")
+PROCESS_NAME = re.compile(r"process(?![\w$])")
+PROTOTYPE_NAME = re.compile(r"prototype(?![\w$])")
+GET_PROTOTYPE_NAME = re.compile(r"getPrototypeOf(?![\w$])")
+CONSTRUCTOR_NAME = re.compile(r"constructor(?![\w$])")
+RETURN_WORD = re.compile(r"(?<![\w$.])return(?![\w$])")
+CLASS_WORD = re.compile(r"(?<![\w$.])class(?![\w$])")
+EXTENDS_WORD = re.compile(r"(?<![\w$.])extends(?![\w$])")
+# what stands before a method named require in a class body: the end of the member before it, or a modifier
+MEMBER_START = frozenset({"{", "}", ";", "async", "public", "private", "protected", "static", "override"})
+KEY_NAME = re.compile(r"[A-Za-z_$][\w$]*")
+# a string that spells one of these reaches it by a reflective call as well as by a key
+# (Object.getOwnPropertyDescriptor(X, 'prototype'), { '__proto__': p }, 'constructor'() { ... }); only an array literal
+# may hold one, as the real reserved-key set does
+STRING_HANDLES = frozenset(CONTRACT["sealed_words"]) | frozenset(CONTRACT["sealed_strings"])
+# a keyword before Object or Array that declares the name, which would let 'Object.prototype' name something else
+DECLARING = frozenset({"class", "function", "interface", "type", "enum", "namespace", "const", "let", "var", "as",
+                       "import"})
+STRING_ESCAPE = re.compile(r"\\(?:u\{([0-9A-Fa-f]+)\}|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|(\r\n|[\s\S]))")
+SIMPLE_ESCAPES = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "0": "\0"}
 # tsconfig compiles src/**/*, which takes .tsx, .mts and .cts too; a script no inventory opens could hold a controller
 UNREAD_SCRIPTS = frozenset({".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"})
 # TypeScript accepts whitespace, a line break or a comment between '@', the name and '('. A reader that wanted '@Name('
@@ -240,7 +270,14 @@ def code_mask(source):
     What is left is code, so every '@' in it is a decorator candidate (S5-U1c-F01). A literal, comment or bracket that
     does not close raises: a reader that lost its place would otherwise hide the code after it.
     """
-    out, stack, last, word, index = list(source), [], "", "", 0
+    return lexed(source)[0]
+
+
+@functools.lru_cache(maxsize=None)
+def lexed(source):
+    """(code_mask text, strings): strings holds the (start, end) of every '...' or "..." literal and every template
+    without substitutions, which literal_keys reads for the names they spell (S5-U1c-F06)."""
+    out, stack, last, word, index, strings = list(source), [], "", "", 0, []
 
     def blank(start, end):
         out[start:end] = [char if char in LINE_TERMINATORS else " " for char in source[start:end]]
@@ -262,6 +299,8 @@ def code_mask(source):
         elif char in "'\"" or (char == "/" and (word in REGEX_WORDS or (not word and (not last or last in REGEX_AFTER)))):
             index = literal_end(source, start)
             blank(start, index)
+            if char != "/":
+                strings.append((start, index))
             last, word = "literal", ""
         elif char == "`" or (char == "}" and stack and stack[-1] == "${"):
             if char == "}":
@@ -270,6 +309,8 @@ def code_mask(source):
             blank(start, index)
             if opened:
                 stack.append("${")
+            elif char == "`":
+                strings.append((start, index))
             last, word = "literal", ""
         elif char.isalnum() or char in "_$":
             word = last = IDENTIFIER.match(source, index).group(0)
@@ -285,7 +326,7 @@ def code_mask(source):
             index += 1
     if stack:
         raise AssertionError(f"unclosed {stack} at the end of the source")
-    return "".join(out)
+    return "".join(out), tuple(strings)
 
 
 def call_end(code, open_paren):
@@ -418,17 +459,19 @@ def module_key(path, specifier):
         return "outside api/src: " + target.as_posix()
 
 
-def decorator_module(key):
-    """A module a decorator name is imported from, or a part of Nest's common package that exports them too."""
-    return key is not None and (key in BINDINGS["modules"] or key.startswith("@nestjs/common/"))
+def whole_module(key):
+    """A module no namespace, default, import = or export * may bind: one a decorator name is imported from, any Nest
+    package, and a project file, whose exports would be read as properties no name check follows (S5-U1c-F06)."""
+    return key is not None and (key in BINDINGS["modules"] or key.startswith(("@nestjs/", "./", "outside api/src")))
 
 
 def module_statements(path, source):
     """[{'form', 'imported', 'local', 'module', 'type', 'at'}] of every import and export statement of the code.
 
     form: 'named' ({ a as b } of an import), 'export' ({ a as b } of an export list; module None without 'from'),
-    'namespace', 'default', 'equals' (import x = require('m') or = A.B) and 'star' (export * [as x] from 'm'). 'local' is
-    the name bound or exported and 'at' its offset. import(), import.meta and import 'm' bind nothing; an export
+    'namespace', 'default', 'equals' (import x = require('m') or = A.B), 'star' (export * [as x] from 'm') and 'bare'
+    (import 'm', which binds nothing but runs the module: source_contract lists it like any other, S5-U1c-F06). 'local'
+    is the name bound or exported and 'at' its offset. import() and import.meta are module_loads' to read; an export
     declaration binds a name the occurrence check of own_import reads. A shape this reader does not know raises: a
     binding it cannot read is refused, not skipped (S5-U1c-F04).
     """
@@ -507,6 +550,8 @@ def module_statements(path, source):
                               "at": local_at})
             continue
         if kind == "string":
+            found.append({"form": "bare", "imported": None, "local": None, "module": module(start)[0], "type": False,
+                          "at": None})
             continue
         bound, clause = [], kind == "name" or (kind, text) in (("punct", "*"), ("punct", "{"))
         if kind == "name":
@@ -600,62 +645,329 @@ def undecorated_names(path, source, code, statements, uses):
     return present
 
 
-def metadata_writes(path, code):
-    """Raise on a metadata writer in code: defineMetadata, decorate or createDecorator under any object, and Reflect used
-    other than as 'Reflect.<member>' of a member that writes nothing (S5-U1c-F05)."""
-    found = [(line_of(code, match.start()), match.group(0)) for match in words(WRITER_NAME, code)]
-    for match in words(REFLECT_NAME, code):
+def gathered(problems, step, *args):
+    """step(*args), or None with its refusal added to problems: every check runs, so a refusal names each of its reasons
+    and a regression can assert the one it is about even where another check refuses the same text too (S5-U1c-F06)."""
+    try:
+        return step(*args)
+    except AssertionError as error:
+        problems.append(str(error))
+        return None
+
+
+def bracket_end(code, at):
+    """Offset just past the bracket that closes code[at], one of '(', '[' and '{'; code is masked, so each is code."""
+    opener = code[at]
+    closer, depth = {"(": ")", "[": "]", "{": "}"}[opener], 0
+    for index in range(at, len(code)):
+        if code[index] == opener:
+            depth += 1
+        elif code[index] == closer:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    raise AssertionError(f"unbalanced {opener!r} at offset {at}")
+
+
+def before_token(code, at):
+    """(text, offset) of the token that ends before code[at] past whitespace: a whole word or one character; ('', -1) at
+    the start of the code."""
+    back = at - 1
+    while back >= 0 and code[back].isspace():
+        back -= 1
+    if back < 0:
+        return "", -1
+    if not IDENTIFIER_CHAR.match(code[back]):
+        return code[back], back
+    start = back
+    while start > 0 and IDENTIFIER_CHAR.match(code[start - 1]):
+        start -= 1
+    return code[start:back + 1], start
+
+
+def is_property(code, at):
+    """Whether the name at code[at] follows '.' or '?.': a member of something, not a binding ('...' is a spread)."""
+    token, index = before_token(code, at)
+    return token == "." and not (index > 0 and code[index - 1] == ".")
+
+
+def owner(code, at):
+    """(name, offset) of the name before the '.' in front of code[at], or None: after '?.', a call or an index there is
+    no name to read."""
+    token, index = before_token(code, at)
+    if token != "." or (index > 0 and code[index - 1] in ".?"):
+        return None
+    name, start = before_token(code, index)
+    return (name, start) if KEY_NAME.fullmatch(name) else None
+
+
+def this_field(code, at):
+    """Whether the member at code[at] is this.<name> or this.<field>.<name>, and this itself no property."""
+    base = owner(code, at)
+    if base is not None and base[0] != "this":
+        base = owner(code, base[1])
+    return base is not None and base[0] == "this" and not is_property(code, base[1])
+
+
+def enclosing(code, at):
+    """Offset of the innermost bracket open at code[at], or None at the top level."""
+    depth = 0
+    for index in range(at - 1, -1, -1):
+        if code[index] in ")]}":
+            depth += 1
+        elif code[index] in "([{":
+            if depth == 0:
+                return index
+            depth -= 1
+    return None
+
+
+def class_body(code, brace):
+    """Whether the '{' at code[brace] opens a class body: 'class' heads the text since the ';', '{' or '}' before it."""
+    start = max(code.rfind(";", 0, brace), code.rfind("{", 0, brace), code.rfind("}", 0, brace)) + 1
+    return CLASS_WORD.search(code, start, brace) is not None
+
+
+def class_method(code, at, end):
+    """Whether the require at code[at], its parameter list ending before code[end], declares a method: the innermost
+    open bracket is a class body, the end of the previous member or a modifier stands before it, and '{' or a return
+    type follows. 'true ? require(name) : null' has '?' before it, and 'require(name)' with a block on the next line
+    stands in a function body: both are calls, which the ':' or '{' after them passed as declarations (S5-U1c-F06)."""
+    opener = enclosing(code, at)
+    return (opener is not None and code[opener] == "{" and class_body(code, opener)
+            and before_token(code, at)[0] in MEMBER_START and code.startswith(("{", ":"), skip_gap(code, end)))
+
+
+def loader_argument(source, paren, end):
+    """('plain', text) when one '...' or "..." literal without an escape is all that stands between source[paren] and
+    the ')' before source[end]; ('template', text) for one such template without substitutions; (None, None) for
+    anything else, which a loader call computes."""
+    start = skip_gap(source, paren + 1)
+    if start >= end - 1 or source[start] not in "'\"`":
+        return None, None
+    if source[start] == "`":
+        stop, opened = template_part(source, start + 1)
+        kind = None if opened else "template"
+    else:
+        stop, kind = literal_end(source, start), "plain"
+    text = source[start + 1:stop - 1]
+    if kind is None or "\\" in text or skip_gap(source, stop) != end - 1:
+        return None, None
+    return kind, text
+
+
+def string_value(text):
+    """The value of a string literal's text: its escapes decoded and a line continuation dropped."""
+    def decode(match):
+        digits = match.group(1) or match.group(2) or match.group(3)
+        if digits:
+            point = int(digits, 16)
+            return chr(point) if point <= 0x10FFFF else "�"
+        char = match.group(4)
+        return "" if char == "\r\n" or char in LINE_TERMINATORS else SIMPLE_ESCAPES.get(char, char)
+    return STRING_ESCAPE.sub(decode, text)
+
+
+def array_literal(code, bracket):
+    """Whether the '[' at code[bracket] opens an array literal: no name, ')' or ']' (an index) and no '.' ('?.[' an
+    index, '...[' a spread into a call's arguments) stands before it."""
+    token, _index = before_token(code, bracket)
+    return not (token in (")", "]", ".") or KEY_NAME.fullmatch(token) and token not in REGEX_WORDS)
+
+
+@functools.lru_cache(maxsize=None)
+def literal_keys(source):
+    """(text, escaped, handles): code_mask(source) with each string literal, or template without substitutions, that
+    stands alone between '[' and ']' written in place as '.' and the name it spells ('?.[' as '?.' and the name), the
+    keys of that kind holding an escape, and the literals anywhere but in an array literal whose value is a
+    STRING_HANDLES name."""
+    code, strings = lexed(source)
+    out, escaped, handles = list(code), [], []
+    for match in re.finditer(r"\[", code):
+        at = match.start()
+        start = skip_gap(source, at + 1)
+        if start >= len(source) or source[start] not in "'\"`":
+            continue
+        if source[start] == "`":
+            stop, opened = template_part(source, start + 1)
+            if opened:
+                continue
+        else:
+            stop = literal_end(source, start)
+        close = skip_gap(source, stop)
+        if not source.startswith("]", close):
+            continue
+        key = source[start + 1:stop - 1]
+        if "\\" in key:
+            escaped.append((line_of(code, at), key))
+        elif KEY_NAME.fullmatch(key):
+            token, index = before_token(code, at)
+            out[at:close + 1] = [char if char in LINE_TERMINATORS else " " for char in code[at:close + 1]]
+            out[at] = " " if token == "." and index > 0 and code[index - 1] == "?" else "."
+            out[start + 1:stop - 1] = key
+    for start, stop in strings:
+        value = string_value(source[start + 1:stop - 1])
+        if value not in STRING_HANDLES:
+            continue
+        opener = enclosing(code, start)
+        if not (opener is not None and code[opener] == "[" and array_literal(code, opener)):
+            handles.append((line_of(code, start), value))
+    return "".join(out), tuple(escaped), tuple(handles)
+
+
+def property_names(path, source):
+    """code_mask(source) with x['name'] read as x.name, so the name checks see a member a literal key reaches: blanked
+    as strings, module['require'] and common['Put'] passed every check (S5-U1c-F06). An array of one string reads the
+    same way, which can only refuse more. Refused: a key holding an escape, and a string that spells a STRING_HANDLES
+    name anywhere but in an array literal, which a reflective call or a quoted member name would read as that name. A
+    key that is an expression is not read (source_contract.outside_the_contract)."""
+    text, escaped, handles = literal_keys(source)
+    problems = []
+    if escaped:
+        problems.append(f"{path.name}: an escaped property key, which the name checks do not read: {list(escaped)}")
+    if handles:
+        problems.append(f"{path.name}: a string literal that spells a handle source_contract seals, outside an array "
+                        f"literal: {list(handles)}")
+    if problems:
+        raise AssertionError(" | ".join(problems))
+    return text
+
+
+def metadata_writes(path, code, named):
+    """Raise on a metadata writer: defineMetadata, decorate or createDecorator under any object or literal key, and
+    Reflect other than 'Reflect.<member>' of a member source_contract lists (S5-U1c-F05/F06). named is the
+    property_names text; the member after Reflect is read from code, where a literal key is still blank, so
+    Reflect['x'] is Reflect handed on."""
+    found = [(line_of(named, match.start()), match.group(0)) for match in words(WRITER_NAME, named)]
+    for match in words(REFLECT_NAME, named):
         dot = skip_gap(code, match.end())
         member = IDENTIFIER.match(code, skip_gap(code, dot + 1)) if code.startswith(".", dot) else None
-        if member is None or member.group(0) in REFLECT_WRITERS:
-            found.append((line_of(code, match.start()), "Reflect" + ("." + member.group(0) if member else "")))
+        if member is None or member.group(0) not in REFLECT_MEMBERS:
+            found.append((line_of(named, match.start()), "Reflect" + ("." + member.group(0) if member else "")))
     if found:
         raise AssertionError(f"{path.name}: a metadata writer that attaches route or public metadata without a decorator "
                              f"the inventory reads: {sorted(found)}")
 
 
-def loadable(module):
-    """A package by name: no file of the project in any spelling (relative, absolute, a URL), none of Nest's packages."""
-    name = module[len("node:"):] if module.startswith("node:") else module
-    return bool(name) and not name.lower().startswith((".", "/", "@nestjs/")) and ":" not in name and "\\" not in name
-
-
 def module_loads(path, source, code):
-    """Raise on a module loader the binding checks cannot follow (S5-U1c-F05): require() or import() of a file of the
-    project or of one of Nest's packages, of a module computed at run time, and require used other than by a call.
+    """[package] of the loader calls source_contract supports; raises on every other require or import (S5-U1c-F05/F06).
 
-    The whole-module import statements are refused in decorator_bindings; require('@nestjs/common')['Put'] and
-    (await import('./auth.guard'))['Public'] hand back the same exports as values that no name check reads. A method
-    named require takes no module string: 'async require(c: Caller) {' declares one, this.studyAccess.require(c, uids)
-    calls one, and both are left alone; a member call with a module string is a loader too (module.require('m')).
+    import is a statement keyword, which module_statements reads, or 'import(...)'. require is 'require(...)', a method
+    declared in a class body, or this.require(...) and this.<field>.require(...), how the services call StudyAccess. A
+    loader call is the bare callee with one plain string literal naming a loaded package and nothing else: the reader
+    before this took 'require('@nest' + 'js/common')' by its first string, 'true ? require(name) : null' by the ':'
+    after the call as a method's return type, 'module.require(name)' as a method call, and module['require'] was a
+    string, so each loaded Nest's common unread (S5-U1c-F06). code is the property_names text, where module['require']
+    is module.require; 'import x = require('m')' is a loader call too.
     """
-    found = []
+    found, loaded = [], []
     for match in words(LOADER_NAME, code):
         word, at = match.group(1), match.start()
-        back = at - 1
-        while back >= 0 and code[back].isspace():
-            back -= 1
-        member = back >= 0 and code[back] == "." and code[max(0, back - 2):back + 1] != "..."
         paren = skip_gap(code, match.end())
-        if not code.startswith("(", paren):
-            if word == "require" and not member:
-                found.append((line_of(code, at), "require not called"))
+        called = code.startswith("(", paren)
+        end = call_end(code, paren) if called else paren
+        text = word + ("(" + " ".join(source[paren + 1:end - 1].split()) + ")" if called else "")
+        if is_property(code, at):
+            if not (word == "require" and called and this_field(code, at)):
+                base = owner(code, at)
+                found.append((line_of(code, at), f"{base[0] if base else '<expression>'}.{text}: a member {word} other "
+                                                 f"than this.require(...) or this.<field>.require(...)"))
             continue
-        start = skip_gap(source, paren + 1)
-        if source.startswith(("'", '"'), start):
-            module = source[start + 1:literal_end(source, start) - 1]
-        elif source.startswith("`", start) and not (template := template_part(source, start + 1))[1]:
-            module = source[start + 1:template[0] - 1]
-        elif member or code[call_end(code, paren):].lstrip()[:1] in ("{", ":"):
+        if not called:
+            if word == "require" or code.startswith(".", paren):
+                found.append((line_of(code, at), "require not called" if word == "require" else "import.meta"))
             continue
+        if word == "require" and class_method(code, at, end):
+            continue
+        kind, module = loader_argument(source, paren, end)
+        if kind == "plain" and module in LOADED_PACKAGES:
+            loaded.append(module)
+        elif kind == "plain":
+            found.append((line_of(code, at), f"{word}({module!r}): not a package the loaders may take"))
+        elif kind == "template":
+            found.append((line_of(code, at), f"{word}({module!r}) written as a template, not one plain string literal"))
         else:
-            found.append((line_of(code, at), f"{word}() of a module computed at run time"))
-            continue
-        if not loadable(module):
-            found.append((line_of(code, at), f"{word}({module!r})"))
+            found.append((line_of(code, at), f"{word}() of a module computed at run time or written other than as one "
+                                             f"plain string literal: {text}"))
     if found:
-        raise AssertionError(f"{path.name}: a module loader the binding check does not follow (a project file, a Nest "
-                             f"package or a computed module): {found}")
+        raise AssertionError(f"{path.name}: a module loader the binding check does not follow (source_contract: the "
+                             f"bare callee and one plain string literal naming a loaded package): {found}")
+    return loaded
+
+
+def contract_names(path, code):
+    """Raise on a sealed word anywhere and on Object, Array, process, prototype, getPrototypeOf and constructor outside
+    the forms source_contract lists (S5-U1c-F06); code is the property_names text.
+
+    Nest serves every route method on the prototype chain of the instance it builds for a registered class, under that
+    class's @Controller() prefix. So no code reaches a class prototype (Object.assign, defineProperty or setPrototypeOf
+    onto X.prototype or Object.getPrototypeOf(this)), no constructor returns another object, Object and Array are not
+    rebound (which would let 'Object.prototype' name a class), and nothing builds a Function (eval, Function, a
+    constructor reached as a property) or reaches a loader through process or module: each would put route methods
+    read under one file's prefix on an instance served under another's, or load a module unread.
+    """
+    found = [(line_of(code, match.start()), match.group(0)) for match in words(SEALED_WORD, code)]
+
+    def add(match, text):
+        found.append((line_of(code, match.start()), text))
+
+    for match in words(OWNER_NAME, code):
+        after, keyword = skip_gap(code, match.end()), before_token(code, match.start())[0]
+        if is_property(code, match.start()):
+            continue
+        used = code.startswith((".", "<"), after) or keyword == "new" and code.startswith("(", after)
+        if keyword in DECLARING or not used:
+            add(match, f"{match.group(0)} other than {match.group(0)}.<member>")
+    for match in words(PROCESS_NAME, code):
+        dot = skip_gap(code, match.end())
+        member = IDENTIFIER.match(code, skip_gap(code, dot + 1)) if code.startswith(".", dot) else None
+        if not is_property(code, match.start()) and (member is None or member.group(0) not in PROCESS_MEMBERS):
+            add(match, "process" + ("." + member.group(0) if member else ""))
+    for match in words(PROTOTYPE_NAME, code):
+        base = owner(code, match.start())
+        if base is None or base[0] not in PROTOTYPE_OWNERS or is_property(code, base[1]):
+            add(match, (base[0] + "." if base else "") + "prototype")
+    for match in words(GET_PROTOTYPE_NAME, code):
+        base, paren = owner(code, match.start()), skip_gap(code, match.end())
+        compared = code.startswith("(", paren) and code.startswith(("===", "!=="), skip_gap(code, call_end(code, paren)))
+        if not (base is not None and base[0] == "Object" and not is_property(code, base[1]) and compared):
+            add(match, "getPrototypeOf other than compared by === or !==")
+    for match in words(CONSTRUCTOR_NAME, code):
+        paren = skip_gap(code, match.end())
+        body = skip_gap(code, call_end(code, paren)) if code.startswith("(", paren) else paren
+        if is_property(code, match.start()):
+            add(match, "constructor as a property")
+        elif not code.startswith("(", paren) or not code.startswith("{", body):
+            add(match, "constructor other than a declaration")
+        elif RETURN_WORD.search(code, body, bracket_end(code, body)):
+            add(match, "return in a constructor")
+    if found:
+        raise AssertionError(f"{path.name}: a sealed name or a form the source contract does not list: {sorted(found)}")
+
+
+def module_sources(path, statements):
+    """Raise on a module statement naming a package source_contract does not list, or a relative module outside api/src
+    (S5-U1c-F06): node:module hands out createRequire, node:vm evaluates code, and a file outside api/src would be
+    compiled into the app without either inventory reading it."""
+    unlisted = sorted({s["module"] for s in statements
+                       if s["module"] is not None and not s["module"].startswith("./") and s["module"] not in PACKAGES})
+    if unlisted:
+        raise AssertionError(f"{path.name}: a module the source contract does not list (source_contract.packages, or a "
+                             f"file under api/src): {unlisted}")
+
+
+def controller_heritage(path, code):
+    """Raise on a class with an extends clause in a *.controller.ts file (S5-U1c-F06): its instances would carry the
+    base's route methods, read under the base's file and served under this file's @Controller() prefix."""
+    headings = []
+    for match in CLASS_WORD.finditer(code):
+        brace = code.find("{", match.end())
+        heading = code[match.start():len(code) if brace < 0 else brace]
+        if EXTENDS_WORD.search(heading):
+            headings.append((line_of(code, match.start()), " ".join(heading.split())))
+    if headings:
+        raise AssertionError(f"{path.name}: a class in a controller file extends another class, whose route methods it "
+                             f"would serve under this file's prefix: {headings}")
 
 
 def decorator_bindings(path, source, runs):
@@ -674,6 +986,12 @@ def decorator_bindings(path, source, runs):
     its import and its decorators (undecorated_names) and is bound by its own import from STRICT_MODULE even when no
     decorator uses it, no metadata writer occurs (metadata_writes), and no loader reaches a project file or a Nest
     package (module_loads).
+
+    S5-U1c-F06: those name checks read the property_names text, so a literal key (common['Put'], module['require']) is
+    the member it names, and source_contract closes the rest: loader calls (module_loads), sealed words and the listed
+    forms of Object, Array, process, prototype, getPrototypeOf and constructor (contract_names), the modules a statement
+    may name (module_sources) and no namespace, default, import = or export * of a project file or a Nest package. Each
+    of these checks runs and the refusal joins their reasons.
     """
     code = code_mask(source)
     if "\\" in code:
@@ -684,21 +1002,28 @@ def decorator_bindings(path, source, runs):
     if renamed:
         raise AssertionError(f"{path.name}: an import or export renames a decorator name: {renamed}")
     whole = sorted((s["form"], s["module"], s["local"]) for s in statements if s["form"] in ("namespace", "default",
-                   "equals", "star") and (decorator_module(s["module"]) or s["local"] in BOUND_NAMES))
+                   "equals", "star") and (whole_module(s["module"]) or s["local"] in BOUND_NAMES))
     if whole:
-        raise AssertionError(f"{path.name}: a whole-module binding of a module that exports decorators, or under a "
-                             f"decorator name: {whole}")
+        raise AssertionError(f"{path.name}: a whole-module binding of a module that exports decorators, a project file "
+                             f"or a Nest package, or under a decorator name: {whole}")
     uses = {}
     for run in runs:
         for name, start, _end in run["items"]:
             uses.setdefault(name, set()).add(DECORATOR_CALL.match(code, start).start(1))
+    problems = []
+    gathered(problems, property_names, path, source)
+    named = literal_keys(source)[0]
     for name, offsets in sorted(uses.items()):
-        own_import(path, code, statements, name, DECORATOR_MODULE.get(name), offsets)
-    present = undecorated_names(path, source, code, statements, uses)
-    metadata_writes(path, code)
-    module_loads(path, source, code)
-    for name in sorted(present - set(uses)):
-        own_import(path, code, statements, name, STRICT_MODULE[name], set(), properties=False)
+        gathered(problems, own_import, path, named, statements, name, DECORATOR_MODULE.get(name), offsets)
+    present = gathered(problems, undecorated_names, path, source, named, statements, uses)
+    gathered(problems, metadata_writes, path, code, named)
+    gathered(problems, module_loads, path, source, named)
+    gathered(problems, contract_names, path, named)
+    gathered(problems, module_sources, path, statements)
+    for name in sorted((present or set()) - set(uses)):
+        gathered(problems, own_import, path, named, statements, name, STRICT_MODULE[name], set(), False)
+    if problems:
+        raise AssertionError(" | ".join(problems))
     return {name: DECORATOR_MODULE[name] for name in sorted(uses)}
 
 
@@ -729,8 +1054,9 @@ def outside_decorators(path, source):
     Both inventories open *.controller.ts only, so a route decorator, @Controller(), @RequestMapping() or @Public()
     anywhere else declares what neither sees (S5-U1c-F03). It is refused, and so are a shape the runs cannot read, a
     name outside_decorators does not classify (an alias or a wrapper can make a route), such call text in a comment
-    or literal, a classified name that is not Nest's own export ('Controller as Injectable', S5-U1c-F04) and a route,
-    Controller or Public applied by a call, a metadata writer or a loader ('Controller('x')(Unlisted)', S5-U1c-F05).
+    or literal, a classified name that is not Nest's own export ('Controller as Injectable', S5-U1c-F04), a route,
+    Controller or Public applied by a call, a metadata writer or a loader ('Controller('x')(Unlisted)', S5-U1c-F05) and
+    any form source_contract does not list (S5-U1c-F06).
     """
     runs = decorator_runs(source)
     names = [name for run in runs for name, _start, _end in run["items"]]
@@ -797,6 +1123,27 @@ def api_sources(root=API):
     return {path: path.read_text(encoding="utf-8") for path in files if path.suffix == ".ts"}
 
 
+def controller_routes(path, source, runs):
+    """[((method, route), public)] of one *.controller.ts file; raises when a decorator shape cannot be read."""
+    controllers = [(run["kind"], start, end) for run in runs for name, start, end in run["items"]
+                   if name == "Controller"]
+    if [kind for kind, _start, _end in controllers] != ["class"]:
+        raise AssertionError(f"{path.name}: expected one @Controller() on a class, found {controllers}")
+    readable = CONTROLLER_TEXT.fullmatch(source, *controllers[0][1:])
+    if readable is None:
+        raise AssertionError(f"{path.name}: unreadable {source[slice(*controllers[0][1:])]!r}")
+    prefix = (readable.group(2) or "").strip("/")
+    handlers = controller_handlers(path, source)
+    # every route item became a handler or controller_handlers raised, so the read items are the whole decision
+    read = {start for run in runs for _name, start, _end in run["items"]}
+    stray = [text for offset, text in decorator_text(source) if offset not in read]
+    if stray:
+        raise AssertionError(f"{path.name}: decorator call text the inventory did not read (comments and literals "
+                             f"count too) {stray}")
+    return [((method, "/".join(part for part in (prefix, child) if part)), public)
+            for method, child, public, _offset in handlers]
+
+
 def controller_inventory(sources=None):
     """(method, route) -> {'file', 'public'}; raises when a decorator shape cannot be read.
 
@@ -805,39 +1152,30 @@ def controller_inventory(sources=None):
     inventory, and with it test_05, instead of being left out (S5-U1c-F03). Every decorator name a controller carries
     must be its module's own export and Public must end at its declaration, or a route or @Public() under a classified
     name stops it too (S5-U1c-F04), and so does a route or Public applied by a call, a metadata writer or a loader in
-    any file (S5-U1c-F05).
+    any file (S5-U1c-F05), any form source_contract does not list and an extends clause in a controller file
+    (S5-U1c-F06). Every check runs on every file and the refusal joins each reason.
     """
-    found = {}
+    found, problems = {}, []
     sources = api_sources() if sources is None else sources
     for path, source in sorted(sources.items()):
         if path.suffix != ".ts":
-            raise AssertionError(f"{path.name}: a script neither inventory opens")
-        if not path.name.endswith(".controller.ts"):
-            outside_decorators(path, source)
+            problems.append(f"{path.name}: a script neither inventory opens")
             continue
-        runs = decorator_runs(source)
-        controllers = [(run["kind"], start, end) for run in runs for name, start, end in run["items"] if name == "Controller"]
-        if [kind for kind, _start, _end in controllers] != ["class"]:
-            raise AssertionError(f"{path.name}: expected one @Controller() on a class, found {controllers}")
-        readable = CONTROLLER_TEXT.fullmatch(source, *controllers[0][1:])
-        if readable is None:
-            raise AssertionError(f"{path.name}: unreadable {source[slice(*controllers[0][1:])]!r}")
-        prefix = (readable.group(2) or "").strip("/")
-        handlers = controller_handlers(path, source)
-        # every route item became a handler or controller_handlers raised, so the read items are the whole decision
-        read = {start for run in runs for _name, start, _end in run["items"]}
-        stray = [text for offset, text in decorator_text(source) if offset not in read]
-        if stray:
-            raise AssertionError(f"{path.name}: decorator call text the inventory did not read (comments and literals "
-                                 f"count too) {stray}")
-        decorator_bindings(path, source, runs)
-        for method, child, public, _offset in handlers:
-            route = "/".join(part for part in (prefix, child) if part)
-            key = (method, route)
+        if not path.name.endswith(".controller.ts"):
+            gathered(problems, outside_decorators, path, source)
+            continue
+        runs = gathered(problems, decorator_runs, source)
+        if runs is None:
+            continue
+        for key, public in gathered(problems, controller_routes, path, source, runs) or []:
             if key in found:
-                raise AssertionError(f"duplicate route {key}")
+                problems.append(f"duplicate route {key}")
             found[key] = {"file": path.name, "public": public}
-    public_export(sources)
+        gathered(problems, decorator_bindings, path, source, runs)
+        gathered(problems, controller_heritage, path, code_mask(source))
+    gathered(problems, public_export, sources)
+    if problems:
+        raise AssertionError(" | ".join(problems))
     return found
 
 
@@ -1768,8 +2106,9 @@ class ClinicianPolicySpec(unittest.TestCase):
                 {added: controller(nest + "import { Header } from '@nestjs/common';\n",
                                    "  @Header('x-read', '1')\n  @Get('read')\n  read() { return this.Header; }\n")},
                 {("GET", "bound/read"): False}),
+            # listed packages since S5-U1c-F06: an unlisted one such as node:fs is refused in test_21
             "unrelated aliases and a namespace": (
-                {outside: service(inject + "import * as fs from 'node:fs';\nimport { readFile as load } from 'node:fs/promises';\n")},
+                {outside: service(inject + "import * as nodeCrypto from 'node:crypto';\nimport { createHash as digest } from 'crypto';\n")},
                 {}),
             "a type-only import beside the value import": (
                 {outside: service(inject + "import type { Request } from 'express';\n")}, {}),
@@ -1959,11 +2298,15 @@ class ClinicianPolicySpec(unittest.TestCase):
         # the reviewer's outside file stops test_12's reader too
         with self.assertRaisesRegex(AssertionError, r"unlisted-routes\.ts: Controller, Public, Put " + undecorated):
             outside_decorators(outside, moved)
+        def plain(imports, after):
+            # service() without its target/descriptor lines: reading Helper.prototype is refused since S5-U1c-F06
+            return imports + "@Injectable()\nexport class Helper {\n  run() { return 1; }\n}\n" + after
+
         # controls: an unused import, Reflect's readers, packages loaded by name and a method named require still read
         accepted = {
             "an unused import of a route decorator": {tags: put + sources[tags]},
-            "Reflect.ownKeys": {outside: service(inject, "export const keys = (v: object) => Reflect.ownKeys(v);\n")},
-            "a package by require and by import()": {outside: service(inject, (
+            "Reflect.ownKeys": {outside: plain(inject, "export const keys = (v: object) => Reflect.ownKeys(v);\n")},
+            "a package by require and by import()": {outside: plain(inject, (
                 "export const raw = require('express').raw;\n"
                 "export const hash = async () => (await import('node:crypto')).createHash('md5');\n"))},
             "a method named require": {outside: inject + "@Injectable()\nexport class Access {\n"
@@ -1975,6 +2318,253 @@ class ClinicianPolicySpec(unittest.TestCase):
                 self.assertEqual(controller_inventory({**sources, **files}), baseline)
         print("CLINICIAN_POLICY_UNDECORATED_USES " + json.dumps({
             "strict_names": sorted(STRICT_NAMES), "refused": sorted(refused), "accepted": sorted(accepted),
+            "real_routes": len(baseline), "real_public": len(PUBLIC),
+        }, ensure_ascii=True, sort_keys=True))
+
+    def test_21_loaders_and_class_assembly_follow_the_closed_source_contract(self):
+        """S5-U1c-F06: module_loads took a loader call by its first string or token and let member calls and calls that
+        ':' followed pass, so require('@nest' + 'js/common'), module.require(name), 'true ? require(name) : null' and
+        module['require']('@nestjs/common') loaded Nest's common unread, and common['Put'] and common['SetMetadata'],
+        strings to the lexer, made PUT study-tags/unlisted a public route both inventories missed: 110 rows, public 4,
+        test_05/11/12/13 green, in the registered study-tags.controller.ts and in unlisted-routes.ts registered in
+        AppModule. source_contract now lists the forms that reach a loader, an evaluator, a metadata writer or a class
+        prototype and every other form is refused; its refused and accepted lists pin the cases below, and each refusal
+        is matched by its reasons inside one check's message.
+        """
+        sources = api_sources()
+        baseline = controller_inventory(sources)
+        counts = MATRIX["counts"]
+        self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
+                         (110, 4, 2, 5, 99), "the real inventory is unchanged: 110 = 4 + 2 + 5 + 99")
+        self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
+        # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
+        named, loaded = set(), set()
+        for path, source in sorted(sources.items()):
+            named |= {s["module"] for s in module_statements(path, source)
+                      if s["module"] is not None and not s["module"].startswith("./")}
+            loaded |= set(module_loads(path, source, property_names(path, source)))
+        self.assertEqual(sorted(named | loaded), sorted(PACKAGES), "source_contract.packages is what api/src names")
+        self.assertEqual(sorted(loaded), sorted(LOADED_PACKAGES), "source_contract.loaded_packages is what api/src loads")
+
+        def reasons_in(message, reasons):
+            # each reason is fragments in order inside one check's message, so no other check's text can stand in for it
+            parts = message.split(" | ")
+            for fragments in reasons:
+                pattern = ".*".join(map(re.escape, fragments))
+                self.assertTrue(any(re.search(pattern, part) for part in parts), f"{fragments} not in {message}")
+
+        def refusal(files):
+            with self.assertRaises(AssertionError) as caught:
+                controller_inventory({**sources, **files})
+            return str(caught.exception)
+
+        tags, outside, helpers, app = (API / "study-tags.controller.ts", API / "unlisted-routes.ts",
+                                       API / "route-helpers.ts", API / "app.module.ts")
+        member, registered = "  @Get() read(", "StudyAccessController],"
+        heading, constructor = "export class StudyTagsController {", "constructor(private service:StudyTagsService){}"
+        for text in (member, heading, constructor):
+            self.assertEqual(sources[tags].count(text), 1, text)
+        self.assertEqual(sources[app].count(registered), 1)
+        self.assertTrue({outside, helpers}.isdisjoint(sources))
+
+        def register(name):
+            return {app: f"import {{ {name} }} from './unlisted-routes';\n"
+                         + sources[app].replace(registered, f"StudyAccessController, {name}],")}
+
+        loader = "a module loader the binding check does not follow"
+        sealed = "a sealed name or a form the source contract does not list"
+        undecorated = "used where no decorator the inventory reads applies it"
+        # the reviewer's four loaders, each in the registered controller and in an outside file registered in AppModule
+        loaders = {
+            "concatenated module string": "const common = require('@nest' + 'js/common');\n",
+            "module.require of a computed name": "const name = '@nestjs/common';\nconst common = module.require(name);\n",
+            "require in a conditional expression": "const name = '@nestjs/common';\nconst common = true ? require(name) : null;\n",
+            "module['require'] of Nest's common": "const common = module['require']('@nestjs/common');\n",
+        }
+        self.assertEqual(sorted(loaders), sorted(CONTRACT["f06_loaders"]))
+        applied = ("const target = {0}.prototype;\nconst descriptor = Object.getOwnPropertyDescriptor(target, 'unlisted');\n"
+                   "common['Put']('unlisted')(target, 'unlisted', descriptor);\n"
+                   "common['SetMetadata']('public', true)(target, 'unlisted', descriptor);\n")
+        places = {
+            "registered study-tags.controller.ts": (tags, "Put, SetMetadata", "StudyTagsController", lambda text: {
+                tags: sources[tags].replace(member, "  unlisted() { return {}; }\n" + member) + text
+                      + applied.format("StudyTagsController")}),
+            "unlisted-routes.ts registered in AppModule": (outside, "Controller, Put, SetMetadata", "UnlistedController",
+                                                           lambda text: {
+                outside: "export class UnlistedController {\n  unlisted() { return {}; }\n}\n" + text
+                         + "common['Controller']('unlisted')(UnlistedController);\n" + applied.format("UnlistedController"),
+                **register("UnlistedController")}),
+        }
+        f06 = {}
+        for form, text in loaders.items():
+            why = CONTRACT["f06_loaders"][form]
+            for place, (path, names, owner_name, build) in places.items():
+                with self.subTest(f06=form, place=place):
+                    reasons = [[path.name + ": " + loader, why], [path.name + ": " + names + " " + undecorated],
+                               [path.name + ": " + sealed, f"'{owner_name}.prototype')"]]
+                    if "module" in text:
+                        reasons.append([path.name + ": " + sealed, "'module')"])
+                    reasons_in(refusal(build(text)), reasons)
+                    f06.setdefault(form, []).append(place)
+            # the loader alone, with no route name and no prototype beside it, is refused for itself
+            with self.subTest(f06_loader_alone=form):
+                message = refusal({outside: text + "export const used = common;\n"})
+                reasons_in(message, [[outside.name + ": " + loader, why]])
+                self.assertNotIn(undecorated, message)
+                self.assertNotIn(".prototype')", message)
+        inject = "import { Injectable } from '@nestjs/common';\n"
+
+        def service(after, imports=""):
+            return {outside: inject + imports + "@Injectable()\nexport class Helper {\n  run() { return 1; }\n}\n" + after}
+
+        def after_tags(text, imports=""):
+            return {tags: imports + sources[tags] + text}
+
+        def edit_tags(old, new, imports="", after=""):
+            return {tags: imports + sources[tags].replace(old, new) + after}
+
+        auth = "import { AuthController } from './auth.controller';\n"
+        subclass = ("import { StudyTagsController } from './study-tags.controller';\nconst holder: any = {};\n"
+                    "export class Unlisted extends StudyTagsController {\n  constructor(service: any) {\n"
+                    "    super(service);\n    return holder;\n  }\n}\n")
+        refused = {
+            # loaders (source_contract.loaded_packages, one plain string literal, the bare callee)
+            "import() of a Nest package": service("export const common = import('@nestjs/common');\n"),
+            "import() of a concatenated string": service("export const common = import('@nest' + 'js/common');\n"),
+            "require of a template naming a loaded package": service("export const raw = require(`express`).raw;\n"),
+            "import() of a template naming a loaded package": service("export const hash = import(`node:crypto`);\n"),
+            "require of a spread argument": service("export const common = require(...['@nestjs/common']);\n"),
+            "require with a second argument": service("export const raw = require('express', 'extra');\n"),
+            "a require call followed by a block": service(
+                "export function load(name: string) {\n  const found = 1;\n  require(name)\n  {}\n  return found;\n}\n"),
+            "an object-literal method named require": service(
+                "export const box = { require(name: string) { return name; } };\n"),
+            "require on another receiver": service("export const load = (holder: any) => holder.require('express');\n"),
+            "require.main": service("export const main = require.main;\n"),
+            "require.call": service("export const common = require.call(null, '@nestjs/common');\n"),
+            "import.meta": service("export const url = import.meta.url;\n"),
+            "import as a member": service("export const load = (holder: any) => holder.import('express');\n"),
+            "import = require of a package that is not loaded": service("", "import jose = require('jose');\n"),
+            # evaluators and the handles to them (sealed_words, process_members, constructor)
+            "eval": service("export const common = eval(\"require('@nestjs/common')\");\n"),
+            "new Function": service("export const load = new Function('name', 'return require(name)');\n"),
+            "Function called": service("export const self = Function('return this')();\n"),
+            "globalThis": service("export const proc = (globalThis as any).process;\n"),
+            "global": service("export const proc = (global as any).process;\n"),
+            "module.constructor": service("export const load = (module as any).constructor._load;\n"),
+            "process.mainModule": service("export const main = process.mainModule;\n"),
+            "process.mainModule by a literal key": service("export const main = process['mainModule'];\n"),
+            "process handed on": service("export const proc = process;\n"),
+            "Proxy": service("export const wrap = (target: any) => new Proxy(target, {});\n"),
+            "a constructor as a property": service("export const make = (value: any) => value.constructor.constructor;\n"),
+            "a constructor by a literal key": service("export const make = (value: any) => value['constructor'];\n"),
+            "Object rebound": service("const Object = { keys: () => [] };\nexport const keys = Object.keys;\n"),
+            # modules (source_contract.packages, files under api/src, no whole-module binding of a project file or Nest)
+            "createRequire from node:module": service("export const load = createRequire(__filename);\n",
+                                                      "import { createRequire } from 'node:module';\n"),
+            "runInThisContext from node:vm": service("export const run = runInThisContext;\n",
+                                                     "import { runInThisContext } from 'node:vm';\n"),
+            "a namespace import of an unlisted package": service("export const read = fs.readFileSync;\n",
+                                                                 "import * as fs from 'node:fs';\n"),
+            "a side-effect import of an unlisted package": service("", "import 'reflect-metadata';\n"),
+            "a relative import outside api/src": service("export const seed = SEED;\n",
+                                                         "import { SEED } from '../prisma/seed';\n"),
+            "a namespace import of a project file": service("export const service = tags.StudyTagsService;\n",
+                                                            "import * as tags from './study-tags.service';\n"),
+            "export * of a project file": service("export * from './study-tags.service';\n"),
+            "a default import of a Nest package": service("export const nest = core;\n", "import core from '@nestjs/core';\n"),
+            # re-export chains: every hop is refused where it names the decorator
+            "a named re-export chain to a route decorator": {
+                helpers: "export { Put } from '@nestjs/common';\n", outside: "export { Put } from './route-helpers';\n",
+                tags: "import { Put } from './unlisted-routes';\n"
+                      + sources[tags].replace(member, "  @Put('unlisted') unlisted() { return {}; }\n" + member)},
+            "a star re-export chain to Public": {helpers: "export { Public } from './auth.guard';\n",
+                                                 outside: "export * from './route-helpers';\n"},
+            # class assembly: a registered class's instance carries only the route methods its own class body declares
+            "Object.assign onto a controller prototype": after_tags(
+                "Object.assign(StudyTagsController.prototype, { unlisted: AuthController.prototype.login });\n", auth),
+            "Object.assign onto the prototype of this": edit_tags(
+                constructor, constructor + "\n  private readonly mixed = Object.assign(Object.getPrototypeOf(this), holder);",
+                after="const holder: any = {};\n"),
+            "defineProperty onto a controller prototype": after_tags(
+                "Object.defineProperty(StudyTagsController.prototype, 'unlisted', { value: () => ({}) });\n"),
+            "setPrototypeOf of a controller prototype": after_tags(
+                "Object.setPrototypeOf(StudyTagsController.prototype, {});\n"),
+            "__proto__ in an object literal": service("export const donor = { __proto__: { run() { return 1; } } };\n"),
+            "a controller that extends another class": edit_tags(
+                heading, "export class StudyTagsController extends AuthController {", auth),
+            "a class expression that extends in a controller file": after_tags(
+                "export const Mixed = class extends StudyTagsController {};\n"),
+            "a controller constructor that returns another object": edit_tags(
+                constructor, "constructor(private service:StudyTagsService){ return holder; }", after="const holder: any = {};\n"),
+            "a registered subclass whose constructor returns another object": {outside: subclass, **register("Unlisted")},
+            # metadata writers (reflect_members; defineMetadata, decorate, createDecorator under any name or key)
+            "Reflect.set": service("export const put = (holder: any) => Reflect.set(holder, 'x', 1);\n"),
+            "Reflect.defineProperty": service("export const put = (holder: any) => Reflect.defineProperty(holder, 'x', {});\n"),
+            "Reflect.construct": service("export const make = (target: any) => Reflect.construct(target, []);\n"),
+            "Reflect cast to any": service(
+                "export const write = (holder: any) => (Reflect as any).defineMetadata('public', true, holder);\n"),
+            "defineMetadata by a literal key": service(
+                "export const write = (holder: any) => holder['defineMetadata']('public', true, holder);\n"),
+            "Reflect by a literal key": service("export const write = (holder: any) => holder['Reflect'];\n"),
+            # literal keys are read as the member they name
+            "a route name by a literal key": service("export const put = (holder: any) => holder['Put'];\n"),
+            "a route name by a template key": service("export const put = (holder: any) => holder[`Put`];\n"),
+            "an escaped property key": service("export const put = (holder: any) => holder['P" + "\\u" + "0075t'];\n"),
+            "require by an optional literal key": service("export const load = (holder: any) => holder?.['require']('express');\n"),
+            # a string that spells a handle is read wherever it stands but in an array literal
+            "a quoted __proto__ key": service("export const donor = { '__proto__': { run() { return 1; } } };\n"),
+            "a quoted constructor that returns another object": {outside: subclass.replace(
+                "  constructor(service: any) {", "  'constructor'(service: any) {"), **register("Unlisted")},
+            "prototype by a string argument": after_tags(
+                "Object.assign(Object.getOwnPropertyDescriptor(StudyTagsController, 'prototype')!.value, { unlisted: () => ({}) });\n"),
+            "a handle spread from an array into a call": after_tags(
+                "export const proto = Object.getOwnPropertyDescriptor(StudyTagsController, ...['prototype', 'x']);\n"),
+            "createDecorator by a string argument": service(
+                "export const Open = Object.getOwnPropertyDescriptor(Reflector, 'createDecorator')!.value({ key: 'public' });\n",
+                "import { Reflector } from '@nestjs/core';\n"),
+            "Object declared as a generic function": service("export function Object<T>(value: T) { return value; }\n"),
+        }
+        self.assertEqual(sorted(refused), sorted(CONTRACT["refused"]), "source_contract.refused pins exactly these cases")
+        for label, files in refused.items():
+            with self.subTest(refused=label):
+                reasons_in(refusal(files), CONTRACT["refused"][label])
+        # controls: the listed forms still read, and a subclass outside the controllers is read as the routes it serves
+        accepted = {
+            "this.require and this.<field>.require of a method named require": {outside: inject + (
+                "@Injectable()\nexport class Access {\n  constructor(private studyAccess: any) {}\n"
+                "  async require(c: any) { return c; }\n"
+                "  run(c: any) { return this.studyAccess.require(c, ['uid']) && this.require(c); }\n}\n")},
+            "a method named require with a return type": {outside: inject + (
+                "@Injectable()\nexport class Access {\n  async require(c: any): Promise<any> { return c; }\n}\n")},
+            "Object.assign on data and a compared prototype": service(
+                "export const merge = (row: any) => Object.getPrototypeOf(row) === Object.prototype "
+                "&& Object.assign(row, { seen: true });\n"),
+            "Array and Object as members, a type and new Array()": service(
+                "export const list = (value: any): Array<number> => Array.isArray(value) && Object.getPrototypeOf(value) "
+                "!== Array.prototype ? new Array(value.length) : Object.keys(value).map(Number);\n"),
+            "process.env and process.exit": service("export const port = () => process.env.PORT ?? process.exit(1);\n"),
+            "Reflect.ownKeys and a namespace of a listed package": service(
+                "export const keys = (v: object) => Reflect.ownKeys(v).length + nodeCrypto.randomBytes(1).length;\n",
+                "import * as nodeCrypto from 'node:crypto';\n"),
+            "one-literal keys that name nothing sealed": service(
+                "export const pick = (headers: any) => headers['content-type'] ?? headers['accept'] ?? headers[`x-kin`] "
+                "?? ['reason'];\n"),
+            "a registered subclass of a controller without a constructor": {outside: (
+                "import { StudyTagsController } from './study-tags.controller';\n"
+                "export class Mirror extends StudyTagsController {}\n"), **register("Mirror")},
+            "a class outside the controllers that extends Error": service(
+                "export class LocalError extends Error {\n  constructor(message: string) {\n    super(message);\n  }\n}\n"),
+            "handle names as elements of an array literal": service(
+                "export const reserved = new Set(['prototype', 'constructor', '__proto__', ...Object.keys({})]);\n"),
+        }
+        self.assertEqual(sorted(accepted), sorted(CONTRACT["accepted"]), "source_contract.accepted pins exactly these")
+        for label, files in accepted.items():
+            with self.subTest(accepted=label):
+                self.assertEqual(controller_inventory({**sources, **files}), baseline)
+        print("CLINICIAN_POLICY_SOURCE_CONTRACT " + json.dumps({
+            "f06_refused": f06, "refused": sorted(refused), "accepted": sorted(accepted), "packages": sorted(PACKAGES),
+            "loaded_packages": sorted(LOADED_PACKAGES), "sealed_words": sorted(CONTRACT["sealed_words"]),
             "real_routes": len(baseline), "real_public": len(PUBLIC),
         }, ensure_ascii=True, sort_keys=True))
 
