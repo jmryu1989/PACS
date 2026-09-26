@@ -1,0 +1,96 @@
+# RISK-RB-1 hosted synthetic check (S4-RELEASE). Dispatch only, from its own branch; it is not
+# installed on main and gates nothing.
+#
+# Question: once the server has been migrated by 489c326, does a rollback to the previous API
+# image (revision 17980d5) start through its real entrypoint? That image's start-production.sh
+# runs `prisma migrate deploy` under `set -eu` against a `_prisma_migrations` table holding 29
+# rows, six of which its own migrations directory has never seen. The Stage-1 rehearsal started
+# the image with `--entrypoint node`, so it never exercised this path.
+#
+# Pattern follows restore-*.yml and validate.yml `runtime`: ubuntu-24.04, contents: read, pinned
+# action SHAs, persist-credentials false, the production target built from a private-mode
+# checkout, one disposable networkless PostgreSQL, no secret, no clinical fixture, no server.
+#
+# The last step's status is a convenience only: it fails when the recorded facts do not show a
+# healthy previous image. Acceptance is decided from the uploaded evidence, not from this colour.
+name: S4 rollback entrypoint check (RISK-RB-1, synthetic)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s4-rollback-entrypoint-check-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PREVIOUS_REVISION: 17980d522b260b59fa97c96924f96038b63551ae
+  CURRENT_REVISION: 489c326478d1e2ffdfe556803cb3c3ea5eff3862
+  # The digest stage2-rollout-rehearsal.yml resolved from the public registry for the
+  # postgres:16-alpine tag that docker-compose.yml runs.
+  RB1_POSTGRES: postgres:16-alpine@sha256:3c5c8892d184f738f4fe282d14ddaa613a38f00f4189d2d94725ebe6f2909ddb
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # Both revisions must be present as objects for the worktrees below.
+          fetch-depth: 0
+
+      - name: Pure harness checks (no daemon)
+        run: python3 scripts/record-run.py --run-dir "$RUNNER_TEMP/rb1/runs/pure" --cwd . --file tests/ops_s4_rollback_check/rb1_check.py --file tests/ops_s4_rollback_check/rb1_check_test.py -- python3 -B tests/ops_s4_rollback_check/rb1_check_test.py
+
+      - name: Worktrees at the two exact revisions, in production's private-checkout mode
+        run: |
+          set -eu
+          test "$(git cat-file -t "$PREVIOUS_REVISION")" = commit
+          test "$(git cat-file -t "$CURRENT_REVISION")" = commit
+          git worktree add --detach "$RUNNER_TEMP/rb1-src/previous" "$PREVIOUS_REVISION"
+          git worktree add --detach "$RUNNER_TEMP/rb1-src/current" "$CURRENT_REVISION"
+          test "$(git -C "$RUNNER_TEMP/rb1-src/previous" rev-parse HEAD)" = "$PREVIOUS_REVISION"
+          test "$(git -C "$RUNNER_TEMP/rb1-src/current" rev-parse HEAD)" = "$CURRENT_REVISION"
+          # Production checks out under umask 077; runtime readability must come from the image build.
+          chmod -R go-rwx "$RUNNER_TEMP/rb1-src/previous/api" "$RUNNER_TEMP/rb1-src/current/api"
+
+      - name: Build the previous production image (17980d5)
+        run: python3 scripts/record-run.py --run-dir "$RUNNER_TEMP/rb1/runs/build-previous" --cwd "$RUNNER_TEMP/rb1-src/previous" -- docker build --target production --build-arg "VCS_REF=$PREVIOUS_REVISION" -t kin-api:rb1-previous api
+
+      - name: Build the current production image (489c326)
+        run: python3 scripts/record-run.py --run-dir "$RUNNER_TEMP/rb1/runs/build-current" --cwd "$RUNNER_TEMP/rb1-src/current" -- docker build --target production --build-arg "VCS_REF=$CURRENT_REVISION" -t kin-api:rb1-current api
+
+      - name: Pull the pinned PostgreSQL
+        run: python3 scripts/record-run.py --run-dir "$RUNNER_TEMP/rb1/runs/pull-postgres" --cwd . -- docker pull "$RB1_POSTGRES"
+
+      # Current image migrates an empty database through its own entrypoint (29 rows), then the
+      # previous image starts on it with its own Entrypoint and CMD, then the secondary probes and
+      # the fresh-database control. Every command's raw output lands under check/steps/.
+      - name: Previous image entrypoint on a current-migrated database
+        run: python3 scripts/record-run.py --run-dir "$RUNNER_TEMP/rb1/runs/sequence" --cwd . --file tests/ops_s4_rollback_check/rb1_check.py -- python3 -B tests/ops_s4_rollback_check/rb1_check.py run --previous-image kin-api:rb1-previous --current-image kin-api:rb1-current --postgres-image "$RB1_POSTGRES" --previous-revision "$PREVIOUS_REVISION" --current-revision "$CURRENT_REVISION" --out "$RUNNER_TEMP/rb1/check"
+
+      - name: Upload the JSON summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: s4-rb1-check-summary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rb1/check/rb1-check-summary.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload every step's raw logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: s4-rb1-check-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rb1
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Report the recorded facts (the status is not an acceptance)
+        if: always()
+        run: python3 -B tests/ops_s4_rollback_check/rb1_check.py report "$RUNNER_TEMP/rb1/check/rb1-check-summary.json"
