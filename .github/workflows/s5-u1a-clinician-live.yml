@@ -1,0 +1,99 @@
+# S5-U1a hosted gate G2: tests/clinician_policy_live.py (4 cases) against an IMMUTABLE candidate SHA.
+#
+# Decision D2(a) keeps this live module out of the candidate_ci BASE, so the candidate commit is never
+# changed to run it. Like candidate.yml, this job checks out its own tools at github.sha and the candidate
+# separately into target/, proves the exact SHA and a clean tree (candidate_ci.hosted_target), and brings
+# up the candidate's own disposable synthetic Compose stack through the candidate's measurement_ci.main
+# (empty hosted Docker daemon, generated secrets, synthetic DICOM seed, compose down --volumes). The
+# driver adds one profile with one suite and refuses any command other than
+#   python scripts/run-tests.py --module tests/clinician_policy_live.py --mode live --unit s5-u1a-clinician-live --timeout 900
+# which runs exactly once per workflow run.
+#
+# Triggers: GitHub accepts workflow_dispatch only for a workflow on the default branch, so a push to this
+# gate's own branch also runs it (as the RB-1 check did) and takes the SHA from
+# tests/ops_s5_u1a_live_gate/candidate.txt. Budget D3: at most three runs of 900 s; every push or dispatch
+# consumes one, a re-run is refused below and never counts, and a cancelled run is consumed, never a pass.
+#
+# No secret, no real patient data, no server. The last step's colour is a convenience: acceptance is
+# decided from the uploaded evidence (u1a-live-summary.json, the sanitized raw suite log, results.json).
+name: S5-U1a clinician live gate (G2, synthetic)
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full lowercase 40-character commit SHA of the immutable S5-U1a candidate
+        required: true
+        default: 88ce2df3b56ca1b63a66e14e0406e04aee5f2f62
+        type: string
+  push:
+    branches: [opus/s5-u1a-live-gate-20260926]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s5-u1a-clinician-live
+  cancel-in-progress: false
+
+jobs:
+  clinician-live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout this gate's tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: tools
+          persist-credentials: false
+      - name: Resolve the immutable candidate, first attempt only
+        id: candidate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_SHA: ${{ inputs.candidate_sha }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          mkdir "$GITHUB_WORKSPACE/u1a-live"
+          [ "$RUN_ATTEMPT" = "1" ] || { echo "a re-run is not a new authorized attempt"; exit 1; }
+          sha="$(python3 -B tools/tests/ops_s5_u1a_live_gate/run_live.py resolve --event-name "$EVENT_NAME" --input-sha "$INPUT_SHA")"
+          echo "candidate: $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Checkout the immutable candidate separately
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.candidate.outputs.sha }}
+          path: target
+          persist-credentials: false
+      - name: Pure gate and summary checks
+        run: python3 -B tools/tests/ops_s5_u1a_live_gate/live_gate_test.py
+      - name: Install the synthetic seed dependencies (the module is API-only; no browser)
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/u1a-python"
+          "$RUNNER_TEMP/u1a-python/bin/python" -m pip install numpy==2.0.2 pydicom==2.4.4
+      - name: G2 clinician live module, once, on the candidate's disposable synthetic stack
+        timeout-minutes: 28
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+        run: |
+          "$RUNNER_TEMP/u1a-python/bin/python" -B tools/tests/ops_s5_u1a_live_gate/run_live.py run --target "$GITHUB_WORKSPACE/target" --candidate-sha "$CANDIDATE_SHA" --evidence "$GITHUB_WORKSPACE/u1a-live"
+      - name: Summarize the recorded facts
+        if: always()
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+        run: |
+          python3 -B tools/tests/ops_s5_u1a_live_gate/summarize.py write --out-dir target/tests/e2e/artifacts/s5-u1a-clinician-live-ci --evidence u1a-live --candidate-sha "$CANDIDATE_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --output u1a-live/u1a-live-summary.json
+      - name: Sanitized synthetic clinician live evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: s5-u1a-clinician-live-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            u1a-live/
+            target/tests/e2e/artifacts/s5-u1a-clinician-live-ci/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Report the recorded facts (the status is not an acceptance)
+        if: always()
+        run: python3 -B tools/tests/ops_s5_u1a_live_gate/summarize.py check u1a-live/u1a-live-summary.json | tee -a "$GITHUB_STEP_SUMMARY"
