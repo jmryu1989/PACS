@@ -204,6 +204,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "admin/users/:id/reset-password"): Route(Kind.NEITHER),
     # S5-U6b 운영 지표: admin 전용, 기관 범위 합계(visible 경계)만 싣는 읽기다.
     ("GET", "admin/metrics"): Route(Kind.TENANT),
+    # S5-U5b 감사·보안 기록: admin 전용, 행을 쓸 때 남은 기관으로 귀속한 행만 싣는 읽기다(tests/admin_audit_live.py).
+    ("GET", "admin/audit"): Route(Kind.TENANT),
 }
 
 

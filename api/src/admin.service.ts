@@ -1,13 +1,22 @@
 import {
-  BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException,
+  BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException,
 } from '@nestjs/common';
 import { randomBytes } from 'crypto';
+import {
+  AUDIT_CANDIDATE_ACTIONS, AUDIT_TARGET_ACTIONS, AuditCursor, AuditSource, auditPageQuery, openAuditCursor, readAuditPage,
+  sealAuditCursor,
+} from './admin-audit';
 import { memberState } from './auth.guard';
 // 역할 목록은 clinician-policy 한 곳에서 온다. 여기서 별도 literal을 두면 guard와 어긋난다.
 import { APP_ROLES } from './clinician-policy';
 import { KeycloakService, KeycloakUser } from './keycloak.service';
 import { Caller } from './pacs.service';
 import { PrismaService } from './prisma.service';
+import { StudyAccessService } from './study-access.service';
+
+// 감사 기록 다음 쪽 값의 봉인 키. 프로세스마다 새로 만든다 — API가 다시 시작되면 이어받기는 만료(409)되고
+// 처음부터 다시 읽는다. 키를 설정으로 두면 값이 재시작을 넘어 살아남을 이유만 생긴다.
+const AUDIT_CURSOR_KEY = randomBytes(32);
 
 function text(value: unknown, field: string, max: number, required = true): string {
   if (value == null && !required) return '';
@@ -23,6 +32,7 @@ export class AdminService {
   constructor(
     private prisma: PrismaService,
     private keycloak: KeycloakService,
+    private studyAccess: StudyAccessService,
   ) {}
 
   private admin(c: Caller) {
@@ -309,5 +319,62 @@ export class AdminService {
     const after = this.row(await this.managed(id));
     await this.audit(c.actor, 'admin.user.reset-password', id, { before, after, mode });
     return after;
+  }
+
+  /**
+   * S5-U5b 관리자 감사·보안 기록(`GET /api/admin/audit`). 행의 귀속과 기관별 투영은 admin-audit.ts가 정한다: 행을 쓸 때
+   * 남은 기관 값만 보고, 회원의 지금 그룹·검사의 지금 소유 기관·지금 StudyAccess로 귀속을 다시 정하지 않는다.
+   * 호출자의 기관은 "누가 읽는가"를 정할 뿐이다. 기존 검사 범위 `GET /api/audit`은 바꾸지 않는다.
+   *
+   * 거르기는 쪽을 자르기 전이다. SQL은 계약표에 있는 action이면서 이 기관 문자열이 detail에 있거나(target이 기관인
+   * action이면 target이 이 기관인) 행만 후보로 넘기고 — 보이는 행을 빠뜨리지 않는 넓은 조건이다 — 정확한 판정은
+   * readAuditPage가 한다. 첫 쪽이 읽은 가장 큰 id를 다음 쪽 값에 봉인해 이어받는 동안의 기준으로 삼는다.
+   *
+   * 검사 접근이 제한된 관리자는 거절한다: 검사 행에는 오더 매칭 overlay 같은 검사 내용이 실리므로, 허용 범위 밖
+   * 검사의 기록을 보이는 창이 된다(운영 지표의 ADMIN_METRICS_RESTRICTED와 같은 이유). 이것은 읽는 사람의 관문이며
+   * 행의 귀속에 쓰지 않는다. AdminController는 응답 뒤 재확인 interceptor를 건너뛰므로 그 확인을 여기서 한다.
+   */
+  async auditEvents(query: unknown, c: Caller) {
+    if (!c.roles?.includes('admin')) throw new ForbiddenException('감사 기록 조회는 admin 권한이 필요합니다');
+    if (c.kind !== 'member' || !c.institution) throw new ForbiddenException('소속 기관이 없는 계정입니다');
+    const me = c.institution;
+    const page = auditPageQuery(query);
+    if (!page) throw new BadRequestException({ code: 'ADMIN_AUDIT_QUERY_INVALID', message: '감사 기록 조회 요청 형식이 잘못되었습니다' });
+    const access = await this.studyAccess.snapshot(c);
+    if (access.policy.restricted)
+      throw new ForbiddenException({ code: 'ADMIN_AUDIT_RESTRICTED', message: '검사 접근 범위가 제한된 계정은 감사 기록을 볼 수 없습니다' });
+    const owner = [me, c.sub];
+    let cursor: AuditCursor | null = null;
+    if (page.after !== null) {
+      cursor = openAuditCursor(AUDIT_CURSOR_KEY, owner, page.after);
+      if (!cursor) throw new ConflictException({ code: 'ADMIN_AUDIT_CURSOR_EXPIRED',
+        message: '이어받기 유효기간이 지났거나 서버가 다시 시작되었습니다. 처음부터 다시 조회하세요.' });
+    }
+    let read: { top: number; observedAt: string; rows: any[]; total: number; last: number | null };
+    try {
+      const top = cursor ? cursor.top
+        : (await this.prisma.auditLog.findFirst({ orderBy: { id: 'desc' }, select: { id: true } }))?.id ?? 0;
+      const mention = JSON.stringify(me);
+      const source: AuditSource = (below, take) => this.prisma.auditLog.findMany({
+        where: {
+          id: below === null ? { lte: top } : { lte: top, lt: below },
+          action: { in: [...AUDIT_CANDIDATE_ACTIONS] },
+          OR: [{ detail: { contains: mention } }, { action: { in: [...AUDIT_TARGET_ACTIONS] }, target: me }],
+        },
+        orderBy: { id: 'desc' }, take,
+        select: { id: true, at: true, actor: true, action: true, target: true, detail: true },
+      });
+      const observedAt = new Date().toISOString();
+      read = { top, observedAt, ...await readAuditPage(source, me, { after: cursor?.after ?? null, limit: page.limit }) };
+    } catch (e: any) {
+      // 읽기 실패는 0건이 아니다. 원인 문구(주소·SQL이 섞일 수 있다)는 싣지 않고 코드만 남긴다.
+      console.warn(`[KIN API] 감사 기록 읽기 실패: ${e?.code ?? e?.name ?? 'unknown'}`);
+      throw new ServiceUnavailableException({ code: 'ADMIN_AUDIT_UNAVAILABLE', message: '감사 기록을 읽지 못했습니다. 잠시 후 다시 조회하세요.' });
+    }
+    await this.studyAccess.unchanged(c, access);
+    return {
+      institutionId: me, observedAt: read.observedAt, total: read.total, rows: read.rows,
+      next: read.last === null ? null : sealAuditCursor(AUDIT_CURSOR_KEY, owner, { top: read.top, after: read.last }),
+    };
   }
 }
