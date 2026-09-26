@@ -174,7 +174,8 @@ class ReportStructureMigration(unittest.TestCase):
         # S4-U3's gateway-receipt migration from 27 to 28 in its own, and S4-U4's gateway-retry-request
         # migration from 28 to 29 in its own.
         # S5-U4a's 20260926120000_study_questions (StudyQuestion, StudyQuestionEntry) moved it from 29 to 30.
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 30)", transfer_test)
+        # S5-U4c's 20260926130000_study_image_requests (StudyImageRequest, StudyImageRequestReceipt) from 30 to 31.
+        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 31)", transfer_test)
 
     def test_the_synthetic_catalog_never_reaches_product_code(self) -> None:
         # P6/P7. The seam is one instance property a test overwrites on its own instance; anything

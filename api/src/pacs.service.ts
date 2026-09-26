@@ -110,7 +110,7 @@ const TECHNICIAN_FIELDS = ['ss', 'ward', 'reqHosp', 'em', 'ov'];
  * 소유 기관 안의 대화라서, 질문 API가 404여도 감사 통로로 존재·행위자·전이가 새지 않게 한다. 한 action을 처음
  * 쓰는 단위가 여기에 이름을 더한다(S5-U4a: study.question, S5-U4c: study.image-request).
  */
-export const OWNER_ONLY_AUDIT_ACTIONS: readonly string[] = Object.freeze(['study.question']);
+export const OWNER_ONLY_AUDIT_ACTIONS: readonly string[] = Object.freeze(['study.question', 'study.image-request']);
 
 const NOTE_PUBLIC_FIELDS = { studyUid: true, version: true, text: true, reason: true, author: true, createdAt: true } as const;
 function noteTransactionError(error: any): never {
@@ -3447,6 +3447,9 @@ export class PacsService implements OnModuleInit {
     // 대신 명시 409로 거절한다. 질문 생성도 이 부모 잠금을 잡으므로 삭제와 생성이 엇갈리지 않는다.
     if (await tx.studyQuestion.findFirst({ where: { studyUid: uid }, select: { id: true } }))
       throw new ConflictException({ code: 'STUDY_HAS_QUESTIONS', message: '임상의 질문이 있는 검사는 삭제할 수 없습니다' });
+    // S5-U4c: 영상 요청과 그 영수증도 같은 이유로 함께 지우지 않는다(FK Restrict). 요청 생성도 이 부모 잠금을 잡는다.
+    if (await tx.studyImageRequest.findFirst({ where: { studyUid: uid }, select: { id: true } }))
+      throw new ConflictException({ code: 'STUDY_HAS_IMAGE_REQUESTS', message: '영상 요청 기록이 있는 검사는 삭제할 수 없습니다' });
 
     /**
      * 삭제 가능 여부는 지금의 RS가 아니라 **사람의 기록이 생긴 적이 있는가**로 정한다.
