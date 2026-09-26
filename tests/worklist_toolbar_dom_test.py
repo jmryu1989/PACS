@@ -360,8 +360,10 @@ class WorklistToolbarStructureTest(unittest.TestCase):
     def setUpClass(cls):
         # S5-UI3 regrouped the report panel's buttons after this unit. Its three regions are put back to their base
         # bytes here, so the pins below keep standing for everything else; tests/report_actions_dom_test.py requires
-        # the result to be its base commit byte for byte.
-        cls.text = without_ui3(MAIN.read_text(encoding='utf-8'))
+        # the result to be its base commit byte for byte. S5-U4c's regions (tests/clinician_request_dom_test.py) are
+        # taken out first, the same way; imported here so the DOM class does not depend on that module.
+        from clinician_request_dom_test import without_u4c_main
+        cls.text = without_ui3(without_u4c_main(MAIN.read_text(encoding='utf-8')))
         cls.parts = parts(cls.text)
         cls.base = base_text()
         print('base commit', BASE, 'present' if cls.base is not None else 'absent in this clone; pinned values used')

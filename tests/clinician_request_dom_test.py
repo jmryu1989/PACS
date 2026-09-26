@@ -80,11 +80,26 @@ BASE_MAIN_SHA256 = "1c112d4b3b0c598a6fb15dd952e85445b0839077ee9a39618f8d6dd1bab7
 BASE_CLINICIAN_SHA256 = "f406be3ae3226c473eaadd0161230ea0295b15b812d7c168b29e4181f40a0775"
 
 # ── the S5-U4c regions ──
+# Every start and end marker occurs exactly once in main.html: the markup ends carry their last inner line because a bare
+# '</section>' or '</details>' line is not unique. The UI2/UI3 byte-pin tests strip these regions through
+# without_u4c_main() before comparing, as they do with without_ui3().
 MAIN_CSS = ("    /* ── S5-U4c 영상 요청 ──", "    /* ── S5-U4c 끝 ── */\n")
-MAIN_READING = ("        <!-- S5-U4c 판독 대상 검사의", "        </section>\n")
-MAIN_QUEUE = ("        <!-- S5-U4c 임상의 영상 요청 대기열.", "        </details>\n")
+MAIN_READING = ("        <!-- S5-U4c 판독 대상 검사의",
+                '          <div id="image-request-pane" role="region" aria-label="Image Requests of the Reading Study" hidden>'
+                "</div>\n        </section>\n")
+MAIN_QUEUE = ("        <!-- S5-U4c 임상의 영상 요청 대기열.",
+              '          <div id="image-request-queue-body" role="region" aria-label="Image Request Queue"></div>\n'
+              "        </details>\n")
 MAIN_BLOCK = ("    // ── 영상 요청(S5-U4c) ──\n", "    // ── Match / Unmatch (8.1.2.1.1 ~ 2) ──")
 HOOK = "      imageRequests?.sync();\n"
+# (name, start, end, end included). The hook is one line, so it is its own start and end.
+U4C_REGIONS = (
+    ("css", *MAIN_CSS, True),
+    ("markup-reading", *MAIN_READING, True),
+    ("markup-queue", *MAIN_QUEUE, True),
+    ("hook", HOOK, HOOK, True),
+    ("script", *MAIN_BLOCK, False),
+)
 CLINICIAN_BLOCK_MARKS = ("  // ── 영상 요청(S5-U4c) ──\n", "  // ── 환자 타임라인(S5-U3) ──")
 CLINICIAN_HOOKS = ("    $('#viewer-note').textContent = TEXT.viewer;\n    clearRequests();\n",
                    "    setKeys(TEXT.keysLoading, null);\n    paintRequestsShell(row);\n")
@@ -99,15 +114,17 @@ def cut(text, start, end, inclusive):
 
 
 def without_u4c_main(text):
-    """main.html (LF) with the S5-U4c CSS block, the two markup regions, the refreshRight hook and the script block out."""
+    """main.html (LF) with the S5-U4c CSS block, the two markup regions, the renderClinical hook and the script block out.
+
+    Each marker must occur exactly once in the text it is cut from, so a text already stripped (or one where a later
+    edit duplicated a marker) is refused rather than cut at the wrong place."""
     text = text.replace("\r\n", "\n")
-    text = cut(text, *MAIN_CSS, True)
-    text = cut(text, *MAIN_READING, True)
-    text = cut(text, *MAIN_QUEUE, True)
-    if text.count(HOOK) != 1:
-        raise AssertionError("the refreshRight hook must occur once")
-    text = text.replace(HOOK, "")
-    return cut(text, *MAIN_BLOCK, False)
+    for name, start, end, inclusive in U4C_REGIONS:
+        for marker in {start, end}:
+            if text.count(marker) != 1:
+                raise AssertionError(f"S5-U4c {name} marker {marker!r} occurs {text.count(marker)} times, expected 1")
+        text = cut(text, start, end, inclusive)
+    return text
 
 
 def without_u4c_clinician(text):
