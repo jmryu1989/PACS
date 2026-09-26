@@ -614,20 +614,73 @@
                          #qf button.on:not([data-days="-1"])) > summary::before {
       content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--kin-accent); }
     /* 상태 문구는 동작 단추와 떨어져 한 곳에 모인다. 남는 폭만 쓰고 넘치면 말줄임한다 — 문구가 길어져도 툴바가 두 줄이
-       되지 않는다. 문구 전체는 DOM에 그대로 있고 role=status로 읽힌다. 단추는 여기에 두지 않는다: 폭이 줄면 잘려 누를 수
-       없게 되므로(1366px에서 약 90px), 저장 검색 표시와 Edit Search는 Filters 안에 있다. */
-    .toolbar-status { display: flex; align-items: center; gap: 10px; flex: 1 1 0; min-width: 0; color: var(--kin-muted); }
-    .toolbar-status > :not(.spacer) { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+       되지 않는다. 단추는 여기에 두지 않는다: 폭이 줄면 잘려 누를 수 없게 되므로(1366px에서 약 90px), 저장 검색 표시와
+       Edit Search는 Filters 안에 있다. 묶음은 줄 높이만큼 늘인다: 펼친 전문이 이 묶음의 아래 변에서 시작한다. */
+    .toolbar-status { display: flex; align-items: center; gap: 10px; flex: 1 1 0; min-width: 0; align-self: stretch;
+                      position: relative; anchor-name: --kin-toolbar-status; color: var(--kin-muted); }
+    .toolbar-status:focus-visible { outline: 2px solid var(--kin-accent); outline-offset: 1px; border-radius: 7px; }
+    .toolbar-status-texts { display: flex; align-items: center; gap: 10px; flex: 0 1 auto; min-width: 0; }
+    .toolbar-status-texts > * { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     /* worklist-search.js는 이 툴바(.userfilter)의 마지막 자식으로 자기 줄(Search Mode·Search·Clear Results on Clear·상태)을
        붙인다. 페이지 스크립트와 그 모듈은 이 단위에서 바꾸지 않으므로 붙은 자리에서 모양만 정한다. 그 상태 문구도 폭 0에서
        시작해 남는 폭만 쓴다. */
-    .userfilter > span:has(> button[data-search-apply]) { flex: 1 1 auto; min-width: 0; }
+    .userfilter > span:has(> button[data-search-apply]) { flex: 1 1 auto; min-width: 0; position: relative; anchor-name: --kin-search-row; }
     .userfilter [data-search-status] { flex: 1 1 0; width: 0; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    /* 말줄임된 상태 문구의 전문(자동 갱신 중지, 설정 저장 실패, 검색 조건 미적용 등). 포인터를 상태 묶음·검색 방식 줄에
+       올리거나 키보드 초점이 그 안에 있는 동안만 같은 요소를 줄 아래에 펼친다 — 문구를 복사하지 않으므로 스크립트가 고쳐 쓴
+       내용이 그대로 보인다. 툴바 기하는 바뀌지 않는다: 펼친 상자는 흐름 밖에 있고, 포인터를 받지 않아(pointer-events: none)
+       포인터가 줄을 떠나면 바로 닫히며 그 아래 목록 행을 가로막지 않는다. <details>처럼 열린 채 남는 판이 아니다. */
+    .toolbar-status:is(:hover, :focus-within) > .toolbar-status-texts:has(> :not(:empty)),
+    .userfilter > span:has(> button[data-search-apply]):is(:hover, :focus-within) > [data-search-status]:not(:empty) {
+      position: absolute; top: 100%; right: 0; z-index: 70; pointer-events: none;
+      width: max-content; max-width: min(40em, calc(100vw - 32px)); padding: 8px 10px;
+      color: var(--kin-text); background: var(--kin-panel); border: 1px solid var(--kin-line2); border-radius: 7px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+    }
+    /* 검색 방식 줄은 스크립트가 인라인으로 gap:6px를 준다. 상태 문구가 흐름에서 빠지면 그 앞의 간격 하나가 사라져 줄이
+       3px씩 움직이므로, 펼친 동안 같은 폭을 오른쪽 안쪽 여백으로 채운다. */
+    .userfilter > span:has(> button[data-search-apply]):is(:hover, :focus-within):has(> [data-search-status]:not(:empty)) {
+      padding-right: 6px; }
+    .toolbar-status:is(:hover, :focus-within) > .toolbar-status-texts { flex-direction: column; align-items: flex-start; gap: 4px; }
+    .toolbar-status:is(:hover, :focus-within) > .toolbar-status-texts > :empty { display: none; }
+    .toolbar-status:is(:hover, :focus-within) > .toolbar-status-texts > *,
+    .userfilter > span:has(> button[data-search-apply]):is(:hover, :focus-within) > [data-search-status] {
+      overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+    /* 판독 화면의 툴바는 92px에서 넘침을 자른다(overflow-y: auto). 앵커 배치를 아는 브라우저에서는 펼친 상자를 fixed로
+       띄워 그 자르기를 벗어나고, 앵커(상태 묶음·검색 방식 줄)의 아래 변·오른쪽 변에 붙인다. 모르는 브라우저는 위의 absolute
+       배치대로 보이고, 판독 화면에서는 툴바를 스크롤해 읽는다. */
+    @supports (position-anchor: --kin-a) {
+      .toolbar-status:is(:hover, :focus-within) > .toolbar-status-texts:has(> :not(:empty)) {
+        position: fixed; position-anchor: --kin-toolbar-status; top: anchor(bottom); right: anchor(right);
+        position-try-fallbacks: flip-inline; }
+      .userfilter > span:has(> button[data-search-apply]):is(:hover, :focus-within) > [data-search-status]:not(:empty) {
+        position: fixed; position-anchor: --kin-search-row; top: anchor(bottom); right: anchor(right);
+        position-try-fallbacks: flip-inline; }
+    }
     /* 1366px 미만은 줄바꿈이 안전장치다. 상태 묶음은 제 폭을 지키며 다음 줄로 내려가고 문구도 줄을 바꾼다. */
     @media (max-width: 1365px) {
       .toolbar-status { min-width: min(10em, 100%); }
-      .toolbar-status > :not(.spacer), .userfilter [data-search-status] { white-space: normal; }
+      .toolbar-status-texts > *, .userfilter [data-search-status] { white-space: normal; }
     }
+    /* 묶음 안의 구획. 모양과 순서만 정하고 단추·id·핸들러는 그대로다. 구획 사이는 세로선으로 나누고, 제목은 줄 높이를
+       단추와 맞춰 위쪽을 맞춘다(Account Layout을 펼치면 그 구획만 아래로 길어진다). */
+    .toolbar-menu-panel:has(> .toolbar-section) { align-items: flex-start; }
+    .toolbar-section { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; min-width: 0; }
+    .toolbar-menu-panel > * + .toolbar-section { margin-left: 4px; padding-left: 10px; border-left: 1px solid var(--kin-line2); }
+    .toolbar-section-title { line-height: 34px; color: var(--kin-dim); letter-spacing: .04em; white-space: nowrap; }
+    /* 저장 검색 칩과 적용 중인 저장 검색은 개수·이름 길이에 상한이 없다. 맨 아래 제 줄을 써서 앞의 검사일·동작 단추를
+       밀어내지 않는다. 칩도 적용 중인 저장 검색도 없으면 빈 구획선을 그리지 않는다. */
+    .toolbar-menu-panel > .toolbar-section-saved { flex: 1 1 100%; margin-left: 0; padding: 6px 0 0; border-left: 0;
+                                                   border-top: 1px solid var(--kin-line2); }
+    .toolbar-section-saved:not(:has(#chips > *, #active-filter-info:not([hidden]))) { display: none; }
+    /* 초기화 단추는 같은 구획의 일반 설정 옆에 붙이지 않는다. */
+    #layout-reset, #workspace-server-clear { margin-left: 12px; }
+    /* Account Layout 패널은 View 안의 문서 흐름에 놓는다. workspace-roaming.js는 이 패널을 position:fixed로 두고 summary의
+       화면 좌표로 left/top을 쓰는데, View 안에서는 View가 닫힌 동안 resize나 요청 종료가 오면 크기 0인 summary로 12px 좌표를
+       계산하고 View를 다시 열어도 다시 계산하지 않는다. 스크립트는 바꾸지 않고, static 배치로 그 좌표가 효과를 잃게 한다.
+       인라인 style을 이기려면 !important가 필요하다. 폭·최대 높이·스크롤은 인라인 값 그대로다. */
+    #workspace-server-menu { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+    #workspace-server-panel { position: static !important; }
     /* 판독 화면은 이 툴바를 92px에서 자른다(reading-workspace.css). 묶기 전의 툴바는 1366px 이상에서도 여러 줄이라 판독
        화면에서 늘 92px이었고, 받아쓰기·소견 서랍·판독 패널의 기하(G-LIVE-GEO)는 그 높이에서 측정됐다. 한 줄이 된 뒤에도 그
        높이를 두어 판독 배치를 옮기지 않는다. 남는 아래 줄은 펼친 묶음이 쓰므로 묶음을 열고 닫아도 뷰어 크기가 변하지 않는다. */
@@ -790,7 +843,9 @@
       <button class="chip" id="clearfilter">Clear</button>
     </div>
     <details class="toolbar-menu" id="toolbar-filters" name="kin-toolbar-menu">
-      <summary class="chip" title="검사일·저장 검색·즐겨찾기·검사 태그·부위 조건을 펼칩니다">Filters<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
+      <summary class="chip" title="검사일·저장 검색·즐겨찾기·검사 태그·부위 조건을 펼칩니다. 단추 앞의 점 표시는 검사일·저장 검색·즐겨찾기·검사 태그 중 하나 이상의 조건이 적용 중이라는 뜻입니다.">Filters<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
+      <!-- 검사일 → 주요 동작 → 저장 검색 목록·적용 상태 순서다. 저장 검색 칩과 이름은 개수·길이에 상한이 없어 맨 아래 제 줄에
+           두고, 앞의 단추를 밀어내지 않게 한다. -->
       <div class="toolbar-menu-panel" role="group" aria-label="Filters">
         <div class="qf" id="qf">
           <button id="qf-days-0" data-days="0">Today</button>
@@ -800,20 +855,24 @@
           <button id="qf-days-60" data-days="60">2 Months</button>
           <button id="qf-days-all" data-days="-1" class="on">All</button>
         </div>
-        <span id="chips" style="display:flex;gap:4px;flex-wrap:wrap"></span>
-        <span id="active-filter-info" hidden style="max-width:100%;overflow-wrap:anywhere">
-          <span id="active-filter-name"></span> · <span id="active-filter-state" role="status"></span>
-          <button class="chip" id="edit-active-filter" type="button" title="적용한 저장 검색을 편집합니다. 열기만으로 목록 조건은 바뀌지 않습니다.">Edit Search</button>
-        </span>
-        <button class="chip" id="savefilter">Save Filter</button>
-        <button class="chip" id="managefilters">Search &amp; Saved Filters</button>
-        <button class="chip" id="favorite-open" type="button">Favorites</button>
-        <button class="chip" id="favorite-clear" type="button" hidden>Clear Favorite Filter</button>
-        <button class="chip" id="study-tag-open" type="button">Study Tags</button>
-        <button class="chip" id="study-tag-clear" type="button" hidden>Clear Tag Filter</button>
-        <button class="chip" id="body-parts-load" type="button" aria-describedby="body-parts-status" disabled>Read Body Parts</button>
-        <button class="chip" id="body-parts-refresh" type="button" title="확인한 부위 정보도 지우고 현재 목록의 모든 시리즈를 다시 조회합니다." hidden>Refresh Body Parts</button>
-        <button class="chip" id="body-parts-cancel" type="button" hidden>Cancel Body Parts</button>
+        <div class="toolbar-section" role="group" aria-label="Filter Actions">
+          <button class="chip" id="savefilter">Save Filter</button>
+          <button class="chip" id="managefilters">Search &amp; Saved Filters</button>
+          <button class="chip" id="favorite-open" type="button">Favorites</button>
+          <button class="chip" id="favorite-clear" type="button" hidden>Clear Favorite Filter</button>
+          <button class="chip" id="study-tag-open" type="button">Study Tags</button>
+          <button class="chip" id="study-tag-clear" type="button" hidden>Clear Tag Filter</button>
+          <button class="chip" id="body-parts-load" type="button" aria-describedby="body-parts-status" disabled>Read Body Parts</button>
+          <button class="chip" id="body-parts-refresh" type="button" title="확인한 부위 정보도 지우고 현재 목록의 모든 시리즈를 다시 조회합니다." hidden>Refresh Body Parts</button>
+          <button class="chip" id="body-parts-cancel" type="button" hidden>Cancel Body Parts</button>
+        </div>
+        <div class="toolbar-section toolbar-section-saved" role="group" aria-label="Saved Searches">
+          <span id="chips" style="display:flex;gap:4px;flex-wrap:wrap"></span>
+          <span id="active-filter-info" hidden style="max-width:100%;overflow-wrap:anywhere">
+            <span id="active-filter-name"></span> · <span id="active-filter-state" role="status"></span>
+            <button class="chip" id="edit-active-filter" type="button" title="적용한 저장 검색을 편집합니다. 열기만으로 목록 조건은 바뀌지 않습니다.">Edit Search</button>
+          </span>
+        </div>
       </div>
     </details>
     <div class="toolbar-refresh" id="toolbar-refresh" role="group" aria-label="Refresh">
@@ -827,24 +886,34 @@
     </div>
     <details class="toolbar-menu" id="toolbar-view" name="kin-toolbar-menu">
       <summary class="chip" title="배치·열·표시·영상 열기·영상 창 설정을 펼칩니다">View<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
+      <!-- 영상 열기·창, 이 브라우저의 배치, 계정 배치의 세 구획이다. 초기화 단추는 각 구획 끝에 떨어뜨려 둔다. -->
       <div class="toolbar-menu-panel" role="group" aria-label="View">
-        <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">Layout: Auto</button>
-        <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">Reset Layout</button>
-        <details id="workspace-server-menu" style="position:relative">
-          <summary class="chip" id="workspace-server-summary">Account Layout</summary>
-          <div id="workspace-server-panel" style="position:fixed;z-index:60;width:300px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:auto;padding:12px;background:var(--kin-panel);border:1px solid var(--kin-muted);border-radius:6px">
-            <p style="margin:0 0 8px">작업공간의 방향과 패널 크기를 다른 브라우저에서 불러옵니다. 영상·판독문은 포함하지 않습니다.</p>
-            <button class="chip" id="workspace-server-save" data-action="save" disabled>Save to Account</button>
-            <button class="chip" id="workspace-server-load" data-action="load" disabled>Load from Account</button>
-            <button class="chip" id="workspace-server-clear" data-action="clear" disabled>Reset Account Layout</button>
-            <p id="workspace-server-status" role="status" style="margin-bottom:0"></p>
-          </div>
-        </details>
-        <button class="chip" id="columnsettings">Columns</button>
-        <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
-        <button class="chip" id="image-opening-open" type="button" disabled>Image Opening</button>
-        <button class="chip" id="viewer-windows-open" type="button" disabled>Viewer Windows</button>
-        <button class="chip" id="b-monitor" style="display:none" title="이 브라우저에서 판독 창을 다른 모니터에 배치하도록 허용합니다. 허용하면 다음 열기부터 적용됩니다.">Move to Monitor</button>
+        <div class="toolbar-section" role="group" aria-label="Images">
+          <span class="toolbar-section-title" aria-hidden="true" title="영상을 여는 방식과 열린 영상 창을 관리합니다">Images</span>
+          <button class="chip" id="image-opening-open" type="button" disabled>Image Opening</button>
+          <button class="chip" id="viewer-windows-open" type="button" disabled>Viewer Windows</button>
+          <button class="chip" id="b-monitor" style="display:none" title="이 브라우저에서 판독 창을 다른 모니터에 배치하도록 허용합니다. 허용하면 다음 열기부터 적용됩니다.">Move to Monitor</button>
+        </div>
+        <div class="toolbar-section" role="group" aria-label="This Browser">
+          <span class="toolbar-section-title" aria-hidden="true" title="이 브라우저에만 기억되는 배치·열·표시 설정입니다">This Browser</span>
+          <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">Layout: Auto</button>
+          <button class="chip" id="columnsettings">Columns</button>
+          <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
+          <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">Reset Layout</button>
+        </div>
+        <div class="toolbar-section" role="group" aria-label="Account">
+          <span class="toolbar-section-title" aria-hidden="true" title="계정에 저장해 다른 브라우저에서 불러오는 배치입니다">Account</span>
+          <details id="workspace-server-menu" style="position:relative">
+            <summary class="chip" id="workspace-server-summary">Account Layout</summary>
+            <div id="workspace-server-panel" style="position:fixed;z-index:60;width:300px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:auto;padding:12px;background:var(--kin-panel);border:1px solid var(--kin-muted);border-radius:6px">
+              <p style="margin:0 0 8px">작업공간의 방향과 패널 크기를 다른 브라우저에서 불러옵니다. 영상·판독문은 포함하지 않습니다.</p>
+              <button class="chip" id="workspace-server-save" data-action="save" disabled>Save to Account</button>
+              <button class="chip" id="workspace-server-load" data-action="load" disabled>Load from Account</button>
+              <button class="chip" id="workspace-server-clear" data-action="clear" disabled>Reset Account Layout</button>
+              <p id="workspace-server-status" role="status" style="margin-bottom:0"></p>
+            </div>
+          </details>
+        </div>
       </div>
     </details>
     <details class="toolbar-menu" id="toolbar-more" name="kin-toolbar-menu">
@@ -855,11 +924,14 @@
         <button class="chip" id="worklist-alerts-open" type="button" disabled>Worklist Alerts</button>
       </div>
     </details>
-    <div class="toolbar-status" id="toolbar-status" role="group" aria-label="Status">
+    <!-- 상태 묶음은 한 줄에서 말줄임되므로 포인터를 올리거나 Tab으로 이 묶음에 오면 전문을 아래에 펼쳐 보인다. -->
+    <div class="toolbar-status" id="toolbar-status" role="group" aria-label="Status" tabindex="0">
       <div class="spacer"></div>
-      <span id="layout-status" role="status" style="font-size:11px;color:var(--kin-muted)" title="계정별로 이 브라우저에 배치를 기억합니다. 작은 세로 창은 768×1024 이상에서 확인했습니다."></span>
-      <small id="worklist-refresh-status" role="status" aria-live="polite"></small>
-      <small id="body-parts-status" role="status" style="max-width:100%;overflow-wrap:anywhere"></small>
+      <div class="toolbar-status-texts">
+        <span id="layout-status" role="status" style="font-size:11px;color:var(--kin-muted)" title="계정별로 이 브라우저에 배치를 기억합니다. 작은 세로 창은 768×1024 이상에서 확인했습니다."></span>
+        <small id="worklist-refresh-status" role="status" aria-live="polite"></small>
+        <small id="body-parts-status" role="status" style="max-width:100%;overflow-wrap:anywhere"></small>
+      </div>
     </div>
   </div>
 

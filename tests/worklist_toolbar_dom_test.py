@@ -13,6 +13,13 @@ text included); an open group covering the list (a <details> panel does not clos
 would stay over the first rows and the reading bar); the reading layout moving (G-LIVE-GEO measured it with the old
 toolbar, which was always 92px in reading mode); a group that cannot be opened or left with the keyboard.
 
+S5-UI2 fix1 (Astra S5-UI2-IMPROVE-R-001, markup and CSS only): a shortened status text (refresh stopped, a setting not
+saved, search criteria not applied) must be readable in full by pointer and by keyboard without the toolbar changing
+shape (F01); the Account Layout panel nested in View must stay in the View group's flow, so coordinates the shipped
+workspace-roaming.js computed while View was closed cannot misplace it (F02); Filters and View are split into ordered
+sections with the resets set apart, and the open-group geometry is also checked below 1366, with Account Layout open
+and after the reading toolbar was scrolled.
+
 The page script is stripped, as in tests/worklist_header_dom_test.py, and every stylesheet main.html links is inlined in
 its own position. The one piece of script that changes the toolbar's shape is added back as shipped: KinWorklistSearch
 .mount() appends its row to '.userfilter' exactly as the page does. Role gating stays the page script's disabled/hidden,
@@ -103,10 +110,26 @@ TOP = ['toolbar-search', 'toolbar-filters', 'toolbar-refresh', 'toolbar-view', '
 SEARCH_ROW = '.userfilter > span:has(> button[data-search-apply])'
 ROW = ['#toolbar-search', '#toolbar-filters > summary', '#refresh', '#toolbar-refresh-menu > summary',
        '#toolbar-view > summary', '#toolbar-more > summary', '#toolbar-status', SEARCH_ROW]
-# Tab order through the closed toolbar, left to right.
+# Tab order through the closed toolbar, left to right. The status group is a focus stop of its own (fix1 F01): focus
+# there shows its texts in full. It is not a control, so the list of controls in view leaves it out.
 TAB_ORDER = ['quick', 'quick-match', 'clearfilter', 'toolbar-filters>summary', 'refresh', 'toolbar-refresh-menu>summary',
-             'toolbar-view>summary', 'toolbar-more>summary', '[data-search-mode]', '[data-search-apply]',
+             'toolbar-view>summary', 'toolbar-more>summary', 'toolbar-status', '[data-search-mode]', '[data-search-apply]',
              '[data-search-clear]']
+CONTROLS_IN_VIEW = [key for key in TAB_ORDER if key != 'toolbar-status']
+# fix1: the sections inside Filters and View, in order, by the ids each holds (proposals 2 and 3).
+SECTIONS = {
+    'toolbar-filters': [['qf'],
+                        ['savefilter', 'managefilters', 'favorite-open', 'favorite-clear', 'study-tag-open',
+                         'study-tag-clear', 'body-parts-load', 'body-parts-refresh', 'body-parts-cancel'],
+                        ['chips', 'active-filter-info']],
+    'toolbar-view': [['image-opening-open', 'viewer-windows-open', 'b-monitor'],
+                     ['layout-toggle', 'columnsettings', 'reading-appearance-open', 'layout-reset'],
+                     ['workspace-server-menu']],
+}
+VIEW_SECTION_TITLES = ['Images', 'This Browser', 'Account']
+# A reset sits at the end of its section, apart from the ordinary settings: 12px on top of the 6px flex gap (layout-reset)
+# or of the space between inline buttons (Reset Account Layout).
+RESET_GAP = 12
 ONE_ROW = [(1366, 768), (1680, 1100), (1920, 1200)]
 NARROW = [(1024, 768), (1280, 800)]
 MODES = [('normal', False, False), ('reading', True, False), ('portrait', False, True), ('reading-portrait', True, True)]
@@ -263,6 +286,54 @@ ACTIVE = """()=>{const e=document.activeElement;if(!e||!e.closest('.userfilter')
   return e.outerHTML.slice(0,60)}"""
 ACTIVE_X = "()=>document.activeElement.getBoundingClientRect().left"
 
+# workspace-roaming.js mounted as shipped, signed out: no request is made, but its place() listeners (toggle, resize,
+# scroll) are attached and write the panel's left/top exactly as on the page.
+MOUNT_ROAMING = """()=>{KinWorkspaceRoaming.mount({owner:null,read:()=>null,apply:()=>false,generation:()=>0,
+  model:{normalize:v=>v},endpoint:'/api/workspace-layout',sessionEndpoint:'/api/me'});
+  for(const b of document.querySelectorAll('#workspace-server-panel button'))b.disabled=false;
+  window.__clicks={};for(const b of document.querySelectorAll('#workspace-server-panel button'))
+    b.addEventListener('click',()=>{window.__clicks[b.id]=(window.__clicks[b.id]||0)+1});}"""
+
+# The status texts as drawn: whether each is cut (scroll size over client size), where it is, and the box that holds
+# them (the texts wrapper for the status group, the element itself for the search row). A box shown out of the flow
+# must not sit under an ancestor that would clip a fixed box (transform, filter, contain, container queries).
+STATUS_VIEW = """()=>{
+  const box=e=>{const r=e.getBoundingClientRect();return {x:r.left,y:r.top,r:r.right,b:r.bottom,w:r.width,h:r.height}};
+  const clipping=e=>{const out=[];for(let a=e.parentElement;a;a=a.parentElement){const cs=getComputedStyle(a);
+    if(cs.transform!=='none'||cs.filter!=='none'||!['none',''].includes(cs.contain)||cs.containerType!=='normal'||
+       /transform|filter/.test(cs.willChange))out.push(a.tagName+'.'+a.className)}return out};
+  const one=(s,hold)=>{const e=document.querySelector(s),h=document.querySelector(hold),cs=getComputedStyle(e);
+    return {sel:s,...box(e),sw:e.scrollWidth,cw:e.clientWidth,sh:e.scrollHeight,ch:e.clientHeight,font:parseFloat(cs.fontSize),
+      whiteSpace:cs.whiteSpace,text:e.textContent,visible:e.checkVisibility({visibilityProperty:true}),
+      holder:{...box(h),position:getComputedStyle(h).position,pointerEvents:getComputedStyle(h).pointerEvents,
+              clipping:clipping(h)}}};
+  return {vw:innerWidth,vh:innerHeight,
+    group:['#layout-status','#worklist-refresh-status','#body-parts-status'].map(s=>one(s,'.toolbar-status-texts')),
+    search:one('[data-search-status]','[data-search-status]')};
+}"""
+
+# Sections of an open group: for each child of its panel, the listed ids it holds in order, its section title, and the
+# title's tooltip.
+SECTION_VIEW = """([group,ids])=>[...document.querySelector('#'+group+' > .toolbar-menu-panel').children].map(c=>({
+  ids:ids.filter(i=>{const e=document.getElementById(i);return e&&(c===e||c.contains(e))})
+    .sort((a,b)=>document.getElementById(a).compareDocumentPosition(document.getElementById(b))&4?-1:1),
+  title:c.querySelector(':scope > .toolbar-section-title')?.textContent.trim()||null,
+  tip:c.querySelector(':scope > .toolbar-section-title')?.title||null,
+  role:c.getAttribute('role'),label:c.getAttribute('aria-label')}))"""
+
+# The Account Layout panel against its summary, the open View panel and the header.
+ACCOUNT_VIEW = """()=>{
+  const box=e=>{const r=e.getBoundingClientRect();return {x:r.left,y:r.top,r:r.right,b:r.bottom,w:r.width,h:r.height}};
+  const panel=document.querySelector('#workspace-server-panel');
+  const inHeader=[[20,26],[innerWidth/2,26],[innerWidth-40,26]].map(([x,y])=>{const h=document.elementFromPoint(x,y);
+    return !!h&&!!h.closest('.menubar')});
+  return {panel:box(panel),position:getComputedStyle(panel).position,left:panel.style.left,top:panel.style.top,
+    summary:box(document.querySelector('#workspace-server-summary')),
+    view:box(document.querySelector('#toolbar-view > .toolbar-menu-panel')),
+    viewOpen:document.querySelector('#toolbar-view').open,accountOpen:document.querySelector('#workspace-server-menu').open,
+    bar:box(document.querySelector('.userfilter')),split:box(document.querySelector('.split')),inHeader};
+}"""
+
 
 class WorklistToolbarStructureTest(unittest.TestCase):
     """Stdlib side: bytes and ids against the base; the browser side only serializes elements."""
@@ -323,13 +394,16 @@ class WorklistToolbarDOMTest(unittest.TestCase):
         (OUT / 'toolbar-geometry.json').write_text(json.dumps({'toolbar_geometry': cls.seen}, ensure_ascii=False, indent=1),
                                                    encoding='utf-8')
 
-    def open_page(self, width, height, reading=False, portrait=False, html=None):
+    def open_page(self, width, height, reading=False, portrait=False, html=None, roaming=False):
         page = self.browser.new_page(viewport={'width': width, 'height': height})
         page.set_default_timeout(4000)
         page.route('**/*', lambda route: route.abort())
         page.set_content(html or self.html)
         page.add_script_tag(content=self.search)
         page.evaluate(MOUNT_SEARCH)
+        if roaming:
+            page.add_script_tag(content=(ASSETS / 'workspace-roaming.js').read_text(encoding='utf-8'))
+            page.evaluate(MOUNT_ROAMING)
         page.evaluate('([r,p])=>{document.body.classList.toggle("reading",r);document.body.classList.toggle("portrait",p)}',
                       [reading, portrait])
         return page
@@ -391,7 +465,7 @@ class WorklistToolbarDOMTest(unittest.TestCase):
             shown = page.evaluate("""()=>[...document.querySelectorAll('.userfilter :is(button,input,select,summary)')]
               .filter(e=>e.getClientRects().length).map(e=>e.id||(e.tagName==='SUMMARY'?e.parentElement.id+'>summary':
               ['data-search-mode','data-search-apply','data-search-clear'].map(a=>e.hasAttribute(a)?'['+a+']':'').join('')))""")
-            self.assertEqual(TAB_ORDER, shown)
+            self.assertEqual(CONTROLS_IN_VIEW, shown)
         finally:
             page.close()
 
@@ -434,7 +508,7 @@ class WorklistToolbarDOMTest(unittest.TestCase):
     def open_group(self, page, group):
         page.locator(f'#{group} > summary').click()
 
-    def check_open(self, page, width, mode, group, closed):
+    def check_open(self, page, width, mode, group, closed, first_in_view=True):
         m = page.evaluate(MEASURE, ROW)
         self.assertEqual([group], [g for g in m['open'] if g in MENUS], f'{group} did not open alone at {width} {mode}')
         bar, split = m['bar'], m['split']
@@ -464,8 +538,9 @@ class WorklistToolbarDOMTest(unittest.TestCase):
         first = True
         for probe, key in controls:
             locator = page.locator(f'[data-probe="{probe}"]')
-            if first and mode.startswith('reading'):
-                # The first line of an open group is in view without scrolling the 92px toolbar.
+            if first and first_in_view and mode.startswith('reading'):
+                # The first line of an open group is in view without scrolling the 92px toolbar (one-row layouts; below
+                # 1366 the closed toolbar may already wrap past 92px, and the group is reached by scrolling it).
                 r = locator.bounding_box()
                 self.assertGreaterEqual(r['y'], bar['y'] - 0.5, key)
                 self.assertLessEqual(r['y'] + r['height'], bar['b'] + 0.5, f'{key} is cut off in the reading toolbar')
@@ -507,6 +582,17 @@ class WorklistToolbarDOMTest(unittest.TestCase):
                 self.open_group(page, group)
                 record['groups'][group] = self.check_open(page, width, mode, group, base_closed)
                 self.shot(page, f'{width}x{height}-{mode}-{group}', width, 340)
+                if group == 'toolbar-view':
+                    # fix1 F02: with the nested Account Layout open its panel is part of View's flow, so its buttons
+                    # are among the controls reached (the CONTROLS probe takes an open nested group's inside).
+                    page.locator('#workspace-server-summary').click()
+                    reached = self.check_open(page, width, mode, group, base_closed)
+                    for key in ('workspace-server-save', 'workspace-server-load', 'workspace-server-clear'):
+                        self.assertIn(key, reached)
+                    record['groups']['toolbar-view+workspace-server-menu'] = reached
+                    self.shot(page, f'{width}x{height}-{mode}-toolbar-view-account-layout', width, 480)
+                    page.locator('#workspace-server-summary').click()
+                    self.assertFalse(page.evaluate("document.querySelector('#workspace-server-menu').open"))
             # Closing the last one gives the one row back.
             self.open_group(page, list(MENUS)[-1])
             self.assertEqual([], [g for g in page.evaluate(MEASURE, ROW)['open'] if g in MENUS])
@@ -543,6 +629,294 @@ class WorklistToolbarDOMTest(unittest.TestCase):
                             locator.scroll_into_view_if_needed()
                             self.assertTrue(locator.evaluate(REACH)['own'], f'{key} is covered at {width} {mode}')
                         self.shot(page, f'{width}x{height}-{mode}-narrow', width)
+                    finally:
+                        page.close()
+
+    def test_narrow_windows_open_groups_below_the_wrapped_row_with_every_control_reachable(self):
+        # fix1 (proposal 4): below 1366 the closed toolbar may wrap; an open group still goes below the last row, moves
+        # the list by what it adds (reading: the 92px toolbar scrolls instead), and every control in it is reachable.
+        for width, height in NARROW:
+            for mode, reading, portrait in MODES[:2]:
+                with self.subTest(width=width, mode=mode):
+                    page = self.open_page(width, height, reading, portrait)
+                    record = {'width': width, 'height': height, 'mode': mode, 'narrow_open': {}}
+                    ok = False
+                    try:
+                        page.evaluate(FULLEST, [SAVED_SEARCH_NAME, SAVED_SEARCH_STATE[0]])
+                        closed = page.evaluate(MEASURE, ROW)
+                        for group in MENUS:
+                            self.open_group(page, group)
+                            record['narrow_open'][group] = self.check_open(page, width, mode, group, closed,
+                                                                           first_in_view=False)
+                            self.shot(page, f'{width}x{height}-{mode}-narrow-{group}', width, 420)
+                            if group == 'toolbar-view':
+                                page.locator('#workspace-server-summary').click()
+                                reached = self.check_open(page, width, mode, group, closed, first_in_view=False)
+                                self.assertIn('workspace-server-clear', reached)
+                                page.locator('#workspace-server-summary').click()
+                        ok = True
+                    finally:
+                        record['passed'] = ok
+                        self.seen.append(record)
+                        page.close()
+
+    # ── (b2) fix1: status texts in full, the nested Account Layout, sections ──
+
+    def status_expanded(self, view, which, width, mode, row_bottom, how):
+        """Every non-empty text of the status group ('group') or the search row ('search') is drawn whole, below the row."""
+        items = view['group'] if which == 'group' else [view['search']]
+        shown = [st for st in items if st['text']]
+        self.assertTrue(shown, which)
+        for st in shown:
+            what = f'{st["sel"]} by {how} at {width} {mode}'
+            holder = st['holder']
+            self.assertTrue(st['visible'], what)
+            self.assertEqual('normal', st['whiteSpace'], what)
+            self.assertLessEqual(st['sw'], st['cw'] + 1, f'{what} is still cut sideways: {st}')
+            self.assertLessEqual(st['sh'], st['ch'] + 1, f'{what} is still cut: {st}')
+            self.assertGreater(st['h'], st['font'] * 0.8, what)
+            self.assertGreaterEqual(st['x'], -0.5, what)
+            self.assertLessEqual(st['r'], view['vw'] + 0.5, what)
+            self.assertLessEqual(st['b'], view['vh'] + 0.5, what)
+            # Out of the flow and fixed to its anchor: the reading toolbar's overflow clip cannot cut it, it opens below
+            # the row, and it takes no pointer (it closes as soon as the pointer leaves and never blocks the list).
+            self.assertEqual('fixed', holder['position'], what)
+            self.assertEqual([], holder['clipping'], what)
+            self.assertEqual('none', holder['pointerEvents'], what)
+            self.assertGreaterEqual(holder['y'], row_bottom - 0.5, f'{what} covers the row')
+            self.assertGreaterEqual(holder['x'], -0.5, what)
+            self.assertLessEqual(holder['r'], view['vw'] + 0.5, what)
+
+    def status_collapsed(self, view, which, what):
+        items = view['group'] if which == 'group' else [view['search']]
+        for st in items:
+            self.assertNotEqual('fixed', st['holder']['position'], f'{st["sel"]} stays open {what}')
+            self.assertNotEqual('absolute', st['holder']['position'], f'{st["sel"]} stays open {what}')
+
+    def same_row(self, page, closed, width, mode, what):
+        m = page.evaluate(MEASURE, ROW)
+        self.assertAlmostEqual(closed['bar']['h'], m['bar']['h'], delta=0.5, msg=f'toolbar changed height {what}')
+        self.assertAlmostEqual(closed['split']['y'], m['split']['y'], delta=0.5, msg=f'the list moved {what}')
+        for before, after in zip(closed['items'], m['items']):
+            self.assertAlmostEqual(before['x'], after['x'], delta=0.5, msg=f'{after["sel"]} moved {what}')
+            self.assertAlmostEqual(before['w'], after['w'], delta=0.5, msg=f'{after["sel"]} resized {what}')
+            self.assertAlmostEqual(before['y'], after['y'], delta=0.5, msg=f'{after["sel"]} moved {what}')
+
+    def test_status_texts_read_in_full_by_pointer_and_by_keyboard(self):
+        # F01: the status group is about 90px at 1366, so the page's longest texts are cut to a few letters. Pointing at
+        # the group or the search row, or keyboard focus inside either, shows the same elements whole below the row;
+        # the closed toolbar keeps its one 59px row (92px reading) and nothing moves while a text is shown.
+        for width, height in ONE_ROW:
+            for mode, reading, portrait in MODES:
+                with self.subTest(width=width, mode=mode):
+                    page = self.open_page(width, height, reading, portrait)
+                    try:
+                        page.mouse.move(width / 2, height - 4)
+                        # Empty texts: focus on the group shows no empty box.
+                        page.locator('#toolbar-status').focus()
+                        self.status_collapsed(page.evaluate(STATUS_VIEW), 'group', 'with empty texts')
+                        page.locator('#quick').focus()
+                        self.fill_statuses(page, STATUS_TEXTS)
+                        closed = page.evaluate(MEASURE, ROW)
+                        self.row_checks(closed, width, mode, 'with the longest status texts, not pointed at')
+                        view = page.evaluate(STATUS_VIEW)
+                        self.status_collapsed(view, 'group', 'before pointing')
+                        self.status_collapsed(view, 'search', 'before pointing')
+                        if width == 1366 and mode == 'normal':
+                            # The case is real: at 1366 the texts are cut in the closed row.
+                            cut = [st['sel'] for st in view['group'] + [view['search']] if st['sw'] > st['cw'] + 1]
+                            self.assertTrue(cut, view)
+                        row_bottom = max(i['b'] for i in closed['items'])
+                        # (b) pointer: the status group, then the search row's text where it sat in the row.
+                        target = page.locator('#toolbar-status').bounding_box()
+                        page.mouse.move(target['x'] + target['width'] / 2, target['y'] + target['height'] / 2)
+                        view = page.evaluate(STATUS_VIEW)
+                        self.status_expanded(view, 'group', width, mode, row_bottom, 'pointer')
+                        self.status_collapsed(view, 'search', 'while the group is pointed at')
+                        self.same_row(page, closed, width, mode, f'with the status texts shown at {width} {mode}')
+                        self.shot(page, f'{width}x{height}-{mode}-status-pointer', width, 360)
+                        search = [s for s in closed['items'] if s['sel'] == SEARCH_ROW][0]
+                        cut_text = page.evaluate("""()=>{const r=document.querySelector('[data-search-status]')
+                          .getBoundingClientRect();return {x:(r.left+r.right)/2,y:(r.top+r.bottom)/2,w:r.width}}""")
+                        if cut_text['w'] > 4:
+                            page.mouse.move(cut_text['x'], cut_text['y'])
+                        else:
+                            page.mouse.move(search['r'] - 4, (search['y'] + search['b']) / 2)
+                        view = page.evaluate(STATUS_VIEW)
+                        self.status_expanded(view, 'search', width, mode, row_bottom, 'pointer')
+                        self.status_collapsed(view, 'group', 'while the search row is pointed at')
+                        self.same_row(page, closed, width, mode, f'with the search text shown at {width} {mode}')
+                        self.shot(page, f'{width}x{height}-{mode}-search-status-pointer', width, 360)
+                        page.mouse.move(width / 2, height - 4)
+                        view = page.evaluate(STATUS_VIEW)
+                        self.status_collapsed(view, 'group', 'after the pointer left')
+                        self.status_collapsed(view, 'search', 'after the pointer left')
+                        # (a) keyboard: Tab from More reaches the status group, then the search row.
+                        page.locator('#toolbar-more > summary').focus()
+                        page.keyboard.press('Tab')
+                        self.assertEqual('toolbar-status', page.evaluate(ACTIVE))
+                        view = page.evaluate(STATUS_VIEW)
+                        self.status_expanded(view, 'group', width, mode, row_bottom, 'keyboard')
+                        self.same_row(page, closed, width, mode, f'with the status texts focused at {width} {mode}')
+                        self.shot(page, f'{width}x{height}-{mode}-status-keyboard', width, 360)
+                        page.keyboard.press('Tab')
+                        self.assertEqual('[data-search-mode]', page.evaluate(ACTIVE))
+                        view = page.evaluate(STATUS_VIEW)
+                        self.status_collapsed(view, 'group', 'after focus left the group')
+                        self.status_expanded(view, 'search', width, mode, row_bottom, 'keyboard')
+                        page.keyboard.press('Tab')
+                        self.assertEqual('[data-search-apply]', page.evaluate(ACTIVE))
+                        self.status_expanded(page.evaluate(STATUS_VIEW), 'search', width, mode, row_bottom, 'keyboard')
+                        page.locator('#quick').focus()
+                        view = page.evaluate(STATUS_VIEW)
+                        self.status_collapsed(view, 'search', 'after focus left the search row')
+                        self.row_checks(page.evaluate(MEASURE, ROW), width, mode, 'after the texts were read')
+                    finally:
+                        page.close()
+
+    def test_account_layout_stays_in_view_after_a_resize_while_view_was_closed(self):
+        # F02: the shipped workspace-roaming.js computes the panel's left/top from its summary. With View closed the
+        # summary has no box, so a resize writes 12px/12px and reopening View does not recompute. The panel is in View's
+        # flow now: those coordinates have no effect and it opens under its summary, inside View, clear of the header.
+        for width, height in [(1366, 768), (1920, 1200)]:
+            for mode, reading, portrait in MODES[:2]:
+                with self.subTest(width=width, mode=mode):
+                    page = self.open_page(width, height, reading, portrait, roaming=True)
+                    try:
+                        page.locator('#toolbar-view > summary').click()
+                        page.locator('#workspace-server-summary').click()
+                        before = page.evaluate(ACCOUNT_VIEW)
+                        self.assertTrue(before['accountOpen'])
+                        self.assertEqual('static', before['position'])
+                        # Filters opens and View closes (one name); Account Layout stays open inside the closed View.
+                        page.locator('#toolbar-filters > summary').click()
+                        hidden = page.evaluate(ACCOUNT_VIEW)
+                        self.assertEqual((False, True), (hidden['viewOpen'], hidden['accountOpen']))
+                        page.set_viewport_size({'width': width - 166, 'height': height - 68})
+                        page.set_viewport_size({'width': width, 'height': height})
+                        after_resize = page.evaluate(ACCOUNT_VIEW)
+                        # The script did write the hidden-summary coordinates: the case under test happened.
+                        self.assertEqual(('12px', '12px'), (after_resize['left'], after_resize['top']))
+                        page.locator('#toolbar-view > summary').click()
+                        m = page.evaluate(ACCOUNT_VIEW)
+                        self.assertEqual((True, True), (m['viewOpen'], m['accountOpen']))
+                        self.assertEqual('static', m['position'])
+                        panel, summary, view = m['panel'], m['summary'], m['view']
+                        self.assertGreater(panel['w'], 0)
+                        self.assertGreater(panel['h'], 0)
+                        self.assertGreaterEqual(panel['y'], summary['b'] - 0.5, f'the panel is not under its summary: {m}')
+                        self.assertAlmostEqual(summary['x'], panel['x'], delta=0.5, msg=f'the panel left its summary: {m}')
+                        self.assertGreaterEqual(panel['x'], view['x'] - 0.5, m)
+                        self.assertLessEqual(panel['r'], view['r'] + 0.5, m)
+                        self.assertGreaterEqual(panel['y'], view['y'] - 0.5, m)
+                        self.assertLessEqual(panel['b'], view['b'] + 0.5, m)
+                        self.assertGreaterEqual(panel['y'], m['bar']['y'] - 0.5, 'the panel reaches over the header')
+                        self.assertEqual([True, True, True], m['inHeader'], 'the header is covered')
+                        self.assertAlmostEqual(before['panel']['w'], panel['w'], delta=0.5)
+                        if not reading:
+                            self.assertLessEqual(panel['b'], m['split']['y'] + 0.5, 'the panel covers the list')
+                        self.shot(page, f'{width}x{height}-{mode}-account-layout-after-hidden-resize', width, 520)
+                        for key in ('workspace-server-save', 'workspace-server-load', 'workspace-server-clear'):
+                            locator = page.locator('#' + key)
+                            locator.scroll_into_view_if_needed()
+                            reach = locator.evaluate(REACH)
+                            self.assertTrue(reach['own'], f'{key} is covered at {width} {mode}')
+                            self.assertTrue(reach['focused'], f'{key} cannot take focus at {width} {mode}')
+                            locator.click()
+                        self.assertEqual({'workspace-server-save': 1, 'workspace-server-load': 1,
+                                          'workspace-server-clear': 1}, page.evaluate('window.__clicks'))
+                    finally:
+                        page.close()
+
+    def test_filters_and_view_are_split_into_ordered_sections_with_the_resets_apart(self):
+        # Proposals 2 and 3: Filters is study date -> actions -> saved searches and applied state; View is images and
+        # windows -> this browser's layout -> account layout. The saved searches take their own last line, so a dozen
+        # chips and a 400-character name never push the action buttons down; resets sit apart at their section's end.
+        for width, height in [(1366, 768), (1920, 1200)]:
+            for mode, reading, portrait in MODES[:2]:
+                with self.subTest(width=width, mode=mode):
+                    page = self.open_page(width, height, reading, portrait)
+                    try:
+                        tip = page.evaluate("document.querySelector('#toolbar-filters > summary').title")
+                        self.assertIn('점 표시', tip)
+                        for group, sections in SECTIONS.items():
+                            ids = [i for s in sections for i in s]
+                            got = page.evaluate(SECTION_VIEW, [group, ids])
+                            self.assertEqual(sections, [c['ids'] for c in got], group)
+                        view = page.evaluate(SECTION_VIEW, ['toolbar-view', [i for s in SECTIONS['toolbar-view'] for i in s]])
+                        self.assertEqual(VIEW_SECTION_TITLES, [c['title'] for c in view])
+                        self.assertEqual(VIEW_SECTION_TITLES, [c['label'] for c in view])
+                        for c in view:
+                            self.assertEqual('group', c['role'])
+                            self.assertRegex(c['tip'] or '', '[가-힣]', c['title'])
+                        # No saved search and none applied: the saved-search section draws nothing.
+                        self.open_group(page, 'toolbar-filters')
+                        self.assertFalse(page.evaluate(
+                            "document.querySelector('.toolbar-section-saved').getClientRects().length"))
+                        page.evaluate(FULLEST, [SAVED_SEARCH_NAME, SAVED_SEARCH_STATE[0]])
+                        boxes = page.evaluate("""(ids)=>Object.fromEntries(ids.map(i=>{const r=document.getElementById(i)
+                          .getBoundingClientRect();return [i,{x:r.left,y:r.top,r:r.right,b:r.bottom}]}))""",
+                                              [i for s in SECTIONS['toolbar-filters'] for i in s] + ['qf-days-0'])
+                        saved_top = page.evaluate("document.querySelector('.toolbar-section-saved').getBoundingClientRect().top")
+                        for key in SECTIONS['toolbar-filters'][1]:
+                            self.assertLessEqual(boxes[key]['b'], saved_top + 0.5, f'{key} is below the saved searches')
+                        self.assertLessEqual(boxes['qf-days-0']['b'], saved_top + 0.5)
+                        self.assertGreaterEqual(boxes['chips']['y'], saved_top - 0.5)
+                        self.shot(page, f'{width}x{height}-{mode}-filters-sections', width, 420)
+                        self.open_group(page, 'toolbar-view')
+                        page.locator('#workspace-server-summary').click()
+                        gaps = page.evaluate("""()=>{const b=s=>document.querySelector(s).getBoundingClientRect();
+                          const pair=(a,c)=>({gap:b(c).left-b(a).right,same:Math.abs(b(a).top-b(c).top)<1});
+                          return {layout:pair('#reading-appearance-open','#layout-reset'),
+                                  account:pair('#workspace-server-load','#workspace-server-clear'),
+                                  plain:pair('#columnsettings','#reading-appearance-open'),
+                                  plainAccount:pair('#workspace-server-save','#workspace-server-load')}}""")
+                        margins = page.evaluate("""()=>['#layout-reset','#workspace-server-clear']
+                          .map(s=>parseFloat(getComputedStyle(document.querySelector(s)).marginLeft))""")
+                        self.assertEqual([RESET_GAP, RESET_GAP], margins)
+                        # Reset Layout shares the line of the ordinary settings in its section, set apart from them.
+                        self.assertTrue(gaps['layout']['same'] and gaps['plain']['same'], gaps)
+                        self.assertGreaterEqual(gaps['layout']['gap'], gaps['plain']['gap'] + RESET_GAP - 0.5, gaps)
+                        # The 300px Account Layout panel may put each button on its own line (as at the base); where
+                        # Reset Account Layout shares a line with Load from Account it is set apart the same way.
+                        if gaps['account']['same']:
+                            plain_gap = gaps['plainAccount']['gap'] if gaps['plainAccount']['same'] else 0
+                            self.assertGreaterEqual(gaps['account']['gap'], plain_gap + RESET_GAP - 0.5, gaps)
+                        self.shot(page, f'{width}x{height}-{mode}-view-sections', width, 480)
+                    finally:
+                        page.close()
+
+    def test_focus_back_to_the_summary_after_the_reading_toolbar_scrolled(self):
+        # Proposal 4: in reading mode the 92px toolbar scrolls to reach the lower lines of an open group. Shift+Tab back
+        # to the group's summary brings it into view where a pointer reaches it, and closing the group gives the row back.
+        for width, height in ONE_ROW:
+            for mode, reading, portrait in (MODES[1], MODES[3]):
+                with self.subTest(width=width, mode=mode):
+                    page = self.open_page(width, height, reading, portrait)
+                    try:
+                        page.evaluate(FULLEST, [SAVED_SEARCH_NAME, SAVED_SEARCH_STATE[0]])
+                        self.open_group(page, 'toolbar-view')
+                        page.locator('#workspace-server-summary').click()
+                        page.locator('#workspace-server-clear').focus()
+                        scrolled = page.evaluate(MEASURE, ROW)['bar']['st']
+                        self.assertGreater(scrolled, 0, 'the reading toolbar did not need to scroll')
+                        for _ in range(30):
+                            if page.evaluate(ACTIVE) == 'toolbar-view>summary':
+                                break
+                            page.keyboard.press('Shift+Tab')
+                        self.assertEqual('toolbar-view>summary', page.evaluate(ACTIVE))
+                        bar = page.evaluate(MEASURE, ROW)['bar']
+                        self.assertLess(bar['st'], scrolled)
+                        summary = page.locator('#toolbar-view > summary').bounding_box()
+                        self.assertGreaterEqual(summary['y'], bar['y'] - 0.5, 'the summary is above the toolbar box')
+                        self.assertLessEqual(summary['y'] + summary['height'], bar['b'] + 0.5, 'the summary is cut off')
+                        self.assertTrue(page.locator('#toolbar-view > summary').evaluate(REACH)['own'])
+                        page.keyboard.press('Enter')
+                        self.assertFalse(page.evaluate("document.querySelector('#toolbar-view').open"))
+                        self.assertEqual('toolbar-view>summary', page.evaluate(ACTIVE))
+                        m = page.evaluate(MEASURE, ROW)
+                        self.assertEqual(0, m['bar']['st'])
+                        self.row_checks(m, width, mode, 'after returning to the summary and closing View')
                     finally:
                         page.close()
 
