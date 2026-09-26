@@ -540,7 +540,10 @@ class Workflow(unittest.TestCase):
 
     def test_dispatch_only_read_only_and_pinned(self):
         on_block = self.text.split('\non:\n', 1)[1].split('\n\n', 1)[0]
-        self.assertEqual(on_block.strip(), 'workflow_dispatch:')
+        # Commander change: GitHub refuses workflow_dispatch for a file that only exists on its own branch,
+        # so a push trigger limited to exactly that branch is accepted next to workflow_dispatch.
+        self.assertIn(on_block.strip(), ('workflow_dispatch:',
+                                         'workflow_dispatch:\n  push:\n    branches: [opus/s4-rb1-check-20260926]'))
         self.assertIn('\npermissions:\n  contents: read\n', self.text)
         self.assertNotIn('secrets.', self.code)
         uses = re.findall(r'uses:\s*(\S+)', self.text)
