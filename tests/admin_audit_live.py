@@ -40,8 +40,10 @@ the Institution rows of the same ids (StudyAccessPolicy.institution references I
 (admins of A, B and Z, a second admin of A, a clinician-only, a technician and a radiologist of A), member m created
 through the member console, two run-created gateway clients, the realm roles `clinician` and `gateway` only when this
 run had to create them, one synthetic study UID 2.25.<random>, and AuditLog rows the run inserts by exact id. Cleanup
-removes exactly these (AuditLog by id, run target or run actor; StudyState, Study Access and site Hanging Protocol rows
-by the run's UID and institutions; then the Institution rows by the ids this run inserted).
+removes exactly these (AuditLog by id, run study UID or run actor; StudyState, site Hanging Protocol, Study Access and
+institution-target audit rows only in the institutions whose Institution INSERT succeeded - StudyState by the run's UID,
+Study Access by the run's subjects, audit rows by the run's actors; then the Institution rows by the ids this run
+inserted). A group whose INSERT failed (the id already existed) is deleted in Keycloak; no database DELETE names it.
 """
 from __future__ import annotations
 
@@ -227,22 +229,34 @@ class AdminAuditLive(unittest.TestCase):
 
     @classmethod
     def purge_owned_rows(cls) -> None:
+        """Institution-scoped rows only for the Institution rows this run inserted (cls.institutions), never for every
+        group it created: a group whose INSERT failed names a row that already existed, and that institution's
+        policies, policy history, site setting and audit rows are not the run's (Astra S5-U5b-D-F01). Within an owned
+        institution the Study Access rows are further limited to the run's subjects and the audit rows naming it to
+        the run's actors; anything else there stays and the Institution DELETE fails on it (RESTRICT) instead."""
         if cls.inserted:
             psql('DELETE FROM "AuditLog" WHERE id IN (' + ",".join(str(int(i)) for i in cls.inserted) + ");")
             if psql('SELECT count(*) FROM "AuditLog" WHERE id IN (' + ",".join(str(int(i)) for i in cls.inserted) + ");") != ["0"]:
                 raise RuntimeError("synthetic audit rows remain")
             cls.inserted.clear()
-        names = [name for name, _ in cls.groups.values()]
-        if not all(GROUP.fullmatch(name) for name in names) or not STUDY.fullmatch(cls.study):
+        owned = list(cls.institutions)
+        subjects = sorted({*cls.members, *cls.stack.user_ids.values()})
+        actors = sorted(set(cls.stack.actors.values()))
+        if (not all(GROUP.fullmatch(name) for name in owned) or not STUDY.fullmatch(cls.study)
+                or not all(UUID.fullmatch(subject) for subject in subjects) or not all(SAFE.fullmatch(actor) for actor in actors)):
             raise RuntimeError("refusing cleanup: an owned identifier has an unexpected shape")
-        targets = [cls.study, *names]
-        psql('DELETE FROM "AuditLog" WHERE target IN (' + ",".join(f"'{t}'" for t in targets) + ");")
-        if names:
-            listed = ",".join(f"'{name}'" for name in names)
+        psql(f'DELETE FROM "AuditLog" WHERE target=\'{cls.study}\';')
+        if owned:
+            listed = ",".join(f"'{name}'" for name in owned)
+            if actors:
+                psql(f'DELETE FROM "AuditLog" WHERE target IN ({listed}) AND actor IN ('
+                     + ",".join(f"'{actor}'" for actor in actors) + ");")
             psql(f'DELETE FROM "StudyState" WHERE uid=\'{cls.study}\' AND "institutionId" IN ({listed});')
             psql(f'DELETE FROM "HangingProtocolPreference" WHERE institution IN ({listed}) AND subject=\'\';')
-            psql(f'DELETE FROM "StudyAccessRevision" WHERE institution IN ({listed});')
-            psql(f'DELETE FROM "StudyAccessPolicy" WHERE institution IN ({listed});')
+            if subjects:
+                who = ",".join(f"'{subject}'" for subject in subjects)
+                psql(f'DELETE FROM "StudyAccessRevision" WHERE institution IN ({listed}) AND subject IN ({who});')
+                psql(f'DELETE FROM "StudyAccessPolicy" WHERE institution IN ({listed}) AND subject IN ({who});')
             if psql(f'SELECT count(*) FROM "StudyState" WHERE uid=\'{cls.study}\';') != ["0"]:
                 raise RuntimeError("the synthetic study state remains (another owner?)")
         for member in cls.synthetic_members:
