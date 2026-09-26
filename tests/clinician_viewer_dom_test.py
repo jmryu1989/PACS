@@ -65,8 +65,8 @@ record a mount):
       is read whole, page by page with its cursor; the frame's return is checked at once and the saved mark is drawn; a
       frameless check held across A->B->A never takes the new A down. Control: the check behind frame identification
       (as at R-002) keeps the retracted rows and asks nothing.
-  13  VIEWER_STATE_MATRIX: every write/mark entry point and every recheck path observed in each session state
-      (unconfirmed, refused, read-only, writer).
+  13  VIEWER_STATE_MATRIX: every write/mark entry point, every recheck path, the list's saved mark and Go to Image observed
+      in each session state (unconfirmed, refused, read-only, writer, and read-only over a writer's held work).
   14  (Astra S5-U2b-R-003 F01) the change to clinician-only voids the reads a writer had in flight: the writer's first author
       page held, another extension's /me (the module gate) answers the same account clinician-only and the page arrives late:
       no row or mark of it, only the final read verified whole, and its final:false check takes that down; a new final read
@@ -77,6 +77,14 @@ record a mount):
       is painted and the final:false check leaves it (Astra's reproduction).
   15  SESSION_CHANGE_MATRIX: what the panel does with reads and writes in flight across unconfirmed->writer,
       writer->read-only and read-only->writer (read-only never goes back), each row observed.
+  16  (Astra S5-U2b-X-R-001 F01) a writer's held work never blocks the clinician-only final list: a writer adds a key image
+      on A without saving and goes A->B->A (Resume / Discard Held Work, nothing of A drawn, Go to Image busy), then another
+      extension's /me answers the same account clinician-only: the final list, its verified mark drawn locked and Go to
+      Image are exactly as without held work, through Refresh, the source frame's loss and return, and final:false then
+      final again; no write control and nothing of the held work is shown, and the work stays held (the unload guard).
+      The writer side is unchanged (Resume gives the key image back), and a session that could leave read-only (a probe; the
+      shipped one never does) gets the same key image back after the clinician-only interval. Control: the file at X-R-001
+      (held work stopped every read path) shows no mark, stays suspended, answers Go to Image busy, also after Refresh.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is S5-U1b (tests/clinician_read_live.py, hosted synthetic stack only).
@@ -272,6 +280,8 @@ def author_page(*items, cursor=None):
 SHOWN_MARK, SHOWN_KEY = mark_item(81, "length", "SYN WRITER SHOWN LENGTH"), key_item(82, "SYN WRITER SHOWN KEY")
 LATE_MARK, LATE_KEY = mark_item(83, "length", "SYN LATE WRITER LENGTH"), key_item(84, "SYN LATE WRITER KEY")
 LATE_WRITE = key_item(85, "SYN LATE WRITTEN KEY")
+# test_13/16: the title of the writer's unsaved key image the panel holds (never saved, never on a read-only screen).
+HELD_TITLE = "SYN HELD WRITER KEY"
 
 # config/ohif.js wording, verbatim (kinCreateViewerHistory READ_ONLY and its statuses).
 RO_NOTE = ("읽기 전용 · 확정 판독문에 저장된 측정·키 이미지만 표시합니다. 이 화면에서는 측정·키 이미지를 만들거나 저장하지 않으며 "
@@ -316,10 +326,16 @@ AUTHORING = ["ArrowAnnotate", "Length", "Angle", "Bidirectional", "RectangleROI"
 ALL_GROUPS = ["default", "mpr", "SRToolGroup", "volume3d"]
 
 # test_13. The viewer document's session states (kinViewerSession): unconfirmed (no successful /me: none yet, 5xx, network,
-# bad JSON), refused (401/403), read-only (/me says clinician only), writer (a member /me with any other app role).
-STATES = ("unconfirmed", "refused", "read-only", "writer")
-WRITER_ONLY = (False, False, False, True)
+# bad JSON), refused (401/403), read-only (/me says clinician only), writer (a member /me with any other app role), and
+# read-only+held (Astra S5-U2b-X-R-001 F01): read-only reached from a writer whose unsaved key image on A is held
+# (hold_writer_work), observed from the change on.
+STATES = ("unconfirmed", "refused", "read-only", "writer", "read-only+held")
+WRITER_ONLY = (False, False, False, True, False)
 VIEWER_STATE_MATRIX = {
+    # The list on screen: its verified saved length drawn locked (the writer list here holds key images only), and Go to Image
+    # of the shown source frame through the navigation API (unconfirmed: busy; refused: ended).
+    "list_mark": (False, False, True, False, True),
+    "go_to_image": (False, False, True, True, True),
     # Write and mark entry points: True = works in that state, False = not offered or refused (nothing drawn, sent or mounted).
     "toolbar_offer": WRITER_ONLY,        # the Measurements split button and the authoring items of More Tools
     "toolbar_press": WRITER_ONLY,        # a press on the rendered toolbar (Bidirectional), then a primary drag
@@ -343,20 +359,20 @@ VIEWER_STATE_MATRIX = {
     "layout_account": WRITER_ONLY,       # Recent Layout buttons enabled / the Hanging Protocol editor mounted
     "marks_present": WRITER_ONLY,        # any native mark left after all of the attempts above
     "stray_mark_kept": WRITER_ONLY,      # a mark made outside every guard survives the next observation tick
-    "viewing": (True, True, True, True),  # Zoom from the toolbar, then a drag: image viewing in every state
+    "viewing": (True, True, True, True, True),  # Zoom from the toolbar, then a drag: image viewing in every state
     # Recheck paths, as the viewer-items requests the panel makes: read = the clinician list (limit=100), read-all = the writer
     # list (includeHidden=true), check = limit=1 (the clinician final check / the writer's access probe), cursor = the next
     # page asked with the handed-out cursor verbatim, none = no list request (unconfirmed: /me is asked again on focus and
     # every 15 s, and nothing is read until an answer; refused: the panel has ended).
-    "initial_read": ("none", "none", "read", "read-all"),
-    "page_continuation": ("none", "none", "cursor", "cursor"),
-    "focus": ("none", "none", "check", "check"),
-    "me_on_focus": (True, False, True, True),                      # the same focus asks /me (the retry, the check, the probe)
-    "periodic": ("none", "none", "check", "check"),                # the clock moved past 15 s since the last /me
-    "frame_lost": ("none", "none", "none", "none"),                # the active viewport stops showing a source frame
-    "frame_return": ("none", "none", "check", "none"),             # the source frame comes back (clinician: checked at once)
-    "frameless_focus": ("none", "none", "check", "none"),          # focus with no source frame (writer probe stays frame-bound)
-    "study_change": ("none", "none", "read", "read-all"),          # the frame of another study
+    "initial_read": ("none", "none", "read", "read-all", "read"),
+    "page_continuation": ("none", "none", "cursor", "cursor", "cursor"),
+    "focus": ("none", "none", "check", "check", "check"),
+    "me_on_focus": (True, False, True, True, True),                # the same focus asks /me (the retry, the check, the probe)
+    "periodic": ("none", "none", "check", "check", "check"),       # the clock moved past 15 s since the last /me
+    "frame_lost": ("none", "none", "none", "none", "none"),        # the active viewport stops showing a source frame
+    "frame_return": ("none", "none", "check", "none", "check"),    # the source frame comes back (clinician: checked at once)
+    "frameless_focus": ("none", "none", "check", "none", "check"),  # focus with no source frame (writer probe stays frame-bound)
+    "study_change": ("none", "none", "read", "read-all", "read"),  # the frame of another study
 }
 
 # test_15 (Astra S5-U2b-R-003 F01). Answers that arrive while the document's session state changes. A change is made by another
@@ -697,6 +713,15 @@ PROBE_WRITES = """async authoring => {
 LAYOUT = """() => { const p = document.querySelector('#kin-viewer-layout');
   return {summary: p.querySelector('summary').textContent, buttons: [...p.querySelectorAll('button')].map(b => b.textContent),
     note: p.querySelector(':scope > p').textContent}; }"""
+# test_13/16: the saved items' display set, so Go to Image can reach the source frame (the stub has none); every frame change
+# Go to Image asks for is recorded in synIndexed.
+NAVIGABLE = """([series, sop]) => { const v = synServices.cornerstoneViewportService.getCornerstoneViewport('syn-vp');
+  window.synIndexed = []; v.setImageIdIndex = async index => { window.synIndexed.push(index); };
+  synServices.displaySetService.getActiveDisplaySets = () => [{ StudyInstanceUID: window.synStudy, SeriesInstanceUID: series,
+    displaySetInstanceUID: 'syn-ds', images: [{ SOPInstanceUID: sop }] }]; }"""
+# The navigation API the Findings section uses (kinViewerHistoryNavigate), to frame 1, highlighting `item` when given.
+NAVIGATE = """([study, series, sop, item]) => window.kinViewerHistoryNavigate({ studyUid: study, seriesUid: series, sopUid: sop,
+  frame: 1, ...(item ? { itemId: item } : {}) })"""
 
 
 def has_hangul(text):
@@ -753,6 +778,11 @@ OLD_DECIDE = ("    decide() {\n      return fetch('/api/me', { credentials: 'sam
               "        .then(me => kinViewerClinicianOnly(me) ? 'read-only' : 'writer', () => 'writer');\n")
 FINAL_CHECK = ("\n        .then(page => confirmShown(ticket, seq, study, page, null), "
                "error => confirmShown(ticket, seq, study, null, error))")
+# test_16. The held-work gate of the read paths (marks, Go to Image, the scan, the history state): held work stops them only in a
+# document that is not clinician-only. As at X-R-001 it stopped them in every session.
+HELD_GATE = "    const held = () => recovery.has(scope) && !readOnly();\n"
+# The session never leaves read-only; without this line a later writer /me would (a probe of the held work, not a product mode).
+STICKY = "    if (state === 'read-only') return state;\n"
 
 
 class ClinicianViewerDOMTest(unittest.TestCase):
@@ -787,6 +817,9 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             "no-final-check": variant(CONFIG, [(FINAL_CHECK, "", 1)], "config/ohif.js"),
             "as-r002": variant(CONFIG, [(POLICY, R002_POLICY, 1), (DROP_MARKS, "enforceToolbar(); } }", 1)], "config/ohif.js"),
             "frame-bound-check": variant(CONFIG, [(FRAME_FREE_CHECK, FRAME_BOUND_CHECK, 1)], "config/ohif.js"),
+            # test_16: the file at X-R-001 (held work stops every read path), and a session that can leave read-only.
+            "held-blocks": variant(CONFIG, [(HELD_GATE, "    const held = () => recovery.has(scope);\n", 1)], "config/ohif.js"),
+            "session-leaves-read-only": variant(CONFIG, [(STICKY, "", 1)], "config/ohif.js"),
         }
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -829,10 +862,20 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.unexpected, self.errors, self.dialogs, self.finished = [], [], [], []
         self.context = self.browser.new_context(viewport={"width": 1400, "height": 900})
         self.context.route("**/*", self.route)
-        self.page = self.context.new_page()
-        self.page.on("pageerror", lambda error: self.errors.append(str(error)))
-        self.page.on("dialog", self.on_dialog)
-        self.page.on("requestfinished", lambda request: self.finished.append(request))
+        self.page = self.watched_page()
+
+    def watched_page(self):
+        page = self.context.new_page()
+        page.on("pageerror", lambda error: self.errors.append(str(error)))
+        page.on("dialog", self.on_dialog)
+        page.on("requestfinished", lambda request: self.finished.append(request))
+        return page
+
+    def fresh_page(self):
+        # The next viewer document in a new page. Closing the old one runs no beforeunload handler: a document that still guards
+        # held work (kinViewerHistoryHasUnsaved) would otherwise ask to stay when a goto leaves it.
+        self.page.close()
+        self.page = self.watched_page()
 
     def tearDown(self):
         self.context.close()
@@ -1099,7 +1142,19 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.page.evaluate("on => { window.synFrameless = on; }", on)
 
     def open_state(self, state):
-        # test_13: one viewer document in the given session state, settled.
+        # test_13: one viewer document in the given session state, settled. read-only+held: the writer's work held for A, then
+        # the same account clinician-only by the other extensions' /me; the requests are counted from that change.
+        self.fresh_page()
+        if state == "read-only+held":
+            self.hold_writer_work()
+            start = len(self.item_requests)
+            self.to_clinician_only(LATER)
+            self.wait_panel("ready", VA)
+            self.modules_settled()
+            self.item_requests = self.item_requests[start:]
+            self.settle()
+            self.assertEqual("read-only", self.session())
+            return
         self.me = RADIOLOGIST if state == "writer" else CLINICIAN
         self.me_status = {"unconfirmed": 503, "refused": 403}.get(state)
         self.writer_paged = state == "writer"
@@ -1132,7 +1187,8 @@ class ClinicianViewerDOMTest(unittest.TestCase):
 
     def observe_writes(self, state):
         seen = self.page.evaluate(PROBE_WRITES, AUTHORING)
-        sr, refusal = tuple(seen.pop("sr")), {"read-only": RO_SR, "refused": ENDED}.get(state, UNCONFIRMED_SR)
+        sr = tuple(seen.pop("sr"))
+        refusal = {"read-only": RO_SR, "read-only+held": RO_SR, "refused": ENDED}.get(state, UNCONFIRMED_SR)
         seen["sr_commands"] = {(f"refused: {WRITER_SR}",) * 2: True, (f"refused: {refusal}",) * 2: False}.get(sr, f"unexpected {sr}")
         buttons, mounted = set(self.panel()["buttons"]), set(self.page.evaluate("synMounted"))
         seen["panel_controls"] = bool(buttons & {"Download SR", "Store SR", "Length", "Angle", "Ellipse ROI", "Add Key Image"})
@@ -1144,6 +1200,12 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.settle()
         seen["stray_mark_kept"] = self.page.evaluate("uid => synHas(uid)", stray)
         return seen
+
+    def observe_list(self):
+        self.page.evaluate(NAVIGABLE, [SERIES, SOP])
+        outcome = self.page.evaluate(NAVIGATE, [VA, SERIES, SOP, None])
+        return {"list_mark": ["Length", "SYN-A length", True] in self.page.evaluate("synDrawn()"),
+                "go_to_image": outcome.get("ok") is True}
 
     def observe_rechecks(self, state):
         initial = list(self.item_requests)
@@ -1856,7 +1918,8 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         for state in STATES:
             with self.subTest(state=state):
                 self.open_state(state)
-                seen = self.observe_writes(state)
+                seen = self.observe_list()
+                seen.update(self.observe_writes(state))
                 seen.update(self.observe_rechecks(state))
                 self.assertEqual(set(VIEWER_STATE_MATRIX), set(seen))
                 for row, expected in VIEWER_STATE_MATRIX.items():
@@ -2187,6 +2250,147 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             for row, expected in SESSION_CHANGE_MATRIX.items():
                 with self.subTest(change=change, row=row):
                     self.assertEqual(expected[SESSION_CHANGES.index(change)], seen[change][row])
+
+    # ── Astra S5-U2b-X-R-001 regression ──
+    def hold_writer_work(self, config=None):
+        # Astra's setup: a writer (MIXED) adds a key image on A and leaves it unsaved, then goes A->B->A. The panel holds that
+        # work for A (Resume / Discard Held Work) and draws and navigates nothing of A until the writer decides.
+        history = self.page.locator("#kin-viewer-history")
+        self.writer_open(config)
+        self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "A's author list")
+        history.get_by_role("button", name="Add Key Image", exact=True).click()
+        history.get_by_label("Key Title", exact=True).fill(HELD_TITLE)
+        self.page.evaluate("study => synSwitch(study)", VP)
+        self.wait_until(lambda: (lambda p: p["uid"] == VP and "SYN writer key" in str(p["rows"]))(self.panel()),
+                        "B's author list")
+        self.page.evaluate("study => synSwitch(study)", VA)
+        self.wait_until(lambda: (lambda p: p["uid"] == VA and "Resume Held Work" in p["buttons"])(self.panel()),
+                        "A's work held")
+        self.page.evaluate(NAVIGABLE, [SERIES, SOP])
+
+    def on_screen(self):
+        return self.page.evaluate("() => document.body.innerText + ' ' + "
+                                  "[...document.querySelectorAll('input, textarea')].map(e => e.value).join(' ')")
+
+    def list_view(self, item):
+        # What the viewer shows and does for the list: the panel, the drawn saved marks, the history state the Findings section
+        # reads, the row's Go to Image (a frame change asked) and the navigation API asked to highlight the item.
+        seen, drawn = self.panel(), self.page.evaluate("synDrawn()")
+        suspended, before = self.page.evaluate("kinViewerHistoryState().suspended"), self.page.evaluate("synIndexed.length")
+        self.page.locator(f'#kin-viewer-history section[data-item-id="{item}"]').get_by_role(
+            "button", name="Go to Image", exact=True).click()
+        self.settle()
+        clicked = self.page.evaluate("synIndexed.length") > before
+        return {"panel": seen, "drawn": drawn, "suspended": suspended, "go_to_image": clicked,
+                "navigate": self.page.evaluate(NAVIGATE, [VA, SERIES, SOP, item])}
+
+    def refresh_final(self):
+        reads = len(self.reads())
+        self.page.get_by_role("button", name="Refresh", exact=True).click()
+        # The final list of A is two pages.
+        self.wait_until(lambda: len(self.reads()) >= reads + 2 and self.panel()["state"] == "ready", "the Refresh read")
+        self.settle()
+
+    def test_16_held_writer_work_never_blocks_the_final_list(self):
+        a_labels, length = ["SYN-A key", "SYN-A length", "SYN-A angle", "SYN-A arrow"], item_id(2)
+        arrived = {"ok": True, "highlighted": True, "annotation": "shown", "present": True, "revision": 2, "hidden": False,
+                   "working": False}
+        unsaved = "() => kinViewerHistoryHasUnsaved()"
+
+        # (a) Astra's control, no held work: the same account turns clinician-only by the other extensions' /me; the final
+        # list's verified length is drawn locked and Go to Image reaches its frame.
+        self.writer_open()
+        self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "A's author list")
+        self.page.evaluate(NAVIGABLE, [SERIES, SOP])
+        self.to_clinician_only(LATER)
+        self.wait_panel("ready", VA)
+        clear = self.list_view(length)
+        self.assertEqual((a_labels, [["Length", "SYN-A length", True]], False, True, arrived),
+                         ([row[2] for row in clear["panel"]["rows"]], clear["drawn"], clear["suspended"],
+                          clear["go_to_image"], clear["navigate"]))
+        self.assertEqual(({"Refresh", "Go to Image"}, [RO_NOTE], 0),
+                         (set(clear["panel"]["buttons"]), clear["panel"]["notes"], clear["panel"]["inputs"]))
+        self.assertFalse(self.page.evaluate(unsaved))
+
+        # (b) Astra's reproduction: the writer's unsaved key image is held for A (the writer's pause: nothing drawn, Go to
+        # Image busy), then the same change. The clinician gets exactly what (a) shows, and none of the held work.
+        self.fresh_page()
+        self.hold_writer_work()
+        self.assertEqual(([], True, {"ok": False, "reason": "busy"}),
+                         (self.page.evaluate("synDrawn()"), self.page.evaluate("kinViewerHistoryState().suspended"),
+                          self.page.evaluate(NAVIGATE, [VA, SERIES, SOP, None])), "the writer's held-work pause")
+        self.to_clinician_only(LATER)
+        self.wait_panel("ready", VA)
+        self.assertEqual(clear, self.list_view(length))
+        # The work stays held: the unload guard still counts it.
+        self.assertTrue(self.page.evaluate(unsaved))
+        for step in ("refresh", "frame lost and back", "final:false, then final"):
+            with self.subTest(step=step):
+                if step == "refresh":
+                    self.refresh_final()
+                elif step == "frame lost and back":
+                    self.frameless(True)
+                    self.wait_until(lambda: self.panel()["frame"] == "unmatched", "the list unmatched")
+                    before = self.probes()
+                    self.frameless(False)
+                    self.wait_until(lambda: self.probes() > before and self.panel()["frame"] is None,
+                                    "the check on the frame's return")
+                    self.settle()
+                else:
+                    self.items[VA] = "withheld"
+                    self.focus()
+                    seen = self.wait_panel("withheld", VA)
+                    self.assertEqual((RO_WITHHELD, [], [], ["Refresh"]),
+                                     (seen["status"], seen["rows"], self.page.evaluate("synDrawn()"), seen["buttons"]))
+                    self.items[VA] = copy.deepcopy(ITEMS[VA])
+                    self.focus()
+                    self.wait_panel("ready", VA)
+                    self.settle()
+                self.assertEqual(clear, self.list_view(length))
+                self.assertNotIn(HELD_TITLE, self.on_screen())
+                self.assertNotIn("Unsaved", str(self.panel()["rows"]))
+                self.assertTrue(self.page.evaluate(unsaved))
+
+        # (c) The writer's side is unchanged: in a document that stays writer, Resume Held Work gives the key image back.
+        self.fresh_page()
+        self.hold_writer_work()
+        history = self.page.locator("#kin-viewer-history")
+        history.get_by_role("button", name="Resume Held Work", exact=True).click()
+        self.wait_until(lambda: "Key Image · Unsaved" in str(self.panel()["rows"]), "the held key image resumed")
+        resumed = self.panel()["rows"]
+        self.assertEqual(HELD_TITLE, history.get_by_label("Key Title", exact=True).input_value())
+        self.assertFalse({"Resume Held Work", "Discard Held Work"} & set(self.panel()["buttons"]))
+
+        # (d) The clinician-only interval leaves the held work untouched. The shipped session never leaves read-only, so a
+        # session that can (a probe of the panel, not a product mode) answers writer after it: Resume gives back what (c) did.
+        self.fresh_page()
+        self.hold_writer_work(self.config_variants["session-leaves-read-only"])
+        self.to_clinician_only(LATER)
+        self.wait_panel("ready", VA)
+        self.assertEqual(clear, self.list_view(length))
+        self.refresh_final()
+        self.me = MIXED
+        self.focus()
+        self.wait_until(lambda: "Resume Held Work" in self.panel()["buttons"], "the held work offered to the writer again")
+        self.assertEqual("writer", self.session())
+        history = self.page.locator("#kin-viewer-history")
+        history.get_by_role("button", name="Resume Held Work", exact=True).click()
+        self.wait_until(lambda: "Key Image · Unsaved" in str(self.panel()["rows"]), "the held key image resumed")
+        self.assertEqual((resumed, HELD_TITLE),
+                         (self.panel()["rows"], history.get_by_label("Key Title", exact=True).input_value()))
+
+        # Control: the file at X-R-001 (held work stops every read path in any session) is Astra's observation: the final
+        # list ready but no mark drawn, suspended, Go to Image busy, and Refresh changes nothing.
+        self.fresh_page()
+        self.hold_writer_work(self.config_variants["held-blocks"])
+        self.to_clinician_only(LATER)
+        self.wait_panel("ready", VA)
+        blocked = self.list_view(length)
+        self.assertEqual(([], True, False, {"ok": False, "reason": "busy"}, {"Refresh", "Go to Image"}, a_labels),
+                         (blocked["drawn"], blocked["suspended"], blocked["go_to_image"], blocked["navigate"],
+                          set(blocked["panel"]["buttons"]), [row[2] for row in blocked["panel"]["rows"]]), "control: blocked")
+        self.refresh_final()
+        self.assertEqual(blocked, self.list_view(length), "control: Refresh changes nothing")
 
 
 if __name__ == "__main__":

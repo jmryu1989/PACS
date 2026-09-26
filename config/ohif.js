@@ -634,6 +634,12 @@ function kinCreateViewerHistory() {
     // Astra S5-U2b-R-002 F01: authoring (native tools, mark edits, SR, this panel's own save paths) is open only while a successful
     // /me answered writer. No answer yet, an error or a 401/403 leaves image viewing only, the same as a clinician-only document.
     const writer = () => kinViewerSession.writer();
+    // Astra S5-U2b-X-R-001 F01. 보관한 writer 작업(recovery)은 writer가 재개하거나 버릴 때까지 그 검사의 목록 표식·영상 이동을
+    // 멈춘다 — 보관 초안과 서버 목록을 한 화면에서 섞지 않으려는 것이다. clinician-only 문서의 확정 목록은 그 초안과 이어지지 않는
+    // 다른 목록이고 read-only는 되돌리지 않아 이 문서에서 재개할 길도 없다: 멈추면 검증한 확정 표식과 Go to Image가 풀리지 않는다.
+    // 그래서 보관 작업은 그대로 격리해 두고(표시·복원·삭제하지 않으며 창 닫기 경고 jobGuard도 그대로) 읽기 쪽만 막지 않는다.
+    // 쓰기 쪽 검사(writable·SR·도구·captureAnnotations)는 recovery.has(scope)를 그대로 읽는다.
+    const held = () => recovery.has(scope) && !readOnly();
     const READ_ONLY = {
       note: '읽기 전용 · 확정 판독문에 저장된 측정·키 이미지만 표시합니다. 이 화면에서는 측정·키 이미지를 만들거나 저장하지 않으며 서버도 쓰기를 거절합니다.',
       withheld: '확정 판독문이 아니어서 저장된 측정·키 이미지를 표시하지 않습니다 · 읽기 전용',
@@ -714,7 +720,7 @@ function kinCreateViewerHistory() {
     const numericMeasurement = m => manual(kinds[m?.toolName]);
     const unverifiedReport = () => ({ columns: ['Verification'], values: ['재확인 필요'] });
     function checkedMeasurement(m) {
-      if (!m || ended || suspended || recovery.has(scope)) return null;
+      if (!m || ended || suspended || held()) return null;
       const a = ct.annotation.state.getAnnotation(m.uid);
       if (!a || a.data.kinUnverified || !sample(a)) return null;
       const mapping = measurementService.getSourceMappings(m.source?.name, m.source?.version)
@@ -1651,7 +1657,7 @@ function kinCreateViewerHistory() {
       return { highlighted: true, annotation: 'shown', ...live };
     }
     const navigationEnv = { services, viewport, reference, matches, hydrate, highlight,
-      ended: () => ended, scope: () => scope, busy: () => suspended || recovery.has(scope),
+      ended: () => ended, scope: () => scope, busy: () => suspended || held(),
       generation: () => generation, valid, navigation: () => navigation, beginNavigation: () => ++navigation,
       delay: () => new Promise(resolve => setTimeout(resolve, 100)) };
     const navigateTo = target => kinViewerNavigateTo(navigationEnv, target);
@@ -1664,7 +1670,7 @@ function kinCreateViewerHistory() {
       } catch (_) { return { viewportId: null, image: null }; }
     };
     async function navigate(e) {
-      if (!valid(generation) || suspended || recovery.has(scope) || entries.get(e.id) !== e) return;
+      if (!valid(generation) || suspended || held() || entries.get(e.id) !== e) return;
       const outcome = await navigateTo({ studyUid: scope, seriesUid: e.draft.seriesUid, sopUid: e.draft.sopUid, frame: e.draft.frame });
       if (outcome.ok || !valid(generation) || entries.get(e.id) !== e) return;
       const message = { 'series-missing': '현재 검사에서 원본 시리즈를 찾을 수 없습니다.', 'frame-missing': '원본 프레임을 열지 못했습니다.',
@@ -1673,7 +1679,7 @@ function kinCreateViewerHistory() {
     }
     // Read-only view of the saved heads for the Findings section: only saved rows are linkable and
     // the Orthanc verdict travels with them, separate from any database link state.
-    const historyState = () => ({ scope, subject, ended, suspended: suspended || recovery.has(scope), writable: writable({}),
+    const historyState = () => ({ scope, subject, ended, suspended: suspended || held(), writable: writable({}),
       generation, loading, ...shownImage(),
       heads: [...entries.values()].filter(e => e.head).map(e => ({ id: e.head.id, revision: e.head.revision, hidden: !!e.head.hidden,
         kind: e.draft.kind, label: e.draft.label ?? e.draft.title ?? '', seriesUid: e.head.item.seriesUid, sopUid: e.head.item.sopUid,
@@ -1681,7 +1687,7 @@ function kinCreateViewerHistory() {
         values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy) })) });
     function hydrate() {
       const v = viewport(), imageId = v?.getCurrentImageId?.(), r = reference(imageId);
-      if (!r || r.study !== scope || !subject || ended || suspended || recovery.has(scope)) return;
+      if (!r || r.study !== scope || !subject || ended || suspended || held()) return;
       configureMeasurements(ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
       const plane = cs.metaData.get('imagePlaneModule', imageId);
       for (const e of entries.values()) {
@@ -1715,7 +1721,7 @@ function kinCreateViewerHistory() {
       // Switching display sets briefly removes the viewport. Mode exit, not
       // that loading gap, owns teardown of drafts and in-flight commands.
       if (!r) return;
-      if (!subject || !scope || suspended || recovery.has(scope)) return;
+      if (!subject || !scope || suspended || held()) return;
       const v = viewport();
       configureMeasurements(v && ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
       for (const a of ct.annotation.state.getAllAnnotations()) {
