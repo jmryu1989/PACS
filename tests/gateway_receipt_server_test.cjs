@@ -262,3 +262,73 @@ test('S4-F01V list: an absent own study carries only its own receipt, read befor
   assert.ok(first.pagination.next);assert.equal('notObserved' in first,false);
   assert.deepEqual(log,[['policy'],receiptRead([first.studies[0].uid]),['policy']]);
 });
+
+// TEST-S5-U6a-SERVER: the admin Gateway Status page (admin.html) reads these same GET /studies rows and Not Observed
+// items; there is no admin route. An admin has no institution exception (RISK-S5-U6a-TENANT): each institution's admin
+// sees only receipts its own credentials wrote on its own studies, every phase projected exactly as stored (failed keeps
+// its F-01 error code for the page to name), a tele-received row and a stray receipt stay null, and nothing is written.
+test('S5-U6a admin view: each institution admin sees only its own receipts, every phase as stored, absent ones too; nothing written',async()=>{
+  const at=new Date('2020-01-01T00:00:00.000Z'),CREATED=at.toISOString();
+  const PHASES=['pending','announcing','sending','retry','failed','complete'],CODE={retry:'stow_http',failed:'instance_exceeds_budget'};
+  // hallym owns 2.25.41-46 (one receipt per phase), 2.25.47 (none), 2.25.48 (a stray receipt kin-center credentials wrote)
+  // and 2.25.51/52 (no QIDO row; 51 has its own failed receipt). kin-center owns 2.25.61 and 2.25.62 (tele-read by hallym).
+  const STATES=[...PHASES.map((_,i)=>['2.25.4'+(i+1),'hallym',null]),['2.25.47','hallym',null],['2.25.48','hallym',null],
+    ['2.25.51','hallym',null],['2.25.52','hallym',null],['2.25.61','kin-center',null],['2.25.62','kin-center','hallym']]
+    .map(([uid,institutionId,teleInstitutionId])=>({uid,institutionId,teleInstitutionId,origin:'gateway',createdAt:at,rs:'W',matched:'U',orderOid:null}));
+  const minute=seq=>'2026-09-26T02:0'+seq+':00.000Z';
+  const receipt=(uid,institutionId,epoch,seq,phase,successCount,localCount)=>big({studyUid:uid,institutionId,epoch,seq,phase,attempt:2,
+    successCount,localCount,errorCode:CODE[phase]??null,receivedAt:new Date(minute(seq))});
+  const RECEIPTS=[...PHASES.map((phase,i)=>receipt('2.25.4'+(i+1),'hallym',V.valid.epoch,i+1,phase,phase==='complete'?12:3,12)),
+    receipt('2.25.48','kin-center',OTHER_EPOCH,7,'failed',0,1),receipt('2.25.51','hallym',V.valid.epoch,8,'failed',0,1),
+    receipt('2.25.61','kin-center',OTHER_EPOCH,9,'retry',2,4),receipt('2.25.62','kin-center',OTHER_EPOCH,3,'sending',1,4)];
+  const QIDO=STATES.filter(s=>!['2.25.51','2.25.52'].includes(s.uid)).map(s=>({'0020000D':{Value:[s.uid]},'00080080':{Value:[s.institutionId]},
+    '00201208':{Value:['3']},'00201206':{Value:['1']},'00100020':{Value:['SYN-'+s.uid]},'00100010':{Value:['SYNTHETIC^PATIENT']}}));
+  const reads=[];
+  const pick=(rows,select)=>select?rows.map(r=>Object.fromEntries(Object.keys(select).map(k=>[k,r[k]]))):rows;
+  const prisma={
+    studyState:{findMany:async arg=>{let rows=structuredClone(STATES);const where=arg?.where;
+        if(where?.uid)rows=rows.filter(s=>where.uid.in.includes(s.uid));
+        else if(where?.institutionId)rows=rows.filter(s=>s.institutionId===where.institutionId);
+        else if(where)throw new Error('unexpected where '+JSON.stringify(where));
+        return pick(rows,arg?.select);},
+      create:async()=>{throw new Error('no study should be created');},update:async()=>{throw new Error('no study should be changed');}},
+    gatewayReceipt:{findMany:async arg=>{reads.push([arg.where.studyUid.in.slice().sort(),arg.where.institutionId,Object.keys(arg.where).sort()]);
+        return structuredClone(RECEIPTS).filter(r=>arg.where.studyUid.in.includes(r.studyUid)&&r.institutionId===arg.where.institutionId);},
+      create:async()=>{throw new Error('the list never writes a receipt');},update:async()=>{throw new Error('the list never writes a receipt');}},
+    order:{findMany:async()=>[]},report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},
+    auditLog:{create:async()=>{throw new Error('no audit expected');}},$queryRaw:async()=>[],
+  };
+  const orthanc={studies:async()=>structuredClone(QIDO),
+    studyIdentities:async()=>structuredClone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080']})),
+    studiesByUid:async uids=>structuredClone(QIDO).filter(r=>uids.includes(r['0020000D'].Value[0]))};
+  const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
+  svc.institutions=[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}];
+  const admin=institution=>({institution,sub:'synthetic-admin-'+institution,actor:'synthetic-admin-'+institution,roles:['admin'],kind:'member'});
+  const projection=(phase,successCount,localCount,seq,epoch)=>({phase,successCount,localCount,attempt:2,errorCode:CODE[phase]??null,
+    serverReceivedAt:minute(seq),agentSeq:seq,epoch});
+  const keys=['institutionId','studyUid'];
+
+  const own=await svc.listStudies(admin('hallym'));
+  const rows=Object.fromEntries(own.studies.map(s=>[s.uid,s]));
+  assert.deepEqual(Object.keys(rows).sort(),['2.25.41','2.25.42','2.25.43','2.25.44','2.25.45','2.25.46','2.25.47','2.25.48','2.25.62']);
+  PHASES.forEach((phase,i)=>assert.deepEqual(rows['2.25.4'+(i+1)].gatewayReceipt,
+    projection(phase,phase==='complete'?12:3,12,i+1,V.valid.epoch),phase));
+  for(const uid of ['2.25.47','2.25.48','2.25.62'])assert.equal(rows[uid].gatewayReceipt,null,uid);
+  assert.equal(rows['2.25.62'].tele,true);
+  assert.deepEqual(own.notObserved,[{uid:'2.25.51',origin:'gateway',createdAt:CREATED,gatewayReceipt:projection('failed',0,1,8,V.valid.epoch)},
+    {uid:'2.25.52',origin:'gateway',createdAt:CREATED}]);
+  assert.equal(JSON.stringify(own).includes(OTHER_EPOCH),false,'no receipt another institution wrote reaches the hallym admin');
+  assert.deepEqual(reads,[[['2.25.41','2.25.42','2.25.43','2.25.44','2.25.45','2.25.46','2.25.47','2.25.48','2.25.62'],'hallym',keys],
+    [['2.25.51','2.25.52'],'hallym',keys]]);
+
+  reads.length=0;
+  const other=await svc.listStudies(admin('kin-center'));
+  const otherRows=Object.fromEntries(other.studies.map(s=>[s.uid,s]));
+  assert.deepEqual(Object.keys(otherRows).sort(),['2.25.61','2.25.62']);
+  assert.deepEqual(otherRows['2.25.61'].gatewayReceipt,projection('retry',2,4,9,OTHER_EPOCH));
+  assert.deepEqual(otherRows['2.25.62'].gatewayReceipt,projection('sending',1,4,3,OTHER_EPOCH),'the owner sees its own receipt on a study it sent out');
+  assert.deepEqual(other.notObserved,[]);
+  // The receipt its credentials wrote on hallym's 2.25.48 is not its study either: nothing of it is listed.
+  for(const needle of [V.valid.epoch,'2.25.48','2.25.51'])assert.equal(JSON.stringify(other).includes(needle),false,needle);
+  assert.deepEqual(reads,[[['2.25.61','2.25.62'],'kin-center',keys]]);
+});
