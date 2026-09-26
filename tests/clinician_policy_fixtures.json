@@ -190,6 +190,10 @@
     "non_route": ["Body", "Controller", "Header", "HttpCode", "Param", "Public", "Query", "Req", "Res"],
     "rule": "S5-U1c D6: every @Name( in a controller is either an HTTP route decorator the inventory reads or one of these; any other name (a WebDAV route decorator of a later Nest, @RequestMapping, @Version, a custom route wrapper) fails the pure test until it is classified here or read by the inventory"
   },
+  "outside_decorators": {
+    "classified": ["Injectable", "Module"],
+    "rule": "S5-U1c-F03: every api/src .ts file that is not *.controller.ts is read by the controllers' lexer and decorator runs inside the inventory, so test_05 fails on it. A route decorator, @Controller(), @RequestMapping() or @Public() there is refused (both inventories open *.controller.ts only), as is a shape the runs cannot read, such call text in a comment or literal, and any decorator name not listed here (an alias or a wrapper could declare a route) until it is classified here."
+  },
   "request_method_pin": {
     "package": "@nestjs/common",
     "lock_version": "10.4.22",

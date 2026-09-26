@@ -6,7 +6,7 @@ REQ-S5-U1a-ROLE-DEFAULT-DENY -> RISK-S5-CLINICIAN-WRITER-LEAK/UNCLASSIFIED-ROUTE
 REQ-S5-U1b-CLINICIAN-READ -> RISK-S5-U1b-DRAFT-LEAK/NONFINAL-BODY/WRITER-FIELD/COUNT-LEAK/TENANT-UID
 -> this file (allowlist == fixture, declared additions only, source pins), TEST-S5-U1b-PURE
 (clinician_read_serializer_test.cjs) and TEST-S5-U1b-LIVE (clinician_read_live.py).
-REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-16
+REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-18
 here) and TEST-S5-U1c-LIVE-MATRIX (clinician_policy_live.py test_01/test_04/test_05): every controller route has exactly one
 route_matrix row, nothing is denied by subtraction, and review notes D3/D5/D6/D8 of S5-U1a are closed by pins.
 
@@ -17,7 +17,9 @@ No Node, no Nest, no browser, no stack. Three kinds of evidence and nothing more
      live module; a green run here is a spec check, not runtime proof of the TS.
   2. The current controller decorator inventory (own parser: decorator runs, so a @Public() belongs to the handler it
      decorates, same decorator table as invariants_live; every '@' outside comments and literals must be a decorator
-     call it reads, spaced or not, or it refuses the file) compared with the invariants_live ROUTES table read as text,
+     call it reads, spaced or not, or it refuses the file; a '//' comment ends at any of the four line terminators, and
+     every other api/src .ts file goes through the same reader and may carry no route, @Controller() or @Public())
+     compared with the invariants_live ROUTES table read as text,
      with the 104-row planning baseline and with the route matrix: every current route is public, a listed session or
      business row, or a denied row with a named basis, and every route added since the baseline has its own row.
   3. Source pins that guard, member console, Keycloak client and realm carry the same role list and that
@@ -118,15 +120,31 @@ HTTP_DECORATORS = {"All": "ALL", "Get": "GET", "Post": "POST", "Put": "PUT", "De
                    "Patch": "PATCH", "Options": "OPTIONS", "Head": "HEAD", "Search": "SEARCH", "Sse": "GET"}
 ROUTE_NAMES = "|".join(map(re.escape, HTTP_DECORATORS))
 KNOWN_DECORATORS = set(HTTP_DECORATORS) | set(FIXTURES["controller_decorators"]["non_route"])
+OUTSIDE_DECORATORS = set(FIXTURES["outside_decorators"]["classified"])
+# the names that declare a route or open one; outside *.controller.ts neither inventory would see them (S5-U1c-F03)
+DECIDING = frozenset({"Public", "Controller", "RequestMapping", *HTTP_DECORATORS})
+# tsconfig compiles src/**/*, which takes .tsx, .mts and .cts too; a script no inventory opens could hold a controller
+UNREAD_SCRIPTS = frozenset({".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"})
 # TypeScript accepts whitespace, a line break or a comment between '@', the name and '('. A reader that wanted '@Name('
 # never saw '@Public ()' and kept that handler private (S5-U1c-F01); comments are blanked by code_mask before this runs.
 DECORATOR_CALL = re.compile(r"@\s*([A-Za-z_$][\w$]*)\s*\(")
 # argument readers run on the raw text: a comment or an expression inside the call is refused, not read around
 ROUTE_TEXT = re.compile(rf"@\s*({ROUTE_NAMES})\s*\(\s*(?:(['\"])([^'\"\\\n]*)\2)?\s*\)")
 CONTROLLER_TEXT = re.compile(r"@\s*Controller\s*\(\s*(?:(['\"])([^'\"\\\n]*)\1)?\s*\)")
-# on the raw text, comments and literals included: every hit must be a decorator the inventory read, so a lexer that
-# blanked real code still cannot hide a route, a @Public() or a @Controller()
-DECIDING_TEXT = re.compile(rf"@\s*(?:Public|Controller|RequestMapping|{ROUTE_NAMES})\s*\(")
+# ECMAScript LineTerminator, the four TypeScript's scanner also breaks lines at (isLineBreak): a '//' comment ends at the
+# first of them. Ending it at LF only read '// note<U+2028>@Public /* c */ ()' as one comment and kept that handler
+# private (S5-U1c-F02).
+LINE_TERMINATORS = "\n\r\u2028\u2029"
+LINE_END = re.compile("[\n\r\u2028\u2029]")
+# TypeScript's single-line whitespace (isWhiteSpaceSingleLine) and the line terminators. str.isspace() is another set: it
+# takes U+001C-U+001F, which TypeScript rejects, and misses U+200B and U+FEFF, which TypeScript skips.
+WHITESPACE = frozenset(map(chr, (0x09, 0x0B, 0x0C, 0x20, 0x85, 0xA0, 0x1680, *range(0x2000, 0x200C), 0x202F, 0x205F,
+                                 0x3000, 0xFEFF))) | frozenset(LINE_TERMINATORS)
+# one part of a dotted name as written; an identifier may spell any of its characters as a \u escape
+NAME_PART = re.compile(r"(?:[\w$]|\\u[0-9A-Fa-f]{4}|\\u\{[0-9A-Fa-f]+\})+")
+NAME_ESCAPE = re.compile(r"\\u(?:([0-9A-Fa-f]{4})|\{([0-9A-Fa-f]+)\})")
+# what can follow a decorator's name: its call, type arguments, the ')' of '@(Name)()', '!', '?.', '[' or a template
+AFTER_NAME = frozenset("(<)!?[`")
 # a '/' after one of these characters or words opens a regex literal, after anything else it divides
 REGEX_AFTER = frozenset("(,=:[!&|?{};+-*%<>~^")
 REGEX_WORDS = frozenset({"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do",
@@ -135,15 +153,24 @@ IDENTIFIER = re.compile(r"[\w$]+")
 
 
 def literal_end(source, start):
-    """Offset past the string or regex literal that opens at source[start]; neither may run over a line break."""
+    """Offset past the string or regex literal that opens at source[start]; neither may run over a line terminator.
+
+    A regex holds none of the four, escaped or not. A string goes on over an escaped one only; a bare U+2028/U+2029 is
+    string content since ES2019, but it is refused here, so the reader never depends on which rule a compiler applies.
+    """
     closer, index, in_class = source[start], start + 1, False
     while index < len(source):
         char = source[index]
-        if char == "\\":
+        if char == "\\" and closer != "/":
             index += 3 if source.startswith("\r\n", index + 1) else 2
             continue
-        if char in "\r\n":
+        if char in LINE_TERMINATORS:
             break
+        if char == "\\":
+            if index + 1 < len(source) and source[index + 1] in LINE_TERMINATORS:
+                break
+            index += 2
+            continue
         if closer == "/" and in_class:
             in_class = char != "]"
         elif closer == "/" and char == "[":
@@ -173,7 +200,7 @@ def template_part(source, index):
 
 @functools.lru_cache(maxsize=None)
 def code_mask(source):
-    """source with comments and string, template and regex literals blanked; offsets and line breaks are kept.
+    """source with comments and string, template and regex literals blanked; offsets and line terminators are kept.
 
     What is left is code, so every '@' in it is a decorator candidate (S5-U1c-F01). A literal, comment or bracket that
     does not close raises: a reader that lost its place would otherwise hide the code after it.
@@ -181,15 +208,15 @@ def code_mask(source):
     out, stack, last, word, index = list(source), [], "", "", 0
 
     def blank(start, end):
-        out[start:end] = [char if char in "\r\n" else " " for char in source[start:end]]
+        out[start:end] = [char if char in LINE_TERMINATORS else " " for char in source[start:end]]
 
     while index < len(source):
         char, start = source[index], index
-        if char.isspace():
+        if char in WHITESPACE:
             index += 1
         elif source.startswith("//", index):
-            index = source.find("\n", index)
-            index = len(source) if index < 0 else index
+            end = LINE_END.search(source, index)
+            index = len(source) if end is None else end.start()
             blank(start, index)
         elif source.startswith("/*", index):
             index = source.find("*/", index + 2)
@@ -280,6 +307,78 @@ def decorator_runs(source):
     return runs
 
 
+def skip_gap(source, index):
+    """Offset past the whitespace and comments at source[index]; a block comment that does not close runs to the end."""
+    while index < len(source):
+        if source[index] in WHITESPACE or source[index].isspace():
+            index += 1
+        elif source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            index = len(source) if end < 0 else end + 2
+        elif source.startswith("//", index):
+            end = LINE_END.search(source, index)
+            index = len(source) if end is None else end.start()
+        else:
+            break
+    return index
+
+
+def name_text(part):
+    """A name part as the compiler reads it: its \\u escapes decoded."""
+    def decode(match):
+        code = int(match.group(1) or match.group(2), 16)
+        return chr(code) if code <= 0x10FFFF else match.group(0)
+    return NAME_ESCAPE.sub(decode, part)
+
+
+def decorator_text(source):
+    """[(offset, text)] for every '@' of the raw text, comments and literals included, that starts a decorator naming a
+    route decorator, @Controller(), @RequestMapping() or @Public() in any spelling TypeScript takes: whitespace, line
+    terminators and comments around every part, '(' before the name, a dotted name, \\u escapes in it.
+
+    It does not trust code_mask: every hit must be a decorator the inventory read, so neither text the lexer wrongly
+    blanked nor a commented-out decorator can hide one. A name that no call, type argument or ')' follows is prose
+    ('@Public 제외' in a doc comment), not a decorator (S5-U1c-F02).
+    """
+    hits = []
+    for at in (match.start() for match in re.finditer("@", source)):
+        index = skip_gap(source, at + 1)
+        while source.startswith("(", index):
+            index = skip_gap(source, index + 1)
+        names = []
+        while part := NAME_PART.match(source, index):
+            names.append(name_text(part.group(0)))
+            index = skip_gap(source, part.end())
+            if not source.startswith(".", index):
+                break
+            index = skip_gap(source, index + 1)
+        if DECIDING.intersection(names) and index < len(source) and source[index] in AFTER_NAME:
+            hits.append((at, source[at:index + 1]))
+    return hits
+
+
+def outside_decorators(path, source):
+    """Decorator names of an api/src file that is not *.controller.ts, read by the lexer and runs a controller gets.
+
+    Both inventories open *.controller.ts only, so a route decorator, @Controller(), @RequestMapping() or @Public()
+    anywhere else declares what neither sees (S5-U1c-F03). It is refused, and so are a shape the runs cannot read, a
+    name outside_decorators does not classify (an alias or a wrapper can make a route) and such call text in a comment
+    or literal.
+    """
+    names = [name for run in decorator_runs(source) for name, _start, _end in run["items"]]
+    misplaced = sorted(DECIDING.intersection(names))
+    if misplaced:
+        raise AssertionError(f"{path.name}: {misplaced} outside *.controller.ts, a file neither inventory reads")
+    unknown = sorted(set(names) - OUTSIDE_DECORATORS)
+    if unknown:
+        raise AssertionError(f"{path.name}: decorators outside the controllers that outside_decorators does not "
+                             f"classify: {unknown}")
+    text = decorator_text(source)
+    if text:
+        raise AssertionError(f"{path.name}: route, @Controller() or @Public() call text outside *.controller.ts {text}")
+    return names
+
+
 def controller_handlers(path, source):
     """[(method, child path, public, offset)] per handler; raises on a decorator shape the inventory could misread."""
     handlers = []
@@ -320,17 +419,29 @@ def previous_public_attribution(source):
     return out
 
 
-def controller_sources():
-    return {path: path.read_text(encoding="utf-8") for path in sorted(API.rglob("*.controller.ts"))}
+def api_sources(root=API):
+    """{path: text} of every .ts file under api/src; raises when api/src holds a script of a kind no inventory opens."""
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    unread = [path.relative_to(root).as_posix() for path in files if path.suffix in UNREAD_SCRIPTS]
+    if unread:
+        raise AssertionError(f"scripts under api/src that neither inventory opens: {unread}")
+    return {path: path.read_text(encoding="utf-8") for path in files if path.suffix == ".ts"}
 
 
 def controller_inventory(sources=None):
     """(method, route) -> {'file', 'public'}; raises when a decorator shape cannot be read.
 
-    sources ({path: text}, default the files on disk) lets a test judge an edited controller without writing it.
+    sources ({path: text}, default every .ts file under api/src) lets a test judge an edited or added file without
+    writing it. A file that is not *.controller.ts must pass outside_decorators, so a route declared there stops the
+    inventory, and with it test_05, instead of being left out (S5-U1c-F03).
     """
     found = {}
-    for path, source in sorted((controller_sources() if sources is None else sources).items()):
+    for path, source in sorted((api_sources() if sources is None else sources).items()):
+        if path.suffix != ".ts":
+            raise AssertionError(f"{path.name}: a script neither inventory opens")
+        if not path.name.endswith(".controller.ts"):
+            outside_decorators(path, source)
+            continue
         runs = decorator_runs(source)
         controllers = [(run["kind"], start, end) for run in runs for name, start, end in run["items"] if name == "Controller"]
         if [kind for kind, _start, _end in controllers] != ["class"]:
@@ -342,7 +453,7 @@ def controller_inventory(sources=None):
         handlers = controller_handlers(path, source)
         # every route item became a handler or controller_handlers raised, so the read items are the whole decision
         read = {start for run in runs for _name, start, _end in run["items"]}
-        stray = [match.group(0) for match in DECIDING_TEXT.finditer(source) if match.start() not in read]
+        stray = [text for offset, text in decorator_text(source) if offset not in read]
         if stray:
             raise AssertionError(f"{path.name}: decorator call text the inventory did not read (comments and literals "
                                  f"count too) {stray}")
@@ -743,12 +854,13 @@ class ClinicianPolicySpec(unittest.TestCase):
             for run in decorator_runs(path.read_text(encoding="utf-8")):
                 seen |= {name for name, _start, _end in run["items"]}
         self.assertEqual(sorted(seen - known), [], "a controller decorator the inventory neither reads nor classifies")
-        for path in sorted(API.rglob("*.ts")):
-            if path.name.endswith(".controller.ts"):
-                continue
-            with self.subTest(outside=path.name):
-                self.assertIsNone(re.search(rf"@\s*(Controller|RequestMapping|{ROUTE_NAMES})\s*\(", path.read_text(encoding="utf-8")),
-                                  "a controller or route outside *.controller.ts is invisible to both inventories")
+        # a controller or route outside *.controller.ts is invisible to both inventories: every other file goes through the
+        # same lexer and runs (S5-U1c-F03), and together they use exactly the classified names
+        sources = api_sources()
+        outside = {path.name: outside_decorators(path, source) for path, source in sources.items()
+                   if not path.name.endswith(".controller.ts")}
+        self.assertEqual(len(outside) + len(list(API.rglob("*.controller.ts"))), len(sources))
+        self.assertEqual({name for names in outside.values() for name in names}, OUTSIDE_DECORATORS)
         # the model knows every method the inventory can produce; a number it does not know fails closed, and the
         # allowlist names only GET and POST, so a member the model lacks can never match a row in model or product
         pin = FIXTURES["request_method_pin"]
@@ -943,7 +1055,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                 read(source)
         # the real controllers: a denied handler that gains a spaced @Public() changes the public set test_05 pins,
         # spaced route and controller decorators read the same 110 rows, and the unsupported shapes stop the inventory
-        sources = controller_sources()
+        sources = api_sources()
         pacs = API / "pacs.controller.ts"
         route, key = "  @Get('studies')\n", "GET studies"
         self.assertIn(key, DENIED_ROUTES)
@@ -981,6 +1093,147 @@ class ClinicianPolicySpec(unittest.TestCase):
         print("CLINICIAN_POLICY_DECORATOR_SHAPES " + json.dumps({
             "public_attributed": sorted(attributed), "spaced_routes_read": sorted(spaced_routes),
             "refused": sorted(refused), "real_denied_route": key, "real_routes": len(baseline),
+        }, ensure_ascii=True, sort_keys=True))
+
+    def test_17_line_comments_end_at_every_line_terminator(self):
+        """S5-U1c-F02: ECMAScript and TypeScript's scanner end a '//' comment at LF, CR, U+2028 or U+2029.
+
+        code_mask ended it at LF only, so '// note<U+2028>  @Public /* c */ ()' above a denied handler was one comment:
+        the handler stayed private and test_05, test_11 and test_12 passed. The raw-text check wanted '@Public (' with
+        nothing but spaces and missed the same text. Each reader is checked here on its own.
+        """
+        terminators = {"LF": "\n", "CR": "\r", "U+2028": "\u2028", "U+2029": "\u2029"}
+        for label, end in terminators.items():
+            with self.subTest(lexer=label):
+                source = f"// note{end}@Public() /* a{end}b */ `c{end}d`\n"
+                code = code_mask(source)
+                self.assertEqual(re.sub(r"\s", "", code), "@Public()", "what follows the terminator is code")
+                self.assertEqual([i for i, c in enumerate(code) if c in LINE_TERMINATORS],
+                                 [i for i, c in enumerate(source) if c in LINE_TERMINATORS], "terminators keep their offsets")
+                self.assertEqual([name for run in decorator_runs(source) for name, _start, _end in run["items"]], ["Public"])
+            # a regex holds no line terminator, escaped or not; a string goes on over an escaped one only
+            for kind, source in (("regex", f"const r = /a{end}b/;\n"), ("escaped in a regex", f"const r = /a\\{end}b/;\n"),
+                                 ("string", f"const s = 'a{end}b';\n")):
+                with self.subTest(refused=kind, terminator=label), self.assertRaisesRegex(AssertionError, "unterminated literal"):
+                    code_mask(source)
+            with self.subTest(continued=label):
+                self.assertEqual(re.sub(r"\s", "", code_mask(f"const s = 'a\\{end}b';\n")), "consts=;")
+        # TypeScript skips U+200B and U+FEFF as whitespace, so the '/' after '[' still opens a regex literal
+        for label, space in (("U+200B", "\u200b"), ("U+FEFF", "\ufeff")):
+            with self.subTest(whitespace=label):
+                self.assertEqual(code_mask(f"const r = [{space}/'/];\n"), f"const r = [{space}   ];\n")
+        # the real controllers: the denied GET studies gains '@Public /* c */ ()' after a line comment that ends at CR,
+        # U+2028 or U+2029; the public set test_05 compares with PUBLIC changes, and the raw-text check sees it alone
+        sources = api_sources()
+        pacs = API / "pacs.controller.ts"
+        route, key = "  @Get('studies')\n", "GET studies"
+        self.assertIn(key, DENIED_ROUTES)
+        self.assertEqual(sources[pacs].count(route), 1)
+        baseline = controller_inventory(sources)
+
+        def insert(text):
+            return {**sources, pacs: sources[pacs].replace(route, text + route)}
+
+        for label in ("CR", "U+2028", "U+2029"):
+            text = insert(f"  // ordinary comment{terminators[label]}  @Public /* annotation */ ()\n")[pacs]
+            at, comment = text.index("@Public /* annotation */"), text.index("// ordinary comment")
+            with self.subTest(denied_gains_public=label):
+                self.assertGreater(text.index("\n", comment), at, "control: a comment ended at LF only swallows it")
+                found = controller_inventory({**sources, pacs: text})
+                self.assertEqual(set(found), set(baseline))
+                self.assertEqual({m + " " + p for (m, p), meta in found.items() if meta["public"]}, PUBLIC | {key})
+                self.assertIn(at, [offset for offset, _text in decorator_text(text)])
+        # the raw-text check without the lexer: deciding call text the lexer blanks stops the inventory in every spelling;
+        # a name that no call follows is prose and does not
+        escaped = "@Pub" + "\\u" + "006cic()"
+        blanked = {
+            "comment between name and call": "  // @Public /* note */ ()\n",
+            "call over lines in a block comment": "  /* @\n    Public\n    () */\n",
+            "U+2029 inside a block comment": "  /* @Public\u2029() */\n",
+            "qualified": "  // @auth.Public()\n",
+            "parenthesised": "  // @(Public())\n",
+            "escaped name": f"  // {escaped}\n",
+            "in a string": "  note = '@Controller /* c */ (\"x\")';\n",
+        }
+        for label, text in blanked.items():
+            with self.subTest(raw_text=label), \
+                    self.assertRaisesRegex(AssertionError, r"decorator call text the inventory did not read"):
+                controller_inventory(insert(text))
+        self.assertEqual(controller_inventory(insert("  // @Public alone is no call\n")), baseline)
+        print("CLINICIAN_POLICY_LINE_TERMINATORS " + json.dumps({
+            "comment_ends_at": sorted(terminators), "real_denied_route": key, "raw_text_refused": sorted(blanked),
+            "real_routes": len(baseline),
+        }, ensure_ascii=True, sort_keys=True))
+
+    def test_18_files_outside_the_controllers_get_the_same_decorator_reader(self):
+        """S5-U1c-F03: both inventories open *.controller.ts only, and the other files were checked by a regex that wanted
+        '@Name (' with nothing but spaces, so unlisted-routes.ts holding '@Controller /* c */ (...)' added routes that the
+        matrix, ROUTES and the live sweep all missed while test_05 and test_12 passed. controller_inventory now reads every
+        other api/src file with the same lexer and runs, so test_05 fails on such a file.
+        """
+        sources = api_sources()
+        baseline = controller_inventory(sources)
+        added = API / "unlisted-routes.ts"
+        self.assertNotIn(added, sources)
+
+        def inventory(text, path=added):
+            return controller_inventory({**sources, path: text})
+
+        def helper(member):
+            return "@Injectable()\nexport class Helper {\n" + member + "  run() { return 1; }\n}\n"
+
+        reviewed = ("@Controller /* boundary comment */ ('unlisted') export class UnlistedController { @Public () "
+                    "@Get /* boundary comment */ ('read') read() { return {}; } }\n")
+        # control: the regex test_12 used at 564e895 finds nothing in the reviewed file
+        self.assertIsNone(re.search(rf"@\s*(Controller|RequestMapping|{ROUTE_NAMES})\s*\(", reviewed))
+        misplaced = r"outside \*\.controller\.ts, a file neither inventory reads"
+        unsupported = "decorator shapes the inventory does not read"
+        unclassified = "outside_decorators does not classify"
+        text = r"call text outside \*\.controller\.ts"
+        escaped = "@G" + "\\u" + "0065t('read')"
+        refused = {
+            "reviewed source": (reviewed, misplaced),
+            "comment between @ and name": ("@ /* c */ Controller('x')\nexport class X {}\n", misplaced),
+            "line break between name and call": (helper("  @Get\n  ('read')\n"), misplaced),
+            "space after @": (helper("  @ Post('x')\n"), misplaced),
+            "after a comment ended by U+2028": (helper("  // note\u2028  @Put /* c */ ('x')\n"), misplaced),
+            "@Public() alone": (helper("  @Public()\n"), misplaced),
+            "RequestMapping": (helper("  @RequestMapping ('x')\n"), misplaced),
+            "qualified": ("@common.Controller('x')\nexport class X {}\n", unsupported),
+            "parenthesised": (helper("  @(Get('read'))\n"), unsupported),
+            "escaped name": (helper(f"  {escaped}\n"), unsupported),
+            "alias": (helper("  @Route('read')\n"), unclassified + r": \['Route'\]"),
+            "SetMetadata": (helper("  @SetMetadata('public', true)\n"), unclassified + r": \['SetMetadata'\]"),
+            "call text in a comment": (helper("  // @Get /* moved */ ('read')\n"), text),
+            "call text in a string": (helper("  note = '@Controller (\"x\")';\n"), text),
+            "unterminated literal": (helper("  other() { return 'x; }\n"), "unterminated literal"),
+        }
+        for label, (source, message) in refused.items():
+            with self.subTest(refused=label), self.assertRaisesRegex(AssertionError, message):
+                inventory(source)
+        with self.subTest(refused="a .tsx script"), self.assertRaisesRegex(AssertionError, "a script neither inventory opens"):
+            inventory(reviewed, API / "unlisted-routes.tsx")
+        # controls: a plain service reads, and a mention that no call follows is prose
+        self.assertEqual(inventory(helper("")), baseline)
+        self.assertEqual(inventory(helper("  // see the @Public decorator in auth.guard.ts\n")), baseline)
+        # a controller the matrix lacks, in a file the inventories do open, is a row test_05 finds missing
+        opened = inventory("@Controller('unlisted')\nexport class UnlistedController {\n  @Public()\n  @Get('read')\n"
+                           "  read() { return {}; }\n}\n", API / "unlisted.controller.ts")
+        self.assertEqual(sorted(set(opened) - set(baseline)), [("GET", "unlisted/read")])
+        self.assertTrue(opened[("GET", "unlisted/read")]["public"])
+        self.assertNotIn("GET unlisted/read", PUBLIC | SESSION | BUSINESS | DENIED_ROUTES)
+        # the compiler reads exactly the directory the inventories read, and no script kind they skip
+        config = json.loads((ROOT / "api" / "tsconfig.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["include"], ["src/**/*"])
+        self.assertNotIn("allowJs", config["compilerOptions"])
+        with tempfile.TemporaryDirectory() as scratch:
+            (Path(scratch) / "routes.tsx").write_text(reviewed, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, r"scripts under api/src that neither inventory opens: \['routes\.tsx'\]"):
+                api_sources(Path(scratch))
+        print("CLINICIAN_POLICY_OUTSIDE_FILES " + json.dumps({
+            "outside_files": sum(1 for path in sources if not path.name.endswith(".controller.ts")),
+            "classified": sorted(OUTSIDE_DECORATORS), "refused": sorted(refused) + ["a .tsx script"],
+            "real_routes": len(baseline),
         }, ensure_ascii=True, sort_keys=True))
 
 
