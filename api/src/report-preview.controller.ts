@@ -30,6 +30,15 @@ export class ReportPreviewController {
     return this.pacs.clinicianReportRead(uid, member(req));
   }
 
+  /**
+   * S5-U3 patient timeline: the listed studies with the anchor's server patient key, paged (limit required, after verbatim).
+   * Here with the other clinician reads for the same no-store middleware and interceptor; pacs.controller.ts stays pinned.
+   */
+  @Get('clinician/studies/:uid/timeline')
+  clinicianTimeline(@Param('uid') uid: string, @Query() query: any, @Req() req: any) {
+    return this.pacs.clinicianTimeline(uid, member(req), query);
+  }
+
   @Get('studies/:uid/report-preview')
   async read(@Param('uid') uid: string, @Req() caller: any) {
     viewerUid(uid);

@@ -219,16 +219,6 @@ export class PacsController {
     return this.svc.listStudies(caller(req), query);
   }
 
-  /**
-   * S5-U3 환자 타임라인(임상의 읽기). 기준 검사와 서버 환자 키가 같은 검사를 쪽으로 준다 — limit 필수, after는 받은 서명 값 그대로.
-   * 이 컨트롤러는 app.module의 no-store 미들웨어 밖이라 GET studies처럼 헤더를 여기서 단다.
-   */
-  @Get('clinician/studies/:uid/timeline')
-  @Header('Cache-Control', 'no-store')
-  clinicianTimeline(@Param('uid') uid: string, @Query() query: any, @Req() req: any) {
-    return this.svc.clinicianTimeline(uid, caller(req), query);
-  }
-
   /** 기관을 못 알아본 검사 — 관리자 전용 통로. 워크리스트에는 안 섞인다 */
   @Get('unassigned')
   unassigned(@Req() req: any) {

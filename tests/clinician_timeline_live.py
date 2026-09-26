@@ -47,12 +47,12 @@ FIXTURES = json.loads((ROOT / "tests" / "clinician_policy_fixtures.json").read_t
 C = FIXTURES["read_contract"]
 DENIED = FIXTURES["denied_code"]
 FORBIDDEN = set(C["forbidden_keys"])
-# The S5-U3 answer (api/src/clinician-policy.ts clinicianTimeline). Declared here until the shared read_contract carries it.
-TIMELINE_KEYS = ["uid", "patientKey", "identity", "studies", "serverTime", "pagination"]
-IDENTITY_KEYS = ["conflict", "birth", "sex"]
-ROW_KEYS = C["list_row_keys"] + ["identity"]
-ROW_IDENTITY_KEYS = ["birth", "sex"]
-RELATIONS = {"match", "mismatch", "not_comparable"}
+# The S5-U3 answer (api/src/clinician-policy.ts clinicianTimeline): the shared read_contract, like the other clinician reads.
+TIMELINE_KEYS = C["timeline_response_keys"]
+IDENTITY_KEYS = C["timeline_identity_keys"]
+ROW_KEYS = C["list_row_keys"] + C["timeline_row_extra_keys"]
+ROW_IDENTITY_KEYS = C["timeline_row_identity_keys"]
+RELATIONS = set(C["timeline_relations"])
 HALLYM, KIN = "한림병원", "KIN 판독센터"
 
 
