@@ -1197,11 +1197,14 @@ function kinCreateViewerHistory() {
     }
     async function authenticate(ticket) {
       const user = await api('/me', {}, ticket);
+      // Another account ends the document's login before its verdict is noted (Astra S5-U2b-X3-R-001 F01, the layout panel's
+      // order too): noted first, a clinician-only account made the document read-only, which the refusal after it cannot leave.
+      if (subject && subject !== user.sub) { sessionEnded(); throw { stale: true }; }
       // The session watcher below runs inside note(): ownAnswer tells it that this panel's own /me is the answer it reacts to.
       ownAnswer = true;
       try { kinViewerSession.note(user); } finally { ownAnswer = false; }
       // `ended`: the answer itself refused (not a viewer member) and the session watcher ended this panel inside note().
-      if (ended || !user.sub || (subject && subject !== user.sub)) { sessionEnded(); throw { stale: true }; }
+      if (ended || !user.sub) { sessionEnded(); throw { stale: true }; }
       me = user; subject = user.sub; lastAuth = Date.now(); return user;
     }
     const path = () => '/studies/' + scope + '/viewer-items';
@@ -2017,9 +2020,17 @@ function kinCreateViewerLayout() {
       } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); signal?.removeEventListener('abort', abort); }
     }
     async function authenticate(signal) {
-      const me = await get('/api/me', signal), next = model.owner(me);
+      // The owner this panel confirmed, read before the request: an end() while the answer was on the way clears `key`, and the
+      // answer is still that of this document's browser session.
+      const known = key;
+      const me = await get('/api/me', signal), next = model.owner(me), confirmed = key || known;
+      // Astra S5-U2b-X3-R-001 F01: another account is the end of the document's login, not only of this panel. The shared session
+      // is refused before note() could post that account's verdict (a writer would keep the other extensions writing and a mode
+      // re-entry would give the account buttons back; a clinician-only one would leave the document read-only instead of ended).
+      // A mode exit with the same account is not an account change and stays this panel's own end below.
+      if (confirmed && next !== confirmed) { sessionEnded(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }
       kinViewerSession.note(me);
-      if (!live() || !next || (key && next !== key)) { end(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }
+      if (!live() || !next) { end(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }
       key = next;
       hpOwner = { institution: me.institution, subject: me.sub };
     }

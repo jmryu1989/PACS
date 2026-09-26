@@ -66,8 +66,9 @@ record a mount):
       frameless check held across A->B->A never takes the new A down. Control: the check behind frame identification
       (as at R-002) keeps the retracted rows and asks nothing.
   13  VIEWER_STATE_MATRIX: every write/mark entry point, every recheck path, the list's saved mark and Go to Image observed
-      in each session state (unconfirmed, refused, read-only, writer, read-only over a writer's held work, and refused with the
-      other extensions' writer /me answers arriving after the refusal).
+      in each session state (unconfirmed, refused, read-only, writer, read-only over a writer's held work, refused with the
+      other extensions' writer /me answers arriving after the refusal, and refused by the layout panel seeing another account
+      first).
   14  (Astra S5-U2b-R-003 F01) the change to clinician-only voids the reads a writer had in flight: the writer's first author
       page held, another extension's /me (the module gate) answers the same account clinician-only and the page arrives late:
       no row or mark of it, only the final read verified whole, and its final:false check takes that down; a new final read
@@ -95,6 +96,15 @@ record a mount):
       on a logout broadcast (its /me asked before it answers a writer afterwards) and on another account's answer: write modules
       come down and local marks go. Control: the file at X2-R-001 for this path (Astra's reproduction: session writer again, the
       Measurements split button back, Bidirectional made). Probes: either half of the fix alone keeps that path closed.
+  18  (Astra S5-U2b-X3-R-001 F01) another account seen first by the layout panel is the end of the document's session: a writer
+      document with the Measurements panel's focus /me held, then Save Recent Layout's /me or the Hanging Protocol editor's
+      access check answers another writer account (or a clinician-only one): at once the session is refused, the Measurements
+      panel has ended, every write module is down, the local mark is gone and nothing is stored; the held first account's writer
+      answer and a mode re-entry with /me answering the other account ask nothing and open nothing (mark, edit, SR, write module,
+      layout buttons, editor). The Measurements panel's own /me answering a clinician-only other account ends it the same way.
+      Control: the file at X3-R-001 for these paths (Astra's reproduction: the session stays writer and the Measurements panel
+      open, Bidirectional makes a mark after the held answer, and the re-entry gives the account buttons, the editor and the write
+      modules back; a clinician-only other account leaves the document read-only through either panel).
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is S5-U1b (tests/clinician_read_live.py, hosted synthetic stack only).
@@ -341,14 +351,16 @@ ALL_GROUPS = ["default", "mpr", "SRToolGroup", "volume3d"]
 # read-only+held (Astra S5-U2b-X-R-001 F01): read-only reached from a writer whose unsaved key image on A is held
 # (hold_writer_work), observed from the change on; refused+late-writer (Astra S5-U2b-X2-R-001 F01): the Measurements panel's
 # /me refused (403) while the module gate's and the layout panel's /me were in flight, and those then answer a writer
-# (refusal_then_late_writers). The session stays refused.
-STATES = ("unconfirmed", "refused", "read-only", "writer", "read-only+held", "refused+late-writer")
-WRITER_ONLY = (False, False, False, True, False, False)
+# (refusal_then_late_writers). The session stays refused. refused+layout-account (Astra S5-U2b-X3-R-001 F01): a writer document
+# whose layout panel sees another writer account first (Save Recent Layout's /me) while the Measurements panel's /me is held, that
+# held first-account answer arriving after it (layout_sees_account_change); observed from the change on. The session is refused.
+STATES = ("unconfirmed", "refused", "read-only", "writer", "read-only+held", "refused+late-writer", "refused+layout-account")
+WRITER_ONLY = (False, False, False, True, False, False, False)
 VIEWER_STATE_MATRIX = {
     # The list on screen: its verified saved length drawn locked (the writer list here holds key images only), and Go to Image
     # of the shown source frame through the navigation API (unconfirmed: busy; refused: ended).
-    "list_mark": (False, False, True, False, True, False),
-    "go_to_image": (False, False, True, True, True, False),
+    "list_mark": (False, False, True, False, True, False, False),
+    "go_to_image": (False, False, True, True, True, False, False),
     # Write and mark entry points: True = works in that state, False = not offered or refused (nothing drawn, sent or mounted).
     "toolbar_offer": WRITER_ONLY,        # the Measurements split button and the authoring items of More Tools
     "toolbar_press": WRITER_ONLY,        # a press on the rendered toolbar (Bidirectional), then a primary drag
@@ -372,20 +384,20 @@ VIEWER_STATE_MATRIX = {
     "layout_account": WRITER_ONLY,       # Recent Layout buttons enabled / the Hanging Protocol editor mounted
     "marks_present": WRITER_ONLY,        # any native mark left after all of the attempts above
     "stray_mark_kept": WRITER_ONLY,      # a mark made outside every guard survives the next observation tick
-    "viewing": (True, True, True, True, True, True),  # Zoom from the toolbar, then a drag: image viewing in every state
+    "viewing": (True, True, True, True, True, True, True),  # Zoom from the toolbar, then a drag: image viewing in every state
     # Recheck paths, as the viewer-items requests the panel makes: read = the clinician list (limit=100), read-all = the writer
     # list (includeHidden=true), check = limit=1 (the clinician final check / the writer's access probe), cursor = the next
     # page asked with the handed-out cursor verbatim, none = no list request (unconfirmed: /me is asked again on focus and
     # every 15 s, and nothing is read until an answer; refused: the panel has ended).
-    "initial_read": ("none", "none", "read", "read-all", "read", "none"),
-    "page_continuation": ("none", "none", "cursor", "cursor", "cursor", "none"),
-    "focus": ("none", "none", "check", "check", "check", "none"),
-    "me_on_focus": (True, False, True, True, True, False),                 # the same focus asks /me (the retry, the check, the probe)
-    "periodic": ("none", "none", "check", "check", "check", "none"),       # the clock moved past 15 s since the last /me
-    "frame_lost": ("none", "none", "none", "none", "none", "none"),        # the active viewport stops showing a source frame
-    "frame_return": ("none", "none", "check", "none", "check", "none"),    # the source frame comes back (clinician: checked at once)
-    "frameless_focus": ("none", "none", "check", "none", "check", "none"),  # focus with no source frame (writer probe stays frame-bound)
-    "study_change": ("none", "none", "read", "read-all", "read", "none"),  # the frame of another study
+    "initial_read": ("none", "none", "read", "read-all", "read", "none", "none"),
+    "page_continuation": ("none", "none", "cursor", "cursor", "cursor", "none", "none"),
+    "focus": ("none", "none", "check", "check", "check", "none", "none"),
+    "me_on_focus": (True, False, True, True, True, False, False),                  # the same focus asks /me (the retry, the check, the probe)
+    "periodic": ("none", "none", "check", "check", "check", "none", "none"),       # the clock moved past 15 s since the last /me
+    "frame_lost": ("none", "none", "none", "none", "none", "none", "none"),        # the active viewport stops showing a source frame
+    "frame_return": ("none", "none", "check", "none", "check", "none", "none"),    # the source frame comes back (clinician: checked at once)
+    "frameless_focus": ("none", "none", "check", "none", "check", "none", "none"),  # focus with no source frame (writer probe stays frame-bound)
+    "study_change": ("none", "none", "read", "read-all", "read", "none", "none"),  # the frame of another study
 }
 
 # test_15 (Astra S5-U2b-R-003 F01). Answers that arrive while the document's session state changes. A change is made by another
@@ -647,8 +659,9 @@ window.synModule = (name, labels, host) => ({ mount() {
   for (const label of labels) { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; box.append(b); }
   ((host && document.querySelector(host)) || document.body).append(box); return true; }, stop() { window.synStopped.push(name); } });
 window.kinViewerTechNote = () => window.synModule('tech-note', ['Tech Note']);
-// Its end() disables its control, as the real editor's end() does (viewer-hanging-protocol.js refresh() with ended).
-window.KinViewerHangingProtocol = { mount: options => { window.synMounted.push('hanging-protocol');
+// Its end() disables its control, as the real editor's end() does (viewer-hanging-protocol.js refresh() with ended). synHpAccess
+// is the access check the layout panel hands it (its /me and study read), as the real editor runs it before an apply or a save.
+window.KinViewerHangingProtocol = { mount: options => { window.synMounted.push('hanging-protocol'); window.synHpAccess = options.access;
   const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Save to Account'; options.host.append(b);
   return { end() { b.disabled = true; } }; } };
 const IDS = ['kin.viewer-history', 'kin.viewer-findings', 'kin.viewer-layout', 'kin.viewer-jobs', 'kin.viewer-tech-note'];
@@ -818,6 +831,23 @@ FINAL_CHECK = ("\n        .then(page => confirmShown(ticket, seq, study, page, n
 HELD_GATE = "    const held = () => recovery.has(scope) && !readOnly();\n"
 # The session never leaves read-only; without this line a later writer /me would (a probe of the held work, not a product mode).
 STICKY = "    if (state === 'read-only') return state;\n"
+# test_18 (Astra S5-U2b-X3-R-001 F01). The layout panel's and the Measurements panel's account-change checks, made before note(),
+# and the same authenticate() lines as at X3-R-001: note() first, then the layout panel ended only itself and the Measurements
+# panel's refusal came after a verdict it could not leave (read-only).
+LAYOUT_CHANGE = ("      if (confirmed && next !== confirmed) { sessionEnded(); "
+                 "throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }\n")
+LAYOUT_END = "      if (!live() || !next) { end(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }\n"
+X3_LAYOUT_END = ("      if (!live() || !next || (key && next !== key)) { end(); "
+                 "throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }\n")
+PANEL_CHANGE = "      if (subject && subject !== user.sub) { sessionEnded(); throw { stale: true }; }\n"
+PANEL_END = "      if (ended || !user.sub) { sessionEnded(); throw { stale: true }; }\n"
+X3_PANEL_END = "      if (ended || !user.sub || (subject && subject !== user.sub)) { sessionEnded(); throw { stale: true }; }\n"
+# config/ohif.js kinCreateViewerLayout wording and controls: run()'s status while it asks, the error authenticate() throws on
+# another account (what the Hanging Protocol editor's access check ends with), the account buttons and the stored layout's prefix.
+LAYOUT_CHECKING = "계정과 검사 접근 확인 중…"
+ACCOUNT_CHANGED = "계정이 변경되어 배치를 적용하지 않았습니다."
+LAYOUT_BUTTONS = ["Save Recent Layout", "Restore Recent Layout", "Delete Recent Layout"]
+LAYOUT_PREFIX = "kin-viewer-layout-v1:"
 
 
 class ClinicianViewerDOMTest(unittest.TestCase):
@@ -860,6 +890,9 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                              "config/ohif.js"),
             "refusal-reversible": variant(CONFIG, [(STICKY_REFUSED, "", 1)], "config/ohif.js"),
             "no-ended-guard": variant(CONFIG, [(POLICY, X2_POLICY, 1), (ENDED_WATCH, X2_WATCH, 1)], "config/ohif.js"),
+            # test_18: the file at X3-R-001 for the account-change paths of both panels.
+            "as-x3": variant(CONFIG, [(LAYOUT_CHANGE, "", 1), (LAYOUT_END, X3_LAYOUT_END, 1), (PANEL_CHANGE, "", 1),
+                                      (PANEL_END, X3_PANEL_END, 1)], "config/ohif.js"),
         }
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -1192,6 +1225,15 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             self.settle()
             self.assertEqual("refused", self.session())
             return
+        if state == "refused+layout-account":
+            held, _ = self.layout_sees_account_change("save", OTHER_WRITER)
+            self.release(held, RADIOLOGIST)
+            # Observed from the change on: the writer document's reads and module mounts before it are not counted (test_18
+            # checks that the modules came down).
+            self.item_requests, self.cursors = [], {}
+            self.page.evaluate("() => { synMounted.length = 0; synStopped.length = 0; }")
+            self.assertEqual("refused", self.session())
+            return
         if state == "read-only+held":
             self.hold_writer_work()
             start = len(self.item_requests)
@@ -1236,7 +1278,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         seen = self.page.evaluate(PROBE_WRITES, AUTHORING)
         sr = tuple(seen.pop("sr"))
         refusal = {"read-only": RO_SR, "read-only+held": RO_SR, "refused": ENDED,
-                   "refused+late-writer": ENDED}.get(state, UNCONFIRMED_SR)
+                   "refused+late-writer": ENDED, "refused+layout-account": ENDED}.get(state, UNCONFIRMED_SR)
         seen["sr_commands"] = {(f"refused: {WRITER_SR}",) * 2: True, (f"refused: {refusal}",) * 2: False}.get(sr, f"unexpected {sr}")
         buttons, mounted = set(self.panel()["buttons"]), set(self.page.evaluate("synMounted"))
         seen["panel_controls"] = bool(buttons & {"Download SR", "Store SR", "Length", "Angle", "Ellipse ROI", "Add Key Image"})
@@ -2471,11 +2513,11 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             for route in writers:
                 self.release(route, RADIOLOGIST)
 
-    def writer_document(self):
+    def writer_document(self, config=None):
         # A radiologist document with every extension entered: the writer list, every module, the layout buttons, a local mark.
         self.me, self.me_status, self.hold_me, self.held_me = RADIOLOGIST, None, False, []
         self.item_requests, self.cursors, self.me_requests, self.writer_paged = [], {}, 0, False
-        self.open_viewer(uncancellable=True)
+        self.open_viewer(config, uncancellable=True)
         self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "the writer panel")
         self.wait_until(lambda: set(self.page.evaluate("synMounted")) == MODULES, "every module mounted")
         self.wait_until(lambda: any(not disabled for _, disabled in self.layout()["buttons"]), "the layout buttons")
@@ -2572,6 +2614,108 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                 self.assertEqual((session, VIEW_SECTION, "false", []),
                                  (self.session(), self.page.evaluate("synToolbar()")["primary"],
                                   self.page.evaluate("synAdd('Bidirectional')"), self.page.evaluate("synMarks()")))
+
+    # ── Astra S5-U2b-X3-R-001 regression ──
+    def layout_sees_account_change(self, via, account, config=None):
+        # A writer document; the Measurements panel's /me asked on focus is held (the first account's answer comes later), and the
+        # layout panel's own /me, asked by Save Recent Layout or by the Hanging Protocol editor's access check, answers `account`
+        # first. Returns the held route and what the layout panel's request ended with (its status line, or the access error).
+        self.writer_document(config)
+        self.hold_me = True
+        self.focus()
+        self.wait_until(lambda: len(self.held_me) == 1, "the Measurements panel's /me asked on focus, held")
+        held, self.hold_me, self.held_me, self.me = self.held_me[0], False, [], account
+        asked = self.me_requests
+        if via == "save":
+            self.page.evaluate("""() => [...document.querySelectorAll('#kin-viewer-layout button')]
+              .find(b => b.textContent === 'Save Recent Layout').click()""")
+            self.wait_until(lambda: self.me_requests > asked and self.layout_status() != LAYOUT_CHECKING,
+                            "Save Recent Layout's /me answered")
+            outcome = self.layout_status()
+        else:
+            self.page.evaluate("""() => { window.synHpOutcome = null;
+              synHpAccess({ signal: new AbortController().signal }).then(() => 'ok', error => error.message)
+                .then(outcome => { window.synHpOutcome = outcome; }); }""")
+            self.wait_until(lambda: self.page.evaluate("window.synHpOutcome") is not None, "the editor's access check answered")
+            outcome = self.page.evaluate("window.synHpOutcome")
+        self.settle()
+        return held, outcome
+
+    def reentry_stays_ended(self):
+        # Mode exit and re-entry of the ended document with /me answering the other account (self.me): nothing asks /me or a list,
+        # nothing mounts, the new layout panel starts ended with its account buttons disabled and no editor, authoring refuses.
+        asked, reads, mounted = self.me_requests, len(self.item_requests), len(self.page.evaluate("synMounted"))
+        self.assertEqual(VIEW_SECTION, self.page.evaluate("() => { synReenter(); return synToolbar().primary; }"))
+        self.settle()
+        self.assertEqual((asked, reads, mounted, "refused", "refused", ENDED, LAYOUT_ENDED, [[n, True] for n in LAYOUT_BUTTONS]),
+                         (self.me_requests, len(self.item_requests), len(self.page.evaluate("synMounted")), self.session(),
+                          self.note_state(), self.panel()["status"], self.layout_status(), self.layout()["buttons"]))
+        self.assertEqual([["new", None]], self.page.evaluate(EDIT_ATTEMPTS))
+        self.assertEqual(["missing", "view WindowLevel", "false", f"refused: {ENDED}"], self.page.evaluate(
+            "async () => [synClick('Bidirectional'), synDraw('default'), synAdd('Bidirectional'), await synSR('storeMeasurements')]"))
+
+    def test_18_another_account_seen_first_by_the_layout_panel_ends_the_documents_session(self):
+        # (a) Astra's order: the layout panel sees another account first (Save Recent Layout, the editor's access check; another
+        # writer, and a clinician-only account that noted first would have made the document read-only instead of ended).
+        outcomes = {"save": LAYOUT_ENDED, "hanging-protocol": ACCOUNT_CHANGED}
+        for via, account in (("save", OTHER_WRITER), ("hanging-protocol", OTHER_WRITER), ("save", CLINICIAN)):
+            with self.subTest(via=via, account=account["user"]):
+                self.fresh_page()
+                held, outcome = self.layout_sees_account_change(via, account)
+                # At once, before the first account's held answer: the document's session is refused, the Measurements panel has
+                # ended, the write modules are down, the local mark is gone and nothing was stored.
+                self.assertEqual((outcomes[via], "refused", ENDED, LAYOUT_ENDED, VIEW_SECTION, "false", []),
+                                 (outcome, self.session(), self.panel()["status"], self.layout_status(),
+                                  self.page.evaluate("synToolbar()")["primary"], self.page.evaluate("synAdd('Bidirectional')"),
+                                  self.page.evaluate("synMarks()")))
+                self.assertEqual(WRITE_MODULES, set(self.page.evaluate("synStopped")))
+                self.assertEqual([], [key for key in self.page.evaluate("Object.keys(localStorage)") if key.startswith(LAYOUT_PREFIX)])
+                # The first account's writer answer, asked before the change, arrives after it: nothing reopens.
+                self.release(held, RADIOLOGIST)
+                self.ended_after_refusal()
+                self.reentry_stays_ended()
+        # (b) The Measurements panel's own /me answering a clinician-only other account ends the document the same way.
+        with self.subTest(via="measurements", account=CLINICIAN["user"]):
+            self.fresh_page()
+            self.writer_document()
+            self.me = CLINICIAN
+            self.focus()
+            self.wait_until(lambda: self.session() != "writer", "the other account's answer")
+            self.settle()
+            self.assertEqual(("refused", ENDED, WRITE_MODULES), (self.session(), self.panel()["status"],
+                                                                 set(self.page.evaluate("synStopped"))))
+            self.ended_after_refusal()
+            self.reentry_stays_ended()
+
+        # Control: the file at X3-R-001 for these paths, Astra's reproduction. The layout panel ends only itself: the session stays
+        # writer and the Measurements panel open, Bidirectional makes a mark after the held answer, and a mode re-entry with /me
+        # answering the other account gives the account buttons, the editor and the write modules back.
+        self.fresh_page()
+        held, outcome = self.layout_sees_account_change("save", OTHER_WRITER, self.config_variants["as-x3"])
+        self.assertEqual((LAYOUT_ENDED, "writer", True), (outcome, self.session(), self.panel()["status"] != ENDED),
+                         "control: only the layout panel ended")
+        self.release(held, RADIOLOGIST)
+        self.assertEqual(("writer", True, "true"),
+                         (self.session(), "MeasurementTools" in self.page.evaluate("synToolbar()")["primary"],
+                          self.page.evaluate("synAdd('Bidirectional')")), "control: authoring kept")
+        self.page.evaluate("synReenter()")
+        self.wait_until(lambda: self.layout()["buttons"] == [[n, False] for n in LAYOUT_BUTTONS + ["Save to Account"]] and
+                        Counter(self.page.evaluate("synMounted"))["findings"] == 2,
+                        "control: the account buttons, the editor and the write modules back after the re-entry")
+        # Control: a clinician-only other account noted first leaves the document read-only (not ended), through either panel.
+        for via in ("save", "measurements"):
+            with self.subTest(control=via):
+                self.fresh_page()
+                if via == "save":
+                    held, _ = self.layout_sees_account_change("save", CLINICIAN, self.config_variants["as-x3"])
+                    self.release(held, RADIOLOGIST)
+                else:
+                    self.writer_document(self.config_variants["as-x3"])
+                    self.me = CLINICIAN
+                    self.focus()
+                self.wait_until(lambda: self.session() != "writer", "control: the other account's answer")
+                self.settle()
+                self.assertEqual("read-only", self.session(), "control: read-only, not ended")
 
 
 if __name__ == "__main__":
