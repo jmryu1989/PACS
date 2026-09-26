@@ -891,7 +891,8 @@ function kinCreateViewerHistory() {
       'DragProbe', 'CobbAngle', 'CalibrationLine', 'PlanarFreehandROI', 'SplineROI', 'LivewireContour', 'UltrasoundDirectionalTool',
       'WindowLevelRegion', 'PlanarFreehandContourSegmentation', 'AdvancedMagnify']);
     const PRIMARY = ct.Enums?.MouseBindings?.Primary ?? 1;
-    const nativeAuthoringClosed = () => !writer();
+    // Astra S5-U2b-X2-R-001 F01: an ended panel (401/403, logout, another account) keeps authoring closed whatever the shared state says.
+    const nativeAuthoringClosed = () => ended || !writer();
     const guardedGroups = new Map(), guardedTools = new Map(), policyRestores = [];
     function guardTool(name, tool) {
       if (!tool || VIEW_TOOLS.has(name) || typeof tool.addNewAnnotation !== 'function' || guardedTools.has(tool)) return;
@@ -1171,6 +1172,9 @@ function kinCreateViewerHistory() {
       }
       render();
     }
+    // Astra S5-U2b-X2-R-001 F01. A real end of the login (401/403, a logout broadcast, another account) is the document's end too:
+    // kinViewerSession keeps 'refused', so no /me asked before or after it gives the other extensions a writer back. Mode exit is not.
+    function sessionEnded() { kinViewerSession.refuse(); end(); }
     async function api(path, options = {}, ticket = generation) {
       // A request of a generation already given up (another study, the clinician-only boundary) is not sent at all: a save that
       // was waiting for its /me when that answer said clinician-only never reaches the server.
@@ -1182,7 +1186,7 @@ function kinCreateViewerHistory() {
       const res = await fetch('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request.signal,
         headers: { 'X-KIN-CSRF': '1', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
       if (!valid(ticket)) throw { stale: true };
-      if (res.status === 401 || res.status === 403 && path === '/me') { kinViewerSession.refuse(); end(); throw { stale: true }; }
+      if (res.status === 401 || res.status === 403 && path === '/me') { sessionEnded(); throw { stale: true }; }
       if (res.status === 403) { deny(); throw { stale: true }; }
       const data = await res.json().catch(() => null);
       if (!valid(ticket)) throw { stale: true };
@@ -1196,7 +1200,8 @@ function kinCreateViewerHistory() {
       // The session watcher below runs inside note(): ownAnswer tells it that this panel's own /me is the answer it reacts to.
       ownAnswer = true;
       try { kinViewerSession.note(user); } finally { ownAnswer = false; }
-      if (!user.sub || (subject && subject !== user.sub)) { end(); throw { stale: true }; }
+      // `ended`: the answer itself refused (not a viewer member) and the session watcher ended this panel inside note().
+      if (ended || !user.sub || (subject && subject !== user.sub)) { sessionEnded(); throw { stale: true }; }
       me = user; subject = user.sub; lastAuth = Date.now(); return user;
     }
     const path = () => '/studies/' + scope + '/viewer-items';
@@ -1787,7 +1792,7 @@ function kinCreateViewerHistory() {
         }
       }
     }
-    const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
+    const onStorage = e => { if (e.key === 'kin-session-ended') sessionEnded(); };
     const onFocus = () => { lastAuth = 0; tried = 0; };
     // A document that is not a confirmed writer has no mark to save, so an unlocked native mark is not unsaved work there.
     const jobGuard = () => recovery.size > 0 || [...entries.values()].some(x => hasWork(x) || x.busy) || writer() &&
@@ -1812,7 +1817,7 @@ function kinCreateViewerHistory() {
     window.kinViewerHistoryActivate = activateStudy;
     window.kinViewerHistoryState = historyState;
     let channel;
-    try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
+    try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') sessionEnded(); }; } catch (_) {}
     window.addEventListener('storage', onStorage); window.addEventListener('focus', onFocus); window.addEventListener('beforeunload', beforeUnload);
     // The pinned viewer changes active viewports through several services. A
     // bounded observation timer also covers stack frame changes without patching them.
@@ -1826,10 +1831,12 @@ function kinCreateViewerHistory() {
     stop = () => { end(true); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe()); window.removeEventListener('storage', onStorage); window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); for (const restores of configured.values()) restores.reverse().forEach(restore => restore()); configured.clear(); panel.remove(); };
     // 판정이 바뀌는 순간(이 패널의 /me가 아니어도): writer면 막는 동안 적어 둔 도구 모드·도구막대를 되돌리고, 그 밖이면 작성
     // 경로를 닫고 이 패널이 그리지 않은 표식을 지운다. read-only는 clinicianBoundary를 지난다. 다른 판정은 그려 둔 행의 컨트롤만
-    // 다시 그린다.
+    // 다시 그린다. (Astra S5-U2b-X2-R-001 F01) 어느 확장의 /me든 refused가 되면 이 패널도 끝나고, 끝난 패널은 그 뒤 공유 판정이
+    // 무엇이든 작성 경로를 다시 열지 않는다.
     const unwatch = kinViewerSession.onChange(next => {
       const own = ownAnswer;
-      if (next === 'writer') reopenAuthoring(); else closeAuthoring();
+      if (next === 'refused' && !ended) end();
+      if (next === 'writer' && !ended) reopenAuthoring(); else closeAuthoring();
       if (ended || !scope) return;
       if (next === 'read-only') clinicianBoundary(own);
       else if (!suspended) { toolbar(); for (const e of entries.values()) row(e); }
@@ -1851,6 +1858,8 @@ function kinCreateViewerHistory() {
       for (const restore of guardedTools.values()) restore();
       guardedTools.clear();
     };
+    // A mode entry in a document whose login already ended (F01) starts ended: no /me, no list, authoring closed.
+    if (kinViewerSession.state() === 'refused') end();
     scan();
   }
   return { id: 'kin.viewer-history', preRegistration({ servicesManager, commandsManager, extensionManager }) { services = servicesManager.services; commands = commandsManager; extensions = extensionManager; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
@@ -1927,12 +1936,16 @@ function kinViewerClinicianOnly(me) {
    쓰기와 작성자 쪽 읽기는 서버가 거절하고, 이 판정은 그 거절을 부를 화면을 붙이지 않을 뿐이다.
    (Astra S5-U2b-R-002 F01) 기본값은 읽기 전용이다: 측정·표식 작성 경로는 writer일 때만 열리고, unconfirmed·refused에서도
    영상 조작만 된다. onChange는 판정이 바뀔 때마다 알린다 — 측정 패널이 작성 경로를 열고 닫고, 쓰기 화면은 writer가 아니게
-   되는 순간 내려간다. */
+   되는 순간 내려간다.
+   (Astra S5-U2b-X2-R-001 F01) refused도 문서가 끝날 때까지 되돌리지 않는다. 401/403·로그아웃·다른 계정은 이 문서의 로그인이
+   끝난 것이고(각 패널은 "다시 로그인한 뒤 뷰어를 여세요"라고 알린다), 그 전에 보낸 /me든 그 뒤의 /me든, 어느 확장의 것이든,
+   응답 본문이 늦게 끝난 것이든 writer 답이 작성 경로를 다시 열지 못한다. 돌아가는 길은 새 뷰어다. */
 const kinViewerSession = (() => {
   let state = 'unconfirmed', read = null;
   const waiting = new Set(), watchers = new Set(), changes = new Set();
   function settle(next) {
     if (state === 'read-only') return state;
+    if (state === 'refused') return state;
     const previous = state; state = next;
     for (const resolve of [...waiting]) { waiting.delete(resolve); resolve(next); }
     if (next === 'read-only') for (const watch of [...watchers]) { try { watch(); } catch (_) {} }
@@ -1952,6 +1965,7 @@ const kinViewerSession = (() => {
     // 같은 때 붙는 확장끼리 /me 읽기 하나를 나눠 쓴다. 답은 그 읽기나 다른 확장의 성공한 /me 중 먼저 온 쪽이다.
     decide() {
       if (state === 'read-only') return Promise.resolve(state);
+      if (state === 'refused') return Promise.resolve(state);
       const answer = new Promise(resolve => waiting.add(resolve));
       if (!read && typeof fetch === 'function') {
         read = fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' } }).then(async response => {
@@ -1982,7 +1996,9 @@ function kinCreateViewerLayout() {
     const buttons = [];
     const live = () => !ended && location.search === search;
     const refresh = () => buttons.forEach(b => { b.disabled = ended || busy || !key || !studies; });
-    function end() { ended = true; controller.abort(); hp?.end(); key = null; status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
+    function end() { if (ended) return; ended = true; controller.abort(); hp?.end(); key = null; status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
+    // Astra S5-U2b-X2-R-001 F01: a 401 or a refused /me of this panel is the end of the document's login (kinViewerSession keeps 'refused').
+    function sessionEnded() { kinViewerSession.refuse(); end(); }
     async function get(path, signal) {
       const request = new AbortController(), abort = () => request.abort();
       controller.signal.addEventListener('abort', abort, { once: true });
@@ -1992,7 +2008,10 @@ function kinCreateViewerLayout() {
       try {
         const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal, headers: { 'X-KIN-CSRF': '1' } });
         if (!live()) throw new Error('화면이 변경되어 배치를 적용하지 않았습니다.');
-        if (response.status === 401 || response.status === 403) { end(); throw new Error('검사 접근 권한을 확인할 수 없습니다.'); }
+        if (response.status === 401 || response.status === 403) {
+          if (response.status === 401 || path === '/api/me') sessionEnded(); else end();
+          throw new Error('검사 접근 권한을 확인할 수 없습니다.');
+        }
         if (!response.ok) throw new Error('서버 연결을 확인한 뒤 다시 시도하세요.');
         return await response.json();
       } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); signal?.removeEventListener('abort', abort); }
@@ -2103,17 +2122,22 @@ function kinCreateViewerLayout() {
     }
     const unwatch = kinViewerSession.onReadOnly(readOnlyPanel);
     if (kinViewerSession.readOnly()) readOnlyPanel();
+    // F01: refused by any extension's /me (before this panel's own answer or after it enabled the account buttons) ends this panel;
+    // its late writer /me then finds it ended and neither keys the buttons nor mounts the Hanging Protocol editor. The logout broadcast
+    // ends only this panel here: the Measurements panel hears the same broadcast and ends the document's session (sessionEnded there).
+    const unwatchEnd = kinViewerSession.onChange(next => { if (next === 'refused') end(); });
     const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
     const onMessage = e => { if (e.data?.type === 'session-ended') end(); };
     window.addEventListener('storage', onStorage);
     try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', onMessage); } catch (_) {}
-    if (studies) authenticate().then(async () => {
+    if (kinViewerSession.state() === 'refused') end();
+    else if (studies) authenticate().then(async () => {
       if (!live()) return;
       if (kinViewerSession.readOnly()) { readOnlyPanel(); return; }
       status.textContent = '현재 검사의 배치를 직접 저장하거나 복원하세요.'; await mountProtocols();
     }).catch(error => { if (live()) status.textContent = error?.message || '계정 정보를 확인할 수 없습니다. 뷰어를 다시 여세요.'; }).finally(refresh);
     else status.textContent = '현재 검사 1~2개의 일반 CT 배치만 지원합니다.';
-    stop = () => { unwatch(); end(); window.removeEventListener('storage', onStorage); channel?.close(); panel.remove(); };
+    stop = () => { unwatch(); unwatchEnd(); end(); window.removeEventListener('storage', onStorage); channel?.close(); panel.remove(); };
   }
   return { id: 'kin.viewer-layout', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
