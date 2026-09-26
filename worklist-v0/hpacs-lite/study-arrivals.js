@@ -215,6 +215,87 @@
     return {requested:false,text,title:''};
   }
 
+  /*
+   * S5-U6a admin Gateway Status. The page lists the own-institution receipts GET /studies already carries (rows and
+   * Not Observed items) and names each with one of five words that never stand in for one another.
+   * Report Received: KIN holds a readable Gateway report that shows no failure. It is what the Gateway counted in its
+   * own queue when it reported, never images received or a transfer ended, so the phase word is not shown.
+   * Transfer Failed: a retry or failed report. Only a bindable retry offers Now Retry (the U4 action above); failed is
+   * F-01 and says why as a failure reason, never as something the Gateway can still send (H-2).
+   * Retry Requested: this page stored a request for exactly the drawn receipt key. Stored, not retried.
+   * Unknown: a report that cannot be read, counted as neither failed nor received.
+   * Query Failed belongs to the list, not to a receipt: the last successful answer stays and says so.
+   */
+  const GATEWAY_STATUS=Object.freeze({
+    received:Object.freeze({text:'Report Received',
+      title:'KIN이 이 검사의 Gateway 전송 보고를 받았습니다. 보고 시점에 Gateway가 자기 큐에서 센 수이며 영상 수신이나 전송 종료를 뜻하지 않습니다.'}),
+    retry_requested:Object.freeze({text:'Retry Requested',title:RETRY_TEXT.requestedTitle}),
+    failed:Object.freeze({text:'Transfer Failed',
+      title:'Gateway가 이 검사의 전송 실패를 보고했습니다. 마지막 보고 기준이며 그 뒤의 결과는 다음 보고로만 알 수 있습니다.'}),
+    unknown:Object.freeze({text:'Unknown',title:'Gateway 보고 형식을 해석하지 못해 상태를 알 수 없습니다. 실패나 정상으로 세지 않습니다.'}),
+    query_failed:Object.freeze({text:'Query Failed',title:'검사 목록 조회가 실패했습니다. 보이는 목록과 상태는 마지막으로 성공한 조회 기준입니다.'})});
+  const GATEWAY_STATUS_ORDER=Object.freeze(['failed','retry_requested','unknown','received']);
+  // A closed server set (gateway-receipt.ts); anything else is not echoed, whatever it says.
+  const ERROR_CODE=/^[a-z_]{1,40}$/;
+  const OVERSIZED='단일 DICOM 인스턴스가 Gateway 전송 상한(최대 24 MiB)을 넘어 보낼 수 없습니다';
+
+  // requestedKey is the epoch|agentSeq this page stored a request for; any other key is not this receipt.
+  function gatewayStatus(receipt,requestedKey=null,format=localTime){
+    const pick=(key,detail,reason,retry)=>({key,text:GATEWAY_STATUS[key].text,title:GATEWAY_STATUS[key].title,detail,reason,retry});
+    if(!readableReceipt(receipt))return pick('unknown','Gateway 보고 형식을 확인할 수 없습니다','',null);
+    const detail='Gateway 보고('+format(receipt.serverReceivedAt)+'): 병원 보유 '+receipt.localCount+'건 중 '+receipt.successCount+'건 전송';
+    const code=typeof receipt.errorCode==='string'&&ERROR_CODE.test(receipt.errorCode)?['오류 코드 '+receipt.errorCode]:[];
+    const retry=gatewayRetryAction(receipt);
+    // failed keeps the U4 F-01 sentence as its note and never a control; the size reason is shown only for its code.
+    if(receipt.phase==='failed')
+      return pick('failed',detail,[...(receipt.errorCode==='instance_exceeds_budget'?[OVERSIZED]:[]),...code].join(' · '),retry);
+    if(receipt.phase==='retry'){
+      const reason=['Gateway 자동 재시도 대기',...(count(receipt.attempt)?['시도 '+receipt.attempt+'회']:[]),...code].join(' · ');
+      if(retry&&retry.kind==='now_retry'&&requestedKey===retry.key)return pick('retry_requested',detail,reason,null);
+      return pick('failed',detail,reason,retry);
+    }
+    return pick('received',detail,'',null);
+  }
+
+  // The admin list is the GET /studies answer itself. Only entries the server gave a receipt are listed: no report is
+  // normal and is counted nowhere. An answer that cannot be read is no observation (null), so the caller keeps the last.
+  function gatewayStatusRows(result){
+    if(!result||typeof result!=='object'||Array.isArray(result)||!Array.isArray(result.studies)||!validTime(result.observedAt))return null;
+    const seen=new Set(),rows=[],text=value=>typeof value==='string'?value:'';
+    for(const row of result.studies){
+      if(!row||typeof row!=='object'||Array.isArray(row)||!validUid(row.uid)||seen.has(row.uid))return null;
+      seen.add(row.uid);
+      if(row.gatewayReceipt===null||row.gatewayReceipt===undefined)continue;
+      rows.push({uid:row.uid,absent:false,name:text(row.name),patientId:text(row.id),date:text(row.date),acc:text(row.acc),receipt:row.gatewayReceipt});
+    }
+    // Absent own studies carry their receipt only with a decided absence list; undecided stays null (unknown), not [].
+    const absent=readNotObserved(result.notObserved,seen);if(absent.error)return null;
+    for(const item of absent.rows===null?[]:absent.rows)if(item.gatewayReceipt!==null&&item.gatewayReceipt!==undefined)
+      rows.push({uid:item.uid,absent:true,origin:item.origin,createdAt:item.createdAt,receipt:item.gatewayReceipt});
+    // Failures first, then unreadable, then the rest; newest report first. The order never uses a request this page made.
+    const group=receipt=>!readableReceipt(receipt)?1:receipt.phase==='retry'||receipt.phase==='failed'?0:2;
+    const at=receipt=>readableReceipt(receipt)?Date.parse(receipt.serverReceivedAt):0;
+    rows.sort((a,b)=>group(a.receipt)-group(b.receipt)||at(b.receipt)-at(a.receipt)||(a.uid<b.uid?-1:a.uid>b.uid?1:0));
+    return {observedAt:result.observedAt,absentKnown:absent.rows!==null,rows};
+  }
+
+  // Unknown is never 0: before a successful read there are no counts, and while absence is undecided the absent
+  // studies (whose receipts come only with a decided list) are Not Observed Unknown.
+  function gatewayStatusSummary(view,format=localTime){
+    const v=view&&typeof view==='object'?view:{};
+    if(!validTime(v.observedAt))return v.failed
+      ?{key:'query_failed',text:GATEWAY_STATUS.query_failed.text+' · 아직 성공한 조회가 없습니다',
+        title:'검사 목록 조회가 실패했고 성공한 조회가 없어 보일 목록이 없습니다.',counts:'Counts Unknown'}
+      :{key:'not_loaded',text:'Not Loaded',title:'아직 조회하지 않았습니다.',counts:'Counts Unknown'};
+    const n=Object.fromEntries(GATEWAY_STATUS_ORDER.map(key=>[key,0]));
+    for(const key of Array.isArray(v.statuses)?v.statuses:[])if(Object.prototype.hasOwnProperty.call(n,key))n[key]++;
+    const counts=GATEWAY_STATUS_ORDER.map(key=>GATEWAY_STATUS[key].text+' '+n[key]).join(' · ')+(v.absentKnown===true?'':' · Not Observed Unknown');
+    if(v.failed)return {key:'query_failed',text:GATEWAY_STATUS.query_failed.text+' · 마지막 관측 기준 '+format(v.observedAt),
+      title:GATEWAY_STATUS.query_failed.title,counts};
+    return {key:'observed',text:'Observed '+format(v.observedAt),counts,
+      title:'이 시각에 성공한 검사 목록 조회 기준입니다.'+(v.absentKnown===true?'':' 영상이 관측되지 않은 검사의 Gateway 보고는 이번 조회로 확인하지 못했습니다.')};
+  }
+
   // One study's three axes. The axes never feed each other: a Gateway report of M-of-N, whatever
   // its phase, cannot change the observation label, and assignment says nothing about receipt.
   function receiptLabels({assignment,observation,gateway},format=localTime){
@@ -245,6 +326,7 @@
   function phrase(kind){if(!Object.prototype.hasOwnProperty.call(PHRASES,kind))throw new TypeError('phrase');return PHRASES[kind];}
 
   const api={diff,observationStart,observationSucceeded,observationFailed,studyObservation,receiptLabels,observationSummary,phrase,formatTime:localTime,
-    gatewayRetryAction,gatewayRetryAnswer,RETRY_TEXT,PHASES:Object.freeze([...PHASES]),BANNED,PHRASES};root.KinStudyArrivals=api;
+    gatewayRetryAction,gatewayRetryAnswer,RETRY_TEXT,PHASES:Object.freeze([...PHASES]),BANNED,PHRASES,
+    gatewayStatus,gatewayStatusRows,gatewayStatusSummary,GATEWAY_STATUS};root.KinStudyArrivals=api;
   if(typeof module==='object'&&module.exports)module.exports=api;
 })(typeof globalThis==='object'?globalThis:this);
