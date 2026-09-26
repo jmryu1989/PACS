@@ -81,6 +81,13 @@ jobs:
       # fixture. The S5-U1b live module runs only through scripts/run-tests.py on a hosted synthetic stack.
       - name: S5-U1b clinician read serializer vectors against the TS source
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-read-serializer --cwd . --file tests/clinician_policy_fixtures.json --file tests/clinician_read_serializer_test.cjs --file api/src/clinician-policy.ts -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src -e KIN_CLINICIAN_POLICY_MODULE=api/src/clinician-policy.ts node:22-alpine node --test tests/clinician_read_serializer_test.cjs
+      # S5-U5b: the admin audit attribution rule (api/src/admin-audit.ts, type-stripped by node:22) over the card's 30
+      # vectors with the rejected current-group/current-owner rule as a negative control, the page read, the sealed
+      # continuation, and the completeness of the action table over every audit write under api/src (the repository is
+      # mounted read-only for that scan). The S5-U5b live module runs only through scripts/run-tests.py on a hosted
+      # synthetic stack.
+      - name: S5-U5b admin audit record-time attribution vectors, negative control and action-table completeness
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-audit-attribution --cwd . --file api/src/admin-audit.ts --file api/src/admin.service.ts --file tests/admin_audit_attribution_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src -e KIN_ADMIN_AUDIT_MODULE=api/src/admin-audit.ts node:22-alpine node --test tests/admin_audit_attribution_test.cjs
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: |
           python3 tests/ci_browser_apt_test.py
@@ -246,6 +253,12 @@ jobs:
       - name: S5-U6b Members console Operations metrics states, unknown never 0, A-B-A guard and wording DOM
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-metrics-dom --cwd . --file worklist-v0/hpacs-lite/admin.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/study-access-admin.js --file tests/admin_metrics_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/admin_metrics_dom_test.py
+      # S5-U5b: the shipped Members console Audit / Security section against in-test GET /admin/audit answers (no stack,
+      # network or credentials); not recorded and withheld are words, a failure never reads as no events, a late answer
+      # must not paint, and the guard-less controls must.
+      - name: S5-U5b Members console Audit / Security rows, withheld and not recorded, failure not empty, A-B-A guards DOM
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-audit-dom --cwd . --file worklist-v0/hpacs-lite/admin.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/study-access-admin.js --file tests/admin_audit_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/admin_audit_dom_test.py
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         timeout-minutes: 28
         run: |
