@@ -20,6 +20,10 @@ workspace-roaming.js computed while View was closed cannot misplace it (F02); Fi
 sections with the resets set apart, and the open-group geometry is also checked below 1366, with Account Layout open
 and after the reading toolbar was scrolled.
 
+S5-UI2 fix2 (hosted validate 36254174084, same Playwright 1.60.0 / Chromium 148.0.7778.96 as the local runs): the F02
+case pinned the coordinates the script writes while View is closed, read right after set_viewport_size(); the resize
+events had not reached the page yet on the hosted runner. The case now waits for them and checks the result instead.
+
 The page script is stripped, as in tests/worklist_header_dom_test.py, and every stylesheet main.html links is inlined in
 its own position. The one piece of script that changes the toolbar's shape is added back as shipped: KinWorklistSearch
 .mount() appends its row to '.userfilter' exactly as the page does. Role gating stays the page script's disabled/hidden,
@@ -331,8 +335,21 @@ ACCOUNT_VIEW = """()=>{
     summary:box(document.querySelector('#workspace-server-summary')),
     view:box(document.querySelector('#toolbar-view > .toolbar-menu-panel')),
     viewOpen:document.querySelector('#toolbar-view').open,accountOpen:document.querySelector('#workspace-server-menu').open,
-    bar:box(document.querySelector('.userfilter')),split:box(document.querySelector('.split')),inHeader};
+    bar:box(document.querySelector('.userfilter')),split:box(document.querySelector('.split')),inHeader,
+    vw:innerWidth,vh:innerHeight};
 }"""
+
+# The panel's box under each given inline left/top, the inline values put back afterwards: equal boxes mean those
+# coordinates do not place it.
+ACCOUNT_UNDER = """(pairs)=>{const p=document.querySelector('#workspace-server-panel'),keep=[p.style.left,p.style.top];
+  const out=pairs.map(([l,t])=>{p.style.left=l;p.style.top=t;const r=p.getBoundingClientRect();
+    return {left:l,top:t,x:r.left,y:r.top,r:r.right,b:r.bottom}});
+  [p.style.left,p.style.top]=keep;return out}"""
+# Resize and toggle events reach the page as tasks after the Playwright call returns (fix2: on the hosted runner the
+# first read after set_viewport_size() came before any resize event); two frames let the queued ones run.
+FRAMES = "()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r())))"
+# place() clamps to 12px and more, so it never writes this; the harness puts it in to see the script overwrite it.
+UNWRITTEN = '-1px'
 
 
 class WorklistToolbarStructureTest(unittest.TestCase):
@@ -775,33 +792,59 @@ class WorklistToolbarDOMTest(unittest.TestCase):
                         page.close()
 
     def test_account_layout_stays_in_view_after_a_resize_while_view_was_closed(self):
-        # F02: the shipped workspace-roaming.js computes the panel's left/top from its summary. With View closed the
-        # summary has no box, so a resize writes 12px/12px and reopening View does not recompute. The panel is in View's
-        # flow now: those coordinates have no effect and it opens under its summary, inside View, clear of the header.
+        # F02: the shipped workspace-roaming.js computes the panel's left/top from its summary on toggle, resize and
+        # scroll. With View closed the summary has no box, so a resize while View is closed writes coordinates from
+        # nothing, and reopening View does not recompute. The panel is in View's flow now: whatever left/top the script
+        # wrote has no effect, and it opens under its summary, inside View and the window, clear of the header.
+        # fix2: the value written is not pinned. Resize events arrive after set_viewport_size() returns, at a time that
+        # differs between runners (hosted run 36254174084 read the value written when Account Layout opened), so the
+        # harness waits for the events and then checks the result: the script wrote while View was closed, and no
+        # inline left/top moves the panel. View is closed by its own summary, not through the shared <details> name.
         for width, height in [(1366, 768), (1920, 1200)]:
             for mode, reading, portrait in MODES[:2]:
                 with self.subTest(width=width, mode=mode):
                     page = self.open_page(width, height, reading, portrait, roaming=True)
                     try:
+                        page.evaluate("()=>{window.__resizes=0;addEventListener('resize',()=>window.__resizes++)}")
                         page.locator('#toolbar-view > summary').click()
                         page.locator('#workspace-server-summary').click()
+                        page.evaluate(FRAMES)
                         before = page.evaluate(ACCOUNT_VIEW)
                         self.assertTrue(before['accountOpen'])
                         self.assertEqual('static', before['position'])
-                        # Filters opens and View closes (one name); Account Layout stays open inside the closed View.
-                        page.locator('#toolbar-filters > summary').click()
+                        # View closes; Account Layout stays open inside the closed View.
+                        page.locator('#toolbar-view > summary').click()
+                        page.evaluate(FRAMES)
                         hidden = page.evaluate(ACCOUNT_VIEW)
                         self.assertEqual((False, True), (hidden['viewOpen'], hidden['accountOpen']))
-                        page.set_viewport_size({'width': width - 166, 'height': height - 68})
-                        page.set_viewport_size({'width': width, 'height': height})
+                        page.evaluate('(v)=>{const p=document.querySelector("#workspace-server-panel");p.style.left=v;p.style.top=v}',
+                                      UNWRITTEN)
+                        seen = page.evaluate('window.__resizes')
+                        for n, (w, h) in enumerate([(width - 166, height - 68), (width, height)], seen + 1):
+                            page.set_viewport_size({'width': w, 'height': h})
+                            page.wait_for_function('([w,h,n])=>innerWidth===w&&innerHeight===h&&window.__resizes>=n',
+                                                   arg=[w, h, n])
+                        page.evaluate(FRAMES)
                         after_resize = page.evaluate(ACCOUNT_VIEW)
-                        # The script did write the hidden-summary coordinates: the case under test happened.
-                        self.assertEqual(('12px', '12px'), (after_resize['left'], after_resize['top']))
+                        self.assertEqual((False, True), (after_resize['viewOpen'], after_resize['accountOpen']))
+                        # The script did write while View was closed: the case under test happened.
+                        for value in (after_resize['left'], after_resize['top']):
+                            self.assertNotEqual(UNWRITTEN, value, f'the resize did not reach the script: {after_resize}')
+                            self.assertRegex(value, r'^\d+(\.\d+)?px$', after_resize)
                         page.locator('#toolbar-view > summary').click()
+                        page.evaluate(FRAMES)
                         m = page.evaluate(ACCOUNT_VIEW)
                         self.assertEqual((True, True), (m['viewOpen'], m['accountOpen']))
                         self.assertEqual('static', m['position'])
                         panel, summary, view = m['panel'], m['summary'], m['view']
+                        # No inline left/top places it: the ones the script wrote while View was closed, the ones it
+                        # writes when nothing has a box, and far off either way all give the same box.
+                        under = page.evaluate(ACCOUNT_UNDER, [[after_resize['left'], after_resize['top']], ['12px', '12px'],
+                                                              ['-4000px', '-4000px'], ['4000px', '4000px']])
+                        for got in under:
+                            for key in ('x', 'y', 'r', 'b'):
+                                self.assertAlmostEqual(panel[key], got[key], delta=0.5,
+                                                       msg=f'left/top {got["left"]}/{got["top"]} moved the panel: {got} {m}')
                         self.assertGreater(panel['w'], 0)
                         self.assertGreater(panel['h'], 0)
                         self.assertGreaterEqual(panel['y'], summary['b'] - 0.5, f'the panel is not under its summary: {m}')
@@ -810,6 +853,9 @@ class WorklistToolbarDOMTest(unittest.TestCase):
                         self.assertLessEqual(panel['r'], view['r'] + 0.5, m)
                         self.assertGreaterEqual(panel['y'], view['y'] - 0.5, m)
                         self.assertLessEqual(panel['b'], view['b'] + 0.5, m)
+                        self.assertGreaterEqual(panel['x'], -0.5, f'the panel is left of the window: {m}')
+                        self.assertLessEqual(panel['r'], m['vw'] + 0.5, f'the panel is right of the window: {m}')
+                        self.assertLessEqual(panel['b'], m['vh'] + 0.5, f'the panel is below the window: {m}')
                         self.assertGreaterEqual(panel['y'], m['bar']['y'] - 0.5, 'the panel reaches over the header')
                         self.assertEqual([True, True, True], m['inHeader'], 'the header is covered')
                         self.assertAlmostEqual(before['panel']['w'], panel['w'], delta=0.5)
