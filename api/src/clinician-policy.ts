@@ -66,3 +66,180 @@ export function routeKey(method: unknown, controllerPath: unknown, handlerPath: 
 export function clinicianRouteAllowed(key: string | null): boolean {
   return key !== null && CLINICIAN_ALLOWED_ROUTES.has(key);
 }
+
+// ── S5-U1b 임상의 읽기 투영 ──
+// 아래 함수는 입력 행에서 **정해진 칸만 새로 만들어** 돌려준다. 행을 펼친 뒤 칸을 지우는 방식은
+// 쓰지 않는다 — 서비스 행에 새 칸(초안·오더·영수증처럼 뒤에 붙은 칸)이 생기면 지우는 목록이
+// 따라가지 못해 그대로 새기 때문이다. 이 파일은 순수 함수만 둔다(DB·Orthanc·Nest 예외 없음).
+
+/**
+ * S5-F5 보수 기본값 — D-S5-NONFINAL-VIEW는 미결이다. 임상의에게 본문·key image·표시 항목이
+ * 나가는 것은 머리 판(ReportVersion(uid, Report.version))의 action이 approve/addendum이고
+ * 같은 순간 RS가 A일 때뿐이다. 둘 중 하나만 보면 기록이 어긋난 행(RS만 A이거나, 머리 판만
+ * 승인)이 확정본으로 나간다. 그 밖의 상태는 본문 없이 상태만 알리고 확정이라고 부르지 않는다.
+ */
+export const CLINICIAN_FINAL_ACTIONS: readonly string[] = Object.freeze(['approve', 'addendum']);
+
+/** 본문 없이 그대로 알려도 되는 진행 상태. 그 밖(확정 머리가 아닌 A, 모르는 값)은 null — 모름. */
+export const CLINICIAN_OPEN_STATES: readonly string[] = Object.freeze(['W', 'T', 'P', 'H']);
+
+/** 확정본 판정. head는 Report.version 번 ReportVersion 행이다(없으면 null). */
+export function clinicianFinal(rs: unknown, head: any): boolean {
+  const action = head?.action;
+  return rs === 'A' && typeof action === 'string' && CLINICIAN_FINAL_ACTIONS.includes(action)
+    && Number.isSafeInteger(head?.version) && head.version > 0;
+}
+
+const text = (value: unknown): string => typeof value === 'string' ? value : '';
+const own = (value: any, key: string): boolean =>
+  !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key);
+
+/**
+ * 판독 상태. 확정본이면 누가(repDoc)·언제(confirm)·어느 판인지를, 아니면 RS만 싣는다.
+ * holdReason·preDoc·preReviewer·holder·초안은 작성자 쪽 칸이라 어느 경우에도 없다.
+ */
+export function clinicianReportStatus(state: any, head: any) {
+  if (!clinicianFinal(state?.rs, head))
+    return { final: false, rs: CLINICIAN_OPEN_STATES.includes(state?.rs) ? state.rs as string : null };
+  return { final: true, rs: 'A', action: head.action as string, version: head.version as number,
+    repDoc: typeof state.repDoc === 'string' ? state.repDoc : null,
+    confirm: typeof state.confirm === 'string' ? state.confirm : null };
+}
+
+/** 판독문 읽기. 본문은 **머리 판 행 자신의** 세 칸이다 — 판정한 action과 같은 불변 행에서 읽는다. */
+export function clinicianReport(state: any, head: any) {
+  const status = clinicianReportStatus(state, head);
+  if (!status.final) return status;
+  return { ...status, findings: text(head.findings), conclusion: text(head.conclusion),
+    recommendation: text(head.recommendation) };
+}
+
+const SNAPSHOT_COMMON = ['schemaVersion', 'kind', 'seriesUid', 'sopUid', 'frame'];
+const SNAPSHOT_MEASURE = [...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points', 'viewPlaneNormal', 'viewUp', 'baseline'];
+/** 표시 항목 종류별로 내보내는 칸(viewer-input.ts viewerCommand의 저장 칸에서 sourceDigest·hidden을 뺀 것). */
+export const CLINICIAN_SNAPSHOT_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  key: Object.freeze([...SNAPSHOT_COMMON, 'title', 'description']),
+  arrow: Object.freeze([...SNAPSHOT_COMMON, 'frameOfReferenceUid', 'label', 'points']),
+  length: Object.freeze(SNAPSHOT_MEASURE),
+  angle: Object.freeze(SNAPSHOT_MEASURE),
+  ellipse: Object.freeze(SNAPSHOT_MEASURE),
+});
+const MEASUREMENT_KINDS = ['length', 'angle', 'ellipse'];
+
+/** 저장된 표시 항목 한 건의 내용. 모르는 종류와 숨긴 항목은 null이다(닫힌 쪽으로 실패). */
+export function clinicianSnapshot(snapshot: any) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot) || snapshot.hidden === true) return null;
+  const kind = snapshot.kind;
+  if (typeof kind !== 'string' || !Object.prototype.hasOwnProperty.call(CLINICIAN_SNAPSHOT_FIELDS, kind)) return null;
+  const out: Record<string, unknown> = {};
+  for (const field of CLINICIAN_SNAPSHOT_FIELDS[kind]) if (own(snapshot, field)) out[field] = snapshot[field];
+  return out;
+}
+
+/** 확정본에 딸린 key image. 작성자는 싣지 않는다 — 누가 확정했는지는 판독 상태의 repDoc이 말한다. */
+export function clinicianKeyImage(row: any) {
+  const item = clinicianSnapshot(row?.snapshot);
+  if (!item || item.kind !== 'key' || row.hidden === true) return null;
+  return { id: row.id as string, revision: row.revision as number, item };
+}
+
+/**
+ * 표시 항목 조회(viewer.service list) 한 건. authorSub·authorActor·studyUid·hidden은 뺀다.
+ * 수동 측정은 원본 확인 결과를 **항상** 싣는다 — 값이 없으면 'unverified'다. 빠진 칸을
+ * 화면이 확인된 측정으로 읽는 일이 없게 한다.
+ */
+export function clinicianViewerItem(row: any) {
+  const item = clinicianSnapshot(row?.item);
+  if (!item || row.hidden === true) return null;
+  return { id: row.id as string, revision: row.revision as number, createdAt: row.createdAt ?? null,
+    updatedAt: row.updatedAt ?? null, item,
+    ...(MEASUREMENT_KINDS.includes(item.kind as string)
+      ? { referenceStatus: row.referenceStatus === 'verified' ? 'verified' : 'unverified' } : {}) };
+}
+
+/** 확정본의 표시 항목 한 쪽. uid를 싣는 이유: 화면은 늦게 온 응답을 쓰기 전에 요청한 검사와 대조한다. */
+export function clinicianViewerPage(uid: string, page: any) {
+  const items = (Array.isArray(page?.items) ? page.items : []).map(clinicianViewerItem).filter(Boolean);
+  return { uid, final: true, items, nextCursor: typeof page?.nextCursor === 'string' ? page.nextCursor : null };
+}
+
+/** 확정 전에는 항목을 싣지 않는다. items가 null인 이유: 빈 목록(항목 없음)과 가려진 목록은 다르다. */
+export function clinicianViewerWithheld(uid: string) {
+  return { uid, final: false, items: null, nextCursor: null };
+}
+
+/**
+ * clinician-only의 표시 항목 쿼리. 숨긴 항목은 요청할 수 없다 — includeHidden은 없거나 'false'만
+ * 받고 그 밖은 null(거절)이다. 나머지 칸(limit·cursor·recheck)의 형식은 viewerPage가 그대로 판정한다.
+ */
+export function clinicianViewerQuery(query: any): Record<string, unknown> | null {
+  const source = query ?? {};
+  if (typeof source !== 'object' || Array.isArray(source)) return null;
+  if (own(source, 'includeHidden') && source.includeHidden !== 'false') return null;
+  return { ...source, includeHidden: 'false' };
+}
+
+/** 판독문 미리보기와 같은 표시 덮어쓰기 칸. 기사가 고친 환자·검사 정보가 원본 태그보다 앞선다. */
+const OVERLAY_DISPLAY = ['id', 'name', 'birth', 'sex', 'date', 'acc', 'desc', 'modality'];
+
+/**
+ * 임상의 목록 한 행. 입력은 워크리스트 목록(listStudies)의 한 행과 그 검사의 머리 판(uid·version·action)이다.
+ * 덮어쓰기(state.ov)는 서버에서 적용하고 ov·orig 자체는 싣지 않는다. sourcePatientKey는 워크리스트가 **원본**
+ * PatientID로 만든 값 그대로다 — 덮어쓰기로 같은 환자 묶음이 바뀌지 않는다. 머리 판은 목록이 본 판 번호
+ * (state.version)와 같을 때만 쓴다 — 그 사이 판이 바뀌었으면 모름(확정 아님)이다.
+ * state·techNote·readerAssignment·gatewayReceipt·orderIdentity와 초안은 이 행에 없다.
+ */
+export function clinicianStudyRow(row: any, head: any) {
+  const state = row?.state && typeof row.state === 'object' ? row.state : null;
+  const ov = state?.ov;
+  const overlay = ov && typeof ov === 'object' && !Array.isArray(ov) ? ov : null;
+  const shown = (key: string) => own(overlay, key) && typeof overlay[key] === 'string' ? overlay[key] as string : text(row?.[key]);
+  const pinned = head && state && Number.isSafeInteger(state.version) && head.version === state.version ? head : null;
+  return {
+    uid: text(row?.uid),
+    id: shown('id'), name: shown('name'), birth: shown('birth'), sex: shown('sex'), date: shown('date'),
+    acc: shown('acc'), desc: shown('desc'), modality: shown('modality'),
+    count: Number.isSafeInteger(row?.count) ? row.count as number : null,
+    series: Number.isSafeInteger(row?.series) ? row.series as number : null,
+    sourcePatientKey: typeof row?.sourcePatientKey === 'string' ? row.sourcePatientKey : null,
+    institutionName: text(row?.institutionName),
+    tele: row?.tele === true,
+    report: clinicianReportStatus(state, pinned),
+  };
+}
+
+/**
+ * 페이지 정보. total은 이 호출자가 지금 볼 수 있는 검사(기관·원격판독·StudyAccess로 거른 열거)의
+ * 수다 — 거르기 전 개수는 studyPageSlice에 들어가지도 않는다. owner는 호출자 자신의 식별자라 뺀다.
+ */
+export function clinicianPagination(pagination: any) {
+  if (!pagination) return undefined;
+  return { next: typeof pagination.next === 'string' ? pagination.next : null, total: pagination.total,
+    offset: pagination.offset, limit: pagination.limit };
+}
+
+/**
+ * 임상의 목록 응답. 워크리스트 응답에서 studies(좁힌 행)·serverTime·pagination만 남긴다 —
+ * observedAt·notObserved·orderReconciliation은 기사·엔지니어링 화면의 칸이라 버린다.
+ */
+export function clinicianList(list: any, heads: any[]) {
+  const byUid = new Map((Array.isArray(heads) ? heads : []).map(head => [head?.uid, head]));
+  const studies = (Array.isArray(list?.studies) ? list.studies : []).map((row: any) => clinicianStudyRow(row, byUid.get(row?.uid)));
+  return { studies, serverTime: typeof list?.serverTime === 'string' ? list.serverTime : null,
+    ...(list?.pagination ? { pagination: clinicianPagination(list.pagination) } : {}) };
+}
+
+/**
+ * 목록을 만든 뒤 머리 판을 읽는 사이 행의 기관·원격판독·RS가 바뀌었는가. 바뀌었으면 워크리스트와 같이 답 전체를
+ * 거절한다(STUDY_LIST_CHANGED). 행이 사라져도 바뀐 것이다.
+ */
+export function clinicianListChanged(rows: any[], current: any[]): boolean {
+  const now = new Map((Array.isArray(current) ? current : []).map(state => [state?.uid, state]));
+  const listed = Array.isArray(rows) ? rows : [];
+  if (now.size !== new Set(listed.map(row => row?.uid)).size) return true;
+  return listed.some(row => {
+    const state = now.get(row?.uid);
+    return !state || state.institutionId !== (row?.state?.institutionId ?? null)
+      || state.teleInstitutionId !== (row?.state?.teleInstitutionId ?? null) || state.rs !== row?.state?.rs;
+  });
+}
