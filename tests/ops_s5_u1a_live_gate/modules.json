@@ -38,8 +38,8 @@
     ],
     "expected": {
       "sweep": {
-        "routes": 116,
-        "denied": 99
+        "routes": 117,
+        "denied": 100
       },
       "audit_rows": {}
     }
