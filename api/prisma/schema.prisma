@@ -96,6 +96,7 @@ model StudyState {
   report Report?
   techNotes TechNoteRevision[]
   consultations StudyConsultation[]
+  questions StudyQuestion[]
   viewerItems ViewerItem[]
   manualSrs ManualSr[]
   viewerJobs ViewerJob[]
@@ -677,6 +678,57 @@ model StudyConsultation {
 
   @@index([institutionId, recipientSub, createdAt, id])
   @@index([institutionId, requesterSub, createdAt, id])
+}
+
+/// S5-U4a 임상의 질문 스레드. 수신자는 소유 기관 영상의학과 풀이고 consultation과 따로다.
+/// 기관은 생성 시 caller 기관으로 고정한다. 읽기는 지금 그 검사의 소유 기관이 같을 때만 된다.
+model StudyQuestion {
+  id String @id @db.Uuid
+  studyUid String
+  study StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict, onUpdate: Restrict)
+  institutionId String @db.VarChar(256)
+  authorSub String @db.VarChar(256)
+  authorActor String @db.VarChar(256)
+  authorName String @db.VarChar(256)
+  state String @db.VarChar(16)
+  revision Int
+  entryCount Int
+  closedAt DateTime?
+  closedByActor String? @db.VarChar(256)
+  closedByName String? @db.VarChar(256)
+  closedByRole String? @db.VarChar(16)
+  changedBy String @db.VarChar(256)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  entries StudyQuestionEntry[]
+
+  @@index([institutionId, authorSub, createdAt, id])
+  @@index([institutionId, state, createdAt, id])
+  @@index([studyUid])
+}
+
+/// 항목 = 적용된 요청 하나의 영수증. 추가만 하고 고치거나 지우지 않는다. id는 그 요청의 requestId이고
+/// 생성 항목(seq 1)은 질문 id와 같다. 재전송은 result(그때 돌려준 적용 결과)를 그대로 돌려준다.
+model StudyQuestionEntry {
+  id String @id @db.Uuid
+  questionId String @db.Uuid
+  question StudyQuestion @relation(fields: [questionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  seq Int
+  kind String @db.VarChar(16)
+  body String @db.VarChar(2000)
+  authorSub String @db.VarChar(256)
+  authorActor String @db.VarChar(256)
+  authorName String @db.VarChar(256)
+  authorRole String @db.VarChar(16)
+  reportRs String @db.VarChar(4)
+  reportVersion Int?
+  fingerprint String
+  appliedRevision Int
+  result Json
+  at DateTime @default(now())
+
+  @@unique([questionId, seq])
+  @@unique([questionId, appliedRevision])
 }
 
 model HangingProtocolPreference {

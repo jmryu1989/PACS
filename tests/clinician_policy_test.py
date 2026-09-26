@@ -58,6 +58,7 @@ KEYCLOAK = API / "keycloak.service.ts"
 REALM = ROOT / "keycloak" / "kin-realm.json"
 MANIFEST = ROOT / "tests" / "invariants_live.py"
 LIVE_MODULE = ROOT / "tests" / "clinician_policy_live.py"
+QUESTION_LIVE = ROOT / "tests" / "clinician_question_live.py"
 LOCKFILE = ROOT / "api" / "package-lock.json"
 FIXTURES = json.loads((ROOT / "tests" / "clinician_policy_fixtures.json").read_text(encoding="utf-8"))
 
@@ -1431,6 +1432,39 @@ def controller_inventory(sources=None):
     return found
 
 
+HTTP_CODE_TEXT = re.compile(r"@\s*HttpCode\s*\(\s*([1-5][0-9]{2})\s*\)")
+
+
+def handler_statuses(sources=None):
+    """S5-U4a: 'METHOD route' -> the success status the handler declares, @HttpCode(n) or else Nest's default (201 for
+    POST, 200 for every other method). test_14 reads an allow row that answers 201 as a write row, so a new writing
+    route cannot join the matrix under the read contract. The runs are the inventory's; test_14 runs the inventory
+    first and compares the keys. Two @HttpCode() on a handler, or one that is not a literal status, is refused."""
+    out = {}
+    for path, source in sorted((api_sources() if sources is None else sources).items()):
+        if not path.name.endswith(".controller.ts"):
+            continue
+        runs = decorator_runs(source)
+        [prefix] = [(CONTROLLER_TEXT.fullmatch(source, start, end).group(2) or "").strip("/")
+                    for run in runs for name, start, end in run["items"] if name == "Controller"]
+        for run in runs:
+            routes = [item for item in run["items"] if item[0] in HTTP_DECORATORS]
+            if run["kind"] != "member" or not routes:
+                continue
+            if len(routes) != 1:
+                raise AssertionError(f"{path.name}: one handler carries {[name for name, _s, _e in run['items']]}")
+            name, start, end = routes[0]
+            codes = [source[at:to] for item, at, to in run["items"] if item == "HttpCode"]
+            read = [HTTP_CODE_TEXT.fullmatch(text) for text in codes]
+            if len(read) > 1 or None in read:
+                raise AssertionError(f"{path.name}: a status the reader does not read on {source[start:end]}: {codes}")
+            method = HTTP_DECORATORS[name]
+            child = (ROUTE_TEXT.fullmatch(source, start, end).group(3) or "").strip("/")
+            key = method + " " + "/".join(part for part in (prefix, child) if part)
+            out[key] = int(read[0].group(1)) if read else 201 if method == "POST" else 200
+    return out
+
+
 def manifest_rows():
     """The invariants_live ROUTES keys in file order; a repeated key would be collapsed silently by the dict."""
     text = MANIFEST.read_text(encoding="utf-8")
@@ -1462,10 +1496,12 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertRegex(self.policy, r"export const APP_ROLES\b[^=]*=\s*new Set\(\[\.\.\.LEGACY_APP_ROLES, CLINICIAN_ROLE\]\);")
         self.assertEqual(ts_array(self.policy, "CLINICIAN_SESSION_ROUTES"), FIXTURES["session_routes"])
         self.assertEqual(ts_array(self.policy, "CLINICIAN_BUSINESS_ROUTES"), FIXTURES["business_routes"])
-        # U1a shipped an empty business allowlist; U1b adds read rows only. The single non-GET row is the viewer's
-        # SOP lookup (answers an Orthanc instance id, writes nothing); anything else that is not a GET is a new decision.
+        # U1a shipped an empty business allowlist; U1b adds read rows only. The non-GET rows are the viewer's SOP lookup
+        # (answers an Orthanc instance id, writes nothing) and the three S5-U4a question writes (decision D33: create,
+        # reply, close; the service decides each action's role); anything else that is not a GET is a new decision.
         self.assertEqual(len(FIXTURES["business_routes"]), len(set(FIXTURES["business_routes"])))
-        self.assertEqual([k for k in FIXTURES["business_routes"] if not k.startswith("GET ")], ["POST dicom/lookup"])
+        self.assertEqual([k for k in FIXTURES["business_routes"] if not k.startswith("GET ")],
+                         ["POST dicom/lookup", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close"])
         self.assertTrue({"GET authz/dicom", "POST dicom/lookup"} <= set(FIXTURES["business_routes"]),
                         "the viewer read pair is allowed together or not at all")
         self.assertTrue(set(FIXTURES["must_stay_denied"]).isdisjoint(ALLOWED))
@@ -1900,38 +1936,110 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertIn('"' + FIXTURES["role_composition"]["live_marker"] + ' "', live)
 
     def test_14_live_matrix_gives_every_allow_row_a_positive_a_wrong_role_and_a_wrong_tenant_case(self):
-        """TEST-S5-U1c-LIVE-MATRIX is data here and one loop in clinician_policy_live.py test_05."""
+        """TEST-S5-U1c-LIVE-MATRIX is data here and one loop in clinician_policy_live.py test_05.
+
+        S5-U4a: an allow row whose handler answers 201 is a write row. Its write names the method, the request body, the
+        expected status and the audit rows its positive writes; its wrong_role and wrong_tenant are denials. Every other
+        row keeps the read contract (200/204, no audit row). The live loop checks each case against the AuditLog rows it
+        caused, and the :id question comes from the helpers TEST-S5-U4a-LIVE runs on.
+        """
         matrix = FIXTURES["live_matrix"]
         rows = matrix["rows"]
         self.assertEqual(set(rows), ALLOWED, "every allow row, and only the allow rows, has live cases")
         wanted = {"positive": {"allowed"}, "wrong_role": {"denied"}, "wrong_tenant": {"denied", "absent"}}
+        inventory = controller_inventory()
+        statuses = handler_statuses()
+        self.assertEqual(set(statuses), {method + " " + path for method, path in inventory}, "the same handlers")
+        fill = set(matrix["fill"])
+        self.assertEqual(fill, {"$request_id", "$owner", "$revision"})
         exceptions = []
         for route, row in sorted(rows.items()):
             with self.subTest(route=route):
-                self.assertEqual(set(row) - {"via"}, set(wanted))
+                method = route.split(" ", 1)[0]
+                write = row.get("write")
+                self.assertEqual(set(row) - {"via", "query", "write"}, set(wanted))
+                self.assertEqual(write is not None, statuses[route] == 201, f"{route}: its handler answers {statuses[route]}")
+                if "via" not in row:
+                    self.assertEqual(row["positive"]["status"], statuses[route], "the status the handler declares")
+                if "query" in row:
+                    self.assertEqual(method, "GET")
+                    self.assertRegex(row["query"], r"^[a-z]+=[a-z]+(?:&[a-z]+=[a-z]+)*$")
                 self.assertEqual(row["positive"]["as"], "clinician", "the positive is the clinician-only member of the study's institution")
                 self.assertNotEqual(row["wrong_role"]["as"], "clinician")
                 self.assertNotIn(row["wrong_tenant"]["as"], ("clinician", "doctor"))
+                answered = (write["expected_status"],) if write is not None else (200, 204)
                 for name, expected in wanted.items():
                     case = row[name]
                     self.assertTrue({"as", "expect", "status", "code"} <= set(case), name)
                     self.assertIn(case["as"], matrix["identities"])
                     self.assertNotEqual(case["code"], FIXTURES["denied_code"], "an allow row is never answered by the clinician gate")
-                    self.assertIn(case["status"], (200, 204) if case["expect"] in ("allowed", "absent") else (403, 404))
+                    self.assertIn(case["status"], answered if case["expect"] in ("allowed", "absent") else (403, 404))
+                    self.assertEqual("absent" in case, case["expect"] == "absent", name)
+                    if case["expect"] == "absent":
+                        self.assertIsNone(write, "a write answers no collection")
+                        self.assertEqual(set(case["absent"]), {"list", "field", "value"})
+                        self.assertIn(case["absent"]["value"], (":uid", ":id"))
                     if case["expect"] not in expected:
                         exceptions.append((route, name, case["expect"]))
                         self.assertTrue(case.get("basis", "").startswith("by design"), f"{route} {name}")
+                if write is None:
+                    continue
+                self.assertEqual(set(write), {"method", "body", "expected_status", "audit"})
+                self.assertEqual((method, write["method"], write["expected_status"]), ("POST", "POST", 201))
+                self.assertEqual(row["positive"]["expect"], "allowed")
+                body = write["body"]
+                self.assertEqual((body.get("requestId"), body.get("expectedOwner")), ("$request_id", "$owner"),
+                                 "requestId and expectedOwner are the run's values, never literals")
+                for key, value in body.items():
+                    if isinstance(value, str) and value.startswith("$"):
+                        self.assertIn(value, fill, key)
+                    else:
+                        self.assertTrue(value == "" or isinstance(value, str) and value.startswith("SYNTHETIC"), key)
+                self.assertEqual("$revision" in body.values(), ":id" in route, "a revision belongs to the :id question")
+                audit = write["audit"]
+                self.assertEqual(set(audit), {"action", "source", "rows", "actor", "target", "detail"})
+                source, constant = audit["source"]
+                self.assertIn(f"export const {constant} = '{audit['action']}';", (API / source).read_text(encoding="utf-8"))
+                self.assertIs(type(audit["rows"]), int)
+                self.assertGreaterEqual(audit["rows"], 1, "a clinician write leaves its audit row")
+                self.assertEqual((audit["actor"], audit["target"]), (row["positive"]["as"], ":uid"))
+                self.assertEqual(audit["detail"].get("requestId"), "$request_id", "the audit row is this request's")
+                for value in audit["detail"].values():
+                    if value.startswith("$"):
+                        self.assertIn(value, set(body.values()))
         self.assertEqual(exceptions, [("POST auth/logout", "wrong_tenant", "allowed")], "the logout exception is the one by-design non-denial")
         for route in ("GET clinician/studies", "GET clinician/studies/:uid/report"):
             self.assertEqual(rows[route]["wrong_role"]["as"], "doctor", "need('clinician') meets the same-institution radiologist")
+        # S5-U4a: the question service's own role table meets a same-institution member of a role it does not admit, and
+        # the other institution's clinician meets the owner-institution rule
+        questions = sorted(m + " " + p for (m, p), found in inventory.items() if found["file"] == "clinician-question.controller.ts")
+        self.assertEqual(len(questions), 6)
+        for route in questions:
+            with self.subTest(question=route):
+                self.assertEqual(rows[route]["wrong_role"]["code"], "QUESTION_ROLE_REQUIRED")
+                self.assertIn(rows[route]["wrong_role"]["as"], ("doctor", "tech"))
+                self.assertEqual(rows[route]["wrong_tenant"]["as"], "kclinician")
         # the live module drives these cases from the fixture and creates every identity they name
         live = LIVE_MODULE.read_text(encoding="utf-8")
         self.assertIn("def " + matrix["test"] + "(self) -> None:", live)
         self.assertIn('LIVE_MATRIX = FIXTURES["live_matrix"]', live)
+        self.assertIn('FILL = LIVE_MATRIX["fill"]', live)
         self.assertIn('"' + matrix["marker"] + ' "', live)
         self.assertIn('cls.stack.create_test_identity("kclinician", ["clinician"], "kin-center")', live)
         self.assertIn('self.create_member("cinvalid", ["clinician"], ["hallym", "kin-center"])', live)
         self.assertIn('self.stack.service_token("gateway")', live)
+        self.assertIn('"a read or a refusal writes no audit row"', live)
+        self.assertIn("cls.addClassCleanup(cls.drop_shared_questions)", live)
+        # one implementation of the question helpers, the one TEST-S5-U4a-LIVE runs on; the policy module imports it
+        shared = ("ask_question", "drop_study_questions", "lit", "member_owner", "read_question_row")
+        self.assertIn("from clinician_question_live import " + ", ".join(shared) + "\n", live)
+        question = QUESTION_LIVE.read_text(encoding="utf-8")
+        for name in shared:
+            self.assertEqual(len(re.findall(rf"^def {name}\(", question, re.M)), 1, name)
+            self.assertNotIn(f"def {name}(", live, name)
+        for use in ("drop_study_questions(uid, cls.owned_subjects())", "member_owner(self.stack, user)",
+                    "ask_question(self.stack, user, uid, self.owner(user), body, rid)", "return read_question_row(qid)"):
+            self.assertIn(use, question)
         # test_01 probes every controller route that is neither public nor allowed, then requires exactly the denied rows
         self.assertIn('DENIED_ROUTES = {route for routes in FIXTURES["route_matrix"]["denied"].values() for route in routes}', live)
         self.assertIn("self.assertEqual(sorted(swept), sorted(DENIED_ROUTES)", live)
@@ -2019,7 +2127,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             with self.subTest(refused=label), self.assertRaisesRegex(AssertionError, message):
                 read(source)
         # the real controllers: a denied handler that gains a spaced @Public() changes the public set test_05 pins,
-        # spaced route and controller decorators read the same 111 rows, and the unsupported shapes stop the inventory
+        # spaced route and controller decorators read the same 117 rows, and the unsupported shapes stop the inventory
         sources = api_sources()
         pacs = API / "pacs.controller.ts"
         route, key = "  @Get('studies')\n", "GET studies"
@@ -2586,9 +2694,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         sources = api_sources()
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
-        # S5-U6b: GET admin/metrics (need admin) joined the admin denied rows, 110 -> 111 and denied 99 -> 100
+        # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed (117 = 4 + 2 + 11 + 100)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (111, 4, 2, 5, 100), "the real inventory is unchanged: 111 = 4 + 2 + 5 + 100")
+                         (117, 4, 2, 11, 100), "the real inventory is unchanged: 117 = 4 + 2 + 11 + 100")
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
@@ -2836,9 +2944,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         sources = api_sources()
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
-        # S5-U6b: GET admin/metrics (need admin) joined the admin denied rows, 110 -> 111 and denied 99 -> 100
+        # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed (117 = 4 + 2 + 11 + 100)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (111, 4, 2, 5, 100), "the real inventory is unchanged: 111 = 4 + 2 + 5 + 100")
+                         (117, 4, 2, 11, 100), "the real inventory is unchanged: 117 = 4 + 2 + 11 + 100")
         contract = CONTRACT["regex_or_division"]
         self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
                           sorted(UNREAD_PUNCT)),
@@ -3010,9 +3118,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         sources = api_sources()
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
-        # S5-U6b: GET admin/metrics (need admin) joined the admin denied rows, 110 -> 111 and denied 99 -> 100
+        # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed (117 = 4 + 2 + 11 + 100)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (111, 4, 2, 5, 100), "the real inventory is unchanged: 111 = 4 + 2 + 5 + 100")
+                         (117, 4, 2, 11, 100), "the real inventory is unchanged: 117 = 4 + 2 + 11 + 100")
         contract = CONTRACT["class_heading"]
         # every class keyword of api/src has a heading class_heading reads, and no controller file's class extends
         keywords, extending = 0, set()

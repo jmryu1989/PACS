@@ -534,10 +534,11 @@ class MigrationPins(unittest.TestCase):
         self.assertIn("rows['GatewayReceipt'] = [", fixture)
         transfer = text("tests", "ops_product_transfer_test.py")
         # 28 -> 29 migrations and 38 -> 39 tables: S4-U4 added GatewayRetryRequest (tests/gateway_retry_source_test.py).
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 29)", transfer)
-        self.assertIn("self.assertEqual(len(transfer.TABLES), 39)", transfer)
+        # 29 -> 30 and 39 -> 41: S5-U4a added 20260926120000_study_questions (StudyQuestion, StudyQuestionEntry).
+        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 30)", transfer)
+        self.assertIn("self.assertEqual(len(transfer.TABLES), 41)", transfer)
         for pinned in ("report_structure_migration_test.py", "order_reconciliation_source_test.py"):
-            self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 29)", text("tests", pinned), pinned)
+            self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 30)", text("tests", pinned), pinned)
 
 
 class WorkflowPins(unittest.TestCase):

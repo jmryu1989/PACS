@@ -139,6 +139,13 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "consultations/:id"): Route(Kind.USER),
     ("POST", "studies/:uid/consultations"): Route(Kind.USER),
     ("POST", "consultations/:id"): Route(Kind.USER),
+    # S5-U4a — 임상의 질문(consultation과 별도 모델·서비스). 기관·StudyAccess·작성자 경계는 clinician-question.service.ts.
+    ("GET", "questions"): Route(Kind.TENANT),
+    ("GET", "questions/:id"): Route(Kind.TENANT),
+    ("GET", "studies/:uid/questions"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/questions"): Route(Kind.TENANT),
+    ("POST", "questions/:id/entries"): Route(Kind.TENANT),
+    ("POST", "questions/:id/close"): Route(Kind.TENANT),
     ("GET", "reader-candidates"): Route(Kind.USER),
     ("GET", "studies/:uid/reader-assignment"): Route(Kind.USER),
     ("POST", "studies/:uid/reader-assignment"): Route(Kind.USER),
