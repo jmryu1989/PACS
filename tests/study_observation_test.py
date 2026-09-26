@@ -432,6 +432,14 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S5-UI1 header session text and its Session details popover; tests/worklist_header_dom_test.py pins how they behave.
+for _kind, _extra in {
+    "ids": {"session-who": 1, "session-details": 1, "session-details-user": 1, "session-details-roles": 1},
+    "functions": {},
+    "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 
 
 def inventory(text):

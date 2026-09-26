@@ -107,6 +107,10 @@ jobs:
         timeout-minutes: 3
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/narrow-image-layout --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/worklist_narrow_layout_dom_test.py --file tests/worklist_image_thumbnails_dom_test.py --file worklist-v0/hpacs-lite/worklist-selection.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_narrow_layout_dom_test.py
+      - name: S5-UI1 worklist header keeps Log out on screen and keyboard reachable
+        timeout-minutes: 3
+        run: |
+          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/worklist-header/shots" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/worklist-header --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/reading-workspace.css --file tests/worklist_header_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_header_dom_test.py
       - name: Existing study arrivals and preserved reading inputs
         timeout-minutes: 3
         run: |
@@ -248,6 +252,11 @@ jobs:
       - name: S5-U3 Clinician patient timeline, identity conflict marker, A-B-A and state DOM
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-timeline-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file tests/clinician_timeline_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_timeline_dom_test.py
+      # S5-U6a: the shipped Members console Gateway Status section against in-test GET /studies and retry answers (no stack,
+      # network or credentials); a late list or retry answer must not paint, and the guard-less controls must.
+      - name: S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-gateway-status-dom --cwd . --file worklist-v0/hpacs-lite/admin.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/study-access-admin.js --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/admin_gateway_status_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/admin_gateway_status_dom_test.py
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         timeout-minutes: 28
         run: |
