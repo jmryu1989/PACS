@@ -176,6 +176,9 @@ ROUTES: dict[tuple[str, str], Route] = {
     # S5-U1b 임상의 읽기. 판독 상태·확정본을 읽으므로 REPORT 배터리(기사 무손상·예비 판독 제3자·타 기관 admin)에 든다.
     ("GET", "clinician/studies"): Route(Kind.REPORT, "clinician-studies", "collection"),
     ("GET", "clinician/studies/:uid/report"): Route(Kind.REPORT, "clinician-report"),
+    # S5-U3 임상의 환자 타임라인. 본문 없이 검사 행·판독 상태만 싣는 기관·원격판독 경계 읽기라 TENANT다(viewer-items와 같은 분류).
+    # 경계는 tests/clinician_timeline_live.py가 실제 스택에서 본다.
+    ("GET", "clinician/studies/:uid/timeline"): Route(Kind.TENANT),
     ("GET", "unassigned"): Route(Kind.TENANT),
     ("POST", "studies/:uid/assign"): Route(Kind.TENANT),
     ("PATCH", "studies/:uid"): Route(Kind.REPORT, "patch"),
