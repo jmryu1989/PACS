@@ -160,7 +160,8 @@
 
       const session = KinAuth.session();
       if (session) {
-        location.replace('main.html');
+        // S5-U2a: clinician-only는 clinician.html, 그 밖(혼합·판독의·기사·관리자·승인 대기)은 예전처럼 main.html.
+        location.replace(KinAuth.home(session));
         return;
       }
 
