@@ -2252,42 +2252,134 @@ function kinCreateCTSync() {
     const core = window.cornerstone, groups = services.syncGroupService;
     const creators = ['imageSlice', 'stackimage'].map(type => [type, groups.getSyncCreatorForType(type)]);
     if (!core?.imageLoader || creators.some(([, fn]) => typeof fn !== 'function')) return;
+    // S5-U2c (Astra S5-VIEWER-UXR-R-001 F01): one wording per state. Only a real end of the login (401, another account, the
+    // logout broadcast, a document that had already ended) says the session changed. A refused or unanswered access check is not
+    // a logout: it keeps its own reason and a Recheck Access button, and nothing moves until a later check confirms access.
+    const TEXT = {
+      ended: '세션이 변경되었거나 종료되어 위치 동기를 중지했습니다. 다시 로그인한 뒤 뷰어를 여세요',
+      checking: '검사 접근 정보를 확인하는 중입니다. 확인한 뒤 위치 동기를 적용합니다',
+      confirmed: '검사 접근 정보를 확인했습니다. 위치 동기를 사용할 수 있습니다',
+      failed: '검사 접근 정보를 확인하지 못해 위치 동기를 멈췄습니다. 연결 상태를 확인한 뒤 다시 확인하세요',
+      denied: '이 계정으로 검사 접근 정보를 확인할 수 없어 위치 동기를 멈췄습니다. 권한을 확인한 뒤 다시 확인하세요',
+      changed: '계정의 역할이 바뀌어 위치 동기를 멈췄습니다. 검사 접근 정보를 다시 확인하세요',
+    };
     const notice = document.createElement('div'); notice.id = 'kin-ct-sync-status'; notice.setAttribute('role', 'status');
     notice.style.cssText = 'position:fixed;top:110px;left:50%;transform:translateX(-50%);z-index:42;max-width:70vw;padding:6px 10px;background:#101e32;color:#e1ecfc;border-radius:6px;font:13px sans-serif;pointer-events:none';
-    notice.hidden = true; document.body.append(notice);
+    // The notice lets the pointer through to the viewport under it; only its own button takes a click.
+    const message = document.createElement('span'), recheck = document.createElement('button');
+    recheck.type = 'button'; recheck.id = 'kin-ct-sync-recheck'; recheck.textContent = 'Recheck Access'; recheck.title = '검사 접근 정보를 다시 확인합니다'; recheck.hidden = true;
+    recheck.style.cssText = 'pointer-events:auto;margin-left:8px;min-height:24px;padding:2px 8px;border:1px solid #657c9f;border-radius:4px;background:#1b3252;color:#e1ecfc;font:13px sans-serif;cursor:pointer';
+    notice.append(message, recheck); notice.hidden = true; document.body.append(notice);
     const controller = new AbortController(), search = location.search, created = new Set();
-    let ended = false, channel, owner, checking, rows = [];
-    const say = text => { notice.textContent = text; notice.hidden = !text; };
+    // access: checking · ready · failed (unanswered) · denied (403 or not one institution's member) · changed (the role changed).
+    // keys: study UID -> server patient key (sourcePatientKey) from the list the last confirmed round read; never DICOM PatientID.
+    let ended = false, channel, owner = null, checking, clinician = null, keys = new Map(), access = 'checking', round = 0, waiting = false;
+    let ready = Promise.resolve(false);
+    const say = (text, offer = false) => { waiting = text === TEXT.checking; message.textContent = text; recheck.hidden = !offer; notice.hidden = !text; };
     const live = () => !ended && location.search === search;
-    const end = () => { ended = true; controller.abort(); created.forEach(s => s.setEnabled(false)); say('세션이 변경되어 위치 동기를 중지했습니다'); };
+    const fresh = mine => !ended && mine === round;
+    const usable = mine => live() && access === 'ready' && mine === round;
+    const end = () => { ended = true; controller.abort(); created.forEach(s => s.setEnabled(false)); say(TEXT.ended); };
+    // Each answer is classified once: 401 ends the login, 403 is this account's refusal, and anything else unanswered (network,
+    // timeout, 409, 5xx, a body that is not JSON) is unconfirmed — neither a permission nor a logout.
+    const refusal = (kind, status = 0) => Object.assign(Error(kind), { kind, status });
     async function get(path) {
       const request = new AbortController(), abort = () => request.abort();
       controller.signal.addEventListener('abort', abort, { once: true });
+      if (controller.signal.aborted) abort();
       const timer = setTimeout(abort, 10000);
       try {
-        const r = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal });
-        if (!r.ok) throw Error('검사 접근 정보를 확인할 수 없습니다');
-        return await r.json();
+        let r;
+        try { r = await fetch(path, { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' }, signal: request.signal }); }
+        catch (_) { throw refusal('failed'); }
+        if (r.status === 401) throw refusal('ended', 401);
+        if (r.status === 403) throw refusal('denied', 403);
+        if (!r.ok) throw refusal('failed', r.status);
+        try { return await r.json(); } catch (_) { throw refusal('failed', r.status); }
       } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); }
     }
     const session = () => checking ||= get('/api/me').finally(() => { checking = null; });
     const ownerOf = me => me?.kind === 'member' && me.institution && me.sub ? JSON.stringify([me.institution, me.sub]) : null;
-    const ready = (async () => {
-      owner = ownerOf(await get('/api/me'));
-      rows = (await get('/api/studies')).studies || [];
-      if (!owner || ownerOf(await get('/api/me')) !== owner) throw Error('계정이 변경되었습니다');
-    })().then(() => true, () => { end(); return false; });
+    const keyOf = row => typeof row?.sourcePatientKey === 'string' && row.sourcePatientKey ? row.sourcePatientKey : null;
+    const opened = [...new Set((new URLSearchParams(search).get('StudyInstanceUIDs') || '').split(',').filter(Boolean))];
+    async function legacyKeys() {
+      const data = await get('/api/studies');
+      if (!Array.isArray(data?.studies)) throw refusal('failed');
+      return new Map(data.studies.filter(row => typeof row?.uid === 'string').map(row => [row.uid, keyOf(row)]));
+    }
+    // clinician-only: GET studies is refused to that role (api/src/clinician-policy.ts), so its narrow list GET clinician/studies is
+    // read instead — the worklist's own institution / tele / StudyAccess scope with the same server patient key. Pages follow the
+    // signed cursor verbatim until every study this viewer opened is seen or the list ends; a page of another shape refuses the whole
+    // read, and a 409 (the list changed between pages) starts again from the first page, at most twice.
+    async function clinicianPages(mine) {
+      const found = new Map();
+      let after = null, total = null, read = 0;
+      for (let page = 0; page < 200; page++) {
+        const data = await get('/api/clinician/studies?limit=100' + (after === null ? '' : '&after=' + encodeURIComponent(after)));
+        if (!fresh(mine)) throw refusal('failed');
+        const p = data?.pagination, list = data?.studies;
+        if (!p || !Array.isArray(list) || list.length > 100 || p.limit !== 100 || p.offset !== read ||
+            !Number.isSafeInteger(p.total) || (total !== null && p.total !== total) ||
+            !(p.next === null || (typeof p.next === 'string' && p.next.length > 0 && p.next.length <= 4096 && p.next !== after)) ||
+            (p.next === null ? read + list.length !== p.total : list.length !== 100) ||
+            list.some(row => typeof row?.uid !== 'string' || !row.uid)) throw refusal('failed');
+        for (const row of list) found.set(row.uid, keyOf(row));
+        read += list.length; total = p.total; after = p.next;
+        if (after === null || (opened.length && opened.every(uid => found.has(uid)))) break;
+      }
+      return found;
+    }
+    async function clinicianKeys(mine) {
+      for (let attempt = 0; ; attempt++) {
+        try { return await clinicianPages(mine); }
+        catch (error) { if (error?.status !== 409 || attempt >= 2 || !fresh(mine)) throw error; }
+      }
+    }
+    // One access check: the account (/me), the study list its role may read, then the same account and role again. A later round
+    // (Recheck Access, a role change) and the end of this mount drop an earlier round's answers.
+    function confirm() {
+      const mine = ++round; access = 'checking'; keys = new Map();
+      ready = (async () => {
+        const me = await get('/api/me');
+        if (!fresh(mine)) throw refusal('failed');
+        const account = ownerOf(me);
+        if (!account) throw refusal('denied');
+        if (owner !== null && account !== owner) throw refusal('ended');
+        owner = account;
+        const role = kinViewerClinicianOnly(me), found = role ? await clinicianKeys(mine) : await legacyKeys();
+        if (!fresh(mine)) throw refusal('failed');
+        const again = await get('/api/me');
+        if (!fresh(mine)) throw refusal('failed');
+        if (ownerOf(again) !== owner) throw refusal('ended');
+        if (kinViewerClinicianOnly(again) !== role) throw refusal('changed');
+        return [role, found];
+      })().then(([role, found]) => {
+        if (!fresh(mine)) return false;
+        clinician = role; keys = found; access = 'ready';
+        if (waiting) say(TEXT.confirmed);
+        return true;
+      }, error => {
+        if (!fresh(mine)) return false;
+        if (error?.kind === 'ended') { end(); return false; }
+        access = error?.kind === 'denied' || error?.kind === 'changed' ? error.kind : 'failed';
+        // Said at once only to someone waiting (a sync event or Recheck Access); otherwise at the next sync event.
+        if (waiting) say(TEXT[access], true);
+        return false;
+      });
+      return ready;
+    }
+    function roleChanged() { round++; access = 'changed'; keys = new Map(); ready = Promise.resolve(false); say(TEXT.changed, true); }
+    recheck.addEventListener('click', () => { if (ended || access === 'checking' || access === 'ready') return; say(TEXT.checking); confirm(); });
     function view(info) {
       const v = services.cornerstoneViewportService.getCornerstoneViewport(info.viewportId);
       const g = services.viewportGridService.getState().viewports.get(info.viewportId);
       if (!v || !g || v.getRenderingEngine().id !== info.renderingEngineId) return null;
       const ids = v.getImageIds?.() || [], sets = g.displaySetInstanceUIDs || [];
       const d = sets.length === 1 && services.displaySetService.getDisplaySetByUID(sets[0]);
-      const patient = rows.find(r => r.uid === d?.StudyInstanceUID)?.sourcePatientKey;
       const classic = v.type === 'stack' && d?.Modality === 'CT' && d?.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2' &&
         d.images?.length === ids.length && d.images.every(i => i.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2') &&
         ids.length > 1 && ids.length <= 2000 && ids.every(id => id.includes('/studies/'+d.StudyInstanceUID+'/series/'+d.SeriesInstanceUID+'/'));
-      return { v, ids, patient, classic, index: v.getCurrentImageIdIndex?.(),
+      return { v, ids, study: d?.StudyInstanceUID, patient: null, classic, index: v.getCurrentImageIdIndex?.(),
         planes: classic ? ids.map(id => core.metaData.get('imagePlaneModule', id)) : [],
         signature: JSON.stringify([sets, ids, v.getCurrentImageId?.()]) };
     }
@@ -2297,20 +2389,29 @@ function kinCreateCTSync() {
         const sync = original(id, options), fire = sync.fireEvent;
         created.add(sync); let serial = 0;
         const destroy = sync.destroy;
-        sync.destroy = function (...args) { ++serial; created.delete(sync); say('위치 동기 꺼짐'); return destroy.apply(this, args); };
+        sync.destroy = function (...args) { ++serial; created.delete(sync); if (!ended) say('위치 동기 꺼짐'); return destroy.apply(this, args); };
         sync.fireEvent = async function (sourceInfo, event) {
           if (!live() || sync.isDisabled()) return;
           const ticket = ++serial, source = view(sourceInfo), targets = sync.getTargetViewports().filter(t => t.viewportId !== sourceInfo.viewportId);
           const snapshots = targets.map(view);
-          if (!(await ready) || !live() || ticket !== serial || !current(sourceInfo, source)) return;
+          // Refused or unconfirmed: nothing moves, and the reason stays with Recheck Access. Still asking: this event waits for it.
+          if (access !== 'ready' && access !== 'checking') { say(TEXT[access], true); return; }
+          if (access === 'checking') say(TEXT.checking);
+          const mine = round;
+          if (!(await ready) || !usable(mine) || ticket !== serial || !current(sourceInfo, source)) return;
           try {
             const me = await session();
             if (ownerOf(me) !== owner) { end(); return; }
-            if (!live() || sync.isDisabled() || ticket !== serial || !current(sourceInfo, source)) return;
+            if (!usable(mine)) return;
+            if (kinViewerClinicianOnly(me) !== clinician) { roleChanged(); return; }
+            if (sync.isDisabled() || ticket !== serial || !current(sourceInfo, source)) return;
+            // The patient key is attached only now, from the list this confirmed round read (an event queued behind the check
+            // would otherwise carry the empty map it saw when it fired).
+            for (const v of [source, ...snapshots]) if (v) v.patient = keys.get(v.study) ?? null;
             const matches = snapshots.map(t => kinCTSyncModel.match(source, t));
             await Promise.all(matches.map((m, i) => m.index < 0 ? null : core.imageLoader.loadAndCacheImage(snapshots[i].ids[m.index])));
             // Native movement now uses cached pixels. A late load cannot choose a replaced stack or an OFF group.
-            if (!live() || sync.isDisabled() || ticket !== serial || !current(sourceInfo, source) || targets.some((t, i) => !current(t, snapshots[i]) || !sync.hasTargetViewport(t.renderingEngineId, t.viewportId))) return;
+            if (!usable(mine) || sync.isDisabled() || ticket !== serial || !current(sourceInfo, source) || targets.some((t, i) => !current(t, snapshots[i]) || !sync.hasTargetViewport(t.renderingEngineId, t.viewportId))) return;
             matches.forEach((m, i) => {
               sync.setOptions(targets[i].viewportId, { ...sync.getOptions(targets[i].viewportId), disabled: m.index < 0, useInitialPosition: true });
               if (m.index >= 0) core.utilities.spatialRegistrationMetadataProvider.add([targets[i].viewportId, sourceInfo.viewportId], [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);
@@ -2318,7 +2419,10 @@ function kinCreateCTSync() {
             const denied = matches.find(m => m.index < 0);
             say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 CT 위치 동기');
             return fire.call(sync, sourceInfo, event);
-          } catch (_) { if (live()) say('위치 동기를 적용하지 못했습니다. 영상과 연결 상태를 확인하세요'); }
+          } catch (error) {
+            if (error?.kind === 'ended') { end(); return; }
+            if (live()) say(error?.kind === 'denied' ? '위치 동기를 적용하지 못했습니다. 이 계정의 검사 접근 권한을 확인할 수 없습니다' : '위치 동기를 적용하지 못했습니다. 영상과 연결 상태를 확인하세요');
+          }
         };
         return sync;
       });
@@ -2328,6 +2432,10 @@ function kinCreateCTSync() {
     window.addEventListener('storage', onStorage);
     try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', onMessage); } catch (_) {}
     stop = () => { end(); creators.forEach(([type, fn]) => groups.addSynchronizerType(type, fn)); window.removeEventListener('storage', onStorage); channel?.close(); notice.remove(); };
+    // A document whose login already ended (its own logout receivers heard it while this extension was down) asks nothing. While
+    // mounted, this extension compares every /me with its own account and does not follow the shared verdict: a 403 on another
+    // panel's /me is that panel's refusal, and a sync event that meets one here only says it could not apply (not an end).
+    if (kinViewerSession.ended()) end(); else confirm();
   }
   return { id: 'kin.ct-sync', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
