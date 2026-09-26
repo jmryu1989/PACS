@@ -18,21 +18,39 @@ Clinician Home (clinician.html + clinician.js + auth.js) against S5-U1b-shaped l
   04  English controls / Korean explanations, no avoided words, text >= 12px, hit targets >= 24px, keyboard (Enter on
       Compare), external strings as text.
 
-Viewer (config/ohif.js, the kinCreate* extensions) in a stub OHIF page (cornerstone, tool group, grid and services
-are in-page stubs; the Findings / Job / Tech Note / Hanging Protocol modules are stubs that only record a mount):
+Viewer (config/ohif.js, the kinCreate* extensions) in a stub OHIF page (cornerstone, grid and services are in-page
+stubs; tool groups, the tool group service, the toolbar, the cornerstone commands and the longitudinal mode that builds
+them are modelled on the pinned bundle; the Findings / Job / Tech Note / Hanging Protocol modules are stubs that only
+record a mount):
   05  a clinician-only session (/me, Keycloak default roles ignored): Measurements & Key Images reads
       GET studies/:uid/viewer-items with limit=100 and the signed cursor verbatim (never includeHidden or recheck),
       shows the saved key image and measurements as Read-only rows (the verified saved measurement drawn locked, the
       unverified one marked 재확인 필요), and offers no create / link / save control; the manual tool refuses a new
       measurement and both SR commands refuse; no Findings, Job or Tech Note module is mounted; the layout panel keeps
       only its status line. Controls: radiologist and mixed sessions get the writer panel and every module; an
-      unanswered /me leaves the panel without controls and mounts the modules as before; the same file without the
-      read-only toolbar, or with the modules un-gated, offers them to the clinician.
+      unanswered /me leaves the panel without controls and mounts no write module (Astra S5-U2b-R-001 F02 changed
+      this expectation: an error is neither permission nor refusal); the same file without the read-only toolbar, or
+      with the modules un-gated, offers them to the clinician.
   06  states: loading, empty (final, no item), withheld (not final), failed (404, 409 and a 400 as sent; another
       study's answer and a page of another report version refused whole) and a 403 denial; Refresh reads again.
       Control: the same file without the report-version pin paints the mixed pages.
   07  A->B->A across the comparison study: a late answer for A never paints while A's newer read is pending, nor
       over the prior. Control: the same file with only the UID check paints it.
+  08  (F01) the viewer's own authoring paths are closed for a clinician-only document: the Measurements split button
+      and every authoring item of More Tools leave the toolbar (viewing items stay and run); every authoring tool is
+      refused through the toolbar command, the hotkey command, the tool group itself and a tool group created later,
+      and a tool activated around the guard is taken down at once; only viewing tools stay Active/Passive (drawn marks
+      stay Enabled) and no mark is drawn; the annotation menu, label/measurement edits, the arrow text prompt and the
+      measurement panel's rename/lock refuse. Controls: a radiologist keeps the toolbar and draws; the same file with
+      the policy switched off lets the clinician draw.
+  09  (F02) the write-module gate: errors (500, 503, network, bad JSON) mount nothing and a later successful /me of
+      the document decides (writer mounts, clinician-only does not); a document the panel confirmed clinician-only
+      mounts nothing when the gate's own /me fails, and keeps that through mode re-entry with /me failing (toolbar
+      trimmed, tools demoted, layout panel status only). Control: the previous gate (own read only, error = writer).
+  10  (F03) the periodic/focus check follows the final report: final:false takes rows and marks down to withheld at
+      once, a new version takes them down and reads the whole version again (a held then failed read leaves nothing),
+      and a check answer held across A->B->A never takes the new A down. Control: the same file that drops the check
+      answer keeps the retracted rows.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is S5-U1b (tests/clinician_read_live.py, hosted synthetic stack only).
@@ -209,6 +227,7 @@ RO_NOTE = ("읽기 전용 · 확정 판독문에 저장된 측정·키 이미지
            "서버도 쓰기를 거절합니다.")
 RO_WITHHELD = "확정 판독문이 아니어서 저장된 측정·키 이미지를 표시하지 않습니다 · 읽기 전용"
 RO_TOOL = "읽기 전용 화면입니다. 측정을 만들지 않습니다."
+RO_EDIT = "읽기 전용 화면입니다. 측정·표식을 편집하지 않습니다."
 RO_SR = "읽기 전용 화면에서는 SR을 만들거나 저장하지 않습니다."
 RO_DENIED = "이 검사의 저장 항목을 읽을 수 없습니다(HTTP 403). 서버가 거절했습니다."
 LOADING = "저장 항목 확인 중…"
@@ -217,6 +236,23 @@ WRITER_CONTROLS = {"Download SR", "Store SR", "Length", "Angle", "Ellipse ROI", 
                    "Restore", "History", "Recheck Source", "Retry Request", "Use Latest & Keep Changes",
                    "Discard Held Changes", "Resume Held Work", "Discard Held Work"}
 MODULES = {"findings", "jobs", "tech-note", "hanging-protocol"}
+WRITE_MODULES = {"findings", "jobs", "tech-note"}
+LATER = ["kin.viewer-findings", "kin.viewer-layout", "kin.viewer-jobs", "kin.viewer-tech-note"]
+
+# Pinned longitudinal mode (modes/longitudinal toolbarButtons + moreTools, initToolGroups); see VIEWER_HARNESS.
+PRIMARY_SECTION = ["MeasurementTools", "Zoom", "Pan", "TrackballRotate", "WindowLevel", "Capture", "Layout", "Crosshairs",
+                   "MoreTools"]
+VIEW_SECTION = [x for x in PRIMARY_SECTION if x != "MeasurementTools"]
+MORE_TOOLS = ["Reset", "rotate-right", "flipHorizontal", "ImageSliceSync", "ReferenceLines", "ImageOverlayViewer",
+              "StackScroll", "invert", "Probe", "Cine", "Angle", "CobbAngle", "Magnify", "CalibrationLine", "TagBrowser",
+              "AdvancedMagnify", "UltrasoundDirectionalTool", "WindowLevelRegion"]
+VIEW_MORE = ["Reset", "rotate-right", "flipHorizontal", "ImageSliceSync", "ReferenceLines", "ImageOverlayViewer",
+             "StackScroll", "invert", "Cine", "Magnify", "TagBrowser"]
+VIEWING = {"WindowLevel", "Pan", "Zoom", "StackScroll", "TrackballRotate", "Crosshairs", "Magnify"}
+AUTHORING = ["ArrowAnnotate", "Length", "Angle", "Bidirectional", "RectangleROI", "EllipticalROI", "CircleROI", "Probe",
+             "DragProbe", "CobbAngle", "CalibrationLine", "PlanarFreehandROI", "SplineROI", "LivewireContour",
+             "UltrasoundDirectionalTool", "WindowLevelRegion", "PlanarFreehandContourSegmentation", "AdvancedMagnify"]
+ALL_GROUPS = ["default", "mpr", "SRToolGroup", "volume3d"]
 
 # Script assets the wrappers load, answered with stubs that only record a mount (the real modules have their own tests).
 MODULE_STUBS = {
@@ -237,23 +273,145 @@ const viewport = { id: 'syn-vp', renderingEngineId: 'syn-engine', type: 'stack',
   getCurrentImageId: () => window.synImage(), getImageIds: () => [window.synImage()], setImageIdIndex: async () => {},
   getCamera: () => ({ viewPlaneNormal: [0, 0, -1], viewUp: [0, -1, 0] }), render() {} };
 const annotations = new Map(), locks = new Map();
+window.synEdits = [];
 window.cornerstone = { Enums: { Events: { STACK_NEW_IMAGE: 'syn-stack-new-image' } },
   metaData: { get: (type) => type === 'imagePlaneModule' ? { frameOfReferenceUID: 'SYN-FOR' } : undefined },
   cache: { getImage: () => null }, getEnabledElement: () => ({ viewport }), getEnabledElements: () => [] };
+// A tool's own mouse-down creation: a new unlocked mark in the annotation state (the harness counts these as syn-native-*).
+let drawn = 0;
 const tool = name => ({ configuration: name === 'EllipticalROI'
     ? { statsCalculator: { statsCallback() {}, getStatistics: () => ({ array: [] }) }, getTextLines: () => [] } : { getTextLines: () => [] },
-  addNewAnnotation() { window.synNative.push('add ' + name); return { annotationUID: 'syn-native-' + name }; } });
+  addNewAnnotation() {
+    window.synNative.push('add ' + name);
+    const uid = 'syn-native-' + (++drawn);
+    annotations.set(uid, { annotationUID: uid, metadata: { toolName: name, referencedImageId: window.synImage() }, data: { handles: { points: [] }, text: '' } });
+    return { annotationUID: uid }; } });
 window.synTools = { EllipticalROI: tool('EllipticalROI') };
-const group = { getToolInstance: name => window.synTools[name], addTool: name => { window.synTools[name] = window.synTools[name] || tool(name); },
-  getActivePrimaryMouseButtonTool: () => null, setToolPassive() {}, setToolActive() {} };
+
+// ── The pinned OHIF around config/ohif.js: cornerstone3D tool groups (modes, primary binding, setToolPassive keeping a
+// tool with another binding Active), extension-cornerstone ToolGroupService (TOOLGROUP_CREATED before tools and modes,
+// TOOL_ACTIVATED), core ToolbarService (add only if absent, remove, sections) and the setToolActive / setToolActiveToolbar
+// actions, and the longitudinal mode's initToolGroups + toolbarButtons + moreTools, built after the extensions' onModeEnter.
+const PRIMARY = 1, SECONDARY = 2, AUXILIARY = 4, WHEEL = 524288;
+const bus = () => { const handlers = new Map(); return {
+  subscribe: (event, fn) => { const set = handlers.get(event) || new Set(); set.add(fn); handlers.set(event, set); return { unsubscribe: () => set.delete(fn) }; },
+  emit: (event, detail) => { for (const fn of [...(handlers.get(event) || [])]) fn(detail); } }; };
+const groupBus = bus(), barBus = bus(), groups = new Map();
+class SynGroup {
+  constructor(id) { this.id = id; this.toolOptions = {}; this.instances = {}; }
+  hasTool(name) { return Object.hasOwn(this.instances, name); }
+  addTool(name) { if (!this.hasTool(name)) { this.instances[name] = window.synTools[name] ||= tool(name); this.toolOptions[name] = { mode: 'Disabled', bindings: [] }; } }
+  getToolInstance(name) { return this.instances[name]; }
+  getToolOptions(name) { return this.toolOptions[name]; }
+  setToolActive(name, options = {}) {
+    if (!this.hasTool(name)) return;
+    this.toolOptions[name] = { mode: 'Active', bindings: [...(options.bindings || [])] };
+    groupBus.emit('syn-tool-activated', { toolGroupId: this.id, toolName: name, toolBindingsOptions: options });
+  }
+  setToolPassive(name) {
+    if (!this.hasTool(name)) return;
+    const bindings = (this.toolOptions[name].bindings || []).filter(b => b.mouseButton !== PRIMARY || b.modifierKey);
+    this.toolOptions[name] = { mode: bindings.length ? 'Active' : 'Passive', bindings };
+  }
+  setToolEnabled(name) { if (this.hasTool(name)) this.toolOptions[name] = { mode: 'Enabled', bindings: [] }; }
+  setToolDisabled(name) { if (this.hasTool(name)) this.toolOptions[name] = { mode: 'Disabled', bindings: [] }; }
+  getActivePrimaryMouseButtonTool() {
+    return Object.keys(this.toolOptions).find(name => this.toolOptions[name].mode === 'Active' &&
+      this.toolOptions[name].bindings.some(b => b.mouseButton === PRIMARY && !b.modifierKey));
+  }
+}
+window.SynGroup = SynGroup;
+const toolGroupService = {
+  EVENTS: { TOOLGROUP_CREATED: 'syn-toolgroup-created', TOOL_ACTIVATED: 'syn-tool-activated' }, subscribe: groupBus.subscribe,
+  getToolGroup: id => groups.get(id || 'default'), getToolGroupIds: () => [...groups.keys()],
+  createToolGroupAndAddTools(id, tools) {
+    const group = new SynGroup(id); groups.set(id, group); groupBus.emit('syn-toolgroup-created', { toolGroupId: id });
+    for (const mode of ['active', 'passive', 'enabled', 'disabled']) for (const t of tools[mode] || []) group.addTool(t.toolName);
+    for (const t of tools.active || []) group.setToolActive(t.toolName, { bindings: t.bindings });
+    for (const t of tools.passive || []) group.setToolPassive(t.toolName);
+    for (const t of tools.enabled || []) group.setToolEnabled(t.toolName);
+    for (const t of tools.disabled || []) group.setToolDisabled(t.toolName);
+    return group;
+  },
+  destroy() { groups.clear(); },
+};
+const bar = { buttons: {}, buttonSections: {} }, barChanged = () => barBus.emit('syn-toolbar-modified');
+const toolbarService = {
+  EVENTS: { TOOL_BAR_MODIFIED: 'syn-toolbar-modified' }, state: bar, subscribe: barBus.subscribe,
+  reset() { bar.buttons = {}; bar.buttonSections = {}; },
+  addButtons(buttons) { for (const b of buttons) if (!bar.buttons[b.id]) bar.buttons[b.id] = b; barChanged(); },
+  removeButton(id) { delete bar.buttons[id]; barChanged(); },
+  createButtonSection(key, ids) { if (bar.buttonSections[key]) bar.buttonSections[key].push(...ids); else bar.buttonSections[key] = ids; barChanged(); },
+  clearButtonSection(key) { bar.buttonSections[key] = []; barChanged(); },
+  getButtons: () => bar.buttons, getButton: id => bar.buttons[id], refreshToolbarState() { barChanged(); },
+};
+const activeTools = { toolGroupIds: ['default', 'mpr', 'SRToolGroup', 'volume3d'] };
+const toolbarCommand = { commandName: 'setToolActiveToolbar', commandOptions: activeTools };
+const item = (id, commands = toolbarCommand) => ({ id, label: id, commands });
+const toolbarButtons = () => [
+  { id: 'MeasurementTools', uiType: 'ohif.splitButton', props: { groupId: 'MeasurementTools', primary: item('Length'),
+    items: ['Length', 'Bidirectional', 'ArrowAnnotate', 'EllipticalROI', 'RectangleROI', 'CircleROI', 'PlanarFreehandROI', 'SplineROI', 'LivewireContour'].map(id => item(id)) } },
+  ...['Zoom', 'WindowLevel', 'Pan', 'TrackballRotate'].map(id => ({ id, uiType: 'ohif.radioGroup', props: { commands: toolbarCommand } })),
+  { id: 'Capture', uiType: 'ohif.radioGroup', props: { commands: 'showDownloadViewportModal' } },
+  { id: 'Layout', uiType: 'ohif.layoutSelector', props: { rows: 3, columns: 4 } },
+  { id: 'Crosshairs', uiType: 'ohif.radioGroup', props: { commands: { commandName: 'setToolActiveToolbar', commandOptions: { toolGroupIds: ['mpr'] } } } },
+  { id: 'MoreTools', uiType: 'ohif.splitButton', props: { groupId: 'MoreTools', primary: item('Reset', 'resetViewport'), items: [
+    item('Reset', 'resetViewport'), item('rotate-right', 'rotateViewportCW'), item('flipHorizontal', 'flipViewportHorizontal'),
+    item('ImageSliceSync', { commandName: 'toggleSynchronizer', commandOptions: { type: 'imageSlice' } }),
+    item('ReferenceLines', 'toggleEnabledDisabledToolbar'), item('ImageOverlayViewer', 'toggleEnabledDisabledToolbar'), item('StackScroll'),
+    item('invert', 'invertViewport'), item('Probe'), item('Cine', 'toggleCine'), item('Angle'), item('CobbAngle'), item('Magnify'),
+    item('CalibrationLine'), item('TagBrowser', 'openDICOMTagViewer'), item('AdvancedMagnify', 'toggleActiveDisabledToolbar'),
+    item('UltrasoundDirectionalTool'), item('WindowLevelRegion')] } }];
+const names = list => list.map(toolName => ({ toolName }));
+const viewing = [{ toolName: 'WindowLevel', bindings: [{ mouseButton: PRIMARY }] }, { toolName: 'Pan', bindings: [{ mouseButton: AUXILIARY }] },
+  { toolName: 'Zoom', bindings: [{ mouseButton: SECONDARY }] }, { toolName: 'StackScroll', bindings: [{ mouseButton: WHEEL }] }];
+window.synMode = () => {
+  toolbarService.reset();
+  toolGroupService.createToolGroupAndAddTools('default', { active: viewing, passive: names(['Length', 'ArrowAnnotate', 'Bidirectional',
+    'DragProbe', 'Probe', 'EllipticalROI', 'CircleROI', 'RectangleROI', 'StackScroll', 'Angle', 'CobbAngle', 'Magnify', 'CalibrationLine',
+    'PlanarFreehandContourSegmentation', 'UltrasoundDirectionalTool', 'PlanarFreehandROI', 'SplineROI', 'LivewireContour', 'WindowLevelRegion']),
+    enabled: names(['ImageOverlayViewer', 'ReferenceLines', 'SRSCOORD3DPoint']), disabled: names(['AdvancedMagnify']) });
+  toolGroupService.createToolGroupAndAddTools('SRToolGroup', { active: viewing, passive: names(['SRLength', 'SRArrowAnnotate', 'SRBidirectional',
+    'SREllipticalROI', 'SRCircleROI', 'SRPlanarFreehandROI', 'SRRectangleROI', 'WindowLevelRegion']), enabled: names(['DICOMSRDisplay']) });
+  toolGroupService.createToolGroupAndAddTools('mpr', { active: viewing, passive: names(['Length', 'ArrowAnnotate', 'Bidirectional', 'DragProbe',
+    'Probe', 'EllipticalROI', 'CircleROI', 'RectangleROI', 'StackScroll', 'Angle', 'CobbAngle', 'PlanarFreehandROI', 'WindowLevelRegion',
+    'PlanarFreehandContourSegmentation']), disabled: names(['Crosshairs', 'AdvancedMagnify', 'ReferenceLines']) });
+  toolGroupService.createToolGroupAndAddTools('volume3d', { active: [{ toolName: 'TrackballRotate', bindings: [{ mouseButton: PRIMARY }] },
+    { toolName: 'Zoom', bindings: [{ mouseButton: SECONDARY }] }, { toolName: 'Pan', bindings: [{ mouseButton: AUXILIARY }] }] });
+  toolbarService.addButtons(toolbarButtons());
+  toolbarService.createButtonSection('primary', ['MeasurementTools', 'Zoom', 'Pan', 'TrackballRotate', 'WindowLevel', 'Capture', 'Layout', 'Crosshairs', 'MoreTools']);
+};
 window.cornerstoneTools = {
   annotation: {
     locking: { setAnnotationLocked: (uid, value) => { locks.set(uid, value); }, isAnnotationLocked: uid => locks.get(uid) === true },
     state: { getAnnotation: uid => annotations.get(uid), getAllAnnotations: () => [...annotations.values()],
       removeAnnotation: uid => { annotations.delete(uid); }, addAnnotation: a => { annotations.set(a.annotationUID, a); } },
     selection: { setAnnotationSelected() {} } },
-  ToolGroupManager: { getToolGroupForViewport: () => group }, Enums: { MouseBindings: { Primary: 1 } } };
-window.synDrawn = () => [...annotations.values()].map(a => [a.metadata.toolName, a.data.label, locks.get(a.annotationUID) === true]);
+  ToolGroupManager: { getToolGroupForViewport: () => groups.get('default'), getToolGroup: id => groups.get(id), getAllToolGroups: () => [...groups.values()] },
+  Enums: { MouseBindings: { Primary: PRIMARY } } };
+window.synDrawn = () => [...annotations.values()].filter(a => !String(a.annotationUID).startsWith('syn-native-'))
+  .map(a => [a.metadata.toolName, a.data.label, locks.get(a.annotationUID) === true]);
+window.synMarks = () => [...annotations.values()].filter(a => String(a.annotationUID).startsWith('syn-native-')).map(a => a.metadata.toolName);
+window.synClearMarks = () => { for (const uid of [...annotations.keys()]) if (uid.startsWith('syn-native-')) annotations.delete(uid); };
+window.synGroup = id => groups.get(id);
+window.synModes = id => Object.fromEntries(Object.entries(groups.get(id)?.toolOptions || {}).map(([name, o]) => [name, o.mode]));
+window.synToolbar = () => ({ primary: [...(bar.buttonSections.primary || [])], buttons: Object.keys(bar.buttons).sort(),
+  more: bar.buttons.MoreTools ? bar.buttons.MoreTools.props.items.map(i => i.id) : null, morePrimary: bar.buttons.MoreTools?.props.primary?.id ?? null });
+// A press on the rendered primary section, as ToolbarService.recordInteraction runs it; 'missing' when the section offers no such control.
+window.synClick = id => {
+  const offered = (bar.buttonSections.primary || []).flatMap(key => { const b = bar.buttons[key]; if (!b) return [];
+    return Array.isArray(b.props.items) ? [b.props.primary, ...b.props.items].filter(Boolean) : [{ id: key, ...b.props }]; });
+  const found = offered.find(x => x.id === id);
+  if (!found) return 'missing';
+  commandsManager.run(found.commands, { ...found, itemId: found.id }); return 'ran';
+};
+// A primary-button drag on the viewport: the active primary tool of that group handles it.
+window.synDraw = (id = 'default') => {
+  const group = groups.get(id), name = group && group.getActivePrimaryMouseButtonTool();
+  if (!name) return 'none';
+  if (['WindowLevel', 'Pan', 'Zoom', 'StackScroll', 'TrackballRotate', 'Crosshairs', 'Magnify'].includes(name)) return 'view ' + name;
+  return group.getToolInstance(name).addNewAnnotation({ detail: { element } }) ? 'mark ' + name : 'refused ' + name;
+};
 const services = {
   cornerstoneViewportService: { getCornerstoneViewport: () => viewport },
   viewportGridService: { EVENTS: { ACTIVE_VIEWPORT_ID_CHANGED: 'syn-active' }, getActiveViewportId: () => 'syn-vp',
@@ -261,12 +419,51 @@ const services = {
       viewports: new Map([['syn-vp', { viewportId: 'syn-vp', x: 0, y: 0, width: 1, height: 1, displaySetInstanceUIDs: [] }]]) }),
     subscribe: () => ({ unsubscribe() {} }), setDisplaySetsForViewport() {}, setActiveViewportId() {} },
   displaySetService: { getActiveDisplaySets: () => [], getDisplaySetByUID: () => undefined },
-  measurementService: { getMeasurements: () => [], getMeasurement: () => undefined, remove() {}, update() {}, getSourceMappings: () => [] },
+  measurementService: { getMeasurements: () => [], getMeasurement: () => undefined, remove() {}, getSourceMappings: () => [],
+    update: (uid, measurement, notYetUpdatedAtSource) => { window.synEdits.push(['update', uid, notYetUpdatedAtSource === true]); },
+    toggleLockMeasurement: uid => { window.synEdits.push(['lock', uid]); } },
   uiNotificationService: { show: notice => { window.synNotices.push(notice.message); } },
+  toolGroupService, toolbarService,
 };
+window.synServices = services;
 const commands = new Map(['downloadReport', 'storeMeasurements'].map(name => [name, { commandFn: () => { window.synNative.push('sr ' + name); } }]));
-const commandsManager = { getCommand: (name, context) => context === 'CORNERSTONE_STRUCTURED_REPORT' ? commands.get(name) : undefined,
-  registerCommand: (context, name, command) => { if (context === 'CORNERSTONE_STRUCTURED_REPORT') commands.set(name, command); } };
+// The CORNERSTONE context: the tool activation actions as the pinned extension runs them, the viewing actions, and the
+// annotation menu / label / measurement / arrow-text commands (recorded so a refusal is visible as their absence).
+const cornerstoneCommands = new Map(), native = (name, fn) => cornerstoneCommands.set(name, { commandFn: fn });
+const setToolActive = ({ toolName, toolGroupId = null }) => {
+  const group = toolGroupService.getToolGroup(toolGroupId);
+  if (!group || !group.hasTool(toolName)) return;
+  const current = group.getActivePrimaryMouseButtonTool();
+  if (current) group.setToolPassive(current);
+  group.setToolActive(toolName, { bindings: [{ mouseButton: PRIMARY }] });
+};
+native('setToolActive', setToolActive);
+native('setToolActiveToolbar', ({ value, itemId, toolName, toolGroupIds = [] }) => {
+  toolName = toolName || itemId || value;
+  (toolGroupIds.length ? toolGroupIds : toolGroupService.getToolGroupIds()).forEach(toolGroupId => setToolActive({ toolName, toolGroupId }));
+});
+native('toggleActiveDisabledToolbar', ({ value, itemId, toolGroupId }) => {
+  const toolName = itemId || value, group = toolGroupService.getToolGroup(toolGroupId);
+  if (!group || !group.hasTool(toolName)) return;
+  if (['Active', 'Passive', 'Enabled'].includes(group.getToolOptions(toolName).mode)) group.setToolDisabled(toolName); else setToolActive({ toolName, toolGroupId });
+});
+for (const name of ['resetViewport', 'rotateViewportCW', 'flipViewportHorizontal', 'toggleSynchronizer', 'toggleEnabledDisabledToolbar',
+  'invertViewport', 'toggleCine', 'openDICOMTagViewer', 'showDownloadViewportModal']) native(name, () => { window.synNative.push('view ' + name); });
+native('showCornerstoneContextMenu', () => { window.synNative.push('menu'); });
+native('deleteMeasurement', ({ uid }) => { window.synNative.push('delete ' + uid); });
+native('setMeasurementLabel', ({ uid }) => { window.synNative.push('label ' + uid); });
+native('updateMeasurement', ({ uid }) => { window.synNative.push('update ' + uid); });
+native('arrowTextCallback', ({ callback }) => { window.synNative.push('arrow-text'); callback('SYN typed'); });
+const commandsManager = {
+  getCommand: (name, context) => context === 'CORNERSTONE_STRUCTURED_REPORT' ? commands.get(name)
+    : context === 'CORNERSTONE' || context === undefined ? cornerstoneCommands.get(name) : undefined,
+  registerCommand: (context, name, command) => {
+    if (context === 'CORNERSTONE_STRUCTURED_REPORT') commands.set(name, command); else if (context === 'CORNERSTONE') cornerstoneCommands.set(name, command); },
+  runCommand: (name, options = {}, context) => { const command = commandsManager.getCommand(name, context); return command?.commandFn({ ...(command.options || {}), ...options }); },
+  run: (toRun, options = {}) => { for (const c of [toRun].flat().filter(Boolean))
+    typeof c === 'string' ? commandsManager.runCommand(c, options) : commandsManager.runCommand(c.commandName, { ...(c.commandOptions || {}), ...options }, c.context); },
+};
+window.synRun = (name, options) => commandsManager.runCommand(name, options);
 window.synSR = name => { try { commands.get(name).commandFn({ measurementData: [] }); return 'ran'; } catch (error) { return 'refused: ' + error.message; } };
 window.synAddLength = () => String(window.synTools.Length.addNewAnnotation({ detail: { element } }));
 // The Tech Note bridge's dependencies as if loaded; the bridge itself and the Hanging Protocol editor record a mount.
@@ -285,13 +482,25 @@ window.kinViewerTechNote = () => window.synModule('tech-note', ['Tech Note']);
 window.KinViewerHangingProtocol = { mount: options => { window.synMounted.push('hanging-protocol');
   const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Save to Account'; options.host.append(b); return { end() {} }; } };
 const IDS = ['kin.viewer-history', 'kin.viewer-findings', 'kin.viewer-layout', 'kin.viewer-jobs', 'kin.viewer-tech-note'];
-window.synBoot = study => {
+let extensions = [];
+// As the viewer route does: extension onModeEnter first, then the mode builds its tool groups and toolbar. `enter` lets a
+// case enter the other extensions later (synEnter) in the same mode.
+window.synBoot = (study, enter = IDS) => {
   window.synStudy = study;
-  const extensions = IDS.map(id => window.config.extensions.find(e => e.id === id));
+  extensions = IDS.map(id => window.config.extensions.find(e => e.id === id));
   for (const e of extensions) e.preRegistration({ servicesManager: { services }, commandsManager, extensionManager: {} });
-  for (const e of extensions) e.onModeEnter();
+  window.synEnter(enter);
+  window.synMode();
+};
+window.synEnter = ids => { for (const e of extensions) if (ids.includes(e.id)) e.onModeEnter(); };
+// Mode exit and re-entry in the same document: extensions leave, the mode destroys its tool groups, and all of it is built again.
+window.synReenter = () => {
+  for (const e of extensions) e.onModeExit();
+  toolGroupService.destroy();
+  window.synEnter(IDS); window.synMode();
 };
 window.synSwitch = study => { window.synStudy = study; document.dispatchEvent(new Event('syn-stack-new-image')); };
+window.synFocus = () => { window.dispatchEvent(new Event('focus')); };
 </script>
 <script src="/harness/ohif.js"></script>
 </body></html>""".replace("%SERIES%", SERIES).replace("%SOP%", SOP)
@@ -326,12 +535,23 @@ KEY_RULE = "    return row && typeof row.sourcePatientKey === 'string' && row.so
 CLICK_CHECK = ("    if (otherUid !== null && (!other || other.uid === row.uid || patientKey(row) === null || "
                "patientKey(other) !== patientKey(row))) {\n")
 RO_TOOLBAR = "      if (readOnly()) { text(actions, 'p', READ_ONLY.note); return; }\n"
-MODULE_GATE = "kinViewerReadOnlySession().then(readOnly => readOnly ? null : ready)"
-NOTE_GATE = "if(readOnly)state='read-only';else connect();"
+MODULE_GATE = "kinViewerSession.decide().then(session => session === 'writer' ? ready : null)"
+NOTE_GATE = "if(session==='writer'){state='stopped';connect();}else state=session;"
+NOTE_CONNECT = "if(!active||state==='loading'||state==='ready'||kinViewerSession.readOnly())return;"
+MODULE_WATCH = "  kinViewerSession.onReadOnly(() => { epoch++; current?.stop(); current = null; });\n"
+NOTE_WATCH = "  kinViewerSession.onReadOnly(()=>{epoch++;if(active)state='read-only';current?.stop();current=null;});\n"
 VERSION_PIN = "(version !== null && page.reportVersion !== version) ||"
 VALID = "    const valid = ticket => !ended && ticket === generation && (!current() || current().study === scope);\n"
 PAGE_SEQ = "          if (seq !== readSequence) return;\n          if (++pages > 6"
-FINAL_SEQ = "        if (!valid(ticket) || seq !== readSequence) return;\n        suspended = false;\n        for (const head of heads) {"
+FINAL_SEQ = "        if (!valid(ticket) || seq !== readSequence) return;\n        readOnlyShow("
+POLICY = "    const nativeAuthoringClosed = () => readOnly();\n"
+DECIDE = "    decide() {\n      if (state === 'read-only') return Promise.resolve(state);\n"
+# The gate as it was before F02: its own /me only, and an error or a non-clinician answer counts as a writer.
+OLD_DECIDE = ("    decide() {\n      return fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' } })\n"
+              "        .then(response => response.ok ? response.json() : null)\n"
+              "        .then(me => kinViewerClinicianOnly(me) ? 'read-only' : 'writer', () => 'writer');\n")
+FINAL_CHECK = ("\n          .then(page => { if (readOnly()) confirmShown(ticket, seq, study, page, null); }, "
+               "error => { if (readOnly()) confirmShown(ticket, seq, study, null, error); })")
 
 
 class ClinicianViewerDOMTest(unittest.TestCase):
@@ -345,13 +565,21 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         }
         cls.config_variants = {
             "writer-toolbar": variant(CONFIG, [(RO_TOOLBAR, "", 1)], "config/ohif.js"),
-            "modules-open": variant(CONFIG, [(MODULE_GATE, "kinViewerReadOnlySession().then(() => ready)", 2),
-                                             (NOTE_GATE, "connect();", 1)], "config/ohif.js"),
+            "modules-open": variant(CONFIG, [(MODULE_GATE, "kinViewerSession.decide().then(() => ready)", 2),
+                                             (NOTE_GATE, "state='stopped';connect();", 1),
+                                             (NOTE_CONNECT, "if(!active||state==='loading'||state==='ready')return;", 1),
+                                             (MODULE_WATCH, "", 2), (NOTE_WATCH, "", 1)],
+                                    "config/ohif.js"),
             "no-version-pin": variant(CONFIG, [(VERSION_PIN, "", 1)], "config/ohif.js"),
             "uid-only": variant(CONFIG, [(VALID, "    const valid = ticket => !ended;\n", 1),
                                          (PAGE_SEQ, "          if (++pages > 6", 1),
-                                         (FINAL_SEQ, "        suspended = false;\n        for (const head of heads) {", 1)],
+                                         (FINAL_SEQ, "        readOnlyShow(", 1)],
                                 "config/ohif.js"),
+            "policy-off": variant(CONFIG, [(POLICY, "    const nativeAuthoringClosed = () => false;\n", 1)], "config/ohif.js"),
+            "gate-as-before": variant(CONFIG, [(DECIDE, OLD_DECIDE, 1),
+                                               (NOTE_CONNECT, "if(!active||state==='loading'||state==='ready')return;", 1)],
+                                      "config/ohif.js"),
+            "no-final-check": variant(CONFIG, [(FINAL_CHECK, "", 1)], "config/ohif.js"),
         }
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -372,6 +600,8 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.cursors = {}
         self.hold_items = set()
         self.held_items = []
+        self.hold_probes = set()
+        self.held_probes = []
         self.item_requests = []
         self.viewer_opens = []
         self.me_requests = 0
@@ -434,7 +664,13 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             return
         if method == "GET" and path == "/api/me":
             self.me_requests += 1
-            if self.me_status:
+            # me_status: None answers self.me; an HTTP status, "abort" (a network failure the case asks for) or
+            # "bad-json" (200 that is not JSON) fails this /me.
+            if self.me_status == "abort":
+                route.abort()
+            elif self.me_status == "bad-json":
+                route.fulfill(status=200, body="<html>SYN not JSON</html>", content_type="text/html; charset=utf-8")
+            elif self.me_status:
                 route.fulfill(status=self.me_status, json={"statusCode": self.me_status, "message": "SYN unavailable"})
             else:
                 route.fulfill(json=self.me)
@@ -501,6 +737,10 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         if query.get("limit") == ["100"] and "cursor" not in query and target in self.hold_items:
             self.held_items.append((target, route))
             return
+        if query.get("limit") == ["1"] and target in self.hold_probes:
+            self.hold_probes.discard(target)
+            self.held_probes.append((target, route))
+            return
         # The panel's periodic access probe (limit=1) is answered without handing out a cursor.
         route.fulfill(**self.clinician_page(target, query.get("cursor", [None])[0], issue=query.get("limit") == ["100"]))
 
@@ -565,7 +805,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         return self.viewer_opens[-1]
 
     # Viewer
-    def open_viewer(self, config=None, study=VA, uncancellable=False):
+    def open_viewer(self, config=None, study=VA, uncancellable=False, enter=None):
         self.viewer_page = True
         self.config = CONFIG if config is None else config
         self.page.goto(VIEWER_URL)
@@ -574,7 +814,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             # harness drops the abort signal to let that answer arrive late, as it does once its response has started.
             self.page.evaluate("""() => { const real = window.fetch.bind(window);
               window.fetch = (url, options = {}) => { const { signal, ...rest } = options; return real(url, rest); }; }""")
-        self.page.evaluate("study => synBoot(study)", study)
+        self.page.evaluate("([study, enter]) => enter ? synBoot(study, enter) : synBoot(study)", [study, enter])
 
     def panel(self):
         return self.page.evaluate(PANEL)
@@ -587,11 +827,25 @@ class ClinicianViewerDOMTest(unittest.TestCase):
     def reads(self):
         return [(target, query) for target, query in self.item_requests if query.get("limit") != ["1"]]
 
+    def note_state(self):
+        return self.page.evaluate("() => window.kinViewerNoteConnectionState()")
+
     def modules_settled(self):
-        # Both gates answered: the Tech Note bridge left 'stopped' and the layout panel has its account.
-        self.wait_until(lambda: self.page.evaluate("() => window.kinViewerNoteConnectionState() !== 'stopped'"),
-                        "the module gate answer")
+        # The module gate answered: the Tech Note bridge left 'stopped'/'unconfirmed'.
+        self.wait_until(lambda: self.note_state() not in ("stopped", "unconfirmed"), "the module gate answer")
         self.settle()
+
+    def layout(self):
+        return self.page.evaluate("""() => { const p = document.querySelector('#kin-viewer-layout');
+          return {summary: p.querySelector('summary').textContent,
+            buttons: [...p.querySelectorAll('button')].map(b => [b.textContent, b.disabled])}; }""")
+
+    def probes(self):
+        return len([1 for _, query in self.item_requests if query.get("limit") == ["1"]])
+
+    def focus(self):
+        # The window focus the panel listens for: its next observation tick runs the access and version check.
+        self.page.evaluate("synFocus()")
 
     # ── Clinician Home ──
     def test_01_open_viewer_and_compare_use_one_named_window_with_the_opener_cut(self):
@@ -774,15 +1028,19 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                 self.assertEqual([(VA, {"includeHidden": ["true"], "limit": ["100"]})], self.reads())
                 self.page.evaluate("synAddLength()")
                 self.assertNotEqual(RO_TOOL, self.panel()["status"])
-        # An unanswered /me: the panel draws no control at all; the modules mount as before (their own writes stay
-        # behind their own radiologist check and the server).
-        self.me, self.me_status, self.item_requests = CLINICIAN, 500, []
+        # An unanswered /me: the panel draws no control at all and no write module mounts. (Before Astra
+        # S5-U2b-R-001 F02 this expected the modules to mount as before; an error is neither permission nor refusal,
+        # so the gate now waits for a successful answer: test_09.) The Tech Note bridge stays unconfirmed and the layout
+        # panel, which has no account, keeps its buttons disabled.
+        self.me, self.me_status, self.item_requests, self.me_requests = CLINICIAN, 500, [], 0
         self.open_viewer()
-        self.wait_until(lambda: len(self.page.evaluate("synMounted")) >= 3, "modules on an unanswered /me")
+        self.wait_until(lambda: self.me_requests >= 3, "the panel's, the module gate's and the layout panel's /me")
         self.settle()
-        self.assertEqual({"findings", "jobs", "tech-note"}, set(self.page.evaluate("synMounted")))
+        self.assertEqual([], self.page.evaluate("synMounted"))
+        self.assertEqual("unconfirmed", self.note_state())
         self.assertEqual([], self.panel()["buttons"])
         self.assertEqual([], self.reads())
+        self.assertTrue(all(disabled for _, disabled in self.layout()["buttons"]), self.layout())
         # Controls: the clinician is offered the writer toolbar, or the modules, by the same file without each gate.
         self.me, self.me_status = CLINICIAN, None
         self.open_viewer(self.config_variants["writer-toolbar"])
@@ -871,6 +1129,224 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                 self.assertEqual(["SYN-A key", "SYN-A length", "SYN-A angle", "SYN-A arrow"], [row[2] for row in seen["rows"]])
                 self.assertNotIn("SYN-A-OLD", str(seen))
                 self.assertNotIn("SYN-P", str(seen))
+
+    # ── Astra S5-U2b-R-001 regressions ──
+    def attempt_every_authoring_tool(self):
+        # Every way the pinned viewer turns a tool on: the rendered toolbar, the toolbar command over all tool groups,
+        # the setToolActive command a hotkey runs, and the tool group itself. Each attempt is followed by a primary drag.
+        outcomes = {}
+        for name in AUTHORING:
+            outcomes[name] = self.page.evaluate("""name => {
+              const drag = () => [synDraw('default'), synDraw('mpr')];
+              const seen = { click: synClick(name) }; seen.afterClick = drag();
+              synRun('setToolActiveToolbar', { itemId: name, toolGroupIds: ['default', 'mpr', 'SRToolGroup', 'volume3d'] }); seen.toolbar = drag();
+              synRun('setToolActive', { toolName: name }); seen.hotkey = drag();
+              synGroup('default').setToolActive(name, { bindings: [{ mouseButton: 1 }] }); seen.group = drag();
+              synGroup('default').setToolPassive(name); seen.passive = synModes('default')[name];
+              return seen; }""", name)
+        return outcomes
+
+    def test_08_native_authoring_paths_are_closed_for_a_clinician(self):
+        self.open_viewer()
+        self.wait_panel("ready", VA)
+        self.wait_until(lambda: self.page.evaluate("synToolbar()")["primary"] == VIEW_SECTION, "the trimmed toolbar")
+        bar = self.page.evaluate("synToolbar()")
+        self.assertEqual((VIEW_SECTION, VIEW_MORE, "Reset"), (bar["primary"], bar["more"], bar["morePrimary"]))
+        self.assertNotIn("MeasurementTools", bar["buttons"])
+        # Only viewing tools stay Active or Passive in any tool group; the others only show what is drawn (Enabled).
+        for group in ALL_GROUPS:
+            with self.subTest(group=group):
+                modes = self.page.evaluate("id => synModes(id)", group)
+                self.assertEqual({}, {n: m for n, m in modes.items() if m in ("Active", "Passive") and n not in VIEWING})
+        self.assertEqual(["view WindowLevel", "view WindowLevel"], self.page.evaluate("[synDraw('default'), synDraw('mpr')]"))
+        # Every authoring tool through every path: not offered, refused, and the viewing tool the refusal left is back.
+        for name, seen in self.attempt_every_authoring_tool().items():
+            with self.subTest(tool=name):
+                view = ["view WindowLevel", "view WindowLevel"]
+                self.assertEqual({"click": "missing", "afterClick": view, "toolbar": view, "hotkey": view, "group": view},
+                                 {k: v for k, v in seen.items() if k != "passive"})
+                self.assertIn(seen["passive"], ("Enabled", "Disabled"))
+        self.assertEqual(RO_TOOL, self.panel()["status"])
+        # Viewing stays: Zoom, Stack Scroll, Crosshairs (MPR) and Reset still run from the toolbar.
+        self.assertEqual(["ran", "view Zoom", "ran", "view StackScroll", "ran", "view Crosshairs", "ran"], self.page.evaluate(
+            """() => [synClick('Zoom'), synDraw('default'), synClick('StackScroll'), synDraw('default'), synClick('Crosshairs'),
+                     synDraw('mpr'), synClick('Reset')]"""))
+        self.page.evaluate("synRun('setToolActive', { toolName: 'WindowLevel' })")
+        # A tool group created after the confirmation is guarded from its first mode; an activation around the guard (the
+        # tool group's own method) is taken down at once.
+        late = self.page.evaluate("""() => { synServices.toolGroupService.createToolGroupAndAddTools('syn-late', {
+            active: [{ toolName: 'WindowLevel', bindings: [{ mouseButton: 1 }] }], passive: [{ toolName: 'Length' }, { toolName: 'ArrowAnnotate' }] });
+          synGroup('syn-late').setToolActive('ArrowAnnotate', { bindings: [{ mouseButton: 1 }] });
+          const created = [synModes('syn-late'), synDraw('syn-late')];
+          SynGroup.prototype.setToolActive.call(synGroup('default'), 'Bidirectional', { bindings: [{ mouseButton: 1 }] });
+          return [...created, synModes('default').Bidirectional, synDraw('default')]; }""")
+        self.assertEqual([{"WindowLevel": "Active", "Length": "Enabled", "ArrowAnnotate": "Enabled"}, "view WindowLevel",
+                          "Enabled", "view WindowLevel"], late)
+        # The annotation menu, the label / measurement edits and the measurement panel's rename and lock refuse; a new
+        # arrow's text prompt answers empty (the native tool cancels that drawing), an existing arrow's is left unanswered.
+        answers = self.page.evaluate("""() => { const answers = [];
+          synRun('showCornerstoneContextMenu', { requireNearbyToolData: true, menuId: 'measurementsContextMenu' });
+          synRun('deleteMeasurement', { uid: 'syn-uid' }); synRun('setMeasurementLabel', { uid: 'syn-uid' });
+          synRun('updateMeasurement', { uid: 'syn-uid', textLabel: 'SYN' });
+          synRun('arrowTextCallback', { callback: text => answers.push(['new', text ?? null]) });
+          synRun('arrowTextCallback', { data: { uid: 'syn-uid' }, callback: text => answers.push(['edit', text ?? null]) });
+          const m = synServices.measurementService;
+          m.update('syn-uid', { label: 'SYN renamed' }, true); m.update('syn-uid', { label: 'synced' }, false); m.toggleLockMeasurement('syn-uid');
+          return answers; }""")
+        self.assertEqual([["new", None]], answers)
+        self.assertEqual([["update", "syn-uid", False]], self.page.evaluate("synEdits"))
+        self.assertEqual(RO_EDIT, self.panel()["status"])
+        self.assertEqual(["view resetViewport"], self.page.evaluate("synNative"))
+        self.assertEqual([], self.page.evaluate("synMarks()"))
+        # The saved marks the panel drew are still shown, locked.
+        self.assertEqual([["Length", "SYN-A length", True]], self.page.evaluate("synDrawn()"))
+        self.assertIsNone(AVOIDED.search(RO_EDIT))
+
+        # Control: a radiologist keeps the whole toolbar, draws, and the menu and edits run.
+        self.me, self.item_requests, self.cursors = RADIOLOGIST, [], {}
+        self.open_viewer()
+        self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "writer panel")
+        bar = self.page.evaluate("synToolbar()")
+        self.assertEqual((PRIMARY_SECTION, MORE_TOOLS), (bar["primary"], bar["more"]))
+        self.assertEqual(["ran", "mark ArrowAnnotate"], self.page.evaluate("[synClick('ArrowAnnotate'), synDraw('default')]"))
+        self.page.evaluate("""() => { synRun('showCornerstoneContextMenu', {}); synRun('setMeasurementLabel', { uid: 'syn-uid' });
+          synServices.measurementService.update('syn-uid', {}, true); }""")
+        self.assertEqual(["ArrowAnnotate"], self.page.evaluate("synMarks()"))
+        self.assertEqual(["add ArrowAnnotate", "menu", "label syn-uid"], self.page.evaluate("synNative"))
+        self.assertEqual([["update", "syn-uid", True]], self.page.evaluate("synEdits"))
+        self.page.evaluate("synClearMarks()")
+
+        # Control: the same file with the policy switched off lets the clinician draw from the default toolbar.
+        self.me, self.item_requests, self.cursors = CLINICIAN, [], {}
+        self.open_viewer(self.config_variants["policy-off"])
+        self.wait_panel("ready", VA)
+        self.settle()
+        self.assertIn("MeasurementTools", self.page.evaluate("synToolbar()")["primary"], "control: toolbar kept")
+        self.assertEqual(["ran", "mark Bidirectional"], self.page.evaluate("[synClick('Bidirectional'), synDraw('default')]"),
+                         "control: the clinician draws")
+        self.page.evaluate("synClearMarks()")
+
+    def test_09_module_gate_waits_for_a_confirmed_writer_and_keeps_clinician_only(self):
+        # Errors are neither permission nor refusal: nothing mounts, and the document's next successful /me decides.
+        for failure in (500, 503, "abort", "bad-json"):
+            with self.subTest(every_me=failure):
+                self.me, self.me_status, self.me_requests, self.item_requests = CLINICIAN, failure, 0, []
+                self.open_viewer()
+                self.wait_until(lambda: self.me_requests >= 3, "every /me asked")
+                self.settle()
+                self.assertEqual(([], "unconfirmed"), (self.page.evaluate("synMounted"), self.note_state()))
+        for session, mounted, state in ((RADIOLOGIST, WRITE_MODULES, "ready"), (CLINICIAN, set(), "read-only")):
+            with self.subTest(later=session["roles"][0]):
+                self.me, self.me_status, self.me_requests, self.item_requests, self.cursors = session, 503, 0, [], {}
+                self.open_viewer()
+                self.wait_until(lambda: self.me_requests >= 3, "every /me asked")
+                self.settle()
+                self.assertEqual([], self.page.evaluate("synMounted"))
+                # The panel reads the next study with /me answering again; that answer decides the waiting modules.
+                self.me_status = None
+                self.page.evaluate("study => synSwitch(study)", VP)
+                self.wait_until(lambda: self.note_state() == state, f"the bridge {state}")
+                self.settle()
+                self.assertEqual(mounted, set(self.page.evaluate("synMounted")))
+
+        # The panel confirmed clinician-only; the modules enter afterwards and their gate's own /me fails.
+        for name, failures in (("shipped", (500, 503, "abort", "bad-json")), ("gate-as-before", (503,))):
+            for failure in failures:
+                with self.subTest(file=name, gate=failure):
+                    self.me, self.me_status, self.me_requests, self.item_requests, self.cursors = CLINICIAN, None, 0, [], {}
+                    self.open_viewer(CONFIG if name == "shipped" else self.config_variants[name], enter=["kin.viewer-history"])
+                    self.wait_panel("ready", VA)
+                    self.me_status = failure
+                    self.page.evaluate("ids => synEnter(ids)", LATER)
+                    if name == "shipped":
+                        self.wait_until(lambda: self.note_state() == "read-only", "the bridge read-only")
+                        self.wait_until(lambda: self.layout()["summary"] == "Viewer Status", "the layout panel status only")
+                        self.settle()
+                        self.assertEqual(([], []), (self.page.evaluate("synMounted"), self.layout()["buttons"]))
+                    else:
+                        self.wait_until(lambda: len(self.page.evaluate("synMounted")) >= 3, "control: modules mounted")
+                        self.assertEqual(WRITE_MODULES, set(self.page.evaluate("synMounted")),
+                                         "control: the previous gate mounts write modules on an error")
+
+        # Mode exit and re-entry of that document with /me failing: still clinician-only everywhere.
+        for name in ("shipped", "gate-as-before"):
+            with self.subTest(reenter=name):
+                self.me, self.me_status, self.me_requests, self.item_requests, self.cursors = CLINICIAN, None, 0, [], {}
+                self.open_viewer(CONFIG if name == "shipped" else self.config_variants[name])
+                self.wait_panel("ready", VA)
+                self.modules_settled()
+                self.me_status, self.me_requests = 503, 0
+                after = self.page.evaluate("""() => { synReenter();
+                  return [synToolbar().primary, Object.entries(synModes('default')).filter(([n, m]) => ['Active', 'Passive'].includes(m)).map(([n]) => n).sort()]; }""")
+                if name == "shipped":
+                    # Built again after re-entry and already trimmed and guarded, before any /me of the new entry answered.
+                    self.assertEqual([VIEW_SECTION, ["Magnify", "Pan", "StackScroll", "WindowLevel", "Zoom"]], after)
+                    self.wait_until(lambda: self.me_requests >= 2, "the re-entered panels' /me (the gate asks none)")
+                    self.settle()
+                    self.assertEqual(([], "read-only"), (self.page.evaluate("synMounted"), self.note_state()))
+                    self.assertEqual(("Viewer Status", []), (self.layout()["summary"], self.layout()["buttons"]))
+                    self.assertFalse(WRITER_CONTROLS & set(self.panel()["buttons"]), self.panel()["buttons"])
+                else:
+                    self.wait_until(lambda: len(self.page.evaluate("synMounted")) >= 3, "control: modules on re-entry")
+                    self.assertEqual(WRITE_MODULES, set(self.page.evaluate("synMounted")), "control: re-entry mounts them")
+
+    def test_10_periodic_and_focus_checks_follow_the_final_report(self):
+        self.open_viewer()
+        self.wait_panel("ready", VA)
+        self.assertEqual([["Length", "SYN-A length", True]], self.page.evaluate("synDrawn()"))
+        # The final report is retracted (final:false): rows and marks go at once, the panel says withheld.
+        self.items[VA] = "withheld"
+        self.focus()
+        seen = self.wait_panel("withheld", VA)
+        self.assertEqual((RO_WITHHELD, [], ["Refresh"]), (seen["status"], seen["rows"], seen["buttons"]))
+        self.assertEqual([], self.page.evaluate("synDrawn()"))
+        # Final again as r5: the whole r5 is read and verified before anything is shown.
+        self.items[VA] = {"version": 5, "pages": [[key_item(71, "SYN-A r5 key")]]}
+        self.focus()
+        seen = self.wait_panel("ready", VA)
+        self.assertEqual(("확정 판독문 r5의 저장 항목 1개 · 읽기 전용",
+                          [["Key Image · Saved r1", "Read-only", "SYN-A r5 key", "프레임 1", "Go to Image"]]), (seen["status"], seen["rows"]))
+        # r5 is shown; the check answers r6 and the r6 read is held, then fails: r5 is never left as the current final.
+        self.hold_items, self.items[VA] = {VA}, {"version": 6, "pages": [[key_item(72, "SYN-A r6 key")]]}
+        self.focus()
+        self.wait_until(lambda: self.held_items, "the r6 read held")
+        seen = self.panel()
+        self.assertEqual(("loading", []), (seen["state"], seen["rows"]))
+        self.hold_items = set()
+        request = self.held_items[0][1].request
+        self.held_items.pop()[1].fulfill(status=CHANGED[0], json=CHANGED[1])
+        self.wait_until(lambda: any(item is request for item in self.finished), "the failed r6 read reaching the page")
+        seen = self.wait_panel("failed", VA)
+        self.assertEqual([], seen["rows"])
+        self.assertEqual([], self.page.evaluate("synDrawn()"))
+
+        # A->B->A with the check's answer held: that late final:false for the old A never takes the new A down.
+        self.items, self.item_requests, self.cursors = copy.deepcopy(ITEMS), [], {}
+        self.open_viewer(uncancellable=True)
+        self.wait_panel("ready", VA)
+        self.hold_probes = {VA}
+        self.focus()
+        self.wait_until(lambda: self.held_probes, "A's check held")
+        self.page.evaluate("study => synSwitch(study)", VP)
+        self.wait_panel("ready", VP)
+        self.page.evaluate("study => synSwitch(study)", VA)
+        self.wait_panel("ready", VA)
+        self.release(self.held_probes.pop()[1], {"uid": VA, "final": False, "items": None, "nextCursor": None})
+        seen = self.panel()
+        self.assertEqual(("ready", ["SYN-A key", "SYN-A length", "SYN-A angle", "SYN-A arrow"]),
+                         (seen["state"], [row[2] for row in seen["rows"]]))
+
+        # Control: the same file that drops the check's answer keeps the retracted final rows.
+        self.items, self.item_requests, self.cursors = copy.deepcopy(ITEMS), [], {}
+        self.open_viewer(self.config_variants["no-final-check"])
+        self.wait_panel("ready", VA)
+        before = self.probes()
+        self.items[VA] = "withheld"
+        self.focus()
+        self.wait_until(lambda: self.probes() > before, "control: the check asked")
+        self.settle()
+        seen = self.panel()
+        self.assertEqual(("ready", 4), (seen["state"], len(seen["rows"])), "control: retracted rows kept")
 
 
 if __name__ == "__main__":

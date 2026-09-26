@@ -18,10 +18,14 @@ function fixture(standalone=false,identityReady=true,optionalReady=true){
   // failure/retry case below instead of being mistaken for the note script.
   if(identityReady)window.KinViewerIdentity={};
   if(standalone)window.top=window;
+  // S5-U2b-R-001 F02: the bridge connects only after a /me answered writer (kinViewerSession.decide). This fixture's
+  // session is a radiologist, and the shared session judgement is loaded with the bridge.
   const context={window,document:{querySelector:()=>null,createElement:()=>({remove(){this.removed=true;}}),head:{append:s=>scripts.push(s)}},
-    setTimeout:f=>{timers.add(f);return f;},clearTimeout:f=>timers.delete(f)};
+    setTimeout:f=>{timers.add(f);return f;},clearTimeout:f=>timers.delete(f),
+    fetch:async()=>({status:200,ok:true,json:async()=>({kind:'member',sub:'reader',roles:['radiologist']})})};
   vm.createContext(context);
-  vm.runInContext(source.slice(source.indexOf('function kinCreateViewerTechNote()'),source.indexOf('\nwindow.config =')),context);
+  vm.runInContext(source.slice(source.indexOf('function kinViewerClinicianOnly('),source.indexOf('function kinCreateViewerLayout()'))+
+    source.slice(source.indexOf('function kinCreateViewerTechNote()'),source.indexOf('\nwindow.config =')),context);
   const extension=context.kinCreateViewerTechNote();extension.preRegistration({servicesManager:{services:{}}});
   const install=()=>{window.kinViewerTechNote=()=>({mount(){mounts++;return true;},stop(){stops++;}});};
   return {extension,window,scripts,timers,install,mounts:()=>mounts,stops:()=>stops};
