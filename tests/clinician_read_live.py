@@ -11,7 +11,8 @@ credentials the member already held (the BFF session is refused at once, a new t
 before the revocation is reported until and after its exp, never counted as revoked early), a final report turns
 into status only after reset, the same user reading A -> B -> A gets each study's own answer, and two races placed
 with pauses inside the compiled controller/services (S5-U1b-F01 reset -> re-approve between the viewer gates,
-S5-U1b-F02 an Addendum between the list's StudyState and Report reads). Field sets come from
+S5-U1b-F02 an Addendum between the list's StudyState and Report reads), and a viewer page chain held across requests to
+the signed version it began on (S5-U1b-F04: an Addendum, or reset -> hide/edit -> re-approval, between pages). Field sets come from
 tests/clinician_policy_fixtures.json read_contract, shared with the pure serializer test, so the live answer and the
 pure projection are held to one list.
 
@@ -798,6 +799,100 @@ class ClinicianReadLive(unittest.TestCase):
             self.assertEqual((result["heads"], *outcome(result)),
                              ([late["signed"], None], 409, C["viewer_changed_code"]), result)
             self.assertEqual(self.items(uid).body, {"uid": uid, "final": False, "items": None, "nextCursor": None})
+
+    def revise_key(self, uid: str, item: dict, title: str) -> dict:
+        snapshot = {k: v for k, v in item["item"].items() if k != "hidden"}
+        return self.call("POST", f"/studies/{quote(uid)}/viewer-items/{item['id']}/revisions", "doctor",
+                         {"requestId": str(uuid.uuid4()), "expectedRevision": item["revision"], "action": "edit",
+                          "item": {**snapshot, "title": title}}).body
+
+    def test_06b_viewer_pages_continue_only_on_the_signed_version_they_started(self) -> None:
+        """S5-U1b-F04 over HTTP: one page chain is one signed Report.version, and every page names that version.
+
+        test_06 holds one request to one version; here the version moves BETWEEN requests, so a continuation kept from an
+        earlier page must be refused (409) instead of answering the next page of another version.
+        """
+        with self.stack.fixture() as fixture:
+            uid = fixture.uid
+            first, second, third = sorted((self.add_key(uid, f"S5-U1b chain key {n}") for n in range(3)),
+                                          key=lambda item: item["id"])
+
+            def ids(page: dict) -> list[str]:
+                return [item["id"] for item in page["items"]]
+
+            def query(cursor: str | None = None) -> str:
+                return "?limit=1" + ("&cursor=" + quote(cursor, safe="") if cursor is not None else "")
+
+            def refused(cursor: str, label: str) -> HttpResult:
+                result = self.items(uid, query=query(cursor), status=409)
+                self.assertEqual(code(result), C["viewer_changed_code"], label)
+                return result
+
+            v = self.commit(uid, "approve", 0, findings=fixture.secret, conclusion="approved")
+
+            # control: an unchanged signed version pages through every key, and each page names the version it read
+            pages = [self.items(uid, query=query()).body]
+            while pages[-1]["nextCursor"] is not None and len(pages) < 4:
+                pages.append(self.items(uid, query=query(pages[-1]["nextCursor"])).body)
+            self.assertEqual([ids(page) for page in pages], [[first["id"]], [second["id"]], [third["id"]]])
+            for page in pages:
+                self.assertEqual(sorted(page), sorted(C["viewer_page_keys"]))
+                self.assertEqual((page["uid"], page["final"], page["reportVersion"]), (uid, True, v))
+                self.assert_clean(page, "clinician viewer page chain")
+            self.assertEqual(ids(self.items(uid).body), [first["id"], second["id"], third["id"]])
+            self.assertEqual(self.report(uid).body["report"]["version"], v, "the pages name the version the report read shows")
+            # the continuation is the study, the version and the boundary, signed; never the bare item id
+            first_cursor = pages[0]["nextCursor"]
+            payload, signature = first_cursor.split(".")
+            self.assertEqual(json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))),
+                             {"v": 1, "uid": uid, "version": v, "after": first["id"]})
+
+            # an addendum between pages: still signed, another version -> the kept continuation is refused
+            v2 = self.commit(uid, "addendum", v, findings=fixture.secret + " addendum", conclusion="approved")
+            refused(pages[1]["nextCursor"], "addendum between pages")
+
+            # Astra S5-U1b-F04: page 1 read under v2; reset; the first key hidden and the second edited while open;
+            # re-approved. The kept continuation must not answer the edited key as page 2 of the chain begun under v2.
+            chain = self.items(uid, query=query()).body
+            self.assertEqual((chain["reportVersion"], ids(chain)), (v2, [first["id"]]))
+            reset = self.commit(uid, "reset", v2, reason="S5-U1b-F04 reset between pages")
+            # while no signed head exists the continuation is refused too, never answered as a withheld page
+            refused(chain["nextCursor"], "reset between pages")
+            self.assertEqual(self.items(uid).body, {"uid": uid, "final": False, "items": None, "nextCursor": None})
+            self.hide(uid, first, "S5-U1b-F04 hidden before re-approval")
+            title = "S5-U1b-F04 edited " + uuid.uuid4().hex[:8]
+            self.revise_key(uid, second, title)
+            m = self.commit(uid, "approve", reset, findings=fixture.secret, conclusion="re-approved")
+            late = refused(chain["nextCursor"], "reset, hide, edit and re-approval between pages")
+            self.assertNotIn(title, late.text, "an item of the re-approved version reached the chain begun before it")
+            self.assertNotIn(second["id"], late.text)
+
+            # a continuation without a version this API signed does not continue on the current head either: the version
+            # moved to the new head under the old signature, and the radiologist path's bare item id
+            forged = base64.urlsafe_b64encode(json.dumps({"v": 1, "uid": uid, "version": m, "after": first["id"]},
+                                                         separators=(",", ":")).encode("utf-8")).decode("ascii").rstrip("=")
+            for label, cursor in (("forged version", forged + "." + signature), ("bare item id", first["id"])):
+                with self.subTest(cursor=label):
+                    refused(cursor, label)
+            # shape errors are the caller's: too long, or with a single-item recheck
+            self.items(uid, query=query("a" * (C["viewer_cursor_max"] + 1)), status=400)
+            self.items(uid, query=query(first_cursor) + "&recheck=" + second["id"], status=400)
+
+            # a new chain starts on the new version, names it, and shows the edited key; the report read agrees
+            fresh = [self.items(uid, query=query()).body]
+            fresh.append(self.items(uid, query=query(fresh[0]["nextCursor"])).body)
+            self.assertEqual([(page["reportVersion"], ids(page)) for page in fresh], [(m, [second["id"]]), (m, [third["id"]])])
+            self.assertEqual(fresh[0]["items"][0]["item"]["title"], title)
+            self.assertIsNone(fresh[1]["nextCursor"])
+            self.assertEqual(self.report(uid).body["report"]["version"], m)
+
+            # the radiologist path is unchanged: its continuation is the bare item id, and it takes no clinician cursor
+            legacy = self.items(uid, "doctor", query="?includeHidden=true&limit=1").body
+            self.assertEqual((ids(legacy), legacy["nextCursor"]), ([first["id"]], first["id"]))
+            self.assertNotIn("reportVersion", legacy)
+            legacy = self.items(uid, "doctor", query="?includeHidden=true&limit=1&cursor=" + first["id"]).body
+            self.assertEqual((ids(legacy), legacy["nextCursor"]), ([second["id"]], second["id"]))
+            self.items(uid, "doctor", query=query(fresh[0]["nextCursor"]), status=400)
 
     def test_07_list_status_is_one_snapshot_when_an_addendum_lands_mid_list(self) -> None:
         """S5-U1b-F02 on the compiled PacsService: an Addendum between listStudies' StudyState and Report reads."""

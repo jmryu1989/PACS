@@ -368,12 +368,12 @@ class ClinicianPolicySpec(unittest.TestCase):
         branch = branch[:branch.index("\n  }")]
         steps = ("const version = await this.pacs.clinicianViewerHead(uid, c);",
                  "if (version === null) return clinicianViewerWithheld(uid);",
-                 "const result = await this.svc.listFinal(uid, page, c, version);",
-                 "if (!clinicianViewerPinned(version, result.finalVersion, await this.pacs.clinicianViewerHead(uid, c)))",
-                 "throw new ConflictException({ code: CLINICIAN_VIEWER_CHANGED,",
-                 "return clinicianViewerPage(uid, result);")
+                 "const result = await this.svc.listFinal(uid, continued ? { ...rest, cursor: continued.after } : rest, c, version);",
+                 "if (!clinicianViewerPinned(version, result.finalVersion, await this.pacs.clinicianViewerHead(uid, c))) throw changed();",
+                 "return clinicianViewerPage(uid, version, result, VIEWER_CURSOR_KEY);")
         positions = [branch.index(step) for step in steps]
         self.assertEqual(positions, sorted(positions), "gate, pinned read, gate+compare, answer — in this order")
+        self.assertIn("new ConflictException({ code: CLINICIAN_VIEWER_CHANGED, message });", viewer)
         self.assertEqual(branch.count("clinicianViewerHead(uid, c)"), 2)
         self.assertNotIn("this.svc.list(", branch, "the clinician path never reads items without the signed head")
         for source in (viewer, service):
@@ -405,6 +405,59 @@ class ClinicianPolicySpec(unittest.TestCase):
         manifest = MANIFEST.read_text(encoding="utf-8")
         self.assertIn('("GET", "clinician/studies"): Route(Kind.REPORT, "clinician-studies", "collection"),', manifest)
         self.assertIn('("GET", "clinician/studies/:uid/report"): Route(Kind.REPORT, "clinician-report"),', manifest)
+
+    def test_10_viewer_pages_continue_only_on_the_signed_version_they_started(self):
+        """S5-U1b-F04 source pins. Runtime proof is the serializer chain vectors and clinician_read_live test_06b."""
+        read = lambda name: (API / name).read_text(encoding="utf-8")  # noqa: E731
+        viewer, items = read("viewer.controller.ts"), read("viewer.service.ts")
+        # one process-local key, made in the controller module and never read from configuration
+        self.assertIn("import { randomBytes } from 'node:crypto';", viewer)
+        self.assertEqual(re.findall(r"const VIEWER_CURSOR_KEY = (.*);", viewer), ["randomBytes(32)"])
+        self.assertNotIn("process.env", viewer)
+        branch = viewer[viewer.index("private async clinicianItems("):]
+        branch = branch[:branch.index("\n  }")]
+        # the continuation is judged before the gate, and the gate's head is compared with its version before anything
+        # is read or withheld; the one version that passes is the pin of listFinal and of the last check
+        steps = ("const page = clinicianViewerQuery(query);",
+                 "const { cursor, ...rest } = page;",
+                 "const continued = cursor === undefined ? null : clinicianViewerContinuation(VIEWER_CURSOR_KEY, uid, cursor);",
+                 "if (cursor !== undefined && !continued) throw changed(",
+                 "const version = await this.pacs.clinicianViewerHead(uid, c);",
+                 "if (!clinicianViewerContinues(continued?.version ?? null, version)) throw changed();",
+                 "if (version === null) return clinicianViewerWithheld(uid);",
+                 "const result = await this.svc.listFinal(uid, continued ? { ...rest, cursor: continued.after } : rest, c, version);",
+                 "if (!clinicianViewerPinned(version, result.finalVersion, await this.pacs.clinicianViewerHead(uid, c))) throw changed();",
+                 "return clinicianViewerPage(uid, version, result, VIEWER_CURSOR_KEY);")
+        positions = [branch.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions), "verify continuation, gate, compare, withhold, pinned read, recheck, answer")
+        # the caller's cursor never reaches the item read; only the verified boundary does, and every answer is signed
+        self.assertEqual(branch.count("cursor: continued.after"), 1)
+        self.assertNotIn("listFinal(uid, page,", branch)
+        self.assertEqual(branch.count("VIEWER_CURSOR_KEY"), 2)
+        # policy: signed {v, uid, version, after}; HMAC-SHA256 compared in constant time over canonical base64url; key >= 32 bytes
+        for fragment in (
+                "import { createHmac, timingSafeEqual } from 'node:crypto';",
+                "if (!(key instanceof Uint8Array) || key.length < 32) throw new Error(",
+                "return createHmac('sha256', key).update(payload).digest();",
+                "const payload = Buffer.from(JSON.stringify({ v: 1, uid, version, after }), 'utf8').toString('base64url');",
+                "if (actual.toString('base64url') !== signature || actual.length !== expected.length"
+                " || !timingSafeEqual(actual, expected)) return null;",
+                "data.v !== 1 || data.uid !== uid || !Number.isSafeInteger(data.version) || data.version < 1",
+                "return started === null || (Number.isSafeInteger(head) && (head as number) > 0 && head === started);",
+                "if (!Number.isSafeInteger(version) || version < 1) throw new Error('a final viewer page needs its signed report version');",
+                "nextCursor: typeof page?.nextCursor === 'string' ? clinicianViewerCursor(key, uid, version, page.nextCursor) : null };"):
+            self.assertIn(fragment, self.policy, fragment)
+        contract = FIXTURES["read_contract"]
+        self.assertEqual(int(re.search(r"export const CLINICIAN_VIEWER_CURSOR_MAX = (\d+);", self.policy).group(1)),
+                         contract["viewer_cursor_max"])
+        # the final page names its version; the withheld answer keeps exactly its four keys
+        self.assertIn("return { uid, final: true, reportVersion: version, items,", self.policy)
+        self.assertIn("return { uid, final: false, items: null, nextCursor: null };", self.policy)
+        self.assertEqual(sorted(contract["viewer_page_keys"]), sorted(contract["viewer_withheld_keys"] + ["reportVersion"]))
+        # the radiologist path is untouched: the unsigned statement and the bare item id as its cursor
+        self.assertIn("return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);", viewer)
+        self.assertIn("return this.read(uid, query, c, id, null);", items)
+        self.assertIn("return { items, nextCursor: pageRow.rows.length > page.limit ? items[items.length - 1].id : null,", items)
 
 
 if __name__ == "__main__":

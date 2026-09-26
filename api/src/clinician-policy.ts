@@ -1,4 +1,5 @@
 import { RequestMethod } from '@nestjs/common';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 
 /**
  * S5-U1a — clinician 역할과 clinician-only 기본 거절.
@@ -169,10 +170,17 @@ export function clinicianViewerItem(row: any) {
       ? { referenceStatus: row.referenceStatus === 'verified' ? 'verified' : 'unverified' } : {}) };
 }
 
-/** 확정본의 표시 항목 한 쪽. uid를 싣는 이유: 화면은 늦게 온 응답을 쓰기 전에 요청한 검사와 대조한다. */
-export function clinicianViewerPage(uid: string, page: any) {
+/**
+ * 확정본의 표시 항목 한 쪽. uid를 싣는 이유: 화면은 늦게 온 응답을 쓰기 전에 요청한 검사와 대조한다.
+ * reportVersion은 이 쪽을 읽은 확정 판 번호다 — 판독문 읽기의 report.version과 대조할 수 있다(S5-U1b-F04).
+ * nextCursor는 마지막 항목 id가 아니라 (검사, 판, 마지막 id)를 서명한 이어받기 값이라 다음 쪽도 이 판에서만 읽힌다.
+ * 판 번호 없이 확정 쪽을 만들지 않는다 — 호출측이 고정 검사를 건너뛴 것이므로 답 대신 실패한다.
+ */
+export function clinicianViewerPage(uid: string, version: number, page: any, key: Uint8Array) {
+  if (!Number.isSafeInteger(version) || version < 1) throw new Error('a final viewer page needs its signed report version');
   const items = (Array.isArray(page?.items) ? page.items : []).map(clinicianViewerItem).filter(Boolean);
-  return { uid, final: true, items, nextCursor: typeof page?.nextCursor === 'string' ? page.nextCursor : null };
+  return { uid, final: true, reportVersion: version, items,
+    nextCursor: typeof page?.nextCursor === 'string' ? clinicianViewerCursor(key, uid, version, page.nextCursor) : null };
 }
 
 /** 확정 전에는 항목을 싣지 않는다. items가 null인 이유: 빈 목록(항목 없음)과 가려진 목록은 다르다. */
@@ -194,13 +202,69 @@ export function clinicianViewerPinned(before: unknown, read: unknown, after: unk
 }
 
 /**
+ * S5-U1b-F04 — 이 요청이 관문이 본 머리 판(head)에서 읽어도 되는가. 첫 쪽(started null)은 지금 머리 판에서 시작한다
+ * (없으면 뒤에서 가린다). 다음 쪽은 이어받기 값이 실어 온 판(started)과 지금 머리 판이 **같은 확정 판**일 때만 이어진다.
+ * 요청 하나 안의 고정(clinicianViewerPinned)만으로는 쪽 사이의 재승인·addendum·reset을 보지 못한다: 옛 이어받기로 새 판의
+ * 다음 쪽을 받으면 두 판의 항목이 한 연쇄로 합쳐져 어느 승인 시점에도 없던 목록이 된다. 머리 판이 없어졌어도(reset) 거절이다 —
+ * 가린 답(items null)을 다음 쪽으로 주면 목록 끝과 구분되지 않는다. 통과한 판 하나를 listFinal과 마지막 검사가 함께 쓴다.
+ */
+export function clinicianViewerContinues(started: number | null, head: unknown): boolean {
+  return started === null || (Number.isSafeInteger(head) && (head as number) > 0 && head === started);
+}
+
+/** 이어받기 값의 최대 길이. 이보다 길거나 문자열이 아니면 서명을 따지기 전에 형식 오류(400)다. */
+export const CLINICIAN_VIEWER_CURSOR_MAX = 512;
+const VIEWER_CURSOR_PART = /^[A-Za-z0-9_-]+$/;
+const VIEWER_ITEM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function viewerCursorMac(key: Uint8Array, payload: string) {
+  // 짧거나 빈 키의 서명은 누구나 만들 수 있어 판 번호를 호출자가 정하는 것과 같다 — 서명하지 않고 실패한다.
+  if (!(key instanceof Uint8Array) || key.length < 32) throw new Error('the clinician viewer cursor key must be at least 32 bytes');
+  return createHmac('sha256', key).update(payload).digest();
+}
+
+/**
+ * S5-U1b-F04 이어받기 값: `base64url(JSON {v, uid, version, after}).base64url(HMAC-SHA256)` — study-page.ts 목록 cursor와 같은
+ * 모양이다. 판 번호는 서버가 이 쪽에서 확인한 확정 판이고, 서명이 있으므로 호출자가 다른 판으로 바꿔 이어 갈 수 없다.
+ * 권한은 아니다: 다음 쪽도 관문(범위·역할·확정 판)을 처음부터 다시 탄다. 만료 시각이 없는 이유도 같다 — 매 쪽 머리 판과
+ * 비교하므로 오래된 값은 같은 판이면 여전히 맞고, 아니면 거절된다.
+ */
+export function clinicianViewerCursor(key: Uint8Array, uid: string, version: number, after: string): string {
+  if (typeof uid !== 'string' || !Number.isSafeInteger(version) || version < 1 || typeof after !== 'string' || !VIEWER_ITEM_ID.test(after))
+    throw new Error('a clinician viewer cursor needs the study, a signed report version and an item id');
+  const payload = Buffer.from(JSON.stringify({ v: 1, uid, version, after }), 'utf8').toString('base64url');
+  return payload + '.' + viewerCursorMac(key, payload).toString('base64url');
+}
+
+/**
+ * 이어받기 값을 읽는다. 이 키로 서명된 이 검사의 값이면 { version, after }, 그 밖은 모두 null이다 — 판 번호가 없는 값
+ * (판독의 경로의 항목 id 그대로), 서명이 맞지 않는 값(바꾼 값 또는 API 재시작 전의 값), 다른 검사의 값. null은 호출측에서
+ * 409(처음부터 다시)다. 판을 모르는 이어받기를 지금 머리 판에서 이어 주면 F04의 섞인 연쇄가 그대로 남는다.
+ */
+export function clinicianViewerContinuation(key: Uint8Array, uid: string, cursor: unknown): { version: number; after: string } | null {
+  if (typeof cursor !== 'string' || cursor.length > CLINICIAN_VIEWER_CURSOR_MAX) return null;
+  const [payload, signature, extra] = cursor.split('.');
+  if (extra !== undefined || !payload || !signature || !VIEWER_CURSOR_PART.test(payload) || !VIEWER_CURSOR_PART.test(signature)) return null;
+  const actual = Buffer.from(signature, 'base64url'), expected = viewerCursorMac(key, payload);
+  if (actual.toString('base64url') !== signature || actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
+  let data: any;
+  try { data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')); } catch { return null; }
+  if (!data || typeof data !== 'object' || data.v !== 1 || data.uid !== uid || !Number.isSafeInteger(data.version) || data.version < 1
+      || typeof data.after !== 'string' || !VIEWER_ITEM_ID.test(data.after)) return null;
+  return { version: data.version, after: data.after };
+}
+
+/**
  * clinician-only의 표시 항목 쿼리. 숨긴 항목은 요청할 수 없다 — includeHidden은 없거나 'false'만
- * 받고 그 밖은 null(거절)이다. 나머지 칸(limit·cursor·recheck)의 형식은 viewerPage가 그대로 판정한다.
+ * 받고 그 밖은 null(거절)이다. cursor는 CLINICIAN_VIEWER_CURSOR_MAX 이하의 문자열 하나이고(서명은 호출측이
+ * clinicianViewerContinuation으로 판정), 한 항목 재확인(recheck)과 함께 올 수 없다. limit·recheck의 형식은 viewerPage가 판정한다.
  */
 export function clinicianViewerQuery(query: any): Record<string, unknown> | null {
   const source = query ?? {};
   if (typeof source !== 'object' || Array.isArray(source)) return null;
   if (own(source, 'includeHidden') && source.includeHidden !== 'false') return null;
+  if (own(source, 'cursor') && (typeof source.cursor !== 'string' || source.cursor.length > CLINICIAN_VIEWER_CURSOR_MAX
+      || own(source, 'recheck'))) return null;
   return { ...source, includeHidden: 'false' };
 }
 

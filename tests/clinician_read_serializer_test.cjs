@@ -16,6 +16,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const path = require('node:path');
 const { readFileSync } = require('node:fs');
+const { createHmac, randomBytes } = require('node:crypto');
 
 const FIXTURES = JSON.parse(readFileSync(path.join(__dirname, 'clinician_policy_fixtures.json'), 'utf8'));
 const C = FIXTURES.read_contract;
@@ -99,6 +100,7 @@ test('the U1b allowlist and the S5-F5 constants are exactly the fixture values',
   assert.deepEqual([...P.CLINICIAN_LIST_PINS], C.list_snapshot_pins);
   assert.ok(Object.isFrozen(P.CLINICIAN_LIST_PINS));
   assert.equal(P.CLINICIAN_VIEWER_CHANGED, C.viewer_changed_code);
+  assert.equal(P.CLINICIAN_VIEWER_CURSOR_MAX, C.viewer_cursor_max);
   assert.deepEqual(Object.fromEntries(Object.entries(P.CLINICIAN_SNAPSHOT_FIELDS).map(([k, v]) => [k, [...v]])), C.snapshot_keys);
   for (const route of FIXTURES.business_routes) assert.equal(P.clinicianRouteAllowed(route), true, route);
   for (const route of FIXTURES.must_stay_denied) assert.equal(P.clinicianRouteAllowed(route), false, route);
@@ -199,19 +201,108 @@ test('viewer items: per-kind fields, measurement source status always present, u
     sorted(C.snapshot_keys.key));
 });
 
+// S5-U1b-F04 cursor vectors. KEY stands in for the controller's process key; OTHER_KEY for the key of a restarted API.
+const KEY = randomBytes(32);
+const OTHER_KEY = randomBytes(32);
+const ID_A = '00000000-0000-4000-8000-00000000000a';
+const ID_B = '00000000-0000-4000-8000-00000000000b';
+const ID_C = '00000000-0000-4000-8000-00000000000c';
+const b64 = value => Buffer.from(value, 'utf8').toString('base64url');
+const unb64 = value => JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+/** A cursor signed with `key` over any payload: reaches the payload checks that follow a valid signature. */
+const signed = (payload, key = KEY) => {
+  const body = b64(typeof payload === 'string' ? payload : JSON.stringify(payload));
+  return body + '.' + createHmac('sha256', key).update(body).digest('base64url');
+};
+const itemRow = id => ({ id, revision: 1, hidden: false, item: snapshot('key'), authorSub: 's' });
+
 test('viewer page and withheld answer carry the requested uid; withheld items are null, not an empty list', () => {
-  const page = P.clinicianViewerPage('1.2.3', { items: [
-    { id: 'a', revision: 1, hidden: false, item: snapshot('key'), authorSub: 's' },
-    { id: 'b', revision: 1, hidden: false, item: { kind: 'polygon' } },
-  ], nextCursor: 'b' });
+  const page = P.clinicianViewerPage('1.2.3', 3, { items: [
+    itemRow(ID_A),
+    { id: ID_B, revision: 1, hidden: false, item: { kind: 'polygon' } },
+  ], nextCursor: ID_B }, KEY);
   assert.deepEqual(keys(page), sorted(C.viewer_page_keys));
-  assert.deepEqual([page.uid, page.final, page.items.map(i => i.id), page.nextCursor], ['1.2.3', true, ['a'], 'b']);
+  assert.deepEqual([page.uid, page.final, page.reportVersion, page.items.map(i => i.id)], ['1.2.3', true, 3, [ID_A]]);
+  // S5-U1b-F04: the continuation is never the bare item id; it is this study, this version and the last row read, signed
+  assert.notEqual(page.nextCursor, ID_B);
+  assert.deepEqual(unb64(page.nextCursor.split('.')[0]), { v: 1, uid: '1.2.3', version: 3, after: ID_B });
+  assert.deepEqual(P.clinicianViewerContinuation(KEY, '1.2.3', page.nextCursor), { version: 3, after: ID_B });
   clean(page, 'viewer page');
-  for (const cursor of [null, undefined, 3, {}]) assert.equal(P.clinicianViewerPage('1.2.3', { items: [], nextCursor: cursor }).nextCursor, null);
-  assert.deepEqual(P.clinicianViewerPage('1.2.3', {}).items, []);
+  for (const cursor of [null, undefined, 3, {}]) assert.equal(P.clinicianViewerPage('1.2.3', 3, { items: [], nextCursor: cursor }, KEY).nextCursor, null);
+  assert.deepEqual(P.clinicianViewerPage('1.2.3', 3, {}, KEY).items, []);
+  // never a final page without the version it was read under, and never a cursor over a non-item boundary or a weak key
+  for (const version of [0, -1, 1.5, '3', null, undefined, 2 ** 53])
+    assert.throws(() => P.clinicianViewerPage('1.2.3', version, { items: [], nextCursor: null }, KEY), /signed report version/, String(version));
+  for (const after of ['b', ID_B.toUpperCase(), ID_B + ' ', ''])
+    assert.throws(() => P.clinicianViewerPage('1.2.3', 3, { items: [], nextCursor: after }, KEY), /item id/, after);
+  for (const key of [Buffer.alloc(0), randomBytes(31), 'k'.repeat(64), null, undefined])
+    assert.throws(() => P.clinicianViewerPage('1.2.3', 3, { items: [], nextCursor: ID_B }, key), /at least 32 bytes/, String(key));
   const withheld = P.clinicianViewerWithheld('1.2.3');
   assert.deepEqual(withheld, { uid: '1.2.3', final: false, items: null, nextCursor: null });
-  assert.deepEqual(keys(withheld), sorted(C.viewer_page_keys));
+  assert.deepEqual(keys(withheld), sorted(C.viewer_withheld_keys));
+});
+
+test('viewer page chain (S5-U1b-F04): one chain is one signed version; a moved head or a cursor without its version is refused', () => {
+  // page 1 read under v3, page 2 continues only while the head is still v3, page 3 ends the chain
+  const page1 = P.clinicianViewerPage('1.2.3', 3, { items: [itemRow(ID_A)], nextCursor: ID_A }, KEY);
+  const resumed = P.clinicianViewerContinuation(KEY, '1.2.3', page1.nextCursor);
+  assert.deepEqual(resumed, { version: 3, after: ID_A });
+  assert.equal(P.clinicianViewerContinues(resumed.version, 3), true, 'same signed head: the chain continues');
+  const page2 = P.clinicianViewerPage('1.2.3', resumed.version, { items: [itemRow(ID_B)], nextCursor: ID_B }, KEY);
+  const resumed2 = P.clinicianViewerContinuation(KEY, '1.2.3', page2.nextCursor);
+  assert.deepEqual(resumed2, { version: 3, after: ID_B });
+  const page3 = P.clinicianViewerPage('1.2.3', resumed2.version, { items: [itemRow(ID_C)], nextCursor: null }, KEY);
+  assert.deepEqual([page1, page2, page3].map(p => [p.reportVersion, p.items.map(i => i.id)]), [[3, [ID_A]], [3, [ID_B]], [3, [ID_C]]]);
+  assert.equal(page3.nextCursor, null);
+
+  // the head the gate sees on the next page is not the version the chain started on
+  for (const [label, head] of [
+    // Astra S5-U1b-F04: page 1 under v3; reset; the first item hidden and the second edited; re-approved as v6
+    ['reset, edited and re-approved between the pages', 6],
+    ['addendum between the pages', 4],
+    ['reset between the pages (no signed head now)', null],
+    ['version as text', '3'], ['boolean', true], ['version 0', 0], ['missing', undefined],
+  ]) assert.equal(P.clinicianViewerContinues(resumed.version, head), false, label);
+  // a first page (no continuation) starts on whatever the gate sees; a null head is withheld by the caller afterwards
+  assert.equal(P.clinicianViewerContinues(null, 6), true);
+  assert.equal(P.clinicianViewerContinues(null, null), true);
+  // started is only ever a verified version: anything else never continues
+  for (const started of [0, -1, '3', 1.5]) assert.equal(P.clinicianViewerContinues(started, started), false, String(started));
+
+  // a continuation that does not carry a version this server signed for this study is no continuation at all
+  const [payload, signature] = page1.nextCursor.split('.');
+  const forged = b64(JSON.stringify({ ...unb64(payload), version: 6 })) + '.' + signature;
+  // 32 MAC bytes leave 2 unused bits in the last base64url character: its twin decodes to the same bytes
+  const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const twin = signature.slice(0, -1) + ALPHABET[ALPHABET.indexOf(signature.slice(-1)) ^ 1];
+  assert.deepEqual(Buffer.from(twin, 'base64url'), Buffer.from(signature, 'base64url'), 'the twin really decodes to the same MAC');
+  for (const [label, cursor] of [
+    ['the radiologist path cursor: the bare item id, no version', ID_A],
+    ['version moved to the new head, old signature', forged],
+    ['signed by a restarted API (another key)', signed(unb64(payload), OTHER_KEY)],
+    ['another study\'s continuation', P.clinicianViewerPage('1.2.4', 3, { items: [], nextCursor: ID_A }, KEY).nextCursor],
+    ['signature cut short', page1.nextCursor.slice(0, -2)],
+    ['signature padded', page1.nextCursor + '='],
+    ['signature with a non-canonical last character', payload + '.' + twin],
+    ['three parts', page1.nextCursor + '.x'],
+    ['no signature', payload], ['empty signature', payload + '.'], ['empty payload', '.' + signature], ['empty', ''],
+    ['too long', 'a'.repeat(C.viewer_cursor_max + 1)],
+    ['not a string', [page1.nextCursor]], ['null', null], ['number', 3],
+    // correctly signed, but the payload is not a continuation this server writes
+    ['signed, no version', signed({ v: 1, uid: '1.2.3', after: ID_A })],
+    ['signed, version 0', signed({ v: 1, uid: '1.2.3', version: 0, after: ID_A })],
+    ['signed, version as text', signed({ v: 1, uid: '1.2.3', version: '3', after: ID_A })],
+    ['signed, fractional version', signed({ v: 1, uid: '1.2.3', version: 3.5, after: ID_A })],
+    ['signed, unknown format', signed({ v: 2, uid: '1.2.3', version: 3, after: ID_A })],
+    ['signed, no uid', signed({ v: 1, version: 3, after: ID_A })],
+    ['signed, boundary not an item id', signed({ v: 1, uid: '1.2.3', version: 3, after: 'x' })],
+    ['signed, not JSON', signed('{"v":1,')],
+    ['signed, JSON null', signed('null')],
+  ]) assert.equal(P.clinicianViewerContinuation(KEY, '1.2.3', cursor), null, label);
+  // the same cursor verifies again (no one-shot state), and only under the key that signed it
+  assert.deepEqual(P.clinicianViewerContinuation(KEY, '1.2.3', page1.nextCursor), resumed);
+  assert.equal(P.clinicianViewerContinuation(OTHER_KEY, '1.2.3', page1.nextCursor), null);
+  assert.throws(() => P.clinicianViewerContinuation(Buffer.alloc(8), '1.2.3', page1.nextCursor), /at least 32 bytes/);
 });
 
 test('viewer pin: the gate before, the signed head read with the items and the gate after must be one version', () => {
@@ -239,13 +330,19 @@ test('viewer pin: the gate before, the signed head read with the items and the g
   ]) assert.equal(P.clinicianViewerPinned(before, read, after), false, label);
 });
 
-test('viewer query: hidden items cannot be requested; everything else passes through to viewerPage', () => {
+test('viewer query: hidden items cannot be requested; a cursor is one bounded string; the rest passes through to viewerPage', () => {
   assert.deepEqual(P.clinicianViewerQuery(undefined), { includeHidden: 'false' });
   assert.deepEqual(P.clinicianViewerQuery({}), { includeHidden: 'false' });
   assert.deepEqual(P.clinicianViewerQuery({ limit: '10', cursor: 'x' }), { limit: '10', cursor: 'x', includeHidden: 'false' });
   assert.deepEqual(P.clinicianViewerQuery({ includeHidden: 'false' }), { includeHidden: 'false' });
+  const longest = 'a'.repeat(C.viewer_cursor_max);
+  assert.deepEqual(P.clinicianViewerQuery({ cursor: longest }), { cursor: longest, includeHidden: 'false' });
+  assert.deepEqual(P.clinicianViewerQuery({ recheck: ID_A }), { recheck: ID_A, includeHidden: 'false' });
   for (const refused of [{ includeHidden: 'true' }, { includeHidden: ['false', 'true'] }, { includeHidden: '' },
-    { includeHidden: 'FALSE' }, { includeHidden: undefined }, [], 'includeHidden=true', 7])
+    { includeHidden: 'FALSE' }, { includeHidden: undefined }, [], 'includeHidden=true', 7,
+    // shape of the continuation (its signature and version are judged by clinicianViewerContinuation)
+    { cursor: longest + 'a' }, { cursor: ['a', 'b'] }, { cursor: { after: ID_A } }, { cursor: 3 }, { cursor: undefined },
+    { cursor: 'x', recheck: ID_A }])
     assert.equal(P.clinicianViewerQuery(refused), null, JSON.stringify(refused));
 });
 

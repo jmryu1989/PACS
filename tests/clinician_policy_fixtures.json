@@ -132,7 +132,9 @@
     "report_body_keys": ["findings", "conclusion", "recommendation"],
     "report_read_keys": ["uid", "report", "keys"],
     "key_image_keys": ["id", "revision", "item"],
-    "viewer_page_keys": ["uid", "final", "items", "nextCursor"],
+    "viewer_page_keys": ["uid", "final", "reportVersion", "items", "nextCursor"],
+    "viewer_withheld_keys": ["uid", "final", "items", "nextCursor"],
+    "viewer_cursor_max": 512,
     "viewer_item_keys": ["id", "revision", "createdAt", "updatedAt", "item"],
     "viewer_measurement_extra_keys": ["referenceStatus"],
     "snapshot_keys": {
