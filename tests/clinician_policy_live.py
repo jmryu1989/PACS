@@ -16,6 +16,9 @@ only when this run had to create it, the LiveStack gateway service client, and o
 test_04 and test_05 (report left at RS W; nothing here writes a report, item or setting) removed by the class cleanup.
 test_05's clinician writes two SYNTHETIC questions on that study (the :id question and the create row's), their receipts
 and study.question audit rows; the question rows go before the study cleanup through the clinician_question_live helper.
+S5-U4c: it also writes two SYNTHETIC image requests (the image-requests rows' :id request, which the change row cancels,
+and the create row's), their receipts and study.image-request audit rows; they go before the study cleanup through the
+clinician_request_live helper.
 Every clinician-gate denial is discriminated by the guard's own code CLINICIAN_ROUTE_DENIED and by the absence of audit
 rows for the clinician actor, so a 403 from a service-layer need() is never counted as one.
 """
@@ -32,6 +35,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request
 
 from clinician_question_live import ask_question, drop_study_questions, lit, member_owner, read_question_row
+from clinician_request_live import drop_study_image_requests, make_image_request, read_request_row
 from invariants_live import LiveStack, controller_routes, psql, purge_user_audit
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -89,6 +93,7 @@ class ClinicianPolicyLive(unittest.TestCase):
         cls.addClassCleanup(cls.delete_role_if_created)
         cls.addClassCleanup(cls.delete_owned_users)
         cls.addClassCleanup(cls.drop_shared_questions)   # last in, first out: before the owned users and the study go
+        cls.addClassCleanup(cls.drop_shared_image_requests)
         cls.stack.create_test_identity("clinician", ["clinician"], "hallym")
         cls.stack.create_test_identity("clinician-radiologist", ["clinician", "radiologist"], "hallym")
         cls.stack.create_test_identity("clinician-technician", ["clinician", "technician"], "hallym")
@@ -123,6 +128,13 @@ class ClinicianPolicyLive(unittest.TestCase):
         TEST-S5-U4a-LIVE uses, so a row some other member wrote stops the cleanup instead of being deleted."""
         if cls.shared_study is not None:
             drop_study_questions(cls.shared_study.uid, set(cls.stack.user_ids.values()) | set(cls.owned_users))
+
+    @classmethod
+    def drop_shared_image_requests(cls) -> None:
+        """S5-U4c: test_05's image request rows go before the study cleanup (every foreign key RESTRICT), through the
+        helper TEST-S5-U4c-LIVE uses, so a row some other member wrote stops the cleanup instead of being deleted."""
+        if cls.shared_study is not None:
+            drop_study_image_requests(cls.shared_study.uid, set(cls.stack.user_ids.values()) | set(cls.owned_users))
 
     # ── owned member helpers (no group => PENDING, two groups => INVALID) ──
 
@@ -348,7 +360,8 @@ class ClinicianPolicyLive(unittest.TestCase):
     def assert_positive(self, route: str, result, values: dict, instance: str, sent) -> None:
         """What the clinician-only member of the study's institution is answered on each allow row (RS W, no items).
 
-        values maps :uid and :id to the study and the prepared question; sent is the request body a write row sent."""
+        values maps :uid and :id to the study and the row's prepared question or, on the image-requests rows, the prepared
+        image request (S5-U4c); sent is the request body a write row sent."""
         body = result.body
         uid, qid, clinician = values[":uid"], values[":id"], self.stack.actor("clinician")
         if route == "GET me":
@@ -378,11 +391,25 @@ class ClinicianPolicyLive(unittest.TestCase):
             self.assertEqual(sorted(body), ["items", "owner"])
             self.assertIn(qid, {item["id"] for item in body["items"]})
             self.assertEqual({item["author"]["actor"] for item in body["items"]}, {clinician}, "a clinician-only member sees its own")
+        elif route == "GET image-requests":
+            self.assertEqual(sorted(body), ["items", "nextCursor", "owner"])
+            self.assertIn(qid, {item["id"] for item in body["items"]})
+            self.assertEqual({item["requester"]["actor"] for item in body["items"]}, {clinician}, "view=mine is the caller's own")
+        elif route == "GET image-requests/:id":
+            self.assertEqual(sorted(body), ["item", "owner"])
+            self.assertEqual((body["item"]["id"], body["item"]["studyUid"], body["item"]["requester"]["actor"]), (qid, uid, clinician))
+        elif route == "GET studies/:uid/image-requests":
+            self.assertEqual(sorted(body), ["items", "owner"])
+            self.assertIn(qid, {item["id"] for item in body["items"]})
+            self.assertEqual({item["requester"]["actor"] for item in body["items"]}, {clinician}, "a clinician-only member sees its own")
         elif route in WRITES:
-            # (question id, action, from, to, revision): the server decides the kind, the author's reply is a follow-up
+            # (question or request id, action, from, to, revision): the server decides the kind, the author's reply is a
+            # follow-up; the clinician's change of its own image request is a cancel (S5-U4c)
             steps = {"POST studies/:uid/questions": (sent["requestId"], "create", None, "Open", 1),
                      "POST questions/:id/entries": (qid, "followup", "Open", "Open", sent.get("revision", 0) + 1),
-                     "POST questions/:id/close": (qid, "close", "Open", "Closed", sent.get("revision", 0) + 1)}
+                     "POST questions/:id/close": (qid, "close", "Open", "Closed", sent.get("revision", 0) + 1),
+                     "POST studies/:uid/image-requests": (sent["requestId"], "create", None, "Requested", 1),
+                     "POST image-requests/:id": (qid, "cancel", "Requested", "Cancelled", sent.get("revision", 0) + 1)}
             self.assertIn(route, steps, "no positive check for " + route)
             self.assertEqual((sorted(body), body["owner"], body["replayed"]),
                              (["applied", "owner", "replayed"], sent["expectedOwner"], False))
@@ -434,16 +461,26 @@ class ClinicianPolicyLive(unittest.TestCase):
         self.assertEqual(asked.status, 201, asked.text[:300])
         qid = asked.body["applied"]["id"]
         self.assertEqual([(row["actor"], row["action"]) for row in audit_since(start)], [(clinician, "study.question")])
-        values = {":uid": uid, ":id": qid}
+        # S5-U4c: the image-requests :id rows read and cancel one image-transfer request the clinician makes here, through
+        # the helper TEST-S5-U4c-LIVE uses; the create row makes an external-image one, so the active rule never meets it
+        _made_id, made = make_image_request(self.stack, "clinician", uid, owners["clinician"])
+        self.assertEqual(made.status, 201, made.text[:300])
+        rid = made.body["applied"]["id"]
+        self.assertEqual([(row["actor"], row["action"]) for row in audit_since(start)],
+                         [(clinician, "study.question"), (clinician, "study.image-request")])
 
-        def fill(template: dict, identity: str) -> dict:
+        def values_for(route: str) -> dict:
+            """:uid is the study; :id is the prepared image request on the image-requests rows and the question elsewhere."""
+            return {":uid": uid, ":id": rid if "image-requests" in route else qid}
+
+        def fill(route: str, template: dict, identity: str) -> dict:
             """A write row's body with this run's values. A refused identity sends its own expectedOwner too, so the
             refusal is the role or tenant rule and never OWNER_CHANGED; gateway and cinvalid stop at the guard."""
             if identity not in owners:
                 owners[identity] = ["none", "none"] if identity in tokens else member_owner(self.stack, identity)
             run = {"$request_id": str(uuid.uuid4()), "$owner": owners[identity]}
             if "$revision" in template.values():
-                run["$revision"] = read_question_row(qid)["revision"]
+                run["$revision"] = (read_request_row(rid) if "image-requests" in route else read_question_row(qid))["revision"]
             self.assertLessEqual(set(run), set(FILL))
             return {key: run[value] if isinstance(value, str) and value in FILL else value for key, value in template.items()}
 
@@ -454,16 +491,19 @@ class ClinicianPolicyLive(unittest.TestCase):
                 return self.stack.bearer_request("GET", f"/dicom-web/studies/{quote(uid)}/metadata", token,
                                                  base=self.stack.proxy, headers={"Accept": "*/*"}), None
             method, template = route.split(" ", 1)
-            path = "/" + template.replace(":uid", quote(uid)).replace(":id", quote(qid))
+            path = "/" + template.replace(":uid", quote(uid)).replace(":id", quote(values_for(route)[":id"]))
             query = LIVE_MATRIX["rows"][route].get("query")
-            sent = fill(WRITES[route]["body"], identity) if route in WRITES else lookup if route == "POST dicom/lookup" else None
+            sent = fill(route, WRITES[route]["body"], identity) if route in WRITES else lookup if route == "POST dicom/lookup" else None
             return self.bearer(method, path + ("?" + query if query else ""), token, sent), sent
 
         observed: dict[str, list] = {}
         # logout last: a Bearer logout ends no session (AuthService.logout(null)); the order keeps that question out of the
-        # reading. The close row ends the :id question, so it runs after every other row that names it.
-        for route in sorted(LIVE_MATRIX["rows"], key=lambda key: (key == "POST auth/logout", key == "POST questions/:id/close", key)):
+        # reading. The close row ends the :id question and the image request change row cancels the :id request, so each
+        # runs after every other row that names it.
+        closing = ("POST questions/:id/close", "POST image-requests/:id")
+        for route in sorted(LIVE_MATRIX["rows"], key=lambda key: (key == "POST auth/logout", key in closing, key)):
             row = LIVE_MATRIX["rows"][route]
+            values = values_for(route)
             for name in ("positive", "wrong_role", "wrong_tenant"):
                 case = row[name]
                 mark = last_audit()
@@ -486,8 +526,8 @@ class ClinicianPolicyLive(unittest.TestCase):
                     else:
                         self.assertEqual(written, [], "a read or a refusal writes no audit row")
         self.assertEqual(len(observed), 3 * len(ALLOWED))
-        # the prepared question's row and each write row's declared rows, and no other clinician row in the class
-        declared = 1 + sum(write["audit"]["rows"] for write in WRITES.values())
+        # the prepared question's and image request's rows and each write row's declared rows, and no other clinician row
+        declared = 2 + sum(write["audit"]["rows"] for write in WRITES.values())
         self.assertEqual(len(audit_since(start)), declared)
         self.assertEqual(psql(f'SELECT count(*) FROM "AuditLog" WHERE actor={lit(clinician)}'), [str(declared)],
                          "the reads and the refusals wrote no audit row")
