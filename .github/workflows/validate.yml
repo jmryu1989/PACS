@@ -231,6 +231,11 @@ jobs:
       - name: S5-U5a Members console role round trip, unknown-role passthrough and wording DOM
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-member-roles-dom --cwd . --file worklist-v0/hpacs-lite/admin.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/study-access-admin.js --file tests/admin_member_roles_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/admin_member_roles_dom_test.py
+      # S5-U2a: the shipped clinician home and its landing (index.html, auth.js) against stubbed S5-U1b answers (no
+      # stack, network or credentials); a late answer for study A must not paint over B, and the guard-less controls must.
+      - name: S5-U2a Clinician Home landing, final-report-first reads, A-B-A guard and list state DOM
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-home-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/index.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/main.html --file api/src/auth.controller.ts --file tests/clinician_home_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_home_dom_test.py
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         timeout-minutes: 28
         run: |
