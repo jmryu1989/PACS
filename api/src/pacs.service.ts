@@ -103,6 +103,15 @@ function inst(c: Caller): string {
 }
 
 const TECHNICIAN_FIELDS = ['ss', 'ward', 'reqHosp', 'em', 'ov'];
+
+/**
+ * 소유 기관 전용 감사 action(S5-U4p §11.1). 이 행은 `GET audit`의 두 경로 모두에서 생성 기관(detail.institution)
+ * = 대상 검사의 **현재** 소유 기관 = caller 기관일 때만 나간다. 기존 action은 원격판독 기관에도 보이지만 질문은
+ * 소유 기관 안의 대화라서, 질문 API가 404여도 감사 통로로 존재·행위자·전이가 새지 않게 한다. 한 action을 처음
+ * 쓰는 단위가 여기에 이름을 더한다(S5-U4a: study.question, S5-U4c: study.image-request).
+ */
+export const OWNER_ONLY_AUDIT_ACTIONS: readonly string[] = Object.freeze(['study.question']);
+
 const NOTE_PUBLIC_FIELDS = { studyUid: true, version: true, text: true, reason: true, author: true, createdAt: true } as const;
 function noteTransactionError(error: any): never {
   if (error?.code === 'P2028' || error?.code === 'P2010' && ['55P03', '57014'].includes(error?.meta?.code))
@@ -3434,6 +3443,10 @@ export class PacsService implements OnModuleInit {
       throw new ConflictException('Tech 메모 이력이 있는 검사는 삭제할 수 없습니다');
     if (await tx.viewerJob.findFirst({ where: { studies: { has: uid } }, select: { id: true } }))
       throw new ConflictException('저장한 비교 작업에서 참조하는 검사는 삭제할 수 없습니다');
+    // S5-U4a: 질문 스레드와 그 영수증은 검사에 묶인 기록이라 함께 지우지 않는다(FK Restrict). 처리되지 않은 FK 오류
+    // 대신 명시 409로 거절한다. 질문 생성도 이 부모 잠금을 잡으므로 삭제와 생성이 엇갈리지 않는다.
+    if (await tx.studyQuestion.findFirst({ where: { studyUid: uid }, select: { id: true } }))
+      throw new ConflictException({ code: 'STUDY_HAS_QUESTIONS', message: '임상의 질문이 있는 검사는 삭제할 수 없습니다' });
 
     /**
      * 삭제 가능 여부는 지금의 RS가 아니라 **사람의 기록이 생긴 적이 있는가**로 정한다.
@@ -3468,24 +3481,37 @@ export class PacsService implements OnModuleInit {
     }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
   }
 
-  /** 감사로그. 내 기관이 볼 수 있는 검사의 것만. */
+  /**
+   * 감사로그. 내 기관이 볼 수 있는 검사의 것만. OWNER_ONLY_AUDIT_ACTIONS 행은 생성 기관 = 현재 소유 기관 = 나일 때만.
+   * 그 조건은 LIMIT이 있는 같은 SQL의 WHERE에 둔다 — 가져온 뒤 거르면 짧은 쪽이 숨긴 행의 수·시각을 드러내고
+   * 보여야 할 오래된 행을 밀어낸다. CASE는 목록의 action에만 detail을 jsonb로 읽고, 검사 행이 없거나 기관이
+   * null이면 NULL이 되어 행이 빠진다(닫힌 쪽). 같은 시각의 행은 id로 순서를 고정한다.
+   */
   async audits(uid: string | undefined, take: number, c: Caller) {
     const me = inst(c);
+    const limit = Math.min(take, 500);
     if (uid) {
       const prev = await this.gate(uid, c);
       // versions()와 같은 이유. 삭제된 검사의 감사(환자 정보가 든 ov 포함)와 회원 감사 행(target이
       // Keycloak 사용자 id)이 이 통로로 새어 나갔다. 회원 감사 조회가 필요해지면 admin 전용 경로로 만든다.
       if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-      return this.prisma.auditLog.findMany({ where: { target: uid }, orderBy: { at: 'desc' }, take: Math.min(take, 500) });
+      return this.prisma.$queryRaw`SELECT a.* FROM "AuditLog" a LEFT JOIN "StudyState" s ON s.uid = a.target
+        WHERE a.target = ${uid}
+          AND CASE WHEN a.action = ANY(${OWNER_ONLY_AUDIT_ACTIONS}::text[])
+                   THEN s."institutionId" = ${me} AND (a.detail::jsonb ->> 'institution') = ${me}
+                   ELSE TRUE END
+        ORDER BY a.at DESC, a.id DESC LIMIT ${limit}`;
     }
     const mine = await this.prisma.studyState.findMany({
       where: { OR: [{ institutionId: me }, { teleInstitutionId: me }] },
       select: { uid: true },
     });
-    return this.prisma.auditLog.findMany({
-      where: { target: { in: [...await this.studyAccess.allowed(c,mine.map(s=>s.uid))] } },
-      orderBy: { at: 'desc' },
-      take: Math.min(take, 500),
-    });
+    const allowed = [...await this.studyAccess.allowed(c,mine.map(s=>s.uid))];
+    return this.prisma.$queryRaw`SELECT a.* FROM "AuditLog" a LEFT JOIN "StudyState" s ON s.uid = a.target
+      WHERE a.target = ANY(${allowed}::text[])
+        AND CASE WHEN a.action = ANY(${OWNER_ONLY_AUDIT_ACTIONS}::text[])
+                 THEN s."institutionId" = ${me} AND (a.detail::jsonb ->> 'institution') = ${me}
+                 ELSE TRUE END
+      ORDER BY a.at DESC, a.id DESC LIMIT ${limit}`;
   }
 }

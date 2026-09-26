@@ -5,7 +5,8 @@ REQ-S5-U1a-ROLE-DEFAULT-DENY -> RISK-S5-CLINICIAN-WRITER-LEAK/UNCLASSIFIED-ROUTE
 REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-LIVE-MATRIX: test_01 sweeps
 every controller route that is neither public nor allowed and requires them to be exactly the route_matrix denied rows,
 test_04 fixes the mixed/legacy role composition on a real study, test_05 runs the live_matrix of the fixtures (a positive,
-a wrong-role and a wrong-tenant case for every allow row, one call each).
+a wrong-role and a wrong-tenant case for every allow row, one call each). S5-U4a: a write allow row also names its body,
+its 201 and the audit rows its positive writes; every case is checked against the AuditLog rows it caused.
 Hosted synthetic stack only, through scripts/run-tests.py:
 
     python scripts/run-tests.py --module tests/clinician_policy_live.py --mode live --unit s5-u1c-clinician-policy --timeout 900
@@ -13,6 +14,8 @@ Hosted synthetic stack only, through scripts/run-tests.py:
 Owned data only: run-created Keycloak users (kin-test-*), the run's password-grant client, the realm role `clinician`
 only when this run had to create it, the LiveStack gateway service client, and one synthetic C-STORE study shared by
 test_04 and test_05 (report left at RS W; nothing here writes a report, item or setting) removed by the class cleanup.
+test_05's clinician writes two SYNTHETIC questions on that study (the :id question and the create row's), their receipts
+and study.question audit rows; the question rows go before the study cleanup through the clinician_question_live helper.
 Every clinician-gate denial is discriminated by the guard's own code CLINICIAN_ROUTE_DENIED and by the absence of audit
 rows for the clinician actor, so a 403 from a service-layer need() is never counted as one.
 """
@@ -28,6 +31,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from urllib.request import Request
 
+from clinician_question_live import ask_question, drop_study_questions, lit, member_owner, read_question_row
 from invariants_live import LiveStack, controller_routes, psql, purge_user_audit
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -39,6 +43,8 @@ PUBLIC = set(FIXTURES["public_routes"])
 DENIED_ROUTES = {route for routes in FIXTURES["route_matrix"]["denied"].values() for route in routes}
 COUNTS = FIXTURES["route_matrix"]["counts"]
 LIVE_MATRIX = FIXTURES["live_matrix"]
+FILL = LIVE_MATRIX["fill"]
+WRITES = {route: row["write"] for route, row in LIVE_MATRIX["rows"].items() if "write" in row}
 APP_ROLES = set(FIXTURES["app_roles"])
 READ = FIXTURES["read_contract"]
 DENIED = FIXTURES["denied_code"]
@@ -82,6 +88,7 @@ class ClinicianPolicyLive(unittest.TestCase):
             raise RuntimeError(f"clinician role lookup failed: {role.status} {role.text}")
         cls.addClassCleanup(cls.delete_role_if_created)
         cls.addClassCleanup(cls.delete_owned_users)
+        cls.addClassCleanup(cls.drop_shared_questions)   # last in, first out: before the owned users and the study go
         cls.stack.create_test_identity("clinician", ["clinician"], "hallym")
         cls.stack.create_test_identity("clinician-radiologist", ["clinician", "radiologist"], "hallym")
         cls.stack.create_test_identity("clinician-technician", ["clinician", "technician"], "hallym")
@@ -109,6 +116,13 @@ class ClinicianPolicyLive(unittest.TestCase):
         cls.owned_users.clear()
         if failures:
             raise RuntimeError("owned member cleanup failed: " + "; ".join(failures))
+
+    @classmethod
+    def drop_shared_questions(cls) -> None:
+        """S5-U4a: test_05's question rows go before the study cleanup (both foreign keys RESTRICT), through the helper
+        TEST-S5-U4a-LIVE uses, so a row some other member wrote stops the cleanup instead of being deleted."""
+        if cls.shared_study is not None:
+            drop_study_questions(cls.shared_study.uid, set(cls.stack.user_ids.values()) | set(cls.owned_users))
 
     # ── owned member helpers (no group => PENDING, two groups => INVALID) ──
 
@@ -331,9 +345,12 @@ class ClinicianPolicyLive(unittest.TestCase):
         self.assertIn("판독문 미리보기에 접근할 수 없습니다", message(foreign), foreign.text[:300])
         print("CLINICIAN_LIVE_COMPOSITION " + json.dumps(composition, ensure_ascii=True, sort_keys=True))
 
-    def assert_positive(self, route: str, result, uid: str, instance: str) -> None:
-        """What the clinician-only member of the study's institution is answered on each allow row (RS W, no items)."""
+    def assert_positive(self, route: str, result, values: dict, instance: str, sent) -> None:
+        """What the clinician-only member of the study's institution is answered on each allow row (RS W, no items).
+
+        values maps :uid and :id to the study and the prepared question; sent is the request body a write row sent."""
         body = result.body
+        uid, qid, clinician = values[":uid"], values[":id"], self.stack.actor("clinician")
         if route == "GET me":
             self.assertEqual((body["kind"], body["institution"]), ("member", "hallym"))
             self.assertEqual({role for role in body["roles"] if role in APP_ROLES}, {"clinician"})
@@ -350,8 +367,42 @@ class ClinicianPolicyLive(unittest.TestCase):
             self.assertIn(uid, {row["uid"] for row in body["studies"]})
         elif route == "GET clinician/studies/:uid/report":
             self.assertEqual(body, {"uid": uid, "report": {"final": False, "rs": "W"}, "keys": None})
+        elif route == "GET questions":
+            self.assertEqual(sorted(body), ["items", "nextCursor", "owner"])
+            self.assertIn(qid, {item["id"] for item in body["items"]})
+            self.assertEqual({item["author"]["actor"] for item in body["items"]}, {clinician}, "view=mine is the caller's own")
+        elif route == "GET questions/:id":
+            self.assertEqual(sorted(body), ["item", "owner"])
+            self.assertEqual((body["item"]["id"], body["item"]["studyUid"], body["item"]["author"]["actor"]), (qid, uid, clinician))
+        elif route == "GET studies/:uid/questions":
+            self.assertEqual(sorted(body), ["items", "owner"])
+            self.assertIn(qid, {item["id"] for item in body["items"]})
+            self.assertEqual({item["author"]["actor"] for item in body["items"]}, {clinician}, "a clinician-only member sees its own")
+        elif route in WRITES:
+            # (question id, action, from, to, revision): the server decides the kind, the author's reply is a follow-up
+            steps = {"POST studies/:uid/questions": (sent["requestId"], "create", None, "Open", 1),
+                     "POST questions/:id/entries": (qid, "followup", "Open", "Open", sent.get("revision", 0) + 1),
+                     "POST questions/:id/close": (qid, "close", "Open", "Closed", sent.get("revision", 0) + 1)}
+            self.assertIn(route, steps, "no positive check for " + route)
+            self.assertEqual((sorted(body), body["owner"], body["replayed"]),
+                             (["applied", "owner", "replayed"], sent["expectedOwner"], False))
+            applied = body["applied"]
+            self.assertEqual((applied["requestId"], applied["studyUid"]), (sent["requestId"], uid))
+            self.assertEqual((applied["id"], applied["action"], applied["from"], applied["to"], applied["revision"]), steps[route])
         else:
             self.fail("no positive check for " + route)
+
+    def assert_audit(self, write: dict, written: list, values: dict, sent: dict) -> None:
+        """S5-U4a: a write row's positive wrote exactly its declared audit rows, attributed to the token and to this request."""
+        audit = write["audit"]
+        run = {template: sent[key] for key, template in write["body"].items() if isinstance(template, str) and template in FILL}
+        self.assertEqual(len(written), audit["rows"], written)
+        for row in written:
+            self.assertEqual((row["actor"], row["action"], row["target"]),
+                             (self.stack.actor(audit["actor"]), audit["action"], values[audit["target"]]))
+            detail = json.loads(row["detail"])
+            self.assertEqual({key: detail.get(key) for key in audit["detail"]},
+                             {key: run.get(value, value) for key, value in audit["detail"].items()})
 
     def test_05_every_allow_row_has_a_positive_a_wrong_role_and_a_wrong_tenant_case(self) -> None:
         study = self.study()
@@ -362,39 +413,86 @@ class ClinicianPolicyLive(unittest.TestCase):
         lookup = {"studyUid": uid, "sopUid": tags.body["SOPInstanceUID"]}
         _user_id, username, password = self.create_member("cinvalid", ["clinician"], ["hallym", "kin-center"])
         tokens = {"cinvalid": self.grant(username, password), "gateway": self.stack.service_token("gateway")}
+        clinician = self.stack.actor("clinician")
+        actions = ", ".join(sorted({lit(write["audit"]["action"]) for write in WRITES.values()})) or "NULL"
+
+        def last_audit() -> int:
+            return int(psql('SELECT coalesce(max(id), 0) FROM "AuditLog"')[0])
+
+        def audit_since(mark: int) -> list[dict]:
+            """AuditLog rows after mark that a case could cause: the clinician's own, and a write row's action on the study
+            by anyone (a refused write that wrote anyway)."""
+            return [json.loads(raw) for raw in psql(
+                f'SELECT to_jsonb(t)::text FROM "AuditLog" t WHERE id > {int(mark)} AND (actor={lit(clinician)} '
+                f'OR (target={lit(uid)} AND action IN ({actions}))) ORDER BY id')]
+
+        # S5-U4a: the :id rows read, follow up and close one question the clinician asks here, through the helper
+        # TEST-S5-U4a-LIVE uses; its study.question row is the only audit row the preparation writes
+        start = last_audit()
+        owners = {"clinician": member_owner(self.stack, "clinician")}
+        _rid, asked = ask_question(self.stack, "clinician", uid, owners["clinician"], "SYNTHETIC S5-U1c matrix :id question")
+        self.assertEqual(asked.status, 201, asked.text[:300])
+        qid = asked.body["applied"]["id"]
+        self.assertEqual([(row["actor"], row["action"]) for row in audit_since(start)], [(clinician, "study.question")])
+        values = {":uid": uid, ":id": qid}
+
+        def fill(template: dict, identity: str) -> dict:
+            """A write row's body with this run's values. A refused identity sends its own expectedOwner too, so the
+            refusal is the role or tenant rule and never OWNER_CHANGED; gateway and cinvalid stop at the guard."""
+            if identity not in owners:
+                owners[identity] = ["none", "none"] if identity in tokens else member_owner(self.stack, identity)
+            run = {"$request_id": str(uuid.uuid4()), "$owner": owners[identity]}
+            if "$revision" in template.values():
+                run["$revision"] = read_question_row(qid)["revision"]
+            self.assertLessEqual(set(run), set(FILL))
+            return {key: run[value] if isinstance(value, str) and value in FILL else value for key, value in template.items()}
 
         def call(route: str, identity: str):
             token = tokens[identity] if identity in tokens else self.stack.token(identity)
             if route == "GET authz/dicom":
                 # its only caller: nginx auth_request in front of the DICOMweb read
                 return self.stack.bearer_request("GET", f"/dicom-web/studies/{quote(uid)}/metadata", token,
-                                                 base=self.stack.proxy, headers={"Accept": "*/*"})
+                                                 base=self.stack.proxy, headers={"Accept": "*/*"}), None
             method, template = route.split(" ", 1)
-            return self.bearer(method, "/" + template.replace(":uid", quote(uid)), token,
-                               lookup if route == "POST dicom/lookup" else None)
+            path = "/" + template.replace(":uid", quote(uid)).replace(":id", quote(qid))
+            query = LIVE_MATRIX["rows"][route].get("query")
+            sent = fill(WRITES[route]["body"], identity) if route in WRITES else lookup if route == "POST dicom/lookup" else None
+            return self.bearer(method, path + ("?" + query if query else ""), token, sent), sent
 
         observed: dict[str, list] = {}
-        # logout last: a Bearer logout ends no session (AuthService.logout(null)); the order keeps that question out of the reading
-        for route in sorted(LIVE_MATRIX["rows"], key=lambda key: (key == "POST auth/logout", key)):
+        # logout last: a Bearer logout ends no session (AuthService.logout(null)); the order keeps that question out of the
+        # reading. The close row ends the :id question, so it runs after every other row that names it.
+        for route in sorted(LIVE_MATRIX["rows"], key=lambda key: (key == "POST auth/logout", key == "POST questions/:id/close", key)):
             row = LIVE_MATRIX["rows"][route]
             for name in ("positive", "wrong_role", "wrong_tenant"):
                 case = row[name]
-                result = call(route, case["as"])
-                observed[route + " " + name] = [case["as"], result.status, code(result)]
+                mark = last_audit()
+                result, sent = call(route, case["as"])
+                written = audit_since(mark)
+                observed[route + " " + name] = [case["as"], result.status, code(result), len(written)]
                 with self.subTest(route=route, case=name, identity=case["as"]):
                     self.assertEqual(result.status, case["status"], result.text[:300])
                     self.assertEqual(code(result), case["code"], result.text[:300])
                     if "message" in case:
                         self.assertIn(case["message"], message(result), result.text[:300])
                     if name == "positive":
-                        self.assert_positive(route, result, uid, instance)
+                        self.assert_positive(route, result, values, instance, sent)
                     elif case["expect"] == "absent":
-                        self.assertNotIn(uid, {r["uid"] for r in result.body["studies"]}, "another institution lists the study")
+                        absent = case["absent"]
+                        self.assertNotIn(values[absent["value"]], {item[absent["field"]] for item in result.body[absent["list"]]},
+                                         "another institution lists it")
+                    if name == "positive" and route in WRITES:
+                        self.assert_audit(WRITES[route], written, values, sent)
+                    else:
+                        self.assertEqual(written, [], "a read or a refusal writes no audit row")
         self.assertEqual(len(observed), 3 * len(ALLOWED))
-        actor = self.stack.actor("clinician").replace("'", "''")
-        self.assertEqual(psql(f"SELECT count(*) FROM \"AuditLog\" WHERE actor='{actor}'"), ["0"], "the allow rows are reads")
+        # the prepared question's row and each write row's declared rows, and no other clinician row in the class
+        declared = 1 + sum(write["audit"]["rows"] for write in WRITES.values())
+        self.assertEqual(len(audit_since(start)), declared)
+        self.assertEqual(psql(f'SELECT count(*) FROM "AuditLog" WHERE actor={lit(clinician)}'), [str(declared)],
+                         "the reads and the refusals wrote no audit row")
         print("CLINICIAN_LIVE_MATRIX " + json.dumps({"rows": len(LIVE_MATRIX["rows"]), "cases": len(observed),
-              "observed": observed}, ensure_ascii=True, sort_keys=True))
+              "writes": sorted(WRITES), "audit_rows": declared, "observed": observed}, ensure_ascii=True, sort_keys=True))
 
 
 if __name__ == "__main__":

@@ -55,7 +55,9 @@ class Pure(unittest.TestCase):
                 ('StudyTagCatalog','ownerSub','wrong-owner'),('StudyTagCatalog','lastRequest','00000000-0000-4000-8000-000000000999'),
                 ('ReaderAssignment','readerSub',None),('ReaderAssignment','revision',1),('ReaderAssignment','lastFingerprint','0'*64),('StudyConsultation','reply','wrong reply'),('StudyConsultation','recipientSub','wrong recipient'),('StudyConsultation','revision',1),
                 ('GatewayReceipt','seq',6),('GatewayReceipt','epoch','00000000-0000-4000-8000-000000000c02'),('GatewayReceipt','errorCode',None),
-                ('GatewayRetryRequest','seq',6),('GatewayRetryRequest','epoch','00000000-0000-4000-8000-000000000c02'),('GatewayRetryRequest','requestedAt','2026-09-06T00:00:00.124')]:
+                ('GatewayRetryRequest','seq',6),('GatewayRetryRequest','epoch','00000000-0000-4000-8000-000000000c02'),('GatewayRetryRequest','requestedAt','2026-09-06T00:00:00.124'),
+                ('StudyQuestion','institutionId','SYNTHETIC-tele'),('StudyQuestion','closedByRole',None),('StudyQuestion','revision',2),
+                ('StudyQuestionEntry','fingerprint','0'*64),('StudyQuestionEntry','result',{}),('StudyQuestionEntry','reportVersion',1)]:
             actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
             actual['rows'][table][0][field]=value
             with self.subTest(table=table,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
@@ -211,8 +213,10 @@ class Pure(unittest.TestCase):
         # BIGINT counts, UUID epoch and non-null errorCode are real values.
         # S4-U4 added the gateway-retry-request table: 29 files, 39 tables, and one synthetic request bound
         # to exactly that receipt's (epoch, seq), so its composite key carries real values too.
-        self.assertEqual(len(transfer.MIGRATIONS), 29)
-        self.assertEqual(len(transfer.TABLES), 39)
+        # S5-U4a added the study-questions tables: 30 files, 41 tables, one Closed question and its three
+        # receipts (create seq 1, answer seq 2, the author's close with an empty note seq 3).
+        self.assertEqual(len(transfer.MIGRATIONS), 30)
+        self.assertEqual(len(transfer.TABLES), 41)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
         self.assertEqual([(r['oid'], r['accession'], r['studyUid']) for r in rows['Order']],
@@ -222,7 +226,18 @@ class Pure(unittest.TestCase):
         [receipt] = rows['GatewayReceipt']
         self.assertEqual([(r['studyUid'], r['epoch'], r['seq']) for r in rows['GatewayRetryRequest']],
                          [(receipt['studyUid'], receipt['epoch'], receipt['seq'])])
-        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1)
+        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3)
+        [question] = rows['StudyQuestion']
+        receipts = sorted(rows['StudyQuestionEntry'], key=lambda r: r['seq'])
+        self.assertEqual((question['studyUid'], question['state'], question['revision'], question['entryCount']), (UID, 'Closed', 3, 3))
+        self.assertEqual([(r['seq'], r['kind'], r['appliedRevision'], r['result']['revision'], r['result']['entry']['seq'])
+                          for r in receipts], [(1, 'question', 1, 1, 1), (2, 'answer', 2, 2, 2), (3, 'close', 3, 3, 3)])
+        self.assertEqual(receipts[0]['id'], question['id'])
+        self.assertEqual([r['result']['requestId'] for r in receipts], [r['id'] for r in receipts])
+        self.assertEqual([(r['result']['from'], r['result']['to']) for r in receipts],
+                         [(None, 'Open'), ('Open', 'Answered'), ('Answered', 'Closed')])
+        self.assertEqual([r['reportVersion'] for r in receipts], [None, 2, 2])
+        self.assertEqual(receipts[2]['body'], '')
         hp = rows['HangingProtocolPreference']
         self.assertEqual(len(hp), 3)
         self.assertEqual(len({(r['institution'], r['subject']) for r in hp}), 3)

@@ -19,6 +19,8 @@ require, command, record = combined.require, combined.command, combined.record
 LIMITS = combined.LIMITS
 # The 37-table catalog plus synthetic rows exceeds 128 KiB (136,191 bytes
 # measured at 32 tables). Keep producer, bounded copy and parser on one finite cap.
+# S5-U4a (41 tables): the synthetic rows grew by 2,920 bytes (exact); the whole receipt is estimated at
+# about 185 KB from a modelled catalog, pending the hosted producer's actual size.
 RECEIPT_LIMIT = 256*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
@@ -50,12 +52,14 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260921120000_report_structure/migration.sql',
               'api/prisma/migrations/20260924120000_order_accession/migration.sql',
               'api/prisma/migrations/20260924130000_gateway_receipt/migration.sql',
-              'api/prisma/migrations/20260924140000_gateway_retry_request/migration.sql']
+              'api/prisma/migrations/20260924140000_gateway_retry_request/migration.sql',
+              'api/prisma/migrations/20260926120000_study_questions/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
+                 'StudyQuestion', 'StudyQuestionEntry',
                  'GatewayReceipt', 'GatewayRetryRequest'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
@@ -233,6 +237,29 @@ def expected_rows(uid):
         reason='SYNTHETIC request',reply='SYNTHETIC reply',cancelReason=None,state='Completed',revision=3,
         changedBy='SYNTHETIC-consultant',creationFingerprint='e'*64,
         lastRequest='00000000-0000-4000-8000-000000000902',lastFingerprint='f'*64,createdAt=STAMP,updatedAt=STAMP)]
+    # S5-U4a: one Closed question with its three receipts - the creating entry (seq 1, id = the question id, no report
+    # version yet), an answer (seq 2) and the author's close with an empty note (seq 3). Each result is the stored
+    # QuestionApplied a replay answers, so the replay receipts, the closing columns and a NULL and a real reportVersion
+    # all go through the exact dump comparison (F-19). The rows satisfy revision = entryCount and appliedRevision = seq.
+    question_id = '00000000-0000-4000-8000-000000000d01'
+    entries = [(question_id, 1, 'question', 'SYNTHETIC question', 'clinician', 'W', None, None, 'Open'),
+               ('00000000-0000-4000-8000-000000000d02', 2, 'answer', 'SYNTHETIC answer\n합성', 'radiologist', 'A', 2, 'Open', 'Answered'),
+               ('00000000-0000-4000-8000-000000000d03', 3, 'close', '', 'clinician', 'A', 2, 'Answered', 'Closed')]
+    rows['StudyQuestion'] = [dict(id=question_id, studyUid=uid, institutionId='SYNTHETIC-hospital',
+        authorSub='SYNTHETIC-clinician-sub', authorActor='SYNTHETIC-clinician', authorName='SYNTHETIC clinician',
+        state='Closed', revision=3, entryCount=3, closedAt=STAMP, closedByActor='SYNTHETIC-clinician',
+        closedByName='SYNTHETIC clinician', closedByRole='clinician', changedBy='SYNTHETIC-clinician',
+        createdAt=STAMP, updatedAt=STAMP)]
+    rows['StudyQuestionEntry'] = [dict(id=entry_id, questionId=question_id, seq=seq, kind=kind, body=body,
+        authorSub='SYNTHETIC-reader-sub' if role == 'radiologist' else 'SYNTHETIC-clinician-sub',
+        authorActor='SYNTHETIC-reader' if role == 'radiologist' else 'SYNTHETIC-clinician',
+        authorName='SYNTHETIC reader' if role == 'radiologist' else 'SYNTHETIC clinician', authorRole=role,
+        reportRs=rs, reportVersion=version, fingerprint=str(seq)*64, appliedRevision=seq,
+        result=dict(id=question_id, studyUid=uid, requestId=entry_id,
+            action='create' if kind == 'question' else 'answer' if kind == 'answer' else 'close',
+            entry=dict(id=entry_id, seq=seq, kind=kind), revision=seq, to=to, at='2026-09-06T00:00:00.123Z',
+            **{'from': before}), at=STAMP)
+        for entry_id, seq, kind, body, role, rs, version, before, to in entries]
     rows['ReaderAssignment']=[dict(studyUid=uid,institutionId='SYNTHETIC-hospital',revision=4,
         readerSub='SYNTHETIC-sub',readerActor='SYNTHETIC-reader',readerName='SYNTHETIC reader',changedBy='SYNTHETIC-admin',
         lastRequest='00000000-0000-4000-8000-000000000701',lastFingerprint='d'*64,updatedAt=STAMP)]
@@ -290,6 +317,7 @@ def create_product(name, db, uid):
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
+                  'StudyQuestion', 'StudyQuestionEntry',
                   'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:
@@ -535,6 +563,20 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing gateway retry receipt FK'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
       BEGIN INSERT INTO "GatewayRetryRequest" SELECT * FROM "GatewayRetryRequest" LIMIT 1;
         RAISE EXCEPTION 'missing gateway retry PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "StudyQuestion" SET state='Bogus';
+        RAISE EXCEPTION 'missing question state check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyQuestion" SET revision=revision+1;
+        RAISE EXCEPTION 'missing question revision check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyQuestion" SET "closedAt"=NULL;
+        RAISE EXCEPTION 'missing question closed check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN DELETE FROM "StudyQuestion";
+        RAISE EXCEPTION 'missing question receipt restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN UPDATE "StudyQuestionEntry" SET "appliedRevision"=99 WHERE seq=1;
+        RAISE EXCEPTION 'missing question receipt revision check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyQuestionEntry" SET result='[]'::jsonb WHERE seq=1;
+        RAISE EXCEPTION 'missing question receipt result check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN INSERT INTO "StudyQuestionEntry" SELECT * FROM "StudyQuestionEntry" LIMIT 1;
+        RAISE EXCEPTION 'missing question receipt PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
       BEGIN UPDATE "StudyConsultation" SET state='Requested';
         INSERT INTO "StudyConsultation" SELECT * FROM json_populate_record(NULL::"StudyConsultation",
           (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000999'))::json FROM "StudyConsultation" t LIMIT 1));
