@@ -464,6 +464,18 @@
     .menubar .item { padding: 8px 10px; color: var(--kin-muted); }
     .menubar .item:hover { background: var(--kin-row-hover); color: var(--kin-text); }
     .mright { color: var(--kin-muted); font-size: 12px; }
+    /* D27: 고정 52px 한 줄이라 항목 합이 폭을 넘으면 오른쪽 끝(Log out)이 화면 밖으로 밀려났다 — 1920px에서도.
+       줄바꿈을 허용해 어떤 항목도 자르지 않고, 세션 묶음은 줄지 않게 오른쪽에 붙인다. 긴 기관·역할 문구는
+       말줄임 대신 묶음 안에서 줄을 바꿔 전부 보인다. */
+    .menubar { height: auto; min-height: 52px; flex-wrap: wrap; }
+    .menubar .tabs { height: auto; min-height: 44px; }
+    .menubar-session { display: flex; align-items: center; flex: none; max-width: 100%; margin-left: auto; }
+    .menubar-session #user { max-width: 14em; }
+    .menubar-session #roles { max-width: 22em; }
+    .menubar-session #user, .menubar-session #roles { white-space: normal; overflow-wrap: anywhere; line-height: 1.3; }
+    .menubar .logout { font: inherit; font-size: 12px; background: none; border: 0; border-radius: 4px; padding: 6px 8px; }
+    .menubar .logout:hover { background: var(--kin-row-hover); }
+    .menubar .logout:focus-visible { outline: 2px solid var(--kin-accent); outline-offset: 1px; }
 
     .userfilter {
       min-height: 59px;
@@ -627,11 +639,14 @@
     <div class="mright">Prefetch <input type="checkbox" checked></div>
     <div class="mright" id="storage">0.0GB / -</div>
     <div class="mright" id="dbstat" title="앱 상태(판독문·RS·매칭)가 어디에 저장되는지">● 확인 중</div>
-    <div class="mright" id="user"></div>
-    <div class="mright" id="roles" style="color:#4da3ff" title="Keycloak 렐름 롤"></div>
-    <a class="mright member-link" id="member-link" href="admin.html" style="display:none">Members</a>
-    <div class="mright" title="메뉴·버튼은 영어, 설명·오류 안내는 한국어로 표시합니다.">EN</div>
-    <div class="mright logout" id="logout">Log out</div>
+    <!-- 세션 묶음은 줄지 않는 한 덩어리다. 헤더가 좁으면 앞 항목이 다음 줄로 내려가도 Log out은 화면 안에 남는다. -->
+    <div class="menubar-session" role="group" aria-label="Session">
+      <div class="mright" id="user"></div>
+      <div class="mright" id="roles" style="color:#4da3ff" title="Keycloak 렐름 롤"></div>
+      <a class="mright member-link" id="member-link" href="admin.html" style="display:none">Members</a>
+      <div class="mright" title="메뉴·버튼은 영어, 설명·오류 안내는 한국어로 표시합니다.">EN</div>
+      <button class="mright logout" id="logout" type="button">Log out</button>
+    </div>
   </div>
 
   <!-- 사용자 필터 영역 (6.2): Quick Search + 날짜 퀵필터 + Save/Clear -->
