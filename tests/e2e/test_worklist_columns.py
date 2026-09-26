@@ -11,6 +11,7 @@ import test_worklist as base
 
 class WorklistColumnsE2E(base.WorklistE2E):
     def open_columns(self, page):
+        self.open_toolbar_group(page, '#columnsettings')
         page.locator('#columnsettings').click()
         expect(page.locator('#column-manager')).to_be_visible()
 
@@ -90,6 +91,7 @@ class WorklistColumnsE2E(base.WorklistE2E):
         first=self.fixture(patient_id=prefix+'A');second=self.fixture(patient_id=prefix+'B')
         self.patch(first,ov={'desc':'match'});self.patch(second,ov={'desc':'other'})
         page=self.login();page.locator('#quick').fill(prefix)
+        self.open_toolbar_group(page,'#managefilters')
         page.locator('#managefilters').click();page.locator('#sfm-add-rule').click()
         row=page.locator('#sfm-rules .sfm-rule')
         row.locator('[data-rule-field]').select_option('desc')

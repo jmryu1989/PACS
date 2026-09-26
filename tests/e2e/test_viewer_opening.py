@@ -17,6 +17,7 @@ class ViewerOpeningE2E(ReadingWorkspaceE2E):
     sign_out = WorkspacePersistenceE2E.sign_out
 
     def settings(self, page, target, prior):
+        self.open_toolbar_group(page, '#image-opening-open')
         page.locator('#image-opening-open').click()
         page.locator('#image-opening-target').select_option(target)
         page.locator('#image-opening-prior').set_checked(prior)
@@ -120,6 +121,7 @@ class ViewerOpeningE2E(ReadingWorkspaceE2E):
         a.evaluate('(key)=>localStorage.setItem(key,"{")', owner)
         a.reload()
         expect(a.locator('#dbstat')).to_contain_text('DB Connected')
+        self.open_toolbar_group(a, '#image-opening-open')
         a.locator('#image-opening-open').click()
         expect(a.locator('#image-opening-status')).to_contain_text('저장된 설정 오류')
         self.assertEqual(self.choice(a), dict(version=3, listTarget='window', includePrior=True, maxWindows=1, autoLoad=False, reuseClean=False))
@@ -154,12 +156,14 @@ class ViewerOpeningE2E(ReadingWorkspaceE2E):
         self.settings(p, 'window', True)
         expect(p.locator('#image-opening-status')).to_contain_text('이 창에서만 유지')
         self.close_settings(p)
+        self.open_toolbar_group(p, '#image-opening-open')
         p.locator('#image-opening-open').click()
         expect(p.locator('#image-opening-status')).to_contain_text('이 창에서만 유지')
         self.close_settings(p)
         self.assertEqual(self.choice(q), dict(version=3, listTarget='workspace', includePrior=False, maxWindows=1, autoLoad=False, reuseClean=False))
         self.assertEqual(frame.evaluate('window.__openingDocument'), 'same')
         self.assertEqual(self.ids(frame), [a.uid, b.uid])
+        self.open_toolbar_group(p, '#image-opening-open')
         p.locator('#image-opening-open').click()
         q.evaluate('''() => { const c=new BroadcastChannel('kin-session'); c.postMessage({type:'session-ended'}); setTimeout(()=>c.close(),0); }''')
         expect(p.locator('#image-opening-dialog')).not_to_be_visible()

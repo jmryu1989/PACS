@@ -35,6 +35,7 @@ class ConsultationRecoveryE2E(ConsultationE2E):
     def test_consult_recovery_02_close_busy_read_aborts_and_clears_search(self):
         a=self.fixture();self.create_request(a);p=self.login('doctor2');self.select(p,a)
         waiting=[];p.route('**/api/consultations?*',lambda route:waiting.append(route))
+        self.open_toolbar_group(p,'#consultations-open')
         p.locator('#consultations-open').click();expect(p.locator('#co-status')).to_contain_text('읽는 중')
         expect(p.locator('#co-close')).to_be_enabled();p.locator('#co-close').click()
         expect(p.locator('#consultations-dialog')).not_to_be_visible()

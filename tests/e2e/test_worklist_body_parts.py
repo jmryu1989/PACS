@@ -90,6 +90,7 @@ class WorklistBodyPartsE2E(compound.CompoundSearchE2E):
         self.rows_are(fresh, [])
         expect(fresh.locator("#page-status")).to_contain_text("Partial")
         expect(fresh.locator("#body-parts-load")).to_have_text("Read Body Parts")
+        self.open_toolbar_group(fresh, "#body-parts-load")
         fresh.locator("#body-parts-load").click()
         self.wait_for_body_parts(fresh)
         self.rows_are(fresh, [unspecified])

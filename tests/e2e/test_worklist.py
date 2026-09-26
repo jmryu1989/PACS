@@ -188,6 +188,21 @@ class WorklistE2E(unittest.TestCase):
         expect(row).to_have_class(re.compile(r"\bsel\b"))
         return row
 
+    def open_toolbar_group(self, page, selector):
+        # S5-UI2: the worklist toolbar keeps most controls in <details> groups (Filters, View, More, the Auto Refresh
+        # menu). Open each closed group holding `selector`, outermost first, by clicking its summary as a user does.
+        # A control in view needs nothing; an open group is left open.
+        groups = page.locator(selector).first.evaluate("""e => {
+            const out = [];
+            for (let d = (e.tagName === 'SUMMARY' ? e.parentElement : e).parentElement.closest('details'); d;
+                 d = d.parentElement.closest('details')) out.unshift(d.id);
+            return out;
+        }""")
+        for group in groups:
+            menu = page.locator('#' + group)
+            if menu.get_attribute('open') is None:
+                menu.locator(':scope > summary').click()
+
     def state(self, fixture, actor="doctor"):
         result = self.stack.request("GET", "/bootstrap", actor)
         self.assertEqual(result.status, 200)

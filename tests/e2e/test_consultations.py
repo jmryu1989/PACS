@@ -56,6 +56,7 @@ class ConsultationE2E(WorklistE2E):
         p.on('request',capture);return p
 
     def open_dialog(self,p):
+        self.open_toolbar_group(p,'#consultations-open')
         p.locator('#consultations-open').click();expect(p.locator('#co-status')).to_contain_text('현재 불러온 의뢰')
 
     def test_consult_01_roles_institution_eligibility_and_original(self):
@@ -135,6 +136,7 @@ class ConsultationE2E(WorklistE2E):
         p.unroute('**/api/studies/*/consultations',lost);p.locator('#co-retry').click()
         expect(p.locator('#co-status')).to_contain_text('자문 요청을 저장했습니다');self.assertEqual(len(self.audits(a)),1)
         p.locator('#co-close').click();waiting=[];p.route('**/api/consultations?*',lambda route:waiting.append(route))
+        self.open_toolbar_group(p,'#consultations-open')
         p.locator('#consultations-open').click();expect(p.locator('#co-status')).to_contain_text('읽는 중')
         p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close();}")
         expect(p.locator('#consultations-dialog')).not_to_be_visible()

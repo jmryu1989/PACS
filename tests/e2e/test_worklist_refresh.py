@@ -16,6 +16,7 @@ class WorklistRefreshE2E(WorklistE2E):
         a=self.fixture();self.seed_report(a);p=self.login();self.select(p,a)
         versions=self.versions(a);p.locator('#findings').fill('REFRESH UNSAVED INPUT')
         expect(p.locator('#worklist-refresh')).to_have_value('30')
+        self.open_toolbar_group(p,'#worklist-refresh')
         p.locator('#worklist-refresh').select_option('0')
         p.wait_for_function('() => !studyPageClient.busy')
         requests=[]
@@ -27,6 +28,7 @@ class WorklistRefreshE2E(WorklistE2E):
         p.locator('#refresh').click()
         p.wait_for_function('(uid)=>studies.some(s=>s.uid===uid)',arg=b.uid)
         expect(p.locator('#findings')).to_have_value('REFRESH UNSAVED INPUT')
+        self.open_toolbar_group(p,'#worklist-refresh')
         c=self.fixture();p.locator('#worklist-refresh').select_option('30')
         self.assertNotIn(c.uid,p.evaluate('studies.map(s=>s.uid)'))
         p.wait_for_function('(uid)=>studies.some(s=>s.uid===uid)',arg=c.uid,timeout=45000)
@@ -38,14 +40,17 @@ class WorklistRefreshE2E(WorklistE2E):
     def test_refresh_02_pause_discards_inflight_list_and_manual_recovers(self):
         a=self.fixture();p=self.login();self.select(p,a)
         p.wait_for_function('() => !studyPageClient.busy')
+        self.open_toolbar_group(p,'#worklist-refresh')
         p.locator('#worklist-refresh').select_option('0')
         b=self.fixture();held=[]
         def hold(route): held.append((route,route.fetch()))
         p.route('**/api/studies?*',hold)
+        self.open_toolbar_group(p,'#worklist-refresh')
         p.locator('#worklist-refresh').select_option('30')
         deadline=time.monotonic()+40
         while not held and time.monotonic()<deadline:p.wait_for_timeout(100)
         self.assertEqual(len(held),1)
+        self.open_toolbar_group(p,'#worklist-refresh')
         p.locator('#worklist-refresh').select_option('0')
         held[0][0].fulfill(response=held[0][1])
         p.wait_for_function('() => !studyPageClient.busy')
@@ -59,11 +64,13 @@ class WorklistRefreshE2E(WorklistE2E):
 
     def test_refresh_03_relogin_other_account_and_storage_failure(self):
         self.fixture();context=self.device();p=self.sign_in(context)
+        self.open_toolbar_group(p,'#worklist-refresh')
         p.locator('#worklist-refresh').select_option('120')
         self.sign_out(p);p=self.sign_in(context)
         expect(p.locator('#worklist-refresh')).to_have_value('120')
         self.assertEqual(p.evaluate('worklistRefresh.seconds()'),120)
         p.evaluate("() => {const original=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k.startsWith('kin-worklist-refresh:'))throw Error('blocked');return original.call(this,k,v);};}")
+        self.open_toolbar_group(p,'#worklist-refresh')
         p.locator('#worklist-refresh').select_option('60')
         expect(p.locator('#worklist-refresh-status')).to_contain_text('현재 창에만')
         self.assertEqual(p.evaluate('worklistRefresh.seconds()'),60)

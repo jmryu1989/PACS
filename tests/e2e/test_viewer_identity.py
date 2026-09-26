@@ -10,6 +10,7 @@ class ViewerIdentityE2E(ViewerPatientCopyE2E):
  def setUp(self):
   super().setUp();self.addCleanup(cleanup_workspace,self.stack,'ReadingAppearance')
  def settings(self,p):
+  self.open_toolbar_group(p,'#reading-appearance-open')
   p.locator('#reading-appearance-open').click();expect(p.locator('#appearance-account-save')).to_be_enabled()
  def label(self,v,uid):return v.locator('.kin-viewer-identity[data-study="'+uid+'"]')
  def test_identity_04_patient_header_stays_english_after_toggle(self):

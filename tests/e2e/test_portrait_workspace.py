@@ -115,13 +115,16 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
             self.drag(page, "#resize-top", -15)
             self.assertGreaterEqual(page.locator(".rw").bounding_box()["height"], 140)
             self.assertLess(page.locator(".rw").bounding_box()["height"], old - 5)
+            self.open_toolbar_group(page, "#layout-toggle")
             page.locator("#layout-toggle").click()  # auto -> portrait
             page.set_viewport_size({"width": 1600, "height": 1000})
             expect(page.locator("body")).to_have_class(re.compile(r"\bportrait\b"))
             self.reachable(page, "#b-history")
+            self.open_toolbar_group(page, "#layout-toggle")
             page.locator("#layout-toggle").click()  # portrait -> landscape
             expect(page.locator("body")).not_to_have_class(re.compile(r"\bportrait\b"))
             self.snapshot(page, "1600-landscape")
+            self.open_toolbar_group(page, "#layout-toggle")
             page.locator("#layout-toggle").click()  # landscape -> auto
             self.portrait(page)
             self.reachable(page, "#b-history")

@@ -275,6 +275,7 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         f = self.specimen(slices=3); shown, _ = self.seed(f); sops = self.sops(f)
         original, rows = self.hashes(), self.owned_rows(f)
         w = self.login(); self.observe(w); w.on('dialog', lambda d: d.accept())
+        self.open_toolbar_group(w, '#image-opening-open')
         w.locator('#image-opening-open').click(); expect(w.locator('#image-opening-dialog')).to_be_visible()
         w.locator('#image-opening-limit').select_option('2'); w.locator('#image-opening-done').click()
         expect(w.locator('#image-opening-dialog')).to_be_hidden()
@@ -295,6 +296,7 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         one.evaluate("()=>{window.kinViewerWindowOwner=window.__realOwner}")
         # A second window of the same study makes the target ambiguous; neither window moves.
         self.close_findings(w)
+        self.open_toolbar_group(w, '#viewer-windows-open')
         w.locator('#viewer-windows-open').click(); expect(w.locator('#viewer-windows-dialog')).to_be_visible()
         latest = w.locator('[data-window-index="0"][data-window-action="latest"]'); expect(latest).to_be_enabled(timeout=15000)
         with w.context.expect_page() as opened: latest.click()

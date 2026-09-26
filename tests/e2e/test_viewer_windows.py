@@ -26,6 +26,7 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
         return popup
 
     def manager(self, p):
+        self.open_toolbar_group(p, '#viewer-windows-open')
         p.locator('#viewer-windows-open').click()
         expect(p.locator('#viewer-windows-dialog')).to_be_visible()
 

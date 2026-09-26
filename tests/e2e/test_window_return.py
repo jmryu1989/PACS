@@ -31,7 +31,7 @@ class WindowReturnE2E(ViewerTechNoteE2E):
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'returned-editor.png'))
 
  def test_return_02_target_and_modal_refusal(self):
-  a,b=self.pair();p,f,v=self.popup(a);self.active(v,a.uid);p.locator('#reading-appearance-open').click();v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_contain_text('대화상자');expect(p.locator('#reading-appearance-dialog')).to_be_visible();p.locator('#reading-appearance-close').click()
+  a,b=self.pair();p,f,v=self.popup(a);self.active(v,a.uid);self.open_toolbar_group(p,'#reading-appearance-open');p.locator('#reading-appearance-open').click();v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_contain_text('대화상자');expect(p.locator('#reading-appearance-dialog')).to_be_visible();p.locator('#reading-appearance-close').click()
   self.choose(p,b);v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_contain_text('판독 대상이나 화면');expect(p.locator('#reading-target')).to_contain_text(b.uid)
   self.open_note(v);before=v.locator('#kin-viewer-return-status').text_content();active=v.evaluate('()=>document.activeElement.id');v.keyboard.press('Control+Alt+4');self.assertEqual(v.evaluate('()=>document.activeElement.id'),active);self.assertEqual(v.locator('#kin-viewer-return-status').text_content(),before);v.locator('#tech-note-close').click()
 
@@ -54,7 +54,7 @@ class WindowReturnE2E(ViewerTechNoteE2E):
    self.assertEqual(result,expected);expect(target).to_be_focused();expect(p.locator('#reading-target')).to_contain_text(a.uid)
 
  def test_return_06_visible_feedback_and_rebind_cancels_pending(self):
-  a,b=self.pair();p,f,v=self.popup(a);self.active(v,a.uid);v.get_by_role('button',name='Measurements',exact=True).click();p.locator('#reading-appearance-open').click();v.keyboard.press('Control+Alt+4')
+  a,b=self.pair();p,f,v=self.popup(a);self.active(v,a.uid);v.get_by_role('button',name='Measurements',exact=True).click();self.open_toolbar_group(p,'#reading-appearance-open');p.locator('#reading-appearance-open').click();v.keyboard.press('Control+Alt+4')
   expect(v.locator('#kin-viewer-return-status')).to_contain_text('대화상자');expect(v.locator('#kin-viewer-return-status')).to_be_in_viewport();expect(v.locator('#kin-viewer-layout')).not_to_be_visible();expect(v.locator('#kin-viewer-history')).to_be_visible();p.locator('#reading-appearance-close').click()
   p.evaluate("()=>{window.syntheticReplies=[];const send=BroadcastChannel.prototype.postMessage;window.syntheticSend=send;BroadcastChannel.prototype.postMessage=function(m){if(m.type==='result')window.syntheticReplies.push([this,m]);else send.call(this,m)}}")
   v.keyboard.press('Control+Alt+4');p.wait_for_function('()=>window.syntheticReplies.length===1');p.get_by_role('button',name='Open Viewer Window',exact=True).click();expect(v.locator('#kin-viewer-return-status')).to_contain_text('이전 복귀 요청은 취소');expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-busy','false')
@@ -67,7 +67,7 @@ class WindowReturnE2E(ViewerTechNoteE2E):
   p.context.route('**/viewer-workspace-dock.js',lambda route:route.fulfill(status=200,content_type='application/javascript',body='window.KinViewerWorkspaceDock=()=>null;'))
   with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   v=opened.value;canvas_ready(v,2);expect(v.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000);expect(v.locator('#kin-workspace-dock')).to_have_count(0);self.active(v,a.uid)
-  v.locator('#kin-viewer-layout > summary').click();expect(v.locator('#kin-viewer-note-open')).not_to_be_visible();p.locator('#reading-appearance-open').click();v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_contain_text('대화상자');expect(v.locator('#kin-viewer-return-status')).to_be_in_viewport();expect(v.locator('#kin-viewer-note-open')).not_to_be_visible()
+  v.locator('#kin-viewer-layout > summary').click();expect(v.locator('#kin-viewer-note-open')).not_to_be_visible();self.open_toolbar_group(p,'#reading-appearance-open');p.locator('#reading-appearance-open').click();v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_contain_text('대화상자');expect(v.locator('#kin-viewer-return-status')).to_be_in_viewport();expect(v.locator('#kin-viewer-note-open')).not_to_be_visible()
 
   p.locator('#reading-appearance-close').click();before=self.snapshot(v)
   v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeExit()");expect(v.locator('#kin-viewer-return-status')).to_have_count(0)

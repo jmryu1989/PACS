@@ -34,6 +34,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
             '^' + re.escape(name) + r', 로드된 목록 기준 \d+건(?:, 기본 필터)?$'))
 
     def edit_from_chip(self, page, name, key='Shift+F10'):
+        self.open_toolbar_group(page, '#chips')
         self.chip(page, name).focus()
         page.keyboard.press(key)
         expect(page.locator('#ctx')).to_be_visible()
@@ -80,6 +81,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         expect(page.locator('#findings')).to_have_value(first.secret)
         draft = first.secret + ' navigation draft'
         page.locator('#findings').fill(draft)
+        self.open_toolbar_group(page, '#chips')
         self.chip(page, name).click()
         self.expect_rows(page, first, second)
         expect(page.locator('#active-filter-name')).to_have_text(name)
@@ -120,6 +122,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         page.once('dialog', lambda dialog: dialog.accept()); page.keyboard.press('Escape')
         expect(page.locator('#saved-filter-manager')).not_to_be_visible()
         expect(self.chip(page, name)).to_be_focused()
+        self.open_toolbar_group(page, '#chips')
         self.chip(page, name).click()
         self.expect_rows(page, second)
         expect(page.locator('#active-filter-state')).to_have_text('Saved')
@@ -127,6 +130,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         page.locator('#quick').fill(prefix + '-absent')
         self.expect_rows(page)
         expect(page.locator('#active-filter-state')).to_have_text('Modified')
+        self.open_toolbar_group(page, '#edit-active-filter')
         page.locator('#edit-active-filter').click()
         expect(page.locator('#sfm-name')).to_have_value(name)
         expect(page.locator('#sfm-quick')).to_have_value(prefix)
@@ -136,13 +140,16 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         expect(page.locator('#active-filter-state')).to_have_text('Saved')
         page.locator('#heads th[data-key="id"]').click()
         expect(page.locator('#active-filter-state')).to_have_text('Modified')
+        self.open_toolbar_group(page, '#chips')
         self.chip(page, name).click()
         expect(page.locator('#active-filter-state')).to_have_text('Saved')
         page.locator('.tabs [data-tab="Technician"]').click()
         expect(page.locator('#active-filter-state')).to_have_text('Modified')
+        self.open_toolbar_group(page, '#chips')
         self.chip(page, name).click()
         expect(page.locator('#active-filter-state')).to_have_text('Saved')
 
+        self.open_toolbar_group(page, '#edit-active-filter')
         page.locator('#edit-active-filter').click()
         page.once('dialog', lambda dialog: dialog.accept())
         with page.expect_response(lambda r: r.request.method == 'DELETE'
@@ -159,6 +166,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         expect(page.locator('#filterrow input[data-f="id"]')).to_have_value(second.patient_id)
         self.expect_rows(page, second)
         page.locator('#clearfilter').click()
+        self.open_toolbar_group(page, '#active-filter-info')
         expect(page.locator('#active-filter-info')).not_to_be_visible()
         expect(page.locator('#quick')).to_have_value('')
         expect(page.locator('#filterrow input[data-f="id"]')).to_have_value('')
@@ -178,6 +186,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         page.locator('#findings').fill(draft)
         page.locator('#quick').fill(prefix)
         self.expect_rows(page, first, second)
+        self.open_toolbar_group(page, '#savefilter')
         page.locator('#savefilter').click()
         expect(page.locator('#saved-filter-manager')).to_be_visible()
         posts = []
@@ -201,6 +210,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         expect(page.locator('#sfm-name')).to_have_value(prefix)
         expect(page.locator('#sfm-col-id')).to_have_value(second.patient_id)
         expect(page.locator('#sfm-default')).to_be_checked()
+        self.open_toolbar_group(page, '#active-filter-info')
         expect(page.locator('#active-filter-info')).not_to_be_visible()
         self.expect_rows(page, first, second)
         expect(page.locator('#findings')).to_have_value(draft)
@@ -241,6 +251,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         expect(fresh.locator('#active-filter-name')).to_have_text(prefix)
         expect(fresh.locator('#active-filter-state')).to_have_text('Saved')
         self.expect_rows(fresh, second)
+        self.open_toolbar_group(fresh, '#edit-active-filter')
         fresh.locator('#edit-active-filter').click()
         expect(fresh.locator('#sfm-name')).to_have_value(prefix)
         expect(fresh.locator('#sfm-default')).to_be_checked()
@@ -264,6 +275,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         draft = first.secret + ' navigation must keep this draft'
         page.locator('#findings').fill(draft)
         page.locator('#quick').fill(prefix)
+        self.open_toolbar_group(page, '#managefilters')
         page.locator('#managefilters').click()
         page.locator('#sfm-search').fill(prefix)
         self.assertEqual(page.locator('#sfm-list button').evaluate_all(

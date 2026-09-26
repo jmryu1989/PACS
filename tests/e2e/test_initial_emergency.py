@@ -12,7 +12,7 @@ class InitialEmergencyE2E(WorklistAlertsE2E):
         self.observe_audio(p);p.locator('#alerts-enable').click();expect(p.locator('#alerts-audio-state')).to_have_text('Sound Ready')
         self.assertEqual(p.evaluate('__alertTones'),0)
         p.locator('#alerts-done').click();self.sign_out(p)
-        p=self.sign_in(context);p.locator('#worklist-refresh').select_option('0');self.observe_audio(p);self.controls(p)
+        p=self.sign_in(context);self.open_toolbar_group(p,'#worklist-refresh');p.locator('#worklist-refresh').select_option('0');self.observe_audio(p);self.controls(p)
         expect(p.locator('#alerts-initial')).to_be_checked();expect(p.locator('#alerts-audio-state')).to_have_text('Sound Off')
         return context,p
 

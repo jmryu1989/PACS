@@ -43,15 +43,15 @@ class FavoritesE2E(WorklistE2E):
 
  def test_favorite_02_browser_cross_context_and_report_roundtrip(self):
   a=self.fixture();b=self.fixture(patient_id=a.patient_id);self.seed_report(a);self.seed_report(b);self.account();p=self.login();self.select(p,a)
-  p.locator('#findings').fill('KEEP FAVORITE REPORT');p.locator('#favorite-open').click()
+  p.locator('#findings').fill('KEEP FAVORITE REPORT');self.open_toolbar_group(p,'#favorite-open');p.locator('#favorite-open').click()
   p.locator('#favorite-new-name').fill('SYNTHETIC <favorite>');p.locator('#favorite-create').click();expect(p.locator('#favorite-status')).to_have_text('저장되었습니다.')
   p.locator('#favorite-add').click();expect(p.locator('.favorite-link')).to_have_count(1);p.locator('#favorite-close').click()
-  self.select(p,b);p.locator('#favorite-open').click();expect(p.locator('#favorite-name')).to_have_value('SYNTHETIC <favorite>')
+  self.select(p,b);self.open_toolbar_group(p,'#favorite-open');p.locator('#favorite-open').click();expect(p.locator('#favorite-name')).to_have_value('SYNTHETIC <favorite>')
   p.locator('#favorite-add').click();expect(p.locator('.favorite-link')).to_have_count(2)
   p.locator('#favorite-name').fill('SYNTHETIC renamed folder');p.locator('#favorite-rename').click();expect(p.locator('#favorite-folders')).to_contain_text('SYNTHETIC renamed folder')
   p.locator(f'.favorite-link[data-uid="{a.uid}"]').get_by_role('button',name='검사 선택',exact=True).click();expect(p.locator('#favorite-dialog')).not_to_be_visible()
   expect(p.locator('#findings')).to_have_value('KEEP FAVORITE REPORT');expect(p.locator('#rows tr.sel')).to_have_attribute('data-uid',a.uid)
-  other=self.login();self.select(other,a);other.locator('#favorite-open').click();expect(other.locator('.favorite-link')).to_have_count(2)
+  other=self.login();self.select(other,a);self.open_toolbar_group(other,'#favorite-open');other.locator('#favorite-open').click();expect(other.locator('.favorite-link')).to_have_count(2)
   self.assertEqual(other.locator('#favorite-folders b').count(),0)
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);other.screenshot(path=str(folder/'favorites.png'))
   other.locator(f'.favorite-link[data-uid="{b.uid}"]').get_by_role('button',name='링크 제거',exact=True).click();expect(other.locator('.favorite-link')).to_have_count(1)
@@ -59,7 +59,7 @@ class FavoritesE2E(WorklistE2E):
   self.assertEqual(len(self.versions(a)),1);self.assertEqual(len(self.versions(b)),1)
 
  def test_favorite_03_lost_response_retry_and_conflict_input(self):
-  a=self.fixture();self.account();p=self.login();self.select(p,a);p.locator('#favorite-open').click();expect(p.locator('#favorite-status')).to_contain_text('최신 즐겨찾기')
+  a=self.fixture();self.account();p=self.login();self.select(p,a);self.open_toolbar_group(p,'#favorite-open');p.locator('#favorite-open').click();expect(p.locator('#favorite-status')).to_contain_text('최신 즐겨찾기')
   def lost(route):route.fetch();route.abort()
   p.route('**/api/favorite-folders',lambda route:lost(route) if route.request.method=='POST' else route.continue_())
   p.locator('#favorite-new-name').fill('SYNTHETIC retry');p.locator('#favorite-create').click();expect(p.locator('#favorite-status')).to_contain_text('저장 확인 실패')
@@ -85,13 +85,14 @@ class FavoritesE2E(WorklistE2E):
 
  def test_favorite_05_revoked_link_cannot_select_and_late_session_read(self):
   a=self.fixture();b=self.fixture(patient_id=a.patient_id);s=self.account();fid=str(uuid.uuid4());s=self.change(self.body(s,'create',fid,name='SYNTHETIC session'))
-  s=self.change(self.body(s,'add',fid,uid=a.uid));p=self.login();self.select(p,b);p.locator('#favorite-open').click();expect(p.locator('.favorite-link')).to_have_count(1)
+  s=self.change(self.body(s,'add',fid,uid=a.uid));p=self.login();self.select(p,b);self.open_toolbar_group(p,'#favorite-open');p.locator('#favorite-open').click();expect(p.locator('.favorite-link')).to_have_count(1)
   psql(f'''UPDATE "StudyState" SET "institutionId"='kin-center' WHERE uid='{a.uid}' ''')
   try:
    p.locator('.favorite-link').get_by_role('button',name='검사 선택',exact=True).click();expect(p.locator('#favorite-status')).to_contain_text('지금 열 수 없습니다')
    expect(p.locator('#rows tr.sel')).to_have_attribute('data-uid',b.uid);expect(p.locator('.favorite-link')).to_have_count(0)
   finally:psql(f'''UPDATE "StudyState" SET "institutionId"='hallym' WHERE uid='{a.uid}' ''')
   p.locator('#favorite-close').click();pending=[];p.route('**/api/favorite-folders',lambda route:pending.append(route))
+  self.open_toolbar_group(p,'#favorite-open')
   p.locator('#favorite-open').click();expect(p.locator('#favorite-status')).to_contain_text('읽는 중')
   p.evaluate("() => {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
   expect(p.locator('#favorite-dialog')).not_to_be_visible();self.assertEqual(len(pending),1)
@@ -100,7 +101,7 @@ class FavoritesE2E(WorklistE2E):
 
  def test_favorite_06_unsaved_name_and_mismatched_owner_clear(self):
   a=self.fixture();s=self.account();fid=str(uuid.uuid4());s=self.change(self.body(s,'create',fid,name='SYNTHETIC private folder'))
-  p=self.login();self.select(p,a);p.locator('#favorite-open').click();expect(p.locator('#favorite-name')).to_have_value('SYNTHETIC private folder')
+  p=self.login();self.select(p,a);self.open_toolbar_group(p,'#favorite-open');p.locator('#favorite-open').click();expect(p.locator('#favorite-name')).to_have_value('SYNTHETIC private folder')
   p.locator('#favorite-name').fill('UNSAVED NAME');p.once('dialog',lambda d:d.dismiss());p.locator('#favorite-close').click()
   expect(p.locator('#favorite-dialog')).to_be_visible();expect(p.locator('#favorite-name')).to_have_value('UNSAVED NAME')
   s['owner']=['hallym',str(uuid.uuid4())];s['folders'][0]['name']='OTHER OWNER SECRET'
@@ -111,7 +112,7 @@ class FavoritesE2E(WorklistE2E):
 
  def test_favorite_07_changed_selection_and_uncommitted_retry(self):
   a=self.fixture();b=self.fixture(patient_id=a.patient_id);s=self.account();fid=str(uuid.uuid4());self.change(self.body(s,'create',fid,name='SYNTHETIC selection guard'))
-  p=self.login();self.select(p,a);p.locator('#favorite-open').click();expect(p.locator('#favorite-name')).to_have_value('SYNTHETIC selection guard')
+  p=self.login();self.select(p,a);self.open_toolbar_group(p,'#favorite-open');p.locator('#favorite-open').click();expect(p.locator('#favorite-name')).to_have_value('SYNTHETIC selection guard')
   p.locator(f'#rows tr[data-uid="{b.uid}"]').evaluate('(el)=>el.click()');expect(p.locator('#rows tr.sel')).to_have_attribute('data-uid',b.uid)
   p.locator('#favorite-add').click();expect(p.locator('#favorite-status')).to_contain_text('선택 검사가 바뀌었습니다');self.assertEqual(self.account()['folders'][0]['uids'],[])
   p.route('**/api/favorite-folders',lambda route:route.fulfill(status=503,content_type='application/json',body=json.dumps({'message':'SYNTHETIC busy'})) if route.request.method=='POST' else route.continue_())
