@@ -6,7 +6,7 @@ REQ-S5-U1a-ROLE-DEFAULT-DENY -> RISK-S5-CLINICIAN-WRITER-LEAK/UNCLASSIFIED-ROUTE
 REQ-S5-U1b-CLINICIAN-READ -> RISK-S5-U1b-DRAFT-LEAK/NONFINAL-BODY/WRITER-FIELD/COUNT-LEAK/TENANT-UID
 -> this file (allowlist == fixture, declared additions only, source pins), TEST-S5-U1b-PURE
 (clinician_read_serializer_test.cjs) and TEST-S5-U1b-LIVE (clinician_read_live.py).
-REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-18
+REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-19
 here) and TEST-S5-U1c-LIVE-MATRIX (clinician_policy_live.py test_01/test_04/test_05): every controller route has exactly one
 route_matrix row, nothing is denied by subtraction, and review notes D3/D5/D6/D8 of S5-U1a are closed by pins.
 
@@ -18,7 +18,9 @@ No Node, no Nest, no browser, no stack. Three kinds of evidence and nothing more
   2. The current controller decorator inventory (own parser: decorator runs, so a @Public() belongs to the handler it
      decorates, same decorator table as invariants_live; every '@' outside comments and literals must be a decorator
      call it reads, spaced or not, or it refuses the file; a '//' comment ends at any of the four line terminators, and
-     every other api/src .ts file goes through the same reader and may carry no route, @Controller() or @Public())
+     every other api/src .ts file goes through the same reader and may carry no route, @Controller() or @Public(); every
+     decorator name is bound once by 'import { Name }' from its listed module and nothing renames, re-exports under
+     another name or shadows it, and Public ends at its declaration in auth.guard.ts)
      compared with the invariants_live ROUTES table read as text,
      with the 104-row planning baseline and with the route matrix: every current route is public, a listed session or
      business row, or a denied row with a named basis, and every route added since the baseline has its own row.
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 import sys
 import tempfile
@@ -123,6 +126,13 @@ KNOWN_DECORATORS = set(HTTP_DECORATORS) | set(FIXTURES["controller_decorators"][
 OUTSIDE_DECORATORS = set(FIXTURES["outside_decorators"]["classified"])
 # the names that declare a route or open one; outside *.controller.ts neither inventory would see them (S5-U1c-F03)
 DECIDING = frozenset({"Public", "Controller", "RequestMapping", *HTTP_DECORATORS})
+BINDINGS = FIXTURES["decorator_bindings"]
+# the one module each name the runs may carry is imported from, by that name. The inventories classify a decorator by its
+# name, so '@Header()' is Nest's Header only when the file says so: 'import { Get as Header }' read as a header (S5-U1c-F04).
+DECORATOR_MODULE = {name: module for module, names in BINDINGS["modules"].items() for name in names}
+# no import or export renames one of these, from or to: an alias is how a route or @Public() takes a harmless name
+BOUND_NAMES = frozenset(DECORATOR_MODULE) | DECIDING
+IMPORT_FORMS = frozenset({"named", "namespace", "default", "equals"})
 # tsconfig compiles src/**/*, which takes .tsx, .mts and .cts too; a script no inventory opens could hold a controller
 UNREAD_SCRIPTS = frozenset({".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"})
 # TypeScript accepts whitespace, a line break or a comment between '@', the name and '('. A reader that wanted '@Name('
@@ -150,6 +160,8 @@ REGEX_AFTER = frozenset("(,=:[!&|?{};+-*%<>~^")
 REGEX_WORDS = frozenset({"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do",
                          "else", "yield", "await"})
 IDENTIFIER = re.compile(r"[\w$]+")
+# an import or export keyword of the code; one after '.' is a property (import.meta is read where the keyword is)
+STATEMENT_KEYWORD = re.compile(r"(?<![\w$.])(import|export)(?![\w$])")
 
 
 def literal_end(source, start):
@@ -357,15 +369,240 @@ def decorator_text(source):
     return hits
 
 
+def next_token(source, index):
+    """(kind, text, start, end) of the token after the whitespace and comments at source[index]: 'name' (\\u escapes
+    decoded), 'string' (the raw text between its quotes), 'punct' (one character) or 'end'."""
+    start = skip_gap(source, index)
+    if start >= len(source):
+        return "end", "", start, start
+    if source[start] in "'\"":
+        end = literal_end(source, start)
+        return "string", source[start + 1:end - 1], start, end
+    part = NAME_PART.match(source, start)
+    if part:
+        return "name", name_text(part.group(0)), start, part.end()
+    return "punct", source[start], start, start + 1
+
+
+def module_key(path, specifier):
+    """A relative module as './<path from api/src>', resolved from the importing file; a package as written."""
+    if not specifier.startswith(("./", "../")):
+        return specifier
+    target = Path(os.path.normpath(path.parent / specifier))
+    try:
+        return "./" + target.relative_to(API).as_posix()
+    except ValueError:
+        return "outside api/src: " + target.as_posix()
+
+
+def decorator_module(key):
+    """A module a decorator name is imported from, or a part of Nest's common package that exports them too."""
+    return key is not None and (key in BINDINGS["modules"] or key.startswith("@nestjs/common/"))
+
+
+def module_statements(path, source):
+    """[{'form', 'imported', 'local', 'module', 'type', 'at'}] of every import and export statement of the code.
+
+    form: 'named' ({ a as b } of an import), 'export' ({ a as b } of an export list; module None without 'from'),
+    'namespace', 'default', 'equals' (import x = require('m') or = A.B) and 'star' (export * [as x] from 'm'). 'local' is
+    the name bound or exported and 'at' its offset. import(), import.meta and import 'm' bind nothing; an export
+    declaration binds a name the occurrence check of own_import reads. A shape this reader does not know raises: a
+    binding it cannot read is refused, not skipped (S5-U1c-F04).
+    """
+    found = []
+
+    def fail(at, why):
+        raise AssertionError(f"{path.name}: an import or export statement the binding check does not read ({why}): "
+                             f"{source[at:at + 60]!r}")
+
+    def module(index):
+        kind, text, start, end = next_token(source, index)
+        if kind != "string" or "\\" in text:
+            fail(start, "a module that is not a plain string")
+        return module_key(path, text), end
+
+    def specifiers(index):
+        """[(left, right, right_at, type)] of '{ a, type b, c as d }' from just past '{', and the offset past '}'."""
+        specs = []
+        while True:
+            kind, text, start, end = next_token(source, index)
+            if (kind, text) == ("punct", "}"):
+                return specs, end
+            modifier = False
+            if (kind, text) == ("name", "type"):
+                following = next_token(source, end)
+                if following[0] == "string" or following[0] == "name" and following[1] != "as":
+                    modifier, (kind, text, start, end) = True, following
+            if kind != "name":
+                fail(start, "a specifier that is not a name")
+            left, right, right_at = text, text, start
+            kind, text, start, end = next_token(source, end)
+            if (kind, text) == ("name", "as"):
+                kind, text, start, end = next_token(source, end)
+                if kind != "name":
+                    fail(start, "an 'as' without a name")
+                right, right_at = text, start
+                kind, text, start, end = next_token(source, end)
+            specs.append((left, right, right_at, modifier))
+            if (kind, text) == ("punct", "}"):
+                return specs, end
+            if (kind, text) != ("punct", ","):
+                fail(start, "a specifier list that does not go on")
+            index = end
+
+    for keyword in STATEMENT_KEYWORD.finditer(code_mask(source)):
+        word, at = keyword.group(1), keyword.start()
+        kind, text, start, end = next_token(source, keyword.end())
+        if word == "import" and (kind, text) in (("punct", "("), ("punct", ".")):
+            continue
+        type_only = False
+        if (kind, text) == ("name", "type"):
+            following = next_token(source, end)
+            if following[0] == "punct" and following[1] in "{*" or word == "import" and following[0] == "name" \
+                    and following[1] != "from":
+                type_only, (kind, text, start, end) = True, following
+        if word == "export":
+            if (kind, text) == ("punct", "{"):
+                specs, end = specifiers(end)
+                source_module = None
+                if next_token(source, end)[:2] == ("name", "from"):
+                    source_module, end = module(next_token(source, end)[3])
+                found += [{"form": "export", "imported": left, "local": right, "module": source_module,
+                           "type": type_only or modifier, "at": right_at} for left, right, right_at, modifier in specs]
+            elif (kind, text) == ("punct", "*"):
+                local, local_at = None, None
+                kind, text, start, end = next_token(source, end)
+                if (kind, text) == ("name", "as"):
+                    kind, local, local_at, end = next_token(source, end)
+                    if kind != "name":
+                        fail(local_at, "an 'as' without a name")
+                    kind, text, start, end = next_token(source, end)
+                if (kind, text) != ("name", "from"):
+                    fail(at, "export * without 'from'")
+                star_module, end = module(end)
+                found.append({"form": "star", "imported": "*", "local": local, "module": star_module, "type": type_only,
+                              "at": local_at})
+            continue
+        if kind == "string":
+            continue
+        bound, clause = [], kind == "name" or (kind, text) in (("punct", "*"), ("punct", "{"))
+        if kind == "name":
+            local, local_at = text, start
+            kind, text, start, end = next_token(source, end)
+            if (kind, text) == ("punct", "="):
+                kind, text, start, end = next_token(source, end)
+                equals_module = None
+                if (kind, text) == ("name", "require") and next_token(source, end)[:2] == ("punct", "("):
+                    equals_module, end = module(next_token(source, end)[3])
+                    if next_token(source, end)[:2] != ("punct", ")"):
+                        fail(at, "require() with more than a module")
+                elif kind != "name":
+                    fail(start, "import = without a name or require()")
+                found.append({"form": "equals", "imported": None, "local": local, "module": equals_module,
+                              "type": type_only, "at": local_at})
+                continue
+            bound.append(("default", "default", local, local_at, False))
+            if (kind, text) == ("punct", ","):
+                kind, text, start, end = next_token(source, end)
+        if (kind, text) == ("punct", "*"):
+            kind, text, start, end = next_token(source, end)
+            local = next_token(source, end)
+            if (kind, text) != ("name", "as") or local[0] != "name":
+                fail(start, "* without 'as' and a name")
+            bound.append(("namespace", "*", local[1], local[2], False))
+            kind, text, start, end = next_token(source, local[3])
+        elif (kind, text) == ("punct", "{"):
+            specs, end = specifiers(end)
+            bound += [("named", left, right, right_at, modifier) for left, right, right_at, modifier in specs]
+            kind, text, start, end = next_token(source, end)
+        if not clause or (kind, text) != ("name", "from"):
+            fail(at, "an import clause without 'from'")
+        import_module, end = module(end)
+        found += [{"form": form, "imported": imported, "local": local, "module": import_module,
+                   "type": type_only or modifier, "at": local_at} for form, imported, local, local_at, modifier in bound]
+    return found
+
+
+def own_import(path, code, statements, name, module, uses):
+    """Raise unless one value import binds name, by its own name, from module, and name occurs in the code only there, at
+    the offsets in uses and as a property after '.': a declaration, parameter, destructuring or second import of the
+    name anywhere in the file could be the binding a use reads (S5-U1c-F04)."""
+    binders = [(s["form"], s["imported"], s["module"], s["type"]) for s in statements
+               if s["form"] in IMPORT_FORMS and s["local"] == name]
+    if binders != [("named", name, module, False)]:
+        raise AssertionError(f"{path.name}: {name} is not bound once by import {{ {name} }} from '{module}': {binders}")
+    at = next(s["at"] for s in statements if s["form"] in IMPORT_FORMS and s["local"] == name)
+    other = []
+    for match in re.finditer(rf"(?<![\w$]){re.escape(name)}(?![\w$])", code):
+        before = code[:match.start()].rstrip()
+        if match.start() not in {at, *uses} and not (before.endswith(".") and not before.endswith("..")):
+            other.append(code[max(0, match.start() - 24):match.end() + 24].strip())
+    if other:
+        raise AssertionError(f"{path.name}: {name} is declared or used outside its import and its uses: {other}")
+
+
+def decorator_bindings(path, source, runs):
+    """{name: module} of the decorator names the runs read; raises unless each is its module's own export (S5-U1c-F04).
+
+    The inventories classify by name, and 'import { Get as Header }' plus 'import { Public as HttpCode } from
+    './auth.guard'' made '@HttpCode() @Header('x')' a public route both read as a header and a status code. So, in every
+    api/src file: no identifier is escaped in code (the occurrence check reads names as written), no import or export
+    renames a BOUND_NAMES name from or to another, no namespace, default, import = or export * takes a module that
+    exports decorators or binds a BOUND_NAMES name, and every name the runs read passes own_import against
+    DECORATOR_MODULE with its decorators as the uses.
+    """
+    code = code_mask(source)
+    if "\\" in code:
+        raise AssertionError(f"{path.name}: an escaped identifier in code, which the binding check does not read")
+    statements = module_statements(path, source)
+    renamed = sorted({(s["imported"], s["local"]) for s in statements if s["form"] in ("named", "export")
+                      and s["imported"] != s["local"] and BOUND_NAMES.intersection((s["imported"], s["local"]))})
+    if renamed:
+        raise AssertionError(f"{path.name}: an import or export renames a decorator name: {renamed}")
+    whole = sorted((s["form"], s["module"], s["local"]) for s in statements if s["form"] in ("namespace", "default",
+                   "equals", "star") and (decorator_module(s["module"]) or s["local"] in BOUND_NAMES))
+    if whole:
+        raise AssertionError(f"{path.name}: a whole-module binding of a module that exports decorators, or under a "
+                             f"decorator name: {whole}")
+    uses = {}
+    for run in runs:
+        for name, start, _end in run["items"]:
+            uses.setdefault(name, set()).add(DECORATOR_CALL.match(code, start).start(1))
+    for name, offsets in sorted(uses.items()):
+        own_import(path, code, statements, name, DECORATOR_MODULE.get(name), offsets)
+    return {name: DECORATOR_MODULE[name] for name in sorted(uses)}
+
+
+def public_export(sources):
+    """The Public binding ends in its module: './auth.guard' declares Public once, in code, as the public-metadata call
+    test_05 counts, of Nest's own SetMetadata, and names Public nowhere else (S5-U1c-F04)."""
+    path = API / (DECORATOR_MODULE["Public"][2:] + ".ts")
+    if path not in sources:
+        raise AssertionError(f"{path.name}, the module every Public import names, is not among the sources")
+    source, declaration = sources[path], BINDINGS["public_declaration"]
+    code, at = code_mask(source), source.find(declaration)
+    head = declaration[:declaration.index("Public") + len("Public")]
+    if source.count(declaration) != 1 or code[at:at + len(head)] != head:
+        raise AssertionError(f"{path.name}: Public is not declared once, in code, as {declaration!r}")
+    named = at + len(head) - len("Public")
+    elsewhere = [m.start() for m in re.finditer(r"(?<![\w$])Public(?![\w$])", code) if m.start() != named]
+    if elsewhere:
+        raise AssertionError(f"{path.name}: Public occurs outside its declaration at offsets {elsewhere}")
+    metadata = BINDINGS["public_metadata_import"]
+    own_import(path, code, module_statements(path, source), metadata["name"], metadata["module"],
+               {at + declaration.index(metadata["name"])})
+
+
 def outside_decorators(path, source):
     """Decorator names of an api/src file that is not *.controller.ts, read by the lexer and runs a controller gets.
 
     Both inventories open *.controller.ts only, so a route decorator, @Controller(), @RequestMapping() or @Public()
     anywhere else declares what neither sees (S5-U1c-F03). It is refused, and so are a shape the runs cannot read, a
-    name outside_decorators does not classify (an alias or a wrapper can make a route) and such call text in a comment
-    or literal.
+    name outside_decorators does not classify (an alias or a wrapper can make a route), such call text in a comment
+    or literal, and a classified name that is not Nest's own export ('Controller as Injectable', S5-U1c-F04).
     """
-    names = [name for run in decorator_runs(source) for name, _start, _end in run["items"]]
+    runs = decorator_runs(source)
+    names = [name for run in runs for name, _start, _end in run["items"]]
     misplaced = sorted(DECIDING.intersection(names))
     if misplaced:
         raise AssertionError(f"{path.name}: {misplaced} outside *.controller.ts, a file neither inventory reads")
@@ -376,6 +613,7 @@ def outside_decorators(path, source):
     text = decorator_text(source)
     if text:
         raise AssertionError(f"{path.name}: route, @Controller() or @Public() call text outside *.controller.ts {text}")
+    decorator_bindings(path, source, runs)
     return names
 
 
@@ -433,10 +671,13 @@ def controller_inventory(sources=None):
 
     sources ({path: text}, default every .ts file under api/src) lets a test judge an edited or added file without
     writing it. A file that is not *.controller.ts must pass outside_decorators, so a route declared there stops the
-    inventory, and with it test_05, instead of being left out (S5-U1c-F03).
+    inventory, and with it test_05, instead of being left out (S5-U1c-F03). Every decorator name a controller carries
+    must be its module's own export and Public must end at its declaration, or a route or @Public() under a classified
+    name stops it too (S5-U1c-F04).
     """
     found = {}
-    for path, source in sorted((api_sources() if sources is None else sources).items()):
+    sources = api_sources() if sources is None else sources
+    for path, source in sorted(sources.items()):
         if path.suffix != ".ts":
             raise AssertionError(f"{path.name}: a script neither inventory opens")
         if not path.name.endswith(".controller.ts"):
@@ -457,12 +698,14 @@ def controller_inventory(sources=None):
         if stray:
             raise AssertionError(f"{path.name}: decorator call text the inventory did not read (comments and literals "
                                  f"count too) {stray}")
+        decorator_bindings(path, source, runs)
         for method, child, public, _offset in handlers:
             route = "/".join(part for part in (prefix, child) if part)
             key = (method, route)
             if key in found:
                 raise AssertionError(f"duplicate route {key}")
             found[key] = {"file": path.name, "public": public}
+    public_export(sources)
     return found
 
 
@@ -1180,7 +1423,10 @@ class ClinicianPolicySpec(unittest.TestCase):
             return controller_inventory({**sources, path: text})
 
         def helper(member):
-            return "@Injectable()\nexport class Helper {\n" + member + "  run() { return 1; }\n}\n"
+            # the import makes the controls valid TypeScript, which decorator_bindings requires since S5-U1c-F04; every
+            # refusal below is raised by a check that runs before it
+            return ("import { Injectable } from '@nestjs/common';\n@Injectable()\nexport class Helper {\n" + member
+                    + "  run() { return 1; }\n}\n")
 
         reviewed = ("@Controller /* boundary comment */ ('unlisted') export class UnlistedController { @Public () "
                     "@Get /* boundary comment */ ('read') read() { return {}; } }\n")
@@ -1217,7 +1463,8 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertEqual(inventory(helper("")), baseline)
         self.assertEqual(inventory(helper("  // see the @Public decorator in auth.guard.ts\n")), baseline)
         # a controller the matrix lacks, in a file the inventories do open, is a row test_05 finds missing
-        opened = inventory("@Controller('unlisted')\nexport class UnlistedController {\n  @Public()\n  @Get('read')\n"
+        opened = inventory("import { Controller, Get } from '@nestjs/common';\nimport { Public } from './auth.guard';\n"
+                           "@Controller('unlisted')\nexport class UnlistedController {\n  @Public()\n  @Get('read')\n"
                            "  read() { return {}; }\n}\n", API / "unlisted.controller.ts")
         self.assertEqual(sorted(set(opened) - set(baseline)), [("GET", "unlisted/read")])
         self.assertTrue(opened[("GET", "unlisted/read")]["public"])
@@ -1234,6 +1481,172 @@ class ClinicianPolicySpec(unittest.TestCase):
             "outside_files": sum(1 for path in sources if not path.name.endswith(".controller.ts")),
             "classified": sorted(OUTSIDE_DECORATORS), "refused": sorted(refused) + ["a .tsx script"],
             "real_routes": len(baseline),
+        }, ensure_ascii=True, sort_keys=True))
+
+    def test_19_decorator_names_are_bound_by_their_own_import(self):
+        """S5-U1c-F04: the readers classify a decorator by its name and never asked what the name was imported as.
+
+        'import { Get as Header }' and 'import { Public as HttpCode } from './auth.guard'' in the registered
+        study-tags.controller.ts made '@HttpCode() @Header('unlisted')' a public GET that both inventories read as a
+        status code and a header: 110 rows, public 4, test_05/11/12/13 green. 'Controller as Injectable, Get as Module'
+        did the same in a file outside the controllers. decorator_bindings now ties every name to its module's own
+        export and public_export ties Public to its declaration; each refusal is matched by its message.
+        """
+        sources = api_sources()
+        baseline = controller_inventory(sources)
+        self.assertEqual(len(baseline), MATRIX["counts"]["routes"])
+        self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
+        # the table: one module per name a run may carry, and the real sources use each name as that module's export
+        self.assertEqual(set(DECORATOR_MODULE), KNOWN_DECORATORS | OUTSIDE_DECORATORS)
+        self.assertEqual(sum(map(len, BINDINGS["modules"].values())), len(DECORATOR_MODULE), "a name has two modules")
+        self.assertEqual({name for name, module in DECORATOR_MODULE.items() if module != "@nestjs/common"}, {"Public"})
+        self.assertIn(BINDINGS["public_declaration"], self.guard)
+        used = Counter()
+        for path, source in sorted(sources.items()):
+            for name, module in decorator_bindings(path, source, decorator_runs(source)).items():
+                used[module] += 1
+        self.assertEqual(set(used), set(BINDINGS["modules"]))
+        self.assertEqual(used["./auth.guard"], 2, "auth.controller.ts and pacs.controller.ts import Public")
+        public_export(sources)
+        tags, outside = API / "study-tags.controller.ts", API / "unlisted-routes.ts"
+        handler_at = "  @Get() read("
+        self.assertEqual(sources[tags].count(handler_at), 1)
+
+        def tagged(imports, handler):
+            return imports + sources[tags].replace(handler_at, handler + handler_at)
+
+        reviewed = tagged("import { Get as Header } from '@nestjs/common';\nimport { Public as HttpCode } from './auth.guard';\n",
+                          "  @HttpCode() @Header('unlisted') unlisted() { return {}; }\n")
+        moved = ("import { Controller as Injectable, Get as Module } from '@nestjs/common';\n@Injectable('unlisted')\n"
+                 "export class UnlistedController {\n  @Module('read')\n  read() { return {}; }\n}\n")
+        # control: what the readers before this check saw — the controller's handlers and its deciding call text are
+        # unchanged, and the outside file carries two classified names and no deciding text, so nothing stopped them
+        self.assertEqual([h[:3] for h in controller_handlers(tags, reviewed)], [h[:3] for h in controller_handlers(tags, sources[tags])])
+        self.assertEqual([t for _o, t in decorator_text(reviewed)], [t for _o, t in decorator_text(sources[tags])])
+        self.assertEqual([name for run in decorator_runs(moved) for name, _s, _e in run["items"]], ["Injectable", "Module"])
+        self.assertEqual(decorator_text(moved), [])
+        renamed = "an import or export renames a decorator name"
+        whole = "a whole-module binding of a module that exports decorators"
+        unbound = "is not bound once by import"
+        shadowed = "is declared or used outside its import and its uses"
+        unread = "an import or export statement the binding check does not read"
+        added = API / "bound.controller.ts"
+        nest = "import { Controller, Get } from '@nestjs/common';\n"
+
+        def controller(imports, member="  @Get('read')\n  read() { return {}; }\n", before=""):
+            return imports + before + "@Controller('bound')\nexport class BoundController {\n" + member + "}\n"
+
+        def service(imports, body=""):
+            return imports + body + "@Injectable()\nexport class Helper {\n  run() { return 1; }\n}\n"
+
+        inject = "import { Injectable } from '@nestjs/common';\n"
+        # the edits of auth.guard.ts below each change exactly the text they name
+        self.assertEqual(sources[API / "auth.guard.ts"].count("  SetMetadata, UnauthorizedException,\n"), 1)
+        refused = {
+            "reviewer: study-tags Get as Header and Public as HttpCode":
+                ({tags: reviewed}, renamed + r": \[\('Get', 'Header'\), \('Public', 'HttpCode'\)\]"),
+            "reviewer: unlisted-routes.ts Controller as Injectable, Get as Module":
+                ({outside: moved}, renamed + r": \[\('Controller', 'Injectable'\), \('Get', 'Module'\)\]"),
+            "study-tags Get as Header alone": ({tags: tagged("import { Get as Header } from '@nestjs/common';\n",
+                                                             "  @Header('unlisted') unlisted() { return {}; }\n")},
+                                               renamed + r": \[\('Get', 'Header'\)\]"),
+            "Public as HttpCode on a real route": ({tags: tagged("import { Public as HttpCode } from './auth.guard';\n",
+                                                                 "  @HttpCode() @Get('unlisted') unlisted() { return {}; }\n")},
+                                                   renamed + r": \[\('Public', 'HttpCode'\)\]"),
+            "an unused route alias": ({added: controller(nest + "import { Post as P } from '@nestjs/common';\n")},
+                                      renamed + r": \[\('Post', 'P'\)\]"),
+            "another export under a classified name": (
+                {added: controller(nest + "import { SetMetadata as Header } from '@nestjs/common';\n",
+                                   "  @Header('public', true)\n  @Get('read')\n  read() { return {}; }\n")},
+                renamed + r": \[\('SetMetadata', 'Header'\)\]"),
+            "a default export under a classified name": ({outside: service(inject + "import { default as Module } from './x';\n")},
+                                                        renamed + r": \[\('default', 'Module'\)\]"),
+            "a re-export renaming a route": ({outside: service(inject + "export { Get as Header } from '@nestjs/common';\n")},
+                                             renamed + r": \[\('Get', 'Header'\)\]"),
+            "auth.guard.ts exports Public under another name": (
+                {API / "auth.guard.ts": sources[API / "auth.guard.ts"] + "export { Public as Open };\n"},
+                renamed + r": \[\('Public', 'Open'\)\]"),
+            "namespace import of Nest's common": ({outside: service(inject + "import * as common from '@nestjs/common';\n")}, whole),
+            "default import of Nest's common": ({outside: service(inject + "import common from '@nestjs/common';\n")}, whole),
+            "import = require of Nest's common": ({outside: service(inject + "import common = require('@nestjs/common');\n")}, whole),
+            "namespace import of a part of Nest's common": (
+                {outside: service(inject + "import * as parts from '@nestjs/common/decorators';\n")}, whole),
+            "export * of the Public module": ({outside: service(inject + "export * from './auth.guard';\n")}, whole),
+            "a namespace under a classified name": ({outside: service(inject + "import * as Header from 'node:http';\n")}, whole),
+            "a classified name from another module": (
+                {added: controller(nest + "import { HttpCode } from './auth.guard';\n",
+                                   "  @HttpCode(200)\n  @Get('read')\n  read() { return {}; }\n")},
+                r"HttpCode " + unbound + r" \{ HttpCode \} from '@nestjs/common'"),
+            "a route from a helper that re-exports it": (
+                {added: controller("import { Controller } from '@nestjs/common';\nimport { Get } from './helpers';\n")},
+                r"Get " + unbound + r" \{ Get \} from '@nestjs/common'"),
+            "Public by a module spelling the check does not resolve": (
+                {added: controller(nest + "import { Public } from './auth.guard.js';\n",
+                                   "  @Public()\n  @Get('read')\n  read() { return {}; }\n")},
+                r"Public " + unbound + r" \{ Public \} from './auth.guard'"),
+            "not imported at all": ({outside: service("")}, r"Injectable " + unbound),
+            "a type-only import": ({outside: service("import type { Injectable } from '@nestjs/common';\n")}, r"Injectable " + unbound),
+            "a type-only specifier": ({outside: service("import { type Injectable } from '@nestjs/common';\n")}, r"Injectable " + unbound),
+            "imported twice": ({outside: service(inject + inject)}, r"Injectable " + unbound),
+            "destructured from require": ({outside: service("const { Controller: Injectable } = require('@nestjs/common');\n")},
+                                          r"Injectable " + unbound),
+            "shadowed by a parameter of an enclosing function": (
+                {added: nest + "export function make(Get: any) {\n  @Controller('bound')\n  class BoundController {\n"
+                               "    @Get('read')\n    read() { return {}; }\n  }\n  return BoundController;\n}\n"},
+                r"Get " + shadowed),
+            "redeclared in a nested scope": (
+                {outside: service(inject, "function wrap() {\n  const Injectable = (path: string) => (target: any) => target;\n"
+                                          "  return Injectable;\n}\n")},
+                r"Injectable " + shadowed),
+            "an escaped identifier": ({added: controller(nest, before="const Head\\u0065r = Get;\n")},
+                                      r"an escaped identifier in code"),
+            "a string-named specifier": ({added: controller(nest + "import { 'Get' as Header } from '@nestjs/common';\n")},
+                                         unread + r" \(a specifier that is not a name\)"),
+            "Public declared another way": (
+                {API / "auth.guard.ts": sources[API / "auth.guard.ts"].replace(BINDINGS["public_declaration"],
+                                                                               "export const Public = () => SetMetadata('open', true);")},
+                r"auth\.guard\.ts: Public is not declared once, in code"),
+            "Public named again in its module": (
+                {API / "auth.guard.ts": sources[API / "auth.guard.ts"] + "export default Public;\n"},
+                r"auth\.guard\.ts: Public occurs outside its declaration"),
+            "SetMetadata of Public from another module": (
+                {API / "auth.guard.ts": sources[API / "auth.guard.ts"].replace("  SetMetadata, UnauthorizedException,\n",
+                                                                               "  UnauthorizedException,\n", 1)
+                 + "import { SetMetadata } from './clinician-policy';\n"},
+                r"auth\.guard\.ts: SetMetadata " + unbound + r" \{ SetMetadata \} from '@nestjs/common'"),
+        }
+        for label, (files, message) in refused.items():
+            with self.subTest(refused=label), self.assertRaisesRegex(AssertionError, message):
+                controller_inventory({**sources, **files})
+        # the reviewer's outside file stops test_12's reader too
+        with self.assertRaisesRegex(AssertionError, renamed):
+            outside_decorators(outside, moved)
+        # controls: what a correct file looks like still reads, and nothing but the binding decides
+        accepted = {
+            "a controller importing its names": ({added: controller(nest)}, {("GET", "bound/read"): False}),
+            "Public from './auth.guard'": (
+                {added: controller(nest + "import { Public } from './auth.guard';\n",
+                                   "  @Public()\n  @Get('read')\n  read() { return {}; }\n")}, {("GET", "bound/read"): True}),
+            "Public from '../auth.guard' in a subdirectory": (
+                {API / "nested" / "bound.controller.ts": controller(nest + "import { Public } from '../auth.guard';\n",
+                                                                  "  @Public()\n  @Get('read')\n  read() { return {}; }\n")},
+                {("GET", "bound/read"): True}),
+            "a property named like a decorator": ({added: controller(nest, "  @Get('read')\n  read() { return this.Get; }\n")},
+                                                  {("GET", "bound/read"): False}),
+            "unrelated aliases and a namespace": (
+                {outside: service(inject + "import * as fs from 'node:fs';\nimport { readFile as load } from 'node:fs/promises';\n")},
+                {}),
+            "a type-only import beside the value import": (
+                {outside: service(inject + "import type { Request } from 'express';\n")}, {}),
+        }
+        for label, (files, extra) in accepted.items():
+            with self.subTest(accepted=label):
+                found = controller_inventory({**sources, **files})
+                self.assertEqual({key: meta["public"] for key, meta in found.items() if key not in baseline}, extra)
+                self.assertEqual({key: found[key] for key in baseline}, baseline)
+        print("CLINICIAN_POLICY_IMPORT_BINDINGS " + json.dumps({
+            "files": len(sources), "bindings_by_module": dict(sorted(used.items())), "refused": sorted(refused),
+            "accepted": sorted(accepted), "real_routes": len(baseline), "real_public": len(PUBLIC),
         }, ensure_ascii=True, sort_keys=True))
 
 

@@ -194,6 +194,15 @@
     "classified": ["Injectable", "Module"],
     "rule": "S5-U1c-F03: every api/src .ts file that is not *.controller.ts is read by the controllers' lexer and decorator runs inside the inventory, so test_05 fails on it. A route decorator, @Controller(), @RequestMapping() or @Public() there is refused (both inventories open *.controller.ts only), as is a shape the runs cannot read, such call text in a comment or literal, and any decorator name not listed here (an alias or a wrapper could declare a route) until it is classified here."
   },
+  "decorator_bindings": {
+    "modules": {
+      "@nestjs/common": ["All", "Body", "Controller", "Delete", "Get", "Head", "Header", "HttpCode", "Injectable", "Module", "Options", "Param", "Patch", "Post", "Put", "Query", "Req", "Res", "Search", "Sse"],
+      "./auth.guard": ["Public"]
+    },
+    "public_declaration": "export const Public = () => SetMetadata('public', true);",
+    "public_metadata_import": {"name": "SetMetadata", "module": "@nestjs/common"},
+    "rule": "S5-U1c-F04: the inventories classify a decorator by its name, so every name a decorator run carries, in a controller or any other api/src file, must be bound once by 'import { Name } from' the module listed here (a relative module is named from api/src and resolved from the importing file) and occur nowhere else in the code but its decorators and after a '.'. No import or export renames a listed name, a route name, Controller, RequestMapping or Public, from or to another name; no namespace, default, import = or export * takes '@nestjs/common', a part of it or './auth.guard', or binds such a name; no identifier is escaped in code; a statement the reader does not know is refused. The Public binding ends at public_declaration, the one place auth.guard.ts names Public, whose SetMetadata is public_metadata_import. A new decorator module or spelling is a new decision: list it here."
+  },
   "request_method_pin": {
     "package": "@nestjs/common",
     "lock_version": "10.4.22",
