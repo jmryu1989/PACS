@@ -512,9 +512,14 @@ window.kinViewerTechNote=function(services,session=null){
       if(!live())throw new Error('영상창이 변경되었습니다');
       const controller=new AbortController();requests.add(controller);const timer=setTimeout(()=>controller.abort(),12000);
       try{const r=await fetch('/api'+path,{method,credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-KIN-CSRF':'1',...(owner?{'X-KIN-Subject':owner[1],'X-KIN-Institution':owner[0]}:{}),...(body===undefined?{}:{'Content-Type':'application/json'})},...(body===undefined?{}:{body:JSON.stringify(body)})});
-        if(!live())throw new Error('영상창이 변경되었습니다');
+        // S5-U2c fix4 (Astra S5-U2c-C-R-001 F01): an answer live() drops (this bridge ended — mode exit too —, the document ended, or
+        // the viewer shows other studies) is still the document's for what it says about the login, also when it came in just before
+        // the abort that ended the bridge: its 401 ends the login, and a /me answer of another account than the document's first one
+        // ends it (session.sameAccount: no verdict). An answer in use reaches the same below and through authenticate()'s answer();
+        // a /me 403 refuses this account without ending the login and is read only then.
+        if(!live()){if(r.status===401)session?.refuse('unauthorized');else if(path==='/me'&&r.ok)session?.sameAccount(await r.json().catch(()=>null));throw new Error('영상창이 변경되었습니다');}
         // A 401, or a 403 on /me, is the end of the document's login; a 403 on a note still ends this bridge only.
-        if([401,403].includes(r.status)){if(r.status===401||path==='/me')session?.refuse();end();throw new Error('메모 계정 또는 접근 권한을 확인하세요');}
+        if([401,403].includes(r.status)){if(r.status===401||path==='/me')session?.refuse(r.status===401?'unauthorized':'forbidden');end();throw new Error('메모 계정 또는 접근 권한을 확인하세요');}
         const value=await r.json().catch(()=>null);if(!r.ok||!value)throw Object.assign(new Error(typeof value?.message==='string'?value.message:'서버 응답을 확인하세요'),{status:r.status});return value;
       }finally{clearTimeout(timer);requests.delete(controller);}
     }

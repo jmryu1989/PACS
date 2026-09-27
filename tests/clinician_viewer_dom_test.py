@@ -142,6 +142,33 @@ Findings, Job and Tech Note modules instead):
       list, no module, no mark or account control. Without a logout the same re-entry works. Control: the file at fix7 (Astra's
       reproduction: the writer document asks /me three times, reads its author list and draws; the clinician-only one asks /me
       twice and reads its final list).
+  24  (S5-U2c, Astra S5-VIEWER-UXR-R-001 F01) CT position sync (kin.ct-sync, the real extension over a same-patient CT pair and a
+      permissive native synchronizer): a clinician-only document asks /me, GET clinician/studies?limit=100 and /me again — never
+      GET studies, which this harness does not answer — shows no notice after the normal login and moves the prior to the same
+      position; an unanswered check (/me 500) says so with Recheck Access, which the pointer reaches while the notice itself lets it
+      through, and pressing it brings sync back; a 401 is the only session end (its words, no button, nothing asked after it),
+      and (fix2) the document keeps it ('unauthorized'): the next entry asks nothing.
+      (fix1, Astra S5-U2c-R-001 F01) the document's end while an event waits for its image: in a new document a Measurements or
+      layout panel's 401 (kinViewerSession.refuse('unauthorized')) and, in another, another account answering another panel
+      (note()) — the released image moves nothing, nothing more is asked, the session words stay; the document's own /me read
+      answering 403 (decide()) is a refusal instead: its words with Recheck Access, nothing moves, and Recheck Access brings sync
+      back. Control: a radiologist document keeps GET studies.
+  25  (S5-U2c fix2, Astra S5-U2c-B-R-001 F01/F03) (a) with the real panels and the module stubs, the Measurements panel's /me
+      403 refuses the account ('forbidden') and each write module ends in place once; the storage and BroadcastChannel logout
+      afterwards only move the reason to 'logout' (no module ends again, the session stays refused, authoring closed, a mode
+      re-entry asks nothing); (b) the real kin.ct-sync: a panel's refuse('forbidden'), mode exit, the logout, then an entry of
+      another account starts ended, asks nothing and moves nothing; (c) mounted after Recheck Access, the logout broadcast while
+      an event waits for its image: the released image moves nothing, nothing more is asked; (d) an event's held /me failing
+      late (403, a network failure) after the shared refusal leaves the refusal words and Recheck Access, and Recheck Access
+      still brings sync back.
+  27  (S5-U2c fix4, Astra S5-U2c-C-R-001 F01 at the write modules) the real Findings section beside the real kin.ct-sync in one
+      writer document: Reload Findings' /me held, the viewer then shows another study (the store gives that generation up and
+      works for it, CT sync still moves the prior), then that /me answers 401: the document ends ('unauthorized') — CT sync with
+      its words and no Recheck Access (a scroll moves and asks nothing), the Job and Tech Note modules once, the Measurements and
+      layout panels, authoring. Control: the store's file with its drop points as before fix4 (the 401 is lost; sync goes on).
+  Each viewer document records the reasons its session tells onEnded (fix2 F02): test_17 checks the producer's 401 as
+  'unauthorized' and its /me 403 as 'forbidden', test_22 the real modules' 401 / 403 / another account ('account-changed')
+  and no reason for the same account or a module list's 403, test_23 the logout as 'logout'.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is S5-U1b (tests/clinician_read_live.py, hosted synthetic stack only).
@@ -914,14 +941,14 @@ HELD_GATE = "    const held = () => recovery.has(scope) && !readOnly();\n"
 STICKY = "    if (role === 'read-only' && next !== 'refused') return previous;\n"
 READ_ONLY_OVER_REFUSED = "    if (role === 'read-only') return previous;\n"
 # Astra S5-U2b-X4-R-001 F01: note() compares every /me answer with the account the document confirmed first, before its verdict.
-OWNER_CHECK = "    if (who !== null && owner !== null && who !== owner) return settle('refused');\n"
+OWNER_CHECK = "    if (who !== null && owner !== null && who !== owner) return settle('refused', 'account-changed');\n"
 # test_18 (Astra S5-U2b-X3-R-001 F01). The authenticate() lines as at X3-R-001: note() first, then the layout panel ended only itself
 # and the Measurements panel's refusal came after a verdict it could not leave (read-only). With OWNER_CHECK removed and
 # READ_ONLY_OVER_REFUSED, that is the file at X3-R-001 for these paths.
 LAYOUT_END = "      if (!live() || !next) { end(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }\n"
 X3_LAYOUT_END = ("      if (!live() || !next || (key && next !== key)) { end(); "
                  "throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }\n")
-PANEL_END = "      if (ended || !user.sub) { sessionEnded(); throw { stale: true }; }\n"
+PANEL_END = "      if (ended || !user.sub) { sessionEnded('not-member'); throw { stale: true }; }\n"
 X3_PANEL_END = "      if (ended || !user.sub || (subject && subject !== user.sub)) { sessionEnded(); throw { stale: true }; }\n"
 # test_19/20 (Astra S5-U2b-X4-R-001 F01/F02). The file at fix6 (c972ed4) for these paths: no document owner (each panel compared the
 # answer with the account it had itself confirmed since its mount — the Measurements panel's subject, the layout panel's key — both
@@ -934,8 +961,8 @@ FIX6_LAYOUT_ME = ("      const known = key;\n"
                   "      const me = await get('/api/me', signal), next = model.owner(me), confirmed = key || known;\n"
                   "      if (confirmed && next !== confirmed) { sessionEnded(); "
                   "throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }\n")
-LAYOUT_LOGOUT = ("    const onStorage = e => { if (e.key === 'kin-session-ended') sessionEnded(); };\n"
-                 "    const onMessage = e => { if (e.data?.type === 'session-ended') sessionEnded(); };\n")
+LAYOUT_LOGOUT = ("    const onStorage = e => { if (e.key === 'kin-session-ended') sessionEnded('logout'); };\n"
+                 "    const onMessage = e => { if (e.data?.type === 'session-ended') sessionEnded('logout'); };\n")
 FIX6_LAYOUT_LOGOUT = ("    const onStorage = e => { if (e.key === 'kin-session-ended') end(); };\n"
                       "    const onMessage = e => { if (e.data?.type === 'session-ended') end(); };\n")
 REQUEST_GATE = "      if (kinViewerSession.ended() || !valid(ticket)) throw { stale: true };\n"
@@ -983,6 +1010,105 @@ MODULE_RECHECK = {
       synNoteApi('GET', '/syn-note').then(() => 'sent', error => error.message).then(outcome => { window.synNoteOutcome = outcome; }); }""",
 }
 BROADCAST_LOGOUT = "() => { const c = new BroadcastChannel('kin-session'); c.postMessage({ type: 'session-ended' }); c.close(); }"
+# S5-U2c fix2 (Astra S5-U2c-B-R-001 F02): every reason the document's session tells its onEnded subscribers, in order, recorded
+# from the document's start (open_viewer, ct_sync_document): which producer ended or refused it, and any later promotion.
+END_REASONS = "() => { window.synEndReasons = []; kinViewerSession.onEnded(reason => { window.synEndReasons.push(reason); }); }"
+
+
+# test_24 (S5-U2c): config/ohif.js kinCreateCTSync wording, verbatim.
+CT_SYNC_TEXT = {
+    "ended": "세션이 변경되었거나 종료되어 위치 동기를 중지했습니다. 다시 로그인한 뒤 뷰어를 여세요",
+    "confirmed": "검사 접근 정보를 확인했습니다. 위치 동기를 사용할 수 있습니다",
+    "failed": "검사 접근 정보를 확인하지 못해 위치 동기를 멈췄습니다. 연결 상태를 확인한 뒤 다시 확인하세요",
+    "denied": "이 계정으로 검사 접근 정보를 확인할 수 없어 위치 동기를 멈췄습니다. 권한을 확인한 뒤 다시 확인하세요",
+    "synced": "같은 좌표계의 CT 위치 동기",
+}
+# test_24 (fix1): the image preload kept unanswered until the case releases it, then answered at once again.
+CT_SYNC_HOLD_IMAGES = """() => { window.synCtImages = [];
+  cornerstone.imageLoader.loadAndCacheImage = () => new Promise(resolve => window.synCtImages.push(resolve)); }"""
+CT_SYNC_RELEASE_IMAGES = """() => { cornerstone.imageLoader.loadAndCacheImage = async () => ({});
+  window.synCtImages.splice(0).forEach(resolve => resolve({})); }"""
+# test_24: the shipped kin.ct-sync mounted over two same-frame CT stacks (current every 2 mm, prior every 4 mm) with the pinned
+# sync group's surface; the native synchronizer is permissive (every enabled target goes to the nearest position), so a target that
+# stays put was held by the extension. Nothing else of the harness is booted.
+CT_SYNC_BOOT = """([current, prior]) => {
+  const CT = '1.2.840.10008.5.1.4.1.1.2', ENGINE = 'syn-ct-engine', planes = new Map(), viewports = new Map(), grid = new Map(), sets = new Map();
+  const stack = (vp, study, series, zs) => {
+    const ids = zs.map((z, i) => `wadors:${location.origin}/dicom-web/studies/${study}/series/${series}/instances/${series}.${i}/frames/1`);
+    ids.forEach((id, i) => planes.set(id, { frameOfReferenceUID: 'SYN-FOR-1', imagePositionPatient: [0, 0, zs[i]], rowCosines: [1, 0, 0], columnCosines: [0, 1, 0] }));
+    sets.set('syn-ds-' + vp, { StudyInstanceUID: study, SeriesInstanceUID: series, Modality: 'CT', SOPClassUID: CT, images: ids.map(() => ({ SOPClassUID: CT })) });
+    grid.set(vp, { viewportId: vp, displaySetInstanceUIDs: ['syn-ds-' + vp] });
+    viewports.set(vp, { id: vp, type: 'stack', index: 0, ids, getRenderingEngine: () => ({ id: ENGINE }), getImageIds() { return this.ids; },
+      getCurrentImageIdIndex() { return this.index; }, getCurrentImageId() { return this.ids[this.index]; } });
+  };
+  stack('syn-ct-a', current, current + '.1', Array.from({ length: 16 }, (_, i) => i * 2));
+  stack('syn-ct-b', prior, prior + '.1', Array.from({ length: 8 }, (_, i) => i * 4));
+  const z = id => planes.get(id)?.imagePositionPatient[2];
+  window.cornerstone.imageLoader = { loadAndCacheImage: async () => ({}) };
+  window.cornerstone.metaData = { get: (type, id) => type === 'imagePlaneModule' ? planes.get(id) : undefined };
+  window.cornerstone.utilities = { spatialRegistrationMetadataProvider: { add() {} } };
+  class NativeSync {
+    constructor() { this.targets = []; this.options = {}; this.enabled = true; }
+    add(info) { this.targets.push(info); }
+    getTargetViewports() { return this.targets.map(t => ({ ...t })); }
+    hasTargetViewport(engine, id) { return this.targets.some(t => t.renderingEngineId === engine && t.viewportId === id); }
+    isDisabled() { return !this.enabled; }
+    setEnabled(value) { this.enabled = value; }
+    getOptions(id) { return this.options[id]; }
+    setOptions(id, value) { this.options[id] = value; }
+    destroy() { this.targets = []; }
+    async fireEvent(info) {
+      const sz = z(viewports.get(info.viewportId).getCurrentImageId());
+      for (const t of this.targets) {
+        if (t.viewportId === info.viewportId || this.options[t.viewportId]?.disabled) continue;
+        const target = viewports.get(t.viewportId), zs = target.ids.map(z);
+        target.index = zs.reduce((best, value, i) => Math.abs(value - sz) < Math.abs(zs[best] - sz) ? i : best, 0);
+      }
+    }
+  }
+  const creators = new Map(['imageSlice', 'stackimage'].map(type => [type, () => new NativeSync()]));
+  const services = {
+    syncGroupService: { getSyncCreatorForType: type => creators.get(type), addSynchronizerType: (type, fn) => { creators.set(type, fn); } },
+    cornerstoneViewportService: { getCornerstoneViewport: id => viewports.get(id) },
+    viewportGridService: { getState: () => ({ viewports: grid }) },
+    displaySetService: { getDisplaySetByUID: uid => sets.get(uid) } };
+  const extension = window.config.extensions.find(e => e && e.id === 'kin.ct-sync');
+  extension.preRegistration({ servicesManager: { services } });
+  let sync = null;
+  window.synCt = {
+    enter() { extension.onModeEnter(); sync = creators.get('imageSlice')('IMAGE_SLICE_SYNC', {});
+      for (const viewportId of viewports.keys()) sync.add({ viewportId, renderingEngineId: ENGINE }); },
+    exit() { extension.onModeExit(); },
+    scroll(vp, index) { viewports.get(vp).index = index; sync.fireEvent({ viewportId: vp, renderingEngineId: ENGINE }, {}); },
+    z: vp => z(viewports.get(vp).getCurrentImageId()),
+    notice() { const n = document.querySelector('#kin-ct-sync-status'), b = document.querySelector('#kin-ct-sync-recheck');
+      return n ? { visible: !n.hidden, text: n.hidden ? '' : n.querySelector('span').textContent, recheck: !!b && !n.hidden && !b.hidden } : null; },
+  };
+  window.synCt.enter();
+}"""
+# test_26 control (Astra S5-U2c-C-R-001 F01): the answers a check or a panel drops left unread for the document, as up to fix2 — the
+# CT sync's 401 not handed on where it arrives, the Measurements and layout panels' dropped answers not read at all.
+KEPT_CT_401 = "        if (r.status === 401) { kinViewerSession.refuse('unauthorized'); throw refusal('ended', 401); }\n"
+KEPT_PANEL = ("      if (!valid(ticket)) throw await drop();\n", "      if (!valid(ticket)) throw await drop(data);\n")
+KEPT_LAYOUT = ("          if (response.status === 401) kinViewerSession.refuse('unauthorized');\n"
+               "          else if (path === '/api/me' && response.ok) kinViewerSession.sameAccount(await response.json().catch(() => null));\n")
+UNKEPT = [(KEPT_CT_401, "        if (r.status === 401) throw refusal('ended', 401);\n", 1),
+          (KEPT_PANEL[0], "      if (!valid(ticket)) throw { stale: true };\n", 1),
+          (KEPT_PANEL[1], "      if (!valid(ticket)) throw { stale: true };\n", 1), (KEPT_LAYOUT, "", 1)]
+# test_27 (S5-U2c fix4): the shipped kin.ct-sync booted beside the harness's panels in one viewer document (CT_SYNC_BOOT); its plane
+# lookup answers the CT pair's image ids and hands every other id to the panels' lookup.
+CT_SYNC_BESIDE_PANELS = ("([current, prior]) => { const panels = window.cornerstone.metaData.get;\n  (" + CT_SYNC_BOOT + ")([current, prior]);\n"
+                         "  const ct = window.cornerstone.metaData.get;\n"
+                         "  window.cornerstone.metaData.get = (type, id) => ct(type, id) ?? panels(type, id); }")
+# test_27 control (Astra S5-U2c-C-R-001 F01): finding-link-model.js with its two drop points as before fix4 — the answer valid() drops
+# is thrown away unread.
+UNKEPT_FINDINGS = [("        if (!valid(ticket)) throw await drop();\n", "        if (!valid(ticket)) throw { stale: true };\n", 1),
+                   ("        if (!valid(ticket)) throw await drop(data);\n", "        if (!valid(ticket)) throw { stale: true };\n", 1)]
+# test_24: what the pointer reaches at the centre of Recheck Access and of the notice's words, and the button's size.
+CT_SYNC_HIT = """() => { const n = document.querySelector('#kin-ct-sync-status'), b = document.querySelector('#kin-ct-sync-recheck');
+  const at = r => document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2), rb = b.getBoundingClientRect();
+  return { button: at(rb) === b, words_pass: !n.contains(at(n.querySelector('span').getBoundingClientRect())), height: rb.height,
+    font: parseFloat(getComputedStyle(b).fontSize) }; }"""
 
 
 class ClinicianViewerDOMTest(unittest.TestCase):
@@ -1037,6 +1163,8 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             # without the document's own logout receivers.
             "modules-unconnected": variant(CONFIG, UNCONNECTED, "config/ohif.js"),
             "as-fix7": variant(CONFIG, [(LOGOUT_RECEIVERS, "", 1)], "config/ohif.js"),
+            # test_26 (Astra S5-U2c-C-R-001 F01): dropped answers left unread for the document.
+            "unkept": variant(CONFIG, UNKEPT, "config/ohif.js"),
         }
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -1337,6 +1465,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.viewer_page = True
         self.config = CONFIG if config is None else config
         self.page.goto(VIEWER_URL)
+        self.page.evaluate(END_REASONS)
         if uncancellable:
             # An answer already on the wire when the study changes: the panel aborts its reads on a study change, so the
             # harness drops the abort signal to let that answer arrive late, as it does once its response has started.
@@ -1379,6 +1508,9 @@ class ClinicianViewerDOMTest(unittest.TestCase):
 
     def session(self):
         return self.page.evaluate("() => kinViewerSession.state()")
+
+    def end_reasons(self):
+        return self.page.evaluate("() => window.synEndReasons")
 
     def release_me(self, answer):
         # Every /me the case held gets the same late answer; later ones are answered at once.
@@ -2776,6 +2908,8 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                 self.refusal_then_late_writers(refuser, status, late_bodies=late_bodies)
                 self.assertEqual(([], []), (self.item_requests, self.page.evaluate("synMounted")))
                 self.ended_after_refusal()
+                # S5-U2c fix2 (F02): each producer names what it met — its 401 ends the login, its /me 403 refuses this account.
+                self.assertEqual(["unauthorized" if status == 401 else "forbidden"], self.end_reasons())
         # (b) Mode exit and re-entry of that document with /me answering a writer: nothing asks /me, nothing mounts, still closed.
         with self.subTest(step="re-entry"):
             asked = self.me_requests
@@ -3219,9 +3353,11 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.release(own, account)
         return panel_me
 
-    def real_writer_document(self, module, config=None):
+    def real_writer_document(self, module, config=None, files=None):
         # A writer document (RADIOLOGIST, every extension entered) with the real `module` mounted and working for that account.
+        # `files` replaces served files after that (test_27's control: the module's file as before fix4).
         before_boot = self.serve_real(module)
+        self.files.update(files or {})
         self.me, self.me_status, self.hold_me, self.held_me = RADIOLOGIST, None, False, []
         self.item_requests, self.cursors, self.me_requests, self.writer_paged = [], {}, 0, False
         self.open_viewer(config, uncancellable=True, before_boot=before_boot)
@@ -3264,6 +3400,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                     self.ended_after_refusal()
                     self.me = RADIOLOGIST
                     self.reentry_stays_ended()
+                    self.assertEqual(["account-changed"], self.end_reasons())
         # (b) Astra's second reproduction: the module mounted with the document's own account asks /me again and that /me alone
         # answers 401, 403 or another account while the other panels' /me are held. Nothing that request would have read or sent
         # next leaves the page, and the held first-account answers change nothing.
@@ -3286,6 +3423,9 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                     self.module_ended_now(module, reads, pairs)
                     self.assertEqual(([["new", None]], f"refused: {ENDED}"),
                                      (self.page.evaluate(EDIT_ATTEMPTS), self.page.evaluate("synSR('storeMeasurements')")))
+                    # S5-U2c fix2 (F02): the real module names its 401 and its /me 403 apart; another account is noted as such.
+                    self.assertEqual([{401: "unauthorized", 403: "forbidden"}[answer] if isinstance(answer, int) else "account-changed"],
+                                     self.end_reasons())
         # (c) The same account answering that recheck, and a mode re-entry, keep the module working; a 403 on the module's own list
         # ends only that module (Job) or holds its drafts (Findings), not the document's login.
         for module in ("jobs", "findings", "tech-note"):
@@ -3305,7 +3445,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                                                           [kind for kind, _, _ in self.module_requests[reads:]]))
                 self.page.evaluate("synClearMarks(), synReenter()")
                 self.module_ready(module)
-                self.assertEqual(("writer", "true"), (self.session(), self.page.evaluate("synAdd('ArrowAnnotate')")))
+                self.assertEqual(("writer", "true", []), (self.session(), self.page.evaluate("synAdd('ArrowAnnotate')"), self.end_reasons()))
                 self.page.evaluate("synClearMarks()")
         for module, refused in (("jobs", MODULE_NOTICE["jobs"][1]), ("findings", "이 검사에 접근할 수 없습니다")):
             with self.subTest(list_refused=module):
@@ -3318,7 +3458,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                 selector = MODULE_NOTICE[module][0]
                 self.wait_until(lambda: refused in (self.text_of(selector) or ""), f"the {module} list refused")
                 self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "the writer panel")
-                self.assertEqual(("writer", "true"), (self.session(), self.page.evaluate("synAdd('Bidirectional')")))
+                self.assertEqual(("writer", "true", []), (self.session(), self.page.evaluate("synAdd('Bidirectional')"), self.end_reasons()))
                 self.page.evaluate("synClearMarks()")
 
         # Control: the same file with the modules not handed the document's session (Astra's reproduction). The Job keeps the other
@@ -3369,6 +3509,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                                       self.page.evaluate("synAdd('Bidirectional')")))
                     self.assertEqual([["new", None]], self.page.evaluate(EDIT_ATTEMPTS))
                     self.assertEqual(f"refused: {ENDED}", self.page.evaluate("synSR('storeMeasurements')"))
+                    self.assertEqual(["logout"], self.end_reasons())
         # Without a logout the same halves give the document back: the writer's /me (three producers), its author list, every
         # module and authoring; the clinician-only document's /me (two) and its final list with its mark.
         for kind in ("writer", "read-only"):
@@ -3417,6 +3558,439 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                                  (self.session(), self.me_requests - asked, self.page.evaluate("synAdd('ArrowAnnotate')")),
                                  "control: the logout was missed")
                 self.page.evaluate("synClearMarks()")
+
+    # test_24 (S5-U2c)
+    def api_paths(self, start):
+        paths = []
+        for request in self.finished[start:]:
+            url = urlparse(request.url)
+            if url.path.startswith("/api/"):
+                paths.append(url.path + (f"?{url.query}" if url.query else ""))
+        return paths
+
+    def ct_sync_document(self, uncancellable=False, checked=True):
+        # uncancellable (test_26): the page's fetch drops the abort signal, as open_viewer's does, so an answer already on the wire
+        # reaches the page after mode exit. checked=False boots without waiting for the access check (a case holding its /me).
+        self.viewer_page = True
+        self.page.goto(VIEWER_URL)
+        self.page.evaluate(END_REASONS)
+        if uncancellable:
+            self.page.evaluate("""() => { const real = window.fetch.bind(window);
+              window.fetch = (url, options = {}) => { const { signal, ...rest } = options; return real(url, rest); }; }""")
+        start = len(self.finished)
+        self.page.evaluate(CT_SYNC_BOOT, [VA, VP])
+        if not checked:
+            return None
+        self.wait_until(lambda: len(self.api_paths(start)) >= 3, "the CT sync access check")
+        self.settle()
+        return self.api_paths(start)
+
+    def test_24_clinician_ct_sync_reads_the_narrow_list_and_says_why_it_stops(self):
+        self.rows = [study(VA, "SYN KIM", "SYN-P-100", patient(INST_A, "SYN-P-100"), "20260320", FINAL),
+                     study(VP, "SYN KIM", "SYN-P-100", patient(INST_A, "SYN-P-100"), "20250101", OPEN)]
+        self.assertEqual(["/api/me", "/api/clinician/studies?limit=100", "/api/me"], self.ct_sync_document())
+        self.assertEqual([], self.unexpected, "no GET studies (and every request carried X-KIN-CSRF)")
+        self.assertEqual({"visible": False, "text": "", "recheck": False}, self.page.evaluate("synCt.notice()"))
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: self.page.evaluate("synCt.z('syn-ct-b')") == 8, "the prior at the same position")
+        self.assertEqual(CT_SYNC_TEXT["synced"], self.page.evaluate("synCt.notice()")["text"])
+        # An unanswered check: its own words and Recheck Access, which the pointer reaches through the pass-through notice.
+        self.page.evaluate("synCt.exit()")
+        self.me_status = 500
+        asked = self.me_requests
+        self.page.evaluate("synCt.enter()")
+        self.wait_until(lambda: self.me_requests > asked, "the failing /me")
+        self.settle()
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.wait_until(lambda: self.page.evaluate("synCt.notice()")["recheck"], "Recheck Access offered")
+        self.assertEqual(({"visible": True, "text": CT_SYNC_TEXT["failed"], "recheck": True}, 8),
+                         (self.page.evaluate("synCt.notice()"), self.page.evaluate("synCt.z('syn-ct-b')")))
+        hit = self.page.evaluate(CT_SYNC_HIT)
+        self.assertEqual((True, True), (hit["button"], hit["words_pass"]))
+        self.assertGreaterEqual(hit["height"], 24)
+        self.assertGreaterEqual(hit["font"], 12)
+        self.me_status = None
+        self.page.locator("#kin-ct-sync-recheck").click()
+        self.wait_until(lambda: self.page.evaluate("synCt.notice()")["text"] == CT_SYNC_TEXT["confirmed"], "the confirmed recheck")
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.wait_until(lambda: self.page.evaluate("synCt.z('syn-ct-b')") == 12, "sync back after Recheck Access")
+        # A 401 is the end of the login: the session words, no button, and nothing is asked after it.
+        self.page.evaluate("synCt.exit()")
+        self.me_status = 401
+        asked = self.me_requests
+        self.page.evaluate("synCt.enter()")
+        self.wait_until(lambda: (self.page.evaluate("synCt.notice()") or {}).get("visible"), "the session end")
+        self.settle()
+        start = len(self.finished)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 8)")
+        self.settle()
+        self.assertEqual(({"visible": True, "text": CT_SYNC_TEXT["ended"], "recheck": False}, 12, [], 1),
+                         (self.page.evaluate("synCt.notice()"), self.page.evaluate("synCt.z('syn-ct-b')"),
+                          self.api_paths(start), self.me_requests - asked))
+        self.assertEqual([], self.unexpected)
+        # fix2 (Astra S5-U2c-B-R-001 F01): that 401 is the document's end, kept for its life ('unauthorized'): the next entry of the
+        # same account asks nothing and stays ended.
+        self.assertEqual(("refused", ["unauthorized"]), (self.session(), self.end_reasons()))
+        self.page.evaluate("synCt.exit()")
+        self.me_status = None
+        asked = self.me_requests
+        self.page.evaluate("synCt.enter()")
+        self.settle()
+        self.assertEqual(({"visible": True, "text": CT_SYNC_TEXT["ended"], "recheck": False}, 0),
+                         (self.page.evaluate("synCt.notice()"), self.me_requests - asked))
+        # fix1 (Astra S5-U2c-R-001 F01), in a new document: the document's end while an event waits for its image. A Measurements
+        # or layout panel's 401 (their sessionEnded(): kinViewerSession.refuse('unauthorized')) arrives while the preload is held:
+        # the released image moves nothing.
+        self.fresh_page()
+        self.me, self.me_status = CLINICIAN, None
+        self.assertEqual(["/api/me", "/api/clinician/studies?limit=100", "/api/me"], self.ct_sync_document())
+        self.page.evaluate(CT_SYNC_HOLD_IMAGES)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 10)")
+        self.wait_until(lambda: self.page.evaluate("synCtImages.length") == 1, "the event waiting for its image")
+        self.settle()
+        start = len(self.finished)
+        self.page.evaluate("() => kinViewerSession.refuse('unauthorized')")
+        self.page.evaluate(CT_SYNC_RELEASE_IMAGES)
+        self.settle()
+        self.assertEqual(({"visible": True, "text": CT_SYNC_TEXT["ended"], "recheck": False}, 0, []),
+                         (self.page.evaluate("synCt.notice()"), self.page.evaluate("synCt.z('syn-ct-b')"), self.api_paths(start)))
+        # Another account answering another panel of a document that confirmed the first one (note()) is the same end.
+        self.fresh_page()
+        self.me, self.me_status = CLINICIAN, None
+        self.assertEqual(["/api/me", "/api/clinician/studies?limit=100", "/api/me"], self.ct_sync_document())
+        self.page.evaluate(CT_SYNC_HOLD_IMAGES)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: self.page.evaluate("synCtImages.length") == 1, "the event waiting for its image")
+        self.settle()
+        start = len(self.finished)
+        self.page.evaluate("([first, other]) => { kinViewerSession.note(first); kinViewerSession.note(other); }",
+                           [CLINICIAN, OTHER_CLINICIAN])
+        self.page.evaluate(CT_SYNC_RELEASE_IMAGES)
+        self.settle()
+        self.assertEqual(({"visible": True, "text": CT_SYNC_TEXT["ended"], "recheck": False}, 0, []),
+                         (self.page.evaluate("synCt.notice()"), self.page.evaluate("synCt.z('syn-ct-b')"), self.api_paths(start)))
+        # The document's own /me read answering 403 (decide(), the write modules' gate) refuses this account instead: its words with
+        # Recheck Access, the released image moves nothing, and only Recheck Access brings sync back.
+        self.fresh_page()
+        self.me, self.me_status = CLINICIAN, None
+        self.assertEqual(["/api/me", "/api/clinician/studies?limit=100", "/api/me"], self.ct_sync_document())
+        self.page.evaluate(CT_SYNC_HOLD_IMAGES)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: self.page.evaluate("synCtImages.length") == 1, "the event waiting for its image")
+        self.settle()
+        start = len(self.finished)
+        self.me_status = 403
+        self.assertEqual("refused", self.page.evaluate("() => kinViewerSession.decide()"))
+        self.me_status = None
+        self.page.evaluate(CT_SYNC_RELEASE_IMAGES)
+        self.settle()
+        self.assertEqual(({"visible": True, "text": CT_SYNC_TEXT["denied"], "recheck": True}, 0, ["/api/me"]),
+                         (self.page.evaluate("synCt.notice()"), self.page.evaluate("synCt.z('syn-ct-b')"), self.api_paths(start)))
+        self.page.locator("#kin-ct-sync-recheck").click()
+        self.wait_until(lambda: self.page.evaluate("synCt.notice()")["text"] == CT_SYNC_TEXT["confirmed"],
+                        "Recheck Access after the refusal")
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.wait_until(lambda: self.page.evaluate("synCt.z('syn-ct-b')") == 12, "sync back after the refusal's Recheck Access")
+        self.assertEqual([], self.unexpected)
+        # Control: a radiologist document keeps GET studies (answered here by this page only).
+        self.fresh_page()
+        self.me, self.me_status = RADIOLOGIST, None
+        listed = []
+
+        def studies(route):
+            listed.append(route.request.headers.get("x-kin-csrf"))
+            route.fulfill(json={"studies": copy.deepcopy(self.rows), "observedAt": "2026-09-27T00:00:00.000Z"})
+        self.page.route(lambda url: urlparse(url).path == "/api/studies", studies)
+        self.assertEqual(["/api/me", "/api/studies", "/api/me"], self.ct_sync_document())
+        self.assertEqual(["1"], listed)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: self.page.evaluate("synCt.z('syn-ct-b')") == 8, "control: the radiologist's prior at the same position")
+
+    def test_25_an_end_after_a_refusal_is_kept_and_a_dropped_events_failure_says_nothing(self):
+        denied = {"visible": True, "text": CT_SYNC_TEXT["denied"], "recheck": True}
+        ended = {"visible": True, "text": CT_SYNC_TEXT["ended"], "recheck": False}
+        notice = lambda: self.page.evaluate("synCt.notice()")
+        z = lambda: self.page.evaluate("synCt.z('syn-ct-b')")
+        # (a) Astra S5-U2c-B-R-001 F01 with the real panels and the module stubs: the Measurements panel's /me 403 (on focus) refuses
+        # this account ('forbidden') and every write module ends in place once. The logout afterwards (storage, then the
+        # BroadcastChannel) moves only the reason: no module ends again, the session stays refused, authoring stays closed, and a
+        # mode re-entry asks nothing and opens nothing.
+        self.writer_document()
+        self.me_status = 403
+        self.focus()
+        self.wait_until(lambda: self.session() == "refused", "the Measurements panel's /me 403")
+        self.settle()
+        modules_ended = Counter(self.page.evaluate("synEnded"))
+        self.assertEqual((["forbidden"], Counter({m: 1 for m in WRITE_MODULES})), (self.end_reasons(), modules_ended))
+        self.me_status = None
+        for logout in (LOGOUT, BROADCAST_LOGOUT):
+            self.page.evaluate(logout)
+            self.settle()
+        self.assertEqual((["forbidden", "logout"], modules_ended, "refused", "false"),
+                         (self.end_reasons(), Counter(self.page.evaluate("synEnded")), self.session(),
+                          self.page.evaluate("synAdd('Bidirectional')")))
+        self.reentry_stays_ended()
+        self.assertEqual(["forbidden", "logout"], self.end_reasons())
+        # (b) The real kin.ct-sync, Astra's order: a panel's /me 403 (refuse('forbidden')) is a refusal with Recheck Access; mode exit;
+        # the logout; the next entry — of another account — starts ended, asks nothing, and a scroll moves nothing. The pair is
+        # test_24's: one server patient key.
+        self.rows = [study(VA, "SYN KIM", "SYN-P-100", patient(INST_A, "SYN-P-100"), "20260320", FINAL),
+                     study(VP, "SYN KIM", "SYN-P-100", patient(INST_A, "SYN-P-100"), "20250101", OPEN)]
+        self.fresh_page()
+        self.me, self.me_status = CLINICIAN, None
+        self.assertEqual(["/api/me", "/api/clinician/studies?limit=100", "/api/me"], self.ct_sync_document())
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: z() == 8, "the prior at the same position")
+        self.page.evaluate("() => kinViewerSession.refuse('forbidden')")
+        self.assertEqual(denied, notice())
+        self.page.evaluate("synCt.exit()")
+        self.page.evaluate(LOGOUT)
+        self.me, asked = OTHER_CLINICIAN, self.me_requests
+        self.page.evaluate("synCt.enter()")
+        self.settle()
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.settle()
+        self.assertEqual((ended, 8, 0, ["forbidden", "logout"]), (notice(), z(), self.me_requests - asked, self.end_reasons()))
+        # (c) Mounted, after Recheck Access brought sync back: the logout broadcast while an event waits for its image. The released
+        # image moves nothing and nothing more is asked.
+        self.fresh_page()
+        self.me = CLINICIAN
+        self.assertEqual(["/api/me", "/api/clinician/studies?limit=100", "/api/me"], self.ct_sync_document())
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: z() == 8, "the prior at the same position")
+        self.page.evaluate("() => kinViewerSession.refuse('forbidden')")
+        self.page.locator("#kin-ct-sync-recheck").click()
+        self.wait_until(lambda: notice()["text"] == CT_SYNC_TEXT["confirmed"], "Recheck Access after the refusal")
+        self.page.evaluate(CT_SYNC_HOLD_IMAGES)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.wait_until(lambda: self.page.evaluate("synCtImages.length") == 1, "the event waiting for its image")
+        self.settle()
+        start = len(self.finished)
+        self.page.evaluate(BROADCAST_LOGOUT)
+        self.wait_until(lambda: notice() == ended, "the logout after the refusal")
+        self.page.evaluate(CT_SYNC_RELEASE_IMAGES)
+        self.settle()
+        self.assertEqual((ended, 8, [], ["forbidden", "logout"]), (notice(), z(), self.api_paths(start), self.end_reasons()))
+        # (d) F03: an event's /me held, the shared refusal shown with Recheck Access, then that /me fails late (403, a network
+        # failure): the refusal and its button stay, nothing moves, and Recheck Access still brings sync back.
+        for late in ("403", "network"):
+            with self.subTest(late=late):
+                self.fresh_page()
+                self.me, self.me_status = CLINICIAN, None
+                self.assertEqual(["/api/me", "/api/clinician/studies?limit=100", "/api/me"], self.ct_sync_document())
+                self.hold_me = True
+                self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+                self.wait_until(lambda: len(self.held_me) == 1, "the event's /me held")
+                self.page.evaluate("() => kinViewerSession.refuse('forbidden')")
+                self.assertEqual(denied, notice())
+                self.hold_me = False
+                route = self.held_me.pop()
+                if late == "403":
+                    self.release(route, {"statusCode": 403, "message": "SYN refused"}, status=403)
+                else:
+                    route.abort()
+                    self.settle()
+                self.assertEqual((denied, 0), (notice(), z()))
+                self.page.locator("#kin-ct-sync-recheck").click()
+                self.wait_until(lambda: notice()["text"] == CT_SYNC_TEXT["confirmed"], "Recheck Access after the late failure")
+                self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+                self.wait_until(lambda: z() == 8, "sync back after Recheck Access")
+
+    def refused_ct_reentry_answers_401(self, config=None):
+        # test_26 (a): the real kin.ct-sync confirms the first account; the re-entry's check waits for its first /me; a panel's /me
+        # 403 (refuse('forbidden')) refuses this account, which drops that check's round without aborting it; the /me then answers
+        # 401. Returns the notice right after that answer.
+        self.config = CONFIG if config is None else config
+        self.me, self.me_status = CLINICIAN, None
+        self.assertEqual(["/api/me", "/api/clinician/studies?limit=100", "/api/me"], self.ct_sync_document())
+        self.page.evaluate("synCt.exit()")
+        self.hold_me = True
+        self.page.evaluate("synCt.enter()")
+        self.wait_until(lambda: len(self.held_me) == 1, "the re-entry's first /me held")
+        self.hold_me = False
+        self.page.evaluate("() => kinViewerSession.refuse('forbidden')")
+        self.assertEqual(CT_SYNC_TEXT["denied"], self.page.evaluate("synCt.notice()")["text"])
+        # Not release(): a 401 that ends the document ends this mount as its headers arrive, and end() aborts the mount's requests,
+        # so its body may never complete (the request fails instead of finishing).
+        route = self.held_me.pop()
+        request = route.request
+        route.fulfill(status=401, json={"statusCode": 401, "message": "SYN unauthorized"})
+        self.wait_until(lambda: request.failure is not None or any(item is request for item in self.finished),
+                        "the released 401 reaching the page")
+        self.settle()
+        return self.page.evaluate("synCt.notice()")
+
+    def panel_answer_after_refusal(self, producer, payload, status, config=None):
+        # test_26 (d): a writer document (every extension, the abort signal dropped so an answer on the wire arrives late); the
+        # Measurements panel's /me asked on focus, or the layout panel's asked by Save Recent Layout, is held; a /me 403 read
+        # elsewhere refuses this account, which ends that panel and every write module (once); then the held /me answers.
+        self.writer_document(config)
+        self.hold_me = True
+        if producer == "panel":
+            self.focus()
+        else:
+            self.page.evaluate("""() => [...document.querySelectorAll('#kin-viewer-layout button')]
+              .find(b => b.textContent === 'Save Recent Layout').click()""")
+        self.wait_until(lambda: len(self.held_me) == 1, f"the {producer}'s /me held")
+        held, self.hold_me = self.held_me.pop(), False
+        self.page.evaluate("() => kinViewerSession.refuse('forbidden')")
+        self.settle()
+        modules = Counter(self.page.evaluate("synEnded"))
+        self.assertEqual((["forbidden"], Counter({m: 1 for m in WRITE_MODULES}), ENDED, LAYOUT_ENDED),
+                         (self.end_reasons(), modules, self.panel()["status"], self.layout_status()))
+        self.release(held, payload, status=status)
+        self.assertEqual((modules, "refused", ENDED, LAYOUT_ENDED, [f"refused: {ENDED}"]),
+                         (Counter(self.page.evaluate("synEnded")), self.session(), self.panel()["status"], self.layout_status(),
+                          [self.page.evaluate("synSR('storeMeasurements')")]))
+        return self.end_reasons()
+
+    def test_26_a_late_401_or_another_account_ends_the_document_whichever_round_or_mount_it_answers(self):
+        # Astra S5-U2c-C-R-001 F01 (fix3): an answer a check, an event or a panel no longer uses — its round dropped by a refusal, its
+        # mount or panel gone — is still the document's for what it says about the login. The pair is test_24's.
+        denied = {"visible": True, "text": CT_SYNC_TEXT["denied"], "recheck": True}
+        ended = {"visible": True, "text": CT_SYNC_TEXT["ended"], "recheck": False}
+        notice = lambda: self.page.evaluate("synCt.notice()")
+        z = lambda: self.page.evaluate("synCt.z('syn-ct-b')")
+        self.rows = [study(VA, "SYN KIM", "SYN-P-100", patient(INST_A, "SYN-P-100"), "20260320", FINAL),
+                     study(VP, "SYN KIM", "SYN-P-100", patient(INST_A, "SYN-P-100"), "20250101", OPEN)]
+        # (a) The dropped round's late 401 ends the document ('unauthorized'): the mount ends at once, Recheck Access is not offered,
+        # and a re-entry asks nothing and moves nothing.
+        self.assertEqual(ended, self.refused_ct_reentry_answers_401())
+        self.assertEqual((["forbidden", "unauthorized"], "refused"), (self.end_reasons(), self.session()))
+        asked, start = self.me_requests, len(self.finished)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.page.evaluate("synCt.exit()")
+        self.page.evaluate("synCt.enter()")
+        self.settle()
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.settle()
+        self.assertEqual((ended, 0, [], 0), (notice(), z(), self.api_paths(start), self.me_requests - asked))
+        # Control: without the 401 kept where it arrives, the reason stays 'forbidden' and Recheck Access syncs again (Astra's order).
+        self.fresh_page()
+        self.assertEqual(denied, self.refused_ct_reentry_answers_401(self.config_variants["unkept"]))
+        self.assertEqual(["forbidden"], self.end_reasons())
+        self.page.locator("#kin-ct-sync-recheck").click()
+        self.wait_until(lambda: notice()["text"] == CT_SYNC_TEXT["confirmed"], "control: Recheck Access")
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.wait_until(lambda: z() == 12, "control: the target moved after the 401")
+        # (b) An event's /me on the wire across the refusal and mode exit answers another account: the document's end
+        # ('account-changed', for a subscriber that joins later too); the mount that left shows nothing, the write-module end ran
+        # once (at the refusal), and a re-entry of that account asks nothing and moves nothing.
+        self.fresh_page()
+        self.config, self.me = CONFIG, CLINICIAN
+        self.assertEqual(["/api/me", "/api/clinician/studies?limit=100", "/api/me"], self.ct_sync_document(uncancellable=True))
+        self.page.evaluate("() => { window.synCtEnders = 0; kinViewerSession.writeModule.onEnd(() => { window.synCtEnders++; }); }")
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: z() == 8, "the prior at the same position")
+        self.hold_me = True
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.wait_until(lambda: len(self.held_me) == 1, "the event's /me held")
+        self.hold_me = False
+        self.page.evaluate("() => kinViewerSession.refuse('forbidden')")
+        self.assertEqual((denied, 1), (notice(), self.page.evaluate("synCtEnders")))
+        self.page.evaluate("synCt.exit()")
+        self.assertIsNone(notice())
+        asked = self.me_requests
+        self.release(self.held_me.pop(), OTHER_CLINICIAN)
+        later = self.page.evaluate("() => { const told = []; kinViewerSession.onEnded(reason => { told.push(reason); }); return told; }")
+        self.assertEqual((None, ["forbidden", "account-changed"], ["account-changed"], 1, "refused", 8),
+                         (notice(), self.end_reasons(), later, self.page.evaluate("synCtEnders"), self.session(), z()))
+        self.me = OTHER_CLINICIAN
+        self.page.evaluate("synCt.enter()")
+        self.settle()
+        self.page.evaluate("synCt.scroll('syn-ct-a', 10)")
+        self.settle()
+        self.assertEqual((ended, 0, 8, 1), (notice(), self.me_requests - asked, z(), self.page.evaluate("synCtEnders")))
+        # (c) The round check stops only the use of a late answer: with no account confirmed yet, the first mount's first /me answers
+        # after the refusal — no list is read, nothing is confirmed, the refusal and Recheck Access stay — yet its account is the
+        # document's first, so Recheck Access answered by another account ends the login.
+        self.fresh_page()
+        self.me, self.hold_me = CLINICIAN, True
+        self.ct_sync_document(checked=False)
+        self.wait_until(lambda: len(self.held_me) == 1, "the first mount's first /me held")
+        self.hold_me = False
+        self.page.evaluate("() => kinViewerSession.refuse('forbidden')")
+        start = len(self.finished)
+        self.release(self.held_me.pop(), CLINICIAN)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.settle()
+        self.assertEqual((denied, 0, ["/api/me"], ["forbidden"]), (notice(), z(), self.api_paths(start), self.end_reasons()))
+        self.me = OTHER_CLINICIAN
+        self.page.locator("#kin-ct-sync-recheck").click()
+        self.wait_until(lambda: notice() == ended, "Recheck Access answered by another account")
+        self.assertEqual((["forbidden", "account-changed"], 0), (self.end_reasons(), z()))
+        self.assertEqual([], self.unexpected)
+        # (d) The same rule at the Measurements and layout panels (their request paths in config/ohif.js): the held /me of a panel the
+        # refusal ended answers 401 or another account — the document's end, the write modules not ended again, authoring closed.
+        for producer in ("panel", "layout"):
+            for late, payload, status, reason in (("401", {"statusCode": 401, "message": "SYN unauthorized"}, 401, "unauthorized"),
+                                                  ("another account", OTHER_WRITER, 200, "account-changed")):
+                with self.subTest(producer=producer, late=late):
+                    self.fresh_page()
+                    self.assertEqual(["forbidden", reason], self.panel_answer_after_refusal(producer, payload, status))
+        # Control: those answers left unread (the file up to fix2 for these paths): the reason stays 'forbidden'.
+        for producer, payload, status in (("panel", {"statusCode": 401, "message": "SYN unauthorized"}, 401), ("layout", OTHER_WRITER, 200)):
+            with self.subTest(control=producer):
+                self.fresh_page()
+                self.assertEqual(["forbidden"], self.panel_answer_after_refusal(producer, payload, status, self.config_variants["unkept"]))
+
+    def late_401_beside_ct_sync(self, files=None):
+        # test_27: a writer document (every extension, the abort signal dropped so an answer on the wire arrives late) with the real
+        # Findings section (finding-link-model.js), the Job and Tech Note stubs, the real Measurements and layout panels, and the real
+        # kin.ct-sync booted beside them over test_24's pair (a radiologist: its GET studies answered by this page). Reload Findings
+        # asks /me, held; the viewer then shows another study (VE, outside the document's pair), so the store gives that generation up
+        # (its abort does not reach the wire) and works for VE, while the document stays a writer and CT sync still moves the prior;
+        # then the held /me answers 401.
+        self.rows = [study(VA, "SYN KIM", "SYN-P-100", patient(INST_A, "SYN-P-100"), "20260320", FINAL),
+                     study(VP, "SYN KIM", "SYN-P-100", patient(INST_A, "SYN-P-100"), "20250101", OPEN)]
+        self.page.route(lambda url: urlparse(url).path == "/api/studies",
+                        lambda route: route.fulfill(json={"studies": copy.deepcopy(self.rows), "observedAt": "2026-09-27T00:00:00.000Z"}))
+        self.real_writer_document("findings", files=files)
+        self.wait_until(lambda: {"jobs", "tech-note"} <= set(self.page.evaluate("synMounted")), "the Job and Tech Note stubs mounted")
+        self.page.evaluate(CT_SYNC_BESIDE_PANELS, [VA, VP])
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: self.page.evaluate("synCt.z('syn-ct-b')") == 8, "CT sync beside the panels")
+        own = self.module_recheck("findings")
+        self.release_held(RADIOLOGIST)
+        self.page.evaluate("study => synSwitch(study)", VE)
+        self.wait_until(lambda: any(kind == "findings" and target == VE for kind, target, _ in self.module_requests), "the store working for VE")
+        self.settle()
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.wait_until(lambda: self.page.evaluate("synCt.z('syn-ct-b')") == 12, "CT sync after the study change")
+        self.assertEqual(("writer", [], []), (self.session(), self.end_reasons(), self.page.evaluate("synEnded")))
+        # Not release(): a 401 that ends the document ends the store's page requests too; wait for the answer either way.
+        request = own.request
+        own.fulfill(status=401, json={"statusCode": 401, "message": "SYN unauthorized"})
+        self.wait_until(lambda: request.failure is not None or any(item is request for item in self.finished), "the late 401 reaching the page")
+        self.settle()
+
+    def test_27_a_write_modules_late_401_ends_ct_sync_and_the_other_panels(self):
+        # Astra S5-U2c-C-R-001 F01 (fix4) at a write module's own request path: panel A's (the Findings store's) /me answering 401
+        # after the store gave that request's generation up is the document's end ('unauthorized'). CT sync ends with it (its words,
+        # no Recheck Access, a scroll moves nothing and asks nothing), and so do the other panels: the Job and Tech Note modules end
+        # in place once, the Measurements and layout panels say the login ended, authoring is closed; the store itself has ended.
+        z = lambda: self.page.evaluate("synCt.z('syn-ct-b')")
+        self.late_401_beside_ct_sync()
+        asked, start = self.me_requests, len(self.finished)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 8)")
+        self.settle()
+        selector, notice = MODULE_NOTICE["findings"]
+        self.assertEqual(("refused", ["unauthorized"], notice, Counter({"jobs": 1, "tech-note": 1}), ENDED, LAYOUT_ENDED,
+                          {"visible": True, "text": CT_SYNC_TEXT["ended"], "recheck": False}, 12, "false"),
+                         (self.session(), self.end_reasons(), self.text_of(selector), Counter(self.page.evaluate("synEnded")),
+                          self.panel()["status"], self.layout_status(), self.page.evaluate("synCt.notice()"), z(),
+                          self.page.evaluate("synAdd('Bidirectional')")))
+        self.assertTrue(all(disabled for _, disabled in self.layout()["buttons"]), self.layout())
+        self.assertEqual((0, []), (self.me_requests - asked, self.api_paths(start)))
+        # Control: the store's file with its drop points as before fix4 (Astra's order at this module): the late 401 is thrown away
+        # unread, the document stays a writer, CT sync moves the prior again and the other panels go on.
+        self.fresh_page()
+        self.late_401_beside_ct_sync({"finding-link-model.js": variant(lf_text(HPACS / "finding-link-model.js"), UNKEPT_FINDINGS,
+                                                                        "finding-link-model.js")})
+        self.page.evaluate("synCt.scroll('syn-ct-a', 8)")
+        self.wait_until(lambda: z() == 16, "control: CT sync goes on after the late 401")
+        self.assertEqual(("writer", [], []), (self.session(), self.end_reasons(), self.page.evaluate("synEnded")))
+        self.assertTrue(any(not disabled for _, disabled in self.layout()["buttons"]), "control: the layout panel still works")
 
 
 if __name__ == "__main__":

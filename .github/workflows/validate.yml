@@ -987,6 +987,9 @@ jobs:
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_layout_test.cjs
       - name: CT position synchronization geometry boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/ct_sync_test.cjs
+      # S5-U2c: the shipped kinCreateCTSync against the clinician-only allowlist read from api/src/clinician-policy.ts.
+      - name: S5-U2c clinician CT sync access route, state wording and late-answer boundaries
+        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_ct_sync_test.cjs
       - name: Cine range, playback ownership and preparation budget boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/cine_budget_test.cjs tests/cine_playback_test.cjs tests/cine_lifecycle_test.cjs
       - name: Selected classic CT preset command boundaries

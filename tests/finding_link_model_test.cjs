@@ -2661,6 +2661,141 @@ test('S5-U2b X5 F01: the document\'s end, whoever saw it, ends the attached stor
   assert.equal(gone.store.state().ended, false);
 });
 
+/* ---------- S5-U2c fix4 (Astra S5-U2c-C-R-001 F01): an answer the store drops is still the document's for the login ----------
+ * fix3's rule (config/ohif.js: CT sync, the Measurements and layout panels) at the store's own request path, api(). A 401, or a /me
+ * answer of another account than the document's first one, that reaches a generation the store gave up (a scope change), a store
+ * the document's refusal of this account ended ('forbidden': another panel's /me 403), or a store detached at mode exit, ends the
+ * document's login ('unauthorized' / 'account-changed'; over the refusal the reason is promoted once). The store applies none of it,
+ * and the write modules' in-place end (enders) is not run again. The transport does not honour the store's abort: an answer already
+ * on the wire when the store let it go still arrives. */
+const MODEL_FILE = path.join(__dirname, '..', 'worklist-v0', 'hpacs-lite', 'finding-link-model.js');
+const OTHER = { kind: 'member', sub: 'reader-2', roles: ['radiologist'] };
+const LISTED = '0개 소견 · 소견 저장은 판독 확정과 별개입니다.';
+// What the store shows and holds, as one comparable value (its UI is drawn from this state).
+const storeView = store => { const s = store.state(); return JSON.stringify([s.ended, s.status, s.scope, s.subject, s.me, s.generation, s.entries.size, s.loading, s.suspended, s.pair.status]); };
+// A writer document (FIRST confirmed by the other panels) with the store attached; `hold(url)` names the requests the case answers.
+function lateWorld(storeModel = model) {
+  const session = viewerSession(), t = transport(), held = [], reasons = [];
+  assert.equal(session.note(FIRST), 'writer');
+  session.onEnded(reason => { reasons.push(reason); });
+  // Another write module of the document: its in-place end runs once, at the document's first refusal or end.
+  let enders = 0; session.writeModule.onEnd(() => { enders++; });
+  let hold = () => false;
+  const response = (status, body, bad) => ({ status, ok: status >= 200 && status < 300, headers: API_HEADERS,
+    json: async () => { if (bad) throw new SyntaxError('SYN not JSON'); return JSON.parse(JSON.stringify(body)); } });
+  const fetch = (url, options) => {
+    if (!hold(url)) return t.fetch(url, options);
+    t.log.push({ url, options });
+    return new Promise(resolve => { held.push({ url, release: (status, body, bad) => resolve(response(status, body, bad)) }); });
+  };
+  const store = storeModel.createStore({ fetch, uuid: () => REQUEST, navigate: async () => ({ ok: true }), session: session.writeModule });
+  return { session, t, store, held, reasons, enders: () => enders, holdWhen: fn => { hold = fn; } };
+}
+// The store working for A, then one of its requests held: its /me (Reload) or its list page.
+async function heldRead(w, at) {
+  w.store.syncHistory(history(A, [])); await tick();
+  assert.equal(w.store.state().status, LISTED);
+  w.holdWhen(at === '/me' ? url => url === '/api/me' : url => url.startsWith('/api/studies/' + A + '/findings'));
+  w.store.load(); await tick();
+  assert.deepEqual([w.held.length, w.held[0].url.startsWith(at === '/me' ? '/api/me' : '/api/studies/' + A)], [1, true], at);
+  w.holdWhen(() => false);
+}
+// How the store lets the held request go: its scope moves on to B (the document still a writer), the document refuses this account
+// (another panel's /me 403, which ends the store in place), or mode exit detaches and disposes it.
+function letGo(w, drop) {
+  if (drop === 'scope') w.store.syncHistory(history(B, []));
+  else if (drop === 'refusal') w.session.refuse('forbidden');
+  else { w.store.detach(); w.store.dispose(); }
+}
+const LATE = { '401': [401, { message: 'SYN unauthorized' }, 'unauthorized'], 'another account': [200, OTHER, 'account-changed'] };
+
+test('S5-U2c fix4 (a)(b): a late 401 or another account reaching a store that let its request go is the document\'s end; the store applies none of it', async () => {
+  for (const drop of ['scope', 'refusal', 'exit']) {
+    for (const late of ['401', 'another account']) {
+      for (const at of late === '401' ? ['/me', 'list page'] : ['/me']) {
+        const label = [drop, late, at].join(' / ');
+        const w = lateWorld();
+        await heldRead(w, at);
+        letGo(w, drop); await tick();
+        const [status, body, reason] = LATE[late];
+        // Before the answer: a scope change leaves the document a writer and the store working for B; the refusal ended the store
+        // and the other write module once; mode exit ended nothing of the document.
+        assert.deepEqual([w.session.state(), w.reasons.join(), w.enders()],
+          drop === 'refusal' ? ['refused', 'forbidden', 1] : ['writer', '', 0], label);
+        if (drop === 'scope') assert.deepEqual([w.store.state().scope, w.store.state().status], [B, LISTED], label);
+        const seen = storeView(w.store), asked = w.t.log.length;
+        w.held[0].release(status, body); await tick();
+        assert.deepEqual([w.session.state(), w.reasons.join(), w.enders(), w.t.log.length],
+          ['refused', drop === 'refusal' ? 'forbidden,' + reason : reason, 1, asked], label);
+        if (drop === 'scope') {
+          // The document's end reaches the store attached for B, which ends in place: nothing of the answer is kept as its login.
+          assert.deepEqual([w.store.state().ended, w.store.state().status, w.store.state().me, w.store.state().subject], [true, ENDED_TEXT, null, ''], label);
+        } else {
+          assert.equal(storeView(w.store), seen, label + ': the store that had ended or left shows nothing new');
+        }
+        // Kept for the document's life: a later subscriber hears it; nothing ends again.
+        const later = []; w.session.onEnded(r => { later.push(r); });
+        assert.deepEqual([later.join(), w.enders(), w.session.writeModule.answer(FIRST)], [reason, 1, false], label);
+      }
+    }
+  }
+});
+
+test('S5-U2c fix4 (c): what else a dropped answer says changes nothing, and the answers the store uses go as before', async () => {
+  // A dropped /me of the document's own account (a writer, or the same account clinician-only) gives no verdict; a dropped /me 403,
+  // 500 or body that is not JSON, and a dropped list page's 403, end nothing: the document stays a writer, the store works for B.
+  const cases = [['/me', 200, FIRST, false, 'same account'], ['/me', 200, { ...FIRST, roles: ['clinician'] }, false, 'same account, clinician-only'],
+    ['/me', 403, { message: 'SYN forbidden' }, false, '/me 403'], ['/me', 500, { message: 'SYN' }, false, '/me 500'],
+    ['/me', 200, null, true, '/me not JSON'], ['list page', 403, { message: 'SYN forbidden' }, false, 'list 403'],
+    ['list page', 200, { items: [], nextCursor: null }, false, 'list answered']];
+  for (const [at, status, body, bad, label] of cases) {
+    const w = lateWorld();
+    await heldRead(w, at);
+    letGo(w, 'scope'); await tick();
+    const seen = storeView(w.store), asked = w.t.log.length;
+    w.held[0].release(status, body, bad); await tick();
+    assert.deepEqual([w.session.state(), w.reasons.join(), w.enders(), storeView(w.store), w.t.log.length], ['writer', '', 0, seen, asked], label);
+    assert.ok(w.store.newDraft(), label + ': the store still writes for B');
+  }
+  // The answers the store uses: its live /me answering 401, 403 or another account ends the document with that reason once (the
+  // store in place, nothing more read); the same account reads the list.
+  for (const [status, body, reason] of [[401, { message: 'SYN' }, 'unauthorized'], [403, { message: 'SYN' }, 'forbidden'], [200, OTHER, 'account-changed']]) {
+    const w = lateWorld();
+    w.store.syncHistory(history(A, [])); await tick();
+    w.holdWhen(url => url === '/api/me'); w.store.load(); await tick(); w.holdWhen(() => false);
+    const asked = w.t.log.length;
+    w.held[0].release(status, body); await tick();
+    assert.deepEqual([w.session.state(), w.reasons.join(), w.enders(), w.store.state().ended, w.store.state().status, w.t.log.length],
+      ['refused', reason, 1, true, ENDED_TEXT, asked], reason);
+  }
+  const same = lateWorld();
+  same.store.syncHistory(history(A, [])); await tick();
+  same.holdWhen(url => url === '/api/me'); same.store.load(); await tick(); same.holdWhen(() => false);
+  same.held[0].release(200, FIRST); await tick();
+  assert.deepEqual([same.session.state(), same.reasons.join(), same.enders(), same.store.state().status, same.t.log.at(-1).url],
+    ['writer', '', 0, LISTED, '/api/studies/' + A + '/findings?includeHidden=true&limit=100']);
+});
+
+test('S5-U2c fix4 control: with the store dropping those answers unread (the file before fix4), the late 401 or account is lost', async () => {
+  // The shipped file with only its two drop points put back as they were: the answer valid() drops is thrown away unread.
+  let text = fs.readFileSync(MODEL_FILE, 'utf8');
+  for (const at of ['if (!valid(ticket)) throw await drop();', 'if (!valid(ticket)) throw await drop(data);']) {
+    assert.equal(text.split(at).length - 1, 1, at);
+    text = text.replace(at, 'if (!valid(ticket)) throw { stale: true };');
+  }
+  const box = { module: { exports: {} }, setTimeout, clearTimeout, AbortController };
+  vm.runInNewContext(text, box, { filename: 'finding-link-model.js (without fix4)' });
+  const unkept = box.module.exports;
+  for (const [drop, late, at, before] of [['scope', '401', '/me', ['writer', '', 0]], ['scope', '401', 'list page', ['writer', '', 0]],
+    ['refusal', '401', '/me', ['refused', 'forbidden', 1]], ['exit', 'another account', '/me', ['writer', '', 0]]]) {
+    const w = lateWorld(unkept);
+    await heldRead(w, at);
+    letGo(w, drop); await tick();
+    w.held[0].release(...LATE[late].slice(0, 2)); await tick();
+    assert.deepEqual([w.session.state(), w.reasons.join(), w.enders()], before, [drop, late, at].join(' / '));
+  }
+});
+
 // The S2-B1 list/command suite runs in this same process as well, so the existing hosted Validate step
 // for this file also executes it; `node --test tests/finding_command_test.cjs` runs it alone.
 require('./finding_command_test.cjs');
