@@ -11,6 +11,93 @@
  */
 
 const KIN_VIEWER_DEFAULT_TITLE = '판독 뷰어 — KOREA IMAGING NETWORK';
+const KIN_VIEWER_PRODUCT = 'KIN Viewer';
+
+/* S5-UI5 (VUI-04). 고정 뷰어 도구막대의 이름과 설명: aria-label은 영어 이름, title은 한국어 설명이다. 도구 ID·data-cy·명령·
+   순서·단축키는 뷰어의 것이라 DOM 속성만 붙인다. 켜고 끄는 도구에는 켜짐 상태(aria-pressed)와 title의 "사용 중"을 더해 색에만
+   기대지 않게 한다. 뷰어가 이미 aria-pressed를 주는 버튼은 그 값을 그대로 둔다. 같은 값이면 쓰지 않으므로 여러 번 불러도
+   속성 변경이 생기지 않고, 도구막대가 다시 그려지면(계정 도구막대 적용·writer가 아닌 문서의 도구막대 줄이기 포함) 새 버튼에 다시 붙는다.
+   분할 버튼의 목록 항목처럼 글자가 보이는 항목은 보이는 이름을 aria-label로 써서 화면 글자와 읽히는 이름이 어긋나지 않게 한다. */
+const kinViewerToolbarLabels = (() => {
+  const PRIMARY = {
+    MeasurementTools: ['Measurements', '측정 도구'],
+    Zoom: ['Zoom', '확대/축소'],
+    Pan: ['Pan', '이동'],
+    TrackballRotate: ['3D Rotate', '3D 회전(볼륨에서만 동작)'],
+    WindowLevel: ['Window / Level', '창/레벨 조절(드래그)'],
+    Capture: ['Capture', '현재 화면을 PNG로 저장(검사 저장 아님)'],
+    Layout: ['Layout', '화면 배치'],
+    Crosshairs: ['Crosshairs', 'MPR 교차선(3D/MPR에서만 동작)'],
+    MoreTools: ['More Tools', '기타 도구'],
+  };
+  const ITEMS = {
+    Length: ['Length', '길이'],
+    Bidirectional: ['Bidirectional', '장축·단축 길이'],
+    ArrowAnnotate: ['Arrow', '화살표 주석'],
+    EllipticalROI: ['Ellipse ROI', '타원 ROI(HU)'],
+    RectangleROI: ['Rectangle ROI', '사각형 ROI'],
+    CircleROI: ['Circle ROI', '원형 ROI'],
+    PlanarFreehandROI: ['Freehand ROI', '자유곡선 ROI'],
+    SplineROI: ['Spline ROI', '스플라인 ROI'],
+    LivewireContour: ['Livewire Contour', '라이브와이어 윤곽'],
+    Reset: ['Reset', '재설정(현재 영상 칸의 화면 조작을 처음으로)'],
+    'rotate-right': ['Rotate Right', '시계 방향 90° 회전'],
+    flipHorizontal: ['Flip Horizontal', '좌우 반전'],
+    ImageSliceSync: ['Image Slice Sync', '영상 칸 사이 단면 위치 맞춤'],
+    ReferenceLines: ['Reference Lines', '기준선 표시'],
+    ImageOverlayViewer: ['Image Overlay', '영상 오버레이 표시'],
+    StackScroll: ['Stack Scroll', '영상 넘기기(드래그)'],
+    invert: ['Invert', '흑백 반전'],
+    Probe: ['Probe', '한 지점의 값 확인'],
+    Cine: ['Cine', '연속 재생'],
+    Angle: ['Angle', '각도'],
+    CobbAngle: ['Cobb Angle', 'Cobb 각도'],
+    Magnify: ['Magnify', '돋보기'],
+    CalibrationLine: ['Calibration Line', '길이 보정선'],
+    TagBrowser: ['Tag Browser', 'DICOM 태그 보기'],
+    AdvancedMagnify: ['Magnify Probe', '고급 돋보기'],
+    UltrasoundDirectionalTool: ['Ultrasound Directional', '초음파 방향 측정'],
+    WindowLevelRegion: ['Window Level Region', '영역 창/레벨'],
+  };
+  // 누르면 켜지고 다른 도구를 고르면 꺼지는 버튼. Capture·Layout·More Tools는 동작·목록이라 켜짐 상태가 없다.
+  const TOGGLES = new Set(['MeasurementTools', 'Zoom', 'Pan', 'TrackballRotate', 'WindowLevel', 'Crosshairs']);
+  const ACTIVE = 'bg-primary-light';
+  const put = (element, name, value) => { if (element.getAttribute(name) !== value) element.setAttribute(name, value); };
+  const shown = element => element.nodeType === 1
+    ? (element.localName === 'svg' ? '' : [...element.childNodes].map(shown).join('')) : element.nodeType === 3 ? element.data : '';
+  // data-cy 하나가 가리키는 것: 주 도구막대 버튼, 분할 버튼의 주/목록 부분, 또는 분할 버튼 목록의 항목.
+  function entry(cy) {
+    const split = /^(.+)-split-button-(primary|secondary)$/.exec(cy || '');
+    const id = split ? split[1] : cy;
+    if (Object.hasOwn(PRIMARY, id)) {
+      const [name, description] = PRIMARY[id];
+      return split?.[2] === 'secondary'
+        ? { id, name: name + ' Menu', description: description + ' 목록 열기', toggle: false, item: false }
+        : { id, name, description, toggle: TOGGLES.has(id), item: false };
+    }
+    if (!split && Object.hasOwn(ITEMS, id)) { const [name, description] = ITEMS[id]; return { id, name, description, toggle: false, item: true }; }
+    return null;
+  }
+  function apply(scope) {
+    for (const element of scope.querySelectorAll('*')) {
+      const found = entry(element.getAttribute('data-cy'));
+      if (!found) continue;
+      const visible = found.item ? shown(element).trim() : '';
+      let active = false;
+      if (found.toggle) {
+        const nativePressed = element.hasAttribute('aria-pressed') && !element.hasAttribute('data-kin-pressed');
+        active = nativePressed ? element.getAttribute('aria-pressed') === 'true'
+          : (element.getAttribute('class') || '').split(/\s+/).includes(ACTIVE);
+        if (!nativePressed) { put(element, 'aria-pressed', String(active)); put(element, 'data-kin-pressed', ''); }
+      }
+      put(element, 'aria-label', visible || found.name);
+      put(element, 'title', found.description + (active ? ' · 사용 중' : ''));
+      // viewer-tech-note.js의 Zoom 진입 보완이 정리할 때 이 이름을 자기 것으로 알고 지우지 않게 표시한다.
+      put(element, 'data-kin-tool-label', found.id);
+    }
+  }
+  return { PRIMARY, ITEMS, TOGGLES, entry, apply };
+})();
 
 /** Product branding only; loaded-image identity owns clinical window titles. */
 function KinViewerBrand({ React }) {
@@ -41,7 +128,9 @@ function KinViewerBrand({ React }) {
     // 메뉴 경계는 이 로고(#kin-viewer-brand)를 품은 머리글이다. 아래 CSS가 865f064부터 같은 선택자로 머리글과 그 안의
     // 오른쪽 드롭다운(.absolute.right-0)을 칠하므로 그 기준을 따른다. 머리글 밖(판독문·검사 설명·영상 주석)의 About은
     // 주변에 Preferences가 있어도 순회하지 않는다. 머리글을 못 찾으면 아무것도 숨기지 않는다(About이 남는 쪽으로 실패).
+    // 설정 항목은 아래에서 Viewer Settings로 이름이 바뀌므로 두 이름 모두 설정 항목으로 읽는다.
     const ABOUT_TITLES = new Set(['About', 'About OHIF Viewer']);
+    const SETTINGS_TITLES = new Set(['Preferences', 'Viewer Settings']);
     const menuScope = () => document.getElementById('kin-viewer-brand')?.closest('.bg-secondary-dark.z-20') || null;
     // 행의 이름은 아이콘 svg(<title> 포함)를 뺀 글자 전체다. 후손 어딘가의 한 글자 조각이 아니라 행 전체가 이름과 같아야 한다.
     const labelOf = node => node.nodeType === Node.ELEMENT_NODE
@@ -52,7 +141,7 @@ function KinViewerBrand({ React }) {
       scope.querySelectorAll('*').forEach(row => {
         if (row.dataset.kinRemoved === 'about' || !ABOUT_TITLES.has(labelOf(row).trim())) return;
         const peers = [...row.parentElement.children].filter(peer => peer !== row && peer.localName === row.localName);
-        if (!peers.some(peer => labelOf(peer).trim() === 'Preferences')) return;
+        if (!peers.some(peer => SETTINGS_TITLES.has(labelOf(peer).trim()))) return;
         row.style.setProperty('display', 'none', 'important');
         row.setAttribute('inert', '');
         row.setAttribute('aria-hidden', 'true');
@@ -60,37 +149,48 @@ function KinViewerBrand({ React }) {
       });
     };
 
-    // 화면에 노출되는 업스트림 제품명은 중립화한다. 머리글 안의 About 제목은 위 판별이 맡으므로 이름을 바꾸지 않는다
-    // (바꾸면 Preferences가 늦게 붙을 때 더는 About으로 읽히지 않는다).
-    const replaceBrandText = (root, scope) => {
-      [root, ...root.querySelectorAll('*')].forEach(element => {
+    // S5-UI5 (VUI-08). 업스트림 제품명 치환과 설정 항목 이름 바꾸기는 제품 chrome, 곧 로고 머리글 안의 톱니 드롭다운
+    // (.absolute.right-0 — 865f064부터 아래 CSS가 칠하는 같은 경계)에서만 한다. 영상·패널·알림·모달·판독/검사 문자열은 환자명·
+    // 시리즈 설명·표식에 "OHIF"·"Foundation" 같은 글자가 있어도 원문 그대로 두고, 머리글 안이라도 드롭다운 밖(환자 정보 등)은
+    // 건드리지 않는다. 로딩·CPU fallback·cross-origin 경고와 라이선스 원문도 드롭다운 밖이라 바꾸지 않는다. 드롭다운을 못 찾으면
+    // 아무것도 바꾸지 않는다(원문이 남는 쪽으로 실패). 바꾼 글자는 다시 규칙에 걸리지 않으므로 메뉴를 다시 만들어도 한 번만 바뀐다.
+    // 머리글 안의 About 제목은 위 판별이 맡으므로 이름을 바꾸지 않는다(바꾸면 설정 항목이 늦게 붙을 때 더는 About으로 읽히지 않는다).
+    const replaceBrandText = scope => {
+      scope.querySelectorAll('*').forEach(element => {
         if (element.childElementCount) return;
+        const menu = element.closest('.absolute.right-0');
+        if (!menu || menu === scope || !scope.contains(menu)) return;
         const text = element.textContent?.trim();
-        if (!text) return;
-        if (ABOUT_TITLES.has(text) && scope?.contains(element)) return;
+        if (!text || ABOUT_TITLES.has(text)) return;
+        // VUI-05: 톱니 메뉴의 Preferences는 표시 이름만 Viewer Settings로 바꾼다. 항목·모달·포커스 복귀는 뷰어의 것이다.
+        if (text === 'Preferences') { element.textContent = 'Viewer Settings'; return; }
         if (/OHIF|Open Health Imaging Foundation/i.test(text)) {
           element.textContent = text
             .replace(/Open Health Imaging Foundation/gi, '업스트림 오픈소스 프로젝트')
+            .replace(/OHIF Viewer/gi, KIN_VIEWER_PRODUCT)
             .replace(/OHIF/gi, '업스트림');
         }
       });
     };
     // 행 이름은 형제 행과 라벨이 모두 붙어야 판별되므로, 머리글 안의 변경(행·라벨 추가, 글자 변경)이 있으면 추가된 노드만이
-    // 아니라 머리글 전체를 다시 본다. 머리글이 새로 붙은 경우도 포함한다.
+    // 아니라 머리글 전체를 다시 본다. 머리글이 새로 붙은 경우도 포함한다. 도구막대 버튼의 켜짐은 class로만 바뀌므로 class
+    // 변경도 본다. 여기서 쓰는 속성(aria-*·title·data-kin-*)은 관찰 대상이 아니고 글자는 한 번만 바뀌므로 스스로 되풀이하지 않는다.
     const touchesScope = (scope, record) => {
       const target = record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement;
       return !!target && scope.contains(target) || [...record.addedNodes].some(node => node.contains?.(scope));
     };
+    const refresh = scope => {
+      hideAboutRows(scope);
+      replaceBrandText(scope);
+      kinViewerToolbarLabels.apply(scope);
+    };
     const initialScope = menuScope();
-    if (initialScope) hideAboutRows(initialScope);
-    replaceBrandText(document.body, initialScope);
+    if (initialScope) refresh(initialScope);
     const observer = new MutationObserver(records => {
       const scope = menuScope();
-      if (scope && records.some(record => touchesScope(scope, record))) hideAboutRows(scope);
-      records.forEach(record => record.addedNodes.forEach(node =>
-        node.nodeType === Node.ELEMENT_NODE && replaceBrandText(node, scope)));
+      if (scope && records.some(record => touchesScope(scope, record))) refresh(scope);
     });
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class'] });
 
     document.title = KIN_VIEWER_DEFAULT_TITLE;
 
@@ -120,6 +220,15 @@ function KinViewerBrand({ React }) {
     #root > div > .bg-secondary-dark.z-20:has(#kin-viewer-brand) button.bg-primary-light {
       color: #071528 !important;
       background-color: var(--kin-accent) !important;
+    }
+    /* S5-UI5 (VUI-04): 켜진 도구는 색에 더해 안쪽 테두리와 아래 막대로 구분하고, 키보드 초점은 바깥 윤곽선으로 따로 둔다. */
+    #root > div > .bg-secondary-dark.z-20:has(#kin-viewer-brand) button.bg-primary-light,
+    #root > div > .bg-secondary-dark.z-20:has(#kin-viewer-brand) button[aria-pressed="true"] {
+      box-shadow: inset 0 0 0 2px #E8F1FF, inset 0 -4px 0 0 #071528 !important;
+    }
+    #root > div > .bg-secondary-dark.z-20:has(#kin-viewer-brand) button:focus-visible {
+      outline: 2px solid #facc15 !important;
+      outline-offset: 2px;
     }
     #root > div > .bg-secondary-dark.z-20:has(#kin-viewer-brand) .absolute.right-0 .text-primary-active {
       color: var(--kin-link) !important;

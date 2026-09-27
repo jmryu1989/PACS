@@ -408,7 +408,8 @@ window.kinViewerTechNote=function(services,session=null){
     function disposeNativeFocus(){
       if(window.kinViewerFocusNativeToolbar===focusNativeToolbar)delete window.kinViewerFocusNativeToolbar;
       nativeFocusStyle.remove();
-      for(const [target,label] of nativeLabels)if(target.getAttribute('aria-label')===label)target.removeAttribute('aria-label');
+      // S5-UI5: a name the viewer's toolbar labels (config/ohif.js kinViewerToolbarLabels) also gave this button is theirs to keep.
+      for(const [target,label] of nativeLabels)if(target.getAttribute('aria-label')===label&&!target.hasAttribute('data-kin-tool-label'))target.removeAttribute('aria-label');
       nativeLabels.clear();
     }
     if(window.top!==window){
