@@ -1063,8 +1063,11 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         summary = self.page.locator("#questions-summary")
         self.assertEqual(("Questions", "이 검사에 대한 질문과 답변을 엽니다. 연 뒤에만 서버에서 읽습니다."),
                          (summary.text_content(), summary.get_attribute("title")))
-        # After Key Images, the viewer line and the comparison place: the section is the last of the detail panel.
-        self.assertEqual("questions", self.page.evaluate("() => document.querySelector('#detail').lastElementChild.id"))
+        # After Key Images, the viewer line and the comparison place: in the integrated Home (S5-U4b+U4c) the
+        # section is second to last and S5-U4c's Image Requests closes the detail panel.
+        self.assertEqual(["questions", "image-requests"], self.page.evaluate(
+            "() => { const last = document.querySelector('#detail').lastElementChild;"
+            " return [last.previousElementSibling.id, last.id]; }"))
         self.settle()
         self.assertEqual([], self.requests(), "selecting studies reads no question until the section is opened")
 
