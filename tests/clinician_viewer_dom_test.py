@@ -37,8 +37,8 @@ Findings, Job and Tech Note modules instead):
       Control: the same file without the report-version pin paints the mixed pages.
   07  A->B->A across the comparison study: a late answer for A never paints while A's newer read is pending, nor
       over the prior. Control: the same file with only the UID check paints it.
-  08  (F01) the viewer's own authoring paths are closed for a clinician-only document: the Measurements split button
-      and every authoring item of More Tools leave the toolbar (viewing items stay and run); every authoring tool is
+  08  (F01) the viewer's own authoring paths are closed for a clinician-only document: the Measurements split button,
+      Capture (S5-UI5) and every authoring item of More Tools leave the toolbar (viewing items stay and run); every authoring tool is
       refused through the toolbar command, the hotkey command, the tool group itself and a tool group created later,
       and a tool activated around the guard is taken down at once; only viewing tools stay Active/Passive (drawn marks
       stay Enabled) and no mark is drawn; the annotation menu, label/measurement edits, the arrow text prompt and the
@@ -142,6 +142,10 @@ Findings, Job and Tech Note modules instead):
       list, no module, no mark or account control. Without a logout the same re-entry works. Control: the file at fix7 (Astra's
       reproduction: the writer document asks /me three times, reads its author list and draws; the clinician-only one asks /me
       twice and reads its final list).
+  24  (S5-UI5 F#4) Capture (showDownloadViewportModal: a PNG of the screen saved in this browser, no server record or check) is
+      a screen policy: not offered while /me is held, given back in its place (between Window / Level and Layout) by the late
+      writer answer and pressed there, and not offered to a clinician-only document, also after a mode re-entry. test_13's
+      matrix carries it as the capture row. Control: the same file without the Capture clause offers it to the clinician.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is S5-U1b (tests/clinician_read_live.py, hosted synthetic stack only).
@@ -371,7 +375,9 @@ LATER = ["kin.viewer-findings", "kin.viewer-layout", "kin.viewer-jobs", "kin.vie
 # Pinned longitudinal mode (modes/longitudinal toolbarButtons + moreTools, initToolGroups); see VIEWER_HARNESS.
 PRIMARY_SECTION = ["MeasurementTools", "Zoom", "Pan", "TrackballRotate", "WindowLevel", "Capture", "Layout", "Crosshairs",
                    "MoreTools"]
-VIEW_SECTION = [x for x in PRIMARY_SECTION if x != "MeasurementTools"]
+# S5-UI5 (F#4): Capture (showDownloadViewportModal, a PNG of the screen saved in this browser, no server counterpart) leaves
+# with the Measurements split button wherever authoring is closed.
+VIEW_SECTION = [x for x in PRIMARY_SECTION if x not in ("MeasurementTools", "Capture")]
 MORE_TOOLS = ["Reset", "rotate-right", "flipHorizontal", "ImageSliceSync", "ReferenceLines", "ImageOverlayViewer",
               "StackScroll", "invert", "Probe", "Cine", "Angle", "CobbAngle", "Magnify", "CalibrationLine", "TagBrowser",
               "AdvancedMagnify", "UltrasoundDirectionalTool", "WindowLevelRegion"]
@@ -405,6 +411,7 @@ VIEWER_STATE_MATRIX = {
     "go_to_image": (False, False, True, True, True, False, False, False, False),
     # Write and mark entry points: True = works in that state, False = not offered or refused (nothing drawn, sent or mounted).
     "toolbar_offer": WRITER_ONLY,        # the Measurements split button and the authoring items of More Tools
+    "capture": WRITER_ONLY,              # Capture offered in the primary section and its press reaching showDownloadViewportModal
     "toolbar_press": WRITER_ONLY,        # a press on the rendered toolbar (Bidirectional), then a primary drag
     "toolbar_command": WRITER_ONLY,      # setToolActiveToolbar over every tool group (ArrowAnnotate), then a drag
     "hotkey": WRITER_ONLY,               # the setToolActive command a hotkey runs (RectangleROI), then a drag
@@ -800,6 +807,8 @@ PROBE_WRITES = """async authoring => {
   from = synEdits.length; const m = synServices.measurementService;
   m.update('syn-uid', {}, true); m.toggleLockMeasurement('syn-uid');
   seen.measurement_panel = JSON.stringify(synEdits.slice(from)) === JSON.stringify([['update', 'syn-uid', true], ['lock', 'syn-uid']]);
+  from = synNative.length;
+  seen.capture = bar.primary.includes('Capture') && synClick('Capture') === 'ran' && synNative.slice(from).includes('view showDownloadViewportModal');
   seen.sr = [await synSR('storeMeasurements'), await synSR('downloadReport')];
   return seen; }"""
 LAYOUT = """() => { const p = document.querySelector('#kin-viewer-layout');
@@ -889,6 +898,8 @@ REVERSIBLE = "    ended = false;\n"
 # The authoring policy as it was at R-002: closed only once clinician-only, and no clean-up of marks made before that.
 R002_POLICY = "    const nativeAuthoringClosed = () => readOnly();\n"
 DROP_MARKS = "enforceToolbar(); dropLocalMarks(); } }"
+# test_24 control (S5-UI5 F#4): Capture joins the toolbar trim through this clause of the authoring rule.
+CAPTURE_RULE = "SCREEN_EXPORT.includes(name) || "
 # The final check as it was at R-002: behind the frame identification.
 FRAME_FREE_CHECK = ("      if (readOnly()) { frameMatch(r); recheckShown(); }\n"
                     "      // Switching display sets briefly removes the viewport. Mode exit, not\n"
@@ -1011,6 +1022,8 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                                         (ASKED, "    const asked = (ticket, seq) => valid(ticket) && seq === readSequence;\n", 1)],
                                "config/ohif.js"),
             "policy-off": variant(CONFIG, [(POLICY, "    const nativeAuthoringClosed = () => false;\n", 1)], "config/ohif.js"),
+            # test_24: the trim rule without Capture (S5-UI5 F#4), as before this unit.
+            "capture-kept": variant(CONFIG, [(CAPTURE_RULE, "", 1)], "config/ohif.js"),
             "gate-as-before": variant(CONFIG, [(DECIDE, OLD_DECIDE, 1),
                                                (NOTE_CONNECT, "if(!active||state==='loading'||state==='ready')return;", 1)],
                                       "config/ohif.js"),
@@ -1825,6 +1838,10 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         bar = self.page.evaluate("synToolbar()")
         self.assertEqual((VIEW_SECTION, VIEW_MORE, "Reset"), (bar["primary"], bar["more"], bar["morePrimary"]))
         self.assertNotIn("MeasurementTools", bar["buttons"])
+        # S5-UI5 (F#4): no Capture either; a press on it finds nothing and the screen PNG dialog never opens.
+        self.assertNotIn("Capture", bar["buttons"])
+        self.assertEqual(["missing", []], self.page.evaluate(
+            "[synClick('Capture'), synNative.filter(x => x === 'view showDownloadViewportModal')]"))
         # Only viewing tools stay Active or Passive in any tool group; the others only show what is drawn (Enabled).
         for group in ALL_GROUPS:
             with self.subTest(group=group):
@@ -1885,6 +1902,8 @@ class ClinicianViewerDOMTest(unittest.TestCase):
           synServices.measurementService.update('syn-uid', {}, true); }""")
         self.assertEqual(["ArrowAnnotate"], self.page.evaluate("synMarks()"))
         self.assertEqual(["add ArrowAnnotate", "menu", "label syn-uid"], self.page.evaluate("synNative"))
+        self.assertEqual("ran", self.page.evaluate("synClick('Capture')"), "the writer keeps Capture")
+        self.assertEqual("view showDownloadViewportModal", self.page.evaluate("synNative.at(-1)"))
         self.assertEqual([["update", "syn-uid", True]], self.page.evaluate("synEdits"))
         self.page.evaluate("synClearMarks()")
 
@@ -3417,6 +3436,43 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                                  (self.session(), self.me_requests - asked, self.page.evaluate("synAdd('ArrowAnnotate')")),
                                  "control: the logout was missed")
                 self.page.evaluate("synClearMarks()")
+
+    def test_24_capture_is_offered_to_a_confirmed_writer_only(self):
+        # S5-UI5 (F#4). Capture saves a PNG of the screen in this browser (showDownloadViewportModal); the server holds no record or
+        # permission check for it, so leaving it out is a screen policy: offered only while the document is a confirmed writer.
+        def capture():
+            return self.page.evaluate("""() => { const from = synNative.length, offered = synToolbar().primary.includes('Capture');
+              return [offered, synClick('Capture'), synNative.slice(from).filter(x => x === 'view showDownloadViewportModal').length]; }""")
+        # /me held: not a writer yet, no Capture.
+        self.hold_me = True
+        self.open_viewer()
+        self.wait_until(lambda: len(self.held_me) >= 3, "every /me held")
+        self.assertEqual(("unconfirmed", VIEW_SECTION, [False, "missing", 0]),
+                         (self.session(), self.page.evaluate("synToolbar()")["primary"], capture()))
+        # The late writer answer gives Capture back in its own place, between Window / Level and Layout.
+        self.release_me(RADIOLOGIST)
+        self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "writer panel")
+        self.assertEqual(("writer", PRIMARY_SECTION), (self.session(), self.page.evaluate("synToolbar()")["primary"]))
+        self.assertEqual([True, "ran", 1], capture())
+        # A clinician-only document: no Capture, and none after a mode re-entry either.
+        self.me, self.item_requests, self.cursors = CLINICIAN, [], {}
+        self.open_viewer()
+        self.wait_panel("ready", VA)
+        self.wait_until(lambda: self.page.evaluate("synToolbar()")["primary"] == VIEW_SECTION, "the trimmed toolbar")
+        self.assertEqual([False, "missing", 0], capture())
+        self.assertEqual(VIEW_SECTION, self.page.evaluate("() => { synReenter(); return synToolbar().primary; }"))
+        # The re-entered panel reads its final list again page by page (as in test_21); every page answered before the next page.
+        self.wait_panel("ready", VA)
+        self.settle()
+        self.assertEqual([False, "missing", 0], capture())
+        # Control: the same file without the Capture rule offers it to the clinician; the rest of the trim is as before.
+        self.me, self.item_requests, self.cursors = CLINICIAN, [], {}
+        self.open_viewer(self.config_variants["capture-kept"])
+        self.wait_panel("ready", VA)
+        self.settle()
+        self.assertEqual([x for x in PRIMARY_SECTION if x != "MeasurementTools"], self.page.evaluate("synToolbar()")["primary"],
+                         "control: the toolbar keeps Capture")
+        self.assertEqual([True, "ran", 1], capture(), "control: the clinician opens the screen PNG dialog")
 
 
 if __name__ == "__main__":
