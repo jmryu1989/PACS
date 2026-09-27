@@ -139,14 +139,24 @@ window.kinViewerJobs = function (services, model, session = null) {
         if (session?.ended()) throw new Error('세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.');
         let r;
         try { r = await send(); } catch (error) { if (!read || controller.signal.aborted || error?.name !== 'TypeError' || !live()) throw error; r = await send(); }
-        if (!live()) throw new Error('화면이 변경되었습니다.');
+        // S5-U2c fix4 (Astra S5-U2c-C-R-001 F01): an answer live() drops (this panel ended — mode exit too —, the document ended, or
+        // the viewer shows other studies) is still the document's for what it says about the login, also when it came in just
+        // before the abort that ended the panel: its 401 ends the login, and a /me answer of another account than the document's
+        // first one ends it (session.sameAccount: no verdict). An answer in use reaches the same below and through authenticate()'s
+        // answer(); a /me 403 refuses this account without ending the login and is read only then.
+        const drop = async value => {
+          if (r.status === 401) session?.refuse('unauthorized');
+          else if (url === '/me' && r.ok) session?.sameAccount(value === undefined ? await r.json().catch(() => null) : value);
+          return new Error('화면이 변경되었습니다.');
+        };
+        if (!live()) throw await drop();
         if (r.status === 401 || r.status === 403 && !foreign) {
           // A 401, or a 403 on /me, is the end of the document's login; a 403 on this study's Jobs still ends this panel only.
-          if (r.status === 401 || url === '/me') session?.refuse();
+          if (r.status === 401 || url === '/me') session?.refuse(r.status === 401 ? 'unauthorized' : 'forbidden');
           end(); throw new Error('검사 접근 권한을 확인할 수 없습니다.');
         }
         const value = await r.json().catch(() => null);
-        if (!live()) throw new Error('화면이 변경되었습니다.');
+        if (!live()) throw await drop(value);
         if (!r.ok || !value) { const e = new Error(typeof value?.message === 'string' ? value.message : '서버 연결을 확인한 뒤 다시 시도하세요.'); e.status = r.status; throw e; }
         return value;
       } finally { clearTimeout(timer); abort.signal.removeEventListener('abort', cancel); options.signal?.removeEventListener('abort', cancel); }
