@@ -2812,9 +2812,12 @@ class MainRequestDOMTest(Harness):
         self.release(route, {"statusCode": 503, "message": "SYN 요청 목록 응답 없음"}, 503)
         self.assertEqual((True, f"{M_OWN_FAILED}\nSYN 요청 목록 응답 없음 (HTTP 503)"), self.cancel_control())
         self.page.locator("#image-request-queue-reload").click()
-        self.wait_until(lambda: len(self.mine_calls) == 2, "the own-list read after Reload")
+        # Reload reads the own list again from its first page and follows the cursor (27-29 above make it two pages); both
+        # reads can land inside one poll, so wait for the whole set and then pin the exact sequence, not a count on the way.
+        self.wait_until(lambda: len(self.mine_calls) >= 3, "the own-list read after Reload")
         self.quiet()
-        self.assertEqual((False, M_TIPS["cancel"]), self.cancel_control())
+        self.assertEqual((["view=mine&state=all", "view=mine&state=all", "view=mine&state=all&cursor=SYN-CURSOR_3"],
+                          (False, M_TIPS["cancel"])), (self.mine_calls, self.cancel_control()))
 
         # An own-list answer that arrives after the session ended draws nothing.
         self.held_mine = []
