@@ -640,9 +640,10 @@
   // 본인 것만), #10(등록), #11(action cancel)만 쓰고 질문·consultation과 섞지 않는다(별도 칸·별도 읽기). 요청은 처리 상태의
   // 기록이라 이 화면은 영상을 옮기지 않는다 — Closed도 영상이 실제로 오갔다는 뜻이 아니어서 그 옆에 같은 말을 쓴다.
   // 칸은 고른 검사마다 접힌 summary 한 줄로 생기고 열 때만 읽는다: 접힌 칸에는 단추·제목이 없어 열지 않은 사람의 화면 구성과
-  // 탭 순서가 그대로이고, 목록에서 검사를 고를 때마다 서버를 부르지 않는다. 역할을 보고 컨트롤을 숨기지 않는다(U2a) — 거절은
-  // 서버의 코드·문구 그대로 보인다. 쓰던 글은 검사·요청별로 이 문서의 메모리에만 두어 A->B->A로 돌아오면 다시 보이고, 서버가
-  // 읽기를 거절했거나 다른 계정의 답이 오면(잠금) 이전 계정의 글이라 모두 버린다.
+  // 탭 순서가 그대로이고, 목록에서 검사를 고를 때마다 서버를 부르지 않는다. 역할을 보고 컨트롤을 숨기지 않는다(U2a) — 취소 칸은
+  // 역할이 아니라 내가 남긴 요청인지로만 정하고(requestMine), 거절은 서버의 코드·문구 그대로 보인다. 쓰기 응답은 보낸 그 쓰기의
+  // 적용 결과와 모두 맞을 때만 저장 결과로 받는다. 쓰던 글은 검사·요청별로 이 문서의 메모리에만 두어 A->B->A로 돌아오면 다시
+  // 보이고, 서버가 읽기를 거절했거나 다른 계정의 답이 오면(잠금) 이전 계정의 글이라 모두 버린다.
   const REQUEST = {
     summary: '이 검사에 남긴 외부영상·영상전송 요청을 엽니다. 연 뒤에만 서버에서 읽습니다.',
     hint: 'External Images는 다른 병원의 영상을 이 기관으로 가져오도록, Send Images는 이 검사의 영상을 다른 병원에 보내도록 '
@@ -795,14 +796,35 @@
     return items;
   }
 
-  /** 쓰기 응답 봉투(U4p §3.4): 이 requestId·검사·동작, 새 요청이면 id = requestId, 취소면 그 요청이어야 저장 결과로 받는다. */
+  /**
+   * 쓰기 응답 봉투(U4p §3.4)가 보낸 그 쓰기의 적용 결과인가: 이 requestId·검사·동작, 새 요청이면 id = requestId·null에서
+   * Requested·revision 1, 취소면 그 요청·보낼 때 읽은 상태에서 Cancelled·보낸 revision + 1, 보낸 종류, 서버가 쓰는 형식의
+   * 시각(at). 재전송 답(replayed)도 처음 적용한 그 결과라 지금 요청이 더 진행되었어도 같은 조건이다. 하나라도 어긋나면 저장
+   * 결과가 아니라 결과를 모르는 요청으로 둔다(같은 requestId로 Retry, 쓰던 글은 그대로).
+   */
   function requestApplied(reply, attempt) {
     const applied = reply && reply.applied;
+    const create = attempt.action === 'create';
+    const at = applied && typeof applied.at === 'string' ? new Date(applied.at) : null;
     return !!applied && typeof applied === 'object' && typeof reply.replayed === 'boolean'
       && typeof applied.requestId === 'string' && applied.requestId.toLowerCase() === attempt.requestId
       && applied.studyUid === attempt.uid && applied.action === attempt.action
-      && applied.id === (attempt.action === 'create' ? attempt.requestId : attempt.itemId)
-      && Number.isSafeInteger(applied.revision) && applied.revision >= 1 && REQUEST_STATES.includes(applied.to);
+      && applied.id === (create ? attempt.requestId : attempt.itemId) && applied.kind === attempt.kind
+      && applied.from === attempt.from && applied.to === (create ? 'Requested' : 'Cancelled')
+      && applied.revision === (create ? 1 : attempt.payload.revision + 1)
+      && !!at && !Number.isNaN(at.getTime()) && at.toISOString() === applied.at;
+  }
+
+  /**
+   * 이 요청을 남긴 사람이 로그인한 계정인가. 취소 칸은 이때만 둔다(U4p §5.2·RM-R7) — 혼합 역할(clinician+radiologist 등)은 이
+   * 화면에서도 기관의 다른 요청을 읽는다. DTO에는 sub가 없어(§3.3) 토큰에서 온 actor(/api/me, 감사 actor와 같은 값)를 요청자
+   * actor와 비교하고 표시 이름은 쓰지 않는다. 역할 목록은 읽지 않으므로(U2a) 관리자의 남의 요청 취소는 main.html 대기열에서 한다.
+   * 알 수 없으면 false다. 판정은 서버가 sub로 다시 한다.
+   */
+  function requestMine(item) {
+    const session = KinAuth.session();
+    const actor = session && session.state === 'approved' && typeof session.user === 'string' ? session.user : '';
+    return actor !== '' && !!item && !!item.requester && item.requester.actor === actor;
   }
 
   /** 상태명은 색과 함께 늘 글자로 쓰고(UXR-G-12), Closed에는 기록일 뿐이라는 문구를 바로 옆에 붙인다. */
@@ -1003,13 +1025,16 @@
     return li;
   }
 
-  /** 처리 중인 요청에만 취소 칸을 둔다. 끝난 요청이어도 쓰던 사유나 결과를 모르는 취소가 남았으면 그 칸은 그대로 둔다. */
+  /**
+   * 처리 중인 내 요청에만 취소 칸을 둔다(requestMine). 끝난 요청이어도 결과를 모르는 취소가 남았으면 그 칸은 그대로 둔다 —
+   * Retry·Discard가 그 칸에 있다.
+   */
   function updateRequestItem(uid, li, item) {
     li.dataset.state = item.state;
     li.querySelector('[data-part="info"]').replaceWith(requestInfo(item));
     const key = requestKey(uid, item.id);
     const compose = li.querySelector('.request-compose');
-    const keep = REQUEST_ACTIVE.includes(item.state) || requestAttempts.has(key);
+    const keep = REQUEST_ACTIVE.includes(item.state) && requestMine(item) || requestAttempts.has(key);
     if (keep && !compose) li.querySelector('[data-request-note]').before(requestCancelComposer(uid, item.id));
     else if (!keep && compose) compose.remove();
   }
@@ -1177,8 +1202,8 @@
       setRequestNote(key, 'failed', REQUEST.noRequestId);
       return;
     }
-    const attempt = { requestId: id, owner: [...owner], uid, itemId: null, action: 'create', key, draft, busy: false, unknown: false,
-      path: `/studies/${encodeURIComponent(uid)}/image-requests`,
+    const attempt = { requestId: id, owner: [...owner], uid, itemId: null, action: 'create', kind: draft.kind, from: null, key, draft,
+      busy: false, unknown: false, path: `/studies/${encodeURIComponent(uid)}/image-requests`,
       payload: { kind: draft.kind, counterparty: draft.counterparty, counterpartyInstitutionId: null, reason: draft.reason } };
     requestDrafts.set(key, draft);
     requestAttempts.set(key, attempt);
@@ -1194,6 +1219,7 @@
       setRequestNote(key, 'failed', REQUEST.noItem);
       return;
     }
+    if (!requestMine(item)) return;
     const draft = requestFields(wrap);
     if (!draft.note.trim() || draft.note.length > REQUEST_TEXT_MAX) {
       setRequestNote(key, 'failed', REQUEST.noCancelText);
@@ -1206,8 +1232,10 @@
       setRequestNote(key, 'failed', REQUEST.noRequestId);
       return;
     }
-    const attempt = { requestId, owner: [...owner], uid, itemId: id, action: 'cancel', key, draft, busy: false, unknown: false,
-      path: `/image-requests/${encodeURIComponent(id)}`, payload: { revision: item.revision, action: 'cancel', note: draft.note } };
+    // kind·from은 보낼 때 읽은 그 요청의 값이다. 적용 결과가 이 둘과 맞아야 저장 결과로 받는다(requestApplied).
+    const attempt = { requestId, owner: [...owner], uid, itemId: id, action: 'cancel', kind: item.kind, from: item.state, key, draft,
+      busy: false, unknown: false, path: `/image-requests/${encodeURIComponent(id)}`,
+      payload: { revision: item.revision, action: 'cancel', note: draft.note } };
     requestDrafts.set(key, draft);
     requestAttempts.set(key, attempt);
     transmitRequest(attempt);

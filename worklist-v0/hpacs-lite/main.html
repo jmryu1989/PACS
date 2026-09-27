@@ -820,6 +820,8 @@
     #image-request-pane { max-height: min(40vh, 320px); overflow: auto; border-top: 1px solid var(--kin-line2); }
     .image-request-bar { display: flex; align-items: center; gap: 6px; padding: 3px 8px; min-width: 0; white-space: nowrap; }
     #image-request-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--kin-muted); }
+    /* 요약이 말줄임으로 잘려도 Closed 옆 필수 문구는 이 줄에서 줄을 넘겨 끝까지 보인다. */
+    .image-request-closed-line { margin: 0; padding: 0 8px 3px; white-space: normal; overflow-wrap: anywhere; }
     :is(#image-request-queue, #image-request-p) :is(button, select) { font: inherit; font-size: 12px; min-height: 24px; padding: 2px 8px;
       border: 1px solid var(--kin-line2); border-radius: 3px; background: var(--kin-panel2); color: var(--kin-text); cursor: pointer; }
     :is(#image-request-queue, #image-request-p) button:disabled { opacity: .45; cursor: default; }
@@ -1666,6 +1668,7 @@
         body: body === undefined ? undefined : JSON.stringify(body),
       });
       if (res.status === 401) {
+        (window.kinOn401 || []).forEach(end => { try { end(); } catch (_) {} });
         await KinAuth.logout();
         throw Object.assign(new Error("세션이 만료되었습니다"), { status: res.status });
       }
@@ -3708,9 +3711,10 @@
     // applyRoleUi처럼 회색으로 두어 안내만 하고 판정은 서버가 한다(거절은 코드·문구 그대로 보인다).
     // 늦은 답은 대기열 쪽 번호(queueSeq), 단건 번호(detailSeq)와 연 요청 id, 판독 쪽 번호(readSeq)와 대상 검사로 버린다(A→B→A).
     // 서버가 읽기를 거절(403)했거나 다른 계정의 답·OWNER_CHANGED가 오면 이 문서에서는 더 읽거나 쓰지 않고(뷰어 세션의 거절과 같은
-    // 한 방향), 세션이 끝나면(로그아웃·다른 탭·401) 두 칸을 내린다. 쓰던 note는 요청별로 이 문서의 메모리에만 두고, 잠그거나 끝나면
-    // 이전 계정의 글이라 버린다.
-    function mountImageRequests({ api, owner, allowed, current, study, institution, can }) {
+    // 한 방향), 세션이 끝나면(로그아웃·다른 탭·401) 두 칸을 내린다. 401은 api()가 본 그 자리에서 window.kinOn401에 등록한 end()로
+    // 끝낸다 — 로그아웃 통지는 POST /auth/logout(제한 시간 없음)이 끝난 뒤에야 오므로 그것을 기다리면 그사이 도착한 이전 세션의
+    // 답이 그려진다. 쓰던 note는 요청별로 이 문서의 메모리에만 두고, 잠그거나 끝나면 이전 계정의 글이라 버린다.
+    function mountImageRequests({ api, owner, actor, allowed, current, study, institution, can }) {
       const TEXT = {
         queueHint: '소속 기관 검사에 임상의가 남긴 외부영상(External Images)·영상전송(Send Images) 요청입니다. 요청은 처리 상태의 '
           + '기록이며 이 칸은 영상을 옮기지 않습니다. 영상은 기존 경로에서 따로 옮기고, 처리를 마치면 Close에 처리 기록을 남기세요.',
@@ -3768,6 +3772,8 @@
       };
       const STATES = ['Requested', 'Accepted', 'Closed', 'Declined', 'Cancelled'];
       const ACTIVE = ['Requested', 'Accepted'];
+      // 동작마다 적용 결과가 가야 할 상태(U4p §5.2 전이표). 쓰기 응답의 to가 이것과 다르면 저장 결과로 받지 않는다.
+      const TARGET = { accept: 'Accepted', close: 'Closed', decline: 'Declined', cancel: 'Cancelled' };
       // API 값 image-transfer는 화면에 쓰지 않는다: transfer는 Connect 전송의 말이고 요청은 전송이 아니다(U4p R06).
       const KINDS = { 'external-image': 'External Images', 'image-transfer': 'Send Images' };
       const KIND_TIPS = { 'external-image': '다른 병원의 영상을 이 기관으로 가져오도록 한 요청입니다.',
@@ -3916,13 +3922,20 @@
         return rows;
       }
 
-      /** 쓰기 응답 봉투(U4p §3.4): 이 requestId·요청·검사·동작이어야 저장 결과로 받는다. */
+      /**
+       * 쓰기 응답 봉투(U4p §3.4)가 보낸 그 쓰기의 적용 결과인가: 이 requestId·요청·검사·동작, 보낼 때 읽은 종류와 상태(from),
+       * 동작의 목적 상태(to), 보낸 revision + 1, 서버가 쓰는 형식의 시각(at). 재전송 답(replayed)도 처음 적용한 그 결과라 지금
+       * 요청이 더 진행되었어도 같은 조건이다. 하나라도 어긋나면 저장 결과가 아니라 결과를 모르는 쓰기로 둔다(같은 requestId로 Retry).
+       */
       function appliedOf(answer, attempt) {
         const applied = answer && answer.applied;
+        const at = applied && typeof applied.at === 'string' ? new Date(applied.at) : null;
         return !!applied && typeof applied === 'object' && typeof answer.replayed === 'boolean'
           && typeof applied.requestId === 'string' && applied.requestId.toLowerCase() === attempt.requestId
           && applied.id === attempt.id && applied.studyUid === attempt.studyUid && applied.action === attempt.action
-          && Number.isSafeInteger(applied.revision) && applied.revision >= 1 && STATES.includes(applied.to);
+          && applied.kind === attempt.kind && applied.from === attempt.from && applied.to === TARGET[attempt.action]
+          && applied.revision === attempt.payload.revision + 1
+          && !!at && !Number.isNaN(at.getTime()) && at.toISOString() === applied.at;
       }
 
       /** 요청 한 건의 읽기 전용 줄들: 종류·상태·검사·요청자와 상대 기관·사유·처리자·note. */
@@ -4193,6 +4206,17 @@
         return !detailFailure && detailItem !== null && detailItem.id === detailId ? detailItem : null;
       }
 
+      /**
+       * 이 요청의 Cancel 안내(U4p §5.2·RM-R7): 관리자이거나, clinician 역할이 있고 이 요청을 남긴 본인일 때만. 역할만 보면
+       * 기관 전체 요청을 읽는 혼합 역할(clinician+radiologist 등)에게 남의 요청 취소가 열린다. DTO에는 sub가 없어(§3.3) 토큰에서 온
+       * actor(/api/me, 감사 actor와 같은 값)를 요청자 actor와 비교하고 표시 이름은 쓰지 않는다. 알 수 없으면 닫는다. 판정은 서버가
+       * sub로 다시 한다.
+       */
+      function canCancel(item) {
+        const me = actor();
+        return can('admin') || (can('clinician') && !!item && typeof me === 'string' && me !== '' && item.requester.actor === me);
+      }
+
       function renderDetail() {
         detailBox.hidden = detailId === null;
         if (detailId === null) return;
@@ -4220,7 +4244,7 @@
         // 같은 글이면 쓰지 않는다: 값을 다시 넣으면 치고 있던 커서·한글 조합이 끊긴다.
         if (noteField.value !== value) noteField.value = value;
         noteField.readOnly = attempt !== null;
-        const staff = can('technician'), canceller = can('admin') || can('clinician');
+        const staff = can('technician'), canceller = canCancel(loaded);
         const state = loaded ? loaded.state : null;
         for (const [action, control] of Object.entries(actions)) {
           const role = action === 'cancel' ? (canceller ? '' : TEXT.roleCancel) : staff ? '' : TEXT.roleStaff;
@@ -4244,6 +4268,7 @@
       function submit(action) {
         const id = detailId, loaded = loadedDetail(), who = owner();
         if (ended || lock !== null || id === null || !loaded || attempts.has(id) || !who) return;
+        if (action === 'cancel' && !canCancel(loaded)) return;
         const text = noteField.value, note = action === 'accept' ? '' : text;
         if (action !== 'accept' && (!note.trim() || note.length > NOTE_MAX)) {
           setNote(id, 'failed', TEXT.noNote);
@@ -4256,8 +4281,9 @@
           setNote(id, 'failed', TEXT.noRequestId);
           return;
         }
-        const attempt = { requestId, owner: who, id, studyUid: loaded.studyUid, action, text, busy: false, unknown: false,
-          payload: { revision: loaded.revision, action, note } };
+        // kind·from은 보낼 때 읽은 그 요청의 값이다. 적용 결과가 이 둘과 맞아야 저장 결과로 받는다(appliedOf).
+        const attempt = { requestId, owner: who, id, studyUid: loaded.studyUid, kind: loaded.kind, from: loaded.state, action, text,
+          busy: false, unknown: false, payload: { revision: loaded.revision, action, note } };
         drafts.set(id, text);
         attempts.set(id, attempt);
         transmit(attempt);
@@ -4354,6 +4380,12 @@
       const readList = make('ol');
       readList.id = 'image-request-read-list';
       readPane.append(make('p', 'image-request-muted', TEXT.readHint), readLine, readList);
+      // 접힌 줄에도 Closed 옆 문구가 보여야 한다(U4p §3.3). 요약은 말줄임으로 잘리므로 그 안에 두지 않고 바로 아래에 줄을 넘기는
+      // 한 줄로 둔다 — Closed가 있을 때만 서므로 Closed 없는 검사의 판독 화면 배치는 그대로다.
+      const readClosed = make('p', 'image-request-closed-line');
+      readClosed.dataset.part = 'closed';
+      readClosed.append(badge('Closed'));
+      readRoot.insertBefore(readClosed, readPane);
 
       function readCounts(items) {
         return STATES.map(state => [state, items.filter(item => item.state === state).length]).filter(([, n]) => n)
@@ -4370,6 +4402,7 @@
           ? TEXT.readCounts(readItems.length, readCounts(readItems)) : TEXT.readLoading;
         readSummary.textContent = text;
         readSummary.title = lock ? `${lock.text}\n${lock.detail}`.trim() : readFailure ? readDetail(readFailure) : text;
+        readClosed.hidden = !!lock || !!readFailure || !readItems || !readItems.some(item => item.state === 'Closed');
         readToggle.hidden = lock !== null;
         readToggle.textContent = readOpen ? 'Hide Requests' : 'Show Requests';
         readToggle.setAttribute('aria-expanded', String(readOpen && lock === null));
@@ -4533,6 +4566,8 @@
       } catch (_) {}
       window.addEventListener('storage', event => { if (event.key === 'kin-session-ended') end(); });
       window.addEventListener('pagehide', end);
+      // api()가 401을 본 그 자리에서(로그아웃을 기다리기 전) 동기로 부르는 목록이다. 칸마다 자기 end()를 넣는다(S5-U4b 등도 같은 목록).
+      (window.kinOn401 = window.kinOn401 || []).push(end);
       renderQueueList();
       renderQueue();
       renderDetail();
@@ -4543,6 +4578,7 @@
     try {
       imageRequests = mountImageRequests({ api,
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; },
+        actor: () => { const s = KinAuth.session(); return s?.state === 'approved' && typeof s.user === 'string' ? s.user : null; },
         allowed: () => !!sess && serverMode && !demoMode && !offline,
         current: () => selectedUid, study: uid => studies.find(s => s.uid === uid) || null,
         institution: id => institutions.find(i => i.id === id)?.name || null, can: role => KinAuth.has(role) });
