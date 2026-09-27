@@ -971,6 +971,8 @@ jobs:
         run: python3 tests/ops_backup_test.py
       - name: D-MEASURE2 session recovery and SR guard regressions (no containers)
         run: node --test tests/viewer_recovery_test.cjs tests/viewer_note_connection_test.cjs
+      - name: S5-UI6 viewer dock row keeps tabs and failures, settings in one collapsed disclosure
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dock-strip --cwd . --file worklist-v0/hpacs-lite/viewer-workspace-dock.js --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/viewer_dock_strip_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_dock_strip_test.cjs
       - name: Automatic prior calendar and identity boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
       - name: Compound search operators and malformed condition boundaries

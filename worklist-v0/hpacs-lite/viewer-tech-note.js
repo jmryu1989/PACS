@@ -440,7 +440,8 @@ window.kinViewerTechNote=function(services,session=null){
     function arrangeTools(){
       if(!live()||!owner)return;
       dock=window.KinViewerWorkspaceDock?.(window,{owner:()=>owner&&JSON.stringify(owner),allowed:()=>live()&&!!owner});
-      if(dock){arrange.hidden=true;dock.querySelector('nav').append(returnStatus);}
+      // Keep return outcomes beside the dock status, left of the right-aligned Dock Settings.
+      if(dock){arrange.hidden=true;const nav=dock.querySelector('nav');nav.insertBefore(returnStatus,nav.querySelector('#kin-dock-settings'));}
       else status.textContent='도구 영역을 연결하지 못했습니다. 다시 시도하세요.';
     }
     arrange.onclick=()=>{arrangeTools();const tab=dock?.querySelector('nav button[aria-controls="kin-viewer-layout"]');if(tab){if(tab.getAttribute('aria-expanded')!=='true')tab.click();tab.focus({preventScroll:true});}};
@@ -453,6 +454,10 @@ window.kinViewerTechNote=function(services,session=null){
     const shortcutActions={image:'Digit2',report:'Digit4',note:'Digit6',tools:'Digit7',nativeTools:'Digit9'};
     const toolHint=document.createElement('p');toolHint.textContent='Ctrl+Alt+7 측정 도구 · 8 비교 작업 도구 · 9 기본 영상 도구 (Tab 이동·Enter 선택) · 2 선택 영상 · 4 판독문으로';toolBar.append(toolHint);
     const returnStatus=document.createElement('span');returnStatus.id='kin-viewer-return-status';returnStatus.setAttribute('role','status');returnStatus.style.cssText='display:inline-block;margin-left:8px;font-size:12px';(host.querySelector(':scope > summary')||toolBar).append(returnStatus);
+    // Return to Report explains its own path (tooltip and description), so the dock row
+    // shows only outcomes and failures. A refused shortcut repeats the path as feedback.
+    const returnButton=toolButtons.get('Digit4'),returnHint=document.createElement('span');returnHint.id='kin-viewer-return-hint';returnHint.hidden=true;returnButton.after(returnHint);returnButton.setAttribute('aria-describedby',returnHint.id);
+    const describeReturn=text=>{returnHint.textContent=text;returnButton.title=text;};
     let readingChannel=null,pendingReturn=null,returnTimer=null,returnEpoch=0,returnSignature='';
     function refreshReturnSelection(event){
       // Camera events must not walk thousands of source images. Keep immediate
@@ -465,7 +470,7 @@ window.kinViewerTechNote=function(services,session=null){
       const cancelled=!!pendingReturn;readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;
       if(!live())return;
       const params=new URLSearchParams(location.hash.slice(1)),tokens=params.getAll('kin-reading-return'),token=tokens.length===1?tokens[0]:'';
-      if(!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(token)){returnStatus.textContent='판독 화면의 영상 새 창으로 열면 돌아갈 수 있습니다.';refresh();return;}
+      if(!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(token)){returnStatus.textContent='';describeReturn('판독 화면의 영상 새 창으로 열면 돌아갈 수 있습니다.');refresh();return;}
       try{
         readingChannel=new BroadcastChannel('kin-reading-return:'+token);
         readingChannel.onmessage=e=>{
@@ -475,12 +480,15 @@ window.kinViewerTechNote=function(services,session=null){
           const messages={focused:'판독문으로 돌아왔습니다.',ready:'판독문 위치를 준비했습니다. 목록 창을 선택하세요.',session:'세션이 바뀌었습니다. 판독 화면에서 다시 연결하세요.',context:'판독 대상이나 화면이 바뀌었습니다. 목록 창에서 확인하세요.',modal:'판독 화면의 대화상자를 닫은 뒤 다시 시도하세요.',unavailable:'판독문 입력란을 확인한 뒤 다시 시도하세요.'};
           if(Object.hasOwn(messages,m.result))finishReturn(messages[m.result]);
         };
-        returnStatus.textContent=cancelled?'이전 복귀 요청은 취소되었습니다. 다시 눌러 돌아가세요.':'연결된 판독문으로 · '+(shortcutMap?window.KinWorkspaceShortcuts.display(shortcutMap.report):'Control+Alt+4');
-      }catch(_){returnStatus.textContent='이 브라우저에서 창 연결을 사용할 수 없습니다. 목록 창을 직접 선택하세요.';}
+        const linked='연결된 판독문으로 · '+(shortcutMap?window.KinWorkspaceShortcuts.display(shortcutMap.report):'Control+Alt+4');
+        returnStatus.textContent=cancelled?'이전 복귀 요청은 취소되었습니다. 다시 눌러 돌아가세요.':'';describeReturn(linked);
+      }catch(_){returnStatus.textContent='이 브라우저에서 창 연결을 사용할 수 없습니다. 목록 창을 직접 선택하세요.';describeReturn(returnStatus.textContent);}
       refresh();
     }
     function returnToReading(){
-      if(!live()||!owner||!patientCopy.tracked()||!readingChannel||pendingReturn||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;
+      if(!live()||!owner||pendingReturn||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;
+      if(!readingChannel){returnStatus.textContent=returnHint.textContent;return;}
+      if(!patientCopy.tracked())return;
       const current=selectedStudy();if(!current){returnStatus.textContent='원본 검사가 확인되는 영상 칸을 선택한 뒤 돌아가세요.';return;}
       refreshReturnSelection();const request=crypto.randomUUID();pendingReturn={request,owner:JSON.stringify(owner),epoch:returnEpoch};returnStatus.textContent='판독 화면에 복귀 요청 중…';refresh();
       try{readingChannel.postMessage({type:'request',request,owner:pendingReturn.owner,studies,activeUid:current.uid});returnTimer=setTimeout(()=>finishReturn('판독 화면의 응답이 없습니다. 목록 창에서 영상 새 창을 다시 눌러 연결하세요.'),2500);}
@@ -526,7 +534,7 @@ window.kinViewerTechNote=function(services,session=null){
       const api=window.KinWorkspaceShortcuts;
       let storage;try{storage=window.localStorage;}catch(_){}
       shortcutMap=api.read(storage,JSON.stringify(owner));
-      if(readingChannel&&!pendingReturn)returnStatus.textContent='연결된 판독문으로 · '+api.display(shortcutMap.report);
+      if(readingChannel)describeReturn('연결된 판독문으로 · '+api.display(shortcutMap.report));
       for(const [action,code] of Object.entries(shortcutActions)){
         const target=action==='note'?button:toolButtons.get(code);
         target.setAttribute('aria-keyshortcuts',api.display(shortcutMap[action]));
