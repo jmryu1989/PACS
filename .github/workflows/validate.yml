@@ -182,10 +182,12 @@ jobs:
         timeout-minutes: 5
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-preview-citation-mutants --cwd . --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file worklist-v0/hpacs-lite/main.html --file tests/report_preview_citation_dom_test.py --file tests/report_preview_citation_mutants.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_preview_citation_mutants.py --out tmp/workspace-ui-ci/report-preview-citation-mutants/mutants.json
+      # -v: the module calls unittest.main() at the default verbosity, which prints only dots and "Ran N", so the
+      # record kept no case names and the run could not show which of the declared cases passed.
       - name: Selected CT display controls and session loader boundaries
         timeout-minutes: 3
         run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/display-scope --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-display-scope.js --file tests/viewer_display_scope_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_display_scope_dom_test.py
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/display-scope --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-display-scope.js --file tests/viewer_display_scope_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_display_scope_dom_test.py -v
       - name: Cell merge double-click ownership, panel and loader boundaries
         timeout-minutes: 3
         run: |
@@ -1211,6 +1213,17 @@ jobs:
             tmp/runtime-ci/gateway-retry-server/
             tmp/runtime-ci/study-identity-client/
             tmp/runtime-ci/study-identity-server/
+          if-no-files-found: error
+          retention-days: 7
+      # The list above names directories one by one and missed later record-run steps (display-scope, viewer-branding,
+      # viewer-toolbar-labels, dock-strip and others), whose command, exit and cases then reached no artifact. This one
+      # takes the whole root, as every other job's upload does; the list above keeps its name and paths.
+      - name: Synthetic runtime record-run evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-runtime-record-runs
+          path: tmp/runtime-ci/
           if-no-files-found: error
           retention-days: 7
   asr-engine:

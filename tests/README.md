@@ -673,6 +673,170 @@ production image tests for main, PRs and tags, recording the exact SHA/image ID.
 It does not deploy, publish a registry image or replace the 69+14 live/browser
 release gates and independent review. No production credentials are used in CI.
 
+Every `scripts/record-run.py --run-dir` in `validate.yml` sits under a path of an `if: always()` `actions/upload-artifact` step of the same job with `if-no-files-found: error`, so each record's `run.json`, `stdout.log` and `stderr.log` reach an artifact whatever the job's outcome. Every job uploads its whole record root except `runtime`, whose `synthetic-runtime-print-identity` names directories one by one and missed eleven of them; `synthetic-runtime-record-runs` uploads all of `tmp/runtime-ci/` (S5-CI2), and the older artifact keeps its name and paths. A unittest module at the default verbosity records only dots and `Ran N`, so the display-scope DOM step passes `-v`; the other record-run steps whose module or `-m unittest` command prints no case names are `identity-fields`, `hanging-protocols`, `cell-merge`, `images-only-loader`, `image-text-loader`, `three-d-cursor-dom` and `identity-position` under `tmp/workspace-ui-ci/`, and `binding-dom` and `orientation-basic-dom` under `tmp/vr-ci/`. The table is extracted from `validate.yml` at that commit (one row per run directory, with the artifacts that cover it); rebuild it from the workflow when a step changes rather than editing rows by hand.
+
+| Job | `--run-dir` | Artifact(s) | Step |
+|---|---|---|---|
+| `measurements` | `tmp/workspace-ui-ci/citation-vectors` | `synthetic-workspace-dom-results` | S3-U2a shared citation vectors against an independent rule |
+| `measurements` | `tmp/workspace-ui-ci/citation-migration` | `synthetic-workspace-dom-results` | S3-U2a additive citation migration, canonical bounds and leak boundary |
+| `measurements` | `tmp/workspace-ui-ci/structure-vectors` | `synthetic-workspace-dom-results` | S3-structured-report shared render vectors against an independent rule and the empty product catalog |
+| `measurements` | `tmp/workspace-ui-ci/structure-migration` | `synthetic-workspace-dom-results` | S3-structured-report additive migration, NULL-writing rules and leak boundary |
+| `measurements` | `tmp/workspace-ui-ci/study-observation` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
+| `measurements` | `tmp/workspace-ui-ci/study-arrivals-counts` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
+| `measurements` | `tmp/workspace-ui-ci/s4-anchors-report_cursor_insert_mutants` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
+| `measurements` | `tmp/workspace-ui-ci/s4-anchors-report_structure_mutants` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
+| `measurements` | `tmp/workspace-ui-ci/s4-anchors-report_preview_citation_mutants` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
+| `measurements` | `tmp/workspace-ui-ci/s4-anchors-report_version_citation_mutants` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
+| `measurements` | `tmp/workspace-ui-ci/s4-anchors-viewer_job_print_citation_mutants` | `synthetic-workspace-dom-results` | S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors |
+| `measurements` | `tmp/workspace-ui-ci/order-reconciliation-source` | `synthetic-workspace-dom-results` | S4-U2 order reconciliation vectors, wrong-rule adequacy and source pins |
+| `measurements` | `tmp/workspace-ui-ci/study-identity-source` | `synthetic-workspace-dom-results` | S4-U5 study identity vectors well-formedness, source pins and forbidden wording |
+| `measurements` | `tmp/workspace-ui-ci/gateway-receipt-source` | `synthetic-workspace-dom-results` | S4-U3 gateway receipt vectors, wrong-rule adequacy, agent error mapping and source pins |
+| `measurements` | `tmp/workspace-ui-ci/gateway-retry-source` | `synthetic-workspace-dom-results` | S4-U4 gateway retry vectors, wrong-rule adequacy, agent single-writer pins and source pins |
+| `measurements` | `tmp/workspace-ui-ci/gateway-pipeline-contract` | `synthetic-workspace-dom-results` | S4-EG1 gateway pipeline judge adequacy and harness pins |
+| `measurements` | `tmp/workspace-ui-ci/clinician-policy` | `synthetic-workspace-dom-results` | S5-U1a clinician-only default denial fixtures, route classification and role-list source pins |
+| `measurements` | `tmp/workspace-ui-ci/clinician-read-serializer` | `synthetic-workspace-dom-results` | S5-U1b clinician read serializer vectors against the TS source |
+| `measurements` | `tmp/workspace-ui-ci/admin-audit-attribution` | `synthetic-workspace-dom-results` | S5-U5b admin audit record-time attribution vectors, negative control and action-table completeness |
+| `measurements` | `tmp/workspace-ui-ci/identity-fields` | `synthetic-workspace-dom-results` | Image field positions and modality profile DOM integration |
+| `measurements` | `tmp/workspace-ui-ci/hanging-protocols` | `synthetic-workspace-dom-results` | Personal Hanging Protocol form and authenticated mount boundaries |
+| `measurements` | `tmp/workspace-ui-ci/image-thumbnails` | `synthetic-workspace-dom-results` | Individual image thumbnails identity and bounded page lifecycle |
+| `measurements` | `tmp/workspace-ui-ci/narrow-image-layout` | `synthetic-workspace-dom-results` | Narrow worklist row and image control hit targets |
+| `measurements` | `tmp/workspace-ui-ci/worklist-header` | `synthetic-workspace-dom-results` | S5-UI1 worklist header keeps Log out on screen and keyboard reachable |
+| `measurements` | `tmp/workspace-ui-ci/worklist-toolbar` | `synthetic-workspace-dom-results` | S5-UI2 worklist toolbar keeps one row of groups, every control and the page script |
+| `measurements` | `tmp/workspace-ui-ci/report-actions` | `synthetic-workspace-dom-results` | S5-UI3 report button rows keep every button in its declared section and the page script |
+| `measurements` | `tmp/workspace-ui-ci/study-arrivals` | `synthetic-workspace-dom-results` | Existing study arrivals and preserved reading inputs |
+| `measurements` | `tmp/workspace-ui-ci/order-reconciliation-dom` | `synthetic-workspace-dom-results` | S4-U2 order reconciliation display through the real poll, failure keep and offline seed exclusion |
+| `measurements` | `tmp/workspace-ui-ci/study-identity-dom` | `synthetic-workspace-dom-results` | S4-U5 DICOM Identity panel through the real poll and the correction paths, with the b6a317c controls |
+| `measurements` | `tmp/workspace-ui-ci/report-rebase` | `synthetic-workspace-dom-results` | Stale addendum refusal, approved-report pane and non-destructive rebase |
+| `measurements` | `tmp/workspace-ui-ci/report-citation-dom` | `synthetic-workspace-dom-results` | S3-U2b citation insertion ordering, late answers, modal busy and convergence |
+| `measurements` | `tmp/workspace-ui-ci/report-cursor-insert-dom` | `synthetic-workspace-dom-results` | S3-U6 cursor insertion position, retention, guards and identity DOM integration |
+| `measurements` | `tmp/workspace-ui-ci/report-cursor-insert-mutants` | `synthetic-workspace-dom-results` | S3-U6 cursor insertion browser mutants killed through the shipped-file overrides |
+| `measurements` | `tmp/workspace-ui-ci/report-dictation-input-dom` | `synthetic-workspace-dom-results` | S3-R14 recogniser-shaped text input parity, occupancy and structured refusals DOM |
+| `measurements` | `tmp/workspace-ui-ci/report-dictation-host-dom` | `synthetic-workspace-dom-results` | S3-ASR-U4 Dictate control, review pane, stale refusals and explicit Insert DOM (synthetic media and transport) |
+| `measurements` | `tmp/workspace-ui-ci/report-structure-dom` | `synthetic-workspace-dom-results` | S3-structured-report entry lifecycle, replace, guards, stale plan and empty catalog DOM |
+| `measurements` | `tmp/workspace-ui-ci/report-structure-mutants` | `synthetic-workspace-dom-results` | S3-structured-report client mutants killed through the shipped-file overrides |
+| `measurements` | `tmp/workspace-ui-ci/report-preview-citation-dom` | `synthetic-workspace-dom-results` | S3-U4 printed citation section lifecycle, terminal states and print re-read |
+| `measurements` | `tmp/workspace-ui-ci/report-preview-citation-mutants` | `synthetic-workspace-dom-results` | S3-U4 printed citation browser mutants killed through the shipped-file override |
+| `measurements` | `tmp/workspace-ui-ci/display-scope` | `synthetic-workspace-dom-results` | Selected CT display controls and session loader boundaries |
+| `measurements` | `tmp/workspace-ui-ci/cell-merge` | `synthetic-workspace-dom-results` | Cell merge double-click ownership, panel and loader boundaries |
+| `measurements` | `tmp/workspace-ui-ci/images-only` | `synthetic-workspace-dom-results` | Images Only fullscreen lifecycle and source preservation |
+| `measurements` | `tmp/workspace-ui-ci/images-only-loader` | `synthetic-workspace-dom-results` | Images Only config loader mode and session boundaries |
+| `measurements` | `tmp/workspace-ui-ci/image-text` | `synthetic-workspace-dom-results` | Image text visibility and source preservation |
+| `measurements` | `tmp/workspace-ui-ci/image-text-loader` | `synthetic-workspace-dom-results` | Image text config loader lifecycle |
+| `measurements` | `tmp/workspace-ui-ci/source-pdf` | `synthetic-workspace-dom-results` | Source PDF owner identity and popup lifecycle boundaries |
+| `measurements` | `tmp/workspace-ui-ci/three-d-cursor-dom` | `synthetic-workspace-dom-results` | Three-D cursor pick, marker origin and rollback ownership DOM integration |
+| `measurements` | `tmp/workspace-ui-ci/job-print-pages` | `synthetic-workspace-dom-results` | Saved comparison print page identity and pagination |
+| `measurements` | `tmp/workspace-ui-ci/job-print-citation-dom` | `synthetic-workspace-dom-results` | S3-U5 job print citation evidence DOM |
+| `measurements` | `tmp/workspace-ui-ci/job-print-citation-mutants` | `synthetic-workspace-dom-results` | S3-U5 job print citation evidence browser mutants |
+| `measurements` | `tmp/workspace-ui-ci/report-version-citation-dom` | `synthetic-workspace-dom-results` | S3-U5b report history citation DOM |
+| `measurements` | `tmp/workspace-ui-ci/report-version-citation-mutants` | `synthetic-workspace-dom-results` | S3-U5b report history citation browser mutants |
+| `measurements` | `tmp/workspace-ui-ci/window-manager` | `synthetic-workspace-dom-results` | Workspace window transition and identity DOM regressions |
+| `measurements` | `tmp/workspace-ui-ci/body-parts` | `synthetic-workspace-dom-results` | Worklist DICOM body-part search and saved-search DOM integration |
+| `measurements` | `tmp/workspace-ui-ci/identity-position` | `synthetic-workspace-dom-results` | Current and prior identity position and legacy display preferences |
+| `measurements` | `tmp/workspace-ui-ci/viewer-opening-focus-dom` | `synthetic-workspace-dom-results` | S4-U3 Image Opening close listener keeps focus moved after Done (old reproduced, stranded fallback, session end, mutant) |
+| `measurements` | `tmp/workspace-ui-ci/admin-member-roles-dom` | `synthetic-workspace-dom-results` | S5-U5a Members console role round trip, unknown-role passthrough and wording DOM |
+| `measurements` | `tmp/workspace-ui-ci/clinician-home-dom` | `synthetic-workspace-dom-results` | S5-U2a Clinician Home landing, final-report-first reads, A-B-A guard and list state DOM |
+| `measurements` | `tmp/workspace-ui-ci/clinician-viewer-dom` | `synthetic-workspace-dom-results` | S5-U2b Clinician read-only viewer, same-patient comparison, A-B-A and state DOM (01-13) |
+| `measurements` | `tmp/workspace-ui-ci/clinician-viewer-dom-2` | `synthetic-workspace-dom-results` | S5-U2b Clinician viewer clinician-only change, held work and session end DOM (14-18) |
+| `measurements` | `tmp/workspace-ui-ci/clinician-viewer-dom-3` | `synthetic-workspace-dom-results` | S5-U2b Clinician viewer document owner, real write modules and logout between modes DOM (19-) |
+| `measurements` | `tmp/workspace-ui-ci/clinician-timeline-dom` | `synthetic-workspace-dom-results` | S5-U3 Clinician patient timeline, identity conflict marker, A-B-A and state DOM |
+| `measurements` | `tmp/workspace-ui-ci/clinician-question-dom` | `synthetic-workspace-dom-results` | S5-U4b Clinician Home questions, requestId retry, A-B-A and session lock DOM (01-07) |
+| `measurements` | `tmp/workspace-ui-ci/clinician-question-dom-2` | `synthetic-workspace-dom-results` | S5-U4b Reading screen answer row, OQ-11 notice, Inbox, A-B-A and session lock DOM (11-17) |
+| `measurements` | `tmp/workspace-ui-ci/clinician-request-dom` | `synthetic-workspace-dom-results` | S5-U4c Image request screens, write envelope, refusals by code, A-B-A and session end DOM |
+| `measurements` | `tmp/workspace-ui-ci/admin-gateway-status-dom` | `synthetic-workspace-dom-results` | S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM |
+| `measurements` | `tmp/workspace-ui-ci/admin-metrics-dom` | `synthetic-workspace-dom-results` | S5-U6b Members console Operations metrics states, unknown never 0, A-B-A guard and wording DOM |
+| `measurements` | `tmp/workspace-ui-ci/admin-audit-dom` | `synthetic-workspace-dom-results` | S5-U5b Members console Audit / Security rows, withheld and not recorded, failure not empty, A-B-A guards DOM |
+| `volume-rendering` | `tmp/vr-ci/measurement-ci` | `synthetic-volume-rendering-results` | CI profile safeguards and artifact policy |
+| `volume-rendering` | `tmp/vr-ci/pure-vr` | `synthetic-volume-rendering-results` | Volume rendering, sculpt, and personal preset boundaries |
+| `volume-rendering` | `tmp/vr-ci/pure-volume-models` | `synthetic-volume-rendering-results` | Volume display, batch, crosshair, marks, curved MPR, orientation, job capture and preference models |
+| `volume-rendering` | `tmp/vr-ci/binding-dom` | `synthetic-volume-rendering-results` | VR source binding survives transient MPR layout readiness |
+| `volume-rendering` | `tmp/vr-ci/orientation-basic-dom` | `synthetic-volume-rendering-results` | MPR Basic Orthogonal stays distinct from Reset Planes |
+| `volume-rendering` | `tmp/vr-ci/execution-selection` | `synthetic-volume-rendering-results` | Confirm exact declared VR-only selection |
+| `volume-rendering` | `tmp/vr-ci/recipe-precision` | `synthetic-volume-rendering-results` | Volume batch recipe rounding precision |
+| `volume-mpr` | `tmp/mpr-ci/measurement-ci` | `synthetic-volume-mpr-results` | MPR profile isolation, bounded budget and artifact policy |
+| `volume-mpr` | `tmp/mpr-ci/curved-dom` | `synthetic-volume-mpr-results` | Curved MPR editing, stale results and restore rollback on the real panel |
+| `volume-mpr` | `tmp/mpr-ci/execution-selection` | `synthetic-volume-mpr-results` | Confirm exact declared crosshair, display and curved selection |
+| `volume-slab` | `tmp/slab-ci/measurement-ci` | `synthetic-volume-slab-results` | Slab profile isolation, bounded budget and artifact policy |
+| `volume-slab` | `tmp/slab-ci/execution-selection` | `synthetic-volume-slab-results` | Confirm exact declared projection, wheel, average-affine and MIP Viewer selection |
+| `volume-path` | `tmp/path-ci/measurement-ci` | `synthetic-volume-path-results` | Path profile isolation, bounded budget and artifact policy |
+| `volume-path` | `tmp/path-ci/path-dom` | `synthetic-volume-path-results` | 3D path editing, stale results, Go to Path Point and restore rollback on the real panel |
+| `volume-path` | `tmp/path-ci/execution-selection` | `synthetic-volume-path-results` | Confirm exact declared path and orientation selection |
+| `volume-batch` | `tmp/batch-ci/measurement-ci` | `synthetic-volume-batch-results` | Batch profile isolation, bounded budget and artifact policy |
+| `volume-batch` | `tmp/batch-ci/binding-dom` | `synthetic-volume-batch-results` | Batch preview keeps its recipe through render readiness transients on the real panel |
+| `volume-batch` | `tmp/batch-ci/execution-selection` | `synthetic-volume-batch-results` | Confirm exact declared batch preview, context, save and scout selection |
+| `volume-sync-preferences` | `tmp/syncpref-ci/measurement-ci` | `synthetic-volume-sync-preferences-results` | Sync and preferences profile isolation, bounded budget and artifact policy |
+| `volume-sync-preferences` | `tmp/syncpref-ci/preferences-layout-dom` | `synthetic-volume-sync-preferences-results` | Applied MPR mouse setting stays bound on a new layout on the real panel |
+| `volume-sync-preferences` | `tmp/syncpref-ci/sync-layout-dom` | `synthetic-volume-sync-preferences-results` | MPR synchronization choices stay on a Hanging Protocol three-plane layout on the real panel |
+| `volume-sync-preferences` | `tmp/syncpref-ci/execution-selection` | `synthetic-volume-sync-preferences-results` | Confirm exact declared MPR synchronization and preferences selection |
+| `volume-marks` | `tmp/marks-ci/measurement-ci` | `synthetic-volume-marks-results` | Marks profile isolation, bounded budget and artifact policy |
+| `volume-marks` | `tmp/marks-ci/progressive-dom` | `synthetic-volume-marks-results` | Armed 3D annotation pick is not previewed by progressive refinement on the real panel |
+| `volume-marks` | `tmp/marks-ci/execution-selection` | `synthetic-volume-marks-results` | Confirm exact declared manual 3D annotation and annotated output selection |
+| `volume-mip-voi` | `tmp/mipvoi-ci/measurement-ci` | `synthetic-volume-mip-voi-results` | MIP VOI profile isolation, bounded budget and artifact policy |
+| `volume-mip-voi` | `tmp/mipvoi-ci/execution-selection` | `synthetic-volume-mip-voi-results` | Confirm exact declared MIP Viewer VOI Slab selection |
+| `volume-mip-job` | `tmp/mipjob-ci/measurement-ci` | `synthetic-volume-mip-job-results` | MIP Job profile isolation, bounded budget and artifact policy |
+| `volume-mip-job` | `tmp/mipjob-ci/execution-selection` | `synthetic-volume-mip-job-results` | Confirm exact declared MIP Viewer Job selection |
+| `volume-mip-batch` | `tmp/mipbatch-ci/measurement-ci` | `synthetic-volume-mip-batch-results` | MIP Batch profile isolation, bounded budget and artifact policy |
+| `volume-mip-batch` | `tmp/mipbatch-ci/execution-selection` | `synthetic-volume-mip-batch-results` | Confirm exact declared MIP Viewer Batch selection |
+| `volume-mip-output` | `tmp/mipout-ci/measurement-ci` | `synthetic-volume-mip-output-results` | MIP output profile isolation, bounded budget and artifact policy |
+| `volume-mip-output` | `tmp/mipout-ci/execution-selection` | `synthetic-volume-mip-output-results` | Confirm exact declared MIP Viewer output selection |
+| `volume-mip-orient` | `tmp/miporient-ci/measurement-ci` | `synthetic-volume-mip-orient-results` | MIP orientation profile isolation, bounded budget and artifact policy |
+| `volume-mip-orient` | `tmp/miporient-ci/execution-selection` | `synthetic-volume-mip-orient-results` | Confirm exact declared MIP Viewer orientation selection |
+| `hanging-protocols` | `tmp/hp-ci/measurement-ci` | `synthetic-hanging-protocols-results` | Hanging protocol profile isolation, bounded budget and artifact policy |
+| `hanging-protocols` | `tmp/hp-ci/execution-selection` | `synthetic-hanging-protocols-results` | Confirm exact declared invariants, worklist and hanging protocol selection |
+| `hanging-protocols` | `tmp/hp-ci/dictation-refusal-oracle` | `synthetic-hanging-protocols-results` | Dictation refusal oracle vectors and tagged mutants (S3-ASR-U5, stdlib only) |
+| `cell-merge` | `tmp/cell-merge-ci/measurement-ci` | `synthetic-cell-merge-results` | Cell merge profile isolation, bounded budget and artifact policy |
+| `cell-merge` | `tmp/cell-merge-ci/execution-selection` | `synthetic-cell-merge-results` | Confirm exact declared cell merge selection |
+| `study-arrivals` | `tmp/study-arrivals-ci/measurement-ci` | `synthetic-study-arrivals-results` | Study arrivals profile isolation, bounded budget and artifact policy |
+| `study-arrivals` | `tmp/study-arrivals-ci/execution-selection` | `synthetic-study-arrivals-results` | Confirm exact declared study arrivals selection |
+| `u2b-regressions` | `tmp/u2b-regressions-ci/measurement-ci` | `synthetic-u2b-regressions-results` | U2b regressions profile isolation, bounded budget and artifact policy |
+| `u2b-regressions` | `tmp/u2b-regressions-ci/execution-selection` | `synthetic-u2b-regressions-results` | Confirm exact declared U2b regression selection |
+| `runtime` | `tmp/runtime-ci/job-print-identity` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Saved comparison print identity model |
+| `runtime` | `tmp/runtime-ci/report-rebase-model` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Report base-version origin, commit failure routing and refused-head model |
+| `runtime` | `tmp/runtime-ci/report-citation-client` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S3-U2b client citation comparator, R5 template and per-study state against the shared vectors |
+| `runtime` | `tmp/runtime-ci/report-cursor-insert` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S3-U6 cursor placement rule, guard spans and the insertion wiring |
+| `runtime` | `tmp/runtime-ci/report-structure-client` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S3-structured-report client rules, keep-list state and the wiring coordinates |
+| `runtime` | `tmp/runtime-ci/dictation-session` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S3-ASR-U1a dictation session review and stale insertion protection (pure only) |
+| `runtime` | `tmp/runtime-ci/report-preview-citation` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S3-U4 printed citation evidence wording, terminal states and answer validity |
+| `runtime` | `tmp/runtime-ci/job-print-citation` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S3-U5 job print citation targets, failure mapping and the shared pure record |
+| `runtime` | `tmp/runtime-ci/editor-link` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Editor link model |
+| `runtime` | `tmp/runtime-ci/three-d-cursor-model` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Three-D cursor geometry model |
+| `runtime` | `tmp/runtime-ci/three-d-cursor-loader` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Three-D cursor loader flag and pane candidate model |
+| `runtime` | `tmp/runtime-ci/finding-link-model` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Finding link state, exact-frame navigation and findings store model |
+| `runtime` | `tmp/runtime-ci/study-arrivals` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Existing study instance and series arrival model |
+| `runtime` | `tmp/runtime-ci/order-reconciliation-client` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S4-U2 order reconciliation client model against the shared vectors |
+| `runtime` | `tmp/runtime-ci/study-identity-client` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S4-U5 study identity client model, label table and summary rows against the shared vectors |
+| `runtime` | `tmp/runtime-ci/display-scope` | `synthetic-runtime-record-runs` | CT display target selection, atomic rollback, panel scope text and CT preset buttons |
+| `runtime` | `tmp/runtime-ci/cell-merge` | `synthetic-runtime-record-runs` | Cell merge geometry, restore oracle and refusal model |
+| `runtime` | `tmp/runtime-ci/images-only` | `synthetic-runtime-record-runs` | Images Only fullscreen owner and source lifecycle model |
+| `runtime` | `tmp/runtime-ci/image-text` | `synthetic-runtime-record-runs` | Image text visibility source lifecycle model |
+| `runtime` | `tmp/runtime-ci/source-pdf-key` | `synthetic-runtime-record-runs` | Native PDF source key and mode lifecycle model |
+| `runtime` | `tmp/runtime-ci/viewer-branding` | `synthetic-runtime-record-runs` | S5-UI4 viewer settings menu without About, upstream wording neutralized and the login licence notice |
+| `runtime` | `tmp/runtime-ci/viewer-toolbar-labels` | `synthetic-runtime-record-runs` | S5-UI5 viewer toolbar names, Korean descriptions, pressed state and the Capture trim rule |
+| `runtime` | `tmp/runtime-ci/hanging-protocols` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Personal Hanging Protocol shared schema and owner model |
+| `runtime` | `tmp/runtime-ci/dock-strip` | `synthetic-runtime-record-runs` | S5-UI6 viewer dock row keeps tabs and failures, settings in one collapsed disclosure |
+| `runtime` | `tmp/runtime-ci/findings-migration` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Findings migration preservation, restrict, action CHECK and synthetic dump/restore |
+| `runtime` | `tmp/runtime-ci/clinician-question-service` | `synthetic-runtime-record-runs` | S5-U4a compiled question service, StudyAccess source reads before locks, receipts and audit keys |
+| `runtime` | `tmp/runtime-ci/image-request-service` | `synthetic-runtime-record-runs` | S5-U4c compiled image request service, StudyAccess source reads before locks, receipts, lock order and audit keys |
+| `runtime` | `tmp/runtime-ci/report-stale-draft` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Compiled stale-draft addendum guard and draft base-version boundaries |
+| `runtime` | `tmp/runtime-ci/report-citations` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Compiled citation attestation, carry-forward, limits and guarded read |
+| `runtime` | `tmp/runtime-ci/report-structure` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Compiled structured-entry rules, the three write paths, the explicit clear and the read |
+| `runtime` | `tmp/runtime-ci/order-reconciliation-server` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S4-U2 compiled order reconciliation rule and the real list path over a fake store |
+| `runtime` | `tmp/runtime-ci/gateway-receipt-server` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S4-U3 compiled receipt rule, the real receipt route and the own-row list surface over a fake store |
+| `runtime` | `tmp/runtime-ci/gateway-retry-server` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S4-U4 compiled retry rules, the real member request route and the Gateway poll over a fake store |
+| `runtime` | `tmp/runtime-ci/study-identity-server` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S4-U5 compiled study identity rule over every shared vector and the real list path over a fake store |
+| `runtime` | `tmp/runtime-ci/admin-metrics` | `synthetic-runtime-record-runs` | S5-U6b compiled admin metrics rows and route over a fake store, and the page model that reads them |
+| `runtime` | `tmp/runtime-ci/dictation-audio` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Compiled dictation PCM WAV byte boundaries |
+| `runtime` | `tmp/runtime-ci/dictation-api` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Compiled dictation API bounds, engine protocol and disconnect lifecycle |
+| `runtime` | `tmp/runtime-ci/dictation-capture` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Pure dictation capture and worklet lifecycle |
+| `runtime` | `tmp/runtime-ci/dictation-host` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Pure dictation host adapter over the shipped session and capture modules |
+| `runtime` | `tmp/runtime-ci/volume-api-models` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Compiled volume job command and volume mark boundary models |
+| `asr-engine` | `tmp/asr-ci/fixture-pure` | `synthetic-asr-engine-runtime` | Pure fixture canonicalization and attestation refusals |
+| `asr-engine` | `tmp/asr-ci/generate` | `synthetic-asr-engine-runtime` | Synthesise the pinned non-clinical sentence |
+| `asr-engine` | `tmp/asr-ci/canonicalize` | `synthetic-asr-engine-runtime` | Canonicalize the fixture to the dictation wire format |
+| `asr-engine` | `tmp/asr-ci/attest` | `synthetic-asr-engine-runtime` | Record runtime attestation before starting the engine |
+| `asr-engine` | `tmp/asr-ci/runtime` | `synthetic-asr-engine-runtime` | Drive the shipped compiled service against the real engine |
+| `dictation-capture` | `tmp/dictation-capture-ci/signal` | `synthetic-dictation-capture-results` | S3-ASR-U4b fixture pin, producer-layout mirror and spectral oracle controls (pure) |
+| `dictation-capture` | `tmp/dictation-capture-ci/capture` | `synthetic-dictation-capture-results` | S3-ASR-U4b fake-device capture, worklet, upload bytes, release and refusals in pinned Chromium |
+
 ## C5 host monitoring and external notification checks
 
 `python tests/ops_monitor_test.py` checks stale/failed backups, bounded maintenance,
