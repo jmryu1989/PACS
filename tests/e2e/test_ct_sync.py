@@ -97,14 +97,45 @@ class CTSyncE2E(ViewerLayoutE2E):
   p.screenshot(path=str(Path(__file__).parent/'artifacts/SYNC-orientation-refused.png'))
   self.assertEqual(self.originals(),originals)
 
- def test_sync_06_failed_access_and_native_exit(self):
-  f,series,refs=self.pair();originals=self.originals();p=self.pair_page(f);self.toggle(p);self.jump(p,0,4);self.wait_z(p,1,8)
-  before=self.snapshot(p)[1];pattern='**/api/me';p.route(pattern,lambda r:r.fulfill(status=403,json={'message':'Synthetic denied'}))
-  self.jump(p,0,6);expect(p.locator('#kin-ct-sync-status')).to_contain_text('적용하지 못했습니다');self.assertEqual(self.snapshot(p)[1],before);p.unroute(pattern)
-  pending=[];p.route(pattern,lambda r:pending.append(r));self.jump(p,0,8);p.wait_for_timeout(150);self.assertTrue(pending)
+ # Astra S5-U2c-B-R-001 F02: the former test_sync_06 answered every /me 403, so whether CT sync or a panel's periodic /me met it
+ # first decided what the next steps saw. Each refusal now has its own case whose order does not depend on timing.
+ def test_sync_06a_own_check_refused_recovers_and_native_exit(self):
+  # CT sync's own access check refused: its list read (GET studies) answered 403 for the viewer only — no other viewer part reads
+  # it before a user action, and none of them turns that 403 into a refusal of the document. A refusal with Recheck Access, never
+  # the session words; nothing moves until Recheck Access confirms.
+  f,series,refs=self.pair();originals=self.originals();p=self.login();pattern='**/api/studies'
+  p.route(pattern,lambda r:r.fulfill(status=403,json={'message':'Synthetic denied'}) if '/ohif/viewer' in r.request.frame.url else r.continue_())
+  self.launch(p,[f]);self.grid(p,2);self.drag(p,'D03A current',0);self.drag(p,'SYNC spaced',1);canvas_ready(p,2)
+  status=p.locator('#kin-ct-sync-status');before=self.snapshot(p)[1];self.toggle(p);self.jump(p,0,4)
+  expect(status).to_contain_text('이 계정으로 검사 접근 정보를 확인할 수 없어');expect(p.locator('#kin-ct-sync-recheck')).to_be_visible()
+  expect(status).not_to_contain_text('세션이 변경');p.wait_for_timeout(300);self.assertEqual(self.snapshot(p)[1],before)
+  p.unroute(pattern);p.locator('#kin-ct-sync-recheck').click();expect(status).to_contain_text('검사 접근 정보를 확인했습니다')
+  self.jump(p,0,6);self.wait_z(p,1,12)
+  pending=[];p.route('**/api/me',lambda r:pending.append(r));self.jump(p,0,8);p.wait_for_timeout(150);self.assertTrue(pending)
   response=pending[0].fetch();p.evaluate('()=>{window.syncExitMarker=true}');p.mouse.click(20,24)
   expect(p.locator('#kin-ct-sync-status')).to_have_count(0);self.assertTrue(p.evaluate('window.syncExitMarker===true'));self.assertNotIn('/ohif/viewer?',p.url)
   pending[0].fulfill(response=response);p.wait_for_timeout(200);expect(p.locator('#kin-ct-sync-status')).to_have_count(0)
+  self.assertEqual(self.originals(),originals)
+
+ def test_sync_06b_panel_refusal_is_not_a_logout_then_own_event_refusal(self):
+  # A panel's /me 403 (the Measurements panel's check on window focus; the write modules' 15 s checks answer the same) refuses
+  # this account for the whole document: CT sync stops with its refusal words and Recheck Access — never the session words — and
+  # asks nothing until then. No sync event runs while that 403 is served, so CT sync does not ask first. That refusal ends every
+  # other part that asks /me with a refusal, so afterwards CT sync's own event /me is the only one that can: its 403 fails that
+  # event alone, and the next event applies.
+  f,series,refs=self.pair();originals=self.originals();p=self.pair_page(f);self.toggle(p);self.jump(p,0,4);self.wait_z(p,1,8)
+  status=p.locator('#kin-ct-sync-status');before=self.snapshot(p)[1];pattern='**/api/me'
+  p.route(pattern,lambda r:r.fulfill(status=403,json={'message':'Synthetic denied'}))
+  p.evaluate("()=>window.dispatchEvent(new Event('focus'))")
+  expect(status).to_contain_text('이 계정으로 검사 접근 정보를 확인할 수 없어',timeout=30000);expect(p.locator('#kin-ct-sync-recheck')).to_be_visible()
+  expect(status).not_to_contain_text('세션이 변경')
+  self.jump(p,0,6);p.wait_for_timeout(300);self.assertEqual(self.snapshot(p)[1],before);expect(status).to_contain_text('이 계정으로 검사 접근 정보를 확인할 수 없어')
+  p.unroute(pattern);p.locator('#kin-ct-sync-recheck').click();expect(status).to_contain_text('검사 접근 정보를 확인했습니다')
+  self.jump(p,0,8);self.wait_z(p,1,16);before=self.snapshot(p)[1]
+  p.route(pattern,lambda r:r.fulfill(status=403,json={'message':'Synthetic denied'}))
+  self.jump(p,0,10);expect(status).to_contain_text('적용하지 못했습니다');expect(status).not_to_contain_text('세션이 변경')
+  self.assertEqual(self.snapshot(p)[1],before);p.unroute(pattern)
+  self.jump(p,0,12);self.wait_z(p,1,24)
   self.assertEqual(self.originals(),originals)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(CTSyncE2E(n) for n in loader.getTestCaseNames(CTSyncE2E) if n.startswith('test_sync_'))

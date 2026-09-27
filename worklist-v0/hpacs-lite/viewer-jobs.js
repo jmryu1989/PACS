@@ -142,7 +142,7 @@ window.kinViewerJobs = function (services, model, session = null) {
         if (!live()) throw new Error('화면이 변경되었습니다.');
         if (r.status === 401 || r.status === 403 && !foreign) {
           // A 401, or a 403 on /me, is the end of the document's login; a 403 on this study's Jobs still ends this panel only.
-          if (r.status === 401 || url === '/me') session?.refuse();
+          if (r.status === 401 || url === '/me') session?.refuse(r.status === 401 ? 'unauthorized' : 'forbidden');
           end(); throw new Error('검사 접근 권한을 확인할 수 없습니다.');
         }
         const value = await r.json().catch(() => null);

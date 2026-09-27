@@ -1174,7 +1174,8 @@ function kinCreateViewerHistory() {
     }
     // Astra S5-U2b-X2-R-001 F01. A real end of the login (401/403, a logout broadcast, another account) is the document's end too:
     // kinViewerSession keeps 'refused', so no /me asked before or after it gives the other extensions a writer back. Mode exit is not.
-    function sessionEnded() { kinViewerSession.refuse(); end(); }
+    // `reason` says which (kinViewerSession loginEnd): a /me 403 refuses this account, a 401 or a logout ends the login.
+    function sessionEnded(reason) { kinViewerSession.refuse(reason); end(); }
     async function api(path, options = {}, ticket = generation) {
       // A request of a generation already given up (another study, the clinician-only boundary) is not sent at all: a save that
       // was waiting for its /me when that answer said clinician-only never reaches the server. Nor is any request of a document
@@ -1187,7 +1188,7 @@ function kinCreateViewerHistory() {
       const res = await fetch('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request.signal,
         headers: { 'X-KIN-CSRF': '1', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
       if (!valid(ticket)) throw { stale: true };
-      if (res.status === 401 || res.status === 403 && path === '/me') { sessionEnded(); throw { stale: true }; }
+      if (res.status === 401 || res.status === 403 && path === '/me') { sessionEnded(res.status === 401 ? 'unauthorized' : 'forbidden'); throw { stale: true }; }
       if (res.status === 403) { deny(); throw { stale: true }; }
       const data = await res.json().catch(() => null);
       if (!valid(ticket)) throw { stale: true };
@@ -1206,7 +1207,7 @@ function kinCreateViewerHistory() {
       ownAnswer = true;
       try { kinViewerSession.note(user); } finally { ownAnswer = false; }
       // `ended`: the answer itself refused (not a viewer member) and the session watcher ended this panel inside note().
-      if (ended || !user.sub) { sessionEnded(); throw { stale: true }; }
+      if (ended || !user.sub) { sessionEnded('not-member'); throw { stale: true }; }
       me = user; subject = user.sub; lastAuth = Date.now(); return user;
     }
     const path = () => '/studies/' + scope + '/viewer-items';
@@ -1799,7 +1800,7 @@ function kinCreateViewerHistory() {
         }
       }
     }
-    const onStorage = e => { if (e.key === 'kin-session-ended') sessionEnded(); };
+    const onStorage = e => { if (e.key === 'kin-session-ended') sessionEnded('logout'); };
     const onFocus = () => { lastAuth = 0; tried = 0; };
     // A document that is not a confirmed writer has no mark to save, so an unlocked native mark is not unsaved work there.
     const jobGuard = () => recovery.size > 0 || [...entries.values()].some(x => hasWork(x) || x.busy) || writer() &&
@@ -1824,7 +1825,7 @@ function kinCreateViewerHistory() {
     window.kinViewerHistoryActivate = activateStudy;
     window.kinViewerHistoryState = historyState;
     let channel;
-    try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') sessionEnded(); }; } catch (_) {}
+    try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') sessionEnded('logout'); }; } catch (_) {}
     window.addEventListener('storage', onStorage); window.addEventListener('focus', onFocus); window.addEventListener('beforeunload', beforeUnload);
     // The pinned viewer changes active viewports through several services. A
     // bounded observation timer also covers stack frame changes without patching them.
@@ -1962,28 +1963,42 @@ function kinViewerClinicianOnly(me) {
    전에 돌아, 각 화면이 자기 자리에 "다시 로그인" 안내를 남기고, 화면의 정리(MPR 도구가 도구 그룹을 돌려주는 복원)가 작성 경로를
    닫는 정책보다 먼저 끝난다. clinician-only는 여전히 쓰기 화면을 내린다(모듈 관문).
    (Astra S5-U2b-X5-R-001 F02) 로그아웃 방송(storage·BroadcastChannel)은 문서가 받는다: 모든 확장이 모드 종료로 내려간 사이의
-   로그아웃도 ended로 적히고, 모드 종료는 이 수신자·owner·ended를 지우지 않는다. */
+   로그아웃도 ended로 적히고, 모드 종료는 이 수신자·owner·ended를 지우지 않는다.
+   (Astra S5-U2c-B-R-001 F01·F02) 멈춘 이유를 둘로 가른다. /me의 403(forbidden)과 구성원이 아닌 답(not-member)은 이 계정의 거절이고,
+   401(unauthorized)·로그아웃(logout)·다른 계정(account-changed)·이유를 대지 않은 refuse()는 로그인의 종료다. 쓰기 경로는 어느
+   쪽이든 ended로 끝난다. 거절 뒤에 온 종료는 이유만 종료로 올려 문서가 끝날 때까지 남기고 onEnded 구독자(CT 위치 동기)에게 다시
+   알린다 — 쓰기 화면의 제자리 종료를 다시 돌리거나 판정을 바꾸지 않고, 종료를 거절로 되돌리지 않는다. 패널·쓰기 화면은 자기
+   401·/me 403·로그아웃을 refuse(reason)에 구분해 넘긴다. */
 const kinViewerSession = (() => {
   let role = 'unconfirmed', ended = false, owner = null, read = null, ending = false, why = null;
   const waiting = new Set(), watchers = new Set(), changes = new Set(), enders = new Set(), endings = new Set();
   const state = () => ended ? 'refused' : role;
-  // `reason` is kept only with a refusal: why the login ended, for onEnded below. It changes no verdict.
+  // S5-U2c fix2 (Astra S5-U2c-B-R-001 F01/F02): why the login stopped, for onEnded below; it changes no verdict. Two reasons only
+  // refuse this account's access: 'forbidden' (a /me answered 403, whichever part of the viewer asked it) and 'not-member' (an
+  // answer that is no institution member's). Every other one is the end of the login: 'unauthorized' (a 401), 'logout' (the logout
+  // broadcast), 'account-changed' (an answer of another account than the first one confirmed) and a refuse() that names none.
+  const loginEnd = reason => reason !== 'forbidden' && reason !== 'not-member';
+  const tell = () => { for (const watch of [...endings]) { try { watch(why); } catch (_) {} } };
   function settle(next, reason = 'refused') {
     const previous = state();
+    // F01: after a refusal of this account the end of its login still comes through, at any time of the document's life. Only the
+    // reason moves, and never back: the write paths ended at the refusal, so no end() runs again and no verdict or watcher changes;
+    // onEnded subscribers hear the end now, later ones when they subscribe.
+    if (next === 'refused' && (ended || ending) && !loginEnd(why) && loginEnd(reason)) { why = reason; if (ended) tell(); }
     if (ended) return previous;
     if (ending) return previous;
     if (role === 'read-only' && next !== 'refused') return previous;
     if (next === 'refused') {
       // The mounted write modules end in place first, while the document still reads as it was (F01; e2e volume preferences 09/14).
-      ending = true;
+      ending = true; why = reason;
       for (const end of [...enders]) { try { end(); } catch (_) {} }
-      ending = false; ended = true; why = reason;
+      ending = false; ended = true;
     } else role = next;
     const now = state();
     for (const resolve of [...waiting]) { waiting.delete(resolve); resolve(now); }
     if (now === 'read-only' && previous !== now) for (const watch of [...watchers]) { try { watch(); } catch (_) {} }
     if (now !== previous) for (const watch of [...changes]) { try { watch(now); } catch (_) {} }
-    if (next === 'refused') for (const watch of [...endings]) { try { watch(why); } catch (_) {} }
+    if (next === 'refused') tell();
     return now;
   }
   // The account a /me answer is from. An answer without one (not a member, no sub) is refused: it cannot be compared with the owner.
@@ -1991,7 +2006,7 @@ const kinViewerSession = (() => {
     ? JSON.stringify([typeof me.institution === 'string' ? me.institution : null, me.sub]) : null;
   function note(me) {
     const who = account(me);
-    if (who !== null && owner !== null && who !== owner) return settle('refused');
+    if (who !== null && owner !== null && who !== owner) return settle('refused', 'account-changed');
     if (who !== null && owner === null) owner = who;
     return who === null ? settle('refused', 'not-member') : settle(kinViewerClinicianOnly(me) ? 'read-only' : 'writer');
   }
@@ -2001,11 +2016,11 @@ const kinViewerSession = (() => {
   try { globalThis.addEventListener?.('storage', e => { if (e?.key === 'kin-session-ended') loggedOut(); }); } catch (_) {}
   try { if (typeof BroadcastChannel === 'function') { logoutChannel = new BroadcastChannel('kin-session'); logoutChannel.onmessage = e => { if (e?.data?.type === 'session-ended') loggedOut(); }; } } catch (_) {}
   // F01: what a write module is handed. answer(me) is its own successful /me: compared with the document's account and noted before
-  // the module keeps anything of it; true only while the document is still a writer of that account. refuse() is its 401 (or 403 on
-  // /me). onEnd(end) registers its in-place end for as long as it is mounted.
+  // the module keeps anything of it; true only while the document is still a writer of that account. refuse(reason) is its 401
+  // ('unauthorized') or its /me 403 ('forbidden'). onEnd(end) registers its in-place end for as long as it is mounted.
   const writeModule = Object.freeze({
     answer(me) { note(me); return state() === 'writer'; },
-    refuse() { settle('refused'); },
+    refuse(reason) { settle('refused', reason); },
     ended: () => ended,
     onEnd(end) { enders.add(end); return () => { enders.delete(end); }; },
   });
@@ -2015,20 +2030,32 @@ const kinViewerSession = (() => {
     readOnly: () => state() === 'read-only',
     writer: () => state() === 'writer',
     note,
-    refuse: () => settle('refused'),
+    // A panel's 401 ('unauthorized'), its /me 403 ('forbidden') or the logout broadcast it received ('logout').
+    refuse: reason => settle('refused', reason),
     writeModule,
     onReadOnly(watch) { watchers.add(watch); return () => { watchers.delete(watch); }; },
     onChange(watch) { changes.add(watch); return () => { changes.delete(watch); }; },
     // S5-U2c fix1 (Astra S5-U2c-R-001 F01): the end of this document's login with its reason, for a viewer function that keeps its
-    // own access check (CT position sync) but must not outlive that end. watch(reason) runs once, after the verdict: at the end, or
-    // at once for a subscriber that joins a document whose login already ended. reason: 'unauthorized' or 'forbidden' (this
-    // session's own /me read answered 401 or 403), 'not-member' (an answer that is no institution member's), 'logout' (the logout
-    // broadcast), 'refused' (an answer of another account than the first one confirmed, or a panel's or write module's refuse():
-    // its 401, or its /me 403 — the caller does not say which).
+    // own access check (CT position sync) but must not outlive that end. watch(reason) runs after the verdict: at the refusal or
+    // end, again when a refusal of this account is followed by the end of its login (fix2), and at once for a subscriber that joins
+    // a document whose login already stopped (with the latest reason). The reasons are those of loginEnd above.
     onEnded(watch) {
       endings.add(watch);
       if (ended) { try { watch(why); } catch (_) {} }
       return () => { endings.delete(watch); };
+    },
+    // S5-U2c fix2 (Astra S5-U2c-B-R-001 F01): an answer of a viewer function that keeps its own access check (CT position sync),
+    // compared with the account this document confirmed first, as note() compares every answer, but without a role verdict. A
+    // mount of that function starts with no account of its own, so its re-entry or Recheck Access answered by another account
+    // would otherwise pass as the first. true: the document's account (the first one, when none was confirmed yet); false: another
+    // account, which ends the document's login here and for its life; null: no account in the answer (that function's refusal).
+    sameAccount(me) {
+      const who = account(me);
+      if (who === null) return null;
+      if (owner === null) owner = who;
+      if (who === owner) return true;
+      settle('refused', 'account-changed');
+      return false;
     },
     // 같은 때 붙는 확장끼리 /me 읽기 하나를 나눠 쓴다. 답은 그 읽기나 다른 확장의 성공한 /me 중 먼저 온 쪽이다.
     decide() {
@@ -2067,7 +2094,8 @@ function kinCreateViewerLayout() {
     const refresh = () => buttons.forEach(b => { b.disabled = ended || busy || !key || !studies; });
     function end() { if (ended) return; ended = true; controller.abort(); hp?.end(); key = null; status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
     // Astra S5-U2b-X2-R-001 F01: a 401 or a refused /me of this panel is the end of the document's login (kinViewerSession keeps 'refused').
-    function sessionEnded() { kinViewerSession.refuse(); end(); }
+    // `reason` says which (kinViewerSession loginEnd): a /me 403 refuses this account, a 401 or a logout ends the login.
+    function sessionEnded(reason) { kinViewerSession.refuse(reason); end(); }
     async function get(path, signal) {
       const request = new AbortController(), abort = () => request.abort();
       controller.signal.addEventListener('abort', abort, { once: true });
@@ -2078,7 +2106,7 @@ function kinCreateViewerLayout() {
         const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal, headers: { 'X-KIN-CSRF': '1' } });
         if (!live()) throw new Error('화면이 변경되어 배치를 적용하지 않았습니다.');
         if (response.status === 401 || response.status === 403) {
-          if (response.status === 401 || path === '/api/me') sessionEnded(); else end();
+          if (response.status === 401 || path === '/api/me') sessionEnded(response.status === 401 ? 'unauthorized' : 'forbidden'); else end();
           throw new Error('검사 접근 권한을 확인할 수 없습니다.');
         }
         if (!response.ok) throw new Error('서버 연결을 확인한 뒤 다시 시도하세요.');
@@ -2200,8 +2228,8 @@ function kinCreateViewerLayout() {
     const unwatchEnd = kinViewerSession.onChange(next => { if (next === 'refused') end(); });
     // Astra S5-U2b-X4-R-001 F02: the logout broadcast ends the document's session here too, not only this panel — a document whose
     // Measurements panel is not mounted (or has already left) must not open this panel's account controls again on a mode re-entry.
-    const onStorage = e => { if (e.key === 'kin-session-ended') sessionEnded(); };
-    const onMessage = e => { if (e.data?.type === 'session-ended') sessionEnded(); };
+    const onStorage = e => { if (e.key === 'kin-session-ended') sessionEnded('logout'); };
+    const onMessage = e => { if (e.data?.type === 'session-ended') sessionEnded('logout'); };
     window.addEventListener('storage', onStorage);
     try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', onMessage); } catch (_) {}
     // A mode entry in a document whose login already ended starts ended: no /me, no account buttons, no editor.
@@ -2288,7 +2316,8 @@ function kinCreateCTSync() {
     const controller = new AbortController(), search = location.search, created = new Set();
     // access: checking · ready · failed (unanswered) · denied (403 or not one institution's member) · changed (the role changed).
     // keys: study UID -> server patient key (sourcePatientKey) from the list the last confirmed round read; never DICOM PatientID.
-    let ended = false, channel, owner = null, checking, clinician = null, keys = new Map(), access = 'checking', round = 0, waiting = false;
+    // The account every /me answer must carry is the document's first one (kinViewerSession.sameAccount), not one of this mount.
+    let ended = false, channel, checking, clinician = null, keys = new Map(), access = 'checking', round = 0, waiting = false;
     let ready = Promise.resolve(false);
     const say = (text, offer = false) => { waiting = text === TEXT.checking; message.textContent = text; recheck.hidden = !offer; notice.hidden = !text; };
     // Every gate after an await reads these. The document's end (documentEnded below) sets `ended` or moves `round` synchronously
@@ -2298,10 +2327,11 @@ function kinCreateCTSync() {
     const usable = mine => live() && access === 'ready' && mine === round;
     const end = () => { ended = true; controller.abort(); created.forEach(s => s.setEnabled(false)); say(TEXT.ended); };
     // S5-U2c fix1 (Astra S5-U2c-R-001 F01): the document's end reaches this mount at any time, not only at its entry. A /me refusal
-    // the document read itself (403, or an answer that is no institution member's) is this account's refusal, as the same answer to
-    // this extension's own /me is: the round and the events in flight are dropped, the synchronizers stay as the user set them, and
-    // only Recheck Access asks again. Every other end (401, another account, the logout broadcast, a panel's refuse() — its 401 or
-    // its /me 403, which it does not tell apart) ends this mount.
+    // of this account (403 — the document's own read, a panel's or a write module's, fix2 F02 — or an answer that is no institution
+    // member's) is this account's refusal, as the same answer to this extension's own /me is: the round and the events in flight are
+    // dropped, the synchronizers stay as the user set them, and only Recheck Access asks again. Every other reason (401, another
+    // account, the logout broadcast, a refuse() that names none) ends this mount — also when it follows that refusal (fix2 F01: the
+    // document tells it again), so neither a re-entry nor Recheck Access starts sync after it.
     function documentEnded(reason) {
       if (ended) return;
       if (reason !== 'forbidden' && reason !== 'not-member') { end(); return; }
@@ -2366,20 +2396,22 @@ function kinCreateCTSync() {
     }
     // One access check: the account (/me), the study list its role may read, then the same account and role again. A later round
     // (Recheck Access, a role change) and the end of this mount drop an earlier round's answers.
+    // fix2 (Astra S5-U2c-B-R-001 F01): each /me answer is compared with the document's first account; another one ends the
+    // document's login for its life (sameAccount), and this check's own 401 is kept by the document as the other parts' 401 is, so
+    // a later mount or Recheck Access asks nothing. An answer that is no member's refuses this account (denied), as the first does.
     function confirm() {
       const mine = ++round; access = 'checking'; keys = new Map();
       ready = (async () => {
         const me = await get('/api/me');
         if (!fresh(mine)) throw refusal('failed');
-        const account = ownerOf(me);
-        if (!account) throw refusal('denied');
-        if (owner !== null && account !== owner) throw refusal('ended');
-        owner = account;
+        if (!ownerOf(me)) throw refusal('denied');
+        if (!kinViewerSession.sameAccount(me)) throw refusal('ended');
         const role = kinViewerClinicianOnly(me), found = role ? await clinicianKeys(mine) : await legacyKeys();
         if (!fresh(mine)) throw refusal('failed');
         const again = await get('/api/me');
         if (!fresh(mine)) throw refusal('failed');
-        if (ownerOf(again) !== owner) throw refusal('ended');
+        if (!ownerOf(again)) throw refusal('denied');
+        if (!kinViewerSession.sameAccount(again)) throw refusal('ended');
         if (kinViewerClinicianOnly(again) !== role) throw refusal('changed');
         return [role, found];
       })().then(([role, found]) => {
@@ -2389,7 +2421,7 @@ function kinCreateCTSync() {
         return true;
       }, error => {
         if (!fresh(mine)) return false;
-        if (error?.kind === 'ended') { end(); return false; }
+        if (error?.kind === 'ended') { if (error.status === 401) kinViewerSession.refuse('unauthorized'); end(); return false; }
         access = error?.kind === 'denied' || error?.kind === 'changed' ? error.kind : 'failed';
         // Said at once only to someone waiting (a sync event or Recheck Access); otherwise at the next sync event.
         if (waiting) say(TEXT[access], true);
@@ -2430,7 +2462,11 @@ function kinCreateCTSync() {
           if (!(await ready) || !usable(mine) || ticket !== serial || !current(sourceInfo, source)) return;
           try {
             const me = await session();
-            if (ownerOf(me) !== owner) { end(); return; }
+            // Another account than the document's first one is the end of its login (sameAccount notes it, and documentEnded ends this
+            // mount); an answer that is no member's refuses this event, as its 403 does.
+            if (ended) return;
+            if (!ownerOf(me)) throw refusal('denied');
+            if (!kinViewerSession.sameAccount(me)) { end(); return; }
             if (!usable(mine)) return;
             if (kinViewerClinicianOnly(me) !== clinician) { roleChanged(); return; }
             if (sync.isDisabled() || ticket !== serial || !current(sourceInfo, source)) return;
@@ -2451,22 +2487,27 @@ function kinCreateCTSync() {
             say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 CT 위치 동기');
             return fire.call(sync, sourceInfo, event);
           } catch (error) {
-            if (error?.kind === 'ended') { end(); return; }
-            if (live()) say(error?.kind === 'denied' ? '위치 동기를 적용하지 못했습니다. 이 계정의 검사 접근 권한을 확인할 수 없습니다' : '위치 동기를 적용하지 못했습니다. 영상과 연결 상태를 확인하세요');
+            // A 401 ends the login whichever event it answers; the document keeps it for its life unless this mount has ended.
+            if (error?.kind === 'ended') { if (!ended && error.status === 401) kinViewerSession.refuse('unauthorized'); end(); return; }
+            // fix2 (Astra S5-U2c-B-R-001 F03): any other failure speaks only for an event still in effect — its round, its serial
+            // number, its synchronizer and the screen it fired on — so a dropped event's late 403 or network error cannot replace the
+            // refusal, check or confirmation shown since (and its Recheck Access).
+            if (!usable(mine) || sync.isDisabled() || ticket !== serial || !current(sourceInfo, source)) return;
+            say(error?.kind === 'denied' ? '위치 동기를 적용하지 못했습니다. 이 계정의 검사 접근 권한을 확인할 수 없습니다' : '위치 동기를 적용하지 못했습니다. 영상과 연결 상태를 확인하세요');
           }
         };
         return sync;
       });
     }
-    // This mount's own logout receivers stay: a logout after the document already ended (a refusal of this account) is not told
-    // again through onEnded. pagehide ends the mount as it does the other viewer extensions'.
+    // This mount's own logout receivers stay beside the document's (which reaches it through onEnded, after a refusal of this
+    // account too). pagehide ends the mount as it does the other viewer extensions'.
     const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
     const onMessage = e => { if (e.data?.type === 'session-ended') end(); };
     window.addEventListener('storage', onStorage); window.addEventListener('pagehide', end);
     try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', onMessage); } catch (_) {}
     // Subscribed for the whole mount and dropped at mode exit. A document whose login already ended before this entry answers at
-    // once: an end asks nothing; a refusal of this account asks nothing either until Recheck Access. This extension still compares
-    // every /me of its own with its own account, and its own 403 stays a refusal (it does not end the document).
+    // once: an end asks nothing; a refusal of this account asks nothing either until Recheck Access. This extension's own /me and
+    // list 403 stay its refusal (they do not end the document); its own 401 and another account end the document's login (fix2).
     const unwatchEnd = kinViewerSession.onEnded(documentEnded);
     stop = () => { unwatchEnd(); end(); creators.forEach(([type, fn]) => groups.addSynchronizerType(type, fn)); window.removeEventListener('storage', onStorage); window.removeEventListener('pagehide', end); channel?.close(); notice.remove(); };
     if (!ended && access === 'checking') confirm();

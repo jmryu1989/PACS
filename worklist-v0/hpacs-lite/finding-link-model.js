@@ -615,7 +615,7 @@
         const res = await fetchImpl('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request?.signal,
           headers: { 'X-KIN-CSRF': '1', [SCHEMA_HEADER]: String(SCHEMA), ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
         if (!valid(ticket)) throw { stale: true };
-        if (res.status === 401 || (res.status === 403 && path === '/me')) { session?.refuse(); end(); throw { stale: true }; }
+        if (res.status === 401 || (res.status === 403 && path === '/me')) { session?.refuse(res.status === 401 ? 'unauthorized' : 'forbidden'); end(); throw { stale: true }; }
         if (res.status === 403 && !foreign) { deny(); throw { stale: true }; }
         const data = await res.json().catch(() => null);
         if (!valid(ticket)) throw { stale: true };

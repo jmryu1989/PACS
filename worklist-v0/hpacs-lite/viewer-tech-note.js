@@ -506,7 +506,7 @@ window.kinViewerTechNote=function(services,session=null){
       try{const r=await fetch('/api'+path,{method,credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-KIN-CSRF':'1',...(owner?{'X-KIN-Subject':owner[1],'X-KIN-Institution':owner[0]}:{}),...(body===undefined?{}:{'Content-Type':'application/json'})},...(body===undefined?{}:{body:JSON.stringify(body)})});
         if(!live())throw new Error('영상창이 변경되었습니다');
         // A 401, or a 403 on /me, is the end of the document's login; a 403 on a note still ends this bridge only.
-        if([401,403].includes(r.status)){if(r.status===401||path==='/me')session?.refuse();end();throw new Error('메모 계정 또는 접근 권한을 확인하세요');}
+        if([401,403].includes(r.status)){if(r.status===401||path==='/me')session?.refuse(r.status===401?'unauthorized':'forbidden');end();throw new Error('메모 계정 또는 접근 권한을 확인하세요');}
         const value=await r.json().catch(()=>null);if(!r.ok||!value)throw Object.assign(new Error(typeof value?.message==='string'?value.message:'서버 응답을 확인하세요'),{status:r.status});return value;
       }finally{clearTimeout(timer);requests.delete(controller);}
     }
