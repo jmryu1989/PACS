@@ -2054,12 +2054,30 @@ const kinViewerSession = (() => {
   let logoutChannel = null;
   try { globalThis.addEventListener?.('storage', e => { if (e?.key === 'kin-session-ended') loggedOut(); }); } catch (_) {}
   try { if (typeof BroadcastChannel === 'function') { logoutChannel = new BroadcastChannel('kin-session'); logoutChannel.onmessage = e => { if (e?.data?.type === 'session-ended') loggedOut(); }; } } catch (_) {}
+  // S5-U2c fix2 (Astra S5-U2c-B-R-001 F01): an answer of a viewer function that keeps its own access check (CT position sync),
+  // compared with the account this document confirmed first, as note() compares every answer, but without a role verdict. A
+  // mount of that function starts with no account of its own, so its re-entry or Recheck Access answered by another account
+  // would otherwise pass as the first. true: the document's account (the first one, when none was confirmed yet); false: another
+  // account, which ends the document's login here and for its life; null: no account in the answer (that function's refusal).
+  // fix3 (Astra S5-U2c-C-R-001 F01): also a panel's /me answer that the panel drops unused (a generation given up, the panel
+  // ended), whose account the document still compares; fix4: a write module's too (writeModule.sameAccount below).
+  function sameAccount(me) {
+    const who = account(me);
+    if (who === null) return null;
+    if (owner === null) owner = who;
+    if (who === owner) return true;
+    settle('refused', 'account-changed');
+    return false;
+  }
   // F01: what a write module is handed. answer(me) is its own successful /me: compared with the document's account and noted before
   // the module keeps anything of it; true only while the document is still a writer of that account. refuse(reason) is its 401
   // ('unauthorized') or its /me 403 ('forbidden'). onEnd(end) registers its in-place end for as long as it is mounted.
+  // S5-U2c fix4 (Astra S5-U2c-C-R-001 F01): sameAccount(me) is a successful /me of its own that the module drops unused (its
+  // generation given up, the module ended or off the screen it was asked for), compared as sameAccount above, without a verdict.
   const writeModule = Object.freeze({
     answer(me) { note(me); return state() === 'writer'; },
     refuse(reason) { settle('refused', reason); },
+    sameAccount,
     ended: () => ended,
     onEnd(end) { enders.add(end); return () => { enders.delete(end); }; },
   });
@@ -2083,21 +2101,8 @@ const kinViewerSession = (() => {
       if (ended) { try { watch(why); } catch (_) {} }
       return () => { endings.delete(watch); };
     },
-    // S5-U2c fix2 (Astra S5-U2c-B-R-001 F01): an answer of a viewer function that keeps its own access check (CT position sync),
-    // compared with the account this document confirmed first, as note() compares every answer, but without a role verdict. A
-    // mount of that function starts with no account of its own, so its re-entry or Recheck Access answered by another account
-    // would otherwise pass as the first. true: the document's account (the first one, when none was confirmed yet); false: another
-    // account, which ends the document's login here and for its life; null: no account in the answer (that function's refusal).
-    // fix3 (Astra S5-U2c-C-R-001 F01): also a panel's /me answer that the panel drops unused (a generation given up, the panel
-    // ended), whose account the document still compares.
-    sameAccount(me) {
-      const who = account(me);
-      if (who === null) return null;
-      if (owner === null) owner = who;
-      if (who === owner) return true;
-      settle('refused', 'account-changed');
-      return false;
-    },
+    // S5-U2c fix2/fix3: see sameAccount above (CT position sync, and the answers a panel drops unused).
+    sameAccount,
     // 같은 때 붙는 확장끼리 /me 읽기 하나를 나눠 쓴다. 답은 그 읽기나 다른 확장의 성공한 /me 중 먼저 온 쪽이다.
     decide() {
       if (ended) return Promise.resolve(state());

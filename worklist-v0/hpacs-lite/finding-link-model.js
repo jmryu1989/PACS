@@ -614,11 +614,21 @@
         if (session?.ended()) { end(); throw { stale: true }; }
         const res = await fetchImpl('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request?.signal,
           headers: { 'X-KIN-CSRF': '1', [SCHEMA_HEADER]: String(SCHEMA), ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
-        if (!valid(ticket)) throw { stale: true };
+        // S5-U2c fix4 (Astra S5-U2c-C-R-001 F01): an answer valid() drops (its generation given up by a scope change, this store
+        // ended or detached, the document ended) is still the document's for what it says about the login, also when it came in
+        // just before the abort that gave it up: its 401 ends the login, and a /me answer of another account than the document's
+        // first one ends it (session.sameAccount: no verdict). An answer in use reaches the same below and through authenticate()'s
+        // answer(); a /me 403 refuses this account without ending the login and is read only then.
+        const drop = async data => {
+          if (res.status === 401) session?.refuse('unauthorized');
+          else if (path === '/me' && res.ok) session?.sameAccount(data === undefined ? await res.json().catch(() => null) : data);
+          return { stale: true };
+        };
+        if (!valid(ticket)) throw await drop();
         if (res.status === 401 || (res.status === 403 && path === '/me')) { session?.refuse(res.status === 401 ? 'unauthorized' : 'forbidden'); end(); throw { stale: true }; }
         if (res.status === 403 && !foreign) { deny(); throw { stale: true }; }
         const data = await res.json().catch(() => null);
-        if (!valid(ticket)) throw { stale: true };
+        if (!valid(ticket)) throw await drop(data);
         if (!res.ok || !data) throw { status: res.status, code: data?.code, headRevision: data?.headRevision ?? null, headHidden: data?.headHidden ?? null, itemId: data?.itemId ?? null,
           jobId: data?.jobId ?? null, markId: data?.markId ?? null };
         // R5: only a successful findings answer decides the API's record format; refusals and proxy errors never do.

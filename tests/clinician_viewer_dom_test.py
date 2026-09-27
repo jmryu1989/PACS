@@ -161,6 +161,11 @@ Findings, Job and Tech Note modules instead):
       an event waits for its image: the released image moves nothing, nothing more is asked; (d) an event's held /me failing
       late (403, a network failure) after the shared refusal leaves the refusal words and Recheck Access, and Recheck Access
       still brings sync back.
+  27  (S5-U2c fix4, Astra S5-U2c-C-R-001 F01 at the write modules) the real Findings section beside the real kin.ct-sync in one
+      writer document: Reload Findings' /me held, the viewer then shows another study (the store gives that generation up and
+      works for it, CT sync still moves the prior), then that /me answers 401: the document ends ('unauthorized') — CT sync with
+      its words and no Recheck Access (a scroll moves and asks nothing), the Job and Tech Note modules once, the Measurements and
+      layout panels, authoring. Control: the store's file with its drop points as before fix4 (the 401 is lost; sync goes on).
   Each viewer document records the reasons its session tells onEnded (fix2 F02): test_17 checks the producer's 401 as
   'unauthorized' and its /me 403 as 'forbidden', test_22 the real modules' 401 / 403 / another account ('account-changed')
   and no reason for the same account or a module list's 403, test_23 the logout as 'logout'.
@@ -1090,6 +1095,15 @@ KEPT_LAYOUT = ("          if (response.status === 401) kinViewerSession.refuse('
 UNKEPT = [(KEPT_CT_401, "        if (r.status === 401) throw refusal('ended', 401);\n", 1),
           (KEPT_PANEL[0], "      if (!valid(ticket)) throw { stale: true };\n", 1),
           (KEPT_PANEL[1], "      if (!valid(ticket)) throw { stale: true };\n", 1), (KEPT_LAYOUT, "", 1)]
+# test_27 (S5-U2c fix4): the shipped kin.ct-sync booted beside the harness's panels in one viewer document (CT_SYNC_BOOT); its plane
+# lookup answers the CT pair's image ids and hands every other id to the panels' lookup.
+CT_SYNC_BESIDE_PANELS = ("([current, prior]) => { const panels = window.cornerstone.metaData.get;\n  (" + CT_SYNC_BOOT + ")([current, prior]);\n"
+                         "  const ct = window.cornerstone.metaData.get;\n"
+                         "  window.cornerstone.metaData.get = (type, id) => ct(type, id) ?? panels(type, id); }")
+# test_27 control (Astra S5-U2c-C-R-001 F01): finding-link-model.js with its two drop points as before fix4 — the answer valid() drops
+# is thrown away unread.
+UNKEPT_FINDINGS = [("        if (!valid(ticket)) throw await drop();\n", "        if (!valid(ticket)) throw { stale: true };\n", 1),
+                   ("        if (!valid(ticket)) throw await drop(data);\n", "        if (!valid(ticket)) throw { stale: true };\n", 1)]
 # test_24: what the pointer reaches at the centre of Recheck Access and of the notice's words, and the button's size.
 CT_SYNC_HIT = """() => { const n = document.querySelector('#kin-ct-sync-status'), b = document.querySelector('#kin-ct-sync-recheck');
   const at = r => document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2), rb = b.getBoundingClientRect();
@@ -3339,9 +3353,11 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.release(own, account)
         return panel_me
 
-    def real_writer_document(self, module, config=None):
+    def real_writer_document(self, module, config=None, files=None):
         # A writer document (RADIOLOGIST, every extension entered) with the real `module` mounted and working for that account.
+        # `files` replaces served files after that (test_27's control: the module's file as before fix4).
         before_boot = self.serve_real(module)
+        self.files.update(files or {})
         self.me, self.me_status, self.hold_me, self.held_me = RADIOLOGIST, None, False, []
         self.item_requests, self.cursors, self.me_requests, self.writer_paged = [], {}, 0, False
         self.open_viewer(config, uncancellable=True, before_boot=before_boot)
@@ -3917,6 +3933,64 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             with self.subTest(control=producer):
                 self.fresh_page()
                 self.assertEqual(["forbidden"], self.panel_answer_after_refusal(producer, payload, status, self.config_variants["unkept"]))
+
+    def late_401_beside_ct_sync(self, files=None):
+        # test_27: a writer document (every extension, the abort signal dropped so an answer on the wire arrives late) with the real
+        # Findings section (finding-link-model.js), the Job and Tech Note stubs, the real Measurements and layout panels, and the real
+        # kin.ct-sync booted beside them over test_24's pair (a radiologist: its GET studies answered by this page). Reload Findings
+        # asks /me, held; the viewer then shows another study (VE, outside the document's pair), so the store gives that generation up
+        # (its abort does not reach the wire) and works for VE, while the document stays a writer and CT sync still moves the prior;
+        # then the held /me answers 401.
+        self.rows = [study(VA, "SYN KIM", "SYN-P-100", patient(INST_A, "SYN-P-100"), "20260320", FINAL),
+                     study(VP, "SYN KIM", "SYN-P-100", patient(INST_A, "SYN-P-100"), "20250101", OPEN)]
+        self.page.route(lambda url: urlparse(url).path == "/api/studies",
+                        lambda route: route.fulfill(json={"studies": copy.deepcopy(self.rows), "observedAt": "2026-09-27T00:00:00.000Z"}))
+        self.real_writer_document("findings", files=files)
+        self.wait_until(lambda: {"jobs", "tech-note"} <= set(self.page.evaluate("synMounted")), "the Job and Tech Note stubs mounted")
+        self.page.evaluate(CT_SYNC_BESIDE_PANELS, [VA, VP])
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: self.page.evaluate("synCt.z('syn-ct-b')") == 8, "CT sync beside the panels")
+        own = self.module_recheck("findings")
+        self.release_held(RADIOLOGIST)
+        self.page.evaluate("study => synSwitch(study)", VE)
+        self.wait_until(lambda: any(kind == "findings" and target == VE for kind, target, _ in self.module_requests), "the store working for VE")
+        self.settle()
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.wait_until(lambda: self.page.evaluate("synCt.z('syn-ct-b')") == 12, "CT sync after the study change")
+        self.assertEqual(("writer", [], []), (self.session(), self.end_reasons(), self.page.evaluate("synEnded")))
+        # Not release(): a 401 that ends the document ends the store's page requests too; wait for the answer either way.
+        request = own.request
+        own.fulfill(status=401, json={"statusCode": 401, "message": "SYN unauthorized"})
+        self.wait_until(lambda: request.failure is not None or any(item is request for item in self.finished), "the late 401 reaching the page")
+        self.settle()
+
+    def test_27_a_write_modules_late_401_ends_ct_sync_and_the_other_panels(self):
+        # Astra S5-U2c-C-R-001 F01 (fix4) at a write module's own request path: panel A's (the Findings store's) /me answering 401
+        # after the store gave that request's generation up is the document's end ('unauthorized'). CT sync ends with it (its words,
+        # no Recheck Access, a scroll moves nothing and asks nothing), and so do the other panels: the Job and Tech Note modules end
+        # in place once, the Measurements and layout panels say the login ended, authoring is closed; the store itself has ended.
+        z = lambda: self.page.evaluate("synCt.z('syn-ct-b')")
+        self.late_401_beside_ct_sync()
+        asked, start = self.me_requests, len(self.finished)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 8)")
+        self.settle()
+        selector, notice = MODULE_NOTICE["findings"]
+        self.assertEqual(("refused", ["unauthorized"], notice, Counter({"jobs": 1, "tech-note": 1}), ENDED, LAYOUT_ENDED,
+                          {"visible": True, "text": CT_SYNC_TEXT["ended"], "recheck": False}, 12, "false"),
+                         (self.session(), self.end_reasons(), self.text_of(selector), Counter(self.page.evaluate("synEnded")),
+                          self.panel()["status"], self.layout_status(), self.page.evaluate("synCt.notice()"), z(),
+                          self.page.evaluate("synAdd('Bidirectional')")))
+        self.assertTrue(all(disabled for _, disabled in self.layout()["buttons"]), self.layout())
+        self.assertEqual((0, []), (self.me_requests - asked, self.api_paths(start)))
+        # Control: the store's file with its drop points as before fix4 (Astra's order at this module): the late 401 is thrown away
+        # unread, the document stays a writer, CT sync moves the prior again and the other panels go on.
+        self.fresh_page()
+        self.late_401_beside_ct_sync({"finding-link-model.js": variant(lf_text(HPACS / "finding-link-model.js"), UNKEPT_FINDINGS,
+                                                                        "finding-link-model.js")})
+        self.page.evaluate("synCt.scroll('syn-ct-a', 8)")
+        self.wait_until(lambda: z() == 16, "control: CT sync goes on after the late 401")
+        self.assertEqual(("writer", [], []), (self.session(), self.end_reasons(), self.page.evaluate("synEnded")))
+        self.assertTrue(any(not disabled for _, disabled in self.layout()["buttons"]), "control: the layout panel still works")
 
 
 if __name__ == "__main__":
