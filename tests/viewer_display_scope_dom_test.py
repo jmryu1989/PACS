@@ -128,6 +128,35 @@ class ViewerDisplayScopeDOMTest(unittest.TestCase):
         finally:
             page.close()
 
+    def test_scope_note_renders_above_the_transform_buttons_and_panel_text_is_at_least_12px(self):
+        # S5-UI7 display requirements, read from what Chromium lays out: the note is seen before the buttons it
+        # qualifies, and the count, note and preset labels are not smaller than 12px (AGENTS §4 minimum, not an exact
+        # value), however the panel spells or attaches its CSS.
+        for width in (320, 900):
+            with self.subTest(width=width):
+                page = self.new_page(width=width, height=900)
+                try:
+                    page.evaluate("""window.kinCTPresets={names:['Soft tissue','Lung','Liver','Bone','Brain'],
+                      preset:i=>[{window:400,level:40},{window:1500,level:-600},{window:150,level:90},{window:2500,level:480},{window:80,level:40}][i],
+                      apply:()=>true}""")
+                    self.assertTrue(page.evaluate("mountDirect()"))
+                    panel = page.locator("#kin-display-scope")
+                    note = panel.locator("[data-scope-note]")
+                    expect(note).to_be_visible()
+                    layout = note.evaluate("""note=>{const buttons=[...document.querySelectorAll('#kin-display-scope [data-action]')];
+                      return {noteBottom:note.getBoundingClientRect().bottom,buttons:buttons.length,
+                        buttonTop:Math.min(...buttons.map(b=>b.getBoundingClientRect().top))}}""")
+                    self.assertEqual(7, layout["buttons"])
+                    self.assertLessEqual(layout["noteBottom"], layout["buttonTop"], "the note sits above the transform buttons")
+                    presets = panel.locator("[data-preset-buttons] button")
+                    expect(presets).to_have_count(5)
+                    for label, locator in (("count", panel.locator("[data-scope-count]")), ("note", note),
+                                           *((f"preset {index}", presets.nth(index)) for index in range(5))):
+                        size = locator.evaluate("el=>parseFloat(getComputedStyle(el).fontSize)")
+                        self.assertGreaterEqual(size, 12, label)
+                finally:
+                    page.close()
+
     def test_session_storage_and_pagehide_each_remove_the_panel_and_disable_controller(self):
         dispatches = [
             "new BroadcastChannel('kin-session').postMessage({type:'session-ended'})",
