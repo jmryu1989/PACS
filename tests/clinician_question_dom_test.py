@@ -40,6 +40,12 @@ receipts that replay the stored `applied` result, revision before state, author/
       open with its typed reply and focus and is read again through GET questions/:id; an unknown Reply there keeps
       Retry across the next re-read; a 404 on that read is the thread's own failure with Retry and the typed text kept;
       a 403 locks the section with its text. Control: the file that drops a thread missing from the list closes it.
+  09c (Astra S5-U4b-C-R-001 F1) unknown Replies in two threads pushed out of the latest 50 stay reachable from the
+      section's pending rows after Questions is closed and opened again and after A->B->A: each row opens its thread
+      through GET questions/:id, and Retry / Discard appear only after that read (hidden while it is held, and after an
+      answer for another study); Retry sends the same requestId, revision and body and adds one entry; Discard keeps the
+      text as a Draft row. A 403 or another account's envelope locks the section: no row, no thread, nothing sent, and
+      nothing comes back after A->B->A or reopening. Control: the file without pending rows leaves no way to Retry.
 
   Reading screen (the S5-U4b block cut out of main.html and run as is, on main.html's own markup and styles with the
   page script stripped; the block sends its own requests and does not use api())
@@ -152,6 +158,11 @@ C_NOT_FOUND = "이 검사나 질문을 찾을 수 없습니다. 원격판독으�
 C_DISCARDED = "보낸 요청을 버렸습니다. 저장되었을 수 있으니 다시 불러온 목록에서 확인하세요."
 C_CLOSED_NOTE = "닫힌 질문입니다. 새 답변·추가 질문·닫기는 서버가 거절합니다."
 C_THREAD_FAILED = "질문 스레드를 불러오지 못했습니다."
+C_MALFORMED = "질문 응답 형식을 확인할 수 없습니다. 다시 불러오세요."
+C_PENDING = ("결과를 모르는 요청이나 보내지 않은 글이 남은 질문 {n}건입니다. 최신 50건 목록에 없어도 여기서 열 수 있습니다. "
+             "화면을 새로 불러오거나 로그아웃하면 사라집니다.")
+C_PENDING_STATES = {"Unconfirmed": "저장되었는지 알 수 없는 요청이 있습니다. 스레드를 열면 Retry·Discard가 있습니다.",
+                    "Sending": "보내는 중인 요청이 있습니다.", "Draft": "보내지 않은 글이 있습니다."}
 R_EMPTY = "이 검사에는 질문이 없습니다."
 R_FAILED = "이 검사의 질문을 불러오지 못했습니다."
 R_COUNTS = "이 검사의 질문 {n}건 · Open {o} · Answered {a} · Closed {c}"
@@ -421,6 +432,10 @@ TARGETS = """(selector) => [...document.querySelectorAll(selector)].filter(e => 
   .map(e => { const r = e.getBoundingClientRect(); return [e.tagName, e.textContent.trim(), r.width, r.height]; })"""
 ACTIVE = """() => { const e = document.activeElement; return {id: e.id || null, tag: e.tagName, text: (e.textContent || '').trim(),
   send: e.dataset && 'send' in e.dataset, open: e.dataset && 'openThread' in e.dataset}; }"""
+PENDING_VIEW = """() => { const box = document.querySelector('#question-pending'); if (!box) return null;
+  return {shown: !box.closest('[hidden]'), text: document.querySelector('#question-pending-text').textContent,
+    rows: [...document.querySelectorAll('#question-pending-list > li')].map(li => ({id: li.dataset.id, state: li.dataset.state,
+      status: li.querySelector('.status').textContent, text: li.textContent}))}; }"""
 CLOSED_VIEW = """() => ({children: [...document.body.children].map(e => `${e.tagName}@${e.getAttribute('role')}`),
   text: document.body.textContent})"""
 
@@ -719,6 +734,9 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
             ("    if (questionThread !== null) loadQuestionThread(uid, questionThread);\n    else hideQuestionThread();\n",
              "    if (questionThread !== null && items.some(item => item.id === questionThread)) loadQuestionThread(uid, questionThread);\n"
              "    else {\n      pickQuestionThread(null);\n      hideQuestionThread();\n    }\n", 1)], "clinician.js")
+        # C-R-001 F1 control: no pending rows (the file before fix3 had no way back to a thread outside the list).
+        cls.home_no_pending = variant(home, [
+            ("    box.hidden = threads.size === 0;\n", "    box.hidden = true;\n", 1)], "clinician.js")
         # B-R-001 F1 controls: api() and the Log out handler without the end-list call.
         cls.api_without_list = variant(API_FN, [(HOOK_401, "", 1)], "main.html api()")
         cls.log_out_hook = slice_between(LOG_OUT_HANDLER, HOOK_LOG_OUT[0], "      try {\n")
@@ -1713,6 +1731,174 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         seen = self.view()
         self.assertEqual((REFUSED, "SYN refused (HTTP 403 · QUESTION_ROLE_REQUIRED)", None, []),
                          (seen["list"]["text"], seen["list"]["detail"], seen["thread"], seen["composers"]))
+
+    def pending(self):
+        return self.page.evaluate(PENDING_VIEW)
+
+    def pending_row(self, state, text):
+        return f"{state} {C_PENDING_STATES[state]} “{text}” Open Thread"
+
+    def open_pending(self, qid):
+        self.page.locator(f'#question-pending-list > li[data-id="{qid}"] button[data-open-pending]').click()
+
+    def reopen_questions(self):
+        self.page.locator("#questions-summary").click()
+        expect(self.page.locator("#questions-body")).to_have_count(0)
+        self.page.locator("#questions-summary").click()
+
+    def pushed_out(self, script):
+        """Two of study A's 50 threads each get a Reply whose outcome is unknown (one applied with the answer lost, one
+        503 QUESTION_BUSY), then two newer threads push both out of the latest 50 and Questions is closed and opened."""
+        self.server = QuestionServer([A, B, C])
+        self.q_requests, self.held, self.holding, self.faults = [], [], set(), []
+        one = self.server.seed(A, CLINICIAN, "SYN oldest one")
+        two = self.server.seed(A, CLINICIAN, "SYN oldest two")
+        for n in range(48):
+            self.server.seed(A, CLINICIAN, f"SYN question {n}")
+        self.open_home(script)
+        self.pick(A)
+        self.open_questions("ready")
+        self.open_thread(one["id"], "Open")
+        self.faults.append({"kind": "reply", "apply": True, "abort": True})
+        self.write("reply", "SYN lost reply one")
+        self.settled_note("unknown")
+        sent_one = self.requests("reply")[-1]["body"]
+        self.open_thread(two["id"], "Open")
+        self.faults.append({"kind": "reply", "status": 503, "body": {"code": "QUESTION_BUSY", "message": "SYN busy"}})
+        self.write("reply", "SYN busy reply two")
+        self.settled_note("unknown")
+        sent_two = self.requests("reply")[-1]["body"]
+        if script is None:
+            # The thread on screen has its own composer; only the other one is a row.
+            self.assertEqual([one["id"]], [r["id"] for r in self.pending()["rows"]])
+        for n in range(2):
+            self.server.seed(A, CLINICIAN, f"SYN newer question {n}")
+        self.reopen_questions()
+        seen = self.listed("ready")
+        self.assertEqual((None, 50), (seen["thread"], len(seen["items"])))
+        self.assertFalse({one["id"], two["id"]} & {i["id"] for i in seen["items"]}, "both are outside the latest 50")
+        return one, two, sent_one, sent_two
+
+    def test_09c_home_pending_requests_outside_the_latest_fifty_stay_reachable(self):
+        # Astra S5-U4b-C-R-001 F1. The control first, so the shipped file's page is the one (a)-(c) go on with.
+        for label, script in (("no-pending control", self.home_no_pending), ("shipped", None)):
+            with self.subTest(file=label):
+                one, two, sent_one, sent_two = self.pushed_out(script)
+                if script is not None:
+                    seen = self.view()
+                    self.assertEqual((False, None, ["ask"]), (self.pending()["shown"], seen["thread"],
+                                                               [c["action"] for c in seen["composers"]]),
+                                     "control: nothing on the section leads back to either unknown Reply")
+
+        # (a) Questions closed and opened: one row per thread, each opened through GET questions/:id; its Retry and
+        # Discard appear only once that read is answered.
+        rows = self.pending()
+        self.assertEqual((True, C_PENDING.format(n=2)), (rows["shown"], rows["text"]))
+        self.assertEqual([(one["id"], "Unconfirmed", self.pending_row("Unconfirmed", "SYN lost reply one")),
+                          (two["id"], "Unconfirmed", self.pending_row("Unconfirmed", "SYN busy reply two"))],
+                         [(r["id"], r["state"], r["text"]) for r in rows["rows"]])
+        self.holding = {"thread"}
+        reads = len(self.q_requests)
+        self.open_pending(one["id"])
+        held, = self.take("thread")
+        self.holding = set()
+        self.assertEqual(f"/api/questions/{one['id']}", held["path"])
+        seen = self.threaded(one["id"], "loading")
+        self.assertEqual([True, True], [c["hidden"] for c in seen["composers"] if c["action"] != "ask"],
+                         "no Retry or Discard before the thread is read")
+        self.release(held)
+        seen = self.threaded(one["id"], "Open")
+        reply = next(c for c in seen["composers"] if c["action"] == "reply")
+        self.assertEqual((False, "unknown", "SYN lost reply one", True, False, True, True),
+                         (reply["hidden"], reply["state"], reply["value"], reply["readOnly"], reply["send"], reply["retry"],
+                          reply["discard"]))
+        self.assertEqual(["thread"], [r["kind"] for r in self.q_requests[reads:]], "opening a row sends nothing")
+        self.assertEqual([two["id"]], [r["id"] for r in self.pending()["rows"]])
+        self.page.locator('.question-compose[data-action="reply"] button[data-retry]').click()
+        self.settled_note("saved")
+        self.assertEqual((sent_one, REPLAYED), (self.requests("reply")[-1]["body"], self.view()["notes"][0]["text"]))
+        expect(self.page.locator("#question-entries > li")).to_have_count(2)
+        self.assertEqual(["question", "followup"], [e["kind"] for e in self.threaded(one["id"], "Open")["thread"]["entries"]])
+
+        # (b) A -> B -> A: B has no row; back on A the other thread's row is there. An answer for another study is not
+        # this thread's read: no Retry or Discard until the thread is read again.
+        self.pick(B)
+        self.listed("empty")
+        self.assertFalse(self.pending()["shown"])
+        self.pick(A)
+        seen = self.listed("ready")
+        self.assertIsNone(seen["thread"])
+        self.assertEqual([(two["id"], "Unconfirmed")], [(r["id"], r["state"]) for r in self.pending()["rows"]])
+        self.faults.append({"kind": "thread", "apply": True, "patch": lambda p: p["item"].update(studyUid=B)})
+        self.open_pending(two["id"])
+        seen = self.threaded(two["id"], "failed")
+        self.assertEqual(["failed", C_THREAD_FAILED, C_MALFORMED], seen["thread"]["load"])
+        self.assertEqual([True, True], [c["hidden"] for c in seen["composers"] if c["action"] != "ask"])
+        self.page.locator("#question-thread-retry").click()
+        seen = self.threaded(two["id"], "Open")
+        reply = next(c for c in seen["composers"] if c["action"] == "reply")
+        self.assertEqual((False, "unknown", "SYN busy reply two", True, True),
+                         (reply["hidden"], reply["state"], reply["value"], reply["retry"], reply["discard"]))
+        self.assertEqual(1, len(seen["thread"]["entries"]), "the 503 was not applied")
+
+        # (c) Discard there: the text stays editable, and with Questions closed and opened it is that thread's Draft row.
+        reads = len(self.q_requests)
+        self.page.locator('.question-compose[data-action="reply"] button[data-discard]').click()
+        self.settled_note("discarded")
+        self.wait_until(lambda: [r["kind"] for r in self.q_requests[reads:]] == ["list", "thread"], "list -> thread")
+        seen = self.threaded(two["id"], "Open")
+        reply = next(c for c in seen["composers"] if c["action"] == "reply")
+        self.assertEqual(("idle", "SYN busy reply two", False, True, False),
+                         (reply["state"], reply["value"], reply["readOnly"], reply["send"], reply["retry"]))
+        self.assertEqual([sent_two], [r["body"] for r in self.requests("reply") if r["body"]["requestId"] == sent_two["requestId"]],
+                         "Discard sends nothing")
+        self.reopen_questions()
+        self.listed("ready")
+        rows = self.pending()
+        self.assertEqual((C_PENDING.format(n=1), [(two["id"], "Draft", self.pending_row("Draft", "SYN busy reply two"))]),
+                         (rows["text"], [(r["id"], r["state"], r["text"]) for r in rows["rows"]]))
+        # English state names, Korean explanations, no avoided or acknowledgement words, text >= 12px, targets >= 24px.
+        for row in rows["rows"]:
+            self.assertFalse(has_hangul(row["status"]))
+        for text in [rows["text"], *C_PENDING_STATES.values()]:
+            self.assertTrue(has_hangul(text))
+            self.assertIsNone(AVOIDED.search(text))
+            self.assertIsNone(ACKNOWLEDGED.search(text))
+        for item in self.page.evaluate(TEXTS, "#question-pending"):
+            if item["size"] is not None:
+                self.assertGreaterEqual(item["size"], 12, item["text"])
+        for tag, text, width, height in self.page.evaluate(TARGETS, "#question-pending button"):
+            self.assertGreaterEqual(min(width, height), 24, f"{tag} {text}")
+
+        # (d) A 403 or another account's envelope locks the section: no row, no thread, nothing sent, nothing comes back.
+        lockers = (("403", {"kind": "list", "status": 403, "body": {"code": "QUESTION_ROLE_REQUIRED", "message": "SYN refused"}},
+                    None, REFUSED),
+                   ("account change", None, [INSTITUTION, "SYN-OTHER-SUB"], OWNER_CHANGED))
+        for label, fault, other, text in lockers:
+            with self.subTest(lock=label):
+                self.pushed_out(None)
+                self.assertEqual(2, len(self.pending()["rows"]))
+                self.page.locator("#questions-summary").click()
+                expect(self.page.locator("#questions-body")).to_have_count(0)
+                if fault:
+                    self.faults.append(fault)
+                self.envelope_owner = other
+                self.page.locator("#questions-summary").click()
+                expect(self.page.locator("#questions")).to_have_attribute("data-state", "locked")
+                self.envelope_owner = None
+                count = len(self.q_requests)
+                for step in ("locked", "A->B->A", "reopened"):
+                    if step == "A->B->A":
+                        self.pick(B)
+                        self.pick(A)
+                    elif step == "reopened":
+                        self.reopen_questions()
+                    self.settle()
+                    seen = self.view()
+                    self.assertEqual(("locked", text, None, [], [], None),
+                                     (seen["state"], seen["list"]["text"], seen["thread"], seen["items"], seen["composers"],
+                                      self.pending()), step)
+                self.assertEqual(count, len(self.q_requests), "a locked section reads and sends nothing more")
 
     # ── Reading screen cases ──
     def test_10_reader_write_envelope_needs_201_and_the_applied_step(self):

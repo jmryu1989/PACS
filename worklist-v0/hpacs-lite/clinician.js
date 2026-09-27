@@ -113,6 +113,13 @@
     ownerChanged: '로그인한 계정이 바뀌었습니다. 이 화면에서는 질문을 더 읽거나 쓰지 않습니다. 화면을 다시 불러오세요.',
     unknown: '저장되었는지 알 수 없습니다. Retry는 같은 요청 ID로 다시 보내 저장 결과를 확인하고, Discard는 이 요청을 버립니다.',
     rejected: '서버가 요청을 거절했습니다.',
+    pending: count => `결과를 모르는 요청이나 보내지 않은 글이 남은 질문 ${count}건입니다. 최신 50건 목록에 없어도 여기서 열 수 있습니다. `
+      + '화면을 새로 불러오거나 로그아웃하면 사라집니다.',
+    pendingStates: {
+      Unconfirmed: '저장되었는지 알 수 없는 요청이 있습니다. 스레드를 열면 Retry·Discard가 있습니다.',
+      Sending: '보내는 중인 요청이 있습니다.',
+      Draft: '보내지 않은 글이 있습니다.',
+    },
     codes: {
       QUESTION_CHANGED: '그사이 이 질문이 바뀌었습니다. 스레드를 다시 불러왔으니 내용을 확인한 뒤 다시 보내세요.',
       QUESTION_CLOSED: '이미 닫힌 질문이라 더 쓸 수 없습니다.',
@@ -1186,6 +1193,17 @@
     retry.id = 'questions-retry';
     retry.addEventListener('click', () => loadQuestions(uid));
     state.append(node('p', 'state-text'), node('p', 'state-detail'), retry);
+    // 결과를 모르는 요청·쓰던 글이 남은 스레드. 최신 50건 목록과 따로 두어, 목록 밖으로 밀린 스레드도 칸을 닫았다 열거나
+    // 다른 검사에 다녀온 뒤 다시 열 수 있다(Astra S5-U4b-C-R-001 F1). 행은 맵에서만 만들고 여는 길은 목록과 같다(단건 읽기).
+    const pending = node('div');
+    pending.id = 'question-pending';
+    pending.hidden = true;
+    const pendingText = node('p', 'muted');
+    pendingText.id = 'question-pending-text';
+    const pendingList = node('ol');
+    pendingList.id = 'question-pending-list';
+    pendingList.style.cssText = 'margin:0 0 10px;padding-left:20px';
+    pending.append(pendingText, pendingList);
     const list = node('ol');
     list.id = 'question-list';
     list.style.cssText = 'margin:0 0 10px;padding-left:20px';
@@ -1197,8 +1215,52 @@
       send: field => sendQuestion(uid, null, 'ask', field, `/studies/${encodeURIComponent(uid)}/questions`, null) });
     ask.append(questionNote(questionNoteKey(uid, null)));
     ask.hidden = true;
-    body.append(node('p', 'muted', QUESTION.hint), state, list, thread, ask);
+    body.append(node('p', 'muted', QUESTION.hint), state, pending, list, thread, ask);
     section.append(body);
+    paintQuestionPending(uid);
+  }
+
+  /**
+   * 이 검사에서 결과를 모르는 요청이나 쓰던 글이 남은 스레드마다 한 행. 최신 50건 목록에 있는지와 관계없이 맵(검사·스레드·동작별)
+   * 에서만 만든다. 행은 스레드를 여는 길일 뿐이다 — Retry·Discard는 연 스레드를 단건 읽기(#2)로 owner·studyUid·요청 번호까지
+   * 확인한 뒤에야 보인다(loadQuestionThread). 잠금·세션 종료는 맵을 비우고 칸을 바꾸므로 여기에 남는 것이 없다.
+   * 지금 보이는 스레드는 넣지 않는다: 그 칸에 이미 있고, 치는 동안 위에 행이 생기면 쓰는 칸이 밀린다.
+   */
+  function paintQuestionPending(uid) {
+    const box = $('#question-pending');
+    if (!box || questionLock !== null || selected !== uid) return;
+    const thread = $('#question-thread');
+    const shown = thread && !thread.hidden ? thread.dataset.id : null;
+    const threads = new Map();
+    const rank = { Unconfirmed: 3, Sending: 2, Draft: 1 };
+    const note = (key, state) => {
+      const [owned, id] = key.split('\n');
+      if (owned !== uid || id === '' || id === shown) return;
+      const now = threads.get(id);
+      if (!now || rank[state] > rank[now.state]) threads.set(id, { state, key });
+    };
+    for (const [key, attempt] of questionAttempts) note(key, attempt.busy ? 'Sending' : 'Unconfirmed');
+    for (const [key, text] of questionDrafts) if (text) note(key, 'Draft');
+    $('#question-pending-list').replaceChildren(...[...threads].map(([id, item]) => questionPendingItem(uid, id, item)));
+    $('#question-pending-text').textContent = QUESTION.pending(threads.size);
+    box.hidden = threads.size === 0;
+  }
+
+  function questionPendingItem(uid, id, item) {
+    const li = node('li');
+    li.dataset.id = id;
+    li.dataset.state = item.state;
+    li.style.margin = '6px 0';
+    const attempt = questionAttempts.get(item.key);
+    const text = attempt ? attempt.text : questionDrafts.get(item.key) || '';
+    const excerpt = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+    const open = node('button', null, 'Open Thread');
+    open.type = 'button';
+    open.dataset.openPending = '';
+    open.addEventListener('click', () => openQuestionThread(uid, id));
+    li.append(node('span', `status ${item.state === 'Draft' ? 'unknown' : 'open'}`, item.state), ' ',
+      QUESTION.pendingStates[item.state], ' ', node('span', null, excerpt ? `“${excerpt}”` : ''), ' ', open);
+    return li;
   }
 
   function setQuestionsState(state, text, detail) {
@@ -1261,6 +1323,7 @@
     $('#questions').dataset.state = items.length ? 'ready' : 'empty';
     setQuestionsState(items.length ? 'ready' : 'empty', items.length ? QUESTION.ready(items.length) : QUESTION.empty);
     $('.question-compose[data-action="ask"]').hidden = false;
+    paintQuestionPending(uid);
     if (questionThread !== null) loadQuestionThread(uid, questionThread);
     else hideQuestionThread();
   }
@@ -1299,6 +1362,7 @@
     box.replaceChildren();
     delete box.dataset.id;
     delete box.dataset.state;
+    paintQuestionPending(selected);
   }
 
   /**
@@ -1340,6 +1404,10 @@
       send: field => { const item = target(); if (item) sendQuestion(uid, id, 'reply', field, `/questions/${encodeURIComponent(id)}/entries`, item); } });
     const close = questionComposer(uid, id, 'close', { label: 'Close Reason', hint: QUESTION.closeHint, button: 'Close', multiline: false,
       send: field => { const item = target(); if (item) sendQuestion(uid, id, 'close', field, `/questions/${encodeURIComponent(id)}/close`, item); } });
+    // 새로 연 스레드의 쓰는 칸(남은 요청의 Retry·Discard 포함)은 첫 읽기가 끝난 뒤 paintQuestionComposers가 연다 —
+    // owner·studyUid를 확인하기 전에는 보내거나 버릴 길을 보이지 않는다(Astra S5-U4b-C-R-001 F1).
+    reply.hidden = true;
+    close.hidden = true;
     box.setAttribute('aria-labelledby', 'question-thread-title');
     box.style.cssText = 'margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px';
     box.replaceChildren(head, meta, state, entries, closed, reply, close, questionNote(questionNoteKey(uid, id)));
@@ -1363,6 +1431,7 @@
     const mine = ++questionThreadSeq;
     const box = questionThreadShell(uid, id);
     box.hidden = false;
+    paintQuestionPending(uid);
     setThreadState('loading', QUESTION.threadLoading);
     try {
       const data = await request(`/questions/${encodeURIComponent(id)}`);
@@ -1388,6 +1457,9 @@
       $('#question-closed-note').hidden = true;
       setThreadState('failed', QUESTION.threadFailed, questionReadDetail(error));
       paintQuestionComposers(uid, id);
+      // 서버가 상태로 답한 실패(404·5xx·연결)는 쓰던 글과 Retry·Discard를 둔다. 응답이 이 검사·이 스레드의 것인지
+      // 확인되지 않은 답(모양 오류, 다른 검사·다른 스레드)에서는 쓰는 칸을 닫는다 — 맵은 그대로라 스레드 Retry로 다시 연다.
+      if (!error.kin) for (const wrap of box.querySelectorAll('.question-compose')) wrap.hidden = true;
     }
   }
 
@@ -1507,6 +1579,8 @@
 
   function repaintQuestionComposer(key) {
     for (const wrap of document.querySelectorAll('.question-compose')) if (wrap.dataset.key === key) paintQuestionComposer(wrap);
+    // 칸이 없는 스레드(닫았거나 다른 스레드로 옮겼다)의 요청 결과도 남은 행에 바로 보인다.
+    paintQuestionPending(key.split('\n')[0]);
   }
 
   function questionNote(noteKey) {
