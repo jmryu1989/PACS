@@ -45,6 +45,19 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_study_arrivals.py', 'StudyArrivalsE2E', 'ci-study-arrivals'),),
     },
+    'u2b-regressions': {
+        'out': ROOT / 'tests/e2e/artifacts/u2b-regressions-ci',
+        'project_prefix': 'kin-u2b-regress-ci-',
+        # S5-CIE: the two existing live modules S5-U2b named as required regressions, which no hosted profile
+        # ran. Not appended to measurements: its 20 suites at 540s already let it claim the whole 25-minute
+        # deadline. No hosted history yet; the 540s multi-suite cap gives (540+35)*2 = 1150s of the shared
+        # 1500s deadline and leaves 350s for a stack whose recorded hosted setup and cleanup took about 70s.
+        'suite_timeout': 540,
+        # Explicit local classes: only the declared test_d03a_* and test_scope_* cases, never the inherited
+        # WorklistE2E, ReturnToCurrentE2E or RelatedFilterE2E cases.
+        'suites': (('e2e/test_prior_selection.py', 'PriorSelectionE2E', 'ci-u2b-prior-selection'),
+                   ('e2e/test_related_scope.py', 'RelatedScopeE2E', 'ci-u2b-related-scope')),
+    },
     'display-scope': {
         'out': ROOT / 'tests/e2e/artifacts/display-scope-ci',
         'project_prefix': 'kin-display-scope-ci-',

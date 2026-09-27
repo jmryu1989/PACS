@@ -934,6 +934,57 @@ jobs:
             tmp/study-arrivals-ci/
           if-no-files-found: error
           retention-days: 7
+  u2b-regressions:
+    # S5-CIE: the existing prior-selection and related-scope live modules that S5-U2b named as
+    # required regressions reach a hosted run only here. A separate job, not more suites inside
+    # measurements: that profile's 20 suites already let it claim measurement_ci.py's whole
+    # 25-minute deadline. Two suites at the 540s cap plus margins are 1150s of the 1500s
+    # deadline. Same 40-minute job policy and 28-minute live step as the existing e2e jobs.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: U2b regressions profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/u2b-regressions-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/u2b-regressions-python"
+          "$RUNNER_TEMP/u2b-regressions-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/u2b-regressions-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared U2b regression selection
+        run: python3 scripts/record-run.py --run-dir tmp/u2b-regressions-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_scope.py -- "$RUNNER_TEMP/u2b-regressions-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared U2b regression tests
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/u2b-regressions-python/bin/python" tests/measurement_ci.py --profile u2b-regressions
+      - name: Collect related-scope screenshots
+        # test_related_scope.py writes controls.png beside the checkout, outside every upload path; only this
+        # suite's synthetic screenshots on this disposable runner are copied, and a run that never reached it adds nothing.
+        if: always()
+        run: |
+          shopt -s nullglob
+          shots=(../tmp/related-scope/*.png)
+          if [ "${#shots[@]}" -gt 0 ]; then
+            mkdir -p tests/e2e/artifacts/u2b-regressions-ci/related-scope
+            cp -- "${shots[@]}" tests/e2e/artifacts/u2b-regressions-ci/related-scope/
+          fi
+      - name: Sanitized synthetic U2b regression evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-u2b-regressions-results
+          path: |
+            tests/e2e/artifacts/u2b-regressions-ci/
+            tests/e2e/artifacts/test_d03a_*.png
+            tests/e2e/artifacts/test_scope_*.png
+            tmp/u2b-regressions-ci/
+          if-no-files-found: error
+          retention-days: 7
   runtime:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
