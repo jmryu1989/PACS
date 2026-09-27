@@ -280,6 +280,16 @@ jobs:
       - name: S5-U3 Clinician patient timeline, identity conflict marker, A-B-A and state DOM
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-timeline-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file tests/clinician_timeline_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_timeline_dom_test.py
+      # S5-U4b: the shipped clinician home's Questions section (01-07) and the reading screen's Questions row, the S5-U4b block
+      # cut out of main.html with the shipped api() (11-17), against an in-test server with the S5-U4a service rules (no stack,
+      # network or credentials); a late answer for study A must not paint over A's newer answer or over B, a Retry resends the
+      # same requestId, and the UID-only control files must paint A's first answer. Two steps of about half a minute each.
+      - name: S5-U4b Clinician Home questions, requestId retry, A-B-A and session lock DOM (01-07)
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-question-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/main.html --file tests/clinician_question_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_question_dom_test.py -k test_0
+      - name: S5-U4b Reading screen answer row, OQ-11 notice, Inbox, A-B-A and session lock DOM (11-17)
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-question-dom-2 --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/clinician_question_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_question_dom_test.py -k test_1
       # S5-U6a: the shipped Members console Gateway Status section against in-test GET /studies and retry answers (no stack,
       # network or credentials); a late list or retry answer must not paint, and the guard-less controls must.
       - name: S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM
