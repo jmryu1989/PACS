@@ -1113,27 +1113,31 @@ function kinCreateViewerHistory() {
     // writer 답이 오면 그대로 되돌린다.
     const ACTIVATING = ['setToolActiveToolbar', 'setToolActive', 'toggleActiveDisabledToolbar'];
     // S5-UI5 (F#4). Capture(showDownloadViewportModal)는 보이는 화면을 이 브라우저에서 PNG로 내려받는 동작이라 서버에 대응하는
-    // 기록·권한 검사가 없다. 그래서 writer로 확인되지 않은 문서(clinician-only 포함)에서는 작성 도구와 함께 도구막대에서 뺀다.
-    // 화면 정책일 뿐 권한이 아니며, writer 답이 오면 다른 버튼과 함께 제자리로 돌아온다.
+    // 기록·권한 검사가 없다. 화면 정책일 뿐 권한이 아니며 clinician-only 문서에서만 뺀다(exporting, 아래 exportClosed).
     const SCREEN_EXPORT = ['showDownloadViewportModal'];
-    const authoring = button => [button?.commands].flat().some(command => {
+    const authoring = (button, exporting = true) => [button?.commands].flat().some(command => {
       const name = typeof command === 'string' ? command : command?.commandName;
-      return SCREEN_EXPORT.includes(name) || ACTIVATING.includes(name) && !VIEW_TOOLS.has(command?.commandOptions?.toolName ?? button.id);
+      return exporting && SCREEN_EXPORT.includes(name) || ACTIVATING.includes(name) && !VIEW_TOOLS.has(command?.commandOptions?.toolName ?? button.id);
     });
     const TOOLBAR = ['getButtons', 'removeButton', 'addButtons', 'clearButtonSection', 'createButtonSection'];
     const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacements = new WeakSet(); let trimming = false;
+    // S5-UI5 fix1. Capture를 빼는 때: clinician-only, 그리고 계정이 아직 확인되지 않은 동안(안전한 기본 — writer 답이 오면 제자리로
+    // 돌아온다). writer 문서의 로그인이 끝난 뒤(거절·로그아웃·다른 계정)에는 빼지 않는다. 이미 뺀 것은 writer 답 전까지 그대로라서
+    // clinician-only·미확인에서 끝난 문서는 계속 없다. 끝난 문서에 다시 들어온 마운트는 역할을 알 수 없어 안전한 기본을 따른다.
+    const endedAtMount = kinViewerSession.ended();
+    const exportClosed = () => !writer() && (!ended || endedAtMount);
     function enforceToolbar() {
       const bar = services.toolbarService;
       if (trimming || TOOLBAR.some(name => typeof bar?.[name] !== 'function')) return;
-      const replaced = [];
+      const replaced = [], exporting = exportClosed();
       for (const [id, button] of Object.entries(bar.getButtons() || {})) {
         if (replacements.has(button)) continue;
         const props = button?.props || {}, items = Array.isArray(props.items) ? props.items : null;
-        if (!items) { if (authoring({ id, commands: props.commands })) { trimmed.add(id); originals.set(id, button); } continue; }
-        const kept = items.filter(item => !authoring(item));
+        if (!items) { if (authoring({ id, commands: props.commands }, exporting)) { trimmed.add(id); originals.set(id, button); } continue; }
+        const kept = items.filter(item => !authoring(item, exporting));
         if (!kept.length) { trimmed.add(id); originals.set(id, button); continue; }
-        if (kept.length < items.length || props.primary && authoring(props.primary)) {
-          const replacement = { ...button, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary) ? props.primary : kept[0] } };
+        if (kept.length < items.length || props.primary && authoring(props.primary, exporting)) {
+          const replacement = { ...button, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary, exporting) ? props.primary : kept[0] } };
           originals.set(id, button); replacements.add(replacement); replaced.push(replacement);
         }
       }

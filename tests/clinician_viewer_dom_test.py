@@ -146,6 +146,10 @@ Findings, Job and Tech Note modules instead):
       a screen policy: not offered while /me is held, given back in its place (between Window / Level and Layout) by the late
       writer answer and pressed there, and not offered to a clinician-only document, also after a mode re-entry. test_13's
       matrix carries it as the capture row. Control: the same file without the Capture clause offers it to the clinician.
+      (fix1) Only clinician-only and the unconfirmed safe default remove it: a writer document keeps it after its logout; a
+      clinician-only document keeps none after its logout and after a re-entry of the ended document (a mount entered ended cannot
+      learn the role and takes the default). Controls: the F#4 rule (every non-writer state) takes it from the ended writer; the
+      rule without the mount default offers it on the ended clinician-only re-entry.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is S5-U1b (tests/clinician_read_live.py, hosted synthetic stack only).
@@ -375,9 +379,12 @@ LATER = ["kin.viewer-findings", "kin.viewer-layout", "kin.viewer-jobs", "kin.vie
 # Pinned longitudinal mode (modes/longitudinal toolbarButtons + moreTools, initToolGroups); see VIEWER_HARNESS.
 PRIMARY_SECTION = ["MeasurementTools", "Zoom", "Pan", "TrackballRotate", "WindowLevel", "Capture", "Layout", "Crosshairs",
                    "MoreTools"]
-# S5-UI5 (F#4): Capture (showDownloadViewportModal, a PNG of the screen saved in this browser, no server counterpart) leaves
-# with the Measurements split button wherever authoring is closed.
+# S5-UI5 (F#4, fix1): Capture (showDownloadViewportModal, a PNG of the screen saved in this browser, no server counterpart) leaves
+# with the Measurements split button in a clinician-only document and while the account is unconfirmed (the safe default), not
+# after a writer's login ended (capture row of test_13; test_24).
 VIEW_SECTION = [x for x in PRIMARY_SECTION if x not in ("MeasurementTools", "Capture")]
+# A confirmed writer document whose login then ended in the same mount: authoring closed, Capture kept (fix1).
+ENDED_WRITER_SECTION = [x for x in PRIMARY_SECTION if x != "MeasurementTools"]
 MORE_TOOLS = ["Reset", "rotate-right", "flipHorizontal", "ImageSliceSync", "ReferenceLines", "ImageOverlayViewer",
               "StackScroll", "invert", "Probe", "Cine", "Angle", "CobbAngle", "Magnify", "CalibrationLine", "TagBrowser",
               "AdvancedMagnify", "UltrasoundDirectionalTool", "WindowLevelRegion"]
@@ -404,6 +411,9 @@ ALL_GROUPS = ["default", "mpr", "SRToolGroup", "volume3d"]
 STATES = ("unconfirmed", "refused", "read-only", "writer", "read-only+held", "refused+late-writer", "refused+layout-account",
           "ended+reenter", "read-only+ended")
 WRITER_ONLY = (False, False, False, True, False, False, False, False, False)
+# S5-UI5 fix1: Capture stays with a writer whose login then ends (refused+layout-account, ended+reenter: the writer document's
+# own mount ends); a document that was unconfirmed or clinician-only when it ended, or a mount entered already ended, has none.
+CAPTURE_OFFERED = (False, False, False, True, False, False, True, True, False)
 VIEWER_STATE_MATRIX = {
     # The list on screen: its verified saved length drawn locked (the writer list here holds key images only), and Go to Image
     # of the shown source frame through the navigation API (unconfirmed: busy; refused: ended).
@@ -411,7 +421,7 @@ VIEWER_STATE_MATRIX = {
     "go_to_image": (False, False, True, True, True, False, False, False, False),
     # Write and mark entry points: True = works in that state, False = not offered or refused (nothing drawn, sent or mounted).
     "toolbar_offer": WRITER_ONLY,        # the Measurements split button and the authoring items of More Tools
-    "capture": WRITER_ONLY,              # Capture offered in the primary section and its press reaching showDownloadViewportModal
+    "capture": CAPTURE_OFFERED,          # Capture offered in the primary section and its press reaching showDownloadViewportModal
     "toolbar_press": WRITER_ONLY,        # a press on the rendered toolbar (Bidirectional), then a primary drag
     "toolbar_command": WRITER_ONLY,      # setToolActiveToolbar over every tool group (ArrowAnnotate), then a drag
     "hotkey": WRITER_ONLY,               # the setToolActive command a hotkey runs (RectangleROI), then a drag
@@ -899,7 +909,10 @@ REVERSIBLE = "    ended = false;\n"
 R002_POLICY = "    const nativeAuthoringClosed = () => readOnly();\n"
 DROP_MARKS = "enforceToolbar(); dropLocalMarks(); } }"
 # test_24 control (S5-UI5 F#4): Capture joins the toolbar trim through this clause of the authoring rule.
-CAPTURE_RULE = "SCREEN_EXPORT.includes(name) || "
+CAPTURE_RULE = "exporting && SCREEN_EXPORT.includes(name) || "
+# test_24 controls (S5-UI5 fix1): when Capture leaves. As at F#4 (ac0adaa) it left in every state that is not a confirmed writer,
+# a writer's ended login included; without the mount default a mount entered in an ended document offers it whatever the role was.
+EXPORT_CLOSED = "    const exportClosed = () => !writer() && (!ended || endedAtMount);\n"
 # The final check as it was at R-002: behind the frame identification.
 FRAME_FREE_CHECK = ("      if (readOnly()) { frameMatch(r); recheckShown(); }\n"
                     "      // Switching display sets briefly removes the viewport. Mode exit, not\n"
@@ -1024,6 +1037,10 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             "policy-off": variant(CONFIG, [(POLICY, "    const nativeAuthoringClosed = () => false;\n", 1)], "config/ohif.js"),
             # test_24: the trim rule without Capture (S5-UI5 F#4), as before this unit.
             "capture-kept": variant(CONFIG, [(CAPTURE_RULE, "", 1)], "config/ohif.js"),
+            "capture-every-non-writer": variant(CONFIG, [(EXPORT_CLOSED, "    const exportClosed = () => true;\n", 1)],
+                                                "config/ohif.js"),
+            "capture-no-mount-default": variant(CONFIG, [(EXPORT_CLOSED, "    const exportClosed = () => !writer() && !ended;\n", 1)],
+                                                "config/ohif.js"),
             "gate-as-before": variant(CONFIG, [(DECIDE, OLD_DECIDE, 1),
                                                (NOTE_CONNECT, "if(!active||state==='loading'||state==='ready')return;", 1)],
                                       "config/ohif.js"),
@@ -2040,10 +2057,11 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.assertEqual(("ready", 4), (seen["state"], len(seen["rows"])), "control: retracted rows kept")
 
     # ── Astra S5-U2b-R-002 regressions ──
-    def authoring_closed(self, status):
-        # What test_08 fixes for a clinician-only document, for a document that is not a confirmed writer.
+    def authoring_closed(self, status, primary=VIEW_SECTION):
+        # What test_08 fixes for a clinician-only document, for a document that is not a confirmed writer (`primary`: a writer
+        # document whose login ended keeps Capture, ENDED_WRITER_SECTION).
         bar = self.page.evaluate("synToolbar()")
-        self.assertEqual((VIEW_SECTION, VIEW_MORE), (bar["primary"], bar["more"]))
+        self.assertEqual((primary, VIEW_MORE), (bar["primary"], bar["more"]))
         for group in ALL_GROUPS:
             modes = self.page.evaluate("id => synModes(id)", group)
             self.assertEqual({}, {n: m for n, m in modes.items() if m in ("Active", "Passive") and n not in VIEWING}, group)
@@ -2142,7 +2160,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.focus()
         self.wait_until(lambda: self.session() == "refused", "the refused /me")
         self.settle()
-        self.assertEqual(VIEW_SECTION, self.page.evaluate("synToolbar()")["primary"])
+        self.assertEqual(ENDED_WRITER_SECTION, self.page.evaluate("synToolbar()")["primary"])
         self.assertEqual([], self.page.evaluate("synMarks()"))
         self.assertEqual((WRITE_MODULES, [], [], "refused"),
                          (set(self.page.evaluate("synEnded")), self.page.evaluate("synStopped"),
@@ -2754,11 +2772,11 @@ class ClinicianViewerDOMTest(unittest.TestCase):
     def layout_status(self):
         return self.page.evaluate("() => document.querySelector('#kin-viewer-layout-status').textContent")
 
-    def ended_after_refusal(self):
+    def ended_after_refusal(self, primary=VIEW_SECTION):
         # What a document whose login ended shows and refuses, whatever /me answered after the end.
         native = self.page.evaluate("synNative.length")
         self.assertEqual("refused", self.session())
-        self.authoring_closed(ENDED)
+        self.authoring_closed(ENDED, primary)
         self.assertEqual([f"refused: {ENDED}"] * 2, [self.page.evaluate("name => synSR(name)", name)
                                                      for name in ("storeMeasurements", "downloadReport")])
         edits = self.page.evaluate("synEdits.length")
@@ -2826,7 +2844,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                     self.wait_until(lambda: self.session() == "refused", "the other account's answer")
                 self.assertEqual([], self.page.evaluate("synMarks()"), "the writer's local mark is gone")
                 self.assertEqual((WRITE_MODULES, []), (set(self.page.evaluate("synEnded")), self.page.evaluate("synStopped")))
-                self.ended_after_refusal()
+                self.ended_after_refusal(ENDED_WRITER_SECTION)
 
         # Control: the file at X2-R-001 for this path, Astra's reproduction: the late writer answer of the module gate makes the
         # session writer again, the ended panel gives the Measurements split button back and Bidirectional makes a mark.
@@ -2895,7 +2913,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                 held, outcome = self.layout_sees_account_change(via, account)
                 # At once, before the first account's held answer: the document's session is refused, the Measurements panel has
                 # ended, the write modules are down, the local mark is gone and nothing was stored.
-                self.assertEqual((outcomes[via], "refused", ENDED, LAYOUT_ENDED, VIEW_SECTION, "false", []),
+                self.assertEqual((outcomes[via], "refused", ENDED, LAYOUT_ENDED, ENDED_WRITER_SECTION, "false", []),
                                  (outcome, self.session(), self.panel()["status"], self.layout_status(),
                                   self.page.evaluate("synToolbar()")["primary"], self.page.evaluate("synAdd('Bidirectional')"),
                                   self.page.evaluate("synMarks()")))
@@ -2903,7 +2921,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                 self.assertEqual([], [key for key in self.page.evaluate("Object.keys(localStorage)") if key.startswith(LAYOUT_PREFIX)])
                 # The first account's writer answer, asked before the change, arrives after it: nothing reopens.
                 self.release(held, RADIOLOGIST)
-                self.ended_after_refusal()
+                self.ended_after_refusal(ENDED_WRITER_SECTION)
                 self.reentry_stays_ended()
         # (b) The Measurements panel's own /me answering a clinician-only other account ends the document the same way.
         with self.subTest(via="measurements", account=CLINICIAN["user"]):
@@ -2916,7 +2934,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             self.assertEqual(("refused", ENDED, WRITE_MODULES, []), (self.session(), self.panel()["status"],
                                                                      set(self.page.evaluate("synEnded")),
                                                                      self.page.evaluate("synStopped")))
-            self.ended_after_refusal()
+            self.ended_after_refusal(ENDED_WRITER_SECTION)
             self.reentry_stays_ended()
 
         # Control: the file at X3-R-001 for these paths, Astra's reproduction. The layout panel ends only itself: the session stays
@@ -3007,7 +3025,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                                  (self.session(), self.panel()["status"], self.history_state(),
                                   len(self.page.evaluate("synMounted")), self.item_requests[reads:], self.page.evaluate("synMarks()"),
                                   self.stored_layouts()))
-                self.ended_after_refusal()
+                self.ended_after_refusal(ENDED_WRITER_SECTION)
                 self.reentry_stays_ended()
         # Control: the file at fix6 for this path (Astra's reproduction): the other writer account keeps the document writer — the
         # Measurements panel's subject is that account, the account buttons, the editor and the write modules come back, and
@@ -3052,7 +3070,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                     self.page.evaluate("ids => synEnter(ids)", GATES if producer == "layout" else [LAYOUT_ID])
                     self.settle()
                     self.assertEqual((asked, "refused", []), (self.me_requests, self.session(), self.page.evaluate("synMounted")))
-                    self.ended_after_refusal()
+                    self.ended_after_refusal(ENDED_WRITER_SECTION)
                     self.me = RADIOLOGIST
                     self.reentry_stays_ended()
         # Control: the file at fix6 for this path (Astra's reproduction): the new producer takes the other writer account — the
@@ -3205,7 +3223,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         # notice and no working control, the other panels have ended, no mark or account control, and nothing more was read (the
         # module's own reads and the Findings store's comparison read, counted from the point the case gives).
         selector, notice = MODULE_NOTICE[module]
-        self.assertEqual(("refused", notice, [], ENDED, LAYOUT_ENDED, VIEW_SECTION, "false", []),
+        self.assertEqual(("refused", notice, [], ENDED, LAYOUT_ENDED, ENDED_WRITER_SECTION, "false", []),
                          (self.session(), self.text_of(selector), self.page.evaluate("synWriteControls()"), self.panel()["status"],
                           self.layout_status(), self.page.evaluate("synToolbar()")["primary"],
                           self.page.evaluate("synAdd('Bidirectional')"), self.page.evaluate("synMarks()")))
@@ -3280,7 +3298,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                     self.module_ended_now(module, 0)
                     self.release(panel_me, RADIOLOGIST)
                     self.module_ended_now(module, 0)
-                    self.ended_after_refusal()
+                    self.ended_after_refusal(ENDED_WRITER_SECTION)
                     self.me = RADIOLOGIST
                     self.reentry_stays_ended()
         # (b) Astra's second reproduction: the module mounted with the document's own account asks /me again and that /me alone
@@ -3473,6 +3491,39 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.assertEqual([x for x in PRIMARY_SECTION if x != "MeasurementTools"], self.page.evaluate("synToolbar()")["primary"],
                          "control: the toolbar keeps Capture")
         self.assertEqual([True, "ran", 1], capture(), "control: the clinician opens the screen PNG dialog")
+        # fix1: a writer document keeps Capture after its login ends (the authoring buttons leave); the F#4 rule took it away.
+        kept = ENDED_WRITER_SECTION
+        for name in ("shipped", "capture-every-non-writer"):
+            with self.subTest(step="writer logout", file=name):
+                self.fresh_page()
+                self.writer_document(None if name == "shipped" else self.config_variants[name])
+                self.page.evaluate(LOGOUT)
+                self.wait_until(lambda: self.session() == "refused", "the logout broadcast")
+                self.settle()
+                if name == "shipped":
+                    self.assertEqual(kept, self.page.evaluate("synToolbar()")["primary"])
+                    self.assertEqual([True, "ran", 1], capture())
+                else:
+                    self.assertEqual((VIEW_SECTION, [False, "missing", 0]),
+                                     (self.page.evaluate("synToolbar()")["primary"], capture()), "control: F#4 trims the ended writer")
+        # fix1: a clinician-only document keeps none after its logout, nor after a re-entry of the ended document (the mount
+        # default); without that default the re-entered mount offers it.
+        for name in ("shipped", "capture-no-mount-default"):
+            with self.subTest(step="clinician logout, re-entry", file=name):
+                self.fresh_page()
+                self.read_only_document(None if name == "shipped" else self.config_variants[name])
+                self.page.evaluate(LOGOUT)
+                self.wait_until(lambda: self.session() == "refused", "the logout broadcast")
+                self.settle()
+                self.assertEqual((VIEW_SECTION, [False, "missing", 0]), (self.page.evaluate("synToolbar()")["primary"], capture()))
+                self.page.evaluate("synReenter()")
+                self.settle()
+                self.assertEqual("refused", self.session())
+                if name == "shipped":
+                    self.assertEqual((VIEW_SECTION, [False, "missing", 0]), (self.page.evaluate("synToolbar()")["primary"], capture()))
+                else:
+                    self.assertEqual((kept, [True, "ran", 1]), (self.page.evaluate("synToolbar()")["primary"], capture()),
+                                     "control: the re-entered ended mount offers Capture")
 
 
 if __name__ == "__main__":
