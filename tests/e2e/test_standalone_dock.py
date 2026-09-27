@@ -4,7 +4,7 @@ import json,os,unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
-from test_dock_preferences import DockPreferencesE2E,dock_settings
+from test_dock_preferences import DockPreferencesE2E,dock_button,dock_settings
 
 class StandaloneDockE2E(ViewerTechNoteE2E):
  def test_standalone_dock_01_parent_popup_preferences_and_work(self):
@@ -18,8 +18,8 @@ class StandaloneDockE2E(ViewerTechNoteE2E):
   dock_settings(v).locator('#kin-dock-placement').select_option('top');canvas_ready(v,2);DockPreferencesE2E.bounds(self,v,True);self.assertEqual(self.snapshot(v),before)
   expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP POPUP TITLE');expect(p.locator('#findings')).to_have_value('KEEP DOCK PARENT REPORT');self.assertEqual(v.url,url);self.assertEqual(self.jobs(a),[])
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);v.screenshot(path=str(folder/'standalone-top.png'))
-  v.get_by_label('Job Title',exact=True).fill('');v.get_by_role('button',name='Measurements',exact=True).click();v.reload();canvas_ready(v,2)
-  expect(v.locator('#kin-dock-placement')).to_have_value('top',timeout=45000);expect(v.get_by_role('button',name='Measurements',exact=True)).to_have_attribute('aria-expanded','true')
+  v.get_by_label('Job Title',exact=True).fill('');dock_button(v,'Measurements').click();v.reload();canvas_ready(v,2)
+  expect(v.locator('#kin-dock-placement')).to_have_value('top',timeout=45000);expect(dock_button(v,'Measurements')).to_have_attribute('aria-expanded','true')
   dock_settings(v).locator('#kin-dock-reset').click();expect(v.locator('#kin-dock-placement')).to_have_value('bottom');expect(v.locator('#kin-viewer-history')).not_to_be_visible()
 
  def test_standalone_dock_02_mode_cleanup_reentry_and_session(self):
@@ -45,9 +45,9 @@ class StandaloneDockE2E(ViewerTechNoteE2E):
  def test_standalone_dock_04_native_invalid_read_denial_and_measurement_restore(self):
   a,b=self.pair();p=self.login();me=p.context.request.get(self.stack.api+'/me').json();key='kin-viewer-dock:v1:'+json.dumps([me['institution'],me['sub']],ensure_ascii=False,separators=(',',':'))
   p.evaluate('(key)=>localStorage.setItem(key,"{bad")',key);v=self.launch(p,[a]);expect(v.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000)
-  expect(v.locator('#kin-workspace-dock')).to_have_count(1);expect(v.locator('#kin-viewer-history')).not_to_be_visible();expect(v.locator('#kin-viewer-layout')).not_to_be_visible();expect(v.locator('#kin-dock-preference-status')).to_contain_text('오류');v.keyboard.press('Control+Alt+7');expect(v.get_by_role('button',name='Measurements',exact=True)).to_be_focused()
+  expect(v.locator('#kin-workspace-dock')).to_have_count(1);expect(v.locator('#kin-viewer-history')).not_to_be_visible();expect(v.locator('#kin-viewer-layout')).not_to_be_visible();expect(v.locator('#kin-dock-preference-status')).to_contain_text('오류');v.keyboard.press('Control+Alt+7');expect(dock_button(v,'Measurements')).to_be_focused()
   v.evaluate('(key)=>localStorage.setItem(key,JSON.stringify({version:1,placement:"top",panel:0}))',key);v.reload();canvas_ready(v,1)
-  expect(v.locator('#kin-dock-placement')).to_have_value('top',timeout=45000);expect(v.get_by_role('button',name='Measurements',exact=True)).to_have_attribute('aria-expanded','true');DockPreferencesE2E.bounds(self,v,True)
+  expect(v.locator('#kin-dock-placement')).to_have_value('top',timeout=45000);expect(dock_button(v,'Measurements')).to_have_attribute('aria-expanded','true');DockPreferencesE2E.bounds(self,v,True)
   v.context.add_init_script("(()=>{const read=Storage.prototype.getItem;Storage.prototype.getItem=function(k){if(k.startsWith('kin-viewer-dock:v1:'))throw Error('synthetic read denial');return read.call(this,k)}})()")
   v.reload();canvas_ready(v,1);expect(v.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000);expect(v.locator('#kin-workspace-dock')).to_have_count(1);expect(v.locator('#kin-dock-preference-status')).to_contain_text('사용 불가')
   self.tools(v);expect(v.locator('#kin-dock-placement')).to_have_value('bottom');expect(v.locator('#kin-viewer-layout')).to_be_visible()
@@ -78,7 +78,7 @@ class StandaloneDockE2E(ViewerTechNoteE2E):
    self.assertTrue(v.locator('#kin-viewer-layout').evaluate('(e)=>e.scrollWidth<=e.clientWidth+1'))
    expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP LAYOUT DRAFT')
   self.assertEqual(self.snapshot(v),before)
-  v.get_by_role('button',name='Measurements',exact=True).click();v.get_by_role('button',name='Comparison',exact=True).click()
+  dock_button(v,'Measurements').click();v.get_by_role('button',name='Comparison',exact=True).click()
   expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP LAYOUT DRAFT');self.assertEqual(self.jobs(a),[])
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(StandaloneDockE2E(n) for n in loader.getTestCaseNames(StandaloneDockE2E) if n.startswith('test_standalone_dock_'))

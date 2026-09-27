@@ -4,6 +4,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_workspace import ReadingWorkspaceE2E
 from test_prior_selection import canvas_ready
+from test_dock_preferences import dock_button
 
 class ReadingDockE2E(ReadingWorkspaceE2E):
  def bounds(self,f):
@@ -16,7 +17,7 @@ class ReadingDockE2E(ReadingWorkspaceE2E):
  def test_dock_01_resize_switch_and_retained_job_save(self):
   a,b=self.pair();original=self.originals();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
   self.bounds(f)
-  job=f.get_by_role('button',name='Comparison',exact=True);history=f.get_by_role('button',name='Measurements',exact=True)
+  job=f.get_by_role('button',name='Comparison',exact=True);history=dock_button(f,'Measurements')
   expect(job).to_have_attribute('aria-expanded','false')
   job.click();f.get_by_label('Job Title',exact=True).fill('DOCK RETAINED JOB')
   self.bounds(f);canvas_ready(f,2)
@@ -44,7 +45,7 @@ class ReadingDockE2E(ReadingWorkspaceE2E):
 
  def test_dock_03_measurement_after_panel_and_canvas_resize(self):
   a,b=self.pair();original=self.originals();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
-  history=f.get_by_role('button',name='Measurements',exact=True);history.click()
+  history=dock_button(f,'Measurements');history.click()
   f.get_by_role('button',name='Length',exact=True).click()
   box=f.locator('.cornerstone-canvas').first.bounding_box()
   x,y=box['x']+box['width']*.4,box['y']+box['height']*.4
