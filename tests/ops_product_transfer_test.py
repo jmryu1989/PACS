@@ -219,8 +219,10 @@ class Pure(unittest.TestCase):
         # receipts (create seq 1, answer seq 2, the author's close with an empty note seq 3).
         # S5-U4c added the study-image-requests tables: 31 files, 43 tables, a Closed image-transfer request with its
         # create, accept and close receipts and an active external-image request with its create receipt.
-        self.assertEqual(len(transfer.MIGRATIONS), 31)
-        self.assertEqual(len(transfer.TABLES), 43)
+        # S7-U1a added the critical-result tables: 32 files, 46 tables, four records (acknowledged, superseded and its created
+        # replacement, cancelled), their seven events and six receipts (contract S7-U1p section 12.3-3).
+        self.assertEqual(len(transfer.MIGRATIONS), 32)
+        self.assertEqual(len(transfer.TABLES), 46)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
         self.assertEqual([(r['oid'], r['accession'], r['studyUid']) for r in rows['Order']],
@@ -230,7 +232,7 @@ class Pure(unittest.TestCase):
         [receipt] = rows['GatewayReceipt']
         self.assertEqual([(r['studyUid'], r['epoch'], r['seq']) for r in rows['GatewayRetryRequest']],
                          [(receipt['studyUid'], receipt['epoch'], receipt['seq'])])
-        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4)
+        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4 + 4 + 7 + 6)
         [question] = rows['StudyQuestion']
         receipts = sorted(rows['StudyQuestionEntry'], key=lambda r: r['seq'])
         self.assertEqual((question['studyUid'], question['state'], question['revision'], question['entryCount']), (UID, 'Closed', 3, 3))
@@ -260,6 +262,35 @@ class Pure(unittest.TestCase):
             self.assertRegex(r['fingerprint'], r'^[0-9a-f]{64}$')
             # the stored result carries no free text, name or sub (contract section 3.4)
             self.assertEqual(sorted(r['result']), ['action', 'at', 'from', 'id', 'kind', 'requestId', 'revision', 'studyUid', 'to'])
+        # S7-U1a: the critical result records pin real rows and their receipts are the replay ledger (contract S7-U1p
+        # section 7.1, 12.3-3): one pending (created) record, the replacement names the record it superseded, the action
+        # copy equals the pinned row, and a clinician-class record pins a final (approve/addendum) row.
+        records = {r['id']: r for r in rows['CriticalResult']}
+        pinned = {r['version']: r for r in rows['ReportVersion']}
+        self.assertEqual(sorted(r['state'] for r in records.values()), ['acknowledged', 'cancelled', 'created', 'superseded'])
+        [old] = [r for r in records.values() if r['state'] == 'superseded']
+        [new] = [r for r in records.values() if r['state'] == 'created']
+        self.assertEqual((new['supersedesId'], new['revision'], old['revision']), (old['id'], 1, 2))
+        for r in records.values():
+            self.assertEqual((r['studyUid'], r['institutionId'], r['senderInstitutionId']), (UID, 'SYNTHETIC-hospital', 'SYNTHETIC-hospital'))
+            self.assertEqual(r['sourceAction'], pinned[r['sourceVersion']]['action'])
+            if r['recipientRole'] == 'clinician': self.assertIn(r['sourceAction'], ('approve', 'addendum'))
+            self.assertEqual(r['revision'], 1 if r['state'] == 'created' else 2)
+        events = sorted((r['recordId'], r['seq'], r['event'], r['revision']) for r in rows['CriticalResultEvent'])
+        self.assertEqual(events, sorted([(r['id'], 1, 'created', 1) for r in records.values()]
+            + [(r['id'], 2, r['state'], 2) for r in records.values() if r['state'] != 'created']))
+        ledger = [(r['recordId'], r['action'], r['appliedRevision'], r['result']['revision'], r['result']['from'], r['result']['to'])
+                  for r in rows['CriticalResultReceipt']]
+        self.assertEqual(sorted(ledger, key=str), sorted([(r['id'], 'create', 1, 1, None, 'created') for r in records.values() if r is not new]
+            + [(r['id'], {'acknowledged': 'ack', 'cancelled': 'cancel', 'superseded': 'supersede'}[r['state']], 2, 2, 'created', r['state'])
+               for r in records.values() if r['state'] not in ('created',)], key=str))
+        for r in rows['CriticalResultReceipt']:
+            self.assertEqual(r['action'] == 'create', r['requestId'] == r['recordId'])
+            self.assertEqual(sorted(r['result']), ['action', 'at', 'from', 'id', 'replacement', 'requestId', 'revision', 'studyUid', 'to'])
+            self.assertEqual((r['result']['requestId'], r['result']['id']), (r['requestId'], r['recordId']))
+            self.assertEqual(r['result']['replacement'], dict(id=new['id'], revision=1, sourceVersion=new['sourceVersion'])
+                             if r['action'] == 'supersede' else None)
+            self.assertNotIn('SYNTHETIC', json.dumps(r['result']))
         hp = rows['HangingProtocolPreference']
         self.assertEqual(len(hp), 3)
         self.assertEqual(len({(r['institution'], r['subject']) for r in hp}), 3)
