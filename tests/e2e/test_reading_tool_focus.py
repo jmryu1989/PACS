@@ -4,6 +4,7 @@ import os,unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_workspace import ReadingWorkspaceE2E
+from test_dock_preferences import dock_button
 
 class ToolFocusE2E(ReadingWorkspaceE2E):
  def test_tools_01_keyboard_roundtrip_keeps_images_and_work(self):
@@ -13,7 +14,7 @@ class ToolFocusE2E(ReadingWorkspaceE2E):
   f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('Job Title',exact=True).fill('KEEP TOOL FOCUS VIEWER')
   before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2);url=f.url
   p.locator('#findings').focus();p.keyboard.press('Control+Alt+7')
-  measurement=f.get_by_role('button',name='Measurements',exact=True);jobs=f.get_by_role('button',name='Comparison',exact=True)
+  measurement=dock_button(f,'Measurements');jobs=f.get_by_role('button',name='Comparison',exact=True)
   expect(measurement).to_be_focused();expect(jobs).to_have_attribute('aria-expanded','true')
   self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
   p.keyboard.press('Enter');expect(measurement).to_have_attribute('aria-expanded','true')

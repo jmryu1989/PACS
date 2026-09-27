@@ -12,6 +12,10 @@ def dock_settings(f):
  if toggle.get_attribute('aria-expanded')!='true':toggle.click()
  return f
 
+def dock_button(f,name):
+ # S5-UI5: the viewer toolbar's split button is also named 'Measurements'; a page-wide role lookup matches both, so dock panel buttons are found only inside the dock's Viewer Tool Panels navigation.
+ return f.locator('#kin-workspace-dock').get_by_role('navigation',name='Viewer Tool Panels',exact=True).get_by_role('button',name=name,exact=True)
+
 class DockPreferencesE2E(ReadingWorkspaceE2E):
  def stored(self,p):return p.evaluate("()=>Object.fromEntries(Object.keys(localStorage).filter(k=>k.startsWith('kin-viewer-dock:v1:')).map(k=>[k,localStorage.getItem(k)]))")
  def bounds(self,f,top):
@@ -32,14 +36,14 @@ class DockPreferencesE2E(ReadingWorkspaceE2E):
   dock_settings(f).locator('#kin-dock-placement').select_option('bottom');canvas_ready(f,2);self.bounds(f,False);self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before);self.assertEqual(f.url,url);self.assertEqual(self.jobs(a),[])
 
  def test_dock_pref_02_reload_owner_isolation_reset_corrupt(self):
-  a,b=self.pair();p=self.login();f=self.workspace(p,a);f.get_by_role('button',name='Measurements',exact=True).click();dock_settings(f).locator('#kin-dock-placement').select_option('top');saved=self.stored(p);self.assertEqual(len(saved),1)
+  a,b=self.pair();p=self.login();f=self.workspace(p,a);dock_button(f,'Measurements').click();dock_settings(f).locator('#kin-dock-placement').select_option('top');saved=self.stored(p);self.assertEqual(len(saved),1)
   self.assertEqual(json.loads(next(iter(saved.values()))),dict(version=2,placement='top',panel=0,autoHide=False))
   f.evaluate('(key)=>window.dispatchEvent(new StorageEvent("storage",{key}))',next(iter(saved)));expect(f.locator('#kin-dock-preference-status')).to_contain_text('현재 창 유지');expect(f.locator('#kin-dock-placement')).to_have_value('top')
-  p.reload();f=self.workspace(p,a);expect(f.locator('#kin-dock-placement')).to_have_value('top');expect(f.get_by_role('button',name='Measurements',exact=True)).to_have_attribute('aria-expanded','true');self.bounds(f,True)
+  p.reload();f=self.workspace(p,a);expect(f.locator('#kin-dock-placement')).to_have_value('top');expect(dock_button(f,'Measurements')).to_have_attribute('aria-expanded','true');self.bounds(f,True)
   other=self.login('doctor2');other.evaluate('(v)=>{for(const [k,s] of Object.entries(v))localStorage.setItem(k,s)}',saved);g=self.workspace(other,a);expect(g.locator('#kin-dock-placement')).to_have_value('bottom')
   g.get_by_role('button',name='Comparison',exact=True).click();self.assertEqual(len(self.stored(other)),2);self.assertEqual(self.stored(other)[next(iter(saved))],next(iter(saved.values())))
-  dock_settings(f).locator('#kin-dock-reset').click();expect(f.locator('#kin-dock-placement')).to_have_value('bottom');expect(f.get_by_role('button',name='Measurements',exact=True)).to_have_attribute('aria-expanded','false')
-  p.reload();f=self.workspace(p,a);expect(f.locator('#kin-dock-placement')).to_have_value('bottom');expect(f.get_by_role('button',name='Measurements',exact=True)).to_have_attribute('aria-expanded','false')
+  dock_settings(f).locator('#kin-dock-reset').click();expect(f.locator('#kin-dock-placement')).to_have_value('bottom');expect(dock_button(f,'Measurements')).to_have_attribute('aria-expanded','false')
+  p.reload();f=self.workspace(p,a);expect(f.locator('#kin-dock-placement')).to_have_value('bottom');expect(dock_button(f,'Measurements')).to_have_attribute('aria-expanded','false')
   p.evaluate('(k)=>localStorage.setItem(k,JSON.stringify({version:1,placement:"outside",panel:99}))',next(iter(saved)));p.reload();f=self.workspace(p,a);expect(f.locator('#kin-dock-placement')).to_have_value('bottom');expect(f.locator('#kin-dock-preference-status')).to_contain_text('오류')
 
  def test_dock_pref_03_failed_storage_other_tab_and_small_screen(self):

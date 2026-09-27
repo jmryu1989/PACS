@@ -1,6 +1,8 @@
 // S5-UI4: the viewer settings menu loses OHIF's About entry (its upstream version/link window) and the open-source
 // notice moves to one line at the bottom of the login page. The branding block of config/ohif.js is sliced out and run
 // against a small element model; the real OHIF bundle lives only in the container, so its DOM is not judged here.
+// S5-UI5: the upstream-name rule is limited to the gear dropdown of the logo header (VUI-08) and the menu's Preferences
+// entry shows as Viewer Settings (VUI-05); the toolbar names are tests/viewer_toolbar_labels_test.cjs.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm');
@@ -19,7 +21,9 @@ class El{
   get childNodes(){return this.children.length?this.children:this.own?[{nodeType:3,data:this.own,parentElement:this}]:[];}
   get textContent(){return this.children.length?this.children.map(c=>c.textContent).join(''):this.own;}
   set textContent(v){this.children.forEach(c=>{c.parentElement=null;});this.children=[];this.own=String(v);}
-  setAttribute(k,v){this.attrs.set(k,String(v));}
+  // Every attribute write in the document makes a record, as in the DOM; the observer below passes on only what its options ask for.
+  setAttribute(k,v){this.attrs.set(k,String(v));if(this.doc.connected(this))this.doc.notify({target:this,addedNodes:[],attributeName:k});}
+  remove(){const p=this.parentElement;if(!p)return;const was=this.doc.connected(p);p.children.splice(p.children.indexOf(this),1);this.parentElement=null;if(was)this.doc.notify({target:p,addedNodes:[]});}
   hasAttribute(k){return this.attrs.has(k);}
   getAttribute(k){return this.attrs.has(k)?this.attrs.get(k):null;}
   contains(n){for(;n;n=n.parentElement)if(n===this)return true;return false;}
@@ -37,7 +41,13 @@ function world(){
     getElementById:id=>body.querySelectorAll('*').find(e=>e.getAttribute('id')===id)||null,
     notify(record){observers.forEach(o=>{if(o.on){pending.push([o,record]);queueMicrotask(()=>{const job=pending.shift();if(job&&job[0].on)job[0].cb([job[1]]);});}});}};
   body=new El(doc,'body');doc.body=body;
-  class MutationObserver{constructor(cb){this.cb=cb;this.on=false;}observe(target,opts){assert.equal(target,body);assert.equal(JSON.stringify(opts),'{"childList":true,"subtree":true,"characterData":true}');this.on=true;observers.add(this);}disconnect(){this.on=false;observers.delete(this);}}
+  // A record reaches the callback only as a real observer with these options would send it: its kind asked for (an attribute
+  // filter asks for attributes), the attribute in the filter, and a record below the observed node only with subtree.
+  class MutationObserver{constructor(cb){this.on=false;this.cb=records=>{const sent=records.filter(r=>this.wants(r));if(sent.length)cb(sent);};}
+    observe(target,options){this.target=target;this.options=options;this.on=true;observers.add(this);}disconnect(){this.on=false;observers.delete(this);}
+    wants(r){const o=this.options,kind=r.attributeName?'attributes':r.target.nodeType===3?'characterData':'childList';
+      return (kind==='attributes'?!!(o.attributes||o.attributeFilter):!!o[kind])&&(kind!=='attributes'||!o.attributeFilter||o.attributeFilter.includes(r.attributeName))
+        &&(r.target===this.target||!!o.subtree&&this.target.contains(r.target));}}
   const el=(tag,text,...kids)=>{const e=new El(doc,tag,text);kids.forEach(k=>{k.parentElement=e;e.children.push(k);});return e;};
   const ctx={document:doc,MutationObserver,Node:{ELEMENT_NODE:1},BroadcastChannel:class{addEventListener(){}removeEventListener(){}close(){}},
     window:{addEventListener(){},removeEventListener(){}},queueMicrotask};
@@ -53,10 +63,13 @@ function menu(el,...titles){
   return el('div','',...titles.map(t=>el('div','',el('svg','',el('title',t==='About'?'info':'settings')),el('span',t))));
 }
 // The menu boundary: the header that holds this repository's own logo (#kin-viewer-brand), matched by the same class
-// list the branding CSS has styled since 865f064. The gear and its dropdown sit inside it in this model.
+// list the branding CSS has styled since 865f064. The gear and its dropdown (.absolute.right-0, the class list the same CSS
+// styles the dropdown by) sit inside it in this model.
 function header(el,...kids){
   const brand=el('div','',el('span','KOREA IMAGING'));brand.setAttribute('id','kin-viewer-brand');
-  const h=el('div','',brand,el('div','',el('button','⚙'),...kids));h.setAttribute('class','bg-secondary-dark z-20 flex');
+  const dropdown=el('div','',...kids);dropdown.setAttribute('class','absolute right-0 z-10');
+  const h=el('div','',brand,el('div','',el('button','⚙'),dropdown));h.setAttribute('class','bg-secondary-dark z-20 flex');
+  h.dropdown=dropdown;
   return h;
 }
 const hidden=row=>row.getAttribute('inert')===''&&row.getAttribute('aria-hidden')==='true'&&row.style.getPropertyValue('display')==='none !important'&&row.dataset.kinRemoved==='about';
@@ -73,7 +86,6 @@ test('source: the About rename rows and About-window link rows are gone and the 
   assert.doesNotMatch(block,/github\.com\/OHIF/);
   assert.match(block,/const ABOUT_TITLES = new Set\(\['About', 'About OHIF Viewer'\]\);/);
   assert.match(block,/document\.getElementById\('kin-viewer-brand'\)\?\.closest\('\.bg-secondary-dark\.z-20'\)/,'the menu boundary is the logo header');
-  assert.match(block,/if \(ABOUT_TITLES\.has\(text\) && scope\?\.contains\(element\)\) return;/);
   assert.match(block,/row\.setAttribute\('inert', ''\);/);
   assert.doesNotMatch(block,/hideAboutRows\(document\.body\)/,'the About rule never scans the whole page');
   assert.equal((source.match(/ABOUT_TITLES/g)||[]).length,3,'the About titles are used only by the branding block');
@@ -88,7 +100,7 @@ test('mount: About leaves the settings menu, Preferences stays, and a late menu 
   const [about,prefs]=list.children;
   assert.ok(hidden(about),'mounted About row hidden, inert and out of the accessibility tree');
   assert.ok(untouched(prefs),'Preferences row untouched');
-  assert.equal(prefs.textContent,'settingsPreferences');
+  assert.equal(prefs.textContent,'settingsViewer Settings','S5-UI5 VUI-05: only its shown name changes');
   assert.equal(about.parentElement,list,'the React-owned row stays in place so later reconciliation cannot throw');
   assert.equal(w.observers.size,1);
 
@@ -206,23 +218,113 @@ test('F02: an About row mounted before its Preferences row is hidden when Prefer
   w.unmount();
 });
 
-test('other upstream wording is still neutralized',async()=>{
+// S5-UI5 VUI-08: the neutralization used to walk the whole page, so a patient name, series description or mark that held
+// "OHIF" or "Foundation" was rewritten. It is now the gear dropdown of the logo header only.
+test('VUI-08: upstream wording is neutralized in the gear dropdown only; clinical, overlay and warning text keep the original',async()=>{
   const w=world();
-  const a=w.el('span','Powered by OHIF'),b=w.el('span','Open Health Imaging Foundation'),c=w.el('span','OHIF Viewer'),d=w.el('span','Series 3');
-  const lateOhif=w.el('p','ohif tools');
-  w.body.append(w.el('div','',a,b,c,d));
+  const a=w.el('span','Powered by OHIF'),b=w.el('span','Open Health Imaging Foundation'),c=w.el('span','OHIF Viewer');
+  const list=menu(w.el,'About OHIF Viewer','Preferences');
+  const h=header(w.el,list,w.el('div','',a,b,c));
+  // Inside the logo header but outside the dropdown (a patient-info strip): not chrome.
+  const patient=w.el('span','SYN^OHIF PATIENT');
+  h.append(w.el('div','',patient));
+  // Synthetic clinical and viewer text anywhere else on the page.
+  const clinical=['SYN^OHIF','OHIF phantom series','About Open Health Imaging Foundation','OHIF Viewer','About','Preferences',
+    'Your GPU could not render with OHIF; CPU rendering is used','Loading OHIF study...','MIT License — Copyright (c) Open Health Imaging Foundation'];
+  const region=w.el('main','',...clinical.map(t=>w.el('span',t)));
+  w.body.append(h,region);
   w.mount();
-  assert.equal(a.textContent,'Powered by 업스트림');
-  assert.equal(b.textContent,'업스트림 오픈소스 프로젝트');
-  assert.equal(c.textContent,'업스트림 Viewer','OHIF Viewer now falls to the general rule');
-  assert.equal(d.textContent,'Series 3');
-  w.body.append(w.el('div','',lateOhif));
+  assert.deepEqual([a,b,c].map(e=>e.textContent),['Powered by 업스트림','업스트림 오픈소스 프로젝트','KIN Viewer'],'chrome: OHIF Viewer becomes the product name');
+  assert.equal(list.children[0].textContent,'settingsAbout OHIF Viewer','the About title is judged and hidden, never renamed');
+  assert.ok(hidden(list.children[0]));
+  assert.equal(patient.textContent,'SYN^OHIF PATIENT','header text outside the dropdown keeps the original');
+  assert.deepEqual(region.children.map(e=>e.textContent),clinical,'patient, series, marks, warnings, loading and licence text keep the original');
+  assert.ok(allUntouched(region));
+
+  // Added later: clinical text anywhere stays as it is; a dropdown built again is rewritten once, not twice.
+  const late=w.el('p','SYN OHIF annotation');
+  w.body.append(w.el('div','',late));
   await tick();
-  assert.equal(lateOhif.textContent,'업스트림 tools');
-  const aboutModalTitle=w.el('h2','About OHIF Viewer');
-  w.body.append(w.el('div','',aboutModalTitle,w.el('p','Version 3.9.1')));
+  assert.equal(late.textContent,'SYN OHIF annotation');
+  const rebuilt=w.el('div','',w.el('span','OHIF Viewer'),w.el('span','Powered by OHIF'));
+  h.dropdown.append(rebuilt);
   await tick();
-  assert.equal(aboutModalTitle.textContent,'About 업스트림 Viewer','outside the menu the About title is only neutralized');
+  assert.deepEqual(rebuilt.children.map(e=>e.textContent),['KIN Viewer','Powered by 업스트림']);
+  // Another header change runs the whole header again: nothing is rewritten a second time.
+  h.dropdown.append(w.el('span','Logout'));
+  await tick();
+  assert.deepEqual([...rebuilt.children,a,b,c].map(e=>e.textContent),['KIN Viewer','Powered by 업스트림','Powered by 업스트림','업스트림 오픈소스 프로젝트','KIN Viewer']);
+  assert.deepEqual(region.children.map(e=>e.textContent),clinical);
+  w.unmount();
+});
+
+test('VUI-08: with no dropdown in the logo header (or no header), nothing is rewritten',async()=>{
+  const w=world();
+  const loose=w.el('div','',w.el('span','OHIF Viewer'),w.el('span','Preferences'));
+  const brand=w.el('div','',w.el('span','KOREA IMAGING'));brand.setAttribute('id','kin-viewer-brand');
+  const h=w.el('div','',brand,loose);h.setAttribute('class','bg-secondary-dark z-20 flex');
+  const outer=w.el('div','',w.el('span','OHIF Viewer'));outer.setAttribute('class','absolute right-0');
+  w.body.append(outer,h);
+  w.mount();
+  assert.deepEqual(loose.children.map(e=>e.textContent),['OHIF Viewer','Preferences']);
+  assert.equal(outer.textContent,'OHIF Viewer','a dropdown-like element outside the logo header is not chrome');
+  w.unmount();
+});
+
+// S5-UI5 VUI-08: the About title is judged, never renamed, so an About row still waiting for its settings row reads About when that
+// row arrives; and a page change runs the wording rule on the logo header only, never on the page or on what was added elsewhere.
+test('VUI-08: an About OHIF Viewer row keeps its title until its settings row arrives; dropdown-like text outside the header is never rewritten',async()=>{
+  const w=world();
+  const list=menu(w.el,'About OHIF Viewer');const about=list.children[0];
+  const h=header(w.el,list);
+  const portal=w.el('div','',w.el('span','OHIF Viewer'),w.el('span','Preferences'));portal.setAttribute('class','absolute right-0 z-10');
+  w.body.append(h,portal);
+  w.mount();
+  assert.ok(untouched(about),'no settings row yet, so not hidden');
+  assert.equal(about.textContent,'settingsAbout OHIF Viewer','and not renamed either');
+  list.append(menu(w.el,'Preferences').children[0]);
+  await tick();
+  assert.ok(hidden(about),'still read as About once Preferences joins the list');
+  assert.equal(about.textContent,'settingsAbout OHIF Viewer');
+  assert.equal(list.children[1].textContent,'settingsViewer Settings');
+  // A dropdown-like element added outside the logo header, then a header change that runs the whole header again.
+  const late=w.el('div','',w.el('span','Powered by OHIF'),w.el('span','Preferences'));late.setAttribute('class','absolute right-0');
+  w.body.append(late);
+  await tick();
+  h.dropdown.append(w.el('span','Logout'));
+  await tick();
+  assert.deepEqual([portal,late].map(e=>e.children.map(c=>c.textContent)),[['OHIF Viewer','Preferences'],['Powered by OHIF','Preferences']]);
+  assert.ok(allUntouched(portal)&&allUntouched(late));
+  w.unmount();
+});
+
+test('VUI-05: Preferences shows as Viewer Settings in the gear menu only; About stays hidden beside it',async()=>{
+  const w=world();
+  const list=menu(w.el,'About','Preferences');
+  const h=header(w.el,list);
+  const aside=w.el('aside','',w.el('button','Preferences'));
+  w.body.append(h,w.el('main','',aside));
+  w.mount();
+  const [about,prefs]=list.children;
+  assert.equal(prefs.textContent,'settingsViewer Settings');
+  assert.ok(untouched(prefs)&&allUntouched(prefs),'the row keeps its place, focus and accessibility; only its text changed');
+  assert.ok(hidden(about));
+  assert.equal(aside.textContent,'Preferences','the same word outside the gear menu keeps the original');
+  // A row that turns into About next to the renamed settings row is still the settings menu's About.
+  const late=menu(w.el,'Help').children[0];
+  list.append(late);
+  await tick();
+  assert.ok(untouched(late));
+  late.children[1].setText('About');
+  await tick();
+  assert.ok(hidden(late),'Viewer Settings is read as the settings row');
+  // The menu built again (the dropdown closes and opens): renamed once more, no doubled text.
+  list.remove();
+  const again=menu(w.el,'About','Preferences');
+  h.dropdown.append(again);
+  await tick();
+  assert.equal(again.children[1].textContent,'settingsViewer Settings');
+  assert.ok(hidden(again.children[0]));
   w.unmount();
 });
 
