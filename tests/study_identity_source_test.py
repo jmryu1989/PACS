@@ -206,7 +206,10 @@ BASE_SHA256 = {
     # (StudyQuestion/StudyQuestionEntry, migration 20260926120000_study_questions); was a5c691d2...5e04 at b6a317c.
     # S5-U4c (4749f5f): and a study with image requests, 409 STUDY_HAS_IMAGE_REQUESTS under the same lock
     # (StudyImageRequest/StudyImageRequestReceipt, migration 20260926130000_study_image_requests); was a7809339...d349.
-    "removeState": "f5cf8d78f9ac8efbcc20cadf40539e3225acf8036005802ae0ac036987eab152",
+    # S7-U1a (e9bb028): and a study with critical result records, 409 STUDY_HAS_CRITICAL_RESULTS under the same lock
+    # (CriticalResult/CriticalResultEvent/CriticalResultReceipt, migration 20260928120000_critical_result, contract S7-U1p
+    # section 12.3-6); was f5cf8d78...b152, measured with this file's own between()/sha() in the S7-U1a fix1 evidence.
+    "removeState": "c6655fd514791766e2b6bc5fd692831e498cf518149feb5e8bb0ccbe2734d557",
     "bootstrap": "2c8ae6afa501225b6b9c808f75065daafc5afd5e93013e43909b5bf4f200fbd9",
     "toClient": "7a10e0e6f6cc5e487140f4b55d3a55b4b01214236b886819b2cf7e7ead7682a3",
 }
@@ -510,7 +513,9 @@ class LiveAndWorkflowPins(unittest.TestCase):
                        "self.preliminary(p, author=\"doctor\", reviewer=\"jmryu\")", "self.assert_snapshot_unchanged("):
             self.assertIn(needle, method, needle)
         self.assertIn("('tests/invariants_live.py', 83)", text("tests", "execution_selection_test.py"))
-        self.assertIn('("invariants_live.py", None, "candidate-invariants", 83),', text("tests", "candidate_ci.py"))
+        # S7-U1a: CriticalResultInvariantTests added six live cases, 83 -> 89 (run-tests.py module_plan, S7-U1a fix1
+        # evidence). execution_selection_test.py still pins 83 above; it is outside the S7-U1a fix1 scope and moves with it.
+        self.assertIn('("invariants_live.py", None, "candidate-invariants", 89),', text("tests", "candidate_ci.py"))
 
     def test_hosted_steps_run_the_real_code_with_source_hashes(self):
         for needle in (

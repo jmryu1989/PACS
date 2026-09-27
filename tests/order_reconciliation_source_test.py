@@ -451,8 +451,9 @@ class MigrationPins(unittest.TestCase):
         # The order is pinned, not a position from the end, so the next additive migration moves only the count.
         # S5-U4a's 20260926120000_study_questions (StudyQuestion, StudyQuestionEntry) was that one: 30 files.
         # S5-U4c's 20260926130000_study_image_requests (StudyImageRequest, StudyImageRequestReceipt): 31 files.
+        # S7-U1a's 20260928120000_critical_result (CriticalResult, CriticalResultEvent, CriticalResultReceipt): 32 files.
         self.assertIn("'api/prisma/migrations/" + MIGRATION_NAME + "/migration.sql',", fixture)
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 31)", transfer)
+        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 32)", transfer)
         self.assertIn("accession='SYNTHETIC-ACC-1'", fixture)
         self.assertIn("'ReportDraft', 'Order', 'UserFilter',", fixture)
         names = sorted(p.name for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())

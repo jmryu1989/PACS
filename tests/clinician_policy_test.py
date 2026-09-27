@@ -1499,13 +1499,14 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertEqual(ts_array(self.policy, "CLINICIAN_BUSINESS_ROUTES"), FIXTURES["business_routes"])
         # U1a shipped an empty business allowlist; U1b adds read rows only. The non-GET rows are the viewer's SOP lookup
         # (answers an Orthanc instance id, writes nothing), the three S5-U4a question writes (decision D33: create,
-        # reply, close; the service decides each action's role) and the two S5-U4c image request writes (create, and
+        # reply, close; the service decides each action's role), the two S5-U4c image request writes (create, and
         # the state change whose accept/close/decline the service keeps to technician/admin and whose cancel to the
-        # requester or admin); anything else that is not a GET is a new decision.
+        # requester or admin) and the S7-U1a explicit acknowledgement of a critical result by its named recipient
+        # (contract S7-U1p section 6.3); anything else that is not a GET is a new decision.
         self.assertEqual(len(FIXTURES["business_routes"]), len(set(FIXTURES["business_routes"])))
         self.assertEqual([k for k in FIXTURES["business_routes"] if not k.startswith("GET ")],
                          ["POST dicom/lookup", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
-                          "POST studies/:uid/image-requests", "POST image-requests/:id"])
+                          "POST studies/:uid/image-requests", "POST image-requests/:id", "POST critical-results/:id/ack"])
         self.assertTrue({"GET authz/dicom", "POST dicom/lookup"} <= set(FIXTURES["business_routes"]),
                         "the viewer read pair is allowed together or not at all")
         self.assertTrue(set(FIXTURES["must_stay_denied"]).isdisjoint(ALLOWED))
@@ -2053,6 +2054,21 @@ class ClinicianPolicySpec(unittest.TestCase):
                     self.assertEqual(wrong["code"], "IMAGE_REQUEST_ROLE_REQUIRED")
                     self.assertIn(wrong["as"], ("doctor", "tech"))
                 self.assertEqual(rows[route]["wrong_tenant"]["as"], "kclinician")
+        # S7-U1a (contract S7-U1p section 6.3): the clinician reaches three of the eight critical result routes, the
+        # received side. Clinician and radiologist are the only recipient classes, so the same-institution technician is
+        # the wrong role; the other institution's clinician meets the record's institution (404), or on the received
+        # list is answered without the record.
+        critical = sorted(m + " " + p for (m, p), found in inventory.items() if found["file"] == "critical-result.controller.ts")
+        self.assertEqual(len(critical), 8)
+        self.assertEqual(sorted(set(critical) & ALLOWED), ["GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack"])
+        for route in sorted(set(critical) & ALLOWED):
+            with self.subTest(critical_result=route):
+                wrong = rows[route]["wrong_role"]
+                self.assertEqual((wrong["as"], wrong["status"], wrong["code"]), ("tech", 403, "CRITICAL_RESULT_ROLE_REQUIRED"))
+                self.assertEqual(rows[route]["wrong_tenant"]["as"], "kclinician")
+        self.assertEqual(rows["GET critical-results"]["query"], "view=received", "the clinician's list is the received view")
+        self.assertEqual(rows["POST critical-results/:id/ack"]["write"]["body"],
+                         {"requestId": "$request_id", "expectedOwner": "$owner", "revision": "$revision"}, "the section 6.1 ACK keys")
         # the live module drives these cases from the fixture and creates every identity they name
         live = LIVE_MODULE.read_text(encoding="utf-8")
         self.assertIn("def " + matrix["test"] + "(self) -> None:", live)
@@ -2172,7 +2188,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             with self.subTest(refused=label), self.assertRaisesRegex(AssertionError, message):
                 read(source)
         # the real controllers: a denied handler that gains a spaced @Public() changes the public set test_05 pins,
-        # spaced route and controller decorators read the same 124 rows, and the unsupported shapes stop the inventory
+        # spaced route and controller decorators read the same 132 rows, and the unsupported shapes stop the inventory
         sources = api_sources()
         pacs = API / "pacs.controller.ts"
         route, key = "  @Get('studies')\n", "GET studies"
@@ -2740,9 +2756,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed; S5-U4c: 5 image request rows allowed;
-        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101)
+        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
+        # S7-U1a: 8 critical result rows, 3 allowed and 5 denied (132 = 4 + 2 + 20 + 106, read from the compiled app's Nest
+        # route metadata in the S7-U1a fix1 evidence)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (124, 4, 2, 17, 101), "the real inventory is unchanged: 124 = 4 + 2 + 17 + 101")
+                         (132, 4, 2, 20, 106), "the real inventory is unchanged: 132 = 4 + 2 + 20 + 106")
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
@@ -2991,9 +3009,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed; S5-U4c: 5 image request rows allowed;
-        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101)
+        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
+        # S7-U1a: 8 critical result rows, 3 allowed and 5 denied (132 = 4 + 2 + 20 + 106, read from the compiled app's Nest
+        # route metadata in the S7-U1a fix1 evidence)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (124, 4, 2, 17, 101), "the real inventory is unchanged: 124 = 4 + 2 + 17 + 101")
+                         (132, 4, 2, 20, 106), "the real inventory is unchanged: 132 = 4 + 2 + 20 + 106")
         contract = CONTRACT["regex_or_division"]
         self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
                           sorted(UNREAD_PUNCT)),
@@ -3166,9 +3186,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed; S5-U4c: 5 image request rows allowed;
-        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101)
+        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
+        # S7-U1a: 8 critical result rows, 3 allowed and 5 denied (132 = 4 + 2 + 20 + 106, read from the compiled app's Nest
+        # route metadata in the S7-U1a fix1 evidence)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (124, 4, 2, 17, 101), "the real inventory is unchanged: 124 = 4 + 2 + 17 + 101")
+                         (132, 4, 2, 20, 106), "the real inventory is unchanged: 132 = 4 + 2 + 20 + 106")
         contract = CONTRACT["class_heading"]
         # every class keyword of api/src has a heading class_heading reads, and no controller file's class extends
         keywords, extending = 0, set()

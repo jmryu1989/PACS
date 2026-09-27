@@ -105,12 +105,12 @@ test('the U1b allowlist and the S5-F5 constants are exactly the fixture values',
   for (const route of FIXTURES.business_routes) assert.equal(P.clinicianRouteAllowed(route), true, route);
   for (const route of FIXTURES.must_stay_denied) assert.equal(P.clinicianRouteAllowed(route), false, route);
   // The clinician writes only through the S5-U4p §6.1 question thread's three routes (create, answer or
-  // follow-up, close) and the S5-U4c image request's two routes (create, action); each is idempotent on
-  // requestId with a stored receipt. The one other non-GET row is the viewer's SOP lookup, which answers an
-  // Orthanc id and writes nothing.
+  // follow-up, close), the S5-U4c image request's two routes (create, action) and the S7-U1p §6.1 explicit
+  // acknowledgement of a critical result it received; each is idempotent on requestId with a stored receipt.
+  // The one other non-GET row is the viewer's SOP lookup, which answers an Orthanc id and writes nothing.
   assert.deepEqual(FIXTURES.business_routes.filter(route => !route.startsWith('GET ')),
     ['POST dicom/lookup', 'POST studies/:uid/questions', 'POST questions/:id/entries', 'POST questions/:id/close',
-      'POST studies/:uid/image-requests', 'POST image-requests/:id']);
+      'POST studies/:uid/image-requests', 'POST image-requests/:id', 'POST critical-results/:id/ack']);
 });
 
 test('final means rs A and a head row whose own action is approve or addendum, nothing looser', () => {

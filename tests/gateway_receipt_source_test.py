@@ -536,10 +536,12 @@ class MigrationPins(unittest.TestCase):
         # 28 -> 29 migrations and 38 -> 39 tables: S4-U4 added GatewayRetryRequest (tests/gateway_retry_source_test.py).
         # 29 -> 30 and 39 -> 41: S5-U4a added 20260926120000_study_questions (StudyQuestion, StudyQuestionEntry).
         # 30 -> 31 and 41 -> 43: S5-U4c added 20260926130000_study_image_requests (StudyImageRequest, StudyImageRequestReceipt).
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 31)", transfer)
-        self.assertIn("self.assertEqual(len(transfer.TABLES), 43)", transfer)
+        # 31 -> 32 and 43 -> 46: S7-U1a added 20260928120000_critical_result (CriticalResult, CriticalResultEvent,
+        # CriticalResultReceipt).
+        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 32)", transfer)
+        self.assertIn("self.assertEqual(len(transfer.TABLES), 46)", transfer)
         for pinned in ("report_structure_migration_test.py", "order_reconciliation_source_test.py"):
-            self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 31)", text("tests", pinned), pinned)
+            self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 32)", text("tests", pinned), pinned)
 
 
 class WorkflowPins(unittest.TestCase):

@@ -19,6 +19,11 @@ and study.question audit rows; the question rows go before the study cleanup thr
 S5-U4c: it also writes two SYNTHETIC image requests (the image-requests rows' :id request, which the change row cancels,
 and the create row's), their receipts and study.image-request audit rows; they go before the study cleanup through the
 clinician_request_live helper.
+S7-U1a (contract S7-U1p section 6.3): test_05 also creates a second synthetic hallym study whose report the LiveStack
+radiologist approves (version 1), and one SYNTHETIC critical result that radiologist sends the clinician pinning that
+approve head (a C2 record), with its event, receipt and study.critical-result audit row; the critical-results rows read
+it and the ACK row acknowledges it. The record rows go before the study cleanup through invariants_live's
+drop_critical_results, the helper TEST-S7-U1a-LIVE uses.
 Every clinician-gate denial is discriminated by the guard's own code CLINICIAN_ROUTE_DENIED and by the absence of audit
 rows for the clinician actor, so a 403 from a service-layer need() is never counted as one.
 """
@@ -36,7 +41,7 @@ from urllib.request import Request
 
 from clinician_question_live import ask_question, drop_study_questions, lit, member_owner, read_question_row
 from clinician_request_live import drop_study_image_requests, make_image_request, read_request_row
-from invariants_live import LiveStack, controller_routes, psql, purge_user_audit
+from invariants_live import LiveStack, controller_routes, critical_row, drop_critical_results, psql, purge_user_audit
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -54,6 +59,8 @@ READ = FIXTURES["read_contract"]
 DENIED = FIXTURES["denied_code"]
 PROBE = FIXTURES["live_probe_values"]
 OWNED_USERNAME = re.compile(r"kin-test-[0-9a-f]{12}-[a-z0-9_-]+")
+# S7-U1a: the approved report text of test_05's second study; the ACK row's record pins that ReportVersion row
+CRITICAL_FINDINGS = "SYNTHETIC S7-U1a matrix pinned findings"
 
 
 def probe_path(route: str) -> str:
@@ -82,6 +89,7 @@ class ClinicianPolicyLive(unittest.TestCase):
         cls.created_role = False
         cls.owned_users: list[str] = []
         cls.shared_study = None
+        cls.critical_study = None
         role = cls.stack.kc_admin("GET", "/roles/clinician")
         if role.status == 404:
             created = cls.stack.kc_admin("POST", "/roles", {"name": "clinician", "description": "temporary S5-U1a clinician role"})
@@ -94,6 +102,7 @@ class ClinicianPolicyLive(unittest.TestCase):
         cls.addClassCleanup(cls.delete_owned_users)
         cls.addClassCleanup(cls.drop_shared_questions)   # last in, first out: before the owned users and the study go
         cls.addClassCleanup(cls.drop_shared_image_requests)
+        cls.addClassCleanup(cls.drop_shared_critical_results)
         cls.stack.create_test_identity("clinician", ["clinician"], "hallym")
         cls.stack.create_test_identity("clinician-radiologist", ["clinician", "radiologist"], "hallym")
         cls.stack.create_test_identity("clinician-technician", ["clinician", "technician"], "hallym")
@@ -135,6 +144,13 @@ class ClinicianPolicyLive(unittest.TestCase):
         helper TEST-S5-U4c-LIVE uses, so a row some other member wrote stops the cleanup instead of being deleted."""
         if cls.shared_study is not None:
             drop_study_image_requests(cls.shared_study.uid, set(cls.stack.user_ids.values()) | set(cls.owned_users))
+
+    @classmethod
+    def drop_shared_critical_results(cls) -> None:
+        """S7-U1a: test_05's critical result rows go before the study cleanup (every foreign key RESTRICT), through the
+        helper TEST-S7-U1a-LIVE uses, so a row naming a subject this run does not own stops the cleanup."""
+        if cls.critical_study is not None:
+            drop_critical_results(cls.critical_study.uid, set(cls.stack.user_ids.values()) | set(cls.owned_users))
 
     # ── owned member helpers (no group => PENDING, two groups => INVALID) ──
 
@@ -189,6 +205,14 @@ class ClinicianPolicyLive(unittest.TestCase):
         if cls.shared_study is None:
             cls.shared_study = cls.stack.create_fixture()
         return cls.shared_study
+
+    def approved_study(self):
+        """S7-U1a: the second run-owned hallym study of test_05, whose report the LiveStack radiologist approves so a
+        critical result can pin a final head; stack.cleanup_all removes it."""
+        cls = type(self)
+        if cls.critical_study is None:
+            cls.critical_study = cls.stack.create_fixture()
+        return cls.critical_study
 
     def admin_row(self, username: str) -> dict:
         page = 1
@@ -361,7 +385,8 @@ class ClinicianPolicyLive(unittest.TestCase):
         """What the clinician-only member of the study's institution is answered on each allow row (RS W, no items).
 
         values maps :uid and :id to the study and the row's prepared question or, on the image-requests rows, the prepared
-        image request (S5-U4c); sent is the request body a write row sent."""
+        image request (S5-U4c), and on the critical-results rows to the approved study and its C2 record (S7-U1a); sent is
+        the request body a write row sent."""
         body = result.body
         uid, qid, clinician = values[":uid"], values[":id"], self.stack.actor("clinician")
         if route == "GET me":
@@ -407,14 +432,28 @@ class ClinicianPolicyLive(unittest.TestCase):
             self.assertEqual(sorted(body), ["items", "owner"])
             self.assertIn(qid, {item["id"] for item in body["items"]})
             self.assertEqual({item["requester"]["actor"] for item in body["items"]}, {clinician}, "a clinician-only member sees its own")
+        elif route == "GET critical-results":
+            # S7-U1a: the received view before the ACK row; pending is the server's count of the caller's created records
+            self.assertEqual(sorted(body), ["items", "nextCursor", "owner", "pending", "view"])
+            self.assertEqual((body["view"], body["pending"], body["nextCursor"]), ("received", 1, None))
+            self.assertEqual([(item["id"], item["view"], item["state"]) for item in body["items"]], [(qid, "full", "created")])
+        elif route == "GET critical-results/:id":
+            # the C2 record in full: the pinned approve row's own body, no ACK written by the read
+            self.assertEqual(sorted(body), ["item", "owner"])
+            item = body["item"]
+            self.assertEqual((item["id"], item["studyUid"], item["view"], item["state"], item["revision"]), (qid, uid, "full", "created", 1))
+            self.assertEqual((item["source"]["version"], item["source"]["action"], item["source"]["current"]), (1, "approve", True))
+            self.assertEqual(item["body"]["findings"], CRITICAL_FINDINGS)
         elif route in WRITES:
             # (question or request id, action, from, to, revision): the server decides the kind, the author's reply is a
-            # follow-up; the clinician's change of its own image request is a cancel (S5-U4c)
+            # follow-up; the clinician's change of its own image request is a cancel (S5-U4c); the recipient's explicit
+            # acknowledgement moves the critical result from created to acknowledged (S7-U1a)
             steps = {"POST studies/:uid/questions": (sent["requestId"], "create", None, "Open", 1),
                      "POST questions/:id/entries": (qid, "followup", "Open", "Open", sent.get("revision", 0) + 1),
                      "POST questions/:id/close": (qid, "close", "Open", "Closed", sent.get("revision", 0) + 1),
                      "POST studies/:uid/image-requests": (sent["requestId"], "create", None, "Requested", 1),
-                     "POST image-requests/:id": (qid, "cancel", "Requested", "Cancelled", sent.get("revision", 0) + 1)}
+                     "POST image-requests/:id": (qid, "cancel", "Requested", "Cancelled", sent.get("revision", 0) + 1),
+                     "POST critical-results/:id/ack": (qid, "ack", "created", "acknowledged", sent.get("revision", 0) + 1)}
             self.assertIn(route, steps, "no positive check for " + route)
             self.assertEqual((sorted(body), body["owner"], body["replayed"]),
                              (["applied", "owner", "replayed"], sent["expectedOwner"], False))
@@ -447,16 +486,33 @@ class ClinicianPolicyLive(unittest.TestCase):
         tokens = {"cinvalid": self.grant(username, password), "gateway": self.stack.service_token("gateway")}
         clinician = self.stack.actor("clinician")
         actions = ", ".join(sorted({lit(write["audit"]["action"]) for write in WRITES.values()})) or "NULL"
+        # S7-U1a (contract S7-U1p section 6.3): the critical-results :id rows read and acknowledge one C2 record. The
+        # LiveStack radiologist approves the report of a second run-owned study (the matrix study stays at RS W) and sends
+        # the clinician one critical result pinning that approve head. Both run before the audit mark below: the report
+        # commit and the sender's create row are the radiologist's, and the loop judges only rows written after the mark.
+        cvr_uid = self.approved_study().uid
+        approved = self.stack.request("POST", f"/studies/{quote(cvr_uid)}/report/commit", "doctor", {
+            "action": "approve", "baseVersion": 0, "findings": CRITICAL_FINDINGS, "conclusion": "", "recommendation": ""})
+        self.assertEqual(approved.status, 201, approved.text[:300])
+        created = self.stack.request("POST", f"/studies/{quote(cvr_uid)}/critical-results", "doctor", {
+            "requestId": str(uuid.uuid4()), "expectedOwner": member_owner(self.stack, "doctor"),
+            "recipientSub": self.stack.user_ids["clinician"], "sourceVersion": 1, "message": "SYNTHETIC S7-U1a matrix critical result"})
+        self.assertEqual(created.status, 201, created.text[:300])
+        cid = created.body["applied"]["id"]
+        prepared = critical_row(cid)
+        self.assertEqual((prepared["state"], prepared["revision"], prepared["recipientSub"], prepared["recipientRole"],
+                          prepared["sourceVersion"], prepared["sourceAction"]),
+                         ("created", 1, self.stack.user_ids["clinician"], "clinician", 1, "approve"), "a C2 record for the clinician")
 
         def last_audit() -> int:
             return int(psql('SELECT coalesce(max(id), 0) FROM "AuditLog"')[0])
 
         def audit_since(mark: int) -> list[dict]:
-            """AuditLog rows after mark that a case could cause: the clinician's own, and a write row's action on the study
-            by anyone (a refused write that wrote anyway)."""
+            """AuditLog rows after mark that a case could cause: the clinician's own, and a write row's action on either
+            study by anyone (a refused write that wrote anyway)."""
             return [json.loads(raw) for raw in psql(
                 f'SELECT to_jsonb(t)::text FROM "AuditLog" t WHERE id > {int(mark)} AND (actor={lit(clinician)} '
-                f'OR (target={lit(uid)} AND action IN ({actions}))) ORDER BY id')]
+                f'OR (target IN ({lit(uid)}, {lit(cvr_uid)}) AND action IN ({actions}))) ORDER BY id')]
 
         # S5-U4a: the :id rows read, follow up and close one question the clinician asks here, through the helper
         # TEST-S5-U4a-LIVE uses; its study.question row is the only audit row the preparation writes
@@ -475,7 +531,11 @@ class ClinicianPolicyLive(unittest.TestCase):
                          [(clinician, "study.question"), (clinician, "study.image-request")])
 
         def values_for(route: str) -> dict:
-            """:uid is the study; :id is the prepared image request on the image-requests rows and the question elsewhere."""
+            """:uid is the study; :id is the prepared image request on the image-requests rows and the question elsewhere.
+            On the critical-results rows (S7-U1a) :id is the prepared record and :uid, which their audit rows target, is the
+            approved study."""
+            if "critical-results" in route:
+                return {":uid": cvr_uid, ":id": cid}
             return {":uid": uid, ":id": rid if "image-requests" in route else qid}
 
         def fill(route: str, template: dict, identity: str) -> dict:
@@ -485,7 +545,8 @@ class ClinicianPolicyLive(unittest.TestCase):
                 owners[identity] = ["none", "none"] if identity in tokens else member_owner(self.stack, identity)
             run = {"$request_id": str(uuid.uuid4()), "$owner": owners[identity]}
             if "$revision" in template.values():
-                run["$revision"] = (read_request_row(rid) if "image-requests" in route else read_question_row(qid))["revision"]
+                run["$revision"] = (critical_row(cid) if "critical-results" in route
+                                    else read_request_row(rid) if "image-requests" in route else read_question_row(qid))["revision"]
             self.assertLessEqual(set(run), set(FILL))
             return {key: run[value] if isinstance(value, str) and value in FILL else value for key, value in template.items()}
 
@@ -496,16 +557,17 @@ class ClinicianPolicyLive(unittest.TestCase):
                 return self.stack.bearer_request("GET", f"/dicom-web/studies/{quote(uid)}/metadata", token,
                                                  base=self.stack.proxy, headers={"Accept": "*/*"}), None
             method, template = route.split(" ", 1)
-            path = "/" + template.replace(":uid", quote(uid)).replace(":id", quote(values_for(route)[":id"]))
+            values = values_for(route)
+            path = "/" + template.replace(":uid", quote(values[":uid"])).replace(":id", quote(values[":id"]))
             query = LIVE_MATRIX["rows"][route].get("query")
             sent = fill(route, WRITES[route]["body"], identity) if route in WRITES else lookup if route == "POST dicom/lookup" else None
             return self.bearer(method, path + ("?" + query if query else ""), token, sent), sent
 
         observed: dict[str, list] = {}
         # logout last: a Bearer logout ends no session (AuthService.logout(null)); the order keeps that question out of the
-        # reading. The close row ends the :id question and the image request change row cancels the :id request, so each
-        # runs after every other row that names it.
-        closing = ("POST questions/:id/close", "POST image-requests/:id")
+        # reading. The close row ends the :id question, the image request change row cancels the :id request and the ACK
+        # row acknowledges the :id critical result, so each runs after every other row that names it.
+        closing = ("POST questions/:id/close", "POST image-requests/:id", "POST critical-results/:id/ack")
         for route in sorted(LIVE_MATRIX["rows"], key=lambda key: (key == "POST auth/logout", key in closing, key)):
             row = LIVE_MATRIX["rows"][route]
             values = values_for(route)

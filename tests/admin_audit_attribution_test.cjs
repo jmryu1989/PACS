@@ -92,8 +92,10 @@ const CONTRACT = {
  * instead of the unknown-action default. Its detail names the creating institution, but the one place that shows it is
  * the study-scoped audit (pacs.service.ts audits(), OWNER_ONLY_AUDIT_ACTIONS), to the owner institution only; the
  * Members console shows it to no institution. The card block above stays verbatim. `study.image-request`, the S5-U4c
- * image request record (the S5-U4c merge), is the same kind of owner-only study-scoped row and takes the same row. */
-CONTRACT.hidden_study_scoped_owner_only = ["study.question", "study.image-request"];
+ * image request record (the S5-U4c merge), is the same kind of owner-only study-scoped row and takes the same row, and
+ * so does `study.critical-result`, the S7-U1a critical result delivery record (contract S7-U1p section 11.2: owner-only,
+ * never the Members console; the admin is no actor of a delivery). */
+CONTRACT.hidden_study_scoped_owner_only = ["study.question", "study.image-request", "study.critical-result"];
 CONTRACT.synthetic_vectors.push({"row":31,"action":"study.question","rule":"hidden:study_scoped_owner_only","record_time_visible_to":[],"withheld_sides":{},"note":"clinician question naming its institution: study-scoped owner-only audit, never the Members console"});
 
 const json = value => JSON.parse(JSON.stringify(value));
@@ -198,9 +200,9 @@ test('the module table is the card contract; allowed and hidden never overlap; t
     assert.deepEqual(allowed.filter(covers), [], `${entry} shadows an allowed action`);
   }
   assert.deepEqual(json(A.AUDIT_TARGET_ACTIONS), ['hanging-protocol.site.save', 'hanging-protocol.site.reset']);
-  // study.question (S5-U4a) and study.image-request (S5-U4c) are hidden by their own rows, and the SQL prefilter never
-  // fetches them for any institution.
-  for (const action of ['study.question', 'study.image-request']) {
+  // study.question (S5-U4a), study.image-request (S5-U4c) and study.critical-result (S7-U1a) are hidden by their own
+  // rows, and the SQL prefilter never fetches them for any institution.
+  for (const action of ['study.question', 'study.image-request', 'study.critical-result']) {
     assert.equal(A.auditRule(action), 'hidden:study_scoped_owner_only', action);
     assert.ok(!A.AUDIT_CANDIDATE_ACTIONS.includes(action), action);
   }
@@ -845,10 +847,11 @@ function assertComplete(scan) {
 test('completeness: every audit action written under api/src has a contract row, and every row is written', () => {
   const scan = scanAuditWrites();
   const { literals, prefixes, unlisted } = assertComplete(scan);
-  // The actions named by a constant: the S5-U4a question write and the S5-U4c image request write, each read from its
-  // own file's declaration.
+  // The actions named by a constant: the S5-U4a question write, the S7-U1a critical result write (the service constant
+  // the contract names, S7-U1p section 11) and the S5-U4c image request write, each read from its own file's declaration.
   assert.deepEqual(scan.sites.filter(site => site.constant).map(site => [site.file, site.form, site.kind, site.actions]),
     [['api/src/clinician-question.service.ts', 'auditLog.create const QUESTION_AUDIT_ACTION', 'literal', ['study.question']],
+      ['api/src/critical-result.service.ts', 'auditLog.create const CRITICAL_RESULT_AUDIT_ACTION', 'literal', ['study.critical-result']],
       ['api/src/image-request.service.ts', 'auditLog.create const IMAGE_REQUEST_AUDIT_ACTION', 'literal', ['study.image-request']]]);
   const byRule = {};
   for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
