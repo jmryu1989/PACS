@@ -78,8 +78,10 @@ receipts that replay the stored `applied` result, revision before state, author/
       wait - the draft write, the hold release and the logout POST, which keep their order. Control: the handler without
       the list call keeps the row up while the draft is written and while the logout POST is held.
   18d every place in main.html that starts KinAuth.logout() calls the end list first (api()'s 401, the dictation 401, the
-      two owner-change exits, Log out before its draft write, the row's own 401); the one other is the membership
-      screen, where no question row ever read. without_u4b() after without_u4c_main() leaves no kinOn401 behind.
+      two owner-change exits, Log out before its draft write, the row's own 401, and since S5-U4bc fix2 the S5-U4c
+      queue write's own 401); the one other is the membership screen, where no question row ever read. without_u4b()
+      after without_u4c_main() leaves no kinOn401 behind. (S5-U4bc-R-001 F01: an account change the row sees goes to the
+      same list with the reason 'account-changed' - tests/clinician_request_dom_test.py c13/m14 open both areas.)
   19  (F3) Inbox -> Open Study for a question outside its study's latest 50 opens it through GET questions/:id and keeps
       it after a reply re-reads the list; a late read of an earlier choice never paints; 404, another study's thread and
       403 are explicit.
@@ -2603,6 +2605,9 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
             "await KinAuth.logout();",  # api()
             f"onUnauthorized: () => {{ {END_401} return KinAuth.logout(); }},",  # the dictation controller's 401
             f"if (e.ownerChanged) {{ studyPageClient.clear(); {END_401} await KinAuth.logout(); return; }}",  # list load
+            # the S5-U4c queue's writes keep the HTTP status outside api() (S5-U4bc-R-001 F02); its mount's logout runs
+            # only from that write's 401 (expire, checked below)
+            "imageRequests = mountImageRequests({ api, apiBase: API, logout: () => KinAuth.logout(),",
             "await KinAuth.logout();",  # Log out
             f"if (e.ownerChanged) {{ studyPageClient.clear(); {END_401} await KinAuth.logout(); return; }}",  # polling
             "studyQuestions = mountStudyQuestions({ apiBase: API, logout: () => KinAuth.logout(), current: () => selectedUid,",
@@ -2621,12 +2626,18 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                       "        (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} });\n        logout();\n",
                       READER_BLOCK)
         self.assertEqual(1, READER_BLOCK.count("      (window.kinOn401 = window.kinOn401 || []).push(end);\n"))
+        # The S5-U4c queue write's 401 the same way: its area, the list, then the logout once; logout() is called nowhere else.
+        from clinician_request_dom_test import BLOCK as U4C_BLOCK
+        from clinician_request_dom_test import without_u4c_main
+        self.assertIn("        if (ended) return;\n        end();\n"
+                      "        (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} });\n        logout();\n",
+                      U4C_BLOCK)
+        self.assertEqual(1, len(re.findall(r"(?<![.\w])logout\(\)", U4C_BLOCK)))
         # The membership screen (a pending or invalid account) is the one start without the list: allowed() needs
         # KinAuth.has(), false for such a session, so the row never read, and the page body is replaced there.
         self.assertIn("document.body.replaceChildren(panel);", extract_function(MAIN, "showMembershipState"))
         # without_u4b() after without_u4c_main() (which cuts the five shared lines) takes every S5-U4b and S5-U4c change
         # back out (the UI2/UI3 byte pins).
-        from clinician_request_dom_test import without_u4c_main
         self.assertNotIn("kinOn401", without_u4b(without_u4c_main(MAIN)))
 
     def test_19_reader_inbox_opens_a_thread_outside_the_latest_fifty(self):

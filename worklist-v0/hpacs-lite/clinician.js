@@ -730,9 +730,10 @@
   // 칸은 고른 검사마다 접힌 summary 한 줄로 생기고 열 때만 읽는다: 접힌 칸에는 단추·제목이 없어 열지 않은 사람의 화면 구성과
   // 탭 순서가 그대로이고, 목록에서 검사를 고를 때마다 서버를 부르지 않는다. 역할을 보고 컨트롤을 숨기지 않는다(U2a) — 취소 칸은
   // 역할이 아니라 서버가 내 요청이라고 한 것(#7 view=mine의 id, requestOwn)에만 두고, 거절은 서버의 코드·문구 그대로 보인다.
-  // 쓰기 응답은 보낸 그 쓰기의 적용 결과와 모두 맞을 때만 저장 결과로 받는다. 결과를 모르는 취소는 그 요청이 최신 50건 밖으로
-  // 밀려도 #8로 따로 읽어 Retry·Discard를 남긴다. 쓰던 글은 검사·요청별로 이 문서의 메모리에만 두어 A->B->A로 돌아오면 다시
-  // 보이고, 서버가 읽기를 거절했거나 다른 계정의 답이 오면(잠금) 이전 계정의 글이라 모두 버린다.
+  // 쓰기 응답은 HTTP 201이고 보낸 그 쓰기의 적용 결과와 모두 맞을 때만 저장 결과로 받는다. 결과를 모르는 취소는 그 요청이 최신
+  // 50건 밖으로 밀려도 #8로 따로 읽어 Retry·Discard를 남긴다. 쓰던 글은 검사·요청별로 이 문서의 메모리에만 두어 A->B->A로 돌아오면
+  // 다시 보이고, 서버가 읽기를 거절했거나 다른 계정의 답이 오면(잠금) 이전 계정의 글이라 모두 버린다. 계정 변경은 어느 칸이
+  // 알아챘든 질문 칸과 함께 잠근다(accountChanged).
   const REQUEST = {
     summary: '이 검사에 남긴 외부영상·영상전송 요청을 엽니다. 연 뒤에만 서버에서 읽습니다.',
     hint: 'External Images는 다른 병원의 영상을 이 기관으로 가져오도록, Send Images는 이 검사의 영상을 다른 병원에 보내도록 '
@@ -849,7 +850,9 @@
 
   /**
    * 요청 쓰기(POST). 읽기(request)처럼 401은 본문을 기다리지 않고 세션을 끝낸다. 연결 실패·제한 시간은 status 0이다 —
-   * 서버가 적용했는지 모르는 결과라 부르는 쪽이 같은 requestId로 다시 보낼 수 있게 남긴다.
+   * 서버가 적용했는지 모르는 결과라 부르는 쪽이 같은 requestId로 다시 보낼 수 있게 남긴다. 성공 응답은 HTTP 상태와 함께
+   * 돌려준다: 적용 결과는 201뿐이라(U4p §3.4) 200·202·204 같은 다른 성공 상태는 부르는 쪽이 결과를 모르는 응답으로 둔다
+   * (Astra S5-U4bc-R-001 F02, 질문 쓰기 questionPost와 같은 규칙).
    */
   async function requestSend(path, payload) {
     const controller = new AbortController();
@@ -863,7 +866,7 @@
       }
       const reply = await response.json().catch(() => null);
       if (!response.ok) throw failure(response.status, reply);
-      return reply;
+      return { status: response.status, body: reply };
     } catch (error) {
       if (error && error.kin) throw error;
       throw failure(0, null, error && error.name === 'AbortError' ? '응답이 없어 요청을 멈췄습니다.' : '서버에 연결하지 못했습니다.');
@@ -897,16 +900,16 @@
   }
 
   /**
-   * 쓰기 응답 봉투(U4p §3.4)가 보낸 그 쓰기의 적용 결과인가: 이 requestId·검사·동작, 새 요청이면 id = requestId·null에서
-   * Requested·revision 1, 취소면 그 요청·보낼 때 읽은 상태에서 Cancelled·보낸 revision + 1, 보낸 종류, 서버가 쓰는 형식의
-   * 시각(at). 재전송 답(replayed)도 처음 적용한 그 결과라 지금 요청이 더 진행되었어도 같은 조건이다. 하나라도 어긋나면 저장
-   * 결과가 아니라 결과를 모르는 요청으로 둔다(같은 requestId로 Retry, 쓰던 글은 그대로).
+   * 쓰기 응답(U4p §3.4)이 보낸 그 쓰기의 적용 결과인가: HTTP 201이고 봉투가 이 requestId·검사·동작, 새 요청이면 id = requestId·
+   * null에서 Requested·revision 1, 취소면 그 요청·보낼 때 읽은 상태에서 Cancelled·보낸 revision + 1, 보낸 종류, 서버가 쓰는
+   * 형식의 시각(at). 재전송 답(replayed)도 처음 적용한 그 결과라 지금 요청이 더 진행되었어도 같은 조건이다. 하나라도 어긋나면
+   * 저장 결과가 아니라 결과를 모르는 요청으로 둔다(같은 requestId로 Retry, 쓰던 글은 그대로).
    */
-  function requestApplied(reply, attempt) {
-    const applied = reply && reply.applied;
+  function requestApplied(sent, attempt) {
+    const reply = sent.body, applied = reply && reply.applied;
     const create = attempt.action === 'create';
     const at = applied && typeof applied.at === 'string' ? new Date(applied.at) : null;
-    return !!applied && typeof applied === 'object' && typeof reply.replayed === 'boolean'
+    return sent.status === 201 && !!applied && typeof applied === 'object' && typeof reply.replayed === 'boolean'
       && typeof applied.requestId === 'string' && applied.requestId.toLowerCase() === attempt.requestId
       && applied.studyUid === attempt.uid && applied.action === attempt.action
       && applied.id === (create ? attempt.requestId : attempt.itemId) && applied.kind === attempt.kind
@@ -935,7 +938,7 @@
         if (!fresh()) return null;
         const same = requestOwnerOf(data);
         if (same === false) {
-          lockRequests(REQUEST.ownerChanged, '');
+          accountChanged('');
           return null;
         }
         const rows = data && data.items;
@@ -979,7 +982,7 @@
         if (!fresh()) return { id, item: null, error: null };
         const same = requestOwnerOf(data);
         if (same === false) {
-          lockRequests(REQUEST.ownerChanged, '');
+          accountChanged('');
           return { id, item: null, error: null };
         }
         if (same === null || !requestItemOk(data.item, uid) || data.item.id !== id) throw new Error(REQUEST.malformed);
@@ -1141,7 +1144,7 @@
       if (!fresh()) return;
       const same = requestOwnerOf(data);
       if (same === false) {
-        lockRequests(REQUEST.ownerChanged, '');
+        accountChanged('');
         return;
       }
       if (same === null) throw new Error(REQUEST.malformed);
@@ -1473,10 +1476,10 @@
     attempt.unknown = false;
     setRequestNote(key, 'busy', REQUEST.sending);
     repaintRequestComposer(key);
-    let reply = null;
+    let sent = null;
     let error = null;
     try {
-      reply = await requestSend(attempt.path, { requestId: attempt.requestId, expectedOwner: attempt.owner, ...attempt.payload });
+      sent = await requestSend(attempt.path, { requestId: attempt.requestId, expectedOwner: attempt.owner, ...attempt.payload });
     } catch (caught) {
       error = caught;
     }
@@ -1487,14 +1490,15 @@
       requestWriteFailed(attempt, error);
       return;
     }
-    const same = requestOwnerOf(reply);
+    const same = requestOwnerOf(sent.body);
     if (same === false) {
-      lockRequests(REQUEST.ownerChanged, '');
+      accountChanged('');
       return;
     }
-    if (same === null || !requestApplied(reply, attempt)) {
+    // 201이 아닌 성공 상태는 적용 결과가 아니다. 그 상태를 자세한 줄에 보이고 같은 requestId의 Retry·Discard를 남긴다.
+    if (same === null || !requestApplied(sent, attempt)) {
       attempt.unknown = true;
-      setRequestNote(key, 'unknown', REQUEST.writeMalformed);
+      setRequestNote(key, 'unknown', REQUEST.writeMalformed, sent.status === 201 ? '' : `HTTP ${sent.status}`);
       repaintRequestComposer(key);
       return;
     }
@@ -1502,7 +1506,7 @@
     requestDrafts.delete(key);
     // 서버가 이 계정([기관, sub])의 새 요청으로 적용했다는 영수증이다 — 이 id는 내 요청이다(목록에서 다시 묻지 않는다).
     if (attempt.action === 'create') requestOwn.set(attempt.requestId, true);
-    setRequestNote(key, 'saved', reply.replayed ? REQUEST.replayed : attempt.action === 'create' ? REQUEST.created : REQUEST.cancelled);
+    setRequestNote(key, 'saved', sent.body.replayed ? REQUEST.replayed : attempt.action === 'create' ? REQUEST.created : REQUEST.cancelled);
     repaintRequestComposer(key);
     // 화면의 목록은 쓰기 응답(적용 결과)이 아니라 읽기 route로 다시 읽은 현재 상태로만 그린다.
     refreshRequests(attempt.uid);
@@ -1516,7 +1520,7 @@
     const key = attempt.key;
     if (error.status === 401) return;
     if (error.code === 'OWNER_CHANGED') {
-      lockRequests(REQUEST.ownerChanged, describe(error));
+      accountChanged(describe(error));
       return;
     }
     if (error.status === 0 || error.status >= 500 || error.code === 'STUDY_ACCESS_CHANGED') {
@@ -1534,12 +1538,13 @@
   }
 
   /**
-   * 서버가 요청 읽기를 거절했거나(403) 다른 계정의 답·OWNER_CHANGED가 왔다. 이 문서에서는 요청을 더 읽거나 쓰지 않고 진행 중인
-   * 요청의 답도 그리지 않는다(뷰어 세션의 거절·계정 변경과 같은 한 방향). 쓰던 글은 이전 계정의 것이라 버린다.
+   * 서버가 요청 읽기를 거절했거나(403) 계정이 바뀌었다(accountChanged — 어느 영역이 알아챘든 두 영역을 함께 잠근다). 이 문서에서는
+   * 요청을 더 읽거나 쓰지 않고 진행 중인 요청의 답도 그리지 않는다(뷰어 세션의 거절·계정 변경과 같은 한 방향). 쓰던 글은 이전 계정의
+   * 것이라 버린다. 403으로 이미 잠긴 뒤 계정 변경을 알면(account) 그 까닭으로 바꿔 쓴다.
    */
-  function lockRequests(text, detail) {
-    if (requestsLock !== null) return;
-    requestsLock = { text, detail: detail || '' };
+  function lockRequests(text, detail, account = false) {
+    if (requestsLock !== null && (requestsLock.account || !account)) return;
+    requestsLock = { text, detail: detail || '', account };
     requestsEpoch++;
     requestsItems = null;
     requestDrafts.clear();
@@ -2133,7 +2138,7 @@
       if (!questionFresh(epoch, uid) || mine !== questionListSeq) return;
       const same = questionOwnerOf(data);
       if (same === false) {
-        lockQuestions(QUESTION.ownerChanged, '');
+        accountChanged('');
         return;
       }
       if (same === null) throw new Error(QUESTION.malformed);
@@ -2279,7 +2284,7 @@
       if (!questionFresh(epoch, uid) || mine !== questionThreadSeq || questionThread !== id) return;
       const same = questionOwnerOf(data);
       if (same === false) {
-        lockQuestions(QUESTION.ownerChanged, '');
+        accountChanged('');
         return;
       }
       if (same === null) throw new Error(QUESTION.malformed);
@@ -2528,7 +2533,7 @@
     }
     const same = questionOwnerOf(sent.body);
     if (same === false) {
-      lockQuestions(QUESTION.ownerChanged, '');
+      accountChanged('');
       return;
     }
     if (same === null || !questionApplied(sent, attempt)) {
@@ -2557,7 +2562,7 @@
   function questionWriteFailed(key, attempt, error) {
     if (error.status === 401) return;
     if (error.code === 'OWNER_CHANGED') {
-      lockQuestions(QUESTION.ownerChanged, describe(error));
+      accountChanged(describe(error));
       return;
     }
     if (error.status === 0 || error.status >= 500 || error.code === 'STUDY_ACCESS_CHANGED') {
@@ -2576,12 +2581,24 @@
   }
 
   /**
-   * 서버가 질문 읽기를 거절했거나(403) 다른 계정의 답·OWNER_CHANGED가 왔다. 이 문서에서는 질문을 더 읽거나 쓰지 않고
-   * 진행 중인 요청의 답도 그리지 않는다(뷰어 세션의 거절·계정 변경과 같은 한 방향). 쓰던 글은 이전 계정의 것이라 버린다.
+   * 확인된 계정 변경(다른 계정의 봉투 owner·OWNER_CHANGED)은 알아챈 칸만의 일이 아니다. 같은 문서의 질문·영상 요청 두 영역을
+   * 이 자리에서 함께 잠가, 네트워크를 기다리기 전에 두 영역의 쓰던 글·결과를 모르는 요청·읽기/쓰기 번호를 버린다 — 한쪽만 잠그면
+   * 다른 쪽에 이전 계정의 글과 Retry가 남고, 나가 있던 쓰기의 늦은 영수증이 저장 결과로 그려진다(Astra S5-U4bc-R-001 F01).
+   * 한 검사의 읽기를 서버가 403으로 거절한 것은 계정 변경이 아니라서 그 영역만 잠근다(lockQuestions·lockRequests를 직접 부른다).
    */
-  function lockQuestions(text, detail) {
-    if (questionLock !== null) return;
-    questionLock = { text, detail: detail || '' };
+  function accountChanged(detail) {
+    lockQuestions(QUESTION.ownerChanged, detail, true);
+    lockRequests(REQUEST.ownerChanged, detail, true);
+  }
+
+  /**
+   * 서버가 질문 읽기를 거절했거나(403) 계정이 바뀌었다(accountChanged). 이 문서에서는 질문을 더 읽거나 쓰지 않고 진행 중인
+   * 요청의 답도 그리지 않는다(뷰어 세션의 거절·계정 변경과 같은 한 방향). 쓰던 글은 이전 계정의 것이라 버린다. 403으로 이미
+   * 잠긴 뒤 계정 변경을 알면(account) 그 까닭으로 바꿔 쓴다.
+   */
+  function lockQuestions(text, detail, account = false) {
+    if (questionLock !== null && (questionLock.account || !account)) return;
+    questionLock = { text, detail: detail || '', account };
     questionEpoch++;
     pickQuestionThread(null);
     questionThreadItem = null;

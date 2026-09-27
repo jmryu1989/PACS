@@ -42,6 +42,16 @@ Clinician Home (clinician.html + clinician.js + auth.js served unchanged):
        Retry is gone.
   c11  (C-R-001 F3) #8 answering 403 or 404 for such a request: the row says the cancel can no longer be checked, shows
        none of the old content and no Retry, and the unknown write is dropped.
+  c12  (S5-U4bc-R-001 F02) only a 201 is an applied write (U4p §3.4): a correct receipt answered 200, 202 or a body-less
+       204, for a create and for a cancel, stays unknown with the status shown, the fields read-only and Retry / Discard;
+       the server did apply it, Retry sends the same requestId and body and gets the stored 201 (replayed), one request.
+       A 201 whose receipt is not this write stays unknown. Control: the check without the status saves on a 200.
+  c13  (S5-U4bc-R-001 F01) both areas open on one study (the question routes answered by tests/clinician_question_dom_test.py
+       QuestionServer): an account change seen by either area (409 OWNER_CHANGED on a Reply, another account's request
+       list) locks both at once - drafts, the unknown write and its Retry gone before the other area's held write is
+       answered; that answer (the old account's valid 201) paints nothing and nothing is read or sent after it, nor after
+       A->B->A, reopening or a later session end. A 403 locks only the area that got it. Controls: the file whose account
+       change locks only the area that saw it paints the old account's late receipt as saved, each way.
 
 main.html (its markup and CSS as shipped with the scripts stripped; the page's own api() and setMode() and the S5-U4c
 block cut from main.html and run over small stand-ins):
@@ -70,6 +80,15 @@ block cut from main.html and run over small stand-ins):
        network wait (the draft write held, or the logout POST held); late read and write answers draw nothing and
        nothing new is read; the draft write, hold release and logout keep their order. Cancelled confirm and an
        insertion in flight end nothing. Control: the handler without the hook line keeps the note and paints late.
+  m13  (S5-U4bc-R-001 F02) the queue's writes go through the block's own transport, which keeps the HTTP status (api()
+       is unchanged): Accept answered 200, Close 202, Decline a body-less 204 and an admin's Cancel 200 each stay unknown
+       with the status shown, the note kept read-only and Retry / Discard; Retry sends the same body and gets the stored
+       201. Control: the check without the status saves an Accept answered 200.
+  m14  (S5-U4bc-R-001 F01) the S5-U4c block and the S5-U4b block (tests/clinician_question_dom_test.py READER_BLOCK) on one
+       page: an account change seen by either (409 OWNER_CHANGED on a Reply, another account's queue page) locks both
+       through window.kinOn401 with the reason 'account-changed' before the other's held write is answered; that answer
+       paints nothing, nothing more is read or sent (another reading study, a later session end). A 403 locks only its
+       own area. Controls: each block without the list call leaves the other area open and paints its late receipt.
 """
 import copy
 import hashlib
@@ -83,6 +102,14 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.sync_api import expect, sync_playwright
+# S5-U4bc-R-001 F01: the question area's server stand-in, block and views for the cases that open both areas together.
+from clinician_question_dom_test import CLINICIAN_VIEW as QUESTION_HOME_VIEW
+from clinician_question_dom_test import HOOK as QUESTION_HOOK
+from clinician_question_dom_test import OWNER_CHANGED as QUESTION_OWNER_CHANGED
+from clinician_question_dom_test import READER_BLOCK as QUESTION_BLOCK
+from clinician_question_dom_test import READER_VIEW as QUESTION_READER_VIEW
+from clinician_question_dom_test import REFUSED as QUESTION_REFUSED
+from clinician_question_dom_test import QuestionServer, kind_of
 from report_actions_dom_test import BASE_MAIN_SHA256 as UI3_BASE_MAIN_SHA256
 from report_actions_dom_test import BASE_SCRIPTS_SHA256 as UI3_BASE_SCRIPTS_SHA256
 from report_actions_dom_test import scripts_digest, without_ui3
@@ -324,6 +351,24 @@ CLINICIAN_FIX1_RECEIPT = variant(SHIPPED["clinician.js"], [(
     "      && applied.id === (attempt.action === 'create' ? attempt.requestId : attempt.itemId)\n"
     "      && Number.isSafeInteger(applied.revision) && applied.revision >= 1 && REQUEST_STATES.includes(applied.to);\n", 1),
 ], "clinician.js")
+# S5-U4bc-R-001 F02 controls: the receipt checks without the HTTP status (any 2xx with a matching receipt is saved), which
+# is what the status-dropping transports of fix3 amounted to.
+CLINICIAN_ANY_2XX = variant(SHIPPED["clinician.js"], [
+    ("    return sent.status === 201 && !!applied && typeof applied === 'object' && typeof reply.replayed === 'boolean'\n",
+     "    return !!applied && typeof applied === 'object' && typeof reply.replayed === 'boolean'\n", 1),
+], "clinician.js")
+BLOCK_ANY_2XX = variant(BLOCK, [
+    ("        return sent.status === 201 && !!applied && typeof applied === 'object' && typeof answer.replayed === 'boolean'\n",
+     "        return !!applied && typeof applied === 'object' && typeof answer.replayed === 'boolean'\n", 1),
+], "the S5-U4c block")
+# S5-U4bc-R-001 F01 controls: an account change locks only the area that saw it (as each unit shipped before the fix).
+CLINICIAN_QUESTIONS_ONLY = variant(SHIPPED["clinician.js"], [
+    ("    lockRequests(REQUEST.ownerChanged, detail, true);\n", "", 1)], "clinician.js")
+CLINICIAN_REQUESTS_ONLY = variant(SHIPPED["clinician.js"], [
+    ("    lockQuestions(QUESTION.ownerChanged, detail, true);\n", "", 1)], "clinician.js")
+ACCOUNT_LIST = "        (window.kinOn401 || []).forEach(done => { try { done('account-changed', detail); } catch (_) {} });\n"
+BLOCK_ONE_AREA = variant(BLOCK, [(ACCOUNT_LIST, "", 1)], "the S5-U4c block")
+QUESTION_BLOCK_ONE_AREA = variant(QUESTION_BLOCK, [(ACCOUNT_LIST, "", 1)], "the S5-U4b block")
 
 # Everything the cut block and the shipped api()/setMode() read from the page script, as small stand-ins. The page's
 # renderClinical() is the shipped HOOK line (pinned in s02); synPick() is a selection followed by it.
@@ -355,6 +400,12 @@ window.synSetMode = m => setMode(m);
 # session and broadcasts the end, which is the wait the 401 hook must not depend on.
 _STUB_AUTH = PRELUDE[PRELUDE.index("const KinAuth = {\n"):PRELUDE.index("};\n", PRELUDE.index("const KinAuth = {\n")) + 3]
 PRELUDE_REAL_AUTH = variant(PRELUDE, [(_STUB_AUTH, "", 1)], "PRELUDE")
+# m14 runs the S5-U4b block beside this one: renderClinical() carries both shipped hook lines, and select() (the S5-U4b
+# Inbox's Open Study) is the page's early return for the same study followed by renderClinical().
+PRELUDE_BOTH = variant(PRELUDE, [(
+    "function renderClinical() {\n" + HOOK + "}\n",
+    "function renderClinical() {\n" + HOOK + QUESTION_HOOK + "}\n"
+    "function select(uid) { if (uid === selectedUid) return; selectedUid = uid; renderClinical(); }\n", 1)], "PRELUDE")
 
 INSTITUTION = "SYN-INST-A"
 CLIN_SUB = "SYN-CLIN-SUB"
@@ -754,6 +805,22 @@ class ImageRequestStructureTest(unittest.TestCase):
         self.assertEqual(sorted({"/studies/${encodeURIComponent(uid)}/image-requests", "/image-requests/${encodeURIComponent(id)}",
                                  "/image-requests?${query}"}),
                          sorted(set(re.findall(r"`(/(?:studies|image-requests)[^`]*)`", CLINICIAN_BLOCK))))
+        # S5-U4bc-R-001 F02: each write transport hands back the HTTP status with the body and only a 201 is a receipt. The
+        # queue's writes leave the page's api() (shared with every other caller, unchanged above) for the block's post();
+        # its 401 is one more logout start: the area, then the end list, then the logout (as api()'s).
+        self.assertNotIn("call('POST'", BLOCK)
+        self.assertIn("          return { status: response.status, data };\n", BLOCK)
+        self.assertIn("        return sent.status === 201 && !!applied", BLOCK)
+        self.assertIn("          if (response.status === 401) {\n            expire();\n", BLOCK)
+        self.assertIn("        if (ended) return;\n        end();\n"
+                      "        (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} });\n        logout();\n", BLOCK)
+        self.assertIn("      return { status: response.status, body: reply };\n", CLINICIAN_BLOCK)
+        self.assertIn("    return sent.status === 201 && !!applied", CLINICIAN_BLOCK)
+        # F01: the owner-changed lock is reached only through the shared account-change path - main.html's block calls the
+        # end list with the reason, clinician.js's accountChanged() (in the S5-U4b block) locks both areas.
+        self.assertEqual((1, 0), (BLOCK.count(ACCOUNT_LIST), BLOCK.count("lockPanel(TEXT.ownerChanged, '')")))
+        self.assertNotIn("lockRequests(REQUEST.ownerChanged", CLINICIAN_BLOCK)
+        self.assertEqual(1, SHIPPED["clinician.js"].count("    lockRequests(REQUEST.ownerChanged, detail, true);\n"))
 
 
 class Harness(unittest.TestCase):
@@ -772,6 +839,12 @@ class Harness(unittest.TestCase):
         # Each applied (or replayed) write answer passes through the next of these first: a receipt that is not the one
         # the page sent (B-R-001 F2). The server itself stores and replays the correct one.
         self.mangles = []
+        # S5-U4bc-R-001 F02: the HTTP status the next applied (or replayed) write answers carry instead of 201; a 204 has no body.
+        self.statuses = []
+        # F01: the S5-U4b question routes beside these, answered by self.questions (QuestionServer) once a case sets it; a
+        # (status, body) in q_faults[kind] answers the next request of that kind instead; a kind in q_holding waits in q_held.
+        self.questions = None
+        self.q_calls, self.q_faults, self.q_holding, self.q_held = [], {}, set(), []
         self.lose_replies = 0
         self.held_reads = self.held_writes = None
         self.reads, self.writes = [], []
@@ -881,12 +954,39 @@ class Harness(unittest.TestCase):
         status, reply = apply(body)
         if self.mangles and status == 201:
             reply = self.mangles.pop(0)(copy.deepcopy(reply))
+        if self.statuses and status == 201:
+            status = self.statuses.pop(0)
+            if status == 204:
+                route.fulfill(status=204, body="")
+                return
         if self.lose_replies:
             # Applied and committed, but the reply never arrives (a network failure after the commit).
             self.lose_replies -= 1
             route.abort()
             return
         route.fulfill(status=status, json=reply)
+
+    def answer_question(self, route, caller):
+        """An S5-U4b route (the F01 cases), answered by self.questions as clinician-question.service.ts would for caller."""
+        request = route.request
+        url = urlparse(request.url)
+        kind = kind_of(request.method, url.path)
+        body = request.post_data_json if request.method == "POST" else None
+        self.q_calls.append((kind, copy.deepcopy(body)))
+        faults = self.q_faults.get(kind)
+        answer = faults.pop(0) if faults else self.questions.handle(
+            caller, request.method, url.path, parse_qs(url.query, keep_blank_values=True), body)
+        if kind in self.q_holding:
+            self.q_held.append((kind, route, answer))
+            return
+        route.fulfill(status=answer[0], json=answer[1])
+
+    def take_question(self, kind):
+        """The one held question request of this kind, once it has arrived (the server has already answered it)."""
+        self.wait_until(lambda: any(held[0] == kind for held in self.q_held), f"the held {kind}")
+        held = next(entry for entry in self.q_held if entry[0] == kind)
+        self.q_held.remove(held)
+        return held
 
     def wording(self, selector, labels):
         texts = self.page.evaluate(TEXTS_IN, selector)
@@ -972,6 +1072,9 @@ class ClinicianRequestDOMTest(Harness):
         found = re.fullmatch(r"/api/clinician/studies/([^/]+)/report", path)
         if method == "GET" and found:
             route.fulfill(json={"uid": unquote(found.group(1)), "report": {"final": False, "rs": "W"}, "keys": None})
+            return
+        if self.questions is not None and kind_of(method, path):
+            self.answer_question(route, self.me)
             return
         found = re.fullmatch(r"/api/studies/([^/]+)/image-requests", path)
         if found and not url.query:
@@ -1701,6 +1804,234 @@ class ClinicianRequestDOMTest(Harness):
         self.reopen("empty")
         self.assertEqual((2, []), (len(self.detail_calls), self.view()["items"]))
 
+    def test_c12_a_write_answered_with_another_2xx_stays_unknown(self):
+        a = uid(1)
+        for n in (1, 2, 3):
+            self.server.add(item(n, a, "Requested", kind="image-transfer", at=4 - n))
+        form = self.page.locator("#image-request-new")
+        # Control: without the status in the check, a correct receipt answered 200 is taken as saved.
+        self.open_home(CLINICIAN_ANY_2XX)
+        self.pick(1)
+        self.open_requests("ready")
+        self.statuses = [200]
+        self.fill("external-image", "SYN Hospital K", "SYN reason K")
+        form.locator("[data-send]").click()
+        self.note_state(form, "saved")
+        self.assertEqual(["saved", C_CREATED, ""], self.view()["form"]["note"], "control: a 200 is taken as saved")
+        self.server.items.pop(self.writes[0][1]["requestId"])
+        self.server.receipts.clear()
+        self.writes.clear()
+
+        self.open_home()
+        self.pick(1)
+        self.open_requests("ready")
+        count = len(self.server.items)
+        for status in (200, 202, 204):
+            with self.subTest(create=status):
+                writes = len(self.writes)
+                self.statuses = [status]
+                self.fill("external-image", f"SYN Hospital {status}", f"SYN reason {status}")
+                form.locator("[data-send]").click()
+                self.note_state(form, "unknown")
+                seen = self.view()["form"]
+                self.assertEqual((["unknown", WRITE_MALFORMED, f"HTTP {status}"], "external-image", f"SYN Hospital {status}",
+                                  f"SYN reason {status}", True, True, False, True, True),
+                                 (seen["note"], seen["kind"], seen["counterparty"], seen["reason"], seen["readOnly"],
+                                  seen["kindDisabled"], seen["send"], seen["retry"], seen["discard"]))
+                self.assertEqual(count + 1, len(self.server.items), "the server applied it; the screen cannot tell")
+                form.locator("[data-retry]").click()
+                self.note_state(form, "saved")
+                self.assertEqual(["saved", REPLAYED, ""], self.view()["form"]["note"])
+                self.assertEqual(writes + 2, len(self.writes))
+                self.assertEqual(self.writes[-2], self.writes[-1], "Retry sends the same requestId and body")
+                self.assertEqual(count + 1, len(self.server.items), "one request, not two")
+                # Finished at the server, so the next create of the same kind is allowed.
+                self.server.items[self.writes[-1][1]["requestId"]].update(state="Cancelled", revision=2, note="SYN finished")
+                count += 1
+        for n, status in ((1, 200), (2, 202), (3, 204)):
+            with self.subTest(cancel=status):
+                entry = self.item_locator(n)
+                entry.locator('[data-field="note"]').fill(f"SYN cancel {status}")
+                writes = len(self.writes)
+                self.statuses = [status]
+                entry.locator("[data-send]").click()
+                self.note_state(entry, "unknown")
+                mine = next(row for row in self.view()["items"] if row["id"] == rid(n))
+                self.assertEqual((["unknown", WRITE_MALFORMED, f"HTTP {status}"], "unknown", f"SYN cancel {status}", True, False,
+                                  True, True),
+                                 (mine["note"], mine["cancel"]["state"], mine["cancel"]["value"], mine["cancel"]["readOnly"],
+                                  mine["cancel"]["send"], mine["cancel"]["retry"], mine["cancel"]["discard"]))
+                self.assertEqual((1, "cancel", f"SYN cancel {status}"),
+                                 tuple(self.writes[-1][1][key] for key in ("revision", "action", "note")))
+                self.assertEqual(("Cancelled", 2), (self.server.items[rid(n)]["state"], self.server.items[rid(n)]["revision"]))
+                entry.locator("[data-retry]").click()
+                self.note_state(entry, "saved")
+                self.assertEqual(writes + 2, len(self.writes))
+                self.assertEqual(self.writes[-2], self.writes[-1], "Retry sends the same requestId, revision and reason")
+                self.assertEqual(["saved", REPLAYED, ""], next(row for row in self.view()["items"] if row["id"] == rid(n))["note"])
+                self.assertEqual(2, self.server.items[rid(n)]["revision"], "applied once")
+        # A 201 whose receipt is not this write is not saved either (c07); its matching stored receipt is.
+        self.mangles = [bad_receipt({"revision": 2})]
+        self.fill("external-image", "SYN Hospital M", "SYN reason M")
+        form.locator("[data-send]").click()
+        self.note_state(form, "unknown")
+        self.assertEqual(["unknown", WRITE_MALFORMED, ""], self.view()["form"]["note"])
+        form.locator("[data-retry]").click()
+        self.note_state(form, "saved")
+        self.assertEqual(["saved", REPLAYED, ""], self.view()["form"]["note"])
+
+    # ── S5-U4bc-R-001 F01: both areas of Clinician Home ──
+    def with_questions(self):
+        """The question routes answered too, with one question thread of this clinician on study 1."""
+        self.questions = QuestionServer([uid(1), uid(2)])
+        self.q_calls.clear()
+        return self.questions.seed(uid(1), {"sub": CLIN_SUB, "actor": "syn-clinician", "name": "SYN Clinician"},
+                                   "SYN question on A")
+
+    def questions_view(self):
+        return self.page.evaluate(QUESTION_HOME_VIEW)
+
+    def open_questions_thread(self, thread):
+        self.page.locator("#questions-summary").click()
+        expect(self.page.locator("#questions-state")).to_have_attribute("data-state", "ready")
+        self.page.locator(f'#question-list > li[data-id="{thread["id"]}"] button[data-open-thread]').click()
+        expect(self.page.locator("#question-thread")).to_have_attribute("data-state", "Open")
+        self.page.locator("#question-ask-text").fill("SYN question draft")
+
+    def send_reply(self, text):
+        self.page.locator("#question-reply-text").fill(text)
+        self.page.locator('.question-compose[data-action="reply"] button[data-send]').click()
+
+    def test_c13_an_account_change_seen_by_either_area_ends_both(self):
+        a = uid(1)
+        self.server.add(item(1, a, "Requested", kind="image-transfer", at=2))
+        changed = "SYN owner changed (HTTP 409 · OWNER_CHANGED)"
+        # (a) The question area sees it (409 OWNER_CHANGED on a Reply) while the request area has a new request typed and a
+        # cancel on its way; the old account's receipt for that cancel then arrives.
+        for label, script in (("questions-only control", CLINICIAN_QUESTIONS_ONLY), ("shipped", None)):
+            with self.subTest(seen_by="questions", file=label):
+                self.server.items[rid(1)].update(state="Requested", revision=1, note=None)
+                self.server.receipts.clear()
+                thread = self.with_questions()
+                self.open_home(script)
+                self.pick(1)
+                self.open_questions_thread(thread)
+                self.open_requests("ready")
+                self.fill("external-image", "SYN-DRAFT-HOSPITAL", "SYN request draft")
+                self.item_locator(1).locator('[data-field="note"]').fill("SYN cancel reason")
+                self.held_writes = []
+                self.item_locator(1).locator("[data-send]").click()
+                self.wait_until(lambda: len(self.held_writes) == 1, "the held cancel")
+                reads, writes = len(self.reads), len(self.writes)
+                self.q_faults["reply"] = [(409, {"code": "OWNER_CHANGED", "message": "SYN owner changed"})]
+                self.send_reply("SYN reply")
+                expect(self.page.locator("#questions")).to_have_attribute("data-state", "locked")
+                at_change = self.view()
+                route, apply, body = self.held_writes.pop()
+                self.held_writes = None
+                status, reply = apply(body)
+                self.release(route, reply, status)
+                late = self.view()
+                if script is not None:
+                    self.assertEqual(("ready", ["saved", C_CANCELLED, ""]), (at_change["state"], late["items"][0]["note"]),
+                                     "control: the request area stays open and paints the old account's receipt")
+                    continue
+                # Locked in the same task as the question area, before the held cancel was answered: the typed request,
+                # the cancel reason and the unknown cancel are gone, and so are their controls.
+                self.assertEqual(("locked", ["failed", OWNER_CHANGED, changed, False, "alert"], None, []),
+                                 (at_change["state"], at_change["list"], at_change["form"], at_change["items"]))
+                self.assertEqual(at_change, late, "the old account's receipt paints nothing")
+                self.assertEqual((reads, writes), (len(self.reads), len(self.writes)), "nothing is read or sent after it")
+                seen = self.questions_view()
+                self.assertEqual(("locked", QUESTION_OWNER_CHANGED, changed, None, []),
+                                 (seen["state"], seen["list"]["text"], seen["list"]["detail"], seen["thread"], seen["composers"]))
+                # A->B->A and closing and opening both areas read nothing, send nothing and bring no draft back.
+                q_calls = len(self.q_calls)
+                self.pick(2)
+                self.pick(1)
+                for summary in ("#questions-summary", "#image-requests-summary", "#questions-summary", "#image-requests-summary"):
+                    self.page.locator(summary).click()
+                self.settle()
+                seen, questions = self.view(), self.questions_view()
+                self.assertEqual(("locked", OWNER_CHANGED, None, []), (seen["state"], seen["list"][1], seen["form"], seen["items"]))
+                self.assertEqual(("locked", QUESTION_OWNER_CHANGED, []), (questions["state"], questions["list"]["text"],
+                                                                          questions["composers"]))
+                self.assertEqual((reads, writes, q_calls), (len(self.reads), len(self.writes), len(self.q_calls)))
+
+        # (b) The request area sees it (another account's list) while a Reply of the question area is on its way.
+        for label, script in (("requests-only control", CLINICIAN_REQUESTS_ONLY), ("shipped", None)):
+            with self.subTest(seen_by="requests", file=label):
+                thread = self.with_questions()
+                self.open_home(script)
+                self.pick(1)
+                self.open_questions_thread(thread)
+                self.q_holding = {"reply"}
+                self.send_reply("SYN reply on its way")
+                _, route, answer = self.take_question("reply")
+                self.q_holding = set()
+                self.read_errors = [(200, {"owner": [INSTITUTION, "SYN-OTHER-SUB"], "items": []})]
+                self.open_requests("failed")
+                at_change = self.questions_view()
+                q_calls = len(self.q_calls)
+                self.release(route, answer[1], answer[0])
+                late = self.questions_view()
+                self.assertEqual(2, len(self.questions.threads[thread["id"]]["entries"]), "the server applied the Reply")
+                if script is not None:
+                    self.assertEqual("ready", at_change["state"], "control: the question area stays open")
+                    self.assertIn("saved", [note["state"] for note in late["notes"]], "control: and paints the old receipt")
+                    continue
+                self.assertEqual(("locked", QUESTION_OWNER_CHANGED, "", None, [], []),
+                                 (at_change["state"], at_change["list"]["text"], at_change["list"]["detail"], at_change["thread"],
+                                  at_change["composers"], at_change["notes"]))
+                self.assertEqual(at_change, late, "the old account's receipt paints nothing")
+                self.assertEqual(q_calls, len(self.q_calls), "and reads nothing again")
+                self.assertEqual(("locked", OWNER_CHANGED), (self.view()["state"], self.view()["list"][1]))
+
+        # (c) A 403 is one study's refusal, not an account change: only the area that got it locks.
+        thread = self.with_questions()
+        self.open_home()
+        self.pick(1)
+        self.page.locator("#questions-summary").click()
+        expect(self.page.locator("#questions-state")).to_have_attribute("data-state", "ready")
+        self.page.locator("#question-ask-text").fill("SYN question kept")
+        self.read_errors = [(403, err("IMAGE_REQUEST_ROLE_REQUIRED", "이 영상 요청 동작에 필요한 역할이 없습니다"))]
+        self.open_requests("failed")
+        self.assertEqual(("locked", C_REFUSED), (self.view()["state"], self.view()["list"][1]))
+        seen = self.questions_view()
+        ask = next(composer for composer in seen["composers"] if composer["action"] == "ask")
+        self.assertEqual(("ready", "SYN question kept", True), (seen["state"], ask["value"], ask["send"]))
+        self.page.locator('.question-compose[data-action="ask"] button[data-send]').click()
+        expect(self.page.locator('.question-compose[data-action="ask"] [data-note-key]')).to_have_attribute("data-state", "saved")
+        self.assertEqual(2, len(self.questions.threads))
+        self.open_home()
+        self.pick(1)
+        self.q_faults["list"] = [(403, {"code": "QUESTION_ROLE_REQUIRED", "message": "SYN refused"})]
+        self.page.locator("#questions-summary").click()
+        expect(self.page.locator("#questions")).to_have_attribute("data-state", "locked")
+        self.assertEqual(QUESTION_REFUSED, self.questions_view()["list"]["text"])
+        self.open_requests("ready")
+        self.fill("external-image", "SYN Hospital N", "SYN reason N")
+        form = self.page.locator("#image-request-new")
+        form.locator("[data-send]").click()
+        self.note_state(form, "saved")
+        self.assertEqual(["saved", C_CREATED, ""], self.view()["form"]["note"])
+
+        # After an account change a session end still closes the page, and nothing is read or sent on the way out.
+        thread = self.with_questions()
+        self.open_home()
+        self.pick(1)
+        self.open_questions_thread(thread)
+        self.open_requests("ready")
+        self.q_faults["reply"] = [(409, {"code": "OWNER_CHANGED", "message": "SYN owner changed"})]
+        self.send_reply("SYN reply")
+        expect(self.page.locator("#image-requests")).to_have_attribute("data-state", "locked")
+        counts = (len(self.reads), len(self.writes), len(self.q_calls))
+        self.page.evaluate(BROADCAST_ENDED)
+        self.wait_until(lambda: self.navigations, "the navigation to index.html")
+        self.settle()
+        self.assertEqual({"children": ["P@status"], "text": CLOSING}, self.page.evaluate(CLOSED_VIEW))
+        self.assertEqual(counts, (len(self.reads), len(self.writes), len(self.q_calls)))
+
 
 class MainRequestDOMTest(Harness):
     STUDIES = [
@@ -1769,6 +2100,11 @@ class MainRequestDOMTest(Harness):
                 return
             route.fulfill(json={})
             return
+        if self.questions is not None and kind_of(method, path):
+            self.answer_question(route, {"sub": self.session["sub"], "actor": self.session["user"],
+                                         "displayName": self.session["displayName"], "roles": self.session["roles"],
+                                         "institution": self.session["institution"]})
+            return
         query = {key: values[0] for key, values in parse_qs(url.query, keep_blank_values=True).items()}
         if method == "GET" and path == "/api/image-requests" and query.get("view") == "mine":
             self.answer_mine(route, query)
@@ -1802,9 +2138,10 @@ class MainRequestDOMTest(Harness):
         route.abort()
 
     # ── page helpers ──
-    def open_main(self, block=BLOCK, api_fn=API_FN, real_auth=False, logout=None):
+    def open_main(self, block=BLOCK, api_fn=API_FN, real_auth=False, logout=None, questions=None):
         """`logout`: the page's Log out handler (LOGOUT_BLOCK or its control) to run after the block, over LOGOUT_STANDINS;
-        confirm() answers window.synConfirm and logs itself."""
+        confirm() answers window.synConfirm and logs itself. `questions`: the S5-U4b block (or its control) to run after
+        this one, with renderClinical() calling both hooks (m14; the stand-in KinAuth only)."""
         head = ("<script>window.synSession = " + json.dumps(self.session) + "; window.synStudies = " + json.dumps(self.STUDIES)
                 + "; window.synInstitutions = " + json.dumps(self.INSTITUTIONS) + "; window.synToasts = []; window.synLogouts = 0;"
                 + " window.synOrder = []; window.synConfirm = true;"
@@ -1812,7 +2149,8 @@ class MainRequestDOMTest(Harness):
         if real_auth:
             head += "<script>\n" + SHIPPED["auth.js"] + "\n</script>"
         tail = "" if logout is None else LOGOUT_STANDINS + logout
-        script = ("<script>\n" + (PRELUDE_REAL_AUTH if real_auth else PRELUDE) + api_fn + "\n" + SET_MODE + "\n" + block + "\n"
+        prelude = PRELUDE_REAL_AUTH if real_auth else PRELUDE if questions is None else PRELUDE_BOTH
+        script = ("<script>\n" + prelude + api_fn + "\n" + SET_MODE + "\n" + block + "\n" + (questions or "") + "\n"
                   + tail + "\n</script>")
         at = MAIN_PAGE.rindex("</body>")
         self.html = MAIN_PAGE[:at] + head + script + MAIN_PAGE[at:]
@@ -2581,6 +2919,185 @@ class MainRequestDOMTest(Harness):
                 self.assertEqual((order, [], []), (self.page.evaluate("() => window.synOrder.slice()"), self.page_posts, self.logouts))
                 self.act("accept")
                 self.result("saved")
+
+    def unknown_until_replayed(self, n, state, action, note, status, after):
+        """One write of the open request answered with a correct receipt but HTTP `status`: unknown, then Retry's 201."""
+        self.open_item(n, state)
+        self.page.locator("#image-request-note").fill(note)
+        writes = len(self.writes)
+        self.statuses = [status]
+        self.act(action)
+        self.result("unknown")
+        seen = self.queue()["detail"]
+        self.assertEqual((["unknown", WRITE_MALFORMED, f"HTTP {status}", True], "unknown", note, True, True, True),
+                         (seen["result"], seen["write"], seen["note"], seen["noteReadOnly"], seen["retry"], seen["discard"]))
+        self.assertTrue(all(disabled for _, disabled, _ in seen["actions"]))
+        self.assertEqual(after, self.server.items[rid(n)]["state"], "the server applied it; the screen cannot tell")
+        self.page.locator('#image-request-detail [data-write="retry"]').click()
+        self.result("saved")
+        self.assertEqual(["saved", REPLAYED, "", True], self.queue()["detail"]["result"])
+        self.assertEqual(writes + 2, len(self.writes))
+        self.assertEqual(self.writes[-2], self.writes[-1], "Retry sends the same requestId, revision and note")
+        expect(self.page.locator("#image-request-detail")).to_have_attribute("data-state", after)
+
+    def test_m13_a_write_answered_with_another_2xx_stays_unknown(self):
+        # Control: without the status in the check, an Accept whose correct receipt comes with 200 is taken as saved.
+        self.open_main(BLOCK_ANY_2XX)
+        self.open_queue()
+        self.open_item(21, "Requested")
+        self.statuses = [200]
+        self.act("accept")
+        self.result("saved")
+        self.assertEqual(["saved", M_SAVED["accept"], "", True], self.queue()["detail"]["result"], "control: a 200 is taken as saved")
+        self.server.items[rid(21)].update(state="Requested", revision=1, handler=None)
+        self.server.receipts.clear()
+
+        self.open_main()
+        self.open_queue()
+        for n, state, action, note, status, after in ((21, "Requested", "accept", "", 200, "Accepted"),
+                                                      (21, "Accepted", "close", "SYN handled 202", 202, "Closed"),
+                                                      (23, "Requested", "decline", "SYN declined 204", 204, "Declined")):
+            with self.subTest(action=action, status=status):
+                self.unknown_until_replayed(n, state, action, note, status, after)
+        self.use("admin", "SYN-ADMIN-SUB")
+        self.open_main()
+        self.open_queue()
+        with self.subTest(action="cancel", status=200):
+            self.unknown_until_replayed(22, "Accepted", "cancel", "SYN cancelled 200", 200, "Cancelled")
+
+    # ── S5-U4bc-R-001 F01: the request block and the question block on one page ──
+    def open_both(self, block=BLOCK, questions=QUESTION_BLOCK):
+        """A radiologist-technician session with both blocks mounted and one clinician question thread on study 11."""
+        self.use_roles(["radiologist", "technician"], "SYN-RADTECH-SUB", "syn-radtech", "SYN RadTech")
+        self.server.items[rid(21)].update(state="Requested", revision=1, note=None, handler=None)
+        self.questions = QuestionServer([uid(11), uid(12)])
+        self.q_calls.clear()
+        thread = self.questions.seed(uid(11), {"sub": CLIN_SUB, "actor": "syn-clinician", "name": "SYN Clinician"},
+                                     "SYN question on A")
+        self.open_main(block=block, questions=questions)
+        self.assertEqual([], self.page.evaluate("() => window.synToasts"), "both blocks mounted")
+        return thread
+
+    def open_question_thread(self, thread):
+        """Radiology mode, study 11 read by both blocks, the question pane open on the thread."""
+        self.mode("Radiology")
+        self.pick(11)
+        expect(self.page.locator("#question-p")).to_have_attribute("data-state", "ready")
+        expect(self.page.locator("#image-request-p")).to_have_attribute("data-state", "ready")
+        self.page.locator("#question-toggle").click()
+        self.page.locator(f'#question-list > li[data-id="{thread["id"]}"] button[data-open-thread]').click()
+        expect(self.page.locator("#question-thread")).to_have_attribute("data-state", "Open")
+
+    def send_answer(self, text):
+        self.page.locator("#question-reply-text").fill(text)
+        self.page.locator('#question-thread .question-compose[data-action="reply"] button[data-send]').click()
+
+    def questions_row(self):
+        return self.page.evaluate(QUESTION_READER_VIEW)
+
+    def test_m14_an_account_change_seen_by_either_block_ends_both(self):
+        changed = "SYN owner changed (HTTP 409 · OWNER_CHANGED)"
+        # (a) The question block sees it (409 OWNER_CHANGED on a Reply) while the queue has a note typed and an Accept on
+        # its way; the old account's receipt for that Accept then arrives.
+        for label, questions in (("question block without the list call (control)", QUESTION_BLOCK_ONE_AREA),
+                                 ("shipped", QUESTION_BLOCK)):
+            with self.subTest(seen_by="questions", block=label):
+                thread = self.open_both(questions=questions)
+                self.open_queue()
+                self.open_item(21, "Requested")
+                self.page.locator("#image-request-note").fill("SYN note typed before the change")
+                self.held_writes = []
+                self.act("accept")
+                self.wait_until(lambda: len(self.held_writes) == 1, "the held accept")
+                self.open_question_thread(thread)
+                counts = (len(self.reads), len(self.writes), len(self.queue_calls), len(self.detail_calls))
+                self.q_faults["reply"] = [(409, {"code": "OWNER_CHANGED", "message": "SYN owner changed"})]
+                self.send_answer("SYN answer")
+                expect(self.page.locator("#question-p")).to_have_attribute("data-state", "locked")
+                reading = self.reading()
+                note = self.page.evaluate("() => document.querySelector('#image-request-note').value")
+                route, apply, body = self.held_writes.pop()
+                self.held_writes = None
+                status, reply = apply(body)
+                self.release(route, reply, status)
+                row = self.questions_row()
+                self.mode("Technician")
+                seen = self.queue()
+                if questions is QUESTION_BLOCK_ONE_AREA:
+                    self.assertEqual(("ready", False, "saved"), (reading["state"], seen["lock"][3], seen["detail"]["result"][0]),
+                                     "control: the queue stays open and paints the old account's Accept as saved")
+                    continue
+                # Locked in the same task as the question row, before the held Accept was answered.
+                self.assertEqual(("locked", OWNER_CHANGED, False, ""), (reading["state"], reading["summary"], reading["pane"], note))
+                self.assertEqual((["failed", OWNER_CHANGED, changed, True], None, []), (seen["lock"], seen["detail"], seen["items"]))
+                self.assertEqual(counts, (len(self.reads), len(self.writes), len(self.queue_calls), len(self.detail_calls)),
+                                 "the old account's receipt reads and sends nothing")
+                self.assertEqual(("locked", ["failed", QUESTION_OWNER_CHANGED, changed], None), (row["state"], row["lock"], row["thread"]))
+                # Another reading study, then a session end: nothing is read or sent by either block.
+                q_calls = len(self.q_calls)
+                self.mode("Radiology")
+                self.pick(12)
+                self.settle()
+                self.page.evaluate(BROADCAST_ENDED)
+                self.mode("Technician")
+                expect(self.page.locator("#image-request-queue-lock")).to_contain_text(M_ENDED)
+                expect(self.page.locator("#question-p")).to_have_attribute("data-state", "ended")
+                self.assertEqual(counts + (q_calls,), (len(self.reads), len(self.writes), len(self.queue_calls),
+                                                       len(self.detail_calls), len(self.q_calls)))
+
+        # (b) The request block sees it (another account's queue page) while an answer of the question row is on its way.
+        for label, block in (("request block without the list call (control)", BLOCK_ONE_AREA), ("shipped", BLOCK)):
+            with self.subTest(seen_by="requests", block=label):
+                thread = self.open_both(block=block)
+                self.open_question_thread(thread)
+                self.page.locator("#question-close-text").fill("SYN close reason typed")
+                self.q_holding = {"reply"}
+                self.send_answer("SYN answer on its way")
+                _, route, answer = self.take_question("reply")
+                self.q_holding = set()
+                self.queue_errors = [(200, {"owner": [INSTITUTION, "SYN-OTHER-SUB"], "items": [], "nextCursor": None})]
+                self.open_queue(None)
+                expect(self.page.locator("#image-request-queue-lock")).to_be_visible()
+                self.mode("Radiology")
+                at_change = self.questions_row()
+                q_calls, reads = len(self.q_calls), len(self.reads)
+                self.release(route, answer[1], answer[0])
+                late = self.questions_row()
+                self.assertEqual(2, len(self.questions.threads[thread["id"]]["entries"]), "the server applied the answer")
+                if block is BLOCK_ONE_AREA:
+                    self.assertEqual("ready", at_change["state"], "control: the question row stays open")
+                    self.assertIn("saved", [entry["state"] for entry in late["notes"]], "control: and paints the old receipt")
+                    continue
+                self.assertEqual(("locked", ["failed", QUESTION_OWNER_CHANGED, ""], None, [], []),
+                                 (at_change["state"], at_change["lock"], at_change["thread"], at_change["composers"], at_change["notes"]))
+                self.assertEqual(at_change, late, "the old account's receipt paints nothing")
+                self.pick(12)
+                self.settle()
+                self.assertEqual((q_calls, reads), (len(self.q_calls), len(self.reads)), "nothing is read after it")
+                self.assertEqual(("locked", OWNER_CHANGED), (self.reading()["state"], self.reading()["summary"]))
+
+        # (c) A 403 is one reading's refusal, not an account change: only the block that got it locks.
+        thread = self.open_both()
+        self.read_errors = [(403, err("IMAGE_REQUEST_ROLE_REQUIRED", "이 영상 요청 동작에 필요한 역할이 없습니다"))]
+        self.pick(11)
+        expect(self.page.locator("#image-request-p")).to_have_attribute("data-state", "locked")
+        expect(self.page.locator("#question-p")).to_have_attribute("data-state", "ready")
+        self.assertEqual(C_REFUSED, self.reading()["summary"])
+        self.page.locator("#question-toggle").click()
+        self.page.locator(f'#question-list > li[data-id="{thread["id"]}"] button[data-open-thread]').click()
+        expect(self.page.locator("#question-thread")).to_have_attribute("data-state", "Open")
+        self.send_answer("SYN answer after the refusal")
+        expect(self.page.locator("#question-thread [data-note-key]:not([hidden])").first).to_have_attribute("data-state", "saved")
+        self.open_both()
+        self.q_faults["list"] = [(403, {"code": "QUESTION_ROLE_REQUIRED", "message": "SYN refused"})]
+        self.pick(11)
+        expect(self.page.locator("#question-p")).to_have_attribute("data-state", "locked")
+        expect(self.page.locator("#image-request-p")).to_have_attribute("data-state", "ready")
+        self.assertEqual(QUESTION_REFUSED, self.questions_row()["summary"])
+        self.open_queue()
+        self.open_item(21, "Requested")
+        self.act("accept")
+        self.result("saved")
 
 
 if __name__ == "__main__":
