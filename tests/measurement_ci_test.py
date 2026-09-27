@@ -102,8 +102,45 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertEqual(outer, 575)
                 outers.append(outer)
         # Both suites at their cap still leave the stack setup and cleanup their share of the one shared deadline.
-        self.assertIn('deadline = time.monotonic()+25*60', (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
         self.assertLessEqual(sum(outers), 25*60 - 350)
+
+        # S5-CIE fix1 (Astra S5-CIE-R-001 F01): the deadline is observed from main() itself on a fake clock, where the
+        # stack setup takes `setup` seconds and each suite spends its whole outer budget, not read from its source.
+        def granted_budgets(setup):
+            clock = [1000.0]
+            fake_time = MagicMock()
+            fake_time.monotonic.side_effect = lambda: clock[0]
+            granted = []
+
+            def fake_run(command, **kwargs):
+                command = [str(part) for part in command]
+                if any(part.endswith('run-tests.py') for part in command):
+                    granted.append((int(command[command.index('--timeout')+1]), kwargs['timeout']))
+                    clock[0] += kwargs['timeout']
+                return MagicMock(returncode=0, stdout=b'', stderr=b'')
+
+            def slow_setup():
+                clock[0] += setup
+
+            with tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                response = MagicMock(); response.__enter__.return_value.status = 200
+                with patch.dict(os.environ, {'GITHUB_ACTIONS':'true', 'RUNNER_ENVIRONMENT':'github-hosted'}, clear=True), \
+                     patch.object(ci, 'ROOT', root), \
+                     patch.dict(ci.PROFILES, {'u2b-regressions': {**profile, 'out': root/'artifacts'}}), \
+                     patch.object(ci, 'time', fake_time), \
+                     patch.object(ci, 'seed_source', side_effect=slow_setup), \
+                     patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']), \
+                     patch.object(ci.subprocess, 'run', side_effect=fake_run), \
+                     patch.object(ci, 'urlopen', return_value=response):
+                    ci.main('u2b-regressions')
+                self.assertTrue((root/'artifacts'/'results.json').exists())
+            return granted
+
+        # 350s of setup: both suites still receive their full 540s inner and 575s outer budgets.
+        self.assertEqual(granted_budgets(350), [(540, 575), (540, 575)])
+        # One more second of setup and the second suite is already short: the shared deadline is exactly 25 minutes.
+        self.assertEqual(granted_budgets(351), [(540, 575), (539, 574)])
         # Each suite's sanitized log is its own artifact file and never overwrites a stack step's log.
         logs = [Path(suite).stem for suite, _, _ in profile['suites']]
         self.assertEqual(len(set(logs)), 2)
@@ -119,35 +156,152 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertFalse({row[0] for row in other['suites']} & {row[0] for row in profile['suites']})
 
     def test_validate_workflow_runs_u2b_regressions_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  u2b-regressions:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one u2b-regressions job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
-                         'persist-credentials: false',
-                         'tests/measurement_ci.py --profile u2b-regressions',
-                         'tests/execution_selection_test.py',
-                         'tests/e2e/artifacts/u2b-regressions-ci/',
-                         'tests/e2e/artifacts/test_d03a_*.png',
-                         'name: synthetic-u2b-regressions-results',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
-        self.assertEqual(text.count('--profile u2b-regressions'), 1)
-        self.assertNotIn('--profile u2b-regressions', jobs[0])
-        self.assertEqual(text.count('name: synthetic-u2b-regressions-results'), 1)
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        # S5-CIE fix1 (Astra S5-CIE-R-001 F01/F02): the workflow is read through the installed YAML parser and the
+        # collection step through its own shell, so an equivalent spelling passes while a disabled upload, a missing
+        # artifact path or a wrong timeout fails.
+        import ast, fnmatch, re, shlex, shutil, subprocess
+        import yaml
+
+        def load(name):
+            return yaml.safe_load((ci.ROOT/'.github/workflows'/name).read_text(encoding='utf-8'))
+
+        def words(step):
+            for line in str(step.get('run') or '').replace('\\\n', ' ').splitlines():
+                try:
+                    yield shlex.split(line, comments=True)
+                except ValueError:
+                    continue
+
+        def profiles(step):
+            # Every measurement_ci.py profile the step's shell requests, as --profile X or --profile=X.
+            found = []
+            for line in words(step):
+                for index, word in enumerate(line):
+                    if not word.endswith('tests/measurement_ci.py'):
+                        continue
+                    rest = line[index+1:]
+                    for position, argument in enumerate(rest):
+                        if argument == '--profile' and position+1 < len(rest):
+                            found.append(rest[position+1])
+                        elif argument.startswith('--profile='):
+                            found.append(argument.split('=', 1)[1])
+            return found
+
+        def executes(step, script):
+            # The script is an argument to run, not a --file input that record-run only hashes.
+            return any(word == script and (index == 0 or line[index-1] != '--file')
+                       for line in words(step) for index, word in enumerate(line))
+
+        def always(step):
+            return re.fullmatch(r'\s*(\$\{\{\s*always\(\)\s*\}\}|always\(\))\s*', str(step.get('if', ''))) is not None
+
+        workflow = load('validate.yml')
+        requests = [(name, index, found) for name, other in workflow['jobs'].items()
+                    for index, step in enumerate(other.get('steps', [])) for found in profiles(step)]
+
+        def requested(profile):
+            return [(name, index) for name, index, found in requests if found == profile]
+
+        job = workflow['jobs']['u2b-regressions']
+        steps = job['steps']
+        self.assertEqual(job['runs-on'], 'ubuntu-24.04')
+        self.assertEqual(int(job['timeout-minutes']), 40)
+        checkout = [step for step in steps if str(step.get('uses', '')).startswith('actions/checkout@')]
+        self.assertEqual(len(checkout), 1)
+        self.assertEqual(str(checkout[0]['with']['persist-credentials']).lower(), 'false')
+
+        # One live step in the whole workflow runs this profile, in its own job, bounded at 28 minutes and unconditional.
+        self.assertIn('u2b-regressions', ci.PROFILES)
+        self.assertEqual(len(requested('u2b-regressions')), 1)
+        (owner, live), = requested('u2b-regressions')
+        self.assertEqual(owner, 'u2b-regressions')
+        self.assertEqual(int(steps[live]['timeout-minutes']), 28)
+        self.assertNotIn('if', steps[live])
+        self.assertFalse(steps[live].get('continue-on-error', False))
+        self.assertTrue(any(executes(step, 'tests/execution_selection_test.py') for step in steps[:live]))
         for profile in ['measurements', 'volume-rendering', 'volume-mpr', 'volume-slab', 'hanging-protocols', 'cell-merge']:
-            self.assertEqual(text.count('--profile '+profile), 1)
+            self.assertEqual(len(requested(profile)), 1)
+
+        # One upload, after the live step, that runs whatever the live step did.
+        uploads = [index for index, step in enumerate(steps) if str(step.get('uses', '')).startswith('actions/upload-artifact@')]
+        self.assertEqual(len(uploads), 1)
+        upload, = uploads
+        self.assertGreater(upload, live)
+        self.assertTrue(always(steps[upload]))
+        options = steps[upload]['with']
+        self.assertEqual(options['name'], 'synthetic-u2b-regressions-results')
+        self.assertEqual(sum(step.get('with', {}).get('name') == options['name']
+                             for other in workflow['jobs'].values() for step in other.get('steps', [])), 1)
+        paths = {line.strip().rstrip('/') for line in str(options['path']).splitlines() if line.strip()}
+        self.assertEqual(paths, {'tests/e2e/artifacts/u2b-regressions-ci', 'tests/e2e/artifacts/test_d03a_*.png',
+                                 'tests/e2e/artifacts/test_scope_*.png', 'tmp/u2b-regressions-ci'})
+        self.assertEqual(options['if-no-files-found'], 'error')
+        self.assertEqual(int(options['retention-days']), 7)
+
+        def uploaded(relative):
+            return any(relative == path or relative.startswith(path+'/') or fnmatch.fnmatchcase(relative, path)
+                       for path in paths)
+
+        # Every screenshot either suite writes reaches the artifact. The inherited viewer() names its file after the
+        # running case under tests/e2e/artifacts/; fixed screenshot paths are resolved against the suite's cwd, ROOT.
+        fixed = []
+        for suite, class_name, _ in ci.PROFILES['u2b-regressions']['suites']:
+            tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+            declared = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+            cases = [node.name for node in declared.body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]
+            self.assertEqual(len(cases), 2)
+            for case in cases:
+                with self.subTest(case=case):
+                    self.assertTrue(uploaded('tests/e2e/artifacts/'+case+'-current.png'))
+            fixed += [keyword.value.value for node in ast.walk(tree) if isinstance(node, ast.Call)
+                      and isinstance(node.func, ast.Attribute) and node.func.attr == 'screenshot'
+                      for keyword in node.keywords if keyword.arg == 'path'
+                      and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str)]
+        self.assertTrue(fixed)
+
+        # The single step between the live step and the upload collects the fixed screenshots that land outside the
+        # checkout; it is run here under bash -e, the runner's default shell for a run step without `shell`.
+        between = steps[live+1:upload]
+        self.assertEqual(len(between), 1)
+        collect, = between
+        self.assertTrue(always(collect))
+        self.assertNotIn('shell', collect)
+        bash = shutil.which('bash')
+        self.assertIsNotNone(bash, 'the collection step is a bash run step')
+
+        def collected(folder, sources):
+            checkout = Path(folder)/'checkout'
+            checkout.mkdir()
+            for index, relative in enumerate(sources):
+                target = (checkout/relative).resolve()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b'synthetic screenshot %d' % index)
+            before = {path for path in checkout.rglob('*')}
+            # On stdin, not -c: the Windows bash launcher re-parses a -c argument before bash sees it.
+            result = subprocess.run([bash, '-e', '-s'], input=collect['run'].encode('utf-8'), cwd=checkout,
+                                    capture_output=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+            return {path.relative_to(checkout).as_posix(): path.read_bytes()
+                    for path in checkout.rglob('*') if path.is_file() and uploaded(path.relative_to(checkout).as_posix())}, \
+                   {path for path in checkout.rglob('*')} - before
+
+        # A Windows bash (WSL) may still hold its former cwd when the folder is removed; only removal is tolerated.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            files, added = collected(folder, [])
+            # A run that never reached the suite adds nothing and does not fail the evidence upload by itself.
+            self.assertEqual((files, added), ({}, set()))
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            files, _ = collected(folder, fixed)
+            for index, relative in enumerate(fixed):
+                with self.subTest(screenshot=relative):
+                    self.assertIn(b'synthetic screenshot %d' % index, files.values())
+
         # A standing push/PR gate only; the manual dispatcher does not duplicate it.
-        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
-        self.assertNotIn('u2b-regressions', dispatch)
+        dispatch = load('output-integration.yml')
+        triggers = dispatch.get('on', dispatch.get(True))
+        self.assertNotIn('u2b-regressions', triggers['workflow_dispatch']['inputs']['profile']['options'])
+        self.assertFalse([step for other in dispatch['jobs'].values() for step in other.get('steps', [])
+                          if 'u2b-regressions' in profiles(step)])
 
     def test_image_thumbnails_profile_is_exact_and_separate(self):
         profile=ci.PROFILES['image-thumbnails']

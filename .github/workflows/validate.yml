@@ -946,6 +946,17 @@ jobs:
         timeout-minutes: 28
         run: |
           "$RUNNER_TEMP/u2b-regressions-python/bin/python" tests/measurement_ci.py --profile u2b-regressions
+      - name: Collect related-scope screenshots
+        # test_related_scope.py writes controls.png beside the checkout, outside every upload path; only this
+        # suite's synthetic screenshots on this disposable runner are copied, and a run that never reached it adds nothing.
+        if: always()
+        run: |
+          shopt -s nullglob
+          shots=(../tmp/related-scope/*.png)
+          if [ "${#shots[@]}" -gt 0 ]; then
+            mkdir -p tests/e2e/artifacts/u2b-regressions-ci/related-scope
+            cp -- "${shots[@]}" tests/e2e/artifacts/u2b-regressions-ci/related-scope/
+          fi
       - name: Sanitized synthetic U2b regression evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -954,6 +965,7 @@ jobs:
           path: |
             tests/e2e/artifacts/u2b-regressions-ci/
             tests/e2e/artifacts/test_d03a_*.png
+            tests/e2e/artifacts/test_scope_*.png
             tmp/u2b-regressions-ci/
           if-no-files-found: error
           retention-days: 7
