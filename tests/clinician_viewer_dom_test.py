@@ -147,7 +147,11 @@ Findings, Job and Tech Note modules instead):
       GET studies, which this harness does not answer — shows no notice after the normal login and moves the prior to the same
       position; an unanswered check (/me 500) says so with Recheck Access, which the pointer reaches while the notice itself lets it
       through, and pressing it brings sync back; a 401 is the only session end (its words, no button, nothing asked after it).
-      Control: a radiologist document keeps GET studies.
+      (fix1, Astra S5-U2c-R-001 F01) the document's end while an event waits for its image: a Measurements or layout panel's 401
+      (kinViewerSession.refuse()) and, in another document, another account answering another panel (note()) — the released
+      image moves nothing, nothing more is asked, the session words stay; the document's own /me read answering 403 (decide())
+      is a refusal instead: its words with Recheck Access, nothing moves, and Recheck Access brings sync back. Control: a
+      radiologist document keeps GET studies.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is S5-U1b (tests/clinician_read_live.py, hosted synthetic stack only).
@@ -996,8 +1000,14 @@ CT_SYNC_TEXT = {
     "ended": "세션이 변경되었거나 종료되어 위치 동기를 중지했습니다. 다시 로그인한 뒤 뷰어를 여세요",
     "confirmed": "검사 접근 정보를 확인했습니다. 위치 동기를 사용할 수 있습니다",
     "failed": "검사 접근 정보를 확인하지 못해 위치 동기를 멈췄습니다. 연결 상태를 확인한 뒤 다시 확인하세요",
+    "denied": "이 계정으로 검사 접근 정보를 확인할 수 없어 위치 동기를 멈췄습니다. 권한을 확인한 뒤 다시 확인하세요",
     "synced": "같은 좌표계의 CT 위치 동기",
 }
+# test_24 (fix1): the image preload kept unanswered until the case releases it, then answered at once again.
+CT_SYNC_HOLD_IMAGES = """() => { window.synCtImages = [];
+  cornerstone.imageLoader.loadAndCacheImage = () => new Promise(resolve => window.synCtImages.push(resolve)); }"""
+CT_SYNC_RELEASE_IMAGES = """() => { cornerstone.imageLoader.loadAndCacheImage = async () => ({});
+  window.synCtImages.splice(0).forEach(resolve => resolve({})); }"""
 # test_24: the shipped kin.ct-sync mounted over two same-frame CT stacks (current every 2 mm, prior every 4 mm) with the pinned
 # sync group's surface; the native synchronizer is permissive (every enabled target goes to the nearest position), so a target that
 # stays put was held by the extension. Nothing else of the harness is booted.
@@ -3556,6 +3566,62 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.assertEqual(({"visible": True, "text": CT_SYNC_TEXT["ended"], "recheck": False}, 12, [], 1),
                          (self.page.evaluate("synCt.notice()"), self.page.evaluate("synCt.z('syn-ct-b')"),
                           self.api_paths(start), self.me_requests - asked))
+        self.assertEqual([], self.unexpected)
+        # fix1 (Astra S5-U2c-R-001 F01): the document's end while an event waits for its image. A Measurements or layout panel's
+        # 401 (their sessionEnded(): kinViewerSession.refuse()) arrives while the preload is held: the released image moves nothing.
+        self.page.evaluate("synCt.exit()")
+        self.me_status = None
+        start = len(self.finished)
+        self.page.evaluate("synCt.enter()")
+        self.wait_until(lambda: len(self.api_paths(start)) >= 3, "the access check of the next entry")
+        self.settle()
+        self.page.evaluate(CT_SYNC_HOLD_IMAGES)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 10)")
+        self.wait_until(lambda: self.page.evaluate("synCtImages.length") == 1, "the event waiting for its image")
+        self.settle()
+        start = len(self.finished)
+        self.page.evaluate("() => kinViewerSession.refuse()")
+        self.page.evaluate(CT_SYNC_RELEASE_IMAGES)
+        self.settle()
+        self.assertEqual(({"visible": True, "text": CT_SYNC_TEXT["ended"], "recheck": False}, 12, []),
+                         (self.page.evaluate("synCt.notice()"), self.page.evaluate("synCt.z('syn-ct-b')"), self.api_paths(start)))
+        # Another account answering another panel of a document that confirmed the first one (note()) is the same end.
+        self.fresh_page()
+        self.me, self.me_status = CLINICIAN, None
+        self.assertEqual(["/api/me", "/api/clinician/studies?limit=100", "/api/me"], self.ct_sync_document())
+        self.page.evaluate(CT_SYNC_HOLD_IMAGES)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: self.page.evaluate("synCtImages.length") == 1, "the event waiting for its image")
+        self.settle()
+        start = len(self.finished)
+        self.page.evaluate("([first, other]) => { kinViewerSession.note(first); kinViewerSession.note(other); }",
+                           [CLINICIAN, OTHER_CLINICIAN])
+        self.page.evaluate(CT_SYNC_RELEASE_IMAGES)
+        self.settle()
+        self.assertEqual(({"visible": True, "text": CT_SYNC_TEXT["ended"], "recheck": False}, 0, []),
+                         (self.page.evaluate("synCt.notice()"), self.page.evaluate("synCt.z('syn-ct-b')"), self.api_paths(start)))
+        # The document's own /me read answering 403 (decide(), the write modules' gate) refuses this account instead: its words with
+        # Recheck Access, the released image moves nothing, and only Recheck Access brings sync back.
+        self.fresh_page()
+        self.me, self.me_status = CLINICIAN, None
+        self.assertEqual(["/api/me", "/api/clinician/studies?limit=100", "/api/me"], self.ct_sync_document())
+        self.page.evaluate(CT_SYNC_HOLD_IMAGES)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: self.page.evaluate("synCtImages.length") == 1, "the event waiting for its image")
+        self.settle()
+        start = len(self.finished)
+        self.me_status = 403
+        self.assertEqual("refused", self.page.evaluate("() => kinViewerSession.decide()"))
+        self.me_status = None
+        self.page.evaluate(CT_SYNC_RELEASE_IMAGES)
+        self.settle()
+        self.assertEqual(({"visible": True, "text": CT_SYNC_TEXT["denied"], "recheck": True}, 0, ["/api/me"]),
+                         (self.page.evaluate("synCt.notice()"), self.page.evaluate("synCt.z('syn-ct-b')"), self.api_paths(start)))
+        self.page.locator("#kin-ct-sync-recheck").click()
+        self.wait_until(lambda: self.page.evaluate("synCt.notice()")["text"] == CT_SYNC_TEXT["confirmed"],
+                        "Recheck Access after the refusal")
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.wait_until(lambda: self.page.evaluate("synCt.z('syn-ct-b')") == 12, "sync back after the refusal's Recheck Access")
         self.assertEqual([], self.unexpected)
         # Control: a radiologist document keeps GET studies (answered here by this page only).
         self.fresh_page()

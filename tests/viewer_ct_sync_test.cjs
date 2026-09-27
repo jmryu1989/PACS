@@ -1,6 +1,6 @@
 'use strict';
 /* REQ-S5-U2c-CLINICIAN-CT-SYNC -> RISK-S5-U2c-FALSE-SESSION-END / RISK-S5-U2c-ALLOWLIST-WIDENING / RISK-S5-U2c-WRONG-PATIENT-SYNC
-   -> TEST-S5-U2c-PURE (Astra S5-VIEWER-UXR-R-001 F01, VUI-02).
+   / RISK-S5-U2c-SYNC-AFTER-DOCUMENT-END -> TEST-S5-U2c-PURE (Astra S5-VIEWER-UXR-R-001 F01, VUI-02; fix1: Astra S5-U2c-R-001 F01).
 
    config/ohif.js runs unchanged in a vm and kinCreateCTSync is mounted against in-test stand-ins for the pinned OHIF services
    (sync group, grid, display sets, cornerstone viewports, metadata and image loader) and for the API. The API stand-in answers
@@ -259,6 +259,12 @@ function world(options = {}) {
   w.expire = ms => { for (const [id, t] of [...timers]) if (t.ms === ms) { timers.delete(id); t.fn(); } };
   w.storage = key => { for (const fn of [...(windowListeners.get('storage') || [])]) fn({ key }); };
   w.broadcast = data => { for (const c of [...channels]) { const e = { data }; c.onmessage?.(e); for (const fn of [...c.listeners]) fn(e); } };
+  w.pagehide = () => { for (const fn of [...(windowListeners.get('pagehide') || [])]) fn({ type: 'pagehide', persisted: false }); };
+  // The document's own /me read (kinViewerSession.decide(), the write modules' gate) answered with `status`; nothing else changes.
+  w.decide = async status => {
+    w.answer = e => e.key === 'GET me' ? respond(status, { statusCode: status }) : undefined;
+    try { return await kin.kinViewerSession.decide(); } finally { w.answer = null; }
+  };
   w.notices = () => body.children.filter(node => node.id === 'kin-ct-sync-status');
   w.screen = () => {
     const found = w.notices();
@@ -683,27 +689,211 @@ test('A->B->A across mode exits: the first mount\'s late answers touch nothing o
   }
 });
 
-test('a document whose login already ended starts ended; another panel\'s refusal while mounted is not an end here', async () => {
-  for (const end of [w => w.storage('kin-session-ended'), w => w.broadcast({ type: 'session-ended' }), w => w.kin.kinViewerSession.refuse()]) {
-    const w = world({ mount: false });
-    end(w);
+// Astra S5-U2c-R-001 F01. What ends the document's login (kinViewerSession) as the viewer's other parts do it: the Measurements and
+// layout panels' sessionEnded() on their 401 (config/ohif.js kinCreateViewerHistory and kinCreateViewerLayout: refuse()), a write
+// module's 401 (writeModule.refuse()), another panel's /me answer of another account (note() after the document confirmed the
+// first one), the document's own /me read answering 401 (decide()), and the logout broadcast. pagehide ends the mount itself.
+const ENDS = {
+  "a Measurements or layout panel's 401 (refuse())": w => { w.kin.kinViewerSession.refuse(); },
+  "a write module's 401 (writeModule.refuse())": w => { w.kin.kinViewerSession.writeModule.refuse(); },
+  'another account answering another panel (note())': w => { w.kin.kinViewerSession.note(CLINICIAN); w.kin.kinViewerSession.note(OTHER_CLINICIAN); },
+  "the document's own /me read answering 401 (decide())": w => w.decide(401),
+  'the storage logout': w => { w.storage('kin-session-ended'); },
+  'the BroadcastChannel logout': w => { w.broadcast({ type: 'session-ended' }); },
+};
+// A /me refusal the document reads itself: this account's refusal, the same answer this extension's own /me calls denied.
+const REFUSALS = {
+  "the document's own /me read answering 403 (decide())": w => w.decide(403),
+  "another panel's /me answer that is no institution member's (note())": w => {
+    w.kin.kinViewerSession.note({ kind: 'anonymous', sub: 'SYN-CLIN', institution: INST }); },
+};
+// Where the mount is waiting when the document's verdict arrives: an event's image preload (Astra's path, config/ohif.js the
+// native fire right after it), an event's /me already on the wire (it answers the first account), or the access check's second
+// list page already on the wire with an event waiting for that check.
+const STAGES = {
+  'an event waiting for its image': async () => {
+    const w = world();
+    await flush();
+    const sync = w.sync();
+    w.holdLoads = true;
+    const pending = w.scroll(sync, 'vp-a', 4);
+    await flush();
+    assert.equal(w.heldLoads.length, 1, 'the event waits for its preload');
+    return { w, sync, pending, release: () => { w.holdLoads = false; w.heldLoads.splice(0).forEach(go => go()); } };
+  },
+  'an event waiting for its /me': async () => {
+    const w = world();
+    await flush();
+    const sync = w.sync();
+    w.hold(e => e.key === 'GET me', true);
+    const pending = w.scroll(sync, 'vp-a', 4);
+    await flush();
+    assert.equal(w.held.length, 1, 'the event waits for its /me');
+    return { w, sync, pending, release: () => { w.held.splice(0).forEach(e => e.release()); } };
+  },
+  'the check waiting for a list page': async () => {
+    const w = world({ rows: MANY, mount: false });
+    w.hold(e => e.key === 'GET clinician/studies' && e.query.includes('after='), true);
     w.enter();
     await flush();
-    assert.deepEqual(w.log, []);
-    assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.ended, recheck: false });
+    assert.equal(w.held.length, 1, 'the check waits for its second page');
+    const sync = w.sync();
+    const pending = w.scroll(sync, 'vp-a', 4);
+    await flush();
+    assert.equal(w.screen().text, TEXT.checking, 'the event waits for the check');
+    return { w, sync, pending, release: () => { w.held.splice(0).forEach(e => e.release()); } };
+  },
+};
+
+test('a document whose login already ended starts ended; one that refused this account asks nothing until Recheck Access', async () => {
+  for (const [label, end] of Object.entries(ENDS)) {
+    const w = world({ mount: false });
+    await end(w);
+    const asked = w.log.length;
+    w.enter();
+    await flush();
+    assert.equal(w.log.length, asked, `${label}: the entry asks nothing`);
+    assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.ended, recheck: false }, label);
     await w.scroll(w.sync(), 'vp-a', 4);
-    assert.deepEqual([w.log, w.moves], [[], []]);
+    assert.deepEqual([w.log.length, w.moves], [asked, []], label);
+    finish(w);
   }
-  // A 403 on another panel's /me refuses the shared session (kinViewerSession); this extension does not follow it and the next
-  // event asks its own /me (tests/e2e/test_ct_sync.py test_sync_06: a /me 403 during an event is not an end).
-  const w = world();
+  for (const [label, refuse] of Object.entries(REFUSALS)) {
+    const w = world({ mount: false });
+    await refuse(w);
+    const asked = w.log.length;
+    w.enter();
+    await flush();
+    assert.equal(w.log.length, asked, `${label}: the entry asks nothing`);
+    assert.deepEqual(w.screen(), { mounted: true, visible: false, text: '', recheck: false }, `${label}: no notice before sync is used`);
+    const sync = w.sync();
+    await w.scroll(sync, 'vp-a', 4);
+    assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.denied, recheck: true }, label);
+    assert.deepEqual([w.log.length, w.moves, sync.isDisabled()], [asked, [], false], label);
+    await w.recheck();
+    assert.deepEqual(w.keys().slice(asked), ['GET me', 'GET clinician/studies', 'GET me'], `${label}: only Recheck Access asks again`);
+    assert.equal(w.screen().text, TEXT.confirmed, label);
+    await w.scroll(sync, 'vp-a', 4);
+    assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 }, label);
+    finish(w);
+  }
+});
+
+test('the document\'s end while mounted (a panel\'s 401, another account, logout, pagehide): no waiting event or check moves or asks anything', async () => {
+  for (const [stage, open] of Object.entries(STAGES)) {
+    for (const [label, end] of Object.entries({ ...ENDS, pagehide: w => { w.pagehide(); } })) {
+      const what = `${stage}, ${label}`;
+      const { w, sync, pending, release } = await open();
+      const before = w.at('vp-b'), registered = w.registrations.length;
+      await end(w);
+      const asked = w.log.length;
+      assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.ended, recheck: false }, what);
+      assert.equal(sync.isDisabled(), true, `${what}: the synchronizers of this mount are off`);
+      // The answer or the pixels arrive after the end: the account-A /me, the page, the preload.
+      release();
+      await pending;
+      await flush();
+      assert.deepEqual([w.moves, w.at('vp-b'), w.registrations.length], [[], before, registered], `${what}: no native fire`);
+      assert.equal(w.log.length, asked, `${what}: nothing more is asked (no next page, no /me)`);
+      assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.ended, recheck: false }, `${what}: no ready after the end`);
+      await w.scroll(sync, 'vp-a', 6);
+      assert.deepEqual([w.moves, w.log.length], [[], asked], `${what}: a later event`);
+      finish(w);
+    }
+  }
+});
+
+test('a /me refusal the document reads while mounted drops the waiting event and check; it is a refusal with Recheck Access, not an end', async () => {
+  for (const [stage, open] of Object.entries(STAGES)) {
+    for (const [label, refuse] of Object.entries(REFUSALS)) {
+      const what = `${stage}, ${label}`;
+      const { w, sync, pending, release } = await open();
+      const before = w.at('vp-b');
+      await refuse(w);
+      const asked = w.log.length;
+      assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.denied, recheck: true }, `${what}: said at once, sync is on`);
+      release();
+      await pending;
+      await flush();
+      assert.deepEqual([w.moves, w.at('vp-b'), w.log.length], [[], before, asked], `${what}: nothing moves, nothing more is asked`);
+      assert.equal(sync.isDisabled(), false, `${what}: a refusal is not an end; the synchronizer stays as the user set it`);
+      assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.denied, recheck: true }, what);
+      await w.scroll(sync, 'vp-a', 6);
+      assert.deepEqual([w.moves, w.log.length, w.screen().text], [[], asked, TEXT.denied], `${what}: an event meanwhile asks nothing`);
+      await w.recheck();
+      const again = w.keys().slice(asked);
+      assert.deepEqual([again[0], again.at(-1), again.slice(1, -1).every(k => k === 'GET clinician/studies'), again.length > 2],
+        ['GET me', 'GET me', true, true], `${what}: Recheck Access runs the whole check again`);
+      assert.equal(w.screen().text, TEXT.confirmed, what);
+      await w.scroll(sync, 'vp-a', 4);
+      assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 }, `${what}: sync is back`);
+      finish(w);
+    }
+  }
+  // The document's login already ended with that refusal, so a later logout is not told again through the session: this mount's
+  // own receivers still end it.
+  for (const logout of [w => w.storage('kin-session-ended'), w => w.broadcast({ type: 'session-ended' })]) {
+    const w = world();
+    await flush();
+    const sync = w.sync();
+    await w.decide(403);
+    logout(w);
+    assert.deepEqual([w.screen().text, sync.isDisabled()], [TEXT.ended, true]);
+    finish(w);
+  }
+});
+
+test('mode exit drops the subscription; an end after it touches no removed mount, and a re-entry cannot undo an end', async () => {
+  const w = world({ mount: false });
+  const shared = w.kin.kinViewerSession, subscribe = shared.onEnded;
+  let subscribed = 0;
+  shared.onEnded = watch => { subscribed++; const off = subscribe(watch); return () => { subscribed--; off(); }; };
+  w.enter();
+  await flush();
+  const first = w.sync();
+  assert.equal(subscribed, 1);
+  w.exit();
+  assert.equal(subscribed, 0, 'mode exit unsubscribes');
+  for (let i = 0; i < 3; i++) { w.enter(); await flush(); w.exit(); }
+  w.enter();
+  await flush();
+  assert.equal(subscribed, 1, 'one subscription per mount, never more');
+  shared.refuse();
+  assert.deepEqual([w.notices().length, w.screen().text], [1, TEXT.ended], 'only the current mount says it');
+  const asked = w.log.length;
+  w.exit();
+  w.enter();
+  await flush();
+  assert.deepEqual([w.log.length, w.screen().text], [asked, TEXT.ended], 're-entry asks nothing and stays ended');
+  await w.scroll(w.sync(), 'vp-a', 4);
+  await w.scroll(first, 'vp-a', 5);
+  assert.deepEqual([w.moves, w.log.length], [[], asked]);
+  w.exit();
+  assert.equal(subscribed, 0);
+  finish(w);
+});
+
+test('controls: without the subscription a panel\'s 401 lets the held image move the target; every end as a logout shows a refusal as one', async () => {
+  // Astra S5-U2c-R-001 F01's path in the file as fix1 found it: the end is seen only at mount.
+  const unsubscribed = variant('const unwatchEnd = kinViewerSession.onEnded(documentEnded);',
+    'const unwatchEnd = () => {}; if (kinViewerSession.ended()) end();');
+  const w = world({ source: unsubscribed });
+  await flush();
+  const sync = w.sync();
+  w.holdLoads = true;
+  const pending = w.scroll(sync, 'vp-a', 4);
   await flush();
   w.kin.kinViewerSession.refuse();
-  const sync = w.sync();
-  await w.scroll(sync, 'vp-a', 4);
-  assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 });
-  assert.equal(w.keys().at(-1), 'GET me');
-  finish(w);
+  w.heldLoads[0]();
+  await pending;
+  assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 }, 'the late image moved the target after the document ended');
+  // Without the reason: a refusal of this account reads as a logout and offers nothing to recover with.
+  const oneWay = variant("if (reason !== 'forbidden' && reason !== 'not-member') { end(); return; }", '{ end(); return; }');
+  const x = world({ source: oneWay });
+  await flush();
+  await x.scroll(x.sync(), 'vp-a', 4);
+  await x.decide(403);
+  assert.deepEqual(x.screen(), { mounted: true, visible: true, text: TEXT.ended, recheck: false });
 });
 
 test('control: the same file sending clinicians to GET studies is refused by the pinned allowlist, and says so without a logout', async () => {
