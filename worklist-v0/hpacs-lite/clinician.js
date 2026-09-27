@@ -641,8 +641,9 @@
   // 기록이라 이 화면은 영상을 옮기지 않는다 — Closed도 영상이 실제로 오갔다는 뜻이 아니어서 그 옆에 같은 말을 쓴다.
   // 칸은 고른 검사마다 접힌 summary 한 줄로 생기고 열 때만 읽는다: 접힌 칸에는 단추·제목이 없어 열지 않은 사람의 화면 구성과
   // 탭 순서가 그대로이고, 목록에서 검사를 고를 때마다 서버를 부르지 않는다. 역할을 보고 컨트롤을 숨기지 않는다(U2a) — 취소 칸은
-  // 역할이 아니라 내가 남긴 요청인지로만 정하고(requestMine), 거절은 서버의 코드·문구 그대로 보인다. 쓰기 응답은 보낸 그 쓰기의
-  // 적용 결과와 모두 맞을 때만 저장 결과로 받는다. 쓰던 글은 검사·요청별로 이 문서의 메모리에만 두어 A->B->A로 돌아오면 다시
+  // 역할이 아니라 서버가 내 요청이라고 한 것(#7 view=mine의 id, requestOwn)에만 두고, 거절은 서버의 코드·문구 그대로 보인다.
+  // 쓰기 응답은 보낸 그 쓰기의 적용 결과와 모두 맞을 때만 저장 결과로 받는다. 결과를 모르는 취소는 그 요청이 최신 50건 밖으로
+  // 밀려도 #8로 따로 읽어 Retry·Discard를 남긴다. 쓰던 글은 검사·요청별로 이 문서의 메모리에만 두어 A->B->A로 돌아오면 다시
   // 보이고, 서버가 읽기를 거절했거나 다른 계정의 답이 오면(잠금) 이전 계정의 글이라 모두 버린다.
   const REQUEST = {
     summary: '이 검사에 남긴 외부영상·영상전송 요청을 엽니다. 연 뒤에만 서버에서 읽습니다.',
@@ -664,6 +665,11 @@
     noText: 'Counterparty(1~256자)와 Reason(1~2,000자)을 입력하세요.',
     noCancelText: '취소 사유를 1~2,000자로 입력하세요.',
     noItem: '이 요청의 최신 상태를 읽지 못해 보내지 않았습니다. 목록을 다시 불러온 뒤 취소하세요.',
+    ownFailed: '이 계정이 남긴 요청인지 확인하지 못해 취소 칸을 열지 않았습니다. Retry로 다시 읽으세요.',
+    ownTooMany: '내 요청 목록을 끝까지 보지 못해 일부 요청을 찾지 못했습니다.',
+    outside: '최신 50건 목록 밖으로 밀린 요청입니다. 결과를 모르는 취소가 남아 있어 이 요청만 따로 읽었습니다.',
+    outsideUnread: '최신 50건 목록 밖으로 밀린 요청을 따로 읽지 못했습니다. 취소 결과는 Retry(같은 요청 ID)로 확인하거나 Discard로 버릴 수 있습니다.',
+    outsideGone: '결과를 모르는 취소가 남은 요청을 서버가 지금 보여 주지 않습니다. 접근 조건이 바뀌었거나 요청이 없어졌을 수 있어 이 취소는 더 확인할 수 없습니다.',
     sending: '보내는 중입니다…',
     created: '요청을 등록했습니다.',
     cancelled: '요청을 취소했습니다.',
@@ -702,6 +708,9 @@
   const REQUEST_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const REQUEST_COUNTERPARTY_MAX = 256;
   const REQUEST_TEXT_MAX = 2000;
+  const REQUEST_CURSOR = /^[A-Za-z0-9_-]{1,256}$/;
+  // 본인 요청을 찾으려 읽는 #7 view=mine의 최대 쪽 수(50건씩). 넘기면 모르는 채로 두어 취소 칸을 열지 않는다.
+  const REQUEST_OWN_PAGES = 20;
   // Image Requests를 연 뒤에는 이어서 고르는 검사도 연 채로 읽는다(이 문서 안에서만, 타임라인과 같다).
   let requestsOpen = false;
   // 고른 검사·칸 열고 닫기·잠금마다 오른다. 목록 읽기는 자기 번호와 함께 이 값을 들고 떠난다.
@@ -715,6 +724,9 @@
   const requestDrafts = new Map();
   const requestAttempts = new Map();
   const requestNotes = new Map();
+  // 요청 id별로 이 계정이 남긴 요청인지(서버 목록이 정한 true·false). 요청자는 요청이 생긴 뒤 바뀌지 않아 이 문서 안에서 그대로 두고,
+  // 잠그면(다른 계정) 버린다.
+  const requestOwn = new Map();
 
   const requestKey = (uid, id) => `${uid}\n${id || ''}`;
 
@@ -816,15 +828,78 @@
   }
 
   /**
-   * 이 요청을 남긴 사람이 로그인한 계정인가. 취소 칸은 이때만 둔다(U4p §5.2·RM-R7) — 혼합 역할(clinician+radiologist 등)은 이
-   * 화면에서도 기관의 다른 요청을 읽는다. DTO에는 sub가 없어(§3.3) 토큰에서 온 actor(/api/me, 감사 actor와 같은 값)를 요청자
-   * actor와 비교하고 표시 이름은 쓰지 않는다. 역할 목록은 읽지 않으므로(U2a) 관리자의 남의 요청 취소는 main.html 대기열에서 한다.
-   * 알 수 없으면 false다. 판정은 서버가 sub로 다시 한다.
+   * 처리 중인 요청 중 아직 모르는 것이 이 계정의 요청인지 정한다. 취소 칸은 서버가 내 것이라고 한 요청에만 둔다(U4p §5.2·RM-R7)
+   * — 혼합 역할(clinician+radiologist 등)은 이 화면에서도 기관의 다른 요청을 읽는다. 기준은 서버가 요청자 sub로 고른 #7
+   * view=mine(state=all)의 id뿐이다: requester.actor는 email 등이 바뀌면 같은 사람의 것이 달라지고 다른 계정의 값과 겹칠 수
+   * 있다. 목록은 생성 시각이 늦은 것부터라, 한 쪽의 마지막 행이 남은 요청보다 확실히 이르거나 다음 쪽이 없으면 남은 요청은
+   * 내 것이 아니다. 403은 서버가 이 계정에 요청자 범위(clinician)를 주지 않은 것이라 모두 내 것이 아니다. 읽지 못했거나 끝까지
+   * 보지 못하면 그 요청들은 모르는 채로 두고(취소 칸 없음) 그 오류를 돌려준다. 역할 목록은 읽지 않으므로(U2a) 관리자의 남의
+   * 요청 취소는 main.html 대기열에서 한다. 판정은 서버가 sub로 다시 한다.
    */
-  function requestMine(item) {
-    const session = KinAuth.session();
-    const actor = session && session.state === 'approved' && typeof session.user === 'string' ? session.user : '';
-    return actor !== '' && !!item && !!item.requester && item.requester.actor === actor;
+  async function readRequestOwn(items, fresh) {
+    const left = new Map(items.filter(item => REQUEST_ACTIVE.includes(item.state) && !requestOwn.has(item.id))
+      .map(item => [item.id, Date.parse(item.createdAt)]));
+    let cursor = null;
+    try {
+      for (let page = 0; left.size && page < REQUEST_OWN_PAGES; page++) {
+        const query = 'view=mine&state=all' + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+        const data = await request(`/image-requests?${query}`);
+        if (!fresh()) return null;
+        const same = requestOwnerOf(data);
+        if (same === false) {
+          lockRequests(REQUEST.ownerChanged, '');
+          return null;
+        }
+        const rows = data && data.items;
+        const next = data && data.nextCursor;
+        if (same === null || !Array.isArray(rows) || rows.length > 50 || !rows.every(row => !!row && typeof row === 'object'
+            && typeof row.id === 'string' && REQUEST_UUID.test(row.id) && typeof row.createdAt === 'string')
+            || new Set(rows.map(row => row.id)).size !== rows.length
+            || !(next === null || (typeof next === 'string' && REQUEST_CURSOR.test(next) && next !== cursor)))
+          throw new Error(REQUEST.malformed);
+        for (const row of rows) if (left.delete(row.id)) requestOwn.set(row.id, true);
+        const last = rows.length ? Date.parse(rows[rows.length - 1].createdAt) : NaN;
+        for (const [id, at] of left) {
+          if (next !== null && !(last < at)) continue;
+          left.delete(id);
+          requestOwn.set(id, false);
+        }
+        cursor = next;
+      }
+      if (left.size) throw new Error(REQUEST.ownTooMany);
+      return null;
+    } catch (error) {
+      if (!fresh()) return null;
+      if (error.status !== 403) return error;
+      for (const id of left.keys()) requestOwn.set(id, false);
+      return null;
+    }
+  }
+
+  /**
+   * 결과를 모르는 취소가 남은 요청이 이번 목록(#9, 최신 50건)에 없으면 #8로 따로 읽는다. 목록에 없다는 것은 더 새 요청에
+   * 밀렸다는 뜻일 수 있고 접근을 잃었다는 뜻은 아니다. 답마다 { id, item, error } 하나이고, 그 뜻은 paintRequestList가 정한다.
+   */
+  function readRequestsOutside(uid, items, fresh) {
+    const listed = new Set(items.map(item => item.id));
+    const waiting = [...requestAttempts.values()].filter(attempt => attempt.uid === uid && attempt.itemId !== null
+      && !listed.has(attempt.itemId));
+    return Promise.all(waiting.map(async attempt => {
+      const id = attempt.itemId;
+      try {
+        const data = await request(`/image-requests/${encodeURIComponent(id)}`);
+        if (!fresh()) return { id, item: null, error: null };
+        const same = requestOwnerOf(data);
+        if (same === false) {
+          lockRequests(REQUEST.ownerChanged, '');
+          return { id, item: null, error: null };
+        }
+        if (same === null || !requestItemOk(data.item, uid) || data.item.id !== id) throw new Error(REQUEST.malformed);
+        return { id, item: data.item, error: null };
+      } catch (error) {
+        return { id, item: null, error };
+      }
+    }));
   }
 
   /** 상태명은 색과 함께 늘 글자로 쓰고(UXR-G-12), Closed에는 기록일 뿐이라는 문구를 바로 옆에 붙인다. */
@@ -943,16 +1018,20 @@
     section.append(body);
   }
 
-  function setRequestsState(state, text, detail) {
+  function setRequestsState(state, text, detail, retry = false) {
     const box = $('#image-requests-state');
     if (!box) return;
     box.dataset.state = state;
     box.querySelector('.state-text').textContent = text;
     box.querySelector('.state-detail').textContent = detail || '';
-    $('#image-requests-retry').hidden = state !== 'failed';
+    $('#image-requests-retry').hidden = state !== 'failed' && !retry;
   }
 
-  /** #9. 고른 검사에 내가 남긴 요청(서버가 임상의에게는 본인 것만 준다, 최신 50). */
+  /**
+   * #9. 고른 검사에 내가 남긴 요청(서버가 임상의에게는 본인 것만 준다, 최신 50). 목록 밖으로 밀린 요청의 결과를 모르는 취소(#8)와
+   * 처리 중인 요청이 내 것인지(#7 view=mine)를 다 읽은 뒤에 한 번 그린다 — 취소 칸이 나중에 끼어들면 그사이 누르던 곳·치던
+   * 글이 밀린다. 늦은 답은 매 대기 뒤 같은 번호·epoch·고른 검사인지로 버린다.
+   */
   async function loadRequests(uid) {
     if (leaving || selected !== uid || !$('#image-requests-body')) return;
     if (requestsLock !== null) {
@@ -965,20 +1044,22 @@
       return;
     }
     const epoch = requestsEpoch;
-    const mine = ++requestsSeq;
+    const seq = ++requestsSeq;
+    const fresh = () => requestsFresh(epoch, uid) && seq === requestsSeq;
     setRequestsState('loading', REQUEST.loading);
+    let items;
     try {
       const data = await request(`/studies/${encodeURIComponent(uid)}/image-requests`);
-      if (!requestsFresh(epoch, uid) || mine !== requestsSeq) return;
+      if (!fresh()) return;
       const same = requestOwnerOf(data);
       if (same === false) {
         lockRequests(REQUEST.ownerChanged, '');
         return;
       }
       if (same === null) throw new Error(REQUEST.malformed);
-      paintRequestList(uid, readRequestItems(data, uid));
+      items = readRequestItems(data, uid);
     } catch (error) {
-      if (!requestsFresh(epoch, uid) || mine !== requestsSeq) return;
+      if (!fresh()) return;
       if (error.status === 403) {
         lockRequests(REQUEST.refused, describe(error));
         return;
@@ -987,55 +1068,89 @@
       $('#image-requests').dataset.state = 'failed';
       $('#image-request-list').hidden = true;
       setRequestsState('failed', REQUEST.failed, `${error.status === 404 ? `${REQUEST.notFound}\n` : ''}${describe(error)}`);
+      return;
     }
+    const outside = await readRequestsOutside(uid, items, fresh);
+    if (!fresh()) return;
+    const ownFailure = await readRequestOwn([...items, ...outside.flatMap(entry => entry.item ? [entry.item] : [])], fresh);
+    if (!fresh()) return;
+    paintRequestList(uid, items, outside, ownFailure);
   }
 
   /**
    * 목록을 제자리에서 맞춘다. 이미 있는 요청 줄은 옮기거나 새로 만들지 않고 내용만 바꾼다 — 다시 만들면 치고 있던 취소 사유의
-   * 커서와 한글 조합이 끊긴다. 새 줄만 제자리에 끼우고 사라진 줄만 뺀다.
+   * 커서와 한글 조합이 끊긴다. 새 줄만 제자리에 끼우고 사라진 줄만 뺀다. 목록 밖으로 밀린 요청의 결과를 모르는 취소는 그 뒤에
+   * 줄을 둔다: 읽혔으면 지금 상태와 Retry·Discard, 403·404(서버가 지금 이 요청을 보이지 않는다)면 쓰기를 버리고 그렇다고만
+   * 쓰며(이전 내용은 다시 보이지 않는다), 그 밖의 실패는 지금 상태를 모를 뿐이라 Retry·Discard를 남긴다 — Retry는 같은
+   * requestId라 서버가 저장 결과를 다시 알려 준다.
    */
-  function paintRequestList(uid, items) {
-    requestsItems = items;
+  function paintRequestList(uid, items, outside, ownFailure) {
+    for (const entry of outside) {
+      const key = requestKey(uid, entry.id);
+      const attempt = requestAttempts.get(key);
+      if (!entry.error || (entry.error.status !== 403 && entry.error.status !== 404) || !attempt || attempt.busy) continue;
+      requestAttempts.delete(key);
+      setRequestNote(key, 'failed', REQUEST.outsideGone, describe(entry.error));
+    }
+    requestsItems = [...items, ...outside.flatMap(entry => entry.item ? [entry.item] : [])];
     const list = $('#image-request-list');
     const kept = new Map([...list.children].map(li => [li.dataset.id, li]));
     let at = list.firstElementChild;
-    for (const item of items) {
-      let li = kept.get(item.id);
-      kept.delete(item.id);
-      if (li) updateRequestItem(uid, li, item);
-      else li = requestItem(uid, item);
+    const place = (id, item, entry) => {
+      let li = kept.get(id);
+      kept.delete(id);
+      if (li) updateRequestItem(uid, li, item, entry);
+      else li = requestItem(uid, id, item, entry);
       if (li === at) at = at.nextElementSibling;
       else list.insertBefore(li, at);
-    }
+    };
+    for (const item of items) place(item.id, item, null);
+    for (const entry of outside) place(entry.id, entry.item, entry);
     for (const li of kept.values()) li.remove();
-    list.hidden = !items.length;
+    list.hidden = !list.children.length;
     $('#image-requests').dataset.state = items.length ? 'ready' : 'empty';
-    setRequestsState(items.length ? 'ready' : 'empty', items.length ? REQUEST.ready(items.length) : REQUEST.empty);
+    setRequestsState(items.length ? 'ready' : 'empty', items.length ? REQUEST.ready(items.length) : REQUEST.empty,
+      ownFailure ? `${REQUEST.ownFailed}\n${describe(ownFailure)}` : '', !!ownFailure);
     $('#image-request-new').hidden = false;
   }
 
-  function requestItem(uid, item) {
+  function requestItem(uid, id, item, entry) {
     const li = node('li');
-    li.dataset.id = item.id;
+    li.dataset.id = id;
     li.style.margin = '8px 0';
     const info = node('div');
     info.dataset.part = 'info';
-    li.append(info, requestNote(requestKey(uid, item.id)));
-    updateRequestItem(uid, li, item);
+    li.append(info, requestNote(requestKey(uid, id)));
+    updateRequestItem(uid, li, item, entry);
     return li;
   }
 
   /**
-   * 처리 중인 내 요청에만 취소 칸을 둔다(requestMine). 끝난 요청이어도 결과를 모르는 취소가 남았으면 그 칸은 그대로 둔다 —
-   * Retry·Discard가 그 칸에 있다.
+   * 처리 중인 내 요청(requestOwn)에만 취소 칸을 둔다. 끝난 요청이어도 결과를 모르는 취소가 남았으면 그 칸은 그대로 둔다 —
+   * Retry·Discard가 그 칸에 있다. entry는 목록 밖에서 따로 읽은 줄이다(item이 없으면 지금 내용을 모르는 줄이라 비워 둔다).
    */
-  function updateRequestItem(uid, li, item) {
-    li.dataset.state = item.state;
-    li.querySelector('[data-part="info"]').replaceWith(requestInfo(item));
-    const key = requestKey(uid, item.id);
+  function updateRequestItem(uid, li, item, entry) {
+    const key = requestKey(uid, li.dataset.id);
+    li.dataset.state = item ? item.state : 'unavailable';
+    const info = item ? requestInfo(item) : node('div');
+    info.dataset.part = 'info';
+    li.querySelector('[data-part="info"]').replaceWith(info);
+    const aside = li.querySelector('[data-part="outside"]');
+    const text = !entry ? null : entry.item ? REQUEST.outside : requestAttempts.has(key)
+      ? `${REQUEST.outsideUnread}\n${describe(entry.error)}` : null;
+    if (text === null) {
+      if (aside) aside.remove();
+    } else if (aside) {
+      aside.textContent = text;
+    } else {
+      const line = node('p', 'muted', text);
+      line.dataset.part = 'outside';
+      line.style.margin = '2px 0 0';
+      info.after(line);
+    }
     const compose = li.querySelector('.request-compose');
-    const keep = REQUEST_ACTIVE.includes(item.state) && requestMine(item) || requestAttempts.has(key);
-    if (keep && !compose) li.querySelector('[data-request-note]').before(requestCancelComposer(uid, item.id));
+    const keep = !!item && REQUEST_ACTIVE.includes(item.state) && requestOwn.get(item.id) === true || requestAttempts.has(key);
+    if (keep && !compose) li.querySelector('[data-request-note]').before(requestCancelComposer(uid, li.dataset.id));
     else if (!keep && compose) compose.remove();
   }
 
@@ -1219,7 +1334,7 @@
       setRequestNote(key, 'failed', REQUEST.noItem);
       return;
     }
-    if (!requestMine(item)) return;
+    if (requestOwn.get(id) !== true) return;
     const draft = requestFields(wrap);
     if (!draft.note.trim() || draft.note.length > REQUEST_TEXT_MAX) {
       setRequestNote(key, 'failed', REQUEST.noCancelText);
@@ -1297,6 +1412,8 @@
     }
     requestAttempts.delete(key);
     requestDrafts.delete(key);
+    // 서버가 이 계정([기관, sub])의 새 요청으로 적용했다는 영수증이다 — 이 id는 내 요청이다(목록에서 다시 묻지 않는다).
+    if (attempt.action === 'create') requestOwn.set(attempt.requestId, true);
     setRequestNote(key, 'saved', reply.replayed ? REQUEST.replayed : attempt.action === 'create' ? REQUEST.created : REQUEST.cancelled);
     repaintRequestComposer(key);
     // 화면의 목록은 쓰기 응답(적용 결과)이 아니라 읽기 route로 다시 읽은 현재 상태로만 그린다.
@@ -1340,6 +1457,7 @@
     requestDrafts.clear();
     requestAttempts.clear();
     requestNotes.clear();
+    requestOwn.clear();
     paintRequestsLock();
   }
 

@@ -1942,7 +1942,7 @@
       fetch: (url, init) => fetch(url, init),
       readContext: dictationContext, block: dictationBlock, insert: dictationInsert, placement: dictationPlacement,
       busy: () => commitInFlight || insertInFlight,
-      onUnauthorized: () => KinAuth.logout(),
+      onUnauthorized: () => { (window.kinOn401 || []).forEach(end => { try { end(); } catch (_) {} }); return KinAuth.logout(); },
     });
     KinDictation.mount(dictation, {
       button: $("#b-dictate"), pane: $("#dictation-pane"), status: $("#dictation-status"),
@@ -2645,7 +2645,7 @@
         return true;
       } catch (e) {
         if (loadSequence !== listLoadSequence) return;
-        if (e.ownerChanged) { studyPageClient.clear(); await KinAuth.logout(); return; }
+        if (e.ownerChanged) { studyPageClient.clear(); (window.kinOn401 || []).forEach(end => { try { end(); } catch (_) {} }); await KinAuth.logout(); return; }
         // 서버 모드에서 목록이 실패하면 **가짜 데이터로 내려가지 않는다.**
         // Incomplete page batches never replace the last complete list or report input.
         if (serverMode) {
@@ -3711,10 +3711,11 @@
     // applyRoleUi처럼 회색으로 두어 안내만 하고 판정은 서버가 한다(거절은 코드·문구 그대로 보인다).
     // 늦은 답은 대기열 쪽 번호(queueSeq), 단건 번호(detailSeq)와 연 요청 id, 판독 쪽 번호(readSeq)와 대상 검사로 버린다(A→B→A).
     // 서버가 읽기를 거절(403)했거나 다른 계정의 답·OWNER_CHANGED가 오면 이 문서에서는 더 읽거나 쓰지 않고(뷰어 세션의 거절과 같은
-    // 한 방향), 세션이 끝나면(로그아웃·다른 탭·401) 두 칸을 내린다. 401은 api()가 본 그 자리에서 window.kinOn401에 등록한 end()로
-    // 끝낸다 — 로그아웃 통지는 POST /auth/logout(제한 시간 없음)이 끝난 뒤에야 오므로 그것을 기다리면 그사이 도착한 이전 세션의
-    // 답이 그려진다. 쓰던 note는 요청별로 이 문서의 메모리에만 두고, 잠그거나 끝나면 이전 계정의 글이라 버린다.
-    function mountImageRequests({ api, owner, actor, allowed, current, study, institution, can }) {
+    // 한 방향), 세션이 끝나면(로그아웃·다른 탭·401) 두 칸을 내린다. 이 페이지가 로그아웃을 시작하는 곳(api()의 401, 확정한 Log out,
+    // 받아쓰기의 401, 목록·폴링의 계정 변경)은 네트워크를 기다리기 전에 window.kinOn401에 등록한 end()를 동기로 부른다 — 로그아웃
+    // 통지는 POST /auth/logout(제한 시간 없음)이 끝난 뒤에야 오므로 그것을 기다리면 그사이 도착한 이전 세션의 답이 그려진다.
+    // 쓰던 note는 요청별로 이 문서의 메모리에만 두고, 잠그거나 끝나면 이전 계정의 글이라 버린다.
+    function mountImageRequests({ api, owner, allowed, current, study, institution, can }) {
       const TEXT = {
         queueHint: '소속 기관 검사에 임상의가 남긴 외부영상(External Images)·영상전송(Send Images) 요청입니다. 요청은 처리 상태의 '
           + '기록이며 이 칸은 영상을 옮기지 않습니다. 영상은 기존 경로에서 따로 옮기고, 처리를 마치면 Close에 처리 기록을 남기세요.',
@@ -3750,6 +3751,9 @@
         noServer: '서버에 연결하지 못했습니다.',
         roleStaff: '방사선사(technician) 또는 관리자 권한이 필요합니다.',
         roleCancel: '요청한 임상의 또는 관리자만 취소할 수 있습니다.',
+        ownChecking: '이 계정이 남긴 요청인지 서버의 내 요청 목록에서 확인하는 중입니다.',
+        ownFailed: '이 계정이 남긴 요청인지 확인하지 못해 Cancel을 막았습니다. Reload로 다시 확인하세요.',
+        ownTooMany: '내 요청 목록을 끝까지 보지 못해 이 요청을 찾지 못했습니다.',
         stateAccept: 'Requested 상태의 요청만 Accept할 수 있습니다.',
         stateDone: '처리가 끝난 요청입니다.',
         tips: { accept: '요청을 받아 처리 중(Accepted)으로 기록합니다.', close: '처리를 마쳤다고(Closed) 기록합니다. 실제 전송 여부를 나타내지 않습니다.',
@@ -3783,7 +3787,8 @@
       const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
       const STUDY = /^\d+(?:\.\d+)+$/;
       const CURSOR = /^[A-Za-z0-9_-]{1,256}$/;
-      const TIMEOUT_MS = 60000, NOTE_MAX = 2000, PAGE = 50;
+      // OWN_PAGES: 본인 요청을 찾으려 읽는 #7 view=mine의 최대 쪽 수(50건씩). 넘기면 모르는 채로 두어 Cancel을 닫는다.
+      const TIMEOUT_MS = 60000, NOTE_MAX = 2000, PAGE = 50, OWN_PAGES = 20;
       const queueRoot = document.getElementById('image-request-queue');
       const queueBody = document.getElementById('image-request-queue-body');
       const readRoot = document.getElementById('image-request-p');
@@ -3798,6 +3803,8 @@
       let readUid = null, readItems = null, readFailure = null, readLoading = false, readSeq = 0, readOpen = false;
       // 요청 id별로 쓰던 note, 결과를 모르는 쓰기(같은 requestId로 다시 보낼 것), 마지막 결과 문구.
       const drafts = new Map(), attempts = new Map(), notes = new Map();
+      // 요청 id별로 이 계정이 남긴 요청인지(true·false, 서버 목록이 정한 값)와, 확인 중('checking')·확인 실패(오류)인 것.
+      const ownIds = new Map(), ownReads = new Map();
       const make = (tag, className, text) => {
         const node = document.createElement(tag);
         if (className) node.className = className;
@@ -4195,6 +4202,7 @@
           if (same === null || !itemOk(data.item, null) || data.item.id !== id) throw new Error(TEXT.malformed);
           detailItem = data.item;
           refreshQueueItem(detailItem);
+          checkOwn(detailItem);
         } catch (error) {
           detailItem = null;
           detailFailure = error;
@@ -4208,13 +4216,80 @@
 
       /**
        * 이 요청의 Cancel 안내(U4p §5.2·RM-R7): 관리자이거나, clinician 역할이 있고 이 요청을 남긴 본인일 때만. 역할만 보면
-       * 기관 전체 요청을 읽는 혼합 역할(clinician+radiologist 등)에게 남의 요청 취소가 열린다. DTO에는 sub가 없어(§3.3) 토큰에서 온
-       * actor(/api/me, 감사 actor와 같은 값)를 요청자 actor와 비교하고 표시 이름은 쓰지 않는다. 알 수 없으면 닫는다. 판정은 서버가
-       * sub로 다시 한다.
+       * 기관 전체 요청을 읽는 혼합 역할(clinician+radiologist 등)에게 남의 요청 취소가 열린다. 본인인지는 서버가 요청자 sub로 고른
+       * #7 view=mine에 그 id가 있는지로만 정한다(ownIds) — requester.actor는 email 등이 바뀌면 같은 사람의 것이 달라지고 다른
+       * 계정의 값과 겹칠 수 있다. 확인 중이거나 확인하지 못했으면 닫는다. 판정은 서버가 sub로 다시 한다.
        */
       function canCancel(item) {
-        const me = actor();
-        return can('admin') || (can('clinician') && !!item && typeof me === 'string' && me !== '' && item.requester.actor === me);
+        return can('admin') || (can('clinician') && !!item && ownIds.get(item.id) === true);
+      }
+
+      /** 닫힌 Cancel의 이유: 역할·타인의 요청, 확인 중, 확인 실패(Reload로 다시 확인). */
+      function cancelHint(item) {
+        if (canCancel(item)) return '';
+        const reading = item ? ownReads.get(item.id) : undefined;
+        if (!can('clinician') || !item || ownIds.has(item.id)) return TEXT.roleCancel;
+        if (reading === 'checking') return TEXT.ownChecking;
+        return reading ? `${TEXT.ownFailed}\n${describe(reading)}` : TEXT.roleCancel;
+      }
+
+      /**
+       * #7 view=mine(state=all)을 필요한 쪽까지 읽어 targets 각각이 이 계정의 요청인지 정한다(true·false). 목록은 생성 시각이 늦은
+       * 것부터라, 한 쪽의 마지막 행이 남은 요청보다 확실히 이르거나 다음 쪽이 없으면 남은 요청은 이 계정의 것이 아니다. 요청자는
+       * 요청이 생긴 뒤 바뀌지 않으므로 한 번 정한 값은 이 문서(같은 계정) 안에서 그대로다. OWN_PAGES 쪽을 넘기면 오류로 둔다.
+       * live()가 거짓이 되면(세션 종료·잠금) null이다.
+       */
+      async function readOwn(targets, live) {
+        const left = new Map(targets.map(item => [item.id, Date.parse(item.createdAt)])), found = new Map();
+        let cursor = null;
+        for (let page = 0; left.size && page < OWN_PAGES; page++) {
+          const query = 'view=mine&state=all' + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+          const data = await call('GET', `/image-requests?${query}`);
+          if (!live()) return null;
+          const same = ownerOf(data);
+          if (same === false) {
+            lockPanel(TEXT.ownerChanged, '');
+            return null;
+          }
+          if (same === null) throw new Error(TEXT.malformed);
+          const rows = itemsOf(data, null), next = data.nextCursor;
+          if (!(next === null || (typeof next === 'string' && CURSOR.test(next) && next !== cursor))) throw new Error(TEXT.malformed);
+          for (const row of rows) if (left.delete(row.id)) found.set(row.id, true);
+          const last = rows.length ? Date.parse(rows[rows.length - 1].createdAt) : NaN;
+          for (const [id, at] of left) {
+            if (next !== null && !(last < at)) continue;
+            left.delete(id);
+            found.set(id, false);
+          }
+          cursor = next;
+        }
+        if (left.size) throw new Error(TEXT.ownTooMany);
+        return found;
+      }
+
+      /**
+       * 연 요청이 처리 중이고 이 계정이 관리자가 아닌 clinician이면 본인 요청인지 확인한다(관리자는 누구의 요청이든 취소할 수
+       * 있고, clinician이 아니면 요청자일 수 없다). 403은 서버가 이 계정에 요청자 범위를 주지 않은 것이라 본인 요청이 아니다.
+       * 그 밖의 실패는 확인 실패로 남겨 Cancel을 닫고, Reload(단건 다시 읽기)가 다시 확인한다.
+       */
+      async function checkOwn(item) {
+        if (ended || lock !== null || can('admin') || !can('clinician') || !ACTIVE.includes(item.state) || ownIds.has(item.id)
+            || ownReads.get(item.id) === 'checking') return;
+        const live = () => !ended && lock === null;
+        ownReads.set(item.id, 'checking');
+        paintComposer();
+        let found = null, failure = null;
+        try {
+          found = await readOwn([item], live);
+        } catch (error) {
+          failure = error;
+        }
+        if (!live() || (failure && failure.status === 401)) return;
+        ownReads.delete(item.id);
+        if (failure && failure.status === 403) found = new Map([[item.id, false]]);
+        else if (failure) ownReads.set(item.id, failure);
+        if (found) for (const [id, own] of found) ownIds.set(id, own);
+        paintComposer();
       }
 
       function renderDetail() {
@@ -4244,10 +4319,10 @@
         // 같은 글이면 쓰지 않는다: 값을 다시 넣으면 치고 있던 커서·한글 조합이 끊긴다.
         if (noteField.value !== value) noteField.value = value;
         noteField.readOnly = attempt !== null;
-        const staff = can('technician'), canceller = canCancel(loaded);
+        const staff = can('technician'), cancel = cancelHint(loaded);
         const state = loaded ? loaded.state : null;
         for (const [action, control] of Object.entries(actions)) {
-          const role = action === 'cancel' ? (canceller ? '' : TEXT.roleCancel) : staff ? '' : TEXT.roleStaff;
+          const role = action === 'cancel' ? cancel : staff ? '' : TEXT.roleStaff;
           const stale = !loaded ? '' : action === 'accept' ? (state === 'Requested' ? '' : TEXT.stateAccept)
             : ACTIVE.includes(state) ? '' : TEXT.stateDone;
           control.disabled = attempt !== null || !loaded || !!role || !!stale;
@@ -4496,6 +4571,9 @@
         drafts.clear();
         attempts.clear();
         notes.clear();
+        ownIds.clear();
+        ownReads.clear();
+        noteField.value = '';
         queueItems = [];
         queueCursor = null;
         queueLoading = false;
@@ -4523,6 +4601,10 @@
         drafts.clear();
         attempts.clear();
         notes.clear();
+        ownIds.clear();
+        ownReads.clear();
+        // 숨긴 칸에도 이전 계정이 치던 글을 남기지 않는다.
+        noteField.value = '';
         queueItems = [];
         queueCursor = null;
         detailId = null;
@@ -4566,7 +4648,8 @@
       } catch (_) {}
       window.addEventListener('storage', event => { if (event.key === 'kin-session-ended') end(); });
       window.addEventListener('pagehide', end);
-      // api()가 401을 본 그 자리에서(로그아웃을 기다리기 전) 동기로 부르는 목록이다. 칸마다 자기 end()를 넣는다(S5-U4b 등도 같은 목록).
+      // 이 페이지가 로그아웃을 시작하는 곳(api()의 401, 확정한 Log out, 받아쓰기의 401, 계정 변경)이 네트워크를 기다리기 전에
+      // 동기로 부르는 목록이다. 칸마다 자기 end()를 넣는다(S5-U4b 등도 같은 목록).
       (window.kinOn401 = window.kinOn401 || []).push(end);
       renderQueueList();
       renderQueue();
@@ -4578,7 +4661,6 @@
     try {
       imageRequests = mountImageRequests({ api,
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; },
-        actor: () => { const s = KinAuth.session(); return s?.state === 'approved' && typeof s.user === 'string' ? s.user : null; },
         allowed: () => !!sess && serverMode && !demoMode && !offline,
         current: () => selectedUid, study: uid => studies.find(s => s.uid === uid) || null,
         institution: id => institutions.find(i => i.id === id)?.name || null, can: role => KinAuth.has(role) });
@@ -6722,6 +6804,8 @@
       loggingOut = true;
       closeSR();
       endPatientCopy();
+      // 등록된 영역(window.kinOn401)은 초안 저장·점유 해제·로그아웃 POST(제한 시간 없음)를 기다리기 전에 끝낸다 — 그사이 도착한 이전 세션의 답이 그려지지 않게.
+      (window.kinOn401 || []).forEach(end => { try { end(); } catch (_) {} });
       try {
         await stashReport();
         await releaseHold();   // 안 풀면 남은 사람에게 이 검사가 5분간 잠겨 보인다
@@ -6828,7 +6912,7 @@
           pollFails = 0;
         } catch (e) {
           if (generation !== pollGeneration) return;
-          if (e.ownerChanged) { studyPageClient.clear(); await KinAuth.logout(); return; }
+          if (e.ownerChanged) { studyPageClient.clear(); (window.kinOn401 || []).forEach(end => { try { end(); } catch (_) {} }); await KinAuth.logout(); return; }
           if (e.stale || e.code === 'STUDY_LIST_CHANGED') return;
           // The first failure already says 관측 불가 beside the kept list; going offline waits for two.
           markObservationUnavailable();

@@ -9,9 +9,10 @@ Structure (stdlib):
   s01  every S5-U4c change sits in named regions: with them taken out, main.html and clinician.js are the base commit
        (aaf53dc) byte for byte, and tests/report_actions_dom_test.py's pins (which tests/worklist_toolbar_dom_test.py
        reads) hold on that result.
-  s02  the hooks are one line each (renderClinical, and api()'s 401 list before the logout is awaited); the queue lives in
-       the Order List panel and the reading line after the report footer row; neither block reads a question, consultation
-       or Connect route or writes markup strings.
+  s02  the hooks are one line each (renderClinical, and the 401 list where the page starts a logout: api()'s 401, the
+       confirmed Log out before its first network wait, the dictation 401, the list and poll account changes); the queue
+       lives in the Order List panel and the reading line after the report footer row; neither block reads a question,
+       consultation or Connect route or writes markup strings, and neither decides ownership by an actor string.
 
 Clinician Home (clinician.html + clinician.js + auth.js served unchanged):
   c01  closed until opened (no read, button or heading); opened: #9 once, the five states, Closed with its note, handler
@@ -30,7 +31,17 @@ Clinician Home (clinician.html + clinician.js + auth.js served unchanged):
        the fields and requestId are kept and Retry sends the same body; a correct replayed receipt is accepted after the
        request moved on; the fix1 check (control) took a wrong receipt as saved.
   c08  (B-R-001 F3) a mixed-role account (clinician+radiologist, clinician+technician) sees Cancel only on its own
-       requests, matched by the token actor and not by the display name; nothing is sent for the others.
+       requests; nothing is sent for the others.
+  c09  (C-R-001 F2) own means an id in the server's #7 view=mine list (requester sub), never the actor: the same sub
+       after its actor changed keeps Cancel; another sub with the same actor gets none; an own request on a later page
+       is found by following the cursor, and an older one is decided without reading further pages; a failed read opens
+       nothing and says so with Retry; 403 (no requester scope) opens nothing. Control: the fix2 actor rule gets both
+       actor cases wrong.
+  c10  (C-R-001 F3) an unknown cancel whose request is pushed past the latest 50 keeps its row, Retry and Discard (read
+       by #8), across reopening and A->B->A; Retry sends the same requestId and body. Control: without the #8 read the
+       Retry is gone.
+  c11  (C-R-001 F3) #8 answering 403 or 404 for such a request: the row says the cancel can no longer be checked, shows
+       none of the old content and no Retry, and the unknown write is dropped.
 
 main.html (its markup and CSS as shipped with the scripts stripped; the page's own api() and setMode() and the S5-U4c
 block cut from main.html and run over small stand-ins):
@@ -50,8 +61,15 @@ block cut from main.html and run over small stand-ins):
        write ends the area before the logout answers; a held read and a held write answered afterwards draw nothing and
        nothing new is read or sent; api() without the hook line (fix1, control) paints the late read.
   m10  (B-R-001 F2) the queue's receipts, as c07 (accept and an admin's cancel).
-  m11  (B-R-001 F3) Cancel is enabled for an admin (note still required) or for a clinician who is the requester (token
-       actor); a mixed-role account on another's request, or one whose actor is unknown, gets it disabled and sends nothing.
+  m11  (C-R-001 F2) Cancel is enabled for an admin (note still required, nothing read) or for a clinician whose own
+       requests (#7 view=mine, followed across pages) hold the request: the same sub after an actor change yes, another
+       sub with the same actor no; an older request is decided without reading further pages; while checking and after
+       a failed read Cancel is disabled with the reason, and Reload checks again; a late answer after the session ended
+       draws nothing. Control: the fix2 actor rule gets both actor cases wrong.
+  m12  (C-R-001 F1) the page's Log out handler over the shipped auth.js: confirmed, it ends the area before its first
+       network wait (the draft write held, or the logout POST held); late read and write answers draw nothing and
+       nothing new is read; the draft write, hold release and logout keep their order. Cancelled confirm and an
+       insertion in flight end nothing. Control: the handler without the hook line keeps the note and paints late.
 """
 import copy
 import hashlib
@@ -107,7 +125,8 @@ MAIN_BLOCK = ("    // ── 영상 요청(S5-U4c) ──\n", "    // ── Mat
 HOOK = "      imageRequests?.sync();\n"
 # B-R-001 F1: api() calls every end() registered in window.kinOn401 as soon as it sees a 401, before it awaits the logout.
 # The list is the shared convention (S5-U4b registers its own end() the same way); the line is generic, not U4c's.
-HOOK_401 = "        (window.kinOn401 || []).forEach(end => { try { end(); } catch (_) {} });\n"
+END_LIST = "(window.kinOn401 || []).forEach(end => { try { end(); } catch (_) {} });"
+HOOK_401 = f"        {END_LIST}\n"
 LOGOUT_AWAIT = "        await KinAuth.logout();\n"
 # (name, start, end, end included). A hook is one line, so it is its own start and end.
 U4C_REGIONS = (
@@ -117,6 +136,26 @@ U4C_REGIONS = (
     ("hook-401", HOOK_401, HOOK_401, True),
     ("hook", HOOK, HOOK, True),
     ("script", *MAIN_BLOCK, False),
+)
+# C-R-001 F1: every other place where the page starts a logout calls the same list before its first network wait: the
+# confirmed Log out (before the draft write, hold release and logout POST), the dictation 401, and the list and poll
+# account changes. The last three edit a base line in place (the same text S5-U4b uses there), so each is restored by
+# replacing the shipped text with the base text; each shipped text carries its base neighbour line, which makes it
+# unique (the Log out hook line alone also occurs inside api()'s deeper-indented line).
+LOGOUT_HOOK = ("      // 등록된 영역(window.kinOn401)은 초안 저장·점유 해제·로그아웃 POST(제한 시간 없음)를 기다리기 전에 끝낸다 — "
+               "그사이 도착한 이전 세션의 답이 그려지지 않게.\n"
+               f"      {END_LIST}\n")
+OWNER_LIST = ("        if (loadSequence !== listLoadSequence) return;\n"
+              "        if (e.ownerChanged) { studyPageClient.clear(); {END}await KinAuth.logout(); return; }\n")
+OWNER_POLL = ("          if (generation !== pollGeneration) return;\n"
+              "          if (e.ownerChanged) { studyPageClient.clear(); {END}await KinAuth.logout(); return; }\n")
+# (name, shipped text, base text)
+U4C_LINE_HOOKS = (
+    ("hook-logout", "      endPatientCopy();\n" + LOGOUT_HOOK, "      endPatientCopy();\n"),
+    ("hook-dictation-401", f"      onUnauthorized: () => {{ {END_LIST} return KinAuth.logout(); }},\n",
+     "      onUnauthorized: () => KinAuth.logout(),\n"),
+    ("hook-owner-list", OWNER_LIST.replace("{END}", END_LIST + " "), OWNER_LIST.replace("{END}", "")),
+    ("hook-owner-poll", OWNER_POLL.replace("{END}", END_LIST + " "), OWNER_POLL.replace("{END}", "")),
 )
 CLINICIAN_BLOCK_MARKS = ("  // ── 영상 요청(S5-U4c) ──\n", "  // ── 환자 타임라인(S5-U3) ──")
 CLINICIAN_HOOKS = ("    $('#viewer-note').textContent = TEXT.viewer;\n    clearRequests();\n",
@@ -132,8 +171,8 @@ def cut(text, start, end, inclusive):
 
 
 def without_u4c_main(text):
-    """main.html (LF) with the S5-U4c CSS block, the two markup regions, api()'s 401 hook line, the renderClinical hook and
-    the script block out.
+    """main.html (LF) with the S5-U4c CSS block, the two markup regions, api()'s 401 hook line, the renderClinical hook,
+    the script block and the four logout hook lines (C-R-001 F1) out.
 
     Each marker must occur exactly once in the text it is cut from, so a text already stripped (or one where a later
     edit duplicated a marker) is refused rather than cut at the wrong place."""
@@ -143,6 +182,10 @@ def without_u4c_main(text):
             if text.count(marker) != 1:
                 raise AssertionError(f"S5-U4c {name} marker {marker!r} occurs {text.count(marker)} times, expected 1")
         text = cut(text, start, end, inclusive)
+    for name, shipped, base in U4C_LINE_HOOKS:
+        if text.count(shipped) != 1:
+            raise AssertionError(f"S5-U4c {name} text occurs {text.count(shipped)} times, expected 1")
+        text = text.replace(shipped, base)
     return text
 
 
@@ -220,13 +263,50 @@ MAIN_PAGE = page_html(MAIN)
 # Control files: the same code without the late-answer guards.
 CLINICIAN_NO_GUARD = variant(SHIPPED["clinician.js"], [
     ("    return !leaving && requestsLock === null && epoch === requestsEpoch && selected === uid;\n", "    return !leaving;\n", 1),
-    ("      if (!requestsFresh(epoch, uid) || mine !== requestsSeq) return;\n", "      if (!requestsFresh(epoch, uid)) return;\n", 2),
+    ("    const fresh = () => requestsFresh(epoch, uid) && seq === requestsSeq;\n", "    const fresh = () => requestsFresh(epoch, uid);\n", 1),
 ], "clinician.js")
+# C-R-001 F3 control: the list without the #8 read of an unknown cancel that fell out of the latest 50 (as fix2 painted it).
+CLINICIAN_NO_OUTSIDE = variant(SHIPPED["clinician.js"], [
+    ("    const outside = await readRequestsOutside(uid, items, fresh);\n", "    const outside = [];\n", 1),
+], "clinician.js")
+# C-R-001 F2 controls: ownership by the fix2 rule (the token actor equals the stored requester actor) on both screens.
+CLINICIAN_ACTOR_RULE = variant(SHIPPED["clinician.js"], [(
+    "    const keep = !!item && REQUEST_ACTIVE.includes(item.state) && requestOwn.get(item.id) === true || requestAttempts.has(key);\n",
+    "    const keep = !!item && REQUEST_ACTIVE.includes(item.state) && item.requester.actor === KinAuth.session().user\n"
+    "      || requestAttempts.has(key);\n", 1),
+], "clinician.js")
+BLOCK_ACTOR_RULE = variant(BLOCK, [(
+    "        return can('admin') || (can('clinician') && !!item && ownIds.get(item.id) === true);\n",
+    "        return can('admin') || (can('clinician') && !!item && item.requester.actor === KinAuth.session().user);\n", 1),
+], "the S5-U4c block")
 BLOCK_NO_GUARD = variant(BLOCK, [
     ("if (ended || lock !== null || mine !== detailSeq || detailId !== id) return;", "if (ended || lock !== null) return;", 2),
 ], "the S5-U4c block")
 # B-R-001 controls: api() as fix1 shipped it (no 401 hook line), and the fix1 receipt checks (revision >= 1, `to` any state).
 API_FN_NO_HOOK = variant(API_FN, [(HOOK_401, "", 1)], "api()")
+# C-R-001 F1: the page's Log out handler as shipped (the same cut report_citation_dom_test.py and
+# report_dictation_host_dom_test.py take), and as fix2 shipped it (no hook line, control).
+LOGOUT_BLOCK = slice_between(MAIN, "    // ② 로그아웃", "    // 다른 사람이 잡거나 놓은 걸")
+LOGOUT_BLOCK_NO_HOOK = variant(LOGOUT_BLOCK, [(LOGOUT_HOOK, "", 1)], "the Log out handler")
+# What the handler calls, as stand-ins that log their order. The draft write and the hold release are POSTs the test can
+# hold; stashReport() also logs whether the request area had already ended when that first network wait began.
+LOGOUT_STANDINS = """
+let insertInFlight = false;
+window.synInsert = value => { insertInFlight = value; };
+const reportPreview = { close() { window.synOrder.push('preview'); } };
+function closeSR() { window.synOrder.push('closeSR'); }
+function endPatientCopy() { window.synOrder.push('endPatientCopy'); }
+async function stashReport() {
+  window.synOrder.push('stash:' + (document.querySelector('#image-request-queue-lock').hidden ? 'open' : 'ended'));
+  await fetch(API + '/syn/draft', { method: 'POST', headers: { 'X-KIN-CSRF': '1' } });
+  window.synOrder.push('stashed');
+}
+async function releaseHold() {
+  window.synOrder.push('release');
+  await fetch(API + '/syn/release', { method: 'POST', headers: { 'X-KIN-CSRF': '1' } });
+  window.synOrder.push('released');
+}
+"""
 BLOCK_FIX1_RECEIPT = variant(BLOCK, [(
     "          && applied.kind === attempt.kind && applied.from === attempt.from && applied.to === TARGET[attempt.action]\n"
     "          && applied.revision === attempt.payload.revision + 1\n"
@@ -323,14 +403,20 @@ def bad_receipt(changes):
 class RequestServer:
     """The S5-U4c routes as image-request.service.ts answers them, over in-test rows (no roles or tenancy: the page is
     what is under test). Every applied write keeps a receipt; a requestId sent again with the same content gets the
-    stored `applied` back with replayed: true."""
+    stored `applied` back with replayed: true. Each row's requester sub is kept beside it (the DTO never carries it, as
+    the service's dto() does not); rows added without one were made by CLIN_SUB."""
 
     def __init__(self, owner, actor, name, staff, page=50):
         self.owner, self.actor, self.name, self.staff, self.page = list(owner), actor, name, staff, page
-        self.items, self.receipts, self.tick = {}, {}, 0
+        self.items, self.receipts, self.subs, self.tick = {}, {}, {}, 0
 
-    def add(self, row):
+    def add(self, row, sub=None):
         self.items[row["id"]] = copy.deepcopy(row)
+        if sub is not None:
+            self.subs[row["id"]] = sub
+
+    def requester(self, id_):
+        return self.subs.get(id_, CLIN_SUB)
 
     def stamp(self):
         self.tick += 1
@@ -346,14 +432,23 @@ class RequestServer:
         rows = self.ordered([row for row in self.items.values() if row["studyUid"] == target])[:50]
         return {"owner": list(self.owner), "items": copy.deepcopy(rows)}
 
-    def queue(self, query):
+    def listed(self, query, mine):
+        """#7: view=queue is the institution's queue, view=mine this account's own requests (requester sub); newest first,
+        pages of self.page with the cursor verbatim."""
         state = query.get("state", "active")
         states = {"active": ACTIVE, "all": STATES}.get(state, [state.capitalize()])
         rows = self.ordered([row for row in self.items.values()
-                             if row["state"] in states and ("kind" not in query or row["kind"] == query["kind"])])
+                             if row["state"] in states and ("kind" not in query or row["kind"] == query["kind"])
+                             and (not mine or self.requester(row["id"]) == self.owner[1])])
         start = int(query["cursor"].rsplit("_", 1)[1]) if "cursor" in query else 0
         following = f"SYN-CURSOR_{start + self.page}" if start + self.page < len(rows) else None
         return {"owner": list(self.owner), "items": copy.deepcopy(rows[start:start + self.page]), "nextCursor": following}
+
+    def queue(self, query):
+        return self.listed(query, False)
+
+    def mine(self, query):
+        return self.listed(query, True)
 
     def read(self, id_):
         row = self.items.get(id_)
@@ -384,6 +479,7 @@ class RequestServer:
             "requester": {"actor": self.actor, "name": self.name},
             "counterparty": {"text": body["counterparty"], "institutionId": body["counterpartyInstitutionId"]},
             "reason": body["reason"], "handler": None, "note": None, "createdAt": at, "updatedAt": at}
+        self.subs[request_id] = self.owner[1]
         applied = {"id": request_id, "studyUid": target, "requestId": request_id, "kind": body["kind"], "action": "create",
                    "from": None, "to": "Requested", "revision": 1, "at": at}
         self.receipts[request_id] = (mark, applied)
@@ -441,6 +537,10 @@ UNKNOWN = "저장되었는지 알 수 없습니다. Retry는 같은 요청 ID로
 WRITE_MALFORMED = "저장 응답의 형식을 확인할 수 없습니다. Retry는 같은 요청 ID로 다시 보내 저장 결과를 확인합니다."
 C_DISCARDED = "보낸 요청을 버렸습니다. 저장되었을 수 있으니 다시 불러온 목록에서 확인하세요."
 C_REFUSED = "서버가 이 계정의 영상 요청 읽기를 거절했습니다. 권한이 바뀌었다면 화면을 다시 불러오세요."
+C_OWN_FAILED = "이 계정이 남긴 요청인지 확인하지 못해 취소 칸을 열지 않았습니다. Retry로 다시 읽으세요."
+C_OUTSIDE = "최신 50건 목록 밖으로 밀린 요청입니다. 결과를 모르는 취소가 남아 있어 이 요청만 따로 읽었습니다."
+C_OUTSIDE_GONE = ("결과를 모르는 취소가 남은 요청을 서버가 지금 보여 주지 않습니다. 접근 조건이 바뀌었거나 요청이 없어졌을 수 있어 "
+                  "이 취소는 더 확인할 수 없습니다.")
 OWNER_CHANGED = "로그인한 계정이 바뀌었습니다. 이 화면에서는 영상 요청을 더 읽거나 쓰지 않습니다. 화면을 다시 불러오세요."
 NO_SERVER = "서버에 연결하지 못했습니다."
 C_CODES = {
@@ -462,6 +562,8 @@ M_DISCARDED = "보낸 요청을 버렸습니다. 저장되었을 수 있으니 �
 M_ENDED = "세션이 끝났습니다. 영상 요청을 더 읽거나 쓰지 않습니다."
 M_ROLE_STAFF = "방사선사(technician) 또는 관리자 권한이 필요합니다."
 M_ROLE_CANCEL = "요청한 임상의 또는 관리자만 취소할 수 있습니다."
+M_OWN_CHECKING = "이 계정이 남긴 요청인지 서버의 내 요청 목록에서 확인하는 중입니다."
+M_OWN_FAILED = "이 계정이 남긴 요청인지 확인하지 못해 Cancel을 막았습니다. Reload로 다시 확인하세요."
 M_STATE_ACCEPT = "Requested 상태의 요청만 Accept할 수 있습니다."
 M_STATE_DONE = "처리가 끝난 요청입니다."
 M_TIPS = {"accept": "요청을 받아 처리 중(Accepted)으로 기록합니다.",
@@ -518,6 +620,7 @@ CLINICIAN_VIEW = """() => { const s = document.querySelector('#image-requests');
     items: [...s.querySelectorAll('#image-request-list > li')].map(li => ({id: li.dataset.id, state: li.dataset.state,
       status: text(li.querySelector('.status')), closed: text(li.querySelector('[data-closed-note]')),
       lines: [...li.querySelectorAll('[data-part="info"] > p')].map(p => p.textContent),
+      outside: text(li.querySelector('[data-part="outside"]')),
       cancel: compose(li.querySelector('.request-compose')), note: note(li.querySelector('[data-request-note]'))})),
     form: form ? {hidden: form.hidden, state: form.dataset.state, kind: field(form, 'kind').value,
       kindDisabled: field(form, 'kind').disabled, counterparty: field(form, 'counterparty').value,
@@ -601,6 +704,28 @@ class ImageRequestStructureTest(unittest.TestCase):
         self.assertEqual(1, MAIN.count(HOOK_401))
         self.assertIn("      if (res.status === 401) {\n" + HOOK_401 + LOGOUT_AWAIT, API_FN)
         self.assertEqual(1, BLOCK.count("      (window.kinOn401 = window.kinOn401 || []).push(end);\n"))
+        # C-R-001 F1: every other place the page starts a logout calls the same list before its first network wait. The
+        # confirmed Log out calls it after the insertion refusal, the confirm and its synchronous closers, and before the
+        # draft write, the hold release and the logout, whose order stays as it was.
+        for name, shipped, _ in U4C_LINE_HOOKS:
+            with self.subTest(hook=name):
+                self.assertEqual(1, MAIN.count(shipped))
+        hook = LOGOUT_BLOCK.index(LOGOUT_HOOK)
+        for before in ("if (insertInFlight) {", 'if (!confirm("로그아웃하시겠습니까?")) return;', "loggingOut = true;",
+                       "endPatientCopy();"):
+            self.assertLess(LOGOUT_BLOCK.index(before), hook, before)
+        steps = [LOGOUT_BLOCK.index(step) for step in ("await stashReport();", "await releaseHold();", "await KinAuth.logout();")]
+        self.assertEqual(sorted(steps), steps)
+        self.assertLess(hook, steps[0])
+        self.assertIn(U4C_LINE_HOOKS[1][1], slice_between(MAIN, "    const dictation = KinDictation.createController({",
+                                                           "    KinDictation.mount("))
+        # C-R-001 F2: own requests are the server's (#7 view=mine ids); neither block compares an actor string.
+        for label, block in (("main.html", BLOCK), ("clinician.js", CLINICIAN_BLOCK)):
+            with self.subTest(block=label):
+                self.assertNotIn("requester.actor ===", block)
+                self.assertNotIn("session.user", block)
+                self.assertIn("'view=mine&state=all'", block)
+        self.assertNotIn("actor()", BLOCK)
         order = slice_between(MAIN, '      <div class="panel order-p"', "      </div><!-- /workrow -->")
         self.assertIn('<details id="image-request-queue">', order)
         self.assertLess(order.index('<details id="image-request-queue">'), order.index('<div class="statusbar">'))
@@ -620,7 +745,8 @@ class ImageRequestStructureTest(unittest.TestCase):
                                  "/image-requests/${encodeURIComponent(attempt.id)}",
                                  "/studies/${encodeURIComponent(target)}/image-requests"}),
                          sorted(set(re.findall(r"`(/[^`$]*(?:\$\{[^}]*\}[^`$]*)*)`", BLOCK))))
-        self.assertEqual(sorted({"/studies/${encodeURIComponent(uid)}/image-requests", "/image-requests/${encodeURIComponent(id)}"}),
+        self.assertEqual(sorted({"/studies/${encodeURIComponent(uid)}/image-requests", "/image-requests/${encodeURIComponent(id)}",
+                                 "/image-requests?${query}"}),
                          sorted(set(re.findall(r"`(/(?:studies|image-requests)[^`]*)`", CLINICIAN_BLOCK))))
 
 
@@ -643,6 +769,9 @@ class Harness(unittest.TestCase):
         self.lose_replies = 0
         self.held_reads = self.held_writes = None
         self.reads, self.writes = [], []
+        # #7 view=mine (own requests, C-R-001 F2) and #8 single reads: queries / ids, held routes, errors to answer first.
+        self.mine_calls, self.mine_requests, self.mine_errors, self.held_mine = [], [], [], None
+        self.detail_calls, self.detail_errors, self.held_detail = [], [], None
         self.unexpected, self.errors, self.dialogs, self.finished = [], [], [], []
         self.context = self.browser.new_context(viewport={"width": 1400, "height": 900}, timezone_id="UTC")
         self.context.route("**/*", self.route)
@@ -680,6 +809,36 @@ class Harness(unittest.TestCase):
         route.fulfill(status=status, json=payload)
         self.wait_until(lambda: any(entry is request for entry in self.finished), "the released answer reaching the page")
         self.settle()
+
+    def quiet(self):
+        """Every own-request read the page has sent so far has been answered and consumed (a list paints only after it)."""
+        self.wait_until(lambda: all(any(entry is request for entry in self.finished) for request in self.mine_requests),
+                        "the own-request reads")
+        self.settle()
+
+    def answer_mine(self, route, query):
+        self.mine_calls.append(route.request.url.split("?", 1)[1])
+        if self.held_mine is not None:
+            self.held_mine.append(route)
+            return
+        self.mine_requests.append(route.request)
+        if self.mine_errors:
+            status, body = self.mine_errors.pop(0)
+            route.fulfill(status=status, json=body)
+            return
+        route.fulfill(json=self.server.mine(query))
+
+    def answer_detail(self, route, target):
+        self.detail_calls.append(target)
+        if self.held_detail is not None:
+            self.held_detail.append((target, route))
+            return
+        if self.detail_errors:
+            status, body = self.detail_errors.pop(0)
+            route.fulfill(status=status, json=body)
+            return
+        status, body = self.server.read(target)
+        route.fulfill(status=status, json=body)
 
     def origin_ok(self, route, url):
         if f"{url.scheme}://{url.netloc}" != ORIGIN:
@@ -817,11 +976,19 @@ class ClinicianRequestDOMTest(Harness):
             if method == "POST":
                 self.answer_write(route, path, lambda body: self.server.create(target, body))
                 return
-        found = re.fullmatch(r"/api/image-requests/([^/]+)", path)
-        if found and method == "POST" and not url.query:
-            target = unquote(found.group(1))
-            self.answer_write(route, path, lambda body: self.server.change(target, body))
+        query = {key: values[0] for key, values in parse_qs(url.query, keep_blank_values=True).items()}
+        if method == "GET" and path == "/api/image-requests" and query.get("view") == "mine":
+            self.answer_mine(route, query)
             return
+        found = re.fullmatch(r"/api/image-requests/([^/]+)", path)
+        if found and not url.query:
+            target = unquote(found.group(1))
+            if method == "GET":
+                self.answer_detail(route, target)
+                return
+            if method == "POST":
+                self.answer_write(route, path, lambda body: self.server.change(target, body))
+                return
         if method == "POST" and path == "/api/auth/logout":
             route.fulfill(status=204, body="")
             return
@@ -1081,6 +1248,7 @@ class ClinicianRequestDOMTest(Harness):
         for label, script in (("shipped", None), ("no-guard", CLINICIAN_NO_GUARD)):
             with self.subTest(label):
                 self.reads.clear()
+                self.mine_calls.clear()
                 self.held_reads = []
                 self.open_home(script)
                 self.pick(1)
@@ -1091,16 +1259,21 @@ class ClinicianRequestDOMTest(Harness):
                 self.pick(1)
                 self.wait_until(lambda: len(self.held_reads) == 3, "A's second read")
                 self.assertEqual([a, b, a], [target for target, _ in self.held_reads])
+                # quiet(): a list paints only after its own-request read, which the guard-less control sends for a late answer.
                 self.release(self.held_reads[0][1], {"owner": owner, "items": [item(7, a, "Requested", reason="SYN-LATE-A")]})
+                self.quiet()
                 after_first = self.view()
                 self.release(self.held_reads[1][1], {"owner": owner, "items": [item(8, b, "Requested", reason="SYN-LATE-B")]})
+                self.quiet()
                 after_second = self.view()
+                late_own_reads = len(self.mine_calls)
                 self.release(self.held_reads[2][1], {"owner": owner, "items": [item(9, a, "Accepted", revision=2, handler=STAFF,
                                                                                      reason="SYN-FRESH-A")]})
                 self.held_reads = None
                 if label == "shipped":
                     for seen in (after_first, after_second):
                         self.assertEqual((a, "loading", []), (seen["uid"], seen["list"][0], seen["items"]))
+                    self.assertEqual(0, late_own_reads, "a late answer reads nothing further")
                     self.list_state("ready")
                     self.assertEqual([rid(9)], [entry["id"] for entry in self.view()["items"]])
                 else:
@@ -1303,14 +1476,15 @@ class ClinicianRequestDOMTest(Harness):
                            "user": "syn-mixed", "displayName": "SYN Mixed"}
                 self.server = RequestServer([INSTITUTION, "SYN-MIXED-SUB"], "syn-mixed", "SYN Mixed", staff=False)
                 self.writes.clear()
-                # Another clinician's requests, one of them under the same display name: the actor decides, not the name.
+                # Another clinician's requests (CLIN_SUB), one of them under the same display name: the server's own list
+                # (#7 view=mine, by requester sub) decides, not the name.
                 other = item(1, a, "Requested", at=3)
                 other["requester"] = {"actor": "syn-clinician", "name": "SYN Mixed"}
                 self.server.add(other)
                 self.server.add(item(2, a, "Accepted", kind="image-transfer", revision=2, handler=STAFF, at=2))
                 own = item(3, a, "Requested", kind="image-transfer", at=1, reason="SYN own reason")
                 own["requester"] = {"actor": "syn-mixed", "name": "SYN Mixed"}
-                self.server.add(own)
+                self.server.add(own, sub="SYN-MIXED-SUB")
                 self.open_home()
                 self.pick(1)
                 self.open_requests("ready")
@@ -1326,6 +1500,201 @@ class ClinicianRequestDOMTest(Harness):
                                  [(path, body["action"], body["revision"]) for path, body in self.writes])
                 self.assertEqual(["Requested", "Accepted", "Cancelled"], [self.server.items[rid(n)]["state"] for n in (1, 2, 3)])
 
+    def open_as(self, sub, user, roles, page=50):
+        """A new document for an account: /api/me and the stand-in server both answer as that sub."""
+        self.me = {"sub": sub, "actor": user, "roles": roles, "institution": INSTITUTION, "kind": "member", "user": user,
+                   "displayName": "SYN Clinician"}
+        self.server = RequestServer([INSTITUTION, sub], user, "SYN Clinician", staff=False, page=page)
+        self.mine_calls.clear()
+        self.writes.clear()
+
+    def test_c09_cancel_follows_the_server_s_own_request_ids_not_the_actor(self):
+        a = uid(1)
+        # Control: the fix2 rule (token actor = stored requester actor) gets both actor cases below wrong.
+        for sub, user, roles, shown in ((CLIN_SUB, "syn-clinician-renamed", ["clinician"], False),
+                                        ("SYN-OTHER-SUB", "syn-clinician", ["clinician", "radiologist"], True)):
+            with self.subTest(control=sub):
+                self.open_as(sub, user, roles)
+                self.server.add(item(1, a, "Requested", at=3))
+                self.open_home(CLINICIAN_ACTOR_RULE)
+                self.pick(1)
+                self.open_requests("ready")
+                self.assertEqual(shown, self.view()["items"][0]["cancel"] is not None, "the fix2 actor rule")
+        # The same account (sub) whose actor changed after it made the request (a new email): the request is still its own.
+        self.open_as(CLIN_SUB, "syn-clinician-renamed", ["clinician"])
+        self.server.add(item(1, a, "Requested", at=3))
+        self.open_home()
+        self.pick(1)
+        self.open_requests("ready")
+        self.assertEqual(["view=mine&state=all"], self.mine_calls)
+        seen = self.view()["items"][0]
+        self.assertEqual(("syn-clinician", "idle", ["ready", C_READY.format(n=1), "", False, "status"]),
+                         (self.server.items[rid(1)]["requester"]["actor"], seen["cancel"]["state"], self.view()["list"]))
+        self.item_locator(1).locator('[data-field="note"]').fill("SYN cancel after the actor changed")
+        self.item_locator(1).locator("[data-send]").click()
+        self.note_state(self.item_locator(1), "saved")
+        self.assertEqual([(f"/api/image-requests/{rid(1)}", "cancel")], [(path, body["action"]) for path, body in self.writes])
+
+        # Another account (sub) whose actor equals the stored requester actor: not its request, nothing to send.
+        self.open_as("SYN-OTHER-SUB", "syn-clinician", ["clinician", "radiologist"])
+        self.server.add(item(2, a, "Requested", at=3))
+        self.open_home()
+        self.pick(1)
+        self.open_requests("ready")
+        self.assertEqual((["view=mine&state=all"], None, 0), (self.mine_calls, self.view()["items"][0]["cancel"],
+                                                             self.item_locator(2).locator("input, button").count()))
+        self.assertEqual([], self.writes)
+
+        # An own request on the second page of the own list is found by following the cursor; another's older request is
+        # decided at the first page whose last row is older, without reading the pages after it.
+        self.open_as(CLIN_SUB, "syn-clinician", ["clinician", "radiologist"], page=2)
+        for n, at in ((41, 13), (42, 12), (43, 11)):
+            self.server.add(item(n, uid(2), "Cancelled", revision=2, note="SYN cancelled", at=at))
+        self.server.add(item(3, a, "Requested", at=6))
+        self.server.add(item(4, a, "Accepted", kind="image-transfer", revision=2, handler=STAFF, at=5), sub="SYN-OTHER-SUB")
+        for n, at in ((44, 2), (45, 1), (46, 0)):
+            self.server.add(item(n, uid(2), "Cancelled", revision=2, note="SYN cancelled", at=at))
+        self.open_home()
+        self.pick(1)
+        self.open_requests("ready")
+        self.assertEqual(["view=mine&state=all", "view=mine&state=all&cursor=SYN-CURSOR_2",
+                          "view=mine&state=all&cursor=SYN-CURSOR_4"], self.mine_calls, "page 4 (SYN-CURSOR_6) is never read")
+        self.assertEqual([(rid(3), True), (rid(4), False)], [(entry["id"], entry["cancel"] is not None)
+                                                            for entry in self.view()["items"]])
+
+        # The own list cannot be read: no cancel field, the list says why and offers Retry, which reads both again.
+        self.open_as(CLIN_SUB, "syn-clinician", ["clinician"])
+        self.server.add(item(5, a, "Requested", at=3))
+        self.mine_errors = [(503, {"statusCode": 503, "message": "SYN 요청 목록 응답 없음"})]
+        self.open_home()
+        self.pick(1)
+        self.open_requests("ready")
+        seen = self.view()
+        self.assertEqual((["ready", C_READY.format(n=1), f"{C_OWN_FAILED}\nSYN 요청 목록 응답 없음 (HTTP 503)", True, "status"], None),
+                         (seen["list"], seen["items"][0]["cancel"]))
+        reads = len(self.reads)
+        self.page.locator("#image-requests-retry").click()
+        self.wait_until(lambda: len(self.reads) == reads + 1 and len(self.mine_calls) == 2, "the list and own reads again")
+        expect(self.item_locator(5).locator(".request-compose")).to_have_count(1)
+        self.assertEqual(["ready", C_READY.format(n=1), "", False, "status"], self.view()["list"])
+
+        # 403: the server gives this account no requester scope (no clinician role), so nothing here is its own.
+        self.open_as("SYN-STAFF-SUB", "syn-staff", ["radiologist", "technician"])
+        self.server.add(item(6, a, "Requested", at=3))
+        self.mine_errors = [(403, err("IMAGE_REQUEST_ROLE_REQUIRED", "이 영상 요청 동작에 필요한 역할이 없습니다"))]
+        self.open_home()
+        self.pick(1)
+        self.open_requests("ready")
+        seen = self.view()
+        self.assertEqual((["ready", C_READY.format(n=1), "", False, "status"], None, 1),
+                         (seen["list"], seen["items"][0]["cancel"], len(self.mine_calls)))
+
+    def fifty(self, a):
+        """The latest 50 requests of study a: rid(100) (Requested, the oldest) and 49 finished ones after it."""
+        self.server.add(item(100, a, "Requested", at=0, reason="SYN oldest reason"))
+        for n in range(101, 150):
+            self.server.add(item(n, a, "Cancelled", kind="image-transfer", revision=2, note="SYN cancelled", at=1))
+
+    def unknown_cancel(self, n, reason):
+        row = self.item_locator(n)
+        row.locator('[data-field="note"]').fill(reason)
+        self.write_errors = [(503, err("IMAGE_REQUEST_BUSY", "영상 요청 처리 중입니다. 같은 요청으로 다시 시도하세요"))]
+        row.locator("[data-send]").click()
+        self.note_state(row, "unknown")
+        return self.writes[-1]
+
+    def reopen(self, state="ready"):
+        reads = len(self.reads)
+        self.page.locator("#image-requests-summary").click()
+        self.page.locator("#image-requests-summary").click()
+        self.wait_until(lambda: len(self.reads) == reads + 1, "the list read after reopening")
+        self.list_state(state)
+
+    def test_c10_an_unknown_cancel_outside_the_latest_50_keeps_retry_and_discard(self):
+        a = uid(1)
+        # Control: without the #8 read, the row and its Retry are gone once the request is pushed past the latest 50.
+        self.fifty(a)
+        self.open_home(CLINICIAN_NO_OUTSIDE)
+        self.pick(1)
+        self.open_requests("ready")
+        self.unknown_cancel(100, "SYN control reason")
+        self.server.add(item(150, a, "Cancelled", revision=2, note="SYN cancelled", at=2))
+        self.reopen()
+        self.assertEqual((50, 0), (len(self.view()["items"]), self.page.locator("#image-request-list [data-retry]:visible").count()),
+                         "the fix2 list drops the unknown cancel's Retry")
+
+        self.server = RequestServer([INSTITUTION, CLIN_SUB], "syn-clinician", "SYN Clinician", staff=False)
+        self.writes.clear()
+        self.detail_calls.clear()
+        self.fifty(a)
+        self.open_home()
+        self.pick(1)
+        self.open_requests("ready")
+        items = self.view()["items"]
+        self.assertEqual((50, rid(100), True), (len(items), items[-1]["id"], items[-1]["cancel"] is not None))
+        sent = self.unknown_cancel(100, "SYN reason to cancel")
+        # Another request pushes rid(100) past the latest 50: reopening reads it by #8 and keeps its row last.
+        self.server.add(item(150, a, "Cancelled", revision=2, note="SYN cancelled", at=2))
+        self.reopen()
+        self.assertEqual([rid(100)], self.detail_calls)
+        for step in ("reopened", "A->B->A"):
+            with self.subTest(step=step):
+                items = self.view()["items"]
+                self.assertEqual((51, rid(150), rid(100)), (len(items), items[0]["id"], items[-1]["id"]))
+                last = items[-1]
+                self.assertEqual(("Requested", C_OUTSIDE, "Reason SYN oldest reason"), (last["state"], last["outside"], last["lines"][2]))
+                self.assertEqual(("unknown", "SYN reason to cancel", True, False, True, True),
+                                 (last["cancel"]["state"], last["cancel"]["value"], last["cancel"]["readOnly"], last["cancel"]["send"],
+                                  last["cancel"]["retry"], last["cancel"]["discard"]))
+                self.assertEqual("unknown", last["note"][0])
+                self.assertEqual(1, self.page.locator("#image-request-list [data-retry]:visible").count())
+                if step == "reopened":
+                    self.pick(2)
+                    self.list_state("empty")
+                    self.pick(1)
+                    self.list_state("ready")
+                    self.wait_until(lambda: len(self.detail_calls) == 2, "the #8 read after A->B->A")
+        # Retry sends the same requestId and body; the server applies it. The list read after it is held so the row's
+        # result is seen before that read drops the row (no unknown write is left for it).
+        self.held_reads = []
+        self.item_locator(100).locator("[data-retry]").click()
+        self.note_state(self.item_locator(100), "saved")
+        self.assertEqual((sent, "Cancelled"), (self.writes[-1], self.server.items[rid(100)]["state"]))
+        self.assertEqual(["saved", C_CANCELLED, ""], self.view()["items"][-1]["note"])
+        self.wait_until(lambda: len(self.held_reads) == 1, "the list read after the write")
+        self.release(self.held_reads[0][1], self.server.study(a))
+        self.held_reads = None
+        expect(self.item_locator(100)).to_have_count(0)
+
+    def test_c11_a_403_or_404_on_the_single_read_says_so_and_drops_the_unknown_cancel(self):
+        a = uid(1)
+        self.server.add(item(1, a, "Requested", at=3, reason="SYN reason 1"))
+        self.server.add(item(2, a, "Accepted", kind="image-transfer", revision=2, handler=STAFF, at=2, reason="SYN reason 2"))
+        self.open_home()
+        self.pick(1)
+        self.open_requests("ready")
+        self.unknown_cancel(1, "SYN first reason")
+        self.unknown_cancel(2, "SYN second reason")
+        # Both leave the list (the server no longer shows them); #8 answers 403 for the first read and 404 for the other.
+        self.server.items.clear()
+        self.detail_errors = [(403, err("IMAGE_REQUEST_ROLE_REQUIRED", "이 영상 요청 동작에 필요한 역할이 없습니다"))]
+        self.reopen("empty")
+        self.wait_until(lambda: len(self.detail_calls) == 2, "the two #8 reads")
+        details = {self.detail_calls[0]: "이 영상 요청 동작에 필요한 역할이 없습니다 (HTTP 403 · IMAGE_REQUEST_ROLE_REQUIRED)",
+                   self.detail_calls[1]: "영상 요청을 찾을 수 없습니다 (HTTP 404 · IMAGE_REQUEST_NOT_FOUND)"}
+        self.assertEqual({rid(1), rid(2)}, set(details))
+        seen = self.view()
+        self.assertEqual({rid(1), rid(2)}, {entry["id"] for entry in seen["items"]})
+        for entry in seen["items"]:
+            with self.subTest(id=entry["id"]):
+                self.assertEqual(("unavailable", [], None, None, ["failed", C_OUTSIDE_GONE, details[entry["id"]]]),
+                                 (entry["state"], entry["lines"], entry["outside"], entry["cancel"], entry["note"]))
+        self.assertEqual(0, self.page.locator("#image-request-list [data-retry], #image-request-list input").count())
+        self.assertEqual(2, len(self.writes), "nothing is sent again")
+        # The unknown writes were dropped: the next reading reads neither again and shows no row.
+        self.reopen("empty")
+        self.assertEqual((2, []), (len(self.detail_calls), self.view()["items"]))
+
 
 class MainRequestDOMTest(Harness):
     STUDIES = [
@@ -1340,8 +1709,10 @@ class MainRequestDOMTest(Harness):
         self.queue_errors, self.detail_errors = [], []
         self.held_queue = self.held_detail = None
         self.queue_calls, self.detail_calls = [], []
-        # POST /auth/logout from the shipped auth.js (m09): held until the test answers it.
+        # POST /auth/logout from the shipped auth.js (m09, m12): held until the test answers it.
         self.logouts = []
+        # m12: the Log out handler's draft write and hold release (stand-ins' POSTs), held while held_posts is a list.
+        self.page_posts, self.held_posts = [], None
         self.html = None
         self.use("technician", "SYN-TECH-SUB")
         a, b = uid(11), uid(12)
@@ -1363,7 +1734,7 @@ class MainRequestDOMTest(Harness):
         items = getattr(self, "server", None)
         self.server = RequestServer([INSTITUTION, sub], user, name, staff=True, page=3)
         if items is not None:
-            self.server.items = items.items
+            self.server.items, self.server.subs = items.items, items.subs
 
     def route(self, route):
         request = route.request
@@ -1385,7 +1756,17 @@ class MainRequestDOMTest(Harness):
         if method == "POST" and path == "/api/auth/logout":
             self.logouts.append(route)
             return
+        if method == "POST" and path in ("/api/syn/draft", "/api/syn/release"):
+            self.page_posts.append(path)
+            if self.held_posts is not None:
+                self.held_posts.append(route)
+                return
+            route.fulfill(json={})
+            return
         query = {key: values[0] for key, values in parse_qs(url.query, keep_blank_values=True).items()}
+        if method == "GET" and path == "/api/image-requests" and query.get("view") == "mine":
+            self.answer_mine(route, query)
+            return
         if method == "GET" and path == "/api/image-requests":
             self.queue_calls.append(url.query)
             if self.held_queue is not None:
@@ -1401,16 +1782,7 @@ class MainRequestDOMTest(Harness):
         if found and not url.query:
             target = unquote(found.group(1))
             if method == "GET":
-                self.detail_calls.append(target)
-                if self.held_detail is not None:
-                    self.held_detail.append((target, route))
-                    return
-                if self.detail_errors:
-                    status, body = self.detail_errors.pop(0)
-                    route.fulfill(status=status, json=body)
-                    return
-                status, body = self.server.read(target)
-                route.fulfill(status=status, json=body)
+                self.answer_detail(route, target)
                 return
             if method == "POST":
                 self.answer_write(route, path, lambda body: self.server.change(target, body))
@@ -1424,16 +1796,24 @@ class MainRequestDOMTest(Harness):
         route.abort()
 
     # ── page helpers ──
-    def open_main(self, block=BLOCK, api_fn=API_FN, real_auth=False):
+    def open_main(self, block=BLOCK, api_fn=API_FN, real_auth=False, logout=None):
+        """`logout`: the page's Log out handler (LOGOUT_BLOCK or its control) to run after the block, over LOGOUT_STANDINS;
+        confirm() answers window.synConfirm and logs itself."""
         head = ("<script>window.synSession = " + json.dumps(self.session) + "; window.synStudies = " + json.dumps(self.STUDIES)
-                + "; window.synInstitutions = " + json.dumps(self.INSTITUTIONS) + "; window.synToasts = []; window.synLogouts = 0;</script>")
+                + "; window.synInstitutions = " + json.dumps(self.INSTITUTIONS) + "; window.synToasts = []; window.synLogouts = 0;"
+                + " window.synOrder = []; window.synConfirm = true;"
+                + " window.confirm = () => { window.synOrder.push('confirm'); return window.synConfirm; };</script>")
         if real_auth:
             head += "<script>\n" + SHIPPED["auth.js"] + "\n</script>"
-        script = "<script>\n" + (PRELUDE_REAL_AUTH if real_auth else PRELUDE) + api_fn + "\n" + SET_MODE + "\n" + block + "\n</script>"
+        tail = "" if logout is None else LOGOUT_STANDINS + logout
+        script = ("<script>\n" + (PRELUDE_REAL_AUTH if real_auth else PRELUDE) + api_fn + "\n" + SET_MODE + "\n" + block + "\n"
+                  + tail + "\n</script>")
         at = MAIN_PAGE.rindex("</body>")
         self.html = MAIN_PAGE[:at] + head + script + MAIN_PAGE[at:]
         self.queue_calls.clear()
         self.detail_calls.clear()
+        self.mine_calls.clear()
+        self.page_posts.clear()
         self.reads.clear()
         self.writes.clear()
         self.page.goto(ORIGIN + "/harness/main.html")
@@ -1990,25 +2370,33 @@ class MainRequestDOMTest(Harness):
         self.result("saved")
         expect(self.page.locator("#image-request-detail")).to_have_attribute("data-state", "Cancelled")
 
-    def test_m11_cancel_is_the_requester_s_or_an_admin_s(self):
+    def cancel_control(self):
+        return {name: (disabled, title) for name, disabled, title in self.queue()["detail"]["actions"]}["cancel"]
+
+    def test_m11_cancel_is_the_requester_s_by_the_server_s_own_ids_or_an_admin_s(self):
+        # rid(21) was made by CLIN_SUB; its stored requester actor is "syn-clinician".
         cases = [
-            # roles, token actor, cancel enabled, staff actions enabled
-            (["clinician", "radiologist"], "syn-mixed", False, False),
-            (["clinician", "technician"], "syn-mixed", False, True),
-            (["clinician", "radiologist"], None, False, False),
-            (["clinician", "radiologist"], "syn-clinician", True, False),
-            (["admin"], "syn-admin", True, True),
+            # label, roles, sub, token actor, cancel enabled, staff actions enabled, own-list reads
+            ("mixed, another's request", ["clinician", "radiologist"], "SYN-MEMBER-SUB", "syn-mixed", False, False, 1),
+            ("mixed staff, another's request", ["clinician", "technician"], "SYN-MEMBER-SUB", "syn-mixed", False, True, 1),
+            ("same sub, actor changed", ["clinician", "radiologist"], CLIN_SUB, "syn-clinician-renamed", True, False, 1),
+            ("another sub, same actor", ["clinician", "radiologist"], "SYN-MEMBER-SUB", "syn-clinician", False, False, 1),
+            ("radiologist", ["radiologist"], "SYN-RAD-SUB", "syn-clinician", False, False, 0),
+            ("admin", ["admin"], "SYN-ADMIN-SUB", "syn-admin", True, True, 0),
         ]
-        for roles, actor, cancel, staff in cases:
-            with self.subTest(roles=roles, actor=actor):
-                self.use_roles(roles, "SYN-MEMBER-SUB", actor, "SYN Clinician")
+        for label, roles, sub, actor, cancel, staff, own_reads in cases:
+            with self.subTest(label):
+                self.use_roles(roles, sub, actor, "SYN Clinician")
                 self.open_main()
                 self.open_queue()
                 self.open_item(21, "Requested")
+                self.wait_until(lambda: len(self.mine_calls) == own_reads, "the own-list read")
+                self.quiet()
                 actions = {name: (disabled, title) for name, disabled, title in self.queue()["detail"]["actions"]}
                 self.assertEqual((not cancel, M_TIPS["cancel"] if cancel else M_ROLE_CANCEL), actions["cancel"])
                 for name in ("accept", "close", "decline"):
                     self.assertEqual(not staff, actions[name][0], name)
+                self.assertEqual(["view=mine&state=all"] * own_reads, self.mine_calls)
                 self.page.locator("#image-request-note").fill("SYN cancel reason")
                 if not cancel:
                     # A disabled Cancel does nothing, whoever clicks it.
@@ -2027,6 +2415,166 @@ class MainRequestDOMTest(Harness):
                 self.assertEqual([("cancel", 1, "SYN cancel reason")],
                                  [(body["action"], body["revision"], body["note"]) for _, body in self.writes])
                 self.server.items[rid(21)].update(state="Requested", revision=1, note=None, handler=None)
+
+        # Control: the fix2 rule (token actor = stored requester actor) gets both actor cases above wrong.
+        for label, sub, actor, cancel in (("same sub, actor changed", CLIN_SUB, "syn-clinician-renamed", False),
+                                          ("another sub, same actor", "SYN-MEMBER-SUB", "syn-clinician", True)):
+            with self.subTest(control=label):
+                self.use_roles(["clinician", "radiologist"], sub, actor, "SYN Clinician")
+                self.open_main(BLOCK_ACTOR_RULE)
+                self.open_queue()
+                self.open_item(21, "Requested")
+                self.wait_until(lambda: len(self.mine_calls) == 1, "the own-list read")
+                self.quiet()
+                self.assertEqual(not cancel, self.cancel_control()[0], "the fix2 actor rule")
+
+        # An own request on the second page of the own list (pages of 3) is found by following the cursor.
+        for n, at in ((27, 8), (28, 7), (29, 6)):
+            self.server.add(item(n, uid(19), "Cancelled", revision=2, note="SYN cancelled", at=at))
+        self.use_roles(["clinician", "radiologist"], CLIN_SUB, "syn-clinician", "SYN Clinician")
+        self.open_main()
+        self.open_queue()
+        self.open_item(21, "Requested")
+        self.wait_until(lambda: len(self.mine_calls) == 2, "the second own-list page")
+        self.quiet()
+        self.assertEqual((["view=mine&state=all", "view=mine&state=all&cursor=SYN-CURSOR_3"], (False, M_TIPS["cancel"])),
+                         (self.mine_calls, self.cancel_control()))
+
+        # Another account whose own list is long: the page whose last row is older than rid(21) settles it (not its own)
+        # and the page after it is never read.
+        for n, at in zip(range(61, 71), (13, 12, 11, 10, 9, 8, 4, 3, 2, 1)):
+            self.server.add(item(n, uid(19), "Cancelled", revision=2, note="SYN cancelled", at=at), sub="SYN-MEMBER-SUB")
+        self.use_roles(["clinician", "radiologist"], "SYN-MEMBER-SUB", "syn-clinician", "SYN Clinician")
+        self.open_main()
+        self.open_queue()
+        self.open_item(21, "Requested")
+        self.wait_until(lambda: len(self.mine_calls) == 3, "the third own-list page")
+        self.quiet()
+        self.assertEqual((["view=mine&state=all", "view=mine&state=all&cursor=SYN-CURSOR_3",
+                           "view=mine&state=all&cursor=SYN-CURSOR_6"], (True, M_ROLE_CANCEL)),
+                         (self.mine_calls, self.cancel_control()), "SYN-CURSOR_9 is never read")
+
+        # While the own list is read Cancel is disabled and says so; a failed read keeps it disabled with the reason, and
+        # Reload checks again.
+        self.use_roles(["clinician", "radiologist"], CLIN_SUB, "syn-clinician", "SYN Clinician")
+        self.held_mine = []
+        self.open_main()
+        self.open_queue()
+        self.open_item(21, "Requested")
+        self.wait_until(lambda: len(self.held_mine) == 1, "the held own-list read")
+        self.assertEqual((True, M_OWN_CHECKING), self.cancel_control())
+        route = self.held_mine.pop(0)
+        self.held_mine = None
+        self.release(route, {"statusCode": 503, "message": "SYN 요청 목록 응답 없음"}, 503)
+        self.assertEqual((True, f"{M_OWN_FAILED}\nSYN 요청 목록 응답 없음 (HTTP 503)"), self.cancel_control())
+        self.page.locator("#image-request-queue-reload").click()
+        self.wait_until(lambda: len(self.mine_calls) == 2, "the own-list read after Reload")
+        self.quiet()
+        self.assertEqual((False, M_TIPS["cancel"]), self.cancel_control())
+
+        # An own-list answer that arrives after the session ended draws nothing.
+        self.held_mine = []
+        self.open_main()
+        self.open_queue()
+        self.open_item(21, "Requested")
+        self.wait_until(lambda: len(self.held_mine) == 1, "the held own-list read")
+        self.page.evaluate(BROADCAST_ENDED)
+        expect(self.page.locator("#image-request-queue-lock")).to_be_visible()
+        route = self.held_mine.pop(0)
+        self.held_mine = None
+        self.release(route, self.server.mine({"view": "mine", "state": "all"}))
+        seen = self.queue()
+        self.assertEqual((["failed", M_ENDED, "", True], [], None), (seen["lock"], seen["items"], seen["detail"]))
+
+    def test_m12_log_out_ends_the_area_before_its_first_network_wait(self):
+        a = uid(11)
+        cases = (("shipped", LOGOUT_BLOCK, "draft write"), ("shipped", LOGOUT_BLOCK, "logout POST"),
+                 ("no-hook", LOGOUT_BLOCK_NO_HOOK, "draft write"))
+        for label, handler, held in cases:
+            with self.subTest(handler=label, held=held):
+                self.logouts = []
+                self.held_posts = [] if held == "draft write" else None
+                self.held_writes = self.held_reads = None
+                self.server.items[rid(21)].update(state="Requested", revision=1, note=None, handler=None)
+                self.open_main(real_auth=True, logout=handler)
+                self.page.evaluate("() => KinAuth.init()")
+                self.open_queue()
+                self.open_item(21, "Requested")
+                self.page.locator("#image-request-note").fill("SYN note before Log out")
+                # A reading read and an Accept are in flight when Log out is confirmed.
+                self.held_reads = []
+                self.pick(11)
+                self.wait_until(lambda: len(self.held_reads) == 1, "the held reading read")
+                self.held_writes = []
+                self.act("accept")
+                self.wait_until(lambda: len(self.held_writes) == 1, "the held write")
+                reads, writes, queue_calls = len(self.reads), len(self.writes), len(self.queue_calls)
+                self.page.evaluate("() => document.querySelector('#logout').click()")
+                if held == "draft write":
+                    self.wait_until(lambda: len(self.held_posts) == 1, "the held draft write")
+                else:
+                    self.wait_until(lambda: len(self.logouts) == 1, "POST /auth/logout (held)")
+                self.settle()
+                at_wait = self.queue()
+                note = self.page.evaluate("() => document.querySelector('#image-request-note').value")
+                order = self.page.evaluate("() => window.synOrder.slice()")
+                self.release(self.held_reads[0][1], self.server.study(a))
+                late_read_paints = int(self.reading()["state"] == "ready")
+                self.held_reads = None
+                route, apply, body = self.held_writes[0]
+                status, reply = apply(body)
+                self.release(route, reply, status)
+                late_write_paints = int((self.queue()["detail"] or {}).get("result", [None])[0] == "saved")
+                self.held_writes = None
+                ended = at_wait["lock"] == ["failed", M_ENDED, "", True]
+                first = ["confirm", "preview", "closeSR", "endPatientCopy"]
+                if label == "no-hook":
+                    self.assertEqual((False, "SYN note before Log out", 1, 1), (ended, note, late_read_paints, late_write_paints),
+                                     "without the hook the area waits for the logout and paints late answers")
+                    self.assertEqual(first + ["stash:open"], order)
+                else:
+                    self.assertEqual((True, "", [], None, 0, 0), (ended, note, at_wait["items"], at_wait["detail"],
+                                                                  late_read_paints, late_write_paints))
+                    self.assertEqual(first + ["stash:ended"] + (["stashed", "release", "released"] if held == "logout POST" else []),
+                                     order)
+                    self.pick(12)
+                    self.settle()
+                    self.assertEqual((reads, writes, queue_calls), (len(self.reads), len(self.writes), len(self.queue_calls)))
+                    self.assertEqual(0, self.page.locator("#image-request-queue button:visible, #image-request-p button:visible").count())
+                if held == "draft write":
+                    # The draft write, then the hold release, then the logout: the order the handler had.
+                    self.assertEqual(([], ["/api/syn/draft"]), (self.logouts, self.page_posts))
+                    self.release(self.held_posts.pop(0), {})
+                    self.wait_until(lambda: len(self.held_posts) == 1, "the held hold release")
+                    self.assertEqual(([], ["/api/syn/draft", "/api/syn/release"]), (self.logouts, self.page_posts))
+                    self.release(self.held_posts.pop(0), {})
+                    self.wait_until(lambda: len(self.logouts) == 1, "POST /auth/logout")
+                self.held_posts = None
+                self.assertEqual(first + ["stash:" + ("open" if label == "no-hook" else "ended"), "stashed", "release", "released"],
+                                 self.page.evaluate("() => window.synOrder.slice()"))
+                self.assertTrue(self.page.url.endswith("/harness/main.html"), "the logout has not answered yet")
+                self.logouts[0].fulfill(status=204, body="")
+                self.page.wait_for_url("**/harness/index.html")
+
+        # Log out not confirmed, and Log out during an insertion: nothing ends and nothing is sent.
+        for label, setup, order in (("confirm cancelled", "() => { window.synConfirm = false; }", ["confirm"]),
+                                    ("insertion in flight", "() => window.synInsert(true)", [])):
+            with self.subTest(label):
+                self.logouts = []
+                self.server.items[rid(21)].update(state="Requested", revision=1, note=None, handler=None)
+                self.open_main(real_auth=True, logout=LOGOUT_BLOCK)
+                self.page.evaluate("() => KinAuth.init()")
+                self.open_queue()
+                self.open_item(21, "Requested")
+                self.page.locator("#image-request-note").fill("SYN kept note")
+                self.page.evaluate(setup)
+                self.page.evaluate("() => document.querySelector('#logout').click()")
+                self.settle()
+                seen = self.queue()
+                self.assertEqual((False, rid(21), "SYN kept note"), (seen["lock"][3], seen["detail"]["id"], seen["detail"]["note"]))
+                self.assertEqual((order, [], []), (self.page.evaluate("() => window.synOrder.slice()"), self.page_posts, self.logouts))
+                self.act("accept")
+                self.result("saved")
 
 
 if __name__ == "__main__":
