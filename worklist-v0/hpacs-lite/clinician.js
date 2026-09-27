@@ -6,6 +6,8 @@
  * (tests/clinician_viewer_dom_test.py). 영상은 고정 OHIF 창에서 열고, 그 창의 읽기 전용은 config/ohif.js가 서버 /me로 정한다.
  * S5-U3 환자 타임라인: REQ-S5-U3-PATIENT-TIMELINE -> RISK-S5-U3-NAME-MERGE / ID-ONLY-IDENTITY / TENANT -> TEST-S5-U3-DOM
  * (tests/clinician_timeline_dom_test.py). 묶음은 서버 GET clinician/studies/:uid/timeline이 정하고, 이 화면은 사용자가 열 때만 읽는다.
+ * S5-U4b 질문 스레드: REQ-S5-U4b-QUESTION-UI -> RISK-S5-U4b-STALE -> TEST-S5-U4b-DOM (tests/clinician_question_dom_test.py).
+ * 서버 S5-U4a route(studies/:uid/questions·questions/:id·entries·close)만 쓰고, 이 화면은 사용자가 Questions를 열 때만 읽는다.
  *
  * 그리는 칸은 S5-U1b 두 읽기 응답에 있는 것뿐이다 — GET clinician/studies의 행과 GET clinician/studies/:uid/report.
  * 역할을 보고 컨트롤을 숨기거나 권한을 짐작하지 않는다. 서버가 거절하면(403/404/409) 그 상태 코드·코드·문구를
@@ -78,6 +80,73 @@
     notListed: '이 검사는 지금 목록에 없어 열 수 없습니다. 목록을 새로고침하세요.',
   };
   const RELATIONS = ['match', 'mismatch', 'not_comparable'];
+  // S5-U4b 질문 스레드 문구. 상태명·버튼·제목은 영어, 설명·확인·오류는 한국어다(AGENTS §4).
+  const QUESTION = {
+    hint: '이 검사에 대해 소속 기관 영상의학과에 질문을 남깁니다. 질문과 답변은 작성한 본인과 소속 기관의 판독의·관리자만 봅니다. '
+      + '새 답변은 알림으로 오지 않으니 이 칸을 다시 열어 확인하세요. 답변은 판독문이 아니며 판독문을 대신하지 않습니다.',
+    summary: '이 검사에 대한 질문과 답변을 엽니다. 연 뒤에만 서버에서 읽습니다.',
+    loading: '질문 목록을 불러오는 중입니다…',
+    failed: '질문 목록을 불러오지 못했습니다.',
+    empty: '이 검사에 남긴 질문이 없습니다. 목록 조회는 성공했습니다.',
+    ready: count => `이 검사에 남긴 질문 ${count}건을 최신순으로 표시합니다.`,
+    malformed: '질문 응답 형식을 확인할 수 없습니다. 다시 불러오세요.',
+    notFound: '이 검사나 질문을 찾을 수 없습니다. 원격판독으로 받은 검사, 접근 조건이 바뀐 검사에는 질문을 남길 수 없습니다.',
+    item: (created, count, last) => `${created} 등록 · 항목 ${count}개 · 최근 ${last}`,
+    threadLoading: '질문 스레드를 불러오는 중입니다…',
+    threadFailed: '질문 스레드를 불러오지 못했습니다.',
+    threadMeta: (created, name) => `${created} 등록 · 작성 ${name}`,
+    closedNote: '닫힌 질문입니다. 새 답변·추가 질문·닫기는 서버가 거절합니다.',
+    anchorChanged: '답변 이후 판독 상태가 바뀌었습니다.',
+    anchorDetail: (then, now) => `답변 때 ${then} → 지금 ${now}`,
+    closeEmpty: '사유 없이 닫았습니다.',
+    askHint: '1~2,000자. 작성자·기관·시각은 서버가 로그인한 계정으로 기록합니다.',
+    replyHint: '같은 스레드에 추가 질문으로 이어집니다. 답변이 있던 질문은 다시 Open이 됩니다.',
+    closeHint: '작성자는 사유 없이 닫을 수 있습니다. 닫은 질문에는 더 쓸 수 없습니다.',
+    noText: '1~2,000자의 내용을 입력하세요.',
+    sending: '보내는 중입니다…',
+    saved: '저장했습니다.',
+    replayed: '이미 저장된 요청입니다. 서버가 처음 저장한 결과를 돌려주었습니다.',
+    discarded: '보낸 요청을 버렸습니다. 저장되었을 수 있으니 다시 불러온 목록에서 확인하세요.',
+    writeMalformed: '저장 응답의 형식을 확인할 수 없습니다. Retry는 같은 요청 ID로 다시 보내 저장 결과를 확인합니다.',
+    noRequestId: '요청 ID를 만들지 못해 보내지 않았습니다.',
+    refused: '서버가 이 계정의 질문 읽기를 거절했습니다. 권한이 바뀌었다면 화면을 다시 불러오세요.',
+    ownerChanged: '로그인한 계정이 바뀌었습니다. 이 화면에서는 질문을 더 읽거나 쓰지 않습니다. 화면을 다시 불러오세요.',
+    unknown: '저장되었는지 알 수 없습니다. Retry는 같은 요청 ID로 다시 보내 저장 결과를 확인하고, Discard는 이 요청을 버립니다.',
+    rejected: '서버가 요청을 거절했습니다.',
+    pending: count => `결과를 모르는 요청이나 보내지 않은 글이 남은 질문 ${count}건입니다. 최신 50건 목록에 없어도 여기서 열 수 있습니다. `
+      + '화면을 새로 불러오거나 로그아웃하면 사라집니다.',
+    pendingStates: {
+      Unconfirmed: '저장되었는지 알 수 없는 요청이 있습니다. 스레드를 열면 Retry·Discard가 있습니다.',
+      Sending: '보내는 중인 요청이 있습니다.',
+      Draft: '보내지 않은 글이 있습니다.',
+    },
+    codes: {
+      QUESTION_CHANGED: '그사이 이 질문이 바뀌었습니다. 스레드를 다시 불러왔으니 내용을 확인한 뒤 다시 보내세요.',
+      QUESTION_CLOSED: '이미 닫힌 질문이라 더 쓸 수 없습니다.',
+      QUESTION_STATE: '지금 질문 상태에서는 할 수 없는 동작입니다.',
+      QUESTION_ENTRY_LIMIT: '이 스레드의 항목 수가 상한에 도달했습니다.',
+      REQUEST_ID_REUSED: '같은 요청 ID가 다른 내용에 이미 쓰였습니다. 다시 불러온 뒤 새로 보내세요.',
+      QUESTION_BUSY: '서버가 다른 요청을 처리하고 있어 저장하지 못했을 수 있습니다. Retry는 같은 요청 ID로 다시 보냅니다.',
+      STUDY_ACCESS_CHANGED: '요청 중 검사 접근 조건이 바뀌었습니다. 저장되었을 수 있으니 Retry로 같은 요청을 다시 보내 확인하세요.',
+    },
+    statuses: { 400: '서버가 입력을 거절했습니다.', 403: '서버가 이 동작을 거절했습니다.' },
+  };
+  const QUESTION_STATES = ['Open', 'Answered', 'Closed'];
+  const QUESTION_BADGE = { Open: 'open', Answered: 'final', Closed: 'unknown' };
+  const QUESTION_KIND = { question: 'Question', followup: 'Follow-up', answer: 'Answer', close: 'Close' };
+  const QUESTION_ROLE = { clinician: 'Clinician', radiologist: 'Radiologist', admin: 'Admin' };
+  // 계약 §5.1 전이표. 쓰기 응답의 action마다 항목 종류·가능한 이전 상태·다음 상태가 하나로 정해진다(§3.4 QuestionApplied).
+  const QUESTION_STEPS = {
+    create: { kind: 'question', from: [null], to: 'Open' },
+    answer: { kind: 'answer', from: ['Open', 'Answered'], to: 'Answered' },
+    followup: { kind: 'followup', from: ['Open', 'Answered'], to: 'Open' },
+    close: { kind: 'close', from: ['Open', 'Answered'], to: 'Closed' },
+  };
+  // 쓰는 칸마다 서버가 고를 수 있는 action. Reply는 작성자면 followup, 아니면 answer다(서버가 정한다).
+  const QUESTION_ACTIONS = { ask: ['create'], reply: ['answer', 'followup'], close: ['close'] };
+  const REPORT_STATE = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', A: 'Approved', H: 'On Hold' };
+  const QUESTION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const QUESTION_TEXT_MAX = 2000;
 
   const $ = selector => document.querySelector(selector);
   let owner = null;
@@ -94,6 +163,23 @@
   // 사용자가 Show Timeline을 누른 뒤에만 참이다. 그 뒤 고르는 검사는 타임라인을 이어서 읽는다(이 문서 안에서만).
   let timelineOpen = false;
   let timelineSeq = 0;
+  // S5-U4b. Questions를 연 뒤에는 이어서 고르는 검사도 연 채로 읽는다(이 문서 안에서만, 타임라인과 같다).
+  let questionsOpen = false;
+  // 고른 검사·칸 열고 닫기·잠금마다 오른다. 목록·스레드 읽기는 자기 번호와 함께 이 값을 들고 떠난다.
+  let questionEpoch = 0;
+  let questionListSeq = 0;
+  let questionThreadSeq = 0;
+  let questionThread = null;
+  // 연 스레드가 바뀔 때마다 오른다(pickQuestionThread). 늦은 Ask 성공은 보낸 때의 epoch와 이 값이 그대로일 때만 새 스레드를 연다.
+  let questionPick = 0;
+  // 지금 연 스레드의 마지막으로 읽은 응답. 답변·닫기의 기준 revision은 여기서만 온다.
+  let questionThreadItem = null;
+  // 서버가 질문 읽기를 거절했거나 다른 계정의 답이 왔다: 이 문서에서는 질문을 더 읽거나 쓰지 않는다(뷰어 세션과 같은 한 방향).
+  let questionLock = null;
+  // 검사·스레드·동작별로 쓰던 글, 결과를 모르는 요청(같은 requestId로 다시 보낼 것), 마지막 결과 문구. 이 문서의 메모리에만 둔다.
+  const questionDrafts = new Map();
+  const questionAttempts = new Map();
+  const questionNotes = new Map();
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -529,9 +615,11 @@
     $('#viewer-slot').hidden = true;
     $('#open-viewer').disabled = true;
     $('#viewer-note').textContent = TEXT.viewer;
+    clearRequests();
     const compare = $('#compare');
     if (compare) compare.remove();
     clearTimeline();
+    clearQuestions();
     const empty = $('#detail-empty');
     empty.textContent = note || TEXT.pick;
     empty.hidden = false;
@@ -611,9 +699,11 @@
     markSelected(uid);
     paintIdentity(row);
     paintTimelineShell(row);
+    paintQuestionsShell(row);
     clearReport();
     setReport('loading', TEXT.reportLoading);
     setKeys(TEXT.keysLoading, null);
+    paintRequestsShell(row);
     request(`/clinician/studies/${encodeURIComponent(uid)}/report`).then(body => {
       if (!reportFresh(mine, uid)) return;
       let view;
@@ -630,6 +720,850 @@
       setReport('failed', TEXT.reportFailed, describe(error));
       setKeys(TEXT.keysFailed, null);
     });
+  }
+
+  // ── 영상 요청(S5-U4c) ──
+  // REQ-S5-U4c-REQUEST-UI -> RISK-S5-U4c-STALE -> TEST-S5-U4c-DOM (tests/clinician_request_dom_test.py).
+  // 고른 검사에 내가 남긴 외부영상(External Images)·영상전송(Send Images) 요청. 서버 S5-U4c route 중 #9(검사별 읽기, 임상의는
+  // 본인 것만), #10(등록), #11(action cancel)만 쓰고 질문·consultation과 섞지 않는다(별도 칸·별도 읽기). 요청은 처리 상태의
+  // 기록이라 이 화면은 영상을 옮기지 않는다 — Closed도 영상이 실제로 오갔다는 뜻이 아니어서 그 옆에 같은 말을 쓴다.
+  // 칸은 고른 검사마다 접힌 summary 한 줄로 생기고 열 때만 읽는다: 접힌 칸에는 단추·제목이 없어 열지 않은 사람의 화면 구성과
+  // 탭 순서가 그대로이고, 목록에서 검사를 고를 때마다 서버를 부르지 않는다. 역할을 보고 컨트롤을 숨기지 않는다(U2a) — 취소 칸은
+  // 역할이 아니라 서버가 내 요청이라고 한 것(#7 view=mine의 id, requestOwn)에만 두고, 거절은 서버의 코드·문구 그대로 보인다.
+  // 쓰기 응답은 HTTP 201이고 보낸 그 쓰기의 적용 결과와 모두 맞을 때만 저장 결과로 받는다. 결과를 모르는 취소는 그 요청이 최신
+  // 50건 밖으로 밀려도 #8로 따로 읽어 Retry·Discard를 남긴다. 쓰던 글은 검사·요청별로 이 문서의 메모리에만 두어 A->B->A로 돌아오면
+  // 다시 보이고, 서버가 읽기를 거절했거나 다른 계정의 답이 오면(잠금) 이전 계정의 글이라 모두 버린다. 계정 변경은 어느 칸이
+  // 알아챘든 질문 칸과 함께 잠근다(accountChanged).
+  const REQUEST = {
+    summary: '이 검사에 남긴 외부영상·영상전송 요청을 엽니다. 연 뒤에만 서버에서 읽습니다.',
+    hint: 'External Images는 다른 병원의 영상을 이 기관으로 가져오도록, Send Images는 이 검사의 영상을 다른 병원에 보내도록 '
+      + '소속 기관 직원에게 남기는 요청입니다. 요청은 처리 상태의 기록일 뿐 이 화면이 영상을 옮기지 않고, 실제 처리는 직원이 따로 합니다. '
+      + '처리 결과는 알림으로 오지 않으니 이 칸을 다시 열어 확인하세요.',
+    tele: '원격판독으로 받은 검사에는 영상 요청을 남기거나 읽지 않습니다. 요청은 검사를 소유한 기관 안에서만 오갑니다.',
+    loading: '영상 요청을 불러오는 중입니다…',
+    failed: '영상 요청을 불러오지 못했습니다.',
+    empty: '이 검사에 남긴 영상 요청이 없습니다. 목록 조회는 성공했습니다.',
+    ready: count => `이 검사에 남긴 영상 요청 ${count}건을 최신순으로 표시합니다.`,
+    malformed: '영상 요청 응답 형식을 확인할 수 없습니다. 다시 불러오세요.',
+    notFound: '이 검사나 요청을 찾을 수 없습니다. 원격판독으로 받은 검사나 접근 조건이 바뀐 검사에서는 영상 요청을 읽거나 남길 수 없습니다.',
+    // U4p §3.3 화면 문구 규칙: Closed 옆에 늘 함께 쓴다.
+    closedNote: '이 기록은 실제 전송 여부를 나타내지 않습니다',
+    formHint: 'Counterparty는 상대 병원 이름 등 1~256자, Reason은 1~2,000자입니다. 이 화면은 등록 기관 목록을 읽지 않아 상대 기관은 '
+      + '적은 문장으로만 기록합니다. 요청자·기관·시각은 서버가 로그인한 계정으로 기록하고, 같은 종류의 처리 중인 요청이 있으면 새로 남길 수 없습니다.',
+    cancelHint: '취소하려면 사유(1~2,000자)를 적으세요. 취소한 요청은 다시 열 수 없습니다.',
+    noText: 'Counterparty(1~256자)와 Reason(1~2,000자)을 입력하세요.',
+    noCancelText: '취소 사유를 1~2,000자로 입력하세요.',
+    noItem: '이 요청의 최신 상태를 읽지 못해 보내지 않았습니다. 목록을 다시 불러온 뒤 취소하세요.',
+    ownFailed: '이 계정이 남긴 요청인지 확인하지 못해 취소 칸을 열지 않았습니다. Retry로 다시 읽으세요.',
+    ownTooMany: '내 요청 목록을 끝까지 보지 못해 일부 요청을 찾지 못했습니다.',
+    outside: '최신 50건 목록 밖으로 밀린 요청입니다. 결과를 모르는 취소가 남아 있어 이 요청만 따로 읽었습니다.',
+    outsideUnread: '최신 50건 목록 밖으로 밀린 요청을 따로 읽지 못했습니다. 취소 결과는 Retry(같은 요청 ID)로 확인하거나 Discard로 버릴 수 있습니다.',
+    outsideGone: '결과를 모르는 취소가 남은 요청을 서버가 지금 보여 주지 않습니다. 접근 조건이 바뀌었거나 요청이 없어졌을 수 있어 이 취소는 더 확인할 수 없습니다.',
+    sending: '보내는 중입니다…',
+    created: '요청을 등록했습니다.',
+    cancelled: '요청을 취소했습니다.',
+    replayed: '이미 저장된 요청입니다. 서버가 처음 저장한 결과를 돌려주었습니다.',
+    unknown: '저장되었는지 알 수 없습니다. Retry는 같은 요청 ID로 다시 보내 저장 결과를 확인하고, Discard는 이 요청을 버립니다.',
+    discarded: '보낸 요청을 버렸습니다. 저장되었을 수 있으니 다시 불러온 목록에서 확인하세요.',
+    writeMalformed: '저장 응답의 형식을 확인할 수 없습니다. Retry는 같은 요청 ID로 다시 보내 저장 결과를 확인합니다.',
+    noRequestId: '요청 ID를 만들지 못해 보내지 않았습니다.',
+    refused: '서버가 이 계정의 영상 요청 읽기를 거절했습니다. 권한이 바뀌었다면 화면을 다시 불러오세요.',
+    ownerChanged: '로그인한 계정이 바뀌었습니다. 이 화면에서는 영상 요청을 더 읽거나 쓰지 않습니다. 화면을 다시 불러오세요.',
+    rejected: '서버가 요청을 거절했습니다.',
+    codes: {
+      IMAGE_REQUEST_ACTIVE_EXISTS: '같은 검사·같은 종류로 처리 중인 요청이 이미 있습니다. 그 요청을 취소한 뒤 다시 남기거나 사유에 함께 적으세요.',
+      IMAGE_REQUEST_CHANGED: '그사이 이 요청이 바뀌었습니다. 목록을 다시 불러왔으니 상태를 확인한 뒤 다시 보내세요.',
+      IMAGE_REQUEST_STATE: '지금 요청 상태에서는 할 수 없는 동작입니다. 이미 처리가 끝났을 수 있어 목록을 다시 불러왔습니다.',
+      REQUEST_ID_REUSED: '같은 요청 ID가 다른 내용에 이미 쓰였습니다. 목록을 다시 불러온 뒤 새로 보내세요.',
+      IMAGE_REQUEST_COUNTERPARTY_INVALID: '상대 기관은 이 기관이 아닌 등록된 기관이어야 합니다.',
+      IMAGE_REQUEST_INPUT_INVALID: '서버가 입력 형식을 거절했습니다. 길이와 줄바꿈·탭 외의 제어 문자를 확인하세요.',
+      IMAGE_REQUEST_ROLE_REQUIRED: '이 계정에는 이 동작에 필요한 역할이 없습니다.',
+      IMAGE_REQUEST_ACTION_FORBIDDEN: '이 요청에는 이 동작을 할 수 없습니다. 요청을 남긴 본인만 취소할 수 있습니다.',
+      CLINICIAN_ROUTE_DENIED: '이 계정으로는 쓸 수 없는 기능입니다.',
+      IMAGE_REQUEST_BUSY: '서버가 다른 요청을 처리하고 있어 저장하지 못했을 수 있습니다. Retry는 같은 요청 ID로 다시 보냅니다.',
+      STUDY_ACCESS_CHANGED: '요청 중 검사 접근 조건이 바뀌었습니다. 저장되었을 수 있으니 Retry로 같은 요청을 다시 보내 확인하세요.',
+    },
+    statuses: { 400: '서버가 입력을 거절했습니다.', 403: '서버가 이 동작을 거절했습니다.' },
+  };
+  const REQUEST_STATES = ['Requested', 'Accepted', 'Closed', 'Declined', 'Cancelled'];
+  const REQUEST_ACTIVE = ['Requested', 'Accepted'];
+  // API 값 image-transfer는 화면에 쓰지 않는다: transfer는 Connect 전송의 말이고 요청은 전송이 아니다(U4p R06).
+  const REQUEST_KINDS = { 'external-image': 'External Images', 'image-transfer': 'Send Images' };
+  const REQUEST_KIND_TIPS = {
+    'external-image': '다른 병원의 영상을 이 기관으로 가져오도록 요청합니다.',
+    'image-transfer': '이 검사의 영상을 다른 병원에 보내도록 요청합니다.',
+  };
+  const REQUEST_NOTE_LABEL = { Closed: 'Handling Note', Declined: 'Decline Reason', Cancelled: 'Cancel Reason' };
+  const REQUEST_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const REQUEST_COUNTERPARTY_MAX = 256;
+  const REQUEST_TEXT_MAX = 2000;
+  const REQUEST_CURSOR = /^[A-Za-z0-9_-]{1,256}$/;
+  // 본인 요청을 찾으려 읽는 #7 view=mine의 최대 쪽 수(50건씩). 넘기면 모르는 채로 두어 취소 칸을 열지 않는다.
+  const REQUEST_OWN_PAGES = 20;
+  // Image Requests를 연 뒤에는 이어서 고르는 검사도 연 채로 읽는다(이 문서 안에서만, 타임라인과 같다).
+  let requestsOpen = false;
+  // 고른 검사·칸 열고 닫기·잠금마다 오른다. 목록 읽기는 자기 번호와 함께 이 값을 들고 떠난다.
+  let requestsEpoch = 0;
+  let requestsSeq = 0;
+  // 지금 연 검사의 마지막으로 읽은 목록. 취소의 기준 revision은 여기서만 온다.
+  let requestsItems = null;
+  // 서버가 읽기를 거절했거나 다른 계정의 답이 왔다: 이 문서에서는 요청을 더 읽거나 쓰지 않는다(뷰어 세션과 같은 한 방향).
+  let requestsLock = null;
+  // 키(검사 + 요청 id, 새 요청은 id 없음)별로 쓰던 글, 결과를 모르는 요청(같은 requestId로 다시 보낼 것), 마지막 결과 문구.
+  const requestDrafts = new Map();
+  const requestAttempts = new Map();
+  const requestNotes = new Map();
+  // 요청 id별로 이 계정이 남긴 요청인지(서버 목록이 정한 true·false). 요청자는 요청이 생긴 뒤 바뀌지 않아 이 문서 안에서 그대로 두고,
+  // 잠그면(다른 계정) 버린다.
+  const requestOwn = new Map();
+
+  const requestKey = (uid, id) => `${uid}\n${id || ''}`;
+
+  /** A->B->A·칸 닫기·잠금: 요청 번호와 함께 epoch와 지금 고른 검사를 본다. UID만 보면 A의 첫 답이 A의 두 번째 자리에 그려진다. */
+  function requestsFresh(epoch, uid) {
+    return !leaving && requestsLock === null && epoch === requestsEpoch && selected === uid;
+  }
+
+  /** 응답의 owner가 이 화면의 계정인가. 다르면 false(다른 계정의 답), 모양이 틀리면 null(형식 오류)이다. */
+  function requestOwnerOf(data) {
+    const value = data && data.owner;
+    if (!Array.isArray(value) || value.length !== 2 || !value.every(part => typeof part === 'string')) return null;
+    return value[0] === owner[0] && value[1] === owner[1];
+  }
+
+  function requestTime(value) {
+    const date = typeof value === 'string' ? new Date(value) : null;
+    if (!date || Number.isNaN(date.getTime())) return '—';
+    const two = part => String(part).padStart(2, '0');
+    return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}`;
+  }
+
+  /** 쓰기마다 새 UUID v4. randomUUID가 없는 브라우저는 같은 형식을 getRandomValues로 만든다. */
+  function requestUuid() {
+    if (root.crypto && typeof root.crypto.randomUUID === 'function') return root.crypto.randomUUID().toLowerCase();
+    const bytes = root.crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map(part => part.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  /**
+   * 요청 쓰기(POST). 읽기(request)처럼 401은 본문을 기다리지 않고 세션을 끝낸다. 연결 실패·제한 시간은 status 0이다 —
+   * 서버가 적용했는지 모르는 결과라 부르는 쪽이 같은 requestId로 다시 보낼 수 있게 남긴다. 성공 응답은 HTTP 상태와 함께
+   * 돌려준다: 적용 결과는 201뿐이라(U4p §3.4) 200·202·204 같은 다른 성공 상태는 부르는 쪽이 결과를 모르는 응답으로 둔다
+   * (Astra S5-U4bc-R-001 F02, 질문 쓰기 questionPost와 같은 규칙).
+   */
+  async function requestSend(path, payload) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    try {
+      const response = await fetch(API + path, { method: 'POST', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' }, body: JSON.stringify(payload) });
+      if (response.status === 401) {
+        logout();
+        throw failure(401, null, '세션이 만료되었습니다. 다시 로그인하세요.');
+      }
+      const reply = await response.json().catch(() => null);
+      if (!response.ok) throw failure(response.status, reply);
+      return { status: response.status, body: reply };
+    } catch (error) {
+      if (error && error.kin) throw error;
+      throw failure(0, null, error && error.name === 'AbortError' ? '응답이 없어 요청을 멈췄습니다.' : '서버에 연결하지 못했습니다.');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 요청 DTO 한 건(U4p §3.3). 요청한 검사의 행이어야 하고, 처리 중(Requested·Accepted)이면 note가 없고 끝난 상태면 있다
+   * (서버 CHECK와 같은 조건). 하나라도 어긋나면 답 전체를 그리지 않는다.
+   */
+  function requestItemOk(item, uid) {
+    const text = value => typeof value === 'string';
+    const person = value => !!value && typeof value === 'object' && text(value.actor) && text(value.name);
+    return !!item && typeof item === 'object' && text(item.id) && REQUEST_UUID.test(item.id) && item.studyUid === uid
+      && Object.prototype.hasOwnProperty.call(REQUEST_KINDS, item.kind) && REQUEST_STATES.includes(item.state)
+      && Number.isSafeInteger(item.revision) && item.revision >= 1 && person(item.requester)
+      && !!item.counterparty && typeof item.counterparty === 'object' && text(item.counterparty.text)
+      && (item.counterparty.institutionId === null || text(item.counterparty.institutionId)) && text(item.reason)
+      && (item.handler === null || person(item.handler)) && (item.note === null || text(item.note))
+      && REQUEST_ACTIVE.includes(item.state) === (item.note === null);
+  }
+
+  function readRequestItems(data, uid) {
+    const items = data && data.items;
+    if (!Array.isArray(items) || items.length > 50 || !items.every(item => requestItemOk(item, uid))
+        || new Set(items.map(item => item.id)).size !== items.length)
+      throw new Error(REQUEST.malformed);
+    return items;
+  }
+
+  /**
+   * 쓰기 응답(U4p §3.4)이 보낸 그 쓰기의 적용 결과인가: HTTP 201이고 봉투가 이 requestId·검사·동작, 새 요청이면 id = requestId·
+   * null에서 Requested·revision 1, 취소면 그 요청·보낼 때 읽은 상태에서 Cancelled·보낸 revision + 1, 보낸 종류, 서버가 쓰는
+   * 형식의 시각(at). 재전송 답(replayed)도 처음 적용한 그 결과라 지금 요청이 더 진행되었어도 같은 조건이다. 하나라도 어긋나면
+   * 저장 결과가 아니라 결과를 모르는 요청으로 둔다(같은 requestId로 Retry, 쓰던 글은 그대로).
+   */
+  function requestApplied(sent, attempt) {
+    const reply = sent.body, applied = reply && reply.applied;
+    const create = attempt.action === 'create';
+    const at = applied && typeof applied.at === 'string' ? new Date(applied.at) : null;
+    return sent.status === 201 && !!applied && typeof applied === 'object' && typeof reply.replayed === 'boolean'
+      && typeof applied.requestId === 'string' && applied.requestId.toLowerCase() === attempt.requestId
+      && applied.studyUid === attempt.uid && applied.action === attempt.action
+      && applied.id === (create ? attempt.requestId : attempt.itemId) && applied.kind === attempt.kind
+      && applied.from === attempt.from && applied.to === (create ? 'Requested' : 'Cancelled')
+      && applied.revision === (create ? 1 : attempt.payload.revision + 1)
+      && !!at && !Number.isNaN(at.getTime()) && at.toISOString() === applied.at;
+  }
+
+  /**
+   * 처리 중인 요청 중 아직 모르는 것이 이 계정의 요청인지 정한다. 취소 칸은 서버가 내 것이라고 한 요청에만 둔다(U4p §5.2·RM-R7)
+   * — 혼합 역할(clinician+radiologist 등)은 이 화면에서도 기관의 다른 요청을 읽는다. 기준은 서버가 요청자 sub로 고른 #7
+   * view=mine(state=all)의 id뿐이다: requester.actor는 email 등이 바뀌면 같은 사람의 것이 달라지고 다른 계정의 값과 겹칠 수
+   * 있다. 목록은 생성 시각이 늦은 것부터라, 한 쪽의 마지막 행이 남은 요청보다 확실히 이르거나 다음 쪽이 없으면 남은 요청은
+   * 내 것이 아니다. 403은 서버가 이 계정에 요청자 범위(clinician)를 주지 않은 것이라 모두 내 것이 아니다. 읽지 못했거나 끝까지
+   * 보지 못하면 그 요청들은 모르는 채로 두고(취소 칸 없음) 그 오류를 돌려준다. 역할 목록은 읽지 않으므로(U2a) 관리자의 남의
+   * 요청 취소는 main.html 대기열에서 한다. 판정은 서버가 sub로 다시 한다.
+   */
+  async function readRequestOwn(items, fresh) {
+    const left = new Map(items.filter(item => REQUEST_ACTIVE.includes(item.state) && !requestOwn.has(item.id))
+      .map(item => [item.id, Date.parse(item.createdAt)]));
+    let cursor = null;
+    try {
+      for (let page = 0; left.size && page < REQUEST_OWN_PAGES; page++) {
+        const query = 'view=mine&state=all' + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+        const data = await request(`/image-requests?${query}`);
+        if (!fresh()) return null;
+        const same = requestOwnerOf(data);
+        if (same === false) {
+          accountChanged('');
+          return null;
+        }
+        const rows = data && data.items;
+        const next = data && data.nextCursor;
+        if (same === null || !Array.isArray(rows) || rows.length > 50 || !rows.every(row => !!row && typeof row === 'object'
+            && typeof row.id === 'string' && REQUEST_UUID.test(row.id) && typeof row.createdAt === 'string')
+            || new Set(rows.map(row => row.id)).size !== rows.length
+            || !(next === null || (typeof next === 'string' && REQUEST_CURSOR.test(next) && next !== cursor)))
+          throw new Error(REQUEST.malformed);
+        for (const row of rows) if (left.delete(row.id)) requestOwn.set(row.id, true);
+        const last = rows.length ? Date.parse(rows[rows.length - 1].createdAt) : NaN;
+        for (const [id, at] of left) {
+          if (next !== null && !(last < at)) continue;
+          left.delete(id);
+          requestOwn.set(id, false);
+        }
+        cursor = next;
+      }
+      if (left.size) throw new Error(REQUEST.ownTooMany);
+      return null;
+    } catch (error) {
+      if (!fresh()) return null;
+      if (error.status !== 403) return error;
+      for (const id of left.keys()) requestOwn.set(id, false);
+      return null;
+    }
+  }
+
+  /**
+   * 결과를 모르는 취소가 남은 요청이 이번 목록(#9, 최신 50건)에 없으면 #8로 따로 읽는다. 목록에 없다는 것은 더 새 요청에
+   * 밀렸다는 뜻일 수 있고 접근을 잃었다는 뜻은 아니다. 답마다 { id, item, error } 하나이고, 그 뜻은 paintRequestList가 정한다.
+   */
+  function readRequestsOutside(uid, items, fresh) {
+    const listed = new Set(items.map(item => item.id));
+    const waiting = [...requestAttempts.values()].filter(attempt => attempt.uid === uid && attempt.itemId !== null
+      && !listed.has(attempt.itemId));
+    return Promise.all(waiting.map(async attempt => {
+      const id = attempt.itemId;
+      try {
+        const data = await request(`/image-requests/${encodeURIComponent(id)}`);
+        if (!fresh()) return { id, item: null, error: null };
+        const same = requestOwnerOf(data);
+        if (same === false) {
+          accountChanged('');
+          return { id, item: null, error: null };
+        }
+        if (same === null || !requestItemOk(data.item, uid) || data.item.id !== id) throw new Error(REQUEST.malformed);
+        return { id, item: data.item, error: null };
+      } catch (error) {
+        return { id, item: null, error };
+      }
+    }));
+  }
+
+  /** 상태명은 색과 함께 늘 글자로 쓰고(UXR-G-12), Closed에는 기록일 뿐이라는 문구를 바로 옆에 붙인다. */
+  function requestBadge(state) {
+    const wrap = node('span');
+    wrap.append(node('span', `status ${REQUEST_ACTIVE.includes(state) ? 'open' : 'unknown'}`, state));
+    if (state === 'Closed') {
+      const note = node('span', null, REQUEST.closedNote);
+      note.dataset.closedNote = '';
+      note.style.cssText = 'margin-left:2px;color:var(--muted);font-size:13px';
+      wrap.append(' ', note);
+    }
+    return wrap;
+  }
+
+  function requestLine(label, value) {
+    const line = node('p', 'body-text');
+    line.style.margin = '2px 0 0';
+    const name = node('span', null, label);
+    name.style.color = 'var(--muted)';
+    line.append(name, ' ', value);
+    return line;
+  }
+
+  function requestInfo(item) {
+    const info = node('div');
+    info.dataset.part = 'info';
+    const head = node('p');
+    head.style.margin = '0';
+    const kind = node('strong', null, REQUEST_KINDS[item.kind]);
+    kind.title = REQUEST_KIND_TIPS[item.kind];
+    head.append(requestBadge(item.state), ' ', kind, ` · ${requestTime(item.createdAt)}`);
+    info.append(head, requestLine('Counterparty', item.counterparty.text), requestLine('Reason', item.reason));
+    if (item.handler) info.append(requestLine('Handler', dash(item.handler.name || item.handler.actor)));
+    if (item.note !== null) info.append(requestLine(REQUEST_NOTE_LABEL[item.state] || 'Note', item.note));
+    return info;
+  }
+
+  /** 고른 검사의 요청 칸. 닫혀 있으면 summary 한 줄뿐이고, 이 문서에서 전에 열었으면 열린 채로 만들고 읽는다. */
+  function paintRequestsShell(row) {
+    clearRequests();
+    const section = node('details');
+    section.id = 'image-requests';
+    section.dataset.uid = row.uid;
+    section.dataset.state = 'closed';
+    section.style.marginTop = '14px';
+    const summary = node('summary', null, 'Image Requests');
+    summary.id = 'image-requests-summary';
+    summary.title = REQUEST.summary;
+    summary.style.cssText = 'cursor:pointer;font-weight:650;min-height:28px;padding:4px 0';
+    section.append(summary);
+    section.addEventListener('toggle', () => requestsToggled(section));
+    $('#detail').append(section);
+    if (requestsOpen) {
+      section.open = true;
+      openRequests(section);
+    }
+  }
+
+  /** 선택이 바뀌거나 내려갈 때: 진행 중인 읽기의 답을 버리고 칸을 지운다. 쓰던 글·결과를 모르는 요청은 검사별로 남는다. */
+  function clearRequests() {
+    requestsEpoch++;
+    requestsItems = null;
+    const old = $('#image-requests');
+    if (old) old.remove();
+  }
+
+  function requestsToggled(section) {
+    if (leaving || !section.isConnected || section.dataset.uid !== selected) return;
+    const body = section.querySelector('#image-requests-body');
+    // paintRequestsShell이 연 칸의 toggle 사건은 이미 반영했다.
+    if (section.open === (body !== null)) return;
+    requestsOpen = section.open;
+    if (section.open) {
+      openRequests(section);
+      return;
+    }
+    requestsEpoch++;
+    requestsItems = null;
+    section.dataset.state = 'closed';
+    body.remove();
+  }
+
+  function openRequests(section) {
+    buildRequestsBody(section);
+    if (requestsLock !== null) paintRequestsLock();
+    else loadRequests(section.dataset.uid);
+  }
+
+  function buildRequestsBody(section) {
+    const uid = section.dataset.uid;
+    const row = byUid.get(uid);
+    const body = node('div');
+    body.id = 'image-requests-body';
+    const state = node('div', 'state');
+    state.id = 'image-requests-state';
+    state.setAttribute('role', 'status');
+    state.setAttribute('aria-live', 'polite');
+    const retry = node('button', null, 'Retry');
+    retry.type = 'button';
+    retry.id = 'image-requests-retry';
+    retry.addEventListener('click', () => loadRequests(uid));
+    state.append(node('p', 'state-text'), node('p', 'state-detail'), retry);
+    body.append(node('p', 'muted', REQUEST.hint), state);
+    // 원격판독으로 받은 검사는 읽지도 쓰지도 않는다 — 서버는 소유 기관만 받고(U4p T-4) 늘 404로 답한다.
+    if (!row || row.tele !== true) {
+      const list = node('ol');
+      list.id = 'image-request-list';
+      list.style.cssText = 'margin:0 0 10px;padding-left:20px';
+      list.hidden = true;
+      const form = requestForm(uid);
+      // 새 요청은 목록을 읽은 뒤에 연다(처리 중인 같은 종류의 요청을 먼저 보게). 결과를 모르는 요청이 남았으면 바로 보인다.
+      form.hidden = !requestAttempts.has(requestKey(uid, null));
+      body.append(list, form);
+    }
+    section.append(body);
+  }
+
+  function setRequestsState(state, text, detail, retry = false) {
+    const box = $('#image-requests-state');
+    if (!box) return;
+    box.dataset.state = state;
+    box.querySelector('.state-text').textContent = text;
+    box.querySelector('.state-detail').textContent = detail || '';
+    $('#image-requests-retry').hidden = state !== 'failed' && !retry;
+  }
+
+  /**
+   * #9. 고른 검사에 내가 남긴 요청(서버가 임상의에게는 본인 것만 준다, 최신 50). 목록 밖으로 밀린 요청의 결과를 모르는 취소(#8)와
+   * 처리 중인 요청이 내 것인지(#7 view=mine)를 다 읽은 뒤에 한 번 그린다 — 취소 칸이 나중에 끼어들면 그사이 누르던 곳·치던
+   * 글이 밀린다. 늦은 답은 매 대기 뒤 같은 번호·epoch·고른 검사인지로 버린다.
+   */
+  async function loadRequests(uid) {
+    if (leaving || selected !== uid || !$('#image-requests-body')) return;
+    if (requestsLock !== null) {
+      paintRequestsLock();
+      return;
+    }
+    if (!$('#image-request-list')) {
+      $('#image-requests').dataset.state = 'tele';
+      setRequestsState('tele', REQUEST.tele);
+      return;
+    }
+    const epoch = requestsEpoch;
+    const seq = ++requestsSeq;
+    const fresh = () => requestsFresh(epoch, uid) && seq === requestsSeq;
+    setRequestsState('loading', REQUEST.loading);
+    let items;
+    try {
+      const data = await request(`/studies/${encodeURIComponent(uid)}/image-requests`);
+      if (!fresh()) return;
+      const same = requestOwnerOf(data);
+      if (same === false) {
+        accountChanged('');
+        return;
+      }
+      if (same === null) throw new Error(REQUEST.malformed);
+      items = readRequestItems(data, uid);
+    } catch (error) {
+      if (!fresh()) return;
+      if (error.status === 403) {
+        lockRequests(REQUEST.refused, describe(error));
+        return;
+      }
+      requestsItems = null;
+      $('#image-requests').dataset.state = 'failed';
+      $('#image-request-list').hidden = true;
+      setRequestsState('failed', REQUEST.failed, `${error.status === 404 ? `${REQUEST.notFound}\n` : ''}${describe(error)}`);
+      return;
+    }
+    const outside = await readRequestsOutside(uid, items, fresh);
+    if (!fresh()) return;
+    const ownFailure = await readRequestOwn([...items, ...outside.flatMap(entry => entry.item ? [entry.item] : [])], fresh);
+    if (!fresh()) return;
+    paintRequestList(uid, items, outside, ownFailure);
+  }
+
+  /**
+   * 목록을 제자리에서 맞춘다. 이미 있는 요청 줄은 옮기거나 새로 만들지 않고 내용만 바꾼다 — 다시 만들면 치고 있던 취소 사유의
+   * 커서와 한글 조합이 끊긴다. 새 줄만 제자리에 끼우고 사라진 줄만 뺀다. 목록 밖으로 밀린 요청의 결과를 모르는 취소는 그 뒤에
+   * 줄을 둔다: 읽혔으면 지금 상태와 Retry·Discard, 403·404(서버가 지금 이 요청을 보이지 않는다)면 쓰기를 버리고 그렇다고만
+   * 쓰며(이전 내용은 다시 보이지 않는다), 그 밖의 실패는 지금 상태를 모를 뿐이라 Retry·Discard를 남긴다 — Retry는 같은
+   * requestId라 서버가 저장 결과를 다시 알려 준다.
+   */
+  function paintRequestList(uid, items, outside, ownFailure) {
+    for (const entry of outside) {
+      const key = requestKey(uid, entry.id);
+      const attempt = requestAttempts.get(key);
+      if (!entry.error || (entry.error.status !== 403 && entry.error.status !== 404) || !attempt || attempt.busy) continue;
+      requestAttempts.delete(key);
+      setRequestNote(key, 'failed', REQUEST.outsideGone, describe(entry.error));
+    }
+    requestsItems = [...items, ...outside.flatMap(entry => entry.item ? [entry.item] : [])];
+    const list = $('#image-request-list');
+    const kept = new Map([...list.children].map(li => [li.dataset.id, li]));
+    let at = list.firstElementChild;
+    const place = (id, item, entry) => {
+      let li = kept.get(id);
+      kept.delete(id);
+      if (li) updateRequestItem(uid, li, item, entry);
+      else li = requestItem(uid, id, item, entry);
+      if (li === at) at = at.nextElementSibling;
+      else list.insertBefore(li, at);
+    };
+    for (const item of items) place(item.id, item, null);
+    for (const entry of outside) place(entry.id, entry.item, entry);
+    for (const li of kept.values()) li.remove();
+    list.hidden = !list.children.length;
+    $('#image-requests').dataset.state = items.length ? 'ready' : 'empty';
+    setRequestsState(items.length ? 'ready' : 'empty', items.length ? REQUEST.ready(items.length) : REQUEST.empty,
+      ownFailure ? `${REQUEST.ownFailed}\n${describe(ownFailure)}` : '', !!ownFailure);
+    $('#image-request-new').hidden = false;
+  }
+
+  function requestItem(uid, id, item, entry) {
+    const li = node('li');
+    li.dataset.id = id;
+    li.style.margin = '8px 0';
+    const info = node('div');
+    info.dataset.part = 'info';
+    li.append(info, requestNote(requestKey(uid, id)));
+    updateRequestItem(uid, li, item, entry);
+    return li;
+  }
+
+  /**
+   * 처리 중인 내 요청(requestOwn)에만 취소 칸을 둔다. 끝난 요청이어도 결과를 모르는 취소가 남았으면 그 칸은 그대로 둔다 —
+   * Retry·Discard가 그 칸에 있다. entry는 목록 밖에서 따로 읽은 줄이다(item이 없으면 지금 내용을 모르는 줄이라 비워 둔다).
+   */
+  function updateRequestItem(uid, li, item, entry) {
+    const key = requestKey(uid, li.dataset.id);
+    li.dataset.state = item ? item.state : 'unavailable';
+    const info = item ? requestInfo(item) : node('div');
+    info.dataset.part = 'info';
+    li.querySelector('[data-part="info"]').replaceWith(info);
+    const aside = li.querySelector('[data-part="outside"]');
+    const text = !entry ? null : entry.item ? REQUEST.outside : requestAttempts.has(key)
+      ? `${REQUEST.outsideUnread}\n${describe(entry.error)}` : null;
+    if (text === null) {
+      if (aside) aside.remove();
+    } else if (aside) {
+      aside.textContent = text;
+    } else {
+      const line = node('p', 'muted', text);
+      line.dataset.part = 'outside';
+      line.style.margin = '2px 0 0';
+      info.after(line);
+    }
+    const compose = li.querySelector('.request-compose');
+    const keep = !!item && REQUEST_ACTIVE.includes(item.state) && requestOwn.get(item.id) === true || requestAttempts.has(key);
+    if (keep && !compose) li.querySelector('[data-request-note]').before(requestCancelComposer(uid, li.dataset.id));
+    else if (!keep && compose) compose.remove();
+  }
+
+  function requestField(wrap, name, label, tag, max, hintId) {
+    const id = `image-request-${name}-${wrap.dataset.fieldSuffix}`;
+    const title = node('label', null, label);
+    title.htmlFor = id;
+    title.style.cssText = 'display:block;font-weight:650;margin-top:6px';
+    const field = node(tag);
+    field.id = id;
+    field.dataset.field = name;
+    if (tag === 'input') field.type = 'text';
+    if (tag === 'textarea') field.rows = 3;
+    if (max) field.maxLength = max;
+    field.setAttribute('aria-describedby', hintId);
+    field.style.cssText = 'display:block;width:100%;min-height:28px;padding:6px 8px;border:1px solid var(--line);border-radius:7px;'
+      + 'background:var(--panel2);color:var(--text);font:inherit;resize:vertical';
+    const key = wrap.dataset.key;
+    const keep = () => { if (!requestAttempts.has(key)) requestDrafts.set(key, requestFields(wrap)); };
+    field.addEventListener('input', keep);
+    field.addEventListener('change', keep);
+    return [title, field];
+  }
+
+  function requestActions(wrap, label, send) {
+    const actions = node('div');
+    actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px';
+    const submit = node('button', null, label);
+    submit.type = 'button';
+    submit.dataset.send = '';
+    submit.addEventListener('click', send);
+    const retry = node('button', null, 'Retry');
+    retry.type = 'button';
+    retry.dataset.retry = '';
+    retry.addEventListener('click', () => resendRequest(wrap.dataset.key));
+    const discard = node('button', null, 'Discard');
+    discard.type = 'button';
+    discard.dataset.discard = '';
+    discard.addEventListener('click', () => discardRequest(wrap.dataset.key));
+    actions.append(submit, retry, discard);
+    return actions;
+  }
+
+  /** 새 요청(#10). 쓰는 칸의 값은 이 검사의 쓰던 글·결과를 모르는 요청에서만 정한다(paintRequestComposer). */
+  function requestForm(uid) {
+    const wrap = node('div', 'request-compose');
+    wrap.id = 'image-request-new';
+    wrap.dataset.key = requestKey(uid, null);
+    wrap.dataset.action = 'create';
+    wrap.dataset.fieldSuffix = 'new';
+    wrap.setAttribute('role', 'group');
+    wrap.setAttribute('aria-labelledby', 'image-request-new-title');
+    wrap.style.cssText = 'margin-top:10px;padding:10px 12px;border:1px solid var(--line);border-radius:8px';
+    const title = node('h4', null, 'New Request');
+    title.id = 'image-request-new-title';
+    title.style.margin = '0';
+    const hint = node('p', 'muted', REQUEST.formHint);
+    hint.id = 'image-request-new-hint';
+    hint.style.margin = '4px 0 0';
+    const [kindLabel, kind] = requestField(wrap, 'kind', 'Kind', 'select', 0, 'image-request-new-hint');
+    for (const [value, label] of Object.entries(REQUEST_KINDS)) {
+      const option = node('option', null, label);
+      option.value = value;
+      option.title = REQUEST_KIND_TIPS[value];
+      kind.append(option);
+    }
+    const [counterpartyLabel, counterparty] = requestField(wrap, 'counterparty', 'Counterparty', 'input', REQUEST_COUNTERPARTY_MAX,
+      'image-request-new-hint');
+    const [reasonLabel, reason] = requestField(wrap, 'reason', 'Reason', 'textarea', REQUEST_TEXT_MAX, 'image-request-new-hint');
+    wrap.append(title, hint, kindLabel, kind, counterpartyLabel, counterparty, reasonLabel, reason,
+      requestActions(wrap, 'Request', () => sendRequestCreate(uid, wrap)), requestNote(wrap.dataset.key));
+    paintRequestComposer(wrap);
+    return wrap;
+  }
+
+  /** 요청 한 건의 취소(#11 action cancel). 사유가 있어야 보내고, 기준 revision은 마지막으로 읽은 목록의 그 요청에서 온다. */
+  function requestCancelComposer(uid, id) {
+    const wrap = node('div', 'request-compose');
+    wrap.dataset.key = requestKey(uid, id);
+    wrap.dataset.action = 'cancel';
+    wrap.dataset.fieldSuffix = id;
+    wrap.style.marginTop = '6px';
+    const hint = node('p', 'muted', REQUEST.cancelHint);
+    hint.id = `image-request-cancel-hint-${id}`;
+    hint.style.margin = '2px 0 0';
+    const [label, field] = requestField(wrap, 'note', 'Cancel Reason', 'input', REQUEST_TEXT_MAX, hint.id);
+    wrap.append(label, hint, field, requestActions(wrap, 'Cancel', () => sendRequestCancel(uid, id, wrap)));
+    paintRequestComposer(wrap);
+    return wrap;
+  }
+
+  function requestFields(wrap) {
+    const values = {};
+    for (const field of wrap.querySelectorAll('[data-field]')) values[field.dataset.field] = field.value;
+    return values;
+  }
+
+  /** 결과를 모르는 요청이 있는 동안 글은 바꿀 수 없고 Retry(같은 requestId)와 Discard만 있다 — 고쳐 새로 보내면 하나가 더 생길 수 있다. */
+  function paintRequestComposer(wrap) {
+    const key = wrap.dataset.key;
+    const attempt = requestAttempts.get(key) || null;
+    wrap.dataset.state = !attempt ? 'idle' : attempt.busy ? 'busy' : 'unknown';
+    const draft = attempt ? attempt.draft : requestDrafts.get(key) || null;
+    for (const field of wrap.querySelectorAll('[data-field]')) {
+      const name = field.dataset.field;
+      const value = draft && typeof draft[name] === 'string' ? draft[name] : name === 'kind' ? 'external-image' : '';
+      // 같은 글이면 쓰지 않는다: 값을 다시 넣으면 치고 있던 커서·한글 조합이 끊긴다.
+      if (field.value !== value) field.value = value;
+      if (field.tagName === 'SELECT') field.disabled = attempt !== null;
+      else field.readOnly = attempt !== null;
+    }
+    wrap.querySelector('[data-send]').disabled = attempt !== null;
+    for (const name of ['retry', 'discard']) wrap.querySelector(`[data-${name}]`).hidden = !attempt || attempt.busy;
+  }
+
+  function repaintRequestComposer(key) {
+    for (const wrap of document.querySelectorAll('.request-compose')) if (wrap.dataset.key === key) paintRequestComposer(wrap);
+  }
+
+  // 결과 문구 칸은 data-request-note로 찾는다. 질문 칸(S5-U4b)의 결과 문구와 같은 속성·키 모양을 쓰면 한쪽 갱신이 다른 쪽 칸을 지운다.
+  function requestNote(key) {
+    const box = node('div', 'state');
+    box.dataset.requestNote = key;
+    box.setAttribute('role', 'status');
+    box.setAttribute('aria-live', 'polite');
+    box.style.marginTop = '8px';
+    box.append(node('p', 'state-text'), node('p', 'state-detail'));
+    paintRequestNote(box);
+    return box;
+  }
+
+  function paintRequestNote(box) {
+    const note = requestNotes.get(box.dataset.requestNote) || null;
+    box.hidden = note === null;
+    box.dataset.state = note ? note.state : 'idle';
+    box.querySelector('.state-text').textContent = note ? note.text : '';
+    box.querySelector('.state-detail').textContent = note ? note.detail : '';
+    // 결과를 모르는 요청은 실패처럼 눈에 띄게 둔다(clinician.html은 failed만 색을 정한다).
+    const alarm = note !== null && note.state === 'unknown';
+    box.style.borderColor = alarm ? 'var(--danger-line)' : '';
+    box.style.background = alarm ? 'var(--danger-bg)' : '';
+    box.style.color = alarm ? 'var(--danger-text)' : '';
+  }
+
+  function setRequestNote(key, state, text, detail) {
+    requestNotes.set(key, { state, text, detail: detail || '' });
+    for (const box of document.querySelectorAll('[data-request-note]')) if (box.dataset.requestNote === key) paintRequestNote(box);
+  }
+
+  /** #10. 새 requestId(UUID v4), 이 화면의 계정([기관, sub]), 등록 기관을 읽지 않으므로 counterpartyInstitutionId는 null. */
+  function sendRequestCreate(uid, wrap) {
+    const key = requestKey(uid, null);
+    if (leaving || requestsLock !== null || selected !== uid || requestAttempts.has(key)) return;
+    const draft = requestFields(wrap);
+    if (!Object.prototype.hasOwnProperty.call(REQUEST_KINDS, draft.kind) || !draft.counterparty.trim()
+        || draft.counterparty.length > REQUEST_COUNTERPARTY_MAX || !draft.reason.trim() || draft.reason.length > REQUEST_TEXT_MAX) {
+      setRequestNote(key, 'failed', REQUEST.noText);
+      return;
+    }
+    let id;
+    try {
+      id = requestUuid();
+    } catch (_) {
+      setRequestNote(key, 'failed', REQUEST.noRequestId);
+      return;
+    }
+    const attempt = { requestId: id, owner: [...owner], uid, itemId: null, action: 'create', kind: draft.kind, from: null, key, draft,
+      busy: false, unknown: false, path: `/studies/${encodeURIComponent(uid)}/image-requests`,
+      payload: { kind: draft.kind, counterparty: draft.counterparty, counterpartyInstitutionId: null, reason: draft.reason } };
+    requestDrafts.set(key, draft);
+    requestAttempts.set(key, attempt);
+    transmitRequest(attempt);
+  }
+
+  /** #11 action cancel. 요청자 본인 확인은 서버가 한다(아니면 IMAGE_REQUEST_ACTION_FORBIDDEN을 그대로 보인다). */
+  function sendRequestCancel(uid, id, wrap) {
+    const key = requestKey(uid, id);
+    const item = requestsItems && requestsItems.find(entry => entry.id === id) || null;
+    if (leaving || requestsLock !== null || selected !== uid || requestAttempts.has(key)) return;
+    if (!item) {
+      setRequestNote(key, 'failed', REQUEST.noItem);
+      return;
+    }
+    if (requestOwn.get(id) !== true) return;
+    const draft = requestFields(wrap);
+    if (!draft.note.trim() || draft.note.length > REQUEST_TEXT_MAX) {
+      setRequestNote(key, 'failed', REQUEST.noCancelText);
+      return;
+    }
+    let requestId;
+    try {
+      requestId = requestUuid();
+    } catch (_) {
+      setRequestNote(key, 'failed', REQUEST.noRequestId);
+      return;
+    }
+    // kind·from은 보낼 때 읽은 그 요청의 값이다. 적용 결과가 이 둘과 맞아야 저장 결과로 받는다(requestApplied).
+    const attempt = { requestId, owner: [...owner], uid, itemId: id, action: 'cancel', kind: item.kind, from: item.state, key, draft,
+      busy: false, unknown: false, path: `/image-requests/${encodeURIComponent(id)}`,
+      payload: { revision: item.revision, action: 'cancel', note: draft.note } };
+    requestDrafts.set(key, draft);
+    requestAttempts.set(key, attempt);
+    transmitRequest(attempt);
+  }
+
+  /** 결과를 모르는 요청만 같은 requestId·같은 본문으로 다시 보낸다. 이미 적용되었으면 서버가 저장한 결과를 돌려준다. */
+  function resendRequest(key) {
+    const attempt = requestAttempts.get(key);
+    if (leaving || requestsLock !== null || !attempt || attempt.busy || !attempt.unknown) return;
+    transmitRequest(attempt);
+  }
+
+  /** 결과를 모르는 요청을 버린다. 글은 칸에 남기고, 저장되었는지는 다시 읽은 목록으로 보인다. */
+  function discardRequest(key) {
+    const attempt = requestAttempts.get(key);
+    if (leaving || !attempt || attempt.busy) return;
+    requestAttempts.delete(key);
+    requestDrafts.set(key, attempt.draft);
+    setRequestNote(key, 'discarded', REQUEST.discarded);
+    repaintRequestComposer(key);
+    refreshRequests(attempt.uid);
+  }
+
+  /** 고른 검사가 그대로이고 칸이 열려 있으면 목록을 다시 읽는다. */
+  function refreshRequests(uid) {
+    if (!leaving && requestsLock === null && selected === uid && $('#image-requests-body')) loadRequests(uid);
+  }
+
+  async function transmitRequest(attempt) {
+    const key = attempt.key;
+    attempt.busy = true;
+    attempt.unknown = false;
+    setRequestNote(key, 'busy', REQUEST.sending);
+    repaintRequestComposer(key);
+    let sent = null;
+    let error = null;
+    try {
+      sent = await requestSend(attempt.path, { requestId: attempt.requestId, expectedOwner: attempt.owner, ...attempt.payload });
+    } catch (caught) {
+      error = caught;
+    }
+    // 세션이 끝났거나 잠겨 맵을 비웠으면 이 결과는 어디에도 쓰지 않는다.
+    if (leaving || requestAttempts.get(key) !== attempt) return;
+    attempt.busy = false;
+    if (error) {
+      requestWriteFailed(attempt, error);
+      return;
+    }
+    const same = requestOwnerOf(sent.body);
+    if (same === false) {
+      accountChanged('');
+      return;
+    }
+    // 201이 아닌 성공 상태는 적용 결과가 아니다. 그 상태를 자세한 줄에 보이고 같은 requestId의 Retry·Discard를 남긴다.
+    if (same === null || !requestApplied(sent, attempt)) {
+      attempt.unknown = true;
+      setRequestNote(key, 'unknown', REQUEST.writeMalformed, sent.status === 201 ? '' : `HTTP ${sent.status}`);
+      repaintRequestComposer(key);
+      return;
+    }
+    requestAttempts.delete(key);
+    requestDrafts.delete(key);
+    // 서버가 이 계정([기관, sub])의 새 요청으로 적용했다는 영수증이다 — 이 id는 내 요청이다(목록에서 다시 묻지 않는다).
+    if (attempt.action === 'create') requestOwn.set(attempt.requestId, true);
+    setRequestNote(key, 'saved', sent.body.replayed ? REQUEST.replayed : attempt.action === 'create' ? REQUEST.created : REQUEST.cancelled);
+    repaintRequestComposer(key);
+    // 화면의 목록은 쓰기 응답(적용 결과)이 아니라 읽기 route로 다시 읽은 현재 상태로만 그린다.
+    refreshRequests(attempt.uid);
+  }
+
+  /**
+   * 쓰기 실패. 연결 실패·제한 시간·5xx·IMAGE_REQUEST_BUSY·STUDY_ACCESS_CHANGED(커밋 뒤 최종 확인일 수 있다)는 적용 여부를 모르는
+   * 결과라 Retry(같은 requestId)를 남긴다. 그 밖의 거절은 요청을 버리고 쓰던 글은 칸에 둔다. OWNER_CHANGED는 계정이 바뀐 것이다.
+   */
+  function requestWriteFailed(attempt, error) {
+    const key = attempt.key;
+    if (error.status === 401) return;
+    if (error.code === 'OWNER_CHANGED') {
+      accountChanged(describe(error));
+      return;
+    }
+    if (error.status === 0 || error.status >= 500 || error.code === 'STUDY_ACCESS_CHANGED') {
+      attempt.unknown = true;
+      setRequestNote(key, 'unknown', REQUEST.codes[error.code] || REQUEST.unknown, describe(error));
+      repaintRequestComposer(key);
+      return;
+    }
+    requestAttempts.delete(key);
+    setRequestNote(key, 'failed', REQUEST.codes[error.code] || (error.status === 404 ? REQUEST.notFound : REQUEST.statuses[error.status])
+      || REQUEST.rejected, describe(error));
+    repaintRequestComposer(key);
+    // 요청이 바뀌었거나 끝났거나 보이지 않게 되었으면 지금 서버 상태를 다시 읽는다(쓰던 글은 칸에 남는다).
+    if (error.status === 404 || error.status === 409) refreshRequests(attempt.uid);
+  }
+
+  /**
+   * 서버가 요청 읽기를 거절했거나(403) 계정이 바뀌었다(accountChanged — 어느 영역이 알아챘든 두 영역을 함께 잠근다). 이 문서에서는
+   * 요청을 더 읽거나 쓰지 않고 진행 중인 요청의 답도 그리지 않는다(뷰어 세션의 거절·계정 변경과 같은 한 방향). 쓰던 글은 이전 계정의
+   * 것이라 버린다. 403으로 이미 잠긴 뒤 계정 변경을 알면(account) 그 까닭으로 바꿔 쓴다.
+   */
+  function lockRequests(text, detail, account = false) {
+    if (requestsLock !== null && (requestsLock.account || !account)) return;
+    requestsLock = { text, detail: detail || '', account };
+    requestsEpoch++;
+    requestsItems = null;
+    requestDrafts.clear();
+    requestAttempts.clear();
+    requestNotes.clear();
+    requestOwn.clear();
+    paintRequestsLock();
+  }
+
+  function paintRequestsLock() {
+    const body = $('#image-requests-body');
+    if (!body || requestsLock === null) return;
+    $('#image-requests').dataset.state = 'locked';
+    const state = node('div', 'state');
+    state.id = 'image-requests-state';
+    state.dataset.state = 'failed';
+    state.setAttribute('role', 'alert');
+    state.append(node('p', 'state-text', requestsLock.text), node('p', 'state-detail', requestsLock.detail));
+    body.replaceChildren(node('p', 'muted', REQUEST.hint), state);
   }
 
   // ── 환자 타임라인(S5-U3) ──
@@ -893,6 +1827,797 @@
     select(uid);
     const toggle = $('#timeline-toggle');
     if (toggle) toggle.focus();
+  }
+
+  // ── 질문 스레드(S5-U4b) ──
+  // 소속 기관 영상의학과에 남기는 질문. 서버 S5-U4a의 질문 route만 쓰고 consultation 화면·요청과 섞지 않는다.
+  // 칸은 고른 검사마다 접힌 summary 한 줄로 생기고, 사용자가 Questions를 열어야 읽는다 — 목록 한 번이 서버 트랜잭션 한 번이다.
+  // 접힌 칸에는 단추·제목이 없다: 열 때 몸체를 만들고 닫을 때 지워서, 열지 않은 사람의 화면 구성과 탭 순서가 그대로다.
+  // 역할을 보고 쓰기 컨트롤을 숨기지 않는다. 누르면 서버가 정하고 거절은 코드·문구 그대로 보인다. 판독문 본문은 읽지도
+  // 붙이지도 않는다(스레드 응답의 판독 상태·판 번호만 쓴다).
+
+  const questionKey = (uid, id, action) => `${uid}\n${id || ''}\n${action}`;
+  const questionNoteKey = (uid, id) => `${uid}\n${id || ''}`;
+
+  /** A->B->A·칸 닫기·잠금: 요청 번호와 함께 epoch와 지금 고른 검사를 본다. UID만 보면 A의 첫 답이 A의 두 번째 자리에 그려진다. */
+  function questionFresh(epoch, uid) {
+    return !leaving && questionLock === null && epoch === questionEpoch && selected === uid;
+  }
+
+  /** 연 스레드를 바꾸는 유일한 자리. 바뀔 때만 선택 번호를 올린다 — 같은 스레드를 다시 누르거나 목록만 다시 읽는 것은 선택이 아니다. */
+  function pickQuestionThread(id) {
+    if (questionThread === id) return;
+    questionThread = id;
+    questionPick++;
+  }
+
+  /** 응답의 owner가 이 화면의 계정인가. 다르면 false(다른 계정의 답), 모양이 틀리면 null(형식 오류)이다. */
+  function questionOwnerOf(data) {
+    const value = data && data.owner;
+    if (!Array.isArray(value) || value.length !== 2 || !value.every(part => typeof part === 'string')) return null;
+    return value[0] === owner[0] && value[1] === owner[1];
+  }
+
+  function questionTime(value) {
+    const date = typeof value === 'string' ? new Date(value) : null;
+    if (!date || Number.isNaN(date.getTime())) return '—';
+    const two = part => String(part).padStart(2, '0');
+    return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}`;
+  }
+
+  function reportStateText(anchor) {
+    const name = REPORT_STATE[anchor.rs] || `RS ${anchor.rs}`;
+    return anchor.version === null ? name : `${name} · Version ${anchor.version}`;
+  }
+
+  function questionBadge(state) {
+    return node('span', `status ${QUESTION_BADGE[state]}`, state);
+  }
+
+  /** 요청마다 새 UUID v4. randomUUID가 없는 브라우저는 같은 형식을 getRandomValues로 만든다. */
+  function questionRequestId() {
+    if (root.crypto && typeof root.crypto.randomUUID === 'function') return root.crypto.randomUUID();
+    const bytes = root.crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map(part => part.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  /**
+   * 질문 쓰기. 읽기(request)와 같이 401은 본문을 기다리지 않고 세션을 끝낸다. 연결 실패·제한 시간은 status 0이다 —
+   * 서버가 적용했는지 모르는 결과라 부르는 쪽이 같은 requestId로 다시 보낼 수 있게 남긴다. 성공 응답은 HTTP 상태와 함께
+   * 돌려준다: 적용 결과는 201뿐이라(계약 §3.4) 200·202 같은 다른 성공 상태는 부르는 쪽이 결과를 모르는 응답으로 둔다.
+   */
+  async function questionPost(path, payload) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    try {
+      const response = await fetch(API + path, { method: 'POST', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' }, body: JSON.stringify(payload) });
+      if (response.status === 401) {
+        logout();
+        throw failure(401, null, '세션이 만료되었습니다. 다시 로그인하세요.');
+      }
+      const answer = await response.json().catch(() => null);
+      if (!response.ok) throw failure(response.status, answer);
+      return { status: response.status, body: answer };
+    } catch (error) {
+      if (error && error.kin) throw error;
+      throw failure(0, null, error && error.name === 'AbortError' ? '응답이 없어 요청을 멈췄습니다.' : '서버에 연결하지 못했습니다.');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** #3 응답의 모양 검사. 다른 검사의 행이나 모르는 상태가 하나라도 있으면 답 전체를 그리지 않는다. */
+  function readQuestionSummaries(data, uid) {
+    const items = data && data.items;
+    if (!Array.isArray(items) || items.length > 50) throw new Error(QUESTION.malformed);
+    for (const item of items) {
+      if (!item || typeof item !== 'object' || typeof item.id !== 'string' || !QUESTION_ID.test(item.id) || item.studyUid !== uid
+          || !QUESTION_STATES.includes(item.state) || !Number.isSafeInteger(item.revision) || item.revision < 1
+          || !Number.isSafeInteger(item.entryCount) || item.entryCount < 1 || !item.author || typeof item.author !== 'object')
+        throw new Error(QUESTION.malformed);
+    }
+    return items;
+  }
+
+  /**
+   * #2 응답의 모양 검사. 요청한 스레드·고른 검사의 답이어야 하고, 항목은 seq 1부터 빈틈없이 이어지며 revision과 개수가 같다
+   * (서버 CHECK revision = entryCount). 판독 상태 표지는 상태 코드와 판 번호뿐이다.
+   */
+  function readQuestionThread(data, uid, id) {
+    const item = data && data.item;
+    const text = value => typeof value === 'string';
+    const person = (value, role) => !!value && typeof value === 'object' && text(value.actor) && text(value.name)
+      && (!role || Object.prototype.hasOwnProperty.call(QUESTION_ROLE, value.role));
+    const anchor = value => !!value && typeof value === 'object' && text(value.rs) && value.rs.length > 0
+      && (value.version === null || (Number.isSafeInteger(value.version) && value.version > 0));
+    if (!item || typeof item !== 'object' || item.id !== id || item.studyUid !== uid || !QUESTION_STATES.includes(item.state)
+        || !person(item.author) || !Array.isArray(item.entries) || !item.entries.length || item.entries.length > 100
+        || item.revision !== item.entries.length || item.entryCount !== item.entries.length || !anchor(item.current)
+        || (item.state === 'Closed') !== (!!item.closed && typeof item.closed === 'object'))
+      throw new Error(QUESTION.malformed);
+    item.entries.forEach((entry, index) => {
+      if (!entry || typeof entry !== 'object' || entry.seq !== index + 1
+          || !Object.prototype.hasOwnProperty.call(QUESTION_KIND, entry.kind) || (index === 0) !== (entry.kind === 'question')
+          || !text(entry.body) || (entry.kind !== 'close' && !entry.body.trim()) || !person(entry.author, true) || !anchor(entry.reportAnchor))
+        throw new Error(QUESTION.malformed);
+    });
+    return item;
+  }
+
+  /**
+   * 쓰기 응답이 이 요청의 적용 결과인가(계약 §3.4 QuestionApplied·§5.1 전이). HTTP 201만 받고 필수 칸을 모두 본다:
+   * requestId·검사·스레드, entry.id = requestId, entry.seq = revision, revision = 보낸 기준 revision + 1(Ask는 1),
+   * from = 보낸 때의 상태(Ask는 null), action·entry.kind·from·to가 전이표의 한 줄, at은 시각. 기준은 원래 요청(attempt)이다 —
+   * 지금 화면의 스레드로 보면 그사이 전이·종결된 스레드에 보낸 Retry의 정상 재전송(저장된 결과)을 틀렸다고 한다.
+   * 하나라도 어긋나면 결과를 모르는 응답이라 글과 requestId를 남긴다.
+   */
+  function questionApplied(sent, attempt) {
+    const answer = sent.body, applied = answer && answer.applied;
+    if (sent.status !== 201 || !applied || typeof applied !== 'object' || typeof answer.replayed !== 'boolean'
+        || !QUESTION_ACTIONS[attempt.action].includes(applied.action)) return false;
+    const step = QUESTION_STEPS[applied.action], entry = applied.entry, base = attempt.base;
+    const mine = value => typeof value === 'string' && value.toLowerCase() === attempt.requestId;
+    return mine(applied.requestId) && applied.studyUid === attempt.uid
+      && applied.id === (attempt.threadId === null ? attempt.requestId : attempt.threadId)
+      && !!entry && typeof entry === 'object' && mine(entry.id) && entry.kind === step.kind && entry.seq === applied.revision
+      && applied.revision === (base ? base.revision + 1 : 1)
+      && step.from.includes(applied.from) && applied.from === (base ? base.state : null) && applied.to === step.to
+      && typeof applied.at === 'string' && !Number.isNaN(Date.parse(applied.at));
+  }
+
+  function questionAnchorChanged(then, now) {
+    return then.rs !== now.rs || then.version !== now.version;
+  }
+
+  /** 고른 검사의 질문 칸. 닫혀 있으면 summary 한 줄뿐이고, 이 문서에서 전에 열었으면 열린 채로 만들고 읽는다. */
+  function paintQuestionsShell(row) {
+    clearQuestions();
+    const section = node('details');
+    section.id = 'questions';
+    section.dataset.uid = row.uid;
+    section.dataset.state = 'closed';
+    section.style.marginTop = '14px';
+    const summary = node('summary', null, 'Questions');
+    summary.id = 'questions-summary';
+    summary.title = QUESTION.summary;
+    summary.style.cssText = 'cursor:pointer;font-weight:650;min-height:28px;padding:4px 0';
+    section.append(summary);
+    section.addEventListener('toggle', () => questionsToggled(section));
+    $('#detail').append(section);
+    if (questionsOpen) {
+      section.open = true;
+      openQuestions(section);
+    }
+  }
+
+  /** 선택이 바뀌거나 내려갈 때: 진행 중인 읽기의 답을 버리고 칸을 지운다. 쓰던 글·결과를 모르는 요청은 검사별로 남는다. */
+  function clearQuestions() {
+    questionEpoch++;
+    pickQuestionThread(null);
+    questionThreadItem = null;
+    const old = $('#questions');
+    if (old) old.remove();
+  }
+
+  function questionsToggled(section) {
+    if (leaving || !section.isConnected || section.dataset.uid !== selected) return;
+    const body = section.querySelector('#questions-body');
+    // paintQuestionsShell이 연 칸의 toggle 사건은 이미 반영했다.
+    if (section.open === (body !== null)) return;
+    questionsOpen = section.open;
+    if (section.open) {
+      openQuestions(section);
+      return;
+    }
+    questionEpoch++;
+    pickQuestionThread(null);
+    questionThreadItem = null;
+    section.dataset.state = 'closed';
+    body.remove();
+  }
+
+  function openQuestions(section) {
+    buildQuestionsBody(section);
+    if (questionLock !== null) paintQuestionLock();
+    else loadQuestions(section.dataset.uid);
+  }
+
+  function buildQuestionsBody(section) {
+    const uid = section.dataset.uid;
+    const body = node('div');
+    body.id = 'questions-body';
+    const state = node('div', 'state');
+    state.id = 'questions-state';
+    state.setAttribute('role', 'status');
+    state.setAttribute('aria-live', 'polite');
+    const retry = node('button', null, 'Retry');
+    retry.type = 'button';
+    retry.id = 'questions-retry';
+    retry.addEventListener('click', () => loadQuestions(uid));
+    state.append(node('p', 'state-text'), node('p', 'state-detail'), retry);
+    // 결과를 모르는 요청·쓰던 글이 남은 스레드. 최신 50건 목록과 따로 두어, 목록 밖으로 밀린 스레드도 칸을 닫았다 열거나
+    // 다른 검사에 다녀온 뒤 다시 열 수 있다(Astra S5-U4b-C-R-001 F1). 행은 맵에서만 만들고 여는 길은 목록과 같다(단건 읽기).
+    const pending = node('div');
+    pending.id = 'question-pending';
+    pending.hidden = true;
+    const pendingText = node('p', 'muted');
+    pendingText.id = 'question-pending-text';
+    const pendingList = node('ol');
+    pendingList.id = 'question-pending-list';
+    pendingList.style.cssText = 'margin:0 0 10px;padding-left:20px';
+    pending.append(pendingText, pendingList);
+    const list = node('ol');
+    list.id = 'question-list';
+    list.style.cssText = 'margin:0 0 10px;padding-left:20px';
+    list.hidden = true;
+    const thread = node('section');
+    thread.id = 'question-thread';
+    thread.hidden = true;
+    const ask = questionComposer(uid, null, 'ask', { label: 'New Question', hint: QUESTION.askHint, button: 'Ask', multiline: true,
+      send: field => sendQuestion(uid, null, 'ask', field, `/studies/${encodeURIComponent(uid)}/questions`, null) });
+    ask.append(questionNote(questionNoteKey(uid, null)));
+    ask.hidden = true;
+    body.append(node('p', 'muted', QUESTION.hint), state, pending, list, thread, ask);
+    section.append(body);
+    paintQuestionPending(uid);
+  }
+
+  /**
+   * 이 검사에서 결과를 모르는 요청이나 쓰던 글이 남은 스레드마다 한 행. 최신 50건 목록에 있는지와 관계없이 맵(검사·스레드·동작별)
+   * 에서만 만든다. 행은 스레드를 여는 길일 뿐이다 — Retry·Discard는 연 스레드를 단건 읽기(#2)로 owner·studyUid·요청 번호까지
+   * 확인한 뒤에야 보인다(loadQuestionThread). 잠금·세션 종료는 맵을 비우고 칸을 바꾸므로 여기에 남는 것이 없다.
+   * 지금 보이는 스레드는 넣지 않는다: 그 칸에 이미 있고, 치는 동안 위에 행이 생기면 쓰는 칸이 밀린다.
+   */
+  function paintQuestionPending(uid) {
+    const box = $('#question-pending');
+    if (!box || questionLock !== null || selected !== uid) return;
+    const thread = $('#question-thread');
+    const shown = thread && !thread.hidden ? thread.dataset.id : null;
+    const threads = new Map();
+    const rank = { Unconfirmed: 3, Sending: 2, Draft: 1 };
+    const note = (key, state) => {
+      const [owned, id] = key.split('\n');
+      if (owned !== uid || id === '' || id === shown) return;
+      const now = threads.get(id);
+      if (!now || rank[state] > rank[now.state]) threads.set(id, { state, key });
+    };
+    for (const [key, attempt] of questionAttempts) note(key, attempt.busy ? 'Sending' : 'Unconfirmed');
+    for (const [key, text] of questionDrafts) if (text) note(key, 'Draft');
+    $('#question-pending-list').replaceChildren(...[...threads].map(([id, item]) => questionPendingItem(uid, id, item)));
+    $('#question-pending-text').textContent = QUESTION.pending(threads.size);
+    box.hidden = threads.size === 0;
+  }
+
+  function questionPendingItem(uid, id, item) {
+    const li = node('li');
+    li.dataset.id = id;
+    li.dataset.state = item.state;
+    li.style.margin = '6px 0';
+    const attempt = questionAttempts.get(item.key);
+    const text = attempt ? attempt.text : questionDrafts.get(item.key) || '';
+    const excerpt = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+    const open = node('button', null, 'Open Thread');
+    open.type = 'button';
+    open.dataset.openPending = '';
+    open.addEventListener('click', () => openQuestionThread(uid, id));
+    li.append(node('span', `status ${item.state === 'Draft' ? 'unknown' : 'open'}`, item.state), ' ',
+      QUESTION.pendingStates[item.state], ' ', node('span', null, excerpt ? `“${excerpt}”` : ''), ' ', open);
+    return li;
+  }
+
+  function setQuestionsState(state, text, detail) {
+    const box = $('#questions-state');
+    if (!box) return;
+    box.dataset.state = state;
+    box.querySelector('.state-text').textContent = text;
+    box.querySelector('.state-detail').textContent = detail || '';
+    $('#questions-retry').hidden = state !== 'failed';
+  }
+
+  /** 읽기 실패의 자세한 줄: 404는 이유를 먼저 쓴다(원격판독으로 받은 검사·접근이 바뀐 검사를 서버가 구별하지 않는다). */
+  function questionReadDetail(error) {
+    return `${error && error.status === 404 ? `${QUESTION.notFound}\n` : ''}${describe(error)}`;
+  }
+
+  /** #3. 고른 검사에서 내가 남긴 질문(서버가 작성자 본인 것만 준다). 성공하면 열린 스레드도 다시 읽는다. */
+  async function loadQuestions(uid) {
+    if (leaving || selected !== uid || !$('#questions-body')) return;
+    if (questionLock !== null) {
+      paintQuestionLock();
+      return;
+    }
+    const epoch = questionEpoch;
+    const mine = ++questionListSeq;
+    setQuestionsState('loading', QUESTION.loading);
+    try {
+      const data = await request(`/studies/${encodeURIComponent(uid)}/questions`);
+      if (!questionFresh(epoch, uid) || mine !== questionListSeq) return;
+      const same = questionOwnerOf(data);
+      if (same === false) {
+        accountChanged('');
+        return;
+      }
+      if (same === null) throw new Error(QUESTION.malformed);
+      paintQuestionList(uid, readQuestionSummaries(data, uid));
+    } catch (error) {
+      if (!questionFresh(epoch, uid) || mine !== questionListSeq) return;
+      if (error.status === 403) {
+        lockQuestions(QUESTION.refused, describe(error));
+        return;
+      }
+      $('#questions').dataset.state = 'failed';
+      $('#question-list').replaceChildren();
+      $('#question-list').hidden = true;
+      hideQuestionThread();
+      setQuestionsState('failed', QUESTION.failed, questionReadDetail(error));
+    }
+  }
+
+  /**
+   * 목록(최신 50)을 그리고 연 스레드는 단건 읽기(#2)로 다시 읽는다. 연 스레드는 이 목록에 있는지로 고르거나 내리지 않는다 —
+   * 새 질문이 쌓이면 오래된 스레드가 50개 밖으로 밀려도 서버는 그 스레드를 계속 준다(Astra S5-U4b-B-R-001 F2). 계속 열 수
+   * 있는지는 loadQuestionThread가 owner·studyUid·요청 번호로 정하고, 404는 스레드 칸의 실패 문구와 Retry로, 403은 잠금으로 보인다.
+   * 스레드 칸은 같은 스레드면 다시 만들지 않으므로 쓰던 글·커서와 결과를 모르는 요청의 Retry가 그대로 남는다.
+   */
+  function paintQuestionList(uid, items) {
+    $('#question-list').replaceChildren(...items.map(item => questionItem(uid, item)));
+    $('#question-list').hidden = !items.length;
+    $('#questions').dataset.state = items.length ? 'ready' : 'empty';
+    setQuestionsState(items.length ? 'ready' : 'empty', items.length ? QUESTION.ready(items.length) : QUESTION.empty);
+    $('.question-compose[data-action="ask"]').hidden = false;
+    paintQuestionPending(uid);
+    if (questionThread !== null) loadQuestionThread(uid, questionThread);
+    else hideQuestionThread();
+  }
+
+  function questionItem(uid, item) {
+    const li = node('li');
+    li.dataset.id = item.id;
+    li.style.margin = '6px 0';
+    if (item.id === questionThread) li.setAttribute('aria-current', 'true');
+    const open = node('button', null, 'Open Thread');
+    open.type = 'button';
+    open.dataset.openThread = '';
+    open.addEventListener('click', () => openQuestionThread(uid, item.id));
+    li.append(questionBadge(item.state), ' ', QUESTION.item(questionTime(item.createdAt), item.entryCount, questionTime(item.lastEntryAt)),
+      ' ', open);
+    return li;
+  }
+
+  function openQuestionThread(uid, id) {
+    if (leaving || questionLock !== null || selected !== uid) return;
+    pickQuestionThread(id);
+    for (const li of document.querySelectorAll('#question-list > li')) {
+      if (li.dataset.id === id) li.setAttribute('aria-current', 'true');
+      else li.removeAttribute('aria-current');
+    }
+    loadQuestionThread(uid, id);
+  }
+
+  /** 스레드 칸을 비운다. 진행 중인 스레드 읽기의 답은 번호로 버린다. */
+  function hideQuestionThread() {
+    questionThreadSeq++;
+    questionThreadItem = null;
+    const box = $('#question-thread');
+    if (!box) return;
+    box.hidden = true;
+    box.replaceChildren();
+    delete box.dataset.id;
+    delete box.dataset.state;
+    paintQuestionPending(selected);
+  }
+
+  /**
+   * 스레드 자리. 같은 스레드를 다시 읽을 때는 머리·항목만 바꾸고 쓰는 칸은 그대로 둔다 — 다시 만들면 치고 있던 글자와
+   * 커서가 사라진다. 다른 스레드를 열 때만 새로 만든다.
+   */
+  function questionThreadShell(uid, id) {
+    const box = $('#question-thread');
+    if (box.dataset.id === id) return box;
+    questionThreadItem = null;
+    box.dataset.id = id;
+    box.dataset.state = 'loading';
+    const head = node('div', 'panel-head');
+    const title = node('h4', null, 'Thread');
+    title.id = 'question-thread-title';
+    title.style.margin = '0';
+    const status = node('span');
+    status.id = 'question-thread-status';
+    head.append(title, status);
+    const meta = node('p', 'muted');
+    meta.id = 'question-thread-meta';
+    const state = node('div', 'state');
+    state.id = 'question-thread-state';
+    state.setAttribute('role', 'status');
+    state.setAttribute('aria-live', 'polite');
+    const retry = node('button', null, 'Retry');
+    retry.type = 'button';
+    retry.id = 'question-thread-retry';
+    retry.addEventListener('click', () => loadQuestionThread(uid, id));
+    state.append(node('p', 'state-text'), node('p', 'state-detail'), retry);
+    const entries = node('ol');
+    entries.id = 'question-entries';
+    entries.style.cssText = 'margin:0;padding-left:20px';
+    const closed = node('p', 'muted', QUESTION.closedNote);
+    closed.id = 'question-closed-note';
+    closed.hidden = true;
+    const target = () => questionThreadItem && questionThreadItem.id === id ? questionThreadItem : null;
+    const reply = questionComposer(uid, id, 'reply', { label: 'Reply', hint: QUESTION.replyHint, button: 'Reply', multiline: true,
+      send: field => { const item = target(); if (item) sendQuestion(uid, id, 'reply', field, `/questions/${encodeURIComponent(id)}/entries`, item); } });
+    const close = questionComposer(uid, id, 'close', { label: 'Close Reason', hint: QUESTION.closeHint, button: 'Close', multiline: false,
+      send: field => { const item = target(); if (item) sendQuestion(uid, id, 'close', field, `/questions/${encodeURIComponent(id)}/close`, item); } });
+    // 새로 연 스레드의 쓰는 칸(남은 요청의 Retry·Discard 포함)은 첫 읽기가 끝난 뒤 paintQuestionComposers가 연다 —
+    // owner·studyUid를 확인하기 전에는 보내거나 버릴 길을 보이지 않는다(Astra S5-U4b-C-R-001 F1).
+    reply.hidden = true;
+    close.hidden = true;
+    box.setAttribute('aria-labelledby', 'question-thread-title');
+    box.style.cssText = 'margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px';
+    box.replaceChildren(head, meta, state, entries, closed, reply, close, questionNote(questionNoteKey(uid, id)));
+    return box;
+  }
+
+  function setThreadState(state, text, detail) {
+    const box = $('#question-thread-state');
+    if (!box) return;
+    box.dataset.state = state;
+    box.hidden = state === 'ready';
+    box.querySelector('.state-text').textContent = text;
+    box.querySelector('.state-detail').textContent = detail || '';
+    $('#question-thread-retry').hidden = state !== 'failed';
+  }
+
+  /** #2. 스레드 전체를 읽는다. 늦은 답은 번호·epoch·고른 검사·연 스레드로 버린다. */
+  async function loadQuestionThread(uid, id) {
+    if (leaving || questionLock !== null || selected !== uid || questionThread !== id || !$('#question-thread')) return;
+    const epoch = questionEpoch;
+    const mine = ++questionThreadSeq;
+    const box = questionThreadShell(uid, id);
+    box.hidden = false;
+    paintQuestionPending(uid);
+    setThreadState('loading', QUESTION.threadLoading);
+    try {
+      const data = await request(`/questions/${encodeURIComponent(id)}`);
+      if (!questionFresh(epoch, uid) || mine !== questionThreadSeq || questionThread !== id) return;
+      const same = questionOwnerOf(data);
+      if (same === false) {
+        accountChanged('');
+        return;
+      }
+      if (same === null) throw new Error(QUESTION.malformed);
+      paintQuestionThread(uid, readQuestionThread(data, uid, id));
+    } catch (error) {
+      if (!questionFresh(epoch, uid) || mine !== questionThreadSeq || questionThread !== id) return;
+      if (error.status === 403) {
+        lockQuestions(QUESTION.refused, describe(error));
+        return;
+      }
+      questionThreadItem = null;
+      box.dataset.state = 'failed';
+      $('#question-thread-status').replaceChildren();
+      $('#question-thread-meta').textContent = '';
+      $('#question-entries').replaceChildren();
+      $('#question-closed-note').hidden = true;
+      setThreadState('failed', QUESTION.threadFailed, questionReadDetail(error));
+      paintQuestionComposers(uid, id);
+      // 서버가 상태로 답한 실패(404·5xx·연결)는 쓰던 글과 Retry·Discard를 둔다. 응답이 이 검사·이 스레드의 것인지
+      // 확인되지 않은 답(모양 오류, 다른 검사·다른 스레드)에서는 쓰는 칸을 닫는다 — 맵은 그대로라 스레드 Retry로 다시 연다.
+      if (!error.kin) for (const wrap of box.querySelectorAll('.question-compose')) wrap.hidden = true;
+    }
+  }
+
+  function paintQuestionThread(uid, item) {
+    questionThreadItem = item;
+    const box = $('#question-thread');
+    box.dataset.state = item.state;
+    $('#question-thread-status').replaceChildren(questionBadge(item.state));
+    $('#question-thread-meta').textContent = QUESTION.threadMeta(questionTime(item.createdAt), dash(item.author.name || item.author.actor));
+    $('#question-entries').replaceChildren(...item.entries.map(entry => questionEntry(entry, item.current)));
+    $('#question-closed-note').hidden = item.state !== 'Closed';
+    setThreadState('ready', '');
+    paintQuestionComposers(uid, item.id);
+  }
+
+  function questionEntry(entry, current) {
+    const li = node('li');
+    li.dataset.seq = String(entry.seq);
+    li.dataset.kind = entry.kind;
+    li.style.margin = '8px 0';
+    const meta = node('p', 'muted');
+    meta.style.margin = '0';
+    meta.append(node('strong', null, QUESTION_KIND[entry.kind]),
+      ` · ${dash(entry.author.name || entry.author.actor)} (${QUESTION_ROLE[entry.author.role]}) · ${questionTime(entry.at)}`);
+    const body = entry.body ? node('p', 'body-text', entry.body) : node('p', 'muted', QUESTION.closeEmpty);
+    body.style.margin = '2px 0 0';
+    li.append(meta, body);
+    // 답변 뒤 판독이 승인·Addendum·Reset되었으면 그 답이 어느 판독 상태를 보고 쓴 것인지 알린다(서버는 스레드를 다시 열지 않는다).
+    if (entry.kind === 'answer' && questionAnchorChanged(entry.reportAnchor, current)) {
+      const note = node('p');
+      note.dataset.anchor = '';
+      note.style.cssText = 'margin:4px 0 0;padding:4px 8px;border-left:3px solid #7a6a33;color:#ffe7a8';
+      note.append(node('strong', null, QUESTION.anchorChanged), ' ',
+        QUESTION.anchorDetail(reportStateText(entry.reportAnchor), reportStateText(current)));
+      li.append(note);
+    }
+    return li;
+  }
+
+  /**
+   * 쓰는 칸 하나(새 질문·Reply·Close Reason). 결과를 모르는 요청이 있는 동안 글은 바꿀 수 없고 Retry(같은 requestId)와
+   * Discard만 있다 — 글을 고쳐 새 requestId로 보내면 이미 저장된 것 위에 하나가 더 생길 수 있다.
+   */
+  function questionComposer(uid, threadId, action, spec) {
+    const key = questionKey(uid, threadId, action);
+    const wrap = node('div', 'question-compose');
+    wrap.dataset.key = key;
+    wrap.dataset.action = action;
+    wrap.style.marginTop = '10px';
+    const fieldId = `question-${action}-text`;
+    const hintId = `question-${action}-hint`;
+    const label = node('label', null, spec.label);
+    label.htmlFor = fieldId;
+    label.style.cssText = 'display:block;font-weight:650';
+    const hint = node('p', 'muted', spec.hint);
+    hint.id = hintId;
+    hint.style.margin = '2px 0 6px';
+    const field = node(spec.multiline ? 'textarea' : 'input');
+    field.id = fieldId;
+    field.dataset.field = '';
+    if (spec.multiline) field.rows = 3;
+    else field.type = 'text';
+    field.maxLength = QUESTION_TEXT_MAX;
+    field.setAttribute('aria-describedby', hintId);
+    field.style.cssText = 'display:block;width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:7px;'
+      + 'background:var(--panel2);color:var(--text);font:inherit;resize:vertical';
+    field.addEventListener('input', () => {
+      if (!questionAttempts.has(key)) questionDrafts.set(key, field.value);
+    });
+    const actions = node('div');
+    actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px';
+    const send = node('button', null, spec.button);
+    send.type = 'button';
+    send.dataset.send = '';
+    send.addEventListener('click', () => spec.send(field));
+    const retry = node('button', null, 'Retry');
+    retry.type = 'button';
+    retry.dataset.retry = '';
+    retry.addEventListener('click', () => resendQuestion(key));
+    const discard = node('button', null, 'Discard');
+    discard.type = 'button';
+    discard.dataset.discard = '';
+    discard.addEventListener('click', () => discardQuestion(key));
+    actions.append(send, retry, discard);
+    wrap.append(label, hint, field, actions);
+    paintQuestionComposer(wrap);
+    return wrap;
+  }
+
+  /** 쓰는 칸의 모양은 맵(쓰던 글·결과를 모르는 요청)과 지금 연 스레드에서만 정한다. */
+  function paintQuestionComposer(wrap) {
+    const key = wrap.dataset.key;
+    const [, threadId] = key.split('\n');
+    const attempt = questionAttempts.get(key) || null;
+    const field = wrap.querySelector('[data-field]');
+    wrap.dataset.state = !attempt ? 'idle' : attempt.busy ? 'busy' : 'unknown';
+    field.readOnly = attempt !== null;
+    // 같은 글이면 쓰지 않는다: 값을 다시 넣으면 치고 있던 커서·한글 조합이 끊긴다.
+    const value = attempt ? attempt.text : questionDrafts.get(key) || '';
+    if (field.value !== value) field.value = value;
+    // 답변·닫기의 기준 revision은 마지막으로 읽힌 그 스레드에서만 온다. 한 번도 읽히지 않았거나 읽기에 실패했으면 보내지 않는다.
+    const ready = threadId === '' || (questionThreadItem !== null && questionThreadItem.id === threadId);
+    wrap.querySelector('[data-send]').disabled = attempt !== null || !ready;
+    for (const name of ['retry', 'discard']) wrap.querySelector(`[data-${name}]`).hidden = !attempt || attempt.busy;
+  }
+
+  function paintQuestionComposers(uid, id) {
+    const closed = questionThreadItem !== null && questionThreadItem.id === id && questionThreadItem.state === 'Closed';
+    for (const wrap of document.querySelectorAll('.question-compose')) {
+      const [owned, threadId] = wrap.dataset.key.split('\n');
+      if (owned !== uid || threadId !== id) continue;
+      paintQuestionComposer(wrap);
+      // 닫힌 스레드에는 쓰는 칸을 두지 않는다. 쓰던 글이나 결과를 모르는 요청이 남은 칸만 그대로 둔다.
+      wrap.hidden = closed && !questionAttempts.has(wrap.dataset.key) && !(questionDrafts.get(wrap.dataset.key) || '');
+    }
+  }
+
+  function repaintQuestionComposer(key) {
+    for (const wrap of document.querySelectorAll('.question-compose')) if (wrap.dataset.key === key) paintQuestionComposer(wrap);
+    // 칸이 없는 스레드(닫았거나 다른 스레드로 옮겼다)의 요청 결과도 남은 행에 바로 보인다.
+    paintQuestionPending(key.split('\n')[0]);
+  }
+
+  function questionNote(noteKey) {
+    const box = node('div', 'state');
+    box.dataset.noteKey = noteKey;
+    box.setAttribute('role', 'status');
+    box.setAttribute('aria-live', 'polite');
+    box.style.marginTop = '8px';
+    box.append(node('p', 'state-text'), node('p', 'state-detail'));
+    paintQuestionNote(box);
+    return box;
+  }
+
+  function paintQuestionNote(box) {
+    const note = questionNotes.get(box.dataset.noteKey) || null;
+    box.hidden = note === null;
+    box.dataset.state = note ? note.state : 'idle';
+    box.querySelector('.state-text').textContent = note ? note.text : '';
+    box.querySelector('.state-detail').textContent = note ? note.detail : '';
+    // 결과를 모르는 요청은 실패처럼 눈에 띄게 둔다(clinician.html은 failed만 색을 정한다).
+    const alarm = note !== null && note.state === 'unknown';
+    box.style.borderColor = alarm ? 'var(--danger-line)' : '';
+    box.style.background = alarm ? 'var(--danger-bg)' : '';
+    box.style.color = alarm ? 'var(--danger-text)' : '';
+  }
+
+  function setQuestionNote(noteKey, state, text, detail) {
+    questionNotes.set(noteKey, { state, text, detail: detail || '' });
+    for (const box of document.querySelectorAll('[data-note-key]')) if (box.dataset.noteKey === noteKey) paintQuestionNote(box);
+  }
+
+  /**
+   * 새 쓰기: 새 requestId(UUID v4)와 이 화면의 계정([기관, sub])을 싣는다. 답변·닫기는 지금 읽힌 스레드(base)의 revision을
+   * 싣고, 그 revision과 상태를 요청에 적어 둔다 — 응답(Retry의 재전송 포함)은 이 기준으로만 확인한다(questionApplied).
+   */
+  function sendQuestion(uid, threadId, action, field, path, base) {
+    const key = questionKey(uid, threadId, action);
+    const noteKey = questionNoteKey(uid, threadId);
+    if (leaving || questionLock !== null || selected !== uid || questionAttempts.has(key)) return;
+    const text = field.value;
+    const blankAllowed = action === 'close' && text === '';
+    if (!blankAllowed && (!text.trim() || text.length > QUESTION_TEXT_MAX)) {
+      setQuestionNote(noteKey, 'failed', QUESTION.noText);
+      return;
+    }
+    let requestId;
+    try {
+      requestId = questionRequestId().toLowerCase();
+    } catch (_) {
+      setQuestionNote(noteKey, 'failed', QUESTION.noRequestId);
+      return;
+    }
+    const attempt = { requestId, uid, threadId, action, noteKey, path, text, busy: false, unknown: false,
+      base: base ? { revision: base.revision, state: base.state } : null,
+      payload: { ...(base ? { revision: base.revision } : {}), [action === 'close' ? 'note' : 'body']: text } };
+    questionDrafts.set(key, text);
+    questionAttempts.set(key, attempt);
+    sendQuestionAttempt(key, attempt);
+  }
+
+  /** 결과를 모르는 요청만 같은 requestId·같은 본문으로 다시 보낸다. 이미 적용되었으면 서버가 저장한 결과를 돌려준다. */
+  function resendQuestion(key) {
+    const attempt = questionAttempts.get(key);
+    if (leaving || questionLock !== null || !attempt || attempt.busy || !attempt.unknown) return;
+    sendQuestionAttempt(key, attempt);
+  }
+
+  /** 결과를 모르는 요청을 버린다. 글은 칸에 남기고, 저장되었는지는 다시 읽은 목록으로 보인다. */
+  function discardQuestion(key) {
+    const attempt = questionAttempts.get(key);
+    if (leaving || !attempt || attempt.busy) return;
+    questionAttempts.delete(key);
+    questionDrafts.set(key, attempt.text);
+    setQuestionNote(attempt.noteKey, 'discarded', QUESTION.discarded);
+    repaintQuestionComposer(key);
+    refreshQuestions(attempt.uid);
+  }
+
+  /** 고른 검사가 그대로이고 칸이 열려 있으면 목록(과 열린 스레드)을 다시 읽는다. */
+  function refreshQuestions(uid) {
+    if (!leaving && questionLock === null && selected === uid && $('#questions-body')) loadQuestions(uid);
+  }
+
+  async function sendQuestionAttempt(key, attempt) {
+    // 보낸 때의 화면(Retry면 다시 보낸 때). 늦게 온 Ask 성공이 새 스레드를 열어도 되는지는 이 둘로만 정한다(아래).
+    const epoch = questionEpoch, pick = questionPick;
+    attempt.busy = true;
+    attempt.unknown = false;
+    setQuestionNote(attempt.noteKey, 'busy', QUESTION.sending);
+    repaintQuestionComposer(key);
+    let sent = null;
+    let error = null;
+    try {
+      sent = await questionPost(attempt.path, { requestId: attempt.requestId, expectedOwner: owner, ...attempt.payload });
+    } catch (caught) {
+      error = caught;
+    }
+    // 세션이 끝났거나 잠겨 맵을 비웠으면 이 결과는 어디에도 쓰지 않는다.
+    if (leaving || questionAttempts.get(key) !== attempt) return;
+    attempt.busy = false;
+    if (error) {
+      questionWriteFailed(key, attempt, error);
+      return;
+    }
+    const same = questionOwnerOf(sent.body);
+    if (same === false) {
+      accountChanged('');
+      return;
+    }
+    if (same === null || !questionApplied(sent, attempt)) {
+      attempt.unknown = true;
+      setQuestionNote(attempt.noteKey, 'unknown', QUESTION.writeMalformed, sent.status === 201 ? '' : `HTTP ${sent.status}`);
+      repaintQuestionComposer(key);
+      return;
+    }
+    questionAttempts.delete(key);
+    questionDrafts.delete(key);
+    setQuestionNote(attempt.noteKey, 'saved', sent.body.replayed ? QUESTION.replayed : QUESTION.saved);
+    repaintQuestionComposer(key);
+    // 화면의 스레드는 쓰기 응답(적용 결과)이 아니라 읽기 route로 다시 읽은 현재 상태로만 그린다. 목록은 다시 읽되(새 질문이
+    // 목록에 보인다) 새 질문의 스레드는 보낸 때의 화면이 그대로일 때만 연다 — 그사이 다른 검사에 다녀왔거나(A→B→A) 칸을
+    // 닫았다 열었거나(epoch) 다른 스레드를 골랐으면(pick) 사용자가 지금 읽거나 쓰는 스레드를 늦은 Ask가 바꾸지 않는다.
+    if (!leaving && questionLock === null && selected === attempt.uid && $('#questions-body')) {
+      if (attempt.action === 'ask' && epoch === questionEpoch && pick === questionPick) pickQuestionThread(sent.body.applied.id);
+      loadQuestions(attempt.uid);
+    }
+  }
+
+  /**
+   * 쓰기 실패. 연결 실패·제한 시간·5xx·QUESTION_BUSY·STUDY_ACCESS_CHANGED(커밋 뒤 최종 확인일 수 있다)는 적용 여부를 모르는
+   * 결과라 Retry(같은 requestId)를 남긴다. 그 밖의 거절은 요청을 버리고 쓰던 글은 칸에 둔다. OWNER_CHANGED는 계정이 바뀐 것이다.
+   */
+  function questionWriteFailed(key, attempt, error) {
+    if (error.status === 401) return;
+    if (error.code === 'OWNER_CHANGED') {
+      accountChanged(describe(error));
+      return;
+    }
+    if (error.status === 0 || error.status >= 500 || error.code === 'STUDY_ACCESS_CHANGED') {
+      attempt.unknown = true;
+      setQuestionNote(attempt.noteKey, 'unknown', QUESTION.codes[error.code] || QUESTION.unknown, describe(error));
+      repaintQuestionComposer(key);
+      return;
+    }
+    questionAttempts.delete(key);
+    setQuestionNote(attempt.noteKey, 'failed',
+      QUESTION.codes[error.code] || (error.status === 404 ? QUESTION.notFound : QUESTION.statuses[error.status]) || QUESTION.rejected,
+      describe(error));
+    repaintQuestionComposer(key);
+    // 질문이 바뀌었거나 닫혔거나 보이지 않게 되었으면 지금 서버 상태를 다시 읽는다(쓰던 글은 칸에 남는다).
+    if (error.status === 404 || error.status === 409) refreshQuestions(attempt.uid);
+  }
+
+  /**
+   * 확인된 계정 변경(다른 계정의 봉투 owner·OWNER_CHANGED)은 알아챈 칸만의 일이 아니다. 같은 문서의 질문·영상 요청 두 영역을
+   * 이 자리에서 함께 잠가, 네트워크를 기다리기 전에 두 영역의 쓰던 글·결과를 모르는 요청·읽기/쓰기 번호를 버린다 — 한쪽만 잠그면
+   * 다른 쪽에 이전 계정의 글과 Retry가 남고, 나가 있던 쓰기의 늦은 영수증이 저장 결과로 그려진다(Astra S5-U4bc-R-001 F01).
+   * 한 검사의 읽기를 서버가 403으로 거절한 것은 계정 변경이 아니라서 그 영역만 잠근다(lockQuestions·lockRequests를 직접 부른다).
+   */
+  function accountChanged(detail) {
+    lockQuestions(QUESTION.ownerChanged, detail, true);
+    lockRequests(REQUEST.ownerChanged, detail, true);
+  }
+
+  /**
+   * 서버가 질문 읽기를 거절했거나(403) 계정이 바뀌었다(accountChanged). 이 문서에서는 질문을 더 읽거나 쓰지 않고 진행 중인
+   * 요청의 답도 그리지 않는다(뷰어 세션의 거절·계정 변경과 같은 한 방향). 쓰던 글은 이전 계정의 것이라 버린다. 403으로 이미
+   * 잠긴 뒤 계정 변경을 알면(account) 그 까닭으로 바꿔 쓴다.
+   */
+  function lockQuestions(text, detail, account = false) {
+    if (questionLock !== null && (questionLock.account || !account)) return;
+    questionLock = { text, detail: detail || '', account };
+    questionEpoch++;
+    pickQuestionThread(null);
+    questionThreadItem = null;
+    questionDrafts.clear();
+    questionAttempts.clear();
+    questionNotes.clear();
+    paintQuestionLock();
+  }
+
+  function paintQuestionLock() {
+    const body = $('#questions-body');
+    if (!body || questionLock === null) return;
+    $('#questions').dataset.state = 'locked';
+    const state = node('div', 'state');
+    state.id = 'questions-state';
+    state.dataset.state = 'failed';
+    state.setAttribute('role', 'alert');
+    state.append(node('p', 'state-text', questionLock.text), node('p', 'state-detail', questionLock.detail));
+    body.replaceChildren(node('p', 'muted', QUESTION.hint), state);
   }
 
   // ── 세션 ──
