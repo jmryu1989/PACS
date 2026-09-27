@@ -4,27 +4,27 @@ import json,os,unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
-from test_dock_preferences import DockPreferencesE2E
+from test_dock_preferences import DockPreferencesE2E,dock_settings
 
 class StandaloneDockE2E(ViewerTechNoteE2E):
  def test_standalone_dock_01_parent_popup_preferences_and_work(self):
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
-  p.locator('#findings').fill('KEEP DOCK PARENT REPORT');f.get_by_role('button',name='Comparison',exact=True).click();f.locator('#kin-dock-placement').select_option('top')
+  p.locator('#findings').fill('KEEP DOCK PARENT REPORT');f.get_by_role('button',name='Comparison',exact=True).click();dock_settings(f).locator('#kin-dock-placement').select_option('top')
   with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   v=opened.value;canvas_ready(v,2);expect(v.locator('#kin-dock-placement')).to_have_value('top',timeout=45000);expect(v.locator('#kin-viewer-layout')).to_be_visible();self.ready(v)
   v.get_by_label('Job Title',exact=True).fill('KEEP POPUP TITLE');before=self.snapshot(v);url=v.url
-  v.locator('#kin-dock-placement').select_option('bottom');canvas_ready(v,2);DockPreferencesE2E.bounds(self,v,False);self.assertEqual(self.snapshot(v),before)
+  dock_settings(v).locator('#kin-dock-placement').select_option('bottom');canvas_ready(v,2);DockPreferencesE2E.bounds(self,v,False);self.assertEqual(self.snapshot(v),before)
   expect(f.locator('#kin-dock-placement')).to_have_value('top');expect(f.locator('#kin-dock-preference-status')).to_contain_text('현재 창 유지')
-  v.locator('#kin-dock-placement').select_option('top');canvas_ready(v,2);DockPreferencesE2E.bounds(self,v,True);self.assertEqual(self.snapshot(v),before)
+  dock_settings(v).locator('#kin-dock-placement').select_option('top');canvas_ready(v,2);DockPreferencesE2E.bounds(self,v,True);self.assertEqual(self.snapshot(v),before)
   expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP POPUP TITLE');expect(p.locator('#findings')).to_have_value('KEEP DOCK PARENT REPORT');self.assertEqual(v.url,url);self.assertEqual(self.jobs(a),[])
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);v.screenshot(path=str(folder/'standalone-top.png'))
   v.get_by_label('Job Title',exact=True).fill('');v.get_by_role('button',name='Measurements',exact=True).click();v.reload();canvas_ready(v,2)
   expect(v.locator('#kin-dock-placement')).to_have_value('top',timeout=45000);expect(v.get_by_role('button',name='Measurements',exact=True)).to_have_attribute('aria-expanded','true')
-  v.locator('#kin-dock-reset').click();expect(v.locator('#kin-dock-placement')).to_have_value('bottom');expect(v.locator('#kin-viewer-history')).not_to_be_visible()
+  dock_settings(v).locator('#kin-dock-reset').click();expect(v.locator('#kin-dock-placement')).to_have_value('bottom');expect(v.locator('#kin-viewer-history')).not_to_be_visible()
 
  def test_standalone_dock_02_mode_cleanup_reentry_and_session(self):
   a,b=self.pair();v=self.launch(self.login(),[a]);self.ready(v);before=self.snapshot(v);self.assertEqual(len(before),1)
-  v.locator('#kin-dock-placement').select_option('top')
+  dock_settings(v).locator('#kin-dock-placement').select_option('top')
   for _ in range(2):
    v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeExit()")
    expect(v.locator('#kin-workspace-dock')).to_have_count(0);expect(v.locator('#kin-viewer-tech-note')).to_have_count(0);expect(v.locator('#kin-viewer-layout > summary')).to_be_visible()
@@ -39,8 +39,8 @@ class StandaloneDockE2E(ViewerTechNoteE2E):
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=800,height=1100))
   p.context.add_init_script("const save=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k.startsWith('kin-viewer-dock:v1:'))throw Error('synthetic denial');return save.call(this,k,v)}")
   v=self.launch(p,[a]);self.ready(v);canvas_ready(v,1);before=self.snapshot(v)
-  v.locator('#kin-dock-placement').select_option('top');expect(v.locator('#kin-dock-preference-status')).to_contain_text('이 창에만');canvas_ready(v,1);DockPreferencesE2E.bounds(self,v,True)
-  self.assertEqual(self.snapshot(v),before);v.locator('#kin-dock-reset').click();expect(v.locator('#kin-dock-placement')).to_have_value('bottom')
+  dock_settings(v).locator('#kin-dock-placement').select_option('top');expect(v.locator('#kin-dock-preference-status')).to_contain_text('이 창에만');canvas_ready(v,1);DockPreferencesE2E.bounds(self,v,True)
+  self.assertEqual(self.snapshot(v),before);dock_settings(v).locator('#kin-dock-reset').click();expect(v.locator('#kin-dock-placement')).to_have_value('bottom')
 
  def test_standalone_dock_04_native_invalid_read_denial_and_measurement_restore(self):
   a,b=self.pair();p=self.login();me=p.context.request.get(self.stack.api+'/me').json();key='kin-viewer-dock:v1:'+json.dumps([me['institution'],me['sub']],ensure_ascii=False,separators=(',',':'))

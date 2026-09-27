@@ -5,6 +5,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_dock_account import DockAccountE2E
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
+from test_dock_preferences import dock_settings
 
 class DockAutohideE2E(DockAccountE2E):
  def tab(self,f):return f.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]')
@@ -15,7 +16,7 @@ class DockAutohideE2E(DockAccountE2E):
  def held_frames(self,f):
   samples=f.evaluate("""()=>new Promise(resolve=>{const samples=[],start=performance.now();function frame(){samples.push(document.body.classList.contains('kin-dock-open'));if(performance.now()-start>=1600)resolve(samples);else requestAnimationFrame(frame)}requestAnimationFrame(frame)})""");self.assertGreater(len(samples),3);self.assertTrue(all(samples));print('OPEN GUARD FRAMES',len(samples),flush=True)
  def test_auto_01_input_pointer_collapse_and_focus_reopen_preserve_work(self):
-  a,b=self.pair();p=self.login();f=self.opened(p,a);p.locator('#findings').fill('KEEP AUTO REPORT');field=f.get_by_label('Job Title',exact=True);field.fill('KEEP AUTO JOB');f.locator('#kin-dock-autohide').check();field.focus();self.held_frames(f);before=ViewerTechNoteE2E.snapshot(self,f)
+  a,b=self.pair();p=self.login();f=self.opened(p,a);p.locator('#findings').fill('KEEP AUTO REPORT');field=f.get_by_label('Job Title',exact=True);field.fill('KEEP AUTO JOB');dock_settings(f).locator('#kin-dock-autohide').check();field.focus();self.held_frames(f);before=ViewerTechNoteE2E.snapshot(self,f)
   box=self.outside(p,f)
   for _ in range(6):p.keyboard.press('Shift');p.wait_for_timeout(300);expect(self.tab(f)).to_have_attribute('aria-expanded','true')
   p.mouse.down();self.held_frames(f);p.mouse.up();expect(self.tab(f)).to_have_attribute('aria-expanded','false',timeout=10000)
@@ -25,7 +26,7 @@ class DockAutohideE2E(DockAccountE2E):
  def test_auto_02_real_busy_request_and_mode_disposal(self):
   a,b=self.pair();p=self.launch(self.login(),[a]);f=p;expect(f.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000)
   if f.locator('#kin-viewer-dock-enable').is_visible():f.locator('#kin-viewer-dock-enable').click()
-  expect(f.locator('#kin-dock-autohide')).to_be_visible(timeout=45000)
+  expect(f.locator('#kin-dock-settings-toggle')).to_be_visible(timeout=45000);dock_settings(f);expect(f.locator('#kin-dock-autohide')).to_be_visible()
   if self.tab(f).get_attribute('aria-expanded')!='true':self.tab(f).click()
   f.locator('#kin-dock-autohide').check();pending=[];path='**/api/studies/'+a.uid+'/viewer-jobs*'
   p.route(path,lambda route:pending.append(route))
@@ -50,16 +51,16 @@ class DockAutohideE2E(DockAccountE2E):
   other.locator('#reading-appearance-close').click();other.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(other.locator('#reading-frame')).to_have_count(0);expect(other.locator('#reading-dock-autohide')).to_be_disabled()
 
  def test_auto_04_history_busy_and_native_modal_guard(self):
-  a,b=self.pair();p=self.login();f=self.opened(p,a);f.locator('#kin-dock-autohide').check();f.evaluate("()=>{window.originalHistoryState=kinViewerHistoryWorkspaceState;window.kinViewerHistoryWorkspaceState=()=>({busy:true,dirty:false})}")
+  a,b=self.pair();p=self.login();f=self.opened(p,a);dock_settings(f).locator('#kin-dock-autohide').check();f.evaluate("()=>{window.originalHistoryState=kinViewerHistoryWorkspaceState;window.kinViewerHistoryWorkspaceState=()=>({busy:true,dirty:false})}")
   try:self.outside(p,f);self.held_frames(f)
   finally:f.evaluate('()=>window.kinViewerHistoryWorkspaceState=window.originalHistoryState')
   expect(self.tab(f)).to_have_attribute('aria-expanded','false',timeout=10000);self.tab(f).focus();expect(self.tab(f)).to_have_attribute('aria-expanded','true')
   f.evaluate("()=>{window.autoDialog=document.createElement('dialog');autoDialog.textContent='Synthetic modal';document.body.append(autoDialog);autoDialog.showModal()}");self.held_frames(f);f.evaluate('()=>{autoDialog.close();autoDialog.remove()}');self.outside(p,f);expect(self.tab(f)).to_have_attribute('aria-expanded','false',timeout=10000)
 
  def test_auto_05_pointer_reopen_does_not_toggle_closed_or_erase_selection(self):
-  a,b=self.pair();p=self.login();f=self.opened(p,a);f.locator('#kin-dock-autohide').check()
+  a,b=self.pair();p=self.login();f=self.opened(p,a);dock_settings(f).locator('#kin-dock-autohide').check()
   for placement in ['bottom','top']:
-   f.locator('#kin-dock-placement').select_option(placement);self.outside(p,f);expect(self.tab(f)).to_have_attribute('aria-expanded','false',timeout=10000)
+   dock_settings(f).locator('#kin-dock-placement').select_option(placement);self.outside(p,f);expect(self.tab(f)).to_have_attribute('aria-expanded','false',timeout=10000)
    self.tab(f).click();print('POINTER REOPEN',placement,f.evaluate("()=>document.getElementById('kin-workspace-dock').preference()"),flush=True);expect(self.tab(f)).to_have_attribute('aria-expanded','true');self.assertEqual(f.evaluate("()=>document.getElementById('kin-workspace-dock').preference().panel"),1)
    saved=p.evaluate("()=>Object.fromEntries(Object.keys(localStorage).filter(k=>k.startsWith('kin-viewer-dock:')).map(k=>[k,JSON.parse(localStorage.getItem(k))]))");self.assertEqual(len(saved),1);self.assertEqual(next(iter(saved.values()))['panel'],1)
 

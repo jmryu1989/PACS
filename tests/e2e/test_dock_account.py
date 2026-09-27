@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 from test_reading_appearance_account import AppearanceAccountE2E
 from test_viewer_tech_note import ViewerTechNoteE2E
 from test_prior_selection import canvas_ready
+from test_dock_preferences import dock_settings
 
 class DockAccountE2E(AppearanceAccountE2E):
  def saved(self,p):expect(p.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')
@@ -26,7 +27,7 @@ class DockAccountE2E(AppearanceAccountE2E):
  def test_dock_account_02_late_load_aba_and_save_snapshot(self):
   a,b=self.pair();p=self.login();f=self.workspace(p,a);self.ready(p);p.locator('#reading-dock-placement').select_option('top');p.locator('#appearance-account-save').click();self.saved(p)
   pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…')
-  p.locator('#reading-appearance-close').click();f.locator('#kin-dock-placement').select_option('bottom');f.locator('#kin-dock-placement').select_option('top');self.settings(p)
+  p.locator('#reading-appearance-close').click();dock_settings(f).locator('#kin-dock-placement').select_option('bottom');f.locator('#kin-dock-placement').select_option('top');self.settings(p)
   self.assertEqual(len(pending),1);pending.pop().fulfill(response=p.request.get(self.stack.api+'/reading-appearance'));expect(p.locator('#appearance-account-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다')
   p.locator('#reading-dock-placement').select_option('bottom');p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…');p.locator('#reading-dock-placement').select_option('top')
   self.assertEqual(len(pending),1);r=pending.pop();r.fulfill(response=r.fetch());expect(p.locator('#appearance-account-status')).to_contain_text('요청 당시 설정');expect(f.locator('#kin-dock-placement')).to_have_value('top');self.assertEqual(p.request.get(self.stack.api+'/reading-appearance').json()['sizes']['dock']['placement'],'bottom')
@@ -56,7 +57,7 @@ class DockAccountE2E(AppearanceAccountE2E):
   with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   popup=opened.value;canvas_ready(popup,2);expect(popup.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000)
   if popup.locator('#kin-viewer-dock-enable').is_visible():popup.locator('#kin-viewer-dock-enable').click()
-  self.settings(p);p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…');popup.locator('#kin-dock-placement').select_option('top')
+  self.settings(p);p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…');dock_settings(popup).locator('#kin-dock-placement').select_option('top')
   expect(p.locator('#reading-dock-status')).to_contain_text('다른 창');self.assertEqual(len(pending),1);pending.pop().fulfill(response=p.request.get(self.stack.api+'/reading-appearance'));expect(p.locator('#appearance-account-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다');expect(f.locator('#kin-dock-placement')).to_have_value('bottom')
 
  def test_dock_account_06_refused_live_apply_keeps_save_disabled(self):
