@@ -79,6 +79,76 @@ class MeasurementCiTests(unittest.TestCase):
         dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
         self.assertNotIn('- cell-merge', dispatch)
 
+    def test_u2b_regressions_profile_is_exact_and_fits_the_shared_deadline(self):
+        # S5-CIE (Astra S5-EXIT-C-R-001 F03): the two live modules S5-U2b named as required regressions run
+        # through one profile, in this order, each against its own declared class.
+        profile = ci.PROFILES['u2b-regressions']
+        self.assertEqual(profile['suites'], (
+            ('e2e/test_prior_selection.py', 'PriorSelectionE2E', 'ci-u2b-prior-selection'),
+            ('e2e/test_related_scope.py', 'RelatedScopeE2E', 'ci-u2b-related-scope')))
+        self.assertEqual(profile['out'], ci.ROOT/'tests/e2e/artifacts/u2b-regressions-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-u2b-regress-ci-')
+        self.assertEqual(profile['suite_timeout'], 540)
+        self.assertNotIn('suite_budgets', profile)
+        outers = []
+        for suite, class_name, unit in profile['suites']:
+            with self.subTest(suite=suite):
+                command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, 2000)
+                self.assertEqual(command[command.index('--module')+1], 'tests/'+suite)
+                self.assertEqual(command[command.index('--class')+1], class_name)
+                self.assertEqual(command[command.index('--unit')+1], unit)
+                self.assertEqual(command[command.index('--mode')+1], 'live')
+                self.assertEqual(command[command.index('--timeout')+1], '540')
+                self.assertEqual(outer, 575)
+                outers.append(outer)
+        # Both suites at their cap still leave the stack setup and cleanup their share of the one shared deadline.
+        self.assertIn('deadline = time.monotonic()+25*60', (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertLessEqual(sum(outers), 25*60 - 350)
+        # Each suite's sanitized log is its own artifact file and never overwrites a stack step's log.
+        logs = [Path(suite).stem for suite, _, _ in profile['suites']]
+        self.assertEqual(len(set(logs)), 2)
+        self.assertFalse(set(logs) & {'database', 'database-tcp', 'keycloak-database', 'stack', 'ports',
+                                      'services', 'cleanup', 'results'})
+        for name, other in ci.PROFILES.items():
+            if name == 'u2b-regressions':
+                continue
+            with self.subTest(profile=name):
+                self.assertNotEqual(profile['out'], other['out'])
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+                # Never run a second time inside another profile's budget.
+                self.assertFalse({row[0] for row in other['suites']} & {row[0] for row in profile['suites']})
+
+    def test_validate_workflow_runs_u2b_regressions_in_its_own_bounded_job(self):
+        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        jobs = text.split('\n  u2b-regressions:\n')
+        self.assertEqual(len(jobs), 2, 'validate.yml must declare one u2b-regressions job')
+        body = []
+        for line in jobs[1].splitlines():
+            if line.startswith('  ') and not line.startswith('   '):
+                break
+            body.append(line)
+        job = '\n'.join(body)
+        for required in ['runs-on: ubuntu-24.04',
+                         'timeout-minutes: 40',
+                         'persist-credentials: false',
+                         'tests/measurement_ci.py --profile u2b-regressions',
+                         'tests/execution_selection_test.py',
+                         'tests/e2e/artifacts/u2b-regressions-ci/',
+                         'tests/e2e/artifacts/test_d03a_*.png',
+                         'name: synthetic-u2b-regressions-results',
+                         'if: always()', 'if-no-files-found: error',
+                         'retention-days: 7']:
+            self.assertIn(required, job)
+        self.assertEqual(text.count('--profile u2b-regressions'), 1)
+        self.assertNotIn('--profile u2b-regressions', jobs[0])
+        self.assertEqual(text.count('name: synthetic-u2b-regressions-results'), 1)
+        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        for profile in ['measurements', 'volume-rendering', 'volume-mpr', 'volume-slab', 'hanging-protocols', 'cell-merge']:
+            self.assertEqual(text.count('--profile '+profile), 1)
+        # A standing push/PR gate only; the manual dispatcher does not duplicate it.
+        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        self.assertNotIn('u2b-regressions', dispatch)
+
     def test_image_thumbnails_profile_is_exact_and_separate(self):
         profile=ci.PROFILES['image-thumbnails']
         self.assertEqual(profile['suites'],(('e2e/test_image_thumbnails.py','ImageThumbnailsE2E','ci-image-thumbnails'),))
@@ -286,7 +356,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge',
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
                           'gateway-e2e'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']

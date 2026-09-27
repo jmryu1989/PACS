@@ -106,6 +106,18 @@ class ExecutionSelectionTests(unittest.TestCase):
         self.assertEqual(len(plan['tests']),5)
         self.assertEqual(runner.collect(plan).countTestCases(),5)
 
+    def test_u2b_regressions_profile_selects_each_module_declared_cases_only(self):
+        # S5-CIE: each module's own load_tests selection, never the inherited WorklistE2E or RelatedFilterE2E cases.
+        profile=ci.PROFILES['u2b-regressions']
+        for (filename,class_name,unit),prefix in zip(profile['suites'],('test_d03a_','test_scope_')):
+            with self.subTest(filename=filename):
+                plan=runner.module_plan('tests/'+filename,unit,'live',profile['suite_timeout'],class_name)
+                cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
+                declared={class_name+'.'+name for name in cls.__dict__ if name.startswith(prefix)}
+                self.assertEqual({row['case'] for row in plan['tests']},declared)
+                self.assertEqual(len(plan['tests']),2)
+                self.assertEqual(runner.collect(plan).countTestCases(),2)
+
     def test_ci_selection_matches_existing_main_contracts(self):
         self.assertEqual(len(ci.SUITES), len(ci.SUITE_CLASSES))
         for filename, class_name in zip(ci.SUITES, ci.SUITE_CLASSES):
