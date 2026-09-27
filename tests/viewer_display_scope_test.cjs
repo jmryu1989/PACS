@@ -3,6 +3,7 @@ const assert=require('node:assert/strict');
 const test=require('node:test');
 const fs=require('node:fs');
 const path=require('node:path');
+const vm=require('node:vm');
 const sourcePath=path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-display-scope.js');
 let source=fs.readFileSync(sourcePath,'utf8');
 const mutation=process.env.KIN_DISPLAY_SCOPE_MUTATION;
@@ -26,7 +27,7 @@ function fixture(count=3){
   const state={layout:{layoutType:'grid',numRows:1,numCols:count},get activeViewportId(){return active},viewports:cells};
   const services={viewportGridService:{EVENTS:{ACTIVE:'active',GRID:'grid'},getState:()=>state,getActiveViewportId:()=>active,setActiveViewportId(){setActiveCalls++}},cornerstoneViewportService:{getCornerstoneViewport:id=>viewports.get(id)},displaySetService:{getDisplaySetByUID:id=>displaySets.get(id)}};
   const scope=Scope.create(services,{metadata:id=>metadata.get(id),toLowHighRange:(width,center)=>({lower:center-width/2,upper:center+width/2-1})});
-  return {scope,state,cells,viewports,displaySets,metadata,set active(value){active=value},get setActiveCalls(){return setActiveCalls}};
+  return {scope,services,state,cells,viewports,displaySets,metadata,set active(value){active=value},get setActiveCalls(){return setActiveCalls}};
 }
 
 test('Active is default and public one-shot APIs preserve frame, source and active id',()=>{
@@ -119,4 +120,120 @@ test('a source getter failure during failure reporting returns partial guidance 
 test('transitional volume image lookup cannot escape observation and operations still fail closed',()=>{
   const x=fixture(1),viewport=x.viewports.get('A');assert.deepEqual(x.scope.selection(),{mode:'active',ids:['A']});viewport.type='orthographic';viewport.getImageIds=()=>{throw Error('volume has no stack image ids')};
   assert.doesNotThrow(()=>x.scope.refresh());const rejected=x.scope.apply('invert');assert.equal(rejected.ok,false);assert.match(rejected.message,/적용 전에 중단|일반 CT 스택/);assert.equal(viewport.properties.invert,false);assert.equal(viewport.renders,0);
+});
+
+// S5-UI7 panel markup. A minimal DOM: enough of innerHTML/querySelector/dataset for the panel, so the markup, the
+// target count, the preset buttons and their click are exercised in node without a browser dependency.
+class Text{constructor(data){this.data=String(data);this.parent=null}get textContent(){return this.data}}
+class El{
+  constructor(tag){this.tagName=tag.toUpperCase();this.attrs=new Map();this.children=[];this.parent=null;this.style={cssText:''};this.checked=false;this.value='';this.onclick=null;this.onchange=null;this.listeners={};
+    this.dataset=new Proxy({},{get:(_,key)=>typeof key==='string'?this.getAttribute('data-'+key.replace(/[A-Z]/g,c=>'-'+c.toLowerCase())):undefined});}
+  getAttribute(name){return this.attrs.has(name)?this.attrs.get(name):null}setAttribute(name,value){this.attrs.set(name,String(value))}hasAttribute(name){return this.attrs.has(name)}removeAttribute(name){this.attrs.delete(name)}
+  get id(){return this.getAttribute('id')||''}set id(value){this.setAttribute('id',value)}get title(){return this.getAttribute('title')||''}set title(value){this.setAttribute('title',value)}
+  get type(){return this.getAttribute('type')||''}set type(value){this.setAttribute('type',value)}get disabled(){return this.hasAttribute('disabled')}set disabled(value){value?this.setAttribute('disabled',''):this.removeAttribute('disabled')}
+  get textContent(){return this.children.map(child=>child.textContent).join('')}set textContent(value){this.replaceChildren(String(value))}
+  get isConnected(){let node=this;while(node.parent)node=node.parent;return node===fakeDocument.body}
+  append(...nodes){for(let node of nodes){if(!(node instanceof El||node instanceof Text))node=new Text(node);node.parent?.children.splice(node.parent.children.indexOf(node),1);node.parent=this;this.children.push(node);}}
+  replaceChildren(...nodes){for(const child of this.children)child.parent=null;this.children=[];this.append(...nodes)}
+  remove(){if(this.parent){this.parent.children.splice(this.parent.children.indexOf(this),1);this.parent=null;}}
+  contains(node){for(;node;node=node.parent)if(node===this)return true;return false}
+  addEventListener(type,fn){(this.listeners[type]||=[]).push(fn)}dispatch(type){(this.listeners[type]||[]).forEach(fn=>fn({type,target:this}))}
+  click(){if(!this.disabled&&this.onclick)this.onclick({type:'click',target:this})}
+  set innerHTML(html){
+    this.replaceChildren();const stack=[this];
+    for(const [token,close,tag,attrs] of html.matchAll(/<(\/?)([a-zA-Z0-9]+)([^>]*)>|[^<]+/g)){
+      if(!tag){stack.at(-1).append(token);continue;}
+      if(close){stack.pop();continue;}
+      const element=new El(tag);for(const [,name,value] of attrs.matchAll(/([^\s=]+)(?:="([^"]*)")?/g))element.setAttribute(name,value??'');
+      stack.at(-1).append(element);if(!['input','br'].includes(tag.toLowerCase()))stack.push(element);
+    }
+  }
+  descendants(){const out=[];for(const child of this.children)if(child instanceof El)out.push(child,...child.descendants());return out}
+  matches(selector){
+    const tag=selector.match(/^[a-zA-Z]+/)?.[0];if(tag&&this.tagName!==tag.toUpperCase())return false;
+    for(const [,name,value] of selector.matchAll(/\[([^\]=]+)(?:=["']?([^"'\]]*)["']?)?\]/g))if(!this.hasAttribute(name)||value!==undefined&&this.getAttribute(name)!==value)return false;
+    const id=selector.match(/#([\w-]+)/)?.[1];return !id||this.id===id;
+  }
+  querySelectorAll(selector){
+    // Descendant combinator only: '[data-scope-cells] input' is each part matched inside the previous part's matches.
+    let scope=[this];for(const part of selector.trim().split(/\s+(?![^\[]*\])/))scope=[...new Set(scope.flatMap(element=>element.descendants().filter(item=>item.matches(part))))];return scope;
+  }querySelector(selector){return this.querySelectorAll(selector)[0]||null}
+}
+const fakeDocument={createElement:tag=>new El(tag),body:new El('body')};
+const ohifSource=fs.readFileSync(path.join(__dirname,'../config/ohif.js'),'utf8');
+
+function mounted(count=3,{modality='CT',control=true}={}){
+  globalThis.document=fakeDocument;const x=fixture(count),host=new El('main');fakeDocument.body.replaceChildren(host);
+  const table=[{window:'400',level:'40'},{window:'1500',level:'-600'},{window:'150',level:'90'},{window:'2500',level:'480'},{window:'80',level:'40'}],called=[],notices=[];
+  x.displaySets.get('ds-A').Modality=modality;
+  Object.assign(x.services,{customizationService:{get:key=>key==='cornerstone.windowLevelPresets'?{presets:{CT:table}}:undefined},uiNotificationService:{show:value=>notices.push(value)}});
+  // The arguments are built inside the vm realm; a JSON copy gives them this realm's prototypes for deepStrictEqual.
+  const commands={runCommand:(...args)=>called.push(JSON.parse(JSON.stringify(args)))},context={window:{},document:{},localStorage:{}};vm.runInNewContext(ohifSource,context);
+  const extension=context.window.config.extensions.find(item=>item.id==='kin.ct-presets');let definition={commandFn(){}};commands.getCommand=()=>definition;commands.registerCommand=(_,__,value)=>{definition=value};
+  if(control)extension.onModeEnter({servicesManager:{services:x.services},commandsManager:commands});
+  const scope=Scope.create(x.services,{host,metadata:id=>x.metadata.get(id),toLowHighRange:(width,center)=>({lower:center-width/2,upper:center+width/2-1}),presets:control?context.window.kinCTPresets:null});
+  assert.equal(scope.mount(),true);const panel=host.querySelector('#kin-display-scope');
+  // Object.assign keeps the fixture's `active` setter, which a spread would flatten into a plain value.
+  return Object.assign(x,{scope,panel,table,called,notices,extension,context,commands,control:context.window.kinCTPresets,buttons:()=>panel.querySelectorAll('[data-preset-buttons] button'),count:()=>panel.querySelector('[data-scope-count]').textContent,status:()=>panel.querySelector('[role=status]').textContent});
+}
+
+test('S5-UI7 panel names the current target count and says only the display changes',t=>{
+  const x=mounted(3);t.after(()=>x.scope.stop());
+  assert.equal(x.count(),'대상 1개 영상');
+  x.panel.querySelector('[data-scope-mode=all]').click();assert.equal(x.count(),'대상 3개 영상');
+  assert.equal(x.scope.setSelection(['A','B']),true);assert.equal(x.count(),'대상 2개 영상');
+  x.panel.querySelector('[data-scope-invert]').click();assert.equal(x.count(),'대상 1개 영상');assert.deepEqual(x.scope.selection().ids,['C']);
+  const boxes=x.panel.querySelectorAll('[data-scope-cells] input');boxes[0].checked=true;boxes[0].onchange();assert.equal(x.count(),'대상 2개 영상');
+  x.panel.querySelector('[data-scope-mode=active]').click();assert.equal(x.count(),'대상 1개 영상');
+  const note=x.panel.querySelector('[data-scope-note]');
+  assert.equal(note.textContent,'선택한 영상의 표시만 바꿉니다. 원본·표식·판독은 바뀌지 않습니다.');
+  // Where the note sits and how large the text renders are layout results this DOM cannot compute; the Chromium
+  // viewer_display_scope_dom_test checks both from the rendered boxes and computed font sizes.
+  const reset=x.panel.querySelector('[data-action=reset]');assert.equal(reset.textContent,'Reset Display');
+  assert.equal(reset.title,'표시(밝기·회전·확대)만 원래대로 — 배치는 Layout, 도구 영역은 Dock Settings에서');
+  assert.equal(x.panel.querySelectorAll('[role=status]').length,1,'one status region, as the e2e locators expect');
+});
+
+test('S5-UI7 preset buttons show the table values and apply only through kinApplyCTPreset to the active CT',t=>{
+  const x=mounted(3);t.after(()=>x.scope.stop());const buttons=x.buttons();
+  assert.deepEqual(buttons.map(button=>button.textContent),['Soft tissue 400/40','Lung 1500/-600','Liver 150/90','Bone 2500/480','Brain 80/40']);
+  buttons.forEach((button,index)=>{assert.equal(button.title,`키 ${index+1} · WW ${Number(x.table[index].window)} / WC ${Number(x.table[index].level)} (프리셋 표에서 읽음)`);assert.equal(button.disabled,false);assert.equal(button.type,'button');assert.equal(button.hasAttribute('data-action'),false);});
+  assert.equal(x.panel.querySelector('[data-preset-reason]').textContent,'');
+  // The value shown comes from the table at render time, not from a copy in the panel.
+  x.table[1]={window:'1600',level:'-550'};x.scope.refresh();assert.equal(x.buttons()[1].textContent,'Lung 1600/-550');assert.match(x.buttons()[1].title,/WW 1600 \/ WC -550/);
+  // Scope All does not widen a preset: the existing path writes the active viewport only.
+  x.panel.querySelector('[data-scope-mode=all]').click();const cameras=[...x.viewports.values()].map(v=>structuredClone(v.properties));
+  x.buttons()[3].click();assert.deepEqual(x.called,[['setViewportWindowLevel',{viewportId:'A',window:2500,level:480},'CORNERSTONE']]);
+  assert.match(x.status(),/Bone 프리셋을 활성 CT 영상에 적용했습니다/);assert.deepEqual([...x.viewports.values()].map(v=>v.properties),cameras,'the panel itself writes no viewport');
+  x.buttons()[1].click();assert.deepEqual(x.called[1],['setViewportWindowLevel',{viewportId:'A',window:1600,level:-550},'CORNERSTONE']);
+  // Key 1 (the mode hotkey runs the guarded setWindowLevel with the preset name) and the Soft tissue button make the same call.
+  x.called.length=0;x.buttons()[0].click();const button=[...x.called];x.called.length=0;
+  x.commands.getCommand().commandFn({description:'Soft tissue'});assert.deepEqual(x.called,button);
+  assert.deepEqual(button,[['setViewportWindowLevel',{viewportId:'A',window:400,level:40},'CORNERSTONE']]);
+});
+
+test('S5-UI7 non-CT, specialized and unreadable presets disable the buttons with a reason and never write',t=>{
+  for(const [label,change] of [['MR',x=>x.displaySets.get('ds-A').Modality='MR'],['US',x=>x.displaySets.get('ds-A').Modality='US'],['volume',x=>x.viewports.get('A').type='orthographic'],['mixed',x=>x.cells.get('A').displaySetInstanceUIDs=['ds-A','ds-B']],['empty',x=>x.cells.get('A').displaySetInstanceUIDs=[]],['enhanced CT',x=>x.displaySets.get('ds-A').SOPClassUID='1.2.840.10008.5.1.4.1.1.2.1']]){
+    const x=mounted(2);try{
+      change(x);x.scope.refresh();
+      assert.ok(x.buttons().length===5&&x.buttons().every(button=>button.disabled),label);assert.match(x.panel.querySelector('[data-preset-reason]').textContent,/CT 원본 프레임에서만/,label);
+      x.buttons()[0].click();assert.equal(x.called.length,0,label);
+      const direct=x.scope.applyPreset(0);assert.equal(direct.ok,false,label);assert.equal(x.called.length,0,label);assert.equal(x.notices.length,1,label);assert.match(direct.message,/CT 원본 프레임에서만/,label);
+    }finally{x.scope.stop();}
+  }
+  // Selecting a CT cell re-enables them on the next grid refresh.
+  const y=mounted(2,{modality:'MR'});t.after(()=>y.scope.stop());assert.ok(y.buttons().every(button=>button.disabled));y.active='B';y.scope.refresh();assert.ok(y.buttons().every(button=>!button.disabled));
+  y.buttons()[4].click();assert.deepEqual(y.called,[['setViewportWindowLevel',{viewportId:'B',window:80,level:40},'CORNERSTONE']]);
+  // An unreadable table entry disables only that button and says so.
+  y.table[2]={window:'0',level:'90'};y.scope.refresh();assert.equal(y.buttons()[2].disabled,true);assert.equal(y.buttons()[2].textContent,'Liver');assert.match(y.buttons()[2].title,/키 3 · 프리셋 값을 확인할 수 없습니다/);assert.equal(y.buttons()[3].disabled,false);
+});
+
+test('S5-UI7 without the preset extension the panel shows no preset buttons, and mode exit withdraws them',t=>{
+  const x=mounted(1,{control:false});t.after(()=>x.scope.stop());assert.equal(x.buttons().length,0);assert.match(x.panel.querySelector('[data-preset-reason]').textContent,/확인할 수 없습니다/);assert.equal(x.scope.applyPreset(0).ok,false);
+  const y=mounted(1);assert.ok(y.context.window.kinCTPresets);y.extension.onModeExit();assert.equal(y.context.window.kinCTPresets,undefined);
+  y.scope.stop();
+  // Without options.presets the panel reads the page global at render time: present -> five buttons, withdrawn -> none.
+  const host=new El('main');fakeDocument.body.replaceChildren(host);const w=Scope.create(y.services,{host,metadata:id=>y.metadata.get(id)});t.after(()=>{w.stop();delete globalThis.kinCTPresets;});
+  globalThis.kinCTPresets=y.control;assert.equal(w.mount(),true);assert.equal(host.querySelectorAll('[data-preset-buttons] button').length,5);
+  delete globalThis.kinCTPresets;w.refresh();assert.equal(host.querySelectorAll('[data-preset-buttons] button').length,0);assert.equal(w.applyPreset(0).ok,false);
 });
