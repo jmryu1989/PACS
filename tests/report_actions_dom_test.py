@@ -264,6 +264,13 @@ class ReportActionsStructureTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.text = lf(MAIN.read_text(encoding='utf-8'))
+        # S5-U4c and S5-U4b (after this unit) added regions outside this unit's three; the byte pins below compare
+        # main.html with those taken out: S5-U4c's regions and the five shared kinOn401 lines first
+        # (tests/clinician_request_dom_test.py), then S5-U4b's four (tests/clinician_question_dom_test.py). Imported here
+        # because those modules need Playwright and this class does not otherwise.
+        from clinician_question_dom_test import without_u4b
+        from clinician_request_dom_test import without_u4c_main
+        cls.pinned = without_u4b(without_u4c_main(cls.text))
         cls.base = base_text()
         print('base commit', BASE, 'present' if cls.base is not None else 'absent in this clone; pinned values used')
 
@@ -280,11 +287,11 @@ class ReportActionsStructureTest(unittest.TestCase):
         self.assertEqual(BASE_RFOOT, self.base[start:self.base.index(ROW_CLOSE, start) + len(ROW_CLOSE)])
 
     def test_everything_outside_the_three_regions_is_the_base_bytes_and_the_script_is_unchanged(self):
-        restored = without_ui3(self.text)
+        restored = without_ui3(self.pinned)
         self.assertEqual(BASE_MAIN_SHA256, digest(restored), 'a byte outside the S5-UI3 regions moved')
         if self.base is not None:
             self.assertEqual(self.base, restored)
-        self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(self.text))
+        self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(self.pinned))
         (cs, ce), (ms, me), (fs, fe) = regions(self.text)
         for name, (start, end) in (('css', (cs, ce)), ('rows', (ms, me)), ('footer', (fs, fe))):
             self.assertNotIn('<script', self.text[start:end], name)
