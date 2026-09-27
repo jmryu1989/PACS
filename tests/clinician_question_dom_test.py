@@ -79,7 +79,7 @@ receipts that replay the stored `applied` result, revision before state, author/
       the list call keeps the row up while the draft is written and while the logout POST is held.
   18d every place in main.html that starts KinAuth.logout() calls the end list first (api()'s 401, the dictation 401, the
       two owner-change exits, Log out before its draft write, the row's own 401); the one other is the membership
-      screen, where no question row ever read. without_u4b() leaves no kinOn401 behind.
+      screen, where no question row ever read. without_u4b() after without_u4c_main() leaves no kinOn401 behind.
   19  (F3) Inbox -> Open Study for a question outside its study's latest 50 opens it through GET questions/:id and keeps
       it after a reply re-reads the list; a late read of an earlier choice never paints; 404, another study's thread and
       403 are explicit.
@@ -272,8 +272,9 @@ CLINICIAN_BLOCK = slice_between(SHIPPED["clinician.js"], "  // ── 질문 스
 # the block registers the row's end() there. api()'s line is byte for byte S5-U4c's: the convention both units share.
 END_401 = "(window.kinOn401 || []).forEach(end => { try { end(); } catch (_) {} });"
 HOOK_401 = f"        {END_401}\n"
-# Log out's call, after its comment line; the call alone is not unique (api()'s indented line contains it).
-HOOK_LOG_OUT = ("      // S5-U4b: 확정한 로그아웃도 401처럼 종료 목록부터 부른다", f"그려지지 않게.\n      {END_401}\n")
+# Log out's call, after its comment line; the call alone is not unique (api()'s indented line contains it). Since the
+# S5-U4b/U4c integration the comment line is the one both units share.
+HOOK_LOG_OUT = ("      // S5-U4b/U4c 공유: 확정한 로그아웃도 401처럼 종료 목록", f"그려지지 않게.\n      {END_401}\n")
 
 # The S5-U4b insertions into main.html, each contiguous: (name, first bytes, end marker, whether the end marker is part
 # of the region). The markup's last line alone (`</section>`) is not unique, so its marker is the last two lines. A
@@ -284,27 +285,31 @@ U4B_REGIONS = [
      '          <div id="question-pane" role="region" aria-label="Question Threads" hidden></div>\n        </section>\n', True),
     ("hook", "      // S5-U4b: 판독 대상이 바뀐 때만 그 검사의 임상의 질문을 읽는다", HOOK, True),
     ("script", BLOCK_START + "\n", BLOCK_END, False),
-    ("hook-401", HOOK_401, HOOK_401, True),
-    ("hook-log-out", *HOOK_LOG_OUT, True),
 ]
-# The three logout starts that call the list inside their existing line: (name, shipped line, base line). The two
-# owner-change lines differ only in indentation, so each carries the line break before it.
-U4B_EDITS = [
-    ("dictation-401", f"      onUnauthorized: () => {{ {END_401} return KinAuth.logout(); }},\n",
-     "      onUnauthorized: () => KinAuth.logout(),\n"),
-    ("list-owner-change", f"\n        if (e.ownerChanged) {{ studyPageClient.clear(); {END_401} await KinAuth.logout(); return; }}\n",
-     "\n        if (e.ownerChanged) { studyPageClient.clear(); await KinAuth.logout(); return; }\n"),
-    ("poll-owner-change", f"\n          if (e.ownerChanged) {{ studyPageClient.clear(); {END_401} await KinAuth.logout(); return; }}\n",
-     "\n          if (e.ownerChanged) { studyPageClient.clear(); await KinAuth.logout(); return; }\n"),
+# The five logout starts that call the list are shared with S5-U4c, byte for byte: api()'s 401 line, Log out's comment
+# and call, and the three starts that call it inside their existing line. tests/clinician_request_dom_test.py
+# without_u4c_main() is the one that cuts them (each exactly once); here each may only occur at most once - absent once
+# that cut ran, present before it. The two owner-change lines differ only in indentation, so each carries the line
+# break before it.
+SHARED_401_TEXTS = [
+    ("hook-401", HOOK_401),
+    ("hook-log-out start", HOOK_LOG_OUT[0]),
+    ("hook-log-out end", HOOK_LOG_OUT[1]),
+    ("dictation-401", f"      onUnauthorized: () => {{ {END_401} return KinAuth.logout(); }},\n"),
+    ("list-owner-change", f"\n        if (e.ownerChanged) {{ studyPageClient.clear(); {END_401} await KinAuth.logout(); return; }}\n"),
+    ("poll-owner-change", f"\n          if (e.ownerChanged) {{ studyPageClient.clear(); {END_401} await KinAuth.logout(); return; }}\n"),
 ]
 
 
 def without_u4b(text):
-    """main.html (LF) with the S5-U4b changes taken out - the regions cut, the edited lines put back: the bytes S5-UI2's
-    and S5-UI3's pins stand for, since tests/worklist_toolbar_dom_test.py and tests/report_actions_dom_test.py pin
-    main.html outside their own regions. Raises if a marker or an edited line is missing or not unique, so a moved or
-    doubled change fails instead of being half undone."""
+    """main.html (LF) with the S5-U4b regions cut: with without_u4c_main() (which cuts the five shared kinOn401 lines)
+    the bytes S5-UI2's and S5-UI3's pins stand for, since tests/worklist_toolbar_dom_test.py and
+    tests/report_actions_dom_test.py pin main.html outside their own regions. Raises if a region marker is missing or not
+    unique, or a shared line occurs more than once, so a moved or doubled change fails instead of being half undone."""
     text = text.replace("\r\n", "\n")
+    for name, shared in SHARED_401_TEXTS:
+        if text.count(shared) > 1:
+            raise AssertionError(f"S5-U4b/U4c shared {name} text {shared!r} occurs {text.count(shared)} times in main.html")
     for name, start, end, inclusive in U4B_REGIONS:
         for marker in (start, end):
             if text.count(marker) != 1:
@@ -312,9 +317,40 @@ def without_u4b(text):
         first = text.index(start)
         last = text.index(end, first) + (len(end) if inclusive else 0)
         text = text[:first] + text[last:]
-    for name, shipped, base in U4B_EDITS:
+    return text
+
+
+# The S5-U4b changes to clinician.js: (name, first bytes, end marker, whether the end marker is part of the region), then
+# the two hook lines each put after its base neighbour line. tests/clinician_request_dom_test.py test_s01 takes them out
+# with S5-U4c's to compare clinician.js with its base pin.
+U4B_CLINICIAN_REGIONS = [
+    ("header", " * S5-U4b 질문 스레드: REQ-S5-U4b-QUESTION-UI",
+     " * 서버 S5-U4a route(studies/:uid/questions·questions/:id·entries·close)만 쓰고, 이 화면은 사용자가 Questions를 열 때만 읽는다.\n",
+     True),
+    ("text", "  // S5-U4b 질문 스레드 문구.", "  const QUESTION_TEXT_MAX = 2000;\n", True),
+    ("state", "  // S5-U4b. Questions를 연 뒤에는", "  const questionNotes = new Map();\n", True),
+    ("block", "  // ── 질문 스레드(S5-U4b) ──\n", "  // ── 세션 ──", False),
+]
+U4B_CLINICIAN_HOOKS = [
+    ("clear", "    clearTimeline();\n    clearQuestions();\n", "    clearTimeline();\n"),
+    ("paint", "    paintTimelineShell(row);\n    paintQuestionsShell(row);\n", "    paintTimelineShell(row);\n"),
+]
+
+
+def without_u4b_clinician(text):
+    """clinician.js (LF) with the S5-U4b header lines, constants, state, block and two hook lines out. Raises if a marker
+    or a hook is missing or not unique."""
+    text = text.replace("\r\n", "\n")
+    for name, start, end, inclusive in U4B_CLINICIAN_REGIONS:
+        for marker in (start, end):
+            if text.count(marker) != 1:
+                raise AssertionError(f"S5-U4b clinician.js {name} marker {marker!r} occurs {text.count(marker)} times")
+        first = text.index(start)
+        last = text.index(end, first) + (len(end) if inclusive else 0)
+        text = text[:first] + text[last:]
+    for name, shipped, base in U4B_CLINICIAN_HOOKS:
         if text.count(shipped) != 1:
-            raise AssertionError(f"S5-U4b {name} line {shipped!r} occurs {text.count(shipped)} times in main.html")
+            raise AssertionError(f"S5-U4b clinician.js {name} hook {shipped!r} occurs {text.count(shipped)} times")
         text = text.replace(shipped, base)
     return text
 
@@ -2585,8 +2621,10 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         # The membership screen (a pending or invalid account) is the one start without the list: allowed() needs
         # KinAuth.has(), false for such a session, so the row never read, and the page body is replaced there.
         self.assertIn("document.body.replaceChildren(panel);", extract_function(MAIN, "showMembershipState"))
-        # without_u4b() takes every S5-U4b change back out (the UI2/UI3 byte pins).
-        self.assertNotIn("kinOn401", without_u4b(MAIN))
+        # without_u4b() after without_u4c_main() (which cuts the five shared lines) takes every S5-U4b and S5-U4c change
+        # back out (the UI2/UI3 byte pins).
+        from clinician_request_dom_test import without_u4c_main
+        self.assertNotIn("kinOn401", without_u4b(without_u4c_main(MAIN)))
 
     def test_19_reader_inbox_opens_a_thread_outside_the_latest_fifty(self):
         # B: the chosen question is the oldest; 50 newer ones (answered, so not in the Open Inbox) fill B's latest 50.

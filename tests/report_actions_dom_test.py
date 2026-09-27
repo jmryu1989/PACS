@@ -264,10 +264,13 @@ class ReportActionsStructureTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.text = lf(MAIN.read_text(encoding='utf-8'))
-        # S5-U4b (after this unit) added four regions outside this unit's three; the byte pins below compare main.html
-        # with those taken out. Imported here because that module needs Playwright and this class does not otherwise.
+        # S5-U4c and S5-U4b (after this unit) added regions outside this unit's three; the byte pins below compare
+        # main.html with those taken out: S5-U4c's regions and the five shared kinOn401 lines first
+        # (tests/clinician_request_dom_test.py), then S5-U4b's four (tests/clinician_question_dom_test.py). Imported here
+        # because those modules need Playwright and this class does not otherwise.
         from clinician_question_dom_test import without_u4b
-        cls.pinned = without_u4b(cls.text)
+        from clinician_request_dom_test import without_u4c_main
+        cls.pinned = without_u4b(without_u4c_main(cls.text))
         cls.base = base_text()
         print('base commit', BASE, 'present' if cls.base is not None else 'absent in this clone; pinned values used')
 

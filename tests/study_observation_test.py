@@ -483,6 +483,16 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S5-U4c image requests: the queue inside the Technician-mode Order List panel, the read-only line under the report footer
+# row and the one mount function behind both. tests/clinician_request_dom_test.py pins how they behave.
+for _kind, _extra in {
+    "ids": {"image-request-queue": 1, "image-request-queue-summary": 1, "image-request-queue-body": 1,
+            "image-request-p": 1, "image-request-summary": 1, "image-request-toggle": 1, "image-request-pane": 1},
+    "functions": {"mountImageRequests": 1},
+    "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 # Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {
