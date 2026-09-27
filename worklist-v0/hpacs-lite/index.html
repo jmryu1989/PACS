@@ -111,6 +111,19 @@
     .stat-dot { margin-right: 5px; }
     .stat-dot.online { color: var(--kin-accent); }
     .stat-dot.offline { color: var(--kin-muted); }
+    /* S5-UI4: 뷰어 톱니 메뉴에서 뺀 오픈소스 표기. body 기준으로 두어 짧은 창에서도 로그인 카드와 겹치지 않는다. */
+    body { position: relative; }
+    .oss-notice {
+      position: absolute;
+      right: 0;
+      bottom: 14px;
+      left: 0;
+      padding: 0 16px;
+      color: var(--kin-muted);
+      font-size: 12px;
+      line-height: 1.5;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
@@ -137,6 +150,7 @@
     </div>
     <div class="stat" id="stat"></div>
   </div>
+  <footer class="oss-notice" id="oss-notice">이 뷰어는 오픈소스 OHIF Viewer(MIT 라이선스)를 기반으로 합니다.</footer>
 
   <script src="auth.js"></script>
   <script>
