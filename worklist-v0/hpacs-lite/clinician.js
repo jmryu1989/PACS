@@ -128,6 +128,15 @@
   const QUESTION_BADGE = { Open: 'open', Answered: 'final', Closed: 'unknown' };
   const QUESTION_KIND = { question: 'Question', followup: 'Follow-up', answer: 'Answer', close: 'Close' };
   const QUESTION_ROLE = { clinician: 'Clinician', radiologist: 'Radiologist', admin: 'Admin' };
+  // 계약 §5.1 전이표. 쓰기 응답의 action마다 항목 종류·가능한 이전 상태·다음 상태가 하나로 정해진다(§3.4 QuestionApplied).
+  const QUESTION_STEPS = {
+    create: { kind: 'question', from: [null], to: 'Open' },
+    answer: { kind: 'answer', from: ['Open', 'Answered'], to: 'Answered' },
+    followup: { kind: 'followup', from: ['Open', 'Answered'], to: 'Open' },
+    close: { kind: 'close', from: ['Open', 'Answered'], to: 'Closed' },
+  };
+  // 쓰는 칸마다 서버가 고를 수 있는 action. Reply는 작성자면 followup, 아니면 answer다(서버가 정한다).
+  const QUESTION_ACTIONS = { ask: ['create'], reply: ['answer', 'followup'], close: ['close'] };
   const REPORT_STATE = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', A: 'Approved', H: 'On Hold' };
   const QUESTION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const QUESTION_TEXT_MAX = 2000;
@@ -154,6 +163,8 @@
   let questionListSeq = 0;
   let questionThreadSeq = 0;
   let questionThread = null;
+  // 연 스레드가 바뀔 때마다 오른다(pickQuestionThread). 늦은 Ask 성공은 보낸 때의 epoch와 이 값이 그대로일 때만 새 스레드를 연다.
+  let questionPick = 0;
   // 지금 연 스레드의 마지막으로 읽은 응답. 답변·닫기의 기준 revision은 여기서만 온다.
   let questionThreadItem = null;
   // 서버가 질문 읽기를 거절했거나 다른 계정의 답이 왔다: 이 문서에서는 질문을 더 읽거나 쓰지 않는다(뷰어 세션과 같은 한 방향).
@@ -980,6 +991,13 @@
     return !leaving && questionLock === null && epoch === questionEpoch && selected === uid;
   }
 
+  /** 연 스레드를 바꾸는 유일한 자리. 바뀔 때만 선택 번호를 올린다 — 같은 스레드를 다시 누르거나 목록만 다시 읽는 것은 선택이 아니다. */
+  function pickQuestionThread(id) {
+    if (questionThread === id) return;
+    questionThread = id;
+    questionPick++;
+  }
+
   /** 응답의 owner가 이 화면의 계정인가. 다르면 false(다른 계정의 답), 모양이 틀리면 null(형식 오류)이다. */
   function questionOwnerOf(data) {
     const value = data && data.owner;
@@ -1015,7 +1033,8 @@
 
   /**
    * 질문 쓰기. 읽기(request)와 같이 401은 본문을 기다리지 않고 세션을 끝낸다. 연결 실패·제한 시간은 status 0이다 —
-   * 서버가 적용했는지 모르는 결과라 부르는 쪽이 같은 requestId로 다시 보낼 수 있게 남긴다.
+   * 서버가 적용했는지 모르는 결과라 부르는 쪽이 같은 requestId로 다시 보낼 수 있게 남긴다. 성공 응답은 HTTP 상태와 함께
+   * 돌려준다: 적용 결과는 201뿐이라(계약 §3.4) 200·202 같은 다른 성공 상태는 부르는 쪽이 결과를 모르는 응답으로 둔다.
    */
   async function questionPost(path, payload) {
     const controller = new AbortController();
@@ -1029,7 +1048,7 @@
       }
       const answer = await response.json().catch(() => null);
       if (!response.ok) throw failure(response.status, answer);
-      return answer;
+      return { status: response.status, body: answer };
     } catch (error) {
       if (error && error.kin) throw error;
       throw failure(0, null, error && error.name === 'AbortError' ? '응답이 없어 요청을 멈췄습니다.' : '서버에 연결하지 못했습니다.');
@@ -1076,14 +1095,25 @@
     return item;
   }
 
-  /** 쓰기 응답 봉투의 확인: 이 요청의 requestId·검사·스레드·동작이어야 저장 결과로 받는다. */
-  function questionApplied(answer, attempt) {
-    const applied = answer && answer.applied;
-    const actions = { ask: ['create'], reply: ['answer', 'followup'], close: ['close'] }[attempt.action];
-    return !!applied && typeof applied === 'object' && typeof answer.replayed === 'boolean'
-      && typeof applied.requestId === 'string' && applied.requestId.toLowerCase() === attempt.requestId
-      && applied.studyUid === attempt.uid && actions.includes(applied.action) && QUESTION_STATES.includes(applied.to)
-      && applied.id === (attempt.threadId === null ? attempt.requestId : attempt.threadId);
+  /**
+   * 쓰기 응답이 이 요청의 적용 결과인가(계약 §3.4 QuestionApplied·§5.1 전이). HTTP 201만 받고 필수 칸을 모두 본다:
+   * requestId·검사·스레드, entry.id = requestId, entry.seq = revision, revision = 보낸 기준 revision + 1(Ask는 1),
+   * from = 보낸 때의 상태(Ask는 null), action·entry.kind·from·to가 전이표의 한 줄, at은 시각. 기준은 원래 요청(attempt)이다 —
+   * 지금 화면의 스레드로 보면 그사이 전이·종결된 스레드에 보낸 Retry의 정상 재전송(저장된 결과)을 틀렸다고 한다.
+   * 하나라도 어긋나면 결과를 모르는 응답이라 글과 requestId를 남긴다.
+   */
+  function questionApplied(sent, attempt) {
+    const answer = sent.body, applied = answer && answer.applied;
+    if (sent.status !== 201 || !applied || typeof applied !== 'object' || typeof answer.replayed !== 'boolean'
+        || !QUESTION_ACTIONS[attempt.action].includes(applied.action)) return false;
+    const step = QUESTION_STEPS[applied.action], entry = applied.entry, base = attempt.base;
+    const mine = value => typeof value === 'string' && value.toLowerCase() === attempt.requestId;
+    return mine(applied.requestId) && applied.studyUid === attempt.uid
+      && applied.id === (attempt.threadId === null ? attempt.requestId : attempt.threadId)
+      && !!entry && typeof entry === 'object' && mine(entry.id) && entry.kind === step.kind && entry.seq === applied.revision
+      && applied.revision === (base ? base.revision + 1 : 1)
+      && step.from.includes(applied.from) && applied.from === (base ? base.state : null) && applied.to === step.to
+      && typeof applied.at === 'string' && !Number.isNaN(Date.parse(applied.at));
   }
 
   function questionAnchorChanged(then, now) {
@@ -1114,7 +1144,7 @@
   /** 선택이 바뀌거나 내려갈 때: 진행 중인 읽기의 답을 버리고 칸을 지운다. 쓰던 글·결과를 모르는 요청은 검사별로 남는다. */
   function clearQuestions() {
     questionEpoch++;
-    questionThread = null;
+    pickQuestionThread(null);
     questionThreadItem = null;
     const old = $('#questions');
     if (old) old.remove();
@@ -1131,7 +1161,7 @@
       return;
     }
     questionEpoch++;
-    questionThread = null;
+    pickQuestionThread(null);
     questionThreadItem = null;
     section.dataset.state = 'closed';
     body.remove();
@@ -1164,7 +1194,7 @@
     thread.id = 'question-thread';
     thread.hidden = true;
     const ask = questionComposer(uid, null, 'ask', { label: 'New Question', hint: QUESTION.askHint, button: 'Ask', multiline: true,
-      send: field => sendQuestion(uid, null, 'ask', field, `/studies/${encodeURIComponent(uid)}/questions`, {}) });
+      send: field => sendQuestion(uid, null, 'ask', field, `/studies/${encodeURIComponent(uid)}/questions`, null) });
     ask.append(questionNote(questionNoteKey(uid, null)));
     ask.hidden = true;
     body.append(node('p', 'muted', QUESTION.hint), state, list, thread, ask);
@@ -1227,7 +1257,7 @@
     $('.question-compose[data-action="ask"]').hidden = false;
     if (questionThread !== null && items.some(item => item.id === questionThread)) loadQuestionThread(uid, questionThread);
     else {
-      questionThread = null;
+      pickQuestionThread(null);
       hideQuestionThread();
     }
   }
@@ -1248,7 +1278,7 @@
 
   function openQuestionThread(uid, id) {
     if (leaving || questionLock !== null || selected !== uid) return;
-    questionThread = id;
+    pickQuestionThread(id);
     for (const li of document.querySelectorAll('#question-list > li')) {
       if (li.dataset.id === id) li.setAttribute('aria-current', 'true');
       else li.removeAttribute('aria-current');
@@ -1304,9 +1334,9 @@
     closed.hidden = true;
     const target = () => questionThreadItem && questionThreadItem.id === id ? questionThreadItem : null;
     const reply = questionComposer(uid, id, 'reply', { label: 'Reply', hint: QUESTION.replyHint, button: 'Reply', multiline: true,
-      send: field => { const item = target(); if (item) sendQuestion(uid, id, 'reply', field, `/questions/${encodeURIComponent(id)}/entries`, { revision: item.revision }); } });
+      send: field => { const item = target(); if (item) sendQuestion(uid, id, 'reply', field, `/questions/${encodeURIComponent(id)}/entries`, item); } });
     const close = questionComposer(uid, id, 'close', { label: 'Close Reason', hint: QUESTION.closeHint, button: 'Close', multiline: false,
-      send: field => { const item = target(); if (item) sendQuestion(uid, id, 'close', field, `/questions/${encodeURIComponent(id)}/close`, { revision: item.revision }); } });
+      send: field => { const item = target(); if (item) sendQuestion(uid, id, 'close', field, `/questions/${encodeURIComponent(id)}/close`, item); } });
     box.setAttribute('aria-labelledby', 'question-thread-title');
     box.style.cssText = 'margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px';
     box.replaceChildren(head, meta, state, entries, closed, reply, close, questionNote(questionNoteKey(uid, id)));
@@ -1505,8 +1535,11 @@
     for (const box of document.querySelectorAll('[data-note-key]')) if (box.dataset.noteKey === noteKey) paintQuestionNote(box);
   }
 
-  /** 새 쓰기: 새 requestId(UUID v4)와 이 화면의 계정([기관, sub])을 싣는다. 답변·닫기는 지금 읽힌 스레드의 revision을 싣는다. */
-  function sendQuestion(uid, threadId, action, field, path, payload) {
+  /**
+   * 새 쓰기: 새 requestId(UUID v4)와 이 화면의 계정([기관, sub])을 싣는다. 답변·닫기는 지금 읽힌 스레드(base)의 revision을
+   * 싣고, 그 revision과 상태를 요청에 적어 둔다 — 응답(Retry의 재전송 포함)은 이 기준으로만 확인한다(questionApplied).
+   */
+  function sendQuestion(uid, threadId, action, field, path, base) {
     const key = questionKey(uid, threadId, action);
     const noteKey = questionNoteKey(uid, threadId);
     if (leaving || questionLock !== null || selected !== uid || questionAttempts.has(key)) return;
@@ -1524,7 +1557,8 @@
       return;
     }
     const attempt = { requestId, uid, threadId, action, noteKey, path, text, busy: false, unknown: false,
-      payload: { ...payload, [action === 'close' ? 'note' : 'body']: text } };
+      base: base ? { revision: base.revision, state: base.state } : null,
+      payload: { ...(base ? { revision: base.revision } : {}), [action === 'close' ? 'note' : 'body']: text } };
     questionDrafts.set(key, text);
     questionAttempts.set(key, attempt);
     sendQuestionAttempt(key, attempt);
@@ -1554,14 +1588,16 @@
   }
 
   async function sendQuestionAttempt(key, attempt) {
+    // 보낸 때의 화면(Retry면 다시 보낸 때). 늦게 온 Ask 성공이 새 스레드를 열어도 되는지는 이 둘로만 정한다(아래).
+    const epoch = questionEpoch, pick = questionPick;
     attempt.busy = true;
     attempt.unknown = false;
     setQuestionNote(attempt.noteKey, 'busy', QUESTION.sending);
     repaintQuestionComposer(key);
-    let answer = null;
+    let sent = null;
     let error = null;
     try {
-      answer = await questionPost(attempt.path, { requestId: attempt.requestId, expectedOwner: owner, ...attempt.payload });
+      sent = await questionPost(attempt.path, { requestId: attempt.requestId, expectedOwner: owner, ...attempt.payload });
     } catch (caught) {
       error = caught;
     }
@@ -1572,24 +1608,26 @@
       questionWriteFailed(key, attempt, error);
       return;
     }
-    const same = questionOwnerOf(answer);
+    const same = questionOwnerOf(sent.body);
     if (same === false) {
       lockQuestions(QUESTION.ownerChanged, '');
       return;
     }
-    if (same === null || !questionApplied(answer, attempt)) {
+    if (same === null || !questionApplied(sent, attempt)) {
       attempt.unknown = true;
-      setQuestionNote(attempt.noteKey, 'unknown', QUESTION.writeMalformed);
+      setQuestionNote(attempt.noteKey, 'unknown', QUESTION.writeMalformed, sent.status === 201 ? '' : `HTTP ${sent.status}`);
       repaintQuestionComposer(key);
       return;
     }
     questionAttempts.delete(key);
     questionDrafts.delete(key);
-    setQuestionNote(attempt.noteKey, 'saved', answer.replayed ? QUESTION.replayed : QUESTION.saved);
+    setQuestionNote(attempt.noteKey, 'saved', sent.body.replayed ? QUESTION.replayed : QUESTION.saved);
     repaintQuestionComposer(key);
-    // 화면의 스레드는 쓰기 응답(적용 결과)이 아니라 읽기 route로 다시 읽은 현재 상태로만 그린다. 새 질문은 그 스레드를 연다.
+    // 화면의 스레드는 쓰기 응답(적용 결과)이 아니라 읽기 route로 다시 읽은 현재 상태로만 그린다. 목록은 다시 읽되(새 질문이
+    // 목록에 보인다) 새 질문의 스레드는 보낸 때의 화면이 그대로일 때만 연다 — 그사이 다른 검사에 다녀왔거나(A→B→A) 칸을
+    // 닫았다 열었거나(epoch) 다른 스레드를 골랐으면(pick) 사용자가 지금 읽거나 쓰는 스레드를 늦은 Ask가 바꾸지 않는다.
     if (!leaving && questionLock === null && selected === attempt.uid && $('#questions-body')) {
-      if (attempt.action === 'ask') questionThread = answer.applied.id;
+      if (attempt.action === 'ask' && epoch === questionEpoch && pick === questionPick) pickQuestionThread(sent.body.applied.id);
       loadQuestions(attempt.uid);
     }
   }
@@ -1627,7 +1665,7 @@
     if (questionLock !== null) return;
     questionLock = { text, detail: detail || '' };
     questionEpoch++;
-    questionThread = null;
+    pickQuestionThread(null);
     questionThreadItem = null;
     questionDrafts.clear();
     questionAttempts.clear();

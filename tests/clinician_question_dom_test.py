@@ -29,9 +29,17 @@ receipts that replay the stored `applied` result, revision before state, author/
       while an answer is pending leave only the closing line.
   07  English controls and state names, Korean explanations, no avoided or acknowledgement words, text >= 12px, hit
       targets >= 24px, keyboard from the summary to Reply, aria wiring; no consultation route or report body is used.
+  08  (Astra S5-U4b-R-001 F4) only a 201 whose `applied` is this request's step counts as saved (contract §3.4, §5.1):
+      200 and 202, a missing entry/from/revision/at, another action, to, entry kind, entry id or entry seq, a revision
+      or a from other than the request's own keep the text read-only with Retry; checked against the request as sent,
+      so a Retry answered with the stored result after the thread moved on and closed is accepted and read again.
+  09  (F2) a late Ask's 201 never moves the thread the user chose after sending it (A->B->A, another thread of the same
+      study, Questions closed and opened again) and keeps the draft and focus there; an Ask nobody moved away from still
+      opens its new thread. Control: the file that opens it whenever the study is still selected moves the user.
 
-  Reading screen (the S5-U4b block cut out of main.html and run as is, with the shipped api(), on main.html's own
-  markup and styles with the page script stripped)
+  Reading screen (the S5-U4b block cut out of main.html and run as is, on main.html's own markup and styles with the
+  page script stripped; the block sends its own requests and does not use api())
+  10  (F4) the same envelope rule for Reply and Close on the reading screen.
   11  the Questions row follows the reading target: GET studies/:uid/questions once per target change and never for the
       same target; hidden (no layout change) for a target without threads, for a tele study (not read) and for a session
       that is neither radiologist nor admin (not read); visible with counts when threads exist; it sits after the report
@@ -45,10 +53,16 @@ receipts that replay the stored `applied` result, revision before state, author/
   15  Inbox: GET questions?view=inbox&state=open, 50 per page with the signed cursor passed back verbatim, the state
       filter, a study missing from the loaded worklist is disabled with a Korean reason, Open Study selects the study
       and opens the chosen thread, empty and failed states.
-  16  session policy: another tab's session end while a read is pending hides the row and paints nothing; a 403 read
-      and another account's envelope lock the row with an explicit text and nothing more is read; a 401 on a write goes
-      through api()'s logout.
+  16  session policy: another tab's session end while a read is pending hides the row, stops the read and paints nothing;
+      a 403 read and another account's envelope lock the row with an explicit text and nothing more is read; a 401 on a
+      write ends the row and starts the logout.
   17  wording, fonts, hit targets and keyboard on the reading screen.
+  18  (F1) with the shipped auth.js, whose logout() broadcasts only after POST /auth/logout: a 401 ends the row while
+      that POST is held - nothing shown, drafts dropped, the requests on the way aborted, their answers paint nothing
+      and nothing more is read. Control: the block that leaves the end to the logout broadcast keeps the row.
+  19  (F3) Inbox -> Open Study for a question outside its study's latest 50 opens it through GET questions/:id and keeps
+      it after a reply re-reads the list; a late read of an earlier choice never paints; 404, another study's thread and
+      403 are explicit.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is tests/clinician_question_live.py (hosted synthetic stack only).
@@ -131,6 +145,7 @@ R_NOT_FOUND = "검사나 질문을 찾을 수 없습니다. 접근 조건이 바
 R_DISCARDED = "보낸 요청을 버렸습니다. 저장되었을 수 있으니 다시 불러온 스레드에서 확인하세요."
 R_CLOSED_NOTE = "닫힌 질문입니다. 새 답변·닫기는 서버가 거절합니다."
 R_THREAD_FAILED = "질문 스레드를 불러오지 못했습니다."
+R_OTHER_STUDY = "이 질문은 판독 대상 검사의 질문이 아니어서 열지 않았습니다. Inbox를 다시 불러오세요."
 R_INBOX_EMPTY = "이 조건의 질문이 없습니다."
 R_INBOX_FAILED = "받은 질문을 불러오지 못했습니다."
 R_INBOX_READY = "질문 {n}건을 최신순으로 표시합니다."
@@ -224,7 +239,6 @@ BLOCK_START = "    // ── 임상의 질문 답변(S5-U4b) ──"
 BLOCK_END = "    // ── 패널 크기 조절 ──"
 HOOK = "      studyQuestions?.sync();\n"
 READER_BLOCK = slice_between(MAIN, BLOCK_START, BLOCK_END)
-API_FN = extract_function(MAIN, "api")
 CLINICIAN_BLOCK = slice_between(SHIPPED["clinician.js"], "  // ── 질문 스레드(S5-U4b) ──", "  // ── 세션 ──")
 
 # The four S5-U4b insertions into main.html, each contiguous: (name, first bytes, end marker, whether the end marker is
@@ -252,26 +266,33 @@ def without_u4b(text):
         text = text[:first] + text[last:]
     return text
 
-# Everything the cut block and the shipped api() read from the page script, as small stand-ins. select() is the page's
-# early return for the same study followed by renderClinical(), whose S5-U4b line is the shipped HOOK.
+# Everything the cut block reads from the page script, as small stand-ins. select() is the page's early return for the
+# same study followed by renderClinical(), whose S5-U4b line is the shipped HOOK. KIN_AUTH is the KinAuth stand-in below,
+# or nothing when the case loads the shipped auth.js first (test_18).
 READER_PRELUDE = """
 const $ = s => document.querySelector(s);
 const API = location.origin + '/api';
 let sess = window.synSession;
 let serverMode = true, demoMode = false, offline = false;
-let selectedUid = null, appState = {}, warnedFor = null;
+let selectedUid = null;
 let studies = window.synStudies;
-const syncStudy = () => {}, updateReportButtons = () => {}, loadReport = () => {}, displayActor = value => value;
 const toast = (message, kind) => { window.synToasts.push([message, kind]); };
-const KinAuth = {
-  session: () => window.synSession,
-  has: role => { const s = window.synSession; return !!s && s.state === 'approved' && (s.roles.includes(role) || s.roles.includes('admin')); },
-  logout: async () => { window.synLogouts += 1; const c = new BroadcastChannel('kin-session'); c.postMessage({ type: 'session-ended' }); c.close(); },
-};
+KIN_AUTH
 function select(uid) { window.synSelects.push(uid); if (uid === selectedUid) return; selectedUid = uid; renderClinical(); }
 function renderClinical() {
 HOOK}
 """.replace("HOOK", HOOK)
+# Its logout broadcasts at once, as auth.js does after the logout POST has returned.
+READER_STAND_IN = """const KinAuth = {
+  session: () => window.synSession,
+  has: role => { const s = window.synSession; return !!s && s.state === 'approved' && (s.roles.includes(role) || s.roles.includes('admin')); },
+  logout: async () => { window.synLogouts += 1; const c = new BroadcastChannel('kin-session'); c.postMessage({ type: 'session-ended' }); c.close(); },
+};"""
+# Records the AbortSignal of every request the page starts with one (the question requests; auth.js's logout POST has none).
+OBSERVE_SIGNALS = """() => { const real = window.fetch; window.synSignals = [];
+  window.fetch = (input, init) => { if (init && init.signal) window.synSignals.push({url: String(input), signal: init.signal});
+    return real(input, init); }; }"""
+SIGNALS = "() => window.synSignals.map(s => [new URL(s.url).pathname, s.signal.aborted])"
 READER_SETUP = """(session) => { window.synSession = session; window.synStudies = SYN_STUDIES; window.synToasts = []; window.synLogouts = 0;
   window.synSelects = []; }"""
 
@@ -575,6 +596,41 @@ def kind_of(method, path):
     return None
 
 
+def bump_revision(payload):
+    payload["applied"]["revision"] += 1
+    payload["applied"]["entry"]["seq"] += 1
+
+
+def flip_from(payload):
+    payload["applied"]["from"] = "Answered" if payload["applied"]["from"] == "Open" else "Open"
+
+
+# Astra S5-U4b-R-001 F4: answers to a Reply that the server applied, each changed in one way that makes it not this
+# request's QuestionApplied (contract §3.4, §5.1). (name, fault fields, the unknown note's second line).
+REPLY_ENVELOPES = [
+    ("HTTP 200", {"http": 200}, "HTTP 200"),
+    ("HTTP 202", {"http": 202}, "HTTP 202"),
+    ("no entry", {"patch": lambda p: p["applied"].pop("entry")}, ""),
+    ("no from", {"patch": lambda p: p["applied"].pop("from")}, ""),
+    ("no revision", {"patch": lambda p: p["applied"].pop("revision")}, ""),
+    ("no at", {"patch": lambda p: p["applied"].pop("at")}, ""),
+    ("action close", {"patch": lambda p: p["applied"].update(action="close")}, ""),
+    ("to Closed", {"patch": lambda p: p["applied"].update(to="Closed")}, ""),
+    ("entry kind", {"patch": lambda p: p["applied"]["entry"].update(kind="question")}, ""),
+    ("entry id", {"patch": lambda p: p["applied"]["entry"].update(id=str(uuid.uuid4()))}, ""),
+    ("entry seq", {"patch": lambda p: p["applied"]["entry"].update(seq=p["applied"]["entry"]["seq"] + 1)}, ""),
+    ("revision", {"patch": bump_revision}, ""),
+    # Open and Answered are both possible before a reply; only the state the request was sent from is this request's.
+    ("from", {"patch": flip_from}, ""),
+]
+ASK_ENVELOPES = [
+    ("HTTP 202", {"http": 202}, "HTTP 202"),
+    ("revision", {"patch": bump_revision}, ""),
+    ("from", {"patch": lambda p: p["applied"].update({"from": "Open"})}, ""),
+    ("id", {"patch": lambda p: p["applied"].update(id=str(uuid.uuid4()))}, ""),
+]
+
+
 class ClinicianQuestionDOMTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -588,6 +644,13 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
             ("      const fresh = (era, target) => !ended && lock === null && era === epoch && target === uid;\n",
              "      const fresh = (era, target) => target === uid;\n", 1),
             ("mine !== listSeq", "false", 2)], "main.html S5-U4b block")
+        # F2 control: a late Ask opens its thread whenever the same study is still selected and the section open.
+        cls.home_ask_any_screen = variant(home, [
+            ("      if (attempt.action === 'ask' && epoch === questionEpoch && pick === questionPick) pickQuestionThread(sent.body.applied.id);\n",
+             "      if (attempt.action === 'ask') pickQuestionThread(sent.body.applied.id);\n", 1)], "clinician.js")
+        # F1 control: a 401 only starts the logout and leaves the row's end to auth.js's broadcast after the logout POST.
+        cls.reader_end_on_broadcast = variant(READER_BLOCK, [
+            ("        end();\n        if (first) logout();\n", "        if (first) logout();\n", 1)], "main.html S5-U4b block")
         cls.reader_page = page_html(MAIN)
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -710,6 +773,8 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
             payload = copy.deepcopy(payload)
             fault["patch"](payload)
             answer = (status, payload)
+        if fault is not None and "http" in fault:
+            answer = (fault["http"], answer[1])
         if self.envelope_owner is not None and answer is not None and isinstance(answer[1], dict) and "owner" in answer[1]:
             answer = (answer[0], {**answer[1], "owner": self.envelope_owner})
         abort = fault is not None and fault.get("abort")
@@ -741,6 +806,14 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         request = held["route"].request
         self.answer(held["route"], held["answer"], held["abort"])
         self.wait_until(lambda: any(item is request for item in self.finished), "the released answer reaching the page")
+        self.settle()
+
+    def release_after_end(self, held):
+        """Answer a request that the row's end() may already have aborted; the page then has nothing to receive."""
+        try:
+            self.answer(held["route"], held["answer"], held["abort"])
+        except PlaywrightError:
+            pass
         self.settle()
 
     def take(self, kind, count=1):
@@ -796,12 +869,17 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         expect(self.page.locator(f"{scope} [data-note-key]:not([hidden])").first).to_have_attribute("data-state", state)
 
     # Reading screen
-    def open_reader(self, session, studies=None, block=None):
+    def open_reader(self, session, studies=None, block=None, real_auth=False):
         self.me = session
         self.page.goto(ORIGIN + BASE + "main.html")
         self.page.evaluate(READER_SETUP.replace("SYN_STUDIES", json.dumps(studies or READER_STUDIES)),
                            {**session, "state": "approved"})
-        self.page.add_script_tag(content=READER_PRELUDE + API_FN + "\n" + (block or READER_BLOCK) + "\nwindow.synPick = uid => select(uid);\n")
+        if real_auth:
+            # The shipped auth.js in place of the stand-in; its session comes from GET /api/me (self.me).
+            self.page.add_script_tag(content=SHIPPED["auth.js"])
+            self.assertEqual("approved", self.page.evaluate("async () => (await KinAuth.init()).state"))
+        prelude = READER_PRELUDE.replace("KIN_AUTH\n", "" if real_auth else READER_STAND_IN + "\n")
+        self.page.add_script_tag(content=prelude + (block or READER_BLOCK) + "\nwindow.synPick = uid => select(uid);\n")
         self.assertEqual([], self.page.evaluate("() => window.synToasts"), "the block mounted")
 
     def target(self, u):
@@ -1325,7 +1403,192 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
             self.assertNotIn(needle, CLINICIAN_BLOCK, needle)
         self.assertEqual({"list", "thread", "reply"}, {r["kind"] for r in self.requests()})
 
+    def test_08_home_write_envelope_needs_201_and_the_applied_step(self):
+        opened, _, _ = self.seed_threads()
+        self.open_home()
+        self.pick(A)
+        self.open_questions("ready")
+        ask_note = self.page.locator('.question-compose[data-action="ask"] [data-note-key]')
+        # Ask (create: null -> Open, revision 1, entry seq 1 = the question). Each applied, each answer not this request's
+        # result: unknown, text read-only, Retry and Discard; Retry gets the stored result and the new thread opens.
+        for name, fault, detail in ASK_ENVELOPES:
+            with self.subTest(ask=name):
+                self.faults.append({"kind": "create", "apply": True, **fault})
+                self.write("ask", f"SYN {name} question")
+                expect(ask_note).to_have_attribute("data-state", "unknown")
+                seen = self.view()
+                self.assertEqual({"state": "unknown", "text": WRITE_MALFORMED, "detail": detail}, seen["notes"][-1])
+                ask = next(c for c in seen["composers"] if c["action"] == "ask")
+                self.assertEqual(("unknown", f"SYN {name} question", True, False, True, True),
+                                 (ask["state"], ask["value"], ask["readOnly"], ask["send"], ask["retry"], ask["discard"]))
+                sent = self.requests("create")[-1]["body"]
+                self.page.locator('.question-compose[data-action="ask"] button[data-retry]').click()
+                expect(ask_note).to_have_attribute("data-state", "saved")
+                self.assertEqual(sent, self.requests("create")[-1]["body"])
+                self.assertEqual({"state": "saved", "text": REPLAYED, "detail": ""}, self.view()["notes"][-1])
+                self.threaded(sent["requestId"], "Open")
+        # Reply (the author's follow-up: Open -> Open at the posted revision + 1).
+        self.open_thread(opened["id"], "Open")
+        for index, (name, fault, detail) in enumerate(REPLY_ENVELOPES):
+            with self.subTest(reply=name):
+                self.faults.append({"kind": "reply", "apply": True, **fault})
+                self.write("reply", f"SYN {name} follow-up")
+                self.settled_note("unknown")
+                seen = self.view()
+                self.assertEqual({"state": "unknown", "text": WRITE_MALFORMED, "detail": detail}, seen["notes"][0])
+                reply = next(c for c in seen["composers"] if c["action"] == "reply")
+                self.assertEqual(("unknown", f"SYN {name} follow-up", True, False, True, True),
+                                 (reply["state"], reply["value"], reply["readOnly"], reply["send"], reply["retry"], reply["discard"]))
+                sent = self.requests("reply")[-1]["body"]
+                self.page.locator('.question-compose[data-action="reply"] button[data-retry]').click()
+                self.settled_note("saved")
+                self.assertEqual((sent, REPLAYED), (self.requests("reply")[-1]["body"], self.view()["notes"][0]["text"]))
+                expect(self.page.locator("#question-entries > li")).to_have_count(2 + index)
+        # A reply whose answer was lost; the thread then moved on and closed, and the screen read it (Closed). Retry's stored
+        # result (Open -> Open at the revision the request was sent with) is this request's and is accepted; the thread
+        # is read again, still Closed.
+        self.faults.append({"kind": "reply", "apply": True, "abort": True})
+        self.write("reply", "SYN follow-up before the close")
+        self.settled_note("unknown")
+        base = self.requests("reply")[-1]["body"]["revision"]
+        self.server.step(opened, "close", CLINICIAN, "clinician", "")
+        self.page.locator(f'#question-list > li[data-id="{opened["id"]}"] button[data-open-thread]').click()
+        expect(self.page.locator("#question-thread")).to_have_attribute("data-state", "Closed")
+        self.assertEqual(base + 2, len(self.view()["thread"]["entries"]))
+        self.page.locator('.question-compose[data-action="reply"] button[data-retry]').click()
+        self.settled_note("saved")
+        seen = self.threaded(opened["id"], "Closed")
+        self.assertEqual((REPLAYED, base + 2), (seen["notes"][0]["text"], len(seen["thread"]["entries"])))
+
+    def test_09_home_late_ask_keeps_the_latest_thread_choice(self):
+        # (a) The Ask's 201 arrives after A -> B -> A and another thread chosen there with a draft typed in it.
+        for label, script in (("shipped", None), ("no-generation control", self.home_ask_any_screen)):
+            with self.subTest(file=label):
+                self.server = QuestionServer([A, B, C])
+                self.q_requests, self.held, self.holding = [], [], set()
+                chosen = self.server.seed(A, CLINICIAN, "SYN chosen thread")
+                self.open_home(script)
+                self.pick(A)
+                self.open_questions("ready")
+                self.holding = {"create"}
+                self.write("ask", "SYN late question")
+                post, = self.take("create")
+                self.holding = set()
+                asked = self.requests("create")[-1]["body"]["requestId"]
+                self.pick(B)
+                self.listed("empty")
+                self.pick(A)
+                self.listed("ready")
+                self.open_thread(chosen["id"], "Open")
+                self.write("reply", "SYN draft in the chosen thread", press=False)
+                self.release(post)
+                expect(self.page.locator("#question-list > li")).to_have_count(2)
+                self.settle()
+                if script is None:
+                    seen = self.threaded(chosen["id"], "Open")
+                    reply = next(c for c in seen["composers"] if c["action"] == "reply")
+                    ask = next(c for c in seen["composers"] if c["action"] == "ask")
+                    self.assertEqual(("SYN draft in the chosen thread", False, "", "idle"),
+                                     (reply["value"], reply["readOnly"], ask["value"], ask["state"]))
+                    self.assertEqual("question-reply-text", self.page.evaluate(ACTIVE)["id"])
+                    self.assertEqual([(asked, None), (chosen["id"], "true")], [(i["id"], i["current"]) for i in seen["items"]])
+                    self.assertEqual([{"state": "saved", "text": SAVED, "detail": ""}], seen["notes"])
+                else:
+                    self.threaded(asked, "Open")
+
+        # (b)-(d) the shipped file.
+        self.server = QuestionServer([A, B, C])
+        self.q_requests, self.held, self.holding = [], [], set()
+        first = self.server.seed(A, CLINICIAN, "SYN first thread")
+        second = self.server.seed(A, CLINICIAN, "SYN second thread")
+        self.open_home()
+        self.pick(A)
+        self.open_questions("ready")
+        self.open_thread(first["id"], "Open")
+        # (b) Another thread of the same study chosen while the Ask is on the way.
+        self.holding = {"create"}
+        self.write("ask", "SYN question then another thread")
+        post, = self.take("create")
+        self.holding = set()
+        self.open_thread(second["id"], "Open")
+        self.write("reply", "SYN draft in the second thread", press=False)
+        self.release(post)
+        expect(self.page.locator("#question-list > li")).to_have_count(3)
+        self.settle()
+        seen = self.threaded(second["id"], "Open")
+        self.assertEqual("SYN draft in the second thread", next(c for c in seen["composers"] if c["action"] == "reply")["value"])
+        self.assertEqual("question-reply-text", self.page.evaluate(ACTIVE)["id"])
+        # (c) Questions closed and opened again while the Ask is on the way: no thread is opened for it.
+        self.holding = {"create"}
+        self.write("ask", "SYN question then reopen")
+        post, = self.take("create")
+        self.holding = set()
+        self.page.locator("#questions-summary").click()
+        expect(self.page.locator("#questions-body")).to_have_count(0)
+        self.page.locator("#questions-summary").click()
+        self.listed("ready")
+        self.release(post)
+        expect(self.page.locator("#question-list > li")).to_have_count(4)
+        self.settle()
+        self.assertIsNone(self.view()["thread"])
+        # (d) Nothing moved while it was on the way: the late Ask opens its new thread, as an Ask answered at once does.
+        self.holding = {"create"}
+        self.write("ask", "SYN question and wait")
+        post, = self.take("create")
+        self.holding = set()
+        self.release(post)
+        self.threaded(self.requests("create")[-1]["body"]["requestId"], "Open")
+
     # ── Reading screen cases ──
+    def test_10_reader_write_envelope_needs_201_and_the_applied_step(self):
+        opened, answered, _ = self.seed_threads()
+        self.open_reader(me(RADIOLOGIST, ["radiologist"]))
+        self.target(A)
+        self.reader_state("ready")
+        self.page.locator("#question-toggle").click()
+        self.reader_thread(opened["id"], "Open")
+        # Reply (a radiologist's answer: Open -> Answered, then Answered -> Answered).
+        for index, (name, fault, detail) in enumerate(REPLY_ENVELOPES):
+            with self.subTest(reply=name):
+                self.faults.append({"kind": "reply", "apply": True, **fault})
+                self.reader_write("reply", f"SYN {name} answer")
+                seen = self.reader_note("unknown")
+                self.assertEqual([{"state": "unknown", "text": WRITE_MALFORMED, "detail": detail}], seen["notes"])
+                reply = seen["composers"][0]
+                self.assertEqual(("reply", "unknown", f"SYN {name} answer", True, False, True, True),
+                                 (reply["action"], reply["state"], reply["value"], reply["readOnly"], reply["send"], reply["retry"],
+                                  reply["discard"]))
+                sent = self.requests("reply")[-1]["body"]
+                self.page.locator('#question-thread .question-compose[data-action="reply"] button[data-retry]').click()
+                seen = self.reader_note("saved")
+                self.assertEqual((sent, REPLAYED), (self.requests("reply")[-1]["body"], seen["notes"][0]["text"]))
+                expect(self.page.locator("#question-entries > li")).to_have_count(2 + index)
+        # Close: an answer naming another action is not this close's result.
+        self.reader_thread(answered["id"], "Answered")
+        self.faults.append({"kind": "close", "apply": True, "patch": lambda p: p["applied"].update(action="answer")})
+        self.reader_write("close", "SYN close reason")
+        seen = self.reader_note("unknown")
+        self.assertEqual([{"state": "unknown", "text": WRITE_MALFORMED, "detail": ""}], seen["notes"])
+        self.page.locator('#question-thread .question-compose[data-action="close"] button[data-retry]').click()
+        seen = self.reader_note("saved")
+        self.assertEqual(REPLAYED, seen["notes"][0]["text"])
+        expect(self.page.locator("#question-thread")).to_have_attribute("data-state", "Closed")
+        # A reply whose answer was lost; the author then closed the thread and the screen read it (Closed). Retry's stored
+        # result (from the state and revision the request was sent with) is accepted; the thread is read again, Closed.
+        self.reader_thread(opened["id"], "Answered")
+        self.faults.append({"kind": "reply", "apply": True, "abort": True})
+        self.reader_write("reply", "SYN answer before the close")
+        self.reader_note("unknown")
+        base = self.requests("reply")[-1]["body"]["revision"]
+        self.server.step(opened, "close", CLINICIAN, "clinician", "")
+        self.page.locator(f'#question-list > li[data-id="{opened["id"]}"] button[data-open-thread]').click()
+        expect(self.page.locator("#question-thread")).to_have_attribute("data-state", "Closed")
+        self.assertEqual(base + 2, len(self.reader()["thread"]["entries"]))
+        self.page.locator('#question-thread .question-compose[data-action="reply"] button[data-retry]').click()
+        seen = self.reader_note("saved")
+        self.assertEqual((REPLAYED, "Closed", base + 2),
+                         (seen["notes"][0]["text"], seen["thread"]["state"], len(seen["thread"]["entries"])))
+
     def test_11_reader_row_follows_the_target_and_stays_out_of_the_layout(self):
         # Static: one hook in renderClinical, the block mounted once, the row between the report fields and the footer row.
         clinical = extract_function(MAIN, "renderClinical")
@@ -1636,9 +1899,11 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
     def test_16_reader_session_end_refusal_owner_and_401(self):
         opened, answered, _ = self.seed_threads()
         self.open_reader(me(RADIOLOGIST, ["radiologist"]))
+        self.page.evaluate(OBSERVE_SIGNALS)
         self.target(A)
         self.reader_state("ready")
-        # Another tab ends the session while a list answer is on the way: the row goes, nothing paints, nothing is read.
+        # Another tab ends the session while a list answer is on the way: the row goes, the read is stopped, nothing
+        # paints, nothing is read.
         self.holding = {"list"}
         self.target(B)
         pending, = self.take("list")
@@ -1648,7 +1913,8 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         other.evaluate(BROADCAST_ENDED)
         other.close()
         expect(self.page.locator("#question-p")).to_have_attribute("data-state", "ended")
-        self.release(pending)
+        self.assertEqual([[f"/api/studies/{A}/questions", False], [f"/api/studies/{B}/questions", True]], self.page.evaluate(SIGNALS))
+        self.release_after_end(pending)
         count = len(self.q_requests)
         self.target(A)
         seen = self.reader()
@@ -1680,7 +1946,7 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.assertEqual((OWNER_CHANGED, ["failed", OWNER_CHANGED, ""], None, []),
                          (seen["summary"], seen["lock"], seen["thread"], seen["items"]))
 
-        # A 401 on a write goes through api()'s logout, whose session end takes the row down.
+        # A 401 on a write ends the row and starts the logout once (the logout POST held: test_18).
         self.q_requests = []
         self.open_reader(me(RADIOLOGIST, ["radiologist"]))
         self.target(A)
@@ -1755,6 +2021,140 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.page.keyboard.press("Enter")
         self.reader_note("saved")
         self.assertEqual("SYN keyboard answer", self.requests("reply")[-1]["body"]["body"])
+
+    def test_18_reader_401_ends_the_row_before_the_logout_post(self):
+        # The block sends its own requests: api() awaits KinAuth.logout(), which broadcasts only after the logout POST.
+        # (A call has arguments; the block's comments name `api()` to say why it is not used.)
+        self.assertIsNone(re.search(r"\bapi\(\s*[^)\s]", READER_BLOCK), "the S5-U4b block calls api()")
+        for label, block in (("shipped", None), ("end-on-broadcast control", self.reader_end_on_broadcast)):
+            with self.subTest(file=label):
+                self.server = QuestionServer([A, B, C])
+                self.q_requests, self.held, self.holding, self.faults, self.logouts = [], [], set(), [], []
+                opened, answered, _ = self.seed_threads()
+                self.open_reader(me(RADIOLOGIST, ["radiologist"]), block=block, real_auth=True)
+                self.page.evaluate(OBSERVE_SIGNALS)
+                self.target(A)
+                self.reader_state("ready")
+                self.page.locator("#question-toggle").click()
+                self.reader_thread(opened["id"], "Open")
+                self.page.locator("#question-close-text").fill("SYN reason typed before the expiry")
+                # A write and a thread read are on the way when a list read gets the 401; the logout POST is held.
+                self.holding = {"reply"}
+                self.reader_write("reply", "SYN answer sent before the expiry")
+                write, = self.take("reply")
+                self.holding = {"thread"}
+                self.page.locator(f'#question-list > li[data-id="{answered["id"]}"] button[data-open-thread]').click()
+                read, = self.take("thread")
+                self.holding = set()
+                self.held_logouts = []
+                self.faults.append({"kind": "list", "status": 401, "body": {"statusCode": 401, "message": "SYN expired"}})
+                self.target(B)
+                self.wait_until(lambda: self.held_logouts, "POST /auth/logout")
+                self.settle()
+                self.assertEqual((["1"], "approved", ORIGIN + BASE + "main.html"),
+                                 (self.logouts, self.page.evaluate("() => KinAuth.session().state"), self.page.url),
+                                 "auth.js is still waiting for its logout POST")
+                seen = self.reader()
+                if block is None:
+                    self.assertEqual((False, "ended", None, [], None, [], []),
+                                     (seen["shown"], seen["state"], seen["mode"], seen["items"], seen["thread"], seen["composers"],
+                                      seen["notes"]))
+                    self.assertEqual([[f"/api/studies/{A}/questions", False], [f"/api/questions/{opened['id']}", False],
+                                      [f"/api/questions/{opened['id']}/entries", True], [f"/api/questions/{answered['id']}", True],
+                                      [f"/api/studies/{B}/questions", True]], self.page.evaluate(SIGNALS))
+                    # The answers of the requests started before the 401 paint nothing, and nothing more is read or sent.
+                    count = len(self.q_requests)
+                    for held in (write, read):
+                        self.release_after_end(held)
+                    self.target(A)
+                    self.page.evaluate("""() => { for (const id of ['question-toggle', 'question-inbox', 'question-toggle'])
+                      document.getElementById(id).click(); }""")
+                    self.settle()
+                    self.assertEqual(seen, self.reader())
+                    self.assertEqual((count, ["1"]), (len(self.q_requests), self.logouts))
+                else:
+                    self.assertEqual((True, "loading"), (seen["shown"], seen["state"]),
+                                     "control: the row is still up while the logout POST is held")
+                self.held_logouts[0].fulfill(status=204, body="")
+                self.held_logouts = None
+                self.page.wait_for_url(ORIGIN + BASE + "index.html")
+                expect(self.page.locator("#stand-in")).to_be_visible()
+                if block is not None:
+                    for held in (write, read):
+                        self.release_after_end(held)
+
+    def test_19_reader_inbox_opens_a_thread_outside_the_latest_fifty(self):
+        # B: the chosen question is the oldest; 50 newer ones (answered, so not in the Open Inbox) fill B's latest 50.
+        oldest = self.server.seed(B, CLINICIAN, "SYN oldest question on B")
+        newer = []
+        for n in range(50):
+            thread = self.server.seed(B, OTHER_CLINICIAN, f"SYN newer question on B {n}")
+            self.server.step(thread, "answer", RADIOLOGIST_TWO, "radiologist", f"SYN answer {n}")
+            newer.append(thread)
+        on_a = self.server.seed(A, CLINICIAN, "SYN open question on A")
+        self.open_reader(me(RADIOLOGIST, ["radiologist"]))
+
+        def open_from_inbox(qid):
+            self.page.locator("#question-inbox").click()
+            expect(self.page.locator("#question-inbox-state")).to_have_attribute("data-state", "ready")
+            self.page.locator(f'#question-inbox-list > li[data-id="{qid}"] button[data-open-study]').click()
+
+        def failed_open(fault, load):
+            self.target(A)
+            self.reader_state("ready")
+            self.faults.append(fault)
+            open_from_inbox(oldest["id"])
+            expect(self.page.locator("#question-thread")).to_have_attribute("data-state", "failed")
+            seen = self.reader()
+            self.assertEqual((oldest["id"], load), (seen["thread"]["id"], seen["thread"]["load"]))
+            self.assertEqual([False, False], [c["send"] for c in seen["composers"]])
+
+        self.target(A)
+        self.reader_state("ready")
+        # A late read of an earlier choice: the Inbox thread's read is held, another thread of B is opened meanwhile.
+        self.holding = {"thread"}
+        open_from_inbox(oldest["id"])
+        late, = self.take("thread")
+        self.holding = set()
+        self.assertEqual(f"/api/questions/{oldest['id']}", late["path"])
+        expect(self.page.locator("#question-list > li")).to_have_count(50)
+        seen = self.reader()
+        self.assertEqual((B, R_COUNTS.format(n=50, o=0, a=50, c=0)), (self.page.evaluate("() => window.synSelects.at(-1)"), seen["summary"]))
+        self.assertNotIn(oldest["id"], [i["id"] for i in seen["items"]])
+        self.reader_thread(newer[-1]["id"], "Answered")
+        self.release(late)
+        seen = self.reader()
+        self.assertEqual((newer[-1]["id"], "Answered"), (seen["thread"]["id"], seen["thread"]["state"]))
+        # Refusals of the direct read are explicit: 404, and a thread of another study than the one opened.
+        failed_open({"kind": "thread", "status": 404, "body": {"code": "QUESTION_NOT_FOUND", "message": "SYN gone"}},
+                    ["failed", R_THREAD_FAILED, R_NOT_FOUND + "\nSYN gone (HTTP 404 · QUESTION_NOT_FOUND)"])
+        failed_open({"kind": "thread", "apply": True, "patch": lambda p: p["item"].update(studyUid=C)},
+                    ["failed", R_THREAD_FAILED, R_OTHER_STUDY])
+        # Open Study: B's list (its latest 50, without the chosen question), then GET questions/:id opens the chosen one.
+        self.target(A)
+        self.reader_state("ready")
+        reads = len(self.q_requests)
+        open_from_inbox(oldest["id"])
+        expect(self.page.locator("#question-thread")).to_have_attribute("data-state", "Open")
+        expect(self.page.locator("#question-thread")).to_have_attribute("data-id", oldest["id"])
+        self.assertEqual([("inbox", "/api/questions"), ("list", f"/api/studies/{B}/questions"), ("thread", f"/api/questions/{oldest['id']}")],
+                         [(r["kind"], r["path"]) for r in self.q_requests[reads:]])
+        seen = self.reader()
+        self.assertEqual(("study", "SYN oldest question on B"), (seen["mode"], seen["thread"]["entries"][0]["lines"][1]))
+        self.assertNotIn(oldest["id"], [i["id"] for i in seen["items"]])
+        # A reply, then the list read again after the write (still without it): the chosen thread stays open.
+        self.reader_write("reply", "SYN answer to the oldest question")
+        self.reader_note("saved")
+        expect(self.page.locator("#question-thread")).to_have_attribute("data-state", "Answered")
+        seen = self.reader()
+        self.assertEqual((oldest["id"], ["question", "answer"]), (seen["thread"]["id"], [e["kind"] for e in seen["thread"]["entries"]]))
+        self.assertNotIn(oldest["id"], [i["id"] for i in seen["items"]])
+        self.assertEqual(["reply", "list", "thread"], [r["kind"] for r in self.q_requests[-3:]])
+        # A 403 on the direct read locks the row with its explicit text.
+        self.faults.append({"kind": "thread", "status": 403, "body": {"code": "QUESTION_ROLE_REQUIRED", "message": "SYN refused"}})
+        open_from_inbox(on_a["id"])
+        seen = self.reader_state("locked")
+        self.assertEqual((REFUSED, ["failed", REFUSED, "SYN refused (HTTP 403 · QUESTION_ROLE_REQUIRED)"]), (seen["summary"], seen["lock"]))
 
 
 if __name__ == "__main__":
