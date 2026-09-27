@@ -1112,9 +1112,13 @@ function kinCreateViewerHistory() {
     // 그대로 쓰고, 모드가 버튼을 다시 넣을 때마다(모드 재진입 포함) 같은 규칙으로 다시 줄인다. 줄이기 전의 버튼·구역은 적어 두었다가
     // writer 답이 오면 그대로 되돌린다.
     const ACTIVATING = ['setToolActiveToolbar', 'setToolActive', 'toggleActiveDisabledToolbar'];
+    // S5-UI5 (F#4). Capture(showDownloadViewportModal)는 보이는 화면을 이 브라우저에서 PNG로 내려받는 동작이라 서버에 대응하는
+    // 기록·권한 검사가 없다. 그래서 writer로 확인되지 않은 문서(clinician-only 포함)에서는 작성 도구와 함께 도구막대에서 뺀다.
+    // 화면 정책일 뿐 권한이 아니며, writer 답이 오면 다른 버튼과 함께 제자리로 돌아온다.
+    const SCREEN_EXPORT = ['showDownloadViewportModal'];
     const authoring = button => [button?.commands].flat().some(command => {
       const name = typeof command === 'string' ? command : command?.commandName;
-      return ACTIVATING.includes(name) && !VIEW_TOOLS.has(command?.commandOptions?.toolName ?? button.id);
+      return SCREEN_EXPORT.includes(name) || ACTIVATING.includes(name) && !VIEW_TOOLS.has(command?.commandOptions?.toolName ?? button.id);
     });
     const TOOLBAR = ['getButtons', 'removeButton', 'addButtons', 'clearButtonSection', 'createButtonSection'];
     const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacements = new WeakSet(); let trimming = false;
