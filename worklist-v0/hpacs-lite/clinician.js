@@ -1249,17 +1249,20 @@
     }
   }
 
+  /**
+   * 목록(최신 50)을 그리고 연 스레드는 단건 읽기(#2)로 다시 읽는다. 연 스레드는 이 목록에 있는지로 고르거나 내리지 않는다 —
+   * 새 질문이 쌓이면 오래된 스레드가 50개 밖으로 밀려도 서버는 그 스레드를 계속 준다(Astra S5-U4b-B-R-001 F2). 계속 열 수
+   * 있는지는 loadQuestionThread가 owner·studyUid·요청 번호로 정하고, 404는 스레드 칸의 실패 문구와 Retry로, 403은 잠금으로 보인다.
+   * 스레드 칸은 같은 스레드면 다시 만들지 않으므로 쓰던 글·커서와 결과를 모르는 요청의 Retry가 그대로 남는다.
+   */
   function paintQuestionList(uid, items) {
     $('#question-list').replaceChildren(...items.map(item => questionItem(uid, item)));
     $('#question-list').hidden = !items.length;
     $('#questions').dataset.state = items.length ? 'ready' : 'empty';
     setQuestionsState(items.length ? 'ready' : 'empty', items.length ? QUESTION.ready(items.length) : QUESTION.empty);
     $('.question-compose[data-action="ask"]').hidden = false;
-    if (questionThread !== null && items.some(item => item.id === questionThread)) loadQuestionThread(uid, questionThread);
-    else {
-      pickQuestionThread(null);
-      hideQuestionThread();
-    }
+    if (questionThread !== null) loadQuestionThread(uid, questionThread);
+    else hideQuestionThread();
   }
 
   function questionItem(uid, item) {

@@ -36,6 +36,10 @@ receipts that replay the stored `applied` result, revision before state, author/
   09  (F2) a late Ask's 201 never moves the thread the user chose after sending it (A->B->A, another thread of the same
       study, Questions closed and opened again) and keeps the draft and focus there; an Ask nobody moved away from still
       opens its new thread. Control: the file that opens it whenever the study is still selected moves the user.
+  09b (Astra S5-U4b-B-R-001 F2) the study's list is its latest 50: the open thread pushed out of it by the 51st Ask stays
+      open with its typed reply and focus and is read again through GET questions/:id; an unknown Reply there keeps
+      Retry across the next re-read; a 404 on that read is the thread's own failure with Retry and the typed text kept;
+      a 403 locks the section with its text. Control: the file that drops a thread missing from the list closes it.
 
   Reading screen (the S5-U4b block cut out of main.html and run as is, on main.html's own markup and styles with the
   page script stripped; the block sends its own requests and does not use api())
@@ -59,7 +63,17 @@ receipts that replay the stored `applied` result, revision before state, author/
   17  wording, fonts, hit targets and keyboard on the reading screen.
   18  (F1) with the shipped auth.js, whose logout() broadcasts only after POST /auth/logout: a 401 ends the row while
       that POST is held - nothing shown, drafts dropped, the requests on the way aborted, their answers paint nothing
-      and nothing more is read. Control: the block that leaves the end to the logout broadcast keeps the row.
+      and nothing more is read - and calls the page's other registered end() once (window.kinOn401). Control: the block
+      that leaves the end to the logout broadcast keeps the row.
+  18b (Astra S5-U4b-B-R-001 F1) the same for a 401 on another request of the page (a report save through main.html's own
+      api(), cut out as shipped): every registered end() runs before POST /auth/logout answers. Control: api() without
+      the list call keeps the row up while that POST is held.
+  18c (B-R-001 F1) the confirmed Log out (main.html's own handler, clicked): the row is ended before its first network
+      wait - the draft write, the hold release and the logout POST, which keep their order. Control: the handler without
+      the list call keeps the row up while the draft is written and while the logout POST is held.
+  18d every place in main.html that starts KinAuth.logout() calls the end list first (api()'s 401, the dictation 401, the
+      two owner-change exits, Log out before its draft write, the row's own 401); the one other is the membership
+      screen, where no question row ever read. without_u4b() leaves no kinOn401 behind.
   19  (F3) Inbox -> Open Study for a question outside its study's latest 50 opens it through GET questions/:id and keeps
       it after a reply re-reads the list; a late read of an earlier choice never paints; 404, another study's thread and
       403 are explicit.
@@ -137,6 +151,7 @@ C_FAILED = "질문 목록을 불러오지 못했습니다."
 C_NOT_FOUND = "이 검사나 질문을 찾을 수 없습니다. 원격판독으로 받은 검사, 접근 조건이 바뀐 검사에는 질문을 남길 수 없습니다."
 C_DISCARDED = "보낸 요청을 버렸습니다. 저장되었을 수 있으니 다시 불러온 목록에서 확인하세요."
 C_CLOSED_NOTE = "닫힌 질문입니다. 새 답변·추가 질문·닫기는 서버가 거절합니다."
+C_THREAD_FAILED = "질문 스레드를 불러오지 못했습니다."
 R_EMPTY = "이 검사에는 질문이 없습니다."
 R_FAILED = "이 검사의 질문을 불러오지 못했습니다."
 R_COUNTS = "이 검사의 질문 {n}건 · Open {o} · Answered {a} · Closed {c}"
@@ -241,21 +256,43 @@ HOOK = "      studyQuestions?.sync();\n"
 READER_BLOCK = slice_between(MAIN, BLOCK_START, BLOCK_END)
 CLINICIAN_BLOCK = slice_between(SHIPPED["clinician.js"], "  // ── 질문 스레드(S5-U4b) ──", "  // ── 세션 ──")
 
-# The four S5-U4b insertions into main.html, each contiguous: (name, first bytes, end marker, whether the end marker is
-# part of the region). The markup's last line alone (`</section>`) is not unique, so its marker is the last two lines.
+# Astra S5-U4b-B-R-001 F1: the page's end list. Every place in main.html that starts the logout first calls each end()
+# registered in window.kinOn401, synchronously, before it waits on the network (the logout POST, Log out's draft write);
+# the block registers the row's end() there. api()'s line is byte for byte S5-U4c's: the convention both units share.
+END_401 = "(window.kinOn401 || []).forEach(end => { try { end(); } catch (_) {} });"
+HOOK_401 = f"        {END_401}\n"
+# Log out's call, after its comment line; the call alone is not unique (api()'s indented line contains it).
+HOOK_LOG_OUT = ("      // S5-U4b: 확정한 로그아웃도 401처럼 종료 목록부터 부른다", f"그려지지 않게.\n      {END_401}\n")
+
+# The S5-U4b insertions into main.html, each contiguous: (name, first bytes, end marker, whether the end marker is part
+# of the region). The markup's last line alone (`</section>`) is not unique, so its marker is the last two lines. A
+# one-line hook is its own start and end.
 U4B_REGIONS = [
     ("css", "    /* S5-U4b 질문 줄과 창.", "    #question-pane .question-detail:empty { display: none; }\n", True),
     ("markup", "        <!-- S5-U4b 임상의 질문 스레드(판독 대상 검사).",
      '          <div id="question-pane" role="region" aria-label="Question Threads" hidden></div>\n        </section>\n', True),
     ("hook", "      // S5-U4b: 판독 대상이 바뀐 때만 그 검사의 임상의 질문을 읽는다", HOOK, True),
     ("script", BLOCK_START + "\n", BLOCK_END, False),
+    ("hook-401", HOOK_401, HOOK_401, True),
+    ("hook-log-out", *HOOK_LOG_OUT, True),
+]
+# The three logout starts that call the list inside their existing line: (name, shipped line, base line). The two
+# owner-change lines differ only in indentation, so each carries the line break before it.
+U4B_EDITS = [
+    ("dictation-401", f"      onUnauthorized: () => {{ {END_401} return KinAuth.logout(); }},\n",
+     "      onUnauthorized: () => KinAuth.logout(),\n"),
+    ("list-owner-change", f"\n        if (e.ownerChanged) {{ studyPageClient.clear(); {END_401} await KinAuth.logout(); return; }}\n",
+     "\n        if (e.ownerChanged) { studyPageClient.clear(); await KinAuth.logout(); return; }\n"),
+    ("poll-owner-change", f"\n          if (e.ownerChanged) {{ studyPageClient.clear(); {END_401} await KinAuth.logout(); return; }}\n",
+     "\n          if (e.ownerChanged) { studyPageClient.clear(); await KinAuth.logout(); return; }\n"),
 ]
 
 
 def without_u4b(text):
-    """main.html (LF) with the four S5-U4b regions taken out: the bytes S5-UI2's and S5-UI3's pins stand for, since
-    tests/worklist_toolbar_dom_test.py and tests/report_actions_dom_test.py pin main.html outside their own regions.
-    Raises if a marker is missing or not unique, so a moved or doubled region fails instead of being half cut."""
+    """main.html (LF) with the S5-U4b changes taken out - the regions cut, the edited lines put back: the bytes S5-UI2's
+    and S5-UI3's pins stand for, since tests/worklist_toolbar_dom_test.py and tests/report_actions_dom_test.py pin
+    main.html outside their own regions. Raises if a marker or an edited line is missing or not unique, so a moved or
+    doubled change fails instead of being half undone."""
     text = text.replace("\r\n", "\n")
     for name, start, end, inclusive in U4B_REGIONS:
         for marker in (start, end):
@@ -264,6 +301,10 @@ def without_u4b(text):
         first = text.index(start)
         last = text.index(end, first) + (len(end) if inclusive else 0)
         text = text[:first] + text[last:]
+    for name, shipped, base in U4B_EDITS:
+        if text.count(shipped) != 1:
+            raise AssertionError(f"S5-U4b {name} line {shipped!r} occurs {text.count(shipped)} times in main.html")
+        text = text.replace(shipped, base)
     return text
 
 # Everything the cut block reads from the page script, as small stand-ins. select() is the page's early return for the
@@ -295,6 +336,27 @@ OBSERVE_SIGNALS = """() => { const real = window.fetch; window.synSignals = [];
 SIGNALS = "() => window.synSignals.map(s => [new URL(s.url).pathname, s.signal.aborted])"
 READER_SETUP = """(session) => { window.synSession = session; window.synStudies = SYN_STUDIES; window.synToasts = []; window.synLogouts = 0;
   window.synSelects = []; }"""
+
+# Astra S5-U4b-B-R-001 F1: main.html's own logout starts, cut out as shipped - api() and the Log out handler with the
+# `let loggingOut` line before it - and run beside the block. What they call around the logout are stand-ins that record
+# the order and the row's state when called; stashReport() waits, as the draft write it stands for, until the case lets
+# it go. OTHER_PANEL registers another panel's end() in the list, so a case sees the list itself called.
+API_FN = extract_function(MAIN, "api")
+LOG_OUT_HANDLER = slice_between(MAIN, "    let loggingOut = false;\n", "    // 다른 사람이 잡거나 놓은 걸 보려면")
+EXIT_STAND_INS = """
+let insertInFlight = false;
+window.synCalls = [];
+const synRow = () => document.querySelector('#question-p').dataset.state;
+window.confirm = () => { window.synCalls.push('confirm'); return true; };
+const reportPreview = { close: () => { window.synCalls.push('reportPreview.close'); } };
+function closeSR() { window.synCalls.push('closeSR'); }
+function endPatientCopy() { window.synCalls.push('endPatientCopy'); }
+async function stashReport() { window.synCalls.push('stashReport:' + synRow()); await new Promise(resolve => { window.synStashed = resolve; }); }
+async function releaseHold() { window.synCalls.push('releaseHold:' + synRow()); }
+"""
+OTHER_PANEL = "() => { window.synOtherEnds = 0; window.kinOn401.push(() => { window.synOtherEnds += 1; }); }"
+TOGGLES = """() => { for (const id of ['question-toggle', 'question-inbox', 'question-toggle'])
+  document.getElementById(id).click(); }"""
 
 # Another tab runs auth.js broadcastEnded(): one channel message, then a localStorage set and remove.
 BROADCAST_ENDED = """() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type: 'session-ended'}); c.close();
@@ -650,7 +712,17 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
              "      if (attempt.action === 'ask') pickQuestionThread(sent.body.applied.id);\n", 1)], "clinician.js")
         # F1 control: a 401 only starts the logout and leaves the row's end to auth.js's broadcast after the logout POST.
         cls.reader_end_on_broadcast = variant(READER_BLOCK, [
-            ("        end();\n        if (first) logout();\n", "        if (first) logout();\n", 1)], "main.html S5-U4b block")
+            ("        end();\n        (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} });\n        logout();\n",
+             "        logout();\n", 1)], "main.html S5-U4b block")
+        # B-R-001 F2 control: the open thread is dropped when the latest-50 list lacks it (the file before fix2).
+        cls.home_list_membership = variant(home, [
+            ("    if (questionThread !== null) loadQuestionThread(uid, questionThread);\n    else hideQuestionThread();\n",
+             "    if (questionThread !== null && items.some(item => item.id === questionThread)) loadQuestionThread(uid, questionThread);\n"
+             "    else {\n      pickQuestionThread(null);\n      hideQuestionThread();\n    }\n", 1)], "clinician.js")
+        # B-R-001 F1 controls: api() and the Log out handler without the end-list call.
+        cls.api_without_list = variant(API_FN, [(HOOK_401, "", 1)], "main.html api()")
+        cls.log_out_hook = slice_between(LOG_OUT_HANDLER, HOOK_LOG_OUT[0], "      try {\n")
+        cls.log_out_without_list = variant(LOG_OUT_HANDLER, [(cls.log_out_hook, "", 1)], "main.html Log out handler")
         cls.reader_page = page_html(MAIN)
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -671,6 +743,8 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.q_requests = []
         self.logouts = []
         self.held_logouts = None
+        # Answers for other API routes of the page, by (method, path): the F1 cases' report save.
+        self.plain = {}
         self.envelope_owner = None
         self.unexpected, self.errors, self.dialogs, self.finished = [], [], [], []
         self.context = self.browser.new_context(viewport={"width": 1366, "height": 900}, timezone_id="Asia/Seoul", locale="ko-KR")
@@ -748,6 +822,10 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                 self.held_logouts.append(route)
                 return
             route.fulfill(status=204, body="")
+            return
+        if (method, path) in self.plain:
+            status, payload = self.plain[(method, path)]
+            route.fulfill(status=status, json=payload)
             return
         kind = kind_of(method, path)
         if kind is None:
@@ -869,7 +947,7 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         expect(self.page.locator(f"{scope} [data-note-key]:not([hidden])").first).to_have_attribute("data-state", state)
 
     # Reading screen
-    def open_reader(self, session, studies=None, block=None, real_auth=False):
+    def open_reader(self, session, studies=None, block=None, real_auth=False, extra=""):
         self.me = session
         self.page.goto(ORIGIN + BASE + "main.html")
         self.page.evaluate(READER_SETUP.replace("SYN_STUDIES", json.dumps(studies or READER_STUDIES)),
@@ -879,7 +957,7 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
             self.page.add_script_tag(content=SHIPPED["auth.js"])
             self.assertEqual("approved", self.page.evaluate("async () => (await KinAuth.init()).state"))
         prelude = READER_PRELUDE.replace("KIN_AUTH\n", "" if real_auth else READER_STAND_IN + "\n")
-        self.page.add_script_tag(content=prelude + (block or READER_BLOCK) + "\nwindow.synPick = uid => select(uid);\n")
+        self.page.add_script_tag(content=prelude + (block or READER_BLOCK) + extra + "\nwindow.synPick = uid => select(uid);\n")
         self.assertEqual([], self.page.evaluate("() => window.synToasts"), "the block mounted")
 
     def target(self, u):
@@ -1539,6 +1617,103 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.release(post)
         self.threaded(self.requests("create")[-1]["body"]["requestId"], "Open")
 
+    def test_09b_home_thread_outside_the_latest_fifty_stays_open(self):
+        # Astra S5-U4b-B-R-001 F2. The list of a study is the clinician's latest 50 (forStudy LIMIT 50). The oldest of 50
+        # threads is open with a reply typed when the 51st Ask's 201 re-reads the list without it.
+        def composer(seen, action):
+            return next(c for c in seen["composers"] if c["action"] == action)
+
+        def reread(reads, kinds):
+            self.wait_until(lambda: [r["kind"] for r in self.q_requests[reads:]] == kinds, " -> ".join(kinds))
+            expect(self.page.locator("#question-thread-state")).to_have_attribute("data-state", re.compile("ready|failed"))
+
+        def discard_ask(text, fault=None):
+            """Reads the list again with the thread left open: an Ask applied but answered with a dropped connection is
+            discarded (an Ask answered at once would open its own thread). `fault` is for the direct read that follows."""
+            self.faults.append({"kind": "create", "apply": True, "abort": True})
+            self.write("ask", text)
+            expect(self.page.locator('.question-compose[data-action="ask"] [data-note-key]')).to_have_attribute("data-state", "unknown")
+            if fault:
+                self.faults.append(fault)
+            reads = len(self.q_requests)
+            self.page.locator('.question-compose[data-action="ask"] button[data-discard]').click()
+            return reads
+
+        # The control first, so the shipped file's page is the one (b)-(d) go on with.
+        for label, script in (("list-membership control", self.home_list_membership), ("shipped", None)):
+            with self.subTest(file=label):
+                self.server = QuestionServer([A, B, C])
+                self.q_requests, self.held, self.holding, self.faults = [], [], set(), []
+                oldest = self.server.seed(A, CLINICIAN, "SYN oldest question")
+                for n in range(49):
+                    self.server.seed(A, CLINICIAN, f"SYN question {n}")
+                self.open_home(script)
+                self.pick(A)
+                seen = self.open_questions("ready")
+                self.assertEqual((50, oldest["id"]), (len(seen["items"]), seen["items"][-1]["id"]))
+                self.holding = {"create"}
+                self.write("ask", "SYN 51st question")
+                post, = self.take("create")
+                self.holding = set()
+                asked = self.requests("create")[-1]["body"]["requestId"]
+                self.open_thread(oldest["id"], "Open")
+                self.write("reply", "SYN reply typed in the oldest thread", press=False)
+                reads = len(self.q_requests)
+                self.release(post)
+                expect(self.page.locator(f'#question-list > li[data-id="{asked}"]')).to_have_count(1)
+                if script is None:
+                    reread(reads, ["list", "thread"])
+                    seen = self.threaded(oldest["id"], "Open")
+                    self.assertEqual(f"/api/questions/{oldest['id']}", self.q_requests[-1]["path"])
+                    self.assertEqual(50, len(seen["items"]))
+                    self.assertNotIn(oldest["id"], [i["id"] for i in seen["items"]])
+                    reply, ask = composer(seen, "reply"), composer(seen, "ask")
+                    self.assertEqual(("idle", "SYN reply typed in the oldest thread", False, True),
+                                     (reply["state"], reply["value"], reply["readOnly"], reply["send"]))
+                    self.assertEqual(("idle", ""), (ask["state"], ask["value"]))
+                    self.assertEqual("question-reply-text", self.page.evaluate(ACTIVE)["id"])
+                    self.assertEqual([{"state": "saved", "text": SAVED, "detail": ""}], seen["notes"])
+                else:
+                    self.wait_until(lambda: [r["kind"] for r in self.q_requests[reads:]] == ["list"], "the list read again")
+                    self.settle()
+                    self.assertEqual((None, ["list"]), (self.view()["thread"], [r["kind"] for r in self.q_requests[reads:]]),
+                                     "control: the thread outside the list is closed with its reply field")
+
+        # (b) A Reply there whose outcome is unknown (applied, the answer lost) keeps Retry across a re-read of the list.
+        self.faults.append({"kind": "reply", "apply": True, "abort": True})
+        self.page.locator('.question-compose[data-action="reply"] button[data-send]').click()
+        self.settled_note("unknown")
+        sent = self.requests("reply")[-1]["body"]
+        reread(discard_ask("SYN 52nd question"), ["list", "thread"])
+        seen = self.threaded(oldest["id"], "Open")
+        self.assertNotIn(oldest["id"], [i["id"] for i in seen["items"]])
+        reply = composer(seen, "reply")
+        self.assertEqual(("unknown", "SYN reply typed in the oldest thread", True, False, True, True),
+                         (reply["state"], reply["value"], reply["readOnly"], reply["send"], reply["retry"], reply["discard"]))
+        self.assertEqual(["question", "followup"], [e["kind"] for e in seen["thread"]["entries"]])
+        self.page.locator('.question-compose[data-action="reply"] button[data-retry]').click()
+        self.settled_note("saved")
+        self.assertEqual((sent, REPLAYED), (self.requests("reply")[-1]["body"], self.view()["notes"][0]["text"]))
+        expect(self.page.locator("#question-entries > li")).to_have_count(2)
+        # (c) A 404 on the direct read is the thread's own failure, with the reason and Retry; the typed text stays.
+        self.write("reply", "SYN reply typed before the 404", press=False)
+        reread(discard_ask("SYN 53rd question", {"kind": "thread", "status": 404,
+                                                 "body": {"code": "QUESTION_NOT_FOUND", "message": "SYN gone"}}), ["list", "thread"])
+        seen = self.threaded(oldest["id"], "failed")
+        reply = composer(seen, "reply")
+        self.assertEqual(["failed", C_THREAD_FAILED, C_NOT_FOUND + "\nSYN gone (HTTP 404 · QUESTION_NOT_FOUND)"], seen["thread"]["load"])
+        self.assertEqual(("SYN reply typed before the 404", False, False), (reply["value"], reply["readOnly"], reply["send"]))
+        self.page.locator("#question-thread-retry").click()
+        seen = self.threaded(oldest["id"], "Open")
+        self.assertEqual(("SYN reply typed before the 404", True), (composer(seen, "reply")["value"], composer(seen, "reply")["send"]))
+        # (d) A 403 on the direct read locks the section with its text (the session policy of every question read).
+        discard_ask("SYN 54th question", {"kind": "thread", "status": 403,
+                                          "body": {"code": "QUESTION_ROLE_REQUIRED", "message": "SYN refused"}})
+        expect(self.page.locator("#questions")).to_have_attribute("data-state", "locked")
+        seen = self.view()
+        self.assertEqual((REFUSED, "SYN refused (HTTP 403 · QUESTION_ROLE_REQUIRED)", None, []),
+                         (seen["list"]["text"], seen["list"]["detail"], seen["thread"], seen["composers"]))
+
     # ── Reading screen cases ──
     def test_10_reader_write_envelope_needs_201_and_the_applied_step(self):
         opened, answered, _ = self.seed_threads()
@@ -2033,6 +2208,7 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                 opened, answered, _ = self.seed_threads()
                 self.open_reader(me(RADIOLOGIST, ["radiologist"]), block=block, real_auth=True)
                 self.page.evaluate(OBSERVE_SIGNALS)
+                self.page.evaluate(OTHER_PANEL)
                 self.target(A)
                 self.reader_state("ready")
                 self.page.locator("#question-toggle").click()
@@ -2062,18 +2238,19 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                     self.assertEqual([[f"/api/studies/{A}/questions", False], [f"/api/questions/{opened['id']}", False],
                                       [f"/api/questions/{opened['id']}/entries", True], [f"/api/questions/{answered['id']}", True],
                                       [f"/api/studies/{B}/questions", True]], self.page.evaluate(SIGNALS))
+                    # B-R-001 F1: the row's own 401 is one of the page's logout starts, so it ends the other panels too.
+                    self.assertEqual(1, self.page.evaluate("() => window.synOtherEnds"), "the other registered end() ran once")
                     # The answers of the requests started before the 401 paint nothing, and nothing more is read or sent.
                     count = len(self.q_requests)
                     for held in (write, read):
                         self.release_after_end(held)
                     self.target(A)
-                    self.page.evaluate("""() => { for (const id of ['question-toggle', 'question-inbox', 'question-toggle'])
-                      document.getElementById(id).click(); }""")
+                    self.page.evaluate(TOGGLES)
                     self.settle()
                     self.assertEqual(seen, self.reader())
                     self.assertEqual((count, ["1"]), (len(self.q_requests), self.logouts))
                 else:
-                    self.assertEqual((True, "loading"), (seen["shown"], seen["state"]),
+                    self.assertEqual((True, "loading", 0), (seen["shown"], seen["state"], self.page.evaluate("() => window.synOtherEnds")),
                                      "control: the row is still up while the logout POST is held")
                 self.held_logouts[0].fulfill(status=204, body="")
                 self.held_logouts = None
@@ -2082,6 +2259,148 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                 if block is not None:
                     for held in (write, read):
                         self.release_after_end(held)
+
+    # ── B-R-001 F1: the page's other logout starts ──
+    def exits_in_flight(self, api_fn=None, log_out=None):
+        """The reading screen with the shipped auth.js, main.html's own api() and Log out handler (or a control of one) and
+        another panel's end() in the list; a thread open with a close reason typed, a Reply write and another thread's
+        read held, and POST /auth/logout to be held when it comes."""
+        self.server = QuestionServer([A, B, C])
+        self.q_requests, self.held, self.holding, self.faults, self.logouts = [], [], set(), [], []
+        opened, answered, _ = self.seed_threads()
+        extra = EXIT_STAND_INS + (api_fn or API_FN) + "\n" + (log_out or LOG_OUT_HANDLER)
+        self.open_reader(me(RADIOLOGIST, ["radiologist"]), real_auth=True, extra=extra)
+        self.page.evaluate(OBSERVE_SIGNALS)
+        self.page.evaluate(OTHER_PANEL)
+        self.target(A)
+        self.reader_state("ready")
+        self.page.locator("#question-toggle").click()
+        self.reader_thread(opened["id"], "Open")
+        self.page.locator("#question-close-text").fill("SYN reason typed before the session end")
+        self.holding = {"reply"}
+        self.reader_write("reply", "SYN answer sent before the session end")
+        write, = self.take("reply")
+        self.holding = {"thread"}
+        self.page.locator(f'#question-list > li[data-id="{answered["id"]}"] button[data-open-thread]').click()
+        read, = self.take("thread")
+        self.holding = set()
+        self.held_logouts = []
+        return opened, answered, write, read
+
+    def assert_row_ended_and_stays(self, opened, answered, write, read):
+        """Already now: nothing shown, no drafts, the question requests on the way aborted, the other end() called once.
+        Afterwards their answers paint nothing, and a new target and the row's buttons read nothing."""
+        seen = self.reader()
+        self.assertEqual((False, "ended", None, [], None, [], []),
+                         (seen["shown"], seen["state"], seen["mode"], seen["items"], seen["thread"], seen["composers"], seen["notes"]))
+        self.assertEqual([[f"/api/studies/{A}/questions", False], [f"/api/questions/{opened['id']}", False],
+                          [f"/api/questions/{opened['id']}/entries", True], [f"/api/questions/{answered['id']}", True]],
+                         self.page.evaluate(SIGNALS))
+        self.assertEqual(1, self.page.evaluate("() => window.synOtherEnds"), "the other registered end() ran once")
+        count = len(self.q_requests)
+        for held in (write, read):
+            self.release_after_end(held)
+        self.target(B)
+        self.page.evaluate(TOGGLES)
+        self.settle()
+        self.assertEqual(seen, self.reader())
+        self.assertEqual(count, len(self.q_requests), "nothing more is read or sent")
+
+    def leave_after_the_logout_post(self, write=None, read=None):
+        self.held_logouts[0].fulfill(status=204, body="")
+        self.held_logouts = None
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        expect(self.page.locator("#stand-in")).to_be_visible()
+        for held in (write, read):
+            if held is not None:
+                self.release_after_end(held)
+
+    def test_18b_reader_api_401_ends_the_row_before_the_logout_post(self):
+        # A report save through main.html's own api() gets the 401; auth.js's POST /auth/logout is held.
+        for label, api_fn in (("shipped", None), ("api() without the list control", self.api_without_list)):
+            with self.subTest(file=label):
+                opened, answered, write, read = self.exits_in_flight(api_fn=api_fn)
+                self.plain[("PUT", f"/api/studies/{A}/report")] = (401, {"statusCode": 401, "message": "SYN expired"})
+                self.page.evaluate("""u => { window.synSave = api('PUT', `/studies/${encodeURIComponent(u)}/report`,
+                  {findings: 'SYN findings'}).then(() => 'saved', e => e.status); }""", A)
+                self.wait_until(lambda: self.held_logouts, "POST /auth/logout")
+                self.settle()
+                self.assertEqual((["1"], "approved", ORIGIN + BASE + "main.html"),
+                                 (self.logouts, self.page.evaluate("() => KinAuth.session().state"), self.page.url),
+                                 "auth.js is still waiting for its logout POST")
+                if api_fn is None:
+                    self.assert_row_ended_and_stays(opened, answered, write, read)
+                    self.assertEqual(["1"], self.logouts)
+                    self.leave_after_the_logout_post()
+                else:
+                    seen = self.reader()
+                    self.assertEqual((True, "ready", 0), (seen["shown"], seen["state"], self.page.evaluate("() => window.synOtherEnds")),
+                                     "control: the row is still up while the logout POST is held")
+                    self.leave_after_the_logout_post(write, read)
+
+    def test_18c_reader_log_out_ends_the_row_before_any_network_wait(self):
+        # The header's Log out, clicked: the handler's local closes, then the draft write (held), the hold release and
+        # auth.js's POST /auth/logout (held).
+        local = ["confirm", "reportPreview.close", "closeSR", "endPatientCopy"]
+        for label, handler in (("shipped", None), ("Log out without the list control", self.log_out_without_list)):
+            with self.subTest(file=label):
+                opened, answered, write, read = self.exits_in_flight(log_out=handler)
+                self.page.locator("#logout").click()
+                self.wait_until(lambda: self.page.evaluate("() => typeof window.synStashed === 'function'"),
+                                "the draft write (stashReport) on its way")
+                self.assertEqual([], self.held_logouts, "the logout POST waits for the draft write")
+                if handler is None:
+                    self.assertEqual(local + ["stashReport:ended"], self.page.evaluate("() => window.synCalls"))
+                    self.assert_row_ended_and_stays(opened, answered, write, read)
+                else:
+                    self.assertEqual(local + ["stashReport:ready"], self.page.evaluate("() => window.synCalls"),
+                                     "control: the row is still up while the draft is written")
+                self.page.evaluate("() => window.synStashed()")
+                self.wait_until(lambda: self.held_logouts, "POST /auth/logout")
+                self.settle()
+                self.assertEqual((["1"], "approved"), (self.logouts, self.page.evaluate("() => KinAuth.session().state")))
+                seen = self.reader()
+                if handler is None:
+                    self.assertEqual((local + ["stashReport:ended", "releaseHold:ended"], False, 1),
+                                     (self.page.evaluate("() => window.synCalls"), seen["shown"],
+                                      self.page.evaluate("() => window.synOtherEnds")))
+                    self.leave_after_the_logout_post()
+                else:
+                    self.assertEqual((True, "ready", 0), (seen["shown"], seen["state"], self.page.evaluate("() => window.synOtherEnds")),
+                                     "control: and while the logout POST is held")
+                    self.leave_after_the_logout_post(write, read)
+
+    def test_18d_every_logout_start_in_main_html_calls_the_end_list_first(self):
+        # Every code line of main.html that starts KinAuth.logout(), in order (comment lines left out).
+        starts = [line.strip() for line in MAIN.split("\n")
+                  if "KinAuth.logout()" in line and not line.lstrip().startswith(("*", "//"))]
+        self.assertEqual([
+            "await KinAuth.logout();",  # api()
+            f"onUnauthorized: () => {{ {END_401} return KinAuth.logout(); }},",  # the dictation controller's 401
+            f"if (e.ownerChanged) {{ studyPageClient.clear(); {END_401} await KinAuth.logout(); return; }}",  # list load
+            "await KinAuth.logout();",  # Log out
+            f"if (e.ownerChanged) {{ studyPageClient.clear(); {END_401} await KinAuth.logout(); return; }}",  # polling
+            "studyQuestions = mountStudyQuestions({ apiBase: API, logout: () => KinAuth.logout(), current: () => selectedUid,",
+            'logout.addEventListener("click", () => KinAuth.logout());',  # the membership screen
+        ], starts)
+        # api(): on the 401 line, before the await.
+        self.assertIn("      if (res.status === 401) {\n" + HOOK_401 + "        await KinAuth.logout();\n", API_FN)
+        # Log out: after the confirmation and the local closes, before its first network wait; the order is kept.
+        marks = [LOG_OUT_HANDLER.index(s) for s in ("if (!confirm(", "endPatientCopy();", END_401, "await stashReport();",
+                                                     "await releaseHold();", "await KinAuth.logout();")]
+        self.assertEqual(sorted(marks), marks)
+        self.assertEqual((1, 1), (LOG_OUT_HANDLER.count(END_401), MAIN.count("    let loggingOut = false;\n")))
+        self.assertTrue(self.log_out_hook.endswith(HOOK_LOG_OUT[1]))
+        # The row's own 401 (its mount's logout runs only from expire()): end(), the list, then the logout once.
+        self.assertIn("        if (ended) return;\n        end();\n"
+                      "        (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} });\n        logout();\n",
+                      READER_BLOCK)
+        self.assertEqual(1, READER_BLOCK.count("      (window.kinOn401 = window.kinOn401 || []).push(end);\n"))
+        # The membership screen (a pending or invalid account) is the one start without the list: allowed() needs
+        # KinAuth.has(), false for such a session, so the row never read, and the page body is replaced there.
+        self.assertIn("document.body.replaceChildren(panel);", extract_function(MAIN, "showMembershipState"))
+        # without_u4b() takes every S5-U4b change back out (the UI2/UI3 byte pins).
+        self.assertNotIn("kinOn401", without_u4b(MAIN))
 
     def test_19_reader_inbox_opens_a_thread_outside_the_latest_fifty(self):
         # B: the chosen question is the oldest; 50 newer ones (answered, so not in the Open Inbox) fill B's latest 50.
