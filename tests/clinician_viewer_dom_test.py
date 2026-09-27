@@ -169,11 +169,17 @@ Findings, Job and Tech Note modules instead):
   28  (S5-UI5 F#4) Capture (showDownloadViewportModal: a PNG of the screen saved in this browser, no server record or check) is
       a screen policy: not offered while /me is held, given back in its place (between Window / Level and Layout) by the late
       writer answer and pressed there, and not offered to a clinician-only document, also after a mode re-entry. test_13's
-      matrix carries it as the capture row. Control: the same file without the Capture clause offers it to the clinician.
+      matrix carries it as the capture row. (fix4) The rule reads what a button runs: a screen export added under another id,
+      its command in the object form, leaves the clinician-only toolbar while a viewing action added beside it stays and runs; a
+      writer keeps and runs both.
       (fix1) Only clinician-only and the unconfirmed safe default remove it: a writer document keeps it after its logout; a
       clinician-only document keeps none after its logout and after a re-entry of the ended document (a mount entered ended cannot
-      learn the role and takes the default). Controls: the F#4 rule (every non-writer state) takes it from the ended writer; the
-      rule without the mount default offers it on the ended clinician-only re-entry.
+      learn the role and takes the default).
+      (fix4, D73 §1-B) No control file is built from config/ohif.js text here: a control made by replacing a line would fail the
+      whole class on an equivalent rewrite of that line. The shipped runs already show the check both ways (Capture offered and
+      pressed for a writer, missing for a clinician-only document; kept after a writer's logout, missing after a clinician-only
+      one's). The rule's defects (Capture kept for a clinician-only document, taken from the ended writer, offered on the ended
+      re-entry; a screen export read by id) are run against this case once per change and kept with the unit's evidence.
   Each viewer document records the reasons its session tells onEnded (fix2 F02): test_17 checks the producer's 401 as
   'unauthorized' and its /me 403 as 'forbidden', test_22 the real modules' 401 / 403 / another account ('account-changed')
   and no reason for the same account or a module list's 403, test_23 the logout as 'logout'.
@@ -935,11 +941,14 @@ REVERSIBLE = "    ended = false;\n"
 # The authoring policy as it was at R-002: closed only once clinician-only, and no clean-up of marks made before that.
 R002_POLICY = "    const nativeAuthoringClosed = () => readOnly();\n"
 DROP_MARKS = "enforceToolbar(); dropLocalMarks(); } }"
-# test_28 control (S5-UI5 F#4): Capture joins the toolbar trim through this clause of the authoring rule.
-CAPTURE_RULE = "exporting && SCREEN_EXPORT.includes(name) || "
-# test_28 controls (S5-UI5 fix1): when Capture leaves. As at F#4 (ac0adaa) it left in every state that is not a confirmed writer,
-# a writer's ended login included; without the mount default a mount entered in an ended document offers it whatever the role was.
-EXPORT_CLOSED = "    const exportClosed = () => !writer() && (!ended || endedAtMount);\n"
+# test_28 (S5-UI5 fix4): two buttons another toolbar could add to the primary section under ids of its own, a screen export (its
+# command in the object form) and a viewing action; the rule reads what a button runs, not its id.
+EXTRA_BUTTONS = """() => { const bar = synServices.toolbarService;
+  bar.addButtons([{ id: 'SYN-Download', uiType: 'ohif.radioGroup', props: { commands: [{ commandName: 'showDownloadViewportModal' }] } },
+                  { id: 'SYN-Reset', uiType: 'ohif.radioGroup', props: { commands: [{ commandName: 'resetViewport' }] } }]);
+  bar.createButtonSection('primary', ['SYN-Download', 'SYN-Reset']); }"""
+EXTRA_PRESSED = """() => { const from = synNative.length, offered = synToolbar().primary.filter(id => id.startsWith('SYN-'));
+  return [offered, synClick('SYN-Download'), synClick('SYN-Reset'), synNative.slice(from)]; }"""
 # The final check as it was at R-002: behind the frame identification.
 FRAME_FREE_CHECK = ("      if (readOnly()) { frameMatch(r); recheckShown(); }\n"
                     "      // Switching display sets briefly removes the viewport. Mode exit, not\n"
@@ -1161,12 +1170,6 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                                         (ASKED, "    const asked = (ticket, seq) => valid(ticket) && seq === readSequence;\n", 1)],
                                "config/ohif.js"),
             "policy-off": variant(CONFIG, [(POLICY, "    const nativeAuthoringClosed = () => false;\n", 1)], "config/ohif.js"),
-            # test_28: the trim rule without Capture (S5-UI5 F#4), as before this unit.
-            "capture-kept": variant(CONFIG, [(CAPTURE_RULE, "", 1)], "config/ohif.js"),
-            "capture-every-non-writer": variant(CONFIG, [(EXPORT_CLOSED, "    const exportClosed = () => true;\n", 1)],
-                                                "config/ohif.js"),
-            "capture-no-mount-default": variant(CONFIG, [(EXPORT_CLOSED, "    const exportClosed = () => !writer() && !ended;\n", 1)],
-                                                "config/ohif.js"),
             "gate-as-before": variant(CONFIG, [(DECIDE, OLD_DECIDE, 1),
                                                (NOTE_CONNECT, "if(!active||state==='loading'||state==='ready')return;", 1)],
                                       "config/ohif.js"),
@@ -4046,6 +4049,10 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "writer panel")
         self.assertEqual(("writer", PRIMARY_SECTION), (self.session(), self.page.evaluate("synToolbar()")["primary"]))
         self.assertEqual([True, "ran", 1], capture())
+        # A writer also keeps a screen export another toolbar adds under an id of its own, and a viewing action beside it.
+        self.page.evaluate(EXTRA_BUTTONS)
+        self.assertEqual([["SYN-Download", "SYN-Reset"], "ran", "ran", ["view showDownloadViewportModal", "view resetViewport"]],
+                         self.page.evaluate(EXTRA_PRESSED))
         # A clinician-only document: no Capture, and none after a mode re-entry either.
         self.me, self.item_requests, self.cursors = CLINICIAN, [], {}
         self.open_viewer()
@@ -4057,47 +4064,28 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.wait_panel("ready", VA)
         self.settle()
         self.assertEqual([False, "missing", 0], capture())
-        # Control: the same file without the Capture rule offers it to the clinician; the rest of the trim is as before.
-        self.me, self.item_requests, self.cursors = CLINICIAN, [], {}
-        self.open_viewer(self.config_variants["capture-kept"])
-        self.wait_panel("ready", VA)
+        # The screen export leaves by what it runs, under another id and in the object form; the viewing action beside it stays.
+        self.page.evaluate(EXTRA_BUTTONS)
+        self.assertEqual([["SYN-Reset"], "missing", "ran", ["view resetViewport"]], self.page.evaluate(EXTRA_PRESSED))
+        # fix1: a writer document keeps Capture after its login ends (the authoring buttons leave).
+        self.fresh_page()
+        self.writer_document()
+        self.page.evaluate(LOGOUT)
+        self.wait_until(lambda: self.session() == "refused", "the logout broadcast")
         self.settle()
-        self.assertEqual([x for x in PRIMARY_SECTION if x != "MeasurementTools"], self.page.evaluate("synToolbar()")["primary"],
-                         "control: the toolbar keeps Capture")
-        self.assertEqual([True, "ran", 1], capture(), "control: the clinician opens the screen PNG dialog")
-        # fix1: a writer document keeps Capture after its login ends (the authoring buttons leave); the F#4 rule took it away.
-        kept = ENDED_WRITER_SECTION
-        for name in ("shipped", "capture-every-non-writer"):
-            with self.subTest(step="writer logout", file=name):
-                self.fresh_page()
-                self.writer_document(None if name == "shipped" else self.config_variants[name])
-                self.page.evaluate(LOGOUT)
-                self.wait_until(lambda: self.session() == "refused", "the logout broadcast")
-                self.settle()
-                if name == "shipped":
-                    self.assertEqual(kept, self.page.evaluate("synToolbar()")["primary"])
-                    self.assertEqual([True, "ran", 1], capture())
-                else:
-                    self.assertEqual((VIEW_SECTION, [False, "missing", 0]),
-                                     (self.page.evaluate("synToolbar()")["primary"], capture()), "control: F#4 trims the ended writer")
-        # fix1: a clinician-only document keeps none after its logout, nor after a re-entry of the ended document (the mount
-        # default); without that default the re-entered mount offers it.
-        for name in ("shipped", "capture-no-mount-default"):
-            with self.subTest(step="clinician logout, re-entry", file=name):
-                self.fresh_page()
-                self.read_only_document(None if name == "shipped" else self.config_variants[name])
-                self.page.evaluate(LOGOUT)
-                self.wait_until(lambda: self.session() == "refused", "the logout broadcast")
-                self.settle()
-                self.assertEqual((VIEW_SECTION, [False, "missing", 0]), (self.page.evaluate("synToolbar()")["primary"], capture()))
-                self.page.evaluate("synReenter()")
-                self.settle()
-                self.assertEqual("refused", self.session())
-                if name == "shipped":
-                    self.assertEqual((VIEW_SECTION, [False, "missing", 0]), (self.page.evaluate("synToolbar()")["primary"], capture()))
-                else:
-                    self.assertEqual((kept, [True, "ran", 1]), (self.page.evaluate("synToolbar()")["primary"], capture()),
-                                     "control: the re-entered ended mount offers Capture")
+        self.assertEqual((ENDED_WRITER_SECTION, [True, "ran", 1]), (self.page.evaluate("synToolbar()")["primary"], capture()))
+        # fix1: a clinician-only document keeps none after its logout, nor after a re-entry of the ended document (a mount entered
+        # ended cannot learn the role and takes the safe default).
+        self.fresh_page()
+        self.read_only_document()
+        self.page.evaluate(LOGOUT)
+        self.wait_until(lambda: self.session() == "refused", "the logout broadcast")
+        self.settle()
+        self.assertEqual((VIEW_SECTION, [False, "missing", 0]), (self.page.evaluate("synToolbar()")["primary"], capture()))
+        self.page.evaluate("synReenter()")
+        self.settle()
+        self.assertEqual(("refused", VIEW_SECTION, [False, "missing", 0]),
+                         (self.session(), self.page.evaluate("synToolbar()")["primary"], capture()))
 
 
 if __name__ == "__main__":

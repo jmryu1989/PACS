@@ -1,32 +1,28 @@
 // S5-UI5 (VUI-04, F#4): the fixed viewer's toolbar gets English names (aria-label), Korean descriptions (title) and a pressed
-// state that is not colour alone; tool IDs, data-cy, commands, order and shortcuts stay the viewer's. A document that is not
-// a confirmed writer (clinician-only included) loses Capture with the authoring buttons. The branding block and the toolbar
-// trim rule of config/ohif.js are sliced out and run against a small element model, with the shipped viewer-tech-note.js loaded
-// beside them; the real OHIF bundle (its toolbar DOM, class names and where split-button lists render) lives only in the
-// container and is not judged here.
+// state that is not colour alone; tool IDs, data-cy, commands, order and shortcuts stay the viewer's. The shipped config/ohif.js
+// runs whole in a small element model and its logo component (whiteLabeling.createLogoComponentFn, what the viewer mounts) labels
+// the toolbar; the shipped viewer-tech-note.js is loaded beside it for its Edit Toolbar dialog and its Tech Note bridge. The real
+// OHIF bundle (its toolbar DOM, class names and where split-button lists render) lives only in the container and is not judged
+// here. Which buttons a document that is not a confirmed writer keeps (Capture with the authoring buttons) is run on the shipped
+// config by clinician_viewer_dom_test.py 08/13/28. No source text is matched: every case runs the shipped code (D73 §1-B).
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm');
-// A Windows checkout (core.autocrlf) has CRLF in the working tree; the anchors below are written with \n.
-const read=path=>fs.readFileSync(path,'utf8').replace(/\r\n/g,'\n');
-const source=read('config/ohif.js');
-const techNote=read('worklist-v0/hpacs-lite/viewer-tech-note.js');
-// Values made in the vm context have that context's prototypes; compare their JSON shape.
-const plain=value=>JSON.parse(JSON.stringify(value));
-const start=source.indexOf('const KIN_VIEWER_DEFAULT_TITLE'),end=source.indexOf('const kinStackPrecision');
-assert.ok(start>=0&&end>start,'branding block anchors');
-const block=source.slice(start,end);
+const config=fs.readFileSync('config/ohif.js','utf8');
+const techNote=fs.readFileSync('worklist-v0/hpacs-lite/viewer-tech-note.js','utf8');
 
-// The selector forms the scripts under test use: compounds of a tag (or *), #id, .class, [attr] and [attr="value"], joined by
-// descendant spaces, in comma lists. Any other form throws, so a changed selector shows up here instead of matching nothing.
+// The selector forms the scripts under test use: compounds of a tag (or *), #id, .class, [attr] and [attr="value"], optionally
+// :not(:disabled), joined by descendant spaces, in comma lists. Any other form throws, so a changed selector shows up here instead
+// of matching nothing.
 function compound(text){
-  const parts=/^(\*|[a-z][\w-]*)?((?:#[\w-]+|\.[\w-]+|\[[\w-]+(?:="[^"]*")?\])*)$/i.exec(text);
+  const parts=/^(\*|[a-z][\w-]*)?((?:#[\w-]+|\.[\w-]+|\[[\w-]+(?:="[^"]*")?\])*)(:not\(:disabled\))?$/i.exec(text);
   if(!text||!parts)throw new Error('selector outside the element model: '+text);
   const checks=[];
   if(parts[1]&&parts[1]!=='*')checks.push(e=>e.localName===parts[1]);
   for(const [,sign,name,value] of parts[2].matchAll(/([#.[])([\w-]+)(?:="([^"]*)")?\]?/g))
     checks.push(sign==='#'?e=>e.getAttribute('id')===name:sign==='.'?e=>(e.getAttribute('class')||'').split(/\s+/).includes(name)
       :value===undefined?e=>e.hasAttribute(name):e=>e.getAttribute(name)===value);
+  if(parts[3])checks.push(e=>!e.disabled);
   return e=>checks.every(check=>check(e));
 }
 function matcher(selector){
@@ -39,30 +35,56 @@ function matcher(selector){
   });
 }
 
-let writes=0;
+const dataName=key=>'data-'+key.replace(/[A-Z]/g,c=>'-'+c.toLowerCase());
+class Text{
+  constructor(data){this.nodeType=3;this.data=String(data);this.parentElement=null;}
+  get textContent(){return this.data;}
+}
+// An element as the DOM gives it to these scripts: attributes (id and dataset reflect them), child nodes with text nodes among
+// them, and a mutation record for every attribute write and child change while it is in the document.
 class El{
-  constructor(doc,tag,text){this.doc=doc;this.localName=tag;this.nodeType=1;this.children=[];this.parentElement=null;this.own=text||'';this.attrs=new Map();this.dataset={};
-    const styles=new Map();this.style={setProperty:(k,v)=>styles.set(k,v),getPropertyValue:k=>styles.get(k)||''};}
+  constructor(doc,tag){this.doc=doc;this.localName=tag;this.nodeType=1;this.nodes=[];this.parentElement=null;this.attrs=new Map();
+    this.disabled=false;this.listeners=new Map();
+    const styles=new Map();this.style={setProperty:(k,v)=>styles.set(k,v),getPropertyValue:k=>styles.get(k)||''};
+    this.dataset=new Proxy({},{get:(_,k)=>typeof k==='string'&&this.hasAttribute(dataName(k))?this.getAttribute(dataName(k)):undefined,
+      set:(_,k,v)=>{this.setAttribute(dataName(k),v);return true;},has:(_,k)=>this.hasAttribute(dataName(k)),
+      deleteProperty:(_,k)=>{this.removeAttribute(dataName(k));return true;}});}
+  get id(){return this.getAttribute('id')??'';}
+  set id(v){this.setAttribute('id',v);}
+  get children(){return this.nodes.filter(n=>n.nodeType===1);}
   get childElementCount(){return this.children.length;}
-  get childNodes(){return this.children.length?this.children:this.own?[{nodeType:3,data:this.own,parentElement:this}]:[];}
-  get textContent(){return this.children.length?this.children.map(c=>c.textContent).join(''):this.own;}
-  set textContent(v){this.children.forEach(c=>{c.parentElement=null;});this.children=[];this.own=String(v);}
-  setAttribute(k,v){writes++;this.attrs.set(k,String(v));this.doc.changed(this,{type:'attributes',attributeName:k});}
-  removeAttribute(k){writes++;this.attrs.delete(k);this.doc.changed(this,{type:'attributes',attributeName:k});}
+  get childNodes(){return this.nodes;}
+  get textContent(){return this.nodes.map(n=>n.textContent).join('');}
+  set textContent(v){this.nodes.forEach(n=>{n.parentElement=null;});this.nodes=String(v)?[new Text(v)]:[];this.nodes.forEach(n=>{n.parentElement=this;});
+    this.doc.changed(this,{type:'childList'});}
+  get isConnected(){return this.doc.connected(this);}
+  setAttribute(k,v){this.attrs.set(k,String(v));this.doc.changed(this,{type:'attributes',attributeName:k});}
+  removeAttribute(k){if(!this.attrs.has(k))return;this.attrs.delete(k);this.doc.changed(this,{type:'attributes',attributeName:k});}
   hasAttribute(k){return this.attrs.has(k);}
   getAttribute(k){return this.attrs.has(k)?this.attrs.get(k):null;}
   contains(n){for(;n;n=n.parentElement)if(n===this)return true;return false;}
   closest(sel){const match=matcher(sel);for(let n=this;n;n=n.parentElement)if(match(n))return n;return null;}
   querySelectorAll(sel){const match=matcher(sel),out=[];const walk=e=>e.children.forEach(c=>{if(match(c))out.push(c);walk(c);});walk(this);return out;}
   querySelector(sel){return this.querySelectorAll(sel)[0]||null;}
-  append(...kids){kids.forEach(k=>{k.parentElement=this;this.children.push(k);});this.doc.changed(this,{type:'childList',addedNodes:kids});return this;}
-  remove(){const p=this.parentElement;if(!p)return;p.children.splice(p.children.indexOf(this),1);this.parentElement=null;this.doc.changed(p,{type:'childList'});}
+  append(...kids){
+    kids=kids.map(k=>typeof k==='string'?new Text(k):k);
+    kids.forEach(k=>{if(k.parentElement)k.parentElement.nodes.splice(k.parentElement.nodes.indexOf(k),1);k.parentElement=this;this.nodes.push(k);});
+    this.doc.changed(this,{type:'childList',addedNodes:kids});return this;}
+  remove(){const p=this.parentElement;if(!p)return;p.nodes.splice(p.nodes.indexOf(this),1);this.parentElement=null;this.doc.changed(p,{type:'childList'});}
   // A React re-render of the toolbar section: new button nodes in place of the old ones.
-  replaceChildren(...kids){this.children.forEach(c=>{c.parentElement=null;});this.children=[];this.append(...kids);}
+  replaceChildren(...kids){this.nodes.forEach(c=>{c.parentElement=null;});this.nodes=[];this.append(...kids);}
   // Laid out while it is in the document and not hidden; focus is the document's active element.
   getClientRects(){return this.doc.connected(this)&&!this.closest('[hidden]')?[{}]:[];}
   focus(){this.doc.activeElement=this;}
   scrollIntoView(){}
+  addEventListener(type,fn){if(!this.listeners.has(type))this.listeners.set(type,new Set());this.listeners.get(type).add(fn);}
+  removeEventListener(type,fn){this.listeners.get(type)?.delete(fn);}
+  // A <dialog>: showModal and close set and clear its open attribute.
+  showModal(){this.setAttribute('open','');}
+  close(){this.removeAttribute('open');}
+  get open(){return this.hasAttribute('open');}
+  // A user's click: the handler the script gave the element.
+  click(){this.onclick?.({type:'click',target:this});}
 }
 function world(){
   const observers=new Set();let html;
@@ -73,10 +95,11 @@ function world(){
       const full={target,addedNodes:[],...record};
       observers.forEach(o=>{if(o.on&&o.wants(full))queueMicrotask(()=>{if(o.on)o.cb([full]);});});
     },
-    createElement:tag=>new El(doc,tag),
+    createElement:tag=>new El(doc,tag),createTextNode:data=>new Text(data),
     getElementById:id=>html.querySelectorAll('*').find(e=>e.getAttribute('id')===id)||null,
     querySelectorAll:sel=>html.querySelectorAll(sel),querySelector:sel=>html.querySelector(sel)};
-  const el=(tag,text,...kids)=>{const e=new El(doc,tag,text);kids.forEach(k=>{k.parentElement=e;e.children.push(k);});return e;};
+  const el=(tag,text,...kids)=>{const e=new El(doc,tag);if(text)e.nodes.push(Object.assign(new Text(text),{parentElement:e}));
+    kids.forEach(k=>{k.parentElement=e;e.nodes.push(k);});return e;};
   doc.head=el('head');doc.body=el('body');html=el('html','',doc.head,doc.body);
   // A record reaches the callback only as a real observer with these options would send it: its kind asked for (an attribute
   // filter asks for attributes), the attribute in the filter, and a record below the observed node only with subtree.
@@ -91,16 +114,20 @@ function world(){
     }
   }
   // An embedded viewer (window.top is another window) showing one study, as the Tech Note bridge reads it.
+  const stored=new Map();
   const ctx={document:doc,MutationObserver,Node:{ELEMENT_NODE:1},BroadcastChannel:class{addEventListener(){}removeEventListener(){}close(){}},
     queueMicrotask,URLSearchParams,location:{search:'?StudyInstanceUIDs=1.2.840.99.1',hash:''},top:{},
+    localStorage:{getItem:k=>stored.has(k)?stored.get(k):null,setItem:(k,v)=>{stored.set(k,String(v));},removeItem:k=>{stored.delete(k);}},
     getComputedStyle:e=>({visibility:e.style.getPropertyValue('visibility')||'visible'}),addEventListener(){},removeEventListener(){}};
   ctx.window=ctx;
   vm.createContext(ctx);
-  const [Brand,labels]=vm.runInContext(block+';[KinViewerBrand,kinViewerToolbarLabels]',ctx);
+  vm.runInContext(config,ctx,{filename:'config/ohif.js'});
   vm.runInContext(techNote,ctx,{filename:'viewer-tech-note.js'});
+  // The viewer mounts the logo the configuration gives it; its effect runs once and its clean-up at unmount.
   let cleanup=null;
-  const React={useEffect:fn=>{cleanup=fn();},createElement:(...a)=>({a})};
-  return {doc,body:doc.body,el,labels,ctx,mount:()=>Brand({React}),unmount:()=>cleanup&&cleanup()};
+  const React={useEffect:fn=>{cleanup=fn();},createElement:(type,props)=>({type,props})};
+  const mount=()=>{const logo=ctx.window.config.whiteLabeling.createLogoComponentFn(React);logo.type(logo.props);};
+  return {doc,body:doc.body,el,ctx,mount,unmount:()=>cleanup&&cleanup()};
 }
 const tick=()=>new Promise(r=>setImmediate(r));
 const cy=(e,v)=>{e.attrs.set('data-cy',v);return e;};
@@ -113,11 +140,19 @@ function tool(el,id,{active=false,items=null}={}){
   const list=el('div','',...items.map(([item,shown])=>cy(el('div','',icon(el),...(shown?[el('span',shown)]:[])),item)));
   return el('div','',primary,secondary,list);
 }
+// The pinned longitudinal mode's primary section, and the list items of its two split buttons (clinician_viewer_dom_test.py
+// PRIMARY_SECTION / toolbarButtons).
 const SECTION=['MeasurementTools','Zoom','Pan','TrackballRotate','WindowLevel','Capture','Layout','Crosshairs','MoreTools'];
+const MEASURE_ITEMS=['Length','Bidirectional','ArrowAnnotate','EllipticalROI','RectangleROI','CircleROI','PlanarFreehandROI','SplineROI','LivewireContour'];
+const MORE_ITEMS=['Reset','rotate-right','flipHorizontal','ImageSliceSync','ReferenceLines','ImageOverlayViewer','StackScroll','invert','Probe',
+  'Cine','Angle','CobbAngle','Magnify','CalibrationLine','TagBrowser','AdvancedMagnify','UltrasoundDirectionalTool','WindowLevelRegion'];
 const MEASURE=[['Length','Length'],['Bidirectional','Bidirectional'],['ArrowAnnotate','Arrow Annotate'],['EllipticalROI','Ellipse'],['LivewireContour','']];
 const MORE=[['Reset','Reset View'],['rotate-right','Rotate Right'],['ImageSliceSync','Image Slice Sync'],['Cine','Cine'],['TagBrowser','']];
-function toolbar(el,ids=SECTION,active='WindowLevel'){
-  return ids.map(id=>tool(el,id,{active:id===active,items:id==='MeasurementTools'?MEASURE:id==='MoreTools'?MORE:null}));
+// The English names VUI-04 gives the primary buttons (the names the Edit Toolbar dialog shows).
+const NAMES={MeasurementTools:'Measurements',Zoom:'Zoom',Pan:'Pan',TrackballRotate:'3D Rotate',WindowLevel:'Window / Level',Capture:'Capture',
+  Layout:'Layout',Crosshairs:'Crosshairs',MoreTools:'More Tools'};
+function toolbar(el,ids=SECTION,active='WindowLevel',lists={MeasurementTools:MEASURE,MoreTools:MORE}){
+  return ids.map(id=>tool(el,id,{active:id===active,items:lists[id]||null}));
 }
 function header(el,bar){
   const brand=el('div','',el('span','KOREA IMAGING'));brand.attrs.set('id','kin-viewer-brand');
@@ -127,34 +162,114 @@ function header(el,bar){
 const byCy=(root,v)=>root.querySelectorAll('*').find(e=>e.getAttribute('data-cy')===v);
 const order=root=>root.querySelectorAll('*').map(e=>e.getAttribute('data-cy')).filter(Boolean);
 const hangul=s=>/[가-힣]/.test(s);
+// The toolbar's primary buttons in the order they are on screen, with the name each is read by (a split button by its primary part).
+const primaryNames=bar=>bar.querySelectorAll('*').map(e=>[e.getAttribute('data-cy'),e]).filter(([v])=>v)
+  .map(([v,e])=>[v.replace(/-split-button-primary$/,''),e]).filter(([id])=>SECTION.includes(id)).map(([id,e])=>[id,e.getAttribute('aria-label')]);
+// Every attribute record under `root` from now on, as any other observer of the page would receive it.
+function recorder(w,root){
+  const seen=[],o=new w.ctx.MutationObserver(records=>seen.push(...records.filter(r=>r.type==='attributes').map(r=>r.attributeName)));
+  o.observe(root,{attributes:true,subtree:true});
+  return {seen,stop:()=>o.disconnect()};
+}
+function labelled(w,ids=SECTION,lists){
+  const bar=w.el('div','',...toolbar(w.el,ids,'WindowLevel',lists)),h=header(w.el,bar);
+  w.body.append(h);w.mount();
+  return {bar,h};
+}
 
-test('source: the nine names are the toolbar editor catalog, which is unchanged; descriptions are Korean',()=>{
-  const line=techNote.match(/const catalog=(\[\[.*?\]\]);/);
-  assert.ok(line,'catalog line');
-  assert.equal(line[0],"const catalog=[['MeasurementTools','Measurements'],['Zoom','Zoom'],['Pan','Pan'],['TrackballRotate','3D Rotate'],['WindowLevel','Window / Level'],['Capture','Capture'],['Layout','Layout'],['Crosshairs','Crosshairs'],['MoreTools','More Tools']];",'the catalog (viewer-tech-note.js) is not changed');
-  const catalog=plain(vm.runInNewContext(line[1]));
-  const {labels}=world();
-  assert.deepEqual(Object.keys(labels.PRIMARY),catalog.map(x=>x[0]));
-  assert.deepEqual(catalog.map(([id])=>labels.PRIMARY[id][0]),catalog.map(x=>x[1]),'the English names are the ones the Edit Toolbar dialog shows');
-  for(const [id,[name,description]] of [...Object.entries(labels.PRIMARY),...Object.entries(labels.ITEMS)]){
-    assert.ok(!hangul(name),id+' name is English');assert.ok(hangul(description),id+' description is Korean');
+test('names: every tool of the pinned toolbar is read by an English name and explained in Korean; the pressed state only on tools that switch on',async()=>{
+  const w=world();
+  // Icon-only list items: every item name comes from the labels, none from shown text.
+  const {h}=labelled(w,SECTION,{MeasurementTools:MEASURE_ITEMS.map(id=>[id,'']),MoreTools:MORE_ITEMS.map(id=>[id,''])});
+  for(const id of [...SECTION.map(id=>['MeasurementTools','MoreTools'].includes(id)?id+'-split-button-primary':id),
+    'MeasurementTools-split-button-secondary','MoreTools-split-button-secondary',...MEASURE_ITEMS,...MORE_ITEMS]){
+    const e=byCy(h,id),name=e.getAttribute('aria-label'),description=e.getAttribute('title');
+    assert.ok(name&&!hangul(name),id+' has an English name: '+name);
+    assert.ok(description&&hangul(description),id+' has a Korean description: '+description);
   }
-  assert.equal(labels.PRIMARY.Capture[1],'현재 화면을 PNG로 저장(검사 저장 아님)');
-  assert.equal(labels.PRIMARY.Crosshairs[1],'MPR 교차선(3D/MPR에서만 동작)');
-  assert.equal(labels.PRIMARY.TrackballRotate[1],'3D 회전(볼륨에서만 동작)');
-  assert.equal(labels.PRIMARY.WindowLevel[1],'창/레벨 조절(드래그)');
-  assert.equal(labels.ITEMS.EllipticalROI.join('|'),'Ellipse ROI|타원 ROI(HU)');
-  assert.deepEqual(plain([...labels.TOGGLES].sort()),['Crosshairs','MeasurementTools','Pan','TrackballRotate','WindowLevel','Zoom']);
+  assert.deepEqual(primaryNames(h).map(([id,name])=>[id,name]),SECTION.map(id=>[id,NAMES[id]]),'the nine names, in the viewer\'s order');
+  const title=id=>byCy(h,id).getAttribute('title');
+  assert.equal(title('Capture'),'현재 화면을 PNG로 저장(검사 저장 아님)');
+  assert.equal(title('Crosshairs'),'MPR 교차선(3D/MPR에서만 동작)');
+  assert.equal(title('TrackballRotate'),'3D 회전(볼륨에서만 동작)');
+  assert.equal(title('WindowLevel'),'창/레벨 조절(드래그) · 사용 중');
+  assert.deepEqual([byCy(h,'EllipticalROI').getAttribute('aria-label'),title('EllipticalROI')],['Ellipse ROI','타원 ROI(HU)']);
+  const pressed=h.querySelectorAll('[aria-pressed]').map(e=>e.getAttribute('data-cy').replace(/-split-button-primary$/,'')).sort();
+  assert.deepEqual(pressed,['Crosshairs','MeasurementTools','Pan','TrackballRotate','WindowLevel','Zoom'],'Capture, Layout and More Tools are actions or lists');
+  w.unmount();
 });
 
-test('apply: names, Korean descriptions and a pressed state for tool buttons; ids, data-cy and order untouched',()=>{
+// The Edit Toolbar dialog (viewer-tech-note.js kinCreateViewerToolbarPreferences, as the Tech Note bridge mounts it) over the pinned
+// viewer's toolbarService: its primary section as the dialog reads and writes it.
+function viewerSection(ids){
+  const sections={primary:ids.slice()};
+  return {sections,service:{EVENTS:{TOOL_BAR_MODIFIED:'syn-toolbar-modified'},subscribe:()=>({unsubscribe(){}}),
+    getButtonSection:key=>(sections[key]||[]).map(id=>({id})),clearButtonSection:key=>{sections[key]=[];},
+    createButtonSection:(key,list)=>{sections[key]=[...(sections[key]||[]),...list];}}};
+}
+function preferences(w,viewer){
+  const host=w.el('div','');w.body.append(host);
+  const controller=w.ctx.kinCreateViewerToolbarPreferences({services:{toolbarService:viewer.service},host,owner:()=>['SYN-INST','SYN-SUB'],live:()=>true});
+  return {controller,host};
+}
+const button=(root,text)=>root.querySelectorAll('button').find(b=>b.textContent===text);
+// The open dialog's rows as a user reads them: the tool's name, whether it is shown, whether that can change, and its checkbox name.
+function editorRows(w){
+  const dialog=w.doc.querySelector('dialog[open]');
+  assert.ok(dialog,'the Edit Toolbar dialog is open');
+  return dialog.querySelectorAll('label').map(label=>{const check=label.querySelector('input');
+    return {name:label.textContent.trim(),shown:check.checked,locked:check.disabled,check:check.getAttribute('aria-label'),row:label.parentElement,box:check};});
+}
+
+test('Edit Toolbar: the dialog lists the toolbar\'s tools by the names the toolbar reads, in its order; a change keeps the viewer\'s ids',async()=>{
+  const w=world();
+  const {bar}=labelled(w);
+  const viewer=viewerSection(SECTION),{controller,host}=preferences(w,viewer);
+  assert.ok(controller,'the editor takes the viewer\'s own section');
+  button(host,'Edit Toolbar').click();
+  let rows=editorRows(w);
+  const onBar=primaryNames(bar);
+  assert.deepEqual(rows.map(r=>r.name),onBar.map(([,name])=>name),'the dialog\'s names are the names the toolbar buttons are read by, in the same order');
+  assert.deepEqual(rows.map(r=>r.check),rows.map(r=>'Show '+r.name));
+  assert.deepEqual(rows.map(r=>[r.shown,r.locked]),onBar.map(([id])=>[true,id==='Zoom']),'all shown; Zoom stays for the keyboard entry');
+  // The user moves Measurements down one place, hides Capture and applies.
+  button(rows[0].row,'Move Down').click();
+  rows=editorRows(w);
+  assert.deepEqual(rows.map(r=>r.name).slice(0,2),[NAMES.Zoom,NAMES.MeasurementTools]);
+  const capture=rows.find(r=>r.name===NAMES.Capture).box;capture.checked=false;capture.onchange();
+  button(w.doc.querySelector('dialog[open]'),'Apply').click();
+  assert.equal(w.doc.querySelector('dialog[open]'),null,'Apply closes the dialog');
+  const applied=['Zoom','MeasurementTools','Pan','TrackballRotate','WindowLevel','Layout','Crosshairs','MoreTools'];
+  assert.deepEqual(viewer.sections.primary,applied,'the viewer\'s section: its own ids, in the chosen order, Capture left out');
+  // The viewer renders that section; the toolbar labels name it again, and the reopened dialog reads the same names.
+  bar.replaceChildren(...toolbar(w.el,viewer.sections.primary));
+  await tick();
+  assert.deepEqual(primaryNames(bar),applied.map(id=>[id,NAMES[id]]));
+  button(host,'Edit Toolbar').click();
+  rows=editorRows(w);
+  assert.deepEqual(rows.filter(r=>r.shown).map(r=>r.name),primaryNames(bar).map(([,name])=>name));
+  assert.deepEqual(rows.map(r=>[r.name,r.shown]),[...applied.slice(0,5),'Capture',...applied.slice(5)].map(id=>[NAMES[id],id!=='Capture']));
+  w.unmount();
+});
+
+test('Edit Toolbar: a section in another order or with another tool is not the viewer\'s, and the dialog is not offered',()=>{
+  for(const ids of [['Zoom','MeasurementTools',...SECTION.slice(2)],[...SECTION.slice(0,-1),'SYN-Tool'],SECTION.slice(1)]){
+    const w=world();
+    const viewer=viewerSection(ids),{controller,host}=preferences(w,viewer);
+    assert.equal(controller,null,ids.join(','));
+    assert.equal(button(host,'Edit Toolbar'),undefined);
+    assert.deepEqual(viewer.sections.primary,ids,'the section is left as the viewer made it');
+  }
+});
+
+test('mount: names, Korean descriptions and a pressed state for tool buttons; ids, data-cy and order untouched',()=>{
   const w=world();
   const bar=w.el('div','',...toolbar(w.el));
   const h=header(w.el,bar);
   // The native pressed state, where the viewer gives one, is kept as it is.
   const nativePressed=byCy(bar,'Pan');nativePressed.attrs.set('aria-pressed','false');
   const before=order(h);
-  w.labels.apply(h);
+  w.body.append(h);w.mount();
   assert.deepEqual(order(h),before,'no data-cy changed, added or moved');
   const seen=id=>{const e=byCy(h,id);return [e.getAttribute('aria-label'),e.getAttribute('title'),e.getAttribute('aria-pressed')];};
   assert.deepEqual(seen('WindowLevel'),['Window / Level','창/레벨 조절(드래그) · 사용 중','true'],'the active tool says so in text and state');
@@ -178,23 +293,26 @@ test('apply: names, Korean descriptions and a pressed state for tool buttons; id
   assert.deepEqual(seen('TagBrowser'),['Tag Browser','DICOM 태그 보기',null]);
   for(const id of [...SECTION.filter(id=>!['MeasurementTools','MoreTools'].includes(id)),'Length','Reset'])
     assert.equal(byCy(h,id).getAttribute('data-kin-tool-label'),id);
+  w.unmount();
 });
 
-test('apply: a second pass writes nothing; unknown data-cy and text are left alone',()=>{
+test('mount: labelling again after a header change changes no attribute; unknown data-cy and text are left alone',async()=>{
   const w=world();
   const other=cy(w.el('button','Series'),'seriesList-btn');
   const bar=w.el('div','',...toolbar(w.el),other);
   const h=header(w.el,bar);
-  w.labels.apply(h);
-  const texts=h.querySelectorAll('*').map(e=>e.textContent);
-  writes=0;
-  w.labels.apply(h);
-  assert.equal(writes,0,'idempotent: no attribute written twice');
-  assert.deepEqual(h.querySelectorAll('*').map(e=>e.textContent),texts,'no text changed');
+  w.body.append(h);w.mount();
+  const elements=h.querySelectorAll('*'),texts=elements.map(e=>e.textContent);
+  const attributes=recorder(w,h);
+  bar.append(w.el('span',''));
+  await tick();
+  assert.deepEqual(attributes.seen,[],'the header change runs the labels again and no attribute is written');
+  assert.deepEqual(elements.map(e=>e.textContent),texts,'no text changed');
   assert.deepEqual([...other.attrs.keys()],['data-cy']);
+  attributes.stop();w.unmount();
 });
 
-// The model's observer sends only the records its options ask for, so these results depend on what the branding block observes.
+// The model's observer sends only the records its options ask for, so these results depend on what the logo component observes.
 test('mounted: a toolbar built again (the not-writer trim, an account toolbar) is labelled once; the active class moves the state',async()=>{
   const w=world();
   const bar=w.el('div','',...toolbar(w.el));
@@ -211,46 +329,19 @@ test('mounted: a toolbar built again (the not-writer trim, an account toolbar) i
   await tick();
   const section=[...new Set(order(bar).map(v=>v.replace(/-split-button-(primary|secondary)$/,'')).filter(v=>SECTION.includes(v)))];
   assert.deepEqual(section,trimmed,'order is the viewer\'s');
-  for(const id of trimmed.filter(id=>id!=='MoreTools'))assert.equal(byCy(bar,id).getAttribute('aria-label'),w.labels.PRIMARY[id][0],id);
+  assert.deepEqual(primaryNames(bar),trimmed.map(id=>[id,NAMES[id]]));
   assert.equal(byCy(bar,'Capture'),undefined);
-  writes=0;
+  const attributes=recorder(w,h);
   bar.append(w.el('span',''));
   await tick();
-  assert.equal(writes,0,'another header change writes no label again');
+  assert.deepEqual(attributes.seen,[],'another header change writes no label again');
   // The user picks Zoom: the viewer moves its active class; the pressed state and the text follow.
   byCy(bar,'WindowLevel').setAttribute('class','');
   byCy(bar,'Zoom').setAttribute('class','bg-primary-light');
   await tick();
   assert.deepEqual(['WindowLevel','Zoom'].map(id=>[byCy(bar,id).getAttribute('aria-pressed'),byCy(bar,id).getAttribute('title')]),
     [['false','창/레벨 조절(드래그)'],['true','확대/축소 · 사용 중']]);
-  w.unmount();
-});
-
-// The trim rule itself (config/ohif.js kinCreateViewerHistory authoring), run on the pinned longitudinal buttons. Its second
-// argument is the screen-export switch kinCreateViewerHistory sets from the session: on for a clinician-only document and while the
-// account is unconfirmed, off for a writer (also after a writer's login ended in that mount). Capture's presence in each of those
-// states is run on the real toolbar of the shipped config by clinician_viewer_dom_test.py 08/13/28.
-const statementAt=(name,from=0)=>{const re=new RegExp('\\bconst\\s+'+name+'\\s*=','g');re.lastIndex=from;const m=re.exec(source);return m?m.index:-1;};
-test('trim rule: Capture leaves with the authoring buttons for a document that is not a writer; viewing buttons and order stay',()=>{
-  const viewAt=statementAt('VIEW_TOOLS'),from=statementAt('ACTIVATING'),to=statementAt('TOOLBAR',from);
-  assert.ok(viewAt>=0&&from>0&&to>from,'trim rule anchors');
-  const authoring=vm.runInNewContext(source.slice(viewAt,source.indexOf(';',viewAt)+1)+'\n'+source.slice(from,to)+';authoring');
-  const command={commandName:'setToolActiveToolbar',commandOptions:{toolGroupIds:['default','mpr']}};
-  const buttons={Zoom:command,WindowLevel:command,Pan:command,TrackballRotate:command,Capture:'showDownloadViewportModal',Layout:undefined,
-    Crosshairs:{commandName:'setToolActiveToolbar',commandOptions:{toolGroupIds:['mpr']}}};
-  // The plain buttons of the section, in its order (the split buttons are judged item by item; clinician_viewer_dom_test.py 08/28).
-  const kept=exporting=>SECTION.filter(id=>id in buttons&&!authoring({id,commands:buttons[id]},exporting));
-  assert.deepEqual(kept(true),['Zoom','Pan','TrackballRotate','WindowLevel','Layout','Crosshairs'],'clinician-only or unconfirmed: Capture leaves');
-  assert.deepEqual(kept(false),['Zoom','Pan','TrackballRotate','WindowLevel','Capture','Layout','Crosshairs'],'a writer: Capture stays in its place');
-  assert.deepEqual(SECTION.filter(id=>id in buttons&&!authoring({id,commands:buttons[id]})),kept(true),'the switch is on unless it is turned off');
-  for(const exporting of [true,false]){
-    assert.equal(authoring({id:'Length',commands:command},exporting),true,'an authoring tool leaves either way');
-    assert.equal(authoring({id:'Reset',commands:'resetViewport'},exporting),false,'a viewing action stays either way');
-  }
-  // The screen export is judged by its command, in the object form too and on a button with another id.
-  assert.equal(authoring({id:'Capture',commands:[{commandName:'showDownloadViewportModal'}]},true),true);
-  assert.equal(authoring({id:'SYN-Download',commands:'showDownloadViewportModal'},true),true);
-  assert.equal(authoring({id:'SYN-Download',commands:[{commandName:'showDownloadViewportModal'}]},false),false);
+  attributes.stop();w.unmount();
 });
 
 // The Tech Note bridge (viewer-tech-note.js kinViewerTechNote) as the mode's onModeEnter mounts it and onModeExit stops it

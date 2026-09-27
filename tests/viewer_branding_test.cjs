@@ -21,8 +21,8 @@ class El{
   get childNodes(){return this.children.length?this.children:this.own?[{nodeType:3,data:this.own,parentElement:this}]:[];}
   get textContent(){return this.children.length?this.children.map(c=>c.textContent).join(''):this.own;}
   set textContent(v){this.children.forEach(c=>{c.parentElement=null;});this.children=[];this.own=String(v);}
-  // Only class changes are observed (attributeFilter), as the toolbar's active tool is a class change.
-  setAttribute(k,v){this.attrs.set(k,String(v));if(k==='class'&&this.doc.connected(this))this.doc.notify({target:this,addedNodes:[],attributeName:'class'});}
+  // Every attribute write in the document makes a record, as in the DOM; the observer below passes on only what its options ask for.
+  setAttribute(k,v){this.attrs.set(k,String(v));if(this.doc.connected(this))this.doc.notify({target:this,addedNodes:[],attributeName:k});}
   remove(){const p=this.parentElement;if(!p)return;const was=this.doc.connected(p);p.children.splice(p.children.indexOf(this),1);this.parentElement=null;if(was)this.doc.notify({target:p,addedNodes:[]});}
   hasAttribute(k){return this.attrs.has(k);}
   getAttribute(k){return this.attrs.has(k)?this.attrs.get(k):null;}
