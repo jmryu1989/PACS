@@ -46,7 +46,11 @@ class NativeToolbarE2E(ViewerTechNoteE2E):
   v.evaluate("()=>{window.oldNativeFocus=kinViewerFocusNativeToolbar;window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeExit()}")
   self.assertFalse(v.evaluate("()=>typeof kinViewerFocusNativeToolbar==='function'"));self.assertFalse(v.evaluate('()=>oldNativeFocus()'))
   # S5-UI5: the tech note's own additions go (its focus function and focus style); the name and description the toolbar labels gave Zoom stay.
-  self.assertFalse(v.evaluate("()=>[...document.querySelectorAll('style')].some(s=>s.textContent.includes('#root button[data-cy]:focus-visible { outline'))"))
+  # The styles a mount adds are the ones present after it that were not before it; every one of them leaves at its mode exit.
+  v.evaluate("()=>{window.kinStylesBeforeMount=new Set(document.querySelectorAll('style'));window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeEnter()}");self.ready(v)
+  self.assertGreater(v.evaluate("()=>(window.kinMountStyles=[...document.querySelectorAll('style')].filter(s=>!kinStylesBeforeMount.has(s))).length"),0)
+  v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeExit()")
+  self.assertEqual(v.evaluate("()=>kinMountStyles.filter(s=>s.isConnected).length"),0);self.assertFalse(v.evaluate("()=>typeof kinViewerFocusNativeToolbar==='function'"))
   expect(self.zoom(v)).to_have_attribute('aria-label','Zoom');expect(self.zoom(v)).to_have_attribute('data-kin-tool-label','Zoom');expect(self.zoom(v)).to_have_attribute('title',re.compile(r'^확대/축소( · 사용 중)?$'))
   v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeEnter()");self.ready(v);v.locator('#kin-viewer-focus-9').click();expect(self.zoom(v)).to_be_focused();self.assertEqual(self.snapshot(v),before)
   v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-viewer-focus-9')).to_be_disabled();self.assertFalse(v.evaluate("()=>typeof kinViewerFocusNativeToolbar==='function'"))

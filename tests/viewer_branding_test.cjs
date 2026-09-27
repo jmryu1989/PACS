@@ -41,7 +41,13 @@ function world(){
     getElementById:id=>body.querySelectorAll('*').find(e=>e.getAttribute('id')===id)||null,
     notify(record){observers.forEach(o=>{if(o.on){pending.push([o,record]);queueMicrotask(()=>{const job=pending.shift();if(job&&job[0].on)job[0].cb([job[1]]);});}});}};
   body=new El(doc,'body');doc.body=body;
-  class MutationObserver{constructor(cb){this.cb=cb;this.on=false;}observe(target,opts){assert.equal(target,body);assert.equal(JSON.stringify(opts),'{"childList":true,"subtree":true,"characterData":true,"attributes":true,"attributeFilter":["class"]}');this.on=true;observers.add(this);}disconnect(){this.on=false;observers.delete(this);}}
+  // A record reaches the callback only as a real observer with these options would send it: its kind asked for (an attribute
+  // filter asks for attributes), the attribute in the filter, and a record below the observed node only with subtree.
+  class MutationObserver{constructor(cb){this.on=false;this.cb=records=>{const sent=records.filter(r=>this.wants(r));if(sent.length)cb(sent);};}
+    observe(target,options){this.target=target;this.options=options;this.on=true;observers.add(this);}disconnect(){this.on=false;observers.delete(this);}
+    wants(r){const o=this.options,kind=r.attributeName?'attributes':r.target.nodeType===3?'characterData':'childList';
+      return (kind==='attributes'?!!(o.attributes||o.attributeFilter):!!o[kind])&&(kind!=='attributes'||!o.attributeFilter||o.attributeFilter.includes(r.attributeName))
+        &&(r.target===this.target||!!o.subtree&&this.target.contains(r.target));}}
   const el=(tag,text,...kids)=>{const e=new El(doc,tag,text);kids.forEach(k=>{k.parentElement=e;e.children.push(k);});return e;};
   const ctx={document:doc,MutationObserver,Node:{ELEMENT_NODE:1},BroadcastChannel:class{addEventListener(){}removeEventListener(){}close(){}},
     window:{addEventListener(){},removeEventListener(){}},queueMicrotask};
@@ -80,10 +86,8 @@ test('source: the About rename rows and About-window link rows are gone and the 
   assert.doesNotMatch(block,/github\.com\/OHIF/);
   assert.match(block,/const ABOUT_TITLES = new Set\(\['About', 'About OHIF Viewer'\]\);/);
   assert.match(block,/document\.getElementById\('kin-viewer-brand'\)\?\.closest\('\.bg-secondary-dark\.z-20'\)/,'the menu boundary is the logo header');
-  assert.match(block,/if \(!text \|\| ABOUT_TITLES\.has\(text\)\) return;/);
   assert.match(block,/row\.setAttribute\('inert', ''\);/);
   assert.doesNotMatch(block,/hideAboutRows\(document\.body\)/,'the About rule never scans the whole page');
-  assert.doesNotMatch(block,/replaceBrandText\(document\.body|replaceBrandText\(node/,'S5-UI5 VUI-08: the wording rule never scans the whole page or added nodes outside the header');
   assert.equal((source.match(/ABOUT_TITLES/g)||[]).length,3,'the About titles are used only by the branding block');
 });
 
@@ -264,6 +268,33 @@ test('VUI-08: with no dropdown in the logo header (or no header), nothing is rew
   w.mount();
   assert.deepEqual(loose.children.map(e=>e.textContent),['OHIF Viewer','Preferences']);
   assert.equal(outer.textContent,'OHIF Viewer','a dropdown-like element outside the logo header is not chrome');
+  w.unmount();
+});
+
+// S5-UI5 VUI-08: the About title is judged, never renamed, so an About row still waiting for its settings row reads About when that
+// row arrives; and a page change runs the wording rule on the logo header only, never on the page or on what was added elsewhere.
+test('VUI-08: an About OHIF Viewer row keeps its title until its settings row arrives; dropdown-like text outside the header is never rewritten',async()=>{
+  const w=world();
+  const list=menu(w.el,'About OHIF Viewer');const about=list.children[0];
+  const h=header(w.el,list);
+  const portal=w.el('div','',w.el('span','OHIF Viewer'),w.el('span','Preferences'));portal.setAttribute('class','absolute right-0 z-10');
+  w.body.append(h,portal);
+  w.mount();
+  assert.ok(untouched(about),'no settings row yet, so not hidden');
+  assert.equal(about.textContent,'settingsAbout OHIF Viewer','and not renamed either');
+  list.append(menu(w.el,'Preferences').children[0]);
+  await tick();
+  assert.ok(hidden(about),'still read as About once Preferences joins the list');
+  assert.equal(about.textContent,'settingsAbout OHIF Viewer');
+  assert.equal(list.children[1].textContent,'settingsViewer Settings');
+  // A dropdown-like element added outside the logo header, then a header change that runs the whole header again.
+  const late=w.el('div','',w.el('span','Powered by OHIF'),w.el('span','Preferences'));late.setAttribute('class','absolute right-0');
+  w.body.append(late);
+  await tick();
+  h.dropdown.append(w.el('span','Logout'));
+  await tick();
+  assert.deepEqual([portal,late].map(e=>e.children.map(c=>c.textContent)),[['OHIF Viewer','Preferences'],['Powered by OHIF','Preferences']]);
+  assert.ok(allUntouched(portal)&&allUntouched(late));
   w.unmount();
 });
 

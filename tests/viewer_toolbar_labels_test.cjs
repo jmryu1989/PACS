@@ -1,8 +1,9 @@
 // S5-UI5 (VUI-04, F#4): the fixed viewer's toolbar gets English names (aria-label), Korean descriptions (title) and a pressed
 // state that is not colour alone; tool IDs, data-cy, commands, order and shortcuts stay the viewer's. A document that is not
 // a confirmed writer (clinician-only included) loses Capture with the authoring buttons. The branding block and the toolbar
-// trim rule of config/ohif.js are sliced out and run against a small element model; the real OHIF bundle (its toolbar DOM,
-// class names and where split-button lists render) lives only in the container and is not judged here.
+// trim rule of config/ohif.js are sliced out and run against a small element model, with the shipped viewer-tech-note.js loaded
+// beside them; the real OHIF bundle (its toolbar DOM, class names and where split-button lists render) lives only in the
+// container and is not judged here.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm');
@@ -16,6 +17,28 @@ const start=source.indexOf('const KIN_VIEWER_DEFAULT_TITLE'),end=source.indexOf(
 assert.ok(start>=0&&end>start,'branding block anchors');
 const block=source.slice(start,end);
 
+// The selector forms the scripts under test use: compounds of a tag (or *), #id, .class, [attr] and [attr="value"], joined by
+// descendant spaces, in comma lists. Any other form throws, so a changed selector shows up here instead of matching nothing.
+function compound(text){
+  const parts=/^(\*|[a-z][\w-]*)?((?:#[\w-]+|\.[\w-]+|\[[\w-]+(?:="[^"]*")?\])*)$/i.exec(text);
+  if(!text||!parts)throw new Error('selector outside the element model: '+text);
+  const checks=[];
+  if(parts[1]&&parts[1]!=='*')checks.push(e=>e.localName===parts[1]);
+  for(const [,sign,name,value] of parts[2].matchAll(/([#.[])([\w-]+)(?:="([^"]*)")?\]?/g))
+    checks.push(sign==='#'?e=>e.getAttribute('id')===name:sign==='.'?e=>(e.getAttribute('class')||'').split(/\s+/).includes(name)
+      :value===undefined?e=>e.hasAttribute(name):e=>e.getAttribute(name)===value);
+  return e=>checks.every(check=>check(e));
+}
+function matcher(selector){
+  const chains=selector.split(',').map(part=>part.trim().split(/\s+/).map(compound));
+  return element=>chains.some(chain=>{
+    if(!chain[chain.length-1](element))return false;
+    let i=chain.length-2;
+    for(let n=element.parentElement;n&&i>=0;n=n.parentElement)if(chain[i](n))i--;
+    return i<0;
+  });
+}
+
 let writes=0;
 class El{
   constructor(doc,tag,text){this.doc=doc;this.localName=tag;this.nodeType=1;this.children=[];this.parentElement=null;this.own=text||'';this.attrs=new Map();this.dataset={};
@@ -24,35 +47,60 @@ class El{
   get childNodes(){return this.children.length?this.children:this.own?[{nodeType:3,data:this.own,parentElement:this}]:[];}
   get textContent(){return this.children.length?this.children.map(c=>c.textContent).join(''):this.own;}
   set textContent(v){this.children.forEach(c=>{c.parentElement=null;});this.children=[];this.own=String(v);}
-  setAttribute(k,v){writes++;this.attrs.set(k,String(v));if(k==='class'&&this.doc.connected(this))this.doc.notify({target:this,addedNodes:[]});}
-  removeAttribute(k){writes++;this.attrs.delete(k);}
+  setAttribute(k,v){writes++;this.attrs.set(k,String(v));this.doc.changed(this,{type:'attributes',attributeName:k});}
+  removeAttribute(k){writes++;this.attrs.delete(k);this.doc.changed(this,{type:'attributes',attributeName:k});}
   hasAttribute(k){return this.attrs.has(k);}
   getAttribute(k){return this.attrs.has(k)?this.attrs.get(k):null;}
   contains(n){for(;n;n=n.parentElement)if(n===this)return true;return false;}
-  closest(sel){assert.match(sel,/^(\.[\w-]+)+$/);const want=sel.slice(1).split('.');
-    for(let n=this;n;n=n.parentElement){const has=(n.getAttribute('class')||'').split(/\s+/);if(want.every(c=>has.includes(c)))return n;}return null;}
-  querySelectorAll(sel){assert.equal(sel,'*');const out=[];const walk=e=>e.children.forEach(c=>{out.push(c);walk(c);});walk(this);return out;}
-  append(...kids){kids.forEach(k=>{k.parentElement=this;this.children.push(k);});if(this.doc.connected(this))this.doc.notify({target:this,addedNodes:kids});return this;}
+  closest(sel){const match=matcher(sel);for(let n=this;n;n=n.parentElement)if(match(n))return n;return null;}
+  querySelectorAll(sel){const match=matcher(sel),out=[];const walk=e=>e.children.forEach(c=>{if(match(c))out.push(c);walk(c);});walk(this);return out;}
+  querySelector(sel){return this.querySelectorAll(sel)[0]||null;}
+  append(...kids){kids.forEach(k=>{k.parentElement=this;this.children.push(k);});this.doc.changed(this,{type:'childList',addedNodes:kids});return this;}
+  remove(){const p=this.parentElement;if(!p)return;p.children.splice(p.children.indexOf(this),1);this.parentElement=null;this.doc.changed(p,{type:'childList'});}
   // A React re-render of the toolbar section: new button nodes in place of the old ones.
   replaceChildren(...kids){this.children.forEach(c=>{c.parentElement=null;});this.children=[];this.append(...kids);}
+  // Laid out while it is in the document and not hidden; focus is the document's active element.
+  getClientRects(){return this.doc.connected(this)&&!this.closest('[hidden]')?[{}]:[];}
+  focus(){this.doc.activeElement=this;}
+  scrollIntoView(){}
 }
 function world(){
-  const observers=new Set();let body;
-  const doc={title:'',connected:e=>{for(let n=e;n;n=n.parentElement)if(n===body)return true;return false;},
-    getElementById:id=>body.querySelectorAll('*').find(e=>e.getAttribute('id')===id)||null,
-    notify(record){observers.forEach(o=>{if(o.on)queueMicrotask(()=>{if(o.on)o.cb([record]);});});}};
-  body=new El(doc,'body');doc.body=body;
-  class MutationObserver{constructor(cb){this.cb=cb;this.on=false;}observe(target,opts){assert.equal(target,body);
-    assert.equal(JSON.stringify(opts),'{"childList":true,"subtree":true,"characterData":true,"attributes":true,"attributeFilter":["class"]}');this.on=true;observers.add(this);}
-    disconnect(){this.on=false;observers.delete(this);}}
+  const observers=new Set();let html;
+  const doc={title:'',activeElement:null,
+    connected:e=>{for(let n=e;n;n=n.parentElement)if(n===html)return true;return false;},
+    changed:(target,record)=>{
+      if(!doc.connected(target))return;
+      const full={target,addedNodes:[],...record};
+      observers.forEach(o=>{if(o.on&&o.wants(full))queueMicrotask(()=>{if(o.on)o.cb([full]);});});
+    },
+    createElement:tag=>new El(doc,tag),
+    getElementById:id=>html.querySelectorAll('*').find(e=>e.getAttribute('id')===id)||null,
+    querySelectorAll:sel=>html.querySelectorAll(sel),querySelector:sel=>html.querySelector(sel)};
   const el=(tag,text,...kids)=>{const e=new El(doc,tag,text);kids.forEach(k=>{k.parentElement=e;e.children.push(k);});return e;};
+  doc.head=el('head');doc.body=el('body');html=el('html','',doc.head,doc.body);
+  // A record reaches the callback only as a real observer with these options would send it: its kind asked for (an attribute
+  // filter asks for attributes), the attribute in the filter, and a record below the observed node only with subtree.
+  class MutationObserver{
+    constructor(cb){this.cb=cb;this.on=false;}
+    observe(target,options){this.target=target;this.options=options;this.on=true;observers.add(this);}
+    disconnect(){this.on=false;observers.delete(this);}
+    wants(record){
+      const o=this.options,asked=record.type==='attributes'?!!(o.attributes||o.attributeFilter):!!o[record.type];
+      return asked&&(record.type!=='attributes'||!o.attributeFilter||o.attributeFilter.includes(record.attributeName))
+        &&(record.target===this.target||!!o.subtree&&this.target.contains(record.target));
+    }
+  }
+  // An embedded viewer (window.top is another window) showing one study, as the Tech Note bridge reads it.
   const ctx={document:doc,MutationObserver,Node:{ELEMENT_NODE:1},BroadcastChannel:class{addEventListener(){}removeEventListener(){}close(){}},
-    window:{addEventListener(){},removeEventListener(){}},queueMicrotask};
+    queueMicrotask,URLSearchParams,location:{search:'?StudyInstanceUIDs=1.2.840.99.1',hash:''},top:{},
+    getComputedStyle:e=>({visibility:e.style.getPropertyValue('visibility')||'visible'}),addEventListener(){},removeEventListener(){}};
+  ctx.window=ctx;
   vm.createContext(ctx);
   const [Brand,labels]=vm.runInContext(block+';[KinViewerBrand,kinViewerToolbarLabels]',ctx);
+  vm.runInContext(techNote,ctx,{filename:'viewer-tech-note.js'});
   let cleanup=null;
   const React={useEffect:fn=>{cleanup=fn();},createElement:(...a)=>({a})};
-  return {doc,body,el,labels,mount:()=>Brand({React}),unmount:()=>cleanup&&cleanup()};
+  return {doc,body:doc.body,el,labels,ctx,mount:()=>Brand({React}),unmount:()=>cleanup&&cleanup()};
 }
 const tick=()=>new Promise(r=>setImmediate(r));
 const cy=(e,v)=>{e.attrs.set('data-cy',v);return e;};
@@ -146,6 +194,7 @@ test('apply: a second pass writes nothing; unknown data-cy and text are left alo
   assert.deepEqual([...other.attrs.keys()],['data-cy']);
 });
 
+// The model's observer sends only the records its options ask for, so these results depend on what the branding block observes.
 test('mounted: a toolbar built again (the not-writer trim, an account toolbar) is labelled once; the active class moves the state',async()=>{
   const w=world();
   const bar=w.el('div','',...toolbar(w.el));
@@ -177,26 +226,86 @@ test('mounted: a toolbar built again (the not-writer trim, an account toolbar) i
   w.unmount();
 });
 
-// The trim rule itself (config/ohif.js kinCreateViewerHistory authoring), run on the pinned longitudinal buttons.
+// The trim rule itself (config/ohif.js kinCreateViewerHistory authoring), run on the pinned longitudinal buttons. Its second
+// argument is the screen-export switch kinCreateViewerHistory sets from the session: on for a clinician-only document and while the
+// account is unconfirmed, off for a writer (also after a writer's login ended in that mount). Capture's presence in each of those
+// states is run on the real toolbar of the shipped config by clinician_viewer_dom_test.py 08/13/28.
+const statementAt=(name,from=0)=>{const re=new RegExp('\\bconst\\s+'+name+'\\s*=','g');re.lastIndex=from;const m=re.exec(source);return m?m.index:-1;};
 test('trim rule: Capture leaves with the authoring buttons for a document that is not a writer; viewing buttons and order stay',()=>{
-  const view=source.match(/    const VIEW_TOOLS = new Set\(\[[^\]]*\]\);\n/);
-  const from=source.indexOf('    const ACTIVATING = '),to=source.indexOf('    const TOOLBAR = [');
-  assert.ok(view&&from>0&&to>from,'trim rule anchors');
-  const rule=source.slice(from,to);
-  assert.match(rule,/const SCREEN_EXPORT = \['showDownloadViewportModal'\];/);
-  const authoring=vm.runInNewContext(view[0]+rule+';authoring');
+  const viewAt=statementAt('VIEW_TOOLS'),from=statementAt('ACTIVATING'),to=statementAt('TOOLBAR',from);
+  assert.ok(viewAt>=0&&from>0&&to>from,'trim rule anchors');
+  const authoring=vm.runInNewContext(source.slice(viewAt,source.indexOf(';',viewAt)+1)+'\n'+source.slice(from,to)+';authoring');
   const command={commandName:'setToolActiveToolbar',commandOptions:{toolGroupIds:['default','mpr']}};
   const buttons={Zoom:command,WindowLevel:command,Pan:command,TrackballRotate:command,Capture:'showDownloadViewportModal',Layout:undefined,
     Crosshairs:{commandName:'setToolActiveToolbar',commandOptions:{toolGroupIds:['mpr']}}};
-  // The plain buttons of the section, in its order (the split buttons are judged item by item; clinician_viewer_dom_test.py 08/24).
-  const kept=SECTION.filter(id=>id in buttons&&!authoring({id,commands:buttons[id]}));
-  assert.deepEqual(kept,['Zoom','Pan','TrackballRotate','WindowLevel','Layout','Crosshairs']);
-  assert.equal(authoring({id:'Capture',commands:[{commandName:'showDownloadViewportModal'}]}),true,'the object form too');
-  assert.equal(authoring({id:'Length',commands:command}),true);
-  assert.equal(authoring({id:'Reset',commands:'resetViewport'}),false);
+  // The plain buttons of the section, in its order (the split buttons are judged item by item; clinician_viewer_dom_test.py 08/28).
+  const kept=exporting=>SECTION.filter(id=>id in buttons&&!authoring({id,commands:buttons[id]},exporting));
+  assert.deepEqual(kept(true),['Zoom','Pan','TrackballRotate','WindowLevel','Layout','Crosshairs'],'clinician-only or unconfirmed: Capture leaves');
+  assert.deepEqual(kept(false),['Zoom','Pan','TrackballRotate','WindowLevel','Capture','Layout','Crosshairs'],'a writer: Capture stays in its place');
+  assert.deepEqual(SECTION.filter(id=>id in buttons&&!authoring({id,commands:buttons[id]})),kept(true),'the switch is on unless it is turned off');
+  for(const exporting of [true,false]){
+    assert.equal(authoring({id:'Length',commands:command},exporting),true,'an authoring tool leaves either way');
+    assert.equal(authoring({id:'Reset',commands:'resetViewport'},exporting),false,'a viewing action stays either way');
+  }
+  // The screen export is judged by its command, in the object form too and on a button with another id.
+  assert.equal(authoring({id:'Capture',commands:[{commandName:'showDownloadViewportModal'}]},true),true);
+  assert.equal(authoring({id:'SYN-Download',commands:'showDownloadViewportModal'},true),true);
+  assert.equal(authoring({id:'SYN-Download',commands:[{commandName:'showDownloadViewportModal'}]},false),false);
 });
 
-test('tech note: its Zoom entry never removes a name the toolbar labels gave',()=>{
-  assert.match(techNote,/if\(target\.getAttribute\('aria-label'\)===label&&!target\.hasAttribute\('data-kin-tool-label'\)\)target\.removeAttribute\('aria-label'\);/);
-  assert.match(techNote,/if\(!target\.hasAttribute\('aria-label'\)\)\{target\.setAttribute\('aria-label','Zoom'\);nativeLabels\.set\(target,'Zoom'\);\}/,'the Zoom entry itself is unchanged');
+// The Tech Note bridge (viewer-tech-note.js kinViewerTechNote) as the mode's onModeEnter mounts it and onModeExit stops it
+// (config/ohif.js kin.viewer-tech-note), here in an embedded viewer; its keyboard entry to the viewer's Zoom button, the focus style
+// and their clean-up are the same code in a viewer window (e2e/test_native_toolbar.py 03 runs that one).
+const enterNote=w=>{const note=w.ctx.kinViewerTechNote({},null);assert.equal(note.mount(),true,'the bridge mounts');return note;};
+function page(w){
+  const h=header(w.el,w.el('div','',...toolbar(w.el))),root=w.el('div','',h);root.attrs.set('id','root');
+  w.body.append(root);
+  return byCy(h,'Zoom');
+}
+const same=(a,b)=>a.length===b.length&&a.every((x,i)=>x===b[i]);
+
+test('tech note: mode exit takes back its focus entry, its style and the Zoom name it gave; a second entry and exit do the same',()=>{
+  const w=world();const zoom=page(w);const head=[...w.doc.head.children];
+  for(const pass of ['first','again']){
+    const note=enterNote(w);
+    const added=w.doc.head.children.filter(e=>!head.includes(e));
+    assert.ok(added.length&&added.every(e=>e.localName==='style'),pass+': the mount adds its focus style');
+    const entry=w.ctx.kinViewerFocusNativeToolbar;
+    assert.equal(entry(),true,pass);
+    assert.equal(w.doc.activeElement,zoom,pass+': keyboard focus is on the viewer\'s own Zoom button');
+    assert.equal(zoom.getAttribute('aria-label'),'Zoom',pass+': an unnamed Zoom button is named for the entry');
+    w.doc.activeElement=null;
+    note.stop();
+    assert.equal('kinViewerFocusNativeToolbar' in w.ctx,false,pass+': the entry is gone');
+    assert.equal(entry(),false,pass+': a kept reference does nothing');
+    assert.equal(w.doc.activeElement,null);
+    assert.ok(same(w.doc.head.children,head)&&added.every(e=>e.parentElement===null),pass+': its style is gone');
+    assert.equal(zoom.hasAttribute('aria-label'),false,pass+': the name it gave is taken back');
+  }
+});
+
+test('tech note: the name and description the toolbar labels gave Zoom stay through mode exit and a new entry, whichever came first',async()=>{
+  for(const first of ['toolbar labels','tech note']){
+    const w=world();const zoom=page(w);
+    const named=()=>[zoom.getAttribute('aria-label'),zoom.getAttribute('data-kin-tool-label'),zoom.getAttribute('title')];
+    let note;
+    if(first==='toolbar labels'){w.mount();note=enterNote(w);}
+    else{note=enterNote(w);assert.equal(w.ctx.kinViewerFocusNativeToolbar(),true);w.mount();}
+    assert.deepEqual(named(),['Zoom','Zoom','확대/축소'],first);
+    for(const pass of ['exit','exit after a new entry']){
+      if(pass!=='exit')note=enterNote(w);
+      w.doc.activeElement=null;
+      assert.equal(w.ctx.kinViewerFocusNativeToolbar(),true,first+', '+pass);
+      assert.equal(w.doc.activeElement,zoom,first+', '+pass+': the entry still reaches Zoom');
+      note.stop();
+      assert.deepEqual(named(),['Zoom','Zoom','확대/축소'],first+', '+pass+': the toolbar\'s name and description stay');
+      assert.equal('kinViewerFocusNativeToolbar' in w.ctx,false);
+    }
+    // The toolbar labels keep working after the exit: the user picks Zoom and its state follows.
+    byCy(w.body,'WindowLevel').setAttribute('class','');
+    zoom.setAttribute('class','bg-primary-light');
+    await tick();
+    assert.deepEqual([...named(),zoom.getAttribute('aria-pressed')],['Zoom','Zoom','확대/축소 · 사용 중','true'],first);
+    w.unmount();
+  }
 });
