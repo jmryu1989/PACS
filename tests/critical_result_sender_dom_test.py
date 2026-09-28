@@ -5,8 +5,9 @@
 -> TEST-S7-U1b-DOM (contract S7-U1p §2.3 SD01-SD09, §8.1, §16.1).
 
 The critical result (CVR) sender screen of main.html: the Mark CVR button, the Send Critical Result dialog and the Sent
-Critical Results list. The shipped critical-result-send.js and the shipped S7-U1b block of main.html (cut out as is, with
-the one renderClinical() line that calls it) run on main.html's own markup and styles with the page script stripped,
+Critical Results list. The shipped critical-result-send.js, the shipped S7-U1b block of main.html (cut out as is) and
+main.html's own renderClinical() (handed out by the browser's parser, run as shipped; see TAIL) run on main.html's own
+markup and styles with the page script stripped,
 from a synthetic origin, against an in-test server that keeps the S7-U1a rules the screen relies on (critical-result
 .service.ts: exact body keys, expectedOwner, per-request receipts that replay the stored `applied` result, pending
 duplicates with the pending record's `id`, source version = head, terminal states with `replacedBy`, revision CAS,
@@ -32,8 +33,9 @@ states, Korean explanations, which requests are sent and their bodies - never th
       connection, a 200, a 201 for another request, an unnamed 409) shows "Delivery status unknown" and Check Again and
       "Not delivered" nowhere on the page.
   sd05 Check Again resends the same bytes (same requestId and body); a replayed 201 is Delivered without a second record.
-  sd06 A->B->A and session: a late #1 answer never enables Mark CVR for a newer read (control: the file without the
-      sequence check does), a late dialog read or POST answer never paints another study's dialog, a pending send goes
+  sd06 A->B->A and session: a late #1 answer never overrides Mark CVR for a newer read (the late answer carries the other
+      state - sendable, refused, failed - so applying it would show; returned while the newer read is out and returned
+      last), a late dialog read or POST answer never paints another study's dialog, a pending send goes
       to the list line when the dialog closes; a session end, another tab's end and a 401 end the area before anything
       else and paint nothing later; another account's envelope and OWNER_CHANGED lock the area and drop the requests.
   sd07 the list: shown only when there is something pending, unknown or failed (or opened), `Pending ACK {pending}` from
@@ -122,31 +124,6 @@ def slice_between(source, start, end):
     return source[first:source.index(end, first)]
 
 
-def extract_function(source, name):
-    """`function name(...) {...}` by brace matching outside string literals (tests/worklist_arrivals_dom_test.py)."""
-    start = source.index(f"function {name}(")
-    depth, quote, escaped = 0, None, False
-    for index in range(source.index("{", start), len(source)):
-        char = source[index]
-        if quote:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-            continue
-        if char in "'\"`":
-            quote = char
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return source[start:index + 1]
-    raise ValueError(name)
-
-
 def page_html(text):
     html = re.sub(r"<script\b[^>]*>.*?</script>", "", text, flags=re.S)
     html = re.sub(r'<link rel="stylesheet" href="([^"]+)">',
@@ -154,24 +131,20 @@ def page_html(text):
     return re.sub(r"<link\b[^>]*>", "", html)
 
 
-def variant(source, edits, label):
-    for old, new, count in edits:
-        found = source.count(old)
-        if found != count:
-            raise AssertionError(f"setup: {old!r} occurs {found} times in {label}, expected {count}")
-        source = source.replace(old, new)
-    return source
-
-
 def has_hangul(text):
     return any(unicodedata.name(ch, "").startswith("HANGUL") for ch in text)
 
 
-# The shipped block (mount call) and the shipped renderClinical() line(s) that reach it, run as the page runs them.
+# The shipped block (mount call), run as the page runs it.
 BLOCK = slice_between(MAIN, "    // ── 중요 결과 발신(S7-U1b) ──", "    // ── 임상의 질문 답변(S5-U4b) ──")
-HOOK_LINES = [line for line in extract_function(MAIN, "renderClinical").split("\n") if "criticalResults" in line]
+# main.html's inline page script (the <script> elements without a src), handed to the browser as text for TAIL.
+PAGE_SCRIPT = "\n".join(re.findall(r"<script>(.*?)</script>", MAIN, flags=re.S))
+# tests/report_actions_dom_test.py runs PRELUDE + BLOCK + TAIL.replace('HOOK', '\n'.join(HOOK_LINES)). TAIL now runs the
+# shipped renderClinical() itself and has no HOOK placeholder, so there is nothing to put in.
+HOOK_LINES = ()
 # Everything the block reads from the page script, as stand-ins. KinAuth.has() admits admin to every role, as auth.js does.
-PRELUDE = """
+# The page script travels in PRELUDE, not TAIL, so report_actions' replace() on TAIL never touches it.
+PRELUDE = "\nconst synPageScript = " + json.dumps(PAGE_SCRIPT, ensure_ascii=False) + ";" + """
 const API = location.origin + '/api';
 let sess = window.synSession;
 let serverMode = window.synMode.serverMode, demoMode = false, offline = window.synMode.offline;
@@ -186,10 +159,27 @@ const KinAuth = {
   logout: async () => { window.synLogouts += 1; },
 };
 """
+# renderClinical() is main.html's own, run as shipped: whatever it does for this unit runs as the page runs it, whatever
+# the names inside. The browser's parser hands it out - the page script is compiled as the body of a function that
+# returns renderClinical before its first statement (a function declaration exists from the start of its body), so
+# nothing else of the page script runs. Every name it reads that this harness does not define (the page's other areas
+# and helpers) resolves to an inert stand-in whose calls, reads and writes do nothing.
 TAIL = """
-function renderClinical() {
-HOOK
-}
+const synInert = new Proxy(function () {}, {
+  get: (_, key) => key === Symbol.toPrimitive ? () => '' : synInert,
+  set: () => true, has: () => false, apply: () => synInert, construct: () => synInert,
+});
+const synScope = new Proxy({}, {
+  has: (_, name) => {
+    if (typeof name !== 'string') return false;
+    try { (0, eval)(name); return false; } catch (error) { return error instanceof ReferenceError; }
+  },
+  get: (_, key) => key === Symbol.unscopables ? undefined : synInert,
+  set: () => true,
+});
+const synShipped = String(new Function('return renderClinical;\\n' + synPageScript)());
+let renderClinical;
+with (synScope) { renderClinical = eval('(' + synShipped + ')'); }
 window.synPick = uid => { selectedUid = uid; renderClinical(); };
 window.synReport = (uid, version, rs, repaint) => { appState[uid] = { ...appState[uid], version, rs }; if (repaint) renderClinical(); };
 window.synOtherEnds = [];
@@ -471,8 +461,6 @@ class SenderRegionsTest(unittest.TestCase):
         self.assertEqual(UI3_BASE_SCRIPTS_SHA256, scripts_digest(restored))
         # The order of the cuts does not matter: the U1b regions do not touch the other units' markers.
         self.assertEqual(restored, without_u1b(without_u4b(without_u4c_main(MAIN))))
-        # The harness runs exactly one shipped renderClinical() line for this unit.
-        self.assertEqual(1, len(HOOK_LINES))
 
 
 class CriticalResultSenderDOMTest(unittest.TestCase):
@@ -628,8 +616,7 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
     def fault(self, kind, **spec):
         self.faults.setdefault(kind, []).append(spec)
 
-    def open_reader(self, session=None, js=None, mode=None, app=None, clock=False):
-        self.js = SHIPPED_JS if js is None else js
+    def open_reader(self, session=None, mode=None, app=None, clock=False):
         self.page.goto(ORIGIN + BASE + "main.html")
         if clock:
             self.page.clock.install()
@@ -637,7 +624,7 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
                                    "app": app or {A: {"version": 3, "rs": "A"}, B: {"version": 1, "rs": "T"}, C: {"version": 2, "rs": "A"}},
                                    "names": NAMES, "mode": mode or {"serverMode": True, "offline": False}})
         self.page.add_script_tag(url=ORIGIN + BASE + JS_NAME)
-        self.page.add_script_tag(content=PRELUDE + BLOCK + TAIL.replace("HOOK", "\n".join(HOOK_LINES)))
+        self.page.add_script_tag(content=PRELUDE + BLOCK + TAIL)
         self.assertEqual([], self.page.evaluate("() => window.synToasts"), "the block mounted")
 
     def pick(self, uid):
@@ -929,34 +916,56 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         self.assertNotIn(NOT_DELIVERED, self.view()["body"])
 
     # ── SD06 ──
+    def entry(self):
+        v = self.view()["entry"]
+        return v["disabled"], v["title"]
+
     def test_sd06a_a_late_mark_cvr_answer_never_overrides_a_newer_read(self):
-        for control in (False, True):
-            with self.subTest(control=control):
-                self.log.clear()
-                js = SHIPPED_JS if not control else variant(
-                    SHIPPED_JS, [("        if (seq !== entrySeq || uid !== target || !live(sent)) return;\n",
-                                  "        if (!live(sent)) return;\n", 2)], JS_NAME)
-                self.server = CvrServer()
-                self.fault("recipients", hold=True, apply=True)
-                self.open_reader(js=js)
-                self.pick(A)
-                first = self.take("recipients")            # A: sendable when it was asked
-                self.server.reasons[B] = "NO_PINNABLE_SOURCE"
-                self.pick(B)
-                self.entry_settled()
-                self.server.reasons[A] = "NO_ELIGIBLE_RECIPIENT"
-                self.fault("recipients", hold=True, apply=True)
-                self.pick(A)
-                second = self.take("recipients")           # A again: no eligible recipient now
-                self.release(first)
-                enabled = not self.view()["entry"]["disabled"]
-                if control:
-                    self.assertTrue(enabled, "control: the file without the sequence check enables A from the stale answer")
-                    continue
-                self.assertFalse(enabled, "the first A answer arrived after the second A read began")
-                self.release(second)
-                v = self.view()["entry"]
-                self.assertEqual((True, REASONS["NO_ELIGIBLE_RECIPIENT"]), (v["disabled"], v["title"]))
+        """A -> B -> A. The first A answer always carries the other state than the second (sendable against refused, a
+        refusal or a failure against sendable), so applying it anywhere would show on the button. It comes back while
+        the second A read is out, or after the second A answer (last)."""
+        cases = [("a late sendable answer", {}, "NO_ELIGIBLE_RECIPIENT", (True, REASONS["NO_ELIGIBLE_RECIPIENT"])),
+                 ("a late refusal", {"reason": "NO_ELIGIBLE_RECIPIENT"}, None, None),
+                 ("a late failure", {"status": 500, "body": {"message": "SYN late failure"}}, None, None)]
+        for name, first_answer, second_reason, refused in cases:
+            for last in (False, True):
+                with self.subTest(name, first_returned_last=last):
+                    self.log.clear()
+                    self.server = CvrServer()
+                    if first_answer.get("reason"):
+                        self.server.reasons[A] = first_answer["reason"]
+                    spec = {k: v for k, v in first_answer.items() if k != "reason"}
+                    self.fault("recipients", hold=True, apply="status" not in spec, **spec)
+                    self.open_reader()
+                    self.pick(A)
+                    first = self.take("recipients")
+                    self.server.reasons.pop(A, None)
+                    self.server.reasons[B] = "NO_PINNABLE_SOURCE"
+                    self.pick(B)
+                    self.entry_settled()
+                    self.assertEqual((True, REASONS["NO_PINNABLE_SOURCE"]), self.entry())
+                    if second_reason:
+                        self.server.reasons[A] = second_reason
+                    self.fault("recipients", hold=True, apply=True)
+                    self.pick(A)
+                    second = self.take("recipients")
+                    waiting = self.entry()
+                    self.assertTrue(waiting[0], "off while the newer A read is out")
+                    if not last:
+                        self.release(first)
+                        self.assertEqual(waiting, self.entry(), "the first A answer came back while the newer read was out")
+                    self.release(second)
+                    newer = self.entry()
+                    if refused:
+                        self.assertEqual(refused, newer)
+                    else:
+                        self.assertFalse(newer[0], "the newer A answer says the study can be sent")
+                    if last:
+                        self.release(first)
+                        self.assertEqual(newer, self.entry(), "the first A answer came back last")
+                    # Three #1 reads, A B A, and nothing written.
+                    self.assertEqual([A, B, A], [unquote(r["path"].split("/")[3]) for r in self.requests("recipients")])
+                    self.assertEqual([], [r for r in self.log if r["method"] != "GET"])
 
     def test_sd06b_late_dialog_answers_never_paint_another_study(self):
         self.ready_reader()
