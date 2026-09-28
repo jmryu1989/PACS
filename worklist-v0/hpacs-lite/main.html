@@ -921,6 +921,37 @@
     #cvr-send-status:is([data-state="unknown"], [data-state="checking"], [data-state="rejected"], [data-state="locked"]) .cvr-word { color: #ffb4b4; }
     #cvr-send-status[data-state="delivered"] .cvr-word { color: #b8f0cf; }
     /* ── S7-U1b 끝 ── */
+    /* ── S7-U2a 중요 결과 수신 ──
+       받는 세션(clinician·radiologist)에는 요약 줄 한 줄(Critical Results · Pending ACK · Show Received · Refresh)이 늘 서고, 본문만
+       접힌다. 요약 줄은 보낸 목록 줄(.cvr-sent-bar)과 같은 모양이라 판독 칼럼에 더하는 높이는 그 한 줄이다. 펼친 본문은 높이 상한
+       안에서 스크롤해 판독문 칸을 밀어내지 않는다. 글자는 12px 이상, 상태는 색과 함께 늘 글자로 쓴다. */
+    #cvr-inbox-p { flex: none; font-size: 12px; color: var(--kin-text); background: var(--kin-panel); border-top: 1px solid var(--kin-line2); }
+    #cvr-inbox-p[hidden], #cvr-inbox-p [hidden] { display: none !important; }
+    .cvr-inbox-bar { display: flex; align-items: center; gap: 6px; padding: 3px 8px; min-width: 0; white-space: nowrap; }
+    #cvr-inbox-badge { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--kin-muted); }
+    #cvr-inbox-badge:is([data-state="failed"], [data-state="locked"]) { color: #ffb4b4; }
+    #cvr-inbox-p button { font: inherit; font-size: 12px; min-height: 24px; padding: 2px 8px; border: 1px solid var(--kin-line2);
+      border-radius: 3px; background: var(--kin-panel2); color: var(--kin-text); cursor: pointer; }
+    #cvr-inbox-p button:disabled { opacity: .45; cursor: default; }
+    #cvr-inbox-p button:focus-visible, #cvr-inbox-p [tabindex="-1"]:focus-visible { outline: 2px solid #93c5fd; outline-offset: 1px; }
+    #cvr-inbox-body { max-height: min(40vh, 360px); overflow: auto; padding: 4px 8px 8px; border-top: 1px solid var(--kin-line2); }
+    #cvr-inbox-body p { margin: 3px 0; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #cvr-inbox-help { color: var(--kin-muted); }
+    #cvr-inbox-status[data-state="failed"], #cvr-inbox-status[data-state="locked"] { color: #ffb4b4; }
+    #cvr-inbox-attempts, #cvr-inbox-list { margin: 4px 0; padding: 0; list-style: none; }
+    #cvr-inbox-p .cvr-inbox-row, #cvr-inbox-p .cvr-inbox-line { margin: 4px 0; padding: 4px 6px; border: 1px solid var(--kin-line2); border-radius: 3px; }
+    #cvr-inbox-p .cvr-inbox-line { border-color: #7a3a3a; }
+    #cvr-inbox-p .cvr-inbox-head { font-weight: 700; }
+    #cvr-inbox-p .cvr-inbox-state { display: inline-block; padding: 0 6px; border: 1px solid var(--kin-line2); border-radius: 9px; color: #dde3ee; }
+    #cvr-inbox-p .cvr-inbox-state[data-state="created"] { color: #ffe7a8; border-color: #7a6a33; }
+    #cvr-inbox-p .cvr-inbox-state[data-state="acknowledged"] { color: #b8f0cf; border-color: #3f8a5f; }
+    #cvr-inbox-p .cvr-inbox-state:is([data-state="changed"], [data-state="unknown"], [data-state="checking"]) { color: #ffb4b4; border-color: #7a3a3a; }
+    #cvr-inbox-p .cvr-inbox-message { font-weight: 700; }
+    #cvr-inbox-p :is(.cvr-inbox-meta, .cvr-inbox-note, .cvr-inbox-detail) { color: var(--kin-muted); }
+    #cvr-inbox-p .cvr-inbox-report { margin: 4px 0; padding-left: 8px; border-left: 2px solid var(--kin-line2); }
+    #cvr-inbox-p .cvr-inbox-field { font-weight: 700; color: var(--kin-muted); }
+    #cvr-inbox-p .cvr-inbox-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+    /* ── S7-U2a 끝 ── */
   </style>
   <link rel="stylesheet" href="reading-workspace.css">
 </head>
@@ -1373,6 +1404,25 @@
             <button id="cvr-sent-more" type="button" hidden>More</button>
           </div>
         </section>
+        <!-- S7-U2a 받은 중요 결과. 받는 세션(clinician·radiologist)에는 요약 줄이 늘 서고 본문만 접힌다. 본문은 확인 대기가
+             생기거나 늘 때·읽기 실패·결과를 모르는 수신 확인에서만 스스로 열리고 스스로 닫히지 않는다. 판독 대상과 무관한 이
+             계정의 받은 목록이며 판독문을 읽거나 쓰지 않는다. -->
+        <section id="cvr-inbox-p" aria-label="Critical Results" data-state="idle" hidden>
+          <div class="cvr-inbox-bar">
+            <b id="cvr-inbox-title" tabindex="-1">Critical Results</b>
+            <span id="cvr-inbox-badge" role="status" aria-live="polite"></span>
+            <button id="cvr-inbox-toggle" type="button" aria-expanded="false" aria-controls="cvr-inbox-body">Show Received</button>
+            <button id="cvr-inbox-refresh" type="button" title="받은 목록을 서버에서 다시 읽습니다. 읽기만 하며 어떤 전달도 바꾸지 않습니다.">Refresh</button>
+          </div>
+          <div id="cvr-inbox-body" role="region" aria-label="Critical Results Details" hidden>
+            <div id="cvr-inbox-help"></div>
+            <button id="cvr-inbox-all" type="button" aria-pressed="false">Show All</button>
+            <ol id="cvr-inbox-attempts" aria-label="Unconfirmed Acknowledgements" hidden></ol>
+            <div id="cvr-inbox-status" role="status" aria-live="polite"></div>
+            <ol id="cvr-inbox-list" aria-label="Received Critical Results"></ol>
+            <button id="cvr-inbox-more" type="button" hidden>More</button>
+          </div>
+        </section>
       </div>
 
       <!-- Order List (8.2.2) — Technician 모드 -->
@@ -1716,6 +1766,7 @@
   <script src="reader-assignment.js"></script>
   <script src="consultations.js"></script>
   <script src="critical-result-send.js"></script>
+  <script src="critical-result-inbox.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
     // init()이 쿠키 세션을 한 번 판정한 뒤 session()/has()는 동기로 읽는다. 이 변수들은
@@ -8070,6 +8121,22 @@
         cite: (request, origin) => openCitePreview(request, origin),
       });
     } catch (_) { toast('영상 소견 목록을 불러오지 못했습니다. 영상 화면의 Findings를 사용하세요.', 'err'); }
+
+    // ── 중요 결과 수신(S7-U2a) ──
+    // REQ-S7-U2a-RECIPIENT-LIST/EXPLICIT-ACK/WORDING → TEST-S7-U2a-DOM (tests/critical_result_recipient_dom_test.py가 이 절을
+    // 잘라 critical-result-inbox.js와 함께 실행한다). 판독 화면의 Critical Results 패널은 판독 대상과 무관한 이 계정의 받은 목록이다.
+    // 받는 역할은 clinician 또는 radiologist를 정확히 본다 — KinAuth.has()는 admin을 모든 역할로 통과시키지만 서버는 admin만·
+    // technician만인 계정의 받은 목록을 거절한다(계약 §14). 이 절은 부팅이 세션과 서버 연결을 확인하기 전에 돌므로, 영역은 이
+    // 판정이 참이 된 뒤에 처음 읽는다. 세션 종료는 이 페이지가 맡는다: 영역의 401은 공통 종료 목록(window.kinOn401)을 부른 뒤
+    // logout 옵션으로 로그아웃을 시작하고, 페이지의 다른 로그아웃 시작점은 그 목록으로 이 영역을 끝낸다.
+    let criticalInbox = null;
+    try {
+      criticalInbox = KinCriticalResultInbox.mount({ apiBase: API, root: 'cvr-inbox-p', prefix: 'cvr-inbox', fold: true,
+        logout: () => KinAuth.logout(),
+        eligible: () => { const s = KinAuth.session(); return !!sess && serverMode && !demoMode && !offline && s?.state === 'approved'
+          && Array.isArray(s.roles) && (s.roles.includes('clinician') || s.roles.includes('radiologist')); },
+        owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; } });
+    } catch (_) { toast('중요 결과 수신 화면을 준비하지 못했습니다. 판독 작업은 계속할 수 있습니다.', 'err'); }
 
     // ── 중요 결과 발신(S7-U1b) ──
     // REQ-S7-U1b-SENDER-UI/FAILURE/ABA → TEST-S7-U1b-DOM (tests/critical_result_sender_dom_test.py가 이 절을 잘라
