@@ -28,6 +28,9 @@ LIMITS = combined.LIMITS
 # sequences, study UID) grew from 202,084 to 234,975 bytes (+23,025 catalog: 460 columns, 172 constraints, 97 indexes;
 # +9,866 rows); with the 32 migration records (4,950 bytes) and the C12L envelope (about 2.3 KB in the pure fixture) the
 # whole receipt is about 242 KB, about 20 KB under this cap. The next schema unit should expect to raise it.
+# S7-U3a (46 tables, one more ReaderAssignment row): measured the same way (43-digit UID), the product section grew from
+# 234,975 to 236,487 bytes (+1,052 catalog: 2 columns, 1 constraint, the pair key's index; +460 rows); with the 33rd
+# migration record the whole receipt is about 244 KB, about 18 KB under this cap.
 RECEIPT_LIMIT = 256*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
@@ -62,7 +65,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260924140000_gateway_retry_request/migration.sql',
               'api/prisma/migrations/20260926120000_study_questions/migration.sql',
               'api/prisma/migrations/20260926130000_study_image_requests/migration.sql',
-              'api/prisma/migrations/20260928120000_critical_result/migration.sql']
+              'api/prisma/migrations/20260928120000_critical_result/migration.sql',
+              'api/prisma/migrations/20260928130000_reader_assignment_scope/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -345,9 +349,16 @@ def expected_rows(uid):
     rows['CriticalResultReceipt'] = [dict(requestId=request, recordId=record, subjectSub=subject, action=result['action'],
         fingerprint=str(index + 1)*64, appliedRevision=result['revision'], result=result, at=STAMP)
         for index, (request, record, subject, result) in enumerate(critical_receipts)]
+    # S7-U3a (D-S7-09 a): the owner's open row and, on the same study, the tele institution's row as its channel's close
+    # left it (reader cleared, revision moved on, closedRevision = revision, closedAt set), so the composite key and both
+    # new columns carry real values through the dump. The rows satisfy 20260928130000_reader_assignment_scope's CHECK.
     rows['ReaderAssignment']=[dict(studyUid=uid,institutionId='SYNTHETIC-hospital',revision=4,
         readerSub='SYNTHETIC-sub',readerActor='SYNTHETIC-reader',readerName='SYNTHETIC reader',changedBy='SYNTHETIC-admin',
-        lastRequest='00000000-0000-4000-8000-000000000701',lastFingerprint='d'*64,updatedAt=STAMP)]
+        lastRequest='00000000-0000-4000-8000-000000000701',lastFingerprint='d'*64,updatedAt=STAMP,
+        closedRevision=None,closedAt=None),
+        dict(studyUid=uid,institutionId='SYNTHETIC-tele',revision=3,readerSub=None,readerActor=None,readerName=None,
+        changedBy='SYNTHETIC-reader',lastRequest='00000000-0000-4000-8000-000000000702',lastFingerprint='e'*64,
+        updatedAt=STAMP,closedRevision=3,closedAt=STAMP)]
     # Exercise bytea/JSON receipts, pending intent and expired tombstones in the
     # actual dump/restore. These bytes are a synthetic DB marker, not a DICOM.
     rows['ManualSr']=[dict(id='00000000-0000-4000-8000-00000000030'+str(n),studyUid=uid,
@@ -719,6 +730,17 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing critical result receipt result check'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN INSERT INTO "CriticalResultReceipt" SELECT * FROM "CriticalResultReceipt" LIMIT 1;
         RAISE EXCEPTION 'missing critical result receipt PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN INSERT INTO "ReaderAssignment" SELECT * FROM "ReaderAssignment" LIMIT 1;
+        RAISE EXCEPTION 'missing reader assignment PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "ReaderAssignment" SET "readerSub"='SYNTHETIC-sub' WHERE "closedAt" IS NOT NULL;
+        RAISE EXCEPTION 'missing reader assignment closed check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ReaderAssignment" SET "closedRevision"="revision"+1 WHERE "closedRevision" IS NOT NULL;
+        RAISE EXCEPTION 'missing reader assignment close revision check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      -- A third institution's row beside the open one on the same study is accepted (the key is the pair, not the
+      -- study alone); the raise afterwards undoes the insert, and only that raise is caught.
+      BEGIN INSERT INTO "ReaderAssignment" SELECT * FROM json_populate_record(NULL::"ReaderAssignment",
+        (SELECT (to_jsonb(t)||jsonb_build_object('institutionId','SYNTHETIC-third'))::json FROM "ReaderAssignment" t WHERE "closedAt" IS NULL));
+        RAISE EXCEPTION 'reader assignment pair key accepted'; EXCEPTION WHEN raise_exception THEN NULL; END;
       BEGIN UPDATE "StudyConsultation" SET state='Requested';
         INSERT INTO "StudyConsultation" SELECT * FROM json_populate_record(NULL::"StudyConsultation",
           (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000999'))::json FROM "StudyConsultation" t LIMIT 1));
