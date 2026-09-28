@@ -80,9 +80,12 @@ receipts that replay the stored `applied` result, revision before state, author/
   18d (S7-PINS, run rather than read) every logout path of main.html calls the end list first. The paths are
       TypeScript's answer over every script the page loads (S7-PINS fix1, Astra S7-COMMAND-R-001-F09: a path list, not
       a count of calls): each KinAuth.logout, and for the two mounts that take `logout: () => KinAuth.logout()` each
-      place the mount calls that option. Each path is made to log its own id, and every start is then run over
+      place the mount calls that option. (S7-U1b's mount passes the same option to KinCriticalResultSend.mount, a name
+      critical-result-send.js puts on window rather than a function the page declares, so its KinAuth.logout is a path
+      where it stands.) Each path is made to log its own id, and every start is then run over
       stand-ins - api()'s 401, the dictation controller's 401, the list and poll account changes, the confirmed Log out,
-      the question row's own 401, the S5-U4c queue write's own 401 - while an end() in window.kinOn401 logs the list:
+      the question row's own 401, the S5-U4c queue write's own 401, the S7-U1b sender area's own 401 (the shipped
+      critical-result-send.js under main.html's S7-U1b block) - while an end() in window.kinOn401 logs the list:
       once, before any network wait and before the logout. Each run is matched to the one path it took. The membership
       screen's Log out is the one start without the list, and it runs only after that screen has replaced the whole
       page. A path no start runs, two starts on one path, or a KinAuth used other than as KinAuth.<name> fails the case
@@ -2952,6 +2955,24 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         expect(self.page.locator(accept)).to_be_enabled()
         self.page.evaluate("s => document.querySelector(s).click()", accept)
 
+    def start_critical_result_401(self, tagged):
+        # The S7-U1b sender area's own read answered 401: the shipped critical-result-send.js and main.html's S7-U1b block
+        # (its mount, cut from the tagged page) over the stand-ins tests/critical_result_sender_dom_test.py runs it on,
+        # whose KinAuth.logout here names the path it was called for. The Sent Critical Results line stands for this
+        # radiologist session; Show Sent reads the sent list, which answers 401. The page's layout is not under test here,
+        # so the control is pressed by script.
+        from critical_result_sender_dom_test import BLOCK_MARKS, PRELUDE, SHIPPED_JS
+        self.plain[("GET", "/api/critical-results")] = (401, {"statusCode": 401, "message": "SYN expired"})
+        prelude = variant(PRELUDE, [("  logout: async () => { window.synLogouts += 1; },\n",
+                                     "  logout: async site => { window.synLogouts += 1; window.synCalls.push('logout:' + site); },\n", 1)],
+                          "tests/critical_result_sender_dom_test.py PRELUDE")
+        stand_ins = "window.synMode = { serverMode: true, offline: false }; window.synAppState = {}; window.synNames = {};\n"
+        self.start_page(stand_ins + SHIPPED_JS + "\n" + prelude + slice_between(tagged, *BLOCK_MARKS))
+        expect(self.page.locator("#cvr-sent-p")).not_to_have_attribute("hidden", "")
+        self.page.evaluate("() => document.getElementById('cvr-sent-toggle').click()")
+        # The area ended with the 401: its line is gone.
+        return lambda: expect(self.page.locator("#cvr-sent-p")).to_have_attribute("hidden", "")
+
     def start_membership_log_out(self, tagged):
         # A pending account: the membership screen replaces the page, then its Log out is clicked.
         self.start_page(SITE_AUTH + extract_function(tagged, "showMembershipState"))
@@ -2987,7 +3008,8 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         starts = [("api() 401", self.start_api_401), ("dictation 401", self.start_dictation_401),
                   ("list account change", self.start_list_owner_change), ("poll account change", self.start_poll_owner_change),
                   ("Log out", self.start_log_out), ("question row 401", self.start_question_401),
-                  ("image request write 401", self.start_image_request_401), (MEMBERSHIP, self.start_membership_log_out)]
+                  ("image request write 401", self.start_image_request_401),
+                  ("critical result 401", self.start_critical_result_401), (MEMBERSHIP, self.start_membership_log_out)]
         reached = {}
         for name, start in starts:
             with self.subTest(start=name):

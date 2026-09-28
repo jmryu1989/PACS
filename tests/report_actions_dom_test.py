@@ -6,7 +6,9 @@ REQ-S5-UI3-REPORT-ACTION-GROUPS: the report panel showed 18 buttons in two rows,
 view stay Approve, Save, Prelim and Dictate with one More menu on top, and Prev/Next at the bottom; the other thirteen
 live in four sections (Reading, Status, Editor, Print and History) of a native <details> that opens without script.
 Same elements, same ids, same labels, same handlers: the page script is not touched. Except and Mark CVR, which had no
-id, get one (b-except, b-mark-cvr) and stay disabled placeholders.
+id, get one (b-except, b-mark-cvr) and stay disabled placeholders. S7-U1b later wired Mark CVR to the critical result
+routes: it stays disabled in the markup and critical-result-send.js turns it on only while the server (#1) says the
+reading study can be sent (the last case below; tests/critical_result_sender_dom_test.py covers the reasons).
 
 Dictate stays in view although UXR-G-08 lists it under More, to keep the report fields their room: at 1366x768 an open
 More grows the row above the fields from 28px to 130-134px, and with the dictation pane open as well the three fields
@@ -138,15 +140,17 @@ DISABLED = ['b-addendum', 'b-dictate', 'b-except', 'b-mark-cvr', 'b-report-templ
 INITIAL_DISABLED = ['b-addendum', 'b-dictate', 'b-except', 'b-mark-cvr', 'b-report-template']
 # fix1 (D54): a placeholder says in Korean that it is not connected yet and that no permission blocks it, so a reader
 # does not take it for a role restriction. These phrases carry that meaning; the rest of the wording is free. S7-U1b
-# turns Mark CVR into a real control that stays disabled until the server answers; its entry then names that reason.
+# turned Mark CVR into a real control that stays disabled until the server answers: its entry names that reason - the
+# server's answer, not a role, turns it on (tests/critical_result_sender_dom_test.py SD01 covers the answers' reasons).
 PLACEHOLDER_REASONS = {
     'b-except': ('연결되지 않은', '권한 때문에 막힌 것이 아닙니다'),
-    'b-mark-cvr': ('연결되지 않은', '권한 때문에 막힌 것이 아닙니다'),
+    'b-mark-cvr': ('서버가', '답하기 전에는 켜지지 않습니다'),
 }
 # The buttons inside More, in their declared order, the Structured entry right before Print.
 MENU_ORDER = ['b-addendum', 'b-transcribe', 'b-defer', 'b-except', 'b-mark-cvr', 'b-unread', 'b-copy', 'b-paste',
               'b-clear', 'b-report-template', 'b-structured', 'b-print', 'b-history']
-# fix1: the one attribute added to base buttons, the Korean tooltips of the two placeholders (the base had none).
+# fix1: the one attribute added to base buttons, the Korean tooltips of the two placeholders (the base had none). Checked
+# on the fixed merge commit (RESULT), where Mark CVR is still the placeholder S7-U1b later wired.
 TITLES_ADDED = {
     'b-except': '판독 제외: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.',
     'b-mark-cvr': '중요 결과(CVR) 표시: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.',
@@ -819,6 +823,76 @@ class ReportActionsDOMTest(unittest.TestCase):
                     self.assertTrue(set(walked).isdisjoint(DISABLED), walked)
                 finally:
                     page.close()
+
+    # ── (e) S7-U1b: Mark CVR follows the server ──
+
+    def test_mark_cvr_is_on_only_while_the_server_says_the_study_can_be_sent(self):
+        """Disabled in the markup (no server answer yet). critical-result-send.js, mounted by main.html's shipped S7-U1b
+        block, keeps it off with the contract's reason for sendable:false and turns it on only for sendable:true; on, it
+        is a keyboard stop in the Status section between Defer and Reset to Unread, and a pointer click on it opens Send
+        Critical Result. tests/critical_result_sender_dom_test.py covers every reason, refusal and late answer."""
+        from urllib.parse import urlparse
+        from playwright.sync_api import expect
+        from critical_result_sender_dom_test import (A, BLOCK, HEADS, HOOK_LINES, INSTITUTION, JS_NAME, P, PRELUDE, RAD,
+                                                     REASONS, SETUP, SHIPPED_JS, STUDIES, TAIL, me)
+        origin, owner = 'https://report.test', [INSTITUTION, RAD['sub']]
+        sendable = {'sendable': True, 'reason': None, 'source': {**HEADS[A], 'final': True},
+                    'recipients': [{key: P[key] for key in ('sub', 'actor', 'name', 'role')}]}
+        answers = [{'sendable': False, 'reason': 'NO_PINNABLE_SOURCE', 'source': None, 'recipients': []}]
+        asked = []
+
+        def handle(route):
+            path = urlparse(route.request.url).path
+            if path == '/worklist/hpacs-lite/main.html':
+                route.fulfill(body=self.html, content_type='text/html; charset=utf-8')
+            elif path == '/worklist/hpacs-lite/' + JS_NAME:
+                route.fulfill(body=SHIPPED_JS, content_type='application/javascript; charset=utf-8')
+            elif path == f'/api/studies/{A}/critical-result-recipients':
+                asked.append(path)
+                route.fulfill(json={'owner': owner, 'uid': A, **(answers.pop(0) if answers else sendable)})
+            elif path == '/api/critical-results':
+                route.fulfill(json={'owner': owner, 'view': 'sent', 'items': [], 'nextCursor': None, 'pending': 0})
+            else:
+                route.abort()
+
+        page = self.browser.new_page(viewport={'width': 1366, 'height': 768})
+        page.set_default_timeout(4000)
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.route('**/*', handle)
+        try:
+            page.goto(origin + '/worklist/hpacs-lite/main.html')
+            page.evaluate(SETUP, {'session': me(RAD, ['radiologist']), 'studies': STUDIES, 'app': {A: {'version': 3, 'rs': 'A'}},
+                                  'names': {}, 'mode': {'serverMode': True, 'offline': False}})
+            page.add_script_tag(url=origin + '/worklist/hpacs-lite/' + JS_NAME)
+            page.add_script_tag(content=PRELUDE + BLOCK + TAIL.replace('HOOK', '\n'.join(HOOK_LINES)))
+            mark = page.locator('#b-mark-cvr')
+            expect(mark).to_be_disabled()
+            page.evaluate('u => window.synPick(u)', A)
+            expect(mark).to_have_attribute('title', REASONS['NO_PINNABLE_SOURCE'])
+            expect(mark).to_be_disabled()
+            # The report state moves on and the server now says the study can be sent.
+            page.evaluate('u => window.synReport(u, 4, "A", true)', A)
+            expect(mark).to_be_enabled()
+            self.assertEqual(2, len(asked))
+            page.locator('#b-approve').focus()
+            for _ in range(3):
+                page.keyboard.press('Tab')
+            self.assertEqual(MENU + '>summary', page.evaluate(ACTIVE))
+            page.keyboard.press('Enter')
+            enabled = page.evaluate("()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.disabled).map(b=>b.id)")
+            self.assertLess(enabled.index('b-defer'), enabled.index('b-mark-cvr'))
+            self.assertLess(enabled.index('b-mark-cvr'), enabled.index('b-unread'))
+            walked = []
+            for _ in range(len(enabled) + 1):
+                page.keyboard.press('Tab')
+                walked.append(page.evaluate(ACTIVE))
+            self.assertEqual(enabled + ['findings'], walked)
+            mark.click(timeout=2000)
+            expect(page.locator('#cvr-send')).to_be_visible()
+            self.assertEqual([], errors)
+        finally:
+            page.close()
 
 
 if __name__ == '__main__':
