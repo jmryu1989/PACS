@@ -13,7 +13,8 @@ Structure (stdlib):
   s02  the hooks are one line each (renderClinical, and the 401 list where the page starts a logout: api()'s 401, the
        confirmed Log out before its first network wait, the dictation 401, the list and poll account changes); the queue
        lives in the Order List panel and the reading line after the report footer row; neither block reads a question,
-       consultation or Connect route or writes markup strings, and neither decides ownership by an actor string.
+       consultation or Connect route or writes markup strings, and neither decides ownership by an actor string; the
+       block's logout() runs only from its write's 401.
 
 Clinician Home (clinician.html + clinician.js + auth.js served unchanged):
   c01  closed until opened (no read, button or heading); opened: #9 once, the five states, Closed with its note, handler
@@ -821,6 +822,9 @@ class ImageRequestStructureTest(unittest.TestCase):
         self.assertIn("          if (response.status === 401) {\n            expire();\n", BLOCK)
         self.assertIn("        if (ended) return;\n        end();\n"
                       "        (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} });\n        logout();\n", BLOCK)
+        # The mount's logout() is called there and nowhere else in the block, so the page-wide logout-start case
+        # (tests/clinician_question_dom_test.py test_18d, which runs that 401) reaches every way the block logs out.
+        self.assertEqual(1, len(re.findall(r"(?<![.\w])logout\(\)", BLOCK)))
         self.assertIn("      return { status: response.status, body: reply };\n", CLINICIAN_BLOCK)
         self.assertIn("    return sent.status === 201 && !!applied", CLINICIAN_BLOCK)
         # F01: the owner-changed lock is reached only through the shared account-change path - main.html's block calls the

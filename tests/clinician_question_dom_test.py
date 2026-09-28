@@ -77,11 +77,15 @@ receipts that replay the stored `applied` result, revision before state, author/
   18c (B-R-001 F1) the confirmed Log out (main.html's own handler, clicked): the row is ended before its first network
       wait - the draft write, the hold release and the logout POST, which keep their order. Control: the handler without
       the list call keeps the row up while the draft is written and while the logout POST is held.
-  18d every place in main.html that starts KinAuth.logout() calls the end list first (api()'s 401, the dictation 401, the
-      two owner-change exits, Log out before its draft write, the row's own 401, and since S5-U4bc fix2 the S5-U4c
-      queue write's own 401); the one other is the membership screen, where no question row ever read. without_u4b()
-      after without_u4c_main() leaves no kinOn401 behind. (S5-U4bc-R-001 F01: an account change the row sees goes to the
-      same list with the reason 'account-changed' - tests/clinician_request_dom_test.py c13/m14 open both areas.)
+  18d (S7-PINS, run rather than read) every place in main.html that starts KinAuth.logout() calls the end list first.
+      Each code-line call in the live file is numbered and gets its number as the argument; every start is then run
+      over stand-ins - api()'s 401, the dictation controller's 401, the list and poll account changes, the confirmed
+      Log out, the question row's own 401, the S5-U4c queue write's own 401 - and an end() in window.kinOn401 logs the
+      list: once, before any network wait and before the logout. The membership screen's Log out is the one start
+      without the list, and it runs only after that screen has replaced the whole page. A numbered call that no start
+      reaches fails the case (a new mount's 401 path needs its own start here). (S5-U4bc-R-001 F01: an account change
+      the row sees goes to the same list with the reason 'account-changed' - tests/clinician_request_dom_test.py c13/m14
+      open both areas.)
   19  (F3) Inbox -> Open Study for a question outside its study's latest 50 opens it through GET questions/:id and keeps
       it after a reply re-reads the list; a late read of an earlier choice never paints; 404, another study's thread and
       403 are explicit.
@@ -406,6 +410,69 @@ async function releaseHold() { window.synCalls.push('releaseHold:' + synRow()); 
 OTHER_PANEL = "() => { window.synOtherEnds = 0; window.kinOn401.push(() => { window.synOtherEnds += 1; }); }"
 TOGGLES = """() => { for (const id of ['question-toggle', 'question-inbox', 'question-toggle'])
   document.getElementById(id).click(); }"""
+
+# test_18d (S7-PINS): every logout start of main.html, run. logout_starts() numbers each code-line call of
+# KinAuth.logout() in the live file and passes the number as the call's argument, so SITE_AUTH's logout(site) logs which
+# start ran; END_LIST_PROBE puts an end() into window.kinOn401 that logs the list. Every stand-in logs into
+# window.synCalls, a network wait as 'wait:<name>'.
+LOGOUT_CALL = "KinAuth.logout()"
+
+
+def logout_starts(source):
+    """(`source` with each code-line KinAuth.logout() call given its number as the argument, {number: (line, code)}):
+    comment lines left out, numbered from 1 in document order. Counts calls; no statement text is pinned."""
+    lines, sites = source.split("\n"), {}
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith(("*", "//")):
+            continue
+        while LOGOUT_CALL in line:
+            sites[len(sites) + 1] = (index + 1, lines[index].strip())
+            line = line.replace(LOGOUT_CALL, f"KinAuth.logout({len(sites)})", 1)
+        lines[index] = line
+    return "\n".join(lines), sites
+
+
+SITE_AUTH = """const KinAuth = {
+  session: () => window.synSession,
+  has: role => { const s = window.synSession; return !!s && s.state === 'approved' && (s.roles.includes(role) || s.roles.includes('admin')); },
+  logout: async site => { window.synCalls.push('logout:' + site); },
+};
+"""
+END_LIST_PROBE = """() => { window.synCalls = window.synCalls || []; window.synOtherEnds = 0;
+  (window.kinOn401 = window.kinOn401 || []).push(() => { window.synOtherEnds += 1; window.synCalls.push('end-list'); }); }"""
+LOGGED_OUT = "() => (window.synCalls || []).some(call => call.startsWith('logout:'))"
+# What each start's cut of the page script reads from the rest of it, as stand-ins.
+OWNER_CHANGED_READ = "async () => { throw Object.assign(new Error('SYN owner changed'), { ownerChanged: true }); }"
+API_STAND_INS = "const API = location.origin + '/api';\n"
+DICTATION_STAND_INS = """const API = location.origin + '/api';
+const KinDictationSession = {}, KinDictationCapture = {};
+function dictationContext() { return null; }
+function dictationBlock() { return null; }
+function dictationInsert() { return false; }
+function dictationPlacement() { return ''; }
+let commitInFlight = false, insertInFlight = false;
+const KinDictation = { createController: options => { window.synDictation = options; return {}; } };
+"""
+LIST_STAND_INS = f"""let listLoadSequence = 0, commitEpoch = 0, commitInFlight = false, offline = false, serverMode = true;
+const studyPageClient = {{ read: {OWNER_CHANGED_READ}, clear: () => {{ window.synCalls.push('clear'); }} }};
+"""
+# A 50 ms interval; clear() pauses the client, so the interval reads once.
+POLL_STAND_INS = f"""let poll = null, pollGeneration = 0, serverMode = true, commitInFlight = false, commitEpoch = 0;
+const worklistRefresh = {{ seconds: () => 0.05 }};
+const studyPageClient = {{ busy: false, paused: false, read: {OWNER_CHANGED_READ},
+  clear() {{ window.synCalls.push('clear'); this.paused = true; }} }};
+"""
+LOG_OUT_STAND_INS = """const $ = s => document.querySelector(s);
+const toast = (message, kind) => { window.synToasts.push([message, kind]); };
+let insertInFlight = false;
+window.confirm = () => { window.synCalls.push('confirm'); return true; };
+const reportPreview = { close: () => { window.synCalls.push('reportPreview.close'); } };
+function closeSR() { window.synCalls.push('closeSR'); }
+function endPatientCopy() { window.synCalls.push('endPatientCopy'); }
+async function stashReport() { window.synCalls.push('wait:stashReport'); }
+async function releaseHold() { window.synCalls.push('wait:releaseHold'); }
+"""
+MEMBERSHIP = "membership screen Log out"
 
 # Another tab runs auth.js broadcastEnded(): one channel message, then a localStorage set and remove.
 BROADCAST_ENDED = """() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type: 'session-ended'}); c.close();
@@ -1003,7 +1070,7 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         expect(self.page.locator(f"{scope} [data-note-key]:not([hidden])").first).to_have_attribute("data-state", state)
 
     # Reading screen
-    def open_reader(self, session, studies=None, block=None, real_auth=False, extra=""):
+    def open_reader(self, session, studies=None, block=None, real_auth=False, extra="", kin_auth=READER_STAND_IN):
         self.me = session
         self.page.goto(ORIGIN + BASE + "main.html")
         self.page.evaluate(READER_SETUP.replace("SYN_STUDIES", json.dumps(studies or READER_STUDIES)),
@@ -1012,7 +1079,7 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
             # The shipped auth.js in place of the stand-in; its session comes from GET /api/me (self.me).
             self.page.add_script_tag(content=SHIPPED["auth.js"])
             self.assertEqual("approved", self.page.evaluate("async () => (await KinAuth.init()).state"))
-        prelude = READER_PRELUDE.replace("KIN_AUTH\n", "" if real_auth else READER_STAND_IN + "\n")
+        prelude = READER_PRELUDE.replace("KIN_AUTH\n", "" if real_auth else kin_auth + "\n")
         self.page.add_script_tag(content=prelude + (block or READER_BLOCK) + extra + "\nwindow.synPick = uid => select(uid);\n")
         self.assertEqual([], self.page.evaluate("() => window.synToasts"), "the block mounted")
 
@@ -2597,48 +2664,133 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                                      "control: and while the logout POST is held")
                     self.leave_after_the_logout_post(write, read)
 
+    # ── S7-PINS: the logout starts of main.html, each run over stand-ins (test_18d) ──
+    def start_page(self, script, session=None):
+        """main.html's markup and CSS as open_reader() serves them, one cut of the tagged page script over stand-ins,
+        and END_LIST_PROBE's end() in window.kinOn401."""
+        self.page.goto(ORIGIN + BASE + "main.html")
+        self.page.evaluate("""([session, studies, institutions]) => { window.synCalls = []; window.synToasts = [];
+          window.synLogouts = 0; window.synSession = session; window.synStudies = studies; window.synInstitutions = institutions; }""",
+                           [session or {**me(RADIOLOGIST, ["radiologist"]), "state": "approved"}, READER_STUDIES, []])
+        self.page.add_script_tag(content=script)
+        self.page.evaluate(END_LIST_PROBE)
+
+    def start_api_401(self, tagged):
+        # A request through the page's api() answered 401.
+        self.plain[("GET", "/api/syn/logout-start")] = (401, {"statusCode": 401, "message": "SYN expired"})
+        self.start_page(API_STAND_INS + SITE_AUTH + extract_function(tagged, "api"))
+        self.page.evaluate("() => { window.synApi = api('GET', '/syn/logout-start').then(() => 'resolved', e => e.status); }")
+        return lambda: self.assertEqual(401, self.page.evaluate("() => window.synApi"), "api() rejects with the 401")
+
+    def start_dictation_401(self, tagged):
+        # The controller the page creates calls onUnauthorized on a dictation request's 401.
+        cut = slice_between(tagged, "    const dictation = KinDictation.createController({", "    KinDictation.mount(")
+        self.start_page(SITE_AUTH + DICTATION_STAND_INS + cut)
+        self.page.evaluate("() => { window.synDictation.onUnauthorized(); }")
+
+    def start_list_owner_change(self, tagged):
+        # The worklist read answers for another account. load() is cut to the first line that closes at its own indent:
+        # extract_function() would stop at its default parameter's braces.
+        cut = slice_between(tagged, "    async function load(", "\n    }\n") + "\n    }\n"
+        self.start_page(SITE_AUTH + LIST_STAND_INS + cut)
+        self.page.evaluate("() => { load(); }")
+
+    def start_poll_owner_change(self, tagged):
+        # The polling read answers for another account.
+        self.start_page(SITE_AUTH + POLL_STAND_INS + extract_function(tagged, "startPolling"))
+        self.page.evaluate("() => { startPolling(); }")
+        return lambda: self.page.evaluate("() => clearInterval(poll)")
+
+    def start_log_out(self, tagged):
+        # The header's Log out, clicked and confirmed.
+        cut = slice_between(tagged, "    let loggingOut = false;\n", "    // 다른 사람이 잡거나 놓은 걸 보려면")
+        self.start_page(SITE_AUTH + LOG_OUT_STAND_INS + cut)
+        self.page.locator("#logout").click()
+
+        def order():
+            calls = self.page.evaluate("() => window.synCalls")
+            waits = [calls.index(step) for step in ("wait:stashReport", "wait:releaseHold")]
+            self.assertEqual(sorted(waits), waits, calls)
+            self.assertLess(calls.index("confirm"), calls.index("end-list"), "the list only after the confirmation")
+        return order
+
+    def start_question_401(self, tagged):
+        # The question row's own read answered 401 (the S5-U4b block, mounted as shipped).
+        self.server = QuestionServer([A, B, C])
+        self.open_reader(me(RADIOLOGIST, ["radiologist"]), block=slice_between(tagged, BLOCK_START, BLOCK_END),
+                         kin_auth=SITE_AUTH)
+        self.page.evaluate(END_LIST_PROBE)
+        self.faults.append({"kind": "list", "status": 401, "body": {"statusCode": 401, "message": "SYN expired"}})
+        self.target(A)
+
+    def start_image_request_401(self, tagged):
+        # The S5-U4c queue's write answered 401 (the block and its mount as shipped, over the page's api()).
+        from clinician_request_dom_test import MAIN_BLOCK, PRELUDE, RequestServer, item, rid, uid
+        server = RequestServer([INSTITUTION, "SYN-TECH-SUB"], "syn-technician", "SYN Technician", staff=True)
+        server.add(item(21, uid(11), "Requested"))
+        self.plain[("GET", "/api/image-requests")] = (200, server.queue({"view": "queue", "state": "active"}))
+        self.plain[("GET", f"/api/image-requests/{rid(21)}")] = server.read(rid(21))
+        self.plain[("POST", f"/api/image-requests/{rid(21)}")] = (401, {"statusCode": 401, "message": "SYN expired"})
+        prelude = variant(PRELUDE, [("  logout: async () => { window.synLogouts += 1; },\n",
+                                     "  logout: async site => { window.synLogouts += 1; window.synCalls.push('logout:' + site); },\n", 1)],
+                          "tests/clinician_request_dom_test.py PRELUDE")
+        session = {"state": "approved", "sub": "SYN-TECH-SUB", "user": "syn-technician", "displayName": "SYN Technician",
+                   "roles": ["technician"], "institution": INSTITUTION}
+        self.start_page(prelude + extract_function(tagged, "api") + "\n" + slice_between(tagged, *MAIN_BLOCK), session=session)
+        # The queue opened, the request opened, Accept: the page's layout is not under test here, so the controls are
+        # pressed by script.
+        self.page.evaluate("() => { document.getElementById('image-request-queue').open = true; }")
+        opener = f'#image-request-queue-list > li[data-id="{rid(21)}"] [data-open]'
+        expect(self.page.locator(opener)).to_have_count(1)
+        self.page.evaluate("s => document.querySelector(s).click()", opener)
+        expect(self.page.locator("#image-request-detail")).to_have_attribute("data-state", "Requested")
+        accept = '#image-request-detail button[data-action="accept"]'
+        expect(self.page.locator(accept)).to_be_enabled()
+        self.page.evaluate("s => document.querySelector(s).click()", accept)
+
+    def start_membership_log_out(self, tagged):
+        # A pending account: the membership screen replaces the page, then its Log out is clicked.
+        self.start_page(SITE_AUTH + extract_function(tagged, "showMembershipState"))
+        self.page.evaluate("() => showMembershipState('pending')")
+        left = self.page.evaluate("() => ({children: [...document.body.children].map(e => e.tagName),"
+                                  " buttons: document.querySelectorAll('button').length})")
+        self.assertEqual({"children": ["MAIN"], "buttons": 1}, left, "the membership screen replaced the whole page")
+        self.page.locator("button").click()
+
     def test_18d_every_logout_start_in_main_html_calls_the_end_list_first(self):
-        # Every code line of main.html that starts KinAuth.logout(), in order (comment lines left out).
-        starts = [line.strip() for line in MAIN.split("\n")
-                  if "KinAuth.logout()" in line and not line.lstrip().startswith(("*", "//"))]
-        self.assertEqual([
-            "await KinAuth.logout();",  # api()
-            f"onUnauthorized: () => {{ {END_401} return KinAuth.logout(); }},",  # the dictation controller's 401
-            f"if (e.ownerChanged) {{ studyPageClient.clear(); {END_401} await KinAuth.logout(); return; }}",  # list load
-            # the S5-U4c queue's writes keep the HTTP status outside api() (S5-U4bc-R-001 F02); its mount's logout runs
-            # only from that write's 401 (expire, checked below)
-            "imageRequests = mountImageRequests({ api, apiBase: API, logout: () => KinAuth.logout(),",
-            "await KinAuth.logout();",  # Log out
-            f"if (e.ownerChanged) {{ studyPageClient.clear(); {END_401} await KinAuth.logout(); return; }}",  # polling
-            "studyQuestions = mountStudyQuestions({ apiBase: API, logout: () => KinAuth.logout(), current: () => selectedUid,",
-            'logout.addEventListener("click", () => KinAuth.logout());',  # the membership screen
-        ], starts)
-        # api(): on the 401 line, before the await.
-        self.assertIn("      if (res.status === 401) {\n" + HOOK_401 + "        await KinAuth.logout();\n", API_FN)
-        # Log out: after the confirmation and the local closes, before its first network wait; the order is kept.
-        marks = [LOG_OUT_HANDLER.index(s) for s in ("if (!confirm(", "endPatientCopy();", END_401, "await stashReport();",
-                                                     "await releaseHold();", "await KinAuth.logout();")]
-        self.assertEqual(sorted(marks), marks)
-        self.assertEqual((1, 1), (LOG_OUT_HANDLER.count(END_401), MAIN.count("    let loggingOut = false;\n")))
-        self.assertTrue(self.log_out_hook.endswith(HOOK_LOG_OUT[1]))
-        # The row's own 401 (its mount's logout runs only from expire()): end(), the list, then the logout once.
-        self.assertIn("        if (ended) return;\n        end();\n"
-                      "        (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} });\n        logout();\n",
-                      READER_BLOCK)
-        self.assertEqual(1, READER_BLOCK.count("      (window.kinOn401 = window.kinOn401 || []).push(end);\n"))
-        # The S5-U4c queue write's 401 the same way: its area, the list, then the logout once; logout() is called nowhere else.
-        from clinician_request_dom_test import BLOCK as U4C_BLOCK
-        from clinician_request_dom_test import without_u4c_main
-        self.assertIn("        if (ended) return;\n        end();\n"
-                      "        (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} });\n        logout();\n",
-                      U4C_BLOCK)
-        self.assertEqual(1, len(re.findall(r"(?<![.\w])logout\(\)", U4C_BLOCK)))
-        # The membership screen (a pending or invalid account) is the one start without the list: allowed() needs
-        # KinAuth.has(), false for such a session, so the row never read, and the page body is replaced there.
-        self.assertIn("document.body.replaceChildren(panel);", extract_function(MAIN, "showMembershipState"))
-        # without_u4b() after without_u4c_main() (which cuts the five shared lines) takes every S5-U4b and S5-U4c change
-        # back out (the UI2/UI3 byte pins).
-        self.assertNotIn("kinOn401", without_u4b(without_u4c_main(MAIN)))
+        tagged, sites = logout_starts(MAIN)
+        starts = [("api() 401", self.start_api_401), ("dictation 401", self.start_dictation_401),
+                  ("list account change", self.start_list_owner_change), ("poll account change", self.start_poll_owner_change),
+                  ("Log out", self.start_log_out), ("question row 401", self.start_question_401),
+                  ("image request write 401", self.start_image_request_401), (MEMBERSHIP, self.start_membership_log_out)]
+        reached = {}
+        for name, start in starts:
+            with self.subTest(start=name):
+                self.plain, self.faults, self.holding, self.held = {}, [], set(), []
+                after = start(tagged)
+                self.wait_until(lambda: self.page.evaluate(LOGGED_OUT), f"{name}: a logout")
+                self.settle()
+                calls = self.page.evaluate("() => window.synCalls")
+                logouts = [call for call in calls if call.startswith("logout:")]
+                self.assertEqual(1, len(logouts), f"{name}: one logout: {calls}")
+                site = int(logouts[0].split(":", 1)[1])
+                self.assertIn(site, sites)
+                self.assertNotIn(site, reached.values(), f"{name} reached a start another case already ran")
+                reached[name] = site
+                if name == MEMBERSHIP:
+                    # Nothing of the page is left to end: the case checked the replaced body before the click.
+                    self.assertNotIn("end-list", calls)
+                else:
+                    # The list once, before any network wait and before the logout.
+                    self.assertEqual(1, calls.count("end-list"), f"{name}: {calls}")
+                    first_wait = next((n for n, call in enumerate(calls) if call.startswith(("wait:", "logout:"))))
+                    self.assertLess(calls.index("end-list"), first_wait, f"{name}: {calls}")
+                if after is not None:
+                    after()
+        print("logout starts:", {name: (site, sites[site][0]) for name, site in reached.items()})
+        # Every numbered call of main.html was run by one of the starts above.
+        self.assertEqual({}, {site: where for site, where in sites.items() if site not in reached.values()},
+                         "a KinAuth.logout() in main.html that no start here runs: add its start (a new mount's 401 too)")
 
     def test_19_reader_inbox_opens_a_thread_outside_the_latest_fifty(self):
         # B: the chosen question is the oldest; 50 newer ones (answered, so not in the Open Inbox) fill B's latest 50.
