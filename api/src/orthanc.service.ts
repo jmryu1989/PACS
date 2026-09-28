@@ -9,6 +9,16 @@ function isStudyLookupKey(value: unknown): value is string {
     && !reservedStudyKeys.has(value);
 }
 
+// S7-U4a header reads put an Orthanc resource id into a path: only Orthanc's own id shape passes.
+const ORTHANC_RESOURCE_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/;
+function orthancResourceId(value: unknown): string {
+  if (typeof value !== 'string' || !ORTHANC_RESOURCE_ID.test(value)) throw new BadRequestException('원본 식별이 올바르지 않습니다');
+  return value;
+}
+// A thin-slice series lists thousands of instances and an enhanced multi-frame header carries per-frame groups;
+// the viewer's 256 KiB bound would turn such a study into a failed read, so these reads take 16 MiB.
+const CONTEXT_READ_LIMIT = 16777216;
+
 /**
  * Orthanc(DICOMweb) 클라이언트.
  *
@@ -35,8 +45,11 @@ export class OrthancService {
     this.auth = 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
   }
 
-  /** New persistence validates original tags without holding a database lock or buffering an unbounded response. */
-  private async viewerJson(path: string, body?: string, signal?: AbortSignal): Promise<any> {
+  /**
+   * New persistence validates original tags without holding a database lock or buffering an unbounded response.
+   * `limit` stays 256 KiB for every viewer read; only the S7-U4a header reads below pass a larger bound.
+   */
+  private async viewerJson(path: string, body?: string, signal?: AbortSignal, limit = 262144): Promise<any> {
     let response: Response, reader: ReadableStreamDefaultReader<Uint8Array>;
     let failure: ViewerSourceFailure = 'unexpected', timedOut = false;
     // Keep cancellation wired for the entire streamed body, not just until
@@ -66,7 +79,7 @@ export class OrthancService {
         while (true) {
           const { done, value } = await reader.read(); if (done) break;
           total += value.byteLength;
-          if (total > 262144) { failure = 'size_limit'; throw new Error('limit'); }
+          if (total > limit) { failure = 'size_limit'; throw new Error('limit'); }
           chunks.push(value);
         }
         controller.signal.throwIfAborted();
@@ -267,6 +280,38 @@ export class OrthancService {
     if (!Array.isArray(rows) || rows.length !== 1 || OrthancService.tag(rows[0], '0020000D') !== uid)
       throw new BadRequestException('출력할 원본 검사를 확인할 수 없습니다');
     return rows[0];
+  }
+
+  // ── S7-U4a CTX-TAGS (계약 S7-U4p §5.4): 기준 검사의 원본 영상 인스턴스 **한 개**의 DICOM 헤더 ──
+  // 요청 태그 다섯 개는 Orthanc 색인 태그가 아니라서(config/orthanc.json에 ExtraMainDicomTags가 없다) QIDO includefield로는
+  // "헤더에 없음"과 "색인이 주지 않음"을 가를 수 없다. 그래서 저장된 파일의 헤더를 읽는다. 여기는 Orthanc 답을 그대로
+  // 돌려주기만 하고, 어느 시리즈·인스턴스를 고를지와 답의 모양은 clinical-context-policy.ts가 판정한다. 모두 GET/조회다.
+
+  /** /tools/lookup 답 그대로. 기준 검사의 Orthanc id를 찾는 데 쓴다. */
+  async contextLookup(studyUid: string): Promise<any> {
+    return this.viewerJson('/tools/lookup', studyUid);
+  }
+
+  /** 검사의 시리즈 목록. 시리즈마다 MainDicomTags의 Modality·SeriesInstanceUID와 인스턴스 id가 온다. */
+  async contextSeries(orthancStudyId: string): Promise<any> {
+    return this.viewerJson(`/studies/${orthancResourceId(orthancStudyId)}/series`, undefined, undefined, CONTEXT_READ_LIMIT);
+  }
+
+  /** 시리즈의 인스턴스 목록. 인스턴스마다 MainDicomTags.SOPInstanceUID가 온다. */
+  async contextInstances(orthancSeriesId: string): Promise<any> {
+    return this.viewerJson(`/series/${orthancResourceId(orthancSeriesId)}/instances`, undefined, undefined, CONTEXT_READ_LIMIT);
+  }
+
+  /**
+   * 인스턴스 한 개의 헤더 전체(파일 기반 /tags, 요소마다 Type·Value). Orthanc는 256자를 넘는 값을 TooLong으로 가리므로
+   * 요청 태그는 ignore-length로 원문 전체를 받는다. 형식은 8자리 hex를 쉼표로 잇는 것이다 — "0032,1030"처럼 쉼표가 든
+   * 태그 표기는 쉼표에서 갈라져 Orthanc 1.12.5가 500으로 답했다(합성 자료를 넣은 Orthanc 24.12.0 이미지에서 관측).
+   */
+  async contextHeader(orthancInstanceId: string, tags: readonly string[]): Promise<any> {
+    if (!Array.isArray(tags) || !tags.length || tags.some(tag => typeof tag !== 'string' || !/^[0-9A-F]{8}$/i.test(tag)))
+      throw new BadRequestException('헤더 태그 목록이 올바르지 않습니다');
+    return this.viewerJson(`/instances/${orthancResourceId(orthancInstanceId)}/tags?ignore-length=${tags.join(',')}`,
+      undefined, undefined, CONTEXT_READ_LIMIT);
   }
 
   /** SOP Instance UID를 Orthanc 내부 ID로 찾는다. 기관 판정은 호출자가 Study로 환원한 뒤 한다. */

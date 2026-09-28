@@ -43,7 +43,10 @@ export class StudyAccessService {
       return {revision:rows[0].revision,policy,windowOpen:accessWindowOpen(policy),needsInstitutionReview:false,
         management:{reason:rows[0].reason??'',updatedBy:rows[0].updatedBy??null,updatedAt:rows[0].updatedAt??null}};
     } catch(e) {
-      throw new ServiceUnavailableException('검사 접근 조건을 확인하지 못했습니다. 잠시 후 다시 시도하세요');
+      // Every caller keeps this one body and no code/meta of its own, so their own busy mappings still see what they saw.
+      // The original error rides only as the cause: a caller that owns the transaction can tell a lock or timeout from a
+      // malformed policy without DB text reaching any reply. The description keeps the body's `error` field.
+      throw new ServiceUnavailableException('검사 접근 조건을 확인하지 못했습니다. 잠시 후 다시 시도하세요',{cause:e,description:'Service Unavailable'});
     }
   }
   async unchanged(c:Caller,previous:AccessSnapshot) {

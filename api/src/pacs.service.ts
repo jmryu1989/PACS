@@ -516,6 +516,11 @@ export class PacsService implements OnModuleInit {
     return this.institutions.find(i => i.id === id)?.name ?? '(미배정)';
   }
 
+  /** S7-U4a Clinical Context가 소유 기관을 워크리스트 행의 institutionName과 같은 표시 이름으로 싣는다(계약 S7-U4p §5.3). */
+  institutionName(id: string | null) {
+    return this.instName(id);
+  }
+
   private audit(actor: string, action: string, target: string, detail?: any) {
     return this.prisma.auditLog.create({
       data: { actor: actor || 'unknown', action, target, detail: dump(detail) },
