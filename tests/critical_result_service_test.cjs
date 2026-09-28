@@ -1,6 +1,7 @@
 'use strict';
-/* TEST-S7-U1a-SERVICE / TEST-S7-U1a-MATRIX (pure half): the compiled critical result policy and service over a stub
- * store, a recording Keycloak and a recording Orthanc (contract S7-U1p section 2.3 SV01-SV14).
+/* TEST-S7-U1a-SERVICE / TEST-S7-U1a-MATRIX (pure half): the compiled critical result policy, and the compiled service
+ * over a real disposable PostgreSQL, a recording Keycloak and a recording Orthanc (contract S7-U1p section 2.3
+ * SV01-SV14). SV11's source check is tests/critical_result_source_test.py.
  *
  * REQ-S7-U1a-RECORD / REQ-S7-U1a-SOURCE-PIN / REQ-S7-U1a-AUTHZ / REQ-S7-U1a-IDEMPOTENCY / REQ-S7-U1a-RECIPIENT-MATRIX /
  * REQ-S7-U1a-AUDIT-ATTRIBUTION / REQ-S7-U1p-RECIPIENT-CLASS / REQ-S7-U1p-IDENTITY / REQ-S7-U1p-DEDUP /
@@ -8,20 +9,28 @@
  *   -> RISK-S7-U1p-DRAFT-OR-LATEST / RISK-S7-U1p-FALSE-ACK / RISK-S7-U1p-WIDENING / RISK-S7-CVR-WRONG-RECIPIENT /
  *      RISK-S7-CVR-STALE-SOURCE / RISK-S7-CVR-PROXY-ACK / RISK-S7-CVR-ACK-CANCEL-RACE / RISK-S7-CVR-REVOKED-ACK /
  *      RISK-S7-CVR-PHI-IN-AUDIT / RISK-S7-CVR-SOURCE-BYPASS / RISK-S7-U1p-CLASS-WIDENING / RISK-S7-U1p-STALE-IDENTITY /
- *      RISK-S7-U1p-DUPLICATE-PENDING / RISK-S7-U1p-FALSE-UNDELIVERED
+ *      RISK-S7-U1p-DUPLICATE-PENDING / RISK-S7-U1p-FALSE-UNDELIVERED / RISK-S7-CVR-COUNT-LEAK
  *   -> TEST-S7-U1a-SERVICE (this file).
  *
  * The expected values below are the contract's tables (M-S7-CVR and the R rows of section 4.2, state-machine.json
- * transitions and refusals, the section 3.3/3.4/11 key sets, section 7.1 replay sequences), written out here as literals;
- * none of them is read back from the implementation. The real StudyAccessService (compiled) decides access; Prisma,
- * Keycloak and Orthanc are stubs. The stub answers the statements the service sends by the table they name and keeps
- * PostgreSQL's two behaviours the contract relies on: a RepeatableRead transaction reads the store as it was when it
- * started, and FOR UPDATE on StudyState/CriticalResult waits for the holder's transaction to end (ReadCommitted re-reads).
- * Every Keycloak, Orthanc and transaction boundary is logged in one ordered list.
- * Container only (kin-api image, /app/dist), as the other compiled service tests.
+ * transitions and refusals, the section 3.3/3.4/11 key sets, section 6.2 lists and counts, section 7.1 replay sequences),
+ * written out here as literals; none of them is read back from the implementation.
+ *
+ * The service cases run the compiled service's own SQL against PostgreSQL (S7-U1a-R-001-F03: a stub that sorted the
+ * service's statements by their text broke on an equivalent alias or spacing and could not see what a statement read).
+ * KIN_CRITICAL_RESULT_DATABASE_URL names a disposable server's database kin_critical_result_test, which must hold no
+ * table when this file starts: the file applies the image's migrations with `prisma migrate deploy` (as the production
+ * start does), checks that every migration directory applied, and truncates the rows it writes between cases. It never
+ * opens another database. PostgreSQL itself provides the RepeatableRead snapshots, the FOR UPDATE waits, the partial
+ * unique index and the jsonb receipts the contract relies on. The real StudyAccessService decides access over the same
+ * database; Keycloak and Orthanc are recording stubs, and every Keycloak call, Orthanc call and transaction boundary is
+ * logged in one ordered list. Container only (kin-api image: /app/dist, /app/prisma and the Prisma CLI).
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const { execFileSync } = require('node:child_process');
 const { from, lastValueFrom } = require('/app/node_modules/rxjs');
 const { ConflictException, ServiceUnavailableException } = require('/app/node_modules/@nestjs/common');
 const P = require('/app/dist/critical-result-policy');
@@ -53,7 +62,6 @@ const owner = c => [c.institution, c.sub];
 const code = (status, value) => e => typeof e?.getStatus === 'function' && e.getStatus() === status
   && (value === undefined || e.getResponse()?.code === value);
 const json = value => JSON.parse(JSON.stringify(value));
-const unique = (name, target) => Object.assign(new Error('SYNTHETIC unique violation ' + name), { code: 'P2002', meta: { target } });
 
 const MESSAGE = 'SYNTHETIC-MESSAGE-TEXT critical finding';
 const REASON = 'SYNTHETIC-CANCEL-REASON wrong recipient';
@@ -61,169 +69,121 @@ const HEAD_BODY = 'SYNTHETIC-CURRENT-REPORT-BODY';   // Report row (current body
 const DRAFT_BODY = 'SYNTHETIC-PRIVATE-DRAFT';         // ReportDraft: never a source
 const pinnedText = v => 'SYNTHETIC-PINNED-V' + v;
 
-/**
- * One synthetic store and its stubs. `log` holds, in order: tx:start / tx:end / tx:rollback, kc:<method> and
- * orthanc:<method>. Writes inside a transaction keep an undo entry so a refused transaction leaves nothing behind.
- */
-function world({ policies = {} } = {}) {
-  const log = [], sqls = [], touched = new Set(), transactions = [];
-  const store = { studies: new Map(), reports: new Map(), versions: new Map(), drafts: new Map(), records: new Map(), events: [],
-    receipts: new Map(), audits: [], policies: new Map(), updates: 0 };
-  for (const [name, policy] of Object.entries(policies))
-    store.policies.set(SUBS[name], { institution: INST, revision: 1, policy, reason: '', updatedBy: null, updatedAt: null });
-  const locks = new Map();
-  const w = { log, sqls, touched, transactions, store };
+// ── the disposable database ──
 
-  const study = (uid, institutionId = INST, extra = {}) => store.studies.set(uid, { uid, institutionId, teleInstitutionId: null, rs: 'W',
-    preDoc: null, preReviewer: null, ov: null, ...extra });
-  w.study = study;
-  /** commitReport's effect on the rows this service reads: a larger version, the head, RS and the P pair. */
-  w.commit = (uid, action, { author = actorOf('S'), reviewer = null, discard = false } = {}) => {
-    const versions = [...store.versions.values()].filter(v => v.uid === uid).map(v => v.version);
-    let version = (versions.length ? Math.max(...versions) : 0) + 1;
+const DATABASE = 'kin_critical_result_test';
+// Every table a case writes, directly or through the service; CASCADE empties whatever else references them.
+const OWNED_TABLES = ['CriticalResultEvent', 'CriticalResultReceipt', 'CriticalResult', 'AuditLog', 'ReportDraft', 'ReportVersion',
+  'Report', 'StudyAccessRevision', 'StudyAccessPolicy', 'StudyState', 'Institution'];
+let prepared = null;
+
+/** The one PrismaService of this file, on a database this file migrated itself from empty. */
+function database() {
+  prepared ??= (async () => {
+    const url = process.env.KIN_CRITICAL_RESULT_DATABASE_URL;
+    assert.ok(url, 'the service cases need a disposable PostgreSQL: set KIN_CRITICAL_RESULT_DATABASE_URL to its ' + DATABASE + ' database');
+    assert.equal(new URL(url).pathname, '/' + DATABASE, 'refusing any database but the disposable ' + DATABASE);
+    process.env.DATABASE_URL = url;
+    const { PrismaService } = require('/app/dist/prisma.service');
+    const base = new PrismaService();
+    await base.$connect();
+    const [{ tables }] = await base.$queryRawUnsafe(`SELECT count(*)::int AS tables FROM pg_tables WHERE schemaname = 'public'`);
+    assert.equal(tables, 0, 'refusing a database that already holds tables: this file empties the tables it writes');
+    execFileSync('/app/node_modules/.bin/prisma', ['migrate', 'deploy', '--schema', '/app/prisma/schema.prisma'],
+      { cwd: '/app', env: { ...process.env, DATABASE_URL: url, HOME: os.tmpdir(), CHECKPOINT_DISABLE: '1' }, stdio: 'pipe' });
+    const applied = await base.$queryRawUnsafe(`SELECT migration_name FROM _prisma_migrations
+      WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`);
+    const folders = fs.readdirSync('/app/prisma/migrations', { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name).sort();
+    assert.deepEqual(applied.map(row => row.migration_name).sort(), folders, 'every migration of the image applied');
+    return base;
+  })();
+  return prepared;
+}
+test.after(async () => { if (prepared) await (await prepared).$disconnect(); });
+
+/**
+ * One synthetic world on the database: the owned tables emptied, three studies, two institutions, the policies given,
+ * and the service wired to a recording view of the real client. `log` holds, in order: tx:start / tx:end / tx:rollback,
+ * kc:<method> and orthanc:<method>; `touched` the client members the services reached (root.* outside a transaction,
+ * tx.* inside one). The harness itself reads and writes through `base`, which is not recorded.
+ */
+async function world({ policies = {} } = {}) {
+  const base = await database();
+  await base.$executeRawUnsafe(`TRUNCATE ${OWNED_TABLES.map(t => '"' + t + '"').join(', ')} RESTART IDENTITY CASCADE`);
+  const log = [], touched = new Set(), transactions = [];
+  const w = { log, touched, transactions, base, onRecordCreate: null };
+  await base.$executeRaw`INSERT INTO "Institution" (id, name) VALUES (${INST}, 'SYNTHETIC A'), (${OTHER}, 'SYNTHETIC B')`;
+  for (const [name, policy] of Object.entries(policies))
+    await base.$executeRaw`INSERT INTO "StudyAccessPolicy" (institution, subject, revision, policy, reason, "updatedBy", "updatedAt")
+      VALUES (${INST}, ${SUBS[name]}, 1, ${JSON.stringify(policy)}::jsonb, 'SYNTHETIC policy', 'SYNTHETIC-admin', now())`;
+  w.study = async (uid, institutionId = INST, tele = null) =>
+    base.$executeRaw`INSERT INTO "StudyState" (uid, "institutionId", "teleInstitutionId", "updatedAt") VALUES (${uid}, ${institutionId}, ${tele}, now())`;
+  await w.study(UID); await w.study(UID2); await w.study(TELE_UID, OTHER, INST);
+
+  /** commitReport's effect on the rows this service reads: the next version row, the Report head, RS, the P pair, a draft. */
+  w.commit = async (uid, action, { author = actorOf('S'), reviewer = null, discard = false } = {}) => {
+    const [{ top }] = await base.$queryRaw`SELECT COALESCE(max(version), 0)::int AS top FROM "ReportVersion" WHERE uid = ${uid}`;
+    let version = top + 1;
     const at = new Date(Date.UTC(2026, 8, 28, 0, 0, version));
-    if (action === 'reset' && discard) {
-      store.versions.set(uid + ':' + version, { uid, version, action: 'discarded', author, at, findings: pinnedText(version), conclusion: '', recommendation: '' });
-      version += 1;
-    }
+    const row = async (n, act, findings, conclusion) => base.$executeRaw`INSERT INTO "ReportVersion"
+      (uid, version, action, findings, conclusion, recommendation, author, at) VALUES (${uid}, ${n}, ${act}, ${findings}, ${conclusion}, '', ${author}, ${at})`;
+    if (action === 'reset' && discard) { await row(version, 'discarded', pinnedText(version), ''); version += 1; }
     const empty = action === 'reset';
-    store.versions.set(uid + ':' + version, { uid, version, action, author, at, findings: empty ? '' : pinnedText(version),
-      conclusion: empty ? '' : 'SYNTHETIC conclusion v' + version, recommendation: '' });
-    store.reports.set(uid, { uid, version, findings: HEAD_BODY, conclusion: HEAD_BODY, recommendation: HEAD_BODY });
-    const s = store.studies.get(uid);
-    s.rs = { save: 'T', approve: 'A', addendum: 'A', reset: 'W', preliminary: s.rs === 'P' ? 'P' : 'P', defer: 'H' }[action];
-    if (action === 'save' && s.preDoc) s.rs = 'P';
-    if (action === 'preliminary') { s.preDoc = author; s.preReviewer = reviewer; }
-    if (action === 'reset' || action === 'approve') { s.preDoc = null; s.preReviewer = null; }
-    store.drafts.set(uid, { uid, findings: DRAFT_BODY });
+    await row(version, action, empty ? '' : pinnedText(version), empty ? '' : 'SYNTHETIC conclusion v' + version);
+    await base.$executeRaw`INSERT INTO "Report" (uid, findings, conclusion, recommendation, version, "updatedAt")
+      VALUES (${uid}, ${HEAD_BODY}, ${HEAD_BODY}, ${HEAD_BODY}, ${version}, now())
+      ON CONFLICT (uid) DO UPDATE SET version = EXCLUDED.version, "updatedAt" = now()`;
+    const [s] = await base.$queryRaw`SELECT rs, "preDoc", "preReviewer" FROM "StudyState" WHERE uid = ${uid}`;
+    let rs = { save: 'T', approve: 'A', addendum: 'A', reset: 'W', preliminary: 'P', defer: 'H' }[action];
+    let preDoc = s.preDoc, preReviewer = s.preReviewer;
+    if (action === 'save' && preDoc) rs = 'P';
+    if (action === 'preliminary') { preDoc = author; preReviewer = reviewer; }
+    if (action === 'reset' || action === 'approve') { preDoc = null; preReviewer = null; }
+    await base.$executeRaw`UPDATE "StudyState" SET rs = ${rs}, "preDoc" = ${preDoc}, "preReviewer" = ${preReviewer}, "updatedAt" = now() WHERE uid = ${uid}`;
+    await base.$executeRaw`INSERT INTO "ReportDraft" (uid, author, findings, conclusion, recommendation, "updatedAt")
+      VALUES (${uid}, 'syn-draft-author@synthetic.test', ${DRAFT_BODY}, ${DRAFT_BODY}, ${DRAFT_BODY}, now())
+      ON CONFLICT (uid, author) DO UPDATE SET findings = EXCLUDED.findings, "updatedAt" = now()`;
     return version;
   };
-  study(UID); study(UID2); study(TELE_UID, OTHER, { teleInstitutionId: INST });
+  w.head = async uid => (await base.$queryRaw`SELECT version FROM "Report" WHERE uid = ${uid}`)[0]?.version ?? 0;
+  w.record = async recordId => (await base.$queryRaw`SELECT * FROM "CriticalResult" WHERE id = ${recordId}::uuid`)[0] ?? null;
+  w.receipt = async requestId => (await base.$queryRaw`SELECT * FROM "CriticalResultReceipt" WHERE "requestId" = ${requestId}::uuid`)[0] ?? null;
+  w.move = async (uid, institution) => base.$executeRaw`UPDATE "StudyState" SET "institutionId" = ${institution} WHERE uid = ${uid}`;
+  w.audits = async () => base.$queryRaw`SELECT actor, action, target, detail FROM "AuditLog" WHERE action = ${CRITICAL_RESULT_AUDIT_ACTION} ORDER BY id`;
+  w.events = async recordId => base.$queryRaw`SELECT seq, event, revision FROM "CriticalResultEvent" WHERE "recordId" = ${recordId}::uuid ORDER BY seq`;
+  w.receipts = async () => base.$queryRaw`SELECT * FROM "CriticalResultReceipt" ORDER BY "requestId"`;
+  /** `updates` = records a terminal event moved to revision 2 (a record is written once and updated at most once). */
+  w.count = async () => (await base.$queryRaw`SELECT (SELECT count(*)::int FROM "CriticalResult") AS records,
+    (SELECT count(*)::int FROM "CriticalResultEvent") AS events, (SELECT count(*)::int FROM "CriticalResultReceipt") AS receipts,
+    (SELECT count(*)::int FROM "AuditLog" WHERE action = ${CRITICAL_RESULT_AUDIT_ACTION}) AS audits,
+    (SELECT count(*)::int FROM "CriticalResult" WHERE revision = 2) AS updates`)[0];
 
-  const count = () => ({ records: store.records.size, events: store.events.length, receipts: store.receipts.size, audits: store.audits.length,
-    updates: store.updates });
-  w.count = count;
-
-  const acquire = async (key, tx) => {
-    for (;;) {
-      const held = locks.get(key);
-      if (!held) break;
-      if (held.tx === tx) return;
-      await held.released;
-    }
-    let release;
-    const released = new Promise(resolve => { release = resolve; });
-    locks.set(key, { tx, released, release });
-    tx.held.push(key);
-  };
-  const releaseAll = tx => { for (const key of tx.held) { const held = locks.get(key); locks.delete(key); held.release(); } tx.held = []; };
-
-  const kind = sql => sql.includes('pg_advisory') ? 'advisory'
-    : sql.includes('"StudyAccessPolicy"') ? 'policy'
-      : sql.includes('FROM "StudyState"') ? 'study'
-        : sql.includes('FROM "Report" r') ? 'head'
-          : sql.includes('FROM "ReportVersion" WHERE') ? 'pinned'
-            : sql.includes('"supersedesId"=') && !sql.includes('JOIN') ? 'replacement'
-              : sql.includes("state='created'") && sql.includes('"senderSub"=') && !sql.includes('JOIN') ? 'pending'
-                : sql.includes('FROM "CriticalResult" WHERE id=') ? 'record' : 'unknown';
-  const query = async (view, tx, strings, values) => {
-    const sql = strings.join('?'), k = kind(sql);
-    sqls.push(k);
-    if (sql.includes('FOR UPDATE')) await acquire(k + ':' + values[0], tx);
-    if (k === 'advisory') return [{ locked: 1 }];
-    if (k === 'policy') { const row = view.policies.get(values[0]); return row ? [structuredClone(row)] : []; }
-    if (k === 'study') { const row = view.studies.get(values[0]); return row ? [structuredClone(row)] : []; }
-    if (k === 'head') {
-      const report = view.reports.get(values[0]);
-      if (!report) return [];
-      const v = view.versions.get(values[0] + ':' + report.version);
-      return [{ headVersion: report.version, headAction: v?.action ?? null, headAuthor: v?.author ?? null, headAt: v?.at ?? null }];
-    }
-    if (k === 'pinned') {
-      const v = view.versions.get(values[0] + ':' + values[1]);
-      return v ? [{ findings: v.findings, conclusion: v.conclusion, recommendation: v.recommendation }] : [];
-    }
-    if (k === 'record') { const row = view.records.get(values[0]); return row ? [structuredClone(row)] : []; }
-    if (k === 'replacement') {
-      const row = [...view.records.values()].find(r => r.supersedesId === values[0]);
-      return row ? [{ id: row.id, sourceVersion: row.sourceVersion }] : [];
-    }
-    if (k === 'pending') return [...view.records.values()].filter(r => r.studyUid === values[0] && r.senderSub === values[1]
-      && r.recipientSub === values[2] && r.state === 'created').map(r => ({ id: r.id }));
-    throw new Error('unexpected SQL in the stub: ' + sql);
-  };
-  const mutate = (tx, apply) => { const undo = apply(); if (tx) tx.undo.push(undo); };
-  const writers = tx => ({
-    criticalResult: {
-      create: async ({ data }) => mutate(tx, () => {
-        if (store.records.has(data.id)) throw unique('record', ['id']);
-        if (data.state === 'created' && [...store.records.values()].some(r => r.state === 'created' && r.studyUid === data.studyUid
-          && r.senderSub === data.senderSub && r.recipientSub === data.recipientSub)) throw unique('pending', 'CriticalResult_pending_key');
-        store.records.set(data.id, structuredClone(data));
-        return () => store.records.delete(data.id);
-      }),
-      update: async ({ where, data }) => mutate(tx, () => {
-        const before = store.records.get(where.id);
-        store.records.set(where.id, { ...before, ...structuredClone(data) });
-        store.updates++;
-        return () => { store.records.set(where.id, before); store.updates--; };
-      }),
-    },
-    criticalResultEvent: { create: async ({ data }) => mutate(tx, () => {
-      if (store.events.some(e => e.recordId === data.recordId && (e.seq === data.seq || e.event === data.event))) throw unique('event', ['recordId', 'seq']);
-      store.events.push(structuredClone(data));
-      return () => store.events.splice(store.events.findIndex(e => e.id === data.id), 1);
-    }) },
-    criticalResultReceipt: { create: async ({ data }) => mutate(tx, () => {
-      if (store.receipts.has(data.requestId)) throw unique('receipt', ['requestId']);
-      store.receipts.set(data.requestId, structuredClone(data));
-      return () => store.receipts.delete(data.requestId);
-    }) },
-    auditLog: { create: async ({ data }) => mutate(tx, () => { store.audits.push(structuredClone(data)); return () => store.audits.pop(); }) },
-  });
-  const watched = (label, target) => new Proxy(target, { get(object, name) {
-    if (typeof name === 'string') touched.add(label + '.' + name);
-    return object[name];
+  const view = (label, client, overrides = {}) => new Proxy({}, { get(_target, name) {
+    if (typeof name !== 'string') return undefined;
+    touched.add(label + '.' + name);
+    if (name in overrides) return overrides[name];
+    const value = client[name];
+    return typeof value === 'function' ? value.bind(client) : value;
   } });
-  const client = (view, tx) => {
-    const write = writers(tx);
-    return watched('tx', {
-      $executeRaw: async () => 0,
-      $queryRaw: (strings, ...values) => query(view, tx, strings, values),
-      criticalResult: write.criticalResult,
-      criticalResultEvent: write.criticalResultEvent,
-      criticalResultReceipt: { ...write.criticalResultReceipt, findUnique: async ({ where }) => {
-        const row = view.receipts.get(where.requestId); return row ? structuredClone(row) : null; } },
-      auditLog: write.auditLog,
-    });
-  };
-  const prisma = watched('root', {
-    $queryRaw: (strings, ...values) => query(store, null, strings, values),
-    $transaction: async (fn, options) => {
-      transactions.push(options);
-      const tx = { held: [], undo: [] };
-      const view = options?.isolationLevel === 'RepeatableRead'
-        ? structuredClone({ studies: store.studies, reports: store.reports, versions: store.versions, records: store.records,
-          receipts: store.receipts, policies: store.policies })
-        : store;
+  // onRecordCreate lets a case put a row in the same transaction just before the service inserts a record, to meet the
+  // real unique indexes; the service reaches only create and update of this delegate inside a transaction.
+  const txView = tx => view('tx', tx, w.onRecordCreate ? { criticalResult: {
+    create: async args => { await w.onRecordCreate(tx, args); return tx.criticalResult.create(args); },
+    update: args => tx.criticalResult.update(args) } } : {});
+  const prisma = view('root', base, { $transaction: async (fn, options) => {
+    transactions.push(options);
+    return base.$transaction(async tx => {
       log.push('tx:start');
       try {
-        const result = await fn(client(view, tx));
+        const out = await fn(txView(tx));
         log.push('tx:end');
-        return result;
+        return out;
       } catch (e) {
-        for (const undo of tx.undo.reverse()) undo();
         log.push('tx:rollback');
         throw e;
-      } finally { releaseAll(tx); }
-    },
-    criticalResultReceipt: { findUnique: async ({ where }) => { const row = store.receipts.get(where.requestId); return row ? structuredClone(row) : null; } },
-    criticalResult: { findUnique: async ({ where }) => { const row = store.records.get(where.id); return row ? structuredClone(row) : null; } },
-    studyState: {
-      findUnique: async ({ where }) => { const row = store.studies.get(where.uid); return row ? { institutionId: row.institutionId } : null; },
-      findMany: async () => [...store.studies.values()].map(s => ({ uid: s.uid })),
-    },
-  });
+      }
+    }, options);
+  } });
   w.users = new Map(Object.keys(PEOPLE).map(name => [SUBS[name], { id: SUBS[name], username: 'syn-' + name.toLowerCase(),
     email: actorOf(name), emailVerified: true, firstName: 'SYNTHETIC', lastName: name, enabled: true, serviceAccountClientId: null,
     groups: [PEOPLE[name].group ?? INST], roles: [...PEOPLE[name].roles] }]));
@@ -241,7 +201,7 @@ function world({ policies = {} } = {}) {
     log.push('orthanc:' + String(name));
     if (w.orthancFail) throw new Error('SYNTHETIC Orthanc down');
     if (name === 'reportPreviewStudy' || name === 'studyAccessMetadata') return source(args[0]);
-    if (name === 'studyIdentities') return [...store.studies.keys()].map(source);
+    if (name === 'studyIdentities') return (await base.$queryRaw`SELECT uid FROM "StudyState" ORDER BY uid`).map(row => source(row.uid));
     return null;
   } });
   w.access = new StudyAccessService(prisma, orthanc, {});
@@ -256,7 +216,6 @@ const cancelBody = (c, requestId, revision = 1, reason = REASON) => ({ requestId
 const supersedeBody = (c, requestId, revision, sourceVersion, message = MESSAGE + ' corrected') =>
   ({ requestId, expectedOwner: owner(c), revision, sourceVersion, message });
 const S = () => person('S');
-const between = (log, from, to) => log.slice(from, to);
 const networkInside = log => { let inside = false, hits = []; for (const e of log) {
   if (e === 'tx:start') inside = true; else if (e === 'tx:end' || e === 'tx:rollback') inside = false;
   else if (inside && (e.startsWith('kc:') || e.startsWith('orthanc:'))) hits.push(e);
@@ -390,23 +349,23 @@ test('audit and allowlist wiring: owner-only GET audit, hidden from the Members 
   assert.deepEqual(mine, ['GET critical-results', 'GET critical-results/:id', 'POST critical-results/:id/ack']);
 });
 
-// ── the compiled service over the stub store ──
+// ── the compiled service over the real database ──
 
-async function approved(w, uid = UID) { w.commit(uid, 'approve'); return w.store.reports.get(uid).version; }
+async function approved(w, uid = UID) { await w.commit(uid, 'approve'); return w.head(uid); }
 
-test('C2: create, read (the pinned body), explicit ACK; reads never acknowledge (CR03, CR20 in the stub)', async () => {
-  const w = world();
+test('C2: create, read (the pinned body), explicit ACK; reads never acknowledge (CR03, CR20)', async () => {
+  const w = await world();
   const v1 = await approved(w);
   const created = await w.svc.create(UID, S(), createBody(S(), id(11), 'P', v1));
   assert.deepEqual(Object.keys(created).sort(), ['applied', 'owner', 'replayed']);
   assert.deepEqual(created.applied, { id: id(11), studyUid: UID, requestId: id(11), action: 'create', from: null, to: 'created', revision: 1,
     replacement: null, at: created.applied.at });
-  const row = w.store.records.get(id(11));
+  const row = await w.record(id(11));
   assert.deepEqual([row.senderSub, row.senderActor, row.senderName, row.recipientSub, row.recipientActor, row.recipientName, row.recipientRole],
     [SUBS.S, actorOf('S'), 'SYNTHETIC S', SUBS.P, actorOf('P'), 'P SYNTHETIC', 'clinician'], 'attribution from the token and Keycloak');
   assert.deepEqual([row.institutionId, row.senderInstitutionId, row.sourceVersion, row.sourceAction], [INST, INST, v1, 'approve']);
   assert.deepEqual([row.origName, row.origPatientId, row.origBirth, row.origStudyDate], ['SYNTHETIC ORIGINAL', 'SYN-PID-1', '19700101', '20260928']);
-  const before = w.count();
+  const before = await w.count();
   for (let n = 0; n < 3; n++) {
     const { item } = await w.svc.read(id(11), person('P'));
     assert.equal(item.view, 'full');
@@ -414,23 +373,25 @@ test('C2: create, read (the pinned body), explicit ACK; reads never acknowledge 
     assert.deepEqual(item.body, { findings: pinnedText(v1), conclusion: 'SYNTHETIC conclusion v' + v1, recommendation: '' });
     assert.equal(item.message, MESSAGE);
   }
-  assert.deepEqual(w.count(), before, 'reads write nothing and never acknowledge');
+  assert.deepEqual(await w.count(), before, 'reads write nothing and never acknowledge');
   const acked = await w.svc.ack(id(11), person('P'), ackBody(person('P'), id(12)));
   assert.deepEqual([acked.replayed, acked.applied.action, acked.applied.from, acked.applied.to, acked.applied.revision],
     [false, 'ack', 'created', 'acknowledged', 2]);
-  assert.equal(w.store.records.get(id(11)).state, 'acknowledged');
+  assert.equal((await w.record(id(11))).state, 'acknowledged');
   const text = JSON.stringify([created, acked, (await w.svc.read(id(11), S())).item]);
   assert.equal(text.includes(HEAD_BODY), false);
   assert.equal(text.includes(DRAFT_BODY), false);
 });
 
 test('SV04 / S-CR: every applied requestId replays its stored result before any state check; reuse is 409', async () => {
-  const w = world();
+  const w = await world();
   const v1 = await approved(w);
   const r0 = await w.svc.create(UID, S(), createBody(S(), id(21), 'P', v1));
   const a1 = await w.svc.ack(id(21), person('P'), ackBody(person('P'), id(22)));
-  const settled = w.count();
+  const settled = await w.count();
   assert.deepEqual(settled, { records: 1, events: 2, receipts: 2, audits: 2, updates: 1 });
+  // the stored jsonb receipt is the applied result the first answer carried
+  assert.deepEqual([(await w.receipt(id(21))).result, (await w.receipt(id(22))).result], [r0.applied, a1.applied]);
   // S-CR1, S-CR2
   const again = await w.svc.create(UID, S(), createBody(S(), id(21), 'P', v1));
   assert.deepEqual([again.replayed, again.applied], [true, r0.applied]);
@@ -447,7 +408,7 @@ test('SV04 / S-CR: every applied requestId replays its stored result before any 
     ['the ack id on another record', () => w.svc.ack(id(26), person('P'), ackBody(person('P'), id(22))), 404, 'CRITICAL_RESULT_NOT_FOUND'],
   ];
   for (const [label, call, status, value] of refusals) await assert.rejects(call, code(status, value), label);
-  assert.deepEqual(w.count(), settled);
+  assert.deepEqual(await w.count(), settled);
   // S-CR9: P loses clinician (new token); the replay is 403 at the route role
   await assert.rejects(w.svc.ack(id(21), { ...person('P'), roles: [] }, ackBody(person('P'), id(22))), code(403, 'CRITICAL_RESULT_ROLE_REQUIRED'));
   // S-CR11: after S-CR9 the sender's replay still answers the stored result (no recipient content in it)
@@ -455,15 +416,15 @@ test('SV04 / S-CR: every applied requestId replays its stored result before any 
   const late = await w.svc.create(UID, S(), createBody(S(), id(21), 'P', v1));
   assert.deepEqual([late.replayed, late.applied], [true, r0.applied]);
   // S-CR10: the study's owner moves; the replay is hidden like any read
-  w.store.studies.get(UID).institutionId = OTHER;
+  await w.move(UID, OTHER);
   await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(21), 'P', v1)), code(404, 'STUDY_NOT_FOUND'));
-  assert.deepEqual(w.count(), settled);
+  assert.deepEqual(await w.count(), settled);
 });
 
 test('SV06 Keycloak, Orthanc and source-tag reads end before the transaction; a failed read is 503 with no write', async () => {
   const metadata = { version: 1, restricted: true, startsAt: null, endsAt: null,
     rules: [{ patientId: 'SYN-PID-1', modalities: [], dateFrom: null, dateTo: null, studyUids: [] }] };
-  const w = world({ policies: { S: metadata } });
+  const w = await world({ policies: { S: metadata } });
   const v1 = await approved(w);
   await w.svc.create(UID, S(), createBody(S(), id(31), 'P', v1));
   await w.svc.supersede(id(31), S(), supersedeBody(S(), id(32), 1, v1));
@@ -476,14 +437,14 @@ test('SV06 Keycloak, Orthanc and source-tag reads end before the transaction; a 
   assert.ok(w.log.includes('orthanc:studyAccessMetadata') && w.log.includes('orthanc:studyIdentities') && w.log.includes('orthanc:reportPreviewStudy'));
   // failures before the transaction: 503 UNAVAILABLE, no transaction, no write
   for (const [label, fail] of [['Keycloak', 'kcFail'], ['Orthanc', 'orthancFail']]) {
-    const f = world();
+    const f = await world();
     const v = await approved(f);
     f[fail] = true;
     await assert.rejects(f.svc.create(UID, S(), createBody(S(), id(36), 'P', v)), code(503, label === 'Keycloak' ? 'CRITICAL_RESULT_UNAVAILABLE' : undefined), label);
     assert.equal(f.log.includes('tx:start'), false, label);
-    assert.deepEqual(f.count(), { records: 0, events: 0, receipts: 0, audits: 0, updates: 0 }, label);
+    assert.deepEqual(await f.count(), { records: 0, events: 0, receipts: 0, audits: 0, updates: 0 }, label);
   }
-  const f = world();
+  const f = await world();
   const v = await approved(f);
   f.orthancFail = true;
   await assert.rejects(f.svc.create(UID, S(), createBody(S(), id(37), 'P', v)), code(503, 'CRITICAL_RESULT_UNAVAILABLE'),
@@ -491,7 +452,7 @@ test('SV06 Keycloak, Orthanc and source-tag reads end before the transaction; a 
 });
 
 test('SV09 the write-time Keycloak re-check: token AND Keycloak roles; replays found before the transaction skip it', async () => {
-  const w = world();
+  const w = await world();
   const v1 = await approved(w);
   const cases = [
     ['radiologist removed in Keycloak', u => { u.roles = ['technician']; }],
@@ -506,8 +467,8 @@ test('SV09 the write-time Keycloak re-check: token AND Keycloak roles; replays f
     await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(41), 'P', v1)), code(403, 'CRITICAL_RESULT_ROLE_REQUIRED'), label);
     w.users.set(SUBS.S, saved);
   }
-  assert.deepEqual(w.count().records, 0);
-  // the token keeps radiologist but only admin remains in Keycloak: the ack of a clinician whose Keycloak roles lost clinician
+  assert.deepEqual((await w.count()).records, 0);
+  // the ack of a clinician whose Keycloak roles lost clinician while the token keeps it
   const created = await w.svc.create(UID, S(), createBody(S(), id(42), 'P', v1));
   w.users.get(SUBS.P).roles = ['technician'];
   await assert.rejects(w.svc.ack(id(42), person('P'), ackBody(person('P'), id(43))), code(403, 'CRITICAL_RESULT_ROLE_REQUIRED'));
@@ -525,7 +486,7 @@ test('SV09 the write-time Keycloak re-check: token AND Keycloak roles; replays f
 
 test('SV10 / S-RACE a concurrent ACK and cancel of one record: one applies, the other gets the winner terminal code', async () => {
   for (let round = 0; round < 10; round++) {
-    const w = world();
+    const w = await world();
     const v1 = await approved(w);
     await w.svc.create(UID, S(), createBody(S(), id(51), 'P', v1));
     const calls = [w.svc.ack(id(51), person('P'), ackBody(person('P'), id(52))), w.svc.cancel(id(51), S(), cancelBody(S(), id(53)))];
@@ -536,23 +497,66 @@ test('SV10 / S-RACE a concurrent ACK and cancel of one record: one applies, the 
     assert.equal(won.length, 1, 'round ' + round);
     const winner = won[0].value.applied.to;
     assert.ok(code(409, winner === 'acknowledged' ? 'CRITICAL_RESULT_ACKNOWLEDGED' : 'CRITICAL_RESULT_CANCELLED')(lost[0].reason), 'round ' + round);
-    assert.deepEqual(w.count(), { records: 1, events: 2, receipts: 2, audits: 2, updates: 1 });
-    assert.equal(w.store.records.get(id(51)).state, winner);
+    assert.deepEqual(await w.count(), { records: 1, events: 2, receipts: 2, audits: 2, updates: 1 });
+    assert.equal((await w.record(id(51))).state, winner);
   }
 });
 
+test('S-DUP concurrent creates for one study, sender and recipient: the study row lock admits one; the other names it', async () => {
+  const w = await world();
+  const v1 = await approved(w);
+  const results = await Promise.allSettled([w.svc.create(UID, S(), createBody(S(), id(56), 'P', v1)),
+    w.svc.create(UID, S(), createBody(S(), id(57), 'P', v1))]);
+  const won = results.filter(r => r.status === 'fulfilled');
+  assert.equal(won.length, 1);
+  const winner = won[0].value.applied.id;
+  assert.ok([id(56), id(57)].includes(winner));
+  const [lost] = results.filter(r => r.status === 'rejected').map(r => r.reason);
+  assert.ok(code(409, 'CRITICAL_RESULT_PENDING_EXISTS')(lost) && lost.getResponse().id === winner, String(lost));
+  assert.deepEqual(await w.count(), { records: 1, events: 1, receipts: 1, audits: 1, updates: 0 });
+});
+
+test('the real unique indexes are the last guard: a pending row met by the partial index is PENDING_EXISTS, a reused id REUSED', async () => {
+  const w = await world();
+  const v1 = await approved(w);
+  await approved(w, UID2);
+  // Another pending (study, sender, recipient) row appears in the same transaction just before the service inserts:
+  // PostgreSQL's CriticalResult_pending_key refuses the insert and the whole transaction rolls back.
+  const other = async (tx, args, rowId, studyUid) => tx.$executeRaw`INSERT INTO "CriticalResult" (id, "studyUid", "institutionId",
+    "senderInstitutionId", "senderSub", "senderActor", "senderName", "recipientSub", "recipientActor", "recipientName", "recipientRole",
+    "sourceVersion", "sourceAction", "sourceAuthor", "sourceAt", "origName", "origPatientId", "origBirth", "origStudyDate", message,
+    state, revision, "changedBy", "createdAt", "updatedAt")
+    SELECT ${rowId}::uuid, ${studyUid}, ${args.data.institutionId}, ${args.data.senderInstitutionId}, ${args.data.senderSub},
+      ${args.data.senderActor}, ${args.data.senderName}, ${args.data.recipientSub}, ${args.data.recipientActor}, ${args.data.recipientName},
+      ${args.data.recipientRole}, version, action, author, at, 'SYNTHETIC', 'SYNTHETIC', '', '', 'SYNTHETIC injected', 'created', 1,
+      ${args.data.changedBy}, now(), now() FROM "ReportVersion" WHERE uid = ${studyUid} AND version = 1`;
+  w.onRecordCreate = (tx, args) => other(tx, args, id(58), UID);
+  await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(59), 'P', v1)),
+    e => code(409, 'CRITICAL_RESULT_PENDING_EXISTS')(e) && e.getResponse().id === undefined, 'the index, not the pre-check, refused');
+  assert.ok(w.log.includes('tx:rollback'));
+  assert.deepEqual(await w.count(), { records: 0, events: 0, receipts: 0, audits: 0, updates: 0 }, 'nothing persists');
+  // the same requestId written for another study in the same transaction: the primary key refuses, REQUEST_ID_REUSED
+  w.onRecordCreate = (tx, args) => other(tx, args, args.data.id, UID2);
+  await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(60), 'P', v1)), code(409, 'REQUEST_ID_REUSED'));
+  assert.deepEqual(await w.count(), { records: 0, events: 0, receipts: 0, audits: 0, updates: 0 });
+  // control: without the injected row the same request applies
+  w.onRecordCreate = null;
+  assert.equal((await w.svc.create(UID, S(), createBody(S(), id(60), 'P', v1))).replayed, false);
+});
+
 test('SV07 audit rows: one per event (supersede two), exactly the section 11 keys, no message, reason or patient text', async () => {
-  const w = world();
+  const w = await world();
   const v1 = await approved(w);
   await w.svc.create(UID, S(), createBody(S(), id(61), 'P', v1));
   await w.svc.supersede(id(61), S(), supersedeBody(S(), id(62), 1, v1));
   await w.svc.ack(id(62), person('P'), ackBody(person('P'), id(63)));
   await w.svc.create(UID, S(), createBody(S(), id(64), 'X', v1));
   await w.svc.cancel(id(64), S(), cancelBody(S(), id(65)));
-  assert.equal(w.store.audits.length, 6, 'create 1 + supersede 2 + ack 1 + create 1 + cancel 1');
+  const audits = await w.audits();
+  assert.equal(audits.length, 6, 'create 1 + supersede 2 + ack 1 + create 1 + cancel 1');
   const KEYS = ['event', 'from', 'id', 'institution', 'recipient', 'replacedBy', 'requestId', 'revision', 'role', 'senderInstitution', 'source',
     'supersedes', 'to'];
-  const details = w.store.audits.map(row => {
+  const details = audits.map(row => {
     assert.deepEqual([row.action, row.target], [CRITICAL_RESULT_AUDIT_ACTION, UID]);
     for (const text of [MESSAGE, REASON, 'SYNTHETIC ORIGINAL', 'SYN-PID-1', '19700101', SUBS.P, SUBS.X]) assert.equal(row.detail.includes(text), false, text);
     const detail = JSON.parse(row.detail);
@@ -568,38 +572,42 @@ test('SV07 audit rows: one per event (supersede two), exactly the section 11 key
     [actorOf('S'), id(64), 'created', null, 'created', 1, id(64), 'radiologist', null, null, INST, INST],
     [actorOf('S'), id(64), 'cancelled', 'created', 'cancelled', 2, id(65), 'radiologist', null, null, INST, INST],
   ]);
-  // append-only: the events and receipts were only ever created, and each record has seq 1 created + at most one seq 2
+  // append-only: each record has seq 1 created and at most one seq 2
   for (const recordId of [id(61), id(62), id(64)]) {
-    const seqs = w.store.events.filter(e => e.recordId === recordId).map(e => [e.seq, e.event, e.revision]);
-    assert.equal(seqs[0][0], 1); assert.equal(seqs[0][1], 'created'); assert.ok(seqs.length <= 2);
+    const seqs = (await w.events(recordId)).map(e => [e.seq, e.event, e.revision]);
+    assert.deepEqual(seqs[0], [1, 'created', 1]);
+    assert.ok(seqs.length <= 2);
   }
-  assert.deepEqual([...w.store.receipts.values()].map(r => [r.requestId, r.recordId, r.action, r.appliedRevision]), [
+  const receipts = await w.receipts();
+  assert.deepEqual(receipts.map(r => [r.requestId, r.recordId, r.action, r.appliedRevision]), [
     [id(61), id(61), 'create', 1], [id(62), id(61), 'supersede', 2], [id(63), id(62), 'ack', 2], [id(64), id(64), 'create', 1],
     [id(65), id(64), 'cancel', 2]]);
-  for (const receipt of w.store.receipts.values()) {
+  for (const receipt of receipts) {
     assert.match(receipt.fingerprint, /^[0-9a-f]{64}$/);
     for (const text of [MESSAGE, REASON, 'SYNTHETIC ORIGINAL']) assert.equal(JSON.stringify(receipt.result).includes(text), false);
   }
 });
 
-test('SV11 no draft, current report body or preview read; other clinical-message services are not dependencies', async () => {
-  const w = world();
+test('SV11 answers carry the pinned rows only; the service reaches no draft, report or other delegate', async () => {
+  const w = await world();
   const v1 = await approved(w);
   const responses = [];
   responses.push(await w.svc.recipients(UID, S()));
   responses.push(await w.svc.create(UID, S(), createBody(S(), id(71), 'P', v1)));
   responses.push(await w.svc.read(id(71), person('P')));
   responses.push(await w.svc.read(id(71), S()));
-  w.commit(UID, 'addendum');
+  await w.commit(UID, 'addendum');
   responses.push(await w.svc.read(id(71), person('P')));
   responses.push(await w.svc.supersede(id(71), S(), supersedeBody(S(), id(72), 1, v1 + 1)));
   responses.push(await w.svc.read(id(72), person('P')));
   responses.push(await w.svc.ack(id(72), person('P'), ackBody(person('P'), id(73))));
+  responses.push(await w.svc.list(person('P'), { view: 'received' }));
+  responses.push(await w.svc.list(S(), { view: 'sent' }));
+  responses.push(await w.svc.forStudy(UID, person('P')));
   const text = JSON.stringify(responses);
   for (const marker of [HEAD_BODY, DRAFT_BODY]) assert.equal(text.includes(marker), false, marker);
   assert.equal(responses[2].item.body.findings, pinnedText(v1));
   assert.equal(responses[6].item.body.findings, pinnedText(v1 + 1), 'the replacement shows its own pinned row');
-  assert.deepEqual(w.sqls.filter(k => k === 'unknown'), []);
   const allowed = ['root.$transaction', 'root.$queryRaw', 'root.criticalResultReceipt', 'root.criticalResult', 'root.studyState',
     'tx.$executeRaw', 'tx.$queryRaw', 'tx.criticalResult', 'tx.criticalResultEvent', 'tx.criticalResultReceipt', 'tx.auditLog'];
   assert.deepEqual([...w.touched].filter(name => !allowed.includes(name)), [], 'no reportDraft, report or other delegate');
@@ -607,9 +615,86 @@ test('SV11 no draft, current report body or preview read; other clinical-message
   assert.deepEqual(types, ['PrismaService', 'StudyAccessService', 'KeycloakService', 'OrthancService']);
 });
 
+test('SV11 in SQL: after the head moves, read, the received list and the study list return each record\'s own pinned row', async () => {
+  const w = await world();
+  const v1 = await approved(w);
+  await w.svc.create(UID, S(), createBody(S(), id(161), 'P', v1));   // C2, then C3 when the head moves
+  await w.svc.create(UID, S(), createBody(S(), id(162), 'X', v1));   // R2, then R3 (full: the pinned row, not the head)
+  const v2 = await w.commit(UID, 'addendum');
+  // X's pinned v1 row, never the v2 head row, the Report body or the draft; P's record is a stub without a body
+  const readX = (await w.svc.read(id(162), person('X'))).item;
+  const listX = (await w.svc.list(person('X'), { view: 'received' })).items;
+  const studyX = (await w.svc.forStudy(UID, person('X'))).items;
+  for (const [label, item] of [['read', readX], ['list', listX[0]], ['study list', studyX[0]]]) {
+    assert.deepEqual([item.id, item.view, item.source.current, item.source.reason, item.body.findings],
+      [id(162), 'full', false, 'head_moved', pinnedText(v1)], label);
+    assert.equal(JSON.stringify(item).includes(pinnedText(v2)), false, label);
+  }
+  const listP = await w.svc.list(person('P'), { view: 'received' });
+  const studyP = (await w.svc.forStudy(UID, person('P'))).items;
+  for (const item of [listP.items[0], studyP[0]]) assert.deepEqual([item.id, item.view, 'body' in item, 'message' in item], [id(161), 'stub', false, false]);
+  // the replacement pins v2; each record keeps its own row in the same list, and pending counts created records only
+  await w.svc.supersede(id(162), S(), supersedeBody(S(), id(163), 1, v2));
+  const both = await w.svc.list(person('X'), { view: 'received' });
+  assert.deepEqual(both.items.map(item => [item.id, item.state, item.body.findings]).sort(),
+    [[id(162), 'superseded', pinnedText(v1)], [id(163), 'created', pinnedText(v2)]]);
+  assert.deepEqual([both.pending, listP.pending, (await w.svc.list(S(), { view: 'sent' })).pending], [1, 1, 2],
+    'X: its replacement; P: the C3 stub is still pending; S: both of its pending records');
+  assert.deepEqual((await w.svc.list(person('X'), { view: 'received', state: 'pending' })).items.map(item => item.id), [id(163)]);
+  const text = JSON.stringify([readX, listX, studyX, listP, studyP, both]);
+  for (const marker of [HEAD_BODY, DRAFT_BODY]) assert.equal(text.includes(marker), false, marker);
+});
+
+test('the received list and pending leave out C5 and R5 rows in the same SQL, before the page', async () => {
+  const w = await world();
+  const s1 = await w.commit(UID, 'save');
+  await w.svc.create(UID, S(), createBody(S(), id(171), 'M', s1));   // R2 for the mixed member M
+  const p1 = await w.commit(UID2, 'preliminary', { author: actorOf('S'), reviewer: actorOf('Y') });
+  await w.svc.create(UID2, S(), createBody(S(), id(172), 'Y', p1));   // R2 for the named reviewer Y
+  const asClinician = { ...person('M'), roles: ['clinician'] };      // M's new token: class C, the unsigned pin is C5
+  for (const [who, recordId] of [[asClinician, id(171)], [person('Y'), id(172)]]) {
+    const before = await w.svc.list(who, { view: 'received' });
+    assert.equal(before.pending, who === asClinician ? 0 : 1);
+    assert.deepEqual(before.items.map(item => item.id), who === asClinician ? [] : [recordId]);
+  }
+  // the P pair moves away from Y at the same head: R5, absent from the list, the count and the one-record read
+  await w.base.$executeRaw`UPDATE "StudyState" SET "preReviewer" = ${actorOf('Z')} WHERE uid = ${UID2}`;
+  const after = await w.svc.list(person('Y'), { view: 'received' });
+  assert.deepEqual([after.items, after.pending], [[], 0]);
+  await assert.rejects(w.svc.read(id(172), person('Y')), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  await assert.rejects(w.svc.read(id(171), asClinician), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  assert.equal((await w.svc.list(person('M'), { view: 'received' })).items.length, 1, 'M with radiologist still reads its R2 row');
+});
+
+test('the received list pages by (createdAt, id) under a cursor bound to the StudyAccess revision', async () => {
+  const w = await world();
+  const uids = Array.from({ length: 52 }, (_, n) => '2.25.8' + String(n).padStart(3, '0'));
+  const made = [];
+  for (const [n, uid] of uids.entries()) {
+    await w.study(uid);
+    const v = await approved(w, uid);
+    made.push((await w.svc.create(uid, S(), createBody(S(), id(200 + n), 'P', v))).applied.id);
+  }
+  const first = await w.svc.list(person('P'), { view: 'received' });
+  assert.equal(first.items.length, 50);
+  assert.equal(typeof first.nextCursor, 'string');
+  assert.equal(first.pending, 52, 'pending is the server count, not the page length');
+  const second = await w.svc.list(person('P'), { view: 'received', cursor: first.nextCursor });
+  assert.deepEqual([second.items.length, second.nextCursor], [2, null]);
+  const order = [...first.items, ...second.items].map(item => [item.createdAt, item.id]);
+  assert.deepEqual(order, [...order].sort((a, b) => a[0] === b[0] ? (a[1] < b[1] ? 1 : -1) : (a[0] < b[0] ? 1 : -1)), 'createdAt DESC, id DESC');
+  assert.deepEqual(order.map(([, recordId]) => recordId).sort(), [...made].sort(), 'every record once');
+  // P's StudyAccess policy gets a revision: the earlier cursor is refused, not read on the new scope
+  await w.base.$executeRaw`INSERT INTO "StudyAccessPolicy" (institution, subject, revision, policy, reason, "updatedBy", "updatedAt")
+    VALUES (${INST}, ${SUBS.P}, 1, ${JSON.stringify({ version: 1, restricted: false, startsAt: null, endsAt: null, rules: [] })}::jsonb,
+      'SYNTHETIC policy', 'SYNTHETIC-admin', now())`;
+  await assert.rejects(w.svc.list(person('P'), { view: 'received', cursor: first.nextCursor }), code(400, 'CRITICAL_RESULT_INPUT_INVALID'));
+  assert.equal((await w.svc.list(person('P'), { view: 'received' })).items.length, 50);
+});
+
 test('SV13 a StudyAccess refusal after the commit leaves the applied write; the same requestId replays it', async () => {
   for (const failure of ['409', '503']) {
-    const w = world();
+    const w = await world();
     const v1 = await approved(w);
     const controller = new CriticalResultController(w.svc);
     let mode = failure;
@@ -637,20 +722,20 @@ test('SV13 a StudyAccess refusal after the commit leaves the applied write; the 
     for (const [handler, c, args, after] of writes) {
       mode = failure;
       await assert.rejects(call(handler, c, ...args), expected, handler + ' ' + failure);
-      const { updates, ...counts } = w.count();
+      const { updates, ...counts } = await w.count();
       assert.deepEqual(counts, after, handler + ': the write committed before the refusal');
       mode = 'pass';
       const replay = await call(handler, c, ...args);
       assert.equal(replay.replayed, true, handler);
       assert.equal(replay.applied.requestId, args[2].requestId);
-      const { updates: _u, ...same } = w.count();
+      const { updates: _u, ...same } = await w.count();
       assert.deepEqual(same, after, handler + ': the replay writes nothing');
     }
   }
 });
 
 test('SV14 a delayed original create applies after its replay was refused; a delayed id-route write cannot outlive a terminal state', async () => {
-  const w = world();
+  const w = await world();
   const v1 = await approved(w);
   const original = w.access.prepare.bind(w.access);
   const held = new Map();
@@ -669,13 +754,13 @@ test('SV14 a delayed original create applies after its replay was refused; a del
   assert.equal(q.replayed, false);
   await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(91), 'P', v1)),
     e => code(409, 'CRITICAL_RESULT_PENDING_EXISTS')(e) && e.getResponse().id === id(92));
-  assert.equal(w.store.receipts.has(id(91)), false, 'the refused replay is not evidence that R0 never applies');
+  assert.equal(await w.receipt(id(91)), null, 'the refused replay is not evidence that R0 never applies');
   await w.svc.ack(id(92), person('P'), ackBody(person('P'), id(93)));
-  const settled = w.count();
+  const settled = await w.count();
   r0Hold.release();
   const applied = await r0;
   assert.equal(applied.replayed, false);
-  assert.deepEqual(w.count(), { ...settled, records: settled.records + 1, events: settled.events + 1, receipts: settled.receipts + 1,
+  assert.deepEqual(await w.count(), { ...settled, records: settled.records + 1, events: settled.events + 1, receipts: settled.receipts + 1,
     audits: settled.audits + 1 });
   const replay = await w.svc.create(UID, S(), createBody(S(), id(91), 'P', v1));
   assert.deepEqual([replay.replayed, replay.applied], [true, applied.applied]);
@@ -685,18 +770,18 @@ test('SV14 a delayed original create applies after its replay was refused; a del
   const a0 = w.svc.ack(id(91), a0Caller, ackBody(person('P'), id(94)));
   await a0Hold.entered;
   await w.svc.cancel(id(91), S(), cancelBody(S(), id(95)));
-  const terminal = w.count();
+  const terminal = await w.count();
   await assert.rejects(w.svc.ack(id(91), person('P'), ackBody(person('P'), id(94))), code(409, 'CRITICAL_RESULT_CANCELLED'));
   a0Hold.release();
   await assert.rejects(a0, code(409, 'CRITICAL_RESULT_CANCELLED'));
-  assert.deepEqual(w.count(), terminal);
+  assert.deepEqual(await w.count(), terminal);
 });
 
 test('S-SU / C3: head moved after create is a stub with no message or body, ACK refused, supersede onto the new head', async () => {
-  const w = world();
+  const w = await world();
   const v1 = await approved(w);
   await w.svc.create(UID, S(), createBody(S(), id(101), 'P', v1));
-  const v2 = w.commit(UID, 'addendum');
+  const v2 = await w.commit(UID, 'addendum');
   const stub = (await w.svc.read(id(101), person('P'))).item;
   assert.deepEqual([stub.view, stub.source.current, stub.source.reason, stub.state], ['stub', false, 'head_moved', 'created']);
   for (const text of [MESSAGE, pinnedText(v1), pinnedText(v2), HEAD_BODY]) assert.equal(JSON.stringify(stub).includes(text), false, text);
@@ -704,11 +789,11 @@ test('S-SU / C3: head moved after create is a stub with no message or body, ACK 
   await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(103), 'P', v2)),
     e => code(409, 'CRITICAL_RESULT_PENDING_EXISTS')(e) && e.getResponse().id === id(101));
   await assert.rejects(w.svc.supersede(id(101), S(), supersedeBody(S(), id(104), 1, v1)), code(409, 'CRITICAL_RESULT_SOURCE_MOVED'));
-  const before = w.count();
+  const before = await w.count();
   const sup = await w.svc.supersede(id(101), S(), supersedeBody(S(), id(104), 1, v2));
   assert.deepEqual(sup.applied.replacement, { id: id(104), revision: 1, sourceVersion: v2 });
   assert.deepEqual([sup.applied.id, sup.applied.from, sup.applied.to, sup.applied.revision], [id(101), 'created', 'superseded', 2]);
-  assert.deepEqual(w.count(), { ...before, records: before.records + 1, events: before.events + 2, receipts: before.receipts + 1,
+  assert.deepEqual(await w.count(), { ...before, records: before.records + 1, events: before.events + 2, receipts: before.receipts + 1,
     audits: before.audits + 2, updates: before.updates + 1 });
   const old = (await w.svc.read(id(101), person('P'))).item;
   assert.deepEqual([old.view, old.state, old.replacedBy], ['stub', 'superseded', id(104)]);
@@ -723,11 +808,11 @@ test('S-SU / C3: head moved after create is a stub with no message or body, ACK 
 });
 
 test('S-RS / C4: reset after create is a stub with reason reset; supersede onto the reset head refused; cancel', async () => {
-  const w = world();
+  const w = await world();
   const v1 = await approved(w);
   await w.svc.create(UID, S(), createBody(S(), id(111), 'P', v1));
-  w.commit(UID, 'reset', { discard: true });
-  const head = w.store.reports.get(UID).version;
+  await w.commit(UID, 'reset', { discard: true });
+  const head = await w.head(UID);
   assert.equal(head, v1 + 2, 'discarded v2 then reset v3');
   const stub = (await w.svc.read(id(111), person('P'))).item;
   assert.deepEqual([stub.view, stub.source.reason], ['stub', 'reset']);
@@ -737,40 +822,40 @@ test('S-RS / C4: reset after create is a stub with reason reset; supersede onto 
     'the discarded number is never the head');
   const cancelled = await w.svc.cancel(id(111), S(), cancelBody(S(), id(114)));
   assert.deepEqual([cancelled.applied.to, cancelled.applied.revision], ['cancelled', 2]);
-  assert.equal(w.store.records.get(id(111)).cancelReason, REASON);
+  assert.equal((await w.record(id(111))).cancelReason, REASON);
   await assert.rejects(w.svc.ack(id(111), person('P'), ackBody(person('P'), id(115), 2)), code(409, 'CRITICAL_RESULT_CANCELLED'));
 });
 
 test('S-RR: unsigned sources reach radiologists only; after the head moves the reader sees the pinned row, not the head', async () => {
-  const w = world();
-  const v1 = w.commit(UID, 'save');
+  const w = await world();
+  const v1 = await w.commit(UID, 'save');
   await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(121), 'P', v1)), code(409, 'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'), 'S-RR1 (C1)');
   for (const who of ['CT', 'CA']) await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(121), who, v1)),
     code(409, 'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'), who + ': a mixed non-reader is class C');
-  assert.equal(w.count().records, 0);
+  assert.equal((await w.count()).records, 0);
   await w.svc.create(UID, S(), createBody(S(), id(122), 'X', v1));
   const r2 = (await w.svc.read(id(122), person('X'))).item;
   assert.deepEqual([r2.view, r2.source.current, r2.body.findings], ['full', true, pinnedText(v1)], 'S-RR2');
-  const v2 = w.commit(UID, 'approve', { author: actorOf('S') });
+  const v2 = await w.commit(UID, 'approve', { author: actorOf('S') });
   const r3 = (await w.svc.read(id(122), person('X'))).item;
   assert.deepEqual([r3.view, r3.source.current, r3.source.reason, r3.body.findings], ['full', false, 'head_moved', pinnedText(v1)], 'S-RR3');
   await assert.rejects(w.svc.ack(id(122), person('X'), ackBody(person('X'), id(123))), code(409, 'CRITICAL_RESULT_SOURCE_CHANGED'), 'S-RR4');
   await w.svc.supersede(id(122), S(), supersedeBody(S(), id(124), 1, v2));
   await w.svc.ack(id(124), person('X'), ackBody(person('X'), id(125)));
   // S-RR6/7: a preliminary with reviewer Y on another study
-  const p1 = w.commit(UID2, 'preliminary', { author: actorOf('S'), reviewer: actorOf('Y') });
+  const p1 = await w.commit(UID2, 'preliminary', { author: actorOf('S'), reviewer: actorOf('Y') });
   await assert.rejects(w.svc.create(UID2, S(), createBody(S(), id(126), 'X', p1)), code(409, 'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'), 'S-RR6 (R1)');
   await w.svc.create(UID2, S(), createBody(S(), id(127), 'Y', p1));
   await assert.rejects(w.svc.create(UID2, person('Z'), createBody(person('Z'), id(128), 'Y', p1)), code(403, 'CRITICAL_RESULT_SOURCE_FORBIDDEN'), 'S-RR7');
   // S-RR8: a mixed member M loses radiologist (new token): the unsigned pin is C5, absent
-  const w2 = world();
-  const s1 = w2.commit(UID, 'save');
+  const w2 = await world();
+  const s1 = await w2.commit(UID, 'save');
   await w2.svc.create(UID, S(), createBody(S(), id(129), 'M', s1));
   await assert.rejects(w2.svc.read(id(129), { ...person('M'), roles: ['clinician'] }), code(404, 'CRITICAL_RESULT_NOT_FOUND'), 'S-RR8');
 });
 
 test('ordering, duplicates and boundaries: body before owner, role before body, 404 before the 409s, pending per sender', async () => {
-  const w = world();
+  const w = await world();
   const v1 = await approved(w);
   const bad = { ...createBody(S(), id(131), 'P', v1), institution: INST };
   await assert.rejects(w.svc.create(UID, { ...S(), roles: ['technician'] }, bad), code(403, 'CRITICAL_RESULT_ROLE_REQUIRED'));
@@ -813,27 +898,28 @@ test('ordering, duplicates and boundaries: body before owner, role before body, 
 });
 
 test('candidates follow the create rules: C1 clinicians, readers outside the P pair, the sender and other institutions are absent', async () => {
-  const w = world();
-  const s1 = w.commit(UID, 'save');
+  const w = await world();
+  const s1 = await w.commit(UID, 'save');
   let out = await w.svc.recipients(UID, S());
   assert.deepEqual(Object.keys(out).sort(), ['owner', 'reason', 'recipients', 'sendable', 'source', 'uid']);
   assert.deepEqual([out.sendable, out.reason, out.source.version, out.source.action, out.source.final], [true, null, s1, 'save', false]);
   const subs = out.recipients.map(r => r.sub).sort();
   assert.deepEqual(subs, [SUBS.AR, SUBS.M, SUBS.X, SUBS.Y, SUBS.Z].sort(), 'radiologists (and mixed) only for an unsigned head');
   for (const r of out.recipients) assert.deepEqual(Object.keys(r).sort(), ['actor', 'name', 'role', 'sub']);
-  w.commit(UID, 'approve');
+  await w.commit(UID, 'approve');
   out = await w.svc.recipients(UID, S());
   assert.deepEqual(out.recipients.map(r => r.sub).sort(), [SUBS.AR, SUBS.CA, SUBS.CT, SUBS.M, SUBS.P, SUBS.P2, SUBS.X, SUBS.Y, SUBS.Z].sort());
   for (const r of out.recipients) assert.equal(r.role, P.recipientClass(PEOPLE[Object.keys(SUBS).find(k => SUBS[k] === r.sub)].roles));
   // every listed candidate is accepted by create; the unlisted ones are refused
+  const head = await w.head(UID);
   let n = 140;
-  for (const r of out.recipients) assert.equal((await w.svc.create(UID, S(), { ...createBody(S(), id(n++), 'P', w.store.reports.get(UID).version), recipientSub: r.sub })).replayed, false);
-  const p1 = w.commit(UID2, 'preliminary', { author: actorOf('S'), reviewer: actorOf('Y') });
+  for (const r of out.recipients) assert.equal((await w.svc.create(UID, S(), { ...createBody(S(), id(n++), 'P', head), recipientSub: r.sub })).replayed, false);
+  const p1 = await w.commit(UID2, 'preliminary', { author: actorOf('S'), reviewer: actorOf('Y') });
   out = await w.svc.recipients(UID2, S());
   assert.deepEqual(out.recipients.map(r => r.sub), [SUBS.Y], 'only the preliminary pair reads an RS P head');
   out = await w.svc.recipients(UID2, person('Z'));
   assert.deepEqual([out.sendable, out.reason, out.source, out.recipients], [false, 'SOURCE_FORBIDDEN', null, []]);
-  w.commit(UID2, 'reset');
+  await w.commit(UID2, 'reset');
   out = await w.svc.recipients(UID2, S());
   assert.deepEqual([out.sendable, out.reason, out.source], [false, 'NO_PINNABLE_SOURCE', null]);
   assert.equal(p1 > 0, true);
