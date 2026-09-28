@@ -1,5 +1,7 @@
 // Test-owned fixture of tests/admin_audit_attribution_test.cjs (not product code): the failure classes of Astra
-// S7-U3a-AUDIT-SPEC-R-001 F01-F03 and of the verdict, one case each. Every case is a TypeScript module of its own, put next
+// S7-U3a-AUDIT-SPEC-R-001 F01-F03 and of the verdict, one case each; F03 as amended by S7-U3a-AUDIT-SPEC-B-R-001 (the
+// INSERT … SELECT and WITH statements of its G2 form are supported writes in sql-positions.ts; the f03-g2-* cases are the
+// variants outside G2 and the WITH fragments whose source is not fixed). Every case is a TypeScript module of its own, put next
 // to the baseline fixture (baseline.ts, actions.ts, forward.ts) as api/src/syn-fixture/case-<name>.ts; with it the gate must
 // fail on exactly the class its header names (and its entries) and on nothing else, and the case's lines must give exactly
 // the candidates they mark (`// expect:` as in baseline.ts). The header:
@@ -410,18 +412,6 @@ export async function run(tx: Prisma.TransactionClient, body: any) {
   await tx.auditLog.create({ data: { action: kind } }); // expect: unresolved `body.kind` is a property the program does not fix
 }
 
-// ==== case: f03-insert-select | verdict: unresolved ====
-import { Prisma } from '@prisma/client';
-export async function run(tx: Prisma.TransactionClient, actor: string) {
-  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM "StudyState"`; // expect: unresolved SELECT where VALUES goes
-}
-
-// ==== case: f03-with | verdict: unresolved ====
-import { Prisma } from '@prisma/client';
-export async function run(tx: Prisma.TransactionClient, actor: string) {
-  await tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState") INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved it begins with WITH
-}
-
 // ==== case: f03-several-statements | verdict: unresolved ====
 import { Prisma } from '@prisma/client';
 export async function run(tx: Prisma.TransactionClient, actor: string, uid: string) {
@@ -554,6 +544,220 @@ export async function run(tx: Prisma.TransactionClient, actor: string, uid: stri
     actor, 'syn.allowed', uid);
 }
 
+// ==== case: f03-g2-a-with-list-before-values | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string, uid: string) {
+  await tx.$executeRaw`WITH s AS (SELECT 1) INSERT INTO "AuditLog" (actor, action, target) VALUES (${actor}, 'syn.allowed', ${uid})`; // expect: unresolved a WITH list before INSERT
+}
+
+// ==== case: f03-g2-with-recursive | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`WITH RECURSIVE s AS (SELECT uid FROM "StudyState") INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved a WITH RECURSIVE list
+}
+
+// ==== case: f03-g2-a-join | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM "StudyState" JOIN "Institution" ON true`; // expect: unresolved JOIN after FROM "StudyState"
+}
+
+// ==== case: f03-g2-a-union-after-the-source | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM "StudyState" UNION SELECT ${actor}, 'syn.second', uid FROM "StudyState"`; // expect: unresolved UNION after FROM "StudyState"
+}
+
+// ==== case: f03-g2-a-union-before-from | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', 'syn.target' UNION SELECT ${actor}, 'syn.second', uid FROM "StudyState"`; // expect: unresolved UNION in the SELECT items
+}
+
+// ==== case: f03-g2-a-where-clause | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string, uid: string) {
+  await tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState") INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s WHERE uid = ${uid}`; // expect: unresolved WHERE after FROM s
+}
+
+// ==== case: f03-g2-an-alias-after-the-source | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', t.uid FROM "StudyState" t`; // expect: unresolved t after FROM "StudyState"
+}
+
+// ==== case: f03-g2-several-statements | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState") INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s; DELETE FROM "StudyState"`; // expect: unresolved several statements
+}
+
+// ==== case: f03-g2-a-source-the-with-list-does-not-declare | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState") INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM "StudyState"`; // expect: unresolved which the WITH list does not declare
+}
+
+// ==== case: f03-g2-a-subquery-source | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM (SELECT uid FROM "StudyState") s`; // expect: unresolved not a source name after FROM
+}
+
+// ==== case: f03-g2-a-source-from-an-interpolation | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string, table: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM ${table}`; // expect: unresolved an interpolation where the source goes
+}
+
+// ==== case: f03-g2-no-from | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string, uid: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', ${uid}`; // expect: unresolved no FROM after the SELECT items
+}
+
+// ==== case: f03-g2-distinct | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT DISTINCT ${actor}, 'syn.allowed', uid FROM "StudyState"`; // expect: unresolved SELECT DISTINCT
+}
+
+// ==== case: f03-g2-an-empty-item | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, , uid FROM "StudyState"`; // expect: unresolved an empty item in the SELECT list
+}
+
+// ==== case: f03-g2-columns-and-items-of-other-lengths | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed' FROM "StudyState"`; // expect: unresolved 3 columns and 2 SELECT items
+}
+
+// ==== case: f03-g2-no-action-column | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, target) SELECT ${actor}, uid FROM "StudyState"`; // expect: unresolved no action column
+}
+
+// ==== case: f03-g2-two-action-items | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target, "action") SELECT ${actor}, 'syn.allowed', uid, 'syn.second' FROM "StudyState"`; // expect: unresolved the column action is named twice
+}
+
+// ==== case: f03-g2-an-action-expression | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.' || 'allowed', uid FROM "StudyState"`; // expect: unresolved the action value is not one SQL string or one interpolation
+}
+
+// ==== case: f03-g2-an-action-from-a-with-body | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`WITH s AS (SELECT 'syn.allowed' AS kind, uid FROM "StudyState") INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, kind, uid FROM s`; // expect: unresolved the action value is not one SQL string or one interpolation
+}
+
+// ==== case: f03-g2-an-unfixed-action-interpolation | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, body: any) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT 'syn.actor', ${body.kind}, uid FROM "StudyState"`; // expect: unresolved `body.kind` is a property the program does not fix
+}
+
+// ==== case: f03-g2-a-fragment-after-insert | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', ${Prisma.sql`uid`} FROM "StudyState"`; // expect: unresolved is not shown to be a value
+}
+
+// ==== case: f03-g2-a-fixed-predicate-after-insert | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string, uid: string) {
+  const selector = Prisma.sql`s.uid = ${uid}::text`;
+  await tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState") INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', ${selector} FROM s`; // expect: unresolved is not shown to be a value
+}
+
+// ==== case: f03-g2-a-with-body-naming-auditlog | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string, uid: string) {
+  await tx.$executeRaw`WITH gone AS (DELETE FROM "AuditLog" WHERE target = ${uid} RETURNING target) INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', target FROM gone`; // expect: unresolved the WITH body of gone names AuditLog
+}
+
+// ==== case: f03-g2-a-second-audit-insert-in-a-with-body | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string, uid: string) {
+  await tx.$executeRaw`WITH extra AS (INSERT INTO "AuditLog" (actor, action, target) VALUES (${actor}, 'syn.unlisted', ${uid}) RETURNING target) INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', target FROM extra`; // expect: unresolved the WITH body of extra names AuditLog
+}
+
+// ==== case: f03-g2-an-unclosed-with-body | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState" INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved an unclosed WITH body of s
+}
+
+// ==== case: f03-g2-an-interpolation-where-a-with-name-goes | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string, name: string) {
+  await tx.$executeRaw`WITH ${name} AS (SELECT uid FROM "StudyState") INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved an interpolation where a WITH name goes
+}
+
+// ==== case: f03-g2-a-with-fragment-of-a-public-method | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynPublic {
+  async linked(tx: Prisma.TransactionClient, actor: string, selector: Prisma.Sql) {
+    await tx.$executeRaw`WITH s AS (SELECT t.uid FROM "StudyState" t WHERE ${selector}) INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved which callers outside this program can call
+  }
+}
+
+// ==== case: f03-g2-a-with-fragment-with-one-unfixed-path | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynPaths {
+  private async linked(tx: Prisma.TransactionClient, actor: string, selector: Prisma.Sql) {
+    await tx.$executeRaw`WITH s AS (SELECT t.uid FROM "StudyState" t WHERE ${selector}) INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved `body.where` is not a Prisma.sql text
+  }
+  async fixed(tx: Prisma.TransactionClient, actor: string, uid: string) { await this.linked(tx, actor, Prisma.sql`t.uid = ${uid}::text`); }
+  async unfixed(tx: Prisma.TransactionClient, actor: string, body: any) { await this.linked(tx, actor, body.where); }
+}
+
+// ==== case: f03-g2-a-with-fragment-of-another-shape | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynShape {
+  private async linked(tx: Prisma.TransactionClient, actor: string, selector: Prisma.Sql) {
+    await tx.$executeRaw`WITH s AS (SELECT t.uid FROM "StudyState" t WHERE ${selector}) INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved is not the predicate
+  }
+  async escape(tx: Prisma.TransactionClient, actor: string) { await this.linked(tx, actor, Prisma.sql`true), extra AS (SELECT 1`); }
+}
+
+// ==== case: f03-g2-a-with-fragment-whose-value-is-a-fragment | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynInner {
+  private async linked(tx: Prisma.TransactionClient, actor: string, selector: Prisma.Sql) {
+    await tx.$executeRaw`WITH s AS (SELECT t.uid FROM "StudyState" t WHERE ${selector}) INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved is not shown to be a value
+  }
+  async inner(tx: Prisma.TransactionClient, actor: string) { await this.linked(tx, actor, Prisma.sql`t.uid = ${Prisma.raw('uid')}::text`); }
+}
+
+// ==== case: f03-g2-a-with-fragment-in-a-cycle | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynCycle {
+  private async linked(tx: Prisma.TransactionClient, actor: string, selector: Prisma.Sql, again: boolean) {
+    if (again) await this.relay(tx, actor, selector);
+    await tx.$executeRaw`WITH s AS (SELECT t.uid FROM "StudyState" t WHERE ${selector}) INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved is reached again
+  }
+  private async relay(tx: Prisma.TransactionClient, actor: string, selector: Prisma.Sql) { await this.linked(tx, actor, selector, false); }
+  async start(tx: Prisma.TransactionClient, actor: string, uid: string) { await this.linked(tx, actor, Prisma.sql`t.uid = ${uid}::text`, true); }
+}
+
+// ==== case: f03-g2-a-with-fragment-changed-before-use | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynChanged {
+  private async linked(tx: Prisma.TransactionClient, actor: string, selector: Prisma.Sql, body: any) {
+    if (body.wide) selector = body.where;
+    await tx.$executeRaw`WITH s AS (SELECT t.uid FROM "StudyState" t WHERE ${selector}) INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved is changed
+  }
+  async start(tx: Prisma.TransactionClient, actor: string, uid: string, body: any) { await this.linked(tx, actor, Prisma.sql`t.uid = ${uid}::text`, body); }
+}
+
 // ==== case: verdict-unlisted-through-a-constant-delegate-key | verdict: unlisted syn.unlisted ====
 import { Prisma } from '@prisma/client';
 const LOG = 'auditLog';
@@ -565,6 +769,12 @@ export async function run(tx: Prisma.TransactionClient) {
 import { Prisma } from '@prisma/client';
 export async function run(tx: Prisma.TransactionClient, actor: string) {
   await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) VALUES (${actor}, 'syn.bad', 'syn.allowed')`; // expect: resolved syn.bad
+}
+
+// ==== case: verdict-unlisted-raw-g2-action-with-registered-strings-elsewhere | verdict: unlisted syn.bad-g2 ====
+import { Prisma } from '@prisma/client';
+export async function run(tx: Prisma.TransactionClient, actor: string) {
+  await tx.$executeRaw`WITH s AS (SELECT 'syn.allowed' AS kind, uid FROM "StudyState") INSERT INTO "AuditLog" (actor, action, target, detail) SELECT ${actor}, 'syn.bad-g2', uid, kind FROM s`; // expect: resolved syn.bad-g2
 }
 
 // ==== case: verdict-a-dynamic-suffix-no-wildcard-covers | verdict: uncovered_prefixes syn.other. ====

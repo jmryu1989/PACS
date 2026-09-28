@@ -14,7 +14,8 @@
  *    rows above the reader's own (GCM does not hide the payload length);
  *  - Astra S5-U5b-B-F02: the SQL prefilter (strpos, a literal substring) loses no visible row and adds none for
  *    institution names carrying \, ", % and _; the removed LIKE form, modelled, loses exactly the \ and " names' rows;
- *  - completeness (Astra S7-U3a-AUDIT-SPEC-R-001 F01-F04): every file of api/src is read; every audit candidate there is
+ *  - completeness (Astra S7-U3a-AUDIT-SPEC-R-001 F01-F04, F01/F03 amended by S7-U3a-AUDIT-SPEC-B-R-001 with the second
+ *    raw SQL form): every file of api/src is read; every audit candidate there is
  *    resolved, proven not a write, or unresolved — and one unresolved fails; every action a write can record has a
  *    contract row and every row is written somewhere. The TypeScript compiler api/package-lock.json installs reads the
  *    program of api/src (see the completeness section). The checker's own tests run on test-owned fixtures
@@ -686,15 +687,27 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    (i) what a preceding `if (... || !['a', ...].includes(x) || ...) throw/return` of an enclosing statement list lets
 //        through to a binding nothing changes.
 //    A fixed start followed by a value the program does not fix is a dynamic suffix; a hidden wildcard row must cover it.
-//  F03 raw SQL, one form only: `INSERT INTO [schema.]"AuditLog" (columns) VALUES (values) [;]`, read by position under
-//    PostgreSQL's lexical rules (strings, quoted identifiers and their case, comments, parentheses, interpolations). The
-//    value at the one `action` column is an SQL string or one interpolation read by F02; other columns and comments do not
-//    count. Every interpolation must be a value (a string the program fixes, or of a primitive or Date type), never an SQL
-//    fragment. A missing, doubled or miscounted column list, an unclosed token, an interpolation where SQL structure goes,
-//    and every other statement that names AuditLog (INSERT … SELECT, WITH, several statements, ON CONFLICT, RETURNING,
-//    UPDATE, DELETE ...) is unresolved — but one SELECT that changes no row only reads. The SQL must be the fixed text of
-//    its raw call: a text naming AuditLog anywhere else, and SQL the program does not fix (an Unsafe call with a computed
-//    text, Prisma.raw of a computed text, a computed join separator), is unresolved.
+//  F03 raw SQL, two forms only (Astra S7-U3a-AUDIT-SPEC-B-R-001 amended F01/F03), read by position under PostgreSQL's
+//    lexical rules (strings, quoted identifiers and their case, comments, parentheses, interpolations):
+//      G1 `INSERT INTO [schema.]"AuditLog" (columns) VALUES (values) [;]`;
+//      G2 `[WITH name AS (...), ...] INSERT INTO [schema.]"AuditLog" (columns) SELECT items FROM source [;]` — a WITH list
+//         that is not RECURSIVE (a name, its column list, [NOT] MATERIALIZED and a body in parentheses that names no
+//         AuditLog); with it the source is one of its names, without it one [schema.]table; no JOIN, UNION, WHERE or other
+//         clause, no DISTINCT.
+//    Columns and values or items are matched at the top level (commas inside strings, identifiers, comments and
+//    parentheses do not split). The value or item at the one `action` column is, whole, an SQL string or one interpolation
+//    read by F02; other columns, comments and the WITH bodies' strings do not count. Every interpolation after INSERT must
+//    be a value (a string the program fixes, or of a primitive or Date type), never an SQL fragment. An interpolation in a
+//    WITH body is a value, or a fragment every value of which — through const bindings, both sides of ?: and every call's
+//    argument for a parameter of a private or local undecorated function — is a Prisma.sql text of the one shape
+//    `[alias.]column = ${value}::type` with its interpolation a value: a text with no parenthesis, comma or semicolon
+//    cannot leave its body or change the INSERT. Its type or place alone proves nothing. A missing, doubled or miscounted
+//    column list, an empty value or item, an unclosed token, an interpolation where SQL structure goes, a fragment whose
+//    source is not fixed on every path (a caller outside the program, a value the program does not fix, a cycle), and
+//    every other statement that names AuditLog (WITH before VALUES, several statements, ON CONFLICT, RETURNING, UPDATE,
+//    DELETE ...) is unresolved — but one SELECT that changes no row only reads. The SQL must be the fixed text of its raw
+//    call: a text naming AuditLog anywhere else, and SQL the program does not fix (an Unsafe call with a computed text,
+//    Prisma.raw of a computed text, a computed join separator), is unresolved.
 
 const API = path.join(ROOT, 'api');
 const slash = file => path.resolve(file).split(path.sep).join('/');
@@ -1352,7 +1365,7 @@ function scanAuditWrites(sources = auditSources()) {
    *  'auditLog' is F01's; SQL names the table as the quoted identifier, the only spelling that reaches it). */
   const namesTable = value => TABLE_WORDS.test(value) && !/^[A-Za-z_$][\w$]*$/.test(value);
   /**
-   * SQL tokens over the texts between interpolations, by PostgreSQL's lexical rules for what the INSERT form needs: a string
+   * SQL tokens over the texts between interpolations, by PostgreSQL's lexical rules for what the two forms need: a string
    * ('' is a quote), a quoted identifier ("" is a quote; case kept), a word (keyword or unquoted identifier, folded to lower
    * case), a number, a punctuation mark, an operator and each interpolation; blanks and comments (--, nested / * * /) are
    * dropped. An unclosed string, identifier or comment (none may hold an interpolation), E'', B'', X'', N'', U& and $ throw.
@@ -1419,14 +1432,70 @@ function scanAuditWrites(sources = auditSources()) {
   const shown = token => (!token ? 'the end' : token.kind === 'param' ? 'an interpolation' : token.kind === 'string' ? `'${token.value}'`
     : token.kind === 'ident' ? `"${token.value}"` : token.value);
   const statements = tokens => tokens.filter((token, n) => token.kind === 'punct' && token.value === ';' && n !== tokens.length - 1).length + 1;
-  /** INSERT INTO [schema.]"AuditLog" (columns) VALUES (values) [;]: the column names and the value tokens by position. */
+  const opens = token => token?.kind === 'punct' && (token.value === '(' || token.value === '[');
+  const closes = token => token?.kind === 'punct' && (token.value === ')' || token.value === ']');
+  // Words that begin another clause: none may stand at the top level of G2's SELECT items (a UNION before FROM included).
+  const CLAUSES = new Set(['SELECT', 'UNION', 'INTERSECT', 'EXCEPT', 'INTO', 'WHERE', 'GROUP', 'HAVING', 'WINDOW', 'ORDER', 'LIMIT',
+    'OFFSET', 'FETCH', 'FOR', 'RETURNING', 'VALUES', 'WITH', 'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'JOIN', 'ON']);
+  /**
+   * The two forms (Astra S7-U3a-AUDIT-SPEC-B-R-001, F03 as amended), else {error}:
+   *  G1 `INSERT INTO [schema.]"AuditLog" (columns) VALUES (values) [;]`;
+   *  G2 `[WITH name AS (...), ...] INSERT INTO [schema.]"AuditLog" (columns) SELECT items FROM source [;]`.
+   * The column names, the value or item tokens by position, the WITH bodies and where INSERT begins.
+   */
   function insertForm(tokens) {
     let i = 0;
     const word = value => tokens[i]?.kind === 'word' && tokens[i].upper === value;
     const punct = value => tokens[i]?.kind === 'punct' && tokens[i].value === value;
     const name = token => (token?.kind === 'ident' ? token.value : token?.kind === 'word' ? token.name : null);
+    /** The tokens inside the parentheses opening at i (i then after them), or null when they do not close. */
+    const enclosed = () => {
+      const start = ++i;
+      for (let depth = 0; i < tokens.length; i++) {
+        if (opens(tokens[i])) depth++;
+        else if (closes(tokens[i]) && depth-- === 0) return tokens.slice(start, i++);
+      }
+      return null;
+    };
     if (statements(tokens) > 1) return { error: 'several statements' };
-    if (!word('INSERT')) return { error: `not the INSERT form: it begins with ${shown(tokens[0])}` };
+    // G2's WITH list: name [(columns)] AS [[NOT] MATERIALIZED] (body), ... — not RECURSIVE; a body naming AuditLog could
+    // be one more audit write (or read) the statement hides, so it is not read here.
+    const ctes = [];
+    if (word('WITH')) {
+      i++;
+      if (word('RECURSIVE')) return { error: 'a WITH RECURSIVE list' };
+      do {
+        if (ctes.length) i++;
+        const token = tokens[i++];
+        if (token?.kind === 'param') return { error: 'an interpolation where a WITH name goes' };
+        if (name(token) === null) return { error: `a WITH list with ${shown(token)}` };
+        if (punct('(')) {
+          const columns = enclosed();
+          if (!columns?.length || columns.length % 2 === 0
+            || columns.some((column, n) => (n % 2 ? !(column.kind === 'punct' && column.value === ',') : name(column) === null))) {
+            return { error: `a WITH column list of ${shown(token)} that is not names` };
+          }
+        }
+        if (!word('AS')) return { error: `${shown(tokens[i])} where AS goes after the WITH name ${shown(token)}` };
+        i++;
+        if (word('NOT')) { i++; if (!word('MATERIALIZED')) return { error: `NOT ${shown(tokens[i])} in the WITH list` }; }
+        if (word('MATERIALIZED')) i++;
+        if (!punct('(')) return { error: `${shown(tokens[i])} where the WITH body of ${shown(token)} goes` };
+        const body = enclosed();
+        if (!body) return { error: `an unclosed WITH body of ${shown(token)}` };
+        if (!body.length) return { error: `an empty WITH body of ${shown(token)}` };
+        if (body.some(inner => (inner.kind === 'ident' || inner.kind === 'word') && inner.name.toLowerCase() === 'auditlog')) {
+          return { error: `the WITH body of ${shown(token)} names AuditLog` };
+        }
+        ctes.push({ name: name(token), shown: shown(token), body });
+      } while (punct(','));
+      const twice = ctes.find((cte, n) => ctes.findIndex(other => other.name === cte.name) !== n);
+      if (twice) return { error: `the WITH name ${twice.shown} is declared twice` };
+    }
+    const insert = i;
+    if (!word('INSERT')) {
+      return { error: ctes.length ? `${shown(tokens[i])} after the WITH list, where INSERT goes` : `not the INSERT form: it begins with ${shown(tokens[0])}` };
+    }
     i++;
     if (!word('INTO')) return { error: `not the INSERT form: ${shown(tokens[i])} after INSERT` };
     i++;
@@ -1448,31 +1517,64 @@ function scanAuditWrites(sources = auditSources()) {
       if (punct(')')) { i++; break; }
       return { error: `a column list with ${shown(tokens[i])}` };
     }
-    if (!word('VALUES')) return { error: `${shown(tokens[i])} where VALUES goes (INSERT … SELECT or another form)` };
-    i++;
-    if (!punct('(')) return { error: `${shown(tokens[i])} after VALUES` };
-    i++;
-    const row = [[]];
-    for (let depth = 0; ;) {
-      const token = tokens[i++];
-      if (!token) return { error: 'an unclosed VALUES list' };
-      if (token.kind === 'punct' && (token.value === '(' || token.value === '[')) depth++;
-      if (token.kind === 'punct' && (token.value === ')' || token.value === ']')) {
-        if (depth === 0) break;
+    /** The checks both forms share, once nothing follows the values or the source. */
+    const matched = (row, what, form) => {
+      if (row.some(value => value.length === 0)) return { error: `an empty ${what === 'values' ? 'value in the VALUES list' : 'item in the SELECT list'}` };
+      if (row.length !== columns.length) return { error: `${columns.length} columns and ${row.length} ${what}` };
+      const twice = columns.find((column, n) => columns.indexOf(column) !== n);
+      if (twice !== undefined) return { error: `the column ${twice} is named twice` };
+      const at = columns.indexOf('action');
+      if (at < 0) return { error: 'no action column' };
+      return { form, columns, row, action: row[at], ctes, insert };
+    };
+    if (word('VALUES')) {   // G1
+      if (ctes.length) return { error: 'a WITH list before INSERT … VALUES (only INSERT … SELECT takes one)' };
+      i++;
+      if (!punct('(')) return { error: `${shown(tokens[i])} after VALUES` };
+      i++;
+      const row = [[]];
+      for (let depth = 0; ;) {
+        const token = tokens[i++];
+        if (!token) return { error: 'an unclosed VALUES list' };
+        if (opens(token)) depth++;
+        if (closes(token)) {
+          if (depth === 0) break;
+          depth--;
+        }
+        if (depth === 0 && token.kind === 'punct' && token.value === ',') { row.push([]); continue; }
+        row[row.length - 1].push(token);
+      }
+      if (punct(';')) i++;
+      if (i < tokens.length) return { error: `${shown(tokens[i])} after the VALUES list (a second row, ON CONFLICT, RETURNING or another clause)` };
+      return matched(row, 'values', 'G1');
+    }
+    if (!word('SELECT')) return { error: `${shown(tokens[i])} where VALUES or SELECT goes` };
+    i++;   // G2
+    if (word('DISTINCT') || word('ALL')) return { error: `SELECT ${tokens[i].upper}, not SELECT items FROM one source` };
+    const items = [[]];
+    for (let depth = 0; ; i++) {
+      const token = tokens[i];
+      if (!token) return { error: 'no FROM after the SELECT items' };
+      if (depth === 0 && token.kind === 'word' && token.upper === 'FROM') break;
+      if (depth === 0 && token.kind === 'word' && CLAUSES.has(token.upper)) return { error: `${token.value} in the SELECT items (UNION or another clause)` };
+      if (opens(token)) depth++;
+      if (closes(token)) {
+        if (depth === 0) return { error: `an unmatched ${token.value} in the SELECT items` };
         depth--;
       }
-      if (depth === 0 && token.kind === 'punct' && token.value === ',') { row.push([]); continue; }
-      row[row.length - 1].push(token);
+      if (depth === 0 && token.kind === 'punct' && token.value === ',') { items.push([]); continue; }
+      items[items.length - 1].push(token);
     }
+    i++;
+    const source = [tokens[i++]];
+    if (!ctes.length && punct('.')) { i++; source.push(tokens[i++]); }
+    const from = source.map(shown).join('.');
+    if (source.some(token => token?.kind === 'param')) return { error: 'an interpolation where the source goes' };
+    if (source.some(token => name(token) === null)) return { error: `not a source name after FROM: ${from}` };
+    if (ctes.length && !ctes.some(cte => cte.name === name(source[0]))) return { error: `FROM ${from}, which the WITH list does not declare` };
     if (punct(';')) i++;
-    if (i < tokens.length) return { error: `${shown(tokens[i])} after the VALUES list (a second row, ON CONFLICT, RETURNING or another clause)` };
-    if (row.some(value => value.length === 0)) return { error: 'an empty value in the VALUES list' };
-    if (row.length !== columns.length) return { error: `${columns.length} columns and ${row.length} values` };
-    const twice = columns.find((column, n) => columns.indexOf(column) !== n);
-    if (twice !== undefined) return { error: `the column ${twice} is named twice` };
-    const at = columns.indexOf('action');
-    if (at < 0) return { error: 'no action column' };
-    return { columns, row, action: row[at] };
+    if (i < tokens.length) return { error: `${shown(tokens[i])} after FROM ${from} (a JOIN, WHERE, UNION or another clause)` };
+    return { ...matched(items, 'SELECT items', 'G2'), from };
   }
   const WRITES = new Set(['INSERT', 'UPDATE', 'DELETE', 'MERGE', 'COPY', 'TRUNCATE', 'INTO', 'CALL', 'DO', 'EXECUTE', 'ALTER',
     'DROP', 'CREATE', 'GRANT', 'REVOKE', 'LOCK', 'SET']);
@@ -1491,7 +1593,7 @@ function scanAuditWrites(sources = auditSources()) {
     return parts.every(part => part.flags & PRIMITIVE || isDate(part)) ? null
       : `\`${snippet(expression)}\` (${checker.typeToString(type)}) is not shown to be a value`;
   }
-  /** A raw call: its SQL must be one fixed text of the program; the INSERT form writes, one SELECT reads, others unresolved. */
+  /** A raw call: its SQL must be one fixed text of the program; the two INSERT forms write, one SELECT reads, others unresolved. */
   function rawCall(call) {
     let source = null;
     if (ts.isTaggedTemplateExpression(call)) source = call.template;
@@ -1517,21 +1619,98 @@ function scanAuditWrites(sources = auditSources()) {
     if (readsOnly(tokens)) return note(call, 'raw SQL naming AuditLog', 'proven_non_audit', 'one SELECT that changes no row reads AuditLog');
     const form = insertForm(tokens);
     if (form.error) return note(call, 'raw SQL naming AuditLog', 'unresolved', form.error);
-    const [slot] = form.action, column = `column ${form.columns.indexOf('action') + 1} of ${form.columns.length}`;
+    const [slot] = form.action, count = form.columns.length, position = form.columns.indexOf('action') + 1;
+    const column = form.form === 'G1' ? `column ${position} of ${count}`
+      : `item ${position} of ${count} of INSERT … SELECT … FROM ${form.from}${form.ctes.length ? ` after WITH ${form.ctes.map(cte => cte.shown).join(', ')}` : ''}`;
     if (form.action.length !== 1 || (slot.kind !== 'string' && slot.kind !== 'param')) {
       return note(call, 'raw INSERT INTO "AuditLog"', 'unresolved', `the action value is not one SQL string or one interpolation: ${form.action.map(shown).join(' ')}`);
     }
     const found = slot.kind === 'string' ? [text(slot.value)] : values(spans[slot.index]);
     if (found.some(value => value.text === undefined && value.prefix === undefined)) return record(call, 'raw INSERT INTO "AuditLog"', found);
-    const fragment = tokens.filter(token => token.kind === 'param' && token !== slot).map(token => notValue(spans[token.index])).find(Boolean);
+    // From INSERT on, every interpolation is a value; in a WITH body, a value or a fixed predicate fragment.
+    const params = tokens.filter(token => token.kind === 'param' && token !== slot);
+    const fragment = params.filter(token => tokens.indexOf(token) > form.insert).map(token => notValue(spans[token.index])).find(Boolean);
     if (fragment) return note(call, 'raw INSERT INTO "AuditLog"', 'unresolved', fragment);
+    const predicates = [], fragments = [];
+    for (const token of params.filter(token => tokens.indexOf(token) < form.insert && notValue(spans[token.index]))) {
+      const predicate = fixedPredicate(spans[token.index]);
+      if (predicate.error) return note(call, 'raw INSERT INTO "AuditLog"', 'unresolved', `the WITH fragment \`${snippet(spans[token.index])}\`: ${predicate.error}`);
+      predicates.push(predicate.basis);
+      fragments.push(spans[token.index]);
+    }
     record(call, 'raw INSERT INTO "AuditLog"', found, null, [slot.kind === 'string' ? `SQL string '${slot.value}' at ${column}`
-      : `the interpolation \`${snippet(spans[slot.index])}\` at ${column}`]);
+      : `the interpolation \`${snippet(spans[slot.index])}\` at ${column}`, ...predicates], fragments);
+  }
+  /**
+   * A fragment interpolated in a WITH body (Astra S7-U3a-AUDIT-SPEC-B-R-001-F03): every value it can take is a Prisma.sql
+   * text of the one shape `[alias.]column = ${value}::type` whose interpolation is a value, else {error}. Its values are
+   * followed through const bindings, both sides of ?: and every call's argument for a parameter of a private or local
+   * undecorated function (h); a binding that is changed, reached again, a caller outside the program or anything else
+   * leaves it unresolved.
+   */
+  function fixedPredicate(expression) {
+    const sources = predicateSources(expression, new Set());
+    const unfixed = sources.find(source => source.unknown);
+    if (unfixed) return { error: unfixed.unknown };
+    const shapes = new Set();
+    for (const { tagged } of sources) {
+      const why = predicateShape(tagged);
+      if (why) return { error: `${where(tagged)}: ${why}` };
+      shapes.add(`${snippet(tagged)} (${where(tagged)})`);
+    }
+    return { basis: `the WITH fragment \`${snippet(expression)}\` (${where(expression)}) is ${[...shapes].join(' or ')}` };
+  }
+  const SHAPE = 'the predicate `[alias.]column = ${value}::type`';
+  function predicateSources(expression, seen) {
+    const node = bare(expression);
+    if (ts.isTaggedTemplateExpression(node) && prismaMember(node.tag) === 'sql') return [{ tagged: node }];
+    if (ts.isConditionalExpression(node)) return [...predicateSources(node.whenTrue, seen), ...predicateSources(node.whenFalse, seen)];
+    if (!ts.isIdentifier(node)) return [{ unknown: `${where(node)}: \`${snippet(node)}\` is not a Prisma.sql text` }];
+    const symbol = symbolAt(node), declarations = symbol?.declarations ?? [];
+    if (declarations.length !== 1) return [{ unknown: `${where(node)}: \`${node.text}\` ${declarations.length ? 'has several declarations' : 'does not resolve'}` }];
+    const [declaration] = declarations;
+    if (seen.has(declaration)) return [{ unknown: `${where(node)}: \`${node.text}\` is reached again through the calls it comes from` }];
+    const next = new Set(seen).add(declaration);
+    const changed = references(symbol).find(reference => mutated(outer(reference)));
+    if (changed) return [{ unknown: `${where(changed)}: \`${node.text}\` is changed` }];
+    if (ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name) && declaration.initializer
+      && ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) return predicateSources(declaration.initializer, next);
+    if (!ts.isParameter(declaration) || !ts.isFunctionLike(declaration.parent)) {
+      return [{ unknown: `${where(node)}: \`${node.text}\` is a ${K[declaration.kind]} that is not const` }];
+    }
+    const owner = declaration.parent, index = owner.parameters.indexOf(declaration) - shift(owner);
+    if (declaration.dotDotDotToken || !ts.isIdentifier(declaration.name)) return [{ unknown: `${where(declaration)}: \`${node.text}\` is a rest or destructured parameter` }];
+    if (!owner.body || open(owner)) return [{ unknown: `${where(declaration)}: \`${node.text}\` is a parameter of ${describe(owner)}, which callers outside this program can call` }];
+    const { calls, escapes } = invocations(owner);
+    if (escapes.length) return [{ unknown: `${where(declaration)}: \`${node.text}\` is a parameter of ${describe(owner)}, which is handed on at ${escapes.join(', ')}` }];
+    if (!calls.length) return [{ unknown: `${where(declaration)}: \`${node.text}\` is a parameter of ${describe(owner)}, which nothing in the program calls` }];
+    return calls.flatMap(call => {
+      if (call.arguments.slice(0, index + 1).some(ts.isSpreadElement)) return [{ unknown: `${where(call)}: a spread argument` }];
+      const argument = call.arguments[index] ?? declaration.initializer;
+      return argument ? predicateSources(argument, next) : [{ unknown: `${where(call)}: no argument for \`${node.text}\`` }];
+    });
+  }
+  /** Why a Prisma.sql text is not exactly SHAPE with a value interpolated, or null. */
+  function predicateShape(tagged) {
+    const template = tagged.template;
+    const parts = ts.isTemplateExpression(template) ? [template.head.text, ...template.templateSpans.map(span => span.literal.text)] : [template.text];
+    let tokens;
+    try {
+      tokens = sqlTokens(parts);
+    } catch (error) {
+      return `${error.message} in its text`;
+    }
+    const name = token => token?.kind === 'ident' || token?.kind === 'word';
+    const operator = (token, value) => token?.kind === 'operator' && token.value === value;
+    const n = name(tokens[0]) && tokens[1]?.kind === 'punct' && tokens[1].value === '.' ? 2 : 0;
+    if (!(name(tokens[n]) && operator(tokens[n + 1], '=') && tokens[n + 2]?.kind === 'param' && operator(tokens[n + 3], '::')
+      && name(tokens[n + 4]) && tokens.length === n + 5)) return `\`${snippet(tagged)}\` is not ${SHAPE}`;
+    return notValue(template.templateSpans[tokens[n + 2].index].expression);
   }
 
   // ── the writes ──
   const READS = new Set(['findMany', 'findFirst', 'findUnique', 'findFirstOrThrow', 'findUniqueOrThrow', 'count', 'aggregate', 'groupBy']);
-  function record(node, via, found, action, basis = []) {
+  function record(node, via, found, action, basis = [], fragments = []) {
     const unread = found.filter(value => value.text === undefined && value.prefix === undefined);
     if (!found.length || unread.length) {
       return note(node, via, 'unresolved', !found.length ? 'its action has no value in the program'
@@ -1543,7 +1722,8 @@ function scanAuditWrites(sources = auditSources()) {
       basis: [...basis, ...origins.map(origin => `${where(origin)} ${JSON.stringify(origin.text)}`),
         ...found.filter(value => value.guard).map(value => `${JSON.stringify(value.text)} let through by the guard at ${value.guard}`),
         ...found.filter(value => value.prefix !== undefined).map(value => `${value.prefix}… then ${value.why}`)] };
-    Object.defineProperties(site, { call: { value: node }, action: { value: action }, origins: { value: origins }, start: { value: node.getStart() } });
+    Object.defineProperties(site, { call: { value: node }, action: { value: action }, origins: { value: origins }, start: { value: node.getStart() },
+      fragments: { value: fragments } });
     sites.push(site);
     note(node, via, 'resolved', site.basis.join('; '));
   }
@@ -2084,7 +2264,7 @@ test('completeness equivalents: every write of api/src rewritten in another nota
     added: 'api/src/syn-added-writer.ts' }));
 });
 
-test('completeness negative controls on api/src: unlisted, dynamic without a wildcard and unwritten actions each fail on their own', () => {
+test('completeness negative controls on api/src: unlisted, dynamic without a wildcard, unwritten actions and an unfixed WITH fragment path each fail on their own', () => {
   const sources = auditSources(), base = scanAuditWrites(sources), { ts } = base.tools, listing = productSources().listing;
   const before = verdict(base, productTable(), listing);
   /** The verdict of `changed`: class `name` gains exactly `added` (in the verdict's own order), every other class is as it was. */
@@ -2142,6 +2322,32 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
     edit(removed, site.file, write.getStart(), write.end, 'void 0');
   }
   alone(scanAuditWrites(edited(sources, removed)), 'unwritten_rows', [row]);
+  // (e) A WITH fragment passed once more from a value the program does not fix (Astra S7-U3a-AUDIT-SPEC-B-R-001-F01): for
+  // every raw write whose WITH fragment is a parameter of a method or function, a private method added next to it passes
+  // that parameter a request value. That write alone becomes unresolved, naming the added path; its actions become
+  // unwritten only where no other write records them.
+  const { bare, symbolAt } = base.tools, lineless = entry => entry.replace(/^([\w./-]+\.[cm]?[jt]sx?):\d+ /, '$1 ');
+  const passedIn = base.sites.flatMap(site => site.fragments.map(fragment => ({ site, declaration: symbolAt(bare(fragment))?.declarations?.[0] })))
+    .filter(({ declaration }) => declaration && ts.isParameter(declaration) && (ts.isMethodDeclaration(declaration.parent)
+      || ts.isFunctionDeclaration(declaration.parent)));
+  assert.ok(passedIn.length > 0, 'api/src has a raw write whose WITH fragment is a parameter');
+  for (const { site, declaration } of passedIn) {
+    const owner = declaration.parent, method = ts.isMethodDeclaration(owner), name = owner.name.getText();
+    const args = owner.parameters.map((parameter, n) => (parameter === declaration ? 'body.where' : `body.p${n}`)).join(', ');
+    const added = method ? `\n  private synUnfixedPath(body: any) { return this.${name}(${args}); }\n`
+      : `\nfunction synUnfixedPath(body: any) { return ${name}(${args}); }\n`;
+    const at = method ? owner.parent.end - 1 : owner.end, path = new Map();
+    edit(path, site.file, at, at, added);
+    const found = verdict(scanAuditWrites(edited(sources, path)), productTable(), listing);
+    const grown = found.unresolved.filter(entry => !before.unresolved.map(lineless).includes(lineless(entry)));
+    assert.equal(grown.length, 1, JSON.stringify(grown));
+    assert.ok(grown[0].startsWith(`${site.file}:${site.line} `) && grown[0].includes('`body.where` is not a Prisma.sql text'), grown[0]);
+    assert.deepEqual(found.unresolved.filter(entry => entry !== grown[0]).map(lineless), before.unresolved.map(lineless));
+    const lost = site.actions.filter(action => base.sites.every(other => other === site || !other.actions.includes(action)));
+    assert.deepEqual(found.unwritten_rows, productTable().rows.filter(entry => before.unwritten_rows.includes(entry) || lost.includes(entry)));
+    for (const other of ['unread_sources', 'unlisted', 'uncovered_prefixes', 'unwritten_wildcards']) assert.deepEqual(found[other], before[other], other);
+  }
   console.log('ADMIN_AUDIT_NEGATIVE_CONTROLS ' + JSON.stringify({ revalued_literals: origins.length, unlisted_after_revalue: changed.unlisted.length,
-    unwritten_row: row, writes_taken_out: [...removed.values()].flat().length }));
+    unwritten_row: row, writes_taken_out: [...removed.values()].flat().length,
+    unfixed_fragment_paths: passedIn.map(({ site, declaration }) => `${site.file}:${site.line} \`${declaration.name.getText()}\``) }));
 });
