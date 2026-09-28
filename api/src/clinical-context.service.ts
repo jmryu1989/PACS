@@ -33,9 +33,16 @@ const changed = () => new ConflictException({ code: CLINICAL_CONTEXT_CHANGED,
 // study-access.service.ts가 R3·R7(b)에서 내는 것과 같은 답이다. R6에서는 트랜잭션 안에서 읽은 정책을 비교하므로 여기서 만든다.
 const accessChanged = () => new ConflictException({ code: 'STUDY_ACCESS_CHANGED', message: '검사 접근 조건이 변경되었습니다. 다시 불러온 뒤 확인하세요' });
 
-/** DB가 지금 답하지 못한 경우만 503이다(lock_timeout·트랜잭션 시간 초과·교착). study-access.service.ts write()와 같은 목록이다. */
+/** DB가 지금 답하지 못한 경우(lock_timeout·트랜잭션 시간 초과·교착). study-access.service.ts write()와 같은 목록이다. */
+const dbBusy = (error: any) => ['P2024', 'P2028', 'P2034'].includes(error?.code)
+  || error?.code === 'P2010' && ['55P03', '57014', '40P01'].includes(error?.meta?.code);
+
+/**
+ * 그 경우만 503 CLINICAL_CONTEXT_BUSY다(§9.4). R6 안의 StudyAccess 정책 잠금·조회는 자기 503을 내고 원래 오류를 cause로만
+ * 넘기므로 그 cause도 본다. 정책 행 형식 오류 같은 다른 StudyAccess 실패는 원래 503 그대로 나간다. DB 오류 원문은 싣지 않는다.
+ */
 function busyOr(error: any): never {
-  if (['P2024', 'P2028', 'P2034'].includes(error?.code) || error?.code === 'P2010' && ['55P03', '57014', '40P01'].includes(error?.meta?.code))
+  if (dbBusy(error) || error instanceof ServiceUnavailableException && dbBusy(error.cause))
     throw new ServiceUnavailableException({ code: CLINICAL_CONTEXT_BUSY, message: '검사 처리 중입니다. 잠시 후 다시 시도하세요' });
   throw error;
 }

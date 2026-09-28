@@ -564,6 +564,57 @@ test('CC-S07 failures stay in their section; a DB failure is 503 for the whole a
     'every Orthanc read ends before the transaction starts');
 });
 
+test('CC-S07 a DB lock or timeout in R6 or R7(a), inside StudyAccess too, is 503 CLINICAL_CONTEXT_BUSY; other failures keep their answer', async () => {
+  // Astra S7-U4a-R-001 F02. The real StudyAccessService takes its shared lock and reads the policy row on the R6 transaction
+  // connection; a barrier step throws the Prisma error there, as PostgreSQL would under lock_timeout or statement_timeout.
+  const dbError = (code, meta) => Object.assign(new Error('SYN-DB-DETAIL relation "StudyAccessPolicy"'), { code },
+    meta ? { meta: { code: meta, message: 'SYN-DB-DETAIL' } } : {});
+  const busy = [
+    ['R6 StudyAccess shared lock, lock_timeout', 'tx:lock', dbError('P2010', '55P03')],
+    ['R6 StudyAccess policy SQL, statement timeout', 'tx:policy', dbError('P2010', '57014')],
+    ['R6 StudyAccess policy SQL, deadlock', 'tx:policy', dbError('P2010', '40P01')],
+    ['R6 StudyAccess lock on an expired transaction', 'tx:lock', dbError('P2028')],
+    ['R6 transaction timed out on its own read', 'tx:studyState.findMany', dbError('P2028')],
+    ['R7(a) statement timeout', 'root:recheck', dbError('P2010', '57014')],
+  ];
+  for (const [label, event, error] of busy) {
+    const w = fullWorld();
+    w.at(event, () => { throw error; });
+    const result = await barrier(w, reader);
+    assert.deepEqual([result.status, Object.keys(result.body).sort(), result.body.code], [503, ['code', 'message'], 'CLINICAL_CONTEXT_BUSY'], label);
+    assert.ok(!/SYN-DB-DETAIL|55P03|57014|40P01|P20/.test(JSON.stringify(result.body)), label + ': no DB text in the answer');
+  }
+  // Not a DB delay: the StudyAccess answer goes out as it is, never BUSY.
+  const unavailable = { message: '검사 접근 조건을 확인하지 못했습니다. 잠시 후 다시 시도하세요', error: 'Service Unavailable', statusCode: 503 };
+  for (const [label, event, error] of [['R6 policy SQL, another DB error', 'tx:policy', dbError('P2010', '42P01')],
+    ['R6 shared lock, an error without a code', 'tx:lock', new Error('SYN-DB-DETAIL connection reset')]]) {
+    const w = fullWorld();
+    w.at(event, () => { throw error; });
+    const result = await barrier(w, reader);
+    assert.deepEqual([result.status, result.body], [503, unavailable], label);
+  }
+  let w = fullWorld();
+  w.at('orthanc:studies', () => { w.store.policies.set(reader.sub, { institution: A, revision: 1, reason: 'SYN', updatedBy: 'syn-admin',
+    updatedAt: T0, policy: { version: 1, restricted: true, startsAt: null, endsAt: null, rules: 'SYN-MALFORMED' } }); });
+  let result = await barrier(w, reader);
+  assert.deepEqual([result.status, result.body], [503, unavailable], 'a malformed policy row read in R6');
+  // A policy change is still V-ACCESS: 409 STUDY_ACCESS_CHANGED.
+  w = fullWorld();
+  w.at('orthanc:studies', () => { w.store.policies.set(reader.sub, { institution: A, revision: 1, reason: 'SYN', updatedBy: 'syn-admin',
+    updatedAt: T0, policy: { version: 1, restricted: false, startsAt: null, endsAt: null, rules: [] } }); });
+  result = await barrier(w, reader);
+  assert.deepEqual([result.status, result.body.code], [409, 'STUDY_ACCESS_CHANGED'], 'policy changed between R3 and R6');
+  // R3: the anchor's original metadata read fails -> the existing StudyAccess 503 (section 9.4), even for an error with a code.
+  const tagRule = { version: 1, restricted: true, startsAt: null, endsAt: null,
+    rules: [{ patientId: null, modalities: ['CT'], dateFrom: null, dateTo: null, studyUids: [] }] };
+  w = fullWorld({ policies: { [reader.sub]: tagRule } });
+  w.at('orthanc:studyAccessMetadata', () => { throw dbError('P2028'); });
+  result = await barrier(w, reader);
+  assert.deepEqual([result.status, result.body], [503, { message: '검사 원본의 접근 조건을 확인하지 못했습니다', error: 'Service Unavailable', statusCode: 503 }],
+    'R3 original metadata failure');
+  assert.equal(w.events.includes('tx:start'), false, 'no transaction after an R3 failure');
+});
+
 // ── CC-S08 changes between the reads ──
 
 /** Calls through the controller and checks that every barrier step set with w.at() really ran inside that call. */
