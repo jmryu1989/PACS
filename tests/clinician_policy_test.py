@@ -10,7 +10,9 @@ REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> T
 here) and TEST-S5-U1c-LIVE-MATRIX (clinician_policy_live.py test_01/test_04/test_05): every controller route has exactly one
 route_matrix row, nothing is denied by subtraction, and review notes D3/D5/D6/D8 of S5-U1a are closed by pins.
 
-No Node, no Nest, no browser, no stack. Three kinds of evidence and nothing more:
+No Nest, no browser, no stack. Node runs for one question only: the TypeScript compiler api/package-lock.json installs
+(npm ci --prefix api --ignore-scripts) says which names spelled like a decorator are the decorator (Compiler,
+tests/route_inventory_ts.js); without node or it the test fails. Three kinds of evidence and nothing more:
   1. tests/clinician_policy_fixtures.json judged by an independent Python model of the guard rules
      (member state, clinician-only detection, gateway identity closure, route key from Nest metadata,
      allowlist decision). The shipped TypeScript is judged against the same fixtures only by the hosted
@@ -21,9 +23,10 @@ No Node, no Nest, no browser, no stack. Three kinds of evidence and nothing more
      every other api/src .ts file goes through the same reader and may carry no route, @Controller() or @Public(); every
      decorator name is bound once by 'import { Name }' from its listed module and nothing renames, re-exports under
      another name or shadows it, and Public ends at its declaration in auth.guard.ts; a route, Controller,
-     RequestMapping, Public or SetMetadata name that the file binds from its module or a package or hands on by an export
-     statement, and any such property, occurs in code only as its import and as a decorator the runs read (a type or
-     value the file declares so itself is not the decorator, S7-U1a-R-001-F02), and no Reflect metadata writer, decorator factory or loader of Nest or a project file reaches that metadata another way;
+     RequestMapping, Public or SetMetadata name occurs in code only as its import and as a decorator the runs read,
+     unless the TypeScript compiler binds it to a declaration of api/src that is not the decorator (a type named Head,
+     S7-U1a-B-R-001-F02), and no Reflect metadata writer, decorator factory or loader of Nest or a project file reaches
+     that metadata another way;
      tests/clinician_policy_fixtures.json source_contract is the closed list of forms that reach a loader, an evaluator,
      a metadata writer or a class prototype, and every other form is refused; a '/' is a regex or a division by the
      token before it, a '/' whose reading turns on grammar the lexer does not track refuses the file, and no regex
@@ -37,10 +40,13 @@ No Node, no Nest, no browser, no stack. Three kinds of evidence and nothing more
 """
 from __future__ import annotations
 
+import atexit
 import functools
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -735,33 +741,86 @@ def words(pattern, code):
             if not (match.start() and IDENTIFIER_CHAR.match(code, match.start() - 1))]
 
 
-def decorator_bound(statements, name):
-    """Whether one of the file's module statements can make name the decorator or hand it on: an import or re-export of
-    it from the decorator's own module (STRICT_MODULE) or from a package, whose exports no check reads, and any export
-    statement that names it, which hands the name on to files this check reads apart. A name the file declares itself (a
-    type, an interface, a function, a const) or imports from another api/src file is that file's own binding and not the
-    decorator (S7-U1a-R-001-F02: 'export type Head' in the critical result policy and its import by the service were
-    refused as route decorators). The decorator is reached only by importing its own name from its module: renames,
-    whole-module bindings, loaders and metadata writers are refused, and an api/src file that hands the decorator on
-    under its name meets this check itself."""
-    return any(name in (s["imported"], s["local"]) and (s["form"] == "export" or s["module"] is not None
-               and (s["module"] == STRICT_MODULE[name] or not s["module"].startswith("./"))) for s in statements)
+class Compiler:
+    """The TypeScript compiler of api/node_modules (api/package-lock.json's typescript; 'npm ci --prefix api
+    --ignore-scripts'), asked through tests/route_inventory_ts.js what each STRICT_NAMES spelling of a source set binds
+    to: 'decorator' (the export of that name from its STRICT_MODULE, through every import and export alias), 'project'
+    (declarations of the set's own files, none a decorator), 'package' (a declaration outside the set) or 'unresolved'.
+
+    Which occurrence is the decorator is TypeScript's binding, not the spelling: a type named Head, its type-only import
+    or re-export is not Nest's Head. So it is the checker's answer, with api/tsconfig.json's options, and no rule of this
+    file reads it (S7-U1a-B-R-001-F02; the reader S7-U1a fix1 added read import and export statements and misjudged
+    'export type { Head } from ...'). One node process answers every set the tests judge, each set whole but a file's
+    text sent only when it changed. No node, no typescript or no @nestjs/common fails the test: that is an answer the
+    inventory does not have, not a check it may skip."""
+
+    CALLER = ROOT / "tests" / "route_inventory_ts.js"
+
+    def __init__(self):
+        self.process, self.sent, self.answers, self.versions = None, {}, {}, None
+
+    def start(self):
+        node = shutil.which("node")
+        if node is None:
+            raise AssertionError("node is not on PATH: which names are the route decorators is the TypeScript "
+                                 "compiler's answer (tests/route_inventory_ts.js, npm ci --prefix api --ignore-scripts)")
+        self.process = subprocess.Popen([node, str(self.CALLER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        text=True, encoding="utf-8", cwd=ROOT)
+        atexit.register(self.close)
+
+    def close(self):
+        if self.process is not None:
+            self.process.stdin.close()
+            self.process.wait(timeout=60)
+            self.process = None
+
+    def bindings(self, sources):
+        """{path: {offset: binding}} of the .ts files of sources ({path: text} under api/src), offsets in the text."""
+        files = {path.relative_to(API).as_posix(): text for path, text in sources.items()
+                 if path.suffix == ".ts" and API in path.parents}
+        key = tuple(sorted(files.items()))
+        if key not in self.answers:
+            if self.process is None:
+                self.start()
+            request = {"files": {name: None if self.sent.get(name) == text else text for name, text in files.items()},
+                       "names": STRICT_MODULE}
+            self.process.stdin.write(json.dumps(request, ensure_ascii=True) + "\n")
+            self.process.stdin.flush()
+            line = self.process.stdout.readline()
+            if not line:
+                raise AssertionError(f"the TypeScript compiler stopped without an answer (exit {self.process.poll()})")
+            reply = json.loads(line)
+            if "error" in reply:
+                raise AssertionError("the TypeScript compiler did not answer: " + reply["error"])
+            self.sent = files
+            self.versions = {name: reply[name] for name in ("typescript", "node", "decorators")}
+            self.answers[key] = {API / name: {offset: kind for offset, _name, kind in found}
+                                 for name, found in reply["files"].items()}
+        return self.answers[key]
 
 
-def undecorated_names(path, source, code, statements, uses):
+COMPILER = Compiler()
+
+
+def judged(path, source):
+    """The compiler's answer for one file judged where it is compiled: api/src as it is, with source as path's text."""
+    return COMPILER.bindings({**api_sources(), path: source}).get(path, {})
+
+
+def undecorated_names(path, source, code, statements, uses, bindings):
     """The STRICT_NAMES the code names; raises when one occurs anywhere but the local name of an import and a decorator
     the runs read (uses), a property after '.' included (S5-U1c-F05). Public's module declares Public and calls
-    SetMetadata once; public_export, which controller_inventory always runs, holds both there to exactly that. The rule is
-    the binding, not the spelling: it reads a name the file binds from the decorator's module or a package, a name an
-    export statement hands on, and every property, which a module object's export can be; a name the file declares or
-    imports from another api/src file is not the decorator and is not read here (decorator_bound, S7-U1a-R-001-F02). A run that applies such a name as a decorator
-    still meets own_import, which wants the decorator's own import."""
+    SetMetadata once; public_export, which controller_inventory always runs, holds both there to exactly that. bindings
+    is the compiler's answer for the file (Compiler): an occurrence it binds to a declaration of the checked sources that
+    is not the decorator ('project': a type, interface or value the sources declare) is not the decorator and is not
+    read here; every other occurrence is, as it was before (S7-U1a-B-R-001-F02). A run that applies such a name as a
+    decorator still meets own_import, which wants the decorator's own import."""
     exempt = {"Public", METADATA_WRITER} if path == PUBLIC_MODULE else set()
     imported = {s["at"] for s in statements if s["form"] in IMPORT_FORMS}
     present, loose = set(), []
     for match in words(STRICT_NAME, code):
         name, at = match.group(0), match.start()
-        if name in exempt or not (is_property(code, at) or decorator_bound(statements, name)):
+        if name in exempt or bindings.get(at) == "project":
             continue
         present.add(name)
         if at not in imported and at not in uses.get(name, ()):
@@ -1240,9 +1299,10 @@ def controller_heritage(path, code):
         raise AssertionError(" | ".join(problems))
 
 
-def decorator_bindings(path, source, runs):
+def decorator_bindings(path, source, runs, bindings=None):
     """{name: module} of the decorator names the runs read; raises unless each is its module's own export (S5-U1c-F04)
-    and nothing applies a route, a controller or public metadata another way (S5-U1c-F05).
+    and nothing applies a route, a controller or public metadata another way (S5-U1c-F05). bindings is the compiler's
+    answer for the file within the set it is judged in (controller_inventory's); by default, api/src as it is.
 
     The inventories classify by name, and 'import { Get as Header }' plus 'import { Public as HttpCode } from
     './auth.guard'' made '@HttpCode() @Header('x')' a public route both read as a header and a status code. So, in every
@@ -1285,7 +1345,8 @@ def decorator_bindings(path, source, runs):
     named = literal_keys(source)[0]
     for name, offsets in sorted(uses.items()):
         gathered(problems, own_import, path, named, statements, name, DECORATOR_MODULE.get(name), offsets)
-    present = gathered(problems, undecorated_names, path, source, named, statements, uses)
+    present = gathered(problems, undecorated_names, path, source, named, statements, uses,
+                       judged(path, source) if bindings is None else bindings)
     gathered(problems, metadata_writes, path, code, named)
     gathered(problems, regex_names, path, source)
     gathered(problems, module_loads, path, source, named)
@@ -1319,7 +1380,7 @@ def public_export(sources):
                {at + declaration.index(metadata["name"])}, properties=False)
 
 
-def outside_decorators(path, source):
+def outside_decorators(path, source, bindings=None):
     """Decorator names of an api/src file that is not *.controller.ts, read by the lexer and runs a controller gets.
 
     Both inventories open *.controller.ts only, so a route decorator, @Controller(), @RequestMapping() or @Public()
@@ -1341,7 +1402,7 @@ def outside_decorators(path, source):
     text = decorator_text(source)
     if text:
         raise AssertionError(f"{path.name}: route, @Controller() or @Public() call text outside *.controller.ts {text}")
-    decorator_bindings(path, source, runs)
+    decorator_bindings(path, source, runs, bindings)
     return names
 
 
@@ -1425,16 +1486,18 @@ def controller_inventory(sources=None):
     name stops it too (S5-U1c-F04), and so does a route or Public applied by a call, a metadata writer or a loader in
     any file (S5-U1c-F05), any form source_contract does not list and an extends clause in a controller file
     (S5-U1c-F06), read past the generic defaults whose type literal hid it (S5-U1c-F08). Every check runs on every file
-    and the refusal joins each reason.
+    and the refusal joins each reason. Which names are the decorators is the compiler's answer for the whole set
+    (Compiler, S7-U1a-B-R-001-F02).
     """
     found, problems = {}, []
     sources = api_sources() if sources is None else sources
+    compiled = COMPILER.bindings(sources)
     for path, source in sorted(sources.items()):
         if path.suffix != ".ts":
             problems.append(f"{path.name}: a script neither inventory opens")
             continue
         if not path.name.endswith(".controller.ts"):
-            gathered(problems, outside_decorators, path, source)
+            gathered(problems, outside_decorators, path, source, compiled.get(path, {}))
             continue
         runs = gathered(problems, decorator_runs, source)
         if runs is None:
@@ -1443,7 +1506,7 @@ def controller_inventory(sources=None):
             if key in found:
                 problems.append(f"duplicate route {key}")
             found[key] = {"file": path.name, "public": public}
-        gathered(problems, decorator_bindings, path, source, runs)
+        gathered(problems, decorator_bindings, path, source, runs, compiled.get(path, {}))
         gathered(problems, controller_heritage, path, code_mask(source))
     gathered(problems, public_export, sources)
     if problems:
@@ -3350,34 +3413,44 @@ class ClinicianPolicySpec(unittest.TestCase):
         }, ensure_ascii=True, sort_keys=True))
 
     def test_24_names_spelled_like_decorators_are_judged_by_their_binding(self):
-        """S7-U1a-R-001-F02: undecorated_names refused every api/src identifier spelled like a route decorator, so the
-        report head type of critical-result-policy.ts ('export type Head') and its uses in critical-result.service.ts
-        stopped the inventory, and the product type was renamed to pass this test (465012f, reverted). The rule reads the
-        binding: a name the file binds from the decorator's module or a package, and any property, is judged as before;
-        a type or value the file declares, or imports from another api/src file, is not the decorator. (1) such names
-        read, (2) a real @Head() route, an alias, a re-export, a call and a property are still read as a route or refused,
-        (3) renaming such a type leaves the inventory as it is. The typed modules are written here in the shape of the
-        product's, so the product may name its types as it likes; the product itself is what test_05 inventories."""
+        """S7-U1a-R-001-F02, S7-U1a-B-R-001-F02: undecorated_names refused every api/src identifier spelled like a route
+        decorator, so the report head type of critical-result-policy.ts ('export type Head') and its uses in
+        critical-result.service.ts stopped the inventory, and the product type was renamed to pass this test (465012f,
+        reverted). S7-U1a fix1 then told the two apart by reading import and export statements, a TypeScript reader of this
+        file's own that took a type-only re-export ('export type { Head } from ...') for the decorator. Which occurrence
+        is the decorator is TypeScript's binding, so the TypeScript compiler answers it (Compiler,
+        tests/route_inventory_ts.js): an occurrence it binds to a declaration of the checked sources that is not the
+        decorator is not read; every other occurrence is judged as before. (1) such names read: a type, its import, its
+        type-only import and re-export, an interface and values; (2) a real @Head() route, an alias, re-exports, a call, a
+        shorthand property, a type-only re-export of Nest's Head and a property of any are still read as a route or
+        refused; (3) renaming such a type leaves the inventory as it is. The typed modules are written here in the shape
+        of the product's, so the product may name its types as it likes; the product itself is what test_05
+        inventories."""
         sources = api_sources()
         baseline = controller_inventory(sources)
         outside, added, helpers = API / "unlisted-routes.ts", API / "bound.controller.ts", API / "route-helpers.ts"
+        reader, types = API / "unlisted-reader.ts", API / "unlisted-types.ts"
         typed = {API / "unlisted-head.ts": "export type Head = { version: number; action: string | null } | null;\n"
                                            "export const pinned = (head: Head): number => head?.version ?? 0;\n",
-                 API / "unlisted-reader.ts": "import { Head, pinned } from './unlisted-head';\n"
-                                             "export const read = (head: Head): number => pinned(head);\n"}
+                 types: "export type { Head } from './unlisted-head';\n",
+                 reader: "import type { Head } from './unlisted-types';\nimport { pinned } from './unlisted-head';\n"
+                         "export const read = (head: Head): number => pinned(head);\n",
+                 API / "unlisted-service.ts": "import { Head, pinned } from './unlisted-head';\n"
+                                              "export const again = (head: Head): number => pinned(head) + 1;\n"}
         spelled = re.compile(r"(?<![\w$])Head(?![\w$])")
 
         def old_rule():
-            """The reader before this fix: every occurrence of a STRICT_NAMES spelling was a decorator name."""
-            return mock.patch.object(sys.modules[__name__], "decorator_bound", lambda statements, name: True)
+            """The reader before S7-U1a: no answer from the compiler, so every STRICT_NAMES spelling is read."""
+            return mock.patch.object(COMPILER, "bindings", lambda sources: {})
 
         def renamed(name):
             return {path: spelled.sub(name, text) for path, text in typed.items()}
 
         def bindings(files):
-            """decorator_bindings of each file on its own: the per-file rule, whatever the rest of api/src holds."""
+            """decorator_bindings of each file, judged with the others in api/src as the compiler would build them."""
+            compiled = COMPILER.bindings({**sources, **files})
             for path, text in files.items():
-                decorator_bindings(path, text, decorator_runs(text))
+                decorator_bindings(path, text, decorator_runs(text), compiled.get(path, {}))
 
         # control: the old reader refused the type for its spelling alone and passed the same code renamed
         with old_rule():
@@ -3386,6 +3459,13 @@ class ClinicianPolicySpec(unittest.TestCase):
                 bindings(typed)
             bindings(renamed("ReportHead"))
         bindings(typed)
+        # control: the compiler does know Nest's decorators; every own-name import of one in api/src is bound to it
+        compiled = COMPILER.bindings(sources)
+        nest = [(path.name, s["local"], compiled.get(path, {}).get(s["at"])) for path, text in sorted(sources.items())
+                for s in module_statements(path, text)
+                if s["form"] == "named" and s["module"] == "@nestjs/common" and s["local"] in STRICT_NAMES]
+        self.assertTrue(nest)
+        self.assertEqual([row for row in nest if row[2] != "decorator"], [])
         undecorated = "used where no decorator the inventory reads applies it"
         inject = "import { Injectable } from '@nestjs/common';\n"
         helper = inject + "@Injectable()\nexport class Helper {\n  run() { return 1; }\n}\n"
@@ -3395,20 +3475,21 @@ class ClinicianPolicySpec(unittest.TestCase):
 
         # (1) a type, an interface and values spelled like route decorators, declared or imported from another api/src
         # file, in and outside the controllers: the inventory reads what it read, plus the added controller's own route
+        declared = "export type Head = { version: number } | null;\nexport const version = (head: Head) => head?.version ?? 0;\n"
         accepted = {
-            "a type named Head outside the controllers": (
-                {outside: "export type Head = { version: number } | null;\n"
-                          "export const version = (head: Head) => head?.version ?? 0;\n"}, {}),
+            "a type named Head outside the controllers": ({outside: declared}, {}),
             "that type imported by another api/src file": (
-                {outside: "export type Head = { version: number } | null;\n"
-                          "export const version = (head: Head) => head?.version ?? 0;\n",
-                 API / "unlisted-reader.ts": "import { Head, version } from './unlisted-routes';\n"
-                                             "export const read = (head: Head) => version(head);\n"}, {}),
+                {outside: declared, reader: "import { Head, version } from './unlisted-routes';\n"
+                                            "export const read = (head: Head) => version(head);\n"}, {}),
+            "that type through a type-only re-export and a type-only import": (
+                {outside: declared, types: "export type { Head } from './unlisted-routes';\n",
+                 reader: "import type { Head } from './unlisted-types';\nimport { version } from './unlisted-routes';\n"
+                         "export const read = (head: Head) => version(head);\n"}, {}),
             "an interface and values spelled like route decorators": (
                 {outside: "export interface Get { at: string }\nexport const Put = (n: number) => n + 1;\n"
                           "export function Search(q: Get) { return q.at; }\n",
-                 API / "unlisted-reader.ts": "import { Put, Search } from './unlisted-routes';\n"
-                                             "export const run = () => Put(1) + Search({ at: 'x' }).length;\n"}, {}),
+                 reader: "import { Put, Search } from './unlisted-routes';\n"
+                         "export const run = () => Put(1) + Search({ at: 'x' }).length;\n"}, {}),
             "a type named Head in a controller file": (
                 {added: controller("import { Controller, Get } from '@nestjs/common';\ntype Head = { version: number };\n",
                                    "  @Get('read')\n  read(): Head { return { version: 1 }; }\n")},
@@ -3440,6 +3521,13 @@ class ClinicianPolicySpec(unittest.TestCase):
                 r"unlisted-routes\.ts: Head " + undecorated),
             "Nest's Head re-exported under its name": (
                 {outside: helper + "export { Head } from '@nestjs/common';\n"}, r"unlisted-routes\.ts: Head " + undecorated),
+            # type-only is not what decides: the compiler binds this export to Nest's Head
+            "Nest's Head in a type-only re-export": (
+                {outside: helper + "export type { Head } from '@nestjs/common';\n"}, r"unlisted-routes\.ts: Head " + undecorated),
+            "Nest's Head handed on by a shorthand property": (
+                {outside: helper.replace(inject, "import { Head, Injectable } from '@nestjs/common';\n")
+                          + "export const table = { Head };\n"},
+                r"unlisted-routes\.ts: Head " + undecorated),
             "@Head() from an api/src file that re-exports Nest's": (
                 {helpers: "export { Head } from '@nestjs/common';\n",
                  added: controller("import { Controller } from '@nestjs/common';\nimport { Head } from './route-helpers';\n",
@@ -3463,7 +3551,8 @@ class ClinicianPolicySpec(unittest.TestCase):
                 self.assertEqual(controller_inventory({**sources, **renamed(name)}), baseline)
         print("CLINICIAN_POLICY_TYPE_NAMES " + json.dumps({
             "accepted": sorted(accepted), "refused": sorted(refused), "read_as_route": "HEAD bound/read",
-            "renamed": ["ReportHead", "PinnedHead"], "real_routes": len(baseline),
+            "renamed": ["ReportHead", "PinnedHead"], "real_routes": len(baseline), "nest_imports_bound": len(nest),
+            "compiler": COMPILER.versions,
         }, ensure_ascii=True, sort_keys=True))
 
 

@@ -73,8 +73,16 @@ jobs:
       # route classified (public, allowlisted or denied) and compared with invariants_live ROUTES, and the role-list
       # pins across guard, member console, Keycloak client and realm (stdlib). The S5-U1a live module runs only
       # through scripts/run-tests.py on a hosted synthetic stack and is not a step of this job.
+      # S7-U1a-B-R-001-F02: which names spelled like a route decorator are the decorator is the TypeScript compiler's
+      # answer (tests/route_inventory_ts.js), so the step needs node and the typescript and @nestjs/common that
+      # api/package-lock.json pins. Lifecycle scripts stay off: declarations are read, nothing is built or run.
+      - name: S7-U1a TypeScript compiler and Nest declarations for the route inventory
+        timeout-minutes: 5
+        run: |
+          node --version
+          npm ci --prefix api --ignore-scripts --no-audit --no-fund
       - name: S5-U1a clinician-only default denial fixtures, route classification and role-list source pins
-        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-policy --cwd . --file tests/clinician_policy_fixtures.json --file tests/clinician_policy_test.py --file api/src/clinician-policy.ts --file api/src/auth.guard.ts --file api/src/admin.service.ts --file api/src/keycloak.service.ts --file keycloak/kin-realm.json --file tests/invariants_live.py -- python3 -B tests/clinician_policy_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-policy --cwd . --file tests/clinician_policy_fixtures.json --file tests/clinician_policy_test.py --file tests/route_inventory_ts.js --file api/package-lock.json --file api/tsconfig.json --file api/src/clinician-policy.ts --file api/src/auth.guard.ts --file api/src/admin.service.ts --file api/src/keycloak.service.ts --file keycloak/kin-realm.json --file tests/invariants_live.py -- python3 -B tests/clinician_policy_test.py
       # S5-U1b: the clinician read projections against the read_contract field sets (deep key walk, no stack). This job
       # builds no kin-api:ci, so KIN_CLINICIAN_POLICY_MODULE points the test at the TS source instead of its default
       # /app/dist/clinician-policy; node:22 strips the types (>= 22.18) and the test serves '@nestjs/common' from the
