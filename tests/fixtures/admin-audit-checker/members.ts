@@ -1,24 +1,23 @@
-// Test-owned fixture of tests/admin_audit_attribution_test.cjs (not product code): the member references and objects of
-// Astra S7-U3a-E-R-001 (F02 (b), (e), (h) and the F03 fragment) that keep to the program. Added to the baseline of
-// tests/fixtures/admin_audit_completeness, each marked write is one resolved site with exactly the marked actions and the
-// gate still passes; nothing else in the file is a candidate.
+// Test-owned fixture of tests/admin_audit_attribution_test.cjs (not product code): the member references and objects that
+// keep to the program, inside the closed list of Astra S7-U3a-AUDIT-SPEC-C-R-001 (W1 keys, W3 helpers, W4 objects, W5
+// predicates). Added to the baseline of tests/fixtures/admin_audit_completeness, each marked write is one resolved site
+// with exactly the marked actions and the gate still passes; nothing else in the file is a candidate. What fix6 had here
+// outside the list (readonly and static readonly fields, a key joined by `+`) is refused in violations.txt (`moved-*`).
 import { Prisma } from '@prisma/client';
 
 const GO = 'go';
-const LINK = 'link' + 'ed';
-const FIELD = 'field';
+const LINK = 'linked';
+const DATA = 'data';
 
 export class SynMembers {
-  private readonly field = 'syn.allowed';
-  private static readonly SECOND = 'syn.second';
   private count = 0;
 
-  // (h) a helper called only by constant keys: a dot and a key the program fixes are one reference
+  // W3 a private helper called by a constant key and by a dot (W1: one reference either way)
   private go(tx: Prisma.TransactionClient, action: string) {
     return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: resolved syn.allowed syn.second
   }
 
-  // F03 a WITH fragment received by a helper that only interpolates it
+  // W5 a WITH predicate received by a private helper that only interpolates it
   private async linked(tx: Prisma.TransactionClient, selector: Prisma.Sql) {
     // expect: resolved syn.hidden
     await tx.$executeRaw`WITH s AS (SELECT t.uid FROM "StudyState" t WHERE ${selector})
@@ -26,25 +25,15 @@ export class SynMembers {
   }
 
   async write(tx: Prisma.TransactionClient, uid: string) {
-    // (e) another member of the instance written: the readonly field keeps its value
+    // W4 another member of the instance written (a count): the helpers still run the bodies the program has
     this.count++;
-    await this[GO](tx, this.field);
-    await this['go'](tx, SynMembers.SECOND);
-    // (e) the readonly field read by a constant key
-    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this[FIELD] } }); // expect: resolved syn.allowed
-    // F03 the fragment through a const alias, tested, and handed to the helper by a constant key
+    await this[GO](tx, 'syn.allowed');
+    await this.go(tx, 'syn.second');
+    // W1 `data` by a constant key
+    await tx.auditLog.create({ [DATA]: { actor: 'syn', target: 'syn', action: 'syn.second' } }); // expect: resolved syn.second
+    // W5 the predicate through a const alias, tested, and handed to the helper by a constant key
     const selector = Prisma.sql`t.uid = ${uid}::text`;
     const same = selector;
     if (same) await this[LINK](tx, same);
   }
 }
-
-// (e) a class handed to other code (a module's providers) is the class's, its static members': its instances' fields
-// keep their values, code outside the program being read as for (h)
-export class SynProvided {
-  private readonly field = 'syn.second';
-  async write(tx: Prisma.TransactionClient) {
-    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: resolved syn.second
-  }
-}
-export const SYN_PROVIDERS = [SynProvided];
