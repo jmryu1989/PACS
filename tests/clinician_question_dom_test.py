@@ -77,15 +77,17 @@ receipts that replay the stored `applied` result, revision before state, author/
   18c (B-R-001 F1) the confirmed Log out (main.html's own handler, clicked): the row is ended before its first network
       wait - the draft write, the hold release and the logout POST, which keep their order. Control: the handler without
       the list call keeps the row up while the draft is written and while the logout POST is held.
-  18d (S7-PINS, run rather than read) every place in main.html that starts KinAuth.logout() calls the end list first.
-      Each code-line call in the live file is numbered and gets its number as the argument; every start is then run
-      over stand-ins - api()'s 401, the dictation controller's 401, the list and poll account changes, the confirmed
-      Log out, the question row's own 401, the S5-U4c queue write's own 401 - and an end() in window.kinOn401 logs the
-      list: once, before any network wait and before the logout. The membership screen's Log out is the one start
-      without the list, and it runs only after that screen has replaced the whole page. A numbered call that no start
-      reaches fails the case (a new mount's 401 path needs its own start here). (S5-U4bc-R-001 F01: an account change
-      the row sees goes to the same list with the reason 'account-changed' - tests/clinician_request_dom_test.py c13/m14
-      open both areas.)
+  18d (S7-PINS, run rather than read) every logout path of main.html calls the end list first. The paths are
+      TypeScript's answer over every script the page loads (S7-PINS fix1, Astra S7-COMMAND-R-001-F09: a path list, not
+      a count of calls): each KinAuth.logout, and for the two mounts that take `logout: () => KinAuth.logout()` each
+      place the mount calls that option. Each path is made to log its own id, and every start is then run over
+      stand-ins - api()'s 401, the dictation controller's 401, the list and poll account changes, the confirmed Log out,
+      the question row's own 401, the S5-U4c queue write's own 401 - while an end() in window.kinOn401 logs the list:
+      once, before any network wait and before the logout. Each run is matched to the one path it took. The membership
+      screen's Log out is the one start without the list, and it runs only after that screen has replaced the whole
+      page. A path no start runs, two starts on one path, or a KinAuth used other than as KinAuth.<name> fails the case
+      (a new mount's 401 path needs its own start here). (S5-U4bc-R-001 F01: an account change the row sees goes to the
+      same list with the reason 'account-changed' - tests/clinician_request_dom_test.py c13/m14 open both areas.)
   19  (F3) Inbox -> Open Study for a question outside its study's latest 50 opens it through GET questions/:id and keeps
       it after a reply re-reads the list; a late read of an earlier choice never paints; 404, another study's thread and
       403 are explicit.
@@ -97,6 +99,8 @@ import base64
 import copy
 import json
 import re
+import shutil
+import subprocess
 import time
 import unicodedata
 import unittest
@@ -412,28 +416,227 @@ OTHER_PANEL = "() => { window.synOtherEnds = 0; window.kinOn401.push(() => { win
 TOGGLES = """() => { for (const id of ['question-toggle', 'question-inbox', 'question-toggle'])
   document.getElementById(id).click(); }"""
 
-# test_18d (S7-PINS): every logout start of main.html, run. logout_starts() numbers each code-line call of
-# KinAuth.logout() in the live file and passes the number as the call's argument, so SITE_AUTH's logout(site) logs which
-# start ran; END_LIST_PROBE puts an end() into window.kinOn401 that logs the list. Every stand-in logs into
-# window.synCalls, a network wait as 'wait:<name>'.
-LOGOUT_CALL = "KinAuth.logout()"
+# test_18d (S7-PINS): every logout path of main.html, run. The paths come from TypeScript (S7-PINS fix1, Astra
+# S7-COMMAND-R-001-F09 - a path list, not a count of calls): LOGOUT_PATHS_TS runs in node with the typescript that
+# api/package-lock.json installs (npm ci --prefix api --ignore-scripts; validate.yml runs it for the route inventory
+# before this file) over every script main.html loads, in page order - its inline blocks and each <script src> file,
+# auth.js among them, where KinAuth is declared. It answers every KinAuth.logout, read or called, and refuses a KinAuth
+# used other than as KinAuth.<name>: an alias or a destructuring would hide logouts from it. A KinAuth.logout inside a
+# function passed as a named option to a function the page declares (the S5-U4b and S5-U4c mounts' `logout: () =>
+# KinAuth.logout()`) starts where that function calls the option, which the checker finds through the destructured
+# name's binding; any other starts where it stands. Offsets are in code points of the text sent.
+# tag_logout_paths() makes each path name itself, so SITE_AUTH's logout(tag) and a 'via:<path>' entry in
+# window.synCalls tell which path a start ran; END_LIST_PROBE puts an end() into window.kinOn401 that logs the list.
+# Every stand-in logs into window.synCalls, a network wait as 'wait:<name>'.
+LOGOUT_PATHS_TS = r"""'use strict';
+const ts = require(require.resolve('typescript', { paths: [process.argv[1]] }));
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', () => {
+  const scripts = JSON.parse(input);
+  const files = new Map(scripts.map((s, i) => [`/page/${i}.js`, s]));
+  const options = { allowJs: true, checkJs: false, noEmit: true, noLib: true, noResolve: true, types: [],
+                    target: ts.ScriptTarget.ESNext };
+  const host = ts.createCompilerHost(options, true);
+  const sources = new Map();
+  host.getSourceFile = (name, version) => {
+    if (!files.has(name)) return undefined;
+    if (!sources.has(name)) sources.set(name, ts.createSourceFile(name, files.get(name).text, version, true, ts.ScriptKind.JS));
+    return sources.get(name);
+  };
+  host.fileExists = name => files.has(name);
+  host.readFile = name => (files.has(name) ? files.get(name).text : undefined);
+  const program = ts.createProgram([...files.keys()], options, host);
+  const checker = program.getTypeChecker();
+  const out = { typescript: ts.version, parse_errors: [], declarations: [], refused: [], references: [], paths: [] };
+  const flat = s => s.replace(/\s+/g, ' ').trim();
+  const where = (node, sf, end) => {
+    const script = files.get(sf.fileName);
+    const at = end ? node.getEnd() : node.getStart(sf);
+    return script.offset === null ? null : script.offset + [...script.text.slice(0, at)].length;
+  };
+  const origin = sf => files.get(sf.fileName).origin;
+  // A readable name for where a node sits: the named functions, variables, options, calls and branches around it.
+  const chain = (node, sf, stop, last) => {
+    const parts = [];
+    for (let child = node, p = node.parent; p && p !== stop; child = p, p = p.parent) {
+      if (ts.isFunctionDeclaration(p) && p.name) parts.push(`function ${p.name.text}`);
+      else if (ts.isMethodDeclaration(p) && p.name) parts.push(`${p.name.getText(sf)}()`);
+      else if (ts.isVariableDeclaration(p) && ts.isIdentifier(p.name)) parts.push(`${p.name.text} =`);
+      else if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && child === p.right)
+        parts.push(`${flat(p.left.getText(sf))} =`);
+      else if (ts.isPropertyAssignment(p) && child === p.initializer) parts.push(`${p.name.getText(sf)}:`);
+      else if (ts.isCatchClause(p)) parts.push('catch');
+      else if (ts.isIfStatement(p) && child !== p.expression)
+        parts.push(`if (${flat(p.expression.getText(sf)).slice(0, 60)})${child === p.elseStatement ? ' else' : ''}`);
+      else if (ts.isCallExpression(p) && p.arguments.includes(child)) {
+        const first = p.arguments[0];
+        const lead = first && first !== child && ts.isStringLiteralLike(first) ? first.getText(sf) + ', ' : '';
+        parts.push(`${flat(p.expression.getText(sf))}(${lead}…)`);
+      }
+    }
+    return [...parts.reverse(), last].join(' › ');
+  };
+  const pageFunction = declaration => declaration && ts.isFunctionDeclaration(declaration) && declaration.name
+    && files.has(declaration.getSourceFile().fileName);
+  for (const name of files.keys()) {
+    const sf = program.getSourceFile(name);
+    for (const d of sf.parseDiagnostics)
+      out.parse_errors.push(`${origin(sf)}: ${ts.flattenDiagnosticMessageText(d.messageText, '\n')}`);
+    const refs = [];
+    const visit = node => {
+      let ref = null;
+      if (ts.isIdentifier(node) && node.text === 'KinAuth') {
+        const p = node.parent;
+        if (ts.isVariableDeclaration(p) && p.name === node) out.declarations.push({ origin: origin(sf), at: where(node, sf) });
+        else ref = ts.isPropertyAccessExpression(p) && p.name === node ? p : node;
+      } else if (ts.isStringLiteralLike(node) && node.text === 'KinAuth' && ts.isElementAccessExpression(node.parent)
+                 && node.parent.argumentExpression === node) {
+        ref = node.parent;
+      }
+      if (ref) {
+        const p = ref.parent;
+        let member = null;
+        if (p && ts.isPropertyAccessExpression(p) && p.expression === ref) member = p.name.text;
+        else if (p && ts.isElementAccessExpression(p) && p.expression === ref && ts.isStringLiteralLike(p.argumentExpression))
+          member = p.argumentExpression.text;
+        else if (p && ts.isTypeOfExpression(p)) member = '';
+        if (member === null)
+          out.refused.push({ origin: origin(sf), at: where(ref, sf), text: flat((p || ref).getText(sf)).slice(0, 120),
+                             why: 'KinAuth used other than as KinAuth.<name>: the logouts reached through it cannot be found' });
+        else if (member === 'logout') refs.push(p);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    for (const ref of refs) {
+      const reference = { id: `r${out.references.length + 1}`, origin: origin(sf), at: where(ref, sf), end: where(ref, sf, true),
+                          label: chain(ref, sf, undefined, flat(ref.getText(sf))), path: null };
+      out.references.push(reference);
+      let fn = ref.parent;
+      while (fn && !ts.isFunctionLike(fn)) fn = fn.parent;
+      const assignment = fn && fn.parent;
+      const literal = assignment && ts.isPropertyAssignment(assignment) && assignment.initializer === fn ? assignment.parent : null;
+      const call = literal && ts.isObjectLiteralExpression(literal) ? literal.parent : null;
+      const symbol = call && ts.isCallExpression(call) && call.arguments.includes(literal) ? checker.getSymbolAtLocation(call.expression) : null;
+      const declaration = symbol && symbol.valueDeclaration;
+      if (!pageFunction(declaration)) {
+        reference.path = `p${out.paths.length + 1}`;
+        out.paths.push({ id: reference.path, kind: 'direct', reference: reference.id, origin: reference.origin,
+                         at: reference.at, end: reference.end, label: reference.label });
+        continue;
+      }
+      const dsf = declaration.getSourceFile();
+      const key = assignment.name.getText(sf);
+      const parameter = declaration.parameters[call.arguments.indexOf(literal)];
+      const element = parameter && ts.isObjectBindingPattern(parameter.name)
+        ? parameter.name.elements.find(e => (e.propertyName || e.name).getText(dsf) === key) : null;
+      if (!element || !ts.isIdentifier(element.name)) {
+        out.refused.push({ origin: reference.origin, at: reference.at, text: reference.label,
+                           why: `${declaration.name.text}() does not take ${key} as a destructured name, so where it calls it is not found` });
+        continue;
+      }
+      const bound = checker.getSymbolAtLocation(element.name);
+      const uses = [];
+      const find = node => {
+        if (ts.isIdentifier(node) && node.text === element.name.text && node !== element.name
+            && checker.getSymbolAtLocation(node) === bound) uses.push(node);
+        ts.forEachChild(node, find);
+      };
+      find(declaration.body);
+      if (!uses.length) reference.unused = `${declaration.name.text}() never uses ${key}`;
+      for (const use of uses) {
+        if (!(ts.isCallExpression(use.parent) && use.parent.expression === use)) {
+          out.refused.push({ origin: origin(dsf), at: where(use, dsf), text: flat(use.parent.getText(dsf)).slice(0, 120),
+                             why: `${declaration.name.text}()'s ${key} used other than called` });
+          continue;
+        }
+        out.paths.push({ id: `p${out.paths.length + 1}`, kind: 'option', reference: reference.id, origin: origin(dsf),
+                         at: where(use, dsf), end: where(use, dsf, true),
+                         label: `${reference.label} ⇒ ${chain(use.parent, dsf, declaration.parent, `${use.text}()`)}` });
+      }
+    }
+  }
+  process.stdout.write(JSON.stringify(out));
+});
+"""
+# The page's scripts as the browser's own HTML parser splits them (test_18d compares page_scripts() with this), and any
+# script an attribute carries, which page_scripts() would not see.
+PARSED_SCRIPTS = """html => { const doc = new DOMParser().parseFromString(html, 'text/html');
+  return {scripts: [...doc.scripts].map(s => [s.getAttribute('src'), s.hasAttribute('src') ? '' : s.text]),
+          attributes: [...doc.querySelectorAll('*')].flatMap(e => [...e.attributes]
+            .filter(a => /^on/i.test(a.name) || /^\\s*javascript:/i.test(a.value)).map(a => `${e.tagName} ${a.name}`))}; }"""
 
 
-def logout_starts(source):
-    """(`source` with each code-line KinAuth.logout() call given its number as the argument, {number: (line, code)}):
-    comment lines left out, numbered from 1 in document order. Counts calls; no statement text is pinned."""
-    lines, sites = source.split("\n"), {}
-    for index, line in enumerate(lines):
-        if line.lstrip().startswith(("*", "//")):
-            continue
-        while LOGOUT_CALL in line:
-            sites[len(sites) + 1] = (index + 1, lines[index].strip())
-            line = line.replace(LOGOUT_CALL, f"KinAuth.logout({len(sites)})", 1)
-        lines[index] = line
-    return "\n".join(lines), sites
+def page_scripts(source):
+    """main.html's scripts in page order, as LOGOUT_PATHS_TS takes them: {origin, offset, text}, where an inline block's
+    offset is its first code point in `source` and a <script src> file (read from hpacs-lite) has none."""
+    scripts = []
+    for match in re.finditer(r"<script\b([^>]*)>(.*?)</script>", source, flags=re.S):
+        src = re.search(r'\bsrc="([^"]+)"', match.group(1))
+        if src:
+            scripts.append({"origin": src.group(1), "offset": None, "text": lf_text(HPACS / src.group(1))})
+        else:
+            scripts.append({"origin": "main.html", "offset": match.start(2), "text": match.group(2)})
+    return scripts
 
 
-SITE_AUTH = """const KinAuth = {
+def logout_paths(scripts):
+    """LOGOUT_PATHS_TS's answer for `scripts`. Fails, never skips, when node or typescript is not there."""
+    node = shutil.which("node")
+    if node is None:
+        raise AssertionError("node is not on PATH: the logout paths are TypeScript's answer (tests/README.md S7-PINS)")
+    run = subprocess.run([node, "-e", LOGOUT_PATHS_TS, str(ROOT / "api")], input=json.dumps(scripts).encode("utf-8"),
+                         capture_output=True, timeout=120)
+    if run.returncode != 0:
+        raise AssertionError("LOGOUT_PATHS_TS failed (typescript: npm ci --prefix api --ignore-scripts): "
+                             + run.stderr.decode("utf-8", "replace")[-2000:])
+    return json.loads(run.stdout.decode("utf-8"))
+
+
+def tag_logout_paths(source, found):
+    """`source` with every KinAuth.logout the parser found calling KinAuth.logout(<tag>, ...): a direct path's own id,
+    or for an option's reference its reference id; and each place a mount calls the option logging 'via:<path id>'
+    first. Only the spans the parser gave are replaced, back to front."""
+    edits = []
+    for ref in found["references"]:
+        spelled = re.sub(r"\s", "", source[ref["at"]:ref["end"]])
+        if not spelled.endswith("logout"):
+            raise AssertionError(f"{ref['id']} at {ref['at']} is {spelled!r}, not a KinAuth.logout")
+        edits.append((ref["at"], ref["end"], f"((...a) => KinAuth.logout('{ref['path'] or ref['id']}', ...a))"))
+    for path in found["paths"]:
+        if path["kind"] == "option":
+            name = source[path["at"]:path["end"]]
+            edits.append((path["at"], path["end"], "((...a) => { (window.synCalls = window.synCalls || []).push("
+                          f"'via:{path['id']}'); return {name}(...a); }})"))
+    edits.sort(reverse=True)
+    after = len(source)
+    for at, end, text in edits:
+        if end > after:
+            raise AssertionError(f"overlapping logout spans at {at}")
+        source, after = source[:at] + text + source[end:], at
+    return source
+
+
+def path_ran(calls, found):
+    """The one logout path a start ran, from what the tagged page logged."""
+    logouts = [call.split(":", 1)[1] for call in calls if call.startswith("logout:")]
+    vias = [call.split(":", 1)[1] for call in calls if call.startswith("via:")]
+    if len(logouts) != 1:
+        raise AssertionError(f"one logout expected: {calls}")
+    direct = {path["id"] for path in found["paths"] if path["kind"] == "direct"}
+    if logouts[0] in direct:
+        if vias:
+            raise AssertionError(f"a direct path logged an option call: {calls}")
+        return logouts[0]
+    options = {path["id"]: path["reference"] for path in found["paths"] if path["kind"] == "option"}
+    if len(vias) != 1 or options.get(vias[0]) != logouts[0]:
+        raise AssertionError(f"the logout {logouts[0]} was not reached through exactly one of its option calls: {calls}")
+    return vias[0]
+
+
+SITE_AUTH ="""const KinAuth = {
   session: () => window.synSession,
   has: role => { const s = window.synSession; return !!s && s.state === 'approved' && (s.roles.includes(role) || s.roles.includes('admin')); },
   logout: async site => { window.synCalls.push('logout:' + site); },
@@ -2759,7 +2962,28 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.page.locator("button").click()
 
     def test_18d_every_logout_start_in_main_html_calls_the_end_list_first(self):
-        tagged, sites = logout_starts(MAIN)
+        scripts = page_scripts(MAIN)
+        # The scripts are the ones the browser's HTML parser finds, in the same order, and no attribute carries script.
+        self.page.goto(ORIGIN + BASE + "blank.html")
+        parsed = self.page.evaluate(PARSED_SCRIPTS, MAIN)
+        self.assertEqual([[None, s["text"]] if s["offset"] is not None else [s["origin"], ""] for s in scripts],
+                         parsed["scripts"])
+        self.assertEqual([], parsed["attributes"], "script in an attribute")
+        found = logout_paths(scripts)
+        print(f"TypeScript {found['typescript']} over {len(scripts)} scripts; KinAuth declared in",
+              [d["origin"] for d in found["declarations"]])
+        self.assertEqual([], found["parse_errors"])
+        self.assertEqual([], found["refused"])
+        self.assertEqual(["auth.js"], [d["origin"] for d in found["declarations"]])
+        paths = {path["id"]: path for path in found["paths"]}
+        where = {key: f"{path['origin']}:{MAIN.count(chr(10), 0, path['at']) + 1 if path['at'] is not None else '?'} "
+                      f"{path['label']}" for key, path in paths.items()}
+        for key, path in paths.items():
+            print(f"logout path {key} ({path['kind']}) {where[key]}")
+        # Every path is in main.html's own script, where a start below can run it.
+        self.assertEqual({}, {key: where[key] for key, path in paths.items() if path["at"] is None},
+                         "a logout path outside main.html's inline script: add its start here")
+        tagged = tag_logout_paths(MAIN, found)
         starts = [("api() 401", self.start_api_401), ("dictation 401", self.start_dictation_401),
                   ("list account change", self.start_list_owner_change), ("poll account change", self.start_poll_owner_change),
                   ("Log out", self.start_log_out), ("question row 401", self.start_question_401),
@@ -2772,26 +2996,25 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                 self.wait_until(lambda: self.page.evaluate(LOGGED_OUT), f"{name}: a logout")
                 self.settle()
                 calls = self.page.evaluate("() => window.synCalls")
-                logouts = [call for call in calls if call.startswith("logout:")]
-                self.assertEqual(1, len(logouts), f"{name}: one logout: {calls}")
-                site = int(logouts[0].split(":", 1)[1])
-                self.assertIn(site, sites)
-                self.assertNotIn(site, reached.values(), f"{name} reached a start another case already ran")
-                reached[name] = site
+                path = path_ran(calls, found)
+                self.assertNotIn(path, reached, f"{name} ran {path}, which {reached.get(path)} already ran")
+                reached[path] = name
+                print(f"run: {name} -> {path} {where[path]}: {calls}")
                 if name == MEMBERSHIP:
                     # Nothing of the page is left to end: the case checked the replaced body before the click.
                     self.assertNotIn("end-list", calls)
                 else:
-                    # The list once, before any network wait and before the logout.
+                    # The list once, before any network wait and before the logout (for a mount, before it calls its
+                    # logout option).
                     self.assertEqual(1, calls.count("end-list"), f"{name}: {calls}")
-                    first_wait = next((n for n, call in enumerate(calls) if call.startswith(("wait:", "logout:"))))
+                    first_wait = next((n for n, call in enumerate(calls) if call.startswith(("wait:", "via:", "logout:"))))
                     self.assertLess(calls.index("end-list"), first_wait, f"{name}: {calls}")
                 if after is not None:
                     after()
-        print("logout starts:", {name: (site, sites[site][0]) for name, site in reached.items()})
-        # Every numbered call of main.html was run by one of the starts above.
-        self.assertEqual({}, {site: where for site, where in sites.items() if site not in reached.values()},
-                         "a KinAuth.logout() in main.html that no start here runs: add its start (a new mount's 401 too)")
+        print("logout paths run:", {key: reached.get(key) for key in paths})
+        # Every path the parser found was run by one of the starts above.
+        self.assertEqual({}, {key: where[key] for key in paths if key not in reached},
+                         "a logout path in main.html that no start here runs: add its start (a new mount's 401 too)")
 
     def test_19_reader_inbox_opens_a_thread_outside_the_latest_fifty(self):
         # B: the chosen question is the oldest; 50 newer ones (answered, so not in the Open Inbox) fill B's latest 50.
