@@ -15,17 +15,18 @@
  *  - Astra S5-U5b-B-F02: the SQL prefilter (strpos, a literal substring) loses no visible row and adds none for
  *    institution names carrying \, ", % and _; the removed LIKE form, modelled, loses exactly the \ and " names' rows;
  *  - completeness: every audit action written under api/src has a contract row (an unlisted action fails), and every
- *    contract row is written somewhere. An action named by a constant is read from the one module-level literal
- *    declaration in the same file; an imported, redeclared, shadowed or non-literal name stays unreadable. Negative
- *    controls: a changed declaration, a new unlisted write and an imported constant each fail the check.
+ *    contract row is written somewhere. Which calls write and which values their action takes is read by the TypeScript
+ *    compiler api/package-lock.json installs, over the program of api/src (see the completeness section). Controls: the
+ *    same writes in other notations read the same actions; unlisted, unreadable and unwritten actions each fail.
  *
  * Module: KIN_ADMIN_AUDIT_MODULE, default api/src/admin-audit.ts loaded through Node type stripping (Node >= 22.18);
- * the compiled /app/dist/admin-audit (kin-api:ci) is the same rule. The completeness scan reads api/src itself, so the
- * repository must be mounted. Synthetic data only: no network, database, credentials or clinical data.
+ * the compiled /app/dist/admin-audit (kin-api:ci) is the same rule. The completeness cases read api/src and use
+ * api/node_modules/typescript ('npm ci --prefix api --ignore-scripts'), so the repository must be mounted with it; without
+ * it they fail. Synthetic data only: no network, database, credentials or clinical data.
  */
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { readFileSync, readdirSync } = require('node:fs');
+const { readFileSync } = require('node:fs');
 const path = require('node:path');
 const { createCipheriv, randomBytes } = require('node:crypto');
 
@@ -640,293 +641,854 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 });
 
 // ── completeness over api/src ──
+//
+// Both directions of the action table over the audit writes under api/src: every action a write can record has a
+// contract row (an unlisted action fails), and every contract row is written somewhere (a stale row would hide a renamed
+// writer). Which calls write the audit log and which values their action takes is answered by the TypeScript compiler
+// api/package-lock.json installs, with api/tsconfig.json's options: its parser and type checker over the program of
+// api/src, not a reader of this repository's text (AGENTS 1-B.15, Astra S7-U3a-C-R-001-F01). Without it the completeness
+// cases fail; they never skip.
+//
+//  - A write is a call of the `create` member of an `auditLog` member (property or element access, whatever the layout,
+//    comments, parentheses or type assertions), or a raw SQL text that inserts into "AuditLog". Any other use of an
+//    auditLog member (createMany, upsert, the delegate kept in a variable ...) is a write this check does not read.
+//  - The action of a create is the `action` property of the object literal its `data` holds (not set again by a later
+//    spread). Its values: string literals and templates; `+` of values; both sides of `?:`, `||`, `??`; a name the checker
+//    binds, through imports and aliases, to a const initializer, a property of an `as const` object literal, an enum
+//    member or a readonly field; a let, var or parameter with every value assigned to it; a parameter of a private or
+//    local function (not decorated) with the argument of every call the program makes of that function, followed through
+//    variables, arguments and callbacks; a value that a preceding `if (... || !['a', ...].includes(x) || ...)
+//    throw/return` of an enclosing block limits. A literal start followed by a value the program does not fix is a
+//    dynamic suffix, which a hidden wildcard row must cover.
+//  - Fail closed: an action from anything else (a call, a property of a request, a parameter of a public or decorated
+//    method, a function handed where its calls are not followed ...) is unreadable, and an unreadable write fails.
+//  - Raw SQL is not TypeScript and no SQL parser is installed, so the statement is not parsed: its action is the one
+//    action-like quoted value or evaluable ${} value after INSERT INTO "AuditLog", and none or several is unreadable. What
+//    the Connect statement writes is held live as well (tests/connect_gate_test.py, its transfer.revoke rows).
+// How many rows a write leaves and whose they are is not this file's claim: the S7-U3a reader assignment writes are held
+// to that on the compiled services (tests/reader_assignment_scope_test.cjs, Astra S7-U3a-B-R-001-F01).
 
-function tsFiles(dir) {
-  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
-    const full = path.join(dir, entry.name);
-    return entry.isDirectory() ? tsFiles(full) : entry.name.endsWith('.ts') ? [full] : [];
-  });
-}
-const SOURCES = tsFiles(path.join(ROOT, 'api', 'src')).sort().map(file => ({
-  file: path.relative(ROOT, file).split(path.sep).join('/'), text: readFileSync(file, 'utf8').replace(/\r\n/g, '\n') }));
+const API = path.join(ROOT, 'api');
+const slash = file => path.resolve(file).split(path.sep).join('/');
+const repoPath = file => path.relative(ROOT, path.resolve(file)).split(path.sep).join('/');
+let compiler = null;
 
-function skipQuoted(text, start) {
-  const quote = text[start];
-  for (let i = start + 1; i < text.length; i++) {
-    if (text[i] === '\\') { i++; continue; }
-    if (text[i] === quote) return i;
-    if (quote === '`' && text[i] === '$' && text[i + 1] === '{') { i = matching(text, i + 1); if (i < 0) break; }
-    else if (quote !== '`' && text[i] === '\n') break;
+/** api/package-lock.json's typescript, api/tsconfig.json's options and the api/src files they name, as checked out. */
+function typescript() {
+  if (compiler) return compiler;
+  let where;
+  try {
+    where = require.resolve('typescript', { paths: [API] });
+  } catch (error) {
+    throw new Error(`typescript is not installed under api/ (npm ci --prefix api --ignore-scripts): ${error.message}`);
   }
-  throw new Error(`unterminated string at ${start}`);
+  const ts = require(where);
+  const config = ts.readConfigFile(path.join(API, 'tsconfig.json'), ts.sys.readFile);
+  if (config.error) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'));
+  const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, API);
+  const options = { ...parsed.options, noEmit: true, incremental: false, sourceMap: false };
+  delete options.outDir;
+  delete options.tsBuildInfoFile;
+  const src = slash(path.join(API, 'src')) + '/';
+  const files = parsed.fileNames.map(slash).filter(file => file.startsWith(src)).sort();
+  assert.ok(files.length > 0, 'api/tsconfig.json includes the files of api/src');
+  compiler = { ts, options, src, base: ts.createCompilerHost(options, true), lookups: new Map(), external: new Map(), internal: new Map(),
+    previous: undefined, sources: files.map(file => ({ file: repoPath(file), text: readFileSync(file, 'utf8').replace(/\r\n/g, '\n') })) };
+  return compiler;
 }
-/** Index of the bracket that closes text[open]; strings and templates are skipped. */
-function matching(text, open) {
-  const pairs = { '(': ')', '{': '}', '[': ']' }, stack = [];
-  for (let i = open; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === "'" || ch === '"' || ch === '`') { i = skipQuoted(text, i); continue; }
-    if (pairs[ch]) stack.push(pairs[ch]);
-    else if (ch === ')' || ch === '}' || ch === ']') { if (stack.pop() !== ch) return -1; if (!stack.length) return i; }
-  }
-  return -1;
-}
-function splitTop(text) {
-  const parts = [];
-  let depth = 0, start = 0;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === "'" || ch === '"' || ch === '`') { i = skipQuoted(text, i); continue; }
-    if ('({['.includes(ch)) depth++;
-    else if (')}]'.includes(ch)) depth--;
-    else if (ch === ',' && depth === 0) { parts.push(text.slice(start, i).trim()); start = i + 1; }
-  }
-  parts.push(text.slice(start).trim());
-  return parts.filter(Boolean);
-}
-/** One action expression: a literal, a literal + ternary of two literals, a literal prefix + variable, a template. */
-function actionOf(expression) {
-  let m;
-  if ((m = /^'([^'\\]+)'$/.exec(expression)) || (m = /^"([^"\\]+)"$/.exec(expression))) return { kind: 'literal', actions: [m[1]] };
-  if ((m = /^'([^'\\]+)'\s*\+\s*\(\s*[^?]+\?\s*'([^'\\]+)'\s*:\s*'([^'\\]+)'\s*\)$/.exec(expression)))
-    return { kind: 'literal', actions: [m[1] + m[2], m[1] + m[3]] };
-  if ((m = /^'([^'\\]+)'\s*\+\s*[\w.]+$/.exec(expression))) return { kind: 'prefix', prefix: m[1] };
-  if ((m = /^`([^`$\\]+)\$\{(\w+)\}`$/.exec(expression))) return { kind: 'template', prefix: m[1], variable: m[2] };
-  return null;
-}
-/**
- * A bare identifier as the action: the value of the one module-level `(export) const NAME(: type) = '<literal>'` of the
- * same file. Anything else stays unreadable (fail closed): an imported name (no declaration here), several
- * declarations, let/var, a declaration inside a block, an initializer that is not one plain literal, or another
- * binding of the name in the file (a parameter or destructured local could shadow the constant at the write; a
- * matching object key or call argument is refused too, never guessed).
- */
-function constantOf(name, text) {
-  const id = name.replace(/\$/g, '\\$'), end = `${id}(?![\\w$])`, word = `(?<![\\w$.])${end}`;
-  const declarations = text.match(new RegExp(`\\b(?:const|let|var|function|class|enum)\\s+${word}`, 'g')) ?? [];
-  const parameters = text.match(new RegExp(`[(,]\\s*(?:\\.\\.\\.)?${end}\\s*\\??\\s*[:=](?![=>])|${word}\\s*=>|` +
-    `\\bcatch\\s*\\(\\s*${word}|\\b(?:const|let|var)\\s*[{[][^=;]*${word}`, 'g')) ?? [];
-  const arrows = [...text.matchAll(/\(([^()]*)\)\s*(?::[^=;{()]+)?=>/g)].filter(m => new RegExp(word).test(m[1]));
-  if (declarations.length !== 1 || parameters.length || arrows.length) return null;
-  // One line, ending in its semicolon: a literal continued on the next line (`'a'\n + b`) is not a plain literal.
-  const m = new RegExp(`^(?:export[ \\t]+)?const[ \\t]+${id}[ \\t]*(?::[ \\t]*[^=\\n]+?)?[ \\t]*=[ \\t]*` +
-    `(?:'([^'\\\\\\n]+)'|"([^"\\\\\\n]+)")[ \\t]*;[ \\t]*(?://[^\\n]*)?$`, 'm').exec(text);
-  return m ? m[1] ?? m[2] : null;
-}
-/** An action expression of TypeScript source: actionOf, or a bare identifier naming its file's literal constant. */
-function actionIn(expression, text) {
-  const parsed = actionOf(expression);
-  if (parsed || !/^[A-Za-z_$][\w$]*$/.test(expression)) return parsed;
-  const value = constantOf(expression, text);
-  return value === null ? null : { kind: 'literal', actions: [value], constant: expression };
-}
-const line = (text, index) => text.slice(0, index).split('\n').length;
-function methodBefore(text, index) {
-  const start = text.lastIndexOf('\n  async ', index);
-  if (start < 0) throw new Error('no enclosing method');
-  return text.slice(start, index);
-}
-/** The values a template's variable takes, read from the method that writes it. A template without one fails. */
-const EXPANSIONS = {
-  'api/src/admin.service.ts admin.user.': (text, index) => {
-    const values = new Set();
-    for (const [, rhs] of methodBefore(text, index).matchAll(/\baction\s*=(?!=)\s*([^;\n]+)/g)) {
-      const branches = rhs.includes('?') ? rhs.slice(rhs.indexOf('?') + 1) : rhs;
-      for (const [, value] of branches.matchAll(/'([^']+)'/g)) values.add(value);
-    }
-    return [...values];
-  },
-  'api/src/pacs.service.ts report.': (text, index) => {
-    const m = /\[([^\]]+)\]\.includes\(action\)/.exec(methodBefore(text, index));
-    if (!m) throw new Error('commitReport action list not found');
-    return [...m[1].matchAll(/'([^']+)'/g)].map(x => x[1]);
-  },
-};
-const READS = new Set(['findMany', 'findFirst', 'findUnique', 'findFirstOrThrow', 'findUniqueOrThrow', 'count', 'aggregate', 'groupBy']);
+/** The api/src files as checked out; the controls pass changed copies. */
+const auditSources = () => typescript().sources;
 
-/**
- * The audit helpers a file defines, by parameter list: `private audit(...)` (called as this.audit) and the local ones
- * called bare (`const audit = (...) =>`, and scopeWrite's `audit:(...)=>` callback type). A callback typed
- * `audit: ((...) => ...)` hands over a whole write and is not a helper with an action parameter.
- */
-function auditHelpers(text) {
-  const helpers = [];
-  for (const m of text.matchAll(/(private\s+audit\s*|const\s+audit\s*=\s*|\baudit\s*:\s*)\((?!\()/g)) {
-    const open = m.index + m[0].length - 1, close = matching(text, open);
-    const params = splitTop(text.slice(open + 1, close)).map(param => {
-      const name = /^(\w+)(\?)?/.exec(param);
-      return { name: name?.[1], optional: !!name?.[2] || param.includes('=') };
-    });
-    helpers.push({ self: m[1].startsWith('private'), action: params.findIndex(p => p.name === 'action'),
-      min: params.filter(p => !p.optional).length, max: params.length });
-  }
-  return helpers;
-}
-
-/** The audit writes of `sources` (default: api/src as checked out); the negative controls pass changed copies. */
-function scanAuditWrites(sources = SOURCES) {
-  const sites = [], helpers = [], callbacks = [], handlers = [], unrecognized = [];
-  const add = (file, text, index, form, parsed) => {
-    if (!parsed) { unrecognized.push(`${file}:${line(text, index)} ${form}`); return; }
-    if (parsed.kind === 'template') {
-      const expand = EXPANSIONS[`${file} ${parsed.prefix}`];
-      if (!expand) { unrecognized.push(`${file}:${line(text, index)} template ${parsed.prefix}\${${parsed.variable}}`); return; }
-      parsed = { kind: 'literal', actions: expand(text, index).map(value => parsed.prefix + value), template: parsed.prefix };
-    }
-    sites.push({ file, line: line(text, index), form: parsed.constant ? `${form} const ${parsed.constant}` : form, ...parsed });
+/** The program of `sources` (the whole of api/src; lib and node_modules from disk), reusing what earlier calls parsed. */
+function auditProgram(sources) {
+  const c = typescript(), { ts, src, base } = c;
+  const texts = new Map(sources.map(source => [slash(path.join(ROOT, source.file)), source.text]));
+  const inside = file => slash(file).startsWith(src);
+  // Outside api/src nothing changes during a run: each lookup of lib and node_modules is asked of the disk once.
+  const once = (name, ask) => key => {
+    const cache = c.lookups.get(name) ?? new Map();
+    c.lookups.set(name, cache);
+    if (!cache.has(key)) cache.set(key, ask(key));
+    return cache.get(key);
   };
-  for (const { file, text } of sources) {
-    for (const m of text.matchAll(/\bauditLog\s*\.\s*(\w+)\s*\(/g)) {
-      if (READS.has(m[1])) continue;
-      if (m[1] !== 'create') { unrecognized.push(`${file}:${line(text, m.index)} auditLog.${m[1]}`); continue; }
-      const open = m.index + m[0].length - 1, close = matching(text, open);
-      const data = /\bdata\s*:\s*\{/.exec(text.slice(open, close));
-      if (close < 0 || !data) { unrecognized.push(`${file}:${line(text, m.index)} auditLog.create without data`); continue; }
-      const dataOpen = open + data.index + data[0].length - 1;
-      const property = splitTop(text.slice(dataOpen + 1, matching(text, dataOpen)))
-        .map(part => /^action\s*(?::\s*([\s\S]+))?$/.exec(part)).find(Boolean);
-      if (!property) { unrecognized.push(`${file}:${line(text, m.index)} auditLog.create without action`); continue; }
-      if (property[1] === undefined || property[1].trim() === 'action') { helpers.push(`${file}:${line(text, m.index)}`); continue; }
-      add(file, text, m.index, 'auditLog.create', actionIn(property[1].trim(), text));
+  const exists = once('fileExists', file => base.fileExists(file)), read = once('readFile', file => base.readFile(file));
+  const directory = once('directoryExists', dir => !base.directoryExists || base.directoryExists(dir));
+  const host = {
+    ...base,
+    fileExists: file => (inside(file) ? texts.has(slash(file)) : exists(file)),
+    readFile: file => (inside(file) ? texts.get(slash(file)) : read(file)),
+    directoryExists: dir => (inside(slash(dir) + '/') ? [...texts.keys()].some(file => file.startsWith(slash(dir) + '/')) : directory(dir)),
+    realpath: base.realpath && once('realpath', file => base.realpath(file)),
+    getDirectories: base.getDirectories && once('getDirectories', dir => base.getDirectories(dir)),
+    getSourceFile(file, version, onError, create) {
+      const at = slash(file);
+      if (!inside(at)) {
+        if (!c.external.has(at)) c.external.set(at, base.getSourceFile(file, version, onError, create));
+        return c.external.get(at);
+      }
+      const text = texts.get(at);
+      if (text === undefined) return undefined;
+      if (!c.internal.has(at)) c.internal.set(at, new Map());
+      const parsed = c.internal.get(at);
+      if (!parsed.has(text)) parsed.set(text, ts.createSourceFile(file, text, version, true));
+      return parsed.get(text);
+    },
+  };
+  c.previous = ts.createProgram({ rootNames: [...texts.keys()], options: c.options, host, oldProgram: c.previous });
+  return c.previous;
+}
+
+/**
+ * The audit writes of `sources` (default: api/src as checked out): `sites` with the actions and dynamic prefixes each can
+ * record, and `unrecognized`, every write this check cannot read and why. A site also carries (not enumerable) its call,
+ * its action property and the string literals its actions come from, for the controls that rewrite them.
+ */
+function scanAuditWrites(sources = auditSources()) {
+  const { ts } = typescript();
+  const K = ts.SyntaxKind;
+  const program = auditProgram(sources), checker = program.getTypeChecker();
+  const files = sources.map(source => program.getSourceFile(slash(path.join(ROOT, source.file))));
+  const sites = [], unrecognized = [];
+
+  const WRAPPERS = new Set([K.ParenthesizedExpression, K.AsExpression, K.SatisfiesExpression, K.NonNullExpression, K.TypeAssertionExpression]);
+  const CHOICES = new Set([K.BarBarToken, K.QuestionQuestionToken, K.AmpersandAmpersandToken]);
+  const EQUALITIES = new Set([K.EqualsEqualsEqualsToken, K.ExclamationEqualsEqualsToken, K.EqualsEqualsToken, K.ExclamationEqualsToken,
+    K.InstanceOfKeyword]);
+  const bare = node => { while (node && WRAPPERS.has(node.kind)) node = node.expression; return node; };
+  const outer = node => { while (node.parent && WRAPPERS.has(node.parent.kind)) node = node.parent; return node; };
+  const where = node => {
+    const file = node.getSourceFile();
+    return `${repoPath(file.fileName)}:${file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1}`;
+  };
+  const snippet = node => node.getText().replace(/\s+/g, ' ').slice(0, 60);
+  const resolve = symbol => (symbol && symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
+  /** The symbol a name stands for as a value (a shorthand property's name stands for the variable it reads). */
+  const symbolAt = node => resolve(ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node
+    ? checker.getShorthandAssignmentValueSymbol(node.parent) : checker.getSymbolAtLocation(node));
+  const keyText = name => {
+    if (!name) return null;
+    if (ts.isComputedPropertyName(name)) name = bare(name.expression);
+    return ts.isIdentifier(name) || ts.isPrivateIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)
+      || ts.isNumericLiteral(name) ? name.text : null;
+  };
+  /** The member name of `a.b` or `a['b']` (a literal key), else null. */
+  const keyOf = node => (ts.isPropertyAccessExpression(node) ? keyText(node.name)
+    : ts.isElementAccessExpression(node) ? keyText(bare(node.argumentExpression)) : null);
+  /** The access a member name belongs to (`this.x` for its `x`, `this['x']` for its literal 'x'), else null. */
+  const accessOf = node => {
+    const parent = node.parent;
+    if (parent && ts.isPropertyAccessExpression(parent) && parent.name === node) return parent;
+    if (!ts.isStringLiteral(node) && !ts.isNoSubstitutionTemplateLiteral(node)) return null;
+    const held = outer(node);
+    return held.parent && ts.isElementAccessExpression(held.parent) && held.parent.argumentExpression === held ? held.parent : null;
+  };
+
+  // ── values ──
+  const text = (value, from = []) => ({ key: 't' + value, text: value, from });
+  const prefix = (value, why) => ({ key: 'p' + value, prefix: value, why });
+  const unknown = why => ({ key: 'u' + why, unknown: why });
+  const fn = node => ({ key: `f${where(node)}@${node.pos}`, fn: node });
+  function union(...lists) {
+    const out = new Map();
+    for (const value of lists.flat()) {
+      const known = out.get(value.key);
+      out.set(value.key, known && value.from ? { ...known, from: [...new Set([...known.from, ...value.from])] } : known ?? value);
     }
-    for (const m of text.matchAll(/INSERT\s+INTO\s+"AuditLog"\s*\(([^)]*)\)\s*(SELECT|VALUES)/gi)) {
-      const columns = m[1].split(',').map(c => c.trim().replace(/"/g, ''));
-      let rest = text.slice(m.index + m[0].length);
-      rest = rest.slice(0, rest.indexOf('`'));
-      if (m[2].toUpperCase() === 'VALUES') rest = rest.replace(/^\s*\(/, '').replace(/\)\s*$/, '');
-      else rest = rest.split(/\bFROM\b/)[0];
-      const values = splitTop(rest);
-      add(file, text, m.index, 'raw INSERT', values.length === columns.length ? actionOf(values[columns.indexOf('action')]) : null);
-    }
-    const defined = auditHelpers(text);
-    for (const m of text.matchAll(/(?<![\w.$])(this\.)?audit\s*\(/g)) {
-      const open = m.index + m[0].length - 1, close = matching(text, open);
-      const lineStart = text.lastIndexOf('\n', m.index) + 1;
-      if (/^\s*(?:private|protected|public)\s+(?:async\s+)?$/.test(text.slice(lineStart, m.index))) continue;   // helper method definition
-      const args = splitTop(text.slice(open + 1, close));
-      if (args[0]?.startsWith('@')) { handlers.push(`${file}:${line(text, m.index)}`); continue; }      // controller handler
-      const call = text.slice(m.index, close + 1);
-      // A call with no literal or template at all hands over a prepared write (the site hanging-protocol callback).
-      if (!args.some(actionOf)) { callbacks.push({ file, line: line(text, m.index), call }); continue; }
-      // Otherwise the action is the argument at the helper's `action` position (the actor can be a literal too).
-      const positions = [...new Set(defined.filter(h => h.self === !!m[1] && h.action >= 0 && h.min <= args.length && args.length <= h.max)
-        .map(h => h.action))];
-      add(file, text, m.index, call, positions.length === 1 ? actionIn(args[positions[0]] ?? '', text) : null);
+    return [...out.values()];
+  }
+  /** `left + right`: a text start with a value the program does not fix after it is a dynamic suffix. */
+  const concat = (left, right) => union(left.flatMap(l => right.map(r => {
+    if (l.text === undefined) return l.prefix !== undefined ? l : unknown(l.unknown ?? `${where(l.fn)}: a function used as text`);
+    if (r.text !== undefined) return text(l.text + r.text);
+    if (r.prefix !== undefined) return prefix(l.text + r.prefix, r.why);
+    return prefix(l.text, r.unknown ?? `${where(r.fn)}: a function used as text`);
+  })));
+
+  const memo = new Map(), active = new Set();
+  function values(expression) {
+    const node = bare(expression);
+    if (memo.has(node)) return memo.get(node);
+    if (active.has(node)) return [unknown(`${where(node)}: \`${snippet(node)}\` depends on itself`)];
+    active.add(node);
+    try {
+      const found = union(evaluate(node));
+      memo.set(node, found);
+      return found;
+    } finally {
+      active.delete(node);
     }
   }
-  return { sites, helpers, callbacks, handlers, unrecognized };
+  function evaluate(node) {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [text(node.text, [node])];
+    if (ts.isTemplateExpression(node))
+      return node.templateSpans.reduce((sum, span) => concat(concat(sum, values(span.expression)), [text(span.literal.text)]),
+        [text(node.head.text)]);
+    if (ts.isBinaryExpression(node)) {
+      const operator = node.operatorToken.kind;
+      if (operator === K.PlusToken) return concat(values(node.left), values(node.right));
+      if (CHOICES.has(operator)) return union(values(node.left), values(node.right));
+      if (operator === K.CommaToken) return values(node.right);
+    }
+    if (ts.isConditionalExpression(node)) return union(values(node.whenTrue), values(node.whenFalse));
+    if (ts.isIdentifier(node)) return named(symbolAt(node), node);
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const key = ts.isPropertyAccessExpression(node) ? node.name : bare(node.argumentExpression);
+      const symbol = keyOf(node) === null ? null : symbolAt(key);
+      return symbol ? named(symbol, key) : [unknown(`${where(node)}: \`${snippet(node)}\` is a property the program does not fix`)];
+    }
+    if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return [fn(node)];
+    return [unknown(`${where(node)}: \`${snippet(node)}\` is a ${K[node.kind]}`)];
+  }
+
+  /** The values of what `symbol` is bound to, read at `use`. */
+  function named(symbol, use) {
+    const name = use.text;
+    const declarations = symbol?.declarations ?? [];
+    if (declarations.length !== 1) {
+      return [unknown(`${where(use)}: \`${name}\` ${declarations.length ? 'has several declarations' : 'does not resolve'}`)];
+    }
+    const [declaration] = declarations;
+    if (ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration)) {
+      // A declaration without a body (a library's) is code this program does not have: what it does with a value is unknown.
+      return declaration.body ? [fn(declaration)] : [unknown(`${where(use)}: \`${name}\` has no body in this program`)];
+    }
+    if (ts.isEnumMember(declaration)) {
+      return declaration.initializer ? values(declaration.initializer) : [unknown(`${where(use)}: \`${name}\` is a numbered enum member`)];
+    }
+    if (ts.isPropertyAssignment(declaration) || ts.isShorthandPropertyAssignment(declaration)) {
+      if (!frozen(declaration.parent)) return [unknown(`${where(use)}: \`${name}\` is a property of an object that is not \`as const\``)];
+      return ts.isPropertyAssignment(declaration) ? values(declaration.initializer) : named(symbolAt(declaration.name), declaration.name);
+    }
+    let found;
+    if (ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name)) {
+      found = declaration.initializer ? values(declaration.initializer)
+        : [unknown(`${where(declaration)}: \`${name}\` is declared without a value`)];
+    } else if (ts.isParameter(declaration) && ts.isFunctionLike(declaration.parent)) {
+      found = passed(declaration);
+    } else if (ts.isPropertyDeclaration(declaration) && declaration.initializer
+      && ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Readonly) {
+      found = values(declaration.initializer);
+    } else {
+      return [unknown(`${where(use)}: \`${name}\` is a ${K[declaration.kind]}`)];
+    }
+    const constant = ts.isVariableDeclaration(declaration) && ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const;
+    const changes = constant ? [] : assignments(symbol);
+    if (changes.length) return union(found, changes);
+    // A binding nothing changes keeps its value, and a preceding exit for every other value limits it here.
+    const members = found.some(value => value.text === undefined) ? limited(use, symbol) : null;
+    return members ? members.filter(member => found.some(value => value.text === undefined || value.text === member)).map(member => text(member))
+      : found;
+  }
+
+  /** An object literal a const holds under `as const` (the outermost literal asserted): its properties never change. */
+  function frozen(object) {
+    let node = object, constant = false;
+    for (;;) {
+      const parent = node.parent;
+      if (ts.isAsExpression(parent) && ts.isConstTypeReference(parent.type)) constant = true;
+      if (WRAPPERS.has(parent.kind)) { node = parent; continue; }
+      if (ts.isPropertyAssignment(parent) && parent.initializer === node && ts.isObjectLiteralExpression(parent.parent)) {
+        node = parent.parent;
+        constant = false;
+        continue;
+      }
+      return constant && ts.isVariableDeclaration(parent) && parent.initializer === node
+        && !!(ts.getCombinedNodeFlags(parent) & ts.NodeFlags.Const);
+    }
+  }
+
+  // ── control flow: a guard `if (... || !['a', 'b'].includes(x) || ...) throw/return;` before the use ──
+  const jumps = node => ts.isBreakOrContinueStatement(node) || !!ts.forEachChild(node, child => jumps(child) || undefined);
+  const exits = statement => ts.isThrowStatement(statement) || ts.isReturnStatement(statement)
+    || (ts.isBlock(statement) && statement.statements.length > 0 && exits(statement.statements[statement.statements.length - 1])
+      && !jumps(statement));
+  function guarded(statement, symbol) {
+    if (!ts.isIfStatement(statement) || statement.elseStatement || !exits(statement.thenStatement)) return null;
+    const alternatives = [];
+    const split = node => {
+      node = bare(node);
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === K.BarBarToken) { split(node.left); split(node.right); }
+      else alternatives.push(node);
+    };
+    split(statement.expression);
+    for (const alternative of alternatives) {
+      if (!ts.isPrefixUnaryExpression(alternative) || alternative.operator !== K.ExclamationToken) continue;
+      const call = bare(alternative.operand);
+      if (!ts.isCallExpression(call) || call.arguments.length !== 1 || keyOf(bare(call.expression)) !== 'includes') continue;
+      const tested = bare(call.arguments[0]), list = bare(bare(call.expression).expression);
+      if (!ts.isIdentifier(tested) || symbolAt(tested) !== symbol || !ts.isArrayLiteralExpression(list)) continue;
+      const members = list.elements.map(element => (ts.isSpreadElement(element) ? [unknown('spread')] : values(element)));
+      if (members.every(found => found.every(value => value.text !== undefined))) return members.flat().map(value => value.text);
+    }
+    return null;
+  }
+  /** The values a guard of an enclosing statement list lets through to `use`; a hoisted function skips its own list. */
+  function limited(use, symbol) {
+    let hoisted = false;
+    for (let node = use; node.parent; node = node.parent) {
+      if (ts.isFunctionDeclaration(node)) hoisted = true;
+      const parent = node.parent;
+      const list = ts.isBlock(parent) || ts.isSourceFile(parent) || ts.isModuleBlock(parent) || ts.isCaseOrDefaultClause(parent)
+        ? parent.statements : null;
+      if (!list) continue;
+      if (!hoisted) {
+        for (let i = list.indexOf(node) - 1; i >= 0; i--) {
+          const members = guarded(list[i], symbol);
+          if (members) return members;
+        }
+      }
+      hoisted = false;
+    }
+    return null;
+  }
+
+  // ── references, assignments and calls ──
+  let spellings = null;
+  /** Every identifier and member key of api/src by spelling, and the local names of renamed imports and exports. */
+  function spelled() {
+    if (spellings) return spellings;
+    const index = spellings = { names: new Map(), renamed: new Map() };
+    const add = (map, key, value) => { if (!map.has(key)) map.set(key, []); map.get(key).push(value); };
+    const walk = node => {
+      if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) add(index.names, node.text, node);
+      else if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && accessOf(node)) add(index.names, node.text, node);
+      if ((ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) && node.propertyName) add(index.renamed, node.propertyName.text, node.name.text);
+      ts.forEachChild(node, walk);
+    };
+    files.forEach(walk);
+    return index;
+  }
+  const same = (found, symbol) => found === symbol || !!found?.declarations?.some(declaration => symbol.declarations?.includes(declaration));
+  /** The uses of `symbol` in api/src (a parameter's or a function-local's in its own file), declarations left out. */
+  function references(symbol) {
+    if (!symbol) return [];
+    const { names, renamed } = spelled();
+    const [first] = symbol.declarations ?? [];
+    const own = new Set((symbol.declarations ?? []).map(declaration => declaration.name));
+    const statement = first && ts.isVariableDeclaration(first) ? first.parent?.parent : null;
+    const local = first && (ts.isParameter(first) || (statement && !ts.isSourceFile(statement.parent) && !ts.isModuleBlock(statement.parent)))
+      ? first.getSourceFile() : null;
+    return [...new Set([symbol.name, ...(renamed.get(symbol.name) ?? [])])].flatMap(name => names.get(name) ?? [])
+      .filter(node => !own.has(node) && (!local || node.getSourceFile() === local) && same(symbolAt(node), symbol));
+  }
+  /** A name on the left of a destructuring assignment. */
+  function destructured(node) {
+    let at = node;
+    while (ts.isArrayLiteralExpression(at.parent) || ts.isObjectLiteralExpression(at.parent) || ts.isSpreadElement(at.parent)
+      || ts.isSpreadAssignment(at.parent) || (ts.isPropertyAssignment(at.parent) && at.parent.initializer === at)
+      || ts.isShorthandPropertyAssignment(at.parent)) at = at.parent;
+    return at !== node && ts.isBinaryExpression(at.parent) && at.parent.operatorToken.kind === K.EqualsToken && at.parent.left === at;
+  }
+  /** The values assigned to a binding after its declaration; a change that is not a plain assignment is unreadable. */
+  function assignments(symbol) {
+    const found = [];
+    for (const reference of references(symbol)) {
+      const node = outer(accessOf(reference) ?? reference), parent = node.parent;
+      const operator = ts.isBinaryExpression(parent) && parent.left === node ? parent.operatorToken.kind : null;
+      if (operator === K.EqualsToken) found.push(...values(parent.right));
+      else if ((operator !== null && operator >= K.FirstCompoundAssignment && operator <= K.LastCompoundAssignment)
+        || ((ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent))
+          && (parent.operator === K.PlusPlusToken || parent.operator === K.MinusMinusToken))
+        || ((ts.isForInStatement(parent) || ts.isForOfStatement(parent)) && parent.initializer === node) || destructured(node)) {
+        found.push(unknown(`${where(parent)}: \`${symbol.name}\` is changed by \`${snippet(parent)}\``));
+      }
+    }
+    return found;
+  }
+
+  const describe = owner => (owner.name ? `\`${owner.name.getText()}\` (${where(owner)})` : `the function at ${where(owner)}`);
+  const decorated = node => ts.canHaveDecorators(node) && (ts.getDecorators(node)?.length ?? 0) > 0;
+  /** A function callers outside this program can reach: Nest calls public class members and whatever a decorator names. */
+  const open = owner => decorated(owner) || owner.parameters.some(decorated)
+    || ((ts.isMethodDeclaration(owner) || ts.isConstructorDeclaration(owner) || ts.isGetAccessorDeclaration(owner)
+      || ts.isSetAccessorDeclaration(owner)) && !(ts.getCombinedModifierFlags(owner) & (ts.ModifierFlags.Private | ts.ModifierFlags.Protected))
+      && !(owner.name && ts.isPrivateIdentifier(owner.name)));
+  const shift = owner => (owner.parameters[0]?.name.getText() === 'this' ? 1 : 0);
+  /** The arguments every call of the parameter's function passes for it. */
+  function passed(parameter) {
+    const owner = parameter.parent, name = parameter.name.getText();
+    const index = owner.parameters.indexOf(parameter) - shift(owner);
+    if (parameter.dotDotDotToken || !ts.isIdentifier(parameter.name)) {
+      return [unknown(`${where(parameter)}: \`${name}\` is a rest or destructured parameter`)];
+    }
+    if (!owner.body || open(owner)) {
+      return [unknown(`${where(parameter)}: \`${name}\` is a parameter of ${describe(owner)}, which callers outside this program can call`)];
+    }
+    const { calls, escapes } = invocations(owner);
+    if (escapes.length) {
+      return [unknown(`${where(parameter)}: \`${name}\` is a parameter of ${describe(owner)}, which is handed on at ${escapes.join(', ')}`)];
+    }
+    return union(...calls.map(call => {
+      if (call.arguments.slice(0, index + 1).some(ts.isSpreadElement)) return [unknown(`${where(call)}: a spread argument`)];
+      const argument = call.arguments[index];
+      return argument ? values(argument) : parameter.initializer ? values(parameter.initializer)
+        : [unknown(`${where(call)}: no argument for \`${name}\``)];
+    }));
+  }
+
+  const invoked = new Map();
+  /** Every call of a function, following it through variables, arguments and parameters; anywhere else is an escape. */
+  function invocations(owner) {
+    if (invoked.has(owner)) {
+      return invoked.get(owner) ?? { calls: [], escapes: [`${where(owner)} (reached again while its calls are being found)`] };
+    }
+    invoked.set(owner, null);
+    const calls = [], escapes = [], seen = new Set(), queue = carriers(owner, escapes);
+    while (queue.length) {
+      const node = queue.shift();
+      if (!seen.has(node)) { seen.add(node); follow(node, calls, escapes, queue); }
+    }
+    const result = { calls: [...new Set(calls)], escapes };
+    invoked.set(owner, result);
+    return result;
+  }
+  function carriers(owner, escapes) {
+    if (ts.isArrowFunction(owner) || ts.isFunctionExpression(owner)) {
+      return [owner, ...(ts.isFunctionExpression(owner) && owner.name ? references(symbolAt(owner.name)) : [])];
+    }
+    const symbol = owner.name ? symbolAt(owner.name) : null;
+    if (!symbol) { escapes.push(`${where(owner)} (no name to follow)`); return []; }
+    // A method is also reached as a member of a value the checker cannot type (`any`): such a member of its name could be it.
+    for (const node of ts.isMethodDeclaration(owner) ? spelled().names.get(symbol.name) ?? [] : []) {
+      if (accessOf(node) && !symbolAt(node)) escapes.push(`${where(node)} (\`${symbol.name}\` of a value the program does not type)`);
+    }
+    return references(symbol).map(node => accessOf(node) ?? node);
+  }
+  function follow(start, calls, escapes, queue) {
+    let node = start;
+    for (;;) {   // the expressions that hand the same value on
+      const parent = node.parent;
+      if (WRAPPERS.has(parent.kind) || (ts.isConditionalExpression(parent) && parent.condition !== node)
+        || (ts.isBinaryExpression(parent) && (CHOICES.has(parent.operatorToken.kind)
+          || (parent.operatorToken.kind === K.CommaToken && parent.right === node)))) node = parent;
+      else break;
+    }
+    const parent = node.parent;
+    if (ts.isCallExpression(parent) && parent.expression === node) { calls.push(parent); return; }
+    if (ts.isCallExpression(parent) && parent.arguments.includes(node)) {
+      const index = parent.arguments.indexOf(node);
+      if (parent.arguments.slice(0, index).some(ts.isSpreadElement)) { escapes.push(`${where(parent)} (after a spread argument)`); return; }
+      for (const callee of values(parent.expression)) {
+        const parameter = callee.fn?.parameters?.[index + shift(callee.fn)];
+        if (!callee.fn) escapes.push(`${where(parent)} (handed to \`${snippet(parent.expression)}\`)`);
+        else if (parameter && (parameter.dotDotDotToken || !ts.isIdentifier(parameter.name))) {
+          escapes.push(`${where(parameter)} (a rest or destructured parameter)`);
+        } else if (parameter) queue.push(...references(symbolAt(parameter.name)));
+      }
+      return;
+    }
+    if (ts.isVariableDeclaration(parent) && parent.initializer === node && ts.isIdentifier(parent.name)) {
+      queue.push(...references(symbolAt(parent.name)));
+      return;
+    }
+    if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === K.EqualsToken && parent.right === node && ts.isIdentifier(bare(parent.left))) {
+      queue.push(...references(symbolAt(bare(parent.left))));
+      return;
+    }
+    const tested = ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent) || ts.isExpressionStatement(parent)
+      || (ts.isForStatement(parent) && parent.condition === node) || (ts.isConditionalExpression(parent) && parent.condition === node)
+      || (ts.isPrefixUnaryExpression(parent) && parent.operator === K.ExclamationToken) || ts.isTypeOfExpression(parent)
+      || ts.isVoidExpression(parent) || ts.isTypeQueryNode(parent) || ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)
+      || ts.isImportClause(parent) || (ts.isBinaryExpression(parent) && EQUALITIES.has(parent.operatorToken.kind));
+    if (!tested) escapes.push(`${where(parent)} (${K[parent.kind]})`);
+  }
+
+  // ── the writes ──
+  const READS = new Set(['findMany', 'findFirst', 'findUnique', 'findFirstOrThrow', 'findUniqueOrThrow', 'count', 'aggregate', 'groupBy']);
+  function record(node, via, found, action) {
+    const unread = found.filter(value => value.text === undefined && !value.prefix);
+    if (unread.length) {
+      unrecognized.push(`${where(node)} ${via}: ${unread.map(value => value.unknown ?? value.why ?? `${where(value.fn)}: a function`).join('; ')}`);
+      return;
+    }
+    const file = node.getSourceFile();
+    const site = { file: repoPath(file.fileName), line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1, via,
+      actions: found.filter(value => value.text !== undefined).map(value => value.text).sort(),
+      prefixes: found.filter(value => value.prefix).map(value => value.prefix).sort() };
+    Object.defineProperties(site, { call: { value: node }, action: { value: action },
+      origins: { value: [...new Set(found.flatMap(value => value.from ?? []))] } });
+    sites.push(site);
+  }
+  /** The property `name` an object literal ends up with: its last definition, unless a later spread may set it again. */
+  function property(object, name) {
+    let found = { why: 'is not set' };
+    for (const member of object.properties) {
+      if (ts.isSpreadAssignment(member)) found = { why: `may be set by the spread at ${where(member)}` };
+      else if (member.name && ts.isComputedPropertyName(member.name) && keyText(member.name) === null) {
+        found = { why: `may be set by the computed key at ${where(member)}` };
+      } else if (keyText(member.name) === name) {
+        found = ts.isPropertyAssignment(member) ? { node: member.initializer, member }
+          : ts.isShorthandPropertyAssignment(member) ? { shorthand: member, member } : { why: `is an accessor or method at ${where(member)}` };
+      }
+    }
+    return found;
+  }
+  function create(call) {
+    const argument = call.arguments.length === 1 ? bare(call.arguments[0]) : null;
+    if (!argument || !ts.isObjectLiteralExpression(argument)) return record(call, 'auditLog.create', [unknown('its argument is not one object literal')]);
+    const data = property(argument, 'data');
+    const object = data.node && bare(data.node);
+    if (!object || !ts.isObjectLiteralExpression(object)) {
+      return record(call, 'auditLog.create', [unknown(`data ${data.why ?? 'is not an object literal'}`)]);
+    }
+    const action = property(object, 'action');
+    const found = action.node ? values(action.node) : action.shorthand ? named(symbolAt(action.shorthand.name), action.shorthand.name)
+      : [unknown(`action ${action.why}`)];
+    record(call, 'auditLog.create', found, action);
+  }
+  function delegate(access) {
+    const held = outer(access), method = held.parent;
+    const name = method && method.expression === held ? keyOf(method) : null;
+    const callee = name === null ? null : outer(method), call = callee?.parent;
+    if (name === null || !call || !ts.isCallExpression(call) || call.expression !== callee) {
+      unrecognized.push(`${where(access)} auditLog: used other than by calling one of its methods`);
+    } else if (!READS.has(name)) {
+      if (name === 'create') create(call);
+      else unrecognized.push(`${where(access)} auditLog.${name}: writes rows this check does not read`);
+    }
+  }
+  const SQL_WRITE = /\b(INSERT\s+INTO|UPDATE)\s+(?:"?\w+"?\s*\.\s*)?"?AuditLog"?(?![\w"])/gi;
+  const QUOTED = /(?<![\w'])'([^'\s\u0000]+)'(?![\w'])/g;
+  const actionLike = value => /^[a-z][\w-]*(?:\.[\w-]+)+$/i.test(value) || A.auditRule(value) !== 'hidden:unknown_action';
+  /** A raw SQL text that writes "AuditLog": its one action-like value after INSERT INTO "AuditLog" (spans marked \0). */
+  function rawSql(node) {
+    const spans = ts.isTemplateExpression(node) ? node.templateSpans : [];
+    const statement = (ts.isTemplateExpression(node) ? [node.head.text, ...spans.map(span => span.literal.text)] : [node.text]).join('\u0000');
+    const writes = [...statement.matchAll(SQL_WRITE)];
+    const spansBefore = at => statement.slice(0, at).split('\u0000').length - 1;
+    writes.forEach((write, n) => {
+      if (/^UPDATE/i.test(write[1])) { unrecognized.push(`${where(node)} raw SQL: updates "AuditLog" rows`); return; }
+      const end = n + 1 < writes.length ? writes[n + 1].index : statement.length;
+      const quoted = [...statement.slice(write.index, end).matchAll(QUOTED)].map(match => match[1]).filter(actionLike).map(value => text(value));
+      const bound = spans.slice(spansBefore(write.index), spansBefore(end)).flatMap(span => values(span.expression))
+        .filter(value => (value.text !== undefined ? actionLike(value.text) : !!value.prefix));
+      const candidates = union(quoted, bound);
+      if (candidates.length === 1) record(node, 'raw SQL INSERT INTO "AuditLog"', candidates);
+      else {
+        unrecognized.push(`${where(node)} raw SQL INSERT INTO "AuditLog": ${candidates.length} action-like values `
+          + `(${candidates.map(value => value.text ?? `${value.prefix}…`).join(', ')}) where one is needed`);
+      }
+    });
+  }
+  function visit(node) {
+    if (keyOf(node) === 'auditLog') delegate(node);
+    else if (ts.isBindingElement(node) && keyText(node.propertyName ?? node.name) === 'auditLog') {
+      unrecognized.push(`${where(node)} auditLog: the delegate is taken out of its client`);
+    }
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateExpression(node)) rawSql(node);
+    ts.forEachChild(node, visit);
+  }
+
+  for (const file of files) {
+    const broken = program.getSyntacticDiagnostics(file);
+    if (broken.length) unrecognized.push(`${repoPath(file.fileName)} does not parse: ${ts.flattenDiagnosticMessageText(broken[0].messageText, ' ')}`);
+    else visit(file);
+  }
+  const scan = { typescript: ts.version, sites, unrecognized };
+  Object.defineProperties(scan, { tools: { value: { ts, bare, symbolAt, references } } });
+  return scan;
 }
 
 /** The completeness verdict over one scan: throws at the first condition it does not meet. */
 function assertComplete(scan) {
   assert.deepEqual(scan.unrecognized, [], 'every audit write site must have a readable action');
-  // The one literal-free helper call is the site hanging-protocol callback; its action is the auditLog.create it wraps.
-  assert.deepEqual(scan.callbacks.map(c => [c.file, c.call]), [['api/src/pacs.service.ts', 'audit(tx, row)']]);
-  assert.deepEqual(scan.handlers.map(h => h.split(':')[0]), ['api/src/pacs.controller.ts'], 'only the study-scoped GET audit handler');
-  const literals = new Set(scan.sites.flatMap(site => site.kind === 'literal' ? site.actions : []));
-  const prefixes = new Set(scan.sites.filter(site => site.kind === 'prefix').map(site => site.prefix));
+  const literals = new Set(scan.sites.flatMap(site => site.actions));
+  const prefixes = new Set(scan.sites.flatMap(site => site.prefixes));
   const hiddenEntries = [...A.AUDIT_HIDDEN_NO_RECORD_TIME_INSTITUTION, ...A.AUDIT_HIDDEN_CONNECT, ...A.AUDIT_HIDDEN_STUDY_SCOPED];
-  const unlisted = [...literals].filter(action => A.auditRule(action) === 'hidden:unknown_action');
+  const stems = hiddenEntries.filter(entry => entry.endsWith('*')).map(entry => entry.slice(0, -1));
+  const unlisted = [...literals].filter(action => A.auditRule(action) === 'hidden:unknown_action').sort();
   assert.deepEqual(unlisted, [], 'an audit action written under api/src without a contract row');
-  // A dynamic suffix cannot be listed one by one: its whole prefix must be a hidden wildcard (fail closed).
-  for (const prefix of prefixes) assert.ok(hiddenEntries.includes(prefix + '*'), `dynamic action ${prefix}* has no wildcard row`);
-  // Templates expand to exactly the table's member and report actions.
-  const template = prefix => [...new Set(scan.sites.filter(s => s.template === prefix).flatMap(s => s.actions))].sort();
-  assert.deepEqual(template('report.'), [...A.AUDIT_REPORT_COMMIT_ACTIONS].map(a => 'report.' + a).sort());
-  assert.deepEqual(template('admin.user.'), ['admin.user.activate', 'admin.user.approve', 'admin.user.suspend',
-    'admin.user.unapprove', 'admin.user.update']);
+  // A dynamic suffix cannot be listed one by one: whatever it becomes must fall under a hidden wildcard row (fail closed).
+  assert.deepEqual([...prefixes].filter(start => !stems.some(stem => start.startsWith(stem))).sort(), [],
+    'a dynamic audit action without a wildcard row');
   // The other direction: no contract row names an action nothing writes (a stale row would hide a renamed writer).
   const allowed = [...A.AUDIT_MEMBER_ACTIONS, ...Object.keys(A.AUDIT_FIELD_RULES), ...A.AUDIT_REPORT_COMMIT_ACTIONS.map(a => 'report.' + a)];
   const exactHidden = hiddenEntries.filter(entry => !entry.endsWith('*'));
   assert.deepEqual([...allowed, ...exactHidden].filter(action => !literals.has(action)), [], 'contract rows nothing writes');
-  assert.deepEqual(hiddenEntries.filter(entry => entry.endsWith('*')).map(entry => entry.slice(0, -1)).filter(p => !prefixes.has(p)), [],
-    'wildcard rows without a dynamic writer');
+  assert.deepEqual(stems.filter(stem => ![...literals, ...prefixes].some(action => action.startsWith(stem))), [],
+    'wildcard rows nothing writes');
   return { literals, prefixes, unlisted };
 }
+
+/** What a scan read, by file: the actions and dynamic prefixes of its writes. */
+function readActions(scan) {
+  const byFile = {};
+  for (const site of scan.sites) {
+    const entry = byFile[site.file] ??= { actions: new Set(), prefixes: new Set() };
+    site.actions.forEach(action => entry.actions.add(action));
+    site.prefixes.forEach(start => entry.prefixes.add(start));
+  }
+  return Object.fromEntries(Object.keys(byFile).sort().map(file => [file, { actions: [...byFile[file].actions].sort(),
+    prefixes: [...byFile[file].prefixes].sort() }]));
+}
+
+/** `sources` with the text edits of `edits` (file -> [[start, end, text], ...], none overlapping) made by position. */
+function edited(sources, edits) {
+  return sources.map(source => {
+    const list = [...(edits.get(source.file) ?? [])].sort((a, b) => b[0] - a[0] || b[1] - a[1]);
+    let text = source.text;
+    list.forEach(([start, end, replacement], i) => {
+      assert.ok(i === 0 || end <= list[i - 1][0], `${source.file}: overlapping edits at ${start}`);
+      text = text.slice(0, start) + replacement + text.slice(end);
+    });
+    return { file: source.file, text };
+  });
+}
+const edit = (edits, file, start, end, replacement) => {
+  if (!edits.has(file)) edits.set(file, []);
+  if (!edits.get(file).some(([s, e, r]) => s === start && e === end && r === replacement)) edits.get(file).push([start, end, replacement]);
+};
 
 test('completeness: every audit action written under api/src has a contract row, and every row is written', () => {
   const scan = scanAuditWrites();
   const { literals, prefixes, unlisted } = assertComplete(scan);
-  // The owner-only study-scoped actions are named by the constants their services export (and their own service tests
-  // import): the S5-U4a question write, the S7-U1a critical result write (the service constant the contract names,
-  // S7-U1p section 11) and the S5-U4c image request write, each read from its own file's declaration.
-  assert.deepEqual(scan.sites.filter(site => site.constant && site.actions.some(action => A.AUDIT_HIDDEN_STUDY_SCOPED.includes(action)))
-    .map(site => [site.file, site.form, site.kind, site.actions]),
-    [['api/src/clinician-question.service.ts', 'auditLog.create const QUESTION_AUDIT_ACTION', 'literal', ['study.question']],
-      ['api/src/critical-result.service.ts', 'auditLog.create const CRITICAL_RESULT_AUDIT_ACTION', 'literal', ['study.critical-result']],
-      ['api/src/image-request.service.ts', 'auditLog.create const IMAGE_REQUEST_AUDIT_ACTION', 'literal', ['study.image-request']]]);
-  // The S7-U3a reader assignment writes (an assignment, and the close when a tele channel is taken away) are held to their
-  // audit contract where they run, on the compiled services (tests/reader_assignment_scope_test.cjs, Astra
-  // S7-U3a-B-R-001-F01): one row per write and per close, an action with a contract row, attributed to the institution
-  // whose assignment it records, naming the study. The name of the value they write or the form of the call is not a
-  // claim of this file; the checks above still fail a write of an action without a row and a row that nothing writes.
+  // The owner-only study-scoped records (the S5-U4a question, the S5-U4c image request, the S7-U1a critical result) are
+  // each written, and their own rows keep them off the console whatever their detail names.
+  for (const action of A.AUDIT_HIDDEN_STUDY_SCOPED) assert.ok(literals.has(action), action);
   const byRule = {};
   for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
   console.log('ADMIN_AUDIT_COMPLETENESS ' + JSON.stringify({
-    write_sites: scan.sites.length, helper_definitions: scan.helpers.length, callback_invocations: scan.callbacks.length,
+    typescript: scan.typescript, write_sites: scan.sites.length, raw_sql_sites: scan.sites.filter(site => site.via.startsWith('raw')).length,
     distinct_actions: literals.size, dynamic_prefixes: [...prefixes].sort(), registered: literals.size - unlisted.length,
-    by_rule: byRule, files: [...new Set(scan.sites.map(s => s.file))].length,
+    by_rule: byRule, files: new Set(scan.sites.map(site => site.file)).size,
   }));
 });
 
-test('completeness negative controls: a changed constant, a new unlisted write and an imported constant fail', () => {
-  assertComplete(scanAuditWrites());   // the checked-out sources pass; each control below changes one thing
-  const QUESTION = 'api/src/clinician-question.service.ts';
-  const DECLARATION = "export const QUESTION_AUDIT_ACTION = 'study.question';";
-  const original = SOURCES.find(source => source.file === QUESTION);
-  assert.equal(original?.text.split(DECLARATION).length, 2, 'the declaration the controls change is in the source once');
-  const withFile = (file, text) => [...SOURCES.filter(source => source.file !== file), { file, text }];
-  const changed = replacement => withFile(QUESTION, original.text.replace(DECLARATION, replacement));
-  const failure = sources => {
-    const scan = scanAuditWrites(sources);
-    try { assertComplete(scan); } catch (error) { return { scan, error }; }
-    assert.fail('the completeness check passed');
+// The same writes in another notation read the same actions (Astra S7-U3a-C-R-001-F01: `action: (ACTION)` and
+// `auditLog['create'](...)` of the reader assignment writes were refused by the former text scanner). The rewrites are
+// made by position on what the compiler parsed, over every audit create of api/src, so no spelling of the product is
+// assumed here.
+test('completeness equivalents: every write of api/src rewritten in another notation reads the same actions', () => {
+  const sources = auditSources(), base = scanAuditWrites(sources), expected = readActions(base);
+  assertComplete(base);
+  const { ts, bare, symbolAt, references } = base.tools;
+  const creates = base.sites.filter(site => site.via === 'auditLog.create');
+  assert.ok(creates.length > 0);
+  const text = node => node.getSourceFile().text.slice(node.getStart(), node.end);
+  const variants = {
+    // `action: (x)` for every action, a shorthand `action` included.
+    'the action in parentheses': edits => creates.forEach(site => {
+      const node = site.action.node ?? site.action.shorthand;
+      edit(edits, site.file, node.getStart(), node.end, site.action.node ? `(${text(node)})` : `${text(node)}: (${text(node)})`);
+    }),
+    // `x['auditLog']['create'](...)` for every `x.auditLog.create(...)`.
+    'element access to the delegate and its create': edits => creates.forEach(site => {
+      for (let access = bare(site.call.expression); access && (ts.isPropertyAccessExpression(access) || ts.isElementAccessExpression(access));
+        access = bare(access.expression)) {
+        const key = ts.isPropertyAccessExpression(access) ? access.name.text : null;
+        if (key === 'create' || key === 'auditLog') edit(edits, site.file, access.expression.end, access.end, `['${key}']`);
+        if (key === 'auditLog') break;
+      }
+    }),
+    // A comment and a line break before the action and the argument, trailing commas after the last properties.
+    'comments, line breaks and trailing commas': edits => creates.forEach(site => {
+      const member = site.action.member, data = member.parent, argument = bare(site.call.arguments[0]);
+      edit(edits, site.file, member.getStart(), member.getStart(), '// the audited action\n');
+      edit(edits, site.file, site.call.arguments.pos, site.call.arguments.pos, '\n  /* the row */\n');
+      for (const object of [data, argument]) if (!object.properties.hasTrailingComma) edit(edits, site.file, object.properties.end, object.properties.end, ',');
+    }),
+    // `as const` on every const literal an action comes from; `satisfies string` on every action named by a binding.
+    'as const and satisfies': edits => creates.forEach(site => {
+      for (const origin of site.origins) {
+        const holder = origin.parent;
+        if (ts.isVariableDeclaration(holder) && holder.initializer === origin) edit(edits, repoPath(origin.getSourceFile().fileName), origin.end, origin.end, ' as const');
+      }
+      const node = site.action.node ? bare(site.action.node) : site.action.shorthand;
+      if (site.action.shorthand) edit(edits, site.file, node.getStart(), node.end, `${text(node)}: ${text(node)} satisfies string`);
+      else if (ts.isIdentifier(node)) edit(edits, site.file, node.end, node.end, ' satisfies string');
+    }),
+    // Every const an action names directly, renamed with all its uses (the checker's references, imports included).
+    'the constants renamed': edits => creates.forEach(site => {
+      const node = site.action.node ? bare(site.action.node) : null;
+      if (!node || !ts.isIdentifier(node)) return;
+      const symbol = symbolAt(node), [declaration] = symbol?.declarations ?? [];
+      if (!declaration || !ts.isVariableDeclaration(declaration) || !(ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const)) return;
+      const renamed = `${symbol.name}_RENAMED`;
+      for (const at of [declaration.name, ...references(symbol)]) {
+        const file = repoPath(at.getSourceFile().fileName);
+        const shorthand = ts.isShorthandPropertyAssignment(at.parent) && at.parent.name === at;
+        edit(edits, file, at.getStart(), at.end, shorthand ? `${at.text}: ${renamed}` : renamed);
+      }
+    }),
   };
-  const READABLE = /^every audit write site must have a readable action/;
-  const UNLISTED = /^an audit action written under api\/src without a contract row/;
-  // (a) The declaration changes. Another literal is an action without a row...
-  const renamed = failure(changed("export const QUESTION_AUDIT_ACTION = 'study.question.v2';"));
-  assert.match(renamed.error.message, UNLISTED);
-  assert.deepEqual(renamed.error.actual, ['study.question.v2']);
-  // ...and anything but one plain module-level literal declaration of the name leaves the write unreadable.
-  for (const replacement of [
-    "export const QUESTION_AUDIT_ACTION = 'study.' + 'question';",
-    'export const QUESTION_AUDIT_ACTION = `study.question`;',
-    "export const QUESTION_AUDIT_ACTION = String('study.question');",
-    "export let QUESTION_AUDIT_ACTION = 'study.question';",
-    "{ const QUESTION_AUDIT_ACTION = 'study.question'; }",
-    `${DECLARATION}\nfunction other() { const QUESTION_AUDIT_ACTION = 'study.question'; return QUESTION_AUDIT_ACTION; }`,
-    `${DECLARATION}\nconst shadow = (QUESTION_AUDIT_ACTION: string) => QUESTION_AUDIT_ACTION;`,
-    "import { QUESTION_AUDIT_ACTION } from './question-actions';",
-  ]) {
-    const { scan, error } = failure(changed(replacement));
-    assert.match(error.message, READABLE, replacement);
-    assert.deepEqual(error.actual.map(entry => entry.replace(/:\d+ /, ' ')), [`${QUESTION} auditLog.create`], replacement);
-    assert.deepEqual(scan.sites.filter(site => site.file === QUESTION), [], replacement);
+  const counts = {};
+  for (const [name, make] of Object.entries(variants)) {
+    const edits = new Map();
+    make(edits);
+    counts[name] = [...edits.values()].reduce((sum, list) => sum + list.length, 0);
+    assert.ok(counts[name] > 0, `${name} changes the source`);
+    const scan = scanAuditWrites(edited(sources, edits));
+    assert.deepEqual(scan.unrecognized, [], name);
+    assert.deepEqual(readActions(scan), expected, name);
+    assertComplete(scan);
   }
-  // (b) A new write whose action has no row fails, written as a literal and as a constant.
-  const NEW = 'api/src/syn-unlisted.service.ts';
-  const added = failure(withFile(NEW, [
+  console.log('ADMIN_AUDIT_EQUIVALENT_REWRITES ' + JSON.stringify(counts));
+});
+
+// A writer of api/src's own spelling is not needed to show how a notation reads: these synthetic files are added to the
+// program next to it (in memory; nothing is written to disk).
+const SYN_ACTIONS = "export const READER_ASSIGNMENT = 'reader.assignment';";
+const SYN_EQUIVALENT = [
+  "import { READER_ASSIGNMENT as MOVED } from './syn-audit-actions';",
+  "import * as ACTIONS from './syn-audit-actions';",
+  "const ACTION = 'reader.assignment' as const;",
+  "const TABLE = { reader: { assignment: 'reader.assignment' } } as const;",
+  "const READER = 'reader';",
+  "enum Kind { Assignment = 'reader.assignment' }",
+  'export class SynEquivalentWrites {',
+  "  private static readonly FIELD = 'reader.assignment';",
+  '  private audit(tx: any, actor: string, action: string, uid: string) {',
+  '    return tx.auditLog.create({ data: { actor, action, target: uid } });',
+  '  }',
+  '  async write(tx: any, c: any, uid: string, body: any) {',
+  '    await tx.auditLog.create({ data: { actor: c.actor, action: ACTION satisfies string, target: uid } });',
+  '    await tx.auditLog.create({ data: { actor: c.actor, action: MOVED, target: uid } });',
+  '    await tx.auditLog.create({ data: { actor: c.actor, action: ACTIONS.READER_ASSIGNMENT, target: uid } });',
+  '    await tx.auditLog.create({ data: { actor: c.actor, action: TABLE.reader.assignment, target: uid } });',
+  "    await tx.auditLog.create({ data: { actor: c.actor, action: TABLE['reader']['assignment'], target: uid } });",
+  '    await tx.auditLog.create({ data: { actor: c.actor, action: `${READER}.assignment`, target: uid } });',
+  "    await tx.auditLog.create({ data: { actor: c.actor, action: READER + '.' + 'assignment', target: uid } });",
+  '    await tx.auditLog.create({ data: { actor: c.actor, action: Kind.Assignment, target: uid } });',
+  '    await tx.auditLog.create({ data: { actor: c.actor, action: SynEquivalentWrites.FIELD, target: uid } });',
+  '    await this.audit(tx, c.actor, ACTION, uid);',
+  '    const local = (action: string) => tx.auditLog.create({ data: { actor: c.actor, action, target: uid } });',
+  '    await local(MOVED);',
+  "    let chosen = 'reader.assignment';",
+  '    if (body.again) chosen = ACTION;',
+  '    await tx.auditLog.create({ data: { actor: c.actor, action: chosen, target: uid } });',
+  '    const kind = body.kind;',
+  "    if (!body || !['reader.assignment'].includes(kind)) throw new Error('SYN unknown kind');",
+  '    await tx.auditLog.create({ data: { actor: c.actor, action: kind, target: uid } });',
+  "    await tx.$executeRaw`INSERT INTO \"AuditLog\" (actor, action, target) VALUES (${c.actor}, 'reader.assignment', ${uid})`;",
+  '    await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) VALUES (${c.actor}, ${ACTION}, ${uid})`;',
+  '  }',
+  '}',
+].join('\n');
+
+test('completeness equivalents: constants moved, imported, aliased, tabled, typed, passed, assigned or checked read the same action', () => {
+  const scan = scanAuditWrites([...auditSources(), { file: 'api/src/syn-audit-actions.ts', text: SYN_ACTIONS },
+    { file: 'api/src/syn-equivalent-writes.ts', text: SYN_EQUIVALENT }]);
+  assert.deepEqual(scan.unrecognized, []);
+  const writes = scan.sites.filter(site => site.file === 'api/src/syn-equivalent-writes.ts');
+  // Thirteen creates (one in the private helper, one in the local arrow) and two raw inserts, each read as the one action.
+  assert.deepEqual(writes.map(site => [site.via, site.actions, site.prefixes]),
+    [...Array(13).fill(['auditLog.create', ['reader.assignment'], []]), ...Array(2).fill(['raw SQL INSERT INTO "AuditLog"', ['reader.assignment'], []])]);
+  assertComplete(scan);
+});
+
+const SYN_UNREADABLE = [   // [code, why the write on that line is unreadable (null: nothing to read there)]
+  ["import { MISSING } from './syn-missing-module';", null],
+  ["const MUTABLE = { reader: 'reader.assignment' };", null],
+  'const SynHook = (): MethodDecorator => () => undefined;',
+  'export class SynUnreadableWrites {',
+  '  private writers: any[] = [];',
+  ['  private audit(tx: any, action: string) { return tx.auditLog.create({ data: { action } }); }', 'is a property the program does not fix'],
+  ['  private handed(tx: any, action: string) { return tx.auditLog.create({ data: { action } }); }', 'which is handed on at'],
+  ['  @SynHook() private hooked(tx: any, action: string) { return tx.auditLog.create({ data: { action } }); }',
+    'which callers outside this program can call'],
+  '  async request(tx: any, body: any) {',
+  ['    await tx.auditLog.create({ data: { action: body.kind } });', '`body.kind` is a property the program does not fix'],
+  '    await this.audit(tx, body.kind);',
+  "    let chosen = 'reader.assignment';",
+  '    if (body.again) chosen = body.kind;',
+  ['    await tx.auditLog.create({ data: { action: chosen } });', 'is a property the program does not fix'],
+  '    const kind = body.kind;',
+  "    if (!['reader.assignment'].includes(kind)) console.warn('SYN unknown kind');",
+  ['    await tx.auditLog.create({ data: { action: kind } });', 'is a property the program does not fix'],
+  ["    await tx.auditLog.create({ data: { action: String('reader.assignment') } });", 'is a CallExpression'],
+  ['    await tx.auditLog.create({ data: { action: MISSING } });', '`MISSING` does not resolve'],
+  ['    await tx.auditLog.create({ data: { action: MUTABLE.reader } });', 'is not `as const`'],
+  ["    await tx.auditLog.create({ data: { action: 'reader.assignment', ...body.extra } });", 'may be set by the spread'],
+  '    this.writers.push(this.handed);',
+  ["    await tx.auditLog.createMany({ data: [{ action: 'reader.assignment' }] });", 'createMany: writes rows this check does not read'],
+  ['    const log = tx.auditLog;', 'used other than by calling one of its methods'],
+  ["    await log.create({ data: { action: 'reader.assignment' } });", null],
+  ['    const { auditLog } = tx;', 'the delegate is taken out of its client'],
+  ["    await tx.$executeRaw`INSERT INTO \"AuditLog\" (actor, action) SELECT actor, action FROM \"AuditLog\" WHERE action IN ('reader.assignment', 'study.access')`;",
+    '2 action-like values'],
+  ['    await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) VALUES (${body.actor}, ${body.kind}, ${body.uid})`;', '0 action-like values'],
+  '  }',
+  '  async write(tx: any, action: string) {',
+  ['    await tx.auditLog.create({ data: { action } });', 'which callers outside this program can call'],
+  '  }',
+  '}',
+].map(entry => (Array.isArray(entry) ? entry : [entry, null]));
+
+test('completeness negative controls: an action the program does not fix, or a write this check cannot read, fails', () => {
+  const FILE = 'api/src/syn-unreadable-writes.ts';
+  const { scan, error } = completenessFailure([...auditSources(), { file: FILE, text: SYN_UNREADABLE.map(([code]) => code).join('\n') }]);
+  assert.match(error.message, /^every audit write site must have a readable action/);
+  const expected = SYN_UNREADABLE.flatMap(([, reason], i) => (reason ? [[i + 1, reason]] : []));
+  const found = scan.unrecognized.filter(entry => entry.startsWith(FILE + ':'));
+  assert.equal(found.length, expected.length, found.join('\n'));
+  for (const [line, reason] of expected) {
+    assert.ok(found.some(entry => entry.startsWith(`${FILE}:${line} `) && entry.includes(reason)), `line ${line}: ${reason}\n${found.join('\n')}`);
+  }
+  assert.deepEqual(scan.sites.filter(site => site.file === FILE), [], 'nothing of the file is read as a write');
+  // Only the added file is unreadable: api/src as checked out reads in full.
+  assert.deepEqual(scan.unrecognized.filter(entry => !entry.startsWith(FILE + ':')), []);
+  // A source that does not parse is not read at all.
+  const broken = completenessFailure([...auditSources(), { file: 'api/src/syn-broken.ts', text: 'export const = ;' }]);
+  assert.deepEqual(broken.error.actual.map(entry => entry.split(' does not parse')[0]), ['api/src/syn-broken.ts']);
+});
+
+/** The scan of `sources` and the completeness error it must give. */
+function completenessFailure(sources) {
+  const scan = scanAuditWrites(sources);
+  try {
+    assertComplete(scan);
+  } catch (error) {
+    return { scan, error };
+  }
+  assert.fail('the completeness check passed');
+}
+
+test('completeness negative controls: unlisted, dynamic without a wildcard and unwritten actions fail', () => {
+  const sources = auditSources(), base = scanAuditWrites(sources), { ts } = base.tools;
+  const UNLISTED = /^an audit action written under api\/src without a contract row/;
+  // (a) A new write of an action without a row, as a literal, as a constant and as raw SQL.
+  const added = completenessFailure([...sources, { file: 'api/src/syn-unlisted.service.ts', text: [
     "export const SYN_UNLISTED_ACTION = 'syn.unlisted';",
     'export class SynUnlistedService {',
     '  async write(tx: any, c: any, uid: string) {',
     "    await tx.auditLog.create({ data: { actor: c.actor, action: 'study.question.reply', target: uid } });",
     '    await tx.auditLog.create({ data: { actor: c.actor, action: SYN_UNLISTED_ACTION, target: uid } });',
+    "    await tx.$executeRaw`INSERT INTO \"AuditLog\" (actor, action, target) VALUES (${c.actor}, 'syn.raw-unlisted', ${uid})`;",
     '  }',
     '}',
-  ].join('\n')));
+  ].join('\n') }]);
   assert.match(added.error.message, UNLISTED);
-  assert.deepEqual(added.error.actual, ['study.question.reply', 'syn.unlisted']);
-  assert.deepEqual(added.scan.sites.filter(site => site.file === NEW).map(site => [site.line, site.form, site.actions]),
-    [[4, 'auditLog.create', ['study.question.reply']], [5, 'auditLog.create const SYN_UNLISTED_ACTION', ['syn.unlisted']]]);
-  // (c) A constant imported from another file is not followed: the write is unreadable.
-  const IMPORTED = 'api/src/syn-imported.service.ts';
-  const imported = failure(withFile(IMPORTED, [
-    "import { QUESTION_AUDIT_ACTION } from './clinician-question.service';",
-    'export async function write(tx: any, c: any, uid: string) {',
-    '  await tx.auditLog.create({ data: { actor: c.actor, action: QUESTION_AUDIT_ACTION, target: uid } });',
+  assert.deepEqual(added.error.actual, ['study.question.reply', 'syn.raw-unlisted', 'syn.unlisted']);
+  // (b) The values existing writes take change to values without a row: every literal an action of api/src is read from,
+  // wherever the compiler found it (a constant, a helper's argument, the create itself), gets '.v2' (unless a wildcard row
+  // would still cover it). Each is then read, through the same constants, helpers and callbacks, as unlisted.
+  const origins = [...new Set(base.sites.flatMap(site => site.origins))]
+    .filter(origin => A.auditRule(origin.text + '.v2') === 'hidden:unknown_action');
+  assert.ok(origins.length > 0, 'actions of api/src are read from literals');
+  const revalued = new Map();
+  for (const origin of origins) {
+    const quote = origin.getText()[0];
+    edit(revalued, repoPath(origin.getSourceFile().fileName), origin.getStart(), origin.end, `${quote}${origin.text}.v2${quote}`);
+  }
+  const changed = completenessFailure(edited(sources, revalued));
+  assert.match(changed.error.message, UNLISTED);
+  assert.deepEqual(changed.error.actual, [...new Set(origins.map(origin => origin.text + '.v2'))].sort());
+  assert.ok(changed.error.actual.includes('reader.assignment.v2'), 'the reader assignment writes are among them');
+  // (c) A dynamic suffix no hidden wildcard row covers.
+  const dynamic = completenessFailure([...sources, { file: 'api/src/syn-dynamic.service.ts', text: [
+    'export class SynDynamicService {',
+    "  async write(tx: any, body: any) { await tx.auditLog.create({ data: { action: 'reader.' + body.kind } }); }",
     '}',
-  ].join('\n')));
-  assert.match(imported.error.message, READABLE);
-  assert.deepEqual(imported.error.actual, [`${IMPORTED}:3 auditLog.create`]);
+  ].join('\n') }]);
+  assert.match(dynamic.error.message, /^a dynamic audit action without a wildcard row/);
+  assert.deepEqual(dynamic.error.actual, ['reader.']);
+  // (d) A contract row nothing writes: every write of reader.assignment is taken out (`void 0` in its place).
+  const removed = new Map();
+  for (const site of base.sites.filter(site => site.actions.includes('reader.assignment'))) {
+    const write = ts.isTaggedTemplateExpression(site.call.parent) ? site.call.parent : site.call;
+    edit(removed, site.file, write.getStart(), write.end, 'void 0');
+  }
+  const unwritten = completenessFailure(edited(sources, removed));
+  assert.match(unwritten.error.message, /^contract rows nothing writes/);
+  assert.deepEqual(unwritten.error.actual, ['reader.assignment']);
 });
