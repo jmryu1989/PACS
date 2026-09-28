@@ -21,8 +21,9 @@ No Node, no Nest, no browser, no stack. Three kinds of evidence and nothing more
      every other api/src .ts file goes through the same reader and may carry no route, @Controller() or @Public(); every
      decorator name is bound once by 'import { Name }' from its listed module and nothing renames, re-exports under
      another name or shadows it, and Public ends at its declaration in auth.guard.ts; a route, Controller,
-     RequestMapping, Public or SetMetadata name occurs in code only as its import and as a decorator the runs read, and
-     no Reflect metadata writer, decorator factory or loader of Nest or a project file reaches that metadata another way;
+     RequestMapping, Public or SetMetadata name that the file binds from its module or a package or hands on by an export
+     statement, and any such property, occurs in code only as its import and as a decorator the runs read (a type or
+     value the file declares so itself is not the decorator, S7-U1a-R-001-F02), and no Reflect metadata writer, decorator factory or loader of Nest or a project file reaches that metadata another way;
      tests/clinician_policy_fixtures.json source_contract is the closed list of forms that reach a loader, an evaluator,
      a metadata writer or a class prototype, and every other form is refused; a '/' is a regex or a division by the
      token before it, a '/' whose reading turns on grammar the lexer does not track refuses the file, and no regex
@@ -734,16 +735,33 @@ def words(pattern, code):
             if not (match.start() and IDENTIFIER_CHAR.match(code, match.start() - 1))]
 
 
+def decorator_bound(statements, name):
+    """Whether one of the file's module statements can make name the decorator or hand it on: an import or re-export of
+    it from the decorator's own module (STRICT_MODULE) or from a package, whose exports no check reads, and any export
+    statement that names it, which hands the name on to files this check reads apart. A name the file declares itself (a
+    type, an interface, a function, a const) or imports from another api/src file is that file's own binding and not the
+    decorator (S7-U1a-R-001-F02: 'export type Head' in the critical result policy and its import by the service were
+    refused as route decorators). The decorator is reached only by importing its own name from its module: renames,
+    whole-module bindings, loaders and metadata writers are refused, and an api/src file that hands the decorator on
+    under its name meets this check itself."""
+    return any(name in (s["imported"], s["local"]) and (s["form"] == "export" or s["module"] is not None
+               and (s["module"] == STRICT_MODULE[name] or not s["module"].startswith("./"))) for s in statements)
+
+
 def undecorated_names(path, source, code, statements, uses):
     """The STRICT_NAMES the code names; raises when one occurs anywhere but the local name of an import and a decorator
     the runs read (uses), a property after '.' included (S5-U1c-F05). Public's module declares Public and calls
-    SetMetadata once; public_export, which controller_inventory always runs, holds both there to exactly that."""
+    SetMetadata once; public_export, which controller_inventory always runs, holds both there to exactly that. The rule is
+    the binding, not the spelling: it reads a name the file binds from the decorator's module or a package, a name an
+    export statement hands on, and every property, which a module object's export can be; a name the file declares or
+    imports from another api/src file is not the decorator and is not read here (decorator_bound, S7-U1a-R-001-F02). A run that applies such a name as a decorator
+    still meets own_import, which wants the decorator's own import."""
     exempt = {"Public", METADATA_WRITER} if path == PUBLIC_MODULE else set()
     imported = {s["at"] for s in statements if s["form"] in IMPORT_FORMS}
     present, loose = set(), []
     for match in words(STRICT_NAME, code):
         name, at = match.group(0), match.start()
-        if name in exempt:
+        if name in exempt or not (is_property(code, at) or decorator_bound(statements, name)):
             continue
         present.add(name)
         if at not in imported and at not in uses.get(name, ()):
@@ -3329,6 +3347,110 @@ class ClinicianPolicySpec(unittest.TestCase):
         print("CLINICIAN_POLICY_CLASS_HEADING " + json.dumps({
             "f08_refused": f08, "refused": sorted(refused), "accepted": sorted(accepted), "class_keywords": keywords,
             "extending_outside_controllers": sorted(extending), "real_routes": len(baseline), "real_public": len(PUBLIC),
+        }, ensure_ascii=True, sort_keys=True))
+
+    def test_24_names_spelled_like_decorators_are_judged_by_their_binding(self):
+        """S7-U1a-R-001-F02: undecorated_names refused every api/src identifier spelled like a route decorator, so the
+        report head type of critical-result-policy.ts ('export type Head') and its uses in critical-result.service.ts
+        stopped the inventory, and the product type was renamed to pass this test (465012f, reverted). The rule reads the
+        binding: a name the file binds from the decorator's module or a package, and any property, is judged as before;
+        a type or value the file declares, or imports from another api/src file, is not the decorator. (1) such names
+        read, (2) a real @Head() route, an alias, a re-export, a call and a property are still read as a route or refused,
+        (3) renaming the product type leaves the inventory as it is."""
+        sources = api_sources()
+        baseline = controller_inventory(sources)
+        policy, service = API / "critical-result-policy.ts", API / "critical-result.service.ts"
+        outside, added, helpers = API / "unlisted-routes.ts", API / "bound.controller.ts", API / "route-helpers.ts"
+        spelled = re.compile(r"(?<![\w$])Head(?![\w$])")
+        self.assertRegex(sources[policy], r"\nexport type Head = ")
+        self.assertGreater(len(spelled.findall(sources[service])), 1, "the service imports the type and annotates with it")
+
+        def old_rule():
+            """The reader before this fix: every occurrence of a STRICT_NAMES spelling was a decorator name."""
+            return mock.patch.object(sys.modules[__name__], "decorator_bound", lambda statements, name: True)
+
+        def renamed(name):
+            return {path: spelled.sub(name, sources[path]) for path in (policy, service)}
+
+        # control: the old reader refused the product for the type's spelling and passed the same code renamed
+        with old_rule():
+            with self.assertRaisesRegex(AssertionError, r"critical-result-policy\.ts: Head used where no decorator the "
+                                                        r"inventory reads applies it"):
+                controller_inventory(sources)
+            self.assertEqual(controller_inventory({**sources, **renamed("ReportHead")}), baseline)
+        undecorated = "used where no decorator the inventory reads applies it"
+        inject = "import { Injectable } from '@nestjs/common';\n"
+        helper = inject + "@Injectable()\nexport class Helper {\n  run() { return 1; }\n}\n"
+
+        def controller(imports, member):
+            return imports + "@Controller('bound')\nexport class BoundController {\n" + member + "}\n"
+
+        # (1) a type, an interface and values spelled like route decorators, declared or imported from another api/src
+        # file, in and outside the controllers: the inventory reads what it read, plus the added controller's own route
+        accepted = {
+            "a type named Head outside the controllers": (
+                {outside: "export type Head = { version: number } | null;\n"
+                          "export const version = (head: Head) => head?.version ?? 0;\n"}, {}),
+            "that type imported by another api/src file": (
+                {outside: "export type Head = { version: number } | null;\n"
+                          "export const version = (head: Head) => head?.version ?? 0;\n",
+                 API / "unlisted-reader.ts": "import { Head, version } from './unlisted-routes';\n"
+                                             "export const read = (head: Head) => version(head);\n"}, {}),
+            "an interface and values spelled like route decorators": (
+                {outside: "export interface Get { at: string }\nexport const Put = (n: number) => n + 1;\n"
+                          "export function Search(q: Get) { return q.at; }\n",
+                 API / "unlisted-reader.ts": "import { Put, Search } from './unlisted-routes';\n"
+                                             "export const run = () => Put(1) + Search({ at: 'x' }).length;\n"}, {}),
+            "a type named Head in a controller file": (
+                {added: controller("import { Controller, Get } from '@nestjs/common';\ntype Head = { version: number };\n",
+                                   "  @Get('read')\n  read(): Head { return { version: 1 }; }\n")},
+                {("GET", "bound/read"): False}),
+        }
+        for label, (files, extra) in accepted.items():
+            with self.subTest(accepted=label):
+                found = controller_inventory({**sources, **files})
+                self.assertEqual({key: meta["public"] for key, meta in found.items() if key not in baseline}, extra)
+                self.assertEqual({key: found[key] for key in baseline}, baseline)
+        # (2) the decorator itself: a real @Head() is a route the inventory reads and no matrix row names, so test_05 fails
+        # on it; every other way to reach Nest's Head is refused with its own reason
+        nest_head = "import { Controller, Head } from '@nestjs/common';\n"
+        found = controller_inventory({**sources, added: controller(nest_head, "  @Head('read')\n  read() { return {}; }\n")})
+        self.assertEqual({key: meta["public"] for key, meta in found.items() if key not in baseline}, {("HEAD", "bound/read"): False})
+        self.assertNotIn("HEAD bound/read", PUBLIC | SESSION | BUSINESS | DENIED_ROUTES, "an unregistered route test_05 refuses")
+        refused = {
+            "@Head() through an alias": (
+                {added: controller("import { Controller, Head as ReportHead } from '@nestjs/common';\n",
+                                   "  @ReportHead('read')\n  read() { return {}; }\n")},
+                r"an import or export renames a decorator name: \[\('Head', 'ReportHead'\)\]"),
+            "Nest's Head applied by a call": (
+                {outside: helper.replace(inject, "import { Head, Injectable } from '@nestjs/common';\n")
+                          + "export const applied = Head('read');\n"},
+                r"unlisted-routes\.ts: Head " + undecorated),
+            "Nest's Head beside a type of that name": (
+                {outside: helper.replace(inject, "import { Head, Injectable } from '@nestjs/common';\n")
+                          + "export type Pinned = Head;\n"},
+                r"unlisted-routes\.ts: Head " + undecorated),
+            "Nest's Head re-exported under its name": (
+                {outside: helper + "export { Head } from '@nestjs/common';\n"}, r"unlisted-routes\.ts: Head " + undecorated),
+            "@Head() from an api/src file that re-exports Nest's": (
+                {helpers: "export { Head } from '@nestjs/common';\n",
+                 added: controller("import { Controller } from '@nestjs/common';\nimport { Head } from './route-helpers';\n",
+                                   "  @Head('read')\n  read() { return {}; }\n")},
+                r"bound\.controller\.ts: Head is not bound once by import \{ Head \} from '@nestjs/common'.*"
+                r"route-helpers\.ts: Head " + undecorated),
+            "Head as a property": (
+                {outside: helper + "export const pick = (m: any) => m.Head;\n"}, r"unlisted-routes\.ts: Head " + undecorated),
+        }
+        for label, (files, message) in refused.items():
+            with self.subTest(refused=label), self.assertRaisesRegex(AssertionError, message):
+                controller_inventory({**sources, **files})
+        # (3) the product's type name is not an input of the inventory: renaming it changes nothing
+        for name in ("ReportHead", "PinnedHead"):
+            with self.subTest(renamed=name):
+                self.assertEqual(controller_inventory({**sources, **renamed(name)}), baseline)
+        print("CLINICIAN_POLICY_TYPE_NAMES " + json.dumps({
+            "accepted": sorted(accepted), "refused": sorted(refused), "read_as_route": "HEAD bound/read",
+            "renamed": ["ReportHead", "PinnedHead"], "real_routes": len(baseline),
         }, ensure_ascii=True, sort_keys=True))
 
 

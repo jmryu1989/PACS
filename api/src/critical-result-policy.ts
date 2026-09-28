@@ -23,7 +23,7 @@ export const CRITICAL_RESULT_TRANSITIONS: Readonly<Record<string, { from: string
 
 export type RecipientClass = 'clinician' | 'radiologist';
 export type Refusal = { status: 400 | 403 | 404 | 409 | 503; code: string; id?: string; replacedBy?: string };
-export type ReportHead = { version: number; action: string | null; author?: string | null; at?: any } | null;
+export type Head = { version: number; action: string | null; author?: string | null; at?: any } | null;
 export type StudyReadState = { rs?: string | null; preDoc?: string | null; preReviewer?: string | null };
 export type RecipientCase = {
   case: 'C2' | 'C3' | 'C4' | 'C5' | 'R2' | 'R3' | 'R4' | 'R5';
@@ -101,7 +101,7 @@ export function legacyReadable(state: StudyReadState | null | undefined, actor: 
  * 생성·대체 때의 수신자 판정(M-S7-CVR C1/C2, R1/R2). 고정 = 지금 머리이므로 C는 확정 원천(clinicianFinal)일 때만,
  * R은 기존 읽기 규칙이 그 머리를 줄 때만 받는다. visible은 수신자에게 지금 검사가 보이는가(기관·StudyAccess)다.
  */
-export function createCase(input: { cls: RecipientClass; visible: boolean; head: ReportHead; state: StudyReadState; actor: string }) {
+export function createCase(input: { cls: RecipientClass; visible: boolean; head: Head; state: StudyReadState; actor: string }) {
   if (input.cls === 'clinician') return input.visible && clinicianFinal(input.state?.rs, input.head) ? 'C2' : 'C1';
   return input.visible && legacyReadable(input.state, input.actor) ? 'R2' : 'R1';
 }
@@ -113,7 +113,7 @@ export function createCase(input: { cls: RecipientClass; visible: boolean; head:
  *   R: 고정 = 머리 ? (legacyReadable ? R2 : R5) : (머리 reset ? R4 : R3), R3/R4는 legacyReadable이면 full 아니면 stub
  * ACK는 C2·R2뿐이다 — 옛 판에 대한 확인은 새 판의 확인으로 읽힐 수 있다.
  */
-export function recipientCase(input: { cls: RecipientClass; visible: boolean; pin: number; head: ReportHead; state: StudyReadState;
+export function recipientCase(input: { cls: RecipientClass; visible: boolean; pin: number; head: Head; state: StudyReadState;
   actor: string }): RecipientCase {
   const clinician = input.cls === 'clinician';
   const head = input.head;
@@ -142,7 +142,7 @@ export function deliveryOf(kase: RecipientCase | null): 'readable' | 'stub' | 'n
  * 원천 고정 판정(§5.4, §4 순서 14): 머리 없음 → INVALID, 화면이 본 판 ≠ 머리 → MOVED, 머리 reset(고정할 수 없는 action) →
  * INVALID, 발신자가 그 머리를 기존 규칙으로 읽을 수 없음 → 403 FORBIDDEN.
  */
-export function sourceRefusal(input: { sourceVersion: number; head: ReportHead; senderReadable: boolean }): Refusal | null {
+export function sourceRefusal(input: { sourceVersion: number; head: Head; senderReadable: boolean }): Refusal | null {
   const head = input.head;
   if (!head || !Number.isSafeInteger(head.version) || head.version < 1) return { status: 409, code: C.SOURCE_INVALID };
   if (input.sourceVersion !== head.version) return { status: 409, code: C.SOURCE_MOVED };
@@ -269,7 +269,7 @@ export function recipientView(record: any, kase: RecipientCase, study: Record<st
 }
 
 /** 발신자 투영(§3.3). 본문은 없다(발신자는 판독 화면에서 읽는다). delivery는 확인 대기 기록에만 값이 있다. */
-export function senderView(record: any, head: ReportHead, study: Record<string, string>, delivery: string | null, replacedBy: string | null) {
+export function senderView(record: any, head: Head, study: Record<string, string>, delivery: string | null, replacedBy: string | null) {
   const current = !!head && head.version > 0 && record.sourceVersion === head.version;
   return { ...base(record, replacedBy), supersedes: record.supersedesId ?? null, view: 'sender' as const,
     recipient: { actor: record.recipientActor, name: record.recipientName, role: record.recipientRole }, study, message: record.message,

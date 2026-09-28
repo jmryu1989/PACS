@@ -7,7 +7,7 @@ import { OrthancService } from './orthanc.service';
 import { clinicianFinal } from './clinician-policy';
 import type { Caller } from './pacs.service';
 import {
-  CRITICAL_RESULT_CODES as CODE, CRITICAL_RESULT_PAGE, CRITICAL_RESULT_PINNABLE_ACTIONS, CRITICAL_RESULT_STATE_FILTERS, ReportHead,
+  CRITICAL_RESULT_CODES as CODE, CRITICAL_RESULT_PAGE, CRITICAL_RESULT_PINNABLE_ACTIONS, CRITICAL_RESULT_STATE_FILTERS, Head,
   RADIOLOGIST, RecipientClass, Refusal, ackFingerprint, ackRefusal, appliedResult, auditDetail, cancelFingerprint, clip,
   createCase, createFingerprint, decodeCursor, deliveryOf, eligibleRecipient, effectiveRoles, encodeCursor, exactKeys, holds,
   isObject, legacyReadable, originalIdentity, positiveValue, recipientCase, recipientClass, recipientView, recordRefusal,
@@ -174,7 +174,7 @@ export class CriticalResultService {
   }
 
   /** 머리 판 = ReportVersion(uid, Report.version) 한 행의 번호·action·작성자·시각. Report의 본문 칸은 읽지 않는다. */
-  private async head(tx: any, uid: string): Promise<ReportHead> {
+  private async head(tx: any, uid: string): Promise<Head> {
     const rows: any[] = await tx.$queryRaw`SELECT r.version AS "headVersion",v.action AS "headAction",v.author AS "headAuthor",v.at AS "headAt"
       FROM "Report" r LEFT JOIN "ReportVersion" v ON v.uid=r.uid AND v.version=r.version WHERE r.uid=${uid}`;
     const row = rows[0];
@@ -199,12 +199,12 @@ export class CriticalResultService {
    * 대체 기록(이 기록을 supersedes로 가리키는 기록)의 id. 발신자에게는 늘, 수신자에게는 그 기록을 지금 읽을 수 있을 때만
    * 준다(§13 "호출자가 읽을 수 있는 기록일 때만").
    */
-  private async replacement(tx: any, row: any, reader: null | { cls: RecipientClass; state: any; head: ReportHead; actor: string }) {
+  private async replacement(tx: any, row: any, reader: null | { cls: RecipientClass; state: any; head: Head; actor: string }) {
     const rows: any[] = await tx.$queryRaw`SELECT id,"sourceVersion" FROM "CriticalResult" WHERE "supersedesId"=${row.id}::uuid`;
     return this.replacementOf(rows[0] ? { id: rows[0].id, sourceVersion: rows[0].sourceVersion } : null, reader);
   }
 
-  private replacementOf(next: { id: string; sourceVersion: number } | null, reader: null | { cls: RecipientClass; state: any; head: ReportHead; actor: string }) {
+  private replacementOf(next: { id: string; sourceVersion: number } | null, reader: null | { cls: RecipientClass; state: any; head: Head; actor: string }) {
     if (!next?.id) return null;
     if (!reader) return next.id;
     const kase = recipientCase({ cls: reader.cls, visible: true, pin: next.sourceVersion, head: reader.head, state: reader.state, actor: reader.actor });
@@ -268,7 +268,7 @@ export class CriticalResultService {
 
   /** 새 기록 한 행(생성·대체). 고정 행의 action·작성자·시각은 같은 트랜잭션에서 읽은 머리 판의 사본이다(불변 행). */
   private newRecord(v: { id: string; uid: string; institution: string; senderInstitution: string; c: CriticalCaller; name: string;
-    recipient: KeycloakUser; cls: RecipientClass; head: ReportHead; identity: any; message: string; supersedesId: string | null; at: Date }) {
+    recipient: KeycloakUser; cls: RecipientClass; head: Head; identity: any; message: string; supersedesId: string | null; at: Date }) {
     return { id: v.id, studyUid: v.uid, institutionId: v.institution, senderInstitutionId: v.senderInstitution, senderSub: v.c.sub,
       senderActor: v.c.actor, senderName: v.name, recipientSub: v.recipient.id, recipientActor: userActor(v.recipient),
       recipientName: userName(v.recipient), recipientRole: v.cls, sourceVersion: v.head.version, sourceAction: v.head.action,
@@ -281,7 +281,7 @@ export class CriticalResultService {
    * 수신자 주체의 StudyAccess는 트랜잭션 전에 준비한 태그로 같은 트랜잭션에서 판정한다.
    */
   private async judgeRecipient(tx: any, uid: string, c: Caller, sub: string, recipient: KeycloakUser | null, subject: Caller | null,
-    head: ReportHead, state: any): Promise<RecipientClass> {
+    head: Head, state: any): Promise<RecipientClass> {
     const cls = eligibleRecipient(recipient, { sub, institution: c.institution, sender: c.sub });
     if (!cls || !subject) throw recipientInvalid();
     const visible = await this.readableBy(subject, uid, tx);
@@ -531,9 +531,9 @@ export class CriticalResultService {
    * 보낸 기록의 delivery(§3.3): 확인 대기 기록마다 지금 수신자가 받으면 무엇을 보는가. 수신자 Keycloak 사용자(같은 수신자는
    * 한 번)와 수신자 주체의 StudyAccess를 스냅샷 뒤에 읽는다. 읽지 못하면 그 수신자의 기록은 'unknown'이고 목록은 실패하지 않는다.
    */
-  private async deliveries(c: Caller, rows: { row: any; head: ReportHead; state: any }[]) {
+  private async deliveries(c: Caller, rows: { row: any; head: Head; state: any }[]) {
     const out = new Map<string, string>();
-    const byRecipient = new Map<string, { row: any; head: ReportHead; state: any }[]>();
+    const byRecipient = new Map<string, { row: any; head: Head; state: any }[]>();
     for (const item of rows) if (item.row.state === 'created') {
       const list = byRecipient.get(item.row.recipientSub) ?? [];
       list.push(item);
@@ -553,7 +553,7 @@ export class CriticalResultService {
     return out;
   }
 
-  private static headOf(row: any): ReportHead {
+  private static headOf(row: any): Head {
     return Number.isSafeInteger(row?.headVersion) && row.headVersion > 0 ? { version: row.headVersion, action: row.headAction ?? null } : null;
   }
 
