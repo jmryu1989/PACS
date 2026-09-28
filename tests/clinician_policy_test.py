@@ -1918,10 +1918,13 @@ class ClinicianPolicySpec(unittest.TestCase):
             "auth.guard.ts": "req.clinicianOnly = clinicianOnly(req.roles);",
             "viewer.controller.ts": "return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);",
             "report-preview.controller.ts": "if (clinicianOnly(caller.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });",
-            # S7-U4a: the Clinical Context second line (contract S7-U4p section 9.2), the report-preview shape
-            "clinical-context.controller.ts": "if (clinicianOnly(req.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });",
             "pacs.service.ts": "if (clinicianOnly(c.roles)) throw new ForbiddenException('전체 검사 통계를 열람할 수 없습니다');",
         }
+        # D73 (AGENTS.md section 1-B): the four statement pins above are S9-U0f carry-over and no precedent. A site added
+        # since is named here by file and call count only; what its call does is checked by running the compiled code in
+        # the named test cases (for S7-U4a, the real controller in CC-S02: clinician-only refused before any read, mixed
+        # users admitted). The TypeScript AST is installed only in the api image, not where this stdlib test runs.
+        behaviour_sites = FIXTURES["role_composition"]["behaviour_checked_sites"]
         counted = {}
         for path in sorted(API.rglob("*.ts")):
             if path == POLICY:
@@ -1932,9 +1935,16 @@ class ClinicianPolicySpec(unittest.TestCase):
                 counted[path.name] = calls
             self.assertIsNone(re.search(r"includes\(\s*(?:'clinician'|\"clinician\"|CLINICIAN_ROLE)\s*\)", source), path.name)
         self.assertEqual(counted, FIXTURES["role_composition"]["clinician_only_call_sites"])
-        self.assertEqual(set(sites), set(counted))
+        self.assertEqual(set(sites) & set(behaviour_sites), set(), "a site is pinned by statement or by behaviour, not both")
+        self.assertEqual(set(sites) | set(behaviour_sites), set(counted), "every counted site is one of the two kinds")
         for name, line in sites.items():
             self.assertIn(line, (API / name).read_text(encoding="utf-8"), name)
+        for name, entry in behaviour_sites.items():
+            with self.subTest(behaviour_site=name):
+                self.assertEqual(set(entry), {"unit", "test", "cases"})
+                cases = (ROOT / entry["test"]).read_text(encoding="utf-8")
+                for case in entry["cases"]:
+                    self.assertIn("test('" + case + " ", cases, "the named behaviour case exists")
         # the clinician reads admit a mixed user by role; they never require clinician-only
         self.assertIn("need(c.roles, CLINICIAN_ROLE, '임상의 조회');", (API / "pacs.service.ts").read_text(encoding="utf-8"))
         live = LIVE_MODULE.read_text(encoding="utf-8")

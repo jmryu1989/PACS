@@ -356,11 +356,15 @@ test('CC-S02 members are included exactly when the caller may read them now (own
 });
 
 test('CC-S02 roles: radiologist, admin and a mixed clinician+radiologist pass; technician-only and clinician-only are 403', async () => {
-  for (const caller of [reader, admin, member('mixed', ['clinician', 'radiologist'])]) {
+  // A mixed user keeps its legacy role (RISK-S5-U1c-MIXED-DOWNGRADE): the controller's second line refuses clinician-only,
+  // never "has clinician". This case, not a source pin, is what clinician_policy_fixtures.json behaviour_checked_sites names.
+  for (const caller of [reader, admin, member('mixed', ['clinician', 'radiologist']), member('mixed-admin', ['clinician', 'admin'])]) {
     assert.equal((await call(fullWorld(), caller)).status, 200, caller.actor);
   }
-  const tech = await call(fullWorld(), member('tech', ['technician']));
+  const techWorld = fullWorld();
+  const tech = await call(techWorld, member('tech', ['technician']));
   assert.deepEqual([tech.status, tech.body.code], [403, 'CLINICAL_CONTEXT_ROLE']);
+  assert.deepEqual([techWorld.calls.delegates.length, techWorld.calls.orthanc.length], [0, 0], 'refused before any read');
   const mixedTech = await call(fullWorld(), member('mixed-tech', ['clinician', 'technician']));
   assert.deepEqual([mixedTech.status, mixedTech.body.code], [403, 'CLINICAL_CONTEXT_ROLE']);
   const w = fullWorld();
