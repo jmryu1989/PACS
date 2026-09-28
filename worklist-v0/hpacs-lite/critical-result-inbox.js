@@ -29,9 +29,33 @@
  *   기록이 있으면 그 행이 후보이고, 없는 것은 그 쪽이 기록의 순서 키를 덮고(첫 쪽은 맨 앞부터, More는 앞 쪽의 마지막 행 뒤부터,
  *   다음 쪽이 있으면 이 쪽의 마지막 행까지) 필터가 그 투영의 상태를 담을 때만 투영을 없애는 증거다. 그 기록의 #4 403·404도
  *   그런 증거다. Refresh·필터 바꿈·목록 읽기 실패는 투영 경계다: 모든 P와 목록 소속을 내리고 그 전에 보낸 읽기의 답을 막는다.
- *   더 새 요청이 나가 있다는 것만으로는 마지막 유효 P를 바꾸지 않는다.
+ *   더 새 요청이 나가 있다는 것만으로는 마지막 유효 P를 바꾸지 않는다. 계정이 바뀌면(A→B→A 포함) 세션 번호가 올라 그 전의 답은
+ *   계정이 같아 보여도 쓰지 않는다.
+ * - 최소 증거(PROJ-R-001 F02). U는 귀속(세션 번호·계정·기록 id·검사 UID·route), 원래 requestId·revision·보낸 body 바이트, 요청
+ *   번호, sending·checking·unknown 분류와 이 요청의 안내(서버 message·code, "지금 다시 보내면 거절되는 이유")만 둔다. E는 이 요청의
+ *   201(applied·replayed)이 준 서버 시각, 또는 끝난 줄의 판정·이 요청의 안내와 서버 상태라는 사실(Cancelled·Superseded, 대체
+ *   기록 id)만 둔다. 둘 다 기록 이름 칸 밖의 내용을 싣지 않고 문서 메모리에만 있다. 이 요청 뒤의 새 투영에 진 #4 답(current 아님)은
+ *   같은 세션·계정·기록·검사이고 그 기록의 지금 시도에 대한 것일 때 흡수 종결 상태(acknowledged·cancelled·superseded)라는 사실로만
+ *   그 시도를 끝낸다 — 본문·사유·Source·view는 옮기지 않는다.
+ * - 사건별 무효화(PROJ-R-001 F02 표). 모든 전이는 그 사건의 첫 paint 전에 끝난다.
+ *   주기·More 읽기 시작: 마지막 유효 P 그대로(시작만으로 상태·권한을 짐작하지 않는다).
+ *   새 유효 #3: 첫 쪽은 목록 소속을 다시 세우고 More는 체인에 잇는다. 기록마다 번호를 견주어 P 전체를 바꾸거나, 덮는 쪽에 없으면
+ *     없앤다. U는 목록에 없거나 stub이라는 것만으로 끝나지 않고, 결과를 모르는 시도마다 #4를 한 번 읽는다. E는 그대로다.
+ *   같은 기록의 새 유효 #4: 그 기록의 P만 통째로 바꾸고 목록 밖이면 이 보기에서 연다. created·stub이면 U 그대로, 종결이면 §8.1대로 끝낸다.
+ *   그 기록의 새 유효 #4 403·404: 목록 행까지 그 기록의 P를 없앤다(번호는 남긴다). U·E 그대로.
+ *   #4의 5xx·연결 실패·제한 시간·틀린 봉투나 id: 투영도 종결 증거도 아니다. 마지막 유효 P 그대로, 실패 안내는 그 요청(Open
+ *     Replacement)의 것만.
+ *   지금 #3의 실패(403·404·cursor 거절·틀린 DTO·제한 시간 포함): 투영 경계. U·E 그대로, Load Failed, 배지에 수 없음.
+ *   Refresh: 투영 경계 + 끝난 줄·적용 결과(E)를 내린다. U는 같은 요청 그대로이고, 그 늦은 201은 적용 결과(최소 줄)만 만든다.
+ *   Show All·필터 바꿈: 투영 경계. U·E 그대로. 투영 경계는 Open Replacement 실패 안내도 내린다.
+ *   일치하는 201(첫 적용·재전송): P·view·Source·본문은 그대로, U를 끝내고 E(서버 시각)를 둔다. P가 created면 상태만 더하고
+ *     Acknowledge를 뺀다. P가 적용과 맞지 않는 종결이면 어느 쪽도 지어내지 않고 맞지 않는다는 안내만 둔다.
+ *   이전 번호·범위·세션의 늦은 답: P·목록 소속·번호·안내를 바꾸지 않는다(위 흡수 종결 사실만 예외).
+ *   로그아웃·401·계정 변경·pagehide: 세션 번호를 올리고 P·U·E·안내·나간 요청을 모두 버린다(늦은 답은 어디에도 쓰지 않는다).
+ *   시간 경과·초점·스크롤·패널 접기: 아무것도 바꾸지 않는다. 자동 ACK·Check Again은 없고, POST 제한 시간은 불확실이지 미적용이 아니다.
  * - 서버가 바꾼 표시(full→stub, 행 제거, ACK 불가, 종결)는 초점과 무관하게 바로 그린다. 답이 같은 행만 다시 만들지 않아 초점이
- *   남는다. 초점이 있던 행이 바뀌면 그 행의 상태 줄로, 사라지면 영역 제목으로 옮기고, 다른 기록의 단추로는 옮기지 않는다.
+ *   남는다. 초점이 있던 행·줄이 바뀌면 그 머리로, 사라지면 같은 기록의 남은 줄·행 머리로, 그것도 없으면 영역 제목으로 옮기고,
+ *   다른 기록의 단추로는 옮기지 않는다.
  * - 세션을 끝내는 것은 호스트 페이지다. 이 파일은 로그아웃·이동·저장소 쓰기를 스스로 시작하지 않는다: 401이면 이 영역을 먼저
  *   끝내고 공통 종료 목록(window.kinOn401)을 부른 뒤 호스트가 준 logout을 부르고, 계정 변경은 같은 목록에 'account-changed'로,
  *   그리고 호스트가 준 onAccountChanged로 알린다.
@@ -113,6 +137,9 @@
     newRequest: '다시 누르면 새 요청으로 보냅니다.',
     serverState: state => `서버의 이 기록은 지금 ${STATES[state] || state} 상태입니다.`,
     replacementFailed: '대체 기록을 열 수 없습니다.',
+    // 이 페이지 ACK의 201과, 그 뒤 서버가 읽어 준 이 기록의 종결 상태(cancelled·superseded)가 맞지 않을 때. 계약상 없는 조합이라
+    // 어느 쪽도 지어내지 않고 다시 읽기를 권한다.
+    mismatch: '이 페이지의 수신 확인 결과와 서버가 지금 보여 준 이 기록의 상태가 맞지 않습니다. Refresh로 다시 확인하세요.',
     codes: {
       CRITICAL_RESULT_INPUT_INVALID: '서버가 요청 형식을 거절했습니다.',
       CRITICAL_RESULT_ROLE_REQUIRED: '이 계정에는 지금 수신 확인할 역할이 없습니다.',
@@ -315,11 +342,30 @@
       const value = owner();
       return Array.isArray(value) && value.length === 2 && value.every(part => text(part) && part.length > 0) ? JSON.stringify(value) : null;
     };
-    const allowed = () => !ended && lock === null && !!eligible() && who() !== null;
+    // 이 영역이 마지막으로 본 계정(owner()의 JSON). 다른 값을 보면 세션 번호가 오른다.
+    let seen = null;
+    /**
+     * 호스트의 계정을 읽고, 바뀌었으면 세션 경계로 다룬다. 처음 계정이 생기는 것(부팅)은 새 세션의 시작일 뿐이다. 계정이 없어지면
+     * 이 세션의 것을 모두 버리고, 다른 계정이 되면 버린 뒤 잠근다 — 이 문서에 이전 계정의 목록·시도가 남거나 이전 계정의 요청이
+     * 새 계정으로 나가지 않게. 돌아온 같은 계정(A→B→A)의 옛 답은 세션 번호가 달라 쓰지 않는다.
+     */
+    function observe() {
+      const now = who();
+      if (now === seen) return now;
+      const before = seen;
+      seen = now;
+      epoch++;
+      if (before !== null && !ended && lock === null) {
+        if (now === null) { drop(); paint(); }
+        else accountChanged('');
+      }
+      return now;
+    }
+    const allowed = () => { const now = observe(); return !ended && lock === null && !!eligible() && now !== null; };
     /** 요청을 보내는 순간의 식별: 요청 번호·세션 번호·계정·투영 번호. 답은 이 값으로만 판정한다. */
-    const begin = () => ({ gen: ++gen, epoch, sent: who(), view });
+    const begin = () => { const sent = observe(); return { gen: ++gen, epoch, sent, view }; };
     /** 이 요청의 답을 받아도 되는가: 영역이 살아 있고 같은 세션·같은 계정이다. */
-    const alive = ctx => !ended && lock === null && ctx.epoch === epoch && who() === ctx.sent;
+    const alive = ctx => { const now = observe(); return !ended && lock === null && ctx.epoch === epoch && now === ctx.sent; };
     const ownAttempt = attempt => attempts.get(attempt.recordId) === attempt && alive(attempt);
     const slotGen = id => (projections.has(id) ? projections.get(id).gen : 0);
 
@@ -347,11 +393,15 @@
       return true;
     }
 
-    /** 투영 경계(Refresh·필터 바꿈·목록 실패·세션 끝): 모든 투영과 목록 소속을 내리고, 그 전에 보낸 읽기의 답이 투영이 되지 못하게 한다. */
+    /**
+     * 투영 경계(Refresh·필터 바꿈·목록 실패·세션 끝): 모든 투영과 목록 소속, 앞 보기의 Open Replacement 실패 안내를 내리고, 그 전에
+     * 보낸 읽기의 답이 투영이 되지 못하게 한다. cursor 체인·배지 수·ready도 새 답을 기다린다.
+     */
     function boundary() {
       view++;
       projections.clear();
       opened.clear();
+      openNotes.clear();
       listIds = [];
       pages = [];
       nextCursor = null;
@@ -701,9 +751,13 @@
       return { row, key, line, seq: (attempt || outcome || { line: 0 }).line };
     }
 
-    /** P로 그리는 행. 적용 결과가 있으면 created 투영의 상태만 Acknowledged {at}으로 바꾸고 모양(full·stub)은 그대로 둔다. */
+    /**
+     * P로 그리는 행. 적용 결과가 있으면 created 투영의 상태만 Acknowledged {at}으로 바꾸고 모양(full·stub)은 그대로 둔다. P가 적용과
+     * 맞지 않는 종결(cancelled·superseded)이면 P대로 그리고 맞지 않는다는 안내만 더한다 — ACK 가능한 모양도 수신 확인도 지어내지 않는다.
+     */
     function projectionRow(p, done, reason, ack, note) {
       const item = done && p.state === 'created' ? { ...p, state: 'acknowledged', acknowledgedAt: done.at } : p;
+      const conflict = !!done && item.state !== 'acknowledged';
       const full = item.view === 'full', changed = item.state === 'created' && !(full && item.source.current);
       const head = item.state === 'acknowledged' ? `Acknowledged ${time(item.acknowledgedAt)}` : changed ? 'Source Changed' : STATES[item.state];
       const notes = [];
@@ -715,7 +769,7 @@
         notes, message: full ? item.message : null, meta: [`From ${item.sender.name} · Sent ${time(item.createdAt)}`, identity(item.study)],
         source: full ? sourceText(item.source) : null,
         body: full ? FIELDS.map(([key, name]) => [name, item.body[key]]) : null,
-        after: [reason ? TEXT.cancelReason(reason) : '', ack === 'busy' ? TEXT.sending : '', note].filter(Boolean),
+        after: [reason ? TEXT.cancelReason(reason) : '', ack === 'busy' ? TEXT.sending : '', conflict ? TEXT.mismatch : '', note].filter(Boolean),
         ack, replacement: item.state === 'superseded' && item.replacedBy ? item.replacedBy : null,
       };
     }
@@ -811,14 +865,14 @@
 
     /**
      * 모델이 같은 요소는 그대로 두고, 바뀐 요소는 제자리에서 바꾸고, 없어진 요소는 뺀다. 초점이 있던 요소가 바뀌면 새 요소의
-     * 머리로, 없어지면 { lost }로 알린다. 남는 요소는 옮기지 않는다(서버 순서라 상대 순서가 그대로다).
+     * 머리로, 없어지면 그 기록 id를 { lost }로 알린다. 남는 요소는 옮기지 않는다(서버 순서라 상대 순서가 그대로다).
      */
     function reconcile(container, nodes, models, build, active) {
-      let lost = false, moveTo = null;
+      let lost = null, moveTo = null;
       const wanted = new Set(models.map(model => model.key));
       for (const [key, entry] of nodes) {
         if (wanted.has(key)) continue;
-        if (entry.element.contains(active)) lost = true;
+        if (entry.element.contains(active)) lost = key;
         entry.element.remove();
         nodes.delete(key);
       }
@@ -884,9 +938,11 @@
       const moreGone = !ready || !nextCursor || lock !== null;
       const moreLost = moreGone && !moreButton.hidden && moreButton.contains(active);
       moreButton.hidden = moreGone;
-      const target = rows.moveTo || lines.moveTo;
+      // 초점이 있던 행·줄이 없어졌으면 같은 기록의 남은 줄·행 머리로, 그것도 없으면 영역 제목으로 간다.
+      const headOf = (nodes, key) => (key !== null && nodes.has(key) ? nodes.get(key).element.querySelector('[tabindex="-1"]') : null);
+      const target = rows.moveTo || lines.moveTo || headOf(lineNodes, rows.lost) || headOf(rowNodes, lines.lost);
       if (target) target.focus();
-      else if (rows.lost || lines.lost || moreLost) title.focus();
+      else if (rows.lost !== null || lines.lost !== null || moreLost) title.focus();
     }
 
     // ── 세션 경계 ──
@@ -903,7 +959,6 @@
       epoch++;
       attempts.clear();
       outcomes.clear();
-      openNotes.clear();
       boundary();
     }
 
@@ -965,7 +1020,6 @@
       // Refresh는 투영 경계다: 첫 paint 전에 모든 투영·목록 소속과 끝난 줄·ACK 결과를 내리고, 누르기 전에 보낸 읽기의 답은 늦게
       // 와도 투영이 되지 못한다. 결과를 기다리거나 모르는 시도는 같은 요청 그대로 끝날 때까지 남는다.
       outcomes.clear();
-      openNotes.clear();
       boundary();
       loadList(false);
     });
