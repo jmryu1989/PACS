@@ -309,8 +309,8 @@
 
     let ended = false, lock = null, channel = null, timer = null, watch = null, reading = false;
     const inflight = new Set();
-    // 요청 식별(파일 머리의 최신 유효). gen은 목록·한 건 읽기·ACK를 보낸 순서다. epoch은 세션 번호로, 영역이 잠기거나 끝나면
-    // 오른다. view는 투영 번호로, 투영 경계(Refresh·필터 바꿈·목록 실패)와 세션 끝에서 오른다.
+    // 요청 식별(파일 머리의 최신 유효). gen은 목록·한 건 읽기·ACK를 보낸 순서다. epoch은 세션 번호로, 호스트의 계정이 바뀌거나
+    // 영역이 잠기거나 끝나면 오른다. view는 투영 번호로, 투영 경계(Refresh·필터 바꿈·목록 실패)와 세션 끝에서 오른다.
     let gen = 0, epoch = 0, view = 0;
     // P: 기록 id → { gen, item }. 기록마다 자리 하나다. item이 null이면 지금 투영이 없고, gen은 그렇게 정한 증거(목록 제외·#4
     // 403·404)나 마지막 투영의 요청 번호다 — 이보다 먼저 보낸 요청의 답은 이 기록의 투영이 되지 못한다. item이 있는 자리는 늘
@@ -385,7 +385,8 @@
 
     /**
      * 기록 id의 투영 후보(item, 투영을 없애는 증거면 null)를 요청 번호 mark로 낸다. 그 기록에 대해 이 요청보다 뒤에 보낸 요청의
-     * 증거가 이미 있으면 아무것도 바꾸지 않는다. 투영을 바꾸는 곳은 여기 하나다.
+     * 증거가 이미 있으면 아무것도 바꾸지 않는다. 답에서 온 후보가 투영이 되는 곳은 여기 하나다(그 밖에는 투영 경계가 모두 내리고,
+     * 새 첫 쪽에 없는 옛 목록 행이 번호만 남기고 모양을 내려놓을 뿐이다).
      */
     function offer(id, mark, item) {
       if (mark <= slotGen(id)) return false;
@@ -664,7 +665,8 @@
     /**
      * 규칙 3 (b)·4: 대상 기록을 다시 읽는다. 그 답은 readRecord가 먼저 투영으로 반영하고(stub이면 본문이 바로 빠지고, 종결이면
      * 그 상태가 되어 Acknowledge가 다시 생기지 않는다), 시도의 끝은 따로 판정한다: acknowledged면 적용 증거(그 서버 시각),
-     * cancelled·superseded면 이 ACK는 앞으로도 적용될 수 없어 그 서버 상태로 끝난다. 아직 created이거나 읽지 못하면(404·거절·실패)
+     * cancelled·superseded면 이 ACK는 앞으로도 적용될 수 없어 그 서버 상태로 끝난다. 그 판정에는 새 투영에 진 답(current 아님)도
+     * 쓴다 — 흡수 상태는 되돌아가지 않는다 — 다만 상태·서버 시각·대체 id만이다. 아직 created이거나 읽지 못하면(404·거절·실패)
      * 결과를 모르는 채로 같은 requestId·body를 보관한다.
      */
     function confirmByRead(attempt) {
