@@ -126,6 +126,12 @@ jobs:
         timeout-minutes: 3
         run: |
           KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/worklist-header/shots" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/worklist-header --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/reading-workspace.css --file tests/worklist_header_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_header_dom_test.py
+      # S7-PINS (Astra S7-COMMAND-R-001-F09): the S5-UI2, S5-UI3 and S5-U4b/U4c equivalence cases below read these five
+      # fixed commits with git show and fail when one cannot be read; this depth-1 checkout has none of them. The
+      # repository is public, so they are fetched without a token (persist-credentials stays false).
+      - name: S7-PINS fixed commits for the Stage 5 byte-equivalence cases
+        timeout-minutes: 3
+        run: git fetch --no-tags --depth=1 origin 7a35570826072c0da1f79e7951f218df38fd0156 5ed77ded757e923d8dbed502b2180d5e091928c1 ae04b19d1b98b57b3ff7de006e5dc38d83ef8e64 aaf53dccad2ed140b4a2c6610e9690d33fbab2dc 64225c5aa7157c898d9e44969a3bd86099c857ab
       # S5-UI2 (UXR-G-01): the toolbar groups against the base commit's ids, labels, script and outside bytes (pinned;
       # this shallow clone has no base commit), one row from 1366px, groups opening below it, the reading layout still.
       - name: S5-UI2 worklist toolbar keeps one row of groups, every control and the page script
@@ -137,7 +143,7 @@ jobs:
       - name: S5-UI3 report button rows keep every button in its declared section and the page script
         timeout-minutes: 3
         run: |
-          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/report-actions/shots" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-actions --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/reading-workspace.css --file tests/report_actions_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_actions_dom_test.py
+          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/report-actions/shots" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-actions --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/reading-workspace.css --file tests/report_actions_dom_test.py --file worklist-v0/hpacs-lite/critical-result-send.js --file tests/critical_result_sender_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_actions_dom_test.py
       - name: Existing study arrivals and preserved reading inputs
         timeout-minutes: 3
         run: |
@@ -299,13 +305,26 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-question-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/main.html --file tests/clinician_question_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_question_dom_test.py -k test_0
       - name: S5-U4b Reading screen answer row, OQ-11 notice, Inbox, A-B-A and session lock DOM (11-17)
         timeout-minutes: 3
-        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-question-dom-2 --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/clinician_question_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_question_dom_test.py -k test_1
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-question-dom-2 --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/clinician_question_dom_test.py --file worklist-v0/hpacs-lite/critical-result-send.js --file tests/critical_result_sender_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_question_dom_test.py -k test_1
       # S5-U4c: the image request screens (Clinician Home request area, Technician-mode queue, read-only reading line) against
       # an in-test stand-in of the S5-U4c routes (no stack, network or credentials); envelope, requestId/revision, codes,
       # A-B-A and session end, and the guard-less control files must paint the late answers the shipped files drop.
       - name: S5-U4c Image request screens, write envelope, refusals by code, A-B-A and session end DOM
         timeout-minutes: 4
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-request-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/main.html --file tests/clinician_request_dom_test.py --file tests/report_actions_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_request_dom_test.py
+      # S7-U1b s00 reads main.html at the unit's base (main 96cb9cd) and at the U1b commit that holds its main.html, with
+      # git show, and fails when one cannot be read; this depth-1 checkout has neither (public repository, no token).
+      - name: S7-U1b fixed commits for the sender region case
+        timeout-minutes: 3
+        run: git fetch --no-tags --depth=1 origin 96cb9cdb051dea86ee54484eb5e50ad0530712d4 f2a88578cce40b3e5f4eff595c66c3f4c6a809ed
+      # S7-U1b: the shipped critical-result-send.js and main.html's S7-U1b block (Mark CVR, Send Critical Result, Sent Critical
+      # Results) against an in-test stand-in of the S7-U1a routes (no stack, network or credentials): Mark CVR only on
+      # sendable:true, nothing delivered before the 201, confirmed rejection vs unknown (§8.1) with Check Again resending the
+      # same bytes, A-B-A (a late answer carries the other state) and session end. The run directory is inside
+      # tmp/workspace-ui-ci/, which the Synthetic workspace DOM evidence upload takes whole.
+      - name: S7-U1b Critical result sender Mark CVR, dialog, sent list, unknown outcomes, A-B-A and session end DOM
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/critical-result-sender-dom --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/critical-result-send.js --file tests/critical_result_sender_dom_test.py --file tests/report_actions_dom_test.py --file tests/clinician_question_dom_test.py --file tests/clinician_request_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/critical_result_sender_dom_test.py
       # S5-U6a: the shipped Members console Gateway Status section against in-test GET /studies and retry answers (no stack,
       # network or credentials); a late list or retry answer must not paint, and the guard-less controls must.
       - name: S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM

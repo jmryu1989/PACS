@@ -493,6 +493,20 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S7-U1b critical result sender: the Send Critical Result dialog and the Sent Critical Results line at the end of the
+# report panel (Mark CVR keeps S5-UI3's b-mark-cvr). The code lives in critical-result-send.js, so main.html gains no
+# top-level function and no $('#...') lookup. tests/critical_result_sender_dom_test.py pins how they behave.
+for _kind, _extra in {
+    "ids": {"cvr-send": 1, "cvr-send-title": 1, "cvr-send-help": 1, "cvr-send-study": 1, "cvr-send-source": 1,
+            "cvr-send-recipient": 1, "cvr-send-message": 1, "cvr-send-status": 1, "cvr-send-close": 1, "cvr-send-check": 1,
+            "cvr-send-submit": 1, "cvr-sent-p": 1, "cvr-sent-summary": 1, "cvr-sent-toggle": 1, "cvr-sent-refresh": 1,
+            "cvr-sent-attempts": 1, "cvr-sent-pane": 1, "cvr-sent-help": 1, "cvr-sent-filter": 1, "cvr-sent-rows": 1,
+            "cvr-sent-status": 1, "cvr-sent-more": 1},
+    "functions": {},
+    "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 # Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {

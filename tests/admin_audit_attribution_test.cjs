@@ -848,11 +848,14 @@ test('completeness: every audit action written under api/src has a contract row,
   const scan = scanAuditWrites();
   const { literals, prefixes, unlisted } = assertComplete(scan);
   // The actions named by a constant: the S5-U4a question write, the S7-U1a critical result write (the service constant
-  // the contract names, S7-U1p section 11) and the S5-U4c image request write, each read from its own file's declaration.
+  // the contract names, S7-U1p section 11), the S5-U4c image request write and the S7-U3a reader assignment's two writes
+  // (the channel close and the assignment), each read from its own file's declaration.
   assert.deepEqual(scan.sites.filter(site => site.constant).map(site => [site.file, site.form, site.kind, site.actions]),
     [['api/src/clinician-question.service.ts', 'auditLog.create const QUESTION_AUDIT_ACTION', 'literal', ['study.question']],
       ['api/src/critical-result.service.ts', 'auditLog.create const CRITICAL_RESULT_AUDIT_ACTION', 'literal', ['study.critical-result']],
-      ['api/src/image-request.service.ts', 'auditLog.create const IMAGE_REQUEST_AUDIT_ACTION', 'literal', ['study.image-request']]]);
+      ['api/src/image-request.service.ts', 'auditLog.create const IMAGE_REQUEST_AUDIT_ACTION', 'literal', ['study.image-request']],
+      ['api/src/reader-assignment.service.ts', 'auditLog.create const ACTION', 'literal', ['reader.assignment']],
+      ['api/src/reader-assignment.service.ts', 'auditLog.create const ACTION', 'literal', ['reader.assignment']]]);
   const byRule = {};
   for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
   console.log('ADMIN_AUDIT_COMPLETENESS ' + JSON.stringify({
