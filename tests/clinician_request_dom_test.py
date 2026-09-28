@@ -6,9 +6,10 @@ stand-in answers as image-request.service.ts does: the DTO of U4p §3.3, the wri
 replayed}) with one receipt per requestId, and the §13 codes. No stack, network or credentials; synthetic data only.
 
 Structure (stdlib):
-  s01  every S5-U4c change sits in named regions: with them taken out, main.html and clinician.js are the base commit
-       (aaf53dc) byte for byte, and tests/report_actions_dom_test.py's pins (which tests/worklist_toolbar_dom_test.py
-       reads) hold on that result.
+  s01  (S7-PINS: on the two fixed commits, never the live files, AGENTS.md 1-B.14) every S5-U4c and S5-U4b change sat in
+       named regions: with them taken out of the S5-U4b/U4c integration's merge commit (64225c5), main.html and
+       clinician.js are its base commit (aaf53dc, S5-UI3's merge) byte for byte, with no kinOn401 left. A shallow clone
+       lacks both commits and skips with that reason; the pinned digests stand for them.
   s02  the hooks are one line each (renderClinical, and the 401 list where the page starts a logout: api()'s 401, the
        confirmed Log out before its first network wait, the dictation 401, the list and poll account changes); the queue
        lives in the Order List panel and the reading line after the report footer row; neither block reads a question,
@@ -110,9 +111,7 @@ from clinician_question_dom_test import READER_BLOCK as QUESTION_BLOCK
 from clinician_question_dom_test import READER_VIEW as QUESTION_READER_VIEW
 from clinician_question_dom_test import REFUSED as QUESTION_REFUSED
 from clinician_question_dom_test import QuestionServer, kind_of
-from report_actions_dom_test import BASE_MAIN_SHA256 as UI3_BASE_MAIN_SHA256
-from report_actions_dom_test import BASE_SCRIPTS_SHA256 as UI3_BASE_SCRIPTS_SHA256
-from report_actions_dom_test import scripts_digest, without_ui3
+from report_actions_dom_test import RESULT_MAIN_SHA256 as UI3_RESULT_MAIN_SHA256
 
 ROOT = Path(__file__).resolve().parents[1]
 HPACS = ROOT / "worklist-v0" / "hpacs-lite"
@@ -131,16 +130,21 @@ BASE = "/worklist/hpacs-lite/"
 SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js")}
 MAIN = lf_text(HPACS / "main.html")
 
-# The commit this unit started from (main after S5-UI3). A shallow CI clone does not have it, so what it held is pinned
-# (LF-normalized UTF-8 sha256); where the commit is present the pins are checked against it first.
+# The commit this unit (and S5-U4b) started from (main after S5-UI3) and the main commit that merged the S5-U4b/U4c
+# integration (PR #108, the branch head 6293365). A shallow CI clone has neither, so what they held is pinned
+# (LF-normalized UTF-8 sha256); where they are present the pins and the equivalence are checked on them (s01).
 BASE_COMMIT = "aaf53dccad2ed140b4a2c6610e9690d33fbab2dc"
+RESULT_COMMIT = "64225c5aa7157c898d9e44969a3bd86099c857ab"
 BASE_MAIN_SHA256 = "1c112d4b3b0c598a6fb15dd952e85445b0839077ee9a39618f8d6dd1bab7b47a"
 BASE_CLINICIAN_SHA256 = "f406be3ae3226c473eaadd0161230ea0295b15b812d7c168b29e4181f40a0775"
+RESULT_MAIN_SHA256 = "f555807c9a21bfae532746a2bd4fd55b360d6f86d0af3be55dc2dc081bfd7644"
+RESULT_CLINICIAN_SHA256 = "def1cc798c6683cd36bb8e245ca0efe40209ea6f030831c8019037f22e309ff4"
+REL_MAIN = "worklist-v0/hpacs-lite/main.html"
+REL_CLINICIAN = "worklist-v0/hpacs-lite/clinician.js"
 
 # ── the S5-U4c regions ──
 # Every start and end marker occurs exactly once in main.html: the markup ends carry their last inner line because a bare
-# '</section>' or '</details>' line is not unique. The UI2/UI3 byte-pin tests strip these regions through
-# without_u4c_main() before comparing, as they do with without_ui3().
+# '</section>' or '</details>' line is not unique. s01 cuts them out of the fixed merge commit only.
 MAIN_CSS = ("    /* ── S5-U4c 영상 요청 ──", "    /* ── S5-U4c 끝 ── */\n")
 MAIN_READING = ("        <!-- S5-U4c 판독 대상 검사의",
                 '          <div id="image-request-pane" role="region" aria-label="Image Requests of the Reading Study" hidden>'
@@ -229,9 +233,10 @@ def without_u4c_clinician(text):
     return cut(text, *CLINICIAN_BLOCK_MARKS, False)
 
 
-def base_text(rel):
+def committed(sha, rel):
+    """A file (LF) at a fixed commit when this clone has it, else None (shallow CI checkout)."""
     try:
-        run = subprocess.run(["git", "show", f"{BASE_COMMIT}:{rel}"], cwd=str(ROOT), capture_output=True, timeout=30)
+        run = subprocess.run(["git", "show", f"{sha}:{rel}"], cwd=str(ROOT), capture_output=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return run.stdout.decode("utf-8").replace("\r\n", "\n") if run.returncode == 0 else None
@@ -729,26 +734,28 @@ def has_hangul(text):
 
 
 class ImageRequestStructureTest(unittest.TestCase):
-    """Stdlib side: where the change is, and that nothing else moved."""
+    """Stdlib side: where the change was (on the fixed commits), and where the hooks are now (on the live files)."""
 
-    def test_s01_every_change_is_in_the_u4c_regions_and_the_ui2_ui3_pins_hold_without_them(self):
-        # S5-U4b landed on the same base (aaf53dc); its regions are taken out after S5-U4c's
-        # (tests/clinician_question_dom_test.py), so the base pins below stand for both.
+    def test_s01_every_u4c_u4b_change_was_in_their_regions_at_the_merge_commit(self):
+        # This unit and S5-U4b started from S5-UI3's merge (constants, so a shallow clone checks the chain too).
+        self.assertEqual(UI3_RESULT_MAIN_SHA256, BASE_MAIN_SHA256)
+        files = {(sha, rel): committed(sha, rel) for sha in (BASE_COMMIT, RESULT_COMMIT) for rel in (REL_MAIN, REL_CLINICIAN)}
+        for (sha, rel), text in files.items():
+            print(f"S5-U4b/U4c commit {sha} {rel}", "present" if text is not None else "absent in this clone; pinned values stand for it")
+        if None in files.values():
+            self.skipTest("the fixed S5-U4b/U4c commits are not in this clone (shallow checkout); the pinned digests stand for them")
+        self.assertEqual([BASE_MAIN_SHA256, BASE_CLINICIAN_SHA256, RESULT_MAIN_SHA256, RESULT_CLINICIAN_SHA256],
+                         [digest(files[key]) for key in ((BASE_COMMIT, REL_MAIN), (BASE_COMMIT, REL_CLINICIAN),
+                                                         (RESULT_COMMIT, REL_MAIN), (RESULT_COMMIT, REL_CLINICIAN))])
+        # S5-U4b's regions are taken out after S5-U4c's (tests/clinician_question_dom_test.py): S5-U4c's helper cuts the
+        # five shared kinOn401 lines, S5-U4b's only checks each is left at most once.
         from clinician_question_dom_test import without_u4b, without_u4b_clinician
-        main = without_u4b(without_u4c_main(MAIN))
-        clinician = without_u4b_clinician(without_u4c_clinician(SHIPPED["clinician.js"]))
-        self.assertEqual(BASE_MAIN_SHA256, digest(main), "a main.html byte outside the S5-U4c/U4b regions moved")
-        self.assertEqual(BASE_CLINICIAN_SHA256, digest(clinician), "a clinician.js byte outside the S5-U4c/U4b blocks moved")
-        for rel, restored in (("worklist-v0/hpacs-lite/main.html", main), ("worklist-v0/hpacs-lite/clinician.js", clinician)):
-            base = base_text(rel)
-            if base is None:
-                print("base commit", BASE_COMMIT, "absent in this clone; pinned values used")
-                continue
-            self.assertEqual(base, restored, rel)
-        # tests/report_actions_dom_test.py (and through it tests/worklist_toolbar_dom_test.py) pin main.html outside their
-        # own regions; those pins hold on main.html without the S5-U4c regions.
-        self.assertEqual(UI3_BASE_MAIN_SHA256, digest(without_ui3(main)))
-        self.assertEqual(UI3_BASE_SCRIPTS_SHA256, scripts_digest(main))
+        main = without_u4b(without_u4c_main(files[(RESULT_COMMIT, REL_MAIN)]))
+        clinician = without_u4b_clinician(without_u4c_clinician(files[(RESULT_COMMIT, REL_CLINICIAN)]))
+        self.assertEqual(files[(BASE_COMMIT, REL_MAIN)], main, "a main.html byte outside the S5-U4c/U4b regions moved")
+        self.assertEqual(files[(BASE_COMMIT, REL_CLINICIAN)], clinician, "a clinician.js byte outside the S5-U4c/U4b blocks moved")
+        # Every end-list call the two units added is inside their regions.
+        self.assertNotIn("kinOn401", main)
 
     def test_s02_hooks_regions_and_boundaries(self):
         self.assertEqual(1, MAIN.count(HOOK))

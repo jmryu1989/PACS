@@ -31,9 +31,11 @@ stylesheet main.html links is inlined in its own position. The one piece of scri
 DOM call. Role gating stays the page script's disabled; the keyboard case enables every button to walk the fullest row.
 
 without_ui3() gives main.html back with this unit's three regions (the button-row markup, the footer row and the CSS
-block) replaced by the base bytes. The structure case below requires that result to equal the base main.html byte for
-byte, and tests/worklist_toolbar_dom_test.py reads it, so S5-UI2's pins over everything outside its toolbar keep
-standing for the bytes this unit did not touch.
+block) replaced by the base bytes. "Only these regions changed and not one script byte" is a claim about this
+refactoring, so (S7-PINS, AGENTS.md 1-B.14) it is checked on the two fixed commits that bound it - the base and the main
+merge that shipped the unit - never on the live main.html, which later units keep changing. The live file is held to
+what the page must still be: every button once with its English label, the regions free of script, the one line that
+places the Structured entry, the CSS block's fonts, and everything the browser cases measure.
 """
 import hashlib
 import json
@@ -50,13 +52,17 @@ REL_MAIN = 'worklist-v0/hpacs-lite/main.html'
 # Screenshots and the geometry record go outside the checkout when the runner names a directory.
 OUT = Path(os.environ.get('KIN_EVIDENCE_DIR') or ROOT / 'tmp/s5-ui3/report-actions')
 
-# The commit this unit started from (S5-UI2 fix1). A shallow CI clone does not have it, so what it held is pinned below;
-# where the commit is present the pins are checked against it first.
+# The commit this unit started from (S5-UI2 fix1) and the main commit that merged it (PR #100, the branch head 054b99a
+# with fix1). A shallow CI clone has neither, so what they held is pinned below; where they are present the pins and the
+# refactoring's equivalence are checked on them, and where they are not those cases say so and skip.
 BASE = 'ae04b19d1b98b57b3ff7de006e5dc38d83ef8e64'
+RESULT = 'aaf53dccad2ed140b4a2c6610e9690d33fbab2dc'
 # LF-normalized UTF-8 sha256 of the base main.html, and of its <script> blocks joined by '\n\0\n' (the digest
 # tests/worklist_toolbar_dom_test.py pins for S5-UI2's base; neither unit changed a script byte).
 BASE_MAIN_SHA256 = 'c32f4026cfa29d54e3ffa0e85d1900d250264c4f860aa3ed09477a70fe98d707'
 BASE_SCRIPTS_SHA256 = '2231eefe0bc40ed48d28887043bf5cb9b0828bcefcb20b659be07d58cf1a7349'
+# The merged main.html (LF). S5-U4b/U4c started from it (tests/clinician_request_dom_test.py BASE_MAIN_SHA256).
+RESULT_MAIN_SHA256 = '1c112d4b3b0c598a6fb15dd952e85445b0839077ee9a39618f8d6dd1bab7b47a'
 
 # The base rows, verbatim (LF). without_ui3() puts them back.
 BASE_RBTNS = '''        <div class="rbtns">
@@ -167,13 +173,24 @@ def without_ui3(text):
     return text[:cs] + text[ce:ms] + BASE_RBTNS + text[me:fs] + BASE_RFOOT + text[fe:]
 
 
-def base_text():
-    """The base main.html when this clone has the commit, else None (shallow CI checkout)."""
+def committed(sha):
+    """main.html (LF) at a fixed commit when this clone has it, else None (shallow CI checkout)."""
     try:
-        run = subprocess.run(['git', 'show', f'{BASE}:{REL_MAIN}'], cwd=str(ROOT), capture_output=True, timeout=30)
+        run = subprocess.run(['git', 'show', f'{sha}:{REL_MAIN}'], cwd=str(ROOT), capture_output=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return lf(run.stdout.decode('utf-8')) if run.returncode == 0 else None
+
+
+def fixed_pair():
+    """(base, result) main.html at the two fixed commits, each None where this clone lacks it; says which it used."""
+    pair = committed(BASE), committed(RESULT)
+    for name, sha, text in (('base', BASE, pair[0]), ('result', RESULT, pair[1])):
+        print(f'S5-UI3 {name} commit {sha}', 'present' if text is not None else 'absent in this clone; pinned values stand for it')
+    return pair
+
+
+ABSENT = 'the fixed S5-UI3 commits are not in this clone (shallow checkout); the pinned digests stand for them'
 
 
 def page_html(text):
@@ -259,43 +276,45 @@ def centre_in(a, c):
 
 
 class ReportActionsStructureTest(unittest.TestCase):
-    """Stdlib side: bytes and ids against the base."""
+    """Stdlib side: the refactoring on its two fixed commits; the live page's own requirements on the live file."""
 
     @classmethod
     def setUpClass(cls):
         cls.text = lf(MAIN.read_text(encoding='utf-8'))
-        # S5-U4c and S5-U4b (after this unit) added regions outside this unit's three; the byte pins below compare
-        # main.html with those taken out: S5-U4c's regions and the five shared kinOn401 lines first
-        # (tests/clinician_request_dom_test.py), then S5-U4b's four (tests/clinician_question_dom_test.py). Imported here
-        # because those modules need Playwright and this class does not otherwise.
-        from clinician_question_dom_test import without_u4b
-        from clinician_request_dom_test import without_u4c_main
-        cls.pinned = without_u4b(without_u4c_main(cls.text))
-        cls.base = base_text()
-        print('base commit', BASE, 'present' if cls.base is not None else 'absent in this clone; pinned values used')
+        cls.base, cls.result = fixed_pair()
 
-    def test_pins_match_the_base_commit_when_it_is_present(self):
+    def test_pins_match_the_fixed_commits_when_they_are_present(self):
         self.assertEqual(BASE_RBTNS_SHA256, digest(BASE_RBTNS))
         self.assertEqual(BASE_RFOOT_SHA256, digest(BASE_RFOOT))
-        if self.base is None:
-            self.skipTest('base commit not in this clone (shallow checkout); the pins stand for it')
+        if self.base is None or self.result is None:
+            self.skipTest(ABSENT)
         self.assertEqual(BASE_MAIN_SHA256, digest(self.base))
         self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(self.base))
+        self.assertEqual(RESULT_MAIN_SHA256, digest(self.result))
         start = self.base.index(RBTNS_OPEN)
         self.assertEqual(BASE_RBTNS, self.base[start:self.base.index(ROW_CLOSE, start) + len(ROW_CLOSE)])
         start = self.base.index(RFOOT_OPEN)
         self.assertEqual(BASE_RFOOT, self.base[start:self.base.index(ROW_CLOSE, start) + len(ROW_CLOSE)])
 
-    def test_everything_outside_the_three_regions_is_the_base_bytes_and_the_script_is_unchanged(self):
-        restored = without_ui3(self.pinned)
-        self.assertEqual(BASE_MAIN_SHA256, digest(restored), 'a byte outside the S5-UI3 regions moved')
-        if self.base is not None:
-            self.assertEqual(self.base, restored)
-        self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(self.pinned))
-        (cs, ce), (ms, me), (fs, fe) = regions(self.text)
-        for name, (start, end) in (('css', (cs, ce)), ('rows', (ms, me)), ('footer', (fs, fe))):
-            self.assertNotIn('<script', self.text[start:end], name)
-        # The one line of script that places a button in these rows is still there, once.
+    def test_the_refactoring_changed_only_its_three_regions_and_no_script_byte(self):
+        # Base and merge commit: with the three regions put back to the base rows, the merged file is the base byte for
+        # byte, and its page script is the base's.
+        if self.base is None or self.result is None:
+            self.skipTest(ABSENT)
+        self.assertEqual(self.base, without_ui3(self.result), 'a byte outside the S5-UI3 regions moved')
+        self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(self.result))
+
+    def test_the_three_regions_hold_no_script_and_the_structured_line_is_there_once(self):
+        # The live page (and the merge commit where present): the regions are markup and CSS only.
+        for label, text in (('live', self.text), ('result', self.result)):
+            if text is None:
+                continue
+            (cs, ce), (ms, me), (fs, fe) = regions(text)
+            for name, (start, end) in (('css', (cs, ce)), ('rows', (ms, me)), ('footer', (fs, fe))):
+                with self.subTest(file=label, region=name):
+                    self.assertNotIn('<script', text[start:end])
+        # The one line of script that places a button in these rows is still there, once: the browser cases replay it
+        # as STRUCTURED.
         self.assertEqual(1, self.text.count(STRUCTURED_LINE))
 
     def test_the_css_block_sets_font_size_only_to_the_buttons_size(self):
@@ -332,7 +351,7 @@ class ReportActionsDOMTest(unittest.TestCase):
     def setUpClass(cls):
         from playwright.sync_api import sync_playwright
         cls.html = page_html(MAIN.read_text(encoding='utf-8'))
-        cls.base = base_text()
+        cls.base, cls.result = fixed_pair()
         cls.seen = []
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -366,12 +385,28 @@ class ReportActionsDOMTest(unittest.TestCase):
 
     # ── (a) structure, as the browser sees it ──
 
-    def test_buttons_keep_their_base_tags_attributes_and_labels(self):
-        page = self.open_page(1366, 768, structured=False)
+    def serialize(self, text):
+        page = self.open_page(1366, 768, html=page_html(text), structured=False)
         try:
-            got = page.evaluate(ELEMENTS, BUTTONS)
+            return page.evaluate(ELEMENTS, BUTTONS)
         finally:
             page.close()
+
+    def test_every_button_is_on_the_page_with_an_english_label(self):
+        # The live page: each of the 18 is found (by its id), and its label is English (AGENTS.md section 4); where
+        # each sits and which are in view is the next case.
+        got = self.serialize(MAIN.read_text(encoding='utf-8'))
+        self.assertEqual([], [row[0] for row in got if row[1] is None])
+        for key, _, label in got:
+            with self.subTest(button=key):
+                self.assertTrue(label, key)
+                self.assertIsNone(re.search('[가-힣]', label), f'{key}: {label}')
+
+    def test_the_refactoring_kept_every_button_tag_attribute_and_label(self):
+        # Base and merge commit, as the browser serializes them: the unit moved the 18 buttons and changed none.
+        if self.base is None or self.result is None:
+            self.skipTest(ABSENT)
+        got = self.serialize(self.result)
         self.assertEqual([], [row[0] for row in got if row[1] is None])
         disabled = [key for key, tag, _ in got if re.search(r'\sdisabled=""', tag)]
         self.assertEqual(DISABLED, disabled)
@@ -383,14 +418,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                 with self.subTest(title=row[0]):
                     self.assertEqual(1, row[1].count(attribute), row[1])
                 row[1] = row[1].replace(attribute, '')
-        # The pin stands for the base: the same serialization of the base markup (the literals, or the commit).
-        page = self.open_page(1366, 768, html=page_html(self.base) if self.base else
-                              page_html(without_ui3(MAIN.read_text(encoding='utf-8'))), structured=False)
-        try:
-            expected = page.evaluate(ELEMENTS, BUTTONS)
-        finally:
-            page.close()
-        self.assertEqual(expected, got)
+        self.assertEqual(self.serialize(self.base), got)
 
     def test_each_button_is_where_it_is_declared_and_seven_controls_are_in_view(self):
         page = self.open_page(1366, 768)
