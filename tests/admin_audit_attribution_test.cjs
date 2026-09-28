@@ -2087,9 +2087,10 @@ test('completeness equivalents: every write of api/src rewritten in another nota
 test('completeness negative controls on api/src: unlisted, dynamic without a wildcard and unwritten actions each fail on their own', () => {
   const sources = auditSources(), base = scanAuditWrites(sources), { ts } = base.tools, listing = productSources().listing;
   const before = verdict(base, productTable(), listing);
-  /** The verdict of `changed`: `name` must be `expected`, every other class as it was before the change. */
-  const alone = (changed, name, expected) => {
-    const found = verdict(changed, productTable(), listing);
+  /** The verdict of `changed`: class `name` gains exactly `added` (in the verdict's own order), every other class is as it was. */
+  const alone = (changed, name, added) => {
+    const found = verdict(changed, productTable(), listing), grown = [...before[name], ...added];
+    const expected = name === 'unwritten_rows' ? productTable().rows.filter(row => grown.includes(row)) : [...new Set(grown)].sort();
     assert.deepEqual(found[name], expected, name);
     for (const other of Object.keys(VERDICT).filter(other => other !== name)) assert.deepEqual(found[other], before[other], `${name}: ${other}`);
     return found;
@@ -2120,7 +2121,8 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
     edit(revalued, repoPath(origin.getSourceFile().fileName), origin.getStart(), origin.end, `${quote}${origin.text}.v2${quote}`);
   }
   const changed = verdict(scanAuditWrites(edited(sources, revalued)), productTable(), listing);
-  assert.deepEqual(changed.unlisted, [...new Set(origins.map(origin => origin.text + '.v2'))].sort());
+  assert.deepEqual(changed.unlisted, [...new Set([...before.unlisted.filter(action => !origins.some(origin => origin.text === action)),
+    ...origins.map(origin => origin.text + '.v2')])].sort());
   assert.deepEqual([changed.unresolved, changed.uncovered_prefixes, changed.unread_sources], [before.unresolved, before.uncovered_prefixes, before.unread_sources]);
   // (c) A dynamic suffix no hidden wildcard row covers.
   alone(scanAuditWrites([...sources, { file: 'api/src/syn-dynamic.service.ts', text: [
