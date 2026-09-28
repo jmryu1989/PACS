@@ -1144,6 +1144,12 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/image-request-service --cwd . --file api/src/image-request.service.ts --file api/src/study-access.service.ts --file api/src/pacs.service.ts --file tests/image_request_service_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/image_request_service_test.cjs
       - name: S7-U4a compiled Clinical Context service, controller and Orthanc header helpers over a stub store and a recording Orthanc (CC-S01..CC-S14)
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/clinical-context-service --cwd . --file api/src/clinical-context.service.ts --file api/src/clinical-context-policy.ts --file api/src/clinical-context.controller.ts --file api/src/orthanc.service.ts --file api/src/study-access.service.ts --file api/src/pacs.service.ts --file tests/clinical_context_service_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/clinical_context_service_test.cjs
+      # S7-U3a (D-S7-09 a, TEST-S7-U3a-SCOPE-PURE): the compiled reader assignment service and PacsService tele paths over
+      # one recording store: the owner/receiver/third-institution matrix, the receiver row closed in the channel change's
+      # transaction, a reopened channel's new revision and the caller institution's worklist rows. The run directory is
+      # also named in the upload list below.
+      - name: S7-U3a compiled reader assignment scope, tele close in the same transaction and caller-institution rows
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/reader-assignment-scope --cwd . --file api/src/reader-assignment.service.ts --file api/src/pacs.service.ts --file tests/reader_assignment_scope_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/reader_assignment_scope_test.cjs
       # S7-U1a (contract S7-U1p SV01-SV14): the compiled policy, and the compiled service against a real disposable
       # PostgreSQL (S7-U1a-R-001-F03) with recording Keycloak/Orthanc and the real StudyAccessService/Interceptor. The
       # database is postgres:16-alpine with --network none on tmpfs, as tests/viewer_migration_test.py starts it; the test
@@ -1247,6 +1253,7 @@ jobs:
             tmp/runtime-ci/study-identity-client/
             tmp/runtime-ci/study-identity-server/
             tmp/runtime-ci/clinical-context-service/
+            tmp/runtime-ci/reader-assignment-scope/
             tmp/runtime-ci/critical-result-service/
             tmp/runtime-ci/critical-result-source/
           if-no-files-found: error
