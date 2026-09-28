@@ -3086,7 +3086,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                         self.press("Refresh")
                         held = self.take("list")
                         self.expect([(x, None) for x in everyone + [z]], "the first paint after Refresh has no projection")
-                        self.assertEqual("Loading", self.badge())
+                        self.assert_no_count("while the new list is held")
                         self.clean(self.seen_since(), "while the new list is held", content=everyone + [z],
                                    reasons=[subject["cancelled"]], rows=everyone + [z])
                         if ending == "timeout":
@@ -3697,7 +3697,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                                    "CRITICAL_RESULT_NOT_FOUND"),
                            "403": ({"status": 403, "body": {"code": "CRITICAL_RESULT_ROLE_REQUIRED", "message": "SYN role"}},
                                    "CRITICAL_RESULT_ROLE_REQUIRED"),
-                           "500": ({"status": 500, "body": {"message": "SYN internal"}}, "HTTP 500"),
+                           "500": ({"status": 500, "body": {"message": "SYN internal"}}, "SYN internal"),
                            "other": ({"patch": lambda p: p["item"].update(id=rid(subject["500"]))}, None),
                            "malformed": ({"patch": lambda p: p["item"].update(revision=3)}, None)}
                 self.watch()
