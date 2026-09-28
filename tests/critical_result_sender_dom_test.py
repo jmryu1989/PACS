@@ -38,7 +38,9 @@ states, Korean explanations, which requests are sent and their bodies - never th
       last), a late dialog read or POST answer never paints another study's dialog, a pending send goes
       to the list line when the dialog closes; a session end, another tab's end and a 401 end the area before anything
       else and paint nothing later; another account's envelope and OWNER_CHANGED lock the area and drop the requests.
-  sd07 the list: shown only when there is something pending, unknown or failed (or opened), `Pending ACK {pending}` from
+  sd07 the list: its line (Sent Critical Results, Show Sent) is there for every sender session, with nothing pending too,
+      so the terminal history (Acknowledged / Cancelled / Superseded / All) opens by the user's own actions; the list
+      itself stays folded until opened; a failed read shows instead of an empty list; `Pending ACK {pending}` from
       the server, columns Study / Recipient / Sent / State / Source, default filter Pending ACK, state names with their
       Korean descriptions, the Source Changed / Recipient Not Eligible / Status Unknown marks, More with the cursor as
       given, Cancel Delivery (reason required) and Supersede (the study's current head from #1, message required).
@@ -47,7 +49,9 @@ states, Korean explanations, which requests are sent and their bodies - never th
   sd09 §8.1 unknown outcomes (a)-(g), including the delayed original request whose retry meets another record's
       PENDING_EXISTS and which appears later in the list.
   sd10 roles: technician, admin-only and clinician + technician sessions never ask #1 or #3 and keep Mark CVR off.
-  sd11 the periodic re-read (60 s, page clock) is one GET of the list: no write, no record changed, no notice.
+  sd11 the periodic re-read (60 s, page clock) is one GET of the list: no write, no record changed, no notice; after the
+      last pending delivery is acknowledged the line stays and the record with the server's acknowledgement time opens
+      again; no periodic read while the document is not visible.
   sd12 a confirmed CRITICAL_RESULT_SOURCE_MOVED on the first Send (contract §8: the screen reads #1 again and the user
       confirms again): the open dialog reads the current head and candidates, Send stays locked while it reads, the
       new Source line is shown and the message kept, a recipient who is no longer a candidate is cleared with a Korean
@@ -1200,11 +1204,14 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         first, again = self.requests("cancel")[1:]
         self.assertEqual(first["raw"], again["raw"])
 
-    def test_sd07b_the_list_is_there_only_when_something_needs_the_sender(self):
+    def test_sd07b_the_line_stays_with_nothing_pending_and_shows_a_failed_read(self):
         self.ready_reader()
         self.wait_until(lambda: len(self.requests("list")) == 1, "the first list read")
-        self.settle()
-        self.assertFalse(self.view()["panel"]["shown"], "nothing pending: the reading layout is unchanged")
+        expect(self.page.locator("#cvr-sent-summary")).to_have_text("Pending ACK 0")
+        panel = self.view()["panel"]
+        # Nothing pending: the line and its Show Sent stay (the way to the history); the list stays folded until opened.
+        self.assertEqual((True, False, "Show Sent"), (panel["shown"], panel["pane"], panel["toggle"]))
+        expect(self.page.locator("#cvr-sent-toggle")).to_be_enabled()
         # The page again, with its first list read failing: the line shows the failure instead of an empty list.
         self.fault("list", status=500, body={"message": "SYN list failure"})
         self.ready_reader()
@@ -1214,6 +1221,41 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         self.assertNotIn("Pending ACK", panel["summary"])
         self.show_sent()
         self.assertIn("SYN list failure", self.view()["panel"]["status"])
+
+    def test_sd07c_the_terminal_history_opens_with_nothing_pending(self):
+        s = self.server
+        r1 = s.add(A, X, state="acknowledged", acknowledgedAt=iso(40))
+        r2 = s.add(B, P, state="cancelled", cancelledAt=iso(41), cancelReason="SYN wrong patient")
+        r3 = s.add(C, P, state="superseded", supersededAt=iso(42))
+        r4 = s.add(C, P, state="acknowledged", acknowledgedAt=iso(43), supersedes=r3["id"])
+        self.ready_reader()
+        expect(self.page.locator("#cvr-sent-summary")).to_have_text("Pending ACK 0")
+        self.assertFalse(self.view()["panel"]["pane"])
+        # From here only the user's own actions: Show Sent, then the State filter.
+        self.page.locator("#cvr-sent-toggle").click()
+        expect(self.page.locator("#cvr-sent-pane")).to_be_visible()
+        self.assertEqual("Hide Sent", self.view()["panel"]["toggle"])
+        self.assertEqual([], self.view()["panel"]["rows"], "nothing pending")
+        for value, records in (("acknowledged", [r4, r1]), ("cancelled", [r2]), ("superseded", [r3]), ("all", [r4, r3, r2, r1])):
+            with self.subTest(state=value):
+                count = len(self.requests("list"))
+                self.page.locator("#cvr-sent-filter").select_option(value)
+                self.wait_until(lambda: len(self.requests("list")) > count, "the filtered read")
+                ids = [record["id"] for record in records]
+                self.wait_until(lambda: [row["id"] for row in self.view()["panel"]["rows"]] == ids, f"the {value} rows")
+                self.assertEqual([value], self.requests("list")[-1]["query"]["state"])
+                rows = {row["id"]: row for row in self.view()["panel"]["rows"]}
+                for record in records:
+                    self.assertIn(STATE_NAMES[record["state"]], rows[record["id"]]["cells"][3])
+                    self.assertEqual([], rows[record["id"]]["buttons"], "no action on a terminal record")
+        # The server's times (Asia/Seoul) and the cancel reason are there to read again.
+        rows = {row["id"]: row["cells"][3] for row in self.view()["panel"]["rows"]}
+        self.assertIn("2026-09-28 11:40", rows[r1["id"]])
+        self.assertIn("2026-09-28 11:41", rows[r2["id"]])
+        self.assertIn("SYN wrong patient", rows[r2["id"]])
+        self.assertIn("2026-09-28 11:42", rows[r3["id"]])
+        self.assertIn("2026-09-28 11:43", rows[r4["id"]])
+        self.assertEqual([], [r for r in self.log if r["method"] != "GET"], "reading the history writes nothing")
 
     # ── SD08 ──
     def test_sd08_english_names_korean_explanations_and_no_avoided_word(self):
@@ -1446,7 +1488,7 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
                 self.assertFalse(v["panel"]["shown"])
 
     # ── SD11 ──
-    def test_sd11_the_periodic_re_read_only_reads(self):
+    def test_sd11_the_periodic_re_read_only_reads_and_an_acknowledged_record_stays_reachable(self):
         r1 = self.server.add(A, P)
         self.ready_reader(clock=True)
         expect(self.page.locator("#cvr-sent-summary")).to_have_text("Pending ACK 1")
@@ -1465,11 +1507,22 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         self.wait_until(lambda: len(self.log) > count, "the second periodic read")
         self.settle()
         self.assertEqual(["list"], [r["kind"] for r in self.log[count:]])
-        self.assertFalse(self.view()["panel"]["shown"], "nothing pending any more")
+        # The last pending delivery ended: the line stays, and the user opens its record and the server's
+        # acknowledgement time (02:53Z, Asia/Seoul) again.
+        expect(self.page.locator("#cvr-sent-summary")).to_have_text("Pending ACK 0")
+        self.show_sent()
+        self.page.locator("#cvr-sent-filter").select_option("acknowledged")
+        self.wait_until(lambda: [row["id"] for row in self.view()["panel"]["rows"]] == [r1["id"]], "the acknowledged record")
+        cell = self.view()["panel"]["rows"][0]["cells"][3]
+        self.assertIn(STATE_NAMES["acknowledged"], cell)
+        self.assertIn("2026-09-28 11:53", cell)
+        # No periodic read while the document is not visible.
+        self.page.evaluate("() => Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'hidden'})")
         count = len(self.log)
         self.page.clock.fast_forward(120000)
         self.settle()
-        self.assertEqual(count, len(self.log), "no periodic read while the line is not shown")
+        self.assertEqual(count, len(self.log), "no periodic read while the document is not visible")
+        self.assertEqual([], [r for r in self.log if r["method"] != "GET"])
 
     # ── SD12 ──
     MOVED_TEXT = "SYN critical finding written before the report moved on"

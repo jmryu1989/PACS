@@ -867,15 +867,17 @@
     }
 
     function paintPanel() {
-      const show = !ended && online() && radiologist() && (lock !== null || listPhase === 'failed' || (pending ?? 0) > 0
-        || lined().length > 0 || paneOpen || forms.size > 0);
+      // 보낼 수 있는 세션에는 이 줄이 늘 선다. 확인 대기가 0이어도 Show Sent로 종결된 전달(Acknowledged·Cancelled·Superseded)의
+      // 기록과 서버 시각을 다시 열 수 있어야 한다 — 확인 대기 항목의 표시 조건을 이력 입구의 조건으로 쓰지 않는다. 목록 칸은
+      // 사용자가 열 때만 펼친다.
+      const show = !ended && online() && radiologist();
       panel.hidden = !show;
       if (!show) return;
       const unknownCount = lined().filter(attempt => unsettled(attempt)).length;
       let line;
       if (lock !== null) line = lock.text;
       else if (listPhase === 'failed') line = TEXT.list.failed;
-      else if (pending === null) line = TEXT.list.loading;
+      else if (pending === null) line = listPhase === 'loading' ? TEXT.list.loading : '';
       else line = `Pending ACK ${pending}${unknownCount ? ` · ${TEXT.list.unknownCount(unknownCount)}` : ''}`;
       panel.dataset.state = lock !== null ? 'locked' : listPhase;
       summary.textContent = line;
@@ -1102,7 +1104,8 @@
       if (!staleRows) return;
       setTimeout(() => { if (staleRows && !rows.contains(document.activeElement)) paintRows(); }, 0);
     });
-    // 화면이 보이고 줄이 열려 있는 동안만 다시 읽는다. 읽기는 어떤 기록도 바꾸지 않고(ACK·재알림이 아니다) 알림도 띄우지 않는다.
+    // 문서가 보이고 이 줄이 서 있는(보낼 수 있는 세션) 동안만 다시 읽는다. 읽기는 어떤 기록도 바꾸지 않고(ACK·재알림이 아니다)
+    // 알림도 띄우지 않는다.
     timer = setInterval(() => {
       if (sender() && !panel.hidden && document.visibilityState === 'visible' && listPhase !== 'loading') loadList(false);
     }, PERIOD_MS);
