@@ -3556,14 +3556,15 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
     '}',
   ].join('\n') }]), 'uncovered_prefixes', ['reader.']);
   // (d) A contract row nothing writes: every write of one row is taken out (`void 0` in its place) — reader.assignment
-  // where its writes record nothing else, else the first such row of the table.
+  // where its writes record nothing else, else the first such row of the table. The lines a write spans stay, so no entry
+  // the other classes name (an unresolved candidate is named by its line) moves.
   const only = row => base.sites.some(site => site.actions.includes(row)) && base.sites.every(site => !site.actions.includes(row) || `${site.actions}` === row);
   const row = only('reader.assignment') ? 'reader.assignment' : productTable().rows.find(only);
   assert.ok(row, 'a contract row whose writes record nothing else');
   const removed = new Map();
   for (const site of base.sites.filter(site => site.actions.includes(row))) {
     const write = ts.isTaggedTemplateExpression(site.call.parent) ? site.call.parent : site.call;
-    edit(removed, site.file, write.getStart(), write.end, 'void 0');
+    edit(removed, site.file, write.getStart(), write.end, 'void 0' + '\n'.repeat(write.getText().split('\n').length - 1));
   }
   alone(scanAuditWrites(edited(sources, removed)), 'unwritten_rows', [row]);
   // (e) A WITH fragment passed once more from a value the program does not fix (Astra S7-U3a-AUDIT-SPEC-B-R-001-F01), and
