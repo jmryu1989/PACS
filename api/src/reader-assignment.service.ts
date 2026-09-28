@@ -11,25 +11,35 @@ const ACTION='reader.assignment';
 const key=(studyUid:string,institutionId:string)=>({studyUid_institutionId:{studyUid,institutionId}});
 
 /**
- * S7-U3a (REQ-S7-U3a-CLOSE -> RISK-S7-U3a-ORPHAN-AFTER-CLOSE): closes, in the caller's transaction, every still-open row
- * of an institution the study no longer admits (neither its owner nor its tele institution in `admits`). The caller has
- * just written that owner and tele institution and holds the StudyState row lock, the lock every assignment write takes
- * first, so no receiver write lands between the channel change and this close. A row is closed, never deleted: the reader
- * is cleared, the revision moves on (a request made before the close can only conflict after a reopen), the close gets
- * its own request id (no earlier request replays into a reopened channel), and one audit entry per row records it for
- * the institution that lost the row.
+ * S7-U3a (REQ-S7-U3a-CLOSE -> RISK-S7-U3a-ORPHAN-AFTER-CLOSE): runs in the transaction of a write that is about to take
+ * the tele channel away (a cancel or a new teleTo, a study delete), before that write. `admits` is the owner and the tele
+ * institution the study keeps after it. The StudyState row lock comes first here and the caller's write keeps it to
+ * commit; every assignment read and write takes that row too (shared or for update), so none falls between the channel
+ * change and this close. The channel that ends is read under the lock, not from the caller's earlier unlocked read.
+ *
+ * Each close moves the institution whose channel ends to a new revision, whether its row is open, already closed by an
+ * earlier channel, or absent (a closed row at revision 1 is then created): a request prepared while one channel was open
+ * can only conflict once another opens (S7-U3a-R-001-F02). A still-open row of any other institution the study no longer
+ * admits closes the same way; other closed rows and the owner's row are left alone. A row is closed, never deleted: the
+ * reader is cleared, the close gets its own request id (no earlier request replays into a reopened channel), and one audit
+ * entry per row records it for the institution that lost it.
  */
 export async function closeReaderAssignments(tx:any,uid:string,admits:{institutionId:string|null;teleInstitutionId:string|null},actor:string,reason:'tele-closed'|'study-deleted'){
-  const kept=[admits.institutionId,admits.teleInstitutionId].filter((x):x is string=>typeof x==='string');
-  const open=await tx.readerAssignment.findMany({where:{studyUid:uid,closedAt:null,institutionId:{notIn:kept}}});
-  for(const row of open){
-    const revision=row.revision+1;
-    await tx.readerAssignment.update({where:key(uid,row.institutionId),data:{revision,readerSub:null,readerActor:null,readerName:null,changedBy:actor,
-      lastRequest:randomUUID(),lastFingerprint:createHash('sha256').update(JSON.stringify({closed:reason,institution:row.institutionId,uid,revision})).digest('hex'),
-      closedRevision:revision,closedAt:new Date()}});
-    await tx.auditLog.create({data:{actor,action:ACTION,target:uid,detail:JSON.stringify({institution:row.institutionId,revision,from:row.readerActor??null,to:null,closed:reason})}});
+  const [study]=await tx.$queryRaw`SELECT "institutionId", "teleInstitutionId" FROM "StudyState" WHERE uid = ${uid} FOR NO KEY UPDATE`;
+  const kept=[study?.institutionId,admits.institutionId,admits.teleInstitutionId].filter((x):x is string=>typeof x==='string');
+  const rows=new Map<string,any>((await tx.readerAssignment.findMany({where:{studyUid:uid,closedAt:null,institutionId:{notIn:kept}}})).map((row:any)=>[row.institutionId,row]));
+  const ended=study?.teleInstitutionId;
+  if(typeof ended==='string'&&!kept.includes(ended)&&!rows.has(ended))rows.set(ended,await tx.readerAssignment.findUnique({where:key(uid,ended)}));
+  for(const [institutionId,row] of rows){
+    const revision=(row?.revision??0)+1;
+    const data={revision,readerSub:null,readerActor:null,readerName:null,changedBy:actor,lastRequest:randomUUID(),
+      lastFingerprint:createHash('sha256').update(JSON.stringify({closed:reason,institution:institutionId,uid,revision})).digest('hex'),
+      closedRevision:revision,closedAt:new Date()};
+    if(row)await tx.readerAssignment.update({where:key(uid,institutionId),data});
+    else await tx.readerAssignment.create({data:{studyUid:uid,institutionId,...data}});
+    await tx.auditLog.create({data:{actor,action:ACTION,target:uid,detail:JSON.stringify({institution:institutionId,revision,from:row?.readerActor??null,to:null,closed:reason})}});
   }
-  return open.length;
+  return rows.size;
 }
 
 @Injectable()

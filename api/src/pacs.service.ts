@@ -2119,10 +2119,12 @@ export class PacsService implements OnModuleInit {
         throw new BadRequestException(`환자·검사 정보(ov) 형식이 잘못되었습니다 — ${OVERLAY_RULE_TEXT}`);
     }
 
-    const saved = await tx.studyState.update({ where: { uid }, data });
     // S7-U3a (D-S7-09 a): an institution this write takes the tele channel away from (cancel, or a new teleTo) loses its
-    // reader assignment in this transaction, under the StudyState row lock the update above holds.
-    if (data.teleInstitutionId !== undefined) await closeReaderAssignments(tx, uid, saved, c.actor, 'tele-closed');
+    // reader assignment in this transaction. The close goes first: it locks the StudyState row, which the update below
+    // keeps to commit, and reads the channel being replaced under that lock rather than from gate()'s read above.
+    if (data.teleInstitutionId !== undefined)
+      await closeReaderAssignments(tx, uid, { institutionId: prev.institutionId, teleInstitutionId: data.teleInstitutionId }, c.actor, 'tele-closed');
+    const saved = await tx.studyState.update({ where: { uid }, data });
     await audit(c.actor, 'state.patch', uid, { ...data, by: me });
     const r = await tx.report.findUnique({ where: { uid } });
     return toClient(saved, r, c.actor, await this.myDraft(uid,c.actor,tx));
