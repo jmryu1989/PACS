@@ -48,6 +48,12 @@ states, Korean explanations, which requests are sent and their bodies - never th
       PENDING_EXISTS and which appears later in the list.
   sd10 roles: technician, admin-only and clinician + technician sessions never ask #1 or #3 and keep Mark CVR off.
   sd11 the periodic re-read (60 s, page clock) is one GET of the list: no write, no record changed, no notice.
+  sd12 a confirmed CRITICAL_RESULT_SOURCE_MOVED on the first Send (contract §8: the screen reads #1 again and the user
+      confirms again): the open dialog reads the current head and candidates, Send stays locked while it reads, the
+      new Source line is shown and the message kept, a recipient who is no longer a candidate is cleared with a Korean
+      note, nothing is sent until the user's next Send, which is a new requestId on the new version. Check Again of an
+      unknown request never takes this path (same requestId and body, §8.1 rule 2), and a late answer of the re-read
+      never paints a dialog opened again.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is tests/critical_result_service_test.cjs and tests/critical_result_live.py.
@@ -427,6 +433,7 @@ VIEW = """() => {
     dialog: {open: shown(dialog), title: t(q('#cvr-send-title')), help: t(q('#cvr-send-help')), study: t(q('#cvr-send-study')),
       source: t(q('#cvr-send-source')), options: [...q('#cvr-send-recipient').options].map(o => [o.value, o.text]),
       recipientTag: q('#cvr-send-recipient').tagName, recipientDisabled: q('#cvr-send-recipient').disabled,
+      recipient: q('#cvr-send-recipient').value,
       message: q('#cvr-send-message').value, messageReadOnly: q('#cvr-send-message').readOnly,
       sendDisabled: q('#cvr-send-submit').disabled, check: shown(q('#cvr-send-check')) && !q('#cvr-send-check').disabled,
       status: shown(dialog) ? q('#cvr-send-status').innerText : '',
@@ -846,7 +853,10 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
                 self.fault("create", status=status, body=body)
                 self.mark()
                 self.send()
-                d = self.dialog_says(NOT_DELIVERED)
+                self.dialog_says(NOT_DELIVERED)
+                # A new send is allowed (after SOURCE_MOVED, once the dialog has read the current head again: sd12).
+                expect(self.page.locator("#cvr-send-submit")).to_be_enabled()
+                d = self.view()["dialog"]
                 self.assertIn(f"SYN refusal {status} {code}", d["status"])
                 self.assertIn(f"HTTP {status}", d["status"])
                 if code:
@@ -1460,6 +1470,127 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         self.page.clock.fast_forward(120000)
         self.settle()
         self.assertEqual(count, len(self.log), "no periodic read while the line is not shown")
+
+    # ── SD12 ──
+    MOVED_TEXT = "SYN critical finding written before the report moved on"
+    V4 = {"version": 4, "action": "addendum", "author": "syn-rad2@kin", "at": "2026-09-28T03:00:00.000Z"}
+
+    def compose_then_move(self, head, **server):
+        """Open the dialog on v3, write the message, then move the server's head before Send reaches it."""
+        self.ready_reader()
+        self.mark()
+        self.assertTrue(self.view()["dialog"]["source"].startswith("Source: v3 · Approve"), self.view()["dialog"]["source"])
+        self.compose(P, self.MOVED_TEXT)
+        self.server.heads[A] = dict(head)
+        for key, value in server.items():
+            getattr(self.server, key)[A] = value
+
+    def test_sd12a_a_moved_source_is_read_again_and_sent_only_on_the_next_send(self):
+        self.compose_then_move(self.V4)
+        reads = len(self.requests("recipients"))
+        self.fault("recipients", hold=True, apply=True)
+        self.page.locator("#cvr-send-submit").click()
+        held = self.take("recipients")
+        first = self.requests("create")[0]
+        self.assertEqual(3, first["body"]["sourceVersion"])
+        d = self.dialog_says(NOT_DELIVERED)
+        self.assertIn("CRITICAL_RESULT_SOURCE_MOVED", d["status"])
+        self.assertTrue(has_hangul(d["status"]), d["status"])
+        # While the current head is read nothing can be sent, and nothing is sent again.
+        self.assertTrue(d["sendDisabled"])
+        self.assertEqual(self.MOVED_TEXT, d["message"])
+        self.assertEqual(reads + 1, len(self.requests("recipients")))
+        self.assertEqual(f"/api/studies/{A}/critical-result-recipients", self.requests("recipients")[-1]["path"])
+        self.release(held)
+        expect(self.page.locator("#cvr-send-source")).to_contain_text("Source: v4 · Addendum · SYN Radiologist Two")
+        expect(self.page.locator("#cvr-send-submit")).to_be_enabled()
+        self.settle()
+        d = self.view()["dialog"]
+        self.assertEqual(self.MOVED_TEXT, d["message"], "the message is kept")
+        self.assertEqual(P["sub"], d["recipient"], "a recipient who is still a candidate stays chosen")
+        self.assertIn(NOT_DELIVERED, d["status"], "the first request stays not delivered")
+        self.assertEqual(1, len(self.requests("create")), "nothing is sent again by itself")
+        self.assertIsNone(SUCCESS.search(self.view()["body"]))
+        # The user's next Send is a new request on the new head.
+        self.page.locator("#cvr-send-submit").click()
+        self.dialog_says(DELIVERED)
+        second = self.requests("create")[1]
+        self.assertRegex(second["body"]["requestId"], UUID_V4)
+        self.assertNotEqual(first["body"]["requestId"], second["body"]["requestId"])
+        self.assertEqual({"recipientSub": P["sub"], "sourceVersion": 4, "message": self.MOVED_TEXT},
+                         {k: second["body"][k] for k in ("recipientSub", "sourceVersion", "message")})
+        self.assertEqual(4, self.server.records[second["body"]["requestId"]]["source"]["version"])
+
+    def test_sd12b_a_recipient_who_cannot_read_the_new_head_is_cleared(self):
+        self.compose_then_move(self.V4, candidates=[X])
+        self.page.locator("#cvr-send-submit").click()
+        self.dialog_says(NOT_DELIVERED)
+        expect(self.page.locator("#cvr-send-source")).to_contain_text("Source: v4")
+        expect(self.page.locator("#cvr-send-submit")).to_be_enabled()
+        self.settle()
+        d = self.view()["dialog"]
+        self.assertEqual("", d["recipient"])
+        self.assertEqual([X["sub"]], [value for value, _ in d["options"] if value])
+        self.assertIn(P["name"], d["status"], "the cleared recipient is named")
+        self.assertEqual(self.MOVED_TEXT, d["message"])
+        # Send without a recipient sends nothing; a current candidate is sent on v4.
+        self.page.locator("#cvr-send-submit").click()
+        self.settle()
+        self.assertEqual(1, len(self.requests("create")))
+        self.page.locator("#cvr-send-recipient").select_option(X["sub"])
+        self.page.locator("#cvr-send-submit").click()
+        self.dialog_says(DELIVERED)
+        second = self.requests("create")[-1]["body"]
+        self.assertEqual((X["sub"], 4, self.MOVED_TEXT), (second["recipientSub"], second["sourceVersion"], second["message"]))
+
+    def test_sd12c_a_new_head_that_cannot_be_sent_keeps_send_locked(self):
+        self.compose_then_move({**self.V4, "action": "save"}, reasons="NO_ELIGIBLE_RECIPIENT")
+        self.page.locator("#cvr-send-submit").click()
+        expect(self.page.locator("#cvr-send-status")).to_contain_text(REASONS["NO_ELIGIBLE_RECIPIENT"])
+        self.settle()
+        v = self.view()
+        self.assertIn(NOT_DELIVERED, v["dialog"]["status"])
+        self.assertTrue(v["dialog"]["sendDisabled"])
+        self.assertEqual(self.MOVED_TEXT, v["dialog"]["message"])
+        self.assertEqual([], [value for value, _ in v["dialog"]["options"] if value])
+        self.assertEqual((True, REASONS["NO_ELIGIBLE_RECIPIENT"]), (v["entry"]["disabled"], v["entry"]["title"]))
+        self.assertEqual(1, len(self.requests("create")))
+
+    def test_sd12d_check_again_keeps_the_unknown_request_as_it_was_sent(self):
+        self.ready_reader()
+        first = self.unknown_then({"status": 503, "body": {"message": "SYN no code"}})
+        self.server.heads[A] = dict(self.V4)
+        # The kept body pins v3, so the server now refuses it as moved (a retry's order 12-15 409: still unknown).
+        self.assertEqual(409, self.server.create(A, first["body"])[0])
+        reads = len(self.requests("recipients"))
+        for _ in range(2):
+            d = self.check_again()
+            self.assertIn(UNKNOWN_WORD, d["status"])
+            self.assertIn(LATER, d["status"])
+            self.assertNotIn(NOT_DELIVERED, self.view()["body"])
+            self.assertEqual(first["raw"], self.requests("create")[-1]["raw"], "the same requestId and body")
+            self.assertTrue(d["source"].startswith("Source: v3 · Approve"), d["source"])
+            self.assertTrue(d["sendDisabled"] and d["messageReadOnly"] and d["recipientDisabled"])
+        self.assertEqual(reads, len(self.requests("recipients")), "Check Again reads no new head or candidates")
+
+    def test_sd12e_a_late_re_read_never_paints_a_dialog_opened_again(self):
+        self.compose_then_move(self.V4)
+        self.fault("recipients", hold=True, apply=True)
+        self.page.locator("#cvr-send-submit").click()
+        held = self.take("recipients")      # the re-read, answered with v4 and the old candidates
+        self.dialog_says(NOT_DELIVERED)
+        self.close_dialog()
+        self.server.heads[A] = {**self.V4, "version": 5}
+        self.server.candidates[A] = [X]
+        self.mark()
+        expect(self.page.locator("#cvr-send-source")).to_contain_text("Source: v5")
+        self.release(held)
+        d = self.view()["dialog"]
+        self.assertTrue(d["source"].startswith("Source: v5"), d["source"])
+        self.assertEqual([X["sub"]], [value for value, _ in d["options"] if value])
+        self.assertEqual("", d["message"], "a dialog opened again starts empty")
+        self.assertNotIn(NOT_DELIVERED, d["status"])
+        self.assertEqual(1, len(self.requests("create")))
 
 
 if __name__ == "__main__":

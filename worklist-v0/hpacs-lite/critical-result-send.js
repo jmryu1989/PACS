@@ -67,6 +67,12 @@
       sending: '보내는 중입니다… 서버가 저장했다고 답하기 전에는 전달되었다고 표시하지 않습니다.',
       locked: '로그인한 계정이 바뀌었습니다. 이 화면에서는 중요 결과를 더 읽거나 보내지 않습니다. 화면을 다시 불러오세요.',
     },
+    // 첫 Send가 확정 SOURCE_MOVED로 거절된 뒤 열린 창이 지금 판과 후보를 다시 읽을 때(§8). 다시 보내는 것은 사용자의 다음 Send다.
+    moved: {
+      loading: '지금 판과 받는 사람 후보를 서버에서 다시 읽는 중입니다. 다 읽기 전에는 보낼 수 없습니다.',
+      ready: (from, to) => `보낼 판을 다시 읽었습니다(${from === to ? `v${to}` : `v${from} → v${to}`}). 쓰던 메시지는 그대로입니다. 새 판을 확인하고 Send를 누르세요.`,
+      dropped: name => `선택했던 받는 사람(${name})은 지금 판을 읽을 수 있는 후보에 없어 선택을 비웠습니다. Recipient를 다시 고르세요.`,
+    },
     delivered: '전달 기록이 저장되었습니다. 수신자가 확인(Acknowledge)하면 Acknowledged로 바뀝니다.',
     replayed: '이미 저장된 요청이라 서버가 처음 저장한 결과를 돌려주었습니다.',
     cancelled: '전달을 취소했습니다. 수신자는 이 전달을 더 확인할 수 없습니다.',
@@ -421,10 +427,21 @@
       messageField.value = '';
     }
 
-    function fillRecipients(read) {
-      const options = read.recipients.map(r => new Option(`${r.name} (${r.actor}) · ${ROLES[r.role]}`, r.sub));
+    function fillRecipients(recipients) {
+      const options = recipients.map(r => new Option(`${r.name} (${r.actor}) · ${ROLES[r.role]}`, r.sub));
       recipientField.replaceChildren(new Option('Choose Recipient', ''), ...options);
       recipientField.value = '';
+    }
+
+    /** 원천 이동 뒤 다시 읽은 결과의 안내. 다 읽기 전·실패·보낼 수 없음이면 그 이유다. */
+    function movedText(view) {
+      if (lock !== null) return { line: TEXT.dialog.locked, detail: lock.detail };
+      if (view.phase === 'loading') return { line: TEXT.moved.loading, detail: '' };
+      if (view.phase === 'failed') return { line: TEXT.dialog.failed, detail: view.detail };
+      if (view.phase === 'unavailable') return { line: `${TEXT.reasons[view.data.reason]}. ${TEXT.dialog.unavailable}`, detail: '' };
+      const { from, dropped } = view.moved;
+      return { line: [TEXT.moved.ready(from, view.data.source.version), dropped ? TEXT.moved.dropped(dropped) : ''].filter(Boolean).join('\n'),
+        detail: '' };
     }
 
     function paintDialog() {
@@ -432,13 +449,20 @@
       const view = dialogView, attempt = dialogAttempt ? attempts.get(dialogAttempt) : null;
       const row = study(dialogUid);
       studyLine.textContent = row ? `Study: ${row.name || '—'} (${row.id || '—'}) · ${row.date || '—'}` : `Study: ${dialogUid}`;
-      const source = attempt ? attempt.source : view && view.data && view.data.source;
+      // 보낸(보내는 중·결과를 모르는·적용된) 요청은 그 요청이 고정한 판을 보인다. 거절된 요청 뒤에는 다음 Send가 쓸 판(#1의 답)을
+      // 보인다 — SOURCE_MOVED 뒤 다시 읽은 새 판이 여기 선다.
+      const source = attempt && attempt.state !== 'rejected' ? attempt.source : view && view.data && view.data.source;
       sourceLine.textContent = source ? sourceText(source) : '';
       const phase = view ? view.phase : 'loading';
       let state = phase, word = '', line = '', detail = '';
       if (attempt) {
         state = attempt.state;
         ({ word, line, detail } = outcomeText(attempt));
+        if (attempt.state === 'rejected' && view && view.moved && view.moved.requestId === attempt.requestId) {
+          const again = movedText(view);
+          line = `${line}\n${again.line}`;
+          detail = [detail, again.detail].filter(Boolean).join('\n');
+        }
       } else if (lock !== null) {
         state = 'locked';
         line = TEXT.dialog.locked;
@@ -469,27 +493,42 @@
 
     function openDialog() {
       if (ended || lock !== null || target === null || entry.disabled) return;
-      const uid = target, sent = who(), seq = ++dialogSeq;
-      dialogUid = uid;
+      dialogUid = target;
       dialogAttempt = null;
       dialogNote = '';
-      dialogView = { phase: 'loading', data: null, detail: '' };
       dialogReturn = document.activeElement;
       resetForm();
-      paintDialog();
       dialog.classList.add('show');
       closeButton.focus();
       // 창을 열 때마다 새로 읽는다: 보낼 판(sourceVersion)은 "화면이 본 머리 판"이어야 하고 후보는 권한이 아니라 지금의 답이다.
+      readDialog(null);
+    }
+
+    /**
+     * 열린 창의 #1 읽기. 창을 열 때와, 첫 Send가 확정 SOURCE_MOVED로 거절된 뒤(§8: 화면은 #1을 다시 읽고 사용자가 다시 확정한다)
+     * 부른다. 다 읽을 때까지 phase가 loading이라 Send가 잠긴다. 다시 읽을 때(moved)는 쓰던 메시지를 두고, 고른 받는 사람은 새
+     * 후보에 있을 때만 남긴다. 스스로 다시 보내지 않는다. 결과를 모르는 요청의 Check Again은 이 길을 타지 않는다 — 그 요청의
+     * requestId·body(sourceVersion 포함)는 바꾸지 않는다(§8.1 규칙 2).
+     */
+    function readDialog(moved) {
+      const uid = dialogUid, sent = who(), seq = ++dialogSeq;
+      const before = dialogView && dialogView.data;
+      const chosen = moved && before ? before.recipients.find(r => r.sub === recipientField.value) || null : null;
+      dialogView = { phase: 'loading', data: null, detail: '', moved };
+      paintDialog();
       call('GET', `/studies/${encodeURIComponent(uid)}/critical-result-recipients`).then(({ data }) => {
         if (seq !== dialogSeq || dialogUid !== uid || !live(sent)) return;
         const mine = ownerOf(data && data.owner, sent);
         if (mine === 'other') { accountChanged(TEXT.otherEnvelope); return; }
         const read = mine === 'same' ? readCandidates(data, uid) : null;
         if (!read) {
-          dialogView = { phase: 'failed', data: null, detail: TEXT.malformed };
+          dialogView = { phase: 'failed', data: null, detail: TEXT.malformed, moved };
         } else {
-          dialogView = { phase: read.sendable ? 'ready' : 'unavailable', data: read, detail: '' };
-          if (read.sendable) fillRecipients(read);
+          const kept = !!chosen && read.sendable && read.recipients.some(r => r.sub === chosen.sub);
+          dialogView = { phase: read.sendable ? 'ready' : 'unavailable', data: read, detail: '',
+            moved: moved && { ...moved, dropped: chosen && read.sendable && !kept ? chosen.name : null } };
+          fillRecipients(read.sendable ? read.recipients : []);
+          if (kept) recipientField.value = chosen.sub;
           // 같은 대상의 단추도 이 답을 따른다. 앞서 나간 #1 읽기의 늦은 답은 번호로 버린다.
           if (uid === target) {
             entrySeq++;
@@ -502,7 +541,7 @@
         if (dialogView.phase === 'ready') recipientField.focus();
       }, error => {
         if (seq !== dialogSeq || dialogUid !== uid || !live(sent)) return;
-        dialogView = { phase: 'failed', data: null, detail: describe(error) };
+        dialogView = { phase: 'failed', data: null, detail: describe(error), moved };
         paintDialog();
       });
     }
@@ -598,12 +637,25 @@
       }
       if (!retry && refused(error)) {
         Object.assign(attempt, { state: 'rejected', reason: reasonOf(error), detail: describe(error) });
+        if (attempt.action === 'create' && error.code === 'CRITICAL_RESULT_SOURCE_MOVED') sourceMoved(attempt);
         paintAttempt(attempt);
-        if (attempt.action === 'create' && error.code === 'CRITICAL_RESULT_SOURCE_MOVED' && attempt.uid === target) { targetKey = null; sync(); }
         if (attempt.action !== 'create') loadList(false);
         return;
       }
       unknown(attempt, retry, describe(error), retry && error.status === 409 && LATER_409.has(error.code) ? reasonOf(error) : '');
+    }
+
+    /**
+     * 첫 Send의 확정 SOURCE_MOVED: 요청이 닿기 전에 머리 판이 옮겨져 아무것도 저장되지 않았다(§8). 이 요청을 보이는 창이 열려
+     * 있으면 그 창의 판과 후보를 다시 읽고, 창이 닫혔으면 단추의 #1만 다시 읽는다. 어느 쪽도 다시 보내지 않는다.
+     */
+    function sourceMoved(attempt) {
+      if (dialogAttempt === attempt.requestId && dialogUid === attempt.uid && lock === null) {
+        readDialog({ requestId: attempt.requestId, from: attempt.source.version, dropped: null });
+      } else if (attempt.uid === target) {
+        targetKey = null;
+        sync();
+      }
     }
 
     function applied(attempt, replayed) {
