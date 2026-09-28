@@ -31,6 +31,15 @@
  *   그런 증거다. Refresh·필터 바꿈·목록 읽기 실패는 투영 경계다: 모든 P와 목록 소속을 내리고 그 전에 보낸 읽기의 답을 막는다.
  *   더 새 요청이 나가 있다는 것만으로는 마지막 유효 P를 바꾸지 않는다. 계정이 바뀌면(A→B→A 포함) 세션 번호가 올라 그 전의 답은
  *   계정이 같아 보여도 쓰지 않는다.
+ * - 요청 식별과 수락 기준(Astra S7-U2a-PROJ-B-R-001 F01 보완 1~5). 요청 번호는 보낼 때 정하고 답이 올 때 새 번호를 주지 않는다.
+ *   가장 나중에 보낸 목록 요청의 번호로 답을 거르지 않는다 — 그러면 뒤에 보낸 요청이 나가 있다는 이유로 먼저 도착한 유효한
+ *   철회(stub·제외·종결)를 버려, 뒤 요청의 답까지 옛 본문·사유·Acknowledge가 남는다. 같은 세션·투영 번호·필터·유효 체인의 답은
+ *   기록마다 위 규칙으로 견주고, 목록 수준(소속·쪽 범위·nextCursor·
+ *   배지 수·ready·안내)은 받아들인 목록 증거의 요청 번호와 견준다: 첫 쪽은 체인이 마지막으로 받아들인 쪽보다 뒤에 보낸 요청일 때 소속을
+ *   새로 세우고, More는 보낸 때의 체인과 부모 쪽이 그대로일 때만 잇는다(같은 cursor 글자는 같은 체인의 증거가 아니다). 목록 수준에서
+ *   뒤진 첫 쪽은 지금 보이는 기록의 투영만 견주고 소속·배지·cursor·안내를 되돌리지 않으며, 자리가 없던 기록도 그 뒤에 받아들인 쪽이
+ *   덮으면서 뺐다면 늦게 나타나지 않는다(도착 순서대로 전부 받으면 이미 받아들인 목록을 옛 답이 되돌린다). 이 순서는 이 페이지가
+ *   요청을 보낸 순서이지 서버가 처리한 시각의 순서가 아니다.
  * - 최소 증거(PROJ-R-001 F02). U는 귀속(세션 번호·계정·기록 id·검사 UID·route), 원래 requestId·revision·보낸 body 바이트, 요청
  *   번호, sending·checking·unknown 분류와 이 요청의 안내(서버 message·code, "지금 다시 보내면 거절되는 이유")만 둔다. E는 이 요청의
  *   201(applied·replayed)이 준 서버 시각, 또는 끝난 줄의 판정·이 요청의 안내와 서버 상태라는 사실(Cancelled·Superseded, 대체
@@ -39,13 +48,16 @@
  *   그 시도를 끝낸다 — 본문·사유·Source·view는 옮기지 않는다.
  * - 사건별 무효화(PROJ-R-001 F02 표). 모든 전이는 그 사건의 첫 paint 전에 끝난다.
  *   주기·More 읽기 시작: 마지막 유효 P 그대로(시작만으로 상태·권한을 짐작하지 않는다).
- *   새 유효 #3: 첫 쪽은 목록 소속을 다시 세우고 More는 체인에 잇는다. 기록마다 번호를 견주어 P 전체를 바꾸거나, 덮는 쪽에 없으면
- *     없앤다. U는 목록에 없거나 stub이라는 것만으로 끝나지 않고, 결과를 모르는 시도마다 #4를 한 번 읽는다. E는 그대로다.
+ *   새 유효 #3: 기록마다 번호를 견주어 P 전체를 바꾸거나, 덮는 쪽에 없으면 없앤다 — 다른 요청의 답을 기다리지 않는다. 목록 수준에서
+ *     앞선 첫 쪽은 목록 소속을 다시 세우고 More는 체인에 잇는다. 뒤진 첫 쪽·바뀐 체인의 More는 위 수락 기준대로다. U는 목록에 없거나
+ *     stub이라는 것만으로 끝나지 않고, 목록 수준에서 받아들인 쪽마다 결과를 모르는 시도의 #4를 한 번 읽는다. E는 그대로다.
  *   같은 기록의 새 유효 #4: 그 기록의 P만 통째로 바꾸고 목록 밖이면 이 보기에서 연다. created·stub이면 U 그대로, 종결이면 §8.1대로 끝낸다.
  *   그 기록의 새 유효 #4 403·404: 목록 행까지 그 기록의 P를 없앤다(번호는 남긴다). U·E 그대로.
  *   #4의 5xx·연결 실패·제한 시간·틀린 봉투나 id: 투영도 종결 증거도 아니다. 마지막 유효 P 그대로, 실패 안내는 그 요청(Open
  *     Replacement)의 것만.
- *   지금 #3의 실패(403·404·cursor 거절·틀린 DTO·제한 시간 포함): 투영 경계. U·E 그대로, Load Failed, 배지에 수 없음.
+ *   지금 #3의 실패(403·404·cursor 거절·틀린 DTO·제한 시간 포함): 지금 세션·보기·필터·체인의 것이고 이미 받아들인 더 새로운 목록
+ *     증거에 대체되지 않았으면 투영 경계. U·E 그대로, Load Failed, 배지에 수 없음. 더 새 답을 받아들인 뒤의 옛 실패는 아무것도
+ *     바꾸지 않고, 경계가 먼저 섰으면 그 전에 보낸 목록의 늦은 성공도 P를 되살리지 못한다.
  *   Refresh: 투영 경계 + 끝난 줄·적용 결과(E)를 내린다. U는 같은 요청 그대로이고, 그 늦은 201은 적용 결과(최소 줄)만 만든다.
  *   Show All·필터 바꿈: 투영 경계. U·E 그대로. 투영 경계는 Open Replacement 실패 안내도 내린다.
  *   일치하는 201(첫 적용·재전송): P·view·Source·본문은 그대로, U를 끝내고 E(서버 시각)를 둔다. P가 created면 상태만 더하고
@@ -322,11 +334,14 @@
     // 받은 목록(#3 view=received). 기본 필터는 확인 대기(state=pending을 명시한다 — 서버 기본값은 all이다). Show All은 all이다.
     // ready는 지금 목록이 지금 필터의 성공한 답인가다. listEnd는 지금 체인의 마지막 쪽이 덮는 범위의 끝(다음 쪽이 있을 때 그 쪽
     // 마지막 행의 순서 키)이고, More로 읽는 쪽은 그 뒤부터 덮는다.
-    let filter = 'pending', listSeq = 0, listPhase = 'idle', listError = '', ready = false, nextCursor = null, listEnd = null;
+    let filter = 'pending', listPhase = 'idle', listError = '', ready = false, nextCursor = null, listEnd = null;
     let pending = null, lastPending = null, bodyOpen = false;
-    // 나가 있는 한 건 읽기의 요청 번호와, 그 가운데 가장 이른 것보다 뒤에 반영한 목록 쪽(번호·필터·범위·id). 투영 자리가 비어 있는
-    // 기록의 늦은 읽기 답이 그 뒤에 보낸 목록 쪽에 졌는지 가리는 데만 쓰고, 나간 읽기가 없으면 비운다.
-    const reads = new Set();
+    // 목록 수준의 수락 기준(파일 머리의 요청 식별과 수락 기준): 지금 체인의 첫 쪽을 정한 요청 번호와, 체인이 마지막으로 받아들인 쪽의
+    // 요청 번호(다음 More의 부모). 소속·쪽 범위·nextCursor·배지 수·ready·안내는 이 두 번호로만 바뀐다. 0은 이 보기에 받아들인 쪽이 없음이다.
+    let chainGen = 0, tailGen = 0;
+    // 나가 있는 목록·한 건 읽기의 요청 번호와, 그 가운데 가장 이른 것보다 뒤에 반영한 목록 쪽(번호·필터·범위·id). 먼저 보낸 요청의
+    // 늦은 답이 그 뒤에 받은 쪽에 졌는지(투영 자리가 없거나 비어 있는 기록의 늦은 등장 포함) 가리는 데만 쓰고, 나간 요청이 없으면 비운다.
+    const outstanding = new Set();
     let pages = [];
     // U: 기록 id → 이 페이지의 ACK 시도(sending·checking·unknown). 적용되거나 끝나면 여기서 빠지고 E로 간다.
     const attempts = new Map();
@@ -385,18 +400,20 @@
 
     /**
      * 기록 id의 투영 후보(item, 투영을 없애는 증거면 null)를 요청 번호 mark로 낸다. 그 기록에 대해 이 요청보다 뒤에 보낸 요청의
-     * 증거가 이미 있으면 아무것도 바꾸지 않는다. 답에서 온 후보가 투영이 되는 곳은 여기 하나다(그 밖에는 투영 경계가 모두 내리고,
-     * 새 첫 쪽에 없는 옛 목록 행이 번호만 남기고 모양을 내려놓을 뿐이다).
+     * 증거가 이미 있으면 아무것도 바꾸지 않는다: 그 자리의 번호, 또는 그 뒤에 받은 목록 쪽이 이 기록을 담았거나 덮으면서 뺀 것 —
+     * 뒤의 것은 자리가 없거나 비어 있던 기록이 늦은 옛 답으로 나타나지 않게 한다. 답에서 온 후보가 투영이 되는 곳은 여기 하나다(그
+     * 밖에는 투영 경계가 모두 내리고, 새 첫 쪽에 없는 옛 목록 행이 번호만 남기고 모양을 내려놓을 뿐이다).
      */
     function offer(id, mark, item) {
       if (mark <= slotGen(id)) return false;
+      if (pages.some(page => page.gen > mark && (page.ids.has(id) || (item && covers(page, item))))) return false;
       projections.set(id, { gen: mark, item });
       return true;
     }
 
     /**
      * 투영 경계(Refresh·필터 바꿈·목록 실패·세션 끝): 모든 투영과 목록 소속, 앞 보기의 Open Replacement 실패 안내를 내리고, 그 전에
-     * 보낸 읽기의 답이 투영이 되지 못하게 한다. cursor 체인·배지 수·ready도 새 답을 기다린다.
+     * 보낸 읽기의 답이 투영이 되지 못하게 한다. cursor 체인·배지 수·ready와 받아들인 목록의 기준도 새 답을 기다린다.
      */
     function boundary() {
       view++;
@@ -409,7 +426,24 @@
       listEnd = null;
       pending = null;
       ready = false;
+      chainGen = tailGen = 0;
+      outstanding.clear();
     }
+
+    /** 끝난 요청의 번호를 빼고, 남아 나가 있는 요청 가운데 가장 이른 것보다 앞선 목록 쪽 증거를 버린다. */
+    function retire(sent) {
+      outstanding.delete(sent);
+      const first = outstanding.size ? Math.min(...outstanding) : Infinity;
+      pages = pages.filter(page => page.gen > first);
+    }
+
+    /**
+     * 이 목록 요청의 답이 목록 수준 상태를 정할 수 있는가: 첫 쪽은 체인이 마지막으로 받아들인 쪽보다 뒤에 보낸 요청, More는 보낸 때의
+     * 체인과 부모 쪽이 그대로(새 첫 쪽이 체인을 바꿨거나 같은 부모의 다른 쪽이 먼저 이어졌으면 아니다).
+     */
+    const leads = ctx => (ctx.next ? chainGen > 0 && ctx.chain === chainGen && ctx.parent === tailGen : ctx.gen > tailGen);
+    /** 이 목록 요청이 지금 보기·필터의 것인가(투영 경계·필터 바꿈 전에 보낸 요청이 아닌가). */
+    const inView = ctx => ctx.view === view && ctx.filter === filter;
 
     /**
      * 중요 결과 route 요청(제한 시간 60초). 성공 응답은 HTTP 상태와 함께 돌려주고(쓰기는 201만 적용), 실패는 상태·code·JSON 본문
@@ -445,24 +479,72 @@
 
     // ── 받은 목록 ──
 
-    /** 목록 한 쪽을 읽는다. next면 nextCursor를 바꾸지 않고 돌려준 다음 쪽이다. 늦은 답은 번호·투영 경계·필터·세션으로 버린다. */
+    /**
+     * 목록 한 쪽을 읽는다. next면 nextCursor를 바꾸지 않고 돌려준 다음 쪽이다. 시작은 이 요청의 식별만 적고 마지막 유효 P와 받아들인
+     * 목록은 그대로 둔다. 답은 세션·투영 번호·필터로만 버리고(뒤에 보낸 목록이 나가 있다는 것은 버릴 까닭이 아니다), 검증한 뒤
+     * takeList·listFailed가 받아들인 증거와 견준다.
+     */
     function loadList(next) {
       if (!allowed()) return;
       const cursor = next ? nextCursor : null;
       if (next && !cursor) return;
-      // 이 쪽의 식별: 요청 번호·세션·계정·투영 번호, 필터, 덮는 범위의 앞 끝(첫 쪽은 맨 앞, More는 앞 쪽의 마지막 행 뒤).
-      const ctx = begin(), seq = ++listSeq, chosen = filter, high = next ? listEnd : null;
-      const mine = () => seq === listSeq && ctx.view === view && chosen === filter && alive(ctx);
+      // 이 쪽의 식별: 요청 번호·세션·계정·투영 번호, 필터, More면 보낸 때의 체인·부모 쪽과 덮는 범위의 앞 끝(앞 쪽의 마지막 행 뒤).
+      const ctx = { ...begin(), filter, next, chain: next ? chainGen : 0, parent: next ? tailGen : 0, high: next ? listEnd : null };
+      outstanding.add(ctx.gen);
       listPhase = 'loading';
       paint();
-      const query = `view=received&state=${chosen}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-      call('GET', `/critical-results?${query}`).then(({ data }) => {
-        if (!mine()) return;
+      const query = `view=received&state=${ctx.filter}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+      // 답을 견주는 데 쓴 목록 쪽 증거는 견준 뒤에 정리한다.
+      const settle = handle => value => {
+        try { handle(value); } finally { retire(ctx.gen); }
+      };
+      call('GET', `/critical-results?${query}`).then(settle(({ data }) => {
+        if (!alive(ctx)) return;
+        if (!inView(ctx)) { paint(); return; }
         const envelope = ownerOf(data && data.owner, ctx.sent);
         if (envelope === 'other') { accountChanged(TEXT.otherEnvelope); return; }
-        const read = envelope === 'same' ? readList(data, chosen) : null;
-        if (!read) { failList(TEXT.malformed); return; }
-        acceptPage(ctx.gen, { filter: chosen, next, high }, read);
+        const read = envelope === 'same' ? readList(data, ctx.filter) : null;
+        if (!read) listFailed(ctx, TEXT.malformed);
+        else takeList(ctx, read);
+      }), settle(error => {
+        if (alive(ctx)) listFailed(ctx, describe(error));
+      }));
+    }
+
+    /**
+     * 유효한 목록 쪽의 답(보완 3·4·7). 쪽의 행은 그 기록의 투영 후보이고, 쪽이 덮는데 없는 기록의 투영은 이 쪽의 번호로 없앤다 —
+     * 둘 다 offer가 그 기록에 이미 받아들인 더 뒤 요청의 증거와 견주고, 다른 요청의 답을 기다리지 않는다. 목록 수준에서 앞서면(leads)
+     * 첫 쪽은 목록 소속을 새로 세우고 More는 체인 뒤에 이으며 nextCursor·범위·배지 수·ready·안내를 이 답으로 바꾼다. 새 첫 쪽에 없는
+     * 옛 목록 행은 모양을 남기지 않는다(번호만 남아 더 먼저 보낸 읽기에 진다). 뒤진 첫 쪽은 지금 보이는 기록의 투영만 견주고 목록
+     * 수준은 건드리지 않으며 자리가 없던 기록을 더하지 않는다. 바뀐 체인·이미 이어진 부모의 More는 반영하지 않는다. 한 번의 paint 전에 끝난다.
+     */
+    function takeList(ctx, read) {
+      const lead = leads(ctx);
+      if (ctx.next && !lead) { paint(); return; }
+      const ids = new Set(read.items.map(item => item.id)), last = read.items[read.items.length - 1];
+      const page = { gen: ctx.gen, filter: ctx.filter, ids, high: ctx.high, low: read.nextCursor && last ? keyOf(last) : null,
+        span: !(read.nextCursor && !last) };
+      for (const item of read.items) {
+        const slot = projections.get(item.id);
+        if (lead || (slot && slot.item)) offer(item.id, ctx.gen, item);
+      }
+      for (const [id, slot] of [...projections]) {
+        if (!ids.has(id) && slot.item && covers(page, slot.item) && offer(id, ctx.gen, null)) opened.delete(id);
+      }
+      if ([...outstanding].some(sent => sent < page.gen)) pages.push(page);
+      if (lead) {
+        if (ctx.next) listIds = listIds.concat(read.items.map(item => item.id).filter(id => !listIds.includes(id)));
+        else {
+          for (const id of listIds) {
+            const slot = projections.get(id);
+            if (!ids.has(id) && !opened.has(id) && slot && slot.item) projections.set(id, { gen: slot.gen, item: null });
+          }
+          listIds = read.items.map(item => item.id);
+          chainGen = ctx.gen;
+        }
+        tailGen = ctx.gen;
+        nextCursor = read.nextCursor;
+        listEnd = page.low;
         // 판독 화면 패널의 본문은 확인 대기가 처음 생기거나 늘 때 스스로 열린다. 같은 수가 이어지면 사용자가 닫은 본문을 다시 열지
         // 않는다(재알림 없음, §16.3·§17 L-2). 스스로 닫지 않는다.
         if (lastPending === null ? read.pending > 0 : read.pending > lastPending) bodyOpen = true;
@@ -470,44 +552,25 @@
         listPhase = 'ready';
         listError = '';
         ready = true;
-        paint();
-        // 결과를 모르는 시도는 목록 뒤 그 기록의 한 건 읽기로 다시 확인한다(§8.1 규칙 3 b). 읽기일 뿐 다시 보내지 않는다.
-        for (const attempt of attempts.values()) if (attempt.state === 'unknown') confirmByRead(attempt);
-      }, error => {
-        if (!mine()) return;
-        failList(describe(error));
-      });
+      }
+      paint();
+      // 결과를 모르는 시도는 받아들인 목록 뒤 그 기록의 한 건 읽기로 다시 확인한다(§8.1 규칙 3 b). 읽기일 뿐 다시 보내지 않는다.
+      if (lead) for (const attempt of attempts.values()) if (attempt.state === 'unknown') confirmByRead(attempt);
     }
 
     /**
-     * 목록 한 쪽의 답을 투영에 반영한다. 쪽의 행은 그 기록의 투영 후보이고, 쪽이 덮는데 없는 기록의 투영은 이 쪽의 번호로 없앤다
-     * (그 기록에 대해 더 뒤에 보낸 요청의 증거가 있으면 둘 다 하지 않는다). 첫 쪽은 목록 소속을 새로 세우고 More는 체인 뒤에
-     * 잇는다. 새 첫 쪽에 없는 옛 목록 행은 모양을 남기지 않는다(번호만 남아 더 먼저 보낸 읽기에 진다).
+     * 목록 읽기의 실패·제한 시간·틀린 DTO(보완 8). 지금 보기·필터·체인의 것이고 이미 받아들인 더 새로운 목록 증거에 대체되지 않았을
+     * 때만 투영 경계다. 더 새 답을 받아들인 뒤에 온 옛 실패는 새 화면·배지·cursor를 지우지 못한다.
      */
-    function acceptPage(mark, { filter: chosen, next, high }, read) {
-      const ids = new Set(read.items.map(item => item.id)), last = read.items[read.items.length - 1];
-      const page = { gen: mark, filter: chosen, ids, high, low: read.nextCursor && last ? keyOf(last) : null,
-        span: !(read.nextCursor && !last) };
-      for (const item of read.items) offer(item.id, mark, item);
-      for (const [id, slot] of [...projections]) {
-        if (!ids.has(id) && slot.item && covers(page, slot.item) && offer(id, mark, null)) opened.delete(id);
-      }
-      if (next) listIds = listIds.concat(read.items.map(item => item.id).filter(id => !listIds.includes(id)));
-      else {
-        for (const id of listIds) {
-          const slot = projections.get(id);
-          if (!ids.has(id) && !opened.has(id) && slot && slot.item) projections.set(id, { gen: slot.gen, item: null });
-        }
-        listIds = read.items.map(item => item.id);
-      }
-      nextCursor = read.nextCursor;
-      listEnd = page.low;
-      if ([...reads].some(sent => sent < page.gen)) pages.push(page);
+    function listFailed(ctx, detail) {
+      if (inView(ctx) && leads(ctx)) failList(detail);
+      else paint();
     }
 
     /**
      * 읽기 실패는 빈 목록이 아니다: 투영 경계로 모든 행을 내리고 실패와 서버의 문구·code를 보이며 배지에 수를 두지 않는다. 실패
      * 안내 아래에 받은 기록의 본문·Acknowledge·취소 사유가 남지 않는다. 남는 것은 이 페이지의 시도 줄과 ACK 결과의 최소 줄뿐이다.
+     * 경계가 먼저 섰으므로 그 전에 보낸 목록의 늦은 성공은 투영 번호가 달라 아무것도 되살리지 못한다.
      */
     function failList(detail) {
       boundary();
@@ -526,12 +589,10 @@
      */
     function readRecord(id, knownUid) {
       const ctx = begin();
-      reads.add(ctx.gen);
-      const later = () => pages.filter(page => page.gen > ctx.gen);
+      outstanding.add(ctx.gen);
+      // 견준 뒤에 이 요청의 번호를 빼고 그보다 앞선 목록 쪽 증거를 정리한다.
       const done = answer => {
-        reads.delete(ctx.gen);
-        const first = Math.min(...reads);
-        pages = reads.size ? pages.filter(page => page.gen > first) : [];
+        retire(ctx.gen);
         return answer;
       };
       return call('GET', `/critical-results/${encodeURIComponent(id)}`).then(({ data }) => {
@@ -542,12 +603,12 @@
         const fresh = ctx.view === view && ctx.gen > slotGen(id);
         // 요청한 기록(과 아는 검사)이 아닌 답은 그 기록에 대해 아무것도 말하지 않는다.
         if (!item || item.id !== id || (knownUid && item.studyUid !== knownUid)) return done({ error: TEXT.malformed, current: fresh });
-        const current = fresh && !later().some(page => page.ids.has(id) || covers(page, item)) && offer(id, ctx.gen, item);
+        const current = fresh && offer(id, ctx.gen, item);
         if (current) opened.add(id);
         return done({ item, current });
       }, error => {
         if (!alive(ctx)) return done(null);
-        const current = ctx.view === view && ctx.gen > slotGen(id) && !later().some(page => page.ids.has(id));
+        const current = ctx.view === view && ctx.gen > slotGen(id) && !pages.some(page => page.gen > ctx.gen && page.ids.has(id));
         // 403·404는 지금 이 기록을 읽을 수 없다는 서버의 답이다: 목록 행까지 그 기록의 투영을 없앤다. 그 밖의 실패(5xx·답 없음·
         // 제한 시간)는 이 기록에 대해 아무것도 말하지 않아 마지막 유효 투영을 그대로 둔다.
         if (current && (error.status === 403 || error.status === 404)) {
@@ -957,7 +1018,6 @@
     /** 이 세션의 것을 모두 버린다: 나간 요청, 투영·목록, 시도, 결과, 안내. 그 뒤 도착하는 이 세션의 답은 어디에도 쓰지 않는다. */
     function drop() {
       abortAll();
-      listSeq++;
       epoch++;
       attempts.clear();
       outcomes.clear();
