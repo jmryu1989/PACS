@@ -204,6 +204,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "studies/:uid/report/citations"): Route(Kind.REPORT, "citations"),
     ("GET", "studies/:uid/report/versions/:version/citations"): Route(Kind.REPORT, "version-citations"),
     ("GET", "studies/:uid/report/structure"): Route(Kind.REPORT, "structure"),
+    # S7-U4a — Clinical Context(판독의 패널). 읽기 전용, 오더 값 없음(D-S7-11 b). 규칙은 clinical-context-policy.ts.
+    ("GET", "studies/:uid/clinical-context"): Route(Kind.REPORT, "clinical-context"),
     ("POST", "studies/:uid/hold"): Route(Kind.REPORT, "hold"),
     ("POST", "studies/:uid/release"): Route(Kind.REPORT, "release"),
     ("POST", "studies/:uid/release/force"): Route(Kind.REPORT, "release-force"),
@@ -3632,6 +3634,10 @@ class LiveInvariantTests(unittest.TestCase):
             # 본문이 새지 않아야 하며, 타 기관 admin에게는 404여야 한다. 실제로 호출한다:
             # 건너뛰거나 목록에서 빼면 새 라우트만 이 세 관문 밖에 남는다.
             return self.stack.request("GET", f"/studies/{uid}/report/structure", user)
+        if operation == "clinical-context":
+            # S7-U4a 판독의 패널 읽기. 기사에게는 역할 403이고, 예비 판독의 제3자에게는 기준 검사의 판독문을 싣지 않으며
+            # (과거 판독문은 서명된 머리 판뿐), 타 기관 admin에게는 404여야 한다. 세 배터리가 이 route를 실제로 부른다.
+            return self.stack.request("GET", f"/studies/{uid}/clinical-context", user)
         if operation == "hold":
             return self.stack.request("POST", f"/studies/{uid}/hold", user)
         if operation == "release":

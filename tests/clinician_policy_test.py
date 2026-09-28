@@ -1920,6 +1920,11 @@ class ClinicianPolicySpec(unittest.TestCase):
             "report-preview.controller.ts": "if (clinicianOnly(caller.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });",
             "pacs.service.ts": "if (clinicianOnly(c.roles)) throw new ForbiddenException('전체 검사 통계를 열람할 수 없습니다');",
         }
+        # D73 (AGENTS.md section 1-B): the four statement pins above are S9-U0f carry-over and no precedent. A site added
+        # since is named here by file and call count only; what its call does is checked by running the compiled code in
+        # the named test cases (for S7-U4a, the real controller in CC-S02: clinician-only refused before any read, mixed
+        # users admitted). The TypeScript AST is installed only in the api image, not where this stdlib test runs.
+        behaviour_sites = FIXTURES["role_composition"]["behaviour_checked_sites"]
         counted = {}
         for path in sorted(API.rglob("*.ts")):
             if path == POLICY:
@@ -1930,9 +1935,16 @@ class ClinicianPolicySpec(unittest.TestCase):
                 counted[path.name] = calls
             self.assertIsNone(re.search(r"includes\(\s*(?:'clinician'|\"clinician\"|CLINICIAN_ROLE)\s*\)", source), path.name)
         self.assertEqual(counted, FIXTURES["role_composition"]["clinician_only_call_sites"])
-        self.assertEqual(set(sites), set(counted))
+        self.assertEqual(set(sites) & set(behaviour_sites), set(), "a site is pinned by statement or by behaviour, not both")
+        self.assertEqual(set(sites) | set(behaviour_sites), set(counted), "every counted site is one of the two kinds")
         for name, line in sites.items():
             self.assertIn(line, (API / name).read_text(encoding="utf-8"), name)
+        for name, entry in behaviour_sites.items():
+            with self.subTest(behaviour_site=name):
+                self.assertEqual(set(entry), {"unit", "test", "cases"})
+                cases = (ROOT / entry["test"]).read_text(encoding="utf-8")
+                for case in entry["cases"]:
+                    self.assertIn("test('" + case + " ", cases, "the named behaviour case exists")
         # the clinician reads admit a mixed user by role; they never require clinician-only
         self.assertIn("need(c.roles, CLINICIAN_ROLE, '임상의 조회');", (API / "pacs.service.ts").read_text(encoding="utf-8"))
         live = LIVE_MODULE.read_text(encoding="utf-8")
@@ -2172,7 +2184,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             with self.subTest(refused=label), self.assertRaisesRegex(AssertionError, message):
                 read(source)
         # the real controllers: a denied handler that gains a spaced @Public() changes the public set test_05 pins,
-        # spaced route and controller decorators read the same 124 rows, and the unsupported shapes stop the inventory
+        # spaced route and controller decorators read the same 125 rows, and the unsupported shapes stop the inventory
         sources = api_sources()
         pacs = API / "pacs.controller.ts"
         route, key = "  @Get('studies')\n", "GET studies"
@@ -2740,9 +2752,10 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed; S5-U4c: 5 image request rows allowed;
-        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101)
+        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
+        # S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (124, 4, 2, 17, 101), "the real inventory is unchanged: 124 = 4 + 2 + 17 + 101")
+                         (125, 4, 2, 17, 102), "the real inventory is unchanged: 125 = 4 + 2 + 17 + 102")
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
@@ -2991,9 +3004,10 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed; S5-U4c: 5 image request rows allowed;
-        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101)
+        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
+        # S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (124, 4, 2, 17, 101), "the real inventory is unchanged: 124 = 4 + 2 + 17 + 101")
+                         (125, 4, 2, 17, 102), "the real inventory is unchanged: 125 = 4 + 2 + 17 + 102")
         contract = CONTRACT["regex_or_division"]
         self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
                           sorted(UNREAD_PUNCT)),
@@ -3166,9 +3180,10 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed; S5-U4c: 5 image request rows allowed;
-        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101)
+        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
+        # S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (124, 4, 2, 17, 101), "the real inventory is unchanged: 124 = 4 + 2 + 17 + 101")
+                         (125, 4, 2, 17, 102), "the real inventory is unchanged: 125 = 4 + 2 + 17 + 102")
         contract = CONTRACT["class_heading"]
         # every class keyword of api/src has a heading class_heading reads, and no controller file's class extends
         keywords, extending = 0, set()

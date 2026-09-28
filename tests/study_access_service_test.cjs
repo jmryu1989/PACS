@@ -70,3 +70,50 @@ test('conditional clinical transaction uses prepared source tags without network
   const changedTx={$queryRaw:async(strings)=>strings.join('?').includes('pg_advisory')?[]:[{institution:caller.institution,revision:2,policy:changed}]};
   await assert.rejects(f.svc.require(request,[uid],changedTx),e=>e.getStatus()===404);
 });
+
+// S7-U4a fix1 (Astra S7-U4a-R-001 F02): snapshot() passes the original error on as the 503's cause. What every caller gets
+// stays as it was: status, body, and no code/meta on the exception itself (reader-assignment, study-tags, consultation and
+// others map busy codes from e.code, so a code here would change their answers). All but the last case also hold for the
+// service before the change; the last one is the cause Clinical Context reads.
+const unavailable={message:'검사 접근 조건을 확인하지 못했습니다. 잠시 후 다시 시도하세요',error:'Service Unavailable',statusCode:503};
+const dbError=(code,meta)=>Object.assign(Error('SYN-DB-DETAIL'),{code},meta?{meta:{code:meta,message:'SYN-DB-DETAIL'}}:{});
+const failures=()=>[['lock timeout',dbError('P2010','55P03')],['expired transaction',dbError('P2028')],['other DB error',dbError('P2010','42P01')],['no code',Error('SYN-DB-DETAIL')]];
+const same=(e,label)=>{assert.equal(e.getStatus(),503,label);assert.deepEqual(e.getResponse(),unavailable,label);assert.equal(e.code,undefined,label);assert.equal(e.meta,undefined,label);return true;};
+test('a failed policy read answers one 503 body with no code of its own, on the root client and in a transaction',async()=>{
+  for(const [label,error] of failures()){
+    const f=service([]);f.db.$queryRaw=async()=>{throw error;};
+    await assert.rejects(f.svc.snapshot(caller),e=>same(e,label));
+    await assert.rejects(f.svc.require(caller,[uid],{$queryRaw:async()=>{throw error;}}),e=>same(e,label+' in a transaction'));
+  }
+  await assert.rejects(service([{revision:1,policy:{}}]).svc.snapshot(caller),e=>same(e,'malformed policy row'));
+});
+test('the worklist, report preview and response interceptor keep their answers when the policy read fails',async()=>{
+  const {PacsService}=require('/app/dist/pacs.service');
+  const {ReportPreviewController}=require('/app/dist/report-preview.controller');
+  const context=(controller,handler)=>({switchToHttp:()=>({getRequest:()=>caller}),getClass:()=>({name:controller}),getHandler:()=>({name:handler})});
+  const state={uid,institutionId:caller.institution,teleInstitutionId:null,rs:'A',preDoc:null,preReviewer:null,ov:null};
+  for(const [label,error] of failures()){
+    const f=service([]);f.db.$queryRaw=async()=>{throw error;};
+    await assert.rejects(new PacsService(f.db,f.orth,{},f.svc,{}).listStudies({...caller}),e=>same(e,'worklist '+label));
+    const interceptor=new StudyAccessInterceptor(f.svc);
+    await assert.rejects(interceptor.intercept(context('ViewerController','list'),{handle:()=>of(null)}),e=>same(e,'interceptor '+label));
+    await assert.rejects(interceptor.intercept(context('PacsController','authzDicom'),{handle:()=>of(null)}),
+      e=>e.getStatus()===403&&JSON.stringify(e.getResponse())===JSON.stringify({message:'열람 권한이 없습니다',error:'Forbidden',statusCode:403}));
+    // report preview: the policy read fails first on the root client, then (root fine) inside its own transaction
+    const db=(read)=>({$queryRaw:read,studyState:{findUnique:async()=>({...state})}});
+    const orth={...f.orth,reportPreviewStudy:async()=>({})};
+    const preview=prisma=>new ReportPreviewController(prisma,orth,new StudyAccessService(prisma,orth,{}),{});
+    await assert.rejects(preview(db(f.db.$queryRaw)).read(uid,{...caller}),e=>same(e,'report preview '+label));
+    const root=db(async()=>[]),tx=db(async()=>{throw error;});
+    root.$transaction=async fn=>fn(tx);
+    await assert.rejects(preview(root).read(uid,{...caller}),e=>same(e,'report preview transaction '+label));
+  }
+});
+test('the original error is kept only as the cause, never in the body',async()=>{
+  for(const [label,error] of failures()){
+    const f=service([]);f.db.$queryRaw=async()=>{throw error;};
+    let seen=null;try{await f.svc.snapshot(caller);}catch(e){seen=e;}
+    assert.equal(seen?.cause,error,label);
+    assert.ok(!JSON.stringify(seen.getResponse()).includes('SYN-DB-DETAIL'),label);
+  }
+});
