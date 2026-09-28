@@ -18,12 +18,17 @@
  * and "atomic with the channel change" are read from the log and the store. The store also refuses what
  * 20260928130000_reader_assignment_scope's CHECK refuses. Study access is a recording stand-in that always allows;
  * its own rules are tests/study_access_service_test.cjs's. Container only (kin-api image: /app/dist).
+ *
+ * The audit rows the assignment writes and the closes leave are judged by the compiled admin audit rule
+ * (api/src/admin-audit.ts, the contract table of tests/admin_audit_attribution_test.cjs): an action with a contract row,
+ * attributed to the institution it records (Astra S7-U3a-B-R-001-F01).
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const { ReaderAssignmentService } = require('/app/dist/reader-assignment.service');
 const { PacsService } = require('/app/dist/pacs.service');
+const AUDIT = require('/app/dist/admin-audit');
 
 const A = 'synthetic-a', B = 'synthetic-b', Z = 'synthetic-z';
 const INSTITUTIONS = [A, B, Z];
@@ -532,6 +537,52 @@ test('a write whose check passed before the close cannot land after it', async (
   const row = w.row(UID, B);
   assert.deepEqual([row.revision, row.closedRevision, row.closedAt instanceof Date, row.readerSub, row.readerActor], [1, 1, true, null, null]);
   assert.deepEqual(w.audits().filter(a => a.action === ACTION).map(a => a.detail), [{ institution: B, revision: 1, from: null, to: null, closed: 'tele-closed' }]);
+});
+
+test('every assignment write and every close leave one audit row: a registered action, recorded for the institution whose row it is (B-F01)', async () => {
+  // Astra S7-U3a-B-R-001-F01: the audit contract of the two writers, on the rows the compiled services write. Each row's
+  // action has a contract row in the admin audit table, whose rule reads the institution the row records; the row is
+  // attributed to the institution whose assignment it is (the caller's for a write, the one that lost its channel for a
+  // close) and to no other, names the study, and records the revision that institution's row reached. A refused or
+  // replayed write leaves none. What the services call the value or how they make the call is not the claim.
+  const w = world();
+  w.study(UID);
+  const seen = [];
+  const step = async (label, act, expected, others = []) => {
+    const from = w.t.AuditLog.length;
+    await act();
+    const added = structuredClone(w.t.AuditLog.slice(from));
+    seen.push(...added);
+    for (const r of added) {
+      assert.notEqual(AUDIT.auditRule(r.action), 'hidden:unknown_action', label + ': ' + r.action + ' has no contract row');
+      assert.equal(r.target, UID, label);
+    }
+    assert.deepEqual(added.filter(r => r.action !== ACTION).map(r => r.action), others, label + ': the other rows');
+    const mine = added.filter(r => r.action === ACTION);
+    assert.deepEqual(mine.map(r => { const d = JSON.parse(r.detail); return [r.actor, d.institution, d.closed ?? null]; }), expected, label);
+    for (const r of mine) {
+      const institution = JSON.parse(r.detail).institution, attributed = AUDIT.attributeAuditRow(r);
+      assert.equal(AUDIT.auditRule(r.action), 'field:detail.institution', label);
+      assert.deepEqual([attributed.rule, [...attributed.visible_to]], ['field:detail.institution', [institution]], label);
+      for (const other of INSTITUTIONS.filter(i => i !== institution)) assert.equal(AUDIT.projectAuditRow(r, other), null, label + ' ' + other);
+      assert.equal(JSON.parse(r.detail).revision, w.row(UID, institution).revision, label + ': the revision the row reached');
+    }
+  };
+  await step('the owner assigns', () => w.assign('aTech', 'aDoc'), [[actorOf('aTech'), A, null]]);
+  await step('the owner opens the channel to B', () => w.tele({ ts: 'wait', teleTo: B }), [], ['state.patch']);
+  await step('the receiver assigns', () => w.assign('bTech', 'bDoc'), [[actorOf('bTech'), B, null]]);
+  await step('the receiver\'s radiologist clears its own', () => w.assign('bDoc', null), [[actorOf('bDoc'), B, null]]);
+  await step('an assignment across the boundary is refused', () => assert.rejects(w.assign('bTech', 'aDoc'), status(400)), []);
+  const body = w.body('bTech', await w.read('bTech'), 'bDoc2');
+  await step('the receiver assigns again', () => w.write('bTech', body), [[actorOf('bTech'), B, null]]);
+  await step('the same request replayed', () => w.write('bTech', body), []);
+  await step('the owner cancels the channel', () => w.tele({ ts: 'cancelled' }), [[actorOf('aDoc'), B, 'tele-closed']], ['state.patch']);
+  await step('the owner opens it again', () => w.tele({ ts: 'wait', teleTo: B }), [], ['state.patch']);
+  await step('the receiver assigns in the new channel', () => w.assign('bTech', 'bDoc'), [[actorOf('bTech'), B, null]]);
+  await step('the owner sends the study to Z instead', () => w.tele({ ts: 'sending', teleTo: Z }), [[actorOf('aDoc'), B, 'tele-closed']], ['state.patch']);
+  await step('Z assigns', () => w.assign('zTech', 'zDoc'), [[actorOf('zTech'), Z, null]]);
+  await step('the owner deletes the study', () => w.pacs.removeState(UID, caller('aTech')), [[actorOf('aTech'), Z, 'study-deleted']], ['state.delete']);
+  assert.deepEqual(structuredClone(w.t.AuditLog), seen, 'no audit row outside the steps');
 });
 
 test('the existing rules hold unchanged at the receiver: replay, CAS, radiologist self only, W/H and the hold', async () => {

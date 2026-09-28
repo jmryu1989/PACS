@@ -847,15 +847,19 @@ function assertComplete(scan) {
 test('completeness: every audit action written under api/src has a contract row, and every row is written', () => {
   const scan = scanAuditWrites();
   const { literals, prefixes, unlisted } = assertComplete(scan);
-  // The actions named by a constant: the S5-U4a question write, the S7-U1a critical result write (the service constant
-  // the contract names, S7-U1p section 11), the S5-U4c image request write and the S7-U3a reader assignment's two writes
-  // (the channel close and the assignment), each read from its own file's declaration.
-  assert.deepEqual(scan.sites.filter(site => site.constant).map(site => [site.file, site.form, site.kind, site.actions]),
+  // The owner-only study-scoped actions are named by the constants their services export (and their own service tests
+  // import): the S5-U4a question write, the S7-U1a critical result write (the service constant the contract names,
+  // S7-U1p section 11) and the S5-U4c image request write, each read from its own file's declaration.
+  assert.deepEqual(scan.sites.filter(site => site.constant && site.actions.some(action => A.AUDIT_HIDDEN_STUDY_SCOPED.includes(action)))
+    .map(site => [site.file, site.form, site.kind, site.actions]),
     [['api/src/clinician-question.service.ts', 'auditLog.create const QUESTION_AUDIT_ACTION', 'literal', ['study.question']],
       ['api/src/critical-result.service.ts', 'auditLog.create const CRITICAL_RESULT_AUDIT_ACTION', 'literal', ['study.critical-result']],
-      ['api/src/image-request.service.ts', 'auditLog.create const IMAGE_REQUEST_AUDIT_ACTION', 'literal', ['study.image-request']],
-      ['api/src/reader-assignment.service.ts', 'auditLog.create const ACTION', 'literal', ['reader.assignment']],
-      ['api/src/reader-assignment.service.ts', 'auditLog.create const ACTION', 'literal', ['reader.assignment']]]);
+      ['api/src/image-request.service.ts', 'auditLog.create const IMAGE_REQUEST_AUDIT_ACTION', 'literal', ['study.image-request']]]);
+  // The S7-U3a reader assignment writes (an assignment, and the close when a tele channel is taken away) are held to their
+  // audit contract where they run, on the compiled services (tests/reader_assignment_scope_test.cjs, Astra
+  // S7-U3a-B-R-001-F01): one row per write and per close, an action with a contract row, attributed to the institution
+  // whose assignment it records, naming the study. The name of the value they write or the form of the call is not a
+  // claim of this file; the checks above still fail a write of an action without a row and a row that nothing writes.
   const byRule = {};
   for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
   console.log('ADMIN_AUDIT_COMPLETENESS ' + JSON.stringify({
