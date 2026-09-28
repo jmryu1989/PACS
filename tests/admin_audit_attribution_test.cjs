@@ -2324,8 +2324,8 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
   alone(scanAuditWrites(edited(sources, removed)), 'unwritten_rows', [row]);
   // (e) A WITH fragment passed once more from a value the program does not fix (Astra S7-U3a-AUDIT-SPEC-B-R-001-F01): for
   // every raw write whose WITH fragment is a parameter of a method or function, a private method added next to it passes
-  // that parameter a request value. That write alone becomes unresolved, naming the added path; its actions become
-  // unwritten only where no other write records them.
+  // that parameter a request value. That write alone becomes unresolved, naming the added path; every other class is the
+  // verdict of the remaining writes (its actions leave the written, unlisted and prefix sets).
   const { bare, symbolAt } = base.tools, lineless = entry => entry.replace(/^([\w./-]+\.[cm]?[jt]sx?):\d+ /, '$1 ');
   const passedIn = base.sites.flatMap(site => site.fragments.map(fragment => ({ site, declaration: symbolAt(bare(fragment))?.declarations?.[0] })))
     .filter(({ declaration }) => declaration && ts.isParameter(declaration) && (ts.isMethodDeclaration(declaration.parent)
@@ -2338,14 +2338,16 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
       : `\nfunction synUnfixedPath(body: any) { return ${name}(${args}); }\n`;
     const at = method ? owner.parent.end - 1 : owner.end, path = new Map();
     edit(path, site.file, at, at, added);
-    const found = verdict(scanAuditWrites(edited(sources, path)), productTable(), listing);
+    const scan = scanAuditWrites(edited(sources, path)), found = verdict(scan, productTable(), listing);
+    // Every candidate where it was (offsets carried), this write now unresolved; nothing added.
+    const was = `${site.file}@${site.start} ${site.via} resolved [${site.actions}] [${site.prefixes}]`;
+    assert.deepEqual(inventory(scan), inventory(base, path).map(entry => (entry === was ? `${site.file}@${site.start} ${site.via} unresolved` : entry)).sort());
     const grown = found.unresolved.filter(entry => !before.unresolved.map(lineless).includes(lineless(entry)));
     assert.equal(grown.length, 1, JSON.stringify(grown));
     assert.ok(grown[0].startsWith(`${site.file}:${site.line} `) && grown[0].includes('`body.where` is not a Prisma.sql text'), grown[0]);
-    assert.deepEqual(found.unresolved.filter(entry => entry !== grown[0]).map(lineless), before.unresolved.map(lineless));
-    const lost = site.actions.filter(action => base.sites.every(other => other === site || !other.actions.includes(action)));
-    assert.deepEqual(found.unwritten_rows, productTable().rows.filter(entry => before.unwritten_rows.includes(entry) || lost.includes(entry)));
-    for (const other of ['unread_sources', 'unlisted', 'uncovered_prefixes', 'unwritten_wildcards']) assert.deepEqual(found[other], before[other], other);
+    const rest = verdict({ ...base, sites: base.sites.filter(other => other !== site), unresolved: [...base.unresolved, grown[0]] }, productTable(), listing);
+    const sorted = classes => ({ ...classes, unresolved: classes.unresolved.map(lineless).sort() });
+    assert.deepEqual(sorted(found), sorted(rest));
   }
   console.log('ADMIN_AUDIT_NEGATIVE_CONTROLS ' + JSON.stringify({ revalued_literals: origins.length, unlisted_after_revalue: changed.unlisted.length,
     unwritten_row: row, writes_taken_out: [...removed.values()].flat().length,
