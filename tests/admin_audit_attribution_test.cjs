@@ -14,10 +14,12 @@
  *    rows above the reader's own (GCM does not hide the payload length);
  *  - Astra S5-U5b-B-F02: the SQL prefilter (strpos, a literal substring) loses no visible row and adds none for
  *    institution names carrying \, ", % and _; the removed LIKE form, modelled, loses exactly the \ and " names' rows;
- *  - completeness: every audit action written under api/src has a contract row (an unlisted action fails), and every
- *    contract row is written somewhere. Which calls write and which values their action takes is read by the TypeScript
- *    compiler api/package-lock.json installs, over the program of api/src (see the completeness section). Controls: the
- *    same writes in other notations read the same actions; unlisted, unreadable and unwritten actions each fail.
+ *  - completeness (Astra S7-U3a-AUDIT-SPEC-R-001 F01-F04): every file of api/src is read; every audit candidate there is
+ *    resolved, proven not a write, or unresolved — and one unresolved fails; every action a write can record has a
+ *    contract row and every row is written somewhere. The TypeScript compiler api/package-lock.json installs reads the
+ *    program of api/src (see the completeness section). The checker's own tests run on test-owned fixtures
+ *    (tests/fixtures/admin_audit_completeness): the supported notations, and each failure class failing the gate alone;
+ *    api/src rewritten in other notations keeps every write site; unlisted, dynamic and unwritten actions each fail alone.
  *
  * Module: KIN_ADMIN_AUDIT_MODULE, default api/src/admin-audit.ts loaded through Node type stripping (Node >= 22.18);
  * the compiled /app/dist/admin-audit (kin-api:ci) is the same rule. The completeness cases read api/src and use
@@ -26,7 +28,7 @@
  */
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { readFileSync } = require('node:fs');
+const { readFileSync, readdirSync } = require('node:fs');
 const path = require('node:path');
 const { createCipheriv, randomBytes } = require('node:crypto');
 
@@ -642,38 +644,64 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 
 // ── completeness over api/src ──
 //
-// Both directions of the action table over the audit writes under api/src: every action a write can record has a
-// contract row (an unlisted action fails), and every contract row is written somewhere (a stale row would hide a renamed
-// writer). Which calls write the audit log and which values their action takes is answered by the TypeScript compiler
-// api/package-lock.json installs, with api/tsconfig.json's options: its parser and type checker over the program of
-// api/src, not a reader of this repository's text (AGENTS 1-B.15, Astra S7-U3a-C-R-001-F01). Without it the completeness
-// cases fail; they never skip.
+// What this proves and how is fixed by Astra S7-U3a-AUDIT-SPEC-R-001 (F01-F04). Statically, over the audit writes of
+// api/src, both directions of the action table as correspondence in the source: every action a write can record has a
+// contract row, and every exact contract row (every hidden wildcard: a value or prefix under it) has a write in the source
+// that records it. The source is not an execution: how many rows a write leaves, whose they are and what a failure undoes
+// are held on the compiled services (tests/reader_assignment_scope_test.cjs, Astra S7-U3a-B-R-001-F01).
 //
-//  - A write is a call of the `create` member of an `auditLog` member (property or element access, whatever the layout,
-//    comments, parentheses or type assertions), or a raw SQL text that inserts into "AuditLog". Any other use of an
-//    auditLog member (createMany, upsert, the delegate kept in a variable ...) is a write this check does not read.
-//  - The action of a create is the `action` property of the object literal its `data` holds (not set again by a later
-//    spread). Its values: string literals and templates; `+` of values; both sides of `?:`, `||`, `??`; a name the checker
-//    binds, through imports and aliases, to a const initializer, a property of an `as const` object literal, an enum
-//    member or a readonly field; a let, var or parameter with every value assigned to it; a parameter of a private or
-//    local function (not decorated) with the argument of every call the program makes of that function, followed through
-//    variables, arguments and callbacks; a value that a preceding `if (... || !['a', ...].includes(x) || ...)
-//    throw/return` of an enclosing block limits. A literal start followed by a value the program does not fix is a
-//    dynamic suffix, which a hidden wildcard row must cover.
-//  - Fail closed: an action from anything else (a call, a property of a request, a parameter of a public or decorated
-//    method, a function handed where its calls are not followed ...) is unreadable, and an unreadable write fails.
-//  - Raw SQL is not TypeScript and no SQL parser is installed, so the statement is not parsed: its action is the one
-//    action-like quoted value or evaluable ${} value after INSERT INTO "AuditLog", and none or several is unreadable. What
-//    the Connect statement writes is held live as well (tests/connect_gate_test.py, its transfer.revoke rows).
-// How many rows a write leaves and whose they are is not this file's claim: the S7-U3a reader assignment writes are held
-// to that on the compiled services (tests/reader_assignment_scope_test.cjs, Astra S7-U3a-B-R-001-F01).
+// The input is the direct audit writes of api/src — the Prisma `auditLog` delegate and raw SQL — and the helpers their
+// values pass through; not arbitrary JavaScript equivalence, not database triggers or functions. The files of api/src are
+// listed from the disk and compared with the program the compiler reads (api/package-lock.json's typescript with
+// api/tsconfig.json's options; without it these cases fail and never skip, AGENTS 1-B.15). Every candidate ends
+// `resolved`, `proven_non_audit` (with its reason) or `unresolved`, and one unresolved candidate fails. The contract table
+// is used in the verdict only, never to find a candidate or to read a value. Nothing depends on the generated Prisma
+// client's types (CI installs with --ignore-scripts and generates none).
+//
+//  F01 candidates: every member access, destructured property or computed key whose name the program fixes as `auditLog`
+//    (a dot, a literal or a constant key): the delegate must be the receiver of a called method — a read method is not a
+//    write, `create` is read below, any other method (createMany, upsert, update, delete ...) is unresolved, and so is the
+//    delegate kept, passed, returned or destructured; a member read by a key the program does not fix from a value a
+//    Prisma client may reach (the client flow; from any other value it is proven_non_audit); every raw call ($executeRaw,
+//    $queryRaw, their Unsafe forms) and every text of the program that names AuditLog other than as one bare name (a
+//    member key such as 'auditLog' is the delegate's; SQL reaches the table only through its quoted identifier).
+//    The client flow: a class extending @prisma/client's PrismaClient, a binding annotated with such a class or with
+//    Prisma's TransactionClient, and the first parameter of a callback handed to `$transaction` hold a client, and so does
+//    every binding, parameter (by every call the program makes) and function result a client value reaches (a fixed
+//    point). A client value anywhere else — spread, kept in an object or an untyped member, handed to a library or to a
+//    callee the program does not fix, returned from a function that is handed on — is unresolved.
+//  F02 values, a finite list; anything else is unresolved, and so is any mix of a value with an unresolved one:
+//    (a) blanks, comments, line breaks and trailing commas; parentheses, as, satisfies, ! and <T> around a value;
+//    (b) a member by a dot or by a key that is one string (element access, computed property name): one key reader for the
+//        delegate, its method, `data` and `action`; the last definition of a property wins, and a later spread or computed
+//        key that may set it again leaves it unresolved;
+//    (c) string literals and templates, `+` and templates of fixed pieces;
+//    (d) const bindings, through renames, imports, re-exports and namespaces;
+//    (e) a property of a const `as const` literal that no use changes, hands on or reads by an unfixed key, an explicit
+//        string enum member and an initialized readonly field, neither written through any receiver (a type is no proof);
+//    (f) both sides of ?:, ||, ?? and &&;
+//    (g) a let, var or parameter with every value assigned to it;
+//    (h) a parameter of a private or local undecorated function: the argument of every call the program makes of it,
+//        followed through variables, arguments and callbacks — no call at all, or the function handed on, is unresolved;
+//    (i) what a preceding `if (... || !['a', ...].includes(x) || ...) throw/return` of an enclosing statement list lets
+//        through to a binding nothing changes.
+//    A fixed start followed by a value the program does not fix is a dynamic suffix; a hidden wildcard row must cover it.
+//  F03 raw SQL, one form only: `INSERT INTO [schema.]"AuditLog" (columns) VALUES (values) [;]`, read by position under
+//    PostgreSQL's lexical rules (strings, quoted identifiers and their case, comments, parentheses, interpolations). The
+//    value at the one `action` column is an SQL string or one interpolation read by F02; other columns and comments do not
+//    count. Every interpolation must be a value (a string the program fixes, or of a primitive or Date type), never an SQL
+//    fragment. A missing, doubled or miscounted column list, an unclosed token, an interpolation where SQL structure goes,
+//    and every other statement that names AuditLog (INSERT … SELECT, WITH, several statements, ON CONFLICT, RETURNING,
+//    UPDATE, DELETE ...) is unresolved — but one SELECT that changes no row only reads. The SQL must be the fixed text of
+//    its raw call: a text naming AuditLog anywhere else, and SQL the program does not fix (an Unsafe call with a computed
+//    text, Prisma.raw of a computed text, a computed join separator), is unresolved.
 
 const API = path.join(ROOT, 'api');
 const slash = file => path.resolve(file).split(path.sep).join('/');
 const repoPath = file => path.relative(ROOT, path.resolve(file)).split(path.sep).join('/');
 let compiler = null;
 
-/** api/package-lock.json's typescript, api/tsconfig.json's options and the api/src files they name, as checked out. */
+/** api/package-lock.json's typescript, api/tsconfig.json's options and the api/src files they name. */
 function typescript() {
   if (compiler) return compiler;
   let where;
@@ -690,16 +718,37 @@ function typescript() {
   delete options.outDir;
   delete options.tsBuildInfoFile;
   const src = slash(path.join(API, 'src')) + '/';
-  const files = parsed.fileNames.map(slash).filter(file => file.startsWith(src)).sort();
-  assert.ok(files.length > 0, 'api/tsconfig.json includes the files of api/src');
-  compiler = { ts, options, src, base: ts.createCompilerHost(options, true), lookups: new Map(), external: new Map(), internal: new Map(),
-    previous: undefined, sources: files.map(file => ({ file: repoPath(file), text: readFileSync(file, 'utf8').replace(/\r\n/g, '\n') })) };
+  const named = parsed.fileNames.map(slash).filter(file => file.startsWith(src)).map(repoPath).sort();
+  assert.ok(named.length > 0, 'api/tsconfig.json includes the files of api/src');
+  compiler = { ts, options, src, named, base: ts.createCompilerHost(options, true), lookups: new Map(), external: new Map(),
+    internal: new Map(), previous: undefined, product: null };
   return compiler;
 }
-/** The api/src files as checked out; the controls pass changed copies. */
-const auditSources = () => typescript().sources;
 
-/** The program of `sources` (the whole of api/src; lib and node_modules from disk), reusing what earlier calls parsed. */
+/** Every entry under `dir` as found on the disk (anything that is neither a file nor a directory is named as such). */
+function onDisk(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+    const at = path.join(dir, entry.name);
+    return entry.isDirectory() ? onDisk(at) : [entry.isFile() ? repoPath(at) : `${repoPath(at)} (not a file)`];
+  });
+}
+const SCRIPT = /\.[cm]?[jt]sx?$/;   // what a compiler could be handed: TypeScript and JavaScript sources, declarations too
+/** The script files on the disk against the files the program reads: one it does not read is `unread`. */
+function sourceListing(disk, named) {
+  const scripts = disk.filter(file => SCRIPT.test(file) || file.endsWith(' (not a file)')).sort();
+  return { disk: scripts.length, program: named.length, unread: scripts.filter(file => !named.includes(file)),
+    extra: named.filter(file => !scripts.includes(file)) };
+}
+/** api/src as checked out: the listing (disk against program) and the sources the program reads. */
+function productSources() {
+  const c = typescript();
+  c.product ??= { listing: sourceListing(onDisk(path.join(API, 'src')), c.named),
+    sources: c.named.map(file => ({ file, text: readFileSync(path.join(ROOT, file), 'utf8').replace(/\r\n/g, '\n') })) };
+  return c.product;
+}
+const auditSources = () => productSources().sources;
+
+/** The program of `sources` (files under api/src; lib and node_modules from disk), reusing what earlier calls parsed. */
 function auditProgram(sources) {
   const c = typescript(), { ts, src, base } = c;
   const texts = new Map(sources.map(source => [slash(path.join(ROOT, source.file)), source.text]));
@@ -739,41 +788,34 @@ function auditProgram(sources) {
 }
 
 /**
- * The audit writes of `sources` (default: api/src as checked out): `sites` with the actions and dynamic prefixes each can
- * record, and `unrecognized`, every write this check cannot read and why. A site also carries (not enumerable) its call,
- * its action property and the string literals its actions come from, for the controls that rewrite them.
+ * The audit candidates of `sources` (default: api/src as checked out). `sites` are the resolved writes with the actions
+ * and dynamic prefixes each can record and the basis of each; `candidates` is every candidate with its status and reason;
+ * `unresolved` the unresolved ones. A site and a candidate also carry (not enumerable) their offset, and a create site its
+ * call, its action property and the literals its actions come from, for the controls that rewrite them.
  */
 function scanAuditWrites(sources = auditSources()) {
   const { ts } = typescript();
-  const K = ts.SyntaxKind;
+  const K = ts.SyntaxKind, TF = ts.TypeFlags;
   const program = auditProgram(sources), checker = program.getTypeChecker();
-  const files = sources.map(source => program.getSourceFile(slash(path.join(ROOT, source.file))));
-  const sites = [], unrecognized = [];
+  const files = [], sites = [], candidates = [];
 
   const WRAPPERS = new Set([K.ParenthesizedExpression, K.AsExpression, K.SatisfiesExpression, K.NonNullExpression, K.TypeAssertionExpression]);
   const CHOICES = new Set([K.BarBarToken, K.QuestionQuestionToken, K.AmpersandAmpersandToken]);
   const EQUALITIES = new Set([K.EqualsEqualsEqualsToken, K.ExclamationEqualsEqualsToken, K.EqualsEqualsToken, K.ExclamationEqualsToken,
-    K.InstanceOfKeyword]);
+    K.InstanceOfKeyword, K.InKeyword]);
   const bare = node => { while (node && WRAPPERS.has(node.kind)) node = node.expression; return node; };
   const outer = node => { while (node.parent && WRAPPERS.has(node.parent.kind)) node = node.parent; return node; };
-  const where = node => {
+  const position = node => {
     const file = node.getSourceFile();
-    return `${repoPath(file.fileName)}:${file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1}`;
+    return { file: repoPath(file.fileName), line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1 };
   };
+  const where = node => { const at = position(node); return `${at.file}:${at.line}`; };
   const snippet = node => node.getText().replace(/\s+/g, ' ').slice(0, 60);
   const resolve = symbol => (symbol && symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
   /** The symbol a name stands for as a value (a shorthand property's name stands for the variable it reads). */
   const symbolAt = node => resolve(ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node
     ? checker.getShorthandAssignmentValueSymbol(node.parent) : checker.getSymbolAtLocation(node));
-  const keyText = name => {
-    if (!name) return null;
-    if (ts.isComputedPropertyName(name)) name = bare(name.expression);
-    return ts.isIdentifier(name) || ts.isPrivateIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)
-      || ts.isNumericLiteral(name) ? name.text : null;
-  };
-  /** The member name of `a.b` or `a['b']` (a literal key), else null. */
-  const keyOf = node => (ts.isPropertyAccessExpression(node) ? keyText(node.name)
-    : ts.isElementAccessExpression(node) ? keyText(bare(node.argumentExpression)) : null);
+  const isAccess = node => !!node && (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node));
   /** The access a member name belongs to (`this.x` for its `x`, `this['x']` for its literal 'x'), else null. */
   const accessOf = node => {
     const parent = node.parent;
@@ -782,8 +824,15 @@ function scanAuditWrites(sources = auditSources()) {
     const held = outer(node);
     return held.parent && ts.isElementAccessExpression(held.parent) && held.parent.argumentExpression === held ? held.parent : null;
   };
+  /** A candidate: where, what, its status and why. */
+  function note(node, kind, status, reason) {
+    const entry = { ...position(node), kind, status, reason };
+    Object.defineProperty(entry, 'start', { value: node.getStart() });
+    candidates.push(entry);
+    return entry;
+  }
 
-  // ── values ──
+  // ── values: the finite list (a)-(i) ──
   const text = (value, from = []) => ({ key: 't' + value, text: value, from });
   const prefix = (value, why) => ({ key: 'p' + value, prefix: value, why });
   const unknown = why => ({ key: 'u' + why, unknown: why });
@@ -796,6 +845,8 @@ function scanAuditWrites(sources = auditSources()) {
     }
     return [...out.values()];
   }
+  /** Every value a text, or null: the one form a key and an SQL action slot take. */
+  const texts = found => (found.length > 0 && found.every(value => value.text !== undefined) ? [...new Set(found.map(value => value.text))] : null);
   /** `left + right`: a text start with a value the program does not fix after it is a dynamic suffix. */
   const concat = (left, right) => union(left.flatMap(l => right.map(r => {
     if (l.text === undefined) return l.prefix !== undefined ? l : unknown(l.unknown ?? `${where(l.fn)}: a function used as text`);
@@ -830,19 +881,41 @@ function scanAuditWrites(sources = auditSources()) {
       if (operator === K.CommaToken) return values(node.right);
     }
     if (ts.isConditionalExpression(node)) return union(values(node.whenTrue), values(node.whenFalse));
-    if (ts.isIdentifier(node)) return named(symbolAt(node), node);
-    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
-      const key = ts.isPropertyAccessExpression(node) ? node.name : bare(node.argumentExpression);
-      const symbol = keyOf(node) === null ? null : symbolAt(key);
-      return symbol ? named(symbol, key) : [unknown(`${where(node)}: \`${snippet(node)}\` is a property the program does not fix`)];
+    // Nothing, which no call can run: unresolved as a text, left out of a callee's functions.
+    if (node.kind === K.NullKeyword || (ts.isIdentifier(node) && node.text === 'undefined' && !symbolAt(node)?.declarations?.length)) {
+      return [{ ...unknown(`${where(node)}: \`${node.getText()}\` is no value`), none: true }];
     }
+    if (ts.isIdentifier(node)) return named(symbolAt(node), node);
+    if (isAccess(node)) return member(node);
     if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return [fn(node)];
     return [unknown(`${where(node)}: \`${snippet(node)}\` is a ${K[node.kind]}`)];
   }
 
+  /** (b) The names an access, an object literal member or a binding element's property takes; null when not fixed. */
+  function keyValues(node) {
+    if (ts.isPropertyAccessExpression(node)) return [node.name.text];
+    const expression = ts.isElementAccessExpression(node) ? bare(node.argumentExpression)
+      : ts.isComputedPropertyName(node) ? bare(node.expression) : null;
+    const name = expression ?? node;
+    if (ts.isNumericLiteral(name)) return [String(Number(name.text))];
+    if (expression) return texts(values(expression));
+    return ts.isIdentifier(name) || ts.isPrivateIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)
+      ? [name.text] : null;
+  }
+  /** (b, d, e) `a.b` or `a[k]`: for each key the program fixes, the member the checker binds on the type of `a`. */
+  function member(node) {
+    const keys = keyValues(node);
+    if (!keys) return [unknown(`${where(node)}: \`${snippet(node)}\` has a key the program does not fix`)];
+    const type = checker.getTypeAtLocation(node.expression);
+    return union(...keys.map(key => {
+      const property = checker.getPropertyOfType(type, key);
+      return property ? named(resolve(property), node) : [unknown(`${where(node)}: \`${snippet(node)}\` is a property the program does not fix`)];
+    }));
+  }
+
   /** The values of what `symbol` is bound to, read at `use`. */
   function named(symbol, use) {
-    const name = use.text;
+    const name = ts.isIdentifier(use) ? use.text : snippet(use);
     const declarations = symbol?.declarations ?? [];
     if (declarations.length !== 1) {
       return [unknown(`${where(use)}: \`${name}\` ${declarations.length ? 'has several declarations' : 'does not resolve'}`)];
@@ -853,10 +926,19 @@ function scanAuditWrites(sources = auditSources()) {
       return declaration.body ? [fn(declaration)] : [unknown(`${where(use)}: \`${name}\` has no body in this program`)];
     }
     if (ts.isEnumMember(declaration)) {
-      return declaration.initializer ? values(declaration.initializer) : [unknown(`${where(use)}: \`${name}\` is a numbered enum member`)];
+      if (!declaration.initializer) return [unknown(`${where(use)}: \`${name}\` is a numbered enum member`)];
+      const changed = memberChanged(symbol);
+      return changed ? [unknown(`${where(use)}: \`${name}\` is written at ${changed}`)] : values(declaration.initializer);
     }
     if (ts.isPropertyAssignment(declaration) || ts.isShorthandPropertyAssignment(declaration)) {
-      if (!frozen(declaration.parent)) return [unknown(`${where(use)}: \`${name}\` is a property of an object that is not \`as const\``)];
+      const table = frozen(declaration.parent);
+      if (!table) return [unknown(`${where(use)}: \`${name}\` is a property of an object that is not \`as const\``)];
+      const keys = keyValues(declaration.name);
+      if (keys?.length !== 1 || property(declaration.parent, keys[0]).member !== declaration) {
+        return [unknown(`${where(use)}: \`${name}\` is set again later in its object`)];
+      }
+      const escape = tableEscapes(table);
+      if (escape) return [unknown(`${where(use)}: \`${name}\` is a property of \`${table.name.text}\`, which ${escape}`)];
       return ts.isPropertyAssignment(declaration) ? values(declaration.initializer) : named(symbolAt(declaration.name), declaration.name);
     }
     let found;
@@ -867,6 +949,8 @@ function scanAuditWrites(sources = auditSources()) {
       found = passed(declaration);
     } else if (ts.isPropertyDeclaration(declaration) && declaration.initializer
       && ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Readonly) {
+      const changed = memberChanged(symbol);
+      if (changed) return [unknown(`${where(use)}: \`${name}\` is written at ${changed}`)];
       found = values(declaration.initializer);
     } else {
       return [unknown(`${where(use)}: \`${name}\` is a ${K[declaration.kind]}`)];
@@ -875,12 +959,12 @@ function scanAuditWrites(sources = auditSources()) {
     const changes = constant ? [] : assignments(symbol);
     if (changes.length) return union(found, changes);
     // A binding nothing changes keeps its value, and a preceding exit for every other value limits it here.
-    const members = found.some(value => value.text === undefined) ? limited(use, symbol) : null;
-    return members ? members.filter(member => found.some(value => value.text === undefined || value.text === member)).map(member => text(member))
-      : found;
+    const limit = found.some(value => value.text === undefined) ? limited(use, symbol) : null;
+    return limit ? limit.members.filter(member => found.some(value => value.text === undefined || value.text === member))
+      .map(member => ({ ...text(member), guard: where(limit.at) })) : found;
   }
 
-  /** An object literal a const holds under `as const` (the outermost literal asserted): its properties never change. */
+  /** The const declaration whose initializer is the outermost `as const` literal holding `object`, else null. */
   function frozen(object) {
     let node = object, constant = false;
     for (;;) {
@@ -892,9 +976,69 @@ function scanAuditWrites(sources = auditSources()) {
         constant = false;
         continue;
       }
-      return constant && ts.isVariableDeclaration(parent) && parent.initializer === node
-        && !!(ts.getCombinedNodeFlags(parent) & ts.NodeFlags.Const);
+      return constant && ts.isVariableDeclaration(parent) && parent.initializer === node && ts.isIdentifier(parent.name)
+        && ts.getCombinedNodeFlags(parent) & ts.NodeFlags.Const ? parent : null;
     }
+  }
+  /** Whether `node` is written: an assignment's target, ++ or --, delete, a for-in/of target, a destructuring target. */
+  function mutated(node) {
+    const parent = node.parent;
+    return (ts.isBinaryExpression(parent) && parent.left === node && parent.operatorToken.kind >= K.FirstAssignment
+        && parent.operatorToken.kind <= K.LastAssignment)
+      || ((ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent))
+        && (parent.operator === K.PlusPlusToken || parent.operator === K.MinusMinusToken))
+      || ts.isDeleteExpression(parent) || ((ts.isForInStatement(parent) || ts.isForOfStatement(parent)) && parent.initializer === node)
+      || destructured(node);
+  }
+  /** A use that neither changes nor hands on a value: tested, compared, typeof, void, a statement of its own. */
+  const inert = node => {
+    const parent = node.parent;
+    return ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent) || ts.isExpressionStatement(parent)
+      || (ts.isForStatement(parent) && parent.condition === node) || (ts.isConditionalExpression(parent) && parent.condition === node)
+      || (ts.isPrefixUnaryExpression(parent) && parent.operator === K.ExclamationToken) || ts.isTypeOfExpression(parent)
+      || ts.isVoidExpression(parent) || (ts.isBinaryExpression(parent) && EQUALITIES.has(parent.operatorToken.kind));
+  };
+  /** (e) Why the table a const `as const` declaration holds may not keep its literal values, or null: every use must read
+   *  a value out of it through keys the program fixes, and never write it or hand the table or a part of it on. */
+  function tableEscapes(declaration) {
+    for (const reference of references(symbolAt(declaration.name))) {
+      if (ts.isTypeQueryNode(reference.parent)) continue;
+      let node = reference, object = bare(declaration.initializer);
+      for (;;) {
+        const parent = node.parent;
+        if (WRAPPERS.has(parent.kind)) { node = parent; continue; }
+        if (!isAccess(parent) || parent.expression !== node) break;
+        if (object) {
+          const keys = keyValues(parent);
+          if (!keys) return `is read by a key the program does not fix at ${where(parent)}`;
+          const inner = keys.map(key => {
+            const index = /^\d+$/.test(key) ? Number(key) : -1;
+            if (ts.isArrayLiteralExpression(object) && (index < 0 || object.elements.slice(0, index + 1).some(ts.isSpreadElement))) return undefined;
+            const next = ts.isArrayLiteralExpression(object) ? object.elements[index] : property(object, key).node;
+            return next ? bare(next) : null;
+          });
+          if (inner.includes(undefined)) return `is used through \`${keys.join(' | ')}\` at ${where(parent)}`;
+          const nested = inner.filter(next => next && (ts.isObjectLiteralExpression(next) || ts.isArrayLiteralExpression(next)));
+          if (nested.length && keys.length > 1) return `is read into nested objects by several keys at ${where(parent)}`;
+          object = nested[0] ?? null;
+        }
+        node = parent;
+      }
+      if (mutated(node)) return `is written at ${where(node.parent)}`;
+      if (object && !inert(node)) return `is handed on at ${where(node.parent)}`;
+    }
+    return null;
+  }
+  /** Where a member named like `symbol` is written through a receiver that is it or that the checker does not type. */
+  function memberChanged(symbol) {
+    for (const node of spelled().names.get(symbol.name) ?? []) {
+      const access = accessOf(node);
+      if (!access) continue;
+      const found = symbolAt(node);
+      if (found && !same(found, symbol)) continue;
+      if (mutated(outer(access))) return where(access);
+    }
+    return null;
   }
 
   // ── control flow: a guard `if (... || !['a', 'b'].includes(x) || ...) throw/return;` before the use ──
@@ -913,12 +1057,12 @@ function scanAuditWrites(sources = auditSources()) {
     split(statement.expression);
     for (const alternative of alternatives) {
       if (!ts.isPrefixUnaryExpression(alternative) || alternative.operator !== K.ExclamationToken) continue;
-      const call = bare(alternative.operand);
-      if (!ts.isCallExpression(call) || call.arguments.length !== 1 || keyOf(bare(call.expression)) !== 'includes') continue;
-      const tested = bare(call.arguments[0]), list = bare(bare(call.expression).expression);
+      const call = bare(alternative.operand), callee = ts.isCallExpression(call) ? bare(call.expression) : null;
+      if (!isAccess(callee) || call.arguments.length !== 1 || keyValues(callee)?.join() !== 'includes') continue;
+      const tested = bare(call.arguments[0]), list = bare(callee.expression);
       if (!ts.isIdentifier(tested) || symbolAt(tested) !== symbol || !ts.isArrayLiteralExpression(list)) continue;
       const members = list.elements.map(element => (ts.isSpreadElement(element) ? [unknown('spread')] : values(element)));
-      if (members.every(found => found.every(value => value.text !== undefined))) return members.flat().map(value => value.text);
+      if (members.every(found => found.every(value => value.text !== undefined))) return { members: members.flat().map(value => value.text), at: statement };
     }
     return null;
   }
@@ -944,7 +1088,7 @@ function scanAuditWrites(sources = auditSources()) {
 
   // ── references, assignments and calls ──
   let spellings = null;
-  /** Every identifier and member key of api/src by spelling, and the local names of renamed imports and exports. */
+  /** Every identifier and member key of the program's sources by spelling, and the local names of renamed imports and exports. */
   function spelled() {
     if (spellings) return spellings;
     const index = spellings = { names: new Map(), renamed: new Map() };
@@ -959,7 +1103,7 @@ function scanAuditWrites(sources = auditSources()) {
     return index;
   }
   const same = (found, symbol) => found === symbol || !!found?.declarations?.some(declaration => symbol.declarations?.includes(declaration));
-  /** The uses of `symbol` in api/src (a parameter's or a function-local's in its own file), declarations left out. */
+  /** The uses of `symbol` in the program's sources (a parameter's or a function-local's in its own file), declarations left out. */
   function references(symbol) {
     if (!symbol) return [];
     const { names, renamed } = spelled();
@@ -979,7 +1123,7 @@ function scanAuditWrites(sources = auditSources()) {
       || ts.isShorthandPropertyAssignment(at.parent)) at = at.parent;
     return at !== node && ts.isBinaryExpression(at.parent) && at.parent.operatorToken.kind === K.EqualsToken && at.parent.left === at;
   }
-  /** The values assigned to a binding after its declaration; a change that is not a plain assignment is unreadable. */
+  /** (g) The values assigned to a binding after its declaration; a change that is not a plain assignment is unresolved. */
   function assignments(symbol) {
     const found = [];
     for (const reference of references(symbol)) {
@@ -1004,7 +1148,7 @@ function scanAuditWrites(sources = auditSources()) {
       || ts.isSetAccessorDeclaration(owner)) && !(ts.getCombinedModifierFlags(owner) & (ts.ModifierFlags.Private | ts.ModifierFlags.Protected))
       && !(owner.name && ts.isPrivateIdentifier(owner.name)));
   const shift = owner => (owner.parameters[0]?.name.getText() === 'this' ? 1 : 0);
-  /** The arguments every call of the parameter's function passes for it. */
+  /** (h) The arguments every call of the parameter's function passes for it. */
   function passed(parameter) {
     const owner = parameter.parent, name = parameter.name.getText();
     const index = owner.parameters.indexOf(parameter) - shift(owner);
@@ -1018,6 +1162,7 @@ function scanAuditWrites(sources = auditSources()) {
     if (escapes.length) {
       return [unknown(`${where(parameter)}: \`${name}\` is a parameter of ${describe(owner)}, which is handed on at ${escapes.join(', ')}`)];
     }
+    if (!calls.length) return [unknown(`${where(parameter)}: \`${name}\` is a parameter of ${describe(owner)}, which nothing in the program calls`)];
     return union(...calls.map(call => {
       if (call.arguments.slice(0, index + 1).some(ts.isSpreadElement)) return [unknown(`${where(call)}: a spread argument`)];
       const argument = call.arguments[index];
@@ -1085,40 +1230,334 @@ function scanAuditWrites(sources = auditSources()) {
       queue.push(...references(symbolAt(bare(parent.left))));
       return;
     }
-    const tested = ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent) || ts.isExpressionStatement(parent)
-      || (ts.isForStatement(parent) && parent.condition === node) || (ts.isConditionalExpression(parent) && parent.condition === node)
-      || (ts.isPrefixUnaryExpression(parent) && parent.operator === K.ExclamationToken) || ts.isTypeOfExpression(parent)
-      || ts.isVoidExpression(parent) || ts.isTypeQueryNode(parent) || ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)
-      || ts.isImportClause(parent) || (ts.isBinaryExpression(parent) && EQUALITIES.has(parent.operatorToken.kind));
+    const tested = inert(node) || ts.isTypeQueryNode(parent) || ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)
+      || ts.isImportClause(parent);
     if (!tested) escapes.push(`${where(parent)} (${K[parent.kind]})`);
+  }
+
+  // ── the client: which values may hold a Prisma client ──
+  const PRISMA = '@prisma/client';
+  /** The name `identifier` is imported under from @prisma/client ('*' for a namespace, 'default'), else null. */
+  function prismaImport(identifier) {
+    const symbol = identifier && ts.isIdentifier(identifier) ? checker.getSymbolAtLocation(identifier) : null;
+    for (const declaration of symbol?.declarations ?? []) {
+      const clause = ts.isImportSpecifier(declaration) ? declaration.parent.parent.parent
+        : ts.isNamespaceImport(declaration) ? declaration.parent.parent : ts.isImportClause(declaration) ? declaration.parent : null;
+      if (clause && ts.isImportDeclaration(clause) && ts.isStringLiteral(clause.moduleSpecifier) && clause.moduleSpecifier.text === PRISMA) {
+        return ts.isImportSpecifier(declaration) ? (declaration.propertyName ?? declaration.name).text
+          : ts.isNamespaceImport(declaration) ? '*' : 'default';
+      }
+    }
+    return null;
+  }
+  /** A member of the Prisma namespace import (`Prisma.sql`, `Prisma.raw` ...): its name, else null. */
+  const prismaMember = node => {
+    const at = bare(node);
+    return isAccess(at) && ts.isIdentifier(bare(at.expression)) && prismaImport(bare(at.expression)) !== null
+      && keyValues(at)?.length === 1 ? keyValues(at)[0] : null;
+  };
+  const clientClasses = new Map();
+  /** A class that extends @prisma/client's PrismaClient, or such a class of the program. */
+  function clientClass(declaration) {
+    if (!declaration || !ts.isClassLike(declaration)) return false;
+    if (clientClasses.has(declaration)) return clientClasses.get(declaration);
+    clientClasses.set(declaration, false);
+    const heritage = declaration.heritageClauses?.find(clause => clause.token === K.ExtendsKeyword)?.types[0];
+    const base = heritage && bare(heritage.expression);
+    const found = !!base && ((ts.isIdentifier(base) && prismaImport(base) === 'PrismaClient') || prismaMember(base) === 'PrismaClient'
+      || clientClass(resolve(checker.getSymbolAtLocation(ts.isPropertyAccessExpression(base) ? base.name : base))?.declarations?.[0]));
+    clientClasses.set(declaration, found);
+    return found;
+  }
+  const classOf = node => resolve(node && checker.getSymbolAtLocation(node))?.declarations?.[0];
+  /** A type annotation whose value may be a client: a client class, @prisma/client's PrismaClient, Prisma's
+   *  TransactionClient, as such, in a union or intersection, as a type argument (Omit<...>) or as an array's element. A
+   *  function type is not its parameters' type, and an object type's members are declarations of their own. */
+  function clientType(type) {
+    if (!type) return false;
+    if (ts.isTypeReferenceNode(type)) {
+      const name = type.typeName;
+      let left = name;
+      while (ts.isQualifiedName(left)) left = left.left;
+      if (ts.isIdentifier(name) ? prismaImport(name) === 'PrismaClient' || clientClass(classOf(name))
+        : ['TransactionClient', 'PrismaClient'].includes(name.right.text) && prismaImport(left) !== null) return true;
+      return (type.typeArguments ?? []).some(clientType);
+    }
+    if (ts.isUnionTypeNode(type) || ts.isIntersectionTypeNode(type)) return type.types.some(clientType);
+    if (ts.isParenthesizedTypeNode(type) || ts.isTypeOperatorNode(type)) return clientType(type.type);
+    if (ts.isArrayTypeNode(type)) return clientType(type.elementType);
+    if (ts.isTupleTypeNode(type)) return type.elements.some(element => clientType(ts.isNamedTupleMember(element) ? element.type : element));
+    return false;
+  }
+  /** The first parameter of a callback handed to `$transaction`. */
+  function transactionCallback(parameter) {
+    const owner = parameter.parent;
+    if (!(ts.isArrowFunction(owner) || ts.isFunctionExpression(owner)) || owner.parameters.indexOf(parameter) !== shift(owner)) return false;
+    const held = outer(owner), call = held.parent, callee = call && ts.isCallExpression(call) && call.arguments[0] === held ? bare(call.expression) : null;
+    return isAccess(callee) && !!keyValues(callee)?.includes('$transaction');
+  }
+  const thisClass = node => {
+    for (let at = node.parent; at; at = at.parent) {
+      if (ts.isClassLike(at)) return at;
+      if (ts.isFunctionDeclaration(at) || ts.isFunctionExpression(at)) return null;
+    }
+    return null;
+  };
+  const clients = new Set(), clientFunctions = new Set(), clientMembers = new Set();
+  const heldClient = symbol => !!symbol?.declarations?.some(declaration => clients.has(declaration));
+  /** The functions a call or `new` runs, when every value its callee can take is one of the program's functions; else null. */
+  function callees(call) {
+    if (ts.isNewExpression(call)) {
+      const declaration = classOf(call.expression);
+      const constructor = declaration && ts.isClassLike(declaration) ? declaration.members.find(ts.isConstructorDeclaration) : null;
+      return constructor?.body ? [constructor] : null;
+    }
+    const found = values(call.expression).filter(value => !value.none);
+    return found.every(value => value.fn && value.fn.body) ? found.map(value => value.fn) : null;
+  }
+  /** Whether a value may be a client (the fixed point below decides the bindings). */
+  function isClient(expression) {
+    const node = bare(expression);
+    if (!node) return false;
+    if (ts.isAwaitExpression(node)) return isClient(node.expression);
+    if (node.kind === K.ThisKeyword) return clientClass(thisClass(node));
+    if (ts.isIdentifier(node)) return heldClient(symbolAt(node));
+    if (ts.isPropertyAccessExpression(node)) {
+      const symbol = resolve(checker.getSymbolAtLocation(node.name));
+      return symbol ? heldClient(symbol) : clientMembers.has(node.name.text);
+    }
+    if (ts.isElementAccessExpression(node)) {
+      const keys = keyValues(node), type = checker.getTypeAtLocation(node.expression);
+      return !!keys && keys.some(key => { const symbol = checker.getPropertyOfType(type, key); return symbol ? heldClient(resolve(symbol)) : clientMembers.has(key); });
+    }
+    if (ts.isConditionalExpression(node)) return isClient(node.whenTrue) || isClient(node.whenFalse);
+    if (ts.isBinaryExpression(node)) {
+      return CHOICES.has(node.operatorToken.kind) ? isClient(node.left) || isClient(node.right)
+        : node.operatorToken.kind === K.CommaToken && isClient(node.right);
+    }
+    if (ts.isNewExpression(node)) return clientClass(classOf(node.expression));
+    // A call handed a client class (Nest's `app.get(PrismaService)`) gives an instance of it.
+    if (ts.isCallExpression(node)) {
+      return node.arguments.some(argument => ts.isIdentifier(bare(argument)) && clientClass(classOf(bare(argument))))
+        || (clientFunctions.size > 0 && !!callees(node)?.some(owner => clientFunctions.has(owner)));
+    }
+    return false;
+  }
+
+  // ── raw SQL (F03) ──
+  const RAW = new Set(['$executeRaw', '$queryRaw', '$executeRawUnsafe', '$queryRawUnsafe']);
+  const claimed = new Set(), naming = [];
+  const TABLE_WORDS = /auditlog/i;
+  /** Texts that may name the AuditLog table in SQL: any text with it that is not one bare name (a member key such as
+   *  'auditLog' is F01's; SQL names the table as the quoted identifier, the only spelling that reaches it). */
+  const namesTable = value => TABLE_WORDS.test(value) && !/^[A-Za-z_$][\w$]*$/.test(value);
+  /**
+   * SQL tokens over the texts between interpolations, by PostgreSQL's lexical rules for what the INSERT form needs: a string
+   * ('' is a quote), a quoted identifier ("" is a quote; case kept), a word (keyword or unquoted identifier, folded to lower
+   * case), a number, a punctuation mark, an operator and each interpolation; blanks and comments (--, nested / * * /) are
+   * dropped. An unclosed string, identifier or comment (none may hold an interpolation), E'', B'', X'', N'', U& and $ throw.
+   */
+  function sqlTokens(parts) {
+    const tokens = [];
+    parts.forEach((part, index) => {
+      if (index > 0) tokens.push({ kind: 'param', index: index - 1 });
+      const last = index === parts.length - 1;
+      const fail = why => { throw new Error(why); };
+      let i = 0;
+      while (i < part.length) {
+        const ch = part[i];
+        if (/\s/.test(ch)) { i++; continue; }
+        if (part.startsWith('--', i)) {
+          const end = part.indexOf('\n', i);
+          if (end < 0 && !last) fail('a line comment runs into an interpolation');
+          i = end < 0 ? part.length : end + 1;
+          continue;
+        }
+        if (part.startsWith('/*', i)) {
+          let depth = 0;
+          do {
+            if (part.startsWith('/*', i)) { depth++; i += 2; } else if (part.startsWith('*/', i)) { depth--; i += 2; } else i++;
+            if (i >= part.length && depth > 0) fail('an unclosed comment');
+          } while (depth > 0);
+          continue;
+        }
+        if (ch === "'" || ch === '"') {
+          let value = '', j = i + 1;
+          for (;;) {
+            if (j >= part.length) fail(ch === "'" ? 'an unclosed string' : 'an unclosed quoted identifier');
+            if (part[j] === ch) { if (part[j + 1] === ch) { value += ch; j += 2; continue; } break; }
+            value += part[j++];
+          }
+          if (ch === '"' && !value) fail('an empty quoted identifier');
+          tokens.push(ch === "'" ? { kind: 'string', value } : { kind: 'ident', value, name: value });
+          i = j + 1;
+          continue;
+        }
+        const word = /^(?:[A-Za-z_]|[^\x00-\x7F])(?:[A-Za-z0-9_$]|[^\x00-\x7F])*/.exec(part.slice(i));
+        if (word) {
+          const next = part[i + word[0].length];
+          if (/^[EeBbXxNn]$/.test(word[0]) && next === "'") fail(`a ${word[0]}'' string`);
+          if (/^[Uu]$/.test(word[0]) && next === '&') fail('a U& escape');
+          tokens.push({ kind: 'word', value: word[0], name: word[0].toLowerCase(), upper: word[0].toUpperCase() });
+          i += word[0].length;
+          continue;
+        }
+        const number = /^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(part.slice(i));
+        if (number) { tokens.push({ kind: 'number', value: number[0] }); i += number[0].length; continue; }
+        if ('(),;.[]'.includes(ch)) { tokens.push({ kind: 'punct', value: ch }); i++; continue; }
+        if (ch === '$') fail('a $ parameter or dollar quote');
+        const operator = /^[+\-*/<>=~!@#%^&|`?:]+/.exec(part.slice(i));
+        if (!operator) fail(`the character ${JSON.stringify(ch)}`);
+        const cut = operator[0].search(/--|\/\*/);   // a comment starts inside what would be one operator
+        const value = cut > 0 ? operator[0].slice(0, cut) : operator[0];
+        tokens.push({ kind: 'operator', value });
+        i += value.length;
+      }
+    });
+    return tokens;
+  }
+  const shown = token => (!token ? 'the end' : token.kind === 'param' ? 'an interpolation' : token.kind === 'string' ? `'${token.value}'`
+    : token.kind === 'ident' ? `"${token.value}"` : token.value);
+  const statements = tokens => tokens.filter((token, n) => token.kind === 'punct' && token.value === ';' && n !== tokens.length - 1).length + 1;
+  /** INSERT INTO [schema.]"AuditLog" (columns) VALUES (values) [;]: the column names and the value tokens by position. */
+  function insertForm(tokens) {
+    let i = 0;
+    const word = value => tokens[i]?.kind === 'word' && tokens[i].upper === value;
+    const punct = value => tokens[i]?.kind === 'punct' && tokens[i].value === value;
+    const name = token => (token?.kind === 'ident' ? token.value : token?.kind === 'word' ? token.name : null);
+    if (statements(tokens) > 1) return { error: 'several statements' };
+    if (!word('INSERT')) return { error: `not the INSERT form: it begins with ${shown(tokens[0])}` };
+    i++;
+    if (!word('INTO')) return { error: `not the INSERT form: ${shown(tokens[i])} after INSERT` };
+    i++;
+    const table = [tokens[i++]];
+    if (punct('.')) { i++; table.push(tokens[i++]); }
+    if (table.some(token => token?.kind === 'param')) return { error: 'an interpolation where the table goes' };
+    if (table.some(token => name(token) === null)) return { error: `not a table name: ${table.map(shown).join('.')}` };
+    const target = table[table.length - 1];
+    if (!(target.kind === 'ident' && target.value === 'AuditLog')) return { error: `it inserts into ${table.map(shown).join('.')}, not "AuditLog"` };
+    if (!punct('(')) return { error: `no column list (${shown(tokens[i])} after the table)` };
+    i++;
+    const columns = [];
+    for (;;) {
+      const token = tokens[i++];
+      if (token?.kind === 'param') return { error: 'an interpolation where a column goes' };
+      if (name(token) === null) return { error: `a column list with ${shown(token)}` };
+      columns.push(name(token));
+      if (punct(',')) { i++; continue; }
+      if (punct(')')) { i++; break; }
+      return { error: `a column list with ${shown(tokens[i])}` };
+    }
+    if (!word('VALUES')) return { error: `${shown(tokens[i])} where VALUES goes (INSERT … SELECT or another form)` };
+    i++;
+    if (!punct('(')) return { error: `${shown(tokens[i])} after VALUES` };
+    i++;
+    const row = [[]];
+    for (let depth = 0; ;) {
+      const token = tokens[i++];
+      if (!token) return { error: 'an unclosed VALUES list' };
+      if (token.kind === 'punct' && (token.value === '(' || token.value === '[')) depth++;
+      if (token.kind === 'punct' && (token.value === ')' || token.value === ']')) {
+        if (depth === 0) break;
+        depth--;
+      }
+      if (depth === 0 && token.kind === 'punct' && token.value === ',') { row.push([]); continue; }
+      row[row.length - 1].push(token);
+    }
+    if (punct(';')) i++;
+    if (i < tokens.length) return { error: `${shown(tokens[i])} after the VALUES list (a second row, ON CONFLICT, RETURNING or another clause)` };
+    if (row.some(value => value.length === 0)) return { error: 'an empty value in the VALUES list' };
+    if (row.length !== columns.length) return { error: `${columns.length} columns and ${row.length} values` };
+    const twice = columns.find((column, n) => columns.indexOf(column) !== n);
+    if (twice !== undefined) return { error: `the column ${twice} is named twice` };
+    const at = columns.indexOf('action');
+    if (at < 0) return { error: 'no action column' };
+    return { columns, row, action: row[at] };
+  }
+  const WRITES = new Set(['INSERT', 'UPDATE', 'DELETE', 'MERGE', 'COPY', 'TRUNCATE', 'INTO', 'CALL', 'DO', 'EXECUTE', 'ALTER',
+    'DROP', 'CREATE', 'GRANT', 'REVOKE', 'LOCK', 'SET']);
+  /** One SELECT with no word that changes rows (FOR UPDATE / FOR NO KEY UPDATE only lock). */
+  const readsOnly = tokens => statements(tokens) === 1 && tokens[0]?.kind === 'word' && tokens[0].upper === 'SELECT'
+    && tokens.every((token, n) => token.kind !== 'word' || !WRITES.has(token.upper)
+      || (token.upper === 'UPDATE' && ['FOR', 'KEY'].includes(tokens[n - 1]?.upper)));
+  const isDate = type => type.symbol?.name === 'Date' && !!type.symbol.declarations?.some(declaration =>
+    program.isSourceFileDefaultLibrary(declaration.getSourceFile()));
+  const PRIMITIVE = TF.StringLike | TF.NumberLike | TF.BooleanLike | TF.BigIntLike | TF.Null | TF.Undefined | TF.EnumLike;
+  /** Why an interpolation may not be a value parameter (an SQL fragment would change the statement), or null. */
+  function notValue(expression) {
+    if (texts(values(expression))) return null;
+    const type = checker.getTypeAtLocation(expression);
+    const parts = type.isUnion() ? type.types : [type];
+    return parts.every(part => part.flags & PRIMITIVE || isDate(part)) ? null
+      : `\`${snippet(expression)}\` (${checker.typeToString(type)}) is not shown to be a value`;
+  }
+  /** A raw call: its SQL must be one fixed text of the program; the INSERT form writes, one SELECT reads, others unresolved. */
+  function rawCall(call) {
+    let source = null;
+    if (ts.isTaggedTemplateExpression(call)) source = call.template;
+    else if (call.arguments.length === 1) {
+      const argument = bare(call.arguments[0]);
+      if (ts.isTaggedTemplateExpression(argument) && prismaMember(argument.tag) === 'sql') source = argument.template;
+      else if (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument)) source = argument;
+    }
+    if (!source) return note(call, 'raw call', 'unresolved', `its SQL is not one fixed text of the program: \`${snippet(call)}\``);
+    claimed.add(source);
+    const parts = ts.isTemplateExpression(source) ? [source.head.text, ...source.templateSpans.map(span => span.literal.text)] : [source.text];
+    const spans = ts.isTemplateExpression(source) ? source.templateSpans.map(span => span.expression) : [];
+    if (!parts.some(part => TABLE_WORDS.test(part))) return note(call, 'raw call', 'proven_non_audit', 'its SQL names no AuditLog');
+    let tokens;
+    try {
+      tokens = sqlTokens(parts);
+    } catch (error) {
+      return note(call, 'raw SQL naming AuditLog', 'unresolved', `${error.message} in its SQL`);
+    }
+    if (!tokens.some(token => (token.kind === 'ident' || token.kind === 'word') && token.name.toLowerCase() === 'auditlog')) {
+      return note(call, 'raw call', 'proven_non_audit', 'AuditLog is only in its strings or comments');
+    }
+    if (readsOnly(tokens)) return note(call, 'raw SQL naming AuditLog', 'proven_non_audit', 'one SELECT that changes no row reads AuditLog');
+    const form = insertForm(tokens);
+    if (form.error) return note(call, 'raw SQL naming AuditLog', 'unresolved', form.error);
+    const [slot] = form.action, column = `column ${form.columns.indexOf('action') + 1} of ${form.columns.length}`;
+    if (form.action.length !== 1 || (slot.kind !== 'string' && slot.kind !== 'param')) {
+      return note(call, 'raw INSERT INTO "AuditLog"', 'unresolved', `the action value is not one SQL string or one interpolation: ${form.action.map(shown).join(' ')}`);
+    }
+    const found = slot.kind === 'string' ? [text(slot.value)] : values(spans[slot.index]);
+    if (found.some(value => value.text === undefined && value.prefix === undefined)) return record(call, 'raw INSERT INTO "AuditLog"', found);
+    const fragment = tokens.filter(token => token.kind === 'param' && token !== slot).map(token => notValue(spans[token.index])).find(Boolean);
+    if (fragment) return note(call, 'raw INSERT INTO "AuditLog"', 'unresolved', fragment);
+    record(call, 'raw INSERT INTO "AuditLog"', found, null, [slot.kind === 'string' ? `SQL string '${slot.value}' at ${column}`
+      : `the interpolation \`${snippet(spans[slot.index])}\` at ${column}`]);
   }
 
   // ── the writes ──
   const READS = new Set(['findMany', 'findFirst', 'findUnique', 'findFirstOrThrow', 'findUniqueOrThrow', 'count', 'aggregate', 'groupBy']);
-  function record(node, via, found, action) {
-    const unread = found.filter(value => value.text === undefined && !value.prefix);
-    if (unread.length) {
-      unrecognized.push(`${where(node)} ${via}: ${unread.map(value => value.unknown ?? value.why ?? `${where(value.fn)}: a function`).join('; ')}`);
-      return;
+  function record(node, via, found, action, basis = []) {
+    const unread = found.filter(value => value.text === undefined && value.prefix === undefined);
+    if (!found.length || unread.length) {
+      return note(node, via, 'unresolved', !found.length ? 'its action has no value in the program'
+        : unread.map(value => value.unknown ?? `${where(value.fn)}: a function`).join('; '));
     }
-    const file = node.getSourceFile();
-    const site = { file: repoPath(file.fileName), line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1, via,
-      actions: found.filter(value => value.text !== undefined).map(value => value.text).sort(),
-      prefixes: found.filter(value => value.prefix).map(value => value.prefix).sort() };
-    Object.defineProperties(site, { call: { value: node }, action: { value: action },
-      origins: { value: [...new Set(found.flatMap(value => value.from ?? []))] } });
+    const origins = [...new Set(found.flatMap(value => value.from ?? []))];
+    const site = { ...position(node), via, actions: found.filter(value => value.text !== undefined).map(value => value.text).sort(),
+      prefixes: found.filter(value => value.prefix !== undefined).map(value => value.prefix).sort(),
+      basis: [...basis, ...origins.map(origin => `${where(origin)} ${JSON.stringify(origin.text)}`),
+        ...found.filter(value => value.guard).map(value => `${JSON.stringify(value.text)} let through by the guard at ${value.guard}`),
+        ...found.filter(value => value.prefix !== undefined).map(value => `${value.prefix}… then ${value.why}`)] };
+    Object.defineProperties(site, { call: { value: node }, action: { value: action }, origins: { value: origins }, start: { value: node.getStart() } });
     sites.push(site);
+    note(node, via, 'resolved', site.basis.join('; '));
   }
-  /** The property `name` an object literal ends up with: its last definition, unless a later spread may set it again. */
+  /** The property `name` an object literal ends up with: its last definition, unless a later spread or computed key may set it. */
   function property(object, name) {
     let found = { why: 'is not set' };
     for (const member of object.properties) {
-      if (ts.isSpreadAssignment(member)) found = { why: `may be set by the spread at ${where(member)}` };
-      else if (member.name && ts.isComputedPropertyName(member.name) && keyText(member.name) === null) {
-        found = { why: `may be set by the computed key at ${where(member)}` };
-      } else if (keyText(member.name) === name) {
-        found = ts.isPropertyAssignment(member) ? { node: member.initializer, member }
-          : ts.isShorthandPropertyAssignment(member) ? { shorthand: member, member } : { why: `is an accessor or method at ${where(member)}` };
+      if (ts.isSpreadAssignment(member)) { found = { why: `may be set by the spread at ${where(member)}` }; continue; }
+      const keys = member.name ? keyValues(member.name) : null;
+      if (!keys) found = { why: `may be set by the computed key at ${where(member)}` };
+      else if (keys.includes(name)) {
+        found = keys.length > 1 ? { why: `may be set by the computed key at ${where(member)}` }
+          : ts.isPropertyAssignment(member) ? { node: member.initializer, member }
+            : ts.isShorthandPropertyAssignment(member) ? { shorthand: member, member } : { why: `is an accessor or method at ${where(member)}` };
       }
     }
     return found;
@@ -1134,93 +1573,381 @@ function scanAuditWrites(sources = auditSources()) {
     const action = property(object, 'action');
     const found = action.node ? values(action.node) : action.shorthand ? named(symbolAt(action.shorthand.name), action.shorthand.name)
       : [unknown(`action ${action.why}`)];
-    record(call, 'auditLog.create', found, action);
+    record(call, 'auditLog.create', found, action, action.member ? [`action \`${snippet(action.member)}\``] : []);
   }
+  /** `x.auditLog` (any fixed key): only the receiver of a called method; `create` is a write this check reads. */
   function delegate(access) {
-    const held = outer(access), method = held.parent;
-    const name = method && method.expression === held ? keyOf(method) : null;
-    const callee = name === null ? null : outer(method), call = callee?.parent;
-    if (name === null || !call || !ts.isCallExpression(call) || call.expression !== callee) {
-      unrecognized.push(`${where(access)} auditLog: used other than by calling one of its methods`);
-    } else if (!READS.has(name)) {
-      if (name === 'create') create(call);
-      else unrecognized.push(`${where(access)} auditLog.${name}: writes rows this check does not read`);
+    const held = outer(access), parent = held.parent;
+    if (!isAccess(parent) || parent.expression !== held) {
+      return note(access, 'auditLog delegate', 'unresolved', `the delegate is used other than by calling one of its methods (${K[parent.kind]})`);
+    }
+    const methods = keyValues(parent);
+    if (!methods || methods.length !== 1) return note(parent, 'auditLog method', 'unresolved', 'a method of the delegate by a key the program does not fix');
+    const [method] = methods, callee = outer(parent), call = callee.parent;
+    if (READS.has(method)) return note(parent, `auditLog.${method}`, 'proven_non_audit', 'a read method');
+    if (!ts.isCallExpression(call) || call.expression !== callee) {
+      return note(parent, `auditLog.${method}`, 'unresolved', 'the method is used other than by calling it');
+    }
+    if (method !== 'create') return note(call, `auditLog.${method}`, 'unresolved', 'writes rows this check does not read');
+    create(call);
+  }
+  function access(node) {
+    const inner = bare(node.expression);
+    if (isAccess(inner) && keyValues(inner)?.includes('auditLog')) return;   // the delegate's method: read by delegate()
+    const keys = keyValues(node);
+    if (keys?.some(key => RAW.has(key))) {
+      const held = outer(node), parent = held.parent;
+      const called = (ts.isTaggedTemplateExpression(parent) && parent.tag === held) || (ts.isCallExpression(parent) && parent.expression === held);
+      if (keys.length === 1 && called) return rawCall(parent);
+      return note(node, 'raw call', 'unresolved', keys.length > 1 ? 'a raw method by a key the program does not fix' : 'a raw method used other than by calling it');
+    }
+    if (keys?.includes('auditLog')) {
+      return keys.length === 1 ? delegate(node)
+        : note(node, 'auditLog access', 'unresolved', `the key may be auditLog or ${keys.filter(key => key !== 'auditLog').join(', ')}`);
+    }
+    const literal = ts.isElementAccessExpression(node) && [K.StringLiteral, K.NoSubstitutionTemplateLiteral, K.NumericLiteral].includes(bare(node.argumentExpression).kind);
+    if (!ts.isElementAccessExpression(node) || literal) return;
+    if (keys) {
+      if (isClient(node.expression)) note(node, 'member of a client', 'proven_non_audit', `the key is ${keys.join(' or ')}`);
+      return;
+    }
+    if (isClient(node.expression)) note(node, 'member of a client', 'unresolved', 'a member of a client value by a key the program does not fix');
+    else note(node, 'computed key', 'proven_non_audit', `no client value reaches \`${snippet(node.expression)}\``);
+  }
+  /** A destructured property of a client, or one named auditLog: the delegate taken out of its client. */
+  function destructuring(node, keyNode, source, rest) {
+    const keys = rest ? null : keyValues(keyNode);
+    if (keys?.includes('auditLog')) return note(node, 'auditLog delegate', 'unresolved', 'the delegate is taken out of its client by destructuring');
+    if (source && isClient(source) && (!keys || rest)) {
+      note(node, 'member of a client', 'unresolved', rest ? 'the rest of a client is taken out by destructuring' : 'a member of a client is taken out by a key the program does not fix');
     }
   }
-  const SQL_WRITE = /\b(INSERT\s+INTO|UPDATE)\s+(?:"?\w+"?\s*\.\s*)?"?AuditLog"?(?![\w"])/gi;
-  const QUOTED = /(?<![\w'])'([^'\s\u0000]+)'(?![\w'])/g;
-  const actionLike = value => /^[a-z][\w-]*(?:\.[\w-]+)+$/i.test(value) || A.auditRule(value) !== 'hidden:unknown_action';
-  /** A raw SQL text that writes "AuditLog": its one action-like value after INSERT INTO "AuditLog" (spans marked \0). */
-  function rawSql(node) {
-    const spans = ts.isTemplateExpression(node) ? node.templateSpans : [];
-    const statement = (ts.isTemplateExpression(node) ? [node.head.text, ...spans.map(span => span.literal.text)] : [node.text]).join('\u0000');
-    const writes = [...statement.matchAll(SQL_WRITE)];
-    const spansBefore = at => statement.slice(0, at).split('\u0000').length - 1;
-    writes.forEach((write, n) => {
-      if (/^UPDATE/i.test(write[1])) { unrecognized.push(`${where(node)} raw SQL: updates "AuditLog" rows`); return; }
-      const end = n + 1 < writes.length ? writes[n + 1].index : statement.length;
-      const quoted = [...statement.slice(write.index, end).matchAll(QUOTED)].map(match => match[1]).filter(actionLike).map(value => text(value));
-      const bound = spans.slice(spansBefore(write.index), spansBefore(end)).flatMap(span => values(span.expression))
-        .filter(value => (value.text !== undefined ? actionLike(value.text) : !!value.prefix));
-      const candidates = union(quoted, bound);
-      if (candidates.length === 1) record(node, 'raw SQL INSERT INTO "AuditLog"', candidates);
-      else {
-        unrecognized.push(`${where(node)} raw SQL INSERT INTO "AuditLog": ${candidates.length} action-like values `
-          + `(${candidates.map(value => value.text ?? `${value.prefix}…`).join(', ')}) where one is needed`);
-      }
-    });
+  /** Prisma's SQL fragment builders: a fragment whose text the program does not fix. */
+  function fragment(node) {
+    const name = prismaMember(node.expression);
+    if (!name) return;
+    const literal = argument => !!argument && (ts.isStringLiteral(bare(argument)) || ts.isNoSubstitutionTemplateLiteral(bare(argument)));
+    if ((name === 'raw' && !literal(node.arguments?.[0])) || (name === 'sql' && ts.isCallExpression(node)) || name === 'Sql'
+      || (name === 'join' && (node.arguments?.length ?? 0) > 1 && !node.arguments.slice(1).every(literal))) {
+      note(node, 'raw SQL fragment', 'unresolved', `\`${snippet(node)}\`: SQL whose text the program does not fix`);
+    }
   }
   function visit(node) {
-    if (keyOf(node) === 'auditLog') delegate(node);
-    else if (ts.isBindingElement(node) && keyText(node.propertyName ?? node.name) === 'auditLog') {
-      unrecognized.push(`${where(node)} auditLog: the delegate is taken out of its client`);
-    }
-    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateExpression(node)) rawSql(node);
+    if (isAccess(node)) access(node);
+    else if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) {
+      let declaration = node.parent;
+      while (ts.isBindingElement(declaration) || ts.isObjectBindingPattern(declaration) || ts.isArrayBindingPattern(declaration)) declaration = declaration.parent;
+      destructuring(node, node.propertyName ?? node.name, ts.isVariableDeclaration(declaration) ? declaration.initializer : null, !!node.dotDotDotToken);
+    } else if (ts.isObjectLiteralExpression(node) && ts.isBinaryExpression(node.parent) && node.parent.operatorToken.kind === K.EqualsToken
+      && node.parent.left === node) {
+      for (const member of node.properties) {
+        destructuring(member, ts.isSpreadAssignment(member) ? null : member.name, node.parent.right, ts.isSpreadAssignment(member));
+      }
+    } else if (ts.isCallExpression(node) || ts.isNewExpression(node)) fragment(node);
+    if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && namesTable(node.text)) naming.push(node);
+    if (ts.isTemplateExpression(node) && namesTable([node.head.text, ...node.templateSpans.map(span => span.literal.text)].join('\u0000'))) naming.push(node);
     ts.forEachChild(node, visit);
   }
 
-  for (const file of files) {
+  // ── the scan ──
+  for (const source of sources) {
+    const file = program.getSourceFile(slash(path.join(ROOT, source.file)));
     const broken = program.getSyntacticDiagnostics(file);
-    if (broken.length) unrecognized.push(`${repoPath(file.fileName)} does not parse: ${ts.flattenDiagnosticMessageText(broken[0].messageText, ' ')}`);
-    else visit(file);
+    if (broken.length) note(file, 'source file', 'unresolved', `does not parse: ${ts.flattenDiagnosticMessageText(broken[0].messageText, ' ')}`);
+    else files.push(file);
   }
-  const scan = { typescript: ts.version, sites, unrecognized };
+  // The client flow: the seeds, then every binding, argument and result a client reaches, to a fixed point.
+  const bindings = [], calls = [], results = [];
+  const enclosing = node => { for (let at = node.parent; at; at = at.parent) if (ts.isFunctionLike(at)) return at.body ? at : null; return null; };
+  const collect = node => {
+    if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isPropertyDeclaration(node) || ts.isPropertySignature(node)) {
+      if (clientType(node.type) || (ts.isParameter(node) && transactionCallback(node))) clients.add(node);
+      if (node.initializer) bindings.push([node, node.initializer]);
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === K.EqualsToken) {
+      const left = bare(node.left);
+      const symbol = ts.isIdentifier(left) ? symbolAt(left) : ts.isPropertyAccessExpression(left) ? resolve(checker.getSymbolAtLocation(left.name)) : null;
+      if (symbol?.declarations?.length === 1) bindings.push([symbol.declarations[0], node.right]);
+    }
+    if (ts.isCallExpression(node) || ts.isNewExpression(node)) calls.push(node);
+    if (ts.isReturnStatement(node) && node.expression && enclosing(node)) results.push([enclosing(node), node.expression]);
+    if (ts.isArrowFunction(node) && !ts.isBlock(node.body)) results.push([node, node.body]);
+    ts.forEachChild(node, collect);
+  };
+  files.forEach(collect);
+  const memberName = declaration => ((ts.isPropertyDeclaration(declaration) || (ts.isParameter(declaration) && ts.getCombinedModifierFlags(declaration)
+    & (ts.ModifierFlags.ParameterPropertyModifier))) && declaration.name && !ts.isComputedPropertyName(declaration.name) ? declaration.name.text : null);
+  for (let changed = true; changed;) {
+    changed = false;
+    const add = (set, item) => { if (!set.has(item)) { set.add(item); changed = true; } };
+    for (const [declaration, value] of bindings) if (!clients.has(declaration) && isClient(value)) add(clients, declaration);
+    for (const call of calls) {
+      (call.arguments ?? []).forEach((argument, index) => {
+        if (ts.isSpreadElement(argument) || !isClient(argument)) return;
+        for (const owner of callees(call) ?? []) {
+          const parameter = owner.parameters[index + shift(owner)];
+          if (parameter && ts.isIdentifier(parameter.name) && !parameter.dotDotDotToken) add(clients, parameter);
+        }
+      });
+    }
+    for (const [owner, value] of results) if (!clientFunctions.has(owner) && isClient(value)) add(clientFunctions, owner);
+    for (const declaration of clients) { const name = memberName(declaration); if (name) add(clientMembers, name); }
+  }
+  files.forEach(visit);
+  // Every client value is followed by the fixed point, or it is unresolved.
+  const assignedClient = left => {
+    const target = bare(left);
+    const symbol = ts.isIdentifier(target) ? symbolAt(target) : ts.isPropertyAccessExpression(target) ? resolve(checker.getSymbolAtLocation(target.name)) : null;
+    return heldClient(symbol);
+  };
+  function followClient(start) {
+    let node = start;
+    for (;;) {
+      const parent = node.parent;
+      if (WRAPPERS.has(parent.kind) || ts.isAwaitExpression(parent) || (ts.isConditionalExpression(parent) && parent.condition !== node)
+        || (ts.isBinaryExpression(parent) && (CHOICES.has(parent.operatorToken.kind)
+          || (parent.operatorToken.kind === K.CommaToken && parent.right === node)))) node = parent;
+      else break;
+    }
+    const parent = node.parent;
+    const argument = (ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.arguments?.includes(node);
+    const receiving = argument && callees(parent)?.every(owner => {
+      const parameter = owner.parameters[parent.arguments.indexOf(node) + shift(owner)];
+      return parameter && ts.isIdentifier(parameter.name) && !parameter.dotDotDotToken && clients.has(parameter);
+    });
+    const returned = ts.isReturnStatement(parent) || (ts.isArrowFunction(parent) && parent.body === node);
+    const owner = returned ? (ts.isReturnStatement(parent) ? enclosing(parent) : parent) : null;
+    if ((isAccess(parent) && parent.expression === node)
+      || ((ts.isVariableDeclaration(parent) || ts.isParameter(parent) || ts.isPropertyDeclaration(parent)) && parent.initializer === node
+        && (clients.has(parent) || !ts.isIdentifier(parent.name)))
+      || (ts.isBinaryExpression(parent) && parent.operatorToken.kind === K.EqualsToken && parent.right === node
+        && (assignedClient(parent.left) || ts.isObjectLiteralExpression(bare(parent.left)) || ts.isArrayLiteralExpression(bare(parent.left))))
+      || (argument && receiving) || (owner && invocations(owner).escapes.length === 0) || inert(node)) return;
+    note(start, 'client value', 'unresolved', `\`${snippet(start)}\`: ` + (argument ? `a client value handed to \`${snippet(parent.expression)}\`, which this check does not follow`
+      : owner ? `a client value returned from ${describe(owner)}, which is handed on` : `a client value used in a ${K[parent.kind]}, where this check does not follow it`));
+  }
+  const occurrences = node => {
+    if (ts.isTypeNode(node)) return;
+    const name = ts.isIdentifier(node) && (accessOf(node) || (node.parent && 'name' in node.parent && node.parent.name === node
+      && !ts.isShorthandPropertyAssignment(node.parent)) || ts.isImportSpecifier(node.parent) || ts.isExportSpecifier(node.parent));
+    const held = outer(node);   // written, not read: `tx = undefined`
+    const target = !!held.parent && ts.isBinaryExpression(held.parent) && held.parent.left === held && held.parent.operatorToken.kind === K.EqualsToken;
+    const value = node.kind === K.ThisKeyword || (ts.isIdentifier(node) && !name) || isAccess(node) || ts.isNewExpression(node) || ts.isCallExpression(node);
+    if (value && !target && isClient(node)) followClient(node);
+    ts.forEachChild(node, occurrences);
+  };
+  files.forEach(occurrences);
+  for (const node of naming) if (!claimed.has(node)) note(node, 'SQL naming AuditLog', 'unresolved', 'names AuditLog but is not the fixed SQL of a raw call');
+  const scan = { typescript: ts.version, files: sources.map(source => source.file), sites, candidates,
+    unresolved: candidates.filter(entry => entry.status === 'unresolved').map(entry => `${entry.file}:${entry.line} ${entry.kind}: ${entry.reason}`),
+    flow: { clients: [...clients].map(declaration => `${where(declaration)} ${declaration.name?.getText() ?? K[declaration.kind]}`).sort(),
+      functions: [...clientFunctions].map(describe).sort(), members: [...clientMembers].sort() } };
   Object.defineProperties(scan, { tools: { value: { ts, bare, symbolAt, references } } });
   return scan;
 }
 
-/** The completeness verdict over one scan: throws at the first condition it does not meet. */
-function assertComplete(scan) {
-  assert.deepEqual(scan.unrecognized, [], 'every audit write site must have a readable action');
-  const literals = new Set(scan.sites.flatMap(site => site.actions));
-  const prefixes = new Set(scan.sites.flatMap(site => site.prefixes));
-  const hiddenEntries = [...A.AUDIT_HIDDEN_NO_RECORD_TIME_INSTITUTION, ...A.AUDIT_HIDDEN_CONNECT, ...A.AUDIT_HIDDEN_STUDY_SCOPED];
-  const stems = hiddenEntries.filter(entry => entry.endsWith('*')).map(entry => entry.slice(0, -1));
-  const unlisted = [...literals].filter(action => A.auditRule(action) === 'hidden:unknown_action').sort();
-  assert.deepEqual(unlisted, [], 'an audit action written under api/src without a contract row');
-  // A dynamic suffix cannot be listed one by one: whatever it becomes must fall under a hidden wildcard row (fail closed).
-  assert.deepEqual([...prefixes].filter(start => !stems.some(stem => start.startsWith(stem))).sort(), [],
-    'a dynamic audit action without a wildcard row');
-  // The other direction: no contract row names an action nothing writes (a stale row would hide a renamed writer).
+// ── the verdict: the contract table is read here only ──
+const VERDICT = {
+  unread_sources: 'every script file under api/src is read by the program',
+  unresolved: 'every audit candidate is resolved or proven not an audit write',
+  unlisted: 'an audit action written under api/src without a contract row',
+  uncovered_prefixes: 'a dynamic audit action without a wildcard row',
+  unwritten_rows: 'contract rows nothing writes',
+  unwritten_wildcards: 'wildcard rows nothing writes',
+};
+const EMPTY_VERDICT = Object.fromEntries(Object.keys(VERDICT).map(name => [name, []]));
+/** The rows of api/src/admin-audit.ts: the exact rows (allowed and hidden) and the hidden wildcards' stems. */
+function productTable() {
   const allowed = [...A.AUDIT_MEMBER_ACTIONS, ...Object.keys(A.AUDIT_FIELD_RULES), ...A.AUDIT_REPORT_COMMIT_ACTIONS.map(a => 'report.' + a)];
-  const exactHidden = hiddenEntries.filter(entry => !entry.endsWith('*'));
-  assert.deepEqual([...allowed, ...exactHidden].filter(action => !literals.has(action)), [], 'contract rows nothing writes');
-  assert.deepEqual(stems.filter(stem => ![...literals, ...prefixes].some(action => action.startsWith(stem))), [],
-    'wildcard rows nothing writes');
-  return { literals, prefixes, unlisted };
+  const hidden = [...A.AUDIT_HIDDEN_NO_RECORD_TIME_INSTITUTION, ...A.AUDIT_HIDDEN_CONNECT, ...A.AUDIT_HIDDEN_STUDY_SCOPED];
+  return { rows: [...allowed, ...hidden.filter(entry => !entry.endsWith('*'))],
+    wildcards: hidden.filter(entry => entry.endsWith('*')).map(entry => entry.slice(0, -1)),
+    listed: action => A.auditRule(action) !== 'hidden:unknown_action' };
+}
+/** Every failure class of one scan at once, so that one never hides another. */
+function verdict(scan, table = productTable(), listing = null) {
+  const literals = new Set(scan.sites.flatMap(site => site.actions)), prefixes = new Set(scan.sites.flatMap(site => site.prefixes));
+  return {
+    unread_sources: listing ? [...listing.unread, ...listing.extra.map(file => `${file} (named by tsconfig, not on the disk)`)] : [],
+    unresolved: scan.unresolved,
+    unlisted: [...literals].filter(action => !table.listed(action)).sort(),
+    uncovered_prefixes: [...prefixes].filter(start => !table.wildcards.some(stem => start.startsWith(stem))).sort(),
+    unwritten_rows: table.rows.filter(action => !literals.has(action)),
+    unwritten_wildcards: table.wildcards.filter(stem => ![...literals, ...prefixes].some(action => action.startsWith(stem))),
+  };
+}
+const failing = found => Object.keys(VERDICT).filter(name => found[name].length > 0);
+
+
+test('completeness: every api/src file is read, every audit candidate is resolved or proven not a write, both directions hold', () => {
+  const { sources, listing } = productSources();
+  const scan = scanAuditWrites(sources), found = verdict(scan, productTable(), listing);
+  // The inventory, whatever the verdict: every write site with its kind, actions or prefixes and their basis, every
+  // unresolved candidate, and every candidate proven not to be a write with its reason.
+  console.log('ADMIN_AUDIT_SOURCES ' + JSON.stringify(listing));
+  for (const site of scan.sites) console.log('ADMIN_AUDIT_WRITER ' + JSON.stringify({ ...site, status: 'resolved' }));
+  for (const entry of scan.candidates.filter(entry => entry.status === 'unresolved')) console.log('ADMIN_AUDIT_WRITER ' + JSON.stringify(entry));
+  const tally = {};
+  for (const entry of scan.candidates) tally[`${entry.kind} / ${entry.status}`] = (tally[`${entry.kind} / ${entry.status}`] ?? 0) + 1;
+  console.log('ADMIN_AUDIT_CANDIDATES ' + JSON.stringify(tally));
+  for (const entry of scan.candidates.filter(entry => entry.status === 'proven_non_audit')) console.log('ADMIN_AUDIT_NON_AUDIT ' + JSON.stringify(entry));
+  console.log('ADMIN_AUDIT_CLIENT_FLOW ' + JSON.stringify(scan.flow));
+  const literals = new Set(scan.sites.flatMap(site => site.actions)), byRule = {};
+  for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
+  console.log('ADMIN_AUDIT_COMPLETENESS ' + JSON.stringify({ typescript: scan.typescript, files_listed: listing.disk, files_read: scan.files.length,
+    write_sites: scan.sites.length, raw_sql_sites: scan.sites.filter(site => site.via.startsWith('raw')).length,
+    unresolved: scan.unresolved.length, distinct_actions: literals.size, dynamic_prefixes: [...new Set(scan.sites.flatMap(site => site.prefixes))].sort(),
+    by_rule: byRule, write_files: new Set(scan.sites.map(site => site.file)).size }));
+  console.log('ADMIN_AUDIT_VERDICT ' + JSON.stringify(found));
+  // The owner-only study-scoped records (the S5-U4a question, the S5-U4c image request, the S7-U1a critical result) are
+  // each written, and their own rows keep them off the console whatever their detail names.
+  for (const action of A.AUDIT_HIDDEN_STUDY_SCOPED) assert.ok(literals.has(action), action);
+  assert.deepEqual(found, EMPTY_VERDICT, `the audit completeness verdict fails: ${failing(found).map(name => VERDICT[name]).join('; ')}`);
+});
+
+test('completeness: the files of api/src are listed from the disk; one the program does not read fails the gate on its own', () => {
+  const { listing } = productSources();
+  assert.equal(listing.disk, typescript().named.length + listing.unread.length - listing.extra.length);
+  const named = ['api/src/a.ts', 'api/src/b.ts'];
+  assert.deepEqual(sourceListing(['api/src/a.ts', 'api/src/b.ts', 'api/src/notes.md'], named), { disk: 2, program: 2, unread: [], extra: [] });
+  assert.deepEqual(sourceListing([...named, 'api/src/legacy.js', 'api/src/types.d.ts', 'api/src/link.ts (not a file)'], named).unread,
+    ['api/src/legacy.js', 'api/src/link.ts (not a file)', 'api/src/types.d.ts']);
+  assert.deepEqual(sourceListing(['api/src/a.ts'], named).extra, ['api/src/b.ts']);
+  const clean = scanAuditWrites(baselineSources());
+  assert.deepEqual(failing(verdict(clean, fixtureTable(), sourceListing([...named, 'api/src/legacy.js'], named))), ['unread_sources']);
+});
+
+// ── the checker's own tests, on test-owned fixtures (tests/fixtures/admin_audit_completeness; Astra S7-U3a-AUDIT-SPEC-R-001-F04) ──
+// Each fixture declares what it expects: `// expect:` on a line names the one candidate the line gives, the violations'
+// headers name the one failure class each must cause, and contract.json is their table. Nothing here is read from the
+// checker's output to decide what is expected.
+
+const FIXTURES = path.join(__dirname, 'fixtures', 'admin_audit_completeness');
+const fixtureText = name => readFileSync(path.join(FIXTURES, name), 'utf8').replace(/\r\n/g, '\n');
+const asSource = (name, text) => ({ file: `api/src/syn-fixture/${name}`, text });
+const baselineSources = () => ['actions.ts', 'forward.ts', 'baseline.ts'].map(name => asSource(name, fixtureText(name)));
+/** contract.json as a table, with a case's added rows or wildcards. */
+function fixtureTable(added = {}) {
+  const table = JSON.parse(fixtureText('contract.json'));
+  const rows = [...table.rows, ...(added.rows ?? [])], wildcards = [...table.wildcards, ...(added.wildcards ?? [])];
+  return { rows, wildcards, listed: action => rows.includes(action) || wildcards.some(stem => action.startsWith(stem)) };
+}
+/** A fixture's marks: line -> {status, detail}; a mark alone on its line is the next line's. */
+function marks(text) {
+  const found = new Map();
+  text.split('\n').forEach((line, index) => {
+    const mark = /\/\/ expect: (resolved|proven_non_audit|unresolved)(?: (.*))?$/.exec(line);
+    if (!mark) return;
+    const at = /^\s*\/\/ expect:/.test(line) ? index + 2 : index + 1;
+    assert.ok(!found.has(at), `line ${at} is marked twice`);
+    found.set(at, { status: mark[1], detail: (mark[2] ?? '').trim() });
+  });
+  return found;
+}
+/** The candidates of `scan` in `source` against its marks: one per marked line, as marked, and none on another line. */
+function assertMarked(scan, source) {
+  const expected = marks(source.text), seen = new Set();
+  for (const entry of scan.candidates.filter(entry => entry.file === source.file)) {
+    const label = `${source.file}:${entry.line} ${entry.kind} ${entry.status}: ${entry.reason}`;
+    const mark = expected.get(entry.line);
+    assert.ok(mark, `a candidate on a line without a mark: ${label}`);
+    assert.ok(!seen.has(entry.line), `a second candidate on a marked line: ${label}`);
+    seen.add(entry.line);
+    assert.equal(entry.status, mark.status, label);
+    if (mark.status === 'resolved') {
+      const site = scan.sites.find(site => site.file === entry.file && site.start === entry.start), words = mark.detail.split(/\s+/).filter(Boolean);
+      assert.deepEqual([site.actions, site.prefixes], [words.filter(word => !word.startsWith('prefix:')).sort(),
+        words.filter(word => word.startsWith('prefix:')).map(word => word.slice('prefix:'.length)).sort()], label);
+    } else {
+      assert.ok(entry.reason.includes(mark.detail), `${label}\n  the mark says: ${mark.detail}`);
+    }
+  }
+  assert.deepEqual([...expected.keys()].filter(line => !seen.has(line)), [], `${source.file}: marked lines that gave no candidate`);
+  return { marked: expected.size, resolved: [...expected.values()].filter(mark => mark.status === 'resolved').length,
+    unresolved: [...expected.values()].filter(mark => mark.status === 'unresolved').length };
+}
+/** violations.txt: one module per `// ==== case: <name> | verdict: <class> [entries] [| table: +row|+wildcard <x>] ====`. */
+function violationCases() {
+  const cases = [];
+  for (const line of fixtureText('violations.txt').split('\n')) {
+    const header = /^\/\/ ==== case: (\S+) \| verdict: (\w+)((?: [^\s|]+)*)((?: \| table: \+(?:row|wildcard) \S+)*) ====$/.exec(line);
+    if (header) {
+      const table = { rows: [], wildcards: [] };
+      for (const [, kind, value] of header[4].matchAll(/\| table: \+(row|wildcard) (\S+)/g)) table[kind === 'row' ? 'rows' : 'wildcards'].push(value);
+      cases.push({ name: header[1], failing: header[2], entries: header[3].trim().split(/\s+/).filter(Boolean), table, lines: [] });
+    } else if (cases.length) {
+      cases[cases.length - 1].lines.push(line);
+    }
+  }
+  return cases.map(entry => ({ ...entry, source: asSource(`case-${entry.name}.ts`, entry.lines.join('\n')) }));
+}
+/** A scan's candidates as `file@offset kind status [actions prefixes]`, their offsets carried through `edits` if given. */
+function inventory(scan, edits = null) {
+  return scan.candidates.map(entry => {
+    const site = entry.status === 'resolved' ? scan.sites.find(site => site.file === entry.file && site.start === entry.start) : null;
+    return `${entry.file}@${edits ? moved(edits, entry.file, entry.start) : entry.start} ${entry.kind} ${entry.status}`
+      + (site ? ` [${site.actions}] [${site.prefixes}]` : '');
+  }).sort();
+}
+/** Where `offset` of `file` lands after `edits` (none overlapping); null when an edit replaced it. */
+function moved(edits, file, offset) {
+  let delta = 0;
+  for (const [start, end, replacement] of edits.get(file) ?? []) {
+    if (end <= offset) delta += replacement.length - (end - start);
+    else if (start < offset) return null;
+  }
+  return offset + delta;
 }
 
-/** What a scan read, by file: the actions and dynamic prefixes of its writes. */
-function readActions(scan) {
-  const byFile = {};
-  for (const site of scan.sites) {
-    const entry = byFile[site.file] ??= { actions: new Set(), prefixes: new Set() };
-    site.actions.forEach(action => entry.actions.add(action));
-    site.prefixes.forEach(start => entry.prefixes.add(start));
+test('checker self-test: the baseline fixture passes the gate alone; its writes, reads and other accesses are as marked', () => {
+  const sources = baselineSources(), scan = scanAuditWrites(sources);
+  const counts = sources.map(source => assertMarked(scan, source));
+  assert.deepEqual(verdict(scan, fixtureTable()), EMPTY_VERDICT);
+  assert.equal(scan.sites.length, counts.reduce((sum, count) => sum + count.resolved, 0));
+  // The flow found the client of the baseline where it is: the PrismaClient subclass's member and the $transaction callback's parameter.
+  assert.deepEqual(scan.flow.clients.map(entry => entry.split(' ').pop()), ['prisma', 'tx']);
+  console.log('ADMIN_AUDIT_CHECKER_BASELINE ' + JSON.stringify({ marks: counts, sites: scan.sites.length, candidates: scan.candidates.length, flow: scan.flow }));
+});
+
+test('checker self-test: the supported notations (a)-(i) and the INSERT positions each add exactly their marked writes', () => {
+  const base = scanAuditWrites(baselineSources()), before = inventory(base);
+  for (const name of ['equivalent.ts', 'sql-positions.ts']) {
+    const source = asSource(name, fixtureText(name)), scan = scanAuditWrites([...baselineSources(), source]);
+    const count = assertMarked(scan, source);
+    // Each marked write is one more site, and nothing of the baseline changed.
+    assert.equal(scan.sites.filter(site => site.file === source.file).length, count.resolved, name);
+    assert.deepEqual(inventory(scan).filter(entry => !entry.startsWith(source.file + '@')), before, name);
+    assert.deepEqual(verdict(scan, fixtureTable()), EMPTY_VERDICT, name);
+    console.log('ADMIN_AUDIT_CHECKER_SUPPORTED ' + JSON.stringify({ fixture: name, ...count,
+      sites: scan.sites.filter(site => site.file === source.file).map(site => `${site.line} ${site.via} [${site.actions}] [${site.prefixes}]`) }));
   }
-  return Object.fromEntries(Object.keys(byFile).sort().map(file => [file, { actions: [...byFile[file].actions].sort(),
-    prefixes: [...byFile[file].prefixes].sort() }]));
-}
+});
+
+test('checker self-test: every failure class fails the gate on its own, on exactly its marked candidates', async t => {
+  const cases = violationCases(), results = [];
+  assert.ok(cases.length >= 60, `${cases.length} cases`);
+  assert.deepEqual(cases.map(entry => entry.name).filter((name, n, all) => all.indexOf(name) !== n), [], 'case names are unique');
+  for (const entry of cases) {
+    await t.test(entry.name, () => {
+      const scan = scanAuditWrites([...baselineSources(), entry.source]), found = verdict(scan, fixtureTable(entry.table));
+      const count = assertMarked(scan, entry.source);
+      assert.deepEqual(failing(found), [entry.failing], `${entry.name}: ${JSON.stringify(found)}`);
+      if (entry.failing === 'unresolved') {
+        assert.equal(found.unresolved.length, count.unresolved);
+        for (const reason of found.unresolved) assert.ok(reason.startsWith(entry.source.file + ':'), reason);
+      } else {
+        assert.deepEqual(found[entry.failing], entry.entries);
+      }
+      results.push({ case: entry.name, failing: failing(found), found: found[entry.failing] });
+    });
+  }
+  console.log('ADMIN_AUDIT_CHECKER_VIOLATIONS ' + JSON.stringify(results));
+});
+
+// ── the controls over api/src: rewrites by the positions the compiler parsed, and values changed to fail ──
+// No spelling of the product is assumed: the edits are made where the compiler found each write, and every write site keeps
+// its position (carried through the edits), its kind and its actions — a site that disappears or appears fails, even when
+// another site records the same action (Astra S7-U3a-AUDIT-SPEC-R-001-F04).
 
 /** `sources` with the text edits of `edits` (file -> [[start, end, text], ...], none overlapping) made by position. */
 function edited(sources, edits) {
@@ -1237,34 +1964,26 @@ function edited(sources, edits) {
 const edit = (edits, file, start, end, replacement) => {
   if (!edits.has(file)) edits.set(file, []);
   if (!edits.get(file).some(([s, e, r]) => s === start && e === end && r === replacement)) edits.get(file).push([start, end, replacement]);
+  edits.get(file).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
 };
 
-test('completeness: every audit action written under api/src has a contract row, and every row is written', () => {
-  const scan = scanAuditWrites();
-  const { literals, prefixes, unlisted } = assertComplete(scan);
-  // The owner-only study-scoped records (the S5-U4a question, the S5-U4c image request, the S7-U1a critical result) are
-  // each written, and their own rows keep them off the console whatever their detail names.
-  for (const action of A.AUDIT_HIDDEN_STUDY_SCOPED) assert.ok(literals.has(action), action);
-  const byRule = {};
-  for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
-  console.log('ADMIN_AUDIT_COMPLETENESS ' + JSON.stringify({
-    typescript: scan.typescript, write_sites: scan.sites.length, raw_sql_sites: scan.sites.filter(site => site.via.startsWith('raw')).length,
-    distinct_actions: literals.size, dynamic_prefixes: [...prefixes].sort(), registered: literals.size - unlisted.length,
-    by_rule: byRule, files: new Set(scan.sites.map(site => site.file)).size,
-  }));
-});
-
-// The same writes in another notation read the same actions (Astra S7-U3a-C-R-001-F01: `action: (ACTION)` and
-// `auditLog['create'](...)` of the reader assignment writes were refused by the former text scanner). The rewrites are
-// made by position on what the compiler parsed, over every audit create of api/src, so no spelling of the product is
-// assumed here.
-test('completeness equivalents: every write of api/src rewritten in another notation reads the same actions', () => {
-  const sources = auditSources(), base = scanAuditWrites(sources), expected = readActions(base);
-  assertComplete(base);
+test('completeness equivalents: every write of api/src rewritten in another notation keeps its site, position and actions', () => {
+  const sources = auditSources(), base = scanAuditWrites(sources);
   const { ts, bare, symbolAt, references } = base.tools;
   const creates = base.sites.filter(site => site.via === 'auditLog.create');
   assert.ok(creates.length > 0);
   const text = node => node.getSourceFile().text.slice(node.getStart(), node.end);
+  /** The `x.auditLog` and `.create` accesses of a create call, outermost first. */
+  const chain = site => {
+    const found = [];
+    for (let access = bare(site.call.expression); access && (ts.isPropertyAccessExpression(access) || ts.isElementAccessExpression(access));
+      access = bare(access.expression)) {
+      found.push(access);
+      if (found.length === 2) break;
+    }
+    return found;
+  };
+  const declare = (edits, file, line) => edit(edits, file, 0, 0, line + '\n');
   const variants = {
     // `action: (x)` for every action, a shorthand `action` included.
     'the action in parentheses': edits => creates.forEach(site => {
@@ -1273,12 +1992,23 @@ test('completeness equivalents: every write of api/src rewritten in another nota
     }),
     // `x['auditLog']['create'](...)` for every `x.auditLog.create(...)`.
     'element access to the delegate and its create': edits => creates.forEach(site => {
-      for (let access = bare(site.call.expression); access && (ts.isPropertyAccessExpression(access) || ts.isElementAccessExpression(access));
-        access = bare(access.expression)) {
-        const key = ts.isPropertyAccessExpression(access) ? access.name.text : null;
-        if (key === 'create' || key === 'auditLog') edit(edits, site.file, access.expression.end, access.end, `['${key}']`);
-        if (key === 'auditLog') break;
+      for (const access of chain(site)) if (ts.isPropertyAccessExpression(access)) edit(edits, site.file, access.expression.end, access.end, `['${access.name.text}']`);
+    }),
+    // `x[AUDIT_DELEGATE_KEY][AUDIT_CREATE_KEY](...)` with the two constants declared in the file (Astra S7-U3a-D-R-001-F01).
+    'constant keys for the delegate and its create': edits => creates.forEach(site => {
+      declare(edits, site.file, "const AUDIT_DELEGATE_KEY = 'auditLog', AUDIT_CREATE_KEY = 'create';");
+      for (const access of chain(site)) {
+        const key = access.name?.text === 'auditLog' ? 'AUDIT_DELEGATE_KEY' : 'AUDIT_CREATE_KEY';
+        if (ts.isPropertyAccessExpression(access)) edit(edits, site.file, access.expression.end, access.end, `[${key}]`);
       }
+    }),
+    // `{ [AUDIT_DATA_KEY]: { [AUDIT_ACTION_KEY]: x } }` with the two constants declared in the file.
+    'constant computed keys for data and action': edits => creates.forEach(site => {
+      declare(edits, site.file, "const AUDIT_DATA_KEY = 'data', AUDIT_ACTION_KEY = 'action';");
+      const member = site.action.member, data = member.parent.parent;
+      edit(edits, site.file, data.name.getStart(), data.name.end, '[AUDIT_DATA_KEY]');
+      if (site.action.shorthand) edit(edits, site.file, member.getStart(), member.end, `[AUDIT_ACTION_KEY]: ${text(member)}`);
+      else edit(edits, site.file, member.name.getStart(), member.name.end, '[AUDIT_ACTION_KEY]');
     }),
     // A comment and a line break before the action and the argument, trailing commas after the last properties.
     'comments, line breaks and trailing commas': edits => creates.forEach(site => {
@@ -1311,184 +2041,98 @@ test('completeness equivalents: every write of api/src rewritten in another nota
       }
     }),
   };
-  const counts = {};
+  const expectedAll = inventory(base), counts = {};
+  const readerAssignment = base.sites.filter(site => site.file === 'api/src/reader-assignment.service.ts');
+  assert.equal(readerAssignment.length, 2, 'the two reader assignment writes (close and assign) are sites of their own');
   for (const [name, make] of Object.entries(variants)) {
     const edits = new Map();
     make(edits);
     counts[name] = [...edits.values()].reduce((sum, list) => sum + list.length, 0);
     assert.ok(counts[name] > 0, `${name} changes the source`);
     const scan = scanAuditWrites(edited(sources, edits));
-    assert.deepEqual(scan.unrecognized, [], name);
-    assert.deepEqual(readActions(scan), expected, name);
-    assertComplete(scan);
+    // Every candidate of api/src, each write site with its actions, where the rewrite carried it; none more, none less.
+    assert.deepEqual(inventory(scan), inventory(base, edits), name);
+    assert.equal(scan.sites.length, base.sites.length, name);
+    // The same verdict (its positions are the inventory's above; a declaration a rewrite adds moves lines).
+    const lineless = scanned => ({ ...scanned, unresolved: scanned.unresolved.map(entry => entry.replace(/^([^:]+):\d+ /, '$1 ')) });
+    assert.deepEqual(lineless(verdict(scan, productTable(), productSources().listing)), lineless(verdict(base, productTable(), productSources().listing)), name);
   }
-  console.log('ADMIN_AUDIT_EQUIVALENT_REWRITES ' + JSON.stringify(counts));
+  console.log('ADMIN_AUDIT_EQUIVALENT_REWRITES ' + JSON.stringify({ edits: counts, candidates: expectedAll.length, sites: base.sites.length }));
+
+  // The comparison keeps each site: taking out one of the two reader assignment writes is caught although the other still
+  // records the same action, where a comparison of the actions each file records would not see it.
+  const [first] = readerAssignment, removal = new Map();
+  edit(removal, first.file, first.call.getStart(), first.call.end, 'void 0');
+  const removed = scanAuditWrites(edited(sources, removal));
+  const actionsByFile = scan => JSON.stringify(Object.fromEntries([...new Set(scan.sites.map(site => site.file))].sort()
+    .map(file => [file, [...new Set(scan.sites.filter(site => site.file === file).flatMap(site => site.actions))].sort()])));
+  assert.equal(actionsByFile(removed), actionsByFile(base), 'the actions per file are the same without it');
+  assert.notDeepEqual(inventory(removed), inventory(base, removal));
+  assert.deepEqual(inventory(base, removal).filter(entry => !inventory(removed).includes(entry)),
+    [`${first.file}@${first.start} auditLog.create resolved [reader.assignment] []`]);
+  // A new synthetic writer adds exactly one site.
+  const writer = [
+    "import { Prisma } from '@prisma/client';",
+    "export async function addedWriter(tx: Prisma.TransactionClient) { await tx.auditLog.create({ data: { action: 'reader.assignment' } }); }",
+  ].join('\n');
+  const added = scanAuditWrites([...sources, { file: 'api/src/syn-added-writer.ts', text: writer }]);
+  assert.deepEqual(inventory(added).filter(entry => !expectedAll.includes(entry)),
+    [`api/src/syn-added-writer.ts@${writer.indexOf('tx.auditLog')} auditLog.create resolved [reader.assignment] []`]);
+  assert.equal(added.sites.length, base.sites.length + 1);
 });
 
-// A writer of api/src's own spelling is not needed to show how a notation reads: these synthetic files are added to the
-// program next to it (in memory; nothing is written to disk).
-const SYN_ACTIONS = "export const READER_ASSIGNMENT = 'reader.assignment';";
-const SYN_EQUIVALENT = [
-  "import { READER_ASSIGNMENT as MOVED } from './syn-audit-actions';",
-  "import * as ACTIONS from './syn-audit-actions';",
-  "const ACTION = 'reader.assignment' as const;",
-  "const TABLE = { reader: { assignment: 'reader.assignment' } } as const;",
-  "const READER = 'reader';",
-  "enum Kind { Assignment = 'reader.assignment' }",
-  'export class SynEquivalentWrites {',
-  "  private static readonly FIELD = 'reader.assignment';",
-  '  private audit(tx: any, actor: string, action: string, uid: string) {',
-  '    return tx.auditLog.create({ data: { actor, action, target: uid } });',
-  '  }',
-  '  async write(tx: any, c: any, uid: string, body: any) {',
-  '    await tx.auditLog.create({ data: { actor: c.actor, action: ACTION satisfies string, target: uid } });',
-  '    await tx.auditLog.create({ data: { actor: c.actor, action: MOVED, target: uid } });',
-  '    await tx.auditLog.create({ data: { actor: c.actor, action: ACTIONS.READER_ASSIGNMENT, target: uid } });',
-  '    await tx.auditLog.create({ data: { actor: c.actor, action: TABLE.reader.assignment, target: uid } });',
-  "    await tx.auditLog.create({ data: { actor: c.actor, action: TABLE['reader']['assignment'], target: uid } });",
-  '    await tx.auditLog.create({ data: { actor: c.actor, action: `${READER}.assignment`, target: uid } });',
-  "    await tx.auditLog.create({ data: { actor: c.actor, action: READER + '.' + 'assignment', target: uid } });",
-  '    await tx.auditLog.create({ data: { actor: c.actor, action: Kind.Assignment, target: uid } });',
-  '    await tx.auditLog.create({ data: { actor: c.actor, action: SynEquivalentWrites.FIELD, target: uid } });',
-  '    await this.audit(tx, c.actor, ACTION, uid);',
-  '    const local = (action: string) => tx.auditLog.create({ data: { actor: c.actor, action, target: uid } });',
-  '    await local(MOVED);',
-  "    let chosen = 'reader.assignment';",
-  '    if (body.again) chosen = ACTION;',
-  '    await tx.auditLog.create({ data: { actor: c.actor, action: chosen, target: uid } });',
-  '    const kind = body.kind;',
-  "    if (!body || !['reader.assignment'].includes(kind)) throw new Error('SYN unknown kind');",
-  '    await tx.auditLog.create({ data: { actor: c.actor, action: kind, target: uid } });',
-  "    await tx.$executeRaw`INSERT INTO \"AuditLog\" (actor, action, target) VALUES (${c.actor}, 'reader.assignment', ${uid})`;",
-  '    await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) VALUES (${c.actor}, ${ACTION}, ${uid})`;',
-  '  }',
-  '}',
-].join('\n');
-
-test('completeness equivalents: constants moved, imported, aliased, tabled, typed, passed, assigned or checked read the same action', () => {
-  const scan = scanAuditWrites([...auditSources(), { file: 'api/src/syn-audit-actions.ts', text: SYN_ACTIONS },
-    { file: 'api/src/syn-equivalent-writes.ts', text: SYN_EQUIVALENT }]);
-  assert.deepEqual(scan.unrecognized, []);
-  const writes = scan.sites.filter(site => site.file === 'api/src/syn-equivalent-writes.ts');
-  // Thirteen creates (one in the private helper, one in the local arrow) and two raw inserts, each read as the one action.
-  assert.deepEqual(writes.map(site => [site.via, site.actions, site.prefixes]),
-    [...Array(13).fill(['auditLog.create', ['reader.assignment'], []]), ...Array(2).fill(['raw SQL INSERT INTO "AuditLog"', ['reader.assignment'], []])]);
-  assertComplete(scan);
-});
-
-const SYN_UNREADABLE = [   // [code, why the write on that line is unreadable (null: nothing to read there)]
-  ["import { MISSING } from './syn-missing-module';", null],
-  ["const MUTABLE = { reader: 'reader.assignment' };", null],
-  'const SynHook = (): MethodDecorator => () => undefined;',
-  'export class SynUnreadableWrites {',
-  '  private writers: any[] = [];',
-  ['  private audit(tx: any, action: string) { return tx.auditLog.create({ data: { action } }); }', 'is a property the program does not fix'],
-  ['  private handed(tx: any, action: string) { return tx.auditLog.create({ data: { action } }); }', 'which is handed on at'],
-  ['  @SynHook() private hooked(tx: any, action: string) { return tx.auditLog.create({ data: { action } }); }',
-    'which callers outside this program can call'],
-  '  async request(tx: any, body: any) {',
-  ['    await tx.auditLog.create({ data: { action: body.kind } });', '`body.kind` is a property the program does not fix'],
-  '    await this.audit(tx, body.kind);',
-  "    let chosen = 'reader.assignment';",
-  '    if (body.again) chosen = body.kind;',
-  ['    await tx.auditLog.create({ data: { action: chosen } });', 'is a property the program does not fix'],
-  '    const kind = body.kind;',
-  "    if (!['reader.assignment'].includes(kind)) console.warn('SYN unknown kind');",
-  ['    await tx.auditLog.create({ data: { action: kind } });', 'is a property the program does not fix'],
-  ["    await tx.auditLog.create({ data: { action: String('reader.assignment') } });", 'is a CallExpression'],
-  ['    await tx.auditLog.create({ data: { action: MISSING } });', '`MISSING` does not resolve'],
-  ['    await tx.auditLog.create({ data: { action: MUTABLE.reader } });', 'is not `as const`'],
-  ["    await tx.auditLog.create({ data: { action: 'reader.assignment', ...body.extra } });", 'may be set by the spread'],
-  '    this.writers.push(this.handed);',
-  ["    await tx.auditLog.createMany({ data: [{ action: 'reader.assignment' }] });", 'createMany: writes rows this check does not read'],
-  ['    const log = tx.auditLog;', 'used other than by calling one of its methods'],
-  ["    await log.create({ data: { action: 'reader.assignment' } });", null],
-  ['    const { auditLog } = tx;', 'the delegate is taken out of its client'],
-  ["    await tx.$executeRaw`INSERT INTO \"AuditLog\" (actor, action) SELECT actor, action FROM \"AuditLog\" WHERE action IN ('reader.assignment', 'study.access')`;",
-    '2 action-like values'],
-  ['    await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) VALUES (${body.actor}, ${body.kind}, ${body.uid})`;', '0 action-like values'],
-  '  }',
-  '  async write(tx: any, action: string) {',
-  ['    await tx.auditLog.create({ data: { action } });', 'which callers outside this program can call'],
-  '  }',
-  '}',
-].map(entry => (Array.isArray(entry) ? entry : [entry, null]));
-
-test('completeness negative controls: an action the program does not fix, or a write this check cannot read, fails', () => {
-  const FILE = 'api/src/syn-unreadable-writes.ts';
-  const { scan, error } = completenessFailure([...auditSources(), { file: FILE, text: SYN_UNREADABLE.map(([code]) => code).join('\n') }]);
-  assert.match(error.message, /^every audit write site must have a readable action/);
-  const expected = SYN_UNREADABLE.flatMap(([, reason], i) => (reason ? [[i + 1, reason]] : []));
-  const found = scan.unrecognized.filter(entry => entry.startsWith(FILE + ':'));
-  assert.equal(found.length, expected.length, found.join('\n'));
-  for (const [line, reason] of expected) {
-    assert.ok(found.some(entry => entry.startsWith(`${FILE}:${line} `) && entry.includes(reason)), `line ${line}: ${reason}\n${found.join('\n')}`);
-  }
-  assert.deepEqual(scan.sites.filter(site => site.file === FILE), [], 'nothing of the file is read as a write');
-  // Only the added file is unreadable: api/src as checked out reads in full.
-  assert.deepEqual(scan.unrecognized.filter(entry => !entry.startsWith(FILE + ':')), []);
-  // A source that does not parse is not read at all.
-  const broken = completenessFailure([...auditSources(), { file: 'api/src/syn-broken.ts', text: 'export const = ;' }]);
-  assert.deepEqual(broken.error.actual.map(entry => entry.split(' does not parse')[0]), ['api/src/syn-broken.ts']);
-});
-
-/** The scan of `sources` and the completeness error it must give. */
-function completenessFailure(sources) {
-  const scan = scanAuditWrites(sources);
-  try {
-    assertComplete(scan);
-  } catch (error) {
-    return { scan, error };
-  }
-  assert.fail('the completeness check passed');
-}
-
-test('completeness negative controls: unlisted, dynamic without a wildcard and unwritten actions fail', () => {
-  const sources = auditSources(), base = scanAuditWrites(sources), { ts } = base.tools;
-  const UNLISTED = /^an audit action written under api\/src without a contract row/;
-  // (a) A new write of an action without a row, as a literal, as a constant and as raw SQL.
-  const added = completenessFailure([...sources, { file: 'api/src/syn-unlisted.service.ts', text: [
+test('completeness negative controls on api/src: unlisted, dynamic without a wildcard and unwritten actions each fail on their own', () => {
+  const sources = auditSources(), base = scanAuditWrites(sources), { ts } = base.tools, listing = productSources().listing;
+  const before = verdict(base, productTable(), listing);
+  /** The verdict of `changed`: `name` must be `expected`, every other class as it was before the change. */
+  const alone = (changed, name, expected) => {
+    const found = verdict(changed, productTable(), listing);
+    assert.deepEqual(found[name], expected, name);
+    for (const other of Object.keys(VERDICT).filter(other => other !== name)) assert.deepEqual(found[other], before[other], `${name}: ${other}`);
+    return found;
+  };
+  // (a) New writes of actions without a row: a literal, a constant, a constant delegate key (Astra S7-U3a-D-R-001-F01) and
+  // raw SQL whose action column holds it while another column holds a registered action (S7-U3a-D-R-001-F02).
+  alone(scanAuditWrites([...sources, { file: 'api/src/syn-unlisted.service.ts', text: [
+    "import { Prisma } from '@prisma/client';",
     "export const SYN_UNLISTED_ACTION = 'syn.unlisted';",
+    "const LOG = 'auditLog';",
     'export class SynUnlistedService {',
-    '  async write(tx: any, c: any, uid: string) {',
-    "    await tx.auditLog.create({ data: { actor: c.actor, action: 'study.question.reply', target: uid } });",
-    '    await tx.auditLog.create({ data: { actor: c.actor, action: SYN_UNLISTED_ACTION, target: uid } });',
-    "    await tx.$executeRaw`INSERT INTO \"AuditLog\" (actor, action, target) VALUES (${c.actor}, 'syn.raw-unlisted', ${uid})`;",
+    '  private async write(tx: Prisma.TransactionClient, actor: string, uid: string) {',
+    "    await tx.auditLog.create({ data: { actor, action: 'study.question.reply', target: uid } });",
+    '    await tx.auditLog.create({ data: { actor, action: SYN_UNLISTED_ACTION, target: uid } });',
+    "    await tx[LOG].create({ data: { actor, action: 'syn.const-key-unlisted', target: uid } });",
+    "    await tx.$executeRaw`INSERT INTO \"AuditLog\" (actor, action, target) VALUES (${actor}, 'syn.raw-unlisted', 'reader.assignment')`;",
     '  }',
     '}',
-  ].join('\n') }]);
-  assert.match(added.error.message, UNLISTED);
-  assert.deepEqual(added.error.actual, ['study.question.reply', 'syn.raw-unlisted', 'syn.unlisted']);
+  ].join('\n') }]), 'unlisted', ['study.question.reply', 'syn.const-key-unlisted', 'syn.raw-unlisted', 'syn.unlisted']);
   // (b) The values existing writes take change to values without a row: every literal an action of api/src is read from,
   // wherever the compiler found it (a constant, a helper's argument, the create itself), gets '.v2' (unless a wildcard row
   // would still cover it). Each is then read, through the same constants, helpers and callbacks, as unlisted.
-  const origins = [...new Set(base.sites.flatMap(site => site.origins))]
-    .filter(origin => A.auditRule(origin.text + '.v2') === 'hidden:unknown_action');
+  const origins = [...new Set(base.sites.flatMap(site => site.origins))].filter(origin => A.auditRule(origin.text + '.v2') === 'hidden:unknown_action');
   assert.ok(origins.length > 0, 'actions of api/src are read from literals');
   const revalued = new Map();
   for (const origin of origins) {
     const quote = origin.getText()[0];
     edit(revalued, repoPath(origin.getSourceFile().fileName), origin.getStart(), origin.end, `${quote}${origin.text}.v2${quote}`);
   }
-  const changed = completenessFailure(edited(sources, revalued));
-  assert.match(changed.error.message, UNLISTED);
-  assert.deepEqual(changed.error.actual, [...new Set(origins.map(origin => origin.text + '.v2'))].sort());
-  assert.ok(changed.error.actual.includes('reader.assignment.v2'), 'the reader assignment writes are among them');
+  const changed = verdict(scanAuditWrites(edited(sources, revalued)), productTable(), listing);
+  assert.deepEqual(changed.unlisted, [...new Set(origins.map(origin => origin.text + '.v2'))].sort());
+  assert.ok(changed.unlisted.includes('reader.assignment.v2'), 'the reader assignment writes are among them');
+  assert.deepEqual([changed.unresolved, changed.uncovered_prefixes, changed.unread_sources], [before.unresolved, before.uncovered_prefixes, before.unread_sources]);
   // (c) A dynamic suffix no hidden wildcard row covers.
-  const dynamic = completenessFailure([...sources, { file: 'api/src/syn-dynamic.service.ts', text: [
+  alone(scanAuditWrites([...sources, { file: 'api/src/syn-dynamic.service.ts', text: [
+    "import { Prisma } from '@prisma/client';",
     'export class SynDynamicService {',
-    "  async write(tx: any, body: any) { await tx.auditLog.create({ data: { action: 'reader.' + body.kind } }); }",
+    "  private async write(tx: Prisma.TransactionClient, body: any) { await tx.auditLog.create({ data: { action: 'reader.' + body.kind } }); }",
     '}',
-  ].join('\n') }]);
-  assert.match(dynamic.error.message, /^a dynamic audit action without a wildcard row/);
-  assert.deepEqual(dynamic.error.actual, ['reader.']);
+  ].join('\n') }]), 'uncovered_prefixes', ['reader.']);
   // (d) A contract row nothing writes: every write of reader.assignment is taken out (`void 0` in its place).
   const removed = new Map();
   for (const site of base.sites.filter(site => site.actions.includes('reader.assignment'))) {
     const write = ts.isTaggedTemplateExpression(site.call.parent) ? site.call.parent : site.call;
     edit(removed, site.file, write.getStart(), write.end, 'void 0');
   }
-  const unwritten = completenessFailure(edited(sources, removed));
-  assert.match(unwritten.error.message, /^contract rows nothing writes/);
-  assert.deepEqual(unwritten.error.actual, ['reader.assignment']);
+  alone(scanAuditWrites(edited(sources, removed)), 'unwritten_rows', ['reader.assignment']);
+  console.log('ADMIN_AUDIT_NEGATIVE_CONTROLS ' + JSON.stringify({ revalued_literals: origins.length, unlisted_after_revalue: changed.unlisted.length }));
 });

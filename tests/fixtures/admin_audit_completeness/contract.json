@@ -1,0 +1,5 @@
+{
+  "note": "Test-owned fixture of tests/admin_audit_attribution_test.cjs (not product code): the contract table of the checker's own tests. The exact rows and the hidden wildcard stems play the parts api/src/admin-audit.ts plays for api/src.",
+  "rows": ["syn.allowed", "syn.second", "syn.hidden"],
+  "wildcards": ["syn.wild."]
+}
