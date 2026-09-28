@@ -3443,7 +3443,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             # a package's exports are read by no check, so a decorator's name from any package is judged as the decorator
             "a decorator's name imported from another package": (
                 {outside: helper.replace(inject, inject + "import { Put } from 'rxjs';\n") + "export const applied = Put('read');\n"},
-                r"unlisted-routes\.ts: Put " + undecorated + r".*Put is not bound once by import \{ Put \} from '@nestjs/common'"),
+                r"unlisted-routes\.ts: Put " + undecorated + r": \[\(7, \"export const applied = Put\('read'\);\"\)\]"),
         }
         for label, (files, message) in refused.items():
             with self.subTest(refused=label), self.assertRaisesRegex(AssertionError, message):
