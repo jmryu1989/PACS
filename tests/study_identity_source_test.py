@@ -217,7 +217,10 @@ BASE_SHA256 = {
     # S7-U1a (e9bb028): and a study with critical result records, 409 STUDY_HAS_CRITICAL_RESULTS under the same lock
     # (CriticalResult/CriticalResultEvent/CriticalResultReceipt, migration 20260928120000_critical_result, contract S7-U1p
     # section 12.3-6); was f5cf8d78...b152, measured with this file's own between()/sha() in the S7-U1a fix1 evidence.
-    "removeState": "c6655fd514791766e2b6bc5fd692831e498cf518149feb5e8bb0ccbe2734d557",
+    # S7-U3a (D-S7-09 a): deleting a study whose tele channel is open closes the receiver's reader assignment under the
+    # same parent lock (closeReaderAssignments, 'study-deleted'); was c6655fd5...d557, measured with this file's own
+    # between()/sha() in the S7-U3a evidence.
+    "removeState": "da986d7baabc87d097cfd0eb721eebbbd6ff27abda75f48e36bc2c826425f007",
     "bootstrap": "2c8ae6afa501225b6b9c808f75065daafc5afd5e93013e43909b5bf4f200fbd9",
     "toClient": "7a10e0e6f6cc5e487140f4b55d3a55b4b01214236b886819b2cf7e7ead7682a3",
 }

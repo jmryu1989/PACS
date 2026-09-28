@@ -35,6 +35,7 @@ import { folderAction, folderEntries, folderPath } from './filter-folders';
 import { copySearchFolder, mergeCopiedFolders, sharedKeys, sharedLibrary, sharedSearch } from './shared-filters';
 import { normalizeHangingProtocol } from './hanging-protocol';
 import type { HangingProtocolLibrary } from './hanging-protocol';
+import { closeReaderAssignments } from './reader-assignment.service';
 
 /**
  * 호출자. 다섯 필드 모두 **서명된 토큰**과 가드 판정에서 나온다 — 클라이언트가 정할 수 없다.
@@ -113,6 +114,12 @@ const TECHNICIAN_FIELDS = ['ss', 'ward', 'reqHosp', 'em', 'ov'];
  * 쓰는 단위가 여기에 이름을 더한다(S5-U4a: study.question, S5-U4c: study.image-request, S7-U1a: study.critical-result).
  */
 export const OWNER_ONLY_AUDIT_ACTIONS: readonly string[] = Object.freeze(['study.question', 'study.image-request', 'study.critical-result']);
+/**
+ * 기록 기관 전용 감사 action(S7-U3a, D-S7-09 a). 소유 기관과 원격판독 수신 기관이 한 검사에 각자의 판독의 배정을 두므로,
+ * 이 행은 `GET audit`의 두 경로에서 기록 기관(detail.institution) = caller 기관일 때만 나간다 — 상대 기관의 배정이
+ * 감사 통로로 보이지 않게 한다(RISK-S7-U3a-CROSS-TENANT-ASSIGN).
+ */
+export const INSTITUTION_AUDIT_ACTIONS: readonly string[] = Object.freeze(['reader.assignment']);
 
 const NOTE_PUBLIC_FIELDS = { studyUid: true, version: true, text: true, reason: true, author: true, createdAt: true } as const;
 function noteTransactionError(error: any): never {
@@ -1156,6 +1163,7 @@ export class PacsService implements OnModuleInit {
       ORDER BY n."studyUid", n.version DESC`;
     const noteByUid = new Map(noteRows.map(n => [n.studyUid, { version: n.version, present: n.present }]));
 
+    // S7-U3a (D-S7-09 a): the caller institution's own rows, whether it owns the study or receives it by tele.
     const assignments = await this.prisma.readerAssignment.findMany({where:{studyUid:{in:pageUids},institutionId:me}});
     const assignmentByUid=new Map(assignments.map(a=>[a.studyUid,a]));
     // S4-U3 axis C: only receipts this institution's own Gateway credentials wrote, and below only on its own rows.
@@ -1181,7 +1189,7 @@ export class PacsService implements OnModuleInit {
       out.push({
         uid,
         techNote: noteByUid.get(uid) ?? { version: 0, present: false },
-        readerAssignment: s.institutionId===me ? (()=>{const a=assignmentByUid.get(uid);return {revision:a?.revision??0,reader:a?.readerSub?{sub:a.readerSub,actor:a.readerActor,name:a.readerName}:null};})() : null,
+        readerAssignment: (()=>{const a=assignmentByUid.get(uid);return {revision:a?.revision??0,reader:a?.readerSub?{sub:a.readerSub,actor:a.readerActor,name:a.readerName}:null};})(),
         // null = no Gateway report: normal (device-direct, older agent, not installed), never failure or offline.
         // A tele receiver sees null too; the sender's transport is not its business.
         gatewayReceipt: s.institutionId === me ? projectGatewayReceipt(receiptByUid.get(uid)) : null,
@@ -2112,6 +2120,9 @@ export class PacsService implements OnModuleInit {
     }
 
     const saved = await tx.studyState.update({ where: { uid }, data });
+    // S7-U3a (D-S7-09 a): an institution this write takes the tele channel away from (cancel, or a new teleTo) loses its
+    // reader assignment in this transaction, under the StudyState row lock the update above holds.
+    if (data.teleInstitutionId !== undefined) await closeReaderAssignments(tx, uid, saved, c.actor, 'tele-closed');
     await audit(c.actor, 'state.patch', uid, { ...data, by: me });
     const r = await tx.report.findUnique({ where: { uid } });
     return toClient(saved, r, c.actor, await this.myDraft(uid,c.actor,tx));
@@ -3529,6 +3540,10 @@ export class PacsService implements OnModuleInit {
 
     if (prev?.orderOid)
       await tx.order.update({ where: { oid: prev.orderOid }, data: { matched: 'U', studyUid: null } });
+    // S7-U3a: deleting the study ends an open tele channel too; the receiver's reader assignment closes with it, under the
+    // row lock taken above, so a study that arrives again under this UID never brings it back open.
+    if (prev.teleInstitutionId)
+      await closeReaderAssignments(tx, uid, { institutionId: prev.institutionId, teleInstitutionId: null }, c.actor, 'study-deleted');
     await tx.studyState.delete({ where: { uid } });
     await tx.auditLog.create({ data: { actor: c.actor, action: 'state.delete', target: uid, detail: JSON.stringify({ by: me }) } });
     return { ok: true };
@@ -3536,9 +3551,9 @@ export class PacsService implements OnModuleInit {
   }
 
   /**
-   * 감사로그. 내 기관이 볼 수 있는 검사의 것만. OWNER_ONLY_AUDIT_ACTIONS 행은 생성 기관 = 현재 소유 기관 = 나일 때만.
-   * 그 조건은 LIMIT이 있는 같은 SQL의 WHERE에 둔다 — 가져온 뒤 거르면 짧은 쪽이 숨긴 행의 수·시각을 드러내고
-   * 보여야 할 오래된 행을 밀어낸다. CASE는 목록의 action에만 detail을 jsonb로 읽고, 검사 행이 없거나 기관이
+   * 감사로그. 내 기관이 볼 수 있는 검사의 것만. OWNER_ONLY_AUDIT_ACTIONS 행은 생성 기관 = 현재 소유 기관 = 나일 때만,
+   * INSTITUTION_AUDIT_ACTIONS 행은 기록 기관 = 나일 때만(S7-U3a). 그 조건은 LIMIT이 있는 같은 SQL의 WHERE에 둔다 —
+   * 가져온 뒤 거르면 짧은 쪽이 숨긴 행의 수·시각을 드러내고 보여야 할 오래된 행을 밀어낸다. CASE는 목록의 action에만 detail을 jsonb로 읽고, 검사 행이 없거나 기관이
    * null이면 NULL이 되어 행이 빠진다(닫힌 쪽). 같은 시각의 행은 id로 순서를 고정한다.
    */
   async audits(uid: string | undefined, take: number, c: Caller) {
@@ -3553,6 +3568,8 @@ export class PacsService implements OnModuleInit {
         WHERE a.target = ${uid}
           AND CASE WHEN a.action = ANY(${OWNER_ONLY_AUDIT_ACTIONS}::text[])
                    THEN s."institutionId" = ${me} AND (a.detail::jsonb ->> 'institution') = ${me}
+                   WHEN a.action = ANY(${INSTITUTION_AUDIT_ACTIONS}::text[])
+                   THEN (a.detail::jsonb ->> 'institution') = ${me}
                    ELSE TRUE END
         ORDER BY a.at DESC, a.id DESC LIMIT ${limit}`;
     }
@@ -3565,6 +3582,8 @@ export class PacsService implements OnModuleInit {
       WHERE a.target = ANY(${allowed}::text[])
         AND CASE WHEN a.action = ANY(${OWNER_ONLY_AUDIT_ACTIONS}::text[])
                  THEN s."institutionId" = ${me} AND (a.detail::jsonb ->> 'institution') = ${me}
+                 WHEN a.action = ANY(${INSTITUTION_AUDIT_ACTIONS}::text[])
+                 THEN (a.detail::jsonb ->> 'institution') = ${me}
                  ELSE TRUE END
       ORDER BY a.at DESC, a.id DESC LIMIT ${limit}`;
   }
