@@ -118,6 +118,12 @@ function world() {
           if (pair(next.studyUid, next.institutionId) !== key) throw new Error('the row left its key');
           check(next); t.ReaderAssignment.set(key, next); return clone(next);
         },
+        create: async a => {
+          record('ReaderAssignment', 'create', a);
+          const key = pair(a.data.studyUid, a.data.institutionId);
+          if (t.ReaderAssignment.has(key)) throw Object.assign(new Error('ReaderAssignment_pkey'), { code: 'P2002' });
+          const next = { closedRevision: null, closedAt: null, ...a.data, updatedAt: now() }; check(next); t.ReaderAssignment.set(key, next); return clone(next);
+        },
         update: async a => {
           record('ReaderAssignment', 'update', a);
           const key = uniquePair(a.where), current = t.ReaderAssignment.get(key);
@@ -211,6 +217,9 @@ test('the boundary matrix: owner A always, receiver B only while its channel is 
     never: { A: true, B: false, Z: false }, open: { A: true, B: true, Z: false },
     closed: { A: true, B: false, Z: false }, reopened: { A: true, B: true, Z: false },
   };
+  // The rows each channel history leaves before anyone assigns: every close gives the institution whose channel ended a
+  // closed row at a new revision, a first close revision 1 (S7-U3a-R-001-F02).
+  const LEFT = { never: {}, open: {}, closed: { [B]: 1 }, reopened: { [B]: 1 } };
   const ROLES = { A: ['aTech', 'aDoc'], B: ['bTech', 'bDoc'], Z: ['zTech', 'zDoc'] };
   const SECOND = { aTech: 'aDoc2', bTech: 'bDoc2', zTech: 'zDoc' };
   const observed = {};
@@ -219,6 +228,10 @@ test('the boundary matrix: owner A always, receiver B only while its channel is 
     for (const [label, [manager, radiologist]] of Object.entries(ROLES)) {
       const w = world();
       await channel(w, state);
+      const before = Object.fromEntries(INSTITUTIONS.map(i => [i, w.row(UID, i)]));
+      for (const i of INSTITUTIONS)
+        assert.deepEqual(before[i] && [before[i].revision, before[i].closedRevision, before[i].closedAt instanceof Date, before[i].readerSub],
+          LEFT[state][i] ? [LEFT[state][i], LEFT[state][i], true, null] : null, state + ' ' + label + ' ' + i + ' before');
       const unknown = await response(w.read(manager, UNKNOWN_UID));
       const outcome = [];
       for (const [name, act] of [[radiologist, () => w.assign(radiologist, radiologist)], [manager, () => w.assign(manager, SECOND[manager])],
@@ -234,11 +247,11 @@ test('the boundary matrix: owner A always, receiver B only while its channel is 
       }
       assert.ok(outcome.every(x => x === outcome[0]), state + ' ' + label + ' ' + JSON.stringify(outcome));
       observed[state][label] = outcome[0];
-      // The caller institution's own row moved twice, or a refused institution wrote nothing; no other row appeared.
-      const own = w.row(UID, PEOPLE[manager][0][0]);
-      if (outcome[0]) assert.deepEqual([own.revision, own.readerSub, own.closedAt], [2, SUB[SECOND[manager]], null], state + ' ' + label);
-      else assert.equal(own, null, state + ' ' + label + ' refused but wrote');
-      for (const other of INSTITUTIONS.filter(i => i !== PEOPLE[manager][0][0])) assert.equal(w.row(UID, other), null, state + ' ' + label + ' ' + other);
+      // The caller institution's own row moved twice, or a refused institution wrote nothing; no other row changed.
+      const mine = PEOPLE[manager][0][0], own = w.row(UID, mine);
+      if (outcome[0]) assert.deepEqual([own.revision, own.readerSub, own.closedAt], [(before[mine]?.revision ?? 0) + 2, SUB[SECOND[manager]], null], state + ' ' + label);
+      else assert.deepEqual(own, before[mine], state + ' ' + label + ' refused but wrote');
+      for (const other of INSTITUTIONS.filter(i => i !== mine)) assert.deepEqual(w.row(UID, other), before[other], state + ' ' + label + ' ' + other);
     }
   }
   assert.deepEqual(observed, EXPECTED);
@@ -300,9 +313,11 @@ test('closing the channel closes the receiver row in the same transaction, with 
   assert.deepEqual(writes.map(c => [c.client, c.model, c.op, c.args?.data?.action ?? '']).sort(),
     [[tx, 'AuditLog', 'create', ACTION], [tx, 'AuditLog', 'create', 'state.patch'], [tx, 'ReaderAssignment', 'update', '']]);
   assert.deepEqual(calls.filter(c => c.client === tx && ['begin', 'commit', 'rollback'].includes(c.op)).map(c => c.op), ['begin', 'commit']);
-  // The close is decided after the channel change, under the lock that change holds.
+  // The close decides from the study row as that transaction reads it, before it touches any assignment row (on
+  // PostgreSQL that read takes the row lock the channel change keeps; the S7-U3a evidence realdb harness checks the lock).
   const order = key => calls.findIndex(c => c.client === tx && key(c));
-  assert.ok(order(c => c.model === 'StudyState' && c.op === 'update') < order(c => c.model === 'ReaderAssignment' && c.op === 'findMany'));
+  assert.ok(order(c => c.model === 'StudyState' && c.op === 'raw') >= 0);
+  assert.ok(order(c => c.model === 'StudyState' && c.op === 'raw') < order(c => c.model === 'ReaderAssignment' && c.op === 'findMany'));
   const closed = w.row(UID, B);
   assert.deepEqual({ ...closed, closedAt: closed.closedAt instanceof Date, updatedAt: undefined, lastRequest: closed.lastRequest === last.requestId,
     lastFingerprint: /^[0-9a-f]{64}$/.test(closed.lastFingerprint) }, {
@@ -318,13 +333,24 @@ test('closing the channel closes the receiver row in the same transaction, with 
   assert.equal((await w.pacs.listStudies(caller('bTech'))).studies.some(s => s.uid === UID), false);
   const a = await w.read('aTech');
   assert.deepEqual([a.revision, a.reader, a.history.map(h => h.detail.institution)], [1, reader('aDoc'), [A]]);
-  // A cancel with no receiver row writes no assignment row and no assignment audit.
+  // A cancel with no receiver row still moves B to a new revision (S7-U3a-R-001-F02): one closed row at revision 1 and one
+  // entry for B, in the cancel's transaction. The owner, which has no row, gets none.
   const v = world();
   await channel(v, 'open');
   const mark = v.mark();
   await v.tele({ ts: 'cancelled' });
-  assert.deepEqual(v.since(mark).filter(c => c.model === 'ReaderAssignment' && !['findMany', 'findUnique'].includes(c.op)), []);
-  assert.deepEqual(v.audits().filter(a => a.action === ACTION), []);
+  const vcalls = v.since(mark), vtx = vcalls.find(c => c.model === 'StudyState' && c.op === 'update').client;
+  assert.deepEqual(vcalls.filter(c => (c.model === 'ReaderAssignment' && !['findMany', 'findUnique'].includes(c.op)) || (c.model === 'AuditLog' && c.op === 'create'))
+    .map(c => [c.client, c.model, c.op, c.args?.data?.action ?? '']).sort(),
+    [[vtx, 'AuditLog', 'create', ACTION], [vtx, 'AuditLog', 'create', 'state.patch'], [vtx, 'ReaderAssignment', 'create', '']]);
+  const marker = v.row(UID, B);
+  assert.deepEqual({ ...marker, closedAt: marker.closedAt instanceof Date, updatedAt: undefined,
+    lastRequest: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(marker.lastRequest), lastFingerprint: /^[0-9a-f]{64}$/.test(marker.lastFingerprint) }, {
+    studyUid: UID, institutionId: B, revision: 1, readerSub: null, readerActor: null, readerName: null, changedBy: actorOf('aDoc'),
+    lastRequest: true, lastFingerprint: true, updatedAt: undefined, closedRevision: 1, closedAt: true });
+  assert.deepEqual(v.audits().filter(a => a.action === ACTION).map(a => [a.actor, a.target, a.detail]),
+    [[actorOf('aDoc'), UID, { institution: B, revision: 1, from: null, to: null, closed: 'tele-closed' }]]);
+  assert.equal(v.row(UID, A), null);
 });
 
 test('the close is atomic with the channel change: a failure after it leaves the channel and the row as they were', async () => {
@@ -378,6 +404,84 @@ test('a reopened channel starts at a new revision: no reader, no history and no 
     [[1, null], [2, 'tele-closed'], [3, null], [4, 'tele-closed']]);
 });
 
+test('every close gives the ended channel a new revision: a request prepared in one channel never lands in the next (F02)', async () => {
+  // (a) No row: B read revision 0 in its first channel and held a request; the owner cancelled and reopened.
+  const w = world();
+  await channel(w, 'open');
+  await w.assign('aTech', 'aDoc');
+  const ownerBefore = w.row(UID, A);
+  const held = w.body('bTech', await w.read('bTech'), 'bDoc');
+  assert.equal(held.revision, 0);
+  await w.tele({ ts: 'cancelled' });
+  await w.tele({ ts: 'wait', teleTo: B });
+  await assert.rejects(w.write('bTech', held), status(409));
+  const fresh = await w.read('bTech');
+  assert.deepEqual([fresh.revision, fresh.reader, fresh.history], [1, null, []]);
+  const written = await w.write('bTech', w.body('bTech', fresh, 'bDoc'));
+  assert.deepEqual([written.revision, written.reader, written.history.map(h => h.detail)],
+    [2, reader('bDoc'), [{ institution: B, revision: 2, from: null, to: actorOf('bDoc') }]]);
+  assert.deepEqual(w.row(UID, A), ownerBefore);
+  assert.deepEqual(w.audits().filter(a => a.action === ACTION).map(a => [a.actor, a.detail]), [
+    [actorOf('aTech'), { institution: A, revision: 1, from: null, to: actorOf('aDoc') }],
+    [actorOf('aDoc'), { institution: B, revision: 1, from: null, to: null, closed: 'tele-closed' }],
+    [actorOf('bTech'), { institution: B, revision: 2, from: null, to: actorOf('bDoc') }]]);
+
+  // (b) A row closed by an earlier channel: Z received the study first and assigned; the owner redirected it to B, which
+  //     assigned and was cancelled; in its reopened channel B prepared a request but wrote nothing, and the owner
+  //     cancelled and reopened once more.
+  const v = world();
+  v.study(UID);
+  await v.assign('aTech', 'aDoc');
+  await v.tele({ ts: 'wait', teleTo: Z });
+  await v.assign('zTech', 'zDoc');
+  await v.tele({ ts: 'sending', teleTo: B });
+  const zClosed = v.row(UID, Z), aRow = v.row(UID, A);
+  assert.deepEqual([zClosed.revision, zClosed.closedRevision, zClosed.readerSub], [2, 2, null]);
+  await v.assign('bTech', 'bDoc');
+  await v.tele({ ts: 'cancelled' });
+  await v.tele({ ts: 'wait', teleTo: B });
+  const prepared = v.body('bTech', await v.read('bTech'), 'bDoc2');
+  assert.equal(prepared.revision, 2);
+  await v.tele({ ts: 'cancelled' });
+  const again = v.row(UID, B);
+  assert.deepEqual([again.revision, again.closedRevision, again.closedAt instanceof Date, again.readerSub], [3, 3, true, null]);
+  await v.tele({ ts: 'wait', teleTo: B });
+  await assert.rejects(v.write('bTech', prepared), status(409));
+  const current = await v.read('bTech');
+  assert.deepEqual([current.revision, current.reader, current.history], [3, null, []]);
+  const landed = await v.write('bTech', v.body('bTech', current, 'bDoc2'));
+  assert.deepEqual([landed.revision, landed.reader, landed.history.map(h => h.detail.revision)], [4, reader('bDoc2'), [4]]);
+  // The owner's row and the earlier receiver Z's closed row are as they were; every entry is kept.
+  assert.deepEqual([v.row(UID, A), v.row(UID, Z)], [aRow, zClosed]);
+  assert.deepEqual(v.audits().filter(a => a.action === ACTION).map(a => [a.detail.institution, a.detail.revision, a.detail.from, a.detail.to, a.detail.closed ?? null]), [
+    [A, 1, null, actorOf('aDoc'), null],
+    [Z, 1, null, actorOf('zDoc'), null], [Z, 2, actorOf('zDoc'), null, 'tele-closed'],
+    [B, 1, null, actorOf('bDoc'), null], [B, 2, actorOf('bDoc'), null, 'tele-closed'], [B, 3, null, null, 'tele-closed'],
+    [B, 4, null, actorOf('bDoc2'), null]]);
+});
+
+test('a receiver read and a UID audit read check the channel and read their answer in one transaction (F01)', async () => {
+  // Which lock that transaction holds is PostgreSQL's to show (the S7-U3a evidence realdb harness pauses a read and a
+  // cancel against each other); here: no answer part is read outside the transaction that checked the channel.
+  const w = world();
+  await channel(w, 'open');
+  await w.assign('bTech', 'bDoc');
+  let at = w.mark();
+  assert.deepEqual((await w.read('bTech')).reader, reader('bDoc'));
+  const reads = w.since(at).filter(c => c.model !== '$');
+  assert.deepEqual(reads.map(c => [c.model, c.op]), [['StudyState', 'raw'], ['ReaderAssignment', 'findUnique'], ['AuditLog', 'history']]);
+  assert.match(reads[0].client, /^tx#\d+$/);
+  assert.ok(reads.every(c => c.client === reads[0].client), JSON.stringify(reads.map(c => c.client)));
+  at = w.mark();
+  const calls = w.access.calls.length;
+  await w.pacs.audits(UID, 10, caller('bTech'));
+  const audit = w.since(at).filter(c => !(c.model === '$' && ['begin', 'commit', 'executeRaw'].includes(c.op)));
+  assert.deepEqual(audit.map(c => [c.model, c.op]), [['StudyState', 'raw'], ['$', 'queryRaw']]);
+  assert.match(audit[0].client, /^tx#\d+$/);
+  assert.equal(audit[1].client, audit[0].client);
+  assert.deepEqual(w.access.calls.slice(calls).filter(c => c[0] === 'require').map(c => c[3]), [audit[0].client]);
+});
+
 test('every path that takes the channel away closes the row: a new teleTo and a study delete; a delete without one changes nothing', async () => {
   // Redirect: the owner sends the waiting study to Z instead of B.
   const w = world();
@@ -399,6 +503,12 @@ test('every path that takes the channel away closes the row: a new teleTo and a 
   assert.deepEqual(d.audits().filter(a => a.action === ACTION && a.detail.closed).map(a => [a.actor, a.detail]),
     [[actorOf('aTech'), { institution: B, revision: 2, from: actorOf('bDoc'), to: null, closed: 'study-deleted' }]]);
   assert.deepEqual(d.row(UID, A), ownerBefore);
+  // Delete while the channel is open but B never assigned: B still gets its closed row at revision 1 (F02).
+  const e = world();
+  await channel(e, 'open');
+  await e.pacs.removeState(UID, caller('aTech'));
+  assert.deepEqual([e.row(UID, B).revision, e.row(UID, B).closedRevision, e.row(UID, B).closedAt instanceof Date, e.row(UID, A)], [1, 1, true, null]);
+  assert.deepEqual(e.audits().filter(a => a.action === ACTION).map(a => a.detail), [{ institution: B, revision: 1, from: null, to: null, closed: 'study-deleted' }]);
   // Delete with no channel open: no assignment call at all.
   const n = world();
   n.study(OTHER_UID);
@@ -417,8 +527,11 @@ test('a write whose check passed before the close cannot land after it', async (
   w.keycloak.getUser = async sub => { if (!cancelled) { cancelled = true; await w.tele({ ts: 'cancelled' }); } return getUser(sub); };
   await assert.rejects(w.assign('bTech', 'bDoc'), status(404));
   assert.equal(cancelled, true);
-  assert.equal(w.row(UID, B), null);
-  assert.deepEqual(w.audits().filter(a => a.action === ACTION), []);
+  // B's write never landed: its row is the one the close made (closed, revision 1, no reader), and the only assignment
+  // entry is that close.
+  const row = w.row(UID, B);
+  assert.deepEqual([row.revision, row.closedRevision, row.closedAt instanceof Date, row.readerSub, row.readerActor], [1, 1, true, null, null]);
+  assert.deepEqual(w.audits().filter(a => a.action === ACTION).map(a => a.detail), [{ institution: B, revision: 1, from: null, to: null, closed: 'tele-closed' }]);
 });
 
 test('the existing rules hold unchanged at the receiver: replay, CAS, radiologist self only, W/H and the hold', async () => {
