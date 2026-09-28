@@ -879,6 +879,48 @@
     #image-request-detail { margin: 6px 0; padding: 6px 8px; border: 1px solid var(--kin-line2); border-radius: 4px; }
     #image-request-queue-list > li[aria-current="true"] { outline: 1px solid var(--kin-accent); outline-offset: 2px; }
     /* ── S5-U4c 끝 ── */
+    /* ── S7-U1b 중요 결과 발신 ──
+       보낸 목록 줄은 확인 대기·결과를 모르는 요청·읽기 실패가 있거나 사용자가 연 동안만 서고, 펼친 목록은 높이 상한 안에서
+       스크롤해 판독문 칸을 밀어내지 않는다. 표는 판독 열(1366px에서 419px) 안에서 줄을 넘겨 쓴다 — 전역 th·td의 nowrap과
+       정렬 표시(cursor)를 이 표에서만 푼다. 글자는 12px 이상(UXR-G-13), 상태는 색과 함께 늘 글자로 쓴다(UXR-G-12). */
+    #cvr-sent-p { flex: none; font-size: 12px; color: var(--kin-text); background: var(--kin-panel); border-top: 1px solid var(--kin-line2); }
+    #cvr-sent-p[hidden], #cvr-sent-p [hidden], #cvr-send [hidden] { display: none !important; }
+    .cvr-sent-bar { display: flex; align-items: center; gap: 6px; padding: 3px 8px; min-width: 0; white-space: nowrap; }
+    #cvr-sent-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--kin-muted); }
+    #cvr-sent-p :is(button, select) { font: inherit; font-size: 12px; min-height: 24px; padding: 2px 8px; border: 1px solid var(--kin-line2);
+      border-radius: 3px; background: var(--kin-panel2); color: var(--kin-text); cursor: pointer; }
+    #cvr-sent-p button:disabled { opacity: .45; cursor: default; }
+    #cvr-sent-p :is(button, select, textarea):focus-visible, #cvr-send :is(button, select, textarea):focus-visible { outline: 2px solid #93c5fd; outline-offset: 1px; }
+    #cvr-sent-attempts { margin: 0; padding: 2px 8px 4px 26px; max-height: min(24vh, 200px); overflow: auto; }
+    #cvr-sent-pane { max-height: min(40vh, 360px); overflow: auto; padding: 4px 8px 8px; border-top: 1px solid var(--kin-line2); }
+    #cvr-sent-pane p, #cvr-sent-attempts p { margin: 3px 0; line-height: 1.5; }
+    .cvr-sent-filter { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+    #cvr-sent-pane table { table-layout: auto; }
+    #cvr-sent-pane :is(th, td) { white-space: normal; overflow-wrap: anywhere; vertical-align: top; padding: 3px 5px; }
+    #cvr-sent-pane thead th { cursor: default; position: static; }
+    #cvr-sent-pane td > span { display: block; }
+    #cvr-sent-pane textarea, #cvr-send textarea { display: block; width: 100%; padding: 4px 6px; font: inherit; font-size: 12px; resize: vertical;
+      background: var(--kin-bg); color: var(--kin-text); border: 1px solid var(--kin-line2); }
+    #cvr-sent-pane label > span { display: block; font-weight: 700; margin-top: 4px; }
+    .cvr-state, .cvr-mark { display: inline-block; margin: 1px 4px 1px 0; padding: 0 6px; border: 1px solid var(--kin-line2); border-radius: 9px; font-weight: 700; }
+    .cvr-state[data-state="created"] { color: #ffe7a8; border-color: #7a6a33; }
+    .cvr-state[data-state="acknowledged"] { color: #b8f0cf; border-color: #3f8a5f; }
+    .cvr-state:is([data-state="cancelled"], [data-state="superseded"]) { color: #dde3ee; border-color: #56607a; }
+    .cvr-mark { color: #ffc978; border-color: #8a6a33; }
+    .cvr-muted, .cvr-note, .cvr-detail { color: var(--kin-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+    .cvr-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+    .cvr-form-title { font-weight: 700; }
+    .cvr-line[data-state="unknown"] .cvr-word, .cvr-line[data-state="checking"] .cvr-word,
+    .cvr-line[data-state="rejected"] .cvr-word { color: #ffb4b4; }
+    .cvr-line[data-state="delivered"] .cvr-word, .cvr-line[data-state="cancelled"] .cvr-word { color: #b8f0cf; }
+    #cvr-send .box { display: flex; flex-direction: column; max-height: 90vh; }
+    #cvr-send-help, #cvr-send-study, #cvr-send-source, #cvr-send-status > p { margin: 0; padding: 6px 12px; font-size: 12px; color: #cdd3dc;
+      line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #cvr-send .tplbody select { font-size: 12px; }
+    #cvr-send-status .cvr-word { font-weight: 700; padding-bottom: 0; }
+    #cvr-send-status:is([data-state="unknown"], [data-state="checking"], [data-state="rejected"], [data-state="locked"]) .cvr-word { color: #ffb4b4; }
+    #cvr-send-status[data-state="delivered"] .cvr-word { color: #b8f0cf; }
+    /* ── S7-U1b 끝 ── */
   </style>
   <link rel="stylesheet" href="reading-workspace.css">
 </head>
@@ -1215,7 +1257,7 @@
               <div class="toolbar-section" id="report-more-status" role="group" aria-label="Status">
                 <button id="b-defer">Defer</button>
                 <button id="b-except" disabled title="판독 제외: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.">Except</button>
-                <button id="b-mark-cvr" disabled title="중요 결과(CVR) 표시: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.">Mark CVR</button>
+                <button id="b-mark-cvr" disabled title="중요 결과(CVR) 보내기: 서버가 이 검사에서 보낼 수 있다고 답하기 전에는 켜지지 않습니다.">Mark CVR</button>
                 <button id="b-unread">Reset to Unread</button>
               </div>
               <div class="toolbar-section" id="report-more-editor" role="group" aria-label="Editor">
@@ -1300,6 +1342,36 @@
             <button id="image-request-toggle" type="button" aria-expanded="false" aria-controls="image-request-pane">Show Requests</button>
           </div>
           <div id="image-request-pane" role="region" aria-label="Image Requests of the Reading Study" hidden></div>
+        </section>
+        <!-- S7-U1b 보낸 중요 결과. 확인 대기·결과를 모르는 요청·읽기 실패가 있거나 사용자가 연 동안에만 보인다 — 보낸 기록이
+             모두 종결이면 판독 화면 배치는 그대로다. 목록은 판독 대상과 무관한 이 계정의 보낸 기록 전체이고 판독문을 읽거나 쓰지 않는다. -->
+        <section id="cvr-sent-p" aria-label="Sent Critical Results" data-state="idle" hidden>
+          <div class="cvr-sent-bar">
+            <b>Sent Critical Results</b>
+            <span id="cvr-sent-summary" role="status" aria-live="polite"></span>
+            <button id="cvr-sent-toggle" type="button" aria-expanded="false" aria-controls="cvr-sent-pane">Show Sent</button>
+            <button id="cvr-sent-refresh" type="button" title="보낸 목록을 서버에서 다시 읽습니다. 읽기만 하며 어떤 전달도 바꾸지 않습니다.">Refresh</button>
+          </div>
+          <ol id="cvr-sent-attempts" aria-label="Unconfirmed Critical Result Requests" hidden></ol>
+          <div id="cvr-sent-pane" role="region" aria-label="Sent Critical Results List" hidden>
+            <p id="cvr-sent-help">보낸 중요 결과의 서버 상태입니다. Pending ACK는 수신자가 아직 확인하지 않았다는 뜻이며 열어보았는지는 기록하지 않습니다. 확인하지 않아도 자동으로 다시 알리지 않으니, 확인이 늦어지면 수신자에게 직접 연락하세요. 이 줄이 보이는 동안 목록을 1분마다 다시 읽습니다.</p>
+            <div class="cvr-sent-filter">
+              <label for="cvr-sent-filter">State</label>
+              <select id="cvr-sent-filter">
+                <option value="pending">Pending ACK</option>
+                <option value="acknowledged">Acknowledged</option>
+                <option value="cancelled">Cancelled</option>
+                <option value="superseded">Superseded</option>
+                <option value="all">All</option>
+              </select>
+            </div>
+            <table>
+              <thead><tr><th scope="col">Study</th><th scope="col">Recipient</th><th scope="col">Sent</th><th scope="col">State</th><th scope="col">Source</th></tr></thead>
+              <tbody id="cvr-sent-rows"></tbody>
+            </table>
+            <p id="cvr-sent-status" role="status" aria-live="polite"></p>
+            <button id="cvr-sent-more" type="button" hidden>More</button>
+          </div>
         </section>
       </div>
 
@@ -1559,6 +1631,34 @@
     </div>
   </div>
 
+  <!--
+    S7-U1b 중요 결과 발신 창 (Send Critical Result)
+
+    Send만 요청을 보낸다. 보낼 판(Source)은 창을 열 때 서버가 답한 머리 판이고, 메시지는 판독문으로 미리 채우지 않는다.
+    서버가 201로 저장했다고 답하기 전에는 이 창 어디에도 전달되었다는 말이 없다. 결과를 모르는 답이면 같은 요청을
+    Check Again으로 다시 보내 확인한다 — 창을 닫아도 그 요청은 보낸 목록 위 줄로 남는다.
+  -->
+  <div class="modal" id="cvr-send" role="dialog" aria-modal="true" aria-labelledby="cvr-send-title" aria-describedby="cvr-send-help">
+    <div class="box" style="width:560px;max-width:94vw">
+      <h3 id="cvr-send-title">Send Critical Result</h3>
+      <p id="cvr-send-help">받는 사람이 KIN 화면에서 직접 확인(Acknowledge)해야 완료됩니다. 메일·문자·전화로 가지 않습니다. 받는 사람이 열어보았는지는 기록하지 않고, 확인하지 않아도 자동으로 다시 알리지 않습니다 — 확인이 늦어지면 Sent Critical Results에서 보고 직접 연락하세요. 보낸 뒤 판독이 바뀌면 받는 사람은 이 전달을 확인할 수 없으니 새 판으로 대체(Supersede)하거나 취소(Cancel Delivery)하세요.</p>
+      <p id="cvr-send-study"></p>
+      <p id="cvr-send-source"></p>
+      <div class="body tplbody">
+        <label for="cvr-send-recipient">Recipient</label>
+        <select id="cvr-send-recipient"><option value="">Choose Recipient</option></select>
+        <label for="cvr-send-message">Message</label>
+        <textarea id="cvr-send-message" maxlength="2000" rows="5"></textarea>
+      </div>
+      <div id="cvr-send-status" role="status" aria-live="polite"></div>
+      <div class="foot">
+        <button id="cvr-send-close" type="button">Close</button>
+        <button id="cvr-send-check" type="button" hidden>Check Again</button>
+        <button id="cvr-send-submit" class="ok" type="button">Send</button>
+      </div>
+    </div>
+  </div>
+
   <script src="auth.js"></script>
   <script src="reading-panel-layout.js"></script>
   <script src="viewer-opening.js"></script>
@@ -1615,6 +1715,7 @@
   <link rel="stylesheet" href="reader-assignment.css">
   <script src="reader-assignment.js"></script>
   <script src="consultations.js"></script>
+  <script src="critical-result-send.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
     // init()이 쿠키 세션을 한 번 판정한 뒤 session()/has()는 동기로 읽는다. 이 변수들은
@@ -3206,6 +3307,8 @@
       $('#tech-note-open').disabled = !s || demoMode || !serverMode || offline;
       // S5-U4b: 판독 대상이 바뀐 때만 그 검사의 임상의 질문을 읽는다(같은 대상이면 요청도 그리기도 없다).
       studyQuestions?.sync();
+      // S7-U1b: 판독 대상이나 화면이 아는 판독 상태가 바뀐 때만 Mark CVR의 서버 답(#1)을 다시 읽는다.
+      criticalResults?.sync();
       $("#clinical").innerHTML = s ? `
         <div class="clinical-scope">${s.uid === selectedUid ? '판독 대상 검사 정보' : '관련 검사 정보 · 판독 대상은 바뀌지 않습니다'}</div>
         <table>
@@ -7967,6 +8070,22 @@
         cite: (request, origin) => openCitePreview(request, origin),
       });
     } catch (_) { toast('영상 소견 목록을 불러오지 못했습니다. 영상 화면의 Findings를 사용하세요.', 'err'); }
+
+    // ── 중요 결과 발신(S7-U1b) ──
+    // REQ-S7-U1b-SENDER-UI/FAILURE/ABA → TEST-S7-U1b-DOM (tests/critical_result_sender_dom_test.py가 이 절을 잘라
+    // critical-result-send.js와 함께 실행한다). Mark CVR·발신 창·보낸 목록은 그 파일이 서버 S7-U1a route로만 움직인다.
+    // 보내는 역할은 radiologist를 정확히 본다 — KinAuth.has()는 admin을 모든 역할로 통과시키지만 서버는 admin만인
+    // 계정의 발신을 거절한다(D-S7-02 a). 판독 상태 {version, rs}가 바뀌면 그 파일이 #1을 다시 읽는다.
+    let criticalResults = null;
+    try {
+      criticalResults = KinCriticalResultSend.mount({ apiBase: API, logout: () => KinAuth.logout(), current: () => selectedUid,
+        study: uid => studies.find(s => s.uid === uid),
+        report: uid => { const a = appState[uid]; return a ? { version: a.version ?? 0, rs: a.rs ?? null } : null; },
+        online: () => !!sess && serverMode && !demoMode && !offline,
+        radiologist: () => { const s = KinAuth.session(); return s?.state === 'approved' && Array.isArray(s.roles) && s.roles.includes('radiologist'); },
+        owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; },
+        actorName: value => displayActor(value) });
+    } catch (_) { toast('중요 결과 발신 화면을 준비하지 못했습니다. 판독 작업은 계속할 수 있습니다.', 'err'); }
 
     // ── 임상의 질문 답변(S5-U4b) ──
     // REQ-S5-U4b-QUESTION-UI → RISK-S5-U4b-STALE → TEST-S5-U4b-DOM (tests/clinician_question_dom_test.py가 이 절을 잘라 실행한다).
