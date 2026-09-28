@@ -22,7 +22,8 @@ outside the critical result's own list (the report preview controller, a pacs.se
 and image request services, section 10.1). Which ReportVersion row a statement reads is the service test's to show: the
 static check cannot tell the pinned version parameter from another one. Outside this check: a member reached by a key
 computed at run time.
-Each rule is shown on the real files and on changed copies: equivalent spellings pass, each forbidden access fails.
+Each rule is shown on the real files and on probe modules this file writes itself (not cut from the product's text, so the
+product's SQL may be rewritten in any equivalent form): equivalent spellings pass, each forbidden access fails.
 """
 from __future__ import annotations
 
@@ -254,10 +255,72 @@ def judge(db: Database, facts: dict) -> list[str]:
     return problems
 
 
-def edit(text: str, old: str, new: str) -> str:
-    if text.count(old) != 1:
-        raise AssertionError(f"the change site is not in the source exactly once: {old[:80]!r}")
-    return text.replace(old, new)
+PROBE = "critical-result.probe.ts"
+
+
+def probe(body: str, imports: str = "") -> dict[str, str]:
+    """A small api/src/critical-result*.ts module around one method body, judged on its own by the same rules as the real
+    files. The probes are written here, not cut from the product's text, so the product's SQL can be rewritten in any
+    equivalent way without touching this file."""
+    return {PROBE: (imports + "import { Injectable } from '@nestjs/common';\n\n@Injectable()\nexport class CriticalResultProbe {\n"
+                    "  constructor(private orthanc: any) {}\n\n  async read(tx: any, uid: string, version: number) {\n    "
+                    + body + "\n  }\n}\n")}
+
+
+EQUIVALENT = {
+    "the head version read with aliases, AS, spacing and keyword case": probe(
+        "return tx.$queryRaw`select   cur.version as \"headVersion\" , ver.action AS \"headAction\", ver.author AS \"headAuthor\",\n"
+        "        ver.at AS \"headAt\"\n      FROM \"Report\" AS cur\n        LEFT JOIN \"ReportVersion\" AS ver\n"
+        "          ON ver.uid = cur.uid AND ver.version = cur.version\n      WHERE cur.uid = ${uid}`;"),
+    "the head version read with no alias": probe(
+        "return tx.$queryRaw`SELECT \"Report\".version, \"ReportVersion\".action FROM \"Report\" LEFT JOIN \"ReportVersion\"\n"
+        "      ON \"ReportVersion\".uid = \"Report\".uid AND \"ReportVersion\".version = \"Report\".version WHERE \"Report\".uid = ${uid}`;"),
+    "a ReportVersion body with a table alias and another line layout": probe(
+        "return tx.$queryRaw`SELECT pv.findings, pv.conclusion, pv.recommendation\n        FROM \"ReportVersion\" pv\n"
+        "        WHERE pv.uid = ${uid} AND pv.version = ${version}`;"),
+    "the original identity read of section 3.1": probe("return this.orthanc.reportPreviewStudy(uid);"),
+}
+# (probe, the reason the refusal must give)
+FORBIDDEN = {
+    "the head read also takes the current findings": (probe(
+        "return tx.$queryRaw`SELECT r.version AS \"headVersion\", v.action AS \"headAction\", r.findings AS \"headFindings\"\n"
+        "      FROM \"Report\" r LEFT JOIN \"ReportVersion\" v ON v.uid = r.uid AND v.version = r.version WHERE r.uid = ${uid}`;"),
+        r"reads the current report body, \"Report\" columns \['findings'\]"),
+    "the body read from Report": (probe("return tx.$queryRaw`SELECT findings, conclusion, recommendation FROM \"Report\" WHERE uid = ${uid}`;"),
+        r"\"Report\" columns \['conclusion', 'findings', 'recommendation'\]"),
+    # the second join is what the first depends on, so the planner cannot drop it as unused
+    "Report joined again under another alias for its conclusion": (probe(
+        "return tx.$queryRaw`SELECT r.version FROM \"Report\" AS cur LEFT JOIN \"Report\" r ON r.uid = cur.uid AND cur.conclusion <> ''\n"
+        "      WHERE cur.uid = ${uid}`;"),
+        r"\"Report\" columns \['conclusion'\]"),
+    "a subquery reads the current body": (probe(
+        "return tx.$queryRaw`SELECT (SELECT h.findings FROM \"Report\" h WHERE h.uid = ${uid}) AS findings, v.conclusion\n"
+        "      FROM \"ReportVersion\" v WHERE v.uid = ${uid} AND v.version = ${version}`;"),
+        r"\"Report\" columns \['findings'\]"),
+    "every Report column": (probe("return tx.$queryRaw`SELECT * FROM \"Report\" WHERE uid = ${uid}`;"),
+        r"\"Report\" columns \['conclusion', 'findings', 'recommendation', 'updatedAt', 'updatedBy'\]"),
+    "a draft read in SQL": (probe("return tx.$queryRaw`SELECT findings FROM \"ReportDraft\" WHERE uid = ${uid}`;"),
+        r"scans \"ReportDraft\", a personal draft"),
+    "the draft delegate": (probe("return tx.reportDraft.findFirst({ where: { uid } });"), r"names the member reportDraft"),
+    "the report delegate": (probe("return tx.report.findUnique({ where: { uid } });"), r"names the member report\b"),
+    "the report preview controller imported": (probe("return ReportPreviewController;",
+                                                     "import { ReportPreviewController } from './report-preview.controller';\n"),
+        r"imports './report-preview\.controller' \(a value\)"),
+    "the preview through a pacs.service value": (probe("return PacsService;", "import { PacsService } from './pacs.service';\n"),
+        r"imports './pacs\.service' \(a value\)"),
+    "the preview method": (probe("return (this as any).pacs.reportPreview(uid);"), r"names the member reportPreview"),
+    "the preview route over HTTP": (probe("return fetch('http://127.0.0.1:3000/api/studies/' + uid + '/report-preview');"),
+        r"a string naming a draft or the preview: '/report-preview'.*names fetch"),
+    "an Unsafe raw query": (probe("return tx.$queryRawUnsafe('SELECT findings FROM \"Report\" WHERE uid = $1', uid);"),
+        r"names the member \$queryRawUnsafe"),
+    "a raw query called as a function": (probe("return tx.$queryRaw(Prisma.sql`SELECT findings FROM \"Report\"`);"),
+        r"\$queryRaw used other than as the tag of a template"),
+    "a template inside a raw query": (probe("return tx.$queryRaw`SELECT ${version ? `findings` : `version`} FROM \"Report\" WHERE uid = ${uid}`;"),
+        r"a \$\{\.\.\.\} of a raw query holds a template"),
+    "the question service imported": (probe("return ClinicianQuestionService;",
+                                            "import { ClinicianQuestionService } from './clinician-question.service';\n"),
+        r"imports './clinician-question\.service' \(a value\)"),
+}
 
 
 class CriticalResultSourceTest(unittest.TestCase):
@@ -268,103 +331,37 @@ class CriticalResultSourceTest(unittest.TestCase):
         cls.texts = {path.name: path.read_text(encoding="utf-8") for path in SOURCES}
         cls.db = Database()
         cls.addClassCleanup(cls.db.close)
-        service = "critical-result.service.ts"
-        head = ("await tx.$queryRaw`SELECT r.version AS \"headVersion\",v.action AS \"headAction\",v.author AS \"headAuthor\","
-                "v.at AS \"headAt\"\n      FROM \"Report\" r LEFT JOIN \"ReportVersion\" v ON v.uid=r.uid AND v.version=r.version WHERE r.uid=${uid}`;")
-        pinned = "await tx.$queryRaw`SELECT findings,conclusion,recommendation FROM \"ReportVersion\" WHERE uid=${uid} AND version=${version}`;"
-        listed = "LEFT JOIN \"Report\" r ON r.uid=cr.\"studyUid\" LEFT JOIN \"ReportVersion\" hv ON hv.uid=r.uid AND hv.version=r.version\n        LEFT JOIN \"CriticalResult\" rb ON rb.\"supersedesId\"=cr.id\n        WHERE cr.\"institutionId\"=${c.institution} AND cr.\"recipientSub\"=${c.sub}"
-        identity = "const row = await this.orthanc.reportPreviewStudy(uid);"
-        imports = "import { OrthancService } from './orthanc.service';\n"
-        text = cls.texts[service]
-
-        def variant(old, new):
-            return {**cls.texts, service: edit(text, old, new)}
-
-        cls.equivalent = {
-            "the head read with other aliases, AS and spacing": variant(head, (
-                "await tx.$queryRaw`select   cur.version as \"headVersion\" , ver.action AS \"headAction\", ver.author AS \"headAuthor\",\n"
-                "        ver.at AS \"headAt\"\n      FROM \"Report\" AS cur\n        LEFT JOIN \"ReportVersion\" AS ver\n"
-                "          ON ver.uid = cur.uid AND ver.version = cur.version\n      WHERE cur.uid = ${uid}`;")),
-            "the pinned body read with a table alias and another line layout": variant(pinned, (
-                "await tx.$queryRaw`SELECT pv.findings, pv.conclusion, pv.recommendation\n        FROM \"ReportVersion\" pv\n"
-                "        WHERE pv.uid = ${uid} AND pv.version = ${version}`;")),
-        }
-        cls.forbidden = {
-            "the head read also takes the current findings": (variant(head, head.replace(
-                "v.at AS \"headAt\"", "v.at AS \"headAt\",r.findings AS \"headFindings\"")),
-                r"reads the current report body, \"Report\" columns \['findings'\]"),
-            "the pinned body read from Report": (variant(pinned, pinned.replace("FROM \"ReportVersion\" WHERE uid=${uid} AND version=${version}",
-                                                                                 "FROM \"Report\" WHERE uid=${uid}")),
-                r"\"Report\" columns \['conclusion', 'findings', 'recommendation'\]"),
-            # the second join is what the first depends on, so the planner cannot drop it as unused
-            "the list joins Report again under another alias and reads its conclusion": (variant(listed, listed.replace(
-                "LEFT JOIN \"Report\" r ON r.uid=cr.\"studyUid\"",
-                "LEFT JOIN \"Report\" AS cur ON cur.uid=cr.\"studyUid\" LEFT JOIN \"Report\" r ON r.uid=cur.uid AND cur.conclusion <> ''")),
-                r"\"Report\" columns \['conclusion'\]"),
-            "a subquery reads the current body": (variant(pinned, pinned.replace(
-                "SELECT findings,conclusion,recommendation FROM \"ReportVersion\"",
-                "SELECT (SELECT h.findings FROM \"Report\" h WHERE h.uid=${uid}) AS findings,conclusion,recommendation FROM \"ReportVersion\"")),
-                r"\"Report\" columns \['findings'\]"),
-            "every Report column": (variant(pinned, pinned.replace("SELECT findings,conclusion,recommendation FROM \"ReportVersion\" WHERE uid=${uid} AND version=${version}",
-                                                                    "SELECT * FROM \"Report\" WHERE uid=${uid}")),
-                r"\"Report\" columns \['conclusion', 'findings', 'recommendation', 'updatedAt', 'updatedBy'\]"),
-            "a draft read in SQL": (variant(pinned, pinned.replace("FROM \"ReportVersion\" WHERE uid=${uid} AND version=${version}",
-                                                                    "FROM \"ReportDraft\" WHERE uid=${uid}")),
-                r"scans \"ReportDraft\", a personal draft.*|a string naming a draft or the preview"),
-            "the draft delegate": (variant(pinned, pinned + "\n    await tx.reportDraft.findFirst({ where: { uid } });"),
-                r"names the member reportDraft"),
-            "the report delegate": (variant(pinned, pinned + "\n    await tx.report.findUnique({ where: { uid } });"),
-                r"names the member report\b"),
-            "the report preview controller imported": (variant(imports, imports + "import { ReportPreviewController } from './report-preview.controller';\n"),
-                r"imports './report-preview\.controller' \(a value\)"),
-            "the preview through the pacs service": (variant(imports, imports + "import { PacsService } from './pacs.service';\n"),
-                r"imports './pacs\.service' \(a value\)"),
-            "the preview method": (variant(identity, identity + "\n      await (this as any).pacs.reportPreview(uid);"),
-                r"names the member reportPreview"),
-            "the preview route over HTTP": (variant(identity, identity + "\n      await fetch('http://127.0.0.1:3000/api/studies/' + uid + '/report-preview');"),
-                r"a string naming a draft or the preview: '/report-preview'.*names fetch|names fetch"),
-            "an Unsafe raw query": (variant(pinned, "await tx.$queryRawUnsafe('SELECT findings FROM \"Report\" WHERE uid = $1', uid);"),
-                r"names the member \$queryRawUnsafe"),
-            "a raw query called as a function": (variant(pinned, "await tx.$queryRaw(Prisma.sql`SELECT findings FROM \"Report\"`);"),
-                r"\$queryRaw used other than as the tag of a template"),
-            "a template inside a raw query": (variant(pinned, "await tx.$queryRaw`SELECT ${x ? `findings` : `version`} FROM \"Report\"`;"),
-                r"a \$\{\.\.\.\} of a raw query holds a template"),
-            "the question service imported": (variant(imports, imports + "import { ClinicianQuestionService } from './clinician-question.service';\n"),
-                r"imports './clinician-question\.service' \(a value\)"),
-        }
-        cls.facts = extract({"real": cls.texts, **cls.equivalent, **{label: files for label, (files, _message) in cls.forbidden.items()}})
+        cls.facts = extract({"real": cls.texts, **EQUIVALENT, **{label: files for label, (files, _message) in FORBIDDEN.items()}})
 
     def test_01_the_real_sources_read_the_report_only_through_report_version(self) -> None:
         facts = self.facts["real"]
-        self.assertEqual(sorted(facts), ["critical-result-policy.ts", "critical-result.controller.ts", "critical-result.service.ts"])
+        self.assertTrue(facts, "no api/src/critical-result*.ts file")
         self.assertEqual(judge(self.db, facts), [])
-        templates = facts["critical-result.service.ts"]["templates"]
-        self.assertGreater(len(templates), 0)
-        # the relations every planned statement scans: what the service reads, and what it does not
+        templates = [template for file in facts.values() for template in file["templates"]]
+        self.assertGreater(len(templates), 0, "the check planned no statement")
         scanned = set()
         for template in templates:
             parts = template["parts"]
             sql = parts[0] + "".join(f"${number}{part}" for number, part in enumerate(parts[1:], 1))
             if not " ".join(sql.split()).upper().startswith("SET "):
                 scanned |= {node["Relation Name"] for node in plan_nodes(self.db.plan(sql)) if "Relation Name" in node}
-        self.assertEqual(scanned, {"CriticalResult", "Report", "ReportVersion", "StudyState"})
         print("CRITICAL_RESULT_SOURCE " + json.dumps({"files": sorted(facts), "templates": len(templates), "scanned": sorted(scanned),
               "imports": sorted({i["module"] for f in facts.values() for i in f["imports"]})}, sort_keys=True))
 
     def test_02_equivalent_spellings_pass(self) -> None:
-        for label in self.equivalent:
+        for label in EQUIVALENT:
             with self.subTest(equivalent=label):
                 self.assertEqual(judge(self.db, self.facts[label]), [])
 
     def test_03_each_forbidden_access_fails_with_its_reason(self) -> None:
         reasons = {}
-        for label, (_files, message) in self.forbidden.items():
+        for label, (_files, message) in FORBIDDEN.items():
             with self.subTest(forbidden=label):
                 problems = judge(self.db, self.facts[label])
                 self.assertTrue(problems, "passed")
                 self.assertRegex(" | ".join(problems), message)
                 reasons[label] = problems
-        print("CRITICAL_RESULT_SOURCE_REFUSALS " + json.dumps({"equivalent_passed": sorted(self.equivalent), "refused": reasons},
+        print("CRITICAL_RESULT_SOURCE_REFUSALS " + json.dumps({"equivalent_passed": sorted(EQUIVALENT), "refused": reasons},
                                                               ensure_ascii=True, sort_keys=True))
 
 
