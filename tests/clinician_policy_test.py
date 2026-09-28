@@ -3356,28 +3356,36 @@ class ClinicianPolicySpec(unittest.TestCase):
         binding: a name the file binds from the decorator's module or a package, and any property, is judged as before;
         a type or value the file declares, or imports from another api/src file, is not the decorator. (1) such names
         read, (2) a real @Head() route, an alias, a re-export, a call and a property are still read as a route or refused,
-        (3) renaming the product type leaves the inventory as it is."""
+        (3) renaming such a type leaves the inventory as it is. The typed modules are written here in the shape of the
+        product's, so the product may name its types as it likes; the product itself is what test_05 inventories."""
         sources = api_sources()
         baseline = controller_inventory(sources)
-        policy, service = API / "critical-result-policy.ts", API / "critical-result.service.ts"
         outside, added, helpers = API / "unlisted-routes.ts", API / "bound.controller.ts", API / "route-helpers.ts"
+        typed = {API / "unlisted-head.ts": "export type Head = { version: number; action: string | null } | null;\n"
+                                           "export const pinned = (head: Head): number => head?.version ?? 0;\n",
+                 API / "unlisted-reader.ts": "import { Head, pinned } from './unlisted-head';\n"
+                                             "export const read = (head: Head): number => pinned(head);\n"}
         spelled = re.compile(r"(?<![\w$])Head(?![\w$])")
-        self.assertRegex(sources[policy], r"\nexport type Head = ")
-        self.assertGreater(len(spelled.findall(sources[service])), 1, "the service imports the type and annotates with it")
 
         def old_rule():
             """The reader before this fix: every occurrence of a STRICT_NAMES spelling was a decorator name."""
             return mock.patch.object(sys.modules[__name__], "decorator_bound", lambda statements, name: True)
 
         def renamed(name):
-            return {path: spelled.sub(name, sources[path]) for path in (policy, service)}
+            return {path: spelled.sub(name, text) for path, text in typed.items()}
 
-        # control: the old reader refused the product for the type's spelling and passed the same code renamed
+        def bindings(files):
+            """decorator_bindings of each file on its own: the per-file rule, whatever the rest of api/src holds."""
+            for path, text in files.items():
+                decorator_bindings(path, text, decorator_runs(text))
+
+        # control: the old reader refused the type for its spelling alone and passed the same code renamed
         with old_rule():
-            with self.assertRaisesRegex(AssertionError, r"critical-result-policy\.ts: Head used where no decorator the "
-                                                        r"inventory reads applies it"):
-                controller_inventory(sources)
-            self.assertEqual(controller_inventory({**sources, **renamed("ReportHead")}), baseline)
+            with self.assertRaisesRegex(AssertionError, r"unlisted-head\.ts: Head used where no decorator the inventory reads "
+                                                        r"applies it"):
+                bindings(typed)
+            bindings(renamed("ReportHead"))
+        bindings(typed)
         undecorated = "used where no decorator the inventory reads applies it"
         inject = "import { Injectable } from '@nestjs/common';\n"
         helper = inject + "@Injectable()\nexport class Helper {\n  run() { return 1; }\n}\n"
@@ -3448,7 +3456,8 @@ class ClinicianPolicySpec(unittest.TestCase):
         for label, (files, message) in refused.items():
             with self.subTest(refused=label), self.assertRaisesRegex(AssertionError, message):
                 controller_inventory({**sources, **files})
-        # (3) the product's type name is not an input of the inventory: renaming it changes nothing
+        # (3) a type's name is not an input of the inventory: the typed modules, renamed or not, leave it as it is
+        self.assertEqual(controller_inventory({**sources, **typed}), baseline)
         for name in ("ReportHead", "PinnedHead"):
             with self.subTest(renamed=name):
                 self.assertEqual(controller_inventory({**sources, **renamed(name)}), baseline)
