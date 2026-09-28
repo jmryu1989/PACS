@@ -31,10 +31,10 @@
  *   그런 증거다. Refresh·필터 바꿈·목록 읽기 실패는 투영 경계다: 모든 P와 목록 소속을 내리고 그 전에 보낸 읽기의 답을 막는다.
  *   더 새 요청이 나가 있다는 것만으로는 마지막 유효 P를 바꾸지 않는다. 계정이 바뀌면(A→B→A 포함) 세션 번호가 올라 그 전의 답은
  *   계정이 같아 보여도 쓰지 않는다.
- * - 요청 식별과 수락 기준(Astra S7-U2a-PROJ-B-R-001 F01 보완 1~5). 요청 번호는 보낼 때 정하고 답이 올 때 새 번호를 주지 않는다.
- *   가장 나중에 보낸 목록 요청의 번호로 답을 거르지 않는다 — 그러면 뒤에 보낸 요청이 나가 있다는 이유로 먼저 도착한 유효한
- *   철회(stub·제외·종결)를 버려, 뒤 요청의 답까지 옛 본문·사유·Acknowledge가 남는다. 같은 세션·투영 번호·필터·유효 체인의 답은
- *   기록마다 위 규칙으로 견주고, 목록 수준(소속·쪽 범위·nextCursor·
+ * - 요청 식별과 수락 기준(Astra S7-U2a-PROJ-B-R-001 F01 보완 1~9). 요청 번호는 보낼 때 정하고 답이 올 때 새 번호를 주지 않는다.
+ *   나가 있는 목록 요청(주기 읽기·More를 미루는 근거)은 요청마다 따로 적고 끝난 요청은 자기 것만 뺀다 — 수락 기준과 한 값으로
+ *   쓰면 뒤에 보낸 요청이 나가 있다는 이유로 먼저 도착한 유효한 철회(stub·제외·종결)를 버려, 뒤 요청의 답까지 옛 본문·사유·
+ *   Acknowledge가 남는다. 같은 세션·투영 번호·필터·유효 체인의 답은 기록마다 위 규칙으로 견주고, 목록 수준(소속·쪽 범위·nextCursor·
  *   배지 수·ready·안내)은 받아들인 목록 증거의 요청 번호와 견준다: 첫 쪽은 체인이 마지막으로 받아들인 쪽보다 뒤에 보낸 요청일 때 소속을
  *   새로 세우고, More는 보낸 때의 체인과 부모 쪽이 그대로일 때만 잇는다(같은 cursor 글자는 같은 체인의 증거가 아니다). 목록 수준에서
  *   뒤진 첫 쪽은 지금 보이는 기록의 투영만 견주고 소속·배지·cursor·안내를 되돌리지 않으며, 자리가 없던 기록도 그 뒤에 받아들인 쪽이
@@ -47,7 +47,7 @@
  *   같은 세션·계정·기록·검사이고 그 기록의 지금 시도에 대한 것일 때 흡수 종결 상태(acknowledged·cancelled·superseded)라는 사실로만
  *   그 시도를 끝낸다 — 본문·사유·Source·view는 옮기지 않는다.
  * - 사건별 무효화(PROJ-R-001 F02 표). 모든 전이는 그 사건의 첫 paint 전에 끝난다.
- *   주기·More 읽기 시작: 마지막 유효 P 그대로(시작만으로 상태·권한을 짐작하지 않는다).
+ *   주기·More 읽기 시작: 그 요청의 식별만 적는다. 마지막 유효 P와 받아들인 목록은 그대로(시작만으로 상태·권한을 짐작하지 않는다).
  *   새 유효 #3: 기록마다 번호를 견주어 P 전체를 바꾸거나, 덮는 쪽에 없으면 없앤다 — 다른 요청의 답을 기다리지 않는다. 목록 수준에서
  *     앞선 첫 쪽은 목록 소속을 다시 세우고 More는 체인에 잇는다. 뒤진 첫 쪽·바뀐 체인의 More는 위 수락 기준대로다. U는 목록에 없거나
  *     stub이라는 것만으로 끝나지 않고, 목록 수준에서 받아들인 쪽마다 결과를 모르는 시도의 #4를 한 번 읽는다. E는 그대로다.
@@ -333,12 +333,15 @@
     const opened = new Set();
     // 받은 목록(#3 view=received). 기본 필터는 확인 대기(state=pending을 명시한다 — 서버 기본값은 all이다). Show All은 all이다.
     // ready는 지금 목록이 지금 필터의 성공한 답인가다. listEnd는 지금 체인의 마지막 쪽이 덮는 범위의 끝(다음 쪽이 있을 때 그 쪽
-    // 마지막 행의 순서 키)이고, More로 읽는 쪽은 그 뒤부터 덮는다.
-    let filter = 'pending', listPhase = 'idle', listError = '', ready = false, nextCursor = null, listEnd = null;
+    // 마지막 행의 순서 키)이고, More로 읽는 쪽은 그 뒤부터 덮는다. listPhase는 이 보기에서 받아들인 결과('none'·'ready'·'failed')다.
+    let filter = 'pending', listPhase = 'none', listError = '', ready = false, nextCursor = null, listEnd = null;
     let pending = null, lastPending = null, bodyOpen = false;
     // 목록 수준의 수락 기준(파일 머리의 요청 식별과 수락 기준): 지금 체인의 첫 쪽을 정한 요청 번호와, 체인이 마지막으로 받아들인 쪽의
     // 요청 번호(다음 More의 부모). 소속·쪽 범위·nextCursor·배지 수·ready·안내는 이 두 번호로만 바뀐다. 0은 이 보기에 받아들인 쪽이 없음이다.
     let chainGen = 0, tailGen = 0;
+    // 진행 중 식별: 이 보기에서 나가 있는 목록 요청의 문맥. 수락 기준과 따로 두고 끝난 요청은 자기 문맥만 뺀다 — 앞 요청이 끝났다고
+    // 뒤 요청이 나가 있다는 사실(주기 읽기·More를 미루는 근거)이 지워지지 않게.
+    const listing = new Set();
     // 나가 있는 목록·한 건 읽기의 요청 번호와, 그 가운데 가장 이른 것보다 뒤에 반영한 목록 쪽(번호·필터·범위·id). 먼저 보낸 요청의
     // 늦은 답이 그 뒤에 받은 쪽에 졌는지(투영 자리가 없거나 비어 있는 기록의 늦은 등장 포함) 가리는 데만 쓰고, 나간 요청이 없으면 비운다.
     const outstanding = new Set();
@@ -413,7 +416,8 @@
 
     /**
      * 투영 경계(Refresh·필터 바꿈·목록 실패·세션 끝): 모든 투영과 목록 소속, 앞 보기의 Open Replacement 실패 안내를 내리고, 그 전에
-     * 보낸 읽기의 답이 투영이 되지 못하게 한다. cursor 체인·배지 수·ready와 받아들인 목록의 기준도 새 답을 기다린다.
+     * 보낸 읽기의 답이 투영이 되지 못하게 한다. cursor 체인·배지 수·ready와 받아들인 목록의 기준도 새 답을 기다린다. 그 전에 보낸
+     * 목록 요청은 투영 번호가 달라 이 보기에서 나가 있는 것으로 세지 않는다.
      */
     function boundary() {
       view++;
@@ -426,7 +430,9 @@
       listEnd = null;
       pending = null;
       ready = false;
+      listPhase = 'none';
       chainGen = tailGen = 0;
+      listing.clear();
       outstanding.clear();
     }
 
@@ -490,12 +496,13 @@
       if (next && !cursor) return;
       // 이 쪽의 식별: 요청 번호·세션·계정·투영 번호, 필터, More면 보낸 때의 체인·부모 쪽과 덮는 범위의 앞 끝(앞 쪽의 마지막 행 뒤).
       const ctx = { ...begin(), filter, next, chain: next ? chainGen : 0, parent: next ? tailGen : 0, high: next ? listEnd : null };
+      listing.add(ctx);
       outstanding.add(ctx.gen);
-      listPhase = 'loading';
       paint();
       const query = `view=received&state=${ctx.filter}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-      // 답을 견주는 데 쓴 목록 쪽 증거는 견준 뒤에 정리한다.
+      // 끝난 요청은 자기 식별만 빼고(그리기 전에), 그 답을 견주는 데 쓴 목록 쪽 증거는 견준 뒤에 정리한다.
       const settle = handle => value => {
+        listing.delete(ctx);
         try { handle(value); } finally { retire(ctx.gen); }
       };
       call('GET', `/critical-results?${query}`).then(settle(({ data }) => {
@@ -968,19 +975,22 @@
       const show = !!eligible();
       region.hidden = !show;
       if (!show) return;
-      region.dataset.state = lock !== null ? 'locked' : listPhase;
+      // 받아들인 결과와 나가 있는 요청으로 정한 영역의 상태. 실패 뒤 다시 읽는 동안은 불러오는 중이다.
+      const phase = lock !== null ? 'locked' : listPhase === 'failed' && !listing.size ? 'failed' : listing.size ? 'loading'
+        : listPhase === 'ready' ? 'ready' : 'idle';
+      region.dataset.state = phase;
       const active = document.activeElement;
       // 배지: 서버 pending. 읽기가 실패하면 수가 없다(0으로 보이지 않는다).
-      setText(badge, lock !== null ? 'Locked' : pending !== null ? `Pending ACK ${pending}` : listPhase === 'failed' ? 'Load Failed' : 'Loading');
-      badge.dataset.state = lock !== null ? 'locked' : pending !== null ? 'ready' : listPhase;
-      setTitle(badge, lock !== null ? TEXT.locked : pending === null && listPhase === 'failed' ? TEXT.badgeFailed : TEXT.badge);
+      setText(badge, lock !== null ? 'Locked' : pending !== null ? `Pending ACK ${pending}` : phase === 'failed' ? 'Load Failed' : 'Loading');
+      badge.dataset.state = lock !== null ? 'locked' : pending !== null ? 'ready' : phase;
+      setTitle(badge, lock !== null ? TEXT.locked : pending === null && phase === 'failed' ? TEXT.badgeFailed : TEXT.badge);
       let line, detail = '';
       if (lock !== null) { line = lock.text; detail = lock.detail; }
-      else if (listPhase === 'failed') { line = TEXT.failed; detail = listError; }
+      else if (phase === 'failed') { line = TEXT.failed; detail = listError; }
       else if (!ready) line = TEXT.loading;
       else if (!listIds.length) line = filter === 'pending' ? TEXT.emptyPending : TEXT.emptyAll;
       else line = TEXT.ready(listIds.length, !!nextCursor);
-      statusBox.dataset.state = lock !== null ? 'locked' : listPhase === 'failed' ? 'failed' : !ready ? 'loading' : listIds.length ? 'ready' : 'empty';
+      statusBox.dataset.state = lock !== null ? 'locked' : phase === 'failed' ? 'failed' : !ready ? 'loading' : listIds.length ? 'ready' : 'empty';
       setText(statusText, line);
       setText(statusDetail, detail);
       statusDetail.hidden = !detail;
@@ -1093,7 +1103,8 @@
       boundary();
       loadList(false);
     });
-    moreButton.addEventListener('click', () => { if (listPhase !== 'loading') loadList(true); });
+    // More는 이 보기에 나가 있는 목록 요청이 없을 때만 보낸다: 같은 부모의 More가 겹치지 않고, 나가 있는 첫 쪽이 체인을 바꾸면 그 More는 버려진다.
+    moreButton.addEventListener('click', () => { if (!listing.size) loadList(true); });
     if (fold) toggle.addEventListener('click', () => {
       if (ended) return;
       bodyOpen = !bodyOpen;
@@ -1101,7 +1112,7 @@
     });
     // 문서가 보이고 영역이 서 있는 동안만 다시 읽는다. 읽기는 어떤 기록도 바꾸지 않고(ACK·재알림이 아니다) 알림도 띄우지 않는다.
     timer = setInterval(() => {
-      if (allowed() && !region.hidden && document.visibilityState === 'visible' && listPhase !== 'loading') loadList(false);
+      if (allowed() && !region.hidden && document.visibilityState === 'visible' && !listing.size) loadList(false);
     }, PERIOD_MS);
     watch = setInterval(sync, WATCH_MS);
     try {
