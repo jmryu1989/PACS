@@ -85,7 +85,8 @@ receipts that replay the stored `applied` result, revision before state, author/
       where it stands.) Each path is made to log its own id, and every start is then run over
       stand-ins - api()'s 401, the dictation controller's 401, the list and poll account changes, the confirmed Log out,
       the question row's own 401, the S5-U4c queue write's own 401, the S7-U1b sender area's own 401 (the shipped
-      critical-result-send.js under main.html's S7-U1b block) - while an end() in window.kinOn401 logs the list:
+      critical-result-send.js under main.html's S7-U1b block), the S7-U2a Critical Results panel's own 401 (the shipped
+      critical-result-inbox.js under main.html's S7-U2a block) - while an end() in window.kinOn401 logs the list:
       once, before any network wait and before the logout. Each run is matched to the one path it took. The membership
       screen's Log out is the one start without the list, and it runs only after that screen has replaced the whole
       page. A path no start runs, two starts on one path, or a KinAuth used other than as KinAuth.<name> fails the case
@@ -124,7 +125,7 @@ def lf_text(path):
 
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js")}
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "critical-result-inbox.js")}
 MAIN = lf_text(HPACS / "main.html")
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
 INDEX_STAND_IN = ('<!doctype html><html><head><meta charset="utf-8"><title>SYN index stand-in</title></head>'
@@ -1071,6 +1072,8 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.holding = set()
         self.held = []
         self.q_requests = []
+        # S7-U2a Critical Results pending-list reads of clinician.html, kept apart from the question requests.
+        self.inbox_reads = []
         self.logouts = []
         self.held_logouts = None
         # Answers for other API routes of the page, by (method, path): the F1 cases' report save.
@@ -1156,6 +1159,15 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         if (method, path) in self.plain:
             status, payload = self.plain[(method, path)]
             route.fulfill(status=status, json=payload)
+            return
+        # S7-U2a: clinician.html's Critical Results area reads its pending list when the page boots (and every 60 s while
+        # shown). After self.plain, so a start that plants a 401 for this route still gets it. Answered empty for this
+        # session and logged apart; any other critical-result request stays unexpected.
+        if method == "GET" and path == "/api/critical-results" and query == {"view": ["received"], "state": ["pending"]}:
+            account = self.me if isinstance(self.me, dict) else {}
+            self.inbox_reads.append(request.url)
+            route.fulfill(json={"owner": [account.get("institution"), account.get("sub")], "view": "received", "items": [],
+                                "nextCursor": None, "pending": 0})
             return
         kind = kind_of(method, path)
         if kind is None:
@@ -2973,6 +2985,22 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         # The area ended with the 401: its line is gone.
         return lambda: expect(self.page.locator("#cvr-sent-p")).to_have_attribute("hidden", "")
 
+    def start_critical_inbox_401(self, tagged):
+        # The S7-U2a Critical Results panel's own first read answered 401: the shipped critical-result-inbox.js and main.html's
+        # S7-U2a block (its mount, cut from the tagged page) over the stand-ins tests/critical_result_recipient_dom_test.py
+        # runs it on, whose KinAuth.logout here names the path it was called for. As on the page, the block runs before boot
+        # gives the session; boot then makes it a receiving session and the panel reads its pending list, which answers 401.
+        from critical_result_recipient_dom_test import BLOCK_MARKS as INBOX_MARKS, INBOX_JS, PRELUDE as INBOX_PRELUDE
+        self.plain[("GET", "/api/critical-results")] = (401, {"statusCode": 401, "message": "SYN expired"})
+        prelude = variant(INBOX_PRELUDE, [("  logout: async () => { window.synLogouts += 1; },\n",
+                                           "  logout: async site => { window.synLogouts += 1; window.synCalls.push('logout:' + site); },\n", 1)],
+                          "tests/critical_result_recipient_dom_test.py PRELUDE")
+        stand_ins = "window.synMode = { serverMode: false, offline: false, demoMode: false };\n"
+        self.start_page(stand_ins + INBOX_JS + "\n" + prelude + slice_between(tagged, *INBOX_MARKS))
+        self.page.evaluate("() => window.synBoot(window.synSession)")
+        # The panel ended with the 401: its summary line is gone.
+        return lambda: expect(self.page.locator("#cvr-inbox-p")).to_have_attribute("hidden", "")
+
     def start_membership_log_out(self, tagged):
         # A pending account: the membership screen replaces the page, then its Log out is clicked.
         self.start_page(SITE_AUTH + extract_function(tagged, "showMembershipState"))
@@ -3009,7 +3037,8 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                   ("list account change", self.start_list_owner_change), ("poll account change", self.start_poll_owner_change),
                   ("Log out", self.start_log_out), ("question row 401", self.start_question_401),
                   ("image request write 401", self.start_image_request_401),
-                  ("critical result 401", self.start_critical_result_401), (MEMBERSHIP, self.start_membership_log_out)]
+                  ("critical result 401", self.start_critical_result_401),
+                  ("critical result inbox 401", self.start_critical_inbox_401), (MEMBERSHIP, self.start_membership_log_out)]
         reached = {}
         for name, start in starts:
             with self.subTest(start=name):
