@@ -2052,7 +2052,7 @@ test('completeness equivalents: every write of api/src rewritten in another nota
     assert.deepEqual(inventory(scan), inventory(base, edits), name);
     assert.equal(scan.sites.length, base.sites.length, name);
     // The same verdict (its positions are the inventory's above; a declaration a rewrite adds moves lines).
-    const lineless = scanned => ({ ...scanned, unresolved: scanned.unresolved.map(entry => entry.replace(/^([^:]+):\d+ /, '$1 ')) });
+    const lineless = scanned => ({ ...scanned, unresolved: scanned.unresolved.map(entry => entry.replace(/([\w./-]+\.[cm]?[jt]sx?):\d+/g, '$1')) });
     assert.deepEqual(lineless(verdict(scan, productTable(), productSources().listing)), lineless(verdict(base, productTable(), productSources().listing)), name);
   }
   console.log('ADMIN_AUDIT_EQUIVALENT_REWRITES ' + JSON.stringify({ edits: counts, candidates: expectedAll.length, sites: base.sites.length }));

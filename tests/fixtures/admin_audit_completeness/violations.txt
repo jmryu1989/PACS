@@ -289,7 +289,7 @@ export class SynFields {
 
 // ==== case: f02-a-constant-computed-key-sets-action-again | verdict: unresolved ====
 import { Prisma } from '@prisma/client';
-const COL = 'action';
+const COL: string = 'action';
 export async function run(tx: Prisma.TransactionClient, body: any) {
   await tx.auditLog.create({ data: { action: 'syn.allowed', [COL]: body.kind } }); // expect: unresolved `body.kind` is a property the program does not fix
 }
