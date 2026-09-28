@@ -36,6 +36,9 @@ refactoring, so (S7-PINS, AGENTS.md 1-B.14) it is checked on the two fixed commi
 merge that shipped the unit - never on the live main.html, which later units keep changing. The live file is held to
 what the page must still be: every button once with its English label, the regions free of script, the one line that
 places the Structured entry, the CSS block's fonts, and everything the browser cases measure.
+
+S7-PINS fix1 (Astra S7-PINS-R-001-F02): the live page is also held to the buttons' starting states, from an explicit
+list, and to the two placeholders' Korean reasons - requirements the live byte comparison used to cover.
 """
 import hashlib
 import json
@@ -55,7 +58,7 @@ OUT = Path(os.environ.get('KIN_EVIDENCE_DIR') or ROOT / 'tmp/s5-ui3/report-actio
 # The commit this unit started from (S5-UI2 fix1) and the main commit that merged it (PR #100, the branch head 054b99a
 # with fix1). A shallow CI clone has neither, so what they held is pinned below; where they are present the pins and the
 # refactoring's equivalence are checked on them, and where they are not those cases say so and skip.
-BASE = 'ae04b19d1b98b57b3ff7de006e5dc38d83ef8e64'
+BASE ='ae04b19d1b98b57b3ff7de006e5dc38d83ef8e64'
 RESULT = 'aaf53dccad2ed140b4a2c6610e9690d33fbab2dc'
 # LF-normalized UTF-8 sha256 of the base main.html, and of its <script> blocks joined by '\n\0\n' (the digest
 # tests/worklist_toolbar_dom_test.py pins for S5-UI2's base; neither unit changed a script byte).
@@ -124,6 +127,20 @@ NEW_IDS = [MENU] + list(SECTIONS)
 IN_VIEW = TOP + [MENU + '>summary'] + FOOT
 MAX_IN_VIEW = 7
 DISABLED = ['b-addendum', 'b-dictate', 'b-except', 'b-mark-cvr', 'b-report-template']
+# The live page (Astra S7-PINS-R-001-F02): the buttons disabled as main.html serves them, before the page script reads
+# the session and the report and enables or disables them by role and report state. Every other button starts enabled.
+# Written out, never read off the page under test.
+INITIAL_DISABLED = ['b-addendum', 'b-dictate', 'b-except', 'b-mark-cvr', 'b-report-template']
+# fix1 (D54): a placeholder says in Korean that it is not connected yet and that no permission blocks it, so a reader
+# does not take it for a role restriction. These phrases carry that meaning; the rest of the wording is free. S7-U1b
+# turns Mark CVR into a real control that stays disabled until the server answers; its entry then names that reason.
+PLACEHOLDER_REASONS = {
+    'b-except': ('연결되지 않은', '권한 때문에 막힌 것이 아닙니다'),
+    'b-mark-cvr': ('연결되지 않은', '권한 때문에 막힌 것이 아닙니다'),
+}
+# The buttons inside More, in their declared order, the Structured entry right before Print.
+MENU_ORDER = ['b-addendum', 'b-transcribe', 'b-defer', 'b-except', 'b-mark-cvr', 'b-unread', 'b-copy', 'b-paste',
+              'b-clear', 'b-report-template', 'b-structured', 'b-print', 'b-history']
 # fix1: the one attribute added to base buttons, the Korean tooltips of the two placeholders (the base had none).
 TITLES_ADDED = {
     'b-except': '판독 제외: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.',
@@ -402,6 +419,24 @@ class ReportActionsDOMTest(unittest.TestCase):
             with self.subTest(button=key):
                 self.assertTrue(label, key)
                 self.assertIsNone(re.search('[가-힣]', label), f'{key}: {label}')
+
+    def test_every_button_starts_enabled_or_disabled_as_required_and_the_placeholders_say_why(self):
+        # The live page as served, before the page script runs (Astra S7-PINS-R-001-F02): the states come from the explicit
+        # INITIAL_DISABLED, so a button that must work (History, Copy, Prev, ...) disabled in the markup fails here, and
+        # each placeholder's tooltip still tells a reader why it does nothing.
+        page = self.open_page(1366, 768, structured=False)
+        try:
+            got = page.evaluate("""(ids)=>ids.map(id=>{const e=document.getElementById(id);
+              return e?[id,e.disabled,e.getAttribute('title')]:[id,null,null]})""", BUTTON_IDS)
+        finally:
+            page.close()
+        self.assertEqual({key: key in INITIAL_DISABLED for key in BUTTON_IDS}, {key: disabled for key, disabled, _ in got})
+        titles = {key: title or '' for key, _, title in got}
+        for key, phrases in PLACEHOLDER_REASONS.items():
+            with self.subTest(placeholder=key):
+                self.assertRegex(titles[key], '[가-힣]', f'{key} has no Korean tooltip')
+                for phrase in phrases:
+                    self.assertIn(phrase, titles[key], key)
 
     def test_the_refactoring_kept_every_button_tag_attribute_and_label(self):
         # Base and merge commit, as the browser serializes them: the unit moved the 18 buttons and changed none.
@@ -728,9 +763,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                     # off here, where the layout does not depend on it.
                     page.evaluate(ENABLE_ALL)
                     menu = page.evaluate("()=>[...document.querySelectorAll('#report-more button')].map(b=>b.id)")
-                    self.assertEqual(['b-addendum', 'b-transcribe', 'b-defer', 'b-except', 'b-mark-cvr', 'b-unread',
-                                      'b-copy', 'b-paste', 'b-clear', 'b-report-template', 'b-structured', 'b-print',
-                                      'b-history'], menu)
+                    self.assertEqual(MENU_ORDER, menu)
                     for key in menu:
                         page.locator('#' + key).click(timeout=2000)
                         self.assertEqual(key, page.evaluate('()=>__hits.at(-1)'), f'{key} at 1366x768 {mode}')
@@ -758,6 +791,8 @@ class ReportActionsDOMTest(unittest.TestCase):
                     self.assertTrue(page.evaluate("document.querySelector('#report-more').open"))
                     enabled = page.evaluate(
                         "()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.disabled).map(b=>b.id)")
+                    # The walk is judged against the declared lists, not the page's own states (F02).
+                    self.assertEqual([key for key in MENU_ORDER if key not in INITIAL_DISABLED], enabled)
                     self.assertEqual('b-transcribe', enabled[0])
                     walked = []
                     for _ in range(len(enabled) + 1):
