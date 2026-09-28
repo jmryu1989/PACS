@@ -6,7 +6,9 @@ REQ-S5-UI3-REPORT-ACTION-GROUPS: the report panel showed 18 buttons in two rows,
 view stay Approve, Save, Prelim and Dictate with one More menu on top, and Prev/Next at the bottom; the other thirteen
 live in four sections (Reading, Status, Editor, Print and History) of a native <details> that opens without script.
 Same elements, same ids, same labels, same handlers: the page script is not touched. Except and Mark CVR, which had no
-id, get one (b-except, b-mark-cvr) and stay disabled placeholders.
+id, get one (b-except, b-mark-cvr) and stay disabled placeholders. S7-U1b later wired Mark CVR to the critical result
+routes: it stays disabled in the markup and critical-result-send.js turns it on only while the server (#1) says the
+reading study can be sent (the last case below; tests/critical_result_sender_dom_test.py covers the reasons).
 
 Dictate stays in view although UXR-G-08 lists it under More, to keep the report fields their room: at 1366x768 an open
 More grows the row above the fields from 28px to 130-134px, and with the dictation pane open as well the three fields
@@ -118,11 +120,13 @@ NEW_IDS = [MENU] + list(SECTIONS)
 IN_VIEW = TOP + [MENU + '>summary'] + FOOT
 MAX_IN_VIEW = 7
 DISABLED = ['b-addendum', 'b-dictate', 'b-except', 'b-mark-cvr', 'b-report-template']
-# fix1: the one attribute added to base buttons, the Korean tooltips of the two placeholders (the base had none).
+# fix1: the one attribute added to base buttons, the Korean tooltip of the Except placeholder (the base had none).
 TITLES_ADDED = {
     'b-except': '판독 제외: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.',
-    'b-mark-cvr': '중요 결과(CVR) 표시: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.',
 }
+# S7-U1b: Mark CVR's markup tooltip is what shows before critical-result-send.js hears the server, which then writes the
+# server's answer there (tests/critical_result_sender_dom_test.py SD01). Here only one Korean tooltip is required.
+TITLES_KOREAN = ['b-mark-cvr']
 # fix1: (button, the one before it) set apart by 8px on top of the 4px gap; every other neighbour pair keeps 4px.
 GAP = 4
 GAPPED = {'b-dictate': 'b-prelim', 'b-unread': 'b-mark-cvr', 'b-clear': 'b-paste'}
@@ -264,13 +268,15 @@ class ReportActionsStructureTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.text = lf(MAIN.read_text(encoding='utf-8'))
-        # S5-U4c and S5-U4b (after this unit) added regions outside this unit's three; the byte pins below compare
-        # main.html with those taken out: S5-U4c's regions and the five shared kinOn401 lines first
-        # (tests/clinician_request_dom_test.py), then S5-U4b's four (tests/clinician_question_dom_test.py). Imported here
-        # because those modules need Playwright and this class does not otherwise.
+        # S5-U4c, S5-U4b and S7-U1b (after this unit) added regions outside this unit's three; the byte pins below compare
+        # main.html with those taken out: S7-U1b's (tests/critical_result_sender_dom_test.py, which also puts Mark CVR's
+        # base tooltip back), S5-U4c's regions and the five shared kinOn401 lines (tests/clinician_request_dom_test.py),
+        # then S5-U4b's four (tests/clinician_question_dom_test.py). Imported here because those modules need Playwright
+        # and this class does not otherwise.
         from clinician_question_dom_test import without_u4b
         from clinician_request_dom_test import without_u4c_main
-        cls.pinned = without_u4b(without_u4c_main(cls.text))
+        from critical_result_sender_dom_test import without_u1b
+        cls.pinned = without_u4b(without_u4c_main(without_u1b(cls.text)))
         cls.base = base_text()
         print('base commit', BASE, 'present' if cls.base is not None else 'absent in this clone; pinned values used')
 
@@ -375,14 +381,21 @@ class ReportActionsDOMTest(unittest.TestCase):
         self.assertEqual([], [row[0] for row in got if row[1] is None])
         disabled = [key for key, tag, _ in got if re.search(r'\sdisabled=""', tag)]
         self.assertEqual(DISABLED, disabled)
-        # fix1 added one attribute, a tooltip, to the two placeholders: it is there with the pinned text, and with it
-        # taken off the start tag is the base's. Any other difference still fails the comparison below.
+        # fix1 added one attribute, a tooltip, to the two placeholders: Except's is there with the pinned text, Mark CVR's
+        # (S7-U1b) is one Korean tooltip, and with it taken off the start tag is the base's. Any other difference still
+        # fails the comparison below.
         for row in got:
             if row[0] in TITLES_ADDED:
                 attribute = f' title="{TITLES_ADDED[row[0]]}"'
                 with self.subTest(title=row[0]):
                     self.assertEqual(1, row[1].count(attribute), row[1])
                 row[1] = row[1].replace(attribute, '')
+            if row[0] in TITLES_KOREAN:
+                found = re.findall(r' title="([^"]*)"', row[1])
+                with self.subTest(title=row[0]):
+                    self.assertEqual(1, len(found), row[1])
+                    self.assertRegex(found[0], '[가-힣]')
+                row[1] = re.sub(r' title="[^"]*"', '', row[1])
         # The pin stands for the base: the same serialization of the base markup (the literals, or the commit).
         page = self.open_page(1366, 768, html=page_html(self.base) if self.base else
                               page_html(without_ui3(MAIN.read_text(encoding='utf-8'))), structured=False)
@@ -738,6 +751,76 @@ class ReportActionsDOMTest(unittest.TestCase):
                     self.assertTrue(set(walked).isdisjoint(DISABLED), walked)
                 finally:
                     page.close()
+
+    # ── (e) S7-U1b: Mark CVR follows the server ──
+
+    def test_mark_cvr_is_on_only_while_the_server_says_the_study_can_be_sent(self):
+        """Disabled in the markup (no server answer yet). critical-result-send.js, mounted by main.html's shipped S7-U1b
+        block, keeps it off with the contract's reason for sendable:false and turns it on only for sendable:true; on, it
+        is a keyboard stop in the Status section between Defer and Reset to Unread, and a pointer click on it opens Send
+        Critical Result. tests/critical_result_sender_dom_test.py covers every reason, refusal and late answer."""
+        from urllib.parse import urlparse
+        from playwright.sync_api import expect
+        from critical_result_sender_dom_test import (A, BLOCK, HEADS, HOOK_LINES, INSTITUTION, JS_NAME, P, PRELUDE, RAD,
+                                                     REASONS, SETUP, SHIPPED_JS, STUDIES, TAIL, me)
+        origin, owner = 'https://report.test', [INSTITUTION, RAD['sub']]
+        sendable = {'sendable': True, 'reason': None, 'source': {**HEADS[A], 'final': True},
+                    'recipients': [{key: P[key] for key in ('sub', 'actor', 'name', 'role')}]}
+        answers = [{'sendable': False, 'reason': 'NO_PINNABLE_SOURCE', 'source': None, 'recipients': []}]
+        asked = []
+
+        def handle(route):
+            path = urlparse(route.request.url).path
+            if path == '/worklist/hpacs-lite/main.html':
+                route.fulfill(body=self.html, content_type='text/html; charset=utf-8')
+            elif path == '/worklist/hpacs-lite/' + JS_NAME:
+                route.fulfill(body=SHIPPED_JS, content_type='application/javascript; charset=utf-8')
+            elif path == f'/api/studies/{A}/critical-result-recipients':
+                asked.append(path)
+                route.fulfill(json={'owner': owner, 'uid': A, **(answers.pop(0) if answers else sendable)})
+            elif path == '/api/critical-results':
+                route.fulfill(json={'owner': owner, 'view': 'sent', 'items': [], 'nextCursor': None, 'pending': 0})
+            else:
+                route.abort()
+
+        page = self.browser.new_page(viewport={'width': 1366, 'height': 768})
+        page.set_default_timeout(4000)
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.route('**/*', handle)
+        try:
+            page.goto(origin + '/worklist/hpacs-lite/main.html')
+            page.evaluate(SETUP, {'session': me(RAD, ['radiologist']), 'studies': STUDIES, 'app': {A: {'version': 3, 'rs': 'A'}},
+                                  'names': {}, 'mode': {'serverMode': True, 'offline': False}})
+            page.add_script_tag(url=origin + '/worklist/hpacs-lite/' + JS_NAME)
+            page.add_script_tag(content=PRELUDE + BLOCK + TAIL.replace('HOOK', '\n'.join(HOOK_LINES)))
+            mark = page.locator('#b-mark-cvr')
+            expect(mark).to_be_disabled()
+            page.evaluate('u => window.synPick(u)', A)
+            expect(mark).to_have_attribute('title', REASONS['NO_PINNABLE_SOURCE'])
+            expect(mark).to_be_disabled()
+            # The report state moves on and the server now says the study can be sent.
+            page.evaluate('u => window.synReport(u, 4, "A", true)', A)
+            expect(mark).to_be_enabled()
+            self.assertEqual(2, len(asked))
+            page.locator('#b-approve').focus()
+            for _ in range(3):
+                page.keyboard.press('Tab')
+            self.assertEqual(MENU + '>summary', page.evaluate(ACTIVE))
+            page.keyboard.press('Enter')
+            enabled = page.evaluate("()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.disabled).map(b=>b.id)")
+            self.assertLess(enabled.index('b-defer'), enabled.index('b-mark-cvr'))
+            self.assertLess(enabled.index('b-mark-cvr'), enabled.index('b-unread'))
+            walked = []
+            for _ in range(len(enabled) + 1):
+                page.keyboard.press('Tab')
+                walked.append(page.evaluate(ACTIVE))
+            self.assertEqual(enabled + ['findings'], walked)
+            mark.click(timeout=2000)
+            expect(page.locator('#cvr-send')).to_be_visible()
+            self.assertEqual([], errors)
+        finally:
+            page.close()
 
 
 if __name__ == '__main__':
