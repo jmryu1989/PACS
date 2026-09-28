@@ -1,7 +1,7 @@
 'use strict';
 /* TEST-S7-U1a-SERVICE / TEST-S7-U1a-MATRIX (pure half): the compiled critical result policy, and the compiled service
  * over a real disposable PostgreSQL, a recording Keycloak and a recording Orthanc (contract S7-U1p section 2.3
- * SV01-SV14). SV11's source check is tests/critical_result_source_test.py.
+ * SV01-SV14, and the lock-failure row: 503 CRITICAL_RESULT_BUSY). SV11's source check is tests/critical_result_source_test.py.
  *
  * REQ-S7-U1a-RECORD / REQ-S7-U1a-SOURCE-PIN / REQ-S7-U1a-AUTHZ / REQ-S7-U1a-IDEMPOTENCY / REQ-S7-U1a-RECIPIENT-MATRIX /
  * REQ-S7-U1a-AUDIT-ATTRIBUTION / REQ-S7-U1p-RECIPIENT-CLASS / REQ-S7-U1p-IDENTITY / REQ-S7-U1p-DEDUP /
@@ -775,6 +775,130 @@ test('SV14 a delayed original create applies after its replay was refused; a del
   a0Hold.release();
   await assert.rejects(a0, code(409, 'CRITICAL_RESULT_CANCELLED'));
   assert.deepEqual(await w.count(), terminal);
+});
+
+// ── lock failure (contract lock table: P2024/P2028/P2034, 55P03/57014/40P01 -> 503 CRITICAL_RESULT_BUSY) ──
+
+/**
+ * The advisory lock the real StudyAccessService takes for `caller` in a transaction, read back from PostgreSQL's pg_locks
+ * (so the key is not rebuilt here). A policy write takes the same subject's lock exclusively (contract section 4).
+ */
+async function policyLock(w, caller) {
+  return w.base.$transaction(async tx => {
+    await w.access.snapshot(caller, tx);
+    const rows = await tx.$queryRaw`SELECT ((classid::bigint << 32) | objid::bigint)::text AS key FROM pg_locks
+      WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND mode = 'ShareLock' AND granted`;
+    assert.equal(rows.length, 1, 'one shared advisory lock per policy snapshot');
+    return rows[0].key;
+  });
+}
+
+/** Another connection holds `key` exclusively, as a policy write in progress does, until the returned release runs. */
+async function holdLock(w, key) {
+  let locked, open;
+  const held = new Promise(r => { locked = r; }), gate = new Promise(r => { open = r; });
+  const done = w.base.$transaction(async tx => {
+    await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(${key}::bigint)`;
+    locked();
+    await gate;
+  }, { maxWait: 4000, timeout: 60000 });
+  await Promise.race([held, done.then(() => { throw new Error('the hold ended before it took the lock'); })]);
+  return async () => { open(); await done; };
+}
+
+const DB_TEXT = /55P03|57014|40P01|P20\d\d|lock timeout|advisory|pg_|SELECT|StudyAccessPolicy|Raw query/i;
+
+test('lock failure: a policy lock held by another connection times out the caller or recipient StudyAccess lock -> 503 CRITICAL_RESULT_BUSY, nothing written; the same requestId applies later', async () => {
+  // Astra S7-U1a-D-R-001-F01: StudyAccess passes the lock timeout on only as the cause of its own 503.
+  const w = await world();
+  const v1 = await approved(w);
+  const v2 = await approved(w, UID2);
+  const locks = { caller: await policyLock(w, S()), recipient: await policyLock(w, person('P')) };
+  assert.notEqual(locks.caller, locks.recipient, 'the sender and the recipient subject have their own policy locks');
+  const busyUnder = async (label, key, call, requestId) => {
+    const before = await w.count();
+    const release = await holdLock(w, key);
+    try {
+      await assert.rejects(call(), e => {
+        const body = e.getResponse();
+        assert.deepEqual([e.getStatus(), body.code, Object.keys(body).sort()], [503, 'CRITICAL_RESULT_BUSY', ['code', 'message']], label);
+        assert.ok(!DB_TEXT.test(JSON.stringify(body)), label + ': no DB text in the answer');
+        return true;
+      }, label);
+    } finally { await release(); }
+    assert.deepEqual(await w.count(), before, label + ': no record, event, receipt or audit row');
+    assert.equal(await w.receipt(requestId), null, label + ': the requestId is not spent');
+  };
+  // (a) create: the sender's lock, then the recipient subject's lock; the same request applies once both are free
+  const create = () => w.svc.create(UID, S(), createBody(S(), id(301), 'P', v1));
+  await busyUnder('create, sender lock', locks.caller, create, id(301));
+  await busyUnder('create, recipient lock', locks.recipient, create, id(301));
+  const created = await create();
+  assert.deepEqual([created.replayed, created.applied.to, (await w.record(id(301))).state], [false, 'created', 'created']);
+  // (b) ack: the recipient is the caller
+  const ack = () => w.svc.ack(id(301), person('P'), ackBody(person('P'), id(302)));
+  await busyUnder('ack, caller lock', locks.recipient, ack, id(302));
+  assert.deepEqual([(await w.record(id(301))).state, (await w.record(id(301))).revision], ['created', 1]);
+  assert.deepEqual([(await ack()).replayed, (await w.record(id(301))).state], [false, 'acknowledged']);
+  // (c) supersede: the sender's lock, then the recipient subject's lock
+  await w.svc.create(UID2, S(), createBody(S(), id(303), 'P', v2));
+  const supersede = () => w.svc.supersede(id(303), S(), supersedeBody(S(), id(304), 1, v2));
+  await busyUnder('supersede, sender lock', locks.caller, supersede, id(304));
+  await busyUnder('supersede, recipient lock', locks.recipient, supersede, id(304));
+  assert.deepEqual([(await w.record(id(303))).state, await w.record(id(304))], ['created', null]);
+  const superseded = await supersede();
+  assert.deepEqual([superseded.replayed, superseded.applied.replacement.id, (await w.record(id(303))).state], [false, id(304), 'superseded']);
+  assert.deepEqual([(await supersede()).replayed, (await create()).replayed], [true, true], 'applied requests replay as before');
+});
+
+test('lock failure only: a malformed policy read in the transaction and the post-commit interceptor 503 keep the code-less StudyAccess answer', async () => {
+  const w = await world();
+  const v1 = await approved(w);
+  // The table's CHECK admits it (an object, version 1, a boolean and an array); StudyAccess's own policy check does not.
+  const malformed = { version: 1, restricted: true, startsAt: null, endsAt: null, rules: ['SYN-MALFORMED'] };
+  // The policy row turns malformed after the sender's preparation, so the transaction's own StudyAccess read meets it.
+  const original = w.access.prepare.bind(w.access);
+  let armed = true;
+  w.access.prepare = async (c, uids, policy) => {
+    const out = await original(c, uids, policy);
+    if (armed && c.sub === SUBS.S) {
+      armed = false;
+      await w.base.$executeRaw`INSERT INTO "StudyAccessPolicy" (institution, subject, revision, policy, reason, "updatedBy", "updatedAt")
+        VALUES (${INST}, ${SUBS.S}, 1, ${JSON.stringify(malformed)}::jsonb, 'SYNTHETIC policy', 'SYNTHETIC-admin', now())`;
+    }
+    return out;
+  };
+  let refused, studyAccessAnswer;
+  await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(311), 'P', v1)), e => { refused = e; return true; });
+  assert.equal(armed, false, 'the row turned malformed between the preparation and the transaction');
+  assert.ok(w.log.includes('tx:rollback'), 'the transaction met the malformed row: ' + String(refused));
+  await assert.rejects(w.access.snapshot(S()), e => { studyAccessAnswer = [e.getStatus(), e.getResponse()]; return true; });
+  assert.deepEqual([refused.getStatus(), refused.getResponse()], studyAccessAnswer, 'StudyAccess\'s own answer for this row, unchanged');
+  assert.equal(refused.getResponse().code, undefined);
+  assert.deepEqual(await w.count(), { records: 0, events: 0, receipts: 0, audits: 0, updates: 0 });
+  // After the commit the interceptor's 503 stays code-less even when StudyAccess's cause is a DB timeout (SV13, section 8.1).
+  await w.base.$executeRaw`DELETE FROM "StudyAccessPolicy" WHERE subject = ${SUBS.S}`;
+  const controller = new CriticalResultController(w.svc);
+  let fail = true;
+  const timeout = Object.assign(new Error('SYN-DB-DETAIL canceling statement due to statement timeout'), { code: 'P2010', meta: { code: '57014' } });
+  const interceptor = new StudyAccessInterceptor({ snapshot: async () => ({ revision: 0 }), unchanged: async () => {
+    if (fail) throw new ServiceUnavailableException('SYNTHETIC policy read failed', { cause: timeout });
+  } });
+  const c = S(), req = { kind: 'member', institution: c.institution, sub: c.sub, actor: c.actor, roles: c.roles, displayName: c.name };
+  const context = { switchToHttp: () => ({ getRequest: () => req }), getClass: () => CriticalResultController,
+    getHandler: () => CriticalResultController.prototype.create };
+  const post = async () => lastValueFrom(await interceptor.intercept(context, { handle: () => from(controller.create(UID, req, createBody(c, id(311), 'P', v1))) }));
+  await assert.rejects(post(), e => {
+    assert.deepEqual([e.getStatus(), e.getResponse().code], [503, undefined]);
+    assert.ok(!DB_TEXT.test(JSON.stringify(e.getResponse())));
+    return true;
+  });
+  const { updates, ...committed } = await w.count();
+  assert.deepEqual(committed, { records: 1, events: 1, receipts: 1, audits: 1 }, 'the write committed before the refusal');
+  fail = false;
+  assert.equal((await post()).replayed, true);
+  const { updates: _u, ...same } = await w.count();
+  assert.deepEqual(same, committed, 'the replay writes nothing');
 });
 
 test('S-SU / C3: head moved after create is a stub with no message or body, ACK refused, supersede onto the new head', async () => {

@@ -160,8 +160,11 @@ export class CriticalResultService {
         const target = JSON.stringify(e?.meta?.target ?? '');
         throw target.includes('pending') || target.includes('recipientSub') ? refuse({ status: 409, code: CODE.PENDING_EXISTS }) : reused();
       }
-      if (['P2024', 'P2028', 'P2034'].includes(e?.code) || e?.code === 'P2010' && ['55P03', '57014', '40P01'].includes(e?.meta?.code))
-        throw busy();
+      // 잠금·트랜잭션 시간 초과(계약 잠금 실패)는 직접 올 수도, 정책 공유 잠금·조회(StudyAccess snapshot)가 자기 503의
+      // cause로만 넘길 수도 있다. 둘 다 BUSY다. 형식이 틀린 정책 같은 다른 StudyAccess 503은 그대로 나가고, cause는 답에 싣지 않는다.
+      const dbBusy = (x: any) => ['P2024', 'P2028', 'P2034'].includes(x?.code)
+        || x?.code === 'P2010' && ['55P03', '57014', '40P01'].includes(x?.meta?.code);
+      if (dbBusy(e) || e instanceof ServiceUnavailableException && dbBusy(e.cause)) throw busy();
       throw e;
     }
   }
