@@ -31,6 +31,13 @@ the origin's storage or in what the origin's storage holds (contract §13's writ
   rx14 the reading panel's R2 ACK, roles and session end.  rx15 wording, fonts, targets, keyboard, external strings.
   rx16 sessions that never read.  rx17 read failures are failures.  rx18 the panel's summary line, history and one bar.
   rx19 server changes apply under focus and focus lands safely.
+  rx20-rx23 (Astra S7-U2a-R-001 F01-F04, each with its counterexample and the preserved normal order): a row shows the
+       newest valid recipient projection - newest by when its request was sent, not when the answer came - and the page's
+       ACK results only add Acknowledged and the server time to it. rx20 the record read after Check Again sets the row
+       (terminal, stub, full current:false) on both hosts; rx21 a late record read loses to a later list, a later read of
+       the same record, Refresh and Show All; rx22 a row opened outside the list goes on exclusion by a list that covers it,
+       a refused read or a failed list, not on a page boundary or a filter that does not hold its state; rx23 a 201 or a
+       replayed receipt brings back no message, version or body.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case.
