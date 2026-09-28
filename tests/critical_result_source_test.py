@@ -141,8 +141,9 @@ class Database:
                 if time.monotonic() > deadline:
                     raise AssertionError("postgres:16-alpine did not answer")
                 time.sleep(0.5)
-            for folder in MIGRATIONS:
-                self.psql((folder / "migration.sql").read_bytes())
+            # every migration in the order Prisma applies them, in one session
+            self.psql(b"\n".join((folder / "migration.sql").read_bytes() for folder in MIGRATIONS))
+            self.plans: dict[str, list] = {}
             self.report_columns = set(self.psql("SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' "
                                                 "AND table_name = 'Report'").stdout.decode("utf-8").split())
         except BaseException:
@@ -159,7 +160,10 @@ class Database:
         return run
 
     def plan(self, sql: str) -> list:
-        return json.loads(self.psql("EXPLAIN (VERBOSE, GENERIC_PLAN, FORMAT JSON) " + sql).stdout.decode("utf-8"))
+        """The plan of one statement; a statement the variants share is planned once."""
+        if sql not in self.plans:
+            self.plans[sql] = json.loads(self.psql("EXPLAIN (VERBOSE, GENERIC_PLAN, FORMAT JSON) " + sql).stdout.decode("utf-8"))
+        return self.plans[sql]
 
     def close(self) -> None:
         subprocess.run(["docker", "rm", "-f", self.name], capture_output=True, timeout=120)
