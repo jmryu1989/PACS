@@ -13,6 +13,18 @@
  *   시도로 목록과 따로 두고, 같은 requestId·body의 Check Again이나 그 기록의 다시 읽기로만 끝낸다(§8.1 규칙 2~4). 목록에서
  *   사라지거나 stub이 된 것은 적용 여부의 증거가 아니다.
  * - 모든 답은 화면에 쓰기 직전 요청 번호·필터·계정·응답의 owner를 대조하고, 어긋나면 버린다(A→B→A, 로그아웃, 계정 전환).
+ * - 투영 우선순위(한 규칙): 한 행이 보이는 모양(상태·메시지·판·본문·Source·Acknowledge)은 그 기록의 가장 새 유효 수신자
+ *   투영 하나에서만 나온다. 투영은 목록(#3) 쪽의 행과 한 건 읽기(#4)의 item이고, 새로움은 답이 도착한 순서가 아니라 요청을 보낸
+ *   순서다 — 도착 순서로 정하면 늦게 온 옛 답이 그 뒤에 보낸 요청이 반영한 stub·행 제거·ACK 불가·종결을 되돌린다(전달
+ *   revision은 투영의 판이 아니다: 판독 머리가 바뀌어 full이 stub이 되어도 revision은 그대로다). 투영을 없애는 증거도 같은
+ *   순서로 센다: 그 기록을 덮는 목록 쪽(범위가 첫 쪽이나 앞 쪽의 cursor부터 이 쪽 끝까지이고, 필터가 그 투영의 상태를 담는 쪽)에
+ *   그 기록이 없음, 그 기록의 #4 403·404, 목록 읽기 실패, Refresh·필터 바꿈. 이 증거보다 먼저 보낸 읽기의 답은 그리기 전에
+ *   버린다. 쪽 범위 밖(More로 아직 읽지 않은 곳)이거나 필터가 담지 않는 상태(확인 대기 보기의 종결 기록)가 목록에 없는 것은
+ *   증거가 아니다.
+ * - 이 페이지 ACK의 적용 결과(201 봉투, Check Again의 재전송 영수증, #4의 acknowledged)는 투영이 아니라 그 위에 겹치는 상태
+ *   증거다: 수신 확인됨과 서버 시각만 더하고 메시지·본문·Source는 언제나 그때의 최신 투영에서 온다. 투영이 없어지면(목록에서
+ *   빠짐·읽기 거절) 기록 이름과 Acknowledged {time}만의 최소 결과 줄로 Refresh까지 남긴다. 클릭 때 본 full 모양은 되살리지
+ *   않는다 — ACK 성공은 지금 본문을 읽어도 된다는 증거가 아니다.
  * - 서버가 바꾼 표시(full→stub, 행 제거, ACK 불가, 종결)는 초점과 무관하게 바로 그린다. 답이 같은 행만 다시 만들지 않아 초점이
  *   남는다. 초점이 있던 행이 바뀌면 그 행의 상태 줄로, 사라지면 영역 제목으로 옮기고, 다른 기록의 단추로는 옮기지 않는다.
  * - 세션을 끝내는 것은 호스트 페이지다. 이 파일은 로그아웃·이동·저장소 쓰기를 스스로 시작하지 않는다: 401이면 이 영역을 먼저
@@ -265,15 +277,29 @@
 
     let ended = false, lock = null, channel = null, timer = null, watch = null, reading = false;
     const inflight = new Set();
+    // 요청 번호: 목록·한 건 읽기·ACK를 보낸 순서. 투영과 그 증거의 새로움은 이 번호로만 비교한다(파일 머리의 투영 우선순위).
+    let stamp = 0;
     // 받은 목록(#3 view=received). 기본 필터는 확인 대기(state=pending을 명시한다 — 서버 기본값은 all이다). Show All은 all이다.
-    // ready는 지금 목록이 지금 필터의 성공한 답인가다. items의 seen은 그 행을 읽은 순번이다.
-    let filter = 'pending', listSeq = 0, listPhase = 'idle', listError = '', ready = false, items = [], nextCursor = null;
-    let pending = null, lastPending = null, bodyOpen = false, seen = 0;
-    // 목록 밖에 남겨 보이는 기록: 이 페이지의 ACK가 적용된 기록과 Open Replacement로 읽은 기록. 사용자가 Refresh를 누를 때까지
-    // 남는다. 같은 기록이 목록에도 있으면 revision이 높은 쪽, 같으면 나중에 읽은 쪽을 그린다.
+    // ready는 지금 목록이 지금 필터의 성공한 답인가다. items의 stamp는 그 쪽을 요청한 번호다. listEnd는 지금 목록의 마지막 쪽이
+    // 덮는 범위의 끝(다음 쪽이 있을 때 그 쪽 마지막 행의 순서 키)이고, More로 읽는 쪽은 그 뒤부터 덮는다.
+    let filter = 'pending', listSeq = 0, listPhase = 'idle', listError = '', ready = false, items = [], nextCursor = null, listEnd = null;
+    let pending = null, lastPending = null, bodyOpen = false;
+    // 목록 밖의 투영: 한 건 읽기(#4)의 item과 그 요청 번호. 같은 기록의 목록 행보다 번호가 크면 그것을 그린다. 그 기록을 덮는 더
+    // 새 목록 쪽이 반영되면(있든 없든) 내리고, Refresh·필터 바꿈·목록 실패에서 모두 내린다.
     const extras = new Map();
+    // 기록마다 그 투영을 없앤 증거의 요청 번호(#4의 403·404, 덮는 목록 쪽에 없음). 이 번호보다 먼저 보낸 요청의 투영은 그리지 않는다.
+    const gone = new Map();
+    // 이 번호보다 먼저 보낸 한 건 읽기의 답은 투영에 쓰지 않는다(Refresh·필터 바꿈·목록 실패가 올린다).
+    let resetAt = 0;
+    // 나가 있는 한 건 읽기의 요청 번호와, 그 가운데 가장 이른 것보다 뒤에 보낸 목록 쪽 중 반영한 것들(늦게 온 읽기 답이 그 뒤의
+    // 목록 쪽에 졌는지 가리는 데만 쓰고, 나간 읽기가 없으면 비운다).
+    const reads = new Set();
+    let pages = [];
+    // 이 페이지 ACK의 적용 결과(기록 id → { at: 서버 시각, item: 기록 이름 칸만의 최소 줄 }). 투영 위에 겹치고, 투영이 없으면
+    // 최소 줄로 그린다. Refresh·로그아웃·계정 전환에서만 내린다.
+    const receipts = new Map();
     // 기록마다 이 페이지의 마지막 ACK 시도(§8.1). sending·checking·unknown은 결과를 기다리고 rejected는 확정 거절이다.
-    // 적용된 시도는 여기서 빠지고 그 기록이 Acknowledged 행으로 남는다.
+    // 시도의 stamp는 마지막으로 보낸 POST의 요청 번호다. 적용된 시도는 여기서 빠지고 receipts에 남는다.
     const attempts = new Map();
     // Open Replacement 읽기가 실패한 행·줄의 안내(그 단추가 있던 기록 id → 문구).
     const openNotes = new Map();
@@ -286,6 +312,23 @@
     const allowed = () => !ended && lock === null && !!eligible() && who() !== null;
     const live = sent => !ended && lock === null && who() === sent;
     const current = attempt => attempts.get(attempt.recordId) === attempt;
+
+    // 서버 목록 순서(createdAt, id 내림차순)의 키. order(a, b) < 0이면 a가 앞이다.
+    const keyOf = item => ({ at: new Date(item.createdAt).getTime(), id: item.id });
+    const order = (a, b) => (b.at - a.at) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
+    /**
+     * 목록 한 쪽이 이 기록에 대해 말하는가. 쪽에 그 기록이 있으면 더 새 모양이고, 쪽의 범위(첫 쪽은 맨 앞부터, More 쪽은 앞 쪽의
+     * 마지막 행 뒤부터; 다음 쪽이 있으면 이 쪽의 마지막 행까지) 안인데 없고 쪽의 필터가 그 투영의 상태를 담으면 서버가 뺐거나
+     * 상태가 바뀐 것이다. 범위 밖이거나 필터가 담지 않는 상태의 기록이 없는 것은 아무것도 말하지 않는다.
+     */
+    function speaks(page, item) {
+      if (page.ids.has(item.id)) return true;
+      if (!page.span || (page.filter !== 'all' && item.state !== 'created')) return false;
+      const key = keyOf(item);
+      return (page.high === null || order(page.high, key) < 0) && (page.low === null || order(key, page.low) <= 0);
+    }
+    /** 이 기록에 대해 이 요청 번호보다 뒤에 보낸 요청의 증거가 이미 반영되었는가(같은 기록의 읽기·거절, Refresh·필터 바꿈·목록 실패). */
+    const outdated = (mark, id) => mark < resetAt || (extras.has(id) && extras.get(id).stamp > mark) || (gone.get(id) || 0) > mark;
 
     /**
      * 중요 결과 route 요청(제한 시간 60초). 성공 응답은 HTTP 상태와 함께 돌려주고(쓰기는 201만 적용), 실패는 상태·code·JSON 본문
@@ -326,7 +369,7 @@
       if (!allowed()) return;
       const cursor = next ? nextCursor : null;
       if (next && !cursor) return;
-      const seq = ++listSeq, sent = who(), chosen = filter;
+      const seq = ++listSeq, sent = who(), chosen = filter, mark = ++stamp, high = next ? listEnd : null;
       listPhase = 'loading';
       paint();
       const query = `view=received&state=${chosen}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
@@ -336,12 +379,16 @@
         if (mine === 'other') { accountChanged(TEXT.otherEnvelope); return; }
         const read = mine === 'same' ? readList(data, chosen) : null;
         if (!read) { failList(TEXT.malformed); return; }
-        const stamp = ++seen, fresh = read.items.map(item => ({ item, seen: stamp }));
+        const fresh = read.items.map(item => ({ item, stamp: mark }));
         if (next) {
           const known = new Set(items.map(entry => entry.item.id));
           items = items.concat(fresh.filter(entry => !known.has(entry.item.id)));
         } else items = fresh;
         nextCursor = read.nextCursor;
+        const last = read.items[read.items.length - 1];
+        listEnd = read.nextCursor && last ? keyOf(last) : null;
+        noteList({ stamp: mark, filter: chosen, ids: new Set(read.items.map(item => item.id)), high, low: listEnd,
+          span: !(read.nextCursor && !last) });
         // 판독 화면 패널의 본문은 확인 대기가 처음 생기거나 늘 때 스스로 열린다. 같은 수가 이어지면 사용자가 닫은 본문을 다시 열지
         // 않는다(재알림 없음, §16.3·§17 L-2). 스스로 닫지 않는다.
         if (lastPending === null ? read.pending > 0 : read.pending > lastPending) bodyOpen = true;
@@ -358,49 +405,107 @@
       });
     }
 
-    /** 읽기 실패는 빈 목록이 아니다: 행을 내리고 실패와 서버의 문구·code를 보이며 배지에 수를 두지 않는다. */
+    /**
+     * 반영한 목록 쪽이 목록 밖 투영에 말하는 것: 그보다 먼저 보낸 읽기의 투영 중 이 쪽이 말하는 것은 내린다(쪽에 있으면 목록 행이
+     * 더 새 모양이고, 없으면 그 투영을 없앤 증거다). 이 쪽보다 먼저 보낸 읽기가 나가 있으면 그 답을 가리도록 쪽을 남긴다.
+     */
+    function noteList(page) {
+      for (const [id, entry] of extras) {
+        if (entry.stamp > page.stamp || !speaks(page, entry.item)) continue;
+        extras.delete(id);
+        if (!page.ids.has(id)) gone.set(id, Math.max(gone.get(id) || 0, page.stamp));
+      }
+      for (const [id, mark] of gone) if (page.ids.has(id) && mark < page.stamp) gone.delete(id);
+      if ([...reads].some(mark => mark < page.stamp)) pages.push(page);
+    }
+
+    /** 앞 보기의 투영을 모두 내리고 그 전에 보낸 한 건 읽기의 답을 버리게 한다(Refresh·필터 바꿈·목록 실패). */
+    function reset() {
+      resetAt = ++stamp;
+      extras.clear();
+      pages = [];
+    }
+
+    /**
+     * 읽기 실패는 빈 목록이 아니다: 행을 내리고 실패와 서버의 문구·code를 보이며 배지에 수를 두지 않는다. 목록 밖 투영도 내린다 —
+     * 실패 안내 아래에 받은 기록의 본문·Acknowledge가 남지 않는다. 남는 것은 이 페이지의 시도 줄과 ACK 결과의 최소 줄뿐이다.
+     */
     function failList(detail) {
       items = [];
       nextCursor = null;
+      listEnd = null;
       pending = null;
       ready = false;
       listPhase = 'failed';
       listError = detail;
       bodyOpen = true;
+      reset();
       paint();
     }
 
-    /** #4 한 건. 계정·모양·id가 맞는 답만 { item }이고, 거절·실패는 { error }다. 버린 답(다른 계정·세션 끝)은 null이다. */
+    /**
+     * #4 한 건을 읽고 그 답을 먼저 투영에 반영한다. 돌려주는 값: { item, fresh } | { error, fresh } | null(버린 답: 다른 계정·세션 끝).
+     * fresh가 거짓이면 그 답은 이 요청 뒤에 보낸 요청의 증거(같은 기록의 읽기·거절, 그 기록을 말하는 목록 쪽, Refresh·필터 바꿈·
+     * 목록 실패)에 져서 화면에 쓰지 않았다. 그래도 item의 상태가 acknowledged·cancelled·superseded면 그 기록은 앞으로도 그 상태라
+     * (종결은 되돌아가지 않는다) ACK 시도의 끝을 판정하는 데는 쓸 수 있다.
+     */
     function readRecord(id, sent) {
+      const mark = ++stamp;
+      reads.add(mark);
+      const done = answer => {
+        reads.delete(mark);
+        const first = Math.min(...reads);
+        pages = reads.size ? pages.filter(page => page.stamp > first) : [];
+        return answer;
+      };
       return call('GET', `/critical-results/${encodeURIComponent(id)}`).then(({ data }) => {
-        if (!live(sent)) return null;
+        if (!live(sent)) return done(null);
         const mine = ownerOf(data && data.owner, sent);
-        if (mine === 'other') { accountChanged(TEXT.otherEnvelope); return null; }
+        if (mine === 'other') { accountChanged(TEXT.otherEnvelope); return done(null); }
         const item = mine === 'same' && isObject(data) ? recipientItem(data.item) : null;
         // 요청한 기록이 아닌 답은 그 기록에 대해 아무것도 말하지 않는다.
-        return item && item.id === id ? { item } : { error: TEXT.malformed };
-      }, error => (live(sent) ? { error: describe(error) } : null));
+        if (!item || item.id !== id) return done({ error: TEXT.malformed, fresh: !outdated(mark, id) });
+        const fresh = !outdated(mark, id) && !pages.some(page => page.stamp > mark && speaks(page, item));
+        if (fresh) extras.set(id, { item, stamp: mark });
+        return done({ item, fresh });
+      }, error => {
+        if (!live(sent)) return done(null);
+        const fresh = !outdated(mark, id) && !pages.some(page => page.stamp > mark && page.ids.has(id));
+        // 403·404는 지금 이 기록을 읽을 수 없다는 서버의 답이다: 그 기록의 투영을 목록 행까지 내린다. 그 밖의 실패(5xx·답 없음)는
+        // 이 기록에 대해 아무것도 말하지 않는다.
+        if (fresh && (error.status === 403 || error.status === 404)) {
+          extras.delete(id);
+          gone.set(id, mark);
+        }
+        return done({ error: describe(error), fresh });
+      });
     }
 
     // ── 명시적 ACK(§5.3, §8.1) ──
 
-    /** 이 기록에 지금 Acknowledge가 있는가: 'on'(누를 수 있음) | 'busy'(보내는 중) | 'off'(없음). */
-    function ackOf(item) {
+    /**
+     * 그려진 한 행(최신 투영)에 지금 Acknowledge가 있는가: 'on'(누를 수 있음) | 'busy'(보내는 중) | 'off'(없음). 확정 거절 뒤에는
+     * 그 POST보다 뒤에 보낸 읽기가 다시 ACK 가능한 모양을 보일 때만 새 요청을 받는다(G-04) — 거절 전 모양으로 되살리지 않는다.
+     */
+    function ackOf(entry) {
+      const item = entry.item;
       if (item.state !== 'created' || item.view !== 'full' || item.source.current !== true || lock !== null || ended) return 'off';
       const attempt = attempts.get(item.id);
-      if (!attempt || attempt.state === 'rejected') return 'on';
+      if (!attempt) return 'on';
+      if (attempt.state === 'rejected') return entry.stamp > attempt.stamp ? 'on' : 'off';
       return attempt.state === 'sending' ? 'busy' : 'off';
     }
 
     function acknowledge(id) {
       if (!allowed()) return;
-      const item = shownItem(id);
-      if (!item || ackOf(item) !== 'on') return;
-      const sent = who(), requestId = newRequestId();
+      const entry = shownEntry(id);
+      if (!entry || ackOf(entry) !== 'on') return;
+      const item = entry.item, sent = who(), requestId = newRequestId();
       // 이 body 바이트를 그대로 보관한다: Check Again은 같은 requestId·revision을 같은 바이트로 다시 보낸다(§8.1 규칙 3 a).
+      // item은 시도 줄의 기록 이름과 적용 뒤 최소 줄의 이름 칸에만 쓴다 — 적용 결과를 그릴 때 이 모양을 되살리지 않는다.
       const raw = JSON.stringify({ requestId, expectedOwner: JSON.parse(sent), revision: item.revision });
       const attempt = { requestId, recordId: item.id, uid: item.studyUid, sent, item, raw,
-        path: `/critical-results/${encodeURIComponent(item.id)}/ack`, state: 'sending', retried: false, reason: '', detail: '',
+        path: `/critical-results/${encodeURIComponent(item.id)}/ack`, state: 'sending', stamp: 0, retried: false, reason: '', detail: '',
         later: '', server: null, replacedBy: null, cancelReason: null };
       attempts.set(item.id, attempt);
       openNotes.delete(item.id);
@@ -409,6 +514,7 @@
 
     function transmit(attempt, retry) {
       attempt.state = retry ? 'checking' : 'sending';
+      attempt.stamp = ++stamp;
       paint();
       call('POST', attempt.path, attempt.raw).then(result => settle(attempt, retry, result, null), error => settle(attempt, retry, null, error));
     }
@@ -424,7 +530,7 @@
         const mine = ownerOf(result.data && result.data.owner, attempt.sent);
         if (mine === 'other') { accountChanged(TEXT.otherEnvelope); return; }
         if (result.status === 201 && mine === 'same' && appliedMatches(attempt, result.data)) {
-          applied(attempt, { ...attempt.item, state: 'acknowledged', revision: 2, acknowledgedAt: result.data.applied.at });
+          applied(attempt, result.data.applied.at);
           return;
         }
         unknown(attempt, retry, TEXT.unexpected(result.status), '');
@@ -443,10 +549,12 @@
           replacedBy: next });
         paint();
         loadList(false);
-        // 먼저 적용된 취소는 그 기록의 서버 상태(와 full이면 사유)를 읽어 함께 보인다.
+        // 먼저 적용된 취소는 그 기록의 서버 상태(와 full이면 사유)를 읽어 함께 보인다. 그 읽기의 투영은 행에도 그대로 쓴다.
         if (error.code === 'CRITICAL_RESULT_CANCELLED') readRecord(attempt.recordId, attempt.sent).then(answer => {
-          if (!answer || !answer.item || !current(attempt) || attempt.state !== 'rejected' || answer.item.state !== 'cancelled') return;
-          Object.assign(attempt, { server: 'cancelled', cancelReason: answer.item.view === 'full' ? answer.item.cancelReason : null });
+          if (!answer) return;
+          if (answer.item && current(attempt) && attempt.state === 'rejected' && answer.item.state === 'cancelled') {
+            Object.assign(attempt, { server: 'cancelled', cancelReason: answer.item.view === 'full' ? answer.item.cancelReason : null });
+          }
           paint();
         });
         return;
@@ -454,9 +562,17 @@
       unknown(attempt, retry, describe(error), retry && error.status === 409 && LATER_409.has(error.code) ? reasonOf(error) : '');
     }
 
-    function applied(attempt, item) {
+    /**
+     * 이 시도가 적용되었다(201 봉투·재전송 영수증의 applied.at, 또는 #4 acknowledged의 서버 시각). 투영은 건드리지 않고 적용 결과만
+     * 남긴다: 기록 이름 칸(발신자·보낸 시각·검사 신원)과 Acknowledged {at}. 메시지·본문·Source는 여기에 없다.
+     */
+    function applied(attempt, at) {
       attempts.delete(attempt.recordId);
-      extras.set(item.id, { item, seen: ++seen });
+      const item = attempt.item;
+      receipts.set(attempt.recordId, { at, item: { id: item.id, studyUid: item.studyUid, state: 'acknowledged', revision: 2,
+        createdAt: item.createdAt, replacedBy: null, view: 'receipt', sender: { name: item.sender.name },
+        study: { name: item.study.name, id: item.study.id, birth: item.study.birth, date: item.study.date },
+        acknowledgedAt: at, cancelledAt: null, supersededAt: null } });
       paint();
       loadList(false);
     }
@@ -469,19 +585,23 @@
     }
 
     /**
-     * 규칙 3 (b)·4: 대상 기록을 다시 읽는다. acknowledged면 적용 증거(그 서버 시각), cancelled·superseded면 이 ACK는 앞으로도
-     * 적용될 수 없어 그 서버 상태로 끝난다. 아직 created이거나 읽지 못하면(404·거절·실패) 결과를 모르는 채로 둔다.
+     * 규칙 3 (b)·4: 대상 기록을 다시 읽는다. 그 답은 readRecord가 먼저 행의 투영으로 반영하고(stub이면 본문이 바로 빠지고, 종결이면
+     * 그 상태가 되어 Acknowledge가 다시 생기지 않는다), 시도의 끝은 따로 판정한다: acknowledged면 적용 증거(그 서버 시각),
+     * cancelled·superseded면 이 ACK는 앞으로도 적용될 수 없어 그 서버 상태로 끝난다. 아직 created이거나 읽지 못하면(404·거절·실패)
+     * 결과를 모르는 채로 같은 requestId·body를 보관한다.
      */
     function confirmByRead(attempt) {
       readRecord(attempt.recordId, attempt.sent).then(answer => {
-        if (!answer || !answer.item || !current(attempt) || attempt.state !== 'unknown') return;
+        if (!answer) return;
         const item = answer.item;
-        if (item.state === 'acknowledged') { applied(attempt, item); return; }
-        if (item.state === 'cancelled' || item.state === 'superseded') {
-          Object.assign(attempt, { state: 'rejected', server: item.state, reason: TEXT.serverState(item.state), detail: '', later: '',
-            replacedBy: item.replacedBy, cancelReason: item.view === 'full' ? item.cancelReason : null, notApplied: true });
-          paint();
+        if (item && current(attempt) && attempt.state === 'unknown') {
+          if (item.state === 'acknowledged') { applied(attempt, item.acknowledgedAt); return; }
+          if (item.state === 'cancelled' || item.state === 'superseded') {
+            Object.assign(attempt, { state: 'rejected', server: item.state, reason: TEXT.serverState(item.state), detail: '', later: '',
+              replacedBy: item.replacedBy, cancelReason: item.view === 'full' ? item.cancelReason : null, notApplied: true });
+          }
         }
+        paint();
       });
     }
 
@@ -491,19 +611,22 @@
       transmit(attempt, true);
     }
 
-    /** Open Replacement: 대체 기록을 한 건 읽어 목록 밖 행으로 연다(Refresh 전까지). 읽기일 뿐 아무것도 보내지 않는다. */
+    /**
+     * Open Replacement: 대체 기록을 한 건 읽어 목록 밖 행으로 연다. 읽기일 뿐 아무것도 보내지 않는다. 그 답이 뒤에 보낸 요청의
+     * 증거에 졌으면(fresh 아님) 행도 실패 안내도 그리지 않는다 — 그 사이 목록이 보인 stub·제거, 같은 기록의 새 읽기, Refresh·
+     * 필터 바꿈이 이긴다.
+     */
     function openReplacement(from, id) {
       if (!allowed()) return;
       const sent = who(), origin = document.activeElement;
       openNotes.delete(from);
       readRecord(id, sent).then(answer => {
-        if (!answer || !live(sent)) return;
+        if (!answer || !answer.fresh || !live(sent)) return;
         if (!answer.item) {
           openNotes.set(from, `${TEXT.replacementFailed}\n${answer.error}`);
           paint();
           return;
         }
-        extras.set(answer.item.id, { item: answer.item, seen: ++seen });
         paint();
         const entry = rowNodes.get(answer.item.id);
         const active = document.activeElement;
@@ -516,35 +639,45 @@
 
     // ── 그리기 ──
 
-    /** 그릴 행: 목록과 목록 밖 행을 합쳐 서버 목록과 같은 순서(createdAt, id 내림차순)로. 행의 상대 순서는 읽을 때마다 같다. */
+    /**
+     * 그릴 행 { item, stamp }: 기록마다 가장 새 유효 투영(목록 행과 목록 밖 투영 중 요청 번호가 큰 것; 그보다 새 거절·제외 증거가
+     * 있으면 없음) 위에 이 페이지 ACK의 적용 결과를 겹친다 — 투영이 created이면 상태·revision·시각만 acknowledged로 바꾸고 모양은
+     * 그대로, 투영이 없으면 기록 이름과 Acknowledged {time}만의 최소 줄. 순서는 서버 목록과 같다(createdAt, id 내림차순).
+     */
     function shown() {
       const byId = new Map();
       for (const entry of items) byId.set(entry.item.id, entry);
       for (const [id, entry] of extras) {
         const have = byId.get(id);
-        if (!have || entry.item.revision > have.item.revision || (entry.item.revision === have.item.revision && entry.seen > have.seen)) {
-          byId.set(id, entry);
+        if (!have || entry.stamp > have.stamp) byId.set(id, entry);
+      }
+      for (const [id, mark] of gone) {
+        const have = byId.get(id);
+        if (have && have.stamp < mark) byId.delete(id);
+      }
+      for (const [id, receipt] of receipts) {
+        const have = byId.get(id);
+        if (!have) byId.set(id, { item: receipt.item, stamp: 0 });
+        else if (have.item.state === 'created') {
+          byId.set(id, { item: { ...have.item, state: 'acknowledged', revision: 2, acknowledgedAt: receipt.at }, stamp: have.stamp });
         }
       }
-      return [...byId.values()].map(entry => entry.item).sort((a, b) => {
-        const gap = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-        return gap || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
-      });
+      return [...byId.values()].sort((a, b) => order(keyOf(a.item), keyOf(b.item)));
     }
-    const shownItem = id => shown().find(item => item.id === id) || null;
+    const shownEntry = id => shown().find(entry => entry.item.id === id) || null;
 
     const identity = study => `Patient: ${dash(study.name)} · ID ${dash(study.id)} · Birth ${dash(study.birth)} · Study Date ${dash(study.date)}`;
     const sourceText = source => `Source: v${source.version} · ${ACTIONS[source.action] || source.action} · ${source.author} · ${time(source.at)}`;
     const label = item => `${dash(item.study.name)} · ${dash(item.study.id)} · Sent ${time(item.createdAt)}`;
 
     /** 한 행이 보일 모든 것. 이 값이 같으면 그 행을 다시 만들지 않는다(초점 보존). */
-    function rowModel(item) {
-      const full = item.view === 'full', changed = item.state === 'created' && !(full && item.source.current);
+    function rowModel(entry) {
+      const item = entry.item, full = item.view === 'full', changed = item.state === 'created' && !(full && item.source.current);
       const head = item.state === 'acknowledged' ? `Acknowledged ${time(item.acknowledgedAt)}` : changed ? 'Source Changed' : STATES[item.state];
       const notes = [];
       if (full && !item.source.current) notes.push(TEXT.moved(item.source.version));
       else if (!full && item.state === 'created') notes.push(TEXT.stub);
-      const ack = ackOf(item);
+      const ack = ackOf(entry);
       return {
         key: item.id, state: changed ? 'changed' : item.state, head,
         headTitle: changed ? (full ? TEXT.moved(item.source.version) : TEXT.stub) : TEXT.states[item.state],
@@ -593,11 +726,11 @@
     /** 결과를 모르는 시도와 확정 거절의 줄(기록마다 한 줄). 적용된 시도는 줄이 아니라 Acknowledged 행이다. */
     function lineModel(attempt) {
       const waiting = attempt.state === 'unknown' || attempt.state === 'checking';
-      const item = shownItem(attempt.recordId);
+      const entry = shownEntry(attempt.recordId);
       let words;
       if (waiting) words = attempt.state === 'checking' ? TEXT.checking : TEXT.unknown;
       else words = [attempt.notApplied ? TEXT.notApplied : TEXT.refused, attempt.reason,
-        item && ackOf(item) === 'on' ? TEXT.newRequest : ''].filter(Boolean).join(' ');
+        entry && ackOf(entry) === 'on' ? TEXT.newRequest : ''].filter(Boolean).join(' ');
       return {
         key: attempt.recordId, state: attempt.state,
         word: waiting ? 'Acknowledgement status unknown' : attempt.server ? STATES[attempt.server] : '',
@@ -723,10 +856,13 @@
       abortAll();
       listSeq++;
       attempts.clear();
-      extras.clear();
+      receipts.clear();
+      gone.clear();
+      reset();
       openNotes.clear();
       items = [];
       nextCursor = null;
+      listEnd = null;
       pending = null;
       ready = false;
     }
@@ -786,18 +922,24 @@
 
     refreshButton.addEventListener('click', () => {
       if (!allowed()) return;
-      // 끝난 줄과 목록 밖 행은 사용자가 본 뒤 Refresh에서 내린다. 결과를 모르는 줄은 끝날 때까지 남는다.
+      // Refresh는 목록만 다시 세운다: 끝난 줄, 목록 밖 행(한 건 읽기의 투영과 ACK 결과의 최소 줄)을 사용자가 본 뒤 여기서 내리고,
+      // 누르기 전에 보낸 한 건 읽기의 답은 늦게 와도 버린다. 결과를 모르는 줄은 끝날 때까지 남는다.
       for (const [id, attempt] of attempts) if (attempt.state === 'rejected') attempts.delete(id);
-      extras.clear();
+      receipts.clear();
       openNotes.clear();
+      reset();
       loadList(false);
     });
     allButton.addEventListener('click', () => {
       if (!allowed()) return;
+      // 필터를 바꾸면 새 보기다: 목록과 목록 밖 투영을 내리고, 바꾸기 전에 보낸 목록·한 건 읽기의 답은 버린다. ACK 결과의 최소
+      // 줄과 시도 줄은 Refresh까지 남는다.
       filter = filter === 'pending' ? 'all' : 'pending';
       items = [];
       nextCursor = null;
+      listEnd = null;
       ready = false;
+      reset();
       loadList(false);
     });
     moreButton.addEventListener('click', () => { if (listPhase !== 'loading') loadList(true); });
