@@ -5,7 +5,10 @@
 // The counterexamples Astra S7-U3a-AUDIT-SPEC-C-R-001-F03 enumerates, by finding and module variant (the case name starts
 // with the finding: e-f01-*, e-f02-*, e-f03-*, f-f01-*, f-f02-*, c-raw-cast-*), each on its own; the E-F03 and F-F01
 // modules come twice, as Astra wrote them (a readonly field, now outside W2 as a whole) and with a private helper (inside
-// the list: the helper's calls may not be what the object runs). Then `moved-*`: every construct fix6 took as a supported
+// the list: the helper's calls may not be what the object runs). fix6's other E-F03 cases (a readonly field or an enum
+// whose object escapes: behind an alias, written through an untyped alias, an instance or the class handed on, the
+// prototype, a called member the check does not read) stay as they were, now refused because W2 reads no property; each
+// of those escapes comes again with a private helper. Then `moved-*`: every construct fix6 took as a supported
 // notation that the closed list W1-W6 leaves out, refused here as unresolved (their lines in
 // tests/fixtures/admin_audit_completeness/equivalent.ts and in members.ts before fix7; tests/fixtures/admin-audit-checker/
 // reclassified.json names each). A fragment handed on is also its own candidate where it is handed on (W4 over every
@@ -234,6 +237,128 @@ export class SynEscaped {
   }
 }
 Object.defineProperty(SynEscaped.prototype, 'audit', { value: () => undefined });
+
+// ==== case: e-f03-a-helper-object-written-through-an-untyped-alias | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynEscaped {
+  private audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved an instance of `SynEscaped`, which is handed on at
+  }
+  change(body: any) {
+    const self: any = this;
+    self.audit = body.fn;
+  }
+  async run(tx: Prisma.TransactionClient) {
+    await this.audit(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.audit`, which this check does not follow
+  }
+}
+
+// ==== case: e-f03-a-helper-object-running-a-called-member-the-check-does-not-read | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export class SynEscaped {
+  private hook: (...values: unknown[]) => void = opaque;
+  private audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved which is handed on as `this` of `this.hook`
+  }
+  async run(tx: Prisma.TransactionClient) {
+    this.hook();
+    await this.audit(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.audit`, which this check does not follow
+  }
+}
+
+// ==== case: e-f03-a-static-helper-of-a-class-handed-on | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynStatic {
+  private static audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved the class `SynStatic`, which is handed on at
+  }
+  async run(tx: Prisma.TransactionClient) {
+    await SynStatic.audit(tx, 'syn.allowed'); // expect: unresolved a client value handed to `SynStatic.audit`, which this check does not follow
+  }
+}
+export const PROVIDERS = [SynStatic];
+
+// ==== case: e-f03-a-readonly-field-object-behind-an-alias | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynReadonly {
+  private readonly field = 'syn.allowed';
+  change(body: any) {
+    const self = this;
+    Object.assign(self, body.patch);
+  }
+  async run(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+
+// ==== case: e-f03-a-readonly-field-written-through-an-untyped-alias | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynReadonly {
+  private readonly field = 'syn.allowed';
+  change(body: any) {
+    const self: any = this;
+    self.field = body.kind;
+  }
+  async run(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+
+// ==== case: e-f03-an-instance-handed-on-outside-its-class | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export class SynReadonly {
+  private readonly field = 'syn.allowed';
+  async run(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+export function leak() {
+  const kept = new SynReadonly();
+  opaque(kept);
+}
+
+// ==== case: e-f03-a-prototype-reached-through-the-class | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynReadonly {
+  private readonly field = 'syn.allowed';
+  async run(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+Object.defineProperty(SynReadonly.prototype, 'field', { set() { /* the initializer's value is dropped */ }, get: () => 'syn.other' });
+
+// ==== case: e-f03-a-called-member-that-runs-code-the-check-does-not-read | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export class SynReadonly {
+  private readonly field = 'syn.allowed';
+  private hook: (...values: unknown[]) => void = opaque;
+  async run(tx: Prisma.TransactionClient) {
+    this.hook();
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+
+// ==== case: e-f03-a-static-readonly-field-of-a-class-handed-on | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynStatic {
+  private static readonly FIELD = 'syn.allowed';
+  async run(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: SynStatic.FIELD } }); // expect: unresolved `SynStatic.FIELD` is a property the program does not fix
+  }
+}
+export const PROVIDERS = [SynStatic];
+
+// ==== case: e-f03-an-enum-handed-on | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+enum Kind { Allowed = 'syn.allowed' }
+export async function run(tx: Prisma.TransactionClient) {
+  opaque(Kind);
+  await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: Kind.Allowed } }); // expect: unresolved `Kind.Allowed` is a property the program does not fix
+}
 
 // ==== case: f-f01-a-method-replaced-by-a-dot-next-to-a-readonly-field | verdict: unresolved ====
 import { Prisma } from '@prisma/client';
