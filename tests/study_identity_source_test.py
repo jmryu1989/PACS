@@ -33,6 +33,7 @@ except Exception:
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 import candidate_ci  # noqa: E402
+from report_actions_dom_test import fixed_file  # noqa: E402
 
 _RUNNER_SPEC = importlib.util.spec_from_file_location("study_identity_runner", ROOT / "scripts" / "run-tests.py")
 RUNNER = importlib.util.module_from_spec(_RUNNER_SPEC)
@@ -210,20 +211,22 @@ BASE_SHA256 = {
     "u2_rule": "45a916d3d2cfa37b3e4d9dc04d5e7f2ee9dc6a86451249ed799aab40bc300dbd",
     "u2_client": "47abd1d5a00a69d37a8c7977e5f31c9d3a9ce16ca04a43d5fd8830a4369963d3",
     "unmatch": "d38480a356f864fb8084bedfe0f632a4d2541047ccff26cdd5dd57f6a7ed92cb",
-    # S5-U4a (b4d9989): removeState refuses a study with questions, 409 STUDY_HAS_QUESTIONS under the parent lock
-    # (StudyQuestion/StudyQuestionEntry, migration 20260926120000_study_questions); was a5c691d2...5e04 at b6a317c.
-    # S5-U4c (4749f5f): and a study with image requests, 409 STUDY_HAS_IMAGE_REQUESTS under the same lock
-    # (StudyImageRequest/StudyImageRequestReceipt, migration 20260926130000_study_image_requests); was a7809339...d349.
-    # S7-U1a (e9bb028): and a study with critical result records, 409 STUDY_HAS_CRITICAL_RESULTS under the same lock
-    # (CriticalResult/CriticalResultEvent/CriticalResultReceipt, migration 20260928120000_critical_result, contract S7-U1p
-    # section 12.3-6); was f5cf8d78...b152, measured with this file's own between()/sha() in the S7-U1a fix1 evidence.
-    # S7-U3a (D-S7-09 a): deleting a study whose tele channel is open closes the receiver's reader assignment under the
-    # same parent lock (closeReaderAssignments, 'study-deleted'); was c6655fd5...d557, measured with this file's own
-    # between()/sha() in the S7-U3a evidence.
-    "removeState": "da986d7baabc87d097cfd0eb721eebbbd6ff27abda75f48e36bc2c826425f007",
     "bootstrap": "2c8ae6afa501225b6b9c808f75065daafc5afd5e93013e43909b5bf4f200fbd9",
     "toClient": "7a10e0e6f6cc5e487140f4b55d3a55b4b01214236b886819b2cf7e7ead7682a3",
 }
+# "S4-U5 left removeState as it was" is a claim about S4-U5's two commits, so (S7-PINS, AGENTS.md 1-B.14; Astra
+# S7-U3a-B-R-001-F02) it is checked on them - the base b6a317c and the main merge fb7dab9 that shipped 4760df0 - read with
+# git show by fixed_file() (tests/report_actions_dom_test.py): a commit that cannot be read, or is not the pinned bytes,
+# fails the case, never skips it. The live pacs.service.ts is not compared: later units change removeState on purpose
+# (S5-U4a, S5-U4c and S7-U1a refusals, S7-U3a's tele close), and until this round each of them re-set a digest of the live
+# method, which froze its spelling and said nothing of what it does. What the live method must do is held on the compiled
+# service by tests/reader_assignment_scope_test.cjs: every refusal (409 STUDY_HAS_CRITICAL_RESULTS among them), nothing
+# deleted, closed or audited on a refusal, and the receiver's assignment closed and audited in the delete's transaction.
+S4U5_BASE = "b6a317cf77dc42afbd7a63356badfb708d2869d6"
+S4U5_RESULT = "fb7dab9df54e6fe3c835dc6d2add89b1cfd62e0f"
+# LF-normalized UTF-8 sha256 of api/src/pacs.service.ts at each (the whole file as git show reads it).
+S4U5_SERVICE_SHA256 = {S4U5_BASE: "db21d0eaddf15473dbca19712fa49e669cfe1e18e6fbef76d5ee56df661f8d7e",
+                       S4U5_RESULT: "c64229b96252eb484e5372fd03cf9ddde39089fd140e16b0baf70937ca8eb173"}
 # StudyState/Order/report write call sites in pacs.service.ts at b6a317c. U5 adds reads only.
 BASE_WRITES = {"studyState.update(": 8, "studyState.updateMany(": 1, "studyState.create(": 3, "studyState.delete(": 1,
                "order.update(": 2, "order.updateMany(": 2, "order.createMany(": 1}
@@ -326,7 +329,14 @@ class ServicePins(unittest.TestCase):
         for token, count in BASE_WRITES.items():
             self.assertEqual(SERVICE.count(token), count, token)
         self.assertEqual(sha(between(SERVICE, "  async unmatch(uid: string, c: Caller) {", "\n  }\n")), BASE_SHA256["unmatch"])
-        self.assertEqual(sha(between(SERVICE, "  async removeState(uid: string, c: Caller) {", "\n  }\n")), BASE_SHA256["removeState"])
+
+    def test_s4u5_left_remove_state_as_it_was(self):
+        # Both commits' files are their pinned bytes (fixed_file() fails otherwise); the method is the same text in each.
+        method = {sha: between(fixed_file(sha, "api/src/pacs.service.ts", digest),
+                               "  async removeState(uid: string, c: Caller) {", "\n  }\n")
+                  for sha, digest in S4U5_SERVICE_SHA256.items()}
+        self.assertEqual(method[S4U5_BASE], method[S4U5_RESULT])
+        self.assertIn("await tx.studyState.delete({ where: { uid } });", method[S4U5_RESULT])
 
     def test_m1_overlay_shape_is_last_in_patch_after_every_existing_refusal(self):
         patch = between(SERVICE, "  async patchState(uid: string, body: any, c: Caller) {", "\n  }\n")

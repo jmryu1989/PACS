@@ -22,6 +22,12 @@
  * The audit rows the assignment writes and the closes leave are judged by the compiled admin audit rule
  * (api/src/admin-audit.ts, the contract table of tests/admin_audit_attribution_test.cjs): an action with a contract row,
  * attributed to the institution it records (Astra S7-U3a-B-R-001-F01).
+ *
+ * The study delete (PacsService.removeState), which this unit made close the receiver's assignment, is held here to its
+ * whole contract (Astra S7-U3a-B-R-001-F02), in place of the digest of its text tests/study_identity_source_test.py used
+ * to re-set: every refusal (the records that hold a study, among them 409 STUDY_HAS_CRITICAL_RESULTS, and who may
+ * delete), no row changed by a refusal, and the close, its audit row and the delete in one transaction that a later
+ * failure undoes. The store answers the refusals' record reads from rows a test seeds.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -54,7 +60,10 @@ const response = async promise => { try { await promise; } catch (e) { return JS
 
 /** One store, one recording client per transaction, the real services over it. */
 function world() {
-  const t = { StudyState: new Map(), ReaderAssignment: new Map(), AuditLog: [] };
+  // `held`: the records that keep a study from being deleted (removeState's refusals), seeded by a test; `Order`: the
+  // orders a test links to a study.
+  const t = { StudyState: new Map(), ReaderAssignment: new Map(), AuditLog: [], Order: new Map(),
+    held: { ViewerItem: [], TechNoteRevision: [], ViewerJob: [], StudyQuestion: [], StudyImageRequest: [], CriticalResult: [], ReportVersion: [], ReportDraft: [] } };
   const log = [];
   let auditSeq = 0, txSeq = 0, clock = Date.parse('2026-09-28T00:00:00.000Z');
   const now = () => new Date(clock += 1000);
@@ -66,6 +75,8 @@ function world() {
     if (v !== null && typeof v === 'object' && !(v instanceof Date)) {
       if ('in' in v) return v.in.includes(row[k]);
       if ('notIn' in v) return !v.notIn.includes(row[k]);
+      if ('has' in v) return Array.isArray(row[k]) && row[k].includes(v.has);
+      if ('not' in v && Object.keys(v).length === 1) return (row[k] ?? null) !== v.not;
       throw new Error('unexpected filter ' + k + ' ' + JSON.stringify(v));
     }
     return (row[k] ?? null) === v;
@@ -83,7 +94,8 @@ function world() {
   };
   function client(name) {
     const record = (model, op, args) => log.push({ client: name, model, op, args: clone(args ?? null) });
-    const none = model => ({ findFirst: async a => { record(model, 'findFirst', a); return null; } });
+    const held = model => ({ findFirst: async a => { record(model, 'findFirst', a);
+      const row = t.held[model].find(r => matches(r, a?.where)); return row ? pick(clone(row), a?.select) : null; } });
     const c = {
       __name: name,
       $executeRaw: async () => { record('$', 'executeRaw'); return 0; },
@@ -140,23 +152,24 @@ function world() {
         if (w.failAudit?.(a.data)) throw new Error('SYNTHETIC audit failure');
         const row = { id: ++auditSeq, at: now(), ...a.data }; t.AuditLog.push(row); return clone(row); } },
       report: { findUnique: async () => null, findMany: async () => [] },
-      reportDraft: { findUnique: async () => null, findMany: async () => [], findFirst: async () => null },
-      reportVersion: none('ReportVersion'), viewerItem: none('ViewerItem'), techNoteRevision: none('TechNoteRevision'),
-      viewerJob: none('ViewerJob'), studyQuestion: none('StudyQuestion'), studyImageRequest: none('StudyImageRequest'),
-      criticalResult: none('CriticalResult'),
+      reportDraft: { findUnique: async () => null, findMany: async () => [], findFirst: held('ReportDraft').findFirst },
+      reportVersion: held('ReportVersion'), viewerItem: held('ViewerItem'), techNoteRevision: held('TechNoteRevision'),
+      viewerJob: held('ViewerJob'), studyQuestion: held('StudyQuestion'), studyImageRequest: held('StudyImageRequest'),
+      criticalResult: held('CriticalResult'),
       gatewayReceipt: { findMany: async () => [] },
-      order: { findMany: async () => [], update: async () => { throw new Error('no order is linked here'); } },
+      order: { findMany: async () => [], update: async a => { record('Order', 'update', a);
+        const row = t.Order.get(a.where.oid); if (!row) throw new Error('no such order'); Object.assign(row, a.data); return clone(row); } },
     };
     if (name === 'root') c.$transaction = async (fn) => {
       const n = ++txSeq, tx = 'tx#' + n;
-      const saved = clone({ s: [...t.StudyState], r: [...t.ReaderAssignment], a: t.AuditLog, auditSeq });
+      const saved = clone({ s: [...t.StudyState], r: [...t.ReaderAssignment], a: t.AuditLog, o: [...t.Order], auditSeq });
       log.push({ client: tx, model: '$', op: 'begin' });
       try {
         const result = await fn(client(tx));
         log.push({ client: tx, model: '$', op: 'commit' });
         return result;
       } catch (error) {
-        t.StudyState = new Map(saved.s); t.ReaderAssignment = new Map(saved.r); t.AuditLog = saved.a; auditSeq = saved.auditSeq;
+        t.StudyState = new Map(saved.s); t.ReaderAssignment = new Map(saved.r); t.AuditLog = saved.a; t.Order = new Map(saved.o); auditSeq = saved.auditSeq;
         log.push({ client: tx, model: '$', op: 'rollback' });
         throw error;
       }
@@ -200,6 +213,8 @@ function world() {
     mark: () => log.length,
     since: at => log.slice(at),
     audits: () => clone(t.AuditLog).map(a => ({ ...a, detail: JSON.parse(a.detail) })),
+    // Every row the store holds, to compare before and after a call.
+    snapshot: () => clone({ studies: [...t.StudyState], assignments: [...t.ReaderAssignment], audit: t.AuditLog, orders: [...t.Order], held: t.held }),
   };
   w.pacs.institutions = INSTITUTIONS.map(i => ({ id: i, name: i }));
   return w;
@@ -583,6 +598,98 @@ test('every assignment write and every close leave one audit row: a registered a
   await step('Z assigns', () => w.assign('zTech', 'zDoc'), [[actorOf('zTech'), Z, null]]);
   await step('the owner deletes the study', () => w.pacs.removeState(UID, caller('aTech')), [[actorOf('aTech'), Z, 'study-deleted']], ['state.delete']);
   assert.deepEqual(structuredClone(w.t.AuditLog), seen, 'no audit row outside the steps');
+});
+
+// A's study with its tele channel open to B, both institutions' assignments written and an order linked: everything a
+// delete removes, unlinks, closes or audits.
+async function deletable(oid) {
+  const w = world();
+  await channel(w, 'open');
+  await w.assign('aTech', 'aDoc');
+  await w.assign('bTech', 'bDoc');
+  Object.assign(w.t.StudyState.get(UID), { matched: 'M', orderOid: oid });
+  w.t.Order.set(oid, { oid, institutionId: A, matched: 'M', studyUid: UID });
+  return w;
+}
+
+test('a delete is refused while a record holds the study or the caller may not delete it, and a refusal changes no row (B-F02)', async () => {
+  // Astra S7-U3a-B-R-001-F02: removeState's contract on the compiled service, in place of a digest of the method's text.
+  // Each refusal leaves every row as it was (the study, both assignments, the audit log, the order link); each record's
+  // refusal is paired with the same world without that record, which is deleted.
+  const HELD = [
+    // [the record, its model, the row, status, code]
+    ['a critical result delivery record', 'CriticalResult', { id: id(1), studyUid: UID }, 409, 'STUDY_HAS_CRITICAL_RESULTS'],
+    ['a clinician question', 'StudyQuestion', { id: id(2), studyUid: UID }, 409, 'STUDY_HAS_QUESTIONS'],
+    ['an image request', 'StudyImageRequest', { id: id(3), studyUid: UID }, 409, 'STUDY_HAS_IMAGE_REQUESTS'],
+    ['a viewer item', 'ViewerItem', { id: id(4), studyUid: UID }, 409, null],
+    ['a tech note revision', 'TechNoteRevision', { studyUid: UID, version: 1 }, 409, null],
+    ['a saved comparison of another study that includes it', 'ViewerJob', { id: id(5), studyUid: OTHER_UID, studies: [OTHER_UID, UID] }, 409, null],
+    ['a report version', 'ReportVersion', { id: 1, uid: UID, version: 1, action: 'approve' }, 400, null],
+    ['a report draft', 'ReportDraft', { uid: UID, author: actorOf('aDoc') }, 400, null],
+  ];
+  const refused = async (w, name, uid, expected, code, label) => {
+    const before = w.snapshot();
+    const error = await w.pacs.removeState(uid, caller(name)).then(() => null, e => e);
+    assert.ok(error && status(expected)(error), label + ': ' + (error ? error.message : 'deleted'));
+    if (code) assert.equal(error.getResponse().code, code, label);
+    assert.deepEqual(w.snapshot(), before, label + ': the refusal changed a row');
+  };
+  for (const [label, model, row, expected, code] of HELD) {
+    const w = await deletable('O-SYN-73001');
+    w.t.held[model].push(row);
+    await refused(w, 'aTech', UID, expected, code, label);
+    w.t.held[model].length = 0;
+    assert.deepEqual(await w.pacs.removeState(UID, caller('aTech')), { ok: true }, label + ': without it the study is deleted');
+    assert.equal(w.t.StudyState.has(UID), false, label);
+  }
+  // Who asks: the tele receiver and a radiologist of the owner (403), a third institution and an unknown UID (404).
+  const w = await deletable('O-SYN-73001');
+  await refused(w, 'bTech', UID, 403, null, 'the tele receiver');
+  await refused(w, 'aDoc', UID, 403, null, 'a radiologist of the owner');
+  await refused(w, 'zTech', UID, 404, null, 'a third institution');
+  await refused(w, 'aTech', UNKNOWN_UID, 404, null, 'an unknown study');
+  // A report version that is only a discarded draft's safe copy does not hold the study.
+  w.t.held.ReportVersion.push({ id: 2, uid: UID, version: 0, action: 'discarded' });
+  assert.deepEqual(await w.pacs.removeState(UID, caller('aTech')), { ok: true });
+  assert.equal(w.t.StudyState.has(UID), false);
+});
+
+test('a delete closes the receiver\'s assignment and audits it in its own transaction; a failure after the close undoes all of it (B-F02)', async () => {
+  // A failure at the delete's own audit row (its last write) and one at the close's audit row: nothing is deleted,
+  // closed, unlinked or audited, although the close had run in that transaction.
+  for (const [label, failing] of [['the delete\'s audit row fails', d => d.action === 'state.delete'], ['the close\'s audit row fails', d => d.action === ACTION]]) {
+    const w = await deletable('O-SYN-73002');
+    const before = w.snapshot(), at = w.mark();
+    w.failAudit = failing;
+    await assert.rejects(w.pacs.removeState(UID, caller('aTech')), /SYNTHETIC audit failure/, label);
+    w.failAudit = null;
+    assert.deepEqual(w.snapshot(), before, label);
+    const calls = w.since(at), tx = calls.find(c => c.model === 'StudyState' && c.op === 'raw').client;
+    assert.ok(calls.some(c => c.client === tx && c.model === 'ReaderAssignment' && c.op === 'update'), label + ': the close ran in that transaction');
+    assert.deepEqual(calls.filter(c => c.client === tx && ['begin', 'commit', 'rollback'].includes(c.op)).map(c => c.op), ['begin', 'rollback'], label);
+    assert.deepEqual((await w.read('bDoc')).reader, reader('bDoc'), label + ': the receiver still holds its assignment');
+  }
+  // The delete: the study goes, its order is unlinked, the receiver's row is closed at a new revision with its reader
+  // cleared and one audit row recorded for B, and the delete's own row is written - all in one committed transaction.
+  // The owner's row is left as it was.
+  const w = await deletable('O-SYN-73002');
+  const owner = w.row(UID, A), receiver = w.row(UID, B), from = w.t.AuditLog.length, at = w.mark();
+  assert.deepEqual(await w.pacs.removeState(UID, caller('aTech')), { ok: true });
+  const calls = w.since(at), tx = calls.find(c => c.model === 'StudyState' && c.op === 'delete').client;
+  assert.deepEqual(calls.filter(c => ['update', 'create', 'upsert', 'delete'].includes(c.op)).map(c => [c.client, c.model, c.op, c.args?.data?.action ?? '']).sort(),
+    [[tx, 'AuditLog', 'create', ACTION], [tx, 'AuditLog', 'create', 'state.delete'], [tx, 'Order', 'update', ''], [tx, 'ReaderAssignment', 'update', ''],
+      [tx, 'StudyState', 'delete', '']].sort());
+  assert.deepEqual(calls.filter(c => c.client === tx && ['begin', 'commit', 'rollback'].includes(c.op)).map(c => c.op), ['begin', 'commit']);
+  assert.equal(w.t.StudyState.has(UID), false);
+  assert.deepEqual(w.t.Order.get('O-SYN-73002'), { oid: 'O-SYN-73002', institutionId: A, matched: 'U', studyUid: null });
+  const closed = w.row(UID, B);
+  assert.deepEqual([closed.revision, closed.closedRevision, closed.closedAt instanceof Date, closed.readerSub, closed.readerActor, closed.readerName],
+    [receiver.revision + 1, receiver.revision + 1, true, null, null, null]);
+  assert.deepEqual(w.row(UID, A), owner);
+  const added = w.audits().slice(from);
+  assert.deepEqual(added.filter(a => a.action === ACTION).map(a => [a.actor, a.target, a.detail]),
+    [[actorOf('aTech'), UID, { institution: B, revision: receiver.revision + 1, from: actorOf('bDoc'), to: null, closed: 'study-deleted' }]]);
+  assert.deepEqual(added.filter(a => a.action !== ACTION).map(a => [a.actor, a.action, a.target, a.detail]), [[actorOf('aTech'), 'state.delete', UID, { by: A }]]);
 });
 
 test('the existing rules hold unchanged at the receiver: replay, CAS, radiologist self only, W/H and the hold', async () => {
