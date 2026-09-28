@@ -34,6 +34,9 @@ elements are the base's" is a claim about this refactoring, so it is checked on 
 base and the main merge that shipped the unit), never on the live main.html, which later units keep changing. The live
 file is held to what the page must still be: every base toolbar id once and in its declared group, no id in the toolbar
 that is not declared, the S5-UI2 CSS block setting no font, and everything the browser cases measure.
+
+S7-PINS fix1 (Astra S7-PINS-R-001-F01): the live page is also held to what each date filter button searches - its label
+and the number of days the page script applies from it - from an explicit list, which the byte comparison used to cover.
 """
 import hashlib
 import json
@@ -88,6 +91,12 @@ GIVEN_IDS = {
     'workspace-server-load': '#workspace-server-panel > [data-action="load"]',
     'workspace-server-clear': '#workspace-server-panel > [data-action="clear"]',
 }
+# The date filter at the head of Filters, in order: each button's label and the days it searches back (-1: no limit).
+# The page script applies a clicked button's data-days as the search's days (main.html, the #qf click handler), so the
+# label a reader picks and the period searched agree only while each label carries its own number. The page opens with
+# no limit, All selected.
+DATE_FILTERS = [('Today', 0), ('3 Days', 3), ('Week', 7), ('1 Month', 30), ('2 Months', 60), ('All', -1)]
+DATE_FILTER_AT_OPEN = 'All'
 # The new containers; nothing else is new in the toolbar markup.
 GROUP_IDS = ['toolbar-search', 'toolbar-filters', 'toolbar-refresh', 'toolbar-refresh-menu', 'toolbar-view',
              'toolbar-more', 'toolbar-status']
@@ -489,6 +498,19 @@ class WorklistToolbarDOMTest(unittest.TestCase):
                 with self.subTest(control=key):
                     self.assertTrue(label, key)
                     self.assertIsNone(re.search('[가-힣]', label), f'{key}: {label}')
+
+    def test_each_date_filter_button_searches_the_days_its_label_names(self):
+        # The live page (Astra S7-PINS-R-001-F01): every button of the date filter found by what it says, not by the id
+        # S5-UI2 gave it, with the days it applies, against the explicit DATE_FILTERS; and the one shown selected when the
+        # page opens is the no-limit search the page starts with.
+        page = self.open_page(1366, 768)
+        try:
+            got = page.evaluate("""()=>[...document.querySelectorAll('#qf button')].map(b=>
+              [b.textContent.replace(/\\s+/g,' ').trim(),b.dataset.days??null,b.classList.contains('on')])""")
+        finally:
+            page.close()
+        self.assertEqual([[label, str(days)] for label, days in DATE_FILTERS], [[label, days] for label, days, _ in got])
+        self.assertEqual([DATE_FILTER_AT_OPEN], [label for label, _, selected in got if selected])
 
     def test_the_refactoring_kept_the_base_tags_and_labels(self):
         # Base and merge commit, as the browser serializes them: the unit moved the controls and changed none (the given
