@@ -768,8 +768,21 @@ function typescript() {
   const src = slash(path.join(API, 'src')) + '/';
   const named = parsed.fileNames.map(slash).filter(file => file.startsWith(src)).map(repoPath).sort();
   assert.ok(named.length > 0, 'api/tsconfig.json includes the files of api/src');
-  compiler = { ts, options, src, named, base: ts.createCompilerHost(options, true), lookups: new Map(), external: new Map(),
-    internal: new Map(), previous: undefined, product: null };
+  const base = ts.createCompilerHost(options, true);
+  // `@prisma/client` only re-exports the client `prisma generate` writes, and CI installs with --ignore-scripts, so none
+  // is there: `Prisma.sql`, `Prisma.join`, `Prisma.empty`, `Prisma.raw` and `Prisma.Sql` would lose the types the SQL
+  // rules read, and the check would read CI's tree otherwise than a developer's. The generated namespace takes those five
+  // from the package's own runtime whatever the schema; with no generated client, that part (as 5.22 writes it) is read.
+  const generated = path.join(API, 'node_modules', '.prisma', 'client');
+  const stub = base.fileExists(path.join(generated, 'default.d.ts')) ? null : {
+    file: slash(path.join(generated, 'default.d.ts')),
+    directories: new Set([slash(path.dirname(generated)), slash(generated)]),
+    text: "import * as runtime from '@prisma/client/runtime/library.js';\nexport namespace Prisma {\n"
+      + '  export import sql = runtime.sqltag\n  export import empty = runtime.empty\n  export import join = runtime.join\n'
+      + '  export import raw = runtime.raw\n  export import Sql = runtime.Sql\n}\n',
+  };
+  compiler = { ts, options, src, named, base, stub, lookups: new Map(), external: new Map(), internal: new Map(),
+    previous: undefined, product: null };
   return compiler;
 }
 
@@ -796,11 +809,12 @@ function productSources() {
 }
 const auditSources = () => productSources().sources;
 
-/** The program of `sources` (files under api/src; lib and node_modules from disk), reusing what earlier calls parsed. */
+/** The program of `sources` (files under api/src; lib and node_modules from disk, and the Prisma runtime part when no
+ *  client was generated), reusing what earlier calls parsed. */
 function auditProgram(sources) {
-  const c = typescript(), { ts, src, base } = c;
+  const c = typescript(), { ts, src, base, stub } = c;
   const texts = new Map(sources.map(source => [slash(path.join(ROOT, source.file)), source.text]));
-  const inside = file => slash(file).startsWith(src);
+  const inside = file => slash(file).startsWith(src), virtual = file => stub !== null && slash(file) === stub.file;
   // Outside api/src nothing changes during a run: each lookup of lib and node_modules is asked of the disk once.
   const once = (name, ask) => key => {
     const cache = c.lookups.get(name) ?? new Map();
@@ -812,15 +826,18 @@ function auditProgram(sources) {
   const directory = once('directoryExists', dir => !base.directoryExists || base.directoryExists(dir));
   const host = {
     ...base,
-    fileExists: file => (inside(file) ? texts.has(slash(file)) : exists(file)),
-    readFile: file => (inside(file) ? texts.get(slash(file)) : read(file)),
-    directoryExists: dir => (inside(slash(dir) + '/') ? [...texts.keys()].some(file => file.startsWith(slash(dir) + '/')) : directory(dir)),
-    realpath: base.realpath && once('realpath', file => base.realpath(file)),
+    fileExists: file => (virtual(file) || (inside(file) ? texts.has(slash(file)) : exists(file))),
+    readFile: file => (virtual(file) ? stub.text : inside(file) ? texts.get(slash(file)) : read(file)),
+    directoryExists: dir => (stub?.directories.has(slash(dir)) ? true
+      : inside(slash(dir) + '/') ? [...texts.keys()].some(file => file.startsWith(slash(dir) + '/')) : directory(dir)),
+    realpath: base.realpath && once('realpath', file => (virtual(file) ? file : base.realpath(file))),
     getDirectories: base.getDirectories && once('getDirectories', dir => base.getDirectories(dir)),
     getSourceFile(file, version, onError, create) {
       const at = slash(file);
       if (!inside(at)) {
-        if (!c.external.has(at)) c.external.set(at, base.getSourceFile(file, version, onError, create));
+        if (!c.external.has(at)) {
+          c.external.set(at, virtual(at) ? ts.createSourceFile(file, stub.text, version, true) : base.getSourceFile(file, version, onError, create));
+        }
         return c.external.get(at);
       }
       const text = texts.get(at);
