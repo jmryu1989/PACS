@@ -14,9 +14,13 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+# the restore fixture's own data (its migration list, tables and synthetic rows); importing it runs nothing
+import ops_product_transfer_fixture as restore_fixture  # noqa: E402
 
 
 def text(*parts):
@@ -656,11 +660,10 @@ class MigrationPins(unittest.TestCase):
                          "study_image_requests and S7-U1a's critical_result, which is last")
         self.assertEqual(len(names), 32)
         self.assertIn("'" + MIGRATION_NAME + "'", text("tests", "production_image_test.py"))
-        self.assertIn("              'api/prisma/migrations/" + U3_MIGRATION + "/migration.sql',\n"
-                      "              'api/prisma/migrations/" + MIGRATION_NAME + "/migration.sql',\n"
-                      "              'api/prisma/migrations/" + questions + "/migration.sql',\n"
-                      "              'api/prisma/migrations/" + image_requests + "/migration.sql',\n"
-                      "              'api/prisma/migrations/" + critical + "/migration.sql']", FIXTURE)
+        # the restore fixture applies exactly these migrations in this order: its list compared as data, so the order
+        # above (U3, U4, study_questions, study_image_requests, critical_result last) is the fixture's too
+        # (S7-U1a-B-R-001-F03: not the list's layout in the fixture's source)
+        self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
         self.assertIn("'GatewayReceipt', 'GatewayRetryRequest'])", FIXTURE)          # TABLES
         self.assertIn("'GatewayReceipt', 'GatewayRetryRequest'):", FIXTURE)          # seeding order, after its FK parent
         self.assertIn("rows['GatewayRetryRequest'] = [dict(studyUid=uid, epoch='00000000-0000-4000-8000-000000000c01', seq=7,\n"
@@ -672,16 +675,20 @@ class MigrationPins(unittest.TestCase):
             self.assertEqual(FIXTURE.count(probe), 1, probe[:50])
         # R3(a): U3 pins exactly three single-quoted 'GatewayReceipt' tokens; U4 adds none.
         self.assertEqual(FIXTURE.count("'GatewayReceipt'"), 3)
-        transfer = text("tests", "ops_product_transfer_test.py")
+        # The restore fixture's tables and synthetic rows, read from the fixture itself (S7-U1a-B-R-001-F03: not the
+        # text of ops_product_transfer_test.py or of the other migration tests).
         # S5-U4a: 30 migrations, 41 tables (StudyQuestion, StudyQuestionEntry), rows + 1 question + 3 receipts.
         # S5-U4c: 31 migrations, 43 tables (StudyImageRequest, StudyImageRequestReceipt), rows + 2 requests + 4 receipts.
         # S7-U1a: 32 migrations, 46 tables (CriticalResult, CriticalResultEvent, CriticalResultReceipt), rows + 4 records +
-        # 7 events + 6 receipts (the fixture's own row builder counts 79, read in the S7-U1a fix1 evidence).
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 32)", transfer)
-        self.assertIn("self.assertEqual(len(transfer.TABLES), 46)", transfer)
-        self.assertIn("46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4 + 4 + 7 + 6)", transfer)
-        for pinned in ("report_structure_migration_test.py", "order_reconciliation_source_test.py", "gateway_receipt_source_test.py"):
-            self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 32)", text("tests", pinned), pinned)
+        # 7 events + 6 receipts, 79 rows in all.
+        rows = restore_fixture.expected_rows("2.25.1")
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 32)
+        self.assertEqual(len(restore_fixture.TABLES), 46)
+        self.assertEqual(set(rows), set(restore_fixture.TABLES))
+        self.assertEqual(sum(len(value) for value in rows.values()), 79)
+        self.assertEqual({table: len(rows[table]) for table in ("GatewayRetryRequest", "CriticalResult", "CriticalResultEvent",
+                                                                "CriticalResultReceipt")},
+                         {"GatewayRetryRequest": 1, "CriticalResult": 4, "CriticalResultEvent": 7, "CriticalResultReceipt": 6})
 
 
 # ── the client ──
