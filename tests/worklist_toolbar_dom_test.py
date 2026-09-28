@@ -37,16 +37,19 @@ that is not declared, the S5-UI2 CSS block setting no font, and everything the b
 
 S7-PINS fix1 (Astra S7-PINS-R-001-F01): the live page is also held to what each date filter button searches - its label
 and the number of days the page script applies from it - from an explicit list, which the byte comparison used to cover.
+
+S7-PINS fix1 (Astra S7-COMMAND-R-001-F09): the two fixed commits are read by tests/report_actions_dom_test.py
+fixed_file(). A clone without them fetches them from origin; if they still cannot be read, or are not the pinned bytes,
+the equivalence cases fail - they never skip.
 """
 import hashlib
 import json
 import os
 import re
-import subprocess
 import unittest
 from pathlib import Path
 from playwright.sync_api import sync_playwright
-from report_actions_dom_test import BASE_MAIN_SHA256 as UI3_BASE_MAIN_SHA256
+from report_actions_dom_test import BASE_MAIN_SHA256 as UI3_BASE_MAIN_SHA256, fixed_file
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / 'worklist-v0/hpacs-lite'
@@ -56,9 +59,9 @@ REL_MAIN = 'worklist-v0/hpacs-lite/main.html'
 OUT = Path(os.environ.get('KIN_EVIDENCE_DIR') or ROOT / 'tmp/s5-ui2/toolbar')
 
 # The commit this unit started from (main after S5-U4a) and the main commit that merged it (PR #99, the branch head
-# a669331 with fix2). A shallow CI clone has neither, so what they held is pinned below; where they are present the pins
-# and the refactoring's equivalence are checked on them, and where they are not those cases say so and skip.
-BASE = '7a35570826072c0da1f79e7951f218df38fd0156'
+# a669331 with fix2). The refactoring's equivalence is checked on the two, read by fixed_file(): each must be readable
+# and be the pinned bytes below, or the case fails.
+BASE ='7a35570826072c0da1f79e7951f218df38fd0156'
 RESULT = '5ed77ded757e923d8dbed502b2180d5e091928c1'
 # The two main.html files (LF-normalized UTF-8 sha256). S5-UI3 started from the merged one
 # (tests/report_actions_dom_test.py BASE_MAIN_SHA256).
@@ -216,24 +219,9 @@ def ids_in(markup):
     return re.findall(r'\bid="([^"$]+)"', markup)
 
 
-def committed(sha):
-    """main.html (LF) at a fixed commit when this clone has it, else None (shallow CI checkout)."""
-    try:
-        run = subprocess.run(['git', 'show', f'{sha}:{REL_MAIN}'], cwd=str(ROOT), capture_output=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return lf(run.stdout.decode('utf-8')) if run.returncode == 0 else None
-
-
 def fixed_pair():
-    """(base, result) main.html at the two fixed commits, each None where this clone lacks it; says which it used."""
-    pair = committed(BASE), committed(RESULT)
-    for name, sha, text in (('base', BASE, pair[0]), ('result', RESULT, pair[1])):
-        print(f'S5-UI2 {name} commit {sha}', 'present' if text is not None else 'absent in this clone; pinned values stand for it')
-    return pair
-
-
-ABSENT = 'the fixed S5-UI2 commits are not in this clone (shallow checkout); the pinned digests stand for them'
+    """(base, result) main.html at the two fixed commits; fixed_file() fails the case when either cannot be read."""
+    return fixed_file(BASE, REL_MAIN, BASE_MAIN_SHA256), fixed_file(RESULT, REL_MAIN, RESULT_MAIN_SHA256)
 
 
 def selector_for(key):
@@ -393,15 +381,12 @@ class WorklistToolbarStructureTest(unittest.TestCase):
     def setUpClass(cls):
         cls.text = lf(MAIN.read_text(encoding='utf-8'))
         cls.parts = parts(cls.text)
-        cls.base, cls.result = fixed_pair()
 
-    def test_pins_match_the_fixed_commits_when_they_are_present(self):
-        # The next unit started from this one's merge (constants, so a shallow clone checks the chain too).
+    def test_pins_match_the_fixed_commits(self):
+        # The next unit started from this one's merge.
         self.assertEqual(UI3_BASE_MAIN_SHA256, RESULT_MAIN_SHA256)
-        if self.base is None or self.result is None:
-            self.skipTest(ABSENT)
-        self.assertEqual((BASE_MAIN_SHA256, RESULT_MAIN_SHA256), (digest(self.base), digest(self.result)))
-        base = parts(self.base)
+        # Both files are their pinned LF sha256 (fixed_file()); the base's parts are the pinned ones.
+        base = parts(fixed_pair()[0])
         self.assertEqual(BASE_TOOLBAR_IDS, ids_in(base['toolbar']))
         self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(base['scripts']))
         self.assertEqual(BASE_OUTSIDE_SHA256, digest(base['outside']))
@@ -410,9 +395,7 @@ class WorklistToolbarStructureTest(unittest.TestCase):
     def test_the_refactoring_left_the_page_script_and_everything_outside_the_toolbar_as_the_base_bytes(self):
         # Base and merge commit: header, list, reading panel, dialogs, row menus and the page script, not one byte moved;
         # the stylesheet gained one block and nothing else.
-        if self.base is None or self.result is None:
-            self.skipTest(ABSENT)
-        base, result = parts(self.base), parts(self.result)
+        base, result = (parts(text) for text in fixed_pair())
         self.assertEqual(base['scripts'], result['scripts'])
         self.assertEqual(base['outside'], result['outside'])
         block, rest = split_ui2_css(result['style'])
@@ -421,10 +404,8 @@ class WorklistToolbarStructureTest(unittest.TestCase):
                          (scripts_digest(result['scripts']), digest(result['outside']), digest(rest)))
 
     def test_the_ui2_css_block_sets_no_font(self):
-        # The live page (and the merge commit where present): the block that lays out the groups leaves type alone.
-        for label, text in (('live', self.text), ('result', self.result)):
-            if text is None:
-                continue
+        # The live page and the merge commit: the block that lays out the groups leaves type alone.
+        for label, text in (('live', self.text), ('result', fixed_pair()[1])):
             with self.subTest(file=label):
                 block, _ = split_ui2_css(parts(text)['style'])
                 self.assertIsNone(re.search(r'\bfont(-size|-family)?\s*:', block), 'the S5-UI2 CSS changes a font')
@@ -514,10 +495,8 @@ class WorklistToolbarDOMTest(unittest.TestCase):
 
     def test_the_refactoring_kept_the_base_tags_and_labels(self):
         # Base and merge commit, as the browser serializes them: the unit moved the controls and changed none (the given
-        # ids taken off). The pin stands for both where this clone lacks them.
+        # ids taken off); both serialize to the pinned BASE_ELEMENTS_SHA256.
         base, result = fixed_pair()
-        if base is None or result is None:
-            self.skipTest(ABSENT)
         for label, text in (('base', base), ('result', result)):
             with self.subTest(file=label):
                 got = self.serialize(text)

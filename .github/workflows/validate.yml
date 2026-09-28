@@ -126,6 +126,12 @@ jobs:
         timeout-minutes: 3
         run: |
           KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/worklist-header/shots" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/worklist-header --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/reading-workspace.css --file tests/worklist_header_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_header_dom_test.py
+      # S7-PINS (Astra S7-COMMAND-R-001-F09): the S5-UI2, S5-UI3 and S5-U4b/U4c equivalence cases below read these five
+      # fixed commits with git show and fail when one cannot be read; this depth-1 checkout has none of them. The
+      # repository is public, so they are fetched without a token (persist-credentials stays false).
+      - name: S7-PINS fixed commits for the Stage 5 byte-equivalence cases
+        timeout-minutes: 3
+        run: git fetch --no-tags --depth=1 origin 7a35570826072c0da1f79e7951f218df38fd0156 5ed77ded757e923d8dbed502b2180d5e091928c1 ae04b19d1b98b57b3ff7de006e5dc38d83ef8e64 aaf53dccad2ed140b4a2c6610e9690d33fbab2dc 64225c5aa7157c898d9e44969a3bd86099c857ab
       # S5-UI2 (UXR-G-01): the toolbar groups against the base commit's ids, labels, script and outside bytes (pinned;
       # this shallow clone has no base commit), one row from 1366px, groups opening below it, the reading layout still.
       - name: S5-UI2 worklist toolbar keeps one row of groups, every control and the page script

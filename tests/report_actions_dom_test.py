@@ -39,6 +39,11 @@ places the Structured entry, the CSS block's fonts, and everything the browser c
 
 S7-PINS fix1 (Astra S7-PINS-R-001-F02): the live page is also held to the buttons' starting states, from an explicit
 list, and to the two placeholders' Korean reasons - requirements the live byte comparison used to cover.
+
+S7-PINS fix1 (Astra S7-COMMAND-R-001-F09): the two fixed commits are read with `git show` and must be there. A clone
+without them fetches them from origin; if they still cannot be read, or are not the pinned bytes, the equivalence cases
+fail - they never skip, and no pinned digest stands in for bytes that were not compared (fixed_file(), which the S5-UI2
+and S5-U4c tests use too).
 """
 import hashlib
 import json
@@ -56,9 +61,9 @@ REL_MAIN = 'worklist-v0/hpacs-lite/main.html'
 OUT = Path(os.environ.get('KIN_EVIDENCE_DIR') or ROOT / 'tmp/s5-ui3/report-actions')
 
 # The commit this unit started from (S5-UI2 fix1) and the main commit that merged it (PR #100, the branch head 054b99a
-# with fix1). A shallow CI clone has neither, so what they held is pinned below; where they are present the pins and the
-# refactoring's equivalence are checked on them, and where they are not those cases say so and skip.
-BASE ='ae04b19d1b98b57b3ff7de006e5dc38d83ef8e64'
+# with fix1). The refactoring's equivalence is checked on the two, read by fixed_file(): each must be readable and be
+# the pinned bytes below, or the case fails.
+BASE = 'ae04b19d1b98b57b3ff7de006e5dc38d83ef8e64'
 RESULT = 'aaf53dccad2ed140b4a2c6610e9690d33fbab2dc'
 # LF-normalized UTF-8 sha256 of the base main.html, and of its <script> blocks joined by '\n\0\n' (the digest
 # tests/worklist_toolbar_dom_test.py pins for S5-UI2's base; neither unit changed a script byte).
@@ -191,24 +196,44 @@ def without_ui3(text):
     return text[:cs] + text[ce:ms] + BASE_RBTNS + text[me:fs] + BASE_RFOOT + text[fe:]
 
 
-def committed(sha):
-    """main.html (LF) at a fixed commit when this clone has it, else None (shallow CI checkout)."""
-    try:
-        run = subprocess.run(['git', 'show', f'{sha}:{REL_MAIN}'], cwd=str(ROOT), capture_output=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return lf(run.stdout.decode('utf-8')) if run.returncode == 0 else None
+def fixed_file(sha, rel, lf_sha256):
+    """`rel` (LF) at the fixed commit `sha` as `git show` reads it, and only if its LF sha256 is `lf_sha256`.
+
+    Also used by tests/worklist_toolbar_dom_test.py and tests/clinician_request_dom_test.py. A clone without the commit
+    (a depth-1 checkout; .github/workflows/validate.yml fetches the five commits these tests read before it runs them)
+    fetches it from origin first. Anything else - no git, no origin to fetch from, a commit or path that is not there,
+    other bytes than the pinned ones - fails the case that asked (Astra S7-COMMAND-R-001-F09): an equivalence that was
+    not checked is not a pass, and the pinned digest does not stand in for the bytes."""
+    spec = f'{sha}:{rel}'
+
+    def git(*args, timeout=60):
+        try:
+            return subprocess.run(['git', *args], cwd=str(ROOT), capture_output=True, timeout=timeout,
+                                  env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AssertionError(f'git {" ".join(args)} did not run ({error}), so {spec} was not checked') from error
+
+    run = git('show', spec)
+    if run.returncode != 0:
+        shallow = git('rev-parse', '--is-shallow-repository').stdout.strip() == b'true'
+        fetch = ['fetch', '--no-tags', *(['--depth=1'] if shallow else []), 'origin', sha]
+        done = git(*fetch, timeout=300)
+        print(f'{spec} is not in this clone; git {" ".join(fetch)} exit {done.returncode}:',
+              done.stderr.decode('utf-8', 'replace').strip()[-300:])
+        run = git('show', spec)
+    if run.returncode != 0:
+        raise AssertionError(f'{spec} cannot be read in this clone, even after fetching {sha} from origin '
+                             f'({run.stderr.decode("utf-8", "replace").strip()[:300]}), so it was not checked')
+    text = lf(run.stdout.decode('utf-8'))
+    if digest(text) != lf_sha256:
+        raise AssertionError(f'{spec} is not the pinned file: LF sha256 {digest(text)}, pinned {lf_sha256}')
+    print(f'{spec} read, LF sha256 {lf_sha256}')
+    return text
 
 
 def fixed_pair():
-    """(base, result) main.html at the two fixed commits, each None where this clone lacks it; says which it used."""
-    pair = committed(BASE), committed(RESULT)
-    for name, sha, text in (('base', BASE, pair[0]), ('result', RESULT, pair[1])):
-        print(f'S5-UI3 {name} commit {sha}', 'present' if text is not None else 'absent in this clone; pinned values stand for it')
-    return pair
-
-
-ABSENT = 'the fixed S5-UI3 commits are not in this clone (shallow checkout); the pinned digests stand for them'
+    """(base, result) main.html at the two fixed commits; fixed_file() fails the case when either cannot be read."""
+    return fixed_file(BASE, REL_MAIN, BASE_MAIN_SHA256), fixed_file(RESULT, REL_MAIN, RESULT_MAIN_SHA256)
 
 
 def page_html(text):
@@ -299,34 +324,28 @@ class ReportActionsStructureTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.text = lf(MAIN.read_text(encoding='utf-8'))
-        cls.base, cls.result = fixed_pair()
 
-    def test_pins_match_the_fixed_commits_when_they_are_present(self):
+    def test_pins_match_the_fixed_commits(self):
         self.assertEqual(BASE_RBTNS_SHA256, digest(BASE_RBTNS))
         self.assertEqual(BASE_RFOOT_SHA256, digest(BASE_RFOOT))
-        if self.base is None or self.result is None:
-            self.skipTest(ABSENT)
-        self.assertEqual(BASE_MAIN_SHA256, digest(self.base))
-        self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(self.base))
-        self.assertEqual(RESULT_MAIN_SHA256, digest(self.result))
-        start = self.base.index(RBTNS_OPEN)
-        self.assertEqual(BASE_RBTNS, self.base[start:self.base.index(ROW_CLOSE, start) + len(ROW_CLOSE)])
-        start = self.base.index(RFOOT_OPEN)
-        self.assertEqual(BASE_RFOOT, self.base[start:self.base.index(ROW_CLOSE, start) + len(ROW_CLOSE)])
+        # Both files are their pinned LF sha256 (fixed_file()); the base's script and rows are the pinned ones.
+        base, _ = fixed_pair()
+        self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(base))
+        start = base.index(RBTNS_OPEN)
+        self.assertEqual(BASE_RBTNS, base[start:base.index(ROW_CLOSE, start) + len(ROW_CLOSE)])
+        start = base.index(RFOOT_OPEN)
+        self.assertEqual(BASE_RFOOT, base[start:base.index(ROW_CLOSE, start) + len(ROW_CLOSE)])
 
     def test_the_refactoring_changed_only_its_three_regions_and_no_script_byte(self):
         # Base and merge commit: with the three regions put back to the base rows, the merged file is the base byte for
         # byte, and its page script is the base's.
-        if self.base is None or self.result is None:
-            self.skipTest(ABSENT)
-        self.assertEqual(self.base, without_ui3(self.result), 'a byte outside the S5-UI3 regions moved')
-        self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(self.result))
+        base, result = fixed_pair()
+        self.assertEqual(base, without_ui3(result), 'a byte outside the S5-UI3 regions moved')
+        self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(result))
 
     def test_the_three_regions_hold_no_script_and_the_structured_line_is_there_once(self):
-        # The live page (and the merge commit where present): the regions are markup and CSS only.
-        for label, text in (('live', self.text), ('result', self.result)):
-            if text is None:
-                continue
+        # The live page and the merge commit: the regions are markup and CSS only.
+        for label, text in (('live', self.text), ('result', fixed_pair()[1])):
             (cs, ce), (ms, me), (fs, fe) = regions(text)
             for name, (start, end) in (('css', (cs, ce)), ('rows', (ms, me)), ('footer', (fs, fe))):
                 with self.subTest(file=label, region=name):
@@ -369,7 +388,6 @@ class ReportActionsDOMTest(unittest.TestCase):
     def setUpClass(cls):
         from playwright.sync_api import sync_playwright
         cls.html = page_html(MAIN.read_text(encoding='utf-8'))
-        cls.base, cls.result = fixed_pair()
         cls.seen = []
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -440,9 +458,8 @@ class ReportActionsDOMTest(unittest.TestCase):
 
     def test_the_refactoring_kept_every_button_tag_attribute_and_label(self):
         # Base and merge commit, as the browser serializes them: the unit moved the 18 buttons and changed none.
-        if self.base is None or self.result is None:
-            self.skipTest(ABSENT)
-        got = self.serialize(self.result)
+        base, result = fixed_pair()
+        got = self.serialize(result)
         self.assertEqual([], [row[0] for row in got if row[1] is None])
         disabled = [key for key, tag, _ in got if re.search(r'\sdisabled=""', tag)]
         self.assertEqual(DISABLED, disabled)
@@ -454,7 +471,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                 with self.subTest(title=row[0]):
                     self.assertEqual(1, row[1].count(attribute), row[1])
                 row[1] = row[1].replace(attribute, '')
-        self.assertEqual(self.serialize(self.base), got)
+        self.assertEqual(self.serialize(base), got)
 
     def test_each_button_is_where_it_is_declared_and_seven_controls_are_in_view(self):
         page = self.open_page(1366, 768)

@@ -93,10 +93,8 @@ block cut from main.html and run over small stand-ins):
        own area. Controls: each block without the list call leaves the other area open and paints its late receipt.
 """
 import copy
-import hashlib
 import json
 import re
-import subprocess
 import time
 import unicodedata
 import unittest
@@ -112,7 +110,7 @@ from clinician_question_dom_test import READER_BLOCK as QUESTION_BLOCK
 from clinician_question_dom_test import READER_VIEW as QUESTION_READER_VIEW
 from clinician_question_dom_test import REFUSED as QUESTION_REFUSED
 from clinician_question_dom_test import QuestionServer, kind_of
-from report_actions_dom_test import RESULT_MAIN_SHA256 as UI3_RESULT_MAIN_SHA256
+from report_actions_dom_test import RESULT_MAIN_SHA256 as UI3_RESULT_MAIN_SHA256, fixed_file
 
 ROOT = Path(__file__).resolve().parents[1]
 HPACS = ROOT / "worklist-v0" / "hpacs-lite"
@@ -122,18 +120,15 @@ def lf_text(path):
     return path.read_bytes().decode("utf-8").replace("\r\n", "\n")
 
 
-def digest(text):
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
 SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js")}
 MAIN = lf_text(HPACS / "main.html")
 
 # The commit this unit (and S5-U4b) started from (main after S5-UI3) and the main commit that merged the S5-U4b/U4c
-# integration (PR #108, the branch head 6293365). A shallow CI clone has neither, so what they held is pinned
-# (LF-normalized UTF-8 sha256); where they are present the pins and the equivalence are checked on them (s01).
+# integration (PR #108, the branch head 6293365), with their files' LF-normalized UTF-8 sha256. s01 reads them with
+# tests/report_actions_dom_test.py fixed_file(): a clone without them fetches them from origin, and if they still cannot
+# be read, or are not these bytes, s01 fails - it never skips (Astra S7-COMMAND-R-001-F09).
 BASE_COMMIT = "aaf53dccad2ed140b4a2c6610e9690d33fbab2dc"
 RESULT_COMMIT = "64225c5aa7157c898d9e44969a3bd86099c857ab"
 BASE_MAIN_SHA256 = "1c112d4b3b0c598a6fb15dd952e85445b0839077ee9a39618f8d6dd1bab7b47a"
@@ -233,15 +228,6 @@ def without_u4c_clinician(text):
             raise AssertionError(f"hook {pair!r} must occur once")
         text = text.replace(pair, pair.split("\n")[0] + "\n")
     return cut(text, *CLINICIAN_BLOCK_MARKS, False)
-
-
-def committed(sha, rel):
-    """A file (LF) at a fixed commit when this clone has it, else None (shallow CI checkout)."""
-    try:
-        run = subprocess.run(["git", "show", f"{sha}:{rel}"], cwd=str(ROOT), capture_output=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return run.stdout.decode("utf-8").replace("\r\n", "\n") if run.returncode == 0 else None
 
 
 def slice_between(source, start, end):
@@ -739,16 +725,12 @@ class ImageRequestStructureTest(unittest.TestCase):
     """Stdlib side: where the change was (on the fixed commits), and where the hooks are now (on the live files)."""
 
     def test_s01_every_u4c_u4b_change_was_in_their_regions_at_the_merge_commit(self):
-        # This unit and S5-U4b started from S5-UI3's merge (constants, so a shallow clone checks the chain too).
+        # This unit and S5-U4b started from S5-UI3's merge.
         self.assertEqual(UI3_RESULT_MAIN_SHA256, BASE_MAIN_SHA256)
-        files = {(sha, rel): committed(sha, rel) for sha in (BASE_COMMIT, RESULT_COMMIT) for rel in (REL_MAIN, REL_CLINICIAN)}
-        for (sha, rel), text in files.items():
-            print(f"S5-U4b/U4c commit {sha} {rel}", "present" if text is not None else "absent in this clone; pinned values stand for it")
-        if None in files.values():
-            self.skipTest("the fixed S5-U4b/U4c commits are not in this clone (shallow checkout); the pinned digests stand for them")
-        self.assertEqual([BASE_MAIN_SHA256, BASE_CLINICIAN_SHA256, RESULT_MAIN_SHA256, RESULT_CLINICIAN_SHA256],
-                         [digest(files[key]) for key in ((BASE_COMMIT, REL_MAIN), (BASE_COMMIT, REL_CLINICIAN),
-                                                         (RESULT_COMMIT, REL_MAIN), (RESULT_COMMIT, REL_CLINICIAN))])
+        # The four files, each read and checked against its pinned LF sha256 by fixed_file() (or the case fails).
+        pins = {(BASE_COMMIT, REL_MAIN): BASE_MAIN_SHA256, (BASE_COMMIT, REL_CLINICIAN): BASE_CLINICIAN_SHA256,
+                (RESULT_COMMIT, REL_MAIN): RESULT_MAIN_SHA256, (RESULT_COMMIT, REL_CLINICIAN): RESULT_CLINICIAN_SHA256}
+        files = {(sha, rel): fixed_file(sha, rel, pin) for (sha, rel), pin in pins.items()}
         # S5-U4b's regions are taken out after S5-U4c's (tests/clinician_question_dom_test.py): S5-U4c's helper cuts the
         # five shared kinOn401 lines, S5-U4b's only checks each is left at most once.
         from clinician_question_dom_test import without_u4b, without_u4b_clinician
