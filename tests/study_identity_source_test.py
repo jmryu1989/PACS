@@ -11,10 +11,12 @@ What this file proves, and nothing more (review M-2):
      its position, relations only from server-read tags, no Order value in the answer, the M-1/N-1 shape checks after
      every existing refusal, unchanged write sites and neighbour surfaces, the client allowlist/escaping, the truthful
      Modify path, the QIDO restore after Unmatch, list invalidation, the guarded Order List refresh, the M-3 wording,
-     the forbidden-word table, the one new live method and the hosted steps that run the real code.
+     the forbidden-word table, the one new live method, its place in the live selection scripts/run-tests.py plans
+     (collected, never run) and the hosted steps that run the real code.
 What it cannot see: whether TypeScript compiles, the browser renders, or PostgreSQL/Orthanc behave as the source says.
 """
 import hashlib
+import importlib.util
 import json
 import math
 import re
@@ -29,6 +31,12 @@ except Exception:
     pass
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+import candidate_ci  # noqa: E402
+
+_RUNNER_SPEC = importlib.util.spec_from_file_location("study_identity_runner", ROOT / "scripts" / "run-tests.py")
+RUNNER = importlib.util.module_from_spec(_RUNNER_SPEC)
+_RUNNER_SPEC.loader.exec_module(RUNNER)
 
 
 def text(*parts):
@@ -512,10 +520,14 @@ class LiveAndWorkflowPins(unittest.TestCase):
                        "md5(", '\\"ReportDraft\\"', '\\"ReportVersion\\"', '\\"Report\\"', "FORGED-ORIG", "states=omit",
                        "self.preliminary(p, author=\"doctor\", reviewer=\"jmryu\")", "self.assert_snapshot_unchanged("):
             self.assertIn(needle, method, needle)
-        self.assertIn("('tests/invariants_live.py', 83)", text("tests", "execution_selection_test.py"))
-        # S7-U1a: CriticalResultInvariantTests added six live cases, 83 -> 89 (run-tests.py module_plan, S7-U1a fix1
-        # evidence). execution_selection_test.py still pins 83 above; it is outside the S7-U1a fix1 scope and moves with it.
-        self.assertIn('("invariants_live.py", None, "candidate-invariants", 89),', text("tests", "candidate_ci.py"))
+        # The case is one of the invariants scripts/run-tests.py plans, and the candidate runner selects that module at the
+        # planned count: the selection itself, not another test file's text (S7-U1a-B-R-001-F01). 83 -> 89: S7-U1a added
+        # the six live critical result cases (CriticalResultInvariantTests).
+        planned = [row["case"] for row in RUNNER.module_plan("tests/invariants_live.py", "study-identity-selection", "live",
+                                                              600)["tests"]]
+        self.assertEqual(planned.count("LiveInvariantTests.test_s4u5_order_identity_qido_only_w_gates_and_report_preservation"), 1)
+        self.assertEqual(len(planned), 89)
+        self.assertIn(("invariants_live.py", None, "candidate-invariants", len(planned)), candidate_ci.BASE)
 
     def test_hosted_steps_run_the_real_code_with_source_hashes(self):
         for needle in (
