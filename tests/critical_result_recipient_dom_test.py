@@ -63,9 +63,27 @@ the origin's storage or in what the origin's storage holds (contract §13's writ
          U      mx07 rx20      mx07           mx07 mx11      mx07           mx03 mx08      mx10 rd08      mx12 rd10
          T      mx02           mx02           mx02           mx02           mx03           mx10           mx12
          A      mx08 rx23      mx08           mx08           mx08           mx08 rx23      mx10           mx12
+       With two list reads out at once (fix3) the cells add: L 1 mx13 mx15, 2 mx13 mx14, 3 mx17, 4 mx15, 5 mx14 mx15 mx16
+       mx17, 6 mx15 mx17; D-OR 1 and 5 mx17; D-CR and D-CA 1 mx13; U 1 mx13, 3 and 5 mx17; T 1 mx13, 5 mx17; A 1 mx13 mx14
+       mx15, 3 mx17, 4 mx15.
        Not applicable: full with current:false on Clinician Home (a clinician never gets that view, contract §3.3/§4.2);
        A->B->A on Clinician Home (the page's owner is its boot session and an account change closes the page - rd08 S-04
        and S-07 are that host's path).
+  mx13-mx17 (Astra S7-U2a-PROJ-B-R-001 F02 and S7-U2a-D-R-001 F01; fix3): two list reads out at once - L1, and L2 that an
+       Acknowledge's 201 starts while L1 is held - with the same oracle and watched history, on both hosts. The order a
+       request was sent in decides, not the order its answer comes in, and a later request still out is no reason to drop
+       an earlier valid answer. mx13 L1 answered while L2 waits is drawn at once: a stub or a covering list withdraws the
+       message, body, Source, reason (row, CR and CA lines, titles, aria-labels) and Acknowledge, the badge is L1's count;
+       focus on Acknowledge goes to the row head, focus on an unchanged line's Check Again stays (D-F01); mx14 the
+       counterexample for a fix that only drops the request-number check: after L2 (covering C without it, empty, or a first
+       page that ends before C) L1 brings back no C, no full row of B or K, no badge, count line or More of its own; mx15 L2
+       ends full, stub, empty, failed or unanswered, in both orders, with no periodic read while L2 is out; L1's old
+       failures after L2; a current failure while L2 waits; L2's other-account and 401 answers; mx16 More follows the
+       accepted chain (a replaced chain's More, the same cursor string on another chain, More while a new first page waits,
+       More twice); mx17 what a late list leaves alone (a later #4, a record outside the range, a terminal record outside
+       the pending list, Refresh, the filter change, the reading panel's A->B->A). mx04's L->L gives the earlier list a stub
+       where the screen is full, so drawing it and dropping it differ. Not applicable: L2 stopping for no answer before L1
+       (both stop 60 s after they were sent and L1 was sent first); A->B->A on Clinician Home (as above).
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case.
@@ -708,6 +726,9 @@ def differences(want, seen, area):
 
 
 class CriticalResultRecipientDOMTest(unittest.TestCase):
+    # A failing oracle comparison shows every difference (which forbidden value showed where), not a cut diff.
+    maxDiff = None
+
     @classmethod
     def setUpClass(cls):
         cls.panel_markup = page_html(MAIN)
@@ -3289,7 +3310,8 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
     def test_mx04_the_later_request_wins_whichever_answer_comes_first(self):
         """M04. The same record, revision 1, answered full by one request and as a stub by another: list then read (L->D),
         read then list (D->L), read then read (D->D), list then list (L->L), with the two answers in both orders. What stays
-        is the answer of the request sent later. A newer read of another record changes none of them."""
+        is the answer of the request sent later; the earlier answer, when it comes first, is drawn at once while the later
+        request waits. A newer read of another record changes none of them."""
         self.page.clock.pause_at("2030-05-05T06:00:00Z")
         for host in MX_HOSTS:
             with self.subTest(host=host):
@@ -3344,24 +3366,35 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                 self.expect([(c1, stub[c1]), (c2, stub[c2])], "D->D: the second read")
                 self.let_go(firsts[c2])
                 self.expect([(c1, stub[c1]), (c2, stub[c2])], "D->D out of order: the first read changes nothing")
-                # L -> L: the minute's list is held (full); the list an ACK's 201 starts is held too (a stub).
+                # L -> L: the minute's list is held, a stub where the screen shows full; the list an ACK's 201 starts is held
+                # too, full again. Answered first, the older list is drawn at once - the later one still waiting is no reason to
+                # keep the old row (S7-U2a-D-R-001 F01; the earlier expectation here, that it is not drawn, gave it the screen's
+                # own full row and could not tell the two apart). Answered second, it changes nothing: the later list wins.
                 for k, newer_first in ((k1, False), (k2, True)):
                     with self.subTest(host=host, lists="newer answered first" if newer_first else "older answered first"):
                         self.mx_set(host, d1, "full")
                         self.minute()
-                        self.expect([(d1, full[d1])], "L->L: full again")
+                        self.expect([(d1, full[d1])], "L->L: full on screen")
+                        stubbed = self.mx_set(host, d1, "stub")
                         self.hold("list")
                         self.minute()
                         older = self.take("list")
-                        stubbed = self.mx_set(host, d1, "stub")
+                        again = self.mx_set(host, d1, "full")
                         self.hold("list")
                         self.mx_press("Acknowledge", mark(k))
                         newer = self.take("list")
-                        for held in ((newer, older) if newer_first else (older, newer)):
-                            self.let_go(held)
-                            if held is older and not newer_first:
-                                self.expect([(d1, full[d1])], "L->L: the older list is not drawn")
-                        self.expect([(d1, stubbed), (k, self.mx_view(k), None, ("ack", SERVER_NOW))], "L->L: the later list wins")
+                        self.watch()
+                        if newer_first:
+                            self.let_go(newer)
+                            self.expect([(d1, again)], "L->L: the later list")
+                            self.let_go(older)
+                            self.clean(self.seen_since(), "L->L: the older list after the later one", pairs=[(d1, "Source Changed")])
+                        else:
+                            self.let_go(older)
+                            self.expect([(d1, stubbed)], "L->L: the older list, answered while the later one waits, is drawn at once")
+                            self.clean(self.seen_since(), "L->L: while the later list waits", content=[d1], acks=[d1])
+                            self.let_go(newer)
+                        self.expect([(d1, again), (k, self.mx_view(k), None, ("ack", SERVER_NOW))], "L->L: the later list wins")
                 # A newer read of another record changes none of them.
                 before = [row for row in self.view()["rows"] if mark(w) not in row["text"]]
                 self.mx_press("Open Replacement", mark(w + 1))
@@ -4030,6 +4063,606 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                     self.assertEqual({("Show Received", False), ("Refresh", False)},
                                      {(button[0], button[1]) for button in self.view()["buttons"]})
 
+
+    # ── fix3 (Astra S7-U2a-PROJ-B-R-001 F01/F02, S7-U2a-D-R-001 F01): two list reads out at once ──
+    # The same oracle and history as mx01-mx12. Here two list reads wait at once: L1 and L2, the second started by an
+    # Acknowledge's 201 (as a person's click does) while the first is held. Each answer is let go on its own and the case
+    # checks that it reached the page. The order a request was sent in decides, not the order its answer comes in.
+    def pending_now(self):
+        """The server's pending count as its list answers give it now."""
+        return sum(1 for record in self.server.records.values() if self.server.visible(record) and record["state"] == "created")
+
+    def more_buttons(self):
+        return [button for button in self.view()["buttons"] if button[0] == "More"]
+
+    def kept(self, log, n, what):
+        """Record n has its row in every state of the region the watched history shows (it never went, not for a moment)."""
+        missing = [entry["text"][:90] for entry in log if entry["kind"] == "state"
+                   and not any(item["list"] == "Received Critical Results" and mark(n) in item["text"] for item in entry["items"])]
+        self.assertEqual([], missing[:1], what)
+
+    # ── D-F01 ──
+    def test_mx13_a_list_answered_while_a_later_list_waits_is_drawn_at_once(self):
+        """D-F01; PROJ-B F02 steps 1, 2 and 8. The all view: a and u full (u with an unknown attempt), and records cancelled and
+        full with their reason - listed so, after a first Acknowledge refused as cancelled (CR: the reason in its Cancelled
+        line too), after Check Again (CA: likewise), one about to leave the list, one that stays (keep). The minute's list L1
+        is held, answered with a, u and the cancelled ones as stubs, one of them out of the complete list, keep as it was;
+        k's Acknowledge then starts L2, held too. L1 comes first. From that moment, with L2 still waiting, the withdrawn
+        records show no message, body, Source, reason or Acknowledge anywhere in the region (rows, lines, titles,
+        aria-labels) - not for a moment - and the badge is L1's count. Focus on a's Acknowledge goes to a's row head; in the
+        second round focus on u's Check Again stays (u's line has not changed) while u's row is withdrawn. The pairs: keep
+        shows its reason all along; L2 then gives a full again, with its body and Acknowledge."""
+        self.page.clock.pause_at("2030-05-05T06:00:00Z")
+        done = ("ack", SERVER_NOW)
+        for host in MX_HOSTS:
+            with self.subTest(host=host):
+                b = 2200 if host == "home" else 2250
+                s = self.mx_server(host)
+                s.add(*[self.mx_rec(host, b + i) for i in range(1, 36)])
+                self.mx_open(host)
+                for r, focus in ((b + 1, "Acknowledge"), (b + 20, "Check Again")):
+                    with self.subTest(host=host, focus=focus):
+                        a, u, listed, cr, ca, gone, keep, k = (r + i for i in range(0, 16, 2))
+                        everyone, closed = (a, u, listed, cr, ca, gone, keep, k), ("closed", "Cancelled", False)
+                        lines = {cr: closed, ca: closed}
+                        want = lambda views, x: (x, views[x], "unknown" if x == u else None, done if x == k else lines.get(x))
+                        # CA before CR: the list read after a refusal would read ca's record itself.
+                        self.unknown_first(u)
+                        self.unknown_first(ca)
+                        self.mx_set(host, ca, **cancelled(ca))
+                        self.mx_press("Check Again", mark(ca))
+                        self.idle()
+                        self.mx_set(host, cr, **cancelled(cr))
+                        self.mx_press("Acknowledge", mark(cr))
+                        self.idle()
+                        for x in (listed, gone, keep):
+                            self.mx_set(host, x, **cancelled(x))
+                        self.minute()
+                        now = {x: self.mx_view(x) for x in everyone}
+                        self.expect([want(now, x)[:4] if x != k else (k, now[k]) for x in everyone],
+                                    "full, and each cancel reason in its row and in its Cancelled line")
+                        # L1: the minute's list, held, answered as the server is now.
+                        for x in (a, u, listed, cr, ca):
+                            self.mx_set(host, x, "stub")
+                        self.mx_set(host, gone, "gone")
+                        self.hold("list")
+                        self.minute()
+                        l1 = self.take("list")
+                        at_l1, count = {x: self.mx_view(x) for x in everyone}, self.pending_now()
+                        # L2: k's Acknowledge; its 201 starts L2, held, answered when let go - a full again by then.
+                        self.mx_set(host, a, "full")
+                        self.hold("list", later=True)
+                        self.mx_press("Acknowledge", mark(k))
+                        l2 = self.take("list")
+                        if focus == "Acknowledge":
+                            self.focus_on(mark(a))
+                        else:
+                            self.line_locator(mark(u)).get_by_role("button", name="Check Again", exact=True).focus()
+                            self.page.evaluate("(root) => { window.synFocusOut = 0; document.querySelector(root)"
+                                               ".addEventListener('focusout', () => { window.synFocusOut += 1; }); }", self.root)
+                        self.watch()
+                        self.let_go(l1)
+                        self.expect([want(at_l1, x) for x in everyone], "L1, answered while L2 waits, is drawn at once")
+                        self.assertEqual(f"Pending ACK {count}", self.badge())
+                        self.clean(self.seen_since(), "from L1 on, while L2 waits", content=[a, u, listed, cr, ca, gone],
+                                   reasons=[listed, cr, ca, gone], acks=[a, u], rows=[gone])
+                        if focus == "Acknowledge":
+                            self.landed_on(a, "Source Changed")
+                        else:
+                            self.assertEqual(0, self.page.evaluate("() => window.synFocusOut"), "u's line has not changed")
+                            focused = self.page.evaluate(FOCUS, self.root)
+                            self.assertEqual(("BUTTON", "Check Again"), (focused["tag"], focused["text"]))
+                            self.assertIn(mark(u), focused["item"] or "")
+                        at_l2 = {x: self.mx_view(x) for x in everyone}
+                        self.let_go(l2)
+                        self.expect([want(at_l2, x) for x in everyone], "L2: a full again with its body and Acknowledge")
+                        self.clean(self.seen_since(), "L2", content=[u, listed, cr, ca, gone], reasons=[listed, cr, ca, gone],
+                                   acks=[u], rows=[gone])
+
+    # ── PROJ-B F02 step 4: the counterexample for a fix that only drops the request-number check ──
+    def test_mx14_a_late_list_does_not_bring_back_what_a_later_list_left_out(self):
+        """PROJ-B F02 steps 3 and 4. The pending view shows A and B; C comes after that. The minute's list L1 is held with A, B
+        and C (Pending ACK 3); C then leaves, and B's Acknowledge starts L2, held: a complete list that covers C's key without
+        it (A only). L2 first: L1 then brings no row, message, body or Acknowledge of C, nothing of B's full row back over its
+        minimal result, and the badge, the count line and More stay L2's - not for a moment. Again with an empty L2 (A left
+        too: Pending ACK 0 and the empty sentence), and with an L2 whose first page ends before C (pages of two: G and F and a
+        next cursor): L1, which held K and C, adds no C and brings K's row back to nothing, and More then gives C from the
+        chain L2 set. The pair, L1 first: C shows at once with its body and Acknowledge and the badge is L1's while L2
+        waits; L2 then takes C out."""
+        self.page.clock.pause_at("2030-05-05T06:00:00Z")
+        done = ("ack", SERVER_NOW)
+        for host in MX_HOSTS:
+            with self.subTest(host=host):
+                b = 2300 if host == "home" else 2350
+                s = self.mx_server(host)
+                self.mx_open(host, show_all=False)
+                for r, (order, later) in enumerate((("L2 first", "covers C"), ("L2 first", "empty"), ("L2 first", "ends before C"),
+                                                     ("L1 first", "covers C"))):
+                    with self.subTest(host=host, order=order, later=later):
+                        n = b + 10 * r
+                        for record in s.records.values():
+                            record.update(MX_CASES[host]["gone"])
+                        s.page_size = 2 if later == "ends before C" else 50
+                        s.cursors.clear()
+                        if later == "ends before C":
+                            c, k, f, g = n + 1, n + 3, n + 5, n + 7
+                            s.add(self.mx_rec(host, k))
+                            self.press("Refresh")
+                            self.idle()
+                            self.expect([(k, self.mx_view(k))], "K alone")
+                            s.add(self.mx_rec(host, c))
+                            self.hold("list")
+                            self.minute()
+                            l1 = self.take("list")
+                            self.assertEqual(2, self.pending_now())
+                            s.add(self.mx_rec(host, f), self.mx_rec(host, g))
+                            self.hold("list", later=True)
+                            self.mx_press("Acknowledge", mark(k))
+                            l2 = self.take("list")
+                            self.let_go(l2)
+                            after = [(g, self.mx_view(g)), (f, self.mx_view(f)), (k, None, None, done), (c, None)]
+                            self.expect(after, "L2: G and F, K's minimal result, More")
+                            seen = (self.badge(), self.status(), self.more_buttons())
+                            self.assertEqual(("Pending ACK 3", [["More", False, None, None]]), (seen[0], seen[2]))
+                            self.watch()
+                            self.let_go(l1)
+                            self.expect(after, "L1 after L2: no C, and K's row not back")
+                            self.assertEqual(seen, (self.badge(), self.status(), self.more_buttons()))
+                            self.clean(self.seen_since(), "L1 after L2", content=[c, k], rows=[c], acks=[c, k])
+                            self.press("More")
+                            self.idle()
+                            self.expect(after[:3] + [(c, self.mx_view(c))], "More gives C, from the chain L2 set")
+                            continue
+                        a, bb, c = n + 1, n + 3, n + 5
+                        s.add(self.mx_rec(host, a), self.mx_rec(host, bb))
+                        self.press("Refresh")
+                        self.idle()
+                        self.expect([(a, self.mx_view(a)), (bb, self.mx_view(bb))], "A and B")
+                        s.add(self.mx_rec(host, c))
+                        self.hold("list")
+                        self.minute()
+                        l1 = self.take("list")
+                        at_l1 = {x: self.mx_view(x) for x in (a, bb, c)}
+                        self.assertEqual(3, self.pending_now())
+                        self.mx_set(host, c, "gone")
+                        if later == "empty":
+                            self.mx_set(host, a, "gone")
+                        self.hold("list", later=True)
+                        self.mx_press("Acknowledge", mark(bb))
+                        l2 = self.take("list")
+                        after = [(a, None if later == "empty" else self.mx_view(a)), (bb, None, None, done), (c, None)]
+                        if order == "L1 first":
+                            self.let_go(l1)
+                            self.expect([(a, at_l1[a]), (bb, at_l1[bb], None, done), (c, at_l1[c])],
+                                        "L1 first: C at once, with its body and Acknowledge, while L2 waits")
+                            self.assertEqual("Pending ACK 3", self.badge())
+                            self.let_go(l2)
+                            self.expect(after, "L2 then takes C out")
+                            self.assertEqual("Pending ACK 1", self.badge())
+                            continue
+                        self.let_go(l2)
+                        self.expect(after, "L2")
+                        seen = (self.badge(), self.status(), self.more_buttons())
+                        self.assertEqual(f"Pending ACK {0 if later == 'empty' else 1}", seen[0])
+                        self.watch()
+                        self.let_go(l1)
+                        self.expect(after, "L1 after L2 changes nothing")
+                        self.assertEqual(seen, (self.badge(), self.status(), self.more_buttons()),
+                                         "the badge, the count line and More stay L2's")
+                        out = [c] + ([a] if later == "empty" else [])
+                        self.clean(self.seen_since(), "L1 after L2", content=out + [bb], rows=out, acks=out)
+
+    # ── PROJ-B F02 steps 3 and 6: how the later list ends, in both orders; old and current failures ──
+    def two_lists(self, host, n, first=None, second=None):
+        """x, j and k (n + 1, n + 3, n + 5) full on screen after Refresh, every other record gone, at the half minute. L1: j's
+        Acknowledge starts it, held (first: how it answers, as hold() takes it; by default as the server is when it is sent),
+        x a stub in it. One second later L2: k's Acknowledge starts it, held (second: by default answered as the server is
+        when it is let go). Returns x, j, k, L1, L2, the views L1 gives and its pending count."""
+        s = self.server
+        x, j, k = n + 1, n + 3, n + 5
+        for record in s.records.values():
+            record.update(MX_CASES[host]["gone"])
+        s.add(*[self.mx_rec(host, m) for m in (x, j, k)])
+        self.press("Refresh")
+        self.idle()
+        self.half()
+        self.expect([(m, self.mx_view(m)) for m in (x, j, k)], "x, j and k full")
+        self.mx_set(host, x, "stub")
+        self.hold("list", **(first or {}))
+        self.mx_press("Acknowledge", mark(j))
+        l1 = self.take("list")
+        at_l1, count = {m: self.mx_view(m) for m in (x, j, k)}, self.pending_now()
+        self.advance(1000)
+        self.hold("list", **(second or {"later": True}))
+        self.mx_press("Acknowledge", mark(k))
+        l2 = self.take("list")
+        return x, j, k, l1, l2, at_l1, count
+
+    def after_l2(self, end, x, j, k, at_l2, what):
+        """The region once L2 has ended as end (full, stub, empty, failure, timeout)."""
+        done = ("ack", SERVER_NOW)
+        if end in ("full", "stub"):
+            self.expect([(x, at_l2[x]), (j, at_l2[j], None, done), (k, at_l2[k], None, done)], f"{what}: as L2 gives it")
+            self.assertEqual("Pending ACK 1", self.badge())
+            return
+        self.expect([(x, None), (j, None, None, done), (k, None, None, done)], f"{what}: no projection")
+        if end == "empty":
+            self.assertEqual("Pending ACK 0", self.badge())
+        else:
+            self.assert_no_count(f"{what}: {end}")
+        if end == "failure":
+            self.assertIn("SYN failure L2", self.status())
+
+    def test_mx15_the_later_list_ends_in_any_way_and_in_either_order(self):
+        """PROJ-B F02 steps 3 and 6, and 401 and an account change apart. Two lists wait at once: L1 (j's Acknowledge started
+        it; x a stub in it, not the full row on screen) and L2 (k's Acknowledge, a second later). L2 ends as a full list (x
+        full again), a stub list, an empty list, a failure or no answer in 60 s, and the answers come in both orders.
+        L1 first: drawn at once while L2 waits, and the minute's read does not start while L2 is out (L1's end did not end
+        L2's); then L2 as it ends - a newer full gives the body and Acknowledge back, a failure or no answer is the current
+        failure (no row, no number, the server's words). L2 first: L1 then changes nothing on screen, not for a moment; after
+        L2's failure L1's answer brings nothing back. (L2 cannot stop for no answer before L1 does: both stop at 60 s and L1
+        was sent first.) Old failures: L1 fails - 500, a malformed answer, no answer in 60 s - after L2 was drawn; the screen
+        stays L2's. A current failure: L1 fails - 500, no answer - while L2 waits: no projection and no number, and L2's
+        answer then brings nothing back. Last, L2 answered for another account locks the region and L2's 401 ends it; L1
+        then draws nothing and nothing more is read."""
+        self.page.clock.pause_at("2030-05-05T06:00:00Z")
+        done = ("ack", SERVER_NOW)
+        for host in MX_HOSTS:
+            with self.subTest(host=host):
+                n = 2400 if host == "home" else 2700
+                s = self.mx_server(host)
+                self.mx_open(host)
+                for end in ("full", "stub", "empty", "failure", "timeout"):
+                    for order in (("L1 first",) if end == "timeout" else ("L1 first", "L2 first")):
+                        with self.subTest(host=host, end=end, order=order):
+                            n += 10
+                            second = {"status": 500, "body": {"message": "SYN failure L2"}} if end == "failure" else None
+                            x, j, k, l1, l2, at_l1, count = self.two_lists(host, n, second=second)
+                            if end == "full":
+                                self.mx_set(host, x, "full")
+                            elif end == "empty":
+                                for m in (x, j, k):
+                                    self.mx_set(host, m, "gone")
+                            at_l2 = {m: self.mx_view(m) for m in (x, j, k)}
+                            if order == "L1 first":
+                                self.watch()
+                                self.let_go(l1)
+                                self.expect([(x, at_l1[x]), (j, at_l1[j], None, done), (k, at_l1[k], None, done)],
+                                            "L1, drawn at once while L2 waits")
+                                self.assertEqual(f"Pending ACK {count}", self.badge())
+                                self.clean(self.seen_since(), "L1", content=[x], acks=[x])
+                                lists = len(self.requests("list"))
+                                self.advance(29000)
+                                self.assertEqual(lists, len(self.requests("list")), "no periodic read while L2 is out")
+                                if end == "timeout":
+                                    self.advance(31000)
+                                    self.release_late(l2)
+                                    self.assertIsNotNone(l2["route"].request.failure, "the page stopped L2")
+                                else:
+                                    self.let_go(l2)
+                                self.after_l2(end, x, j, k, at_l2, "L2 after L1")
+                            else:
+                                self.let_go(l2)
+                                self.after_l2(end, x, j, k, at_l2, "L2 first")
+                                seen = (self.badge(), self.status(), self.view()["rows"])
+                                self.watch()
+                                self.let_go(l1)
+                                self.after_l2(end, x, j, k, at_l2, "L1 after L2")
+                                self.assertEqual(seen, (self.badge(), self.status(), self.view()["rows"]))
+                                self.assertEqual([], self.seen_since(), "L1 after L2 changed nothing, not for a moment")
+                for kind in ("500", "malformed", "timeout"):
+                    with self.subTest(host=host, old_failure=kind):
+                        n += 10
+                        first = {"500": {"status": 500, "body": {"message": "SYN failure L1"}},
+                                 "malformed": {"patch": lambda p: p.update(pending=-1)}, "timeout": {}}[kind]
+                        x, j, k, l1, l2, at_l1, count = self.two_lists(host, n, first=first)
+                        at_l2 = {m: self.mx_view(m) for m in (x, j, k)}
+                        self.let_go(l2)
+                        self.after_l2("stub", x, j, k, at_l2, "L2")
+                        seen = (self.badge(), self.status(), self.view()["rows"])
+                        self.watch()
+                        if kind == "timeout":
+                            self.advance(59000)
+                            self.release_late(l1)
+                            self.assertIsNotNone(l1["route"].request.failure, "the page stopped L1")
+                        else:
+                            self.let_go(l1)
+                        self.after_l2("stub", x, j, k, at_l2, f"L1's old {kind}")
+                        self.assertEqual(seen, (self.badge(), self.status(), self.view()["rows"]), "the screen stays L2's")
+                        self.assertEqual([], self.seen_since(), "the old failure changed nothing, not for a moment")
+                for kind in ("500", "timeout"):
+                    with self.subTest(host=host, current_failure=kind):
+                        n += 10
+                        first = {"status": 500, "body": {"message": "SYN failure L1"}} if kind == "500" else {}
+                        x, j, k, l1, l2, at_l1, count = self.two_lists(host, n, first=first)
+                        self.watch()
+                        if kind == "timeout":
+                            self.advance(59000)
+                            self.release_late(l1)
+                            self.assertIsNotNone(l1["route"].request.failure, "the page stopped L1")
+                        else:
+                            self.let_go(l1)
+                        failed = [(x, None), (j, None, None, done), (k, None, None, done)]
+                        self.expect(failed, f"L1's {kind} while L2 waits: the current failure")
+                        self.assert_no_count(f"L1's {kind}")
+                        if kind == "500":
+                            self.assertIn("SYN failure L1", self.status())
+                        self.let_go(l2)
+                        self.expect(failed, "L2's answer after the failure brings nothing back")
+                        self.assert_no_count("L2 after the failure")
+                        self.clean(self.seen_since(), "the current failure", content=[x, j, k], rows=[x])
+                with self.subTest(host=host, l2="another account"):
+                    n += 10
+                    x, j, k, l1, l2, at_l1, count = self.two_lists(host, n, second={"patch": lambda p: p.update(owner=OTHER_OWNER)})
+                    self.let_go(l2)
+                    self.assertEqual(([], []), (self.view()["rows"], self.view()["lines"]))
+                    self.assert_no_count("locked")
+                    reads = len(self.log)
+                    self.release_late(l1)
+                    self.advance(60000)
+                    self.assertEqual(([], []), (self.view()["rows"], self.view()["lines"]))
+                    self.assertEqual(reads, len(self.log), "nothing read after the lock")
+                s = self.mx_server(host)
+                self.mx_open(host)
+                with self.subTest(host=host, l2="401"):
+                    n += 10
+                    x, j, k, l1, l2, at_l1, count = self.two_lists(
+                        host, n, second={"status": 401, "body": {"statusCode": 401, "message": "SYN expired"}})
+                    reads = len(self.log)
+                    self.release_late(l2)
+                    if host == "home":
+                        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+                    else:
+                        self.wait_until(lambda: self.page.evaluate("() => window.synLogouts") == 1, "the logout option")
+                        self.assertFalse(self.view()["shown"])
+                    self.release_late(l1)
+                    if host == "panel":
+                        self.advance(60000)
+                        self.assertFalse(self.view()["shown"])
+                    self.assertEqual(reads, len(self.log), "nothing read or sent after the end")
+
+    # ── PROJ-B F02 step 5: More follows the accepted chain ──
+    def test_mx16_more_follows_the_accepted_chain(self):
+        """PROJ-B F02 step 5. The all view in pages of two. A More is held; r6 leaves and r5's Acknowledge starts a new first
+        page with other bounds (r5 and r4 and a next cursor), held too.
+        - The new first page first: the More of the chain it replaced is not drawn - r3 does not show, the count line stays -
+          and the next More sends the new chain's cursor and draws that chain's rows.
+        - The same with the new first page's cursor the same string as the old chain's: still not drawn.
+        - The pair, the More first: while the new first page waits, the More of the chain still valid is drawn at once; the
+          new first page then sets the list again, and the next More follows it.
+        - More pressed twice while one is out sends one request, and each row is drawn once."""
+        self.page.clock.pause_at("2030-05-05T06:00:00Z")
+        done = ("ack", SERVER_NOW)
+        for host in MX_HOSTS:
+            with self.subTest(host=host):
+                b = 2500 if host == "home" else 2550
+                s = self.mx_server(host)
+                self.mx_open(host)
+                for r, case in enumerate(("first page first", "the same cursor", "More first", "More twice")):
+                    with self.subTest(host=host, case=case):
+                        n = b + 10 * r
+                        r1, r2, r3, r4, r5, r6 = (n + i for i in range(1, 7))
+                        for record in s.records.values():
+                            record.update(MX_CASES[host]["gone"])
+                        s.add(*[self.mx_rec(host, m) for m in (r1, r2, r3, r4, r5, r6)])
+                        s.page_size = 2
+                        s.cursors.clear()
+                        self.press("Refresh")
+                        self.idle()
+                        chain = {m: self.mx_view(m) for m in (r6, r5)}
+                        self.expect([(r6, chain[r6]), (r5, chain[r5]), (r4, None)], "the first page")
+                        old, sent = list(s.cursors)[-1], len(self.log)
+                        self.hold("list")
+                        self.press("More")
+                        if case == "More twice":
+                            self.press("More")
+                        more = self.take("list")
+                        self.assertEqual([old], more["query"].get("cursor"))
+                        page = {m: self.mx_view(m) for m in (r4, r3)}
+                        if case == "More twice":
+                            self.page.wait_for_timeout(200)
+                            self.assertEqual(["list"], [q["kind"] for q in self.log[sent:]], "one More")
+                            self.let_go(more)
+                            self.expect([(r6, chain[r6]), (r5, chain[r5]), (r4, page[r4]), (r3, page[r3])], "each row once")
+                            continue
+                        self.mx_set(host, r6, "gone")
+                        self.hold("list", **({"patch": lambda p, old=old: p.update(nextCursor=old)} if case == "the same cursor" else {}))
+                        self.mx_press("Acknowledge", mark(r5))
+                        first = self.take("list")
+                        new = {m: self.mx_view(m) for m in (r5, r4)}
+                        cursor = old if case == "the same cursor" else list(s.cursors)[-1]
+                        after = [(r6, None), (r5, new[r5], None, done), (r4, new[r4]), (r3, None)]
+                        if case == "More first":
+                            self.let_go(more)
+                            self.expect([(r6, chain[r6]), (r5, chain[r5], None, done), (r4, page[r4]), (r3, page[r3])],
+                                        "the More of the chain still valid, drawn at once while the new first page waits")
+                            self.let_go(first)
+                            self.expect(after, "the new first page sets the list again")
+                        else:
+                            self.let_go(first)
+                            self.expect(after, "the new first page")
+                            status = self.status()
+                            self.watch()
+                            self.let_go(more)
+                            self.expect(after, "the More of the chain the new first page replaced is not drawn")
+                            self.assertEqual(status, self.status())
+                            self.clean(self.seen_since(), "the replaced chain's More", rows=[r3, r6], content=[r3, r6])
+                        self.press("More")
+                        self.idle()
+                        self.assertEqual([cursor], self.requests("list")[-1]["query"].get("cursor"), "the accepted chain's cursor")
+                        self.expect([(r5, self.mx_view(r5), None, done), (r4, self.mx_view(r4)), (r3, self.mx_view(r3)),
+                                     (r2, self.mx_view(r2)), (r6, None)], "the next More: the accepted chain's next page")
+
+    # ── PROJ-B F02 step 7: what a late list leaves alone ──
+    def test_mx17_what_a_late_list_leaves_alone(self):
+        """PROJ-B F02 step 7, the preservation pairs. Two lists held at once (the minute's L1, and L2 that an Acknowledge's 201
+        starts): a late list does not undo what came after it and says nothing outside what it covers.
+        - A newer read: x read by #4 after L1 was sent (a stub) stays a stub when L1 (x full) comes, while L1 draws y's stub
+          at once (the pair).
+        - Outside the range: d, opened by its read beyond the first page, stays through L1 and L2 - its row there all the
+          time - while L1 draws a change on its page (the pair).
+        - Pending: a terminal record opened by its read stays through the pending lists L1 and L2.
+        - Refresh: L1 drawn - it sent the read of u's record (u's attempt unknown), held - and L2 held. Refresh's first
+          paint has no projection; L2 then draws nothing, and the read (u cancelled and full) ends u's attempt as Cancelled
+          without the reason (the same attempt's terminal fact); the new list gives the reason in the row and the line.
+        - The filter change with L1 and L2 held: no projection at the first paint, neither draws, the new list does.
+        - The reading panel's session A -> B -> A with L1 and L2 held: they draw nothing and nothing more is read. (Clinician
+          Home: an account change closes that page, rd08 S-04, S-07.)"""
+        self.page.clock.pause_at("2030-05-05T06:00:00Z")
+        done, closed = ("ack", SERVER_NOW), ("closed", "Cancelled", False)
+        for host in MX_HOSTS:
+            with self.subTest(host=host):
+                b = 2600 if host == "home" else 2650
+
+                def held_lists(k):
+                    """L1 (the minute's, answered as the server is when it is sent) and L2 (k's Acknowledge; answered when let
+                    go), both held."""
+                    self.hold("list")
+                    self.minute()
+                    l1 = self.take("list")
+                    self.hold("list", later=True)
+                    self.mx_press("Acknowledge", mark(k))
+                    return l1, self.take("list")
+                with self.subTest(host=host, case="a newer read"):
+                    s = self.mx_server(host)
+                    x, p, y, k = b + 1, b + 2, b + 3, b + 5
+                    s.add(self.mx_rec(host, x), self.mx_rec(host, p, state="superseded", replacedBy=rid(x)), self.mx_rec(host, y),
+                          self.mx_rec(host, k))
+                    self.mx_open(host)
+                    self.mx_set(host, y, "stub")
+                    self.hold("list")
+                    self.minute()
+                    l1 = self.take("list")
+                    at_l1 = {m: self.mx_view(m) for m in (x, y, k)}
+                    read = self.mx_set(host, x, "stub")
+                    self.mx_press("Open Replacement", mark(p))
+                    self.idle()
+                    self.expect([(x, read)], "the read sent after L1: a stub")
+                    self.hold("list", later=True)
+                    self.mx_press("Acknowledge", mark(k))
+                    l2 = self.take("list")
+                    self.watch()
+                    self.let_go(l1)
+                    self.expect([(x, read), (y, at_l1[y]), (k, at_l1[k], None, done)], "L1: y's stub at once; x stays the read's stub")
+                    self.clean(self.seen_since(), "L1 after the newer read", content=[x, y], acks=[x, y])
+                    self.let_go(l2)
+                    self.expect([(x, self.mx_view(x)), (y, self.mx_view(y)), (k, self.mx_view(k), None, done)], "L2")
+                with self.subTest(host=host, case="outside the range"):
+                    s = self.mx_server(host)
+                    d, e1, e2, e3, q = b + 11, b + 13, b + 15, b + 17, b + 19
+                    s.add(self.mx_rec(host, d), *[self.mx_rec(host, m) for m in (e1, e2, e3)],
+                          self.mx_rec(host, q, state="superseded", replacedBy=rid(d)))
+                    s.page_size = 3
+                    self.mx_open(host)
+                    self.mx_press("Open Replacement", mark(q))
+                    self.idle()
+                    opened = self.mx_view(d)
+                    self.expect([(q, self.mx_view(q)), (e3, self.mx_view(e3)), (e2, self.mx_view(e2)), (d, opened), (e1, None)],
+                                "d opened beyond the first page")
+                    self.mx_set(host, e2, "stub")
+                    self.mx_set(host, d, "stub")
+                    self.watch()
+                    l1, l2 = held_lists(e3)
+                    at_l1 = self.mx_view(e2)
+                    self.let_go(l1)
+                    self.expect([(e2, at_l1), (d, opened)], "L1: e2's stub at once; d stays")
+                    self.let_go(l2)
+                    self.expect([(e2, self.mx_view(e2)), (e3, self.mx_view(e3), None, done), (d, opened)], "L2: d stays")
+                    log = self.seen_since()
+                    self.kept(log, d, "d's row through L1 and L2")
+                    self.clean(log, "the lists that do not cover d", pairs=[(d, "Source Changed")])
+                with self.subTest(host=host, case="pending, terminal"):
+                    s = self.mx_server(host)
+                    t, rf, k = b + 21, b + 23, b + 25
+                    s.add(self.mx_rec(host, t, state="acknowledged"), self.mx_rec(host, rf), self.mx_rec(host, k))
+                    self.mx_open(host, show_all=False)
+                    self.mx_set(host, rf, state="superseded", revision=2, supersededAt=iso(900), replacedBy=rid(t))
+                    self.mx_press("Acknowledge", mark(rf))
+                    self.wait_until(lambda: [line for line in self.view()["lines"] if mark(rf) in line["text"] and line["buttons"]],
+                                    "Open Replacement on the refusal")
+                    self.idle()
+                    self.mx_press("Open Replacement", mark(rf))
+                    self.idle()
+                    terminal = self.mx_view(t)
+                    self.expect([(t, terminal)], "the terminal record opened")
+                    self.watch()
+                    l1, l2 = held_lists(k)
+                    self.assertEqual({"view": ["received"], "state": ["pending"]}, l1["query"])
+                    self.let_go(l1)
+                    self.expect([(t, terminal)], "L1 (pending): the terminal record stays")
+                    self.let_go(l2)
+                    self.expect([(t, terminal)], "L2 (pending): the terminal record stays")
+                    self.kept(self.seen_since(), t, "the terminal record's row through L1 and L2")
+                with self.subTest(host=host, case="Refresh"):
+                    s = self.mx_server(host)
+                    x, u, k = b + 31, b + 33, b + 35
+                    s.add(*[self.mx_rec(host, m) for m in (x, u, k)])
+                    self.mx_open(host)
+                    self.unknown_first(u)
+                    l1, l2 = held_lists(k)
+                    at_l1 = self.mx_view(u)
+                    self.mx_set(host, u, **cancelled(u))
+                    self.mx_set(host, x, "stub")
+                    self.hold("read")
+                    self.let_go(l1)
+                    read = self.take("read")
+                    self.assertEqual(f"/api/critical-results/{rid(u)}", read["path"])
+                    self.expect([(u, at_l1, "unknown")], "L1 drawn; the read of u's record is out")
+                    self.watch()
+                    self.hold("list", later=True)
+                    self.press("Refresh")
+                    l3 = self.take("list")
+                    self.expect([(x, None), (u, None, "unknown"), (k, None)], "Refresh: no projection at the first paint")
+                    self.let_go(l2)
+                    self.expect([(x, None), (u, None, "unknown"), (k, None)], "L2, sent before Refresh, draws nothing")
+                    self.let_go(read)
+                    self.expect([(x, None), (u, None, None, closed), (k, None)],
+                                "the read sent before Refresh ends u's attempt as Cancelled, without the reason")
+                    self.clean(self.seen_since(), "after Refresh", content=[x, u, k], reasons=[u], rows=[x, u, k])
+                    self.let_go(l3)
+                    self.expect([(x, self.mx_view(x)), (u, self.mx_view(u), None, closed), (k, self.mx_view(k))],
+                                "the new list: u's reason in its row and its line")
+                with self.subTest(host=host, case="the filter change"):
+                    s = self.mx_server(host)
+                    x, k = b + 41, b + 43
+                    s.add(self.mx_rec(host, x), self.mx_rec(host, k))
+                    self.mx_open(host)
+                    self.mx_set(host, x, "stub")
+                    l1, l2 = held_lists(k)
+                    self.watch()
+                    self.hold("list", later=True)
+                    self.press("Show All")
+                    l3 = self.take("list")
+                    self.assertEqual({"view": ["received"], "state": ["pending"]}, l3["query"])
+                    self.expect([(x, None), (k, None, None, done)], "the filter change: no projection at the first paint")
+                    self.let_go(l1)
+                    self.let_go(l2)
+                    self.expect([(x, None), (k, None, None, done)], "L1 and L2, sent before it, draw nothing")
+                    self.clean(self.seen_since(), "the filter change", content=[x, k], rows=[x])
+                    self.let_go(l3)
+                    self.expect([(x, self.mx_view(x)), (k, None, None, done)], "the pending list")
+                if host == "panel":
+                    with self.subTest(host=host, case="A -> B -> A"):
+                        s = self.mx_server(host)
+                        x, k = b + 51, b + 53
+                        s.add(self.mx_rec(host, x), self.mx_rec(host, k))
+                        self.mx_open(host)
+                        self.mx_set(host, x, "stub")
+                        l1, l2 = held_lists(k)
+                        self.page.evaluate("s => { window.synSession = s; }", session(CLIN_B, ["radiologist"]))
+                        self.advance(1000)
+                        self.page.evaluate("s => { window.synSession = s; }", session(RAD, ["radiologist"]))
+                        self.advance(1000)
+                        self.assertIn("account-changed", self.page.evaluate("() => window.synOtherEnds"))
+                        reads = len(self.log)
+                        for held in (l1, l2):
+                            self.release_late(held)
+                        self.idle()
+                        seen = self.view()
+                        self.assertEqual(([], []), (seen["rows"], seen["lines"]))
+                        self.assertIsNone(ACKED.search(seen["text"]), "no result from the earlier session")
+                        self.assert_no_count("locked")
+                        self.assertEqual(reads, len(self.log), "nothing read or sent after the switch")
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
