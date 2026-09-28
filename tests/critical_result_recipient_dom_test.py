@@ -2318,6 +2318,121 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.landed("SYN-PT-190", "Source Changed")
         self.assertEqual(posts, len(self.posts()), "nothing was sent while the focus stood on Acknowledge")
 
+    # ── RX20-RX23: a row shows the newest valid recipient projection; ACK results only add to it (S7-U2a-R-001 F01-F04) ──
+    def release_delivered(self, held):
+        """Release a held answer and check that the page received it (the page did not stop the request first)."""
+        self.release(held)
+        request = held["route"].request
+        self.assertIsNone(request.failure, "the held answer reached the page")
+        self.assertIsNotNone(request.response())
+
+    def unknown_then_check_again(self, n, change):
+        """Record n's ACK answered 503 CRITICAL_RESULT_BUSY (nothing applied, so the outcome is unknown); the server then changes
+        the record (change), focus goes to the line's Check Again and it is pressed. Returns the first POST; the resend carried
+        the same bytes."""
+        self.fault("ack", status=503, body={"code": "CRITICAL_RESULT_BUSY", "message": "SYN busy"})
+        self.acknowledge(f"SYN-PT-{n}")
+        self.wait_until(lambda: UNKNOWN_WORD in self.line_text(f"SYN-PT-{n}"), f"the unknown line of {n}")
+        first = self.posts()[-1]
+        change(self.server.records[rid(n)])
+        self.line_locator(f"SYN-PT-{n}").get_by_role("button", name="Check Again", exact=True).focus()
+        posts = len(self.posts())
+        self.check_again(f"SYN-PT-{n}")
+        self.wait_until(lambda: len(self.posts()) > posts, "the Check Again request")
+        self.reads_settled()
+        self.assertEqual(first["raw"], self.posts()[-1]["raw"], "Check Again sends the same bytes")
+        return first
+
+    def test_rx20_the_record_read_after_check_again_sets_the_row_at_once(self):
+        # F01: the record read that ends or keeps an unknown attempt is what the row shows from then on - a terminal state
+        # with no Acknowledge, a stub with no message, version or body - on both hosts; the line keeps its own verdict.
+        for host in ("home", "panel"):
+            with self.subTest(host=host):
+                base = 210 if host == "home" else 220
+                person, head, stub = (CLIN, "C2", {"case": "C3"}) if host == "home" else (RAD, "R2", {"case": "R3", "full": False})
+                s = self.server = RecipientServer([INSTITUTION, person["sub"]])
+                self.servers.append(s)
+                s.add(*[rec(base + k, case=head) for k in range(1, 8)])
+                if host == "home":
+                    self.open_home()
+                else:
+                    self.open_panel(fold_open=True)
+                # Cancelled meanwhile: the resend meets CRITICAL_RESULT_CANCELLED and the record read says cancelled. The row
+                # is Cancelled with the reason at once - not Pending ACK with an Acknowledge beside the refusal - and focus
+                # stands on the line that ended.
+                n = base + 1
+                self.unknown_then_check_again(n, lambda r: r.update(state="cancelled", revision=2, cancelledAt=iso(300),
+                                                                    cancelReason=f"SYN reason SYN-REASON-{n}"))
+                self.wait_until(lambda: "Cancelled" in self.line_text(f"SYN-PT-{n}"), "the cancelled state")
+                row, line = self.row(f"SYN-PT-{n}"), self.line(f"SYN-PT-{n}")
+                self.assertIn("Cancelled", row["text"])
+                self.assertIn(f"SYN-REASON-{n}", row["text"])
+                self.assertIsNone(re.search(r"Pending ACK|Source Changed", row["text"]))
+                self.assertEqual(([], []), (row["buttons"], line["buttons"]))
+                self.landed(f"SYN-PT-{n}", "Cancelled")
+                # Superseded meanwhile: the row is Superseded with Open Replacement, as the line is.
+                n = base + 2
+                self.unknown_then_check_again(n, lambda r: r.update(state="superseded", revision=2, supersededAt=iso(301),
+                                                                    replacedBy=rid(base + 6)))
+                self.wait_until(lambda: "Superseded" in self.line_text(f"SYN-PT-{n}"), "the superseded state")
+                row, line = self.row(f"SYN-PT-{n}"), self.line(f"SYN-PT-{n}")
+                self.assertIn("Superseded", row["text"])
+                self.assertEqual(([["Open Replacement", False]], [["Open Replacement", False]]), (row["buttons"], line["buttons"]))
+                self.landed(f"SYN-PT-{n}", "Superseded")
+                # Still created, now a stub: the resend meets SOURCE_CHANGED and the read gives the stub. The row loses its
+                # message, version and body at once; the line stays unknown with the same request, and nothing is sent by
+                # itself - only the next Check Again sends, the same bytes again.
+                n = base + 3
+                first = self.unknown_then_check_again(n, lambda r: r.update(**stub))
+                row, line = self.row(f"SYN-PT-{n}"), self.line(f"SYN-PT-{n}")
+                self.assertIn(STUB_SENTENCE, row["text"])
+                for absent in (f"SYN-MSG-{n}", f"SYN-BODY-{n}", "Source: v", "Findings"):
+                    self.assertNotIn(absent, row["text"])
+                self.assertEqual([], row["buttons"])
+                for words in (UNKNOWN_WORD, LATER):
+                    self.assertIn(words, line["text"])
+                self.assertEqual([["Check Again", False]], line["buttons"])
+                self.landed(f"SYN-PT-{n}", UNKNOWN_WORD)
+                posts = len(self.posts())
+                self.tick(60000)
+                self.assertEqual(posts, len(self.posts()), "nothing is sent by itself")
+                self.assertIn(STUB_SENTENCE, self.row_text(f"SYN-PT-{n}"))
+                self.check_again(f"SYN-PT-{n}")
+                self.wait_until(lambda: len(self.posts()) > posts, "Check Again")
+                self.reads_settled()
+                self.assertEqual(first["raw"], self.posts()[-1]["raw"])
+                self.assertIn(UNKNOWN_WORD, self.line_text(f"SYN-PT-{n}"))
+                if host == "panel":
+                    # The reading panel's full, current:false (R3): the sentence and the pinned body come, Acknowledge goes.
+                    n = base + 4
+                    self.unknown_then_check_again(n, lambda r: r.update(case="R3"))
+                    row = self.row(f"SYN-PT-{n}")
+                    for present in ("Source Changed", "판독이 바뀌었습니다 — 보낸 당시의 판(v1)입니다", f"SYN-BODY-{n}F"):
+                        self.assertIn(present, row["text"])
+                    self.assertEqual([], row["buttons"])
+                    self.assertIn(UNKNOWN_WORD, self.line_text(f"SYN-PT-{n}"))
+                # The pair: nothing changed meanwhile, the resend is applied - Acknowledged with the server's time, line gone.
+                n = base + 5
+                self.unknown_then_check_again(n, lambda r: None)
+                self.wait_until(lambda: f"Acknowledged {kst(SERVER_NOW)}" in self.row_text(f"SYN-PT-{n}"), "Acknowledged")
+                self.assertEqual(("", []), (self.line_text(f"SYN-PT-{n}"), self.row(f"SYN-PT-{n}")["buttons"]))
+                if host == "home":
+                    # A first request refused as cancelled: until a read sent after the refusal shows the record, its old row
+                    # offers no Acknowledge (the list read again and the record read are held here); then it is Cancelled.
+                    n = base + 7
+                    s.records[rid(n)].update(state="cancelled", revision=2, cancelledAt=iso(302), cancelReason=f"SYN reason SYN-REASON-{n}")
+                    self.fault("list", hold=True)
+                    self.fault("read", hold=True)
+                    self.acknowledge(f"SYN-PT-{n}")
+                    listed, read = self.take("list"), self.take("read")
+                    self.wait_until(lambda: "CRITICAL_RESULT_CANCELLED" in self.line_text(f"SYN-PT-{n}"), "the refusal")
+                    self.assertEqual([], self.row(f"SYN-PT-{n}")["buttons"])
+                    self.release_delivered(listed)
+                    self.release_delivered(read)
+                    self.reads_settled()
+                    self.assertIn("Cancelled", self.row_text(f"SYN-PT-{n}"))
+                    self.assertEqual([], self.row(f"SYN-PT-{n}")["buttons"])
+
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
