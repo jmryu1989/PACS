@@ -137,7 +137,7 @@ jobs:
       - name: S5-UI3 report button rows keep every button in its declared section and the page script
         timeout-minutes: 3
         run: |
-          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/report-actions/shots" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-actions --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/reading-workspace.css --file tests/report_actions_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_actions_dom_test.py
+          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/report-actions/shots" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-actions --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/reading-workspace.css --file tests/report_actions_dom_test.py --file worklist-v0/hpacs-lite/critical-result-send.js --file tests/critical_result_sender_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_actions_dom_test.py
       - name: Existing study arrivals and preserved reading inputs
         timeout-minutes: 3
         run: |
@@ -306,6 +306,14 @@ jobs:
       - name: S5-U4c Image request screens, write envelope, refusals by code, A-B-A and session end DOM
         timeout-minutes: 4
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-request-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/main.html --file tests/clinician_request_dom_test.py --file tests/report_actions_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_request_dom_test.py
+      # S7-U1b: the shipped critical-result-send.js and main.html's S7-U1b block (Mark CVR, Send Critical Result, Sent Critical
+      # Results) against an in-test stand-in of the S7-U1a routes (no stack, network or credentials): Mark CVR only on
+      # sendable:true, nothing delivered before the 201, confirmed rejection vs unknown (§8.1) with Check Again resending the
+      # same bytes, A-B-A and session end, and the sequence-less control file must enable Mark CVR from a stale answer. The run
+      # directory is inside tmp/workspace-ui-ci/, which the Synthetic workspace DOM evidence upload takes whole.
+      - name: S7-U1b Critical result sender Mark CVR, dialog, sent list, unknown outcomes, A-B-A and session end DOM
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/critical-result-sender-dom --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/critical-result-send.js --file tests/critical_result_sender_dom_test.py --file tests/report_actions_dom_test.py --file tests/clinician_question_dom_test.py --file tests/clinician_request_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/critical_result_sender_dom_test.py
       # S5-U6a: the shipped Members console Gateway Status section against in-test GET /studies and retry answers (no stack,
       # network or credentials); a late list or retry answer must not paint, and the guard-less controls must.
       - name: S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM
