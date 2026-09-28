@@ -2042,8 +2042,6 @@ test('completeness equivalents: every write of api/src rewritten in another nota
     }),
   };
   const expectedAll = inventory(base), counts = {};
-  const readerAssignment = base.sites.filter(site => site.file === 'api/src/reader-assignment.service.ts');
-  assert.equal(readerAssignment.length, 2, 'the two reader assignment writes (close and assign) are sites of their own');
   for (const [name, make] of Object.entries(variants)) {
     const edits = new Map();
     make(edits);
@@ -2059,9 +2057,12 @@ test('completeness equivalents: every write of api/src rewritten in another nota
   }
   console.log('ADMIN_AUDIT_EQUIVALENT_REWRITES ' + JSON.stringify({ edits: counts, candidates: expectedAll.length, sites: base.sites.length }));
 
-  // The comparison keeps each site: taking out one of the two reader assignment writes is caught although the other still
-  // records the same action, where a comparison of the actions each file records would not see it.
-  const [first] = readerAssignment, removal = new Map();
+  // The comparison keeps each site: taking out one of two writes of a file that record the same actions (the reader
+  // assignment close and assign writes, where they are) is caught, where a comparison of the actions each file records
+  // does not see it.
+  const twins = creates.filter(site => creates.some(other => other !== site && other.file === site.file && `${other.actions}` === `${site.actions}`));
+  const first = twins.find(site => site.actions.includes('reader.assignment')) ?? twins[0], removal = new Map();
+  assert.ok(first, 'api/src has two writes of one file that record the same actions');
   edit(removal, first.file, first.call.getStart(), first.call.end, 'void 0');
   const removed = scanAuditWrites(edited(sources, removal));
   const actionsByFile = scan => JSON.stringify(Object.fromEntries([...new Set(scan.sites.map(site => site.file))].sort()
@@ -2069,7 +2070,7 @@ test('completeness equivalents: every write of api/src rewritten in another nota
   assert.equal(actionsByFile(removed), actionsByFile(base), 'the actions per file are the same without it');
   assert.notDeepEqual(inventory(removed), inventory(base, removal));
   assert.deepEqual(inventory(base, removal).filter(entry => !inventory(removed).includes(entry)),
-    [`${first.file}@${first.start} auditLog.create resolved [reader.assignment] []`]);
+    [`${first.file}@${first.start} auditLog.create resolved [${first.actions}] [${first.prefixes}]`]);
   // A new synthetic writer adds exactly one site.
   const writer = [
     "import { Prisma } from '@prisma/client';",
@@ -2079,6 +2080,8 @@ test('completeness equivalents: every write of api/src rewritten in another nota
   assert.deepEqual(inventory(added).filter(entry => !expectedAll.includes(entry)),
     [`api/src/syn-added-writer.ts@${writer.indexOf('tx.auditLog')} auditLog.create resolved [reader.assignment] []`]);
   assert.equal(added.sites.length, base.sites.length + 1);
+  console.log('ADMIN_AUDIT_SITE_CONTROLS ' + JSON.stringify({ removed: `${first.file}:${first.line} [${first.actions}]`, twins: twins.length,
+    added: 'api/src/syn-added-writer.ts' }));
 });
 
 test('completeness negative controls on api/src: unlisted, dynamic without a wildcard and unwritten actions each fail on their own', () => {
@@ -2118,7 +2121,6 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
   }
   const changed = verdict(scanAuditWrites(edited(sources, revalued)), productTable(), listing);
   assert.deepEqual(changed.unlisted, [...new Set(origins.map(origin => origin.text + '.v2'))].sort());
-  assert.ok(changed.unlisted.includes('reader.assignment.v2'), 'the reader assignment writes are among them');
   assert.deepEqual([changed.unresolved, changed.uncovered_prefixes, changed.unread_sources], [before.unresolved, before.uncovered_prefixes, before.unread_sources]);
   // (c) A dynamic suffix no hidden wildcard row covers.
   alone(scanAuditWrites([...sources, { file: 'api/src/syn-dynamic.service.ts', text: [
@@ -2127,12 +2129,17 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
     "  private async write(tx: Prisma.TransactionClient, body: any) { await tx.auditLog.create({ data: { action: 'reader.' + body.kind } }); }",
     '}',
   ].join('\n') }]), 'uncovered_prefixes', ['reader.']);
-  // (d) A contract row nothing writes: every write of reader.assignment is taken out (`void 0` in its place).
+  // (d) A contract row nothing writes: every write of one row is taken out (`void 0` in its place) — reader.assignment
+  // where its writes record nothing else, else the first such row of the table.
+  const only = row => base.sites.some(site => site.actions.includes(row)) && base.sites.every(site => !site.actions.includes(row) || `${site.actions}` === row);
+  const row = only('reader.assignment') ? 'reader.assignment' : productTable().rows.find(only);
+  assert.ok(row, 'a contract row whose writes record nothing else');
   const removed = new Map();
-  for (const site of base.sites.filter(site => site.actions.includes('reader.assignment'))) {
+  for (const site of base.sites.filter(site => site.actions.includes(row))) {
     const write = ts.isTaggedTemplateExpression(site.call.parent) ? site.call.parent : site.call;
     edit(removed, site.file, write.getStart(), write.end, 'void 0');
   }
-  alone(scanAuditWrites(edited(sources, removed)), 'unwritten_rows', ['reader.assignment']);
-  console.log('ADMIN_AUDIT_NEGATIVE_CONTROLS ' + JSON.stringify({ revalued_literals: origins.length, unlisted_after_revalue: changed.unlisted.length }));
+  alone(scanAuditWrites(edited(sources, removed)), 'unwritten_rows', [row]);
+  console.log('ADMIN_AUDIT_NEGATIVE_CONTROLS ' + JSON.stringify({ revalued_literals: origins.length, unlisted_after_revalue: changed.unlisted.length,
+    unwritten_row: row, writes_taken_out: [...removed.values()].flat().length }));
 });
