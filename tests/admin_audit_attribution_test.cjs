@@ -3092,11 +3092,14 @@ test('completeness: the files of api/src are listed from the disk; one the progr
   assert.deepEqual(failing(verdict(clean, fixtureTable(), sourceListing([...named, 'api/src/legacy.js'], named))), ['unread_sources']);
 });
 
-// ── the checker's own tests, on test-owned fixtures (tests/fixtures/admin_audit_completeness; Astra S7-U3a-AUDIT-SPEC-R-001-F04) ──
-// Each fixture declares what it expects: `// expect:` on a line names the one candidate the line gives, the violations'
+// ── the checker's own tests, on test-owned fixtures ──
+// Each fixture declares what it expects: `// expect:` on a line names the candidate the line gives, the violations'
 // headers name the one failure class each must cause, and contract.json is their table. Nothing here is read from the
-// checker's output to decide what is expected. tests/fixtures/admin-audit-checker holds the member references and
-// objects of Astra S7-U3a-E-R-001 in the same form: members.ts beside equivalent.ts, violations.txt beside the other.
+// checker's output to decide what is expected. tests/fixtures/admin_audit_completeness is fix4-fix5's (Astra
+// S7-U3a-AUDIT-SPEC-R-001-F04); tests/fixtures/admin-audit-checker is fix6-fix7's: members.ts and supported.ts beside
+// equivalent.ts and sql-positions.ts, violations.txt beside the other, and reclassified.json — every mark of the older
+// fixtures the closed list W1-W6 (Astra S7-U3a-AUDIT-SPEC-C-R-001) changes, replaced where it stands (F03: a positive
+// outside the list becomes an unresolved refusal there and in a case of its own; nothing is deleted or skipped).
 
 const FIXTURES = path.join(__dirname, 'fixtures', 'admin_audit_completeness');
 const MEMBER_FIXTURES = path.join(__dirname, 'fixtures', 'admin-audit-checker');
@@ -3109,55 +3112,72 @@ function fixtureTable(added = {}) {
   const rows = [...table.rows, ...(added.rows ?? [])], wildcards = [...table.wildcards, ...(added.wildcards ?? [])];
   return { rows, wildcards, listed: action => rows.includes(action) || wildcards.some(stem => action.startsWith(stem)) };
 }
-/** A fixture's marks: line -> {status, detail}; a mark alone on its line is the next line's. */
-function marks(text) {
-  const found = new Map();
-  text.split('\n').forEach((line, index) => {
-    const mark = /\/\/ expect: (resolved|proven_non_audit|unresolved)(?: (.*))?$/.exec(line);
+const RECLASSIFIED = JSON.parse(fixtureText('reclassified.json', MEMBER_FIXTURES)).entries;
+/** The ledger's entries for a fixture of tests/fixtures/admin_audit_completeness, by the file's line. */
+const reclassified = name => new Map(RECLASSIFIED.filter(entry => entry.fixture === `admin_audit_completeness/${name}`).map(entry => [entry.line, entry]));
+/**
+ * A fixture's marks: line -> [{status, detail}]; a mark alone on its line is the next line's. `ledger` (the file's line ->
+ * entry) replaces the mark of a line that must carry exactly the entry's `was`; `first` is the file line of the text's
+ * first line (a violation case is a part of its file). Every entry in the text's lines must be used.
+ */
+function marks(text, ledger = new Map(), first = 1) {
+  const found = new Map(), used = new Set(), lines = text.split('\n');
+  lines.forEach((line, index) => {
+    const mark = /\/\/ expect: ((resolved|proven_non_audit|unresolved)(?: (.*))?)$/.exec(line);
     if (!mark) return;
     const at = /^\s*\/\/ expect:/.test(line) ? index + 2 : index + 1;
     assert.ok(!found.has(at), `line ${at} is marked twice`);
-    found.set(at, { status: mark[1], detail: (mark[2] ?? '').trim() });
+    const entry = ledger.get(first + index);
+    if (!entry) return found.set(at, [{ status: mark[2], detail: (mark[3] ?? '').trim() }]);
+    assert.equal(mark[1], entry.was, `the reclassified line ${entry.fixture}:${entry.line} carries another mark`);
+    used.add(entry.line);
+    found.set(at, entry.now.map(item => ({ status: item.status, detail: item.detail })));
   });
+  for (const line of ledger.keys()) if (line >= first && line < first + lines.length) assert.ok(used.has(line), `the reclassified line ${line} carries no mark`);
   return found;
 }
-/** The candidates of `scan` in `source` against its marks: one per marked line, as marked, and none on another line. */
-function assertMarked(scan, source) {
-  const expected = marks(source.text), seen = new Set();
+/** The candidates of `scan` in `source` against its marks: each candidate one of its line's marks, as marked, every mark
+ *  given, and no candidate on a line without one. */
+function assertMarked(scan, source, ledger = new Map(), first = 1) {
+  const expected = marks(source.text, ledger, first), left = new Map([...expected].map(([line, list]) => [line, [...list]]));
   for (const entry of scan.candidates.filter(entry => entry.file === source.file)) {
     const label = `${source.file}:${entry.line} ${entry.kind} ${entry.status}: ${entry.reason}`;
-    const mark = expected.get(entry.line);
-    assert.ok(mark, `a candidate on a line without a mark: ${label}`);
-    assert.ok(!seen.has(entry.line), `a second candidate on a marked line: ${label}`);
-    seen.add(entry.line);
-    assert.equal(entry.status, mark.status, label);
-    if (mark.status === 'resolved') {
-      const site = scan.sites.find(site => site.file === entry.file && site.start === entry.start), words = mark.detail.split(/\s+/).filter(Boolean);
-      assert.deepEqual([site.actions, site.prefixes], [words.filter(word => !word.startsWith('prefix:')).sort(),
-        words.filter(word => word.startsWith('prefix:')).map(word => word.slice('prefix:'.length)).sort()], label);
-    } else {
-      assert.ok(entry.reason.includes(mark.detail), `${label}\n  the mark says: ${mark.detail}`);
-    }
+    const list = left.get(entry.line);
+    assert.ok(expected.has(entry.line), `a candidate on a line without a mark: ${label}`);
+    const site = entry.status === 'resolved' ? scan.sites.find(site => site.file === entry.file && site.start === entry.start) : null;
+    const fits = mark => {
+      if (mark.status !== entry.status) return false;
+      if (mark.status !== 'resolved') return entry.reason.includes(mark.detail);
+      const words = mark.detail.split(/\s+/).filter(Boolean);
+      return JSON.stringify([site.actions, site.prefixes]) === JSON.stringify([words.filter(word => !word.startsWith('prefix:')).sort(),
+        words.filter(word => word.startsWith('prefix:')).map(word => word.slice('prefix:'.length)).sort()]);
+    };
+    const at = list.findIndex(fits);
+    assert.ok(at >= 0, `${label}\n  the line's marks say: ${JSON.stringify(expected.get(entry.line))}`);
+    list.splice(at, 1);
   }
-  assert.deepEqual([...expected.keys()].filter(line => !seen.has(line)), [], `${source.file}: marked lines that gave no candidate`);
-  return { marked: expected.size, resolved: [...expected.values()].filter(mark => mark.status === 'resolved').length,
-    unresolved: [...expected.values()].filter(mark => mark.status === 'unresolved').length };
+  assert.deepEqual([...left].filter(([, list]) => list.length).map(([line]) => line), [], `${source.file}: marked lines that gave no candidate`);
+  const all = [...expected.values()].flat();
+  return { marked: all.length, resolved: all.filter(mark => mark.status === 'resolved').length,
+    unresolved: all.filter(mark => mark.status === 'unresolved').length };
 }
-/** Both violations.txt: one module per `// ==== case: <name> | verdict: <class> [entries] [| table: +row|+wildcard <x>] ====`. */
+/** Both violations.txt: one module per `// ==== case: <name> | verdict: <class> [entries] [| table: +row|+wildcard <x>] ====`,
+ *  with the file line its first line is (for the ledger). */
 function violationCases() {
   const cases = [];
   for (const dir of [FIXTURES, MEMBER_FIXTURES]) {
     let current = null;   // a file's note, before its first header, belongs to no case
-    for (const line of fixtureText('violations.txt', dir).split('\n')) {
+    fixtureText('violations.txt', dir).split('\n').forEach((line, index) => {
       const header = /^\/\/ ==== case: (\S+) \| verdict: (\w+)((?: [^\s|]+)*)((?: \| table: \+(?:row|wildcard) \S+)*) ====$/.exec(line);
       if (header) {
         const table = { rows: [], wildcards: [] };
         for (const [, kind, value] of header[4].matchAll(/\| table: \+(row|wildcard) (\S+)/g)) table[kind === 'row' ? 'rows' : 'wildcards'].push(value);
-        cases.push(current = { name: header[1], failing: header[2], entries: header[3].trim().split(/\s+/).filter(Boolean), table, lines: [] });
+        cases.push(current = { name: header[1], failing: header[2], entries: header[3].trim().split(/\s+/).filter(Boolean), table, lines: [],
+          first: index + 2, ledger: dir === FIXTURES ? reclassified('violations.txt') : new Map(), fixture: path.basename(dir) });
       } else if (current) {
         current.lines.push(line);
       }
-    }
+    });
   }
   return cases.map(entry => ({ ...entry, source: asSource(`case-${entry.name}.ts`, entry.lines.join('\n')) }));
 }
@@ -3189,17 +3209,23 @@ test('checker self-test: the baseline fixture passes the gate alone; its writes,
   console.log('ADMIN_AUDIT_CHECKER_BASELINE ' + JSON.stringify({ marks: counts, sites: scan.sites.length, candidates: scan.candidates.length, flow: scan.flow }));
 });
 
-test('checker self-test: the supported notations (a)-(i), the INSERT positions and the kept objects each add exactly their marked writes', () => {
+test('checker self-test: the forms W1-W6 take, the INSERT positions and the kept objects each add exactly their marked writes; the forms fix7 leaves out are refused where they stand', () => {
   const base = scanAuditWrites(baselineSources()), before = inventory(base);
-  for (const [name, dir] of [['equivalent.ts', FIXTURES], ['sql-positions.ts', FIXTURES], ['members.ts', MEMBER_FIXTURES]]) {
+  for (const [name, dir] of [['equivalent.ts', FIXTURES], ['sql-positions.ts', FIXTURES], ['members.ts', MEMBER_FIXTURES], ['supported.ts', MEMBER_FIXTURES]]) {
+    const ledger = dir === FIXTURES ? reclassified(name) : new Map();
     const source = asSource(name, fixtureText(name, dir)), scan = scanAuditWrites([...baselineSources(), source]);
-    const count = assertMarked(scan, source);
+    const count = assertMarked(scan, source, ledger);
     // Each marked write is one more site, and nothing of the baseline changed.
     assert.equal(scan.sites.filter(site => site.file === source.file).length, count.resolved, name);
     assert.deepEqual(inventory(scan).filter(entry => !entry.startsWith(source.file + '@')), before, name);
-    assert.deepEqual(verdict(scan, fixtureTable()), EMPTY_VERDICT, name);
-    console.log('ADMIN_AUDIT_CHECKER_SUPPORTED ' + JSON.stringify({ fixture: name, ...count,
-      sites: scan.sites.filter(site => site.file === source.file).map(site => `${site.line} ${site.via} [${site.actions}] [${site.prefixes}]`) }));
+    // The gate passes but for the lines reclassified.json moved out of the list: each is an unresolved candidate there.
+    const found = verdict(scan, fixtureTable());
+    assert.deepEqual({ ...found, unresolved: [] }, EMPTY_VERDICT, name);
+    assert.equal(found.unresolved.length, count.unresolved, name);
+    for (const reason of found.unresolved) assert.ok(reason.startsWith(source.file + ':'), reason);
+    console.log('ADMIN_AUDIT_CHECKER_SUPPORTED ' + JSON.stringify({ fixture: name, ...count, reclassified: [...ledger.keys()],
+      sites: scan.sites.filter(site => site.file === source.file).map(site => `${site.line} ${site.via} [${site.actions}] [${site.prefixes}] ${site.rules.join('; ')}`),
+      not_writes: scan.candidates.filter(entry => entry.file === source.file && entry.status === 'proven_non_audit').map(entry => `${entry.line} ${entry.kind}: ${entry.rule}`) }));
   }
 });
 
@@ -3210,7 +3236,7 @@ test('checker self-test: every failure class fails the gate on its own, on exact
   for (const entry of cases) {
     await t.test(entry.name, () => {
       const scan = scanAuditWrites([...baselineSources(), entry.source]), found = verdict(scan, fixtureTable(entry.table));
-      const count = assertMarked(scan, entry.source);
+      const count = assertMarked(scan, entry.source, entry.ledger, entry.first);
       assert.deepEqual(failing(found), [entry.failing], `${entry.name}: ${JSON.stringify(found)}`);
       if (entry.failing === 'unresolved') {
         assert.equal(found.unresolved.length, count.unresolved);
@@ -3222,6 +3248,69 @@ test('checker self-test: every failure class fails the gate on its own, on exact
     });
   }
   console.log('ADMIN_AUDIT_CHECKER_VIOLATIONS ' + JSON.stringify(results));
+});
+
+// Astra S7-U3a-AUDIT-SPEC-C-R-001-F03 (b): the counterexamples of S7-U3a-E-R-001 and S7-U3a-F-R-001 by finding and module
+// variant, and C-RAW-CAST with its two variants (F02). Each is a case of tests/fixtures/admin-audit-checker/violations.txt
+// the test above runs alone next to the baseline; here each must leave its write or raw call itself unresolved (not only
+// a note beside it), with the gate failing on nothing but unresolved. The normal controls F01-F03 name stay resolved in
+// members.ts (a helper called by a constant key) and supported.ts (a string parameter in an audit INSERT, a method called
+// and never replaced), and sql-positions.ts (an unchanged predicate from two callers).
+const COUNTEREXAMPLES = {
+  'S7-U3a-E-R-001-F01': {
+    'an action helper called by an unknown value through a constant key': 'e-f01-a-helper-called-by-a-constant-key-with-a-request-value',
+    'a readonly field written by a constant key': 'e-f01-a-readonly-field-written-by-a-constant-key',
+    'a WITH helper called by a constant key with an unfixed fragment': 'e-f01-a-with-fragment-helper-called-by-a-constant-key',
+    'a WITH helper whose object is read by an unknown key': 'e-f01-an-unknown-constant-key-call-of-a-with-helper',
+  },
+  'S7-U3a-E-R-001-F02': {
+    'the predicate written through a member': 'e-f02-a-fragment-written-through-a-member',
+    'the predicate handed to an outside function': 'e-f02-a-fragment-handed-to-an-outside-function',
+    'the predicate written through a const alias': 'e-f02-a-fragment-written-through-a-const-alias',
+    'the predicate handed on after an alias': 'e-f02-a-fragment-handed-on-after-an-alias',
+    'the predicate written by the local helper it is handed to': 'e-f02-a-fragment-written-by-a-local-helper',
+  },
+  'S7-U3a-E-R-001-F03': {
+    'the receiving object of a readonly field handed to an outside function': 'e-f03-a-readonly-field-object-handed-to-an-outside-function',
+    'the receiving object of a helper handed to an outside function': 'e-f03-a-helper-object-handed-to-an-outside-function',
+  },
+  'S7-U3a-F-R-001-F01': {
+    'a method replaced by a dot next to a readonly field': 'f-f01-a-method-replaced-by-a-dot-next-to-a-readonly-field',
+    'a method replaced by a dot next to a helper': 'f-f01-a-method-replaced-by-a-dot',
+    'a method replaced by a constant key next to a helper': 'f-f01-a-method-replaced-by-a-constant-key',
+    'the predicate handed to a method replaced by a dot': 'f-f01-a-predicate-handed-to-a-method-replaced-by-a-dot',
+    'the predicate handed to a method replaced by a constant key': 'f-f01-a-predicate-handed-to-a-method-replaced-by-a-constant-key',
+  },
+  'S7-U3a-F-R-001-F02': {
+    'a raw call of a fragment only': 'f-f02-a-fragment-only-raw-call',
+    'fixed SQL of no audit write with a fragment': 'f-f02-a-fixed-non-audit-sql-with-a-fragment',
+  },
+  'S7-U3a-AUDIT-SPEC-C-R-001-F02 (C-RAW-CAST)': {
+    'a fragment asserted to string through a const': 'c-raw-cast-through-a-const',
+    'a fragment asserted to string where it is interpolated': 'c-raw-cast-direct',
+    'the asserted fragment in fixed SQL of no audit write': 'c-raw-cast-in-fixed-non-audit-sql',
+  },
+};
+const WRITES_AND_RAW = new Set(['auditLog.create', 'raw INSERT INTO "AuditLog"', 'raw SQL naming AuditLog', 'raw call']);
+
+test('checker self-test: every counterexample F03 enumerates leaves its write or raw call unresolved on its own', () => {
+  const cases = new Map(violationCases().map(entry => [entry.name, entry])), results = {};
+  for (const [finding, variants] of Object.entries(COUNTEREXAMPLES)) {
+    for (const [variant, name] of Object.entries(variants)) {
+      const entry = cases.get(name);
+      assert.ok(entry, `${finding} ${variant}: no case ${name}`);
+      assert.equal(entry.failing, 'unresolved', name);
+      const scan = scanAuditWrites([...baselineSources(), entry.source]), found = verdict(scan, fixtureTable(entry.table));
+      assert.deepEqual(failing(found), ['unresolved'], name);
+      const own = scan.candidates.filter(candidate => candidate.file === entry.source.file);
+      const writes = own.filter(candidate => WRITES_AND_RAW.has(candidate.kind) && candidate.status !== 'proven_non_audit');
+      assert.ok(writes.length > 0 && writes.every(candidate => candidate.status === 'unresolved'), `${name}: ${JSON.stringify(own)}`);
+      assert.equal(scan.sites.filter(site => site.file === entry.source.file).length, 0, `${name}: no write of it resolves`);
+      results[`${finding} / ${variant}`] = { case: name, unresolved: writes.map(candidate => `${candidate.line} ${candidate.kind}: ${candidate.reason}`),
+        beside: own.filter(candidate => !writes.includes(candidate)).map(candidate => `${candidate.line} ${candidate.kind} ${candidate.status}`) };
+    }
+  }
+  console.log('ADMIN_AUDIT_COUNTEREXAMPLES ' + JSON.stringify(results));
 });
 
 // ── the controls over api/src: rewrites by the positions the compiler parsed, and values changed to fail ──
