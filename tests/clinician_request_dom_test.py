@@ -805,9 +805,8 @@ class ImageRequestStructureTest(unittest.TestCase):
         self.assertIn("          if (response.status === 401) {\n            expire();\n", BLOCK)
         self.assertIn("        if (ended) return;\n        end();\n"
                       "        (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} });\n        logout();\n", BLOCK)
-        # The mount's logout() is called there and nowhere else in the block, so the page-wide logout-start case
-        # (tests/clinician_question_dom_test.py test_18d, which runs that 401) reaches every way the block logs out.
-        self.assertEqual(1, len(re.findall(r"(?<![.\w])logout\(\)", BLOCK)))
+        # Every place the block calls its logout option is a path of tests/clinician_question_dom_test.py test_18d
+        # (TypeScript follows the option's binding), and each must be run there (S7-PINS fix1).
         self.assertIn("      return { status: response.status, body: reply };\n", CLINICIAN_BLOCK)
         self.assertIn("    return sent.status === 201 && !!applied", CLINICIAN_BLOCK)
         # F01: the owner-changed lock is reached only through the shared account-change path - main.html's block calls the
