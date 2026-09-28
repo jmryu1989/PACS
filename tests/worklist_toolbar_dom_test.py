@@ -43,8 +43,6 @@ import subprocess
 import unittest
 from pathlib import Path
 from playwright.sync_api import sync_playwright
-from report_actions_dom_test import without_ui3
-from clinician_question_dom_test import without_u4b
 from report_actions_dom_test import BASE_MAIN_SHA256 as UI3_BASE_MAIN_SHA256
 
 ROOT = Path(__file__).resolve().parents[1]

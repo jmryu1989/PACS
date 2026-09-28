@@ -210,7 +210,8 @@ def without_u4c_main(text):
     the script block and the four logout hook lines (C-R-001 F1) out.
 
     Each marker must occur exactly once in the text it is cut from, so a text already stripped (or one where a later
-    edit duplicated a marker) is refused rather than cut at the wrong place."""
+    edit duplicated a marker) is refused rather than cut at the wrong place. Kept for s01, which applies it to the fixed
+    RESULT_COMMIT only: the live main.html carries later units' changes, which are not this unit's to undo."""
     text = text.replace("\r\n", "\n")
     for name, start, end, inclusive in U4C_REGIONS:
         for marker in {start, end}:

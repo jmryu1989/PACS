@@ -167,7 +167,8 @@ def regions(text):
 
 
 def without_ui3(text):
-    """main.html with this unit's three regions replaced by the base bytes (LF). Raises if a region is missing."""
+    """main.html with this unit's three regions replaced by the base bytes (LF). Raises if a region is missing. Applied
+    to the fixed RESULT commit only: the live file carries later units' changes, which are not this unit's to undo."""
     text = lf(text)
     (cs, ce), (ms, me), (fs, fe) = regions(text)
     return text[:cs] + text[ce:ms] + BASE_RBTNS + text[me:fs] + BASE_RFOOT + text[fe:]

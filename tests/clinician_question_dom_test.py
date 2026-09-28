@@ -296,7 +296,7 @@ U4B_REGIONS = [
 # and call, and the three starts that call it inside their existing line. tests/clinician_request_dom_test.py
 # without_u4c_main() is the one that cuts them (each exactly once); here each may only occur at most once - absent once
 # that cut ran, present before it. The two owner-change lines differ only in indentation, so each carries the line
-# break before it.
+# break before it. (S7-PINS: these cuts are applied to the fixed S5-U4b/U4c merge commit only, in that module's s01.)
 SHARED_401_TEXTS = [
     ("hook-401", HOOK_401),
     ("hook-log-out start", HOOK_LOG_OUT[0]),
@@ -309,9 +309,10 @@ SHARED_401_TEXTS = [
 
 def without_u4b(text):
     """main.html (LF) with the S5-U4b regions cut: with without_u4c_main() (which cuts the five shared kinOn401 lines)
-    the bytes S5-UI2's and S5-UI3's pins stand for, since tests/worklist_toolbar_dom_test.py and
-    tests/report_actions_dom_test.py pin main.html outside their own regions. Raises if a region marker is missing or not
-    unique, or a shared line occurs more than once, so a moved or doubled change fails instead of being half undone."""
+    the S5-U4b/U4c base. Kept for tests/clinician_request_dom_test.py s01, which applies both to the fixed merge commit
+    of the S5-U4b/U4c integration only - the live main.html carries later units' changes, which are not these units' to
+    undo. Raises if a region marker is missing or not unique, or a shared line occurs more than once, so a moved or
+    doubled change fails instead of being half undone."""
     text = text.replace("\r\n", "\n")
     for name, shared in SHARED_401_TEXTS:
         if text.count(shared) > 1:
@@ -328,7 +329,7 @@ def without_u4b(text):
 
 # The S5-U4b changes to clinician.js: (name, first bytes, end marker, whether the end marker is part of the region), then
 # the two hook lines each put after its base neighbour line. tests/clinician_request_dom_test.py test_s01 takes them out
-# with S5-U4c's to compare clinician.js with its base pin.
+# with S5-U4c's to compare the merge commit's clinician.js with the base commit's.
 U4B_CLINICIAN_REGIONS = [
     ("header", " * S5-U4b 질문 스레드: REQ-S5-U4b-QUESTION-UI",
      " * 서버 S5-U4a route(studies/:uid/questions·questions/:id·entries·close)만 쓰고, 이 화면은 사용자가 Questions를 열 때만 읽는다.\n",
