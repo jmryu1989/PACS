@@ -1918,6 +1918,8 @@ class ClinicianPolicySpec(unittest.TestCase):
             "auth.guard.ts": "req.clinicianOnly = clinicianOnly(req.roles);",
             "viewer.controller.ts": "return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);",
             "report-preview.controller.ts": "if (clinicianOnly(caller.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });",
+            # S7-U4a: the Clinical Context second line (contract S7-U4p section 9.2), the report-preview shape
+            "clinical-context.controller.ts": "if (clinicianOnly(req.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });",
             "pacs.service.ts": "if (clinicianOnly(c.roles)) throw new ForbiddenException('전체 검사 통계를 열람할 수 없습니다');",
         }
         counted = {}
@@ -2172,7 +2174,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             with self.subTest(refused=label), self.assertRaisesRegex(AssertionError, message):
                 read(source)
         # the real controllers: a denied handler that gains a spaced @Public() changes the public set test_05 pins,
-        # spaced route and controller decorators read the same 124 rows, and the unsupported shapes stop the inventory
+        # spaced route and controller decorators read the same 125 rows, and the unsupported shapes stop the inventory
         sources = api_sources()
         pacs = API / "pacs.controller.ts"
         route, key = "  @Get('studies')\n", "GET studies"
@@ -2740,9 +2742,10 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed; S5-U4c: 5 image request rows allowed;
-        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101)
+        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
+        # S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (124, 4, 2, 17, 101), "the real inventory is unchanged: 124 = 4 + 2 + 17 + 101")
+                         (125, 4, 2, 17, 102), "the real inventory is unchanged: 125 = 4 + 2 + 17 + 102")
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
@@ -2991,9 +2994,10 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed; S5-U4c: 5 image request rows allowed;
-        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101)
+        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
+        # S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (124, 4, 2, 17, 101), "the real inventory is unchanged: 124 = 4 + 2 + 17 + 101")
+                         (125, 4, 2, 17, 102), "the real inventory is unchanged: 125 = 4 + 2 + 17 + 102")
         contract = CONTRACT["regex_or_division"]
         self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
                           sorted(UNREAD_PUNCT)),
@@ -3166,9 +3170,10 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed; S5-U4c: 5 image request rows allowed;
-        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101)
+        # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
+        # S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (124, 4, 2, 17, 101), "the real inventory is unchanged: 124 = 4 + 2 + 17 + 101")
+                         (125, 4, 2, 17, 102), "the real inventory is unchanged: 125 = 4 + 2 + 17 + 102")
         contract = CONTRACT["class_heading"]
         # every class keyword of api/src has a heading class_heading reads, and no controller file's class extends
         keywords, extending = 0, set()

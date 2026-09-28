@@ -135,7 +135,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 124, "public": 4, "session": 2, "business": 17, "denied": 101},
+    "counts": {"routes": 125, "public": 4, "session": 2, "business": 17, "denied": 102},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -152,7 +152,8 @@
         "DELETE studies/:uid/draft/force", "POST studies/:uid/hold", "POST studies/:uid/release", "POST studies/:uid/release/force",
         "PUT studies/:uid/report", "POST studies/:uid/report/commit", "GET studies/:uid/report/versions",
         "GET studies/:uid/report/citations", "GET studies/:uid/report/versions/:version/citations",
-        "GET studies/:uid/report/structure", "GET studies/:uid/report-preview", "POST studies/:uid/dictation"
+        "GET studies/:uid/report/structure", "GET studies/:uid/report-preview", "POST studies/:uid/dictation",
+        "GET studies/:uid/clinical-context"
       ],
       "viewer": [
         "POST studies/:uid/viewer-items", "GET studies/:uid/viewer-items/:id/revisions", "POST studies/:uid/viewer-items/:id/revisions",
@@ -213,7 +214,8 @@
       "POST studies/:uid/image-requests": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "external-image or image-transfer request create (clinician role, owning institution, attribution from the token only, per-request receipt and one audit row); a record, never a transfer; declared in allowed_additions"},
       "POST image-requests/:id": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "state change: accept/close/decline by technician or admin only, cancel by the requesting clinician or admin; replay returns the stored receipt; Connect routes stay denied; declared in allowed_additions"},
       "GET admin/audit": {"decision": "denied", "unit": "S5-U5b", "commit": "014010f", "basis": "admin audit and security read attributed by the institution recorded in each row (need admin, restricted study access refused); not a clinician read"},
-      "GET clinician/studies/:uid/timeline": {"decision": "business", "unit": "S5-U3", "commit": "156866c", "basis": "patient timeline: the listed studies with the anchor's server patient key (listStudies scope, one-snapshot report status, list row fields) and the source birth/sex relation only, paged with limit required; no bodies or values; declared in allowed_additions"}
+      "GET clinician/studies/:uid/timeline": {"decision": "business", "unit": "S5-U3", "commit": "156866c", "basis": "patient timeline: the listed studies with the anchor's server patient key (listStudies scope, one-snapshot report status, list row fields) and the source birth/sex relation only, paged with limit required; no bodies or values; declared in allowed_additions"},
+      "GET studies/:uid/clinical-context": {"decision": "denied", "unit": "S7-U4a", "commit": "fa2d162", "basis": "Clinical Context reader panel (contract S7-U4p, D-S7-11 b): signed prior report bodies, exam history, DICOM request tags and Tech Note metadata for radiologist/admin only; no clinician screen, so clinician-only is refused by the guard and a second controller line"}
     }
   },
   "controller_decorators": {
@@ -443,7 +445,7 @@
   "role_composition": {
     "unit": "S5-U1c",
     "rule": "RISK-S5-U1c-MIXED-DOWNGRADE: only clinicianOnly() narrows, and only where listed. A token with any legacy role never meets the clinician gate or a clinician projection; a clinician-only token never passes a denied row. A new narrowing site is a new decision and must be listed here.",
-    "clinician_only_call_sites": {"auth.guard.ts": 1, "pacs.service.ts": 1, "report-preview.controller.ts": 1, "viewer.controller.ts": 1},
+    "clinician_only_call_sites": {"auth.guard.ts": 1, "clinical-context.controller.ts": 1, "pacs.service.ts": 1, "report-preview.controller.ts": 1, "viewer.controller.ts": 1},
     "live_test": "test_04_mixed_and_legacy_roles_keep_their_existing_paths",
     "live_marker": "CLINICIAN_LIVE_COMPOSITION"
   },
