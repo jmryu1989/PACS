@@ -19,8 +19,10 @@
  *    resolved, proven not a write, or unresolved — and one unresolved fails; every action a write can record has a
  *    contract row and every row is written somewhere. The TypeScript compiler api/package-lock.json installs reads the
  *    program of api/src (see the completeness section). The checker's own tests run on test-owned fixtures
- *    (tests/fixtures/admin_audit_completeness): the supported notations, and each failure class failing the gate alone;
- *    api/src rewritten in other notations keeps every write site; unlisted, dynamic and unwritten actions each fail alone.
+ *    (tests/fixtures/admin_audit_completeness, and tests/fixtures/admin-audit-checker for the member references and
+ *    objects of Astra S7-U3a-E-R-001): the supported notations, and each failure class failing the gate alone; api/src
+ *    rewritten in other notations keeps every write site; unlisted, dynamic and unwritten actions each fail alone, and so
+ *    does each write given one more path through a helper called by a constant key or a fragment written or handed on.
  *
  * Module: KIN_ADMIN_AUDIT_MODULE, default api/src/admin-audit.ts loaded through Node type stripping (Node >= 22.18);
  * the compiled /app/dist/admin-audit (kin-api:ci) is the same rule. The completeness cases read api/src and use
@@ -675,18 +677,41 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    (a) blanks, comments, line breaks and trailing commas; parentheses, as, satisfies, ! and <T> around a value;
 //    (b) a member by a dot or by a key that is one string (element access, computed property name): one key reader for the
 //        delegate, its method, `data` and `action`; the last definition of a property wins, and a later spread or computed
-//        key that may set it again leaves it unresolved;
+//        key that may set it again leaves it unresolved. The members a helper is called through and a field or an enum
+//        member is written through are found the same way (Astra S7-U3a-E-R-001-F01): a dot and a key (b)-(d, f) fix to
+//        its name are one reference, and either on a value the checker does not type (any, unknown, an index signature)
+//        may be it; a key that needs (e) or a call ((g)-(i)) is not fixed for a reference, so that which calls reach one
+//        helper never waits on which calls reach another;
 //    (c) string literals and templates, `+` and templates of fixed pieces;
 //    (d) const bindings, through renames, imports, re-exports and namespaces;
-//    (e) a property of a const `as const` literal that no use changes, hands on or reads by an unfixed key, an explicit
-//        string enum member and an initialized readonly field, neither written through any receiver (a type is no proof);
+//    (e) a property of a const `as const` literal, an explicit string enum member and an initialized readonly field, when
+//        no write reaches the member (by any receiver and key) and the object it is read out of keeps to the program
+//        (below); an `as const`, a readonly or a type is no proof;
 //    (f) both sides of ?:, ||, ?? and &&;
 //    (g) a let, var or parameter with every value assigned to it;
 //    (h) a parameter of a private or local undecorated function: the argument of every call the program makes of it,
-//        followed through variables, arguments and callbacks — no call at all, or the function handed on, is unresolved;
+//        by a dot or a fixed key, followed through variables, arguments and callbacks — no call at all, the function
+//        handed on, or (a method) the object it is a method of not kept to the program, is unresolved;
 //    (i) what a preceding `if (... || !['a', ...].includes(x) || ...) throw/return` of an enclosing statement list lets
 //        through to a binding nothing changes.
 //    A fixed start followed by a value the program does not fix is a dynamic suffix; a hidden wildcard row must cover it.
+//  Objects (Astra S7-U3a-E-R-001-F02/F03), one rule: a value (e) is read out of an object — the table, the enum, the
+//    class (a static field), the instance (a field) — a helper method (h) is reached through one, and a WITH fragment
+//    (F03 below) is one. The object keeps to the program when every use of what holds it — the const, enum or class
+//    name; `this` and `super` in the class's code (for an instance, its program bases' and subclasses' too); every value
+//    the checker types as an instance of those classes; the fragment's const or parameter — is tested or compared, or
+//    is read by keys (b)-(d, f) fix, the member then read, or called as a method with a body in the program (a class
+//    or an instance only), or (a fragment only) is interpolated into a Prisma.sql or raw template or passed on the ways
+//    F03 reads it (a const binding, ?:, a parameter of a private or local undecorated function), whose uses keep to the
+//    same rule. The members of a table's nested literals and every member of a fragment (a library's object) are the
+//    object's too. A write through a key to the object or to such a member is the object written (for an enum, a class
+//    or an instance: that member written); any other use hands the object on, to code this check does not read, and
+//    what is read out of it or reached through it is unresolved. Reaching `prototype`, `constructor` or `__proto__` of a
+//    class or an instance, or the prototype of an instance's class through the class, hands it on; a called member must
+//    be a method with a body in the program, or a field whose one value is an arrow function. A decorated or extended
+//    class is handed on, and so is a class an instance of which is; a class handed on is its static members' object,
+//    not its instances'. Code outside the program is not read: as for (h), it is taken to keep TypeScript's private and
+//    readonly.
 //  F03 raw SQL, two forms only (Astra S7-U3a-AUDIT-SPEC-B-R-001 amended F01/F03), read by position under PostgreSQL's
 //    lexical rules (strings, quoted identifiers and their case, comments, parentheses, interpolations):
 //      G1 `INSERT INTO [schema.]"AuditLog" (columns) VALUES (values) [;]`;
@@ -701,7 +726,9 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    WITH body is a value, or a fragment every value of which — through const bindings, both sides of ?: and every call's
 //    argument for a parameter of a private or local undecorated function — is a Prisma.sql text of the one shape
 //    `[alias.]column = ${value}::type` with its interpolation a value: a text with no parenthesis, comma or semicolon
-//    cannot leave its body or change the INSERT. Its type or place alone proves nothing. A missing, doubled or miscounted
+//    cannot leave its body or change the INSERT. Every binding on the way holds an object that must keep to the program
+//    (Objects above): a fragment written through any key, or handed on anywhere but those ways, is no longer the text that
+//    was read. Its type or place alone proves nothing. A missing, doubled or miscounted
 //    column list, an empty value or item, an unclosed token, an interpolation where SQL structure goes, a fragment whose
 //    source is not fixed on every path (a caller outside the program, a value the program does not fix, a cycle), and
 //    every other statement that names AuditLog (WITH before VALUES, several statements, ON CONFLICT, RETURNING, UPDATE,
@@ -940,8 +967,7 @@ function scanAuditWrites(sources = auditSources()) {
     }
     if (ts.isEnumMember(declaration)) {
       if (!declaration.initializer) return [unknown(`${where(use)}: \`${name}\` is a numbered enum member`)];
-      const changed = memberChanged(symbol);
-      return changed ? [unknown(`${where(use)}: \`${name}\` is written at ${changed}`)] : values(declaration.initializer);
+      return unkept(symbol, declaration, use, name) ?? values(declaration.initializer);
     }
     if (ts.isPropertyAssignment(declaration) || ts.isShorthandPropertyAssignment(declaration)) {
       const table = frozen(declaration.parent);
@@ -950,7 +976,7 @@ function scanAuditWrites(sources = auditSources()) {
       if (keys?.length !== 1 || property(declaration.parent, keys[0]).member !== declaration) {
         return [unknown(`${where(use)}: \`${name}\` is set again later in its object`)];
       }
-      const escape = tableEscapes(table);
+      const escape = objectUse({ kind: 'table', declaration: table }).escape;
       if (escape) return [unknown(`${where(use)}: \`${name}\` is a property of \`${table.name.text}\`, which ${escape}`)];
       return ts.isPropertyAssignment(declaration) ? values(declaration.initializer) : named(symbolAt(declaration.name), declaration.name);
     }
@@ -960,10 +986,10 @@ function scanAuditWrites(sources = auditSources()) {
         : [unknown(`${where(declaration)}: \`${name}\` is declared without a value`)];
     } else if (ts.isParameter(declaration) && ts.isFunctionLike(declaration.parent)) {
       found = passed(declaration);
-    } else if (ts.isPropertyDeclaration(declaration) && declaration.initializer
+    } else if (ts.isPropertyDeclaration(declaration) && declaration.initializer && ts.isClassLike(declaration.parent)
       && ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Readonly) {
-      const changed = memberChanged(symbol);
-      if (changed) return [unknown(`${where(use)}: \`${name}\` is written at ${changed}`)];
+      const lost = unkept(symbol, declaration, use, name);
+      if (lost) return lost;
       found = values(declaration.initializer);
     } else {
       return [unknown(`${where(use)}: \`${name}\` is a ${K[declaration.kind]}`)];
@@ -1011,47 +1037,337 @@ function scanAuditWrites(sources = auditSources()) {
       || (ts.isPrefixUnaryExpression(parent) && parent.operator === K.ExclamationToken) || ts.isTypeOfExpression(parent)
       || ts.isVoidExpression(parent) || (ts.isBinaryExpression(parent) && EQUALITIES.has(parent.operatorToken.kind));
   };
-  /** (e) Why the table a const `as const` declaration holds may not keep its literal values, or null: every use must read
-   *  a value out of it through keys the program fixes, and never write it or hand the table or a part of it on. */
-  function tableEscapes(declaration) {
-    for (const reference of references(symbolAt(declaration.name))) {
-      if (ts.isTypeQueryNode(reference.parent)) continue;
-      let node = reference, object = bare(declaration.initializer);
-      for (;;) {
-        const parent = node.parent;
-        if (WRAPPERS.has(parent.kind)) { node = parent; continue; }
-        if (!isAccess(parent) || parent.expression !== node) break;
-        if (object) {
-          const keys = keyValues(parent);
-          if (!keys) return `is read by a key the program does not fix at ${where(parent)}`;
-          const inner = keys.map(key => {
-            const index = /^\d+$/.test(key) ? Number(key) : -1;
-            if (ts.isArrayLiteralExpression(object) && (index < 0 || object.elements.slice(0, index + 1).some(ts.isSpreadElement))) return undefined;
-            const next = ts.isArrayLiteralExpression(object) ? object.elements[index] : property(object, key).node;
-            return next ? bare(next) : null;
-          });
-          if (inner.includes(undefined)) return `is used through \`${keys.join(' | ')}\` at ${where(parent)}`;
-          const nested = inner.filter(next => next && (ts.isObjectLiteralExpression(next) || ts.isArrayLiteralExpression(next)));
-          if (nested.length && keys.length > 1) return `is read into nested objects by several keys at ${where(parent)}`;
-          object = nested[0] ?? null;
+  // ── members, and the objects that hold them (b, e, h; Astra S7-U3a-E-R-001, "Objects" above) ──
+  /** (b-d, f) The texts a key takes: literals, templates and `+` of fixed pieces, both sides of ?:, ||, ?? and &&, const
+   *  bindings (renamed, imported, re-exported, through a namespace); null for anything else. */
+  function constantTexts(expression, seen = new Set()) {
+    const node = bare(expression);
+    const joined = lists => (lists.every(Boolean) ? [...new Set(lists.reduce((sum, list) => sum.flatMap(start => list.map(end => start + end)), ['']))] : null);
+    const either = lists => (lists.every(Boolean) ? [...new Set(lists.flat())] : null);
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
+    if (ts.isTemplateExpression(node)) {
+      return joined([[node.head.text], ...node.templateSpans.flatMap(span => [constantTexts(span.expression, seen), [span.literal.text]])]);
+    }
+    if (ts.isConditionalExpression(node)) return either([constantTexts(node.whenTrue, seen), constantTexts(node.whenFalse, seen)]);
+    if (ts.isBinaryExpression(node)) {
+      const operator = node.operatorToken.kind;
+      if (operator === K.PlusToken) return joined([constantTexts(node.left, seen), constantTexts(node.right, seen)]);
+      if (CHOICES.has(operator)) return either([constantTexts(node.left, seen), constantTexts(node.right, seen)]);
+      return operator === K.CommaToken ? constantTexts(node.right, seen) : null;
+    }
+    const symbol = ts.isIdentifier(node) ? symbolAt(node) : ts.isPropertyAccessExpression(node) ? resolve(checker.getSymbolAtLocation(node.name)) : null;
+    const declarations = symbol?.declarations ?? [], [declaration] = declarations;
+    if (declarations.length !== 1 || !ts.isVariableDeclaration(declaration) || !ts.isIdentifier(declaration.name) || !declaration.initializer
+      || !(ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) || seen.has(declaration)) return null;
+    return constantTexts(declaration.initializer, new Set(seen).add(declaration));
+  }
+  /** (b) The names a member access takes — a dot's, or what (b-d, f) fix its key to — else null. A key that would need (e)
+   *  or a call ((g)-(i)) is not fixed here: which calls reach one helper must not wait on which calls reach another. */
+  function referenceKeys(access) {
+    if (ts.isPropertyAccessExpression(access)) return [access.name.text];
+    const key = bare(access.argumentExpression);
+    return ts.isNumericLiteral(key) ? [String(Number(key.text))] : constantTexts(key);
+  }
+  let byName = null;
+  /** Every member access of the program's sources, by each name its key takes. */
+  function memberIndex() {
+    if (byName) return byName;
+    byName = new Map();
+    const walk = node => {
+      if (isAccess(node)) {
+        for (const key of referenceKeys(node) ?? []) {
+          if (!byName.has(key)) byName.set(key, []);
+          byName.get(key).push(node);
         }
-        node = parent;
       }
-      if (mutated(node)) return `is written at ${where(node.parent)}`;
-      if (object && !inert(node)) return `is handed on at ${where(node.parent)}`;
+      ts.forEachChild(node, walk);
+    };
+    files.forEach(walk);
+    return byName;
+  }
+  /** The name a member is reached by (a private name with its #). */
+  const memberKey = symbol => {
+    const name = symbol.declarations?.[0]?.name;
+    return name && (ts.isIdentifier(name) || ts.isPrivateIdentifier(name) || ts.isStringLiteral(name)) ? name.text
+      : name && ts.isNumericLiteral(name) ? String(Number(name.text)) : symbol.name;
+  };
+  /** The accesses that name `symbol`'s member by a dot or a fixed key: `typed` where the receiver's type has it as that
+   *  member, `untyped` where that type has no member of the name (any, unknown, an index signature) and it may be it. */
+  function memberRefs(symbol) {
+    const name = memberKey(symbol), typed = [], untyped = [];
+    for (const access of memberIndex().get(name) ?? []) {
+      const found = ts.isPropertyAccessExpression(access) ? symbolAt(access.name)
+        : resolve(checker.getPropertyOfType(checker.getNonNullableType(checker.getTypeAtLocation(access.expression)), name));
+      if (!found) untyped.push(access);
+      else if (same(found, symbol)) typed.push(access);
+    }
+    return { typed, untyped };
+  }
+  /** Where a member is written, through any receiver, by a dot or a fixed key; else null. */
+  function memberChanged(symbol) {
+    const { typed, untyped } = memberRefs(symbol);
+    const written = [...typed, ...untyped].find(access => mutated(outer(access)));
+    return written ? where(written) : null;
+  }
+
+  const inProgram = declaration => files.includes(declaration.getSourceFile());
+  const isStatic = node => !!(ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Static);
+  /** The object a class or enum member is read out of or reached through: the enum, the class (static) or its instances. */
+  const holdingObject = declaration => (ts.isEnumMember(declaration) ? { kind: 'enum', declaration: declaration.parent }
+    : ts.isClassLike(declaration.parent) ? { kind: isStatic(declaration) ? 'class' : 'instance', declaration: declaration.parent } : null);
+  const objectName = object => `${{ table: 'the table', enum: 'the enum', class: 'the class', instance: 'an instance of',
+    fragment: 'the SQL fragment of' }[object.kind]} \`${object.declaration.name?.getText() ?? 'an anonymous class'}\``;
+  /** The class a class expression or declaration extends, when the program has it; else null. */
+  const baseOf = declaration => {
+    const heritage = declaration.heritageClauses?.find(clause => clause.token === K.ExtendsKeyword)?.types[0];
+    const expression = heritage && bare(heritage.expression);
+    const found = expression && classOf(ts.isPropertyAccessExpression(expression) ? expression.name : expression);
+    return found && ts.isClassLike(found) && inProgram(found) ? found : null;
+  };
+  let classes = null;
+  const families = new Map();
+  /** A class with its bases and its subclasses in the program: an instance of it may run the code of any of them. */
+  function familyOf(declaration) {
+    if (families.has(declaration)) return families.get(declaration);
+    if (!classes) {
+      classes = [];
+      const walk = node => { if (ts.isClassLike(node)) classes.push(node); ts.forEachChild(node, walk); };
+      files.forEach(walk);
+    }
+    const found = new Set();
+    for (let at = declaration; at && !found.has(at); at = baseOf(at)) found.add(at);
+    const descends = other => { for (let at = baseOf(other), seen = new Set(); at && !seen.has(at); seen.add(at), at = baseOf(at)) if (at === declaration) return true; return false; };
+    for (const other of classes) if (descends(other)) found.add(other);
+    families.set(declaration, found);
+    return found;
+  }
+  let selves = null;
+  /** Every `this` and `super` of the program's sources, with the class it stands for and its side (static or not). */
+  function thisUses() {
+    if (selves) return selves;
+    selves = [];
+    const owner = node => {
+      for (let at = node.parent; at; at = at.parent) {
+        if (ts.isArrowFunction(at)) continue;
+        if (ts.isClassStaticBlockDeclaration(at)) return { declaration: at.parent, static: true };
+        if ((ts.isPropertyDeclaration(at) || ts.isMethodDeclaration(at) || ts.isConstructorDeclaration(at) || ts.isGetAccessorDeclaration(at)
+          || ts.isSetAccessorDeclaration(at)) && ts.isClassLike(at.parent)) return { declaration: at.parent, static: isStatic(at) };
+        if (ts.isFunctionLike(at) || ts.isClassLike(at)) return null;
+      }
+      return null;
+    };
+    const walk = node => {
+      if (node.kind === K.ThisKeyword || node.kind === K.SuperKeyword) selves.push({ node, ...(owner(node) ?? { declaration: null, static: false }) });
+      ts.forEachChild(node, walk);
+    };
+    files.forEach(walk);
+    return selves;
+  }
+  /** An identifier that names (a declaration, a member, a label, an import or export) rather than stands for a value. */
+  const nameOnly = node => !!accessOf(node) || ts.isImportSpecifier(node.parent) || ts.isExportSpecifier(node.parent)
+    || ts.isLabeledStatement(node.parent) || ts.isBreakOrContinueStatement(node.parent)
+    || ('name' in node.parent && node.parent.name === node && !ts.isShorthandPropertyAssignment(node.parent));
+  let typedValues = null;
+  /** The value expressions of the program by each program class they have the instance type of (each of a union's). A
+   *  name or a dot is taken at its declared type, which holds every type narrowing leaves it. */
+  function instancesTyped(declaration) {
+    if (!typedValues) {
+      typedValues = new Map();
+      const declared = symbol => (symbol ? checker.getTypeOfSymbol(symbol) : null);
+      const walk = node => {
+        if (ts.isTypeNode(node)) return;
+        const type = ts.isIdentifier(node) ? (nameOnly(node) ? null : declared(symbolAt(node)))
+          : ts.isPropertyAccessExpression(node) ? declared(resolve(checker.getSymbolAtLocation(node.name)))
+            : ts.isElementAccessExpression(node) || ts.isCallExpression(node) || ts.isNewExpression(node) || ts.isTaggedTemplateExpression(node)
+              || ts.isAwaitExpression(node) ? checker.getTypeAtLocation(node) : null;
+        if (type) {
+          for (const part of type.isUnionOrIntersection() ? type.types : [type]) {
+            const target = part.objectFlags & ts.ObjectFlags.Reference ? part.target : part;
+            if (!(target.objectFlags & ts.ObjectFlags.Class)) continue;
+            for (const found of target.symbol?.declarations ?? []) {
+              if (!ts.isClassLike(found)) continue;
+              if (!typedValues.has(found)) typedValues.set(found, []);
+              typedValues.get(found).push(node);
+            }
+          }
+        }
+        ts.forEachChild(node, walk);
+      };
+      files.forEach(walk);
+    }
+    return typedValues.get(declaration) ?? [];
+  }
+  /** The class a reference stands in the `extends` clause of, else null. */
+  const extendedBy = node => (ts.isExpressionWithTypeArguments(node.parent) && ts.isHeritageClause(node.parent.parent)
+    && node.parent.parent.token === K.ExtendsKeyword && ts.isClassLike(node.parent.parent.parent) ? node.parent.parent.parent : null);
+  const inTypePosition = node => !extendedBy(node) && (ts.isTypeNode(node.parent) || ts.isQualifiedName(node.parent));
+  /** What holds `object`: the uses of its name (a table, an enum, a class, a fragment's const or parameter), `this` and
+   *  `super` in its class's code, and for an instance every value typed as one of its family. */
+  function holdersOf(object) {
+    const { kind, declaration } = object;
+    const named = () => references(symbolAt(declaration.name)).filter(node => !inTypePosition(node)).map(node => accessOf(node) ?? node);
+    if (kind !== 'class' && kind !== 'instance') return named();
+    const members = kind === 'instance' ? familyOf(declaration) : new Set([declaration]);
+    const selves = thisUses().filter(self => self.declaration && members.has(self.declaration) && self.static === (kind === 'class')).map(self => self.node);
+    return kind === 'class' ? [...(declaration.name ? named() : []), ...selves] : [...selves, ...[...members].flatMap(instancesTyped)];
+  }
+  const objects = { table: new Map(), enum: new Map(), class: new Map(), instance: new Map(), fragment: new Map() };
+  const SHARED = new Set(['prototype', 'constructor', '__proto__']);
+  /** What the program does with `object` ({kind, declaration}): `escape`, why it may not keep what is read out of it (null
+   *  when it does), and `writes`, the members of an enum, a class or an instance written through what holds it. */
+  function objectUse(object) {
+    const memo = objects[object.kind];
+    if (memo.has(object.declaration)) return memo.get(object.declaration) ?? { escape: 'is reached again while its uses are checked', writes: [] };
+    memo.set(object.declaration, null);
+    const result = { escape: null, writes: [] };
+    if (object.kind === 'class') {
+      const decorator = ts.canHaveDecorators(object.declaration) ? ts.getDecorators(object.declaration)?.[0] : undefined;
+      const instance = objectUse({ kind: 'instance', declaration: object.declaration }).escape;
+      result.escape = decorator ? `is handed to the decorator at ${where(decorator)}` : instance ? `is reached through an instance, which ${instance}` : null;
+    }
+    if (object.kind === 'instance') {
+      // An instance's members live on it and on its classes' prototypes: a prototype reached through a class name (or its
+      // `this` in static code) is the instance's too. The class handed on otherwise is the class's (its static members):
+      // code outside the program is not read, as for (h).
+      const through = node => { let at = node; while (WRAPPERS.has(at.parent.kind)) at = at.parent; return isAccess(at.parent) && at.parent.expression === at ? at.parent : null; };
+      const reached = [...familyOf(object.declaration)].flatMap(member => holdersOf({ kind: 'class', declaration: member })).map(through)
+        .find(access => access && (referenceKeys(access) ?? ['prototype']).some(key => SHARED.has(key)));
+      if (reached) result.escape = `is reached through \`${snippet(reached)}\` at ${where(reached)}`;
+    }
+    const queue = result.escape ? [] : holdersOf(object), seen = new Set();
+    while (!result.escape && queue.length) {
+      const node = queue.shift();
+      if (!seen.has(node)) { seen.add(node); result.escape = holderUse(object, node, result.writes, queue); }
+    }
+    memo.set(object.declaration, result);
+    return result;
+  }
+  /** Why the use `start` (a node holding `object`) makes may change the object or hand it on, else null. A member write of
+   *  an enum, a class or an instance is recorded in `writes` instead; a fragment's const binding or parameter it flows into
+   *  is queued, its uses held to the same rule. */
+  function holderUse(object, start, writes, queue) {
+    const whole = object.kind === 'table' || object.kind === 'fragment';
+    let node = start, literal = object.kind === 'table' ? bare(object.declaration.initializer) : null, depth = 0;
+    for (;;) {
+      const parent = node.parent;
+      if (WRAPPERS.has(parent.kind)) { node = parent; continue; }
+      if (object.kind === 'fragment' && depth === 0 && ((ts.isConditionalExpression(parent) && parent.condition !== node)
+        || (ts.isBinaryExpression(parent) && (CHOICES.has(parent.operatorToken.kind) || (parent.operatorToken.kind === K.CommaToken && parent.right === node))))) {
+        node = parent;
+        continue;
+      }
+      if (!isAccess(parent) || parent.expression !== node) break;
+      const keys = referenceKeys(parent);
+      if (!keys) return `is read by a key the program does not fix at ${where(parent)}`;
+      const member = outer(parent), use = member.parent;
+      const called = (ts.isCallExpression(use) && use.expression === member) || (ts.isTaggedTemplateExpression(use) && use.tag === member);
+      if (object.kind === 'class' || object.kind === 'instance') {
+        // One member of the object itself, read, written (recorded) or called; its value is another object — but the
+        // prototype and the class every instance shares are the object's own members' home, so reaching them hands it on.
+        if (keys.some(key => SHARED.has(key))) return `is handed on through \`${snippet(member)}\` at ${where(parent)}`;
+        const foreign = foreignThis(object, start, keys, parent, called);
+        if (foreign || !mutated(member)) return foreign;
+        writes.push({ keys, at: where(parent) });
+        return null;
+      }
+      if (mutated(member)) {
+        if (whole || depth > 0) return `is written at ${where(use)}`;
+        writes.push({ keys, at: where(parent) });
+        return null;
+      }
+      if (called) return `is handed on as \`this\` of \`${snippet(member)}\` at ${where(use)}`;
+      if (object.kind === 'table') {
+        // The members that are nested literals are the table's too; the others are values read out of it.
+        const inner = keys.map(key => {
+          const index = /^\d+$/.test(key) ? Number(key) : -1;
+          if (ts.isArrayLiteralExpression(literal) && (index < 0 || literal.elements.slice(0, index + 1).some(ts.isSpreadElement))) return undefined;
+          const next = ts.isArrayLiteralExpression(literal) ? literal.elements[index] : property(literal, key).node;
+          return next ? bare(next) : null;
+        });
+        if (inner.includes(undefined)) return `is used through \`${keys.join(' | ')}\` at ${where(parent)}`;
+        const nested = inner.filter(next => next && (ts.isObjectLiteralExpression(next) || ts.isArrayLiteralExpression(next)));
+        if (nested.length && keys.length > 1) return `is read into nested objects by several keys at ${where(parent)}`;
+        literal = nested[0] ?? null;
+        if (!literal) return null;
+      } else if (object.kind !== 'fragment') {
+        return null;   // an enum member read
+      }
+      node = member;   // a nested literal of a table, any member of a fragment: the object's still
+      depth++;
+    }
+    const parent = node.parent;
+    if (mutated(node)) return `is written at ${where(parent)}`;
+    if (inert(node) || ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent) || ts.isImportClause(parent)) return null;
+    if (depth === 0 && object.kind === 'class' && ts.isNewExpression(parent) && parent.expression === node) return null;
+    if (depth === 0 && start.kind === K.SuperKeyword && ts.isCallExpression(parent) && parent.expression === node) {
+      const self = thisUses().find(entry => entry.node === start);
+      return self?.declaration && baseOf(self.declaration) ? null : `is handed on as \`this\` of the base constructor at ${where(parent)}`;
+    }
+    if (depth === 0 && object.kind === 'fragment') {
+      const flow = fragmentFlow(node, queue);
+      if (flow !== undefined) return flow;
+    }
+    if (object.kind === 'class' && extendedBy(node)) return `is extended at ${where(extendedBy(node))}`;
+    return `is handed on at ${where(parent)}`;
+  }
+  /** Why reaching the members `keys` of a class or an instance through `holder` may run code with it as `this` that the
+   *  check does not read, else null. What a call or an accessor may run is the member the holder's type names and every
+   *  declaration of its name in the family (an override): each must be a method or an accessor with a body in the program
+   *  (its `this` is a holder too) or, called, a field whose one value is an arrow function (which takes no `this`). */
+  function foreignThis(object, holder, keys, access, called) {
+    const type = checker.getNonNullableType(checker.getTypeAtLocation(holder));
+    const family = object.kind === 'instance' ? [...familyOf(object.declaration)] : [object.declaration];
+    const accessor = found => ts.isGetAccessorDeclaration(found) || ts.isSetAccessorDeclaration(found);
+    const own = found => (ts.isMethodDeclaration(found) || accessor(found)) && !!found.body && inProgram(found);
+    const arrow = found => ts.isPropertyDeclaration(found) && !!found.initializer && ts.isArrowFunction(bare(found.initializer))
+      && inProgram(found) && !memberChanged(symbolAt(found.name));
+    for (const key of keys) {
+      const named = [...(checker.getPropertyOfType(type, key)?.declarations ?? []), ...family.flatMap(declaration => declaration.members.filter(member =>
+        member.name && !ts.isComputedPropertyName(member.name) && member.name.text === key && isStatic(member) === (object.kind === 'class')))];
+      const code = called ? named : named.filter(accessor);
+      if ((called && !named.length) || !code.every(found => own(found) || (called && arrow(found)))) {
+        return `is handed on as \`this\` of \`${snippet(access)}\` at ${where(access)}`;
+      }
     }
     return null;
   }
-  /** Where a member named like `symbol` is written through a receiver that is it or that the checker does not type. */
-  function memberChanged(symbol) {
-    for (const node of spelled().names.get(symbol.name) ?? []) {
-      const access = accessOf(node);
-      if (!access) continue;
-      const found = symbolAt(node);
-      if (found && !same(found, symbol)) continue;
-      if (mutated(outer(access))) return where(access);
+  /** A fragment's use the way F03 reads it — interpolated into a Prisma.sql or raw template, the value of a const binding,
+   *  the argument for a parameter of a private or local undecorated function (whose uses are then held to the same rule):
+   *  null; a call that does not keep it: why; any other use: undefined. */
+  function fragmentFlow(node, queue) {
+    const parent = node.parent;
+    if (ts.isTemplateSpan(parent) && parent.expression === node) {
+      const tagged = parent.parent.parent, tag = ts.isTaggedTemplateExpression(tagged) ? bare(tagged.tag) : null;
+      const raw = tag && isAccess(tag) ? referenceKeys(tag) : null;
+      return tag && (prismaMember(tag) === 'sql' || (raw?.length === 1 && RAW.has(raw[0]))) ? null : undefined;
     }
-    return null;
+    if (ts.isVariableDeclaration(parent) && parent.initializer === node && ts.isIdentifier(parent.name)
+      && ts.getCombinedNodeFlags(parent) & ts.NodeFlags.Const) {
+      queue.push(...references(symbolAt(parent.name)).map(reference => accessOf(reference) ?? reference));
+      return null;
+    }
+    if (ts.isCallExpression(parent) && parent.arguments.includes(node)) {
+      const index = parent.arguments.indexOf(node);
+      const owners = parent.arguments.slice(0, index).some(ts.isSpreadElement) ? null : callees(parent);
+      if (!owners) return `is handed to \`${snippet(parent.expression)}\` at ${where(parent)}, which this check does not follow`;
+      for (const owner of owners) {
+        const parameter = owner.parameters[index + shift(owner)];
+        if (!parameter || parameter.dotDotDotToken || !ts.isIdentifier(parameter.name) || open(owner)) {
+          return `is handed to ${describe(owner)} at ${where(parent)}, which this check does not follow`;
+        }
+        queue.push(...references(symbolAt(parameter.name)));
+      }
+      return null;
+    }
+    return undefined;
+  }
+  /** (e) Why an enum member or a readonly field may not keep its value: a write of it through any receiver and key, or its
+   *  object not kept to the program; else null. */
+  function unkept(symbol, declaration, use, name) {
+    const object = holdingObject(declaration), found = objectUse(object);
+    const changed = memberChanged(symbol) ?? found.writes.find(write => write.keys.includes(memberKey(symbol)))?.at;
+    if (changed) return [unknown(`${where(use)}: \`${name}\` is written at ${changed}`)];
+    return found.escape ? [unknown(`${where(use)}: \`${name}\` is a member of ${objectName(object)}, which ${found.escape}`)] : null;
   }
 
   // ── control flow: a guard `if (... || !['a', 'b'].includes(x) || ...) throw/return;` before the use ──
@@ -1110,6 +1426,7 @@ function scanAuditWrites(sources = auditSources()) {
       if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) add(index.names, node.text, node);
       else if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && accessOf(node)) add(index.names, node.text, node);
       if ((ts.isImportSpecifier(node) || ts.isExportSpecifier(node)) && node.propertyName) add(index.renamed, node.propertyName.text, node.name.text);
+      if (ts.isImportClause(node) && node.name) add(index.renamed, 'default', node.name.text);   // a default import names what it likes
       ts.forEachChild(node, walk);
     };
     files.forEach(walk);
@@ -1125,7 +1442,7 @@ function scanAuditWrites(sources = auditSources()) {
     const statement = first && ts.isVariableDeclaration(first) ? first.parent?.parent : null;
     const local = first && (ts.isParameter(first) || (statement && !ts.isSourceFile(statement.parent) && !ts.isModuleBlock(statement.parent)))
       ? first.getSourceFile() : null;
-    return [...new Set([symbol.name, ...(renamed.get(symbol.name) ?? [])])].flatMap(name => names.get(name) ?? [])
+    return [...new Set([symbol.name, ...(renamed.get(symbol.name) ?? []), ...(renamed.get('default') ?? [])])].flatMap(name => names.get(name) ?? [])
       .filter(node => !own.has(node) && (!local || node.getSourceFile() === local) && same(symbolAt(node), symbol));
   }
   /** A name on the left of a destructuring assignment. */
@@ -1206,11 +1523,14 @@ function scanAuditWrites(sources = auditSources()) {
     }
     const symbol = owner.name ? symbolAt(owner.name) : null;
     if (!symbol) { escapes.push(`${where(owner)} (no name to follow)`); return []; }
-    // A method is also reached as a member of a value the checker cannot type (`any`): such a member of its name could be it.
-    for (const node of ts.isMethodDeclaration(owner) ? spelled().names.get(symbol.name) ?? [] : []) {
-      if (accessOf(node) && !symbolAt(node)) escapes.push(`${where(node)} (\`${symbol.name}\` of a value the program does not type)`);
-    }
-    return references(symbol).map(node => accessOf(node) ?? node);
+    if (!ts.isMethodDeclaration(owner)) return references(symbol).map(node => accessOf(node) ?? node);
+    // A method (b): every access naming it by a dot or a fixed key; one on a value the checker cannot type (`any`) may be
+    // it; and whoever holds its object may call it, so the object must keep to the program (Objects).
+    const { typed, untyped } = memberRefs(symbol);
+    for (const node of untyped) escapes.push(`${where(node)} (\`${memberKey(symbol)}\` of a value the program does not type)`);
+    const object = holdingObject(owner), escape = object && objectUse(object).escape;
+    if (escape) escapes.push(`${where(owner)} (${objectName(object)}, which ${escape})`);
+    return typed;
   }
   function follow(start, calls, escapes, queue) {
     let node = start;
@@ -1673,6 +1993,9 @@ function scanAuditWrites(sources = auditSources()) {
     const next = new Set(seen).add(declaration);
     const changed = references(symbol).find(reference => mutated(outer(reference)));
     if (changed) return [{ unknown: `${where(changed)}: \`${node.text}\` is changed` }];
+    // The fragment it holds must keep to the program (Objects): not written through a key, not handed on elsewhere.
+    const escape = (ts.isVariableDeclaration(declaration) || ts.isParameter(declaration)) && objectUse({ kind: 'fragment', declaration }).escape;
+    if (escape) return [{ unknown: `${where(node)}: \`${node.text}\` holds an SQL fragment that ${escape}` }];
     if (ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name) && declaration.initializer
       && ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) return predicateSources(declaration.initializer, next);
     if (!ts.isParameter(declaration) || !ts.isFunctionLike(declaration.parent)) {
@@ -2000,10 +2323,12 @@ test('completeness: the files of api/src are listed from the disk; one the progr
 // ── the checker's own tests, on test-owned fixtures (tests/fixtures/admin_audit_completeness; Astra S7-U3a-AUDIT-SPEC-R-001-F04) ──
 // Each fixture declares what it expects: `// expect:` on a line names the one candidate the line gives, the violations'
 // headers name the one failure class each must cause, and contract.json is their table. Nothing here is read from the
-// checker's output to decide what is expected.
+// checker's output to decide what is expected. tests/fixtures/admin-audit-checker holds the member references and
+// objects of Astra S7-U3a-E-R-001 in the same form: members.ts beside equivalent.ts, violations.txt beside the other.
 
 const FIXTURES = path.join(__dirname, 'fixtures', 'admin_audit_completeness');
-const fixtureText = name => readFileSync(path.join(FIXTURES, name), 'utf8').replace(/\r\n/g, '\n');
+const MEMBER_FIXTURES = path.join(__dirname, 'fixtures', 'admin-audit-checker');
+const fixtureText = (name, dir = FIXTURES) => readFileSync(path.join(dir, name), 'utf8').replace(/\r\n/g, '\n');
 const asSource = (name, text) => ({ file: `api/src/syn-fixture/${name}`, text });
 const baselineSources = () => ['actions.ts', 'forward.ts', 'baseline.ts'].map(name => asSource(name, fixtureText(name)));
 /** contract.json as a table, with a case's added rows or wildcards. */
@@ -2046,17 +2371,20 @@ function assertMarked(scan, source) {
   return { marked: expected.size, resolved: [...expected.values()].filter(mark => mark.status === 'resolved').length,
     unresolved: [...expected.values()].filter(mark => mark.status === 'unresolved').length };
 }
-/** violations.txt: one module per `// ==== case: <name> | verdict: <class> [entries] [| table: +row|+wildcard <x>] ====`. */
+/** Both violations.txt: one module per `// ==== case: <name> | verdict: <class> [entries] [| table: +row|+wildcard <x>] ====`. */
 function violationCases() {
   const cases = [];
-  for (const line of fixtureText('violations.txt').split('\n')) {
-    const header = /^\/\/ ==== case: (\S+) \| verdict: (\w+)((?: [^\s|]+)*)((?: \| table: \+(?:row|wildcard) \S+)*) ====$/.exec(line);
-    if (header) {
-      const table = { rows: [], wildcards: [] };
-      for (const [, kind, value] of header[4].matchAll(/\| table: \+(row|wildcard) (\S+)/g)) table[kind === 'row' ? 'rows' : 'wildcards'].push(value);
-      cases.push({ name: header[1], failing: header[2], entries: header[3].trim().split(/\s+/).filter(Boolean), table, lines: [] });
-    } else if (cases.length) {
-      cases[cases.length - 1].lines.push(line);
+  for (const dir of [FIXTURES, MEMBER_FIXTURES]) {
+    let current = null;   // a file's note, before its first header, belongs to no case
+    for (const line of fixtureText('violations.txt', dir).split('\n')) {
+      const header = /^\/\/ ==== case: (\S+) \| verdict: (\w+)((?: [^\s|]+)*)((?: \| table: \+(?:row|wildcard) \S+)*) ====$/.exec(line);
+      if (header) {
+        const table = { rows: [], wildcards: [] };
+        for (const [, kind, value] of header[4].matchAll(/\| table: \+(row|wildcard) (\S+)/g)) table[kind === 'row' ? 'rows' : 'wildcards'].push(value);
+        cases.push(current = { name: header[1], failing: header[2], entries: header[3].trim().split(/\s+/).filter(Boolean), table, lines: [] });
+      } else if (current) {
+        current.lines.push(line);
+      }
     }
   }
   return cases.map(entry => ({ ...entry, source: asSource(`case-${entry.name}.ts`, entry.lines.join('\n')) }));
@@ -2089,10 +2417,10 @@ test('checker self-test: the baseline fixture passes the gate alone; its writes,
   console.log('ADMIN_AUDIT_CHECKER_BASELINE ' + JSON.stringify({ marks: counts, sites: scan.sites.length, candidates: scan.candidates.length, flow: scan.flow }));
 });
 
-test('checker self-test: the supported notations (a)-(i) and the INSERT positions each add exactly their marked writes', () => {
+test('checker self-test: the supported notations (a)-(i), the INSERT positions and the kept objects each add exactly their marked writes', () => {
   const base = scanAuditWrites(baselineSources()), before = inventory(base);
-  for (const name of ['equivalent.ts', 'sql-positions.ts']) {
-    const source = asSource(name, fixtureText(name)), scan = scanAuditWrites([...baselineSources(), source]);
+  for (const [name, dir] of [['equivalent.ts', FIXTURES], ['sql-positions.ts', FIXTURES], ['members.ts', MEMBER_FIXTURES]]) {
+    const source = asSource(name, fixtureText(name, dir)), scan = scanAuditWrites([...baselineSources(), source]);
     const count = assertMarked(scan, source);
     // Each marked write is one more site, and nothing of the baseline changed.
     assert.equal(scan.sites.filter(site => site.file === source.file).length, count.resolved, name);
@@ -2207,6 +2535,27 @@ test('completeness equivalents: every write of api/src rewritten in another nota
       if (site.action.shorthand) edit(edits, site.file, node.getStart(), node.end, `${text(node)}: ${text(node)} satisfies string`);
       else if (ts.isIdentifier(node)) edit(edits, site.file, node.end, node.end, ' satisfies string');
     }),
+    // Every private or protected method of a class in a file that writes, reached by a constant key where the source has a
+    // dot: `x[SYN_METHOD_KEY_n](...)`, the constant declared in the file (Astra S7-U3a-E-R-001-F01: a dot and a fixed key
+    // are one reference, for the calls of a helper as for anything else).
+    'constant keys for the methods of the writing classes': edits => {
+      let n = 0;
+      const walk = node => {
+        if (ts.isMethodDeclaration(node) && ts.isClassLike(node.parent) && ts.isIdentifier(node.name)
+          && ts.getCombinedModifierFlags(node) & (ts.ModifierFlags.Private | ts.ModifierFlags.Protected)) {
+          const key = `SYN_METHOD_KEY_${n++}`;
+          for (const at of references(symbolAt(node.name))) {
+            const access = at.parent;
+            if (!ts.isPropertyAccessExpression(access) || access.name !== at) continue;
+            const file = repoPath(at.getSourceFile().fileName);
+            declare(edits, file, `const ${key} = '${node.name.text}';`);
+            edit(edits, file, access.expression.end, access.end, `${access.questionDotToken ? '?.' : ''}[${key}]`);
+          }
+        }
+        ts.forEachChild(node, walk);
+      };
+      new Set(base.sites.map(site => site.call.getSourceFile())).forEach(walk);
+    },
     // Every const an action names directly, renamed with all its uses (the checker's references, imports included).
     'the constants renamed': edits => creates.forEach(site => {
       const node = site.action.node ? bare(site.action.node) : null;
@@ -2264,7 +2613,7 @@ test('completeness equivalents: every write of api/src rewritten in another nota
     added: 'api/src/syn-added-writer.ts' }));
 });
 
-test('completeness negative controls on api/src: unlisted, dynamic without a wildcard, unwritten actions and an unfixed WITH fragment path each fail on their own', () => {
+test('completeness negative controls on api/src: unlisted, dynamic without a wildcard, unwritten actions, an unfixed WITH fragment path, a helper called by a constant key and a fragment written or handed on each fail on their own', () => {
   const sources = auditSources(), base = scanAuditWrites(sources), { ts } = base.tools, listing = productSources().listing;
   const before = verdict(base, productTable(), listing);
   /** The verdict of `changed`: class `name` gains exactly `added` (in the verdict's own order), every other class is as it was. */
@@ -2322,34 +2671,78 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
     edit(removed, site.file, write.getStart(), write.end, 'void 0');
   }
   alone(scanAuditWrites(edited(sources, removed)), 'unwritten_rows', [row]);
-  // (e) A WITH fragment passed once more from a value the program does not fix (Astra S7-U3a-AUDIT-SPEC-B-R-001-F01): for
-  // every raw write whose WITH fragment is a parameter of a method or function, a private method added next to it passes
-  // that parameter a request value. That write alone becomes unresolved, naming the added path; every other class is the
-  // verdict of the remaining writes (its actions leave the written, unlisted and prefix sets).
+  // (e) A WITH fragment passed once more from a value the program does not fix (Astra S7-U3a-AUDIT-SPEC-B-R-001-F01), and
+  // (f) the paths of Astra S7-U3a-E-R-001 on api/src: a helper reached by a constant key as by a dot (F01), a fixed
+  // predicate written through a member or handed to a function outside the program before it is passed on (F02). For every
+  // raw write whose WITH fragment is a parameter of a method or function, members added next to it pass that parameter a
+  // request value (by a dot and, for a method, by a constant key), a fixed predicate first written through a member, and
+  // one first handed to a declared outside function; for every create whose action is a parameter of a method, an added
+  // private method calls it by a constant key with a request value there. Each makes that write alone unresolved, naming
+  // its path; every other class is the verdict of the remaining writes (its actions leave the written, unlisted and prefix
+  // sets).
   const { bare, symbolAt } = base.tools, lineless = entry => entry.replace(/^([\w./-]+\.[cm]?[jt]sx?):\d+ /, '$1 ');
+  const sorted = classes => ({ ...classes, unresolved: classes.unresolved.map(lineless).sort() });
+  /** `site` alone becomes unresolved, for a reason naming `why`, once `edits` (all after it in its file) are made. */
+  const oneWrite = (site, edits, why) => {
+    const scan = scanAuditWrites(edited(sources, edits)), found = verdict(scan, productTable(), listing);
+    // Every candidate where it was (offsets carried), this write now unresolved; nothing added.
+    const was = `${site.file}@${site.start} ${site.via} resolved [${site.actions}] [${site.prefixes}]`;
+    assert.deepEqual(inventory(scan), inventory(base, edits).map(entry => (entry === was ? `${site.file}@${site.start} ${site.via} unresolved` : entry)).sort());
+    const grown = found.unresolved.filter(entry => !before.unresolved.map(lineless).includes(lineless(entry)));
+    assert.equal(grown.length, 1, JSON.stringify(grown));
+    assert.ok(grown[0].startsWith(`${site.file}:${site.line} `) && grown[0].includes(why), grown[0]);
+    const rest = verdict({ ...base, sites: base.sites.filter(other => other !== site), unresolved: [...base.unresolved, grown[0]] }, productTable(), listing);
+    assert.deepEqual(sorted(found), sorted(rest));
+    return grown[0];
+  };
+  /** Edits adding `members` to the class of the method `owner` (or functions after the function `owner`), and `tail` at the
+   *  end of its file. */
+  const adding = (site, owner, members, tail = '') => {
+    const edits = new Map(), method = ts.isMethodDeclaration(owner), at = method ? owner.parent.end - 1 : owner.end;
+    edit(edits, site.file, at, at, `\n${members.map(member => (method ? `  private ${member}` : `function ${member}`)).join('\n')}\n`);
+    const end = owner.getSourceFile().text.length;
+    if (tail) edit(edits, site.file, end, end, tail);
+    return edits;
+  };
+  const paths = [];
   const passedIn = base.sites.flatMap(site => site.fragments.map(fragment => ({ site, declaration: symbolAt(bare(fragment))?.declarations?.[0] })))
     .filter(({ declaration }) => declaration && ts.isParameter(declaration) && (ts.isMethodDeclaration(declaration.parent)
       || ts.isFunctionDeclaration(declaration.parent)));
   assert.ok(passedIn.length > 0, 'api/src has a raw write whose WITH fragment is a parameter');
+  const predicate = "SynPrisma.sql`s.uid = ${String(body.uid)}::text`";
+  const outside = "\nimport { Prisma as SynPrisma } from '@prisma/client';\ndeclare function synOpaque(value: unknown): void;\n";
   for (const { site, declaration } of passedIn) {
     const owner = declaration.parent, method = ts.isMethodDeclaration(owner), name = owner.name.getText();
-    const args = owner.parameters.map((parameter, n) => (parameter === declaration ? 'body.where' : `body.p${n}`)).join(', ');
-    const added = method ? `\n  private synUnfixedPath(body: any) { return this.${name}(${args}); }\n`
-      : `\nfunction synUnfixedPath(body: any) { return ${name}(${args}); }\n`;
-    const at = method ? owner.parent.end - 1 : owner.end, path = new Map();
-    edit(path, site.file, at, at, added);
-    const scan = scanAuditWrites(edited(sources, path)), found = verdict(scan, productTable(), listing);
-    // Every candidate where it was (offsets carried), this write now unresolved; nothing added.
-    const was = `${site.file}@${site.start} ${site.via} resolved [${site.actions}] [${site.prefixes}]`;
-    assert.deepEqual(inventory(scan), inventory(base, path).map(entry => (entry === was ? `${site.file}@${site.start} ${site.via} unresolved` : entry)).sort());
-    const grown = found.unresolved.filter(entry => !before.unresolved.map(lineless).includes(lineless(entry)));
-    assert.equal(grown.length, 1, JSON.stringify(grown));
-    assert.ok(grown[0].startsWith(`${site.file}:${site.line} `) && grown[0].includes('`body.where` is not a Prisma.sql text'), grown[0]);
-    const rest = verdict({ ...base, sites: base.sites.filter(other => other !== site), unresolved: [...base.unresolved, grown[0]] }, productTable(), listing);
-    const sorted = classes => ({ ...classes, unresolved: classes.unresolved.map(lineless).sort() });
-    assert.deepEqual(sorted(found), sorted(rest));
+    const prefix = method && ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Static ? 'static ' : '';
+    const call = (value, callee = method ? `this.${name}` : name) =>
+      `${callee}(${owner.parameters.map((parameter, n) => (parameter === declaration ? value : `body.p${n}`)).join(', ')})`;
+    paths.push([site, adding(site, owner, [`${prefix}synUnfixedPath(body: any) { return ${call('body.where')}; }`]), '`body.where` is not a Prisma.sql text']);
+    if (method) {
+      paths.push([site, adding(site, owner, [`${prefix}synKeyPath(body: any) { const SYN_KEY = '${name}'; return ${call('body.where', 'this[SYN_KEY]')}; }`]),
+        '`body.where` is not a Prisma.sql text']);
+    }
+    paths.push([site, adding(site, owner, [`${prefix}synWrittenPath(body: any) { const selector = ${predicate}; (selector as any).strings[0] = String(body.sql); return ${call('selector')}; }`], outside),
+      'holds an SQL fragment that is written at']);
+    paths.push([site, adding(site, owner, [`${prefix}synHandedPath(body: any) { const selector = ${predicate}; synOpaque(selector); return ${call('selector')}; }`], outside),
+      'holds an SQL fragment that is handed to `synOpaque`']);
   }
+  const helped = base.sites.filter(site => site.via === 'auditLog.create').map(site => {
+    const node = site.action.node ? bare(site.action.node) : site.action.shorthand?.name;
+    const declaration = node && ts.isIdentifier(node) ? symbolAt(node)?.declarations?.[0] : null;
+    return declaration && ts.isParameter(declaration) && ts.isMethodDeclaration(declaration.parent) ? { site, declaration } : null;
+  }).filter(Boolean);
+  assert.ok(helped.length > 0, 'api/src has a create whose action is a parameter of a method');
+  for (const { site, declaration } of helped) {
+    const owner = declaration.parent, name = owner.name.getText();
+    const prefix = ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Static ? 'static ' : '';
+    const args = owner.parameters.map((parameter, n) => (parameter === declaration ? 'body.action' : `body.p${n}`)).join(', ');
+    paths.push([site, adding(site, owner, [`${prefix}synKeyCall(body: any) { const SYN_KEY = '${name}'; return this[SYN_KEY](${args}); }`]),
+      '`body.action` is a property the program does not fix']);
+  }
+  const reasons = paths.map(([site, edits, why]) => `${site.file}:${site.line} ${oneWrite(site, edits, why).split(': ').slice(1).join(': ')}`);
   console.log('ADMIN_AUDIT_NEGATIVE_CONTROLS ' + JSON.stringify({ revalued_literals: origins.length, unlisted_after_revalue: changed.unlisted.length,
     unwritten_row: row, writes_taken_out: [...removed.values()].flat().length,
-    unfixed_fragment_paths: passedIn.map(({ site, declaration }) => `${site.file}:${site.line} \`${declaration.name.getText()}\``) }));
+    unfixed_fragment_paths: passedIn.map(({ site, declaration }) => `${site.file}:${site.line} \`${declaration.name.getText()}\``),
+    helpers_by_a_constant_key: helped.map(({ site, declaration }) => `${site.file}:${site.line} \`${declaration.parent.name.getText()}\``),
+    one_write_paths: reasons }));
 });
