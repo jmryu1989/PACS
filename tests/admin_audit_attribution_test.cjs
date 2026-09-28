@@ -3313,6 +3313,21 @@ test('checker self-test: every counterexample F03 enumerates leaves its write or
   console.log('ADMIN_AUDIT_COUNTEREXAMPLES ' + JSON.stringify(results));
 });
 
+test('checker self-test: every positive mark reclassified.json replaces is refused by a case of its own, and every entry names its rule', () => {
+  const cases = new Map(violationCases().map(entry => [entry.name, entry]));
+  const moved = RECLASSIFIED.filter(entry => entry.was.startsWith('resolved'));
+  assert.ok(moved.length > 0, 'fix6 positives outside W1-W6 are reclassified');
+  for (const entry of moved) {
+    const refusal = cases.get(entry.moved_to);
+    assert.ok(refusal && refusal.fixture === 'admin-audit-checker', `${entry.fixture}:${entry.line}: no case ${entry.moved_to}`);
+    assert.equal(refusal.failing, 'unresolved', entry.moved_to);
+    assert.ok(entry.now.some(item => item.status === 'unresolved'), `${entry.fixture}:${entry.line} is refused where it stands too`);
+  }
+  for (const entry of RECLASSIFIED) assert.ok(entry.rule, `${entry.fixture}:${entry.line} names the rule it applies`);
+  console.log('ADMIN_AUDIT_RECLASSIFIED ' + JSON.stringify(RECLASSIFIED.map(entry => `${entry.fixture}:${entry.line} ${entry.was} -> `
+    + `${entry.now.map(item => `${item.status} ${item.detail}`).join(' + ')} (${entry.rule}${entry.moved_to ? `; alone in ${entry.moved_to}` : ''})`)));
+});
+
 // ── the controls over api/src: rewrites by the positions the compiler parsed, and values changed to fail ──
 // No spelling of the product is assumed: the edits are made where the compiler found each write, and every write site keeps
 // its position (carried through the edits), its kind and its actions — a site that disappears or appears fails, even when
@@ -3486,13 +3501,15 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
     return found;
   };
   // (a) New writes of actions without a row: a literal, a constant, a constant delegate key (Astra S7-U3a-D-R-001-F01) and
-  // raw SQL whose action column holds it while another column holds a registered action (S7-U3a-D-R-001-F02).
+  // raw SQL whose action column holds it while another column holds a registered action (S7-U3a-D-R-001-F02). The writer is
+  // public so that the raw write's other value, `actor`, is a parameter an outside caller gives as declared (F02); a private
+  // helper nothing calls would leave that value, and the write, unresolved before its action is read.
   alone(scanAuditWrites([...sources, { file: 'api/src/syn-unlisted.service.ts', text: [
     "import { Prisma } from '@prisma/client';",
     "export const SYN_UNLISTED_ACTION = 'syn.unlisted';",
     "const LOG = 'auditLog';",
     'export class SynUnlistedService {',
-    '  private async write(tx: Prisma.TransactionClient, actor: string, uid: string) {',
+    '  async write(tx: Prisma.TransactionClient, actor: string, uid: string) {',
     "    await tx.auditLog.create({ data: { actor, action: 'study.question.reply', target: uid } });",
     '    await tx.auditLog.create({ data: { actor, action: SYN_UNLISTED_ACTION, target: uid } });',
     "    await tx[LOG].create({ data: { actor, action: 'syn.const-key-unlisted', target: uid } });",
@@ -3537,30 +3554,52 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
   // predicate written through a member or handed to a function outside the program before it is passed on (F02). For every
   // raw write whose WITH fragment is a parameter of a method or function, members added next to it pass that parameter a
   // request value (by a dot and, for a method, by a constant key), a fixed predicate first written through a member, and
-  // one first handed to a declared outside function; for every create whose action is a parameter of a method, an added
-  // private method calls it by a constant key with a request value there. Each makes that write alone unresolved, naming
-  // its path; every other class is the verdict of the remaining writes (its actions leave the written, unlisted and prefix
-  // sets).
-  const { bare, symbolAt } = base.tools, lineless = entry => entry.replace(/^([\w./-]+\.[cm]?[jt]sx?):\d+ /, '$1 ');
-  const sorted = classes => ({ ...classes, unresolved: classes.unresolved.map(lineless).sort() });
-  /** `site` alone becomes unresolved, for a reason naming `why`, once `edits` (all after it in its file) are made. */
+  // one first handed to a declared outside function; they take the helper's other parameters as it declares them and pass
+  // them on (values an outside caller gives, F02), varying only the fragment. For every create whose action is a parameter
+  // of a method, an added private method calls it by a constant key with a request value there. Each makes that write
+  // unresolved, naming its path. A fragment the added code hands on is a note of its own there (W4 over every fragment),
+  // and then the values judged by their type in code connected to it are no longer evidence: such a candidate may become
+  // unresolved for that reason and no other. Every other candidate is where it was, as it was; the verdict is the verdict of
+  // the writes that stay resolved.
+  const { bare, symbolAt } = base.tools;
   const oneWrite = (site, edits, why) => {
     const scan = scanAuditWrites(edited(sources, edits)), found = verdict(scan, productTable(), listing);
-    // Every candidate where it was (offsets carried), this write now unresolved; nothing added.
-    const was = `${site.file}@${site.start} ${site.via} resolved [${site.actions}] [${site.prefixes}]`;
-    assert.deepEqual(inventory(scan), inventory(base, edits).map(entry => (entry === was ? `${site.file}@${site.start} ${site.via} unresolved` : entry)).sort());
-    const grown = found.unresolved.filter(entry => !before.unresolved.map(lineless).includes(lineless(entry)));
-    assert.equal(grown.length, 1, JSON.stringify(grown));
-    assert.ok(grown[0].startsWith(`${site.file}:${site.line} `) && grown[0].includes(why), grown[0]);
-    const rest = verdict({ ...base, sites: base.sites.filter(other => other !== site), unresolved: [...base.unresolved, grown[0]] }, productTable(), listing);
-    assert.deepEqual(sorted(found), sorted(rest));
-    return grown[0];
+    const [from, , text] = [...edits.get(site.file)].sort((a, b) => a[0] - b[0])[0], to = from + text.length;
+    const added = entry => entry.file === site.file && entry.start >= from && entry.start < to;
+    const notes = scan.candidates.filter(added);
+    for (const entry of notes) assert.ok(entry.status === 'unresolved' && entry.kind === 'SQL fragment', `a candidate of the added code: ${JSON.stringify(entry)}`);
+    const escapedAt = notes.map(entry => `${entry.file}:${entry.line}`);
+    // Candidates by place and kind (a multiset: nested accesses may begin at one offset), matched to the old ones in order.
+    const after = new Map();
+    for (const entry of scan.candidates.filter(entry => !added(entry))) {
+      const key = `${entry.file}@${entry.start} ${entry.kind}`;
+      after.set(key, [...(after.get(key) ?? []), entry]);
+    }
+    let target = null, tainted = 0;
+    for (const entry of base.candidates) {
+      const key = `${entry.file}@${moved(edits, entry.file, entry.start)} ${entry.kind}`, same = after.get(key) ?? [];
+      const at = same.findIndex(other => other.status === entry.status), now = same.splice(at >= 0 ? at : 0, 1)[0];
+      if (!same.length) after.delete(key);
+      assert.ok(now, `${site.file}:${site.line} (${why}): ${key} is no longer found`);
+      if (entry.file === site.file && entry.start === site.start) { target = now; continue; }
+      if (now.status === entry.status) continue;
+      assert.ok(now.status === 'unresolved' && escapedAt.length && now.reason.includes('so its type is no evidence')
+        && escapedAt.some(at => now.reason.includes(at)), `${key}: ${entry.status} -> ${now.status}: ${now.reason}`);
+      tainted++;
+    }
+    assert.deepEqual([...after.keys()], [], 'candidates that are neither old nor of the added code');
+    assert.ok(target.status === 'unresolved' && target.reason.includes(why), `${site.file}:${site.line}: ${target.reason}`);
+    const kept = new Set(scan.sites.map(other => `${other.file}@${other.start}`));
+    const rest = verdict({ ...base, sites: base.sites.filter(other => kept.has(`${other.file}@${moved(edits, other.file, other.start)}`)),
+      unresolved: scan.unresolved }, productTable(), listing);
+    assert.deepEqual(found, rest);
+    return { write: `${site.file}:${site.line}`, reason: target.reason, fragment_notes: escapedAt, taken_at_their_type_no_longer: tainted };
   };
-  /** Edits adding `members` to the class of the method `owner` (or functions after the function `owner`), and `tail` at the
-   *  end of its file. */
-  const adding = (site, owner, members, tail = '') => {
+  /** Edits adding `members` to the class of the method `owner` (or functions after the function `owner`) — private, or
+   *  public (exported) when `open` — and `tail` at the end of its file. */
+  const adding = (site, owner, members, tail = '', open = false) => {
     const edits = new Map(), method = ts.isMethodDeclaration(owner), at = method ? owner.parent.end - 1 : owner.end;
-    edit(edits, site.file, at, at, `\n${members.map(member => (method ? `  private ${member}` : `function ${member}`)).join('\n')}\n`);
+    edit(edits, site.file, at, at, `\n${members.map(member => (method ? `  ${open ? '' : 'private '}${member}` : `${open ? 'export ' : ''}function ${member}`)).join('\n')}\n`);
     const end = owner.getSourceFile().text.length;
     if (tail) edit(edits, site.file, end, end, tail);
     return edits;
@@ -3575,16 +3614,17 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
   for (const { site, declaration } of passedIn) {
     const owner = declaration.parent, method = ts.isMethodDeclaration(owner), name = owner.name.getText();
     const prefix = method && ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Static ? 'static ' : '';
+    const params = [...owner.parameters.filter(parameter => parameter !== declaration).map(parameter => parameter.getText()), 'body: any'].join(', ');
     const call = (value, callee = method ? `this.${name}` : name) =>
-      `${callee}(${owner.parameters.map((parameter, n) => (parameter === declaration ? value : `body.p${n}`)).join(', ')})`;
-    paths.push([site, adding(site, owner, [`${prefix}synUnfixedPath(body: any) { return ${call('body.where')}; }`]), '`body.where` is not a Prisma.sql text']);
+      `${callee}(${owner.parameters.map(parameter => (parameter === declaration ? value : parameter.name.getText())).join(', ')})`;
+    paths.push([site, adding(site, owner, [`${prefix}synUnfixedPath(${params}) { return ${call('body.where')}; }`], '', true), '`body.where` is not a Prisma.sql text']);
     if (method) {
-      paths.push([site, adding(site, owner, [`${prefix}synKeyPath(body: any) { const SYN_KEY = '${name}'; return ${call('body.where', 'this[SYN_KEY]')}; }`]),
+      paths.push([site, adding(site, owner, [`${prefix}synKeyPath(${params}) { const SYN_KEY = '${name}'; return ${call('body.where', 'this[SYN_KEY]')}; }`], '', true),
         '`body.where` is not a Prisma.sql text']);
     }
-    paths.push([site, adding(site, owner, [`${prefix}synWrittenPath(body: any) { const selector = ${predicate}; (selector as any).strings[0] = String(body.sql); return ${call('selector')}; }`], outside),
+    paths.push([site, adding(site, owner, [`${prefix}synWrittenPath(${params}) { const selector = ${predicate}; (selector as any).strings[0] = String(body.sql); return ${call('selector')}; }`], outside, true),
       'holds an SQL fragment that is written at']);
-    paths.push([site, adding(site, owner, [`${prefix}synHandedPath(body: any) { const selector = ${predicate}; synOpaque(selector); return ${call('selector')}; }`], outside),
+    paths.push([site, adding(site, owner, [`${prefix}synHandedPath(${params}) { const selector = ${predicate}; synOpaque(selector); return ${call('selector')}; }`], outside, true),
       'holds an SQL fragment that is handed to `synOpaque`']);
   }
   const helped = base.sites.filter(site => site.via === 'auditLog.create').map(site => {
@@ -3600,7 +3640,7 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
     paths.push([site, adding(site, owner, [`${prefix}synKeyCall(body: any) { const SYN_KEY = '${name}'; return this[SYN_KEY](${args}); }`]),
       '`body.action` is a property the program does not fix']);
   }
-  const reasons = paths.map(([site, edits, why]) => `${site.file}:${site.line} ${oneWrite(site, edits, why).split(': ').slice(1).join(': ')}`);
+  const reasons = paths.map(([site, edits, why]) => oneWrite(site, edits, why));
   console.log('ADMIN_AUDIT_NEGATIVE_CONTROLS ' + JSON.stringify({ revalued_literals: origins.length, unlisted_after_revalue: changed.unlisted.length,
     unwritten_row: row, writes_taken_out: [...removed.values()].flat().length,
     unfixed_fragment_paths: passedIn.map(({ site, declaration }) => `${site.file}:${site.line} \`${declaration.name.getText()}\``),
