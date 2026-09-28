@@ -20,6 +20,10 @@ import unittest
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+# the restore fixture's own data (its migration list, tables and synthetic rows); importing it runs nothing
+import ops_product_transfer_fixture as restore_fixture  # noqa: E402
+
 MIGRATION_DIR = ROOT / "api" / "prisma" / "migrations" / "20260921120000_report_structure"
 MIGRATION = (MIGRATION_DIR / "migration.sql").read_text(encoding="utf-8")
 SCHEMA = (ROOT / "api" / "prisma" / "schema.prisma").read_text(encoding="utf-8")
@@ -169,13 +173,18 @@ class ReportStructureMigration(unittest.TestCase):
         self.assertRegex(fixture, r"structured=structured if number == 2 else None")
         self.assertRegex(fixture, r"structured=structured if number == 1 else None")
         self.assertIn("SYNTHETIC-ITEM choice = alpha", fixture)
-        transfer_test = (ROOT / "tests" / "ops_product_transfer_test.py").read_text(encoding="utf-8")
-        # S4-U2's order-accession migration moved the pinned count from 26 to 27 in the same commit,
+        # The restore fixture applies every migration directory, in order, this one included: its list compared as data
+        # (S7-U1a-B-R-001-F03: not the text of ops_product_transfer_test.py's count assertion).
+        # S4-U2's order-accession migration moved the count from 26 to 27 in the same commit,
         # S4-U3's gateway-receipt migration from 27 to 28 in its own, and S4-U4's gateway-retry-request
         # migration from 28 to 29 in its own.
         # S5-U4a's 20260926120000_study_questions (StudyQuestion, StudyQuestionEntry) moved it from 29 to 30.
         # S5-U4c's 20260926130000_study_image_requests (StudyImageRequest, StudyImageRequestReceipt) from 30 to 31.
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 31)", transfer_test)
+        # S7-U1a's 20260928120000_critical_result (CriticalResult, CriticalResultEvent, CriticalResultReceipt) from 31 to 32.
+        names = sorted(p.name for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())
+        self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
+        self.assertIn(MIGRATION_DIR.name, names)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 32)
 
     def test_the_synthetic_catalog_never_reaches_product_code(self) -> None:
         # P6/P7. The seam is one instance property a test overwrites on its own instance; anything

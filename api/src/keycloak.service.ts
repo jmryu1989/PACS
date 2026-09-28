@@ -289,4 +289,25 @@ export class KeycloakService {
     throw new ServiceUnavailableException('기관 사용자 수가 조회 한도를 넘었습니다');
   }
 
+  /**
+   * S7-U1a 중요 결과 수신자 후보: 기관 그룹의 활성 회원(서비스 계정 아님, 그룹 정확히 하나 = 그 기관). 역할은 거르지 않는다 —
+   * clinician·radiologist 부류와 원문 읽기 판정은 호출자가 한다. assignmentReaders와 같은 배치·한도이고 캐시한 역할·그룹으로
+   * 판정하지 않는다(후보 목록이 생성 판정과 같은 Keycloak 현재 상태를 보게).
+   */
+  async institutionMembers(institution: string) {
+    const groups: any[] = await this.adm('/groups?briefRepresentation=true&max=500') ?? [];
+    const group = groups.find(g => g.name === institution || g.path === '/' + institution);
+    if (!group) return [];
+    const members: KeycloakUser[] = [];
+    for (let first=0; first<1000; first+=100) {
+      const batch:any[] = await this.adm(`/groups/${encodeURIComponent(group.id)}/members?briefRepresentation=true&first=${first}&max=100`) ?? [];
+      for (let offset=0; offset<batch.length; offset+=10) {
+        const users=await Promise.all(batch.slice(offset,offset+10).map(u=>this.getUser(u.id)));
+        members.push(...users.filter((u):u is KeycloakUser=>!!u&&u.enabled&&!u.serviceAccountClientId&&u.groups.length===1&&u.groups[0]===institution));
+      }
+      if(batch.length<100)return members;
+    }
+    throw new ServiceUnavailableException('기관 사용자 수가 조회 한도를 넘었습니다');
+  }
+
 }

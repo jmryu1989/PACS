@@ -38,6 +38,8 @@ export const CLINICIAN_SESSION_ROUTES: readonly string[] = Object.freeze(['GET m
  *    동작별 역할(view=inbox·답변은 radiologist 등)과 기관·StudyAccess·작성자 경계는 서비스가 판정한다.
  *  - S5-U4c 영상 요청 다섯 행(image-request.controller.ts): 같은 뜻이다. 처리(accept·close·decline)는
  *    technician·admin만, 취소는 요청자·admin만 서비스가 허용하고, 요청은 전송이 아니다(Connect route는 계속 거절).
+ *  - S7-U1a 중요 결과 세 행(critical-result.controller.ts): 받은 목록·한 건·ACK. view=sent는 서비스가 403, 남의 기록은
+ *    404, 확정 원천이 아닌 기록(C3/C4)의 ACK는 409다 — 게이트 통과는 원문 권한이 아니다.
  * `GET studies`·`GET bootstrap`·`GET studies/:uid/report-preview`·`GET audit`는 계속 거절한다 —
  * 초안·오더·상용구·작성자 칸이나 확정 전 본문을 싣는 응답이다.
  */
@@ -50,6 +52,8 @@ export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([
   // S5-U4c
   'GET image-requests', 'GET image-requests/:id', 'GET studies/:uid/image-requests',
   'POST studies/:uid/image-requests', 'POST image-requests/:id',
+  // S7-U1a — 중요 결과 수신(받은 목록·한 건·명시 ACK). 발신·취소·대체·후보·검사별 목록은 clinician-only에게 계속 거절한다.
+  'GET critical-results', 'GET critical-results/:id', 'POST critical-results/:id/ack',
 ]);
 
 export const CLINICIAN_ALLOWED_ROUTES: ReadonlySet<string> =

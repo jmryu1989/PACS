@@ -6,10 +6,12 @@
   "session_routes": ["GET me", "POST auth/logout"],
   "business_routes": ["GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
     "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
-    "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id"],
+    "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id",
+    "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack"],
   "allowed_additions": ["GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
     "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
-    "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id"],
+    "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id",
+    "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack"],
   "must_stay_denied": [
     "GET studies", "GET bootstrap", "GET prefs", "GET audit", "GET studies/:uid/report-preview",
     "GET studies/:uid/report/versions", "GET studies/:uid/report/citations", "GET studies/:uid/report/structure",
@@ -93,7 +95,12 @@
     {"method": 0, "controller": "/", "handler": "image-requests/:id", "key": "GET image-requests/:id", "allowed": true},
     {"method": 0, "controller": "/", "handler": "studies/:uid/image-requests", "key": "GET studies/:uid/image-requests", "allowed": true},
     {"method": 1, "controller": "/", "handler": "studies/:uid/image-requests", "key": "POST studies/:uid/image-requests", "allowed": true},
-    {"method": 1, "controller": "/", "handler": "image-requests/:id", "key": "POST image-requests/:id", "allowed": true}
+    {"method": 1, "controller": "/", "handler": "image-requests/:id", "key": "POST image-requests/:id", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "critical-results", "key": "GET critical-results", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "critical-results/:id", "key": "GET critical-results/:id", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "critical-results/:id/ack", "key": "POST critical-results/:id/ack", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "critical-results/:id/cancel", "key": "POST critical-results/:id/cancel", "allowed": false},
+    {"method": 1, "controller": "/", "handler": "studies/:uid/critical-results", "key": "POST studies/:uid/critical-results", "allowed": false}
   ],
   "baseline_inventory": {
     "source_sha": "d914a9a8441819301cac28299063bdd6e721c10b",
@@ -135,7 +142,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 125, "public": 4, "session": 2, "business": 17, "denied": 102},
+    "counts": {"routes": 133, "public": 4, "session": 2, "business": 20, "denied": 107},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -144,7 +151,8 @@
       "admin": "member console, study-access administration, audit, unassigned studies, institution assignment and operations metrics (need admin).",
       "consultation": "consultations and consultation candidates; the clinician question contract is S5-U4p/U4a, denied until then.",
       "connect": "inter-institution Connect agreements, basis and transfers; a far later stage (AGENTS).",
-      "gateway": "the gateway client-credentials surface (needExact gateway) and the technician's Now Retry request (S4-U3/U4); never a clinician action."
+      "gateway": "the gateway client-credentials surface (needExact gateway) and the technician's Now Retry request (S4-U3/U4); never a clinician action.",
+      "critical_result": "the sender side of critical result delivery (S7-U1a, contract S7-U1p section 6.1/6.3): recipient candidates, create, cancel and supersede are the radiologist's, and the per-study list shows the reading workflow's own records. The clinician's three rows are the received list, one record and the explicit ACK."
     },
     "denied": {
       "report": [
@@ -192,6 +200,10 @@
       ],
       "gateway": [
         "POST gateway/announce", "POST gateway/receipt", "GET gateway/retry-requests", "POST studies/:uid/gateway-retry"
+      ],
+      "critical_result": [
+        "GET studies/:uid/critical-result-recipients", "POST studies/:uid/critical-results", "GET studies/:uid/critical-results",
+        "POST critical-results/:id/cancel", "POST critical-results/:id/supersede"
       ]
     },
     "post_baseline": {
@@ -215,7 +227,15 @@
       "POST image-requests/:id": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "state change: accept/close/decline by technician or admin only, cancel by the requesting clinician or admin; replay returns the stored receipt; Connect routes stay denied; declared in allowed_additions"},
       "GET admin/audit": {"decision": "denied", "unit": "S5-U5b", "commit": "014010f", "basis": "admin audit and security read attributed by the institution recorded in each row (need admin, restricted study access refused); not a clinician read"},
       "GET clinician/studies/:uid/timeline": {"decision": "business", "unit": "S5-U3", "commit": "156866c", "basis": "patient timeline: the listed studies with the anchor's server patient key (listStudies scope, one-snapshot report status, list row fields) and the source birth/sex relation only, paged with limit required; no bodies or values; declared in allowed_additions"},
-      "GET studies/:uid/clinical-context": {"decision": "denied", "unit": "S7-U4a", "commit": "fa2d162", "basis": "Clinical Context reader panel (contract S7-U4p, D-S7-11 b): signed prior report bodies, exam history, DICOM request tags and Tech Note metadata for radiologist/admin only; no clinician screen, so clinician-only is refused by the guard and a second controller line"}
+      "GET studies/:uid/clinical-context": {"decision": "denied", "unit": "S7-U4a", "commit": "fa2d162", "basis": "Clinical Context reader panel (contract S7-U4p, D-S7-11 b): signed prior report bodies, exam history, DICOM request tags and Tech Note metadata for radiologist/admin only; no clinician screen, so clinician-only is refused by the guard and a second controller line"},
+      "GET studies/:uid/critical-result-recipients": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "sender candidates and the pinnable head (radiologist only, service 403 otherwise); the recipient list is the create rule, not a clinician read"},
+      "POST studies/:uid/critical-results": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "critical result create: the radiologist pins the current head ReportVersion for one recipient; a clinician never sends"},
+      "GET critical-results": {"decision": "business", "unit": "S7-U1a", "commit": "e9bb028", "basis": "received critical results of the caller (view=received; view=sent is the radiologist's, service 403), owning institution and StudyAccess only, C5 rows excluded before the page, pending counted in the same snapshot; declared in allowed_additions"},
+      "GET critical-results/:id": {"decision": "business", "unit": "S7-U1a", "commit": "e9bb028", "basis": "one record the caller received: the pinned ReportVersion body only when it is the final head (C2), a stub without message or body when the head moved or was reset (C3/C4), 404 for any record the caller is not a party to; declared in allowed_additions"},
+      "GET studies/:uid/critical-results": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "per-study records beside the reading workflow (sender and recipient views); the clinician's inbox is GET critical-results"},
+      "POST critical-results/:id/ack": {"decision": "business", "unit": "S7-U1a", "commit": "e9bb028", "basis": "explicit acknowledgement by the named recipient only, of a record whose pinned source it can read now (C2/R2); reads never acknowledge; per-request receipt and one audit row; declared in allowed_additions"},
+      "POST critical-results/:id/cancel": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "cancel by the sender (radiologist) with a reason; not a recipient action"},
+      "POST critical-results/:id/supersede": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "supersede by the sender onto the current head for the same recipient; not a recipient action"}
     }
   },
   "controller_decorators": {
@@ -233,7 +253,7 @@
     },
     "public_declaration": "export const Public = () => SetMetadata('public', true);",
     "public_metadata_import": {"name": "SetMetadata", "module": "@nestjs/common"},
-    "rule": "S5-U1c-F04: the inventories classify a decorator by its name, so every name a decorator run carries, in a controller or any other api/src file, must be bound once by 'import { Name } from' the module listed here (a relative module is named from api/src and resolved from the importing file) and occur nowhere else in the code but its decorators and after a '.'. No import or export renames a listed name, a route name, Controller, RequestMapping or Public, from or to another name; no namespace, default, import = or export * takes '@nestjs/common', a part of it or './auth.guard', or binds such a name; no identifier is escaped in code; a statement the reader does not know is refused. The Public binding ends at public_declaration, the one place auth.guard.ts names Public, whose SetMetadata is public_metadata_import. A new decorator module or spelling is a new decision: list it here. S5-U1c-F05: the runs alone named what was checked, so an imported route name or Public applied by a plain call ('Put('x')(target, key, descriptor)') made a public route both inventories missed. In every api/src file a route name, Controller, RequestMapping, Public or SetMetadata occurs in code only as the local name of its own-name import (from the module above; RequestMapping and SetMetadata from '@nestjs/common') and as a decorator the runs read; a call, a reference handed on (variable, array, object, applyDecorators, Reflect.decorate), a property ('x.Get'), a declaration or an export is refused, and Public's module keeps Public and SetMetadata to public_declaration. No metadata writer occurs (defineMetadata, decorate, createDecorator; Reflect only as 'Reflect.<member>' of a member source_contract lists), and loaders follow source_contract (S5-U1c-F06)."
+    "rule": "S5-U1c-F04: the inventories classify a decorator by its name, so every name a decorator run carries, in a controller or any other api/src file, must be bound once by 'import { Name } from' the module listed here (a relative module is named from api/src and resolved from the importing file) and occur nowhere else in the code but its decorators and after a '.'. No import or export renames a listed name, a route name, Controller, RequestMapping or Public, from or to another name; no namespace, default, import = or export * takes '@nestjs/common', a part of it or './auth.guard', or binds such a name; no identifier is escaped in code; a statement the reader does not know is refused. The Public binding ends at public_declaration, the one place auth.guard.ts names Public, whose SetMetadata is public_metadata_import. A new decorator module or spelling is a new decision: list it here. S5-U1c-F05: the runs alone named what was checked, so an imported route name or Public applied by a plain call ('Put('x')(target, key, descriptor)') made a public route both inventories missed. In every api/src file a route name, Controller, RequestMapping, Public or SetMetadata occurs in code only as the local name of its own-name import (from the module above; RequestMapping and SetMetadata from '@nestjs/common') and as a decorator the runs read; a call, a reference handed on (variable, array, object, applyDecorators, Reflect.decorate), a property ('x.Get'), a declaration or an export is refused, and Public's module keeps Public and SetMetadata to public_declaration. No metadata writer occurs (defineMetadata, decorate, createDecorator; Reflect only as 'Reflect.<member>' of a member source_contract lists), and loaders follow source_contract (S5-U1c-F06). S7-U1a-R-001-F02, S7-U1a-B-R-001-F02: that rule is about the binding, not the spelling, and the binding is the TypeScript compiler's answer (tests/route_inventory_ts.js with api/node_modules/typescript and api/tsconfig.json): an occurrence the type checker binds, through every alias, to a declaration of the checked api/src files that is not the export of that name from its module here (a type named Head, its import, type-only import or type-only re-export) is not the decorator and is not read; every other occurrence, bound to the decorator, to a package or to nothing the checker knows (a property of any), is read as before. A decorator run still needs the decorator's own import."
   },
   "source_contract": {
     "unit": "S5-U1c",
@@ -456,12 +476,12 @@
     "unit": "S5-U1c",
     "test": "test_05_every_allow_row_has_a_positive_a_wrong_role_and_a_wrong_tenant_case",
     "marker": "CLINICIAN_LIVE_MATRIX",
-    "study": "one run-owned synthetic hallym study (LiveStack.create_fixture, C-STORE), report left at RS W; the matrix writes no report, item or setting",
+    "study": "one run-owned synthetic hallym study (LiveStack.create_fixture, C-STORE), report left at RS W; the matrix writes no report, item or setting on it (S7-U1a: the critical_result study below is the only one whose report the preparation approves)",
     "write_rule": "S5-U4a: a write allow row is a handler that answers 201 (a POST without @HttpCode). Its write names the method, the request body (placeholders from fill are the run's values), the expected status and the audit rows the positive writes: action (the product constant in source), rows, the actor's identity, target and detail values. Its wrong_role and wrong_tenant are denials, 403 and 404, and write nothing. A read row keeps the read contract: 200/204, no request body but dicom/lookup's, no audit row. Every case of every row is checked against the AuditLog rows it caused.",
     "fill": {
       "$request_id": "a new UUID v4 for every call",
       "$owner": "[institution, sub] of the calling identity from GET /me, the value the question service compares expectedOwner with, so a refusal is the role or tenant rule and never OWNER_CHANGED",
-      "$revision": "the current revision of the row's :id, read just before the call: the :id question from StudyQuestion, the :id image request from StudyImageRequest"
+      "$revision": "the current revision of the row's :id, read just before the call: the :id question from StudyQuestion, the :id image request from StudyImageRequest, the :id critical result from CriticalResult"
     },
     "literals": {
       "rule": "S5-U4c: a write body value that is neither a fill placeholder, '' nor a SYNTHETIC text is one of these enumerated values, each spelled in the source file that defines the row's audit action (null is the explicit no-counterparty-id value)",
@@ -469,6 +489,7 @@
     },
     "question": "one question the clinician asks on the study before the loop with clinician_question_live.ask_question; :id is its id. The create row asks a second one, the entries row follows it up, and the close row, which runs after every other row that names it, closes it. The question rows go before the study cleanup (both foreign keys RESTRICT) through clinician_question_live.drop_study_questions",
     "image_request": "S5-U4c: one image-transfer request the clinician makes on the study before the loop with clinician_request_live.make_image_request; :id of the image-requests rows is its id. The create row makes an external-image request (another kind, so the active-request rule never meets the prepared one) and the change row, which runs after every other row that names it, cancels the prepared one. The list row asks state=all. The request rows go before the study cleanup (every foreign key RESTRICT) through clinician_request_live.drop_study_image_requests",
+    "critical_result": "S7-U1a (contract S7-U1p section 6.3): a second run-owned synthetic hallym study, so the matrix study keeps its report at RS W. Before the loop and before the audit mark, the LiveStack radiologist doctor approves its report (version 1) and sends one critical result to the clinician pinning that approve head: a C2 record the clinician reads in full and may acknowledge. :id of the critical-results rows is that record and :uid of their audit rows is that study. The ACK row, which runs after every other row that names it, acknowledges it; the list row asks view=received. The record rows go before the study cleanup (every foreign key RESTRICT) through invariants_live.drop_critical_results",
     "identities": {
       "clinician": "clinician-only member of hallym, the study's institution",
       "kclinician": "clinician-only member of kin-center",
@@ -612,6 +633,29 @@
         "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
         "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "IMAGE_REQUEST_ROLE_REQUIRED", "basis": "a technician handles requests but never cancels one (the requesting clinician or admin does, OQ-5 a)"},
         "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "IMAGE_REQUEST_NOT_FOUND"}
+      },
+      "GET critical-results": {
+        "query": "view=received",
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "CRITICAL_RESULT_ROLE_REQUIRED", "basis": "only clinician and radiologist are recipients (contract S7-U1p section 4.2); a technician has no received list"},
+        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "absent": {"list": "items", "field": "id", "value": ":id"}, "basis": "a collection: the other institution's clinician is answered, without the record"}
+      },
+      "GET critical-results/:id": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "CRITICAL_RESULT_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "CRITICAL_RESULT_NOT_FOUND"}
+      },
+      "POST critical-results/:id/ack": {
+        "write": {
+          "method": "POST",
+          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "revision": "$revision"},
+          "expected_status": 201,
+          "audit": {"action": "study.critical-result", "source": ["critical-result.service.ts", "CRITICAL_RESULT_AUDIT_ACTION"], "rows": 1,
+                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "event": "acknowledged", "role": "clinician"}}
+        },
+        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "CRITICAL_RESULT_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "CRITICAL_RESULT_NOT_FOUND"}
       }
     }
   },

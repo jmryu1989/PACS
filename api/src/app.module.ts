@@ -9,6 +9,8 @@ import { ClinicianQuestionController } from './clinician-question.controller';
 import { ClinicianQuestionService } from './clinician-question.service';
 import { ImageRequestController } from './image-request.controller';
 import { ImageRequestService } from './image-request.service';
+import { CriticalResultController } from './critical-result.controller';
+import { CriticalResultService } from './critical-result.service';
 import { ReaderAssignmentController } from './reader-assignment.controller';
 import { ReaderAssignmentService } from './reader-assignment.service';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
@@ -47,9 +49,9 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 }
 
 @Module({
-  controllers: [DictationController, PacsController, AuthController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, StudyAccessController],
+  controllers: [DictationController, PacsController, AuthController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController],
   providers: [
-    AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService,
+    AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_INTERCEPTOR, useClass: StudyAccessInterceptor },
   ],
@@ -57,6 +59,6 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
     // 가드가 401/403으로 먼저 끝내는 응답도 브라우저 캐시에 남지 않아야 한다.
-    consumer.apply(adminNoStore).forRoutes(AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, StudyAccessController);
+    consumer.apply(adminNoStore).forRoutes(AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController);
   }
 }

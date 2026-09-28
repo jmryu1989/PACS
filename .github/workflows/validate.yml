@@ -73,8 +73,16 @@ jobs:
       # route classified (public, allowlisted or denied) and compared with invariants_live ROUTES, and the role-list
       # pins across guard, member console, Keycloak client and realm (stdlib). The S5-U1a live module runs only
       # through scripts/run-tests.py on a hosted synthetic stack and is not a step of this job.
+      # S7-U1a-B-R-001-F02: which names spelled like a route decorator are the decorator is the TypeScript compiler's
+      # answer (tests/route_inventory_ts.js), so the step needs node and the typescript and @nestjs/common that
+      # api/package-lock.json pins. Lifecycle scripts stay off: declarations are read, nothing is built or run.
+      - name: S7-U1a TypeScript compiler and Nest declarations for the route inventory
+        timeout-minutes: 5
+        run: |
+          node --version
+          npm ci --prefix api --ignore-scripts --no-audit --no-fund
       - name: S5-U1a clinician-only default denial fixtures, route classification and role-list source pins
-        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-policy --cwd . --file tests/clinician_policy_fixtures.json --file tests/clinician_policy_test.py --file api/src/clinician-policy.ts --file api/src/auth.guard.ts --file api/src/admin.service.ts --file api/src/keycloak.service.ts --file keycloak/kin-realm.json --file tests/invariants_live.py -- python3 -B tests/clinician_policy_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-policy --cwd . --file tests/clinician_policy_fixtures.json --file tests/clinician_policy_test.py --file tests/route_inventory_ts.js --file api/package-lock.json --file api/tsconfig.json --file api/src/clinician-policy.ts --file api/src/auth.guard.ts --file api/src/admin.service.ts --file api/src/keycloak.service.ts --file keycloak/kin-realm.json --file tests/invariants_live.py -- python3 -B tests/clinician_policy_test.py
       # S5-U1b: the clinician read projections against the read_contract field sets (deep key walk, no stack). This job
       # builds no kin-api:ci, so KIN_CLINICIAN_POLICY_MODULE points the test at the TS source instead of its default
       # /app/dist/clinician-policy; node:22 strips the types (>= 22.18) and the test serves '@nestjs/common' from the
@@ -1136,6 +1144,29 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/image-request-service --cwd . --file api/src/image-request.service.ts --file api/src/study-access.service.ts --file api/src/pacs.service.ts --file tests/image_request_service_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/image_request_service_test.cjs
       - name: S7-U4a compiled Clinical Context service, controller and Orthanc header helpers over a stub store and a recording Orthanc (CC-S01..CC-S14)
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/clinical-context-service --cwd . --file api/src/clinical-context.service.ts --file api/src/clinical-context-policy.ts --file api/src/clinical-context.controller.ts --file api/src/orthanc.service.ts --file api/src/study-access.service.ts --file api/src/pacs.service.ts --file tests/clinical_context_service_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/clinical_context_service_test.cjs
+      # S7-U1a (contract S7-U1p SV01-SV14): the compiled policy, and the compiled service against a real disposable
+      # PostgreSQL (S7-U1a-R-001-F03) with recording Keycloak/Orthanc and the real StudyAccessService/Interceptor. The
+      # database is postgres:16-alpine with --network none on tmpfs, as tests/viewer_migration_test.py starts it; the test
+      # container joins its network namespace only, and the test applies the image's migrations itself with prisma migrate
+      # deploy into the empty kin_critical_result_test. The run directory is also named in the upload list below.
+      - name: S7-U1a compiled critical result matrix, pinned rows in SQL, receipts, Keycloak re-check, post-commit refusal and audit keys
+        run: |
+          db="$(docker run -d --network none --tmpfs /var/lib/postgresql/data -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=kin_critical_result_test postgres:16-alpine)"
+          trap 'docker rm -f "$db" > /dev/null' EXIT
+          for attempt in $(seq 1 90); do
+            if docker exec "$db" psql -h 127.0.0.1 -U postgres -d kin_critical_result_test -c 'SELECT 1' > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          python3 scripts/record-run.py --run-dir tmp/runtime-ci/critical-result-service --cwd . --file api/src/critical-result.service.ts --file api/src/critical-result-policy.ts --file api/src/critical-result.controller.ts --file api/src/study-access.service.ts --file api/src/study-access.interceptor.ts --file api/src/pacs.service.ts --file api/src/admin-audit.ts --file api/src/clinician-policy.ts --file api/prisma/migrations/20260928120000_critical_result/migration.sql --file tests/critical_result_service_test.cjs -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_CRITICAL_RESULT_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_critical_result_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/critical_result_service_test.cjs
+      # S7-U1a SV11, the source half (S7-U1a-R-001-F03): TypeScript's compiler API reads api/src/critical-result*.ts in the
+      # development target (its build layers are the ones the production build above just made) and PostgreSQL 16 plans
+      # each raw query on a disposable postgres:16-alpine holding every migration.
+      - name: Build the development target for the TypeScript-parser source check
+        run: docker build --target development -t kin-api:dev-ci api
+      - name: S7-U1a critical result sources read the report only through ReportVersion rows
+        env:
+          KIN_TEST_API_DEV_IMAGE: kin-api:dev-ci
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/critical-result-source --cwd . --file api/src/critical-result.service.ts --file api/src/critical-result-policy.ts --file api/src/critical-result.controller.ts --file tests/critical_result_source_test.py -- python3 -B tests/critical_result_source_test.py
       - name: Compiled stale-draft addendum guard and draft base-version boundaries
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-stale-draft --cwd . --file api/src/pacs.service.ts --file tests/report_stale_draft_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_stale_draft_test.cjs
       - name: Compiled citation attestation, carry-forward, limits and guarded read
@@ -1216,6 +1247,8 @@ jobs:
             tmp/runtime-ci/study-identity-client/
             tmp/runtime-ci/study-identity-server/
             tmp/runtime-ci/clinical-context-service/
+            tmp/runtime-ci/critical-result-service/
+            tmp/runtime-ci/critical-result-source/
           if-no-files-found: error
           retention-days: 7
       # The list above names directories one by one and missed later record-run steps (display-scope, viewer-branding,

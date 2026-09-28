@@ -36,7 +36,8 @@ class CandidateCiTests(unittest.TestCase):
         runner = importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
         rows, selected = candidate.exact_selection(target, runner)
         self.assertEqual([row[2] for row in rows[:2]], ["candidate-invariants", "candidate-worklist"])
-        self.assertEqual(len(selected), 105)
+        # S7-U1a: 89 invariants (six CriticalResultInvariantTests) + 15 worklist + 7 flows
+        self.assertEqual(len(selected), 111)
         self.assertEqual([item["case"] for item in selected[-7:]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
         for filename, class_name, method, prefix in candidate.FLOWS:
@@ -47,7 +48,7 @@ class CandidateCiTests(unittest.TestCase):
     def test_configuration_uses_target_runner_plans_evidence_and_540_seconds(self):
         class FakeRunner:
             def module_plan(self, filename, unit, mode, timeout, class_name):
-                count = 83 if unit == "candidate-invariants" else 15
+                count = 89 if unit == "candidate-invariants" else 15
                 return {"tests": [{"file": filename, "case": "Local.test_" + str(i)} for i in range(count)]}
             def load_module(self, path):
                 filename = path.relative_to(candidate.TOOLS_ROOT / "tests").as_posix()
@@ -76,7 +77,7 @@ class CandidateCiTests(unittest.TestCase):
             self.assertEqual(timeout, 575)
             env = FakeCi.profile_environment("measurements", out, {"ORTHANC_PASS": "synthetic"})
             self.assertEqual(env["KIN_EVIDENCE_DIR"], str(out / "screens"))
-            self.assertEqual(len(selected), 105)
+            self.assertEqual(len(selected), 111)
 
     def test_workflow_keeps_tool_and_candidate_checkouts_separate(self):
         source = (candidate.TOOLS_ROOT / ".github/workflows/candidate.yml").read_text(encoding="utf-8")

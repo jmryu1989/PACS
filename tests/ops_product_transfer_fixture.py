@@ -24,6 +24,10 @@ LIMITS = combined.LIMITS
 # S5-U4c (43 tables): the synthetic rows grew by 3,560 bytes (measured with a 34-digit UID; the real UID's length moves
 # it by a few bytes per row) and the modelled catalog by about 13 KB (26 columns, 16 constraints, 7 indexes; 411 of
 # the 512 columns catalog_contract allows); the whole receipt is estimated at about 203 KB, pending the hosted size.
+# S7-U1a (46 tables): measured on a local postgres:16-alpine with a 43-digit UID, the product section (catalog, rows,
+# sequences, study UID) grew from 202,084 to 234,975 bytes (+23,025 catalog: 460 columns, 172 constraints, 97 indexes;
+# +9,866 rows); with the 32 migration records (4,950 bytes) and the C12L envelope (about 2.3 KB in the pure fixture) the
+# whole receipt is about 242 KB, about 20 KB under this cap. The next schema unit should expect to raise it.
 RECEIPT_LIMIT = 256*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
@@ -57,13 +61,15 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260924130000_gateway_receipt/migration.sql',
               'api/prisma/migrations/20260924140000_gateway_retry_request/migration.sql',
               'api/prisma/migrations/20260926120000_study_questions/migration.sql',
-              'api/prisma/migrations/20260926130000_study_image_requests/migration.sql']
+              'api/prisma/migrations/20260926130000_study_image_requests/migration.sql',
+              'api/prisma/migrations/20260928120000_critical_result/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                  'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
+                 'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt',
                  'GatewayReceipt', 'GatewayRetryRequest'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
@@ -142,7 +148,9 @@ def expected_rows(uid):
         field='findings', templateId='SYN-T1', templateRevision=2, itemCode='SYN-CHOICE',
         valueType='choice', value='c1', unit=None, renderedText='SYNTHETIC-ITEM choice = alpha',
         enteredAt='2026-09-06T00:00:00.123Z', enteredBy='SYNTHETIC-reader')]
-    rows['ReportVersion'] = [dict(id=number, uid=uid, version=number, action='Save',
+    # S7-U1a: the two history rows are a signed approve (v1) and its addendum (v2), so the critical result records below
+    # pin real final rows through their composite foreign key and their action copies equal the pinned rows.
+    rows['ReportVersion'] = [dict(id=number, uid=uid, version=number, action='approve' if number == 1 else 'addendum',
         findings='SYNTHETIC history '+str(number), conclusion='', recommendation='', reason=None,
         author='SYNTHETIC-reader', citations=citation if number == 2 else None,
         structured=structured if number == 2 else None, at=STAMP) for number in (1, 2)]
@@ -292,6 +300,51 @@ def expected_rows(uid):
         result=dict(id=parent, studyUid=uid, requestId=request_id, kind=kind, action=action, to=to, revision=revision,
             at='2026-09-06T00:00:00.123Z', **{'from': before}), at=STAMP)
         for index, (request_id, parent, kind, subject, action, before, to, revision) in enumerate(receipts)]
+    # S7-U1a: four critical result records (contract S7-U1p section 12.3-3) - an acknowledged one to a clinician (v1), a
+    # superseded one to a radiologist (v1) with its replacement still created (v2, supersedes the old one), and a cancelled
+    # one to another clinician (v2) - their seven events (created seq 1 and one terminal seq 2 each; the replacement has
+    # only created) and six receipts (create x3, ack, supersede naming the old record with the new record's id, cancel).
+    # Each result is the stored CriticalResultApplied a replay answers. The rows satisfy every CHECK, the partial unique
+    # pending key (one created record) and the pinned-row foreign keys of 20260928120000_critical_result.
+    acked, superseded, replacement, cancelled = ('00000000-0000-4000-8000-000000000f' + n for n in ('01', '11', '12', '21'))
+    reader = dict(senderSub='SYNTHETIC-reader-sub', senderActor='SYNTHETIC-reader', senderName='SYNTHETIC reader')
+    identity = dict(origName='SYNTHETIC ORIGINAL NAME', origPatientId='SYNTHETIC-patient', origBirth='19700101', origStudyDate='20260906')
+    none = dict(acknowledgedAt=None, cancelledAt=None, cancelReason=None, supersededAt=None)
+    def critical(record, recipient, role, version, message, state, revision, supersedes=None, **terminal):
+        return dict(id=record, studyUid=uid, institutionId='SYNTHETIC-hospital', senderInstitutionId='SYNTHETIC-hospital', **reader,
+            recipientSub='SYNTHETIC-' + recipient + '-sub', recipientActor='SYNTHETIC-' + recipient, recipientName='SYNTHETIC ' + recipient,
+            recipientRole=role, sourceVersion=version, sourceAction='approve' if version == 1 else 'addendum', sourceAuthor='SYNTHETIC-reader',
+            sourceAt=STAMP, **identity, message=message, state=state, revision=revision, supersedesId=supersedes,
+            **{**none, **terminal}, changedBy='SYNTHETIC-clinician' if state == 'acknowledged' else 'SYNTHETIC-reader',
+            createdAt=STAMP, updatedAt=STAMP)
+    rows['CriticalResult'] = [
+        critical(acked, 'clinician', 'clinician', 1, 'SYNTHETIC critical message\n합성', 'acknowledged', 2, acknowledgedAt=STAMP),
+        critical(superseded, 'reader2', 'radiologist', 1, 'SYNTHETIC first wording', 'superseded', 2, supersededAt=STAMP),
+        critical(replacement, 'reader2', 'radiologist', 2, 'SYNTHETIC corrected wording', 'created', 1, supersedes=superseded),
+        critical(cancelled, 'clinician2', 'clinician', 2, 'SYNTHETIC sent to the wrong clinician', 'cancelled', 2,
+            cancelledAt=STAMP, cancelReason='SYNTHETIC cancel reason')]
+    ack_request, supersede_request, cancel_request = acked[:-2] + '02', replacement, cancelled[:-2] + '22'
+    reader_actor = dict(actorSub='SYNTHETIC-reader-sub', actorActor='SYNTHETIC-reader', actorName='SYNTHETIC reader', actorRole='radiologist')
+    events = [(acked, 1, 'created', reader_actor, acked), (acked, 2, 'acknowledged', dict(actorSub='SYNTHETIC-clinician-sub',
+                  actorActor='SYNTHETIC-clinician', actorName='SYNTHETIC clinician', actorRole='clinician'), ack_request),
+              (superseded, 1, 'created', reader_actor, superseded), (superseded, 2, 'superseded', reader_actor, supersede_request),
+              (replacement, 1, 'created', reader_actor, supersede_request),
+              (cancelled, 1, 'created', reader_actor, cancelled), (cancelled, 2, 'cancelled', reader_actor, cancel_request)]
+    rows['CriticalResultEvent'] = [dict(id='00000000-0000-4000-8000-000000000e' + str(70 + index), recordId=record, seq=seq, event=event,
+        revision=seq, **actor, requestId=request, at=STAMP) for index, (record, seq, event, actor, request) in enumerate(events)]
+    applied = lambda record, request, action, before, to, revision, replacement_row=None: dict(id=record, studyUid=uid, requestId=request,
+        action=action, to=to, revision=revision, replacement=replacement_row, at='2026-09-06T00:00:00.123Z', **{'from': before})
+    critical_receipts = [
+        (acked, acked, 'SYNTHETIC-reader-sub', applied(acked, acked, 'create', None, 'created', 1)),
+        (ack_request, acked, 'SYNTHETIC-clinician-sub', applied(acked, ack_request, 'ack', 'created', 'acknowledged', 2)),
+        (superseded, superseded, 'SYNTHETIC-reader-sub', applied(superseded, superseded, 'create', None, 'created', 1)),
+        (supersede_request, superseded, 'SYNTHETIC-reader-sub', applied(superseded, supersede_request, 'supersede', 'created', 'superseded', 2,
+            dict(id=replacement, revision=1, sourceVersion=2))),
+        (cancelled, cancelled, 'SYNTHETIC-reader-sub', applied(cancelled, cancelled, 'create', None, 'created', 1)),
+        (cancel_request, cancelled, 'SYNTHETIC-reader-sub', applied(cancelled, cancel_request, 'cancel', 'created', 'cancelled', 2))]
+    rows['CriticalResultReceipt'] = [dict(requestId=request, recordId=record, subjectSub=subject, action=result['action'],
+        fingerprint=str(index + 1)*64, appliedRevision=result['revision'], result=result, at=STAMP)
+        for index, (request, record, subject, result) in enumerate(critical_receipts)]
     rows['ReaderAssignment']=[dict(studyUid=uid,institutionId='SYNTHETIC-hospital',revision=4,
         readerSub='SYNTHETIC-sub',readerActor='SYNTHETIC-reader',readerName='SYNTHETIC reader',changedBy='SYNTHETIC-admin',
         lastRequest='00000000-0000-4000-8000-000000000701',lastFingerprint='d'*64,updatedAt=STAMP)]
@@ -350,6 +403,7 @@ def create_product(name, db, uid):
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                   'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
+                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt',
                   'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:
@@ -632,6 +686,39 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing image request receipt result check'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN INSERT INTO "StudyImageRequestReceipt" SELECT * FROM "StudyImageRequestReceipt" LIMIT 1;
         RAISE EXCEPTION 'missing image request receipt PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "CriticalResult" SET state='Bogus';
+        RAISE EXCEPTION 'missing critical result state check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "CriticalResult" SET revision=1 WHERE state<>'created';
+        RAISE EXCEPTION 'missing critical result revision check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "CriticalResult" SET "acknowledgedAt"=NULL WHERE state='acknowledged';
+        RAISE EXCEPTION 'missing critical result terminal check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "CriticalResult" SET "sourceAction"='save' WHERE "recipientRole"='clinician';
+        RAISE EXCEPTION 'missing critical result final-source check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "CriticalResult" SET "sourceAction"='reset';
+        RAISE EXCEPTION 'missing critical result pinnable-source check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "CriticalResult" SET "recipientSub"="senderSub";
+        RAISE EXCEPTION 'missing critical result party check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "CriticalResult" SET "sourceVersion"=99;
+        RAISE EXCEPTION 'missing critical result pinned-row FK'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN DELETE FROM "ReportVersion" WHERE version=1;
+        RAISE EXCEPTION 'missing pinned report version restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN DELETE FROM "CriticalResult";
+        RAISE EXCEPTION 'missing critical result history restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN INSERT INTO "CriticalResult" SELECT * FROM json_populate_record(NULL::"CriticalResult",
+        (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000f99','supersedesId',NULL))::json FROM "CriticalResult" t WHERE state='created'));
+        RAISE EXCEPTION 'missing pending critical result unique'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN INSERT INTO "CriticalResultEvent" SELECT * FROM json_populate_record(NULL::"CriticalResultEvent",
+        (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000e99','event','cancelled'))::json
+         FROM "CriticalResultEvent" t WHERE seq=2 AND event<>'cancelled' LIMIT 1));
+        RAISE EXCEPTION 'missing one terminal event per record'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "CriticalResultEvent" SET seq=3 WHERE seq=2;
+        RAISE EXCEPTION 'missing critical result event seq check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "CriticalResultReceipt" SET "appliedRevision"=2 WHERE action='create';
+        RAISE EXCEPTION 'missing critical result receipt revision check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "CriticalResultReceipt" SET result='[]'::jsonb;
+        RAISE EXCEPTION 'missing critical result receipt result check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN INSERT INTO "CriticalResultReceipt" SELECT * FROM "CriticalResultReceipt" LIMIT 1;
+        RAISE EXCEPTION 'missing critical result receipt PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
       BEGIN UPDATE "StudyConsultation" SET state='Requested';
         INSERT INTO "StudyConsultation" SELECT * FROM json_populate_record(NULL::"StudyConsultation",
           (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000999'))::json FROM "StudyConsultation" t LIMIT 1));

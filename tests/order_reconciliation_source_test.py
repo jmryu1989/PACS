@@ -25,6 +25,10 @@ except Exception:
     pass
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+# the restore fixture's own data (its migration list, tables and synthetic rows); importing it runs nothing
+import ops_product_transfer_fixture as restore_fixture  # noqa: E402
+
 VECTORS = json.loads((ROOT / "tests" / "order_reconciliation_vectors.json").read_text(encoding="utf-8"))
 OBSERVATION_VECTORS = json.loads((ROOT / "tests" / "study_observation_vectors.json").read_text(encoding="utf-8"))
 
@@ -445,17 +449,20 @@ class MigrationPins(unittest.TestCase):
     def test_the_image_and_restore_bookkeeping_name_the_migration(self):
         production = text("tests", "production_image_test.py")
         fixture = text("tests", "ops_product_transfer_fixture.py")
-        transfer = text("tests", "ops_product_transfer_test.py")
         self.assertIn("'" + MIGRATION_NAME + "'", production)
         # S4-U3's gateway-receipt and then S4-U4's gateway-retry-request migrations follow this one: 29 files.
         # The order is pinned, not a position from the end, so the next additive migration moves only the count.
         # S5-U4a's 20260926120000_study_questions (StudyQuestion, StudyQuestionEntry) was that one: 30 files.
         # S5-U4c's 20260926130000_study_image_requests (StudyImageRequest, StudyImageRequestReceipt): 31 files.
+        # S7-U1a's 20260928120000_critical_result (CriticalResult, CriticalResultEvent, CriticalResultReceipt): 32 files.
         self.assertIn("'api/prisma/migrations/" + MIGRATION_NAME + "/migration.sql',", fixture)
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 31)", transfer)
         self.assertIn("accession='SYNTHETIC-ACC-1'", fixture)
         self.assertIn("'ReportDraft', 'Order', 'UserFilter',", fixture)
         names = sorted(p.name for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())
+        # the restore fixture applies every migration directory, in order: its list compared as data
+        # (S7-U1a-B-R-001-F03: not the text of ops_product_transfer_test.py's count assertion)
+        self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 32)
         later = [MIGRATION_NAME, "20260924130000_gateway_receipt", "20260924140000_gateway_retry_request"]
         self.assertEqual(names[names.index(MIGRATION_NAME):names.index(MIGRATION_NAME) + 3], later)
 

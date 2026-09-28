@@ -152,6 +152,15 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "studies/:uid/image-requests"): Route(Kind.TENANT),
     ("POST", "studies/:uid/image-requests"): Route(Kind.TENANT),
     ("POST", "image-requests/:id"): Route(Kind.TENANT),
+    # S7-U1a — 중요 결과 전달·명시적 수신 확인(consultation·질문과 별도 모델·서비스). 기관·StudyAccess·참여자·원문 권한 경계는 critical-result.service.ts.
+    ("GET", "studies/:uid/critical-result-recipients"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/critical-results"): Route(Kind.TENANT),
+    ("GET", "critical-results"): Route(Kind.TENANT),
+    ("GET", "critical-results/:id"): Route(Kind.TENANT),
+    ("GET", "studies/:uid/critical-results"): Route(Kind.TENANT),
+    ("POST", "critical-results/:id/ack"): Route(Kind.TENANT),
+    ("POST", "critical-results/:id/cancel"): Route(Kind.TENANT),
+    ("POST", "critical-results/:id/supersede"): Route(Kind.TENANT),
     ("GET", "reader-candidates"): Route(Kind.USER),
     ("GET", "studies/:uid/reader-assignment"): Route(Kind.USER),
     ("POST", "studies/:uid/reader-assignment"): Route(Kind.USER),
@@ -4646,6 +4655,432 @@ class LiveInvariantTests(unittest.TestCase):
                 "동시 commitReport가 같은 version을 계산해 500을 냈습니다. "
                 f"statuses={statuses}, errors={server_errors}",
             )
+
+
+# ── S7-U1a 중요 결과 전달 ──
+# REQ-S7-U1a-AUTHZ / REQ-S7-U1a-RECIPIENT-MATRIX / REQ-S7-U1a-IDEMPOTENCY / REQ-S7-U1a-RECORD / REQ-S7-U1a-MIGRATION /
+# REQ-S7-U1p-DEDUP -> RISK-S7-CVR-WRONG-RECIPIENT / RISK-S7-CVR-SOURCE-BYPASS / RISK-S7-CVR-PROXY-ACK /
+# RISK-S7-CVR-ACK-CANCEL-RACE / RISK-S7-CVR-COUNT-LEAK / RISK-S7-U1p-DUPLICATE-PENDING / RISK-S7-CVR-MIGRATION-DRIFT
+# -> TEST-S7-U1a-LIVE (invariant half: role matrix, institution and tele boundary, the append-only ledger and its DB
+# constraints, requestId replay/reuse and one winner, the study delete refusal; contract S7-U1p CR01, CR02, CR10, CR11,
+# CR13, CR15, CR21 and S-CR/S-RACE). The state transitions, late updates and revocation are tests/e2e/test_critical_result.py.
+# Owned data only: run-created Keycloak users (kin-test-*), the realm role `clinician` only when this run had to create it,
+# one synthetic C-STORE study per case, the critical result rows, receipts and audit rows written on those studies. Every
+# case removes its critical result rows before the study cleanup (all foreign keys RESTRICT). Case 02 moves the owner and
+# tele institution of its own synthetic study with psql (no product path moves ownership) and moves it back in a finally.
+CRITICAL_STUDY_UID = re.compile(r"^[0-9]+(?:\.[0-9]+)+$")
+CRITICAL_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+CRITICAL_AUDIT_ACTION = "study.critical-result"
+
+
+def sql_text(value: Any) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def critical_ledger(uid: str) -> dict[str, int]:
+    """Records, events, receipts and study.critical-result audit rows of one run-owned study, read with psql."""
+    if not CRITICAL_STUDY_UID.fullmatch(uid):
+        raise RuntimeError(f"refusing a critical result count for an abnormal UID: {uid}")
+    u = sql_text(uid)
+    [row] = psql(
+        f'SELECT (SELECT count(*) FROM "CriticalResult" WHERE "studyUid"={u})::text || \',\' || '
+        f'(SELECT count(*) FROM "CriticalResultEvent" e JOIN "CriticalResult" r ON r.id=e."recordId" WHERE r."studyUid"={u})::text || \',\' || '
+        f'(SELECT count(*) FROM "CriticalResultReceipt" c JOIN "CriticalResult" r ON r.id=c."recordId" WHERE r."studyUid"={u})::text || \',\' || '
+        f'(SELECT count(*) FROM "AuditLog" WHERE target={u} AND action={sql_text(CRITICAL_AUDIT_ACTION)})::text')
+    records, events, receipts, audits = (int(value) for value in row.split(","))
+    return {"records": records, "events": events, "receipts": receipts, "audits": audits}
+
+
+def critical_row(record_id: str) -> dict[str, Any]:
+    if not CRITICAL_ID.fullmatch(record_id):
+        raise RuntimeError(f"not a critical result id: {record_id!r}")
+    rows = psql(f'SELECT to_jsonb(t)::text FROM "CriticalResult" t WHERE id={sql_text(record_id)}')
+    if len(rows) != 1:
+        raise AssertionError(f"CriticalResult {record_id}: {rows}")
+    return json.loads(rows[0])
+
+
+def drop_critical_results(uid: str, owned: set[str]) -> None:
+    """Critical result rows of one run-owned study, children first; a row naming a subject outside owned stops the cleanup.
+
+    The foreign keys RESTRICT and LiveStack.cleanup_fixture deletes StudyState and ReportVersion directly, so a case that
+    writes critical results runs this before the study cleanup. A replacement names the record it superseded, so records
+    go leaves first. Audit rows go with the study cleanup (target = the UID)."""
+    if not CRITICAL_STUDY_UID.fullmatch(uid):
+        raise RuntimeError(f"refusing critical result cleanup for an abnormal UID: {uid}")
+    u = sql_text(uid)
+    parties = set(psql(f'SELECT DISTINCT "senderSub" FROM "CriticalResult" WHERE "studyUid"={u}'))
+    parties |= set(psql(f'SELECT DISTINCT "recipientSub" FROM "CriticalResult" WHERE "studyUid"={u}'))
+    foreign = parties - owned
+    if foreign:
+        raise RuntimeError(f"refusing to delete critical result rows naming subjects this run does not own: {sorted(foreign)}")
+    psql('BEGIN; '
+         f'DELETE FROM "CriticalResultEvent" e USING "CriticalResult" r WHERE r.id=e."recordId" AND r."studyUid"={u}; '
+         f'DELETE FROM "CriticalResultReceipt" c USING "CriticalResult" r WHERE r.id=c."recordId" AND r."studyUid"={u}; '
+         'DO $cleanup$ BEGIN LOOP '
+         f'DELETE FROM "CriticalResult" r WHERE r."studyUid"={u} '
+         'AND NOT EXISTS (SELECT 1 FROM "CriticalResult" c WHERE c."supersedesId"=r.id); '
+         'EXIT WHEN NOT FOUND; END LOOP; END $cleanup$; COMMIT;')
+    if psql(f'SELECT count(*) FROM "CriticalResult" WHERE "studyUid"={u}') != ["0"]:
+        raise RuntimeError("critical result rows remained after cleanup")
+
+
+def ensure_clinician_role(stack: LiveStack) -> bool:
+    """The realm role `clinician`; True when this run created it (and must delete it)."""
+    role = stack.kc_admin("GET", "/roles/clinician")
+    if role.status == 200:
+        return False
+    if role.status != 404:
+        raise RuntimeError(f"clinician role lookup failed: {role.status} {role.text}")
+    created = stack.kc_admin("POST", "/roles", {"name": "clinician", "description": "temporary S7-U1a clinician role"})
+    if created.status != 201:
+        raise RuntimeError(f"clinician role creation failed: {created.status} {created.text}")
+    return True
+
+
+class CriticalResultHarness:
+    """Request helpers shared by the invariant class below and tests/e2e/test_critical_result.py."""
+    stack: LiveStack
+    owners: dict[str, list[str]]
+
+    def owner(self, user: str) -> list[str]:
+        if user not in self.owners:
+            me = self.stack.request("GET", "/me", user)
+            if me.status != 200:
+                raise AssertionError(f"GET /me as {user}: {me.status} {me.text[:300]}")
+            self.owners[user] = [me.body["institution"], me.body["sub"]]
+        return self.owners[user]
+
+    def sub(self, user: str) -> str:
+        return self.stack.user_ids[user]
+
+    def check(self, result: HttpResult, status: int, code: str | None = None) -> HttpResult:
+        self.assertEqual(result.status, status, result.text[:600])  # type: ignore[attr-defined]
+        if code is not None:
+            self.assertEqual(result.body.get("code") if isinstance(result.body, dict) else None, code, result.text[:600])  # type: ignore[attr-defined]
+        return result
+
+    def commit(self, uid: str, user: str, action: str, base: int, **extra: Any) -> HttpResult:
+        body = {"action": action, "baseVersion": base, "findings": extra.pop("findings", ""),
+                "conclusion": extra.pop("conclusion", ""), "recommendation": extra.pop("recommendation", ""), **extra}
+        return self.stack.request("POST", f"/studies/{quote(uid)}/report/commit", user, body)
+
+    def send(self, user: str, uid: str, recipient: str, version: int, message: str = "SYNTHETIC critical finding message",
+             rid: str | None = None, recipient_sub: str | None = None) -> tuple[str, HttpResult]:
+        rid = rid or str(uuid.uuid4())
+        return rid, self.stack.request("POST", f"/studies/{quote(uid)}/critical-results", user, {
+            "requestId": rid, "expectedOwner": self.owner(user), "recipientSub": recipient_sub or self.sub(recipient),
+            "sourceVersion": version, "message": message})
+
+    def ack(self, user: str, record: str, revision: int = 1, rid: str | None = None) -> tuple[str, HttpResult]:
+        rid = rid or str(uuid.uuid4())
+        return rid, self.stack.request("POST", f"/critical-results/{quote(record)}/ack", user,
+                                       {"requestId": rid, "expectedOwner": self.owner(user), "revision": revision})
+
+    def cancel(self, user: str, record: str, revision: int = 1, reason: str = "SYNTHETIC cancel reason",
+               rid: str | None = None) -> tuple[str, HttpResult]:
+        rid = rid or str(uuid.uuid4())
+        return rid, self.stack.request("POST", f"/critical-results/{quote(record)}/cancel", user,
+                                       {"requestId": rid, "expectedOwner": self.owner(user), "revision": revision, "reason": reason})
+
+    def supersede(self, user: str, record: str, revision: int, version: int, message: str = "SYNTHETIC corrected message",
+                  rid: str | None = None) -> tuple[str, HttpResult]:
+        rid = rid or str(uuid.uuid4())
+        return rid, self.stack.request("POST", f"/critical-results/{quote(record)}/supersede", user,
+                                       {"requestId": rid, "expectedOwner": self.owner(user), "revision": revision,
+                                        "sourceVersion": version, "message": message})
+
+    def read(self, user: str, record: str) -> HttpResult:
+        return self.stack.request("GET", f"/critical-results/{quote(record)}", user)
+
+    def listed(self, user: str, view: str, state: str | None = None, cursor: str | None = None) -> HttpResult:
+        query = "view=" + view + ("&state=" + state if state else "") + ("&cursor=" + quote(cursor) if cursor else "")
+        return self.stack.request("GET", "/critical-results?" + query, user)
+
+    def ids(self, result: HttpResult) -> list[str]:
+        return [item["id"] for item in result.body["items"]]
+
+    def candidates(self, user: str, uid: str) -> HttpResult:
+        return self.stack.request("GET", f"/studies/{quote(uid)}/critical-result-recipients", user)
+
+    def for_study(self, user: str, uid: str) -> HttpResult:
+        return self.stack.request("GET", f"/studies/{quote(uid)}/critical-results", user)
+
+    def move(self, uid: str, institution: str, tele: str | None = None) -> None:
+        """No product route moves a study's owner (contract F-21 note); only this run's synthetic study is moved."""
+        if not CRITICAL_STUDY_UID.fullmatch(uid) or institution not in ("hallym", "kin-center") or tele not in (None, "hallym", "kin-center"):
+            raise RuntimeError("refusing an unexpected study move")
+        psql(f'UPDATE "StudyState" SET "institutionId"={sql_text(institution)}, '
+             f'"teleInstitutionId"={"NULL" if tele is None else sql_text(tele)} WHERE uid={sql_text(uid)}')
+
+
+class CriticalResultInvariantTests(CriticalResultHarness, unittest.TestCase):
+    maxDiff = None
+    IDENTITIES = (("clinician", ["clinician"], "hallym"), ("clinician2", ["clinician"], "hallym"),
+                  ("kclinician", ["clinician"], "kin-center"), ("clintech", ["clinician", "technician"], "hallym"),
+                  ("hadmin", ["admin"], "hallym"))
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.stack = LiveStack()
+        cls.owners = {}
+        cls.created_role = False
+        cls.addClassCleanup(cls.stack.cleanup_test_identities)
+        cls.addClassCleanup(cls.stack.cleanup_all)
+        cls.addClassCleanup(cls.drop_all_critical_results)
+        cls.stack.require_stack()
+        cls.created_role = ensure_clinician_role(cls.stack)
+        cls.addClassCleanup(cls.delete_role_if_created)
+        for logical, roles, group in cls.IDENTITIES:
+            cls.stack.create_test_identity(logical, roles, group)
+
+    @classmethod
+    def delete_role_if_created(cls) -> None:
+        if cls.created_role and cls.stack.kc_admin("DELETE", "/roles/clinician").status not in (204, 404):
+            raise RuntimeError("temporary clinician role cleanup failed")
+        cls.created_role = False
+
+    @classmethod
+    def drop_all_critical_results(cls) -> None:
+        # Safety net before LiveStack.cleanup_all: a failed per-case cleanup must not leave the study delete refused.
+        for uid in list(cls.stack.active):
+            drop_critical_results(uid, set(cls.stack.user_ids.values()))
+
+    def study(self, institution: str = "한림병원") -> Fixture:
+        fixture = self.stack.create_fixture(institution)
+        self.addCleanup(self.stack.cleanup_fixture, fixture.uid)
+        self.addCleanup(drop_critical_results, fixture.uid, set(self.stack.user_ids.values()))
+        return fixture
+
+    def approved(self, fixture: Fixture) -> None:
+        self.check(self.commit(fixture.uid, "doctor", "approve", 0, findings="SYNTHETIC approved findings " + fixture.secret), 201)
+
+    def refuses(self, statement: str, constraints: tuple[str, ...], condition: str) -> None:
+        """Only a named constraint may refuse: acceptance or another error fails the case, and the refused write rolls back
+        with the block's subtransaction (nothing persists either way)."""
+        names = "ARRAY[" + ",".join(sql_text(name) for name in constraints) + "]"
+        psql(f"DO $probe$ DECLARE refused text; BEGIN {statement}; RAISE EXCEPTION 'SYNTHETIC write accepted'; "
+             f"EXCEPTION WHEN {condition} THEN GET STACKED DIAGNOSTICS refused = CONSTRAINT_NAME; "
+             f"IF refused IS NULL OR NOT (refused = ANY ({names})) THEN RAISE EXCEPTION 'SYNTHETIC refused by %', refused; END IF; "
+             "END $probe$")
+
+    def test_cr_inv_01_role_matrix_and_attribution_from_token(self) -> None:
+        """CR01/CR11: attribution from the token and Keycloak, exact body keys, and every route's role and participant answer."""
+        f = self.study()
+        self.approved(f)
+        rid, created = self.send("doctor", f.uid, "clinician", 1)
+        self.check(created, 201)
+        self.assertEqual(sorted(created.body), ["applied", "owner", "replayed"])
+        row = critical_row(rid)
+        sender, recipient = self.stack.request("GET", "/me", "doctor").body, self.stack.request("GET", "/me", "clinician").body
+        self.assertEqual((row["senderSub"], row["senderActor"], row["recipientSub"], row["recipientActor"], row["recipientName"],
+                          row["institutionId"], row["senderInstitutionId"], row["sourceVersion"], row["sourceAction"], row["recipientRole"]),
+                         (sender["sub"], sender["actor"], recipient["sub"], recipient["actor"], "clinician KIN", "hallym", "hallym",
+                          1, "approve", "clinician"))
+        for key in ("institution", "institutionId", "senderSub", "senderName", "recipientName", "recipientActor", "role", "sourceAction", "body"):
+            extra = self.stack.request("POST", f"/studies/{quote(f.uid)}/critical-results", "doctor", {
+                "requestId": str(uuid.uuid4()), "expectedOwner": self.owner("doctor"), "recipientSub": self.sub("clinician2"),
+                "sourceVersion": 1, "message": "SYNTHETIC", key: "SYNTHETIC-" + key})
+            self.check(extra, 400, "CRITICAL_RESULT_INPUT_INVALID")
+        denied, role = "CLINICIAN_ROUTE_DENIED", "CRITICAL_RESULT_ROLE_REQUIRED"
+        # #1 candidates and #2 create
+        for user, status, code in (("doctor", 200, None), ("jmryu", 200, None), ("clinician", 403, denied), ("clintech", 403, role),
+                                   ("tech", 403, role), ("hadmin", 403, role), ("kdoctor", 404, "STUDY_NOT_FOUND")):
+            self.check(self.candidates(user, f.uid), status, code)
+        for user, status, code in (("clinician", 403, denied), ("clintech", 403, role), ("tech", 403, role), ("hadmin", 403, role),
+                                   ("kdoctor", 404, "STUDY_NOT_FOUND")):
+            self.check(self.send(user, f.uid, "clinician2", 1)[1], status, code)
+        # #3 lists
+        for user, status in (("clinician", 200), ("clintech", 200), ("doctor2", 200), ("tech", 403), ("hadmin", 403)):
+            self.check(self.listed(user, "received"), status, None if status == 200 else role)
+        self.assertEqual(self.ids(self.listed("clinician", "received")), [rid])
+        self.assertEqual(self.ids(self.listed("doctor2", "received")), [])
+        self.check(self.listed("clinician", "sent"), 403, role)
+        self.assertEqual(self.ids(self.listed("doctor", "sent")), [rid])
+        # #4 one record: sender and recipient only
+        self.assertEqual(self.check(self.read("clinician", rid), 200).body["item"]["view"], "full")
+        self.assertEqual(self.check(self.read("doctor", rid), 200).body["item"]["view"], "sender")
+        for user, status, code in (("doctor2", 404, "CRITICAL_RESULT_NOT_FOUND"), ("clinician2", 404, "CRITICAL_RESULT_NOT_FOUND"),
+                                   ("clintech", 404, "CRITICAL_RESULT_NOT_FOUND"), ("jmryu", 404, "CRITICAL_RESULT_NOT_FOUND"),
+                                   ("kdoctor", 404, "CRITICAL_RESULT_NOT_FOUND"), ("kclinician", 404, "CRITICAL_RESULT_NOT_FOUND"),
+                                   ("tech", 403, role), ("hadmin", 403, role)):
+            self.check(self.read(user, rid), status, code)
+        # #5 per study
+        self.assertEqual([item["id"] for item in self.check(self.for_study("doctor", f.uid), 200).body["items"]], [rid])
+        for user in ("clintech", "doctor2"):
+            self.assertEqual(self.check(self.for_study(user, f.uid), 200).body["items"], [])
+        for user, status, code in (("clinician", 403, denied), ("tech", 403, role), ("kdoctor", 404, "STUDY_NOT_FOUND")):
+            self.check(self.for_study(user, f.uid), status, code)
+        # #6 ACK: the recipient only, no proxy ACK
+        for user, status, code in (("doctor", 404, "CRITICAL_RESULT_NOT_FOUND"), ("doctor2", 404, "CRITICAL_RESULT_NOT_FOUND"),
+                                   ("clinician2", 404, "CRITICAL_RESULT_NOT_FOUND"), ("kclinician", 404, "CRITICAL_RESULT_NOT_FOUND"),
+                                   ("hadmin", 403, role), ("tech", 403, role)):
+            self.check(self.ack(user, rid)[1], status, code)
+        self.assertEqual(critical_ledger(f.uid), {"records": 1, "events": 1, "receipts": 1, "audits": 1})
+        self.check(self.ack("clinician", rid)[1], 201)
+        # #7/#8: the sender only
+        for user, status, code in (("clinician", 403, denied), ("tech", 403, role), ("hadmin", 403, role),
+                                   ("doctor2", 404, "CRITICAL_RESULT_NOT_FOUND"), ("kdoctor", 404, "CRITICAL_RESULT_NOT_FOUND")):
+            self.check(self.cancel(user, rid, 2)[1], status, code)
+            self.check(self.supersede(user, rid, 2, 1)[1], status, code)
+        self.check(self.cancel("doctor", rid, 2)[1], 409, "CRITICAL_RESULT_ACKNOWLEDGED")
+        self.assertEqual(critical_ledger(f.uid), {"records": 1, "events": 2, "receipts": 2, "audits": 2})
+
+    def test_cr_inv_02_institution_boundary_tele_and_owner_move(self) -> None:
+        """CR21/CR13/T-3: the tele institution never participates; an owner move hides records everywhere, replays included."""
+        f = self.study()
+        self.approved(f)
+        rid, created = self.send("doctor", f.uid, "clinician", 1)
+        self.check(created, 201)
+        for user in ("kdoctor", "kclinician"):
+            self.check(self.send("doctor", f.uid, user, 1)[1], 400, "CRITICAL_RESULT_RECIPIENT_INVALID")
+        self.move(f.uid, "hallym", tele="kin-center")
+        try:
+            for user in ("kdoctor", "kclinician"):
+                self.check(self.read(user, rid), 404, "CRITICAL_RESULT_NOT_FOUND")
+                self.assertNotIn(rid, self.ids(self.check(self.listed(user, "received"), 200)))
+            self.check(self.candidates("kdoctor", f.uid), 404, "STUDY_NOT_FOUND")
+            self.check(self.send("kdoctor", f.uid, "doctor2", 1)[1], 404, "STUDY_NOT_FOUND")
+            self.check(self.for_study("kdoctor", f.uid), 404, "STUDY_NOT_FOUND")
+            self.assertNotIn(rid, self.ids(self.check(self.listed("kdoctor", "sent"), 200)))
+            # GET audit: the owner sees the owner-only rows, the tele institution sees the study's other rows without them
+            owner_rows = self.check(self.stack.request("GET", f"/audit?uid={quote(f.uid)}", "doctor"), 200).body
+            tele_rows = self.check(self.stack.request("GET", f"/audit?uid={quote(f.uid)}", "kdoctor"), 200).body
+            self.assertEqual([row["action"] for row in owner_rows].count(CRITICAL_AUDIT_ACTION), 1)
+            self.assertEqual([row["action"] for row in tele_rows].count(CRITICAL_AUDIT_ACTION), 0)
+            self.assertTrue(any(row["action"] != CRITICAL_AUDIT_ACTION for row in tele_rows), "the tele reader still sees the other rows")
+            self.move(f.uid, "kin-center")
+            self.assertEqual(self.listed("clinician", "received").body["pending"], 0)
+            for user in ("clinician", "doctor", "kdoctor"):
+                self.check(self.read(user, rid), 404, "CRITICAL_RESULT_NOT_FOUND")
+            self.assertNotIn(rid, self.ids(self.listed("clinician", "received")))
+            self.assertNotIn(rid, self.ids(self.listed("doctor", "sent")))
+            self.check(self.send("doctor", f.uid, "clinician", 1, rid=rid)[1], 404, "STUDY_NOT_FOUND")
+            self.check(self.ack("clinician", rid)[1], 404, "CRITICAL_RESULT_NOT_FOUND")
+            self.assertEqual([row["action"] for row in self.check(self.stack.request("GET", f"/audit?uid={quote(f.uid)}", "kdoctor"), 200).body]
+                             .count(CRITICAL_AUDIT_ACTION), 0, "the new owner does not inherit the record's audit rows")
+        finally:
+            self.move(f.uid, "hallym")
+        self.assertEqual(self.check(self.read("clinician", rid), 200).body["item"]["state"], "created")
+        self.assertEqual(self.listed("clinician", "received").body["pending"], 1)
+        self.assertEqual(critical_ledger(f.uid), {"records": 1, "events": 1, "receipts": 1, "audits": 1})
+
+    def test_cr_inv_03_append_only_ledger_and_db_constraints(self) -> None:
+        """REQ-S7-U1a-RECORD: reads never write; each applied request adds its event, receipt and audit row once; the DB refuses
+        a second terminal event, an out-of-shape event, a revived state, a deleted pinned row or record, and a duplicate receipt."""
+        f = self.study()
+        self.approved(f)
+        rid, created = self.send("doctor", f.uid, "clinician", 1)
+        self.check(created, 201)
+        self.assertEqual(critical_ledger(f.uid), {"records": 1, "events": 1, "receipts": 1, "audits": 1})
+        for _ in range(3):
+            self.check(self.read("clinician", rid), 200)
+            self.check(self.listed("clinician", "received"), 200)
+            self.check(self.for_study("doctor", f.uid), 200)
+            self.check(self.read("doctor", rid), 200)
+        self.assertEqual(critical_ledger(f.uid), {"records": 1, "events": 1, "receipts": 1, "audits": 1})
+        self.assertEqual(critical_row(rid)["state"], "created", "reads never acknowledge")
+        ack_rid, acked = self.ack("clinician", rid)
+        self.check(acked, 201)
+        settled = critical_ledger(f.uid)
+        self.assertEqual(settled, {"records": 1, "events": 2, "receipts": 2, "audits": 2})
+        self.assertTrue(self.check(self.send("doctor", f.uid, "clinician", 1, rid=rid)[1], 201).body["replayed"])
+        self.assertTrue(self.check(self.ack("clinician", rid, rid=ack_rid)[1], 201).body["replayed"])
+        self.check(self.cancel("doctor", rid, 1)[1], 409, "CRITICAL_RESULT_ACKNOWLEDGED")
+        self.assertEqual(critical_ledger(f.uid), settled)
+        events = [json.loads(raw) for raw in psql(f'SELECT to_jsonb(t)::text FROM "CriticalResultEvent" t WHERE "recordId"={sql_text(rid)} ORDER BY seq')]
+        self.assertEqual([(e["seq"], e["event"], e["revision"], e["actorRole"], e["requestId"]) for e in events],
+                         [(1, "created", 1, "radiologist", rid), (2, "acknowledged", 2, "clinician", ack_rid)])
+        receipts = [json.loads(raw) for raw in psql(f'SELECT to_jsonb(t)::text FROM "CriticalResultReceipt" t WHERE "recordId"={sql_text(rid)} ORDER BY "appliedRevision"')]
+        self.assertEqual([(r["requestId"], r["action"], r["appliedRevision"]) for r in receipts], [(rid, "create", 1), (ack_rid, "ack", 2)])
+        before = critical_row(rid)
+        r = sql_text(rid)
+        self.refuses('INSERT INTO "CriticalResultEvent" SELECT * FROM json_populate_record(NULL::"CriticalResultEvent", '
+                     f"(SELECT (to_jsonb(t)||jsonb_build_object('id',gen_random_uuid(),'event','cancelled'))::json FROM \"CriticalResultEvent\" t "
+                     f'WHERE "recordId"={r} AND seq=2))', ("CriticalResultEvent_recordId_seq_key",), "unique_violation")
+        self.refuses(f'UPDATE "CriticalResultEvent" SET seq=3 WHERE "recordId"={r} AND seq=2', ("CriticalResultEvent_seq_check",), "check_violation")
+        self.refuses(f"UPDATE \"CriticalResult\" SET state='created' WHERE id={r}",
+                     ("CriticalResult_revision_check", "CriticalResult_terminal_check"), "check_violation")
+        self.refuses(f"UPDATE \"CriticalResult\" SET \"sourceAction\"='save' WHERE id={r}", ("CriticalResult_source_check",), "check_violation")
+        self.refuses(f'DELETE FROM "ReportVersion" WHERE uid={sql_text(f.uid)} AND version=1',
+                     ("CriticalResult_studyUid_sourceVersion_fkey",), "foreign_key_violation")
+        self.refuses(f'DELETE FROM "CriticalResult" WHERE id={r}',
+                     ("CriticalResultEvent_recordId_fkey", "CriticalResultReceipt_recordId_fkey"), "foreign_key_violation")
+        self.refuses(f'INSERT INTO "CriticalResultReceipt" SELECT * FROM "CriticalResultReceipt" WHERE "requestId"={r}',
+                     ("CriticalResultReceipt_pkey",), "unique_violation")
+        self.assertEqual(critical_row(rid), before)
+        self.assertEqual(critical_ledger(f.uid), settled)
+
+    def test_cr_inv_04_request_id_replay_reuse_and_single_winner(self) -> None:
+        """S-CR1/S-CR3/S-CR4 and S-RACE: a replay answers the stored result, reuse is 409, one of ACK and cancel wins."""
+        f = self.study()
+        self.approved(f)
+        rid, created = self.send("doctor", f.uid, "clinician", 1)
+        applied = self.check(created, 201).body["applied"]
+        again = self.check(self.send("doctor", f.uid, "clinician", 1, rid=rid)[1], 201).body
+        self.assertEqual((again["replayed"], again["applied"]), (True, applied))
+        self.check(self.send("doctor", f.uid, "clinician", 1, message="SYNTHETIC other message", rid=rid)[1], 409, "REQUEST_ID_REUSED")
+        self.check(self.cancel("doctor", rid, 1, rid=rid)[1], 409, "REQUEST_ID_REUSED")
+        self.check(self.send("doctor2", f.uid, "clinician", 1, rid=rid)[1], 409, "REQUEST_ID_REUSED")
+        self.assertEqual(critical_ledger(f.uid), {"records": 1, "events": 1, "receipts": 1, "audits": 1})
+        # the same new requestId twice at once: one applies, the other replays it
+        twin = str(uuid.uuid4())
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: self.send("doctor", f.uid, "clinician2", 1, rid=twin)[1], range(2)))
+        self.assertEqual(sorted(result.status for result in results), [201, 201], [result.text for result in results])
+        self.assertEqual(sorted(result.body["replayed"] for result in results), [False, True])
+        self.assertEqual(critical_ledger(f.uid), {"records": 2, "events": 2, "receipts": 2, "audits": 2})
+        # ACK and cancel of one record at once: exactly one applies and the other gets the winner's terminal code
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ack_future = pool.submit(lambda: self.ack("clinician", rid)[1])
+            cancel_future = pool.submit(lambda: self.cancel("doctor", rid)[1])
+            ack_result, cancel_result = ack_future.result(), cancel_future.result()
+        statuses = sorted([ack_result.status, cancel_result.status])
+        self.assertEqual(statuses, [201, 409], [ack_result.text, cancel_result.text])
+        loser = cancel_result if ack_result.status == 201 else ack_result
+        self.assertEqual(loser.body["code"], "CRITICAL_RESULT_ACKNOWLEDGED" if ack_result.status == 201 else "CRITICAL_RESULT_CANCELLED")
+        self.assertEqual(critical_ledger(f.uid), {"records": 2, "events": 3, "receipts": 3, "audits": 3})
+
+    def test_cr_inv_05_matrix_c1_r2_pending_duplicates_and_recipient_validation(self) -> None:
+        """CR02/CR10: an unsigned head never reaches a clinician, reaches a radiologist; one pending record per sender and
+        recipient; self, another institution, no clinical role, disabled and unknown recipients are 400."""
+        f = self.study()
+        self.check(self.commit(f.uid, "doctor", "save", 0, findings="SYNTHETIC unsigned findings"), 201)
+        self.check(self.send("doctor", f.uid, "clinician", 1)[1], 409, "CRITICAL_RESULT_RECIPIENT_CANNOT_READ")
+        self.check(self.send("doctor", f.uid, "clintech", 1)[1], 409, "CRITICAL_RESULT_RECIPIENT_CANNOT_READ")
+        self.assertEqual(critical_ledger(f.uid), {"records": 0, "events": 0, "receipts": 0, "audits": 0})
+        offered = {row["sub"] for row in self.check(self.candidates("doctor", f.uid), 200).body["recipients"]}
+        self.assertNotIn(self.sub("clinician"), offered)
+        self.assertIn(self.sub("doctor2"), offered)
+        self.check(self.send("doctor", f.uid, "doctor2", 1)[1], 201)
+        self.check(self.commit(f.uid, "doctor", "approve", 1, findings="SYNTHETIC approved findings"), 201)
+        first, sent = self.send("doctor", f.uid, "clinician", 2)
+        self.check(sent, 201)
+        duplicate = self.check(self.send("doctor", f.uid, "clinician", 2)[1], 409, "CRITICAL_RESULT_PENDING_EXISTS")
+        self.assertEqual(duplicate.body["id"], first)
+        self.check(self.send("doctor2", f.uid, "clinician", 2)[1], 201)
+        self.check(self.send("doctor", f.uid, "doctor", 2)[1], 400, "CRITICAL_RESULT_RECIPIENT_INVALID")
+        for user in ("tech", "hadmin", "kclinician", "kdoctor"):
+            self.check(self.send("doctor", f.uid, user, 2)[1], 400, "CRITICAL_RESULT_RECIPIENT_INVALID")
+        self.check(self.send("doctor", f.uid, "clinician", 2, recipient_sub=str(uuid.uuid4()))[1], 400, "CRITICAL_RESULT_RECIPIENT_INVALID")
+        target = self.sub("clinician2")
+        self.assertEqual(self.stack.kc_admin("PUT", f"/users/{quote(target)}", {"enabled": False}).status, 204)
+        try:
+            self.check(self.send("doctor", f.uid, "clinician2", 2)[1], 400, "CRITICAL_RESULT_RECIPIENT_INVALID")
+        finally:
+            self.assertEqual(self.stack.kc_admin("PUT", f"/users/{quote(target)}", {"enabled": True}).status, 204)
+        self.assertEqual(critical_ledger(f.uid), {"records": 3, "events": 3, "receipts": 3, "audits": 3})
+
+    def test_cr_inv_06_study_delete_refused_while_records_exist(self) -> None:
+        """CR15: a study with critical result records is not deleted (409, no cascade); the records stay."""
+        f = self.study()
+        self.approved(f)
+        rid, created = self.send("doctor", f.uid, "clinician", 1)
+        self.check(created, 201)
+        before = critical_row(rid)
+        self.check(self.stack.request("DELETE", f"/studies/{quote(f.uid)}", "tech"), 409, "STUDY_HAS_CRITICAL_RESULTS")
+        self.assertEqual(critical_row(rid), before)
+        self.assertEqual(critical_ledger(f.uid), {"records": 1, "events": 1, "receipts": 1, "audits": 1})
 
 
 def tearDownModule() -> None:

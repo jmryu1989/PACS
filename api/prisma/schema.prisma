@@ -100,6 +100,7 @@ model StudyState {
   consultations StudyConsultation[]
   questions StudyQuestion[]
   imageRequests StudyImageRequest[]
+  criticalResults CriticalResult[]
   viewerItems ViewerItem[]
   manualSrs ManualSr[]
   viewerJobs ViewerJob[]
@@ -307,6 +308,8 @@ model ReportVersion {
   /// 손으로 고쳐진 문장의 옛 값이 서명된 판에 남으면 기계가 읽는 값이 의무기록과 어긋난다.
   structured     Json?
   at             DateTime @default(now())
+  /// S7-U1a 중요 결과 전달이 고정한 판(역관계만; 이 표의 열은 그대로다).
+  criticalResults CriticalResult[]
 
   @@unique([uid, version])
   @@index([uid])
@@ -780,6 +783,89 @@ model StudyImageRequestReceipt {
   at DateTime @default(now())
 
   @@unique([imageRequestId, appliedRevision])
+}
+
+/// S7-U1a 중요 결과 전달 기록(계약 S7-U1p §3.2, §12.1). 발신자 1명 → 수신자 1명, 고정 ReportVersion 1개, 메시지 1개.
+/// 기관은 생성 때 고정한다. 본문은 복사하지 않고 고정 판 행(studyUid, sourceVersion)에서 읽는다 — 개인 초안·현재
+/// Report 본문·미리보기는 원천이 아니다. 기록은 지우지 않는다. 확인 대기(created)는 (studyUid, senderSub, recipientSub)당
+/// 하나다 — migration의 부분 unique index "CriticalResult_pending_key"가 강제한다(Prisma 스키마로 적을 수 없다).
+model CriticalResult {
+  id String @id @db.Uuid
+  studyUid String
+  study StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict, onUpdate: Restrict)
+  institutionId String @db.VarChar(256)
+  senderInstitutionId String @db.VarChar(256)
+  senderSub String @db.VarChar(256)
+  senderActor String @db.VarChar(256)
+  senderName String @db.VarChar(256)
+  recipientSub String @db.VarChar(256)
+  recipientActor String @db.VarChar(256)
+  recipientName String @db.VarChar(256)
+  recipientRole String @db.VarChar(16)
+  sourceVersion Int
+  source ReportVersion @relation(fields: [studyUid, sourceVersion], references: [uid, version], onDelete: Restrict, onUpdate: Restrict)
+  sourceAction String @db.VarChar(16)
+  sourceAuthor String
+  sourceAt DateTime
+  origName String @db.VarChar(256)
+  origPatientId String @db.VarChar(256)
+  origBirth String @db.VarChar(64)
+  origStudyDate String @db.VarChar(64)
+  message String @db.VarChar(2000)
+  state String @db.VarChar(16)
+  revision Int
+  supersedesId String? @unique @db.Uuid
+  supersedes CriticalResult? @relation("CriticalResultSupersede", fields: [supersedesId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  replacedBy CriticalResult? @relation("CriticalResultSupersede")
+  acknowledgedAt DateTime?
+  cancelledAt DateTime?
+  cancelReason String? @db.VarChar(2000)
+  supersededAt DateTime?
+  changedBy String @db.VarChar(256)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  events CriticalResultEvent[]
+  receipts CriticalResultReceipt[]
+
+  @@index([institutionId, recipientSub, createdAt, id])
+  @@index([institutionId, senderSub, createdAt, id])
+  @@index([studyUid, sourceVersion])
+}
+
+/// 상태 변경 이력(추가 전용). 기록마다 created(seq 1)와 종결 하나(seq 2)뿐이다 — unique·CHECK가 모양을 묶는다.
+model CriticalResultEvent {
+  id String @id @db.Uuid
+  recordId String @db.Uuid
+  record CriticalResult @relation(fields: [recordId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  seq Int
+  event String @db.VarChar(16)
+  revision Int
+  actorSub String @db.VarChar(256)
+  actorActor String @db.VarChar(256)
+  actorName String @db.VarChar(256)
+  actorRole String @db.VarChar(16)
+  requestId String @db.Uuid
+  at DateTime @default(now())
+
+  @@unique([recordId, seq])
+  @@unique([recordId, event])
+  @@index([requestId])
+}
+
+/// 적용된 요청 하나의 영수증(추가 전용). recordId는 route가 가리킨 기록(생성: 새 기록, 대체: 옛 기록)이고 재전송은
+/// result(그때 돌려준 적용 결과)를 그대로 돌려준다.
+model CriticalResultReceipt {
+  requestId String @id @db.Uuid
+  recordId String @db.Uuid
+  record CriticalResult @relation(fields: [recordId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  subjectSub String @db.VarChar(256)
+  action String @db.VarChar(16)
+  fingerprint String
+  appliedRevision Int
+  result Json
+  at DateTime @default(now())
+
+  @@unique([recordId, appliedRevision])
 }
 
 model HangingProtocolPreference {

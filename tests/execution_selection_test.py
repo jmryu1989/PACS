@@ -681,14 +681,15 @@ class ExecutionSelectionTests(unittest.TestCase):
         self.assertEqual(len(plan['tests']),4)
         self.assertEqual(runner.collect(plan).countTestCases(),4)
 
-    def test_candidate_contract_remains_83_then_15(self):
+    def test_candidate_contract_remains_89_then_15(self):
         # 69 -> 71: R15 added two live structured-entry cases (L-1, L-2). 71 -> 79: S3-ASR-U5 added
         # the eight dictation refusal cases T1-T8. 79 -> 80: S4-U2 added the one live order
         # reconciliation case. 80 -> 81: S4-U3 added the one live gateway receipt route case. 81 -> 82:
         # S4-U4 added the one live gateway retry route case. 82 -> 83: S4-U5 added the one live study
-        # identity case. The worklist contract is untouched at 15,
+        # identity case. 83 -> 89: S7-U1a added the six live critical result cases
+        # (CriticalResultInvariantTests). The worklist contract is untouched at 15,
         # and neither number may move without the test that moved it.
-        for filename, count in [('tests/invariants_live.py', 83), ('tests/e2e/test_worklist.py', 15)]:
+        for filename, count in [('tests/invariants_live.py', 89), ('tests/e2e/test_worklist.py', 15)]:
             plan = runner.module_plan(filename, 'selection-check', 'live', 600)
             self.assertEqual(runner.collect(plan).countTestCases(), count)
         # The eight U5 cases are selected by name, in the classes the pure oracle judges them in.
@@ -862,7 +863,7 @@ class ExecutionSelectionTests(unittest.TestCase):
             plan=runner.module_plan('tests/'+filename,unit,'live',timeout,class_name)
             self.assertEqual(runner.collect(plan).countTestCases(),len(plan['tests']))
             self.assertTrue(all(item['file']=='tests/'+filename for item in plan['tests']))
-            if index<2:self.assertEqual(len(plan['tests']),[83,15][index])
+            if index<2:self.assertEqual(len(plan['tests']),[89,15][index])
             if class_name:
                 self.assertTrue(all(row['case'].startswith(class_name+'.')
                                     for row in plan['tests']))

@@ -10,9 +10,13 @@ import ast
 import json
 from pathlib import Path
 import re
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+# the restore fixture's own data (its migration list, tables and synthetic rows); importing it runs nothing
+import ops_product_transfer_fixture as restore_fixture  # noqa: E402
 
 
 def text(*parts):
@@ -532,14 +536,18 @@ class MigrationPins(unittest.TestCase):
         self.assertIn("'api/prisma/migrations/" + MIGRATION_NAME + "/migration.sql',", fixture)
         self.assertEqual(fixture.count("'GatewayReceipt'"), 3)   # TABLES, the seeding order and the synthetic row
         self.assertIn("rows['GatewayReceipt'] = [", fixture)
-        transfer = text("tests", "ops_product_transfer_test.py")
+        # The restore fixture applies every migration directory in order and restores this table with its one synthetic
+        # receipt, read from the fixture's own data (S7-U1a-B-R-001-F03: not the text of ops_product_transfer_test.py or of
+        # the other migration tests).
         # 28 -> 29 migrations and 38 -> 39 tables: S4-U4 added GatewayRetryRequest (tests/gateway_retry_source_test.py).
         # 29 -> 30 and 39 -> 41: S5-U4a added 20260926120000_study_questions (StudyQuestion, StudyQuestionEntry).
         # 30 -> 31 and 41 -> 43: S5-U4c added 20260926130000_study_image_requests (StudyImageRequest, StudyImageRequestReceipt).
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 31)", transfer)
-        self.assertIn("self.assertEqual(len(transfer.TABLES), 43)", transfer)
-        for pinned in ("report_structure_migration_test.py", "order_reconciliation_source_test.py"):
-            self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 31)", text("tests", pinned), pinned)
+        # 31 -> 32 and 43 -> 46: S7-U1a added 20260928120000_critical_result (CriticalResult, CriticalResultEvent,
+        # CriticalResultReceipt).
+        self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 32)
+        self.assertEqual(len(restore_fixture.TABLES), 46)
+        self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 
 
 class WorkflowPins(unittest.TestCase):
