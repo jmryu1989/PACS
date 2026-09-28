@@ -1134,6 +1134,8 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/clinician-question-service --cwd . --file api/src/clinician-question.service.ts --file api/src/study-access.service.ts --file api/src/pacs.service.ts --file tests/clinician_question_service_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/clinician_question_service_test.cjs
       - name: S5-U4c compiled image request service, StudyAccess source reads before locks, receipts, lock order and audit keys
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/image-request-service --cwd . --file api/src/image-request.service.ts --file api/src/study-access.service.ts --file api/src/pacs.service.ts --file tests/image_request_service_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/image_request_service_test.cjs
+      - name: S7-U4a compiled Clinical Context service, controller and Orthanc header helpers over a stub store and a recording Orthanc (CC-S01..CC-S14)
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/clinical-context-service --cwd . --file api/src/clinical-context.service.ts --file api/src/clinical-context-policy.ts --file api/src/clinical-context.controller.ts --file api/src/orthanc.service.ts --file api/src/study-access.service.ts --file api/src/pacs.service.ts --file tests/clinical_context_service_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/clinical_context_service_test.cjs
       - name: Compiled stale-draft addendum guard and draft base-version boundaries
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-stale-draft --cwd . --file api/src/pacs.service.ts --file tests/report_stale_draft_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_stale_draft_test.cjs
       - name: Compiled citation attestation, carry-forward, limits and guarded read
@@ -1213,6 +1215,7 @@ jobs:
             tmp/runtime-ci/gateway-retry-server/
             tmp/runtime-ci/study-identity-client/
             tmp/runtime-ci/study-identity-server/
+            tmp/runtime-ci/clinical-context-service/
           if-no-files-found: error
           retention-days: 7
       # The list above names directories one by one and missed later record-run steps (display-scope, viewer-branding,
