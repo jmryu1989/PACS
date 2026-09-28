@@ -14,10 +14,11 @@ duplicates with the pending record's `id`, source version = head, terminal state
 owner-only list with a server `pending` count). Cases assert what a user sees and what reaches the server - names,
 states, Korean explanations, which requests are sent and their bodies - never the file's internals.
 
-  s00 every U1b change of main.html sits in its own regions: without them main.html is S5-U4c's base and S5-UI3's base
-      byte for byte. The byte pins are there because tests/worklist_toolbar_dom_test.py, tests/report_actions_dom_test.py
-      and tests/clinician_request_dom_test.py require every byte outside a unit's regions to stay the base (a
-      behaviour-preserving requirement); without_u1b() is what they chain.
+  s00 every U1b change of main.html sits in its own regions, checked on two fixed commits (S7-PINS, AGENTS.md 1-B.14):
+      the unit's base (main 96cb9cd) and the U1b commit that holds its main.html (RESULT_COMMIT). Without the regions the
+      result is the base byte for byte, and with S5-U4c's and S5-U4b's regions cut too it is S5-U4c's base and, after
+      without_ui3(), S5-UI3's base, script included. The live main.html is never held to these bytes: later units keep
+      changing it (S7-U3a edits a page-script line), and the live page is held to what it must do by the cases below.
   sd01 Mark CVR follows #1: off (with a Korean reason) before the answer, on only for sendable:true, off with the §16.1
       reason for NO_PINNABLE_SOURCE / SOURCE_FORBIDDEN / NO_ELIGIBLE_RECIPIENT and "지금 확인할 수 없습니다" plus the
       server's own message for a refusal, a failure or a malformed answer; #1 is read once per target and report state
@@ -89,6 +90,17 @@ ORIGIN = "https://reader.test"
 BASE = "/worklist/hpacs-lite/"
 
 # ── the S7-U1b regions of main.html ──
+# s00 reads main.html at two fixed commits with tests/report_actions_dom_test.py fixed_file(): each must be readable
+# (fetched from origin when this clone lacks it; .github/workflows/validate.yml fetches both before the S7-U1b step) and
+# be the pinned LF sha256, or the case fails. The base is S7-U1b's base, main after S7-U1a; its main.html is the one the
+# S5-U4b/U4c integration merged (tests/clinician_request_dom_test.py RESULT_MAIN_SHA256). The result is the U1b commit
+# that last changed main.html (fix1; the merge-main round changed no main.html byte). A later U1b change to main.html
+# moves RESULT_COMMIT to the commit that holds it.
+REL_MAIN = "worklist-v0/hpacs-lite/main.html"
+BASE_COMMIT = "96cb9cdb051dea86ee54484eb5e50ad0530712d4"
+RESULT_COMMIT = "f2a88578cce40b3e5f4eff595c66c3f4c6a809ed"
+BASE_MAIN_SHA256 = "f555807c9a21bfae532746a2bd4fd55b360d6f86d0af3be55dc2dc081bfd7644"
+RESULT_MAIN_SHA256 = "78ac1072780849debc04bf4fed4d55b1d5f9d0a212c2507e5584c2f1f8338ad7"
 # (name, first bytes, end marker, end included). Every marker occurs exactly once in main.html.
 U1B_REGIONS = (
     ("css", "    /* ── S7-U1b 중요 결과 발신 ──", "    /* ── S7-U1b 끝 ── */\n", True),
@@ -113,7 +125,8 @@ U1B_LINES = (
 
 def without_u1b(text):
     """main.html (LF) with the S7-U1b regions cut and Mark CVR's base tooltip back. Raises if a marker is missing or not
-    unique, so a moved or doubled change fails instead of being half undone."""
+    unique, so a moved or doubled change fails instead of being half undone. s00 applies it to the fixed RESULT_COMMIT
+    only: the live main.html carries later units' changes, which are not this unit's to undo."""
     text = text.replace("\r\n", "\n")
     for name, start, end, inclusive in U1B_REGIONS:
         for marker in {start, end}:
@@ -145,8 +158,10 @@ def has_hangul(text):
     return any(unicodedata.name(ch, "").startswith("HANGUL") for ch in text)
 
 
-# The shipped block (mount call), run as the page runs it.
-BLOCK = slice_between(MAIN, "    // ── 중요 결과 발신(S7-U1b) ──", "    // ── 임상의 질문 답변(S5-U4b) ──")
+# The shipped block (mount call), run as the page runs it. tests/clinician_question_dom_test.py test_18d cuts the same
+# block out of its tagged page with BLOCK_MARKS.
+BLOCK_MARKS = ("    // ── 중요 결과 발신(S7-U1b) ──", "    // ── 임상의 질문 답변(S5-U4b) ──")
+BLOCK = slice_between(MAIN, *BLOCK_MARKS)
 # main.html's inline page script (the <script> elements without a src), handed to the browser as text for TAIL.
 PAGE_SCRIPT = "\n".join(re.findall(r"<script>(.*?)</script>", MAIN, flags=re.S))
 # tests/report_actions_dom_test.py runs PRELUDE + BLOCK + TAIL.replace('HOOK', '\n'.join(HOOK_LINES)). TAIL now runs the
@@ -457,21 +472,27 @@ VIEW = """() => {
 
 
 class SenderRegionsTest(unittest.TestCase):
-    """Stdlib side: every S7-U1b change of main.html is inside its own regions (see the module docstring)."""
+    """Stdlib side: every S7-U1b change of main.html was inside its own regions, on the fixed commits (module docstring)."""
 
-    def test_s00_every_change_is_inside_the_u1b_regions_and_the_other_units_pins_hold_without_them(self):
+    def test_s00_every_change_was_inside_the_u1b_regions_at_its_commit(self):
         from clinician_question_dom_test import without_u4b
         from clinician_request_dom_test import BASE_MAIN_SHA256 as U4C_BASE_MAIN_SHA256
-        from clinician_request_dom_test import digest, without_u4c_main
+        from clinician_request_dom_test import RESULT_MAIN_SHA256 as U4C_RESULT_MAIN_SHA256
+        from clinician_request_dom_test import without_u4c_main
         from report_actions_dom_test import BASE_MAIN_SHA256 as UI3_BASE_MAIN_SHA256
         from report_actions_dom_test import BASE_SCRIPTS_SHA256 as UI3_BASE_SCRIPTS_SHA256
-        from report_actions_dom_test import scripts_digest, without_ui3
-        restored = without_u4b(without_u4c_main(without_u1b(MAIN)))
-        self.assertEqual(U4C_BASE_MAIN_SHA256, digest(restored), "a main.html byte outside the S7-U1b regions moved")
+        from report_actions_dom_test import digest, fixed_file, scripts_digest, without_ui3
+        # This unit started from the page the S5-U4b/U4c integration merged (main.html unchanged up to S7-U1a).
+        self.assertEqual(U4C_RESULT_MAIN_SHA256, BASE_MAIN_SHA256)
+        base = fixed_file(BASE_COMMIT, REL_MAIN, BASE_MAIN_SHA256)
+        result = fixed_file(RESULT_COMMIT, REL_MAIN, RESULT_MAIN_SHA256)
+        self.assertEqual(base, without_u1b(result), "a main.html byte outside the S7-U1b regions moved")
+        restored = without_u4b(without_u4c_main(without_u1b(result)))
+        self.assertEqual(U4C_BASE_MAIN_SHA256, digest(restored))
         self.assertEqual(UI3_BASE_MAIN_SHA256, digest(without_ui3(restored)))
         self.assertEqual(UI3_BASE_SCRIPTS_SHA256, scripts_digest(restored))
         # The order of the cuts does not matter: the U1b regions do not touch the other units' markers.
-        self.assertEqual(restored, without_u1b(without_u4b(without_u4c_main(MAIN))))
+        self.assertEqual(restored, without_u1b(without_u4b(without_u4c_main(result))))
 
 
 class CriticalResultSenderDOMTest(unittest.TestCase):

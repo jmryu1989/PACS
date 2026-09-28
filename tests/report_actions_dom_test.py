@@ -33,9 +33,19 @@ stylesheet main.html links is inlined in its own position. The one piece of scri
 DOM call. Role gating stays the page script's disabled; the keyboard case enables every button to walk the fullest row.
 
 without_ui3() gives main.html back with this unit's three regions (the button-row markup, the footer row and the CSS
-block) replaced by the base bytes. The structure case below requires that result to equal the base main.html byte for
-byte, and tests/worklist_toolbar_dom_test.py reads it, so S5-UI2's pins over everything outside its toolbar keep
-standing for the bytes this unit did not touch.
+block) replaced by the base bytes. "Only these regions changed and not one script byte" is a claim about this
+refactoring, so (S7-PINS, AGENTS.md 1-B.14) it is checked on the two fixed commits that bound it - the base and the main
+merge that shipped the unit - never on the live main.html, which later units keep changing. The live file is held to
+what the page must still be: every button once with its English label, the regions free of script, the one line that
+places the Structured entry, the CSS block's fonts, and everything the browser cases measure.
+
+S7-PINS fix1 (Astra S7-PINS-R-001-F02): the live page is also held to the buttons' starting states, from an explicit
+list, and to the two placeholders' Korean reasons - requirements the live byte comparison used to cover.
+
+S7-PINS fix1 (Astra S7-COMMAND-R-001-F09): the two fixed commits are read with `git show` and must be there. A clone
+without them fetches them from origin; if they still cannot be read, or are not the pinned bytes, the equivalence cases
+fail - they never skip, and no pinned digest stands in for bytes that were not compared (fixed_file(), which the S5-UI2
+and S5-U4c tests use too).
 """
 import hashlib
 import json
@@ -52,13 +62,17 @@ REL_MAIN = 'worklist-v0/hpacs-lite/main.html'
 # Screenshots and the geometry record go outside the checkout when the runner names a directory.
 OUT = Path(os.environ.get('KIN_EVIDENCE_DIR') or ROOT / 'tmp/s5-ui3/report-actions')
 
-# The commit this unit started from (S5-UI2 fix1). A shallow CI clone does not have it, so what it held is pinned below;
-# where the commit is present the pins are checked against it first.
+# The commit this unit started from (S5-UI2 fix1) and the main commit that merged it (PR #100, the branch head 054b99a
+# with fix1). The refactoring's equivalence is checked on the two, read by fixed_file(): each must be readable and be
+# the pinned bytes below, or the case fails.
 BASE = 'ae04b19d1b98b57b3ff7de006e5dc38d83ef8e64'
+RESULT = 'aaf53dccad2ed140b4a2c6610e9690d33fbab2dc'
 # LF-normalized UTF-8 sha256 of the base main.html, and of its <script> blocks joined by '\n\0\n' (the digest
 # tests/worklist_toolbar_dom_test.py pins for S5-UI2's base; neither unit changed a script byte).
 BASE_MAIN_SHA256 = 'c32f4026cfa29d54e3ffa0e85d1900d250264c4f860aa3ed09477a70fe98d707'
 BASE_SCRIPTS_SHA256 = '2231eefe0bc40ed48d28887043bf5cb9b0828bcefcb20b659be07d58cf1a7349'
+# The merged main.html (LF). S5-U4b/U4c started from it (tests/clinician_request_dom_test.py BASE_MAIN_SHA256).
+RESULT_MAIN_SHA256 = '1c112d4b3b0c598a6fb15dd952e85445b0839077ee9a39618f8d6dd1bab7b47a'
 
 # The base rows, verbatim (LF). without_ui3() puts them back.
 BASE_RBTNS = '''        <div class="rbtns">
@@ -120,13 +134,27 @@ NEW_IDS = [MENU] + list(SECTIONS)
 IN_VIEW = TOP + [MENU + '>summary'] + FOOT
 MAX_IN_VIEW = 7
 DISABLED = ['b-addendum', 'b-dictate', 'b-except', 'b-mark-cvr', 'b-report-template']
-# fix1: the one attribute added to base buttons, the Korean tooltip of the Except placeholder (the base had none).
+# The live page (Astra S7-PINS-R-001-F02): the buttons disabled as main.html serves them, before the page script reads
+# the session and the report and enables or disables them by role and report state. Every other button starts enabled.
+# Written out, never read off the page under test.
+INITIAL_DISABLED = ['b-addendum', 'b-dictate', 'b-except', 'b-mark-cvr', 'b-report-template']
+# fix1 (D54): a placeholder says in Korean that it is not connected yet and that no permission blocks it, so a reader
+# does not take it for a role restriction. These phrases carry that meaning; the rest of the wording is free. S7-U1b
+# turned Mark CVR into a real control that stays disabled until the server answers: its entry names that reason - the
+# server's answer, not a role, turns it on (tests/critical_result_sender_dom_test.py SD01 covers the answers' reasons).
+PLACEHOLDER_REASONS = {
+    'b-except': ('연결되지 않은', '권한 때문에 막힌 것이 아닙니다'),
+    'b-mark-cvr': ('서버가', '답하기 전에는 켜지지 않습니다'),
+}
+# The buttons inside More, in their declared order, the Structured entry right before Print.
+MENU_ORDER = ['b-addendum', 'b-transcribe', 'b-defer', 'b-except', 'b-mark-cvr', 'b-unread', 'b-copy', 'b-paste',
+              'b-clear', 'b-report-template', 'b-structured', 'b-print', 'b-history']
+# fix1: the one attribute added to base buttons, the Korean tooltips of the two placeholders (the base had none). Checked
+# on the fixed merge commit (RESULT), where Mark CVR is still the placeholder S7-U1b later wired.
 TITLES_ADDED = {
     'b-except': '판독 제외: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.',
+    'b-mark-cvr': '중요 결과(CVR) 표시: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.',
 }
-# S7-U1b: Mark CVR's markup tooltip is what shows before critical-result-send.js hears the server, which then writes the
-# server's answer there (tests/critical_result_sender_dom_test.py SD01). Here only one Korean tooltip is required.
-TITLES_KOREAN = ['b-mark-cvr']
 # fix1: (button, the one before it) set apart by 8px on top of the 4px gap; every other neighbour pair keeps 4px.
 GAP = 4
 GAPPED = {'b-dictate': 'b-prelim', 'b-unread': 'b-mark-cvr', 'b-clear': 'b-paste'}
@@ -165,19 +193,51 @@ def regions(text):
 
 
 def without_ui3(text):
-    """main.html with this unit's three regions replaced by the base bytes (LF). Raises if a region is missing."""
+    """main.html with this unit's three regions replaced by the base bytes (LF). Raises if a region is missing. Applied
+    to the fixed RESULT commit only: the live file carries later units' changes, which are not this unit's to undo."""
     text = lf(text)
     (cs, ce), (ms, me), (fs, fe) = regions(text)
     return text[:cs] + text[ce:ms] + BASE_RBTNS + text[me:fs] + BASE_RFOOT + text[fe:]
 
 
-def base_text():
-    """The base main.html when this clone has the commit, else None (shallow CI checkout)."""
-    try:
-        run = subprocess.run(['git', 'show', f'{BASE}:{REL_MAIN}'], cwd=str(ROOT), capture_output=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return lf(run.stdout.decode('utf-8')) if run.returncode == 0 else None
+def fixed_file(sha, rel, lf_sha256):
+    """`rel` (LF) at the fixed commit `sha` as `git show` reads it, and only if its LF sha256 is `lf_sha256`.
+
+    Also used by tests/worklist_toolbar_dom_test.py and tests/clinician_request_dom_test.py. A clone without the commit
+    (a depth-1 checkout; .github/workflows/validate.yml fetches the five commits these tests read before it runs them)
+    fetches it from origin first. Anything else - no git, no origin to fetch from, a commit or path that is not there,
+    other bytes than the pinned ones - fails the case that asked (Astra S7-COMMAND-R-001-F09): an equivalence that was
+    not checked is not a pass, and the pinned digest does not stand in for the bytes."""
+    spec = f'{sha}:{rel}'
+
+    def git(*args, timeout=60):
+        try:
+            return subprocess.run(['git', *args], cwd=str(ROOT), capture_output=True, timeout=timeout,
+                                  env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AssertionError(f'git {" ".join(args)} did not run ({error}), so {spec} was not checked') from error
+
+    run = git('show', spec)
+    if run.returncode != 0:
+        shallow = git('rev-parse', '--is-shallow-repository').stdout.strip() == b'true'
+        fetch = ['fetch', '--no-tags', *(['--depth=1'] if shallow else []), 'origin', sha]
+        done = git(*fetch, timeout=300)
+        print(f'{spec} is not in this clone; git {" ".join(fetch)} exit {done.returncode}:',
+              done.stderr.decode('utf-8', 'replace').strip()[-300:])
+        run = git('show', spec)
+    if run.returncode != 0:
+        raise AssertionError(f'{spec} cannot be read in this clone, even after fetching {sha} from origin '
+                             f'({run.stderr.decode("utf-8", "replace").strip()[:300]}), so it was not checked')
+    text = lf(run.stdout.decode('utf-8'))
+    if digest(text) != lf_sha256:
+        raise AssertionError(f'{spec} is not the pinned file: LF sha256 {digest(text)}, pinned {lf_sha256}')
+    print(f'{spec} read, LF sha256 {lf_sha256}')
+    return text
+
+
+def fixed_pair():
+    """(base, result) main.html at the two fixed commits; fixed_file() fails the case when either cannot be read."""
+    return fixed_file(BASE, REL_MAIN, BASE_MAIN_SHA256), fixed_file(RESULT, REL_MAIN, RESULT_MAIN_SHA256)
 
 
 def page_html(text):
@@ -263,45 +323,39 @@ def centre_in(a, c):
 
 
 class ReportActionsStructureTest(unittest.TestCase):
-    """Stdlib side: bytes and ids against the base."""
+    """Stdlib side: the refactoring on its two fixed commits; the live page's own requirements on the live file."""
 
     @classmethod
     def setUpClass(cls):
         cls.text = lf(MAIN.read_text(encoding='utf-8'))
-        # S5-U4c, S5-U4b and S7-U1b (after this unit) added regions outside this unit's three; the byte pins below compare
-        # main.html with those taken out: S7-U1b's (tests/critical_result_sender_dom_test.py, which also puts Mark CVR's
-        # base tooltip back), S5-U4c's regions and the five shared kinOn401 lines (tests/clinician_request_dom_test.py),
-        # then S5-U4b's four (tests/clinician_question_dom_test.py). Imported here because those modules need Playwright
-        # and this class does not otherwise.
-        from clinician_question_dom_test import without_u4b
-        from clinician_request_dom_test import without_u4c_main
-        from critical_result_sender_dom_test import without_u1b
-        cls.pinned = without_u4b(without_u4c_main(without_u1b(cls.text)))
-        cls.base = base_text()
-        print('base commit', BASE, 'present' if cls.base is not None else 'absent in this clone; pinned values used')
 
-    def test_pins_match_the_base_commit_when_it_is_present(self):
+    def test_pins_match_the_fixed_commits(self):
         self.assertEqual(BASE_RBTNS_SHA256, digest(BASE_RBTNS))
         self.assertEqual(BASE_RFOOT_SHA256, digest(BASE_RFOOT))
-        if self.base is None:
-            self.skipTest('base commit not in this clone (shallow checkout); the pins stand for it')
-        self.assertEqual(BASE_MAIN_SHA256, digest(self.base))
-        self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(self.base))
-        start = self.base.index(RBTNS_OPEN)
-        self.assertEqual(BASE_RBTNS, self.base[start:self.base.index(ROW_CLOSE, start) + len(ROW_CLOSE)])
-        start = self.base.index(RFOOT_OPEN)
-        self.assertEqual(BASE_RFOOT, self.base[start:self.base.index(ROW_CLOSE, start) + len(ROW_CLOSE)])
+        # Both files are their pinned LF sha256 (fixed_file()); the base's script and rows are the pinned ones.
+        base, _ = fixed_pair()
+        self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(base))
+        start = base.index(RBTNS_OPEN)
+        self.assertEqual(BASE_RBTNS, base[start:base.index(ROW_CLOSE, start) + len(ROW_CLOSE)])
+        start = base.index(RFOOT_OPEN)
+        self.assertEqual(BASE_RFOOT, base[start:base.index(ROW_CLOSE, start) + len(ROW_CLOSE)])
 
-    def test_everything_outside_the_three_regions_is_the_base_bytes_and_the_script_is_unchanged(self):
-        restored = without_ui3(self.pinned)
-        self.assertEqual(BASE_MAIN_SHA256, digest(restored), 'a byte outside the S5-UI3 regions moved')
-        if self.base is not None:
-            self.assertEqual(self.base, restored)
-        self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(self.pinned))
-        (cs, ce), (ms, me), (fs, fe) = regions(self.text)
-        for name, (start, end) in (('css', (cs, ce)), ('rows', (ms, me)), ('footer', (fs, fe))):
-            self.assertNotIn('<script', self.text[start:end], name)
-        # The one line of script that places a button in these rows is still there, once.
+    def test_the_refactoring_changed_only_its_three_regions_and_no_script_byte(self):
+        # Base and merge commit: with the three regions put back to the base rows, the merged file is the base byte for
+        # byte, and its page script is the base's.
+        base, result = fixed_pair()
+        self.assertEqual(base, without_ui3(result), 'a byte outside the S5-UI3 regions moved')
+        self.assertEqual(BASE_SCRIPTS_SHA256, scripts_digest(result))
+
+    def test_the_three_regions_hold_no_script_and_the_structured_line_is_there_once(self):
+        # The live page and the merge commit: the regions are markup and CSS only.
+        for label, text in (('live', self.text), ('result', fixed_pair()[1])):
+            (cs, ce), (ms, me), (fs, fe) = regions(text)
+            for name, (start, end) in (('css', (cs, ce)), ('rows', (ms, me)), ('footer', (fs, fe))):
+                with self.subTest(file=label, region=name):
+                    self.assertNotIn('<script', text[start:end])
+        # The one line of script that places a button in these rows is still there, once: the browser cases replay it
+        # as STRUCTURED.
         self.assertEqual(1, self.text.count(STRUCTURED_LINE))
 
     def test_the_css_block_sets_font_size_only_to_the_buttons_size(self):
@@ -338,7 +392,6 @@ class ReportActionsDOMTest(unittest.TestCase):
     def setUpClass(cls):
         from playwright.sync_api import sync_playwright
         cls.html = page_html(MAIN.read_text(encoding='utf-8'))
-        cls.base = base_text()
         cls.seen = []
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -372,38 +425,57 @@ class ReportActionsDOMTest(unittest.TestCase):
 
     # ── (a) structure, as the browser sees it ──
 
-    def test_buttons_keep_their_base_tags_attributes_and_labels(self):
-        page = self.open_page(1366, 768, structured=False)
+    def serialize(self, text):
+        page = self.open_page(1366, 768, html=page_html(text), structured=False)
         try:
-            got = page.evaluate(ELEMENTS, BUTTONS)
+            return page.evaluate(ELEMENTS, BUTTONS)
         finally:
             page.close()
+
+    def test_every_button_is_on_the_page_with_an_english_label(self):
+        # The live page: each of the 18 is found (by its id), and its label is English (AGENTS.md section 4); where
+        # each sits and which are in view is the next case.
+        got = self.serialize(MAIN.read_text(encoding='utf-8'))
+        self.assertEqual([], [row[0] for row in got if row[1] is None])
+        for key, _, label in got:
+            with self.subTest(button=key):
+                self.assertTrue(label, key)
+                self.assertIsNone(re.search('[가-힣]', label), f'{key}: {label}')
+
+    def test_every_button_starts_enabled_or_disabled_as_required_and_the_placeholders_say_why(self):
+        # The live page as served, before the page script runs (Astra S7-PINS-R-001-F02): the states come from the explicit
+        # INITIAL_DISABLED, so a button that must work (History, Copy, Prev, ...) disabled in the markup fails here, and
+        # each placeholder's tooltip still tells a reader why it does nothing.
+        page = self.open_page(1366, 768, structured=False)
+        try:
+            got = page.evaluate("""(ids)=>ids.map(id=>{const e=document.getElementById(id);
+              return e?[id,e.disabled,e.getAttribute('title')]:[id,null,null]})""", BUTTON_IDS)
+        finally:
+            page.close()
+        self.assertEqual({key: key in INITIAL_DISABLED for key in BUTTON_IDS}, {key: disabled for key, disabled, _ in got})
+        titles = {key: title or '' for key, _, title in got}
+        for key, phrases in PLACEHOLDER_REASONS.items():
+            with self.subTest(placeholder=key):
+                self.assertRegex(titles[key], '[가-힣]', f'{key} has no Korean tooltip')
+                for phrase in phrases:
+                    self.assertIn(phrase, titles[key], key)
+
+    def test_the_refactoring_kept_every_button_tag_attribute_and_label(self):
+        # Base and merge commit, as the browser serializes them: the unit moved the 18 buttons and changed none.
+        base, result = fixed_pair()
+        got = self.serialize(result)
         self.assertEqual([], [row[0] for row in got if row[1] is None])
         disabled = [key for key, tag, _ in got if re.search(r'\sdisabled=""', tag)]
         self.assertEqual(DISABLED, disabled)
-        # fix1 added one attribute, a tooltip, to the two placeholders: Except's is there with the pinned text, Mark CVR's
-        # (S7-U1b) is one Korean tooltip, and with it taken off the start tag is the base's. Any other difference still
-        # fails the comparison below.
+        # fix1 added one attribute, a tooltip, to the two placeholders: it is there with the pinned text, and with it
+        # taken off the start tag is the base's. Any other difference still fails the comparison below.
         for row in got:
             if row[0] in TITLES_ADDED:
                 attribute = f' title="{TITLES_ADDED[row[0]]}"'
                 with self.subTest(title=row[0]):
                     self.assertEqual(1, row[1].count(attribute), row[1])
                 row[1] = row[1].replace(attribute, '')
-            if row[0] in TITLES_KOREAN:
-                found = re.findall(r' title="([^"]*)"', row[1])
-                with self.subTest(title=row[0]):
-                    self.assertEqual(1, len(found), row[1])
-                    self.assertRegex(found[0], '[가-힣]')
-                row[1] = re.sub(r' title="[^"]*"', '', row[1])
-        # The pin stands for the base: the same serialization of the base markup (the literals, or the commit).
-        page = self.open_page(1366, 768, html=page_html(self.base) if self.base else
-                              page_html(without_ui3(MAIN.read_text(encoding='utf-8'))), structured=False)
-        try:
-            expected = page.evaluate(ELEMENTS, BUTTONS)
-        finally:
-            page.close()
-        self.assertEqual(expected, got)
+        self.assertEqual(self.serialize(base), got)
 
     def test_each_button_is_where_it_is_declared_and_seven_controls_are_in_view(self):
         page = self.open_page(1366, 768)
@@ -712,9 +784,7 @@ class ReportActionsDOMTest(unittest.TestCase):
                     # off here, where the layout does not depend on it.
                     page.evaluate(ENABLE_ALL)
                     menu = page.evaluate("()=>[...document.querySelectorAll('#report-more button')].map(b=>b.id)")
-                    self.assertEqual(['b-addendum', 'b-transcribe', 'b-defer', 'b-except', 'b-mark-cvr', 'b-unread',
-                                      'b-copy', 'b-paste', 'b-clear', 'b-report-template', 'b-structured', 'b-print',
-                                      'b-history'], menu)
+                    self.assertEqual(MENU_ORDER, menu)
                     for key in menu:
                         page.locator('#' + key).click(timeout=2000)
                         self.assertEqual(key, page.evaluate('()=>__hits.at(-1)'), f'{key} at 1366x768 {mode}')
@@ -742,6 +812,8 @@ class ReportActionsDOMTest(unittest.TestCase):
                     self.assertTrue(page.evaluate("document.querySelector('#report-more').open"))
                     enabled = page.evaluate(
                         "()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.disabled).map(b=>b.id)")
+                    # The walk is judged against the declared lists, not the page's own states (F02).
+                    self.assertEqual([key for key in MENU_ORDER if key not in INITIAL_DISABLED], enabled)
                     self.assertEqual('b-transcribe', enabled[0])
                     walked = []
                     for _ in range(len(enabled) + 1):
