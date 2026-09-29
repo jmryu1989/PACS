@@ -7,8 +7,11 @@ eight stylesheets inlined where they are linked) come from a synthetic origin; t
 identity comes from an in-test /api/me), study-arrivals.js and clinical-context.js are loaded byte for byte; the page's
 own api(), cur(), relatedStudy(), viewed(), viewingUid(), renderClinical() and applyObservation() are handed out by the
 browser's parser and run as shipped (every other page name they touch resolves to an inert stand-in, the technique of
-tests/critical_result_sender_dom_test.py); and the S7-U4b block is cut out of main.html from its own header line to its own
-closing catch line and run as is. An in-test server answers GET /api/studies/{uid}/clinical-context from
+tests/critical_result_sender_dom_test.py); and the S7-U4b block - the page's mountClinicalContext declaration, the one
+statement that mounts it and the declaration of the name that statement assigns - is found by the TypeScript parser (BLOCK_TS)
+and run as is, so no comment, blank or line break of main.html decides what runs (Astra S7-U3b-E-R-001 F01, D73). That needs
+node on PATH and api/node_modules/typescript (npm ci --prefix api --ignore-scripts); without them the cases fail, never skip.
+An in-test server answers GET /api/studies/{uid}/clinical-context from
 tests/clinical_context_vectors.json, whose valid answers the compiled server shape check accepts
 (tests/clinical_context_model_test.cjs cm01), so no answer here is one the server could not send.
 
@@ -50,6 +53,8 @@ Synthetic data only (SYN-* names, 1.2.826.0.1.3680043.10.* UIDs): no stack, no n
 import copy
 import json
 import re
+import shutil
+import subprocess
 import sys
 import time
 import unittest
@@ -122,21 +127,101 @@ def page_html(text):
     return re.sub(r"<link\b[^>]*>", "", html)
 
 
-HEADER = "    // ── 임상 정보 패널(S7-U4b) ──\n"
-
-
-def cut_block(text):
-    """The S7-U4b block from its own header line to its own closing line - the first top-level catch after the header.
-    A missing or doubled header fails the case; no neighbouring unit's marker is used, so a block added later does not move
-    the cut."""
-    if text.count(HEADER) != 1:
-        raise AssertionError(f"the S7-U4b block header occurs {text.count(HEADER)} times in main.html")
-    first = text.index(HEADER)
-    end = text.index("\n    } catch (_) {", first) + 1
-    return text[first:text.index("\n", end) + 1]
-
-
 PAGE_SCRIPT = "\n".join(re.findall(r"<script>(.*?)</script>", MAIN, flags=re.S))
+
+# Astra S7-U3b-E-R-001 F01 (D73): which statements are the S7-U4b block is the TypeScript parser's answer, not a comment
+# line or a layout of main.html. BLOCK_TS runs in node with the typescript that api/package-lock.json installs (npm ci
+# --prefix api --ignore-scripts; validate.yml runs it earlier in the same job) over the page script as the page functions
+# are taken from it, and answers the block's top-level statements, each from its first token to its end:
+#   declaration - the one top-level function declaration of the name;
+#   mount       - the one top-level statement that uses it, which must call it (another use is refused, not guessed);
+#   result      - the one top-level variable statement declaring the name the mount assigns the call's result to.
+# Offsets are in code points of the text sent. Comments and line breaks between or around them are not read.
+BLOCK_TS = r"""'use strict';
+const ts = require(require.resolve('typescript', { paths: [process.argv[1]] }));
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', () => {
+  const { text, name } = JSON.parse(input);
+  const file = '/page/main.js';
+  const options = { allowJs: true, checkJs: false, noEmit: true, noLib: true, noResolve: true, types: [],
+                    target: ts.ScriptTarget.ESNext };
+  const host = ts.createCompilerHost(options, true);
+  let parsed = null;
+  host.getSourceFile = (fileName, version) => (fileName === file
+    ? (parsed = parsed || ts.createSourceFile(file, text, version, true, ts.ScriptKind.JS)) : undefined);
+  host.fileExists = fileName => fileName === file;
+  host.readFile = fileName => (fileName === file ? text : undefined);
+  const checker = ts.createProgram([file], options, host).getTypeChecker();
+  const sf = parsed;
+  const out = { typescript: ts.version, refused: [], statements: [],
+                parse_errors: sf.parseDiagnostics.map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n')) };
+  const top = node => { while (node && node.parent !== sf) node = node.parent; return node || null; };
+  const points = at => [...text.slice(0, at)].length;
+  const found = [];
+  const take = (kind, statement) => { if (!found.some(f => f.node === statement)) found.push({ kind, node: statement }); };
+  const declared = sf.statements.filter(s => ts.isFunctionDeclaration(s) && s.name && s.name.text === name);
+  if (declared.length !== 1) out.refused.push(`${declared.length} top-level function declarations named ${name}`);
+  else {
+    const fn = declared[0], symbol = checker.getSymbolAtLocation(fn.name);
+    take('declaration', fn);
+    const uses = [];
+    const visit = node => {
+      if (ts.isIdentifier(node) && node !== fn.name && node.text === name && checker.getSymbolAtLocation(node) === symbol) uses.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    if (uses.length !== 1) out.refused.push(`${name} is used ${uses.length} times, not once by one mount`);
+    else if (!(ts.isCallExpression(uses[0].parent) && uses[0].parent.expression === uses[0])) out.refused.push(`${name} is used other than called`);
+    else {
+      const call = uses[0].parent, mount = top(call);
+      take('mount', mount);
+      const assigned = call.parent;
+      if (ts.isBinaryExpression(assigned) && assigned.operatorToken.kind === ts.SyntaxKind.EqualsToken && assigned.right === call
+          && ts.isIdentifier(assigned.left)) {
+        const target = checker.getSymbolAtLocation(assigned.left);
+        const statements = ((target && target.declarations) || []).map(top);
+        if (statements.length !== 1 || !statements[0] || !ts.isVariableStatement(statements[0]))
+          out.refused.push(`${assigned.left.text} is not declared by one top-level variable statement`);
+        else take('result', statements[0]);
+      }
+    }
+  }
+  found.sort((a, b) => a.node.getStart(sf) - b.node.getStart(sf));
+  for (const { kind, node } of found) {
+    const at = node.getStart(sf), end = node.getEnd();
+    out.statements.push({ kind, at: points(at), end: points(end), text: text.slice(at, end) });
+  }
+  process.stdout.write(JSON.stringify(out));
+});
+"""
+
+
+def page_block(script, name="mountClinicalContext"):
+    """The S7-U4b block as BLOCK_TS finds it in `script`: its statements as shipped, in page order. Fails, never skips,
+    when node or typescript is not there, the page script does not parse, or the block is not one declaration, one mount
+    and (when the mount assigns) one declared result."""
+    node = shutil.which("node")
+    if node is None:
+        raise AssertionError("node is not on PATH: the S7-U4b block is TypeScript's answer (npm ci --prefix api --ignore-scripts)")
+    run = subprocess.run([node, "-e", BLOCK_TS, str(ROOT / "api")], input=json.dumps({"text": script, "name": name}).encode("utf-8"),
+                         capture_output=True, timeout=120)
+    if run.returncode != 0:
+        raise AssertionError("BLOCK_TS failed (typescript: npm ci --prefix api --ignore-scripts): "
+                             + run.stderr.decode("utf-8", "replace")[-2000:])
+    found = json.loads(run.stdout.decode("utf-8"))
+    if found["parse_errors"] or found["refused"]:
+        raise AssertionError(f"the S7-U4b block in main.html (TypeScript {found['typescript']}): "
+                             + json.dumps({k: found[k] for k in ("parse_errors", "refused")}, ensure_ascii=False))
+    kinds = [statement["kind"] for statement in found["statements"]]
+    if sorted(kinds) not in (["declaration", "mount"], ["declaration", "mount", "result"]):
+        raise AssertionError(f"the S7-U4b block's statements: {kinds}")
+    for statement in found["statements"]:
+        if script[statement["at"]:statement["end"]] != statement["text"]:
+            raise AssertionError(f"the {statement['kind']} TypeScript found is not the page's text at {statement['at']}")
+    return "\n".join(statement["text"] for statement in found["statements"]) + "\n"
+
 
 # Records every fetch the page makes (order, target, headers, signal). With window.synHold set, a clinical-context call
 # never reaches the network: its AbortSignal is ignored and the case ends it with synFinish (a Response the shipped api()
@@ -284,7 +369,7 @@ class Stub:
 class ClinicalContextDOMTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.block = cut_block(MAIN)
+        cls.block = page_block(PAGE_SCRIPT)
         cls.markup = page_html(MAIN)
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
