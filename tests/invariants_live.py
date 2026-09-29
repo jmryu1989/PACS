@@ -4927,7 +4927,8 @@ class CriticalResultInvariantTests(CriticalResultHarness, unittest.TestCase):
         self.assertEqual(critical_ledger(f.uid), {"records": 1, "events": 2, "receipts": 2, "audits": 2})
 
     def test_cr_inv_02_institution_boundary_tele_and_owner_move(self) -> None:
-        """CR21/CR13/T-3: the tele institution never participates; an owner move hides records everywhere, replays included."""
+        """CR21/CR13/T-3 as S7-U1c states them: the tele institution sends from its open channel to owner members only, is
+        never a recipient and never sees the owner's own records; an owner move hides records everywhere, replays included."""
         f = self.study()
         self.approved(f)
         rid, created = self.send("doctor", f.uid, "clinician", 1)
@@ -4939,9 +4940,12 @@ class CriticalResultInvariantTests(CriticalResultHarness, unittest.TestCase):
             for user in ("kdoctor", "kclinician"):
                 self.check(self.read(user, rid), 404, "CRITICAL_RESULT_NOT_FOUND")
                 self.assertNotIn(rid, self.ids(self.check(self.listed(user, "received"), 200)))
-            self.check(self.candidates("kdoctor", f.uid), 404, "STUDY_NOT_FOUND")
-            self.check(self.send("kdoctor", f.uid, "doctor2", 1)[1], 404, "STUDY_NOT_FOUND")
-            self.check(self.for_study("kdoctor", f.uid), 404, "STUDY_NOT_FOUND")
+            # S7-U1c (NR-02): the open channel gives kin-center a sender scope whose candidates are hallym's members only,
+            # B -> B is refused without a write, and the owner's own record is not in kin-center's per-study list.
+            candidates = self.check(self.candidates("kdoctor", f.uid), 200).body["recipients"]
+            self.assertFalse({row["sub"] for row in candidates} & {self.sub("kdoctor"), self.sub("kclinician")})
+            self.check(self.send("kdoctor", f.uid, "kclinician", 1)[1], 400, "CRITICAL_RESULT_RECIPIENT_INVALID")
+            self.assertEqual(self.check(self.for_study("kdoctor", f.uid), 200).body["items"], [])
             self.assertNotIn(rid, self.ids(self.check(self.listed("kdoctor", "sent"), 200)))
             # GET audit: the owner sees the owner-only rows, the tele institution sees the study's other rows without them
             owner_rows = self.check(self.stack.request("GET", f"/audit?uid={quote(f.uid)}", "doctor"), 200).body

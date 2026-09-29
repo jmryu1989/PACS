@@ -11,6 +11,10 @@
  *      RISK-S7-CVR-PHI-IN-AUDIT / RISK-S7-CVR-SOURCE-BYPASS / RISK-S7-U1p-CLASS-WIDENING / RISK-S7-U1p-STALE-IDENTITY /
  *      RISK-S7-U1p-DUPLICATE-PENDING / RISK-S7-U1p-FALSE-UNDELIVERED / RISK-S7-CVR-COUNT-LEAK
  *   -> TEST-S7-U1a-SERVICE (this file).
+ * REQ-S7-U1c-TELE / REQ-S7-U1c-SCHEMA-BRANCH (A: both record-time institutions, no migration)
+ *   -> RISK-S7-U1c-TELE-WIDENING / RISK-S7-U1c-AFTER-CLOSE / RISK-S7-U1c-AUDIT-SIDES (+ the inherited S7-CVR risks)
+ *   -> TEST-S7-U1c-SERVICE TSV01..TSV19 (the S7-U1c section at the end; the diagnosis scenario table is the contract
+ *      supplement, OP-4 a). A = OTHER owns the study, B = INST is the tele channel, Z = THIRD is neither.
  *
  * The expected values below are the contract's tables (M-S7-CVR and the R rows of section 4.2, state-machine.json
  * transitions and refusals, the section 3.3/3.4/11 key sets, section 6.2 lists and counts, section 7.1 replay sequences),
@@ -44,15 +48,18 @@ const { CLINICIAN_BUSINESS_ROUTES } = require('/app/dist/clinician-policy');
 
 const INST = 'synthetic-a';
 const OTHER = 'synthetic-b';
+const THIRD = 'synthetic-c';
 const id = n => '00000000-0000-4000-8000-' + String(n).padStart(12, '0');
 const UID = '2.25.7001', UID2 = '2.25.7002', TELE_UID = '2.25.7003';
+const TELE_UID2 = '2.25.7004', THIRD_UID = '2.25.7005', OTHER_UID = '2.25.7006', REOPEN_UID = '2.25.7007';
 
-// Members: sub, token roles, Keycloak groups. Names are synthetic.
+// Members: sub, token roles, Keycloak groups. Names are synthetic. SUBS follow this order, so new members go at the end.
 const PEOPLE = {
   S: { roles: ['radiologist'] }, X: { roles: ['radiologist'] }, Y: { roles: ['radiologist'] }, Z: { roles: ['radiologist'] },
   P: { roles: ['clinician'] }, P2: { roles: ['clinician'] }, M: { roles: ['clinician', 'radiologist'] },
   CT: { roles: ['clinician', 'technician'] }, CA: { roles: ['clinician', 'admin'] }, AD: { roles: ['admin'] }, T: { roles: ['technician'] },
   AR: { roles: ['admin', 'radiologist'] }, K: { roles: ['radiologist'], group: OTHER }, KC: { roles: ['clinician'], group: OTHER },
+  KS: { roles: ['radiologist'], group: OTHER }, ZR: { roles: ['radiologist'], group: THIRD }, ZC: { roles: ['clinician'], group: THIRD },
 };
 const SUBS = Object.fromEntries(Object.keys(PEOPLE).map((name, n) => [name, id(9000 + n)]));
 const actorOf = name => 'syn-' + name.toLowerCase() + '@synthetic.test';
@@ -1006,13 +1013,15 @@ test('ordering, duplicates and boundaries: body before owner, role before body, 
   // overlapping failures: a moved source beats an invalid recipient; the pending record beats the moved source
   await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(136), 'T', v1 + 5)), code(409, 'CRITICAL_RESULT_SOURCE_MOVED'));
   await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(136), 'P', v1 + 5)), code(409, 'CRITICAL_RESULT_PENDING_EXISTS'));
-  // tele-only and other-institution studies: 404 before any Keycloak or Orthanc read of the recipient or the source
+  // a study neither ours nor open to us by a tele channel (S7-U1c NR-01: TELE_UID is now S's tele scope, TSV01..TSV19),
+  // and no such study: 404 before any Keycloak or Orthanc read of the recipient or the source
+  await w.study(THIRD_UID, THIRD);
   const mark = w.log.length;
-  await assert.rejects(w.svc.create(TELE_UID, S(), createBody(S(), id(137), 'X', 1)), code(404, 'STUDY_NOT_FOUND'));
+  await assert.rejects(w.svc.create(THIRD_UID, S(), createBody(S(), id(137), 'X', 1)), code(404, 'STUDY_NOT_FOUND'));
   await assert.rejects(w.svc.create('2.25.999999', S(), createBody(S(), id(137), 'X', 1)), code(404, 'STUDY_NOT_FOUND'), 'no such study');
   assert.deepEqual(w.log.slice(mark).filter(e => e.startsWith('orthanc:')), [], 'no original identity read for a study that is not ours');
-  await assert.rejects(w.svc.recipients(TELE_UID, S()), code(404, 'STUDY_NOT_FOUND'));
-  await assert.rejects(w.svc.forStudy(TELE_UID, S()), code(404, 'STUDY_NOT_FOUND'));
+  await assert.rejects(w.svc.recipients(THIRD_UID, S()), code(404, 'STUDY_NOT_FOUND'));
+  await assert.rejects(w.svc.forStudy(THIRD_UID, S()), code(404, 'STUDY_NOT_FOUND'));
   // id routes: malformed ids are 404, not 400
   await assert.rejects(w.svc.read('not-a-uuid', S()), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
   await assert.rejects(w.svc.ack('not-a-uuid', person('P'), ackBody(person('P'), id(138))), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
@@ -1048,4 +1057,567 @@ test('candidates follow the create rules: C1 clinicians, readers outside the P p
   assert.deepEqual([out.sendable, out.reason, out.source], [false, 'NO_PINNABLE_SOURCE', null]);
   assert.equal(p1 > 0, true);
   await assert.rejects(w.svc.recipients(UID, person('P')), code(403, 'CRITICAL_RESULT_ROLE_REQUIRED'));
+});
+
+// ── S7-U1c: critical results on tele studies (TEST-S7-U1c-SERVICE TSV01..TSV19) ──
+// A = OTHER owns the study, B = INST holds the tele channel (StudyState.teleInstitutionId), Z = THIRD is neither.
+// S = S_B (INST radiologist), X/Y = other INST radiologists, P = INST clinician, K = X_A (OTHER radiologist),
+// KC = P_A (OTHER clinician), KS = S_A (OTHER radiologist), ZR/ZC = THIRD radiologist/clinician. The channel is opened,
+// closed and moved with one row update, as w.move moves the owner; the service is never told which case it is in.
+
+/** The world with a third institution, a channel setter and a StudyAccess policy writer for any institution. */
+async function teleWorld(options) {
+  const w = await world(options);
+  await w.base.$executeRaw`INSERT INTO "Institution" (id, name) VALUES (${THIRD}, 'SYNTHETIC C')`;
+  w.tele = async (uid, institution) => w.base.$executeRaw`UPDATE "StudyState" SET "teleInstitutionId" = ${institution} WHERE uid = ${uid}`;
+  w.policy = async (institution, name, policy) => w.base.$executeRaw`INSERT INTO "StudyAccessPolicy"
+      (institution, subject, revision, policy, reason, "updatedBy", "updatedAt")
+    VALUES (${institution}, ${SUBS[name]}, 1, ${JSON.stringify(policy)}::jsonb, 'SYNTHETIC policy', 'SYNTHETIC-admin', now())
+    ON CONFLICT (institution, subject) DO UPDATE SET revision = "StudyAccessPolicy".revision + 1, policy = EXCLUDED.policy, "updatedAt" = now()`;
+  return w;
+}
+const restrictTo = rule => ({ version: 1, restricted: true, startsAt: null, endsAt: null,
+  rules: [{ patientId: null, modalities: [], dateFrom: null, dateTo: null, studyUids: [], ...rule }] });
+// The contract's key sets (section 11 audit detail, section 3.3 recipient projections), written out as literals.
+const AUDIT_KEYS = ['event', 'from', 'id', 'institution', 'recipient', 'replacedBy', 'requestId', 'revision', 'role', 'senderInstitution',
+  'source', 'supersedes', 'to'];
+const RECIPIENT_FULL_KEYS = ['acknowledgedAt', 'body', 'cancelReason', 'cancelledAt', 'createdAt', 'id', 'message', 'replacedBy', 'revision',
+  'sender', 'source', 'state', 'study', 'studyUid', 'supersededAt', 'view'];
+const RECIPIENT_STUB_KEYS = ['acknowledgedAt', 'cancelledAt', 'createdAt', 'id', 'replacedBy', 'revision', 'sender', 'source', 'state', 'study',
+  'studyUid', 'supersededAt', 'view'];
+const external = (w, mark) => w.log.slice(mark).filter(e => e.startsWith('kc:') || e.startsWith('orthanc:'));
+const ids = list => list.items.map(item => item.id).sort();
+
+test('TSV01 a tele sender\'s candidates are the owner institution\'s eligible members; B and Z members are never recipients (TS-01, TS-09, TR-01, TR-02)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  const out = await w.svc.recipients(TELE_UID, S());
+  assert.deepEqual([out.sendable, out.reason, out.source.version, out.source.action, out.source.final], [true, null, v1, 'approve', true]);
+  // compared as sets: the candidate order is a display order, not the rule
+  assert.deepEqual(out.recipients.map(r => r.sub).sort(), [SUBS.K, SUBS.KC, SUBS.KS].sort(), 'OTHER\'s eligible members only');
+  assert.deepEqual((await w.svc.recipients(TELE_UID, person('KS'))).recipients.map(r => r.sub).sort(), [SUBS.K, SUBS.KC].sort(),
+    'the owner path lists no INST member either');
+  for (const who of ['P', 'T', 'AD']) {
+    await assert.rejects(w.svc.recipients(TELE_UID, person(who)), code(403, 'CRITICAL_RESULT_ROLE_REQUIRED'), who);
+    await assert.rejects(w.svc.create(TELE_UID, person(who), createBody(person(who), id(1901), 'KC', v1)), code(403, 'CRITICAL_RESULT_ROLE_REQUIRED'), who);
+  }
+  const before = await w.count();
+  for (const who of ['P', 'X', 'ZC', 'ZR'])   // B -> B and B -> Z (TR-02, TR-03)
+    await assert.rejects(w.svc.create(TELE_UID, S(), createBody(S(), id(1902), who, v1)), code(400, 'CRITICAL_RESULT_RECIPIENT_INVALID'), who);
+  for (const who of ['S', 'P'])                // A -> B on the same tele study (TR-01)
+    await assert.rejects(w.svc.create(TELE_UID, person('KS'), createBody(person('KS'), id(1903), who, v1)), code(400, 'CRITICAL_RESULT_RECIPIENT_INVALID'), who);
+  assert.deepEqual(await w.count(), before);
+});
+
+test('TSV02 a tele create stores both record-time institutions and one audit row naming both (TS-02, TA-01, schema branch A)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  const body = createBody(S(), id(1911), 'KC', v1);
+  const created = await w.svc.create(TELE_UID, S(), body);
+  assert.deepEqual([created.replayed, created.applied.action, created.applied.to, created.applied.revision], [false, 'create', 'created', 1]);
+  const row = await w.record(id(1911));
+  assert.deepEqual([row.institutionId, row.senderInstitutionId, row.senderSub, row.recipientSub, row.recipientRole, row.sourceVersion, row.sourceAction],
+    [OTHER, INST, SUBS.S, SUBS.KC, 'clinician', v1, 'approve']);
+  assert.deepEqual((await w.events(id(1911))).map(e => [e.seq, e.event, e.revision]), [[1, 'created', 1]]);
+  assert.deepEqual(await w.count(), { records: 1, events: 1, receipts: 1, audits: 1, updates: 0 });
+  const [audit] = await w.audits();
+  const detail = JSON.parse(audit.detail);
+  assert.deepEqual(Object.keys(detail).sort(), AUDIT_KEYS);
+  assert.deepEqual([audit.actor, audit.target, detail.event, detail.institution, detail.senderInstitution, detail.role, detail.recipient],
+    [actorOf('S'), TELE_UID, 'created', OTHER, INST, 'radiologist', actorOf('KC')]);
+  for (const text of [MESSAGE, SUBS.KC, 'SYNTHETIC ORIGINAL']) assert.equal(audit.detail.includes(text), false, text);
+  // preserving variant: the same request with its keys in another order is the same request
+  const again = await w.svc.create(TELE_UID, S(), Object.fromEntries(Object.entries(body).reverse()));
+  assert.deepEqual([again.replayed, again.applied], [true, created.applied]);
+  assert.deepEqual(await w.count(), { records: 1, events: 1, receipts: 1, audits: 1, updates: 0 });
+});
+
+test('TSV03 the owner-institution recipient reads a tele record like any other and only its click acknowledges; the tele sender lists it and cannot acknowledge (TS-03, TS-16, TM-03)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  await w.svc.create(TELE_UID, S(), createBody(S(), id(1921), 'KC', v1));
+  const before = await w.count();
+  for (let n = 0; n < 3; n++) {
+    const received = await w.svc.list(person('KC'), { view: 'received' });
+    assert.deepEqual([ids(received), received.pending, received.items[0].state], [[id(1921)], 1, 'created']);
+  }
+  const { item } = await w.svc.read(id(1921), person('KC'));
+  assert.deepEqual(Object.keys(item).sort(), RECIPIENT_FULL_KEYS, 'no sender or record institution in the projection');
+  assert.deepEqual([item.view, item.message, item.body.findings, item.sender], ['full', MESSAGE, pinnedText(v1), { name: 'SYNTHETIC S' }]);
+  assert.deepEqual(await w.count(), before, 'lists and reads never acknowledge');
+  const sent = await w.svc.list(S(), { view: 'sent' });
+  assert.deepEqual([ids(sent), sent.pending, sent.items[0].delivery], [[id(1921)], 1, 'readable']);
+  assert.equal((await w.svc.read(id(1921), S())).item.view, 'sender');
+  assert.deepEqual((await w.svc.forStudy(TELE_UID, S())).items.map(i => [i.id, i.view]), [[id(1921), 'sender']]);
+  await assert.rejects(w.svc.ack(id(1921), S(), ackBody(S(), id(1922))), code(404, 'CRITICAL_RESULT_NOT_FOUND'), 'no proxy ACK');
+  assert.equal((await w.svc.ack(id(1921), person('KC'), ackBody(person('KC'), id(1923)))).applied.to, 'acknowledged');
+  const after = await w.svc.list(S(), { view: 'sent' });
+  assert.deepEqual([after.items[0].state, after.items[0].delivery, typeof after.items[0].acknowledgedAt, after.pending], ['acknowledged', null, 'string', 0]);
+});
+
+test('TSV04 unsigned tele sources reach owner radiologists only; a preliminary reads to its P pair only (TS-04, TS-05, C1, R1/R2)', async () => {
+  const w = await teleWorld();
+  const s1 = await w.commit(TELE_UID, 'save', { author: actorOf('S') });
+  assert.deepEqual((await w.svc.recipients(TELE_UID, S())).recipients.map(r => r.sub).sort(), [SUBS.K, SUBS.KS].sort());
+  await assert.rejects(w.svc.create(TELE_UID, S(), createBody(S(), id(1931), 'KC', s1)), code(409, 'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'), 'C1');
+  assert.equal((await w.count()).records, 0);
+  assert.equal((await w.svc.create(TELE_UID, S(), createBody(S(), id(1932), 'K', s1))).replayed, false, 'R2');
+  // a preliminary of S with the INST reviewer X (the reviewer is the writer's institution's, F-07)
+  await w.study(TELE_UID2, OTHER, INST);
+  const p1 = await w.commit(TELE_UID2, 'preliminary', { author: actorOf('S'), reviewer: actorOf('X') });
+  const pre = await w.svc.recipients(TELE_UID2, S());
+  assert.deepEqual([pre.sendable, pre.reason, pre.recipients], [false, 'NO_ELIGIBLE_RECIPIENT', []]);
+  const before = await w.count();
+  await assert.rejects(w.svc.create(TELE_UID2, S(), createBody(S(), id(1933), 'K', p1)), code(409, 'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'), 'R1');
+  // preserving variant: the other member of the P pair sends and gets the same answer
+  await assert.rejects(w.svc.create(TELE_UID2, person('X'), createBody(person('X'), id(1934), 'K', p1)), code(409, 'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'));
+  await assert.rejects(w.svc.create(TELE_UID2, person('Y'), createBody(person('Y'), id(1935), 'K', p1)), code(403, 'CRITICAL_RESULT_SOURCE_FORBIDDEN'));
+  assert.deepEqual(await w.count(), before);
+});
+
+test('TSV05 the recipient\'s StudyAccess is judged at the record institution: an OTHER policy that allows or leaves out the study decides candidates, create and delivery (TS-06)', async () => {
+  const w = await teleWorld();
+  await w.study(TELE_UID2, OTHER, INST);
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  const v2 = await w.commit(TELE_UID2, 'approve', { author: actorOf('S') });
+  await w.policy(OTHER, 'K', restrictTo({ studyUids: [TELE_UID, TELE_UID2] }));
+  assert.ok((await w.svc.recipients(TELE_UID, S())).recipients.some(r => r.sub === SUBS.K), 'allowed: K is a candidate');
+  await w.svc.create(TELE_UID, S(), createBody(S(), id(1941), 'K', v1));
+  const delivery = async () => (await w.svc.list(S(), { view: 'sent' })).items.find(i => i.id === id(1941)).delivery;
+  assert.equal(await delivery(), 'readable');
+  await w.policy(OTHER, 'K', restrictTo({ studyUids: [OTHER_UID] }));
+  assert.equal(await delivery(), 'not_eligible');
+  assert.equal((await w.svc.recipients(TELE_UID2, S())).recipients.some(r => r.sub === SUBS.K), false);
+  const before = await w.count();
+  await assert.rejects(w.svc.create(TELE_UID2, S(), createBody(S(), id(1942), 'K', v2)), code(409, 'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'));
+  assert.deepEqual(await w.count(), before);
+  // preserving variant: a rule picking the same studies another way (their modality) allows them the same way
+  await w.policy(OTHER, 'K', restrictTo({ modalities: ['CT'] }));
+  assert.equal(await delivery(), 'readable');
+  assert.equal((await w.svc.create(TELE_UID2, S(), createBody(S(), id(1943), 'K', v2))).replayed, false);
+});
+
+test('TSV06 the recipient subject\'s policy lock is the record institution\'s: a policy write in progress for [OTHER, K] holds a tele create (TS-07)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  const create = () => w.svc.create(TELE_UID, S(), createBody(S(), id(1951), 'K', v1));
+  const busyUnder = async (key, label) => {
+    const before = await w.count();
+    const release = await holdLock(w, key);
+    try {
+      await assert.rejects(create(), e => {
+        assert.deepEqual([e.getStatus(), e.getResponse().code, Object.keys(e.getResponse()).sort()], [503, 'CRITICAL_RESULT_BUSY', ['code', 'message']], label);
+        return true;
+      }, label);
+    } finally { await release(); }
+    assert.deepEqual(await w.count(), before, label);
+    assert.equal(await w.receipt(id(1951)), null, label);
+  };
+  await busyUnder(await policyLock(w, person('K')), 'recipient subject [OTHER, K]');
+  // preserving variant: the sender's own lock [INST, S] held gives the same answer
+  await busyUnder(await policyLock(w, S()), 'sender [INST, S]');
+  const created = await create();
+  assert.deepEqual([created.replayed, created.applied.to], [false, 'created']);
+});
+
+test('TSV07 the tele sender\'s own restricted policy scopes a tele study like any study it sees: allowed, the sent list has it; left out, 404 and gone (TS-08)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  await w.policy(INST, 'S', restrictTo({ studyUids: [TELE_UID] }));
+  await w.svc.create(TELE_UID, S(), createBody(S(), id(1961), 'KC', v1));
+  const listed = await w.svc.list(S(), { view: 'sent' });
+  assert.deepEqual([ids(listed), listed.pending], [[id(1961)], 1]);
+  // a page cursor of this policy revision (section 6.2: the cursor names the StudyAccess revision it was made under)
+  const cursor = P.encodeCursor(new Date(Date.now() + 60000), id(1961), 1);
+  assert.deepEqual(ids(await w.svc.list(S(), { view: 'sent', cursor })), [id(1961)]);
+  await w.policy(INST, 'S', restrictTo({ studyUids: [OTHER_UID] }));
+  for (const [label, call] of [['recipients', () => w.svc.recipients(TELE_UID, S())], ['forStudy', () => w.svc.forStudy(TELE_UID, S())],
+    ['create', () => w.svc.create(TELE_UID, S(), createBody(S(), id(1962), 'K', v1))]])
+    await assert.rejects(call(), code(404, 'STUDY_NOT_FOUND'), label);
+  const hidden = await w.svc.list(S(), { view: 'sent' });
+  assert.deepEqual([hidden.items, hidden.pending], [[], 0]);
+  await assert.rejects(w.svc.list(S(), { view: 'sent', cursor }), code(400, 'CRITICAL_RESULT_INPUT_INVALID'), 'the earlier revision\'s cursor');
+  await assert.rejects(w.svc.read(id(1961), S()), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  // preserving variant: a date rule that picks the study (its original study date) allows it again
+  await w.policy(INST, 'S', restrictTo({ dateFrom: '2026-09-01', dateTo: '2026-09-30' }));
+  assert.deepEqual(ids(await w.svc.list(S(), { view: 'sent' })), [id(1961)]);
+});
+
+test('TSV08 pending is per (study, sender, recipient): an owner sender and a tele sender each have one; a requestId is service-wide; each sees its own records only (TS-10, TS-11, TR-06)', async () => {
+  for (const order of [['S', 'KS'], ['KS', 'S']]) {   // preserving variant: the two senders in either order
+    const w = await teleWorld();
+    const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('KS') });
+    const made = {};
+    for (const who of order) {
+      made[who] = id(who === 'S' ? 1971 : 1972);
+      assert.equal((await w.svc.create(TELE_UID, person(who), createBody(person(who), made[who], 'KC', v1))).replayed, false, who);
+    }
+    await assert.rejects(w.svc.create(TELE_UID, S(), createBody(S(), id(1973), 'KC', v1)),
+      e => code(409, 'CRITICAL_RESULT_PENDING_EXISTS')(e) && e.getResponse().id === made.S);
+    await assert.rejects(w.svc.create(TELE_UID, person('KS'), createBody(person('KS'), made.S, 'K', v1)), code(409, 'REQUEST_ID_REUSED'));
+    assert.equal((await w.svc.list(person('KC'), { view: 'received' })).pending, 2);
+    await assert.rejects(w.svc.read(made.KS, S()), code(404, 'CRITICAL_RESULT_NOT_FOUND'), 'the A->A record is not B\'s');
+    assert.deepEqual(ids(await w.svc.list(S(), { view: 'sent' })), [made.S]);
+    assert.deepEqual((await w.svc.list(S(), { view: 'received' })).items, []);
+    assert.deepEqual(ids(await w.svc.forStudy(TELE_UID, S())), [made.S]);
+    assert.deepEqual(ids(await w.svc.forStudy(TELE_UID, person('KS'))), [made.KS]);
+  }
+});
+
+test('TSV09 the source moves under tele records: stub and ACK refused, a supersede keeps both institutions, reset refuses it, an R3 reader keeps the pinned body (TS-12, TV-01..TV-03, TA-01)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  await w.svc.create(TELE_UID, S(), createBody(S(), id(1981), 'KC', v1));
+  const v2 = await w.commit(TELE_UID, 'addendum', { author: actorOf('KS') });
+  const stub = (await w.svc.read(id(1981), person('KC'))).item;
+  assert.deepEqual([stub.view, stub.source, 'message' in stub, 'body' in stub], ['stub', { current: false, reason: 'head_moved' }, false, false]);
+  await assert.rejects(w.svc.ack(id(1981), person('KC'), ackBody(person('KC'), id(1982))), code(409, 'CRITICAL_RESULT_SOURCE_CHANGED'));
+  const moved = (await w.svc.list(S(), { view: 'sent' })).items[0];
+  assert.deepEqual([moved.source.current, moved.delivery], [false, 'stub']);
+  const sup = await w.svc.supersede(id(1981), S(), supersedeBody(S(), id(1983), 1, v2));
+  assert.deepEqual(sup.applied.replacement, { id: id(1983), revision: 1, sourceVersion: v2 });
+  const fresh = await w.record(id(1983));
+  assert.deepEqual([fresh.institutionId, fresh.senderInstitutionId, fresh.sourceAuthor, fresh.supersedesId], [OTHER, INST, actorOf('KS'), id(1981)]);
+  assert.deepEqual((await w.audits()).map(a => { const d = JSON.parse(a.detail); return [a.actor, d.id, d.event, d.institution, d.senderInstitution]; }), [
+    [actorOf('S'), id(1981), 'created', OTHER, INST], [actorOf('S'), id(1981), 'superseded', OTHER, INST], [actorOf('S'), id(1983), 'created', OTHER, INST]]);
+  assert.equal((await w.svc.ack(id(1983), person('KC'), ackBody(person('KC'), id(1984)))).applied.to, 'acknowledged');
+  // reset: a supersede onto the reset head is refused, the record can be cancelled
+  const r = await teleWorld();
+  const u1 = await r.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  await r.svc.create(TELE_UID, S(), createBody(S(), id(1985), 'KC', u1));
+  // preserving variant: a supersede onto the unchanged head (a message correction) applies
+  assert.equal((await r.svc.supersede(id(1985), S(), supersedeBody(S(), id(1986), 1, u1))).applied.replacement.sourceVersion, u1);
+  await r.commit(TELE_UID, 'reset', { author: actorOf('KS'), discard: true });
+  await assert.rejects(r.svc.supersede(id(1986), S(), supersedeBody(S(), id(1987), 1, await r.head(TELE_UID))), code(409, 'CRITICAL_RESULT_SOURCE_INVALID'));
+  assert.deepEqual((await r.svc.read(id(1986), person('KC'))).item.source, { current: false, reason: 'reset' });
+  assert.equal((await r.svc.cancel(id(1986), S(), cancelBody(S(), id(1988)))).applied.to, 'cancelled');
+  // R3: the reader of an unsigned tele source keeps its pinned row after B approves
+  const x = await teleWorld();
+  const s1 = await x.commit(TELE_UID, 'save', { author: actorOf('S') });
+  await x.svc.create(TELE_UID, S(), createBody(S(), id(1989), 'K', s1));
+  const a2 = await x.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  const r3 = (await x.svc.read(id(1989), person('K'))).item;
+  assert.deepEqual([r3.view, r3.source.current, r3.source.reason, r3.body.findings], ['full', false, 'head_moved', pinnedText(s1)]);
+  assert.equal(JSON.stringify(r3).includes(pinnedText(a2)), false);
+  await assert.rejects(x.svc.ack(id(1989), person('K'), ackBody(person('K'), id(1990))), code(409, 'CRITICAL_RESULT_SOURCE_CHANGED'));
+});
+
+test('TSV10 the tele sender cancels with a reason; a concurrent ACK and cancel has one winner; the same request replays (TS-13..TS-15, TA-01)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  const body = createBody(S(), id(2001), 'KC', v1);
+  const first = await w.svc.create(TELE_UID, S(), body);
+  const replay = await w.svc.create(TELE_UID, S(), body);
+  assert.deepEqual([replay.replayed, replay.applied], [true, first.applied]);
+  assert.deepEqual(await w.count(), { records: 1, events: 1, receipts: 1, audits: 1, updates: 0 });
+  assert.equal((await w.svc.cancel(id(2001), S(), cancelBody(S(), id(2002)))).applied.to, 'cancelled');
+  const [, audit] = await w.audits();
+  const detail = JSON.parse(audit.detail);
+  assert.deepEqual([audit.actor, detail.event, detail.institution, detail.senderInstitution, detail.role], [actorOf('S'), 'cancelled', OTHER, INST, 'radiologist']);
+  assert.equal(audit.detail.includes(REASON), false);
+  const received = await w.svc.list(person('KC'), { view: 'received' });
+  assert.deepEqual([received.items[0].state, received.pending], ['cancelled', 0]);
+  for (let round = 0; round < 10; round++) {
+    const r = await teleWorld();
+    const v = await r.commit(TELE_UID, 'approve', { author: actorOf('S') });
+    await r.svc.create(TELE_UID, S(), createBody(S(), id(2003), 'KC', v));
+    const calls = [r.svc.ack(id(2003), person('KC'), ackBody(person('KC'), id(2004))), r.svc.cancel(id(2003), S(), cancelBody(S(), id(2005)))];
+    if (round % 2) calls.reverse();
+    const results = await Promise.allSettled(calls);
+    const won = results.filter(x => x.status === 'fulfilled');
+    assert.equal(won.length, 1, 'round ' + round);
+    const winner = won[0].value.applied.to;
+    assert.ok(code(409, winner === 'acknowledged' ? 'CRITICAL_RESULT_ACKNOWLEDGED' : 'CRITICAL_RESULT_CANCELLED')(results.find(x => x.status === 'rejected').reason), 'round ' + round);
+    assert.deepEqual(await r.count(), { records: 1, events: 2, receipts: 2, audits: 2, updates: 1 }, 'round ' + round);
+  }
+});
+
+test('TSV11 no scope, no reads: a third institution\'s study, an owner study with no channel and a Z reader answer 404 before any recipient or source read (TR-03..TR-05)', async () => {
+  const w = await teleWorld();
+  await w.study(THIRD_UID, THIRD);
+  await w.study(OTHER_UID, OTHER);
+  for (const uid of [THIRD_UID, OTHER_UID, TELE_UID]) await w.commit(uid, 'approve', { author: actorOf('KS') });
+  await w.svc.create(TELE_UID, S(), createBody(S(), id(2011), 'KC', 1));
+  const ledger = await w.count();
+  for (const uid of [THIRD_UID, OTHER_UID, '2.25.999998']) {   // preserving variant: a UID that does not exist answers alike
+    const mark = w.log.length;
+    await assert.rejects(w.svc.create(uid, S(), createBody(S(), id(2012), 'KC', 1)), code(404, 'STUDY_NOT_FOUND'), uid);
+    await assert.rejects(w.svc.recipients(uid, S()), code(404, 'STUDY_NOT_FOUND'), uid);
+    await assert.rejects(w.svc.forStudy(uid, S()), code(404, 'STUDY_NOT_FOUND'), uid);
+    assert.deepEqual(external(w, mark), ['kc:getUser'], uid + ': only the create\'s own Keycloak re-check');
+  }
+  const mark = w.log.length;
+  for (const call of [() => w.svc.create(TELE_UID, person('ZR'), createBody(person('ZR'), id(2013), 'KC', 1)),
+    () => w.svc.recipients(TELE_UID, person('ZR')), () => w.svc.forStudy(TELE_UID, person('ZR'))])
+    await assert.rejects(call(), code(404, 'STUDY_NOT_FOUND'));
+  assert.deepEqual(external(w, mark), ['kc:getUser'], 'Z on the tele study: no recipient or original read');
+  for (const call of [() => w.svc.read(id(2011), person('ZR')), () => w.svc.cancel(id(2011), person('ZR'), cancelBody(person('ZR'), id(2014))),
+    () => w.svc.supersede(id(2011), person('ZR'), supersedeBody(person('ZR'), id(2015), 1, 1)),
+    () => w.svc.ack(id(2011), person('ZC'), ackBody(person('ZC'), id(2016)))])
+    await assert.rejects(call(), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  assert.deepEqual([(await w.svc.list(person('ZR'), { view: 'sent' })).items, (await w.svc.list(person('ZC'), { view: 'received' })).items], [[], []]);
+  await assert.rejects(w.svc.create(TELE_UID, S(), createBody(S(), id(2017), 'ZC', 1)), code(400, 'CRITICAL_RESULT_RECIPIENT_INVALID'), 'B -> Z (TR-03)');
+  assert.deepEqual(await w.count(), ledger);
+});
+
+test('TSV12 record-time institutions decide: a row with the two institutions swapped is nobody\'s; a tele sender who moves institution loses its records, the recipient keeps them (TR-07, TR-08)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  // TR-07: institutionId = INST and senderInstitutionId = OTHER on the study OTHER owns with the channel at INST (no CHECK
+  // binds the two columns, migration 20260928120000). The product never writes such a row; nobody's predicate matches it.
+  const swapped = id(2021);
+  await w.base.$executeRaw`INSERT INTO "CriticalResult" (id, "studyUid", "institutionId", "senderInstitutionId", "senderSub", "senderActor",
+      "senderName", "recipientSub", "recipientActor", "recipientName", "recipientRole", "sourceVersion", "sourceAction", "sourceAuthor", "sourceAt",
+      "origName", "origPatientId", "origBirth", "origStudyDate", message, state, revision, "changedBy", "createdAt", "updatedAt")
+    SELECT ${swapped}::uuid, uid, ${INST}, ${OTHER}, ${SUBS.S}, ${actorOf('S')}, 'SYNTHETIC S', ${SUBS.KC}, ${actorOf('KC')}, 'KC SYNTHETIC',
+      'clinician', version, action, author, at, 'SYNTHETIC', 'SYNTHETIC', '', '', ${MESSAGE}, 'created', 1, ${actorOf('S')}, now(), now()
+    FROM "ReportVersion" WHERE uid = ${TELE_UID} AND version = ${v1}`;
+  for (const who of ['S', 'KC', 'KS']) {
+    await assert.rejects(w.svc.read(swapped, person(who)), code(404, 'CRITICAL_RESULT_NOT_FOUND'), who);
+    assert.deepEqual((await w.svc.forStudy(TELE_UID, person(who))).items, [], who);
+    for (const view of who === 'KC' ? ['received'] : ['sent', 'received']) assert.deepEqual((await w.svc.list(person(who), { view })).items, [], who + ' ' + view);
+  }
+  // TR-08: S's record on a second tele study, then S's Keycloak group and token move to OTHER
+  await w.study(TELE_UID2, OTHER, INST);
+  const u1 = await w.commit(TELE_UID2, 'approve', { author: actorOf('S') });
+  await w.svc.create(TELE_UID2, S(), createBody(S(), id(2022), 'KC', u1));
+  w.users.get(SUBS.S).groups = [OTHER];
+  const moved = { ...S(), institution: OTHER };
+  await assert.rejects(w.svc.read(id(2022), moved), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  await assert.rejects(w.svc.cancel(id(2022), moved, cancelBody(moved, id(2023))), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  assert.deepEqual([(await w.svc.list(moved, { view: 'sent' })).items, (await w.svc.forStudy(TELE_UID2, moved)).items], [[], []]);
+  assert.equal((await w.svc.read(id(2022), person('KC'))).item.view, 'full', 'the recipient keeps reading (section 17 L-7)');
+  // preserving variant: back in INST, S sees it again; the recipient acknowledges
+  w.users.get(SUBS.S).groups = [INST];
+  assert.equal((await w.svc.read(id(2022), S())).item.view, 'sender');
+  assert.equal((await w.svc.ack(id(2022), person('KC'), ackBody(person('KC'), id(2024)))).applied.to, 'acknowledged');
+});
+
+test('TSV13 when the channel closes the tele sender loses every read and write of its records at once (list and pending together); the owner side keeps them (TC-01, TC-06)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  const r1 = createBody(S(), id(2031), 'KC', v1);
+  await w.svc.create(TELE_UID, S(), r1);
+  await w.svc.create(TELE_UID, S(), createBody(S(), id(2032), 'K', v1));
+  await w.svc.ack(id(2031), person('KC'), ackBody(person('KC'), id(2033)));
+  const open = await w.svc.list(S(), { view: 'sent' });
+  assert.deepEqual([ids(open), open.pending], [[id(2031), id(2032)].sort(), 1]);
+  const columns = async () => (await w.base.$queryRaw`SELECT id, "institutionId", "senderInstitutionId", state, revision FROM "CriticalResult" ORDER BY id`);
+  const rows = await columns(), ledger = await w.count();
+  await w.tele(TELE_UID, null);
+  for (const recordId of [id(2031), id(2032)]) await assert.rejects(w.svc.read(recordId, S()), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  const closed = await w.svc.list(S(), { view: 'sent' });
+  assert.deepEqual([closed.items, closed.pending], [[], 0], 'the list and its pending count leave together');
+  for (const [label, call] of [['forStudy', () => w.svc.forStudy(TELE_UID, S())], ['recipients', () => w.svc.recipients(TELE_UID, S())],
+    ['create', () => w.svc.create(TELE_UID, S(), createBody(S(), id(2034), 'KS', v1))], ['replay', () => w.svc.create(TELE_UID, S(), r1)]])
+    await assert.rejects(call(), code(404, 'STUDY_NOT_FOUND'), label);
+  await assert.rejects(w.svc.cancel(id(2032), S(), cancelBody(S(), id(2035))), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  await assert.rejects(w.svc.supersede(id(2032), S(), supersedeBody(S(), id(2036), 1, v1)), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  assert.deepEqual([await w.count(), await columns()], [ledger, rows], 'closing writes nothing and changes no record');
+  assert.equal((await w.svc.read(id(2031), person('KC'))).item.state, 'acknowledged');
+  assert.equal((await w.svc.read(id(2032), person('K'))).item.view, 'full');
+  assert.equal((await w.svc.list(person('K'), { view: 'received' })).pending, 1);
+  // preserving variant: the channel reopens to INST and S sees both again
+  await w.tele(TELE_UID, INST);
+  assert.deepEqual(ids(await w.svc.list(S(), { view: 'sent' })), [id(2031), id(2032)].sort());
+  await w.tele(TELE_UID, null);
+  assert.equal((await w.svc.ack(id(2032), person('K'), ackBody(person('K'), id(2037)))).applied.to, 'acknowledged', 'the owner side acknowledges after the close');
+});
+
+test('TSV14 a channel moved to a third institution: its reader sends to the owner\'s members but never sees B\'s records; back at INST, B sees only its own (TC-03, TO-04)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  await w.svc.create(TELE_UID, S(), createBody(S(), id(2041), 'KC', v1));
+  await w.tele(TELE_UID, THIRD);
+  const zr = await w.svc.recipients(TELE_UID, person('ZR'));
+  assert.deepEqual([zr.sendable, zr.recipients.map(r => r.sub).sort()], [true, [SUBS.K, SUBS.KC, SUBS.KS].sort()]);
+  await assert.rejects(w.svc.read(id(2041), person('ZR')), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  assert.deepEqual([(await w.svc.list(person('ZR'), { view: 'sent' })).items, (await w.svc.forStudy(TELE_UID, person('ZR'))).items], [[], []]);
+  await assert.rejects(w.svc.read(id(2041), S()), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  await w.svc.create(TELE_UID, person('ZR'), createBody(person('ZR'), id(2042), 'K', v1));
+  assert.deepEqual([(await w.record(id(2042))).institutionId, (await w.record(id(2042))).senderInstitutionId], [OTHER, THIRD]);
+  assert.deepEqual(ids(await w.svc.list(person('ZR'), { view: 'sent' })), [id(2042)]);
+  await w.tele(TELE_UID, INST);
+  assert.deepEqual(ids(await w.svc.list(S(), { view: 'sent' })), [id(2041)]);
+  assert.deepEqual(ids(await w.svc.forStudy(TELE_UID, S())), [id(2041)]);
+  await assert.rejects(w.svc.read(id(2042), S()), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  assert.deepEqual((await w.svc.list(person('ZR'), { view: 'sent' })).items, [], 'Z loses its own record when the channel leaves it');
+});
+
+test('TSV15 a tele create held before its transaction finds the channel closed under its study row lock: 404, nothing written (TC-04)', async () => {
+  for (const close of [true, false]) {   // false is the preserving variant: nothing changes while it is held
+    const w = await teleWorld();
+    const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+    const original = w.access.prepare.bind(w.access), caller = S();
+    let entered, release;
+    const inside = new Promise(r => { entered = r; }), gate = new Promise(r => { release = r; });
+    w.access.prepare = async (c, uids, policy) => { if (c === caller) { entered(); await gate; } return original(c, uids, policy); };
+    const held = w.svc.create(TELE_UID, caller, createBody(caller, id(2051), 'KC', v1));
+    await inside;
+    if (close) await w.tele(TELE_UID, null);
+    release();
+    if (!close) { assert.equal((await held).replayed, false); continue; }
+    await assert.rejects(held, code(404, 'STUDY_NOT_FOUND'));
+    assert.deepEqual(await w.count(), { records: 0, events: 0, receipts: 0, audits: 0, updates: 0 });
+  }
+});
+
+test('TSV16 cancel and supersede judge the channel after the study row lock: a closing write in flight makes them wait, then 404; held past the lock timeout, 503 (TC-05)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  await w.svc.create(TELE_UID, S(), createBody(S(), id(2061), 'KC', v1));
+  /**
+   * Another connection locks the study row as the product's patchState does and sets the channel; it commits `ms` after
+   * taking the lock. Resolves once the lock is held, to a function that waits for that commit (so the call under test runs
+   * while the writer still holds the row).
+   */
+  const writer = async (tele, ms) => {
+    let locked, finished = false;
+    const held = new Promise(r => { locked = r; });
+    const done = w.base.$transaction(async tx => {
+      await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${TELE_UID} FOR UPDATE`;
+      await tx.$executeRaw`UPDATE "StudyState" SET "teleInstitutionId" = ${tele} WHERE uid = ${TELE_UID}`;
+      locked();
+      await new Promise(r => setTimeout(r, ms));
+    }, { maxWait: 4000, timeout: 20000 }).finally(() => { finished = true; });
+    await Promise.race([held, done.then(() => { throw new Error('the writer ended before it took the lock'); })]);
+    return { committed: () => done, get open() { return !finished; } };
+  };
+  const ledger = await w.count();
+  for (const [label, call] of [['cancel', () => w.svc.cancel(id(2061), S(), cancelBody(S(), id(2062)))],
+    ['supersede', () => w.svc.supersede(id(2061), S(), supersedeBody(S(), id(2063), 1, v1))]]) {
+    const closing = await writer(null, 1000);
+    assert.equal(closing.open, true, label + ': the close is still in flight when the call starts');
+    const started = Date.now();
+    await assert.rejects(call(), code(404, 'CRITICAL_RESULT_NOT_FOUND'), label);
+    assert.ok(Date.now() - started >= 500, label + ': the call waited for the study row');
+    await closing.committed();
+    assert.deepEqual(await w.count(), ledger, label);
+    await w.tele(TELE_UID, INST);
+  }
+  const long = await writer(null, 4500);
+  await assert.rejects(w.svc.cancel(id(2061), S(), cancelBody(S(), id(2064))), code(503, 'CRITICAL_RESULT_BUSY'), 'held past lock_timeout');
+  assert.equal(long.open, true, 'the 503 came while the row was still held');
+  await long.committed();
+  assert.deepEqual(await w.count(), ledger);
+  await w.tele(TELE_UID, INST);
+  // preserving variant: a writer that locks the row and keeps the channel: the cancel waits and applies
+  const keep = await writer(INST, 1000);
+  assert.equal((await w.svc.cancel(id(2061), S(), cancelBody(S(), id(2065)))).applied.to, 'cancelled');
+  await keep.committed();
+});
+
+test('TSV17 a tele create applied behind a post-commit StudyAccess refusal: after the channel closes the same request is 404, never a stored result (TC-07)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  const controller = new CriticalResultController(w.svc);
+  let refuse = true;
+  const interceptor = new StudyAccessInterceptor({ snapshot: async () => ({ revision: 1 }), unchanged: async () => {
+    if (refuse) throw new ConflictException({ code: 'STUDY_ACCESS_CHANGED', message: 'SYNTHETIC policy changed' });
+  } });
+  const c = S(), req = { kind: 'member', institution: c.institution, sub: c.sub, actor: c.actor, roles: c.roles, displayName: c.name };
+  const context = { switchToHttp: () => ({ getRequest: () => req }), getClass: () => CriticalResultController,
+    getHandler: () => CriticalResultController.prototype.create };
+  const body = createBody(c, id(2071), 'KC', v1);
+  const post = async () => lastValueFrom(await interceptor.intercept(context, { handle: () => from(controller.create(TELE_UID, req, body)) }));
+  await assert.rejects(post(), code(409, 'STUDY_ACCESS_CHANGED'));
+  const applied = await w.count();
+  assert.deepEqual(applied, { records: 1, events: 1, receipts: 1, audits: 1, updates: 0 }, 'the write committed before the refusal');
+  refuse = false;
+  await w.tele(TELE_UID, null);
+  await assert.rejects(post(), code(404, 'STUDY_NOT_FOUND'));
+  assert.deepEqual(await w.count(), applied);
+  assert.equal((await w.svc.read(id(2071), person('KC'))).item.view, 'full', 'the recipient reads the applied record');
+  // preserving variant: the channel reopens and the same request replays the stored result
+  await w.tele(TELE_UID, INST);
+  assert.equal((await post()).replayed, true);
+  assert.deepEqual(await w.count(), applied);
+});
+
+test('TSV18 a reopened channel: B sees its records again; reads follow section 4.2 by class (R4 full, C4 stub), ACK refused for both; late requests replay, then PENDING_EXISTS, then SOURCE_MOVED (TO-02, TO-03, TO-05)', async () => {
+  const w = await teleWorld();
+  await w.study(REOPEN_UID, OTHER, INST);                                          // F-RO 1: the channel opens
+  const rX = id(2081), rC = id(2082), bodyX = createBody(S(), rX, 'K', 1);
+  await w.commit(REOPEN_UID, 'save', { author: actorOf('S') });                    // v1, RS T
+  const createdX = await w.svc.create(REOPEN_UID, S(), bodyX);                     // F-RO 2: R_X (R2)
+  await w.commit(REOPEN_UID, 'approve', { author: actorOf('KS') });                // v2, RS A: the owner's approve keeps TS
+  await w.svc.create(REOPEN_UID, S(), createBody(S(), rC, 'KC', 2));               // F-RO 3: R_C (C2)
+  await w.tele(REOPEN_UID, null);                                                  // F-RO 4: closed
+  await assert.rejects(w.svc.read(rX, S()), code(404, 'CRITICAL_RESULT_NOT_FOUND'), 'closed: B reads nothing');
+  await w.commit(REOPEN_UID, 'reset', { author: actorOf('KS'), discard: true });   // F-RO 6: discarded v3, reset v4, RS W
+  assert.equal(await w.head(REOPEN_UID), 4);
+  await w.tele(REOPEN_UID, INST);                                                  // F-RO 7: reopened
+  const L0 = { records: 2, events: 2, receipts: 2, audits: 2, updates: 0 };
+  assert.deepEqual(await w.count(), L0);
+  // (a) the counterexample pair in one reset state
+  const x = (await w.svc.read(rX, person('K'))).item;
+  assert.deepEqual([x.view, x.source.version, x.source.action, x.source.current, x.source.reason, x.message, x.body.findings],
+    ['full', 1, 'save', false, 'reset', MESSAGE, pinnedText(1)], 'R4: the pinned v1 row itself, neither the reset head nor Report');
+  assert.equal(JSON.stringify(x).includes(HEAD_BODY), false);
+  const c4 = (await w.svc.read(rC, person('KC'))).item;
+  assert.deepEqual([Object.keys(c4).sort(), c4.view, c4.source], [RECIPIENT_STUB_KEYS, 'stub', { current: false, reason: 'reset' }], 'C4');
+  await assert.rejects(w.svc.ack(rX, person('K'), ackBody(person('K'), id(2083))), code(409, 'CRITICAL_RESULT_SOURCE_CHANGED'));
+  await assert.rejects(w.svc.ack(rC, person('KC'), ackBody(person('KC'), id(2084))), code(409, 'CRITICAL_RESULT_SOURCE_CHANGED'));
+  assert.deepEqual([(await w.svc.list(person('K'), { view: 'received' })).pending, (await w.svc.list(person('KC'), { view: 'received' })).pending], [1, 1]);
+  const sentOf = async () => { const out = await w.svc.list(S(), { view: 'sent' }); return [Object.fromEntries(out.items.map(i => [i.id, i])), out.pending]; };
+  let [by, pending] = await sentOf();
+  assert.deepEqual([by[rX].delivery, by[rC].delivery, by[rX].source.current, by[rX].source.reason, by[rC].source.reason, pending],
+    ['readable', 'stub', false, 'reset', 'reset', 2]);
+  assert.deepEqual(await w.count(), L0);
+  // (b) R4 stub needs RS P with the reset head, a state the product API never makes (TO-05): pair outside, then inside
+  await w.base.$executeRaw`UPDATE "StudyState" SET rs = 'P', "preDoc" = ${actorOf('S')}, "preReviewer" = ${actorOf('Y')} WHERE uid = ${REOPEN_UID}`;
+  const outside = (await w.svc.read(rX, person('K'))).item;
+  assert.deepEqual([outside.view, outside.source, 'message' in outside, 'body' in outside], ['stub', { current: false, reason: 'reset' }, false, false]);
+  await assert.rejects(w.svc.ack(rX, person('K'), ackBody(person('K'), id(2085))), code(409, 'CRITICAL_RESULT_SOURCE_CHANGED'));
+  assert.equal((await sentOf())[0][rX].delivery, 'stub');
+  await w.base.$executeRaw`UPDATE "StudyState" SET "preReviewer" = ${actorOf('K')} WHERE uid = ${REOPEN_UID}`;
+  assert.equal((await w.svc.read(rX, person('K'))).item.view, 'full');
+  assert.equal((await sentOf())[0][rX].delivery, 'readable');
+  await w.base.$executeRaw`UPDATE "StudyState" SET rs = 'W', "preDoc" = NULL, "preReviewer" = NULL WHERE uid = ${REOPEN_UID}`;
+  assert.deepEqual(await w.count(), L0);
+  // (c) requests prepared before the close that arrive after the reopen, in this order (section 4 steps 11, 12, 14)
+  const replay = await w.svc.create(REOPEN_UID, S(), bodyX);
+  assert.deepEqual([replay.replayed, replay.applied], [true, createdX.applied], '(1) replay');
+  assert.deepEqual(await w.count(), L0);
+  const q2 = id(2086);
+  assert.equal(await w.receipt(q2), null);
+  const pendingX = e => code(409, 'CRITICAL_RESULT_PENDING_EXISTS')(e) && e.getResponse().id === rX;
+  await assert.rejects(w.svc.create(REOPEN_UID, S(), createBody(S(), q2, 'K', 1)), pendingX, '(2) duplicate before source');
+  await assert.rejects(w.svc.create(REOPEN_UID, S(), createBody(S(), id(2087), 'K', 4)), pendingX, '(2) preserving: the current head number too');
+  const q3 = id(2088);
+  assert.equal(await w.receipt(q3), null);
+  assert.deepEqual(await w.base.$queryRaw`SELECT id FROM "CriticalResult" WHERE "studyUid" = ${REOPEN_UID} AND "senderSub" = ${SUBS.S}
+    AND "recipientSub" = ${SUBS.KS} AND state = 'created'`, [], '(3) premise: no pending record for S -> KS');
+  await assert.rejects(w.svc.create(REOPEN_UID, S(), createBody(S(), q3, 'KS', 1)), code(409, 'CRITICAL_RESULT_SOURCE_MOVED'), '(3)');
+  await assert.rejects(w.svc.supersede(rX, S(), supersedeBody(S(), id(2089), 1, 1)), code(409, 'CRITICAL_RESULT_SOURCE_MOVED'), '(4)');
+  await assert.rejects(w.svc.supersede(rX, S(), supersedeBody(S(), id(2090), 1, 4)), code(409, 'CRITICAL_RESULT_SOURCE_INVALID'), '(4\')');
+  assert.deepEqual(await w.count(), L0);
+  assert.equal((await w.svc.cancel(rX, S(), cancelBody(S(), id(2091)))).applied.to, 'cancelled', '(5)');
+  const L1 = { records: 2, events: 3, receipts: 3, audits: 3, updates: 1 };
+  assert.deepEqual(await w.count(), L1);
+  assert.equal(await w.receipt(q2), null, 'a refusal leaves no receipt');
+  await assert.rejects(w.svc.create(REOPEN_UID, S(), createBody(S(), q2, 'K', 1)), code(409, 'CRITICAL_RESULT_SOURCE_MOVED'), '(6)');
+  assert.deepEqual(await w.count(), L1);
+  const k = await w.svc.list(person('K'), { view: 'received' });
+  assert.deepEqual([k.items.find(i => i.id === rX).state, k.pending], ['cancelled', 0]);
+  [by, pending] = await sentOf();
+  assert.deepEqual([by[rX].delivery, by[rC].state, by[rC].delivery, pending], [null, 'created', 'stub', 1]);
+});
+
+test('TSV19 a tele record stays with its record institution: when the study\'s owner moves nobody sees it, the replay included; moved back, all see it again (TC-08)', async () => {
+  const w = await teleWorld();
+  const v1 = await w.commit(TELE_UID, 'approve', { author: actorOf('S') });
+  const body = createBody(S(), id(2101), 'KC', v1);
+  await w.svc.create(TELE_UID, S(), body);
+  await w.move(TELE_UID, THIRD);   // the channel still names INST; the record's institution is OTHER
+  for (const who of ['KC', 'S', 'ZR']) {
+    await assert.rejects(w.svc.read(id(2101), person(who)), code(404, 'CRITICAL_RESULT_NOT_FOUND'), who);
+    for (const view of who === 'KC' ? ['received'] : ['sent', 'received']) assert.deepEqual((await w.svc.list(person(who), { view })).items, [], who + ' ' + view);
+  }
+  assert.deepEqual([(await w.svc.forStudy(TELE_UID, S())).items, (await w.svc.forStudy(TELE_UID, person('ZR'))).items], [[], []]);
+  await assert.rejects(w.svc.create(TELE_UID, S(), body), code(404, 'STUDY_NOT_FOUND'), 'the replay of a record the sender no longer sees');
+  await assert.rejects(w.svc.cancel(id(2101), S(), cancelBody(S(), id(2102))), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
+  await w.move(TELE_UID, OTHER);
+  assert.deepEqual([(await w.svc.read(id(2101), person('KC'))).item.view, (await w.svc.read(id(2101), S())).item.view], ['full', 'sender']);
+  assert.equal((await w.svc.create(TELE_UID, S(), body)).replayed, true);
 });

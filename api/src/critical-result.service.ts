@@ -10,8 +10,9 @@ import {
   CRITICAL_RESULT_CODES as CODE, CRITICAL_RESULT_PAGE, CRITICAL_RESULT_PINNABLE_ACTIONS, CRITICAL_RESULT_STATE_FILTERS, Head,
   RADIOLOGIST, RecipientClass, Refusal, ackFingerprint, ackRefusal, appliedResult, auditDetail, cancelFingerprint, clip,
   createCase, createFingerprint, decodeCursor, deliveryOf, eligibleRecipient, effectiveRoles, encodeCursor, exactKeys, holds,
-  isObject, legacyReadable, originalIdentity, positiveValue, recipientCase, recipientClass, recipientView, recordRefusal,
-  senderView, sourceRefusal, studyIdentity, studyUidValue, supersedeFingerprint, textValue, userActor, userName, uuidValue,
+  isObject, legacyReadable, originalIdentity, positiveValue, recipientCase, recipientClass, recipientSees, recipientView, recordRefusal,
+  senderScope, senderSees, senderView, sourceRefusal, studyIdentity, studyUidValue, supersedeFingerprint, textValue, userActor, userName,
+  uuidValue,
 } from './critical-result-policy';
 
 /**
@@ -22,7 +23,10 @@ import {
  * sourceVersion) 외래 키로 고정하고 본문은 읽을 때 그 행에서 읽는다. 개인 초안·현재 Report 본문·미리보기 응답은 어떤
  * 목적으로도 읽지 않는다(머리 판 번호를 알려고 Report.version만 읽는다).
  * 역할은 동작마다 명시하고 need()를 쓰지 않는다 — need()의 admin 예외가 있으면 관리자가 발신·대리 ACK를 하게 된다
- * (D-S7-02 a). 기관은 소유 기관만이다 — visible()의 원격판독 통로로 열지 않는다(D-S7-05 a, S7-U1c 전).
+ * (D-S7-02 a). 기관(S7-U1c, D-S7-05 a): 기록은 늘 검사 소유 기관(A)의 것이다. 원격판독 통로가 지금 열린 기관(B)의
+ * 판독의는 A의 회원에게만 보낼 수 있고 두 기관 칸(institutionId = A, senderInstitutionId = B)이 기록에 남는다. B의 읽기·
+ * 취소·대체는 통로가 열린 동안만이다(통로는 쓰기에서 검사 행을 잠근 뒤, 읽기에서 같은 스냅샷에서 본다). 수신자 쪽은
+ * 통로와 무관하며 수신자 자격·StudyAccess 주체의 기관은 기록 기관이다. 질문·영상 요청·consultation은 넓히지 않는다.
  * Keycloak·Orthanc 읽기와 StudyAccess 원본 태그 준비는 모두 트랜잭션·잠금 전에 끝나고 트랜잭션 안에서는 네트워크를
  * 쓰지 않는다(§4.1). 쓰기의 새 요청은 caller의 Keycloak 현재 상태를 다시 확인하고, 읽기는 토큰만 쓴다(I-10, §17 L-10).
  */
@@ -38,7 +42,7 @@ export type CriticalCaller = Caller & { name?: string };
 
 const MESSAGES: Record<string, string> = {
   [CODE.INPUT_INVALID]: '중요 결과 요청의 형식을 확인하세요',
-  [CODE.RECIPIENT_INVALID]: '받는 사람은 본인이 아닌 같은 기관의 활성 임상의 또는 판독의여야 합니다',
+  [CODE.RECIPIENT_INVALID]: '받는 사람은 본인이 아닌, 검사 소유 기관의 활성 임상의 또는 판독의여야 합니다',
   [CODE.ROLE_REQUIRED]: '이 중요 결과 동작에 필요한 역할이 없습니다',
   [CODE.SOURCE_FORBIDDEN]: '예비 판독 중이라 지정된 판독의만 이 판독 판을 보낼 수 있습니다',
   [CODE.STUDY_NOT_FOUND]: '검사를 찾을 수 없습니다',
@@ -124,17 +128,22 @@ export class CriticalResultService {
   }
 
   /**
-   * 잠금 없는 사전 읽기: 이 검사가 지금 caller 기관 소유인가. 아니면 Keycloak·Orthanc를 읽지 않고 트랜잭션 안의 가시성
-   * 판정(순서 9)이 404로 답한다 — 원본에 없는 UID(Orthanc 실패 503)와 다른 기관 검사(404)가 다른 답이 되어 기관 밖
-   * 검사의 존재가 드러나지 않게 한다. 판정 자체는 트랜잭션 안에서 다시 한다.
+   * 잠금 없는 사전 읽기: 이 검사의 지금 발신 범위(기록 기관 — 소유 기관이면 caller 기관, 원격판독 통로면 소유 기관).
+   * 없으면 Keycloak·Orthanc를 읽지 않고 트랜잭션 안의 가시성 판정(순서 9)이 404로 답한다 — 원본에 없는 UID(Orthanc 실패
+   * 503)와 범위 밖 검사(404)가 다른 답이 되어 범위 밖 검사의 존재가 드러나지 않게 한다. 판정 자체는 트랜잭션 안에서
+   * 다시 하고, 그 사이 범위가 바뀌었으면 이 읽기로 준비한 수신자·원본을 쓰지 않는다.
    */
-  private async owned(uid: string, c: Caller) {
-    const row = await this.prisma.studyState.findUnique({ where: { uid }, select: { institutionId: true } });
-    return !!row && row.institutionId === c.institution;
+  private async scope(uid: string, c: Caller) {
+    const row = await this.prisma.studyState.findUnique({ where: { uid }, select: { institutionId: true, teleInstitutionId: true } });
+    return senderScope(row, c.institution);
   }
 
-  /** 수신자 주체의 StudyAccess(§4.1): 같은 기관 안에서 sub만 바꾼 호출자. 준비와 판정이 같은 객체를 써야 한다. */
-  private subject(c: Caller, sub: string): Caller { return { ...c, sub }; }
+  /**
+   * 수신자 주체의 StudyAccess(§4.1): 기록 기관(A)의 그 사람. StudyAccess는 (기관, 주체)로 정책과 잠금을 찾고 기관이 다른
+   * 정책 행은 모두 거절하므로, tele 발신자의 기관(B)을 그대로 쓰면 A의 수신자를 B 기관 사람으로 판정한다(F-04). 준비와
+   * 판정이 같은 객체를 써야 한다.
+   */
+  private subject(c: Caller, institution: string, sub: string): Caller { return { ...c, institution, sub }; }
 
   private async readableBy(subject: Caller, uid: string, tx?: any) {
     return (await this.studyAccess.allowed(subject, [uid], tx)).has(uid);
@@ -171,8 +180,8 @@ export class CriticalResultService {
 
   private async studyRow(tx: any, uid: string, lock: boolean) {
     const rows: any[] = lock
-      ? await tx.$queryRaw`SELECT uid,"institutionId",rs,"preDoc","preReviewer",ov FROM "StudyState" WHERE uid=${uid} FOR UPDATE`
-      : await tx.$queryRaw`SELECT uid,"institutionId",rs,"preDoc","preReviewer",ov FROM "StudyState" WHERE uid=${uid}`;
+      ? await tx.$queryRaw`SELECT uid,"institutionId","teleInstitutionId",rs,"preDoc","preReviewer",ov FROM "StudyState" WHERE uid=${uid} FOR UPDATE`
+      : await tx.$queryRaw`SELECT uid,"institutionId","teleInstitutionId",rs,"preDoc","preReviewer",ov FROM "StudyState" WHERE uid=${uid}`;
     return rows[0] ?? null;
   }
 
@@ -214,28 +223,38 @@ export class CriticalResultService {
     return kase.view === null ? null : next.id;
   }
 
-  /** UID route의 검사 가시성(T-1/T-3 a~c): 지금 caller 기관 소유 + StudyAccess. 없음·기관 불일치·접근 거절은 같은 404다. */
-  private async visibleStudy(tx: any, uid: string, c: Caller, state: any, missing: () => HttpException) {
-    if (!state || state.institutionId !== c.institution) throw missing();
+  /**
+   * UID route의 검사 가시성(T-1/T-3 a~c, S7-U1c): 지금 발신 범위(소유 기관 또는 지금 열린 원격판독 통로) + StudyAccess.
+   * 없음·범위 밖·접근 거절은 같은 404다. 범위의 기관(기록 기관)을 돌려준다.
+   */
+  private async visibleStudy(tx: any, uid: string, c: Caller, state: any, missing: () => HttpException): Promise<string> {
+    const institution = senderScope(state, c.institution);
+    if (!institution) throw missing();
     try { await this.studyAccess.require(c, [uid], tx); }
     catch (e) { if (e instanceof NotFoundException) throw missing(); throw e; }
+    return institution;
   }
 
   /**
-   * id route 쓰기의 대상(§4 순서 8~9): 기록 기관 = caller 기관, 검사 행 FOR UPDATE, 지금 소유 기관 = 기록 기관, StudyAccess,
-   * 그다음 기록 행 FOR UPDATE. 잠금 순서는 StudyState → CriticalResult이고 commitReport·removeState도 StudyState를 먼저
-   * 잡으므로 머리 판 판정과 확정이 엇갈리지 않는다.
+   * id route 쓰기의 대상(§4 순서 8~9): caller가 그 기록의 발신자(기록 시점 발신 기관 포함) 또는 수신자(기록 기관 =
+   * caller 기관)인지 먼저 본다 — 두 칸 모두 바뀌지 않는 값이다. 그다음 검사 행 FOR UPDATE, 지금 소유 기관 = 기록 기관과
+   * 발신자면 지금의 발신 범위(tele 통로), StudyAccess, 그다음 기록 행 FOR UPDATE. 통로는 검사 행을 잠근 뒤에 본다 — 잠금
+   * 전에 보면 통로 닫힘과 엇갈린 취소·대체가 닫힌 뒤에 적용된다(TC-05). 잠금 순서는 StudyState → CriticalResult이고
+   * commitReport·removeState·통로를 닫는 patchState도 StudyState를 먼저 잡으므로 머리 판 판정·통로와 쓰기가 엇갈리지 않는다.
    */
-  private async writeTarget(tx: any, id: string, c: Caller) {
+  private async writeTarget(tx: any, id: string, c: Caller, as: 'sender' | 'recipient') {
+    const party = (row: any) => as === 'sender' ? row.senderSub === c.sub && row.senderInstitutionId === c.institution
+      : row.recipientSub === c.sub && row.institutionId === c.institution;
+    const sees = (row: any, state: any) => as === 'sender' ? senderSees(row, state, c) : recipientSees(row, state, c);
     const first = await this.recordRow(tx, id, false);
-    if (!first || first.institutionId !== c.institution) throw recordMissing();
+    if (!first || !party(first)) throw recordMissing();
     const state = await this.studyRow(tx, first.studyUid, true);
-    if (!state || state.institutionId !== first.institutionId) throw recordMissing();
+    if (!sees(first, state)) throw recordMissing();
     try { await this.studyAccess.require(c, [first.studyUid], tx); }
     catch (e) { if (e instanceof NotFoundException) throw recordMissing(); throw e; }
     const head = await this.head(tx, first.studyUid);
     const row = await this.recordRow(tx, id, true);
-    if (!row || row.institutionId !== c.institution || row.studyUid !== first.studyUid) throw recordMissing();
+    if (!row || row.studyUid !== first.studyUid || !party(row) || !sees(row, state)) throw recordMissing();
     return { row, state, head };
   }
 
@@ -280,12 +299,12 @@ export class CriticalResultService {
   }
 
   /**
-   * 생성·대체의 수신자 판정(§4 순서 15): Keycloak 현재 상태의 자격(T-8) → 400, 부류별로 지금 고정 원문을 읽는가(C2/R2) → 409.
-   * 수신자 주체의 StudyAccess는 트랜잭션 전에 준비한 태그로 같은 트랜잭션에서 판정한다.
+   * 생성·대체의 수신자 판정(§4 순서 15): Keycloak 현재 상태의 자격(T-8, 기록 기관의 회원) → 400, 부류별로 지금 고정 원문을
+   * 읽는가(C2/R2) → 409. 수신자 주체(기록 기관)의 StudyAccess는 트랜잭션 전에 준비한 태그로 같은 트랜잭션에서 판정한다.
    */
-  private async judgeRecipient(tx: any, uid: string, c: Caller, sub: string, recipient: KeycloakUser | null, subject: Caller | null,
-    head: Head, state: any): Promise<RecipientClass> {
-    const cls = eligibleRecipient(recipient, { sub, institution: c.institution, sender: c.sub });
+  private async judgeRecipient(tx: any, uid: string, institution: string, c: Caller, sub: string, recipient: KeycloakUser | null,
+    subject: Caller | null, head: Head, state: any): Promise<RecipientClass> {
+    const cls = eligibleRecipient(recipient, { sub, institution, sender: c.sub });
     if (!cls || !subject) throw recipientInvalid();
     const visible = await this.readableBy(subject, uid, tx);
     const kase = createCase({ cls, visible, head, state, actor: userActor(recipient) });
@@ -303,21 +322,24 @@ export class CriticalResultService {
     this.member(c);
     if (!holds(c.roles, RADIOLOGIST)) throw roleRequired();
     if (!studyUidValue(uid)) throw invalid('검사 UID를 확인하세요');
-    if (!await this.owned(uid, c)) throw studyMissing();
+    const institution = await this.scope(uid, c);
+    if (!institution) throw studyMissing();
     await this.studyAccess.prepare(c, [uid]);
+    // 후보는 기록 기관(검사 소유 기관)의 회원이다. tele 발신자 기관(B)의 회원은 수신자가 아니다(TR-02).
     let members: KeycloakUser[];
-    try { members = await this.keycloak.institutionMembers(c.institution); } catch { throw unavailable(); }
+    try { members = await this.keycloak.institutionMembers(institution); } catch { throw unavailable(); }
     const candidates: { user: KeycloakUser; cls: RecipientClass; subject: Caller }[] = [];
     for (const user of members) {
-      const cls = eligibleRecipient(user, { sub: user.id, institution: c.institution, sender: c.sub });
+      const cls = eligibleRecipient(user, { sub: user.id, institution, sender: c.sub });
       if (!cls) continue;
-      const subject = this.subject(c, user.id);
+      const subject = this.subject(c, institution, user.id);
       await this.studyAccess.prepare(subject, [uid]);
       candidates.push({ user, cls, subject });
     }
     const out = await this.run(c, [], async tx => {
       const state = await this.studyRow(tx, uid, false);
-      await this.visibleStudy(tx, uid, c, state, studyMissing);
+      // 사전 읽기 뒤 소유 기관이 바뀌어 범위가 다른 기관이 되었으면 준비한 후보는 그 기관의 것이 아니다.
+      if (await this.visibleStudy(tx, uid, c, state, studyMissing) !== institution) throw unavailable();
       const head = await this.head(tx, uid);
       const pinnable = !!head && CRITICAL_RESULT_PINNABLE_ACTIONS.includes(head.action as string);
       const readable = legacyReadable(state, c.actor);
@@ -353,30 +375,42 @@ export class CriticalResultService {
     const mark = createFingerprint({ uid, institution: c.institution, subject: c.sub, recipientSub, sourceVersion: b.sourceVersion, message: b.message });
     // 순서 4: 적용된 요청의 재전송이면 Keycloak·Orthanc를 읽지 않는다(Keycloak이 멈춰도 재전송은 답한다).
     const known = await this.prisma.criticalResultReceipt.findUnique({ where: { requestId } });
-    let recipient: KeycloakUser | null | undefined, identity: any = null;
+    let recipient: KeycloakUser | null | undefined, identity: any = null, prepared: string | null = null;
     if (!known) {
       await this.recheck(c, roles => holds(roles, RADIOLOGIST));
-      if (await this.owned(uid, c)) { recipient = await this.user(recipientSub); identity = await this.identity(uid); }
+      prepared = await this.scope(uid, c);
+      if (prepared) { recipient = await this.user(recipientSub); identity = await this.identity(uid); }
     }
-    const subject = recipient ? this.subject(c, recipientSub) : null;
+    const subject = recipient && prepared ? this.subject(c, prepared, recipientSub) : null;
     await this.studyAccess.prepare(c, [uid]);
     if (subject) await this.studyAccess.prepare(subject, [uid]);
     return this.run(c, subject ? [subject] : [], async tx => {
       const state = await this.studyRow(tx, uid, true);
-      await this.visibleStudy(tx, uid, c, state, studyMissing);
+      // 발신 범위(tele 통로 포함)는 잠근 검사 행에서 다시 본다 — 사전 읽기 뒤 통로가 닫혔으면 여기서 404다(TC-04).
+      const institution = await this.visibleStudy(tx, uid, c, state, studyMissing);
       const receipt = await tx.criticalResultReceipt.findUnique({ where: { requestId } });
-      if (receipt) return this.replay(receipt, mark, requestId, 'create', c);
+      if (receipt) {
+        const replayed = this.replay(receipt, mark, requestId, 'create', c);
+        // 재전송은 그 기록을 지금 보는 발신자에게만 저장 결과로 답한다. 검사가 보여도(통로는 그대로인데 소유 기관이
+        // 바뀜) 기록 기관이 지금의 발신 범위가 아니면 404다(TC-08) — 같은 기관 경로에서는 늘 같다.
+        const record = await tx.criticalResult.findUnique({ where: { id: requestId },
+          select: { institutionId: true, senderInstitutionId: true, senderSub: true, recipientSub: true } });
+        if (!record || !senderSees(record, state, c)) throw studyMissing();
+        return replayed;
+      }
       const pending: any[] = await tx.$queryRaw`SELECT id FROM "CriticalResult" WHERE "studyUid"=${uid} AND "senderSub"=${c.sub}
         AND "recipientSub"=${recipientSub} AND state='created'`;
       if (pending.length) throw refuse({ status: 409, code: CODE.PENDING_EXISTS, id: pending[0].id });
       const head = await this.head(tx, uid);
       const source = sourceRefusal({ sourceVersion: b.sourceVersion, head, senderReadable: legacyReadable(state, c.actor) });
       if (source) throw refuse(source);
-      // 잠금 없는 사전 읽기가 이 검사를 caller 기관 것으로 보지 못해 수신자·원본을 읽지 않았는데 지금은 보인다(그 사이 기관 배정).
-      if (recipient === undefined || !identity) throw unavailable();
-      const cls = await this.judgeRecipient(tx, uid, c, recipientSub, recipient, subject, head, state);
+      // 잠금 없는 사전 읽기가 이 검사를 발신 범위로 보지 못해 수신자·원본을 읽지 않았는데 지금은 보이거나(그 사이 기관
+      // 배정·통로 열림), 범위의 기관이 달라졌다(그 사이 소유 기관 변경). 준비한 수신자 판정을 다른 기관에 쓰지 않는다.
+      if (recipient === undefined || !identity || prepared !== institution) throw unavailable();
+      const cls = await this.judgeRecipient(tx, uid, institution, c, recipientSub, recipient, subject, head, state);
       const at = new Date(), name = this.name(c);
-      const record = this.newRecord({ id: requestId, uid, institution: c.institution, senderInstitution: c.institution, c, name,
+      // 기록 기관 = 검사 소유 기관, 발신 기관 = caller 기관(tele면 둘이 다르다). 둘 다 기록 시점 값으로 남는다.
+      const record = this.newRecord({ id: requestId, uid, institution, senderInstitution: c.institution, c, name,
         recipient, cls, head, identity, message: b.message, supersedesId: null, at });
       await tx.criticalResult.create({ data: record });
       await this.event(tx, requestId, 1, 'created', c, name, RADIOLOGIST, requestId, at);
@@ -407,8 +441,7 @@ export class CriticalResultService {
     const roles = known ? c.roles : await this.recheck(c, r => !!recipientClass(r));
     await this.studyAccess.prepare(c);
     return this.run(c, [], async tx => {
-      const { row, state, head } = await this.writeTarget(tx, recordId, c);
-      if (row.recipientSub !== c.sub) throw recordMissing();
+      const { row, state, head } = await this.writeTarget(tx, recordId, c, 'recipient');
       const cls = recipientClass(roles);
       const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head, state, actor: c.actor });
       if (kase.view === null) throw recordMissing();
@@ -445,8 +478,7 @@ export class CriticalResultService {
     if (!known) await this.recheck(c, roles => holds(roles, RADIOLOGIST));
     await this.studyAccess.prepare(c);
     return this.run(c, [], async tx => {
-      const { row } = await this.writeTarget(tx, recordId, c);
-      if (row.senderSub !== c.sub) throw recordMissing();
+      const { row } = await this.writeTarget(tx, recordId, c, 'sender');
       const receipt = await tx.criticalResultReceipt.findUnique({ where: { requestId } });
       if (receipt) return this.replay(receipt, mark, recordId, 'cancel', c);
       const replacedBy = row.state === 'superseded' ? await this.replacement(tx, row, null) : null;
@@ -484,22 +516,23 @@ export class CriticalResultService {
     let recipient: KeycloakUser | null | undefined, identity: any = null, subject: Caller | null = null;
     if (!known) {
       await this.recheck(c, roles => holds(roles, RADIOLOGIST));
-      // 수신자·검사는 옛 기록의 것이다. 남의 기록이나 다른 기관 기록이면 아무것도 읽지 않고 트랜잭션이 404로 답한다.
+      // 수신자·검사·기록 기관은 옛 기록의 것이다. 남의 기록이거나 기록 기관이 지금 발신 범위가 아니면(tele 통로 닫힘
+      // 포함) 아무것도 읽지 않고 트랜잭션이 404로 답한다.
       const prior = await this.prisma.criticalResult.findUnique({ where: { id: recordId },
-        select: { institutionId: true, senderSub: true, recipientSub: true, studyUid: true } });
-      if (prior && prior.institutionId === c.institution && prior.senderSub === c.sub && await this.owned(prior.studyUid, c)) {
+        select: { institutionId: true, senderInstitutionId: true, senderSub: true, recipientSub: true, studyUid: true } });
+      if (prior && prior.senderInstitutionId === c.institution && prior.senderSub === c.sub
+        && await this.scope(prior.studyUid, c) === prior.institutionId) {
         recipient = await this.user(prior.recipientSub);
         identity = await this.identity(prior.studyUid);
         if (recipient) {
-          subject = this.subject(c, prior.recipientSub);
+          subject = this.subject(c, prior.institutionId, prior.recipientSub);
           await this.studyAccess.prepare(subject, [prior.studyUid]);
         }
       }
     }
     await this.studyAccess.prepare(c);
     return this.run(c, subject ? [subject] : [], async tx => {
-      const { row, state, head } = await this.writeTarget(tx, recordId, c);
-      if (row.senderSub !== c.sub) throw recordMissing();
+      const { row, state, head } = await this.writeTarget(tx, recordId, c, 'sender');
       const receipt = await tx.criticalResultReceipt.findUnique({ where: { requestId } });
       if (receipt) return this.replay(receipt, mark, recordId, 'supersede', c);
       const replacedBy = row.state === 'superseded' ? await this.replacement(tx, row, null) : null;
@@ -508,7 +541,7 @@ export class CriticalResultService {
       const source = sourceRefusal({ sourceVersion: b.sourceVersion, head, senderReadable: legacyReadable(state, c.actor) });
       if (source) throw refuse(source);
       if (recipient === undefined || !identity || (recipient && recipient.id !== row.recipientSub)) throw unavailable();
-      const cls = await this.judgeRecipient(tx, row.studyUid, c, row.recipientSub, recipient, subject, head, state);
+      const cls = await this.judgeRecipient(tx, row.studyUid, row.institutionId, c, row.recipientSub, recipient, subject, head, state);
       const at = new Date(), name = this.name(c);
       await tx.criticalResult.update({ where: { id: row.id }, data: { state: 'superseded', revision: 2, supersededAt: at,
         changedBy: c.actor, updatedAt: at } });
@@ -532,7 +565,8 @@ export class CriticalResultService {
 
   /**
    * 보낸 기록의 delivery(§3.3): 확인 대기 기록마다 지금 수신자가 받으면 무엇을 보는가. 수신자 Keycloak 사용자(같은 수신자는
-   * 한 번)와 수신자 주체의 StudyAccess를 스냅샷 뒤에 읽는다. 읽지 못하면 그 수신자의 기록은 'unknown'이고 목록은 실패하지 않는다.
+   * 한 번)와 수신자 주체의 StudyAccess를 스냅샷 뒤에 읽는다. 자격과 주체의 기관은 기록 기관이다(tele 기록이면 A — 발신
+   * 기관 B로 보면 A 수신자가 늘 not_eligible이 된다). 읽지 못하면 그 기록은 'unknown'이고 목록은 실패하지 않는다.
    */
   private async deliveries(c: Caller, rows: { row: any; head: Head; state: any }[]) {
     const out = new Map<string, string>();
@@ -542,16 +576,19 @@ export class CriticalResultService {
       list.push(item);
       byRecipient.set(item.row.recipientSub, list);
     }
-    for (const [sub, items] of byRecipient) {
+    for (const [sub, all] of byRecipient) {
       let user: KeycloakUser | null;
-      try { user = await this.keycloak.getUser(sub); } catch { for (const x of items) out.set(x.row.id, 'unknown'); continue; }
-      const cls = eligibleRecipient(user, { sub, institution: c.institution, sender: c.sub });
-      if (!cls) { for (const x of items) out.set(x.row.id, 'not_eligible'); continue; }
-      let allowed: Set<string>;
-      try { allowed = await this.studyAccess.allowed(this.subject(c, sub), [...new Set(items.map(x => x.row.studyUid))]); }
-      catch { for (const x of items) out.set(x.row.id, 'unknown'); continue; }
-      for (const x of items) out.set(x.row.id, deliveryOf(recipientCase({ cls, visible: allowed.has(x.row.studyUid), pin: x.row.sourceVersion,
-        head: x.head, state: x.state, actor: userActor(user) })));
+      try { user = await this.keycloak.getUser(sub); } catch { for (const x of all) out.set(x.row.id, 'unknown'); continue; }
+      for (const institution of new Set<string>(all.map(x => x.row.institutionId))) {
+        const items = all.filter(x => x.row.institutionId === institution);
+        const cls = eligibleRecipient(user, { sub, institution, sender: c.sub });
+        if (!cls) { for (const x of items) out.set(x.row.id, 'not_eligible'); continue; }
+        let allowed: Set<string>;
+        try { allowed = await this.studyAccess.allowed(this.subject(c, institution, sub), [...new Set(items.map(x => x.row.studyUid))]); }
+        catch { for (const x of items) out.set(x.row.id, 'unknown'); continue; }
+        for (const x of items) out.set(x.row.id, deliveryOf(recipientCase({ cls, visible: allowed.has(x.row.studyUid), pin: x.row.sourceVersion,
+          head: x.head, state: x.state, actor: userActor(user) })));
+      }
     }
     return out;
   }
@@ -565,7 +602,9 @@ export class CriticalResultService {
   /**
    * GET critical-results. view=sent는 radiologist의 보낸 기록, view=received는 clinician·radiologist의 받은 기록이다. 목록은
    * 기록 기관과 **현재** 소유 기관을 JOIN하고, 제한 정책이면 허용 UID로 거르고, 받은 목록은 부류별 C5/R5를 같은 WHERE에서
-   * LIMIT 전에 뺀다. 총계는 없고 pending(확인 대기 수)만 한 쪽과 같은 스냅샷에서 센다(RISK-S7-CVR-COUNT-LEAK).
+   * LIMIT 전에 뺀다. 보낸 목록은 발신자 가시성(senderSees)과 같은 조건이다: 기록 시점 발신 기관 = caller 기관이고 기록
+   * 기관이 caller 기관이거나 지금 통로가 caller 기관인 검사 — 통로가 닫히면 다음 읽기부터 목록과 pending에서 함께 빠진다.
+   * 총계는 없고 pending(확인 대기 수)만 한 쪽과 같은 스냅샷에서 센다(RISK-S7-CVR-COUNT-LEAK).
    */
   async list(c: CriticalCaller, q: any) {
     this.member(c);
@@ -581,8 +620,10 @@ export class CriticalResultService {
     const stateValue = filter === 'pending' ? 'created' : filter;
     const access = await this.studyAccess.snapshot(c);
     const restricted = access.policy.restricted;
+    // 제한 정책의 허용 UID는 caller 기관이 지금 볼 수 있는 검사(소유 또는 원격판독 통로) 가운데서 뽑는다 — 소유 검사만
+    // 뽑으면 허용된 tele 검사의 보낸 기록이 빠진다. 받은 목록은 SQL이 기록 기관 = caller 기관으로 따로 거른다.
     const scope = restricted ? [...await this.studyAccess.allowed(c, (await this.prisma.studyState.findMany({
-      where: { institutionId: c.institution }, select: { uid: true } })).map(s => s.uid))] : [];
+      where: { OR: [{ institutionId: c.institution }, { teleInstitutionId: c.institution }] }, select: { uid: true } })).map(s => s.uid))] : [];
     let cursor: { at: string; id: string } | null = null;
     if (query.cursor !== undefined) {
       cursor = decodeCursor(query.cursor, access.revision);
@@ -597,14 +638,16 @@ export class CriticalResultService {
           FROM "CriticalResult" cr JOIN "StudyState" s ON s.uid=cr."studyUid" AND s."institutionId"=cr."institutionId"
           LEFT JOIN "Report" r ON r.uid=cr."studyUid" LEFT JOIN "ReportVersion" hv ON hv.uid=r.uid AND hv.version=r.version
           LEFT JOIN "CriticalResult" rb ON rb."supersedesId"=cr.id
-          WHERE cr."institutionId"=${c.institution} AND cr."senderSub"=${c.sub}
+          WHERE cr."senderSub"=${c.sub} AND cr."senderInstitutionId"=${c.institution}
+            AND (cr."institutionId"=${c.institution} OR s."teleInstitutionId"=${c.institution})
             AND (NOT ${restricted} OR cr."studyUid"=ANY(${scope}::text[]))
             AND (${stateValue}::text='all' OR cr.state::text=${stateValue}::text)
             AND (cr."createdAt",cr.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
           ORDER BY cr."createdAt" DESC,cr.id DESC LIMIT 51`;
         const counted: any[] = await tx.$queryRaw`SELECT count(*)::int AS pending
           FROM "CriticalResult" cr JOIN "StudyState" s ON s.uid=cr."studyUid" AND s."institutionId"=cr."institutionId"
-          WHERE cr."institutionId"=${c.institution} AND cr."senderSub"=${c.sub}
+          WHERE cr."senderSub"=${c.sub} AND cr."senderInstitutionId"=${c.institution}
+            AND (cr."institutionId"=${c.institution} OR s."teleInstitutionId"=${c.institution})
             AND (NOT ${restricted} OR cr."studyUid"=ANY(${scope}::text[])) AND cr.state::text='created'`;
         return { rows, pending: counted[0]?.pending ?? 0 };
       }
@@ -653,7 +696,10 @@ export class CriticalResultService {
     return { owner: this.owner(c), view: 'received', items, nextCursor, pending };
   }
 
-  /** GET critical-results/:id. 발신자면 발신자 투영(radiologist), 수신자면 부류별 투영, 그 밖(같은 기관의 다른 회원 포함)은 404. */
+  /**
+   * GET critical-results/:id. 발신자면 발신자 투영(radiologist, 발신자 가시성 — tele 기록은 통로가 열린 동안만), 수신자면
+   * 부류별 투영, 그 밖(같은 기관의 다른 회원, 통로 기관의 다른 회원 포함)은 404.
+   */
   async read(id: string, c: CriticalCaller) {
     this.member(c);
     const cls = recipientClass(c.roles);
@@ -662,17 +708,14 @@ export class CriticalResultService {
     await this.studyAccess.prepare(c);
     const out = await this.run(c, [], async tx => {
       const row = await this.recordRow(tx, id.toLowerCase(), false);
-      if (!row || row.institutionId !== c.institution) throw recordMissing();
+      if (!row) throw recordMissing();
       const state = await this.studyRow(tx, row.studyUid, false);
-      if (!state || state.institutionId !== row.institutionId) throw recordMissing();
+      const sender = holds(c.roles, RADIOLOGIST) && senderSees(row, state, c);
+      if (!sender && !recipientSees(row, state, c)) throw recordMissing();
       try { await this.studyAccess.require(c, [row.studyUid], tx); }
       catch (e) { if (e instanceof NotFoundException) throw recordMissing(); throw e; }
       const head = await this.head(tx, row.studyUid);
-      if (row.senderSub === c.sub) {
-        if (!holds(c.roles, RADIOLOGIST)) throw recordMissing();
-        return { sender: true as const, row, state, head, replacedBy: await this.replacement(tx, row, null) };
-      }
-      if (row.recipientSub !== c.sub) throw recordMissing();
+      if (sender) return { sender: true as const, row, state, head, replacedBy: await this.replacement(tx, row, null) };
       const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head, state, actor: c.actor });
       if (kase.view === null) throw recordMissing();
       const pinned = kase.view === 'full' ? await this.pinnedBody(tx, row.studyUid, row.sourceVersion) : null;
@@ -684,7 +727,11 @@ export class CriticalResultService {
     return { owner: this.owner(c), item: senderView(out.row, out.head, studyIdentity(out.row, out.state.ov), delivery.get(out.row.id) ?? null, out.replacedBy) };
   }
 
-  /** GET studies/:uid/critical-results. 한 검사에서 내가 보냈거나(radiologist) 받은 기록, 최신 50개(cursor 없음). */
+  /**
+   * GET studies/:uid/critical-results. 한 검사에서 내가 보냈거나(radiologist) 받은 기록, 최신 50개(cursor 없음). 검사는
+   * 지금 발신 범위(소유 또는 원격판독 통로)여야 하고 기록 기관은 그 범위의 기관이다. 보낸 기록은 기록 시점 발신 기관도
+   * caller 기관이어야 하고, 받은 기록은 기록 기관 = caller 기관(소유 검사)뿐이다.
+   */
   async forStudy(uid: string, c: CriticalCaller) {
     this.member(c);
     const cls = recipientClass(c.roles);
@@ -694,7 +741,7 @@ export class CriticalResultService {
     const radiologist = holds(c.roles, RADIOLOGIST);
     const out = await this.run(c, [], async tx => {
       const state = await this.studyRow(tx, uid, false);
-      await this.visibleStudy(tx, uid, c, state, studyMissing);
+      const institution = await this.visibleStudy(tx, uid, c, state, studyMissing);
       const head = await this.head(tx, uid);
       // 받은 기록의 C5/R5는 검사 하나라 머리 판·부류가 행마다 같다: 고정 = 머리인 행을 이 조건이면 뺀다.
       const hide = cls === 'clinician' ? !clinicianFinal(state.rs, head) : !legacyReadable(state, c.actor);
@@ -702,17 +749,19 @@ export class CriticalResultService {
           pv.findings AS "pinFindings",pv.conclusion AS "pinConclusion",pv.recommendation AS "pinRecommendation"
         FROM "CriticalResult" cr JOIN "ReportVersion" pv ON pv.uid=cr."studyUid" AND pv.version=cr."sourceVersion"
         LEFT JOIN "CriticalResult" rb ON rb."supersedesId"=cr.id
-        WHERE cr."studyUid"=${uid} AND cr."institutionId"=${c.institution}
-          AND ((${radiologist} AND cr."senderSub"=${c.sub})
-            OR (cr."recipientSub"=${c.sub} AND NOT (cr."sourceVersion"=${head?.version ?? 0} AND ${hide})))
+        WHERE cr."studyUid"=${uid} AND cr."institutionId"=${institution}
+          AND ((${radiologist} AND cr."senderSub"=${c.sub} AND cr."senderInstitutionId"=${c.institution})
+            OR (cr."recipientSub"=${c.sub} AND cr."institutionId"=${c.institution}
+              AND NOT (cr."sourceVersion"=${head?.version ?? 0} AND ${hide})))
         ORDER BY cr."createdAt" DESC,cr.id DESC LIMIT 50`;
       return { state, head, rows };
     }, true);
-    const sentRows = out.rows.filter(row => radiologist && row.senderSub === c.sub);
+    const mine = (row: any) => radiologist && row.senderSub === c.sub && row.senderInstitutionId === c.institution;
+    const sentRows = out.rows.filter(mine);
     const delivery = await this.deliveries(c, sentRows.map(row => ({ row, head: out.head, state: out.state })));
     const study = (row: any) => studyIdentity(row, out.state.ov);
     const items = out.rows.map(row => {
-      if (radiologist && row.senderSub === c.sub) return senderView(row, out.head, study(row), delivery.get(row.id) ?? null, row.replacedById ?? null);
+      if (mine(row)) return senderView(row, out.head, study(row), delivery.get(row.id) ?? null, row.replacedById ?? null);
       const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head: out.head, state: out.state, actor: c.actor });
       const next = row.replacedById ? { id: row.replacedById, sourceVersion: row.replacedByVersion } : null;
       return recipientView(row, kase, study(row), { findings: row.pinFindings, conclusion: row.pinConclusion, recommendation: row.pinRecommendation },

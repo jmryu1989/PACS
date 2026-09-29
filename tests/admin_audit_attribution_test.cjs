@@ -34,6 +34,10 @@
  * reconstructs the hash-pinned predecessor and scans it with the same compiler. Its complete unresolved inventory,
  * positions, diagnoses, entries and compiler inputs must equal the current ones. Deferral-bearing files stay
  * byte-identical. A new corpus hash alone is insufficient; missing proof rejects the whole disposition.
+ * SPEC-G additionally binds the three critical-result calls by unique AST identity and exact raw diagnosis,
+ * with predecessor/current call hashes and mandatory provenance review inputs. Call/scope byte identity is
+ * required only to bind this temporary disposition, never as a product behavior requirement (AGENTS 1-B.14).
+ * The checker checks bindings, not the truth of provenance narratives; candidate review must verify the evidence.
  * No automatic repinning: every policy change needs the changing candidate's independent review. This is still
  * temporary, not a non-write proof; S7-U3a-RAW-PROVENANCE remains required. Other fixtures gain no exemption.
  *
@@ -337,6 +341,72 @@ test('negative control: the current-group/current-owner rule leaks exactly the c
   const wrong = CONTRACT.synthetic_vectors.filter(v => JSON.stringify(currentRule(ROWS.get(v.row))) !==
     JSON.stringify(v.record_time_visible_to)).map(v => v.row);
   for (const leak of CONTRACT.rejected_current_rule_leaks) assert.ok(wrong.includes(leak.row), `row ${leak.row} undetected`);
+});
+
+// ── S7-U1c (TEST-S7-U1c-AUDIT TA01..TA03, scenario TA-03): the study.critical-result rows of a tele record name two
+// record-time institutions (detail.institution = the owner A, detail.senderInstitution = the tele sender B; contract
+// S7-U1p section 11). The Members console shows them to no institution: the action keeps its hidden owner-only
+// study-scoped row (section 11.2, OP-2 a), whatever the detail names. The rows are shaped like the service's writeAudit.
+const crId = n => '00000000-0000-4000-8000-' + String(n).padStart(12, '0');
+const CR_KEYS = ['event', 'from', 'id', 'institution', 'recipient', 'replacedBy', 'requestId', 'revision', 'role', 'senderInstitution',
+  'source', 'supersedes', 'to'];
+const crRow = (n, event, from, to, revision, actor, role, extra = {}) => row(40 + n, 'study.critical-result', S2, {
+  id: crId(41), institution: 'inst-a', senderInstitution: 'inst-b', event, from, to, revision, requestId: crId(140 + n), role,
+  source: 1, recipient: 'syn-clinician-a@members.test', supersedes: null, replacedBy: null, ...extra }, actor);
+const TELE_CR_ROWS = [
+  crRow(1, 'created', null, 'created', 1, 'syn-reader-b@members.test', 'radiologist'),
+  crRow(2, 'acknowledged', 'created', 'acknowledged', 2, 'syn-clinician-a@members.test', 'clinician'),
+  crRow(3, 'cancelled', 'created', 'cancelled', 2, 'syn-reader-b@members.test', 'radiologist'),
+  crRow(4, 'superseded', 'created', 'superseded', 2, 'syn-reader-b@members.test', 'radiologist', { replacedBy: crId(45) }),
+  crRow(5, 'created', null, 'created', 1, 'syn-reader-b@members.test', 'radiologist', { id: crId(45), supersedes: crId(41) }),
+  // a channel moved to a third institution: its reader's record names Z as the sender institution
+  crRow(6, 'created', null, 'created', 1, 'syn-reader-z@members.test', 'radiologist', { id: crId(46), senderInstitution: 'inst-z' }),
+];
+const READERS = ['inst-a', 'inst-b', 'inst-z'];
+
+test('TA01 a tele critical result row names both record-time institutions and reaches no institution of the Members console', () => {
+  for (const source of TELE_CR_ROWS) {
+    const detail = JSON.parse(source.detail);
+    assert.deepEqual(Object.keys(detail).sort(), CR_KEYS, `row ${source.id}`);
+    const result = A.attributeAuditRow(source);
+    assert.deepEqual([result.rule, json(result.visible_to), result.projection_by_side.size, result.hidden],
+      ['hidden:study_scoped_owner_only', [], 0, 'study_scoped_owner_only'], `row ${source.id}`);
+    // preserving variants of the same row: key order, spacing and one key the contract does not name
+    const variants = [source, ...[JSON.stringify(Object.fromEntries(Object.entries(detail).reverse())), JSON.stringify(detail, null, 2),
+      JSON.stringify({ ...detail, note: 'SYN' })].map(text => ({ ...source, detail: text }))];
+    for (const variant of variants) {
+      assert.deepEqual(json(A.attributeAuditRow(variant).visible_to), [], `row ${source.id}`);
+      for (const reader of READERS) {
+        assert.equal(A.projectAuditRow(variant, reader), null, `row ${source.id} for ${reader}`);
+        assert.equal(A.auditCandidateRow(variant, reader), false, `row ${source.id} prefetched for ${reader}`);
+      }
+    }
+  }
+});
+
+test('TA02 negative control: the same rows attributed by one recorded field reach A or B, so the vectors can see a leak', () => {
+  // A test-owned table that reads one recorded field, as a field rule would (the rejected ways to show these rows).
+  const byField = field => source => { const value = JSON.parse(source.detail)[field]; return typeof value === 'string' && value ? [value] : []; };
+  for (const source of TELE_CR_ROWS) {
+    const detail = JSON.parse(source.detail);
+    assert.deepEqual(byField('institution')(source), ['inst-a'], `row ${source.id}`);
+    assert.deepEqual(byField('senderInstitution')(source), [detail.senderInstitution], `row ${source.id}`);
+    assert.notDeepEqual(byField('senderInstitution')(source), byField('institution')(source), `row ${source.id}: two sides`);
+    // The product's own field-rule path over the same detail: read as a field:detail.institution row, it reaches A.
+    const asField = { ...source, action: 'reader.assignment' };
+    assert.deepEqual([A.attributeAuditRow(asField).rule, json(A.attributeAuditRow(asField).visible_to)], ['field:detail.institution', ['inst-a']]);
+    assert.ok(A.projectAuditRow(asField, 'inst-a'), `row ${source.id}`);
+    // ...where the product row for the action is hidden from every reader
+    assert.deepEqual(READERS.filter(reader => A.projectAuditRow(source, reader)), [], `row ${source.id}`);
+  }
+});
+
+test('TA03 study.critical-result keeps its one hidden study-scoped row: no candidate, field or member rule would show a two-institution row', () => {
+  const action = 'study.critical-result';
+  assert.equal(A.auditRule(action), 'hidden:study_scoped_owner_only');
+  assert.deepEqual([A.AUDIT_HIDDEN_STUDY_SCOPED.includes(action), A.AUDIT_CANDIDATE_ACTIONS.includes(action),
+    Object.prototype.hasOwnProperty.call(A.AUDIT_FIELD_RULES, action), A.AUDIT_MEMBER_ACTIONS.includes(action),
+    A.AUDIT_TARGET_ACTIONS.includes(action)], [true, false, false, false, false]);
 });
 
 test('unclear rows are hidden: unparsable, ambiguous or malformed snapshots, missing fields, foreign ids', () => {
@@ -3052,7 +3122,7 @@ function scanAuditWrites(sources = auditSources()) {
 
 // ── the verdict: the contract table is read here only ──
 
-const { nonWriteDeferrals, sourceFingerprint, repinSources } = require('./admin-audit-deferrals.cjs');
+const { nonWriteDeferrals, sourceFingerprint, repinSources, unresolvedFingerprint, deferralIdentity } = require('./admin-audit-deferrals.cjs');
 const NON_WRITE_DEFERRALS = JSON.parse(readFileSync(path.join(__dirname, 'admin-audit-nonwrite-deferrals.json'), 'utf8'));
 const nonWriteContext = () => Object.fromEntries([
   'api/tsconfig.json', 'api/package-lock.json', 'api/prisma/schema.prisma',
@@ -3819,7 +3889,13 @@ test('D-NW reviewed repin: missing, stale or broadened predecessor proof refuses
   ]) refuse(NON_WRITE_DEFERRALS, sources, restored => change(scanAuditWrites(restored)));
   const restored = repinSources(sources, NON_WRITE_DEFERRALS);
   const previous = scanAuditWrites(restored);
-  assert.deepEqual(previous.unresolved, raw);
+  if (NON_WRITE_DEFERRALS.repin.ruling === 'S7-U1c-SPEC-G-B-R-001') {
+    const identities = (result, input) => result.candidates.filter(entry => entry.status === 'unresolved')
+      .map(entry => entry.file === 'api/src/critical-result.service.ts'
+        ? deferralIdentity(entry, input, result.tools.ts).identity
+        : JSON.stringify([entry.file, entry.line, entry.start, entry.kind, entry.rule, entry.reason])).sort();
+    assert.deepEqual(identities(previous, restored), identities(scan, sources));
+  } else assert.deepEqual(previous.unresolved, raw);
   console.log('ADMIN_AUDIT_REPIN ' + JSON.stringify({
     baseline_source_sha: NON_WRITE_DEFERRALS.repin.source_sha,
     before_sources_sha256: sourceFingerprint(restored),
@@ -3842,4 +3918,110 @@ test('D-NW: a new raw fragment remains unresolved and fails by itself, with or w
   assert.ok(result.errors.length > 0);
   assert.ok(result.unresolved.includes(scan.unresolved[0]));
   assert.deepEqual(failing(verdict({ ...scan, unresolved: result.unresolved }, fixtureTable())), ['unresolved']);
+});
+
+test('D-NW SPEC-G: identities, complete inventory and bounded review inputs are all required', () => {
+  const file = 'api/src/critical-result.service.ts', tick = String.fromCharCode(96);
+  const text = 'export class SpecGFixture {\n' + ['first', 'second', 'third'].map((name, n) =>
+    '  ' + name + '(tx: any, body: any) { return tx.$queryRaw' + tick
+      + 'SELECT ' + (n + 1) + ' WHERE id=${body.value}' + tick + '; }\n').join('') + '}\n';
+  const old = [{ file, text }], context = nonWriteContext();
+  const digest = value => require('node:crypto').createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const pin = entry => [entry.file, entry.line, entry.start, entry.kind];
+  const unresolved = scan => scan.candidates.filter(entry => entry.status === 'unresolved');
+  const build = (input, prior = old) => {
+    const scan = scanAuditWrites(input), previous = scanAuditWrites(prior);
+    const entries = unresolved(scan), priorEntries = unresolved(previous);
+    const before = new Map(priorEntries.filter(entry => entry.file === file).map(entry => {
+      const id = deferralIdentity(entry, prior, previous.tools.ts); return [id.identity, id];
+    }));
+    const policy = { ...structuredClone(NON_WRITE_DEFERRALS), schema_version: 3,
+      baseline_source_sha: '1'.repeat(40), sources_sha256: sourceFingerprint(input),
+      unresolved_sha256: unresolvedFingerprint(entries), entries: entries.map(pin),
+      repin: { ruling: 'S7-U1c-SPEC-G-B-R-001', source_sha: '1'.repeat(40),
+        typescript: scan.typescript, context_sha256: digest(context),
+        sources_sha256: sourceFingerprint(prior), unresolved_sha256: unresolvedFingerprint(priorEntries),
+        entries: priorEntries.map(pin), entries_sha256: digest(priorEntries.map(pin)),
+        before: prior.filter(source => input.find(now => now.file === source.file)?.text !== source.text),
+        site_proofs: entries.filter(entry => entry.file === file).map(entry => {
+          const id = deferralIdentity(entry, input, scan.tools.ts);
+          return { identity: id.identity, before_call_sha256: before.get(id.identity)?.call_sha256,
+            after_call_sha256: id.call_sha256, sql: 'Synthetic SELECT; not a product proof.',
+            values: 'Synthetic body.value remains unresolved; test metadata only.',
+            dependencies: 'Synthetic fixture has no imports.',
+            evidence: [{ ref: 'test-owned in-memory fixture', sha256: digest(input) }] };
+        }),
+      } };
+    return { input, scan, policy };
+  };
+  const moved = [{ file, text: '// positions move\n' + text.replace('SELECT 2', 'SELECT 20') }];
+  const sample = build(moved);
+  const apply = item => nonWriteDeferrals(item.scan, item.input, item.policy, context, scanAuditWrites);
+  const product = auditSources();
+  const productMoved = product.map(source => source.file === file
+    ? { ...source, text: '// SPEC-G position rehearsal\n' + source.text } : source);
+  const rehearsal = build(productMoved, product), real = apply(rehearsal);
+  assert.deepEqual(real.errors, []);
+  assert.deepEqual(real.unresolved, []);
+  assert.equal(real.deferred.length, NON_WRITE_DEFERRALS.entries.length);
+  const good = apply(sample);
+  assert.deepEqual(good.errors, []);
+  assert.deepEqual(good.unresolved, []);
+  assert.equal(good.deferred.length, 3);
+  assert.equal(sample.scan.unresolved.length, 3, 'raw findings stay visible');
+  assert.deepEqual(apply({ ...sample, input: moved.map(source =>
+    ({ ...source, text: source.text.replace(/\n/g, '\r\n') })) }), good);
+  const refuse = item => {
+    const before = inventory(item.scan), raw = [...item.scan.unresolved], result = apply(item);
+    assert.equal(result.deferred.length, 0);
+    assert.ok(result.errors.length > 0);
+    assert.deepEqual(result.unresolved, [...raw, ...result.errors]);
+    assert.deepEqual(inventory(item.scan), before);
+    assert.deepEqual(failing(verdict({ ...item.scan, unresolved: result.unresolved },
+      { rows: [], wildcards: [], listed: () => true })), ['unresolved']);
+  };
+  const mutate = change => {
+    const item = { ...sample, policy: structuredClone(sample.policy) };
+    change(item.policy); refuse(item);
+  };
+  mutate(p => { p.repin.ruling = 'S7-U3a-AUDIT-SPEC-F-R-001'; });
+  mutate(p => { delete p.repin.entries; });
+  mutate(p => { p.repin.entries[0][1]++; p.repin.entries_sha256 = digest(p.repin.entries); });
+  mutate(p => { p.repin.site_proofs = []; });
+  mutate(p => { p.repin.site_proofs[1] = p.repin.site_proofs[0]; });
+  for (const field of ['identity', 'before_call_sha256', 'after_call_sha256', 'sql', 'values', 'dependencies']) {
+    mutate(p => { p.repin.site_proofs[0][field] = ''; });
+  }
+  mutate(p => { p.repin.site_proofs[0].evidence = []; });
+  mutate(p => { p.repin.site_proofs[0].evidence[0].sha256 = 'bad'; });
+  for (const changed of [
+    moved[0].text.replace('body.value', 'body.other'),
+    moved[0].text.replace('second(', 'first('),
+    moved[0].text.replace('  third(tx: any, body: any)', '  fourth(tx: any, body: any)'),
+    moved[0].text.replace('$queryRaw', '$queryRawUnsafe'),
+    moved[0].text.replace('SELECT 20', 'DELETE FROM OtherTable'),
+  ]) {
+    const input = [{ file, text: changed }];
+    const scan = scanAuditWrites(input), policy = structuredClone(sample.policy);
+    policy.sources_sha256 = sourceFingerprint(input);
+    policy.unresolved_sha256 = unresolvedFingerprint(unresolved(scan));
+    policy.entries = unresolved(scan).map(pin);
+    refuse({ input, scan, policy });
+  }
+  const other = { file: 'api/src/other.service.ts', text: text.replace('SpecGFixture', 'OtherFixture') };
+  refuse(build([...moved, { ...other, text: '// changed deferred file\n' + other.text }], [...old, other]));
+  refuse({ ...sample, scan: { ...sample.scan } }); // missing AST/compiler input
+  const more = [{ file, text: moved[0].text.replace('first(', 'extra(tx: any, body: any) { return tx.$queryRaw'
+    + tick + 'SELECT 4 WHERE id=${body.value}' + tick + '; }\n  first(') }];
+  const extraScan = scanAuditWrites(more), extraPolicy = structuredClone(sample.policy);
+  extraPolicy.sources_sha256 = sourceFingerprint(more);
+  extraPolicy.unresolved_sha256 = unresolvedFingerprint(unresolved(extraScan));
+  extraPolicy.entries = unresolved(extraScan).map(pin);
+  refuse({ input: more, scan: extraScan, policy: extraPolicy });
+  const less = [{ file, text: moved[0].text.split('\n').filter(line => !line.includes('third(')).join('\n') }];
+  const lessScan = scanAuditWrites(less), lessPolicy = structuredClone(sample.policy);
+  lessPolicy.sources_sha256 = sourceFingerprint(less);
+  lessPolicy.unresolved_sha256 = unresolvedFingerprint(unresolved(lessScan));
+  lessPolicy.entries = unresolved(lessScan).map(pin);
+  refuse({ input: less, scan: lessScan, policy: lessPolicy });
 });

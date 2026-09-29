@@ -90,6 +90,39 @@ export function recipientClass(roles: readonly string[] | undefined): RecipientC
   return null;
 }
 
+export type StudyScopeState = { institutionId?: string | null; teleInstitutionId?: string | null };
+
+/**
+ * 발신 범위(S7-U1c, D-S7-05 a): 지금 이 검사에서 caller 기관이 보낼 수 있는 기록의 기관. 소유 기관이면 그 기관이고,
+ * 소유 기관이 따로 있는데 지금 원격판독 통로가 caller 기관이면 소유 기관이다 — 기록은 늘 검사 소유 기관(A)의 것이고
+ * 수신자도 A의 회원이다. 둘 다 아니면 null이다. 통로는 지금의 StudyState만 보며 예전에 열렸던 것은 세지 않는다.
+ */
+export function senderScope(state: StudyScopeState | null | undefined, institution: string | null | undefined): string | null {
+  if (!state || typeof institution !== 'string' || !institution) return null;
+  if (state.institutionId === institution) return institution;
+  if (state.teleInstitutionId === institution && typeof state.institutionId === 'string' && state.institutionId) return state.institutionId;
+  return null;
+}
+
+type Party = { institution: string | null; sub: string };
+type RecordSides = { institutionId: string; senderInstitutionId: string; senderSub: string; recipientSub: string };
+
+/**
+ * 발신자 가시성: 보낸 사람과 기록 시점의 발신 기관이 caller이고, 기록 기관이 caller의 지금 발신 범위다. 그래서 tele
+ * 기록은 통로가 닫히면(또는 소유 기관이 바뀌면) 발신자에게서 사라지고 다시 열리면 보인다. 두 기관 칸 중 하나만 맞춰
+ * 보지 않는다 — 다른 통로 기관이나 기관을 옮긴 사람에게 기록이 새지 않게.
+ */
+export function senderSees(record: RecordSides, state: StudyScopeState | null | undefined, caller: Party): boolean {
+  return record.senderSub === caller.sub && record.senderInstitutionId === caller.institution
+    && senderScope(state, caller.institution) === record.institutionId;
+}
+
+/** 수신자 가시성(S7-U1a 그대로): 기록 기관 = caller 기관 = 지금 소유 기관인 지정 수신자. 통로와 무관하다. */
+export function recipientSees(record: RecordSides, state: StudyScopeState | null | undefined, caller: Party): boolean {
+  return record.recipientSub === caller.sub && record.institutionId === caller.institution && !!state
+    && state.institutionId === record.institutionId;
+}
+
 /** 판독의의 기존 읽기 규칙(report-preview·versions(), F-8·F-9): P면 preDoc·preReviewer만. 가시성은 따로 본다. */
 export function legacyReadable(state: StudyReadState | null | undefined, actor: string): boolean {
   if (!state) return false;
@@ -181,6 +214,7 @@ export const userName = (user: KeycloakUserLike) => clip([user?.lastName, user?.
 /**
  * 수신자 자격(T-8): Keycloak 현재 상태에서 활성·서비스 계정 아님·본인 아님·그룹 정확히 하나 = 기록 기관·clinician 또는
  * radiologist. 자격이 있으면 부류, 없으면 null(400 RECIPIENT_INVALID). 원문을 지금 읽을 수 있는지는 따로(createCase) 본다.
+ * 기록 기관은 검사 소유 기관이다 — tele 발신자의 기관이 아니다(S7-U1c).
  */
 export function eligibleRecipient(user: KeycloakUserLike | null, expected: { sub: string; institution: string; sender: string }): RecipientClass | null {
   if (!user || user.id !== expected.sub || expected.sub === expected.sender || user.enabled !== true || user.serviceAccountClientId
