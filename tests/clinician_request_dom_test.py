@@ -122,7 +122,7 @@ def lf_text(path):
 
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js")}
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "critical-result-inbox.js")}
 MAIN = lf_text(HPACS / "main.html")
 
 # The commit this unit (and S5-U4b) started from (main after S5-UI3) and the main commit that merged the S5-U4b/U4c
@@ -1026,6 +1026,8 @@ class ClinicianRequestDOMTest(Harness):
         self.server = RequestServer([INSTITUTION, CLIN_SUB], "syn-clinician", "SYN Clinician", staff=False)
         self.files = dict(SHIPPED)
         self.navigations = []
+        # S7-U2a Critical Results pending-list reads, kept apart from the reads this file checks.
+        self.inbox_reads = []
 
     @staticmethod
     def study_row(n, name, tele=False):
@@ -1093,6 +1095,15 @@ class ClinicianRequestDOMTest(Harness):
                 return
         if method == "POST" and path == "/api/auth/logout":
             route.fulfill(status=204, body="")
+            return
+        # S7-U2a: the Critical Results area reads its pending list when the page boots (and every 60 s while shown). It is
+        # answered empty for this session and logged apart; any other critical-result request stays unexpected.
+        if method == "GET" and path == "/api/critical-results" \
+                and parse_qs(url.query, keep_blank_values=True) == {"view": ["received"], "state": ["pending"]}:
+            account = self.me if isinstance(self.me, dict) else {}
+            self.inbox_reads.append(request.url)
+            route.fulfill(json={"owner": [account.get("institution"), account.get("sub")], "view": "received", "items": [],
+                                "nextCursor": None, "pending": 0})
             return
         self.unexpected.append(f"{method} {request.url}")
         route.abort()
