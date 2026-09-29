@@ -1,0 +1,114 @@
+{
+  "about": "S7-U3b shared worklist column documents (TEST-S7-U3b-COLUMNS, RISK-S7-U3b-PREF-BREAK). Each 'document' is a value a pre-S7-U3b client could have stored in the browser key or the account row, or sent in a PUT: the key lists are the stored data of that time, not a copy of the product constants. Every 'expect' is written by hand; no test computes it from COLUMN_KEYS or COLS. The same documents are read by tests/worklist_columns_server_test.cjs (compiled normalizer, GET and PUT over a fake store), tests/multi_institution_worklist_dom_test.py (the browser key on the shipped page) and tests/worklist_columns_live.py test_08 (the account row on a synthetic stack).",
+  "titles": {
+    "Radiology": {
+      "pf": "PF", "assignedReader": "Assigned Reader", "techNote": "Tech Note", "no": "No", "viewing": "Viewing",
+      "count": "Count", "series": "Series", "em": "EM", "ss": "SS", "rs": "RS", "acc": "Accession No", "ts": "TS",
+      "id": "ID", "name": "Name", "age": "Age", "birth": "BirthDate", "sex": "Sex", "modality": "Modality",
+      "desc": "StudyDesc", "date": "StudyDate", "preDoc": "PreDoc", "preReviewer": "PreReviewer", "institutionName": "Hospital"
+    }
+  },
+  "accepted": [
+    {
+      "id": "V01",
+      "why": "both modes in the default order of the time (Radiology 22 keys, Technician 19 keys), nothing hidden",
+      "document": {"version": 1, "modes": {
+        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer"], "hidden": []},
+        "Technician": {"order": ["assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "id", "name", "age", "sex", "modality", "desc", "date", "ward", "reqHosp"], "hidden": []}}},
+      "expect": {"version": 1, "modes": {
+        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "institutionName"], "hidden": []},
+        "Technician": {"order": ["assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "id", "name", "age", "sex", "modality", "desc", "date", "ward", "reqHosp"], "hidden": []}}}
+    },
+    {
+      "id": "V02",
+      "why": "a user's own Radiology order with three hidden columns and appearance (widths, font, size, color); a Technician order with one hidden column",
+      "document": {"version": 1, "modes": {
+        "Radiology": {"order": ["id", "name", "modality", "desc", "date", "em", "rs", "ss", "acc", "no", "pf", "assignedReader", "techNote", "viewing", "count", "series", "ts", "age", "birth", "sex", "preDoc", "preReviewer"], "hidden": ["age", "birth", "series"],
+          "appearance": {"widths": {"name": 240, "preDoc": 120}, "font": "mono", "size": 14, "color": "cool"}},
+        "Technician": {"order": ["id", "name", "assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "age", "sex", "modality", "desc", "date", "ward", "reqHosp"], "hidden": ["ward"]}}},
+      "expect": {"version": 1, "modes": {
+        "Radiology": {"order": ["id", "name", "modality", "desc", "date", "em", "rs", "ss", "acc", "no", "pf", "assignedReader", "techNote", "viewing", "count", "series", "ts", "age", "birth", "sex", "preDoc", "preReviewer", "institutionName"], "hidden": ["age", "birth", "series"],
+          "appearance": {"widths": {"name": 240, "preDoc": 120}, "font": "mono", "size": 14, "color": "cool"}},
+        "Technician": {"order": ["id", "name", "assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "age", "sex", "modality", "desc", "date", "ward", "reqHosp"], "hidden": ["ward"]}}}
+    },
+    {
+      "id": "V03",
+      "why": "a partial document, the shape of the restore fixture (tests/ops_product_transfer_fixture.py) and of worklist_columns_live.py body(): order name, id, age with age hidden in both modes",
+      "document": {"version": 1, "modes": {
+        "Radiology": {"order": ["name", "id", "age"], "hidden": ["age"]},
+        "Technician": {"order": ["name", "id", "age"], "hidden": ["age"]}}},
+      "expect": {"version": 1, "modes": {
+        "Radiology": {"order": ["name", "id", "age", "pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "institutionName"], "hidden": ["age"]},
+        "Technician": {"order": ["name", "id", "age", "assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "sex", "modality", "desc", "date", "ward", "reqHosp"], "hidden": ["age"]}}}
+    },
+    {
+      "id": "V04",
+      "why": "the last key of the time hidden in each mode; the new column after it is still shown",
+      "document": {"version": 1, "modes": {
+        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer"], "hidden": ["preReviewer"]},
+        "Technician": {"order": ["assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "id", "name", "age", "sex", "modality", "desc", "date", "ward", "reqHosp"], "hidden": ["reqHosp"]}}},
+      "expect": {"version": 1, "modes": {
+        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "institutionName"], "hidden": ["preReviewer"]},
+        "Technician": {"order": ["assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "id", "name", "age", "sex", "modality", "desc", "date", "ward", "reqHosp"], "hidden": ["reqHosp"]}}}
+    },
+    {
+      "id": "V05",
+      "why": "empty order and hidden in both modes (worklist_columns_live.py test_06's body)",
+      "document": {"version": 1, "modes": {
+        "Radiology": {"order": [], "hidden": []},
+        "Technician": {"order": [], "hidden": []}}},
+      "expect": {"version": 1, "modes": {
+        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer", "institutionName"], "hidden": []},
+        "Technician": {"order": ["assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "id", "name", "age", "sex", "modality", "desc", "date", "ward", "reqHosp"], "hidden": []}}}
+    }
+  ],
+  "refused": [
+    {
+      "id": "R01", "why": "an unknown key (patientId) in the Radiology order",
+      "document": {"version": 1, "modes": {
+        "Radiology": {"order": ["id", "name", "patientId"], "hidden": []},
+        "Technician": {"order": [], "hidden": []}}}
+    },
+    {
+      "id": "R02", "why": "a duplicate key in the Radiology order",
+      "document": {"version": 1, "modes": {
+        "Radiology": {"order": ["id", "name", "id"], "hidden": []},
+        "Technician": {"order": [], "hidden": []}}}
+    },
+    {
+      "id": "R03", "why": "a required column (name) hidden",
+      "document": {"version": 1, "modes": {
+        "Radiology": {"order": ["id", "name"], "hidden": ["name"]},
+        "Technician": {"order": [], "hidden": []}}}
+    },
+    {
+      "id": "R04", "why": "an appearance width for an unknown key",
+      "document": {"version": 1, "modes": {
+        "Radiology": {"order": ["id", "name"], "hidden": [], "appearance": {"widths": {"patientId": 200}, "font": "default", "size": 13, "color": "default"}},
+        "Technician": {"order": [], "hidden": []}}}
+    },
+    {
+      "id": "R05", "why": "an extra top-level key",
+      "document": {"version": 1, "modes": {
+        "Radiology": {"order": [], "hidden": []},
+        "Technician": {"order": [], "hidden": []}}, "extra": 1}
+    },
+    {
+      "id": "R07", "why": "the new Radiology key placed in the Technician order (Technician has no Hospital column)",
+      "document": {"version": 1, "modes": {
+        "Radiology": {"order": [], "hidden": []},
+        "Technician": {"order": ["id", "name", "institutionName"], "hidden": []}}}
+    }
+  ],
+  "idempotent": [
+    {
+      "id": "R06", "why": "a document from the new page that moved Hospital into the middle of the Radiology order: that place is kept",
+      "document": {"version": 1, "modes": {
+        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "institutionName", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer"], "hidden": []},
+        "Technician": {"order": [], "hidden": []}}},
+      "expect": {"version": 1, "modes": {
+        "Radiology": {"order": ["pf", "assignedReader", "techNote", "no", "institutionName", "viewing", "count", "series", "em", "ss", "rs", "acc", "ts", "id", "name", "age", "birth", "sex", "modality", "desc", "date", "preDoc", "preReviewer"], "hidden": []},
+        "Technician": {"order": ["assignedReader", "techNote", "no", "count", "series", "em", "ss", "matched", "rs", "acc", "id", "name", "age", "sex", "modality", "desc", "date", "ward", "reqHosp"], "hidden": []}}}
+    }
+  ]
+}
