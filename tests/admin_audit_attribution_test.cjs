@@ -16,7 +16,7 @@
  *    institution names carrying \, ", % and _; the removed LIKE form, modelled, loses exactly the \ and " names' rows;
  *  - completeness (Astra S7-U3a-AUDIT-SPEC-R-001 F01-F04, F01/F03 amended by S7-U3a-AUDIT-SPEC-B-R-001 with the second
  *    raw SQL form, the positive reading closed to the list W1-W6 of S7-U3a-AUDIT-SPEC-C-R-001): every file of api/src
- *    is read; every audit candidate there is resolved, proven not a write, or unresolved — and one unresolved fails;
+ *    is read; every audit candidate there is resolved, proven not a write, or raw unresolved (see D-NW below);
  *    every action a write can record has a contract row and every row is written somewhere. The TypeScript compiler
  *    api/package-lock.json installs reads the program of api/src (see the completeness section). The checker's own tests
  *    run on test-owned fixtures (tests/fixtures/admin_audit_completeness, and tests/fixtures/admin-audit-checker for the
@@ -24,6 +24,15 @@
  *    closed list replaces): the forms taken, each failure class and each counterexample failing the gate alone; api/src
  *    rewritten in other notations keeps every write site; unlisted, dynamic and unwritten actions each fail alone, and so
  *    does each write given one more path through a helper called by a constant key or a fragment written or handed on.
+ *
+ * D-NW (S7-U3a-AUDIT-SPEC-D-R-001) temporarily defers exactly the reviewed 27 raw unresolved candidates; it is
+ * not W1-W6 proof. The raw inventory and diagnoses remain unchanged, with 32 resolved writers. The verdict uses
+ * blocking unresolved: raw unresolved without a valid disposition, plus disposition errors; any such entry fails.
+ * Byte identity (after CRLF-to-LF normalization) of the reviewed source corpus and compiler inputs, the compiler
+ * version, and the exact positions and diagnoses are the boundary of this temporary ruling, so these pins test
+ * that required identity (AGENTS 1-B.14), not a preferred implementation spelling. An omitted or changed pin or
+ * input rejects the whole disposition. No automatic repinning: changes require a separately reviewed disposition
+ * or removal of the deferrals through S7-U3a-RAW-PROVENANCE; other fixtures and counterexamples gain no exemption.
  *
  * Module: KIN_ADMIN_AUDIT_MODULE, default api/src/admin-audit.ts loaded through Node type stripping (Node >= 22.18);
  * the compiled /app/dist/admin-audit (kin-api:ci) is the same rule. The completeness cases read api/src and use
@@ -3721,11 +3730,17 @@ test('D-NW: only the explicit unchanged corpus and every exact pin can receive a
     pins[0][slot] = typeof pins[0][slot] === 'number' ? pins[0][slot] + 1 : pins[0][slot] + '-changed';
     refuse(apply({ ...NON_WRITE_DEFERRALS, entries: pins }), 'changed position ' + slot);
   }
-  // A smaller disposition cannot hide the omitted candidate.
-  const partial = apply({ ...NON_WRITE_DEFERRALS, entries: NON_WRITE_DEFERRALS.entries.slice(1) });
-  assert.deepEqual(partial.errors, []);
-  assert.equal(partial.unresolved.length, 1);
-  assert.equal(partial.deferred.length, allowed.deferred.length - 1);
+  // Every single omission rejects the whole disposition and retains every raw diagnosis.
+  for (let omitted = 0; omitted < NON_WRITE_DEFERRALS.entries.length; omitted++) {
+    const label = 'omitted position ' + omitted;
+    const partial = apply({ ...NON_WRITE_DEFERRALS,
+      entries: NON_WRITE_DEFERRALS.entries.filter((_, index) => index !== omitted) });
+    refuse(partial, label);
+    assert.deepEqual(partial.unresolved, [...raw, ...partial.errors], label);
+    assert.deepEqual(failing(verdict({ ...scan, unresolved: partial.unresolved })), ['unresolved'], label);
+    assert.deepEqual(scan.unresolved, raw, label);
+    assert.deepEqual(inventory(scan), before, label);
+  }
   for (const file of Object.keys(context)) refuse(apply(NON_WRITE_DEFERRALS, sources, scan,
     { ...context, [file]: '0' }), 'changed context ' + file);
   const first = sources[0];

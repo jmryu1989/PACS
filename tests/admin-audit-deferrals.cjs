@@ -48,6 +48,9 @@ function nonWriteDeferrals(scan, sources, policy, context) {
         'a resolved writer cannot be deferred');
       selected.add(entry);
     }
+    // The ruling covers the complete hash-pinned raw set, never a valid subset.
+    assert.ok(selected.size === raw.length && raw.every(entry => selected.has(entry)),
+      'deferral entries must cover the complete unresolved inventory');
     return {
       unresolved: raw.filter(entry => !selected.has(entry)).map(message),
       deferred: [...selected].map(entry => ({
