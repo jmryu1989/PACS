@@ -3039,9 +3039,17 @@ function scanAuditWrites(sources = auditSources()) {
 }
 
 // ── the verdict: the contract table is read here only ──
+
+const { nonWriteDeferrals } = require('./admin-audit-deferrals.cjs');
+const NON_WRITE_DEFERRALS = JSON.parse(readFileSync(path.join(__dirname, 'admin-audit-nonwrite-deferrals.json'), 'utf8'));
+const nonWriteContext = () => Object.fromEntries([
+  'api/tsconfig.json', 'api/package-lock.json', 'api/prisma/schema.prisma',
+].map(file => [file, require('node:crypto').createHash('sha256')
+  .update(readFileSync(path.join(ROOT, file), 'utf8').replace(/\r\n/g, '\n')).digest('hex')]));
+
 const VERDICT = {
   unread_sources: 'every script file under api/src is read by the program',
-  unresolved: 'every audit candidate is resolved or proven not an audit write',
+  unresolved: 'an audit candidate lacks proof or an explicit valid D-NW disposition',
   unlisted: 'an audit action written under api/src without a contract row',
   uncovered_prefixes: 'a dynamic audit action without a wildcard row',
   unwritten_rows: 'contract rows nothing writes',
@@ -3071,9 +3079,11 @@ function verdict(scan, table = productTable(), listing = null) {
 const failing = found => Object.keys(VERDICT).filter(name => found[name].length > 0);
 
 
-test('completeness: every api/src file is read, every audit candidate is resolved or proven not a write, both directions hold', () => {
+test('completeness: every api/src file is read, every candidate is proved or explicitly deferred, both directions hold', () => {
   const { sources, listing } = productSources();
-  const scan = scanAuditWrites(sources), found = verdict(scan, productTable(), listing);
+  const scan = scanAuditWrites(sources);
+  const disposition = nonWriteDeferrals(scan, sources, NON_WRITE_DEFERRALS, nonWriteContext());
+  const found = verdict({ ...scan, unresolved: disposition.unresolved }, productTable(), listing);
   // The inventory, whatever the verdict: every write site with its kind, actions or prefixes and their basis, every
   // unresolved candidate, and every candidate proven not to be a write with its reason.
   console.log('ADMIN_AUDIT_SOURCES ' + JSON.stringify(listing));
@@ -3084,11 +3094,15 @@ test('completeness: every api/src file is read, every audit candidate is resolve
   console.log('ADMIN_AUDIT_CANDIDATES ' + JSON.stringify(tally));
   for (const entry of scan.candidates.filter(entry => entry.status === 'proven_non_audit')) console.log('ADMIN_AUDIT_NON_AUDIT ' + JSON.stringify(entry));
   console.log('ADMIN_AUDIT_CLIENT_FLOW ' + JSON.stringify(scan.flow));
+  console.log('ADMIN_AUDIT_DEFERRAL_INPUT ' + JSON.stringify(NON_WRITE_DEFERRALS));
+  for (const entry of disposition.deferred) console.log('ADMIN_AUDIT_DEFERRED_NON_AUDIT ' + JSON.stringify(entry));
+  console.log('ADMIN_AUDIT_DEFERRAL_ERRORS ' + JSON.stringify(disposition.errors));
   const literals = new Set(scan.sites.flatMap(site => site.actions)), byRule = {};
   for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
   console.log('ADMIN_AUDIT_COMPLETENESS ' + JSON.stringify({ typescript: scan.typescript, files_listed: listing.disk, files_read: scan.files.length,
     write_sites: scan.sites.length, raw_sql_sites: scan.sites.filter(site => site.via.startsWith('raw')).length,
-    unresolved: scan.unresolved.length, distinct_actions: literals.size, dynamic_prefixes: [...new Set(scan.sites.flatMap(site => site.prefixes))].sort(),
+    unresolved: scan.unresolved.length, deferred_non_audit: disposition.deferred.length, blocking_unresolved: found.unresolved.length,
+    distinct_actions: literals.size, dynamic_prefixes: [...new Set(scan.sites.flatMap(site => site.prefixes))].sort(),
     by_rule: byRule, write_files: new Set(scan.sites.map(site => site.file)).size }));
   console.log('ADMIN_AUDIT_VERDICT ' + JSON.stringify(found));
   // The owner-only study-scoped records (the S5-U4a question, the S5-U4c image request, the S7-U1a critical result) are
@@ -3323,6 +3337,10 @@ test('checker self-test: every counterexample F03 enumerates leaves its write or
       const writes = own.filter(candidate => WRITES_AND_RAW.has(candidate.kind) && candidate.status !== 'proven_non_audit');
       assert.ok(writes.length > 0 && writes.every(candidate => candidate.status === 'unresolved'), `${name}: ${JSON.stringify(own)}`);
       assert.equal(scan.sites.filter(site => site.file === entry.source.file).length, 0, `${name}: no write of it resolves`);
+      const disposition = nonWriteDeferrals(scan, [...baselineSources(), entry.source], NON_WRITE_DEFERRALS, nonWriteContext());
+      assert.equal(disposition.deferred.length, 0, name);
+      for (const reason of scan.unresolved) assert.ok(disposition.unresolved.includes(reason), name);
+      assert.deepEqual(failing(verdict({ ...scan, unresolved: disposition.unresolved }, fixtureTable(entry.table))), ['unresolved'], name);
       results[`${finding} / ${variant}`] = { case: name, unresolved: writes.map(candidate => `${candidate.line} ${candidate.kind}: ${candidate.reason}`),
         beside: own.filter(candidate => !writes.includes(candidate)).map(candidate => `${candidate.line} ${candidate.kind} ${candidate.status}`) };
     }
@@ -3664,4 +3682,78 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
     unfixed_fragment_paths: passedIn.map(({ site, declaration }) => `${site.file}:${site.line} \`${declaration.name.getText()}\``),
     helpers_by_a_constant_key: helped.map(({ site, declaration }) => `${site.file}:${site.line} \`${declaration.parent.name.getText()}\``),
     one_write_paths: reasons }));
+});
+
+
+test('D-NW: only the explicit unchanged corpus and every exact pin can receive a temporary disposition', () => {
+  const sources = auditSources(), scan = scanAuditWrites(sources), context = nonWriteContext();
+  const before = inventory(scan), raw = [...scan.unresolved];
+  const apply = (policy = NON_WRITE_DEFERRALS, input = sources, result = scan, env = context) =>
+    nonWriteDeferrals(result, input, policy, env);
+  const allowed = apply();
+  assert.deepEqual(allowed.errors, []);
+  assert.equal(allowed.deferred.length, NON_WRITE_DEFERRALS.entries.length);
+  assert.deepEqual(allowed.unresolved, []);
+  assert.ok(allowed.deferred.every(entry => entry.status === 'deferred_non_audit'
+    && entry.original_status === 'unresolved' && entry.disposition === 'D-NW'));
+  assert.deepEqual(allowed.deferred.map(entry => [entry.file, entry.line, entry.start, entry.kind]),
+    NON_WRITE_DEFERRALS.entries);
+  assert.deepEqual(inventory(scan), before, 'the raw candidate inventory is not rewritten');
+  assert.deepEqual(scan.unresolved, raw);
+  assert.deepEqual(apply(null), { unresolved: raw, deferred: [], errors: [] });
+  assert.deepEqual(apply(NON_WRITE_DEFERRALS, [...sources].reverse()), allowed);
+  assert.deepEqual(apply(NON_WRITE_DEFERRALS, sources.map(source =>
+    ({ ...source, text: source.text.replace(/\n/g, '\r\n') }))), allowed);
+
+  const refuse = (result, label, expected = raw) => {
+    assert.equal(result.deferred.length, 0, label);
+    assert.ok(result.errors.length > 0, label);
+    for (const entry of expected) assert.ok(result.unresolved.includes(entry), label);
+  };
+  for (const [field, value] of [['schema_version', 0], ['ruling', 'other'], ['owner', ''],
+    ['follow_up', ''], ['typescript', '0'], ['sources_sha256', '0'], ['unresolved_sha256', '0']]) {
+    refuse(apply({ ...NON_WRITE_DEFERRALS, [field]: value }), field);
+  }
+  refuse(apply({ ...NON_WRITE_DEFERRALS, entries: [] }), 'empty');
+  refuse(apply({ ...NON_WRITE_DEFERRALS, entries: [...NON_WRITE_DEFERRALS.entries, NON_WRITE_DEFERRALS.entries[0]] }), 'duplicate');
+  for (const slot of [0, 1, 2, 3]) {
+    const pins = NON_WRITE_DEFERRALS.entries.map(pin => [...pin]);
+    pins[0][slot] = typeof pins[0][slot] === 'number' ? pins[0][slot] + 1 : pins[0][slot] + '-changed';
+    refuse(apply({ ...NON_WRITE_DEFERRALS, entries: pins }), 'changed position ' + slot);
+  }
+  // A smaller disposition cannot hide the omitted candidate.
+  const partial = apply({ ...NON_WRITE_DEFERRALS, entries: NON_WRITE_DEFERRALS.entries.slice(1) });
+  assert.deepEqual(partial.errors, []);
+  assert.equal(partial.unresolved.length, 1);
+  assert.equal(partial.deferred.length, allowed.deferred.length - 1);
+  for (const file of Object.keys(context)) refuse(apply(NON_WRITE_DEFERRALS, sources, scan,
+    { ...context, [file]: '0' }), 'changed context ' + file);
+  const first = sources[0];
+  refuse(apply(NON_WRITE_DEFERRALS, sources.map(source => source === first
+    ? { ...source, text: source.text + '\n// changed dependency\n' } : source)), 'changed dependency');
+  refuse(apply(NON_WRITE_DEFERRALS, sources.slice(1)), 'removed source');
+  refuse(apply(NON_WRITE_DEFERRALS, [...sources, first]), 'duplicate source');
+  const changed = scan.candidates.map(entry => entry.status === 'unresolved'
+    ? Object.defineProperty({ ...entry, reason: entry.reason + ' changed' }, 'start', { value: entry.start }) : entry);
+  const changedScan = { ...scan, candidates: changed,
+    unresolved: changed.filter(entry => entry.status === 'unresolved')
+      .map(entry => `${entry.file}:${entry.line} ${entry.kind}: ${entry.reason}`) };
+  refuse(apply(NON_WRITE_DEFERRALS, sources, changedScan), 'changed diagnosis', changedScan.unresolved);
+  console.log('ADMIN_AUDIT_DEFERRAL_CONTROLS ' + JSON.stringify({
+    raw_unresolved: raw.length, deferred: allowed.deferred.length, blocking_unresolved: allowed.unresolved.length,
+  }));
+});
+
+test('D-NW: a new raw fragment remains unresolved and fails by itself, with or without the product disposition', () => {
+  const source = asSource('deferral-boundary.ts', fixtureText('deferral-boundary.ts', MEMBER_FIXTURES));
+  const sources = [...baselineSources(), source], scan = scanAuditWrites(sources);
+  assertMarked(scan, source);
+  const before = verdict(scan, fixtureTable());
+  assert.deepEqual(failing(before), ['unresolved']);
+  assert.equal(scan.unresolved.length, 1);
+  const result = nonWriteDeferrals(scan, sources, NON_WRITE_DEFERRALS, nonWriteContext());
+  assert.equal(result.deferred.length, 0);
+  assert.ok(result.errors.length > 0);
+  assert.ok(result.unresolved.includes(scan.unresolved[0]));
+  assert.deepEqual(failing(verdict({ ...scan, unresolved: result.unresolved }, fixtureTable())), ['unresolved']);
 });
