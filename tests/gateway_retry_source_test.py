@@ -653,15 +653,17 @@ class MigrationPins(unittest.TestCase):
         # S5-U4c: 20260926130000_study_image_requests (StudyImageRequest/StudyImageRequestReceipt) follows it; 30 -> 31.
         # S7-U1a: 20260928120000_critical_result (CriticalResult/CriticalResultEvent/CriticalResultReceipt) follows that;
         # 31 -> 32 (the migration directory list, read in the S7-U1a fix1 evidence).
+        # S7-U3a: 20260928130000_reader_assignment_scope (ReaderAssignment keyed by study and institution) follows that;
+        # 32 -> 33.
         questions, image_requests = "20260926120000_study_questions", "20260926130000_study_image_requests"
-        critical = "20260928120000_critical_result"
-        self.assertEqual(names[-5:], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical],
+        critical, assignment_scope = "20260928120000_critical_result", "20260928130000_reader_assignment_scope"
+        self.assertEqual(names[-6:], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope],
                          "U3 immediately before U4, U4 immediately before S5-U4a's study_questions, then S5-U4c's "
-                         "study_image_requests and S7-U1a's critical_result, which is last")
-        self.assertEqual(len(names), 32)
+                         "study_image_requests, S7-U1a's critical_result and S7-U3a's reader_assignment_scope, which is last")
+        self.assertEqual(len(names), 33)
         self.assertIn("'" + MIGRATION_NAME + "'", text("tests", "production_image_test.py"))
         # the restore fixture applies exactly these migrations in this order: its list compared as data, so the order
-        # above (U3, U4, study_questions, study_image_requests, critical_result last) is the fixture's too
+        # above (U3, U4, study_questions, study_image_requests, critical_result, reader_assignment_scope last) is the fixture's too
         # (S7-U1a-B-R-001-F03: not the list's layout in the fixture's source)
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
         self.assertIn("'GatewayReceipt', 'GatewayRetryRequest'])", FIXTURE)          # TABLES
@@ -681,11 +683,12 @@ class MigrationPins(unittest.TestCase):
         # S5-U4c: 31 migrations, 43 tables (StudyImageRequest, StudyImageRequestReceipt), rows + 2 requests + 4 receipts.
         # S7-U1a: 32 migrations, 46 tables (CriticalResult, CriticalResultEvent, CriticalResultReceipt), rows + 4 records +
         # 7 events + 6 receipts, 79 rows in all.
+        # S7-U3a: 33 migrations, the same 46 tables, rows + the tele institution's closed ReaderAssignment row, 80 in all.
         rows = restore_fixture.expected_rows("2.25.1")
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 32)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 33)
         self.assertEqual(len(restore_fixture.TABLES), 46)
         self.assertEqual(set(rows), set(restore_fixture.TABLES))
-        self.assertEqual(sum(len(value) for value in rows.values()), 79)
+        self.assertEqual(sum(len(value) for value in rows.values()), 80)
         self.assertEqual({table: len(rows[table]) for table in ("GatewayRetryRequest", "CriticalResult", "CriticalResultEvent",
                                                                 "CriticalResultReceipt")},
                          {"GatewayRetryRequest": 1, "CriticalResult": 4, "CriticalResultEvent": 7, "CriticalResultReceipt": 6})

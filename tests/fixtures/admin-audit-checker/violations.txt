@@ -1,0 +1,606 @@
+// Test-owned fixture of tests/admin_audit_attribution_test.cjs (not product code). One module per case, put next to the
+// baseline fixture of tests/fixtures/admin_audit_completeness as api/src/syn-fixture/case-<name>.ts; with it the gate must
+// fail on exactly the class its header names, on exactly the candidates its lines mark (`// expect:`, as there).
+//   // ==== case: <name> | verdict: <class> [entries] [| table: +row <action> | table: +wildcard <stem>] ====
+// The counterexamples Astra S7-U3a-AUDIT-SPEC-C-R-001-F03 enumerates, by finding and module variant (the case name starts
+// with the finding: e-f01-*, e-f02-*, e-f03-*, f-f01-*, f-f02-*, c-raw-cast-*), each on its own; the E-F03 and F-F01
+// modules come twice, as Astra wrote them (a readonly field, now outside W2 as a whole) and with a private helper (inside
+// the list: the helper's calls may not be what the object runs). fix6's other E-F03 cases (a readonly field or an enum
+// whose object escapes: behind an alias, written through an untyped alias, an instance or the class handed on, the
+// prototype, a called member the check does not read) stay as they were, now refused because W2 reads no property; each
+// of those escapes comes again with a private helper. Then `moved-*`: every construct fix6 took as a supported
+// notation that the closed list W1-W6 leaves out, refused here as unresolved (their lines in
+// tests/fixtures/admin_audit_completeness/equivalent.ts and in members.ts before fix7; tests/fixtures/admin-audit-checker/
+// reclassified.json names each). A fragment handed on is also its own candidate where it is handed on (W4 over every
+// fragment).
+
+// ==== case: e-f01-a-helper-called-by-a-constant-key-with-a-request-value | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+const GO = 'go';
+export class SynHelper {
+  private go(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved `body.kind` is a property the program does not fix
+  }
+  async run(tx: Prisma.TransactionClient, body: any) {
+    await this.go(tx, 'syn.allowed');
+    await this[GO](tx, body.kind);
+  }
+}
+
+// ==== case: e-f01-a-helper-object-read-by-an-unfixed-key | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynHelper {
+  private go(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved which is read by a key the program does not fix
+  }
+  async run(tx: Prisma.TransactionClient, body: any) {
+    await this.go(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.go`, which this check does not follow
+    await (this as any)[body.method](body.db, body.kind); // expect: proven_non_audit no client value reaches
+  }
+}
+
+// ==== case: e-f01-a-with-fragment-helper-called-by-a-constant-key | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+const LINK = 'linked';
+export class SynPaths {
+  private async linked(tx: Prisma.TransactionClient, actor: string, selector: Prisma.Sql) {
+    await tx.$executeRaw`WITH s AS (SELECT t.uid FROM "StudyState" t WHERE ${selector}) INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved `body.where` is not a Prisma.sql text
+  }
+  async fixed(tx: Prisma.TransactionClient, actor: string, uid: string) { await this.linked(tx, actor, Prisma.sql`t.uid = ${uid}::text`); }
+  async unfixed(tx: Prisma.TransactionClient, actor: string, body: any) { await this[LINK](tx, actor, body.where); }
+}
+
+// ==== case: e-f01-a-readonly-field-written-by-a-constant-key | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+const KEY = 'field';
+export class SynReadonly {
+  private readonly field = 'syn.allowed';
+  change(body: any) { (this as any)[KEY] = body.kind; }
+  async run(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+
+// ==== case: e-f01-a-helper-replaced-by-a-constant-key | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(...values: unknown[]): unknown;
+const KEY = 'audit';
+export class SynReplaced {
+  private audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved (the method is replaced)
+  }
+  change() { (this as any)[KEY] = opaque; }
+  async run(tx: Prisma.TransactionClient) { await this.audit(tx, 'syn.allowed'); } // expect: unresolved a client value handed to `this.audit`, which this check does not follow
+}
+
+// ==== case: e-f01-an-enum-member-written-by-a-constant-key | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+enum Kind { Allowed = 'syn.allowed' }
+const KEY = 'Allow' + 'ed';
+export async function run(tx: Prisma.TransactionClient, body: any) {
+  (Kind as any)[KEY] = body.kind; // expect: proven_non_audit no client value reaches
+  await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: Kind.Allowed } }); // expect: unresolved `Kind.Allowed` is a property the program does not fix
+}
+
+// ==== case: e-f01-an-unknown-constant-key-call-of-a-with-helper | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynPaths {
+  private async linked(tx: Prisma.TransactionClient, actor: string, selector: Prisma.Sql) {
+    await tx.$executeRaw`WITH s AS (SELECT t.uid FROM "StudyState" t WHERE ${selector}) INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved which is read by a key the program does not fix
+  }
+  async fixed(tx: Prisma.TransactionClient, actor: string, uid: string) {
+    await this.linked(tx, // expect: unresolved a client value handed to `this.linked`, which this check does not follow
+      actor, Prisma.sql`t.uid = ${uid}::text`); // expect: unresolved (Sql) is handed to `this.linked`
+  }
+  async unknown(tx: Prisma.TransactionClient, body: any) {
+    await (this as any)[body.name]( // expect: proven_non_audit no client value reaches
+      tx, body.actor, body.where); // expect: unresolved a client value handed to `(this as any)[body.name]`, which this check does not follow
+  }
+}
+
+// ==== case: e-f02-a-fragment-written-through-a-member | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export function run(tx: Prisma.TransactionClient, uid: string, body: any) {
+  const selector = Prisma.sql`uid = ${uid}::text`;
+  (selector as any).strings[0] = body.sql; // expect: unresolved `selector` (Sql) is asserted to `any`
+  return tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState" WHERE ${selector}) INSERT INTO "AuditLog" (action) SELECT 'syn.allowed' FROM s`; // expect: unresolved holds an SQL fragment that is written at
+}
+
+// ==== case: e-f02-a-fragment-handed-to-an-outside-function | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export function run(tx: Prisma.TransactionClient, uid: string) {
+  const selector = Prisma.sql`uid = ${uid}::text`;
+  opaque(selector); // expect: unresolved `selector` (Sql) is handed to `opaque`
+  return tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState" WHERE ${selector}) INSERT INTO "AuditLog" (action) SELECT 'syn.allowed' FROM s`; // expect: unresolved holds an SQL fragment that is handed to `opaque`
+}
+
+// ==== case: e-f02-a-fragment-written-through-a-const-alias | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export function run(tx: Prisma.TransactionClient, uid: string, body: any) {
+  const selector = Prisma.sql`uid = ${uid}::text`;
+  const same = selector;
+  (same as any).strings[0] = body.sql; // expect: unresolved `same` (Sql) is asserted to `any`
+  return tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState" WHERE ${selector}) INSERT INTO "AuditLog" (action) SELECT 'syn.allowed' FROM s`; // expect: unresolved holds an SQL fragment that is written at
+}
+
+// ==== case: e-f02-a-fragment-written-by-a-local-helper | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+function widen(fragment: Prisma.Sql, sql: string) { (fragment as any).strings[0] = sql; } // expect: unresolved `fragment` (Sql) is asserted to `any`
+export function run(tx: Prisma.TransactionClient, uid: string, body: any) {
+  const selector = Prisma.sql`uid = ${uid}::text`;
+  widen(selector, body.sql);
+  return tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState" WHERE ${selector}) INSERT INTO "AuditLog" (action) SELECT 'syn.allowed' FROM s`; // expect: unresolved holds an SQL fragment that is written at
+}
+
+// ==== case: e-f02-a-fragment-parameter-handed-on-in-its-helper | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export class SynPaths {
+  private async linked(tx: Prisma.TransactionClient, actor: string, selector: Prisma.Sql) {
+    opaque(selector); // expect: unresolved `selector` (Sql) is handed to `opaque`
+    await tx.$executeRaw`WITH s AS (SELECT t.uid FROM "StudyState" t WHERE ${selector}) INSERT INTO "AuditLog" (actor, action, target) SELECT ${actor}, 'syn.allowed', uid FROM s`; // expect: unresolved holds an SQL fragment that is handed to `opaque`
+  }
+  async fixed(tx: Prisma.TransactionClient, actor: string, uid: string) { await this.linked(tx, actor, Prisma.sql`t.uid = ${uid}::text`); }
+}
+
+// ==== case: e-f02-a-fragment-part-handed-on | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export function run(tx: Prisma.TransactionClient, uid: string) {
+  const selector = Prisma.sql`uid = ${uid}::text`;
+  opaque((selector as any).values); // expect: unresolved `selector` (Sql) is asserted to `any`
+  return tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState" WHERE ${selector}) INSERT INTO "AuditLog" (action) SELECT 'syn.allowed' FROM s`; // expect: unresolved holds an SQL fragment that is handed on at
+}
+
+// ==== case: e-f02-a-fragment-part-written-without-an-assertion | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export function run(tx: Prisma.TransactionClient, uid: string, body: any) {
+  const selector = Prisma.sql`uid = ${uid}::text`;
+  selector.strings[0] = String(body.sql); // expect: unresolved `selector` (Sql) is written at
+  return tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState" WHERE ${selector}) INSERT INTO "AuditLog" (action) SELECT 'syn.allowed' FROM s`; // expect: unresolved holds an SQL fragment that is written at
+}
+
+// ==== case: e-f02-a-fragment-handed-on-after-an-alias | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export function run(tx: Prisma.TransactionClient, uid: string) {
+  const selector = Prisma.sql`uid = ${uid}::text`;
+  const same = selector;
+  opaque(same); // expect: unresolved `same` (Sql) is handed to `opaque`
+  return tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState" WHERE ${selector}) INSERT INTO "AuditLog" (action) SELECT 'syn.allowed' FROM s`; // expect: unresolved holds an SQL fragment that is handed to `opaque`
+}
+
+// ==== case: e-f03-a-readonly-field-object-handed-to-an-outside-function | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export class SynReadonly {
+  private readonly field = 'syn.allowed';
+  async run(tx: Prisma.TransactionClient) {
+    opaque(this);
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+
+// ==== case: e-f03-a-helper-object-handed-to-an-outside-function | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export class SynEscaped {
+  private audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved an instance of `SynEscaped`, which is handed on at
+  }
+  async run(tx: Prisma.TransactionClient) {
+    opaque(this);
+    await this.audit(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.audit`, which this check does not follow
+  }
+}
+
+// ==== case: e-f03-a-helper-object-behind-an-alias | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynEscaped {
+  private audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved an instance of `SynEscaped`, which is handed on at
+  }
+  change(body: any) {
+    const self = this;
+    Object.assign(self, body.patch);
+  }
+  async run(tx: Prisma.TransactionClient) {
+    await this.audit(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.audit`, which this check does not follow
+  }
+}
+
+// ==== case: e-f03-a-helper-object-handed-on-outside-its-class | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export class SynEscaped {
+  private audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved an instance of `SynEscaped`, which is handed on at
+  }
+  async run(tx: Prisma.TransactionClient) {
+    await this.audit(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.audit`, which this check does not follow
+  }
+}
+export function leak() {
+  const kept = new SynEscaped();
+  opaque(kept);
+}
+
+// ==== case: e-f03-a-helper-object-prototype-reached-through-the-class | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynEscaped {
+  private audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved is reached through `SynEscaped.prototype` at
+  }
+  async run(tx: Prisma.TransactionClient) {
+    await this.audit(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.audit`, which this check does not follow
+  }
+}
+Object.defineProperty(SynEscaped.prototype, 'audit', { value: () => undefined });
+
+// ==== case: e-f03-a-helper-object-written-through-an-untyped-alias | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynEscaped {
+  private audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved an instance of `SynEscaped`, which is handed on at
+  }
+  change(body: any) {
+    const self: any = this;
+    self.audit = body.fn;
+  }
+  async run(tx: Prisma.TransactionClient) {
+    await this.audit(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.audit`, which this check does not follow
+  }
+}
+
+// ==== case: e-f03-a-helper-object-running-a-called-member-the-check-does-not-read | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export class SynEscaped {
+  private hook: (...values: unknown[]) => void = opaque;
+  private audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved which is handed on as `this` of `this.hook`
+  }
+  async run(tx: Prisma.TransactionClient) {
+    this.hook();
+    await this.audit(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.audit`, which this check does not follow
+  }
+}
+
+// ==== case: e-f03-a-static-helper-of-a-class-handed-on | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynStatic {
+  private static audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved the class `SynStatic`, which is handed on at
+  }
+  async run(tx: Prisma.TransactionClient) {
+    await SynStatic.audit(tx, 'syn.allowed'); // expect: unresolved a client value handed to `SynStatic.audit`, which this check does not follow
+  }
+}
+export const PROVIDERS = [SynStatic];
+
+// ==== case: e-f03-a-readonly-field-object-behind-an-alias | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynReadonly {
+  private readonly field = 'syn.allowed';
+  change(body: any) {
+    const self = this;
+    Object.assign(self, body.patch);
+  }
+  async run(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+
+// ==== case: e-f03-a-readonly-field-written-through-an-untyped-alias | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynReadonly {
+  private readonly field = 'syn.allowed';
+  change(body: any) {
+    const self: any = this;
+    self.field = body.kind;
+  }
+  async run(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+
+// ==== case: e-f03-an-instance-handed-on-outside-its-class | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export class SynReadonly {
+  private readonly field = 'syn.allowed';
+  async run(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+export function leak() {
+  const kept = new SynReadonly();
+  opaque(kept);
+}
+
+// ==== case: e-f03-a-prototype-reached-through-the-class | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynReadonly {
+  private readonly field = 'syn.allowed';
+  async run(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+Object.defineProperty(SynReadonly.prototype, 'field', { set() { /* the initializer's value is dropped */ }, get: () => 'syn.other' });
+
+// ==== case: e-f03-a-called-member-that-runs-code-the-check-does-not-read | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+export class SynReadonly {
+  private readonly field = 'syn.allowed';
+  private hook: (...values: unknown[]) => void = opaque;
+  async run(tx: Prisma.TransactionClient) {
+    this.hook();
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+
+// ==== case: e-f03-a-static-readonly-field-of-a-class-handed-on | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynStatic {
+  private static readonly FIELD = 'syn.allowed';
+  async run(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: SynStatic.FIELD } }); // expect: unresolved `SynStatic.FIELD` is a property the program does not fix
+  }
+}
+export const PROVIDERS = [SynStatic];
+
+// ==== case: e-f03-an-enum-handed-on | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: unknown): void;
+enum Kind { Allowed = 'syn.allowed' }
+export async function run(tx: Prisma.TransactionClient) {
+  opaque(Kind);
+  await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: Kind.Allowed } }); // expect: unresolved `Kind.Allowed` is a property the program does not fix
+}
+
+// ==== case: f-f01-a-method-replaced-by-a-dot-next-to-a-readonly-field | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(this: any): void;
+export class S {
+  private readonly field = 'syn.allowed';
+  private hook() {}
+  run(tx: Prisma.TransactionClient) {
+    this.hook = opaque;
+    this.hook();
+    return tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+
+// ==== case: f-f01-a-method-replaced-by-a-dot | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(this: any): void;
+export class S {
+  private hook() {}
+  private audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved which is handed on as `this` of `this.hook`
+  }
+  async run(tx: Prisma.TransactionClient) {
+    this.hook = opaque;
+    this.hook();
+    await this.audit(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.audit`, which this check does not follow
+  }
+}
+
+// ==== case: f-f01-a-method-replaced-by-a-constant-key | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(this: any): void;
+const KEY = 'hook';
+export class S {
+  private hook() {}
+  private audit(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved which is handed on as `this` of `this[KEY]`
+  }
+  async run(tx: Prisma.TransactionClient) {
+    (this as any)[KEY] = opaque;
+    this[KEY]();
+    await this.audit(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.audit`, which this check does not follow
+  }
+}
+
+// ==== case: f-f01-a-predicate-handed-to-a-method-replaced-by-a-dot | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: Prisma.Sql): void;
+export class S {
+  private hook(value: Prisma.Sql) {}
+  async run(tx: Prisma.TransactionClient, uid: string) {
+    this.hook = opaque;
+    const selector = Prisma.sql`uid = ${uid}::text`;
+    this.hook(selector); // expect: unresolved `selector` (Sql) is handed to `this.hook`
+    await tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState" WHERE ${selector}) INSERT INTO "AuditLog" (action) SELECT 'syn.allowed' FROM s`; // expect: unresolved holds an SQL fragment that is handed to `this.hook`
+  }
+}
+
+// ==== case: f-f01-a-predicate-handed-to-a-method-replaced-by-a-constant-key | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+declare function opaque(value: Prisma.Sql): void;
+const KEY = 'hook';
+export class S {
+  private hook(value: Prisma.Sql) {}
+  async run(tx: Prisma.TransactionClient, uid: string) {
+    (this as any)[KEY] = opaque;
+    const selector = Prisma.sql`uid = ${uid}::text`;
+    this[KEY](selector); // expect: unresolved `selector` (Sql) is handed to `this[KEY]`
+    await tx.$executeRaw`WITH s AS (SELECT uid FROM "StudyState" WHERE ${selector}) INSERT INTO "AuditLog" (action) SELECT 'syn.allowed' FROM s`; // expect: unresolved holds an SQL fragment that is handed to `this[KEY]`
+  }
+}
+
+// ==== case: f-f02-a-fragment-only-raw-call | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export function run(tx: Prisma.TransactionClient, fragment: Prisma.Sql) {
+  return tx.$executeRaw`${fragment}`; // expect: unresolved `fragment` (Sql) is an SQL fragment: in a raw call that writes no audit row
+}
+
+// ==== case: f-f02-a-fixed-non-audit-sql-with-a-fragment | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export function run(tx: Prisma.TransactionClient, uid: string, fragment: Prisma.Sql) {
+  return tx.$executeRaw`UPDATE "StudyState" SET ward = 'syn' WHERE uid = ${uid} AND ${fragment}`; // expect: unresolved `fragment` (Sql) is an SQL fragment: in a raw call that writes no audit row
+}
+
+// ==== case: c-raw-cast-through-a-const | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export function run(tx: Prisma.TransactionClient, fragment: Prisma.Sql) {
+  const value = fragment as unknown as string; // expect: unresolved `fragment` (Sql) is asserted to `unknown`
+  return tx.$executeRaw`INSERT INTO "AuditLog" (action, target) VALUES ('syn.allowed', ${value})`; // expect: unresolved `value` is not shown to be a value: `fragment` (Sql) is an SQL fragment
+}
+
+// ==== case: c-raw-cast-direct | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export function run(tx: Prisma.TransactionClient, fragment: Prisma.Sql) {
+  // expect: unresolved is not shown to be a value: `fragment` (Sql) is an SQL fragment
+  return tx.$executeRaw`INSERT INTO "AuditLog" (action, target) VALUES ('syn.allowed',
+    ${fragment as unknown as string})`; // expect: unresolved `fragment` (Sql) is asserted to `unknown`
+}
+
+// ==== case: c-raw-cast-in-fixed-non-audit-sql | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export function run(tx: Prisma.TransactionClient, uid: string, fragment: Prisma.Sql) {
+  const value = fragment as unknown as string; // expect: unresolved `fragment` (Sql) is asserted to `unknown`
+  return tx.$executeRaw`UPDATE "StudyState" SET ward = ${value} WHERE uid = ${uid}`; // expect: unresolved `value` is not shown to be a value: `fragment` (Sql) is an SQL fragment
+}
+
+// ==== case: c-raw-cast-through-a-function-result | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+function launder(fragment: Prisma.Sql): string { return fragment as any; } // expect: unresolved `fragment` (Sql) is asserted to `any`
+export function run(tx: Prisma.TransactionClient, fragment: Prisma.Sql) {
+  return tx.$executeRaw`INSERT INTO "AuditLog" (action, target) VALUES ('syn.allowed', ${launder(fragment)})`; // expect: unresolved so its type is no evidence
+}
+
+// ==== case: c-raw-cast-through-a-parameter-typed-any | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+function launder(value: any): string { return value; }
+export function run(tx: Prisma.TransactionClient, fragment: Prisma.Sql) {
+  // expect: unresolved so its type is no evidence
+  return tx.$executeRaw`UPDATE "StudyState" SET ward = ${launder(
+    fragment)}`; // expect: unresolved `fragment` (Sql) is handed to `launder`
+}
+
+// ==== case: moved-w1-a-delegate-key-joined-by-plus | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+const LOG_PIECES = 'audit' + 'Log';
+export async function run(tx: Prisma.TransactionClient) {
+  await tx[LOG_PIECES]['create']({ data: { action: 'syn.allowed' } }); // expect: unresolved a member of a client value by a key the program does not fix
+}
+
+// ==== case: moved-w1-a-helper-key-joined-by-plus | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+const GO = 'g' + 'o';
+export class SynMembers {
+  private go(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved which is read by a key the program does not fix
+  }
+  async write(tx: Prisma.TransactionClient) {
+    await this[GO]( // expect: proven_non_audit no client value reaches `this`
+      tx, 'syn.allowed'); // expect: unresolved a client value handed to `this[GO]`, which this check does not follow
+  }
+}
+
+// ==== case: moved-w2-a-re-export | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+import { RE_EXPORTED } from './actions';
+export async function run(tx: Prisma.TransactionClient) {
+  await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: RE_EXPORTED } }); // expect: unresolved reaches its value through the re-export at
+}
+
+// ==== case: moved-w2-a-forwarding-module | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+import { FORWARDED } from './forward';
+export async function run(tx: Prisma.TransactionClient) {
+  await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: FORWARDED } }); // expect: unresolved reaches its value through the re-export at
+}
+
+// ==== case: moved-w2-a-namespace-member | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+import * as ACTIONS from './actions';
+export async function run(tx: Prisma.TransactionClient) {
+  await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: ACTIONS.SYN_ALLOWED } }); // expect: unresolved `ACTIONS.SYN_ALLOWED` is a property the program does not fix
+}
+
+// ==== case: moved-w2-an-as-const-table-by-dots | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+const TABLE = { syn: { allowed: 'syn.allowed', hidden: 'syn.hidden' } } as const;
+export async function run(tx: Prisma.TransactionClient) {
+  await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: TABLE.syn.allowed } }); // expect: unresolved `TABLE.syn.allowed` is a property the program does not fix
+}
+
+// ==== case: moved-w2-an-as-const-table-by-a-conditional-key | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+const SYN = 'syn';
+const TABLE = { syn: { allowed: 'syn.allowed', hidden: 'syn.hidden' } } as const;
+export async function run(tx: Prisma.TransactionClient) {
+  // expect: proven_non_audit no client value reaches
+  const table = TABLE['syn'][SYN === 'syn' ? 'hidden' : 'allowed'];
+  await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: table } }); // expect: unresolved is a property the program does not fix
+}
+
+// ==== case: moved-w2-a-string-enum-member | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+enum Kind { Allowed = 'syn.allowed' }
+export async function run(tx: Prisma.TransactionClient) {
+  await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: Kind.Allowed } }); // expect: unresolved `Kind.Allowed` is a property the program does not fix
+}
+
+// ==== case: moved-w2-a-static-readonly-field | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynEquivalent {
+  private static readonly FIELD = 'syn.allowed';
+  async write(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: SynEquivalent.FIELD } }); // expect: unresolved `SynEquivalent.FIELD` is a property the program does not fix
+  }
+}
+
+// ==== case: moved-w2-a-readonly-field | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynEquivalent {
+  private readonly field = 'syn.second';
+  async write(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+
+// ==== case: moved-w2-a-readonly-field-by-a-constant-key | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+const FIELD = 'field';
+export class SynMembers {
+  private readonly field = 'syn.allowed';
+  async write(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this[FIELD] } }); // expect: unresolved `this[FIELD]` is a property the program does not fix
+  }
+}
+
+// ==== case: moved-w2-readonly-fields-handed-to-a-helper | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynMembers {
+  private readonly field = 'syn.allowed';
+  private static readonly SECOND = 'syn.second';
+  private go(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+  async write(tx: Prisma.TransactionClient) {
+    await this.go(tx, this.field);
+    await this.go(tx, SynMembers.SECOND);
+  }
+}
+
+// ==== case: moved-w2-a-readonly-field-of-a-class-handed-to-a-module | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+export class SynProvided {
+  private readonly field = 'syn.second';
+  async write(tx: Prisma.TransactionClient) {
+    await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: this.field } }); // expect: unresolved `this.field` is a property the program does not fix
+  }
+}
+export const SYN_PROVIDERS = [SynProvided];
+
+// ==== case: moved-w2-an-or-expression | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+const ACTION = 'syn.allowed';
+export async function run(tx: Prisma.TransactionClient) {
+  await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: ACTION || 'syn.second' } }); // expect: unresolved is a || expression, outside W2
+}

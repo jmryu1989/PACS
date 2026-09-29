@@ -1,5 +1,11 @@
 # coding: utf-8
-"""IF-W21 assignment roles, fresh eligibility, CAS/hold and browser/report protection."""
+"""IF-W21 assignment roles, fresh eligibility, CAS/hold and browser/report protection.
+
+S7-U3a (D-S7-09 a): REQ-S7-U3a-TELE-ASSIGN / REQ-S7-U3a-CLOSE / REQ-S7-U3a-ROWS -> RISK-S7-U3a-CROSS-TENANT-ASSIGN /
+RISK-S7-U3a-ORPHAN-AFTER-CLOSE / RISK-S7-U3a-CANDIDATE-LEAK -> TEST-S7-U3a-LIVE (test_assignment_06, 07 and 08). The owner is
+hallym (A) and the tele receiver kin-center (B); the stack has no third group, so kin-center on a study whose channel is
+not open to it is the third institution (Z): neither owner nor receiver. Manager = tech/ktech, radiologist = doctor/kdoctor.
+"""
 import json,os,unittest,uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +20,9 @@ class ReaderAssignmentE2E(WorklistE2E):
   self.close_contexts();self.contexts=[]
   for uid in self.stack.active:
    for raw in psql('SELECT to_jsonb(t)::text FROM "ReaderAssignment" t WHERE "studyUid"='+lit(uid)):
-    row=json.loads(raw);self.assertIn(row['lastRequest'],self.requests);self.assertIn(row['changedBy'],self.actors)
+    # A row a tele close left carries the server's own close request id; who closed it is still this run's actor.
+    row=json.loads(raw);self.assertIn(row['changedBy'],self.actors)
+    if row['closedAt'] is None:self.assertIn(row['lastRequest'],self.requests)
     self.assertEqual(psql('DELETE FROM "ReaderAssignment" t WHERE to_jsonb(t)='+lit(raw)+'::jsonb RETURNING 1'),['1'])
  def account(self,role):
   r=self.stack.request('GET','/me',role);self.assertEqual(r.status,200);actor=r.body['actor'];self.assertTrue(actor.startswith('kin-test-') and actor.endswith('@local.test'));self.actors.add(actor);return r.body
@@ -80,5 +88,86 @@ class ReaderAssignmentE2E(WorklistE2E):
   self.assertEqual([r.status for r in results[:2]],[201,201]);self.assertEqual(sum(r.body['mine'] for r in results[:2]),1);self.assertEqual(results[0].body['holder'],results[1].body['holder']);self.assertIn(results[2].status,[201,409])
   actions=psql('SELECT action FROM "AuditLog" WHERE target='+lit(a.uid)+" AND action IN ('reader.assignment','report.hold') ORDER BY id")
   self.assertEqual(actions,['reader.assignment','report.hold'] if results[2].status==201 else ['report.hold'])
+ def tele(self,f,body):
+  self.account('doctor');r=self.stack.request('PATCH',f'/studies/{f.uid}','doctor',body);self.assertEqual(r.status,200,r.text);return r.body
+ def rows(self,f):
+  return {row['institutionId']:row for row in map(json.loads,psql('SELECT to_jsonb(t)::text FROM "ReaderAssignment" t WHERE "studyUid"='+lit(f.uid)))}
+ def listed(self,f,role):
+  r=self.stack.request('GET','/studies',role);self.assertEqual(r.status,200,r.text);return next((s for s in r.body['studies'] if s['uid']==f.uid),None)
+ def audited(self,f,role):
+  r=self.stack.request('GET',f'/audit?uid={f.uid}&take=500',role);self.assertEqual(r.status,200,r.text)
+  return sorted({json.loads(x['detail'])['institution'] for x in r.body if x['action']=='reader.assignment'})
+ def test_assignment_06_tele_receiver_owner_and_third_institution(self):
+  a=self.fixture();unknown=self.stack.request('GET',f'/studies/{a.uid}.9/reader-assignment','kdoctor');self.assertEqual(unknown.status,404)
+  def refused(role,revision=0):
+   self.account(role);request=str(uuid.uuid4());self.requests.add(request)
+   write=dict(expectedOwner=['kin-center',self.stack.user_ids[role]],revision=revision,readerSub=None,requestId=request)
+   for method,body in (('GET',None),('POST',write)):
+    r=self.stack.request(method,f'/studies/{a.uid}/reader-assignment',role,body);self.assertEqual((r.status,r.text),(404,unknown.text),role+' '+method)
+   r=self.stack.request('GET',f'/audit?uid={a.uid}',role);self.assertEqual((r.status,r.text),(404,unknown.text),role+' audit')
+  # Z: kin-center before any channel gets what an unknown UID gets, on read, write and GET audit (gate()).
+  for role in ('kdoctor','ktech'):refused(role)
+  self.assertEqual(self.tele(a,{'ts':'wait','teleTo':'kin-center'})['teleInstitutionId'],'kin-center')
+  self.change(a,self.body(self.read(a),'doctor'))
+  # B: its own row, from revision 0; its candidates are its own radiologists; hallym's reader is refused.
+  b=self.read(a,'ktech');self.assertEqual((b['owner'],b['revision'],b['reader'],b['history']),(['kin-center',self.stack.user_ids['ktech']],0,None,[]))
+  readers=self.stack.request('GET','/reader-candidates','ktech');self.assertEqual(readers.status,200);subs={r['sub'] for r in readers.body['readers']}
+  self.assertIn(self.stack.user_ids['kdoctor'],subs);self.assertTrue(subs.isdisjoint({self.stack.user_ids[x] for x in ('doctor','doctor2','jmryu','tech','ktech')}))
+  self.change(a,self.body(b,'doctor'),'ktech',400);b=self.change(a,self.body(b,'kdoctor'),'ktech')
+  own=self.change(a,self.body(self.read(a,'kdoctor'),None),'kdoctor');last=self.body(own,'kdoctor');own=self.change(a,last,'kdoctor')
+  mine,theirs=self.read(a),self.read(a,'ktech')
+  self.assertEqual((mine['revision'],mine['reader']['sub'],[h['detail']['institution'] for h in mine['history']]),(1,self.stack.user_ids['doctor'],['hallym']))
+  self.assertEqual((theirs['revision'],theirs['reader']['sub'],[h['detail']['institution'] for h in theirs['history']]),(3,self.stack.user_ids['kdoctor'],['kin-center']*3))
+  for body,foreign in ((mine,('kdoctor','ktech')),(theirs,('doctor','tech'))):
+   for role in foreign:self.assertNotIn(self.stack.user_ids[role],json.dumps(body));self.assertNotIn(self.stack.actor(role),json.dumps(body))
+  # Worklist rows and GET audit: each institution sees its own assignment only.
+  self.assertEqual((self.listed(a,'tech')['tele'],self.listed(a,'tech')['readerAssignment']),(False,{'revision':1,'reader':mine['reader']}))
+  self.assertEqual((self.listed(a,'kdoctor')['tele'],self.listed(a,'kdoctor')['readerAssignment']),(True,{'revision':3,'reader':theirs['reader']}))
+  self.assertEqual((self.audited(a,'tech'),self.audited(a,'ktech')),(['hallym'],['kin-center']))
+  # Close: B's row closes in the cancel, with one entry; hallym's row is untouched; B gets the unknown-UID answer again.
+  owner_row=self.rows(a)['hallym'];self.assertIsNone(self.tele(a,{'ts':'cancelled'})['teleInstitutionId'])
+  rows=self.rows(a);closed=rows['kin-center'];self.assertEqual(rows['hallym'],owner_row);self.assertIsNotNone(closed['closedAt'])
+  self.assertEqual([closed[k] for k in ('revision','closedRevision','readerSub','readerActor','readerName','changedBy')],[4,4,None,None,None,self.stack.actor('doctor')])
+  entries=[d for d in map(json.loads,psql('SELECT detail FROM "AuditLog" WHERE target='+lit(a.uid)+" AND action='reader.assignment' ORDER BY id")) if 'closed' in d]
+  self.assertEqual(entries,[{'institution':'kin-center','revision':4,'from':self.stack.actor('kdoctor'),'to':None,'closed':'tele-closed'}])
+  for role in ('kdoctor','ktech'):refused(role,3)
+  self.assertIsNone(self.listed(a,'kdoctor'));self.assertEqual(self.audited(a,'tech'),['hallym'])
+  # Reopen: a new revision with no reader and no history; the closed channel's last request does not apply.
+  self.tele(a,{'ts':'wait','teleTo':'kin-center'});again=self.read(a,'ktech')
+  self.assertEqual((again['revision'],again['reader'],again['history']),(4,None,[]));self.change(a,last,'kdoctor',409)
+  again=self.change(a,self.body(again,'kdoctor'),'ktech')
+  self.assertEqual((again['revision'],[h['detail']['revision'] for h in again['history']]),(5,[5]))
+  self.assertEqual([self.rows(a)['kin-center'][k] for k in ('closedRevision','closedAt')],[4,None]);self.assertEqual(self.rows(a)['hallym'],owner_row)
+ def test_assignment_07_receiver_chip_and_owner_chip(self):
+  a=self.fixture();self.tele(a,{'ts':'wait','teleTo':'kin-center'});self.change(a,self.body(self.read(a),'doctor'))
+  p=self.login('kdoctor');self.select(p,a);chip=p.locator(f'[data-reader-assignment="{a.uid}"]')
+  expect(chip).to_be_enabled();expect(chip).to_contain_text('Unassigned')
+  self.open(p,a);expect(p.locator('#ra-current')).to_contain_text('Unassigned');expect(p.locator('#ra-history li')).to_have_count(0)
+  expect(p.locator('#ra-reader option')).to_have_count(2)
+  p.locator('#ra-reader').select_option(self.stack.user_ids['kdoctor']);p.locator('#ra-save').click();expect(p.locator('#ra-status')).to_contain_text('저장되었습니다')
+  p.locator('#ra-close').click();expect(chip).to_contain_text(self.stack.actor('kdoctor'))
+  tech=self.login('tech');self.select(tech,a);expect(tech.locator(f'[data-reader-assignment="{a.uid}"]')).to_contain_text(self.stack.actor('doctor'))
+  folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'reader-assignment-tele-receiver.png'))
+  self.tele(a,{'ts':'cancelled'});p.locator('#refresh').click();expect(p.locator(f'#rows tr[data-uid="{a.uid}"]')).to_have_count(0)
+ def test_assignment_08_every_close_gives_the_receiver_a_new_revision(self):
+  # S7-U3a-R-001-F02: a request kin-center prepared in one channel never lands once the channel has closed and reopened,
+  # whether kin-center had no row (the close makes a closed one at revision 1) or its row was already closed and nothing
+  # was written in between. A request made from a fresh read lands; hallym's row and every entry stay.
+  a=self.fixture();self.tele(a,{'ts':'wait','teleTo':'kin-center'});self.change(a,self.body(self.read(a),'doctor'));owner_row=self.rows(a)['hallym']
+  held=self.body(self.read(a,'ktech'),'kdoctor');self.assertEqual(held['revision'],0)
+  self.tele(a,{'ts':'cancelled'});marker=self.rows(a)['kin-center'];self.assertIsNotNone(marker['closedAt'])
+  self.assertEqual([marker[k] for k in ('revision','closedRevision','readerSub','readerActor','readerName','changedBy')],[1,1,None,None,None,self.stack.actor('doctor')])
+  self.tele(a,{'ts':'wait','teleTo':'kin-center'});self.change(a,held,'ktech',409)
+  fresh=self.read(a,'ktech');self.assertEqual((fresh['revision'],fresh['reader'],fresh['history']),(1,None,[]))
+  prepared=self.body(fresh,'kdoctor')
+  self.tele(a,{'ts':'cancelled'});self.assertEqual([self.rows(a)['kin-center'][k] for k in ('revision','closedRevision','readerSub')],[2,2,None])
+  self.tele(a,{'ts':'wait','teleTo':'kin-center'});self.change(a,prepared,'ktech',409)
+  current=self.read(a,'ktech');self.assertEqual((current['revision'],current['reader'],current['history']),(2,None,[]))
+  landed=self.change(a,self.body(current,'kdoctor'),'ktech')
+  self.assertEqual((landed['revision'],landed['reader']['sub'],[h['detail']['revision'] for h in landed['history']]),(3,self.stack.user_ids['kdoctor'],[3]))
+  self.assertEqual(self.rows(a)['hallym'],owner_row)
+  entries=[json.loads(d) for d in psql('SELECT detail FROM "AuditLog" WHERE target='+lit(a.uid)+" AND action='reader.assignment' ORDER BY id")]
+  self.assertEqual([(d['institution'],d['revision'],d['from'],d.get('closed')) for d in entries],
+                   [('hallym',1,None,None),('kin-center',1,None,'tele-closed'),('kin-center',2,None,'tele-closed'),('kin-center',3,None,None)])
 def load_tests(loader,tests,pattern):return unittest.TestSuite(ReaderAssignmentE2E(n) for n in loader.getTestCaseNames(ReaderAssignmentE2E) if n.startswith('test_assignment_'))
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -2507,7 +2507,7 @@
     // 특수 렌더링이 필요한 칸만 함수로
     let studyPriority = null;
     const CELL = {
-      assignedReader:s=>`<button type="button" class="chip" data-reader-assignment="${esc(s.uid)}" ${!serverMode||demoMode||offline||s.tele?'disabled':''}>${esc(s.assignedReader||'Unassigned')}</button>`,
+      assignedReader:s=>`<button type="button" class="chip" data-reader-assignment="${esc(s.uid)}" ${!serverMode||demoMode||offline?'disabled':''}>${esc(s.assignedReader||'Unassigned')}</button>`,
       techNote: s => `<button type="button" class="chip" data-tech-note="${esc(s.uid)}" aria-label="${esc(s.id)} Tech 메모 ${noteLabel(s.uid)}" ${!serverMode || demoMode || offline ? 'disabled' : ''}>${noteLabel(s.uid)}</button>`,
       em: s => {const phase=studyPriority?.get(s.uid)?.phase;return phase?`<span title="${phase==='saving'?'응급 상태를 저장 중입니다':'저장 결과 미확인 — 문맥 메뉴의 Refresh Status로 확인하세요'}">${phase==='saving'?'Saving':'Unverified'}</span>`:s.em === "E" ? `<span class="em-e">E</span>` : "";},
       rs: s => `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason ?? "")}">${esc(s.rs)}</span>`,

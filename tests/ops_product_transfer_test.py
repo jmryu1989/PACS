@@ -65,6 +65,27 @@ class Pure(unittest.TestCase):
             with self.subTest(table=table,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned','kin',expected)
 
+    def test_reader_assignment_owner_and_closed_receiver_rows_restore_apart(self):
+        # REQ-S7-U3a-MIGRATION -> RISK-S7-U3a-MIGRATION-DRIFT -> TEST-S7-U3a-RESTORE (D-S7-09 a): one study carries the
+        # owner's open row and the tele institution's closed row; a restore that lost a row, merged the two institutions
+        # or dropped a close value is a mismatch.
+        body, _, _, _ = fixture(); expected=body['product']
+        rows=expected['rows']['ReaderAssignment']
+        self.assertEqual(sorted((r['studyUid'],r['institutionId'],r['revision'],r['readerSub'] is None,r['closedRevision'],r['closedAt'] is None)
+                                for r in rows),
+                         [(UID,'SYNTHETIC-hospital',4,False,None,True),(UID,'SYNTHETIC-tele',3,True,3,False)])
+        for index,field,value in [(1,'closedAt',None),(1,'closedRevision',None),(1,'institutionId','SYNTHETIC-hospital'),
+                                  (0,'closedRevision',4),(0,'institutionId','SYNTHETIC-tele')]:
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual['rows']['ReaderAssignment'][index][field]=value
+            with self.subTest(index=index,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned','kin',expected)
+        for index in (0,1):
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            del actual['rows']['ReaderAssignment'][index]
+            with self.subTest(dropped=index),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned','kin',expected)
+
     def test_workspace_shortcuts_preserve_bindings_owner_and_revision(self):
         body, _, _, _ = fixture(); expected=body['product']
         rows=expected['rows']['WorkspaceShortcuts']
@@ -221,7 +242,9 @@ class Pure(unittest.TestCase):
         # create, accept and close receipts and an active external-image request with its create receipt.
         # S7-U1a added the critical-result tables: 32 files, 46 tables, four records (acknowledged, superseded and its created
         # replacement, cancelled), their seven events and six receipts (contract S7-U1p section 12.3-3).
-        self.assertEqual(len(transfer.MIGRATIONS), 32)
+        # S7-U3a keyed ReaderAssignment by (study, institution) (D-S7-09 a): 33 files, still 46 tables, and a second
+        # ReaderAssignment row, the tele institution's closed one, on the same study.
+        self.assertEqual(len(transfer.MIGRATIONS), 33)
         self.assertEqual(len(transfer.TABLES), 46)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
@@ -232,7 +255,7 @@ class Pure(unittest.TestCase):
         [receipt] = rows['GatewayReceipt']
         self.assertEqual([(r['studyUid'], r['epoch'], r['seq']) for r in rows['GatewayRetryRequest']],
                          [(receipt['studyUid'], receipt['epoch'], receipt['seq'])])
-        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4 + 4 + 7 + 6)
+        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4 + 4 + 7 + 6 + 1)
         [question] = rows['StudyQuestion']
         receipts = sorted(rows['StudyQuestionEntry'], key=lambda r: r['seq'])
         self.assertEqual((question['studyUid'], question['state'], question['revision'], question['entryCount']), (UID, 'Closed', 3, 3))

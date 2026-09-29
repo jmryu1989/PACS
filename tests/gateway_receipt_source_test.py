@@ -544,8 +544,10 @@ class MigrationPins(unittest.TestCase):
         # 30 -> 31 and 41 -> 43: S5-U4c added 20260926130000_study_image_requests (StudyImageRequest, StudyImageRequestReceipt).
         # 31 -> 32 and 43 -> 46: S7-U1a added 20260928120000_critical_result (CriticalResult, CriticalResultEvent,
         # CriticalResultReceipt).
+        # 32 -> 33, tables unchanged: S7-U3a added 20260928130000_reader_assignment_scope (ReaderAssignment keyed by
+        # study and institution).
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 32)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 33)
         self.assertEqual(len(restore_fixture.TABLES), 46)
         self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 

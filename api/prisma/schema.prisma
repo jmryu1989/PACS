@@ -634,8 +634,11 @@ model ViewerJobRevision {
 }
 
 /// Advisory distribution only; does not grant report access or change authorship.
+/// S7-U3a (D-S7-09 a): one row per (study, institution). The owner's row and a tele receiver's row never see each other.
+/// The receiver's row is closed, never deleted, in the transaction that takes its tele channel away: closedAt is set
+/// while it is closed, and closedRevision (the revision the close gave it) stays as the floor of the history it shows.
 model ReaderAssignment {
-  studyUid String @id
+  studyUid String
   institutionId String @db.VarChar(256)
   revision Int
   readerSub String? @db.VarChar(256)
@@ -645,6 +648,10 @@ model ReaderAssignment {
   lastRequest String @db.Uuid
   lastFingerprint String
   updatedAt DateTime @updatedAt
+  closedRevision Int?
+  closedAt DateTime?
+
+  @@id([studyUid, institutionId])
 }
 
 /// Navigation bindings only; no patient data or clinical commands.
