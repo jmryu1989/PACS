@@ -896,6 +896,20 @@ def correspond(cp: dict) -> dict:
     for kind in ("rows", "lines", "sent_rows", "sent_lines"):
         if len(set(mapping[kind])) != len(mapping[kind]):
             raise Unmatched("screen", f"two {kind} of one page stand for one record (U2)")
+    # U5 (S7-U2b-R-001 F001): U1/U2 look from an observation to a record only, so a record the screen left out failed
+    # neither. A checkpoint that names the records its list must show (`shows`: H-03, H-04, the All lists of test-plan
+    # 6.3.1) gets each of them as exactly one observation and no other record. The named records are this case's own
+    # records of the page's identity and the step shows the All list, whose answer carries every one of them (contract 4,
+    # state=all): one missing from the page's last list answer is the server's, one missing from the screen is the screen's.
+    listed = {key_of(item) for item in items_of(last)}
+    for kind, named in sorted((cp.get("shows") or {}).items()):
+        named = {str(record).lower() for record in named}
+        if named - listed:
+            raise Unmatched("server", f"{kind}: the page's last list answer lacks {sorted(named - listed)} (U5)")
+        shown = set(mapping[kind])
+        if shown != named:
+            raise Unmatched("screen", f"{kind}: records {sorted(named - shown)} not shown, {sorted(shown - named)} shown "
+                                      "but not named by this checkpoint (U5)")
     return mapping
 
 
@@ -1033,7 +1047,9 @@ def problems(cp: dict) -> list[str]:
 
 def judge_vectors() -> list[dict]:
     """test-plan 6.3.2: JV-01..JV-18 as pure inputs (no browser, no stack). Normal vectors answer [], the head-only twins
-    (`m`) and the MU vectors exactly the listed problems, and JV-16 (the fix3 layout) stops before judging."""
+    (`m`) and the MU vectors exactly the listed problems, and JV-16 (the fix3 layout) stops before judging. JV-19 (H-03)
+    and JV-20 (H-04) add rule U5 (S7-U2b-R-001 F001): the three records shown in any order answer [], each one left out
+    stops before judging as the screen's."""
     a, b = "2.25.99001", "2.25.99002"
     studies = {a: "INV-VECTOR00000A01", b: "INV-VECTOR00000B02"}
     p_owner, s_owner, w_owner = ["hallym", "sub-p"], ["hallym", "sub-s"], ["hallym", "sub-w"]
@@ -1086,8 +1102,10 @@ def judge_vectors() -> list[dict]:
         return {"requestId": request, "sub": sub, "reached": reached, "status": status if reached else None}
 
     def cp(kind="settled", role="recipient", owner=p_owner, rows=(), lines=(), badge="Pending ACK 1", records=None, net=(),
-           list_items=(), pending=1, session=None, writes=(), receipts=(), events=(), dialog=None, sent_lines=(), sent_rows=()):
+           list_items=(), pending=1, session=None, writes=(), receipts=(), events=(), dialog=None, sent_lines=(), sent_rows=(),
+           shows=None):
         return {"id": "vector", "kind": kind, "role": role, "owner": owner, "studies": studies, "contents": contents,
+                "shows": dict(shows or {}),
                 "screen": {"rows": list(rows), "lines": list(lines), "badge": badge, "dialog": dialog,
                            "sent_lines": list(sent_lines), "sent_rows": list(sent_rows)},
                 "net": list(net), "writes": list(writes),
@@ -1227,6 +1245,39 @@ def judge_vectors() -> list[dict]:
     vectors.append(("JV-17m", cp(rows=[r0_row, shown("Cancelled", b, replacement=True), r2_row], **fix4), ["state-word-mismatch"]))
     vectors.append(("JV-18", cp(rows=[r0_row, shown(f"Acknowledged {minute(t1)}", b, replacement=True), r2_row], **fix4),
                     ["ack-not-on-server"]))
+    # JV-19 (H-03, F001): S's All list of the fix4 layout - r0 acknowledged (a, v1), r1 superseded (b, v1), r2 created (b, v2).
+    # Each row is tied by K4 and judged by table SL; U5 then asks for exactly the three records.
+    def sent_item(record, uid, state, version):
+        return {"id": record, "studyUid": uid, "state": state, "revision": 1 if state == "created" else 2, "createdAt": t0,
+                "view": "sender", "recipient": {"name": "clinician KIN", "role": "clinician"}, "study": {"id": studies[uid]},
+                "source": {"version": version, "action": "approve" if version == 1 else "addendum", "current": True},
+                "delivery": "readable"}
+
+    def sent(uid, version, state):
+        actions = ["Supersede", "Cancel Delivery"] if state == "created" else []
+        cell = "\n".join([STATE_NAME[state], *actions])
+        return {"study": f"INVARIANT vector ({studies[uid]})\n20260929", "recipient": "clinician KIN · Clinician",
+                "source": f"v{version} · {'Approve' if version == 1 else 'Addendum'} · doctor · {minute(t0)}", "state": cell,
+                "words": words(cell, SENT_WORDS), "marks": words(cell, MARK_WORDS), "actions": actions}
+
+    all_sent = [sent_item(r0, a, "acknowledged", 1), sent_item(r1, b, "superseded", 1), sent_item(r2, b, "created", 2)]
+    h03 = dict(role="sender", owner=s_owner, badge=None, records=fix4["records"], net=[listing(5, s_owner, all_sent, 1, view="sent")],
+               list_items=all_sent, shows={"sent_rows": [r0, r1, r2]}, **the_ledger)
+    h03_rows = [sent(a, 1, "acknowledged"), sent(b, 1, "superseded"), sent(b, 2, "created")]
+    vectors.append(("JV-19", cp(sent_rows=h03_rows, **h03), []))
+    for index in range(3):
+        vectors.append((f"JV-19-{index}", cp(sent_rows=h03_rows[:index] + h03_rows[index + 1:], **h03), ["unmatched:screen"]))
+    vectors.append(("JV-19o", cp(sent_rows=[h03_rows[2], h03_rows[0], h03_rows[1]], **h03), []))
+    # the list answer itself without r0 (and so no r0 row): U5 names the server, not the screen
+    vectors.append(("JV-19s", cp(sent_rows=h03_rows[1:], **dict(h03, net=[listing(5, s_owner, all_sent[1:], 1, view="sent")],
+                                                                list_items=all_sent[1:])), ["unmatched:server"]))
+    # JV-20 (H-04, F001): JV-17's P All list with U5 naming r0, r1 and r2.
+    h04_rows = [r0_row, shown("Superseded", b, replacement=True), r2_row]
+    h04 = dict(fix4, shows={"rows": [r0, r1, r2]})
+    vectors.append(("JV-20", cp(rows=h04_rows, **h04), []))
+    for index in range(3):
+        vectors.append((f"JV-20-{index}", cp(rows=h04_rows[:index] + h04_rows[index + 1:], **h04), ["unmatched:screen"]))
+    vectors.append(("JV-20o", cp(rows=[h04_rows[1], h04_rows[2], h04_rows[0]], **h04), []))
     out = []
     for name, value, want in vectors:
         try:
@@ -1988,10 +2039,14 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
         # The page's own read after the step's write or Refresh (an arrival the case caused), never a period.
         self.until(ready, f"{label}: a {view} list read after the last server change and nothing in flight (settled)", page)
 
-    def judge(self, name: str, sess: Session, kind: str, *, role: str, page: Any = None, expected: tuple = ()) -> dict:
+    def judge(self, name: str, sess: Session, kind: str, *, role: str, page: Any = None, expected: tuple = (),
+              shows: dict | None = None) -> dict:
         """One checkpoint: screen, the page's received answers, handler records and server facts into problems(); the result
-        must be exactly `expected` ([] on the main path, the named problem of a violating variant)."""
+        must be exactly `expected` ([] on the main path, the named problem of a violating variant). `shows` names the records
+        a settled All list must show, each exactly once (rule U5)."""
         page = page or sess.page
+        # An in-flight screen may not know a server change yet, so no list of it is asked to show named records.
+        self.harness_ok(not shows or kind == "settled", f"{name}: records named for a {kind} checkpoint")
         if kind == "settled":
             self.settled(sess, page, role)
         screen = self.recipient_screen(page) if role == "recipient" else self.sender_screen(page)
@@ -2000,6 +2055,8 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
         cp = {"id": name, "case": self.case, "kind": kind, "role": role, "page": label, "owner": sess.owner, "screen": screen,
               "net": [dict(entry) for entry in sess.wire.entries if entry["page"] == label], "writes": self.writes(),
               "server": self.facts(), "studies": {fixture.uid: fixture.patient_id for fixture in self.case_studies}}
+        if shows:
+            cp["shows"] = {what: sorted(records) for what, records in shows.items()}
         cp["contents"] = self.contents(cp["server"])
         record = {k: v for k, v in cp.items() if k != "net"}
         record["net"] = [entry["n"] for entry in cp["net"]]
@@ -2391,7 +2448,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                     with self.assertRaises(AssertionError):
                         write("doctor", "2.25.1", "clinician", 1)
                 vectors = judge_vectors()
-                self.log("pure", variant="JV-01..JV-18 (synthetic)", rows=vectors)
+                self.log("pure", variant="JV-01..JV-20 (synthetic)", rows=vectors)
                 self.harness_ok(all(row["got"] == row["want"] for row in vectors),
                                 f"judge vectors: {[row for row in vectors if row['got'] != row['want']]}")
             with self.step("E-04"):
@@ -2683,11 +2740,11 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 self.server_eq((critical_row(b)["state"], critical_row(b)["supersedesId"]), ("created", q), "H-03 B")
                 self.ledger_is(u1s, 2, 3, 2, 3, "H-03")
                 self.ledger_is(u1, 1, 2, 2, 2, "H-03")
-                self.judge("H-03", s, "settled", role="sender")
+                cp_h03 = self.judge("H-03", s, "settled", role="sender", shows={"sent_rows": (r0, q, b)})
             with self.step("H-04"):
                 self.show_all(p, True)
                 self.recv_refresh(p)
-                cp_h04 = self.judge("H-04", p, "settled", role="recipient")
+                cp_h04 = self.judge("H-04", p, "settled", role="recipient", shows={"rows": (r0, q, b)})
                 self.shot(p.page, "P-list-H-04")
                 since = self.n
                 (self.rows(p.page).filter(has_text=u1s.patient_id).filter(has_not_text=m2)
@@ -2793,6 +2850,17 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                     u1s.patient_id, u1.patient_id)
                 jv16["screen"]["rows"].append(dict(jv16["screen"]["rows"][stub_index], words=["Acknowledged"], times=[acked_at]))
                 self.pure("JV-16", jv16, ["unmatched:harness"])
+            with self.step("U5 H-03 / H-04 (F001)"):
+                # The run's own H-03 and H-04 observations: each named row left out in turn is the screen's failure before
+                # any judging, and the same rows in the opposite order are judged [] again.
+                for name, recorded, what in (("H-03", cp_h03, "sent_rows"), ("H-04", cp_h04, "rows")):
+                    for index, record in enumerate(correspond(recorded)[what]):
+                        dropped = copy.deepcopy(recorded)
+                        del dropped["screen"][what][index]
+                        self.pure(f"{name} without {record}", dropped, ["unmatched:screen"])
+                    turned = copy.deepcopy(recorded)
+                    turned["screen"][what].reverse()
+                    self.pure(f"{name} reversed", turned, [])
 
     def test_crs02_revoked_recipient_old_session_cannot_acknowledge_new_session_sees_nothing(self) -> None:
         """CRS-02: V moves to another institution: S sees Recipient Not Eligible, V's old session still reads (L-10) but its ACK
