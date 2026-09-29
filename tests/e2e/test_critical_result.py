@@ -2198,8 +2198,10 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
         self.judge(step + " cleanup", sess, "settled", role="recipient")
 
     def ledger_is(self, fixture: Fixture, records: int, events: int, receipts: int, audits: int, what: str) -> None:
-        self.server_eq(critical_ledger(fixture.uid), {"records": records, "events": events, "receipts": receipts,
-                                                      "audits": audits}, f"{what} ledger of {fixture.patient_id}")
+        ledger = critical_ledger(fixture.uid)
+        self.log("ledger", step=what, study=fixture.patient_id, value=ledger)
+        self.server_eq(ledger, {"records": records, "events": events, "receipts": receipts, "audits": audits},
+                       f"{what} ledger of {fixture.patient_id}")
 
     @contextmanager
     def controlled(self):
@@ -2557,6 +2559,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 window = self.sender_window(s, u1s, clock=True)
                 dialog, _ = self.open_dialog(s, u1s)
                 m1b = self.message()
+                self.log("window", control="W-S", act="write click (E3)", at=self.tick())
                 self.fill_and_send(dialog, "clinician", m1b)
                 first = self.sender_post(s, window)
                 q = window.q
@@ -2690,6 +2693,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 (self.rows(p.page).filter(has_text=u1s.patient_id).filter(has_not_text=m2)
                  .get_by_role("button", name="Open Replacement", exact=True).click())
                 opened = self.answer(p, "#4", since, "H-04 Open Replacement", target=b)
+                self.log("trace", step="H-04", act="Open Replacement on the K2 U1s row", request=opened["n"], record=b)
                 self.server_eq((opened["status"], ((opened["json"] or {}).get("item") or {}).get("view")), (200, "full"), "H-04 #4 B")
                 self.harness_ok(len([e for e in p.wire.entries if e["route"] == "#4" and e["target"] == b and e["n"] > since]) == 1,
                                 "H-04: one #4 of B")
@@ -2707,6 +2711,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 since = self.n
                 pane.get_by_role("button", name="Cancel Delivery", exact=True, disabled=False).click()
                 post = self.answer(s, "#7", since, "C-01 cancel", target=b)
+                self.log("trace", step="C-01", act="cancel of B", request=post["n"], record=b, status=post["status"])
                 body = body_of(post)
                 self.harness_ok(sorted(body) == ["expectedOwner", "reason", "requestId", "revision"]
                                 and (body["revision"], body["reason"]) == (1, reason), "C-01 request")
@@ -2724,6 +2729,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 since = self.n
                 self.rows(p.page).filter(has_text=m2).get_by_role("button", name="Acknowledge", exact=True).click()
                 late = self.answer(p, "#6", since, "C-02 late ACK", target=b)
+                self.log("trace", step="C-02", act="late ACK of B", request=late["n"], record=b, status=late["status"])
                 self.resume(p)
                 self.server_eq((late["status"], (late["json"] or {}).get("code")), (409, "CRITICAL_RESULT_CANCELLED"), "C-02 answer")
                 self.answer(p, "#3", late["n"], "C-02 list after the refusal", view="received")
@@ -2922,6 +2928,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 window = self.sender_window(s, u4, clock=False)
                 dialog, _ = self.open_dialog(s, u4)
                 m4 = self.message()
+                self.log("window", control="W-S", act="write click (E3)", at=self.tick())
                 self.fill_and_send(dialog, "clinician", m4)
                 first = self.sender_post(s, window)
                 r4 = window.q
@@ -2949,6 +2956,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 self.first_list(p)
                 expect(self.rows(p.page).filter(has_text=m4).get_by_role("button", name="Acknowledge", exact=True)).to_be_enabled()
                 window = self.recipient_window(p, r4)
+                self.log("window", control="W-P", act="write click", at=self.tick())
                 self.rows(p.page).filter(has_text=m4).get_by_role("button", name="Acknowledge", exact=True).click()
                 self.until(lambda: [row for row in self.handled if row["control"] == "W-P" and row["act"] == "fetch-abort"],
                            "L-03 h1 forwarded the ACK", p.page)
@@ -2982,6 +2990,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 self.recv_refresh(p)
                 expect(self.rows(p.page).filter(has_text=m4p).get_by_role("button", name="Acknowledge", exact=True)).to_be_enabled()
                 window = self.recipient_window(p, r4p)
+                self.log("window", control="W-P", act="write click", at=self.tick())
                 self.rows(p.page).filter(has_text=m4p).get_by_role("button", name="Acknowledge", exact=True).click()
                 self.until(lambda: len([row for row in self.handled if row["control"] == "W-P" and row["act"] == "fetch-abort"
                                         and row["target"] == r4p]) == 1, "L-05a h1 forwarded the ACK", p.page)
