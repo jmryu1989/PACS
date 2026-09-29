@@ -59,6 +59,7 @@ import sys
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -120,14 +121,62 @@ def me(roles):
             "roles": roles, "institution": INSTITUTION}
 
 
-def page_html(text):
-    html = re.sub(r"<script\b[^>]*>.*?</script>", "", text, flags=re.S)
-    html = re.sub(r'<link rel="stylesheet" href="([^"]+)">',
-                  lambda m: "<style>" + (HPACS / m.group(1)).read_text(encoding="utf-8") + "</style>", html)
-    return re.sub(r"<link\b[^>]*>", "", html)
+class PageSource(HTMLParser):
+    """Use the standard HTML parser; tag case, attribute order and whitespace are not test contracts."""
+
+    def __init__(self, text):
+        super().__init__(convert_charrefs=False)
+        self.source, self.edits, self.scripts = text, [], []
+        self.script = None
+        self.offsets = [0]
+        for line in text.split("\n"):
+            self.offsets.append(self.offsets[-1] + len(line) + 1)
+        self.feed(text)
+        self.close()
+        if self.script is not None:
+            raise AssertionError("main.html has an unclosed script element")
+
+    def _source_offset(self):
+        line, column = self.getpos()
+        return self.offsets[line - 1] + column
+
+    def handle_starttag(self, tag, attrs):
+        start = self._source_offset()
+        end = start + len(self.get_starttag_text())
+        attrs = dict(attrs)
+        if tag == "script":
+            self.script = (start, end, attrs)
+        elif tag == "link":
+            replacement = ""
+            if "stylesheet" in (attrs.get("rel") or "").lower().split() and attrs.get("href"):
+                replacement = "<style>" + lf_text(HPACS / attrs["href"]) + "</style>"
+            self.edits.append((start, end, replacement))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self.script is not None:
+            start, body, attrs = self.script
+            end_tag = self._source_offset()
+            script_type = (attrs.get("type") or "").strip().lower()
+            if "src" not in attrs and script_type in ("", "text/javascript", "application/javascript"):
+                self.scripts.append(self.source[body:end_tag])
+            self.edits.append((start, self.source.index(">", end_tag) + 1, ""))
+            self.script = None
+
+    def markup(self):
+        chunks, at = [], 0
+        for start, end, replacement in sorted(self.edits):
+            chunks.extend((self.source[at:start], replacement))
+            at = end
+        chunks.append(self.source[at:])
+        return "".join(chunks)
 
 
-PAGE_SCRIPT = "\n".join(re.findall(r"<script>(.*?)</script>", MAIN, flags=re.S))
+PAGE_SOURCE = PageSource(MAIN)
+PAGE_SCRIPT = "\n".join(PAGE_SOURCE.scripts)
+
 
 # Astra S7-U3b-E-R-001 F01 (D73): which statements are the S7-U4b block is the TypeScript parser's answer, not a comment
 # line or a layout of main.html. BLOCK_TS runs in node with the typescript that api/package-lock.json installs (npm ci
@@ -370,7 +419,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.block = page_block(PAGE_SCRIPT)
-        cls.markup = page_html(MAIN)
+        cls.markup = PAGE_SOURCE.markup()
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
 
@@ -667,12 +716,13 @@ class ClinicalContextDOMTest(unittest.TestCase):
     def test_cd01_counts_follow_the_items_and_truncated_adds_a_plus(self):
         self.open_reader()
         self.show(A, vector="A-ONE")
-        titles = [s["text"].split("\n")[0] for s in self.panel()["sections"]]
-        self.assertEqual(titles, [TITLES[n] + " (1)" for n in SECTIONS])
+        for name in SECTIONS:
+            group = self.page.get_by_role("group", name=TITLES[name])
+            expect(group.get_by_text(TITLES[name] + " (1)", exact=True)).to_be_visible()
         self.show(A, vector="A-TRUNC")
-        s = self.sections()
-        self.assertTrue(s["priorReports"]["text"].startswith(TITLES["priorReports"] + " (10+)"))
-        self.assertTrue(s["history"]["text"].startswith(TITLES["history"] + " (200+)"))
+        for name, count in (("priorReports", "10+"), ("history", "200+")):
+            group = self.page.get_by_role("group", name=TITLES[name])
+            expect(group.get_by_text(f"{TITLES[name]} ({count})", exact=True)).to_be_visible()
         self.assertEqual(len(self.page.get_by_role("group", name=TITLES["history"]).get_by_role("listitem").all()), 200)
         # counterexample input: the same answer with its section keys in another order paints the same
         reordered = copy.deepcopy(VALID["A-MIXED"])
@@ -1198,19 +1248,51 @@ class ClinicalContextDOMTest(unittest.TestCase):
     # ── cd10 ──
     def test_cd10_markup_in_values_stays_text(self):
         self.open_reader()
-        self.show(A, vector="A-XSS-PLAIN")
-        plain = self.page.evaluate("() => [...document.querySelectorAll('#clinical-context-sections *')].map(e => e.tagName).join(',')")
-        self.show(A, vector="A-XSS")
-        risky = self.page.evaluate("() => [...document.querySelectorAll('#clinical-context-sections *')].map(e => e.tagName).join(',')")
-        self.assertEqual(risky, plain, "the same elements for the same shape")
-        panel = self.panel()
-        for text in ("<img src=x onerror=window.synXss=1>", "<script>window.synXss=2</script>", "<svg onload=window.synXss=4>",
-                     "<img src=x onerror=window.synXss=6>", "<img src=x onerror=window.synXss=7>"):
-            self.assertIn(text, panel["all"])
-        self.page.locator("#clinical-context-sections details").first.evaluate("d => { d.open = true; }")
-        self.frames()
-        self.assertIsNone(self.page.evaluate("() => window.synXss ?? null"))
-        self.assertEqual(self.page.locator("#clinical-context img, #clinical-context script, #clinical-context svg").count(), 0)
+        requests, expected_requests = [], []
+        self.page.on("request", lambda request: requests.append((request.method, request.url)))
+
+        def safe():
+            self.assertIsNone(self.page.evaluate("() => window.synXss ?? null"), "no value executed")
+            self.assertEqual(requests, expected_requests, "displaying values sends no extra request")
+            self.assertEqual(self.unexpected, [], "unexpected requests")
+            self.assertEqual(self.dialogs, [], "browser dialogs")
+            self.assertEqual(self.errors, [], "page errors")
+
+        for vector in ("A-XSS-PLAIN", "A-XSS"):
+            with self.subTest(vector=vector):
+                answer = VALID[vector]
+                sections = answer["sections"]
+                prior = sections["priorReports"]["items"][0]
+                history = sections["history"]["items"][0]
+                tag = sections["requestTags"]["items"][0]
+                note = sections["techNote"]["items"][0]
+                visible = {
+                    "priorReports": [prior["study"]["description"], prior["provenance"]["author"]],
+                    "history": [history["study"]["description"], history["study"]["accession"], history["institutionName"]],
+                    "requestTags": [tag["value"]],
+                    "techNote": [note["provenance"]["author"]],
+                }
+                self.show(A, vector=vector)
+                expected_requests.append(("GET", ORIGIN + "/api/studies/" + A + "/clinical-context"))
+                shown = self.sections()
+                for name, values in visible.items():
+                    for value in values:
+                        self.assertIn(value, shown[name]["text"], (vector, name, value))
+                report_texts = [prior["report"][name] for name in ("findings", "conclusion", "recommendation")]
+                for value in report_texts:
+                    self.assertIn(value, shown["priorReports"]["all"])
+                    self.assertNotIn(value, shown["priorReports"]["text"], "report text starts folded")
+                title = fill(TEXTS["access"][answer["anchor"]["access"]]["title"],
+                             institutionName=answer["anchor"]["institutionName"])
+                for name in SECTIONS:
+                    self.assertIn(title, [t[1] for t in shown[name]["titled"]], name)
+                safe()
+                reports = self.page.get_by_role("group", name=TITLES["priorReports"])
+                reports.locator("details").first.locator("summary").click()
+                self.frames()
+                for value in report_texts:
+                    self.assertIn(value, reports.inner_text(), (vector, value))
+                safe()
 
     # ── cd11 ──
     def test_cd11_whole_answer_failures_retry_and_one_read_at_a_time(self):
@@ -1376,7 +1458,9 @@ class ClinicalContextDOMTest(unittest.TestCase):
         def screen():
             return self.page.evaluate("""() => {
               const q = s => document.querySelector(s), shown = e => !!e && e.getClientRects().length > 0;
-              return { clinical: q('#clinical').innerHTML,
+              const clinical = q('#clinical');
+              return { clinical: { shown: shown(clinical), text: clinical.innerText,
+                                   titles: [...clinical.querySelectorAll('[title]')].map(e => [e.innerText, e.title]) },
                        controls: ['#study-receipt', '#study-identity', '#copy-patient-id', '#sr-open', '#tech-note-open']
                          .map(s => [s, shown(q(s)), !!q(s).disabled]) };
             }""")
@@ -1419,10 +1503,11 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.open_reader()
         self.show(A, vector="A-TRUNC")
         box = self.page.evaluate("""() => {
-          const panel = document.querySelector('#clinical-context'), column = panel.parentElement, clinical = document.querySelector('#clinical');
+          const panel = document.querySelector('#clinical-context'), column = document.querySelector('.s-clinical'),
+            clinical = document.querySelector('#clinical');
           return { panel: panel.getBoundingClientRect().height, column: column.getBoundingClientRect().height,
                    clinical: clinical.getBoundingClientRect().height, scroll: panel.scrollWidth, width: panel.clientWidth,
-                   inColumn: column.classList.contains('s-clinical') };
+                   inColumn: column.contains(panel) && !clinical.contains(panel) };
         }""")
         self.assertTrue(box["inColumn"])
         self.assertLessEqual(box["panel"], box["column"] * 0.45 + 0.5, box)
@@ -1457,8 +1542,15 @@ class ClinicalContextDOMTest(unittest.TestCase):
             self.assertEqual(call["headers"].get("x-kin-csrf"), "1")
         for entry in self.stub.log:
             self.assertEqual((entry["query"], entry["body"]), ("", None))
-        # the same study again: no request, no repaint
-        before = self.page.evaluate("() => window.synSeen.length")
+        # The same study and an unchanged observation keep the displayed state and send no request.
+        # Observe states, not mutation counts: inert attributes and equivalent markup may change.
+        before = self.panel()
+        self.page.evaluate("""() => {
+          window.synUnchangedStates = [];
+          window.synUnchangedObserver = new MutationObserver(() => window.synUnchangedStates.push(window.synPanel()));
+          window.synUnchangedObserver.observe(document.querySelector('#clinical-context'),
+            { subtree: true, childList: true, characterData: true, attributes: true });
+        }""")
         for _ in range(3):
             self.js("synRender")
         # a later list whose rows say what C's answer says (its own row and its one member)
@@ -1469,7 +1561,13 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.page.clock.run_for(10 * 60 * 1000)
         self.frames()
         self.assertEqual(len(self.calls()), 3)
-        self.assertEqual(self.page.evaluate("() => window.synSeen.length"), before)
+        self.assertEqual(self.panel(), before)
+        observed = self.page.evaluate("""() => {
+          window.synUnchangedObserver.disconnect();
+          return window.synUnchangedStates;
+        }""")
+        for state in observed:
+            self.assertEqual(state, before, "no intermediate displayed state change")
         self.assertEqual({p for p in self.paths() if not p.endswith("/clinical-context")}, {"GET /api/me"})
         # the pair: a change of the viewed study asks once
         self.answer(A, vector="A-MARK-3")
