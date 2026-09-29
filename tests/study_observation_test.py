@@ -530,6 +530,16 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S7-U3b Routing Factors legend in the worklist pane (the Hospital column and its cell are COLS/CELL entries, not anchors);
+# setMode() hides it in Technician through its one $('#...') lookup. tests/multi_institution_worklist_dom_test.py pins how
+# it behaves.
+for _kind, _extra in {
+    "ids": {"routing-factors": 1},
+    "functions": {},
+    "selectors": {"#routing-factors": 1},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 # Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {

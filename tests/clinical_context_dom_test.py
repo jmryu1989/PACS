@@ -7,8 +7,11 @@ eight stylesheets inlined where they are linked) come from a synthetic origin; t
 identity comes from an in-test /api/me), study-arrivals.js and clinical-context.js are loaded byte for byte; the page's
 own api(), cur(), relatedStudy(), viewed(), viewingUid(), renderClinical() and applyObservation() are handed out by the
 browser's parser and run as shipped (every other page name they touch resolves to an inert stand-in, the technique of
-tests/critical_result_sender_dom_test.py); and the S7-U4b block is cut out of main.html from its own header line to its own
-closing catch line and run as is. An in-test server answers GET /api/studies/{uid}/clinical-context from
+tests/critical_result_sender_dom_test.py); and the S7-U4b block - the page's mountClinicalContext declaration, the one
+statement that mounts it and the declaration of the name that statement assigns - is found by the TypeScript parser (BLOCK_TS)
+and run as is, so no comment, blank or line break of main.html decides what runs (Astra S7-U3b-E-R-001 F01, D73). That needs
+node on PATH and api/node_modules/typescript (npm ci --prefix api --ignore-scripts); without them the cases fail, never skip.
+An in-test server answers GET /api/studies/{uid}/clinical-context from
 tests/clinical_context_vectors.json, whose valid answers the compiled server shape check accepts
 (tests/clinical_context_model_test.cjs cm01), so no answer here is one the server could not send.
 
@@ -50,10 +53,13 @@ Synthetic data only (SYN-* names, 1.2.826.0.1.3680043.10.* UIDs): no stack, no n
 import copy
 import json
 import re
+import shutil
+import subprocess
 import sys
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -115,28 +121,156 @@ def me(roles):
             "roles": roles, "institution": INSTITUTION}
 
 
-def page_html(text):
-    html = re.sub(r"<script\b[^>]*>.*?</script>", "", text, flags=re.S)
-    html = re.sub(r'<link rel="stylesheet" href="([^"]+)">',
-                  lambda m: "<style>" + (HPACS / m.group(1)).read_text(encoding="utf-8") + "</style>", html)
-    return re.sub(r"<link\b[^>]*>", "", html)
+class PageSource(HTMLParser):
+    """Use the standard HTML parser; tag case, attribute order and whitespace are not test contracts."""
+
+    def __init__(self, text):
+        super().__init__(convert_charrefs=False)
+        self.source, self.edits, self.scripts = text, [], []
+        self.script = None
+        self.offsets = [0]
+        for line in text.split("\n"):
+            self.offsets.append(self.offsets[-1] + len(line) + 1)
+        self.feed(text)
+        self.close()
+        if self.script is not None:
+            raise AssertionError("main.html has an unclosed script element")
+
+    def _source_offset(self):
+        line, column = self.getpos()
+        return self.offsets[line - 1] + column
+
+    def handle_starttag(self, tag, attrs):
+        start = self._source_offset()
+        end = start + len(self.get_starttag_text())
+        attrs = dict(attrs)
+        if tag == "script":
+            self.script = (start, end, attrs)
+        elif tag == "link":
+            replacement = ""
+            if "stylesheet" in (attrs.get("rel") or "").lower().split() and attrs.get("href"):
+                replacement = "<style>" + lf_text(HPACS / attrs["href"]) + "</style>"
+            self.edits.append((start, end, replacement))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self.script is not None:
+            start, body, attrs = self.script
+            end_tag = self._source_offset()
+            script_type = (attrs.get("type") or "").strip().lower()
+            if "src" not in attrs and script_type in ("", "text/javascript", "application/javascript"):
+                self.scripts.append(self.source[body:end_tag])
+            self.edits.append((start, self.source.index(">", end_tag) + 1, ""))
+            self.script = None
+
+    def markup(self):
+        chunks, at = [], 0
+        for start, end, replacement in sorted(self.edits):
+            chunks.extend((self.source[at:start], replacement))
+            at = end
+        chunks.append(self.source[at:])
+        return "".join(chunks)
 
 
-HEADER = "    // ── 임상 정보 패널(S7-U4b) ──\n"
+PAGE_SOURCE = PageSource(MAIN)
+PAGE_SCRIPT = "\n".join(PAGE_SOURCE.scripts)
 
 
-def cut_block(text):
-    """The S7-U4b block from its own header line to its own closing line - the first top-level catch after the header.
-    A missing or doubled header fails the case; no neighbouring unit's marker is used, so a block added later does not move
-    the cut."""
-    if text.count(HEADER) != 1:
-        raise AssertionError(f"the S7-U4b block header occurs {text.count(HEADER)} times in main.html")
-    first = text.index(HEADER)
-    end = text.index("\n    } catch (_) {", first) + 1
-    return text[first:text.index("\n", end) + 1]
+# Astra S7-U3b-E-R-001 F01 (D73): which statements are the S7-U4b block is the TypeScript parser's answer, not a comment
+# line or a layout of main.html. BLOCK_TS runs in node with the typescript that api/package-lock.json installs (npm ci
+# --prefix api --ignore-scripts; validate.yml runs it earlier in the same job) over the page script as the page functions
+# are taken from it, and answers the block's top-level statements, each from its first token to its end:
+#   declaration - the one top-level function declaration of the name;
+#   mount       - the one top-level statement that uses it, which must call it (another use is refused, not guessed);
+#   result      - the one top-level variable statement declaring the name the mount assigns the call's result to.
+# Offsets are in code points of the text sent. Comments and line breaks between or around them are not read.
+BLOCK_TS = r"""'use strict';
+const ts = require(require.resolve('typescript', { paths: [process.argv[1]] }));
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', () => {
+  const { text, name } = JSON.parse(input);
+  const file = '/page/main.js';
+  const options = { allowJs: true, checkJs: false, noEmit: true, noLib: true, noResolve: true, types: [],
+                    target: ts.ScriptTarget.ESNext };
+  const host = ts.createCompilerHost(options, true);
+  let parsed = null;
+  host.getSourceFile = (fileName, version) => (fileName === file
+    ? (parsed = parsed || ts.createSourceFile(file, text, version, true, ts.ScriptKind.JS)) : undefined);
+  host.fileExists = fileName => fileName === file;
+  host.readFile = fileName => (fileName === file ? text : undefined);
+  const checker = ts.createProgram([file], options, host).getTypeChecker();
+  const sf = parsed;
+  const out = { typescript: ts.version, refused: [], statements: [],
+                parse_errors: sf.parseDiagnostics.map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n')) };
+  const top = node => { while (node && node.parent !== sf) node = node.parent; return node || null; };
+  const points = at => [...text.slice(0, at)].length;
+  const found = [];
+  const take = (kind, statement) => { if (!found.some(f => f.node === statement)) found.push({ kind, node: statement }); };
+  const declared = sf.statements.filter(s => ts.isFunctionDeclaration(s) && s.name && s.name.text === name);
+  if (declared.length !== 1) out.refused.push(`${declared.length} top-level function declarations named ${name}`);
+  else {
+    const fn = declared[0], symbol = checker.getSymbolAtLocation(fn.name);
+    take('declaration', fn);
+    const uses = [];
+    const visit = node => {
+      if (ts.isIdentifier(node) && node !== fn.name && node.text === name && checker.getSymbolAtLocation(node) === symbol) uses.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    if (uses.length !== 1) out.refused.push(`${name} is used ${uses.length} times, not once by one mount`);
+    else if (!(ts.isCallExpression(uses[0].parent) && uses[0].parent.expression === uses[0])) out.refused.push(`${name} is used other than called`);
+    else {
+      const call = uses[0].parent, mount = top(call);
+      take('mount', mount);
+      const assigned = call.parent;
+      if (ts.isBinaryExpression(assigned) && assigned.operatorToken.kind === ts.SyntaxKind.EqualsToken && assigned.right === call
+          && ts.isIdentifier(assigned.left)) {
+        const target = checker.getSymbolAtLocation(assigned.left);
+        const statements = ((target && target.declarations) || []).map(top);
+        if (statements.length !== 1 || !statements[0] || !ts.isVariableStatement(statements[0]))
+          out.refused.push(`${assigned.left.text} is not declared by one top-level variable statement`);
+        else take('result', statements[0]);
+      }
+    }
+  }
+  found.sort((a, b) => a.node.getStart(sf) - b.node.getStart(sf));
+  for (const { kind, node } of found) {
+    const at = node.getStart(sf), end = node.getEnd();
+    out.statements.push({ kind, at: points(at), end: points(end), text: text.slice(at, end) });
+  }
+  process.stdout.write(JSON.stringify(out));
+});
+"""
 
 
-PAGE_SCRIPT = "\n".join(re.findall(r"<script>(.*?)</script>", MAIN, flags=re.S))
+def page_block(script, name="mountClinicalContext"):
+    """The S7-U4b block as BLOCK_TS finds it in `script`: its statements as shipped, in page order. Fails, never skips,
+    when node or typescript is not there, the page script does not parse, or the block is not one declaration, one mount
+    and (when the mount assigns) one declared result."""
+    node = shutil.which("node")
+    if node is None:
+        raise AssertionError("node is not on PATH: the S7-U4b block is TypeScript's answer (npm ci --prefix api --ignore-scripts)")
+    run = subprocess.run([node, "-e", BLOCK_TS, str(ROOT / "api")], input=json.dumps({"text": script, "name": name}).encode("utf-8"),
+                         capture_output=True, timeout=120)
+    if run.returncode != 0:
+        raise AssertionError("BLOCK_TS failed (typescript: npm ci --prefix api --ignore-scripts): "
+                             + run.stderr.decode("utf-8", "replace")[-2000:])
+    found = json.loads(run.stdout.decode("utf-8"))
+    if found["parse_errors"] or found["refused"]:
+        raise AssertionError(f"the S7-U4b block in main.html (TypeScript {found['typescript']}): "
+                             + json.dumps({k: found[k] for k in ("parse_errors", "refused")}, ensure_ascii=False))
+    kinds = [statement["kind"] for statement in found["statements"]]
+    if sorted(kinds) not in (["declaration", "mount"], ["declaration", "mount", "result"]):
+        raise AssertionError(f"the S7-U4b block's statements: {kinds}")
+    for statement in found["statements"]:
+        if script[statement["at"]:statement["end"]] != statement["text"]:
+            raise AssertionError(f"the {statement['kind']} TypeScript found is not the page's text at {statement['at']}")
+    return "\n".join(statement["text"] for statement in found["statements"]) + "\n"
+
 
 # Records every fetch the page makes (order, target, headers, signal). With window.synHold set, a clinical-context call
 # never reaches the network: its AbortSignal is ignored and the case ends it with synFinish (a Response the shipped api()
@@ -284,8 +418,8 @@ class Stub:
 class ClinicalContextDOMTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.block = cut_block(MAIN)
-        cls.markup = page_html(MAIN)
+        cls.block = page_block(PAGE_SCRIPT)
+        cls.markup = PAGE_SOURCE.markup()
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
 
@@ -582,12 +716,13 @@ class ClinicalContextDOMTest(unittest.TestCase):
     def test_cd01_counts_follow_the_items_and_truncated_adds_a_plus(self):
         self.open_reader()
         self.show(A, vector="A-ONE")
-        titles = [s["text"].split("\n")[0] for s in self.panel()["sections"]]
-        self.assertEqual(titles, [TITLES[n] + " (1)" for n in SECTIONS])
+        for name in SECTIONS:
+            group = self.page.get_by_role("group", name=TITLES[name])
+            expect(group.get_by_text(TITLES[name] + " (1)", exact=True)).to_be_visible()
         self.show(A, vector="A-TRUNC")
-        s = self.sections()
-        self.assertTrue(s["priorReports"]["text"].startswith(TITLES["priorReports"] + " (10+)"))
-        self.assertTrue(s["history"]["text"].startswith(TITLES["history"] + " (200+)"))
+        for name, count in (("priorReports", "10+"), ("history", "200+")):
+            group = self.page.get_by_role("group", name=TITLES[name])
+            expect(group.get_by_text(f"{TITLES[name]} ({count})", exact=True)).to_be_visible()
         self.assertEqual(len(self.page.get_by_role("group", name=TITLES["history"]).get_by_role("listitem").all()), 200)
         # counterexample input: the same answer with its section keys in another order paints the same
         reordered = copy.deepcopy(VALID["A-MIXED"])
@@ -1113,19 +1248,51 @@ class ClinicalContextDOMTest(unittest.TestCase):
     # ── cd10 ──
     def test_cd10_markup_in_values_stays_text(self):
         self.open_reader()
-        self.show(A, vector="A-XSS-PLAIN")
-        plain = self.page.evaluate("() => [...document.querySelectorAll('#clinical-context-sections *')].map(e => e.tagName).join(',')")
-        self.show(A, vector="A-XSS")
-        risky = self.page.evaluate("() => [...document.querySelectorAll('#clinical-context-sections *')].map(e => e.tagName).join(',')")
-        self.assertEqual(risky, plain, "the same elements for the same shape")
-        panel = self.panel()
-        for text in ("<img src=x onerror=window.synXss=1>", "<script>window.synXss=2</script>", "<svg onload=window.synXss=4>",
-                     "<img src=x onerror=window.synXss=6>", "<img src=x onerror=window.synXss=7>"):
-            self.assertIn(text, panel["all"])
-        self.page.locator("#clinical-context-sections details").first.evaluate("d => { d.open = true; }")
-        self.frames()
-        self.assertIsNone(self.page.evaluate("() => window.synXss ?? null"))
-        self.assertEqual(self.page.locator("#clinical-context img, #clinical-context script, #clinical-context svg").count(), 0)
+        requests, expected_requests = [], []
+        self.page.on("request", lambda request: requests.append((request.method, request.url)))
+
+        def safe():
+            self.assertIsNone(self.page.evaluate("() => window.synXss ?? null"), "no value executed")
+            self.assertEqual(requests, expected_requests, "displaying values sends no extra request")
+            self.assertEqual(self.unexpected, [], "unexpected requests")
+            self.assertEqual(self.dialogs, [], "browser dialogs")
+            self.assertEqual(self.errors, [], "page errors")
+
+        for vector in ("A-XSS-PLAIN", "A-XSS"):
+            with self.subTest(vector=vector):
+                answer = VALID[vector]
+                sections = answer["sections"]
+                prior = sections["priorReports"]["items"][0]
+                history = sections["history"]["items"][0]
+                tag = sections["requestTags"]["items"][0]
+                note = sections["techNote"]["items"][0]
+                visible = {
+                    "priorReports": [prior["study"]["description"], prior["provenance"]["author"]],
+                    "history": [history["study"]["description"], history["study"]["accession"], history["institutionName"]],
+                    "requestTags": [tag["value"]],
+                    "techNote": [note["provenance"]["author"]],
+                }
+                self.show(A, vector=vector)
+                expected_requests.append(("GET", ORIGIN + "/api/studies/" + A + "/clinical-context"))
+                shown = self.sections()
+                for name, values in visible.items():
+                    for value in values:
+                        self.assertIn(value, shown[name]["text"], (vector, name, value))
+                report_texts = [prior["report"][name] for name in ("findings", "conclusion", "recommendation")]
+                for value in report_texts:
+                    self.assertIn(value, shown["priorReports"]["all"])
+                    self.assertNotIn(value, shown["priorReports"]["text"], "report text starts folded")
+                title = fill(TEXTS["access"][answer["anchor"]["access"]]["title"],
+                             institutionName=answer["anchor"]["institutionName"])
+                for name in SECTIONS:
+                    self.assertIn(title, [t[1] for t in shown[name]["titled"]], name)
+                safe()
+                reports = self.page.get_by_role("group", name=TITLES["priorReports"])
+                reports.locator("details").first.locator("summary").click()
+                self.frames()
+                for value in report_texts:
+                    self.assertIn(value, reports.inner_text(), (vector, value))
+                safe()
 
     # ── cd11 ──
     def test_cd11_whole_answer_failures_retry_and_one_read_at_a_time(self):
@@ -1291,7 +1458,9 @@ class ClinicalContextDOMTest(unittest.TestCase):
         def screen():
             return self.page.evaluate("""() => {
               const q = s => document.querySelector(s), shown = e => !!e && e.getClientRects().length > 0;
-              return { clinical: q('#clinical').innerHTML,
+              const clinical = q('#clinical');
+              return { clinical: { shown: shown(clinical), text: clinical.innerText,
+                                   titles: [...clinical.querySelectorAll('[title]')].map(e => [e.innerText, e.title]) },
                        controls: ['#study-receipt', '#study-identity', '#copy-patient-id', '#sr-open', '#tech-note-open']
                          .map(s => [s, shown(q(s)), !!q(s).disabled]) };
             }""")
@@ -1334,10 +1503,11 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.open_reader()
         self.show(A, vector="A-TRUNC")
         box = self.page.evaluate("""() => {
-          const panel = document.querySelector('#clinical-context'), column = panel.parentElement, clinical = document.querySelector('#clinical');
+          const panel = document.querySelector('#clinical-context'), column = document.querySelector('.s-clinical'),
+            clinical = document.querySelector('#clinical');
           return { panel: panel.getBoundingClientRect().height, column: column.getBoundingClientRect().height,
                    clinical: clinical.getBoundingClientRect().height, scroll: panel.scrollWidth, width: panel.clientWidth,
-                   inColumn: column.classList.contains('s-clinical') };
+                   inColumn: column.contains(panel) && !clinical.contains(panel) };
         }""")
         self.assertTrue(box["inColumn"])
         self.assertLessEqual(box["panel"], box["column"] * 0.45 + 0.5, box)
@@ -1372,8 +1542,15 @@ class ClinicalContextDOMTest(unittest.TestCase):
             self.assertEqual(call["headers"].get("x-kin-csrf"), "1")
         for entry in self.stub.log:
             self.assertEqual((entry["query"], entry["body"]), ("", None))
-        # the same study again: no request, no repaint
-        before = self.page.evaluate("() => window.synSeen.length")
+        # The same study and an unchanged observation keep the displayed state and send no request.
+        # Observe states, not mutation counts: inert attributes and equivalent markup may change.
+        before = self.panel()
+        self.page.evaluate("""() => {
+          window.synUnchangedStates = [];
+          window.synUnchangedObserver = new MutationObserver(() => window.synUnchangedStates.push(window.synPanel()));
+          window.synUnchangedObserver.observe(document.querySelector('#clinical-context'),
+            { subtree: true, childList: true, characterData: true, attributes: true });
+        }""")
         for _ in range(3):
             self.js("synRender")
         # a later list whose rows say what C's answer says (its own row and its one member)
@@ -1384,7 +1561,13 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.page.clock.run_for(10 * 60 * 1000)
         self.frames()
         self.assertEqual(len(self.calls()), 3)
-        self.assertEqual(self.page.evaluate("() => window.synSeen.length"), before)
+        self.assertEqual(self.panel(), before)
+        observed = self.page.evaluate("""() => {
+          window.synUnchangedObserver.disconnect();
+          return window.synUnchangedStates;
+        }""")
+        for state in observed:
+            self.assertEqual(state, before, "no intermediate displayed state change")
         self.assertEqual({p for p in self.paths() if not p.endswith("/clinical-context")}, {"GET /api/me"})
         # the pair: a change of the viewed study asks once
         self.answer(A, vector="A-MARK-3")

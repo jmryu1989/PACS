@@ -1,5 +1,7 @@
 """Delete only this synthetic run's new workspace rows with full-row equality guards."""
 import json,subprocess,uuid
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
 def cleanup_workspace(stack, table='WorkspaceLayout'):
     if table not in ('WorkspaceLayout', 'WorklistColumns', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference'):raise ValueError('Unsupported preference table')
     subjects=list(stack.user_ids.values())
@@ -7,7 +9,7 @@ def cleanup_workspace(stack, table='WorkspaceLayout'):
         if str(uuid.UUID(sub))!=sub:raise RuntimeError('Invalid synthetic subject')
     if not subjects:return
     where=','.join("'"+s+"'" for s in subjects)
-    def sql(query):return subprocess.check_output(['docker','exec','kin-db','psql','-XqAt','-v','ON_ERROR_STOP=1','-U','kin','-d','kin','-c',query]).decode().strip()
+    def sql(query):return subprocess.check_output(['docker','compose','exec','-T','db','psql','-XqAt','-v','ON_ERROR_STOP=1','-U','kin','-d','kin','-c',query],cwd=ROOT).decode().strip()
     rows=sql('SELECT to_jsonb(t)::text FROM "'+table+'" t WHERE subject IN ('+where+')').splitlines()
     for raw in rows:
         row=json.loads(raw)

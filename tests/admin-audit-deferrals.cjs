@@ -10,16 +10,47 @@ const sourceFingerprint = sources => fingerprint(sources.map(source =>
 const unresolvedFingerprint = entries => fingerprint(entries.map(entry =>
   [...position(entry), entry.rule, entry.reason]));
 
+// Rebuild the reviewed predecessor without Git, network access or a writable checkout.
+// Its whole-corpus hash authenticates every restored byte, including unchanged files.
+function repinSources(sources, policy) {
+  const repin = policy.repin;
+  assert.equal(repin.ruling, 'S7-U3a-AUDIT-SPEC-F-R-001', 'repin authority');
+  assert.equal(repin.source_sha, policy.baseline_source_sha, 'repin baseline');
+  assert.ok(/^[0-9a-f]{40}$/.test(repin.source_sha), 'invalid baseline SHA');
+  assert.equal(repin.typescript, policy.typescript, 'repin compiler changed');
+  assert.equal(fingerprint(policy.context), repin.context_sha256, 'repin compiler inputs changed');
+  assert.equal(fingerprint(policy.entries), repin.entries_sha256, 'repin entries changed');
+  assert.equal(policy.unresolved_sha256, repin.unresolved_sha256, 'repin inventory pin changed');
+  assert.ok(Array.isArray(repin.before) && repin.before.length > 0, 'empty repin');
+  const previous = new Map(sources.map(source => [source.file, source]));
+  assert.equal(previous.size, sources.length, 'duplicate source');
+  const seen = new Set(), deferredFiles = new Set(policy.entries.map(pin => pin[0]));
+  for (const source of repin.before) {
+    assert.ok(source && typeof source.file === 'string' && typeof source.text === 'string', 'invalid prior source');
+    assert.ok(previous.has(source.file) && !seen.has(source.file), 'missing or duplicate prior source');
+    assert.ok(!deferredFiles.has(source.file), 'cannot repin a deferral-bearing file');
+    assert.notEqual(source.text.replace(/\r\n/g, '\n'),
+      previous.get(source.file).text.replace(/\r\n/g, '\n'), 'unchanged repin source');
+    seen.add(source.file);
+    previous.set(source.file, source);
+  }
+  const restored = [...previous.values()].map(source =>
+    ({ file: source.file, text: source.text.replace(/\r\n/g, '\n') }))
+    .sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
+  assert.equal(sourceFingerprint(restored), repin.sources_sha256, 'previous source corpus changed');
+  return restored;
+}
+
 /**
  * D-NW is a temporary disposition, never a W1-W6 proof. The caller must supply
  * reviewed policy explicitly. No policy means the ordinary fail-closed verdict.
  * Validate the whole input before deferring anything; leave the raw scan intact.
  */
-function nonWriteDeferrals(scan, sources, policy, context) {
+function nonWriteDeferrals(scan, sources, policy, context, scanPrevious) {
   const unchanged = () => ({ unresolved: [...scan.unresolved], deferred: [], errors: [] });
   if (policy === null || policy === undefined) return unchanged();
   try {
-    assert.equal(policy.schema_version, 1, 'policy version');
+    assert.equal(policy.schema_version, 2, 'policy version');
     assert.equal(policy.ruling, 'S7-U3a-AUDIT-SPEC-D-R-001', 'policy authority');
     assert.ok(typeof policy.owner === 'string' && policy.owner.length, 'policy owner');
     assert.ok(typeof policy.follow_up === 'string' && policy.follow_up.length, 'product follow-up');
@@ -33,6 +64,17 @@ function nonWriteDeferrals(scan, sources, policy, context) {
     assert.deepEqual(scan.unresolved, raw.map(message), 'raw inventory differs from verdict');
     assert.equal(unresolvedFingerprint(raw), policy.unresolved_sha256, 'unresolved inventory changed');
     assert.ok(Array.isArray(policy.entries) && policy.entries.length > 0, 'empty policy');
+    const previousSources = repinSources(sources, policy);
+    assert.equal(typeof scanPrevious, 'function', 'previous scan is required');
+    const previous = scanPrevious(previousSources);
+    assert.equal(previous.typescript, scan.typescript, 'previous compiler changed');
+    assert.deepEqual([...previous.files].sort(), previousSources.map(source => source.file).sort(),
+      'previous scan/source set differs');
+    const previousRaw = previous.candidates.filter(entry => entry.status === 'unresolved');
+    assert.deepEqual(previous.unresolved, previousRaw.map(message), 'previous raw inventory differs from verdict');
+    assert.equal(unresolvedFingerprint(previousRaw), policy.repin.unresolved_sha256, 'previous inventory changed');
+    assert.deepEqual(raw.map(entry => [...position(entry), entry.rule, entry.reason]),
+      previousRaw.map(entry => [...position(entry), entry.rule, entry.reason]), 'repin inventory differs');
     const selected = new Set(), keys = new Set();
     for (const pin of policy.entries) {
       assert.ok(Array.isArray(pin) && pin.length === 4, 'invalid position pin');
@@ -65,4 +107,4 @@ function nonWriteDeferrals(scan, sources, policy, context) {
   }
 }
 
-module.exports = { nonWriteDeferrals, sourceFingerprint, unresolvedFingerprint };
+module.exports = { nonWriteDeferrals, sourceFingerprint, unresolvedFingerprint, repinSources };
