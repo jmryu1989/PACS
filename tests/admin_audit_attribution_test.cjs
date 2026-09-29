@@ -29,10 +29,13 @@
  * not W1-W6 proof. The raw inventory and diagnoses remain unchanged, with 32 resolved writers. The verdict uses
  * blocking unresolved: raw unresolved without a valid disposition, plus disposition errors; any such entry fails.
  * Byte identity (after CRLF-to-LF normalization) of the reviewed source corpus and compiler inputs, the compiler
- * version, and the exact positions and diagnoses are the boundary of this temporary ruling, so these pins test
- * that required identity (AGENTS 1-B.14), not a preferred implementation spelling. An omitted or changed pin or
- * input rejects the whole disposition. No automatic repinning: changes require a separately reviewed disposition
- * or removal of the deferrals through S7-U3a-RAW-PROVENANCE; other fixtures and counterexamples gain no exemption.
+ * version, and the exact positions and diagnoses are the boundary of this temporary ruling (AGENTS 1-B.14).
+ * SPEC-F permits a reviewed whole-corpus repin only for non-deferral files: the policy carries their prior text,
+ * reconstructs the hash-pinned predecessor and scans it with the same compiler. Its complete unresolved inventory,
+ * positions, diagnoses, entries and compiler inputs must equal the current ones. Deferral-bearing files stay
+ * byte-identical. A new corpus hash alone is insufficient; missing proof rejects the whole disposition.
+ * No automatic repinning: every policy change needs the changing candidate's independent review. This is still
+ * temporary, not a non-write proof; S7-U3a-RAW-PROVENANCE remains required. Other fixtures gain no exemption.
  *
  * Module: KIN_ADMIN_AUDIT_MODULE, default api/src/admin-audit.ts loaded through Node type stripping (Node >= 22.18);
  * the compiled /app/dist/admin-audit (kin-api:ci) is the same rule. The completeness cases read api/src and use
@@ -3049,7 +3052,7 @@ function scanAuditWrites(sources = auditSources()) {
 
 // ── the verdict: the contract table is read here only ──
 
-const { nonWriteDeferrals } = require('./admin-audit-deferrals.cjs');
+const { nonWriteDeferrals, sourceFingerprint, repinSources } = require('./admin-audit-deferrals.cjs');
 const NON_WRITE_DEFERRALS = JSON.parse(readFileSync(path.join(__dirname, 'admin-audit-nonwrite-deferrals.json'), 'utf8'));
 const nonWriteContext = () => Object.fromEntries([
   'api/tsconfig.json', 'api/package-lock.json', 'api/prisma/schema.prisma',
@@ -3091,7 +3094,7 @@ const failing = found => Object.keys(VERDICT).filter(name => found[name].length 
 test('completeness: every api/src file is read, every candidate is proved or explicitly deferred, both directions hold', () => {
   const { sources, listing } = productSources();
   const scan = scanAuditWrites(sources);
-  const disposition = nonWriteDeferrals(scan, sources, NON_WRITE_DEFERRALS, nonWriteContext());
+  const disposition = nonWriteDeferrals(scan, sources, NON_WRITE_DEFERRALS, nonWriteContext(), scanAuditWrites);
   const found = verdict({ ...scan, unresolved: disposition.unresolved }, productTable(), listing);
   // The inventory, whatever the verdict: every write site with its kind, actions or prefixes and their basis, every
   // unresolved candidate, and every candidate proven not to be a write with its reason.
@@ -3694,11 +3697,11 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
 });
 
 
-test('D-NW: only the explicit unchanged corpus and every exact pin can receive a temporary disposition', () => {
+test('D-NW: only the reviewed corpus, predecessor proof and every exact pin can receive a temporary disposition', () => {
   const sources = auditSources(), scan = scanAuditWrites(sources), context = nonWriteContext();
   const before = inventory(scan), raw = [...scan.unresolved];
   const apply = (policy = NON_WRITE_DEFERRALS, input = sources, result = scan, env = context) =>
-    nonWriteDeferrals(result, input, policy, env);
+    nonWriteDeferrals(result, input, policy, env, scanAuditWrites);
   const allowed = apply();
   assert.deepEqual(allowed.errors, []);
   assert.equal(allowed.deferred.length, NON_WRITE_DEFERRALS.entries.length);
@@ -3720,7 +3723,7 @@ test('D-NW: only the explicit unchanged corpus and every exact pin can receive a
     for (const entry of expected) assert.ok(result.unresolved.includes(entry), label);
   };
   for (const [field, value] of [['schema_version', 0], ['ruling', 'other'], ['owner', ''],
-    ['follow_up', ''], ['typescript', '0'], ['sources_sha256', '0'], ['unresolved_sha256', '0']]) {
+    ['follow_up', ''], ['typescript', '0'], ['sources_sha256', '0'], ['unresolved_sha256', '0'], ['repin', null]]) {
     refuse(apply({ ...NON_WRITE_DEFERRALS, [field]: value }), field);
   }
   refuse(apply({ ...NON_WRITE_DEFERRALS, entries: [] }), 'empty');
@@ -3756,6 +3759,74 @@ test('D-NW: only the explicit unchanged corpus and every exact pin can receive a
   refuse(apply(NON_WRITE_DEFERRALS, sources, changedScan), 'changed diagnosis', changedScan.unresolved);
   console.log('ADMIN_AUDIT_DEFERRAL_CONTROLS ' + JSON.stringify({
     raw_unresolved: raw.length, deferred: allowed.deferred.length, blocking_unresolved: allowed.unresolved.length,
+  }));
+});
+
+
+test('D-NW reviewed repin: missing, stale or broadened predecessor proof refuses every deferral', () => {
+  const sources = auditSources(), scan = scanAuditWrites(sources), context = nonWriteContext();
+  const raw = [...scan.unresolved], before = inventory(scan);
+  const refuse = (policy, input = sources, prior = scanAuditWrites) => {
+    const result = nonWriteDeferrals(scan, input, policy, context, prior);
+    assert.equal(result.deferred.length, 0);
+    assert.ok(result.errors.length > 0);
+    assert.deepEqual(result.unresolved, [...raw, ...result.errors]);
+    assert.deepEqual(scan.unresolved, raw);
+    assert.deepEqual(inventory(scan), before);
+    assert.deepEqual(failing(verdict({ ...scan, unresolved: result.unresolved })), ['unresolved']);
+  };
+  const changed = change => {
+    const policy = structuredClone(NON_WRITE_DEFERRALS);
+    change(policy);
+    return policy;
+  };
+  refuse(NON_WRITE_DEFERRALS, sources, null);
+  for (const field of ['ruling', 'source_sha', 'typescript', 'context_sha256',
+    'sources_sha256', 'unresolved_sha256', 'entries_sha256']) {
+    refuse(changed(policy => { policy.repin[field] = '0'; }));
+  }
+  refuse(changed(policy => { policy.repin.before = []; }));
+  refuse(changed(policy => { policy.repin.before.push(policy.repin.before[0]); }));
+  refuse(changed(policy => { policy.repin.before[0].file = 'api/src/missing-repin.ts'; }));
+  refuse(changed(policy => { policy.repin.before[0].text += '\n// stale predecessor\n'; }));
+  refuse(changed(policy => {
+    policy.repin.before[0].text = sources.find(source => source.file === policy.repin.before[0].file).text;
+  }));
+  const pinned = sources.find(source => source.file === NON_WRITE_DEFERRALS.entries[0][0]);
+  const altered = sources.map(source => source === pinned
+    ? { ...source, text: source.text + '\n// changed deferred file\n' } : source);
+  refuse(changed(policy => {
+    policy.sources_sha256 = sourceFingerprint(altered);
+    policy.repin.before.push(pinned);
+  }), altered);
+  // Even a self-consistent new current-corpus hash cannot hide an unrecorded dependency change.
+  const unrecorded = sources.find(source => !NON_WRITE_DEFERRALS.entries.some(pin => pin[0] === source.file)
+    && !NON_WRITE_DEFERRALS.repin.before.some(prior => prior.file === source.file));
+  assert.ok(unrecorded);
+  const extra = sources.map(source => source === unrecorded
+    ? { ...source, text: source.text + '\n// unrecorded dependency change\n' } : source);
+  refuse(changed(policy => { policy.sources_sha256 = sourceFingerprint(extra); }), extra);
+  for (const change of [
+    previous => ({ ...previous, typescript: '0' }),
+    previous => ({ ...previous, files: previous.files.slice(1) }),
+    previous => ({ ...previous, unresolved: [] }),
+    previous => {
+      const candidates = previous.candidates.map(entry => entry.status !== 'unresolved' ? entry
+        : Object.defineProperty({ ...entry, reason: entry.reason + ' changed' }, 'start', { value: entry.start }));
+      return { ...previous, candidates, unresolved: candidates.filter(entry => entry.status === 'unresolved')
+        .map(entry => `${entry.file}:${entry.line} ${entry.kind}: ${entry.reason}`) };
+    },
+  ]) refuse(NON_WRITE_DEFERRALS, sources, restored => change(scanAuditWrites(restored)));
+  const restored = repinSources(sources, NON_WRITE_DEFERRALS);
+  const previous = scanAuditWrites(restored);
+  assert.deepEqual(previous.unresolved, raw);
+  console.log('ADMIN_AUDIT_REPIN ' + JSON.stringify({
+    baseline_source_sha: NON_WRITE_DEFERRALS.repin.source_sha,
+    before_sources_sha256: sourceFingerprint(restored),
+    after_sources_sha256: sourceFingerprint(sources),
+    unresolved_sha256: NON_WRITE_DEFERRALS.unresolved_sha256,
+    entries: NON_WRITE_DEFERRALS.entries.length,
+    changed_files: NON_WRITE_DEFERRALS.repin.before.map(source => source.file),
   }));
 });
 

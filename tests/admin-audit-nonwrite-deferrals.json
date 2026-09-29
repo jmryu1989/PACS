@@ -1,17 +1,32 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ruling": "S7-U3a-AUDIT-SPEC-D-R-001",
   "owner": "Fable commander / product worker",
-  "follow_up": "S7-U3a-RAW-PROVENANCE: remove these deferrals through a separately reviewed product unit before changing the pinned corpus; no automatic repinning",
-  "baseline_source_sha": "263719d77208f85edfd17da494c4aa53d8ca8778",
+  "follow_up": "S7-U3a-RAW-PROVENANCE: remove these temporary deferrals. Non-deferral source changes require a reviewed whole-corpus repin, a reconstructed predecessor scan and identical entries/diagnoses/compiler inputs; no automatic repinning",
+  "baseline_source_sha": "663ed5bcd900493e22498a91d39aeab755949f7e",
   "typescript": "5.9.3",
   "context": {
     "api/tsconfig.json": "b51b25b34f2bb9202f0456a79e9e65584450de104ecee7ca7f3d5774d0389dda",
     "api/package-lock.json": "aa86620edc3b56c755f5d92300c0f4e59785765074717a2b9c18fb5a13fe2994",
     "api/prisma/schema.prisma": "70495b010af648f04a3bb3b91646125227a0b6fe77012545a3330a6d1fcb2ae7"
   },
-  "sources_sha256": "49e1446df3431d6ebce15af7ace111d88272f773984e7a4d75436d3ac64e4770",
+  "sources_sha256": "0a3fb25745e687f48206d76fb6091ad240716ce6863bf810337fe63b3847ef28",
   "unresolved_sha256": "ab7785d64ca1d59933a98e81349f108079d73fccd72d50a7f2daf973f108eddb",
+  "repin": {
+    "ruling": "S7-U3a-AUDIT-SPEC-F-R-001",
+    "source_sha": "663ed5bcd900493e22498a91d39aeab755949f7e",
+    "typescript": "5.9.3",
+    "context_sha256": "f29eeae7cb324ead87c347b8beebca3460f96bb8d95e4bee512de4e2563f4462",
+    "sources_sha256": "49e1446df3431d6ebce15af7ace111d88272f773984e7a4d75436d3ac64e4770",
+    "unresolved_sha256": "ab7785d64ca1d59933a98e81349f108079d73fccd72d50a7f2daf973f108eddb",
+    "entries_sha256": "8d781b5eb10fa59270b762ed5b51c6c70dafeaba1b9f5d309b5dcdd4ef7dc2a0",
+    "before": [
+      {
+        "file": "api/src/worklist-columns.ts",
+        "text": "// Persist column identifiers only, never cell values, filters or report content.\nexport const COLUMN_KEYS = {\n  Radiology: ['pf','assignedReader','techNote','no','viewing','count','series','em','ss','rs','acc','ts','id','name','age','birth','sex','modality','desc','date','preDoc','preReviewer'],\n  Technician: ['assignedReader','techNote','no','count','series','em','ss','matched','rs','acc','id','name','age','sex','modality','desc','date','ward','reqHosp'],\n};\n\nexport function normalizeWorklistColumns(value: any) {\n  const object = (v: any) => v !== null && typeof v === 'object' && !Array.isArray(v);\n  if (!object(value) || value.version !== 1 || Object.keys(value).sort().join() !== 'modes,version' ||\n      !object(value.modes) || Object.keys(value.modes).sort().join() !== 'Radiology,Technician' ||\n      JSON.stringify(value).length > 8192) return null;\n  const clean = { version: 1, modes: {} };\n  for (const [mode, keys] of Object.entries(COLUMN_KEYS)) {\n    const part = value.modes[mode];\n    if (!object(part) || !['hidden,order','appearance,hidden,order'].includes(Object.keys(part).sort().join())) return null;\n    for (const name of ['order', 'hidden']) {\n      const list = part[name];\n      if (!Array.isArray(list) || list.length > 64 || new Set(list).size !== list.length ||\n          list.some(k => typeof k !== 'string' || !keys.includes(k))) return null;\n    }\n    if (part.hidden.some(k => k === 'id' || k === 'name')) return null;\n    clean.modes[mode] = { order: [...part.order, ...keys.filter(k => !part.order.includes(k))], hidden: [...part.hidden] };\n    if (Object.prototype.hasOwnProperty.call(part, 'appearance')) {\n      const a = part.appearance;\n      if (!object(a) || Object.keys(a).sort().join() !== 'color,font,size,widths' ||\n          !['default','cool','warm'].includes(a.color) || !['default','sans','mono'].includes(a.font) ||\n          !Number.isInteger(a.size) || a.size < 12 || a.size > 20 || !object(a.widths) ||\n          Object.entries(a.widths).some(([k,w]) => !keys.includes(k) || !Number.isInteger(w) || Number(w) < 64 || Number(w) > 600)) return null;\n      clean.modes[mode].appearance = { widths: { ...a.widths }, font: a.font, size: a.size, color: a.color };\n    }\n  }\n  return clean;\n}\n"
+      }
+    ]
+  },
   "entries": [
     ["api/src/admin.service.ts",364,16201,"raw SQL naming AuditLog"],
     ["api/src/clinical-context.service.ts",224,14852,"raw call"],
