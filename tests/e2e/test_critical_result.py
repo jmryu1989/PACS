@@ -1344,7 +1344,14 @@ class Wire:
             n, page = self.test.tick(), self.page_of(request)
             self.paths.append({"n": n, "page": page, "method": request.method, "path": split.path})
             if split.path == "/api/me" and request.method == "GET":
-                entry = {"n": n, "page": page, "state": "out", "status": None, "json": None, "done": None}
+                # The document that asked: a clinician-only login asks from main.html, which then replaces itself with
+                # clinician.html (auth.js land()), so that answer's body may be gone when it is read (hosted run
+                # 36540533271, CRS-04 E-03 P).
+                try:
+                    doc = urlsplit(request.frame.url).path
+                except Exception:
+                    doc = None
+                entry = {"n": n, "page": page, "doc": doc, "state": "out", "status": None, "json": None, "done": None}
                 self.me.append(entry)
             else:
                 found = route_of(request.method, split.path)
@@ -1830,12 +1837,28 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
             page.wait_for_url("**/worklist/hpacs-lite/main.html", timeout=30000)
             expect(page.locator("#dbstat")).to_contain_text("DB Connected")
             expect(page.locator("#roles")).to_contain_text("technician" if sess.logical == "tech" else "radiologist")
-        label = sess.wire.label(page)
-        self.until(lambda: any(entry["n"] > since and entry["page"] == label and answered(entry) and entry["status"] == 200
-                               for entry in sess.wire.me), f"{sess.label}: the page's own /api/me", page)
-        sess.wire.harvest()
-        me = [entry for entry in sess.wire.me if entry["n"] > since and answered(entry) and entry["status"] == 200][-1]["json"] or {}
-        self.harness_ok(me.get("sub") == self.stack.user_ids[sess.logical], f"{sess.label}: /api/me is another identity")
+        label, landing = sess.wire.label(page), urlsplit(page.url).path
+
+        def answers() -> list[dict]:
+            return [entry for entry in sess.wire.me if entry["n"] > since and entry["page"] == label and answered(entry)
+                    and entry["status"] == 200]
+        # The landing page's own /api/me, not the first one answered: a redirecting main.html's answer arrives first and
+        # its body may no longer be readable, which read as "another identity" (hosted run 36540533271, CRS-04 E-03 P).
+        try:
+            self.until(lambda: any(entry["doc"] == landing for entry in answers()),
+                       f"{sess.label}: the landing page's own /api/me", page)
+        finally:
+            sess.wire.harvest()
+            self.log("me", context=sess.label, landing=landing, answers=[
+                {"n": entry["n"], "doc": entry["doc"], "readable": isinstance(entry["json"], dict),
+                 "sub": entry["json"].get("sub") if isinstance(entry["json"], dict) else None} for entry in answers()])
+        readable = [entry for entry in answers() if isinstance(entry["json"], dict)]
+        own = [entry for entry in readable if entry["doc"] == landing]
+        self.harness_ok(bool(own), f"{sess.label}: the landing page's /api/me answer could not be read")
+        # Every readable answer since the login, the redirecting page's included, names this identity.
+        self.harness_ok(all(entry["json"].get("sub") == self.stack.user_ids[sess.logical] for entry in readable),
+                        f"{sess.label}: /api/me is another identity")
+        me = own[0]["json"]
         sess.owner = [me.get("institution"), me.get("sub")]
         sess.wire.sub = me.get("sub")
         for cookie in sess.context.cookies():
@@ -2164,9 +2187,13 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
         return self.answer(sess, "#3", since, "the sent list after Refresh", page=page, view="sent")
 
     def sent_row(self, page: Any, fixture: Fixture, version: int) -> Any:
-        """The sent-list row of a study and pinned Source version (K4) as a locator for its actions."""
+        """The sent-list row of a study and pinned Source version (K4) as a locator for its actions. The version token is
+        looked for in one cell's own text: a row's text joins its cells with nothing between them (`Cancel Deliveryv1`,
+        `08:07v1`), so a pattern over the whole row cannot see where the Source cell starts (hosted run 36540533271, S-04
+        and V-03 found no row while the row was on screen)."""
+        version_cell = page.get_by_role("cell").filter(has_text=re.compile(rf"(?<![0-9A-Za-z])v{version}(?![0-9])"))
         found = (self.sent_pane(page).get_by_role("table").get_by_role("row").filter(has_text=fixture.patient_id)
-                 .filter(has_text=re.compile(rf"(?<![0-9A-Za-z])v{version}(?![0-9])")))
+                 .filter(has=version_cell))
         expect(found).to_have_count(1)
         return found
 
