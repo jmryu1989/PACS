@@ -506,12 +506,84 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertIn('tests/e2e/artifacts/three-d-cursor-wiring-ci/', dispatch)
         self.assertIn('tests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png', dispatch)
 
+    def test_critical_result_screens_profile_is_exact_and_dispatch_only(self):
+        # S7-U2b (TEST-S7-U2b-E2E, OP-1 A): the six screen cases of one declared class in one unit at the D-S7-12 (a) live cap,
+        # dispatched once per candidate through Focused integration and never a push or PR gate. The workflows are read with
+        # the installed YAML parser and the e2e module with ast (it is not imported: this runs before any browser package).
+        import ast, shlex
+        import yaml
+        profile = ci.PROFILES['critical-result-screens']
+        suite, class_name, unit = 'e2e/test_critical_result.py', 'CriticalResultScreensE2E', 'ci-s7-u2b-critical-result-screens'
+        self.assertEqual(profile['suites'], ((suite, class_name, unit),))
+        self.assertEqual(profile['out'].name, 'critical-result-screens-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-cvr-screens-ci-')
+        self.assertEqual(profile['suite_timeout'], 900)
+        self.assertNotIn('suite_budgets', profile)
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--module')+1], 'tests/'+suite)
+        self.assertEqual(command[command.index('--class')+1], class_name)
+        self.assertEqual(command[command.index('--unit')+1], unit)
+        self.assertEqual(command[command.index('--mode')+1], 'live')
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        for name, other in ci.PROFILES.items():
+            if name == 'critical-result-screens':
+                continue
+            with self.subTest(profile=name):
+                self.assertNotEqual(profile['out'], other['out'])
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+                # The module's S7-U1a API class stays outside every hosted budget, this one included (OP-3).
+                self.assertNotIn(suite, [row[0] for row in other['suites']])
+                self.assertNotIn(unit, [row[2] for row in other['suites']])
+        tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+        declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]
+        # Equal, not at least: a case that silently disappears fails here (test-plan section 3, CRS-01..CRS-06 in order).
+        self.assertEqual(declared, [
+            'test_crs01_two_sessions_send_list_refuse_acknowledge_replay_supersede_cancel',
+            'test_crs02_revoked_recipient_old_session_cannot_acknowledge_new_session_sees_nothing',
+            'test_crs03_wrong_role_and_other_institution_are_offered_nothing',
+            'test_crs04_lost_answers_stay_unknown_until_a_read_or_check_again_proves_them',
+            'test_crs05_moved_head_before_send_is_refused_and_the_dialog_rereads_the_version',
+            'test_crs06_account_switch_in_one_browser_keeps_nothing_of_the_first_recipient'])
+        # The module's own allowlist for a class-less run: the inherited WorklistE2E cases never load.
+        self.assertTrue(any(isinstance(node, ast.FunctionDef) and node.name == 'load_tests' for node in tree.body))
+
+        def load(name):
+            return yaml.safe_load((ci.ROOT/'.github/workflows'/name).read_text(encoding='utf-8'))
+
+        def profiles(step):
+            found = []
+            for line in str(step.get('run') or '').replace('\\\n', ' ').splitlines():
+                try:
+                    words = shlex.split(line, comments=True)
+                except ValueError:
+                    continue
+                for index, word in enumerate(words):
+                    if word.endswith('tests/measurement_ci.py'):
+                        rest = words[index+1:]
+                        found += [rest[i+1] for i, arg in enumerate(rest[:-1]) if arg == '--profile']
+                        found += [arg.split('=', 1)[1] for arg in rest if arg.startswith('--profile=')]
+            return found
+        # Dispatch only: no validate.yml step requests the profile.
+        validate = load('validate.yml')
+        self.assertFalse([step for job in validate['jobs'].values() for step in job.get('steps', [])
+                          if 'critical-result-screens' in profiles(step)])
+        self.assertNotIn('critical-result-screens', (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8'))
+        dispatch = load('output-integration.yml')
+        triggers = dispatch.get('on', dispatch.get(True))
+        self.assertEqual(triggers['workflow_dispatch']['inputs']['profile']['options'].count('critical-result-screens'), 1)
+        uploads = [step for job in dispatch['jobs'].values() for step in job.get('steps', [])
+                   if str(step.get('uses', '')).startswith('actions/upload-artifact@')]
+        paths = {line.strip().rstrip('/') for step in uploads for line in str(step['with']['path']).splitlines() if line.strip()}
+        self.assertIn('tests/e2e/artifacts/critical-result-screens-ci', paths)
+
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
                           'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
-                          'gateway-e2e'})
+                          'gateway-e2e', 'critical-result-screens'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
