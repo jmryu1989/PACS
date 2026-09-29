@@ -12,7 +12,7 @@ attribute, and no page function or variable is called or read. The expected valu
 answers (and tests/worklist_columns_vectors.json), not computed by product code.
 
   mi01 Hospital cell: owner registry name, Tele only for a row the server marks tele, (미배정) as sent, '—' for no name,
-       no added focus target, label size; the demo entry's Orthanc path (see HC-06 below).
+       no added focus target, label size; the demo entry's Orthanc rows (HC-06 below; left out of NEW-1, not run).
   mi02 Hospital filter, AND with other filters, compound rules and the rule editor, the hidden-column note, Manual search.
   mi03 saving a search with Hospital text, compound rule and Hospital sort; applying it again, as default, and the pairs.
   mi04 stored browser layouts from before the unit, account Load/Save answers, two owners, Reset Current Mode.
@@ -21,7 +21,8 @@ answers (and tests/worklist_columns_vectors.json), not computed by product code.
   mi07 the Hospital header sorts by name only; mi08 assignment filters keep tele rows; mi09 Technician and ReqHosp.
   mi10 external strings stay text; mi11 refresh, closed or renamed tele rows and a late list answer.
   f1   both boot kinds are clean on this harness (run against the pre-unit page too: KIN_MULTI_INSTITUTION_MAIN).
-  f5   the demo entry's reach check fails when Orthanc answers 503 (the built-in demo rows cannot pass it).
+  f5   the HC-06 check refuses a QIDO 503 (the built-in demo rows) at its QIDO status check and a QIDO 200 with no
+       study (an empty list) at 'HC-06 synthetic QIDO rows'.
 
 Request contract (test-plan F-2, F-2b, F-3). Server mode: /api/me, /api/bootstrap?states=omit, /api/colleagues, the paged
 /api/studies, /api/worklist-columns, /api/filters and /api/prefs are answered; any other same-origin /api GET (later units'
@@ -30,11 +31,18 @@ of the Orthanc study list /dicom-web/studies fails the case (the list is read th
 declare, another origin or a static path outside worklist-v0/hpacs-lite fails the case. Demo entry (HC-06): /api and
 /auth answer 502, the page's own demo button is pressed, and the one QIDO list GET is answered with synthetic studies.
 
-HC-06 as found on the base (663ed5b, the S7-U3a merge): after the demo entry the page reads the QIDO list, but the
-worklist search view shows no rows for a session without an account owner (worklist-search.js mount().read), so no
-Hospital cell of a QIDO row is visible there. The demo part therefore checks that the Orthanc path was reached (one QIDO
-GET answered 200, no /api/me after entering, no built-in demo rows or notice) and that any row shown carries '—' and no
-Tele; the '—' cell itself is checked in server mode on a row without a name. This is reported, not changed (D98).
+HC-06 (test-plan mi01 demo part, F-2b), checked by demo_reach() for the synthetic QIDO answer and for the same two
+studies in the other order: one QIDO GET answered 200, no /api/me after entering, no built-in demo rows or notice; the
+list is exactly SYN-QIDO-01 and SYN-QIDO-02; each Hospital cell is '—' with no Tele label; after a click on the
+SYN-QIDO-01 ID cell the visible 'Study UID' is the synthetic UID; in Technician both rows show ReqHosp '(로컬)'.
+On the base (663ed5b, the S7-U3a merge) the demo entry reads the QIDO list, but the worklist search view returns no row
+for a session without an account owner (worklist-search.js mount().read); that product path is not changed in this unit.
+S7-U3b-SPEC-R-001 A안: HC-06의 두 합성 행·UID·Hospital/Tele 단언은 보존한다. NEW-1은 기존 18개 중 17개를 선택한다. HC-06과
+그 역순 QIDO 보존 짝은 owner 없는 데모 읽기의 기존 결함 때문에 관문에서 제외되어 not_run이다. F-1/F-5 또는 서버 모드 검사는
+HC-06 표시 성공의 대체 증거가 아니다.
+The exclusion is NEW-1's -k include list (validate.yml), never a skip here. The follow-up unit S7-DEMO-ROWS (D213, due
+before the Stage 9 clean-up) fixes the owner-less demo read; once both QIDO orders pass HC-06 and f5 still refuses the
+empty list, the -k list is removed.
 
 KIN_MULTI_INSTITUTION_MAIN (a main.html path) is the only override: the local mutant runs point it at a copy with one
 change. Synthetic data only (SYN-* names); no server, no network, no credentials.
@@ -82,6 +90,7 @@ FACTORS = ["Hospital", "Modality", "Body Part", "Urgency", "Subspecialty", "SLA"
 NOT_CONFIGURED = ["Subspecialty", "SLA", "Credential", "Workload", "Availability"]
 QIDO_QUERY = "includefield=00081030,00201206,00201208"
 QIDO_UIDS = ["2.25.300000000000000000000000000000000001", "2.25.300000000000000000000000000000000002"]
+QIDO_IDS = ["SYN-QIDO-01", "SYN-QIDO-02"]
 SERVED = set()
 
 
@@ -522,17 +531,31 @@ class MultiInstitutionWorklist(unittest.TestCase):
         return names
 
     def demo_reach(self, screen):
-        """HC-06: the demo entry reached the Orthanc list path, with nothing filled in from elsewhere."""
+        """HC-06: the demo entry shows the two synthetic QIDO studies, with nothing filled in from elsewhere."""
         qido = [e for e in screen.server.ledger if e["path"] == "/dicom-web/studies"]
-        self.assertEqual([(QIDO_QUERY, 200)], [(e["query"], e["status"]) for e in qido])
+        self.assertEqual([(QIDO_QUERY, 200)], [(e["query"], e["status"]) for e in qido], "HC-06 QIDO list read")
         start = max(i for i, e in enumerate(screen.server.ledger) if e["path"] == "/main.html")
         self.assertNotIn("/api/me", [e["path"] for e in screen.server.ledger[start:]])
         text = screen.page.locator("body").inner_text()
         self.assertNotIn("데모 모드 — 가짜 데이터 (Orthanc 미연결)", text)
         self.assertNotIn("P-1001", text)
         self.assertEqual(HOSPITAL, screen.heads()[-1])
-        for cell in screen.column(HOSPITAL):
-            self.assertEqual("—", cell)
+        # The rows are the answer's two studies, as a set: the answer's order is what the preserving pair changes.
+        until(lambda: sorted(screen.column("ID")) == QIDO_IDS, 10, "HC-06 synthetic QIDO rows")
+        self.assertEqual(QIDO_IDS, sorted(screen.column("ID")), "HC-06 synthetic QIDO rows")
+        # A QIDO study carries no institution name and no tele flag.
+        self.assertEqual({pid: "—" for pid in QIDO_IDS}, screen.cells_by_id(HOSPITAL))
+        for pid in QIDO_IDS:
+            expect(screen.data_row(pid).get_by_title(TELE_TIP)).to_have_count(0)
+        # The selected study's visible Study UID is the synthetic one, so the rows came from this answer.
+        screen.data_row("SYN-QIDO-01").get_by_role("cell", name="SYN-QIDO-01", exact=True).click()
+        study_uid = screen.page.get_by_role("row").filter(has=screen.page.get_by_role("cell", name="Study UID", exact=True))
+        expect(study_uid.get_by_role("cell")).to_have_text(["Study UID", QIDO_UIDS[0]])
+        # Technician keeps the local ReqHosp mark on both rows.
+        screen.page.get_by_text("Technician", exact=True).first.click()
+        until(lambda: "ReqHosp" in screen.heads(), 10, "Technician columns")
+        until(lambda: screen.cells_by_id("ReqHosp") == {pid: "(로컬)" for pid in QIDO_IDS}, 10, "HC-06 Technician ReqHosp")
+        self.assertEqual({pid: "(로컬)" for pid in QIDO_IDS}, screen.cells_by_id("ReqHosp"))
 
     def test_mi01_demo_entry_reads_orthanc_and_fills_no_hospital(self):
         screen = self.boot(Server(demo=True), entry="demo")
@@ -545,15 +568,27 @@ class MultiInstitutionWorklist(unittest.TestCase):
 
     def test_f5_demo_reach_check_fails_on_the_builtin_fallback(self):
         # Harness fitness (F-5 (1)): with the QIDO list answered 503 the page falls back to its built-in demo rows; the
-        # reach check above must not pass on that path.
+        # HC-06 check must refuse that path at its QIDO status check.
         screen = self.boot(Server(demo=True, qido_status=503), entry="demo")
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(AssertionError) as refused:
             self.demo_reach(screen)
+        self.assertIn("HC-06 QIDO list read", str(refused.exception))
+        print("F-5 QIDO 503 refused: " + str(refused.exception).replace("\n", " | "))
+        screen.finish()
+        # Counterexample (S7-U3b-SPEC-R-001): a QIDO 200 with no study draws an empty list and no fallback; the check must
+        # refuse it at the synthetic rows, not pass on no rows.
+        screen = self.boot(Server(demo=True, qido=[]), entry="demo")
+        with self.assertRaises(AssertionError) as refused:
+            self.demo_reach(screen)
+        self.assertIn("HC-06 synthetic QIDO rows", str(refused.exception))
+        print("F-5 QIDO 200 empty refused: " + str(refused.exception).replace("\n", " | "))
         screen.finish()
 
     def test_f1_both_boot_kinds_are_clean(self):
         # Harness fitness (F-1): the pages boot with no page error, dialog, undeclared write or foreign request; the request
-        # lists are printed as evidence (run against the pre-unit page with KIN_MULTI_INSTITUTION_MAIN as well).
+        # lists are printed as evidence (run against the pre-unit page with KIN_MULTI_INSTITUTION_MAIN as well). It checks
+        # the boot only: the printed row count is an observation, and a demo boot with 0 rows does not pass the HC-06
+        # display contract (demo_reach, not run in NEW-1; S7-U3b-SPEC-R-001).
         for kind in ("main", "demo"):
             server = Server(rows=self.hospital_rows(), demo=kind == "demo")
             screen = self.boot(server, entry=kind)
