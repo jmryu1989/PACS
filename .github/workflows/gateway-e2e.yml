@@ -38,9 +38,9 @@ jobs:
           [ "$EXPECTED_SHA" = "$ACTUAL_SHA" ] || { echo "expected_sha is not the commit this run checked out"; exit 1; }
           [ "$RUN_ATTEMPT" = "1" ] || { echo "a re-run is not a new authorized dispatch"; exit 1; }
       - name: S4-EG1 profile safeguards and dispatch-only pins
-        run: python3 scripts/record-run.py --run-dir tmp/gateway-e2e-ci/profile --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/gateway-e2e-ci/profile --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/gateway-e2e.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_filter.py -- python3 -B tests/measurement_ci_test.py
       - name: S4-EG1 judge adequacy and harness pins
-        run: python3 scripts/record-run.py --run-dir tmp/gateway-e2e-ci/contract --cwd . --file tests/gateway_pipeline_vectors.json --file tests/gateway_pipeline_judge.py --file tests/gateway_pipeline_contract_test.py --file tests/gateway_pipeline_live.py --file tests/measurement_ci.py --file .github/workflows/gateway-e2e.yml -- python3 -B tests/gateway_pipeline_contract_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/gateway-e2e-ci/contract --cwd . --file tests/gateway_pipeline_vectors.json --file tests/gateway_pipeline_judge.py --file tests/gateway_pipeline_contract_test.py --file tests/gateway_pipeline_live.py --file tests/measurement_ci.py --file .github/workflows/gateway-e2e.yml --file .github/workflows/validate.yml -- python3 -B tests/gateway_pipeline_contract_test.py
       - name: Install synthetic DICOM and agent dependencies (no browser)
         timeout-minutes: 10
         run: |
