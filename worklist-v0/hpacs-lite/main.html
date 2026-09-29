@@ -952,6 +952,19 @@
     #cvr-inbox-p .cvr-inbox-field { font-weight: 700; color: var(--kin-muted); }
     #cvr-inbox-p .cvr-inbox-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
     /* ── S7-U2a 끝 ── */
+    /* ── S7-U3b 다기관 워크리스트 ──
+       Tele 표지는 행 글자 크기를 그대로 따라 작아지지 않는다(UXR-G-13). 범례는 접힌 한 줄로 서고, 펼친 내용은 높이 상한
+       안에서 스크롤해 목록을 밀어내지 않는다. 색·굵기로 대기 시간이나 순위를 나타내지 않는다(C-7). */
+    .tele-tag { display: inline-block; margin-left: 4px; padding: 0 5px; border: 1px solid #4f7fb8; border-radius: 8px;
+                font-size: inherit; font-weight: 600; line-height: 1.3; color: #cfe2ff; white-space: nowrap; }
+    #routing-factors { flex: none; padding: 2px 10px; font-size: 12px; color: var(--kin-muted); border-top: 1px solid var(--kin-line); }
+    #routing-factors > summary { cursor: pointer; min-height: 20px; line-height: 20px; }
+    #routing-factors[open] { max-height: 40vh; overflow: auto; }
+    #routing-factors p { margin: 4px 0; line-height: 1.5; }
+    #routing-factors dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 4px 0 6px; }
+    #routing-factors dt { color: var(--kin-text); font-weight: 600; }
+    #routing-factors dd { margin: 0; overflow-wrap: anywhere; }
+    /* ── S7-U3b 끝 ── */
   </style>
   <link rel="stylesheet" href="reading-workspace.css">
 </head>
@@ -1141,6 +1154,23 @@
       <div id="worklist-selection" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;font-size:12px"></div>
       <div id="study-fetch" style="padding:4px 10px;font-size:12px" hidden><span id="study-fetch-status" role="status"></span> <button id="study-fetch-resume" type="button">Resume</button> <button id="study-fetch-cancel" type="button">Stop Loading</button></div>
       <details id="not-observed" style="padding:2px 10px;font-size:12px" hidden><summary id="not-observed-summary"></summary><div id="not-observed-list"></div></details>
+      <!-- S7-U3b: 목록 값의 출처를 적은 글자뿐인 범례. 요청·저장 상태가 없고, 설정이 없는 요소는 Not Configured로 둔다
+           (값을 추정해 채우지 않는다). Radiology 전용이라 setMode가 Technician에서 숨긴다. -->
+      <details id="routing-factors">
+        <summary>Routing Factors</summary>
+        <p>목록에 보이는 값이 어디서 오는지 적었습니다. 이 화면은 값을 추정하거나 판독의 배정·목록 순서를 대신 정하지 않습니다.</p>
+        <dl>
+          <dt>Hospital</dt><dd>검사를 소유한 기관의 등록 이름입니다. 원격판독으로 받은 검사는 의뢰한 기관의 이름 뒤에 Tele를 붙입니다.</dd>
+          <dt>Modality</dt><dd>DICOM Modality 열의 값입니다.</dd>
+          <dt>Body Part</dt><dd>Read Body Parts로 읽어 온 DICOM Body Part Examined 값이며 검색 조건으로만 씁니다.</dd>
+          <dt>Urgency</dt><dd>EM 열의 값으로, 사람이 지정한 E/N입니다.</dd>
+          <dt>Subspecialty</dt><dd>Not Configured</dd>
+          <dt>SLA</dt><dd>Not Configured</dd>
+          <dt>Credential</dt><dd>Not Configured</dd>
+          <dt>Workload</dt><dd>Not Configured</dd>
+          <dt>Availability</dt><dd>Not Configured</dd>
+        </dl>
+      </details>
       <div class="statusbar">
         <span id="countlist"></span>
         <span id="observation-status" role="status" hidden></span>
@@ -2473,6 +2503,9 @@
         // HPACS도 2025.07에 이 둘을 컬럼으로 붙였다 (교훈 §13 — 컬럼은 끝없이 늘어난다)
         { k: "preDoc", t: "PreDoc", f: "text" },
         { k: "preReviewer", t: "PreReviewer", f: "text" },
+        // S7-U3b: 검사를 소유한 기관의 등록 이름(목록 행의 institutionName 그대로). 서버 목록(worklist-columns.ts)과 같은
+        // 끝자리라 이 열이 생기기 전 저장된 열 설정에도 순서를 바꾸지 않고 맨 뒤에 보인다(두 정규화기의 규칙).
+        { k: "institutionName", t: "Hospital", f: "text" },
       ],
       Technician: [
         { k: "assignedReader", t: "Assigned Reader", f: "text" },
@@ -2523,6 +2556,12 @@
         : s.holder === user
           ? `<span class="hold me" title="내가 작성 중">✎ 나</span>`
           : `<span class="hold other" title="${esc(displayActor(s.holder))} 님이 작성 중">✎ ${esc(displayActor(s.holder))}</span>`,
+      // S7-U3b Hospital: 서버가 준 소유 기관 이름만 쓴다. Tele는 행의 tele만 따른다 — 이름을 내 기관 이름과 비교하면
+      // 등록 이름이 같은 두 기관에서 틀리고, reqHosp는 Technician에서 손으로 바꿀 수 있는 값이다.
+      institutionName: s => {
+        const name = typeof s.institutionName === "string" && s.institutionName !== "" ? esc(s.institutionName) : "—";
+        return s.tele === true ? `${name} <span class="tele-tag" title="원격판독으로 의뢰받은 검사입니다.">Tele</span>` : name;
+      },
     };
 
     let mode = "Radiology";
@@ -3065,6 +3104,7 @@
       document.querySelector(".s-clinical").style.width = tech ? "66%" : "30%";
       document.querySelector(".report-p").style.display = tech ? "none" : "flex";
       document.querySelector(".order-p").style.display = tech ? "flex" : "none";
+      $("#routing-factors").hidden = tech;
       // 탭을 바꿔도 **같은 컬럼이 양쪽에 있으면 정렬을 유지한다.**
       // 두 탭의 컬럼 구성이 달라서 예전엔 무조건 초기화했는데, id·name·date처럼
       // 양쪽에 다 있는 컬럼까지 풀리는 건 그냥 손해다.
