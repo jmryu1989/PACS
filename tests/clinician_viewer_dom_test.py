@@ -209,7 +209,7 @@ def lf_text(path):
 
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js")}
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "critical-result-inbox.js")}
 CONFIG = lf_text(ROOT / "config" / "ohif.js")
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
 
@@ -1237,6 +1237,8 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.item_requests = []
         self.viewer_opens = []
         self.me_requests = 0
+        # S7-U2a Critical Results pending-list reads of clinician.html, kept apart from the reads this file checks.
+        self.inbox_reads = []
         # test_22: the real write modules' own reads (the Job list, the Findings list, a Tech Note request), answered only when a
         # case serves those modules; module_status refuses one of them ({"viewer-jobs": 403}).
         self.real_api = False
@@ -1374,6 +1376,15 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             # test_15: a Save on the wire, held for the case to answer (late).
             self.writes.append((unquote(found.group(1)), found.group(2) or ""))
             self.held_writes.append(route)
+            return
+        # S7-U2a: clinician.html's Critical Results area reads its pending list when the page boots (and every 60 s while
+        # shown). It is answered empty for this session and logged apart; any other critical-result request stays unexpected.
+        if method == "GET" and path == "/api/critical-results" \
+                and parse_qs(url.query, keep_blank_values=True) == {"view": ["received"], "state": ["pending"]}:
+            account = self.me if isinstance(self.me, dict) else {}
+            self.inbox_reads.append(request.url)
+            route.fulfill(json={"owner": [account.get("institution"), account.get("sub")], "view": "received", "items": [],
+                                "nextCursor": None, "pending": 0})
             return
         self.unexpected.append(f"{method} {request.url}")
         route.abort()

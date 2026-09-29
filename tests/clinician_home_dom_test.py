@@ -26,8 +26,10 @@ extra writer-side fields planted in the stubs that the real serializer never sen
       are shown as sent; a late earlier list never replaces a newer one (and its no-guard control does).
   07  paging passes each signed cursor verbatim, shows progress, rejects a malformed page and re-reads /me: another
       account in the same browser clears the page.
-  08  English controls / Korean explanations, no avoided words, no acknowledgement wording, no browser dialogs,
-      text >= 12px, hit targets >= 24px, one tab stop for the list, arrows/Home/End/Enter/Space.
+  08  English controls / Korean explanations, no avoided words, no acknowledgement wording outside the Critical Results
+      region (S7-U2a, contract S7-U1p §16.3), no browser dialogs, text >= 12px, hit targets >= 24px, one tab stop for the
+      list, arrows/Home/End/Enter/Space. The region's own buttons, headings and Tab stops are left out of the exact lists
+      and the Tab walk only; nothing else is left out (13).
   09  Log out, a session ended in another tab, pending and invalid membership, and no session. Log out, two 401s and
       another tab's log out (a channel message and the storage events of a set and a remove) each leave with one
       navigation, counted as document requests while the first is held; the same file without the guard navigates
@@ -44,6 +46,10 @@ extra writer-side fields planted in the stubs that the real serializer never sen
       has sent its one POST, and the current report's 200 that arrives meanwhile does not paint, whether the 401 body
       stays held, completes, or completes malformed; then one navigation. The request() of 2dd971b, which reads the
       body before the status, paints that answer while the body is held and logs out only once it arrives (control).
+  13  (S7-U2a, TEST-S7-U2a-HOME-GUARD) the acknowledgement-wording ban covers everything outside #critical-results: with a
+      pending critical result on screen the region is the one section it exempts, and the page read without that region is
+      exactly the set test_08 checks; a line "Pending ACK 1" or a title "Acknowledged" outside the region is reported, the
+      same words inside it are not, and the exact label lists change when a button is added outside it.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The service half is tests/clinician_read_live.py (hosted synthetic stack only).
@@ -70,7 +76,8 @@ def lf_text(path):
 
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "index.html", "auth.js")}
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "index.html", "auth.js",
+                                                    "critical-result-inbox.js")}
 MAIN_HTML = lf_text(HPACS / "main.html")
 AUTH_CONTROLLER = lf_text(ROOT / "api" / "src" / "auth.controller.ts")
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
@@ -166,6 +173,17 @@ REPORTS = {
     uid(7): open_report(7, "T"),
 }
 
+# test_13: one pending critical result for this clinician (contract S7-U1p §3.3 RecipientFull, case C2), as the S7-U2a
+# region's pending-list read returns it.
+PENDING_CVR = {"id": "5a1b2c3d-0000-4000-8000-00000000c201", "studyUid": uid(1), "state": "created", "revision": 1,
+               "createdAt": "2026-09-28T01:00:00.000Z", "replacedBy": None, "view": "full", "sender": {"name": "SYN Radiologist"},
+               "study": {"uid": uid(1), "name": "SYN ALPHA", "id": "SYN-P-001", "birth": "19800517", "date": "20260320"},
+               "message": "SYN critical finding: call the ward",
+               "source": {"version": 3, "action": "approve", "author": "syn-rad", "at": "2026-09-20T00:00:00.000Z", "current": True,
+                          "reason": None},
+               "body": {"findings": "SYN-A findings", "conclusion": "SYN-A conclusion", "recommendation": ""},
+               "acknowledgedAt": None, "cancelledAt": None, "cancelReason": None, "supersededAt": None}
+
 # Product wording, verbatim (clinician.js TEXT / OPEN_NOTE / FINAL_ONLY).
 FINAL_ONLY = "확정된 판독문(승인 또는 Addendum)만 본문과 키 이미지를 표시합니다."
 LIST_LOADING = "검사 목록을 불러오는 중입니다…"
@@ -206,19 +224,31 @@ LIST_VIEW = """() => { const box = document.querySelector('#list-state');
     detail: box.querySelector('.state-detail').textContent, retry: !document.querySelector('#list-retry').hidden,
     busy: document.querySelector('#studies').closest('table').getAttribute('aria-busy'),
     rows: [...document.querySelectorAll('#studies tr[data-uid]')].map(tr => tr.dataset.uid)}; }"""
-# Every text node's own element, and every title / aria-label (tooltips are explanations too).
+# Every text node's own element, and every title / aria-label (tooltips are explanations too). `inside`: the text belongs
+# to the S7-U2a Critical Results region (#critical-results), the one place the contract (S7-U1p §16.3) lets acknowledgement
+# wording appear on this page; document.title is outside it.
 PAGE_TEXT = """() => { const out = [], walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const inside = element => !!element.closest('#critical-results');
   while (walker.nextNode()) { const node = walker.currentNode, parent = node.parentElement, text = node.textContent.trim();
     if (text && parent && !['SCRIPT', 'STYLE'].includes(parent.tagName))
-      out.push({text, tag: parent.tagName, size: parseFloat(getComputedStyle(parent).fontSize)}); }
+      out.push({text, tag: parent.tagName, size: parseFloat(getComputedStyle(parent).fontSize), inside: inside(parent)}); }
   for (const element of document.querySelectorAll('[title], [aria-label]'))
     for (const name of ['title', 'aria-label']) if (element.hasAttribute(name))
-      out.push({text: element.getAttribute(name), tag: element.tagName + '@' + name, size: null});
-  out.push({text: document.title, tag: 'TITLE', size: null});
+      out.push({text: element.getAttribute(name), tag: element.tagName + '@' + name, size: null, inside: inside(element)});
+  out.push({text: document.title, tag: 'TITLE', size: null, inside: false});
   return out; }"""
-LABELS = """() => { const texts = selector => [...document.querySelectorAll(selector)].map(e => e.textContent);
+# The exact label lists of test_08 are S5-U2a's page; the S7-U2a region's own controls and headings are left out of them
+# (and only those - test_13 shows a button added outside the region changes the list).
+LABELS = """() => { const texts = selector => [...document.querySelectorAll(selector)].filter(e => !e.closest('#critical-results'))
+    .map(e => e.textContent);
   return {buttons: texts('button'), headings: texts('h1, h2, h3, h4'), th: texts('th'), dt: texts('dt'),
     status: texts('.status'), tags: texts('.tag'), title: document.title}; }"""
+IN_REGION = "() => !!document.activeElement.closest('#critical-results')"
+
+
+def acknowledgement_outside(item):
+    """A PAGE_TEXT item that reads as a critical-result delivery or acknowledgement state outside #critical-results."""
+    return not item["inside"] and ACKNOWLEDGED.search(item["text"]) is not None
 # The detail panel: which parts are shown and what they hold, whatever the report state says.
 DETAIL_VIEW = """() => { const q = s => document.querySelector(s), empty = q('#detail-empty');
   return {uid: q('#detail').dataset.uid ?? null, note: empty.hidden ? null : empty.textContent,
@@ -334,6 +364,10 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.list_requests, self.report_requests, self.logouts, self.booted = [], [], [], []
         # /api reads in the order they reached the harness: "me", "list", "report <uid>".
         self.calls = []
+        # S7-U2a Critical Results pending-list reads, kept apart from self.calls, and what they answer (empty unless a case
+        # sets them).
+        self.inbox_reads = []
+        self.inbox_items, self.inbox_pending = [], 0
         self.me_requests = 0
         self.unexpected, self.errors, self.dialogs, self.finished = [], [], [], []
         self.context = self.browser.new_context(viewport={"width": 1400, "height": 900})
@@ -446,6 +480,16 @@ class ClinicianHomeDOMTest(unittest.TestCase):
                 return
             route.fulfill(status=204, body="")
             return
+        # S7-U2a: the Critical Results area reads its pending list when the page boots (and every 60 s while shown). It is
+        # answered for this session (empty unless a case sets inbox_items) and logged apart; any other critical-result
+        # request stays unexpected.
+        if method == "GET" and path == "/api/critical-results" \
+                and parse_qs(url.query, keep_blank_values=True) == {"view": ["received"], "state": ["pending"]}:
+            account = self.me if isinstance(self.me, dict) else {}
+            self.inbox_reads.append(request.url)
+            route.fulfill(json={"owner": [account.get("institution"), account.get("sub")], "view": "received",
+                                "items": copy.deepcopy(self.inbox_items), "nextCursor": None, "pending": self.inbox_pending})
+            return
         self.unexpected.append(f"{method} {request.url}")
         route.abort()
 
@@ -523,6 +567,16 @@ class ClinicianHomeDOMTest(unittest.TestCase):
     def active(self):
         return self.page.evaluate("""() => { const e = document.activeElement;
           return {id: e.id || null, row: e.closest('tr[data-uid]')?.dataset.uid ?? null, text: e.textContent}; }""")
+
+    def walk_past_region(self):
+        """Tab on through the S7-U2a Critical Results region's own stops (at most 8, each inside #critical-results); returns
+        how many there were and the id of the first stop after them."""
+        stops = 0
+        self.page.keyboard.press("Tab")
+        while stops < 8 and self.page.evaluate(IN_REGION):
+            stops += 1
+            self.page.keyboard.press("Tab")
+        return stops, self.active()["id"]
 
     def hold_documents(self):
         # Every navigation to index.html waits here, so a second location.replace lands while the first is in flight
@@ -994,11 +1048,13 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.assertNotIn(".roles", SHIPPED["clinician.js"])
 
         self.open_home()
-        # Keyboard from the top: header, Refresh, then the list's single tab stop.
+        # Keyboard from the top: header, Refresh, then the list's single tab stop. Between the header and Refresh stand the
+        # S7-U2a Critical Results region's own controls (the region is above Studies); every stop passed there is inside it.
         self.page.keyboard.press("Tab")
         self.assertEqual("logout", self.active()["id"])
-        self.page.keyboard.press("Tab")
-        self.assertEqual("refresh", self.active()["id"])
+        stops, landed = self.walk_past_region()
+        self.assertGreater(stops, 0, "the Critical Results region's controls are reached from the keyboard")
+        self.assertEqual("refresh", landed)
         self.page.keyboard.press("Tab")
         self.assertEqual((uid(3), "View"), (self.active()["row"], self.active()["text"]))
         self.assertEqual(1, self.page.evaluate("() => [...document.querySelectorAll('#studies button')].filter(b => b.tabIndex === 0).length"))
@@ -1054,7 +1110,8 @@ class ClinicianHomeDOMTest(unittest.TestCase):
             for item in texts:
                 with self.subTest(text=item["text"][:60], tag=item["tag"]):
                     self.assertIsNone(AVOIDED.search(item["text"]))
-                    self.assertIsNone(ACKNOWLEDGED.search(item["text"]))
+                    # Outside #critical-results only (contract S7-U1p §16.3); test_13 shows that is everything else.
+                    self.assertFalse(acknowledgement_outside(item))
                     if item["size"] is not None:
                         self.assertGreaterEqual(item["size"], 12)
         targets = self.page.evaluate("""() => [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null)
@@ -1352,6 +1409,57 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.assertEqual(1, len(self.logouts) - logouts)
         post.fulfill(status=204, body="")
         self.page.wait_for_url(index)
+
+    def test_13_ack_wording_ban_covers_everything_outside_the_critical_results_region(self):
+        # TEST-S7-U2a-HOME-GUARD (RISK-S7-U2a-GUARD-WEAKENED): the S7-U2a region is the one exemption of test_08, and it
+        # exempts nothing else. A pending critical result puts acknowledgement wording on screen inside the region.
+        self.inbox_items, self.inbox_pending = [copy.deepcopy(PENDING_CVR)], 1
+        self.open_home()
+        region = self.page.locator("#critical-results")
+        for name in ("Acknowledge", "Show All", "Refresh"):
+            expect(region.get_by_role("button", name=name, exact=True)).to_have_count(1)
+        self.assertEqual({"count": 1, "tag": "SECTION", "parent": "MAIN#home"}, self.page.evaluate("""() => {
+          const found = document.querySelectorAll('#critical-results'), parent = found[0].parentElement;
+          return {count: found.length, tag: found[0].tagName, parent: `${parent.tagName}#${parent.id}`}; }"""))
+        # 1. The exemption is not empty, and nothing outside the region reads as an acknowledgement.
+        with_region = self.page.evaluate(PAGE_TEXT)
+        self.assertTrue([item for item in with_region if item["inside"] and ACKNOWLEDGED.search(item["text"])],
+                        "the region shows acknowledgement wording")
+        self.assertEqual([], [item for item in with_region if acknowledgement_outside(item)])
+        # 2. The page read with the region taken out of the document is exactly the set test_08 checks (every text,
+        # title and aria-label outside the region, in order): the exemption is the region and nothing else.
+        outside = [(item["text"], item["tag"]) for item in with_region if not item["inside"]]
+        self.page.evaluate("() => document.getElementById('critical-results').remove()")
+        self.assertEqual(outside, [(item["text"], item["tag"]) for item in self.page.evaluate(PAGE_TEXT)])
+
+        # 3. The ban still reports acknowledgement wording outside the region - a line in the study panel and a title on
+        # the Studies heading - and 4. the same words inside the region are not reported.
+        self.open_home()
+        base = self.page.evaluate(LABELS)
+        self.page.evaluate("""() => {
+          const line = document.createElement('p'); line.textContent = 'Pending ACK 1'; document.getElementById('detail').append(line);
+          document.getElementById('studies-title').title = 'Acknowledged';
+          const outside = document.createElement('button'); outside.textContent = 'SYN Outside'; document.getElementById('detail').append(outside);
+          const region = document.getElementById('critical-results');
+          const inner = document.createElement('p'); inner.textContent = 'Pending ACK 1'; region.append(inner);
+          document.getElementById('critical-results-title').title = 'Acknowledged';
+          const button = document.createElement('button'); button.textContent = 'SYN Inside'; region.append(button); }""")
+        self.assertEqual([("Pending ACK 1", "P"), ("Acknowledged", "H2@title")],
+                         [(item["text"], item["tag"]) for item in self.page.evaluate(PAGE_TEXT) if acknowledgement_outside(item)])
+        # The exact label lists leave out the region's controls only: a button outside it is listed, one inside is not.
+        buttons = self.page.evaluate(LABELS)["buttons"]
+        self.assertEqual((len(base["buttons"]) + 1, True, False),
+                         (len(buttons), "SYN Outside" in buttons, "SYN Inside" in buttons))
+        # The Tab walk skips the region's stops only: a stop outside the region between it and Studies ends the walk
+        # short of Studies' Refresh.
+        self.page.evaluate("""() => { const between = document.createElement('button'); between.id = 'syn-between';
+          between.textContent = 'SYN Between'; document.getElementById('critical-results').after(between);
+          document.activeElement.blur(); }""")
+        self.page.keyboard.press("Tab")
+        self.assertEqual("logout", self.active()["id"])
+        stops, landed = self.walk_past_region()
+        self.assertGreater(stops, 0)
+        self.assertEqual("syn-between", landed)
 
 
 if __name__ == "__main__":

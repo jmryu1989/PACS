@@ -8,6 +8,9 @@
  * (tests/clinician_timeline_dom_test.py). 묶음은 서버 GET clinician/studies/:uid/timeline이 정하고, 이 화면은 사용자가 열 때만 읽는다.
  * S5-U4b 질문 스레드: REQ-S5-U4b-QUESTION-UI -> RISK-S5-U4b-STALE -> TEST-S5-U4b-DOM (tests/clinician_question_dom_test.py).
  * 서버 S5-U4a route(studies/:uid/questions·questions/:id·entries·close)만 쓰고, 이 화면은 사용자가 Questions를 열 때만 읽는다.
+ * S7-U2a 받은 중요 결과(Critical Results): REQ-S7-U2a-RECIPIENT-LIST / EXPLICIT-ACK / WORDING -> TEST-S7-U2a-DOM
+ * (tests/critical_result_recipient_dom_test.py). 영역은 critical-result-inbox.js가 그리고, 이 파일은 승인된 세션에서 붙이고
+ * (boot) 세션이 끝나면 끝내며(close) 계정 변경을 다른 영역과 함께 잠근다(accountChanged). 세션 종료는 이 파일이 맡는다.
  *
  * 그리는 칸은 S5-U1b 두 읽기 응답에 있는 것뿐이다 — GET clinician/studies의 행과 GET clinician/studies/:uid/report.
  * 역할을 보고 컨트롤을 숨기거나 권한을 짐작하지 않는다. 서버가 거절하면(403/404/409) 그 상태 코드·코드·문구를
@@ -160,6 +163,8 @@
   let refocus = null;
   let channel = null;
   let leaving = false;
+  // S7-U2a 받은 중요 결과 영역(critical-result-inbox.js mount의 반환값). 승인된 세션에서만 붙는다.
+  let criticalInbox = null;
   // 사용자가 Show Timeline을 누른 뒤에만 참이다. 그 뒤 고르는 검사는 타임라인을 이어서 읽는다(이 문서 안에서만).
   let timelineOpen = false;
   let timelineSeq = 0;
@@ -2589,6 +2594,7 @@
   function accountChanged(detail) {
     lockQuestions(QUESTION.ownerChanged, detail, true);
     lockRequests(REQUEST.ownerChanged, detail, true);
+    if (criticalInbox) criticalInbox.lock(detail);
   }
 
   /**
@@ -2628,6 +2634,8 @@
    * 이전 세션의 판독문이 남고 늦게 온 답이 다시 그려진다. 이동이 늦어도 빈 화면이 되지 않게 이유 한 줄만 남긴다.
    */
   function close() {
+    // 받은 중요 결과 영역도 같은 자리에서 끝낸다: 나간 요청을 멈추고 늦은 답·주기 읽기를 그리지 않는다.
+    if (criticalInbox) criticalInbox.end();
     listSeq++;
     reportSeq++;
     selected = null;
@@ -2734,6 +2742,12 @@
     $('#actor').textContent = session.displayName || session.user || '';
     clearDetail();
     loadList();
+    // S7-U2a: 받는 사람인지는 서버가 정한다(역할 목록을 읽지 않는다). 이 영역의 401은 이 파일의 logout()으로, 이 영역이 알아챈
+    // 계정 변경은 accountChanged()로 온다. 영역을 준비하지 못해도 검사 목록은 그대로 쓴다.
+    try {
+      criticalInbox = KinCriticalResultInbox.mount({ apiBase: API, root: 'critical-results', prefix: 'critical-results',
+        logout: () => logout(), owner: () => owner, eligible: () => owner !== null, onAccountChanged: detail => accountChanged(detail) });
+    } catch (_) { criticalInbox = null; }
   }
 
   root.KinClinicianHome = { boot, ageAtStudy };
