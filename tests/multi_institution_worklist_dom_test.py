@@ -346,8 +346,11 @@ class Screen:
             dialog.dismiss()
 
     def table(self):
+        # The worklist is the table with the Name column, which no layout can hide (ID and Name are required); the
+        # Technician Order List also has Name but is the one with ScheduledDate. A stored layout may hide any other column.
         return self.page.get_by_role("table").filter(
-            has=self.page.get_by_role("columnheader", name="Accession No", exact=True))
+            has=self.page.get_by_role("columnheader", name="Name", exact=True)).filter(
+            has_not=self.page.get_by_role("columnheader", name="ScheduledDate", exact=True))
 
     def view(self):
         return self.table().evaluate(TABLE_VIEW)
