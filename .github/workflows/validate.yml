@@ -379,7 +379,7 @@ jobs:
         with:
           persist-credentials: false
       - name: CI profile safeguards and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Volume rendering, sculpt, and personal preset boundaries
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-vr --cwd . --file worklist-v0/hpacs-lite/volume-rendering.js --file tests/volume_rendering_test.cjs --file tests/volume_rendering_presets_test.cjs --file worklist-v0/hpacs-lite/volume-sculpt.js --file tests/volume_sculpt_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_rendering_test.cjs tests/volume_rendering_presets_test.cjs tests/volume_sculpt_test.cjs
       - name: Volume display, batch, crosshair, marks, curved MPR, orientation, job capture and preference models
@@ -427,7 +427,7 @@ jobs:
         with:
           persist-credentials: false
       - name: MPR profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/mpr-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/mpr-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -466,7 +466,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Slab profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/slab-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/slab-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -503,7 +503,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Path profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/path-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/path-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -544,7 +544,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Batch profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/batch-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/batch-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -586,7 +586,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Sync and preferences profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/syncpref-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/syncpref-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -629,7 +629,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Marks profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/marks-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/marks-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -668,7 +668,7 @@ jobs:
         with:
           persist-credentials: false
       - name: MIP VOI profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/mipvoi-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/mipvoi-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -704,7 +704,7 @@ jobs:
         with:
           persist-credentials: false
       - name: MIP Job profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/mipjob-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/mipjob-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -740,7 +740,7 @@ jobs:
         with:
           persist-credentials: false
       - name: MIP Batch profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/mipbatch-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/mipbatch-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -776,7 +776,7 @@ jobs:
         with:
           persist-credentials: false
       - name: MIP output profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/mipout-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/mipout-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -813,7 +813,7 @@ jobs:
         with:
           persist-credentials: false
       - name: MIP orientation profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/miporient-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/miporient-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -853,7 +853,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Hanging protocol profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/hp-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/hp-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -899,7 +899,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Cell merge profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/cell-merge-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/cell-merge-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -946,7 +946,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Study arrivals profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/study-arrivals-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/study-arrivals-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -985,7 +985,7 @@ jobs:
         with:
           persist-credentials: false
       - name: U2b regressions profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/u2b-regressions-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/u2b-regressions-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies

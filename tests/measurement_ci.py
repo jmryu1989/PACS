@@ -369,6 +369,15 @@ PROFILES = {
         'suite_timeout': 1260,
         'suites': (('gateway_pipeline_live.py', 'GatewayPipelineLive', 'ci-eg1-gateway'),),
     },
+    'critical-result-screens': {
+        'out': ROOT / 'tests/e2e/artifacts/critical-result-screens-ci',
+        'project_prefix': 'kin-cvr-screens-ci-',
+        # S7-U2b, dispatch only (Focused integration, once per candidate): the sender and recipient screens of two
+        # identities on one synthetic stack, six cases in one unit at the D-S7-12 (a) live cap. The explicit class keeps
+        # the module's S7-U1a API cases and the inherited WorklistE2E cases out of this budget.
+        'suite_timeout': 900,
+        'suites': (('e2e/test_critical_result.py', 'CriticalResultScreensE2E', 'ci-s7-u2b-critical-result-screens'),),
+    },
 }
 
 # S4-EG1 A3: the gateway-e2e suite names its own Compose project here before its first compose call, so the project

@@ -21,6 +21,7 @@ on:
           - image-text
           - three-d-cursor-accuracy
           - three-d-cursor-wiring
+          - critical-result-screens
 
 permissions:
   contents: read
@@ -39,7 +40,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Output integration profile safeguards and exact selection
-        run: python3 scripts/record-run.py --run-dir tmp/output-integration-ci/profile --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py -- python3 -B tests/measurement_ci_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/output-integration-ci/profile --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -78,6 +79,7 @@ jobs:
             tests/e2e/artifacts/three-d-cursor-accuracy-*.json
             tests/e2e/artifacts/three-d-cursor-wiring-ci/
             tests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png
+            tests/e2e/artifacts/critical-result-screens-ci/
             tests/e2e/artifacts/test_image_text_*.png
             tests/e2e/artifacts/STUDY-ARRIVALS-*.png
             tests/e2e/artifacts/test_arrivals_*.png
