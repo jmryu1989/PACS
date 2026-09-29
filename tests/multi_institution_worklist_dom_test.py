@@ -1189,6 +1189,8 @@ class MultiInstitutionWorklist(unittest.TestCase):
         server.rows = [own, tele("SYN Center B3"), row("2.25.1103", "SYN-R-TELE-2", inst=C, tele=True, owner="syn-c",
                                                       tele_to="hallym")]
         screen.refresh()
+        until(lambda: screen.cells_by_id(HOSPITAL) == {"SYN-R-TELE": "SYN Center B3 Tele"},
+              10, "mi11 refreshed Hospital row under active filter")
         screen.wait_rows(["SYN-R-TELE"])
         self.assertEqual("SYN Center B3 Tele", screen.cells_by_id(HOSPITAL)["SYN-R-TELE"])
         self.type_filter(screen, HOSPITAL, "")
