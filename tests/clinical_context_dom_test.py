@@ -35,7 +35,8 @@ Cases (each also checks at tearDown: no page error, no request the harness does 
   cd12 session end (end list, other tab, storage, pagehide, the panel's own 401, another account) on both paths
   cd13 nothing else on the screen changes; open report text survives repaints; storage untouched; the 45% bound
   cd14 the request: its shape, one per change of the viewed study and in that order, none for the same study, none by time
-  cd15 every malformed vector and a non-JSON body are Failed with nothing painted
+  cd15 every malformed vector and a non-JSON body are Failed with nothing painted; on a first read and on a Refresh each
+       ends the read (no item, the malformed reason, Refresh and Retry enabled) and one Retry recovers (F-13)
   cd16 offline hides and asks nothing; back online asks once
   cd17 an answer about another study than the request changes nothing (ABA-3, OP-2 decided by D172)
 
@@ -1413,6 +1414,45 @@ class ClinicalContextDOMTest(unittest.TestCase):
             with self.subTest(original=name):
                 self.show(A, vector=name)
                 self.assertEqual(len(self.panel()["sections"]), 4, name)
+
+    def test_cd15_a_malformed_first_read_or_refresh_ends_failed_and_retry_recovers(self):
+        """F-13, F-06 and Astra S7-U4b-R-001 F01: a malformed answer ends the read. On a first read and on a Refresh over a
+        painted answer, every malformed vector leaves no item, Failed with the reason line a non-JSON 200 gets (both are
+        "malformed", section 7.1), Refresh and Retry enabled; one Retry reads once and paints the original. The page never
+        holds an unhandled rejection."""
+        self.open_reader()
+        self.page.evaluate("() => { window.synRejections = []; window.addEventListener('unhandledrejection', "
+                           "event => window.synRejections.push(String(event.reason && event.reason.stack || event.reason))); }")
+        region = self.page.get_by_role("region", name="Clinical Context")
+        retry, refresh = region.get_by_role("button", name="Retry"), region.get_by_role("button", name="Refresh")
+        self.show(A, status=200, raw="<html>not json</html>")
+        malformed = self.panel()["status"]
+        self.assertIn(TEXTS["stateLabels"]["failed"], malformed)
+        for name, entry in MALFORMED.items():
+            for how in ("first read", "refresh"):
+                with self.subTest(name=name, how=how):
+                    if how == "first read":
+                        self.show(A, malformed=name)
+                    else:
+                        self.show(A, vector=entry["derivedFrom"])
+                        self.assertEqual(len(self.panel()["sections"]), 4)
+                        self.answer(A, malformed=name)
+                        refresh.click()
+                        self.settle()
+                    panel = self.panel()
+                    self.assertEqual(panel["sections"], [])
+                    self.assertEqual(panel["status"], malformed)
+                    self.assertNotIn(entry["visible"], panel["all"])
+                    expect(retry).to_be_enabled()
+                    expect(refresh).to_be_enabled()
+                    asked = len(self.calls())
+                    self.answer(A, vector=entry["derivedFrom"])
+                    retry.click()
+                    self.settle()
+                    self.assertEqual(len(self.calls()), asked + 1)
+                    self.assertEqual(len(self.panel()["sections"]), 4)
+                    self.assertNotIn(TEXTS["stateLabels"]["failed"], self.panel()["status"])
+        self.assertEqual(self.page.evaluate("() => window.synRejections"), [])
 
     # ── cd16 ──
     def test_cd16_offline_hides_and_asks_nothing_until_back_online(self):

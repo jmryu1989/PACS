@@ -10,6 +10,10 @@
  *   cm02  every malformed vector: both checks refuse (its derivedFrom original is accepted by both, cm01).
  *   cm02b every object of every valid vector with one unknown key added, or one of its keys removed: both refuse - the two
  *         key lists are the same without this file naming a key.
+ *   cm02c every value of every valid vector (object members and array elements, at any depth; in an array longer than
+ *         three its first, second and last element) replaced in turn by null, 0, "", [], {} or true: neither check throws
+ *         - a malformed answer is a refusal, never an exception that would leave the panel mid-read (Astra S7-U4b-R-001
+ *         F01: a null Tech Note item) - and the two verdicts are the same.
  *   cm03  "No clinical information provided." only when all four sections are absent (A-ABSENT4 vs A-TAGS-NC).
  *   cm04  the §8.1 stale table (stale_cases T-01..T-18), marks that stay until a new answer, and the direction of the
  *         multi-page limit D-1 (T-15): a list row that differs from the answer in either direction marks the section.
@@ -120,6 +124,70 @@ test('cm02b the same variants: the compiled server refuses every one, so the two
     assert.notEqual(server.clinicalContextShapeError(answer), null, label);
     assert.notEqual(model.shapeError(answer), null, label);
   });
+});
+
+const REPLACEMENTS = [['null', () => null], ['0', () => 0], ['""', () => ''], ['[]', () => []], ['{}', () => ({})], ['true', () => true]];
+/**
+ * Every place in a value that holds another value: [path, holder, key], object members and array elements alike. In an
+ * array longer than three only the first, the second and the last element are entered - the rest of the 10 prior reports
+ * and 200 history rows of the truncated vectors repeat the same row shape, and entering each would re-check the whole
+ * answer thousands of times more.
+ */
+function places(value, at = 'answer', out = []) {
+  if (Array.isArray(value)) {
+    value.forEach((item, i) => {
+      if (value.length > 3 && i > 1 && i < value.length - 1) return;
+      out.push([at + '[' + i + ']', value, i]);
+      places(item, at + '[' + i + ']', out);
+    });
+  } else if (value && typeof value === 'object') {
+    for (const key of Object.keys(value)) { out.push([at + '.' + key, value, key]); places(value[key], at + '.' + key, out); }
+  }
+  return out;
+}
+/** Run visit() on every one-value replacement of every valid vector. */
+function eachReplacement(visit) {
+  for (const [name, original] of Object.entries(VALID)) {
+    const answer = clone(original);
+    for (const [at, holder, key] of places(answer)) {
+      const kept = holder[key];
+      for (const [label, make] of REPLACEMENTS) {
+        holder[key] = make();
+        visit(name + ' ' + at + ' := ' + label, answer);
+      }
+      holder[key] = kept;
+    }
+    assert.deepEqual(answer, original, name + ' restored after its replacements');
+  }
+}
+/** The verdict of one shape check; an exception is reported as such, not as a refusal. */
+function verdict(check, answer) {
+  try { return check(answer) === null ? 'accepted' : 'refused'; } catch (error) { return 'threw ' + error.name + ': ' + error.message; }
+}
+let clientVerdicts = null;
+/** The client model's verdict on every replacement, by label (computed once for both cm02c cases). */
+function clientReplacementVerdicts() {
+  if (!clientVerdicts) {
+    clientVerdicts = new Map();
+    eachReplacement((label, answer) => clientVerdicts.set(label, verdict(value => model.shapeError(value), answer)));
+  }
+  return clientVerdicts;
+}
+
+test('cm02c one value replaced anywhere in a valid vector by null or another type: the client model answers, never throws', () => {
+  const verdicts = clientReplacementVerdicts();
+  assert.ok(verdicts.size > 10000, 'replacements: ' + verdicts.size);
+  for (const [label, client] of verdicts) assert.match(client, /^(accepted|refused)$/, label);
+});
+
+test('cm02c the same replacements: the compiled server answers too, and both give the same verdict', { skip: serverSkip }, () => {
+  const verdicts = clientReplacementVerdicts();
+  let count = 0;
+  eachReplacement((label, answer) => {
+    count += 1;
+    assert.equal(verdict(value => server.clinicalContextShapeError(value), answer), verdicts.get(label), label);
+  });
+  assert.equal(count, verdicts.size, 'the same replacements on both sides');
 });
 
 test('cm03 "No clinical information provided." is true only when all four sections were read and are absent', () => {

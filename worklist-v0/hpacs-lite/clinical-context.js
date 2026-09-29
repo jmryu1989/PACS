@@ -237,11 +237,13 @@
       check(s.state === 'not_configured' ? answer.patientKey === null : s.state === 'failed' || answer.patientKey !== null,
         path, 'state and patientKey disagree');
     }
+    // Items are shape-checked before any comparison reads them: a null item must be refused, not throw out of shapeError()
+    // and leave the panel mid-read (Astra S7-U4b-R-001 F01).
+    items(name, s, answer);
     if (name === 'techNote') {
       check(s.state !== 'present' || s.items[0].version === answer.anchor.techNoteVersion, path, 'differs from anchor.techNoteVersion');
       check(s.state !== 'absent' || answer.anchor.techNoteVersion === 0, path, 'absent needs anchor.techNoteVersion 0');
     }
-    items(name, s, answer);
   }
   /** null when the answer has exactly the closed shape of §9.1 and its value rules, otherwise the path and the rule broken. */
   function shapeError(value) {
