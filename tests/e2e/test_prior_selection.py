@@ -150,6 +150,11 @@ class PriorSelectionE2E(base.WorklistE2E):
             # Selection starts its own thumbnail lookup. Observe autoPrior only
             # after that work settles, so it cannot be counted as a new fetch.
             page.evaluate('() => thumbDone')
+            # S7-U4b: the selection also starts one Clinical Context read; wait until that panel is hidden or its status line
+            # has left Loading…, so only what autoPrior() starts is observed below (a request it makes still comes after this).
+            page.wait_for_function("() => { const p = document.querySelector('#clinical-context'), s = document.querySelector("
+                                   "'#clinical-context-status'); return !p || p.hidden || (!!s && s.textContent !== 'Loading…'); }",
+                                   timeout=15000)
             requests = []
             listener = lambda request: requests.append(request.url)
             page.on("request", listener)

@@ -93,6 +93,7 @@ function fromApi(s){appState[s.uid]=mergePolledState(s.uid,s.state);return {...s
 let studyObservationModel=null;function viewed(){return studies.find(s=>s.uid===selectedUid)}
 let orderReconciliationModel=null;
 let studyIdentityModel=null;
+let clinicalContext=null;
 OBSERVESTATE
 ORDERSTATE
 IDENTITYSTATE
