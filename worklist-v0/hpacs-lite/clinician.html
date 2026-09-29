@@ -90,6 +90,39 @@
     .membership { max-width: 560px; margin: 60px auto; }
     .membership p { line-height: 1.7; color: #c8d5e6; }
     .closing { max-width: 560px; margin: 60px auto; padding: 0 20px; color: var(--muted); }
+    /* S7-U2a 받은 중요 결과(Critical Results): 두 열을 모두 쓰는 한 줄 영역으로 Studies 위에 선다. 행이 많아도 검사 목록을
+       밀어내지 않게 목록은 높이 상한 안에서 스크롤한다. 상태는 색과 함께 늘 글자로 쓴다. */
+    #critical-results { grid-column: 1 / -1; }
+    #critical-results .cvr-badge { display: inline-block; border: 1px solid #7a6a33; border-radius: 999px; padding: 1px 8px;
+      font-size: 12px; font-weight: 700; color: #ffe7a8; background: #3a3218; }
+    #critical-results .cvr-badge:is([data-state="failed"], [data-state="locked"]) { color: var(--danger-text); background: var(--danger-bg);
+      border-color: var(--danger-line); }
+    #critical-results-help { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+    #critical-results-help p { margin: 0 0 4px; }
+    #critical-results-status { margin: 0 0 10px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); }
+    #critical-results-status p { margin: 0; }
+    #critical-results-status .cvr-inbox-status-detail { margin-top: 4px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #critical-results-status[data-state="failed"], #critical-results-status[data-state="locked"] { border-color: var(--danger-line);
+      background: var(--danger-bg); color: var(--danger-text); }
+    #critical-results-status[data-state="empty"] { border-style: dashed; }
+    #critical-results-attempts, #critical-results-list { margin: 0 0 10px; padding: 0; list-style: none; }
+    #critical-results-list { max-height: 60vh; overflow: auto; }
+    .cvr-inbox-row, .cvr-inbox-line { margin: 0 0 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); }
+    .cvr-inbox-line { border-color: var(--danger-line); }
+    .cvr-inbox-row p, .cvr-inbox-line p { margin: 0 0 4px; overflow-wrap: anywhere; }
+    .cvr-inbox-head { font-weight: 650; }
+    .cvr-inbox-head:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+    .cvr-inbox-state { display: inline-block; border: 1px solid #56607a; border-radius: 999px; padding: 1px 8px; font-size: 12px; color: #dde3ee; }
+    .cvr-inbox-state[data-state="created"] { color: #ffe7a8; border-color: #7a6a33; background: #3a3218; }
+    .cvr-inbox-state[data-state="acknowledged"] { color: #b8f0cf; border-color: #3f8a5f; background: #16442d; }
+    .cvr-inbox-state:is([data-state="changed"], [data-state="unknown"], [data-state="checking"]) { color: var(--danger-text);
+      border-color: var(--danger-line); background: var(--danger-bg); }
+    .cvr-inbox-message { white-space: pre-wrap; font-weight: 650; }
+    .cvr-inbox-meta, .cvr-inbox-note, .cvr-inbox-detail { color: var(--muted); font-size: 13px; white-space: pre-wrap; }
+    .cvr-inbox-report { margin: 6px 0; padding: 6px 10px; border-left: 3px solid var(--line); }
+    .cvr-inbox-field { color: #b9c9dc; font-size: 13px; font-weight: 650; }
+    .cvr-inbox-value { white-space: pre-wrap; }
+    .cvr-inbox-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -102,6 +135,23 @@
   </header>
 
   <main id="home">
+    <!-- S7-U2a 받은 중요 결과. 수신 확인(Acknowledge) 문구는 이 영역 안에서만 쓴다(계약 §16.3). 로그인한 승인 세션에서
+         critical-result-inbox.js가 서버 목록으로 채우고 보인다. -->
+    <section class="panel" id="critical-results" aria-labelledby="critical-results-title" hidden>
+      <div class="panel-head">
+        <h2 id="critical-results-title" tabindex="-1">Critical Results</h2>
+        <span class="cvr-badge" id="critical-results-badge" role="status" aria-live="polite"></span>
+        <div class="spacer"></div>
+        <button type="button" id="critical-results-all" aria-pressed="false">Show All</button>
+        <button type="button" id="critical-results-refresh" title="받은 목록을 서버에서 다시 읽습니다. 읽기만 하며 어떤 전달도 바꾸지 않습니다.">Refresh</button>
+      </div>
+      <div id="critical-results-help"></div>
+      <ol id="critical-results-attempts" aria-label="Unconfirmed Acknowledgements" hidden></ol>
+      <div id="critical-results-status" role="status" aria-live="polite"></div>
+      <ol id="critical-results-list" aria-label="Received Critical Results"></ol>
+      <button type="button" id="critical-results-more" hidden>More</button>
+    </section>
+
     <section class="panel" aria-labelledby="studies-title">
       <div class="panel-head">
         <h2 id="studies-title">Studies</h2>
@@ -165,6 +215,7 @@
   </section>
 
   <script src="auth.js"></script>
+  <script src="critical-result-inbox.js"></script>
   <script src="clinician.js"></script>
   <script>KinClinicianHome.boot();</script>
 </body>

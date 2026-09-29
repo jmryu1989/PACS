@@ -54,7 +54,7 @@ def lf_text(path):
 
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js")}
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "critical-result-inbox.js")}
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
 INDEX_STAND_IN = ('<!doctype html><html><head><meta charset="utf-8"><title>SYN index stand-in</title></head>'
                   '<body><p id="stand-in">SYN index stand-in</p></body></html>')
@@ -208,6 +208,8 @@ class ClinicianTimelineDOMTest(unittest.TestCase):
         self.files = dict(SHIPPED)
         self.list_cursors, self.timeline_cursors = {}, {}
         self.timeline_requests, self.report_requests, self.logouts = [], [], []
+        # S7-U2a Critical Results pending-list reads, kept apart from the reads this file checks.
+        self.inbox_reads = []
         self.timeline_errors, self.timeline_patch = [], None
         self.hold_timeline, self.held_timelines = False, []
         self.held_logouts = None
@@ -299,6 +301,13 @@ class ClinicianTimelineDOMTest(unittest.TestCase):
                 self.held_logouts.append(route)
                 return
             route.fulfill(status=204, body="")
+            return
+        # S7-U2a: the Critical Results area reads its pending list when the page boots (and every 60 s while shown). It is
+        # answered empty for this session and logged apart; any other critical-result request stays unexpected.
+        if method == "GET" and path == "/api/critical-results" and query == {"view": ["received"], "state": ["pending"]}:
+            self.inbox_reads.append(request.url)
+            route.fulfill(json={"owner": [ME.get("institution"), ME.get("sub")], "view": "received", "items": [],
+                                "nextCursor": None, "pending": 0})
             return
         self.unexpected.append(f"{method} {request.url}")
         route.abort()

@@ -507,6 +507,18 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S7-U2a critical result receiver panel (Critical Results) after the Sent Critical Results line. The code lives in
+# critical-result-inbox.js, so main.html gains no top-level function and no $('#...') lookup.
+# tests/critical_result_recipient_dom_test.py pins how they behave.
+for _kind, _extra in {
+    "ids": {"cvr-inbox-p": 1, "cvr-inbox-title": 1, "cvr-inbox-badge": 1, "cvr-inbox-toggle": 1, "cvr-inbox-refresh": 1,
+            "cvr-inbox-body": 1, "cvr-inbox-help": 1, "cvr-inbox-all": 1, "cvr-inbox-attempts": 1, "cvr-inbox-status": 1,
+            "cvr-inbox-list": 1, "cvr-inbox-more": 1},
+    "functions": {},
+    "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 # Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {
