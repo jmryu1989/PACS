@@ -76,6 +76,9 @@ class RelatedFilterE2E(previous.ReturnToCurrentE2E):
         self.thumbnail_ready(page); expect(page.locator("#prior-findings")).to_have_text(related.secret)
         before = {selector:page.locator(selector).inner_text() for selector in ("#clinical","#related-current","#prior-report-meta")}
         src = page.locator("#thumbwrap img").get_attribute("src")
+        # S7-U4b: the Related click also starts one Clinical Context read; wait until that panel is hidden or has left
+        # Loading…, so only what the filter changes start is observed below (a request they make still comes after this).
+        page.wait_for_function("() => { const p = document.querySelector('#clinical-context'), s = document.querySelector('#clinical-context-status'); return !p || p.hidden || (!!s && s.textContent !== 'Loading…'); }",timeout=15000)
         requests = []; listener = lambda r:requests.append((r.method,r.url)) if any(x in r.url for x in ("/api/studies/","/api/dicom/lookup","/dicom-web/","/instances/")) else None
         page.on("request",listener)
         for token in ("",None,"",None,""):

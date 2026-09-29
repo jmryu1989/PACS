@@ -519,6 +519,17 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S7-U4b Clinical Context panel after #clinical in .s-clinical (contract S7-U4p §10), its mount function and the lookups
+# the block makes; the pure model lives in clinical-context.js. tests/clinical_context_dom_test.py pins how they behave.
+for _kind, _extra in {
+    "ids": {"clinical-context": 1, "clinical-context-title": 1, "clinical-context-refresh": 1, "clinical-context-status": 1,
+            "clinical-context-conflict": 1, "clinical-context-sections": 1, "clinical-context-scope": 1},
+    "functions": {"mountClinicalContext": 1},
+    "selectors": {"#clinical-context": 1, "#clinical-context-status": 1, "#clinical-context-refresh": 1,
+                  "#clinical-context-conflict": 1, "#clinical-context-sections": 1},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 # Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {

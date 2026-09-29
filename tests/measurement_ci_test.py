@@ -2273,7 +2273,11 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(validate.count('--profile gateway-e2e'), 0)
         dispatch = (ci.ROOT/'.github/workflows/gateway-e2e.yml').read_text(encoding='utf-8')
         self.assertEqual(dispatch.count('--profile gateway-e2e'), 1)
-        self.assertNotIn('gateway-e2e', (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8'))
+        # A record-run `--file <path>` argument only hashes a file the run reads (S7-U4b: output-integration.yml's
+        # measurement_ci_test.py line records gateway-e2e.yml); every other mention of gateway-e2e there still fails.
+        import re
+        integration = re.sub(r'--file\s+\S+', '', (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8'))
+        self.assertNotIn('gateway-e2e', integration)
         self.assertEqual(ci.GATEWAY_HANDOFF, 'gateway-project.json')
         self.assertTrue(ci.GATEWAY_PROJECT.fullmatch('kin-eg1-gw-0123456789ab'))
         self.assertIsNone(ci.GATEWAY_PROJECT.fullmatch('kin-gateway'))
