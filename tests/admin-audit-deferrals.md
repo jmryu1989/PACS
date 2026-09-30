@@ -80,3 +80,62 @@ all api/src inputs, this module/policy, both fixture directories and compiler in
 Include generated-client present/absent and compiler-missing refusal evidence.
 Keep the existing compiled-service and ordinary CI/merge requirements separate;
 historical 263719d evidence is not evidence that the applied HEAD passed them.
+
+## SPEC-F and SPEC-G reviewed transitions (schema 3)
+
+SPEC-F (S7-U3a-AUDIT-SPEC-F-R-001) is unchanged for files with no deferred
+site. Its predecessor entries, diagnostics and all deferral-bearing files
+must be identical. U5 remains under SPEC-F when it changes only such files
+(e.g. admin-audit.ts, not admin.service.ts). Use the latest approved base;
+U1c and U5 policy updates are serialized.
+
+SPEC-G (S7-U1c-SPEC-G-B-R-001, option A) additionally permits the reviewed
+U1c transition of critical-result.service.ts. No other deferral-bearing
+file is permitted. It is temporary D-NW, not a W1-W6 proof or product approval.
+Apply this checker patch INSIDE U1c after SPEC-F merges, not as a separate
+product candidate. The supplied policy stays in SPEC-F mode until U1c's
+actual source and proof inputs exist; do not invent future hashes.
+
+For U1c, take baseline_source_sha and repin.source_sha from the approved
+implementation base B. Set repin.ruling to S7-U1c-SPEC-G-B-R-001.
+Copy B's entries into repin.entries and hash that array into
+repin.entries_sha256; copy B's unresolved/corpus/compiler/context pins
+into repin. Carry the LF Git text of EVERY changed api/src file in
+repin.before. The same compiler rescans the reconstructed entire B corpus.
+Set current sources_sha256, unresolved_sha256 and entries from candidate S.
+Current positions are locators only: the three calls must correspond
+one-to-one by file/kind/rule/exact reason and TypeScript AST scope/branch/
+binding/tag shape. Duplicate anchors, changed diagnoses, added/removed
+unresolved calls, another deferred file or incomplete reconstruction fail
+atomically. The other 24 entries keep their exact positions and reasons.
+
+repin.site_proofs has exactly three records, keyed by deferralIdentity's
+identity hash. Each records before_call_sha256 and after_call_sha256
+(SHA256 of the UTF-8 LF call text), nonempty sql, values, dependencies
+narratives, and evidence: [{ref, sha256}]. All three need a bounded
+RAW-PROVENANCE-style review, including the moved-only call: changing its
+helpers or callers can change provenance without changing the call text.
+The checker verifies correspondence, diagnoses and proof bindings only.
+A nonempty narrative, matching diagnostic or evidence hash format is
+NOT proof, and never grants review approval.
+
+At candidate review, independently open each evidence file from the
+manifest, verify its digest and candidate/input binding, and establish:
+the actual SQL operation/table set and absence of an audit write; every
+unproven interpolation's complete expression, origins, runtime validation,
+assignments and helper/caller paths; no fragment/cast escape or added
+unresolved path; and the authorized tele/read/count behavior. Cover all
+changed dependencies, not just the printed (possibly truncated) reason.
+Missing or inconclusive proof prevents ACCEPT; never infer scalar safety
+from an any type, cast, SELECT prefix or unchanged diagnostic. If a call
+gains scanner proof, or these conditions cannot hold, obtain a separate
+disposition/RAW-PROVENANCE resolution; do not relabel or silently drop it.
+Evidence contains synthetic data and code references only.
+
+Keep the raw scan, all 32 writers, 27 diagnoses and 27 visible dispositions.
+Run every original E/F/C-RAW-CAST and SPEC-F control plus SPEC-G controls;
+no skips, assertion deletion or product restructuring for this checker.
+Record exact candidate SHA, whole inputs, command, exit and raw output,
+including compiler-missing and generated-client present/absent conditions.
+The U1c service/authorization/preservation tests, PR CI, G3 and independent
+candidate review remain mandatory. RAW-PROVENANCE stays open before S7 exit.

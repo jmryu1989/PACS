@@ -395,6 +395,7 @@ class LiveStack:
         self.service_tokens: dict[str, str] = {}
         self.created_gateway_role = False
         self.admin_token: str | None = None
+        self.admin_token_renew_at = 0.0
         self._load_local_configuration()
 
     def _load_local_configuration(self) -> None:
@@ -410,6 +411,11 @@ class LiveStack:
             return urlopen(request, timeout=30, context=self.context)
         return urlopen(request, timeout=30)
 
+    # The master realm's admin-cli token lives only its accessTokenLifespan (60 s on the synthetic stack) while a class
+    # runs for minutes, so kc_admin logs in again this much before the token would expire; reusing the first token
+    # answered 401 in the seventh CriticalResultE2E case (S7-CR-E2E-HARNESS).
+    ADMIN_TOKEN_MARGIN_SECONDS = 15.0
+
     def _admin_login(self) -> None:
         password = os.environ.get("KC_ADMIN_PASSWORD", "")
         if not password:
@@ -422,11 +428,17 @@ class LiveStack:
             "http://127.0.0.1:8080/auth/realms/master/protocol/openid-connect/token",
             data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
         )
+        # Counted from before the request: Keycloak starts the lifetime when it issues the token, which is later.
+        # A missing or short lifetime renews on every call rather than trusting the token.
+        sent = time.monotonic()
         with self._open(request) as response:
-            self.admin_token = json.loads(response.read().decode("utf-8"))["access_token"]
+            granted = json.loads(response.read().decode("utf-8"))
+        self.admin_token = granted["access_token"]
+        lifetime = float(granted.get("expires_in") or 0)
+        self.admin_token_renew_at = sent + max(0.0, lifetime - self.ADMIN_TOKEN_MARGIN_SECONDS)
 
     def kc_admin(self, method: str, path: str, body: Any = None) -> HttpResult:
-        if not self.admin_token:
+        if not self.admin_token or time.monotonic() >= self.admin_token_renew_at:
             self._admin_login()
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Authorization": "Bearer " + str(self.admin_token)}
@@ -774,9 +786,30 @@ class LiveStack:
             payload, text = _json_or_text(error.read())
             return HttpResult(error.code, payload, text)
 
-    def token(self, user: str) -> str:
+    def token(self, user: str, *, refused: bool = False) -> str:
+        """The member's cached token; a new one is confirmed with GET /me = 200 and its actor recorded.
+
+        refused=True is only for a step that expects the server to refuse this member, e.g. after the member's last KIN
+        role is removed the guard answers every route, /me included, 403 INSTITUTION_INVALID. It always takes a new
+        token, keeps it for the step's next requests and records no actor; the step asserts /me and the refused route
+        itself (S7-CR-E2E-HARNESS)."""
+        if refused:
+            self.tokens[user] = self._password_token(user)
+            self.actors.pop(user, None)
+            return self.tokens[user]
         if user in self.tokens:
             return self.tokens[user]
+        token = self._password_token(user)
+        self.tokens[user] = token
+        me = self.request("GET", "/me", user)
+        if me.status != 200:
+            # A later call must not reuse the refused token as if it had been confirmed.
+            self.tokens.pop(user, None)
+            raise RuntimeError(f"실제 토큰으로 /me 호출 실패: {user} -> {me.status} {me.text}")
+        self.actors[user] = me.body["actor"]
+        return token
+
+    def _password_token(self, user: str) -> str:
         password = self.passwords.get(user)
         if not password:
             raise RuntimeError(f"Keycloak 개발 계정 비밀번호를 찾을 수 없습니다: {user}")
@@ -789,13 +822,7 @@ class LiveStack:
             headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
         )
         with self._open(request) as response:
-            token = json.loads(response.read().decode("utf-8"))["access_token"]
-        self.tokens[user] = token
-        me = self.request("GET", "/me", user)
-        if me.status != 200:
-            raise RuntimeError(f"실제 토큰으로 /me 호출 실패: {user} -> {me.status} {me.text}")
-        self.actors[user] = me.body["actor"]
-        return token
+            return json.loads(response.read().decode("utf-8"))["access_token"]
 
     def actor(self, user: str) -> str:
         self.token(user)
@@ -4927,7 +4954,8 @@ class CriticalResultInvariantTests(CriticalResultHarness, unittest.TestCase):
         self.assertEqual(critical_ledger(f.uid), {"records": 1, "events": 2, "receipts": 2, "audits": 2})
 
     def test_cr_inv_02_institution_boundary_tele_and_owner_move(self) -> None:
-        """CR21/CR13/T-3: the tele institution never participates; an owner move hides records everywhere, replays included."""
+        """CR21/CR13/T-3 as S7-U1c states them: the tele institution sends from its open channel to owner members only, is
+        never a recipient and never sees the owner's own records; an owner move hides records everywhere, replays included."""
         f = self.study()
         self.approved(f)
         rid, created = self.send("doctor", f.uid, "clinician", 1)
@@ -4939,9 +4967,12 @@ class CriticalResultInvariantTests(CriticalResultHarness, unittest.TestCase):
             for user in ("kdoctor", "kclinician"):
                 self.check(self.read(user, rid), 404, "CRITICAL_RESULT_NOT_FOUND")
                 self.assertNotIn(rid, self.ids(self.check(self.listed(user, "received"), 200)))
-            self.check(self.candidates("kdoctor", f.uid), 404, "STUDY_NOT_FOUND")
-            self.check(self.send("kdoctor", f.uid, "doctor2", 1)[1], 404, "STUDY_NOT_FOUND")
-            self.check(self.for_study("kdoctor", f.uid), 404, "STUDY_NOT_FOUND")
+            # S7-U1c (NR-02): the open channel gives kin-center a sender scope whose candidates are hallym's members only,
+            # B -> B is refused without a write, and the owner's own record is not in kin-center's per-study list.
+            candidates = self.check(self.candidates("kdoctor", f.uid), 200).body["recipients"]
+            self.assertFalse({row["sub"] for row in candidates} & {self.sub("kdoctor"), self.sub("kclinician")})
+            self.check(self.send("kdoctor", f.uid, "kclinician", 1)[1], 400, "CRITICAL_RESULT_RECIPIENT_INVALID")
+            self.assertEqual(self.check(self.for_study("kdoctor", f.uid), 200).body["items"], [])
             self.assertNotIn(rid, self.ids(self.check(self.listed("kdoctor", "sent"), 200)))
             # GET audit: the owner sees the owner-only rows, the tele institution sees the study's other rows without them
             owner_rows = self.check(self.stack.request("GET", f"/audit?uid={quote(f.uid)}", "doctor"), 200).body
