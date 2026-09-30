@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from pydicom import dcmread
-from invariants_live import ROOT, psql
+from invariants_live import ROOT, past_audit_guard, psql
 from viewer_api_test import ViewerStack, literal
 sys.path.insert(0, str(ROOT/'tests/e2e'))
 from viewer_precision_fixture import synthetic_ct
@@ -635,7 +635,8 @@ class FindingAPI(unittest.TestCase):
                 self.assertEqual(psql(f'DELETE FROM "{table}" t WHERE to_jsonb(t)={literal(raw)}::jsonb RETURNING 1'), ['1'])
         for raw in psql(f"SELECT to_jsonb(t)::text FROM \"AuditLog\" t WHERE target={literal(subject)} AND action='study.access'"):
             self.assertTrue(json.loads(json.loads(raw)['detail'])['reason'].startswith('SYNTHETIC'))
-            self.assertEqual(psql(f'DELETE FROM "AuditLog" t WHERE to_jsonb(t)={literal(raw)}::jsonb RETURNING 1'), ['1'])
+            self.assertEqual(psql(past_audit_guard(f'DELETE FROM "AuditLog" t WHERE to_jsonb(t)={literal(raw)}::jsonb RETURNING 1')),
+                             ['1'])
 
     def boundary(self, uid):
         columns = ', '.join("'%s', \"%s\"" % (c, c) for c in BOUNDARY_COLUMNS)

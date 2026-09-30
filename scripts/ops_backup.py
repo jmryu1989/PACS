@@ -2,7 +2,9 @@
 
 Usage: python scripts/ops_backup.py backup --output <outside-repository-directory>
        python scripts/ops_backup.py rehearse <completed-backup-directory>
-The running write services pause during backup and are resumed in finally.
+The running write services pause during backup and are resumed in finally. A complete backup's AuditLog rows are then
+sealed into audit-checkpoint.json and the backup root's ledger (scripts/ops_audit_integrity.py; the root needs a one-time
+`ops_audit_integrity.py init`), and rehearse verifies its restored copy against that seal.
 """
 from __future__ import annotations
 
@@ -29,6 +31,9 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[1]
 CONTAINERS = ("kin-api", "kin-keycloak", "kin-orthanc", "kin-db")
 FILES = ("kin.dump", "keycloak.dump", "orthanc.tgz", ".env", "docker-compose.yml", "docker-compose.prod.yml")
+# The sealed AuditLog checkpoint (scripts/ops_audit_integrity.py) is an extra component a manifest declares in its
+# sha256/bytes; it is not in FILES, so backups taken before the seal existed stay valid six-file snapshots.
+AUDIT_CHECKPOINT = "audit-checkpoint.json"
 
 # Executed inside an isolated, networkless container against only the restored volume.
 # Validate SQLite AND every indexed attachment: a healthy index without image files
@@ -187,6 +192,19 @@ def reload_proxy():
     run(["docker", "exec", "kin-proxy", "nginx", "-s", "reload"], timeout=30)
 
 
+def seal_audit(directory, parent, manifest):
+    """Stage 'seal audit': after the writers resumed, seal the AuditLog rows of this complete snapshot's kin.dump. The
+    outcome goes to the manifest's existing backup_error ('audit integrity' for a finding, 'seal audit' for a failure),
+    which the unchanged monitor reports as backup_failed; the snapshot stays complete and restorable either way."""
+    # Imported here: the audit tool builds on this module's Docker, digest and lock helpers.
+    import ops_audit_integrity as audit
+    try:
+        audit.seal(directory, parent, manifest)
+    except Exception as error:
+        manifest["backup_error"] = {"stage": "seal audit", "type": type(error).__name__}
+        audit.replace_json(directory / "manifest.json", manifest)
+
+
 def backup(output, ready_timeout=120):
     if not 1 <= ready_timeout <= 900:
         raise RuntimeError("Readiness timeout must be between 1 and 900 seconds")
@@ -302,14 +320,22 @@ def backup(output, ready_timeout=120):
                 manifest["readiness_error"] = "Application readiness deadline exceeded"
         manifest["resume_failures"] = resume_failures
         write_json(directory / "manifest.json", manifest)
+        # The seal reads only the snapshot, so it runs after the writers resumed (it never lengthens the pause) and
+        # also when resume or readiness failed: a complete snapshot is sealed whenever it exists.
+        if manifest["complete"]:
+            seal_audit(directory, parent, manifest)
         # Even an unsuccessful resume must identify a complete recovery snapshot.
         print(json.dumps({"backup": str(directory), "complete": manifest["complete"],
                           "ready": manifest["ready"], "resume_failures": resume_failures,
-                          "pause_seconds": manifest["pause_seconds"]}), flush=True)
+                          "pause_seconds": manifest["pause_seconds"],
+                          "backup_error": manifest.get("backup_error")}), flush=True)
         if resume_failures:
             raise RuntimeError("Write services need recovery: " + ", ".join(resume_failures))
         if manifest["ready"] is False:
             raise RuntimeError("Backup preserved; application readiness needs recovery before deployment")
+    if manifest.get("backup_error"):
+        raise RuntimeError("Backup preserved; audit " + manifest["backup_error"]["stage"] + " needs an operator: "
+                           + manifest["backup_error"]["type"])
 
 
 def validate_backup(directory):
@@ -319,7 +345,9 @@ def validate_backup(directory):
         raise RuntimeError("Backup is incomplete")
     # Snapshot validity is independent of the source application's readiness.
     # A failed restart is exactly when an intact snapshot must remain usable.
-    for name in FILES:
+    # A declared audit checkpoint is a component like the others; an undeclared one is not trusted or required.
+    declared = (*FILES, AUDIT_CHECKPOINT) if AUDIT_CHECKPOINT in manifest.get("sha256", {}) else FILES
+    for name in declared:
         path = directory / name
         if path.is_symlink() or not path.is_file() or digest(path) != manifest.get("sha256", {}).get(name):
             raise RuntimeError("Backup component checksum mismatch: " + name)
@@ -362,6 +390,18 @@ def remove_owned_if_present(kind, name, token):
         raise RuntimeError("Could not verify temporary resource cleanup")
 
 
+def rehearse_audit(directory, manifest, container):
+    """RA-4: the copy this rehearsal restored, not the snapshot file, is compared with the sealed checkpoint. The export
+    of the restored kin (pg_dump in the rehearsal container) is judged in a new isolated verifier; nothing the restored
+    server computes is trusted. Success is the verifier's exit 0: a past event recorded in the checkpoint is carried,
+    a current guard or shape defect of the restored copy fails. Backups taken before sealing existed are not_sealed."""
+    import ops_audit_integrity as audit
+    if AUDIT_CHECKPOINT not in manifest.get("sha256", {}):
+        return "not_sealed"
+    code, report = audit.verify(directory / AUDIT_CHECKPOINT, audit.DatabaseExport(container, "kin", "postgres"))
+    return {"verified": code == 0, **report}
+
+
 def rehearse(directory):
     directory, manifest = validate_backup(directory)
     token = uuid.uuid4().hex
@@ -389,6 +429,9 @@ def rehearse(directory):
                      "--no-owner", "--no-privileges", "--exit-on-error"], input_file=handle)
             if counts(name, database, "postgres") != manifest["counts"][database]:
                 raise RuntimeError("Restored database row counts differ: " + database)
+        result["audit"] = rehearse_audit(directory, manifest, name)
+        if result["audit"] != "not_sealed" and not result["audit"]["verified"]:
+            raise RuntimeError("Restored AuditLog is not verified against its sealed checkpoint")
         temporary_run(["--network", "none", "--read-only",
              "--mount", f"type=volume,source={volume},target=/restore",
              "--mount", f"type=bind,source={directory},target=/backup,readonly",

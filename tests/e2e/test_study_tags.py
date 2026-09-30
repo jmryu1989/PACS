@@ -4,6 +4,7 @@ import json,os,unittest,uuid
 from pathlib import Path
 from playwright.sync_api import expect
 from test_worklist import WorklistE2E,psql
+from invariants_live import past_audit_guard
 
 def literal(x):return "'"+str(x).replace("'","''")+"'"
 class StudyTagsE2E(WorklistE2E):
@@ -39,7 +40,7 @@ class StudyTagsE2E(WorklistE2E):
   if self.tagIds:
    actors=psql('SELECT DISTINCT actor FROM "AuditLog" WHERE action LIKE '+literal('study.tag.%')+' AND target IN ('+','.join(literal(x) for x in self.tagIds)+')')
    self.assertTrue(set(actors)<=self.tagActors,'Foreign audit actor touched test tags')
-  if self.tagActors:psql('DELETE FROM "AuditLog" WHERE action LIKE '+literal('study.tag.%')+' AND actor IN ('+','.join(literal(x) for x in self.tagActors)+')')
+  if self.tagActors:psql(past_audit_guard('DELETE FROM "AuditLog" WHERE action LIKE '+literal('study.tag.%')+' AND actor IN ('+','.join(literal(x) for x in self.tagActors)+')'))
  def catalog(self,state,scope='personal'):return next(c for c in state['catalogs'] if c['scope']==scope)
  def body(self,state,action,tagId,scope='personal',**extra):
   self.tagIds.add(tagId);request=str(uuid.uuid4());self.tagRequests.add(request);return dict(expectedOwner=state['owner'],scope=scope,revision=self.catalog(state,scope)['revision'],requestId=request,tagId=tagId,action=action,**extra)

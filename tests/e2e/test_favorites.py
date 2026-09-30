@@ -4,6 +4,7 @@ import json,os,re,unittest,uuid
 from pathlib import Path
 from playwright.sync_api import expect
 from test_worklist import WorklistE2E,psql
+from invariants_live import AUDIT_GUARD_OFF,AUDIT_GUARD_ON
 
 class FavoritesE2E(WorklistE2E):
  def setUp(self):
@@ -16,7 +17,7 @@ class FavoritesE2E(WorklistE2E):
    self.favoriteOwners[role]=r.body['owner']
    def cleanup():
     self.close_contexts();self.contexts=[]
-    psql(f'''BEGIN; DELETE FROM "FavoriteWorkspace" WHERE institution='{institution}' AND subject='{subject}'; DELETE FROM "AuditLog" WHERE actor='{actor}' AND action LIKE 'favorite.%'; COMMIT;''')
+    psql(f'''BEGIN; DELETE FROM "FavoriteWorkspace" WHERE institution='{institution}' AND subject='{subject}'; {AUDIT_GUARD_OFF} DELETE FROM "AuditLog" WHERE actor='{actor}' AND action LIKE 'favorite.%'; {AUDIT_GUARD_ON} COMMIT;''')
     self.assertEqual(psql(f'''SELECT count(*) FROM "FavoriteWorkspace" WHERE institution='{institution}' AND subject='{subject}' '''),['0'])
    self.addCleanup(cleanup)
   return r.body

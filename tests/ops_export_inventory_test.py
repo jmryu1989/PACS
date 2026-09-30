@@ -305,6 +305,37 @@ class ExportTests(unittest.TestCase):
         (self.root / 'snapshot/kin.dump').unlink()
         with self.assertRaises(ValueError): self.verify()
 
+    def test_21_ei01_declared_audit_checkpoint_is_an_exact_component(self):
+        """S7-AUDIT-STORE EI-01 (SE-10): a sealed snapshot exports with its declared checkpoint and nothing else."""
+        checkpoint = 'snapshot/' + export.AUDIT_CHECKPOINT
+        write(self.root / checkpoint, b'{"synthetic": "checkpoint digests only"}')
+        record = export.file_record(self.root / checkpoint)
+        for field in ('sha256', 'bytes'):
+            self.snapshot[field][export.AUDIT_CHECKPOINT] = record[field]
+        self.refresh()
+        self.assertTrue(self.verify()['inventory_verified'])
+        # declared by the snapshot manifest but absent from the export: refused
+        (self.root / checkpoint).unlink()
+        self.refresh()
+        with self.assertRaises(ValueError): self.verify()
+        # present in the export (and listed) but not declared by the snapshot manifest: refused
+        write(self.root / checkpoint, b'{"synthetic": "checkpoint digests only"}')
+        for field in ('sha256', 'bytes'):
+            self.snapshot[field].pop(export.AUDIT_CHECKPOINT)
+        self.refresh()
+        with self.assertRaises(ValueError): self.verify()
+        # declared and present but its bytes differ from the declaration: refused
+        for field in ('sha256', 'bytes'):
+            self.snapshot[field][export.AUDIT_CHECKPOINT] = record[field]
+        self.refresh()
+        write(self.root / checkpoint, b'{"synthetic": "changed checkpoint"}')
+        with self.assertRaises(ValueError): self.verify()
+
+    def test_22_ei02_snapshot_without_a_checkpoint_keeps_the_six_components(self):
+        """S7-AUDIT-STORE EI-02 (SE-11): an older snapshot (nothing declared) exports exactly as before."""
+        self.assertNotIn('snapshot/' + export.AUDIT_CHECKPOINT, self.body['files'])
+        self.assertTrue(self.verify()['inventory_verified'])
+
     def test_20_source_missing_required_overlay_is_refused(self):
         (self.repo / 'docker-compose.monitor.yml').unlink()
         self.git('add', '--', 'docker-compose.monitor.yml')

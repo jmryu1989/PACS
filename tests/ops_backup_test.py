@@ -1,6 +1,14 @@
-"""Failure-path checks for backup/restore safety; no Docker mutations in this file."""
+"""Failure-path checks for backup/restore safety; no Docker mutations in this file.
+
+test_18..test_22 (S7-AUDIT-STORE OB-01..OB-05): the audit seal and the rehearsal's restored-copy verification inside the
+real backup/rehearse flow. The isolated verifier boundary is answered with synthetic digest streams (its PostgreSQL
+behaviour is tests/audit_store_db_test.py); the manifest the flow wrote is fed to the unchanged ops_monitor.backup_status.
+"""
 from __future__ import annotations
 
+import contextlib
+from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import io
 from pathlib import Path
@@ -9,12 +17,147 @@ import stat
 import sys
 import tarfile
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import ops_backup as ops
+import ops_audit_integrity as audit
+import ops_monitor as monitor
+
+PRESENT = {"state": "present", "statements": {"insert": "accepted", "update": "refused", "delete": "refused",
+                                              "truncate": "refused"}}
+INEFFECTIVE = {"state": "ineffective", "statements": {"insert": "accepted", "update": "accepted", "delete": "refused",
+                                                      "truncate": "refused"}}
+
+
+def rows_stream(rows, guard=PRESENT, schema=()):
+    """A synthetic isolated-verifier answer: {id: content} as the (id, count, digest) stream."""
+    return audit.Evaluation(table=True, rows=[(key, 1, hashlib.sha256(value.encode()).hexdigest())
+                                              for key, value in rows.items()], guard=dict(guard), schema=list(schema))
+
+
+def orthanc_archive():
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+        entry = tarfile.TarInfo("./index")
+        entry.size = 1
+        archive.addfile(entry, io.BytesIO(b"x"))
+    return stream.getvalue()
+
+
+class Host:
+    """The fake host of test_14 (all writers running) with a private backup parent beside the repository, recording
+    every command and the order of pause, resume, readiness and seal."""
+
+    def __init__(self, temporary):
+        self.repo = Path(temporary) / "repo"
+        self.repo.mkdir()
+        for filename in ops.FILES[3:]:
+            (self.repo / filename).write_text("TEST_ONLY=placeholder")
+        self.parent = Path(temporary) / "backups"
+        self.parent.mkdir(mode=0o700)
+        self.info = [{"Name": "/" + name, "State": {"Running": True}, "Image": "sha256:" + "a" * 64,
+                      "Config": {"Labels": {"com.docker.compose.project": "fixture",
+                                            "com.docker.compose.project.working_dir": str(self.repo)}},
+                      "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}]}
+                     for name in (*ops.CONTAINERS, "kin-proxy")]
+        self.events = []
+        self.sources = []
+        # Backups a minute apart within the monitor's 30-hour window: the monitor orders manifests by whole seconds.
+        self.clock = datetime.now(timezone.utc) - timedelta(hours=1)
+
+    def now(self, tz=None):
+        self.clock += timedelta(minutes=1)
+        return self.clock
+
+    def init_ledger(self):
+        with patch.object(ops, "ROOT", self.repo), contextlib.redirect_stdout(io.StringIO()):
+            assert audit.main(["init", str(self.parent)]) == 0
+
+    def fake_text(self, args, **kwargs):
+        self.events.append(("command", list(args)))
+        if args[:2] == ["docker", "inspect"]:
+            return "false" if "--format" in args else json.dumps(self.info)
+        if args[:3] == ["docker", "image", "inspect"]:
+            return '[{"RepoDigests": []}]'
+        if "pg_database_size('kin')" in " ".join(args):
+            return "4096"
+        return "" if "status" in args else "a" * 40
+
+    def fake_run(self, args, **kwargs):
+        self.events.append(("command", list(args)))
+        if "pg_dump" in args:
+            kwargs["output"].write(b"fixture dump " + str(time.monotonic_ns()).encode())
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    def fake_archive(self, args, **kwargs):
+        if "-sk" in args:
+            return "8 /source"
+        if kwargs.get("output") is not None:
+            kwargs["output"].write(orthanc_archive())
+            return ""
+        return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0}) if "python3" in args else ""
+
+    def boundary(self, answer):
+        def evaluate(source, *args, **kwargs):
+            self.events.append(("seal" if isinstance(source, audit.SnapshotDump) else "verify", source))
+            self.sources.append(source)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+        return evaluate
+
+    def backup(self, answer):
+        """One ops.backup run whose seal is answered with `answer`; returns (folder, manifest, error)."""
+        before = {entry.name for entry in self.parent.iterdir()}
+        error = None
+        clock = type("Clock", (datetime,), {"now": staticmethod(self.now)})
+        with patch.object(ops, "ROOT", self.repo), patch.object(ops, "datetime", clock), \
+                patch.object(ops, "text", side_effect=self.fake_text), \
+                patch.object(ops, "run", side_effect=self.fake_run), \
+                patch.object(ops, "temporary_run", side_effect=self.fake_archive), \
+                patch.object(ops, "counts", return_value={"Report": 5}), \
+                patch.object(ops, "wait_ready", side_effect=lambda *a: self.events.append(("ready",))), \
+                patch.object(audit, "evaluate", side_effect=self.boundary(answer)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            try:
+                ops.backup(self.parent)
+            except RuntimeError as caught:
+                error = caught
+        folder = next(self.parent / name for name in {entry.name for entry in self.parent.iterdir()} - before)
+        return folder, json.loads((folder / "manifest.json").read_text(encoding="utf-8")), error
+
+    def rehearse(self, folder, answer):
+        """One ops.rehearse run whose restored-copy verification is answered with `answer`."""
+        self.events.clear()
+        self.sources.clear()
+        error = None
+        cleanup = Mock()
+        earlier = set(folder.glob("rehearsal-*.json"))
+        with patch.object(ops, "run", side_effect=self.fake_run), \
+                patch.object(ops, "temporary_run", side_effect=self.fake_archive), \
+                patch.object(ops, "counts", return_value={"Report": 5}), \
+                patch.object(ops, "remove_owned_if_present", cleanup), \
+                patch.object(audit, "evaluate", side_effect=self.boundary(answer)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            try:
+                ops.rehearse(folder)
+            except RuntimeError as caught:
+                error = caught
+        (written,) = set(folder.glob("rehearsal-*.json")) - earlier
+        result = json.loads(written.read_text())
+        started = [cmd for kind, cmd in self.events if kind == "command" and cmd[:3] == ["docker", "run", "-d"]]
+        container = started[0][started[0].index("--name") + 1] if started else None
+        return result, error, container, cleanup
+
+    def status(self):
+        return monitor.backup_status(self.parent, self.parent / ".no-lock", int(time.time()))[0]
+
+    def files(self, folder):
+        return {path.name: path.read_bytes() for path in folder.iterdir() if not path.name.startswith("rehearsal-")}
 
 
 class BackupSafetyTests(unittest.TestCase):
@@ -212,10 +355,16 @@ class BackupSafetyTests(unittest.TestCase):
                 return ""
 
             output = Path(temporary) / "backups"
+            # S7-AUDIT-STORE NR-20: the complete snapshot is sealed after the readiness failure, so the parent holds an
+            # initialised ledger and the seal's isolated verifier answers; the readiness error keeps its priority.
+            output.mkdir(mode=0o700)
+            with patch.object(ops, "ROOT", root), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(audit.main(["init", str(output)]), 0)
             with patch.object(ops, "ROOT", root), patch.object(ops, "text", side_effect=fake_text), \
                     patch.object(ops, "run", side_effect=fake_run), patch.object(ops, "temporary_run", side_effect=fake_archive), \
                     patch.object(ops, "counts", return_value={"Report": 5}), \
-                    patch.object(ops, "wait_ready", side_effect=RuntimeError("fixture timeout")):
+                    patch.object(ops, "wait_ready", side_effect=RuntimeError("fixture timeout")), \
+                    patch.object(audit, "evaluate", return_value=rows_stream({1: "fixture"})):
                 with self.assertRaisesRegex(RuntimeError, "readiness needs recovery"):
                     ops.backup(output)
             manifest = json.loads(next(output.glob("*/manifest.json")).read_text())
@@ -252,6 +401,198 @@ class BackupSafetyTests(unittest.TestCase):
             with self.assertRaises(subprocess.TimeoutExpired):
                 ops.temporary_run(["fixture-image"], output=output, timeout=1)
             cleanup.assert_called_once()
+
+    def test_18_ob01_seal_follows_resume_reads_the_snapshot_and_a_seal_failure_alarms(self):
+        """OB-01 (SE-01, SE-02): pause -> dump -> resume -> readiness -> seal over the snapshot's own kin.dump."""
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            host.init_ledger()
+            folder, manifest, error = host.backup(rows_stream({1: "a", 2: "b"}))
+            self.assertIsNone(error)
+            kinds = [event[0] if event[0] != "command" else " ".join(event[1][:2]) for event in host.events]
+            order = [kinds.index("docker stop"), max(i for i, k in enumerate(kinds) if k == "docker start"),
+                     kinds.index("ready"), kinds.index("seal")]
+            self.assertEqual(order, sorted(order), "the seal runs after the writers resumed and readiness")
+            dumped = [i for i, (kind, *rest) in enumerate(host.events) if kind == "command" and "pg_dump" in rest[0]]
+            self.assertLess(max(dumped), kinds.index("docker start"), "the dump is taken inside the writer pause")
+            # the judged input is the snapshot's kin.dump with the recorded image; kin-db is not contacted by the seal
+            self.assertEqual(len(host.sources), 1, "one isolated evaluation seals the snapshot")
+            source = host.sources[0]
+            self.assertIsInstance(source, audit.SnapshotDump)
+            self.assertEqual((source.path, source.image), (folder / "kin.dump", manifest["postgres_image"]))
+            after_seal = [event for event in host.events[kinds.index("seal"):] if event[0] == "command"]
+            self.assertFalse([cmd for _, cmd in after_seal if "kin-db" in cmd])
+            self.assertTrue(manifest["complete"])
+            self.assertNotIn("backup_error", manifest)
+            self.assertEqual(host.status(), [])
+
+            ledger_before = (host.parent / audit.LEDGER).read_bytes()
+            folder, manifest, error = host.backup(audit.InputError("synthetic verifier start failure"))
+            self.assertRegex(str(error), "seal audit")
+            self.assertTrue(manifest["complete"])
+            self.assertEqual(manifest["backup_error"], {"stage": "seal audit", "type": "InputError"})
+            self.assertNotIn(audit.CHECKPOINT, manifest["sha256"])
+            self.assertEqual((host.parent / audit.LEDGER).read_bytes(), ledger_before)
+            self.assertEqual(host.status(), ["backup_failed"], "the unchanged monitor alarms from the manifest")
+
+    def test_19_ob02_declared_checkpoint_is_a_validated_component_and_old_backups_stay_valid(self):
+        """OB-02 (SE-01, SE-11)."""
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            host.init_ledger()
+            folder, manifest, _ = host.backup(rows_stream({1: "a"}))
+            self.assertEqual(manifest["format"], 1)
+            self.assertEqual(manifest["sha256"][audit.CHECKPOINT], ops.digest(folder / audit.CHECKPOINT))
+            self.assertEqual(manifest["bytes"][audit.CHECKPOINT], (folder / audit.CHECKPOINT).stat().st_size)
+            with patch.object(ops, "run"):
+                ops.validate_backup(folder)
+                kept = (folder / audit.CHECKPOINT).read_bytes()
+                (folder / audit.CHECKPOINT).write_bytes(kept + b" ")
+                with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
+                    ops.validate_backup(folder)
+                (folder / audit.CHECKPOINT).unlink()
+                with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
+                    ops.validate_backup(folder)
+                # an older six-file backup (nothing declared) is unchanged, even with a stray undeclared file
+                for field in ("sha256", "bytes"):
+                    manifest[field].pop(audit.CHECKPOINT)
+                ops.write_json(folder / "manifest.json", manifest)
+                (folder / audit.CHECKPOINT).write_bytes(b"undeclared")
+                ops.validate_backup(folder)
+
+    def test_20_ob03_previous_comes_from_the_ledger_and_no_ledger_is_never_a_first_seal(self):
+        """OB-03 (SE-04, SE-06, SE-12, DP-02)."""
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            folder, manifest, error = host.backup(rows_stream({1: "a"}))
+            self.assertEqual(manifest["backup_error"], {"stage": "seal audit", "type": "LedgerMissing"})
+            self.assertIsNotNone(error)
+            self.assertFalse((host.parent / audit.LEDGER).exists())
+            self.assertFalse((folder / audit.CHECKPOINT).exists())
+
+            host.init_ledger()
+            first, manifest, error = host.backup(rows_stream({1: "a"}))
+            self.assertIsNone(error)
+            body = json.loads((first / audit.CHECKPOINT).read_text())
+            self.assertEqual((body["previous"], body["previous_verification"]), (None, {"state": "none"}))
+            # a newer sealed folder that the ledger does not list (another ledger's) is never taken as the endpoint
+            decoy = host.parent / "29991231-235959-deadbeef"
+            decoy.mkdir(mode=0o700)
+            other = dict(body, ledger_id="0" * 32)
+            (decoy / audit.CHECKPOINT).write_text(json.dumps(other))
+            ops.write_json(decoy / "manifest.json", {"format": 1, "complete": True, "ready": True, "resume_failures": [],
+                                                     "created_utc": "2999-12-31T23:59:59+00:00",
+                                                     "sha256": {audit.CHECKPOINT: ops.digest(decoy / audit.CHECKPOINT)}})
+            second, _, error = host.backup(rows_stream({1: "a", 2: "b"}))
+            self.assertIsNone(error)
+            seal = json.loads((host.parent / audit.LEDGER).read_text())["entries"][1]
+            body = json.loads((second / audit.CHECKPOINT).read_text())
+            self.assertEqual(body["previous"], {"backup": first.name, "sha256": seal["checkpoint_sha256"], "seq": 1})
+            self.assertEqual(body["previous_verification"], {"state": "verified"})
+            for path in decoy.iterdir():
+                path.unlink()
+            decoy.rmdir()
+
+            latest = json.loads((host.parent / audit.LEDGER).read_text())["entries"][-1]
+            for path in second.iterdir():
+                path.unlink()
+            second.rmdir()
+            third, manifest, error = host.backup(rows_stream({1: "a", 2: "b", 3: "c"}))
+            body = json.loads((third / audit.CHECKPOINT).read_text())
+            self.assertEqual(body["previous"], {"backup": latest["backup"], "sha256": latest["checkpoint_sha256"],
+                                                "seq": latest["seq"]})
+            self.assertEqual(body["previous_verification"], {"state": "unverifiable", "reason": "previous_missing"})
+            self.assertEqual(manifest["backup_error"]["stage"], "audit integrity")
+            self.assertIsNotNone(error)
+
+    def test_21_ob04_past_event_restores_verified_current_defect_restores_but_fails(self):
+        """OB-04 (SE-05, SE-07, SE-14, RS-08, RS-09) [OP-3 (a)]."""
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            host.init_ledger()
+            host.backup(rows_stream({1: "a", 2: "b"}))
+            # (1) a past event: a sealed row changed since the previous seal; this snapshot's own guard and shape are sound
+            past, manifest, error = host.backup(rows_stream({1: "a", 2: "B"}))
+            body = json.loads((past / audit.CHECKPOINT).read_text())
+            self.assertEqual(body["previous_verification"]["state"], "failed")
+            self.assertEqual((body["guard"]["state"], body["schema"]), ("present", []))
+            self.assertTrue(manifest["complete"])
+            self.assertEqual(manifest["backup_error"], {"stage": "audit integrity", "type": "AuditIntegrityMismatch"})
+            self.assertIsNotNone(error)
+            self.assertEqual(host.status(), ["backup_failed"])
+            with patch.object(ops, "run"):
+                ops.validate_backup(past)
+            result, error, _, _ = host.rehearse(past, rows_stream({1: "a", 2: "B"}))
+            self.assertIsNone(error)
+            self.assertTrue(result["success"])
+            self.assertTrue(result["audit"]["verified"])
+            self.assertEqual(result["audit"]["previous_verification"]["state"], "failed")
+
+            # (2) a current defect: this snapshot's own guard is ineffective (variant: an inheritance finding)
+            for label, answer in (("guard", rows_stream({1: "a", 2: "B"}, guard=INEFFECTIVE)),
+                                  ("inheritance", rows_stream({1: "a", 2: "B"}, schema=["inheritance"]))):
+                with self.subTest(label):
+                    current, manifest, error = host.backup(answer)
+                    body = json.loads((current / audit.CHECKPOINT).read_text())
+                    self.assertEqual((body["guard"], body["schema"]), (answer.guard, answer.schema))
+                    self.assertEqual(manifest["backup_error"]["stage"], "audit integrity")
+                    self.assertTrue(manifest["complete"])
+                    self.assertIsNotNone(error)
+                    self.assertEqual(host.status(), ["backup_failed"])
+                    with patch.object(ops, "run"):
+                        ops.validate_backup(current)
+                    before = host.files(current)
+                    result, error, _, cleanup = host.rehearse(current, answer)
+                    self.assertIsNotNone(error)
+                    self.assertFalse(result["success"])
+                    self.assertFalse(result["audit"]["verified"])
+                    self.assertEqual((result["audit"]["guard"], result["audit"]["schema"]), (answer.guard, answer.schema))
+                    self.assertTrue(cleanup.called)
+                    self.assertEqual(host.files(current), before, "the snapshot, its manifest and checkpoint are kept")
+
+    def test_22_ob05_rehearse_verifies_the_export_of_its_own_restored_copy(self):
+        """OB-05 (RS-01, RS-03, RS-07, RS-08, RS-09, RS-10)."""
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            old, _, _ = host.backup(rows_stream({1: "a"}))            # no ledger: an unsealed snapshot
+            result, error, _, _ = host.rehearse(old, rows_stream({1: "a"}))
+            self.assertIsNone(error)
+            self.assertEqual((result["success"], result["audit"]), (True, "not_sealed"))
+            self.assertEqual(host.sources, [])
+
+            host.init_ledger()
+            host.backup(rows_stream({1: "a", 2: "b"}))
+            verified, _, _ = host.backup(rows_stream({1: "a", 2: "b", 3: "c"}))
+            past, manifest, _ = host.backup(rows_stream({1: "a", 2: "B", 3: "c"}))
+            self.assertEqual(manifest["backup_error"]["stage"], "audit integrity")
+            defect, manifest, _ = host.backup(rows_stream({1: "a", 2: "B", 3: "c"}, guard=INEFFECTIVE))
+            self.assertEqual(manifest["backup_error"]["stage"], "audit integrity")
+            cases = {"(a) verified": (verified, rows_stream({1: "a", 2: "b", 3: "c"}), True, "verified"),
+                     "(b) past event": (past, rows_stream({1: "a", 2: "B", 3: "c"}), True, "failed"),
+                     "(c) restored copy differs": (verified, rows_stream({1: "a", 2: "x", 3: "c"}), False, "verified"),
+                     "(d) current guard defect": (defect, rows_stream({1: "a", 2: "B", 3: "c"}, guard=INEFFECTIVE),
+                                                  False, "verified"),
+                     "(e) input error": (verified, audit.InputError("synthetic export failure"), False, "verified")}
+            for label, (folder, answer, success, previous) in cases.items():
+                with self.subTest(label):
+                    before = host.files(folder)
+                    result, error, container, cleanup = host.rehearse(folder, answer)
+                    self.assertEqual(len(host.sources), 1, "a sealed backup's rehearsal verifies its restored copy")
+                    source = host.sources[0]
+                    self.assertIsInstance(source, audit.DatabaseExport, "the restored copy, never the snapshot file")
+                    self.assertEqual((source.container, source.database), (container, "kin"))
+                    self.assertEqual(result["success"], success)
+                    self.assertEqual(result["audit"]["verified"], success)
+                    self.assertEqual(error is None, success)
+                    self.assertTrue(cleanup.called)
+                    self.assertEqual(result["cleanup_failures"], [])
+                    self.assertEqual(host.files(folder), before)
+                    if label.startswith("(e)"):
+                        self.assertEqual(result["audit"]["exit"], 2)
+                    else:
+                        self.assertEqual(result["audit"]["previous_verification"]["state"], previous)
+                    if label.startswith("(c)"):
+                        self.assertEqual(result["audit"]["changed"]["ids"], [2])
 
 
 if __name__ == "__main__":

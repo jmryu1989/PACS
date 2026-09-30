@@ -56,7 +56,7 @@ import uuid
 from urllib.parse import quote, urlencode
 from urllib.request import Request
 
-from invariants_live import LiveStack, psql, purge_user_audit
+from invariants_live import LiveStack, past_audit_guard, psql, purge_user_audit
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -235,7 +235,7 @@ class AdminAuditLive(unittest.TestCase):
         institution the Study Access rows are further limited to the run's subjects and the audit rows naming it to
         the run's actors; anything else there stays and the Institution DELETE fails on it (RESTRICT) instead."""
         if cls.inserted:
-            psql('DELETE FROM "AuditLog" WHERE id IN (' + ",".join(str(int(i)) for i in cls.inserted) + ");")
+            psql(past_audit_guard('DELETE FROM "AuditLog" WHERE id IN (' + ",".join(str(int(i)) for i in cls.inserted) + ");"))
             if psql('SELECT count(*) FROM "AuditLog" WHERE id IN (' + ",".join(str(int(i)) for i in cls.inserted) + ");") != ["0"]:
                 raise RuntimeError("synthetic audit rows remain")
             cls.inserted.clear()
@@ -245,12 +245,12 @@ class AdminAuditLive(unittest.TestCase):
         if (not all(GROUP.fullmatch(name) for name in owned) or not STUDY.fullmatch(cls.study)
                 or not all(UUID.fullmatch(subject) for subject in subjects) or not all(SAFE.fullmatch(actor) for actor in actors)):
             raise RuntimeError("refusing cleanup: an owned identifier has an unexpected shape")
-        psql(f'DELETE FROM "AuditLog" WHERE target=\'{cls.study}\';')
+        psql(past_audit_guard(f'DELETE FROM "AuditLog" WHERE target=\'{cls.study}\';'))
         if owned:
             listed = ",".join(f"'{name}'" for name in owned)
             if actors:
-                psql(f'DELETE FROM "AuditLog" WHERE target IN ({listed}) AND actor IN ('
-                     + ",".join(f"'{actor}'" for actor in actors) + ");")
+                psql(past_audit_guard(f'DELETE FROM "AuditLog" WHERE target IN ({listed}) AND actor IN ('
+                                      + ",".join(f"'{actor}'" for actor in actors) + ");"))
             psql(f'DELETE FROM "StudyState" WHERE uid=\'{cls.study}\' AND "institutionId" IN ({listed});')
             psql(f'DELETE FROM "HangingProtocolPreference" WHERE institution IN ({listed}) AND subject=\'\';')
             if subjects:

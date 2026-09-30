@@ -54,7 +54,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from clinician_question_live import lit, member_owner, restricted, rule
-from invariants_live import Fixture, LiveStack, psql
+from invariants_live import Fixture, LiveStack, past_audit_guard, psql
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -289,7 +289,8 @@ class ClinicalContextLive(unittest.TestCase):
                 self.assertEqual(psql(f'DELETE FROM "{table}" t WHERE to_jsonb(t)={lit(raw)}::jsonb RETURNING 1'), ["1"])
         for raw in psql(f"SELECT to_jsonb(t)::text FROM \"AuditLog\" t WHERE target={lit(subject)} AND action='study.access'"):
             self.assertTrue(json.loads(json.loads(raw)["detail"])["reason"].startswith("SYNTHETIC"))
-            self.assertEqual(psql(f'DELETE FROM "AuditLog" t WHERE to_jsonb(t)={lit(raw)}::jsonb RETURNING 1'), ["1"])
+            self.assertEqual(psql(past_audit_guard(f'DELETE FROM "AuditLog" t WHERE to_jsonb(t)={lit(raw)}::jsonb RETURNING 1')),
+                             ["1"])
 
     def commit(self, fixture: Fixture, user: str, action: str, base: int, findings: str | None = None, **extra) -> int:
         body = {"action": action, "baseVersion": base, "findings": findings if findings is not None else fixture.secret,

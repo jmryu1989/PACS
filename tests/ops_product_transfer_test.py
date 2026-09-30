@@ -244,7 +244,8 @@ class Pure(unittest.TestCase):
         # replacement, cancelled), their seven events and six receipts (contract S7-U1p section 12.3-3).
         # S7-U3a keyed ReaderAssignment by (study, institution) (D-S7-09 a): 33 files, still 46 tables, and a second
         # ReaderAssignment row, the tele institution's closed one, on the same study.
-        self.assertEqual(len(transfer.MIGRATIONS), 33)
+        # S7-AUDIT-STORE made AuditLog append-only (a trigger, no table): 34 files, still 46 tables.
+        self.assertEqual(len(transfer.MIGRATIONS), 34)
         self.assertEqual(len(transfer.TABLES), 46)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
