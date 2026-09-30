@@ -103,7 +103,7 @@ class Host:
 
     def boundary(self, answer):
         def evaluate(source, *args, **kwargs):
-            self.events.append(("seal" if isinstance(source, audit.SnapshotDump) else "verify", source))
+            self.events.append(("evaluate", source))
             self.sources.append(source)
             if isinstance(answer, BaseException):
                 raise answer
@@ -410,8 +410,9 @@ class BackupSafetyTests(unittest.TestCase):
             folder, manifest, error = host.backup(rows_stream({1: "a", 2: "b"}))
             self.assertIsNone(error)
             kinds = [event[0] if event[0] != "command" else " ".join(event[1][:2]) for event in host.events]
+            self.assertIn("evaluate", kinds, "the complete snapshot is sealed")
             order = [kinds.index("docker stop"), max(i for i, k in enumerate(kinds) if k == "docker start"),
-                     kinds.index("ready"), kinds.index("seal")]
+                     kinds.index("ready"), kinds.index("evaluate")]
             self.assertEqual(order, sorted(order), "the seal runs after the writers resumed and readiness")
             dumped = [i for i, (kind, *rest) in enumerate(host.events) if kind == "command" and "pg_dump" in rest[0]]
             self.assertLess(max(dumped), kinds.index("docker start"), "the dump is taken inside the writer pause")
@@ -420,7 +421,7 @@ class BackupSafetyTests(unittest.TestCase):
             source = host.sources[0]
             self.assertIsInstance(source, audit.SnapshotDump)
             self.assertEqual((source.path, source.image), (folder / "kin.dump", manifest["postgres_image"]))
-            after_seal = [event for event in host.events[kinds.index("seal"):] if event[0] == "command"]
+            after_seal = [event for event in host.events[kinds.index("evaluate"):] if event[0] == "command"]
             self.assertFalse([cmd for _, cmd in after_seal if "kin-db" in cmd])
             self.assertTrue(manifest["complete"])
             self.assertNotIn("backup_error", manifest)
