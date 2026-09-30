@@ -370,6 +370,8 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
         self.role_mapping("clinician", "clinician", present=False)                                     # S-CR9
         self.stack.tokens.pop("clinician", None)
         try:
+            self.stack.token("clinician", refused=True)          # a new token of a member left without a KIN role
+            self.forbidden(self.stack.request("GET", "/me", "clinician"), "INSTITUTION_INVALID")
             self.forbidden(self.ack("clinician", r0, rid=a1)[1], ROLE_REQUIRED, "INSTITUTION_INVALID")
             again = self.created(self.send("doctor", f.uid, "clinician", 1, rid=r0)[1])                  # S-CR11
             self.assertEqual((again["replayed"], again["applied"]), (True, create))
@@ -422,6 +424,8 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
             [row] = [item for item in self.check(self.listed("doctor", "sent"), 200).body["items"] if item["id"] == r1]
             self.assertEqual(row["delivery"], "not_eligible", "the sender sees the Keycloak state at once")
             self.stack.tokens.pop("clinician", None)
+            self.stack.token("clinician", refused=True)
+            self.forbidden(self.stack.request("GET", "/me", "clinician"), "INSTITUTION_INVALID")
             self.forbidden(self.read("clinician", r1), "INSTITUTION_INVALID", ROLE_REQUIRED)
         finally:
             self.role_mapping("clinician", "clinician", present=True)
@@ -461,6 +465,7 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
             self.assertTrue(self.created(self.send("doctor", f.uid, "clinician", 1, rid=r1)[1])["replayed"])
         finally:
             self.enabled("doctor", True)
+        self.owner("clinician2")     # CR18's valid token is taken while enabled: Keycloak grants a disabled account none
         self.enabled("clinician2", False)
         try:
             self.forbidden(self.ack("clinician2", r3)[1], ROLE_REQUIRED)
