@@ -430,7 +430,7 @@ class BackupSafetyTests(unittest.TestCase):
             folder, manifest, error = host.backup(audit.InputError("synthetic verifier start failure"))
             self.assertRegex(str(error), "seal audit")
             self.assertTrue(manifest["complete"])
-            self.assertEqual(manifest["backup_error"], {"stage": "seal audit", "type": "InputError"})
+            self.assertEqual(manifest.get("backup_error"), {"stage": "seal audit", "type": "InputError"})
             self.assertNotIn(audit.CHECKPOINT, manifest["sha256"])
             self.assertEqual((host.parent / audit.LEDGER).read_bytes(), ledger_before)
             self.assertEqual(host.status(), ["backup_failed"], "the unchanged monitor alarms from the manifest")
@@ -465,7 +465,7 @@ class BackupSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             host = Host(temporary)
             folder, manifest, error = host.backup(rows_stream({1: "a"}))
-            self.assertEqual(manifest["backup_error"], {"stage": "seal audit", "type": "LedgerMissing"})
+            self.assertEqual(manifest.get("backup_error"), {"stage": "seal audit", "type": "LedgerMissing"})
             self.assertIsNotNone(error)
             self.assertFalse((host.parent / audit.LEDGER).exists())
             self.assertFalse((folder / audit.CHECKPOINT).exists())
@@ -502,7 +502,7 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertEqual(body["previous"], {"backup": latest["backup"], "sha256": latest["checkpoint_sha256"],
                                                 "seq": latest["seq"]})
             self.assertEqual(body["previous_verification"], {"state": "unverifiable", "reason": "previous_missing"})
-            self.assertEqual(manifest["backup_error"]["stage"], "audit integrity")
+            self.assertEqual((manifest.get("backup_error") or {}).get("stage"), "audit integrity")
             self.assertIsNotNone(error)
 
     def test_21_ob04_past_event_restores_verified_current_defect_restores_but_fails(self):
@@ -517,7 +517,7 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertEqual(body["previous_verification"]["state"], "failed")
             self.assertEqual((body["guard"]["state"], body["schema"]), ("present", []))
             self.assertTrue(manifest["complete"])
-            self.assertEqual(manifest["backup_error"], {"stage": "audit integrity", "type": "AuditIntegrityMismatch"})
+            self.assertEqual(manifest.get("backup_error"), {"stage": "audit integrity", "type": "AuditIntegrityMismatch"})
             self.assertIsNotNone(error)
             self.assertEqual(host.status(), ["backup_failed"])
             with patch.object(ops, "run"):
@@ -535,7 +535,7 @@ class BackupSafetyTests(unittest.TestCase):
                     current, manifest, error = host.backup(answer)
                     body = json.loads((current / audit.CHECKPOINT).read_text())
                     self.assertEqual((body["guard"], body["schema"]), (answer.guard, answer.schema))
-                    self.assertEqual(manifest["backup_error"]["stage"], "audit integrity")
+                    self.assertEqual((manifest.get("backup_error") or {}).get("stage"), "audit integrity")
                     self.assertTrue(manifest["complete"])
                     self.assertIsNotNone(error)
                     self.assertEqual(host.status(), ["backup_failed"])
@@ -564,9 +564,9 @@ class BackupSafetyTests(unittest.TestCase):
             host.backup(rows_stream({1: "a", 2: "b"}))
             verified, _, _ = host.backup(rows_stream({1: "a", 2: "b", 3: "c"}))
             past, manifest, _ = host.backup(rows_stream({1: "a", 2: "B", 3: "c"}))
-            self.assertEqual(manifest["backup_error"]["stage"], "audit integrity")
+            self.assertEqual((manifest.get("backup_error") or {}).get("stage"), "audit integrity")
             defect, manifest, _ = host.backup(rows_stream({1: "a", 2: "B", 3: "c"}, guard=INEFFECTIVE))
-            self.assertEqual(manifest["backup_error"]["stage"], "audit integrity")
+            self.assertEqual((manifest.get("backup_error") or {}).get("stage"), "audit integrity")
             cases = {"(a) verified": (verified, rows_stream({1: "a", 2: "b", 3: "c"}), True, "verified"),
                      "(b) past event": (past, rows_stream({1: "a", 2: "B", 3: "c"}), True, "failed"),
                      "(c) restored copy differs": (verified, rows_stream({1: "a", 2: "x", 3: "c"}), False, "verified"),
