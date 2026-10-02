@@ -621,7 +621,12 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         if defaults:
             # Choosing a preset writes its default slab into the editors, even when that preset is already selected.
             select.select_option('Coronal' if preset != 'Coronal' else 'Axial')
-        select.select_option(preset)
+            select.select_option(preset)
+        else:
+            # Only the given fields change over the slab already in the editors (VS-06 pivot only). select_option dispatches
+            # change even for the option already shown, which writes that preset's defaults; a user re-choosing the shown
+            # option sends no change, so the preset is checked, not chosen.
+            expect(select).to_have_value(preset)
         for values, prefix in ((center, 'VOI Center '), (pivot, 'VOI Pivot ')):
             if values is not None:
                 for axis, value in zip('LPS', values):
@@ -1116,7 +1121,10 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                 self.assertGreaterEqual(int(regions['R%d' % (n + 1)].sum()), 400, 'sculpt region %d is observable' % (n + 1))
             for s in slabs:
                 self.assertGreaterEqual(int(oracle(scene, polygons, s)['VOI'].sum()), 400, 'VOI region is observable')
-            self.assertGreater(int(regions['CROP'].sum()), 0); self.assertGreater(int(regions['KEPT'].sum()), 0); self.assertGreaterEqual(int(regions['9'].sum()), 400)
+            self.assertGreater(int(regions['CROP'].sum()), 0); self.assertGreater(int(regions['KEPT'].sum()), 0)
+            # F9 lies between the upper planes of slab A (25.75 mm) and slab B (28.25 mm), inside B's keep only (test-plan
+            # §4 MAX-B): under A its R_9 is empty by construction, and from MX-14 on R_9 is judged under B, so it is read there.
+            self.assertGreaterEqual(int(oracle(scene, polygons, slab_b)['9'].sum()), 400, 'the ninth region F9 is observable in slab B')
             # Distinct oracle boundaries are at least 2 T + 2 = 4 px apart.
             self.assertGreaterEqual(boundary_gaps(scene, polygons, slabs), 4)
         def draw_freehand(vertices):
