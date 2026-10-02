@@ -40,13 +40,22 @@ Cases (the RL ids are test-plan section 3 of the S7-RELATED-LAYOUT diagnosis, PA
        a drag in the small window stores what is visible; Reset Layout.
   rl07 900x700, 1024x600, 1366x600, Technician at 900x600, Layout: Portrait at 900x600, 900x500 (no overlap only).
   rl09 no related exam, 60 related exams (page buttons), long literal descriptions, no reading target.
+  rl10 (D383) portrait windows where the Related panel sits at its 286px minimum (900x1200, 768x1024): the opened related
+       row (three rows, 60 rows, a portrait layout stored at the drag minimums) is whole in the window, on top at points
+       across its whole box (what a user sees and clicks, which the viewport ratio alone does not show) and a click at its
+       centre reaches it; with no related exam the table's message is visible text (T8); in every prior report state the
+       first body text line is T8; the list, the separator and the prior report pane stay inside the panel in that order.
+       The hidden-filter notice case is not part of it (follow-up S7-RL-NOTICE-PORTRAIT).
   RelatedLayoutEquivalence rl06/rl08: work rows of 286px or more (1600x1050, 1366x768, 1920x1080, 1280x800, 1024x768),
        portrait (900x1400, 900x1200, 768x1024) and the report window at 900x600/900x700 lay out exactly as on the
        implementation base. Why a fixed-commit comparison (AGENTS 1-B 14): this unit's requirement there IS sameness with
        the base, so the base page (read from the fixed commit by its LF sha256, tests/report_actions_dom_test.py
        fixed_file) and this page are booted alike in child processes and their landmark rectangles compared (+-0.5px).
        Where the base drew Clinical Info text outside its column (the defect fixed here) the visible part is compared
-       inside the column only. Not in CI: a hosted checkout may lack the commit; it is recorded once at the candidate.
+       inside the column only. One exception (EQ_EXCEPTION, D383): at 900x1200 and 768x1024 the landmarks inside the
+       Related panel (table, separator, Related Report, first body text line) may move, each for the reason written next
+       to it; the panel's own box and everything outside it are still compared. Not in CI: a hosted checkout may lack the
+       commit; it is recorded once at the candidate.
 
 Measurements are printed as `RL-MEASURE {json}` lines next to the assertions; they are observations, not pass evidence.
 KIN_MULTI_INSTITUTION_MAIN (the harness override) points the page at a copy for the local mutant runs. Synthetic data only
@@ -68,6 +77,7 @@ import multi_institution_worklist_dom_test as harness  # noqa: E402  (imported, 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 SMALL = (900, 600)
 LARGE = (1600, 1050)
+PORTRAIT_MIN = [(900, 1200), (768, 1024)]   # portrait windows where the Related panel sits at its 286px minimum
 
 PID = "SYN-RL-01"
 CURRENT_DESC, REPORT_DESC, NOREPORT_DESC, CT_DESC = "SYN RL CURRENT CT", "SYN RL PRIOR MR", "SYN RL PRIOR MR NO REPORT", "SYN RL PRIOR CT"
@@ -135,6 +145,10 @@ def js(page, body, arg=None):
 
 def measure(tag, **values):
     print("RL-MEASURE " + json.dumps({"case": tag, **values}, ensure_ascii=False, default=str))
+
+
+def centre_of_box(b):
+    return (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
 
 
 class Window:
@@ -298,6 +312,43 @@ class Window:
         page.mouse.click(*self.centre_of(row))
         harness.until(lambda: "열람 중" in row.get_by_role("cell").first.inner_text(), 5, f"{tag} row opened")
         self.assert_no_document_scroll(f"{tag} click")
+
+    def covered_points(self, locator):
+        """Points across the element's whole box (3 across x 5 down, the outer ones 5% in from its edges) where the
+        pointer reaches something else: a part painted over, or outside the window. Empty = the user sees all of it."""
+        return js(self.page, """
+          const b = (await io(arg)).box, out = [];
+          for (const fx of [0.1, 0.5, 0.9]) for (const fy of [0.05, 0.25, 0.5, 0.75, 0.95]) {
+            const x = b[0] + (b[2] - b[0]) * fx, y = b[1] + (b[3] - b[1]) * fy;
+            if (!within(document.elementFromPoint(x, y), arg)) out.push([x, y]); }
+          return out;""", locator.element_handle())
+
+    def assert_row_whole_on_top(self, tag, row):
+        """RL-10: the row is whole in the window, on top at every sampled point, and a click at its centre lands on it."""
+        page, case = self.page, self.case
+        self.assert_no_document_scroll(f"{tag} before")
+        seen, covered = self.visible(row), self.covered_points(row)
+        measure(tag, row=seen, covered=covered, table=self.visible(self.related_table))
+        case.assertGreaterEqual(seen["ratio"], 0.999, f"{tag}: row whole in the window")
+        case.assertEqual([], covered, f"{tag}: points of the row under another element")
+        case.assertGreaterEqual(self.visible(self.select)["ratio"], 0.999, f"{tag}: Modality select whole")
+        handle = row.element_handle()
+        handle.evaluate("r => { r.landed = null; document.addEventListener('click', e => { r.landed = r.contains(e.target); }, {capture: true, once: true}); }")
+        page.mouse.click(*centre_of_box(seen["box"]))
+        case.assertTrue(handle.evaluate("r => r.landed"), f"{tag}: a click at the row's centre reached the row")
+        harness.until(lambda: "열람 중" in row.get_by_role("cell").first.inner_text(), 5, f"{tag} row still opened")
+        self.assert_no_document_scroll(f"{tag} click")
+
+    def assert_panel_stacked(self, tag):
+        """The list, the separator and the prior report pane follow each other inside the Related panel's own box."""
+        panel, lst, sep = self.panel.bounding_box(), self.list_region.bounding_box(), self.separator.bounding_box()
+        prior = self.prior_pane().bounding_box()
+        measure(tag, panel=panel, list=lst, separator=sep, prior=prior)
+        self.case.assertGreaterEqual(lst["y"], panel["y"] - 0.5, f"{tag}: list inside the panel (top)")
+        self.case.assertLessEqual(lst["y"] + lst["height"], sep["y"] + 0.5, f"{tag}: list above the separator")
+        self.case.assertGreaterEqual(prior["y"], sep["y"] + sep["height"] - 0.5, f"{tag}: prior report pane below the separator")
+        self.case.assertLessEqual(prior["y"] + prior["height"], panel["y"] + panel["height"] + 0.5,
+                                  f"{tag}: prior report pane inside the panel (bottom)")
 
     def assert_clinical_contained(self, tag):
         """RL-03: Clinical Info text stays inside its column, and the controls next to it are not under it."""
@@ -612,6 +663,46 @@ class RelatedLayoutDOMTest(Base):
             w.assert_context("RL-09 no reading target", "no-target", False)
             w.screen.finish()
 
+    # ── RL-10 (D383) ────────────────────────────────────────────────────────────────────────────────────────────────
+    def test_rl10_portrait_selected_row_whole_and_on_top(self):
+        many = [harness.row(f"2.25.78{i:02d}", PID, date=f"2025{1 + i % 12:02d}{1 + i % 28:02d}", rs="W", modality="CT",
+                            desc=f"SYN RL MANY {i:02d}") for i in range(60)]
+        only = [harness.row("2.25.7001", PID, date="20261005", rs="W", modality="CT", desc=CURRENT_DESC)]
+        # A portrait layout stored at the panel's and the list's drag minimums.
+        stored = {"version": 1, "mode": "auto", "portrait": {"related": 286, "prior": 150}, "landscape": {}}
+        for size in PORTRAIT_MIN:
+            name = f"{size[0]}x{size[1]}"
+            cases = [("rows", dict(state="shown")), ("60 rows", dict(state="shown", row_set=rows(many))),
+                     ("stored size", dict(state="shown", storage={LAYOUT_KEY: json.dumps(stored)})),
+                     ("no related exam", dict(state="unselected", row_set=only))]
+            for label, options in cases:
+                with self.subTest(size=name, case=label):
+                    w = self.open_state(size=size, **options)
+                    tag = f"RL-10 {name} {label}"
+                    if label == "no related exam":
+                        # No row to select: the table's message says so. Its cell is taller than an exam row and scrolls
+                        # inside the table, so it is judged as visible text (T8, on top), not as a whole row.
+                        message = w.related_table.get_by_text("관련 검사 없음", exact=True)
+                        harness.expect(message).to_be_visible()
+                        w.assert_no_document_scroll(tag)
+                        line = w.text_exposure(message)
+                        measure(tag, message=line)
+                        self.assertTrue(line["agrees"], f"{tag}: line tool disagrees with IntersectionObserver {line}")
+                        self.assertTrue(line["h"] >= 8 and line["hit"], f"{tag}: the message T8 - {line['h']:.1f}px visible, hit {line['hit']}")
+                    else:
+                        w.assert_row_whole_on_top(tag, w.related_row(REPORT_DESC))
+                    w.assert_panel_stacked(tag)
+                    w.screen.finish()
+            # The prior report pane at its portrait floor still shows what it holds, in every state.
+            for state in STATES:
+                with self.subTest(size=name, state=state):
+                    w = self.open_state(state, size=size)
+                    tag = f"RL-10 {name} {state}"
+                    w.assert_no_document_scroll(tag)
+                    w.assert_t8(tag, STATES[state])
+                    w.assert_panel_stacked(tag)
+                    w.screen.finish()
+
 
 # ── RelatedLayoutEquivalence (R-EQ; local record, not in CI) ────────────────────────────────────────────────────────
 BASE_SHA = "0856c1bda1b4a66a5abf59467f4926b7e75c8d78"   # implementation base B (S7-AUDIT-STORE merge)
@@ -620,6 +711,15 @@ REL_MAIN = "worklist-v0/hpacs-lite/main.html"
 EQ_LANDSCAPE = [(1600, 1050), (1366, 768), (1920, 1080), (1280, 800), (1024, 768)]
 EQ_PORTRAIT = [(900, 1400), (900, 1200), (768, 1024)]
 EQ_REPORT_WINDOW = [(900, 600), (900, 700)]
+# RL-06 exception (D383): where the portrait Related panel sits at its 286px minimum, its inside is re-divided so the
+# selected row is whole and on top (RL-10). The table area keeps its header and one row (68px instead of 66), the list
+# holds its fixed rows and that table (164px instead of 150), and the prior report pane gives the 14px (floor 116px instead
+# of 130). These landmarks inside the panel move; the panel itself and everything outside it must stay as on the base.
+EQ_EXCEPTION_SIZES = {f"{w}x{h}" for w, h in PORTRAIT_MIN}
+EQ_EXCEPTION = {"Related table": "table area 66 -> 68px and list 150 -> 164px (header + one whole row below the fixed rows)",
+                "separator": "list 150 -> 164px: the separator sits 14px lower",
+                "Related Report": "the prior report pane starts 14px lower (floor 130 -> 116px)",
+                "first body text line": "the prior report pane starts 14px lower (floor 130 -> 116px)"}
 
 
 class _Driver:
@@ -671,6 +771,8 @@ def landmarks(w):
         "Clinical Context heading": page.get_by_role("heading", name="Clinical Context", exact=True),
         # The report window's lower edge: the landmarks above sit at its top and would not show a shorter window.
         "Report window separator": page.get_by_role("separator", name="드래그하여 상단 패널 높이 조절", exact=True),
+        # The panel's own box: the RL-06 exception re-divides its inside only.
+        "Related panel": w.panel,
     }
     column = w.clinical.bounding_box()
     col = [column["x"], column["y"], column["x"] + column["width"], column["y"] + column["height"]]
@@ -712,7 +814,7 @@ class RelatedLayoutEquivalence(unittest.TestCase):
             base_page.write_text(base_text, encoding="utf-8", newline="\n")
             base = run_snapshot(base_page)
         cand = run_snapshot(None)
-        differences = []
+        differences, excepted = [], []
         for key, landmarks_b in base["sizes"].items():
             size = key.split()[0]
             landmarks_s = cand["sizes"][key]
@@ -721,8 +823,9 @@ class RelatedLayoutEquivalence(unittest.TestCase):
                 if size in ("900x600", "900x700") and name not in ("Thumbnail tab", "Clinical Info heading", "Reading Template search",
                                                                    "Show All", "Report window separator"):
                     continue   # RL-08: only the report window at the short sizes
+                found = (differences if size not in EQ_EXCEPTION_SIZES or name not in EQ_EXCEPTION else excepted)
                 if (b is None) != (s is None):
-                    differences.append([key, name, b, s])
+                    found.append([key, name, b, s])
                     continue
                 if b is None:
                     continue
@@ -730,12 +833,13 @@ class RelatedLayoutEquivalence(unittest.TestCase):
                 for x, y in pairs:
                     if x is None or y is None:
                         if x != y:
-                            differences.append([key, name, b, s])
+                            found.append([key, name, b, s])
                         continue
                     if any(abs(p - q) > 0.5 for p, q in zip(x, y)):
-                        differences.append([key, name, b, s])
+                        found.append([key, name, b, s])
                         break
-        measure("RL-06/RL-08", compared=sorted(base["sizes"]), differences=differences)
+        measure("RL-06/RL-08", compared=sorted(base["sizes"]), differences=differences,
+                excepted=[[k, n, EQ_EXCEPTION[n], b, s] for k, n, b, s in excepted])
         self.assertEqual([], differences, "RL-06/RL-08 layout differs from the base where nothing should change")
 
 

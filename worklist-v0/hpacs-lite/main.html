@@ -403,6 +403,15 @@
     body.portrait .rtabs { flex-wrap: wrap; }
     body.portrait .workrow { flex-direction: column; flex: 1 0 480px; min-height: 480px; }
     body.portrait .related-p { width: 100%; height: 56%; min-height: 286px; flex: none; }
+    /* S7-RELATED-LAYOUT (D383): at its 286px minimum (900x1200, 768x1024) the portrait panel gave the list 150px, of which
+       the title, reading-target, filter and help rows take 96px; the table then ran under the separator and the Related
+       Report head, so the selected row was partly covered and a click there missed it. The table keeps its header and
+       one whole row (26.5 + 41px), the list holds those rows plus that table, and the prior report pane gives the
+       difference so the panel sum stays 286px and nothing outside the panel moves; 116px still shows the head and the
+       first text line of every prior report state. The hidden-filter notice (20px) is not covered by these values. */
+    body.portrait .related-list-pane { min-height: 164px; }
+    body.portrait .related-list-pane .grid2 { min-height: 68px; }
+    body.portrait .prior-report-pane { min-height: 116px; }
     body.portrait .report-p, body.portrait .order-p { min-height: 180px; }
     body.portrait #resize-main, body.portrait #resize-related { width: 100%; height: 6px; cursor: row-resize; }
     body.portrait #resize-main::after, body.portrait #resize-related::after {
