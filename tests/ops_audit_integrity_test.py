@@ -65,7 +65,7 @@ def stream(rows, guard=PRESENT, schema=(), table=True, order=None):
 # exporter, a detached one (-d) the export's watchdog, one with stdin (-i) the verifier, any other `sh` exec into the
 # target a control command. As plan.json says: exporter normal | stall (1 KiB, then nothing) | fail (1 KiB, exit 1);
 # verifier normal (reads to EOF, answers) | no_read (never reads) | stall_after_read (reads to EOF, never answers) |
-# fail (exit 3 at once); cancel clean (the run is gone: nothing left) | remaining (one process and one session left) |
+# fail_after_read (reads to EOF, exit 3) | fail (exit 3 at once); cancel clean (the run is gone: nothing left) | remaining (one process and one session left) |
 # fail (exit 1) | unreadable (no result line) | hang (never answers); remove normal | fail | hang. In this fake the
 # exporter's local client is its remote process too, so ending the client ends the export, as a cancel that answers
 # "clean" reports.
@@ -163,6 +163,8 @@ elif args[0] == "exec":
             forever()
         data = sys.stdin.buffer.read()
         (state / "received.json").write_text(json.dumps({"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}))
+        if plan["verifier"] == "fail_after_read":
+            sys.exit(3)
         if plan["verifier"] == "stall_after_read":
             forever()
         sys.stdout.write("\n".join(plan["answer"]) + "\n")
@@ -964,7 +966,8 @@ class ScriptedVerifier:
 
     def _end(self, code):
         if self.returncode is None:
-            if code == 0:
+            # a real process writes through its own handle; once the caller closed its side nothing reads the answer
+            if code == 0 and not self.output.closed:
                 self.output.write(("\n".join(self.answer) + "\n").encode())
                 self.output.flush()
             self.returncode = code
@@ -1069,7 +1072,8 @@ class CleanupBudget(unittest.TestCase):
     carries the termination proof. The verifier fails at once while a named database's exporter still runs; the
     target's control command (the remote cancellation) answers that the run is gone, that a process and a session are
     left, fails, answers without a result or never answers, and the verifier's removal fails or never answers. Only the
-    first is a confirmed cleanup. In every case evaluate raises the InputError within the budget after the failure, the
+    first is a confirmed cleanup. A verifier that fails only after it read the whole export gives the same complete
+    proof. In every case evaluate raises the InputError within the budget after the failure, the
     proof names the run and its target (container ID, database, role, a session name holding the run that fits
     PostgreSQL's 63 bytes) and verify --container reports it with exit 2."""
 
@@ -1115,6 +1119,16 @@ class CleanupBudget(unittest.TestCase):
                 control = self.fake.note("controls.json")
                 self.assertEqual(control[0], self.fake.container_id(TARGET), "the cancellation goes to the target's ID")
                 self.assertIn(proof["run"], control, "and names this run")
+
+    def test_pv10_a_failure_after_the_whole_export_carries_the_whole_proof(self):
+        # the verifier reads the whole export and then fails: the failure surfaces after the transfer, not while it ran
+        self.fake.plan(verifier="fail_after_read", cancel="clean")
+        proof, elapsed = self.evaluate(audit.DatabaseExport(TARGET, "kin", "kin"))
+        self.assertEqual(sorted(proof["steps"]), ["local", "remote", "verifier"], proof)
+        self.assertTrue(proof["confirmed"], proof)
+        self.assertIsNotNone(self.fake.note("controls.json"), "the ended remote export was observed again")
+        self.assertEqual(self.fake.names("containers"), [TARGET])
+        self.assertLess(elapsed, PROMPT)
 
     def test_pv10_one_budget_for_everything_after_the_failure(self):
         for label, plan in (("the cancellation never answers", dict(cancel="hang")),

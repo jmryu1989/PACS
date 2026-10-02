@@ -685,6 +685,7 @@ class _Cleanup:
 
     def __init__(self, export):
         self.export, self.remote, self.started, self.record, self.steps = export, None, None, None, {}
+        self.processes, self.transfer = [], None   # the local docker clients and the transfer thread of this run
 
     def begin(self, cause):
         if self.started is None:
@@ -756,66 +757,66 @@ def _close_pipes(processes):
                     pass
 
 
-def _stop(processes, transfer, verifier, cleanup):
-    """End everything this run owns under the cleanup budget: the local docker clients first (they stop reading and
-    writing at once), then the remote export when one was started (killing its client does not reach it), then the
-    verifier container (its exec ends with it), then reap the clients and the transfer thread. Pipes are closed only
-    once the thread ended."""
-    for process in processes:
+def _stop(cleanup, verifier):
+    """After any failure, wherever it surfaced, end everything this run owns under the cleanup budget: the local docker
+    clients first (they stop reading and writing at once), then the remote export when one was started (killing its
+    client does not reach it; one that already ended is observed again for the proof), then the verifier container (its
+    exec ends with it), then reap the clients and the transfer thread. Pipes are closed only once the thread ended."""
+    for process in cleanup.processes:
         if process.poll() is None:
             process.kill()
     if cleanup.remote is not None:
         cleanup.note("remote", cleanup.remote.cancel(cleanup.left()))
     cleanup.note("verifier", _remove_verifier(verifier, cleanup.left()))
     ended = True
-    for process in processes:
+    for process in cleanup.processes:
         try:
             process.wait(timeout=cleanup.left())
         except subprocess.TimeoutExpired:
             ended = False
-    if transfer is not None:
-        transfer.join(cleanup.left())
-    moving = transfer is not None and transfer.is_alive()
+    if cleanup.transfer is not None:
+        cleanup.transfer.join(cleanup.left())
+    moving = cleanup.transfer is not None and cleanup.transfer.is_alive()
     if not moving:
-        _close_pipes(processes)
+        _close_pipes(cleanup.processes)
     cleanup.note("local", {"confirmed": ended and not moving, "processes_ended": ended, "transfer_ended": not moving})
 
 
 def _load_export(source, export, verifier, output, timeout, cleanup):
     """Stream the export into the verifier under one deadline that runs from the start of the export to the verifier's
-    exit. The exporter (a named database's remote export), the transfer and the verifier are watched together; at the
-    deadline, or as soon as one side fails, _stop ends everything the run owns under the cleanup budget and the
-    InputError goes to evaluate and on to the caller's failure record with the termination proof. No blocking read,
-    write or wait holds the caller, its operations lock, the verifier or the remote export past the deadline and the
-    budget."""
+    exit. The exporter (a named database's remote export), the transfer and the verifier are watched together and kept
+    in cleanup; at the deadline, or as soon as one side fails, the failure is observed here (the cleanup budget starts)
+    and evaluate's _stop ends everything the run owns, so the InputError goes on to the caller's failure record with the
+    termination proof. No blocking read, write or wait holds the caller, its operations lock, the verifier or the remote
+    export past the deadline and the budget."""
     deadline = time.monotonic() + timeout
-    processes, producer, transfer = [], None, None
+    producer, transfer = None, None
     with tempfile.TemporaryFile() as errors, tempfile.TemporaryFile() as export_errors:
         try:
             consumer = subprocess.Popen(["docker", "exec", "-i", verifier[0], "sh", "-c", VERIFIER_SCRIPT], cwd=ops.ROOT,
                                         stdin=subprocess.PIPE, stdout=output, stderr=errors)
-            processes.append(consumer)
+            cleanup.processes.append(consumer)
             if isinstance(source, SnapshotDump):
                 chunks = _file_chunks(source.path)
             else:
                 cleanup.remote = export
                 producer = export.start(deadline, export_errors)
-                processes.append(producer)
+                cleanup.processes.append(producer)
                 chunks = iter(lambda: producer.stdout.read(1024 * 1024), b"")
             transfer = _Transfer(chunks, consumer.stdin)
+            cleanup.transfer = transfer
             transfer.start()
             failure = _watch(producer, consumer, transfer, deadline)
         except BaseException as error:
-            cause = str(error) if isinstance(error, InputError) else "The export could not be started or watched"
-            _stop(processes, transfer, verifier, cleanup.begin(cause))
+            cleanup.begin(str(error) if isinstance(error, InputError) else "The export could not be started or watched")
             raise
         if failure is not None:
-            _stop(processes, transfer, verifier, cleanup.begin(str(failure)))
+            cleanup.begin(str(failure))
             raise failure
-        for process in processes:
+        for process in cleanup.processes:
             process.wait()
         transfer.join()
-        _close_pipes(processes)
+        _close_pipes(cleanup.processes)
     if consumer.returncode:
         raise InputError("The isolated verifier could not restore the export")
     if isinstance(source, SnapshotDump) and transfer.sha.hexdigest() != source.sha256:
@@ -890,7 +891,7 @@ def evaluate(source, timeout=3600):
     token = uuid.uuid4().hex
     verifier = ("kin-rehearsal-" + token[:16] + "-audit", token)
     cleanup = _Cleanup(export)
-    failure = None
+    failure, judged = None, False
     try:
         ops.run(["docker", "run", "-d", "--name", verifier[0], "--label", "kin.ops.run=" + token,
                  "--network", "none", "-e", "POSTGRES_HOST_AUTH_METHOD=trust", image])
@@ -903,7 +904,9 @@ def evaluate(source, timeout=3600):
         with tempfile.TemporaryFile() as output:
             _load_export(source, export, verifier, output, timeout, cleanup)
             shape, digests, schema_view = _read_output(output)
-        return _judge(shape, digests, schema_view)
+        evaluation = _judge(shape, digests, schema_view)
+        judged = True
+        return evaluation
     except InputError as error:
         failure = error
         raise
@@ -911,16 +914,13 @@ def evaluate(source, timeout=3600):
         failure = InputError("The isolated verifier failed")
         raise failure from error
     finally:
-        if failure is not None:
-            cleanup.begin(str(failure))
-        if "verifier" not in cleanup.steps:
-            removed = _remove_verifier(verifier, cleanup.left())
-            if failure is not None:
-                cleanup.note("verifier", removed)
-            elif not removed["confirmed"]:
+        if judged:
+            if not _remove_verifier(verifier, None)["confirmed"]:
                 raise InputError("The isolated verifier could not be removed")
-        if failure is not None:
-            failure.cleanup = cleanup.close()
+        else:
+            _stop(cleanup.begin(str(failure) if failure is not None else "The verification was interrupted"), verifier)
+            if failure is not None:
+                failure.cleanup = cleanup.close()
 
 
 # ── checkpoints and verification ──
