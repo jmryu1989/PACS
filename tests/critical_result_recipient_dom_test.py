@@ -27,6 +27,10 @@ the origin's storage or in what the origin's storage holds (contract §13's writ
        product's session-end signal.
   rd09 the reading panel's R3/R4 full rows: the contract sentence and the pinned body, no Acknowledge.
   rd10 unknown outcomes, Check Again with the same bytes, and how they end.
+  rd10b A-16 - no answer within 60 s, in the minute of the periodic read - in both orders of the late ACK reaching the
+       server and the record read that minute starts, set by the case with the clock paused: a 201 the page stopped
+       waiting for, leaving the pending list and time end nothing; the read's acknowledged ends the attempt with the
+       server's time, its created keeps it until the next minute's read.
   rx11 the 60 s read changes nothing.  rx12 empty, Show All, More, terminal rows.  rx13 confirmed refusals by code.
   rx14 the reading panel's R2 ACK, roles and session end.  rx15 wording, fonts, targets, keyboard, external strings.
   rx16 sessions that never read.  rx17 read failures are failures.  rx18 the panel's summary line, history and one bar.
@@ -1787,26 +1791,130 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.assertIn("CRITICAL_RESULT_SOURCE_CHANGED", line["text"])
         self.assertNotIn(UNKNOWN_WORD, line["text"])
         self.assertEqual([], line["buttons"])
-        # A-16 (last: the minute that times a request out is also the minute of the periodic read): no answer within 60 s
-        # is unknown; the pair - the 201 that comes at 59 s is applied.
-        self.reads_settled()
+        # A-16 (no answer within 60 s) is rd10b: the screen it ends in depends on an order this case did not set.
+
+    # ── RD10b: A-16, the minute that times a request out is also the minute of the periodic read ──
+    def test_rd10b_a_timed_out_ack_ends_only_on_evidence_in_either_order(self):
+        # No answer within 60 s is unknown (A-16), and that minute's periodic read then reads the record once (U-08).
+        # Whether that read shows the late ACK depends on whether the server applied the ACK before it served the read - an
+        # order the page cannot know (contract §8.1 rule 4: the original request may be applied at any time). Both orders
+        # are valid and end differently, so the case sets the order and asserts the contract's screen for each: only
+        # evidence that reaches the page ends the attempt - the matching 201, or the record read's acknowledged with the
+        # server's time (rule 3 (b), rule 4 (a)). A 201 the page stopped waiting for, leaving the pending list and time
+        # passing end nothing (rule 2, U-08, G-03).
+        s = self.server
+        s.add(rec(112), rec(113), rec(114))
+        # The clock stands still, so nothing runs between two steps but what a step moves the clock by.
+        self.page.clock.pause_at("2030-05-05T06:00:00Z")
+        self.open_home()
+
+        def acknowledged_at(n):
+            return re.findall(r"\bAcknowledged (\d{4}-\d\d-\d\d \d\d:\d\d)", self.row_text(f"SYN-PT-{n}"))
+
+        def unknown_kept(n, what):
+            line = self.line(f"SYN-PT-{n}")
+            self.assertIn(UNKNOWN_WORD, line["text"], what)
+            self.assertIn(UNKNOWN_SENTENCE, line["text"], what)
+            self.assertEqual([["Check Again", False]], line["buttons"], what)
+            self.assertIsNone(ACKED.search(self.row_text(f"SYN-PT-{n}")), what)
+
+        def acked_meanwhile(n):
+            """Every row or line of record n that showed Acknowledged at any moment since watch()."""
+            seen = []
+            for entry in self.seen_since():
+                for item in [entry] + entry.get("items", []):
+                    if item["kind"] == "item" and f"SYN-PT-{n}" in item["text"] and ACKED.search(item["text"]):
+                        seen.append(item["text"][:120])
+            return seen
+
+        def ends_acknowledged(n, release, what):
+            """Release the evidence, wait for the screen the contract gives it (no fixed wait), and let the list read that
+            follows an applied ACK finish - so it does not take the list a later step holds."""
+            lists = len(self.requests("list"))
+            self.let_go(release)
+            self.wait_until(lambda: acknowledged_at(n) and not self.line_text(f"SYN-PT-{n}"), what)
+            self.wait_until(lambda: len(self.requests("list")) > lists, "the list read after the acknowledgement")
+            self.idle()
+            self.assertEqual("", self.line_text(f"SYN-PT-{n}"))
+            self.assertEqual([kst(SERVER_NOW)], acknowledged_at(n), "Acknowledged with the server's time, not the browser's")
+            self.assertEqual([], self.row(f"SYN-PT-{n}")["buttons"])
+
+        # The pair (A-16 -> A-01): the 201 that comes at 59 s is applied, with the server's time.
         self.fault("ack", hold=True)
         self.acknowledge("SYN-PT-112")
         held = self.take("ack")
         self.page.clock.fast_forward(59000)
         self.settle()
         self.assertEqual("", self.line_text("SYN-PT-112"), "at 59 s the request is still waiting")
-        self.release(held)
-        self.reads_settled()
-        self.assertIn(f"Acknowledged {kst(SERVER_NOW)}", self.row_text("SYN-PT-112"))
+        ends_acknowledged(112, held, "the 201 at 59 s applied")
+
+        # Order 1 - the server applies the late ACK before it serves the record read (order table O2 -> O6 -> O4/O5, the
+        # order of the CI failures).
+        self.fault("list", hold=True, later=True)
+        self.fault("read", hold=True, later=True)
         self.fault("ack", hold=True, later=True)
+        reads = len(self.requests("read"))
         self.acknowledge("SYN-PT-113")
-        held = self.take("ack")
+        ack = self.take("ack")
         self.page.clock.fast_forward(60000)
         self.wait_until(lambda: UNKNOWN_WORD in self.line_text("SYN-PT-113"), "the timed-out attempt")
-        self.release_late(held)
-        self.reads_settled()
-        self.assertIn(UNKNOWN_SENTENCE, self.line_text("SYN-PT-113"))
+        # The minute that timed the request out is also the minute of the periodic read.
+        listed = self.take("list")
+        self.assertEqual({"view": ["received"], "state": ["pending"]}, listed["query"])
+        self.assertEqual(reads, len(self.requests("read")), "the record is read after the list, not before")
+        stopped = ack["route"].request
+        self.wait_until(lambda: any(item is stopped for item in self.finished), "the page stopping the request")
+        self.assertIsNotNone(stopped.failure, "at 60 s the page stopped the request: no answer to it can reach the page")
+        unknown_kept(113, "unknown at 60 s")
+        self.watch()
+        # The late ACK reaches the server and is applied; its 201 has nowhere to go.
+        self.release_late(ack)
+        self.assertEqual("acknowledged", s.records[rid(113)]["state"])
+        unknown_kept(113, "a late 201 alone ends nothing")
+        # The list, read after the server applied it: 113 is no longer pending - leaving the list is no evidence.
+        self.let_go(listed)
+        read = self.take("read")
+        self.assertEqual(f"/api/critical-results/{rid(113)}", read["path"], "one record read, for the unknown attempt")
+        unknown_kept(113, "leaving the list is no evidence")
+        self.assertEqual([], acked_meanwhile(113), "nothing showed Acknowledged before the record read")
+        # The record read, served after the server applied the ACK: acknowledged ends the attempt with the server's time.
+        ends_acknowledged(113, read, "the record read's acknowledged ending the attempt")
+
+        # Order 2 - the server serves the record read before it applies the late ACK (O3), then the next minute's read
+        # (O4, G-03).
+        self.fault("list", hold=True)
+        self.fault("read", hold=True)
+        self.fault("ack", hold=True, later=True)
+        self.acknowledge("SYN-PT-114")
+        ack = self.take("ack")
+        self.page.clock.fast_forward(60000)
+        self.wait_until(lambda: UNKNOWN_WORD in self.line_text("SYN-PT-114"), "the timed-out attempt")
+        self.let_go(self.take("list"))
+        read = self.take("read")
+        self.assertEqual(f"/api/critical-results/{rid(114)}", read["path"])
+        self.assertEqual("created", s.records[rid(114)]["state"], "the read was served before the ACK was applied")
+        self.watch()
+        self.let_go(read)
+        unknown_kept(114, "a record read that shows created keeps the attempt unknown")
+        self.release_late(ack)
+        self.assertEqual("acknowledged", s.records[rid(114)]["state"])
+        self.idle()
+        unknown_kept(114, "applied on the server after the read: nothing on the page says so yet")
+        self.assertEqual([], acked_meanwhile(114))
+        # The next minute: its list, then one record read of the attempt that is still unknown - served now, acknowledged -
+        # ends it (O4). Had the created answer ended the attempt, this minute would read no record.
+        count, posts, lists = len(self.log), len(self.posts()), len(self.requests("list"))
+        self.page.clock.fast_forward(60000)
+        self.wait_until(lambda: acknowledged_at(114) and not self.line_text("SYN-PT-114"), "the next minute's record read")
+        self.wait_until(lambda: len(self.requests("list")) > lists + 1, "the list read after the acknowledgement")
+        self.idle()
+        new = self.log[count:]
+        self.assertEqual(["list", "read"], [q["kind"] for q in new][:2], "the minute's list, then the record read")
+        self.assertEqual([f"/api/critical-results/{rid(114)}"], [q["path"] for q in new if q["kind"] == "read"])
+        self.assertEqual(posts, len(self.posts()), "nothing is sent again by itself")
+        self.assertEqual("", self.line_text("SYN-PT-114"))
+        self.assertEqual([kst(SERVER_NOW)], acknowledged_at(114), "Acknowledged with the server's time, not the browser's")
+        self.assertEqual(3, len(self.posts()), "one POST per click")
 
     # ── RX11: the minute's read ──
     def test_rx11_periodic_read_is_one_get_per_minute_and_changes_nothing(self):
