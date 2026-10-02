@@ -195,13 +195,16 @@ def reload_proxy():
 def seal_audit(directory, parent, manifest):
     """Stage 'seal audit': after the writers resumed, seal the AuditLog rows of this complete snapshot's kin.dump. The
     outcome goes to the manifest's existing backup_error ('audit integrity' for a finding, 'seal audit' for a failure),
-    which the unchanged monitor reports as backup_failed; the snapshot stays complete and restorable either way."""
+    which the unchanged monitor reports as backup_failed; the snapshot stays complete and restorable either way. A
+    failure that ended the verification carries its termination proof (cleanup), confirmed or not, into that record."""
     # Imported here: the audit tool builds on this module's Docker, digest and lock helpers.
     import ops_audit_integrity as audit
     try:
         audit.seal(directory, parent, manifest)
     except Exception as error:
         manifest["backup_error"] = {"stage": "seal audit", "type": type(error).__name__}
+        if getattr(error, "cleanup", None) is not None:
+            manifest["backup_error"]["cleanup"] = error.cleanup
         audit.replace_json(directory / "manifest.json", manifest)
 
 
@@ -370,21 +373,24 @@ def validate_backup(directory):
     return directory, manifest
 
 
-def remove_owned(kind, name, token):
+def remove_owned(kind, name, token, timeout=600):
+    """timeout bounds the whole removal (each command gets what is left of it), so a caller's cleanup budget holds."""
+    end = time.monotonic() + timeout
     if kind not in ("container", "volume") or not name.startswith("kin-rehearsal-"):
         raise RuntimeError("Refusing cleanup outside rehearsal resources")
     label = text(["docker", kind, "inspect", "--format", '{{index .Labels "kin.ops.run"}}' if kind == "volume"
-                  else '{{index .Config.Labels "kin.ops.run"}}', name])
+                  else '{{index .Config.Labels "kin.ops.run"}}', name], timeout=max(0.01, end - time.monotonic()))
     if label != token:
         raise RuntimeError("Refusing cleanup of a resource owned by another run")
     command = ["docker", "volume", "rm", name] if kind == "volume" else ["docker", "rm", "-f", "-v", name]
-    run(command)
+    run(command, timeout=max(0.01, end - time.monotonic()))
 
 
-def remove_owned_if_present(kind, name, token):
-    found = run(["docker", kind, "inspect", name], check=False)
+def remove_owned_if_present(kind, name, token, timeout=600):
+    end = time.monotonic() + timeout
+    found = run(["docker", kind, "inspect", name], check=False, timeout=timeout)
     if found.returncode == 0:
-        remove_owned(kind, name, token)
+        remove_owned(kind, name, token, timeout=max(0.01, end - time.monotonic()))
     elif not any(message in found.stderr.decode("utf-8", errors="replace").lower()
                  for message in ("no such object", "no such container", "no such volume")):
         raise RuntimeError("Could not verify temporary resource cleanup")

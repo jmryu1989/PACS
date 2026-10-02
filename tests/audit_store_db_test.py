@@ -14,14 +14,25 @@ refused statement, the tool's exit code and report kinds/ids; no trigger, functi
 asserted (the harness discovers the guard's triggers from the catalog when a case has to disable or drop them).
 Every container is created here with this run's label and removed at the end; the verifier's own containers must be
 gone after each call.
+
+IV-DB-13..18 (S7-AUDIT-STORE-F02/F03, SPEC-F01..F03) judge a named database's export as the remote job it is in the
+target container, on this host's real docker client (the Windows client boundary here, Linux in CI): its sessions are
+read from pg_stat_activity (every client session in the case's database other than the test's own), its processes are
+the ones `docker exec` started in the container (their parent is outside it) other than the test's psql sessions.
+Failures are injected at those boundaries only after the intended state was observed: the verifier container killed,
+the local docker client killed, the remote pg_dump stopped (SIGSTOP) once its lock wait is over, the caller's process
+killed, the target paused. Another run of the tool and a session whose name differs from the run's only in the run's
+own characters must come through untouched.
 """
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import shutil
 import subprocess
@@ -30,6 +41,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +73,99 @@ def wait_ready(name, user):
 
 def verifier_containers():
     return docker("ps", "-aq", "--filter", "label=kin.ops.run", "--filter", "name=-audit").stdout.decode().split()
+
+
+GRACE = 15        # the cleanup budget after a failure, as the product documents it
+
+
+def remote_step(proof):
+    return (proof or {}).get("steps", {}).get("remote", {})
+
+
+class Session:
+    """A psql session the test keeps open through `docker exec -i`: send() a statement without output, ask() one with a
+    one-line answer (None once the session is gone)."""
+
+    def __init__(self, container, database, user="kin", application_name=None):
+        env = ["-e", "PGAPPNAME=" + application_name] if application_name else []
+        self.process = subprocess.Popen(["docker", "exec", "-i", *env, container, "psql", "-X", "-q", "-A", "-t", "-U",
+                                         user, "-d", database], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL)
+        self.lines = queue.Queue()
+        threading.Thread(target=self._read, daemon=True).start()
+        self.pid = int(self.ask("SELECT pg_catalog.pg_backend_pid()"))
+
+    def _read(self):
+        for line in self.process.stdout:
+            self.lines.put(line.decode("utf-8", "replace").strip())
+        self.lines.put(None)
+
+    def send(self, statement):
+        try:
+            self.process.stdin.write((statement + ";\n").encode())
+            self.process.stdin.flush()
+            return True
+        except OSError:
+            return False
+
+    def ask(self, statement, timeout=30):
+        if not self.send(statement):
+            return None
+        try:
+            return self.lines.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def close(self):
+        try:
+            self.process.communicate(b"ROLLBACK;\n\\q\n", timeout=30)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            self.process.kill()
+
+
+class Recorder:
+    """Every docker process the product starts while active, through the real docker client (nothing is changed)."""
+
+    def __init__(self):
+        self.launched = []
+
+    @contextlib.contextmanager
+    def active(self):
+        real = subprocess.Popen
+
+        def popen(args, *rest, **kwargs):
+            process = real(args, *rest, **kwargs)
+            if isinstance(args, (list, tuple)) and args and args[0] == "docker":
+                self.launched.append((list(args), process))
+            return process
+        with patch.object(subprocess, "Popen", popen):
+            yield self
+
+    def running_against(self, container_id):
+        """The product's docker clients still running against the container (by its ID)."""
+        return [(args, process) for args, process in self.launched if container_id in args and process.poll() is None]
+
+
+class Background:
+    """A call in a thread: result() is (outcome, seconds from start); outcome holds 'value' or 'error'."""
+
+    def __init__(self, call):
+        self.outcome, self.started = {}, time.monotonic()
+        self.thread = threading.Thread(target=self._run, args=(call,), daemon=True)
+        self.thread.start()
+
+    def _run(self, call):
+        try:
+            self.outcome["value"] = call()
+        except BaseException as error:   # judged by the case
+            self.outcome["error"] = error
+        self.finished = time.monotonic()
+
+    def result(self, timeout):
+        self.thread.join(timeout)
+        if self.thread.is_alive():
+            raise AssertionError("the call was still running after %s s" % timeout)
+        return self.outcome, self.finished
 
 
 class AuditStoreDB(unittest.TestCase):
@@ -224,6 +329,99 @@ class AuditStoreDB(unittest.TestCase):
         if code:
             print(json.dumps({"variant": variant, "constructible": False, "sqlstate": state}), flush=True)
         return code == 0
+
+    # ── the remote export's boundary (IV-DB-13..18) ──
+
+    @classmethod
+    def container_id(cls):
+        return docker("inspect", "--format", "{{.Id}}", cls.db).stdout.decode().strip()
+
+    def sessions(self, database, *own):
+        """Client sessions in the database other than this observation and own: {pid: (name, state, wait type)}."""
+        lines = self.ok("SELECT pid || '|' || application_name || '|' || coalesce(state, '') || '|' || "
+                        "coalesce(wait_event_type, '') FROM pg_catalog.pg_stat_activity WHERE datname = '%s' "
+                        "AND backend_type = 'client backend' AND pid <> pg_catalog.pg_backend_pid()" % database)
+        found = {}
+        for line in lines:
+            pid, name, state, wait = line.split("|")
+            if int(pid) not in own:
+                found[int(pid)] = (name, state, wait)
+        return found
+
+    def processes(self):
+        """Every process in the target container other than the server's and this observation: {pid: (name, parent)}."""
+        script = ('for s in /proc/[0-9]*/stat; do read -r pid name state parent rest 2>/dev/null < "$s" || continue; '
+                  'if [ "$pid" != 1 ] && [ "$pid" != "$$" ] && [ "$name" != "(postgres)" ]; then '
+                  'echo "$pid $name $parent"; fi; done')
+        found = {}
+        for line in docker("exec", self.db, "sh", "-c", script).stdout.decode().splitlines():
+            if line.strip():
+                pid, name, parent = line.split()
+                found[int(pid)] = (name, int(parent))
+        return found
+
+    def exec_processes(self):
+        """Processes `docker exec` started in the target container (their parent is outside it, 0 inside) other than
+        psql sessions: {pid: name}."""
+        return {pid: name for pid, (name, parent) in self.processes().items() if parent == 0 and name != "(psql)"}
+
+    def until(self, condition, seconds, step=0.25):
+        end = time.monotonic() + seconds
+        while True:
+            value = condition()
+            if value or time.monotonic() >= end:
+                return value
+            time.sleep(step)
+
+    def lock(self, database):
+        """A session holding ACCESS EXCLUSIVE on AuditLog: an export waits for it before it reads anything."""
+        holder = Session(self.db, database)
+        holder.send('BEGIN; LOCK TABLE "AuditLog" IN ACCESS EXCLUSIVE MODE')
+        granted = self.until(lambda: self.ok(
+            "SELECT count(*) FROM pg_catalog.pg_locks l JOIN pg_catalog.pg_class c ON c.oid = l.relation "
+            "WHERE c.relname = 'AuditLog' AND l.mode = 'AccessExclusiveLock' AND l.granted AND l.pid = %d"
+            % holder.pid, database) == ["1"], 30)
+        self.assertTrue(granted, "the lock holder got its lock")
+        return holder
+
+    def waiting(self, database, own, count):
+        """The sessions other than own once at least count of them wait on a lock (the intended state is reached)."""
+        def reached():
+            found = self.sessions(database, *own)
+            return found if sum(wait == "Lock" for _, _, wait in found.values()) >= count else None
+        found = self.until(reached, 120)
+        self.assertTrue(found, "%d export(s) observed waiting on the lock" % count)
+        return found
+
+    def start_verify(self, database, folder):
+        return subprocess.Popen([sys.executable, str(TOOL), "verify", "--container", self.db, "--database", database,
+                                 "--user", "kin", "--checkpoint", str(folder / audit.CHECKPOINT)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def start_caller(self, database, timeout):
+        """A caller of the public evaluate in its own process, so that the case can kill it."""
+        program = ("import sys; sys.path.insert(0, sys.argv[1]); import ops_audit_integrity as a; "
+                   "a.evaluate(a.DatabaseExport(sys.argv[2], sys.argv[3], 'kin'), timeout=float(sys.argv[4]))")
+        return subprocess.Popen([sys.executable, "-c", program, str(ROOT / "scripts"), self.db, database, str(timeout)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def finish(self, process, seconds):
+        """The output of a process that has to end within seconds (otherwise the case fails)."""
+        try:
+            out, _ = process.communicate(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            self.fail("the run was still running %s s later" % seconds)
+        return out
+
+    def remove_left_verifiers(self):
+        """The verifier a killed caller could not remove (its removal is the caller's own cleanup)."""
+        for identity in verifier_containers():
+            docker("rm", "-f", "-v", identity, check=False)
+
+    def restarts(self):
+        """How often the server has stopped every session after a child died abnormally (its crash recovery)."""
+        return docker("logs", self.db).stderr.decode("utf-8", "replace").count(
+            "terminating any other active server processes")
 
     def live_digest(self, database, identity, qualified, container=None, user="kin"):
         """The digest as the rejected in-database design computed it (scenario §1 d(r)), run on the tampered server."""
@@ -731,54 +929,342 @@ const { PrismaService } = require('/app/dist/prisma.service');
 
     def test_iv13_an_export_waiting_on_a_lock_fails_within_the_time_limit(self):
         """IV-DB-13 (S7-AUDIT-STORE-F02): while another session holds ACCESS EXCLUSIVE on AuditLog, the export of the
-        named database cannot start; evaluate with an 8 s limit fails as an input error within the limit and a bounded
-        stop, its verifier is removed (tearDown), and the export that waited leaves the server instead of waiting on.
-        Released, the same database verifies."""
+        named database cannot start; evaluate with an 8 s limit fails as an input error within the limit and the cleanup
+        budget with a confirmed termination proof, its verifier is removed (tearDown), and neither the export's session
+        nor a process docker exec started for it stays behind. Released, the same database verifies."""
         limit = 8
         root = self.new_root()
         db = self.new_database("iv13", rows=4)
         folder, _, _ = self.seal(db, root)
-        waiting = ("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = '%s' "
-                   "AND application_name = 'pg_dump'" % db)
-        holder = subprocess.Popen(["docker", "exec", "-i", self.db, "psql", "-X", "-q", "-U", "kin", "-d", db],
-                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        holder = self.lock(db)
         try:
-            holder.stdin.write(b'BEGIN; LOCK TABLE "AuditLog" IN ACCESS EXCLUSIVE MODE;\n')
-            holder.stdin.flush()
-            for _ in range(120):
-                if self.ok("SELECT count(*) FROM pg_catalog.pg_locks l JOIN pg_catalog.pg_class c ON c.oid = l.relation "
-                           "WHERE c.relname = 'AuditLog' AND l.mode = 'AccessExclusiveLock' AND l.granted", db) == ["1"]:
-                    break
-                time.sleep(0.25)
-            else:
-                self.fail("the lock holder did not get its lock")
             seen, stop = [], threading.Event()
 
             def watch():
                 while not stop.is_set():
-                    code, lines, _ = self.sql(waiting + " AND wait_event_type = 'Lock'", db)
-                    if code == 0 and lines and lines[0] != "0":
-                        seen.append(lines[0])
+                    if any(wait == "Lock" for _, _, wait in self.sessions(db, holder.pid).values()):
+                        seen.append(True)
                     time.sleep(0.25)
             watcher = threading.Thread(target=watch)
             watcher.start()
             started = time.monotonic()
             try:
-                with self.assertRaises(audit.InputError):
+                with self.assertRaises(audit.InputError) as caught:
                     audit.evaluate(audit.DatabaseExport(self.db, db, "kin"), timeout=limit)
             finally:
                 stop.set()
                 watcher.join()
-            self.assertLess(time.monotonic() - started, limit + 15)
+            self.assertLess(time.monotonic() - started, limit + GRACE)
             self.assertTrue(seen, "the export was observed waiting on the lock (not an unrelated early failure)")
-            for _ in range(60):
-                if self.ok(waiting, db) == ["0"]:
-                    break
-                time.sleep(0.25)
-            self.assertEqual(self.ok(waiting, db), ["0"], "the export that waited for the lock does not stay behind")
+            self.assertTrue(caught.exception.cleanup["confirmed"], caught.exception.cleanup)
+            self.assertEqual(self.sessions(db, holder.pid), {}, "the export that waited for the lock does not stay behind")
+            self.assertEqual(self.exec_processes(), {}, "nor does any process started for it")
         finally:
-            holder.communicate(b"ROLLBACK;\n", timeout=60)
+            holder.close()
         self.assertEqual(self.verify_db(db, folder)[0], 0, "without the lock the same export verifies")
+
+    def test_iv14_an_early_verifier_failure_ends_only_its_own_run(self):
+        """IV-DB-14 (S7-AUDIT-STORE-F02; SPEC-F01, SPEC-F03 verifier early failure and the foreign job kept): two
+        `verify --container` runs of the same database and role wait on a held lock, beside a session of that database
+        and role named like the first run's session except in the run's own characters. The first run's verifier
+        container is killed: that run exits 2 within the cleanup budget, long before its time limit, with a confirmed
+        proof naming its run, the target container's ID and the whole session name the server showed; its session and
+        the processes docker exec started for it are gone. The second run's session (same pid, still waiting) and
+        processes and the foreign session (same pid, still answering) are untouched. Released, the second run verifies
+        (exit 0) and nothing of either run is left."""
+        root = self.new_root()
+        db = self.new_database("iv14", rows=4)
+        folder, _, _ = self.seal(db, root)
+        holder = self.lock(db)
+        own, runs, foreign = {holder.pid}, [], None
+        try:
+            first = self.start_verify(db, folder)
+            runs.append(first)
+            ((a_pid, (a_name, _, _)),) = self.waiting(db, own, 1).items()
+            a_processes = self.exec_processes()
+            self.assertTrue(a_processes, "the run's remote processes are seen")
+            (a_verifier,) = verifier_containers()
+            foreign_name = a_name[:-8] + ("0" * 8 if a_name[-8:] != "0" * 8 else "f" * 8)
+            foreign = Session(self.db, db, application_name=foreign_name)
+            own.add(foreign.pid)
+            second = self.start_verify(db, folder)
+            runs.append(second)
+            both = self.waiting(db, own, 2)
+            (b_pid,) = set(both) - {a_pid}
+            b_processes = {pid: name for pid, name in self.exec_processes().items() if pid not in a_processes}
+            self.assertEqual(sorted(b_processes.values()), sorted(a_processes.values()), "the second run's processes")
+
+            killed_at = time.monotonic()
+            docker("kill", a_verifier)
+            out = self.finish(first, GRACE + 60)
+            self.assertLess(time.monotonic() - killed_at, GRACE + 3,
+                            "the failure is not waited out until the run's time limit")
+            after = self.sessions(db, *own)
+            self.assertEqual(set(after), {b_pid}, "only the other run's session is left")
+            self.assertEqual(after[b_pid][2], "Lock", "and it still waits")
+            self.assertEqual(self.exec_processes(), b_processes, "only the other run's processes are left")
+            self.assertEqual(foreign.ask("SELECT pg_catalog.pg_backend_pid()"), str(foreign.pid),
+                             "the foreign session is the same and still answers")
+            self.assertEqual(holder.ask("SELECT 1"), "1")
+
+            report = json.loads(out)
+            self.assertEqual((first.returncode, report["exit"]), (2, 2), report)
+            proof = report.get("cleanup") or {}
+            self.assertTrue(proof.get("confirmed"), proof)
+            self.assertLessEqual(proof["elapsed_seconds"], GRACE)
+            self.assertEqual(proof["target"], {"container": self.container_id(), "database": db, "role": "kin",
+                                               "application_name": a_name}, "the whole name the server showed")
+            self.assertIn(proof["run"], a_name)
+            self.assertIn(a_pid, [session["pid"] for session in remote_step(proof).get("sessions", [])])
+
+            holder.send("ROLLBACK")
+            out = self.finish(second, 180)
+            self.assertEqual((second.returncode, json.loads(out)["exit"]), (0, 0), "the other run verifies")
+            self.assertEqual(self.sessions(db, *own), {})
+            self.assertTrue(self.until(lambda: self.exec_processes() == {}, 10), self.exec_processes())
+        finally:
+            for process in runs:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+            if foreign is not None:
+                foreign.close()
+            holder.close()
+
+    def test_iv15_the_local_docker_client_alone_does_not_end_the_export(self):
+        """IV-DB-15 (SPEC-F01, SPEC-F03 local client only; no late connection): on this host's docker client, killing the
+        client of a `docker exec ... pg_dump` that waits on a lock leaves its session and its pg_dump in the container
+        (the boundary, shown with the test's own export). The tool's run whose export client is killed the same way
+        fails within the cleanup budget with a confirmed proof that names the remote pg_dump it ended and the session it
+        terminated; nothing of the run is left. The run's own export command started again afterwards (as a docker start
+        that arrives late) exits by itself without opening a session."""
+        root = self.new_root()
+        db = self.new_database("iv15", rows=4)
+        folder, _, _ = self.seal(db, root)
+        holder = self.lock(db)
+        replay = None
+        try:
+            control_name = "syn-control-" + uuid.uuid4().hex[:12]
+            control = subprocess.Popen(["docker", "exec", "-e", "PGAPPNAME=" + control_name, self.db, "pg_dump", "-U",
+                                        "kin", "-d", db, "-Fc"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.waiting(db, {holder.pid}, 1)
+            control.kill()
+            control.wait()
+            time.sleep(3)
+            self.assertEqual([name for name, _, _ in self.sessions(db, holder.pid).values()], [control_name],
+                             "the session stays after its client was killed")
+            self.assertIn("(pg_dump)", self.exec_processes().values(), "and so does its pg_dump")
+            self.ok("SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
+                    "WHERE application_name = '%s'" % control_name, db)
+            self.assertTrue(self.until(lambda: not self.sessions(db, holder.pid) and not self.exec_processes(), 15))
+
+            recorder = Recorder()
+            with recorder.active():
+                call = Background(lambda: audit.evaluate(audit.DatabaseExport(self.db, db, "kin"), timeout=120))
+                ((a_pid, (a_name, _, _)),) = self.waiting(db, {holder.pid}, 1).items()
+                (dump,) = [pid for pid, name in self.exec_processes().items() if name == "(pg_dump)"]
+                ((export_args, client),) = recorder.running_against(self.container_id())
+                killed_at = time.monotonic()
+                client.kill()
+                outcome, finished = call.result(GRACE + 60)
+            error = outcome.get("error")
+            self.assertIsInstance(error, audit.InputError, outcome)
+            self.assertLess(finished - killed_at, GRACE + 2)
+            self.assertEqual(self.sessions(db, holder.pid), {}, "the run's session is gone")
+            self.assertEqual(self.exec_processes(), {}, "and so is every process docker exec started for it")
+            proof = error.cleanup or {}
+            self.assertTrue(proof.get("confirmed"), proof)
+            self.assertIn(dump, remote_step(proof).get("killed", []), "the proof names the remote pg_dump it ended")
+            self.assertIn(a_pid, [session["pid"] for session in remote_step(proof).get("sessions", [])])
+
+            replay = subprocess.Popen(export_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            seen, end = [], time.monotonic() + 15
+            while replay.poll() is None and time.monotonic() < end:
+                seen += [name for name, _, _ in self.sessions(db, holder.pid).values()]
+                time.sleep(0.2)
+            self.assertIsNotNone(replay.poll(), "the late start ended by itself")
+            self.assertNotEqual(replay.returncode, 0)
+            seen += [name for name, _, _ in self.sessions(db, holder.pid).values()]
+            self.assertNotIn(a_name, seen, "the late start of a cancelled run opens no session")
+            self.assertEqual(self.exec_processes(), {})
+        finally:
+            if replay is not None and replay.poll() is None:
+                replay.kill()
+                replay.wait()
+            holder.close()
+        self.assertEqual(self.verify_db(db, folder)[0], 0)
+
+    def test_iv16_the_deadline_and_the_runs_life_bound_the_remote_export(self):
+        """IV-DB-16 (SPEC-F01 whole-life limit; SPEC-F03 producer stall, deadline, caller gone). (a) Past its lock wait
+        (the lock released while its pg_dump was stopped) the export's session waits for its client, not a lock: at the
+        15 s limit evaluate fails with a confirmed proof naming the stopped pg_dump and nothing is left. (b) The caller's
+        process is killed while its export waits on the lock: the server ends that wait at the run's deadline, not
+        later. (c) The caller's process is killed while its export's pg_dump is stopped past its lock wait: two seconds
+        later the run is still in the container, and the run's watchdog ends it by the end of the run's life (its
+        deadline plus the cleanup budget). Nothing of a run is left in any case."""
+        db = self.new_database("iv16", rows=4)
+
+        def stop_past_the_lock(holder, pid):
+            (dump,) = [found for found, name in self.exec_processes().items() if name == "(pg_dump)"]
+            docker("exec", self.db, "kill", "-STOP", str(dump))
+            holder.close()
+            self.assertTrue(self.until(lambda: self.sessions(db).get(pid, ("", "", "Lock"))[2] not in ("Lock", ""), 15),
+                            "the export's session left its lock wait")
+            return dump
+
+        with self.subTest("(a) the deadline past the lock wait"):
+            holder = self.lock(db)
+            call = Background(lambda: audit.evaluate(audit.DatabaseExport(self.db, db, "kin"), timeout=15))
+            ((pid, _),) = self.waiting(db, {holder.pid}, 1).items()
+            dump = stop_past_the_lock(holder, pid)
+            outcome, finished = call.result(15 + GRACE + 30)
+            error = outcome.get("error")
+            self.assertIsInstance(error, audit.InputError, outcome)
+            self.assertGreaterEqual(finished - call.started, 15 - 0.5, "it ran until its limit")
+            self.assertLess(finished - call.started, 15 + GRACE + 5)
+            self.assertEqual((self.sessions(db), self.exec_processes()), ({}, {}), "nothing of the run is left")
+            self.assertTrue((error.cleanup or {}).get("confirmed"), error.cleanup)
+            self.assertIn(dump, remote_step(error.cleanup).get("killed", []), "the proof names the stopped pg_dump")
+
+        with self.subTest("(b) the caller gone during the lock wait"):
+            holder = self.lock(db)
+            try:
+                caller = self.start_caller(db, 10)
+                self.waiting(db, {holder.pid}, 1)
+                seen_at = time.monotonic()
+                caller.kill()
+                caller.wait()
+                ended = self.until(lambda: not self.sessions(db, holder.pid)
+                                   and "(pg_dump)" not in self.exec_processes().values(), 10 + 6)
+                self.assertTrue(ended, "the server ended the lock wait at the run's deadline")
+                self.assertLess(time.monotonic() - seen_at, 10 + 6)
+            finally:
+                holder.close()
+            self.assertTrue(self.until(lambda: self.exec_processes() == {}, 10), "the watchdog leaves after the export")
+            self.remove_left_verifiers()
+
+        with self.subTest("(c) the caller gone past the lock wait"):
+            holder = self.lock(db)
+            caller = self.start_caller(db, 8)
+            ((pid, _),) = self.waiting(db, {holder.pid}, 1).items()
+            seen_at = time.monotonic()
+            dump = stop_past_the_lock(holder, pid)
+            caller.kill()
+            caller.wait()
+            time.sleep(2)
+            self.assertIn(pid, self.sessions(db), "the run outlives its caller")
+            self.assertIn(dump, self.exec_processes())
+            ended = self.until(lambda: not self.sessions(db) and not self.exec_processes(),
+                               8 + GRACE + 10 - (time.monotonic() - seen_at))
+            self.assertTrue(ended, "the run's watchdog ended it by the end of the run's life")
+            self.assertLess(time.monotonic() - seen_at, 8 + GRACE + 10)
+            self.remove_left_verifiers()
+
+    def test_iv17_a_cleanup_it_cannot_confirm_is_not_reported_as_done(self):
+        """IV-DB-17 (SPEC-F01: a termination that fails or cannot be confirmed is kept with the failure, never reported
+        as done). (a) The target container is paused when the verifier fails, so the remote cancellation cannot run:
+        evaluate still fails within the cleanup budget with the original failure, and its proof says the remote export
+        was not confirmed ended - which is true: once the target runs again the export's session is still waiting; the
+        harness then ends it. (b) A session of another role carries the run's own session name: the cancellation, bound
+        to the export's role, ends the run's session but not that one, and a new observation still finds the name, so
+        the proof is not confirmed; the other role's session is the same afterwards and still answers."""
+        db = self.new_database("iv17", rows=4)
+        with self.subTest("(a) the target cannot be reached"):
+            holder = self.lock(db)
+            try:
+                call = Background(lambda: audit.evaluate(audit.DatabaseExport(self.db, db, "kin"), timeout=60))
+                ((pid, _),) = self.waiting(db, {holder.pid}, 1).items()
+                (verifier,) = verifier_containers()
+                docker("pause", self.db)
+                try:
+                    killed_at = time.monotonic()
+                    docker("kill", verifier)
+                    outcome, finished = call.result(GRACE + 60)
+                finally:
+                    docker("unpause", self.db)
+                error = outcome.get("error")
+                self.assertIsInstance(error, audit.InputError, outcome)
+                self.assertLess(finished - killed_at, GRACE + 2)
+                proof = error.cleanup or {}
+                self.assertIn(pid, self.sessions(db, holder.pid), "the export the proof did not confirm is still there")
+                self.assertFalse(proof.get("confirmed"), proof)
+                self.assertFalse(remote_step(proof).get("confirmed"))
+                self.assertTrue(proof["steps"]["verifier"]["confirmed"])
+                self.ok("SELECT pg_catalog.pg_terminate_backend(%d)" % pid, db)
+                self.assertTrue(self.until(lambda: not self.sessions(db, holder.pid) and not self.exec_processes(), 20))
+            finally:
+                holder.close()
+
+        with self.subTest("(b) the run's name under another role"):
+            self.ok("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'syn_other') "
+                    "THEN CREATE ROLE syn_other LOGIN; END IF; END $$")
+            holder = self.lock(db)
+            other = None
+            try:
+                call = Background(lambda: audit.evaluate(audit.DatabaseExport(self.db, db, "kin"), timeout=60))
+                ((pid, (name, _, _)),) = self.waiting(db, {holder.pid}, 1).items()
+                other = Session(self.db, db, user="syn_other", application_name=name)
+                (verifier,) = verifier_containers()
+                docker("kill", verifier)
+                outcome, _ = call.result(GRACE + 60)
+                error = outcome.get("error")
+                self.assertIsInstance(error, audit.InputError, outcome)
+                self.assertEqual(set(self.sessions(db, holder.pid)), {other.pid}, "the run's own session is gone")
+                self.assertEqual(other.ask("SELECT pg_catalog.pg_backend_pid()"), str(other.pid),
+                                 "the other role's session is the same and still answers")
+                self.assertEqual(self.exec_processes(), {})
+                proof = error.cleanup or {}
+                self.assertFalse(proof.get("confirmed"), proof)
+                self.assertEqual(remote_step(proof).get("sessions_left"), 1, "a new observation still finds the name")
+            finally:
+                if other is not None:
+                    other.close()
+                holder.close()
+
+    def test_iv18_a_process_of_the_run_that_docker_did_not_start_is_never_signalled(self):
+        """IV-DB-18 (SPEC-F01 exactly the run's own processes; PostgreSQL boundary: a process forked in the container whose
+        parent is gone is a child of the postmaster, and the postmaster stops every session when such a child dies by a
+        signal): the run's own export command is
+        started once more so that its process is orphaned at once (the run's identity, parent PID 1). When the run fails,
+        its cancellation ends its own exec'd pg_dump and both sessions of the run but never signals the orphan, which
+        ends by itself once its session is gone; the proof is confirmed and the server did not restart (the lock
+        holder's session is the same and answers, no new crash recovery in the server log)."""
+        db = self.new_database("iv18", rows=4)
+        holder = self.lock(db)
+        try:
+            recorder = Recorder()
+            with recorder.active():
+                call = Background(lambda: audit.evaluate(audit.DatabaseExport(self.db, db, "kin"), timeout=120))
+                ((a_pid, (a_name, _, _)),) = self.waiting(db, {holder.pid}, 1).items()
+                ((export_args, _),) = recorder.running_against(self.container_id())
+                (dump,) = [pid for pid, name in self.exec_processes().items() if name == "(pg_dump)"]
+                at = export_args.index(self.container_id())
+                docker(*export_args[1:at + 1], "sh", "-c", '"$@" > /dev/null 2>&1 & exit 0', "sh",
+                       *export_args[at + 1:])
+                sessions = self.until(lambda: (lambda found: found if [name for name, _, _ in found.values()]
+                                               == [a_name, a_name] else None)(self.sessions(db, holder.pid)), 30)
+                self.assertTrue(sessions, "the orphaned copy waits under the run's name too")
+                (orphan,) = [pid for pid, (name, parent) in self.processes().items()
+                             if name == "(pg_dump)" and pid != dump]
+                self.assertEqual(self.processes()[orphan][1], 1, "its parent is the container's PID 1")
+                restarts = self.restarts()
+                (verifier,) = verifier_containers()
+                docker("kill", verifier)
+                outcome, _ = call.result(GRACE + 60)
+            error = outcome.get("error")
+            self.assertIsInstance(error, audit.InputError, outcome)
+            self.assertEqual(holder.ask("SELECT pg_catalog.pg_backend_pid()"), str(holder.pid), "no server restart")
+            self.assertEqual(self.restarts(), restarts)
+            self.assertEqual(self.sessions(db, holder.pid), {})
+            self.assertNotIn("(pg_dump)", [name for name, _ in self.processes().values()])
+            proof = error.cleanup or {}
+            self.assertTrue(proof.get("confirmed"), proof)
+            self.assertIn(dump, remote_step(proof).get("killed", []))
+            self.assertNotIn(orphan, remote_step(proof).get("killed", []), "the orphan is never signalled")
+            self.assertEqual(sorted(session["pid"] for session in remote_step(proof).get("sessions", [])),
+                             sorted(sessions))
+        finally:
+            holder.close()
 
 
 if __name__ == "__main__":

@@ -60,9 +60,15 @@ def stream(rows, guard=PRESENT, schema=(), table=True, order=None):
 
 
 # The fake docker CLI (test side). Containers and volumes are files under the state directory given as its first
-# argument; `exec` runs the exporter (pg_dump) or the verifier (sh -c ...) in this very process, as plan.json says:
-# exporter normal | stall (1 KiB, then nothing) | fail (1 KiB, exit 1); verifier normal (reads to EOF, answers) |
-# no_read (never reads) | stall_after_read (reads to EOF, never answers) | fail (exit 3 at once).
+# argument; a container is found by its name or its 64-hex ID. `exec` runs in this very process what the container would
+# run, told apart by the docker CLI's own options: an exec that sets an environment (-e) and stays attached is the
+# exporter, a detached one (-d) the export's watchdog, one with stdin (-i) the verifier, any other `sh` exec into the
+# target a control command. As plan.json says: exporter normal | stall (1 KiB, then nothing) | fail (1 KiB, exit 1);
+# verifier normal (reads to EOF, answers) | no_read (never reads) | stall_after_read (reads to EOF, never answers) |
+# fail (exit 3 at once); cancel clean (the run is gone: nothing left) | remaining (one process and one session left) |
+# fail (exit 1) | unreadable (no result line) | hang (never answers); remove normal | fail | hang. In this fake the
+# exporter's local client is its remote process too, so ending the client ends the export, as a cancel that answers
+# "clean" reports.
 FAKE_DOCKER = r'''
 import hashlib, json, os, sys, time
 from pathlib import Path
@@ -73,6 +79,15 @@ plan = json.loads((state / "plan.json").read_text())
 
 def entry(kind, name):
     return state / kind / name
+
+
+def resolve(name):
+    if entry("containers", name).is_file():
+        return name
+    for path in (state / "containers").iterdir():
+        if json.loads(path.read_text())["id"] == name:
+            return path.name
+    return None
 
 
 def absent(name):
@@ -92,9 +107,11 @@ def forever():
 if args[:2] == ["image", "inspect"]:
     print('[{"RepoDigests": []}]')
 elif args[:2] == ["inspect", "--format"]:
-    if not entry("containers", args[3]).is_file():
+    found = resolve(args[3])
+    if found is None:
         absent(args[3])
-    print(json.loads(entry("containers", args[3]).read_text())["image"])
+    body = json.loads(entry("containers", found).read_text())
+    print(args[2].replace("{{.Id}}", body["id"]).replace("{{.Image}}", body["image"]))
 elif args[0] in ("container", "volume") and args[1] == "inspect":
     kind, name = args[0] + "s", args[-1]
     if not entry(kind, name).is_file():
@@ -106,17 +123,28 @@ elif args[:2] == ["volume", "rm"]:
     entry("volumes", args[-1]).unlink()
 elif args[0] == "run":
     name = args[args.index("--name") + 1]
-    entry("containers", name).write_text(json.dumps({"label": label(args), "image": args[-1]}))
+    entry("containers", name).write_text(json.dumps({"label": label(args), "image": args[-1],
+                                                     "id": hashlib.sha256(name.encode()).hexdigest()}))
     print(name)
 elif args[0] == "rm":
+    if plan["remove"] == "fail":
+        sys.stderr.write("Error response from daemon: synthetic removal failure\n")
+        sys.exit(1)
+    if plan["remove"] == "hang":
+        forever()
     entry("containers", args[-1]).unlink()
 elif args[0] == "exec":
-    command = args[2:] if args[1] == "-i" else args[1:]
-    if not entry("containers", command[0]).is_file():
+    options, command = [], args[1:]
+    while command and command[0].startswith("-"):
+        options.append(command[0])
+        command = command[2:] if command[0] == "-e" else command[1:]
+    if resolve(command[0]) is None:
         sys.stderr.write("Error: No such container: %s\n" % command[0])
         sys.exit(1)
     program = command[1]
-    if program == "pg_dump":
+    if program == "sh" and "-d" in options:
+        pass
+    elif program == "sh" and "-e" in options:
         out, block = sys.stdout.buffer, b"FAKE-EXPORT-" * 4096
         if plan["exporter"] in ("stall", "fail"):
             out.write(block[:1024])
@@ -128,7 +156,7 @@ elif args[0] == "exec":
             sha.update(block)
         out.flush()
         (state / "exported.json").write_text(json.dumps({"sha256": sha.hexdigest()}))
-    elif program == "sh":
+    elif program == "sh" and "-i" in options:
         if plan["verifier"] == "fail":
             sys.exit(3)
         if plan["verifier"] == "no_read":
@@ -138,6 +166,17 @@ elif args[0] == "exec":
         if plan["verifier"] == "stall_after_read":
             forever()
         sys.stdout.write("\n".join(plan["answer"]) + "\n")
+    elif program == "sh":
+        (state / "controls.json").write_text(json.dumps(command))
+        if plan["cancel"] == "fail":
+            sys.exit(1)
+        if plan["cancel"] == "hang":
+            forever()
+        if plan["cancel"] == "unreadable":
+            print("synthetic answer without a result")
+        else:
+            print("killed")
+            print("result 1 0 0 0 63" if plan["cancel"] == "clean" else "result 1 1 0 1 63")
     elif program == "pg_restore":
         sys.stdin.buffer.read()
 else:
@@ -170,14 +209,19 @@ class FakeDocker:
         self.launched = []
         self.plan()
 
-    def plan(self, exporter="normal", verifier="normal", answer=(), blocks=4):
-        for name in ("exported.json", "received.json"):
+    def plan(self, exporter="normal", verifier="normal", answer=(), blocks=4, cancel="clean", remove="normal"):
+        for name in ("exported.json", "received.json", "controls.json"):
             (self.state / name).unlink(missing_ok=True)
         (self.state / "plan.json").write_text(json.dumps({"exporter": exporter, "verifier": verifier,
-                                                          "answer": list(answer), "blocks": blocks}))
+                                                          "answer": list(answer), "blocks": blocks, "cancel": cancel,
+                                                          "remove": remove}))
 
     def container(self, name, image=IMAGE):
-        (self.state / "containers" / name).write_text(json.dumps({"label": "", "image": image}))
+        (self.state / "containers" / name).write_text(json.dumps({"label": "", "image": image,
+                                                                  "id": hashlib.sha256(name.encode()).hexdigest()}))
+
+    def container_id(self, name):
+        return json.loads((self.state / "containers" / name).read_text())["id"]
 
     def names(self, kind):
         return sorted(path.name for path in (self.state / kind).iterdir())
@@ -196,13 +240,18 @@ class FakeDocker:
                 process.wait()
 
     @contextlib.contextmanager
-    def active(self):
+    def active(self, verifier=None):
+        """verifier, when given, makes the verifier's process: called with Popen's keyword arguments for the exec with
+        stdin of `sh` in a container the product started, it returns the process object the product then holds."""
         real = subprocess.Popen
 
         def popen(args, *rest, **kwargs):
             if not (isinstance(args, (list, tuple)) and args and args[0] == "docker"):
                 return real(args, *rest, **kwargs)
-            process = real([sys.executable, "-B", str(self.script), str(self.state), *args[1:]], *rest, **kwargs)
+            if verifier is not None and args[1:3] == ["exec", "-i"] and args[4:5] == ["sh"]:
+                process = verifier(kwargs)
+            else:
+                process = real([sys.executable, "-B", str(self.script), str(self.state), *args[1:]], *rest, **kwargs)
             self.launched.append((list(args[1:]), process))
             return process
         with patch.object(subprocess, "Popen", popen):
@@ -795,6 +844,10 @@ class TransferDeadline(unittest.TestCase):
 
     def assert_input_error(self, outcome):
         self.assertIsInstance(outcome.get("error"), audit.InputError, outcome)
+        proof = outcome["error"].cleanup
+        self.assertIsNotNone(proof, "the failure carries its termination proof")
+        self.assertTrue(proof["confirmed"], proof)
+        self.assertLessEqual(proof["elapsed_seconds"], GRACE)
 
     def test_pv08_a_stalled_side_ends_at_the_limit(self):
         cases = {"exporter stops sending": (dict(exporter="stall"), audit.DatabaseExport(TARGET, "kin", "kin")),
@@ -864,6 +917,244 @@ class TransferDeadline(unittest.TestCase):
                 self.assertLess(elapsed, PROMPT)
                 self.assertEqual(self.fake.running(), [])
                 self.assertEqual(self.fake.names("containers"), [TARGET])
+
+
+class Sink:
+    """The scripted verifier's stdin, like a pipe to a process that reads everything (complete), has gone (broken: the
+    first write fails) or stopped reading (blocked: a write waits until the process ends, then fails)."""
+
+    def __init__(self, mode):
+        self.mode = mode
+        self.closed, self.entered, self.released = threading.Event(), threading.Event(), threading.Event()
+
+    def write(self, chunk):
+        if self.mode == "blocked":
+            self.entered.set()
+            self.released.wait(60)
+        if self.mode != "complete":
+            raise BrokenPipeError(32, "synthetic: the verifier does not read")
+        return len(chunk)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.closed.set()
+
+    def settle(self):
+        """The transfer has reached this mode's state (all sent, broken, or waiting in a write)."""
+        (self.entered if self.mode == "blocked" else self.closed).wait(10)
+
+
+class ScriptedVerifier:
+    """A verifier process at the Popen boundary whose end is scripted: it runs until its end_at-th observation (every
+    poll() and wait() call counts as one, so a wait can be the one it ends in) or until ends_after seconds after it
+    started, then has exited with code - with code 0 it has printed answer - and stops reading its stdin. A wait it does
+    not end in sleeps its timeout and then late seconds more, as an operating system wait can return late. Waits made
+    while it ran are kept with the time left to the deadline the caller gave evaluate (counted from this process's
+    start, so never earlier than the caller's own deadline)."""
+
+    def __init__(self, kwargs, code, sink, answer, timeout, end_at=None, ends_after=None, late=0.05):
+        self.stdin, self.stdout, self.pid, self.returncode = sink, None, 0, None
+        self.output, self.code, self.answer, self.late = kwargs["stdout"], code, answer, late
+        self.created = time.monotonic()
+        self.deadline = self.created + timeout
+        self.end_at, self.ends_at = end_at, None if ends_after is None else self.created + ends_after
+        self.calls, self.running_waits = 0, []
+
+    def _end(self, code):
+        if self.returncode is None:
+            if code == 0:
+                self.output.write(("\n".join(self.answer) + "\n").encode())
+                self.output.flush()
+            self.returncode = code
+            self.stdin.released.set()
+
+    def _observe(self):
+        if not self.calls:
+            self.stdin.settle()
+        self.calls += 1
+        if (self.end_at is not None and self.calls >= self.end_at) or \
+                (self.ends_at is not None and time.monotonic() >= self.ends_at):
+            self._end(self.code)
+        return self.returncode
+
+    def poll(self):
+        return self._observe()
+
+    def wait(self, timeout=None):
+        now = time.monotonic()
+        if self.returncode is None:
+            self.running_waits.append((timeout, self.deadline - now))
+        if self._observe() is not None:
+            return self.returncode
+        if timeout is None:
+            raise AssertionError("an unbounded wait on a running verifier")
+        if self.ends_at is not None and self.ends_at <= now + timeout:
+            time.sleep(max(0.0, self.ends_at - time.monotonic()))
+            self._end(self.code)
+            return self.returncode
+        time.sleep(timeout + self.late)
+        raise subprocess.TimeoutExpired("docker", timeout)
+
+    def kill(self):
+        self._end(-9)
+
+
+class ProducerlessEnd(unittest.TestCase):
+    """PV-09 (S7-AUDIT-STORE-F03, SPEC-F02): a snapshot's verification has no exporter. The verifier process, scripted at
+    the Popen boundary, ends at each of its first eight observations in turn - before the first poll, between two
+    observations, during a wait, before the next pass - with exit 0 and 3, while the transfer has sent everything, has
+    broken or is still blocked in a write. Only exit 0 after the whole export gives a result; every other case is an
+    InputError with a confirmed termination proof; nothing else is raised (no wait on a process that is not there) and
+    no wait made while the verifier ran reaches past the deadline. At the deadline: a verifier that ended just after the
+    deadline, while the wait that ran up to it returned late, is judged by its exit code and the transfer when the next
+    observation finds it ended; one still running fails."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="kin-audit-f03-")
+        self.addCleanup(temp.cleanup)
+        self.fake = FakeDocker(temp.name)
+        self.addCleanup(self.fake.kill_all)
+        path = Path(temp.name) / "kin.dump"
+        path.write_bytes(os.urandom(256 * 1024))
+        self.source = audit.SnapshotDump(path, audit.sha256_file(path), IMAGE)
+        self.rows = {1: "a", 2: "b"}
+
+    def run_case(self, mode, code, timeout=30, **end):
+        made = []
+
+        def verifier(kwargs):
+            made.append(ScriptedVerifier(kwargs, code, Sink(mode), verifier_answer(self.rows), timeout, **end))
+            return made[-1]
+        with self.fake.active(verifier=verifier):
+            outcome, _, finished = self.fake.bounded(lambda: audit.evaluate(self.source, timeout=timeout),
+                                                     timeout + GRACE)
+        self.assertTrue(finished)
+        self.assertEqual(self.fake.names("containers"), [], "the verifier container is removed")
+        (process,) = made
+        self.assertIsNotNone(process.returncode, "the verifier ended or was ended")
+        for given, left in process.running_waits:
+            self.assertIsNotNone(given, "a wait on a running verifier is bounded")
+            self.assertLessEqual(given, max(0.0, left) + 0.01, "no wait reaches past the deadline")
+        return outcome
+
+    def assert_result(self, outcome, success):
+        if success:
+            self.assertIsInstance(outcome.get("value"), audit.Evaluation, outcome)
+            self.assertEqual(sorted(outcome["value"].rows), sorted(stream(self.rows).rows))
+        else:
+            self.assertIsInstance(outcome.get("error"), audit.InputError, outcome)
+            self.assertTrue(outcome["error"].cleanup["confirmed"], outcome["error"].cleanup)
+
+    def test_pv09_every_end_transition_without_an_exporter(self):
+        for mode in ("complete", "broken", "blocked"):
+            for code in (0, 3):
+                for end_at in range(1, 9):
+                    with self.subTest(transfer=mode, code=code, end_at=end_at):
+                        self.assert_result(self.run_case(mode, code, end_at=end_at), (mode, code) == ("complete", 0))
+
+    def test_pv09_an_end_at_the_deadline(self):
+        for label, mode, code, ends_after, success in (
+                ("ended with the whole export just after the deadline", "complete", 0, 1.1, True),
+                ("ended with exit 3 just after the deadline", "complete", 3, 1.1, False),
+                ("ended before the whole export just after the deadline", "blocked", 0, 1.1, False),
+                ("still running at the deadline", "complete", 0, 30, False)):
+            with self.subTest(label):
+                self.assert_result(self.run_case(mode, code, timeout=1, ends_after=ends_after, late=0.5), success)
+
+
+class CleanupBudget(unittest.TestCase):
+    """PV-10 (S7-AUDIT-STORE-F02, SPEC-F01): after a failure everything shares one cleanup budget (15 s) and the failure
+    carries the termination proof. The verifier fails at once while a named database's exporter still runs; the
+    target's control command (the remote cancellation) answers that the run is gone, that a process and a session are
+    left, fails, answers without a result or never answers, and the verifier's removal fails or never answers. Only the
+    first is a confirmed cleanup. In every case evaluate raises the InputError within the budget after the failure, the
+    proof names the run and its target (container ID, database, role, a session name holding the run that fits
+    PostgreSQL's 63 bytes) and verify --container reports it with exit 2."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="kin-audit-budget-")
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name)
+        self.fake = FakeDocker(self.base)
+        self.addCleanup(self.fake.kill_all)
+        self.fake.container(TARGET)
+
+    def evaluate(self, source, bound=2 * GRACE + 30):
+        with self.fake.active():
+            outcome, elapsed, finished = self.fake.bounded(lambda: audit.evaluate(source, timeout=60), bound)
+        self.assertTrue(finished)
+        self.assertIsInstance(outcome.get("error"), audit.InputError, outcome)
+        self.assertEqual(self.fake.running(), [], "no process of the run is left running")
+        return outcome["error"].cleanup, elapsed
+
+    def forget_verifiers(self):
+        for name in self.fake.names("containers"):
+            if name != TARGET:
+                (self.fake.state / "containers" / name).unlink()
+
+    def test_pv10_what_the_proof_confirms(self):
+        for answer, confirmed in (("clean", True), ("remaining", False), ("fail", False), ("unreadable", False)):
+            with self.subTest(answer):
+                self.fake.plan(exporter="stall", verifier="fail", cancel=answer)
+                proof, elapsed = self.evaluate(audit.DatabaseExport(TARGET, "kin", "kin"))
+                self.assertEqual((proof["confirmed"], proof["steps"]["remote"]["confirmed"]), (confirmed, confirmed), proof)
+                self.assertTrue(proof["steps"]["verifier"]["confirmed"])
+                self.assertTrue(proof["steps"]["local"]["confirmed"])
+                self.assertRegex(proof["run"], r"^[0-9a-f]{32}$")
+                target = proof["target"]
+                self.assertEqual((target["container"], target["database"], target["role"]),
+                                 (self.fake.container_id(TARGET), "kin", "kin"))
+                self.assertIn(proof["run"], target["application_name"])
+                self.assertLessEqual(len(target["application_name"].encode()), 63)
+                self.assertTrue(proof["observed_utc"])
+                self.assertLess(elapsed, PROMPT)
+                self.assertLessEqual(proof["elapsed_seconds"], GRACE)
+                self.assertEqual(self.fake.names("containers"), [TARGET])
+                control = self.fake.note("controls.json")
+                self.assertEqual(control[0], self.fake.container_id(TARGET), "the cancellation goes to the target's ID")
+                self.assertIn(proof["run"], control, "and names this run")
+
+    def test_pv10_one_budget_for_everything_after_the_failure(self):
+        for label, plan in (("the cancellation never answers", dict(cancel="hang")),
+                            ("neither the cancellation nor the removal answers", dict(cancel="hang", remove="hang"))):
+            with self.subTest(label):
+                self.fake.plan(exporter="stall", verifier="fail", **plan)
+                proof, elapsed = self.evaluate(audit.DatabaseExport(TARGET, "kin", "kin"))
+                self.assertFalse(proof["confirmed"], proof)
+                self.assertFalse(proof["steps"]["remote"]["confirmed"])
+                self.assertFalse(proof["steps"]["verifier"]["confirmed"], "no budget was left to remove it")
+                self.assertLessEqual(proof["elapsed_seconds"], GRACE + 1)
+                self.assertLess(elapsed, GRACE + 8, "the call fails within the budget after the failure")
+                self.forget_verifiers()
+
+    def test_pv10_a_verifier_left_behind_is_not_reported_as_removed(self):
+        path = self.base / "kin.dump"
+        path.write_bytes(os.urandom(64 * 1024))
+        self.fake.plan(verifier="fail", remove="fail")
+        proof, elapsed = self.evaluate(audit.SnapshotDump(path, audit.sha256_file(path), IMAGE))
+        self.assertEqual((proof["confirmed"], proof["steps"]["verifier"]["confirmed"]), (False, False), proof)
+        self.assertTrue(proof["steps"]["local"]["confirmed"])
+        self.assertNotIn("remote", proof["steps"], "a snapshot has no remote export")
+        self.assertLess(elapsed, PROMPT)
+        self.forget_verifiers()
+
+        # the operator's command: exit 2 with the failure and its proof
+        ws = Workspace()
+        self.addCleanup(ws.close)
+        ws.init()
+        folder = ws.sealed("2026-10-01T01:00:00Z", {1: "a"})
+        self.fake.plan(exporter="stall", verifier="fail", cancel="remaining")
+        output = io.StringIO()
+        with self.fake.active(), patch.object(ops, "require_local_docker"), contextlib.redirect_stdout(output):
+            code = audit.main(["verify", "--container", TARGET, "--database", "kin", "--user", "kin",
+                               "--checkpoint", str(folder / audit.CHECKPOINT)])
+        report = json.loads(output.getvalue())
+        self.assertEqual((code, report["exit"]), (2, 2), report)
+        self.assertTrue(report["error"])
+        self.assertFalse(report["cleanup"]["confirmed"])
+        self.assertEqual(report["cleanup"]["steps"]["remote"]["processes_left"], 1)
 
 
 if __name__ == "__main__":

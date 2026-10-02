@@ -12,6 +12,7 @@ of a live database. verify and retention print one JSON line and exit 0 (verifie
 error: neither a pass nor an integrity claim). Every verdict value is computed from an export inside a new networkless
 PostgreSQL container started from a recorded image; nothing the exporting server computes or returns is trusted. Row
 content never leaves that container: checkpoints, the ledger and reports carry ids, digests, counts and folder names.
+An exit 2 that ended an export or a verification carries the termination proof of what that run owned ("cleanup").
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -45,6 +47,7 @@ MIN_YEARS = 2          # FACT-S7-RETENTION (D195): at least two years; an instit
 REPORTED_IDS = 100
 BACKUP_NAME = re.compile(r"\d{8}-\d{6}-[a-f0-9]{8}")   # the folders ops_backup creates and ops_monitor reads
 IMAGE_ID = re.compile(r"sha256:[a-f0-9]{64}")
+CONTAINER_ID = re.compile(r"[a-f0-9]{64}")
 NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}")
 
 # Runs inside the isolated verifier. The export arrives on stdin and stays in the container. The rows database receives
@@ -128,9 +131,177 @@ SELECT pg_catalog.json_build_object(
 AUDIT_SCHEMA_SQL
 """
 
+# The remote side of a named database's export, run in the target container through `docker exec` (S7-AUDIT-STORE-F02,
+# SPEC-F01). Each script gets its part as $0 and the run identifier, the role and the database as $1..$3. The export
+# runs as one exec whose process becomes pg_dump; it carries KIN_AUDIT_EXPORT=<run> and its session the application_name
+# kin-audit-export-<run> (49 bytes, inside PostgreSQL's 63). A detached watchdog exec (KIN_AUDIT_WATCHDOG=<run>) bounds
+# the export's whole life in the container even when the caller is gone: pg_dump sets its own statement_timeout to 0,
+# so no session setting does. The cancel exec ends exactly that run. Only processes that docker exec started for the run
+# (their parent is outside the container) are ever signalled: a process forked inside the container becomes a child of
+# PostgreSQL's postmaster once its parent is gone, and the postmaster restarts every session when such a child dies by a
+# signal. A cancelled run keeps its empty marker in /tmp, so an export of that run that docker starts late refuses to
+# connect.
+REMOTE_NAMES = r"""run=$1 role=$2 db=$3
+case "$run" in *[!0-9a-f]*) exit 2;; esac
+[ ${#run} -eq 32 ] || exit 2
+case "$role$db" in *[!A-Za-z0-9_.-]*) exit 2;; esac
+[ -n "$role" ] && [ -n "$db" ] || exit 2
+tag=kin-audit-export-$run
+cancel=/tmp/$tag.cancel
+started=/tmp/$tag.started
+"""
+
+REMOTE_FUNCTIONS = r"""scan() {
+  exports= watchdogs=
+  for entry in /proc/[0-9]*; do
+    names=$(tr '\0' '\n' 2>/dev/null < "$entry/environ") || continue
+    case "
+$names
+" in
+      *"
+KIN_AUDIT_EXPORT=$run
+"*) exports="$exports ${entry#/proc/}";;
+      *"
+KIN_AUDIT_WATCHDOG=$run
+"*) watchdogs="$watchdogs ${entry#/proc/}";;
+    esac
+  done
+}
+end_exports() {
+  ended=0
+  for pid in $exports; do
+    parent=
+    read -r _ _ _ parent _ 2>/dev/null < "/proc/$pid/stat"
+    if [ "$parent" = 0 ] && kill -KILL "$pid" 2>/dev/null; then
+      killed="$killed $pid"
+      ended=1
+    fi
+  done
+}
+ask() {
+  PGAPPNAME=kin-audit-control psql -X -q -A -t -U "$role" -d "$db" -v ON_ERROR_STOP=1 -c "$1" 2>/dev/null ||
+    PGAPPNAME=kin-audit-control psql -X -q -A -t -U "$role" -d postgres -v ON_ERROR_STOP=1 -c "$1" 2>/dev/null
+}
+terminate() {
+  ask "WITH mine AS MATERIALIZED (SELECT pid FROM pg_catalog.pg_stat_activity WHERE application_name = '$tag'
+         AND datname = '$db' AND usename = '$role' AND pid <> pg_catalog.pg_backend_pid())
+       SELECT pg_catalog.count(*) FILTER (WHERE pg_catalog.pg_terminate_backend(pid)) FROM mine"
+}
+own_left() {
+  ask "SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity WHERE application_name = '$tag'
+         AND datname = '$db' AND usename = '$role'"
+}
+sessions_left() {
+  ask "SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity WHERE application_name = '$tag'"
+}
+"""
+
+# The export: refuses a cancelled run, records its PID for the watchdog, then becomes pg_dump (no child of its own).
+EXPORT_SCRIPT = REMOTE_NAMES + r"""lock=$4
+case "$lock" in ''|*[!0-9]*) exit 2;; esac
+[ -e "$cancel" ] && exit 125
+echo "$$" > "$started" || exit 2
+PGAPPNAME=$tag
+export PGAPPNAME
+exec pg_dump -U "$role" -d "$db" -Fc --lock-wait-timeout="$lock"
+"""
+
+# The watchdog: leaves when the export ended or the run was cancelled; at the end of the run's life ($4 seconds) it
+# cancels the run itself - marker, the export's processes, then the run's sessions as the export's own role.
+WATCHDOG_SCRIPT = REMOTE_NAMES + REMOTE_FUNCTIONS + r"""life=$4
+case "$life" in ''|*[!0-9]*) exit 2;; esac
+end=$(( $(date +%s) + life ))
+pid=
+while [ ! -e "$cancel" ]; do
+  if [ -z "$pid" ] && [ -e "$started" ]; then
+    read -r pid 2>/dev/null < "$started"
+    case "$pid" in *[!0-9]*) pid=;; esac
+  fi
+  if [ -n "$pid" ] && [ ! -d "/proc/$pid" ]; then
+    rm -f "$started"
+    exit 0
+  fi
+  if [ "$(date +%s)" -ge "$end" ]; then
+    : > "$cancel"
+    tries=0
+    while [ "$tries" -lt 50 ]; do
+      scan
+      [ -z "$exports" ] && break
+      end_exports
+      sleep 0.1
+      tries=$((tries + 1))
+    done
+    terminate > /dev/null
+    tries=0
+    while [ "$tries" -lt 50 ] && [ "$(own_left)" != 0 ]; do
+      sleep 0.1
+      tries=$((tries + 1))
+    done
+    rm -f "$started"
+    exit 0
+  fi
+  sleep 0.5
+done
+exit 0
+"""
+
+# The cancellation, within $4 seconds: marker first (no later start of the run connects) and the sessions under the
+# run's name as they are, then the export's processes until none is left (the watchdog leaves on the marker), then the
+# run's sessions (its name, database and role) until they are gone, then a new observation of every session under the
+# run's name, whatever its role, and of the processes. Prints the sessions it found, the processes it killed and one line
+# "result <marker> <processes left> <sessions terminated> <sessions left> <name limit>"; -1 is a value it could not
+# observe.
+CANCEL_SCRIPT = REMOTE_NAMES + REMOTE_FUNCTIONS + r"""budget=$4
+case "$budget" in ''|*[!0-9]*) exit 2;; esac
+end=$(( $(date +%s) + budget ))
+marker=0
+: > "$cancel" 2>/dev/null && marker=1
+ask "SELECT pid || '|' || coalesce(state, '') || '|' || coalesce(wait_event_type, '') || '|' || coalesce(wait_event, '')
+       || '|' || coalesce(datname, '') || '|' || coalesce(usename, '') || '|' || application_name
+     FROM pg_catalog.pg_stat_activity WHERE application_name = '$tag'" | while IFS= read -r line; do
+  echo "session $line"
+done
+killed=
+while :; do
+  scan
+  [ -z "$exports$watchdogs" ] && break
+  end_exports
+  # what is left can only end with its session (not started by docker exec, so never signalled)
+  [ -z "$watchdogs" ] && [ "$ended" = 0 ] && break
+  [ "$(date +%s)" -ge "$end" ] && break
+  sleep 0.05
+done
+terminated=$(terminate)
+case "$terminated" in ''|*[!0-9]*) terminated=-1;; esac
+while :; do
+  mine=$(own_left)
+  [ "$mine" = 0 ] && break
+  [ "$(date +%s)" -ge "$end" ] && break
+  sleep 0.1
+done
+left=$(sessions_left)
+case "$left" in ''|*[!0-9]*) left=-1;; esac
+while :; do
+  scan
+  remaining=$(set -- $exports $watchdogs; echo $#)
+  [ "$remaining" = 0 ] && break
+  [ "$(date +%s)" -ge "$end" ] && break
+  end_exports
+  sleep 0.05
+done
+[ "$remaining" = 0 ] && rm -f "$started"
+limit=$(ask "SHOW max_identifier_length")
+case "$limit" in ''|*[!0-9]*) limit=-1;; esac
+echo "killed$killed"
+echo "result $marker $remaining $terminated $left $limit"
+"""
+
 
 class InputError(Exception):
-    """Exit 2: the inputs could not be judged. Never a pass and never an integrity claim."""
+    """Exit 2: the inputs could not be judged. Never a pass and never an integrity claim. cleanup is the termination proof
+    when the failure ended an export or a verification (see _Cleanup)."""
+
+    cleanup = None
 
 
 class LedgerMissing(Exception):
@@ -398,8 +569,9 @@ def plan(root, years, now=None):
 
 # ── the isolated verifier ──
 
-STOP_SECONDS = 10      # after a kill: how long each process and the transfer thread get to end
+GRACE_SECONDS = 15     # one cleanup budget: everything after a failure (or the deadline) is observed shares it
 POLL_SECONDS = 0.2
+EXPORT_TAG = "kin-audit-export-"
 
 
 class _Transfer(threading.Thread):
@@ -434,86 +606,216 @@ def _file_chunks(path):
         yield from iter(lambda: handle.read(1024 * 1024), b"")
 
 
+@dataclass(frozen=True)
+class _RemoteExport:
+    """One run's export of a named database, bound before it starts: a run identifier that is never reused, the target
+    container's immutable ID, the database and the role. The remote scripts above carry the identifier; cancel ends
+    exactly this run with the export's own role (no other role or privilege)."""
+    run: str
+    container: str
+    database: str
+    user: str
+
+    @property
+    def tag(self):
+        return EXPORT_TAG + self.run
+
+    @property
+    def target(self):
+        return {"container": self.container, "database": self.database, "role": self.user, "application_name": self.tag}
+
+    def start(self, deadline, errors):
+        """The watchdog (detached; the run's life is the time left plus the cleanup budget, so the caller's own cleanup
+        acts first), then the export, whose lock wait also ends at the deadline inside the server."""
+        left = deadline - time.monotonic()
+        life = math.ceil(max(left, 1)) + GRACE_SECONDS
+        try:
+            ops.run(["docker", "exec", "-d", "-e", "KIN_AUDIT_WATCHDOG=" + self.run, self.container, "sh", "-c",
+                     WATCHDOG_SCRIPT, "kin-audit-watchdog", self.run, self.user, self.database, str(life)],
+                    timeout=max(1.0, left))
+        except (RuntimeError, subprocess.SubprocessError) as error:
+            raise InputError("The export could not be started") from error
+        wait = max(1, int((deadline - time.monotonic()) * 1000))
+        return subprocess.Popen(["docker", "exec", "-e", "KIN_AUDIT_EXPORT=" + self.run, self.container, "sh", "-c",
+                                 EXPORT_SCRIPT, "kin-audit-export", self.run, self.user, self.database, str(wait)],
+                                cwd=ops.ROOT, stdout=subprocess.PIPE, stderr=errors)
+
+    def cancel(self, budget):
+        """End this run in the target container within budget seconds and observe it again: the proof of the remote
+        step. Confirmed only when the marker was written and a new observation found none of the run's processes and
+        sessions under a name limit that holds the whole tag; a request that was only accepted is not a confirmation."""
+        if budget <= 0:
+            return {"confirmed": False, "error": "no cleanup time left"}
+        try:
+            result = ops.run(["docker", "exec", self.container, "sh", "-c", CANCEL_SCRIPT, "kin-audit-cancel", self.run,
+                              self.user, self.database, str(max(1, int(budget) - 2))], timeout=budget, check=False)
+        except subprocess.TimeoutExpired:
+            return {"confirmed": False, "error": "the cancellation did not answer within the cleanup time"}
+        except OSError:
+            return {"confirmed": False, "error": "the cancellation could not be started"}
+        killed, sessions, numbers = [], [], None
+        for line in result.stdout.decode("utf-8", "replace").splitlines():
+            kind, _, rest = line.partition(" ")
+            if kind == "killed":
+                killed += [int(pid) for pid in rest.split() if pid.isdigit()]
+            elif kind == "session" and len(rest.split("|")) == 7:
+                pid, *fields = rest.split("|")
+                sessions.append({"pid": int(pid) if pid.isdigit() else pid,
+                                 **dict(zip(("state", "wait_event_type", "wait_event", "database", "role",
+                                             "application_name"), fields))})
+            elif kind == "result":
+                numbers = rest.split()
+        if result.returncode or numbers is None or len(numbers) != 5 or not all(re.fullmatch(r"-?\d+", value)
+                                                                                for value in numbers):
+            return {"confirmed": False, "error": "the cancellation result could not be read", "exit": result.returncode}
+        marker, remaining, terminated, left, limit = map(int, numbers)
+        return {"confirmed": marker == 1 and remaining == 0 and left == 0 and limit >= len(self.tag),
+                "marker": marker == 1, "killed": sorted(set(killed)), "processes_left": remaining,
+                "sessions": sessions, "terminated": terminated, "sessions_left": left, "name_limit": limit,
+                "observed_utc": utc_now().isoformat()}
+
+
+class _Cleanup:
+    """The cleanup of one evaluation after a failure or the deadline. From that observation everything - ending the
+    local docker clients, cancelling the remote export, removing the verifier, reaping and the transfer thread - shares
+    one budget of GRACE_SECONDS; a step left without time is recorded as not done, never as done. The record is the
+    termination proof that goes with the failure (InputError.cleanup): run, target, cause, observation time, each step's
+    outcome and elapsed seconds, and confirmed, which is True only when every step observed its things gone - and a
+    remote export that was started (remote) has no confirmation without its own step."""
+
+    def __init__(self, export):
+        self.export, self.remote, self.started, self.record, self.steps = export, None, None, None, {}
+
+    def begin(self, cause):
+        if self.started is None:
+            self.started = time.monotonic()
+            self.record = {"cause": cause, "observed_utc": utc_now().isoformat(), "budget_seconds": GRACE_SECONDS}
+            if self.export is not None:
+                self.record.update(run=self.export.run, target=self.export.target)
+        return self
+
+    def left(self):
+        return None if self.started is None else max(0.0, self.started + GRACE_SECONDS - time.monotonic())
+
+    def note(self, step, outcome):
+        self.steps[step] = {**outcome, "elapsed_seconds": round(time.monotonic() - self.started, 3)}
+
+    def close(self):
+        required = set(self.steps) | ({"remote"} if self.remote is not None else set())
+        return {**self.record, "steps": self.steps, "elapsed_seconds": round(time.monotonic() - self.started, 3),
+                "confirmed": bool(required) and all(self.steps.get(step, {}).get("confirmed") for step in required)}
+
+
+def _remove_verifier(verifier, budget):
+    name, token = verifier
+    if budget is not None and budget <= 0:
+        return {"confirmed": False, "error": "no cleanup time left"}
+    try:
+        ops.remove_owned_if_present("container", name, token, timeout=600 if budget is None else budget)
+    except Exception as error:
+        return {"confirmed": False, "error": type(error).__name__}
+    return {"confirmed": True}
+
+
 def _watch(producer, consumer, transfer, deadline):
-    """None once the verifier exited holding the whole export and the exporter ended; otherwise the failure, as soon as
-    one process fails, the verifier stops early, the transfer breaks or the deadline passes."""
+    """None once the verifier exited holding the whole export and the exporter (when there is one) exited 0; otherwise
+    the failure, as soon as it is observed. Each pass judges one observation - the exporter's and the verifier's exit
+    states, then whether the transfer still runs and then whether it sent everything - and waits, never past the
+    deadline, only on a process this observation found running. A verifier exit before the whole export was sent is a
+    failure whatever its code. A completed observation counts even when the deadline passed while it was made; anything
+    still running at the deadline fails."""
     while True:
-        if producer is not None and producer.poll():
+        exported = None if producer is None else producer.poll()
+        verified = consumer.poll()
+        moving = transfer.is_alive()
+        sent = transfer.sent
+        if exported:
             return InputError("The target database could not be exported")
-        if consumer.poll() is not None:
-            if not transfer.sent:
-                return InputError("The isolated verifier stopped before it received the whole export")
-            if producer is None or producer.poll() is not None:
-                return None
-        elif not transfer.is_alive() and not transfer.sent:
+        if verified is not None and not sent:
+            return InputError("The isolated verifier stopped before it received the whole export")
+        if verified is None and not moving and not sent:
             return InputError("The export could not be streamed into the isolated verifier")
+        if verified is not None and (producer is None or exported is not None):
+            return None
         if time.monotonic() >= deadline:
             return InputError("The export and its verification exceeded the time limit")
+        running = consumer if verified is None else producer
         try:
-            (consumer if consumer.poll() is None else producer).wait(timeout=POLL_SECONDS)
+            running.wait(timeout=min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
         except subprocess.TimeoutExpired:
             pass
 
 
-def _end(processes, transfer, kill):
-    """Kill whichever process still runs (when kill), then reap each process and the transfer thread within
-    STOP_SECONDS and close the pipes the thread no longer uses."""
-    if kill:
-        for process in processes:
-            if process.poll() is None:
-                process.kill()
+def _close_pipes(processes):
+    for process in processes:
+        for pipe in (process.stdin, process.stdout):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError):
+                    pass
+
+
+def _stop(processes, transfer, verifier, cleanup):
+    """End everything this run owns under the cleanup budget: the local docker clients first (they stop reading and
+    writing at once), then the remote export when one was started (killing its client does not reach it), then the
+    verifier container (its exec ends with it), then reap the clients and the transfer thread. Pipes are closed only
+    once the thread ended."""
+    for process in processes:
+        if process.poll() is None:
+            process.kill()
+    if cleanup.remote is not None:
+        cleanup.note("remote", cleanup.remote.cancel(cleanup.left()))
+    cleanup.note("verifier", _remove_verifier(verifier, cleanup.left()))
+    ended = True
     for process in processes:
         try:
-            process.wait(timeout=STOP_SECONDS)
+            process.wait(timeout=cleanup.left())
         except subprocess.TimeoutExpired:
-            pass
+            ended = False
     if transfer is not None:
-        transfer.join(STOP_SECONDS)
-    if transfer is None or not transfer.is_alive():
-        for process in processes:
-            for pipe in (process.stdin, process.stdout):
-                if pipe is not None:
-                    try:
-                        pipe.close()
-                    except (OSError, ValueError):
-                        pass
+        transfer.join(cleanup.left())
+    moving = transfer is not None and transfer.is_alive()
+    if not moving:
+        _close_pipes(processes)
+    cleanup.note("local", {"confirmed": ended and not moving, "processes_ended": ended, "transfer_ended": not moving})
 
 
-def _load_export(source, name, output, timeout):
+def _load_export(source, export, verifier, output, timeout, cleanup):
     """Stream the export into the verifier under one deadline that runs from the start of the export to the verifier's
-    exit. The exporter (pg_dump of a named database), the transfer and the verifier are watched together; at the
-    deadline, or when either side fails, both processes are killed and reaped and an InputError goes to evaluate, whose
-    finally removes the verifier, and on to the caller's failure record. No blocking read, write or wait can hold the
-    caller, its operations lock or the verifier past the deadline."""
+    exit. The exporter (a named database's remote export), the transfer and the verifier are watched together; at the
+    deadline, or as soon as one side fails, _stop ends everything the run owns under the cleanup budget and the
+    InputError goes to evaluate and on to the caller's failure record with the termination proof. No blocking read,
+    write or wait holds the caller, its operations lock, the verifier or the remote export past the deadline and the
+    budget."""
     deadline = time.monotonic() + timeout
     processes, producer, transfer = [], None, None
     with tempfile.TemporaryFile() as errors, tempfile.TemporaryFile() as export_errors:
         try:
-            consumer = subprocess.Popen(["docker", "exec", "-i", name, "sh", "-c", VERIFIER_SCRIPT], cwd=ops.ROOT,
+            consumer = subprocess.Popen(["docker", "exec", "-i", verifier[0], "sh", "-c", VERIFIER_SCRIPT], cwd=ops.ROOT,
                                         stdin=subprocess.PIPE, stdout=output, stderr=errors)
             processes.append(consumer)
             if isinstance(source, SnapshotDump):
                 chunks = _file_chunks(source.path)
             else:
-                # pg_dump waits for its table locks inside the target server, which killing the docker client does not
-                # reach; its own lock wait ends at the same deadline.
-                wait = max(1, int((deadline - time.monotonic()) * 1000))
-                producer = subprocess.Popen(["docker", "exec", source.container, "pg_dump", "-U", source.user,
-                                             "-d", source.database, "-Fc", "--lock-wait-timeout=%d" % wait],
-                                            cwd=ops.ROOT, stdout=subprocess.PIPE, stderr=export_errors)
+                cleanup.remote = export
+                producer = export.start(deadline, export_errors)
                 processes.append(producer)
                 chunks = iter(lambda: producer.stdout.read(1024 * 1024), b"")
             transfer = _Transfer(chunks, consumer.stdin)
             transfer.start()
             failure = _watch(producer, consumer, transfer, deadline)
-        except BaseException:
-            _end(processes, transfer, kill=True)
+        except BaseException as error:
+            cause = str(error) if isinstance(error, InputError) else "The export could not be started or watched"
+            _stop(processes, transfer, verifier, cleanup.begin(cause))
             raise
-        _end(processes, transfer, kill=failure is not None)
-    if failure is not None:
-        raise failure
-    if producer is not None and producer.returncode:
-        raise InputError("The target database could not be exported")
+        if failure is not None:
+            _stop(processes, transfer, verifier, cleanup.begin(str(failure)))
+            raise failure
+        for process in processes:
+            process.wait()
+        transfer.join()
+        _close_pipes(processes)
     if consumer.returncode:
         raise InputError("The isolated verifier could not restore the export")
     if isinstance(source, SnapshotDump) and transfer.sha.hexdigest() != source.sha256:
@@ -565,33 +867,41 @@ def evaluate(source, timeout=3600):
     """The isolated verifier (scenario §1 I), the one place verdict values are computed: a new PostgreSQL container from
     the recorded image with no network, owned by label and removed at the end, reading only the export. The exporting
     server (the live database, or rehearse's restored copy) takes no part in any computation. timeout (seconds) bounds
-    the export, its transfer and the verification together; past it the call fails as an input error."""
+    the export, its transfer and the verification together; past it, or when a side fails, the call fails as an input
+    error after the cleanup (GRACE_SECONDS at most) and the error carries its termination proof. A named database's
+    export is one run's remote job in that container (_RemoteExport), bound to the container's ID."""
+    export = None
     try:
         if isinstance(source, SnapshotDump):
             image = source.image
         else:
             if not all(NAME.fullmatch(value) for value in (source.container, source.database, source.user)):
                 raise InputError("Invalid target name")
-            image = ops.text(["docker", "inspect", "--format", "{{.Image}}", source.container])
+            found = ops.text(["docker", "inspect", "--format", "{{.Id}} {{.Image}}", source.container]).split()
+            if len(found) != 2 or not CONTAINER_ID.fullmatch(found[0]):
+                raise InputError("The verifier image or target is unavailable")
+            export = _RemoteExport(uuid.uuid4().hex, found[0], source.database, source.user)
+            image = found[1]
         if not IMAGE_ID.fullmatch(image or ""):
             raise InputError("The verifier image must be a recorded image ID")
         ops.run(["docker", "image", "inspect", image])
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         raise InputError("The verifier image or target is unavailable") from error
     token = uuid.uuid4().hex
-    name = "kin-rehearsal-" + token[:16] + "-audit"
+    verifier = ("kin-rehearsal-" + token[:16] + "-audit", token)
+    cleanup = _Cleanup(export)
     failure = None
     try:
-        ops.run(["docker", "run", "-d", "--name", name, "--label", "kin.ops.run=" + token,
+        ops.run(["docker", "run", "-d", "--name", verifier[0], "--label", "kin.ops.run=" + token,
                  "--network", "none", "-e", "POSTGRES_HOST_AUTH_METHOD=trust", image])
         deadline = time.monotonic() + 90
-        while ops.run(["docker", "exec", name, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
+        while ops.run(["docker", "exec", verifier[0], "pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
                       check=False).returncode:
             if time.monotonic() > deadline:
                 raise InputError("The isolated verifier did not become ready")
             time.sleep(0.5)
         with tempfile.TemporaryFile() as output:
-            _load_export(source, name, output, timeout)
+            _load_export(source, export, verifier, output, timeout, cleanup)
             shape, digests, schema_view = _read_output(output)
         return _judge(shape, digests, schema_view)
     except InputError as error:
@@ -601,11 +911,16 @@ def evaluate(source, timeout=3600):
         failure = InputError("The isolated verifier failed")
         raise failure from error
     finally:
-        try:
-            ops.remove_owned_if_present("container", name, token)
-        except Exception as error:
-            if failure is None:
-                raise InputError("The isolated verifier could not be removed") from error
+        if failure is not None:
+            cleanup.begin(str(failure))
+        if "verifier" not in cleanup.steps:
+            removed = _remove_verifier(verifier, cleanup.left())
+            if failure is not None:
+                cleanup.note("verifier", removed)
+            elif not removed["confirmed"]:
+                raise InputError("The isolated verifier could not be removed")
+        if failure is not None:
+            failure.cleanup = cleanup.close()
 
 
 # ── checkpoints and verification ──
@@ -657,7 +972,10 @@ def verify(checkpoint_path, source):
         evaluation = evaluate(source)
         changed, deleted, inserted, tail = compare(checkpoint, evaluation)
     except InputError as error:
-        return 2, {"exit": 2, "error": str(error)}
+        report = {"exit": 2, "error": str(error)}
+        if error.cleanup is not None:
+            report["cleanup"] = error.cleanup
+        return 2, report
     passed = not (changed or deleted or inserted or evaluation.schema) and evaluation.guard.get("state") == "present"
     code = 0 if passed else 1
     return code, {"exit": code, "through_id": checkpoint["through_id"], "sealed": len(checkpoint["rows"]),

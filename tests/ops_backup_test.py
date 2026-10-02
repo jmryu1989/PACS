@@ -237,7 +237,8 @@ class BackupSafetyTests(unittest.TestCase):
     def test_05_cleanup_removes_only_owned_temporary_resources(self):
         with patch.object(ops, "text", return_value="my-token"), patch.object(ops, "run") as command:
             ops.remove_owned("container", "kin-rehearsal-owned", "my-token")
-            command.assert_called_once_with(["docker", "rm", "-f", "-v", "kin-rehearsal-owned"])
+            command.assert_called_once()
+            self.assertEqual(command.call_args.args[0], ["docker", "rm", "-f", "-v", "kin-rehearsal-owned"])
 
     def test_06_failed_commands_do_not_echo_secret_output(self):
         result = SimpleNamespace(returncode=1, stdout=b"private value", stderr=b"credential text")
@@ -651,9 +652,10 @@ class BackupSafetyTests(unittest.TestCase):
     def test_24_ob06_a_stalled_verification_fails_seal_and_rehearse_within_the_time_limit(self):
         """OB-06 (S7-AUDIT-STORE-F02; SE-02, RS-07): the real verifier boundary with a 3 s limit, against the fake docker
         CLI. A verifier that never answers fails the seal as 'seal audit' (the snapshot stays complete, the ledger is
-        unchanged, the monitor alarms); a rehearsal whose restored copy's export stalls fails with its record written,
-        every container and volume it made removed and the operations lock released - each within the limit and a
-        bounded stop. With a sound verifier the same seal and rehearsal succeed."""
+        unchanged, the monitor alarms, and the record carries the confirmed termination proof); a rehearsal whose
+        restored copy's export stalls fails with its record written (audit exit 2 with the proof of the remote export's
+        cancellation), every container and volume it made removed and the operations lock released - each within the
+        limit and the cleanup budget. With a sound verifier the same seal and rehearsal succeed."""
         limit, grace = 3, 15
         with tempfile.TemporaryDirectory() as temporary:
             host = Host(temporary)
@@ -684,7 +686,10 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertLess(time.monotonic() - started, limit + grace)
             self.assertIsNotNone(error)
             self.assertTrue(manifest["complete"])
-            self.assertEqual(manifest.get("backup_error"), {"stage": "seal audit", "type": "InputError"})
+            record = manifest.get("backup_error") or {}
+            self.assertEqual((record.get("stage"), record.get("type")), ("seal audit", "InputError"))
+            self.assertTrue(record["cleanup"]["confirmed"], record)
+            self.assertTrue(record["cleanup"]["steps"]["verifier"]["confirmed"])
             self.assertNotIn(audit.CHECKPOINT, manifest["sha256"])
             self.assertEqual((host.parent / audit.LEDGER).read_bytes(), ledger)
             self.assertEqual(host.status(), ["backup_failed"])
@@ -712,6 +717,10 @@ class BackupSafetyTests(unittest.TestCase):
                     self.assertEqual((result["success"], result["audit"]["verified"]), (success, success))
                     if not success:
                         self.assertEqual(result["audit"]["exit"], 2)
+                        proof = result["audit"]["cleanup"]
+                        self.assertTrue(proof["confirmed"], proof)
+                        self.assertTrue(proof["steps"]["remote"]["confirmed"], "the restored copy's export was ended")
+                        self.assertEqual((proof["target"]["database"], proof["target"]["role"]), ("kin", "postgres"))
                     self.assertEqual(result["cleanup_failures"], [])
                     self.assertFalse((host.repo / ".kin-ops.lock").exists(), "the operations lock is released")
                     self.assertEqual(fake.running(), [])
