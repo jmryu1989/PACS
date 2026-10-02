@@ -6,7 +6,7 @@ from pydicom.uid import generate_uid
 from pynetdicom import AE
 from playwright.sync_api import expect
 from test_worklist import WorklistE2E
-from invariants_live import ROOT,psql
+from invariants_live import AUDIT_GUARD_OFF,AUDIT_GUARD_ON,ROOT,psql
 sys.path.insert(0,str(ROOT/'scripts'))
 from send_cstore import public_ct_series,DEFAULT_SOURCE
 class SourceKeysE2E(WorklistE2E):
@@ -24,7 +24,7 @@ class SourceKeysE2E(WorklistE2E):
     if row.get('Type')!='Study' or row['RequestedTags']['StudyInstanceUID']!=key or row['RequestedTags']['PatientID']!=marker or not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{8}){4}',row['ID']):raise RuntimeError('Refusing cleanup of unowned source key')
     self.assertEqual(self.stack._orthanc_request('DELETE','/studies/'+row['ID']).status,200)
    self.assertEqual(find(),[]);self.assertTrue(re.fullmatch(r'[A-Za-z0-9._-]+',key))
-   psql('BEGIN; DELETE FROM "StudyState" WHERE uid=\''+key+'\'; DELETE FROM "AuditLog" WHERE target=\''+key+'\'; COMMIT;')
+   psql('BEGIN; DELETE FROM "StudyState" WHERE uid=\''+key+'\'; '+AUDIT_GUARD_OFF+' DELETE FROM "AuditLog" WHERE target=\''+key+'\'; '+AUDIT_GUARD_ON+' COMMIT;')
    self.assertEqual(psql('SELECT count(*) FROM "StudyState" WHERE uid=\''+key+'\';'),['0'])
    self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(),before)
   self.addCleanup(cleanup)

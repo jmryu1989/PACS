@@ -9,6 +9,7 @@ from test_study_access import StudyAccessE2E,policy,lit
 from test_viewer_jobs import ViewerJobsE2E
 from viewer_api_test import ViewerStack
 from test_worklist import psql
+from invariants_live import past_audit_guard
 
 class StudyAccessReferencesE2E(StudyAccessE2E):
     @classmethod
@@ -44,7 +45,7 @@ class StudyAccessReferencesE2E(StudyAccessE2E):
                     if table=='StudyConsultation':self.assertIn(row['id'],ids)
                     self.assertEqual(psql('DELETE FROM "'+table+'" t WHERE to_jsonb(t)='+lit(raw)+'::jsonb RETURNING 1'),['1'])
             for raw in psql('SELECT to_jsonb(t)::text FROM "AuditLog" t WHERE actor='+lit(actor)+" AND action LIKE 'favorite.%'"):
-                self.assertEqual(psql('DELETE FROM "AuditLog" t WHERE to_jsonb(t)='+lit(raw)+'::jsonb RETURNING 1'),['1'])
+                self.assertEqual(psql(past_audit_guard('DELETE FROM "AuditLog" t WHERE to_jsonb(t)='+lit(raw)+'::jsonb RETURNING 1')),['1'])
         self.addCleanup(cleanup)
         folder=str(uuid.uuid4());revision=0
         for action,extra in [('create',dict(name='SYNTHETIC folder')),('add',dict(uid=a.uid)),('add',dict(uid=b.uid))]:

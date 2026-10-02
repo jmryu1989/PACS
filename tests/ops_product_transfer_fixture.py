@@ -66,7 +66,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260926120000_study_questions/migration.sql',
               'api/prisma/migrations/20260926130000_study_image_requests/migration.sql',
               'api/prisma/migrations/20260928120000_critical_result/migration.sql',
-              'api/prisma/migrations/20260928130000_reader_assignment_scope/migration.sql']
+              'api/prisma/migrations/20260928130000_reader_assignment_scope/migration.sql',
+              'api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -745,6 +746,11 @@ def constraint_probes(name, product):
         INSERT INTO "StudyConsultation" SELECT * FROM json_populate_record(NULL::"StudyConsultation",
           (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000999'))::json FROM "StudyConsultation" t LIMIT 1));
         RAISE EXCEPTION 'missing active consultation unique'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      -- S7-AUDIT-STORE: AuditLog stays append-only after the restore (a trigger, which --no-privileges keeps). The explicit
+      -- id leaves the AuditLog sequence as restored; the guard's refusal undoes the probe row with its block.
+      BEGIN INSERT INTO "AuditLog" (id,actor,action,target) VALUES(-1,'SYNTHETIC','SYNTHETIC','SYNTHETIC');
+        DELETE FROM "AuditLog" WHERE id=-1;
+        RAISE EXCEPTION 'missing audit append-only guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
     END $$; ROLLBACK'''.replace('UID', uid)
     execute(name, 'kin', sql)
     verify_product(name, 'kin', product)
