@@ -1,8 +1,10 @@
 """Failure-path checks for backup/restore safety; no Docker mutations in this file.
 
-test_18..test_22 (S7-AUDIT-STORE OB-01..OB-05): the audit seal and the rehearsal's restored-copy verification inside the
+test_18..test_23 (S7-AUDIT-STORE OB-01..OB-05): the audit seal and the rehearsal's restored-copy verification inside the
 real backup/rehearse flow. The isolated verifier boundary is answered with synthetic digest streams (its PostgreSQL
 behaviour is tests/audit_store_db_test.py); the manifest the flow wrote is fed to the unchanged ops_monitor.backup_status.
+test_24 (OB-06, S7-AUDIT-STORE-F02) runs the real verifier boundary with a short time limit against the test-side fake
+docker CLI of tests/ops_audit_integrity_test.py.
 """
 from __future__ import annotations
 
@@ -23,9 +25,11 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ops_backup as ops
 import ops_audit_integrity as audit
 import ops_monitor as monitor
+from ops_audit_integrity_test import FakeDocker, verifier_answer
 
 PRESENT = {"state": "present", "statements": {"insert": "accepted", "update": "refused", "delete": "refused",
                                               "truncate": "refused"}}
@@ -107,7 +111,7 @@ class Host:
             self.sources.append(source)
             if isinstance(answer, BaseException):
                 raise answer
-            return answer
+            return answer(source) if callable(answer) else answer
         return evaluate
 
     def backup(self, answer):
@@ -594,6 +598,125 @@ class BackupSafetyTests(unittest.TestCase):
                         self.assertEqual(result["audit"]["previous_verification"]["state"], previous)
                     if label.startswith("(c)"):
                         self.assertEqual(result["audit"]["changed"]["ids"], [2])
+
+    def test_23_ob04_an_unrecovered_declaration_is_a_past_event_that_restores_and_stays_reported(self):
+        """OB-04 with SE-13 (RS-08, RT-13; S7-AUDIT-STORE-F01): a seal that stopped after its manifest declaration and
+        does not continue the ledger makes the next backup alarm with a past event; that snapshot still restores verified,
+        the backups after it are sealed without an alarm, and retention keeps reporting the unresolved declaration."""
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            host.init_ledger()
+            first, _, _ = host.backup(rows_stream({1: "a"}))
+            ledger = (host.parent / audit.LEDGER).read_bytes()
+            broken, _, _ = host.backup(rows_stream({1: "a", 2: "b"}))
+            body = json.loads((broken / audit.CHECKPOINT).read_text())
+            body["previous"] = {"backup": first.name, "sha256": "0" * 64, "seq": 1}
+            (broken / audit.CHECKPOINT).write_text(json.dumps(body))
+            manifest = json.loads((broken / "manifest.json").read_text())
+            manifest["sha256"][audit.CHECKPOINT] = ops.digest(broken / audit.CHECKPOINT)
+            manifest["bytes"][audit.CHECKPOINT] = (broken / audit.CHECKPOINT).stat().st_size
+            ops.write_json(broken / "manifest.json", manifest)
+            (host.parent / audit.LEDGER).write_bytes(ledger)        # the seal stopped before its ledger step
+
+            rows = {1: "a", 2: "b", 3: "c"}
+            past, manifest, error = host.backup(rows_stream(rows))
+            body = json.loads((past / audit.CHECKPOINT).read_text())
+            self.assertEqual(body["previous_verification"], {"state": "unverifiable", "reason": "uncommitted_checkpoint"})
+            self.assertEqual((body["guard"]["state"], body["schema"]), ("present", []))
+            self.assertEqual(manifest.get("backup_error"), {"stage": "audit integrity", "type": "AuditPreviousUnverifiable"})
+            self.assertTrue(manifest["complete"])
+            self.assertIsNotNone(error)
+            self.assertEqual(host.status(), ["backup_failed"])
+            # the snapshot itself is sound: its restored copy verifies and the rehearsal succeeds carrying the past event
+            result, error, _, _ = host.rehearse(past, rows_stream(rows))
+            self.assertIsNone(error)
+            self.assertEqual((result["success"], result["audit"]["verified"]), (True, True))
+            self.assertEqual(result["audit"]["previous_verification"]["state"], "unverifiable")
+
+            # the backups after it are sealed and verified against the ledger without an alarm
+            later, manifest, error = host.backup(rows_stream({**rows, 4: "d"}))
+            self.assertIsNone(error)
+            self.assertNotIn("backup_error", manifest)
+            self.assertEqual(json.loads((later / audit.CHECKPOINT).read_text())["previous_verification"],
+                             {"state": "verified"})
+            self.assertEqual(host.status(), [])
+            # and retention still reports the declaration the ledger never received
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = audit.main(["retention", str(host.parent),
+                                   "--as-of", (host.clock + timedelta(minutes=1)).isoformat()])
+            report = json.loads(output.getvalue())
+            self.assertEqual((code, report["uncommitted"], report["latest"]), (1, [broken.name], later.name))
+
+    def test_24_ob06_a_stalled_verification_fails_seal_and_rehearse_within_the_time_limit(self):
+        """OB-06 (S7-AUDIT-STORE-F02; SE-02, RS-07): the real verifier boundary with a 3 s limit, against the fake docker
+        CLI. A verifier that never answers fails the seal as 'seal audit' (the snapshot stays complete, the ledger is
+        unchanged, the monitor alarms); a rehearsal whose restored copy's export stalls fails with its record written,
+        every container and volume it made removed and the operations lock released - each within the limit and a
+        bounded stop. With a sound verifier the same seal and rehearsal succeed."""
+        limit, grace = 3, 15
+        with tempfile.TemporaryDirectory() as temporary:
+            host = Host(temporary)
+            host.init_ledger()
+            fake = FakeDocker(temporary)
+            self.addCleanup(fake.kill_all)
+            real_evaluate, real_run, real_text = audit.evaluate, ops.run, ops.text
+
+            def limited(source):
+                # the verifier's own docker commands reach the fake CLI even where the flow's other commands are faked
+                with patch.object(ops, "run", real_run), patch.object(ops, "text", real_text):
+                    return real_evaluate(source, timeout=limit)
+
+            rows = {1: "a", 2: "b"}
+            fake.plan(answer=verifier_answer(rows))
+            with fake.active():
+                sealed, manifest, error = host.backup(limited)
+            self.assertIsNone(error)
+            self.assertNotIn("backup_error", manifest)
+            self.assertIn(audit.CHECKPOINT, manifest["sha256"])
+            self.assertEqual((fake.running(), fake.names("containers")), ([], []))
+
+            ledger = (host.parent / audit.LEDGER).read_bytes()
+            fake.plan(verifier="stall_after_read")
+            started = time.monotonic()
+            with fake.active():
+                stalled, manifest, error = host.backup(limited)
+            self.assertLess(time.monotonic() - started, limit + grace)
+            self.assertIsNotNone(error)
+            self.assertTrue(manifest["complete"])
+            self.assertEqual(manifest.get("backup_error"), {"stage": "seal audit", "type": "InputError"})
+            self.assertNotIn(audit.CHECKPOINT, manifest["sha256"])
+            self.assertEqual((host.parent / audit.LEDGER).read_bytes(), ledger)
+            self.assertEqual(host.status(), ["backup_failed"])
+            self.assertEqual((fake.running(), fake.names("containers")), ([], []))
+
+            def rehearse():
+                with patch.object(sys, "argv", ["ops_backup.py", "rehearse", str(sealed)]):
+                    ops.main()
+            for label, plan, success in (("sound", dict(answer=verifier_answer(rows)), True),
+                                         ("the restored copy's export stalls", dict(exporter="stall"), False)):
+                with self.subTest(label):
+                    fake.plan(**plan)
+                    earlier = set(sealed.glob("rehearsal-*.json"))
+                    before = host.files(sealed)
+                    with fake.active(), patch.object(ops, "ROOT", host.repo), patch.object(ops, "require_local_docker"), \
+                            patch.object(ops, "counts", return_value={"Report": 5}), \
+                            patch.object(ops, "temporary_run", side_effect=host.fake_archive), \
+                            patch.object(audit, "evaluate", side_effect=limited), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        outcome, elapsed, finished = fake.bounded(rehearse, limit + grace)
+                    self.assertTrue(finished, "the rehearsal was still running after its limit and a bounded stop")
+                    self.assertEqual(isinstance(outcome.get("error"), RuntimeError), not success, outcome)
+                    (written,) = set(sealed.glob("rehearsal-*.json")) - earlier
+                    result = json.loads(written.read_text())
+                    self.assertEqual((result["success"], result["audit"]["verified"]), (success, success))
+                    if not success:
+                        self.assertEqual(result["audit"]["exit"], 2)
+                    self.assertEqual(result["cleanup_failures"], [])
+                    self.assertFalse((host.repo / ".kin-ops.lock").exists(), "the operations lock is released")
+                    self.assertEqual(fake.running(), [])
+                    self.assertEqual((fake.names("containers"), fake.names("volumes")), ([], []))
+                    self.assertEqual(host.files(sealed), before)
 
 
 if __name__ == "__main__":

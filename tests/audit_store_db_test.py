@@ -729,6 +729,57 @@ const { PrismaService } = require('/app/dist/prisma.service');
         self.assertEqual((checkpoint["previous_verification"]["state"], alarm), ("verified", None))
         self.assertEqual(self.verify_db("kin", sound, self.restore(sound), "postgres")[0], 0)
 
+    def test_iv13_an_export_waiting_on_a_lock_fails_within_the_time_limit(self):
+        """IV-DB-13 (S7-AUDIT-STORE-F02): while another session holds ACCESS EXCLUSIVE on AuditLog, the export of the
+        named database cannot start; evaluate with an 8 s limit fails as an input error within the limit and a bounded
+        stop, its verifier is removed (tearDown), and the export that waited leaves the server instead of waiting on.
+        Released, the same database verifies."""
+        limit = 8
+        root = self.new_root()
+        db = self.new_database("iv13", rows=4)
+        folder, _, _ = self.seal(db, root)
+        waiting = ("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = '%s' "
+                   "AND application_name = 'pg_dump'" % db)
+        holder = subprocess.Popen(["docker", "exec", "-i", self.db, "psql", "-X", "-q", "-U", "kin", "-d", db],
+                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            holder.stdin.write(b'BEGIN; LOCK TABLE "AuditLog" IN ACCESS EXCLUSIVE MODE;\n')
+            holder.stdin.flush()
+            for _ in range(120):
+                if self.ok("SELECT count(*) FROM pg_catalog.pg_locks l JOIN pg_catalog.pg_class c ON c.oid = l.relation "
+                           "WHERE c.relname = 'AuditLog' AND l.mode = 'AccessExclusiveLock' AND l.granted", db) == ["1"]:
+                    break
+                time.sleep(0.25)
+            else:
+                self.fail("the lock holder did not get its lock")
+            seen, stop = [], threading.Event()
+
+            def watch():
+                while not stop.is_set():
+                    code, lines, _ = self.sql(waiting + " AND wait_event_type = 'Lock'", db)
+                    if code == 0 and lines and lines[0] != "0":
+                        seen.append(lines[0])
+                    time.sleep(0.25)
+            watcher = threading.Thread(target=watch)
+            watcher.start()
+            started = time.monotonic()
+            try:
+                with self.assertRaises(audit.InputError):
+                    audit.evaluate(audit.DatabaseExport(self.db, db, "kin"), timeout=limit)
+            finally:
+                stop.set()
+                watcher.join()
+            self.assertLess(time.monotonic() - started, limit + 15)
+            self.assertTrue(seen, "the export was observed waiting on the lock (not an unrelated early failure)")
+            for _ in range(60):
+                if self.ok(waiting, db) == ["0"]:
+                    break
+                time.sleep(0.25)
+            self.assertEqual(self.ok(waiting, db), ["0"], "the export that waited for the lock does not stay behind")
+        finally:
+            holder.communicate(b"ROLLBACK;\n", timeout=60)
+        self.assertEqual(self.verify_db(db, folder)[0], 0, "without the lock the same export verifies")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

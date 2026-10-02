@@ -2,11 +2,14 @@
 checkpoint and ledger files, previous-checkpoint comparison, calendar retention and the ledger lifecycle of
 scripts/ops_audit_integrity.py, without Docker.
 
-Only the isolated verifier boundary (evaluate: the one place that starts the networkless verifier and returns the digest
-stream of an export) is replaced by a synthetic stream; its real behaviour on PostgreSQL is tests/audit_store_db_test.py.
-Backup roots, folders and the ledger are made with the public commands (init, plan), the public seal function and files;
-times enter only through a snapshot manifest's created_utc and retention --as-of. Assertions are on exit codes, the
-documented report and file contents (ids, digests, states), never on implementation text.
+PV-01..PV-07: only the isolated verifier boundary (evaluate: the one place that starts the networkless verifier and
+returns the digest stream of an export) is replaced by a synthetic stream; its real behaviour on PostgreSQL is
+tests/audit_store_db_test.py. Backup roots, folders and the ledger are made with the public commands (init, plan), the
+public seal function and files; times enter only through a snapshot manifest's created_utc and retention --as-of.
+PV-08 runs the real evaluate with its existing timeout argument against FakeDocker below: a test-side docker CLI whose
+exporter and verifier are real processes that stall, refuse to read or fail as a case asks. Assertions are on exit
+codes, the documented report, file contents (ids, digests, states), elapsed time and whether processes and containers
+remain, never on implementation text.
 """
 from __future__ import annotations
 
@@ -19,8 +22,11 @@ import os
 from pathlib import Path
 import random
 import stat
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import uuid
 from unittest.mock import patch
@@ -51,6 +57,177 @@ def stream(rows, guard=PRESENT, schema=(), table=True, order=None):
     if order is not None:
         random.Random(order).shuffle(items)
     return audit.Evaluation(table=table, rows=items, guard=dict(guard), schema=list(schema))
+
+
+# The fake docker CLI (test side). Containers and volumes are files under the state directory given as its first
+# argument; `exec` runs the exporter (pg_dump) or the verifier (sh -c ...) in this very process, as plan.json says:
+# exporter normal | stall (1 KiB, then nothing) | fail (1 KiB, exit 1); verifier normal (reads to EOF, answers) |
+# no_read (never reads) | stall_after_read (reads to EOF, never answers) | fail (exit 3 at once).
+FAKE_DOCKER = r'''
+import hashlib, json, os, sys, time
+from pathlib import Path
+
+state, args = Path(sys.argv[1]), sys.argv[2:]
+plan = json.loads((state / "plan.json").read_text())
+
+
+def entry(kind, name):
+    return state / kind / name
+
+
+def absent(name):
+    sys.stderr.write("Error: No such object: %s\n" % name)
+    sys.exit(1)
+
+
+def label(command):
+    return next(command[i + 1].split("=", 1)[1] for i, arg in enumerate(command) if arg == "--label")
+
+
+def forever():
+    time.sleep(3600)
+    sys.exit(0)
+
+
+if args[:2] == ["image", "inspect"]:
+    print('[{"RepoDigests": []}]')
+elif args[:2] == ["inspect", "--format"]:
+    if not entry("containers", args[3]).is_file():
+        absent(args[3])
+    print(json.loads(entry("containers", args[3]).read_text())["image"])
+elif args[0] in ("container", "volume") and args[1] == "inspect":
+    kind, name = args[0] + "s", args[-1]
+    if not entry(kind, name).is_file():
+        absent(name)
+    print(json.loads(entry(kind, name).read_text())["label"] if "--format" in args else "[{}]")
+elif args[:2] == ["volume", "create"]:
+    entry("volumes", args[-1]).write_text(json.dumps({"label": label(args)}))
+elif args[:2] == ["volume", "rm"]:
+    entry("volumes", args[-1]).unlink()
+elif args[0] == "run":
+    name = args[args.index("--name") + 1]
+    entry("containers", name).write_text(json.dumps({"label": label(args), "image": args[-1]}))
+    print(name)
+elif args[0] == "rm":
+    entry("containers", args[-1]).unlink()
+elif args[0] == "exec":
+    command = args[2:] if args[1] == "-i" else args[1:]
+    if not entry("containers", command[0]).is_file():
+        sys.stderr.write("Error: No such container: %s\n" % command[0])
+        sys.exit(1)
+    program = command[1]
+    if program == "pg_dump":
+        out, block = sys.stdout.buffer, b"FAKE-EXPORT-" * 4096
+        if plan["exporter"] in ("stall", "fail"):
+            out.write(block[:1024])
+            out.flush()
+            forever() if plan["exporter"] == "stall" else sys.exit(1)
+        sha = hashlib.sha256()
+        for _ in range(plan["blocks"]):
+            out.write(block)
+            sha.update(block)
+        out.flush()
+        (state / "exported.json").write_text(json.dumps({"sha256": sha.hexdigest()}))
+    elif program == "sh":
+        if plan["verifier"] == "fail":
+            sys.exit(3)
+        if plan["verifier"] == "no_read":
+            forever()
+        data = sys.stdin.buffer.read()
+        (state / "received.json").write_text(json.dumps({"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}))
+        if plan["verifier"] == "stall_after_read":
+            forever()
+        sys.stdout.write("\n".join(plan["answer"]) + "\n")
+    elif program == "pg_restore":
+        sys.stdin.buffer.read()
+else:
+    sys.stderr.write("fake docker: unexpected command\n")
+    sys.exit(64)
+'''
+# The columns 0_init creates (api/prisma/migrations/0_init/migration.sql), as the verifier's catalog reports them.
+SOUND_COLUMNS = {"id": ["integer", True], "at": ["timestamp(3) without time zone", True], "actor": ["text", True],
+                 "action": ["text", True], "target": ["text", True], "detail": ["text", False]}
+
+
+def verifier_answer(rows):
+    """What the verifier prints for a sound AuditLog holding rows {id: content}: shape, one line per id, schema view."""
+    return [json.dumps({"table": True, "relkind": "r", "columns": SOUND_COLUMNS}),
+            *("%d|1|%s" % (key, row_digest(value)) for key, value in sorted(rows.items())),
+            json.dumps({"relkind": "r", "inherits": 0, "shadows": 0, "probe": PRESENT["statements"]})]
+
+
+class FakeDocker:
+    """Test-side process harness: while active, every `docker ...` process the product starts (subprocess.Popen, which
+    subprocess.run uses too) is FAKE_DOCKER run by this interpreter with this state directory. Every launched process is
+    kept so that a case can tell whether any is still running."""
+
+    def __init__(self, base):
+        self.state = Path(base) / "fake-docker"
+        for kind in ("containers", "volumes"):
+            (self.state / kind).mkdir(parents=True)
+        self.script = self.state / "docker.py"
+        self.script.write_text(FAKE_DOCKER, encoding="utf-8")
+        self.launched = []
+        self.plan()
+
+    def plan(self, exporter="normal", verifier="normal", answer=(), blocks=4):
+        for name in ("exported.json", "received.json"):
+            (self.state / name).unlink(missing_ok=True)
+        (self.state / "plan.json").write_text(json.dumps({"exporter": exporter, "verifier": verifier,
+                                                          "answer": list(answer), "blocks": blocks}))
+
+    def container(self, name, image=IMAGE):
+        (self.state / "containers" / name).write_text(json.dumps({"label": "", "image": image}))
+
+    def names(self, kind):
+        return sorted(path.name for path in (self.state / kind).iterdir())
+
+    def note(self, name):
+        path = self.state / name
+        return json.loads(path.read_text()) if path.is_file() else None
+
+    def running(self):
+        return [args[:2] for args, process in self.launched if process.poll() is None]
+
+    def kill_all(self):
+        for _, process in self.launched:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+    @contextlib.contextmanager
+    def active(self):
+        real = subprocess.Popen
+
+        def popen(args, *rest, **kwargs):
+            if not (isinstance(args, (list, tuple)) and args and args[0] == "docker"):
+                return real(args, *rest, **kwargs)
+            process = real([sys.executable, "-B", str(self.script), str(self.state), *args[1:]], *rest, **kwargs)
+            self.launched.append((list(args[1:]), process))
+            return process
+        with patch.object(subprocess, "Popen", popen):
+            yield self
+
+    def bounded(self, call, seconds):
+        """Run call() in a thread for at most seconds: (outcome, elapsed, finished). A call still running then has its
+        fake processes killed so that it can end; the case reports it as not finished."""
+        outcome = {}
+
+        def target():
+            try:
+                outcome["value"] = call()
+            except BaseException as error:   # the outcome is judged by the case
+                outcome["error"] = error
+        started = time.monotonic()
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        thread.join(seconds)
+        elapsed = time.monotonic() - started
+        finished = not thread.is_alive()
+        if not finished:
+            self.kill_all()
+            thread.join(60)
+        return outcome, elapsed, finished
 
 
 class Workspace:
@@ -104,6 +281,23 @@ class Workspace:
     def sealed(self, created, rows, **kw):
         folder = self.backup(created)
         self.seal(folder, stream(rows, **kw))
+        return folder
+
+    def interrupted(self, created, rows, previous=None):
+        """A seal that stopped after its manifest declaration (§1 L rule 3): the checkpoint and its declaration exist
+        and the ledger is as it was. previous, when given, replaces the checkpoint's link (it then does not continue
+        the ledger's latest seal) and the declaration is made to match the changed file."""
+        ledger = (self.root / audit.LEDGER).read_bytes()
+        folder = self.sealed(created, rows)
+        if previous is not None:
+            body = self.checkpoint(folder)
+            body["previous"] = previous
+            (folder / audit.CHECKPOINT).write_text(json.dumps(body))
+            manifest = self.manifest(folder)
+            manifest["sha256"][audit.CHECKPOINT] = audit.sha256_file(folder / audit.CHECKPOINT)
+            manifest["bytes"][audit.CHECKPOINT] = (folder / audit.CHECKPOINT).stat().st_size
+            ops.write_json(folder / "manifest.json", manifest)
+        (self.root / audit.LEDGER).write_bytes(ledger)
         return folder
 
     def checkpoint(self, folder):
@@ -467,6 +661,209 @@ class AuditIntegrityPure(unittest.TestCase):
                          {"state": "unverifiable", "reason": "uncommitted_checkpoint"})
         self.assertEqual(ws.manifest(last)["backup_error"], {"stage": "audit integrity", "type": alarm})
         self.assertNotIn(broken.name, [e.get("backup") for e in ws.ledger()["entries"]])
+
+    # PV-07 (SE-13, RT-13; S7-AUDIT-STORE-F01): a later seal does not resolve a declaration the ledger lacks.
+    def test_pv07_unrecovered_declaration_stays_reported_after_later_seals(self):
+        def retention(day):
+            return self.ws.cli("retention", self.ws.root, "--as-of", "2026-10-%02dT06:00:00Z" % day)
+
+        self.ws.init()
+        k0 = self.ws.sealed("2026-10-01T01:00:00Z", {1: "a"})
+        broken = self.ws.interrupted("2026-10-02T01:00:00Z", {1: "a", 2: "b"},
+                                     previous={"backup": k0.name, "sha256": "0" * 64, "seq": 1})
+        code, report = retention(2)
+        self.assertEqual((code, report["uncommitted"]), (1, [broken.name]))
+        # the next seal cannot recover it (it does not continue the ledger) and records a past event
+        rows = {1: "a", 2: "b", 3: "c"}
+        after = self.ws.sealed("2026-10-03T01:00:00Z", rows)
+        self.assertEqual(self.ws.checkpoint(after)["previous_verification"],
+                         {"state": "unverifiable", "reason": "uncommitted_checkpoint"})
+        # counterexample: the declaration is now older than the ledger's latest seal and is still unresolved
+        code, report = retention(3)
+        self.assertEqual((code, report["uncommitted"], report["latest"]), (1, [broken.name], after.name))
+        # new backups keep being sealed and verified against the ledger; the declaration stays reported
+        rows = {**rows, 4: "d"}
+        later = self.ws.sealed("2026-10-04T01:00:00Z", rows)
+        self.assertEqual(self.ws.checkpoint(later)["previous_verification"], {"state": "verified"})
+        self.assertNotIn("backup_error", self.ws.manifest(later))
+        code, report = retention(4)
+        self.assertEqual((code, report["uncommitted"]), (1, [broken.name]))
+
+        # whatever else happens to the unresolved folder, the report never turns into a pass
+        def changed(path, data):
+            kept = path.read_bytes()
+            path.unlink() if data is None else path.write_bytes(data)
+            try:
+                return retention(4)
+            finally:
+                path.write_bytes(kept)
+        manifest = self.ws.manifest(broken)
+        variants = {"checkpoint unreadable": (broken / audit.CHECKPOINT, b"{not json"),
+                    "checkpoint removed": (broken / audit.CHECKPOINT, None),
+                    "kin.dump removed": (broken / "kin.dump", None),
+                    "creation time unreadable": (broken / "manifest.json",
+                                                 json.dumps(dict(manifest, created_utc="not a time")).encode())}
+        for label, (path, data) in variants.items():
+            with self.subTest(label):
+                code, report = changed(path, data)
+                self.assertEqual((code, report["uncommitted"]), (1, [broken.name]))
+
+        # the snapshot whose seal recorded it holds only a past event: its own verification passes (RS-08)
+        code, report = self.ws.cli("verify", "--backup", after, evaluation=stream({1: "a", 2: "b", 3: "c"}))
+        self.assertEqual((code, report["previous_verification"]["state"]), (0, "unverifiable"))
+
+        # preservation: a later interrupted seal that continues the ledger is recovered by the next seal and leaves
+        # the report, the unresolved one does not
+        rows = {**rows, 5: "e"}
+        resumable = self.ws.interrupted("2026-10-05T01:00:00Z", rows)
+        self.assertEqual(retention(5)[1]["uncommitted"], [broken.name, resumable.name])
+        rows = {**rows, 6: "f"}
+        nxt = self.ws.sealed("2026-10-06T01:00:00Z", rows)
+        self.assertEqual([(e["backup"], e["recovered"]) for e in self.ws.ledger()["entries"][-2:]],
+                         [(resumable.name, True), (nxt.name, False)])
+        self.assertEqual(self.ws.checkpoint(nxt)["previous_verification"], {"state": "verified"})
+        code, report = retention(6)
+        self.assertEqual((code, report["uncommitted"]), (1, [broken.name]))
+
+        # control: a recovered declaration is not reported however many seals follow it, and with nothing unresolved
+        # retention passes
+        ws = Workspace()
+        self.addCleanup(ws.close)
+        ws.init()
+        rows = {1: "a"}
+        ws.sealed("2026-10-01T01:00:00Z", rows)
+        ws.interrupted("2026-10-02T01:00:00Z", {**rows, 2: "b"})
+        for day in (3, 4, 5):
+            rows = {**rows, day: "x"}
+            ws.sealed("2026-10-%02dT01:00:00Z" % day, rows)
+        code, report = ws.cli("retention", ws.root, "--as-of", "2026-10-05T06:00:00Z")
+        self.assertEqual((code, report["uncommitted"], report["sealed"]), (0, [], 5))
+
+        # control: after a re-initialisation the former ledger's declarations belong to that ledger, not this one
+        ws = Workspace()
+        self.addCleanup(ws.close)
+        ws.init()
+        ws.interrupted("2026-10-01T01:00:00Z", {1: "a"})
+        (ws.root / audit.LEDGER).unlink()
+        self.assertEqual(ws.cli("init", ws.root, "--after-loss", "--reason", "ledger volume lost")[0], 0)
+        ws.sealed("2026-10-02T01:00:00Z", {1: "a", 2: "b"})
+        code, report = ws.cli("retention", ws.root, "--as-of", "2026-10-02T06:00:00Z")
+        self.assertEqual((code, report["uncommitted"]), (1, []))
+        self.assertIsNotNone(report["discontinuity"])
+
+
+TARGET = "kin-syn-target"   # the named database's container in PV-08
+LIMIT = 3                   # the time limit given to evaluate in the stall cases (seconds)
+GRACE = 15                  # how long after its limit a stopped transfer may take to come back as a failure
+PROMPT = 20                 # a failure of one side must come back well before a 60 s limit
+
+
+class TransferDeadline(unittest.TestCase):
+    """PV-08 (S7-AUDIT-STORE-F02): evaluate's timeout bounds the export, its transfer and the verification together.
+    An exporter that stops sending, a verifier that stops reading or never answers ends at the limit; one side failing
+    ends it at once. Either way evaluate raises InputError (the callers' exit 2 / failure record), no exporter or
+    verifier process is left running and the verifier container is removed. The normal transfer is unchanged."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="kin-audit-deadline-")
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name)
+        self.fake = FakeDocker(self.base)
+        self.addCleanup(self.fake.kill_all)
+        self.fake.container(TARGET)
+
+    def snapshot(self, size=3 * 1024 * 1024):
+        path = self.base / ("kin-%s.dump" % uuid.uuid4().hex[:8])
+        path.write_bytes(os.urandom(size))
+        return audit.SnapshotDump(path, audit.sha256_file(path), IMAGE)
+
+    def evaluate(self, source, timeout, bound):
+        with self.fake.active():
+            outcome, elapsed, finished = self.fake.bounded(lambda: audit.evaluate(source, timeout=timeout), bound)
+        self.assertTrue(finished, "evaluate was still running %.0f s after its %s s limit" % (bound, timeout))
+        self.assertEqual(self.fake.running(), [], "no exporter or verifier process is left running")
+        self.assertEqual(self.fake.names("containers"), [TARGET], "the verifier container is removed")
+        if isinstance(source, audit.SnapshotDump):
+            # the snapshot file is not held open afterwards (Windows refuses to rename a file another handle holds)
+            moved = source.path.with_suffix(".moved")
+            try:
+                source.path.rename(moved)
+            except OSError as error:
+                self.fail("the snapshot file is still held open: %s" % error)
+            moved.rename(source.path)
+        return outcome, elapsed
+
+    def assert_input_error(self, outcome):
+        self.assertIsInstance(outcome.get("error"), audit.InputError, outcome)
+
+    def test_pv08_a_stalled_side_ends_at_the_limit(self):
+        cases = {"exporter stops sending": (dict(exporter="stall"), audit.DatabaseExport(TARGET, "kin", "kin")),
+                 "verifier stops reading": (dict(verifier="no_read", blocks=64),
+                                            audit.DatabaseExport(TARGET, "kin", "kin")),
+                 "verifier stops reading a snapshot": (dict(verifier="no_read"), None),
+                 "verifier never answers": (dict(verifier="stall_after_read"), None)}
+        for label, (plan, source) in cases.items():
+            with self.subTest(label):
+                self.fake.plan(**plan)
+                outcome, elapsed = self.evaluate(source or self.snapshot(), LIMIT, LIMIT + GRACE)
+                self.assert_input_error(outcome)
+                self.assertGreaterEqual(elapsed, LIMIT - 0.5, "the case stalled until its limit")
+
+    def test_pv08_one_side_failing_ends_the_other_at_once(self):
+        cases = {"verifier fails while the exporter stalls": dict(exporter="stall", verifier="fail"),
+                 "exporter fails while the verifier does not read": dict(exporter="fail", verifier="no_read")}
+        for label, plan in cases.items():
+            with self.subTest(label):
+                self.fake.plan(**plan)
+                outcome, elapsed = self.evaluate(audit.DatabaseExport(TARGET, "kin", "kin"), 60, 60 + GRACE)
+                self.assert_input_error(outcome)
+                self.assertLess(elapsed, PROMPT, "a failed side is not waited out until the limit")
+        with self.subTest("verifier fails on a snapshot"):
+            self.fake.plan(verifier="fail")
+            outcome, elapsed = self.evaluate(self.snapshot(), 60, 60 + GRACE)
+            self.assert_input_error(outcome)
+            self.assertLess(elapsed, PROMPT)
+
+    def test_pv08_normal_transfer_and_the_verify_exit_codes(self):
+        rows = {1: "a", 2: "b", 3: "c"}
+        self.fake.plan(answer=verifier_answer(rows), blocks=64)
+        outcome, _ = self.evaluate(audit.DatabaseExport(TARGET, "kin", "kin"), 60, 60 + GRACE)
+        evaluation = outcome.get("value")
+        self.assertIsInstance(evaluation, audit.Evaluation, outcome)
+        self.assertEqual((sorted(evaluation.rows), evaluation.guard["state"], evaluation.schema),
+                         (sorted(stream(rows).rows), "present", []))
+        self.assertEqual(self.fake.note("received.json")["sha256"], self.fake.note("exported.json")["sha256"],
+                         "the verifier received exactly the export")
+        source = self.snapshot()
+        self.fake.plan(answer=verifier_answer(rows))
+        outcome, _ = self.evaluate(source, 60, 60 + GRACE)
+        self.assertIsInstance(outcome.get("value"), audit.Evaluation, outcome)
+        self.assertEqual(self.fake.note("received.json")["sha256"], source.sha256)
+
+        # the caller's path: verify answers 0 for the sound export and 2 (an input error) when a side fails
+        ws = Workspace()
+        self.addCleanup(ws.close)
+        ws.init()
+        folder = ws.sealed("2026-10-01T01:00:00Z", rows)
+
+        def verify():
+            output = io.StringIO()
+            with patch.object(ops, "require_local_docker"), contextlib.redirect_stdout(output):
+                code = audit.main(["verify", "--container", TARGET, "--database", "kin", "--user", "kin",
+                                   "--checkpoint", str(folder / audit.CHECKPOINT)])
+            return code, json.loads(output.getvalue())
+        for label, plan, expected in (("sound", dict(answer=verifier_answer(rows)), 0),
+                                      ("exporter fails", dict(exporter="fail", verifier="no_read"), 2)):
+            with self.subTest(label):
+                self.fake.plan(**plan)
+                with self.fake.active():
+                    outcome, elapsed, finished = self.fake.bounded(verify, 60)
+                self.assertTrue(finished)
+                code, report = outcome["value"]
+                self.assertEqual((code, report["exit"]), (expected, expected), report)
+                self.assertLess(elapsed, PROMPT)
+                self.assertEqual(self.fake.running(), [])
+                self.assertEqual(self.fake.names("containers"), [TARGET])
 
 
 if __name__ == "__main__":

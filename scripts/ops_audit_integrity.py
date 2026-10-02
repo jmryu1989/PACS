@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -330,12 +331,13 @@ def link_of(entry):
     return None if entry is None else {"backup": entry["backup"], "sha256": entry["checkpoint_sha256"], "seq": entry["seq"]}
 
 
-def pending_checkpoints(root, ledger, latest, exclude=None):
-    """Folders newer than the ledger's latest seal that declare a checkpoint the ledger does not list (a seal that
-    stopped after its manifest declaration), oldest first, as (created, name, declared digest, checkpoint or None).
-    A checkpoint that cannot be read is kept (None) so that it breaks recovery instead of being skipped."""
+def unlisted_checkpoints(root, ledger, exclude=None):
+    """Every folder that declares a checkpoint the ledger does not list (a seal that stopped after its manifest
+    declaration), in folder order, as (created or None, name, declared digest, checkpoint or None). Age never drops one:
+    a later seal does not resolve it, only recovery into the ledger does (or a re-initialisation after loss, which makes
+    it another ledger's). A checkpoint or creation time that cannot be read is kept (None) so that it is still reported
+    and breaks recovery instead of being skipped."""
     listed = {entry["backup"] for entry in ledger["entries"] if entry["kind"] == "seal"}
-    since = parse_utc(latest["created_utc"]) if latest else None
     found = []
     for name in declared_folders(root):
         if name in listed or name == exclude:
@@ -344,16 +346,23 @@ def pending_checkpoints(root, ledger, latest, exclude=None):
         try:
             created = parse_utc(manifest["created_utc"])
         except (KeyError, TypeError, ValueError):
-            continue
+            created = None
         try:
             body, _ = load_checkpoint(Path(root) / name / CHECKPOINT)
         except InputError:
             body = None
         if body is not None and body["ledger_id"] != ledger["ledger_id"]:
             continue   # a checkpoint of another ledger (before a re-initialisation) is not this ledger's endpoint
-        if since is None or created > since:
-            found.append((created, name, digest, body))
-    return sorted(found, key=lambda item: (item[0], item[1]))
+        found.append((created, name, digest, body))
+    return found
+
+
+def pending_checkpoints(root, ledger, latest, exclude=None):
+    """The recovery candidates of the next seal (§1 L rule 4): unlisted checkpoints created after the ledger's latest
+    seal, oldest first. Older unlisted ones can no longer continue the ledger; retention keeps reporting them."""
+    since = parse_utc(latest["created_utc"]) if latest else None
+    return sorted((item for item in unlisted_checkpoints(root, ledger, exclude)
+                   if item[0] is not None and (since is None or item[0] > since)), key=lambda item: (item[0], item[1]))
 
 
 def init(root, years, after_loss=False, reason=None, now=None):
@@ -389,30 +398,35 @@ def plan(root, years, now=None):
 
 # ── the isolated verifier ──
 
-def _pump(chunks, args, output, timeout):
-    """Feed chunks to a command's stdin; stdout goes to output and stderr to a file (a full pipe cannot stall the pump).
-    Returns the exit code and the SHA-256 of exactly the bytes sent."""
-    sha = hashlib.sha256()
-    with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(args, cwd=ops.ROOT, stdin=subprocess.PIPE, stdout=output, stderr=errors)
+STOP_SECONDS = 10      # after a kill: how long each process and the transfer thread get to end
+POLL_SECONDS = 0.2
+
+
+class _Transfer(threading.Thread):
+    """Copies the export into the verifier's stdin. sent is set only after the last chunk was written and flushed, before
+    stdin closes, so a verifier that exits while sent is unset stopped before it held the whole export."""
+
+    def __init__(self, chunks, sink):
+        super().__init__(daemon=True)
+        self.chunks, self.sink, self.sha, self.sent = chunks, sink, hashlib.sha256(), False
+
+    def run(self):
         try:
+            for chunk in self.chunks:
+                self.sink.write(chunk)
+                self.sha.update(chunk)
+            self.sink.flush()
+            self.sent = True
+        except (OSError, ValueError):
+            pass   # the verifier closed its input (EPIPE, or EINVAL on Windows) or the export could not be read
+        finally:
+            # a broken transfer leaves the snapshot's reader suspended; close it now, not at garbage collection, so the
+            # backup's kin.dump is not held open (on Windows an open handle blocks renaming or removing it)
+            getattr(self.chunks, "close", lambda: None)()
             try:
-                for chunk in chunks:
-                    sha.update(chunk)
-                    process.stdin.write(chunk)
-            except BrokenPipeError:
+                self.sink.close()
+            except (OSError, ValueError):
                 pass
-            finally:
-                try:
-                    process.stdin.close()
-                except BrokenPipeError:
-                    pass
-            code = process.wait(timeout=timeout)
-        except BaseException:
-            process.kill()
-            process.wait()
-            raise
-    return code, sha.hexdigest()
 
 
 def _file_chunks(path):
@@ -420,26 +434,90 @@ def _file_chunks(path):
         yield from iter(lambda: handle.read(1024 * 1024), b"")
 
 
+def _watch(producer, consumer, transfer, deadline):
+    """None once the verifier exited holding the whole export and the exporter ended; otherwise the failure, as soon as
+    one process fails, the verifier stops early, the transfer breaks or the deadline passes."""
+    while True:
+        if producer is not None and producer.poll():
+            return InputError("The target database could not be exported")
+        if consumer.poll() is not None:
+            if not transfer.sent:
+                return InputError("The isolated verifier stopped before it received the whole export")
+            if producer is None or producer.poll() is not None:
+                return None
+        elif not transfer.is_alive() and not transfer.sent:
+            return InputError("The export could not be streamed into the isolated verifier")
+        if time.monotonic() >= deadline:
+            return InputError("The export and its verification exceeded the time limit")
+        try:
+            (consumer if consumer.poll() is None else producer).wait(timeout=POLL_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _end(processes, transfer, kill):
+    """Kill whichever process still runs (when kill), then reap each process and the transfer thread within
+    STOP_SECONDS and close the pipes the thread no longer uses."""
+    if kill:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+    for process in processes:
+        try:
+            process.wait(timeout=STOP_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+    if transfer is not None:
+        transfer.join(STOP_SECONDS)
+    if transfer is None or not transfer.is_alive():
+        for process in processes:
+            for pipe in (process.stdin, process.stdout):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError):
+                        pass
+
+
 def _load_export(source, name, output, timeout):
-    command = ["docker", "exec", "-i", name, "sh", "-c", VERIFIER_SCRIPT]
-    if isinstance(source, SnapshotDump):
-        code, sent = _pump(_file_chunks(source.path), command, output, timeout)
-        if sent != source.sha256:
-            raise InputError("The export differs from its manifest digest")
-    else:
-        with tempfile.TemporaryFile() as errors:
-            producer = subprocess.Popen(["docker", "exec", source.container, "pg_dump", "-U", source.user,
-                                         "-d", source.database, "-Fc"],
-                                        cwd=ops.ROOT, stdout=subprocess.PIPE, stderr=errors)
-            try:
-                code, _ = _pump(iter(lambda: producer.stdout.read(1024 * 1024), b""), command, output, timeout)
-            finally:
-                producer.stdout.close()
-                exported = producer.wait()
-        if exported:
-            raise InputError("The target database could not be exported")
-    if code:
+    """Stream the export into the verifier under one deadline that runs from the start of the export to the verifier's
+    exit. The exporter (pg_dump of a named database), the transfer and the verifier are watched together; at the
+    deadline, or when either side fails, both processes are killed and reaped and an InputError goes to evaluate, whose
+    finally removes the verifier, and on to the caller's failure record. No blocking read, write or wait can hold the
+    caller, its operations lock or the verifier past the deadline."""
+    deadline = time.monotonic() + timeout
+    processes, producer, transfer = [], None, None
+    with tempfile.TemporaryFile() as errors, tempfile.TemporaryFile() as export_errors:
+        try:
+            consumer = subprocess.Popen(["docker", "exec", "-i", name, "sh", "-c", VERIFIER_SCRIPT], cwd=ops.ROOT,
+                                        stdin=subprocess.PIPE, stdout=output, stderr=errors)
+            processes.append(consumer)
+            if isinstance(source, SnapshotDump):
+                chunks = _file_chunks(source.path)
+            else:
+                # pg_dump waits for its table locks inside the target server, which killing the docker client does not
+                # reach; its own lock wait ends at the same deadline.
+                wait = max(1, int((deadline - time.monotonic()) * 1000))
+                producer = subprocess.Popen(["docker", "exec", source.container, "pg_dump", "-U", source.user,
+                                             "-d", source.database, "-Fc", "--lock-wait-timeout=%d" % wait],
+                                            cwd=ops.ROOT, stdout=subprocess.PIPE, stderr=export_errors)
+                processes.append(producer)
+                chunks = iter(lambda: producer.stdout.read(1024 * 1024), b"")
+            transfer = _Transfer(chunks, consumer.stdin)
+            transfer.start()
+            failure = _watch(producer, consumer, transfer, deadline)
+        except BaseException:
+            _end(processes, transfer, kill=True)
+            raise
+        _end(processes, transfer, kill=failure is not None)
+    if failure is not None:
+        raise failure
+    if producer is not None and producer.returncode:
+        raise InputError("The target database could not be exported")
+    if consumer.returncode:
         raise InputError("The isolated verifier could not restore the export")
+    if isinstance(source, SnapshotDump) and transfer.sha.hexdigest() != source.sha256:
+        raise InputError("The export differs from its manifest digest")
 
 
 def _read_output(output):
@@ -486,7 +564,8 @@ def _judge(shape, digests, schema_view):
 def evaluate(source, timeout=3600):
     """The isolated verifier (scenario §1 I), the one place verdict values are computed: a new PostgreSQL container from
     the recorded image with no network, owned by label and removed at the end, reading only the export. The exporting
-    server (the live database, or rehearse's restored copy) takes no part in any computation."""
+    server (the live database, or rehearse's restored copy) takes no part in any computation. timeout (seconds) bounds
+    the export, its transfer and the verification together; past it the call fails as an input error."""
     try:
         if isinstance(source, SnapshotDump):
             image = source.image
@@ -707,7 +786,8 @@ def seal(directory, root, manifest):
 def retention(root, as_of=None, max_age_hours=BACKUP_AGE // 3600):
     """Report, never write or delete. Exit 1 when a sealed backup still inside its retention window is missing or no
     longer matches the ledger, when the latest seal is older than max_age_hours, when a declared checkpoint is not in the
-    ledger, or when a re-initialisation after loss is still inside its window; exit 2 without a readable ledger."""
+    ledger (however many seals followed it), or when a re-initialisation after loss is still inside its window; exit 2
+    without a readable ledger."""
     as_of = as_of or utc_now()
     root = Path(root)
     try:
@@ -755,7 +835,7 @@ def retention(root, as_of=None, max_age_hours=BACKUP_AGE // 3600):
             findings["dump_changed"].append(entry["backup"])
     latest = seals[-1] if seals else None
     stale = latest is not None and as_of - parse_utc(latest["created_utc"]) > timedelta(hours=max_age_hours)
-    uncommitted = [name for _, name, _, _ in pending_checkpoints(root, ledger, latest)]
+    uncommitted = [name for _, name, _, _ in unlisted_checkpoints(root, ledger)]
     first = entries[0]
     discontinuity = (first["kind"] == "reinit_after_loss" and as_of < years_after(parse_utc(first["at"]), years))
     failed = (not seals or stale or uncommitted or discontinuity or any(findings.values()))
