@@ -245,6 +245,26 @@
     .prior-report-value { min-height: 28px; padding: 5px 7px; white-space: pre-wrap; overflow-wrap: anywhere;
                           color: var(--kin-text); background: rgba(14,23,40,.72);
                           border: 1px solid var(--kin-line2); }
+    /* S7-RELATED-LAYOUT (D211; D321 OP-1, D325 OP-6): the Related panel is built for 150 + 6 + 130 = 286px - portrait keeps
+       that sum and the drag/restore clamps assume it - but a landscape work row gets only what the report window leaves
+       (170px at 900x600). The list's table then slid under the separator and the prior report pane, and that pane went
+       below the window. Below 286px the list pane scrolls inside itself, fixed rows and table together, and gives up height
+       first; the prior report pane keeps a floor of its head and the first text line of every state. The cap also bounds a
+       stored or dragged list height without rewriting it, so a larger window gets the user's size back. The two top
+       paddings shrink only here: with 6px + 12px the status text needs 52px, more than the 44px the hidden-filter notice
+       leaves at 900x600. A scrolling pane clips sideways too, and in a 900px window the title row is wider than the
+       panel: the title's right padding gives way so Reading Target stays whole inside it. At 286px or more, in
+       portrait and in the reading layout every value stays as above. */
+    body:not(.portrait):not(.reading) .workrow { container: kin-related-row / size; }
+    @container kin-related-row (height < 286px) {
+      .related-p { --kin-prior-floor: 43px; }
+      .related-list-pane { min-height: min(150px, calc(100% - 6px - var(--kin-prior-floor)));
+                           max-height: calc(100% - 6px - var(--kin-prior-floor)); overflow-x: hidden; overflow-y: auto; }
+      .reltabs .rel-title { padding-right: 2px; }
+      .prior-report-pane { min-height: var(--kin-prior-floor); }
+      .prior-report-body { padding-top: 2px; }
+      .prior-report-status { padding-top: 2px; }
+    }
 
     /* Report */
     .report-p { flex: 1; }
@@ -374,8 +394,11 @@
     body.portrait .right { min-height: 0; overflow: auto; }
     body.portrait .rw section { min-height: 0; }
     /* Wrapped controls can exceed a short panel; scroll the column without
-       collapsing clinical content beneath the next panel's hit target. */
-    body.portrait:not(.reading) .s-clinical { overflow: auto; }
+       collapsing clinical content beneath the next panel's hit target. The column scrolls in landscape too
+       (S7-RELATED-LAYOUT, D321 OP-2): the report window keeps its fixed height there, and the Clinical Context section
+       made the column spill over the Related panel and the report buttons. Only the portrait layout stops #clinical
+       from shrinking; in landscape the identity table still gives way first. */
+    body:not(.reading) .s-clinical { overflow: auto; }
     body.portrait:not(.reading) .clinical { flex: none; }
     body.portrait .rtabs { flex-wrap: wrap; }
     body.portrait .workrow { flex-direction: column; flex: 1 0 480px; min-height: 480px; }
