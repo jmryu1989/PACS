@@ -2249,6 +2249,10 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertGreaterEqual(invocation.kwargs['timeout'],inner+35)
 
     def test_gateway_e2e_profile_is_exact_dispatch_only_and_fits_the_shared_deadline(self):
+        """The focused workflow's two contract checks (steps that request the profile, dispatch options/default) are
+        primary. The literal-absence check beside them preserves the earlier literal-ban regression with one exact
+        record-run argument excepted; it is a supporting check, not a reader that proves what an arbitrary shell
+        program does."""
         profile = ci.PROFILES['gateway-e2e']
         self.assertEqual(profile['suites'], (('gateway_pipeline_live.py', 'GatewayPipelineLive', 'ci-eg1-gateway'),))
         self.assertEqual(profile['out'].name, 'gateway-e2e-ci')
@@ -2344,7 +2348,91 @@ class MeasurementCiTests(unittest.TestCase):
                     if profile in [str(option) for option in (field or {}).get('options') or []]
                     or str((field or {}).get('default')) == profile]
 
-        integration = yaml.safe_load((ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8'))
+        # Secondary check: the earlier literal ban on the profile name anywhere in the focused workflow is kept, with one
+        # exception, because the step that records the files it reads names `.github/workflows/gateway-e2e.yml`. Only
+        # the whole argument `--file .github/workflows/gateway-e2e.yml` in the record-run option region (before the
+        # child command's `--`) of a `python3 scripts/record-run.py` line is removed; a path suffix, another path, env,
+        # dispatch, any other run text, the child command region and a YAML list entry are not. It is not a reader
+        # that proves what an arbitrary shell program does; the two contract checks above stay the primary ones.
+        recorded_file = '.github/workflows/gateway-e2e.yml'
+        recorded_arg = re.compile(r'(?<!\S)--file\s+'+re.escape(recorded_file)+r'(?!\S)')
+
+        def without_recorded_file(text):
+            kept, removed = [], 0
+            for line in text.replace('\\\n', ' ').splitlines():
+                start = re.search(r'(?<!\S)python3?\s+scripts/record-run\.py(?!\S)', line)
+                if start:
+                    split = re.search(r'(?<!\S)--(?!\S)', line[start.end():])
+                    if split:
+                        head = line[:start.end()+split.start()]
+                        try:
+                            words = shlex.split(head, comments=True)
+                        except ValueError:
+                            words = []
+                        as_words = sum(1 for i, w in enumerate(words[:-1]) if w == '--file' and words[i+1] == recorded_file)
+                        in_text = len(recorded_arg.findall(head))
+                        if as_words == in_text:
+                            removed += in_text
+                            line = recorded_arg.sub('', head) + line[len(head):]
+                kept.append(line)
+            return '\n'.join(kept), removed
+
+        raw_integration = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        residue, removed = without_recorded_file(raw_integration)
+        self.assertEqual(removed, 1)
+        self.assertNotIn('gateway-e2e', residue)
+
+        def rejected(text, check):
+            # `check` is the check that must catch the variant; YAML that fails to parse is not a catch.
+            workflow = yaml.safe_load(text)
+            self.assertIsInstance(workflow, dict)
+            return check(workflow, text)
+
+        def literal_left(workflow, text):
+            return 'gateway-e2e' in without_recorded_file(text)[0]
+
+        def executed(workflow, text):
+            return bool(runs_profile(workflow, 'gateway-e2e'))
+
+        def offered_in(workflow, text):
+            return bool(offers_profile(workflow, 'gateway-e2e'))
+
+        profile_step = '          "$RUNNER_TEMP/output-integration-python/bin/python" tests/measurement_ci.py --profile "$KIN_CI_PROFILE"\n'
+        self.assertIn(profile_step, raw_integration)
+        self.assertEqual(rejected(raw_integration, literal_left), False)
+        for label, variant, check in (
+            ('semicolon', profile_step.replace('"$KIN_CI_PROFILE"', 'gateway-e2e;'), literal_left),
+            ('space', profile_step.replace('"$KIN_CI_PROFILE"', 'gateway-e2e '), literal_left),
+            ('redirection', profile_step.replace('tests/measurement_ci.py', 'tests/measurement_ci.py</dev/null').replace(
+                '"$KIN_CI_PROFILE"', 'gateway-e2e'), literal_left),
+            ('equals', profile_step.replace('--profile "$KIN_CI_PROFILE"', '--profile=gateway-e2e'), executed),
+            ('direct', profile_step.replace('"$KIN_CI_PROFILE"', 'gateway-e2e'), executed),
+            ('reassigned', '          KIN_CI_PROFILE=gateway-e2e\n'+profile_step, executed),
+            ('computed', '          X=".github/workflows/gateway-e2e.yml"; KIN_CI_PROFILE=${X##*/}; KIN_CI_PROFILE=${KIN_CI_PROFILE%.yml}\n'
+                         + profile_step, literal_left),
+            ('recording argument in a general run', '          echo --file '+recorded_file+'\n'+profile_step, literal_left),
+            ('recording argument in a quoted value', '          X="--file '+recorded_file+'"\n'+profile_step, literal_left),
+        ):
+            mutated = raw_integration.replace(profile_step, variant)
+            self.assertNotEqual(mutated, raw_integration, label)
+            self.assertTrue(rejected(mutated, check), label)
+        for label, mutated, check in (
+            ('path suffix', raw_integration.replace(recorded_file, recorded_file+'.bak'), literal_left),
+            ('another path', raw_integration.replace(recorded_file, '.github/workflows/gateway-e2e-copy.yml'), literal_left),
+            ('child command region', raw_integration.replace('tests/measurement_ci_test.py\n', 'tests/measurement_ci_test.py --file '+recorded_file+'\n'),
+             literal_left),
+            ('recording argument inside a quoted value', raw_integration.replace(
+                '--cwd .', '--cwd "x --file '+recorded_file+' y"'), literal_left),
+            ('other script', raw_integration.replace('scripts/record-run.py', 'scripts/other-run.py'), literal_left),
+            ('YAML list entry', raw_integration.replace('          - identity-fields\n', '          - identity-fields\n          - gateway-e2e\n'), literal_left),
+            ('dispatch option', raw_integration.replace('          - identity-fields\n', '          - identity-fields\n          - gateway-e2e\n'), offered_in),
+            ('dispatch default', raw_integration.replace('default: output-integration', 'default: gateway-e2e'), offered_in),
+            ('workflow env', raw_integration.replace('permissions:\n', 'env:\n  KIN_CI_PROFILE: gateway-e2e\npermissions:\n'), literal_left),
+            ('step env', raw_integration.replace('KIN_CI_PROFILE: ${{ inputs.profile }}', 'KIN_CI_PROFILE: gateway-e2e'), executed),
+        ):
+            self.assertNotEqual(mutated, raw_integration, label)
+            self.assertTrue(rejected(mutated, check), label)
+        integration = yaml.safe_load(raw_integration)
         # Not vacuous: the dispatch input is read (its own default profile is offered).
         self.assertEqual(offers_profile(integration, 'output-integration'), ['profile'])
         self.assertEqual(runs_profile(integration, 'gateway-e2e'), [])
