@@ -2273,11 +2273,66 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(validate.count('--profile gateway-e2e'), 0)
         dispatch = (ci.ROOT/'.github/workflows/gateway-e2e.yml').read_text(encoding='utf-8')
         self.assertEqual(dispatch.count('--profile gateway-e2e'), 1)
-        # A record-run `--file <path>` argument only hashes a file the run reads (S7-U4b: output-integration.yml's
-        # measurement_ci_test.py line records gateway-e2e.yml); every other mention of gateway-e2e there still fails.
-        import re
-        integration = re.sub(r'--file\s+\S+', '', (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8'))
-        self.assertNotIn('gateway-e2e', integration)
+        # The Focused integration dispatcher can never run this profile: none of its steps requests it and none of its
+        # dispatch inputs offers it. These are the contract, not the words in the file, so a record-run
+        # `--file .github/workflows/gateway-e2e.yml` (it only hashes a file its step reads) passes both (S7-CIREC-REC CR-3).
+        # The workflow is read with the installed YAML parser.
+        import copy, re, shlex
+        import yaml
+
+        def requested(step, env):
+            # Every measurement_ci.py profile the step's shell requests, as --profile X or --profile=X; a $NAME or
+            # ${NAME} value is read from the step, job or workflow env.
+            found = []
+            for line in str(step.get('run') or '').replace('\\\n', ' ').splitlines():
+                try:
+                    words = shlex.split(line, comments=True)
+                except ValueError:
+                    continue
+                for index, word in enumerate(words):
+                    if word.endswith('tests/measurement_ci.py'):
+                        rest = words[index+1:]
+                        found += [rest[i+1] for i, arg in enumerate(rest[:-1]) if arg == '--profile']
+                        found += [arg.split('=', 1)[1] for arg in rest if arg.startswith('--profile=')]
+            names = {**env, **{str(k): str(v) for k, v in (step.get('env') or {}).items()}}
+            return [names.get(m.group(1), value) if (m := re.fullmatch(r'\$\{?(\w+)\}?', value)) else value for value in found]
+
+        def runs_profile(workflow, profile):
+            outer = {str(k): str(v) for k, v in (workflow.get('env') or {}).items()}
+            return [(name, index) for name, job in workflow['jobs'].items()
+                    for index, step in enumerate(job.get('steps', []))
+                    if profile in requested(step, {**outer, **{str(k): str(v) for k, v in (job.get('env') or {}).items()}})]
+
+        def offers_profile(workflow, profile):
+            triggers = workflow.get('on', workflow.get(True)) or {}
+            inputs = ((triggers.get('workflow_dispatch') or {}).get('inputs') or {}) if isinstance(triggers, dict) else {}
+            return [name for name, field in inputs.items()
+                    if profile in [str(option) for option in (field or {}).get('options') or []]
+                    or str((field or {}).get('default')) == profile]
+
+        integration = yaml.safe_load((ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8'))
+        # Not vacuous: the dispatch input is read (its own default profile is offered).
+        self.assertEqual(offers_profile(integration, 'output-integration'), ['profile'])
+        self.assertEqual(runs_profile(integration, 'gateway-e2e'), [])
+        self.assertEqual(offers_profile(integration, 'gateway-e2e'), [])
+        # Controls on copies of the parsed workflow: each forbidden form fails its own check, and recording the file
+        # in a record-run step fails neither.
+        job = lambda workflow: next(iter(workflow['jobs'].values()))
+        stepped = copy.deepcopy(integration)
+        job(stepped)['steps'].append({'run': 'python3 tests/measurement_ci.py --profile gateway-e2e'})
+        self.assertEqual((len(runs_profile(stepped, 'gateway-e2e')), offers_profile(stepped, 'gateway-e2e')), (1, []))
+        through_env = copy.deepcopy(integration)
+        live = next(step for step in job(through_env)['steps'] if requested(step, {}) == ['${{ inputs.profile }}'])
+        live['env']['KIN_CI_PROFILE'] = 'gateway-e2e'
+        self.assertEqual(len(runs_profile(through_env, 'gateway-e2e')), 1)
+        offered = copy.deepcopy(integration)
+        triggers = offered.get('on', offered.get(True))
+        triggers['workflow_dispatch']['inputs']['profile']['options'].append('gateway-e2e')
+        self.assertEqual((runs_profile(offered, 'gateway-e2e'), offers_profile(offered, 'gateway-e2e')), ([], ['profile']))
+        recorded = copy.deepcopy(integration)
+        job(recorded)['steps'].append({'run': 'python3 scripts/record-run.py --run-dir tmp/x --cwd . --file '
+                                              '.github/workflows/gateway-e2e.yml -- python3 -B tests/measurement_ci_test.py'})
+        self.assertEqual((runs_profile(recorded, 'gateway-e2e'), offers_profile(recorded, 'gateway-e2e')), ([], []))
         self.assertEqual(ci.GATEWAY_HANDOFF, 'gateway-project.json')
         self.assertTrue(ci.GATEWAY_PROJECT.fullmatch('kin-eg1-gw-0123456789ab'))
         self.assertIsNone(ci.GATEWAY_PROJECT.fullmatch('kin-gateway'))
