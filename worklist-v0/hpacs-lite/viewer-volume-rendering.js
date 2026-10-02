@@ -127,6 +127,10 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     check(op);const display=editorDisplay(),scale=display.opacity,custom=display.transferMode==='Custom'?display.knots:null,property=op.view.getActors()[0].actor.getProperty();changed=true;
     if(custom){const colors=property.getRGBTransferFunction(0),curve=property.getScalarOpacity(0);colors.removeAllPoints();curve.removeAllPoints();for(const knot of custom){const rgb=KinVolumeRendering.hexToRgb(knot.color);colors.addRGBPoint(knot.hu,...rgb);curve.addPoint(knot.hu,knot.opacity*scale/100);}}
     else{op.view.setProperties({preset:display.preset});const curve=property.getScalarOpacity(0);for(let i=0;i<curve.getSize();i++){const node=[];curve.getNodeValue(i,node);node[1]*=scale/100;curve.setNodeValue(i,node);}}
+    // The viewer's presets switch on a gradient opacity that is 1 at every gradient: no sample's opacity changes, but the
+    // renderer then samples a gradient at every step and, once Crop adds clipping planes, tests each plane for those samples
+    // too (a cropped frame took ~30 s instead of ~1 s on software GL). Only that form is switched off; any other is kept.
+    if(property.getUseGradientOpacity(0)&&property.getGradientOpacityMinimumOpacity(0)===1&&property.getGradientOpacityMaximumOpacity(0)===1)property.setUseGradientOpacity(0,false);
     property.setShade(display.shading);render(op);op.appliedDisplay=KinVolumeRendering.normalizeDisplay(display);status.textContent='VR 표시 조건을 적용했습니다.';
   }catch(error){if(rethrow===true){try{error.kinVrDisplayChanged=changed;}catch(_){}throw error;}if(changed)fail(op,error);else status.textContent=error.message;}}
   function cropValues(){const value=input=>input.value.trim()===''?NaN:Number(input.value);return {i:[value(cropInputs.iMin),value(cropInputs.iMax)],j:[value(cropInputs.jMin),value(cropInputs.jMax)],k:[value(cropInputs.kMin),value(cropInputs.kMax)]};}

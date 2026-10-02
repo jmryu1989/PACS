@@ -43,7 +43,11 @@ function makeView(id,element){
 }
 for(const cell of cells){const element=document.createElement('div');element.id=cell.viewportId;document.querySelector('#sources').append(element);const view=makeView(cell.viewportId,element);views.set(cell.viewportId,view);enabled.set(element,{viewport:view});}
 const curve={getSize:()=>0,getNodeValue(){},setNodeValue(){},removeAllPoints(){},addPoint(){}},colors={removeAllPoints(){},addRGBPoint(){}};
-const property={getRGBTransferFunction:()=>colors,getScalarOpacity:()=>curve,setShade(){}};
+// Gradient opacity as the viewer's presets leave it on the real volume property: on, opacity 1 at both ends.
+const gradient={use:true,minimum:1,maximum:1};
+const property={getRGBTransferFunction:()=>colors,getScalarOpacity:()=>curve,setShade(){},
+  getUseGradientOpacity:()=>gradient.use,setUseGradientOpacity(_,value){gradient.use=value},
+  getGradientOpacityMinimumOpacity:()=>gradient.minimum,getGradientOpacityMaximumOpacity:()=>gradient.maximum};
 // Renderer fake for the VR mapper: view-specific properties are stored as copies and every write is recorded; a render
 // compiles the stored fragment replacements into the linked program the product reads two frames later.
 const mapperLog={properties:null,writes:[]};
