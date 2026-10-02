@@ -248,15 +248,20 @@
     /* S7-RELATED-LAYOUT (D211; D321 OP-1, D325 OP-6): the Related panel is built for 150 + 6 + 130 = 286px - portrait keeps
        that sum and the drag/restore clamps assume it - but a landscape work row gets only what the report window leaves
        (170px at 900x600). The list's table then slid under the separator and the prior report pane, and that pane went
-       below the window. Below 286px the list pane scrolls inside itself, fixed rows and table together, and gives up height
-       first; the prior report pane keeps a floor of its head and the first text line of every state. The cap also bounds a
-       stored or dragged list height without rewriting it, so a larger window gets the user's size back. The two top
-       paddings shrink only here: with 6px + 12px the status text needs 52px, more than the 44px the hidden-filter notice
-       leaves at 900x600. A scrolling pane clips sideways too, and in a 900px window the title row is wider than the
-       panel: the title's right padding gives way so Reading Target stays whole inside it. At 286px or more, in
-       portrait and in the reading layout every value stays as above. */
+       below the window. In a short row the list pane scrolls inside itself, fixed rows and table together, and gives up
+       height first; the prior report pane keeps a floor of its head and the first text line of every state. The cap also
+       bounds a stored or dragged list height without rewriting it, so a larger window gets the user's size back. The two
+       top paddings shrink only here: with 6px + 12px the status text needs 52px, more than the 44px the hidden-filter
+       notice leaves at 900x600. A scrolling pane clips sideways too, and in a 900px window the title row is wider than the
+       panel: the title's right padding gives way so Reading Target stays whole inside it.
+       "Short" is 360px, not 286 (D390): the list does not fit in 150px - its fixed rows take 91-155px by width, fonts and
+       the notice, plus 66px of table - and above the rule it gets only 54% of the row less the separator. The row a window
+       gets depends on the fonts of the report window above it (Linux fonts: 292px at 900x700, Windows: 270), so at 286
+       a 900x700 window lost its related rows under the prior report pane. Measured with both font sets, every window
+       where they were out of reach had a row under 340px; the smallest compared landscape size (1024x768) has 368px. At
+       360px or more, in portrait and in the reading layout every value stays as above. */
     body:not(.portrait):not(.reading) .workrow { container: kin-related-row / size; }
-    @container kin-related-row (height < 286px) {
+    @container kin-related-row (height < 360px) {
       .related-p { --kin-prior-floor: 43px; }
       .related-list-pane { min-height: min(150px, calc(100% - 6px - var(--kin-prior-floor)));
                            max-height: calc(100% - 6px - var(--kin-prior-floor)); overflow-x: hidden; overflow-y: auto; }

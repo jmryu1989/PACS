@@ -38,7 +38,10 @@ Cases (the RL ids are test-plan section 3 of the S7-RELATED-LAYOUT diagnosis, PA
   rl04 keyboard: More Filters -> Tab reaches a related row, the arrow keys and End move to visible rows.
   rl05 a stored 400px list height: capped in the small window without being rewritten, back at 400px in a large one;
        a drag in the small window stores what is visible; Reset Layout.
-  rl07 900x700, 1024x600, 1366x600, Technician at 900x600, Layout: Portrait at 900x600, 900x500 (no overlap only).
+  rl07 900x700, 1024x600, 1366x600, 1024x700, Technician at 900x600, Layout: Portrait at 900x600, 900x500 (no overlap
+       only). 1024x700 (D390) is a window whose work row lands in the band the hosted Linux fonts exposed at 900x700
+       (292px there, 270px here): about 300px with either font set, where a short-row rule that ends at 286px lets the
+       table slide under the prior report pane, so a Windows run sees that failure too.
   rl09 no related exam, 60 related exams (page buttons), long literal descriptions, no reading target.
   rl10 (D383) portrait windows where the Related panel sits at its 286px minimum (900x1200, 768x1024): the opened related
        row (three rows, 60 rows, a portrait layout stored at the drag minimums) is whole in the window, on top at points
@@ -46,7 +49,7 @@ Cases (the RL ids are test-plan section 3 of the S7-RELATED-LAYOUT diagnosis, PA
        centre reaches it; with no related exam the table's message is visible text (T8); in every prior report state the
        first body text line is T8; the list, the separator and the prior report pane stay inside the panel in that order.
        The hidden-filter notice case is not part of it (follow-up S7-RL-NOTICE-PORTRAIT).
-  RelatedLayoutEquivalence rl06/rl08: work rows of 286px or more (1600x1050, 1366x768, 1920x1080, 1280x800, 1024x768),
+  RelatedLayoutEquivalence rl06/rl08: work rows of 360px or more (1600x1050, 1366x768, 1920x1080, 1280x800, 1024x768),
        portrait (900x1400, 900x1200, 768x1024) and the report window at 900x600/900x700 lay out exactly as on the
        implementation base. Why a fixed-commit comparison (AGENTS 1-B 14): this unit's requirement there IS sameness with
        the base, so the base page (read from the fixed commit by its LF sha256, tests/report_actions_dom_test.py
@@ -581,7 +584,7 @@ class RelatedLayoutDOMTest(Base):
 
     # ── RL-07 ───────────────────────────────────────────────────────────────────────────────────────────────────────
     def test_rl07_window_variants(self):
-        for size in ((900, 700), (1024, 600), (1366, 600)):
+        for size in ((900, 700), (1024, 600), (1366, 600), (1024, 700)):
             for state, notice in (("unselected", False), ("shown", True)):
                 with self.subTest(size=size, state=state):
                     w = self.open_state(state, size=size, notice=notice)
