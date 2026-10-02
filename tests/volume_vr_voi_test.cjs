@@ -18,12 +18,15 @@ function near(actual,expected,tolerance=T_MODEL,label=''){
 }
 // A grid as DICOM would describe it: IOP row/column cosines, PixelSpacing (row, column), slice step along the slice
 // normal and the first slice's IPP. Voxel (i,j,k) centre = IPP0 + i*row*colSpacing + j*col*rowSpacing + k*normal*step (F-72).
+// The integer index extent is [0, dims-1] per axis. The pinned renderer's ImageData.getSpatialExtent() is that extent
+// widened by half a voxel, [l-0.5, u+0.5]: the box the volume texture spans and the VR draws (contract C-02 as corrected by
+// S8-U1a-SPEC-B-F01). The model reads it; the expectations below are built from the voxel geometry instead.
 function grid({iop,spacing=[.5,.5],step=2.5,origin=[0,0,0],dims=[64,64,33],descending=false}){
   const row=iop.slice(0,3),col=iop.slice(3,6),normal=cross(row,col),slice=descending?mul(normal,-step):mul(normal,step);
   const axes=[mul(row,spacing[1]),mul(col,spacing[0]),slice];
   const world=([i,j,k])=>add(origin,add(mul(axes[0],i),add(mul(axes[1],j),mul(axes[2],k))));
-  const extent=[0,dims[0]-1,0,dims[1]-1,0,dims[2]-1];
-  return {axes,world,extent,imageData:{getSpatialExtent:()=>extent.slice(),indexToWorld:index=>world(index)}};
+  const index=[0,dims[0]-1,0,dims[1]-1,0,dims[2]-1],spatial=index.map((x,n)=>n%2?x+.5:x-.5);
+  return {axes,dims,world,index,imageData:{getSpatialExtent:()=>spatial.slice(),indexToWorld:index=>world(index)}};
 }
 const GRIDS={
   'G-AX':grid({iop:[1,0,0,0,1,0]}),
@@ -31,20 +34,25 @@ const GRIDS={
   'G-OB2':grid({iop:[.8,.6,0,-.36,.48,.8]}),
   // The same axial grid with its first index at the top: IPP decreases as k grows (SB-03).
   'G-AX-desc':grid({iop:[1,0,0,0,1,0],origin:[0,0,80],descending:true}),
+  // An oblique grid stacked the other way, so a descending affine is also checked off the world axes.
+  'G-OB2-desc':grid({iop:[.8,.6,0,-.36,.48,.8],origin:[3,-2,90],descending:true}),
 };
-function corners(g){const out=[];for(const i of [g.extent[0],g.extent[1]])for(const j of [g.extent[2],g.extent[3]])for(const k of [g.extent[4],g.extent[5]])out.push(g.world([i,j,k]));return out;}
+// The rendered outer box: the integer index extent plus half a voxel on each side, through the grid's affine.
+function outerCorners(g){const out=[];for(const i of [g.index[0]-.5,g.index[1]+.5])for(const j of [g.index[2]-.5,g.index[3]+.5])for(const k of [g.index[4]-.5,g.index[5]+.5])out.push(g.world([i,j,k]));return out;}
 function expectedDefault(g,orientation){
-  const n={Axial:[0,0,1],Coronal:[0,1,0],Sagittal:[1,0,0]}[orientation],c=corners(g),center=mul(c.reduce(add,[0,0,0]),1/8),p=c.map(x=>dot(x,n));
+  const n={Axial:[0,0,1],Coronal:[0,1,0],Sagittal:[1,0,0]}[orientation],c=outerCorners(g),center=mul(c.reduce(add,[0,0,0]),1/8),p=c.map(x=>dot(x,n));
   return {center,normal:n,pivot:center,thickness:Math.max(...p)-Math.min(...p)};
 }
 function rodrigues(v,k,degrees){const r=degrees*Math.PI/180,c=Math.cos(r),s=Math.sin(r);return add(add(mul(v,c),mul(cross(k,v),s)),mul(k,dot(k,v)*(1-c)));}
 const WORLD={L:[1,0,0],P:[0,1,0],S:[0,0,1]};
 // The shader distance the GPU evaluates at normalized texture position posIS: (world(posIS) - c) . n, with posIS 0..1
-// spanning the spatial extent. Computed here as base + axes . posIS from the grid's own corners.
+// spanning the outer box. Computed here as base + axes . posIS from the outer box's own corner and full edges.
 function expectedPlane(g,slab){
-  const o=g.world([g.extent[0],g.extent[2],g.extent[4]]),ends=[[g.extent[1],g.extent[2],g.extent[4]],[g.extent[0],g.extent[3],g.extent[4]],[g.extent[0],g.extent[2],g.extent[5]]].map(i=>sub(g.world(i),o));
-  return {base:dot(sub(o,slab.center),slab.normal),axes:ends.map(e=>dot(e,slab.normal)),halfThickness:slab.thickness/2};
+  const o=g.world([g.index[0]-.5,g.index[2]-.5,g.index[4]-.5]),edges=g.axes.map((a,n)=>mul(a,g.dims[n]));
+  return {base:dot(sub(o,slab.center),slab.normal),axes:edges.map(e=>dot(e,slab.normal)),halfThickness:slab.thickness/2};
 }
+// The normalized texture coordinate of a voxel centre: the texel centre (i - l + 0.5) / N along each axis.
+const texel=(g,index)=>index.map((x,a)=>(x-g.index[2*a]+.5)/g.dims[a]);
 const refusedWith=(fn,key)=>{let error;try{fn();}catch(caught){error=caught;}assert.ok(error,'expected a refusal');assert.equal(vr.reasonOf(error),key,error.message);return error;};
 function deepFreeze(value){if(value&&typeof value==='object'&&!Object.isFrozen(value)){Object.freeze(value);for(const key of Object.keys(value))deepFreeze(value[key]);}return value;}
 const plain=value=>JSON.parse(JSON.stringify(value));
@@ -69,22 +77,58 @@ test('MV-U1a-01 shader planes and bounding planes equal the independent affine g
         const [lower,upper]=vr.planes(record);
         near(lower.origin,sub(want.center,mul(want.normal,want.thickness/2)),T_MODEL,tag+' lower origin');near(lower.normal,want.normal,T_MODEL,tag+' lower normal');
         near(upper.origin,add(want.center,mul(want.normal,want.thickness/2)),T_MODEL,tag+' upper origin');near(upper.normal,mul(want.normal,-1),T_MODEL,tag+' upper normal');
-        // The plane decides the same tissue as the world dot product at sampled voxel centres.
+        // The plane decides the same tissue as the world dot product at sampled voxel centres, read at their texel centres.
         for(const index of [[0,0,0],[63,63,32],[17,40,9],[50,3,30]]){
-          const pos=index.map((x,a)=>(x-g.extent[2*a])/(g.extent[2*a+1]-g.extent[2*a]));
-          near(plane.base+dot(plane.axes,pos),dot(sub(g.world(index),want.center),want.normal),1e-6,tag+' distance '+index);
+          near(plane.base+dot(plane.axes,texel(g,index)),dot(sub(g.world(index),want.center),want.normal),1e-6,tag+' distance '+index);
         }
       }
     }
   }
 });
 
-test('MV-U1a-01 defaults on G-AX are the voxel-centre midpoint and the full projected extent',()=>{
-  const bound=vr.binding(GRIDS['G-AX'].imageData);
+test('MV-U1a-01 defaults on G-AX: the outer box centre, full projected thickness and diagonal (SPEC-B-F01 numbers)',()=>{
+  const g=GRIDS['G-AX'],bound=vr.binding(g.imageData);
   const axial=vr.defaults(bound,'Axial'),coronal=vr.defaults(bound,'Coronal'),sagittal=vr.defaults(bound,'Sagittal');
-  near(axial.center,[15.75,15.75,40]);near(axial.thickness,80);near(coronal.thickness,31.5);near(sagittal.thickness,31.5);
+  // Outer box x/y -0.25..31.75 and z -1.25..81.25 mm, written out by hand.
+  const c=outerCorners(g);near([0,1,2].map(a=>Math.min(...c.map(p=>p[a]))),[-.25,-.25,-1.25]);near([0,1,2].map(a=>Math.max(...c.map(p=>p[a]))),[31.75,31.75,81.25]);
+  near(axial.center,[15.75,15.75,40]);near(axial.thickness,82.5);near(coronal.thickness,32);near(sagittal.thickness,32);
   assert.deepEqual([...axial.pivot],[...axial.center]);
-  near(bound.diagonal,91.566915,1e-6);
+  near(bound.diagonal,94.097024395,1e-6);near(bound.diagonal,Math.hypot(32,32,82.5));
+  // Counterexample: the first-to-last voxel-centre box (80, 31.5, 31.5 mm, diagonal 91.566915) is not what the model takes.
+  for(const [actual,centres] of [[axial.thickness,80],[coronal.thickness,31.5],[sagittal.thickness,31.5],[bound.diagonal,91.566915]])assert.ok(Math.abs(actual-centres)>.4,`${actual} vs ${centres}`);
+});
+
+test('MV-U1a-01 outer corners and projected thickness on axis-aligned, oblique and descending affines (independent)',()=>{
+  // Closed form per grid: a box with full edges E_a = N_a * step_a projects onto n with thickness sum |E_a . n|, its centre
+  // is the voxel centre of the middle index, and its diagonal is the largest |sum s_a E_a|. Hand numbers pin G-OB1 and
+  // G-OB2: N = 64, 64, 33 voxels of 0.5, 0.5, 2.5 mm, so |E| = 32, 32, 82.5 mm.
+  const hand={'G-AX':{Axial:82.5,Coronal:32,Sagittal:32},'G-AX-desc':{Axial:82.5,Coronal:32,Sagittal:32},
+    'G-OB1':{Axial:32*.6+82.5*.8,Coronal:32*.8+82.5*.6,Sagittal:32},
+    'G-OB2':{Axial:32*.8+82.5*.6,Coronal:32*.6+32*.48+82.5*.64,Sagittal:32*.8+32*.36+82.5*.48}};
+  hand['G-OB2-desc']=hand['G-OB2'];
+  for(const [name,g] of Object.entries(GRIDS)){
+    const bound=vr.binding(g.imageData),edges=g.axes.map((a,n)=>mul(a,g.dims[n]));
+    const signs=[[1,1,1],[-1,1,1],[1,-1,1],[1,1,-1]],diagonal=Math.max(...signs.map(s=>Math.hypot(...[0,1,2].map(m=>s[0]*edges[0][m]+s[1]*edges[1][m]+s[2]*edges[2][m])))),mid=g.world([31.5,31.5,16]);
+    near(bound.diagonal,diagonal,T_MODEL,name+' diagonal');near(bound.diagonal,94.097024395,1e-6,name+' diagonal = |box|');
+    for(const orientation of vr.ORIENTATIONS){
+      const n={Axial:[0,0,1],Coronal:[0,1,0],Sagittal:[1,0,0]}[orientation],d=vr.defaults(bound,orientation),tag=`${name} ${orientation}`;
+      near(d.thickness,edges.reduce((sum,e)=>sum+Math.abs(dot(e,n)),0),T_MODEL,tag+' thickness');near(d.thickness,hand[name][orientation],1e-9,tag+' hand thickness');
+      near(d.center,mid,T_MODEL,tag+' centre');near(d.center,expectedDefault(g,orientation).center,T_MODEL,tag+' corner mean');
+      // Counterexample: the voxel-centre box (N_a - 1 steps per axis) would be thinner by sum |step_a . n| > 0.
+      const centres=g.axes.reduce((sum,a,m)=>sum+Math.abs(dot(mul(a,g.dims[m]-1),n)),0);assert.ok(d.thickness-centres>.4,`${tag}: ${d.thickness} vs ${centres}`);
+    }
+    // The texel of the first and last voxel centre sits half a texel inside the outer box, and a full crop's faces are
+    // the outer faces: posIS 0 and 1 are the outer box, not the first and last voxel centres.
+    const plane=vr.shaderPlane({mode:'Slab',orientation:'Axial',slab:{center:mid,normal:[0,0,1],pivot:mid,thickness:1}},bound),outer=outerCorners(g);
+    near(plane.base,dot(sub(outer[0],mid),[0,0,1]),T_MODEL,name+' posIS 0 is the outer corner');
+    near(plane.base+plane.axes.reduce((s,x)=>s+x,0),dot(sub(outer[7],mid),[0,0,1]),T_MODEL,name+' posIS 1 is the outer corner');
+    for(const index of [[0,0,0],[63,63,32]]){
+      const at=texel(g,index),wrong=index.map((x,a)=>(x-g.index[2*a])/(g.index[2*a+1]-g.index[2*a]));
+      near(plane.base+dot(plane.axes,at),dot(sub(g.world(index),mid),[0,0,1]),T_MODEL,name+' texel '+index);
+      // Counterexample: reading posIS as first-to-last voxel centre (0..1 over [l, u]) on this texture misplaces the voxel.
+      assert.ok(Math.abs(plane.base+dot(plane.axes,wrong)-dot(sub(g.world(index),mid),[0,0,1]))>.2,name+' centre-span texture reading '+index);
+    }
+  }
 });
 
 test('MV-U1a-02 voxel-centre inclusion at the slab bound matches volume-voi.js contains',()=>{
@@ -106,7 +150,7 @@ test('MV-U1a-02 voxel-centre inclusion at the slab bound matches volume-voi.js c
 
 test('MV-U1a-05 model calls leave their inputs unchanged and accept deeply frozen inputs',()=>{
   const g=GRIDS['G-OB2'];
-  const imageData=deepFreeze({getSpatialExtent:()=>g.extent.slice(),indexToWorld:index=>g.world(index)});
+  const imageData=deepFreeze({getSpatialExtent:()=>g.imageData.getSpatialExtent(),indexToWorld:index=>g.world(index)});
   const bound=vr.binding(imageData),start=vr.reset(vr.initial(),bound,'Coronal');
   const slab=deepFreeze(plain(start.voi.slab)),before=plain(slab),stateBefore=plain(start);
   let s=vr.apply(start,bound,{orientation:'Coronal',slab:{...slab,thickness:9}});
@@ -118,7 +162,7 @@ test('MV-U1a-05 model calls leave their inputs unchanged and accept deeply froze
 });
 
 test('MV-U1a-06 out-of-range values, a non-unit normal and a thickness beyond the diagonal are refused',()=>{
-  const bound=vr.binding(GRIDS['G-AX'].imageData),s=vr.reset(vr.initial(),bound,'Axial'),slab=s.voi.slab,diagonal=91.566915;
+  const bound=vr.binding(GRIDS['G-AX'].imageData),s=vr.reset(vr.initial(),bound,'Axial'),slab=s.voi.slab,diagonal=94.097024395;
   near(bound.diagonal,diagonal,1e-6);
   const accepted=vr.apply(s,bound,{orientation:'Axial',slab:{...slab,thickness:bound.diagonal}});
   assert.equal(accepted.voi.slab.thickness,bound.diagonal,'a slab as thick as the diagonal is accepted');
@@ -167,7 +211,7 @@ test('MV-U1a-08 transitions: defaults, move, rotate, pivot, reset, disable, undo
   near(turned.voi.slab.center,pivoted.voi.slab.center);near(turned.voi.slab.normal,pivoted.voi.slab.normal);near(turned.voi.slab.pivot,[1,2,3],0);
   const quarter=vr.rotate(pivoted,bound,'S',90);near(quarter.voi.slab.normal,rodrigues(slab.normal,WORLD.S,90));near(quarter.voi.slab.center,add([1,2,3],rodrigues(sub(slab.center,[1,2,3]),WORLD.S,90)));
   // Reset VOI applies the chosen preset's default and leaves VOI on; Disable turns it off; Undo walks back.
-  const reset=vr.reset(moved,bound,'Axial');assert.equal(reset.voi.orientation,'Axial');near(reset.voi.slab.thickness,80);
+  const reset=vr.reset(moved,bound,'Axial');assert.equal(reset.voi.orientation,'Axial');near(reset.voi.slab.thickness,82.5);
   const off=vr.disable(reset);assert.equal(off.voi,null);assert.equal(off.history.length,reset.history.length+1);
   const back=vr.undo(off);assert.ok(vr.same(back.voi,reset.voi));const back2=vr.undo(back);assert.ok(vr.same(back2.voi,moved.voi));
   assert.equal(vr.apply(reset,bound,{orientation:'Axial',slab:reset.voi.slab}),reset,'the same VOI again is not a change');

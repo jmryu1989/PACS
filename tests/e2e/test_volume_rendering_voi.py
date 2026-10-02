@@ -10,6 +10,10 @@ canvas, the read-only VR capability inspect() (contract §13, M-09), English con
 wording and the absence of forbidden words. They never bind to shader text, Korean sentences, data attributes or id
 prefixes. Every case also runs a negative control on the same pixels: an oracle that should be wrong is shown to be wrong.
 VRVOI-MEASURE and VRVOI-MAX lines are observations for the record, never the reason a case passes.
+
+Render range (C-02 as corrected by S8-U1a-SPEC-B-F01): an axis whose integer index extent is [l, u] renders over
+[l - 0.5, u + 0.5]; the 8 corners of that outer box through the source IJK->LPS affine are the unmasked render range and
+a full crop's planes. Voxel centres and the OP-1 marker rule are unchanged, so marker and partial regions get no half voxel.
 """
 import base64, io, json, math, time, unittest, uuid
 import numpy as np
@@ -53,8 +57,20 @@ def index_rows(grid):
 
 
 def box(grid, lo=(0, 0, 0), hi=(63, 63, 32)):
-    """Rays through the voxel-centre range [lo, hi] (contract C-02: the render range is first to last voxel centre)."""
+    """Rays through the index box [lo, hi] (voxel-centre coordinates). Marker and partial regions use it as they are; the
+    default is the first-to-last voxel-centre box, which is not the render range (render_box)."""
     rows = index_rows(grid); return [(rows[i], lo[i], hi[i]) for i in range(3)]
+
+
+def render_box(grid):
+    """The unmasked render range (C-02 as corrected): each index extent widened by half a voxel, [-0.5, dims - 0.5]."""
+    return box(grid, (-.5, -.5, -.5), tuple(n - .5 for n in DIMS))
+
+
+def outer_corners(grid):
+    """The 8 corners of the rendered outer box in world mm (G-AX: x, y -0.25..31.75 and z -1.25..81.25)."""
+    axes = grid_axes(grid)
+    return np.array([axes @ np.array([i, j, k], float) for i in (-.5, DIMS[0] - .5) for j in (-.5, DIMS[1] - .5) for k in (-.5, DIMS[2] - .5)])
 
 
 def slab(center, normal, thickness):
@@ -154,22 +170,56 @@ window.vrVoi={
  arm:()=>{const w=window.vrVoi.watch;w.frames=0;w.statusWrites=0;w.armed=true},
  watched:()=>{const w=window.vrVoi.watch;return w?{frames:w.frames,armed:w.armed,statusWrites:w.statusWrites}:null},
  frames:()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(r)))),
- inspect:()=>window.kinVolumeVr.inspect()};}"""
+ inspect:()=>window.kinVolumeVr.inspect(),
+ // Renderer reads for NT-U1a-03 preconditions: the applied transfer functions evaluated at given HU, shading, and the HU the
+ // VR's own volume holds at given indices (the render input).
+ display:hus=>{const p=one().getActors()[0].actor.getProperty(),c=p.getRGBTransferFunction(0),o=p.getScalarOpacity(0),node=(f,i)=>{const n=[];f.getNodeValue(i,n);return n};
+  return {shade:p.getShade(),color:Array.from({length:c.getSize()},(_,i)=>node(c,i)),opacity:Array.from({length:o.getSize()},(_,i)=>node(o,i)),
+   at:hus.map(hu=>{const rgb=[0,0,0];c.getColor(hu,rgb);return {hu,rgb,opacity:o.getValue(hu)}})}},
+ hu:indices=>{const vol=cornerstone.cache.getVolume(one().getVolumeId());return indices.map(i=>vol.voxelManager.getAtIJK(...i))},
+ // F03 observation of one action (S8-U1a-SPEC-B-F03). Everything is pass-through and removed by traceStop: dialog click and
+ // change listeners before (capture) and after (bubble) the product's handler, mapper planes, mask count and capability
+ // state read there, the VR viewport's render requests, IMAGE_RENDERED, every animation frame, a 100 ms heartbeat, long
+ // tasks, and the duration of WebGL and 2D canvas calls (a call of 50 ms or more is listed with its start).
+ traceStart:()=>{window.vrVoi.traceStop();const v=one(),m=mapper(),log={events:[],gl:{},slow:[],beats:[],frames:[],long:[]},undo=[],clock=()=>performance.timeOrigin+performance.now();
+  const ev=(name,extra)=>{if(log.events.length<500)log.events.push(Object.assign({name,t:clock()},extra||{}))};
+  const state=()=>{const s=window.kinVolumeVr?.inspect?.(),p=m.getViewSpecificProperties()??null;return {planes:m.getClippingPlanes().length,masks:(p?.OpenGL?.ShaderReplacements||[]).length,propertiesLength:JSON.stringify(p).length,voi:s?!!s.voi:null,sculpt:s?.sculpt?.length??0,crop:s?.crop??null}};
+  ev('start',state());
+  const beat=setInterval(()=>{if(log.beats.length<3000)log.beats.push(clock())},100);undo.push(()=>clearInterval(beat));
+  let live=true;const raf=()=>{if(!live)return;if(log.frames.length<6000)log.frames.push(clock());requestAnimationFrame(raf)};requestAnimationFrame(raf);undo.push(()=>{live=false});
+  try{const o=new PerformanceObserver(list=>{for(const e of list.getEntries())if(log.long.length<500)log.long.push([performance.timeOrigin+e.startTime,e.duration])});o.observe({type:'longtask'});undo.push(()=>o.disconnect())}catch(_){log.long=null}
+  const rendered=()=>ev('rendered');v.element.addEventListener(E.Events.IMAGE_RENDERED,rendered);undo.push(()=>v.element.removeEventListener(E.Events.IMAGE_RENDERED,rendered));
+  const dialog=window.vrVoi.watch.dialog,control=e=>e.target?.getAttribute?.('aria-label')||(e.target?.textContent||'').trim().slice(0,40);
+  const armed=e=>ev('armed',{type:e.type,control:control(e)}),handled=e=>ev('handled',Object.assign({control:control(e)},state()));
+  dialog.addEventListener('click',armed,true);dialog.addEventListener('change',armed,true);dialog.addEventListener('click',handled,false);
+  undo.push(()=>{dialog.removeEventListener('click',armed,true);dialog.removeEventListener('change',armed,true);dialog.removeEventListener('click',handled,false)});
+  const own=Object.prototype.hasOwnProperty.call(v,'render'),render=v.render;v.render=function(...a){ev('render');return render.apply(this,a)};undo.push(()=>{if(own)v.render=render;else delete v.render});
+  const timed=(proto,name)=>{const original=proto&&proto[name];if(typeof original!=='function')return;proto[name]=function(...a){const s=performance.now();try{return original.apply(this,a)}finally{const d=performance.now()-s,g=log.gl[name]||(log.gl[name]={n:0,ms:0,max:0});g.n++;g.ms+=d;if(d>g.max)g.max=d;if(d>=50&&log.slow.length<300)log.slow.push([name,performance.timeOrigin+s,d])}};undo.push(()=>{proto[name]=original})};
+  for(const C of [window.WebGL2RenderingContext,window.WebGLRenderingContext])if(C)for(const n of ['compileShader','linkProgram','getShaderParameter','getProgramParameter','useProgram','drawArrays','drawElements','texImage3D','texSubImage3D','texImage2D','readPixels','finish','flush'])timed(C.prototype,n);
+  timed(window.CanvasRenderingContext2D?.prototype,'drawImage');
+  window.vrVoi.tracer={log,undo,ev,state}},
+ traceStop:()=>{const t=window.vrVoi.tracer;if(!t)return;t.ev('stop',t.state());for(const f of t.undo.reverse())try{f()}catch(_){}window.vrVoi.tracer=null;window.vrVoi.traceLog=t.log},
+ traceDump:()=>{const t=window.vrVoi.tracer;return JSON.stringify(t?t.log:window.vrVoi.traceLog||null)}};}"""
 
 
 class Scene:
     """One native VR frame (DPR 1) and the affine world->canvas map of its parallel camera (contract C-03)."""
 
-    def __init__(self, v):
-        self.info = v.evaluate('()=>vrVoi.info()'); lit = v.evaluate('()=>vrVoi.lit()')
-        self.w, self.h = lit['width'], lit['height']
-        raw = np.frombuffer(base64.b64decode(lit['bits']), np.uint8)
-        self.lit = np.unpackbits(raw, bitorder='little')[:self.w * self.h].reshape(self.h, self.w).astype(bool)
+    def __init__(self, v, pixels=True):
+        """pixels=False reads the camera only, so a region can be fixed before the frame's pixels are read (read_pixels)."""
+        self.info = v.evaluate('()=>vrVoi.info()'); self.w, self.h = self.info['width'], self.info['height']
+        if pixels:
+            self.read_pixels(v)
         probe = np.array(v.evaluate('p=>vrVoi.project(p)', [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]), float)
         self.b = probe[0]; self.M = (probe[1:] - probe[0]).T
         self.pinv = np.linalg.pinv(self.M); self.d = np.linalg.svd(self.M)[2][2]
         ys, xs = np.mgrid[0:self.h, 0:self.w]; self.uv = np.stack([xs + .5, ys + .5], -1).astype(float); self.uvb = self.uv - self.b
         self.px_per_mm = float(np.sqrt(abs(np.linalg.det(self.M @ self.M.T))) ** .5)
+
+    def read_pixels(self, v):
+        lit = v.evaluate('()=>vrVoi.lit()'); self.w, self.h = lit['width'], lit['height']
+        raw = np.frombuffer(base64.b64decode(lit['bits']), np.uint8)
+        self.lit = np.unpackbits(raw, bitorder='little')[:self.w * self.h].reshape(self.h, self.w).astype(bool)
 
     def css(self, points):
         return np.asarray(points, float) @ self.M.T + self.b
@@ -229,6 +279,83 @@ def edge_ok(result):
     return result['parallel'] and result['inside'] > 0 and result['outside'] > 0 and result['inside_lit'] >= .99 and result['outside_lit'] == 0
 
 
+# NT-U1a-03 fixed RGBA region (S8-U1a-SPEC-B-F02), defined from geometry and the transfer function before any pixel is read.
+# V-MARK/G-AX, TF-MARK, shading off, Anterior, a Coronal slab y 20.75..22.75 mm: rays through world x 10.5..13 and
+# z 38.75..41.25 keep only MK-MID's uniform 1200 HU interior, whose every interpolation neighbour is MK-MID (index
+# [21,26] x [41,46] x [15,17]). Each contributing sample is white with opacity 1, so the pixel is [255, 255, 255, 255]
+# whatever the ray phase; 2 mm of kept ray is longer than the 0.583 mm sample distance seen on hosted runs.
+RGBA_SLAB = ((15.75, 21.75, 40.), 2.)
+RGBA_REGION = ((10.5, 13.), (38.75, 41.25))
+RGBA_KNOWN = (255, 255, 255, 255)
+# Negative control: the same region under a Coronal slab whose kept ray (y 25.75..27.75) meets no marker.
+RGBA_EMPTY_SLAB = ((15.75, 26.75, 40.), 2.)
+
+
+def hex_rgb(color):
+    return tuple(int(color[n:n + 2], 16) / 255 for n in (1, 3, 5))
+
+
+def transfer_at(name, hu):
+    """The piecewise-linear transfer function of the knots at hu: (rgb 0..1, opacity), held at the end knots beyond them."""
+    knots = TRANSFER[name]
+    if hu <= knots[0][0]:
+        return hex_rgb(knots[0][1]), knots[0][2]
+    for (x0, c0, a0), (x1, c1, a1) in zip(knots, knots[1:]):
+        if hu <= x1:
+            t = (hu - x0) / (x1 - x0); r0, r1 = hex_rgb(c0), hex_rgb(c1)
+            return tuple(r0[m] + t * (r1[m] - r0[m]) for m in range(3)), a0 + t * (a1 - a0)
+    return hex_rgb(knots[-1][1]), knots[-1][2]
+
+
+def marker_band(scene, grid='G-AX', transfer='TF-MARK'):
+    """C-04: the pixels within T of any marker's visible-box boundary."""
+    band = np.zeros((scene.h, scene.w), bool)
+    for name in MARKERS:
+        lo, hi = visible(name, THRESHOLD[transfer]); cons = box(grid, lo, hi); band |= scene.ring(lambda du, dv: scene.hits(cons, du, dv), T_AXIS)[1]
+    return band
+
+
+def rgba_region(scene):
+    """The fixed region's pixels: rays meeting world x and z of RGBA_REGION, minus its own T band and every marker band."""
+    (x0, x1), (z0, z1) = RGBA_REGION; cons = [(np.array([1., 0, 0]), x0, x1), (np.array([0, 0, 1.]), z0, z1)]
+    centre, band, _ = scene.ring(lambda du, dv: scene.hits(cons, du, dv), T_AXIS)
+    return centre & ~band & ~marker_band(scene)
+
+
+def rgba_neighbours(slab_spec=RGBA_SLAB):
+    """Every voxel index a kept sample of the region's rays can interpolate from (floor..ceil of the sample index range)."""
+    (x0, x1), (z0, z1) = RGBA_REGION; (centre, thickness) = slab_spec; y0, y1 = centre[1] - thickness / 2, centre[1] + thickness / 2
+    lo, hi = index_rows('G-AX') @ np.array([x0, y0, z0]), index_rows('G-AX') @ np.array([x1, y1, z1])
+    ranges = [range(int(math.floor(min(a, b))), int(math.ceil(max(a, b))) + 1) for a, b in zip(lo, hi)]
+    return [[i, j, k] for i in ranges[0] for j in ranges[1] for k in ranges[2]]
+
+
+def rgba_difference(a, b):
+    """Observation only: differing pixels, differing channel elements and the largest channel difference."""
+    unequal = a != b
+    return {'pixels': int(unequal.any(-1).sum()), 'elements': int(unequal.sum()), 'max': int(np.abs(a.astype(int) - b.astype(int)).max())}
+
+
+def trace_summary(log, origin):
+    """F03 record of one traced action in ms from origin (the Python click): our own event names, control names, the
+    capability's VOI/sculpt/crop summary, mapper plane and mask counts, frame and heartbeat gaps, long tasks and WebGL/2D
+    call durations. No pixel, shader text or patient data."""
+    if not log:
+        return {'trace': None}
+    rel = lambda t: round(t - origin, 1)
+    first = next((e['t'] for e in log['events'] if e['name'] == 'rendered'), None)
+    # Gaps over 250 ms, counted from the trace start so a block that begins at once is seen even before the first beat.
+    gaps = lambda ts: sorted(([rel(a), round(b - a, 1)] for a, b in zip([log['events'][0]['t']] + ts, ts) if b - a > 250), key=lambda g: -g[1])[:10]
+    return {'events': [{**{k: x for k, x in e.items() if k != 't'}, 't_ms': rel(e['t'])} for e in log['events'] if e['name'] != 'rendered'][:40],
+            'rendered_ms': [rel(e['t']) for e in log['events'] if e['name'] == 'rendered'][:10],
+            'frames_after_first_render_ms': [rel(t) for t in log['frames'] if first is not None and t > first][:3],
+            'frames': len(log['frames']), 'frame_gaps_ms': gaps(log['frames']),
+            'heartbeats': len(log['beats']), 'heartbeat_gaps_ms': gaps(log['beats']),
+            'long_tasks_ms': None if log['long'] is None else sorted(([rel(s), round(d, 1)] for s, d in log['long']), key=lambda g: -g[1])[:10],
+            'gl_ms': {k: [g['n'], round(g['ms'], 1), round(g['max'], 1)] for k, g in sorted(log['gl'].items())},
+            'slow_gl_ms': sorted(([n, rel(s), round(d, 1)] for n, s, d in log['slow']), key=lambda g: -g[2])[:15]}
+
+
 # NT-U1a-05 sub-case MAX geometry on G-AX seen from Superior (test-plan §4 MAX-B, MAX-C).
 F9 = ([6.4375, 26.375, 0], [19.3125, 27.625, 0])
 SLAB_A, SLAB_B = ([15.75, 14.25, 40], 23), ([15.75, 16.75, 40], 23)
@@ -241,8 +368,9 @@ def rectangle(scene, corners):
 
 
 def max_regions(scene, polygons, voi_slab):
-    """Independent regions (MAX-C): box, crop keep, slab keep, each applied polygon and F9, every boundary's T band removed."""
-    box_c = box('G-AX'); crop_c = crop('G-AX', ((0, 51), (0, 63), (0, 32)))[0]; slab_c = slab(voi_slab[0], (0, 1, 0), voi_slab[1]); f9 = rectangle(scene, F9)
+    """Independent regions (MAX-C): box, crop keep, slab keep, each applied polygon and F9, every boundary's T band removed.
+    The box is the rendered outer box, so the half voxel beyond the edge voxel centres is box, not background."""
+    box_c = render_box('G-AX'); crop_c = crop('G-AX', ((0, 51), (0, 63), (0, 32)))[0]; slab_c = slab(voi_slab[0], (0, 1, 0), voi_slab[1]); f9 = rectangle(scene, F9)
     preds = {'box': lambda du, dv: scene.hits(box_c, du, dv), 'crop': lambda du, dv: scene.hits([crop_c], du, dv),
              'voi': lambda du, dv: scene.hits([slab_c], du, dv), 'f9': lambda du, dv: scene.polygon(f9, du, dv)}
     for n, poly in enumerate(polygons):
@@ -284,8 +412,9 @@ def boundary_gaps(scene, polygons, slabs):
         s0 = np.asarray(poly, float); e = np.roll(s0, -1, 0) - s0; d = np.asarray(points, float)[:, None, :] - s0[None]
         t = np.clip((d * e[None]).sum(-1) / np.maximum((e * e).sum(-1), 1e-12)[None], 0, 1)
         return float(np.linalg.norm(d - t[..., None] * e[None], axis=-1).min())
-    lines = [scene.css([[25.75, 0, 0], [25.75, 31.5, 0]])] + [scene.css([[0, c[1] + sgn * t / 2, 0], [31.5, c[1] + sgn * t / 2, 0]]) for c, t in slabs for sgn in (-1, 1)]
-    lines += [scene.css(edge) for edge in ([[0, 0, 0], [0, 31.5, 0]], [[31.5, 0, 0], [31.5, 31.5, 0]], [[0, 0, 0], [31.5, 0, 0]], [[0, 31.5, 0], [31.5, 31.5, 0]])]
+    (x0, y0, _), (x1, y1, _) = outer_corners('G-AX').min(0), outer_corners('G-AX').max(0)
+    lines = [scene.css([[25.75, y0, 0], [25.75, y1, 0]])] + [scene.css([[x0, c[1] + sgn * t / 2, 0], [x1, c[1] + sgn * t / 2, 0]]) for c, t in slabs for sgn in (-1, 1)]
+    lines += [scene.css(edge) for edge in ([[x0, y0, 0], [x0, y1, 0]], [[x1, y0, 0], [x1, y1, 0]], [[x0, y0, 0], [x1, y0, 0]], [[x0, y1, 0], [x1, y1, 0]])]
     shapes = [np.asarray(poly, float) for poly in polygons] + [rectangle(scene, F9)]; best = math.inf
     for n, pa in enumerate(shapes):
         for pb in shapes[n + 1:] + [np.asarray(line) for line in lines]:
@@ -321,9 +450,12 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
     def inspect(self, v):
         return v.evaluate('()=>vrVoi.inspect()')
 
-    def open_series(self, fixture, page=None):
-        """Worklist, filmbox viewer, MPR and the first plane selected (the opened_projection flow) on this module's series."""
-        self.seed_report(fixture); p = page or self.login(); self.choose(p, fixture)
+    def open_series(self, fixture, page=None, seed=True):
+        """Worklist, filmbox viewer, MPR and the first plane selected (the opened_projection flow) on this module's series.
+        seed=False opens a series whose report is already seeded, in a new login (its own browser context)."""
+        if seed:
+            self.seed_report(fixture)
+        p = page or self.login(); self.choose(p, fixture)
         with p.context.expect_page() as opened:
             p.locator('#m-filmbox').click()
         v = opened.value; ct.canvas_ready(v, 1); self.ready(v); self.mpr(v); self.choose_volume(v, v, 0)
@@ -351,7 +483,82 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
             self.measure('settle-slow', waited_s=round(waited, 3))
         v.evaluate('()=>vrVoi.frames()'); self.still_shown(v)
 
-    def show_whole_box(self, v, grid):
+    def responsive(self, v, limit=30):
+        """Seconds until a trivial page call answers again, bounded by min(limit, the suite deadline); None when it did not."""
+        started = time.monotonic()
+        try:
+            v.wait_for_function('()=>true', timeout=self.remaining(limit) * 1000); return round(time.monotonic() - started, 3)
+        except Exception:
+            return None
+
+    def traced_crop(self, v, dialog, i_max, condition, **context):
+        """Apply Crop with I Max = i_max under the F03 trace (HELPERS traceStart) and the unchanged settle bound. Writes one
+        VRVOI-MEASURE line and returns the settle failure, or None; the caller raises it. The wait is never restarted: after a
+        failure only a bounded responsiveness probe and a bounded read of the page record follow."""
+        v.evaluate('()=>vrVoi.traceStart()'); dialog.get_by_label('I Max', exact=True).fill(str(i_max))
+        clicked, started, failure = time.time() * 1000, time.monotonic(), None
+        dialog.get_by_role('button', name='Apply Crop', exact=True).click()
+        try:
+            self.settle(v)
+        except Exception as error:
+            failure = error
+        record = {'condition': condition, 'i_max': i_max, **context, 'outcome': 'settled' if failure is None else 'failed',
+                  'failure': repr(failure)[:200] if failure else None, 'wait_s': round(time.monotonic() - started, 3)}
+        if failure is not None:
+            record['responsive_after_s'] = self.responsive(v)
+        try:
+            log = json.loads(v.wait_for_function('()=>vrVoi.traceDump()', timeout=self.remaining(10) * 1000).json_value())
+            v.evaluate('()=>vrVoi.traceStop()'); record.update(trace_summary(log, clicked))
+        except Exception as error:
+            record['trace_unread'] = repr(error)[:200]
+        self.measure('NT-U1a-05-crop-diagnosis', **record)
+        return failure
+
+    def nt05_sculpt(self, v, dialog):
+        """The NT-U1a-05 sculpt: Rectangle Inside over x 3.75..5.75, y 3.75..7.75 mm seen from Superior (EG-U4-B2)."""
+        scene = Scene(v, pixels=False); r = v.evaluate('()=>vrVoi.rect()'); corners = scene.css([[3.75, 3.75, 0], [5.75, 7.75, 0]])
+        self.sculpt_region(v, dialog, 'Rectangle', 'Inside', [(corners[0][0] / r['width'], corners[0][1] / r['height']), (corners[1][0] / r['width'], corners[1][1] / r['height'])])
+        # CB-10: Drawing locks the VOI with the camera and display edits.
+        expect(self.button(v, 'Apply VOI')).to_be_disabled(); expect(dialog.get_by_label('View From', exact=True)).to_be_disabled()
+        dialog.get_by_role('button', name='Apply Sculpt', exact=True).click(); self.settle(v)
+
+    def crop_diagnosis(self, fixture):
+        """S8-U1a-SPEC-B-F03 diagnosis on V-MARK/G-AX seen from Superior, each condition in its own login, viewer page and VR
+        (a fresh GL context, so its first Crop builds its own clipping program):
+          1-first-crop: TF-COLOR, no VOI or sculpt, the first Crop (the NT-U1a-05 step that did not settle on hosted runs);
+          2-ct-bone-crop: the same geometry and Crop under the opening CT-Bone display;
+          3-crop-after-voi-sculpt: TF-COLOR with the NT-U1a-05 VOI and sculpt applied, then the same Crop.
+        A condition whose first Crop settles applies the same Crop once more (its program now built: the render alone). The
+        records are observations; a condition that does not settle within min(30 s, the suite deadline) is a failure, raised
+        after every condition the page state allows has been recorded."""
+        failures = []
+        for name, transfer, masks in (('1-first-crop', 'TF-COLOR', False), ('2-ct-bone-crop', None, False), ('3-crop-after-voi-sculpt', 'TF-COLOR', True)):
+            try:
+                self.remaining(30)
+            except AssertionError as error:
+                failures.append(error); break
+            p, v = self.open_series(fixture, seed=False); prepared, failure = {}, None
+            try:
+                started = time.monotonic(); dialog = self.open_vr(v); prepared['open_vr_s'] = round(time.monotonic() - started, 3)
+                if transfer:
+                    started = time.monotonic(); self.transfer(v, transfer); prepared['transfer_s'] = round(time.monotonic() - started, 3)
+                self.view_from(v, 'Superior')
+                if masks:
+                    started = time.monotonic(); self.apply_slab(v, 'Coronal', center=[15.75, 14.25, 40], thickness=23); prepared['voi_s'] = round(time.monotonic() - started, 3)
+                    started = time.monotonic(); self.nt05_sculpt(v, dialog); prepared['sculpt_s'] = round(time.monotonic() - started, 3)
+                failure = self.traced_crop(v, dialog, 51, name, prepared=prepared)
+                if failure is None:
+                    failure = self.traced_crop(v, dialog, 51, name + '-again')
+            except Exception as error:
+                failure = error; self.measure('NT-U1a-05-crop-diagnosis', condition=name, prepared=prepared, outcome='failed before the crop', failure=repr(error)[:200])
+            if failure is not None:
+                failures.append(failure)
+                if self.responsive(v) is None:
+                    break
+            v.close(); p.close()
+        if failures:
+            raise failures[0]
+
         """Observation precondition (test-plan §8.3, §8.4): every face, plane and marker a case reads is on the canvas.
         The VR opens fitted to the axial footprint and View From and drags keep that scale, so on G-AX (31.5 x 31.5 x 80
         mm) the k extent leaves an 826 px canvas in Left and Anterior. Zooming out with the dialog's wheel (a view control
@@ -476,28 +683,33 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
 
     # TEST-S8-U1a-NATIVE -----------------------------------------------------------------------------------------------
     def test_vr_voi_00_render_extent_and_sample_position_convention(self):
-        """NT-U1a-00 (OQ-3, C-02): the unmasked range is first to last voxel centre and slab planes sit where the model puts them."""
+        """NT-U1a-00 (OQ-3, C-02 as corrected by S8-U1a-SPEC-B-F01): the unmasked range ends at the outer voxel faces and the
+        slab planes 21.25 and 61.25 mm sit at their world positions; either disagreeing beyond T is a stop (OQ-3)."""
         a = voi_series(self.stack, 'G-AX', 'V-BOX'); self.assert_series(a); p, v = self.open_series(a); self.open_vr(v)
         self.dialog(v).get_by_role('button', name='Apply Display', exact=True).click(); self.settle(v); self.show_whole_box(v, 'G-AX')
         results = {}
         for view in ('Left', 'Anterior'):
-            self.view_from(v, view); scene = Scene(v); cons = box('G-AX')
+            self.view_from(v, view); scene = Scene(v); cons = render_box('G-AX')
             faces = [(1, 'low'), (1, 'high'), (2, 'low'), (2, 'high')] if view == 'Left' else [(0, 'low'), (0, 'high'), (2, 'low'), (2, 'high')]
             for index, side in faces:
                 result = scene.plane_strips(cons, index, side, T_AXIS); results[f'{view} box {index}{side}'] = result; self.assertTrue(edge_ok(result), (view, index, side, result))
-            # Negative control: the voxel-face convention (render range half a voxel wider) is more than T away on this canvas.
-            face = scene.plane_strips(box('G-AX', (-.5, -.5, -.5), (63.5, 63.5, 32.5)), 2, 'high', T_AXIS)
-            self.assertFalse(edge_ok(face), ('voxel-face oracle should differ', view, face))
+            # Negative control: the first-to-last voxel-centre range (the uncorrected C-02) is 1.25 mm inside each k face,
+            # more than T on this canvas, so the same strips tell the two ranges apart.
+            for side in ('low', 'high'):
+                centres = scene.plane_strips(box('G-AX'), 2, side, T_AXIS)
+                self.assertFalse(edge_ok(centres), ('voxel-centre range oracle should differ', view, side, centres))
         state = self.apply_slab(v, 'Axial', center=[15.75, 15.75, 41.25], thickness=40); self.assert_voi(state, [15.75, 15.75, 41.25], [0, 0, 1], 40)
         for view in ('Left', 'Anterior'):
-            self.view_from(v, view); scene = Scene(v); cons = box('G-AX') + [slab([15.75, 15.75, 41.25], [0, 0, 1], 40)]
+            self.view_from(v, view); scene = Scene(v); cons = render_box('G-AX') + [slab([15.75, 15.75, 41.25], [0, 0, 1], 40)]
             for side in ('low', 'high'):
                 result = scene.plane_strips(cons, 3, side, T_AXIS); results[f'{view} slab {side}'] = result; self.assertTrue(edge_ok(result), (view, side, result))
-            # Under the voxel-face texture convention the planes would land at z' = -1.25 + z * 82.5 / 80 (FD-07).
-            shifted = box('G-AX') + [(np.array([0, 0, 1.]), -1.25 + 21.25 * 82.5 / 80, -1.25 + 61.25 * 82.5 / 80)]
+            # Negative control (FD-07): a texture affine mismatch, a plane computed on the voxel-centre extent but sampled on
+            # the texture that spans the outer box, would land at z' = -1.25 + z * 82.5 / 80 (0.59 and 0.66 mm off). It is
+            # a wrong mapping, not the outer-face convention the planes above are judged by.
+            mismatch = render_box('G-AX') + [(np.array([0, 0, 1.]), -1.25 + 21.25 * 82.5 / 80, -1.25 + 61.25 * 82.5 / 80)]
             for side in ('low', 'high'):
-                self.assertFalse(edge_ok(scene.plane_strips(shifted, 3, side, T_AXIS)), ('face-convention slab oracle should differ', view, side))
-        self.measure('NT-U1a-00', edges=results, px_per_mm=Scene(v).px_per_mm)
+                self.assertFalse(edge_ok(scene.plane_strips(mismatch, 3, side, T_AXIS)), ('texture-affine mismatch oracle should differ', view, side))
+        self.measure('NT-U1a-00', convention='outer-face', edges=results, px_per_mm=Scene(v).px_per_mm)
 
     def test_vr_voi_01_box_slab_edges_axis_and_oblique(self):
         """NT-U1a-01 (AC-A09-02): slab-made guaranteed edges within T-EDGE on G-AX, G-OB1 and G-OB2, after a drag rotation too."""
@@ -513,7 +725,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                 if centre_value is not None:
                     centre = np.array(centre); centre[{'Axial': 2, 'Sagittal': 0}[preset]] = centre_value
                 state = self.apply_slab(v, preset, center=list(centre), thickness=thickness); self.assert_voi(state, centre, normal, thickness)
-                cons = box(grid) + [slab(centre, normal, thickness)]; n = np.array(normal, float); h = float(n @ centre)
+                cons = render_box(grid) + [slab(centre, normal, thickness)]; n = np.array(normal, float); h = float(n @ centre)
                 for view in views:
                     if view == 'yaw':
                         self.yaw(v)
@@ -566,34 +778,94 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                         self.button(v, 'Disable VOI').click(); self.settle(v)
                 v.close()
 
+    def fixed_region(self, v, fixture, slab_spec):
+        """Apply a Coronal slab, fix the RGBA region from the camera alone, read the source and render-input HU of every voxel
+        its kept samples can interpolate from and the applied transfer functions there, and only then read the frame."""
+        centre, thickness = slab_spec
+        state = self.apply_slab(v, 'Coronal', center=list(centre), thickness=thickness); self.assert_voi(state, centre, [0, 1, 0], thickness)
+        geometry = Scene(v, pixels=False); region = rgba_region(geometry)
+        self.assertGreater(int(region.sum()), 0, 'the fixed region is on the canvas and not empty')
+        cosine = abs(float(np.array([0, 1., 0]) @ geometry.d))
+        self.assertGreater(cosine, .999, 'rays run along P (Anterior)')
+        self.assertGreater(thickness / cosine, geometry.info['sampleDistance'], 'a kept ray is longer than one sample')
+        indices = rgba_neighbours(slab_spec)
+        hu = {'source': sorted({int(fixture.vrvoi['hu'][k, j, i]) for i, j, k in indices}), 'render': sorted({float(x) for x in v.evaluate('i=>vrVoi.hu(i)', indices)})}
+        display = v.evaluate('h=>vrVoi.display(h)', hu['render'])
+        rgba = v.evaluate('()=>vrVoi.rgba()')
+        pixels = np.frombuffer(base64.b64decode(rgba['bytes']), np.uint8).reshape(rgba['height'], rgba['width'], 4)
+        return {'geometry': geometry, 'region': region, 'indices': indices, 'hu': hu, 'display': display, 'rgba': pixels, 'region_rgba': pixels[region], 'slab': state['voi']['slab']}
+
+    def encoding_session(self, fixture, seed, negative=False):
+        """One NT-U1a-03 session in its own login, viewer page and VR (its own mapper and ray jitter): slab A's observed markers
+        and lit set, then the fixed region under RGBA_SLAB, which must be exactly [255, 255, 255, 255]."""
+        p, v = self.open_series(fixture, seed=seed); dialog = self.open_vr(v)
+        self.transfer(v, 'TF-MARK'); self.view_from(v, 'Anterior'); self.show_whole_box(v, 'G-AX')
+        expect(dialog.get_by_label('VR Shading', exact=True)).not_to_be_checked(); expect(dialog.get_by_label('VR Opacity', exact=True)).to_have_value('100')
+        self.apply_slab(v, 'Axial', center=[15.75, 15.75, 40], thickness=10); scene = Scene(v); markers = self.markers(scene, 'G-AX', 'TF-MARK')
+        self.assertNotIn(None, markers.values(), ('observation precondition: every marker is observed', markers))
+        out = {'scene': scene, 'markers': markers, **self.fixed_region(v, fixture, RGBA_SLAB)}
+        # Preconditions of the known colour, all read before the frame: every interpolation neighbour is MK-MID in the
+        # source and in the VR's own volume, TF-MARK is white and opaque there (here and in the renderer), shading is off.
+        (i0, i1), (j0, j1), (k0, k1), value = MARKERS['MK-MID']
+        self.assertTrue(all(i0 <= i <= i1 and j0 <= j <= j1 and k0 <= k <= k1 for i, j, k in out['indices']))
+        self.assertEqual(out['hu'], {'source': [value], 'render': [float(value)]})
+        self.assertEqual(transfer_at('TF-MARK', value), ((1., 1., 1.), 1.)); self.assertFalse(out['display']['shade'])
+        for point in out['display']['at']:
+            np.testing.assert_allclose(point['rgb'], [1, 1, 1], atol=1e-9, rtol=0); self.assertAlmostEqual(point['opacity'], 1, delta=1e-9)
+        values = out['region_rgba']; wrong = (values != RGBA_KNOWN).any(-1)
+        self.assertEqual(int(wrong.sum()), 0, ('fixed region RGBA', fixture.vrvoi['encoding'], int(values.shape[0]), np.unique(values[wrong], axis=0)[:5].tolist()))
+        if negative:
+            # Negative controls on the same session: slab B shows a different marker set, and a slab whose kept ray meets
+            # no marker does not give the known colour in the same region.
+            self.apply_slab(v, 'Axial', center=[15.75, 15.75, 32.5], thickness=5); out['slab_b'] = self.markers(Scene(v), 'G-AX', 'TF-MARK')
+            out['empty'] = self.fixed_region(v, fixture, RGBA_EMPTY_SLAB)
+        v.close(); p.close()
+        return out
+
     def test_vr_voi_03_signed_rescaled_encodings_same_result(self):
-        """NT-U1a-03 (AC-A09-04, OP-2 (a)): E-U, E-S and E-SLOPE give the same markers, lit set and saturated RGBA for slab A."""
-        renders = {}
-        for encoding in ('E-U', 'E-S', 'E-SLOPE'):
-            a = voi_series(self.stack, 'G-AX', 'V-MARK', encoding); self.assert_series(a); p, v = self.open_series(a); self.open_vr(v)
-            self.transfer(v, 'TF-MARK'); self.view_from(v, 'Anterior'); self.apply_slab(v, 'Axial', center=[15.75, 15.75, 40], thickness=10)
-            scene = Scene(v); rgba = v.evaluate('()=>vrVoi.rgba()')
-            pixels = np.frombuffer(base64.b64decode(rgba['bytes']), np.uint8).reshape(rgba['height'], rgba['width'], 4)
-            renders[encoding] = {'scene': scene, 'markers': self.markers(scene, 'G-AX', 'TF-MARK'), 'rgba': pixels}
-            if encoding == 'E-S':
-                # Negative control: the same encoding with slab B shows a different marker set.
-                self.apply_slab(v, 'Axial', center=[15.75, 15.75, 32.5], thickness=5)
-                renders['E-S slab B'] = {'markers': self.markers(Scene(v), 'G-AX', 'TF-MARK')}
-            v.close()
-        reference = renders['E-U']; scene = reference['scene']
-        band = np.zeros_like(scene.lit)
-        for name in MARKERS:
-            lo, hi = visible(name, THRESHOLD['TF-MARK']); cons = box('G-AX', lo, hi); band |= scene.ring(lambda du, dv: scene.hits(cons, du, dv), T_AXIS)[1]
-        saturated = (reference['rgba'][..., :3] >= 250).all(-1) & ~band
-        self.assertGreater(int(saturated.sum()), 0)
-        differences = {}
-        for encoding in ('E-S', 'E-SLOPE'):
-            other = renders[encoding]; self.assertEqual(other['markers'], reference['markers'], encoding)
-            self.assertTrue(np.array_equal(other['scene'].lit & ~band, scene.lit & ~band), encoding)
-            np.testing.assert_array_equal(other['rgba'][saturated], reference['rgba'][saturated])
-            differences[encoding] = int((other['rgba'] != reference['rgba']).any(-1).sum())
-        self.assertNotEqual(renders['E-S slab B']['markers'], renders['E-S']['markers'])
-        self.measure('NT-U1a-03', markers=reference['markers'], rgba_differences=differences, saturated=int(saturated.sum()))
+        """NT-U1a-03 (AC-A09-04, OP-2 (a) as corrected by S8-U1a-SPEC-B-F02): E-U, E-S and E-SLOPE, each in its own session,
+        show the same observed markers and the same lit set outside the C-04 bands for slab A, on the same camera, size, DPR,
+        transfer functions and slab; the fixed RGBA region is exactly [255, 255, 255, 255] in all three and in a second,
+        independent E-U session. Other RGBA differences are recorded, never used as a tolerance."""
+        fixtures, readback, sessions = {}, {}, {}
+        for name, encoding in (('E-U', 'E-U'), ('E-S', 'E-S'), ('E-SLOPE', 'E-SLOPE'), ('E-U again', 'E-U')):
+            if encoding not in fixtures:
+                fixtures[encoding] = voi_series(self.stack, 'G-AX', 'V-MARK', encoding); readback[encoding] = self.assert_series(fixtures[encoding])
+            sessions[name] = self.encoding_session(fixtures[encoding], seed=name != 'E-U again', negative=name == 'E-S')
+        reference = sessions['E-U']; band = marker_band(reference['scene']); differences = {}
+        for name in ('E-S', 'E-SLOPE', 'E-U again'):
+            other = sessions[name]
+            for key in ('width', 'height', 'cssWidth', 'cssHeight', 'dpr', 'parallel'):
+                self.assertEqual(other['geometry'].info[key], reference['geometry'].info[key], (name, key))
+            np.testing.assert_allclose(np.r_[other['geometry'].M.ravel(), other['geometry'].b], np.r_[reference['geometry'].M.ravel(), reference['geometry'].b], atol=1e-6, rtol=0)
+            self.assertEqual(other['geometry'].info['sampleDistance'], reference['geometry'].info['sampleDistance'], name)
+            self.assertEqual({k: other['display'][k] for k in ('shade', 'color', 'opacity')}, {k: reference['display'][k] for k in ('shade', 'color', 'opacity')}, name)
+            self.assertEqual(other['slab'], reference['slab'], name)
+            self.assertTrue(np.array_equal(other['region'], reference['region']), name)
+            self.assertEqual(other['markers'], reference['markers'], name)
+            self.assertTrue(np.array_equal(other['scene'].lit & ~band, reference['scene'].lit & ~band), name)
+            differences[name] = {'all': rgba_difference(other['rgba'], reference['rgba']), 'outside_band': rgba_difference(other['rgba'][~band], reference['rgba'][~band])}
+        self.assertNotEqual(sessions['E-S']['slab_b'], sessions['E-S']['markers'])
+        empty = sessions['E-S']['empty']; self.assertFalse((empty['region_rgba'] == RGBA_KNOWN).all(), 'a slab with no marker on the kept ray is not the known colour')
+        # Negative control from the read-back stored values: reading E-U or E-SLOPE with its slope or intercept dropped takes
+        # the region off TF-MARK's white plateau or lifts a voxel outside every marker (index 0, 0, 16) to an opacity above
+        # zero, so the region, marker set or lit set would differ: a wrong rescale is never the same result.
+        checked = 0
+        for encoding in ('E-U', 'E-SLOPE'):
+            rows = readback[encoding]; right = (rows[0]['slope'], rows[0]['intercept'])
+            for reading in ((1., right[1]), (right[0], 0.)):
+                if reading == right:
+                    continue
+                region_hu = {float(rows[k]['stored'][j, i]) * reading[0] + reading[1] for i, j, k in rgba_neighbours()}
+                background = float(rows[16]['stored'][0, 0]) * reading[0] + reading[1]
+                self.assertTrue(any(transfer_at('TF-MARK', h) != ((1., 1., 1.), 1.) for h in region_hu) or transfer_at('TF-MARK', background)[1] > 0, (encoding, reading))
+                checked += 1
+        self.assertEqual(checked, 3)
+        self.measure('NT-U1a-03', markers=reference['markers'], region_pixels=int(reference['region'].sum()), rgba_differences=differences,
+                     empty_region=np.unique(empty['region_rgba'], axis=0)[:5].tolist(), empty_hu=empty['hu'],
+                     sessions={name: {'hu': s['hu'], 'slab': s['slab'], 'camera': {k: s['geometry'].info[k] for k in ('viewPlaneNormal', 'viewUp', 'parallelScale', 'sampleDistance', 'cssWidth', 'cssHeight', 'dpr')},
+                                      'px_per_mm': s['geometry'].px_per_mm, 'transfer_at': s['display']['at'], 'shade': s['display']['shade'],
+                                      'region_rgba': np.unique(s['region_rgba'], axis=0)[:5].tolist()} for name, s in sessions.items()})
 
     def test_vr_voi_04_reset_disable_undo_original_close_reopen(self):
         """NT-U1a-04 (VS-01..VS-17, LC-01, LC-03, LC-04, LC-07, LC-08, LC-12, LC-13, CB-08): the contract §7.3 state table."""
@@ -620,8 +892,9 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         self.assertTrue(all(0 < c < 1 for point in points for c in point), ('observation precondition: the sculpt rectangle is on the canvas', points))
         self.sculpt_region(v, self.dialog(v), 'Rectangle', 'Inside', points); self.dialog(v).get_by_role('button', name='Apply Sculpt', exact=True).click(); self.settle(v)
         sculpted = self.markers(Scene(v), 'G-AX', 'TF-MARK'); self.assertIs(sculpted['MK-LAST'], False)
-        # VS-02: Axial default = voxel-centre midpoint, full projected thickness; the image equals the unmasked one.
-        state = self.apply_slab(v, 'Axial'); self.assert_voi(state, [15.75, 15.75, 40], [0, 0, 1], 80, [15.75, 15.75, 40]); self.assertEqual(state['voiHistoryDepth'], 1)
+        # VS-02: Axial default = the outer box centre and the 8 outer corners' projected thickness (82.5 mm on G-AX, C-02 as
+        # corrected); that slab ends at the outer faces, so the image equals the unmasked one.
+        state = self.apply_slab(v, 'Axial'); self.assert_voi(state, [15.75, 15.75, 40], [0, 0, 1], 82.5, [15.75, 15.75, 40]); self.assertEqual(state['voiHistoryDepth'], 1)
         self.assertEqual(self.markers(Scene(v), 'G-AX', 'TF-MARK'), sculpted)
         # VS-03 slab A, VS-06 pivot only, VS-04 move, VS-05 rotate.
         a_state = self.apply_slab(v, 'Axial', center=[15.75, 15.75, 40], thickness=10); kept_a = Scene(v); seen_a = self.markers(kept_a, 'G-AX', 'TF-MARK')
@@ -639,7 +912,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         depth = back['voiHistoryDepth']; self.button(v, 'Undo VOI').click(); self.settle(v); self.button(v, 'Undo VOI').click(); self.settle(v)
         undone = self.inspect(v); self.assertEqual(undone['voiHistoryDepth'], depth - 2); np.testing.assert_allclose(undone['voi']['slab']['center'], moved['voi']['slab']['center'], atol=1e-6)
         self.voi(v).get_by_role('combobox', name='VOI Preset', exact=True).select_option('Axial'); self.button(v, 'Reset VOI').click(); self.settle(v)
-        self.assert_voi(self.inspect(v), [15.75, 15.75, 40], [0, 0, 1], 80)
+        self.assert_voi(self.inspect(v), [15.75, 15.75, 40], [0, 0, 1], 82.5)
         # VS-08 Disable keeps the editors and the sculpt; the pixels differ from slab A (negative control for the comparison).
         self.apply_slab(v, 'Axial', center=[15.75, 15.75, 40], thickness=10); editors = [self.field(v, 'VOI Thickness').input_value()]
         self.button(v, 'Disable VOI').click(); self.settle(v); off = self.inspect(v); self.assertIsNone(off['voi']); self.assertEqual(len(off['sculpt']), 1)
@@ -692,9 +965,14 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         self.dialog(v).get_by_role('button', name='Close VR', exact=True).click(); self.preserved(v, start)
 
     def test_vr_voi_05_crop_sculpt_voi_intersection_and_independence(self):
-        """NT-U1a-05 (CB-01..CB-04, CB-09, CB-10): crop x VOI x sculpt intersect and never erase each other; MAX below."""
+        """NT-U1a-05 (CB-01..CB-04, CB-09, CB-10): crop x VOI x sculpt intersect and never erase each other; MAX below. The
+        S8-U1a-SPEC-B-F03 crop diagnosis (crop_diagnosis) runs first and every Crop of this flow is traced the same way."""
         ledger = []
-        a = voi_series(self.stack, 'G-AX', 'V-MARK'); p, v = self.open_series(a); start = self.start_state(v, (15.75, 15.75, 40))
+        a = voi_series(self.stack, 'G-AX', 'V-MARK'); self.seed_report(a)
+        # F03 first: the three crop conditions are recorded even when the first does not settle; a failure among them is
+        # raised there, before this flow repeats the same first Crop (whose own trace is recorded too).
+        self.crop_diagnosis(a)
+        p, v = self.open_series(a, seed=False); start = self.start_state(v, (15.75, 15.75, 40))
         dialog = self.open_vr(v); self.transfer(v, 'TF-COLOR'); self.view_from(v, 'Superior')
         # EG-U4-B2 geometry: each tool alone hides its own marker part; 48 marker voxels stay (MK-FIRST i 12..15, MK-LAST i/j 48..51).
         parts = {'R-SCULPT': ((8, 11), (8, 15)), 'R-CROP': ((52, 55), (48, 51)), 'R-VOI': ((48, 51), (52, 55)),
@@ -706,13 +984,11 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                 core = centre & ~band; self.assertGreater(int(core.sum()), 0, name); out[name] = bool(scene.lit[core].any())
             return out
         def draw_sculpt():
-            scene = Scene(v); r = v.evaluate('()=>vrVoi.rect()'); corners = scene.css([[3.75, 3.75, 0], [5.75, 7.75, 0]])
-            self.sculpt_region(v, dialog, 'Rectangle', 'Inside', [(corners[0][0] / r['width'], corners[0][1] / r['height']), (corners[1][0] / r['width'], corners[1][1] / r['height'])])
-            # CB-10: Drawing locks the VOI with the camera and display edits.
-            expect(self.button(v, 'Apply VOI')).to_be_disabled(); expect(dialog.get_by_label('View From', exact=True)).to_be_disabled()
-            dialog.get_by_role('button', name='Apply Sculpt', exact=True).click(); self.settle(v)
+            self.nt05_sculpt(v, dialog)
         def apply_crop(i_max):
-            dialog.get_by_label('I Max', exact=True).fill(str(i_max)); dialog.get_by_role('button', name='Apply Crop', exact=True).click(); self.settle(v)
+            failure = self.traced_crop(v, dialog, i_max, 'NT-U1a-05 flow')
+            if failure is not None:
+                raise failure
         apply_crop(51); self.apply_slab(v, 'Coronal', center=[15.75, 14.25, 40], thickness=23); draw_sculpt()
         all_three = Scene(v); seen = lit(all_three); state = self.inspect(v)
         self.assertEqual(seen, {'R-SCULPT': False, 'R-CROP': False, 'R-VOI': False, 'R-KEPT-FIRST': True, 'R-KEPT-LAST': True})
@@ -1082,24 +1358,31 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         self.measure('EG-U1a-B2', margin_mm=.0735)
 
     def test_vr_voi_10_full_extent_slab_equals_unmasked(self):
-        """EG-U1a-B3 (AC-07): a slice-normal slab whose planes are the first and last slice planes equals the unmasked silhouette."""
+        """EG-U1a-B3 (AC-07 as corrected by S8-U1a-SPEC-B-F01): a slice-normal slab from the face half a slice step outside the
+        first slice to the one outside the last (82.5 mm on G-AX and G-OB1) equals the unmasked silhouette within T-EDGE."""
         for grid in ('G-AX', 'G-OB1'):
             with self.subTest(grid=grid):
                 a = voi_series(self.stack, grid, 'V-BOX'); p, v = self.open_series(a); self.open_vr(v)
                 self.dialog(v).get_by_role('button', name='Apply Display', exact=True).click(); self.settle(v); self.show_whole_box(v, grid)
                 self.view_from(v, 'Left'); plain = Scene(v)
                 centre = world(grid, (31.5, 31.5, 16)); normal = grid_axes(grid)[:, 2] / STEP
-                self.apply_slab(v, 'Axial', center=list(centre), thickness=80); state = self.inspect(v)
-                self.assertAlmostEqual(state['voi']['slab']['thickness'], 80, delta=1e-6)
+                projected = outer_corners(grid) @ normal; self.assertAlmostEqual(float(projected.max() - projected.min()), 82.5, delta=1e-9)
+                self.apply_slab(v, 'Axial', center=list(centre), thickness=82.5); state = self.inspect(v)
+                self.assertAlmostEqual(state['voi']['slab']['thickness'], 82.5, delta=1e-6)
                 if grid == 'G-OB1':
                     # The slice normal (0, -0.6, 0.8) is the Axial preset turned about L by the tilt, around the volume centre.
                     tilt = math.degrees(math.atan2(-normal[1], normal[2])); self.field(v, 'VOI Rotate Degrees').fill(repr(tilt))
                     self.voi(v).get_by_role('combobox', name='VOI Rotate Axis', exact=True).select_option('L'); self.button(v, 'Rotate Slab').click(); self.settle(v)
                     np.testing.assert_allclose(self.inspect(v)['voi']['slab']['normal'], normal, atol=1e-6)
                     np.testing.assert_allclose(self.inspect(v)['voi']['slab']['center'], centre, atol=1e-6)
-                masked = Scene(v); differ = masked.lit != plain.lit
-                band = masked.ring(lambda du, dv: masked.hits(box(grid), du, dv), T_OBLIQUE if grid != 'G-AX' else T_AXIS)[1]
-                self.assertEqual(int((differ & ~band).sum()), 0, grid); v.close()
+                masked = Scene(v); differ = masked.lit != plain.lit; tolerance = T_OBLIQUE if grid != 'G-AX' else T_AXIS
+                band = masked.ring(lambda du, dv: masked.hits(render_box(grid), du, dv), tolerance)[1]
+                differs = int((differ & ~band).sum()); self.assertEqual(differs, 0, grid)
+                # Negative control on the same unmasked pixels: a slab from the first to the last slice-centre plane (80 mm,
+                # the uncorrected AC-07) would hide lit pixels outside every T band, so this comparison tells them apart.
+                kept, cut_band, _ = plain.ring(lambda du, dv: plain.hits(render_box(grid) + [slab(centre, normal, 80.)], du, dv), tolerance)
+                lost = int((plain.lit & ~kept & ~cut_band & ~band).sum()); self.assertGreater(lost, 0, (grid, 'centre-plane slab oracle should differ'))
+                self.measure('EG-U1a-B3', grid=grid, outside_band_differences=differs, centre_plane_slab_hides=lost); v.close()
 
     def missing_slice(self, variant):
         """EG-U1a-G1/G2 (X-01..X-08): a series with a missing slice is refused before any VR, with a visible reason."""
