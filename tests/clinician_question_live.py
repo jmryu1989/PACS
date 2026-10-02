@@ -41,7 +41,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from urllib.request import Request
 
-from invariants_live import LiveStack, psql, purge_user_audit
+from invariants_live import LiveStack, past_audit_guard, psql, purge_user_audit
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -304,7 +304,8 @@ class ClinicianQuestionLive(unittest.TestCase):
                 self.assertEqual(psql(f'DELETE FROM "{table}" t WHERE to_jsonb(t)={lit(raw)}::jsonb RETURNING 1'), ["1"])
         for raw in psql(f"SELECT to_jsonb(t)::text FROM \"AuditLog\" t WHERE target={lit(subject)} AND action='study.access'"):
             self.assertTrue(json.loads(json.loads(raw)["detail"])["reason"].startswith("SYNTHETIC"))
-            self.assertEqual(psql(f'DELETE FROM "AuditLog" t WHERE to_jsonb(t)={lit(raw)}::jsonb RETURNING 1'), ["1"])
+            self.assertEqual(psql(past_audit_guard(f'DELETE FROM "AuditLog" t WHERE to_jsonb(t)={lit(raw)}::jsonb RETURNING 1')),
+                             ["1"])
 
     def remove_role(self, logical, role_name) -> None:
         role = self.stack.kc_admin("GET", "/roles/" + quote(role_name))

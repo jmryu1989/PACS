@@ -655,12 +655,16 @@ class MigrationPins(unittest.TestCase):
         # 31 -> 32 (the migration directory list, read in the S7-U1a fix1 evidence).
         # S7-U3a: 20260928130000_reader_assignment_scope (ReaderAssignment keyed by study and institution) follows that;
         # 32 -> 33.
+        # S7-AUDIT-STORE: 20260930120000_audit_log_append_only (the AuditLog guard trigger) follows that; 33 -> 34.
         questions, image_requests = "20260926120000_study_questions", "20260926130000_study_image_requests"
         critical, assignment_scope = "20260928120000_critical_result", "20260928130000_reader_assignment_scope"
-        self.assertEqual(names[-6:], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope],
+        audit_guard = "20260930120000_audit_log_append_only"
+        self.assertEqual(names[-7:], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope,
+                                      audit_guard],
                          "U3 immediately before U4, U4 immediately before S5-U4a's study_questions, then S5-U4c's "
-                         "study_image_requests, S7-U1a's critical_result and S7-U3a's reader_assignment_scope, which is last")
-        self.assertEqual(len(names), 33)
+                         "study_image_requests, S7-U1a's critical_result, S7-U3a's reader_assignment_scope and "
+                         "S7-AUDIT-STORE's audit_log_append_only, which is last")
+        self.assertEqual(len(names), 34)
         self.assertIn("'" + MIGRATION_NAME + "'", text("tests", "production_image_test.py"))
         # the restore fixture applies exactly these migrations in this order: its list compared as data, so the order
         # above (U3, U4, study_questions, study_image_requests, critical_result, reader_assignment_scope last) is the fixture's too
@@ -684,8 +688,9 @@ class MigrationPins(unittest.TestCase):
         # S7-U1a: 32 migrations, 46 tables (CriticalResult, CriticalResultEvent, CriticalResultReceipt), rows + 4 records +
         # 7 events + 6 receipts, 79 rows in all.
         # S7-U3a: 33 migrations, the same 46 tables, rows + the tele institution's closed ReaderAssignment row, 80 in all.
+        # S7-AUDIT-STORE: 34 migrations (a trigger only), the same 46 tables and 80 rows.
         rows = restore_fixture.expected_rows("2.25.1")
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 33)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 34)
         self.assertEqual(len(restore_fixture.TABLES), 46)
         self.assertEqual(set(rows), set(restore_fixture.TABLES))
         self.assertEqual(sum(len(value) for value in rows.values()), 80)

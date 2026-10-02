@@ -14,7 +14,7 @@ import sys
 import tarfile
 import tempfile
 
-from ops_backup import FILES
+from ops_backup import AUDIT_CHECKPOINT, FILES
 from ops_monitor import NAMES
 
 HEX = re.compile(r'[0-9a-f]{64}')
@@ -211,7 +211,8 @@ def parse_inventory(raw, expected_hash):
     require(all(type(value) is str and IMAGE.fullmatch(value) for value in images.values()))
     expected = {'snapshot/' + name for name in (*FILES, 'manifest.json')} | HOST_FILES | {'source.bundle'}
     expected |= {'images/' + value[7:] + '.tar' for value in images.values()}
-    require(type(files) is dict and set(files) == expected)
+    # A snapshot whose AuditLog was sealed carries its checkpoint; verify() requires the manifest to declare exactly it.
+    require(type(files) is dict and set(files) in (expected, expected | {'snapshot/' + AUDIT_CHECKPOINT}))
     for name, record in files.items():
         relative(name)
         require(type(record) is dict and set(record) == {'bytes', 'sha256'})
@@ -252,10 +253,11 @@ def verify(root, expected_hash):
     require(type(running) is dict and set(running) == set(NAMES))
     require(all(type(running[name]) is dict and running[name].get('id') == images[name] for name in NAMES))
     require(snapshot.get('postgres_image') == images['kin-db'] and snapshot.get('orthanc_image') == images['kin-orthanc'])
+    components = (*FILES, AUDIT_CHECKPOINT) if 'snapshot/' + AUDIT_CHECKPOINT in files else FILES
     for field in ('sha256', 'bytes'):
-        require(type(snapshot.get(field)) is dict and set(snapshot[field]) == set(FILES))
+        require(type(snapshot.get(field)) is dict and set(snapshot[field]) == set(components))
         require(all(type(snapshot[field][name]) is type(files['snapshot/' + name][field])
-                    and snapshot[field][name] == files['snapshot/' + name][field] for name in FILES))
+                    and snapshot[field][name] == files['snapshot/' + name][field] for name in components))
     check_bundle(root / 'source.bundle', sha)
     for identity in sorted(set(images.values())):
         check_image(root / ('images/' + identity[7:] + '.tar'), identity)

@@ -64,7 +64,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from invariants_live import (  # noqa: E402
     ROOT, CriticalResultHarness, Fixture, HttpResult, LiveStack, critical_ledger, critical_row, drop_critical_results,
-    ensure_clinician_role, psql, sql_text,
+    ensure_clinician_role, past_audit_guard, psql, sql_text,
 )
 import measurement_ci  # noqa: E402
 # The module, never its classes: a TestCase name imported here would join a class-less run (scripts/run-tests.py refuses
@@ -197,7 +197,8 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
                 self.assertEqual(psql(f'DELETE FROM "{table}" t WHERE to_jsonb(t)={sql_text(raw)}::jsonb RETURNING 1'), ["1"])
         for raw in psql(f"SELECT to_jsonb(t)::text FROM \"AuditLog\" t WHERE target={sql_text(subject)} AND action='study.access'"):
             self.assertIn("SYNTHETIC", raw)
-            self.assertEqual(psql(f'DELETE FROM "AuditLog" t WHERE to_jsonb(t)={sql_text(raw)}::jsonb RETURNING 1'), ["1"])
+            self.assertEqual(psql(past_audit_guard(f'DELETE FROM "AuditLog" t WHERE to_jsonb(t)={sql_text(raw)}::jsonb RETURNING 1')),
+                             ["1"])
 
     def text_free(self, value: object, *texts: str) -> None:
         dumped = str(value)

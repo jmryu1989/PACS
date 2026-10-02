@@ -361,11 +361,25 @@ def user_audit(user_id: str) -> list[tuple[str, dict[str, Any]]]:
     return out
 
 
+# S7-AUDIT-STORE (D281 OP-1 a): AuditLog is append-only for every role - a trigger refuses UPDATE, DELETE and TRUNCATE
+# with SQLSTATE 42501, the superuser kin included. A synthetic-stack cleanup still removes exactly the audit rows it
+# owns: as that superuser, with replica mode set just before the AuditLog statement and reset just after it inside the
+# transaction, so every other statement of the cleanup keeps its foreign-key checks (scenario AO-13). The API has no
+# such means; the guard itself is tests/audit_store_db_test.py.
+AUDIT_GUARD_OFF = "SET LOCAL session_replication_role = replica;"
+AUDIT_GUARD_ON = "SET LOCAL session_replication_role = origin;"
+
+
+def past_audit_guard(statement: str) -> str:
+    """One owned-row AuditLog statement of a cleanup, in its own transaction, past the append-only guard (AO-13)."""
+    return f"BEGIN; {AUDIT_GUARD_OFF} {statement.rstrip().rstrip(';')}; {AUDIT_GUARD_ON} COMMIT;"
+
+
 def purge_user_audit(user_id: str) -> None:
     """시험이 만든 회원 감사 행 정리. cleanup_fixture는 검사 uid 행만 지운다."""
     if not re.fullmatch(UUID_RE, user_id):
         raise RuntimeError(f"감사 정리를 거부한 비정상 사용자 id: {user_id}")
-    psql(f"DELETE FROM \"AuditLog\" WHERE target='{user_id}';")
+    psql(past_audit_guard(f"DELETE FROM \"AuditLog\" WHERE target='{user_id}';"))
 
 
 TEMPORARY_PASSWORD_RE = r"^[A-Za-z0-9_-]{24}aA1!$"
@@ -701,7 +715,7 @@ class LiveStack:
                 print('OWNED TEST AUDIT CLEANUP ' + json.dumps(audits, ensure_ascii=True), flush=True)
             for raw in audits:
                 saved = "'" + raw.replace("'", "''") + "'::jsonb"
-                psql(f'DELETE FROM "AuditLog" t WHERE actor=\'{owner}\' AND to_jsonb(t)={saved}')
+                psql(past_audit_guard(f'DELETE FROM "AuditLog" t WHERE actor=\'{owner}\' AND to_jsonb(t)={saved}'))
             if psql(f'SELECT count(*) FROM "AuditLog" WHERE actor=\'{owner}\'') != ["0"]:
                 raise RuntimeError("Temporary audits changed during cleanup")
             rows = psql(f'SELECT to_jsonb(t)::text FROM "ReadingTemplate" t WHERE owner=\'{owner}\'')
@@ -983,7 +997,7 @@ class LiveStack:
                 f"DELETE FROM \"TechNoteRevision\" WHERE \"studyUid\"='{uid}'; "
                 f"DELETE FROM \"StudyState\" WHERE uid='{uid}'; "
                 f"DELETE FROM \"ReportVersion\" WHERE uid='{uid}'; "
-                f"DELETE FROM \"AuditLog\" WHERE target='{uid}'; COMMIT;"
+                f"{AUDIT_GUARD_OFF} DELETE FROM \"AuditLog\" WHERE target='{uid}'; {AUDIT_GUARD_ON} COMMIT;"
             )
             cleaned = subprocess.run(
                 ["docker", "compose", "exec", "-T", "db", "psql", "-U", "kin", "-d", "kin",
@@ -4315,7 +4329,8 @@ class LiveInvariantTests(unittest.TestCase):
                     self.assertEqual(psql(f'DELETE FROM "{table}" t WHERE to_jsonb(t)=' + lit(raw) + "::jsonb RETURNING 1"), ["1"])
             for raw in psql('SELECT to_jsonb(t)::text FROM "AuditLog" t WHERE target=' + lit(subject) + " AND action='study.access'"):
                 self.assertTrue(json.loads(json.loads(raw)["detail"])["reason"].startswith("SYNTHETIC S4-U2"), raw)
-                self.assertEqual(psql('DELETE FROM "AuditLog" t WHERE to_jsonb(t)=' + lit(raw) + "::jsonb RETURNING 1"), ["1"])
+                self.assertEqual(psql(past_audit_guard('DELETE FROM "AuditLog" t WHERE to_jsonb(t)=' + lit(raw)
+                                                       + "::jsonb RETURNING 1")), ["1"])
         self.addCleanup(remove_policy)
 
         def answer(user: str, paged: bool = False) -> dict[str, Any]:

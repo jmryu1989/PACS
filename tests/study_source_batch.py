@@ -3,7 +3,7 @@ import copy,hashlib,json,re,subprocess,sys,unittest,uuid
 from pathlib import Path
 from pydicom.uid import generate_uid
 from pynetdicom import AE
-from invariants_live import LiveStack,ROOT,psql
+from invariants_live import AUDIT_GUARD_OFF,AUDIT_GUARD_ON,LiveStack,ROOT,psql
 sys.path.insert(0,str(ROOT/'scripts'))
 from send_cstore import public_ct_series,DEFAULT_SOURCE
 class StudySourceBatch(unittest.TestCase):
@@ -24,7 +24,7 @@ class StudySourceBatch(unittest.TestCase):
     result=stack._orthanc_request('POST','/tools/bulk-delete',json.dumps({'Resources':ids}).encode());self.assertEqual(result.status,200)
    self.assertEqual(find({'PatientID':token}),[])
    quoted=','.join("'"+u+"'" for u in uids)
-   psql('BEGIN; DELETE FROM "StudyState" WHERE uid IN ('+quoted+'); DELETE FROM "AuditLog" WHERE target IN ('+quoted+'); COMMIT;')
+   psql('BEGIN; DELETE FROM "StudyState" WHERE uid IN ('+quoted+'); '+AUDIT_GUARD_OFF+' DELETE FROM "AuditLog" WHERE target IN ('+quoted+'); '+AUDIT_GUARD_ON+' COMMIT;')
    self.assertEqual(psql('SELECT count(*) FROM "StudyState" WHERE uid IN ('+quoted+');'),['0'])
    self.assertEqual(hashlib.sha256(source_path.read_bytes()).hexdigest(),before)
   self.addCleanup(cleanup)
