@@ -134,7 +134,7 @@ const mapper=()=>one().getActors()[0].actor.getMapper();
 const b64=bytes=>{let s='';for(let i=0;i<bytes.length;i+=32768)s+=String.fromCharCode.apply(null,bytes.subarray(i,i+32768));return btoa(s)};
 window.vrVoi={
  count:()=>views().length,
- info:()=>{const v=one(),c=v.getCanvas(),e=v.element,m=mapper(),cam=v.getCamera();return {width:c.width,height:c.height,cssWidth:c.clientWidth,cssHeight:c.clientHeight,hostWidth:e.clientWidth,hostHeight:e.clientHeight,dpr:devicePixelRatio,viewPlaneNormal:Array.from(cam.viewPlaneNormal),viewUp:Array.from(cam.viewUp),parallel:cam.parallelProjection===true,sampleDistance:m.getSampleDistance(),planes:m.getClippingPlanes().map(p=>({origin:Array.from(p.getOrigin()),normal:Array.from(p.getNormal())})),properties:JSON.stringify(m.getViewSpecificProperties()??null)}},
+ info:()=>{const v=one(),c=v.getCanvas(),e=v.element,m=mapper(),cam=v.getCamera();return {width:c.width,height:c.height,cssWidth:c.clientWidth,cssHeight:c.clientHeight,hostWidth:e.clientWidth,hostHeight:e.clientHeight,dpr:devicePixelRatio,viewPlaneNormal:Array.from(cam.viewPlaneNormal),viewUp:Array.from(cam.viewUp),parallel:cam.parallelProjection===true,parallelScale:cam.parallelScale,sampleDistance:m.getSampleDistance(),planes:m.getClippingPlanes().map(p=>({origin:Array.from(p.getOrigin()),normal:Array.from(p.getNormal())})),properties:JSON.stringify(m.getViewSpecificProperties()??null)}},
  rect:()=>{const r=one().element.getBoundingClientRect();return {x:r.left,y:r.top,width:r.width,height:r.height}},
  project:points=>{const v=one();return points.map(p=>Array.from(v.worldToCanvas(p)))},
  projection:()=>{const v=one(),img=cornerstone.cache.getVolume(v.getVolumeId()).imageData,e=Array.from(img.getSpatialExtent()),w=v.element.clientWidth,h=v.element.clientHeight;
@@ -340,8 +340,35 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
 
     def settle(self, v, limit=30):
         """A new native render after the action, three frames for the product's post-render check, and the VR still shown."""
-        v.wait_for_function('()=>{const w=vrVoi.watched();return !!w&&w.armed&&w.frames>=1}', timeout=self.remaining(limit) * 1000)
+        timeout = self.remaining(limit) * 1000; started = time.monotonic()
+        try:
+            v.wait_for_function('()=>{const w=vrVoi.watched();return !!w&&w.armed&&w.frames>=1}', timeout=timeout)
+        except Exception:
+            # Observation for a D348 decision (MAX-F): how long the wait ran before the bound; the failure is raised unchanged.
+            self.measure('settle-timeout', waited_s=round(time.monotonic() - started, 3)); raise
+        waited = time.monotonic() - started
+        if waited >= 10:
+            self.measure('settle-slow', waited_s=round(waited, 3))
         v.evaluate('()=>vrVoi.frames()'); self.still_shown(v)
+
+    def show_whole_box(self, v, grid):
+        """Observation precondition (test-plan §8.3, §8.4): every face, plane and marker a case reads is on the canvas.
+        The VR opens fitted to the axial footprint and View From and drags keep that scale, so on G-AX (31.5 x 31.5 x 80
+        mm) the k extent leaves an 826 px canvas in Left and Anterior. Zooming out with the dialog's wheel (a view control
+        that must not move any mask, REQ-S8-U1a-SOURCE-BOUND) until the sphere around the voxel-face box fits keeps it on
+        the canvas for every later View From or drag; the oracles read the camera actually shown."""
+        info = v.evaluate('()=>vrVoi.info()'); radius = float(np.linalg.norm(grid_axes(grid) @ np.array(DIMS, float))) / 2
+        need = radius * 1.05 * max(1., info['cssHeight'] / info['cssWidth'])
+        for _ in range(3):
+            scale = v.evaluate('()=>vrVoi.info()')['parallelScale']
+            if scale >= need:
+                break
+            r = v.evaluate('()=>vrVoi.rect()'); v.mouse.move(r['x'] + r['width'] / 2, r['y'] + r['height'] / 2)
+            # One wheel step zooms by at most e; the product clamps a larger step.
+            v.evaluate('()=>vrVoi.arm()'); v.mouse.wheel(0, 500 * min(1., math.log(need * 1.01 / scale))); self.settle(v)
+        scale = v.evaluate('()=>vrVoi.info()')['parallelScale']
+        self.assertGreaterEqual(scale, need, ('observation precondition: the whole box is on the canvas', grid, scale, need))
+        return scale
 
     def still_shown(self, v):
         expect(self.dialog(v)).to_be_visible()
@@ -402,12 +429,14 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
             np.testing.assert_allclose(slab_state['pivot'], pivot, atol=1e-6, rtol=0)
 
     def markers(self, scene, grid, transfer, names=None, tolerance=T_AXIS):
-        """P(m) per marker, or None when the ray through the marker is shorter than the sample distance (test-plan §8.3)."""
+        """P(m) per marker, or None when it is not observed (test-plan §8.3): the ray through it is shorter than the sample
+        distance, or its region has no pixel on this canvas (off the canvas is not 'absent')."""
         result = {}
         for name in names or MARKERS:
             if chord(grid, name, THRESHOLD[transfer], scene.d) < scene.info['sampleDistance']:
                 result[name] = None; continue
-            region = scene.marker(grid, name, THRESHOLD[transfer], tolerance); result[name] = bool(scene.lit[region].any())
+            region = scene.marker(grid, name, THRESHOLD[transfer], tolerance)
+            result[name] = bool(scene.lit[region].any()) if region.any() else None
         return result
 
     def preserved(self, v, start):
@@ -449,7 +478,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
     def test_vr_voi_00_render_extent_and_sample_position_convention(self):
         """NT-U1a-00 (OQ-3, C-02): the unmasked range is first to last voxel centre and slab planes sit where the model puts them."""
         a = voi_series(self.stack, 'G-AX', 'V-BOX'); self.assert_series(a); p, v = self.open_series(a); self.open_vr(v)
-        self.dialog(v).get_by_role('button', name='Apply Display', exact=True).click(); self.settle(v)
+        self.dialog(v).get_by_role('button', name='Apply Display', exact=True).click(); self.settle(v); self.show_whole_box(v, 'G-AX')
         results = {}
         for view in ('Left', 'Anterior'):
             self.view_from(v, view); scene = Scene(v); cons = box('G-AX')
@@ -479,7 +508,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         for grid, preset, centre_value, thickness, views, tolerance, _ in cases:
             with self.subTest(grid=grid, preset=preset):
                 a = voi_series(self.stack, grid, 'V-BOX'); p, v = self.open_series(a); self.open_vr(v)
-                self.dialog(v).get_by_role('button', name='Apply Display', exact=True).click(); self.settle(v)
+                self.dialog(v).get_by_role('button', name='Apply Display', exact=True).click(); self.settle(v); self.show_whole_box(v, grid)
                 centre = world(grid, (31.5, 31.5, 16)); normal = {'Axial': (0, 0, 1), 'Sagittal': (1, 0, 0)}[preset]
                 if centre_value is not None:
                     centre = np.array(centre); centre[{'Axial': 2, 'Sagittal': 0}[preset]] = centre_value
@@ -492,7 +521,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                         self.view_from(v, view)
                     scene = Scene(v)
                     for side in ('low', 'high'):
-                        result = scene.plane_strips(cons, 3, side, tolerance); measured.append({'grid': grid, 'view': view, 'side': side, **result})
+                        result = scene.plane_strips(cons, 3, side, tolerance); measured.append({'grid': grid, 'view': view, 'side': side, 'px_per_mm': scene.px_per_mm, **result})
                         self.assertTrue(edge_ok(result), (grid, view, side, result))
                         # Negative control (G-AX): the plane snapped to the nearest voxel face (the OP-1 (b) reading) is not within T.
                         plane = h - thickness / 2 if side == 'low' else h + thickness / 2
@@ -579,13 +608,18 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         for word in FORBIDDEN:
             self.assertNotIn(word, text)
         for name in ('VOI Center L', 'VOI Center P', 'VOI Center S', 'VOI Pivot L', 'VOI Thickness', 'VOI Move'):
-            self.assertIn('mm', voi.locator('label', has=self.field(v, name)).inner_text(), name)
-        self.transfer(v, 'TF-MARK'); self.view_from(v, 'Anterior'); unmasked = Scene(v); plain = self.markers(unmasked, 'G-AX', 'TF-MARK')
-        # A sculpt over MK-LAST makes Original View meaningful for both masks.
+            # The label that holds this spinbutton; a has= locator is resolved inside each label, so it is the bare role query.
+            label = voi.locator('label', has=v.get_by_role('spinbutton', name=name, exact=True))
+            expect(label).to_have_count(1); self.assertIn('mm', label.inner_text(), name)
+        self.transfer(v, 'TF-MARK'); self.view_from(v, 'Anterior'); self.show_whole_box(v, 'G-AX'); unmasked = Scene(v); plain = self.markers(unmasked, 'G-AX', 'TF-MARK')
+        self.assertNotIn(None, plain.values(), ('observation precondition: every marker is observed', plain))
+        # A sculpt over MK-LAST makes Original View meaningful for both masks; MK-LAST is shown before it (negative control).
+        self.assertIs(plain['MK-LAST'], True)
         corner = unmasked.css([world('G-AX', (46, 0, 31)), world('G-AX', (57, 0, 32.4))]); r = v.evaluate('()=>vrVoi.rect()')
         points = [((min(corner[:, 0]) - 4) / r['width'], (min(corner[:, 1]) - 4) / r['height']), ((max(corner[:, 0]) + 4) / r['width'], (max(corner[:, 1]) + 4) / r['height'])]
+        self.assertTrue(all(0 < c < 1 for point in points for c in point), ('observation precondition: the sculpt rectangle is on the canvas', points))
         self.sculpt_region(v, self.dialog(v), 'Rectangle', 'Inside', points); self.dialog(v).get_by_role('button', name='Apply Sculpt', exact=True).click(); self.settle(v)
-        sculpted = self.markers(Scene(v), 'G-AX', 'TF-MARK'); self.assertFalse(sculpted['MK-LAST'])
+        sculpted = self.markers(Scene(v), 'G-AX', 'TF-MARK'); self.assertIs(sculpted['MK-LAST'], False)
         # VS-02: Axial default = voxel-centre midpoint, full projected thickness; the image equals the unmasked one.
         state = self.apply_slab(v, 'Axial'); self.assert_voi(state, [15.75, 15.75, 40], [0, 0, 1], 80, [15.75, 15.75, 40]); self.assertEqual(state['voiHistoryDepth'], 1)
         self.assertEqual(self.markers(Scene(v), 'G-AX', 'TF-MARK'), sculpted)
@@ -633,9 +667,10 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         self.settle(v)
         state = self.inspect(v); self.assertEqual(state['voiHistoryDepth'], 32); self.assert_voi(state, [15.75, 15.75, 40], [0, 0, 1], 10)
         self.assertEqual(self.markers(Scene(v), 'G-AX', 'TF-MARK'), seen_a)
-        # LC-12: a window resize redraws the same tissue; the VOI is unchanged.
-        size, css = v.viewport_size, list(self.css_size); v.set_viewport_size({'width': size['width'] - 40, 'height': size['height']})
-        v.wait_for_function('w=>vrVoi.info().cssWidth!==w', arg=css[0], timeout=self.remaining(30) * 1000)
+        # LC-12: a window resize that resizes the VR canvas redraws the same tissue; the VOI is unchanged. The dialog stays
+        # inside the window (test_vr_01), so a window no taller than the canvas cannot keep it: the wait is the precondition.
+        size, css = v.viewport_size, list(self.css_size); v.set_viewport_size({'width': size['width'] - 40, 'height': min(size['height'] - 40, css[1])})
+        v.wait_for_function('([w,h])=>{const i=vrVoi.info();return i.cssWidth!==w||i.cssHeight!==h}', arg=css, timeout=self.remaining(30) * 1000)
         self.assert_voi(self.inspect(v), [15.75, 15.75, 40], [0, 0, 1], 10); v.set_viewport_size(size)
         v.wait_for_function('([w,h])=>{const i=vrVoi.info();return i.cssWidth===w&&i.cssHeight===h}', arg=css, timeout=self.remaining(30) * 1000)
         # VS-13: a slab moved outside the volume is applied and shows nothing (observation).
@@ -1003,8 +1038,18 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
 
     def test_vr_voi_07_source_mpr_marks_report_preserved(self):
         """NT-U1a-07 (SB-04, X-05..X-07): every VOI action leaves source, MPR, marks, report and Job title as they were."""
-        a = voi_series(self.stack, 'G-AX', 'V-MARK'); p, v = self.open_series(a); start = self.start_state(v, (15.75, 15.75, 40))
-        p.locator('#findings').fill('KEEP VR VOI REPORT'); v.get_by_label('Job Title', exact=True).fill('KEEP VR VOI JOB'); jobs = self.jobs(a)
+        a = voi_series(self.stack, 'G-AX', 'V-MARK'); p, v = self.open_series(a)
+        # The report is typed first and its own writes land before S: the hold that typing starts and the periodic draft
+        # autosave belong to the report, not to VR. From S on, every VOI action must leave every row as it is, the saved
+        # draft included (X-05..X-07).
+        held = lambda r: r.request.method == 'POST' and r.url.endswith('/studies/' + a.uid + '/hold')
+        saved = lambda r: r.request.method == 'PUT' and r.url.endswith('/studies/' + a.uid + '/report')
+        with p.expect_response(held) as hold, p.expect_response(saved, timeout=self.remaining(45) * 1000) as draft:
+            p.locator('#findings').fill('KEEP VR VOI REPORT')
+        self.assertEqual(hold.value.status, 201); self.assertEqual(draft.value.status, 200)
+        v.get_by_label('Job Title', exact=True).fill('KEEP VR VOI JOB'); start = self.start_state(v, (15.75, 15.75, 40)); jobs = self.jobs(a)
+        rows = [json.loads(row) for row in start['rows']['ReportDraft']]
+        self.assertEqual([row['findings'] for row in rows if row['uid'] == a.uid], ['KEEP VR VOI REPORT'], 'the autosaved draft is part of S')
         # Negative control: a changed MPR window is detected by the same pixel comparison, and restoring it is not.
         self.mpr_live_after_mask_failure(v, start['native'])
         self.open_vr(v); self.transfer(v, 'TF-MARK')
@@ -1041,7 +1086,8 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         for grid in ('G-AX', 'G-OB1'):
             with self.subTest(grid=grid):
                 a = voi_series(self.stack, grid, 'V-BOX'); p, v = self.open_series(a); self.open_vr(v)
-                self.dialog(v).get_by_role('button', name='Apply Display', exact=True).click(); self.settle(v); self.view_from(v, 'Left'); plain = Scene(v)
+                self.dialog(v).get_by_role('button', name='Apply Display', exact=True).click(); self.settle(v); self.show_whole_box(v, grid)
+                self.view_from(v, 'Left'); plain = Scene(v)
                 centre = world(grid, (31.5, 31.5, 16)); normal = grid_axes(grid)[:, 2] / STEP
                 self.apply_slab(v, 'Axial', center=list(centre), thickness=80); state = self.inspect(v)
                 self.assertAlmostEqual(state['voi']['slab']['thickness'], 80, delta=1e-6)
