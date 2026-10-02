@@ -63,7 +63,8 @@ def stream(rows, guard=PRESENT, schema=(), table=True, order=None):
 # argument; a container is found by its name or its 64-hex ID. `exec` runs in this very process what the container would
 # run, told apart by the docker CLI's own options: an exec that sets an environment (-e) and stays attached is the
 # exporter, a detached one (-d) the export's watchdog, one with stdin (-i) the verifier, any other `sh` exec into the
-# target a control command. As plan.json says: exporter normal | stall (1 KiB, then nothing) | fail (1 KiB, exit 1);
+# target a control command. As plan.json says: exporter normal | short (1 KiB, exit 0) | stall (1 KiB, then nothing) |
+# fail (1 KiB, exit 1);
 # verifier normal (reads to EOF, answers) | no_read (never reads) | stall_after_read (reads to EOF, never answers) |
 # fail_after_read (reads to EOF, exit 3) | fail (exit 3 at once); cancel clean (the run is gone: nothing left) | remaining (one process and one session left) |
 # fail (exit 1) | unreadable (no result line) | hang (never answers); remove normal | fail | hang. In this fake the
@@ -146,6 +147,10 @@ elif args[0] == "exec":
         pass
     elif program == "sh" and "-e" in options:
         out, block = sys.stdout.buffer, b"FAKE-EXPORT-" * 4096
+        if plan["exporter"] == "short":
+            out.write(block[:1024])
+            out.flush()
+            sys.exit(0)
         if plan["exporter"] in ("stall", "fail"):
             out.write(block[:1024])
             out.flush()
@@ -1012,7 +1017,9 @@ class ProducerlessEnd(unittest.TestCase):
     InputError with a confirmed termination proof; nothing else is raised (no wait on a process that is not there) and
     no wait made while the verifier ran reaches past the deadline. At the deadline: a verifier that ended just after the
     deadline, while the wait that ran up to it returned late, is judged by its exit code and the transfer when the next
-    observation finds it ended; one still running fails."""
+    observation finds it ended; one still running fails. With a named database's exporter (no manifest digest behind
+    it), a verifier that answers and exits 0 before the export reached it, while the exporter itself ended normally, is
+    an input error too."""
 
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix="kin-audit-f03-")
@@ -1056,6 +1063,25 @@ class ProducerlessEnd(unittest.TestCase):
                 for end_at in range(1, 9):
                     with self.subTest(transfer=mode, code=code, end_at=end_at):
                         self.assert_result(self.run_case(mode, code, end_at=end_at), (mode, code) == ("complete", 0))
+
+    def test_pv09_an_exit_0_before_the_whole_export_with_an_exporter(self):
+        self.fake.container(TARGET)
+        self.fake.plan(exporter="short")
+        for end_at in (1, 2, 3):
+            with self.subTest(end_at=end_at):
+                made = []
+
+                def verifier(kwargs):
+                    made.append(ScriptedVerifier(kwargs, 0, Sink("blocked"), verifier_answer(self.rows), 30,
+                                                 end_at=end_at))
+                    return made[-1]
+                with self.fake.active(verifier=verifier):
+                    outcome, _, finished = self.fake.bounded(
+                        lambda: audit.evaluate(audit.DatabaseExport(TARGET, "kin", "kin"), timeout=30), 30 + GRACE)
+                self.assertTrue(finished)
+                self.assert_result(outcome, False)
+                self.assertEqual(self.fake.running(), [])
+                self.assertEqual(self.fake.names("containers"), [TARGET])
 
     def test_pv09_an_end_at_the_deadline(self):
         for label, mode, code, ends_after, success in (

@@ -193,8 +193,15 @@ class AuditStoreDB(unittest.TestCase):
             docker("rm", "-f", "-v", identity, check=False)
         shutil.rmtree(cls.work, ignore_errors=True)
 
+    def setUp(self):
+        self.verifiers_before = set(verifier_containers())
+
     def tearDown(self):
-        self.assertEqual(verifier_containers(), [], "the isolated verifier's containers are removed after each call")
+        self.assertEqual(self.new_verifiers(), [], "the isolated verifier's containers are removed after each call")
+
+    def new_verifiers(self):
+        """The verifier containers that appeared during this case (another case's leftovers are not this case's)."""
+        return sorted(set(verifier_containers()) - self.verifiers_before)
 
     # ── harness ──
 
@@ -414,8 +421,8 @@ class AuditStoreDB(unittest.TestCase):
         return out
 
     def remove_left_verifiers(self):
-        """The verifier a killed caller could not remove (its removal is the caller's own cleanup)."""
-        for identity in verifier_containers():
+        """The verifiers of this case that a killed caller could not remove (their removal was the caller's cleanup)."""
+        for identity in self.new_verifiers():
             docker("rm", "-f", "-v", identity, check=False)
 
     def restarts(self):
@@ -637,7 +644,7 @@ const { PrismaService } = require('/app/dist/prisma.service');
 
         def watch():
             while not stop.is_set():
-                for identity in verifier_containers():
+                for identity in self.new_verifiers():
                     if identity not in seen:
                         found = docker("inspect", identity, check=False).stdout
                         if found:
@@ -983,7 +990,7 @@ const { PrismaService } = require('/app/dist/prisma.service');
             ((a_pid, (a_name, _, _)),) = self.waiting(db, own, 1).items()
             a_processes = self.exec_processes()
             self.assertTrue(a_processes, "the run's remote processes are seen")
-            (a_verifier,) = verifier_containers()
+            (a_verifier,) = self.new_verifiers()
             foreign_name = a_name[:-8] + ("0" * 8 if a_name[-8:] != "0" * 8 else "f" * 8)
             foreign = Session(self.db, db, application_name=foreign_name)
             own.add(foreign.pid)
@@ -1023,13 +1030,17 @@ const { PrismaService } = require('/app/dist/prisma.service');
             self.assertEqual(self.sessions(db, *own), {})
             self.assertTrue(self.until(lambda: self.exec_processes() == {}, 10), self.exec_processes())
         finally:
+            killed = False
             for process in runs:
                 if process.poll() is None:
                     process.kill()
                     process.communicate()
+                    killed = True
             if foreign is not None:
                 foreign.close()
             holder.close()
+            if killed:
+                self.remove_left_verifiers()
 
     def test_iv15_the_local_docker_client_alone_does_not_end_the_export(self):
         """IV-DB-15 (SPEC-F01, SPEC-F03 local client only; no late connection): on this host's docker client, killing the
@@ -1138,27 +1149,33 @@ const { PrismaService } = require('/app/dist/prisma.service');
                                    and "(pg_dump)" not in self.exec_processes().values(), 10 + 6)
                 self.assertTrue(ended, "the server ended the lock wait at the run's deadline")
                 self.assertLess(time.monotonic() - seen_at, 10 + 6)
+                self.assertTrue(self.until(lambda: self.exec_processes() == {}, 10), "the watchdog leaves after it")
             finally:
                 holder.close()
-            self.assertTrue(self.until(lambda: self.exec_processes() == {}, 10), "the watchdog leaves after the export")
-            self.remove_left_verifiers()
+                self.remove_left_verifiers()
 
         with self.subTest("(c) the caller gone past the lock wait"):
             holder = self.lock(db)
             caller = self.start_caller(db, 8)
-            ((pid, _),) = self.waiting(db, {holder.pid}, 1).items()
-            seen_at = time.monotonic()
-            dump = stop_past_the_lock(holder, pid)
-            caller.kill()
-            caller.wait()
-            time.sleep(2)
-            self.assertIn(pid, self.sessions(db), "the run outlives its caller")
-            self.assertIn(dump, self.exec_processes())
-            ended = self.until(lambda: not self.sessions(db) and not self.exec_processes(),
-                               8 + GRACE + 10 - (time.monotonic() - seen_at))
-            self.assertTrue(ended, "the run's watchdog ended it by the end of the run's life")
-            self.assertLess(time.monotonic() - seen_at, 8 + GRACE + 10)
-            self.remove_left_verifiers()
+            try:
+                ((pid, _),) = self.waiting(db, {holder.pid}, 1).items()
+                seen_at = time.monotonic()
+                dump = stop_past_the_lock(holder, pid)
+                caller.kill()
+                caller.wait()
+                time.sleep(2)
+                self.assertIn(pid, self.sessions(db), "the run outlives its caller")
+                self.assertIn(dump, self.exec_processes())
+                ended = self.until(lambda: not self.sessions(db) and not self.exec_processes(),
+                                   8 + GRACE + 10 - (time.monotonic() - seen_at))
+                self.assertTrue(ended, "the run's watchdog ended it by the end of the run's life")
+                self.assertLess(time.monotonic() - seen_at, 8 + GRACE + 10)
+            finally:
+                if caller.poll() is None:
+                    caller.kill()
+                    caller.wait()
+                holder.close()
+                self.remove_left_verifiers()
 
     def test_iv17_a_cleanup_it_cannot_confirm_is_not_reported_as_done(self):
         """IV-DB-17 (SPEC-F01: a termination that fails or cannot be confirmed is kept with the failure, never reported
@@ -1174,7 +1191,7 @@ const { PrismaService } = require('/app/dist/prisma.service');
             try:
                 call = Background(lambda: audit.evaluate(audit.DatabaseExport(self.db, db, "kin"), timeout=60))
                 ((pid, _),) = self.waiting(db, {holder.pid}, 1).items()
-                (verifier,) = verifier_containers()
+                (verifier,) = self.new_verifiers()
                 docker("pause", self.db)
                 try:
                     killed_at = time.monotonic()
@@ -1204,7 +1221,7 @@ const { PrismaService } = require('/app/dist/prisma.service');
                 call = Background(lambda: audit.evaluate(audit.DatabaseExport(self.db, db, "kin"), timeout=60))
                 ((pid, (name, _, _)),) = self.waiting(db, {holder.pid}, 1).items()
                 other = Session(self.db, db, user="syn_other", application_name=name)
-                (verifier,) = verifier_containers()
+                (verifier,) = self.new_verifiers()
                 docker("kill", verifier)
                 outcome, _ = call.result(GRACE + 60)
                 error = outcome.get("error")
@@ -1248,7 +1265,7 @@ const { PrismaService } = require('/app/dist/prisma.service');
                              if name == "(pg_dump)" and pid != dump]
                 self.assertEqual(self.processes()[orphan][1], 1, "its parent is the container's PID 1")
                 restarts = self.restarts()
-                (verifier,) = verifier_containers()
+                (verifier,) = self.new_verifiers()
                 docker("kill", verifier)
                 outcome, _ = call.result(GRACE + 60)
             error = outcome.get("error")
