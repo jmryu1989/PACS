@@ -559,11 +559,13 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         if failures:
             raise failures[0]
 
+    def show_whole_box(self, v, grid):
         """Observation precondition (test-plan §8.3, §8.4): every face, plane and marker a case reads is on the canvas.
-        The VR opens fitted to the axial footprint and View From and drags keep that scale, so on G-AX (31.5 x 31.5 x 80
-        mm) the k extent leaves an 826 px canvas in Left and Anterior. Zooming out with the dialog's wheel (a view control
-        that must not move any mask, REQ-S8-U1a-SOURCE-BOUND) until the sphere around the voxel-face box fits keeps it on
-        the canvas for every later View From or drag; the oracles read the camera actually shown."""
+        The VR opens fitted to the axial footprint and View From and drags keep that scale, so on G-AX (outer box 32 x 32 x
+        82.5 mm) the k extent leaves an 826 px canvas in Left and Anterior. Zooming out with the dialog's wheel (a view
+        control that must not move any mask, REQ-S8-U1a-SOURCE-BOUND) until the sphere around the voxel-face box fits keeps
+        it on the canvas for every later View From or drag; the scale reached is asserted, and the oracles read the camera
+        actually shown."""
         info = v.evaluate('()=>vrVoi.info()'); radius = float(np.linalg.norm(grid_axes(grid) @ np.array(DIMS, float))) / 2
         need = radius * 1.05 * max(1., info['cssHeight'] / info['cssWidth'])
         for _ in range(3):
