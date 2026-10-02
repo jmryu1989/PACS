@@ -2280,28 +2280,62 @@ class MeasurementCiTests(unittest.TestCase):
         import copy, re, shlex
         import yaml
 
+        UNRESOLVED = None
+
         def requested(step, env):
-            # Every measurement_ci.py profile the step's shell requests, as --profile X or --profile=X; a $NAME or
-            # ${NAME} value is read from the step, job or workflow env.
+            # Every measurement_ci.py profile the step's shell requests, as --profile X or --profile=X. Fail closed
+            # (UNRESOLVED, which runs_profile counts as the forbidden profile): a value is accepted only when it is
+            # a literal, or a $NAME / ${NAME} whose YAML env value (step, job or workflow) is known and whose NAME is
+            # never mentioned in the step's run text except as a plain expansion (so never assigned, exported, read
+            # into or defaulted), or a ${{ inputs.* }} dispatch input, whose offered options offers_profile checks.
+            # No shell is interpreted.
+            text = str(step.get('run') or '')
+            names = {**env, **{str(k): str(v) for k, v in (step.get('env') or {}).items()}}
             found = []
-            for line in str(step.get('run') or '').replace('\\\n', ' ').splitlines():
+            for line in text.replace('\\\n', ' ').splitlines():
                 try:
                     words = shlex.split(line, comments=True)
                 except ValueError:
+                    if 'tests/measurement_ci.py' in line:
+                        found.append(UNRESOLVED)
                     continue
                 for index, word in enumerate(words):
                     if word.endswith('tests/measurement_ci.py'):
                         rest = words[index+1:]
                         found += [rest[i+1] for i, arg in enumerate(rest[:-1]) if arg == '--profile']
                         found += [arg.split('=', 1)[1] for arg in rest if arg.startswith('--profile=')]
-            names = {**env, **{str(k): str(v) for k, v in (step.get('env') or {}).items()}}
-            return [names.get(m.group(1), value) if (m := re.fullmatch(r'\$\{?(\w+)\}?', value)) else value for value in found]
+                        if rest[-1:] == ['--profile']:
+                            found.append(UNRESOLVED)
+
+            def literal_or_input(value):
+                if re.fullmatch(r'\$\{\{\s*inputs\.\w+\s*\}\}', value):
+                    return value
+                return UNRESOLVED if re.search(r'[$`]', value) else value
+
+            def resolve(value):
+                if value is UNRESOLVED:
+                    return UNRESOLVED
+                variable = re.fullmatch(r'\$\{?(\w+)\}?', value)
+                if not variable:
+                    return literal_or_input(value)
+                name = variable.group(1)
+                rest_of_text = re.sub(r'\$\{'+name+r'\}|\$'+name+r'(?!\w)', '', text)
+                if name not in names or re.search(r'(?<!\w)'+name+r'(?!\w)', rest_of_text):
+                    return UNRESOLVED
+                return literal_or_input(names[name])
+
+            return [resolve(value) for value in found]
 
         def runs_profile(workflow, profile):
             outer = {str(k): str(v) for k, v in (workflow.get('env') or {}).items()}
-            return [(name, index) for name, job in workflow['jobs'].items()
-                    for index, step in enumerate(job.get('steps', []))
-                    if profile in requested(step, {**outer, **{str(k): str(v) for k, v in (job.get('env') or {}).items()}})]
+            hits = []
+            for name, job in workflow['jobs'].items():
+                scope = {**outer, **{str(k): str(v) for k, v in (job.get('env') or {}).items()}}
+                for index, step in enumerate(job.get('steps', [])):
+                    got = requested(step, scope)
+                    if profile in got or UNRESOLVED in got:
+                        hits.append((name, index))
+            return hits
 
         def offers_profile(workflow, profile):
             triggers = workflow.get('on', workflow.get(True)) or {}
@@ -2325,6 +2359,26 @@ class MeasurementCiTests(unittest.TestCase):
         live = next(step for step in job(through_env)['steps'] if requested(step, {}) == ['${{ inputs.profile }}'])
         live['env']['KIN_CI_PROFILE'] = 'gateway-e2e'
         self.assertEqual(len(runs_profile(through_env, 'gateway-e2e')), 1)
+        # F01: the run text can reassign the profile variable before the unchanged command, or hand it a value this
+        # check cannot settle; each must fail, with the YAML env left as it is.
+        selected = lambda workflow: next(step for step in job(workflow)['steps'] if requested(step, {}) == ['${{ inputs.profile }}'])
+        for prefix in ('KIN_CI_PROFILE=gateway-e2e\n', 'export KIN_CI_PROFILE=gateway-e2e\n', 'env KIN_CI_PROFILE=gateway-e2e true\n',
+                       'read KIN_CI_PROFILE <<< gateway-e2e\n', ': "${KIN_CI_PROFILE:=gateway-e2e}"\n', 'KIN_CI_PROFILE=$(echo gateway-e2e)\n'):
+            reassigned = copy.deepcopy(integration)
+            step = selected(reassigned)
+            step['run'] = prefix + step['run']
+            self.assertEqual(len(runs_profile(reassigned, 'gateway-e2e')), 1, prefix)
+        for value in ('"$(echo gateway-e2e)"', '`echo gateway-e2e`', '"$OTHER_PROFILE"'):
+            unsettled = copy.deepcopy(integration)
+            step = selected(unsettled)
+            step['run'] = step['run'].replace('"$KIN_CI_PROFILE"', value)
+            self.assertEqual(len(runs_profile(unsettled, 'gateway-e2e')), 1, value)
+        unknown_env = copy.deepcopy(integration)
+        del selected(unknown_env)['env']['KIN_CI_PROFILE']
+        self.assertEqual(len(runs_profile(unknown_env, 'gateway-e2e')), 1)
+        expression_env = copy.deepcopy(integration)
+        selected(expression_env)['env']['KIN_CI_PROFILE'] = '${{ github.event.inputs.profile }}'
+        self.assertEqual(len(runs_profile(expression_env, 'gateway-e2e')), 1)
         offered = copy.deepcopy(integration)
         triggers = offered.get('on', offered.get(True))
         triggers['workflow_dispatch']['inputs']['profile']['options'].append('gateway-e2e')
