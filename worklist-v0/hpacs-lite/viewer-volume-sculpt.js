@@ -1,4 +1,4 @@
-window.kinCreateVolumeSculpt=function({controlsPane,canvasPane,canvasHost,getOperation,check,render,preflight,fail,status,setDrawing}){
+window.kinCreateVolumeSculpt=function({controlsPane,canvasPane,canvasHost,getOperation,check,masks,fail,status,setDrawing}){
   const model=window.KinVolumeSculpt,svgNS='http://www.w3.org/2000/svg';
   const el=(tag,text,parent)=>{const node=document.createElement(tag);if(text!==undefined)node.textContent=text;parent?.append(node);return node;};
   const fieldset=el('fieldset',undefined,controlsPane);fieldset.id='kin-vr-sculpt';el('legend','Manual Sculpt',fieldset);
@@ -32,17 +32,9 @@ window.kinCreateVolumeSculpt=function({controlsPane,canvasPane,canvasHost,getOpe
     if(op.libraryBusy)throw Error('VR 프리셋 저장을 마친 뒤 조각 영역을 편집하세요.');
     return op;
   }
-  function report(op,error,nativeChanged=false){if(nativeChanged||error?.kinSculptStale)fail(op,error);else status.textContent=error?.message||'조각 영역을 확인하세요.';}
-  function operationState(op){
-    if(!Array.isArray(op.sculptOperations))op.sculptOperations=[];
-    if(!op.sculptPristineMapperProperties)op.sculptPristineMapperProperties=op.mapper.getViewSpecificProperties()||{};
-    return {operations:op.sculptOperations,pristine:op.sculptPristineMapperProperties};
-  }
-  function replacementProperties(op,operations){
-    const {pristine}=operationState(op),openGL=pristine.OpenGL||{},existing=Array.isArray(openGL.ShaderReplacements)?openGL.ShaderReplacements:[];
-    if(!operations.length)return pristine;
-    return {...pristine,OpenGL:{...openGL,ShaderReplacements:[...existing,geometry(()=>model.shaderReplacement(operations))]}};
-  }
+  // Refusals name the contract reason key the VR capability reports (kinVrReason); the shared mask path shows them.
+  const limit=message=>Object.assign(Error(message),{kinVrReason:'vr-limit'});
+  function report(op,error){if(error?.kinSculptStale)fail(op,error);else masks.refuse(op,error);}
   function requireMapper(op){
     if(!model||typeof model.makeRegion!=='function'||typeof model.projection!=='function'||typeof model.makeOperation!=='function'||typeof model.shaderReplacement!=='function')throw Error('VR 조각 도구를 불러오지 못했습니다.');
     if(!op.mapper||typeof op.mapper.getViewSpecificProperties!=='function'||typeof op.mapper.setViewSpecificProperties!=='function'||!op.imageData||typeof op.view?.worldToCanvas!=='function')throw Error('이 뷰어에서는 VR 조각 표시를 사용할 수 없습니다.');
@@ -79,13 +71,15 @@ window.kinCreateVolumeSculpt=function({controlsPane,canvasPane,canvasHost,getOpe
     overlay=document.createElementNS(svgNS,'svg');overlay.dataset.kinVrSculpt='1';overlay.setAttribute('aria-label','Sculpt removal preview');overlay.setAttribute('viewBox',`0 0 ${capture.width} ${capture.height}`);overlay.style.cssText='position:absolute;inset:0;width:100%;height:100%;z-index:3;touch-action:none;cursor:crosshair';canvasPane.append(overlay);
     draft={op,mode:tool.value,side:side.value,projection:capture.projection,width:capture.width,height:capture.height,points:[],pointer:null,region:null};setDrawing(true);refresh();status.textContent=draft.mode.startsWith('Curved')?'화면을 눌러 제어점을 추가하고 Finish Region 또는 오른쪽 클릭으로 마치세요.':'화면에서 제거 영역을 드래그하세요.';
     }catch(error){if(draft?.op===op)cleanup();if(op)report(op,error);else status.textContent=error.message;}}
-  function applyDraft(){const op=draft?.op||getOperation?.();let changed=false;try{
-    const current=ready();if(!draft?.region||current!==op)throw Error('적용할 조각 영역을 먼저 완성하세요.');const state=operationState(op);if(state.operations.length>=8)throw Error('VR 조각 제거는 최대 8개까지 적용할 수 있습니다.');
-    const operation=geometry(()=>model.makeOperation(draft.region,draft.projection,draft.side)),next=[...state.operations,operation],properties=replacementProperties(op,next);preflight(op,properties);changed=true;op.mapper.setViewSpecificProperties(properties);verify(op);op.sculptOperations=next;render(op);cleanup();status.textContent='VR 조각 제거를 적용했습니다.';
-  }catch(error){report(op,error,changed);}}
-  function restore(op,next,message){let changed=false;try{verify(op);const state=operationState(op),properties=replacementProperties(op,next);preflight(op,properties);changed=true;op.mapper.setViewSpecificProperties(properties);verify(op);op.sculptOperations=next;render(op);if(message)status.textContent=message;return true;}catch(error){report(op,error,changed);return false;}}
-  function undoLast(){let op;try{op=ready();if(draft)throw Error('현재 미리보기를 취소한 뒤 되돌리세요.');const operations=Array.isArray(op.sculptOperations)?op.sculptOperations:[];if(!operations.length)throw Error('되돌릴 VR 조각 제거가 없습니다.');restore(op,operations.slice(0,-1),'마지막 VR 조각 제거를 되돌렸습니다.');}catch(error){if(op)report(op,error);else status.textContent=error.message;}}
-  function clearAll(){let op;try{op=ready();if(draft)throw Error('현재 미리보기를 취소한 뒤 모두 지우세요.');const operations=Array.isArray(op.sculptOperations)?op.sculptOperations:[];if(!operations.length)throw Error('지울 VR 조각 제거가 없습니다.');restore(op,[],'VR 조각 제거를 모두 지웠습니다.');}catch(error){if(op)report(op,error);else status.textContent=error.message;}}
+  // Apply, Undo and Clear hand the whole sculpt list to the shared mask path, which writes it together with the VOI. The
+  // ninth region is refused here, before any mapper property exists and before cleanup, so the preview and Drawing stay
+  // for Cancel Sculpt and the applied eight are untouched.
+  function applyDraft(){const op=draft?.op||getOperation?.();try{
+    const current=ready();if(!draft?.region||current!==op)throw Error('적용할 조각 영역을 먼저 완성하세요.');const operations=masks.operations(op);if(operations.length>=8)throw limit('VR 조각 제거는 최대 8개까지 적용할 수 있습니다.');
+    const operation=geometry(()=>model.makeOperation(draft.region,draft.projection,draft.side));if(masks.commit(op,[...operations,operation],'VR 조각 제거를 적용했습니다.'))cleanup();
+  }catch(error){report(op,error);}}
+  function undoLast(){let op;try{op=ready();if(draft)throw Error('현재 미리보기를 취소한 뒤 되돌리세요.');const operations=masks.operations(op);if(!operations.length)throw Error('되돌릴 VR 조각 제거가 없습니다.');masks.commit(op,operations.slice(0,-1),'마지막 VR 조각 제거를 되돌렸습니다.');}catch(error){if(op)report(op,error);else status.textContent=error.message;}}
+  function clearAll(){let op;try{op=ready();if(draft)throw Error('현재 미리보기를 취소한 뒤 모두 지우세요.');const operations=masks.operations(op);if(!operations.length)throw Error('지울 VR 조각 제거가 없습니다.');masks.commit(op,[],'VR 조각 제거를 모두 지웠습니다.');}catch(error){if(op)report(op,error);else status.textContent=error.message;}}
 
   draw.onclick=begin;finish.onclick=()=>{let op;try{op=ready();if(!draft||draft.op!==op)throw Error('그릴 조각 영역을 시작하세요.');complete();}catch(error){if(op)report(op,error);else status.textContent=error.message;}};apply.onclick=applyDraft;cancelButton.onclick=()=>{let op;try{op=ready();if(!draft)throw Error('취소할 조각 미리보기가 없습니다.');cleanup();status.textContent='VR 조각 미리보기를 취소했습니다.';}catch(error){if(op)report(op,error);else status.textContent=error.message;}};undo.onclick=undoLast;clear.onclick=clearAll;
   const pointerDown=event=>{if(event.target!==overlay||!draft)return;const op=draft.op;try{verify(op);if(draft.region){event.preventDefault();return;}if(draft.mode.startsWith('Curved')){if(event.button===0)appendPoint(event);return;}if(event.button!==0)return;draft.points=[point(event)];if(['Ellipse','Rectangle'].includes(draft.mode))draft.points.push(draft.points[0]);draft.pointer=event.pointerId;overlay.setPointerCapture(event.pointerId);event.preventDefault();}catch(error){report(op,error);}};
@@ -96,5 +90,5 @@ window.kinCreateVolumeSculpt=function({controlsPane,canvasPane,canvasHost,getOpe
   canvasPane.addEventListener('pointerdown',pointerDown);canvasPane.addEventListener('pointermove',pointerMove);canvasPane.addEventListener('pointerup',endPointer);canvasPane.addEventListener('pointercancel',cancelPointer);canvasPane.addEventListener('contextmenu',contextMenu);
   side.onchange=()=>{let op;try{op=ready();if(draft?.op===op){draft.side=side.value;preview();}}catch(error){if(op)report(op,error);else status.textContent=error.message;}};
   refresh();
-  return {fieldset,reset(op){cleanup();if(!op)return;const operations=Array.isArray(op.sculptOperations)?op.sculptOperations:[];if(!operations.length){op.sculptOperations=[];return;}if(!restore(op,[],null))throw Error('VR 조각 제거를 초기화하지 못했습니다.');},cancel:cleanup,dispose(){ended=true;cleanup();for(const [name,handler] of [['pointerdown',pointerDown],['pointermove',pointerMove],['pointerup',endPointer],['pointercancel',cancelPointer],['contextmenu',contextMenu]])canvasPane.removeEventListener(name,handler);fieldset.remove();if(changedPosition)canvasPane.style.position=originalPosition;}};
+  return {fieldset,cancel:cleanup,dispose(){ended=true;cleanup();for(const [name,handler] of [['pointerdown',pointerDown],['pointermove',pointerMove],['pointerup',endPointer],['pointercancel',cancelPointer],['contextmenu',contextMenu]])canvasPane.removeEventListener(name,handler);fieldset.remove();if(changedPosition)canvasPane.style.position=originalPosition;}};
 };
