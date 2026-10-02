@@ -611,13 +611,55 @@ Linux에서 새 백업 디렉터리 700·파일 600을 적용한다. 기존 출�
 
 `ops_backup_test.py`는 실패 뒤 서비스 재개·시크릿 출력 방지·변조 백업 거절·소유권 없는 자원 삭제
 거절·작업 잠금·daemon 장애·archive 경로·부모 권한 보존·준비 실패와 snapshot 분리 등
-17개 안전 시험이다(TEST-OPS-01~02). 실제 복원 리허설과 함께 통과해야 한다.
+22개 안전 시험이다(TEST-OPS-01~02, 접속기록 봉인·복원 검증 OB-01~OB-05 포함). 실제 복원 리허설과 함께 통과해야 한다.
 쓰기 서비스 재개 후 nginx 설정 검사·reload로 정적 upstream의 Docker IP를 다시 해석한다.
 reload 실패는 준비 실패로 기록하고 종료코드 1을 반환한다. 실행 중이던 proxy에만 적용한다.
 Linux의 root Docker helper가 호스트 파일 소유권을 바꾸지 않도록 Orthanc 압축은 stdout으로
 흘리고 호스트 실행 계정이 파일을 쓴다. 바이너리 스트림·timeout 뒤 소유 helper 정리도 검사한다.
 이 단계의 서버 내부 백업은 오프사이트 재해복구가 아니다. Gateway queue·인증서·Docker 이미지
 오프사이트 보관과 보존/암호화 정책은 별도다. 스크립트 자체가 cron을 설치하거나 오래된 백업을 삭제하지 않는다.
+
+### Run C — 접속기록(AuditLog) 봉인·검증·보존 (S7-AUDIT-STORE)
+
+```powershell
+# 백업 부모마다 처음 한 번(운영자가 기록을 남기며): 봉인 장부 audit-ledger.json을 만든다. 보존 연수 기본 2
+python scripts/ops_audit_integrity.py init "$env:USERPROFILE/backups/kin-pacs"
+# 기관 내부 관리계획이 2년보다 길면 올린다(내리지 못함)
+python scripts/ops_audit_integrity.py plan "$env:USERPROFILE/backups/kin-pacs" --years 3
+# 이후 백업·리허설은 위와 같다: backup이 봉인하고 rehearse가 복원본을 봉인과 대조한다
+python scripts/ops_audit_integrity.py verify --backup <백업-디렉터리>
+python scripts/ops_audit_integrity.py verify --container kin-db --database kin --user kin --checkpoint <백업-디렉터리>/audit-checkpoint.json
+python scripts/ops_audit_integrity.py retention "$env:USERPROFILE/backups/kin-pacs"   # 월 1회 이상 점검(D195)
+```
+
+- 봉인: `backup`은 writer 정지 구간에 뜬 `kin.dump`가 완성되고 writer 재개·준비 확인이 끝난 뒤(실패해도) 그 덤프의 AuditLog 행을
+  격리 검증 DB에서 digest로 만들어 백업 폴더의 `audit-checkpoint.json`(0600)에 쓰고, manifest의 `sha256`·`bytes`에 선언한 뒤(형식 1 그대로)
+  백업 부모의 `audit-ledger.json`에 덧붙인다(K → manifest → 장부 순서). 정지 시간은 늘지 않고 봉인은 `kin-db`에 명령을 보내지 않는다.
+- 장부가 없으면 봉인하지 않는다(자동으로 처음부터 시작하지 않음): manifest `backup_error = {"stage": "seal audit", "type": "LedgerMissing"}`,
+  종료코드 1. 선언된 체크포인트가 있는 부모의 `init`은 거절되고 `init --after-loss --reason <사유>`만 기록과 함께 새 장부를 만든다.
+- 이전 봉인과 행이 다르거나(과거 사건: `previous_verification` failed/unverifiable), 이번 덤프의 가드가 무력하거나 표 모양이 다르면(현재 결함)
+  새 체크포인트를 쓰고 manifest `backup_error = {"stage": "audit integrity", ...}`, `complete: true`, 종료코드 1. 봉인 실패는
+  `{"stage": "seal audit", ...}`. 무변경 `ops_monitor`가 이 manifest를 `backup_failed`로 알린다. 그 스냅숏은 복원 입력으로 계속 쓰이고
+  내보내기 inventory만 거절한다.
+- `rehearse`는 복원·행수 확인 뒤 **자기가 복원한 `kin`의 내보내기**를 새 격리 검증 DB에서 봉인과 비교한다(스냅숏 파일을 다시 읽지 않는다).
+  `rehearsal-*.json`의 `audit`: 봉인 없는 옛 백업은 `"not_sealed"`, 봉인된 백업은 `verified`와 보고. 과거 사건만 있는 스냅숏은 성공하고
+  그 기록을 옮겨 적으며, 복원본의 행 차이·가드 무력·표 모양 발견·입력 오류는 success false, 종료코드 1이다.
+- 내보내기·전송·검증은 함께 한 시간(3600초) 안에 끝나야 한다. 넘기거나 `pg_dump`·검증기 한쪽이 실패하면 그 실행이 가진 것을 모두
+  끝내고(정리 예산 15초를 함께 쓴다) 입력 오류다(`verify` 2, 봉인 `seal audit`, rehearse 실패 기록) — 잠금을 기다리는 `pg_dump`가
+  백업·리허설과 운영 잠금을 붙잡아 두지 않는다. 이름 붙인 DB(`verify --container`, rehearse 복원본)의 내보내기는 대상 컨테이너 안의 원격
+  작업이라 로컬 `docker` 클라이언트를 끝내도 멈추지 않는다: 실행마다 새 식별자를 대상 컨테이너 ID·DB·역할과 묶고, 세션 이름
+  `kin-audit-export-<식별자>`와 실행 표시로 그 실행의 `pg_dump`·DB 세션만 내보낸 역할 그대로 끝낸 뒤 새로 관측해 확인한다. 같은 컨테이너의
+  watchdog이 호출자가 사라져도 실행 수명(남은 시간 + 15초)에서 끝내고, 취소된 실행은 `/tmp`의 빈 표시 파일로 늦게 시작되어도 접속하지
+  않는다. 컨테이너 안에서 부모를 잃은 프로세스는 postmaster의 자식이 되고 신호로 죽으면 서버가 모든 세션을 재시작하므로, `docker exec`가
+  직접 시작하지 않은 프로세스에는 신호를 보내지 않는다. 실패 보고(`verify`의 `cleanup`, manifest `backup_error.cleanup`, rehearse
+  `audit.cleanup`)는 실행 식별자·대상·관측 시각·단계별 결과·경과 시간과 `confirmed`를 담고, 끝났음을 확인하지 못한 정리는 `confirmed: false`다.
+- `verify`·`retention`의 종료코드: 0 검증됨, 1 무결성 실패, 2 입력 오류(통과도 무결성 주장도 아님). 보고는 JSON 한 줄(종류별 개수와 가장 작은
+  id부터 100개, 봉인 뒤 행 수 tail, guard, schema). 행 내용·비밀은 체크포인트·장부·보고에 없다.
+- `retention`은 장부를 기준으로 기한 안의 봉인된 백업 폴더·체크포인트·`kin.dump`가 그대로인지, 최신 봉인이 30시간(`--max-age`)보다
+  오래되지 않았는지, 장부에 없는 선언된 체크포인트(뒤에 봉인이 이어져도 다음 봉인의 복구로 장부에 들어가기 전까지 `uncommitted`로 계속 보고)와
+  기한 안의 재초기화가 없는지 본다(하나라도 있으면 1, 장부 없음은 2). 기한은 달력 기준
+  N년(`created_utc`의 같은 월·일·시각, 2월 29일은 3월 1일)이며 고정 730일이 아니다. 판정 시각은 `--as-of`로 줄 수 있다. 아무것도 지우지
+  않는다 — 호스트·오프사이트 저장소의 실제 보존 설정과 기한 뒤 폐기는 운영 관문(OPS-RET-1)이다.
 
 ## Run C — Prisma baseline과 시작
 
@@ -668,7 +710,7 @@ after replacement. To return to local source watching, use
 health again. Operating the API in production does not require Nest CLI, a source
 mount or a TypeScript compiler. Prisma CLI remains installed for `migrate deploy`.
 
-GitHub `Validate production image` runs the 17 backup safety tests and isolated
+GitHub `Validate production image` runs the 22 backup safety tests and isolated
 production image tests for main, PRs and tags, recording the exact SHA/image ID.
 It does not deploy, publish a registry image or replace the 69+14 live/browser
 release gates and independent review. No production credentials are used in CI.
@@ -825,6 +867,8 @@ Every `scripts/record-run.py --run-dir` in `validate.yml` sits under a path of a
 | `runtime` | `tmp/runtime-ci/worklist-columns-server` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S7-U3b compiled column preference normalizer over pre-unit documents, the stored-row read and write paths and the Hospital row fields over a fake store |
 | `runtime` | `tmp/runtime-ci/critical-result-service` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S7-U1a compiled critical result matrix, pinned rows in SQL, receipts, Keycloak re-check, post-commit refusal and audit keys |
 | `runtime` | `tmp/runtime-ci/critical-result-source` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S7-U1a critical result sources read the report only through ReportVersion rows |
+| `runtime` | `tmp/runtime-ci/audit-integrity` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S7-AUDIT-STORE verifier, ledger, checkpoint files and retention window |
+| `runtime` | `tmp/runtime-ci/audit-store-db` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | S7-AUDIT-STORE append-only guard, seal and verify on tampered copies, dump/restore |
 | `runtime` | `tmp/runtime-ci/report-stale-draft` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Compiled stale-draft addendum guard and draft base-version boundaries |
 | `runtime` | `tmp/runtime-ci/report-citations` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Compiled citation attestation, carry-forward, limits and guarded read |
 | `runtime` | `tmp/runtime-ci/report-structure` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Compiled structured-entry rules, the three write paths, the explicit clear and the read |
@@ -900,7 +944,8 @@ and `files` (relative path to `{ "bytes": positive_integer, "sha256": hex64 }`).
 Files must be exactly the following, with private owner-only permissions and no
 symlinks, hardlinks, Windows reparse points, extra files or extra directories:
 
-- `snapshot/manifest.json` and the six `ops_backup.FILES` components.
+- `snapshot/manifest.json` and the six `ops_backup.FILES` components, plus `snapshot/audit-checkpoint.json` exactly
+  when the snapshot manifest declares it in `sha256`/`bytes` (S7-AUDIT-STORE; an undeclared one is refused as extra).
 - `source.bundle`, complete in an empty Git repository, containing the named commit
   and the three Compose files plus backup/monitor scripts as regular Git blobs.
 - `images/<64hex>.tar` per distinct running image ID. Only uncompressed Docker save
@@ -2054,6 +2099,22 @@ REQ-S5-U5a-CLINICIAN-ROLE-ROUNDTRIP → RISK-S5-U5a-SILENT-ROLE-DROP/LABEL-RULE 
 - D-NW(SPEC-G, Astra S7-U1c-SPEC-G-B-R-001 A안): `tests/admin-audit-deferrals.cjs`·`tests/admin-audit-deferrals.md`·`tests/admin-audit-nonwrite-deferrals.json`·`tests/admin_audit_attribution_test.cjs`에 판정 원문의 패치를 그대로 적용했다(schema 3). 정책은 SPEC-G 모드다: base B = a7f940f, `repin.before`는 바뀐 api/src 두 파일의 B 원문, `critical-result.service.ts`의 세 유예 호출은 위치가 아니라 정체(파일·종류·규칙·정확한 진단·AST 문맥·tag)로 3/3 대응하고(이동만 2, 호출 본문 변경 1 — 보낸 목록 SQL), 다른 24개 항목과 다른 유예 파일은 위치와 진단까지 같다. `repin.site_proofs` 세 건의 SQL·값·의존 경로 서술과 증거 파일은 후보 검수의 입력이지 검사기의 증명이 아니다. S7-U3a-RAW-PROVENANCE는 계속 열려 있다.
 - CI(`.github/workflows/validate.yml`): 새 단계 없음. `--file`만 더했다 — measurements의 structure-migration·study-observation·order-reconciliation-source 단계에 `tests/invariants_live.py`, gateway-retry-source·clinician-policy·admin-audit-attribution 단계에 `api/src/critical-result.service.ts`·`api/src/critical-result-policy.ts`(api/src 전체를 읽는 시험).
 - 미실행·한계: live 모듈 TL01~TL05, `tests/e2e/test_critical_result.py` CriticalResultE2E 11건, hosted `critical-result-screens` dispatch는 최종 후보에서 합성 스택을 그 후보로 다시 맞춘 뒤 따로 한 번씩 돈다(OP-5 a). 통로 닫힘이 보낸 목록 읽기 한가운데 끼어드는 순간(TC-06)은 결정적으로 만들 수 없어 not_run이다 — 목록과 pending이 한 스냅샷이라는 규칙은 TSV13이 본다.
+
+### S7-AUDIT-STORE 접속기록 추가 전용 저장·봉인·보존 (REQ-S7-AUDIT-STORE → RISK-S7-AUDIT-TAMPER/RISK-S7-AUDIT-LOSS → TEST-S7-AUDIT-STORE-DB·PURE)
+- 설계: Astra가 사전 검수한 진단(PACS-docs main dcf0b3e `evidence/s7-audit-store-20260930/diagnosis/`, S7-AUDIT-STORE-DIAG-C-R-001 ACCEPT)과 지휘 결정 D281(OP-1 a 트리거, OP-2 i DB 밖 봉인 체크포인트, OP-3 a 봉인 계속·보고, OP-4 a 합성 스택 1회)·D288(OP-5 a)을 따른다. S7-U5 진단의 DEP-RET(RA-1~RA-5)이며 보존 사실은 FACT-S7-RETENTION(D195: 2년 이상)이다. api/src·schema.prisma는 바꾸지 않았다(D-NW 입력 불변).
+- 가드(RA-1): migration `20260930120000_audit_log_append_only`의 트리거가 모든 역할(런타임 역할 `kin` = 소유자·슈퍼유저 포함)의 AuditLog `UPDATE`·`DELETE`·`TRUNCATE`를 SQLSTATE `42501`로 거절한다. `INSERT`·`SELECT`는 그대로이고 INSERT 트리거는 없다. 트리거는 스키마 객체라 백업·rehearse·제품 이전 복원(`--no-privileges`)을 따라간다. AuditLog 행을 바꿔야 하는 뒤 migration은 이 가드를 어떻게 다루는지 스스로 적고 검토받는다.
+- 봉인·검증(RA-2, RA-3, `scripts/ops_audit_integrity.py`): 판정 값(행 digest, 가드 탐침, 표 모양)은 모두 **격리 검증 DB**에서 계산한다 — 기록된 이미지 ID로 새로 띄운 `--network none` 컨테이너(소유 label, 끝나면 삭제)에 내보내기(백업의 `kin.dump`, 또는 이름 붙인 DB의 `pg_dump -Fc`)를 넣고, AuditLog `TABLE`·`TABLE DATA` 목차 항목만 복원한 행 DB에서 고정 여섯 열(`id, at, actor, action, target, detail`)의 digest를 읽은 뒤, 따로 스키마만 복원한 DB에서 가드(합성 행의 UPDATE·DELETE·TRUNCATE가 42501인지)와 모양(보통 표, 상속·다른 스키마의 같은 이름 relation·열 형식·중복 id)을 본다. 라이브 DB나 rehearse 복원본이 계산하거나 돌려준 값은 쓰지 않는다. 내보내기 시작부터 전송·검증 종료까지 한 제한 시간(evaluate의 `timeout`, 기본 3600초)이 걸린다 — 그 안에 끝나지 않거나 한쪽(내보내는 `pg_dump`·검증기)이 실패하면 그때부터 정리 예산 15초 안에 로컬 docker 클라이언트, 대상 컨테이너 안의 원격 내보내기(그 실행의 `pg_dump`·세션), 검증기 컨테이너, 전송 스레드를 끝내고 입력 오류로 돌려주며, 호출자(verify exit 2, 봉인 `seal audit`, rehearse 실패 기록)의 실패 경로에 종료 증명(`cleanup`: 실행 식별자, 대상 컨테이너 ID·DB·역할·세션 이름, 원인, 관측 시각, 단계별 결과와 새 관측, 경과 시간, `confirmed`)을 함께 남긴다. 원격 내보내기(SPEC-F01 (b) 보강): 실행마다 다시 쓰지 않는 식별자를 만들어 세션 이름 `kin-audit-export-<식별자>`(49바이트, 서버 한도 63 안 — 증명에 서버의 `max_identifier_length`와 관측한 세션 이름이 있다)와 대상 컨테이너 ID·DB·역할에 묶는다. 시작 전에 같은 컨테이너에 그 실행의 watchdog을 띄우고(`pg_dump`가 `statement_timeout`을 스스로 0으로 바꿔 세션 설정은 수명 한도가 되지 못한다), 취소는 그 실행 표시 파일을 먼저 쓰고(늦게 시작된 같은 실행은 접속하지 않는다) `docker exec`가 시작한 그 실행의 프로세스만 끝낸 뒤 내보낸 역할 그대로 그 이름·DB·역할의 세션을 끝내고, 다시 관측해 그 이름의 세션(어느 역할이든)과 프로세스가 없을 때만 확인으로 적는다. 컨테이너 안에서 부모를 잃은 프로세스는 postmaster 자식이 되어 신호로 죽으면 서버가 모든 세션을 재시작하므로(IV-DB-18) 그런 프로세스에는 신호를 보내지 않고 세션만 끝낸다. 잠금을 기다리는 `pg_dump`는 서버 안에서도 같은 시각에 끝나고(`--lock-wait-timeout`), 호출자가 사라지면 watchdog이 실행 수명(남은 시간 + 15초)에 같은 취소를 한다. 감시 루프는 한 번의 관측(내보내기·검증기 종료 상태, 전송 진행·완료)으로 판단하고 그 관측에서 실행 중인 프로세스만 deadline 안에서 기다린다(F03): 전송이 끝나기 전 검증기의 exit 0은 성공이 아니고, deadline이 지나는 사이 끝난 관측은 종료 코드로 판단한다. 체크포인트 `audit-checkpoint.json`은 백업 폴더에, 봉인 장부 `audit-ledger.json`은 백업 부모에 있고(0600, 덧붙임 전용·원자 교체, 명시 `init`만, 커밋 순서 K → manifest → 장부, 끊긴 봉인의 복구) 둘 다 id·digest·개수·폴더 이름만 담는다.
+- 검증 V(exit 0/1/2): 봉인된 행의 변경·삭제·끼어듦, 지금 판정하는 내보내기의 가드 무력·모양 발견이 하나라도 있으면 1, 입력 오류는 2. 체크포인트의 `previous_verification`(봉인 때 이전 체크포인트와의 대조, 과거 사건)은 exit에 들어가지 않고 보고에 옮겨진다.
+- 복원 검증(RA-4): `ops_backup.py rehearse`는 복원·행수 확인 뒤 자기 복원본 `kin`의 내보내기를 새 격리 검증 DB에서 봉인과 대조한다. 덤프·manifest·체크포인트가 정상이어도 복원본만 달라지면 실패다. 과거 사건만 있는 스냅숏은 성공, 스냅숏 자신의 가드·모양 결함은 실패(복원 입력으로는 계속 허용).
+- 보존(RA-5): 봉인마다 `retain_until` = 생성 시각의 달력 N년 뒤(N = 장부의 보존 연수, 기본 2, `plan`으로 올리기만). `retention`이 장부를 기준으로 기한 안의 폴더·체크포인트·덤프 유실(중간·최신·연속 최신·전체), 오래된 최신 봉인, 장부에 없는 체크포인트(뒤에 봉인이 몇 번 이어져도 복구로 장부에 들어가기 전까지), 재초기화 구간을 1로, 장부 없음은 2로 보고하고 두 종류의 무결성 사건(과거 사건·현재 결함)을 알린다. 제품은 백업·체크포인트·장부를 지우지 않는다.
+- 운영 신호: 봉인 실패·장부 없음은 manifest `backup_error.stage = "seal audit"`, 불일치·이전 검증 불가·가드 무력·모양 발견은 `"audit integrity"`(둘 다 `complete: true`, 종료코드 1). 무변경 `scripts/ops_monitor.py`가 `backup_failed`를 낸다. 명령 절차는 위 "Run C — 접속기록(AuditLog) 봉인·검증·보존".
+- 시험:
+  - TEST-S7-AUDIT-STORE-DB `tests/audit_store_db_test.py` AS-01~AS-06(가드·Connect 모양 CTE·compiled PrismaService·정리 우회 범위·덤프/복원·부팅 migration)과 IV-DB-01~IV-DB-13(봉인·검증, 한 칸·삭제·끼어듦·tail·가드 무력·열 추가, 행과 digest 함수를 함께 바꾼 반례 두 변형, relation 바꿔치기, 복원 뒤 복원본만 바꾼 반례, 과거 사건 대 현재 결함, 잠금 때문에 기다리는 내보내기가 제한 시간 안에 실패하고 서버에 남지 않음)과 IV-DB-14~IV-DB-18(실제 PostgreSQL과 이 호스트의 docker 클라이언트 경계: 검증기 조기 실패 때 그 실행만 끝나고 같은 DB·역할의 다른 실행·이름이 비슷한 다른 세션은 그대로이며 다른 실행은 검증까지 마침, 로컬 docker 클라이언트만 죽인 상태와 취소 뒤 늦은 시작, 잠금 대기를 지난 정지된 `pg_dump`의 deadline·호출자가 사라진 뒤 서버 잠금 한도와 watchdog 수명, 대상에 닿지 못한 정리와 다른 역할의 같은 이름 세션의 미확인 보고, `docker exec`가 시작하지 않은 같은 실행 프로세스에 신호를 보내지 않아 서버 재시작 없음). runtime 단계 `tmp/runtime-ci/audit-store-db`(`KIN_TEST_API_IMAGE=kin-api:ci`, 일회용 `postgres:16-alpine`).
+  - TEST-S7-AUDIT-STORE-PURE `tests/ops_audit_integrity_test.py` PV-01~PV-07(Docker 없음, 격리 검증 경계만 합성 digest 흐름으로; PV-07에 새 봉인 뒤에도 남는 미복구 선언)과 PV-08(실제 evaluate를 시험 쪽 가짜 docker CLI에 대고 — 멈춘 내보내기·읽지 않는 검증기·답하지 않는 검증기·한쪽 실패에서 제한 시간 안의 실패와 확인된 종료 증명, 남은 프로세스·컨테이너 없음, 정상 전송), PV-09(F03: 내보내기 없는 검증에서 Popen 경계의 스크립트 검증기가 처음 여덟 관측 각각에서 exit 0·3으로 끝나고 전송은 완료·끊김·막힘 — 완전한 전송 뒤 exit 0만 결과, 나머지는 입력 오류, 다른 예외 없음, 실행 중 대기는 deadline을 넘지 않음, deadline 직후 끝남; manifest digest가 없는 이름 붙인 DB의 내보내기에서 전송 전에 답하고 exit 0으로 끝난 검증기도 입력 오류), PV-10(원격 취소의 답 — 끝남·남음·실패·결과 없음·무응답 — 과 검증기 삭제 실패·무응답에서 정리 예산 하나, 확인된 것만 `confirmed`, 전체 내보내기를 읽은 뒤 실패한 검증기도 같은 세 단계의 증명, verify exit 2 보고의 증명), `tests/ops_backup_test.py` test_18~test_23 = OB-01~OB-05(흐름이 쓴 manifest를 무변경 `ops_monitor.backup_status`에 넣는다; test_23은 미복구 선언 뒤의 OB-04 경우)와 test_24 = OB-06(봉인·rehearse 검증의 제한 시간, 실패 기록과 그 종료 증명·자원 정리·운영 잠금 해제), test_14의 장부·봉인 답(NR-20), `tests/ops_export_inventory_test.py` test_21·test_22 = EI-01·EI-02. runtime 단계 `tmp/runtime-ci/audit-integrity`와 기존 단계.
+  - `tests/ops_product_transfer_fixture.py`: 복원한 제품 DB의 제약 탐침에 AuditLog DELETE → `insufficient_privilege` 한 블록(NR-19). migration 장부 핀(`production_image_test`·`ops_product_transfer_*`·gateway receipt/retry·order reconciliation·report structure)은 33 → 34로 옮겼다(단언 수 불변).
+- 시험 정리 규칙(AO-13): 합성 스택 정리는 자기 소유 감사 행만, 슈퍼유저 세션에서 **그 AuditLog 문장에만** replica 모드를 걸고 곧바로 되돌린다(`tests/invariants_live.py`의 `past_audit_guard`·`AUDIT_GUARD_OFF/ON`; 같은 정리의 다른 표 문장은 원래 모드라 FK 판정이 그대로). `critical_result_service_test.cjs`의 `world()` 초기화도 AuditLog만 같은 방식으로 비우고 비었는지 확인한다. 단언·사례 수는 그대로다.
+- 한계(진단 L-01~L-08): (a) 방식이라 런타임 역할은 여전히 슈퍼유저이고 가드를 끌 수 있다 — 봉인된 행의 변경과 가드 무력은 V가 탐지한다(L-01). 마지막 봉인 뒤 행은 다음 봉인 전까지 봉인 밖이다(L-02, 창 = 백업 주기). 봉인 열은 고정 여섯 개다(L-03). 호스트 운영 계정은 덤프·체크포인트·manifest·장부를 함께 고칠 수 있다(L-04; 최신 봉인의 나이로 일부 드러남). 시퀀스 되돌림은 대상이 아니다(L-05). 서버 프로세스에 native code를 올린 슈퍼유저가 내보내기를 애플리케이션이 읽는 내용과 다르게 만드는 경우는 V 밖이다(L-07; SQL 수준 조작은 아님). 장부와 모든 폴더가 함께 없어지면 첫 설치와 구별할 수 없다(L-08; 도구는 스스로 처음을 만들지 않는다).
+- 미실행: 합성 스택의 실제 `backup`·`rehearse`·`verify`·`retention`(TL-01, RA-4 원문 증거)과 바뀐 정리 분기의 정확 계획 13사례(R-17)는 최종 후보에서 지휘자 기록 작업이 한 번 돌린다. 운영 호스트의 1회 `init`·보존 설정은 OPS-RET-1이다.
 
 ### S8-U1a VR VOI Slab (REQ-S8-U1a-VOI-SLAB/SOURCE-BOUND/COMBINE/ACCURACY → RISK-S8-U1a-MASK-OVERWRITE/WRONG-TISSUE/CLIP-BUDGET/SOURCE-MUTATION/MIP-REGRESSION/UNTRACKED-COLLISION·RISK-S8-U1p-EXTENT-CONVENTION/MISSING-SLICE → TEST-S8-U1a-MODEL·DOM·NATIVE·EDGE-GAP·REGRESSION)
 - 설계: Astra가 사전 검수한 진단(PACS-docs main 96077ce `evidence/s8-u1a-20261002/diagnosis/`, S8-U1a-DIAG-C-R-001 ACCEPT)과 결정 D346(OP-1~OP-9 모두 (a))·D348·D352를 따른다. 계약은 `evidence/s8-u1p-20260927/`(S8-AMEND 반영본)이다.

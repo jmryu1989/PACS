@@ -116,7 +116,13 @@ test.after(async () => { if (prepared) await (await prepared).$disconnect(); });
  */
 async function world({ policies = {} } = {}) {
   const base = await database();
-  await base.$executeRawUnsafe(`TRUNCATE ${OWNED_TABLES.map(t => '"' + t + '"').join(', ')} RESTART IDENTITY CASCADE`);
+  await base.$executeRawUnsafe(`TRUNCATE ${OWNED_TABLES.filter(t => t !== 'AuditLog').map(t => '"' + t + '"').join(', ')} RESTART IDENTITY CASCADE`);
+  // AuditLog is append-only (S7-AUDIT-STORE guard, SQLSTATE 42501 for every role): this disposable database's harness
+  // reset alone empties it past the guard, as the superuser in replica mode for that one statement, and checks the result.
+  await base.$transaction([base.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
+    base.$executeRawUnsafe(`TRUNCATE "AuditLog" RESTART IDENTITY`)]);
+  const [{ left }] = await base.$queryRawUnsafe(`SELECT count(*)::int AS left FROM "AuditLog"`);
+  assert.equal(left, 0, 'every world starts with an empty AuditLog');
   const log = [], touched = new Set(), transactions = [];
   const w = { log, touched, transactions, base, onRecordCreate: null };
   await base.$executeRaw`INSERT INTO "Institution" (id, name) VALUES (${INST}, 'SYNTHETIC A'), (${OTHER}, 'SYNTHETIC B')`;

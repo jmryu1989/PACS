@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from playwright.sync_api import expect
 from test_worklist import WorklistE2E, psql
+from invariants_live import past_audit_guard
 
 def lit(v): return "'"+str(v).replace("'","''")+"'"
 def policy(uids=None, **changes):
@@ -27,7 +28,7 @@ class StudyAccessE2E(WorklistE2E):
                     self.assertEqual(psql('DELETE FROM "'+table+'" t WHERE to_jsonb(t)='+lit(raw)+'::jsonb RETURNING 1'),['1'])
             for raw in psql('SELECT to_jsonb(t)::text FROM "AuditLog" t WHERE target='+lit(subject)+" AND action='study.access'"):
                 row=json.loads(raw);self.assertTrue(json.loads(row['detail'])['reason'].startswith('SYNTHETIC'))
-                self.assertEqual(psql('DELETE FROM "AuditLog" t WHERE to_jsonb(t)='+lit(raw)+'::jsonb RETURNING 1'),['1'])
+                self.assertEqual(psql(past_audit_guard('DELETE FROM "AuditLog" t WHERE to_jsonb(t)='+lit(raw)+'::jsonb RETURNING 1')),['1'])
 
     def owner(self,who='jmryu'):
         r=self.stack.request('GET','/me',who);self.assertEqual(r.status,200,r.text);return [r.body['institution'],r.body['sub']]

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError
 from urllib.request import Request
 from pydicom import dcmread
-from invariants_live import LiveStack
+from invariants_live import AUDIT_GUARD_OFF, AUDIT_GUARD_ON, LiveStack
 
 
 def psql(sql):
@@ -44,6 +44,10 @@ def exact_deletes(table, captured):
           GET DIAGNOSTICS n = ROW_COUNT;
           IF n<>1 THEN RAISE EXCEPTION 'Owned Connect cleanup row changed'; END IF;
         END $$;''')
+    if table=='AuditLog' and statements:
+        # Append-only AuditLog (S7-AUDIT-STORE): the guard is off for these owned-row blocks only and back on before the
+        # next table's deletes, so their foreign-key checks are unchanged (invariants_live AO-13 rule).
+        statements=[AUDIT_GUARD_OFF,*statements,AUDIT_GUARD_ON]
     return '\n'.join(statements)
 
 
