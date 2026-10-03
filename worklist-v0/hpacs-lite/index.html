@@ -105,6 +105,7 @@
     }
     button.ghost:hover { color: var(--kin-text); border-color: var(--kin-accent); background: var(--kin-panel2); }
     #msg { min-height: 18px; margin-top: 14px; color: var(--kin-error); font-size: 12px; line-height: 1.5; }
+    #msg.ended { color: var(--kin-muted); }
     .hint { margin-top: 18px; padding-top: 16px; color: var(--kin-muted); border-top: 1px solid var(--kin-line); font-size: 11.5px; line-height: 1.7; }
     .hint b { color: var(--kin-muted); font-weight: normal; }
     .stat { margin-top: 14px; color: var(--kin-dim); font-size: 11.5px; }
@@ -141,6 +142,7 @@
     <button class="ghost" id="register">가입 신청</button>
     <button class="ghost" id="switch" style="display:none">다른 계정으로 로그인</button>
     <button class="ghost" id="demo">데모 모드로 둘러보기 (서버 없이)</button>
+    <button class="ghost" id="retry-logout" style="display:none">Retry Log Out</button>
 
     <div id="msg"></div>
 
@@ -160,10 +162,76 @@
     // 서버 없는 데모와 연결 진단은 로컬 개발에만 남긴다. 운영에서는 DOM에서도 제거한다.
     if (KIN_PRODUCTION) $("#demo").remove();
 
+    // S7-U5 로그아웃 상태(auth.js endState). 서버가 종료를 확인하지 못한 동안에는 남은 세션으로 업무에 들어가지 않고 다시
+    // 보내는 것은 사용자의 Retry Log Out뿐이다. 종료 확인은 이 브라우저의 KIN 로그인 세션만 말한다(Keycloak 전체가 아니다).
+    // 안내는 실패의 구분만 말하고 서버의 기술 오류 원문은 보이지 않는다.
+    const END_NOTICES = {
+      conflict: '다른 요청과 겹쳐 서버의 로그인 세션을 끝내지 못했습니다. 업무 화면은 닫혔습니다. Retry Log Out을 눌러 다시 시도해 주세요.',
+      storage: '서버 저장소 문제로 로그인 세션 종료를 확인하지 못했습니다. 업무 화면은 닫혔습니다. 잠시 뒤 Retry Log Out을 눌러 주세요.',
+      network: '서버에 연결하지 못해 로그인 세션 종료를 확인하지 못했습니다. 업무 화면은 닫혔습니다. Retry Log Out을 눌러 다시 시도해 주세요.',
+      timeout: '서버가 제한 시간 안에 답하지 않아 로그인 세션 종료를 확인하지 못했습니다. 업무 화면은 닫혔습니다. Retry Log Out을 눌러 다시 시도해 주세요.',
+      refused: '서버가 로그아웃 요청을 받아들이지 않아 종료를 확인하지 못했습니다. 업무 화면은 닫혔습니다. Retry Log Out을 눌러 다시 시도해 주세요.',
+      ending: '로그아웃 요청의 결과를 아직 확인하지 못했습니다. 업무 화면은 닫혔습니다. 결과가 바뀌지 않으면 Retry Log Out을 눌러 다시 시도해 주세요.',
+    };
+
+    let shownEnd = false;
+    function showEnd(end) {
+      shownEnd = true;
+      const retry = $("#retry-logout");
+      const message = $("#msg");
+      message.classList.toggle('ended', end.state === 'confirmed');
+      if (end.state === 'confirmed') {
+        retry.style.display = 'none';
+        message.textContent = '이 브라우저의 KIN 로그인 세션을 끝냈습니다. 다시 사용하려면 로그인해 주세요.';
+      } else if (end.state === 'unknown') {
+        retry.style.display = 'none';
+        message.textContent = '로그아웃 상태를 확인할 수 없어 자동으로 로그인하지 않습니다. 로그인 버튼을 눌러 주세요.';
+      } else {
+        retry.style.display = 'block';
+        message.textContent = END_NOTICES[end.state === 'ending' ? 'ending' : end.reason] || END_NOTICES.ending;
+      }
+    }
+
+    let retrying = false;
+    // 다른 문서가 종료를 시작했거나 그 결과를 기록하면 그 상태를 보인다. 상태가 지워진 것(다른 탭의 명시적 로그인)은 자동
+    // 진입의 근거가 아니라서 보이던 안내를 그대로 둔다.
+    addEventListener('storage', () => {
+      if (retrying) return;
+      const end = KinAuth.endState();
+      if (!end) return;
+      const first = !shownEnd;
+      showEnd(end);
+      if (first) {
+        revealLanding();
+        probe();
+      }
+    });
+
+    $("#retry-logout").addEventListener('click', async () => {
+      if (retrying) return;
+      retrying = true;
+      $("#retry-logout").disabled = true;
+      try { await KinAuth.retryLogout(); }
+      finally {
+        retrying = false;
+        $("#retry-logout").disabled = false;
+        showEnd(KinAuth.endState() || { state: 'unknown' });
+      }
+    });
+
     async function boot() {
       const params = new URLSearchParams(location.search);
       const authError = params.get('auth_error');
       if (authError) history.replaceState({}, '', location.pathname + location.hash);
+
+      // 종료 상태가 일반 자동 진입보다 먼저다: 기존 세션이 있어도 업무 화면으로 옮기지 않고 자동 로그인·자동 재시도도 하지 않는다.
+      const end = KinAuth.endState();
+      if (end) {
+        showEnd(end);
+        revealLanding();
+        await probe();
+        return;
+      }
 
       let initError = null;
       try {
@@ -172,6 +240,8 @@
         initError = e;
       }
 
+      // 답을 기다리는 사이 다른 문서가 종료를 시작했으면 그 안내(storage 처리)가 이 화면의 것이다.
+      if (shownEnd) return;
       const session = KinAuth.session();
       if (session) {
         // S5-U2a: clinician-only는 clinician.html, 그 밖(혼합·판독의·기사·관리자·승인 대기)은 예전처럼 main.html.
@@ -199,8 +269,11 @@
 
       // 로그인 오류나 인증 서버 장애 때만 랜딩을 보여 주어 재시도할 수 있게 한다.
       revealLanding();
+      await probe();
+    }
 
-      // Keycloak이 살아 있는지 확인해서 버튼 상태를 정한다
+    // Keycloak이 살아 있는지 확인해서 버튼 상태를 정한다
+    async function probe() {
       try {
         const res = await fetch(`${KinAuth.KC}/realms/kin/.well-known/openid-configuration`);
         if (!res.ok) throw new Error('HTTP ' + res.status);

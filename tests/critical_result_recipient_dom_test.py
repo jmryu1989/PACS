@@ -24,7 +24,9 @@ the origin's storage or in what the origin's storage holds (contract §13's writ
   rd06 cancel or supersede first: the refusal, the server state and Open Replacement; the replacement acknowledged.
   rd07 the badge is the server `pending`.
   rd08 late answers, log out, another tab, account change, the storage observer, inbox values never stored, and the
-       product's session-end signal.
+       product's session-end signal (S7-U5: one set/remove pair when the end begins; with the logout POST held the second
+       tab has already closed and moved and sends nothing). Steps after a logout use a new context, and the account A ->
+       B step signs B in through the shipped landing's explicit login (the end state stays until then, §0.C 6).
   rd09 the reading panel's R3/R4 full rows: the contract sentence and the pinned body, no Acknowledge.
   rd10 unknown outcomes, Check Again with the same bytes, and how they end.
   rd10b A-16 - no answer within 60 s, in the minute of the periodic read - in both orders of the late ACK reaching the
@@ -762,6 +764,9 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.held_logouts = []
         self.hold_documents = False
         self.held_documents = []
+        # S7-U5 (§0.C 6): the shipped index.html, its Keycloak probe and the login round trip, for the one flow that signs
+        # another account in after a logout in the same browser (rd08 S-11) through the explicit login the landing offers.
+        self.real_index = False
         self.documents = []
         self.report_requests = []
         self.envelope_owner = None
@@ -781,6 +786,15 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         context.add_init_script(STORE_WATCH)
         context.route("**/*", self.route)
         return context
+
+    def fresh_context(self):
+        """A new browser context (and page, with the clock) for an independent step (S7-U5 §0.C 6): a logout's end state
+        stays in the origin's storage until the next explicit login, so a step after it in the same context would open a
+        closed page. The write log carries on."""
+        self.context.close()
+        self.context = self.new_context()
+        self.page = self.watch_page(self.context.new_page())
+        self.page.clock.install(time=BROWSER_TIME)
 
     def watch_page(self, page):
         page.set_default_timeout(5000)
@@ -824,6 +838,9 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                 if name == "index.html" and self.hold_documents:
                     self.held_documents.append(route)
                     return
+                if name == "index.html" and self.real_index:
+                    route.fulfill(body=lf_text(HPACS / "index.html"), content_type="text/html; charset=utf-8")
+                    return
                 route.fulfill(body=INDEX_STAND_IN if name == "index.html" else BLANK, content_type="text/html; charset=utf-8")
             elif name == "syn-store-fixture.html":
                 route.fulfill(body=STORE_FIXTURE, content_type="text/html; charset=utf-8")
@@ -835,6 +852,15 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
             return
         if path.startswith("/kin-brand/") or path == "/favicon.ico":
             route.fulfill(status=404, body="")
+            return
+        if self.real_index and method == "GET" and path == "/auth/realms/kin/.well-known/openid-configuration":
+            route.fulfill(json={"issuer": ORIGIN + "/auth/realms/kin"})
+            return
+        if self.real_index and method == "GET" and path == "/api/auth/login":
+            # The OIDC round trip (Keycloak, then the callback) stands in as one page that moves on to where a clinician-only
+            # login lands (main.html hands it to Clinician Home); the account is the one the case set in self.me.
+            route.fulfill(body='<!doctype html><title>SYN login</title><script>location.replace("' + BASE + 'clinician.html")'
+                               '</script>', content_type="text/html; charset=utf-8")
             return
         if path.startswith("/api/") and request.headers.get("x-kin-csrf") != "1":
             self.unexpected.append(f"{method} {path} without X-KIN-CSRF")
@@ -1503,6 +1529,8 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
 
     def another_tab_ends_the_session(self):
         # S-03: another tab of this browser logs out while a list read is held: one navigation, nothing painted or read.
+        # A new context: the Log out of S-02 left its end state (S7-U5 §0.C 6).
+        self.fresh_context()
         self.open_home()
         self.fault("list", hold=True)
         self.press("Refresh")
@@ -1568,29 +1596,44 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
     def session_end_signal_reaches_the_second_tab(self):
         # S-12: the product's session-end signal as auth.js sends it, read from the same write log: one setItem of
         # kin-session-ended with the time in decimal milliseconds, then its removeItem; the second tab of the same account
-        # closes on it and its inbox reads nothing more.
+        # closes on it and its inbox reads nothing more. S7-U5 §0.C 2: the signal leaves when the end begins, before the
+        # logout POST; with that POST held the second tab has already closed and moved, and sends no logout of its own.
         self.server.add(rec(57))
         self.open_home()
         second = self.watch_page(self.context.new_page())
         second.goto(ORIGIN + BASE + "clinician.html")
         expect(second.locator("#critical-results")).to_contain_text("SYN-PT-57")
-        writes, before = len(self.writes), self.page.evaluate("() => Date.now()")
+        writes, before, logouts = len(self.writes), self.page.evaluate("() => Date.now()"), len(self.logouts)
+        self.hold_logouts = True
         self.log_out_home()
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        self.wait_until(lambda: self.held_logouts, "POST /auth/logout")
         second.wait_for_url(ORIGIN + BASE + "index.html")
         after = second.evaluate("() => Date.now()")
         count = len(self.log)
+        second.wait_for_timeout(300)
+        self.assertEqual((count, 1), (len(self.log), len(self.logouts) - logouts),
+                         "while the POST is held the second tab has moved and sent nothing, no logout of its own either")
         signal = [w for w in self.writes[writes:] if w["kind"] == "localStorage" and w["names"] == ["kin-session-ended"]]
         self.assertEqual(["setItem", "removeItem"], [w["op"] for w in signal])
         self.assertRegex(signal[0]["text"], r"^\d+$")
         self.assertTrue(before <= int(signal[0]["text"]) <= after, (before, signal[0]["text"], after))
+        self.hold_logouts = False
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
         second.wait_for_timeout(300)
-        self.assertEqual(count, len(self.log))
+        signal = [w for w in self.writes[writes:] if w["kind"] == "localStorage" and w["names"] == ["kin-session-ended"]]
+        self.assertEqual((count, 1, ["setItem", "removeItem"]),
+                         (len(self.log), len(self.logouts) - logouts, [w["op"] for w in signal]),
+                         "the POST's answer sends no second signal")
         second.close()
 
     def inbox_values_do_not_outlive_the_account(self):
         # S-11: account A leaves an unknown attempt and rows on screen; Log out; account B signs in to the same browser.
         # No A value is in any write or in what the origin's storage holds at four moments, and B's page shows none of A.
+        # A new context for A (S-12 logged out); B signs in through the explicit login of the shipped landing, which is
+        # the only way back after a logout (S7-U5 §0.C 6).
+        self.fresh_context()
+        self.real_index = True
         s = RecipientServer([INSTITUTION, CLIN["sub"]])
         self.server = s
         self.servers.append(s)
@@ -1621,7 +1664,14 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         b.add(rec(64))
         self.me = me(CLIN_B, ["clinician"])
         count = len(self.log)
-        self.open_home()
+        # The landing keeps A's logout (confirmed) and enters nothing by itself; B presses its login control.
+        expect(self.page.locator("#msg")).to_have_text("이 브라우저의 KIN 로그인 세션을 끝냈습니다. 다시 사용하려면 로그인해 주세요.")
+        self.assertEqual(ORIGIN + BASE + "index.html", self.page.url)
+        self.page.get_by_role("button", name="KIN 계정으로 로그인").click()
+        self.page.wait_for_url(ORIGIN + BASE + "clinician.html")
+        expect(self.page.locator("#list-state")).to_have_attribute("data-state", "ready")
+        self.wait_until(lambda: self.requests("list"), "the Critical Results read")
+        self.reads_settled()
         self.row("SYN-PT-64")
         self.snapshots.append(("account B's document", self.snapshot(self.page)))
         seen = self.view()

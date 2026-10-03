@@ -312,11 +312,13 @@
      * One end for this page's session (Astra S5-U6a-F01/F02). Log out, a 401 from any request of this page (the first
      * /api/me included, S5-U6a-F05) and another tab's session end all come here and only the first one acts: every
      * panel's closer empties it and drops its requests in flight before anything is awaited, then the page leaves once.
-     * KinAuth.logout() clears and moves only after POST /auth/logout answers (no time limit), so a panel that waited for
-     * it kept the last session's studies on screen and painted late answers meanwhile. Another tab's end sends no POST:
-     * the session is already gone, and a POST now could end the one that tab has since started. This page's own logout
-     * reaches the channel too (auth.js sends from a new channel object); it finds the session ended and does nothing, so
-     * the move stays the one KinAuth.logout() makes.
+     * KinAuth.logout() records the end and drops the identity at once but moves only after POST /auth/logout answers (up
+     * to 10 s, S7-U5), so a panel that waited for it would keep the last session's studies on screen and paint late
+     * answers meanwhile. Another tab's end sends no POST: that tab's POST is the intent's one, and a POST now could end
+     * the session a later explicit login started. A page that finds an end recorded on load has no session (auth.js) and
+     * goes through end(), which then moves without a POST. This page's own logout reaches the channel too (auth.js sends
+     * from a new channel object); it finds the session ended and does nothing, so the move stays the one KinAuth.logout()
+     * makes.
      * Every module of the page takes part (S5-U6a-F03/F04): the members console, Study Access (study-access-admin.js,
      * attached below: its own requests and dialog) and Gateway Status each register a closer and send their 401 here.
      */

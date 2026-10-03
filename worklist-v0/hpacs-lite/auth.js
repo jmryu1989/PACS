@@ -16,6 +16,41 @@ const KinAuth = (() => {
   let initialized = false;
   let initializing = null;
 
+  /**
+   * 로그아웃의 브라우저 쪽 상태(S7-U5). 이 화면의 사용을 끝내는 것과 서버가 세션 종료를 확인한 것은 다르다: 기록이 없으면
+   * 사용 중이고, 있으면 종료 요청 중(ending)·종료 미확인(unconfirmed)·종료 확인(confirmed)이다. 같은 출처의 모든 문서가 읽는
+   * localStorage에 두어 새로고침·뒤로 가기·나중에 연 탭도 같은 상태를 본다 — 탭 범위면 나중에 연 탭이 남은 서버 세션으로
+   * 들어간다. 담는 것은 상태·요청 순서·실패 구분뿐이고 sid·토큰·쿠키·계정·기관·환자 값은 담지 않는다. 지우는 것은 사용자의
+   * 명시적 로그인·가입뿐이라 종료 확인도 그때까지 남는다.
+   */
+  const END_KEY = 'kin-session-end';
+  const END_STATES = ['ending', 'unconfirmed', 'confirmed'];
+  const END_REASONS = ['conflict', 'storage', 'network', 'timeout', 'refused'];
+  // 이 요청에 BFF 세션이 없다는 401 문구(auth.guard.ts·auth.service.ts의 문장 그대로): 세션 쿠키 없음, 세션 행 없음, commit된
+  // idle 종료, commit된 refresh 실패 종료. 쿠키 없음은 서버가 앞선 401에서 쿠키를 지운 뒤의 로그아웃이 받는 답이라 이 브라우저에
+  // 남은 세션이 없다는 뜻이다. 토큰 검증 실패·설정 오류의 401과 403은 세션 부재를 증명하지 않는다.
+  const SESSION_ABSENT = ['인증 정보가 없습니다', '인증 세션이 없습니다', '인증 세션이 만료되었습니다', '인증 세션을 갱신할 수 없습니다'];
+  // 요청 시작부터 응답 본문 판정까지. 넘으면 종료 미확인이고 다시 보내는 것은 랜딩의 Retry Log Out뿐이다.
+  const LOGOUT_WAIT_MS = 10000;
+  // 페이지가 POST 앞에 끼우는 일(main.html의 점유 해제)의 한도. 그 일이 끝나지 않아도 종료는 막히지 않는다.
+  const STEP_WAIT_MS = 5000;
+
+  // 신원 세대. 이 문서에 종료가 닿을 때마다 넘겨, 그 전에 나간 /api/me의 늦은 답이 신원을 되살리지 못하게 한다.
+  let generation = 0;
+  // 이 문서의 사용이 끝났다(스스로 종료를 시작했거나 다른 문서의 종료를 받았다). 그 뒤의 401·계정 변경은 새 의도가 아니다.
+  let closed = false;
+  // 이 문서가 시작한 종료. 같은 문서의 겹친 Log out·401은 새 POST 없이 이것을 나눈다.
+  let ending = null;
+  // 페이지가 맡긴, 종료 기록·통지 뒤 POST 앞의 일(main.html의 점유 해제). 이 일이 도는 동안의 겹친 호출은 바로 돌아간다 —
+  // 그 일 안의 401이 그 일을 기다리는 종료를 다시 기다리면 자기 자신을 기다리게 된다.
+  let step = null;
+  let stepping = false;
+  // 이 문서의 이동은 한 번뿐이다(진행 중인 이동 위의 두 번째 이동은 첫 이동을 취소한다).
+  let moved = false;
+  // 페이지가 알린 "지금 이 문서를 떠나면 잃는 것이 있다" 판정(main.html의 저장을 확인하지 못한 판독문 초안, 조항 8-e).
+  let keep = null;
+  const endedListeners = [];
+
   function broadcastEnded() {
     try {
       const channel = new BroadcastChannel('kin-session');
@@ -28,13 +63,103 @@ const KinAuth = (() => {
     } catch (e) {}
   }
 
+  /** 이 문서의 공개 신원을 내려놓는다. 이후 session()·has()는 이전 신원을 주지 않는다. */
+  function dropIdentity() {
+    cached = null;
+    initialized = true;
+    generation++;
+  }
+
   function clearLocal() {
     [...LEGACY_KEYS, 'kin-demo'].forEach(key => S.removeItem(key));
     document.cookie = 'kin_at=; Path=/; Max-Age=0; Secure; SameSite=Strict';
-    cached = null;
-    initialized = true;
+    dropIdentity();
     broadcastEnded();
   }
+
+  /** 기록된 종료 상태. 기록이 없으면 null, 읽지 못하거나 모양이 다르면 'unknown' — 어느 쪽도 사용 중의 근거가 아니다. */
+  function readEnd() {
+    let text;
+    try { text = localStorage.getItem(END_KEY); }
+    catch (e) { return { state: 'unknown', order: 0, reason: null }; }
+    if (text === null) return null;
+    try {
+      const value = JSON.parse(text);
+      if (value && END_STATES.includes(value.state) && Number.isFinite(value.order))
+        return { state: value.state, order: value.order, reason: END_REASONS.includes(value.reason) ? value.reason : null };
+    } catch (e) {}
+    return { state: 'unknown', order: 0, reason: null };
+  }
+
+  function writeEnd(state, order, reason) {
+    try { localStorage.setItem(END_KEY, JSON.stringify(reason ? { state, order, reason } : { state, order })); }
+    catch (e) {}
+  }
+
+  function forgetEnd() {
+    try { localStorage.removeItem(END_KEY); } catch (e) {}
+  }
+
+  function nextOrder() {
+    const last = readEnd();
+    return Math.max(Date.now(), (last ? last.order : 0) + 1);
+  }
+
+  /** 서버 응답만이 종료를 확인한다. 204와 세션 부재 401만 종료 확인이고, 나머지는 실패 구분과 함께 종료 미확인이다. */
+  async function post() {
+    const control = new AbortController();
+    const timer = setTimeout(() => control.abort(), LOGOUT_WAIT_MS);
+    try {
+      const response = await fetch(`${API}/auth/logout`, {
+        method: 'POST',
+        headers: { 'X-KIN-CSRF': '1' },
+        signal: control.signal,
+      });
+      if (response.status === 204) return { state: 'confirmed', reason: null };
+      let body = null;
+      try { body = await response.json(); }
+      catch (e) { if (control.signal.aborted) return { state: 'unconfirmed', reason: 'timeout' }; }
+      if (response.status === 401 && SESSION_ABSENT.includes(body?.message)) return { state: 'confirmed', reason: null };
+      if (response.status === 409) return { state: 'unconfirmed', reason: 'conflict' };
+      if (response.status === 500 && body?.code === 'AUTH_STORAGE_FAILURE') return { state: 'unconfirmed', reason: 'storage' };
+      return { state: 'unconfirmed', reason: 'refused' };
+    } catch (e) {
+      return { state: 'unconfirmed', reason: control.signal.aborted ? 'timeout' : 'network' };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** 종료 요청 하나. 그사이 더 새 요청(Retry)이나 명시적 로그인이 상태를 넘겨받았으면 늦은 결과로 덮지 않는다. */
+  async function request(order) {
+    const result = await post();
+    const current = readEnd();
+    if (current && current.order === order) writeEnd(result.state, order, result.reason);
+    return result;
+  }
+
+  function leave() {
+    if (moved || (keep && keep())) return;
+    moved = true;
+    location.replace(location.origin + location.pathname.replace(/[^/]*$/, 'index.html'));
+  }
+
+  /**
+   * 다른 문서가 이 브라우저의 종료를 시작했다. 이 문서의 공개 신원을 내려놓을 뿐 새 POST나 이동은 하지 않는다 — 이동은 그
+   * 문서의 조정자가 한다. 통지(BroadcastChannel·storage)와 종료 기록은 서로 다른 길로 와서 순서가 없으므로 둘 다 보고, 종료
+   * 기록이 있을 때 한 번만 처리한다. 기록이 없는 통지(데모 진입의 정리)는 신원을 건드리지 않는다.
+   */
+  function endedElsewhere() {
+    if (closed || !readEnd()) return;
+    closed = true;
+    dropIdentity();
+    for (const listener of endedListeners) { try { listener(); } catch (e) {} }
+  }
+  try {
+    const channel = new BroadcastChannel('kin-session');
+    channel.onmessage = event => { if (event.data && event.data.type === 'session-ended') endedElsewhere(); };
+  } catch (e) {}
+  addEventListener('storage', event => { if (event.key === 'kin-session-ended' || event.key === END_KEY) endedElsewhere(); });
 
   async function loadSession() {
     if (S.getItem('kin-demo')) {
@@ -45,12 +170,24 @@ const KinAuth = (() => {
       return cached;
     }
 
+    // 종료가 기록된 동안(또는 기록을 읽지 못하면) 남은 서버 세션으로 업무에 들어가지 않는다. 어느 문서든 같다 — 랜딩이
+    // 상태를 보이고, 다시 들어가는 길은 사용자의 명시적 로그인뿐이다.
+    if (readEnd()) {
+      cached = null;
+      return cached;
+    }
+
+    // 답을 기다리는 사이 이 문서의 사용이 끝났으면 그 답은 아무것도 정하지 않는다. 문서는 떠나는 중이고 이동은 종료를
+    // 처리하는 쪽이 하므로, 기다리던 쪽(boot)이 두 번째 이동을 하지 않게 끝나지 않는 약속을 준다.
+    const started = generation;
     const response = await fetch(`${API}/me`, { headers: { 'X-KIN-CSRF': '1' } });
+    if (started !== generation) return new Promise(() => {});
     if (response.status === 401) {
       cached = null;
       return cached;
     }
     const body = await response.json().catch(() => ({}));
+    if (started !== generation) return new Promise(() => {});
     if (response.status === 403) {
       if (body.code === 'INSTITUTION_PENDING') cached = { state: 'pending' };
       else if (body.code === 'INSTITUTION_INVALID') cached = { state: 'invalid' };
@@ -92,6 +229,8 @@ const KinAuth = (() => {
     return new Promise(() => {});
   }
 
+  let retrying = null;
+
   return {
     KC,
 
@@ -117,12 +256,20 @@ const KinAuth = (() => {
       return session.roles.includes(role) || session.roles.includes('admin');
     },
 
+    /** 랜딩이 먼저 보는 종료 상태: null(종료 의도 없음), ending·unconfirmed·confirmed, 또는 unknown(읽지 못함). */
+    endState() {
+      const end = readEnd();
+      return end && { state: end.state, reason: end.reason };
+    },
+
     async login(opts = {}) {
+      forgetEnd();
       const query = opts.prompt ? `?prompt=${encodeURIComponent(opts.prompt)}` : '';
       location.href = `${API}/auth/login${query}`;
     },
 
     async register() {
+      forgetEnd();
       location.href = `${API}/auth/register`;
     },
 
@@ -132,20 +279,74 @@ const KinAuth = (() => {
       initialized = false;
     },
 
+    /**
+     * 업무 화면의 Log out과 401·계정 변경. 네트워크를 기다리기 전에 종료 상태를 남기고 이 문서의 신원을 내려놓으며 다른
+     * 문서에 한 번 알린다(통지는 화면을 닫으라는 뜻이지 서버 종료의 증거가 아니다). 페이지가 맡긴 일(beforeLogoutPost)을
+     * 한도 안에서 기다린 뒤 POST 하나를 보내고, 결과를 기록한 뒤 랜딩으로 한 번 옮긴다. 같은 문서의 겹친 호출은 새 POST
+     * 없이 진행 중인 종료를 나눈다. 이미 끝난 문서이거나 종료가 기록돼 있으면(다른 문서가 시작함, 확인·미확인, 읽지 못함)
+     * POST 없이 이 문서만 닫고 떠난다 — 다시 보내는 것은 랜딩의 Retry Log Out뿐이다. 데모는 서버 세션이 없어 로컬만 끝내고
+     * 종료 확인으로 기록하지 않는다.
+     */
     async logout() {
-      const demo = !!S.getItem('kin-demo');
-      const redirect = location.origin + location.pathname.replace(/[^/]*$/, 'index.html');
-      try {
-        if (!demo) await fetch(`${API}/auth/logout`, {
-          method: 'POST',
-          headers: { 'X-KIN-CSRF': '1' },
-        });
-      } catch (e) {
-        // 네트워크가 죽어도 브라우저는 로그인 화면으로 돌아간다. 서버 행은 idle 수거가 맡는다.
-      } finally {
+      if (ending) return stepping ? undefined : ending;
+      if (S.getItem('kin-demo')) {
         clearLocal();
-        location.replace(redirect);
+        leave();
+        return;
       }
+      if (closed || readEnd()) {
+        closed = true;
+        dropIdentity();
+        leave();
+        return;
+      }
+      const order = nextOrder();
+      writeEnd('ending', order);
+      closed = true;
+      clearLocal();
+      ending = (async () => {
+        if (step) {
+          stepping = true;
+          let timer;
+          try {
+            await Promise.race([
+              Promise.resolve().then(step).catch(() => {}),
+              new Promise(resolve => { timer = setTimeout(resolve, STEP_WAIT_MS); }),
+            ]);
+          } finally {
+            clearTimeout(timer);
+            stepping = false;
+          }
+        }
+        await request(order);
+        leave();
+      })();
+      return ending;
     },
+
+    /** 이 문서가 시작하는 종료마다 종료 기록·통지 뒤, POST 앞에 한도 안에서 기다릴 일(실패해도 종료는 막히지 않는다). */
+    beforeLogoutPost(work) { step = typeof work === 'function' ? work : null; },
+
+    /** 랜딩의 Retry Log Out: 누를 때마다 POST 하나(누르는 동안의 겹친 호출은 나눈다). 이동하지 않는다. */
+    retryLogout() {
+      if (retrying) return retrying;
+      const order = nextOrder();
+      writeEnd('ending', order);
+      retrying = request(order).finally(() => { retrying = null; });
+      return retrying;
+    },
+
+    /** 다른 문서가 이 브라우저의 종료를 시작한 것을 이 문서가 알게 되면 한 번 부른다(신원은 이미 내려놓았다). */
+    onEndedElsewhere(listener) {
+      if (typeof listener === 'function') endedListeners.push(listener);
+    },
+
+    /**
+     * 조항 8-e. 판정이 참인 동안(이 문서를 떠나면 잃는 것이 있는 동안) 종료 뒤의 이동을 미룬다. 종료 기록·신원 해제·통지·
+     * POST는 미루지 않는다. 판정이 거짓이 된 뒤 페이지가 leave()로 미룬 이동을 한다.
+     */
+    holdLeave(test) { keep = typeof test === 'function' ? test : null; },
+
+    leave() { leave(); },
   };
 })();

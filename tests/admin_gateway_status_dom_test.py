@@ -430,6 +430,15 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         self.admin_replies, self.access_replies, self.held_access, self.access_calls = [], [], [], []
         self.scripts = dict(SCRIPTS)
         self.held_me, self.cancel_moves = None, False
+        self.context = None
+        self.fresh_context()
+
+    def fresh_context(self):
+        """A new browser context for an independent case (S7-U5 §0.C 6): a logout's end state stays in the origin's storage
+        until the next explicit login, so a case that follows a logout in the same context would open a closed page.
+        The earlier context is closed; counters and queues carry on."""
+        if self.context is not None:
+            self.context.close()
         self.context = self.browser.new_context(timezone_id="UTC", viewport={"width": 1280, "height": 900})
         self.context.add_init_script(INIT)
         self.page = self.context.new_page()
@@ -1142,6 +1151,7 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
     def test_10_log_out_and_a_member_401_empty_the_section_before_the_logout_answers(self):
         for how in ("Log out", "member list 401"):
             with self.subTest(how=how):
+                self.fresh_context()
                 self.open()
                 self.list_and_retry_in_flight()
                 logouts, moves = self.logouts, self.moves()
@@ -1156,7 +1166,7 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
                 self.assert_members_closed()
                 self.release_late()
                 self.assert_nothing_leaves()
-                # Log out again adds nothing; after the POST answers, auth.js's end broadcast reaches this page too.
+                # Log out again adds nothing; auth.js's end broadcast, sent before the POST, reached this page too.
                 self.page.locator("#logout").click()
                 self.assertEqual((logouts + 1, moves), (self.logouts, self.moves()))
                 self.held_logouts.pop().fulfill(status=204, body="")
@@ -1166,6 +1176,7 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
 
         # Control: Log out wired to KinAuth.logout() with no end listener (cafc72c) keeps the list and the control
         # while the POST is out.
+        self.fresh_context()
         self.open(edited([(LOGOUT_WIRING, CAFC72C_LOGOUT_WIRING), (END_LISTENERS, "")]))
         self.refresh((200, FIVE))
         logouts = self.logouts
@@ -1273,6 +1284,7 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         self.assert_closed_away(logouts + 1, moves + 1)
 
         # Control: the 401 judged after the sequence check (cafc72c) drops the older read's 401 with its answer.
+        self.fresh_context()
         self.open(edited([(GATEWAY_401, CAFC72C_GATEWAY_401), (AFTER_SEQUENCE, CAFC72C_AFTER_SEQUENCE)]))
         self.refresh((200, FIVE))
         older, newer = self.two_reads()
@@ -1289,9 +1301,10 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         self.assertEqual((6, False, logouts), (summary["rows"], summary["refreshDisabled"], self.logouts))
 
     def test_14_member_answers_read_after_the_end_are_dropped(self):
-        other = self.other_tab()
         for how in ("Log out", "another tab", "a Gateway 401 over the membership dialog"):
             with self.subTest(how=how):
+                self.fresh_context()
+                other = self.other_tab()
                 self.open()
                 self.page.evaluate(PROBE)
                 logouts, moves = self.logouts, self.moves()
@@ -1340,6 +1353,7 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
                 self.assert_closed_away(logouts + 1, moves + 1)
 
         # Control: without the closer and the end checks the late list paints again and the temporary password opens.
+        self.fresh_context()
         self.open(members_unguarded())
         logouts = self.logouts
         self.start_member_answers()
@@ -1355,9 +1369,10 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         self.arrive_at_index()
 
     def test_15_study_access_takes_the_page_session_end(self):
-        other = self.other_tab()
         for how in ("GET 401", "POST 401", "GET held across another tab's end"):
             with self.subTest(how=how):
+                self.fresh_context()
+                other = self.other_tab()
                 self.open()
                 self.page.evaluate(PROBE)
                 self.list_and_retry_in_flight()
@@ -1415,6 +1430,8 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         # Control: without its 401 line and its closer the module reads the 401 as an error: the Gateway list stays and
         # nothing logs out; then another tab's end closes the page's other sections while the dialog stays open.
         self.scripts[ACCESS_SCRIPT] = access_unattached()
+        self.fresh_context()
+        other = self.other_tab()
         self.open()
         self.page.evaluate(PROBE)
         self.refresh((200, FIVE))
@@ -1433,9 +1450,10 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         self.cancel_moves = False
 
     def test_16_every_modules_401_and_another_tabs_end_together(self):
-        other = self.other_tab()
         for first in ("a 401", "another tab"):
             with self.subTest(first=first):
+                self.fresh_context()
+                other = self.other_tab()
                 self.open()
                 self.page.evaluate(PROBE)
                 self.refresh((200, FIVE))
@@ -1480,6 +1498,7 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
                 self.assert_closed_away(logouts + 1, moves + 1)
 
     def test_17_a_first_session_401_ends_the_page_before_anything_paints_or_writes(self):
+        # Every sub-case is independent: each starts in a new context with its own other tab (S7-U5 §0.C 6).
         other = self.other_tab()
         with self.subTest(me="200, an approved admin"):
             me, enabled = self.boot_held()
@@ -1496,6 +1515,8 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
             self.assertEqual(OPENED, self.members()["enabled"], "one page: Previous and Next stay off")
 
         with self.subTest(me="200, the first list read 401"):
+            self.fresh_context()
+            other = self.other_tab()
             logouts, moves = self.logouts, self.moves()
             me, _ = self.boot_held()
             self.held_logouts = []
@@ -1509,6 +1530,8 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
             self.release_logout_and_move(other, logouts, moves)
 
         with self.subTest(me="403 pending"):
+            self.fresh_context()
+            other = self.other_tab()
             logouts, moves, reads = self.logouts, self.moves(), self.count("GET", LIST_PATH)
             me, _ = self.boot_held()
             self.cancel_moves = True
@@ -1523,6 +1546,8 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
             self.cancel_moves = False
 
         with self.subTest(me="401 first, with a list read, a list body and Create Member out"):
+            self.fresh_context()
+            other = self.other_tab()
             logouts, moves = self.logouts, self.moves()
             me, _ = self.boot_held()
             held = self.race_before_the_session()
@@ -1558,6 +1583,8 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
             self.release_logout_and_move(other, logouts, moves)
 
         with self.subTest(me="Log out first, then /api/me 401"):
+            self.fresh_context()
+            other = self.other_tab()
             logouts, moves, reads = self.logouts, self.moves(), self.count("GET", LIST_PATH)
             me, _ = self.boot_held()
             self.held_logouts = []
@@ -1576,12 +1603,16 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
             self.release_logout_and_move(other, logouts, moves)
 
         # Control: the b95bc17 markup has every member control on before /api/me answers.
+        self.fresh_context()
+        other = self.other_tab()
         me, enabled = self.boot_held(edited(CONTROLS_MARKUP))
         self.assertEqual(MEMBER_CONTROLS, enabled)
         me.fulfill(json=ME)
         expect(self.page.locator("#users td.username")).to_have_count(1)
 
         # Control: the boot without its check after the first read turns the controls on after that read's 401 ended it.
+        self.fresh_context()
+        other = self.other_tab()
         logouts, moves = self.logouts, self.moves()
         me, _ = self.boot_held(edited([(AFTER_FIRST_READ, "        await loadUsers();\n")]))
         self.cancel_moves = True
@@ -1594,6 +1625,8 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
 
         # Control, last (its Create Member answer reads the list again): the b95bc17 boot answers the null session with the
         # move alone. Nothing ends and no logout is sent, the dialog stays open, the late list paints and the submit goes.
+        self.fresh_context()
+        other = self.other_tab()
         logouts, moves = self.logouts, self.moves()
         me, _ = self.boot_held(edited([(NO_SESSION, B95BC17_NO_SESSION)]))
         held = self.race_before_the_session()

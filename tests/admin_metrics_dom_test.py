@@ -32,9 +32,10 @@ and records every request:
   10  S5-U6b-F04: with Operations showing a table and two reads out, a 401 on the member list empties the section and
       turns its control off at once (Gateway Status's control too), before the logout answers; the late newer 200 and
       older 401 neither repaint nor log out again; the control forced back on and pressed sends nothing; Log out pressed
-      again posts nothing; one logout and one navigation. Control: that 401 straight to KinAuth.logout() (the call before
-      the fix) keeps the table and its control, and the late 200 paints over it.
-  11  the same for Log out. Control: the button straight to KinAuth.logout() (the handler before the fix).
+      again posts nothing; one logout and one navigation. (S7-U5: the control that sent this 401 straight to
+      KinAuth.logout() is retired — auth.js's end notice before the network now closes the page and one POST serves the
+      intent, so it reproduces neither risk; the one-off counterexample is kept with the S7-U5 fix1 evidence.)
+  11  the same for Log out (its straight-to-KinAuth.logout() control retired the same way).
   12  the same for a 401 on the Gateway Status list read. Control: Operations' closer kept off the page's session end
       (the F04 state: a panel with an end of its own) keeps the ended session's table and control.
   13  one session object: the shipped page defines KinConsoleSession once (S5-U6a's top-level const; this unit's
@@ -47,8 +48,8 @@ Access, the member writes and a held /api/me, holds member-list and Gateway read
 
   14  S5-U6b-F06: Study Access read and edited (Save on) while an Operations or a Gateway read is out; that read's 401
       disposes the dialog before the logout answers; the dropped dialog's Save, Retry and Reload and a new open send no
-      GET and no POST. Control: the module without its closer and its end checks keeps the dialog open after the end and
-      its Save sends the POST.
+      GET and no POST. Control: the module without its closer and its end checks keeps the dialog open after the end (its
+      Save no longer sends the POST since S7-U5: auth.js drops the identity when the end starts).
   15  S5-U6b-F04: Operations shows Studies Owned 5 with two reads out, and two Gateway reads are out; the OLDER Gateway
       read's 401 closes every panel before the logout answers; the newer Gateway 200 and the late Operations 200 (6) and
       401 repaint nothing and log out no second time; controls forced on send nothing. Control: Gateway's 401 judged
@@ -64,8 +65,13 @@ Access, the member writes and a held /api/me, holds member-list and Gateway read
       request after the end; one logout and one navigation.
   18  the matrix for the boot: while /api/me or the first member-list read is out, a /api/me 401, a member-list 401, a
       Gateway 401, an Operations 401, a Study Access 401 (opened by script: the page draws no row before the first read)
-      and Log out each end the session; nothing turns on, no row is drawn, Study Access opens nothing, the late first
-      read draws nothing; one logout and one navigation.
+      and Log out (before the /api/me headers, and while its body is read) each end the session; nothing turns on, no
+      row is drawn, Study Access opens nothing, the late first read draws nothing, the late /api/me restores no identity
+      (S7-U5 §0.C 7: whether its body is read is not the point); one logout and one navigation.
+
+Each independent case (and each sub-case and control) runs in its own browser context: a logout's end state stays in the
+origin's storage until the next explicit login (S7-U5 §0.C 6), so a later case in the same context would open a closed
+page.
 
 WorklistStorageDOMTest (S5-U6b-F02) slices main.html's shipped #storage element and refreshStorage() into a page with a
 queued fetch: S01 the default names no number; S02 network failure, bad JSON, a missing or malformed TotalDiskSize, 403
@@ -115,12 +121,25 @@ MEMBERS = {"page": 1, "pageSize": 25, "total": 1, "pendingCount": 0, "users": [
 SERVER_WORDING = "SYN-SERVER-WORDING"
 METRICS_PATH = "/api/admin/metrics"
 
+# A path put in __jsonHold holds the next body read on it after its headers arrived, until the case releases it from
+# __jsonHeld (S7-U5 §0.C 7: a session end while the /api/me body is being read).
 INIT = """(() => {
   window.__jsonDone = [];
+  window.__jsonHold = [];
+  window.__jsonHeld = [];
   const json = Response.prototype.json;
   Response.prototype.json = function () {
     const path = new URL(this.url).pathname;
-    return json.call(this).finally(() => { window.__jsonDone.push(path); });
+    let read = json.call(this);
+    const hold = window.__jsonHold.indexOf(path);
+    if (hold >= 0) {
+      window.__jsonHold.splice(hold, 1);
+      const body = read;
+      read = new Promise((resolve, reject) => {
+        window.__jsonHeld.push({path, release: () => body.then(resolve, reject)});
+      });
+    }
+    return read.finally(() => { window.__jsonDone.push(path); });
   };
   // Every answer the page receives, read or not: after a session end an answer arrives but its body is never read.
   window.__fetchDone = [];
@@ -240,12 +259,8 @@ END_IN_REQUEST = """        if (response.status === 401) {
 """
 END_AFTER_SEQUENCE = """        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });
 """
-# S5-U6b-F04 controls. The member list's 401 and Log out as they were before the page's one session end (straight to
-# KinAuth.logout()), and Operations' closer built but never registered on that end (a panel with an end of its own).
-MEMBERS_END = '          KinConsoleSession.end();\n          throw new Error("세션이 만료되었습니다");\n'
-MEMBERS_END_BEFORE = '          await KinAuth.logout();\n          throw new Error("세션이 만료되었습니다");\n'
-LOGOUT_BUTTON = '$("#logout").addEventListener("click", () => KinConsoleSession.end());'
-LOGOUT_BUTTON_BEFORE = '$("#logout").addEventListener("click", () => KinAuth.logout());'
+# S5-U6b-F04 control: Operations' closer built but never registered on the page's one session end (a panel with an end of
+# its own).
 OPS_ON_END = "      KinConsoleSession.onEnd(() => {\n        ops.seq++;\n"
 OPS_OFF_END = "      void (() => {\n        ops.seq++;\n"
 # The page's one object (S5-U6a) is attached to Study Access right after its definition. Test 13 counts every closer
@@ -413,6 +428,15 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.access_replies, self.held_access, self.admin_replies, self.held_admin = [], [], [], []
         self.held_me = None
         self.scripts = dict(SCRIPTS)
+        self.context = None
+        self.fresh_context()
+
+    def fresh_context(self):
+        """A new browser context for an independent case (S7-U5 §0.C 6): a logout's end state stays in the origin's storage
+        until the next explicit login, so a case that follows a logout in the same context would open a closed page.
+        The earlier context is closed; counters and queues carry on."""
+        if self.context is not None:
+            self.context.close()
         self.context = self.browser.new_context(timezone_id="UTC", viewport={"width": 1280, "height": 900})
         self.context.add_init_script(INIT)
         self.page = self.context.new_page()
@@ -828,6 +852,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
         # the table stays, nobody logs out, and the newer answer paints. Edited inside the Operations script: Gateway
         # Status's 401 block is the same text.
         self.logouts, self.held_logouts = 0, None
+        self.fresh_context()
         self.open(variant_in(OPS_SCRIPT, [
             (SEQUENCE_GUARD, SEQUENCE_GUARD + "        if (error?.status === 401) { KinConsoleSession.end(); return; }\n"),
             (END_IN_REQUEST, END_AFTER_SEQUENCE)]))
@@ -899,10 +924,12 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.assertEqual(1, self.logouts)
         self.assertEqual(1, [c["path"] for c in self.calls].count(BASE + "index.html"), "one navigation")
 
-    def control_the_end_leaves_operations(self, path, body, shared_end_ran):
-        """The same end with its path, or Operations, off the page's one session end: the ended session's table and its
-        control stay. When the end never reached the shared object, the late 200 paints and the late 401 logs out again."""
+    def control_the_end_leaves_operations(self, path, body):
+        """The same end with Operations off the page's one session end (its closer never registered): the ended session's
+        table and its control stay. The end did reach the shared object, so the late 200 does not paint and the late 401
+        sends no second logout."""
         self.logouts, self.held_logouts = 0, None
+        self.fresh_context()
         older, newer = self.five_on_screen_and_two_reads_out(body)
         self.end_elsewhere(path)
         summary = self.summary()
@@ -911,27 +938,30 @@ class AdminMetricsDOMTest(unittest.TestCase):
         newer.fulfill(json=answer(second=8, rows=replace(ROWS, "studies.own", value=6)))
         self.wait_until(lambda: self.fetch_done() == 2, f"control ({path}): the late 200 received")
         self.wait_until(lambda: not self.summary()["busy"], f"control ({path}): the late load finished")
-        self.assertEqual((11, "5" if shared_end_ran else "6"), (self.summary()["rows"], self.own_cell()))
+        self.assertEqual((11, "5"), (self.summary()["rows"], self.own_cell()))
         older.fulfill(status=401, json={"message": SERVER_WORDING})
         self.wait_until(lambda: self.fetch_done() == 3, f"control ({path}): the late 401 received")
-        self.wait_until(lambda: self.logouts == (1 if shared_end_ran else 2), f"control ({path}): the logouts")
         self.page.wait_for_timeout(50)
-        self.assertEqual(1 if shared_end_ran else 2, self.logouts)
+        self.assertEqual(1, self.logouts)
         for route in self.held_logouts:
             route.fulfill(status=204, body="")
         self.page.wait_for_url(ORIGIN + BASE + "index.html")
 
+    # S7-U5 §0.C 1 (Astra S7-U5-SPEC-B-F01): cases 10 and 11 had controls that wired the member-list 401 and Log out
+    # straight to KinAuth.logout(); they kept Operations painted while the POST was out and sent a second POST on the late
+    # 401. auth.js now closes every document of the intent before the network (its end notice reaches this page's own
+    # listeners) and keeps one POST per intent, so those controls no longer reproduce the risks. The risks stay asserted
+    # on the shipped page (assert_the_end_closes_operations: emptied before the logout answers, no late paint, one POST,
+    # one navigation); the one-off counterexample that fails there is recorded with the S7-U5 fix1 evidence.
     def test_10_a_member_list_401_closes_operations_at_once(self):
         self.assert_the_end_closes_operations("members")
-        self.control_the_end_leaves_operations("members", variant(MEMBERS_END, MEMBERS_END_BEFORE), shared_end_ran=False)
 
     def test_11_log_out_closes_operations_at_once(self):
         self.assert_the_end_closes_operations("logout")
-        self.control_the_end_leaves_operations("logout", variant(LOGOUT_BUTTON, LOGOUT_BUTTON_BEFORE), shared_end_ran=False)
 
     def test_12_a_gateway_list_401_closes_operations_at_once(self):
         self.assert_the_end_closes_operations("gateway")
-        self.control_the_end_leaves_operations("gateway", variant(OPS_ON_END, OPS_OFF_END), shared_end_ran=True)
+        self.control_the_end_leaves_operations("gateway", variant(OPS_ON_END, OPS_OFF_END))
 
     def test_13_the_page_has_one_session_object_and_every_module_registers_on_it(self):
         # One definition in the shipped page, and no conditional second one (the pre-merge branch had one).
@@ -1065,6 +1095,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
         for how in ("an Operations 401", "a Gateway 401"):
             with self.subTest(how=how):
                 self.logouts, self.held_logouts, moves = 0, None, self.moves()
+                self.fresh_context()
                 self.open()
                 self.refresh((200, answer(rows=replace(ROWS, "studies.own", value=5))))
                 if how == "a Gateway 401":
@@ -1085,10 +1116,14 @@ class AdminMetricsDOMTest(unittest.TestCase):
                 self.assertEqual(ACCESS_READ, self.panels()["accessStatus"])
                 self.release_logout(moves, how)
 
-        # Control: the module without its closer and its end checks (the F06 state) keeps the dialog open after the end,
-        # and its Save sends the POST.
+        # Control: the module without its closer and its end checks (the F06 state) keeps the dialog open after the end.
+        # Its Save also sent the POST until S7-U5; auth.js now gives no identity once the end starts (§0.C 3), so the
+        # module's own owner check refuses it and that half of the control no longer reproduces the risk (retired; the
+        # one-off counterexample is kept with the S7-U5 fix1 evidence). No Study Access POST after the end stays
+        # asserted on the shipped module above.
         self.logouts, self.held_logouts = 0, None
         self.scripts[ACCESS_SCRIPT] = access_unguarded()
+        self.fresh_context()
         self.open()
         self.refresh((200, answer()))
         held = {"operations": self.hold_reads(1)[0]}
@@ -1097,9 +1132,6 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.end_by("an Operations 401", held)
         s = self.panels()
         self.assertEqual((True, True, True, 1), (s["ended"], s["accessConnected"], s["accessOpen"], s["accessInDocument"]))
-        self.access_replies.append((409, {"message": SERVER_WORDING}))
-        self.page.locator("#study-access-dialog [data-save]").click()
-        self.wait_until(lambda: self.count("POST", ACCESS_PATH) == 1, "control: the Study Access POST after the end")
         self.held_logouts.pop().fulfill(status=204, body="")
         self.page.wait_for_url(ORIGIN + BASE + "index.html")
 
@@ -1123,6 +1155,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
         # Control: Gateway's 401 judged after its sequence check (979a69b) drops the older read's 401: nothing ends,
         # nobody logs out, Operations keeps its table and control, and the late 200 paints over it.
         self.logouts, self.held_logouts = 0, None
+        self.fresh_context()
         older_ops, newer_ops = self.five_on_screen_and_two_reads_out(variant_in(GATEWAY_SCRIPT, [
             (GATEWAY_401_IN_REQUEST, GATEWAY_401_BEFORE), (GATEWAY_AFTER_SEQUENCE, GATEWAY_401_AFTER_SEQUENCE)]))
         self.draw_gateway()
@@ -1174,6 +1207,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
         for how in ("Log out", "an Operations 401"):
             with self.subTest(how=how):
                 self.logouts, self.held_logouts, moves = 0, None, self.moves()
+                self.fresh_context()
                 self.open()
                 ending = {"operations": self.hold_reads(1)[0]} if how == "an Operations 401" else {}
                 held = self.member_answers_out()
@@ -1191,6 +1225,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
         # Control: the members console without its closer and end checks (the F05 state) draws the late list and opens
         # the temporary password after the end.
         self.logouts, self.held_logouts = 0, None
+        self.fresh_context()
         self.open(members_unguarded())
         ending = {"operations": self.hold_reads(1)[0]}
         held = self.member_answers_out(create=False)
@@ -1228,6 +1263,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
         for how in SIGNALS:
             with self.subTest(how=how):
                 self.logouts, self.held_logouts, moves = 0, None, self.moves()
+                self.fresh_context()
                 held = self.every_panel_out()
                 self.end_by(how, held)
                 s = self.assert_all_closed(how)
@@ -1243,9 +1279,10 @@ class AdminMetricsDOMTest(unittest.TestCase):
 
     def test_18_the_boot_takes_every_end(self):
         for how in ("a /api/me 401", "a member-list 401", "a Gateway 401", "an Operations 401", "a Study Access 401",
-                    "Log out"):
+                    "Log out", "Log out while the /api/me body is read"):
             with self.subTest(how=how):
                 self.logouts, self.held_logouts, moves = 0, [], self.moves()
+                self.fresh_context()
                 reads = self.count("GET", LIST_PATH)
                 self.held_me = []
                 self.page.goto(ORIGIN + PAGE_PATH)
@@ -1255,10 +1292,21 @@ class AdminMetricsDOMTest(unittest.TestCase):
                 if how == "a /api/me 401":
                     me.fulfill(status=401, json={"message": SERVER_WORDING})
                 elif how == "Log out":
+                    # S7-U5 §0.C 7: the end before the /api/me headers. The late answer reaches the page; read or dropped
+                    # unread, it restores no identity and starts nothing (checked below).
                     self.page.locator("#logout").click()
                     self.wait_until(lambda: self.logouts == 1, "the logout request")
                     me.fulfill(json=ME)
-                    self.wait_until(lambda: self.path_done("json", "/api/me") == 1, "the late session answer read")
+                    self.wait_until(lambda: self.path_done("fetch", "/api/me") == 1, "the late session answer received")
+                elif how == "Log out while the /api/me body is read":
+                    # The end after the headers, while the body is still out.
+                    self.page.evaluate("() => { window.__jsonHold.push('/api/me'); }")
+                    me.fulfill(json=ME)
+                    self.wait_until(lambda: self.page.evaluate("() => window.__jsonHeld.length") == 1, "the session body held")
+                    self.page.locator("#logout").click()
+                    self.wait_until(lambda: self.logouts == 1, "the logout request")
+                    self.page.evaluate("() => window.__jsonHeld.splice(0).forEach(held => held.release())")
+                    self.wait_until(lambda: self.path_done("json", "/api/me") == 1, "the late session body released")
                 elif how == "a member-list 401":
                     self.member_replies.append((401, {"message": SERVER_WORDING}))
                     me.fulfill(json=ME)
@@ -1289,6 +1337,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
                 self.wait_until(lambda: self.logouts == 1, f"{how}: the logout request")
                 self.page.wait_for_timeout(150)
                 s = self.assert_all_closed(how)
+                self.assertIsNone(self.page.evaluate("() => KinAuth.session()"), f"{how}: no identity after the end")
                 if how == "a Study Access 401":
                     self.assertEqual((False, False), (s["accessConnected"], s["accessOpen"]))
                 self.assertEqual(reads + first_read, self.count("GET", LIST_PATH), f"{how}: no list read after the end")

@@ -11,7 +11,7 @@ Structure (stdlib):
        clinician.js are its base commit (aaf53dc, S5-UI3's merge) byte for byte, with no kinOn401 left. A shallow clone
        lacks both commits and skips with that reason; the pinned digests stand for them.
   s02  the hooks are one line each (renderClinical, and the 401 list where the page starts a logout: api()'s 401, the
-       confirmed Log out before its first network wait, the dictation 401, the list and poll account changes); the queue
+       dictation 401, the list and poll account changes; the confirmed Log out's order is run in m12 since S7-U5); the queue
        lives in the Order List panel and the reading line after the report footer row; neither block reads a question,
        consultation or Connect route or writes markup strings, and neither decides ownership by an actor string; the
        block's logout() runs only from its write's 401.
@@ -71,17 +71,19 @@ block cut from main.html and run over small stand-ins):
   m08  wording, 12px text, 24px targets and keyboard reach for both areas.
   m09  (B-R-001 F1) the page's api() over the shipped auth.js with POST /auth/logout held: a 401 on a queue read or on a
        write ends the area before the logout answers; a held read and a held write answered afterwards draw nothing and
-       nothing new is read or sent; api() without the hook line (fix1, control) paints the late read.
+       nothing new is read or sent. (Its control, api() without the hook line, is retired by S7-U5: auth.js's end notice
+       before the network ends the area through its own listener.)
   m10  (B-R-001 F2) the queue's receipts, as c07 (accept and an admin's cancel).
   m11  (C-R-001 F2) Cancel is enabled for an admin (note still required, nothing read) or for a clinician whose own
        requests (#7 view=mine, followed across pages) hold the request: the same sub after an actor change yes, another
        sub with the same actor no; an older request is decided without reading further pages; while checking and after
        a failed read Cancel is disabled with the reason, and Reload checks again; a late answer after the session ended
        draws nothing. Control: the fix2 actor rule gets both actor cases wrong.
-  m12  (C-R-001 F1) the page's Log out handler over the shipped auth.js: confirmed, it ends the area before its first
-       network wait (the draft write held, or the logout POST held); late read and write answers draw nothing and
-       nothing new is read; the draft write, hold release and logout keep their order. Cancelled confirm and an
-       insertion in flight end nothing. Control: the handler without the hook line keeps the note and paints late.
+  m12  (C-R-001 F1, S7-U5 §8) the page's Log out handler over the shipped auth.js: confirmed, it first saves the draft
+       (held: the area is still in use, its note kept, no logout POST), then ends the area through the end list before
+       the logout POST (held) answers; late read and write answers draw nothing, nothing new is read, and the identity is
+       gone. Cancelled confirm and an insertion in flight end nothing. (The control without the hook line is retired by
+       S7-U5; the hold release now runs inside auth.js's end, between its notice and the POST — the logout DOM test.)
   m13  (S5-U4bc-R-001 F02) the queue's writes go through the block's own transport, which keeps the HTTP status (api()
        is unchanged): Accept answered 200, Close 202, Decline a body-less 204 and an admin's Cancel 200 each stay unknown
        with the status shown, the note kept read-only and Retry / Discard; Retry sends the same body and gets the stored
@@ -305,16 +307,23 @@ BLOCK_ACTOR_RULE = variant(BLOCK, [(
 BLOCK_NO_GUARD = variant(BLOCK, [
     ("if (ended || lock !== null || mine !== detailSeq || detailId !== id) return;", "if (ended || lock !== null) return;", 2),
 ], "the S5-U4c block")
-# B-R-001 controls: api() as fix1 shipped it (no 401 hook line), and the fix1 receipt checks (revision >= 1, `to` any state).
-API_FN_NO_HOOK = variant(API_FN, [(HOOK_401, "", 1)], "api()")
+# B-R-001 control: the fix1 receipt checks (revision >= 1, `to` any state).
 # C-R-001 F1: the page's Log out handler as shipped (the same cut report_citation_dom_test.py and
-# report_dictation_host_dom_test.py take), and as fix2 shipped it (no hook line, control).
+# report_dictation_host_dom_test.py take). Its controls without the end-list call (and api()'s) are retired by S7-U5: auth.js
+# now tells every document of the intent before the network, so this area's own session-ended listener ends it without
+# them (Astra S7-U5-SPEC-B-F01/F02; the one-off counterexamples are kept with the S7-U5 fix1 evidence).
 LOGOUT_BLOCK = slice_between(MAIN, "    // ② 로그아웃", "    // 다른 사람이 잡거나 놓은 걸")
-LOGOUT_BLOCK_NO_HOOK = variant(LOGOUT_BLOCK, [(LOGOUT_HOOK, "", 1)], "the Log out handler")
-# What the handler calls, as stand-ins that log their order. The draft write and the hold release are POSTs the test can
-# hold; stashReport() also logs whether the request area had already ended when that first network wait began.
+# What the handler calls, as stand-ins that log their order. stashReport() is the draft write of the logout's preparation
+# (S7-U5 §8-b): a POST the test can hold, answered "saved" as the shipped stashReport() answers a stored write; it logs
+# whether the request area had ended when it began. The page state the preparation reads (the selected study's base
+# version, the citation and structure keep lists, the settle wait) is the empty case here: nothing else is under test.
 LOGOUT_STANDINS = """
-let insertInFlight = false;
+let insertInFlight = false, commitInFlight = false, selectionSeq = 0, user = 'syn-technician';
+const RFIELDS = ['findings', 'conclusion', 'recommendation'];
+const reportBaseVersion = (uid, fallback) => fallback;
+const citations = { keepIds: () => undefined }, structureState = { keepIds: () => undefined };
+const settleStash = async () => true, markConverge = () => {}, heldByOther = () => null, cur = () => null;
+const reportNeedsWrite = () => true;
 window.synInsert = value => { insertInFlight = value; };
 const reportPreview = { close() { window.synOrder.push('preview'); } };
 function closeSR() { window.synOrder.push('closeSR'); }
@@ -323,11 +332,7 @@ async function stashReport() {
   window.synOrder.push('stash:' + (document.querySelector('#image-request-queue-lock').hidden ? 'open' : 'ended'));
   await fetch(API + '/syn/draft', { method: 'POST', headers: { 'X-KIN-CSRF': '1' } });
   window.synOrder.push('stashed');
-}
-async function releaseHold() {
-  window.synOrder.push('release');
-  await fetch(API + '/syn/release', { method: 'POST', headers: { 'X-KIN-CSRF': '1' } });
-  window.synOrder.push('released');
+  return 'saved';
 }
 """
 BLOCK_FIX1_RECEIPT = variant(BLOCK, [(
@@ -753,18 +758,13 @@ class ImageRequestStructureTest(unittest.TestCase):
         self.assertIn("      if (res.status === 401) {\n" + HOOK_401 + LOGOUT_AWAIT, API_FN)
         self.assertEqual(1, BLOCK.count("      (window.kinOn401 = window.kinOn401 || []).push(end);\n"))
         # C-R-001 F1: every other place the page starts a logout calls the same list before its first network wait. The
-        # confirmed Log out calls it after the insertion refusal, the confirm and its synchronous closers, and before the
-        # draft write, the hold release and the logout, whose order stays as it was.
+        # confirmed Log out is no longer read here: since S7-U5 (§8) it first saves the draft and only then ends the page,
+        # an order m12 runs on the handler as shipped (Astra S7-U5-SPEC-B-F02 8-f). The other starts keep their lines.
         for name, shipped, _ in U4C_LINE_HOOKS:
+            if name == "hook-logout":
+                continue
             with self.subTest(hook=name):
                 self.assertEqual(1, MAIN.count(shipped))
-        hook = LOGOUT_BLOCK.index(LOGOUT_HOOK)
-        for before in ("if (insertInFlight) {", 'if (!confirm("로그아웃하시겠습니까?")) return;', "loggingOut = true;",
-                       "endPatientCopy();"):
-            self.assertLess(LOGOUT_BLOCK.index(before), hook, before)
-        steps = [LOGOUT_BLOCK.index(step) for step in ("await stashReport();", "await releaseHold();", "await KinAuth.logout();")]
-        self.assertEqual(sorted(steps), steps)
-        self.assertLess(hook, steps[0])
         self.assertIn(U4C_LINE_HOOKS[1][1], slice_between(MAIN, "    const dictation = KinDictation.createController({",
                                                            "    KinDictation.mount("))
         # C-R-001 F2: own requests are the server's (#7 view=mine ids); neither block compares an actor string.
@@ -845,6 +845,15 @@ class Harness(unittest.TestCase):
         self.mine_calls, self.mine_requests, self.mine_errors, self.held_mine = [], [], [], None
         self.detail_calls, self.detail_errors, self.held_detail = [], [], None
         self.unexpected, self.errors, self.dialogs, self.finished = [], [], [], []
+        self.context = None
+        self.fresh_context()
+
+    def fresh_context(self):
+        """A new browser context for an independent case (S7-U5 §0.C 6): with the shipped auth.js a logout's end state
+        stays in the origin's storage until the next explicit login, so a case after it in the same context would find no
+        session. The earlier context is closed; the request logs carry on."""
+        if self.context is not None:
+            self.context.close()
         self.context = self.browser.new_context(viewport={"width": 1400, "height": 900}, timezone_id="UTC")
         self.context.route("**/*", self.route)
         self.page = self.context.new_page()
@@ -2594,9 +2603,11 @@ class MainRequestDOMTest(Harness):
 
     def test_m09_a_401_ends_the_area_before_the_logout_answers(self):
         a = uid(11)
-        cases = (("queue read", "shipped", API_FN), ("write", "shipped", API_FN), ("queue read", "no-hook", API_FN_NO_HOOK))
+        # The control of api() without the end-list line is retired (S7-U5): see LOGOUT_BLOCK above.
+        cases = (("queue read", "shipped", API_FN), ("write", "shipped", API_FN))
         for trigger, label, api_fn in cases:
             with self.subTest(trigger=trigger, api=label):
+                self.fresh_context()
                 self.logouts = []
                 self.held_writes = self.held_reads = None
                 self.write_errors = []
@@ -2634,22 +2645,18 @@ class MainRequestDOMTest(Harness):
                     self.release(route, reply, status)
                     late_write_paints = int((self.queue()["detail"] or {}).get("result", [None])[0] == "saved")
                 self.held_writes = None
-                if label == "no-hook":
-                    self.assertEqual((1, 1), (late_read_paints, late_write_paints),
-                                     "without the hook the late read and write paint while the logout is held")
-                else:
-                    self.assertEqual((["failed", M_ENDED, "", True], [], None), (at_401["lock"], at_401["items"], at_401["detail"]),
-                                     "ended at the 401, before the logout answered")
-                    self.assertEqual((0, 0), (late_read_paints, late_write_paints))
-                    seen, reading = self.queue(), self.reading()
-                    self.assertEqual((["failed", M_ENDED, "", True], [], None, False, "ended"),
-                                     (seen["lock"], seen["items"], seen["detail"], reading["shown"], reading["state"]))
-                    # Nothing new is read or sent: another reading study, the page's controls are gone.
-                    writes, queue_calls = len(self.writes), len(self.queue_calls)
-                    self.pick(12)
-                    self.settle()
-                    self.assertEqual((reads + 1, writes, queue_calls), (len(self.reads), len(self.writes), len(self.queue_calls)))
-                    self.assertEqual(0, self.page.locator("#image-request-queue button:visible, #image-request-p button:visible").count())
+                self.assertEqual((["failed", M_ENDED, "", True], [], None), (at_401["lock"], at_401["items"], at_401["detail"]),
+                                 "ended at the 401, before the logout answered")
+                self.assertEqual((0, 0), (late_read_paints, late_write_paints))
+                seen, reading = self.queue(), self.reading()
+                self.assertEqual((["failed", M_ENDED, "", True], [], None, False, "ended"),
+                                 (seen["lock"], seen["items"], seen["detail"], reading["shown"], reading["state"]))
+                # Nothing new is read or sent: another reading study, the page's controls are gone.
+                writes, queue_calls = len(self.writes), len(self.queue_calls)
+                self.pick(12)
+                self.settle()
+                self.assertEqual((reads + 1, writes, queue_calls), (len(self.reads), len(self.writes), len(self.queue_calls)))
+                self.assertEqual(0, self.page.locator("#image-request-queue button:visible, #image-request-p button:visible").count())
                 self.assertTrue(self.page.url.endswith("/harness/main.html"), "the logout has not answered yet")
                 self.logouts[0].fulfill(status=204, body="")
                 self.page.wait_for_url("**/harness/index.html")
@@ -2837,17 +2844,20 @@ class MainRequestDOMTest(Harness):
         seen = self.queue()
         self.assertEqual((["failed", M_ENDED, "", True], [], None), (seen["lock"], seen["items"], seen["detail"]))
 
-    def test_m12_log_out_ends_the_area_before_its_first_network_wait(self):
+    def test_m12_log_out_ends_the_area_once_its_draft_is_saved(self):
+        # S7-U5 §8 (Astra S7-U5-SPEC-B-F02): the confirmed Log out first saves the draft (the preparation, not yet the
+        # end: the area stays as it is and no logout POST leaves), then ends the page through the end list and only then
+        # lets auth.js send the logout POST. Late answers after the end paint nothing and nothing more is read or sent.
         a = uid(11)
-        cases = (("shipped", LOGOUT_BLOCK, "draft write"), ("shipped", LOGOUT_BLOCK, "logout POST"),
-                 ("no-hook", LOGOUT_BLOCK_NO_HOOK, "draft write"))
-        for label, handler, held in cases:
-            with self.subTest(handler=label, held=held):
+        first = ["confirm", "preview", "closeSR", "endPatientCopy"]
+        for held in ("draft write", "logout POST"):
+            with self.subTest(held=held):
+                self.fresh_context()
                 self.logouts = []
                 self.held_posts = [] if held == "draft write" else None
                 self.held_writes = self.held_reads = None
                 self.server.items[rid(21)].update(state="Requested", revision=1, note=None, handler=None)
-                self.open_main(real_auth=True, logout=handler)
+                self.open_main(real_auth=True, logout=LOGOUT_BLOCK)
                 self.page.evaluate("() => KinAuth.init()")
                 self.open_queue()
                 self.open_item(21, "Requested")
@@ -2863,12 +2873,20 @@ class MainRequestDOMTest(Harness):
                 self.page.evaluate("() => document.querySelector('#logout').click()")
                 if held == "draft write":
                     self.wait_until(lambda: len(self.held_posts) == 1, "the held draft write")
-                else:
-                    self.wait_until(lambda: len(self.logouts) == 1, "POST /auth/logout (held)")
+                    self.settle()
+                    seen = self.queue()
+                    self.assertEqual((False, "SYN note before Log out", [], ["/api/syn/draft"], first + ["stash:open"]),
+                                     (seen["lock"][3], self.page.evaluate("() => document.querySelector('#image-request-note').value"),
+                                      self.logouts, self.page_posts, self.page.evaluate("() => window.synOrder.slice()")),
+                                     "while the draft is written the page is still in use: nothing ended, no logout POST")
+                    self.release(self.held_posts.pop(0), {})
+                self.wait_until(lambda: len(self.logouts) == 1, "POST /auth/logout (held)")
                 self.settle()
                 at_wait = self.queue()
                 note = self.page.evaluate("() => document.querySelector('#image-request-note').value")
-                order = self.page.evaluate("() => window.synOrder.slice()")
+                self.assertEqual((first + ["stash:open", "stashed"], ["/api/syn/draft"]),
+                                 (self.page.evaluate("() => window.synOrder.slice()"), self.page_posts))
+                self.assertIsNone(self.page.evaluate("() => KinAuth.session()"), "no identity once the end began (§0.C 3)")
                 self.release(self.held_reads[0][1], self.server.study(a))
                 late_read_paints = int(self.reading()["state"] == "ready")
                 self.held_reads = None
@@ -2878,31 +2896,13 @@ class MainRequestDOMTest(Harness):
                 late_write_paints = int((self.queue()["detail"] or {}).get("result", [None])[0] == "saved")
                 self.held_writes = None
                 ended = at_wait["lock"] == ["failed", M_ENDED, "", True]
-                first = ["confirm", "preview", "closeSR", "endPatientCopy"]
-                if label == "no-hook":
-                    self.assertEqual((False, "SYN note before Log out", 1, 1), (ended, note, late_read_paints, late_write_paints),
-                                     "without the hook the area waits for the logout and paints late answers")
-                    self.assertEqual(first + ["stash:open"], order)
-                else:
-                    self.assertEqual((True, "", [], None, 0, 0), (ended, note, at_wait["items"], at_wait["detail"],
-                                                                  late_read_paints, late_write_paints))
-                    self.assertEqual(first + ["stash:ended"] + (["stashed", "release", "released"] if held == "logout POST" else []),
-                                     order)
-                    self.pick(12)
-                    self.settle()
-                    self.assertEqual((reads, writes, queue_calls), (len(self.reads), len(self.writes), len(self.queue_calls)))
-                    self.assertEqual(0, self.page.locator("#image-request-queue button:visible, #image-request-p button:visible").count())
-                if held == "draft write":
-                    # The draft write, then the hold release, then the logout: the order the handler had.
-                    self.assertEqual(([], ["/api/syn/draft"]), (self.logouts, self.page_posts))
-                    self.release(self.held_posts.pop(0), {})
-                    self.wait_until(lambda: len(self.held_posts) == 1, "the held hold release")
-                    self.assertEqual(([], ["/api/syn/draft", "/api/syn/release"]), (self.logouts, self.page_posts))
-                    self.release(self.held_posts.pop(0), {})
-                    self.wait_until(lambda: len(self.logouts) == 1, "POST /auth/logout")
+                self.assertEqual((True, "", [], None, 0, 0), (ended, note, at_wait["items"], at_wait["detail"],
+                                                              late_read_paints, late_write_paints))
+                self.pick(12)
+                self.settle()
+                self.assertEqual((reads, writes, queue_calls), (len(self.reads), len(self.writes), len(self.queue_calls)))
+                self.assertEqual(0, self.page.locator("#image-request-queue button:visible, #image-request-p button:visible").count())
                 self.held_posts = None
-                self.assertEqual(first + ["stash:" + ("open" if label == "no-hook" else "ended"), "stashed", "release", "released"],
-                                 self.page.evaluate("() => window.synOrder.slice()"))
                 self.assertTrue(self.page.url.endswith("/harness/main.html"), "the logout has not answered yet")
                 self.logouts[0].fulfill(status=204, body="")
                 self.page.wait_for_url("**/harness/index.html")
@@ -2911,6 +2911,7 @@ class MainRequestDOMTest(Harness):
         for label, setup, order in (("confirm cancelled", "() => { window.synConfirm = false; }", ["confirm"]),
                                     ("insertion in flight", "() => window.synInsert(true)", [])):
             with self.subTest(label):
+                self.fresh_context()
                 self.logouts = []
                 self.server.items[rid(21)].update(state="Requested", revision=1, note=None, handler=None)
                 self.open_main(real_auth=True, logout=LOGOUT_BLOCK)
