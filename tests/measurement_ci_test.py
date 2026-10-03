@@ -2249,6 +2249,10 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertGreaterEqual(invocation.kwargs['timeout'],inner+35)
 
     def test_gateway_e2e_profile_is_exact_dispatch_only_and_fits_the_shared_deadline(self):
+        """The focused workflow's two contract checks (steps that request the profile, dispatch options/default) are
+        primary. The literal-absence check beside them preserves the earlier literal-ban regression with one exact
+        record-run argument excepted; it is a supporting check, not a reader that proves what an arbitrary shell
+        program does."""
         profile = ci.PROFILES['gateway-e2e']
         self.assertEqual(profile['suites'], (('gateway_pipeline_live.py', 'GatewayPipelineLive', 'ci-eg1-gateway'),))
         self.assertEqual(profile['out'].name, 'gateway-e2e-ci')
@@ -2273,11 +2277,265 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(validate.count('--profile gateway-e2e'), 0)
         dispatch = (ci.ROOT/'.github/workflows/gateway-e2e.yml').read_text(encoding='utf-8')
         self.assertEqual(dispatch.count('--profile gateway-e2e'), 1)
-        # A record-run `--file <path>` argument only hashes a file the run reads (S7-U4b: output-integration.yml's
-        # measurement_ci_test.py line records gateway-e2e.yml); every other mention of gateway-e2e there still fails.
-        import re
-        integration = re.sub(r'--file\s+\S+', '', (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8'))
-        self.assertNotIn('gateway-e2e', integration)
+        # The Focused integration dispatcher can never run this profile: none of its steps requests it and none of its
+        # dispatch inputs offers it. These are the contract, not the words in the file, so a record-run
+        # `--file .github/workflows/gateway-e2e.yml` (it only hashes a file its step reads) passes both (S7-CIREC-REC CR-3).
+        # The workflow is read with the installed YAML parser.
+        import copy, re, shlex
+        import yaml
+
+        UNRESOLVED = None
+
+        def requested(step, env):
+            # Every measurement_ci.py profile the step's shell requests, as --profile X or --profile=X. Fail closed
+            # (UNRESOLVED, which runs_profile counts as the forbidden profile): a value is accepted only when it is
+            # a literal, or a $NAME / ${NAME} whose YAML env value (step, job or workflow) is known and whose NAME is
+            # never mentioned in the step's run text except as a plain expansion (so never assigned, exported, read
+            # into or defaulted), or a ${{ inputs.* }} dispatch input, whose offered options offers_profile checks.
+            # No shell is interpreted.
+            text = str(step.get('run') or '')
+            names = {**env, **{str(k): str(v) for k, v in (step.get('env') or {}).items()}}
+            found = []
+            for line in text.replace('\\\n', ' ').splitlines():
+                try:
+                    words = shlex.split(line, comments=True)
+                except ValueError:
+                    if 'tests/measurement_ci.py' in line:
+                        found.append(UNRESOLVED)
+                    continue
+                for index, word in enumerate(words):
+                    if word.endswith('tests/measurement_ci.py'):
+                        rest = words[index+1:]
+                        found += [rest[i+1] for i, arg in enumerate(rest[:-1]) if arg == '--profile']
+                        found += [arg.split('=', 1)[1] for arg in rest if arg.startswith('--profile=')]
+                        if rest[-1:] == ['--profile']:
+                            found.append(UNRESOLVED)
+
+            def literal_or_input(value):
+                if re.fullmatch(r'\$\{\{\s*inputs\.\w+\s*\}\}', value):
+                    return value
+                return UNRESOLVED if re.search(r'[$`]', value) else value
+
+            def resolve(value):
+                if value is UNRESOLVED:
+                    return UNRESOLVED
+                variable = re.fullmatch(r'\$\{?(\w+)\}?', value)
+                if not variable:
+                    return literal_or_input(value)
+                name = variable.group(1)
+                rest_of_text = re.sub(r'\$\{'+name+r'\}|\$'+name+r'(?!\w)', '', text)
+                if name not in names or re.search(r'(?<!\w)'+name+r'(?!\w)', rest_of_text):
+                    return UNRESOLVED
+                return literal_or_input(names[name])
+
+            return [resolve(value) for value in found]
+
+        def runs_profile(workflow, profile):
+            outer = {str(k): str(v) for k, v in (workflow.get('env') or {}).items()}
+            hits = []
+            for name, job in workflow['jobs'].items():
+                scope = {**outer, **{str(k): str(v) for k, v in (job.get('env') or {}).items()}}
+                for index, step in enumerate(job.get('steps', [])):
+                    got = requested(step, scope)
+                    if profile in got or UNRESOLVED in got:
+                        hits.append((name, index))
+            return hits
+
+        def offers_profile(workflow, profile):
+            triggers = workflow.get('on', workflow.get(True)) or {}
+            inputs = ((triggers.get('workflow_dispatch') or {}).get('inputs') or {}) if isinstance(triggers, dict) else {}
+            return [name for name, field in inputs.items()
+                    if profile in [str(option) for option in (field or {}).get('options') or []]
+                    or str((field or {}).get('default')) == profile]
+
+        # Secondary check: the earlier literal ban on the profile name anywhere in the focused workflow is kept, with one
+        # exception, because the step that records the files it reads names `.github/workflows/gateway-e2e.yml`. The
+        # installed YAML composer locates each jobs.<job>.steps[].run value; only a run in the approved direct form is
+        # touched: a single-line plain scalar written right after `run: `, in a step without `shell` and a workflow and
+        # job without `defaults`, made only of plain words (no quote, `;`, `&`, `|`, `$`, redirection, glob or comment),
+        # whose first word is `python3` and second `scripts/record-run.py`, with record-run's own options as exact
+        # --run-dir/--cwd/--file pairs before the child command's `--`. Within that option region only the whole pair
+        # `--file .github/workflows/gateway-e2e.yml` is removed. Anything else (echo or another command first, a
+        # preceding command, quoting, env, dispatch, a step name, a path suffix, another path, `--file=`, the child
+        # command region) keeps its text. It is not a reader that proves what an arbitrary shell program does; the two
+        # contract checks above stay the primary ones.
+        recorded_file = '.github/workflows/gateway-e2e.yml'
+        plain_words = re.compile(r'[A-Za-z0-9_./=:,+@%-]+(?: [A-Za-z0-9_./=:,+@%-]+)*')
+
+        def entry(mapping, key):
+            # (key node, value node) when the mapping holds the key exactly once; a repeated key is not settled here.
+            if not isinstance(mapping, yaml.MappingNode):
+                return None
+            pairs = [(k, v) for k, v in mapping.value if isinstance(k, yaml.ScalarNode) and k.value == key]
+            return pairs[0] if len(pairs) == 1 else None
+
+        def recorded_runs(text):
+            # (start, end, run without the recorded pair, pairs removed) for each run in the approved direct form.
+            root = yaml.compose(text, Loader=yaml.SafeLoader)
+            jobs = entry(root, 'jobs')
+            if entry(root, 'defaults') or not jobs or not isinstance(jobs[1], yaml.MappingNode):
+                return []
+            found = []
+            for _, job in jobs[1].value:
+                steps = entry(job, 'steps')
+                if entry(job, 'defaults') or not steps or not isinstance(steps[1], yaml.SequenceNode):
+                    continue
+                for step in steps[1].value:
+                    run = entry(step, 'run')
+                    if not run or entry(step, 'shell'):
+                        continue
+                    key, value = run
+                    if not (isinstance(value, yaml.ScalarNode) and value.style is None
+                            and re.fullmatch(r': +', text[key.end_mark.index:value.start_mark.index])):
+                        continue
+                    raw = text[value.start_mark.index:value.end_mark.index]
+                    if raw != value.value or not plain_words.fullmatch(raw):
+                        continue
+                    words = raw.split(' ')
+                    if words[:2] != ['python3', 'scripts/record-run.py'] or '--' not in words:
+                        continue
+                    child = words.index('--')
+                    options = words[2:child]
+                    pairs = list(zip(options[0::2], options[1::2]))
+                    if len(options) % 2 or any(option not in ('--run-dir', '--cwd', '--file') for option, _ in pairs):
+                        continue
+                    kept = [pair for pair in pairs if pair != ('--file', recorded_file)]
+                    found.append((value.start_mark.index, value.end_mark.index,
+                                  ' '.join(words[:2] + [word for pair in kept for word in pair] + words[child:]),
+                                  len(pairs) - len(kept)))
+            return found
+
+        def without_recorded_file(text):
+            removed = 0
+            for start, end, kept, count in sorted(recorded_runs(text), reverse=True):
+                text = text[:start] + kept + text[end:]
+                removed += count
+            return text, removed
+
+        raw_integration = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        residue, removed = without_recorded_file(raw_integration)
+        self.assertEqual(removed, 1)
+        self.assertNotIn('gateway-e2e', residue)
+
+        def rejected(text, check):
+            # `check` is the check that must catch the variant; YAML that fails to parse is not a catch.
+            workflow = yaml.safe_load(text)
+            self.assertIsInstance(workflow, dict)
+            return check(workflow, text)
+
+        def literal_left(workflow, text):
+            return 'gateway-e2e' in without_recorded_file(text)[0]
+
+        def executed(workflow, text):
+            return bool(runs_profile(workflow, 'gateway-e2e'))
+
+        def offered_in(workflow, text):
+            return bool(offers_profile(workflow, 'gateway-e2e'))
+
+        profile_step = '          "$RUNNER_TEMP/output-integration-python/bin/python" tests/measurement_ci.py --profile "$KIN_CI_PROFILE"\n'
+        self.assertIn(profile_step, raw_integration)
+        self.assertEqual(rejected(raw_integration, literal_left), False)
+        for label, variant, check in (
+            ('semicolon', profile_step.replace('"$KIN_CI_PROFILE"', 'gateway-e2e;'), literal_left),
+            ('space', profile_step.replace('"$KIN_CI_PROFILE"', 'gateway-e2e '), literal_left),
+            ('redirection', profile_step.replace('tests/measurement_ci.py', 'tests/measurement_ci.py</dev/null').replace(
+                '"$KIN_CI_PROFILE"', 'gateway-e2e'), literal_left),
+            ('equals', profile_step.replace('--profile "$KIN_CI_PROFILE"', '--profile=gateway-e2e'), executed),
+            ('direct', profile_step.replace('"$KIN_CI_PROFILE"', 'gateway-e2e'), executed),
+            ('reassigned', '          KIN_CI_PROFILE=gateway-e2e\n'+profile_step, executed),
+            ('computed', '          X=".github/workflows/gateway-e2e.yml"; KIN_CI_PROFILE=${X##*/}; KIN_CI_PROFILE=${KIN_CI_PROFILE%.yml}\n'
+                         + profile_step, literal_left),
+            ('recording argument in a general run', '          echo --file '+recorded_file+'\n'+profile_step, literal_left),
+            ('recording argument in a quoted value', '          X="--file '+recorded_file+'"\n'+profile_step, literal_left),
+        ):
+            mutated = raw_integration.replace(profile_step, variant)
+            self.assertNotEqual(mutated, raw_integration, label)
+            self.assertTrue(rejected(mutated, check), label)
+        for label, mutated, check in (
+            ('path suffix', raw_integration.replace(recorded_file, recorded_file+'.bak'), literal_left),
+            ('another path', raw_integration.replace(recorded_file, '.github/workflows/gateway-e2e-copy.yml'), literal_left),
+            ('child command region', raw_integration.replace('tests/measurement_ci_test.py\n', 'tests/measurement_ci_test.py --file '+recorded_file+'\n'),
+             literal_left),
+            ('recording argument inside a quoted value', raw_integration.replace(
+                '--cwd .', '--cwd "x --file '+recorded_file+' y"'), literal_left),
+            ('other script', raw_integration.replace('scripts/record-run.py', 'scripts/other-run.py'), literal_left),
+            ('YAML list entry', raw_integration.replace('          - identity-fields\n', '          - identity-fields\n          - gateway-e2e\n'), literal_left),
+            ('dispatch option', raw_integration.replace('          - identity-fields\n', '          - identity-fields\n          - gateway-e2e\n'), offered_in),
+            ('dispatch default', raw_integration.replace('default: output-integration', 'default: gateway-e2e'), offered_in),
+            ('workflow env', raw_integration.replace('permissions:\n', 'env:\n  KIN_CI_PROFILE: gateway-e2e\npermissions:\n'), literal_left),
+            ('step env', raw_integration.replace('KIN_CI_PROFILE: ${{ inputs.profile }}', 'KIN_CI_PROFILE: gateway-e2e'), executed),
+        ):
+            self.assertNotEqual(mutated, raw_integration, label)
+            self.assertTrue(rejected(mutated, check), label)
+        # C-R-001 F01: the exception holds only for a run that is itself the direct record-run call. The same words
+        # anywhere else keep their text, and so does a real record-run written in a form other than the approved one.
+        record_command = next(line for line in raw_integration.splitlines()
+                              if line.startswith('        run: python3 scripts/record-run.py ')).split('run: ', 1)[1]
+        record_run = 'run: '+record_command
+        shaped = 'python3 scripts/record-run.py --run-dir tmp/x --file '+recorded_file
+        for label, mutated in (
+            ('echo of a record-run', raw_integration.replace(record_run, 'run: echo '+record_command)),
+            ('after a preceding command', raw_integration.replace(record_run, 'run: true && '+record_command)),
+            ('variable assignment first', raw_integration.replace(record_run, 'run: X=1 '+record_command)),
+            ('command list in the option region', raw_integration.replace(record_run, record_run.replace(' --cwd . ', ' --cwd . ; '))),
+            ('--file= form', raw_integration.replace('--file '+recorded_file, '--file='+recorded_file)),
+            ('YAML double-quoted run', raw_integration.replace(record_run, 'run: "'+record_command+'"')),
+            ('YAML single-quoted run', raw_integration.replace(record_run, "run: '"+record_command+"'")),
+            ('shell-quoted run', raw_integration.replace(record_run, "run: |\n          '"+record_command+"'")),
+            ('block scalar run', raw_integration.replace(record_run, 'run: |\n          '+record_command)),
+            ('custom step shell', raw_integration.replace(record_run, 'shell: cat {0}\n        '+record_run)),
+            ('record-run-shaped quoted env', raw_integration.replace(
+                'KIN_CI_PROFILE: ${{ inputs.profile }}\n', 'KIN_CI_PROFILE: ${{ inputs.profile }}\n          X: "'+shaped+'"\n')),
+            ('record-run-shaped plain env', raw_integration.replace(
+                'KIN_CI_PROFILE: ${{ inputs.profile }}\n', 'KIN_CI_PROFILE: ${{ inputs.profile }}\n          X: '+shaped+' -- true\n')),
+            ('record-run-shaped step name', raw_integration.replace(
+                '- name: Output integration profile safeguards and exact selection', '- name: '+shaped+' -- true')),
+        ):
+            self.assertNotEqual(mutated, raw_integration, label)
+            self.assertTrue(rejected(mutated, literal_left), label)
+        integration = yaml.safe_load(raw_integration)
+        # Not vacuous: the dispatch input is read (its own default profile is offered).
+        self.assertEqual(offers_profile(integration, 'output-integration'), ['profile'])
+        self.assertEqual(runs_profile(integration, 'gateway-e2e'), [])
+        self.assertEqual(offers_profile(integration, 'gateway-e2e'), [])
+        # Controls on copies of the parsed workflow: each forbidden form fails its own check, and recording the file
+        # in a record-run step fails neither.
+        job = lambda workflow: next(iter(workflow['jobs'].values()))
+        stepped = copy.deepcopy(integration)
+        job(stepped)['steps'].append({'run': 'python3 tests/measurement_ci.py --profile gateway-e2e'})
+        self.assertEqual((len(runs_profile(stepped, 'gateway-e2e')), offers_profile(stepped, 'gateway-e2e')), (1, []))
+        through_env = copy.deepcopy(integration)
+        live = next(step for step in job(through_env)['steps'] if requested(step, {}) == ['${{ inputs.profile }}'])
+        live['env']['KIN_CI_PROFILE'] = 'gateway-e2e'
+        self.assertEqual(len(runs_profile(through_env, 'gateway-e2e')), 1)
+        # F01: the run text can reassign the profile variable before the unchanged command, or hand it a value this
+        # check cannot settle; each must fail, with the YAML env left as it is.
+        selected = lambda workflow: next(step for step in job(workflow)['steps'] if requested(step, {}) == ['${{ inputs.profile }}'])
+        for prefix in ('KIN_CI_PROFILE=gateway-e2e\n', 'export KIN_CI_PROFILE=gateway-e2e\n', 'env KIN_CI_PROFILE=gateway-e2e true\n',
+                       'read KIN_CI_PROFILE <<< gateway-e2e\n', ': "${KIN_CI_PROFILE:=gateway-e2e}"\n', 'KIN_CI_PROFILE=$(echo gateway-e2e)\n'):
+            reassigned = copy.deepcopy(integration)
+            step = selected(reassigned)
+            step['run'] = prefix + step['run']
+            self.assertEqual(len(runs_profile(reassigned, 'gateway-e2e')), 1, prefix)
+        for value in ('"$(echo gateway-e2e)"', '`echo gateway-e2e`', '"$OTHER_PROFILE"'):
+            unsettled = copy.deepcopy(integration)
+            step = selected(unsettled)
+            step['run'] = step['run'].replace('"$KIN_CI_PROFILE"', value)
+            self.assertEqual(len(runs_profile(unsettled, 'gateway-e2e')), 1, value)
+        unknown_env = copy.deepcopy(integration)
+        del selected(unknown_env)['env']['KIN_CI_PROFILE']
+        self.assertEqual(len(runs_profile(unknown_env, 'gateway-e2e')), 1)
+        expression_env = copy.deepcopy(integration)
+        selected(expression_env)['env']['KIN_CI_PROFILE'] = '${{ github.event.inputs.profile }}'
+        self.assertEqual(len(runs_profile(expression_env, 'gateway-e2e')), 1)
+        offered = copy.deepcopy(integration)
+        triggers = offered.get('on', offered.get(True))
+        triggers['workflow_dispatch']['inputs']['profile']['options'].append('gateway-e2e')
+        self.assertEqual((runs_profile(offered, 'gateway-e2e'), offers_profile(offered, 'gateway-e2e')), ([], ['profile']))
+        recorded = copy.deepcopy(integration)
+        job(recorded)['steps'].append({'run': 'python3 scripts/record-run.py --run-dir tmp/x --cwd . --file '
+                                              '.github/workflows/gateway-e2e.yml -- python3 -B tests/measurement_ci_test.py'})
+        self.assertEqual((runs_profile(recorded, 'gateway-e2e'), offers_profile(recorded, 'gateway-e2e')), ([], []))
         self.assertEqual(ci.GATEWAY_HANDOFF, 'gateway-project.json')
         self.assertTrue(ci.GATEWAY_PROJECT.fullmatch('kin-eg1-gw-0123456789ab'))
         self.assertIsNone(ci.GATEWAY_PROJECT.fullmatch('kin-gateway'))
