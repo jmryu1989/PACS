@@ -231,14 +231,18 @@ class WorklistSearchOwnerContract(unittest.TestCase):
         self.assertEqual({"criteria": C1, "empty": False, "pending": False}, s.read(C1))
         s.mode.select_option("manual")
         writes = [c for c in s.calls_since_mount() if c[0] != "getItem"]
-        self.assertEqual([["setItem", key, '{"version":1,"mode":"manual","clearResults":false}']], writes)
-        self.assertEqual('{"version":1,"mode":"manual","clearResults":false}', a.evaluate("k => localStorage.getItem(k)", key))
+        # The options' meaning is the contract; the serialization (key order, spaces) is the module's own business.
+        self.assertEqual([["setItem", key]], [w[:2] for w in writes], "exactly one write, to this owner's key")
+        manual_kept = {"version": 1, "mode": "manual", "clearResults": False}
+        self.assertEqual(manual_kept, json.loads(writes[0][2]))
+        self.assertEqual(manual_kept, json.loads(a.evaluate("k => localStorage.getItem(k)", key)))
         h.criteria(a, C2)
         self.assertEqual({"criteria": C1, "empty": False, "pending": True}, s.read(C2))
         s.call("apply")
         self.assertEqual({"criteria": C2, "empty": False, "pending": False}, s.read(C2))
         s.clear_box.check()
-        self.assertEqual('{"version":1,"mode":"manual","clearResults":true}', a.evaluate("k => localStorage.getItem(k)", key))
+        self.assertEqual({"version": 1, "mode": "manual", "clearResults": True},
+                         json.loads(a.evaluate("k => localStorage.getItem(k)", key)))
         # Re-mount on the same origin: the stored options come back, the Clear barrier holds until an explicit apply.
         a.reload()
         s = h.module(a, OWNER_A, C2)
@@ -249,6 +253,13 @@ class WorklistSearchOwnerContract(unittest.TestCase):
         self.assertTrue(s.read(C3)["empty"], "the barrier survives another read (refresh)")
         s.call("apply")
         self.assertEqual({"criteria": C2, "empty": False, "pending": False}, s.read(C2))
+        # The same valid options written with another key order and spaces restore the same way (meaning, not bytes).
+        a.evaluate("([k, v]) => localStorage.setItem(k, v)", [key, '{ "clearResults": true,\n "mode": "manual", "version": 1 }'])
+        a.reload()
+        s = h.module(a, OWNER_A, C2)
+        self.assertEqual({"mode": "manual", "mode_disabled": False, "search_disabled": False, "clear": True,
+                          "clear_disabled": False}, s.controls())
+        expect(s.status).to_have_text("")
         # Stored values the module cannot use: the existing sentence, defaults.
         for bad in ("x" * 201, '{"version":1,"mode":"manual","clearResults":false,"patient":"SYN"}'):
             a.evaluate("([k, v]) => localStorage.setItem(k, v)", [key, bad])
