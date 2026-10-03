@@ -11,13 +11,13 @@ from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError
 from urllib.request import Request
 from pydicom import dcmread
-from invariants_live import AUDIT_GUARD_OFF, AUDIT_GUARD_ON, LiveStack
+from invariants_live import AUDIT_GUARD_OFF, AUDIT_GUARD_ON, LiveStack, ROOT
 
 
 def psql(sql):
     # The 100-row pagination teardown exceeds Windows' argv limit. Pass SQL on
     # stdin so the full-row equality guard is retained for every captured row.
-    result=subprocess.run(['docker','exec','-i','-e','PGTZ=UTC','kin-db','psql','-XqAt','-U','kin','-d','kin','-v','ON_ERROR_STOP=1'],
+    result=subprocess.run(['docker','compose','exec','-T','-e','PGTZ=UTC','db','psql','-XqAt','-U','kin','-d','kin','-v','ON_ERROR_STOP=1'],cwd=ROOT,
         input=sql,encoding='utf-8',capture_output=True,timeout=30)
     if result.returncode:raise RuntimeError('Owned Connect SQL failed: '+result.stderr)
     return [line for line in result.stdout.splitlines() if line.strip()]
@@ -154,7 +154,7 @@ class ConnectGateAPI(unittest.TestCase):
 
     @contextmanager
     def database_lock(self, sql):
-        process=subprocess.Popen(['docker','exec','-i','kin-db','psql','-XqAt','-U','kin','-d','kin','-v','ON_ERROR_STOP=1'],
+        process=subprocess.Popen(['docker','compose','exec','-T','db','psql','-XqAt','-U','kin','-d','kin','-v','ON_ERROR_STOP=1'],cwd=ROOT,
             stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding='utf-8')
         try:
             process.stdin.write("BEGIN; SET LOCAL statement_timeout='8s'; "+sql+"; SELECT 'LOCKED';\n");process.stdin.flush()

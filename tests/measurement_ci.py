@@ -580,9 +580,9 @@ def main(profile_name):
         seed_source()
         run('database', compose+['up','-d','--wait','db'])
         # The image's temporary initdb server only listens on its local socket.
-        run('database-tcp', ['docker','exec','kin-db','sh','-c',
+        run('database-tcp', compose+['exec','-T','db','sh','-c',
             'for n in $(seq 1 60); do pg_isready -h 127.0.0.1 -U kin && exit 0; sleep 1; done; exit 1'], timeout=70)
-        run('keycloak-database', ['docker','exec','kin-db','createdb','-U','kin','keycloak'])
+        run('keycloak-database', compose+['exec','-T','db','createdb','-U','kin','keycloak'])
         run('stack', compose+['up','-d','--build'], timeout=900)
         for path in ['/api/health','/auth/realms/kin/.well-known/openid-configuration']:
             ready_by = min(time.monotonic()+180, deadline)

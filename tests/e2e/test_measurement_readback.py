@@ -4,6 +4,7 @@ from pathlib import Path
 import sys, json, unittest, uuid, subprocess
 import math
 from test_viewer_history import ViewerHistoryE2E, synthetic_ct, expect, literal, base
+from test_worklist import ROOT
 
 
 class MeasurementReadbackE2E(ViewerHistoryE2E):
@@ -129,7 +130,7 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
             actor=self.stack.actor('doctor'), institution=institution,
             kind='member', roles=['radiologist']))
         script = (Path(__file__).parents[1]/'viewer_readback_fault.cjs').read_text(encoding='utf-8')
-        run = subprocess.run(['docker', 'exec', '-i', 'kin-api', 'node'],
+        run = subprocess.run(['docker', 'compose', 'exec', '-T', 'api', 'node'], cwd=ROOT,
             input='const fixture = '+json.dumps(payload)+';\n'+script,
             text=True, encoding='utf-8', capture_output=True, timeout=70)
         self.assertEqual(run.returncode, 0, run.stdout+'\n'+run.stderr)

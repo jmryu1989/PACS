@@ -174,7 +174,7 @@ class FindingAPI(unittest.TestCase):
 
     def hold(self, statement):
         """An open psql transaction that has run the row-locking `statement`; finish_lock() commits it."""
-        process = subprocess.Popen(['docker', 'exec', '-i', 'kin-db', 'psql', '-XqAt', '-U', 'kin', '-d', 'kin', '-v', 'ON_ERROR_STOP=1'],
+        process = subprocess.Popen(['docker', 'compose', 'exec', '-T', 'db', 'psql', '-XqAt', '-U', 'kin', '-d', 'kin', '-v', 'ON_ERROR_STOP=1'], cwd=ROOT,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
         process.stdin.write("BEGIN; SET LOCAL statement_timeout='8s'; "+statement+"; SELECT 'LOCKED';\n"); process.stdin.flush()
         while process.stdout.readline().strip() != 'LOCKED':

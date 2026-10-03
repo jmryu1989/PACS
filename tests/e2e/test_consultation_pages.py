@@ -5,7 +5,7 @@ import sys
 import unittest
 import uuid
 from test_consultations import ConsultationE2E, lit
-from test_worklist import psql
+from test_worklist import psql, ROOT
 
 
 class ConsultationPagesE2E(ConsultationE2E):
@@ -47,16 +47,24 @@ class ConsultationPagesE2E(ConsultationE2E):
             self.assertEqual(self.stack.request('GET','/consultations?direction=received&cursor='+cursor,'doctor2').status,400)
         me=self.stack.request('GET','/me','doctor2').body
         caller=dict(sub=me['sub'],actor=me['actor'],roles=['radiologist'],institution=me['institution'],kind='member')
+        # Each service is built from the constructor types Nest injects, so the real StudyAccessService computes the
+        # caller's scope and a new dependency fails by name instead of arriving as undefined. Only PrismaService is the
+        # transaction: the access policy and page queries then run in the session whose TimeZone was just set.
         script="""const {PrismaClient}=require('@prisma/client');const {ConsultationService}=require('./dist/consultation.service');
-          const prisma=new PrismaClient(),caller=CALLER;
+          const {PrismaService}=require('./dist/prisma.service');const {StudyAccessService}=require('./dist/study-access.service');
+          const {OrthancService}=require('./dist/orthanc.service');const {KeycloakService}=require('./dist/keycloak.service');
+          const prisma=new PrismaClient(),caller=CALLER,orthanc=new OrthancService(),keycloak=new KeycloakService();
+          const build=(type,tx)=>new type(...Reflect.getMetadata('design:paramtypes',type).map(dependency=>
+            dependency===PrismaService?tx:dependency===OrthancService?orthanc:dependency===KeycloakService?keycloak
+            :dependency===StudyAccessService?build(StudyAccessService,tx):(()=>{throw Error('unresolved dependency '+(dependency&&dependency.name));})()));
           (async()=>{try{const result={};for(const zone of ['UTC','Asia/Seoul']){
             result[zone]=await prisma.$transaction(async tx=>{
               await tx.$queryRaw`SELECT set_config('TimeZone',${zone},true)`;
-              const service=new ConsultationService(tx,null),ids=[];let cursor;
+              const service=build(ConsultationService,tx),ids=[];let cursor;
               do{const page=await service.list(caller,{direction:'received',...(cursor?{cursor}:{})});ids.push(...page.items.map(r=>r.id));cursor=page.nextCursor;}while(cursor);
               return ids;
             });}console.log(JSON.stringify(result));}finally{await prisma.$disconnect();}})().catch(e=>{console.error(e);process.exit(1);});""".replace('CALLER',json.dumps(caller))
-        result=subprocess.run(['docker','compose','exec','-T','api','node','-e',script],capture_output=True,text=True,encoding='utf-8',timeout=30)
+        result=subprocess.run(['docker','compose','exec','-T','api','node','-e',script],cwd=ROOT,capture_output=True,text=True,encoding='utf-8',timeout=30)
         self.assertEqual(result.returncode,0,result.stderr);pages=json.loads(result.stdout)
         self.assertEqual(pages['UTC'],found);self.assertEqual(pages['Asia/Seoul'],found)
 
