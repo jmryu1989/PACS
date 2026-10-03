@@ -210,13 +210,23 @@ class AuthAuditLive(unittest.TestCase):
             cls.stack.kc_admin("DELETE", f"/groups/{group_id}")
 
     # ── what the proxy saw: the expected client address ──
+    # Each call names its Compose command in full (S7-TEST-DB-EXEC TG-02): the project is the one this run inherited,
+    # selected by cwd = ROOT alone, never by a fixed container name or a forwarded argument list.
     @classmethod
-    def compose(cls, *args: str) -> str:
-        done = subprocess.run(["docker", "compose", *args], cwd=ROOT, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=60)
+    def proxy_log(cls) -> str:
+        done = subprocess.run(["docker", "compose", "logs", "--no-log-prefix", "proxy"], cwd=ROOT, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=60)
         if done.returncode:
-            raise RuntimeError("harness: docker compose " + args[0] + " failed")
+            raise RuntimeError("harness: the proxy log could not be read")
         return done.stdout
+
+    @classmethod
+    def proxy_addresses(cls) -> list:
+        done = subprocess.run(["docker", "compose", "exec", "-T", "proxy", "hostname", "-i"], cwd=ROOT, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=60)
+        if done.returncode:
+            raise RuntimeError("harness: the proxy container address could not be read")
+        return done.stdout.split()
 
     @classmethod
     def observed_ip(cls) -> str:
@@ -225,7 +235,7 @@ class AuthAuditLive(unittest.TestCase):
         status, _headers, _body = Browser(cls.stack).call("GET", "/api/health?" + mark)
         if status != 200:
             raise RuntimeError(f"harness: the probe request answered {status}")
-        lines = [line for line in cls.compose("logs", "--no-log-prefix", "proxy").splitlines() if mark in line]
+        lines = [line for line in cls.proxy_log().splitlines() if mark in line]
         if len(lines) != 1:
             raise RuntimeError(f"harness: the probe mark is in {len(lines)} proxy log lines (need exactly one)")
         address = lines[0].split(" ", 1)[0]
@@ -325,7 +335,7 @@ class AuthAuditLive(unittest.TestCase):
         forged = Browser(self.stack, real_ip="203.0.113.7", forwarded="203.0.113.8")
         browser = self.login("ma", forged)
         self.assertEqual(204, self.logout(browser))
-        proxy_address = self.compose("exec", "-T", "proxy", "hostname", "-i").split()
+        proxy_address = self.proxy_addresses()
         rows = self.rows_of("ma")[-2:]
         ips = [json.loads(r["detail"])["ip"] for r in rows]
         ip_ok = ips == [self.expected_ip, self.expected_ip] and not set(ips) & {"203.0.113.7", "203.0.113.8", *proxy_address}

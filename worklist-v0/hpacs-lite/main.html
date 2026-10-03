@@ -7237,10 +7237,16 @@
       prep.reason = null;
       showLogoutPanel(prep);
       const current = () => logoutPrep === prep && prep.attempt === attempt && prep.state === "saving";
-      // 결과를 모르는 앞선 쓰기가 남아 있으면 새 쓰기를 그것과 경쟁시키지 않는다(8-d).
-      if (prep.uid && !await settleStash(prep.uid)) {
-        if (current()) failLogout(prep, "pending");
-        return;
+      // 결과를 모르는 앞선 쓰기가 남아 있으면 새 쓰기를 그것과 경쟁시키지 않는다(8-d). 그 기다림도 한도 안에서만 한다.
+      if (prep.uid) {
+        let timer;
+        const settled = await Promise.race([settleStash(prep.uid),
+          new Promise(resolve => { timer = setTimeout(resolve, LOGOUT_SAVE_MS, false); })]);
+        clearTimeout(timer);
+        if (!settled) {
+          if (current()) failLogout(prep, "pending");
+          return;
+        }
       }
       if (!current()) return;
       if (prep.uid) {
@@ -7269,8 +7275,12 @@
       if (logoutPrep !== prep || prep.state !== "saving") return;
       prep.state = "failed";
       prep.reason = reason;
-      // 서버 행은 화면과 다를 수 있다. 다음 저장(자동 저장 포함)이 서버를 화면에 맞추게 표시해 둔다.
-      if (prep.uid) markConverge(prep.uid);
+      if (prep.uid) {
+        // 거절 뒤의 다시 읽기(점유 등)가 편집기를 바꾸었을 수 있다 — 화면에 남기는 것은 확보한 원문이다.
+        if (selectedUid === prep.uid && selectionSeq === prep.seq) RFIELDS.forEach(k => { $("#" + k).value = prep.fields[k]; });
+        // 서버 행은 화면과 다를 수 있다. 다음 저장(자동 저장 포함)이 서버를 화면에 맞추게 표시해 둔다.
+        markConverge(prep.uid);
+      }
       showLogoutPanel(prep);
     }
 

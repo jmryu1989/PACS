@@ -268,7 +268,7 @@
       "Object and Array only as <Name>.<member>, <Name><type arguments> or new <Name>(...), and never after a declaring keyword; process only as process.<process_members>; Reflect only as Reflect.<reflect_members>; prototype only as <prototype_owners>.prototype; getPrototypeOf only as Object.getPrototypeOf(...) compared by === or !==; constructor only as a declaration whose body holds no return; no class heading in a *.controller.ts file has extends, the heading read to the '{' of its body past type parameters and heritage clauses as class_heading lists (S5-U1c-F08)",
       "a '/' outside a comment or literal only where regex_or_division reads it as a regex literal or a division from the token before it; a '/' whose reading turns on grammar the lexer does not track refuses the file, and a regex literal spells no name the name checks read (S5-U1c-F07)"
     ],
-    "packages": ["@nestjs/common", "@nestjs/common/constants", "@nestjs/core", "@prisma/client", "crypto", "express", "jose", "node:crypto", "node:http", "rxjs"],
+    "packages": ["@nestjs/common", "@nestjs/common/constants", "@nestjs/core", "@prisma/client", "crypto", "express", "jose", "net", "node:crypto", "node:http", "rxjs"],
     "loaded_packages": ["express", "node:crypto"],
     "sealed_words": ["Function", "Proxy", "__proto__", "defineProperties", "defineProperty", "eval", "global", "globalThis", "module", "setPrototypeOf"],
     "sealed_strings": ["Reflect", "constructor", "createDecorator", "decorate", "defineMetadata", "getPrototypeOf", "process", "prototype", "require"],
