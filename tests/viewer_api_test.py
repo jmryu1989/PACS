@@ -100,7 +100,7 @@ class ViewerAPI(unittest.TestCase):
     @contextmanager
     def parent_lock(self, changes=None):
         assert self.uid in self.stack.active
-        process = subprocess.Popen(['docker','exec','-i','kin-db','psql','-XqAt','-U','kin','-d','kin','-v','ON_ERROR_STOP=1'],
+        process = subprocess.Popen(['docker','compose','exec','-T','db','psql','-XqAt','-U','kin','-d','kin','-v','ON_ERROR_STOP=1'], cwd=ROOT,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
         sql = f'UPDATE "StudyState" SET {changes} WHERE uid={literal(self.uid)}' if changes else f'SELECT uid FROM "StudyState" WHERE uid={literal(self.uid)} FOR UPDATE'
         try:

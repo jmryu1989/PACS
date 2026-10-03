@@ -11,6 +11,7 @@ from pydicom.uid import generate_uid, CTImageStorage, ExplicitVRLittleEndian
 from pynetdicom import AE
 from playwright.sync_api import expect
 from test_portrait_workspace import PortraitWorkspaceE2E
+from test_worklist import ROOT
 
 
 class ThumbnailRequestsE2E(PortraitWorkspaceE2E):
@@ -140,7 +141,7 @@ class ThumbnailRequestsE2E(PortraitWorkspaceE2E):
     def evidence(self, page, label):
         self.settled(page)
         # Capture Docker output in memory; persist only terminal rows carrying this test's nonce.
-        result = subprocess.run(['docker','logs','--since',self.started,'kin-proxy'],capture_output=True)
+        result = subprocess.run(['docker','compose','logs','--no-log-prefix','--no-color','--since',self.started,'proxy'],cwd=ROOT,capture_output=True)
         self.assertEqual(result.returncode,0)
         lines = (result.stdout+result.stderr).decode('utf-8',errors='replace').splitlines()
         rows = []

@@ -41,7 +41,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from urllib.request import Request
 
-from invariants_live import LiveStack, past_audit_guard, psql, purge_user_audit
+from invariants_live import ROOT, LiveStack, past_audit_guard, psql, purge_user_audit
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -389,7 +389,7 @@ class ClinicianQuestionLive(unittest.TestCase):
         """An open psql transaction holding `user`'s study-access advisory lock exclusively: every question transaction of
         that member takes it shared (StudyAccessService.snapshot) and waits here. Same shape as finding_api_test.hold."""
         key = "study-access:" + json.dumps(self.owner(user), separators=(",", ":"), ensure_ascii=False)
-        holder = subprocess.Popen(["docker", "exec", "-i", "kin-db", "psql", "-XqAt", "-U", "kin", "-d", "kin", "-v", "ON_ERROR_STOP=1"],
+        holder = subprocess.Popen(["docker", "compose", "exec", "-T", "db", "psql", "-XqAt", "-U", "kin", "-d", "kin", "-v", "ON_ERROR_STOP=1"], cwd=ROOT,
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
         holder.stdin.write("BEGIN; SET LOCAL statement_timeout='8s'; SET LOCAL idle_in_transaction_session_timeout='30s'; "
                            f"SELECT pg_advisory_xact_lock(hashtextextended({lit(key)}, 0)); SELECT 'LOCKED';\n")

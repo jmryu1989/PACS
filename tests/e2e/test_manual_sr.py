@@ -8,6 +8,7 @@ import numpy as np
 from test_sr_provenance import SRProvenanceE2E
 from test_viewer_history import expect, base, literal
 from viewer_api_test import ViewerAPI
+from test_worklist import ROOT
 
 
 def nums(ds):
@@ -268,7 +269,7 @@ class ManualSrE2E(SRProvenanceE2E):
         payload=dict(uid=f.uid,items=[dict(id=head['id'],revision=head['revision'])],caller=dict(sub=self.stack.user_ids['doctor'],
             actor=self.stack.actor('doctor'),institution=institution,kind='member',roles=['radiologist']))
         script=(Path(__file__).parents[1]/'manual_sr_fault.cjs').read_text(encoding='utf-8')
-        run=subprocess.run(['docker','exec','-i','kin-api','node'],input='const fixture = '+json.dumps(payload)+';\n'+script,
+        run=subprocess.run(['docker','compose','exec','-T','api','node'],cwd=ROOT,input='const fixture = '+json.dumps(payload)+';\n'+script,
             text=True,encoding='utf-8',capture_output=True,timeout=65)
         self.assertEqual(run.returncode,0,run.stdout+'\n'+run.stderr);self.assertIn('MANUAL SR FAULT PASS',run.stdout)
         self.assertEqual((self.state(f),self.versions(f)),before);self.assert_originals(original)

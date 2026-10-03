@@ -1,7 +1,7 @@
 """Account shortcut identity, input boundaries and atomic revision conflicts."""
 import unittest,json,subprocess
 from concurrent.futures import ThreadPoolExecutor
-from invariants_live import LiveStack
+from invariants_live import LiveStack,ROOT
 from workspace_roaming_support import cleanup_workspace
 
 DEFAULTS=dict(list='Digit1',image='Digit2',prior='Digit3',report='Digit4',context='Digit5',note='Digit6',tools='Digit7',nativeTools='Digit9',previous='ArrowLeft',next='ArrowRight')
@@ -37,7 +37,7 @@ class ShortcutAccountLive(unittest.TestCase):
   b=self.body();self.assertEqual(self.put(b).status,200);institution,subject=b['expectedOwner'];self.assertIn(subject,self.stack.user_ids.values())
   quote=lambda value:"'"+value.replace("'","''")+"'"
   sql='UPDATE "WorkspaceShortcuts" SET bindings='+quote('{}')+'::jsonb WHERE institution='+quote(institution)+' AND subject='+quote(subject)+' AND revision=1 RETURNING revision'
-  result=subprocess.check_output(['docker','exec','kin-db','psql','-XqAt','-v','ON_ERROR_STOP=1','-U','kin','-d','kin','-c',sql]).decode().strip();self.assertEqual(result,'1')
+  result=subprocess.check_output(['docker','compose','exec','-T','db','psql','-XqAt','-v','ON_ERROR_STOP=1','-U','kin','-d','kin','-c',sql],cwd=ROOT).decode().strip();self.assertEqual(result,'1')
   head=self.get();self.assertTrue(head['invalid']);self.assertIsNone(head['bindings']);self.assertEqual(head['revision'],1)
   b['revision']=1;self.assertEqual(self.put(b).status,200);self.assertFalse(self.get()['invalid']);self.assertEqual(self.get()['bindings'],b['bindings'])
  def test_06_client_server_acceptance_agrees(self):
