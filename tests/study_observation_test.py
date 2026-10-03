@@ -540,6 +540,20 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S7-U5 browser end (Astra S7-U5-SPEC-B-F02 clause 8, S7-U5-SPEC-C-F02): Log out's draft-preserving preparation, its pause of
+# the page's other work and the page's end coordination; the names are the 4-space top-level functions git diff 9d9794e..
+# adds to main.html (no id, no $('#...') lookup). tests/auth_logout_dom_test.py pins how they behave. This entry keeps the
+# historic inventory current and is no evidence of that behaviour (Astra S7-U5-SPEC-C-F05); the name pin itself stays a
+# D73 structural debt for S9-U0f.
+for _kind, _extra in {
+    "ids": {},
+    "functions": {"workPaused": 1, "pauseWork": 1, "resumeWork": 1, "captureReport": 1, "saveForLogout": 1, "failLogout": 1,
+                  "endUse": 1, "forgetCapture": 1, "discardAndLogOut": 1, "returnToEditing": 1, "dropEndedDraft": 1,
+                  "recoverEndedDraft": 1, "logoutStatus": 1, "showLogoutPanel": 1, "closeWork": 1, "endHere": 1},
+    "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 # Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {

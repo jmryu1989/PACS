@@ -71,16 +71,26 @@ class ThumbnailFailuresE2E(ThumbnailLabelsE2E):
         page.unroute(pattern,unauthorized)
         # Reload removes the observer; the next branch uses actual server401 and the product's unchanged logout.
         page.reload();page.wait_for_selector('#rows tr[data-uid]');self.select(page,fixture);self.thumbs(page,24)
-        writes=self.source_writes(page);actual=[];logouts=[];navigations=[]
+        writes=self.source_writes(page);actual=[];logouts=[];navigations=[];logins=[]
         page.on('framenavigated',lambda frame:navigations.append(urlsplit(frame.url).path) if frame==page.main_frame else None)
         page.on('response',lambda r:actual.append(r.status) if r.url.endswith('/api/dicom/lookup') else None)
         page.on('response',lambda r:logouts.append(r.status) if r.url.endswith('/api/auth/logout') else None)
+        page.on('request',lambda r:logins.append(r.url) if urlsplit(r.url).path=='/api/auth/login' else None)
         response=page.context.request.post(self.stack.api+'/auth/logout',headers={'X-KIN-CSRF':'1'})
         self.assertIn(response.status,(200,204));self.assertEqual(page.context.request.get(self.stack.api+'/me').status,401)
+        # The revocation expired this profile's session cookie, so the page's own logout POST carries no session.
+        self.assertNotIn('kin_sid',[c['name'] for c in page.context.cookies()])
         with page.expect_response(lambda r:r.url.endswith('/api/dicom/lookup') and r.status==401):
             page.evaluate('() => { renderThumbs(); }')
-        # Concurrent401 replies can replace one navigation, and index immediately starts login; observe the final form.
-        expect(page.locator('#username')).to_be_visible()
+        # S7-U5: the 401 ends the page once and moves it to the landing, which starts no login by itself. That POST gets the
+        # general 401 of a request without a session (no session was looked up), so the end is recorded as not confirmed
+        # (Astra S7-U5-SPEC-C-F03) and the landing offers Retry Log Out - not the confirmed notice, not the login form.
+        page.wait_for_url('**/worklist/hpacs-lite/index.html',timeout=30000)
+        expect(page.locator('#retry-logout')).to_be_visible()
+        self.assertEqual({'state':'unconfirmed','reason':'credentials'},page.evaluate('KinAuth.endState()'))
+        page.wait_for_timeout(500)
+        self.assertEqual([],logins,'the landing started a login by itself')
+        expect(page.locator('#username')).to_have_count(0)
         self.assertIn('/worklist/hpacs-lite/index.html',navigations)
         self.assertTrue(actual);self.assertTrue(all(x==401 for x in actual));self.assertLessEqual(len(actual),4)
         print('D02G real session '+json.dumps(dict(lookupStatus=actual,logoutStatus=logouts,

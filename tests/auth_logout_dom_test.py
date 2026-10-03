@@ -19,9 +19,11 @@ logout POST, the draft write, /api/me and the work reads. No stack, network or c
          cannot read its storage enters nothing and offers the manual login.
   BR-04  Retry Log Out sends one POST per press (overlapping presses share it) and a 204 confirms the end: the landing
          stays (reload, a new tab, a work page opened directly) until the login control is pressed.
-  BR-05  how the answer is read: 204 and the session-absent 401s confirm; a token or configuration 401, 403, 409, the
-         fixed 500, another 500, a dropped connection and no answer within 10 s (headers held, or the body held) leave
-         it unconfirmed with their own notice; nothing is sent again by itself.
+  BR-05  how the answer is read: 204 and the 401s that name the request's own session as absent or ended (no row, a
+         committed idle end, a committed refresh end) confirm; the general 401 of a request without session credentials
+         (Astra S7-U5-SPEC-C-F03: the server looked up no session), a token or configuration 401, 403, 409, the fixed 500,
+         another 500, a dropped connection and no answer within 10 s (headers held, or the body held) leave it unconfirmed
+         with their own notice; nothing is sent again by itself.
   BR-06  late answers: an /api/me answered after the end (before its headers, and while its body was read) restores
          no identity and starts no work read; an explicit login in another tab is not undone by the earlier logout's
          late result.
@@ -34,6 +36,15 @@ logout POST, the draft write, /api/me and the work reads. No stack, network or c
          a session end during the preparation (a 401, another tab's end, an account change) closes the screen at once
          and keeps the text only in this window's memory, with no move until Recover Draft (same account only) or an
          explicit discard. With nothing to write the end follows at once; a confirmation (Save) in flight refuses Log out.
+  DP-08..DP-12 (Astra S7-U5-SPEC-C-F01/F02): while the preparation is out the page sends nothing but its draft write - the
+         autosave, the poll, the hold refresh and the panels' periodic reads pass their periods unsent; answers to reads
+         sent before it (the list, the report's citation read, a panel) change neither what is saved nor the screen; a
+         write whose result is unknown keeps Back to Editing and every new save away until it answers; Back to Editing
+         asks the server for the session and reopens only for the same account with the reading role (another account or
+         no session closes the screen, the text kept in memory). Every draft write carries the account the page was
+         opened for ([institution, subject, author]); the synthetic server refuses another session's write as the API
+         does (409 REPORT_DRAFT_OWNER_CHANGED), which closes the page and keeps the text, during the preparation and
+         between Recover Draft's session check and its write alike.
   BR-08  this file's own inputs: every local request is in SERVED_FILES (anything else fails the case) and the run
          prints the files it actually served on one line, `S7-U5-LOGOUT-DOM-SERVED <json>`, which
          ci_rec_check --mode candidate compares with SERVED_FILES, the pages' references and the CI-17 step.
@@ -152,8 +163,10 @@ FIELDS = {"findings": "SYN-FINDINGS typed before Log out", "conclusion": "SYN-CO
 # The landing's notices, as the shipped index.html words them (compared, never parsed).
 CONFIRMED = "이 브라우저의 KIN 로그인 세션을 끝냈습니다. 다시 사용하려면 로그인해 주세요."
 UNKNOWN = "로그아웃 상태를 확인할 수 없어 자동으로 로그인하지 않습니다. 로그인 버튼을 눌러 주세요."
-# Session-absent 401 bodies (auth.guard.ts / auth.service.ts) and the ones that prove nothing.
-ABSENT = ["인증 정보가 없습니다", "인증 세션이 없습니다", "인증 세션이 만료되었습니다", "인증 세션을 갱신할 수 없습니다"]
+# 401 bodies that name the request's own session as absent or ended (auth.service.ts) - the only 401s that confirm - and
+# the general 401 of a request that carried no session at all (auth.guard.ts), which proves nothing about any session.
+ENDED = ["인증 세션이 없습니다", "인증 세션이 만료되었습니다", "인증 세션을 갱신할 수 없습니다"]
+NO_CREDENTIALS = "인증 정보가 없습니다"
 
 # Writes to either storage, recorded before any page script runs (the recorder is this harness's).
 STORAGE_RECORDER = """(() => {
@@ -219,6 +232,9 @@ class Site:
         self.held_logouts, self.logouts = [], []
         self.put_answers = []           # draft writes: (status, body) | "hold" | "abort"; none queued answers 200
         self.held_puts, self.puts = [], []
+        self.drafts = {}                # the draft rows the synthetic server stored, by author (the API's (uid, author) key)
+        self.held_gets = {}             # path -> held routes, for reads a case answers late
+        self.swap_after_me = None       # the account the browser has right after the next /api/me answer (a session swap)
         self.held_me, self.held_lists = None, None
         self.releases, self.holds, self.held_commits = [], [], []
         self.calls, self.violations = [], []
@@ -281,7 +297,12 @@ class Site:
         if method == "GET" and path == "/api/me":
             if self.held_me is not None:
                 return self.held_me.append(route)
-            return self.answer(route, *self.me())
+            self.answer(route, *self.me())
+            if self.swap_after_me is not None:
+                self.account, self.swap_after_me = self.swap_after_me, None
+            return None
+        if method == "GET" and path in self.held_gets:
+            return self.held_gets[path].append(route)
         if method == "POST" and path == "/api/auth/logout":
             self.logouts.append(request.frame.page.url)
             reply = self.logout_answers.pop(0) if self.logout_answers else (204, None)
@@ -338,12 +359,20 @@ class Site:
                 self.releases.append(path)
                 return route.fulfill(json={"ok": True})
             if method == "PUT" and found.group(2) == "report":
-                self.puts.append(request.post_data_json)
+                body = request.post_data_json
+                self.puts.append(body)
+                # The API's rule (pacs.service.ts putReport): a write bound to an account must come from that account's
+                # session, or it is refused before anything is read or written.
+                owner = body.get("expectedOwner", None)
+                if owner is not None and owner != [INSTITUTION, account["sub"], account["actor"]]:
+                    return route.fulfill(status=409, json={"code": "REPORT_DRAFT_OWNER_CHANGED", "message": "SYN other account"})
                 reply = self.put_answers.pop(0) if self.put_answers else (200, {"ok": True})
                 if reply == "hold":
                     return self.held_puts.append(route)
                 if reply == "abort":
                     return route.abort("connectionreset")
+                if reply[0] == 200:
+                    self.drafts[account["actor"]] = {k: body.get(k) for k in FIELDS}
                 return route.fulfill(status=reply[0], json=reply[1])
         if method == "GET":
             return route.fulfill(status=404, json={"code": "SYN_NOT_STUBBED", "message": "synthetic server: not stubbed"})
@@ -518,8 +547,14 @@ class LogoutDOMTest(unittest.TestCase):
         self.page.evaluate("() => { api('GET', '/syn/expired').catch(() => {}); }")
         self.page.wait_for_timeout(200)
         self.assertEqual(1, len(self.site.logouts), "a second 401 shares the intent")
-        self.release_logout(401, {"statusCode": 401, "message": "인증 정보가 없습니다"})
-        self.assertEqual((CONFIRMED, False), self.landing())
+        # The server expired the cookie with the request's 401, so the logout POST carries no session and gets the general
+        # 401: no session was looked up, so the end is not confirmed (F03) - the landing offers Retry Log Out, enters nothing.
+        self.release_logout(401, {"statusCode": 401, "message": NO_CREDENTIALS})
+        message, retry = self.landing()
+        self.assertTrue(retry and message != CONFIRMED, message)
+        self.assertEqual(("unconfirmed", "credentials"), (self.end_state()["state"], self.end_state()["reason"]))
+        self.page.wait_for_timeout(300)
+        self.assertEqual((0, 1, []), (self.site.logins, len(self.site.logouts), self.docs(name="main.html")[1:]))
 
     def test_br01_admin_and_clinician_close_before_the_post(self):
         for page_name in ("admin", "clinician"):
@@ -677,8 +712,10 @@ class LogoutDOMTest(unittest.TestCase):
 
     def test_br05_how_the_answer_is_read(self):
         cases = [("204", (204, None), None, 0, ("confirmed", None))]
-        cases += [(f"401 {m}", (401, {"statusCode": 401, "message": m}), None, 0, ("confirmed", None)) for m in ABSENT]
-        cases += [("401 token", (401, {"statusCode": 401, "message": "토큰 검증 실패: SYN"}), None, 0, ("unconfirmed", "refused")),
+        cases += [(f"401 {m}", (401, {"statusCode": 401, "message": m}), None, 0, ("confirmed", None)) for m in ENDED]
+        cases += [("401 no credentials", (401, {"statusCode": 401, "message": NO_CREDENTIALS}), None, 0,
+                   ("unconfirmed", "credentials")),
+                  ("401 token", (401, {"statusCode": 401, "message": "토큰 검증 실패: SYN"}), None, 0, ("unconfirmed", "refused")),
                   ("401 config", (401, {"statusCode": 401, "message": "서버에 KC_JWKS_URL이 설정되지 않았습니다"}), None, 0,
                    ("unconfirmed", "refused")),
                   ("403", (403, {"statusCode": 403, "message": "SYN CSRF"}), None, 0, ("unconfirmed", "refused")),
@@ -701,7 +738,7 @@ class LogoutDOMTest(unittest.TestCase):
                     self.assertTrue(has_hangul(message) and "SYN" not in message and message != CONFIRMED, message)
                     expect(self.page.locator("#retry-logout")).to_be_visible()
                 messages.setdefault(expected[1], set()).add(message)
-        self.assertEqual(5, len({next(iter(m)) for reason, m in messages.items() if reason}),
+        self.assertEqual(6, len({next(iter(m)) for reason, m in messages.items() if reason}),
                          "each failure kind has its own notice")
 
     # ── BR-06 ──
@@ -919,11 +956,14 @@ class LogoutDOMTest(unittest.TestCase):
                 self.open_main()
                 other = self.open_main(self.watch(self.context.new_page())) if cause == "another tab's end" else None
                 self.select_and_type()
+                if cause == "a 401":
+                    # The paused page sends no new request (F02), so the 401 is the answer to one sent before Log out.
+                    self.out_before_log_out()
                 self.site.put_answers = ["hold"]
                 self.log_out_main()
                 self.wait_until(lambda: self.site.held_puts, "the draft write")
                 if cause == "a 401":
-                    self.page.evaluate("() => { api('GET', '/syn/expired').catch(() => {}); }")
+                    self.expire_the_request_out()
                 elif cause == "another tab's end":
                     self.log_out_main(other)
                     other.wait_for_url(INDEX_URL)
@@ -955,13 +995,25 @@ class LogoutDOMTest(unittest.TestCase):
                 self.assertEqual({**FIELDS, "baseVersion": 0}, {k: self.site.puts[-1][k] for k in (*FIELDS, "baseVersion")})
                 self.assertEqual(puts + 1, len(self.site.puts))
 
+    def out_before_log_out(self):
+        """A work read sent before Log out and held by the server (the paused page sends no new one, F02)."""
+        self.site.held_gets["/api/syn/expired"] = []
+        self.page.evaluate("() => { api('GET', '/syn/expired').catch(() => {}); }")
+        self.wait_until(lambda: self.site.held_gets["/api/syn/expired"], "the work read sent before Log out")
+
+    def expire_the_request_out(self):
+        """That read answered 401 while the preparation is out: a 401 passes the pause (8-e)."""
+        self.site.held_gets.pop("/api/syn/expired").pop().fulfill(
+            status=401, json={"statusCode": 401, "message": "인증 세션이 만료되었습니다"})
+
     def test_dp05_an_explicit_discard_after_the_session_ended(self):
         self.open_main()
         self.select_and_type()
+        self.out_before_log_out()
         self.site.put_answers = ["hold"]
         self.log_out_main()
         self.wait_until(lambda: self.site.held_puts, "the draft write")
-        self.page.evaluate("() => { api('GET', '/syn/expired').catch(() => {}); }")
+        self.expire_the_request_out()
         expect(self.page.locator("dialog.kin-logout h2")).to_have_text("Session Ended")
         self.dialog_answers = [False]
         self.panel_button("Discard Draft").click()
@@ -995,6 +1047,170 @@ class LogoutDOMTest(unittest.TestCase):
                                                  self.page.locator("dialog.kin-logout").count(), self.screen()["end"]))
         self.site.held_commits.pop().fulfill(status=500, json={"statusCode": 500, "message": "SYN"})
         self.page.wait_for_timeout(300)
+
+    # ── DP-08..DP-12: the paused page and the bound draft write (Astra S7-U5-SPEC-C-F01/F02) ──
+    def panel_title(self):
+        return self.page.locator("dialog.kin-logout h2")
+
+    def panel_status(self):
+        return self.page.locator("dialog.kin-logout [role=status]")
+
+    def editor(self):
+        return [self.page.locator("#" + k).input_value() for k in FIELDS]
+
+    def test_dp08_the_preparation_sends_nothing_but_its_draft_write(self):
+        # The page's timers run on the page clock: the autosave (20 s), the poll (30 s), the hold refresh (60 s) and the
+        # panels' periodic reads all pass their periods while the draft write is held, and so does the write's 15 s limit.
+        self.page.clock.install()
+        self.open_main()
+        self.select_and_type()
+        self.site.put_answers = ["hold"]
+        calls = len(self.site.calls)
+        self.log_out_main()
+        self.wait_until(lambda: self.site.held_puts, "the draft write")
+        self.page.clock.run_for(65000)
+        expect(self.panel_title()).to_have_text("Draft Not Saved")
+        self.assertEqual([("PUT", f"/api/studies/{UID}/report")], self.site.calls[calls:],
+                         "nothing but the draft write leaves while the preparation is out")
+        # The write answers late; the failed preparation still sends nothing by itself (no autosave over it, no poll).
+        self.site.held_puts.pop().fulfill(json={"ok": True})
+        self.page.wait_for_timeout(200)
+        self.page.clock.run_for(65000)
+        self.assertEqual([("PUT", f"/api/studies/{UID}/report")], self.site.calls[calls:])
+        self.assertEqual((list(FIELDS.values()), [], None), (self.editor(), self.site.logouts, self.screen()["end"]))
+
+    def test_dp09_answers_to_reads_sent_before_it_change_nothing(self):
+        citations, context = f"/api/studies/{UID}/report/citations", f"/api/studies/{UID}/clinical-context"
+        self.open_main()
+        self.site.held_gets = {citations: [], context: []}
+        self.select_and_type()
+        self.wait_until(lambda: self.site.held_gets[citations] and self.site.held_gets[context], "the report and panel reads")
+        self.site.held_lists = []
+        self.page.get_by_role("group", name="Refresh").get_by_role("button", name="Refresh", exact=True).click()
+        self.wait_until(lambda: self.site.held_lists, "the list read")
+        # An earlier draft write is out too, so the preparation waits for it while the late answers come in.
+        self.site.put_answers = ["hold", "hold"]
+        self.page.evaluate("() => { stashReport(); }")
+        self.wait_until(lambda: self.site.held_puts, "the earlier draft write")
+        rows, panel = self.page.locator("#rows").inner_text(), self.page.locator("#clinical-context").inner_text()
+        self.log_out_main()
+        expect(self.panel_title()).to_have_text("Saving Draft")
+        late = Site.list_body()
+        late["studies"][0]["name"] = "SYN PATIENT LATE"
+        self.site.held_lists.pop().fulfill(json=late)
+        # A confirmed citation read: answered before the preparation, it would make the draft's keep list known (and the
+        # preparation's write would carry it).
+        self.site.held_gets[citations].pop().fulfill(json={"version": 0, "head": [], "draft": [{
+            "v": 2, "cid": "SYN-CID-LATE", "field": "findings", "findingId": "f-0", "findingRevision": 1, "sourceIndex": 0,
+            "sourceRef": {"kind": "item", "itemId": "i-0", "sourceRevision": 1}, "linkStateAtInsert": "current",
+            "headRevisionAtInsert": None, "insertedText": FIELDS["findings"], "insertedAt": "2026-10-03T00:00:00.000Z",
+            "insertedBy": RAD["actor"], "sameTextCount": 1}]})
+        self.site.held_gets[context].pop().fulfill(json={"code": "SYN_LATE_PANEL", "message": "SYN late panel answer"})
+        self.page.wait_for_timeout(300)
+        self.site.held_puts.pop().fulfill(json={"ok": True})
+        self.wait_until(lambda: len(self.site.puts) == 2, "the preparation's own draft write")
+        sent = self.site.puts[1]
+        self.assertEqual(FIELDS, {k: sent[k] for k in FIELDS}, "the preparation sends the text it took")
+        self.assertNotIn("citationIds", sent, "a late citation answer changed what the preparation saves")
+        self.assertEqual((rows, panel), (self.page.locator("#rows").inner_text(), self.page.locator("#clinical-context").inner_text()),
+                         "a late answer changed the screen under the preparation")
+        self.assertNotIn("LATE", self.screen()["text"])
+        self.site.held_puts.pop().fulfill(json={"ok": True})
+        self.assertEqual((CONFIRMED, False), self.landing())
+
+    def test_dp10_a_write_of_unknown_result_keeps_editing_and_new_saves_away(self):
+        self.page.clock.install()
+        self.open_main()
+        self.select_and_type()
+        self.site.put_answers = ["hold"]
+        self.log_out_main()
+        self.wait_until(lambda: self.site.held_puts, "the draft write")
+        self.page.clock.run_for(15500)
+        expect(self.panel_title()).to_have_text("Draft Not Saved")
+        calls = len(self.site.calls)
+        self.panel_button("Back to Editing").click()
+        expect(self.panel_status()).to_contain_text("결과를 아직 모릅니다")
+        self.page.clock.run_for(25000)
+        expect(self.panel_title()).to_have_text("Draft Not Saved")
+        self.assertEqual([], self.site.calls[calls:], "no return and no new write while the earlier write is unknown")
+        # The earlier write answers late; only now does Back to Editing ask the server and reopen the editor.
+        self.site.held_puts.pop().fulfill(json={"ok": True})
+        self.page.wait_for_timeout(200)
+        self.panel_button("Back to Editing").click()
+        expect(self.page.locator("dialog.kin-logout")).to_have_count(0)
+        self.assertEqual([("GET", "/api/me")], self.site.calls[calls:])
+        self.assertEqual(list(FIELDS.values()), self.editor())
+        # New typing is saved by the autosave after the earlier write is known, never beside it.
+        self.page.fill("#findings", "SYN-FINDINGS typed after Back to Editing")
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: len(self.site.puts) == 2, "the autosave after Back to Editing")
+        self.assertEqual("SYN-FINDINGS typed after Back to Editing", self.site.puts[-1]["findings"])
+        self.assertEqual(([], None), (self.site.logouts, self.screen()["end"]))
+
+    def test_dp11_back_to_editing_reopens_only_for_the_same_account_with_the_reading_role(self):
+        for label, account in (("another account", RAD_OTHER), ("no session", None),
+                               ("no reading role", {**RAD, "roles": ["technician"]}), ("the same reader", RAD)):
+            with self.subTest(session=label):
+                self.fresh_context()
+                self.site.account = RAD
+                self.site.puts, self.site.held_puts, self.site.logouts, self.site.held_logouts = [], [], [], []
+                self.open_main()
+                self.select_and_type()
+                self.site.put_answers = [(500, {"statusCode": 500, "message": "SYN"})]
+                self.log_out_main()
+                expect(self.panel_title()).to_have_text("Draft Not Saved")
+                self.site.account = account
+                self.panel_button("Back to Editing").click()
+                if label == "the same reader":
+                    expect(self.page.locator("dialog.kin-logout")).to_have_count(0)
+                    self.assertEqual((list(FIELDS.values()), []), (self.editor(), self.site.logouts))
+                elif label == "no reading role":
+                    expect(self.panel_status()).to_contain_text("판독 권한")
+                    expect(self.panel_title()).to_have_text("Draft Not Saved")
+                    self.assertEqual((list(FIELDS.values()), []), (self.editor(), self.site.logouts))
+                else:
+                    # Another account or no session: the end comes first (8-e). The screen closes, the text stays only in
+                    # this window's memory and the page does not move.
+                    expect(self.panel_title()).to_have_text("Session Ended")
+                    self.assert_closed(f"Back to Editing with {label}")
+                    self.wait_until(lambda: self.site.logouts, "the end's logout POST")
+                    self.page.wait_for_timeout(300)
+                    self.assertEqual([], self.docs(name="index.html"))
+
+    def test_dp12_the_draft_write_is_bound_to_the_page_account(self):
+        owner = [INSTITUTION, RAD["sub"], RAD["actor"]]
+        self.open_main()
+        self.select_and_type()
+        # An earlier draft write is out when Log out starts; it carries the account the page was opened for.
+        self.site.put_answers = ["hold"]
+        self.page.evaluate("() => { stashReport(); }")
+        self.wait_until(lambda: self.site.held_puts, "the earlier draft write")
+        self.assertEqual(owner, self.site.puts[0].get("expectedOwner"))
+        self.log_out_main()
+        expect(self.panel_title()).to_have_text("Saving Draft")
+        # The browser's session becomes another reader's before the preparation's own write leaves: the server refuses it,
+        # the screen closes and the text stays in this window's memory. Nothing is written as the other reader.
+        self.site.account = RAD_OTHER
+        self.site.held_puts.pop().fulfill(json={"ok": True})
+        expect(self.panel_title()).to_have_text("Session Ended")
+        self.assert_closed("a draft write refused for another account")
+        self.assertEqual((2, owner), (len(self.site.puts), self.site.puts[1].get("expectedOwner")))
+        self.assertNotIn(RAD_OTHER["actor"], self.site.drafts)
+        self.page.wait_for_timeout(300)
+        self.assertEqual([], self.docs(name="index.html"), "no move: the text would be lost")
+        # Recover Draft: its session check names the same reader, and the session changes before its write: refused, kept.
+        self.site.account, self.site.swap_after_me = RAD, RAD_OTHER
+        self.panel_button("Recover Draft").click()
+        expect(self.panel_status()).to_contain_text("같은 계정")
+        self.assertEqual((3, owner), (len(self.site.puts), self.site.puts[2].get("expectedOwner")))
+        self.assertNotIn(RAD_OTHER["actor"], self.site.drafts)
+        self.assertEqual([], self.docs(name="index.html"))
+        # With the same reader's session the text is written as that reader's draft, and only then does the page leave.
+        self.site.account = RAD
+        self.panel_button("Recover Draft").click()
+        self.page.wait_for_url(INDEX_URL)
+        self.assertEqual((FIELDS, owner), (self.site.drafts.get(RAD["actor"]), self.site.puts[-1].get("expectedOwner")))
+        self.assertNotIn(RAD_OTHER["actor"], self.site.drafts)
 
 
 def tearDownModule():

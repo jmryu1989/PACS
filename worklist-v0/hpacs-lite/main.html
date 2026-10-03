@@ -1982,6 +1982,12 @@
             toast(`${displayActor(j.holder)} 님이 판독 중입니다 — 저장되지 않았습니다`, "err");
           }
         }
+        // S7-U5: 서버가 지금 세션이 이 페이지의 계정이 아니라고 확인했다(초안 쓰기의 작성자 결속). 목록·폴링이 계정 변경을
+        // 알아챈 때처럼 이 페이지의 사용을 끝낸다 — 이 페이지의 판독문을 다른 계정으로 다시 보내지 않는다.
+        if (res.status === 409 && j.code === "REPORT_DRAFT_OWNER_CHANGED") {
+          (window.kinOn401 || []).forEach(end => { try { end(); } catch (_) {} });
+          await KinAuth.logout();
+        }
         // 본문을 버리지 않는다. 거절이 "무엇을 확인해야 하는가"를 함께 보낼 때
         // (승인본 판 번호와 그 본문 같은 것) 메시지 한 줄만 남기면 화면은 사용자에게
         // 자기 캐시를 대신 보여주게 된다 — 그 캐시가 낡아서 거절당한 것인데도.
@@ -6574,6 +6580,13 @@
     $("#cite-preview-insert").addEventListener("click", insertCitation);
 
     /**
+     * 이 페이지가 열린 계정([기관, 사용자 ID, 작성자], 시작할 때 한 번 정하고 바꾸지 않는다). 초안 쓰기마다 `expectedOwner`로
+     * 실어 보내면 서버가 지금 세션의 계정과 대조한다(S7-U5): 다른 탭에서 계정이 바뀐 뒤 이 페이지의 글이 다른 사람의 초안을
+     * 만들거나 덮거나 지우지 않는다. 계정을 정하는 값이 아니라 대조할 값이다 — 권한과 작성자는 서버가 세션에서 정한다.
+     */
+    let draftOwner = null;
+
+    /**
      * 판독문 초안 저장. 사용자가 누르지 않아도 나가는 요청이다 —
      * 검사 이동·인쇄·자동 저장·로그아웃·탭 닫기.
      *
@@ -6657,7 +6670,7 @@
       // 생략은 "그대로 두라"는 뜻이므로 구조화를 모르는 자동 저장이 남의 증언을 지우지 않는다.
       const structureIds = structureState.keepIds(uid);
       const body = { ...next, baseVersion, ...(keep ? { citationIds: keep } : {}),
-        ...(structureIds ? { structureIds } : {}) };
+        ...(structureIds ? { structureIds } : {}), ...(draftOwner ? { expectedOwner: draftOwner } : {}) };
       const path = `/studies/${encodeURIComponent(uid)}/report`;
       if (keepalive) {
         // 탭이 닫히는 중이라 응답을 볼 수 없다. 보내는 것까지가 우리 몫이다.
@@ -7155,6 +7168,8 @@
       // 삽입이 나가 있는 동안은 확정과 똑같이 비켜선다(B1). `stashReport`에도 같은 검사가
       // 있지만, 다른 경로가 늘어도 여기 한 줄이 빠지지 않게 둘 다 둔다.
       if (!serverMode || !selectedUid || commitInFlight || insertInFlight) return;
+      // 로그아웃 준비 중에는 보존 작업만 쓴다(S7-U5). 결과를 모르는 쓰기 위에 새 쓰기를 얹지 않는다.
+      if (workPaused()) return;
       if (heldByOther(cur())) return;
       // 글자가 같아 보여도 버려진 삽입 뒤에는 서버 행이 다를 수 있다(B3).
       if (!reportNeedsWrite()) return;
@@ -7192,6 +7207,52 @@
     let logoutPrep = null;
     // 준비 단계의 초안 저장 한도. 넘으면 저장을 확인하지 못한 것이고(8-d) 그 쓰기는 결과를 모르는 쓰기로 남는다.
     const LOGOUT_SAVE_MS = 15000;
+
+    /**
+     * 준비 중(저장 중·저장 실패)에는 이 문서의 일반 업무를 멈춘다(8-a, Astra S7-U5-SPEC-C-F02). 모달은 사람의 클릭만 막고
+     * 타이머(자동 저장·점유 갱신·폴링·영역들의 주기 읽기)와 앞서 나간 요청의 답은 그대로 돌기 때문에, 이 문서의 네트워크
+     * 입구(fetch) 하나에서 멈춘다:
+     *   · 새 요청은 보내지 않는다. 보내는 것은 확보한 검사의 초안 쓰기(보존 작업)와 Back to Editing의 신원 확인뿐이다.
+     *   · 준비 전에 보낸 요청의 답은 업무 상태·화면에 닿지 않는다(세대). 예외는 이미 나간 초안 쓰기의 답 — 보존 작업이 그
+     *     결과를 기다리고, 그 정리(수렴 표시)가 다음 쓰기를 정한다 — 과 401이다(인증 종료가 먼저다, 8-e).
+     * 멈춘 요청과 버린 답은 편집으로 돌아갈 때 취소(AbortError)로 끝나고, 실제 종료로 넘어가면 끝나지 않은 채 남는다 — 닫힌
+     * 문서에는 그 답을 쓸 곳이 없다. 이 문서 밖(판독 창의 영상 뷰어, 따로 연 창)의 요청은 그 문서의 일이다.
+     */
+    let workEpoch = 0;
+    const pausedAnswers = [];
+    const pausePermits = new WeakSet();
+    function workPaused() { return !!logoutPrep && (logoutPrep.state === "saving" || logoutPrep.state === "failed"); }
+    {
+      const send = window.fetch;
+      const held = () => new Promise((resolve, reject) => { pausedAnswers.push(reject); });
+      window.fetch = function (input, init) {
+        const url = typeof input === "string" ? input : String(input?.url ?? input);
+        const method = String(init?.method ?? input?.method ?? "GET").toUpperCase();
+        const draftWrite = method === "PUT" && url.startsWith(`${API}/studies/`) && /\/studies\/[^/]+\/report$/.test(url);
+        const preserving = draftWrite && !!logoutPrep?.uid && url === `${API}/studies/${encodeURIComponent(logoutPrep.uid)}/report`;
+        if (workPaused() && !preserving && !pausePermits.has(init)) return held();
+        const epoch = workEpoch;
+        const stale = () => logoutPrep ? held()
+          : Promise.reject(new DOMException("로그아웃 준비 전에 보낸 요청의 답이라 쓰지 않았습니다.", "AbortError"));
+        return send.call(window, input, init).then(
+          response => epoch === workEpoch || draftWrite || response.status === 401 ? response : stale(),
+          // 실패도 답이다: 준비 전에 보낸 요청의 연결 실패가 관측 실패·오류 표시로 화면을 바꾸지 않게 같은 규칙을 탄다.
+          error => epoch === workEpoch || draftWrite ? Promise.reject(error) : stale());
+      };
+    }
+    /** 준비에 들어선다: 세대를 넘기고, 목록·폴링은 자기 세대도 넘긴다(늦은 목록이 화면을 바꾸거나 실패를 연결 끊김으로 세지 않게). */
+    function pauseWork() {
+      workEpoch++;
+      clearInterval(poll); poll = null; ++pollGeneration;
+      listLoadSequence++;
+    }
+    /** 같은 사용자로 편집에 돌아간다: 멈춘 요청과 버린 답을 취소로 끝내고 폴링만 다시 켠다. 나머지 타이머는 스스로 돈다. */
+    function resumeWork() {
+      for (const reject of pausedAnswers.splice(0))
+        reject(new DOMException("로그아웃 준비 중이라 보내지 않았거나 쓰지 않은 요청입니다.", "AbortError"));
+      startPolling();
+    }
+
     $("#logout").addEventListener("click", async () => {
       if (loggingOut) return;
       /**
@@ -7215,14 +7276,19 @@
       closeSR();
       endPatientCopy();
       logoutPrep = captureReport();
+      pauseWork();
       await saveForLogout(logoutPrep);
     });
 
-    /** 8-a: 파괴적인 closer·신원 해제보다 먼저, 지금 작성자의 판독문을 이 문서의 메모리에 확보한다. */
+    /**
+     * 8-a: 파괴적인 closer·신원 해제보다 먼저, 지금 작성자의 판독문을 이 문서의 메모리에 확보한다. 그 글의 계정(owner)은
+     * 이 페이지가 열린 계정 그대로 바뀌지 않는다 — 준비 저장과 Recover Draft가 서버에 대조를 맡긴다(F01).
+     */
     function captureReport() {
       const uid = selectedUid, a = (uid && appState[uid]) || {};
       return {
-        uid, seq: selectionSeq, author: user, state: "saving", reason: null, attempt: 0, panel: null, recovering: false,
+        uid, seq: selectionSeq, author: user, owner: draftOwner, state: "saving", reason: null, attempt: 0, panel: null,
+        recovering: false, checking: false,
         fields: Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value])),
         baseVersion: uid ? reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0) : null,
         citationIds: uid ? citations.keepIds(uid) : undefined,
@@ -7310,13 +7376,50 @@
       await endUse(prep);
     }
 
-    /** Back to Editing: 같은 사용자·기관·권한일 때만 편집으로 돌아간다. 결과를 모르는 쓰기는 다음 저장이 맞춘다. */
-    function returnToEditing(prep) {
+    /**
+     * Back to Editing(8-d). 결과를 모르는 초안 쓰기가 남아 있으면 돌아가지 않는다 — 돌아간 뒤의 새 편집본과 그 쓰기가 서버에서
+     * 순서를 다투게 된다(자동 저장은 준비 중 멈춰 있고, 그 쓰기의 답이 오면 다시 누를 수 있다). 돌아갈 때는 이 페이지의
+     * 캐시가 아니라 서버에 지금 세션을 묻는다: 받아 둔 글의 계정·기관·작성자와 판독 권한이 같을 때만 편집과 멈춘 일을 다시
+     * 켠다. 다른 계정이면 계정 변경이라 인증 종료가 먼저다(8-e) — 원문은 메모리에 남고 같은 계정의 Recover Draft만 저장한다.
+     */
+    async function returnToEditing(prep) {
+      if (logoutPrep !== prep || prep.state !== "failed" || prep.checking) return;
+      if (prep.uid && stashInFlight.get(prep.uid)?.size) {
+        logoutStatus(prep, "앞서 보낸 초안 저장의 결과를 아직 모릅니다. 결과가 온 뒤 다시 누르세요. 입력한 내용은 그대로 있습니다.");
+        return;
+      }
+      prep.checking = true;
+      logoutStatus(prep, "로그인 상태를 확인하는 중입니다…");
+      let status = 0, who = null;
+      try {
+        const init = { headers: { "X-KIN-CSRF": "1" }, cache: "no-store" };
+        pausePermits.add(init);
+        const me = await fetch(API + "/me", init);
+        status = me.status;
+        who = me.ok ? await me.json().catch(() => null) : null;
+      } catch (e) {
+      } finally {
+        prep.checking = false;
+      }
       if (logoutPrep !== prep || prep.state !== "failed") return;
-      const s = KinAuth.session();
-      if (!s || s.state !== "approved" || s.sub !== sess?.sub || (s.institution ?? null) !== (sess?.institution ?? null)
-          || (prep.uid && !KinAuth.has("radiologist"))) {
-        logoutStatus(prep, "로그인 상태가 바뀌어 편집으로 돌아갈 수 없습니다. 입력한 내용은 버리거나 다시 저장을 시도하세요.");
+      // 세션이 없거나(401) 다른 계정이면 인증 종료가 먼저다(8-e): 화면을 닫고 원문은 메모리에 둔다.
+      if (status === 401) {
+        endHere();
+        return;
+      }
+      if (!who) {
+        logoutStatus(prep, "로그인 상태를 확인하지 못해 편집으로 돌아가지 않았습니다. 다시 누르거나 저장을 다시 시도하세요.");
+        return;
+      }
+      const [institution, sub, author] = prep.owner ?? [null, null, prep.author];
+      if (who.sub !== sub || (who.institution ?? null) !== institution || (who.user ?? who.actor ?? "") !== author) {
+        endHere();
+        return;
+      }
+      // 같은 계정이어도 판독 권한을 잃었으면 편집으로 돌아가지 않는다 — 돌아가도 그 글을 저장할 수 없다.
+      const roles = Array.isArray(who.roles) ? who.roles : [];
+      if (prep.uid && !roles.includes("radiologist") && !roles.includes("admin")) {
+        logoutStatus(prep, "판독 권한을 확인할 수 없어 편집으로 돌아갈 수 없습니다. 입력한 내용은 버리거나 다시 저장을 시도하세요.");
         return;
       }
       if (prep.uid && selectedUid === prep.uid && selectionSeq === prep.seq) {
@@ -7327,6 +7430,7 @@
       prep.panel?.remove();
       logoutPrep = null;
       loggingOut = false;
+      resumeWork();
     }
 
     /** 8-e: 세션이 끝난 뒤 사람이 버리기로 했다. 그제야 이 문서를 떠난다. */
@@ -7339,31 +7443,34 @@
     }
 
     /**
-     * 8-e Recover Draft: 사람이 다른 창에서 다시 로그인한 뒤 누른다. 지금 세션이 같은 계정·기관이고 그 작성자일 때만 확보한
-     * 원문을 기존 초안 저장 경로(같은 본문 규칙)로 보낸다. 검사 접근·판독 권한·점유는 서버가 다시 판정한다. 다른 계정이면
-     * 보내지 않는다. 이 문서는 닫힌 채이고 화면을 다시 열지 않는다 — 저장되면 떠난다.
+     * 8-e Recover Draft: 사람이 다른 창에서 다시 로그인한 뒤 누른다. 확보한 원문을 기존 초안 저장 경로(같은 본문 규칙)로
+     * 보내되 받아 둔 계정(owner)을 함께 보내 서버가 지금 세션과 대조한다(F01) — 아래 /api/me 확인은 다른 계정이면 보내지
+     * 않고 바로 알리려는 것이고, 확인과 PUT 사이에 세션이 바뀌어도 서버가 거절한다. 검사 접근·판독 권한·점유도 서버가 다시
+     * 판정한다. 이 문서는 닫힌 채이고 화면을 다시 열지 않는다 — 저장되면 떠난다.
      */
     async function recoverEndedDraft(prep) {
       if (logoutPrep !== prep || prep.state !== "ended" || prep.recovering) return;
       prep.recovering = true;
       logoutStatus(prep, "로그인 상태를 확인하는 중입니다…");
+      const otherAccount = "같은 계정·기관으로 로그인했을 때만 저장합니다. 지금 세션으로는 저장하지 않았습니다.";
       try {
         const me = await fetch(API + "/me", { headers: { "X-KIN-CSRF": "1" } });
         if (me.status === 401) { logoutStatus(prep, "로그인한 세션이 없습니다. 다른 창에서 같은 계정으로 로그인한 뒤 다시 누르세요."); return; }
         const who = me.ok ? await me.json().catch(() => null) : null;
-        if (!who || who.sub !== sess?.sub || (who.institution ?? null) !== (sess?.institution ?? null)
-            || (who.user ?? who.actor ?? "") !== prep.author) {
-          logoutStatus(prep, "같은 계정·기관으로 로그인했을 때만 저장합니다. 지금 세션으로는 저장하지 않았습니다.");
+        const [institution, sub, author] = prep.owner ?? [null, null, prep.author];
+        if (!who || who.sub !== sub || (who.institution ?? null) !== institution || (who.user ?? who.actor ?? "") !== author) {
+          logoutStatus(prep, otherAccount);
           return;
         }
         const body = { ...prep.fields, baseVersion: prep.baseVersion, ...(prep.citationIds ? { citationIds: prep.citationIds } : {}),
-          ...(prep.structureIds ? { structureIds: prep.structureIds } : {}) };
+          ...(prep.structureIds ? { structureIds: prep.structureIds } : {}), ...(prep.owner ? { expectedOwner: prep.owner } : {}) };
         const put = await fetch(`${API}/studies/${encodeURIComponent(prep.uid)}/report`, {
           method: "PUT", headers: { "Content-Type": "application/json", "X-KIN-CSRF": "1" }, body: JSON.stringify(body),
         });
         if (!put.ok) {
           const refusal = await put.json().catch(() => ({}));
           logoutStatus(prep, put.status === 401 ? "로그인한 세션이 없습니다. 다른 창에서 같은 계정으로 로그인한 뒤 다시 누르세요."
+            : refusal.code === "REPORT_DRAFT_OWNER_CHANGED" ? otherAccount
             : refusal.code === "REPORT_HELD" ? "다른 판독의가 이 검사를 판독 중이라 저장하지 못했습니다. 입력한 내용은 그대로 있습니다."
             : put.status === 403 || put.status === 404 ? "이 검사에 판독문 초안을 저장할 수 없습니다. 입력한 내용은 그대로 있습니다."
             : "판독문 초안을 저장하지 못했습니다. 입력한 내용은 그대로 있습니다.");
@@ -10724,6 +10831,7 @@
         return;
       }
       user = sess.user ?? "";
+      if (!sess.demo && typeof sess.sub === "string") draftOwner = Object.freeze([sess.institution ?? null, sess.sub, user]);
       userDisplayName = sess.displayName || user;
       $("#user").textContent = userDisplayName;
       rememberActor(user, userDisplayName, user.split("@")[0]);

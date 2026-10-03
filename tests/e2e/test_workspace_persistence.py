@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from urllib.parse import urlsplit
 from playwright.sync_api import expect
 from test_portrait_workspace import PortraitWorkspaceE2E
 import test_worklist as base
@@ -20,12 +21,30 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         self.contexts.append(context)
         return context
 
+    def ended_contexts(self):
+        """Profiles whose last session ended with sign_out(): S7-U5 keeps that end until the next explicit login."""
+        if not hasattr(self, '_ended_contexts'):
+            self._ended_contexts = set()
+        return self._ended_contexts
+
     def sign_in(self, context, actor='doctor'):
         # An empty cookie jar forces a fresh real BFF/Keycloak login, while the
         # same browser profile's localStorage stays intact for account switching.
         context.clear_cookies()
         page = context.new_page()
+        logins = []
+        page.on('request', lambda r: logins.append(r.url) if urlsplit(r.url).path == '/api/auth/login' else None)
         page.goto(self.stack.proxy + '/')
+        if context in self.ended_contexts():
+            # S7-U5: after this profile's logout the landing shows the confirmed end and starts no login by itself; the
+            # login is the person's own press of the landing's control. The end record is not cleared behind its back.
+            page.wait_for_url('**/worklist/hpacs-lite/index.html', timeout=30000)
+            expect(page.locator('#signin')).to_be_enabled()
+            self.assertEqual({'state': 'confirmed', 'reason': None}, page.evaluate('KinAuth.endState()'))
+            expect(page.locator('#retry-logout')).to_be_hidden()
+            self.assertEqual([], logins, 'the landing started a login by itself after the logout')
+            page.locator('#signin').click()
+            self.ended_contexts().discard(context)
         try:
             page.locator('#username').fill(self.stack.username(actor))
             page.locator('#password').fill(self.stack.passwords[actor])
@@ -43,6 +62,7 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         page.once('dialog', lambda d: d.accept())
         page.locator('#logout').click()
         page.wait_for_url('**/index.html', timeout=30000)
+        self.ended_contexts().add(page.context)
         page.close()
 
     def owner(self, page):

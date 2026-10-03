@@ -1,5 +1,5 @@
 """D02-ROAM real BFF accounts and independent browser workspace restoration."""
-import json,unittest,hashlib
+import json,unittest,hashlib,time
 from pathlib import Path
 from playwright.sync_api import expect
 from test_workspace_persistence import WorkspacePersistenceE2E
@@ -94,13 +94,32 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         page.locator('#layout-toggle').click();page.locator('#layout-toggle').click();before=self.stored(page)
         self.assertEqual(len(pending),1);pending[0].fulfill(response=pending[0].fetch())
         expect(page.locator('#workspace-server-status')).to_contain_text('현재 배치가 변경');self.assertEqual(self.stored(page),before);self.mode_is(page,'landscape');page.unroute(pattern)
-        # Another actual session's logout message ends a pending load in the old window.
+        # Another tab's real logout ends a pending load in the old window. S7-U5: the end is announced before the logout
+        # POST, so while that POST is held the old window is already closed and gone to the landing; the late layout answer
+        # then changes nothing. The old owner's storage key is read before the end - afterwards no identity is given.
+        key=self.owner(page)
         pending=[];page.route(pattern,lambda r:pending.append(r));self.open_menu(page)
         page.get_by_role('button',name='Load from Account',exact=True).click();page.wait_for_timeout(100);self.assertEqual(len(pending),1)
         response=pending[0].fetch();other=page.context.new_page();other.goto(self.stack.proxy+'/worklist/hpacs-lite/main.html')
-        expect(other.locator('#dbstat')).to_contain_text('DB Connected');self.sign_out(other)
-        expect(page.locator('#workspace-server-status')).to_contain_text('세션이 변경');pending[0].fulfill(response=response)
-        self.assertEqual(self.stored(page),before);expect(page.get_by_role('button',name='Load from Account',exact=True)).to_be_disabled()
+        expect(other.locator('#dbstat')).to_contain_text('DB Connected')
+        held=[];other.route('**/api/auth/logout',lambda r:held.append(r))
+        other.once('dialog',lambda d:d.accept());other.locator('#logout').click();self.until_held(other,held)
+        page.wait_for_url('**/worklist/hpacs-lite/index.html',timeout=30000)
+        expect(page.locator('#workspace-server-menu')).to_have_count(0)
+        self.assertIsNone(page.evaluate('KinAuth.session()'))
+        pending[0].fulfill(response=response)
+        page.wait_for_timeout(300)
+        self.assertEqual(page.evaluate('k=>JSON.parse(localStorage.getItem(k))',key),before)
+        held[0].continue_();other.wait_for_url('**/worklist/hpacs-lite/index.html',timeout=30000)
+        self.ended_contexts().add(page.context)
+        self.assertEqual(page.evaluate('k=>JSON.parse(localStorage.getItem(k))',key),before)
+
+    def until_held(self,page,held,timeout=20.0):
+        """Wait for the held logout POST, which only this tab's own Log out sends."""
+        deadline=time.monotonic()+timeout
+        while not held:
+            if time.monotonic()>deadline:raise AssertionError('the logout POST was not sent')
+            page.wait_for_timeout(50)
 
     def test_roam_04_failure_storage_denial_and_csrf(self):
         page=self.sign_in(self.device());self.open_toolbar_group(page,'#layout-toggle');page.locator('#layout-toggle').click();self.action(page,'Save to Account','저장했습니다');remote=self.remote(page)

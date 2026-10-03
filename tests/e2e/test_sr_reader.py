@@ -87,7 +87,11 @@ class SRReaderE2E(RelatedContextE2E):
   expect(other.locator('#rows tr[data-uid="'+a.uid+'"]').first).to_have_count(0)
   p.locator('#sr-close').click();self.open_source(p,sb)
   p.route('**'+self.path(sb),lambda route:route.fulfill(status=403,body='denied'));p.locator('#sr-read').click();expect(p.locator('#sr-status')).to_contain_text('HTTP 403');expect(p.locator('#sr-tree')).to_be_empty();expect(p.locator('#sr-series option, #sr-document option')).to_have_count(0);expect(p.locator('#sr-read')).to_be_disabled()
-  p.locator('#sr-close').click();p.once('dialog',lambda dialog:dialog.accept());p.locator('#logout').click();p.wait_for_url('**/auth/**',timeout=30000)
+  # S7-U5: Log out ends on the landing, which shows the confirmed end and starts no login by itself.
+  logins=[];p.on('request',lambda r:logins.append(r.url) if '/api/auth/login' in r.url.split('?')[0] else None)
+  p.locator('#sr-close').click();p.once('dialog',lambda dialog:dialog.accept());p.locator('#logout').click();p.wait_for_url('**/worklist/hpacs-lite/index.html',timeout=30000)
+  expect(p.locator('#signin')).to_be_enabled();self.assertEqual({'state':'confirmed','reason':None},p.evaluate('KinAuth.endState()'))
+  self.assertEqual([],logins);expect(p.locator('#username')).to_have_count(0)
 
  def test_sr_03_explicit_failures_bounds_and_retry(self):
   f=self.ct('SR-FAIL-'+uuid.uuid4().hex[:12],'current','20260801');source=self.source(f);p=self.login();self.select(p,f);self.open_source(p,source)

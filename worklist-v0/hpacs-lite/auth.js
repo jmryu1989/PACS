@@ -25,11 +25,14 @@ const KinAuth = (() => {
    */
   const END_KEY = 'kin-session-end';
   const END_STATES = ['ending', 'unconfirmed', 'confirmed'];
-  const END_REASONS = ['conflict', 'storage', 'network', 'timeout', 'refused'];
-  // 이 요청에 BFF 세션이 없다는 401 문구(auth.guard.ts·auth.service.ts의 문장 그대로): 세션 쿠키 없음, 세션 행 없음, commit된
-  // idle 종료, commit된 refresh 실패 종료. 쿠키 없음은 서버가 앞선 401에서 쿠키를 지운 뒤의 로그아웃이 받는 답이라 이 브라우저에
-  // 남은 세션이 없다는 뜻이다. 토큰 검증 실패·설정 오류의 401과 403은 세션 부재를 증명하지 않는다.
-  const SESSION_ABSENT = ['인증 정보가 없습니다', '인증 세션이 없습니다', '인증 세션이 만료되었습니다', '인증 세션을 갱신할 수 없습니다'];
+  const END_REASONS = ['conflict', 'storage', 'network', 'timeout', 'refused', 'credentials'];
+  // 서버가 이 요청의 세션(sid)을 찾아 본 뒤 그 세션이 없거나 끝났다고 답하는 401 문구(auth.service.ts의 문장 그대로): 세션 행
+  // 없음, commit된 idle 종료, commit된 refresh 실패 종료. 이것만 종료 확인이다.
+  const SESSION_ENDED = ['인증 세션이 없습니다', '인증 세션이 만료되었습니다', '인증 세션을 갱신할 수 없습니다'];
+  // 요청에 세션 쿠키가 없다는 일반 401(auth.guard.ts). 서버는 어떤 세션도 찾아보지 않았다 — 쿠키만 빠졌고 서버의 세션 행은
+  // 남아 있을 수 있으므로 종료 확인이 아니다(Astra S7-U5-SPEC-C-F03). 토큰 검증 실패·설정 오류의 401과 403도 세션 종료를
+  // 증명하지 않는다.
+  const NO_CREDENTIALS = '인증 정보가 없습니다';
   // 요청 시작부터 응답 본문 판정까지. 넘으면 종료 미확인이고 다시 보내는 것은 랜딩의 Retry Log Out뿐이다.
   const LOGOUT_WAIT_MS = 10000;
   // 페이지가 POST 앞에 끼우는 일(main.html의 점유 해제)의 한도. 그 일이 끝나지 않아도 종료는 막히지 않는다.
@@ -105,7 +108,7 @@ const KinAuth = (() => {
     return Math.max(Date.now(), (last ? last.order : 0) + 1);
   }
 
-  /** 서버 응답만이 종료를 확인한다. 204와 세션 부재 401만 종료 확인이고, 나머지는 실패 구분과 함께 종료 미확인이다. */
+  /** 서버 응답만이 종료를 확인한다. 204와 식별한 세션의 부재·종료 401만 종료 확인이고, 나머지는 실패 구분과 함께 종료 미확인이다. */
   async function post() {
     const control = new AbortController();
     const timer = setTimeout(() => control.abort(), LOGOUT_WAIT_MS);
@@ -119,7 +122,8 @@ const KinAuth = (() => {
       let body = null;
       try { body = await response.json(); }
       catch (e) { if (control.signal.aborted) return { state: 'unconfirmed', reason: 'timeout' }; }
-      if (response.status === 401 && SESSION_ABSENT.includes(body?.message)) return { state: 'confirmed', reason: null };
+      if (response.status === 401 && SESSION_ENDED.includes(body?.message)) return { state: 'confirmed', reason: null };
+      if (response.status === 401 && body?.message === NO_CREDENTIALS) return { state: 'unconfirmed', reason: 'credentials' };
       if (response.status === 409) return { state: 'unconfirmed', reason: 'conflict' };
       if (response.status === 500 && body?.code === 'AUTH_STORAGE_FAILURE') return { state: 'unconfirmed', reason: 'storage' };
       return { state: 'unconfirmed', reason: 'refused' };

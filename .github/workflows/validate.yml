@@ -1282,6 +1282,8 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/audit-store-db --cwd . --file api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql --file api/prisma/schema.prisma --file scripts/ops_audit_integrity.py --file scripts/ops_backup.py --file tests/audit_store_db_test.py -- python3 -B tests/audit_store_db_test.py
       - name: Compiled stale-draft addendum guard and draft base-version boundaries
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-stale-draft --cwd . --file api/src/pacs.service.ts --file tests/report_stale_draft_test.cjs --file api/src/worklist-columns.ts -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_stale_draft_test.cjs
+      - name: Compiled draft write owner binding (S7-U5)
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-draft-owner --cwd . --file api/src/pacs.service.ts --file tests/report_draft_owner_test.cjs --file api/src/worklist-columns.ts -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_draft_owner_test.cjs
       - name: Compiled citation attestation, carry-forward, limits and guarded read
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-citations --cwd . --file api/src/pacs.service.ts --file api/src/report-citation.ts --file api/src/finding.service.ts --file tests/report_citation_vectors.json --file tests/report_citation_test.cjs --file api/src/worklist-columns.ts -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_citation_test.cjs
       - name: Compiled structured-entry rules, the three write paths, the explicit clear and the read
@@ -1343,6 +1345,7 @@ jobs:
             tmp/runtime-ci/report-cursor-insert/
             tmp/runtime-ci/dictation-session/
             tmp/runtime-ci/report-stale-draft/
+            tmp/runtime-ci/report-draft-owner/
             tmp/runtime-ci/report-citations/
             tmp/runtime-ci/report-structure/
             tmp/runtime-ci/dictation-audio/

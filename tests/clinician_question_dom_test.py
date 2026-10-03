@@ -82,7 +82,9 @@ receipts that replay the stored `applied` result, revision before state, author/
       place the mount calls that option. (S7-U1b's mount passes the same option to KinCriticalResultSend.mount, a name
       critical-result-send.js puts on window rather than a function the page declares, so its KinAuth.logout is a path
       where it stands.) Each path is made to log its own id, and every start is then run over
-      stand-ins - api()'s 401, the dictation controller's 401, the list and poll account changes, the confirmed Log out,
+      stand-ins - api()'s 401, api()'s draft write refused for another account (S7-U5-SPEC-C-F01: the server's
+      REPORT_DRAFT_OWNER_CHANGED, an account change), the dictation controller's 401, the list and poll account
+      changes, the confirmed Log out,
       the question row's own 401, the S5-U4c queue write's own 401, the S7-U1b sender area's own 401 (the shipped
       critical-result-send.js under main.html's S7-U1b block), the S7-U2a Critical Results panel's own 401 (the shipped
       critical-result-inbox.js under main.html's S7-U2a block), another document's end (S7-U5: the listener the page
@@ -424,6 +426,10 @@ function closeSR() { window.synCalls.push('closeSR'); }
 function endPatientCopy() { window.synCalls.push('endPatientCopy'); }
 async function stashReport() { window.synCalls.push('stashReport:' + synRow()); await new Promise(resolve => { window.synStashed = resolve; }); return 'saved'; }
 async function releaseHold() { window.synCalls.push('releaseHold:' + synRow()); }
+// S7-U5 F01/F02: the account the page binds its draft writes to (none here), the list and poll generations the preparation
+// moves and the poll Back to Editing restarts; inert here.
+let draftOwner = null, poll = null, pollGeneration = 0, listLoadSequence = 0;
+function startPolling() {}
 """
 OTHER_PANEL = "() => { window.synOtherEnds = 0; window.kinOn401.push(() => { window.synOtherEnds += 1; }); }"
 TOGGLES = """() => { for (const id of ['question-toggle', 'question-inbox', 'question-toggle'])
@@ -703,6 +709,8 @@ function closeSR() { window.synCalls.push('closeSR'); }
 function endPatientCopy() { window.synCalls.push('endPatientCopy'); }
 async function stashReport() { window.synCalls.push('wait:stashReport'); return 'saved'; }
 async function releaseHold() { window.synCalls.push('wait:releaseHold'); }
+let draftOwner = null, poll = null, pollGeneration = 0, listLoadSequence = 0;
+function startPolling() {}
 """
 # S7-U5: what the page's end coordination (closeWork, endHere) reads from the rest of the page script, empty.
 END_STAND_INS = """const $ = s => document.querySelector(s);
@@ -2919,6 +2927,15 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.page.evaluate("() => { window.synApi = api('GET', '/syn/logout-start').then(() => 'resolved', e => e.status); }")
         return lambda: self.assertEqual(401, self.page.evaluate("() => window.synApi"), "api() rejects with the 401")
 
+    def start_api_owner_change(self, tagged):
+        # S7-U5 (Astra S7-U5-SPEC-C-F01): a draft write through the page's api() answered that the session is not the
+        # account the page was opened for - an account change, ended like the list's and the poll's.
+        self.plain[("PUT", "/api/syn/logout-start")] = (409, {"code": "REPORT_DRAFT_OWNER_CHANGED", "message": "SYN other account"})
+        self.start_page(API_STAND_INS + SITE_AUTH + extract_function(tagged, "api"))
+        self.page.evaluate("() => { window.synApi = api('PUT', '/syn/logout-start', {}).then(() => 'resolved', e => e.code); }")
+        return lambda: self.assertEqual("REPORT_DRAFT_OWNER_CHANGED", self.page.evaluate("() => window.synApi"),
+                                        "api() rejects with the refusal")
+
     def start_dictation_401(self, tagged):
         # The controller the page creates calls onUnauthorized on a dictation request's 401.
         cut = slice_between(tagged, "    const dictation = KinDictation.createController({", "    KinDictation.mount(")
@@ -3057,7 +3074,8 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.assertEqual({}, {key: where[key] for key, path in paths.items() if path["at"] is None},
                          "a logout path outside main.html's inline script: add its start here")
         tagged = tag_logout_paths(MAIN, found)
-        starts = [("api() 401", self.start_api_401), ("dictation 401", self.start_dictation_401),
+        starts = [("api() 401", self.start_api_401), ("api() draft owner change", self.start_api_owner_change),
+                  ("dictation 401", self.start_dictation_401),
                   ("list account change", self.start_list_owner_change), ("poll account change", self.start_poll_owner_change),
                   ("Log out", self.start_log_out), ("question row 401", self.start_question_401),
                   ("image request write 401", self.start_image_request_401),

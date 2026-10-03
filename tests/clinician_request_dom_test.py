@@ -328,9 +328,14 @@ window.synInsert = value => { insertInFlight = value; };
 const reportPreview = { close() { window.synOrder.push('preview'); } };
 function closeSR() { window.synOrder.push('closeSR'); }
 function endPatientCopy() { window.synOrder.push('endPatientCopy'); }
+// S7-U5 fix2: the account the page binds its draft writes to (none here), and the list and poll generations the
+// preparation moves and the poll restart of Back to Editing (F02), inert here.
+let draftOwner = null, poll = null, pollGeneration = 0, listLoadSequence = 0;
+function startPolling() {}
 async function stashReport() {
   window.synOrder.push('stash:' + (document.querySelector('#image-request-queue-lock').hidden ? 'open' : 'ended'));
-  await fetch(API + '/syn/draft', { method: 'POST', headers: { 'X-KIN-CSRF': '1' } });
+  // The request the shipped draft write sends: the selected study's draft PUT, the one write the paused page lets out.
+  await fetch(API + '/studies/' + encodeURIComponent(selectedUid) + '/report', { method: 'PUT', headers: { 'X-KIN-CSRF': '1' } });
   window.synOrder.push('stashed');
   return 'saved';
 }
@@ -754,7 +759,8 @@ class ImageRequestStructureTest(unittest.TestCase):
         self.assertNotIn("imageRequests", slice_between(MAIN, "    function select(uid, {", "    function renderClinical()"))
         # B-R-001 F1: api() calls the 401 list synchronously, before it awaits the logout (whose POST has no time limit and
         # whose session-ended notice only follows it). The line is generic; the block puts its own end() in the list.
-        self.assertEqual(1, MAIN.count(HOOK_401))
+        # (S7-U5 fix2: the count of that generic line in the page is no longer pinned - api() has a second logout start, the
+        # server's REPORT_DRAFT_OWNER_CHANGED, and every start is run by tests/clinician_question_dom_test.py test_18d.)
         self.assertIn("      if (res.status === 401) {\n" + HOOK_401 + LOGOUT_AWAIT, API_FN)
         self.assertEqual(1, BLOCK.count("      (window.kinOn401 = window.kinOn401 || []).push(end);\n"))
         # C-R-001 F1: every other place the page starts a logout calls the same list before its first network wait. The
@@ -2106,7 +2112,7 @@ class MainRequestDOMTest(Harness):
         if method == "POST" and path == "/api/auth/logout":
             self.logouts.append(route)
             return
-        if method == "POST" and path in ("/api/syn/draft", "/api/syn/release"):
+        if (method == "POST" and path == "/api/syn/release") or (method == "PUT" and re.fullmatch(r"/api/studies/[^/]+/report", path)):
             self.page_posts.append(path)
             if self.held_posts is not None:
                 self.held_posts.append(route)
@@ -2875,7 +2881,7 @@ class MainRequestDOMTest(Harness):
                     self.wait_until(lambda: len(self.held_posts) == 1, "the held draft write")
                     self.settle()
                     seen = self.queue()
-                    self.assertEqual((False, "SYN note before Log out", [], ["/api/syn/draft"], first + ["stash:open"]),
+                    self.assertEqual((False, "SYN note before Log out", [], [f"/api/studies/{a}/report"], first + ["stash:open"]),
                                      (seen["lock"][3], self.page.evaluate("() => document.querySelector('#image-request-note').value"),
                                       self.logouts, self.page_posts, self.page.evaluate("() => window.synOrder.slice()")),
                                      "while the draft is written the page is still in use: nothing ended, no logout POST")
@@ -2884,7 +2890,7 @@ class MainRequestDOMTest(Harness):
                 self.settle()
                 at_wait = self.queue()
                 note = self.page.evaluate("() => document.querySelector('#image-request-note').value")
-                self.assertEqual((first + ["stash:open", "stashed"], ["/api/syn/draft"]),
+                self.assertEqual((first + ["stash:open", "stashed"], [f"/api/studies/{a}/report"]),
                                  (self.page.evaluate("() => window.synOrder.slice()"), self.page_posts))
                 self.assertIsNone(self.page.evaluate("() => KinAuth.session()"), "no identity once the end began (§0.C 3)")
                 self.release(self.held_reads[0][1], self.server.study(a))
