@@ -19,7 +19,7 @@ pure projection are held to one list.
 Owned data only: run-created Keycloak users (kin-test-*), the run's password-grant client, one run-owned
 short-lifespan password-grant client for the revocation case, the realm role `clinician` only when this run had to
 create it, and C-STORE fixtures whose viewer rows are removed in dependency order before the fixture's own cleanup
-(the product has no DELETE for them). The race driver runs `node` inside kin-api (as invariants_live's admin row
+(the product has no DELETE for them). The race driver runs `node` inside the api service (as invariants_live's admin row
 check does) against this run's fixtures with the clinician identity this run created; it writes nothing itself.
 """
 from __future__ import annotations
@@ -63,7 +63,7 @@ CLIENT_MAPPERS = (
                                           "userinfo.token.claim": "false", "claim.name": "groups"}},
 )
 
-# Runs inside kin-api on the compiled code. It builds the real ViewerController/ViewerService/PacsService on the
+# Runs inside the api service on the compiled code. It builds the real ViewerController/ViewerService/PacsService on the
 # real Prisma and Orthanc, and pauses at named points ("head", "read", "state"): it prints one event and waits for
 # one line on stdin, while the Python side commits report changes through the public API. Nothing here writes.
 DRIVER = r"""
@@ -420,11 +420,11 @@ class ClinicianReadLive(unittest.TestCase):
                                          headers=None if path.startswith("/api/") else {"Accept": "*/*"})
 
     def drive(self, mode: str, uid: str, steps: dict[str, Callable[[dict], None]], **extra) -> list[dict]:
-        """Run DRIVER in kin-api. At each pause run steps[event] (if any), then release the pause."""
+        """Run DRIVER in the api service. At each pause run steps[event] (if any), then release the pause."""
         caller = {"sub": self.stack.user_ids["clinician"], "actor": self.stack.actor("clinician"),
                   "roles": ["clinician"], "institution": "hallym", "kind": "member"}
         payload = json.dumps({"mode": mode, "uid": uid, "caller": caller, **extra})
-        process = subprocess.Popen(["docker", "exec", "-i", "kin-api", "node", "-e", DRIVER, payload],
+        process = subprocess.Popen(["docker", "compose", "exec", "-T", "api", "node", "-e", DRIVER, payload], cwd=ROOT,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, encoding="utf-8", errors="replace")
         events: list[dict] = []

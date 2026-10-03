@@ -5,7 +5,7 @@ import sys
 import unittest
 import uuid
 from test_consultations import ConsultationE2E, lit
-from test_worklist import psql
+from test_worklist import psql, ROOT
 
 
 class ConsultationPagesE2E(ConsultationE2E):
@@ -56,7 +56,7 @@ class ConsultationPagesE2E(ConsultationE2E):
               do{const page=await service.list(caller,{direction:'received',...(cursor?{cursor}:{})});ids.push(...page.items.map(r=>r.id));cursor=page.nextCursor;}while(cursor);
               return ids;
             });}console.log(JSON.stringify(result));}finally{await prisma.$disconnect();}})().catch(e=>{console.error(e);process.exit(1);});""".replace('CALLER',json.dumps(caller))
-        result=subprocess.run(['docker','compose','exec','-T','api','node','-e',script],capture_output=True,text=True,encoding='utf-8',timeout=30)
+        result=subprocess.run(['docker','compose','exec','-T','api','node','-e',script],cwd=ROOT,capture_output=True,text=True,encoding='utf-8',timeout=30)
         self.assertEqual(result.returncode,0,result.stderr);pages=json.loads(result.stdout)
         self.assertEqual(pages['UTC'],found);self.assertEqual(pages['Asia/Seoul'],found)
 

@@ -1227,7 +1227,7 @@ class BffInvariantTests(unittest.TestCase):
             return HttpResult(error.code, payload, text)
 
     def kcadm(self, config: str, *arguments: str, login: bool = False) -> subprocess.CompletedProcess[str]:
-        base = ["docker", "exec", "kin-keycloak"]
+        base = ["docker", "compose", "exec", "-T", "keycloak"]
         if login:
             command = (
                 "/opt/keycloak/bin/kcadm.sh config credentials "
@@ -1235,12 +1235,12 @@ class BffInvariantTests(unittest.TestCase):
                 '--user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD"'
             )
             return subprocess.run(
-                base + ["sh", "-lc", command], capture_output=True, text=True,
+                base + ["sh", "-lc", command], cwd=ROOT, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=30,
             )
         return subprocess.run(
             base + ["/opt/keycloak/bin/kcadm.sh", *arguments, "--config", config],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
 
     def bff_login(self, username: str, password: str):
@@ -1497,8 +1497,8 @@ const value = new AdminService({}, {}).row({
 process.stdout.write(JSON.stringify(value));
 """
         mapped = subprocess.run(
-            ["docker", "exec", "kin-api", "node", "-e", script, payload],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+            ["docker", "compose", "exec", "-T", "api", "node", "-e", script, payload],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
         self.assertEqual(mapped.returncode, 0, mapped.stderr)
         self.assertEqual(json.loads(mapped.stdout)["name"], payload)
@@ -1967,8 +1967,8 @@ process.stdout.write(JSON.stringify(value));
                 self.kcadm(config, "update", f"users/{user_id}", "-r", "kin", "-s", "enabled=true")
                 self.admin("PUT", f"/users/{user_id}", {"enabled": True})
             subprocess.run(
-                ["docker", "exec", "kin-keycloak", "rm", "-f", config],
-                capture_output=True, timeout=30,
+                ["docker", "compose", "exec", "-T", "keycloak", "rm", "-f", config],
+                cwd=ROOT, capture_output=True, timeout=30,
             )
 
 
