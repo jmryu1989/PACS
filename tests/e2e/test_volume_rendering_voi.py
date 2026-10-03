@@ -10,19 +10,22 @@ canvas, the read-only VR capability inspect() (contract §13, M-09), English con
 wording and the absence of forbidden words. They never bind to shader text, Korean sentences, data attributes or id
 prefixes. Every case also runs a negative control on the same pixels: an oracle that should be wrong is shown to be wrong.
 VRVOI-MEASURE and VRVOI-MAX lines are observations for the record, never the reason a case passes; so are the phase records
-(Phases, D419) they carry for the Crop diagnosis, the MAX-H baseline and every MAX-H target action.
+(Phases, D419) they carry for the Crop diagnosis and every MAX target action.
 
 Render range (C-02 as corrected by S8-U1a-SPEC-B-F01): an axis whose integer index extent is [l, u] renders over
 [l - 0.5, u + 0.5]; the 8 corners of that outer box through the source IJK->LPS affine are the unmasked render range and
 a full crop's planes. Voxel centres and the OP-1 marker rule are unchanged, so marker and partial regions get no half voxel.
 
-MAX-H (test-plan §4, S8-U1a-SPEC-C-R-001 F02/F03, D415) is a temporary bound for the MAX render actions, not a
-responsiveness verdict: the same run times e53e281's sculpt path first (the auxiliary step 'MAX-H-baseline'), then every
-target action of the candidate has one absolute deadline from L(n, v), enforced from outside the browser.
+MAX after S8-U1a fix9 (S8-SCULPT-PERF B-u; REQ-S8-SCULPT-PERF-TARGET, TEST-S8-SCULPT-PERF-MAX): every MAX render action has
+one absolute deadline of 30 s from just before its click, enforced from outside the browser; the temporary MAX-H bound and
+its e53e281 baseline are gone. BU-T04: the action's compile and link calls (the phase record's GL counts) are those of the
+install at the first mask and of one new display variant at Reset VR, and none for every other edit. BU-T03: the frame each
+action leaves equals, pixel for pixel, today's generator (KinVolumeVrMasks.build) for the same applied masks drawn on the
+same mapper, camera, display and jitter texture; a generator frame is drawn once per distinct state and bounded on its own.
+NT-U1a-06 holds BU-T08 (install failures) and BU-T05 (write and frame failures); test_vr_voi_13 holds BU-T06a and BU-T06b.
 """
-import base64, contextlib, hashlib, io, json, math, os, re, signal, subprocess, threading, time, unittest, uuid
+import base64, contextlib, io, json, math, os, re, signal, threading, time, unittest, uuid
 from pathlib import Path
-from urllib.parse import urlsplit
 import numpy as np
 from playwright.sync_api import expect
 import test_prior_selection as ct
@@ -42,43 +45,15 @@ TRANSFER = {'TF-MARK': ((-1000, '#000000', 0), (899, '#000000', 0), (900, '#ffff
             'TF-COLOR': ((-1000, '#000000', 0), (1399, '#000000', 0), (1400, '#ff0000', 1), (1600, '#ff0000', 1),
                          (1601, '#0000ff', 1), (2000, '#0000ff', 1))}
 THRESHOLD = {'TF-MARK': 900, 'TF-COLOR': 1400}
-MAX_STEPS = tuple('MX-%02d' % n for n in range(24))
+MAX_STEPS = tuple('MX-%02d' % n for n in range(28))
 REASON_KEYS = {'source-irregular', 'source-unsupported', 'source-changed', 'vr-not-reproducible', 'vr-not-final',
                'vr-unapplied-edit', 'busy', 'vr-layout', 'vr-combination', 'vr-limit', 'render-failed', 'context-lost',
                'access-lost', 'vr-output-unsupported'}
 FORBIDDEN = ('골제거', 'bone removal', '자동')
 
-# MAX-H baseline: e53e281's VR files, served by their git objects to a new browser on this stack's pinned viewer and renderer.
-# The other files the VR loads are this tree's and the same bytes at e53e281 (only these VR files differ between the two).
-BASELINE_SHA = 'e53e281ec967c1a14165381738701698b2f818b0'
-BASELINE_BLOBS = {'viewer-volume-orientation.js': 'af96d6f20d3de9d4434ddccffd5bebe8fb8982fc',
-                  'viewer-volume-rendering.js': '7d03e4e37070944a3945652f18c6f80e5c5fb500',
-                  'viewer-volume-sculpt.js': 'c3ac3ad25798b6139a43be9c752d6633956d37a0',
-                  'volume-rendering.js': '5720e193f685448347605998b046c73829e5f88f',
-                  'volume-sculpt.js': '5b29df3fa756ba4a6936fe29b9f6bd67e9912bda',
-                  'volume-mask-renderer.js': 'd27cd85dd577bf6283b00fbb3fbf39df3cff0805'}
-# Fixed policy values of the ruling, not hosted-proven numbers; never raised after a candidate result.
-BASELINE_ACTION_S, BASELINE_TOTAL_S = 60, 300
-LIMIT_FLOOR_S, LIMIT_CAP_S, LIMIT_SLACK_S = 30, 120, 5
-
-
-def render_limit(b_n, voi):
-    """L(n, v) = min(120, max(30, (v ? 2 : 1) * B_n + 5)) seconds: n sculpts after the action, v = a VOI after it."""
-    return min(LIMIT_CAP_S, max(LIMIT_FLOOR_S, (2 if voi else 1) * b_n + LIMIT_SLACK_S))
-
-
-def baseline_sources():
-    """The e53e281 bytes of each BASELINE_BLOBS file: the commit's path must name the pinned blob and the bytes must hash to it
-    (git's object id). A missing object or any difference means the baseline cannot be established."""
-    root, out = Path(__file__).resolve().parents[2], {}
-    for name, blob in BASELINE_BLOBS.items():
-        named = subprocess.run(['git', 'rev-parse', '--verify', '--quiet', BASELINE_SHA + ':worklist-v0/hpacs-lite/' + name],
-                               cwd=root, capture_output=True, text=True, timeout=30)
-        data = subprocess.run(['git', 'cat-file', 'blob', blob], cwd=root, capture_output=True, timeout=30).stdout
-        if named.returncode or named.stdout.strip() != blob or hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest() != blob:
-            raise AssertionError('MAX-H baseline not established: %s at %s is not the pinned object %s' % (name, BASELINE_SHA, blob))
-        out[name] = data
-    return out
+# REQ-S8-SCULPT-PERF-TARGET: each MAX render action within 30 s on the CI's software GL. REFERENCE_S bounds one frame of
+# today's generator drawn for BU-T03 (its compile is the cost B-u removes); both are fixed values, never raised after a result.
+TARGET_S, REFERENCE_S = 30, 120
 
 
 def process_table():
@@ -125,7 +100,7 @@ def browser_roots():
 
 
 class Supervisor:
-    """MAX-H external deadline for one browser: a thread outside the browser kills the browser's whole process tree when the
+    """MAX external deadline for one browser: a thread outside the browser kills the browser's whole process tree when the
     armed absolute deadline passes, so a hung page, renderer or GPU process cannot hold a Playwright call past it. The call
     then fails with the browser gone; nothing is retried or extended. One deadline is armed at a time."""
 
@@ -178,7 +153,7 @@ def no_phase(name):
 
 
 class Phases:
-    """D419 phase record of one action: the Crop diagnosis, the MAX-H baseline and every MAX-H target action use this one
+    """D419 phase record of one action: the Crop diagnosis and every MAX target action use this one
     recorder, armed before the action's input. It keeps the test's own phases (input, the click from dispatch to Playwright's
     return, the render wait, three frames, the product check, the step's state and pixel assertions) and the page's (HELPERS
     phaseStart: target handler start and end, the first new IMAGE_RENDERED, three frames after it, compile/link and other GL
@@ -424,16 +399,29 @@ window.vrVoi={
   return {shade:p.getShade(),color:Array.from({length:c.getSize()},(_,i)=>node(c,i)),opacity:Array.from({length:o.getSize()},(_,i)=>node(o,i)),
    at:hus.map(hu=>{const rgb=[0,0,0];c.getColor(hu,rgb);return {hu,rgb,opacity:o.getValue(hu)}})}},
  hu:indices=>{const vol=cornerstone.cache.getVolume(one().getVolumeId());return indices.map(i=>vol.voxelManager.getAtIJK(...i))},
- // MAX-H: what the baseline and the candidate must render alike (input, transfer function, sample distance, gradient and
- // shading, camera, canvas, crop planes and GL device). Reads only; the VOI and the mask properties are not part of it.
+ // What a frame depends on apart from the masks (input, transfer function, sample distance, gradient and shading, camera,
+ // canvas, crop planes and GL device). Reads only.
  conditions:()=>{const v=one(),m=mapper(),p=v.getActors()[0].actor.getProperty(),cam=v.getCamera(),c=v.getCanvas(),gl=v.getRenderingEngine().offscreenMultiRenderWindow.getOpenGLRenderWindow().getContext(),ext=gl.getExtension('WEBGL_debug_renderer_info');
   const nodes=f=>Array.from({length:f.getSize()},(_,i)=>{const n=[];f.getNodeValue(i,n);return n}),vol=cornerstone.cache.getVolume(v.getVolumeId()),last=Array.from(vol.dimensions).map(n=>n-1);
   return {css:[v.element.clientWidth,v.element.clientHeight],canvas:[c.width,c.height],dpr:devicePixelRatio,viewPlaneNormal:Array.from(cam.viewPlaneNormal),viewUp:Array.from(cam.viewUp),parallel:cam.parallelProjection===true,parallelScale:cam.parallelScale,
    sampleDistance:m.getSampleDistance(),planes:m.getClippingPlanes().map(q=>({origin:Array.from(q.getOrigin()),normal:Array.from(q.getNormal())})),gradient:[p.getUseGradientOpacity(0),p.getGradientOpacityMinimumOpacity(0),p.getGradientOpacityMaximumOpacity(0)],
    shade:p.getShade(),interpolation:p.getInterpolationType(),color:nodes(p.getRGBTransferFunction(0)),opacity:nodes(p.getScalarOpacity(0)),dimensions:Array.from(vol.dimensions),spacing:Array.from(vol.imageData.getSpacing()),
    last:Array.from(vol.imageData.indexToWorld(last)),hu:[[0,0,0],last,last.map(n=>Math.floor(n/2))].map(i=>vol.voxelManager.getAtIJK(...i)),renderer:ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)}},
- // Phase recorder of one action (D419; the S8-U1a-SPEC-B-F03 Crop trace made one recorder for the Crop diagnosis, the MAX-H
- // baseline and every MAX-H target action, so the baseline and the candidate pay the same cost). Everything is pass-through
+ // BU-T03: the state a frame shows (the applied masks as the capability reports them, and the conditions above).
+ referenceKey:()=>{const s=window.kinVolumeVr.inspect();return JSON.stringify({masks:{voi:s.voi,crop:s.crop,sculpt:s.sculpt,original:s.originalView},conditions:window.vrVoi.conditions()})},
+ // BU-T03: one frame of today's generator for the applied masks (KinVolumeVrMasks.build of the same request the VR applies)
+ // on the same mapper, camera, display and jitter texture, read from the same canvas; then the VR's own properties are put
+ // back and drawn again. The request is rebuilt from the capability and the public VOI model, not from the VR's internals.
+ reference:async()=>{const v=one(),m=mapper(),s=window.kinVolumeVr.inspect(),V=window.KinVolumeVrVoi,M=window.KinVolumeVrMasks,img=cornerstone.cache.getVolume(v.getVolumeId()).imageData;
+  const request={voi:s.voi?V.shaderPlane({mode:'Slab',orientation:s.voi.orientation,slab:s.voi.slab},V.binding(img)):null,original:s.originalView,
+   sculpt:(s.sculpt||[]).map(o=>({side:o.side,projection:o.projection,region:o.region.kind==='Polygon'?{kind:'Polygon',points:o.region.points,bounds:o.region.bounds}:{kind:o.region.kind,bounds:o.region.bounds}}))};
+  const saved=m.getViewSpecificProperties()||{},list=saved.OpenGL?.ShaderReplacements||[],pristine={...saved,OpenGL:{...(saved.OpenGL||{}),ShaderReplacements:list.filter(r=>!M.owned(r.replacementValue))}};
+  const drawn=()=>new Promise(done=>{const seen=()=>{v.element.removeEventListener(E.Events.IMAGE_RENDERED,seen);requestAnimationFrame(()=>done())};v.element.addEventListener(E.Events.IMAGE_RENDERED,seen);v.render()});
+  const generated=M.build(request),started=performance.now();m.setViewSpecificProperties(M.properties(pristine,generated));await drawn();
+  const ms=performance.now()-started,pixels=window.vrVoi.rgba();m.setViewSpecificProperties(saved);await drawn();
+  return {pixels,ms:Math.round(ms),generated:generated!==null}},
+ // Phase recorder of one action (D419; the S8-U1a-SPEC-B-F03 Crop trace made one recorder for the Crop diagnosis and every
+ // MAX target action, so they all pay the same cost). Everything is pass-through
  // and removed by phaseStop: the target button's pointer-down and click before any product listener (window, capture) and
  // after the product's handler (dialog, bubble), the VR viewport's render requests, IMAGE_RENDERED, every animation frame, a
  // 100 ms heartbeat, long tasks, and the duration of WebGL and 2D canvas calls by phase (before the target click, in its
@@ -464,6 +452,51 @@ window.vrVoi={
   window.vrVoi.phases=r;return clock()},
  phaseStop:()=>{const r=window.vrVoi.phases;if(!r)return null;for(const f of r.undo.reverse())try{f()}catch(_){}window.vrVoi.phases=null;r.e.push(['stop',performance.timeOrigin+performance.now(),r.state()]);return r.take()}};}"""
 
+
+# BU-T06a/BU-T06b page helpers: a mask session of the product module (KinVolumeMaskRenderer.session, its public API) on a
+# VOLUME_3D viewport the test enables on the shared engine, and later on a new rendering engine the test makes. GL calls are
+# counted per canvas from the WebGL prototypes (pass-through), so calls on a lost context are visible; the renderer hands out
+# a binding proxy of its context, so the canvas, not the context object, names the context.
+SESSION_HELPERS = """()=>{if(window.vrBu)return;const E=cornerstone.Enums;
+const counts=new Map(),watched=['compileShader','linkProgram','useProgram','uniform4i','uniform4iv','uniform4fv','uniform2fv','getUniform','getUniformLocation','deleteProgram'];
+for(const C of [window.WebGL2RenderingContext,window.WebGLRenderingContext])if(C)for(const name of watched){const original=C.prototype[name];if(typeof original!=='function')continue;
+ C.prototype[name]=function(...args){const c=counts.get(this.canvas)||{};c[name]=(c[name]||0)+1;counts.set(this.canvas,c);return original.apply(this,args)}}
+const count=gl=>({...(counts.get(gl.canvas)||{})});
+const frameFor=view=>done=>{let finished=false,frames=0;const finish=error=>{if(finished)return;finished=true;view.element.removeEventListener(E.Events.IMAGE_RENDERED,seen);Promise.resolve().then(()=>done({error}))};
+ const seen=()=>finish(null);view.element.addEventListener(E.Events.IMAGE_RENDERED,seen);try{view.render()}catch(error){finish(error);return}
+ const tick=()=>{if(finished)return;if(++frames>3)finish(Error('no frame'));else requestAnimationFrame(tick)};requestAnimationFrame(tick)};
+const drawn=view=>new Promise(done=>{const seen=()=>{view.element.removeEventListener(E.Events.IMAGE_RENDERED,seen);requestAnimationFrame(()=>done())};view.element.addEventListener(E.Events.IMAGE_RENDERED,seen);view.render()});
+const pixels=view=>{const c=view.getCanvas(),d=new Uint8Array(c.getContext('2d').getImageData(0,0,c.width,c.height).data.buffer);let s='';for(let i=0;i<d.length;i+=32768)s+=String.fromCharCode.apply(null,d.subarray(i,i+32768));return {width:c.width,height:c.height,bytes:btoa(s)}};
+async function viewport(engine,id){const element=document.createElement('div');element.style.cssText='position:fixed;left:0;bottom:0;width:256px;height:256px';document.body.append(element);
+ engine.enableElement({viewportId:id,type:E.ViewportType.VOLUME_3D,element,defaultOptions:{parallelProjection:true}});const view=engine.getViewport(id);
+ await view.setVolumes([{volumeId:cornerstone.cache.getVolume(projectionVP.getVolumeId()).volumeId}]);view.setProperties({preset:'CT-Bone'});view.resetCamera();await drawn(view);return view}
+// A VOI slab and one rectangle region through the public VOI and sculpt models, on the viewport's own projection.
+function request(view){const V=window.KinVolumeVrVoi,S=window.KinVolumeSculpt,img=cornerstone.cache.getVolume(view.getVolumeId()).imageData,bound=V.binding(img);
+ const voi=V.apply(V.initial(),bound,{orientation:'Axial',slab:{center:[15.75,15.75,40],normal:[0,0,1],pivot:[15.75,15.75,40],thickness:20}}).voi;
+ const projection=S.projection(img,p=>view.worldToCanvas(p),view.element.clientWidth,view.element.clientHeight);
+ return {voi:V.shaderPlane(voi,bound),sculpt:[S.makeOperation(S.makeRegion('Rectangle',[[.35,.35],[.65,.65]]),projection,'Inside')],original:false}}
+window.vrBu={
+ open:async()=>{const engine=projectionVP.getRenderingEngine(),view=await viewport(engine,'kin-test-bu-shared'),mapper=view.getActors()[0].actor.getMapper();
+  const gl=engine.offscreenMultiRenderWindow.getOpenGLRenderWindow().getContext(),session=KinVolumeMaskRenderer.session({target:{engine,mapper,frame:frameFor(view)}});
+  const a=request(view),result=await session.apply(a);Object.assign(window.vrBu,{engine,view,gl,session,a});return {status:result.status,gen:result.gen,state:session.state().status}},
+ // The product VR's Apply VOI is clicked and the test session applies another request; while both are in flight the
+ // registry's release runs (as a viewer-wide unit would on a loss) and then the context is lost.
+ loseWithPending:button=>{const b=window.vrBu;button.click();b.pending=b.session.apply({voi:b.a.voi,sculpt:[],original:false});const pending=b.session.state().pending;
+  const kept=window.vrReleases[0]();b.gl.getExtension('WEBGL_lose_context').loseContext();return {kept,pending:pending&&pending.gen,lost:b.gl.isContextLost()}},
+ afterLoss:async()=>{const b=window.vrBu,result=await b.pending,state=b.session.state(),before=count(b.gl);let refused=null;
+  try{b.session.apply(b.a)}catch(error){refused=error.kinVrReason}const render=await b.session.render(),after=count(b.gl),errors=[];
+  for(let n=0;n<4;n++){const e=b.gl.getError();errors.push(e);if(e===b.gl.NO_ERROR)break}
+  return {pending:result.status,state:{status:state.status,committed:state.committed&&state.committed.gen,pending:state.pending},refused,render:render.status,
+   calls:Object.fromEntries(Object.entries(after).map(([k,n])=>[k,n-(before[k]||0)]).filter(([,n])=>n)),errors,lostCode:b.gl.CONTEXT_LOST_WEBGL,noError:b.gl.NO_ERROR}},
+ reacquire:async()=>{const b=window.vrBu,engine=new cornerstone.RenderingEngine('kin-test-bu-new-context');b.engine2=engine;const view=await viewport(engine,'kin-test-bu-new');
+  const gl=engine.offscreenMultiRenderWindow.getOpenGLRenderWindow().getContext(),mapper=view.getActors()[0].actor.getMapper(),plain=pixels(view),before=count(gl);
+  const result=await b.session.reacquire({engine,mapper,frame:frameFor(view)}),after=count(gl),state=b.session.state(),shown=pixels(view);
+  const M=window.KinVolumeVrMasks,saved=mapper.getViewSpecificProperties()||{},list=saved.OpenGL?.ShaderReplacements||[];
+  mapper.setViewSpecificProperties(M.properties({...saved,OpenGL:{...(saved.OpenGL||{}),ShaderReplacements:list.filter(r=>!M.owned(r.replacementValue))}},M.build(b.a)));await drawn(view);const generator=pixels(view);
+  mapper.setViewSpecificProperties(saved);await drawn(view);const again=pixels(view),info=gl.getExtension('WEBGL_debug_renderer_info');
+  return {status:result.status,gen:result.gen,state:{status:state.status,committed:state.committed&&state.committed.gen,sameRequest:!!state.committed&&state.committed.request===b.a},
+   compile:(after.compileShader||0)-(before.compileShader||0),link:(after.linkProgram||0)-(before.linkProgram||0),plain,shown,generator,again,renderer:info?gl.getParameter(info.UNMASKED_RENDERER_WEBGL):null}},
+ close:()=>{const b=window.vrBu;try{b.session.close()}catch(_){}try{b.engine2&&b.engine2.destroy()}catch(_){}}};}"""
 
 class Scene:
     """One native VR frame (DPR 1) and the affine world->canvas map of its parallel camera (contract C-03)."""
@@ -655,21 +688,9 @@ def lit_count(v):
     return int(np.unpackbits(raw, bitorder='little')[:lit['width'] * lit['height']].sum())
 
 
-def leaves(value):
-    if isinstance(value, dict):
-        return [x for key in sorted(value) for x in [key] + leaves(value[key])]
-    if isinstance(value, (list, tuple)):
-        return [x for item in value for x in leaves(item)]
-    return [value]
-
-
-def condition_differences(baseline, candidate):
-    """MAX-H: the condition names whose values differ, numbers within 1e-9 and everything else exactly."""
-    def same(a, b):
-        a, b = leaves(a), leaves(b)
-        number = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
-        return len(a) == len(b) and all(abs(x - y) <= 1e-9 if number(x) and number(y) else x == y for x, y in zip(a, b))
-    return [key for key in sorted(set(baseline) | set(candidate)) if not same(baseline.get(key), candidate.get(key))]
+def rgba_array(raw):
+    """vrVoi.rgba() as an (h, w, 4) array."""
+    return np.frombuffer(base64.b64decode(raw['bytes']), np.uint8).reshape(raw['height'], raw['width'], 4)
 
 
 def boundary_gaps(scene, polygons, slabs):
@@ -693,7 +714,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
     def setUpClass(cls):
         cls.suite_started = time.monotonic()
         super().setUpClass()
-        # MAX-H: the browser the base class launched is the only one this process has started; its process is what the
+        # MAX: the browser the base class launched is the only one this process has started; its process is what the
         # external supervisor ends at a missed deadline. Not found (no process list, or not exactly one): MAX fails there.
         roots = browser_roots()
         cls.browser_root = next(iter(roots)) if roots is not None and len(roots) == 1 else None
@@ -742,7 +763,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
 
     def settle(self, v, limit=30, deadline=None, phases=None):
         """A new native render after the action, three frames for the product's post-render check, and the VR still shown.
-        Given the action's absolute deadline (MAX-H), the wait is what is left of it, never a fresh limit. Given a phase
+        Given the action's absolute deadline (MAX), the wait is what is left of it, never a fresh limit. Given a phase
         recorder, the three parts are its phases 'render-wait', 'frames' and 'product-check'."""
         mark = phases.phase if phases else no_phase
         if deadline is None:
@@ -750,7 +771,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         else:
             timeout = (deadline - time.monotonic()) * 1000
             if timeout <= 0:
-                raise AssertionError('MAX-H deadline passed before the render wait')
+                raise AssertionError('MAX deadline passed before the render wait')
         started = time.monotonic()
         try:
             with mark('render-wait'):
@@ -900,6 +921,11 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         return self.voi(v).get_by_role('button', name=name, exact=True)
 
     def apply_slab(self, v, preset, center=None, thickness=None, pivot=None, defaults=True):
+        self.slab_inputs(v, preset, center, thickness, pivot, defaults)
+        self.button(v, 'Apply VOI').click(); self.settle(v); return self.inspect(v)
+
+    def slab_inputs(self, v, preset, center=None, thickness=None, pivot=None, defaults=True):
+        """The Slab editors apply_slab fills before its Apply VOI."""
         select = self.voi(v).get_by_role('combobox', name='VOI Preset', exact=True)
         if defaults:
             # Choosing a preset writes its default slab into the editors, even when that preset is already selected.
@@ -916,7 +942,6 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                     self.field(v, prefix + axis).fill(repr(float(value)))
         if thickness is not None:
             self.field(v, 'VOI Thickness').fill(repr(float(thickness)))
-        self.button(v, 'Apply VOI').click(); self.settle(v); return self.inspect(v)
 
     def assert_voi(self, state, center, normal, thickness, pivot=None):
         self.assertIsNotNone(state['voi']); slab_state = state['voi']['slab']; self.assertEqual(state['voi']['mode'], 'Slab')
@@ -1304,9 +1329,9 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         # Outside the sub-test: the MAX steps ran to the end in order, not only the 13 declared cases (test-plan §15 B3).
         self.assertEqual(tuple(ledger), MAX_STEPS)
 
-    # NT-U1a-05 sub-case MAX (test-plan §4 MAX-A..MAX-H) ---------------------------------------------------------------
+    # NT-U1a-05 sub-case MAX (test-plan §4 MAX-A..MAX-G; S8-SCULPT-PERF TEST-S8-SCULPT-PERF-MAX, BU-T03, BU-T04) ---------
     def bounded(self, v, supervisor, step, action, started, deadline, button, check, record, phases=None):
-        """One MAX-H action under one absolute deadline: the click, the new native render, three frames, the product's check
+        """One MAX action under one absolute deadline: the click, the new native render, three frames, the product's check
         and the step's state and pixel assertions all share it. The click's return and the settle start never renew it, and
         the supervisor ends the browser when it passes without an answer. Writes one VRVOI-MAX line with the action's time,
         bound and outcome, success or not, and the action's phase record (D419; armed by the caller before the input, so it
@@ -1316,7 +1341,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         try:
             left = deadline - time.monotonic()
             if left <= 0:
-                raise AssertionError('MAX-H deadline passed before the action')
+                raise AssertionError('MAX deadline passed before the action')
             with mark('click'):
                 button.click(timeout=left * 1000)
             self.settle(v, deadline=deadline, phases=phases)
@@ -1332,11 +1357,11 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         line['phases'] = phases.finish(ended_ms, outcome in ('done', 'late')) if phases else None
         print('VRVOI-MAX ' + json.dumps(line), flush=True)
         if fired:
-            raise AssertionError('MAX-H %s %s: the supervisor ended the browser at the absolute deadline' % (step, action)) from error
+            raise AssertionError('MAX %s %s: the supervisor ended the browser at the absolute deadline' % (step, action)) from error
         if error is not None:
             raise error
         if outcome == 'late':
-            raise AssertionError('MAX-H %s %s completed %.3f s after its absolute deadline' % (step, action, ended - deadline))
+            raise AssertionError('MAX %s %s completed %.3f s after its absolute deadline' % (step, action, ended - deadline))
         return ended - started
 
     def freehand(self, v, dialog, vertices):
@@ -1352,115 +1377,36 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         v.mouse.up(); expect(dialog.get_by_role('button', name='Apply Sculpt', exact=True)).to_be_enabled()
         return box_
 
-    def login_in(self, browser):
-        """The inherited real BFF login, in another browser (MAX-H baseline). That browser closes its own context, so the
-        context is not left to the test's context cleanup."""
-        self.browser = browser
-        try:
-            return self.login()
-        finally:
-            del self.browser
-            self.contexts[:] = [context for context in self.contexts if context.browser is not browser]
-
-    def max_baseline(self, size):
-        """MAX-H-baseline (S8-U1a-SPEC-C-R-001 F02/F03, D415), before any candidate action and inside this unit's existing
-        budget and attempt: e53e281's sculpt path in a new browser on this stack's pinned viewer and renderer, n = 1..8 once.
-        Component adapter: the new browser's context serves the e53e281 objects of the VR files (BASELINE_BLOBS) in place of
-        this tree's; every other file is this tree's and the same at e53e281. Render normalization: e53e281 predates the rule
-        that switches off the presets' gradient opacity of 1 everywhere, so that one rule is applied to the VR actor before
-        the first counted frame; the candidate reaches the same state by its own rule, and the conditions recorded here are
-        compared with the candidate's before its first action (input, transfer function, sample distance, gradient and
-        shading, camera, canvas, crop planes, browser and GL device; the candidate's jitter is untouched).
-        B_n runs from just before Apply Sculpt to the new native render, three frames, the product's check and the applied
-        state (preview gone, Undo Sculpt enabled, the frame darker by at least one region's 400 px). Each action is bounded by
-        60 s and the step by 300 s from outside the browser. A bound, observation or condition failure means no baseline: MAX
-        fails and the step is never measured again."""
-        started = time.monotonic(); total = min(started + BASELINE_TOTAL_S, self.suite_started + SUITE_CAP_S - SUITE_MARGIN_S)
-        head, B, served = {'step': 'MAX-H-baseline', 'sha': BASELINE_SHA}, {}, set()
-        browser = supervisor = token = result = error = None
-        print('VRVOI-MAX ' + json.dumps({**head, 'phase': 'start', 'suite_elapsed_s': round(started - self.suite_started, 3)}), flush=True)
-        try:
-            sources = baseline_sources(); fixture = voi_series(self.stack, 'G-AX', 'V-BOX', 'E-U', 'S-FULL')
-            before = browser_roots()
-            if before is None:
-                raise AssertionError('MAX-H baseline not established: no process list for the external supervisor')
-            browser = self.pw.chromium.launch(channel=self.browser_channel, headless=os.environ.get('KIN_E2E_HEADED') != '1', args=['--enable-unsafe-swiftshader'])
-            roots = (browser_roots() or set()) - before
-            if len(roots) != 1:
-                raise AssertionError('MAX-H baseline not established: the new browser process is not identified (%d found)' % len(roots))
-            supervisor = Supervisor(roots.pop()); token = supervisor.arm(total, 'MAX-H-baseline step')
-            page = self.login_in(browser)
-
-            def serve(route, request):
-                name = urlsplit(request.url).path.rsplit('/', 1)[-1]; served.add(name)
-                route.fulfill(status=200, content_type='application/javascript; charset=utf-8', body=sources[name])
-            page.context.route(re.compile(r'/worklist/hpacs-lite/(%s)$' % '|'.join(map(re.escape, BASELINE_BLOBS))), serve)
-            viewer = page.context.new_page(); viewer.set_viewport_size(size); self.launch(viewer, [fixture]); self.ready(viewer); self.mpr(viewer); self.choose_volume(viewer, viewer, 0)
-            dialog = self.open_vr(viewer)
-            # The VR shown is e53e281's: every pinned file came through the route, and the capability this tree adds is absent.
-            if served != set(BASELINE_BLOBS) or viewer.evaluate('()=>typeof window.kinVolumeVr') != 'undefined':
-                raise AssertionError('MAX-H baseline not established: the page did not run the e53e281 VR files (served %s)' % sorted(served))
-            normalized = viewer.evaluate("""()=>{const p=cornerstone.getRenderingEngines().flatMap(e=>e.getViewports()).find(x=>x.type===cornerstone.Enums.ViewportType.VOLUME_3D).getActors()[0].actor.getProperty(),
-              before=[p.getUseGradientOpacity(0),p.getGradientOpacityMinimumOpacity(0),p.getGradientOpacityMaximumOpacity(0)];
-              if(before[0]&&before[1]===1&&before[2]===1)p.setUseGradientOpacity(0,false);return {before,after:p.getUseGradientOpacity(0)}}""")
-            self.view_from(viewer, 'Superior'); vertices, _ = cell_vertices(Scene(viewer), viewer.evaluate('()=>vrVoi.rect()'))
-            dialog.get_by_label('I Min', exact=True).fill('0'); dialog.get_by_label('I Max', exact=True).fill('51'); dialog.get_by_role('button', name='Apply Crop', exact=True).click(); self.settle(viewer)
-            conditions = viewer.evaluate('()=>vrVoi.conditions()'); shown = [lit_count(viewer)]
-            for n in range(1, 9):
-                # D419: the same recorder as the candidate's actions, armed before the drawing.
-                phases = Phases(viewer, 'Apply Sculpt', 'MAX-H-baseline', 'apply-sculpt')
-                phases.prepare(lambda n=n: self.freehand(viewer, dialog, vertices[n - 1]))
-
-                def applied(n=n):
-                    expect(dialog.get_by_label('Sculpt removal preview', exact=True)).to_have_count(0)
-                    expect(dialog.get_by_role('button', name='Undo Sculpt', exact=True)).to_be_enabled()
-                    lit = lit_count(viewer)
-                    if lit > shown[-1] - 400:
-                        raise AssertionError('MAX-H baseline: sculpt %d did not hide its region (%d -> %d lit px)' % (n, shown[-1], lit))
-                    shown.append(lit)
-                begun = time.monotonic()
-                B[n] = self.bounded(viewer, supervisor, 'MAX-H-baseline', 'apply-sculpt', begun, min(begun + BASELINE_ACTION_S, total),
-                                    dialog.get_by_role('button', name='Apply Sculpt', exact=True), applied, {'n': n, 'limit_s': BASELINE_ACTION_S}, phases)
-                token = supervisor.arm(total, 'MAX-H-baseline step')
-            dialog.get_by_role('button', name='Close VR', exact=True).click(); expect(dialog).to_be_hidden()
-            result = {'B': B, 'conditions': conditions, 'vertices': vertices, 'browser': browser.version, 'normalized': normalized, 'lit': shown, 'fixture': fixture}
-        except Exception as caught:
-            error = caught
-        fired = supervisor.disarm(token) if supervisor is not None else None
-        if browser is not None:
+    def same_as_generator(self, v, step, refs):
+        """BU-T03: the frame the action left equals today's generator for the same applied masks, drawn on the same mapper,
+        camera, display and jitter texture and read from the same canvas: 0 differing pixels. One generator frame per distinct
+        state (refs, keyed by the masks and the frame conditions), under its own external bound REFERENCE_S; afterwards the VR
+        must show its own frame again. The generator frame's compile is its cost; it is recorded and never counted against
+        the action."""
+        shown = v.evaluate('()=>vrVoi.rgba()'); key = v.evaluate('()=>vrVoi.referenceKey()'); fresh = key not in refs
+        if fresh:
+            started = time.monotonic(); deadline = min(started + REFERENCE_S, self.suite_started + SUITE_CAP_S - SUITE_MARGIN_S)
+            token = self.supervisor.arm(deadline, step + ' generator reference'); error = reference = None
             try:
-                browser.close()
-            except Exception:
-                pass
-        ended = time.monotonic()
-        if error is not None or fired or ended - started > BASELINE_TOTAL_S:
-            print('VRVOI-MAX ' + json.dumps({**head, 'phase': 'failed', 'B': {n: round(b, 3) for n, b in B.items()}, 'total_s': round(ended - started, 3),
-                                             'reason': repr(error)[:500] if error is not None else None,
-                                             'supervisor': fired or (supervisor.fired if supervisor else None)}), flush=True)
-            raise AssertionError('MAX-H baseline not established after %.3f s (step bound %d s, action bound %d s): %r'
-                                 % (ended - started, BASELINE_TOTAL_S, BASELINE_ACTION_S, error)) from error
-        limits = {n: [round(render_limit(b, False), 3), round(render_limit(b, True), 3)] for n, b in B.items()}
-        print('VRVOI-MAX ' + json.dumps({**head, 'phase': 'done', 'B': {n: round(b, 3) for n, b in B.items()}, 'limits_s': limits, 'total_s': round(ended - started, 3),
-                                         'suite_elapsed_s': round(ended - self.suite_started, 3), 'blobs': BASELINE_BLOBS, 'browser': result['browser'],
-                                         'normalized': result['normalized'], 'lit': result['lit']}), flush=True)
-        self.measure('MAX-H-baseline', conditions=result['conditions'], vertices=result['vertices'])
-        return result
-
-    def release_baseline(self, owned, fixture):
-        """The baseline's own V-BOX study is the baseline's input, not the candidate's: once the baseline is done and its
-        browser closed, the step removes exactly that study (the step added it and nothing else) with the run's owned-fixture
-        cleanup and confirms Orthanc no longer holds it. MX-00 then compares the same studies its V-MARK snapshot holds,
-        unchanged; without this the baseline's 33 instances read as a change to the originals (hosted 37090067059)."""
-        started = time.monotonic(); added = set(self.stack.active) - owned
-        if added != {fixture.uid} or not re.fullmatch(r'[0-9.]+', fixture.uid):
-            raise AssertionError('MAX-H baseline: the step added %s, not only its own study' % sorted(added))
-        # A saved Job would be a baseline write the study cleanup leaves behind; the baseline saves none.
-        self.assertEqual(ct.base.psql('SELECT count(*) FROM "ViewerJob" WHERE "studyUid"=\'%s\'' % fixture.uid), ['0'], 'MAX-H baseline saved a Job')
-        self.stack.cleanup_fixture(fixture.uid)
-        lookup = self.stack._orthanc_request('POST', '/tools/lookup', fixture.uid.encode('ascii'))
-        self.assertEqual((lookup.status, lookup.body), (200, []), 'MAX-H baseline: its own study is still stored')
-        print('VRVOI-MAX ' + json.dumps({'step': 'MAX-H-baseline', 'phase': 'released', 'study': fixture.uid, 'elapsed_s': round(time.monotonic() - started, 3),
-                                         'suite_elapsed_s': round(time.monotonic() - self.suite_started, 3)}), flush=True)
+                if deadline <= time.monotonic():
+                    raise AssertionError('suite-deadline before the generator reference')
+                reference = v.evaluate('()=>vrVoi.reference()')
+            except BaseException as caught:
+                error = caught
+            fired = self.supervisor.disarm(token)
+            print('VRVOI-MAX ' + json.dumps({'step': step, 'action': 'generator-reference', 'outcome': 'supervisor' if fired else 'failed' if error else 'done',
+                                             'frame_ms': reference and reference['ms'], 'generated': reference and reference['generated'],
+                                             'elapsed_s': round(time.monotonic() - started, 3), 'suite_elapsed_s': round(time.monotonic() - self.suite_started, 3)}), flush=True)
+            if fired:
+                raise AssertionError('BU-T03 %s: the generator reference passed its bound of %d s' % (step, REFERENCE_S)) from error
+            if error is not None:
+                raise error
+            back = rgba_difference(rgba_array(shown), rgba_array(v.evaluate('()=>vrVoi.rgba()')))
+            self.assertEqual(back['pixels'], 0, 'BU-T03 %s: the VR shows its own frame again after the reference' % step)
+            refs[key] = reference['pixels']
+        difference = rgba_difference(rgba_array(shown), rgba_array(refs[key]))
+        print('VRVOI-MAX ' + json.dumps({'step': step, 'action': 'generator-pixels', 'reference': 'drawn' if fresh else 'same state as before', **difference}), flush=True)
+        self.assertEqual(difference['pixels'], 0, 'BU-T03 %s: pixels differing from today\'s generator %s' % (step, difference))
 
     def max_combination(self, p, v_mark, mark_start, mark_uid, ledger):
         started = time.monotonic(); state = {'page': None, 'S': None, 'first': None, 'mark_start': mark_start, 'mark_uid': mark_uid}
@@ -1478,15 +1424,12 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         print('VRVOI-MAX ' + json.dumps({'step': 'start', 'suite_elapsed_s': round(started - self.suite_started, 3)}), flush=True)
         self.supervisor = None
         try:
-            # MAX-H: the e53e281 baseline is fixed before any candidate action; without it, or without a supervisor for this
-            # test's browser, no target action has a bound and MAX fails here.
+            # Without a supervisor for this test's browser no target action has an external bound, and MAX fails here.
             try:
                 if self.browser_root is None:
-                    raise AssertionError('MAX-H: no external supervisor for the test browser (its process was not identified)')
-                owned = set(self.stack.active); state['baseline'] = self.max_baseline(v_mark.evaluate('()=>({width:innerWidth,height:innerHeight})'))
-                self.release_baseline(owned, state['baseline']['fixture'])
+                    raise AssertionError('MAX: no external supervisor for the test browser (its process was not identified)')
             except BaseException as error:
-                state['first'] = ('MAX-H-baseline', error); raise
+                state['first'] = ('MAX-supervisor', error); raise
             self.supervisor = Supervisor(self.browser_root)
             self.max_steps(p, v_mark, state, step)
             print('VRVOI-MAX ' + json.dumps({'step': 'done', 'total_s': round(time.monotonic() - started, 3), 'suite_elapsed_s': round(time.monotonic() - self.suite_started, 3)}), flush=True)
@@ -1496,7 +1439,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
             # the supervisor ended leaves nothing to clean in it.
             first = state['first'] or ('outside-step', error); cleanup = []; v = state['page']
             try:
-                product_closed = v is not None and not v.is_closed() and not self.dialog(v).is_visible() and first[0] not in ('MX-00', 'MX-01', 'MX-23')
+                product_closed = v is not None and not v.is_closed() and not self.dialog(v).is_visible() and first[0] not in ('MX-00', 'MX-01', 'MX-27')
             except Exception as problem:
                 product_closed = False; cleanup.append(f'state: {problem!r}'[:300])
             def cancel():
@@ -1522,7 +1465,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
 
     def max_steps(self, p, v_mark, state, step):
         f9, slab_a, slab_b = [list(c) for c in F9], SLAB_A, SLAB_B
-        ctx = {}
+        ctx, refs = {}, {}
 
         def mx00():
             # The V-MARK flow is over: its S still holds, no VR viewport is left, and only then that page closes.
@@ -1601,34 +1544,24 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
             w, h = self.css_size
             return [np.array([[x * w, y * h] for x, y in op['region']['points']]) for op in (s['sculpt'] or [])]
 
-        baseline = state['baseline']
-
-        def same_conditions():
-            """MAX-H: the baseline rendered what the candidate renders, apart from the candidate's VOI (its v factor): the
-            same requested vertices, conditions() values, browser build and GL device. A difference is no baseline."""
-            mine = v.evaluate('()=>vrVoi.conditions()'); differ = condition_differences(baseline['conditions'], mine)
-            if condition_differences({'v': baseline['vertices']}, {'v': ctx['vertices']}):
-                differ.append('vertices')
-            if baseline['browser'] != self.browser.version:
-                differ.append('browser')
-            self.measure('MAX-H-conditions', differences=differ, candidate=mine)
-            if differ:
-                raise AssertionError('MAX-H baseline not established: the baseline and the candidate differ in %s' % differ)
-
         def recorder(name, step_id, action, prepare=None):
-            """D419: the action's phase recorder, armed before its input (the input itself is the phase 'input')."""
+            """D419: the action's phase record, armed before its input (the input itself is the phase 'input')."""
             phases = Phases(v, name, step_id, action)
             if prepare is not None:
                 phases.prepare(prepare)
             return phases
 
-        def render_action(step_id, action, n, voi, button, check, phases):
-            """A MAX-H target action: L(n, v) from the baseline's B_n, one absolute deadline min(start + L, suite deadline -
-            60 s) made just before the click and shared by everything up to the step's last assertion."""
-            limit = render_limit(baseline['B'][n], voi); started = time.monotonic()
-            deadline = min(started + limit, self.suite_started + SUITE_CAP_S - SUITE_MARGIN_S)
-            self.bounded(v, self.supervisor, step_id, action, started, deadline, button, check,
-                         {'n': n, 'voi': voi, 'B_n': round(baseline['B'][n], 3), 'limit_s': round(limit, 3)}, phases)
+        def render_action(step_id, action, n, voi, button, check, phases, built=(0, 0)):
+            """A MAX target action (REQ-S8-SCULPT-PERF-TARGET): one absolute deadline min(start + 30 s, suite deadline - 60 s)
+            made just before the click and shared by everything up to the step's last assertion. Then BU-T04: its compile and
+            link calls (the phase record's GL counts, every phase of the action) are `built`: (2, 1) for the install at the
+            VR's first mask and for the one new display variant Reset VR makes, (0, 0) for every other edit. Then BU-T03."""
+            started = time.monotonic(); deadline = min(started + TARGET_S, self.suite_started + SUITE_CAP_S - SUITE_MARGIN_S)
+            self.bounded(v, self.supervisor, step_id, action, started, deadline, button, check, {'n': n, 'voi': voi, 'limit_s': TARGET_S}, phases)
+            calls = [sum(table.get(name, [0])[0] for table in phases.gl.values()) for name in ('compileShader', 'linkProgram')]
+            print('VRVOI-MAX ' + json.dumps({'step': step_id, 'action': action, 'compile_link': calls, 'expected': list(built)}), flush=True)
+            self.assertEqual(calls, list(built), 'BU-T04 %s %s: compileShader and linkProgram calls of the action' % (step_id, action))
+            self.same_as_generator(v, step_id + ' ' + action, refs)
 
         def mx03():
             dialog.get_by_role('button', name='Apply Display', exact=True).click(); self.settle(v); self.view_from(v, 'Superior')
@@ -1662,16 +1595,19 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         step('MX-04', mx04)
 
         def mx05():
-            s = self.apply_slab(v, 'Coronal', center=slab_a[0], thickness=slab_a[1]); self.assert_voi(s, slab_a[0], [0, 1, 0], slab_a[1])
-            self.assertEqual(s['voiHistoryDepth'], 1); self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], ctx['P6'])
-            scene = Scene(v); r = oracle(scene, [], slab_a)
-            self.assertEqual(dark(scene, r['VOI']), 0); self.assertEqual(dark(scene, r['CROP']), 0); self.assertEqual(dark(scene, r['2X']), 0); self.assertGreaterEqual(fraction(scene, r['KEPT']), .99)
+            # The VR's first mask: the install compiles the fixed program once (BU-T04), inside the same 30 s bound.
+            phases = recorder('Apply VOI', 'MX-05', 'apply-voi', lambda: self.slab_inputs(v, 'Coronal', center=slab_a[0], thickness=slab_a[1]))
+
+            def check():
+                s = self.inspect(v); self.assert_voi(s, slab_a[0], [0, 1, 0], slab_a[1])
+                self.assertEqual(s['voiHistoryDepth'], 1); self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], ctx['P6'])
+                scene = Scene(v); r = oracle(scene, [], slab_a)
+                self.assertEqual(dark(scene, r['VOI']), 0); self.assertEqual(dark(scene, r['CROP']), 0); self.assertEqual(dark(scene, r['2X']), 0); self.assertGreaterEqual(fraction(scene, r['KEPT']), .99)
+            render_action('MX-05', 'apply-voi', 0, True, self.button(v, 'Apply VOI'), check, phases, built=(2, 1))
         step('MX-05', mx05)
         successes = set()
         for n in range(8):
             def mx_sculpt(n=n):
-                if n == 0:
-                    same_conditions()
                 earlier = self.inspect(v)['sculpt'] or []
                 phases = recorder('Apply Sculpt', 'MX-%02d' % (6 + n), 'apply-sculpt', lambda: draw_freehand(ctx['vertices'][n]))
                 if n == 0:
@@ -1793,29 +1729,99 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
 
             def check():
                 s = self.inspect(v); self.assertEqual(len(s['sculpt']), 8); applied_geometry(s, 7, ctx['vertices'][7], earlier)
-                scene = Scene(v); judge(scene, oracle(scene, css_polygons(s), slab_b), 8, nine=True)
+                scene = Scene(v); judge(scene, oracle(scene, css_polygons(s), slab_b), 8, nine=True); ctx['N'] = s
             render_action('MX-22', 'apply-sculpt', 8, True, dialog.get_by_role('button', name='Apply Sculpt', exact=True), check, phases)
         step('MX-22', mx22)
+        original = self.voi(v).get_by_role('checkbox', name='Original View', exact=True)
 
         def mx23():
-            v.evaluate('()=>vrVoi.release()'); dialog.get_by_role('button', name='Close VR', exact=True).click(); expect(self.dialog(v)).to_be_hidden()
-            self.assertEqual(v.evaluate('()=>vrVoi.count()'), 0); self.preserved(v, state['S']); v.close(); state['page'] = None
+            # Original View lifts every mask and keeps them (today's generator applies none for it, BU-T03).
+            def check():
+                s = self.inspect(v); self.assertTrue(s['originalView']); self.assertEqual(s['sculpt'], ctx['N']['sculpt']); self.assertEqual(s['voi'], ctx['N']['voi'])
+                scene = Scene(v); r = oracle(scene, css_polygons(s), slab_b)
+                for n_ in range(8):
+                    self.assertGreaterEqual(fraction(scene, r['R%d' % (n_ + 1)]), .95, 'Original View shows sculpt region %d' % (n_ + 1))
+                self.assertGreaterEqual(fraction(scene, r['VOI']), .95, 'Original View shows the VOI-only region')
+                self.assertEqual(dark(scene, r['CROP']), 0); self.assertEqual(dark(scene, r['BG']), 0); self.assertGreaterEqual(fraction(scene, r['KEPT']), .99)
+            render_action('MX-23', 'original-view-on', 8, True, original, check, recorder('Original View', 'MX-23', 'original-view-on'))
         step('MX-23', mx23)
 
+        def mx24():
+            def check():
+                s = self.inspect(v); self.assertFalse(s['originalView']); self.assertEqual(s['sculpt'], ctx['N']['sculpt'])
+                scene = Scene(v); judge(scene, oracle(scene, css_polygons(s), slab_b), 8, nine=True)
+            render_action('MX-24', 'original-view-off', 8, True, original, check, recorder('Original View', 'MX-24', 'original-view-off'))
+        step('MX-24', mx24)
+
+        def mx25():
+            def check():
+                s = self.inspect(v); self.assertIsNone(s['sculpt']); self.assert_voi(s, slab_b[0], [0, 1, 0], slab_b[1])
+                scene = Scene(v); judge(scene, oracle(scene, [], slab_b), 0)
+                # Negative control: an oracle that keeps the cleared regions hidden is wrong on each of them.
+                r = oracle(scene, css_polygons(ctx['N']), slab_b)
+                for n_ in range(8):
+                    self.assertGreaterEqual(fraction(scene, r['R%d' % (n_ + 1)]), .95, 'Clear Sculpt shows region %d again' % (n_ + 1))
+            render_action('MX-25', 'clear-sculpt', 0, True, dialog.get_by_role('button', name='Clear Sculpt', exact=True), check, recorder('Clear Sculpt', 'MX-25', 'clear-sculpt'))
+        step('MX-25', mx25)
+
+        def mx26():
+            # Reset VR clears VOI, sculpt and crop and resets the display: the renderer builds one new program variant (no crop
+            # planes) with the fixed masks, compiled once in that frame and given the committed (empty) masks (BU-T04).
+            def check():
+                s = self.inspect(v)
+                self.assertEqual((s['voi'], s['sculpt'], s['crop'], s['originalView'], s['voiHistoryDepth']), (None, None, None, False, 0))
+                self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], [])
+                scene = Scene(v); r = oracle(scene, [], slab_b)
+                self.assertGreaterEqual(fraction(scene, r['BOX']), .99); self.assertEqual(dark(scene, r['BG']), 0)
+            render_action('MX-26', 'reset-vr', 0, False, dialog.get_by_role('button', name='Reset VR', exact=True), check, recorder('Reset VR', 'MX-26', 'reset-vr'), built=(2, 1))
+        step('MX-26', mx26)
+
+        def mx27():
+            v.evaluate('()=>vrVoi.release()'); dialog.get_by_role('button', name='Close VR', exact=True).click(); expect(self.dialog(v)).to_be_hidden()
+            self.assertEqual(v.evaluate('()=>vrVoi.count()'), 0); self.preserved(v, state['S']); v.close(); state['page'] = None
+        step('MX-27', mx27)
+
     def test_vr_voi_06_preflight_refusal_and_native_failure_close_only_vr(self):
-        """NT-U1a-06 (CB-05, CB-06, LC-10): a refused link keeps the display; a failure after the write closes only VR."""
+        """NT-U1a-06 (CB-05, CB-06, LC-10) after S8-U1a fix9 (B-u): BU-T08 a link or compile failure at the VR's first mask,
+        where the fixed mask program is installed, is a refusal that writes nothing and keeps the display and the editors;
+        BU-T05 a uniform write failure (a real GL error, through the page's GL) and a frame whose render request fails each
+        keep the applied VOI, its Undo history and its image, and the VR stays usable; a display that cannot draw even the
+        applied masks again (every render fails) closes only VR, and the MPR draws on."""
         a = voi_series(self.stack, 'G-AX', 'V-MARK'); p, v = self.open_series(a); start = self.start_state(v, (15.75, 15.75, 40)); self.open_vr(v)
-        self.transfer(v, 'TF-MARK'); self.view_from(v, 'Anterior'); applied = self.apply_slab(v, 'Axial', center=[15.75, 15.75, 40], thickness=10); before = Scene(v)
+        self.transfer(v, 'TF-MARK'); self.view_from(v, 'Anterior'); before = Scene(v); status = self.dialog(v).get_by_role('status')
+        self.slab_inputs(v, 'Axial', center=[15.75, 15.75, 40], thickness=10)
+        # (a) One LINK_STATUS or COMPILE_STATUS answer is false, armed and disarmed around the click in one synchronous page call.
+        for method, name in (('getProgramParameter', 'LINK_STATUS'), ('getShaderParameter', 'COMPILE_STATUS')):
+            previous = status.text_content()
+            v.evaluate("""([button,method,name])=>{const protos=[window.WebGL2RenderingContext,window.WebGLRenderingContext].filter(Boolean).map(c=>c.prototype),originals=protos.map(p=>p[method]);let once=true;
+              protos.forEach((proto,i)=>{proto[method]=function(object,pname){if(once&&pname===this[name]){once=false;return false}return originals[i].call(this,object,pname)}});
+              try{button.click()}finally{protos.forEach((proto,i)=>{proto[method]=originals[i]})}}""", [self.button(v, 'Apply VOI').element_handle(), method, name])
+            self.quiet(v); state = self.inspect(v)
+            self.assertEqual(state['lastRefusal'], 'render-failed', name); self.assertIsNone(state['voi'], name)
+            self.assertTrue(status.text_content().strip(), name); self.assertNotEqual(status.text_content(), previous, name)
+            self.assertTrue(np.array_equal(Scene(v).lit, before.lit), name); self.assertEqual(float(self.field(v, 'VOI Thickness').input_value()), 10., name)
+        # Negative control: the same apply without a fault installs and applies.
+        self.button(v, 'Apply VOI').click(); self.settle(v); applied = self.inspect(v); self.assert_voi(applied, [15.75, 15.75, 40], [0, 0, 1], 10)
+        shown = Scene(v); self.assertFalse(np.array_equal(shown.lit, before.lit), 'the applied VOI changes the image')
+        # (c) A uniform write that raises a GL error (the projection array sent with a wrong length, once) and (d) a render
+        # request that throws once: each request fails, the applied masks are drawn again and the VR stays usable.
+        write_fault = """button=>{const protos=[window.WebGL2RenderingContext,window.WebGLRenderingContext].filter(Boolean).map(c=>c.prototype),originals=protos.map(p=>p.uniform4fv);let once=true;
+          protos.forEach((proto,i)=>{proto.uniform4fv=function(location,data,...rest){if(once){once=false;return originals[i].call(this,location,new Float32Array(3))}return originals[i].call(this,location,data,...rest)}});
+          try{button.click()}finally{protos.forEach((proto,i)=>{proto.uniform4fv=originals[i]})}}"""
+        frame_fault = """button=>{const vp=cornerstone.getRenderingEngines().flatMap(e=>e.getViewports()).find(x=>x.type===cornerstone.Enums.ViewportType.VOLUME_3D),own=Object.prototype.hasOwnProperty.call(vp,'render'),original=vp.render;
+          vp.render=function(){if(own)vp.render=original;else delete vp.render;throw Error('INJECTED VR FRAME FAILURE')};button.click()}"""
         self.field(v, 'VOI Thickness').fill('5')
-        # (a) One LINK_STATUS answer is false, armed and disarmed around the click in one synchronous page call.
-        v.evaluate("""button=>{const protos=[window.WebGL2RenderingContext,window.WebGLRenderingContext].filter(Boolean).map(c=>c.prototype),originals=protos.map(p=>p.getProgramParameter);let once=true;
-          protos.forEach((proto,i)=>{proto.getProgramParameter=function(program,name){if(once&&name===this.LINK_STATUS){once=false;return false}return originals[i].call(this,program,name)}});
-          try{button.click()}finally{protos.forEach((proto,i)=>{proto.getProgramParameter=originals[i]})}}""", self.button(v, 'Apply VOI').element_handle())
-        self.quiet(v); state = self.inspect(v); self.assertEqual(state['lastRefusal'], 'render-failed'); self.assertEqual(state['voi'], applied['voi'])
-        self.assertTrue(self.dialog(v).get_by_role('status').text_content().strip()); self.assertTrue(np.array_equal(Scene(v).lit, before.lit))
-        # Negative control: the same apply without the injection succeeds.
+        for label, fault in (('write', write_fault), ('frame', frame_fault)):
+            previous = status.text_content()
+            v.evaluate('()=>vrVoi.arm()'); v.evaluate(fault, self.button(v, 'Apply VOI').element_handle()); self.settle(v)
+            state = self.inspect(v)
+            self.assertEqual(state['voi'], applied['voi'], label); self.assertEqual(state['voiHistoryDepth'], applied['voiHistoryDepth'], label)
+            self.assertEqual(state['lastRefusal'], 'render-failed', label)
+            self.assertTrue(status.text_content().strip(), label); self.assertNotEqual(status.text_content(), previous, label)
+            self.assertTrue(np.array_equal(Scene(v).lit, shown.lit), label + ': the applied masks are shown again')
         self.button(v, 'Apply VOI').click(); self.settle(v); self.assert_voi(self.inspect(v), [15.75, 15.75, 40], [0, 0, 1], 5)
-        # (b) The native render after the write throws: only VR closes, the reason is shown, the MPR renders again.
+        # (b) Every native render after the write throws: the applied masks cannot be drawn again, so only VR closes, the
+        # reason is shown, the MPR renders again.
         v.evaluate("()=>{const vp=cornerstone.getRenderingEngines().flatMap(e=>e.getViewports()).find(v=>v.type===cornerstone.Enums.ViewportType.VOLUME_3D);vp.render=()=>{throw Error('INJECTED VR VOI FAILURE')}}")
         self.field(v, 'VOI Thickness').fill('10'); self.button(v, 'Apply VOI').click()
         expect(self.dialog(v)).to_be_hidden(); self.assertTrue(self.notice(v).text_content().strip()); self.assertNotEqual(self.notice(v).text_content(), self.shown_notice)
@@ -1925,6 +1931,48 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
 
     def test_vr_voi_12_missing_near_first_slice_refused(self):
         self.missing_slice('S-GAP-NEAR-FIRST')
+
+
+    # S8-U1a fix9 (B-u) ------------------------------------------------------------------------------------------------
+    def test_vr_voi_13_mask_session_context_loss_and_new_context(self):
+        """BU-T06a and BU-T06b (REQ-S8-U1a-BU-LOSS-VR) on the real shared engine. With a request in flight in the product VR
+        and in a mask session the test opens on the same engine (KinVolumeMaskRenderer.session, on a VOLUME_3D viewport the
+        test enables there), a viewer-wide context-loss registry as VR feature-detects it gets VR's committed VOI (never the
+        pending one) and VR closes with a notice that claims nothing about the MPR; the context is then lost: the test
+        session's request ends cancelled-context, its committed request stays, nothing of the lost context is used again and
+        GL reports nothing but the loss. BU-T06b: on a new context the test makes (a new rendering engine, not the product's)
+        the session installs the fixed program once and applies the committed request again; its frame equals today's
+        generator for that request on the same new viewport. Product recovery of the shared engine is INT-CTX-01 (S8-CTX),
+        not this case. The page's GL context is gone afterwards, so source and report are checked in the database."""
+        a = voi_series(self.stack, 'G-AX', 'V-MARK'); p, v = self.open_series(a); start = self.start_state(v, (15.75, 15.75, 40))
+        v.evaluate("()=>{window.vrReleases=[];window.kinViewerContextLoss={onContextLoss(release){vrReleases.push(release);return ()=>{window.vrUnregistered=true}}}}")
+        self.open_vr(v); self.assertEqual(v.evaluate('()=>vrReleases.length'), 1, 'VR registered its release function')
+        self.transfer(v, 'TF-MARK'); self.view_from(v, 'Anterior'); committed = self.apply_slab(v, 'Axial', center=[15.75, 15.75, 40], thickness=10)
+        v.evaluate(SESSION_HELPERS); first = v.evaluate('()=>vrBu.open()')
+        self.assertEqual((first['status'], first['state']), ('ok', 'open'), first)
+        notice = self.notice(v).text_content(); self.field(v, 'VOI Thickness').fill('5')
+        lost = v.evaluate('button=>vrBu.loseWithPending(button)', self.button(v, 'Apply VOI').element_handle())
+        self.assertTrue(lost['lost']); self.assertIsNotNone(lost['pending'], 'the test session had a request in flight')
+        self.assertEqual(lost['kept']['voi'], committed['voi'], 'the registry gets the committed VOI, never the pending one')
+        expect(self.dialog(v)).to_be_hidden(); reason = self.notice(v).text_content()
+        self.assertTrue(reason.strip()); self.assertNotEqual(reason, notice); self.assertNotIn('MPR', reason)
+        self.assertTrue(v.evaluate('()=>window.vrUnregistered===true'), 'closing VR unregisters its release function')
+        after = v.evaluate('()=>vrBu.afterLoss()')
+        self.assertEqual(after['pending'], 'cancelled-context')
+        self.assertEqual(after['state'], {'status': 'lost', 'committed': first['gen'], 'pending': None}, 'the pending request never replaces the committed one')
+        self.assertEqual((after['refused'], after['render']), ('context-lost', 'cancelled-context'))
+        self.assertEqual(after['calls'], {}, 'no program, location or uniform of the lost context is used again')
+        self.assertTrue(set(after['errors']) <= {after['lostCode'], after['noError']}, ('GL reports nothing but the loss', after['errors']))
+        new = v.evaluate('()=>vrBu.reacquire()')
+        self.measure('BU-T06b', status=new['status'], compile=new['compile'], link=new['link'], renderer=new['renderer'])
+        self.assertEqual(new['status'], 'ok'); self.assertEqual((new['compile'], new['link']), (2, 1), 'the fixed program is installed once in the new context')
+        self.assertEqual(new['state'], {'status': 'open', 'committed': new['gen'], 'sameRequest': True})
+        shown = rgba_array(new['shown'])
+        self.assertEqual(rgba_difference(shown, rgba_array(new['generator']))['pixels'], 0, "the re-applied masks draw what today's generator draws for them")
+        self.assertEqual(rgba_difference(shown, rgba_array(new['again']))['pixels'], 0)
+        self.assertGreater(rgba_difference(shown, rgba_array(new['plain']))['pixels'], 0, 'negative control: the masks change the new viewport')
+        v.evaluate('()=>vrBu.close()')
+        self.assertEqual(self.originals(), start['originals']); self.unchanged_rows(start['rows']); v.close()
 
 
 def load_tests(loader, tests, pattern):

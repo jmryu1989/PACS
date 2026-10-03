@@ -1942,15 +1942,16 @@ class MeasurementCiTests(unittest.TestCase):
             env = ci.profile_environment('volume-vr-voi', profile['out'], {'ORTHANC_PASS': 'generated-orthanc-password'})
         self.assertNotIn('KIN_EVIDENCE_DIR', env)
 
-    def test_volume_vr_voi_module_declares_thirteen_local_cases(self):
-        """S8-U1a CI-T-02: thirteen authored test_vr_voi_* cases on the VR base, chosen by the module's own load_tests prefix.
-        The count does not prove the MAX sub-case ran; its step ledger is asserted inside test_vr_voi_05."""
+    def test_volume_vr_voi_module_declares_fourteen_local_cases(self):
+        """S8-U1a CI-T-02: fourteen authored test_vr_voi_* cases on the VR base (S8-U1a fix9 adds test_vr_voi_13, BU-T06a/b),
+        chosen by the module's own load_tests prefix. The count does not prove the MAX sub-case ran; its step ledger is asserted
+        inside test_vr_voi_05."""
         import ast
         tree = ast.parse((ci.ROOT/'tests/e2e/test_volume_rendering_voi.py').read_text(encoding='utf-8'))
         classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'VolumeRenderingVoiE2E']
         self.assertEqual([[base.id for base in node.bases] for node in classes], [['VolumeRenderingE2E']])
         declared = [node.name for node in classes[0].body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]
-        self.assertEqual(len(declared), 13)
+        self.assertEqual(len(declared), 14)
         self.assertTrue(all(name.startswith('test_vr_voi_') for name in declared))
         load_tests = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'load_tests')
         self.assertTrue([node for node in ast.walk(load_tests) if isinstance(node, ast.Constant) and node.value == 'test_vr_voi_'])
@@ -2006,8 +2007,8 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(job['runs-on'], 'ubuntu-24.04'); self.assertEqual(int(job['timeout-minutes']), 40)
         checkout = [step for step in steps if str(step.get('uses', '')).startswith('actions/checkout@')]
         self.assertEqual(len(checkout), 1); self.assertEqual(str(checkout[0]['with']['persist-credentials']).lower(), 'false')
-        # MAX-H (S8-U1a-SPEC-C-F02): the suite's e53e281 baseline step reads that commit's objects, so the history is fetched.
-        self.assertEqual(int(checkout[0]['with'].get('fetch-depth', 1)), 0)
+        # S8-U1a fix9: no step reads another commit's objects (the e53e281 MAX-H baseline is gone), so no history is fetched.
+        self.assertEqual(int(checkout[0]['with'].get('fetch-depth', 1)), 1)
         self.assertEqual(int(steps[at]['timeout-minutes']), 28); self.assertNotIn('if', steps[at]); self.assertFalse(steps[at].get('continue-on-error', False))
         self.assertEqual(profiles(steps[at]), ['volume-vr-voi'])
         self.assertFalse(any('volume-vr-voi' in profiles(step) for step in jobs['volume-rendering']['steps']))
@@ -2036,14 +2037,51 @@ class MeasurementCiTests(unittest.TestCase):
         vr = {run_dir: (files, command) for step in jobs['volume-rendering']['steps'] for run_dir, files, command in recorded(step)}
         files, command = vr['tmp/vr-ci/pure-vr']
         tested = command[command.index('--test')+1:]
-        for name in ('tests/volume_vr_voi_test.cjs', 'tests/volume_vr_masks_test.cjs'):
+        for name in ('tests/volume_vr_voi_test.cjs', 'tests/volume_vr_masks_test.cjs', 'tests/volume_mask_session_test.cjs'):
             self.assertIn(name, tested); self.assertIn(name, files)
         for name in ('worklist-v0/hpacs-lite/volume-voi.js', 'worklist-v0/hpacs-lite/volume-vr-voi.js', 'worklist-v0/hpacs-lite/volume-vr-masks.js'):
             self.assertIn(name, files)
         files, command = vr['tmp/vr-ci/binding-dom']
         self.assertIn('tests/viewer_vr_binding_dom_test.py', command[-1])
-        for name in ('volume-voi.js', 'volume-vr-voi.js', 'volume-vr-masks.js', 'viewer-volume-vr-voi.js', 'volume-sculpt.js', 'viewer-volume-sculpt.js'):
+        for name in ('volume-voi.js', 'volume-vr-voi.js', 'volume-vr-masks.js', 'viewer-volume-vr-voi.js', 'volume-sculpt.js', 'viewer-volume-sculpt.js', 'volume-mask-renderer.js'):
             self.assertIn('worklist-v0/hpacs-lite/'+name, files)
+
+    def test_validate_workflow_runs_the_bu_boundary_judge_on_software_gl(self):
+        """S8-U1a fix9 CI-T-05 (TEST-S8-SCULPT-PERF BU-T02): one job runs the native B-u boundary test on SwiftShader with its
+        record kept, then the O9 judge's self-test on that record, both through record-run with their inputs hashed, and
+        uploads the run directory whatever happened. Read through the installed YAML parser and shell words."""
+        import shlex
+        import yaml
+        jobs = yaml.safe_load((ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8'))['jobs']
+
+        def recorded(step):
+            out = []
+            for line in str(step.get('run') or '').replace('\\\n', ' ').splitlines():
+                words = shlex.split(line, comments=True)
+                for index, word in enumerate(words):
+                    if word.endswith('scripts/record-run.py') and '--' in words[index:]:
+                        cut = words.index('--', index); head = words[index+1:cut]
+                        out.append((next(head[n+1] for n, value in enumerate(head) if value == '--run-dir'), [head[n+1] for n, value in enumerate(head) if value == '--file'], words[cut+1:]))
+            return out
+        owners = [name for name, job in jobs.items() for step in job.get('steps', []) for _, _, command in recorded(step) if 'tests/e2e/test_volume_bu_boundary.py' in command]
+        self.assertEqual(owners, ['volume-bu-boundary'])
+        job = jobs['volume-bu-boundary']; steps = job['steps']
+        self.assertEqual(job['runs-on'], 'ubuntu-24.04'); self.assertLessEqual(int(job['timeout-minutes']), 30)
+        runs = [(index, row) for index, step in enumerate(steps) for row in recorded(step)]
+        boundary = [(index, files, command) for index, (_, files, command) in runs if 'tests/e2e/test_volume_bu_boundary.py' in command]
+        judge = [(index, files, command) for index, (_, files, command) in runs if 'tests/o9_band.py' in command and 'selftest' in command]
+        self.assertEqual((len(boundary), len(judge)), (1, 1))
+        (b_at, b_files, b_command), = boundary; (j_at, j_files, j_command), = judge
+        self.assertLess(b_at, j_at)
+        self.assertIn('KIN_BU_ANGLE=swiftshader', b_command); out = next(word.split('=', 1)[1] for word in b_command if word.startswith('KIN_BU_OUT='))
+        for name in ('tests/e2e/test_volume_bu_boundary.py', 'tests/o9_band.py', 'worklist-v0/hpacs-lite/volume-sculpt.js', 'worklist-v0/hpacs-lite/volume-vr-masks.js'):
+            self.assertIn(name, b_files)
+        self.assertEqual(j_command[j_command.index('--record')+1], out + '/record.json'); self.assertIn('tests/o9_band.py', j_files)
+        self.assertTrue(all(run_dir.startswith('tmp/bu-ci/') for _, (run_dir, _, _) in runs))
+        uploads = [step for step in steps if str(step.get('uses', '')).startswith('actions/upload-artifact@')]
+        self.assertEqual(len(uploads), 1); self.assertEqual(str(uploads[0].get('if', '')).replace(' ', ''), 'always()')
+        self.assertEqual(str(uploads[0]['with']['path']).strip().rstrip('/'), 'tmp/bu-ci')
+        self.assertTrue(out.startswith('tmp/bu-ci/'))
 
     def test_e2e_route_handlers_bind_payloads_after_route_and_request(self):
         """A11-ORIENT-1 ci-02 regression (static, not a runtime exercise of any callback).
