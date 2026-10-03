@@ -26,7 +26,8 @@
  *    does each write given one more path through a helper called by a constant key or a fragment written or handed on.
  *
  * D-NW (S7-U3a-AUDIT-SPEC-D-R-001) temporarily defers exactly the reviewed 27 raw unresolved candidates; it is
- * not W1-W6 proof. The raw inventory and diagnoses remain unchanged, with 32 resolved writers. The verdict uses
+ * not W1-W6 proof. The raw inventory and diagnoses remain unchanged, with 35 resolved writers (S7-U5 added the three
+ * access-record writes of auth.service.ts: the login transaction, a login failure row, the end transaction). The verdict uses
  * blocking unresolved: raw unresolved without a valid disposition, plus disposition errors; any such entry fails.
  * Byte identity (after CRLF-to-LF normalization) of the reviewed source corpus and compiler inputs, the compiler
  * version, and the exact positions and diagnoses are the boundary of this temporary ruling (AGENTS 1-B.14).
@@ -120,6 +121,25 @@ const CONTRACT = {
  * never the Members console; the admin is no actor of a delivery). */
 CONTRACT.hidden_study_scoped_owner_only = ["study.question", "study.image-request", "study.critical-result"];
 CONTRACT.synthetic_vectors.push({"row":31,"action":"study.question","rule":"hidden:study_scoped_owner_only","record_time_visible_to":[],"withheld_sides":{},"note":"clinician question naming its institution: study-scoped owner-only audit, never the Members console"});
+/* S7-U5 (TEST-S7-U5-ATTRIBUTION AT-01..AT-02, D7): the access-record rows auth.login, auth.logout and auth.session.expired
+ * are attributed to the institution they recorded at the event - the token's one group then (the verified token at login,
+ * the stored token of the session that ended), never the member's group now. Vectors 32-41 continue the numbering; the
+ * card block above stays verbatim. */
+const AUTH_MEANING = "record-time institution from the token groups at the event";
+Object.assign(CONTRACT.field_rules, {"auth.login":{"source":"detail.institution","meaning":AUTH_MEANING},
+  "auth.logout":{"source":"detail.institution","meaning":AUTH_MEANING},
+  "auth.session.expired":{"source":"detail.institution","meaning":AUTH_MEANING}});
+CONTRACT.synthetic_vectors.push(
+  {"row":32,"action":"auth.login","rule":"field:detail.institution","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"m logs in while in A"},
+  {"row":33,"action":"auth.logout","rule":"field:detail.institution","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"m logs out while in A"},
+  {"row":34,"action":"auth.session.expired","rule":"field:detail.institution","record_time_visible_to":["inst-b"],"withheld_sides":{"inst-b":[]},"note":"m's B-era session ends idle"},
+  {"row":35,"action":"auth.session.expired","rule":"field:detail.institution","record_time_visible_to":["inst-b"],"withheld_sides":{"inst-b":[]},"note":"m2's B session swept: no request, ip null"},
+  {"row":36,"action":"auth.session.expired","rule":"field:detail.institution","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"m3's A session ends on a refused refresh"},
+  {"row":37,"action":"auth.logout","rule":"field:detail.institution","record_time_visible_to":["inst-b"],"withheld_sides":{"inst-b":[]},"note":"m's B session ends by an account switch"},
+  {"row":38,"action":"auth.login","rule":"field:detail.institution","record_time_visible_to":[],"withheld_sides":{},"note":"failed login, identity unknown: no institution"},
+  {"row":39,"action":"auth.login","rule":"field:detail.institution","record_time_visible_to":[],"withheld_sides":{},"note":"PENDING member (no group): no institution"},
+  {"row":40,"action":"auth.login","rule":"field:detail.institution","record_time_visible_to":[],"withheld_sides":{},"note":"two groups (INVALID): no single institution"},
+  {"row":41,"action":"auth.login","rule":"field:detail.institution","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"m3's session could not be stored: failure row with the verified A identity"});
 
 const json = value => JSON.parse(JSON.stringify(value));
 const WITHHELD = { withheld: 'other_institution' };
@@ -186,6 +206,21 @@ const ROWS = new Map([
     entry: '00000000-0000-4000-8000-000000000031', kind: 'question', from: null, to: 'Open', revision: 1,
     requestId: '00000000-0000-4000-8000-000000000031', role: 'clinician' }, 'syn-clinician-a@members.test'),
 ].map(r => [r.id, r]));
+// S7-U5: auth.service.ts writes {institution, ip, dataSubject: null, outcome[, cause]} (login) or {institution, ip,
+// dataSubject: null, cause} (logout, expiry); target is the account id, actor its login identity.
+const authDetail = (institution, rest, ip = '198.51.100.7') => ({ institution, ip, dataSubject: null, ...rest });
+for (const r of [
+  row(32, 'auth.login', M, authDetail('inst-a', { outcome: 'success' }), 'syn-m-login@synthetic.test'),
+  row(33, 'auth.logout', M, authDetail('inst-a', { cause: 'logout' }), 'syn-m-login@synthetic.test'),
+  row(34, 'auth.session.expired', M, authDetail('inst-b', { cause: 'idle' }), 'syn-m-login@synthetic.test'),
+  row(35, 'auth.session.expired', M2, authDetail('inst-b', { cause: 'sweep' }, null), 'syn-m2-login@synthetic.test'),
+  row(36, 'auth.session.expired', M3, authDetail('inst-a', { cause: 'refresh_failed' }), 'syn-m3-login@synthetic.test'),
+  row(37, 'auth.logout', M, authDetail('inst-b', { cause: 'account_switch' }), 'syn-m-login@synthetic.test'),
+  row(38, 'auth.login', '', authDetail(null, { outcome: 'failure', cause: 'provider_error' }), 'unknown'),
+  row(39, 'auth.login', MP, authDetail(null, { outcome: 'success' }), 'syn-mp-login@synthetic.test'),
+  row(40, 'auth.login', MX, authDetail(null, { outcome: 'success' }), 'syn-mx-login@synthetic.test'),
+  row(41, 'auth.login', M3, authDetail('inst-a', { outcome: 'failure', cause: 'session_failed' }), 'syn-m3-login@synthetic.test'),
+]) ROWS.set(r.id, r);
 
 /** Sides of a member row the reader gets as {withheld:'other_institution'} (field rows withhold nothing). */
 function withheldSides(projection) {
@@ -238,8 +273,9 @@ test('the module table is the card contract; allowed and hidden never overlap; t
 });
 
 test('the synthetic vectors (the card\'s 30 and study.question): record-time readers and withheld sides per row', () => {
-  // 31 = the card's 30, unchanged, and the study.question row added with its contract row (Astra S5-U5b-D-F02).
-  assert.equal(CONTRACT.synthetic_vectors.length, 31);
+  // 31 = the card's 30, unchanged, and the study.question row added with its contract row (Astra S5-U5b-D-F02); 32-41
+  // are the S7-U5 access-record rows (AT-02).
+  assert.equal(CONTRACT.synthetic_vectors.length, 41);
   assert.deepEqual(CONTRACT.synthetic_vectors.slice(0, 30).map(v => v.row), Array.from({ length: 30 }, (_, i) => i + 1));
   assert.deepEqual(CONTRACT.synthetic_vectors[30], { row: 31, action: 'study.question', rule: 'hidden:study_scoped_owner_only',
     record_time_visible_to: [], withheld_sides: {}, note: CONTRACT.synthetic_vectors[30].note });
@@ -303,7 +339,9 @@ test('member rows: each side sees its own snapshot, the other side is withheld u
 const CURRENT_GROUP = new Map([[M, 'inst-b'], [M2, 'inst-b'], [M3, 'inst-a'], [M1, 'inst-a']]);
 const CURRENT_OWNER = new Map([[S1, ['inst-b']], [S2, ['inst-a', 'inst-b']], [S3, ['inst-a']]]);
 function currentRule(source) {
-  if (source.action.startsWith('admin.user.') || source.action === 'study.access') {
+  // An access-record row (S7-U5) names its account as target, like a member row: the rejected rule hands it to that
+  // account's group now.
+  if (source.action.startsWith('admin.user.') || source.action === 'study.access' || source.action.startsWith('auth.')) {
     const group = CURRENT_GROUP.get(source.target);
     return group ? [group] : [];
   }
@@ -715,6 +753,84 @@ test('B-F02: the SQL prefilter is a literal substring: names with \\, ", % and _
   assert.match(sql[1], /ORDER BY "id" DESC LIMIT \$\{take\}/);
   assert.doesNotMatch(sql[1], /\b(I?LIKE|SIMILAR)\b/i);
   assert.doesNotMatch(method, /\bcontains\s*:/);
+});
+
+// ── S7-U5 access records (TEST-S7-U5-ATTRIBUTION AT-03..AT-05; AT-01 and AT-02 are the table and vectors above, AT-06 the
+// completeness and D-NW cases below over the repinned policy) ──
+
+test('AT-03 negative control: the current-group rule hands exactly m\'s A-era access rows to B; the record-time rule keeps them in A', () => {
+  const vectors = CONTRACT.synthetic_vectors.filter(v => v.row >= 32);
+  assert.deepEqual(vectors.map(v => v.row), [32, 33, 34, 35, 36, 37, 38, 39, 40, 41]);
+  const leaks = vectors.filter(v => JSON.stringify(currentRule(ROWS.get(v.row))) !== JSON.stringify(v.record_time_visible_to))
+    .map(v => v.row);
+  assert.deepEqual(leaks, [32, 33]);
+  for (const n of leaks) {
+    assert.deepEqual(currentRule(ROWS.get(n)), ['inst-b'], `row ${n}: the rejected rule follows m to B`);
+    assert.equal(A.projectAuditRow(ROWS.get(n), 'inst-b'), null, `row ${n} never reaches B`);
+    assert.ok(A.projectAuditRow(ROWS.get(n), 'inst-a'), `row ${n} stays with A`);
+  }
+  // Preserving pair: the B-era rows read the same under both rules.
+  for (const n of [34, 37]) assert.deepEqual(currentRule(ROWS.get(n)), json(A.attributeAuditRow(ROWS.get(n)).visible_to), `row ${n}`);
+  assert.equal(CONTRACT.rejected_current_rule_leaks.length, 9, 'the card leak list is unchanged');
+});
+
+test('AT-04 an access row that does not clearly record one institution is hidden; a clear one is projected as recorded', () => {
+  const auth = (detail, extra = {}) =>
+    A.attributeAuditRow({ ...row(99, 'auth.logout', M, detail, 'syn-m-login@synthetic.test'), ...extra });
+  const cases = {
+    'institution null': auth(authDetail(null, { cause: 'logout' })),
+    'institution empty': auth(authDetail('', { cause: 'logout' })),
+    'institution numeric': auth(authDetail(7, { cause: 'logout' })),
+    'no institution key': auth((({ institution, ...rest }) => rest)(authDetail('inst-a', { cause: 'logout' }))),
+    'institution only inherited': auth('{"__proto__":{"institution":"inst-a"},"cause":"logout"}'),
+    'detail not JSON': auth('{"institution":"inst-a"'),
+    'detail an array': auth([authDetail('inst-a', { cause: 'logout' })]),
+    'non-string actor': auth(authDetail('inst-a', { cause: 'logout' }), { actor: null }),
+    'invalid time': auth(authDetail('inst-a', { cause: 'logout' }), { at: 'yesterday' }),
+  };
+  for (const [name, result] of Object.entries(cases)) {
+    assert.deepEqual(json(result.visible_to), [], name);
+    assert.equal(result.projection_by_side.size, 0, name);
+    assert.equal(typeof result.hidden, 'string', name);
+    for (const reader of ['inst-a', 'inst-b', 'inst-z']) assert.equal(result.projection_by_side.get(reader), undefined, name);
+  }
+  // A clear row is shown with exactly the keys it recorded: nothing is added, guessed or dropped.
+  for (const [n, reader] of [[32, 'inst-a'], [35, 'inst-b'], [41, 'inst-a']]) {
+    const recorded = JSON.parse(ROWS.get(n).detail), shown = A.projectAuditRow(ROWS.get(n), reader);
+    assert.deepEqual(json(shown.detail), recorded, `row ${n}`);
+    assert.deepEqual(Object.keys(shown.detail), Object.keys(recorded), `row ${n}`);
+    assert.equal(shown.target, ROWS.get(n).target, `row ${n}`);
+  }
+});
+
+test('AT-05 the SQL prefilter keeps every access row of a name with \\, ", % and _ and adds none', async () => {
+  const NAMES = ['inst-a', 'inst\\b', 'inst"q', 'inst%p', 'inst_u', 'a\\"%_\\\\z', '병원 A'];
+  const rows = [], expected = new Map(NAMES.map(name => [name, []]));
+  let id = 0;
+  NAMES.forEach((name, n) => {
+    const account = `syn-account-${n}`;
+    for (const [action, rest] of [['auth.login', { outcome: 'success' }], ['auth.logout', { cause: 'logout' }],
+      ['auth.session.expired', { cause: 'idle' }]]) {
+      rows.push(row(++id, action, account, authDetail(name, rest), `syn-login-${n}@synthetic.test`));
+      expected.get(name).push(id);
+    }
+    // a failed login of an unknown identity next to them: nobody's
+    rows.push(row(++id, 'auth.login', '', authDetail(null, { outcome: 'failure', cause: 'provider_error' }), 'unknown'));
+  });
+  const all = { after: null, limit: 100 }, lost = {};
+  for (const reader of NAMES) {
+    const label = JSON.stringify(reader);
+    assert.deepEqual(rows.filter(r => A.projectAuditRow(r, reader)).map(r => r.id), expected.get(reader), label);
+    for (const r of rows) if (A.projectAuditRow(r, reader)) assert.ok(A.auditCandidateRow(r, reader), `row ${r.id} for ${label}`);
+    const everything = await A.readAuditPage(sourceOver(rows), reader, all);
+    assert.equal(everything.total, 3, label);
+    const prefiltered = await A.readAuditPage(sourceOver(rows.filter(r => A.auditCandidateRow(r, reader))), reader, all);
+    assert.deepEqual(prefiltered, everything, `${label}: the prefilter changes nothing`);
+    const removed = await A.readAuditPage(sourceOver(rows.filter(r => removedLikeCandidate(r, reader))), reader, all);
+    lost[reader] = everything.total - removed.total;
+  }
+  // Negative control: the removed LIKE form (modelled above) loses every access row of a name with \ or ".
+  assert.deepEqual(lost, { 'inst-a': 0, 'inst\\b': 3, 'inst"q': 3, 'inst%p': 0, 'inst_u': 0, 'a\\"%_\\\\z': 3, '병원 A': 0 });
 });
 
 test('the query takes limit (1-100, default 25) and the sealed after only', () => {

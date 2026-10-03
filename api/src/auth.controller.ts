@@ -35,10 +35,13 @@ export class AuthController {
       return;
     }
     if (error) {
+      // 실패 행은 이 서버가 시작한 로그인일 때만 남고, error 원문은 행에 싣지 않는다(OP-2 A).
+      await this.auth.recordLoginFailure(req, 'provider_error');
       res.redirect(302, `${origin}/worklist/hpacs-lite/index.html?auth_error=${encodeURIComponent(error)}`);
       return;
     }
     if (!code) {
+      await this.auth.recordLoginFailure(req, 'no_code');
       res.redirect(302, `${origin}/worklist/hpacs-lite/index.html?auth_error=stale`);
       return;
     }
@@ -55,7 +58,8 @@ export class AuthController {
   @Post('logout')
   @HttpCode(204)
   async logout(@Req() req: any, @Res() res: any) {
-    await this.auth.logout(req.sid ?? null, res);
+    // 접속기록의 접속지는 요청에서, 신원은 끝낸 세션에서 온다. 409(경쟁)·500(저장소)은 쿠키를 바꾸지 않고 그대로 나간다.
+    await this.auth.logout(req, res);
     res.status(204).send();
   }
 }

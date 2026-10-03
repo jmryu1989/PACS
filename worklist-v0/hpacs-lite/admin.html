@@ -1439,7 +1439,33 @@
       const API = `${location.origin}/api`;
       const $ = selector => document.querySelector(selector);
       const PAGE_SIZE = 25;
-      const audit = { seq: 0, failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false };
+      const audit = { seq: 0, failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false, accessSeen: false };
+
+      /*
+       * S7-U5 access history (OP-1 A). The card sentence is replaced only once an answer this page session accepted and
+       * painted held an access-record row: a server of the same version, or an answer merely received, confirms nothing.
+       * The rows are append-only, so an empty answer or a failure does not take it back; the session end does.
+       */
+      const ACCESS_ACTIONS = ["auth.login", "auth.logout", "auth.session.expired"];
+      const accessHistory = $("#audit-access-history");
+      const ACCESS_CARD = { text: accessHistory.textContent, title: accessHistory.title };
+      const ACCESS_SEEN = {
+        text: "접속 이력: 로그인·로그아웃·세션 만료 기록이 이 표에 함께 보입니다",
+        title: "로그인 성공·실패, 로그아웃·계정 전환, 세션 만료(유휴·갱신 실패·정리)를 기록 시점 기관으로 보입니다. "
+          + "기록 시점 기관이 하나로 정해지지 않은 행과 신원을 모르는 로그인 실패는 보이지 않습니다. "
+          + "Keycloak 로그인 화면의 비밀번호 오류는 수집하지 않습니다. 보존 기간은 2년입니다.",
+      };
+
+      function showAccessHistory() {
+        const shown = audit.accessSeen ? ACCESS_SEEN : ACCESS_CARD;
+        Object.assign(accessHistory, { textContent: shown.text, title: shown.title });
+      }
+
+      function noteAccessRows(rows) {
+        if (audit.accessSeen || !rows.some(row => ACCESS_ACTIONS.includes(row.action))) return;
+        audit.accessSeen = true;
+        showAccessHistory();
+      }
 
       function setAuditMessage(value) {
         const box = $("#audit-message");
@@ -1534,13 +1560,15 @@
       /*
        * The page session ended (Log out, or a 401 on a request of any panel). Runs before anything is awaited: moving seq
        * drops every Refresh and Load More in flight, and the rows, the continuation, the message and the controls go with
-       * them; the state line goes back to Not Loaded. The logout is the session end's.
+       * them; the state line goes back to Not Loaded and the access-history sentence to the card's. The logout is the
+       * session end's.
        */
       KinConsoleSession.onEnd(() => {
         audit.seq++;
-        Object.assign(audit, { failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false });
+        Object.assign(audit, { failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false, accessSeen: false });
         $("#audit-refresh").disabled = true;
         setAuditMessage("");
+        showAccessHistory();
         drawAudit();
       });
 
@@ -1559,6 +1587,7 @@
         if (read) {
           Object.assign(audit, { read, rows: read.rows, next: read.next, failed: false });
           setAuditMessage("");
+          noteAccessRows(read.rows);
         } else {
           // Nothing is emptied: the last successful reading stays, marked as the last observation.
           audit.failed = true;
@@ -1582,6 +1611,7 @@
         if (read && read.institutionId === audit.read.institutionId) {
           Object.assign(audit, { rows: audit.rows.concat(read.rows), next: read.next, read: { ...audit.read, total: read.total } });
           setAuditMessage("");
+          noteAccessRows(read.rows);
         } else {
           // The rows already shown stay valid; only the next page failed. An expired continuation cannot be retried.
           if (error?.code === "ADMIN_AUDIT_CURSOR_EXPIRED") audit.next = null;
