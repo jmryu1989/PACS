@@ -1,7 +1,10 @@
 // TEST-S8-U1a-MODEL (MV-U1a-03, 04, 05, 07): the combined VOI + sculpt mask builder.
 // The voxel oracle below is this file's own: crop index ranges, a world dot product for the slab and the accepted sculpt
 // region test on its own projection of the voxel. Shader text is never read; the replacement is compared with the accepted
-// sculpt producer's output and passed through the unchanged renderer preflight with a recording GL.
+// sculpt producer's output and passed through the renderer preflight with a recording GL.
+// B-T1/B-T2 (test-plan MAX-I, S8-U1a-SPEC-C-F04): when the preflight may take the renderer's own linked program instead of
+// building a second copy, and that every other case still runs the full compile and link check, changes no cache entry and
+// keeps a failure a refusal.
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
@@ -116,7 +119,7 @@ test('MV-U1a-04 eight sculpt regions and a VOI make exactly one owned replacemen
   refusedWith(()=>masks.build({voi,sculpt:[{...operations[0],region:{kind:'Polygon',points:[[0,0]],bounds:[0,0,0,0]}}]}),'vr-limit');
 });
 
-test('MV-U1a-04 the unchanged renderer preflight takes the combined block as its one owned block and replaces an earlier one',()=>{
+test('MV-U1a-04 the renderer preflight takes the combined block as its one owned block and replaces an earlier one',()=>{
   const source=fs.readFileSync(path.join(__dirname,'..','worklist-v0','hpacs-lite','volume-mask-renderer.js'),'utf8'),context={window:{}};
   vm.runInNewContext(source,context);const preflight=context.window.KinVolumeMaskRenderer.preflight;
   const g=GRIDS[0],bound=vr.binding(g.imageData),random=rng(11),signature=sculpt.shaderReplacement([]).originalValue;
@@ -139,6 +142,87 @@ test('MV-U1a-04 the unchanged renderer preflight takes the combined block as its
   const gl={VERTEX_SHADER:1,FRAGMENT_SHADER:2,createShader:()=>({}),shaderSource(){},compileShader(){},getShaderParameter:()=>true,createProgram:()=>({}),attachShader(){},linkProgram(){},getProgramParameter:()=>true,deleteProgram(){},deleteShader(){}};
   const program={getCompiled:()=>true,getLinked:()=>true,getVertexShader:()=>({getSource:()=>'v'}),getFragmentShader:()=>({getSource:()=>signature})};
   assert.throws(()=>preflight({mapper:{},engine:{offscreenMultiRenderWindow:{getOpenGLRenderWindow:()=>({getContext:()=>gl,getViewNodeFor:()=>({get:()=>({tris:{getProgram:()=>program}})})})}}},doubled));
+});
+
+// The renderer as the pinned viewer exposes it to the preflight: a GL that records every call, the renderer's program cache
+// (getShaderCache(), its 'shaderPrograms' entries and their getters) and the program linked for the shown frame.
+function rendererCache({lost=false,compile=true,link=true}={}){
+  const calls=[],handles=new Set();
+  const gl={VERTEX_SHADER:1,FRAGMENT_SHADER:2,COMPILE_STATUS:3,LINK_STATUS:4,isContextLost:()=>lost,isProgram:handle=>handles.has(handle)};
+  const answers={createShader:type=>lost?null:{type},createProgram:()=>lost?null:{},getShaderParameter:()=>compile,getProgramParameter:()=>link};
+  for(const name of ['createShader','shaderSource','compileShader','getShaderParameter','createProgram','attachShader','linkProgram','getProgramParameter','deleteProgram','deleteShader','useProgram','drawArrays'])
+    gl[name]=(...args)=>{calls.push(name);return answers[name]?.(...args);};
+  const entry=({vertex='vertex',fragment,geometry='',compiled=true,linked=true,context=gl,alive=true})=>{
+    const handle={};if(alive)handles.add(handle);
+    return {getCompiled:()=>compiled,getLinked:()=>linked,getHandle:()=>handle,get:name=>({[name]:name==='context'?context:undefined}),
+      getVertexShader:()=>({getSource:()=>vertex}),getFragmentShader:()=>({getSource:()=>fragment}),getGeometryShader:()=>({getSource:()=>geometry})};
+  };
+  const programs={};
+  const windowGL={getContext:()=>gl,getShaderCache:()=>({get:name=>({[name]:name==='shaderPrograms'?programs:undefined})})};
+  return {gl,calls,entry,programs,windowGL};
+}
+
+test('B-T1 the preflight takes only the renderer\'s own linked program of exactly these sources in this live context; any other case runs the full check',()=>{
+  const source=fs.readFileSync(path.join(__dirname,'..','worklist-v0','hpacs-lite','volume-mask-renderer.js'),'utf8'),context={window:{}};
+  vm.runInNewContext(source,context);
+  const g=GRIDS[0],bound=vr.binding(g.imageData),random=rng(13),signature=sculpt.shaderReplacement([]).originalValue;
+  const next=masks.build({voi:vr.shaderPlane(vr.reset(vr.initial(),bound,'Coronal').voi,bound),sculpt:[randomOperation(random,'Polygon'),randomOperation(random,'Rectangle')]});
+  const head='#version 300 es\nprecision highp float;\n',tail='\n  return vec4(1.0);\n}\n',shown=head+signature+tail,wanted=head+next.replacementValue+tail;
+  const building=['createShader','compileShader','createProgram','linkProgram','deleteProgram','deleteShader'];
+  // The preflight never reads the mapper: any read of it would throw here.
+  const mapper=new Proxy({},{get(){throw Error('the preflight read the mapper');},set(){throw Error('the preflight wrote the mapper');}});
+  function run(setup,options){
+    const r=rendererCache(options),live=r.entry({fragment:shown});r.programs.live=live;setup(r);
+    const keys=Object.keys(r.programs),entries=keys.map(key=>r.programs[key]);
+    const op={mapper,engine:{offscreenMultiRenderWindow:{getOpenGLRenderWindow:()=>({...r.windowGL,getViewNodeFor:()=>({get:()=>({tris:{getProgram:()=>live}})})})}}};
+    let error=null;try{context.window.KinVolumeMaskRenderer.preflight(op,masks.properties({},next));}catch(caught){error=caught;}
+    // Nothing is inserted, replaced or released in the renderer's cache, and no program is bound, whatever happened.
+    assert.deepEqual(Object.keys(r.programs),keys);assert.ok(keys.every((key,n)=>r.programs[key]===entries[n]));
+    assert.ok(!r.calls.includes('useProgram')&&!r.calls.includes('drawArrays'));
+    return {error,calls:r.calls};
+  }
+  const full=calls=>{for(const name of ['createShader','compileShader','createProgram','linkProgram'])assert.ok(calls.includes(name),name);
+    assert.equal(calls.filter(name=>name==='deleteProgram').length,1,'the checked candidate is deleted');assert.equal(calls.filter(name=>name==='deleteShader').length,2);};
+  // Hit: the renderer already compiled and linked these exact sources in this context.
+  const hit=run(r=>{r.programs.wanted=r.entry({fragment:wanted});});
+  assert.equal(hit.error,null);assert.deepEqual(hit.calls.filter(name=>building.includes(name)),[],'no second copy is built');
+  // Misses, each with the full check and its normal acceptance.
+  for(const [label,setup] of [
+    ['nothing cached for these sources',()=>{}],
+    ['one fragment character differs',r=>{r.programs.near=r.entry({fragment:wanted+' '});}],
+    ['vertex differs',r=>{r.programs.near=r.entry({vertex:'vertex2',fragment:wanted});}],
+    ['geometry differs',r=>{r.programs.near=r.entry({fragment:wanted,geometry:'g'});}],
+    ['another context',r=>{r.programs.other=r.entry({fragment:wanted,context:{}});}],
+    ['not compiled',r=>{r.programs.half=r.entry({fragment:wanted,compiled:false});}],
+    ['not linked',r=>{r.programs.half=r.entry({fragment:wanted,linked:false});}],
+    ['restored context: the cached handle is gone',r=>{r.programs.stale=r.entry({fragment:wanted,alive:false});}]]){
+    const result=run(setup);assert.equal(result.error,null,label);full(result.calls);
+  }
+  // A lost context never counts as a hit and the full check refuses.
+  const lost=run(r=>{r.programs.wanted=r.entry({fragment:wanted});},{lost:true});
+  assert.ok(lost.error);assert.ok(!lost.calls.includes('linkProgram'));
+});
+
+test('B-T2 a compile or link failure stays a refusal: the candidate is deleted and the renderer cache keeps no entry for it',()=>{
+  const source=fs.readFileSync(path.join(__dirname,'..','worklist-v0','hpacs-lite','volume-mask-renderer.js'),'utf8'),context={window:{}};
+  vm.runInNewContext(source,context);
+  const g=GRIDS[1],bound=vr.binding(g.imageData),random=rng(17),signature=sculpt.shaderReplacement([]).originalValue;
+  const next=masks.build({voi:vr.shaderPlane(vr.reset(vr.initial(),bound,'Axial').voi,bound),sculpt:[randomOperation(random,'Ellipse')]});
+  const shown='#version 300 es\n'+signature+'\n  return vec4(1.0);\n}\n';
+  for(const [label,options,built] of [['link',{link:false},true],['compile',{compile:false},false]]){
+    // The same sources fail twice in a row: the first failure leaves nothing a second preflight could take as linked.
+    const r=rendererCache(options),live=r.entry({fragment:shown});r.programs.live=live;const keys=Object.keys(r.programs);
+    const op={mapper:{},engine:{offscreenMultiRenderWindow:{getOpenGLRenderWindow:()=>({...r.windowGL,getViewNodeFor:()=>({get:()=>({tris:{getProgram:()=>live}})})})}}};
+    for(let attempt=0;attempt<2;attempt++){
+      const before=r.calls.length;
+      assert.throws(()=>context.window.KinVolumeMaskRenderer.preflight(op,masks.properties({},next)),label);
+      const calls=r.calls.slice(before);
+      assert.deepEqual(Object.keys(r.programs),keys,label);assert.ok(!calls.includes('useProgram'),label);
+      assert.equal(calls.filter(name=>name==='deleteProgram').length,built?1:0,label);
+      assert.equal(calls.filter(name=>name==='deleteShader').length,calls.filter(name=>name==='createShader').length,label+': every created shader is deleted');
+      assert.ok(calls.includes('compileShader'),label+': the second attempt checks again');
+    }
+  }
 });
 
 test('MV-U1a-05 the builder and the voxel decision leave deeply frozen inputs unchanged',()=>{

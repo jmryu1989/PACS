@@ -17,6 +17,24 @@
     }
     return prefix+tail;
   }
+  // The renderer keeps every program it compiled in its own cache, keyed by the full sources, and its next frame binds the
+  // entry for the sources it builds. An entry it already compiled and linked from exactly these sources, in this live
+  // context, has answered the compile and link question for that frame, so a second copy is not built just to be deleted.
+  // Only reads: nothing is compiled, bound, inserted, released or rendered here, and any doubt falls back to the full check.
+  function linkedProgram(windowGL,gl,vertex,fragment,geometry){
+    if(typeof windowGL.getShaderCache!=='function'||typeof gl.isContextLost!=='function'||gl.isContextLost())return null;
+    const programs=windowGL.getShaderCache()?.get?.('shaderPrograms')?.shaderPrograms;
+    if(!programs||typeof programs!=='object')return null;
+    for(const entry of Object.values(programs)){
+      try{
+        if(entry?.getCompiled?.()!==true||entry.getLinked?.()!==true||entry.get?.('context')?.context!==gl)continue;
+        if(entry.getVertexShader().getSource()!==vertex||entry.getFragmentShader().getSource()!==fragment||(entry.getGeometryShader?.()?.getSource?.()??'')!==geometry)continue;
+        // A context restored after a loss keeps the cache object but not its programs.
+        const handle=entry.getHandle?.();if(handle&&gl.isProgram(handle))return entry;
+      }catch(_){}
+    }
+    return null;
+  }
   function preflight(op,properties){
     const windowGL=op.engine.offscreenMultiRenderWindow.getOpenGLRenderWindow(),gl=windowGL.getContext();
     const program=windowGL.getViewNodeFor(op.mapper)?.get('tris')?.tris?.getProgram();
@@ -28,11 +46,13 @@
       if(replacement.originalValue!==signature||replacement.shaderType!=='Fragment'||replacement.replaceAll!==false||replacement.replaceFirst!==true)throw Error('VR GPU 가림 형식을 확인할 수 없습니다.');
       fragment=fragment.replace(signature,replacement.replacementValue);
     }
+    const vertex=program.getVertexShader().getSource();
+    if(linkedProgram(windowGL,gl,vertex,fragment,program.getGeometryShader?.()?.getSource?.()??''))return;
     let candidate=null;const shaders=[];
     try{
       // Compile and link unattached objects without binding a program or running
       // the shared rendering engine. A bad candidate cannot stall its RAF loop.
-      for(const [type,source] of [[gl.VERTEX_SHADER,program.getVertexShader().getSource()],[gl.FRAGMENT_SHADER,fragment]]){
+      for(const [type,source] of [[gl.VERTEX_SHADER,vertex],[gl.FRAGMENT_SHADER,fragment]]){
         const shader=gl.createShader(type);if(!shader)throw Error('VR GPU shader를 만들 수 없습니다.');
         shaders.push(shader);gl.shaderSource(shader,source);gl.compileShader(shader);
         if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS))throw Error('VR 가림을 GPU에서 컴파일하지 못했습니다. 기존 표시를 유지합니다.');
