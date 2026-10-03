@@ -14,8 +14,14 @@ VRVOI-MEASURE and VRVOI-MAX lines are observations for the record, never the rea
 Render range (C-02 as corrected by S8-U1a-SPEC-B-F01): an axis whose integer index extent is [l, u] renders over
 [l - 0.5, u + 0.5]; the 8 corners of that outer box through the source IJK->LPS affine are the unmasked render range and
 a full crop's planes. Voxel centres and the OP-1 marker rule are unchanged, so marker and partial regions get no half voxel.
+
+MAX-H (test-plan §4, S8-U1a-SPEC-C-R-001 F02/F03, D415) is a temporary bound for the MAX render actions, not a
+responsiveness verdict: the same run times e53e281's sculpt path first (the auxiliary step 'MAX-H-baseline'), then every
+target action of the candidate has one absolute deadline from L(n, v), enforced from outside the browser.
 """
-import base64, io, json, math, time, unittest, uuid
+import base64, hashlib, io, json, math, os, re, signal, subprocess, threading, time, unittest, uuid
+from pathlib import Path
+from urllib.parse import urlsplit
 import numpy as np
 from playwright.sync_api import expect
 import test_prior_selection as ct
@@ -40,6 +46,122 @@ REASON_KEYS = {'source-irregular', 'source-unsupported', 'source-changed', 'vr-n
                'vr-unapplied-edit', 'busy', 'vr-layout', 'vr-combination', 'vr-limit', 'render-failed', 'context-lost',
                'access-lost', 'vr-output-unsupported'}
 FORBIDDEN = ('골제거', 'bone removal', '자동')
+
+# MAX-H baseline: e53e281's VR files, served by their git objects to a new browser on this stack's pinned viewer and renderer.
+# The other files the VR loads are this tree's and the same bytes at e53e281 (only these VR files differ between the two).
+BASELINE_SHA = 'e53e281ec967c1a14165381738701698b2f818b0'
+BASELINE_BLOBS = {'viewer-volume-orientation.js': 'af96d6f20d3de9d4434ddccffd5bebe8fb8982fc',
+                  'viewer-volume-rendering.js': '7d03e4e37070944a3945652f18c6f80e5c5fb500',
+                  'viewer-volume-sculpt.js': 'c3ac3ad25798b6139a43be9c752d6633956d37a0',
+                  'volume-rendering.js': '5720e193f685448347605998b046c73829e5f88f',
+                  'volume-sculpt.js': '5b29df3fa756ba4a6936fe29b9f6bd67e9912bda',
+                  'volume-mask-renderer.js': 'd27cd85dd577bf6283b00fbb3fbf39df3cff0805'}
+# Fixed policy values of the ruling, not hosted-proven numbers; never raised after a candidate result.
+BASELINE_ACTION_S, BASELINE_TOTAL_S = 60, 300
+LIMIT_FLOOR_S, LIMIT_CAP_S, LIMIT_SLACK_S = 30, 120, 5
+
+
+def render_limit(b_n, voi):
+    """L(n, v) = min(120, max(30, (v ? 2 : 1) * B_n + 5)) seconds: n sculpts after the action, v = a VOI after it."""
+    return min(LIMIT_CAP_S, max(LIMIT_FLOOR_S, (2 if voi else 1) * b_n + LIMIT_SLACK_S))
+
+
+def baseline_sources():
+    """The e53e281 bytes of each BASELINE_BLOBS file: the commit's path must name the pinned blob and the bytes must hash to it
+    (git's object id). A missing object or any difference means the baseline cannot be established."""
+    root, out = Path(__file__).resolve().parents[2], {}
+    for name, blob in BASELINE_BLOBS.items():
+        named = subprocess.run(['git', 'rev-parse', '--verify', '--quiet', BASELINE_SHA + ':worklist-v0/hpacs-lite/' + name],
+                               cwd=root, capture_output=True, text=True, timeout=30)
+        data = subprocess.run(['git', 'cat-file', 'blob', blob], cwd=root, capture_output=True, timeout=30).stdout
+        if named.returncode or named.stdout.strip() != blob or hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest() != blob:
+            raise AssertionError('MAX-H baseline not established: %s at %s is not the pinned object %s' % (name, BASELINE_SHA, blob))
+        out[name] = data
+    return out
+
+
+def process_table():
+    """{pid: (parent pid, argv)} from Linux /proc; None where processes cannot be listed (no supervisor can be started)."""
+    if not os.path.isdir('/proc/self/task'):
+        return None
+    table = {}
+    for name in os.listdir('/proc'):
+        if not name.isdigit():
+            continue
+        try:
+            with open('/proc/%s/stat' % name, 'rb') as stat_file:
+                stat = stat_file.read()
+            with open('/proc/%s/cmdline' % name, 'rb') as argv_file:
+                argv = [part.decode('utf-8', 'replace') for part in argv_file.read().split(b'\0') if part]
+        except OSError:
+            continue
+        # The command name in stat may hold spaces or parentheses; the fields after its last ')' are fixed.
+        table[int(name)] = (int(stat[stat.rindex(b')') + 2:].split()[1]), argv)
+    return table
+
+
+def subtree(table, root):
+    children = {}
+    for pid, (parent, _) in table.items():
+        children.setdefault(parent, []).append(pid)
+    out, todo = [], [root]
+    while todo:
+        for child in children.get(todo.pop(), ()):
+            out.append(child); todo.append(child)
+    return out
+
+
+def browser_roots():
+    """The Chromium browser processes this test process started through Playwright's driver: a browser binary whose parent is
+    not one (its renderer, GPU and zygote processes are its descendants). None where processes cannot be listed."""
+    table = process_table()
+    if table is None:
+        return None
+    def chromium(pid):
+        argv = table.get(pid, (0, []))[1]
+        return bool(argv) and re.search(r'chrom|headless_shell', os.path.basename(argv[0]), re.I) is not None
+    return {pid for pid in subtree(table, os.getpid()) if chromium(pid) and not chromium(table[pid][0])}
+
+
+class Supervisor:
+    """MAX-H external deadline for one browser: a thread outside the browser kills the browser's whole process tree when the
+    armed absolute deadline passes, so a hung page, renderer or GPU process cannot hold a Playwright call past it. The call
+    then fails with the browser gone; nothing is retried or extended. One deadline is armed at a time."""
+
+    def __init__(self, root):
+        self.root, self.lock, self.timer, self.token, self.fired = root, threading.Lock(), None, 0, None
+
+    def arm(self, deadline, label):
+        with self.lock:
+            if self.timer is not None:
+                self.timer.cancel()
+            self.token += 1; token = self.token
+            self.timer = threading.Timer(max(0., deadline - time.monotonic()), self.fire, (token, label, deadline))
+            self.timer.daemon = True; self.timer.start()
+            return token
+
+    def disarm(self, token):
+        """Stops the deadline armed as token; returns the supervisor's record when it already ended the browser for it."""
+        with self.lock:
+            if token == self.token and self.timer is not None:
+                self.timer.cancel(); self.timer = None
+            return self.fired if self.fired and self.fired['token'] == token else None
+
+    def fire(self, token, label, deadline):
+        with self.lock:
+            if token != self.token or self.fired:
+                return
+            # Only processes still under this test process: a pid is never signalled after it left the tree.
+            table, killed = process_table() or {}, []
+            mine = set(subtree(table, os.getpid()))
+            for pid in [p for p in [self.root] + subtree(table, self.root) if p in mine]:
+                try:
+                    os.kill(pid, signal.SIGKILL); killed.append(pid)
+                except OSError:
+                    pass
+            self.fired = {'token': token, 'label': label, 'late_s': round(time.monotonic() - deadline, 3), 'killed': len(killed)}
+            self.timer = None
+        print('VRVOI-MAX ' + json.dumps({'step': 'supervisor', **{k: x for k, x in self.fired.items() if k != 'token'}}), flush=True)
 
 
 def grid_axes(grid):
@@ -177,6 +299,14 @@ window.vrVoi={
   return {shade:p.getShade(),color:Array.from({length:c.getSize()},(_,i)=>node(c,i)),opacity:Array.from({length:o.getSize()},(_,i)=>node(o,i)),
    at:hus.map(hu=>{const rgb=[0,0,0];c.getColor(hu,rgb);return {hu,rgb,opacity:o.getValue(hu)}})}},
  hu:indices=>{const vol=cornerstone.cache.getVolume(one().getVolumeId());return indices.map(i=>vol.voxelManager.getAtIJK(...i))},
+ // MAX-H: what the baseline and the candidate must render alike (input, transfer function, sample distance, gradient and
+ // shading, camera, canvas, crop planes and GL device). Reads only; the VOI and the mask properties are not part of it.
+ conditions:()=>{const v=one(),m=mapper(),p=v.getActors()[0].actor.getProperty(),cam=v.getCamera(),c=v.getCanvas(),gl=v.getRenderingEngine().offscreenMultiRenderWindow.getOpenGLRenderWindow().getContext(),ext=gl.getExtension('WEBGL_debug_renderer_info');
+  const nodes=f=>Array.from({length:f.getSize()},(_,i)=>{const n=[];f.getNodeValue(i,n);return n}),vol=cornerstone.cache.getVolume(v.getVolumeId()),last=Array.from(vol.dimensions).map(n=>n-1);
+  return {css:[v.element.clientWidth,v.element.clientHeight],canvas:[c.width,c.height],dpr:devicePixelRatio,viewPlaneNormal:Array.from(cam.viewPlaneNormal),viewUp:Array.from(cam.viewUp),parallel:cam.parallelProjection===true,parallelScale:cam.parallelScale,
+   sampleDistance:m.getSampleDistance(),planes:m.getClippingPlanes().map(q=>({origin:Array.from(q.getOrigin()),normal:Array.from(q.getNormal())})),gradient:[p.getUseGradientOpacity(0),p.getGradientOpacityMinimumOpacity(0),p.getGradientOpacityMaximumOpacity(0)],
+   shade:p.getShade(),interpolation:p.getInterpolationType(),color:nodes(p.getRGBTransferFunction(0)),opacity:nodes(p.getScalarOpacity(0)),dimensions:Array.from(vol.dimensions),spacing:Array.from(vol.imageData.getSpacing()),
+   last:Array.from(vol.imageData.indexToWorld(last)),hu:[[0,0,0],last,last.map(n=>Math.floor(n/2))].map(i=>vol.voxelManager.getAtIJK(...i)),renderer:ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)}},
  // F03 observation of one action (S8-U1a-SPEC-B-F03). Everything is pass-through and removed by traceStop: dialog click and
  // change listeners before (capture) and after (bubble) the product's handler, mapper planes, mask count and capability
  // state read there, the VR viewport's render requests, IMAGE_RENDERED, every animation frame, a 100 ms heartbeat, long
@@ -406,6 +536,29 @@ def cell_vertices(scene, overlay):
     return out, r1
 
 
+def lit_count(v):
+    """Lit pixels (max(R, G, B) > 5) of the native VR canvas, from the bitmap the oracles read."""
+    lit = v.evaluate('()=>vrVoi.lit()'); raw = np.frombuffer(base64.b64decode(lit['bits']), np.uint8)
+    return int(np.unpackbits(raw, bitorder='little')[:lit['width'] * lit['height']].sum())
+
+
+def leaves(value):
+    if isinstance(value, dict):
+        return [x for key in sorted(value) for x in [key] + leaves(value[key])]
+    if isinstance(value, (list, tuple)):
+        return [x for item in value for x in leaves(item)]
+    return [value]
+
+
+def condition_differences(baseline, candidate):
+    """MAX-H: the condition names whose values differ, numbers within 1e-9 and everything else exactly."""
+    def same(a, b):
+        a, b = leaves(a), leaves(b)
+        number = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
+        return len(a) == len(b) and all(abs(x - y) <= 1e-9 if number(x) and number(y) else x == y for x, y in zip(a, b))
+    return [key for key in sorted(set(baseline) | set(candidate)) if not same(baseline.get(key), candidate.get(key))]
+
+
 def boundary_gaps(scene, polygons, slabs):
     """Smallest distance (px) between distinct oracle boundaries: polygons, F9, crop line, slab lines and box edges."""
     def distance(points, poly):
@@ -427,6 +580,10 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
     def setUpClass(cls):
         cls.suite_started = time.monotonic()
         super().setUpClass()
+        # MAX-H: the browser the base class launched is the only one this process has started; its process is what the
+        # external supervisor ends at a missed deadline. Not found (no process list, or not exactly one): MAX fails there.
+        roots = browser_roots()
+        cls.browser_root = next(iter(roots)) if roots is not None and len(roots) == 1 else None
 
     # Bounds and observation helpers -----------------------------------------------------------------------------------
     def remaining(self, limit):
@@ -470,9 +627,16 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         self.assertEqual(info['dpr'], 1); self.css_size = [info['cssWidth'], info['cssHeight']]
         return dialog
 
-    def settle(self, v, limit=30):
-        """A new native render after the action, three frames for the product's post-render check, and the VR still shown."""
-        timeout = self.remaining(limit) * 1000; started = time.monotonic()
+    def settle(self, v, limit=30, deadline=None):
+        """A new native render after the action, three frames for the product's post-render check, and the VR still shown.
+        Given the action's absolute deadline (MAX-H), the wait is what is left of it, never a fresh limit."""
+        if deadline is None:
+            timeout = self.remaining(limit) * 1000
+        else:
+            timeout = (deadline - time.monotonic()) * 1000
+            if timeout <= 0:
+                raise AssertionError('MAX-H deadline passed before the render wait')
+        started = time.monotonic()
         try:
             v.wait_for_function('()=>{const w=vrVoi.watched();return !!w&&w.armed&&w.frames>=1}', timeout=timeout)
         except Exception:
@@ -1021,7 +1185,138 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         # Outside the sub-test: the MAX steps ran to the end in order, not only the 13 declared cases (test-plan §15 B3).
         self.assertEqual(tuple(ledger), MAX_STEPS)
 
-    # NT-U1a-05 sub-case MAX (test-plan §4 MAX-A..MAX-G) ---------------------------------------------------------------
+    # NT-U1a-05 sub-case MAX (test-plan §4 MAX-A..MAX-H) ---------------------------------------------------------------
+    def bounded(self, v, supervisor, step, action, started, deadline, button, check, record):
+        """One MAX-H action under one absolute deadline: the click, the new native render, three frames, the product's check
+        and the step's state and pixel assertions all share it. The click's return and the settle start never renew it, and
+        the supervisor ends the browser when it passes without an answer. Writes one VRVOI-MAX line with the action's time,
+        bound and outcome, success or not; returns the seconds from just before the click to the last assertion."""
+        token = supervisor.arm(deadline, step + ' ' + action); error = None
+        try:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise AssertionError('MAX-H deadline passed before the action')
+            button.click(timeout=left * 1000); self.settle(v, deadline=deadline); check()
+        except BaseException as caught:
+            error = caught
+        fired = supervisor.disarm(token); ended = time.monotonic()
+        outcome = 'supervisor' if fired else 'failed' if error is not None else 'late' if ended > deadline else 'done'
+        print('VRVOI-MAX ' + json.dumps({'step': step, 'action': action, **record, 'deadline_s': round(deadline - started, 3),
+                                         'elapsed_s': round(ended - started, 3), 'outcome': outcome,
+                                         'suite_elapsed_s': round(ended - self.suite_started, 3)}), flush=True)
+        if fired:
+            raise AssertionError('MAX-H %s %s: the supervisor ended the browser at the absolute deadline' % (step, action)) from error
+        if error is not None:
+            raise error
+        if outcome == 'late':
+            raise AssertionError('MAX-H %s %s completed %.3f s after its absolute deadline' % (step, action, ended - deadline))
+        return ended - started
+
+    def freehand(self, v, dialog, vertices):
+        """MAX-B input: Freehand Area, Inside, Draw Region, then one pointer move per vertex on the preview overlay (66 mouse
+        events, 64 product points). Returns the overlay box the normalized vertices were placed in."""
+        dialog.get_by_label('Sculpt Tool', exact=True).select_option('Freehand Area'); dialog.get_by_label('Removal Side', exact=True).select_option('Inside')
+        dialog.get_by_role('button', name='Draw Region', exact=True).click(); overlay = dialog.get_by_label('Sculpt removal preview', exact=True)
+        expect(overlay).to_have_count(1); box_ = overlay.bounding_box()
+        screen = [(box_['x'] + x * box_['width'], box_['y'] + y * box_['height']) for x, y in vertices]
+        v.mouse.move(*screen[0]); v.mouse.down()
+        for point in screen[1:]:
+            v.mouse.move(*point)
+        v.mouse.up(); expect(dialog.get_by_role('button', name='Apply Sculpt', exact=True)).to_be_enabled()
+        return box_
+
+    def login_in(self, browser):
+        """The inherited real BFF login, in another browser (MAX-H baseline). That browser closes its own context, so the
+        context is not left to the test's context cleanup."""
+        self.browser = browser
+        try:
+            return self.login()
+        finally:
+            del self.browser
+            self.contexts[:] = [context for context in self.contexts if context.browser is not browser]
+
+    def max_baseline(self, size):
+        """MAX-H-baseline (S8-U1a-SPEC-C-R-001 F02/F03, D415), before any candidate action and inside this unit's existing
+        budget and attempt: e53e281's sculpt path in a new browser on this stack's pinned viewer and renderer, n = 1..8 once.
+        Component adapter: the new browser's context serves the e53e281 objects of the VR files (BASELINE_BLOBS) in place of
+        this tree's; every other file is this tree's and the same at e53e281. Render normalization: e53e281 predates the rule
+        that switches off the presets' gradient opacity of 1 everywhere, so that one rule is applied to the VR actor before
+        the first counted frame; the candidate reaches the same state by its own rule, and the conditions recorded here are
+        compared with the candidate's before its first action (input, transfer function, sample distance, gradient and
+        shading, camera, canvas, crop planes, browser and GL device; the candidate's jitter is untouched).
+        B_n runs from just before Apply Sculpt to the new native render, three frames, the product's check and the applied
+        state (preview gone, Undo Sculpt enabled, the frame darker by at least one region's 400 px). Each action is bounded by
+        60 s and the step by 300 s from outside the browser. A bound, observation or condition failure means no baseline: MAX
+        fails and the step is never measured again."""
+        started = time.monotonic(); total = min(started + BASELINE_TOTAL_S, self.suite_started + SUITE_CAP_S - SUITE_MARGIN_S)
+        head, B, served = {'step': 'MAX-H-baseline', 'sha': BASELINE_SHA}, {}, set()
+        browser = supervisor = token = result = error = None
+        print('VRVOI-MAX ' + json.dumps({**head, 'phase': 'start', 'suite_elapsed_s': round(started - self.suite_started, 3)}), flush=True)
+        try:
+            sources = baseline_sources(); fixture = voi_series(self.stack, 'G-AX', 'V-BOX', 'E-U', 'S-FULL')
+            before = browser_roots()
+            if before is None:
+                raise AssertionError('MAX-H baseline not established: no process list for the external supervisor')
+            browser = self.pw.chromium.launch(channel=self.browser_channel, headless=os.environ.get('KIN_E2E_HEADED') != '1', args=['--enable-unsafe-swiftshader'])
+            roots = (browser_roots() or set()) - before
+            if len(roots) != 1:
+                raise AssertionError('MAX-H baseline not established: the new browser process is not identified (%d found)' % len(roots))
+            supervisor = Supervisor(roots.pop()); token = supervisor.arm(total, 'MAX-H-baseline step')
+            page = self.login_in(browser)
+
+            def serve(route, request):
+                name = urlsplit(request.url).path.rsplit('/', 1)[-1]; served.add(name)
+                route.fulfill(status=200, content_type='application/javascript; charset=utf-8', body=sources[name])
+            page.context.route(re.compile(r'/worklist/hpacs-lite/(%s)$' % '|'.join(map(re.escape, BASELINE_BLOBS))), serve)
+            viewer = page.context.new_page(); viewer.set_viewport_size(size); self.launch(viewer, [fixture]); self.ready(viewer); self.mpr(viewer); self.choose_volume(viewer, viewer, 0)
+            dialog = self.open_vr(viewer)
+            # The VR shown is e53e281's: every pinned file came through the route, and the capability this tree adds is absent.
+            if served != set(BASELINE_BLOBS) or viewer.evaluate('()=>typeof window.kinVolumeVr') != 'undefined':
+                raise AssertionError('MAX-H baseline not established: the page did not run the e53e281 VR files (served %s)' % sorted(served))
+            normalized = viewer.evaluate("""()=>{const p=cornerstone.getRenderingEngines().flatMap(e=>e.getViewports()).find(x=>x.type===cornerstone.Enums.ViewportType.VOLUME_3D).getActors()[0].actor.getProperty(),
+              before=[p.getUseGradientOpacity(0),p.getGradientOpacityMinimumOpacity(0),p.getGradientOpacityMaximumOpacity(0)];
+              if(before[0]&&before[1]===1&&before[2]===1)p.setUseGradientOpacity(0,false);return {before,after:p.getUseGradientOpacity(0)}}""")
+            self.view_from(viewer, 'Superior'); vertices, _ = cell_vertices(Scene(viewer), viewer.evaluate('()=>vrVoi.rect()'))
+            dialog.get_by_label('I Min', exact=True).fill('0'); dialog.get_by_label('I Max', exact=True).fill('51'); dialog.get_by_role('button', name='Apply Crop', exact=True).click(); self.settle(viewer)
+            conditions = viewer.evaluate('()=>vrVoi.conditions()'); shown = [lit_count(viewer)]
+            for n in range(1, 9):
+                self.freehand(viewer, dialog, vertices[n - 1])
+
+                def applied(n=n):
+                    expect(dialog.get_by_label('Sculpt removal preview', exact=True)).to_have_count(0)
+                    expect(dialog.get_by_role('button', name='Undo Sculpt', exact=True)).to_be_enabled()
+                    lit = lit_count(viewer)
+                    if lit > shown[-1] - 400:
+                        raise AssertionError('MAX-H baseline: sculpt %d did not hide its region (%d -> %d lit px)' % (n, shown[-1], lit))
+                    shown.append(lit)
+                begun = time.monotonic()
+                B[n] = self.bounded(viewer, supervisor, 'MAX-H-baseline', 'apply-sculpt', begun, min(begun + BASELINE_ACTION_S, total),
+                                    dialog.get_by_role('button', name='Apply Sculpt', exact=True), applied, {'n': n, 'limit_s': BASELINE_ACTION_S})
+                token = supervisor.arm(total, 'MAX-H-baseline step')
+            dialog.get_by_role('button', name='Close VR', exact=True).click(); expect(dialog).to_be_hidden()
+            result = {'B': B, 'conditions': conditions, 'vertices': vertices, 'browser': browser.version, 'normalized': normalized, 'lit': shown}
+        except Exception as caught:
+            error = caught
+        fired = supervisor.disarm(token) if supervisor is not None else None
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        ended = time.monotonic()
+        if error is not None or fired or ended - started > BASELINE_TOTAL_S:
+            print('VRVOI-MAX ' + json.dumps({**head, 'phase': 'failed', 'B': {n: round(b, 3) for n, b in B.items()}, 'total_s': round(ended - started, 3),
+                                             'reason': repr(error)[:500] if error is not None else None,
+                                             'supervisor': fired or (supervisor.fired if supervisor else None)}), flush=True)
+            raise AssertionError('MAX-H baseline not established after %.3f s (step bound %d s, action bound %d s): %r'
+                                 % (ended - started, BASELINE_TOTAL_S, BASELINE_ACTION_S, error)) from error
+        limits = {n: [round(render_limit(b, False), 3), round(render_limit(b, True), 3)] for n, b in B.items()}
+        print('VRVOI-MAX ' + json.dumps({**head, 'phase': 'done', 'B': {n: round(b, 3) for n, b in B.items()}, 'limits_s': limits, 'total_s': round(ended - started, 3),
+                                         'suite_elapsed_s': round(ended - self.suite_started, 3), 'blobs': BASELINE_BLOBS, 'browser': result['browser'],
+                                         'normalized': result['normalized'], 'lit': result['lit']}), flush=True)
+        self.measure('MAX-H-baseline', conditions=result['conditions'], vertices=result['vertices'])
+        return result
+
     def max_combination(self, p, v_mark, mark_start, mark_uid, ledger):
         started = time.monotonic(); state = {'page': None, 'S': None, 'first': None, 'mark_start': mark_start, 'mark_uid': mark_uid}
 
@@ -1036,14 +1331,28 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                 print('VRVOI-MAX ' + json.dumps({'step': name, 't_start': round(t0 - started, 3), 't_end': round(t1 - started, 3),
                                                  'elapsed_s': round(t1 - t0, 3), 'suite_elapsed_s': round(t1 - self.suite_started, 3)}), flush=True)
         print('VRVOI-MAX ' + json.dumps({'step': 'start', 'suite_elapsed_s': round(started - self.suite_started, 3)}), flush=True)
+        self.supervisor = None
         try:
+            # MAX-H: the e53e281 baseline is fixed before any candidate action; without it, or without a supervisor for this
+            # test's browser, no target action has a bound and MAX fails here.
+            try:
+                if self.browser_root is None:
+                    raise AssertionError('MAX-H: no external supervisor for the test browser (its process was not identified)')
+                state['baseline'] = self.max_baseline(v_mark.evaluate('()=>({width:innerWidth,height:innerHeight})'))
+            except BaseException as error:
+                state['first'] = ('MAX-H-baseline', error); raise
+            self.supervisor = Supervisor(self.browser_root)
             self.max_steps(p, v_mark, state, step)
             print('VRVOI-MAX ' + json.dumps({'step': 'done', 'total_s': round(time.monotonic() - started, 3), 'suite_elapsed_s': round(time.monotonic() - self.suite_started, 3)}), flush=True)
         except BaseException as error:
             # MAX-E: observation off, preview cancelled, VR closed, no VR viewport, S checked, and the MPR alive when the
-            # product closed the VR. Cleanup errors are reported with the first failure, which is raised unchanged.
+            # product closed the VR. Cleanup errors are reported with the first failure, which is raised unchanged. A browser
+            # the supervisor ended leaves nothing to clean in it.
             first = state['first'] or ('outside-step', error); cleanup = []; v = state['page']
-            product_closed = v is not None and not self.dialog(v).is_visible() and first[0] not in ('MX-00', 'MX-01', 'MX-23')
+            try:
+                product_closed = v is not None and not v.is_closed() and not self.dialog(v).is_visible() and first[0] not in ('MX-00', 'MX-01', 'MX-23')
+            except Exception as problem:
+                product_closed = False; cleanup.append(f'state: {problem!r}'[:300])
             def cancel():
                 button = self.dialog(v).get_by_role('button', name='Cancel Sculpt', exact=True)
                 if self.dialog(v).is_visible() and button.is_enabled():
@@ -1061,7 +1370,8 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                     action()
                 except BaseException as problem:
                     cleanup.append(f'{label}: {problem!r}'[:300])
-            print('VRVOI-MAX failed ' + json.dumps({'step': first[0], 'reason': repr(first[1])[:500], 'product_closed_vr': product_closed, 'cleanup_errors': cleanup}), flush=True)
+            print('VRVOI-MAX failed ' + json.dumps({'step': first[0], 'reason': repr(first[1])[:500], 'product_closed_vr': product_closed, 'cleanup_errors': cleanup,
+                                                    'supervisor': self.supervisor.fired if self.supervisor else None}), flush=True)
             raise first[1]
 
     def max_steps(self, p, v_mark, state, step):
@@ -1128,14 +1438,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
             # Distinct oracle boundaries are at least 2 T + 2 = 4 px apart.
             self.assertGreaterEqual(boundary_gaps(scene, polygons, slabs), 4)
         def draw_freehand(vertices):
-            dialog.get_by_label('Sculpt Tool', exact=True).select_option('Freehand Area'); dialog.get_by_label('Removal Side', exact=True).select_option('Inside')
-            dialog.get_by_role('button', name='Draw Region', exact=True).click(); overlay = dialog.get_by_label('Sculpt removal preview', exact=True)
-            expect(overlay).to_have_count(1); box_ = overlay.bounding_box(); ctx['overlay'] = box_
-            screen = [(box_['x'] + x * box_['width'], box_['y'] + y * box_['height']) for x, y in vertices]
-            v.mouse.move(*screen[0]); v.mouse.down()
-            for point in screen[1:]:
-                v.mouse.move(*point)
-            v.mouse.up(); expect(dialog.get_by_role('button', name='Apply Sculpt', exact=True)).to_be_enabled()
+            ctx['overlay'] = self.freehand(v, dialog, vertices)
 
         def applied_geometry(s, n, vertices, earlier):
             op = s['sculpt'][n]; self.assertEqual(op['side'], 'Inside'); self.assertEqual(op['region']['kind'], 'Polygon')
@@ -1151,6 +1454,28 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         def css_polygons(s):
             w, h = self.css_size
             return [np.array([[x * w, y * h] for x, y in op['region']['points']]) for op in (s['sculpt'] or [])]
+
+        baseline = state['baseline']
+
+        def same_conditions():
+            """MAX-H: the baseline rendered what the candidate renders, apart from the candidate's VOI (its v factor): the
+            same requested vertices, conditions() values, browser build and GL device. A difference is no baseline."""
+            mine = v.evaluate('()=>vrVoi.conditions()'); differ = condition_differences(baseline['conditions'], mine)
+            if condition_differences({'v': baseline['vertices']}, {'v': ctx['vertices']}):
+                differ.append('vertices')
+            if baseline['browser'] != self.browser.version:
+                differ.append('browser')
+            self.measure('MAX-H-conditions', differences=differ, candidate=mine)
+            if differ:
+                raise AssertionError('MAX-H baseline not established: the baseline and the candidate differ in %s' % differ)
+
+        def render_action(step_id, action, n, voi, button, check):
+            """A MAX-H target action: L(n, v) from the baseline's B_n, one absolute deadline min(start + L, suite deadline -
+            60 s) made just before the click and shared by everything up to the step's last assertion."""
+            limit = render_limit(baseline['B'][n], voi); started = time.monotonic()
+            deadline = min(started + limit, self.suite_started + SUITE_CAP_S - SUITE_MARGIN_S)
+            self.bounded(v, self.supervisor, step_id, action, started, deadline, button, check,
+                         {'n': n, 'voi': voi, 'B_n': round(baseline['B'][n], 3), 'limit_s': round(limit, 3)})
 
         def mx03():
             dialog.get_by_role('button', name='Apply Display', exact=True).click(); self.settle(v); self.view_from(v, 'Superior')
@@ -1192,6 +1517,8 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         successes = set()
         for n in range(8):
             def mx_sculpt(n=n):
+                if n == 0:
+                    same_conditions()
                 earlier = self.inspect(v)['sculpt'] or []
                 draw_freehand(ctx['vertices'][n])
                 if n == 0:
@@ -1201,27 +1528,32 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                         expect(dialog.get_by_label(label, exact=True)).to_be_disabled()
                     for name in ('Apply Display', 'Apply Crop'):
                         expect(dialog.get_by_role('button', name=name, exact=True)).to_be_disabled()
-                dialog.get_by_role('button', name='Apply Sculpt', exact=True).click(); self.settle(v)
-                s = self.inspect(v); applied_geometry(s, n, ctx['vertices'][n], earlier)
-                self.assert_voi(s, slab_a[0], [0, 1, 0], slab_a[1]); self.assertEqual(s['voiHistoryDepth'], 1)
-                self.assertEqual(s['crop'], {'i': [0, 51], 'j': [0, 63], 'k': [0, 32]}); self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], ctx['P6'])
-                expect(self.button(v, 'Apply VOI')).to_be_enabled()
-                scene = Scene(v); polygons = css_polygons(s); r = oracle(scene, polygons, slab_a)
-                placement(scene, r, polygons, [slab_a, slab_b]); judge(scene, r, n + 1)
-                successes.add(dialog.get_by_role('status').text_content())
+
+                def check():
+                    s = self.inspect(v); applied_geometry(s, n, ctx['vertices'][n], earlier)
+                    self.assert_voi(s, slab_a[0], [0, 1, 0], slab_a[1]); self.assertEqual(s['voiHistoryDepth'], 1)
+                    self.assertEqual(s['crop'], {'i': [0, 51], 'j': [0, 63], 'k': [0, 32]}); self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], ctx['P6'])
+                    expect(self.button(v, 'Apply VOI')).to_be_enabled()
+                    scene = Scene(v); polygons = css_polygons(s); r = oracle(scene, polygons, slab_a)
+                    placement(scene, r, polygons, [slab_a, slab_b]); judge(scene, r, n + 1)
+                    successes.add(dialog.get_by_role('status').text_content())
+                render_action('MX-%02d' % (6 + n), 'apply-sculpt', n + 1, True, dialog.get_by_role('button', name='Apply Sculpt', exact=True), check)
             step('MX-%02d' % (6 + n), mx_sculpt)
 
         def mx14():
-            self.field(v, 'VOI Move').fill('2.5'); self.button(v, 'Move Slab').click(); self.settle(v)
-            s = self.inspect(v); self.assert_voi(s, slab_b[0], [0, 1, 0], slab_b[1]); self.assertEqual(s['voiHistoryDepth'], 2); self.assertEqual(len(s['sculpt']), 8)
-            self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], ctx['P6'])
-            scene = Scene(v); polygons = css_polygons(s); r = oracle(scene, polygons, slab_b); judge(scene, r, 8)
-            # Negative control: the slab before the move is wrong on the two moved bands.
-            a = oracle(scene, polygons, slab_a); moved = (r['_masks']['voi'] != a['_masks']['voi']) & r['CROPKEEP'] & ~(a['_band'] | r['_band'])
-            for n_ in range(8):
-                moved &= ~r['_masks']['p%d' % n_]
-            moved &= ~r['_masks']['f9']; wrong = int((scene.lit[moved] != a['_masks']['voi'][moved]).sum()); self.assertGreaterEqual(wrong, 400)
-            successes.add(dialog.get_by_role('status').text_content())
+            self.field(v, 'VOI Move').fill('2.5')
+
+            def check():
+                s = self.inspect(v); self.assert_voi(s, slab_b[0], [0, 1, 0], slab_b[1]); self.assertEqual(s['voiHistoryDepth'], 2); self.assertEqual(len(s['sculpt']), 8)
+                self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], ctx['P6'])
+                scene = Scene(v); polygons = css_polygons(s); r = oracle(scene, polygons, slab_b); judge(scene, r, 8)
+                # Negative control: the slab before the move is wrong on the two moved bands.
+                a = oracle(scene, polygons, slab_a); moved = (r['_masks']['voi'] != a['_masks']['voi']) & r['CROPKEEP'] & ~(a['_band'] | r['_band'])
+                for n_ in range(8):
+                    moved &= ~r['_masks']['p%d' % n_]
+                moved &= ~r['_masks']['f9']; wrong = int((scene.lit[moved] != a['_masks']['voi'][moved]).sum()); self.assertGreaterEqual(wrong, 400)
+                successes.add(dialog.get_by_role('status').text_content())
+            render_action('MX-14', 'move-slab', 8, True, self.button(v, 'Move Slab'), check)
         step('MX-14', mx14)
 
         def mx15():
@@ -1265,36 +1597,51 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         step('MX-17', mx17)
 
         def mx18():
-            self.button(v, 'Disable VOI').click(); self.settle(v); s = self.inspect(v); self.assertIsNone(s['voi']); self.assertEqual(s['voiHistoryDepth'], 3)
-            self.assertAlmostEqual(float(self.field(v, 'VOI Center P').input_value()), slab_b[0][1], delta=1e-9); self.assertEqual(s['sculpt'], M['inspect']['sculpt'])
-            self.assertEqual(s['crop'], M['inspect']['crop']); self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], M['planes'])
-            scene = Scene(v); r = oracle(scene, css_polygons(s), slab_b); judge(scene, r, 8, voi_on=False, nine=True); ctx['off'] = scene.lit.copy()
+            def check():
+                s = self.inspect(v); self.assertIsNone(s['voi']); self.assertEqual(s['voiHistoryDepth'], 3)
+                self.assertAlmostEqual(float(self.field(v, 'VOI Center P').input_value()), slab_b[0][1], delta=1e-9); self.assertEqual(s['sculpt'], M['inspect']['sculpt'])
+                self.assertEqual(s['crop'], M['inspect']['crop']); self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], M['planes'])
+                scene = Scene(v); r = oracle(scene, css_polygons(s), slab_b); judge(scene, r, 8, voi_on=False, nine=True); ctx['off'] = scene.lit.copy()
+            render_action('MX-18', 'disable-voi', 8, False, self.button(v, 'Disable VOI'), check)
         step('MX-18', mx18)
 
         def mx19():
-            self.button(v, 'Apply VOI').click(); self.settle(v); s = self.inspect(v); self.assert_voi(s, slab_b[0], [0, 1, 0], slab_b[1]); self.assertEqual(s['voiHistoryDepth'], 4)
-            scene = Scene(v); r = oracle(scene, css_polygons(s), slab_b); judge(scene, r, 8, nine=True)
+            def check():
+                s = self.inspect(v); self.assert_voi(s, slab_b[0], [0, 1, 0], slab_b[1]); self.assertEqual(s['voiHistoryDepth'], 4)
+                scene = Scene(v); r = oracle(scene, css_polygons(s), slab_b); judge(scene, r, 8, nine=True)
+            render_action('MX-19', 'apply-voi', 8, True, self.button(v, 'Apply VOI'), check)
         step('MX-19', mx19)
 
         def mx20():
-            self.button(v, 'Undo VOI').click(); self.settle(v); s = self.inspect(v); self.assertIsNone(s['voi']); self.assertEqual(s['voiHistoryDepth'], 3); self.assertEqual(s['sculpt'], M['inspect']['sculpt'])
-            scene = Scene(v); judge(scene, oracle(scene, css_polygons(s), slab_b), 8, voi_on=False, nine=True)
-            self.button(v, 'Undo VOI').click(); self.settle(v); s = self.inspect(v); self.assert_voi(s, slab_b[0], [0, 1, 0], slab_b[1]); self.assertEqual(s['voiHistoryDepth'], 2)
-            self.assertEqual(s['sculpt'], M['inspect']['sculpt']); scene = Scene(v); judge(scene, oracle(scene, css_polygons(s), slab_b), 8, nine=True)
+            # Two target actions, each with its own deadline and VRVOI-MAX line.
+            def first():
+                s = self.inspect(v); self.assertIsNone(s['voi']); self.assertEqual(s['voiHistoryDepth'], 3); self.assertEqual(s['sculpt'], M['inspect']['sculpt'])
+                scene = Scene(v); judge(scene, oracle(scene, css_polygons(s), slab_b), 8, voi_on=False, nine=True)
+            render_action('MX-20', 'undo-voi-1', 8, False, self.button(v, 'Undo VOI'), first)
+
+            def second():
+                s = self.inspect(v); self.assert_voi(s, slab_b[0], [0, 1, 0], slab_b[1]); self.assertEqual(s['voiHistoryDepth'], 2)
+                self.assertEqual(s['sculpt'], M['inspect']['sculpt']); scene = Scene(v); judge(scene, oracle(scene, css_polygons(s), slab_b), 8, nine=True)
+            render_action('MX-20', 'undo-voi-2', 8, True, self.button(v, 'Undo VOI'), second)
         step('MX-20', mx20)
 
         def mx21():
-            dialog.get_by_role('button', name='Undo Sculpt', exact=True).click(); self.settle(v); s = self.inspect(v)
-            self.assertEqual(s['sculpt'], M['inspect']['sculpt'][:7]); self.assert_voi(s, slab_b[0], [0, 1, 0], slab_b[1]); self.assertEqual(s['voiHistoryDepth'], 2)
-            self.assertEqual(s['crop'], M['inspect']['crop']); self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], M['planes'])
-            scene = Scene(v); polygons = css_polygons(M['inspect']); r = oracle(scene, polygons, slab_b)
-            self.assertGreaterEqual(fraction(scene, r['R8']), .95, 'the removed region is the last applied one'); judge(scene, oracle(scene, polygons[:7], slab_b), 7)
+            def check():
+                s = self.inspect(v)
+                self.assertEqual(s['sculpt'], M['inspect']['sculpt'][:7]); self.assert_voi(s, slab_b[0], [0, 1, 0], slab_b[1]); self.assertEqual(s['voiHistoryDepth'], 2)
+                self.assertEqual(s['crop'], M['inspect']['crop']); self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], M['planes'])
+                scene = Scene(v); polygons = css_polygons(M['inspect']); r = oracle(scene, polygons, slab_b)
+                self.assertGreaterEqual(fraction(scene, r['R8']), .95, 'the removed region is the last applied one'); judge(scene, oracle(scene, polygons[:7], slab_b), 7)
+            render_action('MX-21', 'undo-sculpt', 7, True, dialog.get_by_role('button', name='Undo Sculpt', exact=True), check)
         step('MX-21', mx21)
 
         def mx22():
-            earlier = self.inspect(v)['sculpt']; draw_freehand(ctx['vertices'][7]); dialog.get_by_role('button', name='Apply Sculpt', exact=True).click(); self.settle(v)
-            s = self.inspect(v); self.assertEqual(len(s['sculpt']), 8); applied_geometry(s, 7, ctx['vertices'][7], earlier)
-            scene = Scene(v); judge(scene, oracle(scene, css_polygons(s), slab_b), 8, nine=True)
+            earlier = self.inspect(v)['sculpt']; draw_freehand(ctx['vertices'][7])
+
+            def check():
+                s = self.inspect(v); self.assertEqual(len(s['sculpt']), 8); applied_geometry(s, 7, ctx['vertices'][7], earlier)
+                scene = Scene(v); judge(scene, oracle(scene, css_polygons(s), slab_b), 8, nine=True)
+            render_action('MX-22', 'apply-sculpt', 8, True, dialog.get_by_role('button', name='Apply Sculpt', exact=True), check)
         step('MX-22', mx22)
 
         def mx23():

@@ -860,12 +860,15 @@ jobs:
     # S8-U1a VR VOI Slab cases in their own group, not extra cases inside volume-rendering, whose 1200s cap stays as it is.
     # The same 40-minute job policy and 28-minute live step; the profile's single cap (900+35) = 935s bounds the live step.
     # The suite's time is unmeasured until its first hosted run; an overrun is a stop-and-decide point, not a cap increase.
+    # MAX-H: the suite's own e53e281 baseline step reads that commit's VR files from the repository's objects, so this job's
+    # checkout keeps the history (the baseline runs inside the same 900s unit; it adds no step, budget or attempt).
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: VR VOI profile isolation, bounded budget and artifact policy
         run: python3 scripts/record-run.py --run-dir tmp/vrvoi-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_volume_rendering_voi.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository

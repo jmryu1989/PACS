@@ -2006,6 +2006,8 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(job['runs-on'], 'ubuntu-24.04'); self.assertEqual(int(job['timeout-minutes']), 40)
         checkout = [step for step in steps if str(step.get('uses', '')).startswith('actions/checkout@')]
         self.assertEqual(len(checkout), 1); self.assertEqual(str(checkout[0]['with']['persist-credentials']).lower(), 'false')
+        # MAX-H (S8-U1a-SPEC-C-F02): the suite's e53e281 baseline step reads that commit's objects, so the history is fetched.
+        self.assertEqual(int(checkout[0]['with'].get('fetch-depth', 1)), 0)
         self.assertEqual(int(steps[at]['timeout-minutes']), 28); self.assertNotIn('if', steps[at]); self.assertFalse(steps[at].get('continue-on-error', False))
         self.assertEqual(profiles(steps[at]), ['volume-vr-voi'])
         self.assertFalse(any('volume-vr-voi' in profiles(step) for step in jobs['volume-rendering']['steps']))
