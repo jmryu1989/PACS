@@ -2955,7 +2955,12 @@
       try {
         const res = await fetch("/dicom-web/studies?includefield=00081030,00201206,00201208");
         if (!res.ok) throw new Error("HTTP " + res.status);
-        studies = (await res.json()).map(st => {
+        // Refresh and Home read again without waiting: only the last read started may write the list, the notice or
+        // the demo flag, so an earlier answer arriving late (success or failure) leaves the newer list alone.
+        if (loadSequence !== listLoadSequence) return;
+        const answer = await res.json();
+        if (loadSequence !== listLoadSequence) return;
+        studies = answer.map(st => {
           const uid = tagv(st, "0020000D");
           const birth = tagv(st, "00100030"), date = tagv(st, "00080020");
           return applyState({
@@ -2975,6 +2980,7 @@
         render(); refreshRight();
         await refreshStorage();
       } catch (e) {
+        if (loadSequence !== listLoadSequence) return;
         // ── 데모 모드: Orthanc 없이 열람 시 (GitHub Pages 등) 가짜 데이터로 전환 ──
         demoMode = true;
         $("#err").textContent = "데모 모드 — 가짜 데이터 (Orthanc 미연결)";
