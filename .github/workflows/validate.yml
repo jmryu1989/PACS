@@ -1252,7 +1252,7 @@ jobs:
             if docker exec "$db" psql -h 127.0.0.1 -U postgres -d kin_auth_session_test -c 'SELECT 1' > /dev/null 2>&1; then break; fi
             sleep 1
           done
-          python3 scripts/record-run.py --run-dir tmp/runtime-ci/auth-session-service --cwd . --file api/src/auth.service.ts --file api/src/auth.controller.ts --file api/src/auth.guard.ts --file api/src/admin-audit.ts --file api/prisma/schema.prisma --file tests/auth_session_service_test.cjs -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_AUTH_SESSION_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_auth_session_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/auth_session_service_test.cjs
+          python3 scripts/record-run.py --run-dir tmp/runtime-ci/auth-session-service --cwd . --file api/src/auth.service.ts --file api/src/auth.controller.ts --file api/src/auth.guard.ts --file api/src/admin-audit.ts --file api/prisma/schema.prisma --file tests/auth_session_service_test.cjs --file worklist-v0/hpacs-lite/main.html -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_AUTH_SESSION_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_auth_session_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/auth_session_service_test.cjs
       # S7-U1a SV11, the source half (S7-U1a-R-001-F03): TypeScript's compiler API reads api/src/critical-result*.ts in the
       # development target (its build layers are the ones the production build above just made) and PostgreSQL 16 plans
       # each raw query on a disposable postgres:16-alpine holding every migration.
