@@ -165,6 +165,10 @@ const studyPriority = { get: () => false };
 let logouts = 0;
 const KinAuth = { has: () => true, logout: async () => { logouts += 1; } };
 const reportPreview = { close() {} };
+// S7-U5: the Log out preparation stops the list and the poll by their own generations and the return to editing starts the
+// poll again (main.html pauseWork/resumeWork). Neither is this file's subject; they are inert here.
+let poll = null, pollGeneration = 0, listLoadSequence = 0;
+function startPolling() {}
 function closeSR() {}
 function endPatientCopy() {}
 const displayActor = value => String(value ?? "").split("@")[0];

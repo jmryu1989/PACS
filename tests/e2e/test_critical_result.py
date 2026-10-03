@@ -3293,12 +3293,21 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 p_item = self.session_read(c, f"/critical-results/{r6}")["json"]["item"]
                 mine = set(psql(f'SELECT sid FROM "AuthSession" WHERE sub = {sql_text(p_sub)}')) - before
                 self.harness_ok(len(mine) >= 1, "I-05: P's session row in C")
+                logins: list[str] = []
+                c.page.on("request", lambda r: logins.append(r.url) if urlsplit(r.url).path == "/api/auth/login" else None)
                 c.page.get_by_role("button", name="Log out", exact=True).click()
-                c.page.locator("#username").wait_for(timeout=30000)
+                # S7-U5: the end stays until the next explicit login, so the landing shows it and starts no login by itself.
+                c.page.wait_for_url("**/worklist/hpacs-lite/index.html", timeout=30000)
+                expect(c.page.locator("#signin")).to_be_enabled()
+                self.screen_ok(c.page.evaluate("KinAuth.endState()") == {"state": "confirmed", "reason": None},
+                               "I-05: the landing shows P's confirmed end")
+                self.screen_ok(not logins, "I-05: the landing started a login by itself")
                 left = [sid for sid in mine if psql(f'SELECT count(*) FROM "AuthSession" WHERE sid = {sql_text(sid)}') != ["0"]]
                 self.server_eq(len(left), 0, "I-05 P's session rows after Log out")
                 switched = self.n
                 c.logical = "clinician2"
+                # W logs in on the same context through the landing's own login control.
+                c.page.locator("#signin").click()
                 self.submit_login(c.page, "clinician2")
                 self.landed(c, switched)
                 self.first_list(c, since=switched)

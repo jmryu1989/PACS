@@ -1,4 +1,4 @@
-import { ForbiddenException, BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
+import { ForbiddenException, BadRequestException, ConflictException, Body, Controller, Delete, Get, Header, HttpCode, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
 import { PacsService, Caller } from './pacs.service';
 import { Public } from './auth.guard';
 
@@ -261,7 +261,24 @@ export class PacsController {
   /** 초안 저장 — 내 것에만 쓴다. 판(version)도 안 올리고 확정본도 안 건드린다 */
   @Put('studies/:uid/report')
   report(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.putReport(uid, body, caller(req));
+    const c = caller(req);
+    /**
+     * S7-U5 작성자 결속. `expectedOwner`([기관, 사용자 ID, 작성자])는 화면이 이 판독문을 받아 둔 계정이다. 쿠키의 계정이
+     * 그사이 바뀌었으면(다른 탭의 계정 전환, 복구 직전 확인 뒤의 교체) 받아 둔 글을 지금 계정의 초안으로 만들거나 덮거나
+     * 지우지 않는다 — `putReport`에 넘기기 전에 거절하므로 검사·초안 행을 읽거나 쓰거나 감사를 남기는 일이 하나도 없다.
+     * 값은 대조에만 쓰고 권한과 작성자는 언제나 인증된 호출자에서 정한다. 칸이 없는 요청(삽입·구조화·기준 다시 잡기·API
+     * 클라이언트)은 예전처럼 호출자의 행에 쓴다. 이 PUT 밖에서 `putReport`를 부르는 곳이 생기면 그곳도 이 대조를 거쳐야 한다.
+     */
+    if (body?.expectedOwner !== undefined) {
+      const owner = body.expectedOwner;
+      if (!Array.isArray(owner) || owner.length !== 3 || (owner[0] !== null && typeof owner[0] !== 'string')
+          || typeof owner[1] !== 'string' || typeof owner[2] !== 'string')
+        throw new BadRequestException('expectedOwner는 [기관, 사용자 ID, 작성자] 형식이어야 합니다');
+      if (JSON.stringify(owner) !== JSON.stringify([c.institution ?? null, c.sub, c.actor]))
+        throw new ConflictException({ code: 'REPORT_DRAFT_OWNER_CHANGED',
+          message: '판독문 초안을 쓰던 계정이 아닙니다. 그 계정으로 다시 로그인한 뒤 저장하세요.' });
+    }
+    return this.svc.putReport(uid, body, c);
   }
 
   /** 초안 버리기 — 확정본으로 돌아간다. 내 초안만 지운다 */

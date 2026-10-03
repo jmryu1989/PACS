@@ -148,6 +148,17 @@ def answer(rows, total, second=1, next_=None, institution=INSTITUTION):
 PAGE1 = answer([MOVE, ACCESS, APPROVE], 5, second=1, next_=CURSOR)
 PAGE2 = answer([PATCH, CREATE], 5, second=2)
 EMPTY = answer([], 0, second=3)
+# S7-U5 access records as the server projects them (rule field:detail.institution; detail as auth.service.ts writes it).
+AUTH_ROWS = [
+    {"at": at(9), "actor": "syn-ma@synthetic.test", "action": "auth.login", "target": "SYN-SUB-MA", "rule": "field:detail.institution",
+     "detail": {"institution": INSTITUTION, "ip": "198.51.100.7", "dataSubject": None, "outcome": "success"}},
+    {"at": at(8), "actor": "syn-ma@synthetic.test", "action": "auth.logout", "target": "SYN-SUB-MA", "rule": "field:detail.institution",
+     "detail": {"institution": INSTITUTION, "ip": "198.51.100.7", "dataSubject": None, "cause": "logout"}},
+    {"at": at(7), "actor": "syn-m2@synthetic.test", "action": "auth.session.expired", "target": "SYN-SUB-M2",
+     "rule": "field:detail.institution", "detail": {"institution": INSTITUTION, "ip": None, "dataSubject": None, "cause": "sweep"}},
+    {"at": at(6), "actor": "syn-ma@synthetic.test", "action": "auth.session.expired", "target": "SYN-SUB-MA",
+     "rule": "field:detail.institution", "detail": {"institution": INSTITUTION, "ip": "198.51.100.7", "dataSubject": None, "cause": "idle"}},
+]
 
 AFTER_LINES = ["after.id: SYN-M-1", "after.username: syn-m", "after.name: SYN Member", "after.roles: technician",
                "after.enabled: true", "after.approvalState: APPROVED", "after.emailVerified: true",
@@ -655,6 +666,167 @@ class AdminAuditDOMTest(unittest.TestCase):
         self.assertEqual([["id", MEMBER_ID, "value"], ["username", "syn-m", "value"], ["name", "SYN Member", "value"],
                           ["roles", "technician", "value"], ["enabled", "true", "value"], ["approvalState", "APPROVED", "value"],
                           ["emailVerified", NOT_RECORDED, "not_recorded"], ["institution", INSTITUTION, "value"]], lines)
+
+    # ── S7-U5 access records (TEST-S7-U5-DOM AD-01..AD-03, OP-1 A): the unmodified page, stub answers, answer order and
+    # session end only. The card sentence is the card's contract value; the replaced sentence is judged by meaning rules. ──
+
+    def access_history(self):
+        return self.page.evaluate("() => { const e = document.querySelector('#audit-access-history'); return [e.textContent, e.title]; }")
+
+    def new_page_session(self):
+        """A page session in a fresh browser profile: what one page session confirmed or ended stays out of the next."""
+        self.context.close()
+        self.context = self.browser.new_context(timezone_id="UTC", viewport={"width": 1280, "height": 900})
+        self.context.add_init_script(INIT)
+        self.page = self.context.new_page()
+        self.page.on("pageerror", lambda error: self.errors.append(str(error)))
+        self.page.on("dialog", self.on_dialog)
+        self.page.route("**/*", self.route)
+        self.open()
+
+    def api_requests(self):
+        return [(c["method"], c["path"], c["query"]) for c in self.calls if c["path"].startswith("/api/")]
+
+    def test_ad01_access_rows_are_drawn_like_any_field_row(self):
+        self.open()
+        self.refresh((200, answer(AUTH_ROWS, 4, second=9)))
+        rows = self.table()
+        self.assertEqual([("auth.login", "SYN-SUB-MA"), ("auth.logout", "SYN-SUB-MA"), ("auth.session.expired", "SYN-SUB-M2"),
+                          ("auth.session.expired", "SYN-SUB-MA")], [(r["act"], r["tgt"]) for r in rows])
+        self.assertEqual([([NOT_RECORDED], [NOT_RECORDED])] * 4, [(r["previous"], r["reason"]) for r in rows])
+        expected = [["institution: SYN-INST-A", "ip: 198.51.100.7", "dataSubject: None", "outcome: success"],
+                    ["institution: SYN-INST-A", "ip: 198.51.100.7", "dataSubject: None", "cause: logout"],
+                    ["institution: SYN-INST-A", "ip: None", "dataSubject: None", "cause: sweep"],
+                    ["institution: SYN-INST-A", "ip: 198.51.100.7", "dataSubject: None", "cause: idle"]]
+        self.assertEqual([sorted(lines) for lines in expected], [sorted(r["detail"]) for r in rows])
+        self.assertTrue(all(has_hangul(r["timeTitle"]) for r in rows))
+        self.assertEqual([("limit=25", "1")], self.audit_gets())
+        # Preserving: the same answer with each detail's keys in another order draws the same lines.
+        reordered = deepcopy(AUTH_ROWS)
+        for row in reordered:
+            row["detail"] = dict(reversed(list(row["detail"].items())))
+        self.refresh((200, answer(reordered, 4, second=10)))
+        self.assertEqual([sorted(lines) for lines in expected], [sorted(r["detail"]) for r in self.table()])
+        # Contract-violating inputs: an access row the server did not attribute, or a detail that is not an object, makes
+        # the whole answer unreadable - nothing of it is drawn.
+        for name, change in (("unattributed", lambda row: row.update(rule="hidden:unknown_action")),
+                             ("detail not an object", lambda row: row.update(detail='{"institution":"SYN-INST-A"}'))):
+            with self.subTest(input=name):
+                self.open()
+                bad = deepcopy(AUTH_ROWS)
+                change(bad[0])
+                self.refresh((200, answer(bad, 4, second=11)))
+                s = self.summary()
+                self.assertEqual((0, "Query Failed · 아직 성공한 조회가 없습니다", FIXED["malformed"]), (s["rows"], s["state"], s["message"]))
+
+    def test_ad02_the_access_history_sentence_follows_what_this_page_session_painted(self):
+        # S1: opened (T-01) -> a first page without access rows (T-02) -> Load More with one (T-02) -> an empty answer and a
+        # failure keep it (T-04, T-05). The boot reads only /api/me and the member list.
+        self.open()
+        self.page.wait_for_timeout(200)
+        card = self.access_history()
+        self.assertEqual(FIXED_ACCESS_HISTORY, card[0])
+        self.assertEqual([("GET", "/api/me", ""), ("GET", LIST_PATH, "page=1")], self.api_requests())
+        self.refresh((200, answer([MOVE, ACCESS, APPROVE], 6, second=1, next_=CURSOR)))
+        self.assertEqual(card, self.access_history(), "S1: a first page without access rows keeps the card sentence")
+        self.more((200, answer([PATCH, AUTH_ROWS[0]], 6, second=2)))
+        replaced = self.access_history()
+        self.assertNotEqual(card[0], replaced[0], "S1: replaced once a painted page holds an access row")
+        self.refresh((200, EMPTY))
+        self.assertEqual(replaced, self.access_history(), "S1: an empty answer does not take it back")
+        self.refresh((500, {"message": SERVER_WORDING}))
+        self.assertEqual(replaced, self.access_history(), "S1: a failure does not take it back")
+        self.assertEqual(4, len(self.audit_gets()), "S1: only the reads the user asked for")
+        # S1 pair: the same flow whose next page has no access row keeps the card sentence.
+        self.open()
+        self.refresh((200, answer([MOVE, ACCESS, APPROVE], 5, second=1, next_=CURSOR)))
+        self.more((200, PAGE2))
+        self.assertEqual(card, self.access_history(), "S1 pair: no access row painted")
+        # S2: a failure and a malformed answer (more rows than its total, access rows inside) confirm nothing; a readable
+        # answer does; the session end (Log out, its POST held) puts the card sentence and title back (T-06).
+        self.open()
+        self.refresh((503, {"message": SERVER_WORDING}))
+        self.assertEqual(card, self.access_history(), "S2: a failed read")
+        self.refresh((200, answer(AUTH_ROWS, 1, second=3)))
+        self.assertEqual(card, self.access_history(), "S2: an answer the page refused")
+        self.refresh((200, answer(AUTH_ROWS, 4, second=4)))
+        self.assertNotEqual(card, self.access_history(), "S2: a readable answer with access rows")
+        self.held_logouts = []
+        self.page.locator("#logout").click()
+        self.wait_until(lambda: self.logouts == 1, "S2: the logout request")
+        self.assertEqual(card, self.access_history(), "S2: the session end resets it")
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        # S3: an access-row answer held while Log out ends the session: answered late, never read, nothing confirmed.
+        self.new_page_session()
+        held = self.hold(1)[0]
+        self.held_logouts = []
+        self.page.locator("#logout").click()
+        self.wait_until(lambda: self.logouts == 1, "S3: the logout request")
+        held.fulfill(json=answer(AUTH_ROWS, 4, second=5))
+        self.wait_until(lambda: self.fetch_done() == 1, "S3: the late answer received")
+        self.page.wait_for_timeout(50)
+        self.assertEqual((card, 0), (self.access_history(), self.json_done()), "S3: the late answer confirms nothing")
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        # S3 pair: the same answer before the end confirms.
+        self.new_page_session()
+        self.refresh((200, answer(AUTH_ROWS, 4, second=5)))
+        self.assertNotEqual(card, self.access_history(), "S3 pair")
+        # S4: a 401 on a Refresh ends the page session and resets it.
+        self.held_logouts = []
+        self.replies.append((401, {"message": SERVER_WORDING}))
+        self.page.locator("#audit-refresh").click()
+        self.wait_until(lambda: self.logouts == 1, "S4: the logout request")
+        self.assertEqual(card, self.access_history(), "S4: a 401 resets it")
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        # S5: an older Refresh with access rows answers after a newer one without: the sequence guard drops it.
+        self.new_page_session()
+        older, newer = self.hold(2)
+        newer.fulfill(json=answer([PATCH], 1, second=8))
+        self.wait_until(lambda: self.json_done() == 1, "S5: the newer answer read")
+        older.fulfill(json=answer(AUTH_ROWS, 4, second=7))
+        self.wait_until(lambda: self.json_done() == 2, "S5: the older answer read")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(card, self.access_history(), "S5: a dropped answer confirms nothing")
+        self.refresh((200, answer(AUTH_ROWS, 4, second=7)))
+        self.assertNotEqual(card, self.access_history(), "S5 pair: the same answer as the newest confirms")
+        # S6: a Load More with an access row is held; a Refresh replaces the list; the late page is dropped.
+        self.open()
+        self.page.evaluate("() => { window.__jsonDone = []; }")
+        self.refresh((200, answer([MOVE, ACCESS, APPROVE], 6, second=1, next_=CURSOR)))
+        self.replies.append("hold")
+        self.page.locator("#audit-more").click()
+        self.wait_until(lambda: len(self.held) == 1, "S6: the Load More in flight")
+        late = self.held.pop()
+        self.refresh((200, answer([PATCH], 1, second=9)))
+        late.fulfill(json=answer([AUTH_ROWS[0]], 6, second=2))
+        self.wait_until(lambda: self.json_done() == 3, "S6: the late page read")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(card, self.access_history(), "S6: a page for a replaced list confirms nothing")
+
+    def test_ad03_the_replaced_sentence_says_what_is_collected_and_its_limits(self):
+        for how in ("refresh", "load more"):
+            with self.subTest(how=how):
+                self.open()
+                if how == "refresh":
+                    self.refresh((200, answer(AUTH_ROWS, 4, second=9)))
+                else:
+                    self.refresh((200, answer([MOVE], 2, second=1, next_=CURSOR)))
+                    self.more((200, answer([AUTH_ROWS[1]], 2, second=2)))
+                text, title = self.access_history()
+                self.assertNotEqual(FIXED_ACCESS_HISTORY, text)
+                self.assertTrue(has_hangul(text) and has_hangul(title))
+                for event in ("로그인", "로그아웃", "세션 만료"):
+                    self.assertIn(event, text)
+                self.assertNotIn("수집되지 않음", text)
+                self.assertIsNone(re.search(r"\d", text), "the sentence names no count")
+                self.assertIsNone(AVOIDED.search(text + title))
+                visible = self.page.evaluate("""() => { const e = document.querySelector('#audit-access-history');
+                  return [e.getClientRects().length > 0, parseFloat(getComputedStyle(e).fontSize)]; }""")
+                self.assertTrue(visible[0])
+                self.assertGreaterEqual(visible[1], 12)
 
 
 if __name__ == "__main__":

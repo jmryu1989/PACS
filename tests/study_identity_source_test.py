@@ -1,5 +1,6 @@
 # coding: utf-8
-"""TEST-S4-U5-STUDY-IDENTITY source (stdlib only; no browser, container, database, Node or network).
+"""TEST-S4-U5-STUDY-IDENTITY source (no browser, container, database or network; Node only to run the TypeScript compiler
+api/package-lock.json installs over the controller's route decorators).
 
 What this file proves, and nothing more (review M-2):
   1. tests/study_identity_vectors.json is well formed and carries every named example of the reviewed contract
@@ -9,10 +10,11 @@ What this file proves, and nothing more (review M-2):
      would agree with itself and prove nothing about api/src/study-identity.ts.
   2. Source pins that the shipped files still carry the reviewed decisions: the tenant-pinned second Order read and
      its position, relations only from server-read tags, no Order value in the answer, the M-1/N-1 shape checks after
-     every existing refusal, unchanged write sites and neighbour surfaces, the client allowlist/escaping, the truthful
-     Modify path, the QIDO restore after Unmatch, list invalidation, the guarded Order List refresh, the M-3 wording,
-     the forbidden-word table, the one new live method, its place in the live selection scripts/run-tests.py plans
-     (collected, never run) and the hosted steps that run the real code.
+     every existing refusal, unchanged write sites and neighbour surfaces, the controller's route table against the one
+     S4-U5 shipped (no route added or dropped since; its handlers' bodies are not pinned), the client
+     allowlist/escaping, the truthful Modify path, the QIDO restore after Unmatch, list invalidation, the guarded Order
+     List refresh, the M-3 wording, the forbidden-word table, the one new live method, its place in the live selection
+     scripts/run-tests.py plans (collected, never run) and the hosted steps that run the real code.
 What it cannot see: whether TypeScript compiles, the browser renders, or PostgreSQL/Orthanc behave as the source says.
 """
 import hashlib
@@ -20,6 +22,7 @@ import importlib.util
 import json
 import math
 import re
+import subprocess
 import sys
 import unicodedata
 import unittest
@@ -206,8 +209,7 @@ class VectorFile(unittest.TestCase):
 # ── 2. Server source pins ─────────────────────────────────────────────────────────────────────────────────────
 
 BASE_SHA256 = {
-    # Unchanged at b6a317c (S4-U5 base): route table, the U2 rule/client and the untouched neighbour methods.
-    "controller": "8a862bd2db7bee98406f89d89289e04d4665213c91830fa416cf968bd5b0db23",
+    # Unchanged at b6a317c (S4-U5 base): the U2 rule/client and the untouched neighbour methods.
     "u2_rule": "45a916d3d2cfa37b3e4d9dc04d5e7f2ee9dc6a86451249ed799aab40bc300dbd",
     "u2_client": "47abd1d5a00a69d37a8c7977e5f31c9d3a9ce16ca04a43d5fd8830a4369963d3",
     "unmatch": "d38480a356f864fb8084bedfe0f632a4d2541047ccff26cdd5dd57f6a7ed92cb",
@@ -230,6 +232,146 @@ S4U5_SERVICE_SHA256 = {S4U5_BASE: "db21d0eaddf15473dbca19712fa49e669cfe1e18e6fbe
 # StudyState/Order/report write call sites in pacs.service.ts at b6a317c. U5 adds reads only.
 BASE_WRITES = {"studyState.update(": 8, "studyState.updateMany(": 1, "studyState.create(": 3, "studyState.delete(": 1,
                "order.update(": 2, "order.updateMany(": 2, "order.createMany(": 1}
+# "S4-U5 adds no route" the same way (S7-U5 fix4, commander decision D506; AGENTS.md 1-B.14/15). Until then this file held
+# the sha256 of the whole live pacs.controller.ts: any later edit of any handler failed it (S7-U5's draft PUT owner check
+# did) and an edit that re-set the digest passed whatever routes it added. S4-U5's claim is about its two commits, whose
+# controller is one pinned file (LF sha256, read by fixed_file()). What must hold of the live controller is its route
+# table: the same (method, path) pairs as the controller S4-U5 shipped, both read by the TypeScript compiler and checker
+# that api/package-lock.json installs (npm ci --prefix api --ignore-scripts; the measurements step runs after that step).
+S4U5_CONTROLLER_SHA256 = "8a862bd2db7bee98406f89d89289e04d4665213c91830fa416cf968bd5b0db23"
+# Run by node with {"api": <api dir>, "tables": {label: controller text}} on stdin; answers {label: {routes, problems}}.
+# Each text is judged as api/src/pacs.controller.ts in a program that holds only it and api/src/auth.guard.ts (the module
+# its one local decorator comes from); every other api/src file does not exist for it, node_modules and lib are read from
+# disk. A decorator is what the checker resolves it to through every import and alias: @nestjs/common's route decorators
+# and Controller are read, its other exports (Param, Body, Req, HttpCode, ...) and auth.guard's Public are not routes, and
+# anything else - RequestMapping, applyDecorators, SetMetadata, a decorator it cannot resolve, a route decorator anywhere
+# but directly on an instance method of the one @Controller() class, a path that is not one string literal, a second route
+# decorator on a method, an extends clause - is a problem, never left out of the table.
+ROUTE_TABLE_JS = r"""
+'use strict';
+const path = require('path');
+const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const slash = file => path.resolve(file).split(path.sep).join('/');
+const API = slash(input.api), SRC = API + '/src';
+const CONTROLLER = SRC + '/pacs.controller.ts', GUARD = SRC + '/auth.guard.ts';
+const ts = require(require.resolve('typescript', { paths: [API] }));
+const config = ts.readConfigFile(API + '/tsconfig.json', ts.sys.readFile);
+if (config.error) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'));
+const options = { ...ts.parseJsonConfigFileContent(config.config, ts.sys, API).options, noEmit: true,
+                  incremental: false };
+const METHODS = { Get: 'GET', Post: 'POST', Put: 'PUT', Delete: 'DELETE', Patch: 'PATCH', Options: 'OPTIONS', Head: 'HEAD',
+                  All: 'ALL', Search: 'SEARCH', Sse: 'GET' };
+const REFUSED = ['RequestMapping', 'applyDecorators', 'SetMetadata'];
+const under = file => file.startsWith(SRC + '/');
+
+function table(text) {
+  const texts = new Map([[CONTROLLER, text], [GUARD, ts.sys.readFile(GUARD)]]);
+  const base = ts.createCompilerHost(options, true);
+  const host = { ...base,
+    fileExists: f => under(slash(f)) ? texts.has(slash(f)) : base.fileExists(f),
+    readFile: f => under(slash(f)) ? texts.get(slash(f)) : base.readFile(f),
+    directoryExists: d => slash(d) === SRC || under(slash(d)) ? [...texts.keys()].some(k => k.startsWith(slash(d) + '/'))
+                                                             : !base.directoryExists || base.directoryExists(d),
+    getSourceFile: (f, version, onError, create) => !under(slash(f)) ? base.getSourceFile(f, version, onError, create)
+      : texts.has(slash(f)) ? ts.createSourceFile(f, texts.get(slash(f)), version, true) : undefined };
+  const program = ts.createProgram({ rootNames: [CONTROLLER, GUARD], options, host });
+  const checker = program.getTypeChecker();
+  const resolve = symbol => symbol && symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+  const exportsOf = (specifier, from) => {
+    const found = ts.resolveModuleName(specifier, from, options, host).resolvedModule;
+    const file = found && program.getSourceFile(found.resolvedFileName);
+    const module = file && checker.getSymbolAtLocation(file);
+    if (!module) throw new Error(specifier + ' does not resolve from api/src (npm ci --prefix api)');
+    return new Map(checker.getExportsOfModule(module).map(symbol => [symbol.name, resolve(symbol)]));
+  };
+  const nest = exportsOf('@nestjs/common', CONTROLLER), guard = exportsOf('./auth.guard', CONTROLLER);
+  const route = new Map(Object.keys(METHODS).map(name => [nest.get(name), METHODS[name]]));
+  const controller = nest.get('Controller'), refused = new Set(REFUSED.map(name => nest.get(name)));
+  const nestOwn = new Set(nest.values()), publicMark = guard.get('Public');
+  if ([...route.keys(), controller, ...refused, publicMark].some(symbol => !symbol))
+    throw new Error('a decorator export is missing');
+  const file = program.getSourceFile(CONTROLLER), problems = [], routes = [];
+  const where = node => 'line ' + (file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1);
+  if (program.getSyntacticDiagnostics(file).length) problems.push('the controller does not parse');
+  const symbolOf = node => resolve(checker.getSymbolAtLocation(ts.isPropertyAccessExpression(node) ? node.name : node));
+  const decorated = mark => symbolOf(ts.isCallExpression(mark.expression) ? mark.expression.expression : mark.expression);
+  const literal = (call, node) => {
+    if (call.arguments.length === 0) return '';
+    if (call.arguments.length === 1 && ts.isStringLiteralLike(call.arguments[0])) return call.arguments[0].text;
+    problems.push(where(node) + ': a path that is not one string literal');
+    return null;
+  };
+  const prefixOf = new Map();
+  const visit = node => {
+    if (ts.isIdentifier(node) && !ts.isImportSpecifier(node.parent)) {
+      const symbol = resolve(checker.getSymbolAtLocation(node));
+      if (symbol && (route.has(symbol) || symbol === controller || refused.has(symbol))) {
+        const callee = ts.isPropertyAccessExpression(node.parent) && node.parent.name === node ? node.parent : node;
+        const call = callee.parent;
+        const decorator = ts.isCallExpression(call) && call.expression === callee && ts.isDecorator(call.parent);
+        if (refused.has(symbol) || !decorator)
+          problems.push(where(node) + ': ' + node.text + ' used other than as a route or controller decorator');
+      }
+    }
+    if (ts.isDecorator(node)) {
+      const call = node.expression, owner = node.parent, symbol = decorated(node);
+      if (route.has(symbol)) {
+        const cls = owner.parent;
+        const instance = ts.isMethodDeclaration(owner) && !(ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Static);
+        if (!ts.isCallExpression(call)) problems.push(where(node) + ': a route decorator that is not called');
+        else if (!instance || !ts.isClassDeclaration(cls) || !prefixOf.has(cls))
+          problems.push(where(node) + ': a route decorator not on an instance method of the @Controller() class');
+        else if (ts.getDecorators(owner).filter(d => route.has(decorated(d))).length !== 1)
+          problems.push(where(node) + ': more than one route decorator on a method');
+        else {
+          const child = literal(call, node), prefix = prefixOf.get(cls);
+          const parts = [prefix, child].map(part => (part || '').replace(/^\/+|\/+$/g, '')).filter(Boolean);
+          if (child !== null && prefix !== null) routes.push(route.get(symbol) + ' ' + parts.join('/'));
+        }
+      } else if (symbol !== controller && symbol !== publicMark && !(nestOwn.has(symbol) && !refused.has(symbol)))
+        problems.push(where(node) + ': a decorator that is neither @nestjs/common\'s nor auth.guard\'s Public');
+    }
+    if (ts.isClassDeclaration(node)) {
+      const marks = (ts.getDecorators(node) || []).filter(d => ts.isCallExpression(d.expression) && decorated(d) === controller);
+      if (marks.length > 1) problems.push(where(node) + ': two @Controller() decorators on a class');
+      if (marks.length) {
+        if (prefixOf.size) problems.push(where(node) + ': a second @Controller() class');
+        if ((node.heritageClauses || []).some(clause => clause.token === ts.SyntaxKind.ExtendsKeyword))
+          problems.push(where(node) + ': the controller extends a class');
+        prefixOf.set(node, literal(marks[0].expression, marks[0]));
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  if (!prefixOf.size) problems.push('no @Controller() class');
+  const seen = new Set(), repeated = routes.filter(key => seen.has(key) || !seen.add(key));
+  if (repeated.length) problems.push('a route declared twice: ' + repeated.join(', '));
+  return { routes: routes.sort(), problems };
+}
+
+const out = { typescript: ts.version, tables: {} };
+for (const [label, text] of Object.entries(input.tables)) out.tables[label] = table(text);
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def controller_route_tables(texts):
+    """{label: sorted ['METHOD path']} of each controller text, as ROUTE_TABLE_JS reads it; any problem fails the case."""
+    try:
+        run = subprocess.run(["node", "-e", ROUTE_TABLE_JS], capture_output=True, text=True, encoding="utf-8",
+                             input=json.dumps({"api": str(ROOT / "api"), "tables": texts}), timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AssertionError(f"node did not run ({error}), so the controller's route table was not read") from error
+    if run.returncode != 0:
+        raise AssertionError(f"the route table reader failed (exit {run.returncode}): {run.stderr.strip()[-600:]}")
+    answer = json.loads(run.stdout)
+    problems = {label: table["problems"] for label, table in answer["tables"].items() if table["problems"]}
+    if problems:
+        raise AssertionError(f"route decorators the reader refuses: {problems}")
+    print("S4U5-CONTROLLER-ROUTES", json.dumps({"typescript": answer["typescript"],
+                                                **{label: len(t["routes"]) for label, t in answer["tables"].items()}}))
+    return {label: table["routes"] for label, table in answer["tables"].items()}
 
 
 class RulePins(unittest.TestCase):
@@ -313,7 +455,14 @@ class ServicePins(unittest.TestCase):
                       listing)
 
     def test_no_order_value_leaves_and_no_new_route_or_bootstrap_change(self):
-        self.assertEqual(sha(CONTROLLER), BASE_SHA256["controller"])
+        # S4-U5 left the controller as it was: both of its commits hold the one pinned file (fixed_file() fails otherwise).
+        shipped = {commit: fixed_file(commit, "api/src/pacs.controller.ts", S4U5_CONTROLLER_SHA256)
+                   for commit in (S4U5_BASE, S4U5_RESULT)}
+        self.assertEqual(shipped[S4U5_BASE], shipped[S4U5_RESULT])
+        # No route since: the live controller serves exactly the routes of the one S4-U5 shipped, whatever its handlers do.
+        tables = controller_route_tables({"live": CONTROLLER, "s4u5": shipped[S4U5_RESULT]})
+        self.assertTrue(tables["s4u5"])
+        self.assertEqual(tables["live"], tables["s4u5"])
         self.assertEqual(sha(between(SERVICE, "  async bootstrap(c: Caller, query?: any) {", "\n  }\n")), BASE_SHA256["bootstrap"])
         self.assertEqual(sha(between(SERVICE, "function toClient(", "\n}\n")), BASE_SHA256["toClient"])
         self.assertNotIn("orderIdentity", between(SERVICE, "  async bootstrap(c: Caller, query?: any) {", "\n  }\n"))

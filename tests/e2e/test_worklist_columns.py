@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import unittest
+from urllib.parse import urlsplit
 import uuid
 from playwright.sync_api import expect
 import test_worklist as base
@@ -22,9 +23,19 @@ class WorklistColumnsE2E(base.WorklistE2E):
         old_sid=next(c['value'] for c in page.context.cookies() if c['name']=='kin_sid')
         page.once('dialog',lambda d:d.accept());page.locator('#logout').click()
         page.wait_for_url('**/worklist/hpacs-lite/index.html')
+        logins=[]
+        listen=lambda r:logins.append(r.url) if urlsplit(r.url).path=='/api/auth/login' else None
+        page.on('request',listen)
         page.goto(self.stack.proxy+'/')
-        # The root page redirects asynchronously; wait for the actual login
-        # controls instead of checking visibility before that navigation.
+        # S7-U5: the confirmed end stays until the next explicit login, so the landing starts no login by itself; the
+        # same browser logs in through the landing's own control (its storage is not cleared to get past the end).
+        page.wait_for_url('**/worklist/hpacs-lite/index.html')
+        expect(page.locator('#signin')).to_be_enabled()
+        self.assertEqual({'state':'confirmed','reason':None},page.evaluate('KinAuth.endState()'))
+        self.assertEqual([],logins,'the landing started a login by itself after the logout')
+        page.remove_listener('request',listen)
+        page.locator('#signin').click()
+        # The landing's control leaves for the login page; wait for the actual login controls.
         try:
             page.locator('#username').fill(self.stack.username(actor))
             page.locator('#password').fill(self.stack.passwords[actor])

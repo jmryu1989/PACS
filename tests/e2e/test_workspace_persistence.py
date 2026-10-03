@@ -6,9 +6,17 @@ from __future__ import annotations
 
 import json
 import unittest
+import weakref
+from urllib.parse import urlsplit
 from playwright.sync_api import expect
 from test_portrait_workspace import PortraitWorkspaceE2E
 import test_worklist as base
+
+# Browser profiles whose last session ended with sign_out(): S7-U5 keeps that end until the next explicit login. Kept at
+# module level because other suites borrow sign_in/sign_out as plain functions onto test classes of their own.
+ENDED_CONTEXTS = weakref.WeakSet()
+# The BFF session cookie (api/src/auth.service.ts).
+SESSION_COOKIE = 'kin_sid'
 
 
 class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
@@ -20,12 +28,39 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         self.contexts.append(context)
         return context
 
+    @staticmethod
+    def ended_contexts():
+        """Profiles whose last session ended with sign_out(): S7-U5 keeps that end until the next explicit login."""
+        return ENDED_CONTEXTS
+
     def sign_in(self, context, actor='doctor'):
-        # An empty cookie jar forces a fresh real BFF/Keycloak login, while the
-        # same browser profile's localStorage stays intact for account switching.
-        context.clear_cookies()
         page = context.new_page()
-        page.goto(self.stack.proxy + '/')
+        logins = []
+        page.on('request', lambda r: logins.append(r.url) if urlsplit(r.url).path == '/api/auth/login' else None)
+        if context not in ENDED_CONTEXTS and any(c['name'] == SESSION_COOKIE for c in context.cookies()):
+            # The profile is still signed in, and another of its pages may be open: replace the session the way a login in
+            # another tab does. Keycloak's sign-in cookies go so that the login is a real one; the BFF session cookie stays
+            # until the callback replaces it. Dropping it first would let the open page send a request without a session
+            # - the general 401, which ends this profile's session state (S7-U5, Astra S7-U5-SPEC-C-F03) while the new
+            # login is under way. An expired copy removes just that cookie; clear_cookies(name=...) clears all and re-adds.
+            context.add_cookies([dict(c, value='', expires=1) for c in context.cookies() if c['name'] != SESSION_COOKIE])
+            # The landing would enter the session that is still there; the login it would start is this request.
+            page.goto(self.stack.proxy + '/api/auth/login')
+        else:
+            # An empty cookie jar forces a fresh real BFF/Keycloak login, while the
+            # same browser profile's localStorage stays intact for account switching.
+            context.clear_cookies()
+            page.goto(self.stack.proxy + '/')
+        if context in ENDED_CONTEXTS:
+            # S7-U5: after this profile's logout the landing shows the confirmed end and starts no login by itself; the
+            # login is the person's own press of the landing's control. The end record is not cleared behind its back.
+            page.wait_for_url('**/worklist/hpacs-lite/index.html', timeout=30000)
+            expect(page.locator('#signin')).to_be_enabled()
+            self.assertEqual({'state': 'confirmed', 'reason': None}, page.evaluate('KinAuth.endState()'))
+            expect(page.locator('#retry-logout')).to_be_hidden()
+            self.assertEqual([], logins, 'the landing started a login by itself after the logout')
+            page.locator('#signin').click()
+            ENDED_CONTEXTS.discard(context)
         try:
             page.locator('#username').fill(self.stack.username(actor))
             page.locator('#password').fill(self.stack.passwords[actor])
@@ -43,6 +78,7 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         page.once('dialog', lambda d: d.accept())
         page.locator('#logout').click()
         page.wait_for_url('**/index.html', timeout=30000)
+        ENDED_CONTEXTS.add(page.context)
         page.close()
 
     def owner(self, page):

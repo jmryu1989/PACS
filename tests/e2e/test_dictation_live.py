@@ -77,8 +77,11 @@ FRAME_SECONDS = 30                   # the one longer wait: the embedded viewer'
 PANE_NOT_CONFIGURED = '음성 인식기가 연결되지 않았습니다. — 판독문은 그대로입니다'   # dictation.js:55 + :28
 ACTIVE_STATES = ('requesting-permission', 'recording', 'uploading', 'review')        # dictation-session.js:9
 TERMINAL_STATES = ('failed', 'cancelled', 'unavailable', 'inserted')
+# The observer's `fetchIsNative` stays recorded in `environment` but is not a P2 check here: since S7-U5 F02 the page
+# itself replaces fetch (main.html's logout-pause gate), so it is false by product design. P2 judges fetch through
+# fetch_verdict instead - the same risk, harness code between the page and the browser's fetch (D521).
 ENVIRONMENT_TRUE = ('secure', 'gumIsWrapper', 'gumNative', 'contextObserved', 'nodeObserved', 'contextTarget',
-                    'nodeTarget', 'fetchIsNative')
+                    'nodeTarget')
 # Header evidence is an allowlist: no credential header name or value is ever written anywhere.
 RESPONSE_HEADERS = ('content-type', 'content-security-policy', 'x-content-type-options', 'referrer-policy',
                     'strict-transport-security', 'cross-origin-opener-policy', 'cross-origin-embedder-policy',
@@ -278,6 +281,14 @@ TOGGLE_REACH = """() => {
 }"""
 PROBES = {
     'environment': "() => __u4b.environment()",
+    # P2 fetch (D521): what the page's fetch is now, read and never called. A bound function or a Proxy prints as native
+    # code just as fetch does, so only identity with the fetch the observer saved counts as the native one.
+    'fetch_owner': r"""() => { const text = fn => Function.prototype.toString.call(fn);
+  const native = fn => typeof fn === 'function' && /\{\s*\[native code\]\s*\}\s*$/.test(text(fn));
+  const saved = __u4b.natives.fetch, now = window.fetch;
+  const current = now === saved ? 'saved' : typeof now !== 'function' ? 'not-a-function' : native(now) ? 'native-looking' : 'declared';
+  return { savedNative: native(saved), current, source: current === 'declared' ? text(now) : null,
+    document: location.href, scripts: Array.from(document.scripts, s => s.src).filter(Boolean) }; }""",
     'permission': "() => __u4b.permission()",
     'media': "() => __u4b.media()",
     'clicks': "() => __u4b.clicks()",
@@ -358,6 +369,45 @@ def capability_problems(real):
                 'enginePin': ASR_ENGINE_PIN, 'modelPin': ASR_MODEL_PIN}
     return ['%s %r != %r' % (key, real[key], value) for key, value in expected.items()
             if value is None or type(real[key]) is not type(value) or real[key] != value]
+
+
+def product_text(url, origin):
+    """The repository text of a page or script the stack serves under /worklist/ on `origin` (docker-compose.yml:59, the
+    read-only ./worklist-v0 mount behind nginx `location /worklist/`); None for any other URL."""
+    split, served = urlsplit(url), urlsplit(origin)
+    path = PurePosixPath(split.path)
+    if (split.scheme, split.netloc) != (served.scheme, served.netloc) or path.parts[:2] != ('/', 'worklist') or \
+            '..' in path.parts:
+        return None
+    file = ROOT.joinpath('worklist-v0', *path.parts[2:])
+    return file.read_text(encoding='utf-8') if file.is_file() else None
+
+
+def fetch_verdict(seen, read):
+    """P2 fetch (D521). The risk is the U4b one: harness code between the page and the browser's fetch. The observer
+    saves fetch before any page script and never assigns it (U4b CAP-00/CAP-01), and it is this suite's only init
+    script (execution_selection_test.py). So the saved fetch must be native code, and the page's fetch now either that
+    same function or a function whose source text is in the page's own document or one of its scripts, as `read`
+    returns them from the repository: harness code - an evaluate, a script element it adds, a bound function or Proxy
+    (those print as native code) - is in none of them. Which product function it is and what it does with a request
+    is not judged here; the product's own POST is P5, P6, P8 and P9."""
+    if not isinstance(seen, dict):
+        return {'declared_by': None, 'problems': ['fetch unreadable: %r' % (seen,)]}
+    problems = [] if seen.get('savedNative') is True else ['the fetch saved before any page script is not native code']
+    current, source = seen.get('current'), seen.get('source')
+    if current == 'saved':
+        return {'declared_by': 'saved native', 'problems': problems}
+    if current != 'declared' or not isinstance(source, str) or not source:
+        return {'declared_by': None, 'problems': problems + ['fetch is %r: neither the saved native nor a declared function'
+                                                             % current]}
+    # The HTML parser gives inline scripts LF line ends while a script file keeps its own: both sides compare in LF.
+    lf = lambda text: text.replace('\r\n', '\n').replace('\r', '\n')
+    scripts = seen.get('scripts') if isinstance(seen.get('scripts'), list) else []
+    for url in [seen.get('document')] + scripts:
+        text = read(url) if isinstance(url, str) else None
+        if text is not None and lf(source) in lf(text):
+            return {'declared_by': urlsplit(url).path, 'problems': problems}
+    return {'declared_by': None, 'problems': problems + ['fetch was replaced by a function no file of the page declares']}
 
 
 def launch_verdict(text, fixture_path, capture_version, netlog_path):
@@ -1037,6 +1087,38 @@ def oracle_self_check():
                          ('an extra key', dict(capability, url='x')), ('a lowered maxBytes', dict(capability, maxBytes=MAX_BYTES - 1)),
                          ('another engine pin', dict(capability, enginePin='x'))):
         expect_problem(label, capability_problems(value))
+    # P2 fetch: the saved native, or a function a file of the page declares - and nothing else. Synthetic page texts.
+    origin = 'https://localhost:9443'
+    page, script = origin + MAIN_PATH, origin + '/worklist/hpacs-lite/auth.js'
+    gate, wrapper = 'function (input, init) {\n    return send(input, init);\n  }', '(i, o) => f(i, o)'
+    texts = {page: '<script>\r\n  window.fetch = %s;\r\n</script>' % gate.replace('\n', '\r\n'),
+             script: '{ const f = window.fetch; window.fetch = %s; }\n' % wrapper}
+    seen = lambda **d: dict({'savedNative': True, 'current': 'declared', 'source': gate, 'document': page,
+                             'scripts': [script]}, **d)
+    for label, value, declared_by in (('the saved native', seen(current='saved', source=None), 'saved native'),
+                                      ('a function its document declares (CRLF there)', seen(), MAIN_PATH),
+                                      ('a function one of its scripts declares', seen(source=wrapper),
+                                       '/worklist/hpacs-lite/auth.js')):
+        if fetch_verdict(value, texts.get) != {'declared_by': declared_by, 'problems': []}:
+            problems.append('P2 fetch must accept %s: %r' % (label, fetch_verdict(value, texts.get)))
+    for label, value in (('a saved fetch that is not native', seen(current='saved', source=None, savedNative=False)),
+                         ('a declared function over a saved fetch that is not native', seen(savedNative=False)),
+                         ('a function no file of the page declares', seen(source='(...a) => harness(...a)')),
+                         ('a bound function or a Proxy', seen(current='native-looking', source=None)),
+                         ('a fetch that is not a function', seen(current='not-a-function', source=None)),
+                         ('a declared function without source', seen(source='')),
+                         ('scripts that are not a list', seen(source=wrapper, scripts=script)),
+                         ('an unreadable probe', None)):
+        expect_problem(label, fetch_verdict(value, texts.get)['problems'])
+    if product_text(page, origin) != (ROOT / 'worklist-v0' / 'hpacs-lite' / 'main.html').read_text(encoding='utf-8'):
+        problems.append('product_text must read the served page from worklist-v0')
+    for label, url in (('another origin', 'https://other.test' + MAIN_PATH),
+                       ('another scheme', 'http://localhost:9443' + MAIN_PATH),
+                       ('a path outside /worklist/', origin + '/api/bootstrap'),
+                       ('a dot-dot path', origin + '/worklist/../api/src/asr.service.ts'),
+                       ('a missing file', origin + '/worklist/hpacs-lite/no-such-file.js')):
+        if product_text(url, origin) is not None:
+            problems.append('product_text must refuse %s' % label)
     # P5 U5 and P9 audit.
     if u5_problems(1000.0, 2600.0, 24000):
         problems.append('1.5 s of audio for 1.6 s must pass U5')
@@ -2070,6 +2152,14 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
         run.observed.update(environment=env, permission=permission, crossOriginIsolated=env.get('crossOriginIsolated'))
         for key in ENVIRONMENT_TRUE:
             run.check('P2', key, env.get(key) is True, env.get(key))
+        fetch = run.js('fetch_owner')
+        verdict = fetch_verdict(fetch, lambda url: product_text(url, self.stack.proxy))
+        source = fetch.get('source')
+        run.observed['fetch'] = {'savedNative': fetch.get('savedNative'), 'current': fetch.get('current'),
+                                 'declared_by': verdict['declared_by'], 'scripts': len(fetch.get('scripts') or []),
+                                 'source_sha256': sha256(source.encode('utf-8')) if isinstance(source, str) else None}
+        run.check('P2', 'fetch-native-or-page-declared', not verdict['problems'],
+                  verdict['problems'] or {'current': fetch.get('current'), 'declared_by': verdict['declared_by']})
         run.check('P2', 'permission-granted', permission == 'granted', permission)
         run.strings = run.js('strings')
 

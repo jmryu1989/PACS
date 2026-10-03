@@ -347,12 +347,21 @@ def psql(sql: str) -> list[str]:
 UUID_RE = r"^[0-9a-f-]{36}$"
 
 
+ACCESS_RECORD_ACTIONS = ("auth.login", "auth.logout", "auth.session.expired")
+
+
 def user_audit(user_id: str) -> list[tuple[str, dict[str, Any]]]:
-    """Keycloak 사용자 id를 target으로 남은 회원 감사 행 (id 순)."""
+    """Keycloak 사용자 id를 target으로 남은 회원 감사 행 (id 순).
+
+    S7-U5 접속기록(로그인·로그아웃·세션 만료)도 target이 계정 id라 같은 열에 남는다. 회원 감사가 아니므로 정확히 그 세
+    action만 뺀다 — 접두어로 빼면 나중에 생기는 다른 auth.* 행까지 가려져 단언에서 드러나지 않는다.
+    """
     if not re.fullmatch(UUID_RE, user_id):
         raise RuntimeError(f"감사 조회를 거부한 비정상 사용자 id: {user_id}")
+    excluded = ", ".join(f"'{action}'" for action in ACCESS_RECORD_ACTIONS)
     rows = psql(
-        f"SELECT action || E'\\t' || coalesce(detail, '') FROM \"AuditLog\" WHERE target='{user_id}' ORDER BY id;"
+        f"SELECT action || E'\\t' || coalesce(detail, '') FROM \"AuditLog\" WHERE target='{user_id}' "
+        f"AND action NOT IN ({excluded}) ORDER BY id;"
     )
     out = []
     for row in rows:
@@ -1393,6 +1402,7 @@ class BffInvariantTests(unittest.TestCase):
                 if user_id is not None:
                     deleted = self.admin("DELETE", f"/users/{user_id}")
                     self.assertIn(deleted.status, (204, 404), deleted.text)
+                    purge_user_audit(user_id)
 
     def test_member_service_account_is_hidden_and_unwritable(self) -> None:
         page = 1

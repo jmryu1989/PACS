@@ -63,7 +63,11 @@ class PatientIdCopyE2E(RelatedContextE2E):
   p.evaluate('()=>{window.savedCopyId=viewed().id;viewed().id="";renderClinical();}');expect(p.locator('#copy-patient-id')).to_be_disabled()
   p.evaluate('()=>{viewed().id=savedCopyId;demoMode=true;renderClinical();}');expect(p.locator('#copy-patient-id')).to_be_disabled()
   p.evaluate('()=>{demoMode=false;renderClinical();}');expect(p.locator('#copy-patient-id')).to_be_enabled()
-  p.once('dialog',lambda d:d.accept());p.locator('#logout').click();p.wait_for_url('**/auth/**',timeout=30000);self.assertEqual(self.clipboard(p),f.patient_id)
+  # S7-U5: Log out ends on the landing, which shows the confirmed end and starts no login by itself.
+  logins=[];p.on('request',lambda r:logins.append(r.url) if '/api/auth/login' in r.url.split('?')[0] else None)
+  p.once('dialog',lambda d:d.accept());p.locator('#logout').click();p.wait_for_url('**/worklist/hpacs-lite/index.html',timeout=30000)
+  expect(p.locator('#signin')).to_be_enabled();self.assertEqual({'state':'confirmed','reason':None},p.evaluate('KinAuth.endState()'))
+  self.assertEqual([],logins);expect(p.locator('#username')).to_have_count(0);self.assertEqual(self.clipboard(p),f.patient_id)
   p=self.login();self.permit(p);expect(p.locator('#copy-patient-id')).to_be_disabled();self.select(p,f);p.locator('#copy-patient-id').click();self.copied(p);self.assertEqual(self.clipboard(p),f.patient_id);expect(p.locator('#findings')).to_have_value(draft)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(PatientIdCopyE2E(n) for n in loader.getTestCaseNames(PatientIdCopyE2E) if n.startswith('test_copy_'))
