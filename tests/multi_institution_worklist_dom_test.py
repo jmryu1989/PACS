@@ -12,7 +12,7 @@ attribute, and no page function or variable is called or read. The expected valu
 answers (and tests/worklist_columns_vectors.json), not computed by product code.
 
   mi01 Hospital cell: owner registry name, Tele only for a row the server marks tele, (미배정) as sent, '—' for no name,
-       no added focus target, label size; the demo entry's Orthanc rows (HC-06 below; left out of NEW-1, not run).
+       no added focus target, label size; the demo entry's Orthanc rows (HC-06 below; selected by NEW-1 again).
   mi02 Hospital filter, AND with other filters, compound rules and the rule editor, the hidden-column note, Manual search.
   mi03 saving a search with Hospital text, compound rule and Hospital sort; applying it again, as default, and the pairs.
   mi04 stored browser layouts from before the unit, account Load/Save answers, two owners, Reset Current Mode.
@@ -23,6 +23,10 @@ answers (and tests/worklist_columns_vectors.json), not computed by product code.
   f1   both boot kinds are clean on this harness (run against the pre-unit page too: KIN_MULTI_INSTITUTION_MAIN).
   f5   the HC-06 check refuses a QIDO 503 (the built-in demo rows) at its QIDO status check and a QIDO 200 with no
        study (an empty list) at 'HC-06 synthetic QIDO rows'.
+  dr01..dr04 (S7-DEMO-ROWS T-01..T-04): the demo entry's rows follow the filters with the search options at their
+       defaults and no account value read or written; a session end empties the list in both entries; the built-in rows
+       and a reload after the end; overlapping Refresh/Home reads draw only the latest read started, and an answer after
+       the session end draws no row.
 
 Request contract (test-plan F-2, F-2b, F-3). Server mode: /api/me, /api/bootstrap?states=omit, /api/colleagues, the paged
 /api/studies, /api/worklist-columns, /api/filters and /api/prefs are answered; any other same-origin /api GET (later units'
@@ -35,14 +39,12 @@ HC-06 (test-plan mi01 demo part, F-2b), checked by demo_reach() for the syntheti
 studies in the other order: one QIDO GET answered 200, no /api/me after entering, no built-in demo rows or notice; the
 list is exactly SYN-QIDO-01 and SYN-QIDO-02; each Hospital cell is '—' with no Tele label; after a click on the
 SYN-QIDO-01 ID cell the visible 'Study UID' is the synthetic UID; in Technician both rows show ReqHosp '(로컬)'.
-On the base (663ed5b, the S7-U3a merge) the demo entry reads the QIDO list, but the worklist search view returns no row
-for a session without an account owner (worklist-search.js mount().read); that product path is not changed in this unit.
-S7-U3b-SPEC-R-001 A안: HC-06의 두 합성 행·UID·Hospital/Tele 단언은 보존한다. NEW-1은 기존 18개 중 17개를 선택한다. HC-06과
-그 역순 QIDO 보존 짝은 owner 없는 데모 읽기의 기존 결함 때문에 관문에서 제외되어 not_run이다. F-1/F-5 또는 서버 모드 검사는
-HC-06 표시 성공의 대체 증거가 아니다.
-The exclusion is NEW-1's -k include list (validate.yml), never a skip here. The follow-up unit S7-DEMO-ROWS (D213, due
-before the Stage 9 clean-up) fixes the owner-less demo read; once both QIDO orders pass HC-06 and f5 still refuses the
-empty list, the -k list is removed.
+Until S7-DEMO-ROWS the worklist search view returned no row for a session without an account owner (worklist-search.js
+mount().read), so HC-06 was left out of NEW-1 by a -k include list (S7-U3b-SPEC-R-001 option A; its assertions were
+kept as written). S7-DEMO-ROWS (D213) fixes that read in the module and the demo re-read order in main.html's load()
+QIDO branch; NEW-1 selects every case of this file again, HC-06 unchanged. F-1/F-5 or a server-mode check is still no
+substitute for HC-06.
+The demo QIDO answer can be held and released later (Server.hold_qido, off by default) for the re-read cases dr04.
 
 KIN_MULTI_INSTITUTION_MAIN (a main.html path) is the only override: the local mutant runs point it at a copy with one
 change. Synthetic data only (SYN-* names); no server, no network, no credentials.
@@ -154,6 +156,7 @@ class Server:
         self.demo, self.qido, self.qido_status = demo, QIDO if qido is None else qido, qido_status
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.ledger, self.violations, self.held, self.hold_lists = [], [], [], 0
+        self.held_qido, self.hold_qido = [], 0   # the demo QIDO list answer, held like hold_lists (off by default)
         self.column_answers, self.filter_posts, self.patches = [], [], []
 
     def iso(self):
@@ -200,6 +203,10 @@ class Server:
             if path == "/dicom-web/studies":
                 if query != QIDO_QUERY:
                     self.violations.append("unexpected QIDO query: " + query)
+                if self.hold_qido > 0:
+                    self.hold_qido -= 1
+                    self.held_qido.append((route, entry))
+                    return None
                 return answer(self.qido_status, self.qido if self.qido_status == 200 else {"code": "SYN_ORTHANC"})
             if path == "/statistics" or path.startswith("/dicom-web/") or path.startswith("/instances/"):
                 return answer(404, {"code": "SYN_NOT_STUBBED"})
@@ -281,6 +288,12 @@ class Server:
             return True
         except PlaywrightError:
             return False  # the page already gave the request up (a newer read aborted it)
+
+    def release_qido(self, index, status, studies):
+        route, entry = self.held_qido[index]
+        entry["status"] = status
+        route.fulfill(status=status, content_type="application/json",
+                      body=json.dumps(studies if status == 200 else {"code": "SYN_ORTHANC"}))
 
 
 # Storage writes the page makes, recorded before any page script runs (the recorder is the test's, not the page's).
@@ -587,8 +600,8 @@ class MultiInstitutionWorklist(unittest.TestCase):
     def test_f1_both_boot_kinds_are_clean(self):
         # Harness fitness (F-1): the pages boot with no page error, dialog, undeclared write or foreign request; the request
         # lists are printed as evidence (run against the pre-unit page with KIN_MULTI_INSTITUTION_MAIN as well). It checks
-        # the boot only: the printed row count is an observation, and a demo boot with 0 rows does not pass the HC-06
-        # display contract (demo_reach, not run in NEW-1; S7-U3b-SPEC-R-001).
+        # the boot only: the printed row count is an observation (two for the demo boot since S7-DEMO-ROWS), and the
+        # display contract is HC-06's (demo_reach).
         for kind in ("main", "demo"):
             server = Server(rows=self.hospital_rows(), demo=kind == "demo")
             screen = self.boot(server, entry=kind)
@@ -598,6 +611,230 @@ class MultiInstitutionWorklist(unittest.TestCase):
                 [f"{e['method']} {e['path']}{'?' + e['query'] if e['query'] else ''} {e['status']}" for e in server.ledger
                  if not re.fullmatch(r"/[\w.-]+\.(js|css|svg)", e["path"])]))
             print(f"F-1 {kind} boot: {len(screen.view()['rows'])} worklist rows shown, headers {screen.heads()}")
+
+    # ── S7-DEMO-ROWS T-01..T-04 (diagnosis test-plan §1.1; scenario rows DR-xx) ──────────────────────────────────────
+    DEMO_NOTICE = "데모 모드 — 가짜 데이터 (Orthanc 미연결)"
+    # An account's stored search options: the module's key is its prefix plus the page's owner key for the session
+    # (KinViewerOpening.key: 'kin-image-opening:v1:' + JSON [institution, sub]). Written here from that rule.
+    STORED_MANUAL = '{"version":1,"mode":"manual","clearResults":true}'
+    SEARCH_OFF = {"mode": "automatic", "mode_disabled": True, "search_disabled": True, "clear": False, "clear_disabled": True}
+    # Session-end listeners the test adds after the boot: a message or event reaches the page's own listeners first
+    # (creation and registration order), so once this one has it, the page has handled it too.
+    SESSION_PROBE = """() => { const seen = []; Object.defineProperty(window, '__synSessionSignals', { value: seen });
+      new BroadcastChannel('kin-session').onmessage = e => seen.push('channel:' + e.data?.type);
+      addEventListener('storage', e => { if (e.key === 'kin-session-ended') seen.push('storage:' + e.newValue); }); }"""
+    # Every change of the worklist table recorded as its visible ID column (TABLE_VIEW), for "nothing ever showed X".
+    ID_OBSERVER = """t => {
+      const view = """ + TABLE_VIEW + """;
+      const ids = () => { const v = view(t); const i = v.head.indexOf('ID'); return v.rows.map(r => r[i]); };
+      const log = [ids()];
+      new MutationObserver(() => log.push(ids())).observe(t, { childList: true, subtree: true, characterData: true });
+      Object.defineProperty(window, '__synIdLog', { value: log });
+      Object.defineProperty(window, '__synIdTable', { value: t });
+    }"""
+
+    @staticmethod
+    def search_key(session):
+        return "kin-worklist-search:v1:kin-image-opening:v1:" + json.dumps([session["institution"], session["sub"]],
+                                                                           separators=(",", ":"))
+
+    @staticmethod
+    def search_controls(screen):
+        page = screen.page
+        mode = page.get_by_role("combobox", name="Search Mode")
+        clear = page.get_by_role("checkbox", name="Clear Results on Clear")
+        return {"mode": mode.input_value(), "mode_disabled": mode.is_disabled(),
+                "search_disabled": page.get_by_role("button", name="Search", exact=True).is_disabled(),
+                "clear": clear.is_checked(), "clear_disabled": clear.is_disabled()}
+
+    @staticmethod
+    def wait_demo_rows(screen, message):
+        until(lambda: sorted(screen.column("ID")) == QIDO_IDS, 10, message)
+
+    def end_session_elsewhere(self, screen, signal):
+        """Another page of the same browser context and origin ends the session (another tab's logout)."""
+        screen.page.evaluate(self.SESSION_PROBE)
+        peer = screen.page.context.new_page()
+        peer.goto(ORIGIN + "/kin-emblem-j1.svg")
+        if signal == "channel":
+            peer.evaluate("() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type: 'session-ended'}); c.close(); }")
+        else:
+            peer.evaluate("() => { localStorage.setItem('kin-session-ended', String(Date.now())); localStorage.removeItem('kin-session-ended'); }")
+        until(lambda: screen.page.evaluate("() => window.__synSessionSignals.length") > 0, 10, f"{signal} session end delivered")
+
+    def wait_no_rows(self, screen, message):
+        until(lambda: screen.column("ID") == [] and screen.table().get_by_text("No records found", exact=True).count() == 1,
+              10, message)
+
+    def qido_finished(self, screen):
+        """The re-read QIDO answers that reached the page (their bodies arrived), in order."""
+        finished = []
+        screen.page.on("requestfinished",
+                       lambda request: finished.append(request.url) if urlparse(request.url).path == "/dicom-web/studies" else None)
+        return finished
+
+    def test_dr01_demo_rows_follow_filters_and_keep_no_search_options(self):
+        for qido, account in ((QIDO, SESSION_B), (list(reversed(QIDO)), {**SESSION_B, "sub": "syn-sub-c"})):
+            key = self.search_key(account)
+            screen = self.boot(Server(demo=True, qido=qido), entry="demo", storage={key: self.STORED_MANUAL})
+            self.wait_demo_rows(screen, "DR-01 demo rows")
+            for _ in range(2):   # DR-25: the same filter typed and cleared again draws from the current condition
+                self.type_filter(screen, "ID", "SYN-QIDO-02")
+                screen.wait_rows(["SYN-QIDO-02"])
+                self.type_filter(screen, "ID", "")
+                self.wait_demo_rows(screen, "DR-03 filter cleared")
+            self.assertEqual(self.SEARCH_OFF, self.search_controls(screen), "DR-04 search options at their defaults, off")
+            self.assertEqual(self.STORED_MANUAL, screen.page.evaluate("k => localStorage.getItem(k)", key), "DR-11 kept")
+            writes = [w for w in screen.storage_writes()
+                      if w[1] != "clear" and (w[2].startswith("kin-worklist-search:") or w[2] in ("null", "undefined"))]
+            self.assertEqual([], writes, "DR-11 no search key and no 'null' key written")
+            screen.finish()
+
+    def test_dr02_session_end_empties_the_list_in_both_entries(self):
+        # (c) server mode first: its half holds on the base page too (fitness F-6).
+        screen = self.boot(Server(rows=[row("2.25.2101", "SYN-END-01"), row("2.25.2102", "SYN-END-02")]))
+        screen.wait_rows(["SYN-END-01", "SYN-END-02"])
+        self.end_session_elsewhere(screen, "channel")
+        self.type_filter(screen, "ID", "SYN")
+        self.wait_no_rows(screen, "DR-19 server mode list after the session end")
+        controls = self.search_controls(screen)
+        self.assertEqual((True, True, True), (controls["mode_disabled"], controls["search_disabled"], controls["clear_disabled"]))
+        screen.finish()
+        # (a) demo, BroadcastChannel; (b) demo, the storage event.
+        for signal in ("channel", "storage"):
+            screen = self.boot(Server(demo=True), entry="demo")
+            self.wait_demo_rows(screen, f"DR-17/18 demo rows before the {signal} end")
+            self.end_session_elsewhere(screen, signal)
+            self.type_filter(screen, "ID", "SYN")
+            self.wait_no_rows(screen, f"DR-17/18 demo list after the {signal} end")
+            self.assertEqual(self.SEARCH_OFF, self.search_controls(screen))
+            screen.finish()
+
+    def test_dr03_demo_fallback_rows_and_reentry(self):
+        # (1) QIDO 503: the built-in rows and the notice, drawn without a page error (DR-05).
+        screen = self.boot(Server(demo=True, qido_status=503), entry="demo")
+        until(lambda: len(screen.column("ID")) >= 1, 10, "DR-05 built-in demo rows")
+        self.assertEqual([], [pid for pid in screen.column("ID") if pid.startswith("SYN-QIDO-")])
+        expect(screen.page.get_by_text(self.DEMO_NOTICE, exact=True)).to_be_visible()
+        screen.finish()
+        # Preserving: a QIDO read the network refuses takes the same branch (here on a Refresh after a good boot).
+        server = Server(demo=True)
+        screen = self.boot(server, entry="demo")
+        self.wait_demo_rows(screen, "DR-05 pair boot rows")
+        server.hold_qido = 1
+        screen.refresh()
+        until(lambda: server.held_qido, 10, "held QIDO read")
+        server.held_qido[0][0].abort()
+        until(lambda: screen.page.get_by_text(self.DEMO_NOTICE, exact=True).count() == 1, 10, "DR-05 pair notice")
+        until(lambda: len(screen.column("ID")) >= 1
+              and not [pid for pid in screen.column("ID") if pid.startswith("SYN-QIDO-")], 10, "DR-05 pair built-in rows")
+        screen.finish()
+        # (2) the session ends, the list empties; a reload is a new mount and shows the rows again (DR-28).
+        screen = self.boot(Server(demo=True), entry="demo")
+        self.wait_demo_rows(screen, "DR-28 rows before the end")
+        self.end_session_elsewhere(screen, "channel")
+        self.type_filter(screen, "ID", "SYN")
+        self.wait_no_rows(screen, "DR-28 list after the end")
+        screen.page.reload()
+        until(lambda: sorted(screen.column("ID")) == QIDO_IDS, 15, "DR-28 rows after the reload")
+        self.assertEqual(self.SEARCH_OFF, self.search_controls(screen))
+        screen.finish()
+
+    def overlapping_rereads(self, second="refresh", late=(200, [QIDO[0]]), latest=(200, [QIDO[1]])):
+        """Refresh -> read A held -> Refresh/Home -> read B held; the case releases the answers (DR-31..DR-34)."""
+        server = Server(demo=True)
+        screen = self.boot(server, entry="demo")
+        self.wait_demo_rows(screen, "DR-31 boot rows")
+        finished = self.qido_finished(screen)
+        screen.table().evaluate(self.ID_OBSERVER)
+        server.hold_qido = 2
+        screen.refresh()
+        until(lambda: len(server.held_qido) == 1, 10, "read A held")
+        if second == "home":
+            screen.page.get_by_text("⌂ Home", exact=True).click()
+        else:
+            screen.refresh()
+        until(lambda: len(server.held_qido) == 2, 10, "read B held")
+        answers = {"A": (0, *late), "B": (1, *latest)}
+        return server, screen, finished, answers
+
+    def release(self, server, finished, answers, name):
+        index, status, studies = answers[name]
+        count = len(finished) + 1
+        server.release_qido(index, status, studies)
+        until(lambda: len(finished) >= count, 10, f"answer {name} reached the page")
+
+    def id_log(self, screen):
+        self.assertTrue(screen.page.evaluate("() => window.__synIdTable.isConnected"),
+                        "the observed worklist table was replaced (harness error, not a pass)")
+        return screen.page.evaluate("() => window.__synIdLog.slice()")
+
+    def test_dr04_demo_rereads_draw_only_the_latest_answer(self):
+        notice = self.DEMO_NOTICE
+        # (1) reversed answers: B (the latest read) first, A late -> A changes nothing (DR-31); the same with Home (DR-32).
+        for second in ("refresh", "home"):
+            server, screen, finished, answers = self.overlapping_rereads(second)
+            self.release(server, finished, answers, "B")
+            screen.wait_rows(["SYN-QIDO-02"])
+            self.release(server, finished, answers, "A")
+            screen.page.wait_for_timeout(500)   # observation window after the late answer reached the page (mi11)
+            log = self.id_log(screen)
+            print(f"T-04 (1) {second} ID log: " + json.dumps(log))
+            self.assertEqual(["SYN-QIDO-02"], screen.column("ID"), f"DR-31/32 ({second}): the late answer A drew")
+            after_b = next((i for i, ids in enumerate(log) if ids == ["SYN-QIDO-02"]), None)
+            self.assertIsNotNone(after_b, f"DR-31/32 ({second}): B never showed in the observed table")
+            self.assertNotIn(["SYN-QIDO-01"], log[after_b:], f"DR-31/32 ({second}): A showed after B")
+            self.assertEqual(0, screen.page.get_by_text(notice, exact=True).count())
+            qido = [e for e in server.ledger if e["path"] == "/dicom-web/studies"]
+            self.assertEqual([QIDO_QUERY] * 3, [e["query"] for e in qido], "boot + two re-reads, one query")
+            screen.finish()
+        # Preserving (DR-33): answers in start order; A was superseded when B started, B is drawn.
+        server, screen, finished, answers = self.overlapping_rereads()
+        self.release(server, finished, answers, "A")
+        screen.page.wait_for_timeout(500)   # observation window
+        self.assertEqual(QIDO_IDS, sorted(screen.column("ID")), "DR-33: A drew after B had started")
+        self.release(server, finished, answers, "B")
+        screen.wait_rows(["SYN-QIDO-02"])
+        self.assertNotIn(["SYN-QIDO-01"], self.id_log(screen), "DR-33: A ever showed")
+        screen.finish()
+        # (2) late failure: B 200 with both studies, A 503 afterwards -> rows, no notice, no built-in rows (DR-34).
+        server, screen, finished, answers = self.overlapping_rereads(late=(503, None), latest=(200, QIDO))
+        self.release(server, finished, answers, "B")
+        self.wait_demo_rows(screen, "DR-34 B rows")
+        self.release(server, finished, answers, "A")
+        screen.page.wait_for_timeout(500)   # observation window
+        log = self.id_log(screen)
+        print("T-04 (2) ID log: " + json.dumps(log))
+        self.assertEqual(QIDO_IDS, sorted(screen.column("ID")), "DR-34: the late failure replaced the list")
+        self.assertEqual(0, screen.page.get_by_text(notice, exact=True).count(), "DR-34: the late failure wrote the notice")
+        self.assertEqual([], [ids for ids in log if "P-1001" in ids], "DR-34: built-in rows showed")
+        screen.finish()
+        # (3) an answer after the session end draws no row, success or failure (DR-35).
+        for status in (200, 503):
+            server = Server(demo=True)
+            screen = self.boot(server, entry="demo")
+            self.wait_demo_rows(screen, "DR-35 boot rows")
+            finished = self.qido_finished(screen)
+            server.hold_qido = 1
+            screen.refresh()
+            until(lambda: server.held_qido, 10, "read A held")
+            self.end_session_elsewhere(screen, "channel")
+            server.release_qido(0, status, QIDO)
+            until(lambda: finished, 10, "answer A reached the page")
+            self.wait_no_rows(screen, f"DR-35 answer {status} after the end")
+            self.assertEqual(self.SEARCH_OFF, self.search_controls(screen))
+            self.assertNotIn("P-1001", screen.page.locator("body").inner_text())
+            screen.finish()
+        # (4) a failed boot (built-in rows), then one Refresh that succeeds: its rows (DR-36); the notice is observed only.
+        server = Server(demo=True, qido_status=503)
+        screen = self.boot(server, entry="demo")
+        until(lambda: len(screen.column("ID")) >= 1, 10, "DR-36 built-in rows")
+        server.qido_status = 200
+        screen.refresh()
+        self.wait_demo_rows(screen, "DR-36 rows of the later successful read")
+        print("T-04 (4) notice after the successful re-read (OP-5, observed only): "
+              + str(screen.page.get_by_text(notice, exact=True).count()))
+        screen.finish()
 
     # ── mi02 ──────────────────────────────────────────────────────────────────────────────────────────────────────
     FILTER_ROWS = [row("2.25.201", "SYN-A-CT", inst=A, modality="CT"),
