@@ -260,6 +260,39 @@ test('이전 stop이 끝나기 전에는 새 컨트롤러를 만들지 않는다
   assert.equal(status(sandbox).listeners,4);
 });
 
+for(const kind of ['disable','stop'])
+  test('C-B9-01 pending-unsettled: queued re-entry stays blocked when '+kind+' resolves unsettled',async()=>{
+    const spec=kind==='disable'?{disable:'pending'}:{disable:'settled',stop:'pending'};
+    const {extension,sandbox}=await started({controllers:[spec]});
+    const first=sandbox.__controllers[0];
+    extension.onModeExit();
+    await waitFor(()=>first.gates[kind],kind+' pending gate');
+
+    extension.onModeEnter(); extension.onModeEnter(); extension.onModeEnter();
+    await idle();
+    assert.equal(sandbox.__controllers.length,1,'pending 종료 중 새 컨트롤러가 생겼다');
+    assert.equal(status(sandbox).mounted,false);
+    assert.equal(status(sandbox).listeners,0);
+    assert.equal(status(sandbox).retiring,true);
+
+    first.gates[kind].resolve('unsettled');
+    await waitFor(()=>status(sandbox).retiring===false,kind+' 종료 완료');
+    assert.deepEqual(first.calls,['disable','stop'],'정상 정리 경로가 각각 한 번이어야 한다');
+    assert.equal(status(sandbox).blocked,true);
+    assert.equal(status(sandbox).mounted,false);
+    assert.equal(status(sandbox).listeners,0);
+    assert.equal(status(sandbox).mounts,1);
+
+    extension.onModeEnter(); extension.onModeEnter(); extension.onModeEnter();
+    await idle();
+    assert.equal(sandbox.__controllers.length,1,'unsettled 종료 뒤 재마운트했다');
+    assert.equal(status(sandbox).blocked,true);
+    assert.equal(status(sandbox).mounted,false);
+    assert.equal(status(sandbox).listeners,0);
+    assert.equal(status(sandbox).mounts,1);
+    assert.equal(status(sandbox).retiring,false);
+  });
+
 const failures=[
   {label:'disable이 unsettled를 돌려주면',spec:{disable:'unsettled'},guard:'M2'},
   {label:'stop이 unsettled를 돌려주면',spec:{stop:'unsettled'},guard:'M3'},
