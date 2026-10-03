@@ -32,7 +32,7 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
   function renderKnots(){knotHost.replaceChildren();for(const field of ['HU','Color','Opacity'])el('strong',field,knotHost);knots.forEach((k,index)=>{for(const field of ['HU','Color','Opacity']){const input=el('input',undefined,knotHost);input.setAttribute('aria-label','Knot '+(index+1)+' '+field);input.value=k[field.toLowerCase()];input.type=field==='Color'?'color':'number';if(field==='HU'){input.min='-32768';input.max='65535';input.step='1';}if(field==='Opacity'){input.min='0';input.max='1';input.step='0.05';}input.oninput=()=>{knots[index][field.toLowerCase()]=input.value;};}});const custom=transferMode.value==='Custom';preset.disabled=custom;knotHost.hidden=!custom;addKnot.hidden=removeKnot.hidden=!custom;removeKnot.disabled=knots.length<=2;addKnot.disabled=knots.length>=16;}
   function resetEditors(op){preset.value='CT-Bone';opacity.value='100';shade.checked=false;direction.value='Anterior';transferMode.value='Preset';knots=[{hu:'-1000',color:'#000000',opacity:'0'},{hu:'2000',color:'#FFFFFF',opacity:'1'}];if(op?.dimensions){['i','j','k'].forEach((axis,index)=>{cropInputs[axis+'Min'].value='0';cropInputs[axis+'Max'].value=String(op.dimensions[index]-1);cropInputs[axis+'Min'].min=cropInputs[axis+'Max'].min='0';cropInputs[axis+'Min'].max=cropInputs[axis+'Max'].max=String(op.dimensions[index]-1);});}renderKnots();}
   const current=op=>{try{const t=target(true,true,{requireRenderReady:false});return !ended&&alive()&&dialog.open&&operation===op&&!op.controller.signal.aborted&&JSON.stringify(owner())===op.owner&&t?.group===op.target.group&&t.selection===op.target.selection&&t.views.every((v,i)=>v===op.target.views[i])&&(!op.view||op.engine?.getViewport(op.id)===op.view);}catch(_){return false;}};
-  function close(){const op=operation;operation=null;sculpt.cancel();voi.clear();drag=null;librarySnapshot=null;libraryStale=false;libraryFailure=null;disableControls(true);if(op){op.controller.abort();clearTimeout(op.timeout);clearTimeout(op.accessTimer);try{if(op.engine?.getViewport(op.id))op.engine.disableElement(op.id);}catch(_){} }canvasHost.replaceChildren();savedPreset.replaceChildren();presetName.value='';identity.textContent=sourceText.textContent='';sourceDetails.open=false;dialog.close();}
+  function close(){const op=operation;operation=null;sculpt.cancel();voi.clear();drag=null;librarySnapshot=null;libraryStale=false;libraryFailure=null;disableControls(true);if(op){op.masks?.close();try{op.unregister?.();}catch(_){}op.controller.abort();clearTimeout(op.timeout);clearTimeout(op.accessTimer);try{if(op.engine?.getViewport(op.id))op.engine.disableElement(op.id);}catch(_){} }canvasHost.replaceChildren();savedPreset.replaceChildren();presetName.value='';identity.textContent=sourceText.textContent='';sourceDetails.open=false;dialog.close();}
   function fail(op,error){if(operation!==op)return;close();notice('VR 표시를 닫았습니다. '+(error.message||'다시 열어 확인하세요.'));}
   function check(op){if(!current(op))throw Error('원본이나 계정이 변경되어 VR 표시를 닫았습니다.');}
   async function access(op){
@@ -41,6 +41,31 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     await get('/api/studies/'+encodeURIComponent(op.target.source.uid)+'/viewer-jobs');check(op);op.checkedAt=Date.now();
   }
   function render(op){check(op);op.view.render();}
+  // One frame of the VR display for its mask session: the render request, then the viewport's IMAGE_RENDERED (drawn and
+  // copied to its canvas). A request that throws, or no rendered frame within a few animation frames, is a frame error.
+  function frameOf(op){
+    return done=>{
+      const element=op.view.element,event=cornerstone.Enums.Events.IMAGE_RENDERED;let finished=false,frames=0;
+      const finish=error=>{if(finished)return;finished=true;element.removeEventListener(event,rendered);Promise.resolve().then(()=>done({error}));};
+      const rendered=()=>finish(null);
+      element.addEventListener(event,rendered);
+      try{render(op);}catch(error){finish(error);return;}
+      const tick=()=>{if(finished)return;if(++frames>3)finish(Error('VR 화면이 그려지지 않았습니다.'));else requestAnimationFrame(tick);};
+      requestAnimationFrame(tick);
+    };
+  }
+  // Display and crop changes can make the renderer build another program variant, which has no mask data yet; with masks
+  // installed the redraw goes through the session, which writes and checks the committed masks on the frame that shows it.
+  function redraw(op){
+    const masks=op.masks?.state();
+    if(!masks?.installed||masks.pending){render(op);return;}
+    op.masks.render().then(outcome=>{if(operation===op&&outcome.status==='failed')fail(op,outcome.error);});
+  }
+  // The GL context VR borrows from the MPR engine was lost. The session has already dropped that context's programs and
+  // ended the request in flight; VR closes and says so. Whether the viewer's other views still draw is not VR's to say.
+  function lost(op){if(operation===op)fail(op,window.KinVolumeVrVoi.refusal('context-lost','GPU 연결이 끊겼습니다. 뷰어를 다시 열어 확인하세요.'));}
+  // A viewer-wide context-loss registry, when one is loaded, stops every borrower; VR hands back what it had committed.
+  function release(op){if(operation!==op)return null;const kept=inspect();op.masks?.lost();lost(op);return kept;}
   // A refused mask request keeps the shown display and names its contract reason; a stale VR closes instead.
   function refuse(op,error){
     if(operation!==op)return;
@@ -48,40 +73,34 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     const reason=window.KinVolumeVrVoi?.reasonOf(error);if(reason)op.lastRefusal=reason;
     status.textContent=error?.message||'VR 가림 요청을 확인하세요.';
   }
-  /* The one mask path (contract §7.1-§7.2). VOI and sculpt are built into one owned replacement over the mapper properties
-     captured before the first owned write, compiled and linked before anything is written, then rendered and confirmed
-     in the linked program. A refusal before the write keeps the shown display; a failure after it closes only VR. */
+  /* The one mask path (contract §7.1-§7.2, S8-SCULPT-PERF B-u). VOI and sculpt go to the VR's mask session as one request:
+     it is checked, the fixed mask program is installed the first time (a refusal keeps the shown display), the numbers are
+     written and the drawn frame is checked. The applied state and the Undo histories take a change only when its own frame
+     was confirmed. A change that failed leaves the committed masks shown, and a display that cannot show even those closes
+     only VR. Returns whether the request was taken; its result arrives with that frame. */
   function commitMasks(op,change,message){
-    let changed=false;
     try{
-      check(op);const model=window.KinVolumeVrVoi,masks=window.KinVolumeVrMasks,shown=op.voiState||model.initial();
+      check(op);const model=window.KinVolumeVrVoi,shown=op.voiState||model.initial();
       const nextVoi=change.voi??shown,nextSculpt=change.sculpt??(op.sculptOperations||[]);
       if(change.sculpt&&nextVoi.original)throw model.refusal('vr-not-final','Original View를 끈 뒤 조각 제거를 바꾸세요.');
-      if(typeof op.mapper?.getViewSpecificProperties!=='function'||typeof op.mapper.setViewSpecificProperties!=='function')throw model.refusal('render-failed','이 뷰어에서는 VR 가림 표시를 사용할 수 없습니다.');
-      const replacement=masks.build({voi:nextVoi.voi?model.shaderPlane(nextVoi.voi,op.voiBinding):null,sculpt:nextSculpt,original:nextVoi.original});
-      if(!op.maskPristine)op.maskPristine=op.mapper.getViewSpecificProperties()||{};
-      const properties=masks.properties(op.maskPristine,replacement);
-      try{window.KinVolumeMaskRenderer.preflight(op,properties);}catch(error){throw model.refusal('render-failed',error?.message||'VR 가림을 GPU에서 확인하지 못했습니다. 기존 표시를 유지합니다.');}
-      changed=true;op.mapper.setViewSpecificProperties(properties);check(op);
-      op.voiState=nextVoi;op.sculptOperations=nextSculpt;op.lastRefusal=null;
-      sculpt.fieldset.disabled=!op.ready||!!op.libraryBusy||nextVoi.original;
-      renderMasks(op,masks.ownedText(properties));
-      if(message)status.textContent=message;
+      if(!op.masks||typeof op.mapper?.getViewSpecificProperties!=='function'||typeof op.mapper.setViewSpecificProperties!=='function')throw model.refusal('render-failed','이 뷰어에서는 VR 가림 표시를 사용할 수 없습니다.');
+      op.masks.apply({voi:nextVoi.voi?model.shaderPlane(nextVoi.voi,op.voiBinding):null,sculpt:nextSculpt,original:nextVoi.original})
+        .then(outcome=>settleMasks(op,outcome,nextVoi,nextSculpt,message));
       return true;
-    }catch(error){if(changed)fail(op,error);else refuse(op,error);return false;}
+    }catch(error){refuse(op,error);return false;}
     finally{voi.refresh();}
   }
-  function renderMasks(op,expected){
-    render(op);const generation=op.maskRenderGeneration=(op.maskRenderGeneration||0)+1;
-    // Native shader compilation happens in the queued frame, after render() returns.
-    requestAnimationFrame(()=>requestAnimationFrame(()=>{
-      if(operation!==op||op.controller.signal.aborted||op.maskRenderGeneration!==generation)return;
-      try{
-        check(op);const node=op.engine.offscreenMultiRenderWindow.getOpenGLRenderWindow().getViewNodeFor(op.mapper),program=node?.get('tris')?.tris?.getProgram(),source=program?.getFragmentShader?.()?.getSource?.();
-        // The linked program holds exactly the masks just written: the whole combined block, or no owned block at all.
-        if(!program?.getCompiled()||!program.getLinked()||typeof source!=='string'||(expected?!source.includes(expected):window.KinVolumeVrMasks.owned(source)))throw Error('VR 가림 표시를 GPU에서 적용하지 못했습니다. 다시 열어 주세요.');
-      }catch(error){fail(op,error);}
-    }));
+  function settleMasks(op,outcome,nextVoi,nextSculpt,message){
+    if(operation!==op)return;
+    if(outcome.status==='ok'){
+      op.voiState=nextVoi;op.sculptOperations=nextSculpt;op.lastRefusal=null;
+      sculpt.fieldset.disabled=!op.ready||!!op.libraryBusy||nextVoi.original;
+      if(message)status.textContent=message;
+    }else if(outcome.status==='failed'){
+      if(outcome.restore?.status==='failed'){fail(op,outcome.error||outcome.restore.error);return;}
+      if(outcome.restore?.status==='ok'){op.lastRefusal='render-failed';status.textContent='VR 가림을 적용하지 못해 이전 표시를 유지합니다. '+(outcome.error?.message||'');}
+    }
+    voi.refresh();
   }
   function resetMasks(op){
     const shown=op.voiState;
@@ -131,7 +150,7 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     // renderer then samples a gradient at every step and, once Crop adds clipping planes, tests each plane for those samples
     // too (a cropped frame took ~30 s instead of ~1 s on software GL). Only that form is switched off; any other is kept.
     if(property.getUseGradientOpacity(0)&&property.getGradientOpacityMinimumOpacity(0)===1&&property.getGradientOpacityMaximumOpacity(0)===1)property.setUseGradientOpacity(0,false);
-    property.setShade(display.shading);render(op);op.appliedDisplay=KinVolumeRendering.normalizeDisplay(display);status.textContent='VR 표시 조건을 적용했습니다.';
+    property.setShade(display.shading);redraw(op);op.appliedDisplay=KinVolumeRendering.normalizeDisplay(display);status.textContent='VR 표시 조건을 적용했습니다.';
   }catch(error){if(rethrow===true){try{error.kinVrDisplayChanged=changed;}catch(_){}throw error;}if(changed)fail(op,error);else status.textContent=error.message;}}
   function cropValues(){const value=input=>input.value.trim()===''?NaN:Number(input.value);return {i:[value(cropInputs.iMin),value(cropInputs.iMax)],j:[value(cropInputs.jMin),value(cropInputs.jMax)],k:[value(cropInputs.kMin),value(cropInputs.kMax)]};}
   function applyCrop(rethrow=false,clear=false){const op=operation;if(!op?.view)return;let changed=false;try{
@@ -140,7 +159,7 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     const definitions=full||clear?[]:KinVolumeRendering.cropPlanes(bounds,op.dimensions,op.imageData),next=definitions.map(KinVolumeRendering.createCropPlane),previous=[...mapper.getClippingPlanes()];changed=true;
     try{mapper.removeAllClippingPlanes();for(const plane of next)if(mapper.addClippingPlane(plane)===false)throw Error('VR 자르기 평면을 적용하지 못했습니다.');}
     catch(error){mapper.removeAllClippingPlanes();for(const plane of previous)mapper.addClippingPlane(plane);throw error;}
-    render(op);op.crop=full||clear?null:bounds;if(!clear)status.textContent=full?'전체 VR 범위를 표시합니다.':'VR 자르기 범위를 적용했습니다.';
+    redraw(op);op.crop=full||clear?null:bounds;if(!clear)status.textContent=full?'전체 VR 범위를 표시합니다.':'VR 자르기 범위를 적용했습니다.';
   }catch(error){if(rethrow===true)throw error;if(changed)fail(op,error);else status.textContent=error.message;}}
   async function open(){
     if(ended||operation||!alive()||!permitted()||window.kinViewerJobWorkspaceState?.().busy||window.kinVolumeBatchState?.busy?.()||window.kinMprRenderingState?.busy?.())return;
@@ -155,6 +174,10 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
       // Private viewport creation must not trigger OHIF's crosshair reset binder.
       op.engine=source.getRenderingEngine();op.engine.enableElement({viewportId:op.id,type:cornerstone.Enums.ViewportType.VOLUME_3D,element:canvasHost,defaultOptions:{parallelProjection:true,suppressEvents:true}});op.view=op.engine.getViewport(op.id);op.view.suppressEvents=false;
       await op.view.setVolumes([{volumeId:volume.volumeId}]);check(op);op.imageData=volume.imageData;op.dimensions=Array.from(op.imageData?.getDimensions?.()||volume.dimensions||[]);KinVolumeRendering.validateCropBounds({i:[0,op.dimensions[0]-1],j:[0,op.dimensions[1]-1],k:[0,op.dimensions[2]-1]},op.dimensions);op.mapper=op.view.getActors()[0].actor.getMapper();const sourceMapper=source.getActors?.()[0]?.actor?.getMapper?.();if(!op.mapper||op.mapper===sourceMapper)throw Error('독립 VR 표시를 만들지 못했습니다.');
+      // One mask session per VR; it also watches the borrowed context. Its install step stays the renderer module's
+      // preflight, looked up on window when it runs, as the mask path always called it.
+      op.masks=window.KinVolumeMaskRenderer.session({target:{engine:op.engine,mapper:op.mapper,frame:frameOf(op)},install:(target,properties)=>window.KinVolumeMaskRenderer.preflight(target,properties),onLost:()=>lost(op)});
+      const registry=window.kinViewerContextLoss;if(typeof registry?.onContextLoss==='function'){const off=registry.onContextLoss(()=>release(op));op.unregister=typeof off==='function'?off:null;}
       op.view.resetCamera();op.base=structuredClone(op.view.getCamera());resetEditors(op);voi.ready(op);op.view.setCamera(KinVolumeRendering.orient(op.base,'Anterior'));op.base=structuredClone(op.view.getCamera());applyDisplay(true);clearTimeout(op.timeout);op.ready=true;disableControls(false);renderKnots();const locksAvailable=typeof navigator?.locks?.request==='function';writeButtons.forEach(button=>button.disabled=!locksAvailable);presetHelp.textContent=presetHelpText+(locksAvailable?'':' 이 브라우저에서는 안전한 프리셋 저장과 변경을 사용할 수 없습니다.');try{reloadLibrary(op,false);status.textContent=locksAvailable?'VR 원본을 표시했습니다.':'VR 원본을 표시했습니다. 안전한 개인 프리셋 저장은 이 브라우저에서 사용할 수 없습니다.';}catch(error){if(!current(op))throw error;status.textContent=error.message;}
     }catch(error){if(operation===op){close();throw error;}}
   }
