@@ -2349,33 +2349,68 @@ class MeasurementCiTests(unittest.TestCase):
                     or str((field or {}).get('default')) == profile]
 
         # Secondary check: the earlier literal ban on the profile name anywhere in the focused workflow is kept, with one
-        # exception, because the step that records the files it reads names `.github/workflows/gateway-e2e.yml`. Only
-        # the whole argument `--file .github/workflows/gateway-e2e.yml` in the record-run option region (before the
-        # child command's `--`) of a `python3 scripts/record-run.py` line is removed; a path suffix, another path, env,
-        # dispatch, any other run text, the child command region and a YAML list entry are not. It is not a reader
-        # that proves what an arbitrary shell program does; the two contract checks above stay the primary ones.
+        # exception, because the step that records the files it reads names `.github/workflows/gateway-e2e.yml`. The
+        # installed YAML composer locates each jobs.<job>.steps[].run value; only a run in the approved direct form is
+        # touched: a single-line plain scalar written right after `run: `, in a step without `shell` and a workflow and
+        # job without `defaults`, made only of plain words (no quote, `;`, `&`, `|`, `$`, redirection, glob or comment),
+        # whose first word is `python3` and second `scripts/record-run.py`, with record-run's own options as exact
+        # --run-dir/--cwd/--file pairs before the child command's `--`. Within that option region only the whole pair
+        # `--file .github/workflows/gateway-e2e.yml` is removed. Anything else (echo or another command first, a
+        # preceding command, quoting, env, dispatch, a step name, a path suffix, another path, `--file=`, the child
+        # command region) keeps its text. It is not a reader that proves what an arbitrary shell program does; the two
+        # contract checks above stay the primary ones.
         recorded_file = '.github/workflows/gateway-e2e.yml'
-        recorded_arg = re.compile(r'(?<!\S)--file\s+'+re.escape(recorded_file)+r'(?!\S)')
+        plain_words = re.compile(r'[A-Za-z0-9_./=:,+@%-]+(?: [A-Za-z0-9_./=:,+@%-]+)*')
+
+        def entry(mapping, key):
+            # (key node, value node) when the mapping holds the key exactly once; a repeated key is not settled here.
+            if not isinstance(mapping, yaml.MappingNode):
+                return None
+            pairs = [(k, v) for k, v in mapping.value if isinstance(k, yaml.ScalarNode) and k.value == key]
+            return pairs[0] if len(pairs) == 1 else None
+
+        def recorded_runs(text):
+            # (start, end, run without the recorded pair, pairs removed) for each run in the approved direct form.
+            root = yaml.compose(text, Loader=yaml.SafeLoader)
+            jobs = entry(root, 'jobs')
+            if entry(root, 'defaults') or not jobs or not isinstance(jobs[1], yaml.MappingNode):
+                return []
+            found = []
+            for _, job in jobs[1].value:
+                steps = entry(job, 'steps')
+                if entry(job, 'defaults') or not steps or not isinstance(steps[1], yaml.SequenceNode):
+                    continue
+                for step in steps[1].value:
+                    run = entry(step, 'run')
+                    if not run or entry(step, 'shell'):
+                        continue
+                    key, value = run
+                    if not (isinstance(value, yaml.ScalarNode) and value.style is None
+                            and re.fullmatch(r': +', text[key.end_mark.index:value.start_mark.index])):
+                        continue
+                    raw = text[value.start_mark.index:value.end_mark.index]
+                    if raw != value.value or not plain_words.fullmatch(raw):
+                        continue
+                    words = raw.split(' ')
+                    if words[:2] != ['python3', 'scripts/record-run.py'] or '--' not in words:
+                        continue
+                    child = words.index('--')
+                    options = words[2:child]
+                    pairs = list(zip(options[0::2], options[1::2]))
+                    if len(options) % 2 or any(option not in ('--run-dir', '--cwd', '--file') for option, _ in pairs):
+                        continue
+                    kept = [pair for pair in pairs if pair != ('--file', recorded_file)]
+                    found.append((value.start_mark.index, value.end_mark.index,
+                                  ' '.join(words[:2] + [word for pair in kept for word in pair] + words[child:]),
+                                  len(pairs) - len(kept)))
+            return found
 
         def without_recorded_file(text):
-            kept, removed = [], 0
-            for line in text.replace('\\\n', ' ').splitlines():
-                start = re.search(r'(?<!\S)python3?\s+scripts/record-run\.py(?!\S)', line)
-                if start:
-                    split = re.search(r'(?<!\S)--(?!\S)', line[start.end():])
-                    if split:
-                        head = line[:start.end()+split.start()]
-                        try:
-                            words = shlex.split(head, comments=True)
-                        except ValueError:
-                            words = []
-                        as_words = sum(1 for i, w in enumerate(words[:-1]) if w == '--file' and words[i+1] == recorded_file)
-                        in_text = len(recorded_arg.findall(head))
-                        if as_words == in_text:
-                            removed += in_text
-                            line = recorded_arg.sub('', head) + line[len(head):]
-                kept.append(line)
-            return '\n'.join(kept), removed
+            removed = 0
+            for start, end, kept, count in sorted(recorded_runs(text), reverse=True):
+                text = text[:start] + kept + text[end:]
+                removed += count
+            return text, removed
 
         raw_integration = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
         residue, removed = without_recorded_file(raw_integration)
@@ -2432,6 +2467,32 @@ class MeasurementCiTests(unittest.TestCase):
         ):
             self.assertNotEqual(mutated, raw_integration, label)
             self.assertTrue(rejected(mutated, check), label)
+        # C-R-001 F01: the exception holds only for a run that is itself the direct record-run call. The same words
+        # anywhere else keep their text, and so does a real record-run written in a form other than the approved one.
+        record_command = next(line for line in raw_integration.splitlines()
+                              if line.startswith('        run: python3 scripts/record-run.py ')).split('run: ', 1)[1]
+        record_run = 'run: '+record_command
+        shaped = 'python3 scripts/record-run.py --run-dir tmp/x --file '+recorded_file
+        for label, mutated in (
+            ('echo of a record-run', raw_integration.replace(record_run, 'run: echo '+record_command)),
+            ('after a preceding command', raw_integration.replace(record_run, 'run: true && '+record_command)),
+            ('variable assignment first', raw_integration.replace(record_run, 'run: X=1 '+record_command)),
+            ('command list in the option region', raw_integration.replace(record_run, record_run.replace(' --cwd . ', ' --cwd . ; '))),
+            ('--file= form', raw_integration.replace('--file '+recorded_file, '--file='+recorded_file)),
+            ('YAML double-quoted run', raw_integration.replace(record_run, 'run: "'+record_command+'"')),
+            ('YAML single-quoted run', raw_integration.replace(record_run, "run: '"+record_command+"'")),
+            ('shell-quoted run', raw_integration.replace(record_run, "run: |\n          '"+record_command+"'")),
+            ('block scalar run', raw_integration.replace(record_run, 'run: |\n          '+record_command)),
+            ('custom step shell', raw_integration.replace(record_run, 'shell: cat {0}\n        '+record_run)),
+            ('record-run-shaped quoted env', raw_integration.replace(
+                'KIN_CI_PROFILE: ${{ inputs.profile }}\n', 'KIN_CI_PROFILE: ${{ inputs.profile }}\n          X: "'+shaped+'"\n')),
+            ('record-run-shaped plain env', raw_integration.replace(
+                'KIN_CI_PROFILE: ${{ inputs.profile }}\n', 'KIN_CI_PROFILE: ${{ inputs.profile }}\n          X: '+shaped+' -- true\n')),
+            ('record-run-shaped step name', raw_integration.replace(
+                '- name: Output integration profile safeguards and exact selection', '- name: '+shaped+' -- true')),
+        ):
+            self.assertNotEqual(mutated, raw_integration, label)
+            self.assertTrue(rejected(mutated, literal_left), label)
         integration = yaml.safe_load(raw_integration)
         # Not vacuous: the dispatch input is read (its own default profile is offered).
         self.assertEqual(offers_profile(integration, 'output-integration'), ['profile'])
