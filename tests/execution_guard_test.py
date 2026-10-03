@@ -92,7 +92,8 @@ def _bindings(function):
 class _Source:
     """One parsed test file with the bounded argv resolution R of the S7-TEST-DB-EXEC test plan: list literal,
     `+`, and a name with exactly one plain assignment (local before the call, else module level and never rebound
-    by a function). Everything else is unresolved; the guard closes on it instead of passing it."""
+    by a function) that is read only as a `+` operand or as an execution argv. Everything else is unresolved; the
+    guard closes on it instead of passing it."""
 
     def __init__(self, rel, tree):
         self.rel, self.tree = rel, tree
@@ -117,7 +118,11 @@ class _Source:
             for sub in ast.walk(node):
                 if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
                     self.module_binds.setdefault(sub.id, []).append(sub)
-        self.function_bindings, self._rebound, self._docstrings = {}, None, None
+                elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                    for alias in sub.names:
+                        self.module_binds.setdefault((alias.asname or alias.name).split('.')[0], []).append(alias)
+        self.global_names = {name for node in ast.walk(tree) if isinstance(node, ast.Global) for name in node.names}
+        self.function_bindings, self._rebound, self._docstrings, self._copied_only = {}, None, None, {}
 
     def bindings_of(self, function):
         if function not in self.function_bindings:
@@ -205,8 +210,29 @@ class _Source:
             if assign is None:
                 return None, []
             tokens, used = self.resolve(assign.value, assign, depth + 1)
+            if not self.copied_only(expression.id, assign):
+                tokens = None
             return tokens, used + [assign]
         return None, []
+
+    def copied_only(self, name, assign):
+        """True when every read of `name` in the scope of `assign` is a `+` operand or an execution argv. Any other
+        read (insert/append, a slice or item store, an alias, an argument to other code) may change the list in place,
+        so the assigned value is no longer the argv a call receives."""
+        function = self.function_of(assign)
+        key = (name, function)
+        if key not in self._copied_only:
+            self._copied_only[key] = all(
+                self._copy_read(node) for node in ast.walk(function or self.tree)
+                if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load))
+        return self._copied_only[key]
+
+    def _copy_read(self, node):
+        parent = self.parents.get(node)
+        if isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Add):
+            return True
+        call = self.parents.get(parent) if isinstance(parent, ast.keyword) else parent
+        return isinstance(call, ast.Call) and self.is_execution(call) and self.argv(call) is node
 
     def element(self, node):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -218,6 +244,18 @@ class _Source:
                 return assign.value.value
         return OPAQUE
 
+    def imported_only(self, name, at):
+        """`name` still holds its import at `at`: the module binds it only by that import, no function declares it
+        global, and no enclosing function binds it. A reassignment or del leaves the value's origin unknown."""
+        if len(self.module_binds.get(name, [])) != 1 or name in self.global_names:
+            return False
+        node = at
+        while node in self.parents:
+            node = self.parents[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and name in self.bindings_of(node):
+                return False
+        return True
+
     def is_root(self, expression, at, depth=0):
         """cwd is the repository root: ROOT from invariants_live/test_worklist, a module-level
         Path(__file__).resolve().parents[<depth of this file>], an alias of either, or str() of one."""
@@ -227,13 +265,19 @@ class _Source:
                 and not expression.keywords:
             return self.is_root(expression.args[0], at, depth + 1)
         if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
-            return expression.attr == 'ROOT' and expression.value.id in self.root_module_aliases
+            alias = expression.value.id
+            return expression.attr == 'ROOT' and alias in self.root_module_aliases and self.imported_only(alias, at) \
+                and not any(isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del))
+                            and node.attr == 'ROOT' and isinstance(node.value, ast.Name) and node.value.id == alias
+                            or isinstance(node, ast.Call) and ast.unparse(node.func) in ('setattr', 'delattr')
+                            and node.args and isinstance(node.args[0], ast.Name) and node.args[0].id == alias
+                            for node in ast.walk(self.tree))
         if not isinstance(expression, ast.Name):
             return False
         if expression.id in self.root_imports:
             function = self.function_of(at)
             if function is None or expression.id not in self.bindings_of(function):
-                return True
+                return self.imported_only(expression.id, at)
         assign = self.binding(expression.id, at)
         if assign is None:
             return False
@@ -671,6 +715,35 @@ class ComposeTargetGuard(unittest.TestCase):
                         self.assertNotIn("docker compose", source.lower())
                         command(['git', 'status'])
                 ''',
+            'P-12 module alias': '''\
+                import subprocess
+                import invariants_live as live
+                def ps():
+                    return subprocess.check_output(['docker', 'compose', 'ps', '--format', 'json'], cwd=live.ROOT)
+                def logs():
+                    return subprocess.check_output(['docker', 'compose', 'logs', 'api'], cwd=str(live.ROOT))
+                ''',
+            'P-13 unchanged shared prefix': '''\
+                import subprocess
+                from invariants_live import ROOT
+                PS = ['docker', 'compose', 'ps', '--format', 'json']
+                def ps():
+                    return subprocess.check_output(PS, cwd=ROOT)
+                def every():
+                    return subprocess.check_output(PS + ['--all'], cwd=str(ROOT))
+                def named():
+                    return subprocess.run(args=PS, cwd=ROOT, capture_output=True)
+                ''',
+            'P-14 local name elsewhere': '''\
+                import subprocess
+                from pathlib import Path
+                from invariants_live import ROOT
+                def describe():
+                    ROOT = Path('elsewhere')
+                    return str(ROOT)
+                def ps():
+                    return subprocess.check_output(['docker', 'compose', 'ps'], cwd=ROOT)
+                ''',
         }
         for name, source in cases.items():
             with self.subTest(name):
@@ -794,6 +867,113 @@ class ComposeTargetGuard(unittest.TestCase):
                 ''', [('TG02-OPAQUE', '# V')]),
             'V-20': (KCADM_SHARED.replace("['docker', 'compose', 'exec',", "['docker', 'compose', '-p', 'kin', 'exec',"),
                      [('TG02-SELECT-FLAG', '# login'), ('TG02-SELECT-FLAG', '# general')]),
+            # A list changed in place is not the list first assigned: these calls run with -p kin or opaque argv.
+            'V-21 insert': ('''\
+                import subprocess
+                from invariants_live import ROOT
+                def sql():
+                    base = ['docker', 'compose', 'exec', '-T', 'db']
+                    base.insert(2, '-p')
+                    base.insert(3, 'kin')
+                    return subprocess.run(base + ['psql'], cwd=ROOT)  # V
+                ''', [('TG02-UNRESOLVED', '# V')]),
+            'V-21 shared insert': (KCADM_SHARED.replace(
+                '  # prefix\n', "  # prefix\n    base.insert(2, '-p'); base.insert(3, 'kin')\n"),
+                [('TG02-UNRESOLVED', '# login'), ('TG02-UNRESOLVED', '# general')]),
+            'V-21 module extend': ('''\
+                import subprocess
+                from invariants_live import ROOT
+                BASE = ['docker', 'compose']
+                BASE.extend(['-p', 'kin', 'exec', '-T', 'db'])
+                def sql():
+                    return subprocess.run(BASE + ['psql'], cwd=ROOT)  # V
+                ''', [('TG02-UNRESOLVED', '# V')]),
+            'V-21 changed by a function': ('''\
+                import subprocess
+                from invariants_live import ROOT
+                KEYCLOAK_EXEC = ['docker', 'compose', 'exec', '-T', 'keycloak']
+                def select():
+                    KEYCLOAK_EXEC.insert(2, '--project-name=kin')
+                def remove(config):
+                    return subprocess.run(KEYCLOAK_EXEC + ['rm', '-f', config], cwd=ROOT)  # V
+                ''', [('TG02-UNRESOLVED', '# V')]),
+            'V-21 slice store': ('''\
+                import subprocess
+                from invariants_live import ROOT
+                def sql():
+                    base = ['docker', 'compose', 'exec', '-T', 'db']
+                    base[2:2] = ['-p', 'kin']
+                    return subprocess.run(base + ['psql'], cwd=ROOT)  # V
+                ''', [('TG02-UNRESOLVED', '# V')]),
+            'V-21 handed on': ('''\
+                import subprocess
+                from invariants_live import ROOT
+                def sql(select):
+                    base = ['docker', 'compose', 'exec', '-T', 'db']
+                    select(base)
+                    return subprocess.run(base + ['psql'], cwd=ROOT)  # V
+                ''', [('TG02-UNRESOLVED', '# V')]),
+            'V-21 alias': ('''\
+                import subprocess
+                from invariants_live import ROOT
+                def sql():
+                    base = ['docker', 'compose', 'exec', '-T', 'db']
+                    other = base
+                    other[1:1] = ['compose', '-p', 'kin']
+                    return subprocess.run(base, cwd=ROOT)  # V
+                ''', [('TG02-UNRESOLVED', '# V')]),
+            # cwd=ROOT counts only while ROOT still holds its import; another checkout's path selects another project.
+            'V-22 reassigned': ('''\
+                import subprocess
+                from invariants_live import ROOT
+                ROOT = '/another-checkout'
+                def sql():
+                    return subprocess.run(['docker', 'compose', 'exec', '-T', 'db', 'psql'], cwd=ROOT)  # V
+                ''', [('TG02-CWD', '# V')]),
+            'V-22 re-imported': ('''\
+                import subprocess
+                from invariants_live import ROOT
+                from other_checkout import ROOT
+                def sql():
+                    return subprocess.run(['docker', 'compose', 'exec', '-T', 'db', 'psql'], cwd=str(ROOT))  # V
+                ''', [('TG02-CWD', '# V')]),
+            'V-22 deleted': ('''\
+                import subprocess
+                from invariants_live import ROOT
+                del ROOT
+                def sql():
+                    return subprocess.run(['docker', 'compose', 'exec', '-T', 'db', 'psql'], cwd=ROOT)  # V
+                ''', [('TG02-CWD', '# V')]),
+            'V-22 global': ('''\
+                import subprocess
+                from invariants_live import ROOT
+                def move():
+                    global ROOT
+                    ROOT = '/another-checkout'
+                def sql():
+                    return subprocess.run(['docker', 'compose', 'exec', '-T', 'db', 'psql'], cwd=ROOT)  # V
+                ''', [('TG02-CWD', '# V')]),
+            'V-22 module attribute': ('''\
+                import subprocess
+                import invariants_live as live
+                live.ROOT = '/another-checkout'
+                def sql():
+                    return subprocess.run(['docker', 'compose', 'exec', '-T', 'db', 'psql'], cwd=live.ROOT)  # V
+                ''', [('TG02-CWD', '# V')]),
+            'V-22 setattr': ('''\
+                import subprocess
+                import invariants_live as live
+                setattr(live, 'ROOT', '/another-checkout')
+                def sql():
+                    return subprocess.run(['docker', 'compose', 'exec', '-T', 'db', 'psql'], cwd=str(live.ROOT))  # V
+                ''', [('TG02-CWD', '# V')]),
+            'V-22 alias rebound': ('''\
+                import subprocess
+                import invariants_live as live
+                import other_checkout as live
+                def sql():
+                    return subprocess.run(['docker', 'compose', 'exec', '-T', 'db', 'psql'], cwd=live.ROOT)  # V
+                ''', [('TG02-CWD', '# V')]),
         }
         for name, (source, expected) in cases.items():
             with self.subTest(name):
