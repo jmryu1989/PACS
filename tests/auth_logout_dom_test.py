@@ -361,8 +361,8 @@ class Site:
             if method == "PUT" and found.group(2) == "report":
                 body = request.post_data_json
                 self.puts.append(body)
-                # The API's rule (pacs.service.ts putReport): a write bound to an account must come from that account's
-                # session, or it is refused before anything is read or written.
+                # The API's rule (the PUT studies/:uid/report handler in pacs.controller.ts): a write bound to an account
+                # must come from that account's session, or it is refused before anything is read or written.
                 owner = body.get("expectedOwner", None)
                 if owner is not None and owner != [INSTITUTION, account["sub"], account["actor"]]:
                     return route.fulfill(status=409, json={"code": "REPORT_DRAFT_OWNER_CHANGED", "message": "SYN other account"})
