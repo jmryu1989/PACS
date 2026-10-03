@@ -1423,7 +1423,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                                     dialog.get_by_role('button', name='Apply Sculpt', exact=True), applied, {'n': n, 'limit_s': BASELINE_ACTION_S}, phases)
                 token = supervisor.arm(total, 'MAX-H-baseline step')
             dialog.get_by_role('button', name='Close VR', exact=True).click(); expect(dialog).to_be_hidden()
-            result = {'B': B, 'conditions': conditions, 'vertices': vertices, 'browser': browser.version, 'normalized': normalized, 'lit': shown}
+            result = {'B': B, 'conditions': conditions, 'vertices': vertices, 'browser': browser.version, 'normalized': normalized, 'lit': shown, 'fixture': fixture}
         except Exception as caught:
             error = caught
         fired = supervisor.disarm(token) if supervisor is not None else None
@@ -1446,6 +1446,22 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         self.measure('MAX-H-baseline', conditions=result['conditions'], vertices=result['vertices'])
         return result
 
+    def release_baseline(self, owned, fixture):
+        """The baseline's own V-BOX study is the baseline's input, not the candidate's: once the baseline is done and its
+        browser closed, the step removes exactly that study (the step added it and nothing else) with the run's owned-fixture
+        cleanup and confirms Orthanc no longer holds it. MX-00 then compares the same studies its V-MARK snapshot holds,
+        unchanged; without this the baseline's 33 instances read as a change to the originals (hosted 37090067059)."""
+        started = time.monotonic(); added = set(self.stack.active) - owned
+        if added != {fixture.uid} or not re.fullmatch(r'[0-9.]+', fixture.uid):
+            raise AssertionError('MAX-H baseline: the step added %s, not only its own study' % sorted(added))
+        # A saved Job would be a baseline write the study cleanup leaves behind; the baseline saves none.
+        self.assertEqual(ct.base.psql('SELECT count(*) FROM "ViewerJob" WHERE "studyUid"=\'%s\'' % fixture.uid), ['0'], 'MAX-H baseline saved a Job')
+        self.stack.cleanup_fixture(fixture.uid)
+        lookup = self.stack._orthanc_request('POST', '/tools/lookup', fixture.uid.encode('ascii'))
+        self.assertEqual((lookup.status, lookup.body), (200, []), 'MAX-H baseline: its own study is still stored')
+        print('VRVOI-MAX ' + json.dumps({'step': 'MAX-H-baseline', 'phase': 'released', 'study': fixture.uid, 'elapsed_s': round(time.monotonic() - started, 3),
+                                         'suite_elapsed_s': round(time.monotonic() - self.suite_started, 3)}), flush=True)
+
     def max_combination(self, p, v_mark, mark_start, mark_uid, ledger):
         started = time.monotonic(); state = {'page': None, 'S': None, 'first': None, 'mark_start': mark_start, 'mark_uid': mark_uid}
 
@@ -1467,7 +1483,8 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
             try:
                 if self.browser_root is None:
                     raise AssertionError('MAX-H: no external supervisor for the test browser (its process was not identified)')
-                state['baseline'] = self.max_baseline(v_mark.evaluate('()=>({width:innerWidth,height:innerHeight})'))
+                owned = set(self.stack.active); state['baseline'] = self.max_baseline(v_mark.evaluate('()=>({width:innerWidth,height:innerHeight})'))
+                self.release_baseline(owned, state['baseline']['fixture'])
             except BaseException as error:
                 state['first'] = ('MAX-H-baseline', error); raise
             self.supervisor = Supervisor(self.browser_root)
