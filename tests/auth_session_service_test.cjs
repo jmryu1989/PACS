@@ -727,7 +727,9 @@ test('AS-08 (a) the hourly sweep ends every idle session with one sweep row; (c)
     // At the first run (one hour on) this one is exactly twelve hours old: the cutoff itself, not idle.
     const recent = await w.session(await w.issue('w4', { sub: 'syn-sub-w4', groups: [A] }), { lastSeenAt: past(11 * HOUR) });
     w.tick(HOUR);
-    await w.until('the first sweep run', async () => w.calls.filter(c => c === 'I2:tx:end').length === 3);
+    // Wait on the outcome (the three idle sessions gone), not on how the sweep deletes them: a sweep that deletes
+    // without rows must reach the row assertion below.
+    await w.until('the first sweep run', async () => (await w.sessions()) === 1);
     assert.deepEqual([await w.sessions(), await w.version(recent)], [1, 'w4']);
     const rows = await w.rows();
     assert.deepEqual(summary(rows), [['auth.session.expired', 'sweep', A], ['auth.session.expired', 'sweep', B],
