@@ -9,7 +9,8 @@ Assertions bind to (D73): geometry and pixel oracles computed here from those se
 canvas, the read-only VR capability inspect() (contract §13, M-09), English control names and roles, the required scope
 wording and the absence of forbidden words. They never bind to shader text, Korean sentences, data attributes or id
 prefixes. Every case also runs a negative control on the same pixels: an oracle that should be wrong is shown to be wrong.
-VRVOI-MEASURE and VRVOI-MAX lines are observations for the record, never the reason a case passes.
+VRVOI-MEASURE and VRVOI-MAX lines are observations for the record, never the reason a case passes; so are the phase records
+(Phases, D419) they carry for the Crop diagnosis, the MAX-H baseline and every MAX-H target action.
 
 Render range (C-02 as corrected by S8-U1a-SPEC-B-F01): an axis whose integer index extent is [l, u] renders over
 [l - 0.5, u + 0.5]; the 8 corners of that outer box through the source IJK->LPS affine are the unmasked render range and
@@ -19,7 +20,7 @@ MAX-H (test-plan §4, S8-U1a-SPEC-C-R-001 F02/F03, D415) is a temporary bound fo
 responsiveness verdict: the same run times e53e281's sculpt path first (the auxiliary step 'MAX-H-baseline'), then every
 target action of the candidate has one absolute deadline from L(n, v), enforced from outside the browser.
 """
-import base64, hashlib, io, json, math, os, re, signal, subprocess, threading, time, unittest, uuid
+import base64, contextlib, hashlib, io, json, math, os, re, signal, subprocess, threading, time, unittest, uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 import numpy as np
@@ -164,6 +165,130 @@ class Supervisor:
         print('VRVOI-MAX ' + json.dumps({'step': 'supervisor', **{k: x for k, x in self.fired.items() if k != 'token'}}), flush=True)
 
 
+PHASE_BINDING = '__vrVoiPhases'
+PHASE_STALL_MS = 250
+
+
+def now_ms():
+    return time.time() * 1000
+
+
+def no_phase(name):
+    return contextlib.nullcontext()
+
+
+class Phases:
+    """D419 phase record of one action: the Crop diagnosis, the MAX-H baseline and every MAX-H target action use this one
+    recorder, armed before the action's input. It keeps the test's own phases (input, the click from dispatch to Playwright's
+    return, the render wait, three frames, the product check, the step's state and pixel assertions) and the page's (HELPERS
+    phaseStart: target handler start and end, the first new IMAGE_RENDERED, three frames after it, compile/link and other GL
+    calls by phase, heartbeats and frames) as they arrive through a page binding, so a click that times out, a missed deadline
+    or a browser the supervisor ends still leaves the phases up to then and the first stall. Observation only: nothing here
+    decides a case. Times are epoch ms; the page's clock is mapped through the offset read when armed."""
+    routes, pages = {}, {}
+
+    def __init__(self, page, target, step, action, state=False):
+        self.page, self.step, self.action, self.id = page, step, action, uuid.uuid4().hex
+        self.marks, self.events, self.beats, self.frames, self.gl, self.seqs = [], [], [], [], {}, set()
+        self.click_at, self.unread = None, None
+        Phases.routes[self.id] = self
+        if Phases.pages.get(id(page)) is not page:
+            page.expose_binding(PHASE_BINDING, Phases.receive); Phases.pages[id(page)] = page
+        before = now_ms(); clock = page.evaluate('o=>vrVoi.phaseStart(o)', {'id': self.id, 'binding': PHASE_BINDING, 'target': target, 'state': state})
+        after = now_ms(); self.offset = clock - (before + after) / 2; self.armed_at = before; self.marks.append(['arm', before, after, False])
+
+    @staticmethod
+    def receive(source, batch):
+        recorder = Phases.routes.get(batch.get('id')) if isinstance(batch, dict) else None
+        if recorder is not None:
+            recorder.take(batch)
+
+    def take(self, batch):
+        self.seqs.add(batch['seq']); self.events += batch['e']; self.beats += batch['b']; self.gl = batch['gl']
+        self.frames += batch['f'][:max(0, 30000 - len(self.frames))]
+
+    @contextlib.contextmanager
+    def phase(self, name):
+        mark = [name, now_ms(), None, False]; self.marks.append(mark)
+        if name == 'click':
+            self.click_at = mark[1]
+        try:
+            yield
+        except BaseException:
+            mark[2], mark[3] = now_ms(), True; raise
+        mark[2] = now_ms()
+
+    def prepare(self, action):
+        """The action's input (a drawn shape, typed values) as the phase 'input'; a failure there writes the record too."""
+        try:
+            with self.phase('input'):
+                action()
+        except BaseException as error:
+            line = {'step': self.step, 'action': self.action, 'outcome': 'input-failed', 'failure': repr(error)[:200]}
+            print('VRVOI-MAX ' + json.dumps({**line, 'phases': self.finish(now_ms(), False)}), flush=True); raise
+
+    def finish(self, end, alive):
+        """The record up to end. alive: the page answers, so the recorder is removed and its last batch read; otherwise only
+        what already reached the test counts, and one bounded protocol call delivers the batches already sent."""
+        try:
+            if alive:
+                rest = self.page.evaluate('()=>vrVoi.phaseStop()')
+                if rest:
+                    self.take(rest)
+            elif not self.page.is_closed():
+                self.page.wait_for_timeout(1)
+        except Exception as error:
+            self.unread = repr(error)[:160]
+        Phases.routes.pop(self.id, None)
+        return self.summary(end)
+
+    def summary(self, end):
+        origin = self.click_at if self.click_at is not None else self.armed_at
+        rel = lambda t: None if t is None else round(t - origin, 1)
+        events = sorted(((t - self.offset, name, extra) for name, t, extra in self.events), key=lambda e: e[0])
+        first = lambda name, after=None: next((t for t, n, _ in events if n == name and (after is None or t >= after)), None)
+        began, ended = first('handler-start'), first('handler-end')
+        rendered = first('rendered', began) if began is not None else None
+        spans = [list(mark) for mark in self.marks]
+        if began is not None:
+            spans.append(['handler', began, ended, False])
+        if ended is not None:
+            spans.append(['to-render', ended, rendered, False])
+        if rendered is not None:
+            spans.append(['raf-3', rendered, first('frames-3', rendered), False])
+        spans.sort(key=lambda s: s[1])
+
+        def at(t, length):
+            """Where a gap from t of length ms sits: the phase that ended last before it, the phases in progress at its start,
+            those that began inside it, and the page events that still left the page inside it (tasks that ended)."""
+            done = [s for s in spans if s[2] is not None and s[2] <= t]
+            return {'after': max(done, key=lambda s: s[2])[0] if done else None, 'in': [s[0] for s in spans if s[1] <= t and (s[2] is None or s[2] > t)],
+                    'began': [s[0] for s in spans if t < s[1] < t + length], 'page_events': [[n, rel(x)] for x, n, _ in events if t < x < t + length][:10]}
+        # Heartbeat gaps from the end of arming to end; the last one has no beat after it (open: the page sent nothing more).
+        beats = sorted(t - self.offset for t in self.beats if self.armed_at <= t - self.offset <= end)
+        edges = [self.marks[0][2]] + beats + [max(end, beats[-1] if beats else end)]
+        gaps = [(a, b - a, n == len(edges) - 2) for n, (a, b) in enumerate(zip(edges, edges[1:]))]
+        gap = lambda g: None if g is None else {'at': rel(g[0]), 'ms': round(g[1], 1), 'open': g[2], **at(g[0], g[1])}
+        frames = sorted(t - self.offset for t in self.frames)
+        after_click = [(t, n, x) for t, n, x in events if began is not None and t >= began]
+        out = {'origin': 'click' if self.click_at is not None else 'arm', 'clock_offset_ms': round(self.offset, 1), 'end': rel(end),
+               'spans': [[s[0], rel(s[1]), rel(s[2])] + (['raised'] if s[3] else []) for s in spans],
+               'last_page_event': [events[-1][1], rel(events[-1][0])] if events else None,
+               'pointer_down': rel(first('pointer-down')), 'render_requests': sum(n == 'render-request' for _, n, _ in after_click),
+               'rendered': sum(n == 'rendered' for _, n, _ in after_click), 'input_clicks': sum(n == 'input-click' for _, n, _ in events),
+               'gl': {phase: {name: [g[0], round(g[1], 1), round(g[2], 1)] for name, g in sorted(table.items())} for phase, table in self.gl.items() if table},
+               'beats': len(beats), 'first_stall': gap(next((g for g in gaps if g[1] > PHASE_STALL_MS), None)), 'longest_gap': gap(max(gaps, key=lambda g: g[1]) if gaps else None),
+               'gaps': [[rel(a), round(d, 1)] for a, d, _ in sorted(gaps, key=lambda g: -g[1])[:5] if d > PHASE_STALL_MS],
+               'frames': len(frames), 'longest_frame_gap_ms': round(max((b - a for a, b in zip(frames, frames[1:])), default=0.), 1),
+               'long_tasks': sorted(([rel(x[0] - self.offset), round(x[1], 1)] for _, n, x in events if n == 'long-task'), key=lambda g: -g[1])[:3],
+               'slow_gl': sorted(([x[0], rel(x[1] - self.offset), round(x[2], 1)] for _, n, x in events if n == 'slow-gl'), key=lambda g: -g[2])[:3],
+               'batches': len(self.seqs), 'batches_missing': (max(self.seqs) + 1 - len(self.seqs)) if self.seqs else None, 'unread': self.unread}
+        states = {n: x for _, n, x in events if n in ('start', 'handler-end', 'stop') and x is not None}
+        if states:
+            out['states'] = states
+        return out
+
+
 def grid_axes(grid):
     """Columns: the world step (mm) of one index along i, j, k (contract F-72; origin 0)."""
     iop = np.array(GRIDS[grid], float); row, col = iop[:3], iop[3:]
@@ -288,7 +413,7 @@ window.vrVoi={
   w.frame=()=>{if(w.armed)w.frames++};w.action=e=>{if(e&&w.element.contains(e.target))return;w.frames=0;w.statusWrites=0;w.armed=true};
   v.element.addEventListener(E.Events.IMAGE_RENDERED,w.frame);dialog.addEventListener('click',w.action,true);dialog.addEventListener('change',w.action,true);
   w.observer=new MutationObserver(()=>{if(w.armed)w.statusWrites++});w.observer.observe(status,{childList:true,characterData:true,subtree:true});window.vrVoi.watch=w},
- release:()=>{const w=window.vrVoi.watch;if(!w)return;w.element.removeEventListener(E.Events.IMAGE_RENDERED,w.frame);w.dialog.removeEventListener('click',w.action,true);w.dialog.removeEventListener('change',w.action,true);w.observer.disconnect();window.vrVoi.watch=null},
+ release:()=>{window.vrVoi.phaseStop();const w=window.vrVoi.watch;if(!w)return;w.element.removeEventListener(E.Events.IMAGE_RENDERED,w.frame);w.dialog.removeEventListener('click',w.action,true);w.dialog.removeEventListener('change',w.action,true);w.observer.disconnect();window.vrVoi.watch=null},
  arm:()=>{const w=window.vrVoi.watch;w.frames=0;w.statusWrites=0;w.armed=true},
  watched:()=>{const w=window.vrVoi.watch;return w?{frames:w.frames,armed:w.armed,statusWrites:w.statusWrites}:null},
  frames:()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(r)))),
@@ -307,29 +432,37 @@ window.vrVoi={
    sampleDistance:m.getSampleDistance(),planes:m.getClippingPlanes().map(q=>({origin:Array.from(q.getOrigin()),normal:Array.from(q.getNormal())})),gradient:[p.getUseGradientOpacity(0),p.getGradientOpacityMinimumOpacity(0),p.getGradientOpacityMaximumOpacity(0)],
    shade:p.getShade(),interpolation:p.getInterpolationType(),color:nodes(p.getRGBTransferFunction(0)),opacity:nodes(p.getScalarOpacity(0)),dimensions:Array.from(vol.dimensions),spacing:Array.from(vol.imageData.getSpacing()),
    last:Array.from(vol.imageData.indexToWorld(last)),hu:[[0,0,0],last,last.map(n=>Math.floor(n/2))].map(i=>vol.voxelManager.getAtIJK(...i)),renderer:ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)}},
- // F03 observation of one action (S8-U1a-SPEC-B-F03). Everything is pass-through and removed by traceStop: dialog click and
- // change listeners before (capture) and after (bubble) the product's handler, mapper planes, mask count and capability
- // state read there, the VR viewport's render requests, IMAGE_RENDERED, every animation frame, a 100 ms heartbeat, long
- // tasks, and the duration of WebGL and 2D canvas calls (a call of 50 ms or more is listed with its start).
- traceStart:()=>{window.vrVoi.traceStop();const v=one(),m=mapper(),log={events:[],gl:{},slow:[],beats:[],frames:[],long:[]},undo=[],clock=()=>performance.timeOrigin+performance.now();
-  const ev=(name,extra)=>{if(log.events.length<500)log.events.push(Object.assign({name,t:clock()},extra||{}))};
+ // Phase recorder of one action (D419; the S8-U1a-SPEC-B-F03 Crop trace made one recorder for the Crop diagnosis, the MAX-H
+ // baseline and every MAX-H target action, so the baseline and the candidate pay the same cost). Everything is pass-through
+ // and removed by phaseStop: the target button's pointer-down and click before any product listener (window, capture) and
+ // after the product's handler (dialog, bubble), the VR viewport's render requests, IMAGE_RENDERED, every animation frame, a
+ // 100 ms heartbeat, long tasks, and the duration of WebGL and 2D canvas calls by phase (before the target click, in its
+ // handler where the preflight runs, after it; a call of 50 ms or more is listed with its start). Every event and every
+ // heartbeat sends what was recorded to the test's page binding: a batch leaves the page when its task ends, so a stall
+ // shows as the heartbeat gap that ends it, and a browser ended in a stall leaves the test everything up to that task.
+ phaseStart:o=>{window.vrVoi.phaseStop();const v=one(),m=mapper(),send=window[o.binding],clock=()=>performance.timeOrigin+performance.now();
+  const r={id:o.id,seq:0,e:[],b:[],f:[],gl:{pre:{},handler:{},render:{}},phase:'pre',rendered:false,after:-1,count:0,undo:[]};
+  const take=()=>{const out={id:r.id,seq:r.seq++,e:r.e,b:r.b,f:r.f,gl:r.gl};r.e=[];r.b=[];r.f=[];return out};
+  const flush=()=>{if(r.e.length||r.b.length||r.f.length)try{send(take())}catch(_){}};
+  const ev=(name,extra)=>{if(r.count++<3000)r.e.push([name,clock(),extra===undefined?null:extra]);flush()};
   const state=()=>{const s=window.kinVolumeVr?.inspect?.(),p=m.getViewSpecificProperties()??null;return {planes:m.getClippingPlanes().length,masks:(p?.OpenGL?.ShaderReplacements||[]).length,propertiesLength:JSON.stringify(p).length,voi:s?!!s.voi:null,sculpt:s?.sculpt?.length??0,crop:s?.crop??null}};
-  ev('start',state());
-  const beat=setInterval(()=>{if(log.beats.length<3000)log.beats.push(clock())},100);undo.push(()=>clearInterval(beat));
-  let live=true;const raf=()=>{if(!live)return;if(log.frames.length<6000)log.frames.push(clock());requestAnimationFrame(raf)};requestAnimationFrame(raf);undo.push(()=>{live=false});
-  try{const o=new PerformanceObserver(list=>{for(const e of list.getEntries())if(log.long.length<500)log.long.push([performance.timeOrigin+e.startTime,e.duration])});o.observe({type:'longtask'});undo.push(()=>o.disconnect())}catch(_){log.long=null}
-  const rendered=()=>ev('rendered');v.element.addEventListener(E.Events.IMAGE_RENDERED,rendered);undo.push(()=>v.element.removeEventListener(E.Events.IMAGE_RENDERED,rendered));
-  const dialog=window.vrVoi.watch.dialog,control=e=>e.target?.getAttribute?.('aria-label')||(e.target?.textContent||'').trim().slice(0,40);
-  const armed=e=>ev('armed',{type:e.type,control:control(e)}),handled=e=>ev('handled',Object.assign({control:control(e)},state()));
-  dialog.addEventListener('click',armed,true);dialog.addEventListener('change',armed,true);dialog.addEventListener('click',handled,false);
-  undo.push(()=>{dialog.removeEventListener('click',armed,true);dialog.removeEventListener('change',armed,true);dialog.removeEventListener('click',handled,false)});
-  const own=Object.prototype.hasOwnProperty.call(v,'render'),render=v.render;v.render=function(...a){ev('render');return render.apply(this,a)};undo.push(()=>{if(own)v.render=render;else delete v.render});
-  const timed=(proto,name)=>{const original=proto&&proto[name];if(typeof original!=='function')return;proto[name]=function(...a){const s=performance.now();try{return original.apply(this,a)}finally{const d=performance.now()-s,g=log.gl[name]||(log.gl[name]={n:0,ms:0,max:0});g.n++;g.ms+=d;if(d>g.max)g.max=d;if(d>=50&&log.slow.length<300)log.slow.push([name,performance.timeOrigin+s,d])}};undo.push(()=>{proto[name]=original})};
+  r.ev=ev;r.take=take;r.state=o.state?state:()=>null;ev('start',r.state());
+  const beat=setInterval(()=>{r.b.push(clock());flush()},100);r.undo.push(()=>clearInterval(beat));
+  let live=true;const raf=()=>{if(!live)return;r.f.push(clock());if(r.after>=0&&r.after<3&&++r.after===3)ev('frames-3');requestAnimationFrame(raf)};requestAnimationFrame(raf);r.undo.push(()=>{live=false});
+  try{const ob=new PerformanceObserver(list=>{for(const x of list.getEntries())ev('long-task',[performance.timeOrigin+x.startTime,x.duration])});ob.observe({type:'longtask'});r.undo.push(()=>ob.disconnect())}catch(_){}
+  const rendered=()=>{ev('rendered');if(r.phase!=='pre'&&!r.rendered){r.rendered=true;r.after=0}};v.element.addEventListener(E.Events.IMAGE_RENDERED,rendered);r.undo.push(()=>v.element.removeEventListener(E.Events.IMAGE_RENDERED,rendered));
+  const named=e=>{const b=e.target?.closest?.('button,[role=button]');return b?(b.getAttribute('aria-label')||b.textContent||'').trim():null};
+  const down=e=>{if(r.phase==='pre'&&named(e)===o.target)ev('pointer-down')};
+  const start=e=>{const name=named(e);if(r.phase!=='pre')return;if(name===o.target){r.phase='handler';ev('handler-start')}else ev('input-click',name)};
+  const end=e=>{if(r.phase==='handler'&&named(e)===o.target){r.phase='render';ev('handler-end',r.state());flush()}};
+  const dialog=window.vrVoi.watch.dialog;window.addEventListener('mousedown',down,true);window.addEventListener('click',start,true);dialog.addEventListener('click',end,false);
+  r.undo.push(()=>{window.removeEventListener('mousedown',down,true);window.removeEventListener('click',start,true);dialog.removeEventListener('click',end,false)});
+  const own=Object.prototype.hasOwnProperty.call(v,'render'),render=v.render;v.render=function(...a){ev('render-request');return render.apply(this,a)};r.undo.push(()=>{if(own)v.render=render;else delete v.render});
+  const timed=(proto,name)=>{const original=proto&&proto[name];if(typeof original!=='function')return;proto[name]=function(...a){const s=performance.now();try{return original.apply(this,a)}finally{const d=performance.now()-s,t=r.gl[r.phase],g=t[name]||(t[name]=[0,0,0]);g[0]++;g[1]+=d;if(d>g[2])g[2]=d;if(d>=50)ev('slow-gl',[name,performance.timeOrigin+s,d])}};r.undo.push(()=>{proto[name]=original})};
   for(const C of [window.WebGL2RenderingContext,window.WebGLRenderingContext])if(C)for(const n of ['compileShader','linkProgram','getShaderParameter','getProgramParameter','useProgram','drawArrays','drawElements','texImage3D','texSubImage3D','texImage2D','readPixels','finish','flush'])timed(C.prototype,n);
   timed(window.CanvasRenderingContext2D?.prototype,'drawImage');
-  window.vrVoi.tracer={log,undo,ev,state}},
- traceStop:()=>{const t=window.vrVoi.tracer;if(!t)return;t.ev('stop',t.state());for(const f of t.undo.reverse())try{f()}catch(_){}window.vrVoi.tracer=null;window.vrVoi.traceLog=t.log},
- traceDump:()=>{const t=window.vrVoi.tracer;return JSON.stringify(t?t.log:window.vrVoi.traceLog||null)}};}"""
+  window.vrVoi.phases=r;return clock()},
+ phaseStop:()=>{const r=window.vrVoi.phases;if(!r)return null;for(const f of r.undo.reverse())try{f()}catch(_){}window.vrVoi.phases=null;r.e.push(['stop',performance.timeOrigin+performance.now(),r.state()]);return r.take()}};}"""
 
 
 class Scene:
@@ -464,26 +597,6 @@ def rgba_difference(a, b):
     """Observation only: differing pixels, differing channel elements and the largest channel difference."""
     unequal = a != b
     return {'pixels': int(unequal.any(-1).sum()), 'elements': int(unequal.sum()), 'max': int(np.abs(a.astype(int) - b.astype(int)).max())}
-
-
-def trace_summary(log, origin):
-    """F03 record of one traced action in ms from origin (the Python click): our own event names, control names, the
-    capability's VOI/sculpt/crop summary, mapper plane and mask counts, frame and heartbeat gaps, long tasks and WebGL/2D
-    call durations. No pixel, shader text or patient data."""
-    if not log:
-        return {'trace': None}
-    rel = lambda t: round(t - origin, 1)
-    first = next((e['t'] for e in log['events'] if e['name'] == 'rendered'), None)
-    # Gaps over 250 ms, counted from the trace start so a block that begins at once is seen even before the first beat.
-    gaps = lambda ts: sorted(([rel(a), round(b - a, 1)] for a, b in zip([log['events'][0]['t']] + ts, ts) if b - a > 250), key=lambda g: -g[1])[:10]
-    return {'events': [{**{k: x for k, x in e.items() if k != 't'}, 't_ms': rel(e['t'])} for e in log['events'] if e['name'] != 'rendered'][:40],
-            'rendered_ms': [rel(e['t']) for e in log['events'] if e['name'] == 'rendered'][:10],
-            'frames_after_first_render_ms': [rel(t) for t in log['frames'] if first is not None and t > first][:3],
-            'frames': len(log['frames']), 'frame_gaps_ms': gaps(log['frames']),
-            'heartbeats': len(log['beats']), 'heartbeat_gaps_ms': gaps(log['beats']),
-            'long_tasks_ms': None if log['long'] is None else sorted(([rel(s), round(d, 1)] for s, d in log['long']), key=lambda g: -g[1])[:10],
-            'gl_ms': {k: [g['n'], round(g['ms'], 1), round(g['max'], 1)] for k, g in sorted(log['gl'].items())},
-            'slow_gl_ms': sorted(([n, rel(s), round(d, 1)] for n, s, d in log['slow']), key=lambda g: -g[2])[:15]}
 
 
 # NT-U1a-05 sub-case MAX geometry on G-AX seen from Superior (test-plan §4 MAX-B, MAX-C).
@@ -627,9 +740,11 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         self.assertEqual(info['dpr'], 1); self.css_size = [info['cssWidth'], info['cssHeight']]
         return dialog
 
-    def settle(self, v, limit=30, deadline=None):
+    def settle(self, v, limit=30, deadline=None, phases=None):
         """A new native render after the action, three frames for the product's post-render check, and the VR still shown.
-        Given the action's absolute deadline (MAX-H), the wait is what is left of it, never a fresh limit."""
+        Given the action's absolute deadline (MAX-H), the wait is what is left of it, never a fresh limit. Given a phase
+        recorder, the three parts are its phases 'render-wait', 'frames' and 'product-check'."""
+        mark = phases.phase if phases else no_phase
         if deadline is None:
             timeout = self.remaining(limit) * 1000
         else:
@@ -638,14 +753,18 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                 raise AssertionError('MAX-H deadline passed before the render wait')
         started = time.monotonic()
         try:
-            v.wait_for_function('()=>{const w=vrVoi.watched();return !!w&&w.armed&&w.frames>=1}', timeout=timeout)
+            with mark('render-wait'):
+                v.wait_for_function('()=>{const w=vrVoi.watched();return !!w&&w.armed&&w.frames>=1}', timeout=timeout)
         except Exception:
             # Observation for a D348 decision (MAX-F): how long the wait ran before the bound; the failure is raised unchanged.
             self.measure('settle-timeout', waited_s=round(time.monotonic() - started, 3)); raise
         waited = time.monotonic() - started
         if waited >= 10:
             self.measure('settle-slow', waited_s=round(waited, 3))
-        v.evaluate('()=>vrVoi.frames()'); self.still_shown(v)
+        with mark('frames'):
+            v.evaluate('()=>vrVoi.frames()')
+        with mark('product-check'):
+            self.still_shown(v)
 
     def responsive(self, v, limit=30):
         """Seconds until a trivial page call answers again, bounded by min(limit, the suite deadline); None when it did not."""
@@ -656,25 +775,25 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
             return None
 
     def traced_crop(self, v, dialog, i_max, condition, **context):
-        """Apply Crop with I Max = i_max under the F03 trace (HELPERS traceStart) and the unchanged settle bound. Writes one
-        VRVOI-MEASURE line and returns the settle failure, or None; the caller raises it. The wait is never restarted: after a
-        failure only a bounded responsiveness probe and a bounded read of the page record follow."""
-        v.evaluate('()=>vrVoi.traceStart()'); dialog.get_by_label('I Max', exact=True).fill(str(i_max))
-        clicked, started, failure = time.time() * 1000, time.monotonic(), None
-        dialog.get_by_role('button', name='Apply Crop', exact=True).click()
+        """Apply Crop with I Max = i_max under the phase recorder (Phases, with the capability state at start, after the
+        handler and at stop) and the unchanged settle bound. Writes one VRVOI-MEASURE line and returns the click or settle
+        failure, or None; the caller raises it. The wait is never restarted: after a failure only a bounded responsiveness
+        probe follows, and the recorder is read from the page only when the page answers."""
+        phases = Phases(v, 'Apply Crop', 'NT-U1a-05-crop-diagnosis', condition, state=True)
+        phases.prepare(lambda: dialog.get_by_label('I Max', exact=True).fill(str(i_max)))
+        started, failure = time.monotonic(), None
         try:
-            self.settle(v)
+            with phases.phase('click'):
+                dialog.get_by_role('button', name='Apply Crop', exact=True).click()
+            self.settle(v, phases=phases)
         except Exception as error:
             failure = error
+        ended = now_ms()
         record = {'condition': condition, 'i_max': i_max, **context, 'outcome': 'settled' if failure is None else 'failed',
                   'failure': repr(failure)[:200] if failure else None, 'wait_s': round(time.monotonic() - started, 3)}
         if failure is not None:
             record['responsive_after_s'] = self.responsive(v)
-        try:
-            log = json.loads(v.wait_for_function('()=>vrVoi.traceDump()', timeout=self.remaining(10) * 1000).json_value())
-            v.evaluate('()=>vrVoi.traceStop()'); record.update(trace_summary(log, clicked))
-        except Exception as error:
-            record['trace_unread'] = repr(error)[:200]
+        record['phases'] = phases.finish(ended, failure is None or record['responsive_after_s'] is not None)
         self.measure('NT-U1a-05-crop-diagnosis', **record)
         return failure
 
@@ -1186,24 +1305,32 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         self.assertEqual(tuple(ledger), MAX_STEPS)
 
     # NT-U1a-05 sub-case MAX (test-plan §4 MAX-A..MAX-H) ---------------------------------------------------------------
-    def bounded(self, v, supervisor, step, action, started, deadline, button, check, record):
+    def bounded(self, v, supervisor, step, action, started, deadline, button, check, record, phases=None):
         """One MAX-H action under one absolute deadline: the click, the new native render, three frames, the product's check
         and the step's state and pixel assertions all share it. The click's return and the settle start never renew it, and
         the supervisor ends the browser when it passes without an answer. Writes one VRVOI-MAX line with the action's time,
-        bound and outcome, success or not; returns the seconds from just before the click to the last assertion."""
+        bound and outcome, success or not, and the action's phase record (D419; armed by the caller before the input, so it
+        covers the click whatever ends it); returns the seconds from just before the click to the last assertion."""
+        mark = phases.phase if phases else no_phase
         token = supervisor.arm(deadline, step + ' ' + action); error = None
         try:
             left = deadline - time.monotonic()
             if left <= 0:
                 raise AssertionError('MAX-H deadline passed before the action')
-            button.click(timeout=left * 1000); self.settle(v, deadline=deadline); check()
+            with mark('click'):
+                button.click(timeout=left * 1000)
+            self.settle(v, deadline=deadline, phases=phases)
+            with mark('assertions'):
+                check()
         except BaseException as caught:
             error = caught
-        fired = supervisor.disarm(token); ended = time.monotonic()
+        fired = supervisor.disarm(token); ended = time.monotonic(); ended_ms = now_ms()
         outcome = 'supervisor' if fired else 'failed' if error is not None else 'late' if ended > deadline else 'done'
-        print('VRVOI-MAX ' + json.dumps({'step': step, 'action': action, **record, 'deadline_s': round(deadline - started, 3),
-                                         'elapsed_s': round(ended - started, 3), 'outcome': outcome,
-                                         'suite_elapsed_s': round(ended - self.suite_started, 3)}), flush=True)
+        line = {'step': step, 'action': action, **record, 'deadline_s': round(deadline - started, 3), 'elapsed_s': round(ended - started, 3),
+                'outcome': outcome, 'suite_elapsed_s': round(ended - self.suite_started, 3)}
+        # Read after the outcome is fixed, so the recorder's own read never counts against the deadline.
+        line['phases'] = phases.finish(ended_ms, outcome in ('done', 'late')) if phases else None
+        print('VRVOI-MAX ' + json.dumps(line), flush=True)
         if fired:
             raise AssertionError('MAX-H %s %s: the supervisor ended the browser at the absolute deadline' % (step, action)) from error
         if error is not None:
@@ -1280,7 +1407,9 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
             dialog.get_by_label('I Min', exact=True).fill('0'); dialog.get_by_label('I Max', exact=True).fill('51'); dialog.get_by_role('button', name='Apply Crop', exact=True).click(); self.settle(viewer)
             conditions = viewer.evaluate('()=>vrVoi.conditions()'); shown = [lit_count(viewer)]
             for n in range(1, 9):
-                self.freehand(viewer, dialog, vertices[n - 1])
+                # D419: the same recorder as the candidate's actions, armed before the drawing.
+                phases = Phases(viewer, 'Apply Sculpt', 'MAX-H-baseline', 'apply-sculpt')
+                phases.prepare(lambda n=n: self.freehand(viewer, dialog, vertices[n - 1]))
 
                 def applied(n=n):
                     expect(dialog.get_by_label('Sculpt removal preview', exact=True)).to_have_count(0)
@@ -1291,7 +1420,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                     shown.append(lit)
                 begun = time.monotonic()
                 B[n] = self.bounded(viewer, supervisor, 'MAX-H-baseline', 'apply-sculpt', begun, min(begun + BASELINE_ACTION_S, total),
-                                    dialog.get_by_role('button', name='Apply Sculpt', exact=True), applied, {'n': n, 'limit_s': BASELINE_ACTION_S})
+                                    dialog.get_by_role('button', name='Apply Sculpt', exact=True), applied, {'n': n, 'limit_s': BASELINE_ACTION_S}, phases)
                 token = supervisor.arm(total, 'MAX-H-baseline step')
             dialog.get_by_role('button', name='Close VR', exact=True).click(); expect(dialog).to_be_hidden()
             result = {'B': B, 'conditions': conditions, 'vertices': vertices, 'browser': browser.version, 'normalized': normalized, 'lit': shown}
@@ -1469,13 +1598,20 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
             if differ:
                 raise AssertionError('MAX-H baseline not established: the baseline and the candidate differ in %s' % differ)
 
-        def render_action(step_id, action, n, voi, button, check):
+        def recorder(name, step_id, action, prepare=None):
+            """D419: the action's phase recorder, armed before its input (the input itself is the phase 'input')."""
+            phases = Phases(v, name, step_id, action)
+            if prepare is not None:
+                phases.prepare(prepare)
+            return phases
+
+        def render_action(step_id, action, n, voi, button, check, phases):
             """A MAX-H target action: L(n, v) from the baseline's B_n, one absolute deadline min(start + L, suite deadline -
             60 s) made just before the click and shared by everything up to the step's last assertion."""
             limit = render_limit(baseline['B'][n], voi); started = time.monotonic()
             deadline = min(started + limit, self.suite_started + SUITE_CAP_S - SUITE_MARGIN_S)
             self.bounded(v, self.supervisor, step_id, action, started, deadline, button, check,
-                         {'n': n, 'voi': voi, 'B_n': round(baseline['B'][n], 3), 'limit_s': round(limit, 3)})
+                         {'n': n, 'voi': voi, 'B_n': round(baseline['B'][n], 3), 'limit_s': round(limit, 3)}, phases)
 
         def mx03():
             dialog.get_by_role('button', name='Apply Display', exact=True).click(); self.settle(v); self.view_from(v, 'Superior')
@@ -1520,7 +1656,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                 if n == 0:
                     same_conditions()
                 earlier = self.inspect(v)['sculpt'] or []
-                draw_freehand(ctx['vertices'][n])
+                phases = recorder('Apply Sculpt', 'MX-%02d' % (6 + n), 'apply-sculpt', lambda: draw_freehand(ctx['vertices'][n]))
                 if n == 0:
                     for name in ('Apply VOI', 'Move Slab', 'Disable VOI'):
                         expect(self.button(v, name)).to_be_disabled()
@@ -1537,11 +1673,11 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                     scene = Scene(v); polygons = css_polygons(s); r = oracle(scene, polygons, slab_a)
                     placement(scene, r, polygons, [slab_a, slab_b]); judge(scene, r, n + 1)
                     successes.add(dialog.get_by_role('status').text_content())
-                render_action('MX-%02d' % (6 + n), 'apply-sculpt', n + 1, True, dialog.get_by_role('button', name='Apply Sculpt', exact=True), check)
+                render_action('MX-%02d' % (6 + n), 'apply-sculpt', n + 1, True, dialog.get_by_role('button', name='Apply Sculpt', exact=True), check, phases)
             step('MX-%02d' % (6 + n), mx_sculpt)
 
         def mx14():
-            self.field(v, 'VOI Move').fill('2.5')
+            phases = recorder('Move Slab', 'MX-14', 'move-slab', lambda: self.field(v, 'VOI Move').fill('2.5'))
 
             def check():
                 s = self.inspect(v); self.assert_voi(s, slab_b[0], [0, 1, 0], slab_b[1]); self.assertEqual(s['voiHistoryDepth'], 2); self.assertEqual(len(s['sculpt']), 8)
@@ -1553,7 +1689,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                     moved &= ~r['_masks']['p%d' % n_]
                 moved &= ~r['_masks']['f9']; wrong = int((scene.lit[moved] != a['_masks']['voi'][moved]).sum()); self.assertGreaterEqual(wrong, 400)
                 successes.add(dialog.get_by_role('status').text_content())
-            render_action('MX-14', 'move-slab', 8, True, self.button(v, 'Move Slab'), check)
+            render_action('MX-14', 'move-slab', 8, True, self.button(v, 'Move Slab'), check, phases)
         step('MX-14', mx14)
 
         def mx15():
@@ -1602,14 +1738,14 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                 self.assertAlmostEqual(float(self.field(v, 'VOI Center P').input_value()), slab_b[0][1], delta=1e-9); self.assertEqual(s['sculpt'], M['inspect']['sculpt'])
                 self.assertEqual(s['crop'], M['inspect']['crop']); self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], M['planes'])
                 scene = Scene(v); r = oracle(scene, css_polygons(s), slab_b); judge(scene, r, 8, voi_on=False, nine=True); ctx['off'] = scene.lit.copy()
-            render_action('MX-18', 'disable-voi', 8, False, self.button(v, 'Disable VOI'), check)
+            render_action('MX-18', 'disable-voi', 8, False, self.button(v, 'Disable VOI'), check, recorder('Disable VOI', 'MX-18', 'disable-voi'))
         step('MX-18', mx18)
 
         def mx19():
             def check():
                 s = self.inspect(v); self.assert_voi(s, slab_b[0], [0, 1, 0], slab_b[1]); self.assertEqual(s['voiHistoryDepth'], 4)
                 scene = Scene(v); r = oracle(scene, css_polygons(s), slab_b); judge(scene, r, 8, nine=True)
-            render_action('MX-19', 'apply-voi', 8, True, self.button(v, 'Apply VOI'), check)
+            render_action('MX-19', 'apply-voi', 8, True, self.button(v, 'Apply VOI'), check, recorder('Apply VOI', 'MX-19', 'apply-voi'))
         step('MX-19', mx19)
 
         def mx20():
@@ -1617,12 +1753,12 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
             def first():
                 s = self.inspect(v); self.assertIsNone(s['voi']); self.assertEqual(s['voiHistoryDepth'], 3); self.assertEqual(s['sculpt'], M['inspect']['sculpt'])
                 scene = Scene(v); judge(scene, oracle(scene, css_polygons(s), slab_b), 8, voi_on=False, nine=True)
-            render_action('MX-20', 'undo-voi-1', 8, False, self.button(v, 'Undo VOI'), first)
+            render_action('MX-20', 'undo-voi-1', 8, False, self.button(v, 'Undo VOI'), first, recorder('Undo VOI', 'MX-20', 'undo-voi-1'))
 
             def second():
                 s = self.inspect(v); self.assert_voi(s, slab_b[0], [0, 1, 0], slab_b[1]); self.assertEqual(s['voiHistoryDepth'], 2)
                 self.assertEqual(s['sculpt'], M['inspect']['sculpt']); scene = Scene(v); judge(scene, oracle(scene, css_polygons(s), slab_b), 8, nine=True)
-            render_action('MX-20', 'undo-voi-2', 8, True, self.button(v, 'Undo VOI'), second)
+            render_action('MX-20', 'undo-voi-2', 8, True, self.button(v, 'Undo VOI'), second, recorder('Undo VOI', 'MX-20', 'undo-voi-2'))
         step('MX-20', mx20)
 
         def mx21():
@@ -1632,16 +1768,16 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
                 self.assertEqual(s['crop'], M['inspect']['crop']); self.assertEqual(v.evaluate('()=>vrVoi.info()')['planes'], M['planes'])
                 scene = Scene(v); polygons = css_polygons(M['inspect']); r = oracle(scene, polygons, slab_b)
                 self.assertGreaterEqual(fraction(scene, r['R8']), .95, 'the removed region is the last applied one'); judge(scene, oracle(scene, polygons[:7], slab_b), 7)
-            render_action('MX-21', 'undo-sculpt', 7, True, dialog.get_by_role('button', name='Undo Sculpt', exact=True), check)
+            render_action('MX-21', 'undo-sculpt', 7, True, dialog.get_by_role('button', name='Undo Sculpt', exact=True), check, recorder('Undo Sculpt', 'MX-21', 'undo-sculpt'))
         step('MX-21', mx21)
 
         def mx22():
-            earlier = self.inspect(v)['sculpt']; draw_freehand(ctx['vertices'][7])
+            earlier = self.inspect(v)['sculpt']; phases = recorder('Apply Sculpt', 'MX-22', 'apply-sculpt', lambda: draw_freehand(ctx['vertices'][7]))
 
             def check():
                 s = self.inspect(v); self.assertEqual(len(s['sculpt']), 8); applied_geometry(s, 7, ctx['vertices'][7], earlier)
                 scene = Scene(v); judge(scene, oracle(scene, css_polygons(s), slab_b), 8, nine=True)
-            render_action('MX-22', 'apply-sculpt', 8, True, dialog.get_by_role('button', name='Apply Sculpt', exact=True), check)
+            render_action('MX-22', 'apply-sculpt', 8, True, dialog.get_by_role('button', name='Apply Sculpt', exact=True), check, phases)
         step('MX-22', mx22)
 
         def mx23():
