@@ -430,6 +430,8 @@ async function releaseHold() { window.synCalls.push('releaseHold:' + synRow()); 
 // moves and the poll Back to Editing restarts; inert here.
 let draftOwner = null, poll = null, pollGeneration = 0, listLoadSequence = 0;
 function startPolling() {}
+// S7-U5 fix7 (Astra S7-U5-R-001-F02): the report's citation and structure read tickets the preparation drops; none here.
+const citationReads = new Map(), structureReads = new Map();
 """
 OTHER_PANEL = "() => { window.synOtherEnds = 0; window.kinOn401.push(() => { window.synOtherEnds += 1; }); }"
 TOGGLES = """() => { for (const id of ['question-toggle', 'question-inbox', 'question-toggle'])
@@ -711,6 +713,8 @@ async function stashReport() { window.synCalls.push('wait:stashReport'); return 
 async function releaseHold() { window.synCalls.push('wait:releaseHold'); }
 let draftOwner = null, poll = null, pollGeneration = 0, listLoadSequence = 0;
 function startPolling() {}
+// S7-U5 fix7 (Astra S7-U5-R-001-F02): the report's citation and structure read tickets the preparation drops; none here.
+const citationReads = new Map(), structureReads = new Map();
 """
 # S7-U5: what the page's end coordination (closeWork, endHere) reads from the rest of the page script, empty.
 END_STAND_INS = """const $ = s => document.querySelector(s);

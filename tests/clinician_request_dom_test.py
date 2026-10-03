@@ -332,6 +332,8 @@ function endPatientCopy() { window.synOrder.push('endPatientCopy'); }
 // preparation moves and the poll restart of Back to Editing (F02), inert here.
 let draftOwner = null, poll = null, pollGeneration = 0, listLoadSequence = 0;
 function startPolling() {}
+// S7-U5 fix7 (Astra S7-U5-R-001-F02): the report's citation and structure read tickets the preparation drops; none here.
+const citationReads = new Map(), structureReads = new Map();
 async function stashReport() {
   window.synOrder.push('stash:' + (document.querySelector('#image-request-queue-lock').hidden ? 'open' : 'ended'));
   // The request the shipped draft write sends: the selected study's draft PUT, the one write the paused page lets out.

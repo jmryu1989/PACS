@@ -48,6 +48,23 @@ logout POST, the draft write, /api/me and the work reads. No stack, network or c
   BR-08  this file's own inputs: every local request is in SERVED_FILES (anything else fails the case) and the run
          prints the files it actually served on one line, `S7-U5-LOGOUT-DOM-SERVED <json>`, which
          ci_rec_check --mode candidate compares with SERVED_FILES, the pages' references and the CI-17 step.
+  BR-09 (Astra S7-U5-R-001-F01): the end record cannot be written (reading the storage works and finds nothing; writing
+         the record throws as a full storage does) while /api/me would still answer 200. After a 409, the fixed 500 or a
+         dropped connection the landing still shows the unconfirmed notice with Retry Log Out and enters nothing - on the
+         move, on reload, for work pages opened directly and in a later tab; a tab already open closes on the end notice
+         alone (the storage notice cannot be written either), or without BroadcastChannel as soon as the person returns to
+         it; only Retry Log Out and the explicit login go on. When nothing at all can be stored the landing's address carries
+         the state (reload included).
+  DP-13 (Astra S7-U5-R-001-F02): answers whose headers came before the preparation and whose bodies come after it (the
+         report's citation and structure reads succeeding, a panel's body failing) change neither the screen nor what the
+         preparation saves (the text, base version and keep lists it took); after Back to Editing they still apply
+         nothing and the reads are made again for the current generation. An earlier draft write's own answer (the one
+         answer that still reaches the page then) may empty the screen's keep list; the preparation's write still carries
+         the list it took.
+  DP-14 (Astra S7-U5-R-001-F03): Recover Draft after a session end keeps its write behind an earlier draft write of the
+         same study: while that write is out nothing is sent and nothing is declared (an answer within the wait lets it
+         go on; past the wait it says so and keeps the text); an earlier write cut off without the server's answer leaves
+         the recovery stored but not declared done, the text kept. The report is never confirmed.
 
 Mutants (MU-27..MU-34 and the F02 counterexamples) are one-off copies run outside this file; nothing here edits a
 product file.
@@ -198,6 +215,30 @@ HOLD_LOGOUT_BODY = """(() => {
     return new Response(body, { status: response.status, headers: response.headers });
   };
 })();"""
+# BR-09: the storage can be read (and finds nothing) but writing these keys throws, as a full storage does. The page's other
+# keys are written as usual.
+WRITES_FAIL = """(keys => { const set = Storage.prototype.setItem;
+  Storage.prototype.setItem = function (key, value) {
+    if (keys.includes(String(key))) throw new DOMException('SYN storage full', 'QuotaExceededError');
+    return set.call(this, key, value); }; })(%s);"""
+# BR-09: and the browser keeps no cookie of that name either - nothing of the end can be stored.
+COOKIE_DROPPED = """(name => { const jar = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
+  Object.defineProperty(Document.prototype, 'cookie', { configurable: true, get() { return jar.get.call(this); },
+    set(value) { if (!String(value).startsWith(name + '=')) jar.set.call(this, value); } }); })(%s);"""
+# DP-13: the answer's status and headers arrive at once, but reading its body (json or text) waits until the case releases
+# it or fails it - for the listed paths, and only while window.__synHoldBodies is true.
+HOLD_BODIES = """(paths => { const held = []; Object.defineProperty(window, '__synHeldBodies', { value: held });
+  window.__synHoldBodies = true;
+  for (const name of ['json', 'text']) {
+    const read = Response.prototype[name];
+    Response.prototype[name] = function () {
+      const reading = read.call(this), path = new URL(this.url).pathname;
+      if (!window.__synHoldBodies || !paths.includes(path)) return reading;
+      return new Promise((resolve, reject) => held.push({ path, release: () => reading.then(resolve, reject),
+        fail: () => reading.then(() => reject(new TypeError('SYN body stream failed')), reject) }));
+    };
+  }
+})(%s);"""
 # What the screen shows of a session: rendered text (hidden parts excluded), the editor's values and the identity.
 SCREEN = """() => ({ text: document.body.innerText, values: [...document.querySelectorAll('textarea, input')].map(e => e.value),
   identity: typeof KinAuth === 'undefined' ? 'no auth.js' : KinAuth.session(),
@@ -230,10 +271,14 @@ class Site:
         self.logins = 0
         self.logout_answers = []        # each: (status, body) | "hold" | "abort"; none queued answers 204
         self.held_logouts, self.logouts = [], []
-        self.put_answers = []           # draft writes: (status, body) | "hold" | "abort"; none queued answers 200
+        self.put_answers = []           # draft writes: (status, body) | "hold" | "abort" | "cut"; none queued answers 200
         self.held_puts, self.puts = [], []
+        self.put_bodies = {}            # held draft write route -> its body, stored when finish_put() answers it 200
+        self.cut_puts = []              # "cut": the browser's connection dropped, the server still has the write to finish
         self.drafts = {}                # the draft rows the synthetic server stored, by author (the API's (uid, author) key)
         self.held_gets = {}             # path -> held routes, for reads a case answers late
+        self.gets = {}                  # path -> (status, body): reads a case answers (otherwise 404 SYN_NOT_STUBBED)
+        self.row_draft = None           # the reader's stored draft the list row carries (the API's state.draft)
         self.swap_after_me = None       # the account the browser has right after the next /api/me answer (a session swap)
         self.held_me, self.held_lists = None, None
         self.releases, self.holds, self.held_commits = [], [], []
@@ -323,7 +368,7 @@ class Site:
         if method == "GET" and path == "/api/studies" and parse_qs(query).get("limit") == ["100"]:
             if self.held_lists is not None:
                 return self.held_lists.append(route)
-            return route.fulfill(json=self.list_body())
+            return route.fulfill(json=self.list_body(self.row_draft))
         if method == "GET" and path == "/api/colleagues":
             return route.fulfill(json=[])
         if method == "GET" and path == "/api/prefs":
@@ -368,20 +413,44 @@ class Site:
                     return route.fulfill(status=409, json={"code": "REPORT_DRAFT_OWNER_CHANGED", "message": "SYN other account"})
                 reply = self.put_answers.pop(0) if self.put_answers else (200, {"ok": True})
                 if reply == "hold":
+                    self.put_bodies[id(route)] = (body, account["actor"])
                     return self.held_puts.append(route)
                 if reply == "abort":
+                    return route.abort("connectionreset")
+                if reply == "cut":
+                    self.cut_puts.append((body, account["actor"]))
                     return route.abort("connectionreset")
                 if reply[0] == 200:
                     self.drafts[account["actor"]] = {k: body.get(k) for k in FIELDS}
                 return route.fulfill(status=reply[0], json=reply[1])
+        if method == "GET" and path in self.gets:
+            status, body = self.gets[path]
+            return route.fulfill(status=status, json=body)
         if method == "GET":
             return route.fulfill(status=404, json={"code": "SYN_NOT_STUBBED", "message": "synthetic server: not stubbed"})
         self.violations.append(f"undeclared write: {method} {path}")
         return route.fulfill(status=405, json={"code": "SYN_NO_WRITE"})
 
+    def finish_put(self, index=0, status=200):
+        """Answer a held draft write; a 200 stores it as the server's draft row, in the order the writes finish."""
+        route = self.held_puts.pop(index)
+        body, author = self.put_bodies.pop(id(route))
+        if status == 200:
+            self.drafts[author] = {k: body.get(k) for k in FIELDS}
+            route.fulfill(json={"ok": True})
+        else:
+            route.fulfill(status=status, json={"statusCode": status, "message": "SYN"})
+
+    def finish_cut(self):
+        """The server finishes a write whose connection the browser lost (its answer reaches nobody)."""
+        body, author = self.cut_puts.pop(0)
+        self.drafts[author] = {k: body.get(k) for k in FIELDS}
+
     @staticmethod
-    def list_body():
-        return {"studies": [study_row()], "serverTime": "2026-10-03T00:00:00.000Z", "observedAt": "2026-10-03T00:00:00.000Z",
+    def list_body(draft=None):
+        row = study_row()
+        row["state"]["draft"] = draft
+        return {"studies": [row], "serverTime": "2026-10-03T00:00:00.000Z", "observedAt": "2026-10-03T00:00:00.000Z",
                 "notObserved": [], "pagination": {"owner": [INSTITUTION, RAD["sub"]], "limit": 100, "offset": 0, "total": 1,
                                                   "next": None}}
 
@@ -844,6 +913,118 @@ class LogoutDOMTest(unittest.TestCase):
         self.assertEqual(2, len(icons), icons)
         self.assertEqual([200, 200], self.page.evaluate("hrefs => Promise.all(hrefs.map(h => fetch(h).then(r => r.status)))", icons))
 
+    # ── BR-09: an end record that cannot be written (Astra S7-U5-R-001-F01) ──
+    def unwritable_end(self, cookie=True):
+        """A fresh browser whose storage refuses the end record and the end notice (and, unless `cookie`, keeps no cookie of
+        that name): the session is still alive on the server (/api/me answers 200)."""
+        self.fresh_context()
+        self.context.add_init_script(WRITES_FAIL % json.dumps([END_KEY, "kin-session-ended"]))
+        if not cookie:
+            self.context.add_init_script(COOKIE_DROPPED % json.dumps(END_KEY))
+        self.site.account, self.site.logouts, self.site.held_logouts, self.site.logins = RAD, [], [], 0
+
+    def a_landing(self, page=None):
+        """The landing, with or without the state its address carries."""
+        page = page or self.page
+        page.wait_for_url(re.compile(re.escape(INDEX_URL) + r"(\?.*)?$"))
+        expect(page.locator("#signin")).to_be_enabled()
+        return page.locator("#msg").inner_text(), page.locator("#retry-logout").is_visible()
+
+    def test_br09_an_end_record_that_cannot_be_written_still_keeps_the_session_out(self):
+        notices = set()
+        for label, answer in (("409", (409, {"statusCode": 409, "message": "SYN conflict"})),
+                              ("500 storage", (500, {"code": "AUTH_STORAGE_FAILURE", "message": "SYN storage"})),
+                              ("connection dropped", "abort")):
+            with self.subTest(answer=label):
+                self.unwritable_end()
+                self.open_main()
+                second = self.open_main(self.watch(self.context.new_page()))
+                self.site.logout_answers = [answer]
+                self.log_out_main()
+                message, retry = self.landing()
+                notices.add(message)
+                self.assertTrue(retry and has_hangul(message) and message != CONFIRMED, message)
+                self.assertIsNone(self.screen()["end"], "the premise: the end record is not in the storage")
+                # The tab already open closes on the end notice alone (its storage notice could not be written) and moves
+                # once, sending nothing. Its landing shows the end; returning to it shows the result the first tab recorded.
+                second_message, second_retry = self.landing(second)
+                self.assertTrue(second_retry and second_message != CONFIRMED, second_message)
+                second.evaluate("() => window.dispatchEvent(new Event('focus'))")
+                expect(second.locator("#msg")).to_have_text(message)
+                self.page.wait_for_timeout(500)
+                self.assertEqual(([], [], 0, 1, 1), (self.docs(name="main.html")[1:], self.docs(second, "main.html")[1:],
+                                                     self.site.logins, len(self.site.logouts),
+                                                     len(self.docs(second, "index.html"))))
+                # Reload, work pages opened directly and a later tab: the notice, never the live session.
+                self.page.reload()
+                self.assertEqual((message, True), self.landing())
+                for direct in ("main.html", "admin.html", "clinician.html"):
+                    calls = len(self.site.calls)
+                    self.page.goto(ORIGIN + BASE + direct)
+                    self.assertEqual((message, True), self.landing(), direct)
+                    self.assertEqual([], self.site.calls[calls:], f"{direct}: no API request while the end is unconfirmed")
+                later = self.watch(self.context.new_page())
+                later.goto(INDEX_URL)
+                self.assertEqual((message, True), self.landing(later))
+                later.wait_for_timeout(300)
+                self.assertEqual((0, 1), (self.site.logins, len(self.site.logouts)), "nothing goes on by itself")
+        self.assertEqual(3, len(notices), "each failure keeps its own notice")
+        # Only Retry Log Out and the login control go on: one POST per press, then the login control leaves.
+        self.site.logout_answers = [(204, None)]
+        self.page.locator("#retry-logout").click()
+        expect(self.page.locator("#msg")).to_have_text(CONFIRMED)
+        self.page.reload()
+        self.assertEqual((CONFIRMED, False), self.landing())
+        self.assertEqual((2, 0), (len(self.site.logouts), self.site.logins))
+        self.page.get_by_role("button", name="KIN 계정으로 로그인").click()
+        expect(self.page.locator("#rows")).to_contain_text(PATIENT)
+        # The explicit login forgot the end: a later landing enters by itself again.
+        fresh = self.watch(self.context.new_page())
+        fresh.goto(INDEX_URL)
+        fresh.wait_for_url(ORIGIN + BASE + "main.html")
+        self.assertEqual(1, self.site.logins)
+
+    def test_br09_without_broadcastchannel_a_tab_closes_when_the_person_returns(self):
+        self.unwritable_end()
+        self.open_main()
+        second = self.watch(self.context.new_page())
+        second.add_init_script("delete window.BroadcastChannel;")
+        self.open_main(second)
+        self.site.logout_answers = [(409, {"statusCode": 409, "message": "SYN conflict"})]
+        self.log_out_main()
+        message, _ = self.landing()
+        # No notice can reach that tab; the moment the person comes back to it (the window takes focus) it reads the end.
+        second.evaluate("() => window.dispatchEvent(new Event('focus'))")
+        second.wait_for_url(INDEX_URL)
+        expect(second.locator("#msg")).to_have_text(message)
+        second.wait_for_timeout(300)
+        self.assertEqual((1, 1, 0), (len(self.docs(second, "index.html")), len(self.site.logouts), self.site.logins))
+
+    def test_br09_when_nothing_can_be_stored_the_landing_address_keeps_the_state(self):
+        self.unwritable_end(cookie=False)
+        self.open_main()
+        second = self.open_main(self.watch(self.context.new_page()))
+        self.site.logout_answers = [(409, {"statusCode": 409, "message": "SYN conflict"})]
+        self.log_out_main()
+        message, retry = self.a_landing()
+        self.assertTrue(retry and has_hangul(message) and message != CONFIRMED, message)
+        self.assertEqual(None, self.screen()["end"])
+        self.assertNotIn("kin-session-end", self.page.evaluate("() => document.cookie"), "the premise: no cookie either")
+        # The tab already open closes on the notice, which carries the end itself.
+        message2, retry2 = self.a_landing(second)
+        self.assertTrue(retry2 and message2 != CONFIRMED, message2)
+        self.page.reload()
+        self.assertEqual((message, True), self.a_landing())
+        self.page.wait_for_timeout(300)
+        self.assertEqual(([], [], 0, 1), (self.docs(name="main.html")[1:], self.docs(second, "main.html")[1:],
+                                          self.site.logins, len(self.site.logouts)))
+        self.site.logout_answers = [(204, None)]
+        self.page.locator("#retry-logout").click()
+        expect(self.page.locator("#msg")).to_have_text(CONFIRMED)
+        self.page.get_by_role("button", name="KIN 계정으로 로그인").click()
+        expect(self.page.locator("#rows")).to_contain_text(PATIENT)
+        self.assertEqual((2, 1), (len(self.site.logouts), self.site.logins))
+
     # ── DP: Log out keeps the report draft (F02) ──
     def test_dp01_the_draft_is_saved_before_the_end(self):
         self.open_main()
@@ -1211,6 +1392,203 @@ class LogoutDOMTest(unittest.TestCase):
         self.page.wait_for_url(INDEX_URL)
         self.assertEqual((FIELDS, owner), (self.site.drafts.get(RAD["actor"]), self.site.puts[-1].get("expectedOwner")))
         self.assertNotIn(RAD_OTHER["actor"], self.site.drafts)
+
+    # ── DP-13: bodies that come after the preparation (Astra S7-U5-R-001-F02) ──
+    CITATIONS, STRUCTURE, CONTEXT = (f"/api/studies/{UID}/report/citations", f"/api/studies/{UID}/report/structure",
+                                     f"/api/studies/{UID}/clinical-context")
+    # Answers that would make the draft's keep lists known (and so carried by the next write) if they were applied.
+    LATE_CITATIONS = {"version": 0, "head": [], "draft": [{
+        "v": 2, "cid": "SYN-CID-LATE", "field": "findings", "findingId": "f-0", "findingRevision": 1, "sourceIndex": 0,
+        "sourceRef": {"kind": "item", "itemId": "i-0", "sourceRevision": 1}, "linkStateAtInsert": "current",
+        "headRevisionAtInsert": None, "insertedText": FIELDS["findings"], "insertedAt": "2026-10-03T00:00:00.000Z",
+        "insertedBy": RAD["actor"], "sameTextCount": 1}]}
+    LATE_STRUCTURE = {"unknown": True}
+
+    def held_bodies(self):
+        return self.page.evaluate("() => window.__synHeldBodies.filter(h => !h.done).map(h => h.path)")
+
+    def settle_bodies(self, how):
+        """Release (or fail) the held bodies: how maps a path to 'release' or 'fail'."""
+        self.page.evaluate("""how => window.__synHeldBodies.filter(h => !h.done).forEach(h => {
+          h.done = true; h[how[h.path]](); })""", how)
+
+    def prepare_with_bodies_out(self):
+        """A study opened and typed while its citation, structure and clinical context reads have their headers but not yet
+        their bodies, an autosave out, and Log out: the preparation waits for that autosave."""
+        self.page.clock.install()
+        self.page.add_init_script(HOLD_BODIES % json.dumps([self.CITATIONS, self.STRUCTURE, self.CONTEXT]))
+        self.site.gets = {self.CITATIONS: (200, self.LATE_CITATIONS), self.STRUCTURE: (200, self.LATE_STRUCTURE),
+                          self.CONTEXT: (200, {"code": "SYN_LATE_PANEL"})}
+        self.open_main()
+        self.select_and_type()
+        self.wait_until(lambda: sorted(self.held_bodies()) == sorted([self.CITATIONS, self.STRUCTURE, self.CONTEXT]),
+                        "the three bodies held after their headers")
+        self.site.put_answers = ["hold"]
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.held_puts, "the autosave")
+        seen = (self.page.locator("#rows").inner_text(), self.page.locator("#clinical-context").inner_text(),
+                self.page.locator("#citebar").inner_text())
+        self.log_out_main()
+        expect(self.panel_title()).to_have_text("Saving Draft")
+        return seen
+
+    def test_dp13_bodies_after_the_preparation_change_neither_the_screen_nor_the_saved_draft(self):
+        seen = self.prepare_with_bodies_out()
+        self.settle_bodies({self.CITATIONS: "release", self.STRUCTURE: "release", self.CONTEXT: "fail"})
+        self.page.wait_for_timeout(300)
+        self.assertEqual(seen, (self.page.locator("#rows").inner_text(), self.page.locator("#clinical-context").inner_text(),
+                                self.page.locator("#citebar").inner_text()), "a late body changed the screen")
+        self.assertNotIn("LATE", self.screen()["text"])
+        # The autosave answers; the preparation's own write carries what it took when it began.
+        self.site.put_answers = ["hold"]
+        self.site.finish_put()
+        self.wait_until(lambda: len(self.site.puts) == 2, "the preparation's own draft write")
+        sent = self.site.puts[1]
+        self.assertEqual({**FIELDS, "baseVersion": 0}, {k: sent[k] for k in (*FIELDS, "baseVersion")})
+        self.assertNotIn("citationIds", sent, "a late citation body made the keep list known")
+        self.assertNotIn("structureIds", sent, "a late structure body made the keep list known")
+        self.site.finish_put()
+        self.assertEqual((CONFIRMED, False), self.landing())
+
+    def test_dp13_after_back_to_editing_the_late_bodies_still_apply_nothing(self):
+        self.prepare_with_bodies_out()
+        self.site.put_answers = [(500, {"statusCode": 500, "message": "SYN"})]
+        self.site.finish_put()
+        expect(self.panel_title()).to_have_text("Draft Not Saved")
+        # Back to Editing: the reads are made again for this generation and answered at once (the draft has no citation
+        # and no structure entry).
+        self.page.evaluate("() => { window.__synHoldBodies = false; }")
+        self.site.gets[self.CITATIONS] = (200, {"version": 0, "head": [], "draft": []})
+        self.site.gets[self.STRUCTURE] = (200, {"version": 0, "head": [], "draft": []})
+        reads = (self.site.count("GET", self.CITATIONS), self.site.count("GET", self.STRUCTURE))
+        self.panel_button("Back to Editing").click()
+        expect(self.page.locator("dialog.kin-logout")).to_have_count(0)
+        self.wait_until(lambda: (self.site.count("GET", self.CITATIONS), self.site.count("GET", self.STRUCTURE))
+                        == (reads[0] + 1, reads[1] + 1), "the reads made again after Back to Editing")
+        self.page.wait_for_timeout(200)
+        # Now the bodies from before the preparation come: success and failure alike apply nothing.
+        self.settle_bodies({self.CITATIONS: "release", self.STRUCTURE: "release", self.CONTEXT: "fail"})
+        self.page.wait_for_timeout(300)
+        self.assertNotIn("SYN body stream failed", self.page.locator("#clinical-context").inner_text())
+        self.assertNotIn("LATE", self.screen()["text"])
+        # The next save carries the keep lists of the current reads (empty), not those of the late bodies.
+        self.page.fill("#findings", "SYN-FINDINGS after Back to Editing")
+        puts = len(self.site.puts)
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: len(self.site.puts) == puts + 1, "the autosave after Back to Editing")
+        sent = self.site.puts[-1]
+        self.assertEqual(([], []), (sent.get("citationIds"), sent.get("structureIds")))
+        self.assertEqual(([], None), (self.site.logouts, self.screen()["end"]))
+
+    def test_dp13_the_preparation_write_carries_the_keep_list_it_took(self):
+        # The one answer that still reaches the page during the preparation is an earlier draft write's own. Here it is the
+        # autosave that emptied the stored draft, so the screen's keep list becomes empty while the preparation waits; the
+        # preparation's write still carries what it took when it began (the API ignores ids the row no longer has).
+        self.page.clock.install()
+        stored = {"findings": "SYN-OLD-DRAFT", "conclusion": "", "recommendation": "", "baseVersion": 0,
+                  "at": "2026-10-03T00:00:00.000Z"}
+        self.site.row_draft = stored
+        cited = {**self.LATE_CITATIONS["draft"][0], "cid": "SYN-CID-OLD", "insertedText": stored["findings"]}
+        self.site.gets = {self.CITATIONS: (200, {"version": 0, "head": [], "draft": [cited]})}
+        self.open_main()
+        self.page.locator("#rows tr", has_text=PATIENT).first.click()
+        expect(self.page.locator("#findings")).to_have_value(stored["findings"])
+        self.wait_until(lambda: self.site.count("GET", self.CITATIONS) == 1, "the citation read")
+        for name in FIELDS:
+            self.page.fill("#" + name, "")
+        self.site.put_answers = ["hold"]
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.held_puts, "the autosave that empties the draft")
+        self.assertEqual(({k: "" for k in FIELDS}, ["SYN-CID-OLD"]),
+                         ({k: self.site.puts[-1][k] for k in FIELDS}, self.site.puts[-1].get("citationIds")))
+        for name, value in FIELDS.items():
+            self.page.fill("#" + name, value)
+        self.log_out_main()
+        expect(self.panel_title()).to_have_text("Saving Draft")
+        self.site.finish_put()
+        self.wait_until(lambda: len(self.site.puts) == 2, "the preparation's own draft write")
+        sent = self.site.puts[1]
+        self.assertEqual(({**FIELDS, "baseVersion": 0}, ["SYN-CID-OLD"]),
+                         ({k: sent[k] for k in (*FIELDS, "baseVersion")}, sent.get("citationIds")))
+        self.assertEqual((CONFIRMED, False), self.landing())
+
+    # ── DP-14: Recover Draft and an earlier write of the same study (Astra S7-U5-R-001-F03) ──
+    def end_while_an_earlier_write_is_out(self, earlier):
+        """An autosave of the typed text leaves (`earlier`: "hold" keeps it out, "cut" drops the browser's connection while
+        the server still has it to finish); more is typed; Log out; the session ends during the preparation."""
+        self.fresh_context()
+        self.site.account = RAD
+        self.site.puts, self.site.held_puts, self.site.logouts, self.site.held_logouts = [], [], [], []
+        self.site.drafts, self.site.cut_puts, self.site.put_bodies = {}, [], {}
+        self.page.clock.install()
+        self.open_main()
+        self.select_and_type()
+        self.site.put_answers = [earlier]
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.puts, "the earlier draft write")
+        more = {k: v + " SYN-MORE" for k, v in FIELDS.items()}
+        for name, value in more.items():
+            self.page.fill("#" + name, value)
+        if earlier == "hold":
+            # The session ends while the preparation waits for that write: a read sent before Log out answers 401.
+            self.out_before_log_out()
+            self.log_out_main()
+            expect(self.panel_title()).to_have_text("Saving Draft")
+            self.expire_the_request_out()
+        else:
+            # The preparation's own write meets the end of the session.
+            self.site.put_answers = [(401, {"statusCode": 401, "message": "인증 세션이 만료되었습니다"})]
+            self.log_out_main()
+        expect(self.panel_title()).to_have_text("Session Ended")
+        self.assert_closed("the session ended during the preparation")
+        return more
+
+    def test_dp14_recover_draft_waits_for_an_earlier_write_of_the_study(self):
+        for order in ("the earlier write answers during the wait", "the earlier write is unknown past the wait"):
+            with self.subTest(order=order):
+                more = self.end_while_an_earlier_write_is_out("hold")
+                puts = len(self.site.puts)
+                self.panel_button("Recover Draft").click()
+                expect(self.panel_status()).to_contain_text("앞서 보낸 초안 저장")
+                self.page.wait_for_timeout(300)
+                self.assertEqual((puts, []), (len(self.site.puts), self.docs(name="index.html")),
+                                 "nothing is sent or declared while the earlier write is out")
+                if order == "the earlier write is unknown past the wait":
+                    self.page.clock.run_for(15500)
+                    expect(self.panel_status()).to_contain_text("결과를 아직 모릅니다")
+                    self.page.wait_for_timeout(300)
+                    self.assertEqual((puts, []), (len(self.site.puts), self.docs(name="index.html")))
+                    expect(self.panel_title()).to_have_text("Session Ended")
+                    self.site.finish_put()
+                    self.page.wait_for_timeout(200)
+                    self.panel_button("Recover Draft").click()
+                else:
+                    self.site.finish_put()
+                # Only after the earlier write is known does the recovery go, and it is the last write the server stores.
+                self.page.wait_for_url(INDEX_URL)
+                self.assertEqual(puts + 1, len(self.site.puts))
+                self.assertEqual(more, {k: self.site.puts[-1][k] for k in FIELDS})
+                self.assertEqual(more, self.site.drafts[RAD["actor"]], "the earlier write stored the recovery over")
+                self.assertEqual(0, self.site.count("POST", f"/api/studies/{UID}/report/commit"))
+
+    def test_dp14_an_earlier_write_cut_off_keeps_the_recovery_undeclared(self):
+        more = self.end_while_an_earlier_write_is_out("cut")
+        self.panel_button("Recover Draft").click()
+        self.wait_until(lambda: self.site.puts and {k: self.site.puts[-1][k] for k in FIELDS} == more, "the recovery write")
+        # The server took the recovery, but the cut-off write may still finish after it: nothing is declared, nothing
+        # forgotten, no move.
+        expect(self.panel_status()).to_contain_text("완료로 처리하지 않았습니다")
+        self.page.wait_for_timeout(300)
+        expect(self.panel_title()).to_have_text("Session Ended")
+        self.assertEqual([], self.docs(name="index.html"))
+        self.assert_closed("the recovery kept undeclared")
+        # The text is still in this window's memory: another press sends it whole again.
+        puts = len(self.site.puts)
+        self.panel_button("Recover Draft").click()
+        self.wait_until(lambda: len(self.site.puts) == puts + 1, "the recovery sent again")
+        self.assertEqual(more, {k: self.site.puts[-1][k] for k in FIELDS})
+        self.assertEqual(0, self.site.count("POST", f"/api/studies/{UID}/report/commit"))
+        self.site.finish_cut()
 
 
 def tearDownModule():

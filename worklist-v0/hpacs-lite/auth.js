@@ -24,6 +24,14 @@ const KinAuth = (() => {
    * 명시적 로그인·가입뿐이라 종료 확인도 그때까지 남는다.
    */
   const END_KEY = 'kin-session-end';
+  /**
+   * 종료 기록을 localStorage에 쓰지 못할 때(용량 초과처럼 읽기는 되는데 쓰기만 실패할 때)의 대체 자리(Astra S7-U5-R-001-F01).
+   * 기록이 없으면 사용 중으로 읽히므로, 쓰기 실패를 그냥 넘기면 로그아웃하지 못한 서버 세션으로 랜딩이 자동 진입한다. 같은
+   * 비밀 없는 기록을 같은 출처의 쿠키에 둔다 — 새로고침·문서 이동·다른 탭이 모두 읽는다. kin_sid처럼 세션 쿠키라 그 세션
+   * 쿠키보다 오래 남지 않는다. 둘 다 남기지 못한 기록은 이 문서의 메모리(unkept)에만 있고, 떠날 때 랜딩 주소에 상태만 싣는다.
+   */
+  const END_COOKIE = 'kin-session-end';
+  const END_CHANNEL = 'kin-session-end';
   const END_STATES = ['ending', 'unconfirmed', 'confirmed'];
   const END_REASONS = ['conflict', 'storage', 'network', 'timeout', 'refused', 'credentials'];
   // 서버가 이 요청의 세션(sid)을 찾아 본 뒤 그 세션이 없거나 끝났다고 답하는 401 문구(auth.service.ts의 문장 그대로): 세션 행
@@ -52,6 +60,8 @@ const KinAuth = (() => {
   let moved = false;
   // 페이지가 알린 "지금 이 문서를 떠나면 잃는 것이 있다" 판정(main.html의 저장을 확인하지 못한 판독문 초안, 조항 8-e).
   let keep = null;
+  // 이 문서가 쓰거나 다른 문서의 통지로 받았지만 어느 저장소(localStorage·쿠키)에도 남지 않은 종료 기록.
+  let unkept = null;
   const endedListeners = [];
 
   function broadcastEnded() {
@@ -80,27 +90,109 @@ const KinAuth = (() => {
     broadcastEnded();
   }
 
-  /** 기록된 종료 상태. 기록이 없으면 null, 읽지 못하거나 모양이 다르면 'unknown' — 어느 쪽도 사용 중의 근거가 아니다. */
-  function readEnd() {
-    let text;
-    try { text = localStorage.getItem(END_KEY); }
-    catch (e) { return { state: 'unknown', order: 0, reason: null }; }
-    if (text === null) return null;
+  const UNKNOWN_END = () => ({ state: 'unknown', order: 0, reason: null });
+
+  /** 종료 기록 하나(저장한 글자 또는 통지에 실린 값)를 읽는다. 없으면 null, 모양이 다르면 'unknown'. */
+  function endOf(value) {
+    if (value === null || value === undefined) return null;
     try {
-      const value = JSON.parse(text);
+      if (typeof value === 'string') value = JSON.parse(value);
       if (value && END_STATES.includes(value.state) && Number.isFinite(value.order))
         return { state: value.state, order: value.order, reason: END_REASONS.includes(value.reason) ? value.reason : null };
     } catch (e) {}
-    return { state: 'unknown', order: 0, reason: null };
+    return UNKNOWN_END();
   }
 
+  /** 두 기록 중 나중 것. 같은 요청(순서)이면 결과(확인·미확인)가 요청 중(ending)보다 나중이다. */
+  function later(a, b) {
+    if (!a || !b) return a || b;
+    if (a.order !== b.order) return a.order > b.order ? a : b;
+    return a.state === 'ending' ? b : a;
+  }
+
+  /** 대체 쿠키의 글자. 없으면 null, 풀 수 없으면 ''(모양이 다른 기록 — 사용 중의 근거가 아니다). */
+  function cookieEnd() {
+    let jar;
+    try { jar = document.cookie; } catch (e) { return null; }
+    for (const part of jar.split(';')) {
+      const at = part.indexOf('=');
+      if (at > 0 && part.slice(0, at).trim() === END_COOKIE) {
+        try { return decodeURIComponent(part.slice(at + 1).trim()); } catch (e) { return ''; }
+      }
+    }
+    return null;
+  }
+
+  function setCookieEnd(text) {
+    const secure = location.protocol === 'https:' ? '; Secure' : '';
+    try {
+      document.cookie = text === null
+        ? `${END_COOKIE}=; Path=/; Max-Age=0; SameSite=Strict${secure}`
+        : `${END_COOKIE}=${encodeURIComponent(text)}; Path=/; SameSite=Strict${secure}`;
+    } catch (e) {}
+    return cookieEnd() === text;
+  }
+
+  /** 저장소(localStorage와 그 대체 쿠키)에 남은 기록. 없으면 null, 읽지 못하거나 모양이 다르면 'unknown'. */
+  function storedEnd() {
+    let text;
+    try { text = localStorage.getItem(END_KEY); }
+    catch (e) { return UNKNOWN_END(); }
+    const stored = endOf(text), mirrored = endOf(cookieEnd());
+    if (stored?.state === 'unknown' || mirrored?.state === 'unknown') return UNKNOWN_END();
+    return later(stored, mirrored);
+  }
+
+  /**
+   * 기록을 어디에도 남기지 못하고 떠난 문서가 랜딩 주소에 실어 보낸 상태(leave). 상태·순서·실패 구분뿐이고 이 주소를 다시
+   * 읽는 새로고침에도 같다. 저장소의 기록이 있으면 그것이 먼저다.
+   */
+  function markedEnd() {
+    const query = new URLSearchParams(location.search);
+    const end = endOf({ state: query.get('end'), order: Number(query.get('order') ?? 0), reason: query.get('reason') });
+    return end && end.state !== 'unknown' ? end : null;
+  }
+
+  /** 기록된 종료 상태. 기록이 없으면 null, 읽지 못하거나 모양이 다르면 'unknown' — 어느 쪽도 사용 중의 근거가 아니다. */
+  function readEnd() {
+    const stored = storedEnd();
+    if (stored?.state === 'unknown') return stored;
+    const end = later(stored, unkept) || markedEnd();
+    return end && { ...end };
+  }
+
+  /**
+   * 종료 기록을 남긴다. localStorage에 쓰고 다시 읽어 확인하며, 남지 않았으면 쿠키에 둔다. 둘 다 남지 않으면 이 문서가
+   * 기억해 두고(unkept) 떠날 때 주소로 넘긴다 — 쓰기 실패를 "기록 없음(사용 중)"으로 두지 않는다(F01).
+   *
+   * localStorage가 받지 못한 기록은 그 storage 알림도 다른 문서에 가지 않으므로, 같은 기록을 종료 기록 전용 채널로 보낸다.
+   * 기존 종료 통지(kin-session의 session-ended와 kin-session-ended 한 쌍)와는 다른 채널이다 — 비밀 없는 종료 기록과 화면을
+   * 닫으라는 통지는 구분한다(조항 2). 기록이 localStorage에 남는 평소에는 보내지 않는다.
+   */
   function writeEnd(state, order, reason) {
-    try { localStorage.setItem(END_KEY, JSON.stringify(reason ? { state, order, reason } : { state, order })); }
-    catch (e) {}
+    const record = reason ? { state, order, reason } : { state, order };
+    const text = JSON.stringify(record);
+    let kept = false;
+    try {
+      localStorage.setItem(END_KEY, text);
+      kept = localStorage.getItem(END_KEY) === text;
+    } catch (e) {}
+    if (kept) {
+      unkept = null;
+      return;
+    }
+    unkept = setCookieEnd(text) ? null : { state, order, reason: reason ?? null };
+    try {
+      const channel = new BroadcastChannel(END_CHANNEL);
+      channel.postMessage(record);
+      channel.close();
+    } catch (e) {}
   }
 
   function forgetEnd() {
+    unkept = null;
     try { localStorage.removeItem(END_KEY); } catch (e) {}
+    if (cookieEnd() !== null) setCookieEnd(null);
   }
 
   function nextOrder() {
@@ -145,15 +237,23 @@ const KinAuth = (() => {
   function leave() {
     if (moved || (keep && keep())) return;
     moved = true;
-    location.replace(location.origin + location.pathname.replace(/[^/]*$/, 'index.html'));
+    // 종료를 어느 저장소에도 남기지 못했으면 랜딩이 그것을 알 길은 이 주소뿐이다 — 기록 없는 랜딩은 남은 세션으로 자동
+    // 진입한다(F01). 싣는 것은 상태·순서·실패 구분뿐이다.
+    const end = unkept;
+    const query = end ? '?' + new URLSearchParams({ end: end.state, order: String(end.order), ...(end.reason ? { reason: end.reason } : {}) }) : '';
+    location.replace(location.origin + location.pathname.replace(/[^/]*$/, 'index.html') + query);
   }
 
   /**
    * 다른 문서가 이 브라우저의 종료를 시작했다. 이 문서의 공개 신원을 내려놓을 뿐 새 POST나 이동은 하지 않는다 — 이동은 그
    * 문서의 조정자가 한다. 통지(BroadcastChannel·storage)와 종료 기록은 서로 다른 길로 와서 순서가 없으므로 둘 다 보고, 종료
-   * 기록이 있을 때 한 번만 처리한다. 기록이 없는 통지(데모 진입의 정리)는 신원을 건드리지 않는다.
+   * 기록이 있을 때 한 번만 처리한다. 기록 없는 통지(데모 진입의 정리)는 신원을 건드리지 않는다. 종료 기록 채널로 온 기록은
+   * 저장소에 기록이 없을 때 이 문서의 기록이 된다 — 보낸 문서가 어느 저장소에도 기록을 남기지 못했어도 사용을 끝낸다(F01).
+   * 이미 끝난 문서도 그 기록은 받아 둔다(랜딩이 다시 읽을 때 최신 결과를 보인다).
    */
-  function endedElsewhere() {
+  function endedElsewhere(told) {
+    const end = endOf(told ?? null);
+    if (end && end.state !== 'unknown' && !storedEnd()) unkept = later(unkept, end);
     if (closed || !readEnd()) return;
     closed = true;
     dropIdentity();
@@ -163,7 +263,17 @@ const KinAuth = (() => {
     const channel = new BroadcastChannel('kin-session');
     channel.onmessage = event => { if (event.data && event.data.type === 'session-ended') endedElsewhere(); };
   } catch (e) {}
+  try {
+    const records = new BroadcastChannel(END_CHANNEL);
+    records.onmessage = event => endedElsewhere(event.data);
+  } catch (e) {}
   addEventListener('storage', event => { if (event.key === 'kin-session-ended' || event.key === END_KEY) endedElsewhere(); });
+  // 통지가 오지 않는 길(BroadcastChannel이 없고 종료 기록이 쿠키에만 남은 경우)에도 신원을 가진 문서는 사람이 돌아오는
+  // 순간(창 초점, 탭 표시, 뒤로 가기 캐시 복원) 기록을 다시 본다 — 사람이 이 문서를 쓰려면 먼저 이 문서로 돌아와야 한다.
+  const recheck = () => { if (cached) endedElsewhere(); };
+  addEventListener('focus', recheck);
+  addEventListener('pageshow', event => { if (event.persisted) recheck(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) recheck(); });
 
   async function loadSession() {
     if (S.getItem('kin-demo')) {

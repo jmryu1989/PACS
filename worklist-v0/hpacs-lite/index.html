@@ -195,8 +195,9 @@
 
     let retrying = false;
     // 다른 문서가 종료를 시작했거나 그 결과를 기록하면 그 상태를 보인다. 상태가 지워진 것(다른 탭의 명시적 로그인)은 자동
-    // 진입의 근거가 아니라서 보이던 안내를 그대로 둔다.
-    addEventListener('storage', () => {
+    // 진입의 근거가 아니라서 보이던 안내를 그대로 둔다. 종료 기록이 localStorage에 남지 못했으면 storage 알림이 오지 않으므로
+    // auth.js의 종료 통지와 이 창으로 돌아온 순간에도 같은 상태를 다시 읽는다(Astra S7-U5-R-001-F01).
+    function followEnd() {
       if (retrying) return;
       const end = KinAuth.endState();
       if (!end) return;
@@ -206,7 +207,11 @@
         revealLanding();
         probe();
       }
-    });
+    }
+    addEventListener('storage', followEnd);
+    addEventListener('focus', followEnd);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) followEnd(); });
+    KinAuth.onEndedElsewhere(followEnd);
 
     $("#retry-logout").addEventListener('click', async () => {
       if (retrying) return;
