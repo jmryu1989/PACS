@@ -221,10 +221,11 @@ WRITES_FAIL = """(keys => { const set = Storage.prototype.setItem;
   Storage.prototype.setItem = function (key, value) {
     if (keys.includes(String(key))) throw new DOMException('SYN storage full', 'QuotaExceededError');
     return set.call(this, key, value); }; })(%s);"""
-# BR-09: and the browser keeps no cookie of that name either - nothing of the end can be stored.
-COOKIE_DROPPED = """(name => { const jar = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
+# BR-09: and the browser keeps no cookie a page script writes either (the server's cookies are untouched) - nothing a
+# page could keep the end in survives the page.
+COOKIE_DROPPED = """(() => { const jar = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
   Object.defineProperty(Document.prototype, 'cookie', { configurable: true, get() { return jar.get.call(this); },
-    set(value) { if (!String(value).startsWith(name + '=')) jar.set.call(this, value); } }); })(%s);"""
+    set(value) {} }); })();"""
 # DP-13: the answer's status and headers arrive at once, but reading its body (json or text) waits until the case releases
 # it or fails it - for the listed paths, and only while window.__synHoldBodies is true.
 HOLD_BODIES = """(paths => { const held = []; Object.defineProperty(window, '__synHeldBodies', { value: held });
@@ -920,7 +921,7 @@ class LogoutDOMTest(unittest.TestCase):
         self.fresh_context()
         self.context.add_init_script(WRITES_FAIL % json.dumps([END_KEY, "kin-session-ended"]))
         if not cookie:
-            self.context.add_init_script(COOKIE_DROPPED % json.dumps(END_KEY))
+            self.context.add_init_script(COOKIE_DROPPED)
         self.site.account, self.site.logouts, self.site.held_logouts, self.site.logins = RAD, [], [], 0
 
     def a_landing(self, page=None):
@@ -1008,8 +1009,8 @@ class LogoutDOMTest(unittest.TestCase):
         self.log_out_main()
         message, retry = self.a_landing()
         self.assertTrue(retry and has_hangul(message) and message != CONFIRMED, message)
-        self.assertEqual(None, self.screen()["end"])
-        self.assertNotIn("kin-session-end", self.page.evaluate("() => document.cookie"), "the premise: no cookie either")
+        self.assertEqual((None, ""), (self.screen()["end"], self.page.evaluate("() => document.cookie")),
+                         "the premise: nothing in the storage, no script cookie")
         # The tab already open closes on the notice, which carries the end itself.
         message2, retry2 = self.a_landing(second)
         self.assertTrue(retry2 and message2 != CONFIRMED, message2)
