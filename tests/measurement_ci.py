@@ -300,6 +300,20 @@ PROFILES = {
         # MIP Viewer, VOI Slab, MIP Job, MIP Batch, MIP output, projection and orientation cases stay out.
         'suites': (('e2e/test_volume_mip_orient.py', None, 'ci-mip-orient'),),
     },
+    'volume-vr-voi': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-vr-voi-ci',
+        'project_prefix': 'kin-vr-voi-ci-',
+        # S8-U1a VR VOI Slab cases in their own group, not inside volume-rendering, whose 1200s cap stays as it is (K-S8-02,
+        # D-S8-14 (a)). The name does not start with 'volume-rendering' so the existing single-occurrence checks of that
+        # profile keep counting one. The suite's time is unmeasured; its first hosted run records the MAX steps and the total,
+        # and an overrun of 900s is a stop-and-decide point (D348), never an automatic increase: (900+35) = 935s. The module's
+        # MAX-H e53e281 baseline step (at most 300s, S8-U1a-SPEC-C-F03) runs inside this one unit and this cap: no new suite,
+        # budget or attempt.
+        'suite_timeout': 900,
+        # The module's load_tests is the allowlist: exactly the authored test_vr_voi_* cases of its own class, so the inherited
+        # test_vr_* cases stay in the volume-rendering profile.
+        'suites': (('e2e/test_volume_rendering_voi.py', None, 'ci-vr-voi'),),
+    },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
         'project_prefix': 'kin-output-ci-',

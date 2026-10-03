@@ -21,15 +21,18 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
   const savedPreset=select('Saved Presets',[],presetControls),savePreset=el('button','Save New Preset',presetControls),replacePreset=el('button','Replace Preset',presetControls),loadPreset=el('button','Load Preset',presetControls),deletePreset=el('button','Delete Preset',presetControls),reloadPresets=el('button','Reload Presets',presetControls),closeButton=el('button','Close VR',dialog);closeButton.className='kin-vr-close';
   const status=el('p','',dialog);status.className='kin-vr-status';status.setAttribute('role','status');const hint=el('p','드래그: 회전 · 휠: 확대/축소. 원래 MPR 평면·표식·판독 입력은 유지됩니다.',dialog);hint.className='kin-vr-hint';
   const canvasPane=el('div',undefined,dialog);canvasPane.className='kin-vr-canvas-pane';const canvasHost=el('div',undefined,canvasPane);canvasHost.dataset.kinVrRender='1';canvasHost.style.cssText='width:100%;height:100%;min-height:0;background:black;touch-action:none';document.body.append(dialog);
-  let ended=false,operation=null,drag=null,drawing=false,knots=[],librarySnapshot=null,libraryStale=false,libraryFailure=null;const groups=[controls,cropControls,transferControls,presetControls],writeButtons=[savePreset,replacePreset,deletePreset];
-  const disableControls=value=>{groups.forEach(group=>group.disabled=value);if(sculpt)sculpt.fieldset.disabled=value;};
-  const sculpt=window.kinCreateVolumeSculpt({controlsPane,canvasPane,canvasHost,getOperation:()=>operation,check,render:renderSculpt,preflight:(op,properties)=>window.KinVolumeMaskRenderer.preflight(op,properties),fail,status,
+  // The VOI fieldset sits in the existing controls pane beside the crop it combines with; VOI and sculpt share one mask path.
+  const voi=window.kinCreateVolumeVrVoi({controlsPane,getOperation:()=>operation,check,commit:(op,next,message)=>commitMasks(op,{voi:next},message),refuse,masked:op=>!!op?.sculptOperations?.length,status});cropControls.after(voi.fieldset);
+  let ended=false,operation=null,drag=null,drawing=false,knots=[],librarySnapshot=null,libraryStale=false,libraryFailure=null;const groups=[controls,cropControls,voi.fieldset,transferControls,presetControls],writeButtons=[savePreset,replacePreset,deletePreset];
+  // Original View also locks the sculpt edits (contract §14): the masks stay set while nobody sees them.
+  const disableControls=value=>{groups.forEach(group=>group.disabled=value);if(sculpt)sculpt.fieldset.disabled=value||!!operation?.voiState?.original;voi.refresh();};
+  const sculpt=window.kinCreateVolumeSculpt({controlsPane,canvasPane,canvasHost,getOperation:()=>operation,check,masks:{operations:op=>op.sculptOperations||[],commit:(op,operations,message)=>commitMasks(op,{sculpt:operations},message),refuse},fail,status,
     setDrawing(value){drawing=value;drag=null;const op=operation;groups.forEach(group=>group.disabled=value||!op?.ready||!!op.libraryBusy);}
   });
   function renderKnots(){knotHost.replaceChildren();for(const field of ['HU','Color','Opacity'])el('strong',field,knotHost);knots.forEach((k,index)=>{for(const field of ['HU','Color','Opacity']){const input=el('input',undefined,knotHost);input.setAttribute('aria-label','Knot '+(index+1)+' '+field);input.value=k[field.toLowerCase()];input.type=field==='Color'?'color':'number';if(field==='HU'){input.min='-32768';input.max='65535';input.step='1';}if(field==='Opacity'){input.min='0';input.max='1';input.step='0.05';}input.oninput=()=>{knots[index][field.toLowerCase()]=input.value;};}});const custom=transferMode.value==='Custom';preset.disabled=custom;knotHost.hidden=!custom;addKnot.hidden=removeKnot.hidden=!custom;removeKnot.disabled=knots.length<=2;addKnot.disabled=knots.length>=16;}
   function resetEditors(op){preset.value='CT-Bone';opacity.value='100';shade.checked=false;direction.value='Anterior';transferMode.value='Preset';knots=[{hu:'-1000',color:'#000000',opacity:'0'},{hu:'2000',color:'#FFFFFF',opacity:'1'}];if(op?.dimensions){['i','j','k'].forEach((axis,index)=>{cropInputs[axis+'Min'].value='0';cropInputs[axis+'Max'].value=String(op.dimensions[index]-1);cropInputs[axis+'Min'].min=cropInputs[axis+'Max'].min='0';cropInputs[axis+'Min'].max=cropInputs[axis+'Max'].max=String(op.dimensions[index]-1);});}renderKnots();}
   const current=op=>{try{const t=target(true,true,{requireRenderReady:false});return !ended&&alive()&&dialog.open&&operation===op&&!op.controller.signal.aborted&&JSON.stringify(owner())===op.owner&&t?.group===op.target.group&&t.selection===op.target.selection&&t.views.every((v,i)=>v===op.target.views[i])&&(!op.view||op.engine?.getViewport(op.id)===op.view);}catch(_){return false;}};
-  function close(){const op=operation;operation=null;sculpt.cancel();drag=null;librarySnapshot=null;libraryStale=false;libraryFailure=null;disableControls(true);if(op){op.controller.abort();clearTimeout(op.timeout);clearTimeout(op.accessTimer);try{if(op.engine?.getViewport(op.id))op.engine.disableElement(op.id);}catch(_){} }canvasHost.replaceChildren();savedPreset.replaceChildren();presetName.value='';identity.textContent=sourceText.textContent='';sourceDetails.open=false;dialog.close();}
+  function close(){const op=operation;operation=null;sculpt.cancel();voi.clear();drag=null;librarySnapshot=null;libraryStale=false;libraryFailure=null;disableControls(true);if(op){op.controller.abort();clearTimeout(op.timeout);clearTimeout(op.accessTimer);try{if(op.engine?.getViewport(op.id))op.engine.disableElement(op.id);}catch(_){} }canvasHost.replaceChildren();savedPreset.replaceChildren();presetName.value='';identity.textContent=sourceText.textContent='';sourceDetails.open=false;dialog.close();}
   function fail(op,error){if(operation!==op)return;close();notice('VR 표시를 닫았습니다. '+(error.message||'다시 열어 확인하세요.'));}
   function check(op){if(!current(op))throw Error('원본이나 계정이 변경되어 VR 표시를 닫았습니다.');}
   async function access(op){
@@ -38,16 +41,59 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     await get('/api/studies/'+encodeURIComponent(op.target.source.uid)+'/viewer-jobs');check(op);op.checkedAt=Date.now();
   }
   function render(op){check(op);op.view.render();}
-  function renderSculpt(op){
-    render(op);const generation=op.sculptRenderGeneration=(op.sculptRenderGeneration||0)+1;
+  // A refused mask request keeps the shown display and names its contract reason; a stale VR closes instead.
+  function refuse(op,error){
+    if(operation!==op)return;
+    if(error?.kinSculptStale||!current(op)){fail(op,error);return;}
+    const reason=window.KinVolumeVrVoi?.reasonOf(error);if(reason)op.lastRefusal=reason;
+    status.textContent=error?.message||'VR 가림 요청을 확인하세요.';
+  }
+  /* The one mask path (contract §7.1-§7.2). VOI and sculpt are built into one owned replacement over the mapper properties
+     captured before the first owned write, compiled and linked before anything is written, then rendered and confirmed
+     in the linked program. A refusal before the write keeps the shown display; a failure after it closes only VR. */
+  function commitMasks(op,change,message){
+    let changed=false;
+    try{
+      check(op);const model=window.KinVolumeVrVoi,masks=window.KinVolumeVrMasks,shown=op.voiState||model.initial();
+      const nextVoi=change.voi??shown,nextSculpt=change.sculpt??(op.sculptOperations||[]);
+      if(change.sculpt&&nextVoi.original)throw model.refusal('vr-not-final','Original View를 끈 뒤 조각 제거를 바꾸세요.');
+      if(typeof op.mapper?.getViewSpecificProperties!=='function'||typeof op.mapper.setViewSpecificProperties!=='function')throw model.refusal('render-failed','이 뷰어에서는 VR 가림 표시를 사용할 수 없습니다.');
+      const replacement=masks.build({voi:nextVoi.voi?model.shaderPlane(nextVoi.voi,op.voiBinding):null,sculpt:nextSculpt,original:nextVoi.original});
+      if(!op.maskPristine)op.maskPristine=op.mapper.getViewSpecificProperties()||{};
+      const properties=masks.properties(op.maskPristine,replacement);
+      try{window.KinVolumeMaskRenderer.preflight(op,properties);}catch(error){throw model.refusal('render-failed',error?.message||'VR 가림을 GPU에서 확인하지 못했습니다. 기존 표시를 유지합니다.');}
+      changed=true;op.mapper.setViewSpecificProperties(properties);check(op);
+      op.voiState=nextVoi;op.sculptOperations=nextSculpt;op.lastRefusal=null;
+      sculpt.fieldset.disabled=!op.ready||!!op.libraryBusy||nextVoi.original;
+      renderMasks(op,masks.ownedText(properties));
+      if(message)status.textContent=message;
+      return true;
+    }catch(error){if(changed)fail(op,error);else refuse(op,error);return false;}
+    finally{voi.refresh();}
+  }
+  function renderMasks(op,expected){
+    render(op);const generation=op.maskRenderGeneration=(op.maskRenderGeneration||0)+1;
     // Native shader compilation happens in the queued frame, after render() returns.
     requestAnimationFrame(()=>requestAnimationFrame(()=>{
-      if(operation!==op||op.controller.signal.aborted||op.sculptRenderGeneration!==generation)return;
+      if(operation!==op||op.controller.signal.aborted||op.maskRenderGeneration!==generation)return;
       try{
-        check(op);const node=op.engine.offscreenMultiRenderWindow.getOpenGLRenderWindow().getViewNodeFor(op.mapper),program=node?.get('tris')?.tris?.getProgram();
-        if(!program?.getCompiled()||!program.getLinked()||(!!op.sculptOperations?.length!==program.getFragmentShader().getSource().includes('kinSculptPoint0')))throw Error('VR 조각 표시를 GPU에서 적용하지 못했습니다. 다시 열어 주세요.');
+        check(op);const node=op.engine.offscreenMultiRenderWindow.getOpenGLRenderWindow().getViewNodeFor(op.mapper),program=node?.get('tris')?.tris?.getProgram(),source=program?.getFragmentShader?.()?.getSource?.();
+        // The linked program holds exactly the masks just written: the whole combined block, or no owned block at all.
+        if(!program?.getCompiled()||!program.getLinked()||typeof source!=='string'||(expected?!source.includes(expected):window.KinVolumeVrMasks.owned(source)))throw Error('VR 가림 표시를 GPU에서 적용하지 못했습니다. 다시 열어 주세요.');
       }catch(error){fail(op,error);}
     }));
+  }
+  function resetMasks(op){
+    const shown=op.voiState;
+    if(!shown?.voi&&!shown?.original&&!op.sculptOperations?.length){op.voiState=window.KinVolumeVrVoi.initial();op.sculptOperations=[];return;}
+    if(!commitMasks(op,{voi:window.KinVolumeVrVoi.initial(),sculpt:[]}))throw Error('VR 가림을 초기화하지 못했습니다.');
+  }
+  // Read-only capability data: deep copies of what the open VR actually applied, never the editors or a test expectation.
+  function inspect(){
+    const op=operation;if(!op)return null;const s=op.voiState;
+    return JSON.parse(JSON.stringify({voi:s?.voi?{mode:s.voi.mode,orientation:s.voi.orientation,slab:s.voi.slab,cutSide:null,mprThickness:null}:null,crop:op.crop??null,
+      sculpt:op.sculptOperations?.length?op.sculptOperations.map(o=>({side:o.side,region:{kind:o.region.kind,bounds:o.region.bounds,points:o.region.points??null},projection:o.projection})):null,
+      originalView:!!s?.original,voiHistoryDepth:s?.history?.length??0,lastRefusal:op.lastRefusal??null}));
   }
   function editorDisplay(){
     const scale=Number(opacity.value);if(!opacity.value.trim()||!Number.isFinite(scale)||scale<0||scale>100)throw Error('불투명도를 0~100 범위로 입력하세요.');
@@ -81,6 +127,10 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     check(op);const display=editorDisplay(),scale=display.opacity,custom=display.transferMode==='Custom'?display.knots:null,property=op.view.getActors()[0].actor.getProperty();changed=true;
     if(custom){const colors=property.getRGBTransferFunction(0),curve=property.getScalarOpacity(0);colors.removeAllPoints();curve.removeAllPoints();for(const knot of custom){const rgb=KinVolumeRendering.hexToRgb(knot.color);colors.addRGBPoint(knot.hu,...rgb);curve.addPoint(knot.hu,knot.opacity*scale/100);}}
     else{op.view.setProperties({preset:display.preset});const curve=property.getScalarOpacity(0);for(let i=0;i<curve.getSize();i++){const node=[];curve.getNodeValue(i,node);node[1]*=scale/100;curve.setNodeValue(i,node);}}
+    // The viewer's presets switch on a gradient opacity that is 1 at every gradient: no sample's opacity changes, but the
+    // renderer then samples a gradient at every step and, once Crop adds clipping planes, tests each plane for those samples
+    // too (a cropped frame took ~30 s instead of ~1 s on software GL). Only that form is switched off; any other is kept.
+    if(property.getUseGradientOpacity(0)&&property.getGradientOpacityMinimumOpacity(0)===1&&property.getGradientOpacityMaximumOpacity(0)===1)property.setUseGradientOpacity(0,false);
     property.setShade(display.shading);render(op);op.appliedDisplay=KinVolumeRendering.normalizeDisplay(display);status.textContent='VR 표시 조건을 적용했습니다.';
   }catch(error){if(rethrow===true){try{error.kinVrDisplayChanged=changed;}catch(_){}throw error;}if(changed)fail(op,error);else status.textContent=error.message;}}
   function cropValues(){const value=input=>input.value.trim()===''?NaN:Number(input.value);return {i:[value(cropInputs.iMin),value(cropInputs.iMax)],j:[value(cropInputs.jMin),value(cropInputs.jMax)],k:[value(cropInputs.kMin),value(cropInputs.kMax)]};}
@@ -90,13 +140,13 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     const definitions=full||clear?[]:KinVolumeRendering.cropPlanes(bounds,op.dimensions,op.imageData),next=definitions.map(KinVolumeRendering.createCropPlane),previous=[...mapper.getClippingPlanes()];changed=true;
     try{mapper.removeAllClippingPlanes();for(const plane of next)if(mapper.addClippingPlane(plane)===false)throw Error('VR 자르기 평면을 적용하지 못했습니다.');}
     catch(error){mapper.removeAllClippingPlanes();for(const plane of previous)mapper.addClippingPlane(plane);throw error;}
-    render(op);if(!clear)status.textContent=full?'전체 VR 범위를 표시합니다.':'VR 자르기 범위를 적용했습니다.';
+    render(op);op.crop=full||clear?null:bounds;if(!clear)status.textContent=full?'전체 VR 범위를 표시합니다.':'VR 자르기 범위를 적용했습니다.';
   }catch(error){if(rethrow===true)throw error;if(changed)fail(op,error);else status.textContent=error.message;}}
   async function open(){
     if(ended||operation||!alive()||!permitted()||window.kinViewerJobWorkspaceState?.().busy||window.kinVolumeBatchState?.busy?.()||window.kinMprRenderingState?.busy?.())return;
     const t=target(true);if(!t)throw Error('완전히 로드된 일반 CT의 MPR에서 여세요.');
     const capturedOwner=owner();if(!capturedOwner)throw Error('로그인 상태를 확인하세요.');const bound=JSON.stringify(KinVolumeRendering.normalizeOwner(capturedOwner));
-    const op={target:t,owner:bound,controller:new AbortController(),id:'kin-vr-'+crypto.randomUUID()};operation=op;dialog.showModal();disableControls(true);status.textContent='원본과 계정을 확인하는 중…';
+    const op={target:t,owner:bound,controller:new AbortController(),id:'kin-vr-'+crypto.randomUUID(),voiState:window.KinVolumeVrVoi.initial(),sculptOperations:[],crop:null,lastRefusal:null};operation=op;dialog.showModal();disableControls(true);status.textContent='원본과 계정을 확인하는 중…';
     op.timeout=setTimeout(()=>fail(op,Error('VR 원본 확인 시간이 지났습니다. 다시 열어 주세요.')),30000);
     try{
       await access(op);const source=t.views.find(v=>v.id===t.source.viewportId),volume=cornerstone.cache.getVolume(source.getVolumeId());check(op);
@@ -105,12 +155,12 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
       // Private viewport creation must not trigger OHIF's crosshair reset binder.
       op.engine=source.getRenderingEngine();op.engine.enableElement({viewportId:op.id,type:cornerstone.Enums.ViewportType.VOLUME_3D,element:canvasHost,defaultOptions:{parallelProjection:true,suppressEvents:true}});op.view=op.engine.getViewport(op.id);op.view.suppressEvents=false;
       await op.view.setVolumes([{volumeId:volume.volumeId}]);check(op);op.imageData=volume.imageData;op.dimensions=Array.from(op.imageData?.getDimensions?.()||volume.dimensions||[]);KinVolumeRendering.validateCropBounds({i:[0,op.dimensions[0]-1],j:[0,op.dimensions[1]-1],k:[0,op.dimensions[2]-1]},op.dimensions);op.mapper=op.view.getActors()[0].actor.getMapper();const sourceMapper=source.getActors?.()[0]?.actor?.getMapper?.();if(!op.mapper||op.mapper===sourceMapper)throw Error('독립 VR 표시를 만들지 못했습니다.');
-      op.view.resetCamera();op.base=structuredClone(op.view.getCamera());resetEditors(op);op.view.setCamera(KinVolumeRendering.orient(op.base,'Anterior'));op.base=structuredClone(op.view.getCamera());applyDisplay(true);clearTimeout(op.timeout);op.ready=true;disableControls(false);renderKnots();const locksAvailable=typeof navigator?.locks?.request==='function';writeButtons.forEach(button=>button.disabled=!locksAvailable);presetHelp.textContent=presetHelpText+(locksAvailable?'':' 이 브라우저에서는 안전한 프리셋 저장과 변경을 사용할 수 없습니다.');try{reloadLibrary(op,false);status.textContent=locksAvailable?'VR 원본을 표시했습니다.':'VR 원본을 표시했습니다. 안전한 개인 프리셋 저장은 이 브라우저에서 사용할 수 없습니다.';}catch(error){if(!current(op))throw error;status.textContent=error.message;}
+      op.view.resetCamera();op.base=structuredClone(op.view.getCamera());resetEditors(op);voi.ready(op);op.view.setCamera(KinVolumeRendering.orient(op.base,'Anterior'));op.base=structuredClone(op.view.getCamera());applyDisplay(true);clearTimeout(op.timeout);op.ready=true;disableControls(false);renderKnots();const locksAvailable=typeof navigator?.locks?.request==='function';writeButtons.forEach(button=>button.disabled=!locksAvailable);presetHelp.textContent=presetHelpText+(locksAvailable?'':' 이 브라우저에서는 안전한 프리셋 저장과 변경을 사용할 수 없습니다.');try{reloadLibrary(op,false);status.textContent=locksAvailable?'VR 원본을 표시했습니다.':'VR 원본을 표시했습니다. 안전한 개인 프리셋 저장은 이 브라우저에서 사용할 수 없습니다.';}catch(error){if(!current(op))throw error;status.textContent=error.message;}
     }catch(error){if(operation===op){close();throw error;}}
   }
   direction.onchange=()=>{const op=operation;if(!op?.view)return;try{check(op);op.view.setCamera(KinVolumeRendering.orient(op.view.getCamera(),direction.value));render(op);}catch(e){fail(op,e);}};
   transferMode.onchange=()=>renderKnots();addKnot.onclick=()=>{if(knots.length>=16)return;const last=knots.at(-1),previous=knots.at(-2),gap=Math.max(1,Number(last.hu)-Number(previous.hu));knots.push({hu:String(Math.min(65535,Number(last.hu)+gap)),color:last.color,opacity:last.opacity});renderKnots();};removeKnot.onclick=()=>{if(knots.length>2){knots.pop();renderKnots();}};
-  apply.onclick=()=>applyDisplay();applyCropButton.onclick=()=>applyCrop();reset.onclick=()=>{const op=operation;if(!op?.view)return;try{check(op);sculpt.reset(op);op.view.setCamera(structuredClone(op.base));resetEditors(op);applyDisplay(true);if(typeof op.mapper.getClippingPlanes==='function'&&typeof op.mapper.addClippingPlane==='function'&&typeof op.mapper.removeAllClippingPlanes==='function')applyCrop(true,true);status.textContent='처음 VR 표시로 돌아왔습니다.';}catch(e){fail(op,e);}};
+  apply.onclick=()=>applyDisplay();applyCropButton.onclick=()=>applyCrop();reset.onclick=()=>{const op=operation;if(!op?.view)return;try{check(op);sculpt.cancel();resetMasks(op);op.view.setCamera(structuredClone(op.base));resetEditors(op);voi.reset(op);applyDisplay(true);if(typeof op.mapper.getClippingPlanes==='function'&&typeof op.mapper.addClippingPlane==='function'&&typeof op.mapper.removeAllClippingPlanes==='function')applyCrop(true,true);status.textContent='처음 VR 표시로 돌아왔습니다.';}catch(e){fail(op,e);}};
   savePreset.onclick=()=>changeLibrary('add');replacePreset.onclick=()=>changeLibrary('replace');deletePreset.onclick=()=>changeLibrary('delete');loadPreset.onclick=()=>{const op=operation;if(!op?.ready)return;try{check(op);if(libraryFailure)throw Error(libraryFailure);if(libraryStale)throw Error('다른 창에서 VR 프리셋 목록이 변경되었습니다. Reload Presets를 누르세요.');const item=selectedEntry();useDisplay(item.display);applyDisplay(true);status.textContent='VR 프리셋을 불러와 적용했습니다.';}catch(error){if(operation===op&&(!current(op)||error.kinVrDisplayChanged))fail(op,error);else status.textContent=error.message;}};reloadPresets.onclick=()=>{const op=operation;if(!op?.ready)return;try{reloadLibrary(op);}catch(error){if(operation===op&&!current(op))fail(op,error);else status.textContent=error.message;}};
   canvasHost.onpointerdown=e=>{const op=operation;if(drawing||e.button!==0||!op?.ready||!current(op))return;e.preventDefault();drag={id:e.pointerId,x:e.clientX,y:e.clientY};canvasHost.setPointerCapture(e.pointerId);};
   canvasHost.onpointermove=e=>{const op=operation;if(drawing||!drag||drag.id!==e.pointerId||!op?.ready||!current(op))return;e.preventDefault();try{const dx=Math.max(-180,Math.min(180,(e.clientX-drag.x)*.4)),dy=Math.max(-180,Math.min(180,(e.clientY-drag.y)*.4));drag.x=e.clientX;drag.y=e.clientY;op.view.setCamera(KinVolumeRendering.rotate(op.view.getCamera(),dx,dy));direction.value='Custom';render(op);}catch(error){fail(op,error);}};
@@ -122,5 +172,5 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
   const windowResized=()=>{if(operation?.ready)sculpt.cancel();};window.addEventListener('resize',windowResized);
   const timer=setInterval(()=>{const op=operation;if(!op)return;if(!current(op)){fail(op,Error('원본·선택 또는 계정이 변경되었습니다.'));return;}if(op.view&&!op.checking&&Date.now()-op.checkedAt>15000){op.checking=true;op.accessTimer=setTimeout(()=>fail(op,Error('VR 접근 확인 시간이 지났습니다.')),15000);access(op).catch(error=>fail(op,error)).finally(()=>{op.checking=false;clearTimeout(op.accessTimer);});}},250);
   const storageChanged=event=>{const op=operation;if(!op?.ready||!current(op)||!librarySnapshot||event.key!==null&&event.key!==librarySnapshot.key)return;libraryStale=true;libraryFailure=null;status.textContent='다른 창에서 VR 프리셋 목록이 변경되었습니다. 편집과 표시는 유지됩니다. Reload Presets를 누르세요.';};window.addEventListener('storage',storageChanged);
-  return {open,dispose(){ended=true;clearInterval(timer);window.removeEventListener('storage',storageChanged);observer.disconnect();window.removeEventListener('resize',windowResized);close();sculpt.dispose();dialog.remove();}};
+  return {open,inspect,dispose(){ended=true;clearInterval(timer);window.removeEventListener('storage',storageChanged);observer.disconnect();window.removeEventListener('resize',windowResized);close();sculpt.dispose();voi.dispose();dialog.remove();}};
 };

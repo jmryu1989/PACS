@@ -170,7 +170,8 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   vrButton.onclick=async()=>{
     if(vrLoading||!alive()||busy||!permitted()||workspaceBusy())return;vrLoading=true;vrButton.disabled=true;
     try{
-      for(const [name,file] of [['KinVolumeRendering','volume-rendering.js'],['KinVolumeSculpt','volume-sculpt.js'],['KinVolumeMaskRenderer','volume-mask-renderer.js'],['kinCreateVolumeSculpt','viewer-volume-sculpt.js'],['kinCreateVolumeRendering','viewer-volume-rendering.js']])if(!window[name])await new Promise((resolve,reject)=>{
+      // VOI is part of VR (one mask path with sculpt), so every VOI file is required: a missing one keeps VR closed with a reason.
+      for(const [name,file] of [['KinVolumeRendering','volume-rendering.js'],['KinVolumeSculpt','volume-sculpt.js'],['KinVolumeMaskRenderer','volume-mask-renderer.js'],['kinCreateVolumeSculpt','viewer-volume-sculpt.js'],['KinVolumeVoi','volume-voi.js'],['KinVolumeVrVoi','volume-vr-voi.js'],['KinVolumeVrMasks','volume-vr-masks.js'],['kinCreateVolumeVrVoi','viewer-volume-vr-voi.js'],['kinCreateVolumeRendering','viewer-volume-rendering.js']])if(!window[name])await new Promise((resolve,reject)=>{
         const script=document.createElement('script');script.src='/worklist/hpacs-lite/'+file;let finished=false;
         const finish=error=>{if(finished)return;finished=true;clearTimeout(timer);script.onload=script.onerror=null;script.remove();error?reject(error):resolve();};
         const timer=setTimeout(()=>finish(Error('VR 도구를 불러오지 못했습니다. 다시 누르세요.')),30000);
@@ -228,7 +229,11 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
     clearForJob(){mip?.job.clearForJob();},
   };
   window.kinVolumeMipJob=mipJob;
+  // The read-only VR capability (contract §13): a copy of the masks the open VR applied and its last refusal reason key,
+  // or null when no VR is open. Nothing returned reaches back into the VR state.
+  const vrCapability=Object.freeze({inspect:()=>{try{return vr?vr.inspect():null;}catch(_){return null;}}});
+  window.kinVolumeVr=vrCapability;
   const cineTarget=(v,verify=false)=>{if(verify&&(busy||!permitted()))throw Error('다른 작업을 마친 뒤 MPR을 재생하세요.');const t=target(verify);if(!t||t.source.viewportId!==v?.id||!t.views.includes(v))return null;return {key:JSON.stringify([t.group,t.selection]),contentKey:JSON.stringify([t.group,v.id]),allowed:!busy&&permitted(),volume:cornerstone.cache.getVolume(v.getVolumeId())};};
   window.kinGetVolumeCineTarget=cineTarget;
-  return {dispose(){ended=true;path?.dispose();curved?.dispose();vr?.dispose();if(window.kinVolumeMipJob===mipJob)delete window.kinVolumeMipJob;mip?.dispose();if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);clearInterval(startTimer);panel.remove();for(const name of ['pointerdown','wheel','keydown']){document.removeEventListener(name,guard,true);document.removeEventListener(name,early,true);}}};
+  return {dispose(){ended=true;path?.dispose();curved?.dispose();vr?.dispose();if(window.kinVolumeVr===vrCapability)delete window.kinVolumeVr;if(window.kinVolumeMipJob===mipJob)delete window.kinVolumeMipJob;mip?.dispose();if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);clearInterval(startTimer);panel.remove();for(const name of ['pointerdown','wheel','keydown']){document.removeEventListener(name,guard,true);document.removeEventListener(name,early,true);}}};
 };

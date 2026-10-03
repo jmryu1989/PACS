@@ -182,6 +182,20 @@ class ExecutionSelectionTests(unittest.TestCase):
                             for item in plan['tests']))
         self.assertEqual(runner.collect(plan).countTestCases(), len(declared))
 
+    def test_volume_vr_voi_profile_selects_only_its_thirteen_declared_cases(self):
+        """S8-U1a CI-T-04: the VR VOI Slab profile runs exactly its own test_vr_voi_* cases, never the inherited test_vr_*."""
+        suite, class_name, unit = ci.PROFILES['volume-vr-voi']['suites'][0]
+        plan = runner.module_plan('tests/'+suite, unit, 'live', ci.PROFILES['volume-vr-voi']['suite_timeout'], class_name)
+        selected = [item['case'] for item in plan['tests']]
+        module = runner.load_module(ROOT/'tests'/suite)
+        declared = sorted('VolumeRenderingVoiE2E.'+name for name in module.VolumeRenderingVoiE2E.__dict__ if name.startswith('test_vr_voi_'))
+        self.assertEqual(selected, declared)
+        self.assertEqual(len(selected), 13)
+        self.assertTrue(all(item['file'] == 'tests/e2e/test_volume_rendering_voi.py' for item in plan['tests']))
+        self.assertEqual(runner.collect(plan).countTestCases(), 13)
+        rendering = {row[0] for row in ci.PROFILES['volume-rendering']['suites']}
+        self.assertFalse(rendering & {suite})
+
     def test_volume_mpr_profile_selects_only_the_declared_mpr_modules(self):
         profile = ci.PROFILES['volume-mpr']
         expected = [('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E',

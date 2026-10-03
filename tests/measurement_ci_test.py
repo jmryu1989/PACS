@@ -582,7 +582,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'volume-vr-voi', 'cell-merge', 'u2b-regressions',
                           'gateway-e2e', 'critical-result-screens'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
@@ -1906,6 +1906,145 @@ class MeasurementCiTests(unittest.TestCase):
         tested = pure.rsplit(' --test ', 1)[1].split()
         for name in ('tests/volume_mip_test.cjs', 'tests/volume_mip_job_test.cjs', 'tests/volume_mip_batch_test.cjs', 'tests/volume_mip_output_test.cjs', 'tests/viewer_volume_job_capture_test.cjs'):
             self.assertIn(name, tested, name)
+
+    def test_volume_vr_voi_profile_is_exact_bounded_and_isolated(self):
+        """S8-U1a CI-T-01 (K-S8-02, D-S8-14 (a)): the VR VOI Slab suite in its own profile at 900s, separate from volume-rendering."""
+        import ast
+        profile = ci.PROFILES['volume-vr-voi']
+        self.assertEqual(profile['suites'], (('e2e/test_volume_rendering_voi.py', None, 'ci-vr-voi'),))
+        self.assertEqual(profile['out'].name, 'volume-vr-voi-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-vr-voi-ci-')
+        self.assertEqual(profile['suite_timeout'], 900)
+        self.assertNotIn('suite_budgets', profile)
+        self.assertEqual(ci.PROFILES['volume-rendering']['suite_timeout'], 1200)
+        # The module bounds every wait by the same cap (MAX-A deadline), read from its source.
+        module = ast.parse((ci.ROOT/'tests/e2e/test_volume_rendering_voi.py').read_text(encoding='utf-8'))
+        caps = [ast.literal_eval(node.value) for node in module.body if isinstance(node, ast.Assign)
+                and [target.id for target in node.targets if isinstance(target, ast.Name)] == ['SUITE_CAP_S']]
+        self.assertEqual(caps, [profile['suite_timeout']])
+        modules = {row[0] for row in profile['suites']}
+        for name, other in ci.PROFILES.items():
+            if name == 'volume-vr-voi':
+                continue
+            with self.subTest(profile=name):
+                self.assertFalse(modules & {row[0] for row in other['suites']})
+                self.assertNotEqual(profile['out'], other['out'])
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+                self.assertNotIn('ci-vr-voi', {row[2] for row in other['suites']})
+        suite, class_name, unit = profile['suites'][0]
+        command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, 4000)
+        self.assertNotIn('--class', command)
+        self.assertEqual(command[command.index('--module')+1], 'tests/e2e/test_volume_rendering_voi.py')
+        self.assertEqual(command[command.index('--unit')+1], 'ci-vr-voi')
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        with patch.dict(os.environ, {'KIN_EVIDENCE_DIR': 'caller-value'}, clear=False):
+            env = ci.profile_environment('volume-vr-voi', profile['out'], {'ORTHANC_PASS': 'generated-orthanc-password'})
+        self.assertNotIn('KIN_EVIDENCE_DIR', env)
+
+    def test_volume_vr_voi_module_declares_thirteen_local_cases(self):
+        """S8-U1a CI-T-02: thirteen authored test_vr_voi_* cases on the VR base, chosen by the module's own load_tests prefix.
+        The count does not prove the MAX sub-case ran; its step ledger is asserted inside test_vr_voi_05."""
+        import ast
+        tree = ast.parse((ci.ROOT/'tests/e2e/test_volume_rendering_voi.py').read_text(encoding='utf-8'))
+        classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'VolumeRenderingVoiE2E']
+        self.assertEqual([[base.id for base in node.bases] for node in classes], [['VolumeRenderingE2E']])
+        declared = [node.name for node in classes[0].body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]
+        self.assertEqual(len(declared), 13)
+        self.assertTrue(all(name.startswith('test_vr_voi_') for name in declared))
+        load_tests = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'load_tests')
+        self.assertTrue([node for node in ast.walk(load_tests) if isinstance(node, ast.Constant) and node.value == 'test_vr_voi_'])
+
+    def test_validate_workflow_runs_volume_vr_voi_in_its_own_bounded_job(self):
+        """S8-U1a CI-T-03: the workflow is read through the installed YAML parser and each step's shell words, so an equivalent
+        spelling passes and a missing input, a second live step, a disabled upload or a wrong bound fails. No substring counts."""
+        import shlex
+        import yaml
+        workflow = yaml.safe_load((ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8'))
+
+        def words(step):
+            for line in str(step.get('run') or '').replace('\\\n', ' ').splitlines():
+                try:
+                    yield shlex.split(line, comments=True)
+                except ValueError:
+                    continue
+
+        def profiles(step):
+            found = []
+            for line in words(step):
+                for index, word in enumerate(line):
+                    if word.endswith('tests/measurement_ci.py'):
+                        rest = line[index+1:]
+                        for position, argument in enumerate(rest):
+                            if argument == '--profile' and position+1 < len(rest):
+                                found.append(rest[position+1])
+                            elif argument.startswith('--profile='):
+                                found.append(argument.split('=', 1)[1])
+            return found
+
+        def recorded(step):
+            """The record-run steps of a step: (run dir, hashed --file inputs, command after --)."""
+            out = []
+            for line in words(step):
+                for index, word in enumerate(line):
+                    if word.endswith('scripts/record-run.py') and '--' in line[index:]:
+                        cut = line.index('--', index); head = line[index+1:cut]
+                        files = [head[n+1] for n, value in enumerate(head) if value == '--file' and n+1 < len(head)]
+                        run_dir = next(head[n+1] for n, value in enumerate(head) if value == '--run-dir')
+                        out.append((run_dir, files, line[cut+1:]))
+            return out
+
+        def always(step):
+            return str(step.get('if', '')).replace(' ', '') in ('always()', '${{always()}}')
+
+        jobs = workflow['jobs']
+        live = [(name, index) for name, job in jobs.items() for index, step in enumerate(job.get('steps', [])) if 'volume-vr-voi' in profiles(step)]
+        self.assertEqual(len(live), 1)
+        (owner, at), = live
+        self.assertEqual(owner, 'volume-vr-voi')
+        job = jobs['volume-vr-voi']; steps = job['steps']
+        self.assertEqual(job['runs-on'], 'ubuntu-24.04'); self.assertEqual(int(job['timeout-minutes']), 40)
+        checkout = [step for step in steps if str(step.get('uses', '')).startswith('actions/checkout@')]
+        self.assertEqual(len(checkout), 1); self.assertEqual(str(checkout[0]['with']['persist-credentials']).lower(), 'false')
+        # MAX-H (S8-U1a-SPEC-C-F02): the suite's e53e281 baseline step reads that commit's objects, so the history is fetched.
+        self.assertEqual(int(checkout[0]['with'].get('fetch-depth', 1)), 0)
+        self.assertEqual(int(steps[at]['timeout-minutes']), 28); self.assertNotIn('if', steps[at]); self.assertFalse(steps[at].get('continue-on-error', False))
+        self.assertEqual(profiles(steps[at]), ['volume-vr-voi'])
+        self.assertFalse(any('volume-vr-voi' in profiles(step) for step in jobs['volume-rendering']['steps']))
+        self.assertEqual([found for step in jobs['volume-rendering']['steps'] for found in profiles(step)], ['volume-rendering'])
+        runs = [(index, row) for index, step in enumerate(steps) for row in recorded(step)]
+        gates = {}
+        for index, (run_dir, files, command) in runs:
+            self.assertLess(index, at)
+            self.assertTrue(run_dir.startswith('tmp/vrvoi-ci/'), run_dir)
+            for script in ('tests/measurement_ci_test.py', 'tests/execution_selection_test.py'):
+                if script in command:
+                    gates[script] = files
+        self.assertEqual(set(gates), {'tests/measurement_ci_test.py', 'tests/execution_selection_test.py'})
+        for files in gates.values():
+            self.assertIn('tests/e2e/test_volume_rendering_voi.py', files)
+        uploads = [index for index, step in enumerate(steps) if str(step.get('uses', '')).startswith('actions/upload-artifact@')]
+        self.assertEqual(len(uploads), 1); upload, = uploads
+        self.assertGreater(upload, at); self.assertTrue(always(steps[upload]))
+        options = steps[upload]['with']
+        self.assertEqual(options['name'], 'synthetic-volume-vr-voi-results')
+        self.assertEqual(sum(step.get('with', {}).get('name') == options['name'] for other in jobs.values() for step in other.get('steps', [])), 1)
+        paths = {line.strip().rstrip('/') for line in str(options['path']).splitlines() if line.strip()}
+        self.assertEqual(paths, {'tests/e2e/artifacts/volume-vr-voi-ci', 'tmp/vrvoi-ci'})
+        self.assertEqual(options['if-no-files-found'], 'error'); self.assertEqual(int(options['retention-days']), 7)
+        # The VR job's pure and binding gates run and hash the new models, their tests and the files the harness serves.
+        vr = {run_dir: (files, command) for step in jobs['volume-rendering']['steps'] for run_dir, files, command in recorded(step)}
+        files, command = vr['tmp/vr-ci/pure-vr']
+        tested = command[command.index('--test')+1:]
+        for name in ('tests/volume_vr_voi_test.cjs', 'tests/volume_vr_masks_test.cjs'):
+            self.assertIn(name, tested); self.assertIn(name, files)
+        for name in ('worklist-v0/hpacs-lite/volume-voi.js', 'worklist-v0/hpacs-lite/volume-vr-voi.js', 'worklist-v0/hpacs-lite/volume-vr-masks.js'):
+            self.assertIn(name, files)
+        files, command = vr['tmp/vr-ci/binding-dom']
+        self.assertIn('tests/viewer_vr_binding_dom_test.py', command[-1])
+        for name in ('volume-voi.js', 'volume-vr-voi.js', 'volume-vr-masks.js', 'viewer-volume-vr-voi.js', 'volume-sculpt.js', 'viewer-volume-sculpt.js'):
+            self.assertIn('worklist-v0/hpacs-lite/'+name, files)
+
     def test_e2e_route_handlers_bind_payloads_after_route_and_request(self):
         """A11-ORIENT-1 ci-02 regression (static, not a runtime exercise of any callback).
 
