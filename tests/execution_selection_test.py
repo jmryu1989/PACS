@@ -182,44 +182,77 @@ class ExecutionSelectionTests(unittest.TestCase):
                             for item in plan['tests']))
         self.assertEqual(runner.collect(plan).countTestCases(), len(declared))
 
-    def test_volume_vr_voi_profile_selects_only_its_fourteen_declared_cases(self):
-        """S8-U1a CI-T-04: the VR VOI Slab profile runs exactly its own test_vr_voi_* cases, never the inherited test_vr_*."""
-        suite, class_name, unit = ci.PROFILES['volume-vr-voi']['suites'][0]
-        plan = runner.module_plan('tests/'+suite, unit, 'live', ci.PROFILES['volume-vr-voi']['suite_timeout'], class_name)
-        selected = [item['case'] for item in plan['tests']]
-        module = runner.load_module(ROOT/'tests'/suite)
-        declared = sorted('VolumeRenderingVoiE2E.'+name for name in module.VolumeRenderingVoiE2E.__dict__ if name.startswith('test_vr_voi_'))
-        self.assertEqual(selected, declared)
-        self.assertEqual(len(selected), 14)
-        self.assertTrue(all(item['file'] == 'tests/e2e/test_volume_rendering_voi.py' for item in plan['tests']))
-        self.assertEqual(runner.collect(plan).countTestCases(), 14)
-        rendering = {row[0] for row in ci.PROFILES['volume-rendering']['suites']}
-        self.assertFalse(rendering & {suite})
+    # The fourteen cases the one-job VR VOI suite declared before S8-U1a fix12 split it; every one of them must still run.
+    VR_VOI_BEFORE_SPLIT = ('test_vr_voi_00_render_extent_and_sample_position_convention', 'test_vr_voi_01_box_slab_edges_axis_and_oblique',
+                           'test_vr_voi_02_known_markers_kept_hidden_after_rotation', 'test_vr_voi_03_signed_rescaled_encodings_same_result',
+                           'test_vr_voi_04_reset_disable_undo_original_close_reopen', 'test_vr_voi_05_crop_sculpt_voi_intersection_and_independence',
+                           'test_vr_voi_06_preflight_refusal_and_native_failure_close_only_vr', 'test_vr_voi_07_source_mpr_marks_report_preserved',
+                           'test_vr_voi_08_first_slice_boundary', 'test_vr_voi_09_last_slice_boundary_move', 'test_vr_voi_10_full_extent_slab_equals_unmasked',
+                           'test_vr_voi_11_missing_middle_slice_refused', 'test_vr_voi_12_missing_near_first_slice_refused',
+                           'test_vr_voi_13_mask_session_context_loss_and_new_context')
+
+    def vr_voi_groups(self):
+        """{profile: (class, [collected tests])} for the VR VOI Slab groups, through the runner's own plan and collection."""
+        filename = 'tests/e2e/test_volume_rendering_voi.py'; module = runner.load_module(ROOT/filename); out = {}
+        for name in ci.VR_VOI_GROUPS:
+            profile = ci.PROFILES[name]; (suite, class_name, unit), = profile['suites']
+            self.assertEqual('tests/'+suite, filename); self.assertTrue(class_name, name)
+            plan = runner.module_plan(filename, unit, 'live', profile['suite_timeout'], class_name)
+            self.assertTrue(all(item['file'] == filename for item in plan['tests']))
+            tests = list(runner.collect(plan))
+            self.assertEqual([item['case'] for item in plan['tests']], [class_name+'.'+test._testMethodName for test in tests])
+            out[name] = (getattr(module, class_name), tests)
+        return module, out
+
+    def test_volume_vr_voi_groups_run_every_declared_case_exactly_once(self):
+        """S8-U1a CI-T-04 (fix12, D542 D-C): the VR VOI Slab groups together run exactly the module's declared test_vr_voi_*
+        cases: the fourteen of the one-job suite and the access contract case added with the split, each in one group, none
+        twice, none added, never an inherited test_vr_* case. A group's case is the very function the base class declares,
+        so nothing about a case changes with its group, and each group keeps the job's 900 s cap."""
+        module, groups = self.vr_voi_groups(); base = module.VolumeRenderingVoiE2E
+        declared = {name: function for name, function in vars(base).items() if name.startswith('test')}
+        self.assertTrue(all(name.startswith('test_vr_voi_') for name in declared))
+        self.assertEqual(sorted(declared), sorted(self.VR_VOI_BEFORE_SPLIT + ('test_vr_voi_14_access_contract_under_long_frames',)))
+        self.assertIn(len(ci.VR_VOI_GROUPS), (2, 3)); self.assertEqual(len(set(ci.VR_VOI_GROUPS)), len(ci.VR_VOI_GROUPS))
+        owner = {}
+        for name, (group, tests) in groups.items():
+            self.assertTrue(tests, name); self.assertTrue(issubclass(group, base) and group is not base, name)
+            self.assertEqual(group.__module__, module.__name__)
+            self.assertEqual({key for key in vars(group) if key.startswith('test')}, {test._testMethodName for test in tests}, 'a group declares its cases and no other test')
+            for test in tests:
+                case = test._testMethodName
+                self.assertIs(vars(group)[case], declared.get(case), 'the same function as the declared case')
+                self.assertNotIn(case, owner, 'a case runs in one group only'); owner[case] = name
+                self.assertEqual(test.suite_cap_s, ci.PROFILES[name]['suite_timeout'], (name, case)); self.assertEqual(test.suite_cap_s, 900)
+                self.assertFalse(test.generator_reference, (name, case))
+        self.assertEqual(set(owner), set(declared), 'every declared case runs, and nothing else')
+        self.assertEqual(sum(len(tests) for _, tests in groups.values()), len(declared))
+        # The module's own selection (no class) is still every declared case of the base class, once.
+        whole = runner.module_plan('tests/e2e/test_volume_rendering_voi.py', 'selection-check', 'live', 900)
+        self.assertEqual(sorted(item['case'] for item in whole['tests']), sorted('VolumeRenderingVoiE2E.'+name for name in declared))
+        self.assertFalse({row[0] for row in ci.PROFILES['volume-rendering']['suites']} & {'e2e/test_volume_rendering_voi.py'})
+        print('SELECTION vr-voi groups', {name: sorted(case[12:14] for case, group in owner.items() if group == name) for name in ci.VR_VOI_GROUPS}, flush=True)
 
     def test_bu_t03_runs_once_across_vr_voi_and_its_own_profile(self):
-        """S8-U1a fix10 CI-T-08 (D531, TEST-S8-SCULPT-PERF BU-T03): the two profiles on the VR VOI module select disjoint cases;
-        volume-vr-voi still runs all 14 declared test_vr_voi_* cases, volume-bu-generator exactly its one BU-T03 case, and the
+        """S8-U1a fix10 CI-T-08 (D531, TEST-S8-SCULPT-PERF BU-T03): the profiles on the VR VOI module select disjoint cases; the
+        VR VOI Slab groups run the declared test_vr_voi_* cases, volume-bu-generator exactly its one BU-T03 case, and the
         generator comparison is on in that one collected case only, each under its own profile's cap."""
         import ast
         filename = 'tests/e2e/test_volume_rendering_voi.py'
-        collected = {}
-        for name in ('volume-vr-voi', 'volume-bu-generator'):
-            profile = ci.PROFILES[name]; (suite, class_name, unit), = profile['suites']
-            self.assertEqual('tests/'+suite, filename)
-            plan = runner.module_plan('tests/'+suite, unit, 'live', profile['suite_timeout'], class_name)
-            collected[name] = list(runner.collect(plan))
-            for test in collected[name]:
-                self.assertEqual(test.suite_cap_s, profile['suite_timeout'], (name, test.id()))
-        module = runner.load_module(ROOT/filename)
+        module, groups = self.vr_voi_groups()
+        collected = {name: tests for name, (_, tests) in groups.items()}
+        profile = ci.PROFILES['volume-bu-generator']; (suite, class_name, unit), = profile['suites']
+        self.assertEqual('tests/'+suite, filename)
+        collected['volume-bu-generator'] = list(runner.collect(runner.module_plan(filename, unit, 'live', profile['suite_timeout'], class_name)))
+        for test in collected['volume-bu-generator']:
+            self.assertEqual(test.suite_cap_s, profile['suite_timeout'], test.id())
         base, generator = module.VolumeRenderingVoiE2E, module.VolumeRenderingVoiGeneratorE2E
         cases = {name: sorted((type(test).__name__, test._testMethodName) for test in tests) for name, tests in collected.items()}
-        # No case of the original suite is missing, and none is added to it.
-        self.assertEqual(cases['volume-vr-voi'], sorted(('VolumeRenderingVoiE2E', name) for name in base.__dict__ if name.startswith('test_vr_voi_')))
-        self.assertEqual(len(cases['volume-vr-voi']), 14)
         self.assertEqual(cases['volume-bu-generator'], [('VolumeRenderingVoiGeneratorE2E', 'test_bu_t03_max_frames_equal_todays_generator')])
         self.assertEqual([name for name in vars(generator) if name.startswith('test')], ['test_bu_t03_max_frames_equal_todays_generator'])
-        self.assertFalse(set(cases['volume-vr-voi']) & set(cases['volume-bu-generator']))
-        # BU-T03 is on in exactly one collected case of the two runs, the generator class's.
+        self.assertNotIn('test_bu_t03_max_frames_equal_todays_generator', {case for name in ci.VR_VOI_GROUPS for _, case in cases[name]})
+        self.assertNotIn(generator, [group for group, _ in groups.values()])
+        # BU-T03 is on in exactly one collected case of all these runs, the generator class's.
         on = [(name, type(test).__name__) for name, tests in collected.items() for test in tests if test.generator_reference]
         self.assertEqual(on, [('volume-bu-generator', 'VolumeRenderingVoiGeneratorE2E')])
         # Every generator comparison in the module runs under that switch, and the BU-T03 case drives the MAX flow that
@@ -236,6 +269,106 @@ class ExecutionSelectionTests(unittest.TestCase):
         drives = lambda key: [call for call in ast.walk(methods[key]) if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == 'max_combination']
         self.assertEqual(len(drives(('VolumeRenderingVoiE2E', 'test_vr_voi_05_crop_sculpt_voi_intersection_and_independence'))), 1)
         self.assertEqual(len(drives(('VolumeRenderingVoiGeneratorE2E', 'test_bu_t03_max_frames_equal_todays_generator'))), 1)
+
+    def test_vr_voi_failures_are_written_when_they_happen_and_stay_failures(self):
+        """S8-U1a fix11 CI-T-09: a failing or erroring VR VOI case writes its traceback before the next case starts (the runner
+        prints tracebacks only when the whole run ends, which a suite killed on its cap never reaches), and its result is
+        still the FAIL or ERROR it was. Run on the module's own class with a stand-in for the stack and five small cases.
+        S8-U1a fix12: a case that failed also writes, before its cleanup, why its VR closed as far as it can be read
+        (VRVOI-CLOSE) for each viewer page it watched; what could not be read is listed as not recorded, and a case that
+        passed writes no such record."""
+        import contextlib
+        import io
+        import json
+        import time
+        from unittest.mock import patch
+        module = runner.load_module(ROOT/'tests/e2e/test_volume_rendering_voi.py')
+
+        class Page:
+            """A viewer page that is open and does not answer: everything the close record reads from it fails."""
+            def on(self, name, handler):
+                pass
+
+            def is_closed(self):
+                return False
+
+            def wait_for_function(self, *arguments, **options):
+                raise RuntimeError('PROBE-PAGE')
+
+        def cases(base):
+            class Probe(base):
+                @classmethod
+                def setUpClass(cls):
+                    cls.suite_started = time.monotonic()
+
+                def setUp(self):
+                    self.contexts = []; print('PROBE-START', self._testMethodName, flush=True)
+                    if hasattr(self, 'watch_access'):
+                        self.watch_access(Page())
+
+                def test_a_fails(self):
+                    self.assertEqual(1, 2, 'PROBE-A')
+
+                def test_b_errors(self):
+                    raise RuntimeError('PROBE-B')
+
+                def test_c_passes(self):
+                    pass
+
+                def test_d_part_fails(self):
+                    with self.subTest(part=1):
+                        self.fail('PROBE-D')
+
+                def test_e_cleanup_errors(self):
+                    def broken():
+                        raise RuntimeError('PROBE-E')
+                    self.addCleanup(broken)
+            names = ['test_a_fails', 'test_b_errors', 'test_c_passes', 'test_d_part_fails', 'test_e_cleanup_errors']
+            out = io.StringIO()
+            with contextlib.ExitStack() as stack:
+                if base is not unittest.TestCase:
+                    # The inherited tearDown screenshots the stack's pages into the artifact folder; there is no stack here.
+                    inherited = next(klass for klass in base.__mro__[1:] if 'tearDown' in vars(klass))
+                    stack.enter_context(patch.object(inherited, 'tearDown', lambda case: None))
+                stack.enter_context(contextlib.redirect_stdout(out))
+                result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=2).run(unittest.TestSuite(Probe(name) for name in names))
+            return result, out.getvalue()
+        result, written = cases(module.VolumeRenderingVoiE2E)
+        # The results are what the runner would have counted without the records: two failures, two errors, nothing skipped.
+        self.assertEqual((result.testsRun, len(result.failures), len(result.errors), len(result.skipped)), (5, 2, 2, 0))
+        self.assertFalse(result.wasSuccessful())
+        blocks = written.split('VRVOI-TRACEBACK end')
+        self.assertEqual(len(blocks), 5, written)
+        for kind, name, marker, following in (('FAIL', 'test_a_fails', 'PROBE-A', 'test_b_errors'), ('ERROR', 'test_b_errors', 'PROBE-B', 'test_c_passes'),
+                                              ('FAIL', 'test_d_part_fails', 'PROBE-D', 'test_e_cleanup_errors'), ('ERROR', 'test_e_cleanup_errors', 'PROBE-E', None)):
+            header = [line for line in written.splitlines() if line.startswith('VRVOI-TRACEBACK ' + kind + ' ') and name in line]
+            self.assertEqual(len(header), 1, (kind, name, written))
+            at = written.index(header[0]); end = written.index('VRVOI-TRACEBACK end', at)
+            self.assertIn(marker, written[at:end], name); self.assertIn('Traceback', written[at:end], name)
+            if following:
+                self.assertLess(end, written.index('PROBE-START ' + following), name + ' is written before the next case starts')
+        self.assertNotIn('test_c_passes', ''.join(line for line in written.splitlines() if line.startswith('VRVOI-TRACEBACK ')))
+        # The close record: one per watched page of each case whose body failed, written after its traceback and before the
+        # next case; nothing it could not read is filled in. A cleanup that fails after the pages are gone writes none.
+        lines = written.splitlines(); closes = [json.loads(line.split(' ', 1)[1]) for line in lines if line.startswith('VRVOI-CLOSE ')]
+        self.assertEqual([record['case'] for record in closes], ['test_a_fails', 'test_b_errors', 'test_d_part_fails'])
+        for record, following in zip(closes, ('test_b_errors', 'test_c_passes', 'test_e_cleanup_errors')):
+            self.assertEqual(record['access_checks']['total'], 0)
+            self.assertTrue(any('PROBE-PAGE' in item for item in record['not_recorded']), record)
+            self.assertTrue(any('does not answer' in item for item in record['not_recorded']), record)
+            for key in ('notice', 'dialog_status', 'context_lost_now', 'vr_closed_s'):
+                self.assertNotIn(key, record, 'an item that was not read is not written')
+            at = next(n for n, line in enumerate(lines) if line.startswith('VRVOI-CLOSE ') and json.loads(line.split(' ', 1)[1])['case'] == record['case'])
+            self.assertGreater(at, next(n for n, line in enumerate(lines) if line.startswith('VRVOI-TRACEBACK ') and record['case'] in line))
+            self.assertLess(at, lines.index('PROBE-START ' + following))
+        # Each case's time is written as well (VRVOI-CASE), with whether a part of it failed.
+        timed = {record['case']: record for record in (json.loads(line.split(' ', 1)[1]) for line in lines if line.startswith('VRVOI-CASE '))}
+        self.assertEqual({name: record['failed_parts'] for name, record in timed.items()},
+                         {'test_a_fails': 1, 'test_b_errors': 1, 'test_c_passes': 0, 'test_d_part_fails': 1, 'test_e_cleanup_errors': 1})
+        # The same five cases on a plain TestCase write nothing: the records come from the VR VOI class.
+        plain, silent = cases(unittest.TestCase)
+        self.assertEqual((plain.testsRun, len(plain.failures), len(plain.errors)), (5, 2, 2))
+        self.assertFalse([line for line in silent.splitlines() if line.startswith('VRVOI-')])
 
     def test_volume_mpr_profile_selects_only_the_declared_mpr_modules(self):
         profile = ci.PROFILES['volume-mpr']

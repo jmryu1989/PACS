@@ -856,42 +856,114 @@ jobs:
             tmp/miporient-ci/
           if-no-files-found: error
           retention-days: 7
-  volume-vr-voi:
-    # S8-U1a VR VOI Slab cases in their own group, not extra cases inside volume-rendering, whose 1200s cap stays as it is.
-    # The same 40-minute job policy and 28-minute live step; the profile's single cap (900+35) = 935s bounds the live step.
-    # The suite's time is unmeasured until its first hosted run; an overrun is a stop-and-decide point, not a cap increase.
-    # S8-U1a fix9 (B-u): MAX has a fixed 30 s bound per render action, so no other commit's files are read and the checkout
-    # needs no history. S8-U1a fix10 (D531): its comparison with today's generator (BU-T03) runs in volume-bu-generator.
+  # S8-U1a VR VOI Slab cases in their own groups, not extra cases inside volume-rendering, whose 1200s cap stays as it is.
+  # S8-U1a fix12 (D542 D-C): the declared test_vr_voi_* cases never fit one job's 900 s cap on hosted runners (18 runs), and
+  # 900 s is a CI job's budget, not a product requirement (that is 30 s per action on software GL). They run in three jobs,
+  # each one profile of tests/measurement_ci.py VR_VOI_GROUPS with the module's explicit local class for its cases
+  # (CI-T-04: every declared case in exactly one group). Each job keeps the 40-minute policy and the 28-minute live step;
+  # the profile's cap (900+35) = 935s bounds the live step, and an overrun is a stop-and-decide point, not a cap increase.
+  # S8-U1a fix9 (B-u): MAX has a fixed 30 s bound per render action, so no other commit's files are read and the checkout
+  # needs no history. S8-U1a fix10 (D531): MAX's comparison with today's generator (BU-T03) runs in volume-bu-generator.
+  volume-vr-voi-geometry:
+    # Accuracy: test_vr_voi_00..03 (render extent, slab edges, markers, encodings) and 08..10 (first and last slice boundary, full-extent slab).
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: VR VOI profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/vrvoi-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_volume_rendering_voi.py -- python3 -B tests/measurement_ci_test.py
+      - name: VR VOI geometry group profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/vrvoi-geometry-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_volume_rendering_voi.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
         timeout-minutes: 10
         run: |
-          python3 -m venv "$RUNNER_TEMP/vrvoi-python"
-          "$RUNNER_TEMP/vrvoi-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/vrvoi-python/bin/python" -m playwright install --with-deps chromium
-      - name: Confirm exact declared VR VOI Slab selection
-        run: python3 scripts/record-run.py --run-dir tmp/vrvoi-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_filter.py --file worklist-v0/hpacs-lite/main.html --file tests/e2e/test_volume_rendering_voi.py --file tests/e2e/test_volume_rendering.py -- "$RUNNER_TEMP/vrvoi-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared VR VOI Slab tests
+          python3 -m venv "$RUNNER_TEMP/vrvoi-geometry-python"
+          "$RUNNER_TEMP/vrvoi-geometry-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/vrvoi-geometry-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared VR VOI Slab groups
+        run: python3 scripts/record-run.py --run-dir tmp/vrvoi-geometry-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_filter.py --file worklist-v0/hpacs-lite/main.html --file tests/e2e/test_volume_rendering_voi.py --file tests/e2e/test_volume_rendering.py -- "$RUNNER_TEMP/vrvoi-geometry-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared VR VOI Slab tests, geometry group
         timeout-minutes: 28
         run: |
-          "$RUNNER_TEMP/vrvoi-python/bin/python" tests/measurement_ci.py --profile volume-vr-voi
-      - name: Sanitized synthetic VR VOI Slab evidence
+          "$RUNNER_TEMP/vrvoi-geometry-python/bin/python" tests/measurement_ci.py --profile volume-vr-voi-geometry
+      - name: Sanitized synthetic VR VOI Slab evidence, geometry group
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: synthetic-volume-vr-voi-results
+          name: synthetic-volume-vr-voi-geometry-results
           path: |
-            tests/e2e/artifacts/volume-vr-voi-ci/
-            tmp/vrvoi-ci/
+            tests/e2e/artifacts/volume-vr-voi-geometry-ci/
+            tmp/vrvoi-geometry-ci/
+          if-no-files-found: error
+          retention-days: 7
+  volume-vr-voi-state:
+    # State and failure: test_vr_voi_04 (state table), 06 (install, write and frame failures), 07 (preservation), 11 and 12 (refused sources), 13 (context loss), 14 (access contract under long frames).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: VR VOI state group profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/vrvoi-state-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_volume_rendering_voi.py -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/vrvoi-state-python"
+          "$RUNNER_TEMP/vrvoi-state-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/vrvoi-state-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared VR VOI Slab groups
+        run: python3 scripts/record-run.py --run-dir tmp/vrvoi-state-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_filter.py --file worklist-v0/hpacs-lite/main.html --file tests/e2e/test_volume_rendering_voi.py --file tests/e2e/test_volume_rendering.py -- "$RUNNER_TEMP/vrvoi-state-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared VR VOI Slab tests, state group
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/vrvoi-state-python/bin/python" tests/measurement_ci.py --profile volume-vr-voi-state
+      - name: Sanitized synthetic VR VOI Slab evidence, state group
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-volume-vr-voi-state-results
+          path: |
+            tests/e2e/artifacts/volume-vr-voi-state-ci/
+            tmp/vrvoi-state-ci/
+          if-no-files-found: error
+          retention-days: 7
+  volume-vr-voi-max:
+    # Combination: test_vr_voi_05 (crop x VOI x sculpt, the Crop diagnosis and MAX with its 30 s bound per action and BU-T04).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: VR VOI max group profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/vrvoi-max-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_volume_rendering_voi.py -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/vrvoi-max-python"
+          "$RUNNER_TEMP/vrvoi-max-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/vrvoi-max-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared VR VOI Slab groups
+        run: python3 scripts/record-run.py --run-dir tmp/vrvoi-max-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_filter.py --file worklist-v0/hpacs-lite/main.html --file tests/e2e/test_volume_rendering_voi.py --file tests/e2e/test_volume_rendering.py -- "$RUNNER_TEMP/vrvoi-max-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared VR VOI Slab tests, max group
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/vrvoi-max-python/bin/python" tests/measurement_ci.py --profile volume-vr-voi-max
+      - name: Sanitized synthetic VR VOI Slab evidence, max group
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-volume-vr-voi-max-results
+          path: |
+            tests/e2e/artifacts/volume-vr-voi-max-ci/
+            tmp/vrvoi-max-ci/
           if-no-files-found: error
           retention-days: 7
   volume-bu-generator:
@@ -899,26 +971,42 @@ jobs:
     # generator, in its own job so the generator frames (469.8 s and 600.8 s on the fix9 and fix10 local runs) never spend
     # volume-vr-voi's 900 s cap.
     # The same 40-minute job policy and 28-minute live step; the profile's single cap (1300+35) = 1335s bounds the live step.
+    # S8-U1a fix12 (D542 D-B): the comparison is the final candidate's gate. The first step reads what this event changes
+    # (tests/measurement_ci.py RELEVANT_PATHS): a dispatch always runs it, a push or pull request runs it when a path it
+    # depends on changed (or the changes cannot be read), and otherwise the job ends here as not applicable. The checkout
+    # holds the event's commit and its parents for that reading.
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 2
+      - name: Whether this event changes what the B-u generator comparison depends on
+        id: relevant
+        env:
+          KIN_EVENT_BEFORE: ${{ github.event.before }}
+        run: python3 scripts/record-run.py --run-dir tmp/bugen-ci/relevance --cwd . --file tests/measurement_ci.py -- python3 -B tests/measurement_ci.py --relevant volume-bu-generator
       - name: B-u generator profile isolation, bounded budget and artifact policy
         run: python3 scripts/record-run.py --run-dir tmp/bugen-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_volume_rendering_voi.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        if: steps.relevant.outputs.run == 'true'
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
+        if: steps.relevant.outputs.run == 'true'
         timeout-minutes: 10
         run: |
           python3 -m venv "$RUNNER_TEMP/bugen-python"
           "$RUNNER_TEMP/bugen-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/bugen-python/bin/python" -m playwright install --with-deps chromium
       - name: Confirm exact declared B-u generator selection
+        if: steps.relevant.outputs.run == 'true'
         run: python3 scripts/record-run.py --run-dir tmp/bugen-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_filter.py --file worklist-v0/hpacs-lite/main.html --file tests/e2e/test_volume_rendering_voi.py --file tests/e2e/test_volume_rendering.py -- "$RUNNER_TEMP/bugen-python/bin/python" -B tests/execution_selection_test.py
       - name: Isolated declared B-u generator equality test
+        if: steps.relevant.outputs.run == 'true'
         timeout-minutes: 28
+        env:
+          KIN_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           "$RUNNER_TEMP/bugen-python/bin/python" tests/measurement_ci.py --profile volume-bu-generator
       - name: Sanitized synthetic B-u generator evidence

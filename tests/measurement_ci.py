@@ -300,19 +300,32 @@ PROFILES = {
         # MIP Viewer, VOI Slab, MIP Job, MIP Batch, MIP output, projection and orientation cases stay out.
         'suites': (('e2e/test_volume_mip_orient.py', None, 'ci-mip-orient'),),
     },
-    'volume-vr-voi': {
-        'out': ROOT / 'tests/e2e/artifacts/volume-vr-voi-ci',
-        'project_prefix': 'kin-vr-voi-ci-',
-        # S8-U1a VR VOI Slab cases in their own group, not inside volume-rendering, whose 1200s cap stays as it is (K-S8-02,
-        # D-S8-14 (a)). The name does not start with 'volume-rendering' so the existing single-occurrence checks of that
-        # profile keep counting one. The suite's time is unmeasured; its first hosted run records the MAX steps and the total,
-        # and an overrun of 900s is a stop-and-decide point (D348), never an automatic increase: (900+35) = 935s. S8-U1a fix9:
-        # MAX's fixed 30s action bound runs inside this one unit and this cap. S8-U1a fix10 (D531): its comparison with today's
-        # generator (BU-T03) runs in volume-bu-generator, not here, and this cap stays 900s.
+    # S8-U1a VR VOI Slab cases in their own groups, not inside volume-rendering, whose 1200s cap stays as it is (K-S8-02,
+    # D-S8-14 (a)). The names do not start with 'volume-rendering' so the existing single-occurrence checks of that profile
+    # keep counting one. S8-U1a fix9: MAX's fixed 30s action bound runs inside its unit. S8-U1a fix10 (D531): MAX's comparison
+    # with today's generator (BU-T03) runs in volume-bu-generator. S8-U1a fix12 (D542 D-C): 900s is the budget of one CI job,
+    # not a product requirement (the product's is 30s per action on software GL), and the declared test_vr_voi_* cases no
+    # longer fit one job (the one-job suite never passed its cap on hosted runners, 18 runs). They run in three groups, each
+    # an explicit local class of the module that holds the very functions of VolumeRenderingVoiE2E (VR_VOI_GROUPS; CI-T-04
+    # proves every declared case is in exactly one group), each at the unchanged 900s cap: (900+35) = 935s. An overrun stays
+    # a stop-and-decide point (D348), never an automatic increase.
+    'volume-vr-voi-geometry': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-vr-voi-geometry-ci',
+        'project_prefix': 'kin-vr-voi-geo-ci-',
         'suite_timeout': 900,
-        # The module's load_tests is the allowlist: exactly the authored test_vr_voi_* cases of its own class, so the inherited
-        # test_vr_* cases stay in the volume-rendering profile and the BU-T03 class stays in volume-bu-generator.
-        'suites': (('e2e/test_volume_rendering_voi.py', None, 'ci-vr-voi'),),
+        'suites': (('e2e/test_volume_rendering_voi.py', 'VolumeRenderingVoiGeometryE2E', 'ci-vr-voi-geometry'),),
+    },
+    'volume-vr-voi-state': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-vr-voi-state-ci',
+        'project_prefix': 'kin-vr-voi-state-ci-',
+        'suite_timeout': 900,
+        'suites': (('e2e/test_volume_rendering_voi.py', 'VolumeRenderingVoiStateE2E', 'ci-vr-voi-state'),),
+    },
+    'volume-vr-voi-max': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-vr-voi-max-ci',
+        'project_prefix': 'kin-vr-voi-max-ci-',
+        'suite_timeout': 900,
+        'suites': (('e2e/test_volume_rendering_voi.py', 'VolumeRenderingVoiCombinationE2E', 'ci-vr-voi-max'),),
     },
     'volume-bu-generator': {
         'out': ROOT / 'tests/e2e/artifacts/volume-bu-generator-ci',
@@ -326,7 +339,8 @@ PROFILES = {
         # (1300+35)+150 = 1485s of the shared 1500s deadline, 165s for a stack whose recorded hosted setup took about 55-80s.
         # A ceiling, not an estimate; an overrun is a stop-and-decide point (D348), never an automatic increase.
         'suite_timeout': 1300,
-        # An explicit local class: exactly its one BU-T03 case, never the test_vr_voi_* cases it inherits (volume-vr-voi).
+        # An explicit local class: exactly its one BU-T03 case, never the test_vr_voi_* cases it inherits (the VR VOI groups).
+        # S8-U1a fix12 (D542 D-B): whether an event runs this comparison at all is RELEVANT_PATHS below.
         'suites': (('e2e/test_volume_rendering_voi.py', 'VolumeRenderingVoiGeneratorE2E', 'ci-bu-generator'),),
     },
     'output-integration': {
@@ -408,6 +422,78 @@ PROFILES = {
         'suites': (('e2e/test_critical_result.py', 'CriticalResultScreensE2E', 'ci-s7-u2b-critical-result-screens'),),
     },
 }
+
+# The VR VOI Slab groups (S8-U1a fix12, D542 D-C): the profiles that together run every declared test_vr_voi_* case once.
+VR_VOI_GROUPS = ('volume-vr-voi-geometry', 'volume-vr-voi-state', 'volume-vr-voi-max')
+
+# S8-U1a fix12 (D542 D-B): BU-T03 draws today's generator for every MAX state, which costs the compile B-u removes. It is the
+# final candidate's gate rather than every commit's: its job runs the comparison on a dispatch always, and on a push or a
+# pull request when that event changes a path the comparison depends on; otherwise the job ends as not applicable. A
+# path here is a file, or a directory (ending in '/') with everything under it:
+#   the masks as drawn: shader text and packing, the mask session, the generator's sculpt block, the VOI conversion, and
+#     the VR dialog and loader that apply them;
+#   the render environment: the pinned viewer and stack, the pinned browser packages, this workflow;
+#   the fixture and the judge: the comparison's module and every e2e module it inherits its flow from, the stack helper,
+#     the profile and the test runner.
+RELEVANT_PATHS = {
+    'volume-bu-generator': (
+        'worklist-v0/hpacs-lite/volume-vr-masks.js', 'worklist-v0/hpacs-lite/volume-mask-renderer.js', 'worklist-v0/hpacs-lite/volume-sculpt.js',
+        'worklist-v0/hpacs-lite/volume-vr-voi.js', 'worklist-v0/hpacs-lite/volume-voi.js', 'worklist-v0/hpacs-lite/volume-rendering.js',
+        'worklist-v0/hpacs-lite/viewer-volume-rendering.js', 'worklist-v0/hpacs-lite/viewer-volume-vr-voi.js',
+        'worklist-v0/hpacs-lite/viewer-volume-sculpt.js', 'worklist-v0/hpacs-lite/viewer-volume-orientation.js', 'config/ohif.js',
+        'docker-compose.yml', 'config/orthanc.json', 'proxy/', 'tests/e2e/requirements.txt', 'scripts/ci_browser_apt.py', '.github/workflows/validate.yml',
+        'tests/e2e/', 'tests/invariants_live.py', 'tests/live_test_gate.py', 'tests/measurement_ci.py', 'scripts/run-tests.py',
+    ),
+}
+
+
+def relevance(profile_name, event, changed):
+    """(run, reason) for one event: whether the profile's live comparison runs. changed is the event's changed paths
+    (repository-relative, '/' separated), or None when they could not be read; then it runs, never the other way."""
+    patterns = RELEVANT_PATHS[profile_name]
+    if event == 'workflow_dispatch':
+        return True, 'dispatch: always runs'
+    if event not in ('push', 'pull_request'):
+        return True, 'event %s: runs' % event
+    if changed is None:
+        return True, 'changed paths not readable: runs'
+    hits = sorted(path for path in changed if any(path == pattern or pattern.endswith('/') and path.startswith(pattern) for pattern in patterns))
+    if hits:
+        return True, 'changed: ' + ', '.join(hits[:20]) + (' ...' if len(hits) > 20 else '')
+    return False, 'not applicable: none of the %d changed paths is one the comparison depends on' % len(changed)
+
+
+def event_changes(event, before):
+    """The paths this event changes, from the checkout (the event's commit and its parents): a pull request's merge
+    commit against its base (first parent), a push against the commit the branch was at before. None when that cannot
+    be read (a new branch, a push of several commits whose start is not in the checkout, any git failure)."""
+    def git(*words):
+        done = subprocess.run(['git', *words], cwd=ROOT, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60)
+        return done.stdout if done.returncode == 0 else None
+    if event == 'pull_request':
+        base = 'HEAD^1'
+    elif event == 'push' and re.fullmatch(r'[0-9a-f]{40}', before or '') and set(before) != {'0'}:
+        base = before
+    else:
+        return None
+    if git('cat-file', '-e', base + '^{commit}') is None:
+        return None
+    names = git('diff', '--name-only', '-z', base, 'HEAD')
+    return None if names is None else [name for name in names.split('\0') if name]
+
+
+def relevant(profile_name):
+    """The job's first step: decide, print the decision for the record, and hand it to the workflow (GITHUB_OUTPUT run=)."""
+    event = os.environ.get('GITHUB_EVENT_NAME', '')
+    changed = event_changes(event, os.environ.get('KIN_EVENT_BEFORE', ''))
+    run, reason = relevance(profile_name, event, changed)
+    print(json.dumps({'profile': profile_name, 'event': event, 'changed_paths': None if changed is None else len(changed), 'run': run, 'reason': reason}), flush=True)
+    output = os.environ.get('GITHUB_OUTPUT')
+    if output:
+        with open(output, 'a', encoding='utf-8') as stream:
+            stream.write('run=%s\n' % ('true' if run else 'false'))
+    return 0
+
 
 # S4-EG1 A3: the gateway-e2e suite names its own Compose project here before its first compose call, so the project
 # stays findable when the suite is killed on its deadline and run-tests.py never reaches its class cleanup.
@@ -653,5 +739,10 @@ def main(profile_name):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--profile', required=True, choices=tuple(PROFILES))
-    main(parser.parse_args().profile)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--profile', choices=tuple(PROFILES))
+    group.add_argument('--relevant', choices=tuple(RELEVANT_PATHS), help='decide whether this event runs the profile (no stack is started)')
+    arguments = parser.parse_args()
+    if arguments.relevant:
+        sys.exit(relevant(arguments.relevant))
+    main(arguments.profile)
