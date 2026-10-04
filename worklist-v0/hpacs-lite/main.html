@@ -7024,8 +7024,10 @@
         // 같은 글의 같은 실패는 처음 한 번만 알린다. 서버가 그 검사에 쓸 수 없다고 답했으면 자동 저장도 멈춘다(위 설명).
         const failed = ["refused", "unknown", "owner"].includes(result.outcome) && result.code !== "REPORT_HELD";
         // 다시 보내도 같은 답인 거절: 권한(403)·보이지 않는 검사(404)·받을 수 없는 내용이나 상태(400·409·410·413·422).
+        // 세션 저장소가 잠깐 바빴다는 409(AUTH_SESSION_BUSY)는 그 검사나 그 글에 대한 답이 아니다 — 지나가는 실패다.
         const standing = result.outcome === "owner"
-          || (result.outcome === "refused" && [400, 403, 404, 409, 410, 413, 422].includes(result.answer?.status));
+          || (result.outcome === "refused" && result.code !== "AUTH_SESSION_BUSY"
+              && [400, 403, 404, 409, 410, 413, 422].includes(result.answer?.status));
         // 표시는 이 쓰기가 떠날 때 이미 섰다. 그 사이 사람이 서버 것을 골랐거나 확정이 그 글을 받아들여 표시가 내려갔다면
         // (확정이 나가 있는 동안 검사를 옮겨 이 쓰기가 그 뒤에 줄 섰을 때), 이 쓰기가 실었던 글은 더는 확인을 기다리는 글이
         // 아니다: 늦게 온 이 실패는 표시를 되살리지 않고, 저장 실패로 알릴 일도 아니다.
@@ -7755,19 +7757,26 @@
      * Editing이 재개를 알린 뒤(returnToEditing의 finally). 실제 종료에서는 풀지 않는다 — 종료 통지보다 해제를 먼저 본
      * 뷰어는 종료를 취소로 읽는다(U5VW-F11). 그때는 이 문서가 사라질 때 브라우저가 푼다. P는 Log Out을 누를 때마다 새로
      * 정하므로 다른 문서가 같은 이름을 쥘 일이 없고, 얻는 데 기다림이 없다. 잠금을 쓸 수 없는 브라우저(지원 대상
-     * Chromium에는 있다)에서는 통지만으로 간다.
+     * Chromium에는 있다)에서는 통지만으로 간다. 잠금을 요청하는 호출이 거절로 답하든 그 자리에서 예외를 던지든(잠금
+     * 관리자를 읽는 것부터 던지는 문서도 있다) 마찬가지다 — 잠금 없이 준비를 이어 간다. 그 예외가 Log out 처리기 밖으로
+     * 나가면 `loggingOut`만 선 채 준비도 창도 없어, 다시 눌러도 아무 일이 없는 Log out이 남는다.
      */
     function holdPreparation(prep, enter) {
       const waiting = () => logoutPrep === prep && prep.state === "waiting";
       if (!waiting()) return;
-      if (!navigator.locks) { enter(); return; }
-      navigator.locks.request("kin-preparation:" + prep.id, { mode: "exclusive" }, () => {
-        // 얻기 전에 취소됐거나 세션이 끝났으면 알린 것이 없다 — 쥐지 않는다.
-        if (!waiting()) return undefined;
-        // 준비는 이 콜백 밖에서 시작한다: 그 안의 예외가 이 약속을 끝내(잠금을 풀어) 버리지 못한다.
-        queueMicrotask(enter);
-        return new Promise(release => { prep.release = release; });
-      }).catch(() => enter());
+      let asked = null;
+      try {
+        asked = navigator.locks ? navigator.locks.request("kin-preparation:" + prep.id, { mode: "exclusive" }, () => {
+          // 얻기 전에 취소됐거나 세션이 끝났으면 알린 것이 없다 — 쥐지 않는다.
+          if (!waiting()) return undefined;
+          // 준비는 이 콜백 밖에서 시작한다: 그 안의 예외가 이 약속을 끝내(잠금을 풀어) 버리지 못한다.
+          queueMicrotask(enter);
+          return new Promise(release => { prep.release = release; });
+        }) : null;
+      } catch (_) { asked = null; }
+      // 잠금 없이 가는 길은 하나다(관리자 없음·예외·거절). `enter`는 이미 들어선 준비에는 아무것도 하지 않는다.
+      if (!asked || typeof asked.then !== "function") { enter(); return; }
+      asked.then(undefined, () => enter());
     }
 
     /**

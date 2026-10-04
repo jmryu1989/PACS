@@ -1340,22 +1340,53 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.page.wait_for_url(h.INDEX_URL)
         self.assertEqual(1, len(self.site.logouts))
 
+    # A document whose lock manager is missing, throws when it is read, throws from request(), or rejects the request.
+    NO_LOCKS = {
+        "no lock manager": "get() { return undefined; }",
+        "reading the lock manager throws": "get() { throw new DOMException('SYN no locks here', 'SecurityError'); }",
+        "the request throws": "get() { return { request() { throw new DOMException('SYN no locks here', 'SecurityError'); } }; }",
+        "the request is rejected": "get() { return { request() { return Promise.reject(new DOMException('SYN', 'AbortError')); } }; }",
+    }
+
     def test_without_the_lock_manager_the_notices_still_go_and_log_out_completes(self):
-        self.context.add_init_script("Object.defineProperty(Navigator.prototype, 'locks', { configurable: true, get() { return undefined; } });")
+        for label, getter in self.NO_LOCKS.items():
+            with self.subTest(locks=label):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                seen = len(self.errors)
+                self.context.add_init_script(
+                    "Object.defineProperty(Navigator.prototype, 'locks', { configurable: true, %s });" % getter)
+                self.open_main()
+                session = self.site.cookie
+                self.select_and_type()
+                self.site.put_answers = ["hold"]
+                self.log_out_main()
+                self.wait_until(lambda: self.site.held_puts, "the preparation's save")
+                self.panel_button("Back to Editing").click()
+                first = self.preparing()[0]["preparation"]
+                self.assertEqual([{"type": "session-preparing", "session": session, "preparation": first},
+                                  {"type": "session-resumed", "session": session, "preparation": first}], self.posts())
+                self.assertEqual(200, self.site.finish_put())
+                # Log out can be pressed again, and that press ends the session.
+                self.log_out_main()
+                self.page.wait_for_url(h.INDEX_URL)
+                self.assertEqual((h.FIELDS, 1), (self.site.stored_for(h.UID), len(self.site.logouts)))
+                self.assertEqual([], self.errors[seen:], "the failed lock request escaped as a page error")
+
+    def test_a_busy_session_store_does_not_stop_the_autosave(self):
+        self.page.clock.install()
         self.open_main()
-        session = self.site.cookie
+        notices = self.collect_notices()
         self.select_and_type()
-        self.site.put_answers = ["hold"]
-        self.log_out_main()
-        self.wait_until(lambda: self.site.held_puts, "the preparation's save")
-        self.panel_button("Back to Editing").click()
-        first = self.preparing()[0]["preparation"]
-        self.assertEqual([{"type": "session-preparing", "session": session, "preparation": first},
-                          {"type": "session-resumed", "session": session, "preparation": first}], self.posts())
-        self.assertEqual(200, self.site.finish_put())
-        self.log_out_main()
-        self.page.wait_for_url(h.INDEX_URL)
-        self.assertEqual((h.FIELDS, 1), (self.site.stored_for(h.UID), len(self.site.logouts)))
+        # The server could not take the write because the login session's record was busy (409): it says to try again.
+        self.site.put_answers = [(409, {"code": "AUTH_SESSION_BUSY", "message": "SYN-SERVER-WORDING busy"})]
+        self.page.clock.run_for(20500)
+        self.wait_until(lambda: len(self.site.puts) == 1, "the refused autosave")
+        self.page.wait_for_timeout(200)
+        self.page.clock.run_for(20500)
+        self.wait_until(lambda: self.site.stored_for(h.UID) == h.FIELDS, "the next autosave stores the text")
+        self.assertEqual((2, h.FIELDS), (len(self.site.puts), self.editor()))
+        self.assertLessEqual(len([text for text, error in notices if error]), 1, notices)
 
 
 def load_tests(loader, tests, pattern):
