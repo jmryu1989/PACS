@@ -33,18 +33,24 @@
     function validate(next) {
       if (!Array.isArray(next.rows) || next.rows.some(row => !object(row))
         || !['complete', 'partial', 'unknown'].includes(next.loadState)
-        || !Array.isArray(next.searches) || next.searches.some(search => !object(search)
-          || !text(search.id) || !text(search.name) || typeof search.matches !== 'function')
-        || new Set(next.searches.map(search => search.id)).size !== next.searches.length
+        || !Array.isArray(next.searches)
         || !Array.isArray(next.shortcuts) || next.shortcuts.length > 200
         || next.shortcuts.some(item => !object(item) || Object.keys(item).sort().join() !== 'id,name,searchId'
           || !text(item.id) || !text(item.name) || !text(item.searchId))
         || new Set(next.shortcuts.map(item => item.id)).size !== next.shortcuts.length) {
         throw new Error('폴더 목록 또는 바로가기 형식을 확인해 주세요.');
       }
+      // 저장 검색 하나의 문제로 전체 건수를 잃지 않는다. 중복 ID는 첫 항목만 판단하며,
+      // 첫 항목이 사용 불가여도 뒤 항목의 조건으로 대체하지 않는다.
+      const seen = new Set();
+      const searches = next.searches.filter(search => {
+        if (!object(search) || !text(search.id) || seen.has(search.id)) return false;
+        seen.add(search.id);
+        return typeof search.name === 'string' && search.name.trim().length > 0 && typeof search.matches === 'function';
+      }).map(search => ({ ...search }));
       const shortcuts = next.shortcuts.map(item => ({ ...item, name: item.name.trim() }));
       return { rows: [...next.rows], loadState: next.loadState,
-        searches: next.searches.map(search => ({ ...search })), shortcuts };
+        searches, shortcuts };
     }
     // 저장 데이터의 이름 충돌은 적재를 막지 않는다. 이름 정책은 지금 편집하는 항목에만 적용한다.
     function validateName(item) {

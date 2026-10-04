@@ -269,11 +269,91 @@ test('TEST-WS3-INCOMING-VALID: full saved capacity, missing searches and indeter
   assert.equal(changes.length,2); assert.equal(selections.length,0);
 });
 
-test('TEST-WS3-INCOMING-MALFORMED: refusal invalidates visible counts, preserves criteria and permits recovery', () => {
+test('TEST-WS3-INCOMING-SEARCH-NAMES: long and multiline saved names stay usable and render literally', () => {
+  const rows = [{modality:'CT'}, {modality:'MR'}];
+  for (const name of ['x'.repeat(401), 'Saved\nSearch', '<img src=x onerror=bad()>']) {
+    for (const incoming of ['mount', 'update']) {
+      const source = {id:'other',name,matches:row => row.modality === 'MR'};
+      const options = {searches:[...searches,source],shortcuts:[shortcut('a'),{id:'b',name:'Other',searchId:'other'}],rows,loadState:'complete'};
+      const { api, host, changes, selections } = setup(incoming === 'mount' ? options : {searches,rows:[{modality:'CT'}],loadState:'complete'});
+      if (incoming === 'update') { api.select('modality:CT'); api.update(options); }
+      assert.equal(api.snapshot().loadState,'complete');
+      assert.ok(api.snapshot().items.every(item => /^\d+$/.test(item.count)));
+      assert.equal(get(api,'all').count,'2');
+      assert.equal(get(api,'shortcut:a').count,'1');
+      assert.equal(get(api,'shortcut:b').count,'1');
+      assert.equal(get(api,'shortcut:b').unavailable,false);
+      assert.equal(api.snapshot().selectedId,incoming === 'mount' ? 'all' : 'modality:CT');
+      assert.equal(selections.length,incoming === 'mount' ? 0 : 1);
+      assert.ok(nodes(host).some(node => node.tagName === 'OPTION' && node.textContent === name));
+      assert.equal(nodes(host).some(node => node.tagName === 'IMG'),false);
+      api.select('shortcut:b'); assert.deepEqual(api.filter(rows),[rows[1]]);
+      assert.equal(changes.length,0);
+    }
+  }
+});
+
+test('TEST-WS3-INCOMING-SEARCH-INVALID: unusable adapters affect only their own shortcut and recover silently', () => {
+  const rows = [{modality:'CT'}, {modality:'MR'}];
+  const valid = {id:'bad',name:'Recover',matches:row => row.modality === 'MR'};
+  for (const bad of [null, [], {}, {id:'bad',name:'Bad'}, {...valid,matches:true},
+    {...valid,id:''}, {...valid,id:'x'.repeat(401)}, {...valid,id:'x\ny'},
+    {...valid,name:''}, {...valid,name:'   '}, {...valid,name:null}, {...valid,name:42}]) {
+    for (const incoming of ['mount','update']) {
+      const options = {rows,loadState:'complete',searches:[bad,...searches],
+        shortcuts:[shortcut('a'),{id:'b',name:'Other',searchId:'bad'}]};
+      const { api, host, changes, selections } = setup(incoming === 'mount' ? options : {...options,searches:[valid,...searches]});
+      if (incoming === 'update') { api.select('shortcut:b'); api.update(options); }
+      assert.equal(api.snapshot().loadState,'complete');
+      assert.equal(get(api,'all').count,'2');
+      assert.equal(get(api,'shortcut:a').count,'1');
+      assert.ok(api.snapshot().items.filter(item => item.id !== 'shortcut:b').every(item => /^\d+$/.test(item.count)));
+      assert.equal(get(api,'shortcut:b').unavailable,true);
+      assert.equal(get(api,'shortcut:b').count,'—');
+      assert.equal(button(host,'Other (—) · Unavailable').disabled,true);
+      assert.throws(() => api.select('shortcut:b'));
+      if (incoming === 'update') {
+        assert.equal(api.snapshot().selectedId,'shortcut:b');
+        assert.deepEqual(api.filter(rows),[]);
+      }
+      assert.equal(nodes(host).find(node => node.getAttribute('role') === 'status').textContent,'');
+      api.update({searches:[valid,...searches]});
+      assert.equal(get(api,'shortcut:b').count,'1');
+      assert.equal(get(api,'shortcut:b').unavailable,false);
+      assert.equal(selections.length,incoming === 'mount' ? 0 : 1);
+      assert.equal(changes.length,0);
+    }
+  }
+});
+
+test('TEST-WS3-INCOMING-SEARCH-DUPLICATES: first id wins, even when its adapter is unavailable', () => {
+  const rows = [{modality:'CT'}, {modality:'MR'}];
+  for (const incoming of ['mount','update']) {
+    for (const first of [searches[0], {...searches[0],matches:null}]) {
+      const options = {rows,loadState:'complete',shortcuts:[shortcut('a')],
+        searches:[first,{...searches[0],name:'Later',matches:()=>true}]};
+      const { api, host, changes, selections } = setup(incoming === 'mount' ? options : {});
+      if (incoming === 'update') api.update(options);
+      assert.equal(get(api,'all').count,'2');
+      assert.ok(api.snapshot().items.filter(item => item.kind !== 'shortcut').every(item => /^\d+$/.test(item.count)));
+      assert.equal(nodes(host).filter(node => node.tagName === 'OPTION').length,first.matches ? 1 : 0);
+      if (first.matches) {
+        assert.equal(get(api,'shortcut:a').count,'1');
+        api.select('shortcut:a'); assert.deepEqual(api.filter(rows),[rows[0]]);
+      } else {
+        assert.equal(get(api,'shortcut:a').unavailable,true);
+        assert.equal(get(api,'shortcut:a').count,'—');
+        assert.throws(() => api.select('shortcut:a'));
+      }
+      assert.equal(changes.length,0); assert.equal(selections.length,first.matches ? 1 : 0);
+    }
+  }
+});
+
+test('TEST-WS3-INCOMING-MALFORMED: malformed calls invalidate counts, preserve criteria and permit recovery', () => {
   const badData = [
     {rows:null}, {rows:[null]}, {rows:[[]]}, {loadState:'loading'},
-    {searches:null}, {searches:[null]}, {searches:[{id:'x',name:'x'}]},
-    {searches:[{...searches[0],id:''}]}, {searches:[{...searches[0],name:'x\ny'}]}, {searches:[...searches,...searches]},
+    {searches:null},
     {shortcuts:null}, {shortcuts:[null]}, {shortcuts:[{...shortcut('a'),extra:true}]},
     {shortcuts:[{...shortcut('a'),id:''}]}, {shortcuts:[{...shortcut('a'),searchId:''}]},
     {shortcuts:[shortcut('a','')]}, {shortcuts:[shortcut('a','x\ny')]}, {shortcuts:[shortcut('a','x'.repeat(401))]},
