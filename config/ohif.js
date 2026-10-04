@@ -16,7 +16,7 @@ const KIN_VIEWER_PRODUCT = 'KIN Viewer';
 // The first extension sets the page defaults before shared modules and data sources start work.
 function kinCreateSessionBoundary() {
   return { id: 'kin.session-boundary', async preRegistration() {
-    for (const name of ['work-context.js', 'session-transport.js', 'viewer-session.js']) {
+    for (const name of ['work-context.js', 'session-transport.js', 'viewer-resources.js', 'viewer-session.js']) {
       await new Promise((resolve, reject) => {
         const script = document.createElement('script');
         script.src = '/worklist/hpacs-lite/' + name;
@@ -2139,14 +2139,9 @@ const kinViewerSession = (() => {
   const waiting = new Set(), watchers = new Set(), changes = new Set(), enders = new Set(), endings = new Set();
   const state = () => ended ? 'refused' : role;
   // Preserve the reason for existing panel subscribers; the page gate alone authorizes an end.
-  const loginEnd = reason => reason !== 'forbidden' && reason !== 'not-member';
   const tell = () => { for (const watch of [...endings]) { try { watch(why); } catch (_) {} } };
   function settle(next, reason = 'refused') {
     const previous = state();
-    // F01: after a refusal of this account the end of its login still comes through, at any time of the document's life. Only the
-    // reason moves, and never back: the write paths ended at the refusal, so no end() runs again and no verdict or watcher changes;
-    // onEnded subscribers hear the end now, later ones when they subscribe.
-    if (next === 'refused' && (ended || ending) && !loginEnd(why) && loginEnd(reason)) { why = reason; if (ended) tell(); }
     if (ended) return previous;
     if (ending) return previous;
     if (role === 'read-only' && next !== 'refused') return previous;
@@ -2203,16 +2198,13 @@ const kinViewerSession = (() => {
     writeModule,
     onReadOnly(watch) { watchers.add(watch); return () => { watchers.delete(watch); }; },
     onChange(watch) { changes.add(watch); return () => { changes.delete(watch); }; },
-    // S5-U2c fix1 (Astra S5-U2c-R-001 F01): the end of this document's login with its reason, for a viewer function that keeps its
-    // own access check (CT position sync) but must not outlive that end. watch(reason) runs after the verdict: at the refusal or
-    // end, again when a refusal of this account is followed by the end of its login (fix2), and at once for a subscriber that joins
-    // a document whose login already stopped (with the latest reason). The reasons are those of loginEnd above.
+    // End subscribers follow only the page gate, including subscribers mounted after its end.
     onEnded(watch) {
       endings.add(watch);
       if (ended) { try { watch(why); } catch (_) {} }
       return () => { endings.delete(watch); };
     },
-    // S5-U2c fix2/fix3: see sameAccount above (CT position sync, and the answers a panel drops unused).
+    // An unexpected member answer refuses only the panel reading it.
     sameAccount,
     // 같은 때 붙는 확장끼리 /me 읽기 하나를 나눠 쓴다. 답은 그 읽기나 다른 확장의 성공한 /me 중 먼저 온 쪽이다.
     decide() {
@@ -2471,7 +2463,7 @@ function kinCreateCTSync() {
     const controller = new AbortController(), search = location.search, created = new Set();
     // access: checking · ready · failed (unanswered) · denied (403 or not one institution's member) · changed (the role changed).
     // keys: study UID -> server patient key (sourcePatientKey) from the list the last confirmed round read; never DICOM PatientID.
-    // The account every /me answer must carry is the document's first one (kinViewerSession.sameAccount), not one of this mount.
+    // Panel account checks reject only this access round; only the page gate ends the document.
     let ended = false, channel, checking, clinician = null, keys = new Map(), access = 'checking', round = 0, waiting = false;
     let ready = Promise.resolve(false);
     const say = (text, offer = false) => { waiting = text === TEXT.checking; message.textContent = text; recheck.hidden = !offer; notice.hidden = !text; };
@@ -2481,19 +2473,8 @@ function kinCreateCTSync() {
     const fresh = mine => !ended && mine === round;
     const usable = mine => live() && access === 'ready' && mine === round;
     const end = () => { ended = true; controller.abort(); created.forEach(s => s.setEnabled(false)); say(TEXT.ended); };
-    // S5-U2c fix1 (Astra S5-U2c-R-001 F01): the document's end reaches this mount at any time, not only at its entry. A /me refusal
-    // of this account (403 — the document's own read, a panel's or a write module's, fix2 F02 — or an answer that is no institution
-    // member's) is this account's refusal, as the same answer to this extension's own /me is: the round and the events in flight are
-    // dropped, the synchronizers stay as the user set them, and only Recheck Access asks again. Every other reason (401, another
-    // account, the logout broadcast, a refuse() that names none) ends this mount — also when it follows that refusal (fix2 F01: the
-    // document tells it again), so neither a re-entry nor Recheck Access starts sync after it.
-    function documentEnded(reason) {
-      if (ended) return;
-      if (reason !== 'forbidden' && reason !== 'not-member') { end(); return; }
-      round++; access = 'denied'; keys = new Map(); ready = Promise.resolve(false);
-      // A viewer with sync on (or a notice on screen) hears it at once; one that has not turned sync on, at its next event.
-      if (!notice.hidden || [...created].some(s => !s.isDisabled())) say(TEXT.denied, true);
-    }
+    // Only the document gate publishes an end; a panel's HTTP refusal stays in that panel.
+    function documentEnded() { if (!ended) end(); }
     // Session termination is owned by the page transport and gate.
     const refusal = (kind, status = 0) => Object.assign(Error(kind), { kind, status });
     async function get(path) {
@@ -2513,9 +2494,7 @@ function kinCreateCTSync() {
     }
     const session = () => checking ||= whoAmI().finally(() => { checking = null; });
     const ownerOf = me => me?.kind === 'member' && me.institution && me.sub ? JSON.stringify([me.institution, me.sub]) : null;
-    // fix3: a /me answer and its comparison with the document's first account (kinViewerSession.sameAccount), made as it arrives and
-    // before any check of this mount can drop it. An answer that is no member's (ownerOf) is compared with nothing; its reader
-    // refuses it as before.
+    // Comparing a panel answer never changes the page's session authority.
     async function whoAmI() {
       const me = await get('/api/me');
       return { me, same: ownerOf(me) ? kinViewerSession.sameAccount(me) : null };
@@ -2557,24 +2536,20 @@ function kinCreateCTSync() {
     }
     // One access check: the account (/me), the study list its role may read, then the same account and role again. A later round
     // (Recheck Access, a role change) and the end of this mount drop an earlier round's answers.
-    // fix2 (Astra S5-U2c-B-R-001 F01): each /me answer is compared with the document's first account; another one ends the
-    // document's login for its life (sameAccount), and this check's own 401 is kept by the document as the other parts' 401 is, so
-    // a later mount or Recheck Access asks nothing. An answer that is no member's refuses this account (denied), as the first does.
-    // fix3: both are the document's as the answers arrive (get, whoAmI), also for a round a refusal or Recheck Access has dropped
-    // and for a mount that has left; fresh() below limits only this round's list, role and notice.
+    // A mismatched member answer refuses this round; the bound page transport owns real ends.
     function confirm() {
       const mine = ++round; access = 'checking'; keys = new Map();
       ready = (async () => {
         const { me, same } = await whoAmI();
         if (!fresh(mine)) throw refusal('failed');
         if (!ownerOf(me)) throw refusal('denied');
-        if (!same) throw refusal('ended');
+        if (!same) throw refusal('denied');
         const role = kinViewerClinicianOnly(me), found = role ? await clinicianKeys(mine) : await legacyKeys();
         if (!fresh(mine)) throw refusal('failed');
         const again = await whoAmI();
         if (!fresh(mine)) throw refusal('failed');
         if (!ownerOf(again.me)) throw refusal('denied');
-        if (!again.same) throw refusal('ended');
+        if (!again.same) throw refusal('denied');
         if (kinViewerClinicianOnly(again.me) !== role) throw refusal('changed');
         return [role, found];
       })().then(([role, found]) => {
@@ -2584,8 +2559,6 @@ function kinCreateCTSync() {
         return true;
       }, error => {
         if (!fresh(mine)) return false;
-        // The document has already ended its login and, through documentEnded, this mount; this end() is only this mount's own.
-        if (error?.kind === 'ended') { end(); return false; }
         access = error?.kind === 'denied' || error?.kind === 'changed' ? error.kind : 'failed';
         // Said at once only to someone waiting (a sync event or Recheck Access); otherwise at the next sync event.
         if (waiting) say(TEXT[access], true);
@@ -2626,11 +2599,10 @@ function kinCreateCTSync() {
           if (!(await ready) || !usable(mine) || ticket !== serial || !current(sourceInfo, source)) return;
           try {
             const { me, same } = await session();
-            // Another account than the document's first one is the end of its login (sameAccount noted it as the answer arrived —
-            // whoAmI, fix3 — and documentEnded ended this mount); an answer that is no member's refuses this event, as its 403 does.
+            // Member/role refusals are local. Only the page gate can end this mount.
             if (ended) return;
             if (!ownerOf(me)) throw refusal('denied');
-            if (!same) { end(); return; }
+            if (!same) throw refusal('denied');
             if (!usable(mine)) return;
             if (kinViewerClinicianOnly(me) !== clinician) { roleChanged(); return; }
             if (sync.isDisabled() || ticket !== serial || !current(sourceInfo, source)) return;
@@ -3493,7 +3465,7 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
   const handlerId = '@ohif/extension-dicom-pdf.sopClassHandlerModule.dicom-pdf';
   const pdfSop = '1.2.840.10008.5.1.4.1.1.104.1';
   const objectIds = new WeakMap(); let nextObjectId = 0, patch = null, active = false, epoch = 0;
-  let cache = new WeakMap(), sessionChannel = null, listening = false; const pending = new Set(), records = new Set(), activationWaiters = new Set();
+  let cache = new WeakMap(), sessionChannel = null, listening = false; const pending = new Set(), records = new Set(), activationWaiters = new Set(), urls = new Set();
   const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
   const validUid = item => typeof item === 'string' && item.length <= 64 && /^\d+(?:\.\d+)+$/.test(item);
   function sourceOf(props) {
@@ -3559,7 +3531,9 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
       const lastReply = requireReply(await fetch('/api/me', init()), '로그인 세션을 확인할 수 없습니다.'); assertLive(source, ticket, controller);
       const last = ownerOf(await json(lastReply)); assertLive(source, ticket, controller);
       if (!sameOwner(first, last)) throw new Error('계정이 변경되어 원본 PDF를 표시하지 않았습니다.');
-      return root.origin + '/instances/' + lookup.id + '/pdf';
+      const url = await window.KinViewerResource.read(root.origin + '/instances/' + lookup.id + '/pdf', { signal: controller.signal, type: 'application/pdf' });
+      try { assertLive(source, ticket, controller); } catch (error) { window.KinViewerResource.release(url); throw error; }
+      urls.add(url); return url;
   }
   async function resolve(source, ticket, controller) {
     await waitForActivation(ticket, controller); assertLive(source, ticket, controller);
@@ -3571,14 +3545,15 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
   }
   function start(record) {
     const controller = new AbortController(); record.controller = controller; record.failed = false; pending.add(controller);
-    resolve(record.source, record.ticket, controller).then(value => { if (!record.settled) { record.settled = true; records.delete(record); record.resolve(value); options.onSuccess?.(record.source.value, record.original); } }, error => {
+    resolve(record.source, record.ticket, controller).then(value => { if (!record.settled) { record.url = value; record.settled = true; records.delete(record); record.resolve(value); options.onSuccess?.(record.source.value, record.original); } else window.KinViewerResource.release(value); }, error => {
       if (!record.settled && error?.retryable && active && record.ticket === epoch && matches(record.source)) { record.failed = true; options.onFailure?.(error, record.source.value, record.original); }
       else if (!record.settled) { record.settled = true; records.delete(record); record.reject(error); }
     });
   }
   function resolvedSource(source) {
     let record = cache.get(source.value);
-    if (record?.key === source.key && record.original === source.pdfUrl) return record;
+    if (record?.key === source.key && record.original === source.pdfUrl && (!record.url || window.KinViewerResource.has(record.url))) return record;
+    if (record?.url) { window.KinViewerResource.release(record.url); urls.delete(record.url); }
     if (record && !record.settled) { record.controller?.abort(); record.settled = true; records.delete(record); record.reject(new Error('선택한 원본 문서가 변경되었습니다.')); }
     let fulfill, reject; const promise = new Promise((resolve, fail) => { fulfill = resolve; reject = fail; }); promise.catch(() => {});
     record = { key: source.key, original: source.pdfUrl, source, ticket: epoch, promise, resolve: fulfill, reject, failed: false, settled: false, controller: null };
@@ -3608,6 +3583,7 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
   function retry(value, pdfUrl) { for (const record of records) if (record.failed && !record.settled && record.ticket === epoch && matches(record.source) && (!value || record.source.value === value && record.original === pdfUrl)) start(record); }
   function deactivate() {
     active = false; epoch++; unlisten(); cache = new WeakMap(); for (const item of pending) item.abort(); pending.clear();
+    for (const url of urls) window.KinViewerResource.release(url); urls.clear();
     for (const waiter of activationWaiters) waiter.reject(new Error('원본 PDF 준비가 중단되었습니다.')); activationWaiters.clear();
     for (const record of records) if (!record.settled) { record.settled = true; record.reject(new Error('원본 PDF 준비가 중단되었습니다.')); } records.clear();
   }

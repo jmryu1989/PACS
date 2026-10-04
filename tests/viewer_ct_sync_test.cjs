@@ -466,8 +466,8 @@ test('message matrix of the access check: unconfirmed, 401, 403, unanswered and 
   await slow.scroll(slow.sync(), 'vp-a', 4);
   assert.deepEqual(slow.screen(), { mounted: true, visible: true, text: TEXT.failed, recheck: true });
   finish(slow);
-  // The second /me of the check: another account is the end of the login; another role is a changed role, not a logout.
-  for (const [label, account, text, recheck] of [['another account', OTHER_CLINICIAN, TEXT.ended, false], ['another role', CLINICIAN_NOW_MIXED, TEXT.changed, true]]) {
+  // A mismatched account refuses this access round locally; a role change needs a new access check.
+  for (const [label, account, text, recheck] of [['another account', OTHER_CLINICIAN, TEXT.denied, true], ['another role', CLINICIAN_NOW_MIXED, TEXT.changed, true]]) {
     const w = world({ mount: false });
     w.hold(e => e.key === 'GET me' && w.log.filter(x => x.key === 'GET me').length === 2);
     w.enter();
@@ -505,7 +505,7 @@ test('Recheck Access asks again from /me, says it is checking, and only a confir
   await w.scroll(sync, 'vp-a', 4);
   assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 });
   finish(w);
-  // From a refusal too; and a recheck that meets another account is the end of the login.
+  // A mismatched account stays refused without ending the document; a corrected read can recover.
   const refused = world();
   refused.answer = e => e.key === 'GET clinician/studies' ? respond(403, { code: 'CLINICIAN_ROUTE_DENIED' }) : undefined;
   await flush();
@@ -515,10 +515,15 @@ test('Recheck Access asks again from /me, says it is checking, and only a confir
   refused.answer = null;
   refused.account = OTHER_CLINICIAN;
   await refused.recheck();
-  assert.deepEqual(refused.screen(), { mounted: true, visible: true, text: TEXT.ended, recheck: false });
-  assert.equal(s2.isDisabled(), true);
+  assert.deepEqual(refused.screen(), { mounted: true, visible: true, text: TEXT.denied, recheck: true });
+  assert.equal(s2.isDisabled(), false);
+  assert.equal(refused.page.gate.state(), 'active');
   await refused.scroll(s2, 'vp-a', 5);
   assert.deepEqual(refused.moves, []);
+  refused.account = CLINICIAN;
+  await refused.recheck();
+  await refused.scroll(s2, 'vp-a', 4);
+  assert.deepEqual(refused.at('vp-b'), { index: 2, z: 8 });
   finish(refused);
 });
 
@@ -552,7 +557,8 @@ test('checks inside a sync event: authenticated end stops work, ordinary 403 onl
   const s3 = other.sync();
   other.account = OTHER_CLINICIAN;
   await other.scroll(s3, 'vp-a', 4);
-  assert.deepEqual([other.screen().text, other.moves, s3.isDisabled()], [TEXT.ended, [], true]);
+  assert.deepEqual([other.screen().text, other.moves, s3.isDisabled()], [TEXT.applyDenied, [], false]);
+  assert.equal(other.page.gate.state(), 'active');
   finish(other);
 
   const role = world();
@@ -617,8 +623,8 @@ test('late answers: Sync OFF, series replacement, account change, logout and A->
   await held(null, async (w, sync) => { sync.destroy(); w.held[0].release(); }, TEXT.off);
   await held(null, async (w, sync) => { sync.setEnabled(false); w.held[0].release(); });
   await held(null, async w => { w.show('vp-b', 'S2'); w.held[0].release(); });
-  const other = await held(null, async w => { w.account = OTHER_CLINICIAN; w.held[0].release(); }, TEXT.ended);
-  assert.equal(other.sync.isDisabled(), true);
+  const other = await held(null, async w => { w.account = OTHER_CLINICIAN; w.held[0].release(); }, TEXT.applyDenied);
+  assert.equal(other.w.page.gate.state(), 'active');
   await held(null, async w => { w.page.end(); w.held[0].release(); }, TEXT.ended);
   await held(null, async w => { w.page.end(); w.held[0].release(); }, TEXT.ended);
   // A->B->A inside the mount: an event while B is shown asks nothing; the stack reloaded under A again is not the one it saw

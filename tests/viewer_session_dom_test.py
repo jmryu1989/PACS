@@ -14,6 +14,10 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from playwright.sync_api import sync_playwright
+try:
+    from viewer_session_fixture import reject_unbound, unbound_protected_request
+except ImportError:
+    from tests.viewer_session_fixture import reject_unbound, unbound_protected_request
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "https://viewer-session.test"
@@ -36,6 +40,10 @@ class ViewerSessionDOMTest(unittest.TestCase):
     def setUp(self):
         self.context = self.browser.new_context()
         self.requests = []
+        self.unbound = []
+        # Even a test-specific held/error route must satisfy the same boundary rule.
+        self.context.on('request', lambda request: self.unbound.append((request.url, request.resource_type))
+                        if request.url.startswith(BASE + '/') and unbound_protected_request(request) else None)
         self.status, self.code = 200, None
         self.server_session = "S1"
         self.dialogs = []
@@ -52,8 +60,11 @@ class ViewerSessionDOMTest(unittest.TestCase):
 
     def tearDown(self):
         self.context.close()
+        self.assertEqual(self.unbound, [], 'protected browser loads must never be unbound')
 
     def route(self, route):
+        if reject_unbound(route, self.unbound):
+            return
         path = route.request.url[len(BASE):].split("?")[0]
         if path.startswith("/worklist/hpacs-lite/") and path.endswith(".js"):
             name = path.rsplit("/", 1)[-1]
@@ -91,6 +102,275 @@ class ViewerSessionDOMTest(unittest.TestCase):
     def notice(self, kind, session="S1", preparation="document-X:preparation"):
         self.opener.evaluate("value=>channel.postMessage(value)",
                              {"type": kind, "session": session, "preparation": preparation})
+
+
+    def test_router_reload_cannot_adopt_replacement_session(self):
+        view = self.open_viewer()
+        view.evaluate("history.pushState({router:'next'},'',location.href+'&layout=2')")
+        self.server_session = 'S2'
+        self.opener.evaluate("window.KinWorkContext={session:()=> 'S2',state:()=> 'active'}")
+        view.reload()
+        view.wait_for_function('window.started===true')
+        view.evaluate("fetch('/api/studies').then(r=>r.json())")
+        self.assertEqual(view.evaluate('KinWorkContext.session()'), 'S1')
+        self.assertEqual(self.requests, [('/api/studies', 'S1')])
+
+    def test_ended_history_reload_and_back_send_and_paint_nothing(self):
+        self.context.add_init_script('window.restoreBrowserHistory=history.replaceState.bind(history)')
+        view = self.open_viewer()
+        # Keep the ended entry while exercising real reload/back. The page gate alone must
+        # prevent work; no opener end or server rejection is available to rescue the mutant.
+        view.evaluate("restoreBrowserHistory({...history.state,kinViewerSession:{session:'S1',ended:true}},'')")
+        for back in [False, True]:
+            if back:
+                view.goto(BASE + '/elsewhere')
+                view.go_back()
+            else:
+                view.reload()
+            for _ in range(100):
+                if view.url.endswith('/index.html'): break
+                view.wait_for_timeout(10)
+            self.assertEqual(view.url, BASE + '/worklist/hpacs-lite/index.html')
+            self.assertEqual(view.locator('#root').count(), 0)
+            self.assertEqual(self.requests, [])
+            if not back:
+                # The landing replaces an ended entry; reconstruct a restored browser entry.
+                view.goto(BASE + '/ohif/viewer')
+                view.wait_for_function('window.started===true')
+                view.evaluate("restoreBrowserHistory({...history.state,kinViewerSession:{session:'S1',ended:true}},'')")
+
+    def test_opener_ending_without_notice_ends_within_one_poll(self):
+        view = self.open_viewer()
+        self.opener.evaluate("source({state:'ending',session:'S1'})")
+        view.wait_for_timeout(550)
+        self.assertEqual(view.url, BASE + '/worklist/hpacs-lite/index.html')
+        self.assertEqual(view.locator('#root').count(), 0)
+        self.assertEqual(self.requests, [])
+
+    def test_other_origin_fetch_and_xhr_never_carry_session_or_csrf(self):
+        view = self.open_viewer()
+        seen = []
+        def outside(route):
+            seen.append(route.request.headers)
+            route.fulfill(body='{}', content_type='application/json', headers={'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS'})
+        self.context.route('https://external.test/**', outside)
+        for path in ['/api/me', '/dicom-web/studies']:
+            url = 'https://external.test' + path
+            view.evaluate('url=>fetch(url).then(r=>r.text())', url)
+            view.evaluate("""url=>new Promise((resolve,reject)=>{const x=new XMLHttpRequest();x.open('GET',url);
+              x.onload=()=>resolve(x.status);x.onerror=reject;x.send();})""", url)
+        self.assertEqual(len(seen), 4)
+        for headers in seen:
+            self.assertNotIn('x-kin-session', headers)
+            self.assertNotIn('x-kin-csrf', headers)
+
+    def test_preparation_lease_expires_after_opener_closes_navigates_or_goes_silent(self):
+        for action in ['closed', 'navigate', 'silent']:
+            with self.subTest(action=action):
+                if self.opener.is_closed() or self.opener.url != BASE + '/worklist':
+                    self.opener = self.context.new_page()
+                    self.opener.goto(BASE + '/worklist')
+                    self.opener.evaluate("KinWorkContext.follow({onLifecycle(fn){window.source=fn;fn({state:'active',session:'S1'})}});window.channel=new BroadcastChannel('kin-session')")
+                view = self.open_viewer()
+                self.opener.evaluate("window.preparation=KinWorkContext.prepare({preparationId:'lease-X'})")
+                self.notice('session-preparing', preparation='lease-X')
+                view.wait_for_function("KinWorkContext.state()==='preparing'")
+                view.evaluate("window.delivered=0;setTimeout(()=>delivered++,1)")
+                if action == 'closed':
+                    # A different main document can disappear without taking its viewers away.
+                    self.opener.close()
+                elif action == 'navigate':
+                    self.opener.goto(BASE + '/elsewhere')
+                view.wait_for_timeout(6350)
+                self.assertEqual(view.evaluate('[KinWorkContext.state(),delivered]'), ['active',1])
+                view.locator('#draft').fill('continued draft')
+                self.assertEqual(view.locator('#draft').input_value(), 'continued draft')
+                view.close()
+                if action != 'silent':
+                    self.opener = self.context.new_page()
+                    self.opener.goto(BASE + '/worklist')
+                    self.opener.evaluate("KinWorkContext.follow({onLifecycle(fn){window.source=fn;fn({state:'active',session:'S1'})}});window.channel=new BroadcastChannel('kin-session')")
+
+    def test_matching_renewals_keep_pause_other_id_does_not_extend_lease(self):
+        view = self.open_viewer()
+        self.notice('session-preparing', preparation='lease-X')
+        view.wait_for_function("KinWorkContext.state()==='preparing'")
+        for _ in range(4):
+            view.wait_for_timeout(2000)
+            self.notice('session-preparing', preparation='lease-X')
+        self.assertEqual(view.evaluate('KinWorkContext.state()'), 'preparing')
+        for _ in range(3):
+            view.wait_for_timeout(1800)
+            self.notice('session-preparing', preparation='lease-Y')
+        view.wait_for_timeout(1000)
+        self.assertEqual(view.evaluate('KinWorkContext.state()'), 'active')
+        self.assertEqual(view.locator('#draft').input_value(), 'held draft')
+
+    def test_opened_during_preparation_resumes_on_notice_after_main_reprepares(self):
+        self.opener.evaluate("window.preparation=KinWorkContext.prepare({preparationId:'live-opaque-id'})")
+        view = self.open_viewer()
+        self.assertEqual(view.evaluate('KinWorkContext.state()'), 'preparing')
+        self.opener.evaluate("KinWorkContext.cancelPreparation(preparation);window.preparation=KinWorkContext.prepare({preparationId:'live-opaque-id'})")
+        self.notice('session-resumed', preparation='live-opaque-id')
+        view.wait_for_timeout(100)
+        self.assertEqual(view.evaluate('KinWorkContext.state()'), 'active', 'the matching notice resumes before the lease can expire')
+        self.assertEqual(view.locator('#draft').input_value(), 'held draft')
+
+    def test_noopener_transient_bootstrap_retries_without_closing(self):
+        for status, code in [(503, 'AUTH_IDP_UNAVAILABLE'), (500, None), (401, None), (403, None)]:
+            with self.subTest(status=status):
+                self.status, self.code = status, code
+                page = self.context.new_page()
+                page.clock.install()
+                page.goto(BASE + '/ohif/viewer')
+                for _ in range(100):
+                    if '/ohif/viewer' not in page.url or page.evaluate('!!window.KinViewerSessionBoundary'): break
+                    page.wait_for_timeout(10)
+                page.wait_for_timeout(50)
+                self.assertIn('/ohif/viewer', page.url)
+                self.assertEqual(page.evaluate('KinWorkContext.state()'), 'unknown')
+                self.assertFalse(page.evaluate('!!window.closeAttempted'))
+                self.assertEqual(page.evaluate("fetch('/api/studies').catch(e=>e.transport)"), 'not-admitted')
+                self.status, self.code = 200, None
+                page.clock.run_for(1100)
+                page.wait_for_function('window.started===true')
+                self.assertEqual(page.evaluate('KinWorkContext.session()'), 'S1')
+                page.close()
+
+    def test_noopener_offline_timeout_and_exhausted_budget_offer_in_document_retry(self):
+        for failure in ['offline', 'timeout', 'http']:
+            with self.subTest(failure=failure):
+                page = self.context.new_page(); page.clock.install()
+                held = []
+                def fail(route):
+                    if failure == 'offline': route.abort('internetdisconnected')
+                    elif failure == 'timeout': held.append(route)
+                    else: route.fulfill(status=503, body='{}', content_type='application/json')
+                page.route(BASE + '/api/me', fail)
+                page.goto(BASE + '/ohif/viewer')
+                page.wait_for_function("window.KinViewerSessionBoundary && KinWorkContext.state()==='unknown'")
+                for _ in range(6):
+                    page.clock.run_for(11000); page.wait_for_timeout(30)
+                self.assertEqual(page.get_by_role('button', name='Retry').count(), 1)
+                self.assertFalse(page.evaluate('!!window.closeAttempted'))
+                self.assertEqual(page.evaluate('KinWorkContext.state()'), 'unknown')
+                page.unroute(BASE + '/api/me', fail)
+                page.get_by_role('button', name='Retry').click()
+                page.wait_for_function('window.started===true')
+                self.assertEqual(page.evaluate('KinWorkContext.session()'), 'S1')
+                for route in held:
+                    try: route.abort()
+                    except Exception: pass  # the native bootstrap deadline already aborted it
+                page.close()
+
+    def test_bootstrap_confirmed_absence_or_member_refusal_ends(self):
+        for status, code in [(401, 'AUTH_CREDENTIALS_MISSING'), (401, 'AUTH_SESSION_ENDED'),
+                             (403, 'INSTITUTION_PENDING'), (403, 'INSTITUTION_INVALID')]:
+            self.status, self.code = status, code
+            page = self.context.new_page(); page.goto(BASE + '/ohif/viewer')
+            page.wait_for_url(BASE + '/worklist/hpacs-lite/index.html')
+            self.assertEqual(page.locator('#root').count(), 0)
+            page.close()
+
+    def test_protected_native_elements_use_owned_blobs_and_release_on_close_and_end(self):
+        view = self.open_viewer()
+        def media(route):
+            if reject_unbound(route, self.unbound): return
+            self.requests.append((route.request.url.split(BASE)[1], route.request.headers.get('x-kin-session')))
+            route.fulfill(body=b'%PDF-1.4\n%%EOF', content_type='application/pdf')
+        self.context.route(BASE + '/instances/**', media)
+        urls = view.evaluate("""async()=>{
+          window.resources=[];
+          for(const [tag,attr] of [['object','data'],['iframe','src'],['embed','src'],['img','src'],['video','src'],['video','poster'],['audio','src'],['source','src']]){
+            const element=document.createElement(tag);document.body.append(element);resources.push({element,attr});
+            if(resources.length%2)element[attr]='/instances/'+resources.length+'/pdf';else element.setAttribute(attr,'/instances/'+resources.length+'/pdf');
+          }
+        }""")
+        view.wait_for_function("resources.every(({element,attr})=>element.getAttribute(attr)?.startsWith('blob:'))")
+        urls = view.evaluate("resources.map(({element,attr})=>element.getAttribute(attr))")
+        self.assertEqual(len(self.requests), 8)
+        self.assertTrue(all(session == 'S1' for _, session in self.requests))
+        view.evaluate('resources[0].element.remove()')
+        view.wait_for_function('url=>!KinViewerResource.has(url)', arg=urls[0])
+        self.assertEqual(view.evaluate('url=>fetch(url).then(()=>true,()=>false)', urls[0]), False)
+        view.evaluate('window.savedBlobUrls=resources.map(({element,attr})=>element.getAttribute(attr))')
+        held = []
+        view.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: held.append(route))
+        self.notice('session-ended')
+        for _ in range(100):
+            if held: break
+            view.wait_for_timeout(10)
+        self.assertTrue(self.opener.evaluate('viewerRef.savedBlobUrls.every(url=>!viewerRef.KinViewerResource.has(url))'))
+        self.assertEqual(self.opener.evaluate('viewerRef.document.querySelectorAll("object,iframe,img,video,audio,embed").length'), 0)
+        for route in held: route.abort()
+
+
+
+    def test_derived_batch_frame_urls_survive_previous_next_until_owner_releases(self):
+        view=self.open_viewer()
+        result=view.evaluate("""async()=>{
+          const a=URL.createObjectURL(new Blob(['frame-a'])),b=URL.createObjectURL(new Blob(['frame-b']));
+          const img=document.createElement('img');document.body.append(img);
+          img.src=a;img.src=b;img.src=a;img.remove();
+          await Promise.resolve();
+          const before=await Promise.all([a,b].map(url=>fetch(url).then(r=>r.text())));
+          URL.revokeObjectURL(a);URL.revokeObjectURL(b);
+          return {before,after:[a,b].map(url=>KinViewerResource.has(url))};
+        }""")
+        self.assertEqual(result,{'before':['frame-a','frame-b'],'after':[False,False]})
+
+    def test_native_pdf_and_source_panel_use_bound_bytes_under_the_viewer_csp(self):
+        policy = next(line.split('"')[1] for line in (ROOT/'proxy/nginx.conf.template').read_text(encoding='utf-8').splitlines()
+                      if 'add_header Content-Security-Policy' in line)
+        def document(route):
+            route.fulfill(body=self.extra_html + '<div id="root"><div id="kin-viewer-layout"></div></div>'
+                '<script src="/config.js"></script><script>window.close=()=>{};config.extensions[0].preRegistration().then(()=>window.started=true)</script>',
+                content_type='text/html', headers={'Content-Security-Policy': policy})
+        self.context.route(BASE+'/ohif/viewer?*', document)
+        def answer(route):
+            if reject_unbound(route, self.unbound): return
+            path=route.request.url.split(BASE)[1]
+            self.requests.append((path, route.request.headers.get('x-kin-session')))
+            if path.startswith('/instances/'):
+                route.fulfill(body=b'%PDF-1.4\n%%EOF', content_type='application/pdf'); return
+            body={'kind':'member','institution':'I1','sub':'reader','sessionId':'S1'} if path=='/api/me' else (
+                {'id':'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'} if path=='/api/dicom/lookup' else {'studies':[{'uid':'1.2.3','id':'SYNTHETIC'}]})
+            route.fulfill(body=json.dumps(body), content_type='application/json')
+        for path in ['/api/**','/instances/**']:
+            self.context.route(BASE+path,answer)
+        view=self.open_viewer()
+        view.add_script_tag(url=BASE+'/worklist/hpacs-lite/viewer-dicom-pdf.js')
+        view.evaluate("""async()=>{
+          window.cspFailures=[];addEventListener('securitypolicyviolation',e=>cspFailures.push(e.effectiveDirective));
+          const sop='1.2.840.10008.5.1.4.1.1.104.1';
+          const ds={displaySetInstanceUID:'pdf1',SOPClassHandlerId:'@ohif/extension-dicom-pdf.sopClassHandlerModule.dicom-pdf',
+            SOPClassUID:sop,StudyInstanceUID:'1.2.3',SeriesInstanceUID:'1.2.4',SOPInstanceUID:'1.2.5',
+            pdfUrl:Promise.resolve(location.origin+'/dicom-web/studies/1.2.3/series/1.2.4/instances/1.2.5/rendered'),
+            instance:{SOPClassUID:sop,StudyInstanceUID:'1.2.3',SeriesInstanceUID:'1.2.4',SOPInstanceUID:'1.2.5',PatientID:'SYNTHETIC',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}};
+          const entry={component:props=>({key:props.key,props})};
+          window.pdfGuard=kinDicomPdfViewportGuard({getModuleEntry:()=>entry});pdfGuard.install();pdfGuard.activate();
+          const result=entry.component({displaySets:[ds]});window.pdfBlob=await result.props.displaySets[0].pdfUrl;
+          const object=document.createElement('object');object.type='application/pdf';object.data=pdfBlob;document.querySelector('#root').append(object);
+          const state={activeViewportId:'vp1',viewports:new Map([['vp1',{viewportId:'vp1',displaySetInstanceUIDs:['pdf1']}]])};
+          window.pdfPanel=KinDicomPdf.create({viewportGridService:{getState:()=>state},displaySetService:{getDisplaySetByUID:()=>ds}});pdfPanel.mount();
+        }""")
+        for _ in range(200):
+            if view.evaluate("!document.querySelector('#kin-source-pdf-open').disabled"): break
+            view.wait_for_timeout(10)
+        view.locator('#kin-source-pdf-open').click()
+        for _ in range(200):
+            if view.evaluate("!!document.querySelector('dialog[open] iframe')"): break
+            view.wait_for_timeout(10)
+        urls=view.evaluate("[pdfBlob,document.querySelector('dialog iframe').src]")
+        self.assertTrue(all(url.startswith('blob:') for url in urls))
+        self.assertTrue(all(binding=='S1' for _,binding in self.requests))
+        self.assertEqual(len(self.context.pages),2,'Source PDF stays in the viewer document')
+        self.assertEqual(view.evaluate('cspFailures'),[])
+        view.get_by_role('button',name='Close',exact=True).click()
+        self.assertFalse(view.evaluate('url=>KinViewerResource.has(url)',urls[1]))
+        view.evaluate('pdfGuard.deactivate()')
+        self.assertFalse(view.evaluate('url=>KinViewerResource.has(url)',urls[0]))
 
     def test_open_and_reload_keep_binding_without_a_new_visible_step(self):
         view = self.open_viewer()

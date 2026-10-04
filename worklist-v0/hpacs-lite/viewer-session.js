@@ -17,7 +17,7 @@
     const clearTimeout = win.clearTimeout.bind(win), clearInterval = win.clearInterval.bind(win);
     const nativeFrame = win.requestAnimationFrame?.bind(win), cancelFrame = win.cancelAnimationFrame?.bind(win);
     const timers = new Map(), intervals = new Map(), frames = new Map(), deferred = new Set(), workers = new Set();
-    let announce, preparation = null, preparingId = null, peerPreparation = null, ended = false, cleaning = false;
+    let announce, preparation = null, preparingId = null, peerPreparation = null, lease = null, ended = false, cleaning = false;
     let peer = null, record = null;
     const enders = new Set(), changes = new Set();
     try { peer = win.opener || (win.parent !== win ? win.parent : null); } catch (_) {}
@@ -49,6 +49,7 @@
       cleaning = true;
       remember(true);
       announce({ state: 'ending', session });
+      clearTimeout(lease);
       for (const timer of timers.keys()) clearTimeout(timer);
       for (const timer of intervals.keys()) clearInterval(timer);
       for (const frame of frames.keys()) cancelFrame(frame);
@@ -68,15 +69,22 @@
           [403, 409].includes(failure.status) && failure.code === 'AUTH_SESSION_MISMATCH') end();
     }
     const transport = win.KinSessionTransport.page({ fetch: originalFetch, authFailure });
+    function renewLease() {
+      clearTimeout(lease);
+      const id = preparingId;
+      lease = nativeTimeout(() => { syncPeer(); resume(id); }, 6000);
+    }
     function pause(id) {
       if (ended || id === null || id === undefined || closed(gate.state())) return;
-      if (preparation) return;
+      if (preparation) { if (id === preparingId) renewLease(); return; }
       preparingId = id;
-      preparation = gate.prepare({});
+      preparation = gate.prepare({ preparationId: id });
+      renewLease();
       for (const run of [...changes]) { try { run('preparing'); } catch (_) {} }
     }
     function resume(id) {
       if (ended || !preparation || id !== preparingId) return;
+      clearTimeout(lease); lease = null;
       gate.cancelPreparation(preparation);
       preparation = null; preparingId = null;
       for (const run of [...changes]) { try { run('active'); } catch (_) {} }
@@ -97,12 +105,14 @@
     }
     function syncPeer() {
       try {
-        const source = peer?.KinWorkContext;
+        const source = peer && !peer.closed ? peer.KinWorkContext : null;
         if (!source || source.session() !== session) return;
         if (closed(source.state())) end();
         else if (source.state() === 'preparing') {
-          peerPreparation = source.preparation()?.preparation;
-          pause(peerPreparation);
+          const id = source.preparation()?.preparation;
+          // A readable but frozen opener is not a heartbeat. Only a new preparation or its
+          // own repeated notice renews the lease; observing the same stale object cannot.
+          if (id !== peerPreparation) { peerPreparation = id; pause(id); }
         } else if (peerPreparation !== null) { resume(peerPreparation); peerPreparation = null; }
       } catch (_) { /* A closed opener is not evidence that this session ended. */ }
     }
@@ -117,7 +127,7 @@
     function deliver(run) {
       if (ended) return;
       if (gate.state() === 'active') run();
-      else if (gate.state() === 'preparing') deferred.add(run);
+      else if (gate.state() === 'preparing' || gate.state() === 'unknown') deferred.add(run);
     }
     function wait(value, release) {
       return new Promise((resolve, reject) => Promise.resolve(value).then(
@@ -174,6 +184,7 @@
     }
     const input = event => {
       if (gate.state() === 'active') return;
+      if (!ended && entryNotice?.contains(event.target)) return;
       event.preventDefault(); event.stopImmediatePropagation();
     };
     for (const type of ['pointerdown', 'pointerup', 'pointermove', 'mousedown', 'mouseup', 'click', 'dblclick',
@@ -230,7 +241,7 @@
     };
     const guarded = new WeakMap();
     // A new noopener document follows the same entry rule as auth.js: reliable storage,
-    // no end record, one unbound /me. A history binding (including a failed entry) NEVER
+    // no end record, one bootstrap with bounded retries. A history binding NEVER
     // enters this path. Recheck records/notices after the body, before adopting its identity.
     function entryAllowed() {
       try {
@@ -242,29 +253,55 @@
           !win.document.cookie.split(';').some(part => part.trim().startsWith('kin-session-end='));
       } catch (_) { return false; }
     }
+    let entryNotice = null;
     async function bootstrap() {
       if (!needsBootstrap) return;
       // A reload of an unresolved entry must not start a second identity adoption.
       if (!remember(true) || !entryAllowed()) { end(); return; }
-      const controller = new win.AbortController();
-      const deadline = nativeTimeout(() => controller.abort(), 10000);
-      try {
-        const response = await originalFetch('/api/me', { credentials: 'same-origin', cache: 'no-store',
-          headers: { 'X-KIN-CSRF': '1' }, signal: controller.signal });
-        const me = response.ok ? await response.json() : null;
-        if (ended || !entryAllowed() || !me || typeof me.sessionId !== 'string' || !me.sessionId ||
-            heard.get(me.sessionId)?.type === 'session-ended') { end(); return; }
-        session = me.sessionId;
-        remember(false);
-        announce({ state: 'active', session });
-        notice(heard.get(session));
-      } catch (_) { end(); }
-      finally { clearTimeout(deadline); }
+      for (;;) {
+        for (const delay of [0, 1000, 2000]) {
+          if (delay) await new Promise(resolve => nativeTimeout(resolve, delay));
+          if (ended) return;
+          if (!entryAllowed()) { end(); return; }
+          const controller = new win.AbortController();
+          const deadline = nativeTimeout(() => controller.abort(), 10000);
+          try {
+            const response = await originalFetch('/api/me', { credentials: 'same-origin', cache: 'no-store',
+              headers: { 'X-KIN-CSRF': '1' }, signal: controller.signal });
+            let me = null;
+            try { me = await response.json(); } catch (_) {}
+            const code = response.headers.get('X-KIN-Auth-Code') || me?.code;
+            if (ended || !entryAllowed() ||
+                response.status === 401 && ['AUTH_CREDENTIALS_MISSING', 'AUTH_SESSION_ENDED'].includes(code) ||
+                response.status === 403 && ['INSTITUTION_PENDING', 'INSTITUTION_INVALID'].includes(code)) { end(); return; }
+            if (!response.ok || typeof me?.sessionId !== 'string' || !me.sessionId) continue;
+            if (heard.get(me.sessionId)?.type === 'session-ended') { end(); return; }
+            session = me.sessionId;
+            if (!remember(false)) { end(); return; }
+            announce({ state: 'active', session });
+            notice(heard.get(session));
+            if (gate.state() === 'active') for (const run of [...deferred]) { deferred.delete(run); if (!ended) run(); }
+            return;
+          } catch (_) { /* Offline, timeout and a malformed reply leave entry unknown. */ }
+          finally { clearTimeout(deadline); }
+        }
+        if (ended) return;
+        // Retry the unresolved entry in this document, never by reloading/adopting a new login.
+        await new Promise(resolve => {
+          entryNotice = win.document.createElement('section'); entryNotice.setAttribute('role', 'alert');
+          entryNotice.style.cssText = 'position:fixed;inset:30% 20% auto;z-index:10000;background:#18212b;color:white;padding:24px';
+          const message = win.document.createElement('p'), button = win.document.createElement('button');
+          message.textContent = '세션을 확인하지 못했습니다. 연결을 확인한 뒤 다시 시도하세요.';
+          button.textContent = 'Retry';
+          button.onclick = () => { entryNotice.remove(); entryNotice = null; resolve(); };
+          entryNotice.append(message, button); win.document.body.append(entryNotice);
+        });
+      }
     }
     const api = Object.freeze({
       gate, transport, wait, ready: Promise.resolve().then(bootstrap), session: () => session,
       active: () => gate.state() === 'active',
-      ended: () => ended || closed(gate.state()),
+      ended: () => ended,
       guardMethods(target, names) {
         if (!guarded.has(target)) guarded.set(target, new Set());
         for (const name of names) {
@@ -284,6 +321,7 @@
       authFailure,
     });
     win.KinViewerSessionBoundary = api;
+    win.KinViewerResource = win.KinViewerResources.create(win, api, protectedUrl);
     installXHR(win, api, protectedUrl);
     if (initialEnd) end();
     return api;

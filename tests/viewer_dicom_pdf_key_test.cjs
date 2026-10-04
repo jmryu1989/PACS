@@ -8,9 +8,10 @@ const vm=require('node:vm');
 const { sessionWorld }=require('./viewer_session_fixture.cjs');
 let config=fs.readFileSync(path.join(__dirname,'..','config','ohif.js'),'utf8');
 if(process.env.KIN_PDF_KEY_MUTATION==='drop')config=config.replace(', key });', ' });');
-function load(extra={}){const sandbox={AbortController,URL,setTimeout,clearTimeout,...extra};const page=sessionWorld(sandbox,sandbox.fetch,config);sandbox.endSession=page.end;return sandbox;}
+function load(extra={}){const sandbox={AbortController,URL,setTimeout,clearTimeout,...extra};const send=sandbox.fetch;sandbox.fetch=async(url,init)=>String(url).includes('/instances/aaaaaaaa-')?new Response('%PDF-1.4\n%%EOF',{headers:{'Content-Type':'application/pdf'}}):send(url,init);const page=sessionWorld(sandbox,sandbox.fetch,config);sandbox.endSession=page.end;return sandbox;}
 function display(over={}){return {displaySetInstanceUID:'ds-pdf',SOPClassHandlerId:'@ohif/extension-dicom-pdf.sopClassHandlerModule.dicom-pdf',SOPClassUID:'1.2.840.10008.5.1.4.1.1.104.1',StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.4',pdfUrl:Promise.resolve('/pdf'),instance:{SOPClassUID:'1.2.840.10008.5.1.4.1.1.104.1',StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.4',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}},...over};}
 function manager(component){const entry={component};return {entry,manager:{getModuleEntry:id=>id==='@ohif/extension-dicom-pdf.viewportModule.dicom-pdf'?entry:null}};}
+const fetchBlob=url=>{assert.ok(url.startsWith('blob:'));return global.fetch(url).then(r=>r.text())};
 const React={createElement:(type,props)=>({type,key:props.key==null?null:String(props.key),props})};
 const keyed=props=>React.createElement('OHIFCornerstonePdfViewport',props);
 
@@ -59,7 +60,7 @@ test('native source resolver returns the authenticated Orthanc PDF route once pe
   const {kinDicomPdfViewportGuard}=load({fetch,location:{href:'https://pdf.test/ohif/viewer',origin:'https://pdf.test'}}),fixture=manager(keyed),guard=kinDicomPdfViewportGuard(fixture.manager);guard.install();guard.activate();
   const source=display({SOPClassHandlerId:'@ohif/extension-dicom-pdf.sopClassHandlerModule.dicom-pdf',SOPClassUID:'1.2.840.10008.5.1.4.1.1.104.1',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.4/rendered'),instance:{SOPClassUID:'1.2.840.10008.5.1.4.1.1.104.1',StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.4',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});
   const first=fixture.entry.component({displaySets:[source]}),repeat=fixture.entry.component({displaySets:[source]});assert.equal(first.key,repeat.key);assert.equal(first.props.displaySets[0].pdfUrl,repeat.props.displaySets[0].pdfUrl);
-  assert.equal(await first.props.displaySets[0].pdfUrl,'https://pdf.test/instances/aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee/pdf');
+  assert.equal(await fetchBlob(await first.props.displaySets[0].pdfUrl),'%PDF-1.4\n%%EOF');
   assert.deepEqual(requests.map(x=>x[0]),['/api/me','/api/dicom/lookup','/api/me']);assert.deepEqual(JSON.parse(requests[1][2]),{studyUid:'1.2',sopUid:'1.4'});
 });
 
@@ -86,8 +87,8 @@ test('a viewport rendered before onModeEnter waits for activation instead of bec
   const fetch=async url=>url==='/api/dicom/lookup'?{ok:true,json:async()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'})}:{ok:true,json:async()=>({kind:'member',institution:'hospital',sub:'reader'})};
   const {kinDicomPdfViewportGuard}=load({fetch,location:{href:'https://pdf.test/ohif/viewer',origin:'https://pdf.test'}}),fixture=manager(keyed),guard=kinDicomPdfViewportGuard(fixture.manager);guard.install();
   const source=display({pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.4/rendered')}),element=fixture.entry.component({displaySets:[source]});assert.ok(element,'ModeRoute renders its captured layout before its effect calls onModeEnter');
-  guard.activate();assert.equal(await element.props.displaySets[0].pdfUrl,'https://pdf.test/instances/aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee/pdf');
-  guard.deactivate();const reentry=fixture.entry.component({displaySets:[source]});assert.ok(reentry);assert.notEqual(reentry.key,element.key);guard.activate();assert.equal(await reentry.props.displaySets[0].pdfUrl,'https://pdf.test/instances/aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee/pdf');
+  guard.activate();assert.equal(await fetchBlob(await element.props.displaySets[0].pdfUrl),'%PDF-1.4\n%%EOF');
+  guard.deactivate();const reentry=fixture.entry.component({displaySets:[source]});assert.ok(reentry);assert.notEqual(reentry.key,element.key);guard.activate();assert.equal(await fetchBlob(await reentry.props.displaySets[0].pdfUrl),'%PDF-1.4\n%%EOF');
 });
 
 test('a timed out native resolver keeps one promise and succeeds only after explicit retry',async()=>{
@@ -96,7 +97,7 @@ test('a timed out native resolver keeps one promise and succeeds only after expl
   const {kinDicomPdfViewportGuard}=load({fetch,location:{href:'https://pdf.test/ohif/viewer',origin:'https://pdf.test'}}),fixture=manager(keyed),guard=kinDicomPdfViewportGuard(fixture.manager,{timeoutMs:20,onFailure:()=>failures++});guard.install();guard.activate();
   const element=fixture.entry.component({displaySets:[display({pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.4/rendered')})]}),samePromise=element.props.displaySets[0].pdfUrl;
   await new Promise(resolve=>setTimeout(resolve,35));assert.equal(failures,1);blocked=false;guard.retry();assert.equal(element.props.displaySets[0].pdfUrl,samePromise);
-  assert.equal(await samePromise,'https://pdf.test/instances/aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee/pdf');
+  assert.equal(await fetchBlob(await samePromise),'%PDF-1.4\n%%EOF');
 });
 
 test('a transient native HTTP failure keeps the consumed promise for explicit retry',async()=>{
@@ -105,7 +106,7 @@ test('a transient native HTTP failure keeps the consumed promise for explicit re
   const {kinDicomPdfViewportGuard}=load({fetch,location:{href:'https://pdf.test/ohif/viewer',origin:'https://pdf.test'}}),fixture=manager(keyed),guard=kinDicomPdfViewportGuard(fixture.manager,{onFailure:()=>failures++});guard.install();guard.activate();
   const element=fixture.entry.component({displaySets:[display({pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.4/rendered')})]}),samePromise=element.props.displaySets[0].pdfUrl;
   await new Promise(resolve=>setImmediate(resolve));assert.equal(failures,1);unavailable=false;guard.retry();assert.equal(element.props.displaySets[0].pdfUrl,samePromise);
-  assert.equal(await samePromise,'https://pdf.test/instances/aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee/pdf');
+  assert.equal(await fetchBlob(await samePromise),'%PDF-1.4\n%%EOF');
 });
 
 test('native failure and success callbacks stay bound to their exact display set',async()=>{
@@ -118,8 +119,8 @@ test('native failure and success callbacks stay bound to their exact display set
   const url='https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.4/rendered',a=display({displaySetInstanceUID:'a',pdfUrl:Promise.resolve(url)});
   const aElement=fixture.entry.component({displaySets:[a]});await new Promise(resolve=>setImmediate(resolve));assert.equal(states.get(a).pdfUrl,a.pdfUrl);
   unavailable=false;const b=display({displaySetInstanceUID:'b',pdfUrl:Promise.resolve(url)}),bElement=fixture.entry.component({displaySets:[b]});
-  assert.match(await bElement.props.displaySets[0].pdfUrl,/\/instances\/.+\/pdf$/);assert.ok(states.has(a),'B success must not clear A failure');assert.equal(states.has(b),false);
-  guard.retry(a,a.pdfUrl);assert.match(await aElement.props.displaySets[0].pdfUrl,/\/instances\/.+\/pdf$/);assert.equal(states.has(a),false);
+  assert.equal(await fetchBlob(await bElement.props.displaySets[0].pdfUrl),'%PDF-1.4\n%%EOF');assert.ok(states.has(a),'B success must not clear A failure');assert.equal(states.has(b),false);
+  guard.retry(a,a.pdfUrl);assert.equal(await fetchBlob(await aElement.props.displaySets[0].pdfUrl),'%PDF-1.4\n%%EOF');assert.equal(states.has(a),false);
 });
 
 test('replacing pdfUrl on the same display set retires its stale resolver record',async()=>{
@@ -127,7 +128,7 @@ test('replacing pdfUrl on the same display set retires its stale resolver record
   const sandbox=load({fetch,location:{href:'https://pdf.test/ohif/viewer',origin:'https://pdf.test'}}),fixture=manager(keyed),guard=sandbox.kinDicomPdfViewportGuard(fixture.manager);guard.install();guard.activate();
   const source=display({pdfUrl:new Promise(()=>{})}),old=fixture.entry.component({displaySets:[source]}),url='https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.4/rendered';
   source.pdfUrl=Promise.resolve(url);const current=fixture.entry.component({displaySets:[source]});await assert.rejects(old.props.displaySets[0].pdfUrl,/변경/);
-  assert.equal(await current.props.displaySets[0].pdfUrl,'https://pdf.test/instances/aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee/pdf');
+  assert.equal(await fetchBlob(await current.props.displaySets[0].pdfUrl),'%PDF-1.4\n%%EOF');
 });
 
 test('session-ended retires pending native work',async()=>{

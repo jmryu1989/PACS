@@ -4,12 +4,32 @@ The shipped authority, gate and transport run in Chromium. Panels use the public
 onEnd port; full config registration/navigation is covered by viewer_session_dom_test.
 """
 from pathlib import Path
+from urllib.parse import urlparse
 
 HPACS = Path(__file__).resolve().parents[1] / 'worklist-v0' / 'hpacs-lite'
 
+def unbound_protected_request(request):
+    path = urlparse(request.url).path
+    protected = any(path == prefix or path.startswith(prefix + '/') for prefix in
+                    ['/api', '/dicom-web', '/instances', '/statistics', '/system'])
+    bootstrap = path == '/api/me' and request.method == 'GET' and request.resource_type in ('fetch', 'xhr')
+    return protected and not request.headers.get('x-kin-session') and not bootstrap
+
+
+def reject_unbound(route, failures):
+    request = route.request
+    if unbound_protected_request(request):
+        path = urlparse(request.url).path
+        failures.append((path, request.resource_type))
+        route.fulfill(status=403, headers={'X-KIN-Auth-Code': 'AUTH_SESSION_REQUIRED'}, body='{}')
+        return True
+    return False
+
 
 def install_viewer_session(page):
-    for name in ['work-context.js', 'session-transport.js', 'viewer-session.js']:
+    failures = []
+    page.route('**/*', lambda route: None if reject_unbound(route, failures) else route.fallback())
+    for name in ['work-context.js', 'session-transport.js', 'viewer-resources.js', 'viewer-session.js']:
         page.add_script_tag(path=str(HPACS / name))
     page.evaluate("""() => {
       history.replaceState({...history.state,kinViewerSession:{session:'S1',ended:false}},'');
@@ -17,6 +37,7 @@ def install_viewer_session(page):
       window.kinViewerOnEnd=run=>({close:boundary.onEnd(run)});
       return boundary.ready;
     }""")
+    return failures
 
 
 # Only Cornerstone's rendering service is synthetic. Controls, events, job model,
