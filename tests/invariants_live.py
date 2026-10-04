@@ -1227,7 +1227,6 @@ class BffInvariantTests(unittest.TestCase):
         cls.addClassCleanup(cls.stack.cleanup_test_identities)
         cls.stack.require_stack()
         cls.context = cls.stack.context
-        cls.admin_token = str(cls.stack.admin_token)
         groups = cls.admin("GET", "/groups?search=hallym")
         exact = [group for group in groups.body if group.get("name") == "hallym"]
         if len(exact) != 1:
@@ -1236,24 +1235,9 @@ class BffInvariantTests(unittest.TestCase):
 
     @classmethod
     def admin(cls, method: str, path: str, body: Any = None) -> HttpResult:
-        data = None if body is None else json.dumps(body).encode("utf-8")
-        headers = {"Authorization": "Bearer " + cls.admin_token}
-        if data is not None:
-            headers["Content-Type"] = "application/json"
-        request = Request(
-            "http://127.0.0.1:8080/auth/admin/realms/kin" + path,
-            data=data, headers=headers, method=method,
-        )
-        try:
-            with urlopen(request, timeout=30) as response:
-                raw = response.read()
-                payload, text = _json_or_text(raw)
-                if method == "POST" and path == "/users":
-                    payload = response.headers.get("Location", "").rstrip("/").split("/")[-1]
-                return HttpResult(response.status, payload, text)
-        except HTTPError as error:
-            payload, text = _json_or_text(error.read())
-            return HttpResult(error.code, payload, text)
+        # A class can outlive a master-realm token, especially across kcadm calls.
+        # Reuse the fixture's expiry-aware credentials without retrying refusals.
+        return cls.stack.kc_admin(method, path, body)
 
     def proxy(self, opener, method: str, path: str, body: Any = None,
               headers: dict[str, str] | None = None) -> HttpResult:
@@ -2436,7 +2420,7 @@ class LiveInvariantTests(unittest.TestCase):
             before = self.snapshot(fixture, "doctor")
             other = self.stack.request("PUT", path + "/report", "doctor2", {"findings": "draft-on-A", "baseVersion": 1})
             self.assert_status(other, 200)
-            self.assertEqual(other.body["author"], self.stack.actor("doctor2"))
+            self.assertEqual(other.body["owner"]["author"], self.stack.actor("doctor2"))
             self.assert_snapshot_unchanged(fixture, "doctor", before)
             seen = self.state(fixture, "doctor2")
             self.assertEqual((seen["findings"], seen["version"], seen["rs"]), (fixture.secret, 1, "A"))
@@ -2646,11 +2630,47 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual(json.loads(draft_row["detail"]), {"len": [len(fixture.secret), 1, 0]})
             self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {}), 200)
             self.assertEqual(count("report.draft.clear"), 1)
-            self.assert_status(self.stack.request("DELETE", path + "/draft", "doctor"), 200)
-            self.assertEqual(count("report.draft.discard"), 0, "지운 초안이 없는데 폐기 감사가 남았습니다")
-            self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {"findings": "x"}), 200)
-            self.assert_status(self.stack.request("DELETE", path + "/draft", "doctor"), 200)
-            self.assertEqual(count("report.draft.discard"), 1)
+            # U5S-REQ-02/03/14/16: even an absent discard changes the durable
+            # boundary and needs an operation audit, but never a discarded
+            # ReportVersion. Audit count is not a count of deleted content.
+            for present in (False, True):
+                with self.subTest(discard_present=present):
+                    if present:
+                        self.assert_status(self.stack.request(
+                            "PUT", path + "/report", "doctor", {"findings": fixture.secret}), 200)
+                    before = self.stack.request("GET", path + "/draft", "doctor")
+                    self.assert_status(before, 200)
+                    self.assertEqual(before.body["present"], present)
+                    report_before = self.snapshot(fixture, "doctor")
+                    audit_before = self.audit_rows(fixture)
+                    precondition = {"expectedOwner": before.body["owner"],
+                                    "expectedRevision": before.body["revision"]}
+                    discarded = self.stack.request("DELETE", path + "/draft", "doctor", precondition)
+                    self.assert_status(discarded, 200)
+                    epoch, revision = before.body["revision"].rsplit(":", 1)
+                    self.assertEqual(discarded.body["revision"], f"{epoch}:{int(revision) + 1}")
+                    self.assertEqual(discarded.body["owner"], before.body["owner"])
+                    self.assertEqual(discarded.body["uid"], fixture.uid)
+                    self.assertFalse(discarded.body["present"])
+                    self.assertIsNone(discarded.body["snapshot"])
+                    self.assertIsNone(discarded.body["updatedAt"])
+                    persisted = self.stack.request("GET", path + "/draft", "doctor")
+                    self.assert_status(persisted, 200)
+                    for key in ("uid", "owner", "revision", "present", "snapshot", "updatedAt"):
+                        self.assertEqual(persisted.body[key], discarded.body[key], key)
+                    self.assert_snapshot_unchanged(fixture, "doctor", report_before)
+                    previous_ids = {row["id"] for row in audit_before}
+                    added = [row for row in self.audit_rows(fixture) if row["id"] not in previous_ids]
+                    self.assertEqual(len(added), 1, "성공한 경계 변경의 감사가 없거나 중복되었습니다")
+                    self.assertEqual((added[0]["action"], added[0]["actor"], added[0]["target"]),
+                                     ("report.draft.discard", self.stack.actor("doctor"), fixture.uid))
+                    self.assertEqual(json.loads(added[0]["detail"]), {}, "폐기 감사에 본문이나 허위 폐기 이력이 실렸습니다")
+                    audits_after = self.audit_rows(fixture)
+                    replay = self.stack.request("DELETE", path + "/draft", "doctor", precondition)
+                    self.assert_status(replay, 409)
+                    self.assertEqual(replay.body["code"], "REPORT_DRAFT_CONFLICT")
+                    self.assertEqual(self.audit_rows(fixture), audits_after, "거절된 재전송이 폐기 감사를 추가했습니다")
+            self.assertEqual(count("report.draft.discard"), 2)
             forced = self.stack.request("DELETE", path + "/draft/force", "jmryu")
             self.assert_status(forced, 200)
             self.assertEqual(forced.body["count"], 0)
@@ -4163,7 +4183,7 @@ class LiveInvariantTests(unittest.TestCase):
             body["structureIds"] = keep
         result = self.stack.request("PUT", f"/studies/{quote(fixture.uid)}/report", user, body)
         self.assert_status(result, 200)
-        applied = result.body.get("structured")
+        applied = result.body.get("applied")
         self.assertIsInstance(applied, dict, "적용 응답에 sid가 없습니다: " + result.text)
         self.assertEqual(applied["field"], field)
         self.assertRegex(applied["sid"], r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")

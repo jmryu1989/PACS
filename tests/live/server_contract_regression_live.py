@@ -1,7 +1,7 @@
 """Run the existing server regression assertions with an explicit public CT source.
 
-The root live module is outside this worker's writable paths. Only its fixture
-constructor is substituted during class setup; HTTP requests, expected outcomes,
+Only the root live module's fixture constructor is substituted during class
+setup; HTTP requests, expected outcomes,
 test methods and cleanup remain the existing suite's. This is not a product mock.
 """
 from pathlib import Path
