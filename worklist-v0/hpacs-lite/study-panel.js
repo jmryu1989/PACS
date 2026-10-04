@@ -41,10 +41,12 @@
       listen(tab, 'click', () => select(name));
     }
     const snapshot = () => ({ ...state });
+    // Layout records keep the preference even while the current mode hides it.
+    const shownTab = () => available.includes(state.tab) ? state.tab : available[0];
     function render() {
       drawer.hidden = !state.open; drawer.inert = !state.open;
       names.forEach((name, i) => {
-        const active = available.includes(name) && state.tab === name;
+        const active = shownTab() === name;
         tabs[i].hidden = !available.includes(name);
         tabs[i].setAttribute('aria-selected', String(active)); tabs[i].tabIndex = active ? 0 : -1;
         panels[i].hidden = !active; panels[i].inert = !active;
@@ -62,15 +64,21 @@
       try { el.focus({ preventScroll: true }); } finally { movingFocus = false; }
       return doc.activeElement === el;
     }
-    function focusTab() { focus(tabs[names.indexOf(state.tab)]); }
+    function focusTab() { focus(tabs[names.indexOf(shownTab())]); }
+    const outsideElement = el => el?.nodeType === 1 && el.ownerDocument === doc && el.isConnected
+      && el !== doc.body && el !== doc.documentElement && !drawer.contains(el);
     function captureOpener(el = doc.activeElement) {
       // Repeated API entry from inside the drawer refreshes the outside record,
       // never making a drawer control its own return destination.
       if (drawer.contains(el)) el = opener?.el;
-      if (!el || el === doc.body || el === doc.documentElement) { opener = null; return; }
-      opener = { el, scrollTop: el?.scrollTop, scrollLeft: el?.scrollLeft };
-      if (typeof el?.selectionStart === 'number') {
-        opener.selection = [el.selectionStart, el.selectionEnd, el.selectionDirection];
+      if (!outsideElement(el)) return;
+      // Missing focus/selection information is not a new user destination.
+      opener = opener?.el === el ? { ...opener } : { el };
+      for (const key of ['scrollTop', 'scrollLeft']) {
+        if (Number.isFinite(el[key])) opener[key] = el[key];
+      }
+      if (Number.isFinite(el.selectionStart) && Number.isFinite(el.selectionEnd)) {
+        opener.selection = [el.selectionStart, el.selectionEnd, el.selectionDirection ?? opener.selection?.[2] ?? 'none'];
       }
     }
     function returnFocus(needed) {
@@ -80,18 +88,27 @@
       if (!needed) return;
       if (saved && focus(saved.el)) {
         if (saved.selection) saved.el.setSelectionRange(...saved.selection);
-        saved.el.scrollTop = saved.scrollTop; saved.el.scrollLeft = saved.scrollLeft;
+        for (const key of ['scrollTop', 'scrollLeft']) {
+          if (Number.isFinite(saved[key])) saved.el[key] = saved[key];
+        }
       } else focus(resolve(app.fallbackFocus));
     }
     function changed() { app.onChange?.(snapshot()); }
-    function open(tab = state.tab) {
-      if (destroyed || !available.includes(tab)) return false;
-      const different = !state.open || state.tab !== tab;
-      captureOpener();
-      state = { open: true, tab }; render();
-      const panel = panels[names.indexOf(tab)], target = app.focusTarget?.(tab, panel);
-      if (!target || !panel.contains(target) || !focus(target)) focusTab();
+    function applyState(value) {
+      const different = state.open !== value.open || state.tab !== value.tab;
+      const returnNeeded = state.open && !value.open && drawer.contains(doc.activeElement);
+      if (value.open) captureOpener();
+      state = { ...value }; render();
+      if (state.open) {
+        const tab = shownTab(), panel = panels[names.indexOf(tab)], target = app.focusTarget?.(tab, panel);
+        if (!target || !panel.contains(target) || !focus(target)) focusTab();
+      } else returnFocus(returnNeeded);
       if (different) changed(); return true;
+    }
+    function open(tab) {
+      // Explicit unavailable requests are refused; omitted tab opens the shown fallback.
+      if (destroyed || !available.length || (tab !== undefined && !available.includes(tab))) return false;
+      return applyState({ open: true, tab: tab === undefined ? state.tab : tab });
     }
     function close() {
       if (destroyed || !state.open) return false;
@@ -106,28 +123,24 @@
       if (different) changed(); return true;
     }
     function restore(value) {
-      if (destroyed || !value || typeof value.open !== 'boolean' || !available.includes(value.tab)
+      if (destroyed || !value || typeof value.open !== 'boolean' || !names.includes(value.tab)
           || Object.keys(value).some(key => !['open', 'tab'].includes(key))) return false;
-      if (value.open) return open(value.tab);
-      const different = state.open || state.tab !== value.tab;
-      const returnNeeded = state.open && drawer.contains(doc.activeElement);
-      state = { open: false, tab: value.tab }; render();
-      returnFocus(returnNeeded); if (different) changed(); return true;
+      return applyState({ open: value.open && available.length > 0, tab: value.tab });
     }
     function setAvailable(value) {
       if (destroyed || !validAvailable(value)) return false;
       const before = snapshot(), inside = state.open && drawer.contains(doc.activeElement);
       available = names.filter(name => value.includes(name));
-      if (available.length && !available.includes(state.tab)) state.tab = available[0];
       if (!available.length) state.open = false;
       render();
       if (before.open && !state.open) returnFocus(inside);
-      else if (inside && (!drawer.contains(doc.activeElement) || !focusable(doc.activeElement))) focusTab();
+      else if (inside && (!drawer.contains(doc.activeElement) || !focusable(doc.activeElement)
+          || (tabs.includes(doc.activeElement) && doc.activeElement !== tabs[names.indexOf(shownTab())]))) focusTab();
       if (before.open !== state.open || before.tab !== state.tab) changed();
       return true;
     }
     listen(drawer, 'focusin', event => {
-      if (state.open && !movingFocus && !drawer.contains(event.relatedTarget)) captureOpener(event.relatedTarget);
+      if (state.open && !movingFocus && outsideElement(event.relatedTarget)) captureOpener(event.relatedTarget);
     });
     listen(closeButton, 'click', close);
     listen(tablist, 'keydown', event => {

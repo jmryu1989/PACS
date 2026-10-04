@@ -241,6 +241,106 @@ test('W3M-F02: body/documentElement/null에서 열었으면 안정 fallback으�
   }
 });
 
+test('W3M-F05: 같은 drawer 요소로 정보 없이 복귀 후 Esc는 편집기 caret과 다음 입력 보존', () => {
+  for (const source of [null, undefined, 'body', 'documentElement', 'detached', 'comment']) {
+    const f = fixture(); f.opener.setSelectionRange(10, 10, 'none');
+    const before = editorState(f.opener); f.panel.open('info');
+    const tab = f.tab('Info');
+    // A reactivation gives no new editor position, even if background work changed it.
+    f.opener.setSelectionRange(0, 0, 'none'); f.opener.scrollTop = 0;
+    const relatedTarget = source === 'detached' ? f.doc.createElement('input')
+      : source === 'comment' ? f.doc.createComment('unknown') : typeof source === 'string' ? f.doc[source] : source;
+    tab.dispatch('focusin', { relatedTarget });
+    assert.equal(f.doc.activeElement, tab);
+    const event = tab.dispatch('keydown', { key: 'Escape' });
+    assert.equal(event.defaultPrevented, true); assert.equal(f.doc.activeElement, f.opener);
+    assert.deepEqual(editorState(f.opener), before);
+    typeText(f.doc.activeElement, '!'); assert.equal(f.opener.value, 'KEEP DRAFT!');
+  }
+});
+
+test('W3M-F05: API 재진입의 알 수 없는 포커스도 opener·선택을 지우지 않음', () => {
+  for (const empty of ['body', 'documentElement', null]) {
+    for (const enter of [f => f.panel.open('info'), f => f.panel.select('info'),
+      f => f.panel.restore({ open: true, tab: 'info' })]) {
+      const f = fixture(), before = editorState(f.opener); f.panel.open('templates');
+      f.doc.activeElement = empty ? f.doc[empty] : null; enter(f);
+      f.doc.activeElement.dispatch('keydown', { key: 'Escape' });
+      assert.equal(f.doc.activeElement, f.opener); assert.deepEqual(editorState(f.opener), before);
+    }
+  }
+});
+
+test('W3M-F05: 같은 opener의 선택·스크롤 정보 누락은 보존하고 새 opener에는 이전 선택을 복사하지 않음', () => {
+  for (const missing of [null, undefined, NaN]) {
+    const f = fixture(), before = editorState(f.opener); f.panel.open('info');
+    f.opener.selectionStart = missing; f.opener.selectionEnd = missing;
+    f.opener.selectionDirection = null; f.opener.scrollTop = missing; f.opener.scrollLeft = missing;
+    f.panel.open('templates'); f.panel.close();
+    assert.equal(f.doc.activeElement, f.opener); assert.deepEqual(editorState(f.opener), before);
+  }
+  const f = fixture(); f.panel.open('info');
+  f.opener.setSelectionRange(4, 8, null); f.panel.open('templates'); f.panel.close();
+  assert.deepEqual([f.opener.selectionStart, f.opener.selectionEnd, f.opener.selectionDirection], [4, 8, 'backward']);
+  f.panel.open(); const button = f.attach('button'); button.focus(); f.panel.open('info'); f.panel.close();
+  assert.equal(f.doc.activeElement, button); assert.equal(button.selectionStart, undefined);
+});
+
+test('W3M-F06: Technician 왕복은 저장된 Templates 유지, 표시·포커스만 복귀하고 onChange 없음', () => {
+  for (const open of [false, true]) for (const outside of [false, true]) {
+    const f = fixture(); f.panel.restore({ open, tab: 'templates' });
+    if (open) f.input.focus();
+    if (outside) resumeEditing(f);
+    const before = editorState(f.opener), count = f.changes.length;
+    f.panel.setAvailable(['images', 'info']); active(f, 'Images');
+    assert.deepEqual(f.panel.snapshot(), { open, tab: 'templates' });
+    f.panel.setAvailable(['images', 'info', 'templates']); active(f, 'Templates');
+    assert.deepEqual(f.panel.snapshot(), { open, tab: 'templates' });
+    assert.equal(f.changes.length, count);
+    assert.equal(f.doc.activeElement, open && !outside ? f.tab('Templates') : f.opener);
+    assert.deepEqual(editorState(f.opener), before);
+  }
+});
+
+test('W3M-F06: 현재 비가용 탭 기록도 복원 수용, 대체 표시 후 선호 탭 재표시·알림 횟수', () => {
+  for (const open of [false, true]) {
+    const f = fixture({ available: ['images', 'info'] }), record = { open, tab: 'templates' };
+    assert.equal(f.panel.restore(record), true); assert.deepEqual(f.panel.snapshot(), record);
+    assert.equal(f.panel.element.hidden, !open); active(f, 'Images');
+    assert.equal(f.doc.activeElement, open ? f.tab('Images') : f.opener);
+    assert.deepEqual(f.changes, [record]);
+    assert.equal(f.panel.restore(record), true); assert.equal(f.changes.length, 1);
+    for (const tab of [null, undefined, '', 'Templates', 'bad']) {
+      assert.equal(f.panel.restore({ open, tab }), false);
+      assert.deepEqual(f.panel.snapshot(), record); assert.equal(f.changes.length, 1);
+    }
+    f.panel.setAvailable(['images', 'info', 'templates']); active(f, 'Templates');
+    assert.deepEqual(f.panel.snapshot(), record); assert.equal(f.changes.length, 1);
+    assert.equal(f.doc.activeElement, open ? f.tab('Templates') : f.opener);
+  }
+});
+
+test('W3M-F06: 기본 open/toggle은 선호 유지, 명시 비가용 요청은 거절하고 실제 선택만 저장', () => {
+  const calls = [], f = fixture({ available: ['images', 'info'], focusTarget: (tab, panel) => { calls.push([tab, panel]); } });
+  f.panel.restore({ open: false, tab: 'templates' });
+  assert.equal(f.panel.open(), true); active(f, 'Images');
+  assert.equal(calls.at(-1)[0], 'images'); assert.equal(calls.at(-1)[1].hidden, false);
+  assert.deepEqual(f.panel.snapshot(), { open: true, tab: 'templates' });
+  assert.equal(f.changes.length, 2);
+  assert.equal(f.panel.open(), true); assert.equal(f.changes.length, 2);
+  for (const tab of ['templates', null, 'bad']) for (const method of ['open', 'select']) {
+    assert.equal(f.panel[method](tab), false); assert.equal(f.doc.activeElement, f.tab('Images'));
+    assert.deepEqual(f.panel.snapshot(), { open: true, tab: 'templates' }); assert.equal(f.changes.length, 2);
+  }
+  f.panel.toggle(); f.panel.toggle(); active(f, 'Images'); assert.equal(f.changes.length, 4);
+  assert.deepEqual(f.changes.map(value => value.tab), ['templates', 'templates', 'templates', 'templates']);
+  f.tab('Images').dispatch('click'); assert.deepEqual(f.changes.at(-1), { open: true, tab: 'images' });
+  assert.equal(f.changes.length, 5); f.tab('Images').dispatch('click'); assert.equal(f.changes.length, 5);
+  f.panel.setAvailable(['images', 'info', 'templates']); active(f, 'Images'); assert.equal(f.changes.length, 5);
+  assert.equal(f.panel.open('info'), true); active(f, 'Info'); assert.equal(f.changes.length, 6);
+  assert.deepEqual(f.changes.at(-1), { open: true, tab: 'info' });
+});
+
 test('W3M-F03/D-08: 생성 시 가용 탭만 표시·순환하며 사용 불가 탭 API는 부작용 없이 거절', () => {
   const f = fixture({ available: ['images', 'info'] });
   assert.equal(f.tab('Templates').hidden, true); f.panel.open('info');
@@ -249,8 +349,7 @@ test('W3M-F03/D-08: 생성 시 가용 탭만 표시·순환하며 사용 불가 
     assert.equal(f.doc.activeElement, f.tab(expected));
   }
   const before = f.panel.snapshot(), count = f.changes.length, focused = f.doc.activeElement;
-  for (const call of [() => f.panel.open('templates'), () => f.panel.select('templates'),
-    () => f.panel.restore({ open: true, tab: 'templates' }), () => f.panel.restore({ open: false, tab: 'templates' })]) {
+  for (const call of [() => f.panel.open('templates'), () => f.panel.select('templates')]) {
     assert.equal(call(), false); assert.deepEqual(f.panel.snapshot(), before);
     assert.equal(f.changes.length, count); assert.equal(f.doc.activeElement, focused);
   }
@@ -260,25 +359,25 @@ test('W3M-F03/D-08: 생성 시 가용 탭만 표시·순환하며 사용 불가 
   }
 });
 
-test('W3M-F03: 현재 탭 제외 시 첫 가용 탭·onChange 1회, 외부 편집 포커스 보존', () => {
+test('W3M-F03/F06: 현재 탭 제외 시 첫 가용 탭 표시·저장 알림 없음, 외부 편집 포커스 보존', () => {
   for (const outside of [false, true]) {
     const f = fixture(); f.panel.open('templates'); f.input.focus();
     if (outside) resumeEditing(f);
     const before = editorState(f.opener), count = f.changes.length;
     assert.equal(f.panel.setAvailable(['info', 'images']), true);
     active(f, 'Images'); assert.equal(f.tab('Templates').hidden, true);
-    assert.equal(f.changes.length, count + 1); assert.deepEqual(f.changes.at(-1), { open: true, tab: 'images' });
+    assert.equal(f.changes.length, count); assert.deepEqual(f.panel.snapshot(), { open: true, tab: 'templates' });
     assert.equal(f.doc.activeElement, outside ? f.opener : f.tab('Images'));
     assert.deepEqual(editorState(f.opener), before);
-    f.panel.setAvailable(['images', 'info']); assert.equal(f.changes.length, count + 1);
+    f.panel.setAvailable(['images', 'info']); assert.equal(f.changes.length, count);
     f.panel.close(); assert.equal(f.doc.activeElement, f.opener);
   }
   const closed = fixture(); closed.panel.select('templates'); const count = closed.changes.length;
-  closed.panel.setAvailable(['info']); assert.deepEqual(closed.panel.snapshot(), { open: false, tab: 'info' });
-  assert.equal(closed.changes.length, count + 1); assert.equal(closed.doc.activeElement, closed.opener);
+  closed.panel.setAvailable(['info']); assert.deepEqual(closed.panel.snapshot(), { open: false, tab: 'templates' });
+  assert.equal(closed.changes.length, count); assert.equal(closed.doc.activeElement, closed.opener);
 });
 
-test('W3M-F03: 가용 탭 0개는 닫힘·열기 거절, 다시 허용하면 첫 탭 선택', () => {
+test('W3M-F03/F06: 가용 탭 0개는 닫힘·열기 거절, 유효 기록 수용과 선호 보존', () => {
   for (const outside of [false, true]) {
     const f = fixture(); f.panel.open('templates'); if (outside) resumeEditing(f);
     const before = editorState(f.opener), count = f.changes.length;
@@ -288,8 +387,13 @@ test('W3M-F03: 가용 탭 0개는 닫힘·열기 거절, 다시 허용하면 첫
     assert.ok(f.role('tab').every(tab => tab.hidden && tab.tabIndex === -1 && tab.getAttribute('aria-selected') === 'false'));
     assert.ok(f.role('tabpanel').every(panel => panel.hidden && panel.inert));
     assert.equal(f.panel.open(), false); assert.equal(f.panel.toggle(), false);
-    assert.equal(f.panel.restore({ open: true, tab: 'images' }), false);
+    assert.equal(f.panel.restore({ open: true, tab: 'templates' }), true);
+    assert.deepEqual(f.panel.snapshot(), { open: false, tab: 'templates' });
+    assert.equal(f.changes.length, count + 1);
     f.panel.setAvailable(['info']); active(f, 'Info'); assert.equal(f.panel.open(), true);
+    assert.deepEqual(f.panel.snapshot(), { open: true, tab: 'templates' });
+    f.panel.setAvailable(['images', 'info', 'templates']); active(f, 'Templates');
+    assert.equal(f.changes.length, count + 2);
   }
   const f = fixture({ available: [] }); assert.equal(f.panel.open(), false);
   for (const invalid of [null, 'info', ['bad'], ['images', null]]) {
