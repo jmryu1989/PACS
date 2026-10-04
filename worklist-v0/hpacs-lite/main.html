@@ -1418,6 +1418,8 @@
                   title="서버에 먼저 기록된 초안을 이 화면의 내용으로 덮어씁니다">Keep This Text</button>
           <button id="b-draft-load" style="display:none"
                   title="이 화면의 내용을 버리고 서버에 기록된 초안을 불러옵니다">Load Server Draft</button>
+          <button id="b-approved-view" style="display:none"
+                  title="승인된 판독문 원문과 이 화면의 글을 나란히 봅니다 (아무것도 바꾸지 않습니다)">View Approved Report</button>
           <button id="b-draft-discard" title="쓰다 만 내용을 버리고 저장된 판독문으로 돌아갑니다">Discard Draft</button>
         </div>
         <div class="draftbar" id="holdbar" style="display:none"><span id="holdmsg"></span></div>
@@ -1600,7 +1602,7 @@
           <h5>Recommendation</h5><pre id="stale-head-recommendation"></pre>
         </section>
         <section>
-          <h4>지금 쓰던 내용 (저장되지 않음)</h4>
+          <h4 id="stale-draft-title">지금 쓰던 내용 (저장되지 않음)</h4>
           <h5>Findings</h5><pre id="stale-draft-findings"></pre>
           <h5>Conclusion</h5><pre id="stale-draft-conclusion"></pre>
           <h5>Recommendation</h5><pre id="stale-draft-recommendation"></pre>
@@ -2055,8 +2057,10 @@
     }
     function apiFail(e) { toast("서버 저장 실패: " + e.message, "err"); }
 
-    let appState = {};
-    try { appState = JSON.parse(localStorage.getItem("kin-app") ?? "{}"); } catch (e) {}
+    const appState = {};
+    // Legacy demo data has no authenticated owner; never merge it into this session's drafts.
+    let legacyAppState = {};
+    try { legacyAppState = JSON.parse(localStorage.getItem("kin-app") ?? "{}"); } catch (e) {}
 
     // PATCH로 보낼 수 있는 필드. 서버의 STATE_FIELDS와 같아야 한다.
     // 판독 생애주기는 commitReport, matched·orig는 /match·/unmatch만 움직인다.
@@ -2102,7 +2106,7 @@
       // painting; callers that ignore it behave exactly as before.
       const at = work.capture("document");
       return api("PATCH", `/studies/${encodeURIComponent(uid)}`, body, undefined, at)
-        .then(st => work.commit(at, () => { appState[uid] = mergePolledState(uid, st); syncStudy(uid); render(); }))
+        .then(st => work.commit(at, () => { appState[uid] = mergeObservedReportState(uid, st); syncStudy(uid); render(); }))
         .catch(async e => {
           if (!work.commit(at, () => apiFail(e))) return false;
           let fresh = null;
@@ -2111,7 +2115,7 @@
             fresh = r.studies.find(x => x.uid === uid);
           } catch (e2) {}
           work.commit(at, () => {
-            if (fresh) { appState[uid] = mergePolledState(uid, fresh.state); syncStudy(uid); }
+            if (fresh) { appState[uid] = mergeObservedReportState(uid, fresh.state); syncStudy(uid); }
             render(); refreshRight();
           });
           return false;
@@ -2215,19 +2219,15 @@
     function insertTemplate(t) {
       const why = templateInsertionBlock(t);
       if (why) { toast(why, why === "삽입할 내용이 없습니다" ? "info" : "err"); return false; }
-      for (const k of RFIELDS) {
-        if (!t[k]) continue;
-        const el = $("#" + k);
-        // S3-U6: 상용구도 사람이 둔 커서 자리에 줄 단위로 들어간다. 저장된 상용구에는 CR이
-        // 섞일 수 있어 줄 끝을 먼저 모은다 — 아니면 넣은 뒤 커서가 CR 수만큼 어긋난다.
-        const plan = KinReportCitation.placeBlock(el.value, KinReportCitation.toLf(t[k]),
+      // S3-U6: 상용구도 사람이 둔 커서 자리에 줄 단위로 들어간다. 저장된 상용구에는 CR이
+      // 섞일 수 있어 줄 끝을 먼저 모은다 — 아니면 넣은 뒤 커서가 CR 수만큼 어긋난다.
+      // 쓰기는 편집기의 한 자리(`editReport`)로 간다: 표시를 세우고, 타이핑/Tab처럼 점유를 시작해 다른 판독의에게 편집
+      // 중임이 보이게 한다.
+      return editReport(RFIELDS.filter(k => t[k]).map(k => {
+        const plan = KinReportCitation.placeBlock($("#" + k).value, KinReportCitation.toLf(t[k]),
                                                   caretAt(k), citationGuards(k));
-        el.value = plan.text;
-        el.setSelectionRange(plan.end, plan.end);
-        // 목록 삽입도 타이핑/Tab처럼 점유를 시작해야 다른 판독의에게 편집 중임이 보인다.
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-      return true;
+        return reportEditOf(k, plan.text, plan.end);
+      }));
     }
     $("#tplrows").addEventListener("dblclick", e => {
       if (e.target.closest("button")) return;
@@ -2281,11 +2281,8 @@
       // 줄 끝만 모으는 것은 상용구와 같다 — textarea 값은 CR을 LF로 바꾸므로 그러지 않으면 커서가 어긋난다.
       const plan = KinReportCitation.placeBlock(el.value, KinReportCitation.toLf(ins.text), ins.caret,
                                                 citationGuards(ins.field));
-      el.value = plan.text;
-      el.setSelectionRange(plan.end, plan.end);
-      // 타이핑·상용구처럼 점유를 시작하고, 저장은 기존 자동 저장이 한 번 가져간다.
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      return true;
+      // 타이핑·상용구처럼 표시를 세우고 점유를 시작하며, 저장은 기존 자동 저장이 한 번 가져간다.
+      return editReport([reportEditOf(ins.field, plan.text, plan.end)]);
     }
     function dictationPlacement(pin, text) {
       const el = $("#" + pin.field);
@@ -2431,10 +2428,8 @@
                  : el.id === "recommendation" ? (t.recommendation ?? "")
                  : (t.findings ?? "");
       if (!text) return false;
-      el.value = before.slice(0, before.length - word.length) + text + el.value.slice(pos);
-      const caret = pos - word.length + text.length;
-      el.setSelectionRange(caret, caret);
-      el.dispatchEvent(new Event("input", { bubbles: true }));   // 점유·자동저장이 알아채야 한다
+      // 단축어 자리를 그 칸의 문장으로 바꾼다. 표시·점유·자동 저장은 편집기의 한 자리(`editReport`)가 챙긴다.
+      if (!editReport([{ field: el.id, start: pos - word.length, end: pos, text }])) return false;
       toast(`상용구 "${t.title}" 삽입`, "info");
       return true;
     }
@@ -2864,7 +2859,7 @@
       updateReaderAssignment(s.uid,s.readerAssignment);
       updateNoteSummary(s.uid, s.techNote);
       /**
-       * **서버 상태가 화면 상태를 대신하는 자리는 전부 같은 규칙을 지난다**(`mergePolledState`).
+       * **서버 상태가 화면 상태를 대신하는 자리는 전부 같은 규칙을 지난다**(`mergeObservedReportState`).
        *
        * 여기가 목록 한 줄의 상태를 실제로 갈아끼우는 곳이고, 폴링만이 아니라 **Refresh 단추**가
        * 부르는 `load()`도 이 함수를 지난다(Auto Refresh를 Manual로 두면 그게 유일한 갱신이다).
@@ -2872,7 +2867,7 @@
        * 아직 서버에 보내지 못한 글을 담은 검사가 고른 검사가 아니면 그 글이 사라졌다.
        * 바로 아래 `applyState`가 `appState`를 읽으므로 목록 행의 판 번호도 여기서 맞는다.
        */
-      appState[s.uid] = mergePolledState(s.uid, s.state);
+      appState[s.uid] = mergeObservedReportState(s.uid, s.state);
       return applyState({
         uid: s.uid, pf: "·", assignedReader:readerAssignments.get(s.uid)?.reader?[readerAssignments.get(s.uid).reader.name,readerAssignments.get(s.uid).reader.actor].filter(Boolean).join(" · "):"",
         count: s.count, series: s.series, acc: s.acc,
@@ -5213,7 +5208,7 @@
           return;
         }
         work.commit(at, () => {
-          appState[s.uid] = { ...a, ...st };
+          appState[s.uid] = mergeObservedReportState(s.uid, st);
           Object.assign(s, st.ov ?? {}, { matched: "M", ward: st.ward });
           o.matched = "M"; o.studyUid = s.uid;
           // S4-U5: a list answer requested before this match would re-install the unmatched row; drop it and read again.
@@ -5251,7 +5246,7 @@
           return;
         }
         work.commit(at, () => {
-          appState[s.uid] = { ...a, ...st, ov: undefined };
+          appState[s.uid] = { ...mergeObservedReportState(s.uid, st), ov: undefined };
           // S4-U5: back to what the server last read from the DICOM, never to the client-claimed orig. Without
           // those tags the fields stay until the list read below repaints them.
           const read = studyIdentityModel ? KinStudyIdentity.tags(studyIdentityModel, s.uid) : null;
@@ -5610,8 +5605,8 @@
       const locked = !!r.prelimHidden;
       if (locked) reportPreview.close();
       // 자동 저장된 내 초안은 DOM과 같아 dirty가 아니어도, 잠금 전환이 그 글을 지워서는 안 된다.
-      const preserveValue = !force && (reportDirty() || (locked && !!r.draft));
-      reportRefreshPendingFor = preserveValue ? selectedUid : null;
+      const preserveValue = !force && (reportConverge.has(selectedUid) || (locked && !!r.draft));
+      reportRefreshPendingFor = preserveValue && (locked || reportDirty()) ? selectedUid : null;
       const src = locked ? {} : reportSource();
       // 값을 실제로 넣는 이 호출만이 기준 판을 바꾼다. 입력을 보존하는 호출(폴링·잠금
       // 전환)은 화면의 글자를 그대로 두므로 그 글자가 딛고 선 판도 그대로다.
@@ -5619,7 +5614,8 @@
         recordReportOrigin(selectedUid, renderedOrigin(r));
         // 이 글이 딛고 선 초안 revision도 같은 자리에서 정한다: 다음 초안 쓰기·확정은 "화면이 본 그 초안 위에서"만 통과한다.
         // 화면에 보인 초안은 이 문서가 본 원문으로 기억된다 — 나중의 충돌이 그 글과의 것이면 사람에게 묻지 않고 이어 간다.
-        if (selectedUid) draftClient.observe(selectedUid, r.draftRevision, locked ? undefined : r.draft ?? null);
+        if (selectedUid && !reportConverge.has(selectedUid))
+          draftClient.observe(selectedUid, r.draftRevision, locked ? undefined : r.draft ?? null);
         // 편집기의 글이 바뀐다 — 그 전에 떠난 편집기 범위의 작업(붙여넣기 등)은 이 글 위에 쓰지 않는다.
         work.edited();
       }
@@ -5636,6 +5632,7 @@
         // 원문과 API 값이 줄 끝에서 다를 수 있으므로 문자열 예측이 아니라 결과를 본다.
         if (!preserveValue) {
           const was = el.value;
+          // 서버의 글을 그리는 대입이다(이 문서의 편집이 아니다) — `editReport` 밖의 두 대입 가운데 하나.
           el.value = locked ? "" : (src[sel.slice(1)] ?? "");
           if (el.value !== was) forgetCaret(sel.slice(1));
         }
@@ -5678,6 +5675,14 @@
       const conflict = selectedUid ? draftClient.conflict(selectedUid) : null;
       $("#b-draft-keep").style.display = $("#b-draft-load").style.display = conflict ? "" : "none";
       $("#b-draft-keep").disabled = $("#b-draft-load").disabled = !conflict?.latest;
+      /**
+       * 승인된 판독문 위에 그 승인본과 다른 내 초안이 있다(U5CLI-F11). 편집기는 그 초안을 보이므로 화면의 글은 승인본이
+       * 아니다 — Approve가 나가 있는 동안 더 친 글이든, 추가기재를 쓰다 만 글이든 같다. 이 줄이 그 사실을 말하지 않으면
+       * 판독의는 그 문장이 승인된 판독문에 있다고 믿고, 임상의는 그 문장이 없는 승인본을 읽는다. 충돌·서버 새 내용 안내가
+       * 먼저다(그때 고를 것은 그쪽이다).
+       */
+      const apart = !conflict && !pending && reportApart(r);
+      $("#b-approved-view").style.display = apart ? "" : "none";
       if (conflict) {
         bar.style.display = "flex";
         $("#b-draft-discard").style.display = $("#b-report-reload").style.display = "none";
@@ -5686,7 +5691,7 @@
                            : `서버의 초안을 확인하지 못했습니다 — 연결되면 다시 확인합니다`);
         return;
       }
-      if (!d && !pending) { bar.style.display = "none"; return; }
+      if (!d && !pending && !reportConverge.has(selectedUid)) { bar.style.display = "none"; return; }
       bar.style.display = "flex";
       $("#b-draft-discard").style.display = d ? "" : "none";
       // pending은 초안이 없어도 생긴다. 서버 값과 화면 값이 갈라졌다고 알려놓고
@@ -5699,7 +5704,7 @@
             (d ? ` · 초안 버리기를 누르면 서버 내용으로 돌아갑니다` : ``);
         return;
       }
-      const at = d.at ? String(d.at).replace("T", " ").slice(0, 16) : "";
+      const at = d?.at ? String(d.at).replace("T", " ").slice(0, 16) : "";
       // 내가 이 초안을 쓰기 시작한 뒤 남이 확정을 했다면, 그걸 지금 말해야 한다.
       // 확정 버튼을 누른 다음에야 알게 되면 이미 늦다.
       const behind = reportDraftBehind(r);
@@ -5709,11 +5714,44 @@
        * 쓰면 저장 안 됐다는 사실을 알려주는 자리가 저장됐다고 말하는 셈이다.
        */
       const deferred = !!selectedUid && reportConverge.has(selectedUid);
-      $("#draftmsg").innerHTML = `<b>● 저장 안 된 초안</b> — ` +
-        (deferred ? `${esc(at)}에 이 화면에 담아 두었습니다 · 곧 서버에 저장합니다`
-                  : `${esc(at)}에 자동 저장됨`) +
-        (behind ? ` · <b>주의</b> 이 초안을 쓰는 동안 다른 사람이 v${esc(r.version)}을 확정했습니다`
-                : ` · 확정하려면 Save 또는 Approve`);
+      // 서버가 이 검사에 쓸 수 없다고 답해 자동 저장을 멈춘 글이다. 한 번 알린 뒤에는 이 줄이 그 사실을 말한다.
+      const stopped = deferred && reportSaveFailures.get(selectedUid) === "stop";
+      // 누가 확정했는지는 여기서 알 수 없다 — 내가 누른 Approve가 떠난 뒤의 쓰기도 이 자리에 온다. 아는 사실만 말한다.
+      $("#draftmsg").innerHTML =
+        (apart ? `<b>● 승인된 판독문에 포함되지 않은 글이 있습니다</b> — 이 화면의 글은 승인본(v${esc(r.version)})과 다릅니다 · `
+               : `<b>● 저장 안 된 초안</b> — `) +
+        (stopped ? `이 화면에 담아 두었습니다 · 서버가 저장을 받지 않아 자동 저장을 멈췄습니다 — 글을 고치면 다시 시도합니다`
+         : deferred ? `이 화면에 담아 두었습니다 · 서버 저장은 아직 확인되지 않았습니다`
+                  : `${esc(at)}에 ${apart ? "초안으로 " : ""}자동 저장됨`) +
+        (behind ? ` · <b>주의</b> 이 초안을 쓰기 시작한 뒤 v${esc(r.version)}이 확정됐습니다`
+                : `<span id="drafthint"></span>`);
+      renderDraftHint();
+    }
+
+    /**
+     * 표시줄이 안내하는 확정 단추는 **지금 눌리는 것뿐이다.** 승인된 판독문에서 Save·Approve는 잠겨 있는데 "확정하려면 Save
+     * 또는 Approve"라고 쓰면 사람은 갈 수 없는 길을 안내받는다(U5CLI-F11). 무엇이 눌리는가는 단추를 잠그는
+     * `updateReportButtons`가 정한 그대로 읽는다 — 같은 판단을 여기서 다시 계산하면 언젠가 한쪽만 고쳐진다. 그래서 단추를
+     * 다시 잠그거나 푸는 그 함수가 끝에 이것을 부른다. 확정이 나가 있는 동안은 눌리는 것이 없으므로 안내도 없다.
+     */
+    function renderDraftHint() {
+      const hint = $("#drafthint");
+      if (!hint) return;
+      const open = id => { const el = $(id); return !!el && !el.disabled; };
+      hint.textContent = open("#b-addendum") ? " · 추가기재로 확정하려면 More ▸ Addendum"
+        : open("#b-save") && open("#b-approve") ? " · 확정하려면 Save 또는 Approve"
+        : open("#b-save") ? " · 확정하려면 Save" : open("#b-approve") ? " · 확정하려면 Approve" : "";
+    }
+
+    /**
+     * 승인된 판독문과 내 초안이 갈라져 있는가. 기록된 사실만 본다: 그 검사가 승인 상태(RS A)이고, 내 초안이 있고, 그 초안의
+     * 세 칸이 승인본의 세 칸과 다르다. 이 문서가 한 일(무엇을 언제 쳤는가)을 보지 않으므로 새로 고침·다른 검사에 다녀옴·
+     * 다음 날 다시 열기에서도 같은 답이다. "서버가 아직 확인하지 않은 글" 표시(`reportConverge`)와는 다른 물음이다 —
+     * 자동 저장된 초안도 승인본과는 여전히 다르다.
+     */
+    function reportApart(r) {
+      const d = r?.prelimHidden ? null : r?.draft;
+      return !!d && r.rs === "A" && RFIELDS.some(k => (d[k] ?? "") !== (r[k] ?? ""));
     }
 
     /**
@@ -5731,15 +5769,17 @@
       if (!uid || !appState[uid]?.draft) return;
       if (!confirm("쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?")) return;
       const at = work.capture("document");
-      let revision;
+      let state = { ...appState[uid], draft: null };
       if (serverMode) {
         // 버리기도 초안의 경계를 넘기는 명령이다: 화면이 본 그 초안(revision)일 때만 버려진다.
+        // 버리기는 이 문서의 글을 보내는 명령이 아니다: 거절되거나 결과를 모르면 표시는 버리기 전 그대로다(없었으면 없다 —
+        // 버리려던 초안을 자동 저장이 되살리지 않는다, U5CLI-F10).
         const result = await draftClient.discard(uid, { owner: draftOwner, context: at });
-        if (result.outcome !== "saved") { draftNotSaved(uid, at, result, { converge: false }); return false; }
-        revision = result.envelope.revision;
+        if (result.outcome !== "saved") { draftNotSaved(uid, at, result, { converge: false, discard: true }); return false; }
+        state = result.state;
       }
       return work.commit(at, () => {
-        appState[uid] = { ...appState[uid], draft: null, ...(revision ? { draftRevision: revision } : {}) };
+        appState[uid] = replaceReportState(uid, state, { confirmed: serverMode });
         // 초안 행이 사라지면 그 행의 인용도 함께 사라진다. 머리 판의 인용은 그대로이므로
         // 모르는 상태로 되돌리고 `loadReport`의 전용 읽기가 남은 것을 다시 가져온다.
         citations.forget(uid);
@@ -5764,6 +5804,7 @@
      * 띄우지 않는다. 서버의 초안을 아직 읽지 못했으면(연결 실패) 여기서 다시 읽는다.
      */
     function openDraftConflict(uid) {
+      if (uid === selectedUid) keepReportEditor();
       if (uid === selectedUid) renderDraftBar();
       toast("서버의 초안이 이 화면과 달라 저장하지 않았습니다 — 입력한 내용은 그대로 있습니다. 초안 표시줄에서 고르세요.", "err");
       if (!draftClient.conflict(uid)?.latest) readDraftConflict(uid);
@@ -5777,33 +5818,31 @@
     $("#b-draft-keep").addEventListener("click", () => {
       const uid = selectedUid;
       if (!uid || !draftClient.conflict(uid)?.latest || reportWriteBlock()) return;
+      keepReportEditor();
       if (!draftClient.resolve(uid)) return;
       markConverge(uid);
       renderDraftBar();
       stashReport();
     });
-    $("#b-draft-load").addEventListener("click", () => {
-      const uid = selectedUid, latest = uid ? draftClient.conflict(uid)?.latest : null;
-      if (!latest) return;
-      if (!draftClient.resolve(uid)) return;
-      const s = latest.snapshot;
-      appState[uid] = { ...appState[uid], draftRevision: latest.revision,
-        draft: s ? { findings: s.findings, conclusion: s.conclusion, recommendation: s.recommendation,
-                     baseVersion: s.baseVersion, at: latest.updatedAt ?? new Date().toISOString() } : null };
-      // 인용·구조화의 확인 상태는 버린 글에 대한 것이다. 전용 읽기가 불러온 초안의 것을 다시 가져온다.
-      citations.forget(uid); citationNotes.delete(uid);
-      structureState.forget(uid); structureNotes.delete(uid);
-      reportConverge.delete(uid);
-      loadReport({ force: true });
-      updateReportButtons();
-      toast("서버의 초안을 불러왔습니다", "info");
-    });
-    $("#b-report-reload").addEventListener("click", () => {
-      // 표시 뒤 상태가 다시 바뀌었을 수도 있다. 가려진 판독문을 force로 빈 값에 덮지 않는다.
-      if (!selectedUid || appState[selectedUid]?.prelimHidden) return;
-      loadReport({ force: true });
-      updateReportButtons();
-    });
+    $("#b-draft-load").addEventListener("click", reloadServerReport);
+    $("#b-report-reload").addEventListener("click", reloadServerReport);
+
+    async function reloadServerReport() {
+      const uid = selectedUid, at = work.capture("editor");
+      if (!uid || appState[uid]?.prelimHidden) return;
+      try {
+        await draftClient.settled(uid);
+        if (!work.admits(at)) return;
+        const b = await api("GET", "/bootstrap", undefined, undefined, at);
+        work.commit(at, () => {
+          appState[uid] = replaceReportState(uid, b.states?.[uid]);
+          syncStudy(uid);
+          loadReport({ force: true });
+          updateReportButtons();
+          toast("서버의 판독문을 불러왔습니다", "info");
+        });
+      } catch (e) { work.commit(at, () => toast("서버 판독문을 불러오지 못했습니다: " + e.message, "err")); }
+    }
 
     /**
      * ── 낡은 초안 재기준 ──
@@ -5832,26 +5871,83 @@
       // 모양이 아니면 아무것도 "승인본"이라고 보여주지 않는다. 그때는 일반 실패로 끝낸다.
       if (!head) { toast("저장 실패: " + e.message, "err"); return; }
       stalePane = { uid, seq: ++staleSeq, selSeq: selectionSeq, head };
-      $("#stale-msg").textContent =
-        `이 초안은 v${head.draftBaseVersion ?? "?"}을 기준으로 씁니다. 그 뒤 v${head.version}이 승인됐습니다 — ` +
-        `아래 승인본을 확인한 뒤 정하세요. 쓰던 내용은 그대로 두었습니다.`;
+      drawApprovedPane(head, {
+        title: "Approved Report Changed",
+        message: `이 초안은 v${head.draftBaseVersion ?? "?"}을 기준으로 씁니다. 그 뒤 v${head.version}이 승인됐습니다 — ` +
+          `아래 승인본을 확인한 뒤 정하세요. 쓰던 내용은 그대로 두었습니다.`,
+        mine: "지금 쓰던 내용 (저장되지 않음)", rebase: true });
+      toast(`승인본이 v${head.version}으로 바뀌어 추가기재를 붙이지 못했습니다 — 승인본을 확인하세요`, "err");
+    }
+    /** 승인본(서버가 준 다섯 칸)과 편집기의 지금 글을 나란히 그린다. 두 쓰임(재기준, 승인본 보기)이 같은 창을 쓴다. */
+    function drawApprovedPane(head, { title, message, mine, rebase }) {
+      $("#stale-title").textContent = title;
+      $("#stale-msg").textContent = message;
       $("#stale-head-title").textContent =
         `승인본 v${head.version}` + (head.updatedBy ? ` · ${displayActor(head.updatedBy)}` : "");
+      $("#stale-draft-title").textContent = mine;
       for (const k of RFIELDS) {
         $("#stale-head-" + k).textContent = head[k];
         $("#stale-draft-" + k).textContent = $("#" + k).value;
       }
+      $("#stale-rebase").style.display = rebase ? "" : "none";
       $("#stale-rebase").textContent = `v${head.version} 기준으로 다시 잡기`;
-      $("#stale-rebase").disabled = false;
+      $("#stale-rebase").disabled = !rebase;
       $("#stale-status").textContent = "";
       $("#stalemodal").classList.add("show");
-      toast(`승인본이 v${head.version}으로 바뀌어 추가기재를 붙이지 못했습니다 — 승인본을 확인하세요`, "err");
     }
     function closeStaleRebase() { stalePane = null; $("#stalemodal").classList.remove("show"); }
 
+    /**
+     * ── 승인본 보기 (U5CLI-F11) ──
+     *
+     * 승인된 판독문 위에 그와 다른 내 초안이 있으면 편집기는 초안을 보인다. 무엇이 승인됐는지를 사람이 **그대로** 볼 수
+     * 있어야 한다: 서버의 판 이력에서 지금의 승인 판을 읽어, 재기준 창과 같은 창에 편집기의 글과 나란히 놓는다. 읽기만
+     * 한다 — 편집기도 초안도 기준 판도 바꾸지 않는다. 화면이 들고 있는 사본으로 그리지 않는 이유는 재기준 창과 같다:
+     * 사람이 확인하려는 것이 바로 "서버에 승인된 것"이다. 그 뒤의 길은 기존 그대로다 — 닫고 Addendum(추가기재),
+     * Discard Draft(승인본만 남긴다), 또는 닫고 계속 쓴다.
+     */
+    async function viewApprovedReport() {
+      const uid = selectedUid;
+      if (!uid || !reportApart(appState[uid])) return;
+      // 답이 올 때도 그때 그 선택이어야 한다(검사 범위의 문맥은 UID와 선택 순번을 함께 본다 — A→B→A도 같은 선택이
+      // 아니다). 다른 검사의, 또는 다시 그려진 편집기 옆에 이 승인본을 놓지 않는다.
+      const at = work.capture("study");
+      let head = null;
+      try {
+        if (serverMode) {
+          const list = await api("GET", `/studies/${encodeURIComponent(uid)}/report/versions`, undefined, undefined, at);
+          // 폐기된 초안의 기록은 판독문의 판이 아니다. 남은 것 가운데 가장 새 판이 지금의 승인본이어야 한다.
+          const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded")
+            .sort((a, b) => b.version - a.version)[0];
+          if (top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action))
+            head = { version: top.version, updatedBy: typeof top.author === "string" ? top.author : "",
+              ...Object.fromEntries(RFIELDS.map(k => [k, typeof top[k] === "string" ? top[k] : ""])) };
+        } else {
+          // 서버 없는 모드에는 이력이 없다 — 이 브라우저의 저장본이 곧 승인본이다.
+          const a = appState[uid];
+          head = { version: a.version ?? 0, updatedBy: "", ...Object.fromEntries(RFIELDS.map(k => [k, a[k] ?? ""])) };
+        }
+      } catch (e) {
+        work.commit(at, () => toast("승인본을 불러오지 못했습니다: " + e.message, "err"));
+        return;
+      }
+      work.commit(at, () => {
+        // 승인본이 아닌 것을 "승인본"이라고 보여 주지 않는다(그 사이 판독이 취소됐거나 이력을 읽을 수 없다).
+        if (!head) { toast("승인본을 확인하지 못했습니다 — 목록을 새로 고친 뒤 다시 확인하세요", "err"); return; }
+        stalePane = { uid, seq: ++staleSeq, selSeq: selectionSeq, head, view: true };
+        drawApprovedPane(head, {
+          title: "Approved Report",
+          message: `왼쪽이 승인된 판독문(v${head.version})입니다. 오른쪽은 지금 이 화면의 글이고, 승인된 판독문에 포함되지 않았습니다.` +
+            ($("#b-addendum").disabled ? `` : ` 승인본에 덧붙이려면 닫고 More ▸ Addendum을 누르세요.`),
+          mine: "이 화면의 글 (승인본에 포함되지 않음)", rebase: false });
+      });
+    }
+    $("#b-approved-view").addEventListener("click", viewApprovedReport);
+
     async function rebaseDraft() {
       const pane = stalePane;
-      if (!pane || staleBusy) return;
+      // 승인본 보기로 연 창에는 다시 잡을 기준이 없다(단추도 없다).
+      if (!pane || pane.view || staleBusy) return;
       // 화면에 쓰기 직전에 UID와 순번을 함께 확인한다. 안내가 열린 사이에 검사를 옮겼다면
       // 지금 textarea에 있는 글은 **다른 검사의 글**이다 (교훈: A→B→A — 돌아와도 같은 선택이 아니다).
       if (pane.uid !== selectedUid || pane.seq !== staleSeq || pane.selSeq !== selectionSeq) {
@@ -5890,10 +5986,12 @@
       work.commit(at, () => {
         // 서버에 남은 것은 이 검사의 초안이다. 화면 갱신은 지금 그 검사·그 안내일 때만 한다.
         const a = appState[pane.uid] ?? {};
-        appState[pane.uid] = { ...a, draftRevision: result.envelope.revision,
-          draft: { ...next, baseVersion: pane.head.version, at: new Date().toISOString() } };
-        recordReportOrigin(pane.uid, pane.head.version);
-        reportConverge.delete(pane.uid);
+        appState[pane.uid] = { ...a, draftRevision: result.envelope.revision };
+        if (RFIELDS.every(k => (a.draft ?? a)[k] === next[k])) {
+          appState[pane.uid].draft = { ...next, baseVersion: pane.head.version, at: new Date().toISOString() };
+          recordReportOrigin(pane.uid, pane.head.version);
+          reportConverge.delete(pane.uid);
+        }
         if (pane.seq !== staleSeq) return;
         closeStaleRebase();
         if (selectedUid === pane.uid) renderDraftBar();
@@ -5936,28 +6034,51 @@
     let citationListOpen = false;
 
     /**
-     * **수렴 표시**(B3). 삽입이 버려졌거나 실패했거나 응답을 못 본 뒤에는 서버 행과
-     * 화면이 갈라져 있을 수 있는데, 그 직전에 자동 저장이 한 번 돌았다면 `reportDirty()`는
-     * "같다"고 답한다(초안 사본과 화면이 같으므로). 그 상태로 두면 다음 자동 저장이
-     * 건너뛰고 갈라짐이 그대로 남는다. 그래서 dirty 비교와 **별개의 명시 표시**를 둔다.
+     * 검사마다 하나의 사실: **이 문서에 서버가 아직 확인하지 않은 글이 있다.** 글을 비교해 짐작하지 않고 이 문서가 한 일로만
+     * 세운다 — 편집기의 글을 바꿨거나(`recordReportEdit`: 사람의 타건과 `editReport`), 그 글을 싣고 나간 쓰기가 있다(초안
+     * 명령 경로의 `onWrite`: write·preserve·writeOnUnload). 서버에서 온 글(목록·폴링·bootstrap·다른 탭의 저장)과 버리기·
+     * 확정 명령은 세우지 않는다. 내리는 것은 지금의 글 그대로를 서버가 확인했을 때와 사람이 서버 것을 골랐을 때·버렸을 때뿐이다.
+     * 자동 저장·로그아웃 보존·떠나기 경고·폴링의 입력 보호가 모두 이 표시 하나만 본다.
      */
     const reportConverge = new Set();
+    /**
+     * 자동 저장이 실패한 검사와 그 뒤에 할 일. 같은 글을 20초마다 다시 보내 같은 실패를 다시 알리지 않는다: 처음 한 번만
+     * 알린다. 서버가 그 검사에 쓸 수 없다고 답한 거절(4xx — 권한·기관 이동으로 목록에서 사라진 검사 등)은 다시 보내도 같은
+     * 답이므로 자동 저장을 멈추고("stop"), 지나갈 수 있는 실패(5xx·결과 모름)는 조용히 다시 해 본다("retry"). 글과 표시는
+     * 어느 쪽이든 그대로다 — Log out과 떠나기 경고는 표시만 보므로 그 글을 그대로 묻는다. 그 검사의 글이 다시 바뀌거나,
+     * 저장이 확인되거나, 연결이 되살아나면 지운다.
+     */
+    const reportSaveFailures = new Map();
     function markConverge(uid) {
       if (!uid) return;
       reportConverge.add(uid);
       if (uid === selectedUid) renderDraftBar();
     }
-    /** 저장해야 하는가 — 글자가 달라졌거나, 수렴이 필요하다고 표시돼 있거나. */
+    /** Only this document's recorded edits/commands can require a write. */
     function reportNeedsWrite() {
-      return reportDirty() || (!!selectedUid && reportConverge.has(selectedUid));
+      return !!selectedUid && reportConverge.has(selectedUid);
+    }
+    /**
+     * 삽입(인용·구조화)이 싣고 나가는 글은 지금 글에 넣을 문장을 더한, 아직 화면에 없는 글이다. 그 쓰기도 표시를 세운다
+     * (답을 기다리는 동안 폴링이 편집기를 다시 그리지 않게 한다). 그런데 서버가 그 삽입을 기록하지 않았다고 분명히 답했고
+     * (거절), 삽입을 누른 뒤로 편집기가 그대로이며, 삽입 전에 표시가 없었으면 — 이 문서에 확인되지 않은 글은 여전히 없다.
+     * 그때 표시를 남기면 고치지 않은 검사의 저장된 판독문이 20초 뒤 초안으로 보내진다(U5CLI-F10과 같은 부류).
+     * `pristineEditor`는 삽입을 보내기 전에 "표시가 없는 지금의 편집기"를 잡고(표시가 있으면 null), `insertLeftNoText`는
+     * 실패한 삽입이 그 상태를 그대로 두었는지를 답한다. 결과를 모르는 삽입(서버에 닿았을 수 있다)과 충돌은 표시를 남긴다.
+     */
+    function pristineEditor(uid) {
+      return uid === selectedUid && !reportConverge.has(uid) ? work.capture("editor") : null;
+    }
+    function insertLeftNoText(pristine, result) {
+      return !!pristine && work.admits(pristine)
+        && (result.outcome === "owner" || (result.outcome === "refused" && result.answer?.status !== 503));
     }
 
     /**
      * 폴링이 한 검사의 상태를 합칠 때 **화면 것을 지켜야 하는 칸**. 규칙은 여기 하나뿐이고
      * 폴링의 세 자리가 모두 이것을 쓴다 — 세 곳이 각자 판단하면 언젠가 한 곳만 고쳐진다.
      *
-     *   version — 지금 고른 검사의 판 번호는 **화면이 본 판**이어야 한다. 폴링이 몰래 올리면
-     *     다음 저장의 낙관적 락이 본 적 없는 승인본을 조용히 통과한다.
+     *   version — 고른 검사에 로컬 편집이 있으면 그 글이 딛고 선 판을 지킨다.
      *   draft  — 아직 서버에 보내지 못한 글. 삽입이 나가 있는 동안 검사를 옮기면 그 타건은
      *     **여기에만** 담겨 있고(쓰기는 미뤘다), 폴링이 서버 투영으로 갈아끼우면 사람이 친
      *     글이 어디에도 남지 않는다. 그래서 수렴 표시가 있는 검사는 고르지 않았어도 지킨다.
@@ -5965,8 +6086,8 @@
      */
     function preservedLocal(uid, mine) {
       const local = {};
-      if (uid === selectedUid) local.version = mine?.version ?? 0;
-      if (uid === selectedUid || reportConverge.has(uid)) {
+      if (reportConverge.has(uid)) {
+        if (uid === selectedUid) local.version = mine?.version ?? 0;
         local.draft = mine?.draft ?? null;
         // 초안과 그 revision은 한 쌍이다. 화면의 초안을 지키면서 revision만 폴링의 것으로 바꾸면, 본 적 없는 서버 초안을
         // 기준으로 쓰게 된다.
@@ -5976,9 +6097,31 @@
       return local;
     }
     /** 폴링 응답 한 건을 그 검사의 화면 상태에 합친다. 가려진 예비 판독은 서버가 본문을 안 준다. */
-    function mergePolledState(uid, st) {
+    function mergeObservedReportState(uid, st) {
+      // An observation can update an idle document, including its draft command baseline.
       const mine = appState[uid] ?? {};
+      if (!reportConverge.has(uid) && st)
+        draftClient.observe(uid, st.draftRevision, st.prelimHidden ? undefined : st.draft ?? null);
       return { ...mine, ...st, ...preservedLocal(uid, mine) };
+    }
+
+    /**
+     * A person's server choice (or confirmed discard/commit) replaces all report baselines together.
+     *
+     * 읽어 온 상태로 바꾸는 선택(Load Server Draft·Reload Report·최신 불러오기)은 초안 명령 경로의 기준도 함께 바꿔야 하므로
+     * 그 검사에 나가 있는 명령이 없을 때만 된다. `confirmed`는 확정·버리기의 답이다: 그 명령이 기준을 이미 그 상태로 옮겼고
+     * 뒤에 줄 선 명령은 그 위에서 나간다 — 서버가 받아들인 확정을 여기서 실패로 바꾸지 않는다.
+     */
+    function replaceReportState(uid, st, { confirmed = false } = {}) {
+      const rebased = !!st && (demoMode || draftClient.replace(uid, st.draftRevision, st.draft ?? null));
+      if (!st || (!rebased && !confirmed))
+        throw new Error("서버 판독문의 기준을 확인하지 못했습니다. 다시 불러오세요.");
+      reportConverge.delete(uid);
+      reportSaveFailures.delete(uid);
+      recordReportOrigin(uid, renderedOrigin(st));
+      citations.forget(uid); citationNotes.delete(uid);
+      structureState.forget(uid); structureNotes.delete(uid);
+      return { ...appState[uid], ...st, draft: st.draft ?? null };
     }
 
     /** 삽입이 나가 있는 동안의 비-keepalive 초안 저장을 **전부** 비켜세운다(B1). */
@@ -6002,7 +6145,9 @@
      * 글을 덮지 못하고, 결과를 모르는 쓰기 뒤에는 다음 명령이 서버 상태부터 읽는다. 저장 확인은 답의 봉투(작성자·revision·
      * 전체 원문)가 보낸 것과 전부 같을 때뿐이다.
      */
-    const draftClient = KinReportDraftClient.create({ transport, base: API });
+    const draftClient = KinReportDraftClient.create({ transport, base: API,
+      // 이 문서의 글을 싣고 나간 쓰기는 답이 확인할 때까지 표시로 남는다. 버리기·확정은 표시를 세우지 않는다(U5CLI-F10).
+      onWrite: uid => reportConverge.add(uid) });
 
     /** 점유 거절(REPORT_HELD): 누가 잡고 있는지 화면에 반영하고 그 검사에 한 번만 알린다. */
     function noteHeld(uid, holder) {
@@ -6028,10 +6173,10 @@
      * 쓰기를 멈추고 사람이 한 번 고르게 하고(openDraftConflict), 결과를 모르는 쓰기와 거절은 수렴 표시로 남겨 저장된 것처럼
      * 두지 않는다. 떠나지 않은 요청(문맥이 무효), 서버가 알린 세션 종료(종료 조정이 맡는다), 더 새 저장에 합쳐진 쓰기는 알릴
      * 실패가 아니다. 작성자 대조의 거절은 그 쓰기 하나의 거절이다 — 아무것도 다른 계정으로 저장되지 않았고, 화면을 닫을
-     * 일이 아니다. `quiet`는 부른 쪽이 자기 자리에 이미 알렸을 때, `converge: false`는 화면의 글을 다시 보낼 일이 아닐
-     * 때(버리기)다.
+     * 일이 아니다. `quiet`는 부른 쪽이 자기 자리에 이미 알렸을 때(또는 같은 실패를 이미 알렸을 때), `converge: false`는
+     * 화면의 글을 다시 보낼 일이 아닐 때(버리기, 아무것도 남기지 않은 삽입 거절), `discard`는 실패한 것이 버리기일 때다.
      */
-    function draftNotSaved(uid, at, result, { quiet = false, converge = true } = {}) {
+    function draftNotSaved(uid, at, result, { quiet = false, converge = true, discard = false } = {}) {
       if (result.outcome === "unsent" || result.outcome === "auth" || result.outcome === "merged") return;
       work.commit(at, () => {
         if (converge) reportConverge.add(uid);
@@ -6039,7 +6184,11 @@
         if (result.code === "REPORT_HELD") { noteHeld(uid, result.answer?.body?.holder); return; }
         if (uid === selectedUid) renderDraftBar();
         if (quiet) return;
-        toast(result.outcome === "unknown"
+        // 버리기의 실패는 저장의 실패가 아니다 — 무엇이 되지 않았는지를 그대로 말한다. 화면의 글은 어느 쪽이든 그대로다.
+        if (discard) toast(result.outcome === "unknown"
+          ? "초안을 버렸는지 확인하지 못했습니다 — 화면은 그대로 두었습니다. 서버의 상태는 다음 새로 고침에 반영됩니다"
+          : "초안을 버리지 못했습니다: " + draftFailureText(result), "err");
+        else toast(result.outcome === "unknown"
           ? "초안 저장을 확인하지 못했습니다 — 입력한 내용은 그대로 있고, 다음 저장이 서버 상태부터 확인합니다"
           : "서버 저장 실패: " + draftFailureText(result), "err");
       });
@@ -6340,6 +6489,7 @@
       // 이 적용을 시작한 문맥(세션·작업 세대). 검사와 창의 세대는 아래 epoch이 본다 — 떠난 검사에도 수렴 표시는 남겨야 한다.
       // 쓰기는 초안의 명령 경로로 간다: 작성자·초안 revision·전체 원문에 이 적용을 실어 한 번에 기록한다.
       const at = work.capture("document");
+      const pristine = pristineEditor(uid);
       const result = await draftClient.write(uid, { ...content, baseVersion }, { owner: draftOwner, context: at,
         operation: { structure: {
           op: pane.previous ? "replace" : "apply", field: pane.field,
@@ -6353,16 +6503,18 @@
       wakeIdle();
       if (result.outcome !== "saved") {
         pane.busy = false;
+        const untouched = insertLeftNoText(pristine, result);
         work.commit(at, () => {
           // 판독문은 한 글자도 바뀌지 않았다. 다만 요청이 서버에 닿았는지는 알 수 없으므로
-          // 수렴을 표시하고 구조화 상태를 모르는 것으로 되돌린다.
-          markConverge(epoch.uid);
+          // 수렴을 표시하고 구조화 상태를 모르는 것으로 되돌린다 — 서버가 기록하지 않았다고 분명히 답했고 고친 글도
+          // 없으면 표시는 적용 전 그대로다.
+          if (untouched) reportConverge.delete(epoch.uid); else markConverge(epoch.uid);
           invalidateStructure(epoch.uid);
           pane.status = "적용하지 못했습니다: " + draftFailureText(result) + " — 판독문은 그대로입니다.";
           // 그 사이 이 창이 닫히고 다른 창이 열렸다면 남의 창에 이 실패를 그리지 않는다.
           if (structPane === pane) renderStructure();
         });
-        draftNotSaved(epoch.uid, at, result, { quiet: true });
+        draftNotSaved(epoch.uid, at, result, { quiet: true, converge: !untouched });
         return;
       }
       work.commit(at, () => {
@@ -6377,12 +6529,9 @@
           toast("다른 검사로 옮기기 전에 누른 구조화 적용의 응답이 늦게 도착해 화면에 반영하지 않았습니다.", "err");
           return;
         }
-        const el = $("#" + pane.field);
-        el.value = fresh.text;
-        el.setSelectionRange(fresh.end, fresh.end);
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-        appState[uid] = { ...appState[uid], draft: { ...content, baseVersion, at: new Date().toISOString() } };
-        reportConverge.delete(uid);
+        editReport([reportEditOf(pane.field, fresh.text, fresh.end)]);
+        // The edit retained all current fields, including edits made while this command was out.
+        if (sameDraftText(appState[uid]?.draft, { ...content, baseVersion })) reportConverge.delete(uid);
         // 새 `sid`를 지어내지 않는다 — 서버가 무엇을 기록했는지는 전용 읽기 하나가 말한다.
         invalidateStructure(uid);
         if (structPane === pane) closeStructure();
@@ -6783,6 +6932,7 @@
          * 말하므로, 뒤늦게 도착해 확인됨으로 굳으면 새 `cid`가 빠진 유지 목록이 만들어진다.
          */
         citationReads.delete(pane.uid);
+        const pristine = pristineEditor(pane.uid);
         // 쓰기는 초안의 명령 경로로 간다: 작성자·초안 revision·전체 원문에 이 삽입을 실어 한 번에 기록한다.
         const result = await draftClient.write(pane.uid, { ...content, baseVersion }, { owner: draftOwner, context: at,
           operation: { insert: { field, findingId: pane.findingId, findingRevision: pane.findingRevision,
@@ -6792,11 +6942,13 @@
         insertInFlight = false;
         wakeIdle();
         if (result.outcome !== "saved") {
+          const untouched = insertLeftNoText(pristine, result);
           work.commit(at, () => {
             // 판독문은 한 글자도 바뀌지 않았다. 다만 이 요청이 서버에 닿았는지는 알 수 없으므로
             // 다음 자동 저장이 서버 행을 화면에 맞추도록 표시하고, 인용 상태는 **모르는 것**으로
-            // 되돌린다 — 아는 척하는 유지 목록이 그 사이 기록된 증언을 지울 수 있다.
-            markConverge(epoch.uid);
+            // 되돌린다 — 아는 척하는 유지 목록이 그 사이 기록된 증언을 지울 수 있다. 서버가 기록하지 않았다고
+            // 분명히 답했고 고친 글도 없으면 표시는 삽입 전 그대로다.
+            if (untouched) reportConverge.delete(epoch.uid); else markConverge(epoch.uid);
             invalidateCitations(epoch.uid);
             // 이 요청이 서버에 닿았는지 모르는 것은 구조화 쪽도 같다. 같은 자리에서 같이 되돌린다.
             invalidateStructure(epoch.uid);
@@ -6805,7 +6957,7 @@
             if (result.code === "REPORT_CITATION_STALE" || result.code === "REPORT_CITATION_SOURCE")
               toast("소견이 그 사이 바뀌었습니다 — Image Findings에서 Reload Findings를 누른 뒤 다시 인용하세요", "err");
           });
-          draftNotSaved(epoch.uid, at, result, { quiet: true });
+          draftNotSaved(epoch.uid, at, result, { quiet: true, converge: !untouched });
           return;
         }
         const answer = result.answer.body;
@@ -6828,14 +6980,11 @@
         // 달라진 것은 자리뿐이고, 들어가는 문자열은 방금 서버에 보낸 그 문자열이다.
         const el = $("#" + field);
         const shown = screenPlan(field, pane.block, before, plan2);
-        el.value = shown.text;
         // 커서는 넣은 글 끝에 선다. 가운데에 넣고 화면 끝으로 튀면 사람이 자기 글을 다시 찾아야 한다.
-        el.setSelectionRange(shown.end, shown.end);
-        el.dispatchEvent(new Event("input", { bubbles: true }));
+        editReport([reportEditOf(field, shown.text, shown.end)]);
         // 서버 행은 방금 우리가 보낸 세 칸이다. 초안 표시가 그 사실을 말하게 한다.
-        appState[pane.uid] = { ...appState[pane.uid],
-          draft: { ...content, baseVersion, at: new Date().toISOString() } };
-        reportConverge.delete(pane.uid);
+        // A confirmed insertion does not confirm later typing in any of the three fields.
+        if (sameDraftText(appState[pane.uid]?.draft, { ...content, baseVersion })) reportConverge.delete(pane.uid);
         /**
          * B2: **확인된 상태만** 넓힌다. 확인 전이었다면 한 건짜리 목록을 지어내지 않는다 —
          * 그 목록을 실어 보내면 화면이 본 적 없는 나머지 증언이 전부 지워진다.
@@ -6908,7 +7057,7 @@
      * 충돌했거나, 결과를 모른다. 확인되지 않은 글은 수렴 표시로 남아 다음 저장이 다시 가져간다.
      */
     async function stashReport({ keepalive = false } = {}) {
-      if (!selectedUid || heldByOther(cur())) return;
+      if (!selectedUid) return;
       const uid = selectedUid;
       const a = appState[uid] ?? {};
       const next = {
@@ -6927,23 +7076,13 @@
        * 내 초안이 남의 판독문 자리에 생긴다. 서버도 403으로 막는다.
        * 판독 권한이 없을 때(기사)도 같은 이유로 보내지 않는다.
        */
-      if (a.prelimHidden || !KinAuth.has("radiologist")) return;
-      /**
-       * 서버가 죽었으면 초안도 저장하지 않는다. 여기서 `draft`를 세워두면
-       * 표시줄이 "07:44에 자동 저장됨"이라고 **거짓말**을 한다 —
-       * 저장 안 됐다는 사실을 알려주는 자리가 저장됐다고 말하는 셈이다.
-       * 글자는 textarea에 그대로 있고, 연결이 돌아오면 다음 자동 저장이 가져간다.
-       */
-      if (offline) return;
-      // 충돌이 남아 있는 동안에는 스스로 쓰지 않는다. 사람이 초안 표시줄에서 정한 뒤에 다시 쓴다.
-      if (serverMode && draftClient.conflict(uid)) return;
-
+      if (!KinAuth.has("radiologist")) return;
       const empty = RFIELDS.every(k => !next[k]);
       // 화면에 그려진 판이 기준이다. 초안이 아직 없을 때도 마찬가지다 —
       // 첫 자동 저장이 남의 판 번호를 기준으로 박아두면 그 뒤 모든 판단이 그 위에 선다.
       const baseVersion = reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0);
-      // 비운 초안은 초안이 없는 것과 같다 — 안 그러면 빈 초안이 확정본을 가린다.
-      const draft = empty ? null : { ...next, baseVersion, at: new Date().toISOString() };
+      // Keep an unconfirmed clear as an empty edit; only a confirmed clear may reveal the final report.
+      const draft = { ...next, baseVersion, at: new Date().toISOString() };
       /**
        * **삽입이 나가 있는 동안 비켜서는 것은 쓰기뿐이다 (B1).**
        *
@@ -6959,30 +7098,172 @@
       appState[uid] = { ...a, draft };
       // 화면에 담아 둔 글은 아직 저장된 것이 아니다. 저장이 확인될 때까지 수렴 표시를 세워 둔다 — 미룬 쓰기, 거절, 결과를
       // 모르는 쓰기, 로그아웃 준비가 버린 답 뒤에도 다음 저장이 이 글을 다시 가져간다.
-      if (serverMode) reportConverge.add(uid);
+      if (!demoMode) reportConverge.add(uid);
       if (selectedUid === uid) renderDraftBar();
-      if (deferWrite) return;
-      if (!serverMode) { saveApp(); return "saved"; }
+      draftClient.keep(uid, { ...next, baseVersion });
+      if (deferWrite || offline || a.prelimHidden || heldByOther(cur()) || (serverMode && draftClient.conflict(uid))) return;
+      if (!serverMode) { if (empty) appState[uid].draft = null; saveApp(); reportConverge.delete(uid); return "saved"; }
 
+      return saveReportDraft(uid, draft, { keepalive });
+    }
+
+    async function saveReportDraft(uid, draft, { keepalive = false } = {}) {
       const at = work.capture("document");
-      const texts = { ...next, baseVersion };
+      const texts = { ...Object.fromEntries(RFIELDS.map(k => [k, draft[k] ?? ""])), baseVersion: draft.baseVersion };
+      const empty = RFIELDS.every(k => !texts[k]);
       if (keepalive) {
         // 탭이 닫히는 중이라 응답을 볼 수 없다. 기준과 유지 목록을 이미 알 때만 보낼 수 있다 — 보내는 것까지가 우리 몫이다.
         draftClient.writeOnUnload(uid, texts, { owner: draftOwner, context: at });
         return;
       }
       const result = await draftClient.write(uid, texts, { owner: draftOwner, context: at });
-      if (result.outcome !== "saved") { draftNotSaved(uid, at, result); return; }
+      if (result.outcome !== "saved") {
+        // 같은 글의 같은 실패는 처음 한 번만 알린다. 서버가 그 검사에 쓸 수 없다고 답했으면 자동 저장도 멈춘다(위 설명).
+        const failed = ["refused", "unknown", "owner"].includes(result.outcome) && result.code !== "REPORT_HELD";
+        // 다시 보내도 같은 답인 거절: 권한(403)·보이지 않는 검사(404)·받을 수 없는 내용이나 상태(400·409·410·413·422).
+        // 세션 저장소가 잠깐 바빴다는 409(AUTH_SESSION_BUSY)는 그 검사나 그 글에 대한 답이 아니다 — 지나가는 실패다.
+        const standing = result.outcome === "owner"
+          || (result.outcome === "refused" && result.code !== "AUTH_SESSION_BUSY"
+              && [400, 403, 404, 409, 410, 413, 422].includes(result.answer?.status));
+        // 표시는 이 쓰기가 떠날 때 이미 섰다. 그 사이 사람이 서버 것을 골랐거나 확정이 그 글을 받아들여 표시가 내려갔다면
+        // (확정이 나가 있는 동안 검사를 옮겨 이 쓰기가 그 뒤에 줄 섰을 때), 이 쓰기가 실었던 글은 더는 확인을 기다리는 글이
+        // 아니다: 늦게 온 이 실패는 표시를 되살리지 않고, 저장 실패로 알릴 일도 아니다.
+        const moot = !reportConverge.has(uid);
+        draftNotSaved(uid, at, result, { quiet: moot || (failed && reportSaveFailures.has(uid)), converge: false });
+        if (failed && !moot) work.commit(at, () => {
+          reportSaveFailures.set(uid, standing ? "stop" : "retry");
+          if (uid === selectedUid) renderDraftBar();
+        });
+        return;
+      }
       return work.commit(at, () => {
         const now = appState[uid] ?? {};
         appState[uid] = { ...now, draftRevision: result.envelope.revision };
+        reportSaveFailures.delete(uid);
         // 서버 행이 방금 보낸 글자와 같아졌다. 수렴 표시는 여기서만 내린다 — 그 사이 더 새 글을 담아 두었으면(다음 저장이
         // 줄 서 있다) 그 글은 아직 확인되지 않았으므로 그대로 둔다.
-        if (sameDraftText(now.draft, draft)) reportConverge.delete(uid);
+        const current = now.draft ?? { ...now, baseVersion: reportBaseVersion(uid, now.version ?? 0) };
+        // 확인된 글이 지금 담아 둔 그 글이면 확인한 시각을 적는다 — 표시줄의 "…에 자동 저장됨"이 말하는 시각이다.
+        if (now.draft && sameDraftText(now.draft, draft)) appState[uid].draft = { ...now.draft, at: new Date().toISOString() };
+        if (sameDraftText(current, draft)) reportConverge.delete(uid);
         // 비운 초안은 서버에서 행이 지워진다 — 그 행의 인용도 함께 없어진 것이 사실이다.
-        if (empty) { citations.emptied(uid); structureState.emptied(uid); }
+        if (empty) {
+          if (sameDraftText(now.draft, draft)) appState[uid].draft = null;
+          citations.emptied(uid); structureState.emptied(uid);
+        }
         if (uid === selectedUid) renderDraftBar();
       }) ? "saved" : undefined;
+    }
+
+    /**
+     * 표시된 검사의 확인되지 않은 글: 고른 검사는 편집기의 글(방금 담았다), 그 밖의 검사는 떠날 때 담아 둔 사본이다. 표시는
+     * 있는데 담아 둔 글이 없으면 기록이 어긋난 것이다(있어서는 안 되는 상태). 그때 저장된 판독문을 초안인 것처럼 지어내
+     * 보내지 않는다(U5CLI-F10) — 이 문서가 지킬 글이 없으므로 표시를 내리고, 조용히 넘기지 않게 콘솔에 오류로 남긴다.
+     * 그 검사는 그 뒤 서버의 상태를 그대로 받는다.
+     */
+    function unconfirmedReport(uid) {
+      if (uid === selectedUid) keepReportEditor();
+      const draft = appState[uid]?.draft;
+      if (draft) return draft;
+      reportConverge.delete(uid);
+      reportSaveFailures.delete(uid);
+      console.error("KIN report draft: a study was marked as holding unconfirmed text but no local text was kept", uid);
+      return null;
+    }
+
+    // Reconnect and later autosaves reconcile every retained edit, even when its study is no longer in the list.
+    function reconcileReportDrafts() {
+      if (!serverMode || offline || demoMode || commitInFlight || insertInFlight || work.state() !== "active"
+          || !KinAuth.has("radiologist")) return;
+      for (const uid of [...reportConverge]) {
+        const draft = unconfirmedReport(uid);
+        if (!draft) continue;
+        const a = appState[uid];
+        if (a.prelimHidden || (a.holder && a.holder !== user) || draftClient.busy(uid)) continue;
+        const conflict = draftClient.conflict(uid);
+        if (conflict) {
+          draftClient.keep(uid, draft);
+          if (!conflict.latest) readDraftConflict(uid);
+          continue;
+        }
+        // 서버가 이 검사에 쓸 수 없다고 답한 글은 다시 보내지 않는다 — 글은 그대로 있고, 고치면 다시 시도한다.
+        if (reportSaveFailures.get(uid) === "stop") continue;
+        saveReportDraft(uid, draft);
+      }
+    }
+
+    /**
+     * 이 문서가 고른 검사의 편집기 글을 바꿨다는 기록. 사람의 타건(input)과 프로그램의 쓰기(`editReport`)가 같은 것을 남긴다:
+     * 표시를 세우고, 그 글을 그 검사의 사본에 담는다 — 보낼 수 없는 사정(충돌·오프라인·점유·삽입 중)이 있어도 가장 새 글이
+     * 버려질 수 있는 textarea에만 남지 않게 한다. 새로 고친 글은 서버가 앞서 거절한 그 글이 아니므로 자동 저장도 다시 시도한다.
+     * 검사마다 마지막으로 고친 차례도 적는다 — 나가 있던 확정의 답이 "그 뒤에 고친 글이 있는가"를 글을 견주지 않고 안다.
+     */
+    let reportEdits = 0;
+    const reportEditedAt = new Map();
+    function recordReportEdit() {
+      if (work.state() !== "active" || !selectedUid) return;
+      reportEditedAt.set(selectedUid, ++reportEdits);
+      reportConverge.add(selectedUid);
+      reportSaveFailures.delete(selectedUid);
+      keepReportEditor();
+    }
+    for (const field of RFIELDS) $("#" + field).addEventListener("input", recordReportEdit);
+
+    /**
+     * 판독문 칸(`#findings`·`#conclusion`·`#recommendation`)의 글을 **이 문서의 코드가** 바꾸는 한 자리.
+     *
+     * 사람의 타건은 input 이벤트가 알리지만 스크립트의 `.value` 대입은 아무것도 알리지 않는다. 대입하는 자리마다 "이 글은
+     * 서버가 아직 모른다"는 표시를 각자 챙기게 두면, 한 자리가 빠지는 순간 그 글은 자동 저장·로그아웃 보존·떠나기 경고
+     * 어디에도 없고 다음 폴링이 서버 글로 덮는다(U5CLI-F09: Paste와 Clear가 그랬다). 그래서 값을 바꾸는 일과 그 기록을
+     * 이 함수 하나가 함께 한다 — 붙여넣기·비우기·상용구·받아쓰기·단축어·인용·구조화가 모두 여기를 지난다. 이 함수 밖에서
+     * 세 칸에 대입하는 곳은 둘뿐이다: 서버의 글을 그리는 `loadReport`와 화면을 닫는 `closeWork`(둘 다 이 문서의 편집이
+     * 아니다).
+     *
+     * `edits`는 `{ field, start, end, text[, caret] }`의 목록이다: 그 칸의 지금 글에서 [start, end)를 text로 바꾸고 커서를
+     * caret(없으면 넣은 글의 끝)에 둔다. 칸·범위·넣을 글로 받는 것은 편집기 경계 모듈(report-editor-frame.js의
+     * capture + insert / insertMany)이 같은 것을 받기 때문이다. 쓸 수 있는가(권한·잠금·그때 그 선택인가)는 부르는 쪽이
+     * 이미 확인했다. 여기서는 업무 중인 문서의 고른 검사일 때만 쓰고, 글이 실제로 바뀌었는지를 돌려준다 — 아무것도 바꾸지
+     * 않은 호출(빈 붙여넣기 등)은 편집이 아니므로 표시도 세우지 않는다.
+     */
+    function editReport(edits) {
+      if (work.state() !== "active" || !selectedUid) return false;
+      const changed = [];
+      for (const { field, start, end, text, caret } of edits) {
+        const el = $("#" + field), was = el.value;
+        if (was.slice(start, end) === text) continue;
+        el.value = was.slice(0, start) + text + was.slice(end);
+        const at = caret ?? start + text.length;
+        el.setSelectionRange(at, at);
+        changed.push(el);
+      }
+      if (!changed.length) return false;
+      // 편집기의 글이 바뀌었다 — 그 전에 떠난 편집기 범위의 작업(클립보드 읽기 등)은 이 글 위에 쓰지 않는다.
+      work.edited();
+      recordReportEdit();
+      // 글이 바뀐 뒤에 따라오는 일(점유 시작, 인용 다시 세기, 상용구 단추, 받아쓰기 자리)은 타이핑과 같은 input이 알린다.
+      for (const el of changed) el.dispatchEvent(new Event("input", { bubbles: true }));
+      return true;
+    }
+    /**
+     * 계획이 낸 **칸 전체의 새 글**을, 지금 글에서 달라지는 한 구간의 편집으로 옮긴다(앞뒤의 같은 글자는 건드리지 않는다).
+     * 적용한 결과는 그 계획의 글과 글자까지 같다 — 삽입 자리 규칙(placeBlock·구조화 계획)은 그 계획들이 그대로 정한다.
+     */
+    function reportEditOf(field, text, caret) {
+      const was = $("#" + field).value, shared = Math.min(was.length, text.length);
+      let start = 0, tail = 0;
+      while (start < shared && was[start] === text[start]) start += 1;
+      while (tail < shared - start && was[was.length - 1 - tail] === text[text.length - 1 - tail]) tail += 1;
+      return { field, start, end: was.length - tail, text: text.slice(start, text.length - tail), caret };
+    }
+
+    function keepReportEditor() {
+      const uid = selectedUid;
+      if (!uid || !reportConverge.has(uid)) return;
+      const a = appState[uid] || {};
+      const texts = { ...Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value])),
+        baseVersion: reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0) };
+      appState[uid] = { ...a, draft: { ...texts, at: a.draft?.at ?? null } };
+      draftClient.keep(uid, texts);
     }
 
     /**
@@ -7026,6 +7307,8 @@
         conclusion: $("#conclusion").value,
         recommendation: $("#recommendation").value,
       };
+      // 받아들여진 확정이 싣지 않은, 그 뒤에 친 글이 남았는가(아래) — 완료 안내가 그 사실을 함께 말한다.
+      let lateText = false;
 
       if (serverMode) {
         commitInFlight = true;
@@ -7053,6 +7336,8 @@
         // 이 확정을 시작한 문맥(세션·작업 세대). 그때 그 선택인가는 아래의 uid·seq 대조가 본다 — 받아 온 상태는 자료라
         // 다른 검사로 옮겼어도 남기고, 그리는 것만 그 선택일 때 한다.
         const at = work.capture("document");
+        // 이 확정이 싣고 나가는 글(content)까지의 편집 차례. 답이 올 때 그 뒤의 편집이 있었는지를 이것으로 안다.
+        const sentAt = reportEdits;
         // 확정은 초안 행도 함께 치운다. 그래서 초안의 명령 경로로 간다: 작성자와 화면이 본 초안 revision을 싣고, 답의 봉투와
         // 그 안의 검사 상태(state)가 확인될 때만 확정으로 본다.
         const result = await draftClient.commit(uid,
@@ -7081,7 +7366,19 @@
           }
           const st = result.state;
           heldUid = null; clearInterval(heartbeat); heartbeat = null;   // 확정하면 서버가 점유를 푼다
-          appState[uid] = { ...appState[uid], ...st };
+          /**
+           * 확정이 나가 있는 동안 이 문서가 그 검사의 글을 더 고쳤으면(기록된 편집이다 — 글을 견주어 짐작하지 않는다) 그 글은
+           * 이 확정이 받아들인 글이 아니다. 확정본으로 다시 그리면 말없이 사라진다. 그래서 새 판 위의 확인되지 않은 글로
+           * 남긴다: 고른 검사면 편집기의 글을 그대로 두고, 떠난 검사면 떠날 때 담아 둔 사본을 지킨다 — 다음 자동 저장·검사
+           * 이동·로그아웃이 그 글을 초안으로 가져간다. 그 글을 확정본에 넣지도, 스스로 추가기재하지도 않는다: 사람이
+           * 확정을 누른 글은 떠날 때의 그 글이다. 대신 갈라졌다는 사실을 말한다 — 지금은 완료 안내가, 그 뒤로는 초안
+           * 표시줄이(U5CLI-F11).
+           */
+          const later = (reportEditedAt.get(uid) ?? 0) > sentAt
+            ? (uid === selectedUid ? Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value])) : appState[uid]?.draft) : null;
+          lateText = !!later;
+          // 서버가 받아들인 확정이다: 확정이 나가 있는 동안 검사를 옮겨 그 검사의 쓰기가 뒤에 줄 서 있어도 실패로 알리지 않는다.
+          appState[uid] = replaceReportState(uid, st, { confirmed: true });
           syncStudy(uid);
           /**
            * 확정은 머리 판과 초안 행을 **함께** 움직였다. 화면이 들고 있던 인용 집합은
@@ -7096,8 +7393,14 @@
           structureState.forget(uid);
           structureNotes.delete(uid);
           reportConverge.delete(uid);
-          // 확정 응답은 내가 방금 선택한 서버 상태다. 여기서는 입력 보호보다 그 결과가 우선한다.
-          loadReport({ force: true });
+          if (later) {
+            appState[uid] = { ...appState[uid], draft: { ...Object.fromEntries(RFIELDS.map(k => [k, later[k] ?? ""])),
+              baseVersion: reportBaseVersion(uid, st.version ?? 0), at: null } };
+            reportConverge.add(uid);
+          }
+          // 확정 응답은 내가 방금 선택한 서버 상태다. 여기서는 입력 보호보다 그 결과가 우선한다 — 그 확정이 싣지 않은,
+          // 나가 있는 동안 고친 글만 예외다(위).
+          loadReport({ force: !(later && uid === selectedUid) });
         } catch (e) {
           // 낙관적 락에 걸린 경우 — 그 사이 남이 저장했다.
           // 내가 쓴 내용을 지우지 않는다. 서버 것을 보여주고 사용자가 판단하게 한다.
@@ -7114,25 +7417,32 @@
             if (confirm(e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)")) {
               navigator.clipboard?.writeText(
                 [content.findings, content.conclusion, content.recommendation].filter(Boolean).join("\n\n"));
-              const b = await api("GET", "/bootstrap", undefined, undefined, at);
-              if (!work.admits(at)) return;
-              appState[uid] = { ...appState[uid], ...b.states[uid] };
+              /**
+               * 최신 판독문을 읽지 못했거나(연결 실패), 읽은 답에 그 검사가 없거나(그 사이 권한·기관이 바뀌었다), 그 검사의
+               * 초안 기준을 바꿀 수 없으면 아무것도 바꾸지 않는다: 화면의 글과 표시는 그대로이고 그 사실을 알린다. 이 실패가
+               * 처리되지 않은 오류로 빠져나가면 사람은 눌렀는데 아무 일도 없는 화면만 본다.
+               */
+              let latest;
+              try {
+                const b = await api("GET", "/bootstrap", undefined, undefined, at);
+                await draftClient.settled(uid);
+                if (!work.admits(at)) return;
+                latest = replaceReportState(uid, b.states?.[uid]);
+              } catch (failure) {
+                if (work.admits(at))
+                  toast("서버의 최신 판독문을 불러오지 못했습니다 — 쓰던 내용은 화면에 그대로 있습니다" +
+                        (failure?.message ? ` (${failure.message})` : ""), "err");
+                return;
+              }
+              appState[uid] = latest;
               syncStudy(uid);
               // 확인창과 응답을 기다리는 사이에 다른 검사로 갔다면 그 화면을 덮지 않는다.
               // 받아온 상태는 남기되(자료다), 그리는 것은 그때 그 선택일 때만 한다.
               if (uid !== selectedUid || seq !== selectionSeq) { render(); return; }
               loadReport({ force: true }); render(); renderRelated(); updateReportButtons();
-              /**
-               * **화면에 있는 것을 그대로 말한다.**
-               *
-               * 초안이 남아 있으면 방금 force로 다시 그린 것도 **여전히 내 초안**이다
-               * (`reportSource()`가 초안을 먼저 고른다). 그런데 "서버 판독문을 불러왔습니다"라고
-               * 말하면 사용자는 최신 승인본을 보고 있다고 믿고 같은 확정을 다시 누른다 —
-               * 기준 판이 초안의 것으로 돌아가므로 같은 409가 그대로 반복된다.
-               * 나가는 길을 이름으로 말해주는 편이 정확하다.
-               */
+              // The replacement may itself contain the reader's server draft; name the source shown.
               if (appState[uid]?.draft)
-                toast("쓰던 초안을 그대로 두었습니다 — 화면에 보이는 것은 초안입니다. " +
+                toast("서버의 초안을 불러왔습니다 — 화면에 보이는 것은 초안입니다. " +
                       (appState[uid]?.rs === "A"
                         ? "Discard Draft로 서버 내용을 보거나, Addendum을 눌러 승인본을 확인하고 기준을 다시 잡으세요."
                         : "Discard Draft를 누르면 서버 내용으로 돌아갑니다.") +
@@ -7177,14 +7487,33 @@
         saveApp();
       }
       render(); renderRelated(); updateReportButtons();
-      toast({
+      const done = {
         save: "임시 저장했습니다 (RS: T)",
         defer: `보류했습니다 (RS: H) — ${reason}`,
         approve: "판독문을 승인했습니다 (RS: A)",
         addendum: "추가기재를 저장했습니다 — 이전 승인본은 그대로 남습니다",
         reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",
         preliminary: "예비 판독으로 넘겼습니다 (RS: P) — 지정한 상급 판독의만 내용을 볼 수 있습니다",
-      }[action], action === "reset" ? "info" : "ok");
+      }[action];
+      if (!lateText) { toast(done, action === "reset" ? "info" : "ok"); return; }
+      /**
+       * 확정은 됐고, 그 확정이 싣지 않은 글이 화면에 남았다. "승인했습니다"만 말하면 판독의는 마지막에 친 문장도 승인된
+       * 줄 안다(U5CLI-F11). 무엇이 들어가지 않았는지를 같은 안내에서 말한다 — 실패가 아니므로 오류 색을 쓰지 않고, 읽을
+       * 시간을 준다. 그 뒤로는 초안 표시줄이 같은 사실을 계속 말한다. 그 검사를 떠나 있었으면 어느 검사인지부터 말한다
+       * (로그아웃 창과 같은 표기).
+       */
+      const missed = action === "approve" ? "Approve를 누른 뒤 입력한 글은 승인된 판독문에 포함되지 않았습니다"
+        : action === "addendum" ? "Addendum을 누른 뒤 입력한 글은 승인된 판독문에 포함되지 않았습니다"
+        : "단추를 누른 뒤 입력한 글은 저장된 판독문에 포함되지 않았습니다";
+      toast((uid === selectedUid ? "" : studyLabel(uid) + " — ") + `${done}. ${missed}` +
+        (uid === selectedUid ? " — 그 글은 초안으로 화면에 남아 있습니다." : " — 그 검사를 열면 초안으로 남아 있습니다."),
+        "info", 12000);
+    }
+
+    /** 검사를 사람에게 가리키는 표기: 환자 이름 · 접수번호 · 검사일. 목록에서 사라진 검사는 남은 이름(UID)으로 부른다. */
+    function studyLabel(uid) {
+      const study = studies.find(s => s.uid === uid);
+      return study ? [study.name, study.acc, study.date].filter(Boolean).join(" · ") : uid;
     }
 
     function heldByOther(s) { return s?.holder && s.holder !== user ? s.holder : null; }
@@ -7251,6 +7580,8 @@
       if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
       }
+      // 초안 표시줄의 확정 안내는 방금 정한 단추 상태를 그대로 따른다(눌리지 않는 단추를 안내하지 않는다).
+      renderDraftHint();
       updateTemplatePreview();
       updateReportTemplateButton();
       // 받아쓰기 단추도 같은 관문을 따른다. 검사 이동도 여기를 지나므로(refreshRight) 떠난 검사의
@@ -7492,24 +7823,28 @@
     setInterval(() => {
       // 삽입이 나가 있는 동안은 확정과 똑같이 비켜선다(B1). `stashReport`에도 같은 검사가
       // 있지만, 다른 경로가 늘어도 여기 한 줄이 빠지지 않게 둘 다 둔다.
-      if (!serverMode || !selectedUid || commitInFlight || insertInFlight) return;
+      if (!serverMode || commitInFlight || insertInFlight) return;
       // 로그아웃 준비 중에는 보존 작업만 쓴다(S7-U5): 이 문서의 관문이 업무를 받아들일 때만 저장을 시작한다.
       if (work.state() !== "active") return;
-      // 서버의 초안을 읽지 못한 채 남은 충돌은 여기서 다시 읽는다 — 이 문서의 글과의 것이면 풀리고 다음 주기가 저장한다.
-      const conflict = draftClient.conflict(selectedUid);
-      if (conflict && !conflict.latest && !offline) { readDraftConflict(selectedUid); return; }
-      if (heldByOther(cur())) return;
-      // 글자가 같아 보여도 버려진 삽입 뒤에는 서버 행이 다를 수 있다(B3).
-      if (!reportNeedsWrite()) return;
-      stashReport();
+      reconcileReportDrafts();
     }, AUTOSAVE_MS);
 
     // ① 탭·브라우저를 닫거나 새로고침
     window.addEventListener("beforeunload", e => {
-      if (!reportNeedsWrite()) return;
-      // keepalive 요청은 문서가 사라진 뒤에도 끝까지 간다. 다만 보장은 아니라서,
-      // 경고도 함께 띄운다 — 판독문은 잃어버리면 안 되는 유일한 것이다.
-      if (!heldByOther(cur())) stashReport({ keepalive: true });
+      if (logoutPrep && ["closing", "done"].includes(logoutPrep.state)) return;
+      const capture = logoutPrep?.reports ? logoutPrep : captureReport();
+      const pending = (capture.reports || []).filter(report => !report.safe);
+      if (!pending.length) return;
+      // Navigation is a document boundary: unselected studies need the same protection.
+      if (work.state() === "active") {
+        if (demoMode) stashReport({ keepalive: true });
+        else {
+          keepReportEditor();
+          const context = work.capture("document");
+          for (const report of pending)
+            draftClient.writeOnUnload(report.uid, report.texts, { owner: capture.owner, context });
+        }
+      }
       if (serverMode && heldUid) {
         transport.request(`${API}/studies/${encodeURIComponent(heldUid)}/release`,
           { method: "POST", keepalive: true, read: "none", deadlineMs: 0, context: work.capture("document") }).catch(() => {});
@@ -7535,8 +7870,37 @@
      */
     let loggingOut = false;
     let logoutPrep = null;
-    // 이 문서가 뷰어에 알린 준비의 번호. 취소의 신호는 같은 번호를 싣는다.
-    let announcedPreparations = 0;
+    /**
+     * 준비 하나(번호 P — 모든 문서에 걸쳐 그 준비 하나의 것이다)가 뷰어와 맺는 계약은 잠금이다(gate-api §6). 뷰어는 준비
+     * 통지로 멈추고, 멈추게 한 이 문서가 살아서 준비 중인 동안만 멈춰 있어야 한다. 그 "살아 있음"을 타이머로 다시 알리면
+     * 가려진 탭에서 어긋난다 — 브라우저가 숨은 문서의 타이머를 분 단위까지 늦춰, 준비 중인데 뷰어가 풀렸다 멈췄다 한다
+     * (U5VW-F07). 그래서 브라우저가 지키는 Web Lock을 쥔다: `kin-preparation:P`를 배타로 얻은 **뒤에야** 준비에 들어서
+     * 통지하고, 준비 내내(Retry도 같은 준비다) 쥔다. 뷰어는 같은 이름을 공유로 기다린다 — 이 문서가 닫히거나 죽거나
+     * 버려지면 브라우저가 풀어 주므로 타이머도, 떠나면서 보내는 통지도 없다. 이 문서가 푸는 자리는 하나다: Back to
+     * Editing이 재개를 알린 뒤(returnToEditing의 finally). 실제 종료에서는 풀지 않는다 — 종료 통지보다 해제를 먼저 본
+     * 뷰어는 종료를 취소로 읽는다(U5VW-F11). 그때는 이 문서가 사라질 때 브라우저가 푼다. P는 Log Out을 누를 때마다 새로
+     * 정하므로 다른 문서가 같은 이름을 쥘 일이 없고, 얻는 데 기다림이 없다. 잠금을 쓸 수 없는 브라우저(지원 대상
+     * Chromium에는 있다)에서는 통지만으로 간다. 잠금을 요청하는 호출이 거절로 답하든 그 자리에서 예외를 던지든(잠금
+     * 관리자를 읽는 것부터 던지는 문서도 있다) 마찬가지다 — 잠금 없이 준비를 이어 간다. 그 예외가 Log out 처리기 밖으로
+     * 나가면 `loggingOut`만 선 채 준비도 창도 없어, 다시 눌러도 아무 일이 없는 Log out이 남는다.
+     */
+    function holdPreparation(prep, enter) {
+      const waiting = () => logoutPrep === prep && prep.state === "waiting";
+      if (!waiting()) return;
+      let asked = null;
+      try {
+        asked = navigator.locks ? navigator.locks.request("kin-preparation:" + prep.id, { mode: "exclusive" }, () => {
+          // 얻기 전에 취소됐거나 세션이 끝났으면 알린 것이 없다 — 쥐지 않는다.
+          if (!waiting()) return undefined;
+          // 준비는 이 콜백 밖에서 시작한다: 그 안의 예외가 이 약속을 끝내(잠금을 풀어) 버리지 못한다.
+          queueMicrotask(enter);
+          return new Promise(release => { prep.release = release; });
+        }) : null;
+      } catch (_) { asked = null; }
+      // 잠금 없이 가는 길은 하나다(관리자 없음·예외·거절). `enter`는 이미 들어선 준비에는 아무것도 하지 않는다.
+      if (!asked || typeof asked.then !== "function") { enter(); return; }
+      asked.then(undefined, () => enter());
+    }
 
     /**
      * 같은 사용자로 편집에 돌아왔다(준비 취소 = 새 작업 세대). 준비 전에 나갔던 일의 답은 돌아오지 않으므로, 그 일들이 그리던
@@ -7557,7 +7921,7 @@
       if (loggingOut || work.state() !== "active") return;
       loggingOut = true;
       const prep = logoutPrep = { uid: null, seq: selectionSeq, owner: draftOwner, state: "waiting", reason: null, attempt: 0,
-        panel: null, recovering: false, permit: null, announced: 0, needsWrite: false, texts: null };
+        panel: null, recovering: false, permit: null, id: crypto.randomUUID(), release: null, needsWrite: false, texts: null };
       const begin = () => {
         // 기다리는 사이 취소했거나 세션이 끝났으면(닫힌 화면이 이어받았다) 여기서 할 일이 없다.
         if (logoutPrep !== prep || prep.state !== "waiting" || work.state() !== "active") return;
@@ -7567,12 +7931,13 @@
       /**
        * 확정·삽입이 나가 있으면 그 답이 화면의 글과 서버 행을 함께 바꾼다 — 답을 보기 전에 잡은 글은 어느 쪽과도 다를 수
        * 있다. 그래서 그 답을 본 뒤에 잡는다. 다시 누르라고 하지 않고 스스로 기다렸다가 이어 간다. 이 기다림은 아직 준비가
-       * 아니다: 업무는 멈추지 않았고 그 답은 평소처럼 화면에 쓰인다(창이 새 입력만 막는다).
+       * 아니다: 업무는 멈추지 않았고 그 답은 평소처럼 화면에 쓰인다(창이 새 입력만 막는다). 글을 잡고 준비에 들어서는
+       * 것은 준비 잠금을 얻은 그 자리다(holdPreparation).
        */
       if (commitInFlight || insertInFlight) {
         showLogoutPanel(prep);
-        workIdle().then(begin);
-      } else begin();
+        workIdle().then(() => holdPreparation(prep, begin));
+      } else holdPreparation(prep, begin);
     });
 
     /**
@@ -7582,17 +7947,21 @@
      * (수렴 표시·결과를 모르는 쓰기), 저장이 아직 나가 있으면 보낸다.
      */
     function captureReport() {
-      const uid = selectedUid, a = (uid && appState[uid]) || {};
-      // 판독 권한은 이 페이지가 열릴 때의 신원으로 본다 — 세션이 끝나는 자리에서 잡을 때는 auth.js가 이미 신원을 내려놓았다.
       const reader = !!sess && sess.state === "approved" && Array.isArray(sess.roles)
         && (sess.roles.includes("radiologist") || sess.roles.includes("admin"));
-      const writer = !!uid && reader && !a.prelimHidden;
-      return {
-        uid, seq: selectionSeq, owner: draftOwner,
-        needsWrite: writer && (reportNeedsWrite() || (serverMode && (draftClient.busy(uid) || draftClient.uncertain(uid)))),
-        texts: Object.freeze({ ...Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value])),
-          baseVersion: uid ? reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0) : 0 }),
-      };
+      const reports = [];
+      if (reader) {
+        for (const uid of [...reportConverge]) {
+          // 고른 검사는 편집기의 글, 그 밖의 검사는 담아 둔 사본. 저장된 판독문을 초안인 것처럼 잡지 않는다.
+          const source = unconfirmedReport(uid);
+          if (!source) continue;
+          const a = appState[uid] || {};
+          const texts = Object.freeze({ ...Object.fromEntries(RFIELDS.map(k => [k, source[k] ?? ""])),
+            baseVersion: reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0) });
+          reports.push({ uid, label: studyLabel(uid), texts, safe: false });
+        }
+      }
+      return { uid: null, seq: selectionSeq, owner: draftOwner, reports, needsWrite: reports.length > 0 };
     }
 
     /**
@@ -7606,69 +7975,73 @@
       const attempt = ++prep.attempt;
       prep.state = "saving";
       prep.reason = null;
-      let permit = prep.permit = work.prepare({ owner: prep.owner, expectedRevision: null, snapshot: prep.texts });
-      // 업무 중이 아니다: 누르는 사이 세션이 끝났다. 닫힌 화면이 이 일을 이어받는다.
+      let permit = prep.permit = work.prepare({ preparationId: prep.id, owner: prep.owner, snapshot: prep.reports });
       if (!permit) return;
-      // 연결된 뷰어(판독 창의 iframe, 따로 연 영상 창)는 닫지 않는다. 이 세션의 뷰어 문서에 멈추라고 한 번 알린다.
-      if (!prep.announced) {
-        prep.announced = ++announcedPreparations;
-        KinAuth.notifyPreparation("preparing", prep.announced);
-      }
+      // 통지는 준비마다 한 번이다 — Retry와 덮어쓰기는 같은 준비(같은 번호, 같은 잠금)의 다음 시도다.
+      if (attempt === 1) KinAuth.notifyPreparation("preparing", prep.id);
       clearInterval(poll); poll = null;
-      const mine = () => logoutPrep === prep && prep.attempt === attempt && prep.permit === permit;
+      const mine = () => logoutPrep === prep && prep.attempt === attempt && prep.permit === permit && work.admits(permit);
       const fail = reason => work.commit(permit, () => { if (mine()) failLogout(prep, reason); });
       const finish = () => work.commit(permit, () => { if (mine()) endUse(prep); });
-      // 보낼 것이 없으면(검사를 고르지 않았거나 화면이 저장된 그대로) 저장 확인이 필요 없다.
       if (!prep.needsWrite) { finish(); return; }
       showLogoutPanel(prep);
-      if (!serverMode) {
-        // 서버 없는 둘러보기: 이 브라우저에 담아 두는 것이 저장이다.
-        const empty = RFIELDS.every(k => !prep.texts[k]);
-        appState[prep.uid] = { ...appState[prep.uid], draft: empty ? null : { ...prep.texts, at: new Date().toISOString() } };
-        saveApp();
-        finish();
+      // Every command in this document must settle before deciding that any text is safe.
+      await draftClient.settled();
+      if (!mine()) return;
+      if (offline && !demoMode) {
+        for (const report of prep.reports) if (!report.safe) report.reason = "offline";
+        fail("offline");
         return;
       }
-      if (offline) { fail("offline"); return; }
-      if (heldByOther(studies.find(s => s.uid === prep.uid))) { fail("held"); return; }
-      const failed = result => {
-        // 떠나지 않은 요청(준비가 그 사이 끝났다)과 서버가 알린 세션 종료는 닫힌 화면이 이어받는다.
-        if (result.outcome === "unsent" || result.outcome === "auth") return;
-        fail(result.outcome === "conflict" ? "conflict" : result.outcome === "unknown" || result.outcome === "rebased" ? "unknown"
-          : result.code === "REPORT_HELD" ? "held" : "refused");
-      };
-      for (let round = 0; ; round += 1) {
-        // 한 검사의 명령은 차례로 나간다: 앞서 나간 초안 쓰기가 끝난 뒤, 결과를 모르는 쓰기가 있었으면 서버 상태를 읽어 기준을 정한다.
-        const base = await draftClient.base(prep.uid, { owner: prep.owner, context: permit });
-        if (!mine()) return;
-        if (base.outcome === "conflict" && !base.latest) {
-          const got = await draftClient.latest(prep.uid, { owner: prep.owner, context: permit });
+      for (const report of prep.reports) {
+        if (report.safe) continue;
+        work.commit(permit, () => { prep.uid = report.uid; prep.texts = report.texts; report.reason = null; });
+        if (demoMode) {
+          work.commit(permit, () => {
+            appState[report.uid] = { ...appState[report.uid], draft: { ...report.texts, at: new Date().toISOString() } };
+            saveApp(); report.safe = true;
+          });
+          continue;
+        }
+        if (heldByOther(studies.find(s => s.uid === report.uid))) { report.reason = "held"; continue; }
+        const failed = result => {
+          if (result.outcome === "auth" || !mine()) return;
+          report.reason = result.outcome === "conflict" ? "conflict" : ["unknown", "rebased"].includes(result.outcome) ? "unknown"
+            : result.code === "REPORT_HELD" ? "held" : "refused";
+        };
+        for (let round = 0; ; round += 1) {
+          const base = await draftClient.base(report.uid, { owner: prep.owner, context: permit });
           if (!mine()) return;
-          if (got.resolved && round === 0) continue;
+          if (base.outcome === "conflict" && !base.latest) {
+            const got = await draftClient.latest(report.uid, { owner: prep.owner, context: permit });
+            if (!mine()) return;
+            if (got.resolved && round === 0) continue;
+          }
+          if (base.outcome !== "ready") { failed(base); break; }
+          const snapshot = { ...report.texts, citations: base.lists.citations, structured: base.lists.structured };
+          if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !report.texts[k]) ? null : snapshot)) break;
+          permit = prep.permit = work.prepare({ preparationId: prep.id, owner: prep.owner, expectedRevision: base.revision, snapshot });
+          if (!permit) return;
+          const capture = { uid: report.uid, owner: permit.owner, expectedRevision: permit.expectedRevision, snapshot: permit.snapshot };
+          const result = await draftClient.preserve(capture, { context: permit });
+          if (!mine()) return;
+          if (result.outcome === "saved") break;
+          if (result.outcome === "rebased" && round === 0) continue;
+          failed(result);
+          break;
         }
-        if (base.outcome !== "ready") { failed(base); return; }
-        const snapshot = { ...prep.texts, citations: base.lists.citations, structured: base.lists.structured };
-        // 서버가 이미 이 원문 전부를 갖고 있다(답을 잃었던 저장이 기록돼 있었다): 다시 쓸 것 없이 저장이 확인됐다.
-        if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !prep.texts[k]) ? null : snapshot)) {
-          work.commit(permit, () => { reportConverge.delete(prep.uid); });
-          finish();
-          return;
-        }
-        // 보존 저장을 승인하는 준비: 작성자·검사·기대 revision·전체 원문이 이 준비 하나에 얼어 묶인다.
-        permit = prep.permit = work.prepare({ owner: prep.owner, expectedRevision: base.revision, snapshot });
-        if (!permit) return;
-        const capture = { uid: prep.uid, owner: permit.owner, expectedRevision: permit.expectedRevision, snapshot: permit.snapshot };
-        const result = await draftClient.preserve(capture, { context: permit });
         if (!mine()) return;
-        if (result.outcome === "saved") {
-          work.commit(permit, () => { reportConverge.delete(prep.uid); });
-          finish();
-          return;
-        }
-        if (result.outcome === "rebased" && round === 0) continue;
-        failed(result);
+        if (report.reason) continue;
+        work.commit(permit, () => { report.safe = true; reportConverge.delete(report.uid); });
+      }
+      const pending = prep.reports.filter(report => !report.safe);
+      if (pending.length) {
+        const current = pending.find(report => report.reason === "conflict") || pending[0];
+        prep.uid = current.uid; prep.texts = current.texts;
+        fail(current.reason);
         return;
       }
+      finish();
     }
 
     /** 저장을 확인하지 못했다. 나가지 않는다 — 원문은 메모리와 화면에 있고 고르는 것은 사람이다. */
@@ -7684,7 +8057,8 @@
     /**
      * 실제 종료. auth.js가 같은 호출 안에서 네트워크 전에 종료 기록·신원 해제·다른 문서 통지를 하고, 이 문서의 관문이 닫히는
      * 그 자리에서 세션 종료 조정이 화면·영역을 닫는다. 그 뒤 이 페이지가 맡긴 점유 해제(beforeLogoutPost, 한도 안에서만
-     * 기다린다) → 로그아웃 POST 하나가 나간다.
+     * 기다린다) → 로그아웃 POST 하나가 나간다. 준비 잠금은 여기서 풀지 않는다(위 holdPreparation) — auth.js가 종료 표지
+     * 잠금을 통지보다 먼저 걸고, 둘 다 이 문서가 사라질 때 풀린다.
      */
     function endUse(prep) {
       prep.state = "closing";
@@ -7694,12 +8068,21 @@
 
     /** 잡아 둔 원문을 메모리에서 지운다(저장을 확인했거나 사람이 버렸다). */
     function forgetCapture(prep) {
-      prep.texts = Object.freeze({ findings: "", conclusion: "", recommendation: "", baseVersion: 0 });
+      prep.reports = [];
+      prep.texts = null;
+      prep.needsWrite = false;
     }
 
     function discardAndLogOut(prep) {
-      if (!confirm("저장하지 못한 판독문 초안을 버리고 로그아웃할까요? 버린 내용은 되돌릴 수 없습니다.")) return;
       if (logoutPrep !== prep || prep.state !== "failed") return;
+      const pending = prep.reports.filter(report => !report.safe);
+      if (!confirm(`저장하지 못한 ${pending.length}건의 판독문 초안을 버리고 로그아웃할까요?\n` +
+          pending.map(report => `${report.label || report.uid} (${report.uid})`).join("\n") +
+          "\n버린 내용은 되돌릴 수 없습니다. 저장을 확인한 검사는 그대로 보존됩니다.")) return;
+      for (const report of pending) {
+        reportConverge.delete(report.uid);
+        if (appState[report.uid]) appState[report.uid].draft = null;
+      }
       forgetCapture(prep);
       endUse(prep);
     }
@@ -7731,16 +8114,21 @@
       if (logoutPrep !== prep || !["waiting", "saving", "failed"].includes(prep.state)) return;
       const permit = prep.permit, prepared = prep.state !== "waiting";
       prep.state = "cancelled";
-      prep.panel?.close();
-      prep.panel?.remove();
-      logoutPrep = null;
-      loggingOut = false;
-      // 준비에 들어선 적이 없으면(나가 있는 확정·삽입을 기다리던 중) 멈춘 것도 없다.
-      if (!prepared) return;
-      if (prep.uid && prep.needsWrite) reportConverge.add(prep.uid);
-      if (!work.cancelPreparation(permit)) return;
-      KinAuth.notifyPreparation("resumed", prep.announced);
-      resumeWork();
+      try {
+        prep.panel?.close();
+        prep.panel?.remove();
+        logoutPrep = null;
+        loggingOut = false;
+        // 준비에 들어선 적이 없으면(나가 있는 확정·삽입을 기다리던 중) 멈춘 것도 없다.
+        if (!prepared) return;
+        for (const report of prep.reports || []) if (!report.safe) reportConverge.add(report.uid);
+        if (!work.cancelPreparation(permit)) return;
+        KinAuth.notifyPreparation("resumed", prep.id);
+        resumeWork();
+      } finally {
+        // 준비 잠금을 푸는 한 자리: 재개를 알린 뒤에 푼다. 그 밖의 길(실제 종료, 닫힌 탭)은 이 문서가 사라질 때 브라우저가 푼다.
+        prep.release?.();
+      }
     }
 
     /** 세션이 끝난 뒤 사람이 버리기로 했다. 그제야 이 문서를 떠난다. */
@@ -7794,31 +8182,38 @@
         if (binding.owner.sub !== owner.sub || (binding.owner.institution ?? null) !== (owner.institution ?? null)
             || binding.owner.author !== owner.author) { say(otherAccount); return; }
         const via = { context: at, session: binding.session };
-        for (let round = 0; ; round += 1) {
-          say("서버의 초안을 확인하는 중입니다…");
-          const base = await draftClient.base(prep.uid, { owner: prep.owner, ...via });
-          if (!ended()) return;
-          if (base.outcome === "conflict") {
-            // 충돌 때의 읽기가 실패했었으면 여기서 다시 읽는다. 서버에 있는 것이 이 문서의 글이면 풀리고 이어 간다.
-            const got = base.latest ? null : await draftClient.latest(prep.uid, { owner: prep.owner, ...via });
+        await draftClient.settled();
+        if (!ended() || !work.admits(at)) return;
+        for (const report of prep.reports) {
+          if (report.safe) continue;
+          if (!work.commit(at, () => { prep.uid = report.uid; prep.texts = report.texts; })) return;
+          for (let round = 0; ; round += 1) {
+            say("서버의 초안을 확인하는 중입니다…");
+            const base = await draftClient.base(prep.uid, { owner: prep.owner, ...via });
             if (!ended()) return;
-            if (got?.resolved && round === 0) continue;
-            conflicted();
-            return;
+            if (base.outcome === "conflict") {
+              // 충돌 때의 읽기가 실패했었으면 여기서 다시 읽는다. 서버에 있는 것이 이 문서의 글이면 풀리고 이어 간다.
+              const got = base.latest ? null : await draftClient.latest(prep.uid, { owner: prep.owner, ...via });
+              if (!ended()) return;
+              if (got?.resolved && round === 0) continue;
+              conflicted();
+              return;
+            }
+            if (base.outcome !== "ready") { say(explain(base)); return; }
+            const capture = { uid: prep.uid, owner: prep.owner, expectedRevision: base.revision,
+              snapshot: { ...prep.texts, citations: base.lists.citations, structured: base.lists.structured } };
+            // 서버가 이미 이 원문 전부를 갖고 있다(답을 잃었던 저장이 기록돼 있었다): 다시 쓸 것 없이 저장이 확인됐다.
+            if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !prep.texts[k]) ? null : capture.snapshot)) break;
+            say("판독문 초안을 저장하는 중입니다…");
+            // 명령 경로가 충돌·결과 모름을 서버의 지금 초안으로 먼저 확인한다: 잡아 둔 원문이 거기 전부 있을 때만 저장이다.
+            const result = await draftClient.preserve(capture, via);
+            if (!ended()) return;
+            if (result.outcome === "rebased" && round === 0) continue;
+            if (result.outcome === "conflict") { conflicted(); return; }
+            if (result.outcome !== "saved") { say(explain(result)); return; }
+            break;
           }
-          if (base.outcome !== "ready") { say(explain(base)); return; }
-          const capture = { uid: prep.uid, owner: prep.owner, expectedRevision: base.revision,
-            snapshot: { ...prep.texts, citations: base.lists.citations, structured: base.lists.structured } };
-          // 서버가 이미 이 원문 전부를 갖고 있다(답을 잃었던 저장이 기록돼 있었다): 다시 쓸 것 없이 저장이 확인됐다.
-          if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !prep.texts[k]) ? null : capture.snapshot)) break;
-          say("판독문 초안을 저장하는 중입니다…");
-          // 명령 경로가 충돌·결과 모름을 서버의 지금 초안으로 먼저 확인한다: 잡아 둔 원문이 거기 전부 있을 때만 저장이다.
-          const result = await draftClient.preserve(capture, via);
-          if (!ended()) return;
-          if (result.outcome === "rebased" && round === 0) continue;
-          if (result.outcome === "conflict") { conflicted(); return; }
-          if (result.outcome !== "saved") { say(explain(result)); return; }
-          break;
+          if (!work.commit(at, () => { report.safe = true; reportConverge.delete(report.uid); })) return;
         }
         work.commit(at, () => {
           if (!ended()) return;
@@ -7857,7 +8252,7 @@
 
     /**
      * 준비·종료 창. 모달이라 뒤의 업무 화면은 가려지고 누를 수 없다(편집·검사 이동·새 작업 없음). Escape로 닫지 않는다.
-     * 판독문·환자 값은 이 창에 쓰지 않는다.
+     * After session end, show only study identifiers, never patient labels or report text.
      */
     function showLogoutPanel(prep) {
       if (!prep.panel) {
@@ -7874,6 +8269,14 @@
       note.textContent = prep.state === "failed"
         ? `${LOGOUT_FAILED[prep.reason] || LOGOUT_FAILED.refused} 로그아웃하지 않았고 입력한 내용은 이 화면에 그대로 있습니다.`
         : LOGOUT_NOTES[prep.state] || LOGOUT_NOTES.closing;
+      const pending = document.createElement("p");
+      if (["failed", "ended"].includes(prep.state)) {
+        const label = report => prep.state === "ended" ? report.uid : `${report.label || report.uid} (${report.uid})`;
+        const current = (prep.reports || []).find(report => report.uid === prep.uid);
+        pending.textContent = "보존이 필요한 검사: " + (prep.reports || []).filter(r => !r.safe)
+          .map(report => label(report) + (report.reason ? " — " + LOGOUT_FAILED[report.reason] : "")).join("\n")
+          + (current ? " · 현재 확인 중: " + label(current) : "");
+      }
       const status = document.createElement("p");
       status.setAttribute("role", "status");
       const actions = document.createElement("div");
@@ -7899,7 +8302,7 @@
         if (overwritable) button("Overwrite Server Draft", () => overwriteServerDraft(prep));
         button("Discard Draft", () => dropEndedDraft(prep));
       }
-      prep.panel.replaceChildren(title, note, status, actions);
+      prep.panel.replaceChildren(title, note, pending, status, actions);
       if (!prep.panel.open) prep.panel.showModal();
       actions.querySelector("button")?.focus();
     }
@@ -7956,7 +8359,7 @@
 
           // 목록이 달라졌으면(도착·삭제) 통째로 다시 그린다.
           if (fresh.length || r.studies.length !== studies.length) {
-            // 지키는 칸은 `fromApi`가 지나는 `mergePolledState` 한 곳이 정한다 — 목록을 통째로
+            // 지키는 칸은 `fromApi`가 지나는 `mergeObservedReportState` 한 곳이 정한다 — 목록을 통째로
             // 다시 그리는 이 길도 결국 그 함수를 지나므로 여기서 따로 되돌릴 것이 없다.
             studies = r.studies.map(fromApi);
             // 썸네일 등 오른쪽 전체를 다시 그릴 필요는 없지만, 판독문 잠금은 반영해야 한다.
@@ -7984,7 +8387,7 @@
               //     되돌아간다. 확정본(findings 등)은 갱신해도 된다 — 초안이 있는 동안
               //     화면은 초안을 그리고, 확정본은 "그 사이 남이 v5를 확정했다" 안내에만 쓰인다.
               // 나머지(rs·ss·holder 등)도 갱신한다. 남이 승인한 게 화면에 보여야 하니까.
-              appState[uid] = mergePolledState(uid, st);
+              appState[uid] = mergeObservedReportState(uid, st);
               /**
                * 판독문 값은 loadReport가 스스로 지키므로, 호출자는 항상 상태를 반영한다.
                * 예전엔 폴링이 `prelimHidden`만 반영하고 판독문 패널은 그대로 뒀다 —
@@ -7998,7 +8401,7 @@
                * 서버 어디에도 없다. 폴링 한 번이 그것을 서버 투영으로 갈아끼우면 돌아온
                * 화면은 옛 글을 그리고, 수렴 저장이 그 옛 글을 서버에 밀어 넣는다.
                */
-              appState[uid] = mergePolledState(uid, st);
+              appState[uid] = mergeObservedReportState(uid, st);
             }
             syncStudy(uid);
             if (selectedUid === uid) { loadReport(); updateReportButtons(); }
@@ -8218,8 +8621,8 @@
       if (!has) return;
       if (!confirm("쓰고 있던 판독문 세 칸(Findings/Conclusion/Recommendation)을 모두 비웁니다.\n" +
                    "저장된 판독문은 그대로 남습니다. 계속할까요?")) return;
-      $("#findings").value = $("#conclusion").value = $("#recommendation").value = "";
-      work.edited();
+      // 비운 것도 이 문서의 편집이다: 표시가 서야 다음 폴링이 옛 글을 되살리지 않고, 비운 초안이 서버에 닿는다.
+      if (!editReport(RFIELDS.map(field => ({ field, start: 0, end: $("#" + field).value.length, text: "" })))) return;
       toast("쓰던 내용을 비웠습니다 — 저장된 판독문은 그대로입니다", "info");
     });
     $("#b-copy").addEventListener("click", () => {
@@ -8238,8 +8641,10 @@
       try { text = await navigator.clipboard.readText(); } catch (e) { return; }
       work.commit(at, () => {
         if (reportWriteBlock()) return;
-        $("#findings").value += text;
-        work.edited();
+        // Findings 끝에 붙인다. 붙여 넣은 글은 타이핑한 글과 같은 이 문서의 편집이다 — 표시 없이 대입만 하면 자동 저장도
+        // 로그아웃도 그 글을 모르고 다음 폴링이 서버 글로 덮는다(U5CLI-F09).
+        const end = $("#findings").value.length;
+        editReport([{ field: "findings", start: end, end, text }]);
       });
     });
     const reportPreview = KinReportPreview({ api, actorName: displayActor, toast,
@@ -10756,7 +11161,7 @@
           // 같은 이유로 같은 규칙을 지난다. 이 타이머는 요청된 uid로 돌아오므로 그 검사가
           // 지금 고른 검사가 아닐 수 있다.
           work.commit(at, () => {
-            appState[uid] = mergePolledState(uid, st);
+            appState[uid] = mergeObservedReportState(uid, st);
             syncStudy(uid); render();
           });
         } catch (e) { work.commit(at, () => toast("원격판독 상태 변경 실패: " + e.message, "err")); }
@@ -10984,10 +11389,10 @@
        * 그대로 닫으면 그 글이 사라진다 — 준비 중의 종료와 같게 이 문서의 메모리에 잡아 두고 Recover Draft를 보인다. 이
        * 문서가 스스로 끝내는 중(종료를 확정한 Log out·명시적 폐기)에는 잡을 것이 없다.
        */
-      if (!workClosed && !preparing && (!logoutPrep || logoutPrep.state === "waiting") && serverMode) {
+      if (!workClosed && !preparing && (!logoutPrep || logoutPrep.state === "waiting") && !demoMode) {
         const capture = captureReport();
         if (capture.needsWrite) {
-          logoutPrep = { state: "saving", reason: null, attempt: 0, panel: null, recovering: false, permit: null, announced: 0,
+          logoutPrep = { state: "saving", reason: null, attempt: 0, panel: null, recovering: false, permit: null, id: null,
             ...(logoutPrep || {}), ...capture };
           loggingOut = preparing = true;
         }
@@ -11008,6 +11413,7 @@
       listLoadSequence++; commitEpoch++;
       markSelectionChanged(null);
       relatedUid = null; studies = [];
+      // 닫는 화면을 비우는 대입이다(편집이 아니다; 확인되지 않은 글은 위에서 이미 잡았다) — `editReport` 밖의 두 대입 가운데 하나.
       for (const k of RFIELDS) $("#" + k).value = "";
       for (const id of ["rows", "relrows", "user", "roles", "clinical", "thumbwrap", "ctx", "err"]) $("#" + id)?.replaceChildren();
       document.querySelectorAll(".modal.show").forEach(modal => modal.classList.remove("show"));
@@ -11104,7 +11510,7 @@
       serverMode = true; offline = false;
       $('#consultations-open').disabled=!!demoMode;consultations.refresh();
       stopReconnect();
-      appState = b.states;
+      for (const [uid, state] of Object.entries(b.states ?? {})) appState[uid] = mergeObservedReportState(uid, state);
       orders = b.orders;
       myInstitution = b.me?.institution ?? null;
       myInstitutionName = b.me?.institutionName ?? "";
@@ -11132,6 +11538,9 @@
       // 미배정 통로는 관리자에게만. 평소엔 0건이라 숨어 있어야 맞다.
       $("#m-unassigned").style.display = KinAuth.has("admin") ? "" : "none";
       startPolling();
+      // 연결이 되살아났다: 앞서 실패해 멈춘 검사도 한 번 다시 보낸다(같은 거절이면 한 번 알리고 다시 멈춘다).
+      reportSaveFailures.clear();
+      reconcileReportDrafts();
     }
 
     /**
@@ -11298,9 +11707,22 @@
     }
 
     async function boot() {
-      try { await KinAuth.init(); }
+      try {
+        await KinAuth.init({ retry: true, onRetry: () => {
+          work.commit(work.capture("lifecycle"), () => {
+            $("#err").textContent = "세션을 다시 확인하고 있습니다. 확인되면 자동으로 들어갑니다…";
+          });
+        } });
+        if (KinAuth.session()) work.commit(work.capture("document"), () => $("#err").replaceChildren());
+      }
       catch {
-        location.replace("index.html");
+        work.commit(work.capture("lifecycle"), () => {
+          $("#err").textContent = "세션을 확인하지 못했습니다. 잠시 뒤 다시 확인해 주세요. ";
+          const retry = document.createElement("button");
+          retry.textContent = "Retry Session Check";
+          retry.addEventListener("click", () => { retry.disabled = true; boot(); });
+          $("#err").append(retry);
+        });
         return;
       }
       sess = KinAuth.session();
@@ -11387,6 +11809,7 @@
       roleText = $("#roles").textContent;
       if (sess.demo) {
         serverMode = false; offline = false;
+        Object.assign(appState, legacyAppState);
         $("#dbstat").innerHTML = `<span style="color:#7f8899">●</span> 데모 모드`;
         $("#dbstat").title = "로그인하지 않은 둘러보기 모드 — 변경 내용은 이 브라우저에만 남습니다";
         await load();
@@ -11405,10 +11828,10 @@
          * 경고도, 무엇이 사라지는지도 없었다. 이제 서버 것이 이기되(그건 맞다),
          * 버리기 전에 날짜를 붙여 따로 떼어두고 알려준다.
          */
-        const localKeys = Object.keys(appState ?? {});
+        const localKeys = Object.keys(legacyAppState ?? {});
         if (localKeys.length) {
           const key = `kin-app-backup-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}`;
-          try { localStorage.setItem(key, JSON.stringify(appState)); } catch (e) {}
+          try { localStorage.setItem(key, JSON.stringify(legacyAppState)); } catch (e) {}
           localStorage.removeItem("kin-app");
           toast(`이 브라우저에 남아 있던 기록 ${localKeys.length}건은 서버 데이터로 대체됩니다 ` +
                 `(localStorage의 ${key}에 보관)`, "info");

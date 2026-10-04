@@ -269,7 +269,8 @@ const KinAuth = (() => {
     if (answer.status === 403 && (body.code === 'INSTITUTION_PENDING' || body.code === 'INSTITUTION_INVALID') && id)
       return { id, identity: { state: body.code === 'INSTITUTION_PENDING' ? 'pending' : 'invalid' } };
     if (answer.status === 403) throw new Error('계정 상태를 확인할 수 없습니다');
-    if (answer.status !== 200) throw new Error(`세션 확인 실패 (HTTP ${answer.status})`);
+    if (answer.status !== 200) throw Object.assign(new Error(`세션 확인 실패 (HTTP ${answer.status})`),
+      { retryable: answer.status >= 500 });
     if (!id) throw new Error('세션 확인 실패 (세션 식별값 없음)');
     return { id, identity: identityOf(body) };
   }
@@ -418,8 +419,28 @@ const KinAuth = (() => {
     return Math.max(Date.now(), operation + 1, (last && last !== UNREADABLE ? last.operation : 0) + 1);
   }
 
+  /**
+   * 종료 표지. 이 문서가 자기 세션의 실제 종료를 알리거나 알게 되는 자리에서, 통지보다 **먼저** Web Lock
+   * `kin-session-ended:<세션>`을 요청해 이 문서가 사라질 때까지 쥔다. 통지(BroadcastChannel)와 잠금 해제는 브라우저의 서로
+   * 다른 줄로 전달되어 순서가 없다 — 로그아웃 준비로 멈춘 뷰어가 준비 잠금의 해제를 종료 통지보다 먼저 보면 종료를 취소로
+   * 읽는다. 뷰어는 풀려날 때 이 표지부터 본다(쥐었거나 기다리는 요청이 있으면 종료다). 요청은 걸어 두기만 하고 기다리지
+   * 않는다: 같은 세션의 다른 문서가 이미 쥐고 있으면 그것으로 충분하고, 종료는 잠금 때문에 늦어지거나 막히지 않는다. 잠금을
+   * 쓸 수 없는 브라우저에서는 통지만 간다.
+   */
+  const marked = new Set();
+  function markEnded(session) {
+    if (!session || marked.has(session)) return;
+    marked.add(session);
+    try {
+      const request = navigator.locks && navigator.locks.request('kin-session-ended:' + session, { mode: 'exclusive' },
+        () => new Promise(() => {}));
+      if (request) request.catch(() => {});
+    } catch (e) {}
+  }
+
   /** 종료를 시작한 문서가 같은 세션의 다른 문서에 한 번 알린다. 화면을 닫으라는 뜻이지 서버 종료의 증거가 아니다. */
   function tell(session, op) {
+    markEnded(session);
     try {
       const channel = new BroadcastChannel(CHANNEL);
       channel.postMessage({ type: 'session-ended', session, operation: op, status: 'ending' });
@@ -470,6 +491,8 @@ const KinAuth = (() => {
    * 한 번 알린다. 새 POST도 다시 알림도 없다 — 이동은 페이지의 조정자가 한다.
    */
   function endedElsewhere(next, why, op) {
+    // 통지를 받은 문서도 표지를 건다 — 종료를 시작한 문서가 먼저 떠나도, 이 문서가 남아 있는 동안 표지가 남는다.
+    markEnded(sessionId);
     closeHere(next, why, op);
     notifyEnded();
   }
@@ -536,12 +559,34 @@ const KinAuth = (() => {
    * 누름이 지금 세션을 다시 확인한다. 남은 세션이 없으면 평범한 링크로 간다.
    */
   async function initiate(path, json, query) {
+    const reuse = path === '/auth/login' && !json?.prompt && reliable && readEnd() === null
+      && (undecided() || state === 'active');
+    if (reuse) {
+      // Login after a failed confirmation is entry, not an implicit account switch.
+      if (state !== 'active') {
+        const answer = await send('/me');
+        if (answer.status !== 401) {
+          const { id, identity } = readIdentity(answer);
+          if (!adopt(id, identity, false)) return;
+        }
+      }
+      if (state === 'active') {
+        moved = true;
+        location.href = home(cached);
+        return;
+      }
+      if (!undecided() || readEnd() !== null) return;
+      moved = true;
+      location.href = `${API}${path}${query}`;
+      return;
+    }
     let binding = rebind ? null : sessionId;
     if (!binding) {
       // 명시적 로그인을 위한 한 번의 확인: 이 POST가 대신할 세션이 무엇인지 알 뿐, 이 문서의 신원으로 삼지 않는다.
       const answer = await send('/me');
       const id = answer.body && typeof answer.body.sessionId === 'string' ? answer.body.sessionId : null;
       binding = (answer.status === 200 || answer.status === 403) && id ? id : null;
+      if (!binding && answer.status !== 401) throw new Error('세션을 확인하지 못했습니다. 잠시 뒤 다시 눌러 주세요.');
     }
     if (binding) {
       const answer = await send(path, { method: 'POST', session: binding, ...(json === undefined ? {} : { json }) });
@@ -577,10 +622,23 @@ const KinAuth = (() => {
   return {
     KC,
 
-    async init() {
+    async init({ retry = false, onRetry } = {}) {
       if (entered) return cached;
       if (!initializing) {
-        initializing = enter()
+        initializing = (async () => {
+          const delays = retry ? [1000, 2000, 4000] : [];
+          for (let attempt = 0; ; attempt += 1) {
+            try { return await enter(); }
+            catch (error) {
+              if (!undecided() || moved) return null;
+              if (attempt >= delays.length || !(error.retryable || ['network', 'timeout'].includes(error.kind))) throw error;
+              if (typeof onRetry === 'function') onRetry();
+              await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+              recheck();
+              if (!undecided() || moved) return null;
+            }
+          }
+        })()
           .then(result => { entered = true; return result; })
           .then(land)
           .finally(() => { initializing = null; });

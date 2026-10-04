@@ -92,6 +92,13 @@
     if (!transport || typeof transport.request !== 'function') throw new TypeError('KinReportDraftClient.create: a transport is required');
     if (typeof base !== 'string') throw new TypeError('KinReportDraftClient.create: the API base is required');
     const lines = new Map();
+    /**
+     * 이 문서의 글을 초안으로 싣는 명령(write·preserve·writeOnUnload)이 시작될 때 부른 쪽에 동기로 알린다(`onWrite(uid)`).
+     * 그 글은 답이 확인할 때까지 서버가 가졌는지 모르는 글이다 — 명령의 답을 받는 화면 쪽 이어짐이 버려져도(로그아웃 준비,
+     * 닫히는 탭) 그 사실은 남아야 한다. 버리기와 확정은 알리지 않는다: 이 문서의 글을 초안으로 보내는 명령이 아니고,
+     * 거절되면 아무것도 달라지지 않는다.
+     */
+    const sending = uid => { if (typeof options.onWrite === 'function') options.onWrite(uid); };
 
     /**
      * 한 검사의 줄. revision은 이 문서의 다음 명령이 실을 기준이고, known은 그 revision에서 서버가 가진 전체 원문이다
@@ -387,10 +394,34 @@
 
       revision(uid) { return lines.has(uid) ? lines.get(uid).revision : null; },
       lists(uid) { return lines.has(uid) ? listsOf(lines.get(uid)) : null; },
+      /** All studies touched by this document, including commands whose page continuation was retired. */
+      studies() { return [...lines.keys()]; },
+      /** Explicit server replacement, after pending commands have settled. Observations cannot clear conflicts. */
+      replace(uid, revision, seen) {
+        const own = line(uid);
+        if (own.open || !isRevision(revision)) return false;
+        own.conflict = null;
+        own.uncertain = null;
+        own.mine = [];
+        const known = own.revision === revision ? own.known : undefined;
+        own.revision = null;
+        const accepted = this.observe(uid, revision, seen);
+        own.known = known;
+        return accepted;
+      },
+      /** Keep the person's latest edit even when a conflict forbids sending it. */
+      keep(uid, texts) {
+        const own = lines.get(uid);
+        if (own?.conflict) own.conflict = { ...own.conflict,
+          attempt: { ...(own.conflict.attempt || listsOf(own) || {}), ...texts } };
+      },
       /** 이 검사의 초안을 바꾸는 명령이 나가 있거나 줄 서 있는가. */
       busy(uid) { return lines.has(uid) && lines.get(uid).changing > 0; },
       /** 지금 세워진 명령이 모두 끝날 때. 거절되지 않는다. */
-      settled(uid) { return lines.has(uid) ? lines.get(uid).tail : Promise.resolve(); },
+      settled(uid) {
+        return uid === undefined ? Promise.all([...lines.values()].map(own => own.tail))
+          : lines.has(uid) ? lines.get(uid).tail : Promise.resolve();
+      },
       uncertain(uid) { return lines.has(uid) && !!lines.get(uid).uncertain; },
       conflict(uid) { return lines.has(uid) ? lines.get(uid).conflict : null; },
 
@@ -432,6 +463,7 @@
       write(uid, texts, { owner, context, operation } = {}) {
         const own = line(uid);
         const ticket = operation ? null : (own.newest = {});
+        sending(uid);
         return queue(uid, async () => {
           if (ticket && own.newest !== ticket) return { outcome: 'merged' };
           if (own.conflict) return { outcome: 'conflict', latest: own.conflict.latest || null };
@@ -449,6 +481,7 @@
       writeOnUnload(uid, texts, { owner, context } = {}) {
         const own = line(uid);
         if (!own.revision || own.known === undefined || own.conflict || own.uncertain || own.open) return false;
+        sending(uid);
         const lists = listsOf(own);
         const snapshot = { findings: texts.findings, conclusion: texts.conclusion, recommendation: texts.recommendation,
           baseVersion: texts.baseVersion, citations: lists.citations, structured: lists.structured };
@@ -466,6 +499,7 @@
        */
       preserve(capture, { context, session } = {}) {
         const uid = capture.uid;
+        sending(uid);
         return queue(uid, async () => {
           if (!validSnapshot(capture.snapshot) || !isRevision(capture.expectedRevision))
             return { outcome: 'refused', code: 'KIN_DRAFT_CAPTURE_INCOMPLETE', message: '잡아 둔 초안의 기준을 알 수 없습니다.' };
