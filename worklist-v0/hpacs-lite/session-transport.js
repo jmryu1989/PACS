@@ -19,7 +19,7 @@
   'use strict';
 
   const DEADLINE_MS = 10000;
-  const READS = ['json', 'text', 'blob', 'arrayBuffer', 'stream', 'none'];
+  const READS = ['json', 'text', 'blob', 'arrayBuffer', 'stream', 'none', 'response'];
   // 서버(와 nginx의 auth_request)가 세션 결속을 거절할 때의 코드. 401은 코드와 무관하게 인증 실패다.
   const BINDING_CODES = ['AUTH_SESSION_REQUIRED', 'AUTH_SESSION_MISMATCH'];
   const BINDING_STATUSES = [403, 409, 428];
@@ -89,7 +89,11 @@
         },
       };
       const deadlineMs = init.deadlineMs === undefined ? defaultDeadline : init.deadlineMs;
-      const timer = deadlineMs > 0 ? setTimeout(() => operation.cancel('timeout'), deadlineMs) : null;
+      const timer = deadlineMs > 0 ? setTimeout(() => {
+        operation.cancel('timeout');
+        // Response를 그대로 넘긴 요청은 본문이 언제 끝났는지 이 전송이 모른다 — 한도가 그 끝이다.
+        if (read === 'response') finish();
+      }, deadlineMs) : null;
       const outer = init.signal || null;
       const onAbort = () => operation.cancel('cancelled');
       if (outer) outer.addEventListener('abort', onAbort, { once: true });
@@ -124,6 +128,15 @@
           ? response.headers.get('X-KIN-Auth-Code') : null;
         const answer = (fields) => Object.freeze({ ok: response.ok, status, code: null, body: null, headers: response.headers,
           auth: false, incomplete: false, ...fields });
+
+        if (read === 'response') {
+          // 본문은 부른 쪽이 읽는다. 인증 실패는 상태와 머리글의 코드로만 가린다(본문을 여기서 읽으면 부른 쪽이 읽지 못한다).
+          if (status === 401 || (BINDING_STATUSES.includes(status) && BINDING_CODES.includes(headerCode)))
+            report(session, status, headerCode);
+          // 한도가 없으면 여기까지가 이 전송의 몫이다. 한도가 있으면 그 시각까지 같은 신호가 본문 읽기도 끊는다.
+          if (timer === null) finish();
+          return response;
+        }
 
         if (!response.ok) {
           // 거절의 본문은 작다. 코드가 거기 실려 오므로 읽는 방식과 무관하게 여기서 읽는다.
@@ -186,7 +199,18 @@
       })();
     }
 
-    return Object.freeze({ request, pending: () => open.size });
+    /**
+     * fetch처럼 Response를 그대로 돌려주는 보내기 — 답을 스스로 읽는 소비자(모듈에 넘기는 fetch)를 위한 것이다. 승인·결속·
+     * 취소·인증 실패의 귀속은 request와 같고, 문맥을 주지 않으면 부르는 순간의 문서 범위다. 한도는 주었을 때만 건다.
+     * 읽은 것을 화면에 쓰는 자리의 관문은 그 소비자의 몫이다 — 이 함수는 그것을 대신하지 않는다.
+     */
+    function fetchBound(url, init = {}) {
+      return request(url, { ...init, read: 'response',
+        context: init.context === undefined ? gate.capture('document') : init.context,
+        deadlineMs: init.deadlineMs === undefined ? 0 : init.deadlineMs });
+    }
+
+    return Object.freeze({ request, fetch: fetchBound, pending: () => open.size });
   }
 
   let shared = null;
