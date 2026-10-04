@@ -2217,19 +2217,15 @@
     function insertTemplate(t) {
       const why = templateInsertionBlock(t);
       if (why) { toast(why, why === "삽입할 내용이 없습니다" ? "info" : "err"); return false; }
-      for (const k of RFIELDS) {
-        if (!t[k]) continue;
-        const el = $("#" + k);
-        // S3-U6: 상용구도 사람이 둔 커서 자리에 줄 단위로 들어간다. 저장된 상용구에는 CR이
-        // 섞일 수 있어 줄 끝을 먼저 모은다 — 아니면 넣은 뒤 커서가 CR 수만큼 어긋난다.
-        const plan = KinReportCitation.placeBlock(el.value, KinReportCitation.toLf(t[k]),
+      // S3-U6: 상용구도 사람이 둔 커서 자리에 줄 단위로 들어간다. 저장된 상용구에는 CR이
+      // 섞일 수 있어 줄 끝을 먼저 모은다 — 아니면 넣은 뒤 커서가 CR 수만큼 어긋난다.
+      // 쓰기는 편집기의 한 자리(`editReport`)로 간다: 표시를 세우고, 타이핑/Tab처럼 점유를 시작해 다른 판독의에게 편집
+      // 중임이 보이게 한다.
+      return editReport(RFIELDS.filter(k => t[k]).map(k => {
+        const plan = KinReportCitation.placeBlock($("#" + k).value, KinReportCitation.toLf(t[k]),
                                                   caretAt(k), citationGuards(k));
-        el.value = plan.text;
-        el.setSelectionRange(plan.end, plan.end);
-        // 목록 삽입도 타이핑/Tab처럼 점유를 시작해야 다른 판독의에게 편집 중임이 보인다.
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-      return true;
+        return reportEditOf(k, plan.text, plan.end);
+      }));
     }
     $("#tplrows").addEventListener("dblclick", e => {
       if (e.target.closest("button")) return;
@@ -2283,11 +2279,8 @@
       // 줄 끝만 모으는 것은 상용구와 같다 — textarea 값은 CR을 LF로 바꾸므로 그러지 않으면 커서가 어긋난다.
       const plan = KinReportCitation.placeBlock(el.value, KinReportCitation.toLf(ins.text), ins.caret,
                                                 citationGuards(ins.field));
-      el.value = plan.text;
-      el.setSelectionRange(plan.end, plan.end);
-      // 타이핑·상용구처럼 점유를 시작하고, 저장은 기존 자동 저장이 한 번 가져간다.
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      return true;
+      // 타이핑·상용구처럼 표시를 세우고 점유를 시작하며, 저장은 기존 자동 저장이 한 번 가져간다.
+      return editReport([reportEditOf(ins.field, plan.text, plan.end)]);
     }
     function dictationPlacement(pin, text) {
       const el = $("#" + pin.field);
@@ -2433,10 +2426,8 @@
                  : el.id === "recommendation" ? (t.recommendation ?? "")
                  : (t.findings ?? "");
       if (!text) return false;
-      el.value = before.slice(0, before.length - word.length) + text + el.value.slice(pos);
-      const caret = pos - word.length + text.length;
-      el.setSelectionRange(caret, caret);
-      el.dispatchEvent(new Event("input", { bubbles: true }));   // 점유·자동저장이 알아채야 한다
+      // 단축어 자리를 그 칸의 문장으로 바꾼다. 표시·점유·자동 저장은 편집기의 한 자리(`editReport`)가 챙긴다.
+      if (!editReport([{ field: el.id, start: pos - word.length, end: pos, text }])) return false;
       toast(`상용구 "${t.title}" 삽입`, "info");
       return true;
     }
@@ -5639,6 +5630,7 @@
         // 원문과 API 값이 줄 끝에서 다를 수 있으므로 문자열 예측이 아니라 결과를 본다.
         if (!preserveValue) {
           const was = el.value;
+          // 서버의 글을 그리는 대입이다(이 문서의 편집이 아니다) — `editReport` 밖의 두 대입 가운데 하나.
           el.value = locked ? "" : (src[sel.slice(1)] ?? "");
           if (el.value !== was) forgetCaret(sel.slice(1));
         }
@@ -5737,12 +5729,14 @@
       let state = { ...appState[uid], draft: null };
       if (serverMode) {
         // 버리기도 초안의 경계를 넘기는 명령이다: 화면이 본 그 초안(revision)일 때만 버려진다.
+        // 버리기는 이 문서의 글을 보내는 명령이 아니다: 거절되거나 결과를 모르면 표시는 버리기 전 그대로다(없었으면 없다 —
+        // 버리려던 초안을 자동 저장이 되살리지 않는다, U5CLI-F10).
         const result = await draftClient.discard(uid, { owner: draftOwner, context: at });
-        if (result.outcome !== "saved") { draftNotSaved(uid, at, result, { converge: false }); return false; }
+        if (result.outcome !== "saved") { draftNotSaved(uid, at, result, { converge: false, discard: true }); return false; }
         state = result.state;
       }
       return work.commit(at, () => {
-        appState[uid] = replaceReportState(uid, state);
+        appState[uid] = replaceReportState(uid, state, { confirmed: serverMode });
         // 초안 행이 사라지면 그 행의 인용도 함께 사라진다. 머리 판의 인용은 그대로이므로
         // 모르는 상태로 되돌리고 `loadReport`의 전용 읽기가 남은 것을 다시 가져온다.
         citations.forget(uid);
@@ -5939,9 +5933,22 @@
     const citationReads = new Map(), citationNotes = new Map();
     let citationListOpen = false;
 
-    // One per-study fact: this document edited or issued a draft command, still awaiting confirmation.
-    // Server observations never create this mark. Exact confirmation or explicit replacement clears it.
+    /**
+     * 검사마다 하나의 사실: **이 문서에 서버가 아직 확인하지 않은 글이 있다.** 글을 비교해 짐작하지 않고 이 문서가 한 일로만
+     * 세운다 — 편집기의 글을 바꿨거나(`recordReportEdit`: 사람의 타건과 `editReport`), 그 글을 싣고 나간 쓰기가 있다(초안
+     * 명령 경로의 `onWrite`: write·preserve·writeOnUnload). 서버에서 온 글(목록·폴링·bootstrap·다른 탭의 저장)과 버리기·
+     * 확정 명령은 세우지 않는다. 내리는 것은 지금의 글 그대로를 서버가 확인했을 때와 사람이 서버 것을 골랐을 때·버렸을 때뿐이다.
+     * 자동 저장·로그아웃 보존·떠나기 경고·폴링의 입력 보호가 모두 이 표시 하나만 본다.
+     */
     const reportConverge = new Set();
+    /**
+     * 자동 저장이 실패한 검사와 그 뒤에 할 일. 같은 글을 20초마다 다시 보내 같은 실패를 다시 알리지 않는다: 처음 한 번만
+     * 알린다. 서버가 그 검사에 쓸 수 없다고 답한 거절(4xx — 권한·기관 이동으로 목록에서 사라진 검사 등)은 다시 보내도 같은
+     * 답이므로 자동 저장을 멈추고("stop"), 지나갈 수 있는 실패(5xx·결과 모름)는 조용히 다시 해 본다("retry"). 글과 표시는
+     * 어느 쪽이든 그대로다 — Log out과 떠나기 경고는 표시만 보므로 그 글을 그대로 묻는다. 그 검사의 글이 다시 바뀌거나,
+     * 저장이 확인되거나, 연결이 되살아나면 지운다.
+     */
+    const reportSaveFailures = new Map();
     function markConverge(uid) {
       if (!uid) return;
       reportConverge.add(uid);
@@ -5950,6 +5957,21 @@
     /** Only this document's recorded edits/commands can require a write. */
     function reportNeedsWrite() {
       return !!selectedUid && reportConverge.has(selectedUid);
+    }
+    /**
+     * 삽입(인용·구조화)이 싣고 나가는 글은 지금 글에 넣을 문장을 더한, 아직 화면에 없는 글이다. 그 쓰기도 표시를 세운다
+     * (답을 기다리는 동안 폴링이 편집기를 다시 그리지 않게 한다). 그런데 서버가 그 삽입을 기록하지 않았다고 분명히 답했고
+     * (거절), 삽입을 누른 뒤로 편집기가 그대로이며, 삽입 전에 표시가 없었으면 — 이 문서에 확인되지 않은 글은 여전히 없다.
+     * 그때 표시를 남기면 고치지 않은 검사의 저장된 판독문이 20초 뒤 초안으로 보내진다(U5CLI-F10과 같은 부류).
+     * `pristineEditor`는 삽입을 보내기 전에 "표시가 없는 지금의 편집기"를 잡고(표시가 있으면 null), `insertLeftNoText`는
+     * 실패한 삽입이 그 상태를 그대로 두었는지를 답한다. 결과를 모르는 삽입(서버에 닿았을 수 있다)과 충돌은 표시를 남긴다.
+     */
+    function pristineEditor(uid) {
+      return uid === selectedUid && !reportConverge.has(uid) ? work.capture("editor") : null;
+    }
+    function insertLeftNoText(pristine, result) {
+      return !!pristine && work.admits(pristine)
+        && (result.outcome === "owner" || (result.outcome === "refused" && result.answer?.status !== 503));
     }
 
     /**
@@ -6016,7 +6038,8 @@
      * 전체 원문)가 보낸 것과 전부 같을 때뿐이다.
      */
     const draftClient = KinReportDraftClient.create({ transport, base: API,
-      onCommand: uid => reportConverge.add(uid) });
+      // 이 문서의 글을 싣고 나간 쓰기는 답이 확인할 때까지 표시로 남는다. 버리기·확정은 표시를 세우지 않는다(U5CLI-F10).
+      onWrite: uid => reportConverge.add(uid) });
 
     /** 점유 거절(REPORT_HELD): 누가 잡고 있는지 화면에 반영하고 그 검사에 한 번만 알린다. */
     function noteHeld(uid, holder) {
@@ -6042,10 +6065,10 @@
      * 쓰기를 멈추고 사람이 한 번 고르게 하고(openDraftConflict), 결과를 모르는 쓰기와 거절은 수렴 표시로 남겨 저장된 것처럼
      * 두지 않는다. 떠나지 않은 요청(문맥이 무효), 서버가 알린 세션 종료(종료 조정이 맡는다), 더 새 저장에 합쳐진 쓰기는 알릴
      * 실패가 아니다. 작성자 대조의 거절은 그 쓰기 하나의 거절이다 — 아무것도 다른 계정으로 저장되지 않았고, 화면을 닫을
-     * 일이 아니다. `quiet`는 부른 쪽이 자기 자리에 이미 알렸을 때, `converge: false`는 화면의 글을 다시 보낼 일이 아닐
-     * 때(버리기)다.
+     * 일이 아니다. `quiet`는 부른 쪽이 자기 자리에 이미 알렸을 때(또는 같은 실패를 이미 알렸을 때), `converge: false`는
+     * 화면의 글을 다시 보낼 일이 아닐 때(버리기, 아무것도 남기지 않은 삽입 거절), `discard`는 실패한 것이 버리기일 때다.
      */
-    function draftNotSaved(uid, at, result, { quiet = false, converge = true } = {}) {
+    function draftNotSaved(uid, at, result, { quiet = false, converge = true, discard = false } = {}) {
       if (result.outcome === "unsent" || result.outcome === "auth" || result.outcome === "merged") return;
       work.commit(at, () => {
         if (converge) reportConverge.add(uid);
@@ -6053,7 +6076,11 @@
         if (result.code === "REPORT_HELD") { noteHeld(uid, result.answer?.body?.holder); return; }
         if (uid === selectedUid) renderDraftBar();
         if (quiet) return;
-        toast(result.outcome === "unknown"
+        // 버리기의 실패는 저장의 실패가 아니다 — 무엇이 되지 않았는지를 그대로 말한다. 화면의 글은 어느 쪽이든 그대로다.
+        if (discard) toast(result.outcome === "unknown"
+          ? "초안을 버렸는지 확인하지 못했습니다 — 화면은 그대로 두었습니다. 서버의 상태는 다음 새로 고침에 반영됩니다"
+          : "초안을 버리지 못했습니다: " + draftFailureText(result), "err");
+        else toast(result.outcome === "unknown"
           ? "초안 저장을 확인하지 못했습니다 — 입력한 내용은 그대로 있고, 다음 저장이 서버 상태부터 확인합니다"
           : "서버 저장 실패: " + draftFailureText(result), "err");
       });
@@ -6354,6 +6381,7 @@
       // 이 적용을 시작한 문맥(세션·작업 세대). 검사와 창의 세대는 아래 epoch이 본다 — 떠난 검사에도 수렴 표시는 남겨야 한다.
       // 쓰기는 초안의 명령 경로로 간다: 작성자·초안 revision·전체 원문에 이 적용을 실어 한 번에 기록한다.
       const at = work.capture("document");
+      const pristine = pristineEditor(uid);
       const result = await draftClient.write(uid, { ...content, baseVersion }, { owner: draftOwner, context: at,
         operation: { structure: {
           op: pane.previous ? "replace" : "apply", field: pane.field,
@@ -6367,16 +6395,18 @@
       wakeIdle();
       if (result.outcome !== "saved") {
         pane.busy = false;
+        const untouched = insertLeftNoText(pristine, result);
         work.commit(at, () => {
           // 판독문은 한 글자도 바뀌지 않았다. 다만 요청이 서버에 닿았는지는 알 수 없으므로
-          // 수렴을 표시하고 구조화 상태를 모르는 것으로 되돌린다.
-          markConverge(epoch.uid);
+          // 수렴을 표시하고 구조화 상태를 모르는 것으로 되돌린다 — 서버가 기록하지 않았다고 분명히 답했고 고친 글도
+          // 없으면 표시는 적용 전 그대로다.
+          if (untouched) reportConverge.delete(epoch.uid); else markConverge(epoch.uid);
           invalidateStructure(epoch.uid);
           pane.status = "적용하지 못했습니다: " + draftFailureText(result) + " — 판독문은 그대로입니다.";
           // 그 사이 이 창이 닫히고 다른 창이 열렸다면 남의 창에 이 실패를 그리지 않는다.
           if (structPane === pane) renderStructure();
         });
-        draftNotSaved(epoch.uid, at, result, { quiet: true });
+        draftNotSaved(epoch.uid, at, result, { quiet: true, converge: !untouched });
         return;
       }
       work.commit(at, () => {
@@ -6391,11 +6421,8 @@
           toast("다른 검사로 옮기기 전에 누른 구조화 적용의 응답이 늦게 도착해 화면에 반영하지 않았습니다.", "err");
           return;
         }
-        const el = $("#" + pane.field);
-        el.value = fresh.text;
-        el.setSelectionRange(fresh.end, fresh.end);
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-        // The input event retained all current fields, including edits made while this command was out.
+        editReport([reportEditOf(pane.field, fresh.text, fresh.end)]);
+        // The edit retained all current fields, including edits made while this command was out.
         if (sameDraftText(appState[uid]?.draft, { ...content, baseVersion })) reportConverge.delete(uid);
         // 새 `sid`를 지어내지 않는다 — 서버가 무엇을 기록했는지는 전용 읽기 하나가 말한다.
         invalidateStructure(uid);
@@ -6797,6 +6824,7 @@
          * 말하므로, 뒤늦게 도착해 확인됨으로 굳으면 새 `cid`가 빠진 유지 목록이 만들어진다.
          */
         citationReads.delete(pane.uid);
+        const pristine = pristineEditor(pane.uid);
         // 쓰기는 초안의 명령 경로로 간다: 작성자·초안 revision·전체 원문에 이 삽입을 실어 한 번에 기록한다.
         const result = await draftClient.write(pane.uid, { ...content, baseVersion }, { owner: draftOwner, context: at,
           operation: { insert: { field, findingId: pane.findingId, findingRevision: pane.findingRevision,
@@ -6806,11 +6834,13 @@
         insertInFlight = false;
         wakeIdle();
         if (result.outcome !== "saved") {
+          const untouched = insertLeftNoText(pristine, result);
           work.commit(at, () => {
             // 판독문은 한 글자도 바뀌지 않았다. 다만 이 요청이 서버에 닿았는지는 알 수 없으므로
             // 다음 자동 저장이 서버 행을 화면에 맞추도록 표시하고, 인용 상태는 **모르는 것**으로
-            // 되돌린다 — 아는 척하는 유지 목록이 그 사이 기록된 증언을 지울 수 있다.
-            markConverge(epoch.uid);
+            // 되돌린다 — 아는 척하는 유지 목록이 그 사이 기록된 증언을 지울 수 있다. 서버가 기록하지 않았다고
+            // 분명히 답했고 고친 글도 없으면 표시는 삽입 전 그대로다.
+            if (untouched) reportConverge.delete(epoch.uid); else markConverge(epoch.uid);
             invalidateCitations(epoch.uid);
             // 이 요청이 서버에 닿았는지 모르는 것은 구조화 쪽도 같다. 같은 자리에서 같이 되돌린다.
             invalidateStructure(epoch.uid);
@@ -6819,7 +6849,7 @@
             if (result.code === "REPORT_CITATION_STALE" || result.code === "REPORT_CITATION_SOURCE")
               toast("소견이 그 사이 바뀌었습니다 — Image Findings에서 Reload Findings를 누른 뒤 다시 인용하세요", "err");
           });
-          draftNotSaved(epoch.uid, at, result, { quiet: true });
+          draftNotSaved(epoch.uid, at, result, { quiet: true, converge: !untouched });
           return;
         }
         const answer = result.answer.body;
@@ -6842,10 +6872,8 @@
         // 달라진 것은 자리뿐이고, 들어가는 문자열은 방금 서버에 보낸 그 문자열이다.
         const el = $("#" + field);
         const shown = screenPlan(field, pane.block, before, plan2);
-        el.value = shown.text;
         // 커서는 넣은 글 끝에 선다. 가운데에 넣고 화면 끝으로 튀면 사람이 자기 글을 다시 찾아야 한다.
-        el.setSelectionRange(shown.end, shown.end);
-        el.dispatchEvent(new Event("input", { bubbles: true }));
+        editReport([reportEditOf(field, shown.text, shown.end)]);
         // 서버 행은 방금 우리가 보낸 세 칸이다. 초안 표시가 그 사실을 말하게 한다.
         // A confirmed insertion does not confirm later typing in any of the three fields.
         if (sameDraftText(appState[pane.uid]?.draft, { ...content, baseVersion })) reportConverge.delete(pane.uid);
@@ -6998,31 +7026,102 @@
       }) ? "saved" : undefined;
     }
 
+    /**
+     * 표시된 검사의 확인되지 않은 글: 고른 검사는 편집기의 글(방금 담았다), 그 밖의 검사는 떠날 때 담아 둔 사본이다. 표시는
+     * 있는데 담아 둔 글이 없으면 기록이 어긋난 것이다(있어서는 안 되는 상태). 그때 저장된 판독문을 초안인 것처럼 지어내
+     * 보내지 않는다(U5CLI-F10) — 이 문서가 지킬 글이 없으므로 표시를 내리고, 조용히 넘기지 않게 콘솔에 오류로 남긴다.
+     * 그 검사는 그 뒤 서버의 상태를 그대로 받는다.
+     */
+    function unconfirmedReport(uid) {
+      if (uid === selectedUid) keepReportEditor();
+      const draft = appState[uid]?.draft;
+      if (draft) return draft;
+      reportConverge.delete(uid);
+      reportSaveFailures.delete(uid);
+      console.error("KIN report draft: a study was marked as holding unconfirmed text but no local text was kept", uid);
+      return null;
+    }
+
     // Reconnect and later autosaves reconcile every retained edit, even when its study is no longer in the list.
     function reconcileReportDrafts() {
       if (!serverMode || offline || demoMode || commitInFlight || insertInFlight || work.state() !== "active"
           || !KinAuth.has("radiologist")) return;
-      keepReportEditor();
-      for (const uid of reportConverge) {
+      for (const uid of [...reportConverge]) {
+        const draft = unconfirmedReport(uid);
+        if (!draft) continue;
         const a = appState[uid];
-        if (!a) continue;
         if (a.prelimHidden || (a.holder && a.holder !== user) || draftClient.busy(uid)) continue;
         const conflict = draftClient.conflict(uid);
         if (conflict) {
-          draftClient.keep(uid, a.draft);
+          draftClient.keep(uid, draft);
           if (!conflict.latest) readDraftConflict(uid);
           continue;
         }
-        saveReportDraft(uid, a.draft ?? { ...a, baseVersion: reportBaseVersion(uid, a.version ?? 0) });
+        // 서버가 이 검사에 쓸 수 없다고 답한 글은 다시 보내지 않는다 — 글은 그대로 있고, 고치면 다시 시도한다.
+        if (reportSaveFailures.get(uid) === "stop") continue;
+        saveReportDraft(uid, draft);
       }
     }
 
-    // A blocked send must never leave the latest edit only in a disposable textarea.
-    for (const field of RFIELDS) $("#" + field).addEventListener("input", () => {
+    /**
+     * 이 문서가 고른 검사의 편집기 글을 바꿨다는 기록. 사람의 타건(input)과 프로그램의 쓰기(`editReport`)가 같은 것을 남긴다:
+     * 표시를 세우고, 그 글을 그 검사의 사본에 담는다 — 보낼 수 없는 사정(충돌·오프라인·점유·삽입 중)이 있어도 가장 새 글이
+     * 버려질 수 있는 textarea에만 남지 않게 한다. 새로 고친 글은 서버가 앞서 거절한 그 글이 아니므로 자동 저장도 다시 시도한다.
+     */
+    function recordReportEdit() {
       if (work.state() !== "active" || !selectedUid) return;
       reportConverge.add(selectedUid);
+      reportSaveFailures.delete(selectedUid);
       keepReportEditor();
-    });
+    }
+    for (const field of RFIELDS) $("#" + field).addEventListener("input", recordReportEdit);
+
+    /**
+     * 판독문 칸(`#findings`·`#conclusion`·`#recommendation`)의 글을 **이 문서의 코드가** 바꾸는 한 자리.
+     *
+     * 사람의 타건은 input 이벤트가 알리지만 스크립트의 `.value` 대입은 아무것도 알리지 않는다. 대입하는 자리마다 "이 글은
+     * 서버가 아직 모른다"는 표시를 각자 챙기게 두면, 한 자리가 빠지는 순간 그 글은 자동 저장·로그아웃 보존·떠나기 경고
+     * 어디에도 없고 다음 폴링이 서버 글로 덮는다(U5CLI-F09: Paste와 Clear가 그랬다). 그래서 값을 바꾸는 일과 그 기록을
+     * 이 함수 하나가 함께 한다 — 붙여넣기·비우기·상용구·받아쓰기·단축어·인용·구조화가 모두 여기를 지난다. 이 함수 밖에서
+     * 세 칸에 대입하는 곳은 둘뿐이다: 서버의 글을 그리는 `loadReport`와 화면을 닫는 `closeWork`(둘 다 이 문서의 편집이
+     * 아니다).
+     *
+     * `edits`는 `{ field, start, end, text[, caret] }`의 목록이다: 그 칸의 지금 글에서 [start, end)를 text로 바꾸고 커서를
+     * caret(없으면 넣은 글의 끝)에 둔다. 칸·범위·넣을 글로 받는 것은 편집기 경계 모듈(report-editor-frame.js의
+     * capture + insert / insertMany)이 같은 것을 받기 때문이다. 쓸 수 있는가(권한·잠금·그때 그 선택인가)는 부르는 쪽이
+     * 이미 확인했다. 여기서는 업무 중인 문서의 고른 검사일 때만 쓰고, 글이 실제로 바뀌었는지를 돌려준다 — 아무것도 바꾸지
+     * 않은 호출(빈 붙여넣기 등)은 편집이 아니므로 표시도 세우지 않는다.
+     */
+    function editReport(edits) {
+      if (work.state() !== "active" || !selectedUid) return false;
+      const changed = [];
+      for (const { field, start, end, text, caret } of edits) {
+        const el = $("#" + field), was = el.value;
+        if (was.slice(start, end) === text) continue;
+        el.value = was.slice(0, start) + text + was.slice(end);
+        const at = caret ?? start + text.length;
+        el.setSelectionRange(at, at);
+        changed.push(el);
+      }
+      if (!changed.length) return false;
+      // 편집기의 글이 바뀌었다 — 그 전에 떠난 편집기 범위의 작업(클립보드 읽기 등)은 이 글 위에 쓰지 않는다.
+      work.edited();
+      recordReportEdit();
+      // 글이 바뀐 뒤에 따라오는 일(점유 시작, 인용 다시 세기, 상용구 단추, 받아쓰기 자리)은 타이핑과 같은 input이 알린다.
+      for (const el of changed) el.dispatchEvent(new Event("input", { bubbles: true }));
+      return true;
+    }
+    /**
+     * 계획이 낸 **칸 전체의 새 글**을, 지금 글에서 달라지는 한 구간의 편집으로 옮긴다(앞뒤의 같은 글자는 건드리지 않는다).
+     * 적용한 결과는 그 계획의 글과 글자까지 같다 — 삽입 자리 규칙(placeBlock·구조화 계획)은 그 계획들이 그대로 정한다.
+     */
+    function reportEditOf(field, text, caret) {
+      const was = $("#" + field).value, shared = Math.min(was.length, text.length);
+      let start = 0, tail = 0;
+      while (start < shared && was[start] === text[start]) start += 1;
+      while (tail < shared - start && was[was.length - 1 - tail] === text[text.length - 1 - tail]) tail += 1;
+      return { field, start, end: was.length - tail, text: text.slice(start, text.length - tail), caret };
+    }
 
     function keepReportEditor() {
       const uid = selectedUid;
@@ -7630,10 +7729,11 @@
         && (sess.roles.includes("radiologist") || sess.roles.includes("admin"));
       const reports = [];
       if (reader) {
-        for (const uid of reportConverge) {
+        for (const uid of [...reportConverge]) {
+          // 고른 검사는 편집기의 글, 그 밖의 검사는 담아 둔 사본. 저장된 판독문을 초안인 것처럼 잡지 않는다.
+          const source = unconfirmedReport(uid);
+          if (!source) continue;
           const a = appState[uid] || {};
-          const source = uid === selectedUid ? Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value]))
-            : a.draft ?? a;
           const texts = Object.freeze({ ...Object.fromEntries(RFIELDS.map(k => [k, source[k] ?? ""])),
             baseVersion: reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0) });
           const study = studies.find(s => s.uid === uid);
@@ -8296,8 +8396,8 @@
       if (!has) return;
       if (!confirm("쓰고 있던 판독문 세 칸(Findings/Conclusion/Recommendation)을 모두 비웁니다.\n" +
                    "저장된 판독문은 그대로 남습니다. 계속할까요?")) return;
-      $("#findings").value = $("#conclusion").value = $("#recommendation").value = "";
-      work.edited();
+      // 비운 것도 이 문서의 편집이다: 표시가 서야 다음 폴링이 옛 글을 되살리지 않고, 비운 초안이 서버에 닿는다.
+      if (!editReport(RFIELDS.map(field => ({ field, start: 0, end: $("#" + field).value.length, text: "" })))) return;
       toast("쓰던 내용을 비웠습니다 — 저장된 판독문은 그대로입니다", "info");
     });
     $("#b-copy").addEventListener("click", () => {
@@ -8316,8 +8416,10 @@
       try { text = await navigator.clipboard.readText(); } catch (e) { return; }
       work.commit(at, () => {
         if (reportWriteBlock()) return;
-        $("#findings").value += text;
-        work.edited();
+        // Findings 끝에 붙인다. 붙여 넣은 글은 타이핑한 글과 같은 이 문서의 편집이다 — 표시 없이 대입만 하면 자동 저장도
+        // 로그아웃도 그 글을 모르고 다음 폴링이 서버 글로 덮는다(U5CLI-F09).
+        const end = $("#findings").value.length;
+        editReport([{ field: "findings", start: end, end, text }]);
       });
     });
     const reportPreview = KinReportPreview({ api, actorName: displayActor, toast,
@@ -11086,6 +11188,7 @@
       listLoadSequence++; commitEpoch++;
       markSelectionChanged(null);
       relatedUid = null; studies = [];
+      // 닫는 화면을 비우는 대입이다(편집이 아니다; 확인되지 않은 글은 위에서 이미 잡았다) — `editReport` 밖의 두 대입 가운데 하나.
       for (const k of RFIELDS) $("#" + k).value = "";
       for (const id of ["rows", "relrows", "user", "roles", "clinical", "thumbwrap", "ctx", "err"]) $("#" + id)?.replaceChildren();
       document.querySelectorAll(".modal.show").forEach(modal => modal.classList.remove("show"));

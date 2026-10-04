@@ -1,8 +1,17 @@
 # coding: utf-8
-"""U5S-REQ-04/13/17/22/23 -> U5S-RISK-DRAFT/APPLY/SUCCESS -> U5CLI-F01/F02/F05/F06/F07/F08.
+"""U5S-REQ-04/13/17/22/23 -> U5S-RISK-DRAFT/APPLY/SUCCESS -> U5CLI-F01/F02/F05/F06/F07/F08/F09/F10, U5VW-F03 (main's half).
 
 Real pages and public controls, using the existing DOM harness read-only. The fixture adds
 independent stored drafts for study B; no product function is replaced or inspected.
+
+Round 4 (U5CLI-F09/F10): text that this document's own controls put into the report editor (Paste, Clear, a template,
+its shortcut, a dictation, a structured line, a quoted finding) is kept and saved - or asked about - like typed text;
+a command that changes no text of this document (a refused or unconfirmed Approve, Save or Discard Draft, a refused
+insertion) writes nothing and asks nothing; text typed while a save is out is not confirmed by that save; a study the
+server no longer accepts is announced once and its text kept; the logout preparation's notice is a lease.
+Stand-ins added here, named: the clipboard (the harness's), the media devices of a dictation (an audio context, a
+worklet node and a microphone stream - nothing else of the browser), and the server's answers for a dictation, a
+findings list, an insertion and a discard.
 """
 import contextlib
 import re
@@ -10,6 +19,62 @@ import unittest
 
 import auth_logout_dom_test as h
 from playwright.sync_api import expect
+
+# The media devices a dictation records from. The capture ends with a short silent PCM buffer when Stop is pressed.
+MEDIA = """(() => {
+  class FakeAudioContext {
+    constructor() { this.sampleRate = 16000; this.destination = {}; this.audioWorklet = { addModule: async () => {} }; }
+    async resume() {}
+    async close() {}
+    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+  }
+  class FakeWorkletNode {
+    constructor() {
+      const node = this;
+      this.port = { onmessage: null, close() {}, postMessage(message) {
+        if (message && message.type === 'stop') Promise.resolve().then(() => node.port.onmessage &&
+          node.port.onmessage({ data: { type: 'pcm', buffer: new Uint8Array(3200).buffer } }));
+      } };
+    }
+    connect() {}
+    disconnect() {}
+  }
+  const stream = () => {
+    const track = { readyState: 'live', addEventListener() {}, removeEventListener() {}, stop() { this.readyState = 'ended'; } };
+    return { getTracks: () => [track], getAudioTracks: () => [track] };
+  };
+  Object.defineProperty(window, 'AudioContext', { configurable: true, writable: true, value: FakeAudioContext });
+  Object.defineProperty(window, 'AudioWorkletNode', { configurable: true, writable: true, value: FakeWorkletNode });
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => stream() } });
+})();"""
+DICTATION = {"available": True, "maxBytes": 1048576, "timeoutMs": 30000, "languagePin": "ko", "enginePin": "SYN-ENGINE",
+             "modelPin": "SYN-MODEL"}
+DICTATED = "SYN dictated sentence."
+TEMPLATE = {"title": "SYN TEMPLATE", "shortcut": "synsc", "modality": "", "bodypart": "",
+            "findings": "SYN template findings", "conclusion": "SYN template conclusion", "recommendation": ""}
+FINDING = {"id": "11111111-1111-4111-8111-111111111111", "studyUid": h.UID, "revision": 1, "hidden": False,
+           "authorActor": h.RAD["actor"], "updatedAt": "2026-10-03T00:00:00.000Z",
+           "item": {"title": "SYN finding title", "text": "SYN finding text", "primary": 0, "sources": [
+               {"itemId": "22222222-2222-4222-8222-222222222222", "revision": 1, "studyUid": h.UID, "seriesUid": "1.2.826.1",
+                "sopUid": "1.2.826.1.1", "frame": 1, "kind": "arrow", "label": "SYN mark"}]},
+           "links": [{"itemId": "22222222-2222-4222-8222-222222222222", "linkState": "current", "headRevision": 1}]}
+SAVED_REPORT = {"version": 1, "rs": "T", "findings": "SYN-SAVED-V1 report", "conclusion": "", "recommendation": ""}
+EMPTY = dict.fromkeys(h.FIELDS, "")
+
+
+class Amended:
+    """A route whose JSON answer the fixture amends before it is sent; the harness's handler still decides the answer."""
+
+    def __init__(self, route, amend):
+        self._route, self._amend = route, amend
+
+    def __getattr__(self, name):
+        return getattr(self._route, name)
+
+    def fulfill(self, **kwargs):
+        if isinstance(kwargs.get("json"), dict):
+            kwargs["json"] = self._amend(dict(kwargs["json"]))
+        return self._route.fulfill(**kwargs)
 
 
 class MultiStudySite(h.Site):
@@ -19,6 +84,34 @@ class MultiStudySite(h.Site):
         self.current_uid = h.UID
         self.other_state = ({}, {}, {"version": 0, "rs": "W"})
         self.bootstrap_states = None
+        self.hidden = set()             # studies the list no longer shows (access removed, another institution)
+        self.discard_answers = []       # DELETE draft of UID: (status, body) | "abort" | "lost" (done, answer lost)
+        self.templates, self.dictation, self.findings = [], None, None
+        self.dictations, self.sids = [], 0
+
+    def list_body(self, account, rename=None):
+        body = super().list_body(account, rename)
+        body["studies"] = [row for row in body["studies"] if row["uid"] not in self.hidden]
+        body["pagination"]["total"] = len(body["studies"])
+        return body
+
+    def write(self, body, account):
+        """An insertion or a structured line is recorded with the same write: the server names the new id."""
+        status, answer = super().write(body, account)
+        row = self.rows.get(account["actor"])
+        if status != 200 or row is None:
+            return status, answer
+        if "insert" in body:
+            self.cids += 1
+            row["citations"].append(f"SYN-CID-{self.cids}")
+            return 200, {**self.envelope(account), "inserted": {"cid": row["citations"][-1],
+                                                                 "insertedAt": "2026-10-03T00:00:00.000Z"}}
+        if "structure" in body:
+            self.sids += 1
+            replaced = body["structure"].get("replacesSid")
+            row["structured"] = [sid for sid in row["structured"] if sid != replaced] + [f"SYN-SID-{self.sids}"]
+            return 200, {**self.envelope(account), "applied": {"sid": row["structured"][-1]}}
+        return status, answer
 
     @contextlib.contextmanager
     def study(self, uid):
@@ -48,6 +141,22 @@ class MultiStudySite(h.Site):
             return row
 
     def api(self, route, request, method, path, query):
+        if method == "GET" and path == "/api/bootstrap" and (self.templates or self.dictation):
+            route = Amended(route, lambda body: {**body, "templates": self.templates, "dictation": self.dictation})
+        if method == "POST" and path == f"/api/studies/{h.UID}/dictation":
+            self.dictations.append(request.headers.get("x-kin-session"))
+            return route.fulfill(json={"text": DICTATED, "seconds": 0.1, "languagePin": DICTATION["languagePin"],
+                                       "enginePin": DICTATION["enginePin"], "modelPin": DICTATION["modelPin"]})
+        if method == "GET" and path == f"/api/studies/{h.UID}/findings" and self.findings is not None:
+            return route.fulfill(json={"items": self.findings, "nextCursor": None}, headers={"X-KIN-Finding-Schema": "2"})
+        if method == "DELETE" and path == f"/api/studies/{h.UID}/draft" and self.discard_answers:
+            reply = self.discard_answers.pop(0)
+            self.discards.append(request.post_data_json)
+            if reply == "lost":             # the server discards the draft; its answer reaches nobody
+                account = self.sessions[self.cookie]
+                self.revs[account["actor"]] = self.revs.get(account["actor"], 0) + 1
+                self.rows.pop(account["actor"], None)
+            return route.abort("connectionreset") if reply in ("abort", "lost") else self.answer(route, *reply)
         if method == "GET" and path == "/api/bootstrap" and (self.bootstrap_states is not None or "states=omit" not in query):
             states = self.bootstrap_states
             if states is None:
@@ -620,26 +729,245 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.assertTrue(any(h.PATIENT_B in line and "다른 판독의" in line for line in lines))
         self.assertEqual((3, []), (len(self.site.puts), self.site.logouts))
 
-    def test_refused_command_without_typing_still_requires_confirmation_before_leaving(self):
+    # ── round 4: U5CLI-F09 / F10, the reviewer's unverified paths, the preparation lease ──
+    def collect_notices(self, page=None):
+        """Every notice the page shows from now on, as (text, shown as an error)."""
+        page = page or self.page
+        notices = []
+        page.expose_function("syn_notice", lambda text, error: notices.append((text, error)))
+        page.evaluate("""() => new MutationObserver(() => {
+            const node = document.querySelector('#toast');
+            if (node.textContent.trim() && node.classList.contains('show'))
+              window.syn_notice(node.textContent, node.classList.contains('err'));
+        }).observe(document.querySelector('#toast'), {childList: true, subtree: true, characterData: true, attributes: true})""")
+        return notices
+
+    def leaving_asks(self, page=None):
+        """Whether the page would ask before the browser leaves it (the beforeunload contract)."""
+        return (page or self.page).evaluate("""() => {
+            const event = new Event('beforeunload', {cancelable: true});
+            window.dispatchEvent(event); return event.defaultPrevented;
+        }""")
+
+    def report_menu(self, control):
+        """A control of the report toolbar; some sit in the More menu."""
+        if not self.page.locator(control).is_visible():
+            self.page.locator("#report-more > summary").click()
+        return self.page.locator(control)
+
+    def paste(self, text):
+        reads = self.page.evaluate("() => window.__synClipboard.reads.length")
+        self.report_menu("#b-paste").click()
+        self.wait_until(lambda: self.page.evaluate("() => window.__synClipboard.reads.length") == reads + 1, "the clipboard read")
+        self.page.evaluate("([index, text]) => window.__synClipboard.reads[index].resolve(text)", [reads, text])
+
+    def open_untouched(self, report=None, draft=None):
+        """A new document on study A with nothing typed. `draft` is a draft the reader stored earlier."""
+        self.fresh_context()
+        self.site = MultiStudySite()
+        if report:
+            self.site.report = dict(report)
+        if draft:
+            self.site.write({**draft, "baseVersion": self.site.report["version"], "citationIds": [], "structureIds": [],
+                             "expectedOwner": h.owner_of(h.RAD), "expectedRevision": "SYNEPOCH1:0"}, h.RAD)
+        for part in ("citations", "structure"):
+            self.site.gets[f"/api/studies/{h.UID}/report/{part}"] = (200, {
+                "version": self.site.report["version"], "draftRevision": self.site.revision(h.RAD["actor"]),
+                "head": [], "draft": []})
+        self.context.add_init_script(h.CLIPBOARD)
+        self.context.add_init_script(MEDIA)
         self.page.clock.install()
-        self.site.report.update(findings="SYN report already on server")
+
+    def select_untouched(self):
         self.open_main()
         self.switch(h.PATIENT)
-        self.site.commit_answers = [(500, {"message": "SYN commit refused"})]
-        self.page.locator("#b-save").click()
-        expect(self.page.locator("#toast")).to_contain_text("SYN commit refused")
-        self.page.clock.run_for(21000)
-        self.wait_until(lambda: self.site.stored_for(h.UID), "command's text confirmed")
-        cancelled = self.page.evaluate("""() => {
-            const e = new Event('beforeunload', {cancelable:true});
-            window.dispatchEvent(e); return e.defaultPrevented;
-        }""")
-        self.assertFalse(cancelled, "exact confirmation clears the command mark")
+        expect(self.page.locator("#findings")).to_be_editable()
+
+    def cross(self, boundary, saved):
+        """Take the page across one boundary at which unsaved editor text was lost; `saved` is what the server must
+        hold afterwards (study A's stored draft)."""
+        if boundary == "poll":
+            self.page.clock.run_for(31000)      # the autosave (20 s), then the list poll (30 s)
+            self.wait_until(lambda: self.site.stored_for(h.UID) == saved, "the autosave")
+            self.page.wait_for_timeout(300)
+        elif boundary == "study switch":
+            self.switch(h.PATIENT_B)
+            self.wait_until(lambda: self.site.stored_for(h.UID) == saved, "the save on leaving the study")
+            self.switch(h.PATIENT)
+        elif boundary == "refresh":
+            self.refresh()
+            self.page.wait_for_timeout(400)
+
+    BOUNDARIES = ("poll", "study switch", "refresh", "log out", "log out, save refused")
+
+    def end_at(self, boundary, saved, kept):
+        """Log out after the boundary: the text is stored, or - when the server refuses it - the person is asked."""
+        if boundary == "log out, save refused":
+            self.site.put_answers = [(403, {"statusCode": 403, "message": "SYN refused"})] * 2
+            self.log_out_main()
+            expect(self.panel_title()).to_have_text("Draft Not Saved")
+            expect(self.page.locator("dialog.kin-logout")).to_contain_text(h.PATIENT)
+            self.assertEqual(([], kept), (self.site.logouts, self.editor()), "refused: nothing ends, the text stays")
+            return
         self.log_out_main()
         self.page.wait_for_url(h.INDEX_URL)
-        self.assertEqual({"findings": "SYN report already on server", "conclusion": "", "recommendation": ""},
-                         self.site.stored_for(h.UID))
+        self.assertEqual((saved, 1), (self.site.stored_for(h.UID), len(self.site.logouts)))
 
+    def test_pasted_text_in_an_untouched_study_is_saved_or_asked_at_every_boundary(self):
+        pasted = {**EMPTY, "findings": "SYN-PASTED report text"}
+        for boundary in self.BOUNDARIES:
+            with self.subTest(boundary=boundary):
+                self.open_untouched()
+                self.select_untouched()
+                self.paste(pasted["findings"])
+                expect(self.page.locator("#findings")).to_have_value(pasted["findings"])
+                self.cross(boundary, pasted)
+                self.assertEqual(pasted, self.editor(), "the pasted text is no longer in the editor")
+                self.end_at(boundary, pasted, pasted)
+                self.assertEqual([], self.dialogs, "nothing is asked on the way")
+
+    def test_a_cleared_draft_in_an_untouched_study_is_saved_or_asked_at_every_boundary(self):
+        for boundary in self.BOUNDARIES:
+            with self.subTest(boundary=boundary):
+                self.open_untouched(draft=h.FIELDS)
+                self.select_untouched()
+                expect(self.page.locator("#findings")).to_have_value(h.FIELDS["findings"])
+                asked = len(self.dialogs)
+                self.dialog_answers = [True]
+                self.report_menu("#b-clear").click()
+                self.assertEqual(EMPTY, self.editor())
+                # The cleared draft is the reader's edit: the server's draft row goes, and the old text does not come back.
+                self.cross(boundary, None)
+                self.assertEqual(EMPTY, self.editor(), "the cleared text came back")
+                self.end_at(boundary, None, EMPTY)
+                self.assertEqual(asked + 1, len(self.dialogs), "only Clear's own confirmation was asked")
+                if boundary == "log out, save refused":
+                    self.assertEqual(h.FIELDS, self.site.stored_for(h.UID), "the refused clear changed nothing on the server")
+
+    def insert_template(self):
+        self.page.locator("#tplrows tr", has_text=TEMPLATE["title"]).first.dblclick()
+        return TEMPLATE["findings"]
+
+    def insert_shortcut(self):
+        # The typed shortcut is saved first, so what follows is the expansion alone.
+        typed = {**EMPTY, "findings": TEMPLATE["shortcut"]}
+        self.page.fill("#findings", typed["findings"])
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.stored_for(h.UID) == typed, "the typed shortcut autosaved")
+        self.page.wait_for_timeout(300)
+        self.page.locator("#findings").evaluate("el => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }")
+        self.page.keyboard.press("Tab")
+        return TEMPLATE["findings"]
+
+    def insert_dictation(self):
+        self.page.locator("#b-dictate").click()
+        self.page.locator("#dictation-stop").click()
+        self.page.locator("#dictation-insert").click()
+        self.assertEqual([self.site.cookie], self.site.dictations, "one recognition request, bound to the session")
+        return DICTATED
+
+    def insert_structured(self):
+        self.report_menu("#b-structured").click()
+        self.page.locator("#struct-value-text").fill("SYN technique")
+        self.page.locator("#struct-apply").click()
+        return "SYN technique"
+
+    def insert_citation(self):
+        self.page.locator("#reading-findings-open").click()
+        self.page.locator("#reading-findings-list").get_by_role("button", name="Insert into Report").first.click()
+        self.page.locator("#cite-preview-insert").click()
+        return FINDING["item"]["text"]
+
+    def test_each_insertion_by_a_control_is_recorded_like_typed_text(self):
+        for kind in ("template", "shortcut", "dictation", "structured", "citation"):
+            with self.subTest(insertion=kind):
+                self.open_untouched()
+                self.site.templates, self.site.dictation, self.site.findings = [TEMPLATE], DICTATION, [FINDING]
+                self.select_untouched()
+                inserted = getattr(self, "insert_" + kind)()
+                expect(self.page.locator("#findings")).to_have_value(re.compile(re.escape(inserted)))
+                shown = self.editor()
+                # Nothing is typed after the insertion. The autosave stores exactly what the control put there and the
+                # list poll does not replace it.
+                self.page.clock.run_for(31000)
+                self.wait_until(lambda: self.site.stored_for(h.UID) == shown, "the inserted text stored")
+                self.page.wait_for_timeout(300)
+                self.assertEqual(shown, self.editor(), "the poll replaced the inserted text")
+                self.log_out_main()
+                self.page.wait_for_url(h.INDEX_URL)
+                self.assertEqual((shown, []), (self.site.stored_for(h.UID), self.dialogs))
+
+    def test_a_refused_or_unconfirmed_approve_or_save_of_an_unedited_study_writes_and_asks_nothing(self):
+        cases = (("Approve refused for a newer version", "#b-approve", (409, {"message": "그 사이 다른 사용자가 저장했습니다 (v2)"}), [False]),
+                 ("Save refused", "#b-save", (500, {"message": "SYN commit refused"}), []),
+                 ("Save of unknown outcome", "#b-save", (502, {"message": "SYN gateway"}), []))
+        for label, control, answer, answers in cases:
+            with self.subTest(command=label):
+                self.open_untouched(report=SAVED_REPORT)
+                self.select_untouched()
+                expect(self.page.locator("#findings")).to_have_value(SAVED_REPORT["findings"])
+                self.site.commit_answers = [answer]
+                self.dialog_answers = list(answers)
+                self.page.locator(control).click()
+                self.wait_until(lambda: len(self.site.commits) == 1, "the command reached the server")
+                self.page.wait_for_timeout(400)
+                for _ in range(2):
+                    self.page.clock.run_for(21000)
+                    self.page.wait_for_timeout(200)
+                self.assertEqual(([], None), (self.site.puts, self.site.stored_for(h.UID)),
+                                 "nobody typed: the saved report was written as a draft")
+                self.assertFalse(self.leaving_asks(), "nobody typed: leaving asks nothing")
+                self.log_out_main()
+                self.page.wait_for_url(h.INDEX_URL)
+                self.assertEqual(([], 1), (self.site.puts, len(self.site.logouts)), "Log out is one press, nothing to save")
+
+    def test_a_failed_discard_of_an_unedited_draft_is_not_sent_again(self):
+        cases = (("refused", (403, {"statusCode": 403, "message": "SYN discard refused"}), h.FIELDS),
+                 ("unknown outcome, not done", "abort", h.FIELDS),
+                 ("unknown outcome, done on the server", "lost", None))
+        for label, reply, stored in cases:
+            with self.subTest(discard=label):
+                self.open_untouched(draft=h.FIELDS)
+                self.select_untouched()
+                expect(self.page.locator("#b-draft-discard")).to_be_visible()
+                self.site.discard_answers = [reply]
+                self.dialog_answers = [True]
+                self.page.locator("#b-draft-discard").click()
+                self.wait_until(lambda: len(self.site.discards) == 1, "the discard reached the server")
+                self.page.wait_for_timeout(500)
+                for _ in range(2):
+                    self.page.clock.run_for(21000)
+                    self.page.wait_for_timeout(250)
+                self.assertEqual(([], stored), (self.site.puts, self.site.stored_for(h.UID)),
+                                 "the draft the reader was discarding was written again")
+                # The screen follows the server: the draft is still shown while it exists, and gone once it is gone.
+                self.assertEqual(stored or EMPTY, self.editor())
+                self.assertFalse(self.leaving_asks(), "nothing typed: leaving asks nothing")
+                self.log_out_main()
+                self.page.wait_for_url(h.INDEX_URL)
+                self.assertEqual(([], 1), (self.site.puts, len(self.site.logouts)))
+
+    def test_a_refused_insertion_into_an_unedited_study_leaves_no_draft(self):
+        self.open_untouched(report=SAVED_REPORT)
+        self.select_untouched()
+        expect(self.page.locator("#findings")).to_have_value(SAVED_REPORT["findings"])
+        self.report_menu("#b-structured").click()
+        self.page.locator("#struct-value-text").fill("SYN technique")
+        self.site.put_answers = [(403, {"statusCode": 403, "message": "SYN structure refused"})]
+        self.page.locator("#struct-apply").click()
+        self.wait_until(lambda: len(self.site.puts) == 1, "the refused insertion")
+        self.page.wait_for_timeout(300)
+        saved = {k: SAVED_REPORT[k] for k in h.FIELDS}
+        self.assertEqual(saved, self.editor(), "a refused insertion changes no text")
+        for _ in range(2):
+            self.page.clock.run_for(21000)
+            self.page.wait_for_timeout(200)
+        self.assertEqual((1, None), (len(self.site.puts), self.site.stored_for(h.UID)),
+                         "the saved report was written as a draft after a refused insertion")
+        self.assertFalse(self.leaving_asks())
+        self.log_out_main()
+        self.page.wait_for_url(h.INDEX_URL)
+        self.assertEqual((1, 1), (len(self.site.puts), len(self.site.logouts)))
 
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(ReportTextBoundaries(name) for name in ReportTextBoundaries.__dict__ if name.startswith('test_'))
