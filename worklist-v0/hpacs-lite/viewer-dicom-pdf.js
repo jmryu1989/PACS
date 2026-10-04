@@ -125,13 +125,13 @@
     function mount(){
       if(ended||mounted)return api;let attempts=0;if(!attach())hostTimer=setInterval(()=>{if(ended||attach()){clearInterval(hostTimer);hostTimer=null;}else if(++attempts>=200)stop();},100);
       try{for(const event of new Set(Object.values(grid?.EVENTS||{})))subscriptions.push(grid.subscribe(event,refresh));}catch(_){subscriptions.splice(0).forEach(item=>item.unsubscribe?.());}
-      root.addEventListener?.('storage',storageEnd);try{channel=new BroadcastChannel('kin-session');channel.onmessage=event=>{if(event.data?.type==='session-ended')stop();};}catch(_){}
+      try{channel = window.kinViewerOnEnd(() => stop());}catch(_){}
       bindOwner();return api;
     }
-    function stop(){if(ended)return;ended=true;generation++;cancelOperation();cancelSource();ownerRequest?.abort();ownerRequest=null;if(hostTimer)clearInterval(hostTimer);hostTimer=null;subscriptions.splice(0).forEach(item=>item.unsubscribe?.());channel?.close();root.removeEventListener?.('storage',storageEnd);panel.remove();}
+    function stop(){if(ended)return;ended=true;generation++;cancelOperation();cancelSource();ownerRequest?.abort();ownerRequest=null;if(hostTimer)clearInterval(hostTimer);hostTimer=null;subscriptions.splice(0).forEach(item=>item.unsubscribe?.());channel?.close();panel.remove();}
     function nativeFailure(error,displaySet,pdfUrl){const selected=snapshot(candidate());if(ended||!sameNativeSource(selected,displaySet,pdfUrl))return;nativeRetryNeeded=true;nativeRetryPending=false;nativeRetrySource={displaySet,pdfUrl};button.textContent='Retry Source PDF';button.disabled=!!request||!boundOwner;status.textContent=error?.message||'원본 PDF 표시를 완료하지 못했습니다. 다시 시도하세요.';}
     function nativeReady(displaySet,pdfUrl){const selected=snapshot(candidate());if(ended||!nativeRetryNeeded||!nativeRetrySource||nativeRetrySource.displaySet!==displaySet||nativeRetrySource.pdfUrl!==pdfUrl||!sameNativeSource(selected,displaySet,pdfUrl))return;nativeRetryNeeded=false;nativeRetryPending=false;nativeRetrySource=null;button.textContent='Open Source PDF';const ready=!!source&&sameOwner(boundOwner,source.owner);button.disabled=!ready;status.textContent=ready?'Ready · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.':'Checking source path…';}
-    const storageEnd=event=>{if(event.key==='kin-session-ended')stop();};
+
     const api={mount,stop,nativeFailure,nativeReady};return api;
   }
   root.KinDicomPdf={create};if(typeof module==='object'&&module.exports)module.exports=root.KinDicomPdf;

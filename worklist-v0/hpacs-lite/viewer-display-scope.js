@@ -144,10 +144,10 @@
       panel.querySelectorAll('[data-action]').forEach(button=>button.onclick=()=>apply(button.dataset.action==='rotate-left'?'rotate':button.dataset.action==='rotate-right'?'rotate':button.dataset.action,button.dataset.action==='rotate-left'?-90:button.dataset.action==='rotate-right'?90:undefined));
       panel.querySelector('[data-window]').onclick=()=>apply('window',{width:panel.querySelector('[data-ww]').value,center:panel.querySelector('[data-wc]').value});
       baseline=signature();for(const event of new Set(Object.values(grid?.EVENTS||{})))try{subscriptions.push(grid.subscribe(event,()=>{fresh();refreshUi();}));}catch(_){ }
-      if(!listening){listening=true;root.addEventListener?.('storage',sessionEnd);root.addEventListener?.('pagehide',stop);try{channel=new BroadcastChannel('kin-session');channel.onmessage=event=>{if(event.data?.type==='session-ended')stop();};}catch(_){ }}refreshUi();return true;
+      if(!listening){listening=true;root.addEventListener?.('pagehide',stop);try{channel = window.kinViewerOnEnd(() => stop());}catch(_){ }}refreshUi();return true;
     }
-    const sessionEnd=event=>{if(event.key==='kin-session-ended')stop();};
-    function stop(){if(ended)return;ended=true;subscriptions.splice(0).forEach(item=>item?.unsubscribe?.());channel?.close();channel=null;if(listening){root.removeEventListener?.('storage',sessionEnd);root.removeEventListener?.('pagehide',stop);listening=false;}panel?.remove();panel=status=null;chosen.clear();}
+
+    function stop(){if(ended)return;ended=true;subscriptions.splice(0).forEach(item=>item?.unsubscribe?.());channel?.close();channel=null;if(listening){root.removeEventListener?.('pagehide',stop);listening=false;}panel?.remove();panel=status=null;chosen.clear();}
     return {mount,stop,apply,applyPreset,selection,setMode,setSelection,invertSelection,toggleCell,sourceToken:()=>baseline,refresh(){fresh();refreshUi();}};
   }
   const api={create};if(typeof module==='object'&&module.exports)module.exports=api;else root.KinViewerDisplayScope=api;

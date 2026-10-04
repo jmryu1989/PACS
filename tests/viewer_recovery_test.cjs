@@ -6,6 +6,8 @@ const vm = require('node:vm');
 const { readFileSync } = require('node:fs');
 const { webcrypto } = require('node:crypto');
 const source = readFileSync(require.resolve('../config/ohif.js'), 'utf8');
+const gates = require('../worklist-v0/hpacs-lite/work-context.js');
+const transports = require('../worklist-v0/hpacs-lite/session-transport.js');
 class Element extends EventTarget {
   constructor(tag) { super(); this.tagName = tag; this.children = []; this.style = {}; this.dataset = {}; this.attributes = {}; this.textContent = ''; }
   append(...children) { for (const c of children) { c.parent = this; this.children.push(c); } }
@@ -26,10 +28,16 @@ const head = (id = 'a', revision = 1, title = 'server', hidden = false) => ({ id
 async function harness() {
   const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
   const window = new EventTarget(), annotations = new Map(), commands = new Map();
+  const gate = gates.create(); let announce;
+  gate.follow({ onLifecycle(listener) { announce = listener; listener({ state: 'active', session: 'S1' }); } });
+  window.KinWorkContext = gate;
+  // This suite isolates the history panel; the real document controller is exercised in Chromium.
+  window.KinViewerSessionBoundary = { active: () => gate.state() === 'active', ended: () => gate.state() === 'ending' };
   let study = '1', tick, me = { sub: 'doctor', kind: 'member', roles: ['radiologist'] };
   const calls = [], notices = [], dialogs = [], pages = new Map([['1', [head()]], ['2', [head('b')]]]);
   let reply = async (path, options) => {
-    if (path === '/api/me') return { status: 200, data: me };
+    if (path === '/api/me') return me.sub === 'doctor' ? { status: 200, data: me }
+      : { status: 409, data: { code: 'AUTH_SESSION_MISMATCH' } };
     const uid = path.match(/\/studies\/([^/]+)/)?.[1];
     if (options.method === 'POST') return { status: 409, data: {} };
     return { status: 200, data: { items: copy(pages.get(uid) || []), nextCursor: null } };
@@ -49,9 +57,14 @@ async function harness() {
     uiNotificationService: { show: x => notices.push(x) },
   };
   for (const name of ['downloadReport', 'storeMeasurements']) commands.set(name, { commandFn: () => { throw new Error('native SR must not run'); } });
+  const transport = transports.create({ gate, authFailure: failure => announce({ state: 'ending', session: failure.session }),
+    fetch: async (path, options) => {
+      calls.push({ path, options }); const r = await reply(path, options);
+      return new Response(JSON.stringify(r.data), { status: r.status, headers: r.data?.code ? { 'X-KIN-Auth-Code': r.data.code } : {} });
+    } });
   vm.runInNewContext(source, { window, document, crypto: webcrypto, TextEncoder, console, Event, AbortController,
     setInterval: fn => { tick = fn; return 1; }, clearInterval() {}, setTimeout, clearTimeout,
-    fetch: async (path, options) => { calls.push({ path, options }); const r = await reply(path, options); return { status: r.status, ok: r.status === 200, json: async () => copy(r.data) }; },
+    fetch: transport.fetch,
   });
   const extension = window.config.extensions.find(e => e.id === 'kin.viewer-history');
   extension.preRegistration({ servicesManager: { services }, commandsManager: {
@@ -68,7 +81,7 @@ async function harness() {
     text: () => all().map(e => e.textContent).join('\n'),
     switch: async uid => { study = uid; tick(); await flush(); },
     tick: async () => { tick(); await flush(); },
-    logout: () => { const e = new Event('storage'); e.key = 'kin-session-ended'; window.dispatchEvent(e); },
+    logout: () => announce({ state: 'ending', session: 'S1' }),
   };
 }
 
@@ -146,7 +159,7 @@ test('A1/C5: late committed create cannot cross A→B→A; same UUID retry coale
 test('C2 (9): actual session end clears recovery and both captured SR commands explain re-entry', async () => {
   const h = await harness(); await h.click('Edit'); h.input('Key Title', 'private'); await h.switch('2');
   const captured = [...h.commands.values()];
-  h.setReply(async () => ({ status: 401, data: {} })); await h.click('Refresh');
+  h.setReply(async () => ({ status: 401, data: { code: 'AUTH_SESSION_ENDED' } })); await h.click('Refresh');
   assert.equal(h.window.kinViewerHistoryHasUnsaved(), false);
   for (const command of captured) assert.throws(() => command.commandFn({ measurementData: [{ uid: 'x', toolName: 'Length' }] }), /다시 로그인한 뒤 뷰어/);
   assert.equal(h.notices.length, 2); assert.doesNotMatch(h.text(), /private/);

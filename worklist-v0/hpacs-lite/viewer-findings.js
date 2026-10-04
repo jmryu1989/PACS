@@ -9,8 +9,8 @@ window.kinViewerFindings = function (services, model) {
   let held = [];
   const keep = records => { if (Array.isArray(records) && records.length) held = held.concat(records); };
   const dropHeld = () => { held = []; };
-  window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') dropHeld(); });
-  try { const session = new BroadcastChannel('kin-session'); session.onmessage = e => { if (e.data?.type === 'session-ended') dropHeld(); }; } catch (_) {}
+
+  window.kinViewerOnEnd(dropHeld);
   window.addEventListener('kin-viewer-access-ended', e => { if (e?.kinModeExit !== true) dropHeld(); });
   window.addEventListener('beforeunload', e => { if (held.length) { e.preventDefault(); e.returnValue = ''; } });
   // This document's study set in URL order: the first study anchors the section, the second is its comparison study.
@@ -58,6 +58,8 @@ window.kinViewerFindings = function (services, model) {
       history: () => typeof window.kinViewerHistoryState === 'function' ? window.kinViewerHistoryState() : null,
       activate: study => typeof window.kinViewerHistoryActivate === 'function' ? window.kinViewerHistoryActivate(study) : { ok: false, reason: 'tool-missing' },
       location: () => window.kinViewerJobLocation || null, continuation: continuation() });
+    window.KinViewerSessionBoundary?.guardMethods(store, ['discardHeld', 'setScope', 'syncHistory', 'newDraft',
+      'updateDraft', 'toggleSource', 'setPrimary', 'refreshSource', 'useLatest', 'discard', 'edit', 'save', 'toggleJob']);
     held = [];
     const panel = document.createElement('details'); panel.id = 'kin-viewer-findings'; panel.open = true;
     panel.style.cssText = 'border-top:1px solid #405777;margin-top:10px;padding-top:8px';
@@ -343,16 +345,16 @@ window.kinViewerFindings = function (services, model) {
     const unsubscribe = store.subscribe(render);
     // The Measurements panel owns scope, session and saved heads; observe it at the same cadence.
     const timer = setInterval(() => { try { store.syncHistory(typeof window.kinViewerHistoryState === 'function' ? window.kinViewerHistoryState() : null); } catch (_) {} }, 250);
-    const onStorage = e => { if (e.key === 'kin-session-ended') store.end(); };
-    let channel; try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') store.end(); }; } catch (_) {}
+
+    let channel; try { channel = window.kinViewerOnEnd(() => store.end()); } catch (_) {}
     // The Measurements panel announces both a real session end and its own mode exit; only the
     // former destroys drafts, the latter hands them to the next mode entry of this document.
     const onAccessEnded = e => { if (e?.kinModeExit === true) keep(store.detach()); else store.end(); };
-    window.addEventListener('storage', onStorage); window.addEventListener('kin-viewer-access-ended', onAccessEnded);
+     window.addEventListener('kin-viewer-access-ended', onAccessEnded);
     window.kinViewerFindingsState = () => ({ scope: store.state().scope, ...store.workState() });
     const state = window.kinViewerFindingsState;
     stop = () => {
-      clearInterval(timer); unsubscribe(); channel?.close(); window.removeEventListener('storage', onStorage); window.removeEventListener('kin-viewer-access-ended', onAccessEnded);
+      clearInterval(timer); unsubscribe(); channel?.close();  window.removeEventListener('kin-viewer-access-ended', onAccessEnded);
       keep(store.detach());
       if (window.kinViewerFindingsState === state) delete window.kinViewerFindingsState;
       store.dispose(); panel.remove(); rows.clear(); editors.clear(); stop = () => {};

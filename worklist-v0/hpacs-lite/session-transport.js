@@ -70,6 +70,9 @@
     const authFailure = typeof options.authFailure === 'function' ? options.authFailure : null;
     // 이 전송의 모든 요청에 한 한도를 주면(시험, 다른 창을 대신 조정하는 코드) 종류별 기본값 대신 그것을 쓴다.
     const fixedDeadline = options.deadlineMs;
+    // A viewer may pause its UI scheduler after configuring the page transport.
+    // Network deadlines must continue on the clock that admitted the request.
+    const schedule = globalThis.setTimeout.bind(globalThis), unschedule = globalThis.clearTimeout.bind(globalThis);
     const open = new Set();
 
     // 문맥이 무효가 된 읽기는 여기서 끊는다. 쓰기는 남긴다(위 설명).
@@ -95,10 +98,12 @@
       if (typeof session !== 'string' || !session) return Promise.reject(failure('unbound', false));
 
       const method = String(init.method || 'GET').toUpperCase();
-      const headers = { ...(init.headers || {}), 'X-KIN-CSRF': '1', 'X-KIN-Session': session };
+      const headers = new Headers(init.headers);
+      headers.set('X-KIN-CSRF', '1');
+      headers.set('X-KIN-Session', session);
       let body = init.body;
       if (init.json !== undefined) {
-        headers['Content-Type'] = 'application/json';
+        headers.set('Content-Type', 'application/json');
         body = JSON.stringify(init.json);
       }
       const control = new AbortController();
@@ -114,7 +119,7 @@
       };
       const deadlineMs = init.deadlineMs !== undefined ? init.deadlineMs
         : fixedDeadline !== undefined ? fixedDeadline : DEADLINES[kind];
-      const timer = deadlineMs > 0 ? setTimeout(() => {
+      const timer = deadlineMs > 0 ? schedule(() => {
         operation.cancel('timeout');
         // Response를 그대로 넘긴 요청은 본문이 언제 끝났는지 이 전송이 모른다 — 한도가 그 끝이다.
         if (read === 'response') finish();
@@ -128,7 +133,7 @@
         if (finished) return;
         finished = true;
         open.delete(operation);
-        if (timer !== null) clearTimeout(timer);
+        if (timer !== null) unschedule(timer);
         if (outer) outer.removeEventListener('abort', onAbort);
       };
       const thrown = () => failure(operation.cause || 'network', true);
@@ -139,10 +144,14 @@
         if (operation.cause) { finish(); throw failure(operation.cause, false); }
         let response;
         try {
+          // Keep the caller's Fetch policy (especially redirect: 'error' for uploads).
+          // Binding headers, body encoding and the combined cancellation signal remain ours.
+          const policy = {};
+          for (const key of ['cache', 'credentials', 'mode', 'redirect', 'referrer', 'referrerPolicy',
+            'integrity', 'keepalive', 'priority', 'duplex'])
+            if (init[key] !== undefined) policy[key] = init[key];
           response = await send(url, {
-            method, headers, body, signal: control.signal,
-            ...(init.keepalive ? { keepalive: true } : {}),
-            ...(init.cache ? { cache: init.cache } : {}),
+            ...policy, method, headers, body, signal: control.signal,
           });
         } catch (_) {
           finish();
@@ -153,11 +162,14 @@
           ? response.headers.get('X-KIN-Auth-Code') : null;
         const answer = (fields) => Object.freeze({ ok: response.ok, status, code: null, body: null, headers: response.headers,
           auth: false, incomplete: false, ...fields });
+        // An authenticated end in the headers is already known; a stalled error body cannot
+        // postpone it. Body-only codes still use the same classification below, exactly once.
+        const headerAuth = endSignal(status, headerCode);
+        if (headerAuth) report(session, status, headerCode);
 
         if (read === 'response') {
           // 본문은 부른 쪽이 읽는다. 종료 신호는 머리글의 코드로만 가린다(본문을 여기서 읽으면 부른 쪽이 읽지 못한다) —
           // 서버는 AUTH_* 거절마다 같은 코드를 X-KIN-Auth-Code 머리글에도 싣는다.
-          if (endSignal(status, headerCode)) report(session, status, headerCode);
           // 한도가 없으면 여기까지가 이 전송의 몫이다. 한도가 있으면 그 시각까지 같은 신호가 본문 읽기도 끊는다.
           if (timer === null) finish();
           return response;
@@ -176,7 +188,7 @@
           finish();
           const code = headerCode || (parsed && typeof parsed.code === 'string' ? parsed.code : null);
           const auth = endSignal(status, code);
-          if (auth) report(session, status, code);
+          if (auth && !headerAuth) report(session, status, code);
           return answer({ code, body: parsed, auth, incomplete });
         }
 
@@ -243,7 +255,15 @@
    * 이 문서의 전송 하나: 이 문서의 관문(KinWorkContext)과 세션 권위(KinAuth)에 묶인다. KinAuth는 `const`로 선언된 전역이라
    * window의 속성이 아니다 — 이름으로 찾는다.
    */
-  function page() {
+  function page(options) {
+    // A document without auth.js supplies its own authority once, before any consumer starts.
+    // The gate remains the page default, so shared modules cannot accidentally use another gate.
+    if (options !== undefined) {
+      if (shared) throw new Error('KinSessionTransport.page: the page transport is already configured');
+      if (!root?.KinWorkContext || typeof options?.authFailure !== 'function')
+        throw new TypeError('KinSessionTransport.page: a page gate and authFailure are required');
+      shared = create({ ...options, gate: root.KinWorkContext });
+    }
     if (!shared) {
       const auth = typeof KinAuth === 'object' ? KinAuth : null;
       if (!root || !root.KinWorkContext || !auth || typeof auth.authFailure !== 'function')

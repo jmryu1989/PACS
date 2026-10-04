@@ -657,5 +657,6 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     restore,
     clearForJob(){if(operation)close();},
   };
+  window.KinViewerSessionBoundary?.guardMethods(job,['saved','restore','clearForJob']);
   return {open,job,dispose(){ended=true;clearInterval(timer);stopBatchPlay();observer.disconnect();close();dialog.remove();}};
 };

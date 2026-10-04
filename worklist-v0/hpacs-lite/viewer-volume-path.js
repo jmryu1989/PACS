@@ -411,6 +411,7 @@ window.kinCreateVolumePath=function({target,permitted,alive,owner,host}){
       return {state:stateText.textContent,armed,busy,selected,generation,current:signature(r.value),value:r.value?structuredClone(r.value):null,final:pack(r.final,values),preview:pack(r.preview,values),failed:r.failed?{...r.failed}:null,navigation:navigation&&structuredClone(navigation)};
     }
   };
+  window.KinViewerSessionBoundary?.guardMethods(capability,['saved','restore','clearForJob']);
   window.kinMprPath=capability;const timer=setInterval(refresh,250);refresh();
   return {dispose(){ended=true;clearInterval(timer);cancel();unbind();records.clear();if(window.kinMprPath===capability)delete window.kinMprPath;window.removeEventListener('beforeunload',beforeUnload);for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);panel.remove();}};
 };

@@ -136,14 +136,14 @@
     function end(){if(ended)return;ended=true;epoch++;clearInterval(timer);for(const c of requests)c.abort();tracking=null;owner=null;permit=null;render();}
     toggle.onchange=()=>{enabled=toggle.checked;try{localStorage.setItem(ownerKey(),String(enabled));preferenceMessage='설정 저장됨 · 다음에 여는 영상 창에도 적용';}catch(_){preferenceMessage='설정을 저장하지 못해 이 창에서만 적용됩니다.';}if(enabled)load();else{epoch++;for(const c of requests)c.abort();tracking=null;phase='disabled';render();}};
     reload.onclick=()=>load();
-    const onStorage=e=>{if(e.key==='kin-session-ended')end();};
-    root.addEventListener('storage',onStorage);root.addEventListener('beforeunload',beforeUnload);
+
+    root.addEventListener('beforeunload',beforeUnload);
     document.addEventListener(core.Enums.Events.IMAGE_RENDERED,onImage,true);
-    try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+    try{channel = window.kinViewerOnEnd(() => end());}catch(_){}
     root.kinViewerFrameCoverageState=snapshot;root.kinViewerFrameCoverageConfirm=confirmLeave;
     timer=setInterval(()=>{if(!live()){end();return;}if(!panel.isConnected){host=document.querySelector('#kin-viewer-layout');host?.append(panel);}},250);
     load();
-    return {stop(){end();clearInterval(timer);channel?.close();root.removeEventListener('storage',onStorage);root.removeEventListener('beforeunload',beforeUnload);document.removeEventListener(core.Enums.Events.IMAGE_RENDERED,onImage,true);panel.remove();}};
+    return {stop(){end();clearInterval(timer);channel?.close();root.removeEventListener('beforeunload',beforeUnload);document.removeEventListener(core.Enums.Events.IMAGE_RENDERED,onImage,true);panel.remove();}};
   }
   const api={catalog,tracker,reference,mount};if(typeof module==='object'&&module.exports)module.exports=api;else root.KinFrameCoverage=api;
 })(globalThis);
