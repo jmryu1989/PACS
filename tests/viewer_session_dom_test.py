@@ -196,43 +196,43 @@ class ViewerSessionDOMTest(unittest.TestCase):
     def test_end_marker_blocks_every_resume_path_even_without_end_notice(self):
         self.observe_deferred_reads()
         for path in ['release-held', 'release-pending', 'resumed', 'peer']:
-            with self.subTest(path=path):
-                preparer = self.preparer()
-                view = self.open_viewer()
-                pid = 'marker-' + path
-                if path == 'peer':
-                    self.opener.evaluate("id=>window.localPreparation=KinWorkContext.prepare({preparationId:id})", pid)
-                    view.evaluate("navigator.locks.request=()=>Promise.reject(new DOMException('unavailable','NotAllowedError'));void 0")
-                self.notice('session-preparing', preparation=pid)
-                view.wait_for_function("KinWorkContext.state()==='preparing'")
-                self.queue_image_and_work(view)
-                landing = []
-                view.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
-                if path == 'release-pending':
-                    self.hold_lock(preparer, 'kin-session-ended:S1', 'shared')
-                    preparer.evaluate("navigator.locks.request('kin-session-ended:S1',()=>new Promise(()=>{}));void 0")
-                    self.assertIn('kin-session-ended:S1', preparer.evaluate('navigator.locks.query().then(q=>q.pending.map(l=>l.name))'))
-                    # Only the pending exclusive marker remains; hide the shared holder in
-                    # the snapshot so this independently exercises the pending decision.
-                    view.evaluate("const query=navigator.locks.query.bind(navigator.locks);navigator.locks.query=async()=>{const q=await query();return {...q,held:q.held.filter(l=>l.name!=='kin-session-ended:S1')}}")
-                else:
-                    self.hold_lock(preparer, 'kin-session-ended:S1')
-                if path == 'resumed':
-                    self.opener.evaluate("id=>channel.postMessage({type:'session-resumed',session:'S1',preparation:id})", pid)
-                elif path == 'peer':
-                    # The readable-peer fallback also checks the marker before cancellation.
-                    self.opener.evaluate("KinWorkContext.cancelPreparation(localPreparation)")
-                else:
-                    self.opener.evaluate("id=>preparationLocks.get(JSON.stringify(['S1',id])).release()", pid)
-                for _ in range(100):
-                    if landing: break
-                    self.opener.wait_for_timeout(10)
-                self.assertTrue(landing)
-                self.assertEqual(self.opener.evaluate('[viewerRef.states,viewerRef.nativeSends,viewerRef.delivered]'), [['ending'],[],0])
-                for route in landing: route.abort()
+            # Stop on the first assertion so a failed case cannot retain a lock into the next case.
+            preparer = self.preparer()
+            view = self.open_viewer()
+            pid = 'marker-' + path
+            if path == 'peer':
+                self.opener.evaluate("id=>window.localPreparation=KinWorkContext.prepare({preparationId:id})", pid)
+                view.evaluate("navigator.locks.request=()=>Promise.reject(new DOMException('unavailable','NotAllowedError'));void 0")
+            self.notice('session-preparing', preparation=pid)
+            view.wait_for_function("KinWorkContext.state()==='preparing'")
+            self.queue_image_and_work(view)
+            landing = []
+            view.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
+            if path == 'release-pending':
+                self.hold_lock(preparer, 'kin-session-ended:S1', 'shared')
+                preparer.evaluate("navigator.locks.request('kin-session-ended:S1',()=>new Promise(()=>{}));void 0")
+                self.assertIn('kin-session-ended:S1', preparer.evaluate('navigator.locks.query().then(q=>q.pending.map(l=>l.name))'))
+                # Only the pending exclusive marker remains; hide the shared holder in
+                # the snapshot so this independently exercises the pending decision.
+                view.evaluate("const query=navigator.locks.query.bind(navigator.locks);navigator.locks.query=async()=>{const q=await query();return {...q,held:q.held.filter(l=>l.name!=='kin-session-ended:S1')}}")
+            else:
+                self.hold_lock(preparer, 'kin-session-ended:S1')
+            if path == 'resumed':
+                self.opener.evaluate("id=>channel.postMessage({type:'session-resumed',session:'S1',preparation:id})", pid)
+            elif path == 'peer':
+                # The readable-peer fallback also checks the marker before cancellation.
+                self.opener.evaluate("KinWorkContext.cancelPreparation(localPreparation)")
+            else:
                 self.opener.evaluate("id=>preparationLocks.get(JSON.stringify(['S1',id])).release()", pid)
-                view.close(); preparer.close()
-                self.opener.evaluate("source({state:'active',session:'S1'})")
+            for _ in range(100):
+                if landing: break
+                self.opener.wait_for_timeout(10)
+            self.assertTrue(landing)
+            self.assertEqual(self.opener.evaluate('[viewerRef.states,viewerRef.nativeSends,viewerRef.delivered]'), [['ending'],[],0])
+            for route in landing: route.abort()
+            self.opener.evaluate("id=>preparationLocks.get(JSON.stringify(['S1',id])).release()", pid)
+            view.close(); preparer.close()
+            self.opener.evaluate("source({state:'active',session:'S1'})")
 
     def test_startup_end_marker_blocks_opener_handoff_typed_reload_and_frame(self):
         self.context.add_init_script("""(() => {
@@ -242,39 +242,39 @@ class ViewerSessionDOMTest(unittest.TestCase):
           }});
         })();""")
         for entry in ['opener', 'handoff', 'typed', 'reload', 'restore', 'frame']:
-            with self.subTest(entry=entry):
-                preparer = self.preparer()
-                view = self.open_viewer() if entry in ['reload', 'restore'] else None
-                self.hold_lock(preparer, 'kin-session-ended:S1')
-                self.requests.clear()
-                landing = []
-                self.context.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
-                if entry in ['opener', 'handoff', 'typed']:
-                    with self.context.expect_page() as created:
-                        self.opener.evaluate("""entry=>{
-                          const p=window.viewerRef=window.open('/ohif/viewer');
-                          if(entry==='handoff')p.name='kin-viewer-entry:'+JSON.stringify({session:'S1',name:'viewer'});
-                          if(entry!=='opener')p.opener=null;
-                        }""", entry)
-                    view = created.value
-                elif entry == 'reload': view.evaluate('location.reload()')
-                elif entry == 'restore': view.evaluate("entryStates=[];dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}))")
-                else:
-                    self.opener.evaluate("const f=document.createElement('iframe');f.id='viewer';f.src='/ohif/viewer';document.body.append(f)")
-                for _ in range(100):
-                    if (entry == 'frame' and self.opener.locator('#viewer').count() == 0) or landing: break
-                    self.opener.wait_for_timeout(10)
-                if entry == 'frame': self.assertEqual(self.opener.locator('#viewer').count(), 0)
-                else:
-                    self.assertTrue(landing)
-                    self.assertEqual(self.opener.evaluate('viewerRef.KinWorkContext.state()'), 'ending')
-                    self.assertNotIn('active', self.opener.evaluate('viewerRef.entryStates'))
-                    if entry != 'restore': self.assertFalse(self.opener.evaluate('!!viewerRef.started'))
-                    for route in landing: route.abort()
-                    view.close()
-                self.assertEqual(self.requests, [('/api/me',None)] if entry == 'typed' else [])
-                self.context.unroute(BASE + '/worklist/hpacs-lite/index.html')
-                preparer.close()
+            # Stop on the first assertion so a failed case cannot retain a lock into the next case.
+            preparer = self.preparer()
+            view = self.open_viewer() if entry in ['reload', 'restore'] else None
+            self.hold_lock(preparer, 'kin-session-ended:S1')
+            self.requests.clear()
+            landing = []
+            self.context.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
+            if entry in ['opener', 'handoff', 'typed']:
+                with self.context.expect_page() as created:
+                    self.opener.evaluate("""entry=>{
+                      const p=window.viewerRef=window.open('/ohif/viewer');
+                      if(entry==='handoff')p.name='kin-viewer-entry:'+JSON.stringify({session:'S1',name:'viewer'});
+                      if(entry!=='opener')p.opener=null;
+                    }""", entry)
+                view = created.value
+            elif entry == 'reload': view.evaluate('location.reload()')
+            elif entry == 'restore': view.evaluate("entryStates=[];dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}))")
+            else:
+                self.opener.evaluate("const f=document.createElement('iframe');f.id='viewer';f.src='/ohif/viewer';document.body.append(f)")
+            for _ in range(100):
+                if (entry == 'frame' and self.opener.locator('#viewer').count() == 0) or landing: break
+                self.opener.wait_for_timeout(10)
+            if entry == 'frame': self.assertEqual(self.opener.locator('#viewer').count(), 0)
+            else:
+                self.assertTrue(landing)
+                self.assertEqual(self.opener.evaluate('viewerRef.KinWorkContext.state()'), 'ending')
+                self.assertNotIn('active', self.opener.evaluate('viewerRef.entryStates'))
+                if entry != 'restore': self.assertFalse(self.opener.evaluate('!!viewerRef.started'))
+                for route in landing: route.abort()
+                view.close()
+            self.assertEqual(self.requests, [('/api/me',None)] if entry == 'typed' else [])
+            self.context.unroute(BASE + '/worklist/hpacs-lite/index.html')
+            preparer.close()
 
     def test_other_sessions_end_during_handoff_does_not_stop_entry(self):
         held = []
@@ -295,7 +295,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         view.evaluate("fetch('/api/studies').then(r=>r.json())")
         self.assertEqual(self.requests, [('/api/studies','S1')])
 
-    def test_removed_or_never_connected_elements_send_nothing_on_resume(self):
+    def test_removed_elements_send_nothing_and_never_attached_errors_on_resume(self):
         self.observe_deferred_reads()
         view = self.open_viewer()
         self.notice('session-preparing')
@@ -305,7 +305,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
           window.fetch=(url,...args)=>{readAttempts.push(String(url));return fetch(url,...args);};
           for(const kind of ['never','brief','removed','reattached']){
             const image=new Image();image.id=kind;
-            image.onload=image.onerror=()=>events.push(kind);
+            image.onload=()=>events.push(kind+'-load');image.onerror=()=>events.push(kind+'-error');
             image.src='/dicom-web/deferred-'+kind;
             if(kind!=='never')document.body.append(image);
             if(kind==='brief')image.remove();
@@ -324,7 +324,103 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.assertEqual(view.evaluate('readAttempts'), [])
         self.assertEqual(view.evaluate('nativeSends'), [])
         self.assertEqual(self.requests, [])
-        self.assertEqual(view.evaluate('events'), [])
+        self.assertEqual(view.evaluate('events'), ['never-error'])
+
+    def test_never_attached_image_and_media_settle_with_error_while_active(self):
+        view = self.open_viewer()
+        view.evaluate("""()=>{
+          window.events=[];
+          for(const element of [new Image(),document.createElement('video'),document.createElement('audio')]){
+            element.onload=()=>events.push(element.tagName+'-load');
+            element.onerror=()=>events.push(element.tagName+'-error');
+            element.src='/dicom-web/detached';
+          }
+        }""")
+        for _ in range(200):
+            if view.evaluate('events.length===3'): break
+            view.wait_for_timeout(10)
+        self.assertEqual(view.evaluate('events.sort()'), ['AUDIO-error','IMG-error','VIDEO-error'])
+        self.assertEqual(self.requests, [])
+
+    def test_both_locks_vanish_with_end_record_ends_without_notice(self):
+        self.observe_deferred_reads()
+        for storage in ['localStorage', 'cookie']:
+            for trial in range(2):
+                preparer = self.preparer()
+                view = self.open_viewer()
+                self.hold_lock(preparer, 'kin-preparation:vanishing')
+                preparer.evaluate("channel.postMessage({type:'session-preparing',session:'S1',preparation:'vanishing'})")
+                view.wait_for_function("KinWorkContext.state()==='preparing'")
+                self.queue_image_and_work(view)
+                self.hold_lock(preparer, 'kin-session-ended:S1')
+                preparer.evaluate("""storage=>{
+                  const record=JSON.stringify({session:'S1',status:'ending'});
+                  if(storage==='cookie')document.cookie='kin-session-end='+encodeURIComponent(record)+';path=/';
+                  else localStorage.setItem('kin-session-end',record);
+                }""", storage)
+                landing = []
+                view.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
+                preparer.close()
+                for _ in range(200):
+                    if landing: break
+                    self.opener.wait_for_timeout(10)
+                self.assertTrue(landing, (storage, trial))
+                self.assertEqual(self.opener.evaluate('({states:viewerRef.states,sends:viewerRef.nativeSends,events:viewerRef.events,work:viewerRef.delivered,body:viewerRef.document.body.textContent})'),
+                                 {'states':['ending'],'sends':[],'events':[],'work':0,'body':''})
+                self.assertEqual(self.requests, [])
+                for route in landing: route.abort()
+                view.close()
+                self.opener.evaluate("localStorage.removeItem('kin-session-end');document.cookie='kin-session-end=;max-age=0;path=/'")
+
+    def test_both_locks_vanish_without_matching_end_record_resumes_and_loads(self):
+        self.observe_deferred_reads()
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
+        self.context.route(BASE + '/dicom-web/deferred', lambda route: (
+            self.requests.append(('/dicom-web/deferred', route.request.headers.get('x-kin-session'))),
+            route.fulfill(body=png, content_type='image/png')))
+        for record in [None, 'invalid-json', '{"session":"S2"}']:
+            preparer = self.preparer()
+            view = self.open_viewer()
+            self.hold_lock(preparer, 'kin-preparation:vanishing')
+            preparer.evaluate("channel.postMessage({type:'session-preparing',session:'S1',preparation:'vanishing'})")
+            view.wait_for_function("KinWorkContext.state()==='preparing'")
+            self.queue_image_and_work(view)
+            self.hold_lock(preparer, 'kin-session-ended:S1')
+            if record is not None: preparer.evaluate("r=>localStorage.setItem('kin-session-end',r)", record)
+            preparer.close()
+            for _ in range(200):
+                if view.evaluate("events.includes('load')"): break
+                view.wait_for_timeout(10)
+            self.assertEqual(view.evaluate('[states,nativeSends,events,delivered]'), [['active'],['active'],['load'],1], record)
+            self.assertEqual(self.requests, [('/dicom-web/deferred','S1')])
+            self.requests.clear()
+            view.close()
+            self.opener.evaluate("localStorage.removeItem('kin-session-end')")
+
+    def test_end_record_blocks_bound_startup_without_web_locks(self):
+        self.context.add_init_script("Object.defineProperty(navigator,'locks',{value:undefined})")
+        for storage in ['localStorage', 'cookie']:
+            self.opener.evaluate("""storage=>{
+              const record=JSON.stringify({session:'S1',status:'ending'});
+              if(storage==='cookie')document.cookie='kin-session-end='+encodeURIComponent(record)+';path=/';
+              else localStorage.setItem('kin-session-end',record);
+            }""", storage)
+            landing = []
+            self.context.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
+            with self.context.expect_page() as created:
+                self.opener.evaluate("window.viewerRef=window.open('/ohif/viewer')")
+            view = created.value
+            for _ in range(200):
+                if landing: break
+                self.opener.wait_for_timeout(10)
+            self.assertTrue(landing, storage)
+            self.assertEqual(self.opener.evaluate('viewerRef.KinWorkContext.state()'), 'ending')
+            self.assertFalse(self.opener.evaluate('!!viewerRef.started'))
+            self.assertEqual(self.requests, [])
+            for route in landing: route.abort()
+            view.close()
+            self.context.unroute(BASE + '/worklist/hpacs-lite/index.html')
+            self.opener.evaluate("localStorage.removeItem('kin-session-end');document.cookie='kin-session-end=;max-age=0;path=/'")
 
 
     def test_router_reload_cannot_adopt_replacement_session(self):

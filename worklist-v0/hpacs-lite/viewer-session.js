@@ -76,8 +76,17 @@
           [403, 409].includes(failure.status) && failure.code === 'AUTH_SESSION_MISMATCH') end();
     }
     const transport = win.KinSessionTransport.page({ fetch: originalFetch, authFailure });
+    function readEndRecord() {
+      const stored = win.localStorage.getItem('kin-session-end');
+      if (stored !== null) return stored;
+      const cookie = win.document.cookie.split(';').map(part => part.trim()).find(part => part.startsWith('kin-session-end='));
+      return cookie ? decodeURIComponent(cookie.slice('kin-session-end='.length)) : null;
+    }
     async function mayStartWork(id = session) {
       if (ended) return false;
+      try {
+        if (JSON.parse(readEndRecord())?.session === id) { end(); return false; }
+      } catch (_) { /* An unreadable record is not evidence of an end. */ }
       if (!locks) return true;
       try {
         const snapshot = await locks.query();
@@ -296,8 +305,7 @@
         storage.setItem(key, value);
         const reliable = storage.getItem(key) === value;
         storage.removeItem(key);
-        return reliable && storage.getItem(key) === null && storage.getItem('kin-session-end') === null &&
-          !win.document.cookie.split(';').some(part => part.trim().startsWith('kin-session-end='));
+        return reliable && storage.getItem(key) === null && readEndRecord() === null;
       } catch (_) { return false; }
     }
     let entryNotice = null;

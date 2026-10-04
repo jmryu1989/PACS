@@ -17,8 +17,8 @@
       if (!protectedUrl(url)) throw new TypeError('Expected a protected resource in this origin');
       await boundary.wait();
       if (options.signal?.aborted) throw new win.DOMException('Aborted', 'AbortError');
-      // The observer may never see a synchronous attach/remove. Check the owner when
-      // the deferred read is actually due; explicit read() callers own detached use.
+      // Detached element loads fail explicitly; read() callers own detached use.
+      // Recheck at delivery because preparation can outlive the element's attachment.
       if (options.element && !options.element.isConnected) throw new win.DOMException('Element removed', 'AbortError');
       const response = await win.fetch(url, { credentials: 'same-origin', cache: 'no-store', signal: options.signal });
       const type = response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase();
@@ -66,8 +66,10 @@
         entry.url = url; apply(url);
         if (element.tagName === 'SOURCE') element.parentElement?.load?.();
       }, () => {
-        if (!element.isConnected && elements.get(element)?.get(name) === entry) { forget(element, name); return; }
-        if (elements.get(element)?.get(name) === entry && !boundary.ended()) element.dispatchEvent(new win.Event('error'));
+        if (elements.get(element)?.get(name) !== entry || boundary.ended()) return;
+        const removed = entry.connected && !element.isConnected;
+        forget(element, name);
+        if (!removed) element.dispatchEvent(new win.Event('error'));
       });
     }
     if (nativeSet) {
@@ -88,8 +90,10 @@
         }
       }
     }
-    const observer = win.MutationObserver && new win.MutationObserver(() => {
+    const observer = win.MutationObserver && new win.MutationObserver(records => {
       for (const [element, entries] of elements) for (const [name, entry] of entries) {
+        // Removal records also retain an element attached and removed in the same task.
+        if (records.some(record => [...record.removedNodes].some(node => node === element || node.contains(element)))) entry.connected = true;
         if (element.isConnected) entry.connected = true;
         else if (entry.connected) forget(element, name);
       }
