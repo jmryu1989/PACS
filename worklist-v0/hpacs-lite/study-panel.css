@@ -1,0 +1,10 @@
+/* The host owns drawer placement and responsive geometry. */
+.study-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; color: var(--kin-text); background: var(--kin-bg); border: 1px solid var(--kin-line); }
+.study-panel[hidden], .study-panel [hidden] { display: none !important; }
+.study-panel-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .5rem; }
+.study-panel-head h2 { margin: 0; font-size: 1rem; }
+.study-panel > [role="tablist"] { display: flex; flex-wrap: wrap; gap: .25rem; padding: .5rem; }
+.study-panel > [role="tablist"] > [role="tab"] { flex: 1; }
+.study-panel > [role="tablist"] > [role="tab"][aria-selected="true"] { font-weight: bold; text-decoration: underline; }
+.study-panel > [role="tabpanel"] { min-width: 0; min-height: 0; flex: 1; overflow: auto; padding: .5rem; }
+.study-panel :focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
