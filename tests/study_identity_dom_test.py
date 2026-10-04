@@ -332,6 +332,9 @@ let serverMode=true,offline=false,demoMode=false,commitEpoch=0,listLoadSequence=
 let myInstitution='hallym',orderRefreshSequence=0,studies=[],appState={},orders=[],studyIdentityModel=null;
 let apiCalls=[],pending=[],toasts=[],alerts=[],loads=[],orderRenders=[];
 const reportConverge=new Set();
+// No report text is being written on this page: an observed state hands its draft boundary to the draft client, which is
+// not under test here (tests/report_text_boundaries_dom_test.py runs the shipped one).
+const draftClient={observe(){}};
 function api(method,path,body){apiCalls.push({method,path,body:body===undefined?null:JSON.parse(JSON.stringify(body))});
   return new Promise((resolve,reject)=>pending.push({resolve,reject}))}
 window.answer=(ok,value)=>{const next=pending.shift();if(!next)throw new Error('no pending api call');
@@ -362,7 +365,7 @@ MODIFYBIND
 
 def correction_page(apply_state=None, cells=None, modify=None):
     functions = [apply_state or extract_function(MAIN, "applyState")]
-    for name in ("saveApp", "apiFail", "preservedLocal", "mergePolledState", "syncStudy", "applyStudyIdentity",
+    for name in ("saveApp", "apiFail", "preservedLocal", "mergeObservedReportState", "syncStudy", "applyStudyIdentity",
                  "renderStudyIdentity", "openModify"):
         functions.append(extract_function(MAIN, name))
     functions.append("async " + extract_function(MAIN, "saveModify"))

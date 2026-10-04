@@ -43,7 +43,7 @@ START_POLLING = extract_function(MAIN, "startPolling")
 # harness asserts that the selected study keeps its drawn version and its local draft, and that
 # claim is only worth anything if the product's own rule is what produced it.
 PRESERVE = extract_function(MAIN, "preservedLocal")
-MERGE = extract_function(MAIN, "mergePolledState")
+MERGE = extract_function(MAIN, "mergeObservedReportState")
 # S4-U1b: the poll now reports each observation to these; they are sliced, not re-described, so the
 # cases below judge the shipped labels and the shipped failure rule.
 OBSERVE = "\n".join(extract_function(MAIN, name) for name in ("applyObservation", "markObservationUnavailable", "renderObservation"))
@@ -89,13 +89,15 @@ const assertStudyOwner=()=>{},KinAuth={logout:async()=>{},has:role=>grants.inclu
 function api(method,path,body){apiCalls.push({method,path,body});return new Promise((resolve,reject)=>{window.settleApi=(ok,value)=>ok?resolve(value):reject(value)})}
 function applyState(value){return value}function fmtD(value){return value}
 function updateNoteSummary(){}function updateReaderAssignment(){}
-// Nothing is waiting to converge in these cases; the non-empty set is exercised by
-// tests/report_citation_dom_test.py, which drives the same two functions through applyPoll.
-const reportConverge=new Set();
+// The selected study carries text this document typed and the server has not confirmed: the page records that fact as
+// a mark on the study (it does not compare texts), and the poll keeps the drawn version and the local draft of a marked
+// study only. A study without the mark takes the server's state and hands its draft boundary to the draft client.
+const reportConverge=new Set(['1.2.3']);
+const draftObserved=[],draftClient={observe:(uid,revision,seen)=>{draftObserved.push({uid,revision,seen})}};
 PRESERVELOCAL
 MERGESTATE
 // The shipped fromApi assigns through the same rule, so the rebuild path keeps it too.
-function fromApi(s){appState[s.uid]=mergePolledState(s.uid,s.state);return {...s}}
+function fromApi(s){appState[s.uid]=mergeObservedReportState(s.uid,s.state);return {...s}}
 // Starts null: study-arrivals.js is added after this script, and setUp starts the session model.
 let studyObservationModel=null;function viewed(){return studies.find(s=>s.uid===selectedUid)}
 let orderReconciliationModel=null;

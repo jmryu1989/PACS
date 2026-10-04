@@ -5,6 +5,7 @@ import unittest
 
 from playwright.sync_api import sync_playwright
 from viewer_identity_position_dom_test import HARNESS, v1_viewer
+from module_session_harness import activate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,8 @@ class ViewerIdentityFieldsDOMTest(unittest.TestCase):
         self.page = self.browser.new_page(viewport={"width": 1280, "height": 900})
         self.page.route("https://identity-fields.test/", lambda route: route.fulfill(body=HARNESS, content_type="text/html"))
         self.page.goto("https://identity-fields.test/")
+        # viewer-identity.js follows its document's gate (S7-U5): the shipped gate with a live synthetic session.
+        activate(self.page)
         self.page.add_script_tag(path=str(IDENTITY))
 
     def tearDown(self):
@@ -84,6 +87,7 @@ class ViewerIdentityFieldsDOMTest(unittest.TestCase):
         self.page.locator('#viewer').evaluate("(frame,html)=>frame.srcdoc=html", HARNESS)
         frame = self.page.locator('#viewer').element_handle().content_frame()
         frame.wait_for_load_state()
+        activate(frame)
         frame.add_script_tag(path=str(IDENTITY))
         frame.evaluate("window.identityMount=__mount()")
         self.page.evaluate("""() => {

@@ -1302,7 +1302,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         panel.get_by_label("MPR annotation label", exact=True).fill("")
         self.assertEqual(view.evaluate("kinMprMarks.capture(true)"), before)
 
-    def test_tech_note_input_and_inflight_save_survive_preparation(self):
+    def test_tech_note_input_survives_preparation_and_a_save_answered_across_it_is_not_called_saved(self):
         view = self.open_viewer()
         held = []
         note_url = BASE + "/api/studies/1.2.3/tech-note"
@@ -1337,7 +1337,13 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.notice("session-resumed")
         view.wait_for_timeout(100)
         self.assertEqual(view.locator("#tech-note-text").input_value(), "unsaved original")
-        self.assertIn("저장되었습니다", view.locator("#tech-note-status").inner_text())
+        # The shared Tech Note module (also mounted by main.html) treats a save whose answer crossed a cancelled
+        # preparation as unconfirmed: the input stays, the person is told, and Save Note is pressable again. It
+        # does not claim a save it did not apply (the same contract as tests/session_modules_dom_test.py).
+        status = view.locator("#tech-note-status").inner_text()
+        self.assertNotIn("저장되었습니다", status)
+        self.assertIn("입력은 유지했습니다", status)
+        self.assertTrue(view.get_by_role("button", name="Save Note", exact=True).is_enabled())
 
     def test_pause_retires_cancelled_timers_and_defers_an_xhr_completion(self):
         view = self.open_viewer()
