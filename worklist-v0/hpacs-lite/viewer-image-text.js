@@ -121,8 +121,8 @@
       toggle = doc.createElement('button'); toggle.type = 'button'; toggle.id = 'kin-image-text-toggle'; toggle.textContent = 'Hide Image Text'; toggle.addEventListener('click', toggleText); panel.append(toggle);
       status = doc.createElement('p'); status.id = 'kin-image-text-status'; status.setAttribute('role', 'status'); status.textContent = 'Image Text · 영상 정보가 표시됩니다.'; panel.append(status); host.append(panel);
       listen(doc, 'fullscreenchange', observe); listen(win, 'pagehide', end);
-      listen(win, 'storage', event => { if (event.key === 'kin-session-ended') end(); });
-      try { channel = new win.BroadcastChannel('kin-session'); channel.onmessage = event => { if (event.data?.type === 'session-ended') end(); }; } catch (_) {}
+
+      try { channel = window.kinViewerOnEnd(() => end()); } catch (_) {}
       for (const service of [services?.viewportGridService, services?.displaySetService]) for (const event of new Set(Object.values(service?.EVENTS || {}))) try { subscriptions.push(service.subscribe(event, observe)); } catch (_) {}
       for (const event of ['PRE_STACK_NEW_IMAGE', 'STACK_NEW_IMAGE', 'IMAGE_RENDERED'].map(name => win.cornerstone?.Enums?.Events?.[name]).filter(Boolean)) listen(doc, event, observe, true);
       if (intervalMs) timer = win.setInterval(observe, intervalMs);

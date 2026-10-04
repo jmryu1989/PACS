@@ -1,6 +1,7 @@
 # coding: utf-8
 """TEST-HP-MOUNT: actual config mount, source filtering and stale async boundaries."""
 from pathlib import Path
+from viewer_session_fixture import install_viewer_session
 from urllib.parse import urlparse
 import time
 import unittest
@@ -90,6 +91,7 @@ class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
         self.site_value = None; self.site_requests = []
         self.page.route('https://mount.test/**', self.route)
         self.page.goto(f'https://mount.test/ohif/viewer?StudyInstanceUIDs={CURRENT},{RELATED}')
+        install_viewer_session(self.page)
         self.page.add_script_tag(content=INTEGRATION)
         self.page.evaluate("value=>localStorage.setItem('kin-hanging-protocols:v1:'+JSON.stringify(['hospital','reader']),JSON.stringify(value))", library())
 
@@ -167,7 +169,7 @@ class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
     def test_session_end_while_editor_script_is_delayed_cannot_mount_or_mutate(self):
         self.delayed_script = []; self.page.evaluate('mountLayout()'); self.page.wait_for_function('()=>document.querySelectorAll("script[src*=viewer-hanging-protocol]").length===1')
         self.wait_for_capture(self.delayed_script, 'viewer-hanging-protocol.js')
-        self.page.evaluate("window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))")
+        self.page.evaluate("window.KinViewerSessionBoundary.authFailure({session:'S1',status:401,code:'AUTH_SESSION_ENDED'})")
         self.release(self.delayed_script, body=EDITOR, content_type='application/javascript'); self.page.wait_for_timeout(100)
         self.assertEqual(0, self.page.get_by_role('heading', name='Hanging Protocols').count()); self.assertEqual(0, self.page.evaluate('setCalls.length'))
         expect(self.page.locator('#kin-viewer-layout-status')).to_contain_text('세션이 변경')
@@ -175,7 +177,7 @@ class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
     def test_interrupted_permission_and_delayed_owner_change_fail_closed(self):
         self.mount(); self.delayed_studies = []; self.page.locator('#kin-hp-apply').click()
         self.wait_for_capture(self.delayed_studies, '/api/studies')
-        self.page.evaluate("window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))")
+        self.page.evaluate("window.KinViewerSessionBoundary.authFailure({session:'S1',status:401,code:'AUTH_SESSION_ENDED'})")
         self.release(self.delayed_studies, json={'studies': STUDIES}); self.page.wait_for_timeout(100); self.assertEqual(0, self.page.evaluate('setCalls.length'))
 
         self.page.evaluate('viewerLayoutExtension.onModeExit()'); self.change_owner_after = None; self.me_count = 0; self.delayed_studies = None
@@ -185,10 +187,11 @@ class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
         self.page.evaluate('mountLayout()'); self.page.wait_for_timeout(100)
         self.assertEqual((0, 0), (self.me_count, self.page.get_by_role('heading', name='Hanging Protocols').count()))
         expect(self.page.locator('#kin-viewer-layout-status')).to_contain_text('세션이 변경')
-        self.page.goto(f'https://mount.test/ohif/viewer?StudyInstanceUIDs={CURRENT},{RELATED}'); self.page.add_script_tag(content=INTEGRATION)
+        self.page.goto(f'https://mount.test/ohif/viewer?StudyInstanceUIDs={CURRENT},{RELATED}'); install_viewer_session(self.page); self.page.add_script_tag(content=INTEGRATION)
         self.page.evaluate('mountLayout()'); expect(self.page.get_by_role('heading', name='Hanging Protocols')).to_be_visible()
         self.change_owner_after = self.me_count + 1
-        self.page.locator('#kin-hp-apply').click(); expect(self.page.locator('#kin-viewer-layout-status')).to_contain_text('세션이 변경')
+        self.page.locator('#kin-hp-apply').click(); expect(self.page.locator('#kin-hp-status')).to_contain_text('계정 응답이 일치하지')
+        self.assertEqual(self.page.evaluate('KinWorkContext.state()'), 'active')
         self.assertEqual(0, self.page.evaluate('setCalls.length'))
 
 

@@ -1,6 +1,7 @@
 # coding: utf-8
 """Isolated Chromium coverage for the actual Image Text config loader."""
 from pathlib import Path
+from viewer_session_fixture import install_viewer_session
 import time
 import unittest
 
@@ -67,6 +68,7 @@ class ViewerImageTextLoaderDOMTest(unittest.TestCase):
         page = self.browser.new_page()
         page.route(URL, lambda route: route.fulfill(body=HARNESS, content_type="text/html; charset=utf-8"))
         page.goto(URL)
+        install_viewer_session(page)
         page.add_script_tag(content=FACTORY)
         return page
 
@@ -116,7 +118,7 @@ class ViewerImageTextLoaderDOMTest(unittest.TestCase):
             page.evaluate("enterImageText()")
             page.wait_for_function("()=>document.querySelectorAll('script[src*=viewer-image-text]').length===1")
             self.wait_for_capture(page, held)
-            page.evaluate("dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))")
+            page.evaluate("KinViewerSessionBoundary.authFailure({session:'S1',status:401,code:'AUTH_SESSION_ENDED'})")
             held.pop().fulfill(body=FAKE_MODULE, content_type="application/javascript")
             page.wait_for_function("()=>!!window.imageTextCalls")
             page.evaluate("enterImageText()")

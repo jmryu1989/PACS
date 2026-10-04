@@ -1,6 +1,6 @@
+const { pageDefaults, loadPanel } = require('./viewer_session_fixture.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const ImageText = require('../worklist-v0/hpacs-lite/viewer-image-text.js');
 
 class Style {
   constructor(){this.values=new Map()}
@@ -32,7 +32,7 @@ class Document extends EventTarget {
   querySelector(selector){return selector.includes('dialog')&&this.dialog?{}:null}
 }
 function setup({two=false}={}) {
-  const doc=new Document(),win=new EventTarget();doc.defaultView=win;win.setInterval=setInterval;win.clearInterval=clearInterval;win.BroadcastChannel=class{close(){}};
+  const doc=new Document(),win=new EventTarget();const page=pageDefaults(win);doc.defaultView=win;win.setInterval=setInterval;win.clearInterval=clearInterval;win.BroadcastChannel=class{close(){}};
   let owner='owner-1',busy=false;win.kinViewerWindowOwner=()=>owner;win.kinViewerHistoryWorkspaceState=()=>({busy});win.kinViewerJobWorkspaceState=()=>({busy:false});
   const state={layout:{numRows:1,numCols:two?2:1},activeViewportId:'vp0',viewports:new Map()},viewports=new Map(),sets=new Map(),meta=new Map(),subs=[];
   for(let index=0;index<(two?2:1);index++){
@@ -44,34 +44,35 @@ function setup({two=false}={}) {
     state.viewports.set(`vp${index}`,{viewportId:`vp${index}`,x:index,y:0,width:1,height:1,displaySetInstanceUIDs:[`ds${index}`]});
   }
   const services={viewportGridService:{EVENTS:{GRID:'grid'},getState:()=>state,subscribe:(_,fn)=>{subs.push(fn);return{unsubscribe(){}}}},cornerstoneViewportService:{getCornerstoneViewport:id=>viewports.get(id)},displaySetService:{EVENTS:{ADDED:'added'},getDisplaySetByUID:id=>sets.get(id),subscribe:(_,fn)=>{subs.push(fn);return{unsubscribe(){}}}}};
-  const api=ImageText.create(services,{doc,root:win,metadata:id=>meta.get(id),rendered:()=> 'rendered',intervalMs:0});assert.equal(api.mount(),true);
-  return {doc,win,state,viewports,sets,meta,api,toggle:doc.getElementById('kin-image-text-toggle'),emit:()=>subs.forEach(fn=>fn()),setOwner:value=>owner=value,setBusy:value=>busy=value};
+  loadPanel(page,'viewer-image-text.js');
+  const api=win.KinViewerImageText.create(services,{doc,root:win,metadata:id=>meta.get(id),rendered:()=> 'rendered',intervalMs:0});assert.equal(api.mount(),true);
+  return {page,doc,win,state,viewports,sets,meta,api,toggle:doc.getElementById('kin-image-text-toggle'),emit:()=>subs.forEach(fn=>fn()),setOwner:value=>owner=value,setBusy:value=>busy=value};
 }
 
 test('hide and show affect verified grid text only and restore exact prior styles',()=>{
   const h=setup({two:true}),first=h.viewports.get('vp0'),second=h.viewports.get('vp1'),canvas=new Element('canvas');first.element.append(canvas);
   const panes=[first,second].map(v=>v.element.parentElement),overlays=panes.map(p=>p.querySelectorAll('.viewport-overlay')[0]);overlays[1].style.setProperty('visibility','hidden','important');const camera=first.camera;
-  h.toggle.click();assert.equal(globalThis.kinViewerImageTextHidden(),true);assert.equal(h.toggle.textContent,'Show Image Text');
+  h.toggle.click();assert.equal(h.win.kinViewerImageTextHidden(),true);assert.equal(h.toggle.textContent,'Show Image Text');
   assert.match(h.doc.head.children[0].textContent,/\.orientation-marker/);assert.equal(panes[0].children.find(item=>item.className==='orientation-marker').style.getPropertyValue('color'),'red');
   assert.match(panes[0].getAttribute('data-kin-image-text-hidden'),/^kit-/);assert.equal(overlays[0].style.getPropertyValue('visibility'),'');assert.equal(canvas.hasAttribute('data-kin-image-text-hidden'),false);assert.equal(first.camera,camera);
-  h.toggle.click();assert.equal(globalThis.kinViewerImageTextHidden(),false);assert.equal(overlays[0].style.getPropertyValue('visibility'),'');assert.equal(overlays[1].style.getPropertyValue('visibility'),'hidden');assert.equal(overlays[1].style.getPropertyPriority('visibility'),'important');h.api.stop();
+  h.toggle.click();assert.equal(h.win.kinViewerImageTextHidden(),false);assert.equal(overlays[0].style.getPropertyValue('visibility'),'');assert.equal(overlays[1].style.getPropertyValue('visibility'),'hidden');assert.equal(overlays[1].style.getPropertyPriority('visibility'),'important');h.api.stop();
 });
 
 test('same-stack frame remains hidden, new overlay is adopted, and source mutation restores all',()=>{
-  const h=setup(),v=h.viewports.get('vp0');h.toggle.click();v.current=v.imageIds[0];h.emit();assert.equal(globalThis.kinViewerImageTextHidden(),true);
+  const h=setup(),v=h.viewports.get('vp0');h.toggle.click();v.current=v.imageIds[0];h.emit();assert.equal(h.win.kinViewerImageTextHidden(),true);
   const late=new Element();late.className='viewport-overlay';v.element.parentElement.append(late);h.emit();assert.match(v.element.parentElement.getAttribute('data-kin-image-text-hidden'),/^kit-/);
-  h.meta.get(v.imageIds[0]).PatientID='OTHER';h.emit();assert.equal(globalThis.kinViewerImageTextHidden(),false);assert.equal(late.style.getPropertyValue('visibility'),'');assert.match(h.doc.getElementById('kin-image-text-status').textContent,/구성이 바뀌어/);h.api.stop();
+  h.meta.get(v.imageIds[0]).PatientID='OTHER';h.emit();assert.equal(h.win.kinViewerImageTextHidden(),false);assert.equal(late.style.getPropertyValue('visibility'),'');assert.match(h.doc.getElementById('kin-image-text-status').textContent,/구성이 바뀌어/);h.api.stop();
 });
 
 test('owner, fullscreen, busy, mixed viewport and session changes fail closed',()=>{
   const h=setup();h.setBusy(true);h.emit();assert.equal(h.toggle.disabled,true);h.setBusy(false);h.emit();assert.equal(h.toggle.disabled,false);
-  h.doc.fullscreenElement=h.viewports.get('vp0').element;h.emit();assert.equal(h.toggle.disabled,true);h.doc.fullscreenElement=null;h.emit();h.toggle.click();h.doc.fullscreenElement=h.viewports.get('vp0').element;h.doc.dispatchEvent(new Event('fullscreenchange'));assert.equal(globalThis.kinViewerImageTextHidden(),false);
-  h.doc.fullscreenElement=null;h.emit();h.toggle.click();h.setOwner('owner-2');assert.equal(globalThis.kinViewerImageTextHidden(),true);h.emit();assert.equal(globalThis.kinViewerImageTextHidden(),false);
-  h.setOwner('owner-1');h.emit();h.viewports.get('vp0').type='orthographic';h.emit();assert.equal(h.toggle.disabled,true);h.win.dispatchEvent(Object.assign(new Event('storage'),{key:'kin-session-ended'}));assert.equal(h.doc.getElementById('kin-image-text'),null);
+  h.doc.fullscreenElement=h.viewports.get('vp0').element;h.emit();assert.equal(h.toggle.disabled,true);h.doc.fullscreenElement=null;h.emit();h.toggle.click();h.doc.fullscreenElement=h.viewports.get('vp0').element;h.doc.dispatchEvent(new Event('fullscreenchange'));assert.equal(h.win.kinViewerImageTextHidden(),false);
+  h.doc.fullscreenElement=null;h.emit();h.toggle.click();h.setOwner('owner-2');assert.equal(h.win.kinViewerImageTextHidden(),true);h.emit();assert.equal(h.win.kinViewerImageTextHidden(),false);
+  h.setOwner('owner-1');h.emit();h.viewports.get('vp0').type='orthographic';h.emit();assert.equal(h.toggle.disabled,true);h.page.end();assert.equal(h.doc.getElementById('kin-image-text'),null);
 });
 
 test('stale detached controls and attribute ownership collisions do not mutate another view',()=>{
-  const first=setup(),old=first.toggle;first.api.stop();old.click();assert.equal(globalThis.kinViewerImageTextHidden(),false);
-  const second=setup(),pane=second.viewports.get('vp0').element.parentElement;pane.setAttribute('data-kin-image-text-hidden','other');second.toggle.click();assert.equal(globalThis.kinViewerImageTextHidden(),false);assert.equal(pane.getAttribute('data-kin-image-text-hidden'),'other');second.api.stop();
+  const first=setup(),old=first.toggle;first.api.stop();old.click();assert.equal(first.win.kinViewerImageTextHidden(),false);
+  const second=setup(),pane=second.viewports.get('vp0').element.parentElement;pane.setAttribute('data-kin-image-text-hidden','other');second.toggle.click();assert.equal(second.win.kinViewerImageTextHidden(),false);assert.equal(pane.getAttribute('data-kin-image-text-hidden'),'other');second.api.stop();
   const duplicate=setup(),set=duplicate.sets.get('ds0');set.images.push(set.images[0]);duplicate.emit();assert.equal(duplicate.toggle.disabled,true);duplicate.api.stop();
 });

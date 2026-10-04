@@ -657,5 +657,12 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     restore,
     clearForJob(){if(operation)close();},
   };
-  return {open,job,dispose(){ended=true;clearInterval(timer);stopBatchPlay();observer.disconnect();close();dialog.remove();}};
+  window.KinViewerSessionBoundary?.guardMethods(job,['saved','restore','clearForJob']);
+  // Programmatic control commands have the same mutation boundary as native input. In
+  // particular, a paused display must not change its VOI draft, batch or pending Job.
+  if(window.KinViewerSessionBoundary)for(const control of dialog.querySelectorAll('button,select,input,textarea'))
+    window.KinViewerSessionBoundary.guardMethods(control,['onclick','onchange','oninput'].filter(name=>typeof control[name]==='function'));
+  const api={open,job,dispose(){ended=true;clearInterval(timer);stopBatchPlay();observer.disconnect();close();dialog.remove();}};
+  window.KinViewerSessionBoundary?.guardMethods(api,['open']);
+  return api;
 };

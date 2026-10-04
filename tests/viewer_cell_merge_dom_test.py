@@ -1,6 +1,7 @@
 # coding: utf-8
 """Isolated Chromium coverage for cell merge: double-click ownership, panel and loader."""
 from pathlib import Path
+from viewer_session_fixture import install_viewer_session
 import json
 import time
 import unittest
@@ -170,6 +171,7 @@ class ViewerCellMergeDOMTest(unittest.TestCase):
         page = self.browser.new_page(viewport={"width": 900, "height": 700})
         page.route(URL, lambda route: route.fulfill(body=HARNESS, content_type="text/html; charset=utf-8"))
         page.goto(URL)
+        install_viewer_session(page)
         if module:
             page.add_script_tag(content=MODULE)
         if factory:
@@ -425,10 +427,10 @@ class ViewerCellMergeDOMTest(unittest.TestCase):
         finally:
             page.close()
 
-    def test_session_storage_and_pagehide_each_remove_the_panel_and_the_gesture(self):
+    def test_session_code_and_pagehide_each_remove_the_panel_and_the_gesture(self):
         dispatches = [
-            "new BroadcastChannel('kin-session').postMessage({type:'session-ended'})",
-            "dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))",
+            "new BroadcastChannel('kin-session').postMessage({type:'session-ended',session:'S1'})",
+            "KinViewerSessionBoundary.authFailure({session:'S1',status:401,code:'AUTH_SESSION_ENDED'})",
             "dispatchEvent(new Event('pagehide'))",
         ]
         for dispatch in dispatches:

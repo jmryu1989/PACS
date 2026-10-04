@@ -16,7 +16,8 @@ function context(crypto = webcrypto) {
   const window = { cornerstone: { Viewport, StackViewport, VolumeViewport } };
   vm.runInNewContext(source, { window, document: {}, crypto, TextEncoder,
     console: { warn: x => warnings.push(x) } });
-  return { window, Viewport, StackViewport, VolumeViewport, warnings, extension: window.config.extensions[0] };
+  return { window, Viewport, StackViewport, VolumeViewport, warnings,
+    extension: window.config.extensions.find(extension => extension.id === 'kin.stack-precision') };
 }
 const plain = x => Array.from(x);
 const names = ['flip', '_getFocalPointForResetCamera'];

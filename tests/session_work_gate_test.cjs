@@ -16,7 +16,7 @@
 //                before the body, between stream chunks, after decoding and before the apply, a clipboard completion, the
 //                error path, the finally path) x every transition (preparation, its cancellation, the end, a replacement
 //                login, a selection change, A -> B -> A, an edit) x both completion orders of two operations.
-//   SEND-01..11  a request leaves only for an admitted context and always carries that context's session; the deadline
+//   SEND-01..14  a request leaves only for an admitted context and always carries that context's session; the deadline
 //                is the request kind's (draft 10 s, other API 60 s, media only what the caller gives) and covers headers
 //                and body; a read whose context went stale is aborted, a write is not; only the server's word that the
 //                session ended or was replaced is reported as a session-end signal - any other 401/403/409/428/5xx is
@@ -289,13 +289,13 @@ function network() {
       call.answerText = (status, text) => resolve(new Response(text, { status }));
       call.drop = () => reject(new TypeError('fetch failed'));
       // Headers now, the body when the case says (or never): reading it fails on abort as a real fetch body does.
-      call.headersThenBody = (status) => {
+      call.headersThenBody = (status, headers = {}) => {
         let controller;
         const body = new ReadableStream({ start(c) {
           controller = c;
           init.signal.addEventListener('abort', () => { call.aborted = true; try { c.error(new DOMException('aborted', 'AbortError')); } catch (_) {} });
         } });
-        resolve(new Response(body, { status }));
+        resolve(new Response(body, { status, headers }));
         return { push: text => controller.enqueue(new TextEncoder().encode(text)), close: () => controller.close(),
           fail: () => controller.error(new TypeError('SYN body stream failed')) };
       };
@@ -317,8 +317,8 @@ test('SEND-01 every request carries the session its work was captured under, and
   const context = gate.capture('document');
   const done = transport.request('/api/studies', { context });
   assert.equal(net.calls.length, 1);
-  assert.equal(net.calls[0].headers['X-KIN-Session'], 'S1');
-  assert.equal(net.calls[0].headers['X-KIN-CSRF'], '1');
+  assert.equal(new Headers(net.calls[0].headers).get('X-KIN-Session'), 'S1');
+  assert.equal(new Headers(net.calls[0].headers).get('X-KIN-CSRF'), '1');
   net.calls[0].answer(200, { studies: [] });
   const answer = await done;
   assert.deepEqual({ ok: answer.ok, status: answer.status, body: answer.body, auth: answer.auth, incomplete: answer.incomplete },
@@ -326,13 +326,69 @@ test('SEND-01 every request carries the session its work was captured under, and
 
   // A retry of the same operation keeps the identity it was issued with.
   const again = transport.request('/api/studies', { context, method: 'PUT', json: { a: 1 }, headers: { 'X-KIN-Session': 'forged' } });
-  assert.equal(net.calls[1].headers['X-KIN-Session'], 'S1', 'a caller header cannot replace the captured session');
+  assert.equal(new Headers(net.calls[1].headers).get('X-KIN-Session'), 'S1', 'a caller header cannot replace the captured session');
   assert.equal(net.calls[1].init.method, 'PUT');
   assert.equal(net.calls[1].init.body, '{"a":1}');
-  assert.equal(net.calls[1].headers['Content-Type'], 'application/json');
+  assert.equal(new Headers(net.calls[1].headers).get('Content-Type'), 'application/json');
   net.calls[1].answer(200, {});
   await again;
   assert.equal(transport.pending(), 0);
+});
+
+for (const [name, given] of [
+  ['Headers', () => new Headers({ Accept: 'multipart/related', 'Content-Type': 'application/dicom+json' })],
+  ['pairs', () => [['Accept', 'multipart/related'], ['Content-Type', 'application/dicom+json']]],
+  ['lower-case bindings', () => ({ Accept: 'multipart/related', 'Content-Type': 'application/dicom+json',
+    'x-kin-session': 'forged', 'x-kin-csrf': 'forged' })],
+]) test('SEND-12 caller ' + name + ' keep media headers and cannot override or duplicate binding', async () => {
+  const { gate, net, transport } = wired('S1');
+  for (const read of ['request', 'fetch']) {
+    const done = read === 'fetch' ? transport.fetch('/dicom-web/studies', { headers: given() })
+      : transport.request('/api/studies', { context: gate.capture('document'), headers: given() });
+    const call = net.calls.at(-1), headers = new Headers(call.init.headers);
+    assert.equal(headers.get('Accept'), 'multipart/related');
+    assert.equal(headers.get('Content-Type'), 'application/dicom+json');
+    assert.equal(headers.get('X-KIN-Session'), 'S1');
+    assert.equal(headers.get('X-KIN-CSRF'), '1');
+    assert.equal(headers.has('0'), false);
+    call.answer(200, {});
+    await done;
+  }
+  const json = transport.request('/api/write', { context: gate.capture('document'), method: 'POST', headers: given(), json: { value: 1 } });
+  assert.equal(new Headers(net.calls.at(-1).init.headers).get('Content-Type'), 'application/json');
+  net.calls.at(-1).answer(200, {});
+  await json;
+});
+
+test('SEND-13 an authenticated end in headers is reported before a held error body, exactly once', async () => {
+  const { gate, net, failures, transport } = wired('S1');
+  const done = transport.request('/api/studies', { context: gate.capture('document') });
+  const body = net.calls[0].headersThenBody(401, { 'X-KIN-Auth-Code': 'AUTH_SESSION_ENDED' });
+  await new Promise(setImmediate);
+  assert.deepEqual(failures, [{ session: 'S1', status: 401, code: 'AUTH_SESSION_ENDED' }]);
+  body.push('{"code":"AUTH_SESSION_ENDED"}'); body.close();
+  assert.equal((await done).auth, true);
+  assert.equal(failures.length, 1);
+});
+
+test('SEND-14 Fetch policy survives binding, including redirect rejection on uploads', async () => {
+  for (const method of ['request', 'fetch']) {
+    const { gate, net, transport } = wired('S1');
+    const policy = { redirect: 'error', credentials: 'same-origin', mode: 'same-origin', cache: 'no-store',
+      referrer: 'https://kin.test/worklist', referrerPolicy: 'no-referrer', integrity: 'sha256-synthetic',
+      priority: 'high', keepalive: false, duplex: 'half' };
+    const outer = new AbortController();
+    const done = transport[method]('/api/dictation', { ...policy, context: gate.capture('document'),
+      method: 'POST', body: new Blob(['synthetic audio']), signal: outer.signal });
+    const call = net.calls[0];
+    for (const [key, value] of Object.entries(policy)) assert.equal(call.init[key], value, key);
+    assert.equal(call.init.method, 'POST');
+    assert.equal(await call.init.body.text(), 'synthetic audio');
+    assert.notEqual(call.init.signal, outer.signal);
+    assert.equal(new Headers(call.init.headers).get('X-KIN-Session'), 'S1');
+    call.drop();
+    await assert.rejects(done, error => error.transport === 'network');
+  }
 });
 
 test('SEND-02 nothing is sent for a context that is not admitted, or without a session to bind', async () => {
@@ -500,7 +556,7 @@ test('SEND-07 an explicit operation binding is carried and blamed instead of the
   source.say('confirmed', 'S1');
   const context = gate.capture('lifecycle');
   const pending = transport.request('/api/studies/A/report', { context, session: 'S2', method: 'PUT', json: {} });
-  assert.equal(net.calls[0].headers['X-KIN-Session'], 'S2');
+  assert.equal(new Headers(net.calls[0].headers).get('X-KIN-Session'), 'S2');
   net.calls[0].answer(401, { code: 'AUTH_SESSION_ENDED' });
   await pending;
   assert.deepEqual(failures, [{ session: 'S2', status: 401, code: 'AUTH_SESSION_ENDED' }]);
@@ -802,7 +858,7 @@ test('DRAFT-01 every write carries the owner, the revision it stands on and the 
   assert.deepEqual(net.calls.map(call => call.init.method), ['GET', 'PUT']);
   assert.deepEqual(JSON.parse(net.calls[1].init.body), { expectedOwner: OWNER, expectedRevision: 'E1:0', findings: 'SYN one',
     conclusion: '', recommendation: '', baseVersion: 0, citationIds: [], structureIds: [] });
-  assert.equal(net.calls[1].headers['X-KIN-Session'], 'S1');
+  assert.equal(new Headers(net.calls[1].headers).get('X-KIN-Session'), 'S1');
   assert.equal(client.revision('A'), 'E1:1');
   // The next write stands on the revision the first one made, without another read.
   const again = await serve(client.write('A', TEXT('SYN two'), { owner: OWNER, context: at() }));
@@ -1110,7 +1166,7 @@ function browser({ storage = 'reliable' } = {}) {
       { status, headers: code ? { 'X-KIN-Auth-Code': code } : {} });
   }
   function serve(url, init) {
-    const path = new URL(url).pathname, method = init.method || 'GET', bound = init.headers['X-KIN-Session'] ?? null;
+    const path = new URL(url).pathname, method = init.method || 'GET', bound = new Headers(init.headers).get('X-KIN-Session');
     server.calls.push([method, path, bound]);
     const scripted = server.answers.find(entry => entry.path === path && !entry.used);
     if (scripted) {
@@ -1433,4 +1489,3 @@ test('AUTH-08 a logout that the server does not confirm is unconfirmed by its ki
     assert.equal(server.calls.filter(call => call[1] === '/api/auth/logout').length, 1, 'nothing is sent again by itself');
   }
 });
-

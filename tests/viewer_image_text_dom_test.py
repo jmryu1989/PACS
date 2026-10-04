@@ -1,6 +1,7 @@
 # coding: utf-8
 """Isolated Chromium DOM coverage for scoped native Image Text hiding."""
 from pathlib import Path
+from viewer_session_fixture import install_viewer_session
 import unittest
 
 from playwright.sync_api import expect, sync_playwright
@@ -41,7 +42,7 @@ class ViewerImageTextDOMTest(unittest.TestCase):
     def setUp(self):
         self.page = self.browser.new_page()
         self.page.route(URL, lambda route: route.fulfill(body=HARNESS, content_type="text/html; charset=utf-8"))
-        self.page.goto(URL); self.page.add_script_tag(path=str(MODULE)); self.assertTrue(self.page.evaluate("mountImageText()"))
+        self.page.goto(URL); install_viewer_session(self.page); self.page.add_script_tag(path=str(MODULE)); self.assertTrue(self.page.evaluate("mountImageText()"))
 
     def tearDown(self):
         self.page.close()
@@ -99,7 +100,7 @@ class ViewerImageTextDOMTest(unittest.TestCase):
     def test_session_end_restores_owned_scope_and_detached_control_is_inert(self):
         old = self.page.locator("#kin-image-text-toggle").element_handle()
         self.page.locator("#kin-image-text-toggle").click()
-        self.page.evaluate("dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))")
+        self.page.evaluate("KinViewerSessionBoundary.authFailure({session:'S1',status:401,code:'AUTH_SESSION_ENDED'})")
         expect(self.page.locator("#kin-image-text")).to_have_count(0)
         expect(self.page.locator("#native")).to_have_css("visibility", "visible")
         self.assertFalse(self.page.evaluate("kinViewerImageTextHidden()"))

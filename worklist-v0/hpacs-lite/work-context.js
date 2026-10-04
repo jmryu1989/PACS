@@ -129,7 +129,7 @@
       preparations += 1;
       preparation = issue({
         session, workEpoch, uid, selectionSeq,
-        preparation: preparations,
+        preparation: typeof detail?.preparationId === 'string' && detail.preparationId ? detail.preparationId : preparations,
         owner: snapshotOf(detail?.owner ?? null),
         expectedRevision: snapshotOf(detail?.expectedRevision ?? null),
         snapshot: snapshotOf(detail?.snapshot ?? null),

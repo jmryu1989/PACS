@@ -262,9 +262,9 @@
       open = doc.createElement('button'); open.type = 'button'; open.id = 'kin-images-only-enter'; open.textContent = 'Images Only'; open.addEventListener('click', enter); panel.append(open);
       status = doc.createElement('p'); status.id = 'kin-images-only-status'; status.setAttribute('role', 'status'); panel.append(status); host.append(panel);
       listen(doc, 'fullscreenchange', () => safe(fullscreenChanged));
-      listen(win, 'storage', event => { if (event.key === 'kin-session-ended') end(); });
+
       listen(win, 'pagehide', end);
-      try { channel = new win.BroadcastChannel('kin-session'); channel.onmessage = event => { if (event.data?.type === 'session-ended') end(); }; } catch (_) {}
+      try { channel = window.kinViewerOnEnd(() => end()); } catch (_) {}
       for (const service of [services?.viewportGridService, services?.displaySetService]) for (const event of new Set(Object.values(service?.EVENTS || {}))) {
         try { subscriptions.push(service.subscribe(event, () => safe(observe))); } catch (_) {}
       }

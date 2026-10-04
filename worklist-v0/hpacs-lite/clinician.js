@@ -569,14 +569,17 @@
     }
     // main.html openOhifWindow와 같은 주소 모양: 첫 검사가 현재 검사, 둘째가 비교 검사이고 비교 배치로 연다.
     const url = `/ohif/viewer?StudyInstanceUIDs=${uids.join(',')}${other ? '&hangingProtocolId=@ohif/hpCompare' : ''}`;
+    const expectedSession = KinAuth.sessionId();
+    if (!expectedSession) { note.textContent = '세션을 확인할 수 없습니다. 목록을 다시 열어 주세요.'; return; }
     let popup = null;
     try { popup = root.open(url, VIEWER_WINDOW); } catch (_) {}
     if (!popup) {
       note.textContent = TEXT.viewerBlocked;
       return;
     }
-    // 뷰어 문서가 이 화면을 되짚지 못하게 끊는다(워크리스트의 뷰어 창과 같다).
-    try { popup.opener = null; } catch (_) {}
+    // name은 서버/URL 이력에 남지 않는다. 새 뷰어의 첫 설정 스크립트가 읽고 원래 창 이름으로 돌린다.
+    try { popup.name = 'kin-viewer-entry:' + JSON.stringify({ session: expectedSession, name: VIEWER_WINDOW }); popup.opener = null; }
+    catch (_) { try { popup.close(); } catch (_) {} note.textContent = TEXT.viewerBlocked; return; }
     try { popup.focus(); } catch (_) {}
     note.textContent = other ? TEXT.compareAsked : TEXT.viewerAsked;
   }

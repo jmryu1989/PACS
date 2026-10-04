@@ -737,13 +737,13 @@
       }
     }
 
-    const sessionEnd = event => { if (event.key === 'kin-session-ended') stop(); };
+
     function stop() {
       if (ended) return; ended = true; record = null;
       subscriptions.splice(0).forEach(item => item?.unsubscribe?.());
       doc.removeEventListener('dblclick', onDoubleClick);
       channel?.close(); channel = null;
-      if (listening) { win.removeEventListener?.('storage', sessionEnd); win.removeEventListener?.('pagehide', stop); listening = false; }
+      if (listening) {  win.removeEventListener?.('pagehide', stop); listening = false; }
       if (workspace && win.kinCellMergeWorkspaceState === workspace) delete win.kinCellMergeWorkspaceState;
       workspace = null;
       panel?.remove(); panel = status = hint = null;
@@ -776,8 +776,8 @@
       win.kinCellMergeWorkspaceState = workspace;
       if (!listening) {
         listening = true;
-        win.addEventListener?.('storage', sessionEnd); win.addEventListener?.('pagehide', stop);
-        try { channel = new win.BroadcastChannel('kin-session'); channel.onmessage = event => { if (event.data?.type === 'session-ended') stop(); }; } catch (_) { }
+         win.addEventListener?.('pagehide', stop);
+        try { channel = window.kinViewerOnEnd(() => stop()); } catch (_) { }
       }
       refresh(); note('칸을 선택한 뒤 확대·병합하거나 영상 칸을 더블클릭하세요.');
       return true;
