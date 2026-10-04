@@ -396,9 +396,16 @@ const RFIELDS = ['findings', 'conclusion', 'recommendation'];
 const reportBaseVersion = (uid, fallback) => fallback;
 const heldByOther = () => null, reportNeedsWrite = () => true;
 let draftOwner = {sub:'SYN-RAD-SUB',institution:'SYN-INST-A',author:'syn-radiologist'}, poll = null;
+// The page saves at Log out only what it recorded as edited: an `input` on the editor marks the selected study and the
+// kept text of a marked study is the editor's (main.html recordReportEdit / unconfirmedReport, which sit in the report
+// region this file does not cut out). These stand-ins keep that rule; the rule itself is tests/report_text_boundaries_dom_test.py's.
 const reportConverge = new Set();
+for (const field of RFIELDS) document.getElementById(field)?.addEventListener('input', () => { if (selectedUid) reportConverge.add(selectedUid); });
+const unconfirmedReport = uid => uid === selectedUid ? Object.fromEntries(RFIELDS.map(k => [k, document.getElementById(k).value])) : null;
+const studyLabel = uid => uid;
 const KinReportDraftClient = {sameSnapshot: (a,b) => JSON.stringify(a) === JSON.stringify(b)};
 const draftClient = {
+  settled: async () => {},
   base: async () => ({outcome:'ready',revision:0,stored:null,lists:{citations:[],structured:[]}}),
   preserve: async capture => {
     window.synCapture = capture;
@@ -1035,7 +1042,10 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
             self.page.add_script_tag(content=SHIPPED[name])
         self.assertEqual("approved", self.page.evaluate("async () => (await KinAuth.init()).state"))
         self.page.evaluate("KinWorkContext.follow(KinAuth)")
-        prelude = READER_PRELUDE.replace("KIN_AUTH\n", "const work = KinWorkContext; const transport = KinSessionTransport.page();\nfunction onCommonEnd(end) { work.onInvalidate(e => { if (e.reason === 'lifecycle' && !['active','preparing'].includes(e.state)) end(); }); }\n")
+        # The page's own end and account-change registration (main.html): the shipped functions over the shipped gate.
+        prelude = READER_PRELUDE.replace("KIN_AUTH\n", "const work = KinWorkContext; const transport = KinSessionTransport.page();\n"
+                                         "const accountChangeHooks = [];\n" + extract_function(MAIN, "notifyAccountChanged") + "\n"
+                                         + extract_function(MAIN, "onCommonEnd") + "\n")
         self.page.add_script_tag(content=prelude + (block or READER_BLOCK) + extra + "\nwindow.synPick = uid => select(uid);\n")
         self.assertEqual([], self.page.evaluate("() => window.synToasts"), "the block mounted")
 

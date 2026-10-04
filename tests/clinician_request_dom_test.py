@@ -265,6 +265,8 @@ BLOCK = slice_between(MAIN, *MAIN_BLOCK)
 CLINICIAN_BLOCK = slice_between(SHIPPED["clinician.js"], *CLINICIAN_BLOCK_MARKS)
 API_FN = extract_function(MAIN, "api")
 SET_MODE = extract_function(MAIN, "setMode")
+# The page's one way to tell its areas of an account change one of them saw (the shipped function; the cut blocks call it).
+NOTIFY_ACCOUNT = extract_function(MAIN, "notifyAccountChanged")
 MAIN_PAGE = page_html(MAIN)
 # Control files: the same code without the late-answer guards.
 CLINICIAN_NO_GUARD = variant(SHIPPED["clinician.js"], [
@@ -330,11 +332,9 @@ CLINICIAN_ANY_2XX = variant(SHIPPED["clinician.js"], [
     ("    return sent.status === 201 && !!applied && typeof applied === 'object' && typeof reply.replayed === 'boolean'\n",
      "    return !!applied && typeof applied === 'object' && typeof reply.replayed === 'boolean'\n", 1),
 ], "clinician.js")
-# S5-U4bc-R-001 F01 controls: an account change locks only the area that saw it (as each unit shipped before the fix).
-CLINICIAN_QUESTIONS_ONLY = variant(SHIPPED["clinician.js"], [
-    ("    lockRequests(REQUEST.ownerChanged, detail, true);\n", "", 1)], "clinician.js")
-CLINICIAN_REQUESTS_ONLY = variant(SHIPPED["clinician.js"], [
-    ("    lockQuestions(QUESTION.ownerChanged, detail, true);\n", "", 1)], "clinician.js")
+# S5-U4bc-R-001 F01: an account change seen by one area must not leave the other open with the previous account's text.
+# Since S7-U5 the clinician document has one answer to a verified account change - the whole document closes as a replaced
+# session (KinAuth.replaced; no area-by-area lock is left to remove), so the two "one area only" control files are retired.
 ACCOUNT_LIST = "        (window.kinOn401 || []).forEach(done => { try { done('account-changed', detail); } catch (_) {} });\n"
 
 # Everything the cut block and the shipped api()/setMode() read from the page script, as small stand-ins. The page's
@@ -936,6 +936,8 @@ class ClinicianRequestDOMTest(Harness):
         self.server = RequestServer([INSTITUTION, CLIN_SUB], "syn-clinician", "SYN Clinician", staff=False)
         self.files = dict(SHIPPED)
         self.navigations = []
+        # POST /auth/logout from the shipped auth.js (answered 204): a replaced session must not send one.
+        self.logout_posts = []
         # S7-U2a Critical Results pending-list reads, kept apart from the reads this file checks.
         self.inbox_reads = []
 
@@ -1004,6 +1006,7 @@ class ClinicianRequestDOMTest(Harness):
                 self.answer_write(route, path, lambda body: self.server.change(target, body))
                 return
         if method == "POST" and path == "/api/auth/logout":
+            self.logout_posts.append(request.url)
             route.fulfill(status=204, body="")
             return
         # S7-U2a: the Critical Results area reads its pending list when the page boots (and every 60 s while shown). It is
@@ -1310,13 +1313,14 @@ class ClinicianRequestDOMTest(Harness):
         self.read_errors = [(200, {"owner": [INSTITUTION, "SYN-OTHER-SUB"], "items": []})]
         self.open_home()
         self.pick(1)
-        self.open_requests("failed")
-        seen = self.view()
-        self.assertEqual(("locked", ["failed", OWNER_CHANGED, "", False, "alert"], None), (seen["state"], seen["list"], seen["form"]))
-        # The lock holds for the document: another study shows it at once and reads nothing.
-        self.pick(2)
-        self.list_state("failed")
-        self.assertEqual(("locked", OWNER_CHANGED, [a]), (self.view()["state"], self.view()["list"][1], self.reads))
+        # Another account's answer to a request bound to this session means the session was replaced: the whole document
+        # closes (no area is left showing the previous account's screen), nothing more is read and no logout POST is sent.
+        self.page.locator("#image-requests-summary").click()
+        self.wait_until(lambda: self.navigations, "the navigation to index.html")
+        self.assertEqual({"children": ["P@status"], "text": CLOSING}, self.page.evaluate(CLOSED_VIEW))
+        self.settle()
+        self.assertEqual(([a], [], ["index.html"]), (self.reads, self.logout_posts, self.navigations))
+        self.navigations.clear()
 
         self.read_errors = [(403, err("IMAGE_REQUEST_ROLE_REQUIRED", "이 영상 요청 동작에 필요한 역할이 없습니다"))]
         self.open_home()
@@ -1325,7 +1329,7 @@ class ClinicianRequestDOMTest(Harness):
         self.assertEqual(("locked", ["failed", C_REFUSED, "이 영상 요청 동작에 필요한 역할이 없습니다 (HTTP 403 · IMAGE_REQUEST_ROLE_REQUIRED)",
                                      False, "alert"]), (self.view()["state"], self.view()["list"]))
 
-        # OWNER_CHANGED on a write locks the area and drops what was typed.
+        # OWNER_CHANGED on a write closes the document the same way and drops what was typed.
         self.open_home()
         self.pick(1)
         self.open_requests("ready")
@@ -1333,14 +1337,10 @@ class ClinicianRequestDOMTest(Harness):
         self.write_errors = [(409, err("OWNER_CHANGED", "로그인한 계정이 바뀌었습니다. 화면을 다시 불러오세요"))]
         self.item_locator(1).locator('[data-field="note"]').fill("SYN reason")
         self.item_locator(1).locator("[data-send]").click()
-        self.list_state("failed")
-        seen = self.view()
-        self.assertEqual(("locked", OWNER_CHANGED, "로그인한 계정이 바뀌었습니다. 화면을 다시 불러오세요 (HTTP 409 · OWNER_CHANGED)", None, []),
-                         (seen["state"], seen["list"][1], seen["list"][2], seen["form"], seen["items"]))
-        self.page.locator("#image-requests-summary").click()
-        self.page.locator("#image-requests-summary").click()
-        self.list_state("failed")
-        self.assertIsNone(self.view()["form"])
+        self.wait_until(lambda: self.navigations, "the navigation to index.html")
+        self.assertEqual({"children": ["P@status"], "text": CLOSING}, self.page.evaluate(CLOSED_VIEW))
+        self.assertEqual([], self.logout_posts)
+        self.navigations.clear()
 
         # Another tab ends the session while a write and a read are held: the page closes and draws neither answer.
         self.open_home()
@@ -1821,87 +1821,66 @@ class ClinicianRequestDOMTest(Harness):
         self.server.add(item(1, a, "Requested", kind="image-transfer", at=2))
         changed = "SYN owner changed (HTTP 409 · OWNER_CHANGED)"
         # (a) The question area sees it (409 OWNER_CHANGED on a Reply) while the request area has a new request typed and a
-        # cancel on its way; the old account's receipt for that cancel then arrives.
-        for label, script in (("questions-only control", CLINICIAN_QUESTIONS_ONLY), ("shipped", None)):
-            with self.subTest(seen_by="questions", file=label):
-                self.server.items[rid(1)].update(state="Requested", revision=1, note=None)
-                self.server.receipts.clear()
-                thread = self.with_questions()
-                self.open_home(script)
-                self.pick(1)
-                self.open_questions_thread(thread)
-                self.open_requests("ready")
-                self.fill("external-image", "SYN-DRAFT-HOSPITAL", "SYN request draft")
-                self.item_locator(1).locator('[data-field="note"]').fill("SYN cancel reason")
-                self.held_writes = []
-                self.item_locator(1).locator("[data-send]").click()
-                self.wait_until(lambda: len(self.held_writes) == 1, "the held cancel")
-                reads, writes = len(self.reads), len(self.writes)
-                self.q_faults["reply"] = [(409, {"code": "OWNER_CHANGED", "message": "SYN owner changed"})]
-                self.send_reply("SYN reply")
-                expect(self.page.locator("#questions")).to_have_attribute("data-state", "locked")
-                at_change = self.view()
-                route, apply, body = self.held_writes.pop()
-                self.held_writes = None
-                status, reply = apply(body)
-                self.release(route, reply, status)
-                late = self.view()
-                if script is not None:
-                    self.assertEqual(("ready", ["saved", C_CANCELLED, ""]), (at_change["state"], late["items"][0]["note"]),
-                                     "control: the request area stays open and paints the old account's receipt")
-                    continue
-                # Locked in the same task as the question area, before the held cancel was answered: the typed request,
-                # the cancel reason and the unknown cancel are gone, and so are their controls.
-                self.assertEqual(("locked", ["failed", OWNER_CHANGED, changed, False, "alert"], None, []),
-                                 (at_change["state"], at_change["list"], at_change["form"], at_change["items"]))
-                self.assertEqual(at_change, late, "the old account's receipt paints nothing")
-                self.assertEqual((reads, writes), (len(self.reads), len(self.writes)), "nothing is read or sent after it")
-                seen = self.questions_view()
-                self.assertEqual(("locked", QUESTION_OWNER_CHANGED, changed, None, []),
-                                 (seen["state"], seen["list"]["text"], seen["list"]["detail"], seen["thread"], seen["composers"]))
-                # A->B->A and closing and opening both areas read nothing, send nothing and bring no draft back.
-                q_calls = len(self.q_calls)
-                self.pick(2)
-                self.pick(1)
-                for summary in ("#questions-summary", "#image-requests-summary", "#questions-summary", "#image-requests-summary"):
-                    self.page.locator(summary).click()
-                self.settle()
-                seen, questions = self.view(), self.questions_view()
-                self.assertEqual(("locked", OWNER_CHANGED, None, []), (seen["state"], seen["list"][1], seen["form"], seen["items"]))
-                self.assertEqual(("locked", QUESTION_OWNER_CHANGED, []), (questions["state"], questions["list"]["text"],
-                                                                          questions["composers"]))
-                self.assertEqual((reads, writes, q_calls), (len(self.reads), len(self.writes), len(self.q_calls)))
+        # cancel on its way; the old account's receipt for that cancel then arrives. A verified account change closes the
+        # whole document at once - no area stays open with the previous account's text - and sends no logout POST (the
+        # cookie belongs to the replacement login).
+        with self.subTest(seen_by="questions"):
+            thread = self.with_questions()
+            self.open_home()
+            self.pick(1)
+            self.open_questions_thread(thread)
+            self.open_requests("ready")
+            self.fill("external-image", "SYN-DRAFT-HOSPITAL", "SYN request draft")
+            self.item_locator(1).locator('[data-field="note"]').fill("SYN cancel reason")
+            self.held_writes = []
+            self.item_locator(1).locator("[data-send]").click()
+            self.wait_until(lambda: len(self.held_writes) == 1, "the held cancel")
+            reads, writes = len(self.reads), len(self.writes)
+            self.q_faults["reply"] = [(409, {"code": "OWNER_CHANGED", "message": "SYN owner changed"})]
+            self.send_reply("SYN reply")
+            self.wait_until(lambda: self.navigations, "the navigation to index.html")
+            at_change = self.page.evaluate(CLOSED_VIEW)
+            # Closed before the held cancel was answered: the typed request, the cancel reason, the unknown cancel and
+            # the question thread are gone with their controls.
+            self.assertEqual({"children": ["P@status"], "text": CLOSING}, at_change)
+            route, apply, body = self.held_writes.pop()
+            self.held_writes = None
+            status, reply = apply(body)
+            self.release(route, reply, status)
+            self.settle()
+            self.assertEqual(at_change, self.page.evaluate(CLOSED_VIEW), "the old account's receipt paints nothing")
+            self.assertEqual((reads, writes), (len(self.reads), len(self.writes)), "nothing is read or sent after it")
+            self.assertEqual(["index.html"], self.navigations)
+            self.assertEqual([], self.logout_posts, "a replaced session is not logged out by this document")
 
         # (b) The request area sees it (another account's list) while a Reply of the question area is on its way.
-        for label, script in (("requests-only control", CLINICIAN_REQUESTS_ONLY), ("shipped", None)):
-            with self.subTest(seen_by="requests", file=label):
-                thread = self.with_questions()
-                self.open_home(script)
-                self.pick(1)
-                self.open_questions_thread(thread)
-                self.q_holding = {"reply"}
-                self.send_reply("SYN reply on its way")
-                _, route, answer = self.take_question("reply")
-                self.q_holding = set()
-                self.read_errors = [(200, {"owner": [INSTITUTION, "SYN-OTHER-SUB"], "items": []})]
-                self.open_requests("failed")
-                at_change = self.questions_view()
-                q_calls = len(self.q_calls)
-                self.release(route, answer[1], answer[0])
-                late = self.questions_view()
-                self.assertEqual(2, len(self.questions.threads[thread["id"]]["entries"]), "the server applied the Reply")
-                if script is not None:
-                    self.assertEqual("ready", at_change["state"], "control: the question area stays open")
-                    self.assertIn("saved", [note["state"] for note in late["notes"]], "control: and paints the old receipt")
-                    continue
-                self.assertEqual(("locked", QUESTION_OWNER_CHANGED, "", None, [], []),
-                                 (at_change["state"], at_change["list"]["text"], at_change["list"]["detail"], at_change["thread"],
-                                  at_change["composers"], at_change["notes"]))
-                self.assertEqual(at_change, late, "the old account's receipt paints nothing")
-                self.assertEqual(q_calls, len(self.q_calls), "and reads nothing again")
-                self.assertEqual(("locked", OWNER_CHANGED), (self.view()["state"], self.view()["list"][1]))
+        with self.subTest(seen_by="requests"):
+            self.fresh_context()
+            self.navigations.clear()
+            thread = self.with_questions()
+            self.open_home()
+            self.pick(1)
+            self.open_questions_thread(thread)
+            self.q_holding = {"reply"}
+            self.send_reply("SYN reply on its way")
+            _, route, answer = self.take_question("reply")
+            self.q_holding = set()
+            self.read_errors = [(200, {"owner": [INSTITUTION, "SYN-OTHER-SUB"], "items": []})]
+            self.page.locator("#image-requests-summary").click()
+            self.wait_until(lambda: self.navigations, "the navigation to index.html")
+            at_change = self.page.evaluate(CLOSED_VIEW)
+            self.assertEqual({"children": ["P@status"], "text": CLOSING}, at_change)
+            q_calls = len(self.q_calls)
+            self.release(route, answer[1], answer[0])
+            self.settle()
+            self.assertEqual(2, len(self.questions.threads[thread["id"]]["entries"]), "the server applied the Reply")
+            self.assertEqual(at_change, self.page.evaluate(CLOSED_VIEW), "the old account's receipt paints nothing")
+            self.assertEqual(q_calls, len(self.q_calls), "and reads nothing again")
+            self.assertEqual([], self.logout_posts, "a replaced session is not logged out by this document")
 
-        # (c) A 403 is one study's refusal, not an account change: only the area that got it locks.
+        # The cases below start from a new document of a session at work.
+        self.fresh_context()
+        self.navigations.clear()        # (c) A 403 is one study's refusal, not an account change: only the area that got it locks.
         thread = self.with_questions()
         self.open_home()
         self.pick(1)
@@ -1930,21 +1909,22 @@ class ClinicianRequestDOMTest(Harness):
         self.note_state(form, "saved")
         self.assertEqual(["saved", C_CREATED, ""], self.view()["form"]["note"])
 
-        # After an account change a session end still closes the page, and nothing is read or sent on the way out.
+        # After an account change the page is closed; a session end notice that arrives afterwards reads and sends nothing.
         thread = self.with_questions()
+        self.navigations.clear()
         self.open_home()
         self.pick(1)
         self.open_questions_thread(thread)
         self.open_requests("ready")
         self.q_faults["reply"] = [(409, {"code": "OWNER_CHANGED", "message": "SYN owner changed"})]
         self.send_reply("SYN reply")
-        expect(self.page.locator("#image-requests")).to_have_attribute("data-state", "locked")
+        self.wait_until(lambda: self.navigations, "the navigation to index.html")
         counts = (len(self.reads), len(self.writes), len(self.q_calls))
         self.page.evaluate(BROADCAST_ENDED)
-        self.wait_until(lambda: self.navigations, "the navigation to index.html")
         self.settle()
         self.assertEqual({"children": ["P@status"], "text": CLOSING}, self.page.evaluate(CLOSED_VIEW))
         self.assertEqual(counts, (len(self.reads), len(self.writes), len(self.q_calls)))
+        self.assertEqual(["index.html"], self.navigations)
 
 
 class MainRequestDOMTest(Harness):
@@ -2069,6 +2049,7 @@ class MainRequestDOMTest(Harness):
         defaults = "const work=KinWorkContext; work.follow(KinAuth); const transport=KinSessionTransport.page();" if real_auth else STANDIN
         defaults += "const sessionEndHooks=[],accountChangeHooks=[]; function onSessionEnd(fn){work.onInvalidate(e=>{if(e.reason==='lifecycle'&&!['active','preparing'].includes(e.state))fn();});} function onCommonEnd(fn){onSessionEnd(fn);accountChangeHooks.push(fn);}"
         defaults += "function staleAnswer(){return Object.assign(new Error('Stale'),{name:'AbortError'});} const activeWork=()=>work.state()==='active';"
+        defaults += NOTIFY_ACCOUNT
         script = ("<script>\n" + prelude + defaults + api_fn + "\n" + SET_MODE + "\n" + block + "\n" + (questions or "") + "\n"
                   + tail + "\nwork.onInvalidate(e=>{if(e.reason==='cancel'){imageRequests?.resume();}});</script>")
         at = MAIN_PAGE.rindex("</body>")
