@@ -43,17 +43,15 @@
         throw new Error('폴더 목록 또는 바로가기 형식을 확인해 주세요.');
       }
       const shortcuts = next.shortcuts.map(item => ({ ...item, name: item.name.trim() }));
-      const names = new Set(['All Studies', ...defaultModalities(next.rows),
-        ...(applied.kind === 'modality' ? [applied.modality] : []),
-        ...(applied.kind === 'shortcut' && !shortcuts.some(item => 'shortcut:' + item.id === selected)
-          ? [applied.name] : [])].map(name => name.toUpperCase()));
-      for (const item of shortcuts) {
-        const name = item.name.toUpperCase();
-        if (names.has(name)) throw new Error('이미 사용 중인 폴더 또는 바로가기 이름입니다. 다른 이름을 입력해 주세요.');
-        names.add(name);
-      }
       return { rows: [...next.rows], loadState: next.loadState,
         searches: next.searches.map(search => ({ ...search })), shortcuts };
+    }
+    // 저장 데이터의 이름 충돌은 적재를 막지 않는다. 이름 정책은 지금 편집하는 항목에만 적용한다.
+    function validateName(item) {
+      const names = ['All Studies', ...BASE, ...state.shortcuts.filter(other => other.id !== item.id).map(other => other.name)];
+      if (names.some(name => name.toUpperCase() === item.name.toUpperCase())) {
+        throw new Error('이미 사용 중인 폴더 또는 바로가기 이름입니다. 다른 이름을 입력해 주세요.');
+      }
     }
     function availableItems() {
       return [{ id: 'all', name: 'All Studies', kind: 'all' },
@@ -106,10 +104,19 @@
     function setApplied(id) { choose(id, null); }
     function update(patch) {
       active();
-      if (!object(patch) || Object.keys(patch).some(key => !['rows', 'loadState', 'searches', 'shortcuts'].includes(key))) {
-        throw new Error('폴더 갱신 형식을 확인해 주세요.');
+      try {
+        if (!object(patch) || Object.keys(patch).some(key => !['rows', 'loadState', 'searches', 'shortcuts'].includes(key))) {
+          throw new Error('폴더 갱신 형식을 확인해 주세요.');
+        }
+        state = validate({ ...state, ...patch });
+      } catch (error) {
+        // 갱신 실패 뒤 이전 건수를 최신 완료 건수로 오인하지 않도록 무효화한다.
+        state = { ...state, loadState: 'unknown' };
+        status.textContent = error.message;
+        render();
+        throw error;
       }
-      state = validate({ ...state, ...patch });
+      status.textContent = '';
       const current = state.shortcuts.find(item => 'shortcut:' + item.id === selected);
       if (current && current.searchId === applied.searchId) applied.name = current.name;
       render();
@@ -118,6 +125,7 @@
     function add(item) {
       active();
       const next = validate({ ...state, shortcuts: [...state.shortcuts, item] });
+      validateName(next.shortcuts[next.shortcuts.length - 1]);
       if (!state.searches.some(search => search.id === item.searchId)) throw new Error('기존 검색을 선택해 주세요.');
       change(next.shortcuts);
     }
@@ -128,7 +136,10 @@
     }
     function rename(id, name) {
       const at = index(id), next = state.shortcuts.map(item => ({ ...item }));
-      next[at].name = name; change(next);
+      next[at].name = name;
+      const valid = validate({ ...state, shortcuts: next });
+      validateName(valid.shortcuts[at]);
+      change(valid.shortcuts);
     }
     function remove(id) { const at = index(id); change(state.shortcuts.filter((_, i) => i !== at)); }
     function reorder(id, to) {
