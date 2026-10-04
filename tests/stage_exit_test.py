@@ -98,6 +98,15 @@ class StageExitTest(unittest.TestCase):
         self.run_fixture()
         self.assert_failure(*self.verdict([TEST, "lean_fixture.LeanFixture.test_forgotten"]), "누락")
 
+    def test_interleaved_warning(self):
+        self.run_fixture("import warnings; warnings.warn('synthetic child warning', UserWarning)")
+        log = (self.directory / "run/stderr.log").read_text(encoding="utf-8")
+        self.assertIn("UserWarning: synthetic child warning", log)
+        self.assertIn("\nok\n", log)
+        code, report = self.verdict()
+        self.assertEqual(code, 0)
+        self.assertTrue(report["all_pass"])
+
     def test_one_skipped(self):
         self.run_fixture("self.skipTest('synthetic unavailable fixture')")
         self.assert_failure(*self.verdict(), "건너뜀")

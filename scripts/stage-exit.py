@@ -25,7 +25,7 @@ def python_results(log, module=None):
                 pending = module + pending[len("__main__"):]
             outcomes[pending] = "중단: 사례의 종료 결과 없음"
         if pending:
-            result = re.search(r"\.\.\. (ok|FAIL|ERROR|skipped .+|expected failure|unexpected success)$", line)
+            result = re.search(r"(?:^|\.\.\. )(ok|FAIL|ERROR|skipped .+|expected failure|unexpected success)$", line)
             if result:
                 status = result[1]
                 outcomes[pending] = ("PASS" if status == "ok" else

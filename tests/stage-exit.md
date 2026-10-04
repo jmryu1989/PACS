@@ -28,8 +28,9 @@ JSON에는 각 시험의 이유와 원문 경로를 남기며, 콘솔은 요구�
 ```powershell
 $sha = (git rev-parse HEAD).Trim()
 if ($sha -ne (git rev-parse main).Trim()) { throw '최종 main checkout 필요' }
-if (git status --porcelain) { throw '실행할 소스의 수정 상태 확인 필요' }
-$out = "tmp/stage7-final-$sha"
+if (git status --porcelain --untracked-files=no) { throw '실행할 소스의 수정 상태 확인 필요' }
+$shortSha = $sha.Substring(0, 12)
+$out = "tmp/stage7-final-$shortSha"
 # U5 병합 후에는 아래 실행 목록에도 그 실제 시험을 추가한다.
 $live = @(
   @('tests/e2e/test_critical_result.py', 'CriticalResultE2E'),
@@ -39,15 +40,32 @@ $live = @(
   @('tests/clinical_context_live.py', 'ClinicalContextLive')
 )
 foreach ($item in $live) {
-  $unit = 's7-exit-' + $item[1].ToLowerInvariant()
-  python scripts/record-run.py --run-dir "$out/live/$unit" --cwd . --file $item[0] -- python scripts/run-tests.py --module $item[0] --class $item[1] --mode live --unit $unit --timeout 1800
+  $unit = 's7-exit-' + $shortSha + '-' + $item[1].ToLowerInvariant()
+  $runDir = "$out/live/$unit"
+  if (Test-Path "$runDir/run.json") {
+    $record = Get-Content -Raw "$runDir/run.json" | ConvertFrom-Json
+    if ($record.git_head_before -eq $sha -and $record.git_head_after -eq $sha -and
+        $record.status -eq 'completed' -and $record.exit_code -eq 0 -and $record.recorder_exit_code -eq 0) {
+      continue
+    }
+  }
+  if (Test-Path $runDir) { throw "기존 미완료 기록 점검 필요: $runDir; 아래 재시도 절차 확인" }
+  python scripts/record-run.py --run-dir $runDir --cwd . --file $item[0] -- python scripts/run-tests.py --module $item[0] --class $item[1] --mode live --unit $unit --timeout 1800
   if ($LASTEXITCODE -ne 0) { throw "시험 실패: $unit; 기존 실행 원장/정리 절차에 따라 확인" }
 }
 ```
 
+같은 SHA의 성공 기록은 재실행하지 않고 재사용한다. 미완료/실패 기록은 원장과 정리 상태를
+먼저 점검한다. 기존 절차가 재시도를 허용하면 실패 기록을 `$out/failed/`에 보존한 뒤
+원래 `$runDir`가 없는 상태에서 같은 `$unit`으로 반복문을 재개한다. 성공한 다른 클래스는 건너뛴다.
+이전 실패는 최종 판정 입력과 구분해 보존하며, `$out/failed/`를 `--runs`에 넣지 않는다.
+단위 이름·SHA·출력 폴더를 바꿔 같은 실패의 예산이나 점검 marker를 우회하지 않는다.
+새 최종 SHA의 검증은 새 단위로 식별하되 이전 실행의 정리 의무는 그대로다.
+
 동일 SHA의 validate 및 G3 실행 artifact를 받아 각각 `$out/validate`, `$out/candidate`에 푼다.
-validate에서는 `synthetic-runtime-record-runs`와 업무 화면 record-run artifact가 필요하다.
-Node service/scope, DOM, AuditStore DB, backup/integrity, production image 시험을 여기서 읽는다.
+validate에서는 `synthetic-runtime-record-runs`와 `synthetic-workspace-dom-results`가 필요하다.
+Node service/scope, DOM, AuditStore DB, integrity와 함께, 두 기존 실행을 `record-run`으로 감싼
+`backup-safety/run.json`·`production-image/run.json`도 runtime artifact에서 읽는다.
 별도 hosted 업무 프로필의 `results.json`만으로는 SHA가 없으므로 위 live 기록을 대체할 수 없다.
 G3 폴더는 `candidate-provenance.json`이 바로 들어 있는 폴더를 지정한다.
 
