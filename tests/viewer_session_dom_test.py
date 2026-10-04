@@ -1206,7 +1206,10 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.assertEqual(view.get_by_label('Finding Text',exact=True).input_value(),'held original body')
 
     def test_mip_job_controls_and_capability_refuse_during_pause_preserving_the_open_job(self):
-        from tests.viewer_session_fixture import MIP_RENDERER
+        try:
+            from viewer_session_fixture import MIP_RENDERER
+        except ImportError:
+            from tests.viewer_session_fixture import MIP_RENDERER
         view=self.open_viewer()
         view.route(BASE+'/api/me',lambda route:route.fulfill(json={'kind':'member','institution':'I1','sub':'u1','roles':['radiologist'],'sessionId':'S1'}))
         view.route(BASE+'/api/studies',lambda route:route.fulfill(json={'studies':[{'uid':'1.2.3'}]}))
@@ -1273,7 +1276,10 @@ class ViewerSessionDOMTest(unittest.TestCase):
             browser.close();server.shutdown();server.server_close();thread.join()
 
     def test_marks_and_unfinished_label_survive_pause_and_mutation_capabilities_refuse(self):
-        from tests.viewer_volume_marks_progressive_dom_test import HARNESS
+        try:
+            from viewer_volume_marks_progressive_dom_test import HARNESS
+        except ImportError:
+            from tests.viewer_volume_marks_progressive_dom_test import HARNESS
         self.extra_html = HARNESS
         view = self.open_viewer()
         for name in ["volume-marks.js", "viewer-volume-progressive.js", "viewer-volume-marks.js", "viewer-volume-orientation.js"]:
