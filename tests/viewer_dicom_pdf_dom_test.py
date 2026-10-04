@@ -165,7 +165,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         }""")
         button = self.page.locator("#kin-source-pdf-open")
         expect(button).to_be_enabled()
-        self.page.evaluate("pdfController.nativeFailure(Error('Synthetic native timeout'),displaySet,displaySet.pdfUrl)")
+        self.page.evaluate("pdfController.nativeFailure(Object.assign(Error('Synthetic native timeout'),{retryable:true}),displaySet,displaySet.pdfUrl)")
         self.page.evaluate("emit()")
         expect(button).to_have_text("Retry Source PDF")
         expect(button).to_be_enabled()
@@ -199,7 +199,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
           mountPdf({onRetry:(value,pdfUrl)=>nativeRetries.push([value.displaySetInstanceUID,pdfUrl])});
         }""")
         button=self.page.locator("#kin-source-pdf-open");expect(button).to_be_enabled()
-        self.page.evaluate("pdfController.nativeFailure(Error('A native failure'),displaySet,displaySet.pdfUrl)")
+        self.page.evaluate("pdfController.nativeFailure(Object.assign(Error('A native failure'),{retryable:true}),displaySet,displaySet.pdfUrl)")
         button.click();expect(button).to_be_disabled();self.assertEqual(1,len(self.page.evaluate("nativeRetries")))
         self.page.evaluate("""() => {
           displaySet=makeSet({displaySetInstanceUID:'source-b',SOPInstanceUID:'1.5',SeriesDescription:'Source B',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});
@@ -241,7 +241,8 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
             with self.subTest(route=route):
                 self.page.evaluate("([url,value])=>routes[url]=value", [PDF, route])
                 button.click()
-                expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("원본 자료 응답을 확인할 수 없습니다")
+                message = 'PDF 형식이 아닙니다' if route['status']==200 else '원본 자료 응답을 확인할 수 없습니다'
+                expect(self.page.locator("#kin-source-pdf-status")).to_contain_text(message)
                 self.assertEqual(0, self.page.locator('dialog[open]').count())
 
         self.page.evaluate("([url])=>{routes[url]={status:200,body:null,contentType:'application/pdf'};holdCancel=true}", [PDF])
@@ -296,6 +297,34 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         self.page.evaluate('emit()')
         expect(self.page.locator('#kin-source-pdf-status')).to_contain_text('로그인 세션을 확인할 수 없습니다')
         expect(self.page.locator('#kin-source-pdf-open')).to_be_disabled()
+
+    def test_native_pdf_permanent_failures_are_visible_without_retry_after_grid_refresh(self):
+        self.page.add_script_tag(path=str(CONFIG))
+        for path, status, mime, message in [
+            (PDF,403,'application/json','접근이 거절'),
+            (PDF,404,'application/json','찾을 수 없습니다'),
+            (PDF,200,'text/plain','PDF 형식이 아닙니다'),
+            ('/api/dicom/lookup',403,'application/json','접근이 거절'),
+        ]:
+            with self.subTest(path=path,status=status,mime=mime):
+                self.page.evaluate("""([path,status,mime])=>{
+                  window.pdfExtension?.onModeExit();pdfController.stop();
+                  routes['/api/dicom/lookup']=()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'});
+                  routes[path]={status,body:{},contentType:mime};
+                  displaySet=makeSet();window.nativeOutcome='pending';
+                  const entry={component:props=>{props.displaySets[0].pdfUrl.then(url=>{
+                    document.querySelector('#native-pdf').data=url;nativeOutcome='url';},()=>nativeOutcome='rejected');return {key:props.key};}};
+                  window.pdfExtension=kinCreateDicomPdf();pdfExtension.preRegistration({servicesManager:{services},extensionManager:{getModuleEntry:()=>entry}});
+                  pdfExtension.onModeEnter();entry.component({displaySets:[displaySet]});
+                }""",[path,status,mime])
+                self.page.wait_for_function("nativeOutcome==='rejected'")
+                expect(self.page.locator('#kin-source-pdf-status')).to_contain_text(message)
+                self.page.evaluate('emit()')
+                expect(self.page.locator('#kin-source-pdf-status')).to_contain_text(message)
+                expect(self.page.locator('#kin-source-pdf')).to_be_visible()
+                expect(self.page.locator('#kin-source-pdf-open')).to_be_disabled()
+                self.assertNotIn('Retry',self.page.locator('#kin-source-pdf-open').inner_text())
+                self.assertIsNone(self.page.locator('#native-pdf').get_attribute('data'))
 
     def test_document_close_http_failure_and_dispose_are_bounded(self):
         button = self.page.locator('#kin-source-pdf-open')

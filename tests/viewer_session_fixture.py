@@ -8,11 +8,11 @@ from urllib.parse import urlparse
 
 HPACS = Path(__file__).resolve().parents[1] / 'worklist-v0' / 'hpacs-lite'
 
-def unbound_protected_request(request):
+def unbound_protected_request(request, allow_bootstrap=True):
     path = urlparse(request.url).path
     protected = any(path == prefix or path.startswith(prefix + '/') for prefix in
                     ['/api', '/dicom-web', '/instances', '/statistics', '/system'])
-    bootstrap = path == '/api/me' and request.method == 'GET' and request.resource_type in ('fetch', 'xhr')
+    bootstrap = allow_bootstrap and path == '/api/me' and request.method == 'GET' and request.resource_type in ('fetch', 'xhr')
     return protected and not request.headers.get('x-kin-session') and not bootstrap
 
 
@@ -28,6 +28,15 @@ def reject_unbound(route, failures):
 
 def install_viewer_session(page):
     failures = []
+    origin = urlparse(page.url)
+    def assert_bound(request):
+        target = urlparse(request.url)
+        if (target.scheme, target.netloc) == (origin.scheme, origin.netloc) and unbound_protected_request(request, allow_bootstrap=False):
+            failures.append((request.url, request.resource_type))
+            raise AssertionError('Unbound protected request: ' + request.url)
+    # Observe every browser request, including routes a test later overrides and native
+    # srcset/CSS/SVG/parser loads. No caller opt-in or teardown assertion is required.
+    page.on('request', assert_bound)
     page.route('**/*', lambda route: None if reject_unbound(route, failures) else route.fallback())
     for name in ['work-context.js', 'session-transport.js', 'viewer-resources.js', 'viewer-session.js']:
         page.add_script_tag(path=str(HPACS / name))

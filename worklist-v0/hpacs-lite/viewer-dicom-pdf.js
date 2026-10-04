@@ -14,6 +14,7 @@
     const timeoutMs=Number.isInteger(options.timeoutMs)&&options.timeoutMs>0?options.timeoutMs:10000;
     let ended=false,mounted=false,hostTimer=null,channel=null,boundOwner=null,ownerError=null,source=null,generation=0,request=null,sourceRequest=null,ownerRequest=null,documentView=null,nativeRetryNeeded=false,nativeRetryPending=false,nativeRetrySource=null;
     const subscriptions=[];
+    let nativeError=null;
     const panel=root.document.createElement('section');panel.id='kin-source-pdf';panel.hidden=true;
     panel.innerHTML='<style>#kin-source-pdf{border-top:1px solid #355272;padding:8px 10px}#kin-source-pdf h3{margin:0 0 5px;font-size:14px}#kin-source-pdf p{margin:3px 0;overflow-wrap:anywhere}#kin-source-pdf button{margin-top:5px;padding:4px 7px;border:1px solid #657c9f;border-radius:4px}</style><h3>Source Documents</h3><p data-title></p><p data-role></p><p data-patient></p><p id="kin-source-pdf-status" role="status"></p><button id="kin-source-pdf-open" type="button" disabled>Open Source PDF</button>';
     const title=panel.querySelector('[data-title]'),role=panel.querySelector('[data-role]'),patient=panel.querySelector('[data-patient]'),status=panel.querySelector('[role=status]'),button=panel.querySelector('button');
@@ -65,18 +66,22 @@
         const url=new URL('/instances/'+lookup.id+'/pdf',root.location.origin),path='/instances/'+lookup.id+'/pdf';
         if(url.origin!==root.location.origin||url.pathname!==path||url.search||url.hash||url.username||url.password)throw Error('원본 PDF 경로를 확인할 수 없습니다.');
         if(!sourceLive())return;source={...value,url:url.href,orthancId:lookup.id,owner:first};const nativeError=options.nativeFailureFor?.(value.displaySet,value.pdfUrl);
-        if(nativeError){nativeRetryNeeded=true;nativeRetryPending=false;nativeRetrySource={displaySet:value.displaySet,pdfUrl:value.pdfUrl};button.textContent='Retry Source PDF';button.disabled=false;status.textContent=nativeError.message||'원본 PDF 표시를 완료하지 못했습니다. 다시 시도하세요.';}
+        if(nativeError){nativeFailure(nativeError,value.displaySet,value.pdfUrl);}
         else{button.textContent='Open Source PDF';button.disabled=false;status.textContent='Ready · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.';}
       })();
       let timer;const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>{const error=Error('원본 PDF 확인 시간이 지났습니다. 다시 시도하세요.');error.retryable=true;reject(error);controller.abort();},timeoutMs);});
       const stopped=new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true}));
       try{await Promise.race([work,deadline,stopped]);}
-      catch(error){if(sourceOwns()){source=null;const retryable=!!error?.retryable||error?.name==='AbortError'||error instanceof TypeError;button.textContent=retryable?'Retry Source PDF':'Open Source PDF';button.disabled=!retryable||!boundOwner;status.textContent=ownerError||(error?.name==='AbortError'||error instanceof TypeError?'원본 PDF 확인 요청을 완료하지 못했습니다.':error.message)||'원본 PDF 경로를 확인할 수 없습니다.';}}
+      catch(error){if(sourceOwns()){source=null;const retryable=!!error?.retryable||error?.name==='AbortError'||error instanceof TypeError;button.textContent=retryable?'Retry Source PDF':'Open Source PDF';button.disabled=!retryable||!boundOwner;status.textContent=ownerError||nativeError?.message||(error?.name==='AbortError'||error instanceof TypeError?'원본 PDF 확인 요청을 완료하지 못했습니다.':error.message)||'원본 PDF 경로를 확인할 수 없습니다.';}}
       finally{clearTimeout(timer);if(sourceRequest===operation)sourceRequest=null;}
     }
     function refresh(){
       if(ended)return;const next=snapshot(candidate());
-      if(nativeRetrySource&&!sameNativeSource(next,nativeRetrySource.displaySet,nativeRetrySource.pdfUrl)){nativeRetryNeeded=false;nativeRetryPending=false;nativeRetrySource=null;}
+      if(nativeRetrySource&&!sameNativeSource(next,nativeRetrySource.displaySet,nativeRetrySource.pdfUrl)){nativeRetryNeeded=false;nativeRetryPending=false;nativeRetrySource=null;nativeError=null;}
+      if(nativeError&&nativeRetrySource&&sameNativeSource(next,nativeRetrySource.displaySet,nativeRetrySource.pdfUrl)){
+        button.textContent=nativeRetryNeeded?'Retry Source PDF':'Open Source PDF';button.disabled=!nativeRetryNeeded||!!request||nativeRetryPending||!boundOwner;
+        status.textContent=nativeRetryPending?'원본 PDF를 다시 확인하고 있습니다.':nativeError.message;return;
+      }
       if(source&&sameSource(source,next)){const ready=sameOwner(boundOwner,source.owner);if(nativeRetryNeeded){button.textContent='Retry Source PDF';button.disabled=!!request||nativeRetryPending||!boundOwner;return;}button.textContent='Open Source PDF';button.disabled=!!request||!ready;if(!request)status.textContent=ready?'Ready · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.':(ownerError||'계정이 변경되어 원본 PDF를 표시하지 않았습니다.');return;}
       if(sourceRequest&&sameSource(sourceRequest.value,next)){button.disabled=true;status.textContent=ownerError||'Checking source path…';return;}
       generation++;cancelOperation();cancelSource();closeDocument();source=null;patient.textContent='';
@@ -131,8 +136,8 @@
       bindOwner();return api;
     }
     function stop(){if(ended)return;ended=true;generation++;cancelOperation();cancelSource();closeDocument();ownerRequest?.abort();ownerRequest=null;if(hostTimer)clearInterval(hostTimer);hostTimer=null;subscriptions.splice(0).forEach(item=>item.unsubscribe?.());channel?.close();panel.remove();}
-    function nativeFailure(error,displaySet,pdfUrl){const selected=snapshot(candidate());if(ended||!sameNativeSource(selected,displaySet,pdfUrl))return;nativeRetryNeeded=true;nativeRetryPending=false;nativeRetrySource={displaySet,pdfUrl};button.textContent='Retry Source PDF';button.disabled=!!request||!boundOwner;status.textContent=error?.message||'원본 PDF 표시를 완료하지 못했습니다. 다시 시도하세요.';}
-    function nativeReady(displaySet,pdfUrl){const selected=snapshot(candidate());if(ended||!nativeRetryNeeded||!nativeRetrySource||nativeRetrySource.displaySet!==displaySet||nativeRetrySource.pdfUrl!==pdfUrl||!sameNativeSource(selected,displaySet,pdfUrl))return;nativeRetryNeeded=false;nativeRetryPending=false;nativeRetrySource=null;button.textContent='Open Source PDF';const ready=!!source&&sameOwner(boundOwner,source.owner);button.disabled=!ready;status.textContent=ready?'Ready · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.':'Checking source path…';}
+    function nativeFailure(error,displaySet,pdfUrl){const selected=snapshot(candidate());if(ended||!sameNativeSource(selected,displaySet,pdfUrl))return;nativeError=error;nativeRetryNeeded=!!error?.retryable;nativeRetryPending=false;nativeRetrySource={displaySet,pdfUrl};panel.hidden=false;button.textContent=nativeRetryNeeded?'Retry Source PDF':'Open Source PDF';button.disabled=!nativeRetryNeeded||!!request||!boundOwner;status.textContent=error?.message||'원본 PDF 표시를 완료하지 못했습니다.';}
+    function nativeReady(displaySet,pdfUrl){const selected=snapshot(candidate());if(ended||!nativeRetryNeeded||!nativeRetrySource||nativeRetrySource.displaySet!==displaySet||nativeRetrySource.pdfUrl!==pdfUrl||!sameNativeSource(selected,displaySet,pdfUrl))return;nativeError=null;nativeRetryNeeded=false;nativeRetryPending=false;nativeRetrySource=null;button.textContent='Open Source PDF';const ready=!!source&&sameOwner(boundOwner,source.owner);button.disabled=!ready;status.textContent=ready?'Ready · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.':'Checking source path…';}
 
     const api={mount,stop,nativeFailure,nativeReady};return api;
   }

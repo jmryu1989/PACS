@@ -15,11 +15,16 @@
     win.URL.revokeObjectURL = release;
     async function read(url, options = {}) {
       if (!protectedUrl(url)) throw new TypeError('Expected a protected resource in this origin');
+      await boundary.wait();
+      if (options.signal?.aborted) throw new win.DOMException('Aborted', 'AbortError');
       const response = await win.fetch(url, { credentials: 'same-origin', cache: 'no-store', signal: options.signal });
       const type = response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase();
       if (!response.ok || options.type && (response.status !== 200 || type !== options.type)) {
         await response.body?.cancel();
-        const error = new Error('원본 자료 응답을 확인할 수 없습니다.');
+        const error = new Error([401, 403].includes(response.status) ? '원본 자료 접근이 거절되었습니다. 검사 접근 권한을 확인하세요.' :
+          response.status === 404 ? '원본 자료를 찾을 수 없습니다.' :
+          response.ok && options.type === 'application/pdf' && type !== options.type ? '원본 자료가 PDF 형식이 아닙니다.' :
+          '원본 자료 응답을 확인할 수 없습니다.');
         error.retryable = response.status === 429 || response.status >= 500;
         throw error;
       }
@@ -53,7 +58,7 @@
       elements.get(element).set(name, entry);
       if (!protectedLoad) { apply(value); return; }
       nativeRemove.call(element, name);
-      read(value, { signal: entry.controller.signal }).then(url => {
+      boundary.wait(read(value, { signal: entry.controller.signal }), release).then(url => {
         if (elements.get(element)?.get(name) !== entry || boundary.ended()) { release(url); return; }
         entry.url = url; apply(url);
         if (element.tagName === 'SOURCE') element.parentElement?.load?.();

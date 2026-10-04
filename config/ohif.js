@@ -13,6 +13,25 @@
 const KIN_VIEWER_DEFAULT_TITLE = '판독 뷰어 — KOREA IMAGING NETWORK';
 const KIN_VIEWER_PRODUCT = 'KIN Viewer';
 
+// Consume the opener-less handoff before loading any other script. Neither the address nor
+// a later document's window.name retains the expected session; the boundary records it locally.
+const KIN_VIEWER_EXPECTED_SESSION = (() => {
+  const prefix = 'kin-viewer-entry:';
+  if (!window.name?.startsWith(prefix)) return null;
+  const raw = window.name.slice(prefix.length); window.name = '';
+  try {
+    const entry = JSON.parse(raw);
+    window.name = typeof entry.name === 'string' ? entry.name : '';
+    const expected = typeof entry.session === 'string' && entry.session ? entry.session : null;
+    // A fresh list action may reuse the named window and its URL. It starts a new
+    // verification; a reload has no handoff and retains the previous entry instead.
+    history.replaceState({ ...history.state, kinViewerSession: {
+      session: null, ended: false, unresolved: true, expected, entryStopped: !expected,
+    } }, '');
+    return expected;
+  } catch (_) { return null; }
+})();
+
 // The first extension sets the page defaults before shared modules and data sources start work.
 function kinCreateSessionBoundary() {
   return { id: 'kin.session-boundary', async preRegistration() {
@@ -25,7 +44,7 @@ function kinCreateSessionBoundary() {
         document.head.append(script);
       });
     }
-    const boundary = window.KinViewerSession.connect(window);
+    const boundary = window.KinViewerSession.connect(window, KIN_VIEWER_EXPECTED_SESSION);
     boundary.onEnd(() => {
       kinViewerSession.refuse('logout');
       for (const extension of window.config.extensions) {
@@ -1389,10 +1408,8 @@ function kinCreateViewerHistory() {
     }
     async function authenticate(ticket) {
       const user = await api('/me', {}, ticket);
-      // Another account ends the document's login before its verdict is noted (Astra S5-U2b-X3-R-001 F01, X4-R-001 F01). note()
-      // makes that comparison against the account the document confirmed first — by this mount, an earlier one or another panel —
-      // so a mount that has not confirmed anyone yet (subject is empty after a mode re-entry) is covered too; a refusal there ends
-      // this panel inside note() through the session watcher.
+      // Compare with the account first confirmed in this document, including earlier mounts.
+      // A different account refuses this panel's answer; only the page gate ends the document.
       // The session watcher below runs inside note(): ownAnswer tells it that this panel's own /me is the answer it reacts to.
       if (kinViewerSession.sameAccount(user) !== true) throw { stale: true };
       ownAnswer = true;
@@ -2643,7 +2660,7 @@ function kinCreateCTSync() {
     try { channel = kinViewerOnEnd(() => onMessage()); } catch (_) {}
     // Subscribed for the whole mount and dropped at mode exit. A document whose login already ended before this entry answers at
     // once: an end asks nothing; a refusal of this account asks nothing either until Recheck Access. This extension's own /me and
-    // list 403 stay its refusal (they do not end the document); its own 401 and another account end the document's login (fix2).
+    // list refusal, plain 401 and another account stay local failures. Only the page gate ends the document's session.
     const unwatchEnd = kinViewerSession.onEnded(documentEnded);
     stop = () => { unwatchEnd(); end(); creators.forEach(([type, fn]) => groups.addSynchronizerType(type, fn));  window.removeEventListener('pagehide', end); channel?.close(); notice.remove(); };
     if (!ended && access === 'checking') confirm();
@@ -3495,7 +3512,8 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
   async function json(result) { try { return await result.json(); } catch (_) { throw new Error('원본 PDF 확인 응답이 올바르지 않습니다.'); } }
   function requireReply(reply, message) {
     if (reply?.ok) return reply;
-    const error = new Error(message);
+    const error = new Error([401, 403].includes(reply?.status) ? '원본 PDF 접근이 거절되었습니다. 검사 접근 권한을 확인하세요.' :
+      reply?.status === 404 ? '원본 PDF를 찾을 수 없습니다.' : message);
     error.retryable = !reply || reply.status === 429 || reply.status >= 500;
     throw error;
   }
@@ -3546,8 +3564,10 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
   function start(record) {
     const controller = new AbortController(); record.controller = controller; record.failed = false; pending.add(controller);
     resolve(record.source, record.ticket, controller).then(value => { if (!record.settled) { record.url = value; record.settled = true; records.delete(record); record.resolve(value); options.onSuccess?.(record.source.value, record.original); } else window.KinViewerResource.release(value); }, error => {
-      if (!record.settled && error?.retryable && active && record.ticket === epoch && matches(record.source)) { record.failed = true; options.onFailure?.(error, record.source.value, record.original); }
-      else if (!record.settled) { record.settled = true; records.delete(record); record.reject(error); }
+      if (!record.settled && active && record.ticket === epoch && matches(record.source)) {
+        record.failed = !!error?.retryable; options.onFailure?.(error, record.source.value, record.original);
+      }
+      if (!record.settled && !record.failed) { record.settled = true; records.delete(record); record.reject(error); }
     });
   }
   function resolvedSource(source) {

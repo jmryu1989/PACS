@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = "https://viewer-session.test"
 HPACS = ROOT / "worklist-v0" / "hpacs-lite"
 SOURCE = Path(os.environ.get("KIN_VIEWER_SESSION_SOURCE", HPACS / "viewer-session.js"))
+RESOURCE_SOURCE = Path(os.environ.get("KIN_VIEWER_RESOURCE_SOURCE", HPACS / "viewer-resources.js"))
 MIP_SOURCE = Path(os.environ.get("KIN_VIEWER_MIP_SOURCE", HPACS / "viewer-volume-mip.js"))
 
 
@@ -68,10 +69,10 @@ class ViewerSessionDOMTest(unittest.TestCase):
         path = route.request.url[len(BASE):].split("?")[0]
         if path.startswith("/worklist/hpacs-lite/") and path.endswith(".js"):
             name = path.rsplit("/", 1)[-1]
-            source = SOURCE if name == "viewer-session.js" else HPACS / name
-            route.fulfill(body=source.read_text(encoding="utf-8"), content_type="application/javascript")
+            source = SOURCE if name == "viewer-session.js" else RESOURCE_SOURCE if name == "viewer-resources.js" else HPACS / name
+            route.fulfill(body=source.read_text(encoding="utf-8"), content_type="application/javascript; charset=utf-8")
         elif path == "/config.js":
-            route.fulfill(body=(ROOT / "config" / "ohif.js").read_text(encoding="utf-8"), content_type="application/javascript")
+            route.fulfill(body=(ROOT / "config" / "ohif.js").read_text(encoding="utf-8"), content_type="application/javascript; charset=utf-8")
         elif path == "/worklist":
             route.fulfill(body='<script src="/worklist/hpacs-lite/work-context.js"></script>', content_type="text/html")
         elif path == "/ohif/viewer":
@@ -79,7 +80,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
               <script src="/config.js"></script><script>
               window.close=()=>{window.closeAttempted=true};
               config.extensions.find(extension=>extension.id==='kin.session-boundary').preRegistration().then(()=>window.started=true);
-              </script>''', content_type="text/html")
+              </script>''', content_type="text/html; charset=utf-8")
         elif path.startswith(("/api/", "/dicom-web/", "/instances/")):
             self.requests.append((path, route.request.headers.get("x-kin-session")))
             headers = {"X-KIN-Auth-Code": self.code} if self.code else {}
@@ -100,7 +101,16 @@ class ViewerSessionDOMTest(unittest.TestCase):
         return self.view
 
     def notice(self, kind, session="S1", preparation="document-X:preparation"):
-        self.opener.evaluate("value=>channel.postMessage(value)",
+        # Main's contract: own the lock before the notice, release on cancellation/end.
+        self.opener.evaluate("""async value=>{
+          window.preparationLocks ||= new Map();const key=JSON.stringify([value.session,value.preparation]);
+          if(value.type==='session-preparing'&&!preparationLocks.has(key))await new Promise(acquired=>{
+            navigator.locks.request('kin-preparation:'+value.preparation,()=>new Promise(release=>{
+              preparationLocks.set(key,{session:value.session,release});acquired();}));});
+          channel.postMessage(value);
+          if(value.type==='session-resumed'){preparationLocks.get(key)?.release();preparationLocks.delete(key);}
+          if(value.type==='session-ended')for(const [key,item] of preparationLocks)if(item.session===value.session){item.release();preparationLocks.delete(key);}
+        }""",
                              {"type": kind, "session": session, "preparation": preparation})
 
 
@@ -165,16 +175,16 @@ class ViewerSessionDOMTest(unittest.TestCase):
             self.assertNotIn('x-kin-session', headers)
             self.assertNotIn('x-kin-csrf', headers)
 
-    def test_preparation_lease_expires_after_opener_closes_navigates_or_goes_silent(self):
-        for action in ['closed', 'navigate', 'silent']:
+    def test_preparation_lock_releases_after_preparer_closes_or_navigates(self):
+        for action in ['closed', 'navigate']:
             with self.subTest(action=action):
                 if self.opener.is_closed() or self.opener.url != BASE + '/worklist':
                     self.opener = self.context.new_page()
                     self.opener.goto(BASE + '/worklist')
                     self.opener.evaluate("KinWorkContext.follow({onLifecycle(fn){window.source=fn;fn({state:'active',session:'S1'})}});window.channel=new BroadcastChannel('kin-session')")
                 view = self.open_viewer()
-                self.opener.evaluate("window.preparation=KinWorkContext.prepare({preparationId:'lease-X'})")
-                self.notice('session-preparing', preparation='lease-X')
+                self.opener.evaluate("window.preparation=KinWorkContext.prepare({preparationId:'lock-X'})")
+                self.notice('session-preparing', preparation='lock-X')
                 view.wait_for_function("KinWorkContext.state()==='preparing'")
                 view.evaluate("window.delivered=0;setTimeout(()=>delivered++,1)")
                 if action == 'closed':
@@ -182,30 +192,96 @@ class ViewerSessionDOMTest(unittest.TestCase):
                     self.opener.close()
                 elif action == 'navigate':
                     self.opener.goto(BASE + '/elsewhere')
-                view.wait_for_timeout(6350)
+                view.wait_for_function("KinWorkContext.state()==='active'", timeout=2000)
                 self.assertEqual(view.evaluate('[KinWorkContext.state(),delivered]'), ['active',1])
                 view.locator('#draft').fill('continued draft')
                 self.assertEqual(view.locator('#draft').input_value(), 'continued draft')
                 view.close()
-                if action != 'silent':
-                    self.opener = self.context.new_page()
-                    self.opener.goto(BASE + '/worklist')
-                    self.opener.evaluate("KinWorkContext.follow({onLifecycle(fn){window.source=fn;fn({state:'active',session:'S1'})}});window.channel=new BroadcastChannel('kin-session')")
+                self.opener = self.context.new_page()
+                self.opener.goto(BASE + '/worklist')
+                self.opener.evaluate("KinWorkContext.follow({onLifecycle(fn){window.source=fn;fn({state:'active',session:'S1'})}});window.channel=new BroadcastChannel('kin-session')")
 
-    def test_matching_renewals_keep_pause_other_id_does_not_extend_lease(self):
+    def test_held_lock_keeps_pause_without_renewals_and_another_lock_does_not_hold_it(self):
         view = self.open_viewer()
-        self.notice('session-preparing', preparation='lease-X')
+        self.notice('session-preparing', preparation='lock-X')
         view.wait_for_function("KinWorkContext.state()==='preparing'")
-        for _ in range(4):
-            view.wait_for_timeout(2000)
-            self.notice('session-preparing', preparation='lease-X')
+        view.evaluate("window.delivered=0;setTimeout(()=>delivered++,1)")
+        view.wait_for_timeout(8500)
         self.assertEqual(view.evaluate('KinWorkContext.state()'), 'preparing')
-        for _ in range(3):
-            view.wait_for_timeout(1800)
-            self.notice('session-preparing', preparation='lease-Y')
-        view.wait_for_timeout(1000)
-        self.assertEqual(view.evaluate('KinWorkContext.state()'), 'active')
+        view.locator('#draft').press('End'); view.keyboard.type('forbidden')
         self.assertEqual(view.locator('#draft').input_value(), 'held draft')
+        self.assertEqual(view.evaluate('delivered'), 0)
+        self.notice('session-preparing', preparation='lock-Y')
+        self.opener.evaluate("preparationLocks.get(JSON.stringify(['S1','lock-X'])).release()")
+        view.wait_for_function("KinWorkContext.state()==='active'", timeout=2000)
+        self.assertEqual(view.evaluate('KinWorkContext.state()'), 'active')
+        self.assertEqual(view.evaluate('delivered'), 1)
+        self.assertEqual(view.locator('#draft').input_value(), 'held draft')
+
+    def test_readable_preparing_peer_keeps_pause_without_a_lock(self):
+        self.opener.evaluate("window.preparation=KinWorkContext.prepare({preparationId:'readable-X'})")
+        view = self.open_viewer()
+        view.wait_for_timeout(7500)
+        self.assertEqual(view.evaluate('KinWorkContext.state()'), 'preparing')
+        self.opener.close()
+        view.wait_for_function("KinWorkContext.state()==='active'", timeout=2000)
+
+    def test_end_disposes_while_the_preparer_still_holds_its_lock(self):
+        view=self.open_viewer(); self.notice('session-preparing',preparation='held-at-end')
+        view.wait_for_function("KinWorkContext.state()==='preparing'")
+        held=[]; view.route(BASE+'/worklist/hpacs-lite/index.html',lambda route:held.append(route))
+        self.opener.evaluate("channel.postMessage({type:'session-ended',session:'S1'})")
+        for _ in range(100):
+            if held: break
+            view.wait_for_timeout(10)
+        self.assertTrue(held)
+        self.assertEqual(self.opener.evaluate('viewerRef.KinWorkContext.state()'),'ending')
+        self.assertEqual(self.opener.evaluate('viewerRef.document.body.textContent'),'')
+        self.assertIn('kin-preparation:held-at-end',self.opener.evaluate('navigator.locks.query().then(q=>q.held.map(l=>l.name))'))
+        self.assertEqual(self.opener.evaluate('navigator.locks.query().then(q=>q.pending.length)'),0)
+        for route in held: route.abort()
+
+    def test_lock_release_observes_opener_end_before_delivering_work_without_a_notice(self):
+        with self.context.expect_page() as created:
+            self.opener.evaluate("window.viewerRef=window.open('about:blank')")
+        view=created.value
+        view.clock.install(); view.clock.pause_at(view.evaluate('Date.now()'))
+        view.goto(BASE+'/ohif/viewer?StudyInstanceUIDs=1.2.3')
+        for _ in range(200):
+            if view.evaluate('!!window.KinViewerSessionBoundary'): break
+            view.wait_for_timeout(10)
+        self.notice('session-preparing',preparation='ending-without-notice')
+        for _ in range(100):
+            if view.evaluate("KinWorkContext.state()==='preparing'"): break
+            view.wait_for_timeout(10)
+        self.assertEqual(view.evaluate('KinWorkContext.state()'),'preparing')
+        view.evaluate("const i=new Image();i.src='/dicom-web/must-not-start';document.body.append(i)")
+        held=[]; view.route(BASE+'/worklist/hpacs-lite/index.html',lambda route:held.append(route))
+        self.opener.evaluate("""()=>{source({state:'ending',session:'S1'});
+          preparationLocks.get(JSON.stringify(['S1','ending-without-notice'])).release();}""")
+        for _ in range(100):
+            if held: break
+            view.wait_for_timeout(10)
+        self.assertTrue(held,'the lock release observes the end even with the viewer polling clock stopped')
+        self.assertEqual(self.requests,[],'no deferred resource starts between lock release and the end')
+        self.assertEqual(self.opener.evaluate('viewerRef.document.body.textContent'),'')
+        for route in held: route.abort()
+
+    def test_no_locks_uses_readable_peer_and_notices_never_silence(self):
+        self.context.add_init_script("Object.defineProperty(navigator,'locks',{value:undefined})")
+        self.opener.evaluate("window.preparation=KinWorkContext.prepare({preparationId:'fallback-X'})")
+        view = self.open_viewer()
+        view.wait_for_timeout(7000)
+        self.assertEqual(view.evaluate('KinWorkContext.state()'), 'preparing')
+        self.opener.goto(BASE + '/elsewhere')
+        view.wait_for_function("KinWorkContext.state()==='active'", timeout=2000)
+        self.opener.evaluate("window.channel=new BroadcastChannel('kin-session')")
+        self.opener.evaluate("channel.postMessage({type:'session-preparing',session:'S1',preparation:'unreadable'})")
+        view.wait_for_function("KinWorkContext.state()==='preparing'")
+        view.wait_for_timeout(7000)
+        self.assertEqual(view.evaluate('KinWorkContext.state()'), 'preparing')
+        self.opener.evaluate("channel.postMessage({type:'session-resumed',session:'S1',preparation:'unreadable'})")
+        view.wait_for_function("KinWorkContext.state()==='active'")
 
     def test_opened_during_preparation_resumes_on_notice_after_main_reprepares(self):
         self.opener.evaluate("window.preparation=KinWorkContext.prepare({preparationId:'live-opaque-id'})")
@@ -214,7 +290,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.opener.evaluate("KinWorkContext.cancelPreparation(preparation);window.preparation=KinWorkContext.prepare({preparationId:'live-opaque-id'})")
         self.notice('session-resumed', preparation='live-opaque-id')
         view.wait_for_timeout(100)
-        self.assertEqual(view.evaluate('KinWorkContext.state()'), 'active', 'the matching notice resumes before the lease can expire')
+        self.assertEqual(view.evaluate('KinWorkContext.state()'), 'active', 'the matching notice resumes immediately')
         self.assertEqual(view.locator('#draft').input_value(), 'held draft')
 
     def test_noopener_transient_bootstrap_retries_without_closing(self):
@@ -272,6 +348,181 @@ class ViewerSessionDOMTest(unittest.TestCase):
             page.wait_for_url(BASE + '/worklist/hpacs-lite/index.html')
             self.assertEqual(page.locator('#root').count(), 0)
             page.close()
+
+    def open_noopener(self, expected='S1'):
+        with self.context.expect_page() as created:
+            self.opener.evaluate("""expected=>{const p=window.open('/ohif/viewer?StudyInstanceUIDs=1.2.3','_blank');
+              if(expected)p.name='kin-viewer-entry:'+JSON.stringify({session:expected,name:'clinician-viewer'});
+              p.opener=null;}""", expected)
+        return created.value
+
+    def expect_reopen_notice(self, page):
+        # An unresolved viewer deliberately suspends requestAnimationFrame. Observe its
+        # visible notice from the driver instead of waiting in the blocked page scheduler.
+        for _ in range(200):
+            if page.get_by_role('alert').count() and '목록에서' in page.get_by_role('alert').inner_text(): break
+            page.wait_for_timeout(10)
+        self.assertIn('목록에서',page.get_by_role('alert').inner_text())
+
+    def test_noopener_expected_session_is_consumed_without_click_or_address_leak(self):
+        page = self.open_noopener()
+        page.wait_for_function('window.started===true')
+        self.assertEqual(page.evaluate('[KinWorkContext.session(),window.name,window.opener]'), ['S1','clinician-viewer',None])
+        self.assertEqual(page.url, BASE+'/ohif/viewer?StudyInstanceUIDs=1.2.3')
+        self.assertEqual(page.get_by_role('alert').count(), 0)
+        self.assertEqual(self.requests, [('/api/me',None)])
+        page.goto(BASE+'/elsewhere')
+        self.assertEqual(page.evaluate('window.name'), 'clinician-viewer')
+        self.assertIsNone(page.evaluate('history.state?.kinViewerSession'))
+
+    def test_noopener_retry_never_adopts_a_replacement_with_or_without_end_notice(self):
+        for expected, hear_end in [('S1',False),('S1',True),(None,True)]:
+            with self.subTest(expected=expected, hear_end=hear_end):
+                self.status, self.code, self.server_session = 503, 'AUTH_IDP_UNAVAILABLE', 'S1'
+                page = self.open_noopener(expected)
+                page.get_by_role('button',name='Retry').wait_for(timeout=8000)
+                if hear_end: self.notice('session-ended'); page.wait_for_timeout(100)
+                self.status, self.code, self.server_session = 200, None, 'S2'
+                page.get_by_role('button',name='Retry').click()
+                self.expect_reopen_notice(page)
+                self.assertEqual(page.evaluate('[KinWorkContext.session(),KinWorkContext.state(),!!window.started]'), [None,'unknown',False])
+                self.assertEqual(page.get_by_role('button',name='Retry').count(), 0)
+                self.assertFalse(page.evaluate('!!window.closeAttempted'))
+                page.reload()
+                self.expect_reopen_notice(page)
+                self.assertIsNone(page.evaluate('KinWorkContext.session()'))
+                page.close()
+        self.assertFalse(any(binding for _,binding in self.requests))
+
+    def test_retry_notice_reload_repeats_original_expected_session_verification(self):
+        for server_session in ['S1','S2']:
+            with self.subTest(server=server_session):
+                self.status, self.code, self.server_session = 503, 'AUTH_IDP_UNAVAILABLE', 'S1'
+                page = self.open_noopener()
+                page.get_by_role('button',name='Retry').wait_for(timeout=8000)
+                self.status, self.code, self.server_session = 200, None, server_session
+                page.reload()
+                if server_session == 'S1':
+                    page.wait_for_function('window.started===true')
+                    self.assertEqual(page.evaluate('KinWorkContext.session()'), 'S1')
+                else:
+                    self.expect_reopen_notice(page)
+                    self.assertIsNone(page.evaluate('KinWorkContext.session()'))
+                self.assertFalse(page.evaluate('!!window.closeAttempted'))
+                self.assertIn('/ohif/viewer',page.url)
+                page.close()
+
+    def test_handoff_survives_reload_when_boundary_script_loading_failed(self):
+        self.context.route(BASE+'/worklist/hpacs-lite/viewer-session.js',lambda route:route.abort())
+        page=self.open_noopener()
+        page.wait_for_load_state('load')
+        self.assertEqual(page.evaluate('window.name'),'clinician-viewer')
+        self.context.unroute(BASE+'/worklist/hpacs-lite/viewer-session.js')
+        self.server_session='S2'; page.reload()
+        self.expect_reopen_notice(page)
+        self.assertIsNone(page.evaluate('KinWorkContext.session()'))
+
+    def test_reopen_from_list_verifies_a_new_handoff_in_the_same_named_window(self):
+        self.server_session='S2';page=self.open_noopener('S1');self.expect_reopen_notice(page)
+        with page.expect_navigation():
+            self.opener.evaluate("""()=>{const p=window.open('/ohif/viewer?StudyInstanceUIDs=1.2.3','clinician-viewer');
+              p.name='kin-viewer-entry:'+JSON.stringify({session:'S2',name:'clinician-viewer'});p.opener=null;}""")
+        page.wait_for_function('window.started===true')
+        self.assertEqual(len(self.context.pages),2)
+        self.assertEqual(page.evaluate('KinWorkContext.session()'),'S2')
+        self.assertEqual(page.get_by_role('alert').count(),0)
+        page.evaluate("fetch('/api/studies').then(r=>r.json())")
+        self.assertEqual(self.requests,[('/api/me',None),('/api/me',None),('/api/studies','S2')])
+
+    def test_protected_element_load_waits_for_resume_or_entry_and_drops_at_end(self):
+        # Observe the native send boundary too: a request aborted during teardown can
+        # disappear before Playwright's route callback, but must still fail this test.
+        self.context.add_init_script("""(() => {
+          window.deferredSends=[];const nativeFetch=window.fetch.bind(window);
+          window.fetch=(url,...args)=>{
+            if(new URL(url,location.href).pathname==='/dicom-web/deferred')
+              deferredSends.push(KinWorkContext.state());
+            return nativeFetch(url,...args);
+          };
+        })();""")
+        for phase in ['preparing','unknown','end']:
+            with self.subTest(phase=phase):
+                held=[]; sent=[]
+                def image_response(route):
+                    sent.append(route.request.headers.get('x-kin-session'))
+                    route.fulfill(body=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='),content_type='image/png')
+                self.context.route(BASE+'/dicom-web/deferred',image_response)
+                if phase=='unknown':
+                    self.context.route(BASE+'/api/me',lambda route:held.append(route))
+                    view=self.open_noopener()
+                    view.wait_for_function('!!window.KinViewerSessionBoundary')
+                else:
+                    view=self.open_viewer(); self.notice('session-preparing')
+                    view.wait_for_function("KinWorkContext.state()==='preparing'")
+                view.evaluate("""()=>{window.events=[];const i=document.createElement('img');i.id='deferred';
+                  i.onload=()=>events.push('load:'+KinWorkContext.state());i.onerror=()=>events.push('error:'+KinWorkContext.state());
+                  i.src='/dicom-web/deferred';document.body.append(i);}""")
+                view.wait_for_timeout(100)
+                self.assertEqual(sent,[]); self.assertEqual(view.evaluate('events'),[])
+                self.assertEqual(view.evaluate('deferredSends'),[])
+                if phase=='end':
+                    landing=[];view.route(BASE+'/worklist/hpacs-lite/index.html',lambda route:landing.append(route))
+                    # The sender closes its gate before broadcasting/releasing its lock
+                    # (auth.js logout contract). Otherwise a lock-first callback sees an
+                    # active opener and legitimately resumes before the end notice arrives.
+                    self.opener.evaluate("source({state:'ending',session:'S1'})")
+                    self.notice('session-ended')
+                    for _ in range(100):
+                        if landing: break
+                        view.wait_for_timeout(10)
+                    self.assertTrue(landing, 'the viewer must finish its end transition')
+                    self.assertEqual(self.opener.evaluate('viewerRef.KinWorkContext.state()'),'ending')
+                    self.assertEqual(self.opener.evaluate('viewerRef.deferredSends'),[])
+                    self.assertEqual(sent,[])
+                    self.assertEqual(self.opener.evaluate('viewerRef.events'),[])
+                    for route in landing: route.abort()
+                else:
+                    if phase=='unknown':
+                        held[0].fulfill(json={'sessionId':'S1'})
+                        self.context.unroute(BASE+'/api/me')
+                    else: self.notice('session-resumed')
+                    view.wait_for_function("events.length===1")
+                    self.assertEqual(view.evaluate('events'),['load:active'])
+                    self.assertEqual(sent,['S1'])
+                    self.assertEqual(view.evaluate('deferredSends'),['active'])
+                view.close(); self.context.unroute(BASE+'/dicom-web/deferred',image_response)
+
+    def hold_ended_viewer(self, view):
+        held=[];view.route(BASE+'/worklist/hpacs-lite/index.html',lambda route:held.append(route))
+        self.notice('session-ended')
+        for _ in range(100):
+            if held: break
+            view.wait_for_timeout(10)
+        self.assertTrue(held)
+        return held
+
+    def test_end_revokes_owned_blobs_that_were_never_attached(self):
+        view=self.open_viewer()
+        urls=view.evaluate("[URL.createObjectURL(new Blob(['decoder'])),URL.createObjectURL(new Blob(['print']))]")
+        self.assertEqual(view.evaluate('urls=>Promise.all(urls.map(u=>fetch(u).then(r=>r.text())))',urls),['decoder','print'])
+        held=self.hold_ended_viewer(view)
+        self.assertEqual(self.opener.evaluate('urls=>Promise.all(urls.map(u=>viewerRef.fetch(u).then(()=>true,()=>false)))',urls),[False,False])
+        for route in held: route.abort()
+
+    def test_create_object_url_is_refused_after_session_end(self):
+        view=self.open_viewer();held=self.hold_ended_viewer(view)
+        self.assertEqual(self.opener.evaluate("()=>{try{viewerRef.URL.createObjectURL(new Blob(['late']));return 'created'}catch(e){return e.name}}"),'AbortError')
+        for route in held: route.abort()
+
+    def test_two_elements_share_resource_until_the_last_reference_is_removed(self):
+        view=self.open_viewer()
+        self.context.route(BASE+'/instances/shared/pdf',lambda route:route.fulfill(body=b'%PDF-shared',content_type='application/pdf'))
+        url=view.evaluate("""async()=>{const url=await KinViewerResource.read('/instances/shared/pdf');window.shared=[];
+          for(let n=0;n<2;n++){const e=document.createElement('object');document.body.append(e);e.data=url;shared.push(e);}return url;}""")
+        view.evaluate('shared[0].remove()');view.wait_for_timeout(50)
+        self.assertEqual(view.evaluate('u=>fetch(u).then(r=>r.text()).catch(()=>null)',url),'%PDF-shared')
+        view.evaluate('shared[1].remove()');view.wait_for_timeout(50)
+        self.assertFalse(view.evaluate('u=>fetch(u).then(()=>true,()=>false)',url))
 
     def test_protected_native_elements_use_owned_blobs_and_release_on_close_and_end(self):
         view = self.open_viewer()
@@ -540,7 +791,8 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.notice('session-resumed')
         page.wait_for_timeout(50)
         held.pop().fulfill(json={'sessionId':'S1'})
-        page.wait_for_url(BASE+'/worklist/hpacs-lite/index.html')
+        self.expect_reopen_notice(page)
+        self.assertEqual(page.evaluate('[KinWorkContext.session(),KinWorkContext.state(),!!window.started]'),[None,'unknown',False])
         self.assertEqual(self.requests,[])
 
     def test_ordinary_two_windows_reload_and_study_navigation_need_no_extra_interaction(self):

@@ -7,7 +7,7 @@
   const RECORD = 'kinViewerSession';
   const closed = state => !['active', 'preparing'].includes(state);
 
-  function connect(win) {
+  function connect(win, expectedSession = null) {
     if (win.KinViewerSessionBoundary) return win.KinViewerSessionBoundary;
     const gate = win.KinWorkContext;
     const originalFetch = win.fetch.bind(win);
@@ -17,7 +17,8 @@
     const clearTimeout = win.clearTimeout.bind(win), clearInterval = win.clearInterval.bind(win);
     const nativeFrame = win.requestAnimationFrame?.bind(win), cancelFrame = win.cancelAnimationFrame?.bind(win);
     const timers = new Map(), intervals = new Map(), frames = new Map(), deferred = new Set(), workers = new Set();
-    let announce, preparation = null, preparingId = null, peerPreparation = null, lease = null, ended = false, cleaning = false;
+    let announce, preparation = null, preparingId = null, peerPreparation = null, lockWatch = null, ended = false, cleaning = false;
+    const locks = win.navigator?.locks;
     let peer = null, record = null;
     const enders = new Set(), changes = new Set();
     try { peer = win.opener || (win.parent !== win ? win.parent : null); } catch (_) {}
@@ -25,13 +26,18 @@
     let peerGate = null;
     try { peerGate = peer?.KinWorkContext || null; } catch (_) {}
     const validRecord = record && typeof record.session === 'string' && record.session.length > 0 && typeof record.ended === 'boolean';
+    const unresolved = record?.unresolved === true && record.ended === false;
+    const expected = unresolved ? record.expected : !record ? expectedSession : null;
+    let entryStopped = unresolved && record.entryStopped === true;
     let session = validRecord ? record.session : record ? null : peerGate?.session() || null;
-    const needsBootstrap = !record && !peerGate && !session;
+    const needsBootstrap = unresolved || !record && !peerGate && !session;
     const heard = new Map();
     const initialEnd = record?.ended === true || !session && !needsBootstrap ||
       (peerGate?.session() === session && closed(peerGate.state()));
+    const entryRecord = ending => ({ session, ended: ending, unresolved: !session && needsBootstrap && !ending,
+      expected: expected || null, entryStopped });
     const remember = ending => {
-      try { nativeReplaceState({ ...win.history.state, [RECORD]: { session, ended: ending } }, ''); return true; }
+      try { nativeReplaceState({ ...win.history.state, [RECORD]: entryRecord(ending) }, ''); return true; }
       catch (_) { return false; }
     };
     gate.follow({ onLifecycle(listener) {
@@ -41,7 +47,7 @@
     if (session) remember(initialEnd);
     // Router state changes must not erase this history entry's original session before a reload.
     for (const [name, native] of [['replaceState', nativeReplaceState], ['pushState', nativePushState]])
-      win.history[name] = (state, title, url) => native({ ...state, [RECORD]: { session, ended: ended || initialEnd } }, title, url);
+      win.history[name] = (state, title, url) => native({ ...state, [RECORD]: entryRecord(ended || initialEnd) }, title, url);
 
     function end() {
       if (ended) return;
@@ -49,7 +55,7 @@
       cleaning = true;
       remember(true);
       announce({ state: 'ending', session });
-      clearTimeout(lease);
+      lockWatch?.controller.abort(); lockWatch = null;
       for (const timer of timers.keys()) clearTimeout(timer);
       for (const timer of intervals.keys()) clearInterval(timer);
       for (const frame of frames.keys()) cancelFrame(frame);
@@ -69,22 +75,38 @@
           [403, 409].includes(failure.status) && failure.code === 'AUTH_SESSION_MISMATCH') end();
     }
     const transport = win.KinSessionTransport.page({ fetch: originalFetch, authFailure });
-    function renewLease() {
-      clearTimeout(lease);
-      const id = preparingId;
-      lease = nativeTimeout(() => { syncPeer(); resume(id); }, 6000);
+    function preparingPeer(id) {
+      try {
+        const source = peer && !peer.closed ? peer.KinWorkContext : null;
+        return source?.session() === session && source.state() === 'preparing' && source.preparation()?.preparation === id;
+      } catch (_) { return false; }
+    }
+    function watchPreparation(id) {
+      const watch = { controller: new win.AbortController(), released: false, unavailable: !locks,
+        sawPeer: preparingPeer(id) };
+      lockWatch = watch;
+      if (!locks) return;
+      // Main holds this exclusive lock BEFORE announcing preparation. A shared waiter is
+      // notified by the browser on release, independently of either document's timers.
+      locks.request('kin-preparation:' + id, { mode: 'shared', signal: watch.controller.signal }, () => {
+        if (lockWatch !== watch || ended) return;
+        watch.released = true;
+        // The opener may have ended before its notice reaches this document. Read that
+        // state before releasing any deferred work at the lock boundary.
+        syncPeer();
+      }).catch(() => { if (lockWatch === watch) watch.unavailable = true; });
     }
     function pause(id) {
       if (ended || id === null || id === undefined || closed(gate.state())) return;
-      if (preparation) { if (id === preparingId) renewLease(); return; }
+      if (preparation) return;
       preparingId = id;
       preparation = gate.prepare({ preparationId: id });
-      renewLease();
+      watchPreparation(id);
       for (const run of [...changes]) { try { run('preparing'); } catch (_) {} }
     }
     function resume(id) {
       if (ended || !preparation || id !== preparingId) return;
-      clearTimeout(lease); lease = null;
+      lockWatch?.controller.abort(); lockWatch = null;
       gate.cancelPreparation(preparation);
       preparation = null; preparingId = null;
       for (const run of [...changes]) { try { run('active'); } catch (_) {} }
@@ -92,6 +114,9 @@
     }
     function notice(data) {
       if (needsBootstrap && !session && data?.session) {
+        if (data.type === 'session-ended' && (!expected || data.session === expected)) {
+          entryStopped = true; remember(false);
+        }
         const previous = heard.get(data.session);
         if (previous?.type === 'session-ended') return;
         if (data.type === 'session-ended' || data.type === 'session-preparing') heard.set(data.session, data);
@@ -106,15 +131,17 @@
     function syncPeer() {
       try {
         const source = peer && !peer.closed ? peer.KinWorkContext : null;
-        if (!source || source.session() !== session) return;
-        if (closed(source.state())) end();
-        else if (source.state() === 'preparing') {
+        if (source && source.session() === session && closed(source.state())) { end(); return; }
+        if (source?.session() === session && source.state() === 'preparing') {
           const id = source.preparation()?.preparation;
-          // A readable but frozen opener is not a heartbeat. Only a new preparation or its
-          // own repeated notice renews the lease; observing the same stale object cannot.
           if (id !== peerPreparation) { peerPreparation = id; pause(id); }
-        } else if (peerPreparation !== null) { resume(peerPreparation); peerPreparation = null; }
+        } else peerPreparation = null;
       } catch (_) { /* A closed opener is not evidence that this session ended. */ }
+      if (!lockWatch) return;
+      if (preparingPeer(preparingId)) lockWatch.sawPeer = true;
+      else if (lockWatch.released || lockWatch.unavailable && lockWatch.sawPeer) resume(preparingId);
+      // Without Web Locks and without a readable preparer, only a matching resume notice
+      // can safely unpause. Silence is not evidence of cancellation.
     }
     let channel = null;
     try { channel = new win.BroadcastChannel('kin-session'); channel.onmessage = event => notice(event.data); } catch (_) {}
@@ -240,9 +267,8 @@
         abortWhenStale: false })).then(responseFor);
     };
     const guarded = new WeakMap();
-    // A new noopener document follows the same entry rule as auth.js: reliable storage,
-    // no end record, one bootstrap with bounded retries. A history binding NEVER
-    // enters this path. Recheck records/notices after the body, before adopting its identity.
+    // A list-opened noopener verifies the handed-over session. Only a typed URL without
+    // an expected id can bootstrap an identity, and never after hearing an unresolved end.
     function entryAllowed() {
       try {
         const storage = win.localStorage, key = 'kin-viewer-entry-probe', value = win.crypto.randomUUID().padEnd(160, '.');
@@ -254,14 +280,32 @@
       } catch (_) { return false; }
     }
     let entryNotice = null;
+    function entryMessage(message, retry) {
+      entryNotice?.remove();
+      entryNotice = win.document.createElement('section'); entryNotice.setAttribute('role', 'alert');
+      entryNotice.style.cssText = 'position:fixed;inset:30% 20% auto;z-index:10000;background:#18212b;color:white;padding:24px';
+      const text = win.document.createElement('p'); text.textContent = message; entryNotice.append(text);
+      if (retry) {
+        const button = win.document.createElement('button'); button.textContent = 'Retry';
+        button.onclick = () => { entryNotice.remove(); entryNotice = null; retry(); }; entryNotice.append(button);
+      }
+      win.document.body.append(entryNotice);
+    }
+    function reopenFromList() {
+      entryStopped = true; remember(false);
+      entryMessage('이 창을 연 세션을 확인할 수 없습니다. 목록에서 뷰어를 다시 열어 주세요.');
+      return new Promise(() => {});
+    }
     async function bootstrap() {
       if (!needsBootstrap) return;
-      // A reload of an unresolved entry must not start a second identity adoption.
-      if (!remember(true) || !entryAllowed()) { end(); return; }
+      if (!remember(false)) { end(); return; }
+      if (entryStopped) return reopenFromList();
+      if (!entryAllowed()) { end(); return; }
       for (;;) {
         for (const delay of [0, 1000, 2000]) {
           if (delay) await new Promise(resolve => nativeTimeout(resolve, delay));
           if (ended) return;
+          if (entryStopped) return reopenFromList();
           if (!entryAllowed()) { end(); return; }
           const controller = new win.AbortController();
           const deadline = nativeTimeout(() => controller.abort(), 10000);
@@ -271,11 +315,12 @@
             let me = null;
             try { me = await response.json(); } catch (_) {}
             const code = response.headers.get('X-KIN-Auth-Code') || me?.code;
+            if (!ended && entryStopped) return reopenFromList();
             if (ended || !entryAllowed() ||
                 response.status === 401 && ['AUTH_CREDENTIALS_MISSING', 'AUTH_SESSION_ENDED'].includes(code) ||
                 response.status === 403 && ['INSTITUTION_PENDING', 'INSTITUTION_INVALID'].includes(code)) { end(); return; }
             if (!response.ok || typeof me?.sessionId !== 'string' || !me.sessionId) continue;
-            if (heard.get(me.sessionId)?.type === 'session-ended') { end(); return; }
+            if (entryStopped || expected && me.sessionId !== expected) return reopenFromList();
             session = me.sessionId;
             if (!remember(false)) { end(); return; }
             announce({ state: 'active', session });
@@ -286,16 +331,7 @@
           finally { clearTimeout(deadline); }
         }
         if (ended) return;
-        // Retry the unresolved entry in this document, never by reloading/adopting a new login.
-        await new Promise(resolve => {
-          entryNotice = win.document.createElement('section'); entryNotice.setAttribute('role', 'alert');
-          entryNotice.style.cssText = 'position:fixed;inset:30% 20% auto;z-index:10000;background:#18212b;color:white;padding:24px';
-          const message = win.document.createElement('p'), button = win.document.createElement('button');
-          message.textContent = '세션을 확인하지 못했습니다. 연결을 확인한 뒤 다시 시도하세요.';
-          button.textContent = 'Retry';
-          button.onclick = () => { entryNotice.remove(); entryNotice = null; resolve(); };
-          entryNotice.append(message, button); win.document.body.append(entryNotice);
-        });
+        await new Promise(resolve => entryMessage('세션을 확인하지 못했습니다. 연결을 확인한 뒤 다시 시도하세요.', resolve));
       }
     }
     const api = Object.freeze({
