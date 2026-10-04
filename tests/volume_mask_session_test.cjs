@@ -22,7 +22,7 @@ const WRITES=new Set(['useProgram','uniform4i','uniform4iv','uniform4fv','unifor
 
 function world(){
   const calls=[],errors=[],programs=new Set(),canvas=new EventTarget(),cacheMap={};
-  const inject={compile:0,link:0,frameErrors:0,writeErrors:0,stale:0,dropReplacements:false,variant:'plain'};
+  const inject={compile:0,link:0,frameErrors:0,writeErrors:0,stale:0,dropReplacements:false,keepMasks:0,variant:'plain'};
   let lost=false,current=null,frames=[],drawn=null;
   const gl={NO_ERROR:0,INVALID_VALUE:0x501,INVALID_OPERATION:0x502,CURRENT_PROGRAM:0x8b8d,canvas,
     isContextLost:()=>lost,isProgram:handle=>!lost&&programs.has(handle),
@@ -73,6 +73,8 @@ function world(){
   function draw(){
     let fragment='#version 300 es\n// variant '+inject.variant+'\n'+masks.SIGNATURE+'\n  return tValue;\n}\n';
     if(!inject.dropReplacements)for(const r of mapper.props?.OpenGL?.ShaderReplacements||[])if(r.shaderType==='Fragment')fragment=fragment.replace(r.originalValue,()=>r.replacementValue);
+    // A frame that still draws the fixed masks although the mapper carries none (keepMasks frames).
+    if(inject.keepMasks&&!fragment.includes(masks.TEXT)){inject.keepMasks--;fragment=fragment.replace(masks.SIGNATURE,()=>masks.TEXT);}
     const program=cache.getShaderProgram('vertex',fragment,'');
     if(!cache.readyShaderProgram(program))throw Error('the renderer could not build its program');
     drawn=program;
@@ -106,6 +108,10 @@ function shows(w,request){
   return [['kinMeta',d.meta],['kinProj',d.proj],['kinBox',d.box],['kinEll',d.ell],['kinEdge',d.edge],['kinCross',d.cross],['kinVoi',d.voi],['kinVoiHalf',d.voiHalf]]
     .every(([name,want])=>{const got=w.uniform(name);return got.length===want.length&&got.every((value,index)=>value===want[index]);});
 }
+// Nothing masked (S8-U1a fix12): the mapper holds the very properties it had before the first mask, and the frame drew
+// the renderer's own program, with no mask in it.
+function unmasked(w,pristine){return w.mapper.props===pristine&&!masks.owned(w.drawn().getFragmentShader().getSource());}
+const built=w=>[count(w.calls,'compileShader'),count(w.calls,'linkProgram')];
 
 // Requests: a slab and up to three regions on an identity projection.
 const IDENTITY={base:[0,0],axes:[[1,0],[0,1],[0,0]]};
@@ -118,26 +124,67 @@ const A={voi:SLAB,sculpt:[R1]},B={voi:SLAB,sculpt:[R1,R2]},C={voi:{...SLAB,base:
 async function committed(w,s,request){const pending=s.apply(request);await w.run();const result=await pending;assert.equal(result.status,'ok',JSON.stringify(result));return result;}
 
 test('BU-T04 the first request installs one program; later edits, Undo, Original View and Clear compile and link nothing; a new display variant compiles once',async()=>{
-  const w=world(),s=renderer().session({target:w.target});
-  const built=()=>[count(w.calls,'compileShader'),count(w.calls,'linkProgram')],start=built();
+  const w=world(),s=renderer().session({target:w.target}),pristine=w.mapper.props,start=built(w);
   const first=s.apply(A);
-  assert.deepEqual(built(),[start[0]+2,start[1]+1],'the install compiles and links the fixed program once, before the frame');
+  assert.deepEqual(built(w),[start[0]+2,start[1]+1],'the install compiles and links the fixed program once, before the frame');
   assert.equal(w.mapper.writes,1,'the mapper gets the fixed replacement once');
   await w.run();assert.equal((await first).status,'ok');assert.ok(shows(w,A));
-  assert.deepEqual(built(),[start[0]+2,start[1]+1],'the frame found the installed program');
-  for(const request of [B,C,D,B,{voi:SLAB,sculpt:[R1,R2],original:true},{voi:SLAB},{}]){
-    const before=built();await committed(w,s,request);
-    assert.deepEqual(built(),before,JSON.stringify(request));assert.ok(shows(w,request));assert.equal(w.mapper.writes,1);
+  assert.deepEqual(built(w),[start[0]+2,start[1]+1],'the frame found the installed program');
+  // Edits that keep a mask (a VOI alone is one) write numbers only: the mapper keeps the one replacement.
+  for(const request of [B,C,D,B,{voi:SLAB}]){
+    const before=built(w);await committed(w,s,request);
+    assert.deepEqual(built(w),before,JSON.stringify(request));assert.ok(shows(w,request));assert.equal(w.mapper.writes,1);
+  }
+  // Nothing masked (Original View, no VOI and no sculpt): the mapper's own properties again, the renderer's own program
+  // drawn, nothing compiled; the next mask of this display variant finds the fixed program in the cache.
+  let writes=w.mapper.writes;
+  for(const [blank,next] of [[{voi:SLAB,sculpt:[R1,R2],original:true},B],[{},C],[{voi:null,sculpt:[]},{voi:SLAB}],[{original:true},D]]){
+    let before=built(w);const off=await committed(w,s,blank);
+    assert.ok(unmasked(w,pristine),JSON.stringify(blank));assert.deepEqual(built(w),before,'no compile for no masks');
+    assert.equal(w.mapper.writes,++writes);assert.equal(s.state().installed,false);assert.equal(s.state().committed.gen,off.gen);
+    // A redraw with nothing masked is a plain frame of the renderer.
+    const plain=s.render();assert.equal(await w.run(),1);assert.equal((await plain).status,'ok');assert.ok(unmasked(w,pristine));
+    before=built(w);await committed(w,s,next);
+    assert.deepEqual(built(w),before,'the fixed program of this variant is still linked: no compile, no link');
+    assert.ok(shows(w,next),JSON.stringify(next));assert.equal(w.mapper.writes,++writes);assert.equal(s.state().installed,true);
   }
   // A display change makes the renderer build another variant: compiled once in that frame, then written and checked.
   await committed(w,s,C);
-  w.inject.variant='shaded';let before=built();
+  w.inject.variant='shaded';let before=built(w);
   const redraw=s.render();assert.equal(await w.run(),2,'the new variant draws nothing once, then the rewrite is drawn');
-  assert.equal((await redraw).status,'ok');assert.deepEqual(built(),[before[0]+2,before[1]+1]);assert.ok(shows(w,C));
-  before=built();await committed(w,s,D);assert.deepEqual(built(),before);assert.ok(shows(w,D));
+  assert.equal((await redraw).status,'ok');assert.deepEqual(built(w),[before[0]+2,before[1]+1]);assert.ok(shows(w,C));
+  before=built(w);await committed(w,s,D);assert.deepEqual(built(w),before);assert.ok(shows(w,D));
   // Back to the first variant: cached, and it already holds the latest data (every fixed program is written).
-  w.inject.variant='plain';before=built();const back=s.render();assert.equal(await w.run(),1);
-  assert.equal((await back).status,'ok');assert.deepEqual(built(),before);assert.ok(shows(w,D));
+  w.inject.variant='plain';before=built(w);const back=s.render();assert.equal(await w.run(),1);
+  assert.equal((await back).status,'ok');assert.deepEqual(built(w),before);assert.ok(shows(w,D));
+});
+
+test('fix12 nothing masked returns the mapper to its own properties whatever path ends there, and failures keep the committed image',async()=>{
+  // The properties to return to are the mapper's own at the install; a property someone else added afterwards is kept.
+  const w=world(),s=renderer().session({target:w.target});w.mapper.props={kept:'own',OpenGL:{ShaderReplacements:[{shaderType:'Vertex',originalValue:'x',replacementValue:'y'}]}};
+  const pristine=w.mapper.props;await committed(w,s,A);
+  assert.deepEqual(w.mapper.props.OpenGL.ShaderReplacements.map(r=>r.shaderType),['Vertex','Fragment'],'the mask is added to what was there');
+  await committed(w,s,{});assert.equal(w.mapper.props,pristine,'exactly the earlier object');
+  await committed(w,s,B);w.mapper.props={...w.mapper.props,added:'later'};
+  await committed(w,s,{});assert.equal(w.mapper.props.added,'later');assert.equal(w.mapper.props.kept,'own');
+  assert.deepEqual(w.mapper.props.OpenGL.ShaderReplacements.map(r=>r.shaderType),['Vertex'],'only the owned replacement is taken out');
+  // A request for no masks whose frame fails: the committed masks are installed and drawn again, without compiling.
+  const w2=world(),s2=renderer().session({target:w2.target}),own=w2.mapper.props;const a=await committed(w2,s2,A);
+  let before=built(w2);w2.inject.frameErrors=1;let pending=s2.apply({});await w2.run();let result=await pending;
+  assert.equal(result.status,'failed');assert.equal(result.restore.status,'ok');assert.ok(shows(w2,A));assert.deepEqual(built(w2),before);
+  assert.equal(s2.state().committed.gen,a.gen);assert.equal(s2.state().installed,true);
+  // A masked request that fails over a committed request for no masks: the mapper's own properties again.
+  await committed(w2,s2,{original:true});assert.ok(unmasked(w2,own));
+  before=built(w2);w2.inject.frameErrors=1;pending=s2.apply(B);await w2.run();result=await pending;
+  assert.equal(result.status,'failed');assert.equal(result.restore.status,'ok');assert.ok(unmasked(w2,own));assert.deepEqual(built(w2),before);
+  // A frame that still draws masks after they were taken off gets one more frame; a second one fails the request, and
+  // the committed masks are shown again.
+  await committed(w2,s2,C);w2.inject.keepMasks=1;pending=s2.apply({});assert.equal(await w2.run(),2);assert.equal((await pending).status,'ok');assert.ok(unmasked(w2,own));
+  await committed(w2,s2,C);w2.inject.keepMasks=2;pending=s2.apply({});await w2.run();result=await pending;
+  assert.equal(result.status,'failed');assert.match(result.error.message,/masks still in the drawn program/);assert.equal(result.restore.status,'ok');assert.ok(shows(w2,C));
+  // Superseded on the way: a request for no masks replaced by a masked one before its frame never commits.
+  const none=s2.apply({}),again=s2.apply(B);await w2.run();
+  assert.equal((await none).status,'superseded');assert.equal((await again).status,'ok');assert.ok(shows(w2,B));assert.equal(s2.state().installed,true);
 });
 
 test('BU-T05 a frame error or a uniform write failure fails the request, keeps the committed request shown, and the session stays usable',async()=>{
@@ -153,10 +200,10 @@ test('BU-T05 a frame error or a uniform write failure fails the request, keeps t
     assert.deepEqual([count(w.calls,'compileShader'),w.mapper.writes],before,label+': nothing compiled or reinstalled');
   }
   const c=await committed(w,s,C);assert.ok(shows(w,C));assert.equal(s.state().committed.gen,c.gen);
-  // A failure before anything was committed draws no masks again.
-  const w2=world(),s2=renderer().session({target:w2.target});w2.inject.frameErrors=1;
+  // A failure before anything was committed draws no masks again: the mapper's own properties and program.
+  const w2=world(),s2=renderer().session({target:w2.target}),own=w2.mapper.props;w2.inject.frameErrors=1;
   const pending=s2.apply(B);await w2.run();const result=await pending;
-  assert.equal(result.status,'failed');assert.equal(result.restore.status,'ok');assert.equal(s2.state().committed,null);assert.ok(shows(w2,{}));
+  assert.equal(result.status,'failed');assert.equal(result.restore.status,'ok');assert.equal(s2.state().committed,null);assert.ok(unmasked(w2,own));
 });
 
 test('BU-T05 when the committed request cannot be drawn again either, the result says so and an interrupted write draws nothing',async()=>{
@@ -225,6 +272,11 @@ test('BU-T06b given a new context the session installs the fixed program there a
   // Nothing committed: the new context only gets the session; nothing is installed or written.
   const w3=world(),w4=world(),fresh=renderer().session({target:w3.target});
   assert.equal((await fresh.reacquire(w4.target)).status,'ok');assert.equal(w4.mapper.writes,0);
+  // A committed request for no masks needs nothing in the new context either; the next mask installs there once.
+  const w5=world(),w6=world(),cleared=renderer().session({target:w5.target});await committed(w5,cleared,A);await committed(w5,cleared,{});w5.lose();
+  const calls=w6.calls.length,quiet=cleared.reacquire(w6.target);await w6.run();assert.equal((await quiet).status,'ok');
+  assert.equal(w6.mapper.writes,0);assert.deepEqual(w6.calls.slice(calls),[],'nothing compiled or written for no masks');
+  const base=built(w6);await committed(w6,cleared,B);assert.deepEqual(built(w6),[base[0]+2,base[1]+1]);assert.ok(shows(w6,B));
 });
 
 test('BU-T08 a compile or link failure at install refuses before anything is written or a generation is taken; the display stays usable',async()=>{

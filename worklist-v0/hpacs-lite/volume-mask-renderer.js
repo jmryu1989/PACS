@@ -12,7 +12,11 @@
      fixed text and read back the generation and spot values, with one rewrite and one more frame for a stale program (a
      variant the frame just compiled has no data yet). Only a request whose own frame passed becomes committed. After a
      failure the committed data (no masks when nothing was committed) is written and drawn again, so the shown image is the
-     committed one; when even that cannot be shown the result says so and the caller closes the display (fail closed). */
+     committed one; when even that cannot be shown the result says so and the caller closes the display (fail closed).
+     A request that masks nothing (no sculpt and no VOI, or Original View) takes the replacement off the mapper again: its
+     view-specific properties are the ones it had before the first mask, and the frame is the renderer's own program for
+     them, checked to carry no mask. The fixed program stays linked in the renderer's cache, so the next mask of the same
+     display variant in this context installs without compiling. A VOI alone is a mask and keeps the fixed program. */
   const SIGNATURE='vec4 getColorForValue(vec4 tValue, vec3 posIS, vec3 tstep)\n{';
   const owned=text=>/kinSculptPoint\d|kinVoiDistance/.test(text);
   const NAMES=['kinHead','kinMeta','kinProj','kinBox','kinEll','kinEdge','kinCross','kinVoi','kinVoiHalf'];
@@ -104,6 +108,8 @@
     return {...properties,OpenGL:{...properties.OpenGL,ShaderReplacements:list.filter(r=>!owned(r?.replacementValue||''))}};
   }
   const same=(got,want)=>!!got&&got.length===want.length&&Array.prototype.every.call(got,(value,index)=>value===want[index]);
+  // Packed data that masks nothing: no sculpt region counted and the VOI off (also what Original View packs to).
+  const blank=data=>data.count===0&&!(data.voiHalf[1]>0);
 
   /* One VR display's masks. target = {engine, mapper, frame}: frame(done) schedules one render of the display and calls
      done({error}) after it, with error set when the render or the copy to the screen failed. install(target, properties)
@@ -112,7 +118,7 @@
      cancelled-session or cancelled-context, and restore tells whether the committed image is shown again after a failure. */
   function session({target,install=preflight,onLost=()=>{}}){
     const s={target,closed:false,lost:false,context:0,latest:0,pending:null,committed:null,written:null,installed:false,
-      locations:new WeakMap(),waits:new Set(),pristine:new WeakMap(),canvas:null};
+      locations:new WeakMap(),waits:new Set(),pristine:new WeakMap(),mine:new WeakMap(),canvas:null};
     const contextOf=()=>{const windowGL=renderWindow(s.target);return {windowGL,gl:windowGL.getContext()};};
     const committedData=()=>s.committed?s.committed.data:empty||(empty=model().pack({}));
     // A lost context takes its programs, handles and uniform locations with it: nothing of it is used again, the request
@@ -135,13 +141,27 @@
       s.locations.set(handle,found);return found;
     }
     function carries(mapper,text){const list=mapper.getViewSpecificProperties?.()?.OpenGL?.ShaderReplacements;return Array.isArray(list)&&list.some(r=>r?.replacementValue===text);}
+    const masked=mapper=>{const list=mapper.getViewSpecificProperties?.()?.OpenGL?.ShaderReplacements;return Array.isArray(list)&&list.some(r=>owned(r?.replacementValue||''));};
     function ensureInstalled(){
       const masks=model(),mapper=s.target.mapper;
       if(s.installed&&carries(mapper,masks.TEXT))return;
-      if(!s.pristine.has(mapper))s.pristine.set(mapper,withoutOwned(mapper.getViewSpecificProperties()||{}));
+      // The properties to return to are the mapper's own at this install, so a mapper without masks is read again each time.
+      if(!s.pristine.has(mapper)||!masked(mapper))s.pristine.set(mapper,withoutOwned(mapper.getViewSpecificProperties()||{}));
       const properties=masks.properties(s.pristine.get(mapper),masks.REPLACEMENT);
       try{install(s.target,properties);}catch(error){throw refusal('render-failed',error?.message||'VR 가림을 GPU에서 확인하지 못했습니다. 기존 표시를 유지합니다.');}
-      mapper.setViewSpecificProperties(properties);s.installed=true;
+      mapper.setViewSpecificProperties(properties);s.mine.set(mapper,properties);s.installed=true;
+    }
+    // Nothing masked: the mapper gets back exactly the properties it had before the masks (when someone else changed them
+    // since, only the owned replacement is taken out). Programs and their data stay in the cache for the next mask.
+    function uninstall(){
+      const mapper=s.target.mapper;
+      if(masked(mapper)){
+        const current=mapper.getViewSpecificProperties(),set=s.mine.get(mapper);
+        // A mapper that hands out copies of its properties is compared by content.
+        let untouched=current===set;if(!untouched&&set)try{untouched=JSON.stringify(current)===JSON.stringify(set);}catch(_){}
+        mapper.setViewSpecificProperties(untouched&&s.pristine.has(mapper)?s.pristine.get(mapper):withoutOwned(current));
+      }
+      s.installed=false;
     }
     function writeHandle(gl,handle,data,gen){
       const at=locate(gl,handle);
@@ -168,6 +188,8 @@
       const {windowGL,gl}=contextOf(),program=drawnProgram(windowGL,s.target.mapper),handle=program?.getHandle?.();
       if(!handle||program.getLinked?.()!==true||!gl.isProgram(handle))return {ok:false,retry:true,why:'drawn program not linked'};
       let fragment='';try{fragment=program.getFragmentShader().getSource();}catch(_){}
+      // Nothing masked: the frame must be the renderer's own program, with no mask of any kind in it.
+      if(blank(data))return fragment&&!owned(fragment)?{ok:true}:{ok:false,retry:true,why:fragment?'masks still in the drawn program':'drawn program not readable'};
       if(!fragment.includes(model().TEXT))return {ok:false,retry:false,why:'drawn program without the fixed masks'};
       const read=name=>{const location=gl.getUniformLocation(handle,name);return location?gl.getUniform(handle,location):null;};
       const head=read('kinHead');
@@ -178,7 +200,10 @@
       for(const [name,want] of spots)if(!same(read(name),want))return {ok:false,retry:true,why:'masks differ at '+name};
       return {ok:true};
     }
-    // One frame of the written generation, then the checks; resolves to {status, error}.
+    // What one generation draws with: no replacement on the mapper for data that masks nothing, else the written numbers
+    // in the installed fixed program.
+    function stage(gen,data){if(blank(data))uninstall();else write(gen,data);}
+    // One frame of the staged generation, then the checks; resolves to {status, error}.
     function shown(gen,data){
       return new Promise(resolve=>{
         const context=s.context;let retries=0,done=false;
@@ -193,7 +218,7 @@
           if(!info||info.error){const error=info?.error;wait.finish('failed',typeof error?.message==='string'?error:Error(error?String(error):'VR 화면이 그려졌는지 확인하지 못했습니다.'));return;}
           const result=check(gen,data);
           if(result.ok){wait.finish('ok');return;}
-          if(retries<RETRIES&&result.retry){retries++;try{write(gen,data);}catch(error){wait.finish('failed',error);return;}frame();return;}
+          if(retries<RETRIES&&result.retry){retries++;try{stage(gen,data);}catch(error){wait.finish('failed',error);return;}frame();return;}
           wait.finish('failed',Error('VR 가림 표시를 확인하지 못했습니다 ('+result.why+').'));
         };
         const frame=()=>{let reported=false;const report=info=>{if(!reported){reported=true;settle(info);}};try{s.target.frame(report);}catch(error){report({error});}};
@@ -205,19 +230,20 @@
       if(s.closed||s.lost||!gl||gl.isContextLost())return Promise.resolve({status:'skipped'});
       if(s.latest!==failed)return Promise.resolve({status:'superseded'});
       const data=committedData(),gen=++generations;s.latest=gen;
-      try{write(gen,data);}catch(error){return Promise.resolve({status:'failed',error});}
+      // The failed request may have taken the fixed program off the mapper; committed masks need it there again.
+      try{if(!blank(data))ensureInstalled();stage(gen,data);}catch(error){return Promise.resolve({status:'failed',error});}
       return shown(gen,data).then(result=>result.status==='ok'?{status:'ok',gen}:result);
     }
     function apply(request){
       if(s.closed)throw refusal('render-failed','VR 가림 표시가 닫혔습니다.');
       const data=model().pack(request),{gl}=contextOf();
       if(s.lost||gl.isContextLost())throw refusal('context-lost','GPU 연결이 끊겨 VR 가림을 적용할 수 없습니다.');
-      ensureInstalled();
+      if(!blank(data))ensureInstalled();
       const gen=++generations;s.latest=gen;s.pending={gen,request};
       return new Promise(resolve=>{
         const end=(status,extra)=>{if(s.pending?.gen===gen)s.pending=null;resolve({status,gen,...extra});};
         const failed=error=>{if(s.pending?.gen===gen)s.pending=null;restore(gen).then(restored=>end('failed',{error,restore:restored}));};
-        try{write(gen,data);}catch(error){failed(error);return;}
+        try{stage(gen,data);}catch(error){failed(error);return;}
         shown(gen,data).then(result=>{
           if(result.status==='ok'){s.committed={gen,request,data};end('ok');}
           else if(result.status==='failed')failed(result.error);
@@ -243,6 +269,8 @@
       s.target=next;listen();invalidate('cancelled-context');s.lost=false;
       const committed=s.committed;if(!committed)return Promise.resolve({status:'ok',gen:null});
       if(contextOf().gl.isContextLost()){s.lost=true;throw refusal('context-lost','GPU 연결이 끊겨 VR 가림을 다시 적용할 수 없습니다.');}
+      // A committed request that masks nothing needs no program in the new context; its mapper carries no replacement.
+      if(blank(committed.data)){uninstall();return Promise.resolve({status:'ok',gen:null});}
       ensureInstalled();
       const gen=++generations;s.latest=gen;
       try{write(gen,committed.data);}catch(error){return Promise.resolve({status:'failed',gen,error});}
