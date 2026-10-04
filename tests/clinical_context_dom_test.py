@@ -76,7 +76,10 @@ def lf_text(path):
 
 
 MAIN = lf_text(HPACS / "main.html")
-SHIPPED = {name: lf_text(HPACS / name) for name in ("auth.js", "study-arrivals.js", "clinical-context.js")}
+# S7-U5: the page's requests leave through its gate and its session-bound transport, so those two shipped files are
+# loaded with auth.js, in the page's own order.
+PAGE_FILES = ("auth.js", "work-context.js", "session-transport.js", "study-arrivals.js", "clinical-context.js")
+SHIPPED = {name: lf_text(HPACS / name) for name in PAGE_FILES}
 VECTORS = json.loads((ROOT / "tests" / "clinical_context_vectors.json").read_text(encoding="utf-8"))
 VALID, MALFORMED = VECTORS["answers"]["valid"], VECTORS["answers"]["malformed"]
 CONTEXTS, LISTS, TEXTS = VECTORS["request_context"], VECTORS["lists"], VECTORS["texts"]
@@ -285,8 +288,7 @@ FETCH_WRAPPER = """(() => {
     const url = new URL(typeof input === 'string' ? input : input.url, location.href);
     paths.push((options.method || 'GET').toUpperCase() + ' ' + url.pathname);
     if (!/\\/clinical-context$/.test(url.pathname)) return realFetch(input, init);
-    const headers = {};
-    for (const [key, value] of Object.entries(options.headers || {})) headers[key.toLowerCase()] = value;
+    const headers = Object.fromEntries(new Headers(options.headers));   // read as fetch reads them; names in lower case
     const call = { index: calls.length, method: (options.method || 'GET').toUpperCase(), path: url.pathname, query: url.search,
       headers, body: options.body === undefined ? null : options.body, signal: options.signal || null, held: false,
       abortedAtFinish: null, response: null, rejected: false };
@@ -319,6 +321,11 @@ PRELUDE = "\nconst synPageScript = " + json.dumps(PAGE_SCRIPT, ensure_ascii=Fals
 const API = location.origin + '/api';
 const $ = selector => document.querySelector(selector);
 let sess = KinAuth.session();
+// The page's gate and transport, set up as the page sets them up (main.html), and the list its areas register on.
+const work = KinWorkContext;
+work.follow(KinAuth);
+const transport = KinSessionTransport.page();
+const accountChangeHooks = [];
 let serverMode = !window.synDemo, demoMode = !!window.synDemo, offline = false;
 let selectedUid = null, relatedUid = null;
 let studies = window.synStudies;
@@ -341,13 +348,15 @@ const synScope = new Proxy({}, {
   get: (_, key) => key === Symbol.unscopables ? undefined : synInert,
   set: () => true,
 });
-const synShipped = new Function('return [api, cur, relatedStudy, viewed, viewingUid, renderClinical, applyObservation];\\n'
-  + synPageScript)().map(String);
-let api, cur, relatedStudy, viewed, viewingUid, renderClinical, applyObservation;
+const synShipped = new Function('return [api, cur, relatedStudy, viewed, viewingUid, renderClinical, applyObservation,'
+  + ' staleAnswer, notifyAccountChanged, onCommonEnd];\\n' + synPageScript)().map(String);
+let api, cur, relatedStudy, viewed, viewingUid, renderClinical, applyObservation, staleAnswer, notifyAccountChanged, onCommonEnd;
 with (synScope) {
   api = eval('(' + synShipped[0] + ')'); cur = eval('(' + synShipped[1] + ')'); relatedStudy = eval('(' + synShipped[2] + ')');
   viewed = eval('(' + synShipped[3] + ')'); viewingUid = eval('(' + synShipped[4] + ')');
   renderClinical = eval('(' + synShipped[5] + ')'); applyObservation = eval('(' + synShipped[6] + ')');
+  staleAnswer = eval('(' + synShipped[7] + ')'); notifyAccountChanged = eval('(' + synShipped[8] + ')');
+  onCommonEnd = eval('(' + synShipped[9] + ')');
 }
 """
 
@@ -362,7 +371,10 @@ window.synOffline = () => { serverMode = false; offline = true; renderClinical()
 window.synOnline = () => { serverMode = true; offline = false; renderClinical(); };
 // A poll that rebuilt the list without the study and did not call renderClinical (scenario L-09).
 window.synDrop = uid => { studies = studies.filter(s => s.uid !== uid); };
-window.synEnd = reason => (window.kinOn401 || []).forEach(end => { try { end(reason); } catch (_) {} });
+// The two things that reach the page's areas together: the end of this document's session (here the server's answer that
+// the session ended, given to the session authority as the transport gives it) and an account change one area saw.
+window.synEnd = reason => reason === 'account-changed' ? notifyAccountChanged(undefined)
+  : KinAuth.authFailure({ session: work.session(), status: 401, code: 'AUTH_SESSION_ENDED' });
 window.synSeen = [];
 (() => {
   const root = document.querySelector('#clinical-context');
@@ -530,7 +542,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
         if demo:
             self.page.evaluate("() => sessionStorage.setItem('kin-demo', '1')")
         self.page.evaluate(SETUP, {"studies": studies or STUDIES, "names": NAMES, "demo": demo})
-        for name in ("auth.js", "study-arrivals.js", "clinical-context.js"):
+        for name in PAGE_FILES:
             self.page.add_script_tag(url=ORIGIN + BASE + name)
         self.page.evaluate("async () => { await KinAuth.init(); }")
         self.page.add_script_tag(content=PRELUDE + self.block + TAIL)
@@ -642,7 +654,9 @@ class ClinicalContextDOMTest(unittest.TestCase):
         if aborted:
             self.assertTrue(call["abortedAtFinish"], "the late call had already been cancelled: " + json.dumps(call))
         if call["rejected"]:
-            self.assertEqual((call["headers"].get("x-kin-csrf"), call["headers"].get("content-type")), ("1", "application/json"),
+            # The request the page's transport sent: bound to this document's session (a GET carries no body type).
+            self.assertEqual((call["headers"].get("x-kin-csrf"), call["headers"].get("x-kin-session")),
+                             ("1", "SYN-SESSION-" + str(self.stub.identity.get("sub"))),
                              "the rejected promise was the one api() awaited")
         else:
             self.assertTrue(call["bodyUsed"], "api() consumed the late answer's body: " + json.dumps(call))
@@ -1358,8 +1372,12 @@ class ClinicalContextDOMTest(unittest.TestCase):
     # ── cd12 ──
     def test_cd12_session_end_empties_the_panel_before_anything_else_on_path_ga(self):
         ends = (("end list", "() => window.synEnd()"), ("account changed", "() => window.synEnd('account-changed')"),
-                ("other tab", "() => new BroadcastChannel('kin-session').postMessage({ type: 'session-ended' })"),
-                ("storage", "() => window.dispatchEvent(new StorageEvent('storage', { key: 'kin-session-ended', newValue: '1' }))"),
+                # another document of the same session ends it: its notice names the session, and its end record does
+                ("other tab", "() => new BroadcastChannel('kin-session').postMessage({ type: 'session-ended',"
+                              " session: KinAuth.sessionId(), operation: Date.now(), status: 'ending' })"),
+                ("end record", "() => { localStorage.setItem('kin-session-end', JSON.stringify({ session: KinAuth.sessionId(),"
+                               " operation: Date.now(), status: 'confirmed' }));"
+                               " window.dispatchEvent(new StorageEvent('storage', { key: 'kin-session-end' })); }"),
                 ("pagehide", "() => window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false }))"))
         for label, script in ends:
             with self.subTest(end=label):
@@ -1395,24 +1413,31 @@ class ClinicalContextDOMTest(unittest.TestCase):
         self.settle()
         self.assertIn("SYN reason: refreshed", self.panel()["text"])
 
-    def test_cd12_the_panels_own_401_ends_it_before_the_logout_answer(self):
-        """E-05 / F-15: api() calls the end list, then KinAuth.logout() once; the panel is empty while the logout POST is held."""
+    def test_cd12_the_panels_own_401_is_a_failed_read_and_only_the_servers_end_empties_the_panel(self):
+        """E-05 / F-15 under S7-U5. A 401 that does not say the session ended is that read's failure: the panel says
+        Failed, the document stays at work and no logout is sent. The server's AUTH_SESSION_ENDED on the next read ends
+        the document: the panel is empty, without a failure line, and this document sends no logout POST either."""
         self.open_reader()
         self.show(A, vector="A-PRESENT-OWNER")
         self.stub.hold_logout = True
-        self.answer(A, status=401, json={"message": "SYN expired"})
+        self.answer(A, status=401, json={"message": "SYN refused"})
         self.refresh_button().click()
-        self.wait_until(lambda: len(self.stub.logouts) == 1, "the one logout POST")
+        self.settle()
+        panel = self.panel()
+        self.assertTrue(panel["shown"])
+        self.assertIn(TEXTS["stateLabels"]["failed"], panel["all"])
+        self.assertEqual(("active", []), (self.page.evaluate("() => KinWorkContext.state()"), self.stub.logouts))
+        self.answer(A, status=401, json={"code": "AUTH_SESSION_ENDED", "message": "SYN ended"})
+        self.refresh_button().click()
+        self.wait_until(lambda: self.page.evaluate("() => KinWorkContext.state()") not in ("active", "preparing"),
+                        "the end the server told")
         self.frames()
         panel = self.panel()
         self.assertFalse(panel["shown"])
         self.assertEqual(panel["sections"], [])
         self.assertNotIn(TEXTS["stateLabels"]["failed"], panel["all"])
         self.page.wait_for_timeout(100)
-        self.assertEqual(len(self.stub.logouts), 1)
-        with self.page.expect_navigation():
-            self.stub.logouts[0].fulfill(status=204, body="")
-
+        self.assertEqual([], self.stub.logouts, "a session the server ended is not logged out again")
     def test_cd12_path_na_answers_that_arrive_after_the_end_paint_nothing(self):
         """L-07 / L-13 / E-09: the cancel-ignoring call ends after the session end with a success, a 503 or a failed
         connection; api() reads it; the panel stays hidden and empty with no Failed."""
@@ -1429,9 +1454,10 @@ class ClinicalContextDOMTest(unittest.TestCase):
                 self.wait_calls(index + 1)
                 kind, value = ending
                 if kind == "owner":
-                    # KinAuth.session() becomes null (clearLocal) in the same task that ends the current call, so the answer
-                    # can be read before the other-tab message reaches the panel: the account check refuses it (E-09).
-                    self.page.evaluate("([i, t]) => { KinAuth.demo(); window.synFinish(i, 200, t); }",
+                    # The account behind this document's session is gone (the session was replaced): the identity is
+                    # dropped and the document closes in the same task that ends the current call, so the answer is
+                    # read by a panel that has no account to show it to (E-09).
+                    self.page.evaluate("([i, t]) => { KinAuth.replaced({ session: KinAuth.sessionId() }); window.synFinish(i, 200, t); }",
                                        [index, json.dumps(VALID[value], ensure_ascii=False)])
                     self.page.wait_for_timeout(50)
                     self.frames()

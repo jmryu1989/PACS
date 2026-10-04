@@ -287,7 +287,10 @@
 
   // ── whole-answer failures (§7.1; OP-1 decided by D172 for the statuses §7.1 does not name) ──
   function failure(error) {
-    const status = Number.isSafeInteger(error && error.status) ? error.status : null;
+    // A success answer whose body could not be read (the page's api() calls it `incomplete`) failed in its body, not in
+    // its status: it is the same bad answer as a 200 that is not JSON, and its line names no HTTP status.
+    const unread = !!(error && error.incomplete);
+    const status = !unread && Number.isSafeInteger(error && error.status) ? error.status : null;
     const code = error && typeof error.code === 'string' && error.code ? error.code : null;
     let reason;
     if (status === 404) reason = 'not_visible';
@@ -296,7 +299,7 @@
     else if (status === 503) reason = 'busy';
     else if (status !== null && status >= 500) reason = 'network';      // OP-1: 500, 502, 504 ... read like a lost connection
     else if (status !== null) reason = 'malformed';                     // OP-1: 400 and the other 4xx
-    else if (error && error.name === 'SyntaxError') reason = 'malformed'; // a 200 whose body is not JSON
+    else if (unread || (error && error.name === 'SyntaxError')) reason = 'malformed'; // a 200 whose body is not JSON
     else reason = 'network';                                            // the request never got an answer
     // ABA-7: only a transient failure keeps the last answer of the same study (as Stale); ABA-6 and a bad answer clear it.
     return { reason, status, code, keep: reason === 'busy' || reason === 'network' };
