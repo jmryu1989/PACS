@@ -1,15 +1,9 @@
 (function(root){
   'use strict';
-  /*
-   * The page's session lifecycle (admin.html KinConsoleSession: ended, end, onEnd) is attached once (Astra S5-U6a-F04).
-   * Study Access sends its own requests, so its 401 ends the page session before any body is read, like every other
-   * request of the page, and the page's end (Log out, any 401, another tab) disposes the dialog at once: no unsaved-change
-   * confirm, no wait for the logout answer, no open, reload or save after it. Without an attached lifecycle open() does
-   * nothing rather than run a dialog that outlives its session.
-   */
-  let active=null,session=null,closeActive=null;
+  // The page owns termination; this dialog releases its edit and pending request with that lifecycle.
+  let active=null,session=null,closeActive=null,refused=null;
   const emptyRule=()=>({patientId:null,modalities:[],dateFrom:null,dateTo:null,studyUids:[]});
-  function attach(lifecycle){if(session)return;session=lifecycle;lifecycle.onEnd(()=>closeActive?.());}
+  function attach(lifecycle,onRefused){if(session)return;session=lifecycle;refused=onRefused;lifecycle.onEnd(()=>closeActive?.());}
   function open(user){
     if(!session||session.ended())return;
     if(active){active.focus();return;}
@@ -28,28 +22,29 @@
     async function request(method,body){
       if(closed||session.ended())throw Error('세션이 종료되었습니다');
       if(!sameOwner())throw Error('계정이 변경되었습니다. 다시 로그인하세요');
-      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
-      try{
-        const response=await fetch('/api/admin/users/'+encodeURIComponent(user.id)+'/study-access',{method,credentials:'same-origin',signal:controller.signal,headers:{'Content-Type':'application/json','X-KIN-CSRF':'1'},...(body?{body:JSON.stringify(body)}:{})});
-        // Judged before the body and before the closed check: a 401 ends the page session even after this dialog is gone.
-        if(response.status===401){session.end();throw Error('세션이 만료되었습니다');}
-        const result=await response.json().catch(()=>({}));
+      const context=KinWorkContext.capture('document');
+      const response=await KinSessionTransport.page().request('/api/admin/users/'+encodeURIComponent(user.id)+'/study-access',
+        {method,json:body,context,deadlineMs:15000});
+      const result=response.body;
         // A body read after the end or after Close is dropped: nothing of it is drawn or kept.
         if(closed||session.ended())throw Error('세션이 종료되었습니다');
         if(!sameOwner())throw Error('계정이 변경되었습니다. 응답을 적용하지 않았습니다');
-        if(!response.ok){const e=Error(typeof result.message==='string'?result.message:'접근 조건 요청을 처리하지 못했습니다');e.status=response.status;throw e;}
+        if(!response.ok||response.incomplete){const e=Error(typeof result?.message==='string'?result.message:'접근 조건 요청을 처리하지 못했습니다');e.status=response.status;throw e;}
+        if(Array.isArray(result.owner)&&result.owner.length===2&&result.owner.every(x=>typeof x==='string')&&JSON.stringify(result.owner)!==JSON.stringify(owner)){
+          KinAuth.replaced({session:context.session});throw Error('계정이 변경되었습니다. 응답을 적용하지 않았습니다');
+        }
         if(JSON.stringify(result.owner)!==JSON.stringify(owner)||result.subject!==user.id||!Number.isInteger(result.revision))throw Error('접근 조건 응답의 사용자·버전을 확인하지 못했습니다');
         return result;
-      }finally{clearTimeout(timer);}
     }
     function addRule(value=emptyRule()){
+      if(closed)return;
       if(rules.children.length>=10){message('조건은 최대10개입니다');return;}
       const box=document.createElement('fieldset');box.style.cssText='margin:12px 0;border:1px solid #355272';
       box.innerHTML=`<legend>OR Rule</legend><div class="form-grid"><label>Original Patient ID<input data-field="patientId" maxlength="256" autocomplete="off"></label><label>Modality<input data-field="modalities" placeholder="CT, MR" autocomplete="off"></label><label>Study Date From<input type="date" data-field="dateFrom"></label><label>Study Date To<input type="date" data-field="dateTo"></label><label class="full">Study UIDs<textarea data-field="studyUids" rows="3" maxlength="65000" style="background:#0b1625;color:inherit;border:1px solid #355272"></textarea></label></div><button type="button" data-remove>Remove Rule</button>`;
       for(const key of ['patientId','modalities','dateFrom','dateTo','studyUids'])box.querySelector('[data-field="'+key+'"]').value=Array.isArray(value[key])?value[key].join(key==='studyUids'?'\n':', '):value[key]||'';
-      box.querySelector('[data-remove]').onclick=()=>{box.remove();dirty=true;};rules.append(box);
+      box.querySelector('[data-remove]').onclick=()=>{if(closed)return;box.remove();dirty=true;};rules.append(box);
     }
-    function modeChanged(){const mode=form.elements.mode.value;rules.hidden=mode!=='rules';$('[data-add]').hidden=mode!=='rules';form.elements.starts.disabled=mode==='unrestricted';form.elements.ends.disabled=mode==='unrestricted';}
+    function modeChanged(){if(closed)return;const mode=form.elements.mode.value;rules.hidden=mode!=='rules';$('[data-add]').hidden=mode!=='rules';form.elements.starts.disabled=mode==='unrestricted';form.elements.ends.disabled=mode==='unrestricted';}
     function render(result){
       const p=result.policy;if(!p||p.version!==1||typeof p.restricted!=='boolean'||!Array.isArray(p.rules))throw Error('저장된 접근 조건 형식을 확인하지 못했습니다');
       revision=result.revision;rules.replaceChildren();form.elements.mode.value=!p.restricted?'unrestricted':!p.rules.length?'none':p.rules[0].all?'all':'rules';
@@ -61,7 +56,12 @@
       if(closed||busy||(ask&&(dirty||pending)&&!confirm('현재 입력·재시도 요청을 버리고 서버 설정을 불러오시겠습니까?')))return;
       const token=++generation;busy=true;controls();message('Loading');
       try{const r=await request('GET');if(closed||token!==generation)return;render(r);pending=null;}
-      catch(e){if(!closed)message(e.message||'접근 조건을 불러오지 못했습니다');}
+      catch(e){
+        if(closed)return;
+        const text=e.message||'접근 조건을 불러오지 못했습니다';
+        if(e.status===403){dispose();refused?.(text);return;}
+        message(text);
+      }
       finally{busy=false;if(!closed)controls();}
     }
     function policy(){
@@ -82,8 +82,8 @@
       catch(e){if(closed)return;message((e.message||'저장 결과를 확인하지 못했습니다')+' · 입력을 유지했습니다.');if([400,403,404,409].includes(e.status)){pending=null;if(e.status===409)revision=null;}}
       finally{busy=false;if(!closed)controls();}
     }
-    form.addEventListener('input',()=>{dirty=true;});form.elements.mode.onchange=modeChanged;
-    $('[data-add]').onclick=()=>{addRule();dirty=true;};$('[data-reload]').onclick=()=>reload();$('[data-retry]').onclick=()=>save(true);$('[data-close]').onclick=close;
+    form.addEventListener('input',()=>{if(!closed)dirty=true;});form.elements.mode.onchange=modeChanged;
+    $('[data-add]').onclick=()=>{if(closed)return;addRule();dirty=true;};$('[data-reload]').onclick=()=>reload();$('[data-retry]').onclick=()=>save(true);$('[data-close]').onclick=close;
     form.onsubmit=e=>{e.preventDefault();save();};dialog.addEventListener('cancel',e=>{e.preventDefault();close();});
     // Close after a confirm, the page session's end (the attached lifecycle, which also hears other tabs) and pagehide all
     // end here: the request generation moves and the pending save, revision and edits go with the dialog.
@@ -92,5 +92,5 @@
     window.addEventListener('pagehide',dispose,{once:true});
     document.body.append(dialog);dialog.showModal();reload(false);
   }
-  root.KinStudyAccessAdmin={open,attach};
+  root.KinStudyAccessAdmin={open,attach,close:()=>closeActive?.()};
 })(window);

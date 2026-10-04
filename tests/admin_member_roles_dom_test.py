@@ -67,6 +67,8 @@ ORIGIN = "https://members.test"
 PAGE_PATH = "/worklist/hpacs-lite/admin.html"
 SCRIPTS = {
     "/worklist/hpacs-lite/auth.js": lf_text(HPACS / "auth.js"),
+    "/worklist/hpacs-lite/work-context.js": lf_text(HPACS / "work-context.js"),
+    "/worklist/hpacs-lite/session-transport.js": lf_text(HPACS / "session-transport.js"),
     "/worklist/hpacs-lite/study-access-admin.js": lf_text(HPACS / "study-access-admin.js"),
 }
 INSTITUTION = "SYN-INST-A"
