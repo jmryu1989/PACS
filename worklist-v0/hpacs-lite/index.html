@@ -253,7 +253,12 @@
 
       let initError = null;
       try {
-        await KinAuth.init();
+        await KinAuth.init({ retry: true, onRetry: () => {
+          if (shownEnd || leaving) return;
+          $("#msg").textContent = '세션을 다시 확인하고 있습니다. 확인되면 자동으로 들어갑니다…';
+          revealLanding();
+          probe();
+        } });
       } catch (e) {
         initError = e;
       }
@@ -288,7 +293,7 @@
       else if (authError)
         $("#msg").textContent = '로그인 실패: ' + authError;
       else if (initError)
-        $("#msg").textContent = '로그인 실패: ' + initError.message;
+        $("#msg").textContent = '세션을 확인하지 못했습니다. 로그인 버튼을 누르면 다시 확인합니다. ' + initError.message;
 
       revealLanding();
       await probe();

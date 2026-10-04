@@ -269,7 +269,8 @@ const KinAuth = (() => {
     if (answer.status === 403 && (body.code === 'INSTITUTION_PENDING' || body.code === 'INSTITUTION_INVALID') && id)
       return { id, identity: { state: body.code === 'INSTITUTION_PENDING' ? 'pending' : 'invalid' } };
     if (answer.status === 403) throw new Error('계정 상태를 확인할 수 없습니다');
-    if (answer.status !== 200) throw new Error(`세션 확인 실패 (HTTP ${answer.status})`);
+    if (answer.status !== 200) throw Object.assign(new Error(`세션 확인 실패 (HTTP ${answer.status})`),
+      { retryable: answer.status >= 500 });
     if (!id) throw new Error('세션 확인 실패 (세션 식별값 없음)');
     return { id, identity: identityOf(body) };
   }
@@ -536,12 +537,34 @@ const KinAuth = (() => {
    * 누름이 지금 세션을 다시 확인한다. 남은 세션이 없으면 평범한 링크로 간다.
    */
   async function initiate(path, json, query) {
+    const reuse = path === '/auth/login' && !json?.prompt && reliable && readEnd() === null
+      && (undecided() || state === 'active');
+    if (reuse) {
+      // Login after a failed confirmation is entry, not an implicit account switch.
+      if (state !== 'active') {
+        const answer = await send('/me');
+        if (answer.status !== 401) {
+          const { id, identity } = readIdentity(answer);
+          if (!adopt(id, identity, false)) return;
+        }
+      }
+      if (state === 'active') {
+        moved = true;
+        location.href = home(cached);
+        return;
+      }
+      if (!undecided() || readEnd() !== null) return;
+      moved = true;
+      location.href = `${API}${path}${query}`;
+      return;
+    }
     let binding = rebind ? null : sessionId;
     if (!binding) {
       // 명시적 로그인을 위한 한 번의 확인: 이 POST가 대신할 세션이 무엇인지 알 뿐, 이 문서의 신원으로 삼지 않는다.
       const answer = await send('/me');
       const id = answer.body && typeof answer.body.sessionId === 'string' ? answer.body.sessionId : null;
       binding = (answer.status === 200 || answer.status === 403) && id ? id : null;
+      if (!binding && answer.status !== 401) throw new Error('세션을 확인하지 못했습니다. 잠시 뒤 다시 눌러 주세요.');
     }
     if (binding) {
       const answer = await send(path, { method: 'POST', session: binding, ...(json === undefined ? {} : { json }) });
@@ -577,10 +600,23 @@ const KinAuth = (() => {
   return {
     KC,
 
-    async init() {
+    async init({ retry = false, onRetry } = {}) {
       if (entered) return cached;
       if (!initializing) {
-        initializing = enter()
+        initializing = (async () => {
+          const delays = retry ? [1000, 2000, 4000] : [];
+          for (let attempt = 0; ; attempt += 1) {
+            try { return await enter(); }
+            catch (error) {
+              if (!undecided() || moved) return null;
+              if (attempt >= delays.length || !(error.retryable || ['network', 'timeout'].includes(error.kind))) throw error;
+              if (typeof onRetry === 'function') onRetry();
+              await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+              recheck();
+              if (!undecided() || moved) return null;
+            }
+          }
+        })()
           .then(result => { entered = true; return result; })
           .then(land)
           .finally(() => { initializing = null; });

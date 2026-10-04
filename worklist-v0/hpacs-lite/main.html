@@ -5686,7 +5686,7 @@
                            : `서버의 초안을 확인하지 못했습니다 — 연결되면 다시 확인합니다`);
         return;
       }
-      if (!d && !pending) { bar.style.display = "none"; return; }
+      if (!d && !pending && !reportConverge.has(selectedUid)) { bar.style.display = "none"; return; }
       bar.style.display = "flex";
       $("#b-draft-discard").style.display = d ? "" : "none";
       // pending은 초안이 없어도 생긴다. 서버 값과 화면 값이 갈라졌다고 알려놓고
@@ -5699,7 +5699,7 @@
             (d ? ` · 초안 버리기를 누르면 서버 내용으로 돌아갑니다` : ``);
         return;
       }
-      const at = d.at ? String(d.at).replace("T", " ").slice(0, 16) : "";
+      const at = d?.at ? String(d.at).replace("T", " ").slice(0, 16) : "";
       // 내가 이 초안을 쓰기 시작한 뒤 남이 확정을 했다면, 그걸 지금 말해야 한다.
       // 확정 버튼을 누른 다음에야 알게 되면 이미 늦다.
       const behind = reportDraftBehind(r);
@@ -5710,7 +5710,7 @@
        */
       const deferred = !!selectedUid && reportConverge.has(selectedUid);
       $("#draftmsg").innerHTML = `<b>● 저장 안 된 초안</b> — ` +
-        (deferred ? `${esc(at)}에 이 화면에 담아 두었습니다 · 곧 서버에 저장합니다`
+        (deferred ? `이 화면에 담아 두었습니다 · 서버 저장은 아직 확인되지 않았습니다`
                   : `${esc(at)}에 자동 저장됨`) +
         (behind ? ` · <b>주의</b> 이 초안을 쓰는 동안 다른 사람이 v${esc(r.version)}을 확정했습니다`
                 : ` · 확정하려면 Save 또는 Approve`);
@@ -5764,6 +5764,7 @@
      * 띄우지 않는다. 서버의 초안을 아직 읽지 못했으면(연결 실패) 여기서 다시 읽는다.
      */
     function openDraftConflict(uid) {
+      if (uid === selectedUid) keepReportEditor();
       if (uid === selectedUid) renderDraftBar();
       toast("서버의 초안이 이 화면과 달라 저장하지 않았습니다 — 입력한 내용은 그대로 있습니다. 초안 표시줄에서 고르세요.", "err");
       if (!draftClient.conflict(uid)?.latest) readDraftConflict(uid);
@@ -5777,6 +5778,7 @@
     $("#b-draft-keep").addEventListener("click", () => {
       const uid = selectedUid;
       if (!uid || !draftClient.conflict(uid)?.latest || reportWriteBlock()) return;
+      keepReportEditor();
       if (!draftClient.resolve(uid)) return;
       markConverge(uid);
       renderDraftBar();
@@ -6908,7 +6910,7 @@
      * 충돌했거나, 결과를 모른다. 확인되지 않은 글은 수렴 표시로 남아 다음 저장이 다시 가져간다.
      */
     async function stashReport({ keepalive = false } = {}) {
-      if (!selectedUid || heldByOther(cur())) return;
+      if (!selectedUid) return;
       const uid = selectedUid;
       const a = appState[uid] ?? {};
       const next = {
@@ -6927,23 +6929,13 @@
        * 내 초안이 남의 판독문 자리에 생긴다. 서버도 403으로 막는다.
        * 판독 권한이 없을 때(기사)도 같은 이유로 보내지 않는다.
        */
-      if (a.prelimHidden || !KinAuth.has("radiologist")) return;
-      /**
-       * 서버가 죽었으면 초안도 저장하지 않는다. 여기서 `draft`를 세워두면
-       * 표시줄이 "07:44에 자동 저장됨"이라고 **거짓말**을 한다 —
-       * 저장 안 됐다는 사실을 알려주는 자리가 저장됐다고 말하는 셈이다.
-       * 글자는 textarea에 그대로 있고, 연결이 돌아오면 다음 자동 저장이 가져간다.
-       */
-      if (offline) return;
-      // 충돌이 남아 있는 동안에는 스스로 쓰지 않는다. 사람이 초안 표시줄에서 정한 뒤에 다시 쓴다.
-      if (serverMode && draftClient.conflict(uid)) return;
-
+      if (!KinAuth.has("radiologist")) return;
       const empty = RFIELDS.every(k => !next[k]);
       // 화면에 그려진 판이 기준이다. 초안이 아직 없을 때도 마찬가지다 —
       // 첫 자동 저장이 남의 판 번호를 기준으로 박아두면 그 뒤 모든 판단이 그 위에 선다.
       const baseVersion = reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0);
-      // 비운 초안은 초안이 없는 것과 같다 — 안 그러면 빈 초안이 확정본을 가린다.
-      const draft = empty ? null : { ...next, baseVersion, at: new Date().toISOString() };
+      // Keep an unconfirmed clear as an empty edit; only a confirmed clear may reveal the final report.
+      const draft = { ...next, baseVersion, at: new Date().toISOString() };
       /**
        * **삽입이 나가 있는 동안 비켜서는 것은 쓰기뿐이다 (B1).**
        *
@@ -6959,10 +6951,11 @@
       appState[uid] = { ...a, draft };
       // 화면에 담아 둔 글은 아직 저장된 것이 아니다. 저장이 확인될 때까지 수렴 표시를 세워 둔다 — 미룬 쓰기, 거절, 결과를
       // 모르는 쓰기, 로그아웃 준비가 버린 답 뒤에도 다음 저장이 이 글을 다시 가져간다.
-      if (serverMode) reportConverge.add(uid);
+      if (!demoMode) reportConverge.add(uid);
       if (selectedUid === uid) renderDraftBar();
-      if (deferWrite) return;
-      if (!serverMode) { saveApp(); return "saved"; }
+      draftClient.keep(uid, { ...next, baseVersion });
+      if (deferWrite || offline || a.prelimHidden || heldByOther(cur()) || (serverMode && draftClient.conflict(uid))) return;
+      if (!serverMode) { if (empty) appState[uid].draft = null; saveApp(); return "saved"; }
 
       const at = work.capture("document");
       const texts = { ...next, baseVersion };
@@ -6980,9 +6973,31 @@
         // 줄 서 있다) 그 글은 아직 확인되지 않았으므로 그대로 둔다.
         if (sameDraftText(now.draft, draft)) reportConverge.delete(uid);
         // 비운 초안은 서버에서 행이 지워진다 — 그 행의 인용도 함께 없어진 것이 사실이다.
-        if (empty) { citations.emptied(uid); structureState.emptied(uid); }
+        if (empty) {
+          if (sameDraftText(now.draft, draft)) appState[uid].draft = null;
+          citations.emptied(uid); structureState.emptied(uid);
+        }
         if (uid === selectedUid) renderDraftBar();
       }) ? "saved" : undefined;
+    }
+
+    // A blocked send must never leave the latest edit only in a disposable textarea.
+    for (const field of RFIELDS) $("#" + field).addEventListener("input", () => {
+      if (work.state() !== "active" || !selectedUid) return;
+      if (offline || insertInFlight || draftClient.conflict(selectedUid)) keepReportEditor();
+    });
+
+    function keepReportEditor() {
+      const uid = selectedUid;
+      if (!uid) return;
+      const a = appState[uid] || {};
+      const texts = { ...Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value])),
+        baseVersion: reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0) };
+      if (reportDirty()) {
+        appState[uid] = { ...a, draft: { ...texts, at: a.draft?.at ?? null } };
+        reportConverge.add(uid);
+      }
+      draftClient.keep(uid, texts);
     }
 
     /**
@@ -7506,10 +7521,20 @@
 
     // ① 탭·브라우저를 닫거나 새로고침
     window.addEventListener("beforeunload", e => {
-      if (!reportNeedsWrite()) return;
-      // keepalive 요청은 문서가 사라진 뒤에도 끝까지 간다. 다만 보장은 아니라서,
-      // 경고도 함께 띄운다 — 판독문은 잃어버리면 안 되는 유일한 것이다.
-      if (!heldByOther(cur())) stashReport({ keepalive: true });
+      if (logoutPrep && ["closing", "done"].includes(logoutPrep.state)) return;
+      const capture = logoutPrep?.reports ? logoutPrep : captureReport();
+      const pending = (capture.reports || []).filter(report => !report.safe);
+      if (!pending.length) return;
+      // Navigation is a document boundary: unselected studies need the same protection.
+      if (work.state() === "active") {
+        if (demoMode) stashReport({ keepalive: true });
+        else {
+          keepReportEditor();
+          const context = work.capture("document");
+          for (const report of pending)
+            draftClient.writeOnUnload(report.uid, report.texts, { owner: capture.owner, context });
+        }
+      }
       if (serverMode && heldUid) {
         transport.request(`${API}/studies/${encodeURIComponent(heldUid)}/release`,
           { method: "POST", keepalive: true, read: "none", deadlineMs: 0, context: work.capture("document") }).catch(() => {});
@@ -7535,8 +7560,7 @@
      */
     let loggingOut = false;
     let logoutPrep = null;
-    // 이 문서가 뷰어에 알린 준비의 번호. 취소의 신호는 같은 번호를 싣는다.
-    let announcedPreparations = 0;
+    // The opaque notice id belongs to one preparation across all documents.
 
     /**
      * 같은 사용자로 편집에 돌아왔다(준비 취소 = 새 작업 세대). 준비 전에 나갔던 일의 답은 돌아오지 않으므로, 그 일들이 그리던
@@ -7582,17 +7606,27 @@
      * (수렴 표시·결과를 모르는 쓰기), 저장이 아직 나가 있으면 보낸다.
      */
     function captureReport() {
-      const uid = selectedUid, a = (uid && appState[uid]) || {};
-      // 판독 권한은 이 페이지가 열릴 때의 신원으로 본다 — 세션이 끝나는 자리에서 잡을 때는 auth.js가 이미 신원을 내려놓았다.
       const reader = !!sess && sess.state === "approved" && Array.isArray(sess.roles)
         && (sess.roles.includes("radiologist") || sess.roles.includes("admin"));
-      const writer = !!uid && reader && !a.prelimHidden;
-      return {
-        uid, seq: selectionSeq, owner: draftOwner,
-        needsWrite: writer && (reportNeedsWrite() || (serverMode && (draftClient.busy(uid) || draftClient.uncertain(uid)))),
-        texts: Object.freeze({ ...Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value])),
-          baseVersion: uid ? reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0) : 0 }),
-      };
+      const reports = [];
+      if (reader) {
+        const uids = new Set([...Object.keys(appState), ...reportConverge, ...draftClient.studies()]);
+        if (selectedUid) uids.add(selectedUid);
+        for (const uid of uids) {
+          const a = appState[uid] || {};
+          const source = uid === selectedUid ? Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value]))
+            : a.draft ?? a;
+          const texts = Object.freeze({ ...Object.fromEntries(RFIELDS.map(k => [k, source[k] ?? ""])),
+            baseVersion: reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0) });
+          const changed = uid === selectedUid && reportDirty();
+          if (changed || reportConverge.has(uid) || (!demoMode && draftClient.unsettled(uid, a.draft ? texts : null))) {
+            const study = studies.find(s => s.uid === uid);
+            const label = study ? [study.name, study.acc, study.date].filter(Boolean).join(" · ") : uid;
+            reports.push({ uid, label, texts, safe: false });
+          }
+        }
+      }
+      return { uid: null, seq: selectionSeq, owner: draftOwner, reports, needsWrite: reports.length > 0 };
     }
 
     /**
@@ -7606,69 +7640,62 @@
       const attempt = ++prep.attempt;
       prep.state = "saving";
       prep.reason = null;
-      let permit = prep.permit = work.prepare({ owner: prep.owner, expectedRevision: null, snapshot: prep.texts });
-      // 업무 중이 아니다: 누르는 사이 세션이 끝났다. 닫힌 화면이 이 일을 이어받는다.
+      let permit = prep.permit = work.prepare({ owner: prep.owner, snapshot: prep.reports });
       if (!permit) return;
-      // 연결된 뷰어(판독 창의 iframe, 따로 연 영상 창)는 닫지 않는다. 이 세션의 뷰어 문서에 멈추라고 한 번 알린다.
       if (!prep.announced) {
-        prep.announced = ++announcedPreparations;
+        prep.announced = crypto.randomUUID();
         KinAuth.notifyPreparation("preparing", prep.announced);
       }
       clearInterval(poll); poll = null;
-      const mine = () => logoutPrep === prep && prep.attempt === attempt && prep.permit === permit;
+      const mine = () => logoutPrep === prep && prep.attempt === attempt && prep.permit === permit && work.admits(permit);
       const fail = reason => work.commit(permit, () => { if (mine()) failLogout(prep, reason); });
       const finish = () => work.commit(permit, () => { if (mine()) endUse(prep); });
-      // 보낼 것이 없으면(검사를 고르지 않았거나 화면이 저장된 그대로) 저장 확인이 필요 없다.
       if (!prep.needsWrite) { finish(); return; }
       showLogoutPanel(prep);
-      if (!serverMode) {
-        // 서버 없는 둘러보기: 이 브라우저에 담아 두는 것이 저장이다.
-        const empty = RFIELDS.every(k => !prep.texts[k]);
-        appState[prep.uid] = { ...appState[prep.uid], draft: empty ? null : { ...prep.texts, at: new Date().toISOString() } };
-        saveApp();
-        finish();
-        return;
-      }
-      if (offline) { fail("offline"); return; }
-      if (heldByOther(studies.find(s => s.uid === prep.uid))) { fail("held"); return; }
-      const failed = result => {
-        // 떠나지 않은 요청(준비가 그 사이 끝났다)과 서버가 알린 세션 종료는 닫힌 화면이 이어받는다.
-        if (result.outcome === "unsent" || result.outcome === "auth") return;
-        fail(result.outcome === "conflict" ? "conflict" : result.outcome === "unknown" || result.outcome === "rebased" ? "unknown"
-          : result.code === "REPORT_HELD" ? "held" : "refused");
-      };
-      for (let round = 0; ; round += 1) {
-        // 한 검사의 명령은 차례로 나간다: 앞서 나간 초안 쓰기가 끝난 뒤, 결과를 모르는 쓰기가 있었으면 서버 상태를 읽어 기준을 정한다.
-        const base = await draftClient.base(prep.uid, { owner: prep.owner, context: permit });
-        if (!mine()) return;
-        if (base.outcome === "conflict" && !base.latest) {
-          const got = await draftClient.latest(prep.uid, { owner: prep.owner, context: permit });
+      // Every command in this document must settle before deciding that any text is safe.
+      await draftClient.settled();
+      if (!mine()) return;
+      for (const report of prep.reports) {
+        if (report.safe) continue;
+        work.commit(permit, () => { prep.uid = report.uid; prep.texts = report.texts; });
+        if (demoMode) {
+          work.commit(permit, () => {
+            appState[report.uid] = { ...appState[report.uid], draft: { ...report.texts, at: new Date().toISOString() } };
+            saveApp(); report.safe = true;
+          });
+          continue;
+        }
+        if (offline) { fail("offline"); return; }
+        if (heldByOther(studies.find(s => s.uid === report.uid))) { fail("held"); return; }
+        const failed = result => {
+          if (result.outcome === "auth" || !mine()) return;
+          fail(result.outcome === "conflict" ? "conflict" : ["unknown", "rebased"].includes(result.outcome) ? "unknown"
+            : result.code === "REPORT_HELD" ? "held" : "refused");
+        };
+        for (let round = 0; ; round += 1) {
+          const base = await draftClient.base(report.uid, { owner: prep.owner, context: permit });
           if (!mine()) return;
-          if (got.resolved && round === 0) continue;
-        }
-        if (base.outcome !== "ready") { failed(base); return; }
-        const snapshot = { ...prep.texts, citations: base.lists.citations, structured: base.lists.structured };
-        // 서버가 이미 이 원문 전부를 갖고 있다(답을 잃었던 저장이 기록돼 있었다): 다시 쓸 것 없이 저장이 확인됐다.
-        if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !prep.texts[k]) ? null : snapshot)) {
-          work.commit(permit, () => { reportConverge.delete(prep.uid); });
-          finish();
+          if (base.outcome === "conflict" && !base.latest) {
+            const got = await draftClient.latest(report.uid, { owner: prep.owner, context: permit });
+            if (!mine()) return;
+            if (got.resolved && round === 0) continue;
+          }
+          if (base.outcome !== "ready") { failed(base); return; }
+          const snapshot = { ...report.texts, citations: base.lists.citations, structured: base.lists.structured };
+          if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !report.texts[k]) ? null : snapshot)) break;
+          permit = prep.permit = work.prepare({ owner: prep.owner, expectedRevision: base.revision, snapshot });
+          if (!permit) return;
+          const capture = { uid: report.uid, owner: permit.owner, expectedRevision: permit.expectedRevision, snapshot: permit.snapshot };
+          const result = await draftClient.preserve(capture, { context: permit });
+          if (!mine()) return;
+          if (result.outcome === "saved") break;
+          if (result.outcome === "rebased" && round === 0) continue;
+          failed(result);
           return;
         }
-        // 보존 저장을 승인하는 준비: 작성자·검사·기대 revision·전체 원문이 이 준비 하나에 얼어 묶인다.
-        permit = prep.permit = work.prepare({ owner: prep.owner, expectedRevision: base.revision, snapshot });
-        if (!permit) return;
-        const capture = { uid: prep.uid, owner: permit.owner, expectedRevision: permit.expectedRevision, snapshot: permit.snapshot };
-        const result = await draftClient.preserve(capture, { context: permit });
-        if (!mine()) return;
-        if (result.outcome === "saved") {
-          work.commit(permit, () => { reportConverge.delete(prep.uid); });
-          finish();
-          return;
-        }
-        if (result.outcome === "rebased" && round === 0) continue;
-        failed(result);
-        return;
+        work.commit(permit, () => { report.safe = true; reportConverge.delete(report.uid); });
       }
+      finish();
     }
 
     /** 저장을 확인하지 못했다. 나가지 않는다 — 원문은 메모리와 화면에 있고 고르는 것은 사람이다. */
@@ -7694,7 +7721,9 @@
 
     /** 잡아 둔 원문을 메모리에서 지운다(저장을 확인했거나 사람이 버렸다). */
     function forgetCapture(prep) {
-      prep.texts = Object.freeze({ findings: "", conclusion: "", recommendation: "", baseVersion: 0 });
+      prep.reports = [];
+      prep.texts = null;
+      prep.needsWrite = false;
     }
 
     function discardAndLogOut(prep) {
@@ -7737,7 +7766,7 @@
       loggingOut = false;
       // 준비에 들어선 적이 없으면(나가 있는 확정·삽입을 기다리던 중) 멈춘 것도 없다.
       if (!prepared) return;
-      if (prep.uid && prep.needsWrite) reportConverge.add(prep.uid);
+      for (const report of prep.reports || []) if (!report.safe) reportConverge.add(report.uid);
       if (!work.cancelPreparation(permit)) return;
       KinAuth.notifyPreparation("resumed", prep.announced);
       resumeWork();
@@ -7794,31 +7823,38 @@
         if (binding.owner.sub !== owner.sub || (binding.owner.institution ?? null) !== (owner.institution ?? null)
             || binding.owner.author !== owner.author) { say(otherAccount); return; }
         const via = { context: at, session: binding.session };
-        for (let round = 0; ; round += 1) {
-          say("서버의 초안을 확인하는 중입니다…");
-          const base = await draftClient.base(prep.uid, { owner: prep.owner, ...via });
-          if (!ended()) return;
-          if (base.outcome === "conflict") {
-            // 충돌 때의 읽기가 실패했었으면 여기서 다시 읽는다. 서버에 있는 것이 이 문서의 글이면 풀리고 이어 간다.
-            const got = base.latest ? null : await draftClient.latest(prep.uid, { owner: prep.owner, ...via });
+        await draftClient.settled();
+        if (!ended() || !work.admits(at)) return;
+        for (const report of prep.reports) {
+          if (report.safe) continue;
+          if (!work.commit(at, () => { prep.uid = report.uid; prep.texts = report.texts; })) return;
+          for (let round = 0; ; round += 1) {
+            say("서버의 초안을 확인하는 중입니다…");
+            const base = await draftClient.base(prep.uid, { owner: prep.owner, ...via });
             if (!ended()) return;
-            if (got?.resolved && round === 0) continue;
-            conflicted();
-            return;
+            if (base.outcome === "conflict") {
+              // 충돌 때의 읽기가 실패했었으면 여기서 다시 읽는다. 서버에 있는 것이 이 문서의 글이면 풀리고 이어 간다.
+              const got = base.latest ? null : await draftClient.latest(prep.uid, { owner: prep.owner, ...via });
+              if (!ended()) return;
+              if (got?.resolved && round === 0) continue;
+              conflicted();
+              return;
+            }
+            if (base.outcome !== "ready") { say(explain(base)); return; }
+            const capture = { uid: prep.uid, owner: prep.owner, expectedRevision: base.revision,
+              snapshot: { ...prep.texts, citations: base.lists.citations, structured: base.lists.structured } };
+            // 서버가 이미 이 원문 전부를 갖고 있다(답을 잃었던 저장이 기록돼 있었다): 다시 쓸 것 없이 저장이 확인됐다.
+            if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !prep.texts[k]) ? null : capture.snapshot)) break;
+            say("판독문 초안을 저장하는 중입니다…");
+            // 명령 경로가 충돌·결과 모름을 서버의 지금 초안으로 먼저 확인한다: 잡아 둔 원문이 거기 전부 있을 때만 저장이다.
+            const result = await draftClient.preserve(capture, via);
+            if (!ended()) return;
+            if (result.outcome === "rebased" && round === 0) continue;
+            if (result.outcome === "conflict") { conflicted(); return; }
+            if (result.outcome !== "saved") { say(explain(result)); return; }
+            break;
           }
-          if (base.outcome !== "ready") { say(explain(base)); return; }
-          const capture = { uid: prep.uid, owner: prep.owner, expectedRevision: base.revision,
-            snapshot: { ...prep.texts, citations: base.lists.citations, structured: base.lists.structured } };
-          // 서버가 이미 이 원문 전부를 갖고 있다(답을 잃었던 저장이 기록돼 있었다): 다시 쓸 것 없이 저장이 확인됐다.
-          if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !prep.texts[k]) ? null : capture.snapshot)) break;
-          say("판독문 초안을 저장하는 중입니다…");
-          // 명령 경로가 충돌·결과 모름을 서버의 지금 초안으로 먼저 확인한다: 잡아 둔 원문이 거기 전부 있을 때만 저장이다.
-          const result = await draftClient.preserve(capture, via);
-          if (!ended()) return;
-          if (result.outcome === "rebased" && round === 0) continue;
-          if (result.outcome === "conflict") { conflicted(); return; }
-          if (result.outcome !== "saved") { say(explain(result)); return; }
-          break;
+          if (!work.commit(at, () => { report.safe = true; })) return;
         }
         work.commit(at, () => {
           if (!ended()) return;
@@ -7857,7 +7893,7 @@
 
     /**
      * 준비·종료 창. 모달이라 뒤의 업무 화면은 가려지고 누를 수 없다(편집·검사 이동·새 작업 없음). Escape로 닫지 않는다.
-     * 판독문·환자 값은 이 창에 쓰지 않는다.
+     * After session end, show only study identifiers, never patient labels or report text.
      */
     function showLogoutPanel(prep) {
       if (!prep.panel) {
@@ -7874,6 +7910,13 @@
       note.textContent = prep.state === "failed"
         ? `${LOGOUT_FAILED[prep.reason] || LOGOUT_FAILED.refused} 로그아웃하지 않았고 입력한 내용은 이 화면에 그대로 있습니다.`
         : LOGOUT_NOTES[prep.state] || LOGOUT_NOTES.closing;
+      const pending = document.createElement("p");
+      if (["failed", "ended"].includes(prep.state)) {
+        const label = report => prep.state === "ended" ? report.uid : `${report.label || report.uid} (${report.uid})`;
+        const current = (prep.reports || []).find(report => report.uid === prep.uid);
+        pending.textContent = "보존이 필요한 검사: " + (prep.reports || []).filter(r => !r.safe).map(label).join(", ")
+          + (current ? " · 현재 확인 중: " + label(current) : "");
+      }
       const status = document.createElement("p");
       status.setAttribute("role", "status");
       const actions = document.createElement("div");
@@ -7899,7 +7942,7 @@
         if (overwritable) button("Overwrite Server Draft", () => overwriteServerDraft(prep));
         button("Discard Draft", () => dropEndedDraft(prep));
       }
-      prep.panel.replaceChildren(title, note, status, actions);
+      prep.panel.replaceChildren(title, note, pending, status, actions);
       if (!prep.panel.open) prep.panel.showModal();
       actions.querySelector("button")?.focus();
     }
@@ -10984,7 +11027,7 @@
        * 그대로 닫으면 그 글이 사라진다 — 준비 중의 종료와 같게 이 문서의 메모리에 잡아 두고 Recover Draft를 보인다. 이
        * 문서가 스스로 끝내는 중(종료를 확정한 Log out·명시적 폐기)에는 잡을 것이 없다.
        */
-      if (!workClosed && !preparing && (!logoutPrep || logoutPrep.state === "waiting") && serverMode) {
+      if (!workClosed && !preparing && (!logoutPrep || logoutPrep.state === "waiting") && !demoMode) {
         const capture = captureReport();
         if (capture.needsWrite) {
           logoutPrep = { state: "saving", reason: null, attempt: 0, panel: null, recovering: false, permit: null, announced: 0,
@@ -11298,9 +11341,22 @@
     }
 
     async function boot() {
-      try { await KinAuth.init(); }
+      try {
+        await KinAuth.init({ retry: true, onRetry: () => {
+          work.commit(work.capture("lifecycle"), () => {
+            $("#err").textContent = "세션을 다시 확인하고 있습니다. 확인되면 자동으로 들어갑니다…";
+          });
+        } });
+        if (KinAuth.session()) work.commit(work.capture("document"), () => $("#err").replaceChildren());
+      }
       catch {
-        location.replace("index.html");
+        work.commit(work.capture("lifecycle"), () => {
+          $("#err").textContent = "세션을 확인하지 못했습니다. 잠시 뒤 다시 확인해 주세요. ";
+          const retry = document.createElement("button");
+          retry.textContent = "Retry Session Check";
+          retry.addEventListener("click", () => { retry.disabled = true; boot(); });
+          $("#err").append(retry);
+        });
         return;
       }
       sess = KinAuth.session();

@@ -387,10 +387,28 @@
 
       revision(uid) { return lines.has(uid) ? lines.get(uid).revision : null; },
       lists(uid) { return lines.has(uid) ? listsOf(lines.get(uid)) : null; },
+      /** All studies touched by this document, including commands whose page continuation was retired. */
+      studies() { return [...lines.keys()]; },
+      unsettled(uid, texts) {
+        const own = lines.get(uid);
+        if (!own) return false;
+        if (own.changing || own.uncertain || own.conflict) return true;
+        if (!texts || own.known === undefined) return false;
+        return own.known === null ? !emptyText(texts) : !sameTexts(own.known, texts);
+      },
+      /** Keep the person's latest edit even when a conflict forbids sending it. */
+      keep(uid, texts) {
+        const own = lines.get(uid);
+        if (own?.conflict) own.conflict = { ...own.conflict,
+          attempt: { ...(own.conflict.attempt || listsOf(own) || {}), ...texts } };
+      },
       /** 이 검사의 초안을 바꾸는 명령이 나가 있거나 줄 서 있는가. */
       busy(uid) { return lines.has(uid) && lines.get(uid).changing > 0; },
       /** 지금 세워진 명령이 모두 끝날 때. 거절되지 않는다. */
-      settled(uid) { return lines.has(uid) ? lines.get(uid).tail : Promise.resolve(); },
+      settled(uid) {
+        return uid === undefined ? Promise.all([...lines.values()].map(own => own.tail))
+          : lines.has(uid) ? lines.get(uid).tail : Promise.resolve();
+      },
       uncertain(uid) { return lines.has(uid) && !!lines.get(uid).uncertain; },
       conflict(uid) { return lines.has(uid) ? lines.get(uid).conflict : null; },
 
