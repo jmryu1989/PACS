@@ -66,6 +66,21 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = Path(__file__).resolve().parents[1]
 HPACS = ROOT / "worklist-v0" / "hpacs-lite"
 MAIN = Path(os.environ.get("KIN_MULTI_INSTITUTION_MAIN") or HPACS / "main.html")
+# A page of a fixed commit runs with the files of that commit: its scripts and styles are read from the repository at
+# KIN_MULTI_INSTITUTION_ASSETS_SHA instead of the working tree (a page from before S7-U5 cannot boot on the later auth.js
+# and modules, which expect the page's gate and transport). Used by the layout equivalence of related_layout_dom_test.py.
+ASSETS_SHA = os.environ.get("KIN_MULTI_INSTITUTION_ASSETS_SHA") or None
+_FIXED_ASSETS = {}
+
+
+def fixed_asset(path):
+    """`worklist-v0/hpacs-lite/<path>` at ASSETS_SHA as `git show` reads it, or None when that commit has no such file."""
+    if path not in _FIXED_ASSETS:
+        import subprocess
+        shown = subprocess.run(["git", "show", f"{ASSETS_SHA}:worklist-v0/hpacs-lite/{path}"], cwd=str(ROOT),
+                               capture_output=True, timeout=60)
+        _FIXED_ASSETS[path] = shown.stdout if shown.returncode == 0 else None
+    return _FIXED_ASSETS[path]
 VECTORS = json.loads((ROOT / "tests" / "worklist_columns_vectors.json").read_text(encoding="utf-8"))
 V = {v["id"]: v for v in VECTORS["accepted"] + VECTORS["refused"] + VECTORS["idempotent"]}
 TITLES = VECTORS["titles"]["Radiology"]
@@ -233,6 +248,12 @@ class Server:
         if path.startswith("/kin-brand/") or path == "/favicon.ico":
             entry["status"] = 404
             return route.fulfill(status=404, body="")
+        if ASSETS_SHA and path != "/main.html":
+            name = path.lstrip("/")
+            data = fixed_asset(name) if re.fullmatch(r"[A-Za-z0-9_.-]+", name) else None
+            entry["status"] = 200 if data is not None else 404
+            return route.fulfill(status=entry["status"], body=data if data is not None else "",
+                                 content_type=TYPES.get(Path(name).suffix, "application/octet-stream"))
         target = MAIN if path == "/main.html" else HPACS / path.lstrip("/")
         inside = path == "/main.html" or (target.is_file() and target.resolve().parent == HPACS.resolve())
         if not inside:

@@ -795,11 +795,15 @@ def landmarks(w):
     return result
 
 
-def run_snapshot(page_path):
-    """Landmarks of `page_path`, or of this process's own page (the override, if one was given, else the shipped page)."""
+def run_snapshot(page_path, assets_sha=None):
+    """Landmarks of `page_path`, or of this process's own page (the override, if one was given, else the shipped page).
+    `assets_sha`: the commit whose scripts and styles the page runs with (a fixed-commit page runs with its own files)."""
     env = {**os.environ}
+    env.pop("KIN_MULTI_INSTITUTION_ASSETS_SHA", None)
     if page_path:
         env["KIN_MULTI_INSTITUTION_MAIN"] = str(page_path)
+    if assets_sha:
+        env["KIN_MULTI_INSTITUTION_ASSETS_SHA"] = assets_sha
     child = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), "--layout-snapshot"], capture_output=True,
                            text=True, encoding="utf-8", env=env, timeout=1500)
     lines = [ln for ln in child.stdout.splitlines() if ln.startswith("RL-SNAPSHOT ")]
@@ -815,7 +819,7 @@ class RelatedLayoutEquivalence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             base_page = Path(folder) / "main.html"
             base_page.write_text(base_text, encoding="utf-8", newline="\n")
-            base = run_snapshot(base_page)
+            base = run_snapshot(base_page, BASE_SHA)
         cand = run_snapshot(None)
         differences, excepted = [], []
         for key, landmarks_b in base["sizes"].items():
