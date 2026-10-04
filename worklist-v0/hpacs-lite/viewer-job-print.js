@@ -101,9 +101,10 @@
   // swallowed. The error's own `name` is not consulted: api() runs its own
   // timer per call, so an AbortError can be that timer rather than this unit's,
   // and only the caller's signal tells the two apart.
-  function citationTerminal({ aborted, live, status } = {}) {
+  function citationTerminal({ aborted, live, status, code } = {}) {
     if (aborted || live === false) return 'rethrow';
-    if (status === 403) return 'refused';
+    const transport = root.KinSessionTransport || require('./session-transport.js');
+    if (transport.refusal({ status, code }) === 'denied') return 'refused';
     return 'unknown';
   }
   // The one source read of every saved-image output: the frame cells here and the version 4-6, 12 and 13 volume loader. A read that
@@ -376,7 +377,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         try {
           answer = await api('/studies/' + target.uid + '/report/citations', { signal, foreign: true });
         } catch (error) {
-          const terminal = identity.citationTerminal({ aborted: signal.aborted, live: live(), status: error?.status });
+          const terminal = identity.citationTerminal({ aborted: signal.aborted, live: live(), status: error?.status, code: error?.code });
           // Caught per entry: one page's failure must not blank the images, the
           // summary and the other study's page along with it.
           if (terminal === 'rethrow') throw error;

@@ -34,7 +34,7 @@ function pageDefaults(sandbox, send = sandbox.fetch, source = config) {
     const url = new URL(value, sandbox.location?.href || 'https://viewer.test');
     return url.origin === (sandbox.location?.origin || 'https://viewer.test') && /^\/(api|dicom-web|instances)(\/|$)/.test(url.pathname);
   });
-  window.KinSessionTransport = { page: () => transport };
+  window.KinSessionTransport = { ...transports, page: () => transport };
   sandbox.document ||= {};
   sandbox.location ||= {};
   const context = vm.createContext(sandbox);

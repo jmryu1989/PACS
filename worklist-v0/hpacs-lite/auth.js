@@ -198,6 +198,10 @@ const KinAuth = (() => {
 
   const reliable = probeStorage();
   let proof = takeProof();
+  let entryBinding = null;
+  // This URL flag conveys a failed confirmation, never authority to enter a session.
+  const uncertainEntry = /\/index\.html$/.test(location.pathname)
+    && new URLSearchParams(location.search).get('auth_error') === 'entry_unconfirmed';
 
   /** 저장소가 말하는 이 문서의 시작 상태. 종료 기록이 있으면 그 상태로 닫혀 있고, 저장소를 믿을 수 없으면 unknown이다. */
   function classify() {
@@ -216,6 +220,7 @@ const KinAuth = (() => {
     }
   }
   if (!proof) classify();
+  if (uncertainEntry && state === 'unknown') reason = 'entry-unconfirmed';
 
   /** 서버에 물을 수 있는 시작인가: 아직 아무것도 정해지지 않은 unknown뿐이다. */
   function undecided() { return state === 'unknown' && reason === null; }
@@ -268,6 +273,8 @@ const KinAuth = (() => {
     const id = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : null;
     if (answer.status === 403 && (body.code === 'INSTITUTION_PENDING' || body.code === 'INSTITUTION_INVALID') && id)
       return { id, identity: { state: body.code === 'INSTITUTION_PENDING' ? 'pending' : 'invalid' } };
+    if (['AUTH_IDP_UNAVAILABLE', 'AUTH_SESSION_BUSY', 'AUTH_STORAGE_FAILURE'].includes(answer.code))
+      throw Object.assign(new Error('세션 연결을 확인하지 못했습니다'), { retryable: true });
     if (answer.status === 403) throw new Error('계정 상태를 확인할 수 없습니다');
     if (answer.status !== 200) throw Object.assign(new Error(`세션 확인 실패 (HTTP ${answer.status})`),
       { retryable: answer.status >= 500 });
@@ -330,20 +337,25 @@ const KinAuth = (() => {
    * 거절된 증명(다른 세션·만료·재사용)은 아무것도 열지 않는다.
    */
   async function enterWithProof() {
-    const offered = proof;
-    proof = null;
-    let entry;
-    try { entry = await send('/auth/entry', { method: 'POST', json: { proof: offered } }); }
-    catch (e) { entry = null; }
-    const id = entry && entry.status === 200 && entry.body && typeof entry.body.sessionId === 'string' && entry.body.sessionId
-      ? entry.body.sessionId : null;
+    if (!entryBinding) {
+      const offered = proof;
+      proof = null;
+      let entry;
+      try { entry = await send('/auth/entry', { method: 'POST', json: { proof: offered } }); }
+      catch (_) { return entryUnconfirmed(); }
+      if (entry.status >= 500 || entry.status === 429 || entry.status === 200 && !entry.body?.sessionId)
+        return entryUnconfirmed();
+      entryBinding = entry.status === 200 && typeof entry.body?.sessionId === 'string' && entry.body.sessionId
+        ? entry.body.sessionId : null;
+    }
+    const id = entryBinding;
     let found = null;
     if (id) {
       try {
         const answer = await send('/me', { session: id });
         const read = readIdentity(answer);
         if (read.id === id) found = read;
-      } catch (e) {}
+      } catch (error) { if (error.retryable || ['network', 'timeout'].includes(error.kind)) throw error; }
     }
     if (!undecided()) return null;
     // Roles may change after the callback chose this document. A consumed proof cannot be
@@ -363,6 +375,14 @@ const KinAuth = (() => {
     return adopt(found.id, found.identity, true);
   }
 
+  function entryUnconfirmed() {
+    if (!undecided()) return null;
+    reason = 'entry-unconfirmed';
+    announce();
+    leave();
+    return moved ? new Promise(() => {}) : null;
+  }
+
   async function enter() {
     if (tab.get('kin-demo')) {
       cached = {
@@ -377,7 +397,7 @@ const KinAuth = (() => {
     }
     // 종료가 기록된 동안, 또는 저장소를 믿을 수 없는 동안에는 남은 서버 세션으로 업무에 들어가지 않는다. 어느 문서든 같다 —
     // 랜딩이 상태를 보이고, 다시 들어가는 길은 사용자의 명시적 로그인뿐이다.
-    const result = proof ? await enterWithProof() : undecided() ? await bootstrap() : null;
+    const result = proof || entryBinding ? await enterWithProof() : undecided() ? await bootstrap() : null;
     // 답을 기다리는 사이 이 문서가 이동을 시작했으면 기다리던 쪽(boot)이 두 번째 이동을 하지 않게 끝나지 않는 약속을 준다.
     if (moved) return new Promise(() => {});
     return result;
@@ -409,7 +429,8 @@ const KinAuth = (() => {
   function leave() {
     if (moved || (keep && keep())) return;
     moved = true;
-    location.replace(location.origin + location.pathname.replace(/[^/]*$/, 'index.html'));
+    location.replace(location.origin + location.pathname.replace(/[^/]*$/, 'index.html')
+      + (reason === 'entry-unconfirmed' ? '?auth_error=entry_unconfirmed' : ''));
   }
 
   /** 이 문서를 닫는다: 신원을 내려놓고 상태를 알린다. 이후 session()·has()는 이전 신원을 주지 않는다. */
@@ -567,6 +588,22 @@ const KinAuth = (() => {
    * 누름이 지금 세션을 다시 확인한다. 남은 세션이 없으면 평범한 링크로 간다.
    */
   async function initiate(path, json, query) {
+    if (uncertainEntry && path === '/auth/login' && !json?.prompt) {
+      // A lost entry answer is not an account-switch request. Reconfirm first;
+      // even an unreadable end record must never turn this click into a revoke.
+      const answer = await send('/me');
+      if (answer.status !== 401) {
+        const { id, identity } = readIdentity(answer);
+        if (reliable && readEnd() === null && state === 'unknown' && reason === 'entry-unconfirmed') {
+          reason = null;
+          if (adopt(id, identity, false)) { moved = true; location.href = home(cached); }
+          return;
+        }
+        throw new Error('로그인 세션은 유지되고 있지만 업무 화면 진입을 확인하지 못했습니다. 잠시 뒤 다시 확인해 주세요.');
+      }
+      location.href = `${API}${path}${query}`;
+      return;
+    }
     const reuse = path === '/auth/login' && !json?.prompt && reliable && readEnd() === null
       && (undecided() || state === 'active');
     if (reuse) {
@@ -634,15 +671,25 @@ const KinAuth = (() => {
       if (entered) return cached;
       if (!initializing) {
         initializing = (async () => {
-          const delays = retry ? [1000, 2000, 4000] : [];
+          const delays = retry || proof || entryBinding ? [1000, 2000, 4000] : [];
           for (let attempt = 0; ; attempt += 1) {
             try { return await enter(); }
             catch (error) {
               if (!undecided() || moved) return null;
-              if (attempt >= delays.length || !(error.retryable || ['network', 'timeout'].includes(error.kind))) throw error;
+              if (attempt >= delays.length || !(error.retryable || ['network', 'timeout'].includes(error.kind))) {
+                if (entryBinding) return entryUnconfirmed();
+                throw error;
+              }
               if (typeof onRetry === 'function') onRetry();
               await new Promise(resolve => setTimeout(resolve, delays[attempt]));
-              recheck();
+              if (entryBinding) {
+                // A proof may supersede an older login's record, never its own end.
+                const record = readEnd();
+                if (record?.session === entryBinding || heard.has(entryBinding)) {
+                  adopt(entryBinding, null, true);
+                  return null;
+                }
+              } else recheck();
               if (!undecided() || moved) return null;
             }
           }

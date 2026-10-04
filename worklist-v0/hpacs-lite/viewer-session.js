@@ -169,6 +169,12 @@
     }
     let channel = null;
     try { channel = new win.BroadcastChannel('kin-session'); channel.onmessage = event => notice(event.data); } catch (_) {}
+    // A storage notice must retire even a viewer with no mounted extension or active request.
+    win.addEventListener('storage', event => {
+      if (event.key !== 'kin-session-end' && event.key !== null) return;
+      try { if (session && JSON.parse(readEndRecord())?.session === session) end(); }
+      catch (_) { /* An unreadable record is not evidence of an end. */ }
+    });
     // Polling also repairs missed preparation notifications. A different peer session is never adopted.
     const poll = nativeInterval(syncPeer, 250);
     syncPeer();

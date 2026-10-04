@@ -50,8 +50,10 @@ def synthetic_pdf(labels):
 
 
 class DicomPdfE2E(ViewerLayoutE2E):
-    # Full Chromium's new headless mode renders PDFs; headless-shell downloads them.
-    browser_channel = "chromium"
+    # Source PDF is now fetched into the viewer's blob-backed dialog. These cases
+    # verify the source bytes, scope and dialog lifecycle; they do not assert the
+    # browser's native PDF controls. Use the same bundled headless browser as OHIF.
+    browser_channel = None
 
     def pdf_source(self, fixture, labels, title, mime="application/pdf", payload=None):
         original = pydicom.dcmread(io.BytesIO(self.stack.orthanc_bytes(

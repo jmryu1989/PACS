@@ -505,7 +505,9 @@ IF refused IS DISTINCT FROM '{constraint}' THEN RAISE EXCEPTION 'SYNTHETIC refus
     def create(self,name):ops.run(['docker','exec',self.db,'createdb','-U','postgres',name])
 
     def old_rows(self,db):
-        tables=[name for name in transfer.TABLES if not name.startswith('Viewer')]
+        # These two cases start at the baseline, before later product tables exist.
+        # Observe every original table from that database instead of today's restore inventory.
+        tables=self.sql(db,"SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename NOT LIKE 'Viewer%' ORDER BY tablename").splitlines()
         return {name:self.sql(db,f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in tables}
 
     def seed_existing(self,db):

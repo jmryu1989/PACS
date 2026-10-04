@@ -30,7 +30,7 @@ MAIN = """<!doctype html><html><body><p id="work" hidden>Worklist</p>
 <script src="session-transport.js"></script><script>
 KinWorkContext.follow(KinAuth);
 (async () => {
-  const identity = await KinAuth.init();
+  const identity = await KinAuth.init({retry:true});
   if (!identity || identity.state !== 'approved') return;
   const at = KinWorkContext.capture('document');
   const answer = await KinSessionTransport.page().request('/api/syn-work', { context: at });
@@ -100,6 +100,9 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.page.expose_function("synAuthState", lambda event: self.auth_states.append(event))
         self.roles = ["clinician"]
         self.me_code = None
+        self.me_failures = []
+        self.lose_entry = False
+        self.real_landing = False
         self.refuse = False
         self.used = False
         self.held_entry = None
@@ -125,7 +128,7 @@ class AuthEntryDOMTest(unittest.TestCase):
             name = path[len(BASE):]
             if name == "main.html":
                 return route.fulfill(content_type="text/html", body=MAIN)
-            if name == "index.html":
+            if name == "index.html" and not self.real_landing:
                 return route.fulfill(content_type="text/html", body="<!doctype html><p>Login</p>")
             source = AUTH if name == "auth.js" else (PAGES if name in ("clinician.html", "clinician.js") else ASSETS) / name
             if source.is_file():
@@ -143,6 +146,13 @@ class AuthEntryDOMTest(unittest.TestCase):
                     return
                 return self.answer_entry(route)
             if path == "/api/me":
+                if self.me_failures:
+                    failure = self.me_failures.pop(0)
+                    if failure == "network":
+                        return route.abort("failed")
+                    if failure == "timeout":
+                        return  # The shipped ten-second request deadline aborts this read.
+                    return route.fulfill(status=failure, headers={"X-KIN-Auth-Code": "AUTH_IDP_UNAVAILABLE"}, json={})
                 if self.me_code:
                     return route.fulfill(status=403, json={"code": self.me_code, "sessionId": SESSION})
                 return route.fulfill(json={"sub": "SYN-sub", "actor": "SYN-doctor", "user": "SYN-doctor",
@@ -154,6 +164,10 @@ class AuthEntryDOMTest(unittest.TestCase):
                 return route.fulfill(json={"items": [], "nextCursor": None})
             if path == "/api/syn-work":
                 return route.fulfill(json={"ok": True})
+        if path == "/auth/realms/kin/.well-known/openid-configuration":
+            return route.fulfill(json={})
+        if path.startswith("/branding/"):
+            return route.fulfill(body="", content_type="image/svg+xml")
         self.errors.append("Unexpected request: " + request.method + " " + path)
         route.abort()
 
@@ -161,7 +175,69 @@ class AuthEntryDOMTest(unittest.TestCase):
         if self.refuse or self.used:
             return route.fulfill(status=403, json={"code": "AUTH_ENTRY_REFUSED"})
         self.used = True
+        if self.lose_entry:
+            return route.abort("failed")
         return route.fulfill(json={"sessionId": SESSION})
+
+    def test_consumed_proof_reconfirms_same_session_after_transient_failure(self):
+        for failure in (503, 500, "network", "timeout"):
+            with self.subTest(failure=failure):
+                self.used = False
+                self.entries.clear()
+                self.requests.clear()
+                self.me_failures = [failure]
+                self.roles = ['radiologist']
+                self.login('main.html')
+                expect(self.page.locator("#work")).to_be_visible(timeout=15000)
+                self.assert_entry()
+                self.assertEqual([binding for path, binding in self.requests if path == "/api/me"], [SESSION, SESSION])
+
+    def assert_uncertain_landing_recovers(self):
+        self.page.wait_for_url("**/index.html*", timeout=15000)
+        expect(self.page.locator("#msg")).to_contain_text("확인하지 못해")
+        expect(self.page.locator("#msg")).not_to_contain_text("이미 사용")
+        expect(self.page.locator("#msg")).not_to_contain_text("만료")
+        self.assertEqual(len(self.entries), 1)
+        self.assertNotIn("active", [event["state"] for event in self.auth_states])
+        self.me_failures.clear()
+        self.page.locator("#signin").click()
+        expect(self.page.locator("#list-state")).to_have_attribute("data-state", "empty")
+        self.assertFalse(any(path in ("/api/auth/login", "/api/auth/logout") for path, _ in self.requests))
+        self.assertEqual(len(self.entries), 1)
+
+    def test_consumed_proof_budget_exhaustion_login_reconfirms_without_revocation(self):
+        self.real_landing = True
+        self.me_failures = [503] * 4
+        self.login(denied=False)
+        self.page.wait_for_url("**/index.html*", timeout=15000)
+        self.assertEqual([binding for path, binding in self.requests if path == "/api/me"], [SESSION] * 4)
+        self.assert_uncertain_landing_recovers()
+
+    def test_lost_entry_answer_login_reconfirms_without_resending_proof_or_revoking(self):
+        self.real_landing = self.lose_entry = True
+        self.login(denied=False)
+        self.assert_uncertain_landing_recovers()
+
+    def test_lost_entry_with_old_end_record_keeps_live_session_on_repeated_login(self):
+        self.real_landing = self.lose_entry = True
+        self.context.add_init_script("localStorage.setItem('kin-session-end',JSON.stringify({session:'old-ended',operation:1,status:'confirmed'}))")
+        self.login(denied=False)
+        self.page.wait_for_url('**/index.html*')
+        for _ in range(2):
+            expect(self.page.locator('#msg')).to_contain_text('확인하지 못해')
+            self.page.locator('#signin').click()
+            expect(self.page.locator('#msg')).to_contain_text('세션은 유지되고 있지만')
+            self.page.reload()
+        self.assertFalse(any(path in ('/api/auth/login', '/api/auth/logout') for path, _ in self.requests))
+        self.assertNotIn('active', [event['state'] for event in self.auth_states])
+        self.assertEqual(len(self.entries), 1)
+
+    def test_consumed_proof_definitive_refusal_does_not_retry(self):
+        self.me_code = "AUTH_SESSION_MISMATCH"
+        self.login(denied=False)
+        self.page.wait_for_url("**/index.html")
+        self.assertEqual(self.requests, [("/api/auth/entry", None), ("/api/me", SESSION)])
+        self.assertNotIn("active", [event["state"] for event in self.auth_states])
 
     def login(self, destination="clinician.html", denied=True):
         type(self).destination = destination

@@ -180,11 +180,17 @@
     };
 
     let shownEnd = false;
+    const entryConfirmationFailed = new URLSearchParams(location.search).get('auth_error') === 'entry_unconfirmed';
     function showEnd(end) {
       shownEnd = true;
       const retry = $("#retry-logout");
       const message = $("#msg");
       message.classList.toggle('ended', end.state === 'confirmed');
+      if (entryConfirmationFailed) {
+        retry.style.display = 'none';
+        message.textContent = '로그인 세션을 확인하지 못해 업무 화면을 열지 않았습니다. 로그인 버튼을 누르면 다시 확인합니다.';
+        return;
+      }
       if (end.state === 'confirmed') {
         retry.style.display = 'none';
         message.textContent = '이 브라우저의 KIN 로그인 세션을 끝냈습니다. 다시 사용하려면 로그인해 주세요.';
@@ -239,7 +245,7 @@
     async function boot() {
       const params = new URLSearchParams(location.search);
       const authError = params.get('auth_error');
-      if (authError) history.replaceState({}, '', location.pathname + location.hash);
+      if (authError && !entryConfirmationFailed) history.replaceState({}, '', location.pathname + location.hash);
 
       // 종료 상태(명시적 로그아웃·미확인 종료·믿을 수 없는 저장소)가 일반 자동 진입보다 먼저다: 기존 세션이 있어도 업무
       // 화면으로 옮기지 않고 자동 로그인·자동 재시도도 하지 않는다.

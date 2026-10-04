@@ -1398,7 +1398,8 @@ function kinCreateViewerHistory() {
         return { stale: true };
       };
       if (!valid(ticket)) throw await drop();
-      if (res.status === 403) { deny(); throw { stale: true }; }
+      if (window.KinSessionTransport.refusal(res) === 'denied' && res.status === 403) { deny(); throw { stale: true }; }
+      if (window.KinSessionTransport.refusal(res)) throw window.KinSessionTransport.responseError(res);
       const data = await res.json().catch(() => null);
       if (!valid(ticket)) throw await drop(data);
       // `said` (the server's wording) is read only by readOnlyLoad; writer paths keep their own messages (manualSr reads `message`).
@@ -2272,9 +2273,7 @@ function kinCreateViewerLayout() {
           if (path === '/api/me' && response.ok) kinViewerSession.sameAccount(await response.json().catch(() => null));
           throw new Error('화면이 변경되어 배치를 적용하지 않았습니다.');
         }
-        if (response.status === 401 || response.status === 403) {
-          throw new Error('검사 접근 권한을 확인할 수 없습니다.');
-        }
+        if (window.KinSessionTransport.refusal(response)) throw window.KinSessionTransport.responseError(response);
         if (!response.ok) throw new Error('서버 연결을 확인한 뒤 다시 시도하세요.');
         return await response.json();
       } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); signal?.removeEventListener('abort', abort); }
@@ -2503,8 +2502,7 @@ function kinCreateCTSync() {
         let r;
         try { r = await fetch(path, { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' }, signal: request.signal }); }
         catch (_) { throw refusal('failed'); }
-        if (r.status === 401) throw refusal('failed', 401);
-        if (r.status === 403) throw refusal('denied', 403);
+        if (window.KinSessionTransport.refusal(r) === 'denied' && r.status === 403) throw refusal('denied', r.status);
         if (!r.ok) throw refusal('failed', r.status);
         try { return await r.json(); } catch (_) { throw refusal('failed', r.status); }
       } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); }
@@ -3135,11 +3133,13 @@ function kinCreateCTPresets() {
 }
 
 function kinCreateViewerJobs() {
-  let ready, current, epoch = 0;
-  // S5-U2b(R-001 F02, R-002 F01): a document that turns clinician-only takes the Job panel down even if a writer answer mounted it
-  // first. (Astra S5-U2b-X5-R-001 F01) The end of the document's login does not: the panel has ended in place through
-  // kinViewerSession.writeModule (its status keeps saying why), a mount still waiting is dropped, and mode exit takes it down.
-  kinViewerSession.onChange(next => { if (next === 'writer') return; epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
+  let ready, current, epoch = 0, active = false;
+  function connect(ticket = epoch) {
+    ready?.then(extension => { if (active && ticket === epoch && !current && kinViewerSession.writer()) { current = extension; current.mount(); } }).catch(error => { if (active && ticket === epoch) { const p = document.querySelector('#kin-viewer-layout-status'); if (p) p.textContent = error.message; } });
+  }
+  // A later successful role check may resolve an initially unconfirmed mount.
+  // Clinician-only transitions remove authoring; the page boundary disposes every module at an end.
+  kinViewerSession.onChange(next => { if (next === 'writer') { connect(); return; } epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
   return { id: 'kin.viewer-jobs', preRegistration({ servicesManager }) {
     const load = name => new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
@@ -3150,21 +3150,26 @@ function kinCreateViewerJobs() {
       .then(() => window.kinViewerJobs(servicesManager.services, kinViewerLayoutModel, kinViewerSession.writeModule));
     ready.catch(() => {});
   }, onModeEnter() {
-    const ticket = ++epoch;
+    const ticket = ++epoch; active = true;
     // S5-U2b: saved jobs are written and read on writer routes; only a /me that answered writer mounts the Job panel.
-    kinViewerSession.decide().then(session => session === 'writer' ? ready : null).then(extension => { if (extension && ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
+    kinViewerSession.decide().then(session => { if (session === 'writer') connect(ticket); }).catch(e => {
       if (ticket === epoch) { const p = document.querySelector('#kin-viewer-layout-status'); if (p) p.textContent = e.message; }
     });
-  }, onModeExit() { epoch++; current?.stop(); current = null; } };
+  }, onModeExit() { epoch++; active = false; current?.stop(); current = null; } };
 }
 
 // Findings live inside the Measurements panel; the dock keeps its two panels unchanged.
 function kinCreateViewerFindings() {
-  let ready, current, epoch = 0;
-  // S5-U2b(R-001 F02, R-002 F01): a document that turns clinician-only takes the Findings section down even if a writer answer
-  // mounted it first. (Astra S5-U2b-X5-R-001 F01) The end of the document's login does not: the section's store has ended in place
-  // through kinViewerSession.writeModule (its status keeps "다시 로그인"), and mode exit takes it down.
-  kinViewerSession.onChange(next => { if (next === 'writer') return; epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
+  let ready, current, epoch = 0, active = false;
+  function connect(ticket = epoch) {
+    ready?.then(extension => { if (active && ticket === epoch && !current && kinViewerSession.writer()) { current = extension; current.mount(); } }).catch(error => {
+      if (!active || ticket !== epoch) return;
+      const host = document.querySelector('#kin-viewer-history');
+      if (host) { const p = document.createElement('p'); p.id = 'kin-viewer-findings-unavailable'; p.textContent = error.message; host.append(p); }
+    });
+  }
+  // Keep the mount eligible for a successful account retry while this mode is active.
+  kinViewerSession.onChange(next => { if (next === 'writer') { connect(); return; } epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
   return { id: 'kin.viewer-findings', preRegistration({ servicesManager }) {
     const load = name => new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
@@ -3180,22 +3185,20 @@ function kinCreateViewerFindings() {
     });
     ready.catch(() => {});
   }, onModeEnter() {
-    const ticket = ++epoch;
+    const ticket = ++epoch; active = true;
     // S5-U2b: findings are written and linked on writer routes; only a /me that answered writer mounts the Findings section.
-    kinViewerSession.decide().then(session => session === 'writer' ? ready : null).then(extension => { if (extension && ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
+    kinViewerSession.decide().then(session => { if (session === 'writer') connect(ticket); }).catch(e => {
       if (ticket !== epoch) return;
       const host = document.querySelector('#kin-viewer-history');
       if (host) { const p = document.createElement('p'); p.id = 'kin-viewer-findings-unavailable'; p.textContent = e.message; host.append(p); }
     });
-  }, onModeExit() { epoch++; current?.stop(); current = null; } };
+  }, onModeExit() { epoch++; active = false; current?.stop(); current = null; } };
 }
 
 function kinCreateViewerTechNote() {
   let ready, current, prepare, epoch=0, active=false, state='stopped';
-  // S5-U2b(R-001 F02, R-002 F01): a document that turns clinician-only drops the note bridge even if a writer answer connected it
-  // first; the bridge state names why ('read-only' or 'refused'). (Astra S5-U2b-X5-R-001 F01) The end of the document's login has
-  // ended the bridge in place through kinViewerSession.writeModule (its status says to open the viewer again); mode exit stops it.
-  kinViewerSession.onChange(next=>{if(next==='writer')return;epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;}});
+  // The bridge follows the verified role; document disposal belongs to the page boundary.
+  kinViewerSession.onChange(next=>{if(next==='writer'){connect();return;}epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;}});
   function connect() {
     if(!active||state==='loading'||state==='ready'||!kinViewerSession.writer())return;
     const ticket=epoch;state='loading';
@@ -3252,7 +3255,7 @@ function kinCreateViewerTechNote() {
   },onModeEnter(){if(!prepare)return;epoch++;active=true;state='unconfirmed';const ticket=epoch;
     // S5-U2b: Tech notes are a technician record the clinician allowlist neither reads nor writes. The bridge connects only
     // after a /me answered writer; until an answer it stays 'unconfirmed', and 'read-only'/'refused' never connect.
-    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer'){state='stopped';connect();}else state=session;});
+    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer')connect();else state=session;});
   },onModeExit(){epoch++;active=false;state='stopped';current?.stop();current=null;}};
 }
 
@@ -3512,9 +3515,9 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
   async function json(result) { try { return await result.json(); } catch (_) { throw new Error('원본 PDF 확인 응답이 올바르지 않습니다.'); } }
   function requireReply(reply, message) {
     if (reply?.ok) return reply;
-    const error = new Error([401, 403].includes(reply?.status) ? '원본 PDF 접근이 거절되었습니다. 검사 접근 권한을 확인하세요.' :
-      reply?.status === 404 ? '원본 PDF를 찾을 수 없습니다.' : message);
-    error.retryable = !reply || reply.status === 429 || reply.status >= 500;
+    const error = window.KinSessionTransport.responseError(reply,
+      reply?.status === 404 ? '원본 PDF를 찾을 수 없습니다.' : message,
+      '원본 PDF 접근이 거절되었습니다. 검사 접근 권한을 확인하세요.');
     throw error;
   }
   function ownerOf(value) {
@@ -3653,7 +3656,7 @@ function kinCreateDicomPdf() {
    칸이 빈 채로 끝났다. 설정에서 닿는 재시도 지점이 없으므로 이번 모드 수명주기의 WADO 클라이언트 인스턴스 하나에만
    공개 메서드 retrieveSeriesMetadata를 자기 속성으로 씌우고, 나갈 때 그 속성이 아직 이 확장의 것일 때만 지운다.
    prototype·전역 fetch/XHR은 건드리지 않는다.
-   - 다시 묻는 것은 HTTP 500~599로 거절된 GET뿐이다. 0(중단·연결 오류)·4xx(401/403/404/429 포함)·동기 예외는 원래
+   - 다시 묻는 것은 HTTP 500~599 또는 AUTH_* 일시 실패로 거절된 GET이다. 종료 신호·코드 없는 4xx·0·동기 예외는 원래
      결과를 그대로 돌려준다. (수명주기, 검사, 시리즈)마다 한 번, 고정 1000ms 뒤, 같은 this·options로 보낸다.
    - 로더가 쥐는 약속은 여기서 돌려준 하나뿐이다. 다시 받은 응답으로 그 약속을 한 번 채우므로 storeInstances·표시 세트·
      HP 적용도 한 번만 일어난다. 끝난 실패는 마지막 오류로 거절하고 영상이 준비된 척하지 않는다.
@@ -3665,7 +3668,8 @@ function kinCreateSeriesMetadataRecovery() {
   const retryDelay = 1000, own = (target, key) => Object.prototype.hasOwnProperty.call(target, key);
   let services = null, extensions = null, ticket = null, phase = 'stopped';
   const retryable = error => !!error && typeof error === 'object' && !!error.request &&
-    Number.isInteger(error.status) && error.status >= 500 && error.status <= 599;
+    (window.KinSessionTransport.refusal(error) === 'temporary' ||
+      Number.isInteger(error.status) && error.status >= 500 && error.status <= 599);
   function studiesOf(search) {
     const list = [];
     for (const value of new URLSearchParams(search).getAll('StudyInstanceUIDs'))
@@ -3685,7 +3689,8 @@ function kinCreateSeriesMetadataRecovery() {
   }
   function describe(failure) {
     const code = Number.isInteger(failure.status) && failure.status > 0 ? 'HTTP ' + failure.status : '요청 오류';
-    if (failure.status === 401 || failure.status === 403) return failure.position + '번째 검사의 영상 정보에 접근할 수 없습니다(' + code + '). 이 검사 영상은 표시하지 않았습니다.';
+    if (window.KinSessionTransport.refusal(failure.error) === 'temporary') return failure.position + '번째 검사의 연결을 확인하지 못했습니다. 뷰어를 다시 열어 재시도하세요.';
+    if (window.KinSessionTransport.refusal(failure.error) === 'denied') return failure.position + '번째 검사의 영상 정보에 접근할 수 없습니다(' + code + '). 이 검사 영상은 표시하지 않았습니다.';
     return failure.position + '번째 검사의 영상 정보를 ' + (failure.retried ? '한 번 다시 요청했지만 ' : '') +
       '불러오지 못했습니다(' + code + '). 이 검사 영상은 표시하지 않았습니다. 뷰어를 다시 여세요.';
   }
@@ -3719,7 +3724,7 @@ function kinCreateSeriesMetadataRecovery() {
     const fail = (key, position, error, retried) => {
       if (!live()) return;
       const fresh = !current.failures.has(key);
-      current.failures.set(key, { position, status: error?.status, retried: retried || !!current.failures.get(key)?.retried });
+      current.failures.set(key, { position, status: error?.status, error, retried: retried || !!current.failures.get(key)?.retried });
       render(current);
       if (!fresh) return;
       try { services?.uiNotificationService?.show?.({ title: 'Image Loading', message: describe(current.failures.get(key)), type: 'error' }); } catch (_) {}

@@ -459,9 +459,8 @@
         const method=action==='load'?'GET':'PUT',expectedOwner=site?boundSite:boundOwner;
         const body=method==='GET'?undefined:JSON.stringify({expectedOwner,revision,value:action==='reset'?null:value});
         const response=await fetcher(scopeEndpoints[beforeScope],{method,credentials:'same-origin',cache:'no-store',signal:request.signal,headers:{'X-KIN-CSRF':'1',...(body?{'Content-Type':'application/json'}:{})},body});const raw=await json(response);
-        if(!response.ok)throw Error(response.status===403?'기관 공용 규칙의 저장·초기화는 관리자 전용입니다.'
-          :response.status===409?'다른 창에서 규칙이 바뀌었습니다. 다시 불러오세요.'
-          :site?'기관 저장 여부를 확인하지 못했습니다. 다시 불러오세요.':'계정 저장 여부를 확인하지 못했습니다. 다시 불러오세요.');
+        if(!response.ok)throw root.KinSessionTransport.responseError(response,response.status===409?'다른 창에서 규칙이 바뀌었습니다. 다시 불러오세요.'
+          :site?'기관 저장 여부를 확인하지 못했습니다. 다시 불러오세요.':'계정 저장 여부를 확인하지 못했습니다. 다시 불러오세요.','기관 공용 규칙의 저장·초기화는 관리자 전용입니다.');
         const data=site?siteValue(raw):accountValue(raw);
         await session(request.signal);if(ended||!live())return;
         // A response belongs to the scope that asked for it. Coming back to a different scope

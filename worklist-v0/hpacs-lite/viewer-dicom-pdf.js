@@ -53,7 +53,7 @@
       const controller=new AbortController(),signal=controller.signal,operation={controller,value};cancelSource();sourceRequest=operation;
       const init=(method='GET',body)=>({method,credentials:'same-origin',cache:'no-store',signal,headers:{'X-KIN-CSRF':'1',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
       const sourceOwns=()=>!ended&&sourceRequest===operation&&ticket===generation&&live(value),sourceLive=()=>sourceOwns()&&!signal.aborted;
-      const reply=async(path,options)=>{const result=await fetcher(path,options);if(!sourceLive())throw Error('선택한 원본 문서가 변경되었습니다.');if(!result?.ok){const error=Error(result?.status===401||result?.status===403?'로그인 또는 검사 접근 권한을 확인하세요.':'원본 PDF 확인 요청을 완료하지 못했습니다.');error.retryable=!result||result.status===429||result.status>=500;throw error;}const data=await json(result);if(!sourceLive())throw Error('선택한 원본 문서가 변경되었습니다.');return data;};
+      const reply=async(path,options)=>{const result=await fetcher(path,options);if(!sourceLive())throw Error('선택한 원본 문서가 변경되었습니다.');if(!result?.ok){throw root.KinSessionTransport.responseError(result,'원본 PDF 확인 요청을 완료하지 못했습니다.','로그인 또는 검사 접근 권한을 확인하세요.');}const data=await json(result);if(!sourceLive())throw Error('선택한 원본 문서가 변경되었습니다.');return data;};
       const work=(async()=>{
         const raw=await value.pdfUrl;if(!sourceLive())return;
         if(typeof raw!=='string')throw Error('원본 PDF 경로를 확인할 수 없습니다.');
@@ -92,7 +92,7 @@
     }
     function assertLive(operation){if(request!==operation||operation.controller.signal.aborted||operation.generation!==generation||!live(operation.before)||source?.url!==operation.before.url||source?.orthancId!==operation.before.orthancId||!sameOwner(source?.owner,operation.before.owner))throw Error('선택한 원본 문서가 변경되어 열지 않았습니다.');}
     async function response(path,init,operation){
-      const result=await fetcher(path,init);assertLive(operation);if(!result?.ok)throw Error(result?.status===401||result?.status===403?'로그인 또는 검사 접근 권한을 확인하세요.':'원본 PDF 확인 요청을 완료하지 못했습니다.');const data=await json(result);assertLive(operation);return data;
+      const result=await fetcher(path,init);assertLive(operation);if(!result?.ok)throw root.KinSessionTransport.responseError(result,'원본 PDF 확인 요청을 완료하지 못했습니다.','로그인 또는 검사 접근 권한을 확인하세요.');const data=await json(result);assertLive(operation);return data;
     }
     function showDocument(operation){
       closeDocument();
@@ -106,7 +106,7 @@
     }
     async function open(){
       if(ended||request||!boundOwner)return;if(nativeRetryNeeded){if(nativeRetryPending||!nativeRetrySource)return;nativeRetryPending=true;options.onRetry?.(nativeRetrySource.displaySet,nativeRetrySource.pdfUrl);button.textContent='Retry Source PDF';button.disabled=true;status.textContent='Checking native PDF…';return;}if(!source){button.disabled=true;button.textContent='Retry Source PDF';refresh();return;}
-      const before=snapshot(source),owner={...boundOwner},controller=new AbortController(),operation={controller,before,generation,url:null};request=operation;const signal=controller.signal,timer=setTimeout(()=>controller.abort(),10000);button.disabled=true;patient.textContent='';status.textContent='Verifying source PDF…';
+      const before=snapshot(source),owner={...boundOwner},controller=new AbortController(),operation={controller,before,generation,url:null};request=operation;let failure=null;const signal=controller.signal,timer=setTimeout(()=>controller.abort(),10000);button.disabled=true;patient.textContent='';status.textContent='Verifying source PDF…';
       const init=(method='GET',body)=>({method,credentials:'same-origin',cache:'no-store',signal,headers:{'X-KIN-CSRF':'1',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
       try{
         const first=ownerOf(await response('/api/me',init(),operation));if(!sameOwner(first,owner))throw Error('계정이 변경되어 PDF를 열지 않았습니다.');assertLive(operation);
@@ -118,8 +118,8 @@
         operation.url=await root.KinViewerResource.read(before.url,{signal,type:'application/pdf'});assertLive(operation);
         const last=ownerOf(await response('/api/me',init(),operation));if(!sameOwner(last,owner))throw Error('계정이 변경되어 PDF를 열지 않았습니다.');assertLive(operation);
         showDocument(operation);patient.textContent='Verified Patient ID: '+matches[0].id;if(request===operation)status.textContent='Opened source PDF · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.';
-      }catch(error){if(operation.url)root.KinViewerResource.release(operation.url);if(!ended&&request===operation){patient.textContent='';status.textContent=error?.name==='AbortError'||error instanceof TypeError?'원본 PDF 확인 요청을 완료하지 못했습니다.':error.message;}}
-      finally{clearTimeout(timer);if(request===operation){request=null;if(!ended){const ready=!!source&&sameOwner(boundOwner,source.owner);button.textContent=nativeRetryNeeded||!ready?'Retry Source PDF':'Open Source PDF';button.disabled=nativeRetryNeeded?nativeRetryPending||!boundOwner:!ready;}}}
+      }catch(error){failure=error;if(operation.url)root.KinViewerResource.release(operation.url);if(!ended&&request===operation){patient.textContent='';status.textContent=error?.name==='AbortError'||error instanceof TypeError?'원본 PDF 확인 요청을 완료하지 못했습니다.':error.message;}}
+      finally{clearTimeout(timer);if(request===operation){request=null;if(!ended){const ready=!!source&&sameOwner(boundOwner,source.owner);button.textContent=nativeRetryNeeded||!ready||failure?.retryable?'Retry Source PDF':'Open Source PDF';button.disabled=nativeRetryNeeded?nativeRetryPending||!boundOwner:!ready||root.KinSessionTransport.refusal(failure)==='denied';}}}
     }
     button.addEventListener('click',open);
     async function bindOwner(){

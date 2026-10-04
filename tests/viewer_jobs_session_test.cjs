@@ -121,3 +121,17 @@ test('U5 Job: a current matching identity proceeds; invalid or dropped identitie
   assert.equal(w.status(), LISTED);
   assert.equal(w.session.state(), 'writer');
 });
+
+test('U5INT-F01: temporary coded refusal preserves the job panel and its retry', async () => {
+  for (const code of ['AUTH_IDP_UNAVAILABLE', 'AUTH_SESSION_BUSY', 'AUTH_STORAGE_FAILURE']) {
+    for (const at of ['/me', 'list read']) {
+      const w = await jobsWorld(), { run } = await heldRead(w, at);
+      w.held[0].release(403, { code }); await run; await tick();
+      assert.match(w.status(), /연결을 확인하지 못했습니다/);
+      assert.doesNotMatch(w.status(), /권한|거절/);
+      assert.deepEqual([w.session.state(), w.enders()], ['writer', 0]);
+      await w.refresh(); await tick();
+      assert.equal(w.status(), LISTED);
+    }
+  }
+});

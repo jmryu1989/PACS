@@ -33,7 +33,7 @@ window.KinTechNote = function (app) {
   }
   async function read() {
     if(work.state()!=='active')return;
-    const at=work.capture('document'); interruptedRead=true;interruptedHistory=null;interruptedSave=false;
+    const at=work.capture('document'); interruptedRead=true;interruptedHistory=null;interruptedSave=null;
     const ticket = ++seq, target = uid; busy = true; controls(); status('메모를 불러오는 중…');
     try {
       const result = await app.api('GET', '/studies/' + encodeURIComponent(target) + '/tech-note', undefined, undefined, at);
@@ -43,12 +43,15 @@ window.KinTechNote = function (app) {
   }
   $('save').onclick = async () => {
     if(work.state()!=='active')return;
+    if(interruptedSave){await reconcileSave(interruptedSave);return;}
     const at=work.capture('document');
     if (busy || !writable || !app.allowed() || ended) return;
     if (version && !$('reason').value.trim()) { status('수정·비우기 사유를 입력하세요.'); $('reason').focus(); return; }
     const ticket = ++seq, target = uid;
     const body = { baseVersion: version, text: $('text').value, reason: $('reason').value };
-    interruptedSave=true;busy = true; controls(); status('저장 중…');
+    let settled;
+    const pending={target,body,previous:saved,done:new Promise(resolve=>{settled=resolve;})};
+    interruptedSave=pending;busy = true; controls(); status('저장 중…');
     try {
       const result = await app.api('POST', '/studies/' + encodeURIComponent(target) + '/tech-note', body, undefined, at);
       work.commit(at,()=>{if (valid(ticket, target)) {
@@ -56,8 +59,33 @@ window.KinTechNote = function (app) {
         status('저장되었습니다. v' + version);
       }});
     } catch (e) { work.commit(at,()=>{if (valid(ticket, target)) status('저장 확인 실패: ' + e.message + ' · 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.');}); }
-    finally { if (ticket === seq) busy=false; work.commit(at,()=>{if(ticket===seq){interruptedSave=false;controls();}}); }
+    finally { settled();if (ticket === seq) busy=false; work.commit(at,()=>{if(ticket===seq){interruptedSave=null;controls();}}); }
   };
+  async function reconcileSave(pending) {
+    if(work.state()!=='active'||ended||!d.open||uid!==pending.target)return;
+    const at=work.capture('document'),ticket=++seq,target=uid;
+    busy=true;controls();
+    // A write can finish after preparation is cancelled. Wait for that attempt,
+    // then read its result before another save can reuse the old version.
+    await pending.done;
+    if(!work.admits(at)||!valid(ticket,target))return;
+    try {
+      const result=await app.api('GET','/studies/'+encodeURIComponent(target)+'/tech-note',undefined,undefined,at);
+      work.commit(at,()=>{
+        if(!valid(ticket,target))return;
+        if(result.uid!==target||result.note&&result.note.studyUid!==target)throw new Error('메모 대상이 일치하지 않습니다');
+        const latest=result.note,revision=latest?.version??0;
+        const stored=revision===pending.body.baseVersion+1&&latest?.text===pending.body.text&&
+          (latest?.reason||'')===(pending.body.reason||'').trim();
+        const unchanged=revision===pending.body.baseVersion&&(latest?.text??'')===pending.previous;
+        if(stored){adopt(result);$('history-items').replaceChildren();$('more').hidden=true;cursor=null;}
+        else if(unchanged){writable=result.writable===true;}
+        else {status('다른 메모가 저장되었습니다. 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.');return;}
+        interruptedSave=null;status('');
+      });
+    } catch(e){work.commit(at,()=>{if(valid(ticket,target))status('저장 확인 실패: '+e.message+' · 입력은 유지했습니다.');});}
+    finally {if(ticket===seq)busy=false;work.commit(at,()=>{if(ticket===seq)controls();});}
+  }
   $('reload').onclick = () => {
     if (!busy && (!dirty() || confirm('입력 중인 메모를 버리고 최신 저장본을 읽을까요?'))) read();
   };
@@ -103,12 +131,12 @@ window.KinTechNote = function (app) {
   }
   $('close').onclick = () => close(); d.addEventListener('cancel', e => { e.preventDefault(); close(); });
   function end() { ended = true; close(true); }
-  let interruptedHistory=null,interruptedSave=false;
+  let interruptedHistory=null,interruptedSave=null;
   const unsubscribe=work.onInvalidate(event=>{
     if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
     if(event.reason==='cancel'){
       ++seq;busy=false;controls();
-      if(d.open&&interruptedSave){interruptedSave=false;status('저장 확인 실패 · 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.');}
+      if(d.open&&interruptedSave){reconcileSave(interruptedSave);}
       else if(d.open&&interruptedHistory!==null){const more=interruptedHistory;interruptedHistory=null;history(more);}
       else if(d.open&&interruptedRead&&!dirty()){interruptedRead=false;read();}
     }

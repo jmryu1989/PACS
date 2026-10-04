@@ -353,13 +353,15 @@ class ViewerSessionDOMTest(unittest.TestCase):
                 view.wait_for_function("KinWorkContext.state()==='preparing'")
                 self.queue_image_and_work(view)
                 self.hold_lock(preparer, 'kin-session-ended:S1')
+                # Storage delivery can close the viewer before evaluate returns. Observe
+                # navigation before either end signal, independent of browser queue order.
+                landing = []
+                view.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
                 preparer.evaluate("""storage=>{
                   const record=JSON.stringify({session:'S1',status:'ending'});
                   if(storage==='cookie')document.cookie='kin-session-end='+encodeURIComponent(record)+';path=/';
                   else localStorage.setItem('kin-session-end',record);
                 }""", storage)
-                landing = []
-                view.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
                 preparer.close()
                 for _ in range(200):
                     if landing: break
@@ -1318,15 +1320,16 @@ class ViewerSessionDOMTest(unittest.TestCase):
         panel.get_by_label("MPR annotation label", exact=True).fill("")
         self.assertEqual(view.evaluate("kinMprMarks.capture(true)"), before)
 
-    def test_tech_note_input_survives_preparation_and_a_save_answered_across_it_is_not_called_saved(self):
+    def test_tech_note_save_across_cancel_is_confirmed_by_read_without_a_repair_click(self):
         view = self.open_viewer()
         held = []
+        stored = {"note": None}
         note_url = BASE + "/api/studies/1.2.3/tech-note"
         def note(route):
             if route.request.method == "POST":
                 held.append(route)
             else:
-                route.fulfill(json={"uid": "1.2.3", "writable": True, "note": None})
+                route.fulfill(json={"uid": "1.2.3", "writable": True, **stored})
         view.route(note_url, note)
         view.add_script_tag(path=str(HPACS / "tech-note.js"))
         view.evaluate("""() => {
@@ -1344,21 +1347,19 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.assertEqual(len(held), 1)
         self.notice("session-preparing")
         view.wait_for_timeout(50)
-        held.pop().fulfill(json={"uid": "1.2.3", "writable": True,
-                                "note": {"studyUid": "1.2.3", "text": "unsaved original", "version": 1,
-                                         "author": "synthetic", "createdAt": "2026-10-04T00:00:00Z"}})
+        stored["note"]={"studyUid": "1.2.3", "text": "unsaved original", "version": 1,
+                        "author": "synthetic", "createdAt": "2026-10-04T00:00:00Z"}
+        held.pop().fulfill(json={"uid": "1.2.3", "writable": True, **stored})
         view.wait_for_timeout(100)
         self.assertEqual(view.locator("#tech-note-text").input_value(), "unsaved original")
         self.assertNotIn("저장되었습니다", view.locator("#tech-note-status").inner_text())
         self.notice("session-resumed")
         view.wait_for_timeout(100)
         self.assertEqual(view.locator("#tech-note-text").input_value(), "unsaved original")
-        # The shared Tech Note module (also mounted by main.html) treats a save whose answer crossed a cancelled
-        # preparation as unconfirmed: the input stays, the person is told, and Save Note is pressable again. It
-        # does not claim a save it did not apply (the same contract as tests/session_modules_dom_test.py).
+        # The resumed document confirms the old write by reading it, without a repair prompt.
         status = view.locator("#tech-note-status").inner_text()
         self.assertNotIn("저장되었습니다", status)
-        self.assertIn("입력은 유지했습니다", status)
+        self.assertEqual("", status)
         self.assertTrue(view.get_by_role("button", name="Save Note", exact=True).is_enabled())
 
     def test_pause_retires_cancelled_timers_and_defers_an_xhr_completion(self):

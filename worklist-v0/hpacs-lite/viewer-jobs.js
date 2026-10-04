@@ -145,11 +145,7 @@ window.kinViewerJobs = function (services, model, session = null) {
           return new Error('화면이 변경되었습니다.');
         };
         if (!live()) throw await drop();
-        if (r.status === 401 || r.status === 403 && !foreign) {
-          // Session termination is owned by the page transport and gate.
-
-          throw new Error('검사 접근 권한을 확인할 수 없습니다.');
-        }
+        if (window.KinSessionTransport.refusal(r)) throw window.KinSessionTransport.responseError(r);
         const value = await r.json().catch(() => null);
         if (!live()) throw await drop(value);
         if (!r.ok || !value) { const e = new Error(typeof value?.message === 'string' ? value.message : '서버 연결을 확인한 뒤 다시 시도하세요.'); e.status = r.status; throw e; }
@@ -525,7 +521,7 @@ window.kinViewerJobs = function (services, model, session = null) {
         else if (ctx.mutating) result = { state: 'screen-unknown', reason: 'apply-failed', message: '복원 결과를 확인하지 못했습니다. 현재 영상을 확인하세요.' };
         else if (!live()) result = { state: 'refused', reason: 'ended', message: LOCATION_TEXT.ended };
         else if (e?.name === 'AbortError' || controller.signal.aborted) result = { state: 'refused', reason: 'timeout', message: LOCATION_TEXT.timeout };
-        else if (e?.status === 403 || e?.status === 404) {
+        else if (window.KinSessionTransport.refusal(e) === 'denied' || e?.status === 404) {
           result = { state: 'refused', reason: 'job-unavailable', message: LOCATION_TEXT['job-unavailable'] };
           // A refused Job may mean a withdrawn comparison study: the anchor list decides whether this panel ends.
           if (e.status === 403) load().catch(() => {});

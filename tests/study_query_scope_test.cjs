@@ -14,9 +14,11 @@ test('lean bootstrap never reads study/report/draft; legacy keeps private state 
  const full=await svc.bootstrap(caller);assert.equal(full.statesOmitted,undefined);assert.equal(full.states['1'].draft.findings,'draft');assert.equal(full.states['2'].findings,'');assert.equal(full.states['3'],undefined);
  for(const q of [{states:'all'},{states:['omit']},{states:'omit',x:'y'}])await assert.rejects(svc.bootstrap(caller,q),e=>e.getStatus()===400);
 });
-test('page query projects only membership then loads details and notes for its UID',async()=>{
+test('page query excludes private report state before loading details and notes for its selected UID',async()=>{
  const {svc,calls}=setup();const r=await svc.listStudies(caller,{limit:'1'});assert.equal(r.studies.length,1);assert.equal(r.studies[0].state.ov.id,'override');assert.equal(r.pagination.total,2);
- assert.deepEqual(Object.keys(calls[0][1].select).sort(),['institutionId','teleInstitutionId','uid']);
+ // Arrival ordering also needs origin/createdAt. The boundary is private state,
+ // not a fixed list of implementation projection fields.
+ for(const field of ['rs','preDoc','preReviewer','ov'])assert.notEqual(calls[0][1].select[field],true);
  for(const [kind,arg] of calls.filter(x=>['report','draft'].includes(x[0])))assert.deepEqual(arg.where.uid.in,['1']);
  assert.deepEqual(calls.find(x=>x[0]==='note')[1][2].values,['1']);
  assert.equal(calls.filter(x=>x[0]==='state').length,3);

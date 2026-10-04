@@ -33,6 +33,33 @@ def violate(name):
 
 
 class ViewerResourceGuardDOMTest(unittest.TestCase):
+    def test_resource_auth_refusal_classification_and_recovery(self):
+        from playwright.sync_api import sync_playwright
+        from viewer_session_fixture import install_viewer_session
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.route('**/*', lambda route: route.fulfill(body='<body></body>', content_type='text/html'))
+            page.goto('https://resource-guard.test/ohif/viewer')
+            install_viewer_session(page)
+            for status in (401, 403):
+                for code in ('AUTH_IDP_UNAVAILABLE', 'AUTH_SESSION_BUSY', 'AUTH_STORAGE_FAILURE', None):
+                    with self.subTest(status=status, code=code):
+                        page.route('**/instances/refused', lambda route: route.fulfill(status=status,
+                            headers={'X-KIN-Auth-Code': code} if code else {}, body=''))
+                        result = page.evaluate("""async()=>{
+                          try { await KinViewerResource.read('/instances/refused'); return null; }
+                          catch(error) { return {message:error.message,retryable:error.retryable,state:KinWorkContext.state()}; }
+                        }""")
+                        self.assertEqual(result['state'], 'active')
+                        self.assertEqual(result['retryable'], bool(code))
+                        if code:
+                            self.assertIn('연결을 확인하지 못했습니다', result['message'])
+                            self.assertNotIn('거절', result['message'])
+                        else:
+                            self.assertIn('접근이 거절', result['message'])
+            browser.close()
+
     def detects(self, name):
         result=subprocess.run([sys.executable,'-B',str(Path(__file__).resolve()),'--violate',name],
                               capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=30)

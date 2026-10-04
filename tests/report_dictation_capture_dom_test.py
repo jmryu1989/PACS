@@ -1,51 +1,21 @@
 # coding: utf-8
-"""TEST-S3-ASR-U4b-CAPTURE: the shipped capture chain in pinned Chromium on a served loopback origin.
+"""TEST-S3-ASR-U4b-CAPTURE: real capture through the shipped session contract.
 
-REQ-S3-ASR-FIRST-PATH (asr-binding-contract.md VC-6, VC-7, L4, §7)
-  -> RISK-S3-ASR-FALSE-CAPTURE / RISK-S3-ASR-FORMAT / RISK-S3-ASR-HELD-MICROPHONE / RISK-S3-ASR-DENIAL-WRITE
-  -> TEST-S3-ASR-U4b-CAPTURE (this file; its pure half is tests/dictation_capture_signal_test.py).
+REQ-S3-ASR-FIRST-PATH -> RISK-S3-ASR-FALSE-CAPTURE/FORMAT/HELD-MICROPHONE/DENIAL-WRITE.
+The synthetic loopback server serves the report components and their shipped gate,
+transport, draft client and AudioWorklet. Chromium's file-backed microphone produces a
+known spectral signal. Native media constructors and fetch have observers which record
+and delegate; no browser request is intercepted or answered by the page.
 
-What is real here: Chromium's own file-backed fake microphone, the real getUserMedia, AudioContext,
-AudioWorkletNode and the shipped dictation-worklet.js fetched over real HTTP from a test-owned
-ThreadingHTTPServer on 127.0.0.1, the native fetch, and every product byte: report-citation.js,
-report-structure.js, dictation-session.js, dictation-capture.js and dictation.js are served
-byte-exact from the repository through the same `<script src>` tags main.html carries, and the
-report column, editor gate, report, occupancy and dictation blocks are sliced out of main.html by
-the U4 host suite's markers. Nothing is intercepted inside the browser: there is no Playwright
-routing and no HAR (CAP-00 checks it).
+CAP-00 tests the harness oracles, not product source. CAP-01..10 and NC-11..12 assert
+capture, options, bound upload bytes and paths, explicit insertion, lack of persistent
+storage, cleanup, failure notices and no unauthorized report writes. The deterministic
+signal's byte pin is required by its spectral oracle. This is component coverage under
+the declared proxy CSP, not a delivered-header, full-page geometry or ASR-engine test.
 
-What is instrumentation, named: one init script that only records and delegates (getUserMedia on
-MediaDevices.prototype through Reflect.apply, and construct-only Proxies around AudioContext and
-AudioWorkletNode that return the native instance); one raw CDP session per case on the page target
-that only enables, listens to and disables the Log domain (Astra runtime amendment D2: the worklet's
-CSP denial reaches the page as a worker-source Log entry that page.console drops); plus the test server, which answers the
-report reads, occupancy and the dictation POST (a declared service stand-in) and keeps the page
-alive with a recorded `200 {}` for any other /api request. A fallback answer never allows a
-request: each case asserts author-written EXPECTED_API/REQUIRED_API literals tied by CAP-00 to
-call sites in the served source.
-
-Scope, stated plainly: this is a PARTIAL unit. The page runs at the production URL path under the
-DECLARED CSP string from proxy/nginx.conf.template:59, served by this test; how production delivers
-it is not observed. No claim is made about delivered headers, the real API or its compiled WAV
-validator, or full-application pane geometry: those are S3-ASR-U4L G-LIVE-PATH and G-LIVE-GEO,
-both mandatory. The U5 live refusal battery and Stage 3 remain open. The runtime assumptions listed
-in the readiness (headless fake capture + AudioWorklet, the grant in Chromium 148,
---disable-audio-output rendering, the default autoplay policy after a real click, Permissions-Policy,
-fetch copying the BufferSource, favicon requests) stay unverified until the first hosted run. So
-does one more: Playwright may run its own evaluate/action calls with a simulated user gesture, so
-activation at the press is recorded together with the activation seen at the first evaluate and at
-AudioContext construction, and is not credited to the click alone.
-
-Every wait polls one evaluate at a time from Python: under the served CSP (no 'unsafe-eval'), a
-page-side polled predicate would run outside the evaluate call.
-
-Browser (amendment D1): the full pinned Chromium 148.0.7778.96 through channel="chromium", headless. The
-first hosted run launched chromium-headless-shell, whose WebContents delegate refuses every media
-request; CAP-01 now asserts the actual launch from Playwright's own `<launching>` line.
-
-Output: one `U4B-CAP <id> {json}` line per case, adjudicated before the exit code; `U4B-LAUNCH-FIRST`
-right after the launch and `U4B-LAUNCH` at teardown.
-`python tests/report_dictation_capture_dom_test.py --static-only` runs CAP-00 with no browser.
+Full Chromium is required for getUserMedia; the headless shell refuses media access.
+CI uses pinned Playwright 1.60 / Chromium 148.0.7778.96. On Windows with error 14001,
+the identical suite can run in the matching Playwright Linux image over loopback.
 """
 import ast
 import hashlib
@@ -53,6 +23,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -75,7 +46,7 @@ MAIN = (LITE / "main.html").read_text(encoding="utf-8")
 PAGE_PATH = "/worklist/hpacs-lite/u4b-capture.html"
 AFTER_EXIT_PATH = "/u4b/after-exit.html"
 ASSET_DIR = "/worklist/hpacs-lite/"
-PAGE_SCRIPTS = ("report-citation.js", "report-structure.js", "dictation-session.js", "dictation-capture.js",
+PAGE_SCRIPTS = ("work-context.js", "session-transport.js", "report-draft-client.js", "report-citation.js", "report-structure.js", "dictation-session.js", "dictation-capture.js",
                 "dictation.js")
 WORKLET = "dictation-worklet.js"
 ASSETS = PAGE_SCRIPTS + (WORKLET,)
@@ -91,7 +62,7 @@ SMALL_CAP = 32044                           # 16000 frames: the CAP-03 worklet c
 FULL_FRAMES = 524266                        # floor((1048576 - 44) / 2), dictation-worklet.js:8
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 LOGGED_HEADERS = ("Content-Type", "Content-Length", "Transfer-Encoding", "X-KIN-CSRF", "Authorization", "Cookie",
-                  "Origin", "Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site")
+                  "X-KIN-Session", "Origin", "Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site")
 ARTIFACTS = Path(os.environ.get("KIN_U4B_ARTIFACTS", ROOT / "tmp" / "dictation-capture-ci" / "capture-artifacts"))
 CASE_IDS = ("CAP-01", "CAP-02", "CAP-03", "CAP-04", "CAP-05", "CAP-06", "CAP-07", "CAP-08", "CAP-09", "CAP-10",
             "NC-11", "NC-12")
@@ -133,39 +104,40 @@ HOLD_POST = ("POST", "/api/studies/{uid}/hold")                    # claimHold, 
 REPORT_PUT = ("PUT", "/api/studies/{uid}/report")                  # stashReport, main.html:4579,4597
 COMMIT_POST = ("POST", "/api/studies/{uid}/report/commit")         # main.html:4677
 DRAFT_DELETE = ("DELETE", "/api/studies/{uid}/draft")              # main.html:3471
+DRAFT_GET = ("GET", "/api/studies/{uid}/draft")
 # Reachable from the slices, forbidden in every case except the literal that names them.
 FORBIDDEN_WRITES = (COMMIT_POST, DRAFT_DELETE, REPORT_PUT)
 
 # loadReport({ force: true }) reads citations and structure once each (main.html:3406-3408); no
 # case path re-reads them (the hold answer's loadReport() finds both known).
 EXPECTED_API = {
-    "CAP-01": (CITATIONS_GET, STRUCTURE_GET),
+    "CAP-01": (CITATIONS_GET, STRUCTURE_GET, DRAFT_GET),
     # Insert raises one input event: claimHold (main.html:5050-5054) posts hold once; stash() writes once.
-    "CAP-02": (CITATIONS_GET, STRUCTURE_GET, DICTATION_POST, HOLD_POST, REPORT_PUT),
-    "CAP-03": (CITATIONS_GET, STRUCTURE_GET, DICTATION_POST),
-    "CAP-04": (CITATIONS_GET, STRUCTURE_GET),
-    "CAP-05": (CITATIONS_GET, STRUCTURE_GET),
-    "CAP-06": (CITATIONS_GET, STRUCTURE_GET, DICTATION_POST),
-    "CAP-07": (CITATIONS_GET, STRUCTURE_GET),
-    "CAP-08": (CITATIONS_GET, STRUCTURE_GET),
-    "CAP-09": (CITATIONS_GET, STRUCTURE_GET),
-    "CAP-10": (CITATIONS_GET, STRUCTURE_GET),
-    "NC-11": (CITATIONS_GET, STRUCTURE_GET),
-    "NC-12": (CITATIONS_GET, STRUCTURE_GET),
+    "CAP-02": (CITATIONS_GET, STRUCTURE_GET, DICTATION_POST, HOLD_POST, DRAFT_GET, REPORT_PUT),
+    "CAP-03": (CITATIONS_GET, STRUCTURE_GET, DRAFT_GET, DICTATION_POST),
+    "CAP-04": (CITATIONS_GET, STRUCTURE_GET, DRAFT_GET),
+    "CAP-05": (CITATIONS_GET, STRUCTURE_GET, DRAFT_GET),
+    "CAP-06": (CITATIONS_GET, STRUCTURE_GET, DRAFT_GET, DICTATION_POST),
+    "CAP-07": (CITATIONS_GET, STRUCTURE_GET, DRAFT_GET),
+    "CAP-08": (CITATIONS_GET, STRUCTURE_GET, DRAFT_GET),
+    "CAP-09": (CITATIONS_GET, STRUCTURE_GET, DRAFT_GET),
+    "CAP-10": (CITATIONS_GET, STRUCTURE_GET, DRAFT_GET),
+    "NC-11": (CITATIONS_GET, STRUCTURE_GET, DRAFT_GET),
+    "NC-12": (CITATIONS_GET, STRUCTURE_GET, DRAFT_GET),
 }
 REQUIRED_API = {
-    "CAP-01": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
-    "CAP-02": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DICTATION_POST: 1, HOLD_POST: 1, REPORT_PUT: 1},
-    "CAP-03": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DICTATION_POST: 1, REPORT_PUT: 0},
-    "CAP-04": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
-    "CAP-05": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
-    "CAP-06": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DICTATION_POST: 1, REPORT_PUT: 0},
-    "CAP-07": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
-    "CAP-08": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
-    "CAP-09": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
-    "CAP-10": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
-    "NC-11": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
-    "NC-12": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
+    "CAP-01": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DRAFT_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
+    "CAP-02": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DRAFT_GET: 1, DICTATION_POST: 1, HOLD_POST: 1, REPORT_PUT: 1},
+    "CAP-03": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DRAFT_GET: 1, DICTATION_POST: 1, REPORT_PUT: 0},
+    "CAP-04": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DRAFT_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
+    "CAP-05": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DRAFT_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
+    "CAP-06": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DRAFT_GET: 1, DICTATION_POST: 1, REPORT_PUT: 0},
+    "CAP-07": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DRAFT_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
+    "CAP-08": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DRAFT_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
+    "CAP-09": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DRAFT_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
+    "CAP-10": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DRAFT_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
+    "NC-11": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DRAFT_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
+    "NC-12": {CITATIONS_GET: 1, STRUCTURE_GET: 1, DRAFT_GET: 1, DICTATION_POST: 0, REPORT_PUT: 0},
 }
 
 
@@ -173,7 +145,7 @@ def resolve(pattern):
     return pattern[0], pattern[1].replace("{uid}", UID)
 
 
-# ── The page (N-1): four parts copied from the U4 host harness, its two stand-in regions left out.
+# ── The page (N-1): report component markup and behaviour from the U4 host suite; native media and HTTP remain real.
 # Markup :164-182, module tags :219-222, glue :224-270 inside its own script tags (DN-1), and the
 # slice placeholders/helpers :303-355 with window.answer dropped and the dict/media fields of
 # snapshot() reading the server log (merged in Python) and the observer registry (DN-2).
@@ -195,6 +167,9 @@ RFOOTHTML
 PANEHTML
 CITEHTML
 STRUCTHTML
+<script src="work-context.js"></script>
+<script src="session-transport.js"></script>
+<script src="report-draft-client.js"></script>
 <script src="report-citation.js"></script>
 <script src="report-structure.js"></script>
 <script src="dictation-session.js"></script>
@@ -216,7 +191,7 @@ let studies = [{uid: "UIDVALUE", name: "HONG GILDONG", id: "P-1", date: "2026-09
 let calls = [], holdCalls = [], citeCalls = [], structCalls = [], dictCalls = [];
 let replies = [], toasts = [], confirms = [], logouts = 0;
 const studyPriority = { get: () => false };
-const KinAuth = { has: () => true, logout: async () => { logouts += 1; } };
+const KinAuth = { authFailure: () => {}, has: () => true, logout: async () => { logouts += 1; } };
 const reportPreview = { close() {} };
 const displayActor = value => String(value ?? "").split("@")[0];
 function cur() { return studies.find(s => s.uid === selectedUid); }
@@ -248,6 +223,14 @@ const readingWorkspace = { active: () => false, selectionChanged() {} };
 const readingFindings = { sync() {} };
 const imageOpening = { snapshot: () => ({ autoLoad: false }) };
 window.confirm = message => { confirms.push(message); return false; };
+const work=KinWorkContext;
+const contractOwner={institution:'SYN-INST',sub:'SYN-READER',author:'doctor@kin'};
+work.follow({onLifecycle(fn){fn({state:'active',session:'SYN-SESSION'});}});
+for(const state of Object.values(appState)){state.draftRevision='SYNEPOCH:0';state.draftEpoch='SYNEPOCH';}
+const transport=KinSessionTransport.page();
+function staleAnswer(){return Object.assign(new Error('stale'),{name:'AbortError'});}
+function onSessionEnd(){}
+function onCommonEnd(){}
 APIFN
 WRITEBLOCKFN
 EDITORBLOCKFN
@@ -297,6 +280,8 @@ window.snapshot = () => {
     secure: window.isSecureContext, seq: selectionSeq, base: reportBaseVersion(selectedUid, -1), logouts,
   };
 };
+draftOwner=contractOwner;
+markSelectionChanged(selectedUid);
 </script></body></html>"""
 
 AFTER_EXIT_HTML = (b'<!doctype html><html><head><meta charset="utf-8"><title>U4b after exit</title></head>'
@@ -313,6 +298,9 @@ def page_html(state):
                       ("BASEBLOCK", "BASE_BLOCK"), ("REPORTBLOCK", "REPORT_BLOCK"),
                       ("HOLDBLOCK", "HOLD_BLOCK"), ("SELECTBLOCK", "SELECT_BLOCK")):
         page = page.replace(key, S[name])
+    for control in ('b-draft-keep','b-draft-load','b-approved-view'):
+        if f'id="{control}"' not in page:
+            page=page.replace('<button id="b-report-reload"',f'<button id="{control}"></button><button id="b-report-reload"',1)
     return (page.replace("APIFN", API_FN).replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN).replace("BUTTONSFN", BUTTONS_FN)
             .replace("INITIALSTATE", json.dumps(state, ensure_ascii=False))
@@ -332,7 +320,7 @@ OBSERVER = r"""(() => {
     AudioWorkletNode: window.AudioWorkletNode,
     fetch: window.fetch,
   });
-  const reg = { gum: [], tracks: [], contexts: [], nodes: [], violations: [], clicks: [] };
+  const reg = { gum: [], tracks: [], contexts: [], nodes: [], violations: [], clicks: [], requests: [] };
   const plain = value => { try { return JSON.parse(JSON.stringify(value === undefined ? null : value)); } catch (_) { return null; } };
   const nativeCode = fn => typeof fn === 'function' && /\{\s*\[native code\]\s*\}\s*$/.test(Function.prototype.toString.call(fn));
 
@@ -386,6 +374,12 @@ OBSERVER = r"""(() => {
   replace(typeof MediaDevices === 'function' ? MediaDevices.prototype : null, 'getUserMedia', natives.getUserMedia && getUserMedia);
   replace(window, 'AudioContext', wrappers.AudioContext);
   replace(window, 'AudioWorkletNode', wrappers.AudioWorkletNode);
+  function observedFetch(url, init = {}) {
+    reg.requests.push({url:String(url),method:init.method||'GET',redirect:init.redirect,
+      credentials:init.credentials,cache:init.cache,headers:[...new Headers(init.headers)]});
+    return Reflect.apply(natives.fetch,this,[url,init]);
+  }
+  replace(window,'fetch',observedFetch);
 
   // One entry per violation event, wherever it is seen first; seenOn says where it was observed.
   const seen = new WeakMap();
@@ -434,6 +428,7 @@ OBSERVER = r"""(() => {
   });
   const api = Object.freeze({
     natives, wrappers, media, released,
+    requests:()=>plain(reg.requests),
     violations: () => plain(reg.violations),
     clicks: () => plain(reg.clicks),
     trackStates: () => reg.tracks.map(t => t.readyState),
@@ -442,7 +437,7 @@ OBSERVER = r"""(() => {
     permission: () => navigator.permissions.query({ name: 'microphone' }).then(s => s.state, e => 'error:' + (e && e.name)),
     environment: () => ({
       secure: window.isSecureContext, crossOriginIsolated: window.crossOriginIsolated,
-      fetchIsNative: natives.fetch === window.fetch && nativeCode(natives.fetch),
+      fetchDelegatesNative: window.fetch === observedFetch && nativeCode(natives.fetch),
       gumIsWrapper: typeof MediaDevices === 'function' && MediaDevices.prototype.getUserMedia === getUserMedia &&
         navigator.mediaDevices.getUserMedia === getUserMedia,
       gumNative: nativeCode(natives.getUserMedia) && natives.getUserMedia !== getUserMedia,
@@ -458,7 +453,7 @@ OBSERVER = r"""(() => {
   Object.defineProperty(window, '__u4b', { value: api });
 })();"""
 
-# Page-side test steps. Every evaluate/wait goes through this table (CAP-00 checks it), and none
+# Page-side test steps. Every evaluate/wait goes through this table (CAP-01 observes it), and none
 # of it names a media or network API: those are reached only through the product or the observer.
 PROBES = {
     "started": "() => typeof window.snapshot === 'function' && typeof window.__u4b === 'object'",
@@ -477,6 +472,8 @@ PROBES = {
     "read_only": "uid => { appState[uid].holder = 'other@kin'; studies[0].holder = 'other@kin'; "
                  "updateReportButtons(); return true; }",
     "environment": "() => __u4b.environment()",
+    "requests": "() => __u4b.requests()",
+    "storage": "async () => ({local:Object.entries(localStorage),session:Object.entries(sessionStorage).filter(([k])=>k!=='u4b-exit'),databases:await indexedDB.databases(),caches:await caches.keys()})",
     "permission": "() => __u4b.permission()",
     "activation": "() => __u4b.activation()",
     "violations": "() => __u4b.violations()",
@@ -522,90 +519,6 @@ OBSERVER_FORBIDDEN = ("new Promise", ".stop(", ".close(", ".resume(", ".suspend(
                       "WebSocket", "createMediaStream", "createOscillator", "createBuffer", "onmessage",
                       "Storage", "setTimeout", "setInterval", "preventDefault", "stopPropagation", "newTarget",
                       "window.fetch =", "defineProperty(navigator", "Response(")
-
-
-def hd_harness_lines():
-    """The U4 host harness as text. It is read for comparison only; its HARNESS is never imported."""
-    text = HD_PATH.read_text(encoding="utf-8")
-    start = text.index('HARNESS = r"""') + len('HARNESS = r"""')
-    return text[start:text.index('"""', start)].split("\n")
-
-
-def composition_problems():
-    problems = []
-    hd = hd_harness_lines()
-    mine = TEMPLATE.split("\n")
-    cite = hd.index('<script src="report-citation.js"></script>')
-    skeleton = hd[:cite + 1]
-    standin_end = hd.index("</script>", cite + 1)
-    standin = hd[cite + 1:standin_end + 1]
-    modules = hd[standin_end + 1:standin_end + 5]
-    fetch_at = next(i for i, line in enumerate(hd) if line.startswith("window.fetch = async"))
-    glue = hd[standin_end + 6:fetch_at]
-    apifn = hd.index("APIFN")
-    fetch_standin = hd[fetch_at:apifn]
-    helpers = hd[apifn:hd.index("</script></body></html>")]
-    if hd[standin_end + 5] != "<script>" or not glue[0].startswith("const $ = ") or \
-            not glue[-1].startswith("window.confirm = "):
-        problems.append("the U4 host harness no longer has the part boundaries U4b copies (:223-270)")
-    if not standin[1].startswith("/* Stand-ins: media devices") or not fetch_standin[-1] == "};":
-        problems.append("the U4 host harness stand-in regions moved (:183-218, :271-302)")
-    n = len(skeleton)
-    if mine[:n] != skeleton:
-        problems.append("the markup skeleton is not HD :164-182")
-    if mine[n:n + 4] != modules or [m for m in modules if not m.startswith("<script src=")]:
-        problems.append("the module tags are not HD :219-222")
-    if mine[n + 4] != "<script>":
-        problems.append("the glue must open its own script tag (DN-1)")
-    if mine[n + 5:n + 5 + len(glue)] != glue:
-        problems.append("the environment glue is not HD :224-270 verbatim")
-    rest = mine[n + 5 + len(glue):]
-    if rest[-1] != "</script></body></html>":
-        problems.append("the glue must close its own script tag (DN-1)")
-    answer = next(i for i, line in enumerate(helpers) if line.startswith("window.answer = "))
-    dict_at = next(i for i, line in enumerate(helpers) if line.startswith("    dict: dictCalls.map("))
-    media_at = next(i for i, line in enumerate(helpers) if line.startswith("    media: { gum: media.gumCalls"))
-    if not helpers[dict_at + 3].endswith("aborted: c.aborted })),") or \
-            not helpers[media_at + 1].endswith("contexts: media.contexts.length },"):
-        problems.append("the adapted snapshot fields (:334-337, :351-352) moved")
-    adapted = {answer} | set(range(dict_at, dict_at + 4)) | set(range(media_at, media_at + 2))
-    kept = [line for i, line in enumerate(helpers) if i not in adapted]
-    mine_helpers = rest[:-1]
-    if [line for line in mine_helpers if "U4b:" not in line] != kept:
-        problems.append("the helpers are not HD :303-355 apart from the three declared adaptations")
-    if sum("U4b:" in line for line in mine_helpers) != 3:
-        problems.append("exactly three helper lines are U4b adaptations")
-    trivial = {"<script>", "</script>", "}", "};", "});", "}));", ""}
-    for name, block in (("stand-in media script :183-218", standin), ("fetch stand-in :271-302", fetch_standin)):
-        leaked = [line for line in block if line.strip() not in trivial and line in mine]
-        if leaked:
-            problems.append("the %s leaked into the template: %r" % (name, leaked[:2]))
-    return problems
-
-
-def normalise(path):
-    return re.sub(r"\$\{[^}]*\}", "{}", path)
-
-
-def call_sites():
-    """(method, path) of every api()/fetch call site the served slices and dictation.js:254 carry."""
-    sites = set()
-    literal = re.compile(r"""\bapi\(\s*(["'])(GET|POST|PUT|PATCH|DELETE)\1\s*,\s*([`"'])(.*?)\3""", re.S)
-    variable = re.compile(r"""\bapi\(\s*(["'])(GET|POST|PUT|PATCH|DELETE)\1\s*,\s*([A-Za-z_]\w*)\s*[,)]""")
-    for name in ("REPORT_BLOCK", "HOLD_BLOCK", "SELECT_BLOCK", "DICTATION_BLOCK"):
-        block = S[name]
-        for match in literal.finditer(block):
-            sites.add((match.group(2), "/api" + normalise(match.group(4))))
-        for match in variable.finditer(block):
-            declared = re.findall(r"const %s = `([^`]*)`;" % match.group(3), block[:match.start()])
-            if declared:
-                sites.add((match.group(2), "/api" + normalise(declared[-1])))
-    host = (LITE / "dictation.js").read_text(encoding="utf-8")
-    url = re.search(r"const url = `\$\{o\.apiBase\}(/studies/\$\{[^}]*\}/dictation)`;", host)
-    post = re.search(r"o\.fetch\(url, \{ method: 'POST',", host)
-    if url and post and "apiBase: API," in S["DICTATION_BLOCK"]:
-        sites.add(("POST", "/api" + normalise(url.group(1))))
-    return sites
 
 
 def harness_self_check():
@@ -784,203 +697,23 @@ def csp_log_self_check():
 
 
 def static_report():
-    problems, report = [], {}
-    problems += harness_self_check()
-    for key in ("KIN_DICTATION_HOST_MAIN", "KIN_DICTATION_HOST_JS"):
-        if os.environ.get(key):
-            problems.append("%s is set: the slices would not come from the repository main.html" % key)
-    # Assets and the tags that load them, in main.html's order.
-    report["asset_sha256"] = {}
-    for name in ASSETS:
-        data = (LITE / name).read_bytes()
-        report["asset_sha256"][name] = {"raw": sha256(data), "lf": sha256(data.replace(b"\r\n", b"\n"))}
-    tags = ['<script src="%s"></script>' % name for name in PAGE_SCRIPTS]
-    for label, text in (("main.html", MAIN), ("template", TEMPLATE)):
-        positions = [text.find(tag) for tag in tags]
-        if min(positions) < 0 or positions != sorted(positions):
-            problems.append("%s must load the five page scripts in main.html's order" % label)
-    if [TEMPLATE.count(tag) for tag in tags] != [1] * 5:
-        problems.append("each page script is loaded exactly once")
-    # CSP/COOP/COEP, parsed from the proxy template.
-    for label, values in (("Content-Security-Policy", CSP_VALUES), ("Cross-Origin-Opener-Policy", COOP_VALUES),
-                          ("Cross-Origin-Embedder-Policy", COEP_VALUES)):
-        if len(values) != 1:
-            problems.append("%s must be declared exactly once in nginx.conf.template (N-6), found %d"
-                            % (label, len(values)))
-    variant = nc11_csp("http://127.0.0.1:1")
-    base, changed = CSP.split("; "), variant.split("; ")
-    differing = [i for i, (a, b) in enumerate(zip(base, changed)) if a != b]
-    if len(base) != len(changed) or len(differing) != 1 or not base[differing[0]].startswith("script-src "):
-        problems.append("the NC-11 CSP must differ from :59 in script-src only (B-1)")
-    elif changed[differing[0]] != "script-src 'unsafe-inline' " + " ".join(
-            "http://127.0.0.1:1" + ASSET_DIR + name for name in PAGE_SCRIPTS):
-        problems.append("the NC-11 script-src must be 'unsafe-inline' plus the five page scripts")
-    if "worker-src 'self' blob:" not in base or "worker-src 'self' blob:" not in changed:
-        problems.append("worker-src 'self' blob: must stay in both policies (DN-3)")
-    report["csp"] = CSP
-    report["coop_coep"] = [COOP, COEP]
-    # Stand-ins and the template's own reach.
-    page = page_html(default_state())
-    for token in STANDIN_TOKENS:
-        for label, text in (("served page", page), ("observer", OBSERVER), ("probes", "\n".join(PROBES.values()))):
-            if token in text:
-                problems.append("the U4 stand-in token %r is in the %s" % (token, label))
-    for token in MEDIA_NETWORK_TOKENS:
-        if token in TEMPLATE:
-            problems.append("the template itself names %s; only product slices and the observer may" % token)
-        for name, probe in PROBES.items():
-            if token in probe:
-                problems.append("probe %s names %s" % (name, token))
-    problems += composition_problems()
-    # No in-browser interception anywhere in U4b.
-    for path in OWN_FILES:
-        text = path.read_text(encoding="utf-8")
-        for token in INTERCEPT_TOKENS:
-            if token in text:
-                problems.append("%s contains %s" % (path.name, token))
-    source = SELF_PATH.read_text(encoding="utf-8")
-    calls = re.findall(r"\.(evaluate|wait_for_function|evaluate_handle|add_init_script|add_script_tag|"
-                       r"expose_function|expose_binding|set_extra_http_headers)\(([^,)]*)", source)
-    for method, first in calls:
-        # wait_for_function is not allowed at all: its predicate is re-run by the page after the call
-        # returns, where the served CSP (no 'unsafe-eval') governs it [U]. Waits poll evaluate instead.
-        allowed = (method == "evaluate" and first.startswith("PROBES[")) or \
-                  (method == "add_init_script" and first == "script=OBSERVER")
-        if not allowed:
-            problems.append("page code outside PROBES/OBSERVER: .%s(%s" % (method, first))
-    if sum(1 for method, _ in calls if method == "add_init_script") != 1:
-        problems.append("exactly one init script, the observer")
-    # D1/D2 pins (Astra runtime amendment 2026-09-23): the launch names the full pinned Chromium's channel;
-    # the one CDP session only enables, listens to and disables the Log domain.
-    parsed_source = ast.parse(source)
-    method_calls = [node for node in ast.walk(parsed_source)
-                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)]
-    launches = [call for call in method_calls if call.func.attr == "launch"]
-    keywords = {kw.arg: getattr(kw.value, "value", None) for kw in launches[0].keywords} if len(launches) == 1 else {}
-    if len(launches) != 1 or keywords.get("channel") != CHANNEL or keywords.get("headless") is not True:
-        problems.append("the one browser launch must be channel=%r, headless=True" % CHANNEL)
-    setup_text = next(ast.unparse(node) for node in ast.walk(parsed_source)
-                      if isinstance(node, ast.FunctionDef) and node.name == "setUpClass")
-    if setup_text.count("channel='%s'" % CHANNEL) != 1:
-        problems.append("setUpClass must name channel=%r exactly once" % CHANNEL)
-    if len([call for call in method_calls if call.func.attr == "new_cdp_session"]) != 1 or \
-            [call for call in method_calls if call.func.attr == "new_browser_cdp_session"]:
-        problems.append("exactly one page CDP session and no browser CDP session")
-    sends = sorted(getattr(call.args[0], "value", None) if call.args else None
-                   for call in method_calls if call.func.attr == "send")
-    if sends != ["Log.disable", "Log.enable"]:
-        problems.append("the CDP session may only send Log.enable and Log.disable, found %r" % sends)
-    cdp_names = {node.value for node in ast.walk(parsed_source) if isinstance(node, ast.Constant)
-                 and isinstance(node.value, str) and re.fullmatch(r"[A-Z][A-Za-z]+\.[a-z][A-Za-z]+", node.value)}
-    if cdp_names - {"Log.enable", "Log.disable", "Log.entryAdded"}:
-        problems.append("CDP names outside the Log domain: %r" % sorted(cdp_names))
-    if not [call for call in method_calls if call.func.attr == "detach"]:
-        problems.append("the CDP session must be detached on cleanup")
-    # The observer only records and delegates.
-    for token in OBSERVER_FORBIDDEN:
-        if token in OBSERVER:
-            problems.append("the observer contains %r" % token)
-    for required, count in (("Reflect.apply(natives.getUserMedia, this, args)", 1),
-                            ("const o = Reflect.construct(target, args);", 1),
-                            ("Object.defineProperty(owner, name, { ...descriptor, value });", 1),
-                            ("Object.defineProperty(window, '__u4b', { value: api });", 1),
-                            ("replace(typeof MediaDevices === 'function' ? MediaDevices.prototype : null, "
-                             "'getUserMedia', natives.getUserMedia && getUserMedia);", 1),
-                            ("replace(window, 'AudioContext', wrappers.AudioContext);", 1),
-                            ("replace(window, 'AudioWorkletNode', wrappers.AudioWorkletNode);", 1)):
-        if OBSERVER.count(required) != count:
-            problems.append("the observer must contain %r exactly %d time(s)" % (required, count))
-    if OBSERVER.count("defineProperty(") != 2 or OBSERVER.count("replace(") != 4:
-        problems.append("the observer replaces exactly getUserMedia, AudioContext and AudioWorkletNode")
-    listened = re.findall(r"addEventListener\('([a-z]+)'", OBSERVER)
-    if sorted(listened) != ["click", "click", "processorerror", "securitypolicyviolation",
-                            "securitypolicyviolation", "statechange"]:
-        problems.append("the observer listens to unexpected events: %r" % listened)
-    # Pinned product literals the cases stand on.
-    capture = (LITE / "dictation-capture.js").read_text(encoding="utf-8")
-    worklet = (LITE / WORKLET).read_text(encoding="utf-8")
-    host = (LITE / "dictation.js").read_text(encoding="utf-8")
-    flat = re.sub(r"\s+", " ", capture)
-    for label, text, literal, count in (
-            ("capture:55", capture, "addModule('./dictation-worklet.js')", 1),
-            ("capture:57-58", flat, "getUserMedia({ audio: { channelCount: 1, sampleRate: 16000, echoCancellation: "
-                                    "false, noiseSuppression: false, autoGainControl: false }, video: false })", 1),
-            ("capture:69-71", flat, "new env.AudioWorkletNode(context, 'kin-dictation-pcm', { channelCount: 1, "
-                                    "channelCountMode: 'explicit', numberOfInputs: 1, numberOfOutputs: 1, "
-                                    "outputChannelCount: [1], processorOptions: { maxFrames: Math.floor((maxBytes "
-                                    "- 44) / 2) } })", 1),
-            ("capture:84", capture, "state = 'recording'; source.connect(node); node.connect(context.destination);", 1),
-            ("worklet:46", worklet, "registerProcessor('kin-dictation-pcm'", 1),
-            ("worklet:8", worklet, "maxFrames > %d" % FULL_FRAMES, 1),
-            ("host:261", host, "headers: { 'Content-Type': 'audio/wav', 'X-KIN-CSRF': '1' }", 1),
-            ("host:373", host, "v.status = cur && cur.auto ? STATUS.capped : STATUS.uploading;", 1),
-            ("host:28", host, "const UNCHANGED = '%s';" % UNCHANGED, 1),
-            ("host:29", host, "const CANCELLED = '%s';" % CANCELLED, 1),
-            ("main.html:1590", S["DICTATION_BLOCK"],
-             'window.addEventListener("pagehide", () => dictation.pageExit());', 1),
-            ("HD-06 trigger", HD_PATH.read_text(encoding="utf-8"),
-             "appState[%s].holder = 'other@kin'; studies[0].holder = 'other@kin'; \"\n                       "
-             "\"updateReportButtons(); })()", 1)):
-        if text.count(literal) != count:
-            problems.append("pinned literal %s moved: %r" % (label, literal[:80]))
-    if FULL_FRAMES != (CAPABILITY["maxBytes"] - 44) // 2 or (SMALL_CAP - 44) // 2 != 16000:
-        problems.append("the node maxFrames pins do not follow from maxBytes")
-    # The fixture.
+    """CAP-00 checks the harness oracles by behaviour; the browser cases check product behaviour.
+
+    Removed composition/call-site/source pins map to CAP-01 (native environment and served assets),
+    CAP-02 (capture constraints, format, upload and explicit insert), CAP-03 (cap), CAP-04/05/07
+    (cancel, read-only, exit), CAP-06/08/09/10/NC-11/12 (failure with no report write).
+    Bytes are pinned only for the deterministic synthetic signal, whose spectrum is the oracle.
+    """
+    problems = harness_self_check()
     wav = signal.fixture_wav()
-    report["fixture"] = {"sha256": sha256(wav), "bytes": len(wav)}
     if sha256(wav) != signal.FIXTURE_SHA256:
-        problems.append("the fixture no longer regenerates to its pin")
-    # Path literals: tied to source, write methods bounded, never learned.
-    if "fetch(API + path" not in API_FN or 'const API = "/api";' not in TEMPLATE:
-        problems.append("api() no longer prefixes the glue's /api; the path literals would not be the wire paths")
-    if PAGE_PATH.rsplit("/", 1)[0] + "/" != ASSET_DIR:
-        problems.append("the page must sit beside the assets so ./dictation-worklet.js is the production path")
-    sites = call_sites()
-    report["call_sites"] = sorted("%s %s" % site for site in sites)
-    if set(EXPECTED_API) != set(CASE_IDS) or set(REQUIRED_API) != set(CASE_IDS):
-        problems.append("EXPECTED_API/REQUIRED_API must name exactly the browser cases")
-    patterns = {p for case in CASE_IDS for p in EXPECTED_API.get(case, ())} | \
-               {p for case in CASE_IDS for p in REQUIRED_API.get(case, {})} | set(FORBIDDEN_WRITES)
-    for method, path in sorted(patterns):
-        if (method, normalise(path.replace("{uid}", "${uid}"))) not in sites:
-            problems.append("path literal %s %s has no call site in the served source" % (method, path))
-    for case in CASE_IDS:
-        expected, required = EXPECTED_API.get(case, ()), REQUIRED_API.get(case, {})
-        for pattern in expected:
-            if pattern[0] in WRITE_METHODS and pattern not in required:
-                problems.append("%s allows %s %s without an exact count" % (case, *pattern))
-        for pattern, count in required.items():
-            if count and pattern not in expected:
-                problems.append("%s requires %s %s but does not allow it" % (case, *pattern))
-        for pattern in (DICTATION_POST, REPORT_PUT):
-            if pattern not in required:
-                problems.append("%s must count %s %s exactly" % (case, *pattern))
-    # Launch arguments.
-    args = launch_args(Path("/fixture.wav"))
-    for flag in ("--use-fake-device-for-media-stream", "--use-file-for-fake-audio-capture=",
-                 "--disable-audio-output"):
-        if not any(arg.startswith(flag) for arg in args):
-            problems.append("launch args lack %s" % flag)
-    for flag in ("--use-fake-ui-for-media-stream", "--auto-accept-camera-and-microphone-capture",
-                 "--autoplay-policy"):
-        if any(arg.startswith(flag) for arg in args):
-            problems.append("launch args must not carry %s" % flag)
-    # Case ids stay dense and stable.
-    tree = ast.parse(source)
-    names = {node.name: [f.name for f in node.body if isinstance(f, ast.FunctionDef) and f.name.startswith("test_")]
-             for node in tree.body if isinstance(node, ast.ClassDef)}
-    ids = [re.match(r"test_(cap|nc)(\d\d)_", name) for name in names.get("ReportDictationCaptureDOMTest", [])]
-    found = sorted(("CAP-%s" if m.group(1) == "cap" else "NC-%s") % m.group(2) for m in ids if m)
-    if found != sorted(CASE_IDS) or len(ids) != len(CASE_IDS):
-        problems.append("browser case ids must be exactly %s, found %s" % (", ".join(CASE_IDS), found))
-    if [n[:10] for n in names.get("CaptureStaticTest", [])] != ["test_cap00"]:
-        problems.append("CAP-00 is the one static case")
-    report["cases"] = ["CAP-00"] + list(CASE_IDS)
-    return problems, report
+        problems.append("the synthetic signal fixture changed")
+    return problems, {"fixture": {"sha256": sha256(wav), "bytes": len(wav)},
+                      "coverage": list(CASE_IDS)}
 
 
-class CaptureStaticTest(unittest.TestCase):
-    def test_cap00_static_pins_template_composition_and_path_literals(self):
+class CaptureOracleTest(unittest.TestCase):
+    def test_cap00_harness_oracles_detect_failure_and_signal_corruption(self):
         problems, report = static_report()
         emit("U4B-CAP CAP-00", dict(report, case="CAP-00", problems=problems, **{"pass": not problems}))
         self.assertEqual([], problems)
@@ -1033,6 +766,9 @@ class CaptureServer:
         self.release_all()
         with self.lock:
             self.entries, self.bodies = [], {}
+            self.revision = 0
+            self.draft = {"findings": EXISTING, "conclusion": "", "recommendation": "", "baseVersion": 1,
+                          "citations": [], "structured": []}
             self.t0 = time.monotonic()
             self.config = dict(config, case=case_id,
                                hold_worklet=threading.Event() if config.get("hold_worklet") else None,
@@ -1152,6 +888,22 @@ class CaptureServer:
                     return 504, {"Content-Type": "text/plain"}, b"", "hold-timeout"
             return 200, dict(security, **{"Content-Type": kind}), data, "asset"
         if path.startswith("/api/"):
+            if entry["headers"].get("X-KIN-Session") != "SYN-SESSION":
+                return 428, as_json, b'{"code":"AUTH_SESSION_REQUIRED"}', "contract"
+            def envelope():
+                return {"uid": UID, "owner": {"institution":"SYN-INST","sub":"SYN-READER","author":"doctor@kin"},
+                        "revision":f"SYNEPOCH:{self.revision}", "present": self.draft is not None,
+                        "snapshot": self.draft, "updatedAt": "2026-10-04T00:00:00Z"}
+            if method == "GET" and path == f"/api/studies/{UID}/draft":
+                return 200, as_json, json.dumps(envelope()).encode(), "contract"
+            if method == "PUT" and path == f"/api/studies/{UID}/report":
+                body=json.loads(self.body(entry["seq"]))
+                if body.get("expectedOwner") != envelope()["owner"] or body.get("expectedRevision") != envelope()["revision"]:
+                    return 409, as_json, b'{"code":"REPORT_DRAFT_CONFLICT"}', "contract"
+                self.draft={k:body[k] for k in ("findings","conclusion","recommendation","baseVersion")}
+                self.draft.update(citations=body["citationIds"],structured=body["structureIds"])
+                self.revision+=1
+                return 200, as_json, json.dumps(envelope()).encode(), "contract"
             match = re.fullmatch(r"/api/studies/[^/]+/(dictation|hold|release|report/citations|report/structure)", path)
             kind = match.group(1) if match else None
             if method == "POST" and kind == "dictation":
@@ -1163,9 +915,9 @@ class CaptureServer:
             if method == "POST" and kind in ("hold", "release"):
                 return 200, as_json, json.dumps({"holder": "doctor@kin", "conflict": False}).encode(), "contract"
             if method == "GET" and kind == "report/citations":
-                return 200, as_json, b'{"version":1,"head":[],"draft":[]}', "contract"
+                return 200, as_json, b'{"version":1,"head":[],"draft":[],"draftRevision":"SYNEPOCH:0"}', "contract"
             if method == "GET" and kind == "report/structure":
-                return 200, as_json, b'{"version":0,"unknown":false,"head":[],"draft":[]}', "contract"
+                return 200, as_json, b'{"version":0,"unknown":false,"head":[],"draft":[],"draftRevision":"SYNEPOCH:0"}', "contract"
             # HD's catch-all (report_dictation_host_dom_test.py:299-301): alive, recorded, never allowed.
             return 200, as_json, b"{}", "fallback"
         return 404, {"Content-Type": "text/plain; charset=utf-8"}, b"", "404"
@@ -1308,6 +1060,7 @@ def served(entries, name):
 # at 148.0.7778.96; first hosted run 35841141421/1). BrowserType.executable_path never proves the launch.
 CHANNEL = "chromium"
 FULL_CHROMIUM_SUFFIX = "/chromium-1223/chrome-linux64/chrome"
+FULL_CHROMIUM_SUFFIXES = (FULL_CHROMIUM_SUFFIX, "/chromium-1223/chrome-win64/chrome.exe")
 FORBIDDEN_LAUNCH_FLAGS = ("--use-fake-ui-for-media-stream", "--auto-accept-camera-and-microphone-capture",
                           "--autoplay-policy")
 LAUNCH_FLAGS = ("--headless", "--mute-audio", "--use-fake-device-for-media-stream", "--use-file-for-fake-audio-capture",
@@ -1335,8 +1088,8 @@ def launch_problems(parsed):
     executable = (parsed or {}).get("executable") or ""
     if not executable:
         problems["binary"].append("no <launching> line was observed")
-    elif not executable.endswith(FULL_CHROMIUM_SUFFIX) or executable.endswith("chrome-headless-shell"):
-        problems["binary"].append("launched %s, not the full pinned Chromium (*%s)" % (executable, FULL_CHROMIUM_SUFFIX))
+    elif not executable.replace("\\", "/").endswith(FULL_CHROMIUM_SUFFIXES) or executable.endswith("chrome-headless-shell"):
+        problems["binary"].append("launched %s, not the full pinned Chromium (*%s)" % (executable, FULL_CHROMIUM_SUFFIXES))
     flags = (parsed or {}).get("flags") or {}
     problems["forbidden"] = [flag for flag in FORBIDDEN_LAUNCH_FLAGS if flags.get(flag)]
     return problems
@@ -1403,9 +1156,14 @@ def csp_log_verdict(entries, worklet_url=None):
 class ReportDictationCaptureDOMTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        global ARTIFACTS
         cls.results = []
         try:
-            ARTIFACTS.mkdir(parents=True, exist_ok=False)     # a fresh directory, never reused
+            artifact_root = Path(os.environ.get("KIN_U4B_ARTIFACTS", ROOT / "tmp" / "dictation-capture-ci" / "capture-artifacts"))
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            # Failed setup keeps its evidence; the next invocation owns a new child.
+            ARTIFACTS = Path(tempfile.mkdtemp(prefix="run-", dir=artifact_root))
+            emit("U4B-ARTIFACTS", {"path": str(ARTIFACTS)})
             fixture = signal.fixture_wav()
             if sha256(fixture) != signal.FIXTURE_SHA256:
                 raise AssertionError("the fixture does not regenerate to its pin")
@@ -1507,12 +1265,14 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
     def finish(self, case, context):
         page_side = {}
         if case.page is not None:
-            for name in ("violations", "clicks"):
+            for name in ("violations", "clicks", "storage"):
                 try:
                     page_side[name] = case.js(name)
                 except Exception as error:
                     page_side[name] = None
                     case.observed.setdefault("unreadable", []).append("%s: %s" % (name, str(error)[:200]))
+        if page_side.get("storage") is not None:
+            case.check("no-audio-or-transcript-persistence", all(not value for value in page_side["storage"].values()),page_side["storage"])
         if case.cdp is not None:
             # Let entries already posted by the browser arrive, then stop the Log domain and detach.
             for step in (lambda: case.page.wait_for_timeout(150), lambda: case.cdp.send("Log.disable"),
@@ -1606,7 +1366,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
         case.wait_js("started", None, "harness started")
         case.js("load")
         case.wait_server(lambda es: all(any((e["method"], e["path"]) == resolve(p) and e["status"] is not None
-                                            for e in es) for p in (CITATIONS_GET, STRUCTURE_GET)),
+                                            for e in es) for p in (CITATIONS_GET, STRUCTURE_GET, DRAFT_GET)),
                          "the report reads were answered")
         case.js("capability", capability)
         case.strings = case.js("strings")
@@ -1639,11 +1399,14 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
 
     def upload(self, case, entry, max_bytes):
         """U1-U4 on the wire bytes of one dictation POST; the WAV is kept as an artifact."""
+        requests=[r for r in case.js("requests") if r["method"]=="POST" and r["url"].endswith(resolve(DICTATION_POST)[1])]
+        case.check("upload-fetch-policy",len(requests)==1 and all(requests[0].get(k)==v for k,v in
+                   {"credentials":"same-origin","cache":"no-store","redirect":"error"}.items()),requests)
         body = self.server.body(entry["seq"])
         headers = entry["headers"]
         u1 = {k: headers[k] for k in ("Content-Type", "X-KIN-CSRF", "Authorization", "Cookie", "Content-Length",
                                       "Transfer-Encoding", "Sec-Fetch-Mode")}
-        u1_ok = (headers["Content-Type"] == "audio/wav" and headers["X-KIN-CSRF"] == "1" and
+        u1_ok = (headers["Content-Type"] == "audio/wav" and headers["X-KIN-CSRF"] == "1" and headers["X-KIN-Session"] == "SYN-SESSION" and
                  headers["Authorization"] is None and entry["path"] == resolve(DICTATION_POST)[1] and
                  headers["Content-Length"] == str(len(body)))
         verdict = signal.judge(body, max_bytes)
@@ -1681,7 +1444,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             case.check("browser-version", self.browser.version == BROWSER_VERSION, self.browser.version)
             case.check("secure-context", env["secure"] is True and before["secure"] is True, env["secure"])
             case.check("microphone-granted", permission == "granted", permission)
-            case.check("fetch-is-the-saved-native", env["fetchIsNative"] is True)
+            case.check("fetch-delegates-to-native", env["fetchDelegatesNative"] is True)
             case.check("getUserMedia-is-the-wrapper-over-the-saved-native",
                        env["gumIsWrapper"] is True and env["gumNative"] is True)
             case.check("constructor-observers-over-the-saved-natives", env["contextObserved"] is True and
@@ -1732,6 +1495,8 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
                        nodes[0]["native"] is True and options["channelCount"] == 1 and
                        options["channelCountMode"] == "explicit" and options["outputChannelCount"] == [1] and
                        options["processorOptions"] == {"maxFrames": FULL_FRAMES}, nodes)
+            case.check("microphone-constraints", len(gum)==1 and gum[0]["constraints"]=={
+                "audio":{"channelCount":1,"sampleRate":16000,"echoCancellation":False,"noiseSuppression":False,"autoGainControl":False},"video":False},gum)
             case.check("one-granted-capture", len(gum) == 1 and gum[0]["outcome"] == "resolved" and
                        len(media["tracks"]) >= 1 and all(t["readyState"] == "live" for t in media["tracks"]), gum)
             case.wait_js("recorded_for", 2000, "2.0 s after the worklet node", while_active=True)

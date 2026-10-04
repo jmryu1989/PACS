@@ -28,12 +28,12 @@ const owner={kind:'member',institution:'hospital',sub:'reader'},routes={
  '/api/studies':()=>({studies:[{uid:'1.2',id:'PID-001'}]}),
  'PDF_ROUTE':()=>({status:200,body:null,contentType:'application/pdf'})
 };
-const response=(status,value,url,contentType='application/json')=>new Response(new ReadableStream({start(controller){
+const response=(status,value,url,contentType='application/json',headers={})=>new Response(new ReadableStream({start(controller){
  const finish=()=>{controller.enqueue(new TextEncoder().encode(contentType==='application/pdf'?'%PDF-1.4\n%%EOF':JSON.stringify(value)));controller.close()};
- if(holdCancel&&url==='PDF_ROUTE')cancelHeld.push(finish);else finish();},cancel(){cancels.push(url)}}),{status,headers:{'Content-Type':contentType}});
+ if(holdCancel&&url==='PDF_ROUTE')cancelHeld.push(finish);else finish();},cancel(){cancels.push(url)}}),{status,headers:{'Content-Type':contentType,...headers}});
 const nativeFetch=window.fetch.bind(window);
 window.fetch=(url,options={})=>{if(String(url).startsWith('blob:'))return nativeFetch(url,options);if(!new Headers(options.headers).get('X-KIN-Session'))throw Error('Unbound protected request');requests.push({url,method:options.method||'GET',body:options.body?JSON.parse(options.body):null});
- const done=()=>{const configured=routes[url],value=typeof configured==='function'?configured():configured;return response(value?.status||200,value?.body??value,url,value?.contentType);};
+ const done=()=>{const configured=routes[url],value=typeof configured==='function'?configured():configured;return response(value?.status||200,value?.body??value,url,value?.contentType,value?.headers);};
  if(holdPath===url)return new Promise((resolve,reject)=>{const item={resolve:()=>resolve(done()),reject};held.push(item);if(!ignoreAbort)options.signal?.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});});return Promise.resolve(done());};
 window.open=()=>{if(blockPopup)return null;const popup={closed:false,opener:{unsafe:true},navigated:null,close(){this.closed=true},location:{replace(value){if(throwNavigation)throw Error('synthetic navigation detail');popup.navigated=value;}}};popups.push(popup);return popup;};
 const state={activeViewportId:'vp1',viewports:new Map([['vp1',view]])};
@@ -91,6 +91,42 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
     def tearDown(self):
         self.page.close()
         self.assertEqual(self.unbound, [])
+
+    def test_coded_refusal_all_pdf_reads_allow_retry_plain_refusal_disables(self):
+        button = self.page.locator('#kin-source-pdf-open')
+        status = self.page.locator('#kin-source-pdf-status')
+        for phase in ('resolve', 'verify', 'bytes'):
+            for code in ('AUTH_IDP_UNAVAILABLE', 'AUTH_SESSION_BUSY', 'AUTH_STORAGE_FAILURE', None):
+                with self.subTest(phase=phase, code=code):
+                    self.page.evaluate("""({phase,code,pdf})=>{
+                      pdfController.stop();
+                      routes['/api/dicom/lookup']=()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'});
+                      routes[pdf]=()=>({status:200,body:null,contentType:'application/pdf'});
+                      window.refusalPath=phase==='bytes'?pdf:'/api/dicom/lookup';
+                      window.good=routes[refusalPath];window.bad=()=>({status:403,headers:code?{'X-KIN-Auth-Code':code}:{}});
+                      if(phase==='resolve')routes[refusalPath]=bad;
+                      mountPdf();
+                    }""", {'phase': phase, 'code': code, 'pdf': PDF})
+                    if phase != 'resolve':
+                        expect(button).to_be_enabled()
+                        self.page.evaluate('routes[refusalPath]=bad')
+                        button.click()
+                    if code:
+                        expect(status).to_contain_text('연결을 확인하지 못했습니다')
+                        expect(status).not_to_contain_text('권한')
+                        expect(button).to_have_text('Retry Source PDF')
+                        expect(button).to_be_enabled()
+                        self.page.evaluate('routes[refusalPath]=good')
+                        button.click()
+                        if phase == 'resolve':
+                            expect(button).to_have_text('Open Source PDF')
+                        else:
+                            expect(self.page.get_by_title('Source PDF', exact=True)).to_be_visible()
+                            self.page.get_by_role('button', name='Close', exact=True).click()
+                    else:
+                        expect(status).to_contain_text('권한')
+                        expect(button).to_be_disabled()
+                        expect(button).not_to_have_text('Retry Source PDF')
 
     def test_selected_native_pdf_opens_exact_verified_source_and_preserves_embed(self):
         panel = self.page.locator("#kin-source-pdf")
@@ -332,7 +368,10 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         button.click()
         expect(self.page.locator('#kin-source-pdf-status')).to_contain_text('접근 권한')
         self.assertEqual(0, self.page.locator('dialog').count())
-        self.page.evaluate("routes['/api/dicom/lookup']=()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'})")
+        expect(button).to_be_disabled()
+        # A fresh selection rechecks access; a definitive refusal has no retry button.
+        self.page.evaluate("routes['/api/dicom/lookup']=()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'});displaySet=makeSet({displaySetInstanceUID:'reselected'});view.displaySetInstanceUIDs=['reselected'];emit()")
+        expect(button).to_be_enabled()
         button.click()
         expect(self.page.locator('dialog')).to_be_visible()
         url = self.page.get_by_title('Source PDF', exact=True).get_attribute('src')

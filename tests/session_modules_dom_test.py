@@ -27,10 +27,12 @@ BOOT = """async () => {
   const nativeFetch=window.fetch.bind(window), nativeDecode=HTMLImageElement.prototype.decode;
   window.syn={calls:[],holds:[],decodes:[],hold:false,holdDecode:false,status:200,applied:[],value:false,revision:1};
   const syn=window.syn, me=KinAuth.session(), owner=[me.institution,me.sub];
+  syn.note={studyUid:'1.2.3',version:1,text:'SYN saved',reason:'',author:'SYN author',createdAt:'2026-10-04T00:00:00Z'};
+  syn.storeNote=true;
   const response=(path,status)=>{
     if(status!==200)return new Response(JSON.stringify({message:'SYN request failed'}),{status,headers:{'Content-Type':'application/json'}});
     if(path==='/api/preferences/reading')return new Response(JSON.stringify({owner,revision:syn.revision,autoNote:syn.value}));
-    if(path.endsWith('/tech-note'))return new Response(JSON.stringify({uid:'1.2.3',writable:true,note:{studyUid:'1.2.3',version:1,text:'SYN saved',author:'SYN author',createdAt:'2026-10-04T00:00:00Z'}}));
+    if(path.endsWith('/tech-note'))return new Response(JSON.stringify({uid:'1.2.3',writable:true,note:syn.note}));
     if(path==='/api/study-access')return new Response(JSON.stringify({owner,revision:syn.revision,restricted:false,windowOpen:true,denied:false}));
     if(path==='/api/dicom/lookup')return new Response(JSON.stringify({id:'12345678-12345678-12345678-12345678-12345678'}));
     if(path.startsWith('/dicom-web/'))return new Response(JSON.stringify([{
@@ -44,6 +46,14 @@ BOOT = """async () => {
     const path=new URL(input,location.href).pathname;
     if(!['/api/preferences/reading','/api/study-access','/api/dicom/lookup'].includes(path)&&!path.startsWith('/dicom-web/')&&!path.startsWith('/instances/')&&!path.endsWith('/tech-note'))return nativeFetch(input,init);
     syn.calls.push({path,session:new Headers(init.headers).get('X-KIN-Session'),method:init.method||'GET'});
+    if(path.endsWith('/tech-note')&&init.method==='POST'){
+      const body=JSON.parse(init.body);
+      if(body.baseVersion!==syn.note.version)return Promise.resolve(new Response('{}',{status:409}));
+      if(syn.storeNote)syn.note={...syn.note,version:syn.note.version+1,text:body.text,reason:body.reason};
+      const reply=response(path,syn.storeNote?200:503);
+      if(syn.holdNoteWrite)return new Promise(resolve=>syn.holds.push(()=>resolve(reply)));
+      return Promise.resolve(reply);
+    }
     const reply=response(path,syn.status);
     if(syn.hold&&path===syn.hold)return new Promise(resolve=>syn.holds.push(()=>resolve(reply)));
     return Promise.resolve(reply);
@@ -123,7 +133,7 @@ class SessionModulesDOMTest(unittest.TestCase):
         self.settle()
         self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
 
-    def test_note_cancel_preserves_uncertain_save_input_and_reason(self):
+    def test_note_cancel_reads_its_stored_save_and_next_save_uses_the_confirmed_version(self):
         self.mount("note")
         self.page.evaluate("syn.open()")
         note = self.page.locator("#tech-note-text")
@@ -131,17 +141,41 @@ class SessionModulesDOMTest(unittest.TestCase):
         expect(note).to_have_value("SYN saved")
         note.fill("SYN edited")
         reason.fill("SYN reason")
-        self.page.evaluate("syn.hold='/api/studies/1.2.3/tech-note'")
+        self.page.evaluate("syn.holdNoteWrite=true")
         self.page.get_by_role("button", name="Save Note", exact=True).click()
         self.page.wait_for_function("syn.holds.length===1")
         self.page.evaluate("syn.prepare();syn.cancel();syn.holds.shift()()")
         expect(self.page.locator("#tech-note-dialog")).to_be_visible()
         expect(note).to_have_value("SYN edited")
-        expect(reason).to_have_value("SYN reason")
+        expect(reason).to_have_value("")
         expect(self.page.get_by_role("button", name="Save Note", exact=True)).to_be_enabled()
-        expect(self.page.locator("#tech-note-status")).to_contain_text("입력은 유지했습니다")
+        expect(self.page.locator("#tech-note-status")).to_have_text("")
+        self.assertEqual(['GET','POST','GET'],self.page.evaluate("syn.calls.map(c=>c.method)"))
+        self.page.evaluate("syn.holdNoteWrite=false")
+        note.fill("SYN next edit"); reason.fill("SYN next reason")
+        self.page.get_by_role("button", name="Save Note", exact=True).click()
+        expect(self.page.locator("#tech-note-status")).to_have_text("저장되었습니다. v3")
         self.end()
         expect(self.page.locator("#tech-note-dialog")).not_to_be_visible()
+
+    def test_note_cancel_keeps_an_unsaved_attempt_and_the_next_save_succeeds(self):
+        self.mount("note"); self.page.evaluate("syn.open()")
+        note=self.page.locator("#tech-note-text"); reason=self.page.locator("#tech-note-reason")
+        expect(note).to_have_value("SYN saved")
+        note.fill("SYN not stored"); reason.fill("SYN reason")
+        self.page.evaluate("syn.holdNoteWrite=true;syn.storeNote=false")
+        self.page.get_by_role("button",name="Save Note",exact=True).click()
+        self.page.wait_for_function("syn.holds.length===1")
+        self.page.evaluate("syn.prepare();syn.holds.shift()()")
+        self.settle()
+        self.page.evaluate("syn.cancel()")
+        expect(self.page.get_by_role("button",name="Save Note",exact=True)).to_be_enabled()
+        expect(note).to_have_value("SYN not stored"); expect(reason).to_have_value("SYN reason")
+        expect(self.page.locator("#tech-note-status")).to_have_text("")
+        self.assertEqual(['GET','POST','GET'],self.page.evaluate("syn.calls.map(c=>c.method)"))
+        self.page.evaluate("syn.holdNoteWrite=false;syn.storeNote=true")
+        self.page.get_by_role("button",name="Save Note",exact=True).click()
+        expect(self.page.locator("#tech-note-status")).to_have_text("저장되었습니다. v2")
 
     def test_request_prepare_cancel_drops_old_and_resumes(self):
         self.mount("request")

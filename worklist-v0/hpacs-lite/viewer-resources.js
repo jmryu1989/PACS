@@ -24,11 +24,9 @@
       const type = response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase();
       if (!response.ok || options.type && (response.status !== 200 || type !== options.type)) {
         await response.body?.cancel();
-        const error = new Error([401, 403].includes(response.status) ? '원본 자료 접근이 거절되었습니다. 검사 접근 권한을 확인하세요.' :
-          response.status === 404 ? '원본 자료를 찾을 수 없습니다.' :
+        const error = win.KinSessionTransport.responseError(response, response.status === 404 ? '원본 자료를 찾을 수 없습니다.' :
           response.ok && options.type === 'application/pdf' && type !== options.type ? '원본 자료가 PDF 형식이 아닙니다.' :
-          '원본 자료 응답을 확인할 수 없습니다.');
-        error.retryable = response.status === 429 || response.status >= 500;
+          '원본 자료 응답을 확인할 수 없습니다.', '원본 자료 접근이 거절되었습니다. 검사 접근 권한을 확인하세요.');
         throw error;
       }
       const blob = await boundary.wait(response.blob());

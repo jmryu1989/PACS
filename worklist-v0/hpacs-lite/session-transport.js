@@ -36,6 +36,27 @@
       || (MISMATCH_STATUSES.includes(status) && code === 'AUTH_SESSION_MISMATCH');
   }
 
+  // DICOM auth_request keeps the AUTH_* header but maps temporary failures to 403.
+  // Consumers share this classification; only the transport reports an actual end.
+  function refusal(reply) {
+    const status = reply?.status;
+    const code = reply?.headers?.get?.('X-KIN-Auth-Code')
+      || reply?.getResponseHeader?.('X-KIN-Auth-Code')
+      || reply?.request?.getResponseHeader?.('X-KIN-Auth-Code') || reply?.code;
+    if (endSignal(status, code)) return 'ended';
+    if (![401, 403].includes(status)) return null;
+    return typeof code === 'string' && code.startsWith('AUTH_') ? 'temporary' : 'denied';
+  }
+
+  function responseError(reply, message = '요청을 완료하지 못했습니다.', denied = '검사 접근이 거절되었습니다. 접근 권한을 확인하세요.') {
+    const kind = refusal(reply);
+    return Object.assign(new Error(kind === 'temporary' ? '연결을 확인하지 못했습니다. 잠시 뒤 다시 시도하세요.'
+      : kind === 'denied' ? denied : message), {
+      status: reply?.status, code: reply?.headers?.get?.('X-KIN-Auth-Code') || reply?.code,
+      retryable: kind === 'temporary' || !kind && (!reply || reply.status === 429 || reply.status >= 500),
+    });
+  }
+
   /** 요청의 종류: 부른 쪽이 밝힌 것, 아니면 읽는 방식과 주소로 가린다(`/api/` 밖은 DICOM·영상 경로다). */
   function kindOf(url, read, given) {
     if (given !== undefined) return Object.prototype.hasOwnProperty.call(DEADLINES, given) ? given : null;
@@ -273,7 +294,7 @@
     return shared;
   }
 
-  const api = Object.freeze({ create, page, DEADLINES });
+  const api = Object.freeze({ create, page, DEADLINES, refusal, responseError });
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.KinSessionTransport = api;
 })(typeof window === 'object' ? window : null);

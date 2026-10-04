@@ -8,11 +8,9 @@ Pure Playwright: the real viewer-job-print.js runs on a blank page beside the tw
 libraries the viewer lazily loads, with a cornerstone stub, empty cells (so no renderer)
 and a synthetic read-only api. No LiveStack, no Orthanc, no database, no original DICOM.
 
-The api stub is a RE-TYPED copy of viewer-jobs.js:110-136, because that function is a
-closure inside kinViewerJobs and cannot be loaded standalone. The one rule this file
-depends on - 401 or non-foreign 403 ends the panel, every other status is attached to the
-error - is pinned against the shipped text by tests/viewer_job_print_citation_test.cjs so
-this copy cannot outlive it.
+Synthetic endpoint outcomes use session-transport.js to classify failures. The reader
+itself is exercised by viewer_jobs_session_test.cjs; this suite verifies the resulting
+printed sections and the ability to recheck, without pinning any implementation text.
 
 KIN_JOB_PRINT_JS is the override tests/viewer_job_print_citation_mutants.py needs. The
 default is always the shipped file and the runner only ever points it at a temporary COPY.
@@ -84,8 +82,8 @@ SETUP = """args => {
     if (slot.queue.length) slot.last = slot.queue.shift();
     return slot.last;
   };
-  // A re-typed copy of viewer-jobs.js:110-136. Only the parts this unit depends
-  // on: the foreign option, the panel-ending statuses and the attached .status.
+  // Synthetic endpoint outcomes use the shipped refusal classifier. A plain
+  // HTTP failure cannot impersonate the document's session-end port.
   const api = async (url, options = {}) => {
     const { foreign = false } = options;
     const method = options.method || 'GET';
@@ -101,14 +99,8 @@ SETUP = """args => {
       else if (citations) reply = nextCitation(citations[1]) || { status: 404 };
       else reply = { status: 404 };
     }
-    if (reply.status === 401 || reply.status === 403 && !foreign) {
-      window.__ended = true;
-      throw new Error('검사 접근 권한을 확인할 수 없습니다.');
-    }
     if (reply.status >= 400 || !reply.body) {
-      const error = new Error(reply.message || '서버 연결을 확인한 뒤 다시 시도하세요.');
-      error.status = reply.status;
-      throw error;
+      throw KinSessionTransport.responseError(reply);
     }
     return copy(reply.body);
   };
@@ -231,6 +223,7 @@ class ViewerJobPrintCitationDOM(unittest.TestCase):
         page = self.context.new_page()
         page.set_content("<!doctype html><html><body></body></html>")
         page.evaluate(CORNERSTONE)
+        page.add_script_tag(path=str(ROOT / 'worklist-v0/hpacs-lite/session-transport.js'))
         page.add_script_tag(path=str(MODULE))
         if modules:
             page.add_script_tag(path=str(CITATION_MODULE))
@@ -405,6 +398,21 @@ class ViewerJobPrintCitationDOM(unittest.TestCase):
         self.assertIn("Study " + UID_A, srcdoc)
         self.assertNotIn(NONE, srcdoc)
         self.assert_no_writes(page)
+
+    def test_15_coded_auth_refusal_is_unknown_evidence_and_can_be_rechecked(self):
+        for code in ('AUTH_IDP_UNAVAILABLE', 'AUTH_SESSION_BUSY', 'AUTH_STORAGE_FAILURE'):
+            with self.subTest(code=code):
+                page = self.open_page(self.pair(), {
+                    UID_A: [answer(1, [entry('findings', 11, 0)])],
+                    UID_B: [dict(status=403, code=code)],
+                })
+                page.wait_for_function(READY, timeout=60000)
+                self.choose_settled(page, 'both')
+                sections = self.sections(page)
+                self.assertEqual(len(sections), 2)
+                self.assertEqual(sections[1]['lines'], ['인용 증적 확인: doctor2의 열람 권한 기준', UNKNOWN])
+                self.assertFalse(page.eval_on_selector("#kin-job-print button:text-is('다시 확인')", 'b => b.disabled'))
+                self.assert_no_writes(page)
 
     def test_06_editor_mode_prints_a_notice_and_never_reads_citations(self):
         data = self.pair()

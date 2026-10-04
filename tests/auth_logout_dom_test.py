@@ -2279,6 +2279,63 @@ class LogoutDOMTest(unittest.TestCase):
         self.landing(page)
 
 
+    def check_note_after_cancel(self, stored):
+        page = self.open_main()
+        self.select_and_type()
+        note = {"studyUid": UID, "version": 1, "text": "SYN saved note", "reason": "", "author": RAD["actor"], "createdAt": "2026-10-05T00:00:00Z"}
+        held, reads, writes = [], [], []
+        def answer(route):
+            request = route.request
+            self.assertEqual(self.site.cookie, request.headers.get("x-kin-session"))
+            if request.method == "GET":
+                reads.append(note["version"])
+                return route.fulfill(json={"uid": UID, "writable": True, "note": dict(note)})
+            body = request.post_data_json
+            writes.append(body)
+            self.assertEqual(note["version"], body["baseVersion"], "the next Save uses the reconciled version")
+            if len(writes) == 1:
+                if stored:
+                    note.update(version=note["version"] + 1, text=body["text"], reason=body["reason"].strip())
+                held.append(route)
+            else:
+                note.update(version=note["version"] + 1, text=body["text"], reason=body["reason"].strip())
+                route.fulfill(json={"uid": UID, "writable": True, "note": dict(note)})
+        page.route("**/api/studies/*/tech-note", answer)
+        page.locator("#tech-note-open").click()
+        expect(page.locator("#tech-note-text")).to_have_value("SYN saved note")
+        page.fill("#tech-note-text", "SYN note before preparation")
+        page.fill("#tech-note-reason", "  SYN correction  ")
+        page.locator("#tech-note-save").click()
+        self.wait_until(lambda: bool(held), "the overlapping note save")
+        self.site.put_answers = [(500, {"message": "SYN draft unavailable"})]
+        self.log_out_main()
+        expect(self.panel_title()).to_have_text("Draft Not Saved")
+        self.panel_button("Back to Editing").click()
+        expect(page.locator("dialog.kin-logout")).to_have_count(0)
+        expect(page.locator("#tech-note-save")).to_be_disabled()
+        held.pop().fulfill(status=200 if stored else 503,
+                           json={"uid": UID, "writable": True, "note": dict(note)} if stored else {"message": "SYN not stored"})
+        self.wait_until(lambda: len(reads) == 2, "the automatic note confirmation")
+        expect(page.locator("#tech-note-status")).to_have_text("")
+        expect(page.locator("#tech-note-text")).to_have_value("SYN note before preparation")
+        expect(page.locator("#tech-note-reason")).to_have_value("" if stored else "  SYN correction  ")
+        expect(page.locator("#tech-note-save")).to_be_enabled()
+        if stored:
+            page.fill("#tech-note-text", "SYN next edit")
+            page.fill("#tech-note-reason", "SYN next correction")
+        page.locator("#tech-note-save").click()
+        expect(page.locator("#tech-note-status")).to_contain_text("저장되었습니다")
+        self.assertEqual(2, len(writes))
+        self.assertEqual([], self.site.logouts)
+        self.assertEqual(FIELDS, self.editor())
+
+    def test_note_stored_across_cancel_confirms_itself_before_the_next_save(self):
+        self.check_note_after_cancel(True)
+
+    def test_note_not_stored_across_cancel_keeps_input_and_the_next_save_works(self):
+        self.check_note_after_cancel(False)
+
+
 def tearDownModule():
     print("S7-U5-LOGOUT-DOM-SERVED " + json.dumps(sorted(SERVED)))
     print("S7-U5-LOGOUT-DOM-UNBOUND " + json.dumps(sorted(UNBOUND)))

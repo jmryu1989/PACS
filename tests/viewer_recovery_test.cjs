@@ -62,6 +62,7 @@ async function harness() {
       calls.push({ path, options }); const r = await reply(path, options);
       return new Response(JSON.stringify(r.data), { status: r.status, headers: r.data?.code ? { 'X-KIN-Auth-Code': r.data.code } : {} });
     } });
+  window.KinSessionTransport = transports;
   vm.runInNewContext(source, { window, document, crypto: webcrypto, TextEncoder, console, Event, AbortController,
     setInterval: fn => { tick = fn; return 1; }, clearInterval() {}, setTimeout, clearTimeout,
     fetch: transport.fetch,
@@ -347,6 +348,7 @@ function recovery({ search = `?StudyInstanceUIDs=${CURRENT},${PRIOR}`, lazy = tr
   const native = Client.prototype.retrieveSeriesMetadata, client = new Client();
   if (own) client.retrieveSeriesMetadata = function foreign(options) { return native.call(this, options); };
   const dataSource = { retrieve: accessor ? { getWadoDicomWebClient: () => client } : {}, getConfig: () => ({ enableStudyLazyLoad: lazy }) };
+  window.KinSessionTransport = transports;
   vm.runInNewContext(source, { window, document, location, URLSearchParams, crypto: webcrypto, TextEncoder, console, Event, AbortController,
     setInterval: () => 0, clearInterval() {}, setTimeout: (fn, ms) => { timers.set(++serial, { fn, ms }); return serial; }, clearTimeout: id => { timers.delete(id); },
     fetch: async () => { throw new Error('no network in this contract'); } });
@@ -386,7 +388,7 @@ test('U5-CI1 R1: one own wrapper on this lifecycle client, restored only while s
   }
 });
 
-test('U5-CI1 R2: only a rejected HTTP 500-599 GET waits one fixed 1000 ms retry with the same client and options; 0, 4xx, 429, 600, no request and sync throws do not', async () => {
+test('U5-CI1 R2: a rejected HTTP 500-599 GET waits one fixed retry; uncoded 4xx, 0, 429, 600, no request and sync throws do not', async () => {
   for (const status of [500, 502, 503, 599]) {
     const h = recovery(); h.enter(); const { seen } = h.load();
     h.calls[0].reject(http(status)); await flush();
@@ -403,6 +405,23 @@ test('U5-CI1 R2: only a rejected HTTP 500-599 GET waits one fixed 1000 ms retry 
   const h = recovery(); h.enter();
   assert.throws(() => h.client.retrieveSeriesMetadata({ studyInstanceUID: CURRENT }), /Series Instance UID is required/);
   assert.deepEqual(h.delays(), []); assert.equal(h.calls.length, 0);
+});
+
+test('U5INT-F01: metadata retries coded auth refusals and keeps uncoded denial permanent', async () => {
+  for (const code of ['AUTH_IDP_UNAVAILABLE', 'AUTH_SESSION_BUSY', 'AUTH_STORAGE_FAILURE']) {
+    const h = recovery(); h.enter(); const { seen } = h.load();
+    const error = { status: 403, request: { getResponseHeader: name => name === 'X-KIN-Auth-Code' ? code : null } };
+    h.calls[0].reject(error); await flush();
+    assert.deepEqual(h.delays(), [1000]); assert.equal(seen.error, undefined);
+    h.fire(); h.calls[1].reject(error); await flush();
+    assert.equal(seen.error, error); assert.match(h.text(), /연결을 확인하지 못했습니다/);
+    assert.doesNotMatch(h.text(), /접근할 수 없습니다/);
+    assert.deepEqual(h.delays(), []);
+  }
+  const h = recovery(); h.enter(); const { seen } = h.load();
+  h.calls[0].reject(http(403)); await flush();
+  assert.equal(seen.error.status, 403); assert.deepEqual(h.delays(), []);
+  assert.match(h.text(), /접근할 수 없습니다/);
 });
 
 test('U5-CI1 R3: a transient 500 fills the one held promise with the retry reply; a persistent one rejects with the final error and names only the study position', async () => {
