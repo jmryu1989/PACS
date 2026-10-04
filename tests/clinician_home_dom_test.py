@@ -848,9 +848,10 @@ class ClinicianHomeDOMTest(unittest.TestCase):
                                  (seen["detailUid"], seen["reportUid"], seen["text"], seen["detail"], seen["retry"],
                                   seen["status"], seen["metaHidden"], seen["bodyHidden"], seen["keysState"]))
                 self.assertEqual("SYN ETA", self.identity()["Name"])
-        # Retry reads again and paints the answer the server gives now.
+        # A denied report disables its controls; selecting the study again makes a fresh read.
+        expect(self.page.locator('#report-retry')).to_be_disabled()
         self.reports[uid(7)] = final_report(7, 4, "approve", "SYN-T findings", "SYN-T conclusion", "SYN-T recommendation", [])
-        self.page.locator("#report-retry").click()
+        self.row(7).click()
         expect(self.page.locator("#report-state")).to_have_attribute("data-state", "final")
         self.assertEqual(("Final", "4", ["Findings", "SYN-T findings"]),
                          (self.report()["status"], self.report()["meta"]["Version"], self.report()["sections"][0]))
@@ -963,7 +964,8 @@ class ClinicianHomeDOMTest(unittest.TestCase):
                 expect(self.page.locator("#list-state")).to_have_attribute("data-state", "failed")
                 self.assertEqual((LIST_FAILED, detail, []), tuple(self.listed()[k] for k in ("text", "detail", "rows")))
                 self.assertEqual(requests + 1, len(self.list_requests))
-                expect(self.page.locator("#refresh")).to_be_enabled()
+                expect(self.page.locator("#refresh")).to_be_disabled()
+                expect(self.page.locator("#list-retry")).to_be_disabled()
                 expect(self.page.locator("#logout")).to_be_visible()
 
         # A late earlier list never replaces a newer one.
@@ -1143,15 +1145,24 @@ class ClinicianHomeDOMTest(unittest.TestCase):
                 self.list_errors = [error]
                 self.page.locator("#refresh").click()
                 expect(self.page.locator("#list-state")).to_have_attribute("data-state", "failed")
-                self.assertEqual(self.taken_down(UNVERIFIED), self.detail())
+                note = '임상의 조회은(는) clinician 권한이 필요합니다 (HTTP 403)' if label == '403' else UNVERIFIED
+                self.assertEqual(self.taken_down(note), self.detail())
                 content = self.page.content()
                 for text in ("SYN ALPHA", "SYN-P-001", "SYN-ACC-1", "SYN-A findings", "SYN-A conclusion", "SYN key one"):
                     self.assertNotIn(text, content)
                 calls = len(self.calls)
-                self.page.locator("#list-retry").click()
+                if label == '403':
+                    expect(self.page.locator('#list-retry')).to_be_disabled()
+                    expect(self.page.locator('#refresh')).to_be_disabled()
+                    self.assertEqual(ORIGIN + BASE + 'clinician.html', self.page.url)
+                    self.open_home()
+                    self.pick(1)
+                else:
+                    self.page.locator("#list-retry").click()
                 expect(self.page.locator("#report")).to_be_visible()
                 expect(self.page.locator("#report-state")).to_have_attribute("data-state", "final")
-                self.assertEqual(["list", "me", f"report {uid(1)}"], self.calls[calls:])
+                expected = ["list", "me", f"report {uid(1)}"]
+                self.assertEqual(expected, self.calls[-3:] if label == '403' else self.calls[calls:])
                 seen = self.report()
                 self.assertEqual((uid(1), "SYN ALPHA", "3", ["Findings", "SYN-A findings line 1\nline 2"], "키 이미지 2건", [uid(1)]),
                                  (seen["reportUid"], self.identity()["Name"], seen["meta"]["Version"], seen["sections"][0],
@@ -1188,17 +1199,17 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.assertEqual(["list", "me", f"report {uid(2)}"], self.calls[calls:])
         self.assertEqual(("홍길동 SYN", [uid(2)]), (self.identity()["Name"], self.detail()["current"]))
 
-        # Control: without setAside() a refused refresh leaves the final report up, and the pending answer paints.
+        # Control: without setAside() a 409 leaves the final report up. The separate 403 cleanup now protects a denial.
         self.files["clinician.js"] = self.variants["list-keeps-detail"]
         self.open_home()
         self.pick(1)
-        self.list_errors = [refusals["403"]]
+        self.list_errors = [refusals["409"]]
         self.page.locator("#refresh").click()
         expect(self.page.locator("#list-state")).to_have_attribute("data-state", "failed")
         seen = self.report()
         self.assertEqual((uid(1), "final", ["Findings", "SYN-A findings line 1\nline 2"], "SYN ALPHA"),
                          (seen["detailUid"], seen["state"], seen["sections"][0], self.identity()["Name"]),
-                         "list-keeps-detail: the final report stays up after a 403")
+                         "list-keeps-detail: the final report stays up after a 409")
         self.open_home()
         self.pick(1)
         (pending,) = self.pending_reports(2)

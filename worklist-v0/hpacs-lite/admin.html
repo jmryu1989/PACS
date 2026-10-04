@@ -359,12 +359,17 @@
         },
       };
     })();
-    KinStudyAccessAdmin.attach(KinConsoleSession);
+    KinStudyAccessAdmin.attach(KinConsoleSession, message => {
+      const box = document.querySelector("#message");
+      box.textContent = message;
+      box.classList.add("show");
+    });
   </script>
   <script>
     (() => {
       const API = `${location.origin}/api`;
       const state = { page: 1, pageSize: 25, total: 0, users: [], editing: null, institutions: new Set() };
+      let membersEpoch = 0, membersDenied = false;
       const $ = selector => document.querySelector(selector);
       // What the console says before its first read, put back when the session ends: the last counts belong to it.
       const opening = { pending: $("#pending-badge").textContent, page: $("#page-label").textContent };
@@ -391,11 +396,16 @@
 
       async function request(method, path, body) {
         if (KinConsoleSession.ended()) throw new Error("세션이 종료되었습니다");
+        if (membersDenied && method !== "GET") throw new Error("회원 정보를 다시 불러오세요.");
+        const epoch = membersEpoch;
         const context = KinWorkContext.capture("document");
-        const response = await KinSessionTransport.page().request(API + path, { method, json: body, context });
+        let response;
+        try { response = await KinSessionTransport.page().request(API + path, { method, json: body, context }); }
+        catch (error) { if (epoch !== membersEpoch) error.stale = true; throw error; }
         if (!KinWorkContext.admits(context)) throw new Error("세션이 종료되었습니다");
+        if (epoch !== membersEpoch) throw Object.assign(new Error("이전 조회의 응답입니다"), { stale: true });
         const payload = response.body;
-        if (!response.ok || response.incomplete) throw new Error(errorText(payload, response.status));
+        if (!response.ok || response.incomplete) throw Object.assign(new Error(errorText(payload, response.status)), { status: response.status });
         return payload;
       }
 
@@ -458,6 +468,7 @@
       }
 
       function openMembership(user) {
+        if (membersDenied) return;
         // 저장할 필드는 대화상자가 보여 준 값과 비교해 정한다. 제출 때 state.users를 다시 찾으면 그 사이
         // 목록이 새로 읽혔을 때 화면에 없던 값이 기준이 된다.
         state.editing = {
@@ -495,7 +506,7 @@
           await request("PATCH", `/admin/users/${encodeURIComponent(user.id)}`, body);
           await loadUsers();
         } catch (error) {
-          if (KinConsoleSession.ended()) return;
+          if (KinConsoleSession.ended() || error.stale || membersDenied) return;
           setMessage(error.message);
         }
       }
@@ -508,12 +519,13 @@
           if (mode === "temp") showTemporaryPassword(changed.temporaryPassword);
           else setMessage("비밀번호 변경 메일을 보냈습니다.");
         } catch (error) {
-          if (KinConsoleSession.ended()) return;
+          if (KinConsoleSession.ended() || error.stale || membersDenied) return;
           setMessage(error.message);
         }
       }
 
       function renderUsers() {
+        if (membersDenied) return;
         const body = $("#users");
         body.replaceChildren();
         const visible = state.users.filter(userMatches);
@@ -586,6 +598,9 @@
         try {
           const result = await request("GET", `/admin/users?page=${state.page}`);
           if (KinConsoleSession.ended()) return;
+          membersDenied = false;
+          const session = KinAuth.session();
+          $("#actor").textContent = session.displayName || session.user;
           state.page = result.page;
           state.pageSize = result.pageSize;
           state.total = result.total;
@@ -598,8 +613,10 @@
           $("#previous").disabled = state.page <= 1;
           $("#next").disabled = state.page >= pages;
           renderUsers();
+          for (const control of ["#search", "#institution-filter", "#refresh", "#open-create"]) $(control).disabled = false;
         } catch (error) {
-          if (KinConsoleSession.ended()) return;
+          if (KinConsoleSession.ended() || error.stale) return;
+          if (error.status === 403) { membersDenied = true; closeMembers(); }
           setMessage(error.message);
         }
       }
@@ -650,7 +667,7 @@
           state.page = 1;
           await loadUsers();
         } catch (error) {
-          if (KinConsoleSession.ended()) return;
+          if (KinConsoleSession.ended() || error.stale || membersDenied) return;
           setDialogMessage("#create-message", error.message);
         }
       });
@@ -697,6 +714,8 @@
        * dropped by request() after its body and again right before its caller writes, so nothing comes back.
        */
       function closeMembers() {
+        membersEpoch++;
+        KinStudyAccessAdmin.close();
         Object.assign(state, { page: 1, total: 0, users: [], editing: null, institutions: new Set() });
         $("#create-dialog").close();
         $("#membership-dialog").close();
@@ -728,7 +747,7 @@
         if (session.demo || !KinAuth.has("admin")) { KinConsoleSession.go("main.html"); return; }
         $("#actor").textContent = session.displayName || session.user;
         await loadUsers();
-        if (KinConsoleSession.ended()) return;
+        if (KinConsoleSession.ended() || membersDenied) return;
         for (const control of ["#search", "#institution-filter", "#refresh", "#open-create"]) $(control).disabled = false;
       }
 
@@ -797,7 +816,7 @@
        * moving seq drops every list read in flight, the cleared tokens and items drop every retry answer, and the list,
        * the stored requests, the counts and the control go with them. The logout or the move is KinConsoleSession's.
        */
-      KinConsoleSession.onEnd(() => {
+      function closeGateway() {
         gateway.seq++;
         for (const item of gateway.items.values()) item.dataset.request = "";
         gateway.items.clear();
@@ -812,7 +831,8 @@
         $("#gateway-busy").hidden = true;
         $("#gateway-refresh").disabled = true;
         setGatewayMessage("");
-      });
+      }
+      KinConsoleSession.onEnd(closeGateway);
 
       function newItem(uid) {
         const item = document.createElement("li");
@@ -915,8 +935,10 @@
         if (seq !== gateway.seq) return;
         $("#gateway-busy").hidden = true;
         if (rulesFailed) { setGatewayMessage("화면 규칙(study-arrivals.js)을 불러오지 못했습니다. 다시 시도하세요."); return; }
+        if (error?.status === 403) { closeGateway(); setGatewayMessage(failureText(error)); return; }
         const read = error ? null : window.KinStudyArrivals.gatewayStatusRows(result);
         if (read) {
+          $("#gateway-refresh").disabled = false;
           Object.assign(gateway, { failed: false, observedAt: read.observedAt, absentKnown: read.absentKnown, rows: read.rows });
           setGatewayMessage("");
         } else {
@@ -1221,14 +1243,15 @@
        * Status). Runs before anything is awaited: moving seq drops every read in flight, and the table, the last reading,
        * the message and the control go with them; the state line goes back to Not Loaded. The logout is the session end's.
        */
-      KinConsoleSession.onEnd(() => {
+      function closeOps() {
         ops.seq++;
         Object.assign(ops, { read: null, failed: false });
         $("#metrics-busy").hidden = true;
         $("#metrics-refresh").disabled = true;
         setOpsMessage("");
         drawOps();
-      });
+      }
+      KinConsoleSession.onEnd(closeOps);
 
       async function refreshOps() {
         if (KinConsoleSession.ended()) return;
@@ -1240,8 +1263,10 @@
         // Only the newest load paints; a session end (a transport end signal too) moves seq, so nothing paints after it.
         if (seq !== ops.seq) return;
         $("#metrics-busy").hidden = true;
+        if (error?.status === 403) { closeOps(); setOpsMessage(failureText(error)); return; }
         const read = error ? null : window.KinAdminMetrics.readAnswer(answer);
         if (read) {
+          $("#metrics-refresh").disabled = false;
           Object.assign(ops, { read, failed: false });
           setOpsMessage("");
         } else {
@@ -1507,7 +1532,7 @@
         $("#audit-busy").hidden = !audit.pending && !audit.loadingMore;
         const more = $("#audit-more");
         more.hidden = !read || !audit.next;
-        more.disabled = audit.pending || audit.loadingMore || audit.failed || KinConsoleSession.ended();
+        more.disabled = !read || audit.pending || audit.loadingMore || audit.failed || KinConsoleSession.ended();
       }
 
       /*
@@ -1516,14 +1541,15 @@
        * them; the state line goes back to Not Loaded and the access-history sentence to the card's. The logout is the
        * session end's.
        */
-      KinConsoleSession.onEnd(() => {
+      function closeAudit() {
         audit.seq++;
         Object.assign(audit, { failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false, accessSeen: false });
         $("#audit-refresh").disabled = true;
         setAuditMessage("");
         showAccessHistory();
         drawAudit();
-      });
+      }
+      KinConsoleSession.onEnd(closeAudit);
 
       async function refreshAudit() {
         if (KinConsoleSession.ended()) return;
@@ -1536,8 +1562,10 @@
         // Only the newest load paints; a session end (a transport end signal too) moves seq, so nothing paints after it.
         if (seq !== audit.seq) return;
         audit.pending = false;
+        if (error?.status === 403) { closeAudit(); setAuditMessage(failureText(error)); return; }
         const read = error ? null : window.KinAdminAudit.readAnswer(answer);
         if (read) {
+          $("#audit-refresh").disabled = false;
           Object.assign(audit, { read, rows: read.rows, next: read.next, failed: false });
           setAuditMessage("");
           noteAccessRows(read.rows);
@@ -1560,6 +1588,7 @@
         // A Refresh sent meanwhile or the session end moved seq; a newer list carries another continuation.
         if (seq !== audit.seq || audit.next !== cursor) return;
         audit.loadingMore = false;
+        if (error?.status === 403) { closeAudit(); setAuditMessage(failureText(error)); return; }
         const read = error ? null : window.KinAdminAudit.readAnswer(answer);
         if (read && read.institutionId === audit.read.institutionId) {
           Object.assign(audit, { rows: audit.rows.concat(read.rows), next: read.next, read: { ...audit.read, total: read.total } });

@@ -341,6 +341,16 @@
       applyList(loaded);
     } catch (error) {
       if (!listFresh(mine)) return;
+      if (error.status === 403) {
+        // A denied list also withdraws the selected study and its retained editors.
+        byUid.clear();
+        resume = null;
+        requestDrafts.clear(); requestAttempts.clear(); requestNotes.clear(); requestOwn.clear();
+        questionDrafts.clear(); questionAttempts.clear(); questionNotes.clear();
+        clearDetail(describe(error));
+        $('#refresh').disabled = true;
+        $('#list-retry').disabled = true;
+      }
       setListState('failed', TEXT.listFailed, describe(error));
       if (resume !== null) clearDetail(TEXT.unverified);
     }
@@ -365,6 +375,8 @@
   }
 
   function applyList(rows) {
+    $('#refresh').disabled = false;
+    $('#list-retry').disabled = false;
     studies = [...rows].sort(byStudyDate);
     byUid = new Map(studies.map(row => [row.uid, row]));
     const focusUid = refocus;
@@ -699,6 +711,7 @@
     paintTimelineShell(row);
     paintQuestionsShell(row);
     clearReport();
+    $('#report-retry').disabled = false;
     setReport('loading', TEXT.reportLoading);
     setKeys(TEXT.keysLoading, null);
     paintRequestsShell(row);
@@ -715,6 +728,10 @@
       paintReport(view);
     }, error => {
       if (!reportFresh(mine, uid)) return;
+      if (error.status === 403) {
+        clearReport();
+        $('#report-retry').disabled = true;
+      }
       setReport('failed', TEXT.reportFailed, describe(error));
       setKeys(TEXT.keysFailed, null);
     });
@@ -1703,6 +1720,7 @@
     if (leaving || selected !== uid || !$('#timeline')) return;
     const mine = ++timelineSeq;
     resetTimelineBody();
+    $('#timeline-retry').disabled = false;
     setTimelineState('loading', TIMELINE.loading);
     const loaded = [];
     let total = null;
@@ -1728,6 +1746,10 @@
     } catch (error) {
       if (!timelineFresh(mine, uid)) return;
       resetTimelineBody();
+      if (error.status === 403) {
+        $('#timeline-toggle').disabled = true;
+        $('#timeline-retry').disabled = true;
+      }
       setTimelineState('failed', TIMELINE.failed, describe(error));
     }
   }

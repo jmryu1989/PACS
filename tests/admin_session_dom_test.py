@@ -120,6 +120,7 @@ class PageSessionDOMTest(unittest.TestCase):
         self.cancel_moves = False
         self.completed_moves = set()
         self.me_owner = SUB
+        self.responses = {}
         self.context = self.browser.new_context()
         self.context.add_init_script(INIT + init)
         self.page = self.context.new_page()
@@ -153,6 +154,8 @@ class PageSessionDOMTest(unittest.TestCase):
             route.fulfill(status=204)
         elif path == '/api/auth/entry':
             route.fulfill(json={'sessionId':self.session})
+        elif path in self.responses:
+            route.fulfill(json=self.responses[path])
         elif path == '/api/admin/users':
             route.fulfill(json=MEMBERS if req.method=='GET' else {'temporaryPassword':'SYN late secret'})
         elif path.endswith('/study-access'):
@@ -241,6 +244,217 @@ class PageSessionDOMTest(unittest.TestCase):
                         self.page.locator(button).click()
                         self.page.wait_for_function('synRelease !== null')
                         self.close_and_check(mode)
+
+    def assert_work_stays(self):
+        self.assertEqual('active', self.page.evaluate('KinWorkContext.state()'))
+        self.assertEqual(ORIGIN + BASE + self.kind + '.html', self.page.url)
+        self.assertEqual([], self.moves)
+        self.assertFalse(any(p == '/api/auth/logout' for _, p, _ in self.calls))
+
+    def test_read_403_clears_admin_panels_and_later_read_recovers(self):
+        # U5PG-F01: denial withdraws the protected panel, not the session.
+        panels = [('members', '/api/admin/users', '#refresh', '#users', '#message'),
+                  ('metrics', '/api/admin/metrics', '#metrics-refresh', '#metrics-rows', '#metrics-message'),
+                  ('audit', '/api/admin/audit', '#audit-refresh', '#audit-rows', '#audit-message'),
+                  ('audit-more', '/api/admin/audit', '#audit-more', '#audit-rows', '#audit-message'),
+                  ('gateway', '/api/studies', '#gateway-refresh', '#gateway-rows', '#gateway-message')]
+        for label, path, button, rows, message in panels:
+            with self.subTest(panel=label):
+                self.fresh('admin'); self.open()
+                refresh = '#audit-refresh' if label == 'audit-more' else button
+                if label != 'members':
+                    self.page.locator(refresh).click()
+                expect(self.page.locator(rows + ' > *')).not_to_have_count(0)
+                self.hold(path, 'headers', {'message': 'SYN read refused'}, 403)
+                self.page.locator(button).click()
+                self.page.wait_for_function('synRelease !== null')
+                if label == 'members':
+                    self.page.get_by_role('button', name='Change Membership', exact=True).click()
+                    self.page.locator('#membership-form input[name=institution]').fill('SYN private edit')
+                self.page.evaluate('synRelease()')
+                expect(self.page.locator(rows + ' > *')).to_have_count(0)
+                expect(self.page.locator(rows + ' button')).to_have_count(0)
+                expect(self.page.locator(refresh)).to_be_disabled()
+                expect(self.page.locator(message)).to_be_visible()
+                self.assertTrue(self.page.locator(message).inner_text())
+                if label == 'members':
+                    expect(self.page.locator('dialog[open]')).to_have_count(0)
+                    self.assertEqual('', self.page.locator('#membership-form input[name=institution]').input_value())
+                    for control in ['#search', '#institution-filter', '#open-create', '#previous', '#next']:
+                        expect(self.page.locator(control)).to_be_disabled()
+                self.assert_work_stays()
+                # Controls stay disabled until the panel is opened again in a freshly read document.
+                self.page.reload()
+                expect(self.page.locator('#users tr')).not_to_have_count(0)
+                if label != 'members': self.page.locator(refresh).click()
+                expect(self.page.locator(rows + ' > *')).not_to_have_count(0)
+                expect(self.page.locator(refresh)).to_be_enabled()
+                self.assert_work_stays()
+
+    def test_read_403_closes_study_access_but_write_403_keeps_edits(self):
+        self.open()
+        button = self.page.get_by_role('button', name='Study Access', exact=True)
+        button.click()
+        expect(self.page.locator('[data-save]')).to_be_enabled()
+        self.page.locator('#study-access-form input[name=reason]').fill('SYN retained reason')
+        path = '/api/admin/users/SYN-U-1/study-access'
+        self.hold(path, 'headers', {'message': 'SYN write refused'}, 403)
+        self.page.locator('[data-save]').click()
+        self.page.evaluate('synRelease()')
+        expect(self.page.locator('[data-status]')).to_contain_text('SYN write refused')
+        self.assertEqual('SYN retained reason', self.page.locator('#study-access-form input[name=reason]').input_value())
+        expect(self.page.locator('[data-save]')).to_be_enabled()
+        self.page.on('dialog', lambda dialog: dialog.accept())
+        self.hold(path, 'headers', {'message': 'SYN read refused'}, 403)
+        self.page.locator('[data-reload]').click()
+        self.page.evaluate('synRelease()')
+        expect(self.page.locator('#study-access-dialog')).to_have_count(0)
+        expect(self.page.locator('#message')).to_have_text('SYN read refused')
+        self.assert_work_stays()
+        button.click()
+        expect(self.page.locator('[data-save]')).to_be_enabled()
+        self.assertEqual('', self.page.locator('#study-access-form input[name=reason]').input_value())
+
+    def test_member_read_denial_drops_an_older_password_answer(self):
+        self.open()
+        self.hold('/api/admin/users/SYN-U-1/reset-password', 'headers', {'temporaryPassword': 'SYN late secret'})
+        self.page.get_by_role('button', name='Temp Password', exact=True).click()
+        self.page.wait_for_function('synRelease !== null')
+        self.page.evaluate('window.releasePassword = synRelease; synRelease = null')
+        self.hold('/api/admin/users', 'headers', {'message': 'SYN read refused'}, 403)
+        self.page.locator('#refresh').click()
+        self.page.wait_for_function('synRelease !== null')
+        self.page.evaluate('synRelease()')
+        expect(self.page.locator('#message')).to_have_text('SYN read refused')
+        self.page.evaluate('releasePassword()')
+        self.page.wait_for_timeout(80)
+        expect(self.page.locator('dialog[open]')).to_have_count(0)
+        expect(self.page.locator('#users tr')).to_have_count(0)
+        expect(self.page.locator('#temporary-password')).to_be_empty()
+        expect(self.page.locator('#message')).to_have_text('SYN read refused')
+        self.assert_work_stays()
+
+    def test_write_403_keeps_members_and_gateway_rows(self):
+        for label, path, button, rows, message in [
+            ('members', '/api/admin/users/SYN-U-1', 'Revoke Approval', '#users', '#message'),
+            ('gateway', None, None, '#gateway-rows', '.gw-note')]:
+            with self.subTest(panel=label):
+                self.fresh('admin'); self.open()
+                if label == 'gateway':
+                    self.page.locator('#gateway-refresh').click()
+                    expect(self.page.locator('#gateway-rows > li')).not_to_have_count(0)
+                    action = self.page.locator('#gateway-rows button:visible').first
+                    uid = action.locator('xpath=ancestor::li').get_attribute('data-uid')
+                    path = '/api/studies/' + uid + '/gateway-retry'
+                else:
+                    action = self.page.get_by_role('button', name=button, exact=True)
+                before = self.page.locator(rows + ' > *').count()
+                self.hold(path, 'headers', {'message': 'SYN write refused'}, 403)
+                action.click()
+                self.page.wait_for_function('synRelease !== null')
+                self.page.evaluate('synRelease()')
+                self.page.wait_for_timeout(80)
+                expect(self.page.locator(rows + ' > *')).to_have_count(before)
+                self.assertTrue(any(self.page.locator(message).all_text_contents()))
+                self.assert_work_stays()
+
+    def test_read_403_clears_clinician_panels_and_later_read_recovers(self):
+        uid = ROWS[0]['uid']
+        for label, path, target, controls in [
+            ('studies', '/api/clinician/studies', '#studies', '#refresh, #list-retry'),
+            ('report', f'/api/clinician/studies/{uid}/report', '#report-body', '#report-retry'),
+            ('timeline', f'/api/clinician/studies/{uid}/timeline', '#timeline-list', '#timeline-toggle, #timeline-retry'),
+            ('questions', f'/api/studies/{uid}/questions', '#questions-body', '#questions-body button'),
+            ('images', f'/api/studies/{uid}/image-requests', '#image-requests-body', '#image-requests-body button')]:
+            with self.subTest(panel=label):
+                self.fresh('clinician')
+                rows = [{**r} for r in ROWS]
+                rows[1]['sourcePatientKey'] = rows[0]['sourcePatientKey']
+                rows.sort(key=lambda r: r['uid'])
+                self.responses['/api/clinician/studies'] = {'studies': rows,
+                    'pagination': {'limit': 100, 'offset': 0, 'total': len(rows), 'next': None}}
+                if label == 'timeline':
+                    self.responses[path] = {'uid': uid, 'patientKey': rows[0]['sourcePatientKey'],
+                        'identity': {'birth': 'match', 'sex': 'match', 'conflict': False},
+                        'studies': [{**r, 'identity': {'birth': 'match', 'sex': 'match'}} for r in rows[:2]],
+                        'pagination': {'limit': 100, 'offset': 0, 'total': 2, 'next': None}}
+                if label == 'questions':
+                    self.responses[path] = {'owner': OWNER, 'items': [{'id': '00000000-0000-4000-8000-000000000001',
+                        'studyUid': uid, 'state': 'Open', 'revision': 1, 'entryCount': 1,
+                        'author': {'actor': 'syn-author', 'name': 'SYN prior author'}}]}
+                if label == 'images':
+                    self.responses[path] = {'owner': OWNER, 'items': [{'id': '00000000-0000-4000-8000-000000000001',
+                        'studyUid': uid, 'kind': 'external-image', 'state': 'Closed', 'revision': 1,
+                        'requester': {'actor': 'syn-author', 'name': 'SYN prior author'},
+                        'counterparty': {'text': 'SYN destination', 'institutionId': None},
+                        'reason': 'SYN prior reason', 'handler': None, 'note': 'SYN prior note'}]}
+                self.open()
+                pick = self.page.locator(f'#studies tr[data-uid="{uid}"] button')
+                pick.click()
+                expect(self.page.locator('#report-state')).to_have_attribute('data-state', 'final')
+                if label == 'timeline':
+                    self.page.locator('#timeline-toggle').click()
+                    expect(self.page.locator('#timeline-list > li')).to_have_count(2)
+                if label in ['questions', 'images']:
+                    summary = '#questions-summary' if label == 'questions' else '#image-requests-summary'
+                    self.page.locator(summary).click()
+                    rows_selector = '#question-list > li' if label == 'questions' else '#image-request-list > li'
+                    expect(self.page.locator(rows_selector)).to_have_count(1)
+                self.hold(path, 'headers', {'message': 'SYN read refused'}, 403)
+                if label == 'studies': self.page.locator('#refresh').click()
+                elif label == 'report': pick.click()
+                elif label == 'timeline':
+                    self.page.locator('#timeline-toggle').click()
+                    self.page.locator('#timeline-toggle').click()
+                else:
+                    self.page.locator(summary).click()
+                    self.page.locator(summary).click()
+                self.page.wait_for_function('synRelease !== null')
+                self.page.evaluate('synRelease()')
+                state = {'studies': '#list-state', 'report': '#report-state', 'timeline': '#timeline-state',
+                         'questions': '#questions-state', 'images': '#image-requests-state'}[label]
+                expect(self.page.locator(state)).to_contain_text('SYN read refused')
+                for control in self.page.locator(controls).all(): expect(control).to_be_disabled()
+                if label in ['questions', 'images']:
+                    expect(self.page.locator(rows_selector)).to_have_count(0)
+                    expect(self.page.locator(target + ' button')).to_have_count(0)
+                    self.assertNotIn('SYN prior', self.page.locator(target).inner_text())
+                else:
+                    expect(self.page.locator(target + ' > *')).to_have_count(0)
+                self.assert_work_stays()
+                self.page.reload()
+                expect(self.page.locator('#studies tr')).not_to_have_count(0)
+                self.page.locator(f'#studies tr[data-uid="{uid}"] button').click()
+                expect(self.page.locator('#report-state')).to_have_attribute('data-state', 'final')
+                if label == 'timeline':
+                    self.page.locator('#timeline-toggle').click()
+                    expect(self.page.locator('#timeline-list > li')).to_have_count(2)
+                elif label in ['questions', 'images']:
+                    self.page.locator(summary).click()
+                    expect(self.page.locator(rows_selector)).to_have_count(1)
+                self.assert_work_stays()
+
+    def test_write_403_keeps_clinician_editors_and_report(self):
+        for operation in ['question', 'image']:
+            with self.subTest(panel=operation):
+                self.fresh('clinician'); self.open(); uid = self.pick()
+                suffix = 'questions' if operation == 'question' else 'image-requests'
+                self.page.locator('#' + suffix + ' summary').click()
+                field = '#question-ask-text' if operation == 'question' else '#image-request-reason-new'
+                expect(self.page.locator(field)).to_be_visible()
+                self.page.locator(field).fill('SYN retained edit')
+                if operation == 'image': self.page.locator('#image-request-counterparty-new').fill('SYN ward')
+                before = self.page.locator('#report-body').inner_html()
+                self.hold('/api/studies/' + uid + '/' + suffix, 'headers', {'message': 'SYN write refused'}, 403)
+                self.page.locator('.question-compose[data-action=ask] [data-send]' if operation == 'question'
+                                  else '#image-request-new [data-send]').click()
+                self.page.wait_for_function('synRelease !== null')
+                self.page.evaluate('synRelease()')
+                expect(self.page.locator('#' + suffix)).to_contain_text('SYN write refused')
+                expect(self.page.locator(field)).to_be_enabled()
+                self.assertEqual('SYN retained edit', self.page.locator(field).input_value())
+                self.assertEqual(before, self.page.locator('#report-body').inner_html())
+                self.assert_work_stays()
 
     def test_admin_permission_and_study_access_writes(self):
         for operation in ['permission','access','create','password']:

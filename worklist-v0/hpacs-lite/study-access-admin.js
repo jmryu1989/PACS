@@ -1,9 +1,9 @@
 (function(root){
   'use strict';
   // The page owns termination; this dialog releases its edit and pending request with that lifecycle.
-  let active=null,session=null,closeActive=null;
+  let active=null,session=null,closeActive=null,refused=null;
   const emptyRule=()=>({patientId:null,modalities:[],dateFrom:null,dateTo:null,studyUids:[]});
-  function attach(lifecycle){if(session)return;session=lifecycle;lifecycle.onEnd(()=>closeActive?.());}
+  function attach(lifecycle,onRefused){if(session)return;session=lifecycle;refused=onRefused;lifecycle.onEnd(()=>closeActive?.());}
   function open(user){
     if(!session||session.ended())return;
     if(active){active.focus();return;}
@@ -56,7 +56,12 @@
       if(closed||busy||(ask&&(dirty||pending)&&!confirm('현재 입력·재시도 요청을 버리고 서버 설정을 불러오시겠습니까?')))return;
       const token=++generation;busy=true;controls();message('Loading');
       try{const r=await request('GET');if(closed||token!==generation)return;render(r);pending=null;}
-      catch(e){if(!closed)message(e.message||'접근 조건을 불러오지 못했습니다');}
+      catch(e){
+        if(closed)return;
+        const text=e.message||'접근 조건을 불러오지 못했습니다';
+        if(e.status===403){dispose();refused?.(text);return;}
+        message(text);
+      }
       finally{busy=false;if(!closed)controls();}
     }
     function policy(){
@@ -87,5 +92,5 @@
     window.addEventListener('pagehide',dispose,{once:true});
     document.body.append(dialog);dialog.showModal();reload(false);
   }
-  root.KinStudyAccessAdmin={open,attach};
+  root.KinStudyAccessAdmin={open,attach,close:()=>closeActive?.()};
 })(window);

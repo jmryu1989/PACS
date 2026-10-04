@@ -676,6 +676,14 @@ class AdminMetricsDOMTest(unittest.TestCase):
             with self.subTest(status=reply[0], sentence=sentence):
                 self.refresh(reply)
                 summary = self.summary()
+                if reply[0] == 403:
+                    self.assertEqual((0, True, sentence), (summary['rows'], summary['wrapHidden'], summary['message']))
+                    expect(self.page.locator('#metrics-refresh')).to_be_disabled()
+                    self.assertEqual(ORIGIN + PAGE_PATH, self.page.url)
+                    self.open()
+                    self.refresh((200, answer()))
+                    self.assert_observed()
+                    continue
                 self.assertEqual(("Query Failed · 마지막 관측 기준 " + shown_generated(1), "mstate query_failed", sentence,
                                   True, False, True), (summary["state"], summary["stateClass"], summary["message"],
                                                        summary["messageShown"], summary["wrapHidden"], summary["stale"]))

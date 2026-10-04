@@ -459,6 +459,15 @@ class AdminAuditDOMTest(unittest.TestCase):
             with self.subTest(status=reply[0], sentence=sentence):
                 self.refresh(reply)
                 s = self.summary()
+                if reply[0] == 403:
+                    self.assertEqual((0, True, sentence), (s['rows'], s['wrapHidden'], s['message']))
+                    expect(self.page.locator('#audit-refresh')).to_be_disabled()
+                    expect(self.page.locator('#audit-more')).to_be_disabled()
+                    self.assertEqual(ORIGIN + PAGE_PATH, self.page.url)
+                    self.open()
+                    self.refresh((200, PAGE1))
+                    self.assertEqual(3, self.summary()['rows'])
+                    continue
                 self.assertEqual(("Query Failed · 마지막 조회 기준 " + shown_at(1), "astate query_failed", sentence, True,
                                   False, True, True, 3, "Showing 3 of 5 Events", True),
                                  (s["state"], s["stateClass"], s["message"], s["messageShown"], s["wrapHidden"], s["stale"],

@@ -568,7 +568,12 @@ class ClinicianTimelineDOMTest(unittest.TestCase):
                 seen = self.settled_timeline("failed")
                 self.assertEqual((FAILED, detail, True, [], None), (seen["text"], seen["detail"], seen["retry"], seen["items"],
                                                                     seen["conflict"]))
-                self.page.locator("#timeline-retry").click()
+                if answer[0] == 403:
+                    expect(self.page.locator('#timeline-retry')).to_be_disabled()
+                    expect(self.page.locator('#timeline-toggle')).to_be_disabled()
+                    self.pick(A)
+                else:
+                    self.page.locator("#timeline-retry").click()
                 self.assertEqual(4, len(self.settled_timeline("ready")["items"]))
 
         n_row = next(row for row in self.rows if row["uid"] == N)
