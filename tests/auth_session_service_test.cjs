@@ -195,6 +195,71 @@ test.after(async () => {
   if (kc.server) await new Promise(resolve => kc.server.close(resolve));
 });
 
+// U5S-REQ-06/09 + amendments 1/2 -> U5S-RISK-SESSION -> U5S-ENTRY-01/02.
+test('U5S-ENTRY-01 callback delivers a single-use proof to the approved member final document', async t => {
+  const w = await world(t);
+  const vectors = [
+    ['clinician', [A], ['clinician'], 'clinician.html', 200],
+    ['defaults', ['/' + A], ['offline_access', 'clinician', 'default-roles-kin'], 'clinician.html', 200],
+    ['reader', [A], ['radiologist'], 'main.html', 200],
+    ['technician', [A], ['technician'], 'main.html', 200],
+    ['admin', [A], ['admin'], 'main.html', 200],
+    ['mixed-reader', [A], ['clinician', 'radiologist'], 'main.html', 200],
+    ['mixed-tech', [A], ['clinician', 'technician'], 'main.html', 200],
+    ['mixed-admin', [A], ['clinician', 'admin'], 'main.html', 200],
+    ['pending', [], ['clinician'], 'main.html', 403],
+    ['invalid', [A, B], ['clinician'], 'main.html', 403],
+    ['no-role', [A], [], 'main.html', 403],
+    ['nonstring-group', [7], ['clinician'], 'main.html', 403],
+    ['gateway-mixed', [A], ['clinician', 'gateway'], 'main.html', 403],
+  ];
+  for (const [label, groups, roles, document, status] of vectors) {
+    const sub = 'syn-entry-' + label;
+    const { done } = await login(w, w.I1, await w.issue(label, { sub, groups, roles }));
+    assert.equal(done.status, 302, label);
+    const target = new URL(done.location);
+    assert.equal(target.origin + target.pathname, ORIGIN + '/worklist/hpacs-lite/' + document, label);
+    assert.equal(target.search, '', 'proof never rides in the query');
+    assert.ok(done.proof && done.newSid, label);
+    const entry = await w.call(w.I1, 'entry', { sid: done.newSid, body: { proof: done.proof } });
+    assert.equal(entry.status, 200, label);
+    const me = await w.call(w.I1, 'me', { sid: done.newSid, binding: entry.body.sessionId });
+    assert.equal(me.status, status, label);
+    if (status === 200) assert.deepEqual(me.body.roles, roles, label);
+    assert.deepEqual(coded(await w.call(w.I2, 'entry', { sid: done.newSid, body: { proof: done.proof } })),
+      [403, 'AUTH_ENTRY_REFUSED', 'AUTH_ENTRY_REFUSED'], label);
+    assert.equal(rowsOf(await w.rows(), sub).filter(row => row.action === 'auth.entry').length, 1, label);
+  }
+  await w.finish('U5S-ENTRY-01');
+});
+
+test('U5S-ENTRY-02 bound me after proof consumption uses refreshed member roles, not the callback destination', async t => {
+  const w = await world(t);
+  for (const [label, before, after, groups, status] of [
+    ['reader-to-clinician', ['radiologist'], ['clinician'], [A], 200],
+    ['clinician-to-reader', ['clinician'], ['radiologist'], [A], 200],
+    ['clinician-to-pending', ['clinician'], ['clinician'], [], 403],
+    ['clinician-to-invalid', ['clinician'], ['clinician'], [A, B], 403],
+  ]) {
+    const sub = 'syn-entry-change-' + label;
+    const { done } = await login(w, w.I1, await w.issue(label, { sub, roles: before, expIn: 1 }));
+    assert.equal(new URL(done.location).pathname, '/worklist/hpacs-lite/'
+      + (before.includes('clinician') ? 'clinician.html' : 'main.html'));
+    w.tick(2_000);
+    const next = await w.issue(label + '-next', { sub, roles: after, groups });
+    kc.auto = () => reply.tokens(next);
+    const entry = await w.call(w.I1, 'entry', { sid: done.newSid, body: { proof: done.proof } });
+    assert.equal(entry.status, 200);
+    const me = await w.call(w.I1, 'me', { sid: done.newSid, binding: entry.body.sessionId });
+    assert.equal(me.status, status, label);
+    if (status === 200) assert.deepEqual(me.body.roles, after, label);
+    else assert.equal(me.body.code, groups.length ? 'INSTITUTION_INVALID' : 'INSTITUTION_PENDING', label);
+    assert.equal(me.body.sessionId, entry.body.sessionId, label);
+    kc.auto = null;
+  }
+  await w.finish('U5S-ENTRY-02');
+});
+
 // ── what reaches stdout/stderr while a world runs ──
 
 const realWrite = { out: process.stdout.write.bind(process.stdout), err: process.stderr.write.bind(process.stderr) };
