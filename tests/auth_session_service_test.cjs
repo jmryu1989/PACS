@@ -6,8 +6,16 @@
  * REQ-S7-U5-AUTH-AUDIT -> RISK-S7-U5-SECRET-IN-LOG / RISK-S7-U5-CROSS-INSTITUTION / RISK-S7-U5-SWEEP-SILENT
  *   -> TEST-S7-U5 (this file; TEST-S7-U5-LIVE is tests/auth_audit_live.py).
  * Contracts: the session lifecycle contract (scenario-table section 0.A, Astra S7-U5-SPEC-F01, outcome table RT-01..RT-15)
- * and the DB failure boundary contract (section 0.B, S7-U5-SPEC-F02). The expected values are the contract's literals,
- * never read back from the implementation.
+ * and the DB failure boundary contract (section 0.B, S7-U5-SPEC-F02), as replaced by Astra spec U5S (REQ-05, 08, 09, 10)
+ * and its 2026-10-04 amendments: a logout revokes and records before Keycloak is told and does not wait for it; no
+ * answer expires kin_sid; a cookie request names the session its document saw (X-KIN-Session); a login is entered with
+ * a single-use proof; a refresh starts ahead of the token's expiry and only Keycloak's refusal of the refresh token ends
+ * a session (U5S-AMD-04, U5S-TEST-S05/S07/S11, U5S-REQ-08/09 at the end of this file). The expected values are the
+ * contract's literals, never read back from the implementation.
+ *
+ * RT rows whose fixture changed with the lead (the outcomes did not): a session whose token "has expired" is stored with
+ * atExpiresAt 31 s in the past (lapsed()), and the same-exp fixtures expire within the 2 s the service already counts as
+ * expired - both make the request wait for its refresh, which is what those timelines hold and release.
  *
  * Why compiled and not live: the sweep is an hourly timer with no route, and the races, the audit-write failures and the
  * late Keycloak answers cannot be timed on a live stack without test hooks (D73). So: the product's own Nest lifecycle hook
@@ -46,8 +54,12 @@ const ORIGIN = 'https://syn.test';
 const HOUR = 3600_000;
 const IDLE = 12 * HOUR;
 const START = Date.UTC(2026, 9, 3, 0, 0, 0);          // the mocked clock of every world
-const AUTH_ACTIONS = ['auth.login', 'auth.logout', 'auth.session.expired'];
+const AUTH_ACTIONS = ['auth.login', 'auth.logout', 'auth.session.expired', 'auth.entry'];
 const ABSENT = '인증 세션이 없습니다', EXPIRED = '인증 세션이 만료되었습니다', REFUSED = '인증 세션을 갱신할 수 없습니다';
+// The contract's lead: a stored access token is refreshed from 30 s before its expiry (atExpiresAt = exp - 30 s). A
+// request before that instant is not refreshed; from it to the expiry the request goes on while a refresh runs; after
+// the expiry the request waits for the refresh.
+const LEAD = 30_000;
 const IP = '198.51.100.7';
 const A = 'syn-inst-a', B = 'syn-inst-b', Z = 'syn-inst-z';
 
@@ -85,7 +97,8 @@ function database() {
 // ── the fake Keycloak (127.0.0.1, the container's own loopback) ──
 
 const KEYS = {};
-const kc = { server: null, port: 0, held: [], waiters: [], auto: null, logoutMode: 'ok', logouts: 0, tokens: 0, codes: [] };
+const kc = { server: null, port: 0, held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
+  certs: 'ok', certRequests: 0, abandoned: 0 };
 
 async function keycloak() {
   if (kc.server) return;
@@ -103,11 +116,22 @@ async function keycloak() {
         res.writeHead(status, { 'Content-Type': 'application/json' });
         res.end(value === undefined ? '' : JSON.stringify(value));
       };
-      if (path === '/realms/kin/protocol/openid-connect/certs') return send(200, { keys: [jwk] });
+      if (path === '/realms/kin/protocol/openid-connect/certs') {
+        kc.certRequests++;
+        // 'drop' cuts the connection, 'error' answers 503: the key set cannot be fetched (the token is not at fault).
+        if (kc.certs === 'drop') return req.socket.destroy();
+        return kc.certs === 'error' ? send(503, { error: 'unavailable' }) : send(200, { keys: [jwk] });
+      }
       if (path === '/realms/kin/protocol/openid-connect/logout') {
         kc.logouts++;
-        if (kc.logoutMode === 'drop') return req.socket.destroy();
-        return send(204);
+        // A request Keycloak never answers ends when the caller gives it up: counted, so a case can tell an answer
+        // that waited for that from one that did not.
+        if (kc.logoutMode === 'hang') res.on('close', () => { kc.abandoned++; });
+        // 'drop' cuts the connection, 'hang' never answers (the caller's own bound ends the wait).
+        const answer = () => kc.logoutMode === 'drop' ? req.socket.destroy() : kc.logoutMode === 'hang' ? undefined : send(204);
+        // What the store holds at the moment Keycloak is told: a case reads it here, before the answer.
+        if (kc.onLogout) return void kc.onLogout().then(answer, answer);
+        return answer();
       }
       if (path === '/realms/kin/protocol/openid-connect/token') {
         kc.tokens++;
@@ -117,6 +141,8 @@ async function keycloak() {
           form,
           answer(reply) {
             if (reply === 'drop') return req.socket.destroy();
+            if (reply === 'hang') return undefined;          // never answered: the caller's own bound ends the wait
+            if (reply === 'unreadable') { res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end('<html>SYN gateway page</html>'); }
             send(reply[0], reply[1]);
           },
         };
@@ -133,6 +159,15 @@ async function keycloak() {
   process.env.KC_JWKS_URL = `http://127.0.0.1:${kc.port}/realms/kin/protocol/openid-connect/certs`;
 }
 
+// Keycloak logout requests the process has started (a logout tells Keycloak after its answer is decided and does not
+// wait for it): the cases wait until what was started has arrived before they count arrivals.
+const idp = { started: 0 };
+const realFetch = globalThis.fetch;
+globalThis.fetch = (input, init) => {
+  if (String(input).endsWith('/protocol/openid-connect/logout')) idp.started++;
+  return realFetch(input, init);
+};
+
 /** The n-th /token request held since the world began (1-based), in arrival order. */
 async function heldToken(n, label = 'a /token request') {
   // Real time: the mocked clock does not move by itself.
@@ -148,6 +183,11 @@ const reply = {
   tokens: v => [200, { access_token: v.access, refresh_token: v.refresh, token_type: 'Bearer', expires_in: 60 }],
   reject: () => [400, { error: 'invalid_grant', error_description: 'SYN refused' }],
   drop: () => 'drop',
+  // Not a refusal: Keycloak could not be reached, answered late, failed, or answered something that is not its answer.
+  hang: () => 'hang',
+  unreadable: () => 'unreadable',
+  failing: () => [503, { error: 'temporarily_unavailable' }],
+  misconfigured: () => [401, { error: 'invalid_client' }],
 };
 
 test.after(async () => {
@@ -196,6 +236,7 @@ const DETAIL_KEYS = {
   'auth.login:failure': ['cause', 'dataSubject', 'institution', 'ip', 'outcome'],
   'auth.logout': ['cause', 'dataSubject', 'institution', 'ip'],
   'auth.session.expired': ['cause', 'dataSubject', 'institution', 'ip'],
+  'auth.entry': ['dataSubject', 'institution', 'ip'],
 };
 const shapeOf = row => row.action === 'auth.login' ? 'auth.login:' + row.detail.outcome : row.action;
 
@@ -207,6 +248,7 @@ const summary = rows => rows.map(r => [r.action, r.detail.cause ?? r.detail.outc
 const { AuthService } = require('/app/dist/auth.service');
 const { AuthGuard } = require('/app/dist/auth.guard');
 const { AuthController } = require('/app/dist/auth.controller');
+const { PacsController } = require('/app/dist/pacs.controller');
 
 class SynProtectedController { read() {} }
 
@@ -225,9 +267,11 @@ async function world(t, { now = START } = {}) {
     base.$executeRawUnsafe(`TRUNCATE "AuditLog" RESTART IDENTITY`)]);
   const [{ left }] = await base.$queryRawUnsafe(`SELECT (SELECT count(*) FROM "AuditLog") + (SELECT count(*) FROM "AuthSession") AS left`);
   assert.equal(Number(left), 0, 'every world starts with no session and no audit row');
-  Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', logouts: 0, tokens: 0, codes: [] });
+  Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
+    certs: 'ok', certRequests: 0, abandoned: 0 });
+  idp.started = 0;
 
-  const w = { t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [] };
+  const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [] };
   w.secret = (kind, value) => { for (const entry of secretEntries(kind, value)) w.secrets.push(entry); };
   w.secret('client-secret', SECRETS.client);
   w.secret('cookie-secret', SECRETS.cookie);
@@ -265,7 +309,11 @@ async function world(t, { now = START } = {}) {
       await hit(inst, 'tx.open');
       return base.$transaction(async tx => {
         w.calls.push(inst + ':tx:start');
-        const view = new Proxy({}, { get(_t, k) { return k === 'authSession' || k === 'auditLog' ? delegate(inst, tx, k, 'tx') : tx[k]; } });
+        const view = new Proxy({}, { get(_t, k) {
+          if (k === 'authSession' || k === 'auditLog') return delegate(inst, tx, k, 'tx');
+          const value = tx[k];
+          return typeof value === 'function' ? value.bind(tx) : value;
+        } });
         const out = await fn(view);
         w.calls.push(inst + ':tx:end');
         return out;
@@ -281,6 +329,8 @@ async function world(t, { now = START } = {}) {
   };
   w.I1 = make('I1');
   w.I2 = make('I2');
+  /** Another process over the same database: nothing of the others' memory (key set, shared refreshes). */
+  w.instance = make;
 
   // The real Nest exception path, with only its transport replaced by an in-memory response.
   const adapter = {
@@ -290,31 +340,52 @@ async function world(t, { now = START } = {}) {
   };
   w.exceptions = new ExceptionsHandler(adapter);
 
-  /** One request through the compiled guard and controller (or the protected test handler). */
-  w.call = async (inst, kind, { sid, cookie, ip = IP, headers = {}, query = {}, bearer } = {}) => {
+  /**
+   * One request through the compiled guard and controller (or the protected test handler).
+   *
+   * A cookie request carries the binding a document of that session holds (X-KIN-Session = the session's own id, the
+   * value `GET me` hands out; computed with the service's pure derivation, which the guard itself calls) unless the case
+   * gives another (`binding: null` sends none, a string sends that value). The bootstrap `me`, the entry proof and the
+   * link logins are the requests a document makes before it knows the id: they send none by default.
+   */
+  w.call = async (inst, kind, { sid, cookie, ip = IP, headers = {}, query = {}, body, bearer, binding, csrf = true } = {}) => {
     const routes = {
       get: ['GET', '/api/syn/protected', SynProtectedController, SynProtectedController.prototype.read],
+      me: ['GET', '/api/me', PacsController, PacsController.prototype.me],
+      authz: ['GET', '/api/authz/dicom', PacsController, PacsController.prototype.authzDicom],
       logout: ['POST', '/api/auth/logout', AuthController, AuthController.prototype.logout],
       login: ['GET', '/api/auth/login', AuthController, AuthController.prototype.login],
       register: ['GET', '/api/auth/register', AuthController, AuthController.prototype.register],
+      switch: ['POST', '/api/auth/login', AuthController, AuthController.prototype.startLogin],
+      signup: ['POST', '/api/auth/register', AuthController, AuthController.prototype.startRegister],
+      entry: ['POST', '/api/auth/entry', AuthController, AuthController.prototype.entry],
       callback: ['GET', '/api/auth/callback', AuthController, AuthController.prototype.callback],
     };
     const [method, path, cls, handler] = routes[kind];
     const cookies = [sid ? 'kin_sid=' + encodeURIComponent(sid) : null, cookie ?? null].filter(Boolean).join('; ');
-    const req = { method, originalUrl: path, url: path, query, headers: {
+    const unbound = ['me', 'entry', 'login', 'register', 'callback'].includes(kind);
+    const bound = binding === undefined ? (sid && !unbound ? inst.service.sessionRef(sid) : null) : binding;
+    const req = { method, originalUrl: path, url: path, query, body, headers: {
       ...(cookies ? { cookie: cookies } : {}), ...(ip === null ? {} : { 'x-real-ip': ip }),
-      ...(kind === 'logout' ? { 'x-kin-csrf': '1' } : {}), ...(bearer ? { authorization: 'Bearer ' + bearer } : {}), ...headers } };
-    const res = { req, setCookies: [], statusCode: null, body: undefined, location: null, sent: false,
+      ...(method === 'POST' && csrf ? { 'x-kin-csrf': '1' } : {}), ...(bound ? { 'x-kin-session': bound } : {}),
+      ...(bearer ? { authorization: 'Bearer ' + bearer } : {}), ...headers } };
+    const res = { req, setCookies: [], sentHeaders: {}, headersSent: false, statusCode: null, body: undefined, location: null, sent: false,
       append(name, value) { if (name === 'Set-Cookie') this.setCookies.push(value); },
+      setHeader(name, value) { this.sentHeaders[String(name).toLowerCase()] = value; },
       redirect(status, url) { this.statusCode = status; this.location = url; this.sent = true; },
       status(code) { this.statusCode = code; return this; },
       send(body) { this.body = body; this.sent = true; return this; } };
     try {
       await inst.guard.canActivate(new ExecutionContextHost([req, res], cls, handler));
       if (kind === 'get') { inst.handled++; res.status(200).send({ ok: true }); }
+      else if (kind === 'authz') { inst.handled++; res.status(204).send(); }
+      else if (kind === 'me') res.status(200).send(new PacsController(null).me(req));
       else if (kind === 'logout') await inst.controller.logout(req, res);
       else if (kind === 'login') await inst.controller.login(req, res, query.prompt);
       else if (kind === 'register') await inst.controller.register(req, res);
+      else if (kind === 'switch') res.status(200).send(await inst.controller.startLogin(req, res, body));
+      else if (kind === 'signup') res.status(200).send(await inst.controller.startRegister(req, res));
+      else if (kind === 'entry') res.status(200).send(await inst.controller.entry(req, res));
       else await inst.controller.callback(req, res, query.code, query.state, query.error);
     } catch (error) {
       w.exceptions.next(error, new ExecutionContextHost([req, res]));
@@ -323,19 +394,26 @@ async function world(t, { now = START } = {}) {
     const sidCookie = set('kin_sid'), pending = set('kin_pending');
     const value = c => decodeURIComponent(c.slice(c.indexOf('=') + 1, c.indexOf(';')));
     const out = {
-      status: res.statusCode, body: res.body, location: res.location,
-      expired: sidCookie.some(c => c.startsWith('kin_sid=;') && /Max-Age=0/.test(c)),
+      status: res.statusCode, body: res.body, location: res.location ?? res.body?.location ?? null,
+      authCode: res.sentHeaders['x-kin-auth-code'] ?? null,
+      expired: sidCookie.some(c => c.startsWith('kin_sid=;') || /Max-Age=0/.test(c)),
       newSid: sidCookie.filter(c => !/Max-Age=0/.test(c)).map(value)[0] ?? null,
       pending: pending.filter(c => !/Max-Age=0/.test(c)).map(value)[0] ?? null,
       sidCookies: sidCookie.length, texts: [JSON.stringify(res.body ?? null), res.location ?? '', ...res.setCookies],
     };
-    out.cookie = out.expired ? (out.pending ? 'E+P' : 'E') : out.newSid ? 'S' : 'K';
+    // What the answer does to the browser's cookies: E = it expires kin_sid (no answer may), S = a new kin_sid (the login
+    // callback only), P = a new pending login and kin_sid untouched, K = kin_sid untouched.
+    out.cookie = out.expired ? (out.pending ? 'P' : 'E') : out.newSid ? 'S' : out.pending ? 'P' : 'K';
+    if (out.expired) w.expiries.push(kind);
     if (out.newSid) w.secret('sid', out.newSid);
     if (out.pending) w.secret('pending', out.pending);
+    const fragment = /#kin-entry=([^&]+)/.exec(out.location ?? '');
+    if (fragment) { out.proof = decodeURIComponent(fragment[1]); w.secret('proof', out.proof); }
     w.responses.push(out.texts);
     return out;
   };
   w.responses = [];
+  w.expiries = [];
 
   /** A token version: a signed access token (RS256, the fake Keycloak's key) and an opaque refresh token. */
   w.issue = async (label, { sub, groups = [A], email, roles = ['radiologist'], expIn = HOUR / 1000, key = 'main', same } = {}) => {
@@ -368,6 +446,15 @@ async function world(t, { now = START } = {}) {
     .map(r => ({ actor: r.actor, action: r.action, target: r.target, detail: JSON.parse(r.detail) }));
   w.ends = async () => summary((await w.rows()).filter(r => r.action !== 'auth.login'));
   w.tick = ms => t.mock.timers.tick(ms);
+  /**
+   * The count of Keycloak logout requests once `expected` have arrived (or what arrived within the wait). A logout
+   * answers when the session is revoked and recorded; Keycloak is told afterwards, without the answer waiting for it.
+   */
+  w.told = async () => {
+    const until = performance.now() + 5_000;
+    while (kc.logouts < idp.started && performance.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+    return kc.logouts;
+  };
 
   /** Waits (real time) until the predicate on the database holds: a sweep has no response to wait for. */
   w.until = async (what, predicate) => {
@@ -383,6 +470,9 @@ async function world(t, { now = START } = {}) {
   capture.texts = [];
   /** World end (AS-10 a): every auth row has its exact key set; no secret in rows, responses or captured output. */
   w.finish = async (name, { output = [] } = {}) => {
+    // Every Keycloak logout request this world started has arrived: a telling does not hold its logout's answer, so
+    // the world waits for the stragglers here instead of leaving them to the next world's counters.
+    assert.equal(await w.told(), idp.started, `${name}: Keycloak logout requests started and arrived`);
     capture.on = false;
     const rows = await w.rows();
     for (const row of rows) {
@@ -399,6 +489,8 @@ async function world(t, { now = START } = {}) {
     report(JSON.stringify({ case: name, rows: rows.length, hits: [...hits.rows, ...hits.output, ...extra],
       captured: capture.texts.length }));
     assert.deepEqual(hits, { rows: [], output: [] }, `${name}: secrets found (kinds only)`);
+    // U5S-REQ-10: no answer of this world expired or overwrote kin_sid; the only kin_sid an answer sets is a login's.
+    assert.deepEqual(w.expiries, [], `${name}: answers that expired kin_sid`);
     assert.deepEqual(extra, [], `${name}: markers found in the output (kinds only)`);
     return capture.texts;
   };
@@ -469,6 +561,8 @@ async function guardView(w, access) {
 }
 
 const past = (ms = 1000) => new Date(Date.now() - ms);
+/** A stored atExpiresAt whose token has really expired (the lead is over): a request must wait for the refresh. */
+const lapsed = () => past(LEAD + 1000);
 
 // ── AS-01..AS-07 ──
 
@@ -476,8 +570,8 @@ test('AS-01 a login writes its session and one success row in one transaction', 
   const w = await world(t);
   const v = await w.issue('ma', { sub: 'syn-sub-ma', groups: ['/' + A], email: 'syn-ma@synthetic.test' });
   const first = await login(w, w.I1, v);
-  assert.deepEqual([first.done.status, first.done.location, !!first.done.newSid],
-    [302, ORIGIN + '/worklist/hpacs-lite/main.html', true]);
+  assert.deepEqual([first.done.status, first.done.location.split('#kin-entry=')[0], !!first.done.proof, !!first.done.newSid],
+    [302, ORIGIN + '/worklist/hpacs-lite/main.html', true, true], 'the callback is the one answer that sets kin_sid; the entry proof rides in the fragment');
   assert.equal(await w.sessions(), 1);
   assert.deepEqual(await w.rows(), [{ actor: 'syn-ma@synthetic.test', action: 'auth.login', target: 'syn-sub-ma',
     detail: { institution: A, ip: IP, dataSubject: null, outcome: 'success' } }]);
@@ -578,7 +672,7 @@ test('AS-04 logout: one row from the ended session, Bearer none, overlap one, a 
   // (a) the row's actor, target and institution are the stored token's - the guard's own reading of it.
   const va = await w.issue('a', { sub: 'syn-sub-a', groups: [A] });
   let out = await w.call(w.I1, 'logout', { sid: await w.session(va) });
-  assert.deepEqual([out.status, out.cookie], [204, 'E']);
+  assert.deepEqual([out.status, out.cookie], [204, 'K']);
   const seen = await guardView(w, va.access);
   assert.deepEqual(rowsOf(await w.rows(), 'syn-sub-a'), [{ actor: seen.actor, action: 'auth.logout', target: seen.sub,
     detail: { institution: seen.institution, ip: IP, dataSubject: null, cause: 'logout' } }]);
@@ -586,8 +680,8 @@ test('AS-04 logout: one row from the ended session, Bearer none, overlap one, a 
   kc.logoutMode = 'drop';
   const logouts = kc.logouts;
   out = await w.call(w.I1, 'logout', { sid: await w.session(await w.issue('b', { sub: 'syn-sub-b', groups: [B] })) });
+  assert.deepEqual([out.status, out.cookie, await w.told() - logouts], [204, 'K', 1]);
   kc.logoutMode = 'ok';
-  assert.deepEqual([out.status, out.cookie, kc.logouts - logouts], [204, 'E', 1]);
   assert.deepEqual(summary(rowsOf(await w.rows(), 'syn-sub-b')), [['auth.logout', 'logout', B]]);
   // (c) two logouts of one session overlap (RT-12), in both orders: the one that deleted writes the row.
   for (const [first, second, sub] of [[w.I1, w.I2, 'syn-sub-c1'], [w.I2, w.I1, 'syn-sub-c2']]) {
@@ -598,9 +692,9 @@ test('AS-04 logout: one row from the ended session, Bearer none, overlap one, a 
     const won = await w.call(second, 'logout', { sid });
     gate.release();
     const lost = await held;
-    assert.deepEqual([won.status, won.cookie, lost.status, lost.cookie], [204, 'E', 204, 'E'], sub);
+    assert.deepEqual([won.status, won.cookie, lost.status, lost.cookie], [204, 'K', 204, 'K'], sub);
     const after = await w.call(first, 'logout', { sid });
-    assert.deepEqual([after.status, after.body?.message, after.cookie], [401, ABSENT, 'E'], sub + ': a later logout meets the absence in the guard');
+    assert.deepEqual([after.status, after.cookie], [204, 'K'], sub + ': a later, correctly bound logout of the absent session is confirmed again, without a row');
     assert.deepEqual(summary(rowsOf(await w.rows(), sub)), [['auth.logout', 'logout', A]], sub);
   }
   // (d) Bearer: no session, no row.
@@ -608,26 +702,30 @@ test('AS-04 logout: one row from the ended session, Bearer none, overlap one, a 
   out = await w.call(w.I1, 'logout', { bearer: bearer.access });
   assert.deepEqual([out.status, out.cookie], [204, 'K']);
   assert.deepEqual(rowsOf(await w.rows(), 'syn-sub-bearer'), []);
-  // (e) the guard ends the session before the controller: its own cause, no logout row.
+  // (e) U5S-REQ-05: a logout is independent of the token refresh and of the idle judgement. An expired stored access
+  // token with Keycloak refusing every refresh, and a session idle for 13 h: each is ended by the logout itself - its own
+  // cause, no /token request, nothing left to the guard.
   kc.auto = () => reply.reject();
-  out = await w.call(w.I1, 'logout', { sid: await w.session(await w.issue('e1', { sub: 'syn-sub-e1', groups: [A] }), { atExpiresAt: past() }) });
+  const tokensBefore = kc.tokens;
+  out = await w.call(w.I1, 'logout', { sid: await w.session(await w.issue('e1', { sub: 'syn-sub-e1', groups: [A] }), { atExpiresAt: lapsed() }) });
   kc.auto = null;
-  assert.deepEqual([out.status, out.body?.message, out.cookie], [401, REFUSED, 'E']);
+  assert.deepEqual([out.status, out.cookie, kc.tokens - tokensBefore], [204, 'K', 0]);
   out = await w.call(w.I1, 'logout', { sid: await w.session(await w.issue('e2', { sub: 'syn-sub-e2', groups: [B] }), { lastSeenAt: past(13 * HOUR) }) });
-  assert.deepEqual([out.status, out.body?.message, out.cookie], [401, EXPIRED, 'E']);
+  assert.deepEqual([out.status, out.cookie], [204, 'K']);
   assert.deepEqual(summary([...rowsOf(await w.rows(), 'syn-sub-e1'), ...rowsOf(await w.rows(), 'syn-sub-e2')]),
-    [['auth.session.expired', 'idle', B], ['auth.session.expired', 'refresh_failed', A]]);
+    [['auth.logout', 'logout', A], ['auth.logout', 'logout', B]]);
   assert.equal(w.I1.handled + w.I2.handled, 0);
   await w.finish('AS-04');
 });
 
 test('AS-05 an account switch or a registration ends the browser session with one account_switch row', async t => {
   const w = await world(t);
-  for (const [kind, query, sub, options] of [['login', { prompt: 'login' }, 'syn-sub-s1', {}],
-    ['register', {}, 'syn-sub-s2', {}], ['login', { prompt: 'login' }, 'syn-sub-s3', { lastSeenAt: past(13 * HOUR) }]]) {
+  for (const [kind, body, sub, options] of [['switch', { prompt: 'login' }, 'syn-sub-s1', {}],
+    ['signup', undefined, 'syn-sub-s2', {}], ['switch', { prompt: 'login' }, 'syn-sub-s3', { lastSeenAt: past(13 * HOUR) }]]) {
     const sid = await w.session(await w.issue(sub, { sub, groups: [B] }), options);
-    const out = await w.call(w.I1, kind, { sid, query });
-    assert.deepEqual([out.status, out.cookie, out.location.startsWith(ISSUER + '/protocol/openid-connect/auth?')], [302, 'E+P', true], sub);
+    const out = await w.call(w.I1, kind, { sid, body });
+    assert.deepEqual([out.status, out.cookie, out.location.startsWith(ISSUER + '/protocol/openid-connect/auth?')], [200, 'P', true], sub);
+    assert.equal(new URL(out.location).searchParams.get('prompt'), kind === 'switch' ? 'login' : 'create', sub);
     assert.equal(await w.version(sid), null, sub);
     assert.deepEqual(summary(rowsOf(await w.rows(), sub)), [['auth.logout', 'account_switch', B]], sub + ': account_switch even when idle');
   }
@@ -644,7 +742,7 @@ test('AS-06 idle: one row at the end, none at exactly twelve hours or before', a
   const w = await world(t);
   const sid = await w.session(await w.issue('i1', { sub: 'syn-sub-i1', groups: [A] }), { lastSeenAt: past(IDLE + 1000) });
   let out = await w.call(w.I1, 'get', { sid });
-  assert.deepEqual([out.status, out.body?.message, out.cookie], [401, EXPIRED, 'E']);
+  assert.deepEqual([out.status, out.body?.message, out.cookie], [401, EXPIRED, 'K']);
   assert.deepEqual(rowsOf(await w.rows(), 'syn-sub-i1').map(r => r.detail), [{ institution: A, ip: IP, dataSubject: null, cause: 'idle' }]);
   // Two requests of one idle session overlap (RT-12): one row.
   const sid2 = await w.session(await w.issue('i2', { sub: 'syn-sub-i2', groups: [B] }), { lastSeenAt: past(IDLE + 1000) });
@@ -654,7 +752,7 @@ test('AS-06 idle: one row at the end, none at exactly twelve hours or before', a
   const won = await w.call(w.I2, 'get', { sid: sid2 });
   gate.release();
   const lost = await held;
-  assert.deepEqual([won.status, won.cookie, lost.status, lost.body?.message, lost.cookie], [401, 'E', 401, EXPIRED, 'E']);
+  assert.deepEqual([won.status, won.cookie, lost.status, lost.body?.message, lost.cookie], [401, 'K', 401, EXPIRED, 'K']);
   assert.deepEqual(summary(rowsOf(await w.rows(), 'syn-sub-i2')), [['auth.session.expired', 'idle', B]]);
   // Exactly twelve hours is the cutoff itself and not idle; 11 h 59 min neither.
   for (const [sub, age] of [['syn-sub-i3', IDLE], ['syn-sub-i4', IDLE - 60_000]]) {
@@ -663,38 +761,32 @@ test('AS-06 idle: one row at the end, none at exactly twelve hours or before', a
     assert.deepEqual(rowsOf(await w.rows(), sub), [], sub);
   }
   out = await w.call(w.I1, 'get', { sid: 'syn-unknown-' + randomUUID() });
-  assert.deepEqual([out.status, out.body?.message, out.cookie], [401, ABSENT, 'E']);
+  assert.deepEqual([out.status, out.body?.message, out.cookie], [401, ABSENT, 'K']);
   assert.equal((await w.rows()).length, 2);
   await w.finish('AS-06');
 });
 
 test('AS-07 refresh: a refusal ends the session once, a success adds no row and is not refreshed again', async t => {
   const w = await world(t);
-  for (const [sub, answer] of [['syn-sub-r1', () => reply.reject()], ['syn-sub-r2', () => reply.drop()]]) {
-    kc.auto = answer;
-    const out = await w.call(w.I1, 'get', { sid: await w.session(await w.issue(sub, { sub, groups: [A] }), { atExpiresAt: past() }) });
-    assert.deepEqual([out.status, out.body?.message, out.cookie], [401, REFUSED, 'E'], sub);
-    assert.deepEqual(summary(rowsOf(await w.rows(), sub)), [['auth.session.expired', 'refresh_failed', A]], sub);
-  }
-  // A success answer whose token fails verification is a refusal too (an external failure).
-  const forged = await w.issue('r3-next', { sub: 'syn-sub-r3', groups: [A], key: 'other' });
-  kc.auto = () => reply.tokens(forged);
-  let out = await w.call(w.I1, 'get', { sid: await w.session(await w.issue('r3', { sub: 'syn-sub-r3', groups: [A] }), { atExpiresAt: past() }) });
+  // Keycloak's own refusal of the refresh token (400 invalid_grant) ends the session. An answer that is not that refusal
+  // ends nothing: U5S-AMD-04 below.
+  kc.auto = () => reply.reject();
+  let out = await w.call(w.I1, 'get', { sid: await w.session(await w.issue('syn-sub-r1', { sub: 'syn-sub-r1', groups: [A] }), { atExpiresAt: lapsed() }) });
   kc.auto = null;
-  assert.deepEqual([out.status, out.body?.message], [401, REFUSED]);
-  assert.deepEqual(summary(rowsOf(await w.rows(), 'syn-sub-r3')), [['auth.session.expired', 'refresh_failed', A]]);
+  assert.deepEqual([out.status, out.body?.code, out.body?.message, out.authCode, out.cookie], [401, 'AUTH_SESSION_ENDED', REFUSED, 'AUTH_SESSION_ENDED', 'K']);
+  assert.deepEqual(summary(rowsOf(await w.rows(), 'syn-sub-r1')), [['auth.session.expired', 'refresh_failed', A]]);
   // Two requests of one instance on the same snapshot share one /token request.
   kc.held = [];
   let tokens = kc.tokens;
-  const sid4 = await w.session(await w.issue('r4', { sub: 'syn-sub-r4', groups: [B] }), { atExpiresAt: past() });
+  const sid4 = await w.session(await w.issue('r4', { sub: 'syn-sub-r4', groups: [B] }), { atExpiresAt: lapsed() });
   const both = [w.call(w.I1, 'get', { sid: sid4 }), w.call(w.I1, 'get', { sid: sid4 })];
   (await heldToken(1, 'the shared refresh')).answer(reply.reject());
   const shared = await Promise.all(both);
-  assert.deepEqual([shared.map(o => [o.status, o.cookie]), kc.tokens - tokens], [[[401, 'E'], [401, 'E']], 1]);
+  assert.deepEqual([shared.map(o => [o.status, o.cookie]), kc.tokens - tokens], [[[401, 'K'], [401, 'K']], 1]);
   assert.deepEqual(summary(rowsOf(await w.rows(), 'syn-sub-r4')), [['auth.session.expired', 'refresh_failed', B]]);
   // Two instances, both refused (RT-04): one row, two 401s.
   kc.held = [];
-  const sid5 = await w.session(await w.issue('r5', { sub: 'syn-sub-r5', groups: [A] }), { atExpiresAt: past() });
+  const sid5 = await w.session(await w.issue('r5', { sub: 'syn-sub-r5', groups: [A] }), { atExpiresAt: lapsed() });
   const r1 = w.call(w.I1, 'get', { sid: sid5 });
   const k1 = await heldToken(1);
   const r2 = w.call(w.I2, 'get', { sid: sid5 });
@@ -702,14 +794,15 @@ test('AS-07 refresh: a refusal ends the session once, a success adds no row and 
   k1.answer(reply.reject());
   k2.answer(reply.reject());
   const pair = await Promise.all([r1, r2]);
-  assert.deepEqual(pair.map(o => [o.status, o.cookie]), [[401, 'E'], [401, 'E']]);
+  assert.deepEqual(pair.map(o => [o.status, o.cookie]), [[401, 'K'], [401, 'K']]);
   assert.deepEqual(summary(rowsOf(await w.rows(), 'syn-sub-r5')), [['auth.session.expired', 'refresh_failed', A]]);
   // A success is stored once and adopted: no row, one /token although its stored atExpiresAt is already past.
   const next = await w.issue('r6-next', { sub: 'syn-sub-r6', groups: [A], expIn: 20 });
   kc.auto = () => reply.tokens(next);
   tokens = kc.tokens;
-  const sid6 = await w.session(await w.issue('r6', { sub: 'syn-sub-r6', groups: [A] }), { atExpiresAt: past() });
+  const sid6 = await w.session(await w.issue('r6', { sub: 'syn-sub-r6', groups: [A] }), { atExpiresAt: lapsed() });
   out = await w.call(w.I1, 'get', { sid: sid6 });
+  // (the stored token of that answer is itself inside its lead: the same request adopts it and starts no second refresh)
   kc.auto = null;
   assert.deepEqual([out.status, out.cookie, await w.version(sid6), kc.tokens - tokens], [200, 'K', 'r6-next', 1]);
   assert.deepEqual(rowsOf(await w.rows(), 'syn-sub-r6'), []);
@@ -741,8 +834,8 @@ test('AS-08 (a) the hourly sweep ends every idle session with one sweep row; (c)
     // (c) the control: a 13 h idle session with an expired token ends idle in the guard, before any refresh.
     const tokens = kc.tokens;
     const out = await w.call(w.I1, 'get', { sid: await w.session(await w.issue('w5', { sub: 'syn-sub-w5', groups: [B] }),
-      { lastSeenAt: past(13 * HOUR), atExpiresAt: past() }) });
-    assert.deepEqual([out.status, out.body?.message, out.cookie, kc.tokens - tokens], [401, EXPIRED, 'E', 0]);
+      { lastSeenAt: past(13 * HOUR), atExpiresAt: lapsed() }) });
+    assert.deepEqual([out.status, out.body?.message, out.cookie, kc.tokens - tokens], [401, EXPIRED, 'K', 0]);
     assert.deepEqual(summary(rowsOf(await w.rows(), 'syn-sub-w5')), [['auth.session.expired', 'idle', B]]);
     // (d) the sweep has read a target and waits before its delete; the target's own request ends it idle first.
     const sid6 = await w.session(await w.issue('w6', { sub: 'syn-sub-w6', groups: [A] }), { lastSeenAt: past(13 * HOUR) });
@@ -795,40 +888,43 @@ test('AS-09 a DB failure on any path is a fixed 500 with nothing committed and n
     assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.login', 'session_failed', A], ['auth.login', 'success', A]], point);
     await w.base.authSession.deleteMany({});
   }
-  // (2) logout: 500, the session kept, no row, no cookie; Keycloak was asked once. Retried: 204 and one logout row.
+  // (2) logout (U5S-REQ-05, S06): 500, the session kept, no row, no cookie change and no Keycloak call - the session is
+  // revoked before Keycloak is told, so a failed revocation tells it nothing. Retried: 204, one logout row, one call.
   for (const point of ['tx.delete', 'tx.audit']) {
     const s = sub(), v = await w.issue(s, { sub: s, groups: [B] }), sid = await w.session(v), logouts = kc.logouts;
     w.fault('I1', point, dbError('logout-' + point));
     const out = await w.call(w.I1, 'logout', { sid });
     assert.ok(storageFailure(out), point);
-    assert.deepEqual([out.cookie, await w.version(sid), kc.logouts - logouts], ['K', s, 1], point);
+    assert.deepEqual([out.cookie, await w.version(sid), kc.logouts - logouts], ['K', s, 0], point);
     assert.deepEqual(rowsOf(await w.rows(), s), [], point);
     const retry = await w.call(w.I1, 'logout', { sid });
-    assert.deepEqual([retry.status, retry.cookie], [204, 'E'], point);
+    assert.deepEqual([retry.status, retry.cookie, await w.told() - logouts], [204, 'K', 1], point);
     assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.logout', 'logout', B]], point);
   }
-  // ... and when Keycloak has meanwhile refused the session, the retry ends it in the guard: refresh_failed, no logout row.
+  // ... and when the stored access token has meanwhile expired and Keycloak refuses every refresh, the retried logout
+  // still ends the session itself: a logout row, no /token request (the logout does not refresh the session it ends).
   {
     const s = sub(), sid = await w.session(await w.issue(s, { sub: s, groups: [A], expIn: 60 }));
     w.fault('I1', 'tx.delete', dbError('logout-kc'));
     assert.ok(storageFailure(await w.call(w.I1, 'logout', { sid })));
     w.tick(45_000);
     kc.auto = () => reply.reject();
+    const tokens = kc.tokens;
     const retry = await w.call(w.I1, 'logout', { sid });
     kc.auto = null;
-    assert.deepEqual([retry.status, retry.body?.message, retry.cookie], [401, REFUSED, 'E']);
-    assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.session.expired', 'refresh_failed', A]]);
+    assert.deepEqual([retry.status, retry.cookie, kc.tokens - tokens], [204, 'K', 0]);
+    assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.logout', 'logout', A]]);
   }
-  // (3) account switch and registration: 500, no pending cookie, no redirect, the session kept; then 302 and one row.
-  for (const [kind, query, point] of [['login', { prompt: 'login' }, 'tx.delete'], ['register', {}, 'tx.audit']]) {
+  // (3) account switch and registration: 500, no pending cookie, no Keycloak address, the session kept; then 200 and one row.
+  for (const [kind, body, point] of [['switch', { prompt: 'login' }, 'tx.delete'], ['signup', undefined, 'tx.audit']]) {
     const s = sub(), sid = await w.session(await w.issue(s, { sub: s, groups: [B] }));
     w.fault('I2', point, dbError('switch-' + point));
-    const out = await w.call(w.I2, kind, { sid, query });
+    const out = await w.call(w.I2, kind, { sid, body });
     assert.ok(storageFailure(out), kind);
     assert.deepEqual([out.cookie, out.pending, out.location, await w.version(sid)], ['K', null, null, s], kind);
     assert.deepEqual(rowsOf(await w.rows(), s), [], kind);
-    const retry = await w.call(w.I2, kind, { sid, query });
-    assert.deepEqual([retry.status, retry.cookie, await w.version(sid)], [302, 'E+P', null], kind);
+    const retry = await w.call(w.I2, kind, { sid, body });
+    assert.deepEqual([retry.status, retry.cookie, await w.version(sid)], [200, 'P', null], kind);
     assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.logout', 'account_switch', B]], kind);
   }
   // (4) idle: 500 before the handler, no cookie change; then 401 and one idle row.
@@ -840,13 +936,13 @@ test('AS-09 a DB failure on any path is a fixed 500 with nothing committed and n
     assert.ok(storageFailure(out), point);
     assert.deepEqual([out.cookie, w.I1.handled - handled, await w.version(sid)], ['K', 0, s], point);
     const retry = await w.call(w.I1, 'get', { sid });
-    assert.deepEqual([retry.status, retry.body?.message, retry.cookie], [401, EXPIRED, 'E'], point);
+    assert.deepEqual([retry.status, retry.body?.message, retry.cookie], [401, EXPIRED, 'K'], point);
     assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.session.expired', 'idle', A]], point);
   }
   // (5) a refused refresh whose end fails: 500 (not 401), the session as it was; retried with Keycloak still refusing:
   // 401 and exactly one refresh_failed row; retried with Keycloak answering: authenticated, a new version, no row.
   for (const [point, retryAnswer] of [['tx.delete', 'reject'], ['tx.audit', 'tokens']]) {
-    const s = sub(), sid = await w.session(await w.issue(s, { sub: s, groups: [B] }), { atExpiresAt: past() });
+    const s = sub(), sid = await w.session(await w.issue(s, { sub: s, groups: [B] }), { atExpiresAt: lapsed() });
     const next = await w.issue(s + '-next', { sub: s, groups: [B] });
     kc.auto = () => reply.reject();
     w.fault('I1', point, dbError('refused-' + point));
@@ -859,7 +955,7 @@ test('AS-09 a DB failure on any path is a fixed 500 with nothing committed and n
     const retry = await w.call(w.I1, 'get', { sid });
     kc.auto = null;
     if (retryAnswer === 'reject') {
-      assert.deepEqual([retry.status, retry.body?.message, retry.cookie, await w.version(sid)], [401, REFUSED, 'E', null], point);
+      assert.deepEqual([retry.status, retry.body?.message, retry.cookie, await w.version(sid)], [401, REFUSED, 'K', null], point);
       assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.session.expired', 'refresh_failed', B]], point);
     } else {
       assert.deepEqual([retry.status, retry.cookie, await w.version(sid)], [200, 'K', s + '-next'], point);
@@ -868,7 +964,7 @@ test('AS-09 a DB failure on any path is a fixed 500 with nothing committed and n
   }
   // (6) storing a successful refresh fails: 500, not refresh_failed, the old version kept; the next request decides anew.
   for (const nextAnswer of ['reject', 'accept']) {
-    const s = sub(), sid = await w.session(await w.issue(s, { sub: s, groups: [A] }), { atExpiresAt: past() });
+    const s = sub(), sid = await w.session(await w.issue(s, { sub: s, groups: [A] }), { atExpiresAt: lapsed() });
     const next = await w.issue(s + '-next', { sub: s, groups: [A] }), later = await w.issue(s + '-later', { sub: s, groups: [A] });
     kc.auto = () => reply.tokens(next);
     w.fault('I1', 'store', dbError('store-' + nextAnswer));
@@ -879,7 +975,7 @@ test('AS-09 a DB failure on any path is a fixed 500 with nothing committed and n
     const retry = await w.call(w.I1, 'get', { sid });
     kc.auto = null;
     if (nextAnswer === 'reject') {
-      assert.deepEqual([retry.status, retry.body?.message, retry.cookie], [401, REFUSED, 'E']);
+      assert.deepEqual([retry.status, retry.body?.message, retry.cookie], [401, REFUSED, 'K']);
       assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.session.expired', 'refresh_failed', A]]);
     } else {
       assert.deepEqual([retry.status, await w.version(sid)], [200, s + '-later']);
@@ -944,11 +1040,11 @@ test('AS-10 (b) synthetic DB error markers never reach a response, the logger, s
     await run('guard-read', async tag => { const sid = await session(tag); w.fault('I1', 'read', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'get', { sid }))); });
     await run('logout-delete', async tag => { const sid = await session(tag); w.fault('I1', 'tx.delete', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'logout', { sid }))); });
     await run('logout-audit', async tag => { const sid = await session(tag); w.fault('I1', 'tx.audit', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'logout', { sid }))); });
-    await run('switch-read', async tag => { const sid = await session(tag); w.fault('I1', 'read', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'login', { sid, query: { prompt: 'login' } }))); });
-    await run('switch-audit', async tag => { const sid = await session(tag); w.fault('I1', 'tx.audit', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'register', { sid }))); });
+    await run('switch-read', async tag => { const sid = await session(tag); w.fault('I1', 'read', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'switch', { sid, body: { prompt: 'login' } }))); });
+    await run('switch-audit', async tag => { const sid = await session(tag); w.fault('I1', 'tx.audit', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'signup', { sid }))); });
     await run('idle-delete', async tag => { const sid = await session(tag, { lastSeenAt: past(13 * HOUR) }); w.fault('I1', 'tx.delete', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'get', { sid }))); });
     await run('refused-audit', async tag => {
-      const sid = await session(tag, { atExpiresAt: past() });
+      const sid = await session(tag, { atExpiresAt: lapsed() });
       kc.auto = () => reply.reject();
       w.fault('I1', 'tx.audit', dbError(tag));
       const out = await w.call(w.I1, 'get', { sid });
@@ -956,7 +1052,7 @@ test('AS-10 (b) synthetic DB error markers never reach a response, the logger, s
       assert.ok(storageFailure(out));
     });
     await run('store', async tag => {
-      const sid = await session(tag, { atExpiresAt: past() }), next = await w.issue(tag + '-next', { sub: 'syn-sub-' + tag, groups: [A] });
+      const sid = await session(tag, { atExpiresAt: lapsed() }), next = await w.issue(tag + '-next', { sub: 'syn-sub-' + tag, groups: [A] });
       kc.auto = () => reply.tokens(next);
       w.fault('I1', 'store', dbError(tag));
       const out = await w.call(w.I1, 'get', { sid });
@@ -1021,7 +1117,8 @@ test('AS-10 (b) synthetic DB error markers never reach a response, the logger, s
 // Each timeline holds Keycloak's /token answers (heldToken) and/or an instance before its next AuthSession write
 // (w.gate), asserts the state at the hold where the contract names one, and ends with the remaining session (its version
 // label), each request's public result, the exact set of end rows (action, cause, institution) and the cookie letters
-// (K kept, E expired, E+P expired with a new pending). Rows are counted per account (target), login rows apart.
+// (K kin_sid untouched, P untouched with a new pending login, S a new kin_sid; E - an expired kin_sid - is what no
+// answer gives any more, U5S-REQ-10). Rows are counted per account (target), login rows apart.
 
 const chainAnswers = map => form => map.has(form.refresh_token) ? reply.tokens(map.get(form.refresh_token)) : reply.reject();
 const endsOf = async (w, sub) => summary(rowsOf(await w.rows(), sub).filter(r => r.action !== 'auth.login'));
@@ -1030,7 +1127,7 @@ test('AS-12 T1 (RT-01, X-11) and its sequential attribution variants (X-18)', as
   const w = await world(t);
   const s = 'syn-sub-t1';
   const v1 = await w.issue('t1-v1', { sub: s, groups: [A] }), v2 = await w.issue('t1-v2', { sub: s, groups: [B] });
-  const sid = await w.session(v1, { atExpiresAt: past(), lastSeenAt: past(10 * 60_000) });
+  const sid = await w.session(v1, { atExpiresAt: lapsed(), lastSeenAt: past(10 * 60_000) });
   const r1 = w.call(w.I1, 'get', { sid });
   const k1 = await heldToken(1, 'I1 refresh');
   const r2 = w.call(w.I2, 'get', { sid });
@@ -1051,9 +1148,9 @@ test('AS-12 T1 (RT-01, X-11) and its sequential attribution variants (X-18)', as
       const sub = 'syn-sub-t1-' + end;
       const a = await w.issue(sub + '-a', { sub, groups: [A] }), b = await w.issue(sub + '-b', { sub, groups: [B] });
       chain.set(a.refresh, b);
-      const sidX = await w.session(a, { atExpiresAt: past() });
+      const sidX = await w.session(a, { atExpiresAt: lapsed() });
       assert.deepEqual([(await w.call(w.I1, 'get', { sid: sidX })).status, await w.version(sidX)], [200, sub + '-b']);
-      if (end === 'switch') await w.call(w.I1, 'login', { sid: sidX, query: { prompt: 'login' } });
+      if (end === 'switch') await w.call(w.I1, 'switch', { sid: sidX, body: { prompt: 'login' } });
       else if (end === 'logout') await w.call(w.I1, 'logout', { sid: sidX });
       else {
         await w.base.authSession.update({ where: { sid: sidX }, data: { lastSeenAt: past(13 * HOUR) } });
@@ -1076,7 +1173,7 @@ test('AS-12 T1b (RT-02, X-28): two successes cross; the later one is discarded, 
     const s = 'syn-sub-t1b-' + order.split(' ')[0];
     const v1 = await w.issue(s + '-v1', { sub: s, groups: [A] }), v2 = await w.issue(s + '-v2', { sub: s, groups: [B] });
     const v2p = await w.issue(s + '-v2p', { sub: s, groups: [A] });
-    const sid = await w.session(v1, { atExpiresAt: past() });
+    const sid = await w.session(v1, { atExpiresAt: lapsed() });
     const r1 = w.call(w.I1, 'get', { sid });
     const k1 = await heldToken(1);
     const r2 = w.call(w.I2, 'get', { sid });
@@ -1096,23 +1193,23 @@ test('AS-12 T2 (RT-03, X-12): a refusal ends v1 first; a late success or refusal
     kc.held = [];
     const s = 'syn-sub-t2-' + late;
     const v1 = await w.issue(s + '-v1', { sub: s, groups: [A] }), v2 = await w.issue(s + '-v2', { sub: s, groups: [B] });
-    const sid = await w.session(v1, { atExpiresAt: past() });
+    const sid = await w.session(v1, { atExpiresAt: lapsed() });
     const r1 = w.call(w.I1, 'get', { sid });
     const k1 = await heldToken(1);
     const r2 = w.call(w.I2, 'get', { sid });
     const k2 = await heldToken(2);
     k1.answer(reply.reject());
     const o1 = await r1;
-    assert.deepEqual([o1.status, o1.body?.message, o1.cookie], [401, REFUSED, 'E'], late);
+    assert.deepEqual([o1.status, o1.body?.message, o1.cookie], [401, REFUSED, 'K'], late);
     k2.answer(late === 'success' ? reply.tokens(v2) : reply.reject());
     const o2 = await r2;
     assert.deepEqual([o2.status, o2.body?.message, o2.cookie, await w.version(sid), await endsOf(w, s)],
-      [401, REFUSED, 'E', null, [['auth.session.expired', 'refresh_failed', A]]], late);
+      [401, REFUSED, 'K', null, [['auth.session.expired', 'refresh_failed', A]]], late);
   }
   await w.finish('AS-12 T2');
 });
 
-test('AS-12 T3 (RT-05, X-13): a logout ends v2 while v1\'s refresh is held; the late answer revives nothing', async t => {
+test('AS-12 T3 (RT-05, X-13; logout order per U5S-REQ-05): a logout ends v1 while v1\'s refresh is held, without refreshing it; the late answer revives nothing', async t => {
   const w = await world(t);
   for (const late of ['success', 'refusal']) {
     kc.held = [];
@@ -1120,37 +1217,39 @@ test('AS-12 T3 (RT-05, X-13): a logout ends v2 while v1\'s refresh is held; the 
     const s = 'syn-sub-t3-' + late;
     const v1 = await w.issue(s + '-v1', { sub: s, groups: [A] }), v2 = await w.issue(s + '-v2', { sub: s, groups: [B] });
     const v2p = await w.issue(s + '-v2p', { sub: s, groups: [A] });
-    const sid = await w.session(v1, { atExpiresAt: past() });
+    const sid = await w.session(v1, { atExpiresAt: lapsed() });
     const r1 = w.call(w.I1, 'get', { sid });
     const k1 = await heldToken(1, 'R1 refresh');
+    // Keycloak would answer a refresh of v1 with v2 (B); the logout must not ask: it ends the version it read (A).
     kc.auto = chainAnswers(new Map([[v1.refresh, v2]]));
+    const asked = kc.tokens;
     const out = await w.call(w.I2, 'logout', { sid });
     kc.auto = null;
-    assert.deepEqual([out.status, out.cookie, await endsOf(w, s)], [204, 'E', [['auth.logout', 'logout', B]]], late);
+    assert.deepEqual([out.status, out.cookie, kc.tokens - asked, await endsOf(w, s)], [204, 'K', 0, [['auth.logout', 'logout', A]]], late);
     k1.answer(late === 'success' ? reply.tokens(v2p) : reply.reject());
     const o1 = await r1;
     assert.deepEqual([o1.status, o1.body?.message, o1.cookie, await w.version(sid), await endsOf(w, s)],
-      [401, REFUSED, 'E', null, [['auth.logout', 'logout', B]]], late);
+      [401, REFUSED, 'K', null, [['auth.logout', 'logout', A]]], late);
   }
   await w.finish('AS-12 T3');
 });
 
 test('AS-12 T4 (RT-05, X-14): an account switch or registration ends v1 while its refresh is held', async t => {
   const w = await world(t);
-  for (const [kind, query, late] of [['login', { prompt: 'login' }, 'success'], ['login', { prompt: 'login' }, 'refusal'],
-    ['register', {}, 'success'], ['register', {}, 'refusal']]) {
+  for (const [kind, body, late] of [['switch', { prompt: 'login' }, 'success'], ['switch', { prompt: 'login' }, 'refusal'],
+    ['signup', undefined, 'success'], ['signup', undefined, 'refusal']]) {
     kc.held = [];
     const s = `syn-sub-t4-${kind}-${late}`;
     const v1 = await w.issue(s + '-v1', { sub: s, groups: [A] }), v2 = await w.issue(s + '-v2', { sub: s, groups: [B] });
-    const sid = await w.session(v1, { atExpiresAt: past() });
+    const sid = await w.session(v1, { atExpiresAt: lapsed() });
     const r1 = w.call(w.I1, 'get', { sid });
     const k1 = await heldToken(1);
-    const out = await w.call(w.I2, kind, { sid, query });
-    assert.deepEqual([out.status, out.cookie, await endsOf(w, s)], [302, 'E+P', [['auth.logout', 'account_switch', A]]], s);
+    const out = await w.call(w.I2, kind, { sid, body });
+    assert.deepEqual([out.status, out.cookie, await endsOf(w, s)], [200, 'P', [['auth.logout', 'account_switch', A]]], s);
     k1.answer(late === 'success' ? reply.tokens(v2) : reply.reject());
     const o1 = await r1;
     assert.deepEqual([o1.status, o1.cookie, await w.version(sid), await endsOf(w, s)],
-      [401, 'E', null, [['auth.logout', 'account_switch', A]]], s);
+      [401, 'K', null, [['auth.logout', 'account_switch', A]]], s);
   }
   await w.finish('AS-12 T4');
 });
@@ -1162,16 +1261,16 @@ test('AS-12 T5 (RT-07, X-15/X-16): the sweep or another request ends v1 idle whi
     kc.held = [];
     const s = 'syn-sub-t5i-' + late;
     const v1 = await w.issue(s + '-v1', { sub: s, groups: [A] }), v2 = await w.issue(s + '-v2', { sub: s, groups: [B] });
-    const sid = await w.session(v1, { lastSeenAt: new Date(Date.now() - IDLE + 10_000), atExpiresAt: past() });
+    const sid = await w.session(v1, { lastSeenAt: new Date(Date.now() - IDLE + 10_000), atExpiresAt: lapsed() });
     const r1 = w.call(w.I1, 'get', { sid });
     const k1 = await heldToken(1);
     w.tick(30_000);
     const o2 = await w.call(w.I2, 'get', { sid, ip: '198.51.100.9' });
-    assert.deepEqual([o2.status, o2.body?.message, o2.cookie], [401, EXPIRED, 'E'], late);
+    assert.deepEqual([o2.status, o2.body?.message, o2.cookie], [401, EXPIRED, 'K'], late);
     k1.answer(late === 'success' ? reply.tokens(v2) : reply.reject());
     const o1 = await r1;
     assert.deepEqual([o1.status, o1.body?.message, o1.cookie, await w.version(sid), await endsOf(w, s)],
-      [401, REFUSED, 'E', null, [['auth.session.expired', 'idle', A]]], late);
+      [401, REFUSED, 'K', null, [['auth.session.expired', 'idle', A]]], late);
     assert.deepEqual(rowsOf(await w.rows(), s).map(r => r.detail.ip), ['198.51.100.9'], 'the address of the request that ended it');
   }
   // sweep variants (X-15): the timer runs while R1's refresh is held.
@@ -1183,14 +1282,14 @@ test('AS-12 T5 (RT-07, X-15/X-16): the sweep or another request ends v1 idle whi
       w.tick(due - 30_000 - Date.now());
       const s = 'syn-sub-t5s-' + late;
       const v1 = await w.issue(s + '-v1', { sub: s, groups: [A] }), v2 = await w.issue(s + '-v2', { sub: s, groups: [B] });
-      const sid = await w.session(v1, { lastSeenAt: new Date(Date.now() - IDLE + 10_000), atExpiresAt: past() });
+      const sid = await w.session(v1, { lastSeenAt: new Date(Date.now() - IDLE + 10_000), atExpiresAt: lapsed() });
       const r1 = w.call(w.I1, 'get', { sid });
       const k1 = await heldToken(1);
       w.tick(30_000);
       await w.until('the sweep', async () => (await w.version(sid)) === null);
       k1.answer(late === 'success' ? reply.tokens(v2) : reply.reject());
       const o1 = await r1;
-      assert.deepEqual([o1.status, o1.cookie, await endsOf(w, s)], [401, 'E', [['auth.session.expired', 'sweep', A]]], late);
+      assert.deepEqual([o1.status, o1.cookie, await endsOf(w, s)], [401, 'K', [['auth.session.expired', 'sweep', A]]], late);
       assert.deepEqual(rowsOf(await w.rows(), s).map(r => r.detail.ip), [null]);
       due += HOUR;
     }
@@ -1208,10 +1307,10 @@ for (const fixture of ['different-exp', 'same-exp']) {
     try {
       w.tick(HOUR - 1000);                // R starts at T - 1 s
       const s = 'syn-sub-t6';
-      const v1 = await w.issue('t6-v1', { sub: s, groups: [A], expIn: fixture === 'same-exp' ? 20 : HOUR / 1000 });
+      const v1 = await w.issue('t6-v1', { sub: s, groups: [A], expIn: fixture === 'same-exp' ? 2 : HOUR / 1000 });
       const v2 = await w.issue('t6-v2', { sub: s, groups: [B], same: fixture === 'same-exp' ? v1 : undefined, expIn: 2 * HOUR / 1000 });
       // lastSeenAt = R's start - 12 h + 0.5 s: R passes the idle check; stored atExpiresAt is past, so R refreshes.
-      const atExpiresAt = fixture === 'same-exp' ? new Date(v1.exp * 1000 - 30_000) : past();
+      const atExpiresAt = fixture === 'same-exp' ? new Date(v1.exp * 1000 - LEAD) : lapsed();
       const sid = await w.session(v1, { lastSeenAt: new Date(Date.now() - IDLE + 500), atExpiresAt });
       const sweep = w.gate('I2', 'tx.open');
       const r = w.call(w.I1, 'get', { sid });
@@ -1244,7 +1343,7 @@ test('AS-12 T7 (RT-13, RT-14, RT-02; X-21, X-22): same-exp tokens of different v
   const flow = async (name, steps) => {
     kc.held = [];
     const s = 'syn-sub-t7' + name;
-    const exp = { exp: Math.floor(Date.now() / 1000) + 20 };
+    const exp = { exp: Math.floor(Date.now() / 1000) + 2 };
     const v = {};
     for (const [label, group] of [['v1', A], ['v2', B], ['v2p', A], ['v3', B]]) v[label] = await w.issue(`${s}-${label}`, { sub: s, groups: [group], same: exp });
     const sid = await w.session(v.v1);
@@ -1267,7 +1366,7 @@ test('AS-12 T7 (RT-13, RT-14, RT-02; X-21, X-22): same-exp tokens of different v
       const o1 = await r1;
       if (then === 'success') assert.deepEqual([o1.status, await w.version(sid), await endsOf(w, s)], [200, s + '-v3', []]);
       else assert.deepEqual([o1.status, o1.cookie, await w.version(sid), await endsOf(w, s)],
-        [401, 'E', null, [['auth.session.expired', 'refresh_failed', B]]]);
+        [401, 'K', null, [['auth.session.expired', 'refresh_failed', B]]]);
     });
   }
   // (b) v2 stored, then v1's late success v2' is discarded; the follow-up refresh of v2 is held with v2 in place.
@@ -1295,19 +1394,19 @@ test('AS-12 T7 (RT-13, RT-14, RT-02; X-21, X-22): same-exp tokens of different v
     k1.answer(reply.reject());
     const o1 = await r1;
     assert.deepEqual([o2.status, o2.cookie, o1.status, o1.cookie, await w.version(sid), await endsOf(w, s)],
-      [200, 'K', 401, 'E', null, [['auth.session.expired', 'refresh_failed', A]]]);
+      [200, 'K', 401, 'K', null, [['auth.session.expired', 'refresh_failed', A]]]);
   });
   await w.finish('AS-12 T7');
 });
 
 test('AS-12 T8 (RT-06, X-23): an account switch read v1; v2 (B) is stored before its delete; it ends v2 and records B', async t => {
   const w = await world(t);
-  for (const [kind, query] of [['login', { prompt: 'login' }], ['register', {}]]) {
+  for (const [kind, body] of [['switch', { prompt: 'login' }], ['signup', undefined]]) {
     const s = 'syn-sub-t8-' + kind;
     const v1 = await w.issue(s + '-v1', { sub: s, groups: [A] }), v2 = await w.issue(s + '-v2', { sub: s, groups: [B] });
-    const sid = await w.session(v1, { atExpiresAt: past() });
+    const sid = await w.session(v1, { atExpiresAt: lapsed() });
     const gate = w.gate('I1', 'tx.open');
-    const sw = w.call(w.I1, kind, { sid, query });
+    const sw = w.call(w.I1, kind, { sid, body });
     await gate.arrived();
     kc.auto = chainAnswers(new Map([[v1.refresh, v2]]));
     const o2 = await w.call(w.I2, 'get', { sid });
@@ -1316,20 +1415,20 @@ test('AS-12 T8 (RT-06, X-23): an account switch read v1; v2 (B) is stored before
     gate.release();
     const out = await sw;
     assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)],
-      [302, 'E+P', null, [['auth.logout', 'account_switch', B]]], kind);
+      [200, 'P', null, [['auth.logout', 'account_switch', B]]], kind);
   }
   await w.finish('AS-12 T8');
 });
 
 /** I1 runs an end request; between each of its reads and deletes I2 refreshes the session (rounds), then `last` runs. */
-async function interleavedEnds(w, { s, kind, query = {}, rounds, groups = [B], last }) {
+async function interleavedEnds(w, { s, kind, body, rounds, groups = [B], last }) {
   const versions = [];
-  for (let n = 0; n <= rounds + 2; n++) versions.push(await w.issue(`${s}-v${n}`, { sub: s, groups: n ? groups : [A], expIn: 20 }));
+  for (let n = 0; n <= rounds + 2; n++) versions.push(await w.issue(`${s}-v${n}`, { sub: s, groups: n ? groups : [A], expIn: 2 }));
   const chain = new Map(versions.slice(0, -1).map((v, n) => [v.refresh, versions[n + 1]]));
   kc.auto = chainAnswers(chain);
   const sid = await w.session(versions[0]);
   let gate = w.gate('I1', 'tx.open');
-  const held = w.call(w.I1, kind, { sid, query });
+  const held = w.call(w.I1, kind, { sid, body });
   for (let n = 1; n <= rounds; n++) {
     await gate.arrived();
     const current = gate;
@@ -1347,52 +1446,53 @@ test('AS-12 T9 (RT-15, X-24, O-10, X-33): three interleaved refreshes give an en
   const w = await world(t);
   // account switch: 409, no cookie change, no pending, no redirect, the competitor's last version kept, no row.
   let s = 'syn-sub-t9-switch';
-  let { out, sid } = await interleavedEnds(w, { s, kind: 'login', query: { prompt: 'login' }, rounds: 3 });
+  let { out, sid } = await interleavedEnds(w, { s, kind: 'switch', body: { prompt: 'login' }, rounds: 3 });
   assert.deepEqual([out.status, out.cookie, out.pending, out.location, await endsOf(w, s)], [409, 'K', null, null, []]);
   const kept = await w.version(sid);
   assert.ok(kept && kept.startsWith(s + '-v'), 'a later version remains');
-  out = await w.call(w.I1, 'login', { sid, query: { prompt: 'login' } });
-  assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)], [302, 'E+P', null, [['auth.logout', 'account_switch', B]]]);
-  // logout (the guard refreshes first; the competitor keeps winning): 409, then the next logout ends it.
+  out = await w.call(w.I1, 'switch', { sid, body: { prompt: 'login' } });
+  assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)], [200, 'P', null, [['auth.logout', 'account_switch', B]]]);
+  // logout (the competitor's refreshes keep winning its three deletes): 409 AUTH_SESSION_BUSY - not ended, Keycloak not
+  // told (S06) - then the next logout ends the kept version as it stands, without a refresh of its own.
   s = 'syn-sub-t9-logout';
+  let logouts = kc.logouts;
   ({ out, sid } = await interleavedEnds(w, { s, kind: 'logout', rounds: 3 }));
-  assert.deepEqual([out.status, out.cookie, await endsOf(w, s)], [409, 'K', []]);
-  // The next logout's guard refreshes the kept version once more (its stored atExpiresAt is past), then ends it.
-  const after = await w.issue(s + '-after', { sub: s, groups: [B], expIn: 3600 });
-  kc.auto = () => reply.tokens(after);
+  assert.deepEqual([out.status, out.body?.code, out.authCode, out.cookie, kc.logouts - logouts, await endsOf(w, s)],
+    [409, 'AUTH_SESSION_BUSY', 'AUTH_SESSION_BUSY', 'K', 0, []]);
+  assert.ok(await w.version(sid), 'the session is still there after the bounded conflict');
+  const asked = kc.tokens;
   out = await w.call(w.I1, 'logout', { sid });
-  kc.auto = null;
-  assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)], [204, 'E', null, [['auth.logout', 'logout', B]]]);
+  assert.deepEqual([out.status, out.cookie, kc.tokens - asked, await w.told() - logouts, await w.version(sid), await endsOf(w, s)],
+    [204, 'K', 0, 1, null, [['auth.logout', 'logout', B]]]);
   // X-33: after the third conflict the session is already gone (I2 logged out): the end completes, 409 is not given,
   // and the row is the one of the transition that deleted it.
-  for (const kind of ['login', 'logout']) {
+  for (const kind of ['switch', 'logout']) {
     s = 'syn-sub-t9-absent-' + kind;
-    ({ out, sid } = await interleavedEnds(w, { s, kind, query: kind === 'login' ? { prompt: 'login' } : {}, rounds: 3,
+    ({ out, sid } = await interleavedEnds(w, { s, kind, body: kind === 'switch' ? { prompt: 'login' } : undefined, rounds: 3,
       last: async sidX => assert.equal((await w.call(w.I2, 'logout', { sid: sidX })).status, 204) }));
     assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)],
-      [kind === 'login' ? 302 : 204, kind === 'login' ? 'E+P' : 'E', null, [['auth.logout', 'logout', B]]], kind);
+      [kind === 'switch' ? 200 : 204, kind === 'switch' ? 'P' : 'K', null, [['auth.logout', 'logout', B]]], kind);
   }
   await w.finish('AS-12 T9');
 });
 
-test('AS-12 T10 (RT-06, X-25): a logout read v1\' (A); v2 (B) is stored before its delete; it ends v2 and records B', async t => {
+test('AS-12 T10 (RT-06, X-25): a logout read v1 (A); v2 (B) is stored before its delete; it ends v2 and records B', async t => {
   const w = await world(t);
   const s = 'syn-sub-t10';
-  const v1 = await w.issue(s + '-v1', { sub: s, groups: [A], expIn: 20 });
-  const v1p = await w.issue(s + '-v1p', { sub: s, groups: [A], expIn: 20 });
-  const v2 = await w.issue(s + '-v2', { sub: s, groups: [B], expIn: 20 });
-  kc.auto = chainAnswers(new Map([[v1.refresh, v1p], [v1p.refresh, v2]]));
+  const v1 = await w.issue(s + '-v1', { sub: s, groups: [A], expIn: 2 });
+  const v2 = await w.issue(s + '-v2', { sub: s, groups: [B], expIn: 2 });
+  kc.auto = chainAnswers(new Map([[v1.refresh, v2]]));
   const sid = await w.session(v1);
   const gate = w.gate('I1', 'tx.open');
   const held = w.call(w.I1, 'logout', { sid });
   await gate.arrived();
-  assert.equal(await w.version(sid), s + '-v1p', 'the logout\'s guard refreshed v1 to v1\'');
+  assert.equal(await w.version(sid), s + '-v1', 'the logout read v1 and did not refresh it');
   assert.equal((await w.call(w.I2, 'get', { sid })).status, 200);
   assert.equal(await w.version(sid), s + '-v2');
   gate.release();
   const out = await held;
   kc.auto = null;
-  assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)], [204, 'E', null, [['auth.logout', 'logout', B]]]);
+  assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)], [204, 'K', null, [['auth.logout', 'logout', B]]]);
   await w.finish('AS-12 T10');
 });
 
@@ -1401,8 +1501,8 @@ test('AS-12 T11 (RT-15, X-26, X-33): a request whose every refresh write loses t
   const run = async (s, last) => {
     kc.held = [];
     const versions = [], mine = [];
-    for (let n = 0; n <= 4; n++) versions.push(await w.issue(`${s}-v${n}`, { sub: s, groups: [B], expIn: 20 }));
-    for (let n = 0; n <= 4; n++) mine.push(await w.issue(`${s}-mine${n}`, { sub: s, groups: [B], expIn: 20 }));
+    for (let n = 0; n <= 4; n++) versions.push(await w.issue(`${s}-v${n}`, { sub: s, groups: [B], expIn: 2 }));
+    for (let n = 0; n <= 4; n++) mine.push(await w.issue(`${s}-mine${n}`, { sub: s, groups: [B], expIn: 2 }));
     // Per refresh token: the first request (I1, which asks first) gets I1's answer, the second (I2) the competitor's.
     const asked = new Map();
     kc.auto = form => {
@@ -1439,7 +1539,7 @@ test('AS-12 T11 (RT-15, X-26, X-33): a request whose every refresh write loses t
   const absent = await run(s, async sidX => assert.equal((await w.call(w.I2, 'logout', { sid: sidX })).status, 204));
   kc.auto = null;
   assert.deepEqual([absent.out.status, absent.out.body?.message, absent.out.cookie, await w.version(absent.sid), await endsOf(w, s)],
-    [401, REFUSED, 'E', null, [['auth.logout', 'logout', B]]]);
+    [401, REFUSED, 'K', null, [['auth.logout', 'logout', B]]]);
   await w.finish('AS-12 T11');
 });
 
@@ -1449,7 +1549,7 @@ test('AS-12 T12 (RT-09, X-29): R2 judged v1 idle and waits; R stored v2 (B) - (a
     kc.held = [];
     const s = 'syn-sub-t12' + variant;
     const v1 = await w.issue(s + '-v1', { sub: s, groups: [A] }), v2 = await w.issue(s + '-v2', { sub: s, groups: [B] });
-    const sid = await w.session(v1, { lastSeenAt: new Date(Date.now() - IDLE + 500), atExpiresAt: past() });
+    const sid = await w.session(v1, { lastSeenAt: new Date(Date.now() - IDLE + 500), atExpiresAt: lapsed() });
     const r = w.call(w.I1, 'get', { sid });
     const k = await heldToken(1, 'R refresh');
     w.tick(1000);
@@ -1472,7 +1572,7 @@ test('AS-12 T12 (RT-09, X-29): R2 judged v1 idle and waits; R stored v2 (B) - (a
       gate2.release();
       const o2 = await r2;
       assert.deepEqual([o2.status, o2.body?.message, o2.cookie, await w.version(sid), await endsOf(w, s)],
-        [401, EXPIRED, 'E', null, [['auth.session.expired', 'idle', B]]], '(b) exactly one idle row, institution B');
+        [401, EXPIRED, 'K', null, [['auth.session.expired', 'idle', B]]], '(b) exactly one idle row, institution B');
       touch.release();
       assert.deepEqual([(await r).status, (await r).cookie], [200, 'K'], '(b) R, already adopted, completes');
     }
@@ -1534,7 +1634,7 @@ test('AS-12 T14 (RT-11, X-31): idle or sweep ends v1 before the touch of an adop
   let o = await r;
   assert.deepEqual([o.status, o.cookie], [200, 'K'], 'the adopted request completes');
   o = await w.call(w.I1, 'get', { sid });
-  assert.deepEqual([o.status, o.body?.message, o.cookie, await endsOf(w, s)], [401, ABSENT, 'E', [['auth.session.expired', 'idle', A]]]);
+  assert.deepEqual([o.status, o.body?.message, o.cookie, await endsOf(w, s)], [401, ABSENT, 'K', [['auth.session.expired', 'idle', A]]]);
   w.I2.service.onModuleInit();
   try {
     w.tick(HOUR - 500);
@@ -1549,7 +1649,7 @@ test('AS-12 T14 (RT-11, X-31): idle or sweep ends v1 before the touch of an adop
     o = await r;
     assert.deepEqual([o.status, o.cookie], [200, 'K']);
     o = await w.call(w.I1, 'get', { sid });
-    assert.deepEqual([o.status, o.body?.message, o.cookie, await endsOf(w, s)], [401, ABSENT, 'E', [['auth.session.expired', 'sweep', B]]]);
+    assert.deepEqual([o.status, o.body?.message, o.cookie, await endsOf(w, s)], [401, ABSENT, 'K', [['auth.session.expired', 'sweep', B]]]);
   } finally {
     w.I2.service.onModuleDestroy();
   }
@@ -1559,27 +1659,27 @@ test('AS-12 T14 (RT-11, X-31): idle or sweep ends v1 before the touch of an adop
 test('AS-12 T15 (RT-12, X-32): two end transitions overlap; the one that deleted writes the one row', async t => {
   const w = await world(t);
   // (b) logout against account switch, both orders.
-  for (const [first, firstKind, secondKind, row] of [['I1', 'logout', 'login', ['auth.logout', 'account_switch', A]],
-    ['I1', 'login', 'logout', ['auth.logout', 'logout', A]]]) {
+  for (const [first, firstKind, secondKind, row] of [['I1', 'logout', 'switch', ['auth.logout', 'account_switch', A]],
+    ['I1', 'switch', 'logout', ['auth.logout', 'logout', A]]]) {
     const s = `syn-sub-t15-${firstKind}-held`;
     const sid = await w.session(await w.issue(s + '-v1', { sub: s, groups: [A] }));
     const gate = w.gate(first, 'tx.open');
-    const query = kind => kind === 'login' ? { prompt: 'login' } : {};
-    const held = w.call(w.I1, firstKind, { sid, query: query(firstKind) });
+    const body = kind => kind === 'switch' ? { prompt: 'login' } : undefined;
+    const held = w.call(w.I1, firstKind, { sid, body: body(firstKind) });
     await gate.arrived();
-    const won = await w.call(w.I2, secondKind, { sid, query: query(secondKind) });
+    const won = await w.call(w.I2, secondKind, { sid, body: body(secondKind) });
     gate.release();
     const lost = await held;
-    const done = kind => kind === 'login' ? [302, 'E+P'] : [204, 'E'];
+    const done = kind => kind === 'switch' ? [200, 'P'] : [204, 'K'];
     assert.deepEqual([[won.status, won.cookie], [lost.status, lost.cookie], await endsOf(w, s)],
       [done(secondKind), done(firstKind), [row]], s);
   }
-  // (c) a logout meeting the absence in the guard.
+  // (c) a logout of a session that is already ended (correctly bound): confirmed again, and no second row.
   const s = 'syn-sub-t15c';
   const sid = await w.session(await w.issue(s + '-v1', { sub: s, groups: [A] }));
   assert.equal((await w.call(w.I2, 'logout', { sid })).status, 204);
   const late = await w.call(w.I1, 'logout', { sid });
-  assert.deepEqual([late.status, late.body?.message, late.cookie, await endsOf(w, s)], [401, ABSENT, 'E', [['auth.logout', 'logout', A]]]);
+  assert.deepEqual([late.status, late.cookie, await endsOf(w, s)], [204, 'K', [['auth.logout', 'logout', A]]]);
   // (a) a logout past its guard waits before its delete; the sweep ends the session first; the logout completes on the
   // absence and adds no row.
   w.I2.service.onModuleInit();
@@ -1593,9 +1693,316 @@ test('AS-12 T15 (RT-12, X-32): two end transitions overlap; the one that deleted
     await w.until('the sweep', async () => (await w.version(sid2)) === null);
     gate.release();
     const out = await held;
-    assert.deepEqual([out.status, out.cookie, await endsOf(w, s2)], [204, 'E', [['auth.session.expired', 'sweep', A]]]);
+    assert.deepEqual([out.status, out.cookie, await endsOf(w, s2)], [204, 'K', [['auth.session.expired', 'sweep', A]]]);
   } finally {
     w.I2.service.onModuleDestroy();
   }
   await w.finish('AS-12 T15');
+});
+
+// ── U5S session contract (Astra spec U5S-REQ-05, 08, 09, 10, 12 and the 2026-10-04 amendments 1-5, 9) ──
+// U5S-REQ-05/08/09/10/18 -> U5S-RISK-SESSION / -AUDIT / -WAIT / -SUCCESS -> U5S-TEST-S05, S06, S07 (server and cookie
+// half), S11 (one termination record) and the cases below. S06 (a failed or conflicting revocation confirms nothing and
+// tells Keycloak nothing) is AS-09 (2), (3) and AS-12 T9 above. The proxy half of S12 is tests/proxy_auth_code_test.py.
+
+/** [status, body code, X-KIN-Auth-Code] of an answer. */
+const coded = out => [out.status, out.body?.code ?? null, out.authCode];
+
+test('U5S-AMD-04 Keycloak unreachable, slow, failing or unreadable never ends a session; only its refusal of the refresh token does', async t => {
+  const w = await world(t);
+  // (a) The stored token has really expired, so the request waits for the refresh. Every answer that is not Keycloak's
+  // refusal of the refresh token means "not now": 503 AUTH_IDP_UNAVAILABLE, the handler not reached, the session and its
+  // version kept, no record, no cookie change. With Keycloak back the next request goes on with a new version.
+  const forged = await w.issue('amd4-forged', { sub: 'syn-sub-amd4-unverifiable', groups: [A], key: 'other' });
+  for (const [kind, answer] of [['drop', reply.drop], ['failing', reply.failing], ['unreadable', reply.unreadable],
+    ['misconfigured', reply.misconfigured], ['unverifiable', () => reply.tokens(forged)], ['hang', reply.hang]]) {
+    const s = 'syn-sub-amd4-' + kind;
+    const sid = await w.session(await w.issue(s, { sub: s, groups: [A] }), { atExpiresAt: lapsed() });
+    const next = await w.issue(s + '-next', { sub: s, groups: [A] });
+    kc.auto = answer;
+    const handled = w.I1.handled;
+    const out = await w.call(w.I1, 'get', { sid });
+    assert.deepEqual([...coded(out), out.cookie, w.I1.handled - handled, await w.version(sid), await endsOf(w, s)],
+      [503, 'AUTH_IDP_UNAVAILABLE', 'AUTH_IDP_UNAVAILABLE', 'K', 0, s, []], kind);
+    kc.auto = () => reply.tokens(next);
+    const again = await w.call(w.I1, 'get', { sid });
+    kc.auto = null;
+    assert.deepEqual([again.status, again.cookie, await w.version(sid), await endsOf(w, s)], [200, 'K', s + '-next', []], kind + ': Keycloak back');
+  }
+  // (b) Inside the lead (the refresh is due, the token still valid): the request is answered without waiting for
+  // Keycloak, and so is the next one, which shares the refresh that is out. What the refresh then brings is applied to
+  // the session, never to those answers: a new version, nothing, or - on Keycloak's refusal - the end of the session.
+  for (const kind of ['tokens', 'drop', 'reject']) {
+    kc.held = [];
+    const s = 'syn-sub-amd4-lead-' + kind;
+    const v1 = await w.issue(s, { sub: s, groups: [B], expIn: 20 });
+    const v2 = await w.issue(s + '-next', { sub: s, groups: [B] });
+    const sid = await w.session(v1);
+    const handled = w.I1.handled;
+    const out = await w.call(w.I1, 'get', { sid });
+    const k = await heldToken(1, 'the refresh ahead of the expiry');
+    const second = await w.call(w.I1, 'get', { sid });
+    assert.deepEqual([out.status, out.cookie, second.status, w.I1.handled - handled, kc.held.length, await w.version(sid)],
+      [200, 'K', 200, 2, 1, s], kind + ': both answered while one refresh is out');
+    assert.ok(k.form.refresh_token === v1.refresh, kind + ': the refresh is of the stored version');
+    k.answer(kind === 'tokens' ? reply.tokens(v2) : kind === 'drop' ? reply.drop() : reply.reject());
+    if (kind === 'tokens') {
+      await w.until('the refreshed version', async () => (await w.version(sid)) === s + '-next');
+      assert.deepEqual([(await w.call(w.I1, 'get', { sid })).status, kc.held.length, await endsOf(w, s)], [200, 1, []], kind);
+    } else if (kind === 'drop') {
+      // the failed refresh is over once a request starts another; the session is as it was
+      await w.until('a new refresh after the failed one', async () => (await w.call(w.I1, 'get', { sid })).status === 200 && kc.held.length >= 2);
+      assert.deepEqual([await w.version(sid), await endsOf(w, s)], [s, []], kind);
+      kc.held[1].answer(reply.drop());
+    } else {
+      await w.until('the refused session ends', async () => (await w.version(sid)) === null);
+      const after = await w.call(w.I1, 'get', { sid });
+      assert.deepEqual([...coded(after), after.cookie, await endsOf(w, s)],
+        [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED', 'K', [['auth.session.expired', 'refresh_failed', B]]], kind);
+    }
+  }
+  // (c) The key set cannot be fetched (a new process while Keycloak does not answer /certs): the stored token cannot be
+  // verified now. That is 503, not a refusal; the session is kept and works once the keys can be fetched.
+  for (const mode of ['drop', 'error']) {
+    const s = 'syn-sub-amd4-jwks-' + mode;
+    const sid = await w.session(await w.issue(s, { sub: s, groups: [A] }));
+    const inst = w.instance('J-' + mode);
+    kc.certs = mode;
+    const out = await w.call(inst, 'get', { sid });
+    kc.certs = 'ok';
+    assert.deepEqual([...coded(out), out.cookie, inst.handled, await w.version(sid), await endsOf(w, s)],
+      [503, 'AUTH_IDP_UNAVAILABLE', 'AUTH_IDP_UNAVAILABLE', 'K', 0, s, []], mode);
+    const again = await w.call(inst, 'get', { sid });
+    assert.deepEqual([again.status, again.cookie, inst.handled], [200, 'K', 1], mode + ': keys back');
+  }
+  // Control: a token that is itself wrong (signed by another key) is refused as a token - 401, not "Keycloak unavailable".
+  const wrong = await w.call(w.I1, 'get', { bearer: forged.access });
+  assert.deepEqual([wrong.status, wrong.body?.code ?? null], [401, null]);
+  await w.finish('U5S-AMD-04');
+});
+
+test('U5S-TEST-S05 logout: the revocation and its record commit before Keycloak is told, the answer does not wait for Keycloak, and nothing revives the session', async t => {
+  const w = await world(t);
+  for (const mode of ['hang', 'drop', 'ok']) {
+    const s = 'syn-sub-s05-' + mode;
+    const sid = await w.session(await w.issue(s, { sub: s, groups: [A] }));
+    kc.logoutMode = mode;
+    // What the store holds at the moment Keycloak is told.
+    const told = deferred();
+    kc.onLogout = async () => { told.resolve({ session: await w.version(sid), rows: await endsOf(w, s) }); };
+    const from = performance.now();
+    const out = await w.call(w.I1, 'logout', { sid });
+    // Keycloak never answers in 'hang': the logout's answer is here although that request has not been given up yet
+    // (its bound is 2 s; an answer that waited for it would be later than that).
+    const abandonedAtAnswer = kc.abandoned, took = performance.now() - from;
+    assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)], [204, 'K', null, [['auth.logout', 'logout', A]]], mode);
+    assert.deepEqual(await within(told.promise, 'Keycloak being told'), { session: null, rows: [['auth.logout', 'logout', A]] },
+      mode + ': when Keycloak is told the session is already revoked and recorded');
+    kc.onLogout = null;
+    if (mode === 'hang') {
+      assert.deepEqual([abandonedAtAnswer, took < 1500], [0, true], `the answer did not wait for the Keycloak request to end (${Math.round(took)} ms)`);
+      // ... and that request is bounded: the caller gives it up (2 s), nobody waits for it.
+      await w.until('the unanswered Keycloak request being given up', async () => kc.abandoned === 1);
+      assert.ok(performance.now() - from < 4000, 'given up within its bound');
+    }
+    // The ended session is refused by every process - one that never saw it included (nothing in memory could revive it).
+    for (const inst of [w.I1, w.I2, w.instance('S05-' + mode)]) {
+      const after = await w.call(inst, 'get', { sid });
+      assert.deepEqual([...coded(after), after.cookie], [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED', 'K'], mode);
+    }
+    // The same logout again (the answer was lost and the user asks again): confirmed, no second record.
+    const again = await w.call(w.I2, 'logout', { sid });
+    assert.deepEqual([again.status, again.cookie, await endsOf(w, s)], [204, 'K', [['auth.logout', 'logout', A]]], mode);
+  }
+  kc.logoutMode = 'ok';
+  await w.finish('U5S-TEST-S05');
+});
+
+test('U5S-TEST-S07 a newer login S2: the held logout, the late 401 and every later request of the old document S1 leave S2\'s cookie, session and records untouched', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-s07';
+  // The browser's cookie jar: only what an answer sets changes it (the order of delivery is the order of these lines).
+  let jar = null;
+  const deliver = out => { if (out.expired) jar = null; if (out.newSid) jar = out.newSid; return out; };
+  // S1: a login, entered by its document (which now holds S1's id).
+  const one = await login(w, w.I1, await w.issue('s07-v1', { sub: s, groups: [A] }));
+  deliver(one.done);
+  const s1 = jar;
+  const id1 = deliver(await w.call(w.I1, 'entry', { sid: jar, body: { proof: one.done.proof } })).body.sessionId;
+  // Two requests of the S1 document are on their way and are held in the server: a read and its logout.
+  const readGate = w.gate('I1', 'read');
+  const heldRead = w.call(w.I1, 'get', { sid: s1, binding: id1 });
+  await readGate.arrived();
+  const logoutGate = w.gate('I1', 'tx.open');
+  const heldLogout = w.call(w.I1, 'logout', { sid: s1, binding: id1 });
+  await logoutGate.arrived();
+  // Another tab logs in again (the same person): its document learnt S1's id at its bootstrap and starts a bound login,
+  // which revokes S1 with its record; the callback then sets S2's cookie.
+  const boot = deliver(await w.call(w.I2, 'me', { sid: jar }));
+  assert.deepEqual([boot.status, boot.body.sessionId], [200, id1]);
+  const begin = deliver(await w.call(w.I2, 'switch', { sid: jar, binding: boot.body.sessionId, body: { prompt: 'login' } }));
+  assert.deepEqual([begin.status, begin.cookie, jar], [200, 'P', s1], 'a login start sets a pending cookie and leaves kin_sid alone');
+  const v2 = await w.issue('s07-v2', { sub: s, groups: [A] });
+  kc.auto = form => form.grant_type === 'authorization_code' ? reply.tokens(v2) : reply.reject();
+  const state = new URL(begin.location).searchParams.get('state');
+  w.secret('state', state);
+  const done = deliver(await w.call(w.I2, 'callback', { sid: jar, cookie: 'kin_pending=' + encodeURIComponent(begin.pending), query: { code: 'syn-code-' + randomUUID(), state } }));
+  kc.auto = null;
+  const s2 = jar;
+  assert.deepEqual([done.status, done.cookie, s2 !== s1 && !!s2], [302, 'S', true]);
+  const id2 = deliver(await w.call(w.I2, 'entry', { sid: jar, body: { proof: done.proof } })).body.sessionId;
+  assert.notEqual(id2, id1);
+  // Now the held S1 answers are released, after S2 exists: the read is a 401 of S1, the logout is confirmed (S1 is
+  // gone) - and neither touches the cookie.
+  readGate.release();
+  const lateRead = deliver(await heldRead);
+  logoutGate.release();
+  const lateLogout = deliver(await heldLogout);
+  assert.deepEqual([coded(lateRead), lateRead.cookie, lateLogout.status, lateLogout.cookie, jar],
+    [[401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED'], 'K', 204, 'K', s2]);
+  // Every later request of the S1 document rides the browser's cookie (S2) with S1's id: refused before any refresh,
+  // handler, revocation or Keycloak call - and the refusal does not name S2.
+  const logouts = await w.told();
+  for (const [kind, options, status] of [['get', {}, 409], ['logout', {}, 409], ['switch', { body: { prompt: 'login' } }, 409],
+    ['signup', {}, 409], ['authz', {}, 403], ['me', {}, 409]]) {
+    const calls = w.calls.length, tokens = kc.tokens, handled = w.I1.handled;
+    const out = deliver(await w.call(w.I1, kind, { sid: jar, binding: id1, ...options }));
+    assert.deepEqual([...coded(out), out.cookie, out.pending, w.calls.length - calls, kc.tokens - tokens, w.I1.handled - handled],
+      [status, 'AUTH_SESSION_MISMATCH', 'AUTH_SESSION_MISMATCH', 'K', null, 0, 0, 0], kind);
+    assert.deepEqual(secretHits([JSON.stringify(out.body)], [['s2-id', id2], ['s2-cookie', s2]]), [], kind + ': the refusal does not name the browser\'s session');
+  }
+  // ... and one without any id is told to bootstrap (428); a request refused is not a session ended.
+  const unbound = deliver(await w.call(w.I1, 'get', { sid: jar, binding: null }));
+  assert.deepEqual([...coded(unbound), unbound.cookie], [428, 'AUTH_SESSION_REQUIRED', 'AUTH_SESSION_REQUIRED', 'K']);
+  // S2 is what it was: its cookie in the jar, an authenticated request, its identity, no Keycloak logout on its behalf.
+  const mine = deliver(await w.call(w.I1, 'get', { sid: jar, binding: id2 }));
+  const me = deliver(await w.call(w.I1, 'me', { sid: jar, binding: id2 }));
+  assert.deepEqual([jar, mine.status, me.status, me.body.sub, me.body.sessionId, await w.version(s2), await w.told() - logouts],
+    [s2, 200, 200, s, id2, 's07-v2', 0]);
+  // The records: two logins, two entries, one termination of S1 (the bound login that revoked it) and none of S2.
+  assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.entry', undefined, A], ['auth.entry', undefined, A],
+    ['auth.login', 'success', A], ['auth.login', 'success', A], ['auth.logout', 'account_switch', A]]);
+  await w.finish('U5S-TEST-S07');
+});
+
+test('U5S-TEST-S11 two documents of one session log out at once: both are confirmed, one termination record', async t => {
+  const w = await world(t);
+  for (const round of [1, 2, 3]) {
+    const s = 'syn-sub-s11-' + round;
+    const sid = await w.session(await w.issue(s, { sub: s, groups: [B] }));
+    const answers = await Promise.all([w.call(w.I1, 'logout', { sid }), w.call(w.I2, 'logout', { sid }), w.call(w.I1, 'logout', { sid })]);
+    assert.deepEqual([answers.map(o => [o.status, o.cookie]), await w.version(sid), await endsOf(w, s)],
+      [[[204, 'K'], [204, 'K'], [204, 'K']], null, [['auth.logout', 'logout', B]]], 'round ' + round);
+  }
+  await w.finish('U5S-TEST-S11');
+});
+
+test('U5S-REQ-08 binding: no credentials 401, no binding 428, another session 409, an ended session 401 - before any read, refresh or handler; several documents of one session are ordinary; Bearer needs none', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-b1';
+  const live = await w.session(await w.issue(s, { sub: s, groups: [A] }));
+  const other = await w.session(await w.issue('syn-sub-b2', { sub: 'syn-sub-b2', groups: [B] }));
+  // Several documents (two tabs, a viewer window) of one session: each bootstraps once with an unbound `me`, gets the
+  // same id - which is not the cookie - and works with it side by side, on any instance, the DICOM subrequest included.
+  const d1 = await w.call(w.I1, 'me', { sid: live }), d2 = await w.call(w.I2, 'me', { sid: live }), d3 = await w.call(w.I2, 'me', { sid: other });
+  assert.deepEqual([d1.status, d2.status, typeof d1.body.sessionId, d1.body.sessionId === d2.body.sessionId, d1.body.sessionId !== d3.body.sessionId],
+    [200, 200, 'string', true, true]);
+  assert.deepEqual(secretHits([d1.body.sessionId], [['cookie', live]]), [], 'the id is not the cookie value');
+  const side = await Promise.all([w.call(w.I1, 'get', { sid: live, binding: d1.body.sessionId }), w.call(w.I2, 'get', { sid: live, binding: d2.body.sessionId }),
+    w.call(w.I1, 'authz', { sid: live, binding: d2.body.sessionId }), w.call(w.I2, 'me', { sid: live, binding: d1.body.sessionId })]);
+  assert.deepEqual(side.map(o => [o.status, o.cookie]), [[200, 'K'], [200, 'K'], [204, 'K'], [200, 'K']]);
+  assert.deepEqual(await endsOf(w, s), []);
+  // The refusals, on a session whose token has expired while Keycloak would refuse its refresh: asking Keycloak or
+  // reading the session would end it, so "nothing read, nothing asked, no handler" is what keeps it alive.
+  const lapsedSid = await w.session(await w.issue('syn-sub-b3', { sub: 'syn-sub-b3', groups: [A] }), { atExpiresAt: lapsed() });
+  kc.auto = () => reply.reject();
+  const refused = async (label, kind, options, expected) => {
+    const calls = w.calls.length, tokens = kc.tokens, handled = w.I1.handled;
+    const out = await w.call(w.I1, kind, options);
+    assert.deepEqual([...coded(out), out.cookie, out.pending, w.calls.length - calls, kc.tokens - tokens, w.I1.handled - handled],
+      [...expected, 'K', null, 0, 0, 0], label);
+    return out;
+  };
+  const otherId = d3.body.sessionId;
+  await refused('no cookie and no token', 'get', {}, [401, 'AUTH_CREDENTIALS_MISSING', 'AUTH_CREDENTIALS_MISSING']);
+  await refused('no cookie and no token, DICOM subrequest', 'authz', {}, [401, 'AUTH_CREDENTIALS_MISSING', 'AUTH_CREDENTIALS_MISSING']);
+  for (const kind of ['get', 'logout', 'switch', 'signup']) {
+    await refused(kind + ' without a binding', kind, { sid: lapsedSid, binding: null }, [428, 'AUTH_SESSION_REQUIRED', 'AUTH_SESSION_REQUIRED']);
+    await refused(kind + ' with another session\'s id', kind, { sid: lapsedSid, binding: otherId }, [409, 'AUTH_SESSION_MISMATCH', 'AUTH_SESSION_MISMATCH']);
+  }
+  await refused('a binding that is no id at all', 'get', { sid: lapsedSid, binding: 'x' }, [409, 'AUTH_SESSION_MISMATCH', 'AUTH_SESSION_MISMATCH']);
+  // The DICOM subrequest answers the same two as 403 (the proxy passes 401 and 403 only); the code keeps them apart.
+  await refused('DICOM subrequest without a binding', 'authz', { sid: lapsedSid, binding: null }, [403, 'AUTH_SESSION_REQUIRED', 'AUTH_SESSION_REQUIRED']);
+  await refused('DICOM subrequest with another session\'s id', 'authz', { sid: lapsedSid, binding: otherId }, [403, 'AUTH_SESSION_MISMATCH', 'AUTH_SESSION_MISMATCH']);
+  // A cookie request that changes something without the CSRF header: 403 with its own code.
+  const csrf = await w.call(w.I1, 'logout', { sid: live, csrf: false });
+  assert.deepEqual([...coded(csrf), csrf.cookie, await w.version(live)], [403, 'AUTH_CSRF_REQUIRED', 'AUTH_CSRF_REQUIRED', 'K', s]);
+  kc.auto = null;
+  assert.deepEqual([await w.version(lapsedSid), await endsOf(w, 'syn-sub-b3')], ['syn-sub-b3', []], 'none of the refusals read, refreshed or ended the session');
+  // A link login (GET) revokes nothing: with a live session it goes back to the entrance, without a pending login.
+  for (const kind of ['login', 'register']) {
+    const link = await w.call(w.I1, kind, { sid: live });
+    assert.deepEqual([link.status, link.location, link.cookie, await w.version(live)],
+      [302, ORIGIN + '/worklist/hpacs-lite/index.html?auth_error=session_active', 'K', s], kind);
+  }
+  // A correctly bound request of a session that is gone: 401 AUTH_SESSION_ENDED, on the API and on the DICOM subrequest.
+  const gone = 'syn-gone-' + randomUUID();
+  for (const kind of ['get', 'authz', 'me']) {
+    const out = await w.call(w.I1, kind, { sid: gone, binding: w.I1.service.sessionRef(gone) });
+    assert.deepEqual([...coded(out), out.cookie], [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED', 'K'], kind);
+  }
+  // Bearer: no binding, no CSRF header, and a cookie in the same request is not its session - a Bearer logout ends nothing.
+  const bearer = await w.issue('b-bearer', { sub: 'syn-sub-b-bearer', groups: [A] });
+  const viaToken = await w.call(w.I1, 'get', { bearer: bearer.access, sid: live, binding: 'syn-not-an-id' });
+  const tokenMe = await w.call(w.I1, 'me', { bearer: bearer.access });
+  const tokenLogout = await w.call(w.I1, 'logout', { bearer: bearer.access, sid: live, binding: null, csrf: false });
+  assert.deepEqual([viaToken.status, tokenMe.body.sessionId, tokenMe.body.sub, tokenLogout.status, tokenLogout.cookie, await w.version(live), await endsOf(w, s)],
+    [200, null, 'syn-sub-b-bearer', 204, 'K', s, []]);
+  await w.finish('U5S-REQ-08');
+});
+
+test('U5S-REQ-09 entry proof: a login is entered once, by the document that holds its proof and its cookie; consumption and its record are one commit; a link or a second tab needs none', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-e1';
+  const first = await login(w, w.I1, await w.issue('e1', { sub: s, groups: [A], email: 'syn-e1@synthetic.test' }));
+  const sid = first.done.newSid, proof = first.done.proof;
+  const entries = async sub => rowsOf(await w.rows(), sub).filter(r => r.action === 'auth.entry');
+  // Named refusals that consume nothing: a malformed body, no cookie, no CSRF header.
+  for (const body of [{}, { proof: 7 }, { proof: '' }, { proof: 'x'.repeat(129) }, undefined])
+    assert.deepEqual(coded(await w.call(w.I1, 'entry', { sid, body })), [400, 'AUTH_ENTRY_INVALID', 'AUTH_ENTRY_INVALID']);
+  assert.deepEqual(coded(await w.call(w.I1, 'entry', { body: { proof } })), [401, 'AUTH_CREDENTIALS_MISSING', 'AUTH_CREDENTIALS_MISSING']);
+  assert.deepEqual(coded(await w.call(w.I1, 'entry', { sid, body: { proof }, csrf: false })), [403, 'AUTH_CSRF_REQUIRED', 'AUTH_CSRF_REQUIRED']);
+  // The cookie changed between the callback and the entry (another login): this proof does not enter that session.
+  const second = await login(w, w.I2, await w.issue('e2', { sub: 'syn-sub-e2', groups: [B] }));
+  assert.deepEqual(coded(await w.call(w.I1, 'entry', { sid: second.done.newSid, body: { proof } })), [403, 'AUTH_ENTRY_REFUSED', 'AUTH_ENTRY_REFUSED']);
+  // The record cannot be written: 500, nothing consumed - the same proof still enters afterwards.
+  w.fault('I1', 'tx.audit', dbError('entry'));
+  assert.ok(storageFailure(await w.call(w.I1, 'entry', { sid, body: { proof } })));
+  assert.deepEqual(await entries(s), []);
+  const entered = await w.call(w.I1, 'entry', { sid, body: { proof } });
+  assert.deepEqual([entered.status, Object.keys(entered.body), typeof entered.body.sessionId, entered.cookie], [200, ['sessionId'], 'string', 'K']);
+  assert.deepEqual(await entries(s), [{ actor: 'syn-e1@synthetic.test', action: 'auth.entry', target: s,
+    detail: { institution: A, ip: IP, dataSubject: null } }]);
+  // The id it answers is the session's id: a bound `me` answers the same, and requests bound with it work.
+  const me = await w.call(w.I1, 'me', { sid, binding: entered.body.sessionId });
+  assert.deepEqual([me.status, me.body.sessionId, (await w.call(w.I2, 'get', { sid, binding: entered.body.sessionId })).status], [200, entered.body.sessionId, 200]);
+  // Replay, on any instance: refused with the same answer as any other unusable proof; no second record.
+  for (const inst of [w.I1, w.I2])
+    assert.deepEqual(coded(await w.call(inst, 'entry', { sid, body: { proof } })), [403, 'AUTH_ENTRY_REFUSED', 'AUTH_ENTRY_REFUSED']);
+  assert.equal((await entries(s)).length, 1);
+  // A proof is short-lived: 120 s after its login it no longer enters. The session itself is not affected - a document
+  // without a proof (a second tab, a reload) enters by its bootstrap.
+  w.tick(121_000);
+  assert.deepEqual(coded(await w.call(w.I2, 'entry', { sid: second.done.newSid, body: { proof: second.done.proof } })), [403, 'AUTH_ENTRY_REFUSED', 'AUTH_ENTRY_REFUSED']);
+  const tab = await w.call(w.I2, 'me', { sid: second.done.newSid });
+  assert.deepEqual([tab.status, typeof tab.body.sessionId, await entries('syn-sub-e2')], [200, 'string', []]);
+  // A member waiting for approval can enter, is told so with the id it needs, and can log out with it.
+  const pending = await login(w, w.I1, await w.issue('e3', { sub: 'syn-sub-e3', groups: [] }));
+  const pe = await w.call(w.I1, 'entry', { sid: pending.done.newSid, body: { proof: pending.done.proof } });
+  const pm = await w.call(w.I1, 'me', { sid: pending.done.newSid });
+  assert.deepEqual([pe.status, pm.status, pm.body?.code, pm.body?.sessionId === pe.body.sessionId], [200, 403, 'INSTITUTION_PENDING', true]);
+  const out = await w.call(w.I1, 'logout', { sid: pending.done.newSid, binding: pe.body.sessionId });
+  assert.deepEqual([out.status, out.cookie, await w.version(pending.done.newSid)], [204, 'K', null]);
+  assert.equal(w.faults.length, 0, 'the injected failure was reached');
+  await w.finish('U5S-REQ-09', { output: markers('entry') });
 });

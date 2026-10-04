@@ -15,6 +15,15 @@ const PENDING_MAX_AGE_SECONDS = 10 * 60;
 const TRANSITION_LIMIT = 3;
 // 세션을 끝낸 **뒤의** Keycloak 로그아웃이 쓸 수 있는 시간(U5S-REQ-18). 넘기면 버린다 — 이 앱의 세션은 이미 끝났다.
 const IDP_LOGOUT_MS = 2000;
+// Keycloak 토큰 교환(로그인 code, refresh) 한 번이 쓸 수 있는 시간(U5S-REQ-18의 외부 조회 한도).
+const IDP_TOKEN_MS = 5000;
+/**
+ * 갱신은 access token이 만료되기 이만큼 **전에** 시작한다: 저장하는 `atExpiresAt`은 토큰의 exp에서 이 값을 뺀 시각이다.
+ * 그 시각부터 실제 만료까지는 저장된 토큰이 아직 유효하므로 요청은 갱신을 기다리지 않는다(아래 `authenticateSession`).
+ */
+const REFRESH_LEAD_MS = 30_000;
+// 실제 만료 직전의 토큰을 "아직 유효"로 채택하면 곧이은 서명 검증에서 만료로 떨어진다. 그 틈을 만료 쪽으로 센다.
+const TOKEN_MARGIN_MS = 2000;
 // 로그인 직후의 진입 증명이 통하는 시간(U5S-REQ-09). 콜백의 이동과 첫 요청 사이만 덮는다.
 const ENTRY_PROOF_MS = 120_000;
 
@@ -36,7 +45,19 @@ export type LoginFailureCause =
   'provider_error' | 'state_mismatch' | 'no_code' | 'exchange_failed' | 'token_invalid' | 'session_failed';
 type StorageStep = 'session_read' | 'session_write' | 'end_transaction' | 'login_transaction' | 'login_failure_row'
   | 'entry_transaction' | 'sweep_read' | 'sweep_target' | 'sweep_cycle';
-type RefreshOutcome = { kind: 'stored'; session: Session } | { kind: 'ended' } | { kind: 'conflict' };
+/**
+ * refresh 교환의 답. `refused`는 Keycloak이 **그 refresh token을 거절했다고 답한 것**(400 invalid_grant: 만료·철회)뿐이다.
+ * 연결 실패·시간 초과·5xx·읽지 못한 답·검증하지 못한 새 토큰은 `unavailable`이다 — 세션이 끝났다는 증거가 아니다.
+ */
+type RefreshAnswer = { kind: 'tokens'; tokens: any; payload: JWTPayload & Record<string, any> } | { kind: 'refused' } | { kind: 'unavailable' };
+type RefreshOutcome = { kind: 'stored'; session: Session } | { kind: 'ended' } | { kind: 'conflict' } | { kind: 'unavailable' };
+
+/** jose가 **토큰 자체**를 판정한 오류. 이 밖의 검증 실패(JWKS 조회 시간 초과·응답 이상·연결 실패)는 토큰의 잘못이 아니다. */
+const TOKEN_VERDICTS = new Set([
+  'ERR_JWT_EXPIRED', 'ERR_JWT_CLAIM_VALIDATION_FAILED', 'ERR_JWT_INVALID', 'ERR_JWS_INVALID',
+  'ERR_JWS_SIGNATURE_VERIFICATION_FAILED', 'ERR_JOSE_ALG_NOT_ALLOWED', 'ERR_JOSE_NOT_SUPPORTED',
+  'ERR_JWKS_NO_MATCHING_KEY', 'ERR_JWKS_MULTIPLE_MATCHING_KEYS',
+]);
 
 /**
  * 인증 거절의 한 모양: 상태 코드와 기계가 읽는 `code`(S7-U5, U5S-REQ-08). 화면은 문구가 아니라 code로 갈라 읽는다 —
@@ -148,6 +169,15 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   private ended(message: string) {
     return new UnauthorizedException({ code: 'AUTH_SESSION_ENDED', message });
+  }
+
+  /**
+   * Keycloak에 닿지 못해 지금은 인증을 확인하지 못했다는 답(503). 세션은 그대로다 — 인증 서버의 일시 장애로 로그인된
+   * 사람을 내보내지 않는다. 화면은 이 답을 세션 종료로 읽지 않고, 다음 요청이 다시 확인한다.
+   */
+  private idpUnavailable() {
+    return authRefusal(503, 'AUTH_IDP_UNAVAILABLE',
+      '인증 서버에 연결하지 못해 요청을 처리하지 못했습니다. 로그인은 유지됩니다 — 잠시 뒤 다시 시도해 주십시오');
   }
 
   private setPendingCookie(res: any, value: string) {
@@ -428,6 +458,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body,
+        signal: AbortSignal.timeout(IDP_TOKEN_MS),
       });
       const answer: any = await response.json().catch(() => ({}));
       if (response.ok && answer.access_token && answer.refresh_token) tokens = answer;
@@ -459,7 +490,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
           sub: String(payload.sub),
           accessToken: tokens.access_token,
           refreshToken: tokens.refresh_token,
-          atExpiresAt: new Date(Number(payload.exp) * 1000 - 30_000),
+          atExpiresAt: new Date(Number(payload.exp) * 1000 - REFRESH_LEAD_MS),
           lastSeenAt: now,
           entryProofHash: this.proofHash(proof),
           entryProofExpiresAt: new Date(now.getTime() + ENTRY_PROOF_MS),
@@ -519,15 +550,20 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       });
       return payload;
     } catch (error: any) {
+      // 공개키를 가져오지 못한 것은 토큰의 잘못이 아니다: 인증 실패(401)로 답하면 멀쩡한 세션이 거절된 것처럼 보인다.
+      if (!TOKEN_VERDICTS.has(error?.code)) throw this.idpUnavailable();
       throw new UnauthorizedException('토큰 검증 실패: ' + error.message);
     }
   }
 
   /**
-   * Keycloak refresh 교환과 토큰 검증만 거절(refresh_failed)이다. 성공 토큰 저장이나 실패 종료의 DB 오류는 거절이
-   * 아니라 저장소 실패다 — 두 실패를 한 catch에 담지 않는다(S7-U5 §0.B 2).
+   * Keycloak refresh 교환. **거절은 Keycloak이 거절이라고 답했을 때뿐이다**(400 invalid_grant — refresh token의 만료·철회).
+   * 예전에는 연결 실패·시간 초과·5xx·읽지 못한 답도 거절로 세어 세션을 지웠다: 인증 서버가 잠깐 느리거나 재시작하면
+   * 일하던 사람이 모두 로그아웃됐다. 그런 답은 `unavailable`이고 세션을 건드리지 않는다.
+   * 성공 토큰 저장이나 거절 뒤 종료의 DB 오류는 여기 답이 아니라 저장소 실패다 — 한 catch에 담지 않는다(S7-U5 §0.B 2).
    */
-  private async exchangeRefresh(refreshToken: string): Promise<{ tokens: any; payload: JWTPayload & Record<string, any> } | null> {
+  private async exchangeRefresh(refreshToken: string): Promise<RefreshAnswer> {
+    let status: number, answer: any;
     try {
       const response = await fetch(this.internalOidc('/token'), {
         method: 'POST',
@@ -538,24 +574,33 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
           client_secret: process.env.KC_WEB_SECRET!,
           refresh_token: refreshToken,
         }),
+        signal: AbortSignal.timeout(IDP_TOKEN_MS),
       });
-      const tokens: any = await response.json().catch(() => ({}));
-      if (!response.ok || !tokens.access_token) return null;
-      return { tokens, payload: await this.verifyAccessToken(tokens.access_token) };
+      status = response.status;
+      answer = await response.json();
     } catch {
-      return null;
+      return { kind: 'unavailable' };
+    }
+    if (status === 400 && answer?.error === 'invalid_grant') return { kind: 'refused' };
+    if (status !== 200 || typeof answer?.access_token !== 'string' || !answer.access_token) return { kind: 'unavailable' };
+    try {
+      return { kind: 'tokens', tokens: answer, payload: await this.verifyAccessToken(answer.access_token) };
+    } catch {
+      return { kind: 'unavailable' };
     }
   }
 
-  /** 응답은 그 요청을 시작한 관찰 S에만 적용한다: 성공은 S 조건부 저장이 count 1일 때만, 실패는 S 조건부 종료. */
+  /** 응답은 그 요청을 시작한 관찰 S에만 적용한다: 성공은 S 조건부 저장이 count 1일 때만, 거절은 S 조건부 종료. */
   private async doRefresh(session: Session, ip: string | null): Promise<RefreshOutcome> {
     const answer = await this.exchangeRefresh(session.refreshToken);
-    if (!answer) return await this.endSession(session, 'refresh_failed', ip) ? { kind: 'ended' } : { kind: 'conflict' };
+    if (answer.kind === 'unavailable') return { kind: 'unavailable' };
+    if (answer.kind === 'refused')
+      return await this.endSession(session, 'refresh_failed', ip) ? { kind: 'ended' } : { kind: 'conflict' };
     const data = {
       sub: String(answer.payload.sub),
       accessToken: answer.tokens.access_token as string,
       refreshToken: (answer.tokens.refresh_token ?? session.refreshToken) as string,
-      atExpiresAt: new Date(Number(answer.payload.exp) * 1000 - 30_000),
+      atExpiresAt: new Date(Number(answer.payload.exp) * 1000 - REFRESH_LEAD_MS),
     };
     const { count } = await this.storage('session_write', () =>
       this.prisma.authSession.updateMany({ where: this.version(session), data }));
@@ -576,11 +621,18 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     return started;
   }
 
+  /**
+   * 토큰 갱신과 업무의 관계(S7-U5 개정 ④): 갱신은 만료 **전**(`atExpiresAt`)에 시작하고, 저장된 토큰이 실제로 유효한
+   * 동안의 요청은 그 갱신을 기다리지 않고 그 토큰으로 진행한다 — 인증 서버가 느려도 일하는 화면은 멈추지 않는다.
+   * 토큰이 실제로 만료된 뒤의 요청만 갱신을 기다린다. 그때도 Keycloak에 닿지 못한 것(`unavailable`)은 503일 뿐 세션을
+   * 끝내지 않는다. 세션이 끝나는 것은 Keycloak이 거절을 답했을 때와 idle뿐이다.
+   */
   async authenticateSession(sid: string, res: any): Promise<any> {
     const ip = this.requestIp(res?.req);
     let session = await this.readSession(sid);
     if (!session) throw this.ended('인증 세션이 없습니다');
     // idle → refresh → 진행을 관찰마다 판정한다. 조건부 전이가 0행이면 그 관찰(과 늦은 성공 토큰)을 버리고 다시 읽는다.
+    let refreshAhead = false;
     for (let writes = 0; ;) {
       const now = Date.now();
       const cutoff = new Date(now - SESSION_IDLE_MS);
@@ -589,12 +641,17 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         writes++;
         if (await this.endSession(session, 'idle', ip, cutoff)) throw this.ended('인증 세션이 만료되었습니다');
         ended = '인증 세션이 만료되었습니다';
+      } else if (session.atExpiresAt.getTime() <= now && now < session.atExpiresAt.getTime() + REFRESH_LEAD_MS - TOKEN_MARGIN_MS) {
+        // 갱신할 때가 됐고 토큰은 아직 유효하다: 이 요청은 저장된 토큰으로 가고, 갱신은 아래에서 시작만 한다.
+        refreshAhead = true;
+        break;
       } else if (session.atExpiresAt.getTime() <= now) {
         writes++;
         const outcome = await this.refresh(session, ip);
         // 자기 저장이 채택되면 그대로 진행한다 — 저장된 atExpiresAt이 이미 지났다는 이유로 같은 요청에서 다시 refresh하지 않는다.
         if (outcome.kind === 'stored') { session = outcome.session; break; }
         if (outcome.kind === 'ended') throw this.ended('인증 세션을 갱신할 수 없습니다');
+        if (outcome.kind === 'unavailable') throw this.idpUnavailable();
         ended = '인증 세션을 갱신할 수 없습니다';
       } else {
         break;
@@ -612,6 +669,12 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         this.prisma.authSession.updateMany({ where, data: { lastSeenAt: now } }));
       if (count === 1) session = { ...session, lastSeenAt: now };
     }
+    /**
+     * 미리 하는 갱신은 touch **뒤에** 시작한다: 먼저 시작하면 그 저장이 이 요청의 touch(읽은 버전 조건)를 0행으로 만들어
+     * 접속 시각이 갱신되지 않는다. 기다리지 않는다 — 그 갱신의 답(저장·거절로 인한 종료·닿지 못함)은 이미 채택한 이
+     * 요청을 바꾸지 않고, 저장소 실패는 `storage`가 고정 분류로 남겼다.
+     */
+    if (refreshAhead) this.refresh(session, ip).catch(() => undefined);
     return session;
   }
 
@@ -621,6 +684,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 시작되지 않았다. 이제 DB 실패·경쟁(409)은 "끝났다"는 답도 Keycloak 호출도 만들지 않고, 폐기 뒤의 Keycloak 실패·
    * 시간 초과·프로세스 재시작은 세션을 되살리거나 접속기록을 하나 더 만들지 못한다.
    * 이미 없는 세션은 접속기록 없이 끝난 것으로 답한다. 결속과 CSRF는 가드가 토큰 갱신 없이 먼저 확인했다.
+   *
+   * 답은 Keycloak을 기다리지 않는다(개정 ⑨): 폐기와 접속기록이 commit되면 이 앱의 로그아웃은 끝난 것이고, 그 뒤의
+   * Keycloak 통지(2초 한도)가 느리다고 사람이 "로그아웃 중"을 보고 있을 이유가 없다.
    */
   async logout(req: any): Promise<void> {
     const sid: string | null = req?.sid ?? null;
@@ -628,7 +694,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const session = await this.readSession(sid);
     if (!session) return;
     const last = await this.endByRequest(sid, session, 'logout', this.requestIp(req));
-    if (last) await this.idpLogout(last.refreshToken);
+    if (last) void this.idpLogout(last.refreshToken);
   }
 
   /** 이 앱의 세션이 끝난 뒤의 Keycloak 로그아웃. 2초 안에 끝나지 않으면 버리고, 실패해도 다시 보내지 않는다. */
