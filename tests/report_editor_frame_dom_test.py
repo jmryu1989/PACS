@@ -596,6 +596,61 @@ class ReportEditorFrameDOM(unittest.TestCase):
                 self.key(key)
                 self.assertEqual(self.read(), texts)
 
+    def test_boundary_carries_visited_mark_with_unchanged_selection(self):
+        """W6EF-F09 / RISK-T3: default Paste/dictation uses the visible carried caret."""
+        for boundary in ('authoritative', 'reopen'):
+            with self.subTest(boundary=boundary):
+                self.open('A', findings='abc def', conclusion='old')
+                self.focus()
+                self.key('Home')
+                for _ in range(3):
+                    self.key('ArrowRight')
+                texts = self.read()
+                texts['conclusion'] = 'new'
+                if boundary == 'authoritative':
+                    self.assertEqual(self.page.evaluate('t=>editor.replaceAuthoritative(t)', texts), {'status':'switched'})
+                else:
+                    self.open('A', **texts)
+                self.assertEqual(self.page.evaluate("document.activeElement.id"), 'findings')
+                visible = self.page.evaluate("[editor.element('findings').selectionStart, editor.element('findings').selectionEnd]")
+                self.assertEqual(visible, [3, 3])
+                self.capture()
+                self.assertEqual(self.page.evaluate('[at.start, at.end]'), visible)
+                self.assertEqual(self.insert('PASTE'), {'status':'applied'})
+                self.assert_text('abcPASTE def')
+
+    def test_authoritative_equality_is_lf_only(self):
+        """W6EF-F10 / RISK-T4: authoritative text keeps whitespace and Unicode form."""
+        for before, given, same in (
+                ('text', 'text ', False), ('text', 'text\n', False),
+                ('\u00e9', 'e\u0301', False),
+                ('a\nb', 'a\rb', True), ('a\nb', 'a\r\nb', True)):
+            with self.subTest(given=given):
+                self.open('A', findings=before)
+                texts = dict.fromkeys(FIELDS, '')
+                texts['findings'] = given
+                self.assertEqual(self.page.evaluate('t=>editor.replaceAuthoritative(t)', texts),
+                                 {'status': 'unchanged' if same else 'switched'})
+                self.assert_text(given.replace('\r\n', '\n').replace('\r', '\n'))
+
+    def test_same_opening_equality_is_lf_only(self):
+        """W6EF-F10 / RISK-T4: different text needs a new opening, with no silent cleanup."""
+        for before, given, same in (
+                ('text', 'text ', False), ('text', 'text\n', False),
+                ('\u00e9', 'e\u0301', False),
+                ('a\nb', 'a\rb', True), ('a\nb', 'a\r\nb', True)):
+            with self.subTest(given=given):
+                self.open('A', findings=before)
+                texts = dict.fromkeys(FIELDS, '')
+                texts['findings'] = given
+                result = self.page.evaluate('x=>editor.switchStudy(x.context,x.texts)', {
+                    'context': {'uid':'A', 'selectionSeq':self.seq}, 'texts':texts})
+                self.assertEqual(result, {'status':'unchanged'} if same else
+                                 {'status':'refused', 'reason':'same-opening'})
+                self.assert_text(before)
+                self.open('A', **texts)
+                self.assert_text(given.replace('\r\n', '\n').replace('\r', '\n'))
+
     def test_authoritative_reentrant_call_refused_during_focus_and_input(self):
         """N12: 동기 페이지 listener의 권위 교체가 진행 중인 편집에 재진입할 수 있다."""
         for event in ('focus', 'input'):
@@ -849,7 +904,7 @@ MUTANTS = [
         "test_unfocusable_target_never_edits_the_active_field"]),
     ("M23-allow-truncation", "if (el.maxLength >= 0 && expected.length > el.maxLength) return refused('length');", "// Let the browser silently truncate the insertion.", [
         "test_native_length_limit_cannot_partially_apply_text"]),
-    ("M24-carry-different-text-caret", "if (same) next.setSelectionRange(saved.start, saved.end, saved.direction);", "next.setSelectionRange(saved.start, saved.end, saved.direction);", [
+    ("M24-carry-different-text-caret", "if (same) next.setSelectionRange(saved.start, saved.end, saved.direction);", "if (true) next.setSelectionRange(saved.start, saved.end, saved.direction);", [
         "test_different_text_opening_types_at_end_and_unvisited_capture_uses_end", "test_drag_across_opening_cannot_select_new_text"]),
     ("M25-unvisited-caret", "const start = range?.start ?? (s.caret ? el.selectionStart : el.value.length);", "const start = range?.start ?? el.selectionStart;", [
         "test_different_text_opening_types_at_end_and_unvisited_capture_uses_end"]),
@@ -865,6 +920,12 @@ MUTANTS = [
         "test_authoritative_same_text_preserves_nodes_caret_tickets_and_undo"]),
     ("M31-authoritative-no-busy-N12", "      if (writing) return refused('busy');\n      return unchanged(texts) || open(opening, texts);", "      // Allow re-entry.\n      return unchanged(texts) || open(opening, texts);", [
         "test_authoritative_reentrant_call_refused_during_focus_and_input"]),
+    ("M32-equality-trim-N15", "read(k) === lf(texts[k])", "read(k).trim() === lf(texts[k]).trim()", [
+        "test_authoritative_equality_is_lf_only", "test_same_opening_equality_is_lf_only"]),
+    ("M33-equality-normalize-N17", "read(k) === lf(texts[k])", "read(k).normalize() === lf(texts[k]).normalize()", [
+        "test_authoritative_equality_is_lf_only", "test_same_opening_equality_is_lf_only"]),
+    ("M34-discard-carried-visited-mark", "s.el = next; s.revision = 0;", "s.el = next; s.revision = 0; s.caret = false;", [
+        "test_boundary_carries_visited_mark_with_unchanged_selection"]),
 ]
 
 

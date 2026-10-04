@@ -103,10 +103,11 @@
         opening = Object.freeze({ uid: context.uid, selectionSeq: context.selectionSeq });
         for (const { s, old, next, saved, same } of replacements) {
           s.unbind();
-          s.el = next; s.revision = 0; s.caret = false;
+          s.el = next; s.revision = 0;
           bind(s);
           old.replaceWith(next);
           if (same) next.setSelectionRange(saved.start, saved.end, saved.direction);
+          else s.caret = false;
         }
         const focused = replacements.find(item => item.old === active);
         if (focused) focused.next.focus();
