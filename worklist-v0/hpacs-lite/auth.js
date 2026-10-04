@@ -419,8 +419,28 @@ const KinAuth = (() => {
     return Math.max(Date.now(), operation + 1, (last && last !== UNREADABLE ? last.operation : 0) + 1);
   }
 
+  /**
+   * 종료 표지. 이 문서가 자기 세션의 실제 종료를 알리거나 알게 되는 자리에서, 통지보다 **먼저** Web Lock
+   * `kin-session-ended:<세션>`을 요청해 이 문서가 사라질 때까지 쥔다. 통지(BroadcastChannel)와 잠금 해제는 브라우저의 서로
+   * 다른 줄로 전달되어 순서가 없다 — 로그아웃 준비로 멈춘 뷰어가 준비 잠금의 해제를 종료 통지보다 먼저 보면 종료를 취소로
+   * 읽는다. 뷰어는 풀려날 때 이 표지부터 본다(쥐었거나 기다리는 요청이 있으면 종료다). 요청은 걸어 두기만 하고 기다리지
+   * 않는다: 같은 세션의 다른 문서가 이미 쥐고 있으면 그것으로 충분하고, 종료는 잠금 때문에 늦어지거나 막히지 않는다. 잠금을
+   * 쓸 수 없는 브라우저에서는 통지만 간다.
+   */
+  const marked = new Set();
+  function markEnded(session) {
+    if (!session || marked.has(session)) return;
+    marked.add(session);
+    try {
+      const request = navigator.locks && navigator.locks.request('kin-session-ended:' + session, { mode: 'exclusive' },
+        () => new Promise(() => {}));
+      if (request) request.catch(() => {});
+    } catch (e) {}
+  }
+
   /** 종료를 시작한 문서가 같은 세션의 다른 문서에 한 번 알린다. 화면을 닫으라는 뜻이지 서버 종료의 증거가 아니다. */
   function tell(session, op) {
+    markEnded(session);
     try {
       const channel = new BroadcastChannel(CHANNEL);
       channel.postMessage({ type: 'session-ended', session, operation: op, status: 'ending' });
@@ -471,6 +491,8 @@ const KinAuth = (() => {
    * 한 번 알린다. 새 POST도 다시 알림도 없다 — 이동은 페이지의 조정자가 한다.
    */
   function endedElsewhere(next, why, op) {
+    // 통지를 받은 문서도 표지를 건다 — 종료를 시작한 문서가 먼저 떠나도, 이 문서가 남아 있는 동안 표지가 남는다.
+    markEnded(sessionId);
     closeHere(next, why, op);
     notifyEnded();
   }

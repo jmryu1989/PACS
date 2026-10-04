@@ -1,5 +1,5 @@
 # coding: utf-8
-"""U5S-REQ-04/13/17/22/23 -> U5S-RISK-DRAFT/APPLY/SUCCESS -> U5CLI-F01/F02/F05/F06/F07/F08/F09/F10, U5VW-F03 (main's half).
+"""U5S-REQ-04/13/17/22/23 -> U5S-RISK-DRAFT/APPLY/SUCCESS -> U5CLI-F01/F02/F05/F06/F07/F08/F09/F10, U5VW-F03/F07/F11 (main's half).
 
 Real pages and public controls, using the existing DOM harness read-only. The fixture adds
 independent stored drafts for study B; no product function is replaced or inspected.
@@ -8,10 +8,16 @@ Round 4 (U5CLI-F09/F10): text that this document's own controls put into the rep
 its shortcut, a dictation, a structured line, a quoted finding) is kept and saved - or asked about - like typed text;
 a command that changes no text of this document (a refused or unconfirmed Approve, Save or Discard Draft, a refused
 insertion) writes nothing and asks nothing; text typed while a save is out is not confirmed by that save; a study the
-server no longer accepts is announced once and its text kept; the logout preparation's notice is a lease.
+server no longer accepts is announced once and its text kept.
+Round 5 (U5VW-F07/F11, main's half): the logout preparation's contract with viewer documents is two Web Locks, not a
+timer - `kin-preparation:<id>` held from before the pause notice until Back to Editing (or the document's unload), and
+`kin-session-ended:<session>` asked for before every end notice. The cases read the browser's own lock manager from
+another document (`navigator.locks.query()`), and the order of lock requests, grants and notices inside the document.
+Text typed while a Save or Approve is out stays when the server accepts that command.
 Stand-ins added here, named: the clipboard (the harness's), the media devices of a dictation (an audio context, a
-worklet node and a microphone stream - nothing else of the browser), and the server's answers for a dictation, a
-findings list, an insertion and a discard.
+worklet node and a microphone stream - nothing else of the browser), the server's answers for a dictation, a
+findings list, an insertion and a discard, a blank same-origin document standing in for a viewer, and a recorder of
+the calls a document makes to the lock manager and the session channel.
 """
 import contextlib
 import re
@@ -60,6 +66,31 @@ FINDING = {"id": "11111111-1111-4111-8111-111111111111", "studyUid": h.UID, "rev
            "links": [{"itemId": "22222222-2222-4222-8222-222222222222", "linkState": "current", "headRevision": 1}]}
 SAVED_REPORT = {"version": 1, "rs": "T", "findings": "SYN-SAVED-V1 report", "conclusion": "", "recommendation": ""}
 EMPTY = dict.fromkeys(h.FIELDS, "")
+# A same-origin document that is not one of the product's pages (the viewer stand-in of the lock cases).
+VIEWER_URL = h.ORIGIN + "/syn-viewer.html"
+# What a document asks of the browser's lock manager and posts on the session channel, in the order it happened, each
+# with the state of the document's work gate at that moment. The lock manager and the channel stay the browser's own.
+ORDER_RECORDER = """(() => {
+  if (window.__synOrder) return;
+  const order = [];
+  Object.defineProperty(window, '__synOrder', { value: order });
+  const gate = () => typeof KinWorkContext === 'undefined' ? null : KinWorkContext.state();
+  if (navigator.locks) {
+    const request = navigator.locks.request.bind(navigator.locks);
+    navigator.locks.request = (name, ...rest) => {
+      const callback = rest.pop();
+      order.push({ event: 'request', name, gate: gate() });
+      return request(name, ...rest, lock => { order.push({ event: 'granted', name, gate: gate() }); return callback(lock); });
+    };
+  }
+  if (typeof BroadcastChannel === 'function') {
+    const post = BroadcastChannel.prototype.postMessage;
+    BroadcastChannel.prototype.postMessage = function (message) {
+      if (this.name === 'kin-session') order.push({ event: 'post', type: message && message.type, gate: gate() });
+      return post.call(this, message);
+    };
+  }
+})();"""
 
 
 class Amended:
@@ -729,7 +760,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.assertTrue(any(h.PATIENT_B in line and "다른 판독의" in line for line in lines))
         self.assertEqual((3, []), (len(self.site.puts), self.site.logouts))
 
-    # ── round 4: U5CLI-F09 / F10, the reviewer's unverified paths, the preparation lease ──
+    # ── round 4: U5CLI-F09 / F10, the reviewer's unverified paths ──
     def collect_notices(self, page=None):
         """Every notice the page shows from now on, as (text, shown as an error)."""
         page = page or self.page
@@ -1136,78 +1167,195 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                 self.assertEqual(h.FIELDS, {k: self.site.report[k] for k in h.FIELDS}, "the saved report is untouched")
                 self.assertEqual([], self.dialogs)
 
+    # ── round 5: the preparation's contract with viewer documents is two Web Locks, not a timer (U5VW-F07, U5VW-F11) ──
     def preparing(self, page=None):
         return [post for post in self.posts(page) if post["type"] == "session-preparing"]
 
-    def test_the_preparation_notice_is_a_lease_renewed_while_it_lives_and_released_when_the_document_goes(self):
-        for ending in ("Back to Editing", "the document goes away", "Log out completes"):
-            with self.subTest(ending=ending):
-                self.fresh_context()
-                self.site = MultiStudySite()
-                self.page.clock.install()
-                self.open_main()
-                session = self.site.cookie
-                self.select_and_type()
-                self.site.put_answers = ["hold"]
-                self.site.logout_answers = ["hold"]
-                self.log_out_main()
-                self.wait_until(lambda: self.site.held_puts, "the preparation's save")
-                first = self.preparing()[0]
-                self.assertEqual(session, first["session"])
-                # While the preparation lives its notice is posted again every 2 s, unchanged.
-                self.page.clock.run_for(6100)
-                renewed = self.preparing()
-                self.assertGreaterEqual(len(renewed), 4, "the first notice and three renewals in six seconds")
-                self.assertEqual([first] * len(renewed), renewed, "a renewal is the same notice, the same preparation")
-                self.assertEqual("preparing", self.screen()["state"])
-                if ending == "Back to Editing":
-                    self.panel_button("Back to Editing").click()
-                    resumed = [post for post in self.posts() if post["type"] == "session-resumed"]
-                    self.assertEqual([{"type": "session-resumed", "session": session, "preparation": first["preparation"]}],
-                                     resumed)
-                elif ending == "the document goes away":
-                    # The browser's notice that this document is being left (a closed tab, a navigation).
-                    self.page.evaluate("() => window.dispatchEvent(new PageTransitionEvent('pagehide'))")
-                    resumed = [post for post in self.posts() if post["type"] == "session-resumed"]
-                    self.assertEqual([{"type": "session-resumed", "session": session, "preparation": first["preparation"]}],
-                                     resumed, "the viewers are released at once, not after their lease runs out")
-                    continue
-                else:
-                    self.assertEqual(200, self.site.finish_put())
-                    self.wait_until(lambda: self.site.held_logouts, "the real end")
-                count = len(self.preparing())
-                self.page.clock.run_for(6100)
-                self.assertEqual(count, len(self.preparing()), "no renewal after the preparation ended")
-                if ending == "Log out completes":
-                    self.assertEqual([], [post for post in self.posts() if post["type"] == "session-resumed"])
-                    self.assertEqual("session-ended", self.posts()[-1]["type"])
+    def order(self, page=None):
+        """What the document asked of the lock manager and posted on the session channel, in order, as (event, what)."""
+        return (page or self.page).evaluate(
+            "() => window.__synOrder.map(e => [e.event, e.name || e.type, e.gate])")
 
-    def test_a_document_that_is_not_preparing_posts_no_release_when_it_goes(self):
-        self.open_main()
-        self.select_and_type()
-        self.page.evaluate("() => window.dispatchEvent(new PageTransitionEvent('pagehide'))")
-        self.assertEqual([], self.posts())
+    def viewer(self):
+        """A document of the same origin that is no auth.js page, as a viewer document is: it hears the session channel
+        and reads the browser's locks. With each notice it keeps the locks it could read at that moment."""
+        page = self.watch(self.context.new_page())
+        page.route(VIEWER_URL, lambda route: route.fulfill(content_type="text/html",
+                                                           body="<!doctype html><title>SYN viewer stand-in</title>"))
+        page.goto(VIEWER_URL)
+        page.evaluate("""() => { window.__synHeard = []; window.__synChannel = new BroadcastChannel('kin-session');
+            window.__synChannel.onmessage = async event => {
+              const entry = { ...event.data, locks: null };
+              window.__synHeard.push(entry);
+              const now = await navigator.locks.query();
+              entry.locks = [...now.held, ...now.pending].map(lock => lock.name);
+            }; }""")
+        return page
 
-    def test_closing_the_preparing_tab_tells_the_other_documents_of_the_session_to_resume(self):
+    def heard(self, viewer, kind):
+        return viewer.evaluate("kind => window.__synHeard.filter(notice => notice.type === kind && notice.locks)", kind)
+
+    def locks(self, viewer):
+        return viewer.evaluate("""async () => { const now = await navigator.locks.query();
+            return { held: now.held.map(lock => lock.name).sort(), pending: now.pending.map(lock => lock.name).sort() }; }""")
+
+    def begin_preparation(self, answers):
+        """A reader with typed text presses Log out; the preparation's save gets `answers`. Returns the viewer stand-in,
+        the session and the preparation id of the one notice."""
+        self.context.add_init_script(ORDER_RECORDER)
         self.open_main()
         session = self.site.cookie
         self.select_and_type()
-        # Another document of the same session listens on the session channel, as a viewer does.
-        other = self.open_main(self.watch(self.context.new_page()))
-        other.evaluate("""() => { window.__synHeard = []; window.__synChannel = new BroadcastChannel('kin-session');
-            window.__synChannel.onmessage = event => window.__synHeard.push(event.data); }""")
-        heard = lambda: other.evaluate("() => window.__synHeard")
+        viewer = self.viewer()
+        self.site.put_answers = list(answers)
+        self.log_out_main()
+        self.wait_until(lambda: self.heard(viewer, "session-preparing"), "the pause notice", page=viewer)
+        notices = self.preparing()
+        self.assertEqual([session], [notice["session"] for notice in notices], "one notice for one preparation")
+        return viewer, session, notices[0]["preparation"]
+
+    def test_a_preparation_holds_its_lock_from_before_its_notice_until_back_to_editing_releases_it(self):
+        self.page.clock.install()
+        viewer, session, first = self.begin_preparation([(403, {"statusCode": 403, "message": "SYN refused"})])
+        name = "kin-preparation:" + first
+        expect(self.panel_title()).to_have_text("Draft Not Saved")
+        # (1) The lock is granted first; only then the document prepares and posts its notice.
+        self.assertEqual([["request", name, "active"], ["granted", name, "active"], ["post", "session-preparing", "preparing"]],
+                         self.order())
+        # What a viewer can read when the notice reaches it: the lock is already held.
+        paused = self.heard(viewer, "session-preparing")
+        self.assertEqual([("session-preparing", session, first)], [(n["type"], n["session"], n["preparation"]) for n in paused])
+        self.assertIn(name, paused[0]["locks"], "the notice arrived before the lock it stands on")
+        self.assertEqual({"held": [name], "pending": []}, self.locks(viewer))
+        # Nothing of this depends on a timer of the preparing document: ten minutes pass, nothing is posted, it is held.
+        self.page.clock.run_for(600000)
+        self.assertEqual((1, "preparing"), (len(self.posts()), self.screen()["state"]))
+        self.assertEqual({"held": [name], "pending": []}, self.locks(viewer))
+        # (2) Retry is the same preparation: the same lock, no second notice.
+        self.site.put_answers = ["hold"]
+        self.panel_button("Retry").click()
+        self.wait_until(lambda: self.site.held_puts, "the retried save")
+        self.assertEqual((1, 3), (len(self.posts()), len(self.order())), "a retry asked for another lock or posted again")
+        self.assertEqual({"held": [name], "pending": []}, self.locks(viewer))
+        # (3) Back to Editing: the resume notice, then the release.
+        self.panel_button("Back to Editing").click()
+        self.wait_until(lambda: self.locks(viewer) == {"held": [], "pending": []}, "the lock released", page=viewer)
+        resumed = self.heard(viewer, "session-resumed")
+        self.assertEqual([("session-resumed", session, first)], [(n["type"], n["session"], n["preparation"]) for n in resumed])
+        self.assertEqual(("active", []), (self.screen()["state"], self.heard(viewer, "session-ended")))
+        # (6) A new Log out is a new preparation: a new id, a new lock.
+        self.log_out_main()
+        self.wait_until(lambda: len(self.preparing()) == 2, "the second preparation")
+        second = self.preparing()[1]["preparation"]
+        self.assertNotEqual(first, second)
+        self.wait_until(lambda: self.locks(viewer) == {"held": ["kin-preparation:" + second], "pending": []},
+                        "the second preparation's lock", page=viewer)
+
+    def test_a_real_end_asks_for_the_end_lock_before_its_notice_and_never_releases_the_preparation(self):
+        for ending in ("Log out completes", "the server ended the session", "the session became another login's",
+                       "another document ended the session"):
+            with self.subTest(ending=ending):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.context.add_init_script(ORDER_RECORDER)
+                other = self.open_main(self.watch(self.context.new_page())) if ending.startswith("another") else None
+                self.site.logout_answers = ["hold"]
+                viewer, session, first = self.begin_preparation(["hold"])
+                self.wait_until(lambda: self.site.held_puts, "the preparation's save")
+                name, end = "kin-preparation:" + first, "kin-session-ended:" + session
+                if ending == "Log out completes":
+                    self.assertEqual(200, self.site.finish_put())
+                    self.wait_until(lambda: len(self.site.held_logouts) == 1, "the real end")
+                elif ending == "the server ended the session":
+                    self.site.ended.add(session)
+                    self.site.refuse(self.site.held_puts.pop()[0], 401, "AUTH_SESSION_ENDED")
+                elif ending == "the session became another login's":
+                    self.site.account = h.RAD_OTHER
+                    self.site.refuse(self.site.held_puts.pop()[0], 409, "AUTH_SESSION_MISMATCH")
+                else:
+                    self.log_out_main(other)
+                    self.wait_until(lambda: len(self.site.held_logouts) == 1, "the other document's end", page=other)
+                if ending != "Log out completes":
+                    expect(self.panel_title()).to_have_text("Session Ended")
+                self.wait_until(lambda: self.heard(viewer, "session-ended"), "the end notice", page=viewer)
+                # (4) The end lock is asked for before the end is posted; whoever hears the end can already read it.
+                order = [step[:2] for step in self.order(other)]
+                self.assertLess(order.index(["request", end]), order.index(["post", "session-ended"]),
+                                "the end was posted before its lock was asked for")
+                self.assertEqual([], [n for n in self.heard(viewer, "session-ended") if end not in n["locks"]],
+                                 "a viewer heard the end and could not read its lock")
+                if other:
+                    # A document that learns of the end asks for the lock too, and announces no end of its own.
+                    mine = [step[:2] for step in self.order()]
+                    self.assertIn(["request", end], mine)
+                    self.assertNotIn(["post", "session-ended"], mine)
+                # The preparation's lock is not released and no resume is posted: an end is never read as a cancel.
+                self.page.wait_for_timeout(300)
+                now = self.locks(viewer)
+                self.assertIn(name, now["held"], "the preparation's lock was released at the end")
+                self.assertIn(end, now["held"] + now["pending"])
+                self.assertEqual([], viewer.evaluate("() => window.__synHeard.filter(n => n.type === 'session-resumed')"))
+                # Both go with the documents that hold them.
+                while self.site.held_logouts:
+                    self.release_logout()
+                if ending == "Log out completes":
+                    self.page.wait_for_url(h.INDEX_URL)
+                else:
+                    if other:
+                        other.wait_for_url(h.INDEX_URL)
+                    self.wait_until(lambda: end in self.locks(viewer)["held"], "the document that stays keeps the end readable",
+                                    page=viewer)
+                    self.page.close()
+                    self.page = viewer
+                self.wait_until(lambda: self.locks(viewer) == {"held": [], "pending": []}, "the locks released with the document",
+                                page=viewer)
+                self.assertEqual([], viewer.evaluate("() => window.__synHeard.filter(n => n.type === 'session-resumed')"))
+
+    def test_closing_the_preparing_tab_releases_its_lock_and_posts_nothing(self):
+        viewer, session, first = self.begin_preparation(["hold"])
+        self.wait_until(lambda: self.site.held_puts, "the preparation's save")
+        self.assertEqual({"held": ["kin-preparation:" + first], "pending": []}, self.locks(viewer))
+        self.page.close()                   # the tab is closed in the middle of its preparation
+        self.page = viewer
+        # The browser releases what the document held; nobody posts anything, and nothing says the session ended.
+        self.wait_until(lambda: self.locks(viewer) == {"held": [], "pending": []}, "the lock released by the browser", page=viewer)
+        viewer.wait_for_timeout(300)
+        self.assertEqual(["session-preparing"], viewer.evaluate("() => window.__synHeard.map(notice => notice.type)"))
+
+    def test_log_out_with_nothing_to_save_is_one_press_and_the_same_order(self):
+        self.context.add_init_script(ORDER_RECORDER)
+        self.open_main()
+        session = self.site.cookie
+        self.switch(h.PATIENT)
+        expect(self.page.locator("#findings")).to_be_editable()
+        self.site.logout_answers = ["hold"]
+        self.log_out_main()
+        self.wait_until(lambda: self.site.held_logouts, "the real end")
+        name, end = "kin-preparation:" + self.preparing()[0]["preparation"], "kin-session-ended:" + session
+        # The same contract as with text to save, in one press: nothing waits for the end lock's grant.
+        self.assertEqual([["request", name], ["granted", name], ["post", "session-preparing"], ["request", end],
+                          ["post", "session-ended"]], [step[:2] for step in self.order() if step[:2] != ["granted", end]])
+        self.assertEqual(([], []), (self.site.puts, self.dialogs))
+        self.release_logout()
+        self.page.wait_for_url(h.INDEX_URL)
+        self.assertEqual(1, len(self.site.logouts))
+
+    def test_without_the_lock_manager_the_notices_still_go_and_log_out_completes(self):
+        self.context.add_init_script("Object.defineProperty(Navigator.prototype, 'locks', { configurable: true, get() { return undefined; } });")
+        self.open_main()
+        session = self.site.cookie
+        self.select_and_type()
         self.site.put_answers = ["hold"]
         self.log_out_main()
-        self.wait_until(lambda: heard(), "the pause notice", page=other)
-        paused = heard()[0]
-        self.assertEqual(("session-preparing", session), (paused["type"], paused["session"]))
-        self.page.close()                   # the tab is closed in the middle of its preparation
-        self.page = other
-        released = lambda: [notice for notice in heard() if notice["type"] == "session-resumed"]
-        self.wait_until(released, "the release notice", page=other)
-        self.assertEqual([{"type": "session-resumed", "session": session, "preparation": paused["preparation"]}], released())
-        self.assertEqual("active", self.screen(other)["state"], "the session itself is untouched")
+        self.wait_until(lambda: self.site.held_puts, "the preparation's save")
+        self.panel_button("Back to Editing").click()
+        first = self.preparing()[0]["preparation"]
+        self.assertEqual([{"type": "session-preparing", "session": session, "preparation": first},
+                          {"type": "session-resumed", "session": session, "preparation": first}], self.posts())
+        self.assertEqual(200, self.site.finish_put())
+        self.log_out_main()
+        self.page.wait_for_url(h.INDEX_URL)
+        self.assertEqual((h.FIELDS, 1), (self.site.stored_for(h.UID), len(self.site.logouts)))
 
 
 def load_tests(loader, tests, pattern):
