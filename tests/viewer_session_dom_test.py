@@ -113,6 +113,219 @@ class ViewerSessionDOMTest(unittest.TestCase):
         }""",
                              {"type": kind, "session": session, "preparation": preparation})
 
+    def preparer(self):
+        page = self.context.new_page()
+        page.goto(BASE + '/worklist')
+        page.evaluate("window.channel=new BroadcastChannel('kin-session')")
+        return page
+
+    def hold_lock(self, page, name, mode='exclusive'):
+        page.evaluate("""({name,mode})=>new Promise(acquired=>{
+          window.releases ||= new Map();
+          navigator.locks.request(name,{mode},()=>new Promise(release=>{
+            releases.set(name,release);acquired();}));
+        })""", {'name': name, 'mode': mode})
+
+    def observe_deferred_reads(self):
+        self.context.add_init_script("""(() => {
+          window.nativeSends=[];const nativeFetch=window.fetch.bind(window);
+          window.fetch=(url,...args)=>{
+            if(String(url).includes('/dicom-web/deferred'))nativeSends.push(KinWorkContext.state());
+            return nativeFetch(url,...args);
+          };
+        })();""")
+
+    def queue_image_and_work(self, view):
+        view.evaluate("""()=>{
+          window.states=[];window.delivered=0;window.events=[];
+          KinWorkContext.onInvalidate(e=>states.push(e.state));
+          setTimeout(()=>delivered++,0);
+          const image=new Image();image.src='/dicom-web/deferred';
+          image.onload=()=>events.push('load');image.onerror=()=>events.push('error');
+          document.body.append(image);
+        }""")
+
+    def test_nonopener_end_then_release_never_resumes_or_sends_30_times(self):
+        self.observe_deferred_reads()
+        preparer = self.preparer()
+        for trial in range(30):
+            with self.subTest(trial=trial):
+                view = self.open_viewer()
+                pid = 'nonopener-' + str(trial)
+                self.hold_lock(preparer, 'kin-preparation:' + pid)
+                preparer.evaluate("id=>channel.postMessage({type:'session-preparing',session:'S1',preparation:id})", pid)
+                view.wait_for_function("KinWorkContext.state()==='preparing'")
+                self.queue_image_and_work(view)
+                landing = []
+                view.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
+                # The granted marker, end notice and early release share one main task.
+                # Early release stresses the viewer even though main normally holds until unload.
+                preparer.evaluate("""id=>new Promise(done=>navigator.locks.request('kin-session-ended:S1',()=>
+                  new Promise(release=>{releases.set('kin-session-ended:S1',release);
+                    channel.postMessage({type:'session-ended',session:'S1'});
+                    releases.get('kin-preparation:'+id)();done();})))""", pid)
+                for _ in range(100):
+                    if landing: break
+                    self.opener.wait_for_timeout(10)
+                self.assertTrue(landing)
+                result = self.opener.evaluate("({states:viewerRef.states,sends:viewerRef.nativeSends,work:viewerRef.delivered,events:viewerRef.events})")
+                self.assertEqual(result, {'states':['ending'], 'sends':[], 'work':0, 'events':[]})
+                for route in landing: route.abort()
+                view.close()
+                preparer.evaluate("releases.get('kin-session-ended:S1')()")
+
+    def test_nonopener_cancel_and_close_release_resume_deferred_work(self):
+        self.observe_deferred_reads()
+        for action in ['cancel', 'close']:
+            with self.subTest(action=action):
+                preparer = self.preparer()
+                view = self.open_viewer()
+                self.hold_lock(preparer, 'kin-preparation:separate')
+                preparer.evaluate("channel.postMessage({type:'session-preparing',session:'S1',preparation:'separate'})")
+                view.wait_for_function("KinWorkContext.state()==='preparing'")
+                self.queue_image_and_work(view)
+                if action == 'cancel':
+                    preparer.evaluate("channel.postMessage({type:'session-resumed',session:'S1',preparation:'separate'});releases.get('kin-preparation:separate')()")
+                else:
+                    preparer.close()
+                view.wait_for_function("delivered===1 && nativeSends.length===1")
+                self.assertEqual(view.evaluate('[states,nativeSends]'), [['active'],['active']])
+                view.close()
+                if not preparer.is_closed(): preparer.close()
+
+    def test_end_marker_blocks_every_resume_path_even_without_end_notice(self):
+        self.observe_deferred_reads()
+        for path in ['release-held', 'release-pending', 'resumed', 'peer']:
+            with self.subTest(path=path):
+                preparer = self.preparer()
+                view = self.open_viewer()
+                pid = 'marker-' + path
+                if path == 'peer':
+                    self.opener.evaluate("id=>window.localPreparation=KinWorkContext.prepare({preparationId:id})", pid)
+                    view.evaluate("navigator.locks.request=()=>Promise.reject(new DOMException('unavailable','NotAllowedError'));void 0")
+                self.notice('session-preparing', preparation=pid)
+                view.wait_for_function("KinWorkContext.state()==='preparing'")
+                self.queue_image_and_work(view)
+                landing = []
+                view.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
+                if path == 'release-pending':
+                    self.hold_lock(preparer, 'kin-session-ended:S1', 'shared')
+                    preparer.evaluate("navigator.locks.request('kin-session-ended:S1',()=>new Promise(()=>{}));void 0")
+                    self.assertIn('kin-session-ended:S1', preparer.evaluate('navigator.locks.query().then(q=>q.pending.map(l=>l.name))'))
+                    # Only the pending exclusive marker remains; hide the shared holder in
+                    # the snapshot so this independently exercises the pending decision.
+                    view.evaluate("const query=navigator.locks.query.bind(navigator.locks);navigator.locks.query=async()=>{const q=await query();return {...q,held:q.held.filter(l=>l.name!=='kin-session-ended:S1')}}")
+                else:
+                    self.hold_lock(preparer, 'kin-session-ended:S1')
+                if path == 'resumed':
+                    self.opener.evaluate("id=>channel.postMessage({type:'session-resumed',session:'S1',preparation:id})", pid)
+                elif path == 'peer':
+                    # The readable-peer fallback also checks the marker before cancellation.
+                    self.opener.evaluate("KinWorkContext.cancelPreparation(localPreparation)")
+                else:
+                    self.opener.evaluate("id=>preparationLocks.get(JSON.stringify(['S1',id])).release()", pid)
+                for _ in range(100):
+                    if landing: break
+                    self.opener.wait_for_timeout(10)
+                self.assertTrue(landing)
+                self.assertEqual(self.opener.evaluate('[viewerRef.states,viewerRef.nativeSends,viewerRef.delivered]'), [['ending'],[],0])
+                for route in landing: route.abort()
+                self.opener.evaluate("id=>preparationLocks.get(JSON.stringify(['S1',id])).release()", pid)
+                view.close(); preparer.close()
+                self.opener.evaluate("source({state:'active',session:'S1'})")
+
+    def test_startup_end_marker_blocks_opener_handoff_typed_reload_and_frame(self):
+        self.context.add_init_script("""(() => {
+          let gate;window.entryStates=[];
+          Object.defineProperty(window,'KinWorkContext',{get:()=>gate,set:value=>{
+            gate=value;gate.onInvalidate(e=>entryStates.push(e.state));
+          }});
+        })();""")
+        for entry in ['opener', 'handoff', 'typed', 'reload', 'restore', 'frame']:
+            with self.subTest(entry=entry):
+                preparer = self.preparer()
+                view = self.open_viewer() if entry in ['reload', 'restore'] else None
+                self.hold_lock(preparer, 'kin-session-ended:S1')
+                self.requests.clear()
+                landing = []
+                self.context.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
+                if entry in ['opener', 'handoff', 'typed']:
+                    with self.context.expect_page() as created:
+                        self.opener.evaluate("""entry=>{
+                          const p=window.viewerRef=window.open('/ohif/viewer');
+                          if(entry==='handoff')p.name='kin-viewer-entry:'+JSON.stringify({session:'S1',name:'viewer'});
+                          if(entry!=='opener')p.opener=null;
+                        }""", entry)
+                    view = created.value
+                elif entry == 'reload': view.evaluate('location.reload()')
+                elif entry == 'restore': view.evaluate("entryStates=[];dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}))")
+                else:
+                    self.opener.evaluate("const f=document.createElement('iframe');f.id='viewer';f.src='/ohif/viewer';document.body.append(f)")
+                for _ in range(100):
+                    if (entry == 'frame' and self.opener.locator('#viewer').count() == 0) or landing: break
+                    self.opener.wait_for_timeout(10)
+                if entry == 'frame': self.assertEqual(self.opener.locator('#viewer').count(), 0)
+                else:
+                    self.assertTrue(landing)
+                    self.assertEqual(self.opener.evaluate('viewerRef.KinWorkContext.state()'), 'ending')
+                    self.assertNotIn('active', self.opener.evaluate('viewerRef.entryStates'))
+                    if entry != 'restore': self.assertFalse(self.opener.evaluate('!!viewerRef.started'))
+                    for route in landing: route.abort()
+                    view.close()
+                self.assertEqual(self.requests, [('/api/me',None)] if entry == 'typed' else [])
+                self.context.unroute(BASE + '/worklist/hpacs-lite/index.html')
+                preparer.close()
+
+    def test_other_sessions_end_during_handoff_does_not_stop_entry(self):
+        held = []
+        self.context.route(BASE + '/api/me', lambda route: held.append(route))
+        view = self.open_noopener('S1')
+        for _ in range(100):
+            if held: break
+            view.wait_for_timeout(10)
+        self.assertEqual(len(held), 1)
+        self.notice('session-ended', session='S2')
+        view.wait_for_timeout(100)
+        held[0].fulfill(json={'sessionId':'S1'})
+        # Driver polling avoids a timeout-only mutant oracle on the suspended page clock.
+        for _ in range(100):
+            if view.evaluate("!!window.started || !!document.querySelector('[role=alert]')"): break
+            view.wait_for_timeout(10)
+        self.assertEqual(view.evaluate('[KinWorkContext.session(),KinWorkContext.state(),!!window.started]'), ['S1','active',True])
+        view.evaluate("fetch('/api/studies').then(r=>r.json())")
+        self.assertEqual(self.requests, [('/api/studies','S1')])
+
+    def test_removed_or_never_connected_elements_send_nothing_on_resume(self):
+        self.observe_deferred_reads()
+        view = self.open_viewer()
+        self.notice('session-preparing')
+        view.wait_for_function("KinWorkContext.state()==='preparing'")
+        view.evaluate("""()=>{
+          window.events=[];window.readAttempts=[];const fetch=window.fetch.bind(window);
+          window.fetch=(url,...args)=>{readAttempts.push(String(url));return fetch(url,...args);};
+          for(const kind of ['never','brief','removed','reattached']){
+            const image=new Image();image.id=kind;
+            image.onload=image.onerror=()=>events.push(kind);
+            image.src='/dicom-web/deferred-'+kind;
+            if(kind!=='never')document.body.append(image);
+            if(kind==='brief')image.remove();
+          }
+        }""")
+        # Let the observer see the two persistent elements, then retire their reads.
+        view.wait_for_timeout(30)
+        view.evaluate("window.retired=document.getElementById('reattached');retired.remove();document.getElementById('removed').remove()")
+        view.wait_for_timeout(30)
+        view.evaluate('document.body.append(retired)')
+        self.notice('session-resumed')
+        view.wait_for_function("KinWorkContext.state()==='active'")
+        view.wait_for_timeout(150)
+        # Check retirement at the browser fetch API as well as at native send. The page
+        # transport's independent abort defence must not hide a restarted retired read.
+        self.assertEqual(view.evaluate('readAttempts'), [])
+        self.assertEqual(view.evaluate('nativeSends'), [])
+        self.assertEqual(self.requests, [])
+        self.assertEqual(view.evaluate('events'), [])
+
 
     def test_router_reload_cannot_adopt_replacement_session(self):
         view = self.open_viewer()

@@ -42,7 +42,8 @@
     };
     gate.follow({ onLifecycle(listener) {
       announce = listener;
-      listener({ state: initialEnd || needsBootstrap ? 'unknown' : 'active', session });
+      // Even a retained/opener binding must observe the ordered end marker before work.
+      listener({ state: 'unknown', session });
     } });
     if (session) remember(initialEnd);
     // Router state changes must not erase this history entry's original session before a reload.
@@ -75,6 +76,17 @@
           [403, 409].includes(failure.status) && failure.code === 'AUTH_SESSION_MISMATCH') end();
     }
     const transport = win.KinSessionTransport.page({ fetch: originalFetch, authFailure });
+    async function mayStartWork(id = session) {
+      if (ended) return false;
+      if (!locks) return true;
+      try {
+        const snapshot = await locks.query();
+        // Notices and lock grants use different browser queues. Main acquires this marker
+        // before declaring an end, so a released preparation cannot be mistaken for cancel.
+        if ([...snapshot.held, ...snapshot.pending].some(lock => lock.name === 'kin-session-ended:' + id)) end();
+        return !ended;
+      } catch (_) { return false; } // An unreadable snapshot is not permission to resume.
+    }
     function preparingPeer(id) {
       try {
         const source = peer && !peer.closed ? peer.KinWorkContext : null;
@@ -96,16 +108,18 @@
         syncPeer();
       }).catch(() => { if (lockWatch === watch) watch.unavailable = true; });
     }
-    function pause(id) {
+    function pause(id, watch = true) {
       if (ended || id === null || id === undefined || closed(gate.state())) return;
       if (preparation) return;
       preparingId = id;
       preparation = gate.prepare({ preparationId: id });
-      watchPreparation(id);
+      if (watch) watchPreparation(id);
       for (const run of [...changes]) { try { run('preparing'); } catch (_) {} }
     }
-    function resume(id) {
+    async function resume(id) {
       if (ended || !preparation || id !== preparingId) return;
+      const paused = preparation;
+      if (!await mayStartWork() || preparation !== paused || id !== preparingId) return;
       lockWatch?.controller.abort(); lockWatch = null;
       gate.cancelPreparation(preparation);
       preparation = null; preparingId = null;
@@ -113,7 +127,7 @@
       for (const run of [...deferred]) { deferred.delete(run); if (!ended) run(); }
     }
     function notice(data) {
-      if (needsBootstrap && !session && data?.session) {
+      if (gate.state() === 'unknown' && data?.session) {
         if (data.type === 'session-ended' && (!expected || data.session === expected)) {
           entryStopped = true; remember(false);
         }
@@ -132,6 +146,7 @@
       try {
         const source = peer && !peer.closed ? peer.KinWorkContext : null;
         if (source && source.session() === session && closed(source.state())) { end(); return; }
+        if (gate.state() === 'unknown') return;
         if (source?.session() === session && source.state() === 'preparing') {
           const id = source.preparation()?.preparation;
           if (id !== peerPreparation) { peerPreparation = id; pause(id); }
@@ -217,8 +232,14 @@
     for (const type of ['pointerdown', 'pointerup', 'pointermove', 'mousedown', 'mouseup', 'click', 'dblclick',
       'keydown', 'keyup', 'beforeinput', 'input', 'change', 'wheel', 'touchstart', 'touchmove', 'drop', 'paste'])
       win.addEventListener(type, input, true);
-    win.addEventListener('pageshow', event => {
+    win.addEventListener('pageshow', async event => {
       if (!event.persisted) return;
+      if (gate.state() === 'active') {
+        // Preserve the already-adopted identity while checking a restored document.
+        const id = win.crypto.randomUUID();
+        pause(id, false);
+        await resume(id);
+      }
       syncPeer();
       if (gate.state() === 'active') {
         // A restored document retains its layout. The bound probe repairs a missed end notice;
@@ -296,8 +317,15 @@
       entryMessage('이 창을 연 세션을 확인할 수 없습니다. 목록에서 뷰어를 다시 열어 주세요.');
       return new Promise(() => {});
     }
+    async function activate() {
+      if (!await mayStartWork()) return;
+      announce({ state: 'active', session });
+      syncPeer();
+      notice(heard.get(session));
+      if (gate.state() === 'active') for (const run of [...deferred]) { deferred.delete(run); if (!ended) run(); }
+    }
     async function bootstrap() {
-      if (!needsBootstrap) return;
+      if (!needsBootstrap) return activate();
       if (!remember(false)) { end(); return; }
       if (entryStopped) return reopenFromList();
       if (!entryAllowed()) { end(); return; }
@@ -307,6 +335,7 @@
           if (ended) return;
           if (entryStopped) return reopenFromList();
           if (!entryAllowed()) { end(); return; }
+          if (expected && !await mayStartWork(expected)) return;
           const controller = new win.AbortController();
           const deadline = nativeTimeout(() => controller.abort(), 10000);
           try {
@@ -323,9 +352,7 @@
             if (entryStopped || expected && me.sessionId !== expected) return reopenFromList();
             session = me.sessionId;
             if (!remember(false)) { end(); return; }
-            announce({ state: 'active', session });
-            notice(heard.get(session));
-            if (gate.state() === 'active') for (const run of [...deferred]) { deferred.delete(run); if (!ended) run(); }
+            await activate();
             return;
           } catch (_) { /* Offline, timeout and a malformed reply leave entry unknown. */ }
           finally { clearTimeout(deadline); }

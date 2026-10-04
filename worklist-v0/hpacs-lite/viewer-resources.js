@@ -17,6 +17,9 @@
       if (!protectedUrl(url)) throw new TypeError('Expected a protected resource in this origin');
       await boundary.wait();
       if (options.signal?.aborted) throw new win.DOMException('Aborted', 'AbortError');
+      // The observer may never see a synchronous attach/remove. Check the owner when
+      // the deferred read is actually due; explicit read() callers own detached use.
+      if (options.element && !options.element.isConnected) throw new win.DOMException('Element removed', 'AbortError');
       const response = await win.fetch(url, { credentials: 'same-origin', cache: 'no-store', signal: options.signal });
       const type = response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase();
       if (!response.ok || options.type && (response.status !== 200 || type !== options.type)) {
@@ -58,11 +61,12 @@
       elements.get(element).set(name, entry);
       if (!protectedLoad) { apply(value); return; }
       nativeRemove.call(element, name);
-      boundary.wait(read(value, { signal: entry.controller.signal }), release).then(url => {
+      boundary.wait(read(value, { signal: entry.controller.signal, element }), release).then(url => {
         if (elements.get(element)?.get(name) !== entry || boundary.ended()) { release(url); return; }
         entry.url = url; apply(url);
         if (element.tagName === 'SOURCE') element.parentElement?.load?.();
       }, () => {
+        if (!element.isConnected && elements.get(element)?.get(name) === entry) { forget(element, name); return; }
         if (elements.get(element)?.get(name) === entry && !boundary.ended()) element.dispatchEvent(new win.Event('error'));
       });
     }
