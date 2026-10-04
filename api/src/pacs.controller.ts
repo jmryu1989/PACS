@@ -37,9 +37,36 @@ const caller = (req: any): Caller => ({
   kind: req.kind ?? 'member',
 });
 
+/**
+ * 초안 쓰기 순서(S7-U5, Astra S7-U5-R-001-F03)가 기억하는 범위.
+ *
+ * 한 문서의 순번을 기억해야 하는 시간은 그 문서가 앞서 보낸 쓰기가 네트워크·앞단 프록시에 남았다가 뒤늦게 닿을 수 있는
+ * 동안이다(프록시 제한 시간이 분 단위) — 넉넉히 한 시간을 둔다. 문서 ID는 요청이 정하는 값이라 한 초안 행이 기억하는 문서
+ * 수와 ID 길이에도 한도를 둔다. 한도가 없으면 한 계정이 이 표를 끝없이 키울 수 있다.
+ */
+const DRAFT_ORDER_KEEP_MS = 60 * 60 * 1000;
+const DRAFT_ORDER_SWEEP_MS = 60 * 1000;
+const DRAFT_ORDER_PAGES = 32;
+const DRAFT_ORDER_PAGE_ID = 64;
+
+type DraftOrder = [page: string, seq: number];
+
+interface DraftLine {
+  /** 이 초안 행의 마지막 쓰기가 끝나면 풀린다. 다음 쓰기는 이것을 기다린 뒤에 들어간다. */
+  tail: Promise<void>;
+  /** 줄에 선 쓰기 수(처리 중 포함). 0이 아니면 줄을 지우지 않는다. */
+  busy: number;
+  /** 문서 ID → 그 문서의 쓰기 중 마지막으로 저장된 순번과 저장 시각. 오래 저장하지 않은 문서가 앞에 온다. */
+  pages: Map<string, { seq: number; at: number }>;
+}
+
 @Controller()
 export class PacsController {
   constructor(private svc: PacsService) {}
+
+  /** 초안 행(검사·작성자)마다의 쓰기 줄. 이 프로세스의 메모리에만 있다 — 아래 `draftWrite`의 한계를 본다. */
+  private readonly draftLines = new Map<string, DraftLine>();
+  private draftLinesSweptAt = 0;
 
   @Public()
   @Get('health')
@@ -278,7 +305,76 @@ export class PacsController {
         throw new ConflictException({ code: 'REPORT_DRAFT_OWNER_CHANGED',
           message: '판독문 초안을 쓰던 계정이 아닙니다. 그 계정으로 다시 로그인한 뒤 저장하세요.' });
     }
-    return this.svc.putReport(uid, body, c);
+    /**
+     * S7-U5 쓰기 순서. `draftOrder`([문서 ID, 순번])는 화면(문서)이 자기 초안 쓰기에 매긴 순서다 — 아래 `draftWrite`가
+     * 그 문서가 이미 저장한 순번 이하의 쓰기를 `putReport`에 넘기기 전에 거절한다. 모양이 틀리면 아무것도 읽기 전에 400이다.
+     * 칸이 없는 요청(이 칸을 모르는 열린 화면, 삽입·구조화·기준 다시 잡기, API 클라이언트)은 예전처럼 저장한다: 같은 줄에서
+     * 차례는 지키지만 순서로 거절하지 않고, 기억된 순번을 바꾸지 않으며, 답에 `draftOrder`가 없다.
+     */
+    const order = body?.draftOrder;
+    if (order !== undefined && (!Array.isArray(order) || order.length !== 2 || typeof order[0] !== 'string' || !order[0]
+        || order[0].length > DRAFT_ORDER_PAGE_ID || !Number.isSafeInteger(order[1]) || order[1] < 1))
+      throw new BadRequestException('draftOrder는 [문서 ID, 1 이상의 순번] 형식이어야 합니다');
+    return this.draftWrite(uid, c, order === undefined ? null : [order[0], order[1]], () => this.svc.putReport(uid, body, c));
+  }
+
+  /**
+   * 한 초안 행(검사·작성자)의 쓰기를 처리기에 닿은 차례대로 하나씩 `putReport`에 넘기고, 순서를 실은 쓰기는 같은 문서가
+   * 이미 저장한 순번 이하이면 넘기지 않는다(Astra S7-U5-R-001-F03).
+   *
+   * 피하는 실패: 브라우저의 연결이 끊겨 답을 받지 못한 앞선 초안 쓰기가 서버에서 늦게 끝나거나 뒤늦게 닿아, 그 뒤에 저장한
+   * 글(로그아웃 준비의 저장, 세션 종료 뒤의 Recover Draft)을 옛 글로 덮는다. `putReport`의 upsert는 요청 순서를 보지 않는다.
+   *  - 처리 중인 앞선 쓰기: 뒤 쓰기는 그것이 끝난 뒤에 들어가므로 어느 쪽이 먼저 끝나든 나중에 보낸 글이 남는다. 순번은
+   *    초안 행에 저장되지 않아 검사와 저장을 한 트랜잭션에 넣을 수 없으므로, 줄이 그 둘을 한 덩어리로 만든다.
+   *  - 뒤늦게 닿은 앞선 쓰기: 같은 문서가 저장한 순번 이하라 409 `REPORT_DRAFT_SUPERSEDED`로 거절한다. 거절은 `putReport`
+   *    전이라 검사·초안 행을 읽거나 쓰거나 감사를 남기지 않는다.
+   * 순번은 **저장된** 쓰기만 기억한다 — 거절되거나 실패한 쓰기는 아무것도 남기지 않는다. 순서를 확인한 저장은 답에 같은
+   * `draftOrder`를 돌려준다: 화면은 그 답을 받았을 때만 앞선 쓰기가 이 글을 덮지 못한다고 본다.
+   *
+   * 한계: 줄과 순번은 이 API 프로세스의 메모리에 있다. 재시작하면 잊고(그때 처리 중이던 쓰기도 함께 끝난다), API를 여러
+   * 프로세스로 띄우면 프로세스끼리는 순서를 모른다 — 그 구성은 순번을 초안 행과 함께 저장하는 migration이 먼저다. 서로
+   * 다른 문서(같은 계정의 다른 탭)의 쓰기 사이에는 예전처럼 순서가 없다.
+   */
+  private async draftWrite<T extends object>(uid: string, c: Caller, order: DraftOrder | null, write: () => Promise<T>) {
+    this.sweepDraftLines(Date.now());
+    const key = JSON.stringify([uid, c.actor]);
+    let line = this.draftLines.get(key);
+    if (!line) this.draftLines.set(key, line = { tail: Promise.resolve(), busy: 0, pages: new Map() });
+    const before = line.tail;
+    let finish!: () => void;
+    line.tail = new Promise<void>(resolve => { finish = resolve; });
+    line.busy++;
+    try {
+      await before;
+      if (!order) return await write();
+      const last = line.pages.get(order[0]);
+      if (last && order[1] <= last.seq)
+        throw new ConflictException({ code: 'REPORT_DRAFT_SUPERSEDED',
+          message: '같은 화면에서 더 나중에 보낸 판독문 초안이 이미 저장되어, 앞서 보낸 이 저장은 반영하지 않았습니다.' });
+      const saved = await write();
+      // 다시 넣어 가장 최근에 저장한 문서가 맨 뒤에 오게 한다. 한도를 넘으면 가장 오래 저장하지 않은 문서부터 잊는다.
+      line.pages.delete(order[0]);
+      line.pages.set(order[0], { seq: order[1], at: Date.now() });
+      if (line.pages.size > DRAFT_ORDER_PAGES) {
+        const oldest = line.pages.keys().next();
+        if (!oldest.done) line.pages.delete(oldest.value);
+      }
+      return { ...saved, draftOrder: [order[0], order[1]] };
+    } finally {
+      line.busy--;
+      finish();
+      if (!line.busy && !line.pages.size) this.draftLines.delete(key);
+    }
+  }
+
+  /** 기억한 지 오래된 순번을 지운다(메모리 한도일 뿐 규칙이 아니다). 쓰기가 올 때 드물게 돌고, 처리 중인 줄은 남긴다. */
+  private sweepDraftLines(now: number) {
+    if (now - this.draftLinesSweptAt < DRAFT_ORDER_SWEEP_MS) return;
+    this.draftLinesSweptAt = now;
+    for (const [key, line] of this.draftLines) {
+      for (const [page, kept] of line.pages) if (now - kept.at > DRAFT_ORDER_KEEP_MS) line.pages.delete(page);
+      if (!line.busy && !line.pages.size) this.draftLines.delete(key);
+    }
   }
 
   /** 초안 버리기 — 확정본으로 돌아간다. 내 초안만 지운다 */

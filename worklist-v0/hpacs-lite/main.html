@@ -5750,12 +5750,25 @@
     const stashInFlight = new Map();
     /**
      * 서버의 답을 받지 못하고 끝난 초안 쓰기가 있었던 검사(S7-U5, Astra S7-U5-R-001-F03). 연결이 끊긴 쓰기(앞단 프록시의 502·
-     * 504 포함)는 서버에서 아직 진행 중일 수 있고, 나중에 끝나면 그 뒤에 저장한 글을 덮는다. 초안 쓰기에는 서버가 확인하는
-     * 순서가 없어 이 화면은 그 쓰기가 끝났는지 알 수 없다 — 세션 종료 뒤의 Recover Draft는 이런 쓰기가 남은 검사에서 저장을
-     * 완료로 처리하지 않고 원문을 지우지 않는다. 보내지 않은 요청(로그아웃 준비가 멈춘 요청의 취소)은 여기에 들지 않는다.
+     * 504 포함)는 서버에서 아직 진행 중일 수 있고, 나중에 끝나면 그 뒤에 저장한 글을 덮는다. 이 화면은 그 쓰기가 끝났는지
+     * 알 수 없다 — 세션 종료 뒤의 Recover Draft는 서버가 복구 쓰기의 순서를 확인해 주지 않는 한(아래 초안 쓰기 순서) 이런
+     * 쓰기가 남은 검사에서 저장을 완료로 처리하지 않고 원문을 지우지 않는다. 보내지 않은 요청(로그아웃 준비가 멈춘 요청의
+     * 취소)은 여기에 들지 않는다.
      */
     const stashUnanswered = new Set();
     const unanswered = e => e?.name !== "AbortError" && (e?.status === undefined || e.status === 502 || e.status === 504);
+    /**
+     * 초안 쓰기 순서(S7-U5, Astra S7-U5-R-001-F03). 이 문서가 보내는 초안 저장(자동 저장·검사 이동·탭 닫기·로그아웃 준비·
+     * Recover Draft)마다 `draftOrder`([문서 ID, 순번])를 싣고, 순번은 보낼 때마다 커진다. 서버는 같은 초안 행의 쓰기를 닿은
+     * 차례대로 하나씩 처리하고 이 문서가 이미 저장한 순번 이하의 쓰기는 저장하지 않는다 — 연결이 끊겨 답을 받지 못한 앞선
+     * 쓰기가 서버에서 늦게 끝나거나 뒤늦게 닿아도 그 뒤에 저장한 글을 덮지 못한다. 순서를 확인한 서버는 답에 같은 값을
+     * 돌려준다. 돌려주지 않는 서버(이 칸을 모르는 API)에서는 순서가 지켜진다고 보지 않는다. 문서 ID는 이 문서를 열 때 한 번
+     * 정하는 무작위 값이고 계정·검사·내용을 담지 않는다.
+     */
+    const draftPage = [...crypto.getRandomValues(new Uint8Array(16))].map(part => part.toString(16).padStart(2, "0")).join("");
+    let draftSeq = 0;
+    const orderConfirmed = (answer, order) =>
+      Array.isArray(answer?.draftOrder) && answer.draftOrder[0] === order[0] && answer.draftOrder[1] === order[1];
     const SETTLE_ROUNDS = 8;
     async function settleStash(uid) {
       for (let round = 0; round < SETTLE_ROUNDS; round++) {
@@ -6685,8 +6698,10 @@
       // 생략은 "그대로 두라"는 뜻이므로 구조화를 모르는 자동 저장이 남의 증언을 지우지 않는다.
       const structureIds = kept ? kept.structureIds : structureState.keepIds(uid);
       const owner = kept ? kept.owner : draftOwner;
+      // 순번은 본문을 만드는 이 자리에서 매긴다 — 보내는 차례가 곧 순서다. 미룬 쓰기(위)는 순번을 쓰지 않는다.
       const body = { ...next, baseVersion, ...(keep ? { citationIds: keep } : {}),
-        ...(structureIds ? { structureIds } : {}), ...(owner ? { expectedOwner: owner } : {}) };
+        ...(structureIds ? { structureIds } : {}), ...(owner ? { expectedOwner: owner } : {}),
+        draftOrder: [draftPage, ++draftSeq] };
       const path = `/studies/${encodeURIComponent(uid)}/report`;
       if (keepalive) {
         // 탭이 닫히는 중이라 응답을 볼 수 없다. 보내는 것까지가 우리 몫이다.
@@ -6714,7 +6729,9 @@
           return true;
         } catch (e) {
           if (unanswered(e)) stashUnanswered.add(uid);
-          if (e.code !== "REPORT_HELD") apiFail(e); return false;
+          // 이 문서가 더 나중에 보낸 저장이 이미 기록됐다는 거절은 알릴 실패가 아니다 — 서버 행은 더 새 글이고 화면은 그 저장의
+          // 답이 정한다. 이 쓰기는 저장된 것이 아니므로 결과는 다른 실패와 같다.
+          if (e.code !== "REPORT_HELD" && e.code !== "REPORT_DRAFT_SUPERSEDED") apiFail(e); return false;
         }
       })();
       let pending = stashInFlight.get(uid);
@@ -7498,11 +7515,11 @@
      * 않고 바로 알리려는 것이고, 확인과 PUT 사이에 세션이 바뀌어도 서버가 거절한다. 검사 접근·판독 권한·점유도 서버가 다시
      * 판정한다. 이 문서는 닫힌 채이고 화면을 다시 열지 않는다 — 저장되면 떠난다.
      *
-     * 같은 검사에 이 문서가 앞서 보낸 초안 쓰기와는 순서를 지킨다(Astra S7-U5-R-001-F03). 서버의 초안 쓰기는 요청 순서를 보지
-     * 않으므로, 앞선 쓰기가 아직 나가 있는 동안 복구 쓰기를 보내면 나중에 끝나는 앞선 쓰기가 복구한 글을 덮는다. 그래서
-     * 준비의 저장처럼 그 쓰기의 결과를 한도 안에서 기다리고, 그래도 모르면 보내지 않는다. 앞선 쓰기 중 서버의 답 없이 끝난 것이
-     * 있으면 그 쓰기는 서버에서 아직 진행 중일 수 있으므로, 복구 쓰기가 받아들여져도 완료로 처리하지 않고 원문을 지우지 않는다
-     * (그 경우를 끝내려면 서버가 확인하는 쓰기 순서가 필요하다). 기다리는 사이 사람이 버리기를 고르면 아무것도 보내지 않는다.
+     * 같은 검사에 이 문서가 앞서 보낸 초안 쓰기와는 순서를 지킨다(Astra S7-U5-R-001-F03). 앞선 쓰기가 아직 나가 있으면 준비의
+     * 저장처럼 그 결과를 한도 안에서 기다리고, 그래도 모르면 보내지 않는다. 복구 쓰기는 이 문서의 다음 순번을 싣는다 — 서버가
+     * 그 순서를 확인해 답하면(위 초안 쓰기 순서) 답 없이 끝났던 앞선 쓰기는 서버에서 늦게 끝나거나 뒤늦게 닿아도 복구한 글을
+     * 덮지 못하므로 완료로 처리한다. 순서를 확인해 주지 않는 서버에서는, 답 없이 끝난 앞선 쓰기가 있었던 검사의 복구를 완료로
+     * 처리하지 않고 원문을 지우지 않는다. 기다리는 사이 사람이 버리기를 고르면 아무것도 보내지 않는다.
      */
     async function recoverEndedDraft(prep) {
       if (logoutPrep !== prep || prep.state !== "ended" || prep.recovering) return;
@@ -7534,8 +7551,10 @@
           logoutStatus(prep, otherAccount);
           return;
         }
+        const order = [draftPage, ++draftSeq];
         const body = { ...prep.fields, baseVersion: prep.baseVersion, ...(prep.citationIds ? { citationIds: prep.citationIds } : {}),
-          ...(prep.structureIds ? { structureIds: prep.structureIds } : {}), ...(prep.owner ? { expectedOwner: prep.owner } : {}) };
+          ...(prep.structureIds ? { structureIds: prep.structureIds } : {}), ...(prep.owner ? { expectedOwner: prep.owner } : {}),
+          draftOrder: order };
         const put = await fetch(`${API}/studies/${encodeURIComponent(prep.uid)}/report`, {
           method: "PUT", headers: { "Content-Type": "application/json", "X-KIN-CSRF": "1" }, body: JSON.stringify(body),
         });
@@ -7549,7 +7568,10 @@
             : "판독문 초안을 저장하지 못했습니다. 입력한 내용은 그대로 있습니다.");
           return;
         }
-        if (stashUnanswered.has(prep.uid)) {
+        // 서버가 이 쓰기의 순서를 확인했는가는 그 답으로만 안다. 읽지 못한 답은 확인이 아니다.
+        const answer = await put.json().catch(() => null);
+        if (!ended()) return;
+        if (!orderConfirmed(answer, order) && stashUnanswered.has(prep.uid)) {
           logoutStatus(prep, "판독문 초안을 서버에 보냈지만, 앞서 연결이 끊긴 초안 저장이 서버에서 늦게 끝나면 이 내용을 덮을 수 있어 "
             + "완료로 처리하지 않았습니다. 입력한 내용은 이 창에 그대로 있습니다.");
           return;

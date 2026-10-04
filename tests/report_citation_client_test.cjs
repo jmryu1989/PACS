@@ -72,6 +72,66 @@ function extractFunction(source, name) {
   throw new Error(`unbalanced ${name}`);
 }
 
+/**
+ * The shipped stashReport(), executed (AGENTS 1-B, D73: the assertions that use this look at what leaves the page and
+ * what the page keeps, not at how the function is spelled). What it reads around itself are stand-ins: one selected
+ * study a radiologist may write, the editor's three fields, the page's account and write order. The citation state is the
+ * shipped module's own object. Every request is recorded where it would leave - api() for an ordinary save, fetch() for
+ * the closing tab's keepalive - with its body parsed in this realm.
+ */
+const STASH_UID = '1.2.3';
+const STASH_TYPED = { findings: 'SYN typed findings', conclusion: 'SYN typed conclusion', recommendation: '' };
+async function runStash({ options = '{}', insertInFlight = false, citations = C.createState(), kept = null } = {}) {
+  const sent = [], converge = new Set();
+  const leave = (via, method, url, body, keepalive) => sent.push({ via, method, url, keepalive, body: JSON.parse(body) });
+  const context = vm.createContext({
+    citations, kept, reportConverge: converge, stashInFlight: new Map(), stashUnanswered: new Set(),
+    structureState: { keepIds: () => undefined, emptied() {} },
+    $: selector => ({ value: STASH_TYPED[selector.slice(1)] }),
+    api: async (method, path, body) => { leave('api', method, path, JSON.stringify(body), false); return {}; },
+    fetch: async (url, init) => { leave('fetch', init.method, url, init.body, init.keepalive === true); return { ok: true }; },
+  });
+  vm.runInContext([
+    `var selectedUid = ${JSON.stringify(STASH_UID)}, insertInFlight = ${insertInFlight ? 'true' : 'false'};`,
+    'var serverMode = true, offline = false, API = "/api", appState = {}; appState[selectedUid] = { version: 0 };',
+    'var RFIELDS = ["findings", "conclusion", "recommendation"], draftOwner = ["SYN-INST", "syn-sub", "syn-reader"];',
+    'var draftPage = "syn-page", draftSeq = 0, KinAuth = { has: role => role === "radiologist" };',
+    'function heldByOther() { return false; } function cur() { return null; } function reportNeedsWrite() { return true; }',
+    'function reportBaseVersion(uid, fallback) { return fallback; } function renderDraftBar() {} function saveApp() {}',
+    'function apiFail() {} function unanswered() { return false; }',
+    extractFunction(html, 'stashReport'),
+    `var outcome = stashReport(${options});`,
+  ].join('\n'), context, { filename: 'stashReport.js' });
+  const outcome = await context.outcome;
+  const draft = JSON.parse(vm.runInContext('JSON.stringify(appState[selectedUid].draft ?? null)', context));
+  return { sent, outcome, draft, converge: [...converge] };
+}
+
+/**
+ * The shipped Log out click handler, executed: the Log out region is evaluated with a `$` that keeps the listener it
+ * registers, and the listener is then called once. What a press may start is recorded: a question, a request, an end of
+ * the session, the preparation's own state.
+ */
+async function pressLogout({ insertInFlight }) {
+  const region = html.slice(html.indexOf('$("#logout").addEventListener("click"'), html.indexOf('// 다른 사람이 잡거나 놓은 걸'));
+  const seen = { asked: [], toasts: [], requests: [], ended: 0 };
+  let press = null;
+  const context = vm.createContext({
+    $: selector => ({ addEventListener: (type, listener) => { if (selector === '#logout' && type === 'click') press = listener; } }),
+    // The question is dismissed, so a press that gets as far as asking ends there.
+    confirm: text => { seen.asked.push(text); return false; },
+    toast: (text, kind) => { seen.toasts.push([text, kind]); },
+    api: async (method, path) => { seen.requests.push([method, path]); return {}; },
+    fetch: async (url, init) => { seen.requests.push([init?.method ?? 'GET', url]); return { ok: true, status: 200, json: async () => ({}) }; },
+    KinAuth: { logout: async () => { seen.ended++; } },
+  });
+  vm.runInContext(`var loggingOut = false, logoutPrep = null, commitInFlight = false, insertInFlight = ${insertInFlight ? 'true' : 'false'};\n`
+    + region, context, { filename: 'logout-region.js' });
+  assert.equal(typeof press, 'function', 'the Log out control has no click handler in the Log out region');
+  await press();
+  return { ...seen, loggingOut: vm.runInContext('loggingOut', context), preparing: vm.runInContext('logoutPrep !== null', context) };
+}
+
 const operands = vector => {
   const shift = value => value.normalize('NFD');
   return [vector.nfd === 'body' ? shift(vector.body) : vector.body,
@@ -506,7 +566,7 @@ test('TEST-S3-U2b-BYTES: neither the module nor this file carries a control byte
   assert.equal(C.entryKey({ cid: 'r', state: C.SOURCE_UNAVAILABLE }), null, 'a reduced entry has no key');
 });
 
-test('TEST-S3-U2b-WIRING: every non-keepalive draft write stands aside while an insertion is out', () => {
+test('TEST-S3-U2b-WIRING: every non-keepalive draft write stands aside while an insertion is out', async () => {
   const stash = extractFunction(html, 'stashReport');
   // Pin B1 skips the WRITE. Skipping the local capture as well would lose unsaved typing the
   // moment a study move redraws the editor, so the capture happens first and the deferral is
@@ -522,9 +582,30 @@ test('TEST-S3-U2b-WIRING: every non-keepalive draft write stands aside while an 
   // Not a timer-only guard: the product has exactly one non-keepalive writer and it is this one.
   const callers = [...html.matchAll(/stashReport\((\{[^}]*\})?\)/g)].map(m => m[0]);
   assert.ok(callers.length >= 4, 'the draft write is reached from several places');
-  for (const call of callers)
-    assert.ok(call === 'stashReport()' || call.includes('keepalive: true'),
-      `unexpected stash call shape ${call}`);
+  // Executed, so the rule does not depend on how a caller spells its call (S7-U5: Log out's preparation passes the text
+  // it took as a snapshot). Whatever a non-keepalive call passes, nothing leaves while an insertion is out, the text is
+  // still captured and the converge flag raised; with no insertion out the same call sends exactly one write.
+  const snapshot = { uid: STASH_UID, fields: { findings: 'SYN snapshot findings', conclusion: '', recommendation: '' },
+    baseVersion: 0, citationIds: undefined, structureIds: undefined, owner: ['SYN-INST', 'syn-sub', 'syn-reader'] };
+  for (const [what, options, kept, text] of [
+    ['the plain call (autosave, study move)', '{}', null, STASH_TYPED.findings],
+    ['a call that names keepalive: false', '{ keepalive: false }', null, STASH_TYPED.findings],
+    ['the call with a snapshot (Log out preparation)', '{ kept }', snapshot, snapshot.fields.findings],
+  ]) {
+    const aside = await runStash({ options, kept, insertInFlight: true });
+    assert.deepEqual(aside.sent, [], `${what}: nothing may leave while an insertion is out`);
+    assert.notEqual(aside.outcome, 'saved', `${what}: a deferred write is not a stored one`);
+    assert.equal(aside.draft?.findings, text, `${what}: the text is captured even though the write is deferred`);
+    assert.deepEqual(aside.converge, [STASH_UID], `${what}: the deferral is recorded as the converge flag`);
+    const free = await runStash({ options, kept });
+    assert.deepEqual(free.sent.map(request => [request.via, request.method, request.body.findings]),
+      [['api', 'PUT', text]], `${what}: with no insertion out it sends its one write`);
+    assert.equal(free.outcome, 'saved', what);
+  }
+  // The closing tab is the exception: its keepalive write is the last chance and leaves at once.
+  const closing = await runStash({ options: '{ keepalive: true }', insertInFlight: true });
+  assert.deepEqual(closing.sent.map(request => [request.via, request.method, request.keepalive, request.body.findings]),
+    [['fetch', 'PUT', true, STASH_TYPED.findings]], 'the closing tab still sends what it has');
   // B3: the dirty comparison is clean right after a stash, so the flag has to be separate.
   const needs = extractFunction(html, 'reportNeedsWrite');
   assert.match(needs, /reportDirty\(\) \|\| \(!!selectedUid && reportConverge\.has\(selectedUid\)\)/);
@@ -539,9 +620,35 @@ test('TEST-S3-U2b-WIRING: every non-keepalive draft write stands aside while an 
   assert.match(stash, /await api\("PUT", path, body\);\s*\n\s*\/\/[^\n]*\n\s*reportConverge\.delete\(uid\);/);
 });
 
-test('TEST-S3-U2b-WIRING: the keep list is carried only while the state is confirmed', () => {
+test('TEST-S3-U2b-WIRING: the keep list is carried only while the state is confirmed', async () => {
   const stash = extractFunction(html, 'stashReport');
-  assert.match(stash, /const keep = citations\.keepIds\(uid\);/);
+  // Executed against the shipped citation state: a study whose draft citations were never read sends no `citationIds`
+  // key at all (an empty list would tell the server to delete every attestation of the draft); once the dedicated read
+  // confirmed them the save carries exactly those ids - an empty confirmed draft says so with [] - and a state turned
+  // back to unknown omits the key again. The closing tab's keepalive write carries the same list.
+  const entry = cid => ({ v: C.SCHEMA, cid, field: 'findings', insertedText: 'SYN cited ' + cid, sameTextCount: 1 });
+  const unread = await runStash();
+  assert.equal(unread.sent.length, 1);
+  assert.equal('citationIds' in unread.sent[0].body, false, 'an unconfirmed study omits the key');
+  const state = C.createState();
+  assert.ok(state.confirm(STASH_UID, { version: 0, head: [], draft: [entry('c-1'), entry('c-2')] }));
+  assert.deepEqual((await runStash({ citations: state })).sent[0].body.citationIds, ['c-1', 'c-2'],
+    'a confirmed study carries the ids of its draft citations');
+  assert.deepEqual((await runStash({ citations: state, options: '{ keepalive: true }' })).sent[0].body.citationIds,
+    ['c-1', 'c-2'], 'the keepalive write carries the same keep list');
+  assert.ok(state.unconfirm(STASH_UID));
+  assert.equal('citationIds' in (await runStash({ citations: state })).sent[0].body, false,
+    'a state turned back to unknown omits the key again');
+  const none = C.createState();
+  assert.ok(none.confirm(STASH_UID, { version: 0, head: [], draft: [] }));
+  assert.deepEqual((await runStash({ citations: none })).sent[0].body.citationIds, [],
+    'a confirmed draft with no citation says so explicitly');
+  // The preparation's snapshot write carries the list it took, whatever the screen's state has become since.
+  const taken = { uid: STASH_UID, fields: { ...STASH_TYPED }, baseVersion: 0, citationIds: ['c-1'], structureIds: undefined,
+    owner: ['SYN-INST', 'syn-sub', 'syn-reader'] };
+  assert.deepEqual((await runStash({ citations: none, kept: taken, options: '{ kept }' })).sent[0].body.citationIds, ['c-1']);
+  assert.equal('citationIds' in (await runStash({ citations: state, kept: { ...taken, citationIds: undefined },
+    options: '{ kept }' })).sent[0].body, false, 'a snapshot taken while the state was unknown omits the key');
   assert.match(stash, /\.\.\.\(keep \? \{ citationIds: keep \} : \{\}\)/, 'an unconfirmed study omits the key');
   assert.ok(stash.indexOf('const body = { ...next, baseVersion') < stash.indexOf('if (keepalive)'),
     'both the normal and the keepalive write use the one body');
@@ -655,7 +762,7 @@ test('TEST-S3-U2b-WIRING: the shipped fromApi line really keeps a draft that is 
   assert.equal(raw.B.version, 9, 'and adopted a version the screen never drew');
 });
 
-test('TEST-S3-U2b-WIRING: logout stands aside for an insertion instead of tearing the session down', () => {
+test('TEST-S3-U2b-WIRING: logout stands aside for an insertion instead of tearing the session down', async () => {
   // Its draft write is non-keepalive, so B1 defers it; KinAuth.logout() then destroys the session
   // before navigation, so the closing-tab keepalive would leave after the session is gone.
   const logout = html.slice(html.indexOf('$("#logout").addEventListener("click"'),
@@ -664,7 +771,15 @@ test('TEST-S3-U2b-WIRING: logout stands aside for an insertion instead of tearin
   assert.ok(guard > 0, 'the logout must check for an insertion in flight');
   assert.ok(guard < logout.indexOf('confirm("로그아웃하시겠습니까?")'), 'before it asks anything');
   assert.ok(guard < logout.indexOf('loggingOut = true;'));
-  assert.ok(guard < logout.indexOf('await stashReport();'));
+  // Executed (the preparation reaches the draft write through its own steps since S7-U5, so its place in the text says
+  // nothing): with an insertion out, a press on Log out asks nothing, starts no preparation, sends no request - the draft
+  // write among them - and leaves the session alone; it says why. Without one, the same press goes on to its question.
+  const held = await pressLogout({ insertInFlight: true });
+  assert.deepEqual([held.asked, held.requests, held.ended, held.loggingOut, held.preparing], [[], [], 0, false, false],
+    'a press while an insertion is out starts nothing');
+  assert.deepEqual(held.toasts.map(([, kind]) => kind), ['err'], 'and it says why');
+  const free = await pressLogout({ insertInFlight: false });
+  assert.deepEqual([free.asked.length, free.toasts], [1, []], 'without an insertion the press goes on to ask');
   assert.ok(guard < logout.indexOf('await KinAuth.logout();'));
   assert.match(logout.slice(guard, logout.indexOf('if (!confirm')), /toast\(/, 'and it says why');
 });

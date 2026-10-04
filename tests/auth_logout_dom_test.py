@@ -58,13 +58,22 @@ logout POST, the draft write, /api/me and the work reads. No stack, network or c
   DP-13 (Astra S7-U5-R-001-F02): answers whose headers came before the preparation and whose bodies come after it (the
          report's citation and structure reads succeeding, a panel's body failing) change neither the screen nor what the
          preparation saves (the text, base version and keep lists it took); after Back to Editing they still apply
-         nothing and the reads are made again for the current generation. An earlier draft write's own answer (the one
-         answer that still reaches the page then) may empty the screen's keep list; the preparation's write still carries
-         the list it took.
+         nothing - the panel whose late body failed still shows what it showed before the preparation - and the reads are
+         made again for the current generation. An earlier draft write's own answer (the one answer that still reaches
+         the page then) may empty the screen's keep list; the preparation's write still carries the list it took.
   DP-14 (Astra S7-U5-R-001-F03): Recover Draft after a session end keeps its write behind an earlier draft write of the
          same study: while that write is out nothing is sent and nothing is declared (an answer within the wait lets it
-         go on; past the wait it says so and keeps the text); an earlier write cut off without the server's answer leaves
-         the recovery stored but not declared done, the text kept. The report is never confirmed.
+         go on; past the wait it says so and keeps the text). On an API that does not confirm the write order, an earlier
+         write cut off without the server's answer leaves the recovery stored but not declared done, the text kept. The
+         report is never confirmed.
+  DP-15 (Astra S7-U5-R-001-F03, the write order): every draft save of a page (autosave, the preparation's save, Recover
+         Draft) carries `draftOrder` = [the page's id, a sequence that grows with each save]; another page has another
+         id. The synthetic server keeps that order as the API's PUT handler does (a write at or below the sequence its
+         page already stored is refused 409 REPORT_DRAFT_SUPERSEDED and stores nothing; a stored write is answered with
+         its order). A write whose connection was cut and which the server finishes late - before or after the later
+         save - never replaces the recovery, the preparation's save or the next autosave: the stored draft is the later
+         text in both completion orders, and with the order confirmed Recover Draft declares the recovery and leaves.
+         A superseded refusal is not shown as a failed save.
 
 Mutants (MU-27..MU-34 and the F02 counterexamples) are one-off copies run outside this file; nothing here edits a
 product file.
@@ -277,6 +286,8 @@ class Site:
         self.put_bodies = {}            # held draft write route -> its body, stored when finish_put() answers it 200
         self.cut_puts = []              # "cut": the browser's connection dropped, the server still has the write to finish
         self.drafts = {}                # the draft rows the synthetic server stored, by author (the API's (uid, author) key)
+        self.ordered = True             # the API keeps the draft write order (False: an API that does not know the field)
+        self.orders = {}                # (author, page id) -> the highest sequence of that page the server stored
         self.held_gets = {}             # path -> held routes, for reads a case answers late
         self.gets = {}                  # path -> (status, body): reads a case answers (otherwise 404 SYN_NOT_STUBBED)
         self.row_draft = None           # the reader's stored draft the list row carries (the API's state.draft)
@@ -422,7 +433,7 @@ class Site:
                     self.cut_puts.append((body, account["actor"]))
                     return route.abort("connectionreset")
                 if reply[0] == 200:
-                    self.drafts[account["actor"]] = {k: body.get(k) for k in FIELDS}
+                    reply = self.store(body, account["actor"])
                 return route.fulfill(status=reply[0], json=reply[1])
         if method == "GET" and path in self.gets:
             status, body = self.gets[path]
@@ -432,20 +443,33 @@ class Site:
         self.violations.append(f"undeclared write: {method} {path}")
         return route.fulfill(status=405, json={"code": "SYN_NO_WRITE"})
 
+    def store(self, body, author):
+        """The API's draft write when its turn comes (the PUT studies/:uid/report handler in pacs.controller.ts): a write
+        that carries an order at or below the sequence its page already stored is refused and stores nothing; a stored
+        write is the server's draft row and, when it carried an order, is answered with it. An API that does not know the
+        field (`ordered` False) stores every write and confirms no order."""
+        order = body.get("draftOrder") if self.ordered else None
+        if order is not None:
+            if order[1] <= self.orders.get((author, order[0]), 0):
+                return 409, {"code": "REPORT_DRAFT_SUPERSEDED", "message": "SYN superseded"}
+            self.orders[(author, order[0])] = order[1]
+        self.drafts[author] = {k: body.get(k) for k in FIELDS}
+        return 200, ({"ok": True} if order is None else {"ok": True, "draftOrder": order})
+
     def finish_put(self, index=0, status=200):
-        """Answer a held draft write; a 200 stores it as the server's draft row, in the order the writes finish."""
+        """Answer a held draft write; a 200 is the server reaching that write now (stored or refused for its order), so
+        the draft row follows the order the writes finish in."""
         route = self.held_puts.pop(index)
         body, author = self.put_bodies.pop(id(route))
-        if status == 200:
-            self.drafts[author] = {k: body.get(k) for k in FIELDS}
-            route.fulfill(json={"ok": True})
-        else:
-            route.fulfill(status=status, json={"statusCode": status, "message": "SYN"})
+        status, answer = self.store(body, author) if status == 200 else (status, {"statusCode": status, "message": "SYN"})
+        route.fulfill(status=status, json=answer)
+        return status
 
     def finish_cut(self):
-        """The server finishes a write whose connection the browser lost (its answer reaches nobody)."""
+        """The server reaches a write whose connection the browser lost (its answer reaches nobody); the status it would
+        have answered is returned."""
         body, author = self.cut_puts.pop(0)
-        self.drafts[author] = {k: body.get(k) for k in FIELDS}
+        return self.store(body, author)[0]
 
     @staticmethod
     def list_body(draft=None):
@@ -1452,7 +1476,7 @@ class LogoutDOMTest(unittest.TestCase):
         self.assertEqual((CONFIRMED, False), self.landing())
 
     def test_dp13_after_back_to_editing_the_late_bodies_still_apply_nothing(self):
-        self.prepare_with_bodies_out()
+        seen = self.prepare_with_bodies_out()
         self.site.put_answers = [(500, {"statusCode": 500, "message": "SYN"})]
         self.site.finish_put()
         expect(self.panel_title()).to_have_text("Draft Not Saved")
@@ -1467,10 +1491,17 @@ class LogoutDOMTest(unittest.TestCase):
         self.wait_until(lambda: (self.site.count("GET", self.CITATIONS), self.site.count("GET", self.STRUCTURE))
                         == (reads[0] + 1, reads[1] + 1), "the reads made again after Back to Editing")
         self.page.wait_for_timeout(200)
-        # Now the bodies from before the preparation come: success and failure alike apply nothing.
+        # Now the bodies from before the preparation come: success and failure alike apply nothing. The panel whose body
+        # failed shows exactly what it showed before the preparation (its read was still out then): a failure of an answer
+        # from before the preparation is not this generation's to paint - no failure line, no Retry.
+        panel = self.page.locator("#clinical-context")
+        self.assertEqual(seen[1], panel.inner_text(), "the panel changed before the late bodies came")
         self.settle_bodies({self.CITATIONS: "release", self.STRUCTURE: "release", self.CONTEXT: "fail"})
         self.page.wait_for_timeout(300)
-        self.assertNotIn("SYN body stream failed", self.page.locator("#clinical-context").inner_text())
+        self.assertEqual(seen[1], panel.inner_text(), "a late body failure was painted after Back to Editing")
+        self.assertEqual(0, panel.get_by_role("button", name="Retry", exact=True).count(),
+                         "the late body failure offered a retry after Back to Editing")
+        self.assertNotIn("SYN body stream failed", panel.inner_text())
         self.assertNotIn("LATE", self.screen()["text"])
         # The next save carries the keep lists of the current reads (empty), not those of the late bodies.
         self.page.fill("#findings", "SYN-FINDINGS after Back to Editing")
@@ -1520,7 +1551,7 @@ class LogoutDOMTest(unittest.TestCase):
         self.fresh_context()
         self.site.account = RAD
         self.site.puts, self.site.held_puts, self.site.logouts, self.site.held_logouts = [], [], [], []
-        self.site.drafts, self.site.cut_puts, self.site.put_bodies = {}, [], {}
+        self.site.drafts, self.site.cut_puts, self.site.put_bodies, self.site.orders = {}, [], {}, {}
         self.page.clock.install()
         self.open_main()
         self.select_and_type()
@@ -1572,7 +1603,9 @@ class LogoutDOMTest(unittest.TestCase):
                 self.assertEqual(more, self.site.drafts[RAD["actor"]], "the earlier write stored the recovery over")
                 self.assertEqual(0, self.site.count("POST", f"/api/studies/{UID}/report/commit"))
 
-    def test_dp14_an_earlier_write_cut_off_keeps_the_recovery_undeclared(self):
+    def test_dp14_an_earlier_write_cut_off_keeps_the_recovery_undeclared_when_the_api_confirms_no_order(self):
+        # An API that does not know the write order: it stores every write and its answer confirms no order.
+        self.site.ordered = False
         more = self.end_while_an_earlier_write_is_out("cut")
         self.panel_button("Recover Draft").click()
         self.wait_until(lambda: self.site.puts and {k: self.site.puts[-1][k] for k in FIELDS} == more, "the recovery write")
@@ -1590,6 +1623,110 @@ class LogoutDOMTest(unittest.TestCase):
         self.assertEqual(more, {k: self.site.puts[-1][k] for k in FIELDS})
         self.assertEqual(0, self.site.count("POST", f"/api/studies/{UID}/report/commit"))
         self.site.finish_cut()
+
+    # ── DP-15: the draft write order (Astra S7-U5-R-001-F03) ──
+    def orders(self):
+        """The order each draft write of the case carried, as [page id, sequence]."""
+        return [put.get("draftOrder") for put in self.site.puts]
+
+    def assert_one_page_in_sequence(self, orders, what):
+        self.assertTrue(all(isinstance(o, list) and len(o) == 2 and isinstance(o[0], str) and o[0] for o in orders),
+                        f"{what}: every draft write carries [page id, sequence]: {orders}")
+        self.assertEqual(1, len({o[0] for o in orders}), f"{what}: one page, one id: {orders}")
+        sequences = [o[1] for o in orders]
+        self.assertTrue(all(isinstance(s, int) and s >= 1 for s in sequences)
+                        and all(a < b for a, b in zip(sequences, sequences[1:])),
+                        f"{what}: the sequence grows with every write the page sends: {sequences}")
+
+    def test_dp15_a_cut_off_write_finishing_late_never_replaces_the_recovery(self):
+        for order in ("the cut-off write finishes after the recovery", "the cut-off write finishes before the recovery"):
+            with self.subTest(order=order):
+                more = self.end_while_an_earlier_write_is_out("cut")
+                typed = dict(FIELDS)
+                if order == "the cut-off write finishes before the recovery":
+                    self.assertEqual(200, self.site.finish_cut())
+                    self.assertEqual(typed, self.site.drafts[RAD["actor"]], "the server finished the earlier write first")
+                self.panel_button("Recover Draft").click()
+                # The server confirmed the recovery's order, so the earlier write can no longer replace it: the recovery
+                # is declared and the page leaves.
+                self.page.wait_for_url(INDEX_URL)
+                self.assertEqual(more, {k: self.site.puts[-1][k] for k in FIELDS})
+                self.assertEqual(more, self.site.drafts[RAD["actor"]])
+                if order == "the cut-off write finishes after the recovery":
+                    # The server reaches the cut-off write only now: it is refused and the stored draft stays the recovery.
+                    self.assertEqual(409, self.site.finish_cut())
+                    self.assertEqual(more, self.site.drafts[RAD["actor"]], "the cut-off write replaced the recovery")
+                # The cut-off autosave, the preparation's own write (it met the 401) and the recovery, in the order sent.
+                self.assertEqual(3, len(self.site.puts))
+                self.assert_one_page_in_sequence(self.orders(), order)
+                self.assertEqual(0, self.site.count("POST", f"/api/studies/{UID}/report/commit"))
+
+    def test_dp15_a_cut_off_autosave_never_replaces_the_preparation_save(self):
+        self.page.clock.install()
+        self.open_main()
+        self.select_and_type()
+        self.site.put_answers = ["cut"]
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.cut_puts, "the autosave whose connection is cut")
+        more = {k: v + " SYN-MORE" for k, v in FIELDS.items()}
+        for name, value in more.items():
+            self.page.fill("#" + name, value)
+        # Log out: the preparation's save is stored and the end follows.
+        self.log_out_main()
+        self.assertEqual((CONFIRMED, False), self.landing())
+        self.assertEqual((2, more), (len(self.site.puts), self.site.drafts[RAD["actor"]]))
+        # The server reaches the cut-off autosave after the page has gone: refused, the draft stays what Log out saved.
+        self.assertEqual(409, self.site.finish_cut())
+        self.assertEqual(more, self.site.drafts[RAD["actor"]], "the cut-off autosave replaced the draft Log out saved")
+        self.assert_one_page_in_sequence(self.orders(), "the autosave and the preparation's save")
+
+    def test_dp15_a_cut_off_autosave_never_replaces_the_next_autosave_and_pages_have_their_own_ids(self):
+        self.page.clock.install()
+        self.open_main()
+        self.select_and_type()
+        self.site.put_answers = ["cut"]
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.cut_puts, "the autosave whose connection is cut")
+        self.page.fill("#findings", "SYN-FINDINGS typed after the cut")
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: len(self.site.puts) == 2, "the next autosave")
+        self.wait_until(lambda: self.site.drafts.get(RAD["actor"], {}).get("findings") == "SYN-FINDINGS typed after the cut",
+                        "the next autosave stored")
+        self.assertEqual(409, self.site.finish_cut())
+        self.assertEqual("SYN-FINDINGS typed after the cut", self.site.drafts[RAD["actor"]]["findings"],
+                         "the cut-off autosave replaced the next one")
+        self.assert_one_page_in_sequence(self.orders(), "two autosaves of one page")
+        self.assertEqual(([], None), (self.site.logouts, self.screen()["end"]))
+        # Another page of the same reader (another tab) numbers its own writes under its own id.
+        second = self.open_main(self.watch(self.context.new_page()))
+        self.select_and_type(second)
+        second.evaluate("() => { stashReport(); }")
+        self.wait_until(lambda: len(self.site.puts) == 3, "the other page's draft write", page=second)
+        first_page, other_page = self.orders()[0], self.orders()[2]
+        self.assertNotEqual(first_page[0], other_page[0], "two pages share one id: they would refuse each other's writes")
+        self.assertEqual(FIELDS, self.site.drafts[RAD["actor"]], "the other page's first write was refused for the first page's order")
+
+    def test_dp15_a_superseded_refusal_is_not_shown_as_a_failed_save(self):
+        self.open_main()
+        self.select_and_type()
+        # Two draft writes of the page are out at once; the server reaches the later one first.
+        self.site.put_answers = ["hold", "hold"]
+        self.page.evaluate("() => { stashReport(); }")
+        self.wait_until(lambda: len(self.site.held_puts) == 1, "the earlier draft write")
+        self.page.fill("#findings", "SYN-FINDINGS the later write")
+        self.page.evaluate("() => { stashReport(); }")
+        self.wait_until(lambda: len(self.site.held_puts) == 2, "the later draft write")
+        self.assertEqual(200, self.site.finish_put(index=1))
+        self.assertEqual(409, self.site.finish_put(index=0))
+        self.page.wait_for_timeout(300)
+        self.assertEqual("SYN-FINDINGS the later write", self.site.drafts[RAD["actor"]]["findings"])
+        toast = self.page.locator("#toast")
+        self.assertFalse("err" in (toast.get_attribute("class") or "").split() and "show" in (toast.get_attribute("class") or "").split(),
+                         "the refusal of the earlier write was shown as an error: " + toast.inner_text())
+        self.assertNotIn("서버 저장 실패", toast.inner_text())
+        # The page goes on as before: the editor keeps the text and nothing ended.
+        self.assertEqual("SYN-FINDINGS the later write", self.page.locator("#findings").input_value())
+        self.assertEqual(([], None, RAD["sub"]), (self.site.logouts, self.screen()["end"], self.screen()["identity"]["sub"]))
 
 
 def tearDownModule():

@@ -143,12 +143,60 @@ test('TEST-S3-U3-PAYLOAD: the approved report shown to the human comes from the 
   assert.equal(head({ body: { draftBaseVersion: '2', head: { version: 1 } } }).draftBaseVersion, null);
 });
 
-test('TEST-S3-U3-WIRING: the shipped callers use the rendered base and the preserved error body', () => {
+/**
+ * The shipped stashReport() over the shipped base-version block, executed (AGENTS 1-B, D73: the assertion below looks at
+ * the base version the save carries and keeps, not at how the function reads it). The study was rendered at one version
+ * (the block records it) and `state` is what the page holds for it afterwards (a poll may have moved its version). What
+ * the function reads around itself are stand-ins; `sent` is the body of every draft write it sends.
+ */
+async function stashAfterRender({ rendered, state, options = '{}', kept = null }) {
+  const UID = '1.2.3', sent = [];
+  const context = vm.createContext({
+    kept, reportConverge: new Set(), stashInFlight: new Map(), stashUnanswered: new Set(),
+    citations: { keepIds: () => undefined, emptied() {} }, structureState: { keepIds: () => undefined, emptied() {} },
+    $: selector => ({ value: selector === '#findings' ? 'SYN typed findings' : '' }),
+    api: async (method, path, body) => { sent.push(JSON.parse(JSON.stringify(body))); return {}; },
+    fetch: async () => { throw new Error('this harness sends no keepalive write'); },
+  });
+  vm.runInContext(html.slice(blockStart, blockEnd), context, { filename: 'base-version-block.js' });
+  vm.runInContext([
+    `markSelectionChanged(${JSON.stringify(UID)});`,
+    rendered === undefined ? '' : `recordReportOrigin(${JSON.stringify(UID)}, ${JSON.stringify(rendered)});`,
+    `var appState = {}; appState[selectedUid] = ${JSON.stringify(state)};`,
+    'var insertInFlight = false, serverMode = true, offline = false, API = "/api";',
+    'var RFIELDS = ["findings", "conclusion", "recommendation"], draftOwner = ["SYN-INST", "syn-sub", "syn-reader"];',
+    'var draftPage = "syn-page", draftSeq = 0, KinAuth = { has: role => role === "radiologist" };',
+    'function heldByOther() { return false; } function cur() { return null; } function reportNeedsWrite() { return true; }',
+    'function renderDraftBar() {} function saveApp() {} function apiFail() {} function unanswered() { return false; }',
+    // The scanner above returns the function without its `async` keyword.
+    'async ' + extractFunction(html, 'stashReport'),
+    `var outcome = stashReport(${options});`,
+  ].join('\n'), context, { filename: 'stashReport.js' });
+  const outcome = await context.outcome;
+  const draft = JSON.parse(vm.runInContext('JSON.stringify(appState[selectedUid].draft ?? null)', context));
+  return { sent, outcome, draft };
+}
+
+test('TEST-S3-U3-WIRING: the shipped callers use the rendered base and the preserved error body', async () => {
   const api = extractFunction(html, 'api');
   assert.match(api, /body: j \}\);/, 'api() must keep the error body for the approved-report pane');
 
-  const stash = extractFunction(html, 'stashReport');
-  assert.match(stash, /const baseVersion = reportBaseVersion\(uid,/, 'the first stash must carry the rendered base');
+  // Executed: the screen rendered v2; a poll has since put v5 into the page's state. The first stash carries the base the
+  // text was written on (2) and keeps it in the local draft - not the version nobody has seen on this screen.
+  const first = await stashAfterRender({ rendered: 2, state: { version: 5 } });
+  assert.deepEqual([first.sent.length, first.sent[0]?.baseVersion, first.draft?.baseVersion, first.outcome], [1, 2, 2, 'saved'],
+    'the first stash must carry the rendered base');
+  // A later stash of the same screen still stands on the rendered version, whatever the stored draft and the poll say.
+  const again = await stashAfterRender({ rendered: 2, state: { version: 5, draft: { findings: 'SYN earlier', baseVersion: 4 } } });
+  assert.equal(again.sent[0].baseVersion, 2);
+  // Without a recorded render the base falls back to what the page holds: the draft's base first, else the version.
+  assert.equal((await stashAfterRender({ state: { version: 5, draft: { findings: 'SYN earlier', baseVersion: 3 } } })).sent[0].baseVersion, 3);
+  assert.equal((await stashAfterRender({ state: { version: 5 } })).sent[0].baseVersion, 5);
+  // Log out's preparation sends the base it took when it began (S7-U5), not one read again at send time.
+  const taken = { uid: '1.2.3', fields: { findings: 'SYN taken', conclusion: '', recommendation: '' }, baseVersion: 2,
+    citationIds: undefined, structureIds: undefined, owner: ['SYN-INST', 'syn-sub', 'syn-reader'] };
+  const prepared = await stashAfterRender({ rendered: 7, state: { version: 9 }, options: '{ kept }', kept: taken });
+  assert.deepEqual([prepared.sent[0].baseVersion, prepared.sent[0].findings, prepared.draft.baseVersion], [2, 'SYN taken', 2]);
 
   const commit = extractFunction(html, 'commitReport');
   assert.match(commit, /reportBaseVersion\(uid, appState\[uid\]\?\.version \?\? 0\)/);
