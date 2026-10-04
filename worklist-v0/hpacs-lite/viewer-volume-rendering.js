@@ -22,27 +22,79 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
   const status=el('p','',dialog);status.className='kin-vr-status';status.setAttribute('role','status');const hint=el('p','드래그: 회전 · 휠: 확대/축소. 원래 MPR 평면·표식·판독 입력은 유지됩니다.',dialog);hint.className='kin-vr-hint';
   const canvasPane=el('div',undefined,dialog);canvasPane.className='kin-vr-canvas-pane';const canvasHost=el('div',undefined,canvasPane);canvasHost.dataset.kinVrRender='1';canvasHost.style.cssText='width:100%;height:100%;min-height:0;background:black;touch-action:none';document.body.append(dialog);
   // The VOI fieldset sits in the existing controls pane beside the crop it combines with; VOI and sculpt share one mask path.
-  const voi=window.kinCreateVolumeVrVoi({controlsPane,getOperation:()=>operation,check,commit:(op,next,message)=>commitMasks(op,{voi:next},message),refuse,masked:op=>!!op?.sculptOperations?.length,status});cropControls.after(voi.fieldset);
+  const voi=window.kinCreateVolumeVrVoi({controlsPane,getOperation:()=>operation,check,shown:op=>wanted(op).voi,commit:(op,next,message)=>commitMasks(op,{voi:next},message),refuse,masked:op=>!!op&&!!wanted(op).sculpt.length,status});cropControls.after(voi.fieldset);
   let ended=false,operation=null,drag=null,drawing=false,knots=[],librarySnapshot=null,libraryStale=false,libraryFailure=null;const groups=[controls,cropControls,voi.fieldset,transferControls,presetControls],writeButtons=[savePreset,replacePreset,deletePreset];
   // Original View also locks the sculpt edits (contract §14): the masks stay set while nobody sees them.
-  const disableControls=value=>{groups.forEach(group=>group.disabled=value);if(sculpt)sculpt.fieldset.disabled=value||!!operation?.voiState?.original;voi.refresh();};
-  const sculpt=window.kinCreateVolumeSculpt({controlsPane,canvasPane,canvasHost,getOperation:()=>operation,check,masks:{operations:op=>op.sculptOperations||[],commit:(op,operations,message)=>commitMasks(op,{sculpt:operations},message),refuse},fail,status,
+  const disableControls=value=>{groups.forEach(group=>group.disabled=value);if(sculpt)sculpt.fieldset.disabled=value||!!(operation&&wanted(operation).voi.original);voi.refresh();};
+  const sculpt=window.kinCreateVolumeSculpt({controlsPane,canvasPane,canvasHost,getOperation:()=>operation,check,masks:{operations:op=>wanted(op).sculpt,commit:(op,operations,message)=>commitMasks(op,{sculpt:operations},message),refuse},fail,status,
     setDrawing(value){drawing=value;drag=null;const op=operation;groups.forEach(group=>group.disabled=value||!op?.ready||!!op.libraryBusy);}
   });
   function renderKnots(){knotHost.replaceChildren();for(const field of ['HU','Color','Opacity'])el('strong',field,knotHost);knots.forEach((k,index)=>{for(const field of ['HU','Color','Opacity']){const input=el('input',undefined,knotHost);input.setAttribute('aria-label','Knot '+(index+1)+' '+field);input.value=k[field.toLowerCase()];input.type=field==='Color'?'color':'number';if(field==='HU'){input.min='-32768';input.max='65535';input.step='1';}if(field==='Opacity'){input.min='0';input.max='1';input.step='0.05';}input.oninput=()=>{knots[index][field.toLowerCase()]=input.value;};}});const custom=transferMode.value==='Custom';preset.disabled=custom;knotHost.hidden=!custom;addKnot.hidden=removeKnot.hidden=!custom;removeKnot.disabled=knots.length<=2;addKnot.disabled=knots.length>=16;}
   function resetEditors(op){preset.value='CT-Bone';opacity.value='100';shade.checked=false;direction.value='Anterior';transferMode.value='Preset';knots=[{hu:'-1000',color:'#000000',opacity:'0'},{hu:'2000',color:'#FFFFFF',opacity:'1'}];if(op?.dimensions){['i','j','k'].forEach((axis,index)=>{cropInputs[axis+'Min'].value='0';cropInputs[axis+'Max'].value=String(op.dimensions[index]-1);cropInputs[axis+'Min'].min=cropInputs[axis+'Max'].min='0';cropInputs[axis+'Min'].max=cropInputs[axis+'Max'].max=String(op.dimensions[index]-1);});}renderKnots();}
   const current=op=>{try{const t=target(true,true,{requireRenderReady:false});return !ended&&alive()&&dialog.open&&operation===op&&!op.controller.signal.aborted&&JSON.stringify(owner())===op.owner&&t?.group===op.target.group&&t.selection===op.target.selection&&t.views.every((v,i)=>v===op.target.views[i])&&(!op.view||op.engine?.getViewport(op.id)===op.view);}catch(_){return false;}};
-  function close(){const op=operation;operation=null;sculpt.cancel();voi.clear();drag=null;librarySnapshot=null;libraryStale=false;libraryFailure=null;disableControls(true);if(op){op.masks?.close();try{op.unregister?.();}catch(_){}op.controller.abort();clearTimeout(op.timeout);clearTimeout(op.accessTimer);try{if(op.engine?.getViewport(op.id))op.engine.disableElement(op.id);}catch(_){} }canvasHost.replaceChildren();savedPreset.replaceChildren();presetName.value='';identity.textContent=sourceText.textContent='';sourceDetails.open=false;dialog.close();}
+  function close(){const op=operation;operation=null;sculpt.cancel();voi.clear();drag=null;librarySnapshot=null;libraryStale=false;libraryFailure=null;disableControls(true);if(op){op.masks?.close();try{op.unregister?.();}catch(_){}try{op.unguard?.();}catch(_){}try{op.unwatch?.();}catch(_){}op.controller.abort();endAsking(op);clearTimeout(op.timeout);try{if(op.engine?.getViewport(op.id))op.engine.disableElement(op.id);}catch(_){} }canvasHost.replaceChildren();savedPreset.replaceChildren();presetName.value='';identity.textContent=sourceText.textContent='';sourceDetails.open=false;dialog.close();}
   function fail(op,error){if(operation!==op)return;close();notice('VR 표시를 닫았습니다. '+(error.message||'다시 열어 확인하세요.'));}
   function check(op){if(!current(op))throw Error('원본이나 계정이 변경되어 VR 표시를 닫았습니다.');}
-  async function access(op){
-    const get=async url=>{const r=await fetch(url,{credentials:'same-origin',cache:'no-store',headers:{'X-KIN-Subject':JSON.parse(op.owner)[1]},signal:op.controller.signal});if(!r.ok)throw Error('VR 원본 접근 권한을 확인하지 못했습니다.');return r.json();};
+  /* Access contract (S8-U1a fix12, D542), in real time. A check stands for ACCESS_VALID_MS counted from the moment it was
+     asked, so an answer that waited behind a blocked main thread is no younger for it. A check without an answer
+     ACCESS_SILENT_MS after it was asked closes VR. One check is open at a time, its answer is taken only while it is
+     still that check of this open VR, and a late answer writes nothing. With the render entry control below, access that
+     was taken away, another account or a server that stops answering closes VR within the validity, plus the one frame
+     that was already on its way (30 s at most on software GL, REQ-S8-SCULPT-PERF-TARGET), plus the silent limit: 60 s. */
+  const ACCESS_VALID_MS=15000,ACCESS_SILENT_MS=15000;
+  const stamp=()=>({wall:Date.now(),mono:performance.now()});
+  // Real time since a stamp. The wall clock can be set back and the monotonic clock can stand still while the machine
+  // sleeps; whichever shows more time counts, so neither can make a check last longer.
+  const since=at=>Math.max(Date.now()-at.wall,performance.now()-at.mono);
+  const inForce=op=>!op.asking&&!!op.confirmed&&since(op.confirmed)<ACCESS_VALID_MS;
+  // One access check for this VR and its account. Nothing is written here; the caller takes the answer.
+  async function access(op,asking){
+    const get=async url=>{const r=await fetch(url,{credentials:'same-origin',cache:'no-store',headers:{'X-KIN-Subject':JSON.parse(op.owner)[1]},signal:asking.controller.signal});if(!r.ok)throw Error('VR 원본 접근 권한을 확인하지 못했습니다.');return r.json();};
     const me=await get('/api/me');if(me.kind!=='member'||JSON.stringify([me.institution,me.sub])!==op.owner)throw Error('VR 계정이 변경되었습니다.');
-    await get('/api/studies/'+encodeURIComponent(op.target.source.uid)+'/viewer-jobs');check(op);op.checkedAt=Date.now();
+    await get('/api/studies/'+encodeURIComponent(op.target.source.uid)+'/viewer-jobs');
   }
+  function endAsking(op){const asking=op.asking;op.asking=null;if(asking){clearTimeout(asking.timer);asking.controller.abort();}}
+  function overdue(op){if(operation===op&&op.asking&&since(op.asking.at)>=ACCESS_SILENT_MS)fail(op,Error('VR 접근 확인 시간이 지났습니다.'));}
+  function ask(op){
+    if(operation!==op||op.asking)return;
+    const asking=op.asking={at:stamp(),controller:new AbortController()},mine=()=>operation===op&&op.asking===asking;
+    asking.timer=setTimeout(()=>overdue(op),ACCESS_SILENT_MS);
+    access(op,asking).then(()=>{
+      if(!mine())return;
+      // The limit is judged on the clock again when the answer is taken: an answer after it is no answer.
+      if(since(asking.at)>=ACCESS_SILENT_MS){overdue(op);return;}
+      try{check(op);}catch(error){fail(op,error);return;}
+      clearTimeout(asking.timer);op.asking=null;op.confirmed=asking.at;
+      // The held frame goes to the engine under this answer; an answer that is no longer in force is asked again first.
+      if(op.held){if(!inForce(op)){ask(op);return;}op.held=false;try{op.draw();}catch(error){fail(op,error);}}
+    },error=>{if(mine())fail(op,error);});
+  }
+  /* Render entry control. Every frame of the VR viewport starts as a render request to the engine VR shares with the MPR:
+     the viewport's own render, the engine's render of listed or of all viewports, and its resize. While this VR is open
+     those requests leave the VR viewport out unless an access check is in force (asked less than ACCESS_VALID_MS ago and
+     none open). The frame left out is held, a check is asked, and its answer is handled before that frame is asked of
+     the engine. So no VR frame starts on a check that ran out or is still open, whoever asked for the frame (mask, crop,
+     display, rotation, wheel, resize, the host viewer), and repeated requests cannot put the check off. */
+  function guard(op){
+    const engine=op.engine,names=['renderViewport','renderViewports','render'];
+    if(names.some(name=>typeof engine[name]!=='function')||typeof engine.getViewports!=='function')throw Error('이 뷰어에서는 VR 접근 확인을 적용할 수 없습니다.');
+    const own=names.map(name=>Object.prototype.hasOwnProperty.call(engine,name)),was=names.map(name=>engine[name]);
+    const admit=()=>{if(operation!==op||inForce(op))return true;op.held=true;ask(op);return false;};
+    const mine=[function(id){if(id!==op.id||admit())return was[0].call(this,id);},
+      function(ids){return was[1].call(this,Array.from(ids||[]).filter(id=>id!==op.id||admit()));},
+      function(){return this.renderViewports(this.getViewports().map(viewport=>viewport.id));}];
+    names.forEach((name,i)=>{engine[name]=mine[i];});
+    op.draw=()=>was[0].call(engine,op.id);
+    op.unguard=()=>names.forEach((name,i)=>{if(engine[name]!==mine[i])return;if(own[i])engine[name]=was[i];else delete engine[name];});
+  }
+  // A VR frame that was already on its way when a check was asked ran on the thread that takes the check's answer, so the
+  // check's time went into the frame. That check is dropped and asked again from now; no frame is let through while a
+  // check is open, so this happens once per check at most and the 60 s above still holds.
+  function drawn(op){if(operation===op&&op.asking&&op.view){endAsking(op);ask(op);}}
   function render(op){check(op);op.view.render();}
   // One frame of the VR display for its mask session: the render request, then the viewport's IMAGE_RENDERED (drawn and
   // copied to its canvas). A request that throws, or no rendered frame within a few animation frames, is a frame error.
+  // A frame the access check holds back has not been asked of the engine yet: the animation frames count from there.
   function frameOf(op){
     return done=>{
       const element=op.view.element,event=cornerstone.Enums.Events.IMAGE_RENDERED;let finished=false,frames=0;
@@ -50,7 +102,7 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
       const rendered=()=>finish(null);
       element.addEventListener(event,rendered);
       try{render(op);}catch(error){finish(error);return;}
-      const tick=()=>{if(finished)return;if(++frames>3)finish(Error('VR 화면이 그려지지 않았습니다.'));else requestAnimationFrame(tick);};
+      const tick=()=>{if(finished)return;if(operation===op&&op.held)frames=0;else if(++frames>3){finish(Error('VR 화면이 그려지지 않았습니다.'));return;}requestAnimationFrame(tick);};
       requestAnimationFrame(tick);
     };
   }
@@ -78,33 +130,42 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
      written and the drawn frame is checked. The applied state and the Undo histories take a change only when its own frame
      was confirmed. A change that failed leaves the committed masks shown, and a display that cannot show even those closes
      only VR. Returns whether the request was taken; its result arrives with that frame. */
+  // What the next edit builds on and what the controls show: the request in flight while there is one, else what is
+  // applied. Edits made before a frame is drawn therefore chain (A, B, then A again ends at A), and a control shows what
+  // was asked for at once. A request that fails gives the controls back to the applied state.
+  function wanted(op){return op.requested||{voi:op.voiState||window.KinVolumeVrVoi.initial(),sculpt:op.sculptOperations||[]};}
   function commitMasks(op,change,message){
     try{
-      check(op);const model=window.KinVolumeVrVoi,shown=op.voiState||model.initial();
-      const nextVoi=change.voi??shown,nextSculpt=change.sculpt??(op.sculptOperations||[]);
-      if(change.sculpt&&nextVoi.original)throw model.refusal('vr-not-final','Original View를 끈 뒤 조각 제거를 바꾸세요.');
+      check(op);const model=window.KinVolumeVrVoi,base=wanted(op);
+      const request={voi:change.voi??base.voi,sculpt:change.sculpt??base.sculpt};
+      if(change.sculpt&&request.voi.original)throw model.refusal('vr-not-final','Original View를 끈 뒤 조각 제거를 바꾸세요.');
       if(!op.masks||typeof op.mapper?.getViewSpecificProperties!=='function'||typeof op.mapper.setViewSpecificProperties!=='function')throw model.refusal('render-failed','이 뷰어에서는 VR 가림 표시를 사용할 수 없습니다.');
-      op.masks.apply({voi:nextVoi.voi?model.shaderPlane(nextVoi.voi,op.voiBinding):null,sculpt:nextSculpt,original:nextVoi.original})
-        .then(outcome=>settleMasks(op,outcome,nextVoi,nextSculpt,message));
+      op.masks.apply({voi:request.voi.voi?model.shaderPlane(request.voi.voi,op.voiBinding):null,sculpt:request.sculpt,original:request.voi.original})
+        .then(outcome=>settleMasks(op,outcome,request,message));
+      op.requested=request;
       return true;
     }catch(error){refuse(op,error);return false;}
     finally{voi.refresh();}
   }
-  function settleMasks(op,outcome,nextVoi,nextSculpt,message){
+  function settleMasks(op,outcome,request,message){
     if(operation!==op)return;
+    // A request that a newer one replaced ends as superseded and changes nothing here; the newer one is still in flight.
+    const latest=op.requested===request;
     if(outcome.status==='ok'){
-      op.voiState=nextVoi;op.sculptOperations=nextSculpt;op.lastRefusal=null;
-      sculpt.fieldset.disabled=!op.ready||!!op.libraryBusy||nextVoi.original;
+      op.voiState=request.voi;op.sculptOperations=request.sculpt;op.lastRefusal=null;if(latest)op.requested=null;
+      sculpt.fieldset.disabled=!op.ready||!!op.libraryBusy||wanted(op).voi.original;
       if(message)status.textContent=message;
     }else if(outcome.status==='failed'){
+      if(latest)op.requested=null;
       if(outcome.restore?.status==='failed'){fail(op,outcome.error||outcome.restore.error);return;}
       if(outcome.restore?.status==='ok'){op.lastRefusal='render-failed';status.textContent='VR 가림을 적용하지 못해 이전 표시를 유지합니다. '+(outcome.error?.message||'');}
+      sculpt.fieldset.disabled=!op.ready||!!op.libraryBusy||wanted(op).voi.original;
     }
     voi.refresh();
   }
   function resetMasks(op){
-    const shown=op.voiState;
-    if(!shown?.voi&&!shown?.original&&!op.sculptOperations?.length){op.voiState=window.KinVolumeVrVoi.initial();op.sculptOperations=[];return;}
+    const shown=wanted(op);
+    if(!op.requested&&!shown.voi.voi&&!shown.voi.original&&!shown.sculpt.length){op.voiState=window.KinVolumeVrVoi.initial();op.sculptOperations=[];return;}
     if(!commitMasks(op,{voi:window.KinVolumeVrVoi.initial(),sculpt:[]}))throw Error('VR 가림을 초기화하지 못했습니다.');
   }
   // Read-only capability data: deep copies of what the open VR actually applied, never the editors or a test expectation.
@@ -168,11 +229,14 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     const op={target:t,owner:bound,controller:new AbortController(),id:'kin-vr-'+crypto.randomUUID(),voiState:window.KinVolumeVrVoi.initial(),sculptOperations:[],crop:null,lastRefusal:null};operation=op;dialog.showModal();disableControls(true);status.textContent='원본과 계정을 확인하는 중…';
     op.timeout=setTimeout(()=>fail(op,Error('VR 원본 확인 시간이 지났습니다. 다시 열어 주세요.')),30000);
     try{
-      await access(op);const source=t.views.find(v=>v.id===t.source.viewportId),volume=cornerstone.cache.getVolume(source.getVolumeId());check(op);
+      const first=op.asking={at:stamp(),controller:new AbortController()};await access(op,first);check(op);op.asking=null;op.confirmed=first.at;
+      const source=t.views.find(v=>v.id===t.source.viewportId),volume=cornerstone.cache.getVolume(source.getVolumeId());check(op);
       identity.textContent='CT · Patient '+t.source.study.id;sourceText.textContent='Study '+t.source.uid+' · Series '+t.source.series;
       // Keep the existing GL context, but allocate a separate actor and camera.
       // Private viewport creation must not trigger OHIF's crosshair reset binder.
       op.engine=source.getRenderingEngine();op.engine.enableElement({viewportId:op.id,type:cornerstone.Enums.ViewportType.VOLUME_3D,element:canvasHost,defaultOptions:{parallelProjection:true,suppressEvents:true}});op.view=op.engine.getViewport(op.id);op.view.suppressEvents=false;
+      // From its first frame on the VR viewport is drawn only under an access check in force; every drawn frame is seen here.
+      guard(op);{const element=op.view.element,event=cornerstone.Enums.Events.IMAGE_RENDERED,seen=()=>drawn(op);element.addEventListener(event,seen);op.unwatch=()=>element.removeEventListener(event,seen);}
       await op.view.setVolumes([{volumeId:volume.volumeId}]);check(op);op.imageData=volume.imageData;op.dimensions=Array.from(op.imageData?.getDimensions?.()||volume.dimensions||[]);KinVolumeRendering.validateCropBounds({i:[0,op.dimensions[0]-1],j:[0,op.dimensions[1]-1],k:[0,op.dimensions[2]-1]},op.dimensions);op.mapper=op.view.getActors()[0].actor.getMapper();const sourceMapper=source.getActors?.()[0]?.actor?.getMapper?.();if(!op.mapper||op.mapper===sourceMapper)throw Error('독립 VR 표시를 만들지 못했습니다.');
       // One mask session per VR; it also watches the borrowed context. Its install step stays the renderer module's
       // preflight, looked up on window when it runs, as the mask path always called it.
@@ -193,7 +257,10 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
   for(const name of ['keydown','keyup','keypress'])dialog.addEventListener(name,e=>e.stopPropagation(),true);
   const observer=new ResizeObserver(()=>{const op=operation;if(op?.ready&&current(op)){try{sculpt.cancel();op.engine.resize(true,true);render(op);}catch(error){fail(op,error);}}});observer.observe(canvasHost);
   const windowResized=()=>{if(operation?.ready)sculpt.cancel();};window.addEventListener('resize',windowResized);
-  const timer=setInterval(()=>{const op=operation;if(!op)return;if(!current(op)){fail(op,Error('원본·선택 또는 계정이 변경되었습니다.'));return;}if(op.view&&!op.checking&&Date.now()-op.checkedAt>15000){op.checking=true;op.accessTimer=setTimeout(()=>fail(op,Error('VR 접근 확인 시간이 지났습니다.')),15000);access(op).catch(error=>fail(op,error)).finally(()=>{op.checking=false;clearTimeout(op.accessTimer);});}},250);
+  // The open VR is looked at four times a second and when the page is shown again (a hidden page's timers run late): its
+  // source and account, an open check past its limit, and a check that ran out, which is asked again before any frame.
+  const watch=()=>{const op=operation;if(!op)return;if(!current(op)){fail(op,Error('원본·선택 또는 계정이 변경되었습니다.'));return;}if(!op.view)return;if(op.asking)overdue(op);else if(!inForce(op))ask(op);};
+  const timer=setInterval(watch,250),pageShown=()=>{if(document.visibilityState==='visible')watch();};document.addEventListener('visibilitychange',pageShown);
   const storageChanged=event=>{const op=operation;if(!op?.ready||!current(op)||!librarySnapshot||event.key!==null&&event.key!==librarySnapshot.key)return;libraryStale=true;libraryFailure=null;status.textContent='다른 창에서 VR 프리셋 목록이 변경되었습니다. 편집과 표시는 유지됩니다. Reload Presets를 누르세요.';};window.addEventListener('storage',storageChanged);
-  return {open,inspect,dispose(){ended=true;clearInterval(timer);window.removeEventListener('storage',storageChanged);observer.disconnect();window.removeEventListener('resize',windowResized);close();sculpt.dispose();voi.dispose();dialog.remove();}};
+  return {open,inspect,dispose(){ended=true;clearInterval(timer);document.removeEventListener('visibilitychange',pageShown);window.removeEventListener('storage',storageChanged);observer.disconnect();window.removeEventListener('resize',windowResized);close();sculpt.dispose();voi.dispose();dialog.remove();}};
 };

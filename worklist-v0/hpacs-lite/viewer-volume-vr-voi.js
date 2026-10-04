@@ -1,5 +1,8 @@
-window.kinCreateVolumeVrVoi=function({controlsPane,getOperation,check,commit,refuse,masked,status}){
+window.kinCreateVolumeVrVoi=function({controlsPane,getOperation,check,shown,commit,refuse,masked,status}){
   const model=window.KinVolumeVrVoi;
+  // The VOI state an edit builds on and the controls show: the host's requested state while a request is in flight (its
+  // frame not drawn yet), else the applied one. Several edits in a row therefore chain, and the last one is what ends up applied.
+  const current=op=>shown?.(op)??op.voiState;
   const el=(tag,text,parent)=>{const node=document.createElement(tag);if(text!==undefined)node.textContent=text;parent?.append(node);return node;};
   const fieldset=el('fieldset',undefined,controlsPane);el('legend','VOI',fieldset);
   el('p','원본 환자 좌표(LPS, mm)에 고정한 두 평면 사이(Slab)만 VR에 표시합니다. 끌어 회전·확대와 View From은 Slab을 옮기지 않습니다. 입력값은 Apply VOI를 눌러야 표시에 적용됩니다.',fieldset);
@@ -33,7 +36,7 @@ window.kinCreateVolumeVrVoi=function({controlsPane,getOperation,check,commit,ref
   }
   const mm=n=>Number(n.toFixed(1));
   function refresh(){
-    const op=getOperation?.(),s=op?.ready?op.voiState:null,usable=!!s&&!op.voiProblem,locked=!!s?.original;
+    const op=getOperation?.(),s=op?.ready?current(op):null,usable=!!s&&!op.voiProblem,locked=!!s?.original;
     for(const input of [...editors,applyButton,resetButton])input.disabled=!usable||locked;
     moveButton.disabled=rotateButton.disabled=disableButton.disabled=!usable||locked||!s.voi;
     undoButton.disabled=!usable||locked||!s.history.length;
@@ -43,10 +46,10 @@ window.kinCreateVolumeVrVoi=function({controlsPane,getOperation,check,commit,ref
   }
   // Invalid input and Original View refuse before any native call; an accepted transition goes through the one mask path.
   function act(build,message,after){
-    const op=getOperation?.();if(!op?.ready)return;let next;
-    try{check(op);if(op.voiProblem)throw model.refusal('source-unsupported',op.voiProblem);next=build(op,op.voiState);}
+    const op=getOperation?.();if(!op?.ready)return;let next,from;
+    try{check(op);if(op.voiProblem)throw model.refusal('source-unsupported',op.voiProblem);from=current(op);next=build(op,from);}
     catch(error){refuse(op,error);refresh();return;}
-    if(next===op.voiState){status.textContent='이미 표시에 적용된 VOI 상태입니다.';refresh();return;}
+    if(next===from){status.textContent='이미 표시에 적용된 VOI 상태입니다.';refresh();return;}
     if(commit(op,next,message))after?.(next);
     refresh();
   }
