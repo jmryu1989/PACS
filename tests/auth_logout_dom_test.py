@@ -920,7 +920,10 @@ class LogoutDOMTest(unittest.TestCase):
         self.assert_closed("main, after a late list answer")
         self.assertEqual([(MAIN_URL, session)], self.site.logouts, "one POST, naming the session it ends")
         self.assertEqual([], self.docs(name="index.html"), "no move before the POST answers")
-        self.assertEqual([{"type": "session-preparing", "session": session, "preparation": 1},
+        preparation = self.posts()[0]["preparation"]
+        self.assertIsInstance(preparation, str)
+        self.assertTrue(preparation.strip(), "preparation is a non-empty opaque id")
+        self.assertEqual([{"type": "session-preparing", "session": session, "preparation": preparation},
                           {"type": "session-ended", "session": session, "operation": self.end_state()["operation"],
                            "status": "ending"}], self.posts(),
                          "the viewers' pause notice, then one end notice - each naming its session")
@@ -1477,7 +1480,11 @@ class LogoutDOMTest(unittest.TestCase):
         # The viewers of this session are told to pause - not to close (amendment section 3).
         seen = self.screen()
         self.assertEqual(("preparing", RAD["sub"], None), (seen["state"], seen["identity"]["sub"], seen["end"]))
-        self.assertEqual(([], [], [{"type": "session-preparing", "session": session, "preparation": 1}]),
+        preparation = self.posts()[0]["preparation"]
+        self.assertIsInstance(preparation, str)
+        self.assertTrue(preparation.strip(), "preparation is a non-empty opaque id")
+        # One notice per preparation: the pause is held by a Web Lock, not renewed by a timer.
+        self.assertEqual(([], [], [{"type": "session-preparing", "session": session, "preparation": preparation}]),
                          (self.site.releases, self.site.logouts, self.posts()))
         self.assertEqual([], [w for w in self.writes()[writes:] if w[2] == END_KEY])
         self.assertEqual([], self.dialogs, "one press: no confirmation")
@@ -1848,7 +1855,11 @@ class LogoutDOMTest(unittest.TestCase):
                 self.assertEqual((FIELDS, "active", RAD["sub"]), (self.editor(), seen["state"], seen["identity"]["sub"]))
                 # The viewers were told to pause, then to resume - and never that the session ended.
                 self.assertEqual(["session-preparing", "session-resumed"], [post["type"] for post in self.posts()])
-                self.assertEqual({post["preparation"] for post in self.posts()}, {1})
+                preparing, resumed = self.posts()
+                self.assertIsInstance(preparing["preparation"], str)
+                self.assertTrue(preparing["preparation"].strip(), "preparation is a non-empty opaque id")
+                self.assertEqual(preparing["preparation"], resumed["preparation"])
+                self.assertEqual([self.site.cookie, self.site.cookie], [post["session"] for post in self.posts()])
                 # The next save keeps what the server's draft has, not the ids a late citation answer would have named.
                 self.page.fill("#findings", "SYN-FINDINGS after Back to Editing")
                 puts = len(self.site.puts)
