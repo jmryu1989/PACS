@@ -1101,6 +1101,41 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.page.wait_for_url(h.INDEX_URL)
         self.assertEqual((1, 1), (len(self.site.puts), len(self.site.logouts)))
 
+    def test_text_typed_while_a_save_or_approve_is_out_is_kept_when_the_server_accepts_it(self):
+        for control, rs in (("#b-save", "T"), ("#b-approve", "A")):
+            with self.subTest(command=control):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.page.clock.install()
+                self.open_main()
+                self.select_and_type()
+                self.site.commit_answers = ["hold"]
+                self.page.locator(control).click()
+                self.wait_until(lambda: self.site.held_commits, "the command is out")
+                later = {**h.FIELDS, "findings": h.FIELDS["findings"] + " SYN typed while the command was out"}
+                self.page.locator("#findings").press_sequentially(" SYN typed while the command was out")
+                # The server accepts the command as it was sent (what the harness answers for an unheld commit).
+                route, body = self.site.held_commits.pop(), self.site.commits[-1]
+                self.site.revs[h.RAD["actor"]] = self.site.revs.get(h.RAD["actor"], 0) + 1
+                self.site.rows.pop(h.RAD["actor"], None)
+                self.site.report = {"version": 1, "rs": rs, **{k: body.get(k, "") for k in h.FIELDS}}
+                route.fulfill(json={**self.site.envelope(h.RAD), "state": self.site.state(h.RAD)})
+                row = self.page.locator("#rows tr", has_text=h.PATIENT).first
+                expect(row.get_by_role("cell", name=rs, exact=True)).to_be_visible()
+                # The command carried the earlier text and that is what was saved; the later text is still on screen.
+                self.assertEqual(h.FIELDS, {k: self.site.report[k] for k in h.FIELDS})
+                self.assertEqual(later, self.editor(), "the accepted command redrew the editor over text typed meanwhile")
+                self.assertTrue(self.leaving_asks(), "the later text is not stored anywhere yet: leaving asks")
+                self.refresh()
+                self.page.wait_for_timeout(400)
+                self.assertEqual(later, self.editor(), "the list read replaced the later text")
+                # It is this document's unconfirmed text on the accepted version: the next autosave stores it as a draft.
+                self.page.clock.run_for(21000)
+                self.wait_until(lambda: self.site.stored_for(h.UID) == later, "the later text stored as a draft")
+                self.assertEqual(1, self.site.puts[-1]["baseVersion"], "the draft stands on the version just accepted")
+                self.assertEqual(h.FIELDS, {k: self.site.report[k] for k in h.FIELDS}, "the saved report is untouched")
+                self.assertEqual([], self.dialogs)
+
     def preparing(self, page=None):
         return [post for post in self.posts(page) if post["type"] == "session-preparing"]
 

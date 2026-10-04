@@ -7097,9 +7097,13 @@
      * 이 문서가 고른 검사의 편집기 글을 바꿨다는 기록. 사람의 타건(input)과 프로그램의 쓰기(`editReport`)가 같은 것을 남긴다:
      * 표시를 세우고, 그 글을 그 검사의 사본에 담는다 — 보낼 수 없는 사정(충돌·오프라인·점유·삽입 중)이 있어도 가장 새 글이
      * 버려질 수 있는 textarea에만 남지 않게 한다. 새로 고친 글은 서버가 앞서 거절한 그 글이 아니므로 자동 저장도 다시 시도한다.
+     * 검사마다 마지막으로 고친 차례도 적는다 — 나가 있던 확정의 답이 "그 뒤에 고친 글이 있는가"를 글을 견주지 않고 안다.
      */
+    let reportEdits = 0;
+    const reportEditedAt = new Map();
     function recordReportEdit() {
       if (work.state() !== "active" || !selectedUid) return;
+      reportEditedAt.set(selectedUid, ++reportEdits);
       reportConverge.add(selectedUid);
       reportSaveFailures.delete(selectedUid);
       keepReportEditor();
@@ -7231,6 +7235,8 @@
         // 이 확정을 시작한 문맥(세션·작업 세대). 그때 그 선택인가는 아래의 uid·seq 대조가 본다 — 받아 온 상태는 자료라
         // 다른 검사로 옮겼어도 남기고, 그리는 것만 그 선택일 때 한다.
         const at = work.capture("document");
+        // 이 확정이 싣고 나가는 글(content)까지의 편집 차례. 답이 올 때 그 뒤의 편집이 있었는지를 이것으로 안다.
+        const sentAt = reportEdits;
         // 확정은 초안 행도 함께 치운다. 그래서 초안의 명령 경로로 간다: 작성자와 화면이 본 초안 revision을 싣고, 답의 봉투와
         // 그 안의 검사 상태(state)가 확인될 때만 확정으로 본다.
         const result = await draftClient.commit(uid,
@@ -7259,6 +7265,14 @@
           }
           const st = result.state;
           heldUid = null; clearInterval(heartbeat); heartbeat = null;   // 확정하면 서버가 점유를 푼다
+          /**
+           * 확정이 나가 있는 동안 이 문서가 그 검사의 글을 더 고쳤으면(기록된 편집이다 — 글을 견주어 짐작하지 않는다) 그 글은
+           * 이 확정이 받아들인 글이 아니다. 확정본으로 다시 그리면 말없이 사라진다. 그래서 새 판 위의 확인되지 않은 글로
+           * 남긴다: 고른 검사면 편집기의 글을 그대로 두고, 떠난 검사면 떠날 때 담아 둔 사본을 지킨다 — 다음 자동 저장·검사
+           * 이동·로그아웃이 그 글을 초안으로 가져간다.
+           */
+          const later = (reportEditedAt.get(uid) ?? 0) > sentAt
+            ? (uid === selectedUid ? Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value])) : appState[uid]?.draft) : null;
           // 서버가 받아들인 확정이다: 확정이 나가 있는 동안 검사를 옮겨 그 검사의 쓰기가 뒤에 줄 서 있어도 실패로 알리지 않는다.
           appState[uid] = replaceReportState(uid, st, { confirmed: true });
           syncStudy(uid);
@@ -7275,8 +7289,14 @@
           structureState.forget(uid);
           structureNotes.delete(uid);
           reportConverge.delete(uid);
-          // 확정 응답은 내가 방금 선택한 서버 상태다. 여기서는 입력 보호보다 그 결과가 우선한다.
-          loadReport({ force: true });
+          if (later) {
+            appState[uid] = { ...appState[uid], draft: { ...Object.fromEntries(RFIELDS.map(k => [k, later[k] ?? ""])),
+              baseVersion: reportBaseVersion(uid, st.version ?? 0), at: null } };
+            reportConverge.add(uid);
+          }
+          // 확정 응답은 내가 방금 선택한 서버 상태다. 여기서는 입력 보호보다 그 결과가 우선한다 — 그 확정이 싣지 않은,
+          // 나가 있는 동안 고친 글만 예외다(위).
+          loadReport({ force: !(later && uid === selectedUid) });
         } catch (e) {
           // 낙관적 락에 걸린 경우 — 그 사이 남이 저장했다.
           // 내가 쓴 내용을 지우지 않는다. 서버 것을 보여주고 사용자가 판단하게 한다.
