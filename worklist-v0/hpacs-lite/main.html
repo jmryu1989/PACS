@@ -1418,6 +1418,8 @@
                   title="서버에 먼저 기록된 초안을 이 화면의 내용으로 덮어씁니다">Keep This Text</button>
           <button id="b-draft-load" style="display:none"
                   title="이 화면의 내용을 버리고 서버에 기록된 초안을 불러옵니다">Load Server Draft</button>
+          <button id="b-approved-view" style="display:none"
+                  title="승인된 판독문 원문과 이 화면의 글을 나란히 봅니다 (아무것도 바꾸지 않습니다)">View Approved Report</button>
           <button id="b-draft-discard" title="쓰다 만 내용을 버리고 저장된 판독문으로 돌아갑니다">Discard Draft</button>
         </div>
         <div class="draftbar" id="holdbar" style="display:none"><span id="holdmsg"></span></div>
@@ -1600,7 +1602,7 @@
           <h5>Recommendation</h5><pre id="stale-head-recommendation"></pre>
         </section>
         <section>
-          <h4>지금 쓰던 내용 (저장되지 않음)</h4>
+          <h4 id="stale-draft-title">지금 쓰던 내용 (저장되지 않음)</h4>
           <h5>Findings</h5><pre id="stale-draft-findings"></pre>
           <h5>Conclusion</h5><pre id="stale-draft-conclusion"></pre>
           <h5>Recommendation</h5><pre id="stale-draft-recommendation"></pre>
@@ -5673,6 +5675,14 @@
       const conflict = selectedUid ? draftClient.conflict(selectedUid) : null;
       $("#b-draft-keep").style.display = $("#b-draft-load").style.display = conflict ? "" : "none";
       $("#b-draft-keep").disabled = $("#b-draft-load").disabled = !conflict?.latest;
+      /**
+       * 승인된 판독문 위에 그 승인본과 다른 내 초안이 있다(U5CLI-F11). 편집기는 그 초안을 보이므로 화면의 글은 승인본이
+       * 아니다 — Approve가 나가 있는 동안 더 친 글이든, 추가기재를 쓰다 만 글이든 같다. 이 줄이 그 사실을 말하지 않으면
+       * 판독의는 그 문장이 승인된 판독문에 있다고 믿고, 임상의는 그 문장이 없는 승인본을 읽는다. 충돌·서버 새 내용 안내가
+       * 먼저다(그때 고를 것은 그쪽이다).
+       */
+      const apart = !conflict && !pending && reportApart(r);
+      $("#b-approved-view").style.display = apart ? "" : "none";
       if (conflict) {
         bar.style.display = "flex";
         $("#b-draft-discard").style.display = $("#b-report-reload").style.display = "none";
@@ -5706,12 +5716,42 @@
       const deferred = !!selectedUid && reportConverge.has(selectedUid);
       // 서버가 이 검사에 쓸 수 없다고 답해 자동 저장을 멈춘 글이다. 한 번 알린 뒤에는 이 줄이 그 사실을 말한다.
       const stopped = deferred && reportSaveFailures.get(selectedUid) === "stop";
-      $("#draftmsg").innerHTML = `<b>● 저장 안 된 초안</b> — ` +
+      // 누가 확정했는지는 여기서 알 수 없다 — 내가 누른 Approve가 떠난 뒤의 쓰기도 이 자리에 온다. 아는 사실만 말한다.
+      $("#draftmsg").innerHTML =
+        (apart ? `<b>● 승인된 판독문에 포함되지 않은 글이 있습니다</b> — 이 화면의 글은 승인본(v${esc(r.version)})과 다릅니다 · `
+               : `<b>● 저장 안 된 초안</b> — `) +
         (stopped ? `이 화면에 담아 두었습니다 · 서버가 저장을 받지 않아 자동 저장을 멈췄습니다 — 글을 고치면 다시 시도합니다`
          : deferred ? `이 화면에 담아 두었습니다 · 서버 저장은 아직 확인되지 않았습니다`
-                  : `${esc(at)}에 자동 저장됨`) +
-        (behind ? ` · <b>주의</b> 이 초안을 쓰는 동안 다른 사람이 v${esc(r.version)}을 확정했습니다`
-                : ` · 확정하려면 Save 또는 Approve`);
+                  : `${esc(at)}에 ${apart ? "초안으로 " : ""}자동 저장됨`) +
+        (behind ? ` · <b>주의</b> 이 초안을 쓰기 시작한 뒤 v${esc(r.version)}이 확정됐습니다`
+                : `<span id="drafthint"></span>`);
+      renderDraftHint();
+    }
+
+    /**
+     * 표시줄이 안내하는 확정 단추는 **지금 눌리는 것뿐이다.** 승인된 판독문에서 Save·Approve는 잠겨 있는데 "확정하려면 Save
+     * 또는 Approve"라고 쓰면 사람은 갈 수 없는 길을 안내받는다(U5CLI-F11). 무엇이 눌리는가는 단추를 잠그는
+     * `updateReportButtons`가 정한 그대로 읽는다 — 같은 판단을 여기서 다시 계산하면 언젠가 한쪽만 고쳐진다. 그래서 단추를
+     * 다시 잠그거나 푸는 그 함수가 끝에 이것을 부른다. 확정이 나가 있는 동안은 눌리는 것이 없으므로 안내도 없다.
+     */
+    function renderDraftHint() {
+      const hint = $("#drafthint");
+      if (!hint) return;
+      const open = id => { const el = $(id); return !!el && !el.disabled; };
+      hint.textContent = open("#b-addendum") ? " · 추가기재로 확정하려면 More ▸ Addendum"
+        : open("#b-save") && open("#b-approve") ? " · 확정하려면 Save 또는 Approve"
+        : open("#b-save") ? " · 확정하려면 Save" : open("#b-approve") ? " · 확정하려면 Approve" : "";
+    }
+
+    /**
+     * 승인된 판독문과 내 초안이 갈라져 있는가. 기록된 사실만 본다: 그 검사가 승인 상태(RS A)이고, 내 초안이 있고, 그 초안의
+     * 세 칸이 승인본의 세 칸과 다르다. 이 문서가 한 일(무엇을 언제 쳤는가)을 보지 않으므로 새로 고침·다른 검사에 다녀옴·
+     * 다음 날 다시 열기에서도 같은 답이다. "서버가 아직 확인하지 않은 글" 표시(`reportConverge`)와는 다른 물음이다 —
+     * 자동 저장된 초안도 승인본과는 여전히 다르다.
+     */
+    function reportApart(r) {
+      const d = r?.prelimHidden ? null : r?.draft;
+      return !!d && r.rs === "A" && RFIELDS.some(k => (d[k] ?? "") !== (r[k] ?? ""));
     }
 
     /**
@@ -5831,26 +5871,83 @@
       // 모양이 아니면 아무것도 "승인본"이라고 보여주지 않는다. 그때는 일반 실패로 끝낸다.
       if (!head) { toast("저장 실패: " + e.message, "err"); return; }
       stalePane = { uid, seq: ++staleSeq, selSeq: selectionSeq, head };
-      $("#stale-msg").textContent =
-        `이 초안은 v${head.draftBaseVersion ?? "?"}을 기준으로 씁니다. 그 뒤 v${head.version}이 승인됐습니다 — ` +
-        `아래 승인본을 확인한 뒤 정하세요. 쓰던 내용은 그대로 두었습니다.`;
+      drawApprovedPane(head, {
+        title: "Approved Report Changed",
+        message: `이 초안은 v${head.draftBaseVersion ?? "?"}을 기준으로 씁니다. 그 뒤 v${head.version}이 승인됐습니다 — ` +
+          `아래 승인본을 확인한 뒤 정하세요. 쓰던 내용은 그대로 두었습니다.`,
+        mine: "지금 쓰던 내용 (저장되지 않음)", rebase: true });
+      toast(`승인본이 v${head.version}으로 바뀌어 추가기재를 붙이지 못했습니다 — 승인본을 확인하세요`, "err");
+    }
+    /** 승인본(서버가 준 다섯 칸)과 편집기의 지금 글을 나란히 그린다. 두 쓰임(재기준, 승인본 보기)이 같은 창을 쓴다. */
+    function drawApprovedPane(head, { title, message, mine, rebase }) {
+      $("#stale-title").textContent = title;
+      $("#stale-msg").textContent = message;
       $("#stale-head-title").textContent =
         `승인본 v${head.version}` + (head.updatedBy ? ` · ${displayActor(head.updatedBy)}` : "");
+      $("#stale-draft-title").textContent = mine;
       for (const k of RFIELDS) {
         $("#stale-head-" + k).textContent = head[k];
         $("#stale-draft-" + k).textContent = $("#" + k).value;
       }
+      $("#stale-rebase").style.display = rebase ? "" : "none";
       $("#stale-rebase").textContent = `v${head.version} 기준으로 다시 잡기`;
-      $("#stale-rebase").disabled = false;
+      $("#stale-rebase").disabled = !rebase;
       $("#stale-status").textContent = "";
       $("#stalemodal").classList.add("show");
-      toast(`승인본이 v${head.version}으로 바뀌어 추가기재를 붙이지 못했습니다 — 승인본을 확인하세요`, "err");
     }
     function closeStaleRebase() { stalePane = null; $("#stalemodal").classList.remove("show"); }
 
+    /**
+     * ── 승인본 보기 (U5CLI-F11) ──
+     *
+     * 승인된 판독문 위에 그와 다른 내 초안이 있으면 편집기는 초안을 보인다. 무엇이 승인됐는지를 사람이 **그대로** 볼 수
+     * 있어야 한다: 서버의 판 이력에서 지금의 승인 판을 읽어, 재기준 창과 같은 창에 편집기의 글과 나란히 놓는다. 읽기만
+     * 한다 — 편집기도 초안도 기준 판도 바꾸지 않는다. 화면이 들고 있는 사본으로 그리지 않는 이유는 재기준 창과 같다:
+     * 사람이 확인하려는 것이 바로 "서버에 승인된 것"이다. 그 뒤의 길은 기존 그대로다 — 닫고 Addendum(추가기재),
+     * Discard Draft(승인본만 남긴다), 또는 닫고 계속 쓴다.
+     */
+    async function viewApprovedReport() {
+      const uid = selectedUid;
+      if (!uid || !reportApart(appState[uid])) return;
+      // 답이 올 때도 그때 그 선택이어야 한다(검사 범위의 문맥은 UID와 선택 순번을 함께 본다 — A→B→A도 같은 선택이
+      // 아니다). 다른 검사의, 또는 다시 그려진 편집기 옆에 이 승인본을 놓지 않는다.
+      const at = work.capture("study");
+      let head = null;
+      try {
+        if (serverMode) {
+          const list = await api("GET", `/studies/${encodeURIComponent(uid)}/report/versions`, undefined, undefined, at);
+          // 폐기된 초안의 기록은 판독문의 판이 아니다. 남은 것 가운데 가장 새 판이 지금의 승인본이어야 한다.
+          const top = (Array.isArray(list) ? list : []).filter(v => v?.action !== "discarded")
+            .sort((a, b) => b.version - a.version)[0];
+          if (top && Number.isSafeInteger(top.version) && ["approve", "addendum"].includes(top.action))
+            head = { version: top.version, updatedBy: typeof top.author === "string" ? top.author : "",
+              ...Object.fromEntries(RFIELDS.map(k => [k, typeof top[k] === "string" ? top[k] : ""])) };
+        } else {
+          // 서버 없는 모드에는 이력이 없다 — 이 브라우저의 저장본이 곧 승인본이다.
+          const a = appState[uid];
+          head = { version: a.version ?? 0, updatedBy: "", ...Object.fromEntries(RFIELDS.map(k => [k, a[k] ?? ""])) };
+        }
+      } catch (e) {
+        work.commit(at, () => toast("승인본을 불러오지 못했습니다: " + e.message, "err"));
+        return;
+      }
+      work.commit(at, () => {
+        // 승인본이 아닌 것을 "승인본"이라고 보여 주지 않는다(그 사이 판독이 취소됐거나 이력을 읽을 수 없다).
+        if (!head) { toast("승인본을 확인하지 못했습니다 — 목록을 새로 고친 뒤 다시 확인하세요", "err"); return; }
+        stalePane = { uid, seq: ++staleSeq, selSeq: selectionSeq, head, view: true };
+        drawApprovedPane(head, {
+          title: "Approved Report",
+          message: `왼쪽이 승인된 판독문(v${head.version})입니다. 오른쪽은 지금 이 화면의 글이고, 승인된 판독문에 포함되지 않았습니다.` +
+            ($("#b-addendum").disabled ? `` : ` 승인본에 덧붙이려면 닫고 More ▸ Addendum을 누르세요.`),
+          mine: "이 화면의 글 (승인본에 포함되지 않음)", rebase: false });
+      });
+    }
+    $("#b-approved-view").addEventListener("click", viewApprovedReport);
+
     async function rebaseDraft() {
       const pane = stalePane;
-      if (!pane || staleBusy) return;
+      // 승인본 보기로 연 창에는 다시 잡을 기준이 없다(단추도 없다).
+      if (!pane || pane.view || staleBusy) return;
       // 화면에 쓰기 직전에 UID와 순번을 함께 확인한다. 안내가 열린 사이에 검사를 옮겼다면
       // 지금 textarea에 있는 글은 **다른 검사의 글**이다 (교훈: A→B→A — 돌아와도 같은 선택이 아니다).
       if (pane.uid !== selectedUid || pane.seq !== staleSeq || pane.selSeq !== selectionSeq) {
@@ -7210,6 +7307,8 @@
         conclusion: $("#conclusion").value,
         recommendation: $("#recommendation").value,
       };
+      // 받아들여진 확정이 싣지 않은, 그 뒤에 친 글이 남았는가(아래) — 완료 안내가 그 사실을 함께 말한다.
+      let lateText = false;
 
       if (serverMode) {
         commitInFlight = true;
@@ -7271,10 +7370,13 @@
            * 확정이 나가 있는 동안 이 문서가 그 검사의 글을 더 고쳤으면(기록된 편집이다 — 글을 견주어 짐작하지 않는다) 그 글은
            * 이 확정이 받아들인 글이 아니다. 확정본으로 다시 그리면 말없이 사라진다. 그래서 새 판 위의 확인되지 않은 글로
            * 남긴다: 고른 검사면 편집기의 글을 그대로 두고, 떠난 검사면 떠날 때 담아 둔 사본을 지킨다 — 다음 자동 저장·검사
-           * 이동·로그아웃이 그 글을 초안으로 가져간다.
+           * 이동·로그아웃이 그 글을 초안으로 가져간다. 그 글을 확정본에 넣지도, 스스로 추가기재하지도 않는다: 사람이
+           * 확정을 누른 글은 떠날 때의 그 글이다. 대신 갈라졌다는 사실을 말한다 — 지금은 완료 안내가, 그 뒤로는 초안
+           * 표시줄이(U5CLI-F11).
            */
           const later = (reportEditedAt.get(uid) ?? 0) > sentAt
             ? (uid === selectedUid ? Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value])) : appState[uid]?.draft) : null;
+          lateText = !!later;
           // 서버가 받아들인 확정이다: 확정이 나가 있는 동안 검사를 옮겨 그 검사의 쓰기가 뒤에 줄 서 있어도 실패로 알리지 않는다.
           appState[uid] = replaceReportState(uid, st, { confirmed: true });
           syncStudy(uid);
@@ -7385,14 +7487,33 @@
         saveApp();
       }
       render(); renderRelated(); updateReportButtons();
-      toast({
+      const done = {
         save: "임시 저장했습니다 (RS: T)",
         defer: `보류했습니다 (RS: H) — ${reason}`,
         approve: "판독문을 승인했습니다 (RS: A)",
         addendum: "추가기재를 저장했습니다 — 이전 승인본은 그대로 남습니다",
         reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",
         preliminary: "예비 판독으로 넘겼습니다 (RS: P) — 지정한 상급 판독의만 내용을 볼 수 있습니다",
-      }[action], action === "reset" ? "info" : "ok");
+      }[action];
+      if (!lateText) { toast(done, action === "reset" ? "info" : "ok"); return; }
+      /**
+       * 확정은 됐고, 그 확정이 싣지 않은 글이 화면에 남았다. "승인했습니다"만 말하면 판독의는 마지막에 친 문장도 승인된
+       * 줄 안다(U5CLI-F11). 무엇이 들어가지 않았는지를 같은 안내에서 말한다 — 실패가 아니므로 오류 색을 쓰지 않고, 읽을
+       * 시간을 준다. 그 뒤로는 초안 표시줄이 같은 사실을 계속 말한다. 그 검사를 떠나 있었으면 어느 검사인지부터 말한다
+       * (로그아웃 창과 같은 표기).
+       */
+      const missed = action === "approve" ? "Approve를 누른 뒤 입력한 글은 승인된 판독문에 포함되지 않았습니다"
+        : action === "addendum" ? "Addendum을 누른 뒤 입력한 글은 승인된 판독문에 포함되지 않았습니다"
+        : "단추를 누른 뒤 입력한 글은 저장된 판독문에 포함되지 않았습니다";
+      toast((uid === selectedUid ? "" : studyLabel(uid) + " — ") + `${done}. ${missed}` +
+        (uid === selectedUid ? " — 그 글은 초안으로 화면에 남아 있습니다." : " — 그 검사를 열면 초안으로 남아 있습니다."),
+        "info", 12000);
+    }
+
+    /** 검사를 사람에게 가리키는 표기: 환자 이름 · 접수번호 · 검사일. 목록에서 사라진 검사는 남은 이름(UID)으로 부른다. */
+    function studyLabel(uid) {
+      const study = studies.find(s => s.uid === uid);
+      return study ? [study.name, study.acc, study.date].filter(Boolean).join(" · ") : uid;
     }
 
     function heldByOther(s) { return s?.holder && s.holder !== user ? s.holder : null; }
@@ -7459,6 +7580,8 @@
       if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
         const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
       }
+      // 초안 표시줄의 확정 안내는 방금 정한 단추 상태를 그대로 따른다(눌리지 않는 단추를 안내하지 않는다).
+      renderDraftHint();
       updateTemplatePreview();
       updateReportTemplateButton();
       // 받아쓰기 단추도 같은 관문을 따른다. 검사 이동도 여기를 지나므로(refreshRight) 떠난 검사의
@@ -7835,9 +7958,7 @@
           const a = appState[uid] || {};
           const texts = Object.freeze({ ...Object.fromEntries(RFIELDS.map(k => [k, source[k] ?? ""])),
             baseVersion: reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0) });
-          const study = studies.find(s => s.uid === uid);
-          const label = study ? [study.name, study.acc, study.date].filter(Boolean).join(" · ") : uid;
-          reports.push({ uid, label, texts, safe: false });
+          reports.push({ uid, label: studyLabel(uid), texts, safe: false });
         }
       }
       return { uid: null, seq: selectionSeq, owner: draftOwner, reports, needsWrite: reports.length > 0 };

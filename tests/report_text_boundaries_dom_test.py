@@ -1,5 +1,5 @@
 # coding: utf-8
-"""U5S-REQ-04/13/17/22/23 -> U5S-RISK-DRAFT/APPLY/SUCCESS -> U5CLI-F01/F02/F05/F06/F07/F08/F09/F10, U5VW-F03/F07/F11 (main's half).
+"""U5S-REQ-04/13/17/22/23 -> U5S-RISK-DRAFT/APPLY/SUCCESS -> U5CLI-F01/F02/F05/F06/F07/F08/F09/F10/F11, U5VW-F03/F07/F11 (main's half).
 
 Real pages and public controls, using the existing DOM harness read-only. The fixture adds
 independent stored drafts for study B; no product function is replaced or inspected.
@@ -14,10 +14,20 @@ timer - `kin-preparation:<id>` held from before the pause notice until Back to E
 `kin-session-ended:<session>` asked for before every end notice. The cases read the browser's own lock manager from
 another document (`navigator.locks.query()`), and the order of lock requests, grants and notices inside the document.
 Text typed while a Save or Approve is out stays when the server accepts that command.
+Round 6 (U5CLI-F11): that kept text is not part of the approved report, and the screen says so - in the notice of the
+approval (naming the study when the reader has left it), and in a state of the draft bar of its own that is derived
+from recorded facts (an approved report, my draft, different text) and therefore shows again after a study change, in
+a new document and on a later day. The bar names only confirming controls that can be pressed; View Approved Report
+shows the approved text as the server has it; the text goes into the report only by the reader's own Addendum, or
+away by Discard Draft. The ordinary path (nothing typed after the press) keeps its one notice and no bar. A lock
+request that throws or is rejected leaves Log out pressable; a busy session store (409) does not stop the autosave.
+The wording asserted is the part the unit's instruction fixed (the approved report "does not contain" the text; the
+English control names of AGENTS section 4), not whole sentences.
 Stand-ins added here, named: the clipboard (the harness's), the media devices of a dictation (an audio context, a
 worklet node and a microphone stream - nothing else of the browser), the server's answers for a dictation, a
-findings list, an insertion and a discard, a blank same-origin document standing in for a viewer, and a recorder of
-the calls a document makes to the lock manager and the session channel.
+findings list, an insertion and a discard, a blank same-origin document standing in for a viewer, a recorder of
+the calls a document makes to the lock manager and the session channel, the server's version history (its head
+version) and its acceptance of an Addendum, and a lock manager that is missing, throws or rejects.
 """
 import contextlib
 import re
@@ -171,7 +181,35 @@ class MultiStudySite(h.Site):
             row["state"] = self.state(account)
             return row
 
+    def accept(self, route, body, rs):
+        """The server accepts a held Approve, Save or Addendum as it was sent: the report becomes that text with a new
+        version and that state, and the author's draft row is gone."""
+        self.revs[h.RAD["actor"]] = self.revs.get(h.RAD["actor"], 0) + 1
+        self.rows.pop(h.RAD["actor"], None)
+        self.report = {"version": self.report["version"] + 1, "rs": rs, "action": body.get("action"),
+                       **{k: body.get(k, "") for k in h.FIELDS}}
+        route.fulfill(json={**self.envelope(h.RAD), "state": self.state(h.RAD)})
+
+    def versions(self):
+        """The version history of study A, newest first: the fixture keeps the head version only."""
+        head = self.report
+        return [] if not head["version"] else [{
+            "id": head["version"], "uid": h.UID, "version": head["version"], "reason": None,
+            "action": head.get("action") or ("approve" if head["rs"] == "A" else "save"),
+            "author": h.RAD["actor"], "at": "2026-10-03T00:00:00.000Z", **{k: head.get(k, "") for k in h.FIELDS}}]
+
     def api(self, route, request, method, path, query):
+        if method == "GET" and path == f"/api/studies/{h.UID}/report/versions":
+            if path in self.held_gets:
+                return self.held_gets[path].append(route)
+            return route.fulfill(json=self.versions())
+        if (method == "POST" and path == f"/api/studies/{h.UID}/report/commit" and not self.commit_answers
+                and (request.post_data_json or {}).get("action") == "addendum"):
+            # An Addendum leaves the report approved (the harness answers every other command than Approve with T).
+            body = request.post_data_json
+            self.commits.append(body)
+            refused = self.preconditions(body, self.sessions[self.cookie])
+            return self.answer(route, *refused) if refused else self.accept(route, body, "A")
         if method == "GET" and path == "/api/bootstrap" and (self.templates or self.dictation):
             route = Amended(route, lambda body: {**body, "templates": self.templates, "dictation": self.dictation})
         if method == "POST" and path == f"/api/studies/{h.UID}/dictation":
@@ -1372,6 +1410,253 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                 self.page.wait_for_url(h.INDEX_URL)
                 self.assertEqual((h.FIELDS, 1), (self.site.stored_for(h.UID), len(self.site.logouts)))
                 self.assertEqual([], self.errors[seen:], "the failed lock request escaped as a page error")
+
+    # ── round 6: text typed after the press is not in the approved report, and the screen says so (U5CLI-F11) ──
+    LATE = " SYN-LATE sentence typed after the press"
+    LATER = {**h.FIELDS, "findings": h.FIELDS["findings"] + LATE}
+    CONFIRMING = {"Save": "#b-save", "Approve": "#b-approve", "Addendum": "#b-addendum"}
+
+    def press_then_type(self, control="#b-approve", rs="A", leave=False):
+        """The reader presses a confirming control and, while the server still has it, types one more sentence
+        (and may move on to study B); then the server accepts the command as it was sent."""
+        self.site.commit_answers = ["hold"]
+        self.page.locator(control).click()
+        self.wait_until(lambda: self.site.held_commits, "the command is out")
+        self.page.locator("#findings").press_sequentially(self.LATE)
+        if leave:
+            self.switch(h.PATIENT_B)
+            self.page.wait_for_timeout(200)
+        self.site.accept(self.site.held_commits.pop(), self.site.commits[-1], rs)
+        row = self.page.locator("#rows tr", has_text=h.PATIENT).first
+        expect(row.get_by_role("cell", name=rs, exact=True)).to_be_visible()
+        self.assertEqual(h.FIELDS, {k: self.site.report[k] for k in h.FIELDS}, "the accepted report is the text sent")
+
+    def late_notice(self, notices):
+        """The notice that says some text is not part of what was just confirmed."""
+        self.wait_until(lambda: any("포함되지 않았습니다" in text for text, error in notices), "the notice of the text left out")
+        text, error = next(notice for notice in notices if "포함되지 않았습니다" in notice[0])
+        self.assertFalse(error, "an accepted command was shown as a failure")
+        return text
+
+    def bar_guides(self):
+        """The confirming controls the draft bar names. A control it names can be pressed."""
+        text = self.page.locator("#draftbar").inner_text()
+        named = [name for name in self.CONFIRMING if re.search(rf"(?<![A-Za-z]){name}(?![A-Za-z])", text)]
+        for name in named:
+            self.assertTrue(self.page.locator(self.CONFIRMING[name]).is_enabled(), f"the draft bar points at {name}, which is disabled: {text}")
+        return named
+
+    def assert_apart(self, what):
+        """The draft bar's state of its own: text on screen that the approved report does not contain."""
+        bar = self.page.locator("#draftbar")
+        expect(bar).to_be_visible()
+        expect(bar).to_contain_text("승인된 판독문에 포함되지 않은 글", timeout=3000)
+        expect(bar.get_by_role("button", name="View Approved Report")).to_be_visible()
+        expect(bar.get_by_role("button", name="Discard Draft")).to_be_visible()
+        self.assertEqual(["Addendum"], self.bar_guides(), what)
+
+    def approved_view(self):
+        """View Approved Report: the approved text as the server has it, next to the text on screen."""
+        self.page.locator("#draftbar").get_by_role("button", name="View Approved Report").click()
+        dialog = self.page.get_by_role("dialog", name="Approved Report", exact=True)
+        expect(dialog).to_be_visible()
+        column = lambda title: dialog.locator("section").filter(has=self.page.get_by_role("heading", name=re.compile(title)))
+        return dialog, column("^승인본"), column("이 화면의 글")
+
+    def test_text_typed_after_approve_is_said_to_be_outside_the_approved_report_then_and_on_every_return(self):
+        self.page.clock.install()
+        self.open_main()
+        notices = self.collect_notices()
+        self.select_and_type()
+        self.press_then_type()
+        # Then: the notice of the approval says it, naming the control that was pressed.
+        said = self.late_notice(notices)
+        self.assertRegex(said, "승인")
+        self.assertIn("Approve", said)
+        # The text is kept and nothing is locked; the bar is the state of its own and points at what can be pressed.
+        self.assertEqual(self.LATER, self.editor())
+        expect(self.page.locator("#findings")).to_be_editable()
+        self.assert_apart("right after the approval")
+        self.assertEqual(["Approve", "Save"], sorted(name for name, control in self.CONFIRMING.items()
+                                                      if self.page.locator(control).is_disabled()))
+        # The approved report as the server has it does not contain the sentence; the screen's text does.
+        dialog, approved, mine = self.approved_view()
+        expect(approved).to_contain_text(h.FIELDS["findings"])
+        expect(approved).not_to_contain_text(self.LATE.strip())
+        expect(mine).to_contain_text(self.LATE.strip())
+        dialog.get_by_role("button", name="Close").click()
+        expect(dialog).not_to_be_visible()
+        self.assertEqual(self.LATER, self.editor(), "looking at the approved report changed the editor")
+        # Stored as a draft on the approved version: still not in the approved report, and the bar still says so.
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.stored_for(h.UID) == self.LATER, "the later text stored as a draft")
+        self.assertEqual((1, h.FIELDS), (self.site.puts[-1]["baseVersion"], {k: self.site.report[k] for k in h.FIELDS}))
+        self.assert_apart("after the autosave")
+        # Another study and back.
+        self.switch(h.PATIENT_B)
+        expect(self.page.locator("#draftbar")).not_to_be_visible()
+        self.switch(h.PATIENT)
+        self.assertEqual(self.LATER, self.editor())
+        self.assert_apart("after another study")
+        # A new document (the next day): the same bar from the recorded facts alone, and nothing is written or asked.
+        puts = len(self.site.puts)
+        self.page.reload()
+        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
+        self.switch(h.PATIENT)
+        expect(self.page.locator("#findings")).to_have_value(self.LATER["findings"])
+        self.assert_apart("in a new document")
+        _, approved, mine = self.approved_view()
+        expect(approved).not_to_contain_text(self.LATE.strip())
+        expect(mine).to_contain_text(self.LATE.strip())
+        self.page.clock.run_for(21000)
+        self.page.wait_for_timeout(200)
+        self.assertEqual((puts, False, []), (len(self.site.puts), self.leaving_asks(), self.dialogs),
+                         "a stored draft that only differs from the approved report is not an unconfirmed edit")
+
+    def test_text_outside_the_approved_report_goes_in_by_addendum_or_goes_away_by_discard(self):
+        for way in ("Addendum", "Discard Draft"):
+            with self.subTest(way=way):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.open_main()
+                notices = self.collect_notices()
+                self.select_and_type()
+                self.press_then_type()
+                self.late_notice(notices)
+                self.assert_apart("before " + way)
+                if way == "Addendum":
+                    # The existing flow, by the reader's own press: the sentence is in what is sent, on the approved version.
+                    self.report_menu("#b-addendum").click()
+                    self.wait_until(lambda: len(self.site.commits) == 2, "the Addendum")
+                    sent = self.site.commits[-1]
+                    self.assertEqual(("addendum", 1, self.LATER), (sent["action"], sent["baseVersion"], {k: sent[k] for k in h.FIELDS}))
+                    self.wait_until(lambda: self.site.report["version"] == 2, "the Addendum accepted")
+                    expect(self.page.locator("#draftbar")).not_to_be_visible()
+                    self.assertEqual((self.LATER, self.LATER), (self.editor(), {k: self.site.report[k] for k in h.FIELDS}))
+                else:
+                    self.dialog_answers = [True]
+                    self.page.locator("#draftbar").get_by_role("button", name="Discard Draft").click()
+                    expect(self.page.locator("#draftbar")).not_to_be_visible()
+                    # Only the approved report is left, on screen and on the server.
+                    self.assertEqual((h.FIELDS, None, h.FIELDS),
+                                     (self.editor(), self.site.stored_for(h.UID), {k: self.site.report[k] for k in h.FIELDS}))
+                self.assertFalse(self.leaving_asks(), "nothing of this document is left unconfirmed")
+
+    def test_text_typed_after_approve_in_a_study_that_was_then_left_is_named_and_shown_on_return(self):
+        self.page.clock.install()
+        self.open_main()
+        notices = self.collect_notices()
+        self.select_and_type()
+        self.press_then_type(leave=True)
+        # The reader is on study B: the notice says which study it speaks of, the way the logout panel names a study.
+        said = self.late_notice(notices)
+        study = self.site.study_row(h.RAD)
+        for part in (h.PATIENT, study["acc"], "Approve"):
+            self.assertIn(part, said)
+        self.assertEqual(EMPTY, self.editor(), "study B's editor was written by study A's answer")
+        expect(self.page.locator("#draftbar")).not_to_be_visible()
+        # Back on study A: the sentence is there, and the same bar says it is not in the approved report.
+        self.switch(h.PATIENT)
+        self.assertEqual(self.LATER, self.editor())
+        self.assert_apart("back on the study that was left")
+        dialog, approved, mine = self.approved_view()
+        expect(approved).not_to_contain_text(self.LATE.strip())
+        expect(mine).to_contain_text(self.LATE.strip())
+        dialog.get_by_role("button", name="Close").click()
+        # The write of leaving the study was made before the approval; the draft ends up standing on the approved version.
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.stored_for(h.UID) == self.LATER
+                        and self.site.rows[h.RAD["actor"]]["baseVersion"] == 1, "the later text stored on the approved version")
+        self.assertEqual(h.FIELDS, {k: self.site.report[k] for k in h.FIELDS}, "the approved report is untouched")
+        self.wait_until(lambda: not self.leaving_asks(), "the stored draft confirmed to this document")
+        # A new document: the same bar for that study.
+        self.page.reload()
+        expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
+        self.switch(h.PATIENT)
+        expect(self.page.locator("#findings")).to_have_value(self.LATER["findings"])
+        self.assert_apart("in a new document")
+        self.assertEqual([], self.dialogs)
+
+    def test_text_typed_after_save_is_said_and_the_next_save_takes_it(self):
+        self.open_main()
+        notices = self.collect_notices()
+        self.select_and_type()
+        self.press_then_type("#b-save", "T")
+        self.late_notice(notices)
+        # Not an approved report: the ordinary draft bar, and what it points at can be pressed.
+        bar = self.page.locator("#draftbar")
+        expect(bar).to_be_visible()
+        expect(bar.get_by_role("button", name="View Approved Report")).not_to_be_visible()
+        self.assertIn("Save", self.bar_guides())
+        self.page.locator("#b-save").click()
+        self.wait_until(lambda: len(self.site.commits) == 2, "the next Save")
+        sent = self.site.commits[-1]
+        self.assertEqual((1, self.LATER), (sent["baseVersion"], {k: sent[k] for k in h.FIELDS}))
+
+    def test_approve_or_save_with_nothing_typed_afterwards_is_one_press_one_notice_and_no_bar(self):
+        for control, rs in (("#b-approve", "A"), ("#b-save", "T")):
+            with self.subTest(command=control):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.page.clock.install()
+                self.open_main()
+                notices = self.collect_notices()
+                self.select_and_type()
+                self.page.locator(control).click()
+                row = self.page.locator("#rows tr", has_text=h.PATIENT).first
+                expect(row.get_by_role("cell", name=rs, exact=True)).to_be_visible()
+                self.wait_until(lambda: notices, "the notice of the command")
+                self.page.wait_for_timeout(300)
+                # One notice, of success, that speaks of nothing left out; no bar, no question, no draft afterwards.
+                self.assertEqual(1, len(set(notices)), notices)
+                self.assertEqual([], [text for text, error in notices if error or "포함되지" in text], notices)
+                expect(self.page.locator("#draftbar")).not_to_be_visible()
+                self.page.clock.run_for(21000)
+                self.page.wait_for_timeout(200)
+                self.assertEqual((1, [], [], h.FIELDS, False),
+                                 (len(self.site.commits), self.site.puts, self.dialogs, self.editor(), self.leaving_asks()))
+
+    def test_the_draft_bar_points_only_at_controls_that_can_be_pressed(self):
+        approved = {"version": 1, "rs": "A", **h.FIELDS}
+        cases = (("a draft of a report that is not approved", None, None, ["Approve", "Save"], False),
+                 ("an addendum being written on an approved report", approved, None, ["Addendum"], True),
+                 ("a stored draft that differs from the approved report, opened later", approved, self.LATER, ["Addendum"], True),
+                 ("a stored draft that says what the approved report says", approved, h.FIELDS, ["Addendum"], False))
+        for label, report, draft, guides, apart in cases:
+            with self.subTest(state=label):
+                self.open_untouched(report=report, draft=draft)
+                self.select_untouched()
+                if draft is None:
+                    self.page.locator("#findings").press_sequentially(" SYN typed now")
+                    self.page.clock.run_for(21000)
+                    self.wait_until(lambda: self.site.stored_for(h.UID), "the autosave")
+                expect(self.page.locator("#draftbar")).to_be_visible()
+                self.assertEqual(guides, sorted(self.bar_guides()))
+                view = self.page.locator("#draftbar").get_by_role("button", name="View Approved Report")
+                self.assertEqual(apart, view.is_visible(), "the bar of an approved report that the screen's text differs from")
+                if draft is not None:
+                    # Opening a study says what is there; it marks nothing as this document's unconfirmed edit.
+                    self.page.clock.run_for(21000)
+                    self.page.wait_for_timeout(200)
+                    self.assertEqual(([], False), (self.site.puts, self.leaving_asks()))
+
+    def test_a_late_answer_of_view_approved_report_is_not_drawn_beside_another_selection(self):
+        self.open_untouched(report={"version": 1, "rs": "A", **h.FIELDS}, draft=self.LATER)
+        self.select_untouched()
+        path = f"/api/studies/{h.UID}/report/versions"
+        self.site.held_gets[path] = []
+        self.page.locator("#draftbar").get_by_role("button", name="View Approved Report").click()
+        self.wait_until(lambda: self.site.held_gets[path], "the read of the approved report")
+        # A -> B -> A is not the selection the reader asked from: the answer draws nothing.
+        self.switch(h.PATIENT_B)
+        self.switch(h.PATIENT)
+        self.site.held_gets.pop(path).pop().fulfill(json=self.site.versions())
+        self.page.wait_for_timeout(400)
+        expect(self.page.get_by_role("dialog", name="Approved Report", exact=True)).not_to_be_visible()
+        self.assertEqual(self.LATER, self.editor())
+        # Asked again on this selection, it shows.
+        dialog, approved, _ = self.approved_view()
+        expect(approved).not_to_contain_text(self.LATE.strip())
 
     def test_a_busy_session_store_does_not_stop_the_autosave(self):
         self.page.clock.install()
