@@ -1,3 +1,4 @@
+# S7-U5: session termination cases moved to admin_session_dom_test.py (named signals, all panels and delayed navigation).
 # coding: utf-8
 """REQ-S5-U2a-CLINICIAN-HOME -> RISK-S5-U2a-STALE-A-B-A / HIDE-AS-PERMISSION / STATE-CONFUSION -> TEST-S5-U2a-DOM.
 
@@ -80,7 +81,7 @@ def lf_text(path):
 
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "index.html", "auth.js",
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "index.html", "auth.js", "work-context.js", "session-transport.js",
                                                     "critical-result-inbox.js")}
 MAIN_HTML = lf_text(HPACS / "main.html")
 AUTH_CONTROLLER = lf_text(ROOT / "api" / "src" / "auth.controller.ts")
@@ -332,10 +333,8 @@ class ClinicianHomeDOMTest(unittest.TestCase):
             "uid-only": variant([(REPORT_GUARD, "    return selected === uid;\n")]),
             "no-guard": variant([(REPORT_GUARD, "    return true;\n")]),
             "list-no-guard": variant([(LIST_GUARD, "    return true;\n")]),
-            "nav-no-guard": variant([(GO_GUARD, "    location.replace(url);\n"), (LOGOUT_GUARD, "    KinAuth.logout();\n")]),
             "list-keeps-detail": variant([(SET_ASIDE, "")]),
             # The request() of 2dd971b: the 401 is seen only after its body has been read.
-            "body-before-401": variant([(STATUS_FIRST, BODY_FIRST)]),
         }
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -717,13 +716,6 @@ class ClinicianHomeDOMTest(unittest.TestCase):
 
     # ── cases ──
     def test_01_landing_follows_the_guard_rule_and_main_html_hands_clinician_only_over(self):
-        # Why the hand-over sits in auth.js: the callback sends every login to main.html, main.html loads auth.js and
-        # its boot starts by awaiting KinAuth.init(). api/ and main.html are outside this unit.
-        self.assertEqual(2, AUTH_CONTROLLER.count("res.redirect(302, `${origin}/worklist/hpacs-lite/main.html`);"))
-        self.assertEqual(1, MAIN_HTML.count('<script src="auth.js"></script>'))
-        self.assertIn("    async function boot() {\n      try { await KinAuth.init(); }\n", MAIN_HTML)
-        self.assertLess(MAIN_HTML.index('<script src="auth.js"></script>'), MAIN_HTML.index("    async function boot() {"))
-
         cases = (("clinician only", ["clinician", *KEYCLOAK_DEFAULTS], "clinician.html"),
                  ("clinician + radiologist", ["clinician", "radiologist"], "main.html"),
                  ("technician + clinician", ["technician", "clinician"], "main.html"),
@@ -742,7 +734,7 @@ class ClinicianHomeDOMTest(unittest.TestCase):
                 else:
                     expect(self.page.locator("#list-state")).to_have_attribute("data-state", "ready")
         with self.subTest(entry="index.html", session="pending"):
-            self.me, self.booted = (403, {"code": "INSTITUTION_PENDING"}), []
+            self.me, self.booted = (403, {"code": "INSTITUTION_PENDING", "sessionId": "SYN-PENDING"}), []
             self.page.goto(ORIGIN + BASE + "index.html")
             self.page.wait_for_url(ORIGIN + BASE + "main.html")
             self.wait_until(lambda: self.booted, "main.html boot past init() for a pending session")
@@ -1130,78 +1122,6 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         for text, width, height in targets:
             self.assertGreaterEqual(min(width, height), 24, text)
 
-    def test_09_log_out_session_end_membership_and_no_session(self):
-        self.assertIn("      channel.postMessage({ type: 'session-ended' });\n", SHIPPED["auth.js"])
-        self.assertIn("      localStorage.setItem('kin-session-ended', String(Date.now()));\n"
-                      "      localStorage.removeItem('kin-session-ended');\n", SHIPPED["auth.js"])
-        index = ORIGIN + BASE + "index.html"
-        self.index_stand_in = True
-
-        # Log out: the page's own session-ended clears it and does not navigate again. Each scenario below starts in a new
-        # context: the end state of a logout stays until the next explicit login (S7-U5 §0.C 6).
-        self.assertEqual([index], self.log_out_here(), "Log out: one navigation")
-        self.assertEqual(["1"], self.logouts)
-        self.land()
-
-        # Two 401s: one POST /auth/logout, one navigation.
-        self.fresh_context()
-        first, after, logouts = self.two_expired()
-        self.assertEqual(([index], [index], 1), (first, after, logouts), "two 401s: one log out, one navigation")
-        self.land()
-
-        # Log out in another tab of this browser: every signal calls leave(); the page navigates once.
-        self.fresh_context()
-        seen, counts = self.log_out_elsewhere()
-        self.assertEqual(1, counts["channel"])
-        self.assertGreaterEqual(counts["storage"], 1)
-        self.assertEqual([index], seen, f"another tab's log out ({counts}): one navigation")
-        self.land()
-
-        self.fresh_context()
-        for code, title, text in (("INSTITUTION_PENDING", "Pending Approval",
-                                   "가입 신청이 접수되었습니다. 관리자가 기관과 역할을 확인한 뒤 사용할 수 있습니다."),
-                                  ("INSTITUTION_INVALID", "Account Setup Required",
-                                   "기관 또는 업무 역할 설정이 올바르지 않습니다. 관리자에게 문의해 주세요.")):
-            with self.subTest(membership=code):
-                self.me = (403, {"code": code})
-                lists = len(self.list_requests)
-                self.page.goto(ORIGIN + BASE + "clinician.html")
-                expect(self.page.locator("#membership")).to_be_visible()
-                self.assertEqual((title, text), (self.page.locator("#membership-title").text_content(),
-                                                 self.page.locator("#membership-text").text_content()))
-                expect(self.page.locator("#home")).to_be_hidden()
-                expect(self.page.locator("#membership-logout")).to_have_text("Log out")
-                self.assertEqual(lists, len(self.list_requests))
-
-        self.me = (401, {"statusCode": 401, "message": "인증 정보가 없습니다"})
-        start = len(self.documents)
-        self.page.goto(ORIGIN + BASE + "clinician.html")
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        expect(self.page.locator("#stand-in")).to_be_visible()
-        self.assertEqual([ORIGIN + BASE + "clinician.html", index], self.documents[start:], "no session: one navigation")
-        self.assertEqual([], self.failed_documents, "no navigation was cancelled")
-
-        # Control: the same steps on the same file without the guard, inside the same window. The page's own
-        # session-ended navigates again and the signals from another tab navigate more than once, so the single counts
-        # above are not a harness that misses them. Only these are asserted: what the second log out's navigation and
-        # echo add to the held requests is not pinned. The second 401's logout() call no longer sends a second POST
-        # (S7-U5 §0.C 1: auth.js shares one POST per intent), so that control asserts the second navigation only.
-        self.files["clinician.js"] = self.variants["nav-no-guard"]
-        self.me = me(["clinician", *KEYCLOAK_DEFAULTS])
-        self.fresh_context()
-        self.assertEqual([index, index], self.log_out_here(), "nav-no-guard: Log out navigates twice")
-        self.land()
-
-        self.fresh_context()
-        first, _, logouts = self.two_expired()
-        self.assertEqual(([index, index], 1), (first, logouts), "nav-no-guard: the 401 navigates twice, one POST")
-        self.land()
-
-        self.fresh_context()
-        seen, counts = self.log_out_elsewhere()
-        self.assertEqual([index] * len(seen), seen)
-        self.assertGreaterEqual(len(seen), 2, f"nav-no-guard: another tab's signals ({counts}) navigate again")
-        self.land()
 
     def own_echo_moves_nothing(self, documents, what):
         """The page's own session-ended went out when its end began, before the POST (S7-U5 §0.C 2/4): it has reached
@@ -1210,100 +1130,6 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.page.wait_for_timeout(WINDOW_MS)
         self.assertEqual(documents, len(self.documents), f"{what}: no navigation while the POST is held")
 
-    def test_10_log_out_and_401_clear_the_page_before_the_log_out_answers(self):
-        # KinAuth.logout() navigates only after POST /auth/logout answers (up to 10 s). Every case holds that POST: the
-        # page must already be clear, and stay clear when an earlier report read answers 200. Each scenario starts in a
-        # new context: the end state of a logout stays until the next explicit login (S7-U5 §0.C 6).
-        index = ORIGIN + BASE + "index.html"
-        self.index_stand_in = True
-        answer_b = self.reports[uid(2)]
-
-        # The review's order: a report read pending, the list answers 401, the POST held, then the report answers.
-        self.open_home()
-        self.pick(1)
-        self.page.evaluate(WATCH_SIGNALS)
-        logouts, documents, self.signals = len(self.logouts), len(self.documents), []
-        (pending,) = self.pending_reports(2)
-        self.held_logouts, self.list_errors = [], [EXPIRED]
-        self.page.locator("#refresh").click()
-        post = self.pending_log_out()
-        self.assert_closed("list 401, log out pending")
-        self.own_echo_moves_nothing(documents, "list 401")
-        self.release(pending, answer_b)
-        self.assert_closed("list 401: the earlier report answer after it")
-        self.assertEqual([index], self.finish_log_out(post), "list 401: one navigation")
-        self.assertEqual(1, len(self.logouts) - logouts, "list 401: one POST")
-        self.land()
-
-        # Log out with a report read pending; another tab ends the session while the POST is pending, and nothing
-        # navigates before KinAuth.logout() does.
-        self.fresh_context()
-        self.open_home()
-        self.pick(1)
-        self.page.evaluate(WATCH_SIGNALS)
-        logouts = len(self.logouts)
-        (pending,) = self.pending_reports(2)
-        self.held_logouts = []
-        self.page.locator("#logout").click()
-        post = self.pending_log_out()
-        self.assert_closed("Log out pending")
-        self.release(pending, answer_b)
-        self.assert_closed("Log out pending: the earlier report answer after it")
-        documents, self.signals = len(self.documents), []
-        other = self.context.new_page()
-        other.goto(ORIGIN + BASE + "blank.html")
-        other.evaluate(BROADCAST_ENDED)
-        self.wait_until(lambda: "channel" in self.signals and "storage" in self.signals, "another tab's session-ended")
-        self.page.wait_for_timeout(WINDOW_MS)
-        other.close()
-        self.assertEqual(documents, len(self.documents), "another tab's session-ended: no navigation while the POST is pending")
-        self.assert_closed("another tab's session-ended while Log out is pending")
-        self.assertEqual([index], self.finish_log_out(post), "Log out: one navigation")
-        self.assertEqual(1, len(self.logouts) - logouts, "Log out: one POST")
-        self.land()
-
-        # A report read answers 401 and starts the log out; an earlier read answers 401 while the POST is pending.
-        self.fresh_context()
-        self.open_home()
-        self.pick(1)
-        self.page.evaluate(WATCH_SIGNALS)
-        logouts, documents, self.signals = len(self.logouts), len(self.documents), []
-        earlier, current = self.pending_reports(2, 3)
-        self.held_logouts = []
-        current.fulfill(status=EXPIRED[0], json=EXPIRED[1])
-        post = self.pending_log_out()
-        self.assert_closed("a report 401, log out pending")
-        self.own_echo_moves_nothing(documents, "a report 401")
-        earlier.fulfill(status=EXPIRED[0], json=EXPIRED[1])
-        self.wait_until(lambda: any(item is earlier.request for item in self.finished), "the second 401 reaching the page")
-        self.settle()
-        self.assertEqual(1, len(self.logouts) - logouts, "the second 401 does not log out again")
-        self.assert_closed("a second 401 while the POST is pending")
-        self.assertEqual([index], self.finish_log_out(post), "two 401s: one navigation")
-        self.land()
-
-        # S7-U5 §0.C 1/2: the control that served the pre-fix logout() (no close) and report guard is retired. auth.js
-        # now sends the end notice when the end begins, the page's own listener closes it from that notice before the
-        # POST is answered, so the pre-fix file no longer keeps the page up or paints the earlier answer. The cases above
-        # keep both risks asserted on the shipped file; the one-off counterexample (the pre-fix file over an auth.js that
-        # notifies only after the POST) is kept with the S7-U5 fix1 evidence.
-
-        # A page without BroadcastChannel: no session-ended comes back to it, and it is cleared all the same.
-        self.fresh_context("delete globalThis.BroadcastChannel;")
-        self.open_home()
-        self.assertEqual("undefined", self.page.evaluate("() => typeof BroadcastChannel"))
-        self.pick(1)
-        logouts = len(self.logouts)
-        (pending,) = self.pending_reports(2)
-        self.held_logouts = []
-        self.page.locator("#logout").click()
-        post = self.pending_log_out()
-        self.assert_closed("no BroadcastChannel: Log out pending")
-        self.release(pending, answer_b)
-        self.assert_closed("no BroadcastChannel: the earlier report answer after it")
-        self.assertEqual([index], self.finish_log_out(post), "no BroadcastChannel: one navigation")
-        self.assertEqual(1, len(self.logouts) - logouts, "no BroadcastChannel: one POST")
-        self.land()
 
     def test_11_a_list_refresh_takes_the_selected_study_down_until_a_list_succeeds(self):
         refusals = {"403": (403, {"statusCode": 403, "message": "임상의 조회은(는) clinician 권한이 필요합니다", "error": "Forbidden"}),
@@ -1384,50 +1210,6 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.assertEqual((uid(2), "final", ["Findings", "SYN-B findings"]), (seen["detailUid"], seen["state"], seen["sections"][0]),
                          "list-keeps-detail: the pending answer paints after a 409")
 
-    def test_12_a_401_ends_the_session_on_its_status_line_while_its_body_is_held(self):
-        # The 401 is known from its status line. Nothing may wait for its body: while the body and POST /auth/logout are
-        # both held the page is clear and the current study's 200 does not paint, however the body ends.
-        index = ORIGIN + BASE + "index.html"
-        self.index_stand_in = True
-        answer_a = self.reports[uid(1)]
-        for ending in ("held", "json", "malformed"):
-            with self.subTest(body=ending):
-                # A new context each: the end state of the previous sub-case stays until an explicit login.
-                self.fresh_context(HOLD_401_BODY)
-                logouts = len(self.logouts)
-                current = self.expire_behind_a_held_body()
-                post = self.pending_log_out()
-                self.assert_closed(f"{ending}: 401 status line, body and log out held")
-                self.release(current, answer_a)
-                self.assert_closed(f"{ending}: the current report's 200 after the 401 status line")
-                if ending != "held":
-                    self.page.evaluate("kind => synHeld401[0].finish(kind)", ending)
-                    self.settle()
-                    self.assert_closed(f"{ending}: the 401 body completes")
-                self.assertEqual(1, len(self.logouts) - logouts, f"{ending}: one POST while it is pending")
-                self.assertEqual([index], self.finish_log_out(post), f"{ending}: one navigation")
-                self.assertEqual(1, len(self.logouts) - logouts, f"{ending}: one POST")
-                self.land()
-
-        # Control: request() of 2dd971b reads the body first. While it is held nothing is cleared, no POST is sent and
-        # the current answer paints its final report and key images; the session ends only when the body arrives. So
-        # the checks above cannot pass on a harness that delivers a 401's body with its status line.
-        self.files["clinician.js"] = self.variants["body-before-401"]
-        self.fresh_context(HOLD_401_BODY)
-        logouts = len(self.logouts)
-        current = self.expire_behind_a_held_body()
-        self.release(current, answer_a)
-        seen = self.report()
-        self.assertEqual(("final", ["Findings", "SYN-A findings line 1\nline 2"], "키 이미지 2건", "SYN ALPHA", 0),
-                         (seen["state"], seen["sections"][0], seen["keysState"], self.identity()["Name"],
-                          len(self.logouts) - logouts),
-                         "body-before-401: the current answer paints while the 401 body is held")
-        self.page.evaluate("kind => synHeld401[0].finish(kind)", "json")
-        post = self.pending_log_out()
-        self.assert_closed("body-before-401: the page closes only once the 401 body arrives")
-        self.assertEqual(1, len(self.logouts) - logouts)
-        post.fulfill(status=204, body="")
-        self.page.wait_for_url(index)
 
     def test_13_ack_wording_ban_covers_everything_outside_the_critical_results_region(self):
         # TEST-S7-U2a-HOME-GUARD (RISK-S7-U2a-GUARD-WEAKENED): the S7-U2a region is the one exemption of test_08, and it

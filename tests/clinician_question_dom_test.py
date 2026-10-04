@@ -64,36 +64,15 @@ receipts that replay the stored `applied` result, revision before state, author/
       filter, a study missing from the loaded worklist is disabled with a Korean reason, Open Study selects the study
       and opens the chosen thread, empty and failed states.
   16  session policy: another tab's session end while a read is pending hides the row, stops the read and paints nothing;
-      a 403 read and another account's envelope lock the row with an explicit text and nothing more is read; a 401 on a
-      write ends the row and starts the logout.
+      a 403 read and another account's envelope lock the row with an explicit text and nothing more is read; a plain 401 on a
+      write is a failed request, not a session end.
   17  wording, fonts, hit targets and keyboard on the reading screen.
-  18  (F1) with the shipped auth.js and POST /auth/logout held: a 401 ends the row while that POST is held - nothing
-      shown, drafts dropped, the question requests on the way aborted, their answers paint nothing and nothing more is
-      read - calls the page's other registered end() once (window.kinOn401), and auth.js gives no identity any more.
-  18b (Astra S5-U4b-B-R-001 F1) the same for a 401 on another request of the page (a report save through main.html's own
-      api(), cut out as shipped): every registered end() runs before POST /auth/logout answers.
-  18c (B-R-001 F1, S7-U5 §8) the confirmed Log out (main.html's own handler, clicked): the draft write of its preparation
-      comes first and is not the end (the row stays, no logout POST); once it is saved the row is ended before the
-      logout POST answers. (The 18/18b/18c controls - the block leaving its end to the broadcast, api() and the handler
-      without the list call - are retired by S7-U5: auth.js's end notice before the network ends the row in each.)
-  18d (S7-PINS, run rather than read) every logout path of main.html calls the end list first. The paths are
-      TypeScript's answer over every script the page loads (S7-PINS fix1, Astra S7-COMMAND-R-001-F09: a path list, not
-      a count of calls): each KinAuth.logout, and for the two mounts that take `logout: () => KinAuth.logout()` each
-      place the mount calls that option. (S7-U1b's mount passes the same option to KinCriticalResultSend.mount, a name
-      critical-result-send.js puts on window rather than a function the page declares, so its KinAuth.logout is a path
-      where it stands.) Each path is made to log its own id, and every start is then run over
-      stand-ins - api()'s 401, api()'s draft write refused for another account (S7-U5-SPEC-C-F01: the server's
-      REPORT_DRAFT_OWNER_CHANGED, an account change), the dictation controller's 401, the list and poll account
-      changes, the confirmed Log out,
-      the question row's own 401, the S5-U4c queue write's own 401, the S7-U1b sender area's own 401 (the shipped
-      critical-result-send.js under main.html's S7-U1b block), the S7-U2a Critical Results panel's own 401 (the shipped
-      critical-result-inbox.js under main.html's S7-U2a block), another document's end (S7-U5: the listener the page
-      hands auth.js) - while an end() in window.kinOn401 logs the list: once, before any network wait and before the
-      logout (the confirmed Log out: after its draft write, S7-U5 §8). Each run is matched to the one path it took. The membership
-      screen's Log out is the one start without the list, and it runs only after that screen has replaced the whole
-      page. A path no start runs, two starts on one path, or a KinAuth used other than as KinAuth.<name> fails the case
-      (a new mount's 401 path needs its own start here). (S5-U4bc-R-001 F01: an account change the row sees goes to the
-      same list with the reason 'account-changed' - tests/clinician_request_dom_test.py c13/m14 open both areas.)
+  18  a named server end drops pending question answers without sending another logout POST.
+  18b a plain 401 through the page API leaves pending questions and the session intact.
+  18c the shipped Log out preparation waits for its draft command, keeps Questions visible until saving succeeds,
+      then ends pending questions before the logout POST answers.
+  18d other page requests exercise ordinary failures versus the two named session errors through the real authority.
+
   19  (F3) Inbox -> Open Study for a question outside its study's latest 50 opens it through GET questions/:id and keeps
       it after a reply re-reads the list; a late read of an earlier choice never paints; 404, another study's thread and
       403 are explicit.
@@ -127,7 +106,7 @@ def lf_text(path):
 
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "critical-result-inbox.js")}
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", "critical-result-inbox.js")}
 MAIN = lf_text(HPACS / "main.html")
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
 INDEX_STAND_IN = ('<!doctype html><html><head><meta charset="utf-8"><title>SYN index stand-in</title></head>'
@@ -383,7 +362,7 @@ let selectedUid = null;
 let studies = window.synStudies;
 const toast = (message, kind) => { window.synToasts.push([message, kind]); };
 KIN_AUTH
-function select(uid) { window.synSelects.push(uid); if (uid === selectedUid) return; selectedUid = uid; renderClinical(); }
+function select(uid) { work.select(uid); window.synSelects.push(uid); if (uid === selectedUid) return; selectedUid = uid; renderClinical(); }
 function renderClinical() {
 HOOK}
 """.replace("HOOK", HOOK)
@@ -415,320 +394,27 @@ EXIT_STAND_INS = """
 let insertInFlight = false, commitInFlight = false, appState = {}, selectionSeq = 0, user = 'syn-radiologist';
 const RFIELDS = ['findings', 'conclusion', 'recommendation'];
 const reportBaseVersion = (uid, fallback) => fallback;
-const citations = { keepIds: () => undefined }, structureState = { keepIds: () => undefined };
-const settleStash = async () => true, markConverge = () => {}, heldByOther = () => null, cur = () => null;
-const reportNeedsWrite = () => true;
-window.synCalls = [];
-const synRow = () => document.querySelector('#question-p').dataset.state;
-window.confirm = () => { window.synCalls.push('confirm'); return true; };
-const reportPreview = { close: () => { window.synCalls.push('reportPreview.close'); } };
-function closeSR() { window.synCalls.push('closeSR'); }
-function endPatientCopy() { window.synCalls.push('endPatientCopy'); }
-async function stashReport() { window.synCalls.push('stashReport:' + synRow()); await new Promise(resolve => { window.synStashed = resolve; }); return 'saved'; }
-async function releaseHold() { window.synCalls.push('releaseHold:' + synRow()); }
-// S7-U5 F01/F02: the account the page binds its draft writes to (none here), the list and poll generations the preparation
-// moves and the poll Back to Editing restarts; inert here.
-let draftOwner = null, poll = null, pollGeneration = 0, listLoadSequence = 0;
-function startPolling() {}
-// S7-U5 fix7 (Astra S7-U5-R-001-F02): the report's citation and structure read tickets the preparation drops; none here.
-const citationReads = new Map(), structureReads = new Map();
+const heldByOther = () => null, reportNeedsWrite = () => true;
+let draftOwner = {sub:'SYN-RAD-SUB',institution:'SYN-INST-A',author:'syn-radiologist'}, poll = null;
+const reportConverge = new Set();
+const KinReportDraftClient = {sameSnapshot: (a,b) => JSON.stringify(a) === JSON.stringify(b)};
+const draftClient = {
+  base: async () => ({outcome:'ready',revision:0,stored:null,lists:{citations:[],structured:[]}}),
+  preserve: async capture => {
+    window.synCapture = capture;
+    await new Promise(resolve => { window.synStashed = resolve; });
+    return {outcome:'saved'};
+  },
+};
+const staleAnswer = () => Object.assign(new Error('SYN obsolete'), {stale:true});
 """
-OTHER_PANEL = "() => { window.synOtherEnds = 0; window.kinOn401.push(() => { window.synOtherEnds += 1; }); }"
+
+OTHER_PANEL = "() => { window.synOtherEnds = 0; KinWorkContext.onInvalidate(e => { if(e.reason === 'lifecycle' && !['active','preparing'].includes(e.state)) window.synOtherEnds += 1; }); }"
 TOGGLES = """() => { for (const id of ['question-toggle', 'question-inbox', 'question-toggle'])
   document.getElementById(id).click(); }"""
 
-# test_18d (S7-PINS): every logout path of main.html, run. The paths come from TypeScript (S7-PINS fix1, Astra
-# S7-COMMAND-R-001-F09 - a path list, not a count of calls): LOGOUT_PATHS_TS runs in node with the typescript that
-# api/package-lock.json installs (npm ci --prefix api --ignore-scripts; validate.yml runs it for the route inventory
-# before this file) over every script main.html loads, in page order - its inline blocks and each <script src> file,
-# auth.js among them, where KinAuth is declared. It answers every KinAuth.logout, read or called, and refuses a KinAuth
-# used other than as KinAuth.<name>: an alias or a destructuring would hide logouts from it. A KinAuth.logout inside a
-# function passed as a named option to a function the page declares (the S5-U4b and S5-U4c mounts' `logout: () =>
-# KinAuth.logout()`) starts where that function calls the option, which the checker finds through the destructured
-# name's binding; any other starts where it stands. Offsets are in code points of the text sent.
-# tag_logout_paths() makes each path name itself, so SITE_AUTH's logout(tag) and a 'via:<path>' entry in
-# window.synCalls tell which path a start ran; END_LIST_PROBE puts an end() into window.kinOn401 that logs the list.
-# Every stand-in logs into window.synCalls, a network wait as 'wait:<name>'.
-LOGOUT_PATHS_TS = r"""'use strict';
-const ts = require(require.resolve('typescript', { paths: [process.argv[1]] }));
-let input = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => { input += chunk; });
-process.stdin.on('end', () => {
-  const scripts = JSON.parse(input);
-  const files = new Map(scripts.map((s, i) => [`/page/${i}.js`, s]));
-  const options = { allowJs: true, checkJs: false, noEmit: true, noLib: true, noResolve: true, types: [],
-                    target: ts.ScriptTarget.ESNext };
-  const host = ts.createCompilerHost(options, true);
-  const sources = new Map();
-  host.getSourceFile = (name, version) => {
-    if (!files.has(name)) return undefined;
-    if (!sources.has(name)) sources.set(name, ts.createSourceFile(name, files.get(name).text, version, true, ts.ScriptKind.JS));
-    return sources.get(name);
-  };
-  host.fileExists = name => files.has(name);
-  host.readFile = name => (files.has(name) ? files.get(name).text : undefined);
-  const program = ts.createProgram([...files.keys()], options, host);
-  const checker = program.getTypeChecker();
-  const out = { typescript: ts.version, parse_errors: [], declarations: [], refused: [], references: [], paths: [] };
-  const flat = s => s.replace(/\s+/g, ' ').trim();
-  const where = (node, sf, end) => {
-    const script = files.get(sf.fileName);
-    const at = end ? node.getEnd() : node.getStart(sf);
-    return script.offset === null ? null : script.offset + [...script.text.slice(0, at)].length;
-  };
-  const origin = sf => files.get(sf.fileName).origin;
-  // A readable name for where a node sits: the named functions, variables, options, calls and branches around it.
-  const chain = (node, sf, stop, last) => {
-    const parts = [];
-    for (let child = node, p = node.parent; p && p !== stop; child = p, p = p.parent) {
-      if (ts.isFunctionDeclaration(p) && p.name) parts.push(`function ${p.name.text}`);
-      else if (ts.isMethodDeclaration(p) && p.name) parts.push(`${p.name.getText(sf)}()`);
-      else if (ts.isVariableDeclaration(p) && ts.isIdentifier(p.name)) parts.push(`${p.name.text} =`);
-      else if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && child === p.right)
-        parts.push(`${flat(p.left.getText(sf))} =`);
-      else if (ts.isPropertyAssignment(p) && child === p.initializer) parts.push(`${p.name.getText(sf)}:`);
-      else if (ts.isCatchClause(p)) parts.push('catch');
-      else if (ts.isIfStatement(p) && child !== p.expression)
-        parts.push(`if (${flat(p.expression.getText(sf)).slice(0, 60)})${child === p.elseStatement ? ' else' : ''}`);
-      else if (ts.isCallExpression(p) && p.arguments.includes(child)) {
-        const first = p.arguments[0];
-        const lead = first && first !== child && ts.isStringLiteralLike(first) ? first.getText(sf) + ', ' : '';
-        parts.push(`${flat(p.expression.getText(sf))}(${lead}…)`);
-      }
-    }
-    return [...parts.reverse(), last].join(' › ');
-  };
-  const pageFunction = declaration => declaration && ts.isFunctionDeclaration(declaration) && declaration.name
-    && files.has(declaration.getSourceFile().fileName);
-  for (const name of files.keys()) {
-    const sf = program.getSourceFile(name);
-    for (const d of sf.parseDiagnostics)
-      out.parse_errors.push(`${origin(sf)}: ${ts.flattenDiagnosticMessageText(d.messageText, '\n')}`);
-    const refs = [];
-    const visit = node => {
-      let ref = null;
-      if (ts.isIdentifier(node) && node.text === 'KinAuth') {
-        const p = node.parent;
-        if (ts.isVariableDeclaration(p) && p.name === node) out.declarations.push({ origin: origin(sf), at: where(node, sf) });
-        else ref = ts.isPropertyAccessExpression(p) && p.name === node ? p : node;
-      } else if (ts.isStringLiteralLike(node) && node.text === 'KinAuth' && ts.isElementAccessExpression(node.parent)
-                 && node.parent.argumentExpression === node) {
-        ref = node.parent;
-      }
-      if (ref) {
-        const p = ref.parent;
-        let member = null;
-        if (p && ts.isPropertyAccessExpression(p) && p.expression === ref) member = p.name.text;
-        else if (p && ts.isElementAccessExpression(p) && p.expression === ref && ts.isStringLiteralLike(p.argumentExpression))
-          member = p.argumentExpression.text;
-        else if (p && ts.isTypeOfExpression(p)) member = '';
-        if (member === null)
-          out.refused.push({ origin: origin(sf), at: where(ref, sf), text: flat((p || ref).getText(sf)).slice(0, 120),
-                             why: 'KinAuth used other than as KinAuth.<name>: the logouts reached through it cannot be found' });
-        else if (member === 'logout') refs.push(p);
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sf);
-    for (const ref of refs) {
-      const reference = { id: `r${out.references.length + 1}`, origin: origin(sf), at: where(ref, sf), end: where(ref, sf, true),
-                          label: chain(ref, sf, undefined, flat(ref.getText(sf))), path: null };
-      out.references.push(reference);
-      let fn = ref.parent;
-      while (fn && !ts.isFunctionLike(fn)) fn = fn.parent;
-      const assignment = fn && fn.parent;
-      const literal = assignment && ts.isPropertyAssignment(assignment) && assignment.initializer === fn ? assignment.parent : null;
-      const call = literal && ts.isObjectLiteralExpression(literal) ? literal.parent : null;
-      const symbol = call && ts.isCallExpression(call) && call.arguments.includes(literal) ? checker.getSymbolAtLocation(call.expression) : null;
-      const declaration = symbol && symbol.valueDeclaration;
-      if (!pageFunction(declaration)) {
-        reference.path = `p${out.paths.length + 1}`;
-        out.paths.push({ id: reference.path, kind: 'direct', reference: reference.id, origin: reference.origin,
-                         at: reference.at, end: reference.end, label: reference.label });
-        continue;
-      }
-      const dsf = declaration.getSourceFile();
-      const key = assignment.name.getText(sf);
-      const parameter = declaration.parameters[call.arguments.indexOf(literal)];
-      const element = parameter && ts.isObjectBindingPattern(parameter.name)
-        ? parameter.name.elements.find(e => (e.propertyName || e.name).getText(dsf) === key) : null;
-      if (!element || !ts.isIdentifier(element.name)) {
-        out.refused.push({ origin: reference.origin, at: reference.at, text: reference.label,
-                           why: `${declaration.name.text}() does not take ${key} as a destructured name, so where it calls it is not found` });
-        continue;
-      }
-      const bound = checker.getSymbolAtLocation(element.name);
-      const uses = [];
-      const find = node => {
-        if (ts.isIdentifier(node) && node.text === element.name.text && node !== element.name
-            && checker.getSymbolAtLocation(node) === bound) uses.push(node);
-        ts.forEachChild(node, find);
-      };
-      find(declaration.body);
-      if (!uses.length) reference.unused = `${declaration.name.text}() never uses ${key}`;
-      for (const use of uses) {
-        if (!(ts.isCallExpression(use.parent) && use.parent.expression === use)) {
-          out.refused.push({ origin: origin(dsf), at: where(use, dsf), text: flat(use.parent.getText(dsf)).slice(0, 120),
-                             why: `${declaration.name.text}()'s ${key} used other than called` });
-          continue;
-        }
-        out.paths.push({ id: `p${out.paths.length + 1}`, kind: 'option', reference: reference.id, origin: origin(dsf),
-                         at: where(use, dsf), end: where(use, dsf, true),
-                         label: `${reference.label} ⇒ ${chain(use.parent, dsf, declaration.parent, `${use.text}()`)}` });
-      }
-    }
-  }
-  process.stdout.write(JSON.stringify(out));
-});
-"""
-# The page's scripts as the browser's own HTML parser splits them (test_18d compares page_scripts() with this), and any
-# script an attribute carries, which page_scripts() would not see.
-PARSED_SCRIPTS = """html => { const doc = new DOMParser().parseFromString(html, 'text/html');
-  return {scripts: [...doc.scripts].map(s => [s.getAttribute('src'), s.hasAttribute('src') ? '' : s.text]),
-          attributes: [...doc.querySelectorAll('*')].flatMap(e => [...e.attributes]
-            .filter(a => /^on/i.test(a.name) || /^\\s*javascript:/i.test(a.value)).map(a => `${e.tagName} ${a.name}`))}; }"""
-
-
-def page_scripts(source):
-    """main.html's scripts in page order, as LOGOUT_PATHS_TS takes them: {origin, offset, text}, where an inline block's
-    offset is its first code point in `source` and a <script src> file (read from hpacs-lite) has none."""
-    scripts = []
-    for match in re.finditer(r"<script\b([^>]*)>(.*?)</script>", source, flags=re.S):
-        src = re.search(r'\bsrc="([^"]+)"', match.group(1))
-        if src:
-            scripts.append({"origin": src.group(1), "offset": None, "text": lf_text(HPACS / src.group(1))})
-        else:
-            scripts.append({"origin": "main.html", "offset": match.start(2), "text": match.group(2)})
-    return scripts
-
-
-def logout_paths(scripts):
-    """LOGOUT_PATHS_TS's answer for `scripts`. Fails, never skips, when node or typescript is not there."""
-    node = shutil.which("node")
-    if node is None:
-        raise AssertionError("node is not on PATH: the logout paths are TypeScript's answer (tests/README.md S7-PINS)")
-    run = subprocess.run([node, "-e", LOGOUT_PATHS_TS, str(ROOT / "api")], input=json.dumps(scripts).encode("utf-8"),
-                         capture_output=True, timeout=120)
-    if run.returncode != 0:
-        raise AssertionError("LOGOUT_PATHS_TS failed (typescript: npm ci --prefix api --ignore-scripts): "
-                             + run.stderr.decode("utf-8", "replace")[-2000:])
-    return json.loads(run.stdout.decode("utf-8"))
-
-
-def tag_logout_paths(source, found):
-    """`source` with every KinAuth.logout the parser found calling KinAuth.logout(<tag>, ...): a direct path's own id,
-    or for an option's reference its reference id; and each place a mount calls the option logging 'via:<path id>'
-    first. Only the spans the parser gave are replaced, back to front."""
-    edits = []
-    for ref in found["references"]:
-        spelled = re.sub(r"\s", "", source[ref["at"]:ref["end"]])
-        if not spelled.endswith("logout"):
-            raise AssertionError(f"{ref['id']} at {ref['at']} is {spelled!r}, not a KinAuth.logout")
-        edits.append((ref["at"], ref["end"], f"((...a) => KinAuth.logout('{ref['path'] or ref['id']}', ...a))"))
-    for path in found["paths"]:
-        if path["kind"] == "option":
-            name = source[path["at"]:path["end"]]
-            edits.append((path["at"], path["end"], "((...a) => { (window.synCalls = window.synCalls || []).push("
-                          f"'via:{path['id']}'); return {name}(...a); }})"))
-    edits.sort(reverse=True)
-    after = len(source)
-    for at, end, text in edits:
-        if end > after:
-            raise AssertionError(f"overlapping logout spans at {at}")
-        source, after = source[:at] + text + source[end:], at
-    return source
-
-
-def path_ran(calls, found):
-    """The one logout path a start ran, from what the tagged page logged."""
-    logouts = [call.split(":", 1)[1] for call in calls if call.startswith("logout:")]
-    vias = [call.split(":", 1)[1] for call in calls if call.startswith("via:")]
-    if len(logouts) != 1:
-        raise AssertionError(f"one logout expected: {calls}")
-    direct = {path["id"] for path in found["paths"] if path["kind"] == "direct"}
-    if logouts[0] in direct:
-        if vias:
-            raise AssertionError(f"a direct path logged an option call: {calls}")
-        return logouts[0]
-    options = {path["id"]: path["reference"] for path in found["paths"] if path["kind"] == "option"}
-    if len(vias) != 1 or options.get(vias[0]) != logouts[0]:
-        raise AssertionError(f"the logout {logouts[0]} was not reached through exactly one of its option calls: {calls}")
-    return vias[0]
-
-
-# The page's S7-U5 end coordination also hands auth.js a listener for another document's end, a step before the logout
-# POST and a hold on its move; the stand-in keeps the listener so a start can call it, and takes the other two.
-SITE_AUTH ="""const KinAuth = {
-  session: () => window.synSession,
-  has: role => { const s = window.synSession; return !!s && s.state === 'approved' && (s.roles.includes(role) || s.roles.includes('admin')); },
-  logout: async site => { window.synCalls.push('logout:' + site); },
-  onEndedElsewhere: listener => { window.synEndedElsewhere = listener; },
-  beforeLogoutPost: () => {},
-  holdLeave: () => {},
-  leave: () => {},
-};
-"""
-END_LIST_PROBE = """() => { window.synCalls = window.synCalls || []; window.synOtherEnds = 0;
-  (window.kinOn401 = window.kinOn401 || []).push(() => { window.synOtherEnds += 1; window.synCalls.push('end-list'); }); }"""
-LOGGED_OUT = "() => (window.synCalls || []).some(call => call.startsWith('logout:'))"
-# What each start's cut of the page script reads from the rest of it, as stand-ins.
-OWNER_CHANGED_READ = "async () => { throw Object.assign(new Error('SYN owner changed'), { ownerChanged: true }); }"
-API_STAND_INS = "const API = location.origin + '/api';\n"
-DICTATION_STAND_INS = """const API = location.origin + '/api';
-const KinDictationSession = {}, KinDictationCapture = {};
-function dictationContext() { return null; }
-function dictationBlock() { return null; }
-function dictationInsert() { return false; }
-function dictationPlacement() { return ''; }
-let commitInFlight = false, insertInFlight = false;
-const KinDictation = { createController: options => { window.synDictation = options; return {}; } };
-"""
-LIST_STAND_INS = f"""let listLoadSequence = 0, commitEpoch = 0, commitInFlight = false, offline = false, serverMode = true;
-const studyPageClient = {{ read: {OWNER_CHANGED_READ}, clear: () => {{ window.synCalls.push('clear'); }} }};
-"""
-# A 50 ms interval; clear() pauses the client, so the interval reads once.
-POLL_STAND_INS = f"""let poll = null, pollGeneration = 0, serverMode = true, commitInFlight = false, commitEpoch = 0;
-const worklistRefresh = {{ seconds: () => 0.05 }};
-const studyPageClient = {{ busy: false, paused: false, read: {OWNER_CHANGED_READ},
-  clear() {{ window.synCalls.push('clear'); this.paused = true; }} }};
-"""
-# S7-U5 §8: the Log out's preparation reads the selected study (a synthetic one with a change to write) and saves the
-# draft first; stashReport() answers "saved" as the shipped one answers a stored write.
-LOG_OUT_STAND_INS = """const $ = s => document.querySelector(s);
-const API = location.origin + '/api';
-const toast = (message, kind) => { window.synToasts.push([message, kind]); };
-let insertInFlight = false, commitInFlight = false, offline = false, selectedUid = 'SYN-STUDY', appState = {}, selectionSeq = 0;
-let sess = window.synSession, user = '';
-const RFIELDS = ['findings', 'conclusion', 'recommendation'];
-const reportBaseVersion = (uid, fallback) => fallback;
-const citations = { keepIds: () => undefined }, structureState = { keepIds: () => undefined };
-const settleStash = async () => true, markConverge = () => {}, heldByOther = () => null, cur = () => null;
-const reportNeedsWrite = () => true;
-window.confirm = () => { window.synCalls.push('confirm'); return true; };
-const reportPreview = { close: () => { window.synCalls.push('reportPreview.close'); } };
-function closeSR() { window.synCalls.push('closeSR'); }
-function endPatientCopy() { window.synCalls.push('endPatientCopy'); }
-async function stashReport() { window.synCalls.push('wait:stashReport'); return 'saved'; }
-async function releaseHold() { window.synCalls.push('wait:releaseHold'); }
-let draftOwner = null, poll = null, pollGeneration = 0, listLoadSequence = 0;
-function startPolling() {}
-// S7-U5 fix7 (Astra S7-U5-R-001-F02): the report's citation and structure read tickets the preparation drops; none here.
-const citationReads = new Map(), structureReads = new Map();
-"""
-# S7-U5: what the page's end coordination (closeWork, endHere) reads from the rest of the page script, empty.
-END_STAND_INS = """const $ = s => document.querySelector(s);
-let logoutPrep = null, pollGeneration = 0, poll = null, heartbeat = null, listLoadSequence = 0, commitEpoch = 0;
-let selectionSeq = 0, selectedUid = null, relatedUid = null, studies = [];
-const RFIELDS = ['findings', 'conclusion', 'recommendation'];
-function showLogoutPanel() {}
-async function releaseHold() { window.synCalls.push('wait:releaseHold'); }
-"""
-END_SECTION = ("    // ══════════ 세션 종료 조정 (S7-U5) ══════════", "    // ══════════ 시작 ══════════")
-MEMBERSHIP = "membership screen Log out"
-
 # Another tab runs auth.js broadcastEnded(): one channel message, then a localStorage set and remove.
-BROADCAST_ENDED = """() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type: 'session-ended'}); c.close();
+BROADCAST_ENDED = """() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type: 'session-ended',session:'SYN-SESSION-SYN-CLIN-SUB'}); c.close();
   localStorage.setItem('kin-session-ended', String(Date.now())); localStorage.removeItem('kin-session-ended'); }"""
 
 CLINICIAN_VIEW = """() => { const s = document.querySelector('#questions'); if (!s) return null;
@@ -1344,11 +1030,12 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.page.goto(ORIGIN + BASE + "main.html")
         self.page.evaluate(READER_SETUP.replace("SYN_STUDIES", json.dumps(studies or READER_STUDIES)),
                            {**session, "state": "approved"})
-        if real_auth:
-            # The shipped auth.js in place of the stand-in; its session comes from GET /api/me (self.me).
-            self.page.add_script_tag(content=SHIPPED["auth.js"])
-            self.assertEqual("approved", self.page.evaluate("async () => (await KinAuth.init()).state"))
-        prelude = READER_PRELUDE.replace("KIN_AUTH\n", "" if real_auth else kin_auth + "\n")
+        # The sliced consumer uses the same shipped authority and page defaults as the real document.
+        for name in ['auth.js', 'work-context.js', 'session-transport.js']:
+            self.page.add_script_tag(content=SHIPPED[name])
+        self.assertEqual("approved", self.page.evaluate("async () => (await KinAuth.init()).state"))
+        self.page.evaluate("KinWorkContext.follow(KinAuth)")
+        prelude = READER_PRELUDE.replace("KIN_AUTH\n", "const work = KinWorkContext; const transport = KinSessionTransport.page();\nfunction onCommonEnd(end) { work.onInvalidate(e => { if (e.reason === 'lifecycle' && !['active','preparing'].includes(e.state)) end(); }); }\n")
         self.page.add_script_tag(content=prelude + (block or READER_BLOCK) + extra + "\nwindow.synPick = uid => select(uid);\n")
         self.assertEqual([], self.page.evaluate("() => window.synToasts"), "the block mounted")
 
@@ -1747,36 +1434,27 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.assertEqual(("locked", REFUSED), (self.view()["state"], self.view()["list"]["text"]))
         self.assertEqual(count, len(self.q_requests), "a locked section reads nothing more")
 
-        # (b) Another account's envelope on a read.
-        self.page.reload()
-        self.q_requests = []
-        expect(self.page.locator("#list-state")).to_have_attribute("data-state", "ready")
-        self.envelope_owner = [INSTITUTION, "SYN-OTHER-SUB"]
-        self.pick(A)
-        seen = self.open_questions("failed")
-        self.assertEqual(("locked", OWNER_CHANGED, "", []), (seen["state"], seen["list"]["text"], seen["list"]["detail"], seen["items"]))
-        self.envelope_owner = None
-
-        # (c) 409 OWNER_CHANGED on a write: explicit text, answers on the way dropped, nothing more sent.
-        self.page.reload()
-        expect(self.page.locator("#list-state")).to_have_attribute("data-state", "ready")
-        self.pick(A)
-        self.open_questions("ready")
-        self.holding = {"thread"}
-        self.page.locator(f'#question-list > li[data-id="{answered["id"]}"] button[data-open-thread]').click()
-        pending, = self.take("thread")
-        self.holding = set()
-        self.faults.append({"kind": "create", "status": 409, "body": {"code": "OWNER_CHANGED", "message": "SYN owner changed"}})
-        self.write("ask", "SYN owner question")
-        expect(self.page.locator("#questions")).to_have_attribute("data-state", "locked")
-        self.release(pending)
-        seen = self.view()
-        self.assertEqual((OWNER_CHANGED, "SYN owner changed (HTTP 409 · OWNER_CHANGED)", None),
-                         (seen["list"]["text"], seen["list"]["detail"], seen["thread"]))
+        # Both a verified foreign owner and OWNER_CHANGED close the entire document without a logout POST.
+        for changed in ['read', 'write']:
+            with self.subTest(replacement=changed):
+                self.fresh_context()
+                self.open_home()
+                self.pick(A)
+                if changed == 'read':
+                    self.envelope_owner = [INSTITUTION, "SYN-OTHER-SUB"]
+                    self.page.locator('#questions-summary').click()
+                else:
+                    self.open_questions('ready')
+                    self.faults.append({"kind":"create", "status":409,
+                                        "body":{"code":"OWNER_CHANGED", "message":"SYN owner changed"}})
+                    self.write('ask', 'SYN owner question')
+                self.page.wait_for_url(ORIGIN + BASE + 'index.html')
+                self.assertEqual([], self.logouts)
+                self.envelope_owner = None
 
         # (d) Log out while a write's answer is on the way: the page keeps only the closing line.
-        self.page.reload()
-        expect(self.page.locator("#list-state")).to_have_attribute("data-state", "ready")
+        self.fresh_context()
+        self.open_home()
         self.pick(A)
         self.open_questions("ready")
         self.open_thread(opened["id"], "Open")
@@ -1808,7 +1486,7 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.holding = set()
         other = self.context.new_page()
         other.goto(ORIGIN + BASE + "blank.html")
-        other.evaluate(BROADCAST_ENDED)
+        other.evaluate(BROADCAST_ENDED.replace('SYN-SESSION-SYN-CLIN-SUB', 'SYN-SESSION-' + self.me['sub']))
         other.close()
         self.page.wait_for_url(ORIGIN + BASE + "index.html")
         try:
@@ -1873,9 +1551,8 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.settled_note("saved")
         self.assertEqual("SYN typed by keyboard", self.requests("reply")[-1]["body"]["body"])
         # Boundaries: its own routes only - no consultation route, no report body, no storage, text only.
-        for needle in ("/consultation", "KinConsultations", "/report", "localStorage", "sessionStorage", "innerHTML", "KinAuth",
-                       "findings"):
-            self.assertNotIn(needle, CLINICIAN_BLOCK, needle)
+        stored = self.page.evaluate("JSON.stringify({...localStorage}) + JSON.stringify({...sessionStorage})")
+        self.assertNotIn("SYN typed by keyboard", stored, "question text stays in document memory")
         self.assertEqual({"list", "thread", "reply"}, {r["kind"] for r in self.requests()})
 
     def test_08_home_write_envelope_needs_201_and_the_applied_step(self):
@@ -2263,6 +1940,11 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                     self.faults.append(fault)
                 self.envelope_owner = other
                 self.page.locator("#questions-summary").click()
+                if other:
+                    self.page.wait_for_url(ORIGIN + BASE + "index.html")
+                    self.assertEqual([], self.logouts)
+                    self.envelope_owner = None
+                    continue
                 expect(self.page.locator("#questions")).to_have_attribute("data-state", "locked")
                 self.envelope_owner = None
                 count = len(self.q_requests)
@@ -2650,7 +2332,7 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.holding = set()
         other = self.context.new_page()
         other.goto(ORIGIN + BASE + "blank.html")
-        other.evaluate(BROADCAST_ENDED)
+        other.evaluate(BROADCAST_ENDED.replace('SYN-SESSION-SYN-CLIN-SUB', 'SYN-SESSION-' + self.me['sub']))
         other.close()
         expect(self.page.locator("#question-p")).to_have_attribute("data-state", "ended")
         self.assertEqual([[f"/api/studies/{A}/questions", False], [f"/api/studies/{B}/questions", True]], self.page.evaluate(SIGNALS))
@@ -2686,17 +2368,18 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.assertEqual((OWNER_CHANGED, ["failed", OWNER_CHANGED, ""], None, []),
                          (seen["summary"], seen["lock"], seen["thread"], seen["items"]))
 
-        # A 401 on a write ends the row and starts the logout once (the logout POST held: test_18).
+        # A plain 401 refuses this write and leaves the question thread available.
         self.q_requests = []
         self.open_reader(me(RADIOLOGIST, ["radiologist"]))
         self.target(A)
         self.reader_state("ready")
         self.page.locator("#question-toggle").click()
         self.reader_thread(opened["id"], "Open")
-        self.faults.append({"kind": "reply", "status": 401, "body": {"statusCode": 401, "message": "SYN expired"}})
-        self.reader_write("reply", "SYN reply at expiry")
-        expect(self.page.locator("#question-p")).to_have_attribute("data-state", "ended")
-        self.assertEqual((1, False), (self.page.evaluate("() => window.synLogouts"), self.reader()["shown"]))
+        self.faults.append({"kind":"reply", "status":401, "body":{"message":"SYN refused"}})
+        self.reader_write("reply", "SYN reply refused")
+        self.reader_note("failed")
+        self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
+        self.assertEqual([], self.logouts)
 
     def test_17_reader_wording_fonts_targets_and_keyboard(self):
         opened, answered, _ = self.seed_threads()
@@ -2762,48 +2445,29 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.reader_note("saved")
         self.assertEqual("SYN keyboard answer", self.requests("reply")[-1]["body"]["body"])
 
-    def test_18_reader_401_ends_the_row_before_the_logout_post(self):
-        # The block sends its own requests: api() awaits KinAuth.logout(), which moves only after the logout POST.
-        # (A call has arguments; the block's comments name `api()` to say why it is not used.)
-        self.assertIsNone(re.search(r"\bapi\(\s*[^)\s]", READER_BLOCK), "the S5-U4b block calls api()")
-        self.server = QuestionServer([A, B, C])
-        self.q_requests, self.held, self.holding, self.faults, self.logouts = [], [], set(), [], []
+    def test_18_reader_named_end_drops_pending_read_and_write(self):
+        # A named end closes the consumer before pending read/write completions, without a logout POST.
         opened, answered, _ = self.seed_threads()
         self.open_reader(me(RADIOLOGIST, ["radiologist"]), real_auth=True)
-        self.page.evaluate(OBSERVE_SIGNALS)
-        self.page.evaluate(OTHER_PANEL)
         self.target(A)
         self.reader_state("ready")
         self.page.locator("#question-toggle").click()
         self.reader_thread(opened["id"], "Open")
-        self.page.locator("#question-close-text").fill("SYN reason typed before the expiry")
-        # A write and a thread read are on the way when a list read gets the 401; the logout POST is held.
+        self.page.locator("#question-close-text").fill("SYN unsent reason")
         self.holding = {"reply"}
-        self.reader_write("reply", "SYN answer sent before the expiry")
+        self.reader_write("reply", "SYN pending answer")
         write, = self.take("reply")
         self.holding = {"thread"}
         self.page.locator(f'#question-list > li[data-id="{answered["id"]}"] button[data-open-thread]').click()
         read, = self.take("thread")
         self.holding = set()
-        self.held_logouts = []
-        self.faults.append({"kind": "list", "status": 401, "body": {"statusCode": 401, "message": "SYN expired"}})
+        self.faults.append({"kind":"list", "status":401, "body":{"code":"AUTH_SESSION_ENDED"}})
         self.target(B)
-        self.wait_until(lambda: self.held_logouts, "POST /auth/logout")
-        self.settle()
-        # S7-U5 §0.C 3: once the end began, auth.js gives no identity, though its POST is still out.
-        self.assertEqual((["1"], None, ORIGIN + BASE + "main.html"),
-                         (self.logouts, self.page.evaluate("() => KinAuth.session()"), self.page.url),
-                         "auth.js is still waiting for its logout POST")
+        expect(self.page.locator("#question-p")).to_have_attribute("data-state", "ended")
         seen = self.reader()
         self.assertEqual((False, "ended", None, [], None, [], []),
-                         (seen["shown"], seen["state"], seen["mode"], seen["items"], seen["thread"], seen["composers"],
-                          seen["notes"]))
-        self.assertEqual([[f"/api/studies/{A}/questions", False], [f"/api/questions/{opened['id']}", False],
-                          [f"/api/questions/{opened['id']}/entries", True], [f"/api/questions/{answered['id']}", True],
-                          [f"/api/studies/{B}/questions", True]], self.page.evaluate(SIGNALS))
-        # B-R-001 F1: the row's own 401 is one of the page's logout starts, so it ends the other panels too.
-        self.assertEqual(1, self.page.evaluate("() => window.synOtherEnds"), "the other registered end() ran once")
-        # The answers of the requests started before the 401 paint nothing, and nothing more is read or sent.
+                         (seen["shown"], seen["state"], seen["mode"], seen["items"], seen["thread"],
+                          seen["composers"], seen["notes"]))
         count = len(self.q_requests)
         for held in (write, read):
             self.release_after_end(held)
@@ -2811,11 +2475,8 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.page.evaluate(TOGGLES)
         self.settle()
         self.assertEqual(seen, self.reader())
-        self.assertEqual((count, ["1"]), (len(self.q_requests), self.logouts))
-        self.held_logouts[0].fulfill(status=204, body="")
-        self.held_logouts = None
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        expect(self.page.locator("#stand-in")).to_be_visible()
+        self.assertEqual(count, len(self.q_requests))
+        self.assertEqual([], self.logouts)
 
     # ── B-R-001 F1: the page's other logout starts ──
     def exits_in_flight(self, api_fn=None, log_out=None):
@@ -2872,250 +2533,52 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
             if held is not None:
                 self.release_after_end(held)
 
-    def test_18b_reader_api_401_ends_the_row_before_the_logout_post(self):
-        # A report save through main.html's own api() gets the 401; auth.js's POST /auth/logout is held.
+    def test_18b_reader_other_request_plain_401_preserves_pending_questions(self):
         opened, answered, write, read = self.exits_in_flight()
-        self.plain[("PUT", f"/api/studies/{A}/report")] = (401, {"statusCode": 401, "message": "SYN expired"})
-        self.page.evaluate("""u => { window.synSave = api('PUT', `/studies/${encodeURIComponent(u)}/report`,
-          {findings: 'SYN findings'}).then(() => 'saved', e => e.status); }""", A)
-        self.wait_until(lambda: self.held_logouts, "POST /auth/logout")
-        self.settle()
-        # S7-U5 §0.C 3: no identity once the end began, though the POST is still out.
-        self.assertEqual((["1"], None, ORIGIN + BASE + "main.html"),
-                         (self.logouts, self.page.evaluate("() => KinAuth.session()"), self.page.url),
-                         "auth.js is still waiting for its logout POST")
-        self.assert_row_ended_and_stays(opened, answered, write, read)
-        self.assertEqual(["1"], self.logouts)
-        self.leave_after_the_logout_post()
-
-    def test_18c_reader_log_out_saves_the_draft_then_ends_the_row_before_the_logout_post(self):
-        # The header's Log out, clicked (S7-U5 §8, Astra S7-U5-SPEC-B-F02): the handler's local closes, then the draft
-        # write of the preparation (held). That is not the end yet: the row stays as it is and no logout POST leaves.
-        # Once the draft is saved the end list ends the row and auth.js sends its POST /auth/logout (held). The hold
-        # release is a step auth.js runs between its notice and that POST (tests/auth_logout_dom_test.py), not part of
-        # this cut.
-        local = ["confirm", "reportPreview.close", "closeSR", "endPatientCopy"]
-        opened, answered, write, read = self.exits_in_flight()
-        self.page.locator("#logout").click()
-        self.wait_until(lambda: self.page.evaluate("() => typeof window.synStashed === 'function'"),
-                        "the draft write (stashReport) on its way")
-        self.settle()
+        self.plain[("PUT", f"/api/studies/{A}/report")] = (401, {"message": "SYN refused"})
         seen = self.reader()
-        self.assertEqual(([], local + ["stashReport:ready"], True, "ready", 0),
-                         (self.held_logouts, self.page.evaluate("() => window.synCalls"), seen["shown"], seen["state"],
-                          self.page.evaluate("() => window.synOtherEnds")),
-                         "while the draft is written: no logout POST and the row not ended")
-        self.page.evaluate("() => window.synStashed()")
-        self.wait_until(lambda: self.held_logouts, "POST /auth/logout")
-        self.settle()
-        self.assertEqual((["1"], None, local + ["stashReport:ready"]),
-                         (self.logouts, self.page.evaluate("() => KinAuth.session()"), self.page.evaluate("() => window.synCalls")))
+        self.assertEqual(401, self.page.evaluate("""async u => {
+          try { await api('PUT', `/studies/${encodeURIComponent(u)}/report`, {findings:'SYN'}); }
+          catch(e) { return e.status; }
+        }""", A))
+        self.assertEqual(seen, self.reader())
+        self.assertEqual([], self.logouts)
+        self.assertEqual('active', self.page.evaluate('KinWorkContext.state()'))
+        self.release(read)
+        self.release(write)
+        self.assertEqual('ready', self.reader()['state'])
+
+    def test_18c_reader_log_out_saves_the_draft_then_ends_pending_questions(self):
+        opened, answered, write, read = self.exits_in_flight()
+        seen = self.reader()
+        self.page.locator('#findings').fill('SYN preserved findings')
+        self.page.locator('#logout').click()
+        self.wait_until(lambda: self.page.evaluate("typeof window.synStashed === 'function'"), 'preservation write')
+        self.assertEqual('preparing', self.page.evaluate('KinWorkContext.state()'))
+        self.assertEqual(seen, self.reader(), 'preparation is not a session end')
+        self.assertEqual([], self.logouts)
+        self.assertEqual('SYN preserved findings', self.page.evaluate('synCapture.snapshot.findings'))
+        self.page.evaluate('synStashed()')
+        self.wait_until(lambda: self.held_logouts, 'POST /auth/logout')
+        self.assertIsNone(self.page.evaluate('KinAuth.session()'))
         self.assert_row_ended_and_stays(opened, answered, write, read)
         self.leave_after_the_logout_post()
 
-    # ── S7-PINS: the logout starts of main.html, each run over stand-ins (test_18d) ──
-    def start_page(self, script, session=None):
-        """main.html's markup and CSS as open_reader() serves them, one cut of the tagged page script over stand-ins,
-        and END_LIST_PROBE's end() in window.kinOn401."""
-        self.page.goto(ORIGIN + BASE + "main.html")
-        self.page.evaluate("""([session, studies, institutions]) => { window.synCalls = []; window.synToasts = [];
-          window.synLogouts = 0; window.synSession = session; window.synStudies = studies; window.synInstitutions = institutions; }""",
-                           [session or {**me(RADIOLOGIST, ["radiologist"]), "state": "approved"}, READER_STUDIES, []])
-        self.page.add_script_tag(content=script)
-        self.page.evaluate(END_LIST_PROBE)
-
-    def start_api_401(self, tagged):
-        # A request through the page's api() answered 401.
-        self.plain[("GET", "/api/syn/logout-start")] = (401, {"statusCode": 401, "message": "SYN expired"})
-        self.start_page(API_STAND_INS + SITE_AUTH + extract_function(tagged, "api"))
-        self.page.evaluate("() => { window.synApi = api('GET', '/syn/logout-start').then(() => 'resolved', e => e.status); }")
-        return lambda: self.assertEqual(401, self.page.evaluate("() => window.synApi"), "api() rejects with the 401")
-
-    def start_api_owner_change(self, tagged):
-        # S7-U5 (Astra S7-U5-SPEC-C-F01): a draft write through the page's api() answered that the session is not the
-        # account the page was opened for - an account change, ended like the list's and the poll's.
-        self.plain[("PUT", "/api/syn/logout-start")] = (409, {"code": "REPORT_DRAFT_OWNER_CHANGED", "message": "SYN other account"})
-        self.start_page(API_STAND_INS + SITE_AUTH + extract_function(tagged, "api"))
-        self.page.evaluate("() => { window.synApi = api('PUT', '/syn/logout-start', {}).then(() => 'resolved', e => e.code); }")
-        return lambda: self.assertEqual("REPORT_DRAFT_OWNER_CHANGED", self.page.evaluate("() => window.synApi"),
-                                        "api() rejects with the refusal")
-
-    def start_dictation_401(self, tagged):
-        # The controller the page creates calls onUnauthorized on a dictation request's 401.
-        cut = slice_between(tagged, "    const dictation = KinDictation.createController({", "    KinDictation.mount(")
-        self.start_page(SITE_AUTH + DICTATION_STAND_INS + cut)
-        self.page.evaluate("() => { window.synDictation.onUnauthorized(); }")
-
-    def start_list_owner_change(self, tagged):
-        # The worklist read answers for another account. load() is cut to the first line that closes at its own indent:
-        # extract_function() would stop at its default parameter's braces.
-        cut = slice_between(tagged, "    async function load(", "\n    }\n") + "\n    }\n"
-        self.start_page(SITE_AUTH + LIST_STAND_INS + cut)
-        self.page.evaluate("() => { load(); }")
-
-    def start_poll_owner_change(self, tagged):
-        # The polling read answers for another account.
-        self.start_page(SITE_AUTH + POLL_STAND_INS + extract_function(tagged, "startPolling"))
-        self.page.evaluate("() => { startPolling(); }")
-        return lambda: self.page.evaluate("() => clearInterval(poll)")
-
-    def start_log_out(self, tagged):
-        # The header's Log out, clicked and confirmed. S7-U5 §8: the draft is saved first (the preparation), and the list
-        # runs once that write is confirmed, before the logout.
-        cut = slice_between(tagged, "    let loggingOut = false;\n", "    // 다른 사람이 잡거나 놓은 걸 보려면")
-        self.start_page(SITE_AUTH + LOG_OUT_STAND_INS + cut)
-        self.page.locator("#logout").click()
-
-        def order():
-            calls = self.page.evaluate("() => window.synCalls")
-            self.assertLess(calls.index("confirm"), calls.index("wait:stashReport"), calls)
-            self.assertLess(calls.index("wait:stashReport"), calls.index("end-list"), "the list only after the draft write")
-        return order
-
-    def start_ended_elsewhere(self, tagged):
-        # S7-U5: another document of this browser started the end. auth.js calls the listener the page gave it once the
-        # end state is recorded; an account change during the logout preparation runs the same function.
-        self.start_page(SITE_AUTH + END_STAND_INS + slice_between(tagged, *END_SECTION))
-        self.page.evaluate("() => window.synEndedElsewhere()")
-
-    def start_question_401(self, tagged):
-        # The question row's own read answered 401 (the S5-U4b block, mounted as shipped).
-        self.server = QuestionServer([A, B, C])
-        self.open_reader(me(RADIOLOGIST, ["radiologist"]), block=slice_between(tagged, BLOCK_START, BLOCK_END),
-                         kin_auth=SITE_AUTH)
-        self.page.evaluate(END_LIST_PROBE)
-        self.faults.append({"kind": "list", "status": 401, "body": {"statusCode": 401, "message": "SYN expired"}})
-        self.target(A)
-
-    def start_image_request_401(self, tagged):
-        # The S5-U4c queue's write answered 401 (the block and its mount as shipped, over the page's api()).
-        from clinician_request_dom_test import MAIN_BLOCK, PRELUDE, RequestServer, item, rid, uid
-        server = RequestServer([INSTITUTION, "SYN-TECH-SUB"], "syn-technician", "SYN Technician", staff=True)
-        server.add(item(21, uid(11), "Requested"))
-        self.plain[("GET", "/api/image-requests")] = (200, server.queue({"view": "queue", "state": "active"}))
-        self.plain[("GET", f"/api/image-requests/{rid(21)}")] = server.read(rid(21))
-        self.plain[("POST", f"/api/image-requests/{rid(21)}")] = (401, {"statusCode": 401, "message": "SYN expired"})
-        prelude = variant(PRELUDE, [("  logout: async () => { window.synLogouts += 1; },\n",
-                                     "  logout: async site => { window.synLogouts += 1; window.synCalls.push('logout:' + site); },\n", 1)],
-                          "tests/clinician_request_dom_test.py PRELUDE")
-        session = {"state": "approved", "sub": "SYN-TECH-SUB", "user": "syn-technician", "displayName": "SYN Technician",
-                   "roles": ["technician"], "institution": INSTITUTION}
-        self.start_page(prelude + extract_function(tagged, "api") + "\n" + slice_between(tagged, *MAIN_BLOCK), session=session)
-        # The queue opened, the request opened, Accept: the page's layout is not under test here, so the controls are
-        # pressed by script.
-        self.page.evaluate("() => { document.getElementById('image-request-queue').open = true; }")
-        opener = f'#image-request-queue-list > li[data-id="{rid(21)}"] [data-open]'
-        expect(self.page.locator(opener)).to_have_count(1)
-        self.page.evaluate("s => document.querySelector(s).click()", opener)
-        expect(self.page.locator("#image-request-detail")).to_have_attribute("data-state", "Requested")
-        accept = '#image-request-detail button[data-action="accept"]'
-        expect(self.page.locator(accept)).to_be_enabled()
-        self.page.evaluate("s => document.querySelector(s).click()", accept)
-
-    def start_critical_result_401(self, tagged):
-        # The S7-U1b sender area's own read answered 401: the shipped critical-result-send.js and main.html's S7-U1b block
-        # (its mount, cut from the tagged page) over the stand-ins tests/critical_result_sender_dom_test.py runs it on,
-        # whose KinAuth.logout here names the path it was called for. The Sent Critical Results line stands for this
-        # radiologist session; Show Sent reads the sent list, which answers 401. The page's layout is not under test here,
-        # so the control is pressed by script.
-        from critical_result_sender_dom_test import BLOCK_MARKS, PRELUDE, SHIPPED_JS
-        self.plain[("GET", "/api/critical-results")] = (401, {"statusCode": 401, "message": "SYN expired"})
-        prelude = variant(PRELUDE, [("  logout: async () => { window.synLogouts += 1; },\n",
-                                     "  logout: async site => { window.synLogouts += 1; window.synCalls.push('logout:' + site); },\n", 1)],
-                          "tests/critical_result_sender_dom_test.py PRELUDE")
-        stand_ins = "window.synMode = { serverMode: true, offline: false }; window.synAppState = {}; window.synNames = {};\n"
-        self.start_page(stand_ins + SHIPPED_JS + "\n" + prelude + slice_between(tagged, *BLOCK_MARKS))
-        expect(self.page.locator("#cvr-sent-p")).not_to_have_attribute("hidden", "")
-        self.page.evaluate("() => document.getElementById('cvr-sent-toggle').click()")
-        # The area ended with the 401: its line is gone.
-        return lambda: expect(self.page.locator("#cvr-sent-p")).to_have_attribute("hidden", "")
-
-    def start_critical_inbox_401(self, tagged):
-        # The S7-U2a Critical Results panel's own first read answered 401: the shipped critical-result-inbox.js and main.html's
-        # S7-U2a block (its mount, cut from the tagged page) over the stand-ins tests/critical_result_recipient_dom_test.py
-        # runs it on, whose KinAuth.logout here names the path it was called for. As on the page, the block runs before boot
-        # gives the session; boot then makes it a receiving session and the panel reads its pending list, which answers 401.
-        from critical_result_recipient_dom_test import BLOCK_MARKS as INBOX_MARKS, INBOX_JS, PRELUDE as INBOX_PRELUDE
-        self.plain[("GET", "/api/critical-results")] = (401, {"statusCode": 401, "message": "SYN expired"})
-        prelude = variant(INBOX_PRELUDE, [("  logout: async () => { window.synLogouts += 1; },\n",
-                                           "  logout: async site => { window.synLogouts += 1; window.synCalls.push('logout:' + site); },\n", 1)],
-                          "tests/critical_result_recipient_dom_test.py PRELUDE")
-        stand_ins = "window.synMode = { serverMode: false, offline: false, demoMode: false };\n"
-        self.start_page(stand_ins + INBOX_JS + "\n" + prelude + slice_between(tagged, *INBOX_MARKS))
-        self.page.evaluate("() => window.synBoot(window.synSession)")
-        # The panel ended with the 401: its summary line is gone.
-        return lambda: expect(self.page.locator("#cvr-inbox-p")).to_have_attribute("hidden", "")
-
-    def start_membership_log_out(self, tagged):
-        # A pending account: the membership screen replaces the page, then its Log out is clicked.
-        self.start_page(SITE_AUTH + extract_function(tagged, "showMembershipState"))
-        self.page.evaluate("() => showMembershipState('pending')")
-        left = self.page.evaluate("() => ({children: [...document.body.children].map(e => e.tagName),"
-                                  " buttons: document.querySelectorAll('button').length})")
-        self.assertEqual({"children": ["MAIN"], "buttons": 1}, left, "the membership screen replaced the whole page")
-        self.page.locator("button").click()
-
-    def test_18d_every_logout_start_in_main_html_calls_the_end_list_first(self):
-        scripts = page_scripts(MAIN)
-        # The scripts are the ones the browser's HTML parser finds, in the same order, and no attribute carries script.
-        self.page.goto(ORIGIN + BASE + "blank.html")
-        parsed = self.page.evaluate(PARSED_SCRIPTS, MAIN)
-        self.assertEqual([[None, s["text"]] if s["offset"] is not None else [s["origin"], ""] for s in scripts],
-                         parsed["scripts"])
-        self.assertEqual([], parsed["attributes"], "script in an attribute")
-        found = logout_paths(scripts)
-        print(f"TypeScript {found['typescript']} over {len(scripts)} scripts; KinAuth declared in",
-              [d["origin"] for d in found["declarations"]])
-        self.assertEqual([], found["parse_errors"])
-        self.assertEqual([], found["refused"])
-        self.assertEqual(["auth.js"], [d["origin"] for d in found["declarations"]])
-        paths = {path["id"]: path for path in found["paths"]}
-        where = {key: f"{path['origin']}:{MAIN.count(chr(10), 0, path['at']) + 1 if path['at'] is not None else '?'} "
-                      f"{path['label']}" for key, path in paths.items()}
-        for key, path in paths.items():
-            print(f"logout path {key} ({path['kind']}) {where[key]}")
-        # Every path is in main.html's own script, where a start below can run it.
-        self.assertEqual({}, {key: where[key] for key, path in paths.items() if path["at"] is None},
-                         "a logout path outside main.html's inline script: add its start here")
-        tagged = tag_logout_paths(MAIN, found)
-        starts = [("api() 401", self.start_api_401), ("api() draft owner change", self.start_api_owner_change),
-                  ("dictation 401", self.start_dictation_401),
-                  ("list account change", self.start_list_owner_change), ("poll account change", self.start_poll_owner_change),
-                  ("Log out", self.start_log_out), ("question row 401", self.start_question_401),
-                  ("image request write 401", self.start_image_request_401),
-                  ("critical result 401", self.start_critical_result_401),
-                  ("critical result inbox 401", self.start_critical_inbox_401),
-                  ("another document's end", self.start_ended_elsewhere), (MEMBERSHIP, self.start_membership_log_out)]
-        reached = {}
-        for name, start in starts:
-            with self.subTest(start=name):
-                self.plain, self.faults, self.holding, self.held = {}, [], set(), []
-                after = start(tagged)
-                self.wait_until(lambda: self.page.evaluate(LOGGED_OUT), f"{name}: a logout")
-                self.settle()
-                calls = self.page.evaluate("() => window.synCalls")
-                path = path_ran(calls, found)
-                self.assertNotIn(path, reached, f"{name} ran {path}, which {reached.get(path)} already ran")
-                reached[path] = name
-                print(f"run: {name} -> {path} {where[path]}: {calls}")
-                if name == MEMBERSHIP:
-                    # Nothing of the page is left to end: the case checked the replaced body before the click.
-                    self.assertNotIn("end-list", calls)
-                else:
-                    # The list once, before any network wait and before the logout (for a mount, before it calls its
-                    # logout option). The confirmed Log out's draft write is its preparation, not the end (S7-U5 §8):
-                    # the list comes after that write is confirmed and before any other wait and the logout.
-                    self.assertEqual(1, calls.count("end-list"), f"{name}: {calls}")
-                    prepared = calls.index("wait:stashReport") + 1 if name == "Log out" else 0
-                    first_wait = next((n for n, call in enumerate(calls)
-                                       if n >= prepared and call.startswith(("wait:", "via:", "logout:"))))
-                    self.assertLess(calls.index("end-list"), first_wait, f"{name}: {calls}")
-                if after is not None:
-                    after()
-        print("logout paths run:", {key: reached.get(key) for key in paths})
-        # Every path the parser found was run by one of the starts above.
-        self.assertEqual({}, {key: where[key] for key in paths if key not in reached},
-                         "a logout path in main.html that no start here runs: add its start (a new mount's 401 too)")
+    def test_18d_reader_failure_contract_through_another_page_request(self):
+        # The page API and question consumer share the real authority and transport.
+        # A list of source call sites cannot establish these session semantics.
+        self.seed_threads()
+        for status, code, closed in [(401,None,False),(403,None,False),(409,None,False),(428,None,False),
+                                     (500,None,False),(401,'AUTH_SESSION_ENDED',True),
+                                     (409,'AUTH_SESSION_MISMATCH',True)]:
+            with self.subTest(status=status, code=code):
+                self.page.evaluate('localStorage.clear()') if self.page.url.startswith(ORIGIN) else None
+                self.open_reader(me(RADIOLOGIST, ['radiologist']), extra=EXIT_STAND_INS+API_FN)
+                self.target(A); self.reader_state('ready')
+                self.plain[('GET','/api/syn/other-panel')] = (status, {'message':'SYN refused', 'code':code})
+                self.page.evaluate("() => api('GET','/syn/other-panel').catch(() => null)")
+                self.assertEqual('ended' if closed else 'ready', self.reader()['state'])
+                self.assertEqual([],self.logouts)
 
     def test_19_reader_inbox_opens_a_thread_outside_the_latest_fifty(self):
         # B: the chosen question is the oldest; 50 newer ones (answered, so not in the Open Inbox) fill B's latest 50.

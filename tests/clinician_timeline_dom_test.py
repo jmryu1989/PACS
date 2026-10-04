@@ -54,7 +54,7 @@ def lf_text(path):
 
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "critical-result-inbox.js")}
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", "critical-result-inbox.js")}
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
 INDEX_STAND_IN = ('<!doctype html><html><head><meta charset="utf-8"><title>SYN index stand-in</title></head>'
                   '<body><p id="stand-in">SYN index stand-in</p></body></html>')
@@ -112,7 +112,7 @@ NOT_FOUND = (404, {"statusCode": 404, "message": "검사를 찾을 수 없습니
 CHANGED = (409, {"code": "STUDY_LIST_CHANGED", "message": "검사 목록 또는 판독 상태가 바뀌었습니다. 새로고침하세요."})
 ROUTE_DENIED = (403, {"code": "CLINICIAN_ROUTE_DENIED"})
 NO_LIMIT = (400, {"statusCode": 400, "message": "타임라인은 limit(1~100)으로 쪽을 나눠 읽습니다", "error": "Bad Request"})
-EXPIRED = (401, {"statusCode": 401, "message": "인증 정보가 없습니다"})
+EXPIRED = (401, {"code": "AUTH_SESSION_ENDED", "statusCode": 401, "message": "인증 정보가 없습니다"})
 
 # Product wording, verbatim (clinician.js TIMELINE).
 HINT = ("지금 목록에 같은 환자 키(기관과 원본 DICOM 환자 ID)의 다른 검사가 {n}건 있습니다. "
@@ -379,11 +379,12 @@ class ClinicianTimelineDOMTest(unittest.TestCase):
     def settle(self):
         self.page.evaluate("() => new Promise(resolve => setTimeout(resolve, 200))")
 
-    def release(self, index, patch=None):
+    def release(self, index, patch=None, ended=False):
         anchor, query, route = self.held_timelines[index]
         request = route.request
         route.fulfill(**self.timeline_reply(anchor, query, patch))
-        self.wait_until(lambda: any(item is request for item in self.finished), "the released answer reaching the page")
+        if not ended:
+            self.wait_until(lambda: any(item is request for item in self.finished), "the released answer reaching the page")
         self.settle()
 
     def open_home(self, script=None):
@@ -639,7 +640,7 @@ class ClinicianTimelineDOMTest(unittest.TestCase):
         self.page.locator("#timeline-toggle").click()
         self.page.locator("#timeline-toggle").click()
         self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        self.assertEqual(["1"], self.logouts)
+        self.assertEqual([], self.logouts)
 
     def test_05_pages_pass_the_signed_cursor_verbatim_and_disagreeing_pages_are_refused(self):
         filler = [study(uid(1000 + i), f"SYN FILLER {i:03d}", "SYN-P-100", key(INST_A, "SYN-P-100"),
@@ -726,7 +727,7 @@ class ClinicianTimelineDOMTest(unittest.TestCase):
         self.held_logouts = []
         self.page.locator("#logout").click()
         self.wait_until(lambda: self.held_logouts, "POST /auth/logout")
-        self.release(2, lambda r: r["studies"][0].update(desc="SYN-AFTER-LOGOUT"))
+        self.release(2, lambda r: r["studies"][0].update(desc="SYN-AFTER-LOGOUT"), ended=True)
         closed = self.page.evaluate("() => ({text: document.body.textContent, timeline: !!document.querySelector('#timeline')})")
         self.assertEqual({"text": CLOSING, "timeline": False}, closed)
         self.held_logouts[0].fulfill(status=204, body="")

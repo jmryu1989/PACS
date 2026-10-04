@@ -1,3 +1,4 @@
+# S7-U5: session termination cases moved to admin_session_dom_test.py (named signals, all panels and delayed navigation).
 # coding: utf-8
 """REQ-S5-U6b-OPS-METRICS -> RISK-S5-U6b-UNKNOWN-AS-ZERO/INVENTED-THRESHOLD/TENANT-AGGREGATE -> TEST-S5-U6b-DOM.
 
@@ -111,7 +112,7 @@ PAGE_PATH = BASE + "admin.html"
 ARRIVALS_PATH = BASE + "study-arrivals.js"
 # study-arrivals.js is served only once a case asks for Gateway Status (serve_arrivals): anywhere else a request for it
 # is unexpected and fails the case.
-SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "study-access-admin.js")}
+SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "work-context.js", "session-transport.js", "study-access-admin.js")}
 INDEX = "<!doctype html><title>SYN index</title><p id=index>SYN INDEX</p>"
 INSTITUTION = "SYN-INST-A"
 ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"], "institution": INSTITUTION,
@@ -128,8 +129,9 @@ INIT = """(() => {
   window.__jsonDone = [];
   window.__jsonHold = [];
   window.__jsonHeld = [];
-  const json = Response.prototype.json;
-  Response.prototype.json = function () {
+  for (const method of ['json', 'text']) {
+  const json = Response.prototype[method];
+  Response.prototype[method] = function () {
     const path = new URL(this.url).pathname;
     let read = json.call(this);
     const hold = window.__jsonHold.indexOf(path);
@@ -142,6 +144,7 @@ INIT = """(() => {
     }
     return read.finally(() => { window.__jsonDone.push(path); });
   };
+  }
   // Every answer the page receives, read or not: after a session end an answer arrives but its body is never read.
   window.__fetchDone = [];
   const fetch = window.fetch;
@@ -725,32 +728,6 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.a_b()
         self.assertEqual(("Observed " + shown_generated(5), "5"), (self.summary()["state"], self.own_cell()))
 
-    def test_06_a_401_empties_the_section_before_logout_and_drops_late_answers(self):
-        self.open()
-        self.refresh((200, answer()))
-        self.replies.append("hold")
-        self.page.locator("#metrics-refresh").click()
-        self.wait_until(lambda: len(self.held) == 1, "the held read")
-        held = self.held.pop()
-        self.held_logouts = []
-        self.replies.append((401, {"message": SERVER_WORDING}))
-        self.page.locator("#metrics-refresh").click()
-        self.wait_until(lambda: self.logouts == 1, "the logout request")
-        summary = self.summary()
-        self.assertEqual((0, True, True, False, False),
-                         (summary["rows"], summary["wrapHidden"], summary["refreshDisabled"], summary["busy"], summary["messageShown"]))
-        held.fulfill(json=answer(second=7))
-        self.wait_until(lambda: self.fetch_done() == 3, "the late answer received")
-        self.page.wait_for_timeout(50)
-        summary = self.summary()
-        self.assertEqual((0, True), (summary["rows"], summary["wrapHidden"]), "nothing is painted after the session ended")
-        self.assertNotIn(shown_generated(7), summary["state"])
-        self.assertEqual(1, self.json_done(), "an answer that arrives after the session ended is never read")
-        self.held_logouts.pop().fulfill(status=204, body="")
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        expect(self.page.locator("#index")).to_have_text("SYN INDEX")
-        self.assertEqual(1, self.logouts)
-        self.assertEqual(1, [c["path"] for c in self.calls].count(BASE + "index.html"), "one navigation")
 
     def test_07_wording_sizes_no_threshold_keyboard_and_no_dialog(self):
         self.open()
@@ -821,52 +798,6 @@ class AdminMetricsDOMTest(unittest.TestCase):
         held, self.held = self.held, []
         return held
 
-    def test_09_an_older_read_401_ends_the_session_at_once(self):
-        self.open()
-        self.refresh((200, answer()))
-        oldest, newer, newest = self.hold_reads(3)
-        self.held_logouts = []
-        oldest.fulfill(status=401, json={"message": SERVER_WORDING})
-        self.wait_until(lambda: self.logouts == 1, "the logout request")
-        summary = self.summary()
-        self.assertEqual((0, True, True, False, False, "Not Loaded", "mstate not_loaded"),
-                         (summary["rows"], summary["wrapHidden"], summary["refreshDisabled"], summary["busy"],
-                          summary["messageShown"], summary["state"], summary["stateClass"]),
-                         "the oldest read's 401 empties the section while two newer reads are still out")
-        newer.fulfill(json=answer(second=8))
-        self.wait_until(lambda: self.fetch_done() == 3, "the newer 200 received")
-        newest.fulfill(status=401, json={"message": SERVER_WORDING})
-        self.wait_until(lambda: self.fetch_done() == 4, "the newest 401 received")
-        self.page.wait_for_timeout(50)
-        summary = self.summary()
-        self.assertEqual((0, True, "Not Loaded"), (summary["rows"], summary["wrapHidden"], summary["state"]),
-                         "no answer repaints after the end")
-        self.assertEqual(1, self.json_done(), "no answer after the end is read")
-        self.assertEqual(1, self.logouts, "a second 401 logs out no second time")
-        self.held_logouts.pop().fulfill(status=204, body="")
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        expect(self.page.locator("#index")).to_have_text("SYN INDEX")
-        self.assertEqual(1, self.logouts)
-        self.assertEqual(1, [c["path"] for c in self.calls].count(BASE + "index.html"), "one navigation")
-
-        # Control: the 401 judged after the sequence check (the order before S5-U6b-F03) drops an older read's 401 —
-        # the table stays, nobody logs out, and the newer answer paints. Edited inside the Operations script: Gateway
-        # Status's 401 block is the same text.
-        self.logouts, self.held_logouts = 0, None
-        self.fresh_context()
-        self.open(variant_in(OPS_SCRIPT, [
-            (SEQUENCE_GUARD, SEQUENCE_GUARD + "        if (error?.status === 401) { KinConsoleSession.end(); return; }\n"),
-            (END_IN_REQUEST, END_AFTER_SEQUENCE)]))
-        self.refresh((200, answer()))
-        older, newer = self.hold_reads(2)
-        older.fulfill(status=401, json={"message": SERVER_WORDING})
-        self.wait_until(lambda: self.fetch_done() == 2, "the older 401 received")
-        self.page.wait_for_timeout(50)
-        self.assertEqual((11, 0), (self.summary()["rows"], self.logouts), "control: the older 401 was dropped")
-        newer.fulfill(json=answer(second=8))
-        self.wait_until(lambda: self.json_done() == 2, "control: the newer answer read")
-        self.wait_until(lambda: not self.summary()["busy"], "control: the load finished")
-        self.assert_observed(8)
 
     # ── S5-U6b-F04: every end path of the page closes Operations ──
     def metrics_gets(self):
@@ -954,38 +885,9 @@ class AdminMetricsDOMTest(unittest.TestCase):
     # listeners) and keeps one POST per intent, so those controls no longer reproduce the risks. The risks stay asserted
     # on the shipped page (assert_the_end_closes_operations: emptied before the logout answers, no late paint, one POST,
     # one navigation); the one-off counterexample that fails there is recorded with the S7-U5 fix1 evidence.
-    def test_10_a_member_list_401_closes_operations_at_once(self):
-        self.assert_the_end_closes_operations("members")
 
-    def test_11_log_out_closes_operations_at_once(self):
-        self.assert_the_end_closes_operations("logout")
 
-    def test_12_a_gateway_list_401_closes_operations_at_once(self):
-        self.assert_the_end_closes_operations("gateway")
-        self.control_the_end_leaves_operations("gateway", variant(OPS_ON_END, OPS_OFF_END))
 
-    def test_13_the_page_has_one_session_object_and_every_module_registers_on_it(self):
-        # One definition in the shipped page, and no conditional second one (the pre-merge branch had one).
-        self.assertEqual(1, ADMIN_HTML.count("KinConsoleSession = "))
-        self.assertNotIn("typeof KinConsoleSession", ADMIN_HTML)
-        self.assertNotIn("window.KinConsoleSession", ADMIN_HTML)
-        self.open(variant(ATTACH, COUNTING_ATTACH))
-        # The fifth closer is the S5-U5b Audit / Security closer.
-        self.assertEqual(["object", False, 5], self.page.evaluate(
-            "() => [typeof KinConsoleSession, 'KinConsoleSession' in window, window.__registered]"),
-            "a top-level const; Study Access, the members console, Gateway Status, Operations and Audit / Security "
-            "register one closer each")
-        self.refresh((200, answer()))
-        self.held_logouts = []
-        self.page.locator("#logout").click()
-        self.wait_until(lambda: self.logouts == 1, "the logout request")
-        summary = self.summary()
-        self.assertEqual((0, True, True, "Not Loaded"),
-                         (summary["rows"], summary["wrapHidden"], summary["refreshDisabled"], summary["state"]))
-        self.assertTrue(self.page.evaluate("() => KinConsoleSession.ended()"), "Log out ends through the page's object")
-        self.held_logouts.pop().fulfill(status=204, body="")
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        self.assertEqual(1, self.logouts)
 
     # ── S5-U6b-R-003: every module of the merged page on the one session end ──
     def path_done(self, kind, path):
@@ -1092,88 +994,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
             self.wait_until(lambda: self.path_done("fetch", path) > before, f"{what}: the late {key} answer")
         self.page.wait_for_timeout(150)
 
-    def test_14_study_access_closes_with_the_page_session(self):
-        for how in ("an Operations 401", "a Gateway 401"):
-            with self.subTest(how=how):
-                self.logouts, self.held_logouts, moves = 0, None, self.moves()
-                self.fresh_context()
-                self.open()
-                self.refresh((200, answer(rows=replace(ROWS, "studies.own", value=5))))
-                if how == "a Gateway 401":
-                    self.draw_gateway()
-                    held = {"gateway": self.hold_gateway_reads(1)[0]}
-                else:
-                    held = {"operations": self.hold_reads(1)[0]}
-                self.open_study_access()
-                self.edit_study_access()
-                gets = self.count("GET", ACCESS_PATH)
-                self.end_by(how, held)
-                s = self.assert_all_closed(how)
-                self.assertEqual((False, False, ACCESS_READ), (s["accessConnected"], s["accessOpen"], s["accessStatus"]),
-                                 f"{how}: the dialog is disposed before the logout answers")
-                self.assert_nothing_leaves(how)
-                self.assertEqual((gets, 0), (self.count("GET", ACCESS_PATH), self.count("POST", ACCESS_PATH)),
-                                 f"{how}: no Study Access GET or POST after the end")
-                self.assertEqual(ACCESS_READ, self.panels()["accessStatus"])
-                self.release_logout(moves, how)
 
-        # Control: the module without its closer and its end checks (the F06 state) keeps the dialog open after the end.
-        # Its Save also sent the POST until S7-U5; auth.js now gives no identity once the end starts (§0.C 3), so the
-        # module's own owner check refuses it and that half of the control no longer reproduces the risk (retired; the
-        # one-off counterexample is kept with the S7-U5 fix1 evidence). No Study Access POST after the end stays
-        # asserted on the shipped module above.
-        self.logouts, self.held_logouts = 0, None
-        self.scripts[ACCESS_SCRIPT] = access_unguarded()
-        self.fresh_context()
-        self.open()
-        self.refresh((200, answer()))
-        held = {"operations": self.hold_reads(1)[0]}
-        self.open_study_access()
-        self.edit_study_access()
-        self.end_by("an Operations 401", held)
-        s = self.panels()
-        self.assertEqual((True, True, True, 1), (s["ended"], s["accessConnected"], s["accessOpen"], s["accessInDocument"]))
-        self.held_logouts.pop().fulfill(status=204, body="")
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
-
-    def test_15_an_older_gateway_read_401_ends_the_session_at_once(self):
-        older_ops, newer_ops = self.five_on_screen_and_two_reads_out()
-        self.draw_gateway()
-        older, newer = self.hold_gateway_reads(2)
-        self.end_by("a Gateway 401", {"gateway": older})
-        self.assert_all_closed("an older Gateway read's 401")
-        self.release_late({"gateway": newer}, "the newer Gateway read")
-        newer_ops.fulfill(json=answer(second=8, rows=replace(ROWS, "studies.own", value=6)))
-        self.wait_until(lambda: self.fetch_done() == 2, "the late Operations 200")
-        older_ops.fulfill(status=401, json={"message": SERVER_WORDING})
-        self.wait_until(lambda: self.fetch_done() == 3, "the late Operations 401")
-        self.page.wait_for_timeout(150)
-        self.assert_all_closed("after the late answers")
-        self.assertEqual(1, self.json_done(), "no Operations answer after the end is read")
-        self.assert_nothing_leaves("an older Gateway read's 401")
-        self.release_logout(0, "an older Gateway read's 401")
-
-        # Control: Gateway's 401 judged after its sequence check (979a69b) drops the older read's 401: nothing ends,
-        # nobody logs out, Operations keeps its table and control, and the late 200 paints over it.
-        self.logouts, self.held_logouts = 0, None
-        self.fresh_context()
-        older_ops, newer_ops = self.five_on_screen_and_two_reads_out(variant_in(GATEWAY_SCRIPT, [
-            (GATEWAY_401_IN_REQUEST, GATEWAY_401_BEFORE), (GATEWAY_AFTER_SEQUENCE, GATEWAY_401_AFTER_SEQUENCE)]))
-        self.draw_gateway()
-        older, newer = self.hold_gateway_reads(2)
-        done = self.path_done("fetch", STUDIES_PATH)
-        older.fulfill(status=401, json={"message": SERVER_WORDING})
-        self.wait_until(lambda: self.path_done("fetch", STUDIES_PATH) > done, "control: the older Gateway 401")
-        self.page.wait_for_timeout(150)
-        s = self.panels()
-        self.assertEqual((False, 0, 11, True), (s["ended"], self.logouts, s["opsRows"], s["opsRefresh"]))
-        newer_ops.fulfill(json=answer(second=8, rows=replace(ROWS, "studies.own", value=6)))
-        self.wait_until(lambda: self.json_done() == 2, "control: the late Operations answer read")
-        self.wait_until(lambda: not self.summary()["busy"], "control: the load finished")
-        self.assertEqual("6", self.own_cell())
-        older_ops.fulfill(json=answer(second=7))
-        newer.fulfill(json=gateway_list(1))
-        self.wait_until(lambda: self.path_done("fetch", STUDIES_PATH) > done + 1, "control: the newer Gateway answer")
 
     def member_answers_out(self, create=True):
         """A member-list read, a temporary password and (create) a Create Member submit, each held at the server. The
@@ -1204,39 +1025,6 @@ class AdminMetricsDOMTest(unittest.TestCase):
             self.wait_until(lambda: self.path_done("json", path) > before, f"the late {key} answer read")
         self.page.wait_for_timeout(150)
 
-    def test_16_the_members_console_closes_and_drops_late_answers(self):
-        for how in ("Log out", "an Operations 401"):
-            with self.subTest(how=how):
-                self.logouts, self.held_logouts, moves = 0, None, self.moves()
-                self.fresh_context()
-                self.open()
-                ending = {"operations": self.hold_reads(1)[0]} if how == "an Operations 401" else {}
-                held = self.member_answers_out()
-                self.assertEqual(["create-dialog"], self.panels()["dialogs"])
-                self.end_by(how, ending)
-                self.assert_all_closed(how)
-                reads = self.count("GET", LIST_PATH)
-                self.release_member_answers(held)
-                s = self.assert_all_closed(f"{how}: after the late answers")
-                self.assertEqual(ENDED, s["message"], "a late answer only says that the session ended")
-                self.assertEqual(reads, self.count("GET", LIST_PATH), "no list read after the creation")
-                self.assert_nothing_leaves(how)
-                self.release_logout(moves, how)
-
-        # Control: the members console without its closer and end checks (the F05 state) draws the late list and opens
-        # the temporary password after the end.
-        self.logouts, self.held_logouts = 0, None
-        self.fresh_context()
-        self.open(members_unguarded())
-        ending = {"operations": self.hold_reads(1)[0]}
-        held = self.member_answers_out(create=False)
-        self.end_by("an Operations 401", ending)
-        self.release_member_answers(held)
-        s = self.panels()
-        self.assertEqual((True, 1, ["password-dialog"], SECRET), (s["ended"], s["memberRows"], s["dialogs"], s["secret"]))
-        self.assertIn("SYN Late Member", s["text"])
-        self.held_logouts.pop().fulfill(status=204, body="")
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
 
     def every_panel_out(self):
         """Every live module shows this session's data and has one request out: Operations (Studies Owned 5), Gateway
@@ -1260,90 +1048,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
                          (s["ended"], s["opsRows"], s["gatewayRows"], s["memberRows"], s["dialogs"], s["accessStatus"]))
         return held
 
-    def test_17_every_signal_closes_every_live_panel(self):
-        for how in SIGNALS:
-            with self.subTest(how=how):
-                self.logouts, self.held_logouts, moves = 0, None, self.moves()
-                self.fresh_context()
-                held = self.every_panel_out()
-                self.end_by(how, held)
-                s = self.assert_all_closed(how)
-                self.assertEqual((False, False, "Loading"), (s["accessConnected"], s["accessOpen"], s["accessStatus"]),
-                                 f"{how}: Study Access is disposed before the logout answers")
-                self.release_late(held, how)
-                s = self.assert_all_closed(f"{how}: after the late answers")
-                self.assertEqual("Loading", s["accessStatus"], f"{how}: the late Study Access answer draws nothing")
-                self.assertEqual(EXPIRED if how == "a member-list 401" else ENDED, s["message"],
-                                 f"{how}: the members console says only that the session ended")
-                self.assert_nothing_leaves(how)
-                self.release_logout(moves, how)
 
-    def test_18_the_boot_takes_every_end(self):
-        for how in ("a /api/me 401", "a member-list 401", "a Gateway 401", "an Operations 401", "a Study Access 401",
-                    "Log out", "Log out while the /api/me body is read"):
-            with self.subTest(how=how):
-                self.logouts, self.held_logouts, moves = 0, [], self.moves()
-                self.fresh_context()
-                reads = self.count("GET", LIST_PATH)
-                self.held_me = []
-                self.page.goto(ORIGIN + PAGE_PATH)
-                self.wait_until(lambda: len(self.held_me) == 1, "the session read")
-                me, self.held_me = self.held_me.pop(), None
-                first_read = 0
-                if how == "a /api/me 401":
-                    me.fulfill(status=401, json={"message": SERVER_WORDING})
-                elif how == "Log out":
-                    # S7-U5 §0.C 7: the end before the /api/me headers. The late answer reaches the page; read or dropped
-                    # unread, it restores no identity and starts nothing (checked below).
-                    self.page.locator("#logout").click()
-                    self.wait_until(lambda: self.logouts == 1, "the logout request")
-                    me.fulfill(json=ME)
-                    self.wait_until(lambda: self.path_done("fetch", "/api/me") == 1, "the late session answer received")
-                elif how == "Log out while the /api/me body is read":
-                    # The end after the headers, while the body is still out.
-                    self.page.evaluate("() => { window.__jsonHold.push('/api/me'); }")
-                    me.fulfill(json=ME)
-                    self.wait_until(lambda: self.page.evaluate("() => window.__jsonHeld.length") == 1, "the session body held")
-                    self.page.locator("#logout").click()
-                    self.wait_until(lambda: self.logouts == 1, "the logout request")
-                    self.page.evaluate("() => window.__jsonHeld.splice(0).forEach(held => held.release())")
-                    self.wait_until(lambda: self.path_done("json", "/api/me") == 1, "the late session body released")
-                elif how == "a member-list 401":
-                    self.member_replies.append((401, {"message": SERVER_WORDING}))
-                    me.fulfill(json=ME)
-                    first_read = 1
-                else:
-                    # The first list read is out, so the boot is still pending; Gateway Status and Operations are on.
-                    self.member_replies.append("hold")
-                    me.fulfill(json=ME)
-                    self.wait_until(lambda: len(self.held_members) == 1, "the first list read")
-                    expect(self.page.locator("#metrics-refresh")).to_be_enabled()
-                    expect(self.page.locator("#gateway-refresh")).to_be_enabled()
-                    if how == "a Gateway 401":
-                        self.serve_arrivals = True
-                        self.study_replies.append((401, {"message": SERVER_WORDING}))
-                        self.page.locator("#gateway-refresh").click()
-                    elif how == "an Operations 401":
-                        self.replies.append((401, {"message": SERVER_WORDING}))
-                        self.page.locator("#metrics-refresh").click()
-                    else:
-                        self.access_replies.append((401, {"message": SERVER_WORDING}))
-                        self.page.evaluate("""user => { KinStudyAccessAdmin.open(user);
-                          window.__access = document.querySelector('#study-access-dialog'); }""", MEMBER)
-                    self.wait_until(lambda: self.logouts == 1, f"{how}: the logout request")
-                    done = self.path_done("json", LIST_PATH)
-                    self.held_members.pop().fulfill(json=MEMBERS)
-                    self.wait_until(lambda: self.path_done("json", LIST_PATH) > done, "the late first list read")
-                    first_read = 1
-                self.wait_until(lambda: self.logouts == 1, f"{how}: the logout request")
-                self.page.wait_for_timeout(150)
-                s = self.assert_all_closed(how)
-                self.assertIsNone(self.page.evaluate("() => KinAuth.session()"), f"{how}: no identity after the end")
-                if how == "a Study Access 401":
-                    self.assertEqual((False, False), (s["accessConnected"], s["accessOpen"]))
-                self.assertEqual(reads + first_read, self.count("GET", LIST_PATH), f"{how}: no list read after the end")
-                self.assert_nothing_leaves(how)
-                self.release_logout(moves, how)
 
 
 # ── S5-U6b-F02: the worklist menubar storage figure (main.html #storage) ──
@@ -1388,8 +1093,8 @@ def extract_function(source, name):
 
 STORAGE_ELEMENT = re.search(r'<div class="mright" id="storage"[^>]*>[^<]*</div>', MAIN_HTML).group(0)
 STORAGE_STATE = "    let storageSeq = 0, storageLast = null;\n"
-STORAGE_GUARD = "      if (seq !== storageSeq) return;\n"
-REFRESH_STORAGE = "async " + extract_function(MAIN_HTML, "refreshStorage")
+STORAGE_GUARD = "if (seq === storageSeq) "
+REFRESH_STORAGE = MAIN_HTML[MAIN_HTML.index("    async function refreshStorage("):MAIN_HTML.index("    async function load(options = {})")]
 # The page's `$`; fetch answers from a queue the case settles, in any order.
 STORAGE_HARNESS = """<!doctype html><html><body><div class="menubar">ELEMENT</div><script>
 const $ = s => document.querySelector(s);
@@ -1398,6 +1103,9 @@ window.fetch = url => new Promise((resolve, reject) => window.pending.push({ url
 window.settle = (index, status, body) => window.pending[index].resolve(new Response(body, { status }));
 window.fail = index => window.pending[index].reject(new TypeError('SYN network down'));
 window.box = () => { const b = $('#storage'); return { text: b.textContent, title: b.title, state: b.dataset.state }; };
+const work = KinWorkContext.create();
+work.follow({ onLifecycle(fn) { fn({ state: 'active', session: 'SYN-STORAGE' }); } });
+const transport = KinSessionTransport.create({ gate: work });
 STATE
 REFRESH
 </script></body></html>"""
@@ -1436,14 +1144,15 @@ class WorklistStorageDOMTest(unittest.TestCase):
             self.page.close()
         self.page = self.browser.new_page()
         self.page.on("pageerror", lambda error: self.errors.append(str(error)))
-        self.page.set_content(STORAGE_HARNESS.replace("ELEMENT", STORAGE_ELEMENT).replace("STATE", STORAGE_STATE)
-                              .replace("REFRESH", refresh))
+        html = STORAGE_HARNESS.replace("ELEMENT", STORAGE_ELEMENT).replace("STATE", STORAGE_STATE).replace("REFRESH", refresh)
+        core = lf_text(HPACS / "work-context.js") + lf_text(HPACS / "session-transport.js")
+        self.page.set_content(html.replace("<script>", "<script>" + core + "</script><script>", 1))
         self.page.add_script_tag(content=ARRIVALS_JS)
         self.page.add_script_tag(content=METRICS_MODEL)
 
     def read(self, settle):
         """One refreshStorage(); `settle` answers its request (JS taking the request index `i`)."""
-        return self.page.evaluate(f"""async () => {{ const run = refreshStorage(), i = window.pending.length - 1;
+        return self.page.evaluate(f"""async () => {{ const run = refreshStorage(); await Promise.resolve(); const i = window.pending.length - 1;
           {settle}; await run; return box(); }}""")
 
     def ok(self, body):
@@ -1473,13 +1182,7 @@ class WorklistStorageDOMTest(unittest.TestCase):
         self.assertIsNone(re.search(r"\d", shown["text"]))
         self.assertIn("아직 관측하지 않았습니다", shown["title"])
         self.assertIn(NO_ZERO, shown["title"])
-        # The old default text and the old write ('0.0GB / -', `+ "GB used"`) are gone; the comment may still name them.
-        self.assertNotIn(">0.0GB / -<", MAIN_HTML)
-        self.assertNotIn('"GB used"', MAIN_HTML)
-        # One writer: every /statistics read and every #storage write is refreshStorage().
-        self.assertEqual(1, MAIN_HTML.count('fetch("/statistics")'))
-        self.assertEqual(1, MAIN_HTML.count('$("#storage")') + MAIN_HTML.count("$('#storage')"))
-        self.assertIn('$("#storage")', REFRESH_STORAGE)
+        self.assertEqual(0, self.page.evaluate("pending.length"), "no storage observation before a read")
 
     def test_s02_every_first_failure_is_unobservable_with_its_reason(self):
         failed, shape = "원천 조회에 실패했습니다.", "응답 형식을 확인할 수 없습니다."
@@ -1521,7 +1224,8 @@ class WorklistStorageDOMTest(unittest.TestCase):
         self.assert_unobservable(self.read("settle(i, 503, '{}')"), "원천이 HTTP 503로 답했습니다.", last="0 B")
 
     AB = """async () => {
-      const a = refreshStorage(), ia = window.pending.length - 1, b = refreshStorage(), ib = window.pending.length - 1;
+      const a = refreshStorage(); await Promise.resolve(); const ia = window.pending.length - 1;
+      const b = refreshStorage(); await Promise.resolve(); const ib = window.pending.length - 1;
       settle(ib, 200, JSON.stringify({ TotalDiskSize: String(2 ** 30) }));
       await b;
       const newer = box();

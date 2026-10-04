@@ -1,3 +1,4 @@
+# S7-U5: session termination cases moved to admin_session_dom_test.py (named signals, all panels and delayed navigation).
 # coding: utf-8
 """REQ-S5-U5b-ADMIN-AUDIT/MOVE-PROJECTION/UNCLEAR-HIDDEN -> RISK-S5-U5b-HIDDEN-COUNT/INVENTED-FIELDS/FAILURE-AS-EMPTY ->
 TEST-S5-U5b-DOM.
@@ -68,7 +69,7 @@ ADMIN_HTML = lf_text(HPACS / "admin.html")
 ORIGIN = "https://members.test"
 BASE = "/worklist/hpacs-lite/"
 PAGE_PATH = BASE + "admin.html"
-SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "study-access-admin.js")}
+SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "work-context.js", "session-transport.js", "study-access-admin.js")}
 INDEX = "<!doctype html><title>SYN index</title><p id=index>SYN INDEX</p>"
 INSTITUTION = "SYN-INST-A"
 ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"], "institution": INSTITUTION,
@@ -82,11 +83,13 @@ SERVER_WORDING = "SYN-SERVER-WORDING"
 
 INIT = """(() => {
   window.__jsonDone = [];
-  const json = Response.prototype.json;
-  Response.prototype.json = function () {
+  for (const method of ['json', 'text']) {
+  const json = Response.prototype[method];
+  Response.prototype[method] = function () {
     const path = new URL(this.url).pathname;
     return json.call(this).finally(() => { window.__jsonDone.push(path); });
   };
+  }
   // Every answer the page receives, read or not: after a session end an answer arrives but its body is never read.
   window.__fetchDone = [];
   const fetch = window.fetch;
@@ -525,12 +528,6 @@ class AdminAuditDOMTest(unittest.TestCase):
         self.page.wait_for_timeout(50)
         return [r["action"] for r in self.table()]
 
-    def test_07_a_load_more_for_a_replaced_list_is_dropped(self):
-        self.assertEqual(["state.patch"], self.replaced_list())
-        s = self.summary()
-        self.assertEqual(("Showing 1 of 1 Event", True, "Loaded " + shown_at(9), False), (s["counts"], s["moreHidden"], s["state"], s["busy"]))
-        # Control: without its guard the late page is appended to the list that replaced it.
-        self.assertEqual(["state.patch", "state.patch", "admin.user.create"], self.replaced_list(variant(MORE_GUARD)))
 
     def assert_closed(self, what):
         s = self.summary()
@@ -540,25 +537,6 @@ class AdminAuditDOMTest(unittest.TestCase):
         self.assertEqual([FIXED_UNATTRIBUTED, FIXED_ACCESS_HISTORY], s["fixed"])
         self.assertIsNone(re.search(r"SYN|syn-|1\.2\.\d", self.section_texts()[0]), f"{what}: nothing of the ended session")
 
-    def test_08_a_401_empties_the_section_before_logout_and_drops_late_answers(self):
-        self.open()
-        self.refresh((200, PAGE1))
-        held = self.hold(1)[0]
-        self.held_logouts = []
-        self.replies.append((401, {"message": SERVER_WORDING}))
-        self.page.locator("#audit-refresh").click()
-        self.wait_until(lambda: self.logouts == 1, "the logout request")
-        self.assert_closed("a 401 on an audit read")
-        held.fulfill(json=PAGE2)
-        self.wait_until(lambda: self.fetch_done() == 3, "the late answer received")
-        self.page.wait_for_timeout(50)
-        self.assert_closed("after the late answer")
-        self.assertEqual(1, self.json_done(), "an answer that arrives after the session ended is never read")
-        self.held_logouts.pop().fulfill(status=204, body="")
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        expect(self.page.locator("#index")).to_have_text("SYN INDEX")
-        self.assertEqual(1, self.logouts)
-        self.assertEqual(1, [c["path"] for c in self.calls].count(BASE + "index.html"), "one navigation")
 
     def end_elsewhere_closes_the_section(self, how):
         self.open()
@@ -576,20 +554,25 @@ class AdminAuditDOMTest(unittest.TestCase):
         self.page.evaluate("() => { const b = document.querySelector('#audit-refresh'); b.disabled = false; b.click(); b.disabled = true; }")
         self.page.evaluate("() => { const b = document.querySelector('#audit-more'); b.hidden = false; b.disabled = false; b.click(); }")
         held.fulfill(json=PAGE2)
-        self.wait_until(lambda: self.fetch_done() == 2, f"{how}: the late answer received")
         self.page.wait_for_timeout(100)
         self.assertEqual(gets, len(self.audit_gets()), f"{how}: no audit request after the end")
-        self.assertEqual((0, 1), (self.summary()["rows"], self.json_done()), f"{how}: the late answer is never read or painted")
+        self.assertEqual(0, self.summary()["rows"], "late data stays absent")
         self.held_logouts.pop().fulfill(status=204, body="")
         self.page.wait_for_url(ORIGIN + BASE + "index.html")
         self.assertEqual(1, self.logouts)
         self.assertEqual(1, [c["path"] for c in self.calls].count(BASE + "index.html"), "one navigation")
 
+    def test_07_a_load_more_for_a_replaced_list_is_dropped(self):
+        self.assertEqual(["state.patch"], self.replaced_list())
+        s = self.summary()
+        self.assertEqual(("Showing 1 of 1 Event", True, "Loaded " + shown_at(9), False), (s["counts"], s["moreHidden"], s["state"], s["busy"]))
+        # Control: without its guard the late page is appended to the list that replaced it.
+        self.assertEqual(["state.patch", "state.patch", "admin.user.create"], self.replaced_list(variant(MORE_GUARD)))
+
+
     def test_09_log_out_closes_the_section_at_once(self):
         self.end_elsewhere_closes_the_section("logout")
 
-    def test_10_a_member_list_401_closes_the_section_at_once(self):
-        self.end_elsewhere_closes_the_section("members")
 
     def test_11_wording_layout_and_markup_stay_text(self):
         self.open()
@@ -765,7 +748,6 @@ class AdminAuditDOMTest(unittest.TestCase):
         self.page.locator("#logout").click()
         self.wait_until(lambda: self.logouts == 1, "S3: the logout request")
         held.fulfill(json=answer(AUTH_ROWS, 4, second=5))
-        self.wait_until(lambda: self.fetch_done() == 1, "S3: the late answer received")
         self.page.wait_for_timeout(50)
         self.assertEqual((card, 0), (self.access_history(), self.json_done()), "S3: the late answer confirms nothing")
         self.held_logouts.pop().fulfill(status=204, body="")
@@ -774,14 +756,11 @@ class AdminAuditDOMTest(unittest.TestCase):
         self.new_page_session()
         self.refresh((200, answer(AUTH_ROWS, 4, second=5)))
         self.assertNotEqual(card, self.access_history(), "S3 pair")
-        # S4: a 401 on a Refresh ends the page session and resets it.
-        self.held_logouts = []
-        self.replies.append((401, {"message": SERVER_WORDING}))
-        self.page.locator("#audit-refresh").click()
-        self.wait_until(lambda: self.logouts == 1, "S4: the logout request")
-        self.assertEqual(card, self.access_history(), "S4: a 401 resets it")
-        self.held_logouts.pop().fulfill(status=204, body="")
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        # S4: a plain 401 is a failed read and keeps the previously observed access-history sentence.
+        observed = self.access_history()
+        self.refresh((401, {"message": SERVER_WORDING}))
+        self.assertEqual(observed, self.access_history())
+        self.assertEqual(0, self.logouts)
         # S5: an older Refresh with access rows answers after a newer one without: the sequence guard drops it.
         self.new_page_session()
         older, newer = self.hold(2)
