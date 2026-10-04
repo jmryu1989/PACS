@@ -7726,6 +7726,29 @@
     let loggingOut = false;
     let logoutPrep = null;
     // The opaque notice id belongs to one preparation across all documents.
+    /**
+     * 준비의 통지는 임대(lease)다. 뷰어는 이 통지로 멈추는데, 멈추게 한 이 탭이 준비 중에 닫히거나 멈추거나 버려지면 재개
+     * 통지를 보낼 문서가 없어 뷰어가 안내 없이 멈춘 채 남는다(U5VW-F03). 그래서 준비가 살아 있는 동안 같은 통지(같은 준비
+     * 번호)를 2초마다 다시 보낸다 — 뷰어는 같은 번호의 재통지를 갱신으로 보고, 갱신이 끊기면 세션이 유효한 한 스스로
+     * 재개한다. 이 문서가 준비 중에 사라질 때(pagehide)는 그 한도를 기다리게 하지 않고 재개를 바로 알린다. 갱신은 통지일
+     * 뿐이다: 이 문서의 화면도 상태도 바꾸지 않고, 이 준비가 지금도 이 문서의 살아 있는 준비일 때만 나간다.
+     */
+    const PREPARATION_RENEW_MS = 2000;
+    function leasePreparation(prep) {
+      clearInterval(prep.lease);
+      prep.lease = setInterval(() => {
+        if (logoutPrep === prep && work.admits(prep.permit)) KinAuth.notifyPreparation("preparing", prep.announced);
+        else endLease(prep);
+      }, PREPARATION_RENEW_MS);
+    }
+    function endLease(prep) {
+      clearInterval(prep.lease);
+      prep.lease = null;
+    }
+    window.addEventListener("pagehide", () => {
+      const prep = logoutPrep;
+      if (prep?.announced && work.admits(prep.permit)) KinAuth.notifyPreparation("resumed", prep.announced);
+    });
 
     /**
      * 같은 사용자로 편집에 돌아왔다(준비 취소 = 새 작업 세대). 준비 전에 나갔던 일의 답은 돌아오지 않으므로, 그 일들이 그리던
@@ -7805,7 +7828,10 @@
       if (announce) prep.announced = crypto.randomUUID();
       let permit = prep.permit = work.prepare({ preparationId: prep.announced, owner: prep.owner, snapshot: prep.reports });
       if (!permit) return;
-      if (announce) KinAuth.notifyPreparation("preparing", prep.announced);
+      if (announce) {
+        KinAuth.notifyPreparation("preparing", prep.announced);
+        leasePreparation(prep);
+      }
       clearInterval(poll); poll = null;
       const mine = () => logoutPrep === prep && prep.attempt === attempt && prep.permit === permit && work.admits(permit);
       const fail = reason => work.commit(permit, () => { if (mine()) failLogout(prep, reason); });
@@ -7888,6 +7914,7 @@
      */
     function endUse(prep) {
       prep.state = "closing";
+      endLease(prep);
       showLogoutPanel(prep);
       return KinAuth.logout();
     }
@@ -7940,6 +7967,7 @@
       if (logoutPrep !== prep || !["waiting", "saving", "failed"].includes(prep.state)) return;
       const permit = prep.permit, prepared = prep.state !== "waiting";
       prep.state = "cancelled";
+      endLease(prep);
       prep.panel?.close();
       prep.panel?.remove();
       logoutPrep = null;

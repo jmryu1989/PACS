@@ -1101,6 +1101,80 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.page.wait_for_url(h.INDEX_URL)
         self.assertEqual((1, 1), (len(self.site.puts), len(self.site.logouts)))
 
+    def preparing(self, page=None):
+        return [post for post in self.posts(page) if post["type"] == "session-preparing"]
+
+    def test_the_preparation_notice_is_a_lease_renewed_while_it_lives_and_released_when_the_document_goes(self):
+        for ending in ("Back to Editing", "the document goes away", "Log out completes"):
+            with self.subTest(ending=ending):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.page.clock.install()
+                self.open_main()
+                session = self.site.cookie
+                self.select_and_type()
+                self.site.put_answers = ["hold"]
+                self.site.logout_answers = ["hold"]
+                self.log_out_main()
+                self.wait_until(lambda: self.site.held_puts, "the preparation's save")
+                first = self.preparing()[0]
+                self.assertEqual(session, first["session"])
+                # While the preparation lives its notice is posted again every 2 s, unchanged.
+                self.page.clock.run_for(6100)
+                renewed = self.preparing()
+                self.assertGreaterEqual(len(renewed), 4, "the first notice and three renewals in six seconds")
+                self.assertEqual([first] * len(renewed), renewed, "a renewal is the same notice, the same preparation")
+                self.assertEqual("preparing", self.screen()["state"])
+                if ending == "Back to Editing":
+                    self.panel_button("Back to Editing").click()
+                    resumed = [post for post in self.posts() if post["type"] == "session-resumed"]
+                    self.assertEqual([{"type": "session-resumed", "session": session, "preparation": first["preparation"]}],
+                                     resumed)
+                elif ending == "the document goes away":
+                    # The browser's notice that this document is being left (a closed tab, a navigation).
+                    self.page.evaluate("() => window.dispatchEvent(new PageTransitionEvent('pagehide'))")
+                    resumed = [post for post in self.posts() if post["type"] == "session-resumed"]
+                    self.assertEqual([{"type": "session-resumed", "session": session, "preparation": first["preparation"]}],
+                                     resumed, "the viewers are released at once, not after their lease runs out")
+                    continue
+                else:
+                    self.assertEqual(200, self.site.finish_put())
+                    self.wait_until(lambda: self.site.held_logouts, "the real end")
+                count = len(self.preparing())
+                self.page.clock.run_for(6100)
+                self.assertEqual(count, len(self.preparing()), "no renewal after the preparation ended")
+                if ending == "Log out completes":
+                    self.assertEqual([], [post for post in self.posts() if post["type"] == "session-resumed"])
+                    self.assertEqual("session-ended", self.posts()[-1]["type"])
+
+    def test_a_document_that_is_not_preparing_posts_no_release_when_it_goes(self):
+        self.open_main()
+        self.select_and_type()
+        self.page.evaluate("() => window.dispatchEvent(new PageTransitionEvent('pagehide'))")
+        self.assertEqual([], self.posts())
+
+    def test_closing_the_preparing_tab_tells_the_other_documents_of_the_session_to_resume(self):
+        self.open_main()
+        session = self.site.cookie
+        self.select_and_type()
+        # Another document of the same session listens on the session channel, as a viewer does.
+        other = self.open_main(self.watch(self.context.new_page()))
+        other.evaluate("""() => { window.__synHeard = []; window.__synChannel = new BroadcastChannel('kin-session');
+            window.__synChannel.onmessage = event => window.__synHeard.push(event.data); }""")
+        heard = lambda: other.evaluate("() => window.__synHeard")
+        self.site.put_answers = ["hold"]
+        self.log_out_main()
+        self.wait_until(lambda: heard(), "the pause notice", page=other)
+        paused = heard()[0]
+        self.assertEqual(("session-preparing", session), (paused["type"], paused["session"]))
+        self.page.close()                   # the tab is closed in the middle of its preparation
+        self.page = other
+        released = lambda: [notice for notice in heard() if notice["type"] == "session-resumed"]
+        self.wait_until(released, "the release notice", page=other)
+        self.assertEqual([{"type": "session-resumed", "session": session, "preparation": paused["preparation"]}], released())
+        self.assertEqual("active", self.screen(other)["state"], "the session itself is untouched")
+
+
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(ReportTextBoundaries(name) for name in ReportTextBoundaries.__dict__ if name.startswith('test_'))
 
