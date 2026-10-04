@@ -30,6 +30,8 @@ import re
 import unittest
 from pathlib import Path
 
+from report_page_contract import install_contract
+
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -233,6 +235,8 @@ window.release = () => { const next = heldAnswers.shift(); if (next) next(); };
 </script></body></html>"""
 
 
+HARNESS = install_contract(HARNESS)
+
 def harness(state, catalog=CATALOG):
     return (HARNESS
             .replace("MODALCSS", MODAL_CSS)
@@ -313,6 +317,44 @@ class ReportStructureDOMTest(unittest.TestCase):
         self.assertEqual(page.evaluate("() => $('#findings').value"), EXISTING)
         self.assertIsNone(page.evaluate("() => pane()"))
 
+    def test_d20_apply_is_above_the_open_findings_drawer_at_1366_by_768(self):
+        """U5PT-F02 / covered Apply: use the whole shipped page and drawer geometry."""
+        import auth_logout_dom_test as auth
+        import report_session_page_dom_test as session_page
+        from playwright.sync_api import expect
+
+        site = session_page.ReportSite()
+        for suffix, body in (
+                ('report/structure', {'version': 0, 'unknown': False, 'head': [], 'draft': []}),
+                ('report/citations', {'version': 0, 'head': [], 'draft': []})):
+            site.gets['/api/studies/' + auth.UID + '/' + suffix] = (200, body)
+        context = self._browser.new_context(viewport={'width': 1366, 'height': 768})
+        self.addCleanup(context.close)
+        context.route('**/*', site.handle)
+        page = context.new_page()
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.clock.install()
+        page.goto(auth.MAIN_URL)
+        page.locator('#rows tr', has_text=auth.PATIENT).first.click()
+        page.locator('#reading-findings-open').click()
+        expect(page.locator('#reading-findings')).to_be_visible()
+        page.locator('#report-more > summary').click()
+        page.locator('#b-structured').click()
+        page.locator('#struct-item').select_option('GEN-1\x00CONCLUSION')
+        page.locator('#struct-value-text').fill('SYN accessible Apply')
+        expect(page.locator('#struct-apply')).to_be_enabled()
+        self.assertTrue(page.locator('#struct-apply').evaluate('''el => {
+          const r = el.getBoundingClientRect();
+          return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === el;
+        }'''), 'the actual pointer target at Apply must be Apply, with Image Findings still open')
+        expect(page.locator('#reading-findings')).to_be_visible()
+        page.locator('#struct-apply').click()
+        expect(page.locator('#conclusion')).to_have_value('Conclusion: SYN accessible Apply')
+        self.assertEqual('Conclusion: SYN accessible Apply', site.stored()['conclusion'])
+        self.assertEqual([], errors)
+        self.assertEqual([], site.violations)
+
     # D2 ───────────────────────────────────────────────────────────────────────────────────────
     def test_d02_apply_writes_the_field_only_after_the_server_answered(self):
         page = self.open(state(), struct_replies=[{"version": 4, "unknown": False, "head": [], "draft": []},
@@ -320,7 +362,7 @@ class ReportStructureDOMTest(unittest.TestCase):
                                                    "draft": [entry(renderedText=BOOL_LINE, field="conclusion",
                                                                    itemCode="SYN-BOOL", valueType="boolean",
                                                                    value=True)]}],
-                         replies=[{"status": 200, "body": {"structured": {"sid": SID, "field": "conclusion",
+                         replies=[{"status": 200, "body": {"applied": {"sid": SID, "field": "conclusion",
                                                                           "enteredAt": "now"}}}])
         page.evaluate("() => { $('#conclusion').value = 'typed by hand'; $('#conclusion').focus();"
                       "$('#conclusion').setSelectionRange(14, 14); }")
@@ -361,7 +403,7 @@ class ReportStructureDOMTest(unittest.TestCase):
         page = self.open(state(findings=CHOICE_LINE),
                          struct_replies=[{"version": 4, "unknown": False, "head": [head], "draft": []},
                                          {"version": 4, "unknown": False, "head": [head], "draft": []}],
-                         replies=[{"status": 200, "body": {"structured": {"sid": "s-new", "field": "findings",
+                         replies=[{"status": 200, "body": {"applied": {"sid": "s-new", "field": "findings",
                                                                           "enteredAt": "now"}}}])
         page.evaluate("() => { $('#findings').value = %s; }" % json.dumps(CHOICE_LINE))
         page.wait_for_function("() => structKnown()")
@@ -405,7 +447,7 @@ class ReportStructureDOMTest(unittest.TestCase):
         body = "before\n" + CITED + "\nafter"
         page = self.open(state(findings=body),
                          struct_replies=[{"version": 4, "unknown": False, "head": [], "draft": []}],
-                         replies=[{"status": 200, "body": {"structured": {"sid": SID, "field": "findings",
+                         replies=[{"status": 200, "body": {"applied": {"sid": SID, "field": "findings",
                                                                           "enteredAt": "now"}}}])
         page.evaluate("() => { $('#findings').value = %s; $('#findings').focus();"
                       "$('#findings').setSelectionRange(18, 18); }" % json.dumps(body))
@@ -468,7 +510,7 @@ class ReportStructureDOMTest(unittest.TestCase):
                          struct_replies=[{"version": 4, "unknown": False, "head": [], "draft": []},
                                          {"version": 1, "unknown": False, "head": [], "draft": []},
                                          {"version": 1, "unknown": False, "head": [], "draft": []}],
-                         replies=[{"status": 200, "body": {"structured": {"sid": SID, "field": "findings",
+                         replies=[{"status": 200, "body": {"applied": {"sid": SID, "field": "findings",
                                                                           "enteredAt": "now"}}}])
         page.evaluate("() => { $('#findings').value = %s; }" % json.dumps(EXISTING))
         self.pick(page)
@@ -482,21 +524,17 @@ class ReportStructureDOMTest(unittest.TestCase):
         self.assertIsNone(page.evaluate("() => pane()"))
 
     # D10 ──────────────────────────────────────────────────────────────────────────────────────
-    def test_d10_autosave_carries_the_keep_list_only_once_the_read_confirmed_it(self):
-        page = self.open(state())
-        page.evaluate("() => { $('#findings').value = 'typed'; }")
-        page.evaluate("() => stash()")
-        page.wait_for_function("() => calls.length === 1")
-        self.assertNotIn("structureIds", page.evaluate("() => calls[0].keys"),
-                         "S3-STRUCT D10: an unknown state must not invent a keep list")
-        page.evaluate("answer => { structReplies.push(answer); }",
-                      {"version": 4, "unknown": False, "head": [], "draft": [entry(sid="s-draft")]})
-        page.evaluate("() => ensureStruct({force: true})")
-        page.wait_for_function("() => structKnown()")
-        page.evaluate("() => { $('#findings').value = 'typed more'; }")
-        page.evaluate("() => stash()")
-        page.wait_for_function("() => calls.length === 2")
-        self.assertEqual(page.evaluate("() => calls[1].body.structureIds"), ["s-draft"])
+    def test_d10_autosave_uses_the_authoritative_draft_keep_list(self):
+        for ids in ([], ["s-draft"]):
+            with self.subTest(ids=ids):
+                page = self.open(state(draft={"findings": EXISTING, "conclusion": "", "recommendation": "", "baseVersion": 4}),
+                                 struct_replies=[{"version": 4, "unknown": False, "head": [],
+                                                  "draft": [entry(sid=sid) for sid in ids]}])
+                page.evaluate("() => { $('#findings').value = 'typed more'; }")
+                page.evaluate("() => stash()")
+                page.wait_for_function("() => calls.length === 1")
+                self.assertEqual(ids, page.evaluate("() => calls[0].body.structureIds"))
+                self.assertEqual("SYNEPOCH:0", page.evaluate("() => calls[0].body.expectedRevision"))
 
     # D11 ──────────────────────────────────────────────────────────────────────────────────────
     def test_d11_an_entry_from_another_catalog_revision_is_read_only(self):
@@ -516,7 +554,7 @@ class ReportStructureDOMTest(unittest.TestCase):
     def test_d12_the_caret_survives_the_form_taking_focus(self):
         page = self.open(state(),
                          struct_replies=[{"version": 4, "unknown": False, "head": [], "draft": []}],
-                         replies=[{"status": 200, "body": {"structured": {"sid": SID, "field": "findings",
+                         replies=[{"status": 200, "body": {"applied": {"sid": SID, "field": "findings",
                                                                           "enteredAt": "now"}}}])
         page.evaluate("() => { const el = $('#findings'); el.value = %s; el.focus();"
                       "el.setSelectionRange(10, 10); }" % json.dumps(EXISTING))
@@ -596,7 +634,7 @@ class ReportStructureDOMTest(unittest.TestCase):
         page.evaluate("() => load({force: true})")
         page.wait_for_function("() => structCalls.length >= 1")
         page.evaluate("() => { structReplies = [{version: 4, unknown: false, head: [], draft: []}];"
-                      "replies = [{status: 200, body: {structured: {sid: 'x', field: 'conclusion',"
+                      "replies = [{status: 200, body: {applied: {sid: 'x', field: 'conclusion',"
                       "  enteredAt: 'now'}}}]; }")
         page.evaluate("() => { openStruct(); pickStruct('GEN-1\\u0000CONCLUSION'); }")
         page.evaluate("() => { $('#struct-value-text').value = 'a line the reader typed';"
@@ -644,7 +682,7 @@ class ReportStructureDOMTest(unittest.TestCase):
     def test_d15_a_plan_that_went_stale_sends_nothing_and_asks_again(self):
         page = self.open(state(),
                          struct_replies=[{"version": 4, "unknown": False, "head": [], "draft": []}],
-                         replies=[{"status": 200, "body": {"structured": {"sid": SID, "field": "findings",
+                         replies=[{"status": 200, "body": {"applied": {"sid": SID, "field": "findings",
                                                                           "enteredAt": "now"}}}])
         page.evaluate("() => { const el = $('#findings'); el.value = %s; el.focus();"
                       "el.setSelectionRange(10, 10); }" % json.dumps(EXISTING))
@@ -672,7 +710,7 @@ class ReportStructureDOMTest(unittest.TestCase):
         page = self.open(state(),
                          struct_replies=[{"version": 4, "unknown": False, "head": [], "draft": []},
                                          {"version": 1, "unknown": False, "head": [], "draft": []}],
-                         replies=[{"status": 200, "body": {"structured": {"sid": SID, "field": "findings",
+                         replies=[{"status": 200, "body": {"applied": {"sid": SID, "field": "findings",
                                                                           "enteredAt": "now"}}}])
         page.evaluate("() => { const el = $('#findings'); el.value = %s; el.focus();"
                       "el.setSelectionRange(10, 10); }" % json.dumps(EXISTING))
@@ -699,7 +737,7 @@ class ReportStructureDOMTest(unittest.TestCase):
         draft = entry(sid="s-draft", value="c2", renderedText=CHOICE_LINE2)
         page = self.open(state(findings=CHOICE_LINE2),
                          struct_replies=[{"version": 4, "unknown": False, "head": [head], "draft": [draft]}],
-                         replies=[{"status": 200, "body": {"structured": {"sid": "s-third", "field": "findings",
+                         replies=[{"status": 200, "body": {"applied": {"sid": "s-third", "field": "findings",
                                                                           "enteredAt": "now"}}}])
         page.evaluate("() => { $('#findings').value = %s; }" % json.dumps(CHOICE_LINE2))
         page.wait_for_function("() => structKnown()")

@@ -24,8 +24,9 @@ import os
 import unittest
 from pathlib import Path
 
+from report_page_contract import install_contract
+
 from playwright.sync_api import sync_playwright
-from module_session_harness import CORE, STANDIN
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = Path(os.environ.get("KIN_PREVIEW_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")).read_text(encoding="utf-8")
@@ -124,14 +125,10 @@ CITATIONJS
 PREVIEWJS
 </script>
 <script>
-COREJS
 const API = "/api";
 let selectedUid = "UIDVALUE", warnedFor = null, appState = {};
 let previewCalls = [], citeCalls = [], toasts = [], logouts = 0;
 const KinAuth = { logout: async () => { logouts += 1; } };
-STANDINJS
-work.select(selectedUid);
-const staleAnswer = () => Object.assign(new Error('stale'), {stale: true});
 const displayActor = value => String(value ?? "").split("@")[0];
 function syncStudy() {}
 function updateReportButtons() {}
@@ -245,6 +242,8 @@ def ok(head, version=3):
     return {"status": 200, "body": {"version": version, "head": head, "draft": []}}
 
 
+HARNESS = install_contract(HARNESS)
+
 class ReportPreviewCitationDOMTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -269,8 +268,6 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
         self.page.on("pageerror", lambda error: errors.append(str(error)))
         harness = (HARNESS
                    .replace("CITATIONJS", CITATION_JS)
-                   .replace("COREJS", CORE)
-                   .replace("STANDINJS", STANDIN)
                    .replace("PREVIEWJS", PREVIEW_JS)
                    .replace("APIFN", API_FN)
                    .replace("PREVIEWANSWER", json.dumps(answer or preview_answer(), ensure_ascii=False))
@@ -347,6 +344,19 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
         self.assertIn(NONE, section)
         self.assertNotIn(LIMITATION, section)
         self.assertNotIn(UNKNOWN, section)
+
+    def test_printed_report_neither_claims_structure_nor_reads_its_route(self):
+        """U5PT-F02 / P15: output must not imply an unverified structure attestation."""
+        self.open(cite=ok([]))
+        self.require_print()
+        documents = self.print_document()
+        self.assertTrue(documents)
+        for document in documents:
+            text = self.page.evaluate("html => new DOMParser().parseFromString(html, 'text/html').body.textContent", document)
+            self.assertIn(BODY_LINE, text)
+            self.assertNotIn("structured", text.lower())
+        paths = self.page.evaluate("[...previewCalls, ...citeCalls].map(c => c.path)")
+        self.assertFalse(any('/report/structure' in path for path in paths), paths)
 
     # ── D3 · refused ──
 
@@ -575,13 +585,22 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
 
     # ── D17 · a session that ended takes the paper with it ──
 
-    def test_an_expired_session_blanks_the_paper_instead_of_drawing_unknown(self):
+    def test_an_ended_session_blanks_the_paper_instead_of_drawing_unknown(self):
         self.open(cite={"status": 401, "body": {"code": "AUTH_SESSION_ENDED"}}, render=False)
-        self.page.wait_for_function("KinWorkContext.state() === 'ending'")
+        self.page.wait_for_function("!['active', 'preparing'].includes(KinWorkContext.state())")
         self.assertEqual("", self.page.evaluate("ui.srcdoc()"), "nothing is drawn on a logged-out screen")
         self.assertEqual("", self.page.evaluate("ui.status()"))
         self.assertEqual(0, self.page.evaluate("ui.logouts()"), "an authoritative end sends no logout request")
         self.assertTrue(self.page.evaluate("ui.printDisabled()"))
+
+    def test_a_plain_401_is_unknown_evidence_and_keeps_the_report_open(self):
+        # Amendment ⑤: a request refusal is not evidence that this session ended.
+        self.open(cite={"status": 401, "body": {"message": "synthetic refusal"}}, render=False)
+        self.page.wait_for_function("() => citeCalls.length === 1 && ui.status() !== '출력 직전 상태를 다시 확인하고 있습니다…'", timeout=3000)
+        self.assertIn(BODY_LINE, self.page.evaluate("ui.srcdoc()"), "a plain 401 must not blank valid report text")
+        self.assertEqual("active", self.page.evaluate("work.state()"))
+        self.assertEqual(0, self.page.evaluate("ui.logouts()"))
+        self.assertIn(UNKNOWN, self.page.evaluate("ui.srcdoc()"))
 
     # ── D14 · a head that was never saved has nothing to attest ──
 

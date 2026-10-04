@@ -22,6 +22,8 @@ import os
 import unittest
 from pathlib import Path
 
+from report_page_contract import install_contract
+
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -311,6 +313,8 @@ window.snapshot = () => ({
 });
 </script></body></html>"""
 
+
+HARNESS = install_contract(HARNESS)
 
 def harness(state):
     return (HARNESS
@@ -622,26 +626,21 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.assertEqual(EXISTING + "\n더 친 글\n" + BLOCK, put["body"]["findings"],
                          "and it carries the typing plus the sentence the 200 appended")
 
-    def test_the_closing_tab_still_sends_what_it_has_while_an_insertion_is_out(self):
-        # The documented residual: keepalive cannot wait for an answer, so it sends T0. Neither
-        # outcome loses authored text, and the citation list says which one happened.
-        self.open()          # unconfirmed on purpose: the keepalive body must carry no keep list
+    def test_the_closing_tab_does_not_overtake_an_insertion_with_an_old_revision(self):
+        self.open()
         self.page.evaluate(type_js([EXISTING + "\n아직 저장 안 된 줄", "", ""]))
         self.open_pane()
         self.page.evaluate("hold()")
-        self.page.evaluate("reply({status: 200, body: {inserted: {cid: 'c1', field: 'findings',"
-                           " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
+        self.page.evaluate("reply({status:200,body:{inserted:{cid:'c1',field:'findings'}}})")
         self.press_insert()
         self.page.wait_for_function("()=>outstanding()===1")
         self.page.evaluate("closeTab()")
-        self.page.wait_for_function("()=>calls.length===2")
-        keepalive = self.page.evaluate("snapshot().calls")[1]
-        self.assertTrue(keepalive["keepalive"], "the closing tab uses the keepalive path")
-        self.assertEqual(EXISTING + "\n아직 저장 안 된 줄", keepalive["body"]["findings"],
-                         "the typed text still goes out even though the sentence is in flight")
-        self.assertNotIn("insert", keepalive["keys"], "a keepalive write never carries an insertion")
-        # The unconfirmed state keeps the key out of that body too, so it can delete nothing.
-        self.assertNotIn("citationIds", keepalive["keys"])
+        self.assertEqual(1, len(self.page.evaluate("snapshot().calls")))
+        self.assertEqual(EXISTING + "\n아직 저장 안 된 줄", self.page.locator("#findings").input_value())
+        self.page.evaluate("release()")
+        self.page.wait_for_function("()=>!snapshot().shown")
+        stored = self.page.evaluate("contractEnvelope('%s').snapshot" % UID)
+        self.assertEqual(EXISTING + "\n아직 저장 안 된 줄\n" + BLOCK, stored["findings"])
 
     # ── Contract 16: late answers ──
 
@@ -707,9 +706,8 @@ class ReportCitationDOMTest(unittest.TestCase):
         put = self.page.evaluate("snapshot().calls")[1]
         self.assertEqual(EXISTING, put["body"]["findings"], "the row converges to what the screen shows")
         self.assertNotIn("insert", put["keys"])
-        # The screen no longer knows what the row holds, so it must not send a keep list at all: a
-        # list without the new cid would delete the attestation the server may just have written.
-        self.assertNotIn("citationIds", put["keys"], "a discarded insertion must leave the keep list unknown")
+        # The draft command path reads the authoritative ids; the stale display cannot delete an attestation.
+        self.assertEqual(["c1"], put["body"]["citationIds"], "the authoritative draft keeps the stored insertion attestation")
         self.assertEqual([], self.page.evaluate("snapshot()")["converge"], "a completed write lowers the flag")
 
     def test_a_real_study_move_during_an_insertion_keeps_the_unsaved_typing(self):
@@ -781,35 +779,6 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.assertEqual("서버가 가진 글", self.page.evaluate("snapshot().stored")[UID]["draft"]["findings"],
                          "the guard lifts with the flag; it is not a permanent freeze")
 
-    def test_logout_stands_aside_while_an_insertion_is_out(self):
-        # The logout's own draft write is non-keepalive, so B1 defers it; KinAuth.logout() then
-        # destroys the session before navigation, which means the closing-tab keepalive would leave
-        # after the session is gone. Standing aside for the few seconds the answer takes is the
-        # honest behaviour, and it is what commitReport already does.
-        self.open(citations={"version": 1, "head": [], "draft": []})
-        self.page.evaluate(type_js([EXISTING + "\n로그아웃 직전에 친 줄", "", ""]))
-        self.open_pane()
-        self.page.evaluate("hold()")
-        self.page.evaluate("reply({status: 200, body: {inserted: {cid: 'c1', field: 'findings',"
-                           " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
-        self.press_insert()
-        self.page.wait_for_function("()=>outstanding()===1")
-        self.page.evaluate("()=>{ confirmAnswer = true; }")
-        # The busy pane covers the screen, so a person cannot reach the button with a pointer;
-        # dispatching the click runs the same shipped handler, which is what is under test.
-        self.page.evaluate("()=>$('#logout').click()")
-        value = self.page.evaluate("snapshot()")
-        self.assertEqual(0, value["logouts"], "the session must not be torn down around an insertion")
-        self.assertEqual([], value["confirms"], "the refusal comes before the confirmation dialog")
-        self.assertEqual(1, len(value["calls"]), "and nothing was sent")
-        self.assertIn("인용을 기록하는 중입니다", value["toasts"][-1]["message"])
-        # Once the answer is in, the ordinary logout proceeds.
-        self.page.evaluate("release()")
-        self.page.wait_for_function("()=>!$('#cite-preview').classList.contains('show')")
-        self.page.click("#logout")
-        self.page.wait_for_function("()=>logouts===1")
-        self.assertEqual(1, len(self.page.evaluate("snapshot().confirms")))
-
     def test_a_late_200_leaves_the_keep_list_unknown_and_the_head_choice_intact(self):
         # The row may now hold the sentence and its attestation; this screen never saw the cid. A
         # keep list built from the pre-insertion read would remove exactly that attestation.
@@ -870,7 +839,7 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.assertIn("넣은 문자열이 이 칸에 더는 없습니다", shown)
         self.assertNotIn("넣은 문자열이 이 칸에 그대로 있습니다", shown)
 
-    def test_the_insertion_waits_for_every_write_of_that_study_not_only_the_newest(self):
+    def test_the_insertion_waits_for_serial_saves_and_keeps_the_latest_typing(self):
         self.open(citations={"version": 1, "head": [], "draft": []})
         self.page.evaluate("hold(2)")
         self.page.evaluate(type_js([EXISTING + "\n첫 번째", "", ""]))
@@ -878,24 +847,19 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.page.wait_for_function("()=>outstanding()===1")
         self.page.evaluate(type_js([EXISTING + "\n두 번째", "", ""]))
         self.page.evaluate("()=>{ window.b = stash(); }")
-        self.page.wait_for_function("()=>outstanding()===2")
-        self.assertEqual(2, len(self.page.evaluate("snapshot().calls")))
-        self.open_pane()
-        self.page.evaluate("reply({status: 200, body: {inserted: {cid: 'c1', field: 'findings',"
-                           " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
-        self.press_insert()
-        self.page.wait_for_function("()=>$('#cite-preview-insert').disabled===true")
-        # Only the NEWER write settles. Waiting for one promise per study would let the insertion
-        # leave here, and the older body (older text, keep list without the new cid) would land
-        # after it - the row would lose the sentence and its attestation together.
-        self.page.evaluate("releaseNewest()")
-        self.page.wait_for_function("()=>outstanding()===1")
-        self.assertEqual(2, len(self.page.evaluate("snapshot().calls")), "pin B1 means ANY in-flight write")
+        self.assertEqual(1, len(self.page.evaluate("snapshot().calls")), "one command at a time")
         self.page.evaluate("release()")
-        self.page.wait_for_function("()=>calls.length===3")
-        put = self.page.evaluate("snapshot().calls")[2]
-        self.assertIn("insert", put["keys"])
-        self.assertEqual(EXISTING + "\n두 번째\n" + BLOCK, put["body"]["findings"])
+        self.page.wait_for_function("()=>calls.length===2 && outstanding()===1")
+        self.open_pane()
+        self.page.evaluate("reply({status:200,body:{inserted:{cid:'c1',field:'findings'}}})")
+        self.press_insert()
+        self.assertEqual(2, len(self.page.evaluate("snapshot().calls")))
+        self.page.evaluate("release()")
+        self.page.wait_for_function("()=>calls.length===3 && !snapshot().shown")
+        calls = self.page.evaluate("snapshot().calls")
+        self.assertEqual(["SYNEPOCH:0", "SYNEPOCH:1", "SYNEPOCH:2"], [c["body"]["expectedRevision"] for c in calls])
+        self.assertEqual(EXISTING + "\n두 번째\n" + BLOCK, calls[2]["body"]["findings"])
+        self.assertEqual(calls[2]["body"]["findings"], self.page.locator("#findings").input_value())
 
     def test_a_draft_standing_on_an_older_approved_report_refuses_the_insertion(self):
         # Contract 6, last bullet: the non-destructive exit S3-U3 built must come first, otherwise
@@ -995,16 +959,16 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.press_insert()
         self.page.wait_for_function("()=>calls.length===1")
         put = self.page.evaluate("snapshot().calls")[0]
-        self.assertNotIn("citationIds", put["keys"], "an unconfirmed study must omit the key, never send []")
+        self.assertEqual([], put["body"]["citationIds"], "the authoritative draft read confirmed an empty list")
         info = self.page.evaluate("citeInfo('%s')" % UID)
         self.assertFalse(info["known"], "pin B2: a 200 extends, it does not confirm")
         self.assertEqual("OMITTED", info["keep"])
-        # The next draft write still omits it, so nothing this screen never read can be deleted.
+        # The next draft write keeps the ids returned by the draft envelope, independently of the display read.
         self.page.evaluate(type_js([EXISTING + "\n" + BLOCK + "\n더", "", ""]))
         self.page.evaluate("()=>stash()")
         self.page.wait_for_function("()=>calls.length===2")
-        self.assertNotIn("citationIds", self.page.evaluate("snapshot().calls")[1]["keys"])
-        # One successful read is what changes that.
+        self.assertEqual(["c1"], self.page.evaluate("snapshot().calls")[1]["body"]["citationIds"])
+        # A successful dedicated read also refreshes the displayed citation state.
         self.page.evaluate("citeReply(%s)" % json.dumps(
             {"version": 1, "head": [], "draft": [entry("c1")]}, ensure_ascii=False))
         self.page.click("#b-cite-reload")

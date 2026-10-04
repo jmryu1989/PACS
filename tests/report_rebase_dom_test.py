@@ -11,6 +11,8 @@ import os
 import unittest
 from pathlib import Path
 
+from report_page_contract import install_contract
+
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -212,6 +214,8 @@ window.snapshot = () => ({
 </script></body></html>"""
 
 
+HARNESS = install_contract(HARNESS)
+
 def harness(state):
     return (HARNESS
             .replace("MODALCSS", MODAL_CSS)
@@ -346,7 +350,9 @@ class ReportRebaseDOMTest(unittest.TestCase):
         self.page.wait_for_function("()=>calls.length===2")
         put = self.page.evaluate("snapshot().calls")[1]
         self.assertEqual("PUT", put["method"])
-        self.assertEqual({"findings": "MY ADDENDUM+", "conclusion": "C", "recommendation": "", "baseVersion": 4}, put["body"])
+        self.assertEqual({"findings": "MY ADDENDUM+", "conclusion": "C", "recommendation": "", "baseVersion": 4,
+                          "expectedOwner": {"institution": "SYN-INST", "sub": "SYN-READER", "author": "doctor@kin"},
+                          "expectedRevision": "SYNEPOCH:0", "citationIds": [], "structureIds": []}, put["body"])
         value = self.page.evaluate("snapshot()")
         self.assertFalse(value["shown"], "the pane closes once the human has chosen")
         self.assertEqual(["MY ADDENDUM+", "C", ""], value["text"], "the rebase must not redraw the editor")

@@ -6,8 +6,8 @@
 // possible because it takes the citation library as an argument instead of reaching for a global
 // (the lesson of U4 pin C4 - `window.KinReportCitation` is not `globalThis.KinReportCitation`).
 //
-// What this file does NOT prove: that the page runs this code. The string assertions at the end are
-// coordinates, not behaviour; D1-D15 in the hosted DOM test are what execute it.
+// Page integration runs in report_structure_dom_test.py. The canonical catalog digest is retained
+// because the reviewed GEN-1 catalog bytes themselves are the fixed requirement (R15).
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
 
@@ -16,9 +16,8 @@ const LITE = path.join(ROOT, 'worklist-v0', 'hpacs-lite');
 globalThis.window = globalThis.window || {};
 require(path.join(LITE, 'report-citation.js'));
 const C = globalThis.window.KinReportCitation;
-const S = require(path.join(LITE, 'report-structure.js'));
+const S = require(process.env.KIN_STRUCT_STRUCTURE_JS || path.join(LITE, 'report-structure.js'));
 const VECTORS = require('./report_structure_vectors.json');
-const MAIN = fs.readFileSync(path.join(LITE, 'main.html'), 'utf8');
 
 const CATALOG = VECTORS.catalog;
 const form = S.create(C, CATALOG);
@@ -28,6 +27,7 @@ const entry = (over = {}) => ({ v: 1, sid: 's-1', field: 'findings', templateId:
   renderedText: 'SYNTHETIC-ITEM choice = alpha', enteredAt: '2026-09-21T00:00:00.000Z',
   enteredBy: 'doctor@synthetic', ...over });
 
+// Page wiring, visible placement and refusal preservation run in report_structure_dom_test.py.
 test('the module loads in plain Node and publishes the same object on window', () => {
   assert.equal(globalThis.window.KinReportStructure, S);
   assert.throws(() => S.create(null, CATALOG), /citation library/);
@@ -441,132 +441,4 @@ test('liveEntries is head union my draft, and the immutable head wins on a sid c
   assert.equal(S.itemKey(entry()), 'SYN-T1\u0000SYN-CHOICE');
 });
 
-test('main.html clears the structure state everywhere it clears the citation state', () => {
-  // P14. These are coordinates: they say the two states are cleared together, which is the property
-  // that keeps a keep-list from deleting an attestation the screen never saw.
-  const count = needle => MAIN.split(needle).length - 1;
-  assert.equal(count('citations.forget(uid);'), 2);
-  assert.equal(count('structureState.forget(uid);'), 2);
-  assert.equal(count('citations.emptied(uid)'), 1);
-  assert.equal(count('structureState.emptied(uid)'), 1);
-  assert.match(MAIN, /if \(empty\) \{ citations\.emptied\(uid\); structureState\.emptied\(uid\); \}/);
-  const lines = MAIN.split('\n');
-  const citationCalls = lines
-    .map((line, i) => ({ line, i }))
-    .filter(row => /invalidateCitations\((epoch|pane)\.uid\)/.test(row.line));
-  assert.equal(citationCalls.length, 3);
-  for (const row of citationCalls)
-    assert.ok(lines.slice(row.i, row.i + 9).some(l => l.includes('invalidateStructure(')),
-      `no invalidateStructure near line ${row.i + 1}`);
-});
-
-test('main.html carries the keep list on both writes and asks for the dedicated read', () => {
-  assert.match(MAIN, /const structureIds = structureState\.keepIds\(uid\);/);
-  // Three writes carry it: the 20s autosave, the commit, and the structure apply itself - and each
-  // only when the dedicated read confirmed the row. Any fourth write that forgets it would be a
-  // write whose keep list says nothing, which is the safe direction but worth noticing.
-  assert.equal(MAIN.split('...(structureIds ? { structureIds } : {})').length - 1, 3,
-    'autosave, commit and apply carry it, and only when it is known');
-  assert.match(MAIN, /ensureStructure\(selectedUid\);/);
-  assert.match(MAIN, /report\/structure`\)/);
-  // The button exists only when a catalog does. A disabled button would promise what nothing can do.
-  assert.match(MAIN, /if \(!structureForm\.empty\) \{/);
-  assert.equal(MAIN.includes('<button disabled>Structured'), false);
-  assert.equal(MAIN.includes('id="b-structured"'), false, 'the button is created in script, not markup');
-});
-
-test('paper and history never fetch the structure route and never label anything structured', () => {
-  // P15/D6-honesty. The sentences print because they are body text; no output path reads or names
-  // the typed values, so nothing on paper can claim a structure it did not verify. This is asserted
-  // statically because the printing paths are owned by the accepted U4/U5/U5b contracts and this
-  // unit must be able to say it did not touch them.
-  for (const name of ['report-preview.js', 'viewer-job-print.js', 'reading-findings.js']) {
-    const text = fs.readFileSync(path.join(LITE, name), 'utf8');
-    assert.equal(text.includes('report/structure'), false, `${name} must not read the structure route`);
-    assert.equal(text.includes('KinReportStructure'), false, `${name} must not know the structure module`);
-    // `structuredClone` is the platform's own name and says nothing about this unit.
-    assert.equal(text.replace(/structuredClone/g, '').includes('structured'), false,
-      `${name} must not label anything structured`);
-  }
-  // The history modal lives in main.html; it must not have grown a structure read either.
-  const history = MAIN.slice(MAIN.indexOf('// ── 판독문 이력 ──'));
-  assert.equal(history.includes('report/structure'), false);
-});
-
-test('the form is bound to the study it opened on, and the binding is checked first', () => {
-  // B4. The order is the whole point: if the study check ran AFTER the plan refresh, the first
-  // press would only re-plan on the other patient's textarea and the second press would find that
-  // plan consistent and write patient A's entry into patient B's report.
-  const apply = MAIN.slice(MAIN.indexOf('async function applyStructure()'));
-  const body = apply.slice(0, apply.indexOf('\n    }\n'));
-  assert.match(body, /pane\.uid !== selectedUid \|\| pane\.selSeq !== selectionSeq/);
-  assert.ok(body.indexOf('pane.uid !== selectedUid') < body.indexOf('structurePlan(pane)'),
-    'the study check must come before the plan is recomputed');
-  assert.ok(body.indexOf('pane.uid !== selectedUid') < body.indexOf('api("PUT"'),
-    'and before anything is sent');
-  assert.match(body, /const uid = pane\.uid;/, 'the request uses the pinned study, not the selection');
-});
-
-test('the open structured dialog is layered above the Image Findings drawer, and only it is', () => {
-  // Measured, not assumed: at 1366x768 the dialog opened and `Apply` (922,470,58x22) was covered by
-  // the drawer (934,472,420x284), because `.modal` is z-30 and the drawer is z-80. The numbers are
-  // read from the two shipped files rather than written down here, so this fails if either moves.
-  const css = fs.readFileSync(path.join(LITE, 'reading-workspace.css'), 'utf8');
-  const layer = (text, selector) => {
-    const rule = text.slice(text.indexOf(selector + ' {'));
-    const found = /z-index:\s*(-?\d+)/.exec(rule.slice(0, rule.indexOf('}')));
-    return found ? Number(found[1]) : null;
-  };
-  const drawer = layer(css, '#reading-findings');
-  const open = layer(MAIN, '#structmodal.modal.on');
-  const modals = layer(MAIN, '.modal');
-  assert.equal(typeof drawer, 'number', 'the drawer declares a layer');
-  assert.ok(open > drawer, `the open dialog (${open}) must sit above the drawer (${drawer})`);
-  assert.equal(modals, 30, 'every other modal keeps the layer it had');
-  // Scoped to this dialog while it is open: the base `.modal` rule must not carry the raise, or
-  // every dialog would climb over the drawer at once.
-  const base = MAIN.slice(MAIN.indexOf('.modal {'), MAIN.indexOf('.modal .box {'));
-  assert.equal((base.match(/z-index:\s*-?\d+/g) || []).length, 2,
-    'only `.modal` and the open structured dialog declare a layer in this block');
-  assert.match(base, /#structmodal\.modal\.on \{ display: flex; z-index: \d+; \}/,
-    'the raise belongs to the open dialog rule, not to a new selector');
-  // The drawer keeps its own layer, and nothing else was lifted with it.
-  assert.equal(css.split('z-index: ' + drawer).length - 1, 1, 'the drawer still declares one layer');
-  // opened-on binding and the sibling-modal close, the same coordinate the cite preview has
-  assert.match(MAIN, /structPane = \{ uid: selectedUid, selSeq: selectionSeq \};/);
-  assert.match(MAIN, /if \(!structPane\?\.busy\) closeStructure\(\);/);
-  assert.ok(MAIN.indexOf('if (!citeBusy) closeCitePreview(false);')
-    < MAIN.indexOf('if (!structPane?.busy) closeStructure();'),
-    'both live in select(), next to each other');
-});
-
-test('the value shown for an item is my draft entry, not a superseded head entry', () => {
-  // B3: after one Save the first value is a head entry; once it is replaced its sentence has left
-  // the body, and offering it again would show the old value and plan to delete a line that is no
-  // longer there.
-  const fn = MAIN.slice(MAIN.indexOf('function structurePrevious('));
-  const body = fn.slice(0, fn.indexOf('\n    }\n'));
-  assert.ok(body.indexOf('row.draft.find(same)') < body.indexOf('row.head.find(same)'),
-    'my draft entry is consulted first');
-  assert.match(body, /structureState\.known\(uid\)/, 'an unconfirmed row has no draft answer to give');
-  assert.match(MAIN, /const previous = structurePrevious\(/);
-});
-
-test('replace mode previews the sentence that will be removed as well as the new one', () => {
-  // B7/P3: this modal covers the report column, and replace is the only path here that deletes
-  // body text. A line number alone cannot be checked by the person pressing the button.
-  assert.match(MAIN, /\$\("#struct-removed"\)\.textContent = removing;/);
-  assert.match(MAIN, /pane\.previous\.renderedText/);
-  assert.match(MAIN, /id="struct-removed"/);
-  // textContent only - the removed sentence carries a user-typed value just like the new one
-  assert.equal(MAIN.includes('#struct-removed").innerHTML'), false);
-});
-
-test('every element the structure block reaches for exists in the markup', () => {
-  // U3's lesson: a top-level `$("#id")` for an element that is not there throws while the page
-  // loads, and then every DOM case dies before its assertion.
-  const ids = new Set([...MAIN.matchAll(/\$\("#(struct[a-z-]*)"\)/g)].map(m => m[1]));
-  assert.ok(ids.size >= 8, `expected the structure block to reach for its controls, saw ${ids.size}`);
-  for (const id of ids)
-    assert.ok(MAIN.includes(`id="${id}"`), `#${id} is referenced but not in the markup`);
-});
+// Draft precedence after Save and replacement is executed by report_structure_dom_test.py D17.

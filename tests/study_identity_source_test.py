@@ -11,10 +11,9 @@ What this file proves, and nothing more (review M-2):
   2. Source pins that the shipped files still carry the reviewed decisions: the tenant-pinned second Order read and
      its position, relations only from server-read tags, no Order value in the answer, the M-1/N-1 shape checks after
      every existing refusal, unchanged write sites and neighbour surfaces, the controller's route table against the one
-     S4-U5 shipped (no route added or dropped since; its handlers' bodies are not pinned), the client
-     allowlist/escaping, the truthful Modify path, the QIDO restore after Unmatch, list invalidation, the guarded Order
-     List refresh, the M-3 wording, the forbidden-word table, the one new live method, its place in the live selection
+     S4-U5 shipped (no route added or dropped since; its handlers' bodies are not pinned), the one new live method, its place in the live selection
      scripts/run-tests.py plans (collected, never run) and the hosted steps that run the real code.
+     Client behaviour is covered by study_identity_test.cjs and study_identity_dom_test.py, not source pins here.
 What it cannot see: whether TypeScript compiles, the browser renders, or PostgreSQL/Orthanc behave as the source says.
 """
 import hashlib
@@ -539,141 +538,11 @@ class ServicePins(unittest.TestCase):
 
 # ── 3. Client source pins ─────────────────────────────────────────────────────────────────────────────────────
 
-class ClientPins(unittest.TestCase):
-    def test_the_module_reads_only_the_answer_and_the_response_row(self):
-        code = "\n".join(line for line in CLIENT.splitlines() if not line.strip().startswith(("*", "//", "/*")))
-        for banned in ("localStorage", "sessionStorage", "SEED_ORDERS", "kin-orders", "fetch(", "XMLHttpRequest",
-                       "document.", "innerHTML", ".ov", ".orig", "window."):
-            self.assertNotIn(banned, code, banned)
-        self.assertIsNone(re.search(r"\borders\b", code))
-        self.assertIn("const SOURCE='engineering_only',MARKER='Engineering Only',OBSERVATION_UNAVAILABLE='관측 불가';", CLIENT)
-        self.assertIn("const IDENTITY_KEYS=['accession','birth','oid','patientId','patientName','sex','source'];", CLIENT)
-        self.assertIn("rows.set(row.uid,{tags:{uid:row.uid,acc:textOf(row.acc),id:textOf(row.id),name:textOf(row.name),", CLIENT)
-        view = js_function(CLIENT, "view")
-        self.assertIn("else if(matched==='U')key='no_linked_order';", view)
-        self.assertIn("else if(matched==='M'&&row.order.state==='identity'&&row.order.identity.oid===own.oid)key='linked';", view)
-        self.assertIn("else key='unknown';", view)
-
-    def test_m3_the_pn_row_names_its_group(self):
-        self.assertIn("label:'Patient Name · Alphabetic',field:'patientName',absent:'Alphabetic Absent',", CLIENT)
-        self.assertIn("const NAME_SCOPE='Patient Name은 Alphabetic 그룹만 읽고 표시하고 비교합니다. Ideographic·Phonetic 표기는 표시하지도 비교하지도 않습니다.';", CLIENT)
-        self.assertIn("title=RELATION_TITLE[identity[tag.field]]+(tag.key==='name'?' '+NAME_SCOPE:'');", CLIENT)
-        self.assertEqual(CLIENT.count("absent:'Absent'"), 6)
-
-    def test_labels_titles_and_guidance_carry_no_forbidden_word(self):
-        literals = re.findall(r"'((?:[^'\\\n]|\\.)*)'", CLIENT)
-        self.assertTrue(any("Same Value" in item for item in literals))
-        for item in literals:
-            self.assertEqual(forbidden_hits(item), [], item)
-        self.assertEqual(CLIENT.count(NEGATION), 1)
-        panel = between(MAIN, '<details id="study-identity"', "</details>")
-        note = between(MAIN, '<div class="note">※ 판독 전(RS: W)인 검사만 수정 가능.', "</div>")
-        for item in (panel, note):
-            self.assertEqual(forbidden_hits(item), [], item)
-        # The seeded mutation of the review (M14/M15) must be caught by this very check.
-        self.assertEqual(forbidden_hits("판독 취소(Reset) 후 다시 매칭하세요"), ["Reset", "판독 취소"])
-        self.assertEqual(forbidden_hits("다른 환자입니다"), ["다른 환자입니다"])
-
-    def test_main_wires_the_panel_through_the_observation_only(self):
-        self.assertIn('  <script src="order-reconciliation.js"></script>\n  <script src="study-identity.js"></script>\n', MAIN)
-        self.assertIn("    let studyIdentityModel = window.KinStudyIdentity?.start?.() ?? null;", MAIN)
-        self.assertEqual(MAIN.count("studyIdentityModel = "), 3)   # declaration + apply + correction
-        apply = js_function(MAIN, "applyObservation")
-        self.assertLess(apply.index("applyStudyIdentity(next.ok ? result : null);"), apply.index("renderObservation();"))
-        failure = js_function(MAIN, "markObservationUnavailable")
-        self.assertLess(failure.index("applyStudyIdentity(null);"), failure.index("renderObservation();"))
-        self.assertEqual(MAIN.count("applyStudyIdentity("), 3)
-        self.assertIn('</table>` : "No clinical information provided.";\n      renderStudyIdentity();\n      renderObservation();\n    }\n', MAIN)
-        # render() redraws the panel last: the poll merges row state after it reports the observation.
-        self.assertIn("      renderChips();\n      // S4-U5: the poll merges row state after it reports the observation, so the identity panel is redrawn here\n"
-                      "      // too; its stale rule reads that merged state (a correction answer or a newer poll), never an older one.\n"
-                      "      renderStudyIdentity();\n    }\n", MAIN)
-        self.assertEqual(MAIN.count("renderStudyIdentity();"), 4)   # applyStudyIdentity, renderClinical, render, correction
-        render = js_function(MAIN, "renderStudyIdentity")
-        for banned in ("innerHTML", "api(", "fetch(", "toast(", "localStorage", "sessionStorage", "saveApp(", "SEED_ORDERS"):
-            self.assertNotIn(banned, render)
-        self.assertIn("KinStudyIdentity.view(studyIdentityModel, s.uid, appState[s.uid] ?? {})", render)
-        self.assertIn("if (!box || !studyIdentityModel) return;", render)
-        self.assertIn("value.textContent = `${row.tag} ${row.label}: ${row.value}`;", render)
-        panel = between(MAIN, '<div id="study-receipt"', "</section>")
-        self.assertRegex(panel, r'<details id="study-identity" [^>]*hidden>')
-        for child in ("study-identity-summary", "study-identity-order", "study-identity-tags", "study-identity-guidance"):
-            self.assertIn('id="%s"' % child, panel)
-        self.assertNotIn("<button", between(MAIN, '<details id="study-identity"', "</details>"))
-
-    def test_m1_client_containment_overlay_allowlist_and_escaped_cells(self):
-        state = js_function(MAIN, "applyState")
-        self.assertNotIn("Object.assign(s, a.ov)", state)
-        self.assertIn("for (const key of OVERLAY_KEYS) if (overlayValue(key, a.ov?.[key])) s[key] = a.ov[key];", state)
-        self.assertTrue(state.rstrip().endswith("s[key] = a.ov[key];\n      return s;\n    }"))
-        self.assertIn('    const overlayValue = (key, value) => typeof value === "string" || (key === "age" && Number.isFinite(value));', MAIN)
-        self.assertIn('      ts: s => `<span class="ts ts-${esc(s.ts)}">${esc(s.ts)}</span>`,', MAIN)
-        self.assertIn('      matched: s => `<span class="mt ${esc(s.matched)}">${esc(s.matched)}</span>`,', MAIN)
-        cells = between(MAIN, "    const CELL = {", "\n    };")
-        self.assertIsNone(re.search(r"\$\{s\.(ts|matched)\}", cells))
-
-    def test_modify_waits_for_the_answer_and_repaints_from_the_server(self):
-        save = js_function(MAIN, "saveModify")
-        server = save[save.index("if (serverMode || offline) {"):save.index("} else {")]
-        wait = server.index("ok = await saveApp(uid, { ov }) === true;")
-        for later in ("if (!ok) {", "applyState(row);", "noteIdentityCorrection(uid, true);"):
-            self.assertLess(wait, server.index(later), later)
-        for early in ("Object.assign(s", "a.ov =", "a.orig", "toast(", "render("):
-            self.assertNotIn(early, server[:wait], early)
-        self.assertLess(save.index("} else {"), save.index('toast("검사 정보를 수정했습니다");'))
-        self.assertIn('if (serverMode) { commitEpoch++; listLoadSequence++; load(); }', save)
-        self.assertEqual(MAIN.count('$("#m-save").addEventListener("click", saveModify);'), 1)
-        self.assertEqual(MAIN.count('$("#m-save")'), 1)
-        app = js_function(MAIN, "saveApp")
-        self.assertIn("return api(\"PATCH\", `/studies/${encodeURIComponent(uid)}`, body)\n"
-                      "        .then(st => { appState[uid] = mergePolledState(uid, st); syncStudy(uid); render(); })\n"
-                      "        .then(() => true)", app)
-        self.assertIn("render(); refreshRight();\n          return false;", app)
-        self.assertNotIn("localStorage에만", MAIN)
-        self.assertIn("수정 내용은 화면 표시용 덮어쓰기로 서버에 저장되며 Orthanc 원본 DICOM과 오더 비교 결과는 바뀌지 않습니다.", MAIN)
-
-    def test_match_and_unmatch_invalidate_lists_and_unmatch_repaints_from_qido(self):
-        match = js_function(MAIN, "doMatch")
-        unmatch = js_function(MAIN, "doUnmatch")
-        for body in (match, unmatch):
-            server = body[body.index("if (serverMode) {"):body.index("} else {")]
-            self.assertLess(server.index("} catch (e) {"), server.index("commitEpoch++; listLoadSequence++;"))
-            self.assertIn("noteIdentityCorrection(s.uid, true); load(); refreshOrders();", server)
-            self.assertIn("noteIdentityCorrection(s.uid, false);", server)
-        # M-4.6: the two projection literals stay verbatim.
-        self.assertIn("appState[s.uid] = { ...a, ...st };", match)
-        self.assertIn("appState[s.uid] = { ...a, ...st, ov: undefined };", unmatch)
-        self.assertNotIn("st.orig", unmatch)
-        self.assertIn("KinStudyIdentity.tags(studyIdentityModel, s.uid)", unmatch)
-        self.assertIn("age: ageOf(fmtD(read.birth), s.date), desc: read.desc });", unmatch)
-        self.assertIn('alert("매칭 실패: " + e.message);', match)
-        self.assertIn('alert("매칭 해제 실패: " + e.message);', unmatch)
-        self.assertIn("patient: { age: ov.age, orig: claimed } });", match)
-        self.assertIn("for (const key of OVERLAY_KEYS) if (overlayValue(key, orig?.[key])) claimed[key] = orig[key];", match)
-
-    def test_order_list_refresh_is_server_only_guarded_and_latest_wins(self):
-        refresh = js_function(MAIN, "refreshOrders")
-        self.assertTrue(refresh.startswith("function refreshOrders() {\n      if (!serverMode) { renderOrders(); return; }"))
-        for needle in ("const token = ++orderRefreshSequence;", 'answer = await api("GET", "/bootstrap?states=omit");',
-                       "if (token !== orderRefreshSequence || !serverMode) return;",
-                       "answer.me?.institution !== myInstitution", "orders = answer.orders;",
-                       "if (!orders.some(o => o.oid === selectedOid)) selectedOid = null;"):
-            self.assertEqual(1, refresh.count(needle), needle)
-        for banned in ("SEED_ORDERS", "localStorage", "saveOrders", "markObservationUnavailable", "kin-orders"):
-            self.assertNotIn(banned, refresh)
-        self.assertEqual(MAIN.count('$("#o-refresh").addEventListener("click", refreshOrders);'), 1)
-        self.assertEqual(MAIN.count('$("#o-refresh")'), 1)
-
-    def test_m4_pinned_tokens_do_not_move(self):
-        # gatewayReceipt 5 -> 6 at S4-F01V: the Not Observed item reads its own receipt (gateway_retry_source_test.py).
-        for token, count in (("gatewayReceipt", 6), ("SEED_ORDERS", 2), ("applyObservation(", 3),
-                             ("markObservationUnavailable(", 4), ("applyOrderReconciliation(", 3),
-                             ("renderOrderReconciliation(", 2), ("orderReconciliationModel =", 2), ('id="b-print"', 1),
-                             ("mergePolledState(", 7)):
-            self.assertEqual(MAIN.count(token), count, token)
-
-
-# ── 4. Live method and hosted wiring ──────────────────────────────────────────────────────────────────────────
+# The former nine ClientPins cases asserted source spelling. Their behaviour runs in
+# study_identity_test.cjs (closed answer/labels/guidance) and study_identity_dom_test.py:
+# 01-03 observation-only labels, 04/04c/05b stale lists, 05/05-success truthful Modify,
+# 06 QIDO restoration, 07 containment/escaping, 08 latest Order refresh, 09 guidance.
+# Fixed token/history checks remain in report_actions_dom_test.py.
 
 class LiveAndWorkflowPins(unittest.TestCase):
     def test_the_one_live_method_holds_the_required_cells(self):
