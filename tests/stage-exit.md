@@ -28,7 +28,7 @@ JSON에는 각 시험의 이유와 원문 경로를 남기며, 콘솔은 요구�
 ```powershell
 $sha = (git rev-parse HEAD).Trim()
 if ($sha -ne (git rev-parse main).Trim()) { throw '최종 main checkout 필요' }
-if (git status --porcelain --untracked-files=no) { throw '실행할 소스의 수정 상태 확인 필요' }
+if (git status --porcelain -- . ':(exclude)tmp') { throw '실행할 소스의 수정 상태 확인 필요' }
 $shortSha = $sha.Substring(0, 12)
 $out = "tmp/stage7-final-$shortSha"
 # U5 병합 후에는 아래 실행 목록에도 그 실제 시험을 추가한다.

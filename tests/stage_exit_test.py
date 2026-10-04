@@ -111,6 +111,11 @@ class StageExitTest(unittest.TestCase):
         self.run_fixture("self.skipTest('synthetic unavailable fixture')")
         self.assert_failure(*self.verdict(), "건너뜀")
 
+    def test_stray_ok_then_skipped(self):
+        self.run_fixture("import sys; print('\\nok', file=sys.stderr, flush=True); "
+                         "self.skipTest('synthetic unavailable fixture')")
+        self.assert_failure(*self.verdict(), "미완료")
+
     def test_different_sha(self):
         self.run_fixture()
         other_sha = "0" * 40 if self.sha != "0" * 40 else "1" * 40
