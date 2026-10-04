@@ -319,12 +319,13 @@ PROFILES = {
         'project_prefix': 'kin-bu-gen-ci-',
         # S8-U1a fix10 (D531): BU-T03 in its own group. It runs the MAX flow again (28 steps, 20 render actions under their
         # fixed 30s bound and BU-T04) and draws one frame of today's generator per distinct state, each under its own fixed
-        # 120s bound. The fix9 local software-GL run took 469.8s for the 15 generator frames (max 79.0s) and about 150s for the
-        # 20 actions, about 620s; hosted MPR suites ran at 0.9-1.5x local history, so about 560-930s is expected. The single
-        # suite gets the 1200s cap of the other single-suite volume groups: (1200+35) = 1235s leaves 265s of the shared 1500s
-        # deadline for a stack whose recorded hosted setup and cleanup took about 80s. A ceiling, not an estimate; an overrun
-        # is a stop-and-decide point (D348), never an automatic increase.
-        'suite_timeout': 1200,
+        # 120s bound. Local software-GL runs of that path (no stack, no pixel oracles): fix9 469.8s for the 15 generator frames
+        # (max 79.0s) and about 150s for the 20 actions; fix10 at its change 600.8s (max 95.3s) and 154.1s, 779.9s in all. The
+        # live case adds the study setup, MX-00..04 and every check's pixel oracles, and hosted MPR suites ran at 0.9-1.5x local
+        # history, so its slow end is above 1170s. The cap is the largest that keeps the 150s stack reserve of the other groups:
+        # (1300+35)+150 = 1485s of the shared 1500s deadline, 165s for a stack whose recorded hosted setup took about 55-80s.
+        # A ceiling, not an estimate; an overrun is a stop-and-decide point (D348), never an automatic increase.
+        'suite_timeout': 1300,
         # An explicit local class: exactly its one BU-T03 case, never the test_vr_voi_* cases it inherits (volume-vr-voi).
         'suites': (('e2e/test_volume_rendering_voi.py', 'VolumeRenderingVoiGeneratorE2E', 'ci-bu-generator'),),
     },

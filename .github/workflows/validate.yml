@@ -896,8 +896,9 @@ jobs:
           retention-days: 7
   volume-bu-generator:
     # S8-U1a fix10 (D531, TEST-S8-SCULPT-PERF BU-T03): the MAX flow again with each render action's frame compared to today's
-    # generator, in its own job so the generator frames (470 s on the fix9 local run) never spend volume-vr-voi's 900 s cap.
-    # The same 40-minute job policy and 28-minute live step; the profile's single cap (1200+35) = 1235s bounds the live step.
+    # generator, in its own job so the generator frames (469.8 s and 600.8 s on the fix9 and fix10 local runs) never spend
+    # volume-vr-voi's 900 s cap.
+    # The same 40-minute job policy and 28-minute live step; the profile's single cap (1300+35) = 1335s bounds the live step.
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:

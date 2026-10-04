@@ -25,7 +25,8 @@ same mapper, camera, display and jitter texture; a generator frame is drawn once
 NT-U1a-06 holds BU-T08 (install failures) and BU-T05 (write and frame failures); test_vr_voi_13 holds BU-T06a and BU-T06b.
 
 BU-T03 in its own unit (S8-U1a fix10, D531): drawing today's generator for every MAX state costs the compile B-u removes
-(15 frames, 470 s on the fix9 local run), so the generator comparison runs in VolumeRenderingVoiGeneratorE2E, the MAX flow
+(15 frames, 469.8 s and 600.8 s on the fix9 and fix10 local runs), so the generator comparison runs in
+VolumeRenderingVoiGeneratorE2E, the MAX flow
 again with BU-T03 on, under its own profile (volume-bu-generator) and cap GENERATOR_CAP_S. The 14 test_vr_voi_* cases keep
 MAX with its 30 s bound and BU-T04 in volume-vr-voi; BU-T03 runs in that one class only.
 """
@@ -39,7 +40,7 @@ from test_volume_rendering import VolumeRenderingE2E
 # The profile's suite_timeout (CI-T-01 compares the two); every wait is bounded by what is left of it minus a margin.
 SUITE_CAP_S = 900
 # The volume-bu-generator profile's suite_timeout (CI-T-06 compares the two), the bound of the BU-T03 class's waits.
-GENERATOR_CAP_S = 1200
+GENERATOR_CAP_S = 1300
 SUITE_MARGIN_S = 60
 T_AXIS, T_OBLIQUE = 1.0, 1.5
 SPACING, STEP, DIMS = (.5, .5), 2.5, (64, 64, 33)

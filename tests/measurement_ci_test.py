@@ -1962,14 +1962,14 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertTrue([node for node in ast.walk(load_tests) if isinstance(node, ast.Constant) and node.value == 'test_vr_voi_'])
 
     def test_volume_bu_generator_profile_is_exact_bounded_and_isolated(self):
-        """S8-U1a fix10 CI-T-06 (D531, TEST-S8-SCULPT-PERF BU-T03): BU-T03 in its own profile at its own 1200s cap, on the VR VOI
+        """S8-U1a fix10 CI-T-06 (D531, TEST-S8-SCULPT-PERF BU-T03): BU-T03 in its own profile at its own 1300s cap, on the VR VOI
         module through its own local class, so the volume-vr-voi profile and its 900s cap stay as they are."""
         import ast
         profile = ci.PROFILES['volume-bu-generator']
         self.assertEqual(profile['suites'], (('e2e/test_volume_rendering_voi.py', 'VolumeRenderingVoiGeneratorE2E', 'ci-bu-generator'),))
         self.assertEqual(profile['out'].name, 'volume-bu-generator-ci')
         self.assertEqual(profile['project_prefix'], 'kin-bu-gen-ci-')
-        self.assertEqual(profile['suite_timeout'], 1200)
+        self.assertEqual(profile['suite_timeout'], 1300)
         self.assertNotIn('suite_budgets', profile)
         self.assertEqual(ci.PROFILES['volume-vr-voi']['suite_timeout'], 900)
         # The class bounds every wait by the same cap, read from the module's source.
@@ -1995,8 +1995,8 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(command[command.index('--module')+1], 'tests/e2e/test_volume_rendering_voi.py')
         self.assertEqual(command[command.index('--class')+1], 'VolumeRenderingVoiGeneratorE2E')
         self.assertEqual(command[command.index('--unit')+1], 'ci-bu-generator')
-        self.assertEqual(command[command.index('--timeout')+1], '1200')
-        self.assertEqual(outer, 1235)
+        self.assertEqual(command[command.index('--timeout')+1], '1300')
+        self.assertEqual(outer, 1335)
         with patch.dict(os.environ, {'KIN_EVIDENCE_DIR': 'caller-value'}, clear=False):
             env = ci.profile_environment('volume-bu-generator', profile['out'], {'ORTHANC_PASS': 'generated-orthanc-password'})
         self.assertNotIn('KIN_EVIDENCE_DIR', env)
