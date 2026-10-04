@@ -13,9 +13,7 @@ import test_session_draft_boundaries as boundary
 
 
 class WorklistContractRegression(boundary.SessionDraftBoundaries):
-    @unittest.skip("expected-to-wait: viewer transport and central disposal are not integrated at 08b09f4")
-    def test_06_prior_preview_and_comparison_viewer(self):
-        return super().test_06_prior_preview_and_comparison_viewer()
+    """Every WorklistE2E case, the comparison viewer included, on the stack that setup_stack selects."""
 
 
 def load_tests(loader, tests, pattern):

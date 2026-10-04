@@ -2,7 +2,7 @@
 
 Real main document, BFF, Keycloak and database. UI actions drive editing/logout;
 response interception delays delivery or injects a request failure, never a fake success.
-Breadth/viewer cases are explicitly skipped until the parallel implementation is integrated.
+The viewer case opens the real viewer window from the list and holds it through a cancelled logout preparation.
 """
 import json
 from pathlib import Path
@@ -148,27 +148,54 @@ class SessionDraftBoundaries(worklist.WorklistE2E):
         expect(page.locator("#findings")).to_be_editable()
         self.assertEqual(session.json("GET", "/api/me")[0], 200)
 
-    @unittest.skip("expected-to-wait: viewer job must integrate bound transport and preparation pause/resume")
+    def settled_image(self, canvas, same_as=None):
+        """The canvas picture once it stops changing (and, when given, once it is that earlier picture again)."""
+        previous = None
+        for _ in range(60):
+            current = canvas.screenshot()
+            if current == previous and same_as in (None, current):
+                return current
+            previous = current
+            canvas.page.wait_for_timeout(500)
+        self.fail("The viewer canvas did not settle" + (" on the picture it showed before" if same_as else ""))
+
     def test_wait_viewer_preparation_cancel_preserves_document_canvas_and_report(self):
         fixture = self.fixture()
         session = Session(self.stack).login(self)
         page = self.open_main(self.profile(session))
         self.select(page, fixture)
-        with page.expect_popup() as popup:
-            page.get_by_role("button", name="Open Viewer", exact=True).click()
-        viewer = popup.value
-        expect(viewer.locator("canvas").first).to_be_visible()
+        with page.context.expect_page() as opened:
+            page.locator(f'#rows tr[data-uid="{fixture.uid}"]').dblclick()
+        viewer = opened.value
+        viewer.wait_for_url("**/ohif/viewer?**", timeout=30000)
+        canvas = viewer.locator(".cornerstone-canvas").first
+        expect(canvas).to_be_visible(timeout=60000)
+        # An allocated but blank canvas is not a shown image: real CT pixels have a range of grey values.
+        viewer.wait_for_function("""() => {
+            const canvas = document.querySelector('.cornerstone-canvas'), context = canvas?.getContext('2d');
+            if (!context || !canvas.width || !canvas.height) return false;
+            const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            let min = 255, max = 0;
+            for (let i = 0; i < data.length; i += 16) { min = Math.min(min, data[i]); max = Math.max(max, data[i]); }
+            return max - min > 40;
+        }""", timeout=60000)
         before_url = viewer.url
-        before_image = viewer.locator("canvas").first.screenshot()
+        before_image = self.settled_image(canvas)
+        viewer.evaluate("window.kinE2eSameDocument = true")
         page.locator("#findings").fill("Synthetic viewer preservation")
         page.route("**/api/studies/*/report", lambda route: route.fulfill(
-            status=503, content_type="application/json", body='{"code":"REPORT_DRAFT_UNAVAILABLE"}'))
+            status=503, content_type="application/json", body='{"code":"REPORT_DRAFT_UNAVAILABLE"}')
+            if route.request.method == "PUT" else route.continue_())
         page.locator("#logout").click()
+        # The preparation really ran and its save was refused before it is cancelled.
+        expect(page.get_by_role("button", name="Retry", exact=True)).to_be_visible()
         page.get_by_role("button", name="Back to Editing", exact=True).click()
+        expect(page.locator("dialog[open]")).to_have_count(0)
         self.assertFalse(viewer.is_closed())
-        expect(viewer.locator("canvas").first).to_be_visible()
+        expect(canvas).to_be_visible()
         self.assertEqual(viewer.url, before_url)
-        self.assertEqual(viewer.locator("canvas").first.screenshot(), before_image)
+        self.assertTrue(viewer.evaluate("window.kinE2eSameDocument === true"), "the viewer document was replaced")
+        self.settled_image(canvas, same_as=before_image)
         expect(page.locator("#findings")).to_have_value("Synthetic viewer preservation")
 
 
