@@ -64,6 +64,10 @@
       for (const [el, top, left] of positions) { el.scrollTop = top; el.scrollLeft = left; }
     }
 
+    function unchanged(texts) {
+      return names.every(k => read(k) === lf(texts[k])) ? { status: 'unchanged' } : null;
+    }
+
     function switchStudy(context, texts) {
       if (!context || !(context.uid === null || typeof context.uid === 'string') ||
           !Number.isSafeInteger(context.selectionSeq) || names.some(k => typeof texts?.[k] !== 'string'))
@@ -71,16 +75,16 @@
       if (writing) return refused('busy');
       // A render of the current opening must not reset history, selection or an IME session.
       if (opening && opening.uid === context.uid && opening.selectionSeq === context.selectionSeq)
-        return names.every(k => read(k) === lf(texts[k])) ? { status: 'unchanged' } : refused('same-opening');
+        return unchanged(texts) || refused('same-opening');
       return open(context, texts);
     }
 
-    // 명시적인 폐기/재조회/잠금은 선택 순번을 바꾸지 않고 이력만 새로 시작한다.
+    // 같은 글의 저장/재조회는 사용자의 Undo와 방문한 커서를 그대로 둔다.
     function replaceAuthoritative(texts) {
       if (!opening || names.some(k => typeof texts?.[k] !== 'string'))
         throw new TypeError('An open study and all report texts are required');
       if (writing) return refused('busy');
-      return open(opening, texts);
+      return unchanged(texts) || open(opening, texts);
     }
 
     function open(context, texts) {
@@ -158,7 +162,7 @@
         // Hidden or inert controls cannot take focus; execCommand would edit the previous field.
         if (doc.activeElement !== el) return refused('unavailable');
         el.setSelectionRange(start, end);
-        const accepted = nativeInsert(text);
+        const accepted = doc.execCommand('insertText', false, text);
         applied = el.value === expected;
         if (!accepted || !applied) return refused('native-edit');
         // Chromium ends a typing group on an explicit selection, including an unchanged selection.
@@ -173,16 +177,6 @@
     }
 
     function insert(at, text) { return replace(at, text, at?.start, at?.end); }
-
-    function nativeInsert(text) {
-      // Chromium은 insertText의 줄마다 input을 낸다. 이스케이프한 단일 text fragment는
-      // 한 편집으로 처리하며 줄끝/공백을 보존한다. HTML 파서가 바꾸는 NUL은 원래 경로로 둔다.
-      if (text.includes('\n') && !text.includes('\0')) {
-        const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        return doc.execCommand('insertHTML', false, escaped);
-      }
-      return doc.execCommand('insertText', false, text);
-    }
 
     function insertMany(edits) {
       if (!Array.isArray(edits) || !edits.length || new Set(edits.map(e => e.at?.field)).size !== edits.length)

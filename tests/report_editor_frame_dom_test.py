@@ -229,6 +229,39 @@ class ReportEditorFrameDOM(unittest.TestCase):
         self.key("Control+z")
         self.assert_text("abc")
 
+    def test_t5_trailing_lf_insert_redo_with_both_shortcuts(self):
+        """W6EF-F07 / RISK-T5: probe5 전체 조합과 LF 끝 상용구를 실제 키로 복원한다."""
+        cases = [("ab\n", 3, t) for t in ("\n", "\n\n", "\nx\n", "x\n")]
+        cases += [("ab", 2, "\n"), ("ab\n\n", 4, "\n"), ("", 0, "\n"), ("a\nb", 2, "\n"),
+                  ("Liver normal.\n", 14, "No hemorrhage.\nNo mass effect.\n")]
+        for base, pos, text in cases:
+            with self.subTest(base=base, pos=pos, text=text):
+                self.open('A', findings=base)
+                self.focus()
+                self.capture(start=pos, end=pos)
+                self.assertEqual(self.insert(text), {'status': 'applied'})
+                expected = base[:pos] + text + base[pos:]
+                self.assert_text(expected)
+                for redo in ('Control+y', 'Control+Shift+z'):
+                    self.key('Control+z'); self.assert_text(base)
+                    self.key(redo); self.assert_text(expected)
+
+    def test_t5_trailing_lf_insert_between_typing_groups(self):
+        """W6EF-F07 / RISK-T5: 앞뒤 타이핑과 삽입이 각각 Undo/Redo 한 단계다."""
+        for redo in ('Control+y', 'Control+Shift+z'):
+            with self.subTest(redo=redo):
+                self.open('A', findings='base\n')
+                self.type('typed\n')
+                self.capture()
+                self.assertEqual(self.insert('TEMPLATE\nLINE\n'), {'status': 'applied'})
+                inserted = 'base\ntyped\nTEMPLATE\nLINE\n'
+                self.page.keyboard.type('after')
+                self.assert_text(inserted + 'after')
+                for expected in (inserted, 'base\ntyped\n', 'base\n'):
+                    self.key('Control+z'); self.assert_text(expected)
+                for expected in ('base\ntyped\n', inserted, inserted + 'after'):
+                    self.key(redo); self.assert_text(expected)
+
     def test_t7_composing_tab_skips_shortcut_and_navigates(self):
         """TEST-REF-T7: Tab itself commits Chromium composition before focusout, no second CDP commit."""
         self.page.evaluate("""() => {
@@ -521,9 +554,62 @@ class ReportEditorFrameDOM(unittest.TestCase):
             self.key(key)
             self.assertEqual(self.read(), texts)
         self.type(' edit')
-        self.assertEqual(self.page.evaluate("editor.replaceAuthoritative(editor.read())")['status'], 'switched')
+        self.assertEqual(self.page.evaluate("editor.replaceAuthoritative(editor.read())")['status'], 'unchanged')
         self.key('Control+z')
-        self.assert_text('server edit')
+        self.assert_text('server')
+
+    def test_authoritative_same_text_preserves_nodes_caret_tickets_and_undo(self):
+        """W6EF-F08 / RISK-T3/T5: 같은 글 Save/Reload는 LF 정규화 뒤 완전한 무동작이다."""
+        for field in FIELDS:
+            for newline in ('\n', '\r\n', '\r'):
+                with self.subTest(field=field, newline=repr(newline)):
+                    self.open('A', **dict.fromkeys(FIELDS, 'base\n'))
+                    self.type('typed', field)
+                    self.page.evaluate("k => editor.element(k).setSelectionRange(2,4,'backward')", field)
+                    self.capture(field)
+                    self.page.evaluate("window.nodes = ['findings','conclusion','recommendation'].map(k=>editor.element(k))")
+                    texts = {k: v.replace('\n', newline) for k, v in self.read().items()}
+                    self.assertEqual(self.page.evaluate('t=>editor.replaceAuthoritative(t)', texts), {'status':'unchanged'})
+                    self.assertTrue(self.page.evaluate("nodes.every((el,i)=>el===editor.element(['findings','conclusion','recommendation'][i]))"))
+                    self.assertEqual(self.page.evaluate("k=>{const e=editor.element(k), a=editor.capture(k);return [document.activeElement.id,e.selectionStart,e.selectionEnd,e.selectionDirection,a.start,a.end]}", field), [field,2,4,'backward',2,4])
+                    self.assertEqual(self.server(self.read()[field], self.read()[field]), {'status':'unchanged'})
+                    self.key('Control+z'); self.assert_text('base\n', field)
+                    self.key('Control+y'); self.assert_text('base\ntyped', field)
+        self.focus()
+        cdp = self.compose()
+        self.assertEqual(self.page.evaluate('editor.replaceAuthoritative(editor.read())'), {'status':'unchanged'})
+        self.assertTrue(self.page.evaluate('editor.isComposing()'))
+        cdp.send('Input.insertText', {'text':'한'})
+
+    def test_authoritative_one_changed_field_resets_history_for_all_fields(self):
+        """W6EF-F08 / RISK-T4: 한 칸만 달라도 전체가 새 경계이며 옛 글은 복원되지 않는다."""
+        for field in FIELDS:
+            self.type('old-' + field, field)
+        self.capture('findings')
+        texts = self.read()
+        texts['conclusion'] = 'new'
+        self.assertEqual(self.page.evaluate('t=>editor.replaceAuthoritative(t)', texts), {'status':'switched'})
+        self.assertEqual(self.insert('late'), {'status':'refused','reason':'stale'})
+        for field in FIELDS:
+            self.focus(field)
+            for key in ('Control+z', 'Control+y', 'Control+Shift+z') * 3:
+                self.key(key)
+                self.assertEqual(self.read(), texts)
+
+    def test_authoritative_reentrant_call_refused_during_focus_and_input(self):
+        """N12: 동기 페이지 listener의 권위 교체가 진행 중인 편집에 재진입할 수 있다."""
+        for event in ('focus', 'input'):
+            with self.subTest(event=event):
+                self.open('A', findings='KEEP')
+                self.focus('after')
+                self.capture(start=4, end=4)
+                self.page.evaluate("event=>editor.element('findings').addEventListener(event,()=>{window.reentry=editor.replaceAuthoritative({findings:'SERVER',conclusion:'',recommendation:''})},{once:true})", event)
+                self.assertEqual(self.insert('X'), {'status':'applied'})
+                self.assertEqual(self.page.evaluate('reentry'), {'status':'refused','reason':'busy'})
+                self.assert_text('KEEPX')
+                self.focus()
+                self.key('Control+z'); self.assert_text('KEEP')
+                self.key('Control+y'); self.assert_text('KEEPX')
 
     def test_authoritative_refuses_composition_then_retries_after_end(self):
         self.focus()
@@ -663,8 +749,8 @@ class ReportEditorFrameDOM(unittest.TestCase):
         self.assertEqual(self.insert('X'),{'status':'refused','reason':'unavailable'})
         self.assert_text('KEEP')
 
-    def test_long_plain_text_insert_one_event_and_one_undo(self):
-        """W6EF-F05: 긴 상용구/이전 판독문은 그대로 한 편집. 실행 시간은 probe에서 기록."""
+    def test_long_plain_text_insert_native_events_and_one_undo(self):
+        """W6EF-F07: 긴 상용구도 한 편집이다. 다수 input/실행 시간 한계는 probe에서 기록."""
         for lines in (50,150,300):
             with self.subTest(lines=lines):
                 self.open('A')
@@ -674,7 +760,7 @@ class ReportEditorFrameDOM(unittest.TestCase):
                 text=('  간유리음영 없음 <img src=x onerror=alert(1)> &amp;\t  \n'*lines)
                 self.assertEqual(self.insert(text),{'status':'applied'})
                 self.assert_text('be'+text+'re')
-                self.assertEqual(self.page.evaluate('n'),1)
+                self.assertGreater(self.page.evaluate('n'),0)
                 self.page.keyboard.type('!')
                 self.key('Control+z'); self.assert_text('be'+text+'re')
                 self.key('Control+z'); self.assert_text('before')
@@ -723,7 +809,7 @@ MUTANTS = [
         "test_ordinary_same_opening_preserves_history_selection_and_composition", "test_same_opening_cannot_bypass_safe_apply"]),
     ("M03-uid-only-request", "at.opening !== opening", "at.opening?.uid !== opening.uid", [
         "test_t3_requests_retired_on_different_study_and_same_uid_reopening"]),
-    ("M04-value-assignment", "const accepted = nativeInsert(text);", "const accepted = (el.value = expected, true);", [
+    ("M04-value-assignment", "const accepted = doc.execCommand('insertText', false, text);", "const accepted = (el.value = expected, true);", [
         "test_t5_each_insertion_kind_undo_redo", "test_t5_native_input_and_plain_text_newlines"]),
     ("M05-live-caret", "el.setSelectionRange(start, end);", "// Use the live caret instead of the requested range.", [
         "test_t3_captured_position_survives_caret_and_focus_move"]),
@@ -767,14 +853,18 @@ MUTANTS = [
         "test_different_text_opening_types_at_end_and_unvisited_capture_uses_end", "test_drag_across_opening_cannot_select_new_text"]),
     ("M25-unvisited-caret", "const start = range?.start ?? (s.caret ? el.selectionStart : el.value.length);", "const start = range?.start ?? el.selectionStart;", [
         "test_different_text_opening_types_at_end_and_unvisited_capture_uses_end"]),
-    ("M26-authoritative-as-render", "return open(opening, texts);", "return switchStudy(opening, texts);", [
+    ("M26-authoritative-as-render", "return unchanged(texts) || open(opening, texts);", "return switchStudy(opening, texts);", [
         "test_authoritative_same_selection_readonly_and_history_boundary"]),
     ("M27-no-batch-focus-precheck", "for (const { at } of edits) {", "for (const { at } of []) {", [
         "test_many_prechecks_every_field_and_clear_undo_is_per_field"]),
-    ("M28-slow-multiline", "return doc.execCommand('insertHTML', false, escaped);", "return doc.execCommand('insertText', false, text);", [
-        "test_long_plain_text_insert_one_event_and_one_undo"]),
-    ("M29-interpret-markup", "return doc.execCommand('insertHTML', false, escaped);", "return doc.execCommand('insertHTML', false, text);", [
+    ("M28-trailing-lf-redo-loss", "const accepted = doc.execCommand('insertText', false, text);", "const accepted = doc.execCommand('insertHTML', false, text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));", [
+        "test_t5_trailing_lf_insert_redo_with_both_shortcuts", "test_t5_trailing_lf_insert_between_typing_groups"]),
+    ("M29-interpret-markup", "const accepted = doc.execCommand('insertText', false, text);", "const accepted = doc.execCommand('insertHTML', false, text);", [
         "test_t5_native_input_and_plain_text_newlines"]),
+    ("M30-identical-authoritative-boundary", "return unchanged(texts) || open(opening, texts);", "return open(opening, texts);", [
+        "test_authoritative_same_text_preserves_nodes_caret_tickets_and_undo"]),
+    ("M31-authoritative-no-busy-N12", "      if (writing) return refused('busy');\n      return unchanged(texts) || open(opening, texts);", "      // Allow re-entry.\n      return unchanged(texts) || open(opening, texts);", [
+        "test_authoritative_reentrant_call_refused_during_focus_and_input"]),
 ]
 
 
