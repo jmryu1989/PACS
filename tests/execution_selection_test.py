@@ -182,6 +182,61 @@ class ExecutionSelectionTests(unittest.TestCase):
                             for item in plan['tests']))
         self.assertEqual(runner.collect(plan).countTestCases(), len(declared))
 
+    def test_volume_vr_voi_profile_selects_only_its_fourteen_declared_cases(self):
+        """S8-U1a CI-T-04: the VR VOI Slab profile runs exactly its own test_vr_voi_* cases, never the inherited test_vr_*."""
+        suite, class_name, unit = ci.PROFILES['volume-vr-voi']['suites'][0]
+        plan = runner.module_plan('tests/'+suite, unit, 'live', ci.PROFILES['volume-vr-voi']['suite_timeout'], class_name)
+        selected = [item['case'] for item in plan['tests']]
+        module = runner.load_module(ROOT/'tests'/suite)
+        declared = sorted('VolumeRenderingVoiE2E.'+name for name in module.VolumeRenderingVoiE2E.__dict__ if name.startswith('test_vr_voi_'))
+        self.assertEqual(selected, declared)
+        self.assertEqual(len(selected), 14)
+        self.assertTrue(all(item['file'] == 'tests/e2e/test_volume_rendering_voi.py' for item in plan['tests']))
+        self.assertEqual(runner.collect(plan).countTestCases(), 14)
+        rendering = {row[0] for row in ci.PROFILES['volume-rendering']['suites']}
+        self.assertFalse(rendering & {suite})
+
+    def test_bu_t03_runs_once_across_vr_voi_and_its_own_profile(self):
+        """S8-U1a fix10 CI-T-08 (D531, TEST-S8-SCULPT-PERF BU-T03): the two profiles on the VR VOI module select disjoint cases;
+        volume-vr-voi still runs all 14 declared test_vr_voi_* cases, volume-bu-generator exactly its one BU-T03 case, and the
+        generator comparison is on in that one collected case only, each under its own profile's cap."""
+        import ast
+        filename = 'tests/e2e/test_volume_rendering_voi.py'
+        collected = {}
+        for name in ('volume-vr-voi', 'volume-bu-generator'):
+            profile = ci.PROFILES[name]; (suite, class_name, unit), = profile['suites']
+            self.assertEqual('tests/'+suite, filename)
+            plan = runner.module_plan('tests/'+suite, unit, 'live', profile['suite_timeout'], class_name)
+            collected[name] = list(runner.collect(plan))
+            for test in collected[name]:
+                self.assertEqual(test.suite_cap_s, profile['suite_timeout'], (name, test.id()))
+        module = runner.load_module(ROOT/filename)
+        base, generator = module.VolumeRenderingVoiE2E, module.VolumeRenderingVoiGeneratorE2E
+        cases = {name: sorted((type(test).__name__, test._testMethodName) for test in tests) for name, tests in collected.items()}
+        # No case of the original suite is missing, and none is added to it.
+        self.assertEqual(cases['volume-vr-voi'], sorted(('VolumeRenderingVoiE2E', name) for name in base.__dict__ if name.startswith('test_vr_voi_')))
+        self.assertEqual(len(cases['volume-vr-voi']), 14)
+        self.assertEqual(cases['volume-bu-generator'], [('VolumeRenderingVoiGeneratorE2E', 'test_bu_t03_max_frames_equal_todays_generator')])
+        self.assertEqual([name for name in vars(generator) if name.startswith('test')], ['test_bu_t03_max_frames_equal_todays_generator'])
+        self.assertFalse(set(cases['volume-vr-voi']) & set(cases['volume-bu-generator']))
+        # BU-T03 is on in exactly one collected case of the two runs, the generator class's.
+        on = [(name, type(test).__name__) for name, tests in collected.items() for test in tests if test.generator_reference]
+        self.assertEqual(on, [('volume-bu-generator', 'VolumeRenderingVoiGeneratorE2E')])
+        # Every generator comparison in the module runs under that switch, and the BU-T03 case drives the MAX flow that
+        # test_vr_voi_05 drives (read from the module's syntax tree, not run).
+        tree = ast.parse((ROOT/filename).read_text(encoding='utf-8'))
+        guarded = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and ast.unparse(node.test) == 'self.generator_reference':
+                guarded |= {id(call) for statement in node.body for call in ast.walk(statement) if isinstance(call, ast.Call)}
+        compares = [call for call in ast.walk(tree) if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == 'same_as_generator']
+        self.assertTrue(compares)
+        self.assertTrue(all(id(call) in guarded for call in compares))
+        methods = {(klass.name, node.name): node for klass in tree.body if isinstance(klass, ast.ClassDef) for node in klass.body if isinstance(node, ast.FunctionDef)}
+        drives = lambda key: [call for call in ast.walk(methods[key]) if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == 'max_combination']
+        self.assertEqual(len(drives(('VolumeRenderingVoiE2E', 'test_vr_voi_05_crop_sculpt_voi_intersection_and_independence'))), 1)
+        self.assertEqual(len(drives(('VolumeRenderingVoiGeneratorE2E', 'test_bu_t03_max_frames_equal_todays_generator'))), 1)
+
     def test_volume_mpr_profile_selects_only_the_declared_mpr_modules(self):
         profile = ci.PROFILES['volume-mpr']
         expected = [('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E',

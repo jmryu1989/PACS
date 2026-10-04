@@ -416,7 +416,7 @@ jobs:
       - name: CI profile safeguards and artifact policy
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Volume rendering, sculpt, and personal preset boundaries
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-vr --cwd . --file worklist-v0/hpacs-lite/volume-rendering.js --file tests/volume_rendering_test.cjs --file tests/volume_rendering_presets_test.cjs --file worklist-v0/hpacs-lite/volume-sculpt.js --file tests/volume_sculpt_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_rendering_test.cjs tests/volume_rendering_presets_test.cjs tests/volume_sculpt_test.cjs
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-vr --cwd . --file worklist-v0/hpacs-lite/volume-rendering.js --file tests/volume_rendering_test.cjs --file tests/volume_rendering_presets_test.cjs --file worklist-v0/hpacs-lite/volume-sculpt.js --file tests/volume_sculpt_test.cjs --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/volume-vr-voi.js --file tests/volume_vr_voi_test.cjs --file worklist-v0/hpacs-lite/volume-vr-masks.js --file worklist-v0/hpacs-lite/volume-mask-renderer.js --file tests/volume_vr_masks_test.cjs --file tests/volume_mask_session_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_rendering_test.cjs tests/volume_rendering_presets_test.cjs tests/volume_sculpt_test.cjs tests/volume_vr_voi_test.cjs tests/volume_vr_masks_test.cjs tests/volume_mask_session_test.cjs
       - name: Volume display, batch, crosshair, marks, curved MPR, orientation, job capture and preference models
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-volume-models --cwd . --file worklist-v0/hpacs-lite/volume-display.js --file tests/volume_display_test.cjs --file worklist-v0/hpacs-lite/volume-batch.js --file tests/volume_batch_test.cjs --file worklist-v0/hpacs-lite/volume-batch-scout.js --file tests/volume_batch_scout_test.cjs --file worklist-v0/hpacs-lite/volume-crosshair.js --file tests/volume_crosshair_test.cjs --file worklist-v0/hpacs-lite/volume-marks.js --file tests/volume_marks_test.cjs --file worklist-v0/hpacs-lite/volume-curved.js --file tests/volume_curved_test.cjs --file worklist-v0/hpacs-lite/volume-path.js --file tests/volume_path_test.cjs --file worklist-v0/hpacs-lite/volume-orientation.js --file tests/volume_orientation_test.cjs --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/volume_preferences_test.cjs --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/volume_average_shader_test.cjs --file worklist-v0/hpacs-lite/volume-mip.js --file tests/volume_mip_test.cjs --file worklist-v0/hpacs-lite/volume-voi.js --file tests/volume_voi_test.cjs --file worklist-v0/hpacs-lite/volume-mip-job.js --file tests/volume_mip_job_test.cjs --file worklist-v0/hpacs-lite/volume-mip-batch.js --file tests/volume_mip_batch_test.cjs --file worklist-v0/hpacs-lite/volume-mip-output.js --file tests/volume_mip_output_test.cjs --file worklist-v0/hpacs-lite/viewer-volume-job.js --file tests/viewer_volume_job_capture_test.cjs --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_display_test.cjs tests/volume_batch_test.cjs tests/volume_batch_scout_test.cjs tests/volume_crosshair_test.cjs tests/volume_marks_test.cjs tests/volume_curved_test.cjs tests/volume_path_test.cjs tests/volume_orientation_test.cjs tests/volume_preferences_test.cjs tests/volume_average_shader_test.cjs tests/volume_mip_test.cjs tests/volume_voi_test.cjs tests/volume_mip_job_test.cjs tests/volume_mip_batch_test.cjs tests/volume_mip_output_test.cjs tests/viewer_volume_job_capture_test.cjs
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
@@ -428,7 +428,7 @@ jobs:
           "$RUNNER_TEMP/vr-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/vr-python/bin/python" -m playwright install --with-deps chromium
       - name: VR source binding survives transient MPR layout readiness
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/binding-dom --cwd . --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-rendering.js --file tests/viewer_vr_binding_dom_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_vr_binding_dom_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/binding-dom --cwd . --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-rendering.js --file tests/viewer_vr_binding_dom_test.py --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/volume-vr-voi.js --file worklist-v0/hpacs-lite/volume-vr-masks.js --file worklist-v0/hpacs-lite/viewer-volume-vr-voi.js --file worklist-v0/hpacs-lite/volume-sculpt.js --file worklist-v0/hpacs-lite/viewer-volume-sculpt.js --file worklist-v0/hpacs-lite/volume-mask-renderer.js -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_vr_binding_dom_test.py
       - name: MPR Basic Orthogonal stays distinct from Reset Planes
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/orientation-basic-dom --cwd . --file worklist-v0/hpacs-lite/volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file tests/viewer_volume_orientation_dom_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_volume_orientation_dom_test.py
       - name: Confirm exact declared VR-only selection
@@ -871,6 +871,113 @@ jobs:
           path: |
             tests/e2e/artifacts/volume-mip-orient-ci/
             tmp/miporient-ci/
+          if-no-files-found: error
+          retention-days: 7
+  volume-vr-voi:
+    # S8-U1a VR VOI Slab cases in their own group, not extra cases inside volume-rendering, whose 1200s cap stays as it is.
+    # The same 40-minute job policy and 28-minute live step; the profile's single cap (900+35) = 935s bounds the live step.
+    # The suite's time is unmeasured until its first hosted run; an overrun is a stop-and-decide point, not a cap increase.
+    # S8-U1a fix9 (B-u): MAX has a fixed 30 s bound per render action, so no other commit's files are read and the checkout
+    # needs no history. S8-U1a fix10 (D531): its comparison with today's generator (BU-T03) runs in volume-bu-generator.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: VR VOI profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/vrvoi-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_volume_rendering_voi.py -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/vrvoi-python"
+          "$RUNNER_TEMP/vrvoi-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/vrvoi-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared VR VOI Slab selection
+        run: python3 scripts/record-run.py --run-dir tmp/vrvoi-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_filter.py --file worklist-v0/hpacs-lite/main.html --file tests/e2e/test_volume_rendering_voi.py --file tests/e2e/test_volume_rendering.py -- "$RUNNER_TEMP/vrvoi-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared VR VOI Slab tests
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/vrvoi-python/bin/python" tests/measurement_ci.py --profile volume-vr-voi
+      - name: Sanitized synthetic VR VOI Slab evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-volume-vr-voi-results
+          path: |
+            tests/e2e/artifacts/volume-vr-voi-ci/
+            tmp/vrvoi-ci/
+          if-no-files-found: error
+          retention-days: 7
+  volume-bu-generator:
+    # S8-U1a fix10 (D531, TEST-S8-SCULPT-PERF BU-T03): the MAX flow again with each render action's frame compared to today's
+    # generator, in its own job so the generator frames (469.8 s and 600.8 s on the fix9 and fix10 local runs) never spend
+    # volume-vr-voi's 900 s cap.
+    # The same 40-minute job policy and 28-minute live step; the profile's single cap (1300+35) = 1335s bounds the live step.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: B-u generator profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/bugen-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_volume_rendering_voi.py -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/bugen-python"
+          "$RUNNER_TEMP/bugen-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/bugen-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared B-u generator selection
+        run: python3 scripts/record-run.py --run-dir tmp/bugen-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_filter.py --file worklist-v0/hpacs-lite/main.html --file tests/e2e/test_volume_rendering_voi.py --file tests/e2e/test_volume_rendering.py -- "$RUNNER_TEMP/bugen-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared B-u generator equality test
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/bugen-python/bin/python" tests/measurement_ci.py --profile volume-bu-generator
+      - name: Sanitized synthetic B-u generator evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-volume-bu-generator-results
+          path: |
+            tests/e2e/artifacts/volume-bu-generator-ci/
+            tmp/bugen-ci/
+          if-no-files-found: error
+          retention-days: 7
+  volume-bu-boundary:
+    # S8-U1a fix9 (TEST-S8-SCULPT-PERF BU-T02): today's mask generator and the fixed B-u mask program decide on the CI's
+    # software GL (SwiftShader) at the native boundary sweep, judged by the approved O9 rule (tests/o9_band.py: pass =
+    # rule_pass AND 0 out-of-range); then the judge's own self-test, whose record controls use this run's record. No stack.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/bu-python"
+          "$RUNNER_TEMP/bu-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2
+          "$RUNNER_TEMP/bu-python/bin/python" -m playwright install --with-deps chromium
+      - name: Native B-u boundary decisions within the O9 rule on SwiftShader
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/bu-ci/boundary --cwd . --file tests/e2e/test_volume_bu_boundary.py --file tests/o9_band.py --file worklist-v0/hpacs-lite/volume-sculpt.js --file worklist-v0/hpacs-lite/volume-vr-masks.js -- env KIN_BU_ANGLE=swiftshader KIN_BU_OUT=tmp/bu-ci/boundary-record "$RUNNER_TEMP/bu-python/bin/python" -B tests/e2e/test_volume_bu_boundary.py
+      - name: O9 band judge self-test on this run's record
+        timeout-minutes: 10
+        run: python3 scripts/record-run.py --run-dir tmp/bu-ci/o9-band-selftest --cwd . --file tests/o9_band.py --file tmp/bu-ci/boundary-record/record.json -- "$RUNNER_TEMP/bu-python/bin/python" -B tests/o9_band.py selftest --record tmp/bu-ci/boundary-record/record.json --out tmp/bu-ci/o9-band-selftest-result/result.json
+      - name: Sanitized synthetic B-u boundary evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-volume-bu-boundary-results
+          path: tmp/bu-ci/
           if-no-files-found: error
           retention-days: 7
   hanging-protocols:
