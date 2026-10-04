@@ -1147,6 +1147,18 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.assertEqual(["P@status"], seen["children"], what)
         self.assertNotIn("SYN", seen["text"], what)
 
+    def other_account_seen(self, host):
+        """What another account's answer does to the host. The reading panel locks its region: no row, no line, no
+        count. Clinician Home takes it as a replaced session (S7-U5): the whole document closes and moves to the
+        landing, and it sends no logout POST for the login that replaced it."""
+        if host != "home":
+            self.assertEqual(([], []), (self.view()["rows"], self.view()["lines"]))
+            self.assert_no_count("locked")
+            return
+        logouts = len(self.logouts)
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        self.assertEqual(logouts, len(self.logouts), "a replaced session is not logged out by this document")
+
     # ── RD01-RD04: rows as the server's view draws them ──
     def test_rd01_c2_full_row_shows_the_pinned_version_and_offers_acknowledge(self):
         r = self.server.add(rec(1, source={"version": 3, "action": "approve", "author": "syn-rad@kin", "at": "2026-09-28T00:30:00.000Z"}))
@@ -1582,39 +1594,31 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.assertEqual((count, logouts), (len(self.log), len(self.logouts)))
 
     def another_accounts_envelope_locks(self):
-        # S-07: the list answers for another account. The region locks, and so do the question and image request areas of
-        # the same page (accountChanged): opening them reads nothing, and the inbox reads nothing more.
+        # S-07: the list answers for another account. On Clinician Home that is a replaced session: the whole document
+        # closes and moves to the landing - the inbox, the question and the image request areas go with it - no logout
+        # POST is sent for the login that replaced it, and nothing more is read.
         s = self.server
         s.add(rec(56))
+        self.fresh_context()
         self.envelope_owner = OTHER_OWNER
-        self.open_home()
-        seen = self.view()
-        self.assertEqual(([], []), (seen["rows"], seen["lines"]))
-        self.assertTrue(has_hangul(self.status()))
-        self.assert_no_count("locked")
-        self.assertEqual({("Show All", True), ("Refresh", True)}, {(b[0], b[1]) for b in seen["buttons"]})
+        logouts = len(self.logouts)
+        self.page.goto(ORIGIN + BASE + "clinician.html")
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
         count = len(self.log)
-        self.page.locator(f'#studies tr[data-uid="{suid(1)}"]').click()
-        expect(self.page.locator("#report-state")).to_have_attribute("data-state", "final")
-        # Opening them reads nothing: a question or image request read would reach the harness unanswered and fail the case.
-        self.page.locator("#questions-summary").click()
-        self.page.locator("#image-requests-summary").click()
-        self.tick(60000)
-        self.assertEqual(count, len(self.log))
+        self.page.wait_for_timeout(300)
+        self.assertEqual((count, logouts), (len(self.log), len(self.logouts)))
         self.envelope_owner = None
-        # A-08: OWNER_CHANGED on the ACK locks the same way.
+        # A-08: OWNER_CHANGED on the ACK closes the page the same way.
+        self.fresh_context()
         self.open_home()
         self.fault("ack", status=409, body={"code": "OWNER_CHANGED", "message": "SYN owner changed"})
+        logouts = len(self.logouts)
         self.acknowledge("SYN-PT-56")
-        self.wait_until(lambda: not self.view()["rows"], "the lock")
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
         count = len(self.log)
-        self.page.locator(f'#studies tr[data-uid="{suid(1)}"]').click()
-        expect(self.page.locator("#report-state")).to_have_attribute("data-state", "final")
-        self.page.locator("#questions-summary").click()
-        self.tick(60000)
-        self.assertEqual(count, len(self.log))
-        self.assert_no_count("locked")
-
+        self.page.wait_for_timeout(300)
+        self.assertEqual((count, logouts), (len(self.log), len(self.logouts)))
+        self.fresh_context()
     def session_end_signal_reaches_the_second_tab(self):
         # S7-U5 persists the bound ending record before the logout request. The second tab of the same session
         # closes on it and its inbox reads nothing more. S7-U5 §0.C 2: the signal leaves when the end begins, before the
@@ -2427,7 +2431,8 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
     def test_rx16_sessions_that_never_read(self):
         for code in ("INSTITUTION_PENDING", "INSTITUTION_INVALID"):
             with self.subTest(membership=code):
-                self.me = (403, {"code": code})
+                # The server names the session in this answer too (a member state is told to a session it knows).
+                self.me = (403, {"code": code, "sessionId": "SYN-SESSION-" + CLIN["sub"]})
                 self.page.goto(ORIGIN + BASE + "clinician.html")
                 expect(self.page.locator("#membership")).to_be_visible()
                 expect(self.page.locator("#home")).to_be_hidden()
@@ -4018,9 +4023,9 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                 self.expect([(x, self.mx_view(x))], "the read for this owner")
                 self.fault("read", patch=lambda p: p.update(owner=OTHER_OWNER))
                 self.mx_press("Open Replacement", mark(x + 1))
-                self.idle()
-                self.assertEqual(([], []), (self.view()["rows"], self.view()["lines"]))
-                self.assert_no_count("locked")
+                if host != "home":
+                    self.idle()
+                self.other_account_seen(host)
                 # A 201 for another owner, after one for this owner (the pair).
                 s = self.mx_server(host)
                 s.add(self.mx_rec(host, x), self.mx_rec(host, y))
@@ -4030,9 +4035,9 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                 self.expect([(x, self.mx_view(x), None, ("ack", SERVER_NOW))], "the 201 for this owner")
                 self.fault("ack", patch=lambda p: p.update(owner=OTHER_OWNER))
                 self.mx_press("Acknowledge", mark(y))
-                self.idle()
-                self.assertEqual(([], []), (self.view()["rows"], self.view()["lines"]))
-                self.assert_no_count("locked")
+                if host != "home":
+                    self.idle()
+                self.other_account_seen(host)
                 # A read for another record; a 201 for another request or another study: no evidence, still unknown.
                 s = self.mx_server(host)
                 s.add(self.mx_rec(host, x), self.mx_rec(host, y), self.mx_rec(host, z))
@@ -4617,13 +4622,18 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                 with self.subTest(host=host, l2="another account"):
                     n += 10
                     x, j, k, l1, l2, at_l1, count = self.two_lists(host, n, second={"patch": lambda p: p.update(owner=OTHER_OWNER)})
-                    self.let_go(l2)
-                    self.assertEqual(([], []), (self.view()["rows"], self.view()["lines"]))
-                    self.assert_no_count("locked")
+                    if host == "home":
+                        self.release_late(l2)
+                    else:
+                        self.let_go(l2)
+                    self.other_account_seen(host)
                     reads = len(self.log)
                     self.release_late(l1)
-                    self.advance(60000)
-                    self.assertEqual(([], []), (self.view()["rows"], self.view()["lines"]))
+                    if host != "home":
+                        self.advance(60000)
+                        self.assertEqual(([], []), (self.view()["rows"], self.view()["lines"]))
+                    else:
+                        self.page.wait_for_timeout(300)
                     self.assertEqual(reads, len(self.log), "nothing read after the lock")
                 s = self.mx_server(host)
                 self.mx_open(host)
