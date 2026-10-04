@@ -4,6 +4,9 @@
   function create(app) {
     const host = app.host, doc = host?.ownerDocument;
     const names = ['images', 'info', 'templates'], labels = ['Images', 'Info', 'Templates'];
+    const validAvailable = value => Array.isArray(value) && value.every(name => names.includes(name));
+    if (app.available !== undefined && !validAvailable(app.available)) throw new TypeError('Invalid available tabs');
+    let available = names.filter(name => (app.available ?? names).includes(name));
     const resolve = value => typeof value === 'function' ? value() : value;
     if (!doc || !host.id || !app.fallbackFocus) throw new TypeError('Study Panel requires a named host and fallbackFocus');
     const contents = names.map(name => resolve(app.content?.[name]));
@@ -12,7 +15,8 @@
       throw new TypeError('Study Panel requires three separate content elements');
     }
     const listeners = [], moved = [], tabs = [], panels = [];
-    let state = { open: false, tab: 'images' }, opener = null, destroyed = false, composing = false;
+    let state = { open: false, tab: available[0] || 'images' }, opener = null, destroyed = false, composing = false;
+    let movingFocus = false;
     const node = (tag, text, parent) => {
       const el = doc.createElement(tag); if (text) el.textContent = text;
       if (parent) parent.append(el); return el;
@@ -40,7 +44,8 @@
     function render() {
       drawer.hidden = !state.open; drawer.inert = !state.open;
       names.forEach((name, i) => {
-        const active = state.tab === name;
+        const active = available.includes(name) && state.tab === name;
+        tabs[i].hidden = !available.includes(name);
         tabs[i].setAttribute('aria-selected', String(active)); tabs[i].tabIndex = active ? 0 : -1;
         panels[i].hidden = !active; panels[i].inert = !active;
       });
@@ -53,18 +58,26 @@
     }
     function focus(el) {
       if (!focusable(el)) return false;
-      el.focus({ preventScroll: true }); return doc.activeElement === el;
+      movingFocus = true;
+      try { el.focus({ preventScroll: true }); } finally { movingFocus = false; }
+      return doc.activeElement === el;
     }
     function focusTab() { focus(tabs[names.indexOf(state.tab)]); }
-    function captureOpener() {
-      const el = doc.activeElement;
+    function captureOpener(el = doc.activeElement) {
+      // Repeated API entry from inside the drawer refreshes the outside record,
+      // never making a drawer control its own return destination.
+      if (drawer.contains(el)) el = opener?.el;
+      if (!el || el === doc.body || el === doc.documentElement) { opener = null; return; }
       opener = { el, scrollTop: el?.scrollTop, scrollLeft: el?.scrollLeft };
       if (typeof el?.selectionStart === 'number') {
         opener.selection = [el.selectionStart, el.selectionEnd, el.selectionDirection];
       }
     }
-    function returnFocus() {
+    function returnFocus(needed) {
       const saved = opener; opener = null;
+      // Decide before hiding/removing DOM: browsers can then move focus to body.
+      // An outside editor belongs to the user and must not be touched on close.
+      if (!needed) return;
       if (saved && focus(saved.el)) {
         if (saved.selection) saved.el.setSelectionRange(...saved.selection);
         saved.el.scrollTop = saved.scrollTop; saved.el.scrollLeft = saved.scrollLeft;
@@ -72,9 +85,9 @@
     }
     function changed() { app.onChange?.(snapshot()); }
     function open(tab = state.tab) {
-      if (destroyed || !names.includes(tab)) return false;
+      if (destroyed || !available.includes(tab)) return false;
       const different = !state.open || state.tab !== tab;
-      if (!state.open) captureOpener();
+      captureOpener();
       state = { open: true, tab }; render();
       const panel = panels[names.indexOf(tab)], target = app.focusTarget?.(tab, panel);
       if (!target || !panel.contains(target) || !focus(target)) focusTab();
@@ -82,30 +95,49 @@
     }
     function close() {
       if (destroyed || !state.open) return false;
-      state.open = false; render(); returnFocus(); changed(); return true;
+      const returnNeeded = drawer.contains(doc.activeElement);
+      state.open = false; render(); returnFocus(returnNeeded); changed(); return true;
     }
     function select(tab) {
-      if (destroyed || !names.includes(tab)) return false;
+      if (destroyed || !available.includes(tab)) return false;
       const different = state.tab !== tab;
+      if (state.open) captureOpener();
       state.tab = tab; render(); if (state.open) focusTab();
       if (different) changed(); return true;
     }
     function restore(value) {
-      if (destroyed || !value || typeof value.open !== 'boolean' || !names.includes(value.tab)
+      if (destroyed || !value || typeof value.open !== 'boolean' || !available.includes(value.tab)
           || Object.keys(value).some(key => !['open', 'tab'].includes(key))) return false;
       if (value.open) return open(value.tab);
-      const different = state.open || state.tab !== value.tab, wasOpen = state.open;
+      const different = state.open || state.tab !== value.tab;
+      const returnNeeded = state.open && drawer.contains(doc.activeElement);
       state = { open: false, tab: value.tab }; render();
-      if (wasOpen) returnFocus(); if (different) changed(); return true;
+      returnFocus(returnNeeded); if (different) changed(); return true;
     }
+    function setAvailable(value) {
+      if (destroyed || !validAvailable(value)) return false;
+      const before = snapshot(), inside = state.open && drawer.contains(doc.activeElement);
+      available = names.filter(name => value.includes(name));
+      if (available.length && !available.includes(state.tab)) state.tab = available[0];
+      if (!available.length) state.open = false;
+      render();
+      if (before.open && !state.open) returnFocus(inside);
+      else if (inside && (!drawer.contains(doc.activeElement) || !focusable(doc.activeElement))) focusTab();
+      if (before.open !== state.open || before.tab !== state.tab) changed();
+      return true;
+    }
+    listen(drawer, 'focusin', event => {
+      if (state.open && !movingFocus && !drawer.contains(event.relatedTarget)) captureOpener(event.relatedTarget);
+    });
     listen(closeButton, 'click', close);
     listen(tablist, 'keydown', event => {
-      const i = tabs.indexOf(event.target);
+      const visibleTabs = available.map(name => tabs[names.indexOf(name)]), i = visibleTabs.indexOf(event.target);
       if (i < 0 || event.defaultPrevented || event.isComposing || composing || event.altKey || event.ctrlKey || event.metaKey) return;
-      const destinations = { ArrowRight: (i + 1) % 3, ArrowLeft: (i + 2) % 3, Home: 0, End: 2 };
+      const count = available.length;
+      const destinations = { ArrowRight: (i + 1) % count, ArrowLeft: (i + count - 1) % count, Home: 0, End: count - 1 };
       if (!Object.hasOwn(destinations, event.key)) return;
       const next = destinations[event.key];
-      event.preventDefault(); event.stopPropagation(); select(names[next]);
+      event.preventDefault(); event.stopPropagation(); select(available[next]);
     });
     listen(drawer, 'compositionstart', () => { composing = true; });
     listen(drawer, 'compositionend', () => { composing = false; });
@@ -122,7 +154,7 @@
       const returnNeeded = state.open && drawer.contains(doc.activeElement);
       destroyed = true; state.open = false;
       listeners.forEach(remove => remove());
-      if (returnNeeded) returnFocus(); else opener = null;
+      returnFocus(returnNeeded);
       for (const { content, marker } of moved) {
         if (marker.parentNode) marker.parentNode.replaceChild(content, marker);
         else content.remove();
@@ -130,7 +162,7 @@
       drawer.remove();
     }
     render();
-    return { open, close, toggle: () => state.open ? close() : open(), select, snapshot, restore, destroy,
+    return { open, close, toggle: () => state.open ? close() : open(), select, setAvailable, snapshot, restore, destroy,
       element: drawer };
   }
   if (typeof module === 'object' && module.exports) module.exports = create;
