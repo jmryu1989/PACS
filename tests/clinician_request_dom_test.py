@@ -1074,7 +1074,7 @@ class ClinicianRequestDOMTest(Harness):
             route.fulfill(status=404, body="")
             return
         if method == "GET" and path == "/api/me":
-            route.fulfill(json=self.me)
+            route.fulfill(json={**self.me, "sessionId": "SYN-SESSION-" + self.me["sub"]})
             return
         if method == "GET" and path == "/api/clinician/studies":
             rows = sorted(self.rows, key=lambda row: row["uid"])
@@ -2109,7 +2109,8 @@ class MainRequestDOMTest(Harness):
         if method == "GET" and path == "/api/me":
             route.fulfill(json={"sub": self.session["sub"], "actor": self.session["user"], "user": self.session["user"],
                                 "displayName": self.session["displayName"], "roles": self.session["roles"],
-                                "institution": self.session["institution"], "kind": "member"})
+                                "institution": self.session["institution"], "kind": "member",
+                                "sessionId": "SYN-SESSION-" + self.session["sub"]})
             return
         if method == "POST" and path == "/api/auth/logout":
             self.logouts.append(route)

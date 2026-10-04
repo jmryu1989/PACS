@@ -61,7 +61,8 @@ INDEX_STAND_IN = ('<!doctype html><html><head><meta charset="utf-8"><title>SYN i
 
 INST_A, INST_B = "SYN-INST-A", "SYN-INST-B"
 ME = {"sub": "SYN-CLIN-SUB", "actor": "syn-clinician", "roles": ["clinician", "default-roles-kin", "offline_access"],
-      "institution": INST_A, "kind": "member", "user": "syn-clinician", "displayName": "SYN Clinician"}
+      "institution": INST_A, "kind": "member", "user": "syn-clinician", "displayName": "SYN Clinician",
+      "sessionId": "SYN-SESSION-CLIN"}
 PREFIX = "1.2.826.0.1.3680043.10.5432"
 
 

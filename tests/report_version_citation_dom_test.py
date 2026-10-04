@@ -104,6 +104,10 @@ HISTORY_BLOCK = slice_between(MAIN, "    // ── 판독문 이력 ──",
                               "    /**\n     * 판독문 textarea를 **스크립트로**")
 HIST_HTML = slice_between(MAIN, '<div class="modal" id="histmodal"', "\n  </div>") + "\n  </div>"
 DISPLAY_ACTOR_FN = extract_function(MAIN, "displayActor")
+# S7-U5: the history block applies its answers through the page's work-context gate. The shipped gate is loaded as it is,
+# following a session that is at work for the whole case.
+WORK_CONTEXT = ((ROOT / "worklist-v0/hpacs-lite/work-context.js").read_text(encoding="utf-8")
+                + "\nconst work=KinWorkContext;work.follow({onLifecycle(listener){listener({state:'active',session:'SYN-SESSION'})}});\n")
 
 HARNESS = """<!doctype html><html><head><meta charset="utf-8"></head><body>
 <button id="b-history">History</button>
@@ -115,6 +119,7 @@ CITATIONJS
 PAPERJS
 </script>
 <script>
+WORKCONTEXT
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -135,7 +140,8 @@ function apiPush(path, replies) { apiQueue[path] = (apiQueue[path] || []).concat
 function replyValue(reply) {
   // The product's api() attaches `.status` to a failed response and throws a TypeError for a
   // transport failure; the branches under test read exactly those two shapes.
-  if (reply.status) throw Object.assign(new Error(reply.message || "실패"), { status: reply.status });
+  // `ended` is the answer by which the server says this session ended: the page's api() marks it `auth`.
+  if (reply.status) throw Object.assign(new Error(reply.message || "실패"), { status: reply.status, ...(reply.ended ? { auth: true } : {}) });
   if (reply.network) throw new TypeError("Failed to fetch");
   return reply.body;
 }
@@ -175,6 +181,7 @@ HISTORYBLOCK
 
 def harness():
     return (HARNESS
+            .replace("WORKCONTEXT", WORK_CONTEXT)
             .replace("HISTHTML", HIST_HTML)
             .replace("CITATIONJS", CITATION_JS)
             .replace("PAPERJS", PAPER_JS)
@@ -309,12 +316,13 @@ class ReportVersionCitationDOM(unittest.TestCase):
         self.assertEqual(3, self.page.evaluate("document.querySelectorAll('.ver').length"))
         self.assertTrue(self.page.evaluate("$('#histmodal').classList.contains('show')"))
 
-    def test_04_failures_are_unknown_replace_what_they_showed_and_a_401_draws_nothing(self):
+    def test_04_failures_are_unknown_replace_what_they_showed_and_an_ended_session_draws_nothing(self):
         self.start({citation_path(3): [{"body": answer(3, [readable()])},
                                        {"status": 404, "message": "그 판을 찾을 수 없습니다"}],
                     citation_path(7): [{"status": 500, "message": "서버 오류"}],
                     citation_path(9): [{"network": True},
-                                       {"status": 401, "message": "세션이 만료되었습니다"}]})
+                                       {"status": 401, "message": "SYN token rejected"},
+                                       {"status": 401, "message": "세션이 만료되었습니다", "ended": True}]})
         self.open_history()
         self.press(3)
         self.assertIn("소견 r31", self.text(3))
@@ -332,11 +340,14 @@ class ReportVersionCitationDOM(unittest.TestCase):
         self.assertNotIn("접근 권한 밖", self.text(7))
         self.press(9)
         self.assertIn("인용 증적을 확인하지 못했습니다", self.text(9))
-        # 401: api() has already torn the session down, so no citation state is drawn at all.
+        # A 401 that proves no end is one failed read like any other (S7-U5 amendment 5): it says so and ends nothing.
+        self.press(9)
+        self.assertIn("인용 증적을 확인하지 못했습니다", self.text(9))
+        # The server says this session ended: the end coordination closes the screen, so no citation state is drawn.
         self.press(9)
         self.assertEqual([], self.page.evaluate("blockHeadings('9')"),
-                         "a 401 must not draw a citation state")
-        self.assertEqual("확인하는 중입니다", self.text(9), "a 401 must not draw a citation state")
+                         "an ended session must not draw a citation state")
+        self.assertEqual("확인하는 중입니다", self.text(9), "an ended session must not draw a citation state")
 
     def test_05_each_block_speaks_the_presence_of_its_own_version(self):
         self.start({citation_path(3): [{"body": answer(3, [readable(presence="present")])}],

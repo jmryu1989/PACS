@@ -1326,7 +1326,7 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             elif self.me_status:
                 route.fulfill(status=self.me_status, json={"statusCode": self.me_status, "message": "SYN unavailable"})
             else:
-                route.fulfill(json=self.me)
+                route.fulfill(json={**self.me, "sessionId": "SYN-SESSION-" + str(self.me.get("sub"))})
             return
         if method == "GET" and path == "/api/clinician/studies":
             query = parse_qs(url.query, keep_blank_values=True)

@@ -485,7 +485,7 @@ class ClinicalContextDOMTest(unittest.TestCase):
             route.abort()
             return
         if method == "GET" and path == "/api/me":
-            route.fulfill(status=200, json=self.stub.identity)
+            route.fulfill(status=200, json={**self.stub.identity, "sessionId": "SYN-SESSION-" + str(self.stub.identity.get("sub"))})
             return
         if method == "POST" and path == "/api/auth/logout":
             self.stub.logouts.append(route)

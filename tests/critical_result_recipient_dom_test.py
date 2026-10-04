@@ -869,7 +869,8 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         query = parse_qs(url.query, keep_blank_values=True)
         if self.host == "home" and method == "GET" and path == "/api/me":
             answer = self.me_queue.pop(0) if self.me_queue else self.me
-            route.fulfill(**({"status": answer[0], "json": answer[1]} if isinstance(answer, tuple) else {"json": answer}))
+            route.fulfill(**({"status": answer[0], "json": answer[1]} if isinstance(answer, tuple)
+                             else {"json": {**answer, "sessionId": "SYN-SESSION-" + str(answer.get("sub"))}}))
             return
         if self.host == "home" and method == "GET" and path == "/api/clinician/studies" and query == {"limit": ["100"]}:
             rows = sorted(self.rows, key=lambda row: row["uid"])
