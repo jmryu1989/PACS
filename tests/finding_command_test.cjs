@@ -199,6 +199,7 @@ test('list: A-B-A selection, owner change and session end drop late pages; rows 
 
 test('list: plain 401 fails, 403/404 deny and 503/network/invalid pages fail; each clears previously shown rows and never shows a partial list', async () => {
   const outcomes = [
+    [{ status: 403, code: 'AUTH_SESSION_BUSY' }, 'failed'], [{ status: 403, code: 'AUTH_CSRF_REQUIRED' }, 'failed'],
     [{ status: 403 }, 'denied'], [{ status: 404 }, 'denied'], [{ status: 503 }, 'failed'], [new TypeError('network'), 'failed'],
     [page([finding()], CURSOR), 'failed', page([finding({ id: ID2 })], CURSOR)], // repeated cursor
     [page([finding()], 'not-a-cursor'), 'failed'],
@@ -654,7 +655,7 @@ function worklist(options) {
     s.api.push([init && init.method || 'GET', p]); s.fetched.push({ url: String(url), init });
     const headers = { get: name => String(name).toLowerCase() === 'x-kin-finding-schema' ? s.schema : null };
     try { const body = await s.respond(p); return { status: 200, ok: true, headers, json: async () => body }; }
-    catch (error) { return { status: error && error.status || 500, ok: false, headers, json: async () => ({ message: 'refused' }) }; }
+    catch (error) { return { status: error && error.status || 500, ok: false, headers: { get: name => name.toLowerCase() === 'x-kin-auth-code' ? error.headerCode || null : headers.get(name) }, json: async () => ({ message: 'refused', code: error.code }) }; }
   };
   const app = {
     current: () => s.selected, allowed: () => s.allowed, owner: () => s.owner, sub: () => s.sub,
@@ -1012,9 +1013,9 @@ test('adapter: selection A-B-A, 403/404/503 and session end clear rows and drop 
   assert.deepEqual(h.articles().map(e => e.dataset.findingId), [ID2]);
   assert.equal(h.result().textContent, ''); assert.equal(v.focused, 0);
   // Denied, failed: rows cleared with the refusal text.
-  for (const [status, state] of [[403, 'denied'], [404, 'denied'], [503, 'failed']]) {
+  for (const [status, state, code, headerCode] of [[403, 'failed', 'AUTH_SESSION_BUSY'], [403, 'failed', undefined, 'AUTH_CSRF_REQUIRED'], [403, 'denied'], [404, 'denied'], [503, 'failed']]) {
     await h.click(h.named(h.panel(), 'Reload Findings')[0]);
-    lists.at(-1).d.reject({ status }); await flush();
+    lists.at(-1).d.reject({ status, code, headerCode }); await flush();
     assert.deepEqual([h.panel().dataset.state, h.articles().length], [state, 0], String(status));
     await h.click(h.named(h.panel(), 'Reload Findings')[0]);
     lists.at(-1).d.resolve(page([finding()])); await flush();

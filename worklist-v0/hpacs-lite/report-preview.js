@@ -213,7 +213,7 @@
         answer = await api('GET', '/studies/' + encodeURIComponent(s.uid) + '/report/citations', undefined, signal, at);
       } catch (error) {
         if (error.name === 'AbortError' || error.auth) throw error;
-        return { state: error.status === 403 ? 'refused' : 'unknown', entries: [] };
+        return { state: error.status === 403 && !String(error.code || '').startsWith('AUTH_') ? 'refused' : 'unknown', entries: [] };
       }
       return citationAnswerOk(answer, s.data.report.version) ? { state: 'ok', entries: answer.head } : { state: 'unknown', entries: [] };
     }

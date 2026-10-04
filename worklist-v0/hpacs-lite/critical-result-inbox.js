@@ -471,7 +471,7 @@
         const data = response.incomplete ? undefined : response.body;
         if (!response.ok) {
           throw Object.assign(new Error(isObject(data) && text(data.message) ? data.message : `HTTP ${response.status}`),
-            { kin: true, status: response.status, code: isObject(data) && text(data.code) ? data.code : null, json: isObject(data),
+            { kin: true, status: response.status, code: String(response.code || '').startsWith('AUTH_') ? response.code : (isObject(data) && text(data.code) ? data.code : null), json: isObject(data),
               body: isObject(data) ? data : null });
         }
         return { status: response.status, data };
@@ -620,7 +620,7 @@
         const current = ctx.view === view && ctx.gen > slotGen(id) && !pages.some(page => page.gen > ctx.gen && page.ids.has(id));
         // 403·404는 지금 이 기록을 읽을 수 없다는 서버의 답이다: 목록 행까지 그 기록의 투영을 없앤다. 그 밖의 실패(5xx·답 없음·
         // 제한 시간)는 이 기록에 대해 아무것도 말하지 않아 마지막 유효 투영을 그대로 둔다.
-        if (current && (error.status === 403 || error.status === 404)) {
+        if (current && ((error.status === 403 && !String(error.code || '').startsWith('AUTH_')) || error.status === 404)) {
           offer(id, ctx.gen, null);
           opened.delete(id);
         }

@@ -723,6 +723,23 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         self.entry_settled()
 
     # ── SD01 ──
+    def test_u5_cancel_delivery_survives_cancelled_preparation_without_source_read(self):
+        record = self.server.add(B, X)
+        self.ready_reader()
+        self.show_sent()
+        self.page.locator(f'#cvr-sent-rows tr[data-id="{record["id"]}"]').get_by_role("button", name="Cancel Delivery").click()
+        form = self.page.locator("#cvr-sent-rows tr:not([data-id])")
+        reason = "SYN keep the typed cancellation reason"
+        form.locator("textarea").fill(reason)
+        self.server.reasons[B] = "NO_PINNABLE_SOURCE"
+        reads = len(self.requests("recipients"))
+        expect(form.get_by_role("button", name="Cancel Delivery")).to_be_enabled()
+        self.page.evaluate("() => {const p=KinWorkContext.prepare({});KinWorkContext.cancelPreparation(p);}")
+        self.settle()
+        expect(form.get_by_role("button", name="Cancel Delivery")).to_be_enabled()
+        expect(form.locator("textarea")).to_have_value(reason)
+        self.assertEqual(reads, len(self.requests("recipients")))
+
     def test_u5_supersede_source_survives_selection_change(self):
         record = self.server.add(B, X)
         self.ready_reader()

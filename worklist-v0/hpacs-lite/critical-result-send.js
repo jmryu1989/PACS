@@ -1119,7 +1119,7 @@
         }
         if (entryView.phase === 'loading') targetKey = null;
         if (dialogUid !== null && dialogView?.phase === 'loading') readDialog(false);
-        for (const form of forms.values()) if (!form.source) readFormSource(form);
+        for (const form of forms.values()) if (form.kind === 'supersede' && !form.source) readFormSource(form);
         sync(); if (listPhase === 'loading') loadList(false);
         startTimers();
       } else if (event.reason === 'lifecycle' && event.state === 'active') startTimers();

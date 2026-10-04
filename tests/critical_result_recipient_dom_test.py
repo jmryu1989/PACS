@@ -960,7 +960,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         elif held["answer"][1] is None:
             route.fulfill(status=held["answer"][0], body="")
         else:
-            route.fulfill(status=held["answer"][0], json=held["answer"][1])
+            route.fulfill(status=held["answer"][0], json=held["answer"][1], headers=fault.get("headers"))
 
     # ── helpers ──
     def wait_until(self, predicate, what, timeout=10.0):
@@ -3938,7 +3938,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
             with self.subTest(host=host):
                 b = 1800 if host == "home" else 1850
                 s = self.mx_server(host)
-                kinds = ("404", "403", "500", "timeout", "other", "malformed")
+                kinds = ("404", "403", *(("auth_body", "auth_header") if host == "panel" else ()), "500", "timeout", "other", "malformed")
                 subject = {kind: b + 1 + 2 * i for i, kind in enumerate(kinds)}
                 for x in subject.values():
                     s.add(self.mx_rec(host, x), self.mx_rec(host, x + 1, state="superseded", replacedBy=rid(x)))
@@ -3947,7 +3947,9 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                     self.mx_press("Open Replacement", mark(x + 1))
                     self.idle()
                 opened = {x: self.mx_view(x) for x in subject.values()}
-                answers = {"404": ({"status": 404, "body": {"code": "CRITICAL_RESULT_NOT_FOUND", "message": "SYN gone"}},
+                answers = {"auth_body": ({"status": 403, "body": {"code": "AUTH_SESSION_BUSY", "message": "SYN binding failed"}}, "AUTH_SESSION_BUSY"),
+                           "auth_header": ({"status": 403, "headers": {"X-KIN-Auth-Code": "AUTH_CSRF_REQUIRED"}, "body": {"message": "SYN binding failed"}}, "AUTH_CSRF_REQUIRED"),
+                           "404": ({"status": 404, "body": {"code": "CRITICAL_RESULT_NOT_FOUND", "message": "SYN gone"}},
                                    "CRITICAL_RESULT_NOT_FOUND"),
                            "403": ({"status": 403, "body": {"code": "CRITICAL_RESULT_ROLE_REQUIRED", "message": "SYN role"}},
                                    "CRITICAL_RESULT_ROLE_REQUIRED"),

@@ -177,7 +177,7 @@
       } catch (error) {
         if (!current()) return false;
         const status = error && error.status;
-        work.commit(at, () => { set(status === 403 || status === 404 ? 'denied' : 'failed', []); });
+        work.commit(at, () => { set((status === 403 && !String(error.code || '').startsWith('AUTH_')) || status === 404 ? 'denied' : 'failed', []); });
         return false;
       } finally {
         work.commit(at, () => { if (current()) { s.loading = false; changed(); } });

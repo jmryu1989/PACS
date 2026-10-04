@@ -2036,7 +2036,7 @@
         // 본문을 버리지 않는다. 거절이 "무엇을 확인해야 하는가"를 함께 보낼 때
         // (승인본 판 번호와 그 본문 같은 것) 메시지 한 줄만 남기면 화면은 사용자에게
         // 자기 캐시를 대신 보여주게 된다 — 그 캐시가 낡아서 거절당한 것인데도.
-        throw Object.assign(new Error(j.message ?? `HTTP ${answer.status}`), { code: j.code, status: answer.status, body: j });
+        throw Object.assign(new Error(j.message ?? `HTTP ${answer.status}`), { code: String(answer.code || '').startsWith('AUTH_') ? answer.code : j.code, status: answer.status, body: j });
       }
       // 읽을 수 없는 성공 본문은 성공이 아니다.
       if (answer.incomplete || answer.body === null)

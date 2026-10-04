@@ -437,7 +437,7 @@
     if (error.status === 404) return comparison ? '소견이나 연결한 표식을 찾을 수 없거나 그 검사에 더 이상 접근할 수 없습니다. 작성 내용은 저장되지 않았습니다.'
       : '연결한 표식이 이 검사에 없습니다. 작성 내용은 저장되지 않았습니다.';
     const located = comparison || !!(context && context.job);
-    if (error.status === 403 && located) return '비교 검사가 이 검사와 다른 기관 소속이거나 접근할 수 없어 연결하지 않았습니다. 작성 내용은 저장되지 않았습니다.';
+    if (error.status === 403 && located && !String(error.code || '').startsWith('AUTH_')) return '비교 검사가 이 검사와 다른 기관 소속이거나 접근할 수 없어 연결하지 않았습니다. 작성 내용은 저장되지 않았습니다.';
     if (error.status === 400 && located) return '같은 환자의 비교 검사 하나만 연결할 수 있습니다. 비교 검사와 입력 내용을 확인하세요. 작성 내용은 저장되지 않았습니다.';
     if (error.status === 400 || error.status === 413) return '입력 길이와 연결 표식을 확인하세요. 작성 내용은 저장되지 않았습니다.';
     return '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.';
@@ -615,8 +615,10 @@
           headers: { 'X-KIN-CSRF': '1', [SCHEMA_HEADER]: String(SCHEMA), ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
         const data = await res.json().catch(() => null);
         if (!valid(ticket) || !work.admits(at)) throw { stale: true };
-        if (res.status === 403 && !foreign) { work.commit(at, deny); throw { stale: true }; }
-        if (!res.ok || !data) throw { status: res.status, code: data?.code, headRevision: data?.headRevision ?? null, headHidden: data?.headHidden ?? null, itemId: data?.itemId ?? null,
+        const headerCode = res.headers?.get('X-KIN-Auth-Code');
+        const code = String(headerCode || '').startsWith('AUTH_') ? headerCode : data?.code;
+        if (res.status === 403 && !foreign && !String(code || '').startsWith('AUTH_')) { work.commit(at, deny); throw { stale: true }; }
+        if (!res.ok || !data) throw { status: res.status, code, headRevision: data?.headRevision ?? null, headHidden: data?.headHidden ?? null, itemId: data?.itemId ?? null,
           jobId: data?.jobId ?? null, markId: data?.markId ?? null };
         // R5: only a successful findings answer decides the API's record format; refusals and proxy errors never do.
         work.commit(at, () => { if (/\/findings(?:[/?]|$)/.test(path)) s.compat = schemaOf(res) === String(SCHEMA) ? 'v2' : 'old-api'; });
@@ -756,7 +758,7 @@
         if (!current()) return;
         work.commit(workAt, () => {
         s.pair.heads = new Map();
-        s.pair.status = error && (error.status === 403 || error.status === 404) ? 'denied' : 'failed';
+        s.pair.status = error && ((error.status === 403 && !String(error.code || '').startsWith('AUTH_')) || error.status === 404) ? 'denied' : 'failed';
         // Findings naming that study are no longer readable either; the anchor list drops them, once per
         // refusal (the flag survives superseded reads and clears only with an answered list or a new anchor).
         if (s.pair.status === 'denied' && !s.pair.refused) { s.pair.refused = true; if (s.loading) s.again = true; else load(); }
@@ -962,7 +964,7 @@
         if (error.status === 409 && error.code !== 'FINDING_SOURCE_STALE' && error.code !== 'FINDING_COMPARISON_STUDY') await load();
         // A saved finding that answers 404 may have become unreadable, and a comparison 403 may hide an
         // anchor refusal: the authoritative list decides (lose() or deny()) and the draft stays otherwise.
-        else if ((error.status === 404 && e.head) || (error.status === 403 && (comparison || job))) { work.commit(workAt, () => { e.busy = false; }); await load(); }
+        else if ((error.status === 404 && e.head) || (error.status === 403 && !String(error.code || '').startsWith('AUTH_') && (comparison || job))) { work.commit(workAt, () => { e.busy = false; }); await load(); }
         else if (error.status === 404 && comparison) loadPair();
         return false;
       } finally { work.commit(workAt, () => { if (valid(ticket) && s.entries.has(e.id)) { e.busy = false; notify(); } }); }

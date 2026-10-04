@@ -61,7 +61,8 @@ window.KinReadingFindings = function (app) {
     const response = await transport.request('/api' + path, { context: at, read: 'response', method: 'GET', credentials: 'same-origin', cache: 'no-store',
       headers: { 'X-KIN-CSRF': '1', [links.SCHEMA_HEADER]: String(links.SCHEMA) } });
     const data = await response.json().catch(() => null);
-    if (!response.ok || !data) throw { status: response.status, code: data && data.code };
+    const headerCode = response.headers?.get('X-KIN-Auth-Code');
+    if (!response.ok || !data) throw { status: response.status, code: String(headerCode || '').startsWith('AUTH_') ? headerCode : data?.code };
     work.commit(at, () => { oldApi = links.schemaOf(response) !== String(links.SCHEMA); });
     return data;
   }

@@ -1141,7 +1141,7 @@ const pCopy = (id, revision) => ({ itemId: id, revision, studyUid: B, kind: 'key
 function pairTransport() {
   const t = transport(), base = t.fetch;
   const pair = { items: [pItem(P1, 1), pItem(P2, 3)], status: 200, manual: false, calls: [] };
-  const answer = (status, items) => ({ status, ok: status === 200, json: async () => status === 200 ? { items, nextCursor: null } : { message: 'refused' } });
+  const answer = (status, items) => ({ status, ok: status === 200, headers: {get: name => name.toLowerCase() === 'x-kin-auth-code' ? pair.headerCode || null : null}, json: async () => status === 200 ? { items, nextCursor: null } : { message: 'refused', code: pair.code } });
   t.fetch = async (url, options) => {
     if (!url.startsWith('/api/studies/' + B + '/viewer-items')) return base(url, options);
     t.log.push({ url, options, body: null });
@@ -2666,3 +2666,34 @@ test('a 403 on the findings list hides stored findings and holds drafts without 
   assert.equal(store.state().entries.get(e.id).draft.title, title);
   assert.ok(store.state().entries.has(F1));
 });
+
+// U5MOD-F08: a binding failure is not evidence that either study refused access.
+for (const location of ['header', 'body']) for (const code of ['AUTH_SESSION_BUSY', 'AUTH_CSRF_REQUIRED']) {
+  const failure = () => ({status: 403, ok: false, headers: {get: name => location === 'header' && name.toLowerCase() === 'x-kin-auth-code' ? code : null}, json: async () => location === 'body' ? {code} : {}});
+  test(`coded 403 ${location} ${code}: findings remain visible and drafts editable`, async () => {
+    const t = transport(); const {store, e, lifecycle} = await drafting(t);
+    t.state.items = [t.head(F1, 1)]; await store.load();
+    t.state.responses.push(failure); await store.load();
+    assert.ok(store.state().entries.has(F1)); assert.equal(store.state().entries.get(e.id), e);
+    assert.equal(store.state().suspended, false); assert.equal(store.held().count, 0);
+    store.updateDraft(e, {title: 'SYN still editable'}); assert.equal(e.draft.title, 'SYN still editable');
+    assert.ok(store.newDraft()); assert.equal(lifecycle.gate.state(), 'active');
+    t.state.responses.push(failure); assert.equal(await store.save(e, 'create'), false);
+    assert.equal(store.state().suspended, false); assert.equal(store.state().entries.get(e.id), e);
+  });
+  test(`coded 403 ${location} ${code}: comparison failures do not deny or reload the anchor`, async () => {
+    const t = pairTransport(); t.state.items = [t.head(F1, 1)];
+    const {store} = await anchored(t);
+    const e = store.newDraft(); store.updateDraft(e, {title: 'SYN comparison'});
+    store.toggleSource(e, ITEM); store.toggleSource(e, P1, B);
+    const before = reads(t, A, 'findings');
+    t.state.responses.push(failure); assert.equal(await store.save(e, 'create'), false); await tick();
+    assert.equal(reads(t, A, 'findings'), before);
+    assert.equal(e.message, model.errorMessage({status: 403, code}));
+    assert.equal(store.state().suspended, false); assert.ok(store.state().entries.has(F1));
+    t.pair.status = 403; t.pair[location === 'header' ? 'headerCode' : 'code'] = code;
+    await store.loadPair(); await tick();
+    assert.equal(store.state().pair.status, 'failed'); assert.equal(store.state().pair.refused, false);
+    assert.equal(reads(t, A, 'findings'), before); assert.equal(store.state().entries.get(e.id), e);
+  });
+}
