@@ -24,6 +24,8 @@ import os
 import unittest
 from pathlib import Path
 
+from report_page_contract import install_contract
+
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -239,6 +241,8 @@ def reduced(cid=CID + "5", field="conclusion"):
 def ok(head, version=3):
     return {"status": 200, "body": {"version": version, "head": head, "draft": []}}
 
+
+HARNESS = install_contract(HARNESS)
 
 class ReportPreviewCitationDOMTest(unittest.TestCase):
     @classmethod
@@ -551,13 +555,14 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
 
     # ── D17 · a session that ended takes the paper with it ──
 
-    def test_an_expired_session_blanks_the_paper_instead_of_drawing_unknown(self):
-        self.open(cite={"status": 401, "body": {}}, render=False)
-        self.page.wait_for_function("expired => ui.status() === expired", arg=EXPIRED)
-        self.assertEqual("", self.page.evaluate("ui.srcdoc()"), "nothing is drawn on a logged-out screen")
-        self.assertEqual(EXPIRED, self.page.evaluate("ui.status()"))
-        self.assertEqual(1, self.page.evaluate("ui.logouts()"), "the shipped api() ended the session")
-        self.assertTrue(self.page.evaluate("ui.printDisabled()"))
+    def test_a_plain_401_is_unknown_evidence_and_keeps_the_report_open(self):
+        # Amendment ⑤: a request refusal is not evidence that this session ended.
+        self.open(cite={"status": 401, "body": {"message": "synthetic refusal"}}, render=False)
+        self.page.wait_for_function("() => citeCalls.length === 1 && ui.status() !== '출력 직전 상태를 다시 확인하고 있습니다…'", timeout=3000)
+        self.assertIn(BODY_LINE, self.page.evaluate("ui.srcdoc()"), "a plain 401 must not blank valid report text")
+        self.assertEqual("active", self.page.evaluate("work.state()"))
+        self.assertEqual(0, self.page.evaluate("ui.logouts()"))
+        self.assertIn(UNKNOWN, self.page.evaluate("ui.srcdoc()"))
 
     # ── D14 · a head that was never saved has nothing to attest ──
 

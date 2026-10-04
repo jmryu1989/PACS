@@ -11,15 +11,18 @@ Each discriminating case also runs the b6a317c code it replaces (in-test control
 the defect, so a green run here is not a tautology. Hosted only; no server, database or clinical data.
 """
 import json
+import os
 from pathlib import Path
 import unittest
 
 from playwright.sync_api import sync_playwright
 
 import worklist_arrivals_dom_test as arrivals
+from report_page_contract import bind_api_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = arrivals.MAIN.replace("\r\n", "\n")
+MAIN = (Path(os.environ["KIN_IDENTITY_MAIN"]).read_text(encoding="utf-8")
+        if "KIN_IDENTITY_MAIN" in os.environ else arrivals.MAIN).replace("\r\n", "\n")
 IDENTITY_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "study-identity.js").read_text(encoding="utf-8")
 extract_function = arrivals.extract_function
 
@@ -141,16 +144,20 @@ class Browser(unittest.TestCase):
         cls.pw.stop()
 
     def tearDown(self):
+        self.assertTrue(all(request["session"] == "SYN-SESSION" for request in
+                            self.page.evaluate("identityWireRequests")))
         self.page.close()
         self.assertEqual([], self.errors)
 
     def open(self, html, *scripts):
         self.errors = []
         self.page = self.browser.new_page()
+        self.page.set_default_timeout(3000)
         self.page.on("pageerror", lambda error: self.errors.append(str(error)))
         self.page.set_content(html)
         for script in scripts:
             self.page.add_script_tag(content=script)
+        bind_api_fixture(self.page, "async " + extract_function(MAIN, "api"))
 
     def panel(self):
         return self.page.evaluate(READ_PANEL)
@@ -315,7 +322,7 @@ class PollPanelDOMTest(Browser):
 
 
 # Harness B: the correction paths with recorded stand-ins.
-CORRECTION_PAGE = """<!doctype html><html><body>
+CORRECTION_PAGE = """<!doctype html><html><head><script>WORKGATE</script></head><body>
 PANEL
 MODAL
 <table><tbody id="rows"></tbody></table>
@@ -363,7 +370,7 @@ def correction_page(apply_state=None, cells=None, modify=None):
     if modify:
         functions.append(modify)
     cells = cells or {}
-    return (CORRECTION_PAGE.replace("PANEL", PANEL).replace("MODAL", MODAL)
+    return (CORRECTION_PAGE.replace("WORKGATE", arrivals.WORK).replace("PANEL", PANEL).replace("MODAL", MODAL)
             .replace("ESC", statement(MAIN, "    const esc = v => "))
             .replace("FMTD", statement(MAIN, "    const fmtD = d => "))
             .replace("STATEKEYS", statement(MAIN, "    const STATE_KEYS = "))
