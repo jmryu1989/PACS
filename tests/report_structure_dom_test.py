@@ -317,6 +317,44 @@ class ReportStructureDOMTest(unittest.TestCase):
         self.assertEqual(page.evaluate("() => $('#findings').value"), EXISTING)
         self.assertIsNone(page.evaluate("() => pane()"))
 
+    def test_d20_apply_is_above_the_open_findings_drawer_at_1366_by_768(self):
+        """U5PT-F02 / covered Apply: use the whole shipped page and drawer geometry."""
+        import auth_logout_dom_test as auth
+        import report_session_page_dom_test as session_page
+        from playwright.sync_api import expect
+
+        site = session_page.ReportSite()
+        for suffix, body in (
+                ('report/structure', {'version': 0, 'unknown': False, 'head': [], 'draft': []}),
+                ('report/citations', {'version': 0, 'head': [], 'draft': []})):
+            site.gets['/api/studies/' + auth.UID + '/' + suffix] = (200, body)
+        context = self._browser.new_context(viewport={'width': 1366, 'height': 768})
+        self.addCleanup(context.close)
+        context.route('**/*', site.handle)
+        page = context.new_page()
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.clock.install()
+        page.goto(auth.MAIN_URL)
+        page.locator('#rows tr', has_text=auth.PATIENT).first.click()
+        page.locator('#reading-findings-open').click()
+        expect(page.locator('#reading-findings')).to_be_visible()
+        page.locator('#report-more > summary').click()
+        page.locator('#b-structured').click()
+        page.locator('#struct-item').select_option('GEN-1\x00CONCLUSION')
+        page.locator('#struct-value-text').fill('SYN accessible Apply')
+        expect(page.locator('#struct-apply')).to_be_enabled()
+        self.assertTrue(page.locator('#struct-apply').evaluate('''el => {
+          const r = el.getBoundingClientRect();
+          return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === el;
+        }'''), 'the actual pointer target at Apply must be Apply, with Image Findings still open')
+        expect(page.locator('#reading-findings')).to_be_visible()
+        page.locator('#struct-apply').click()
+        expect(page.locator('#conclusion')).to_have_value('Conclusion: SYN accessible Apply')
+        self.assertEqual('Conclusion: SYN accessible Apply', site.stored()['conclusion'])
+        self.assertEqual([], errors)
+        self.assertEqual([], site.violations)
+
     # D2 ───────────────────────────────────────────────────────────────────────────────────────
     def test_d02_apply_writes_the_field_only_after_the_server_answered(self):
         page = self.open(state(), struct_replies=[{"version": 4, "unknown": False, "head": [], "draft": []},

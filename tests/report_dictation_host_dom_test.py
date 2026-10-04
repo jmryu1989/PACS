@@ -311,6 +311,11 @@ REPORTBLOCK
 BUTTONSFN
 HOLDBLOCK
 SELECTBLOCK
+// Unrelated offline indicators/reconnect scheduling are inert in this component page.
+const worklistBodyParts = { sync() {} }, consultations = { refresh() {} };
+let poll = null, pollGeneration = 0;
+function startReconnect() {}
+GOOFFLINEFN
 window.load = options => loadReport(options);
 window.stash = () => stashReport();
 window.put = (field, start, end) => { const el = $("#" + field); el.setSelectionRange(start, end === undefined ? start : end); };
@@ -379,6 +384,7 @@ def harness(state):
         page = page.replace(key, S[name])
     return (page.replace("APIFN", API_FN).replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN).replace("BUTTONSFN", BUTTONS_FN)
+            .replace("GOOFFLINEFN", GO_OFFLINE_FN)
             .replace("INITIALSTATE", json.dumps(state, ensure_ascii=False))
             .replace("UIDVALUE", UID).replace("OTHERVALUE", OTHER))
 
@@ -467,6 +473,60 @@ class ReportDictationHostDOMTest(unittest.TestCase):
 
     def puts(self):
         return [c for c in self.snap()["calls"] if c["method"] == "PUT"]
+
+    def offline_indicators(self):
+        self.page.evaluate("""() => {
+          for (const id of ['consultations-open', 'dbstat']) {
+            const el = document.createElement('button'); el.id = id; document.body.append(el);
+          }
+        }""")
+
+    def test_hd18_offline_releases_recording_and_refuses_insert(self):
+        """U5PT-F02 / HELD-MICROPHONE: run the shipped offline transition."""
+        self.open()
+        self.offline_indicators()
+        self.record()
+        before = self.snap()['text']
+        self.page.evaluate("goOffline(new Error('SYN connection lost'))")
+        self.page.wait_for_function("released()", timeout=3000)
+        self.assertNotEqual("recording", self.snap()["session"]["state"])
+        self.page.locator('#dictation-insert').dispatch_event('click')
+        self.assertEqual(before, self.snap()['text'])
+        self.assertEqual([], self.puts())
+
+    def test_hd20_offline_refuses_inserting_an_already_received_transcript(self):
+        """U5PT-F02: preserve the requested refusal even if the current product allows it."""
+        self.open()
+        self.offline_indicators()
+        self.review()
+        before = self.snap()["text"]
+        self.page.evaluate("goOffline(new Error('SYN connection lost'))")
+        self.page.locator("#dictation-insert").dispatch_event("click")
+        self.assertEqual(before, self.snap()["text"])
+        self.assertEqual([], self.puts())
+        self.assertTrue(self.snap()["pane"]["insert"]["disabled"])
+
+    def test_hd19_audio_never_enters_browser_storage_or_an_object_url(self):
+        """U5PT-F02 / voice retention: observe storage APIs through upload and disposal."""
+        self.page.add_init_script("""(() => {
+          window.voiceRetention = [];
+          for (const [object, method] of [[Storage.prototype, 'setItem'],
+              [IDBObjectStore.prototype, 'put'], [IDBObjectStore.prototype, 'add'],
+              [URL, 'createObjectURL']]) {
+            const original = object[method];
+            object[method] = function (...args) {
+              voiceRetention.push(method); return original.apply(this, args);
+            };
+          }
+        })();""")
+        self.open()
+        before = self.page.evaluate("[Object.entries(localStorage), Object.entries(sessionStorage)]")
+        self.page.evaluate("voiceRetention.length = 0")
+        self.review()
+        self.page.locator("#dictation-cancel").click()
+        self.assertTrue(self.snap()["media"]["released"])
+        self.assertEqual([], self.page.evaluate("voiceRetention"))
+        self.assertEqual(before, self.page.evaluate("[Object.entries(localStorage), Object.entries(sessionStorage)]"))
 
     # ── HD-00 ──────────────────────────────────────────────────────────────────────────────
     def test_hd00_opening_the_report_keeps_the_text_and_starts_no_recording(self):

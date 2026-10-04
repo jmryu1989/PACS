@@ -345,6 +345,19 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
         self.assertNotIn(LIMITATION, section)
         self.assertNotIn(UNKNOWN, section)
 
+    def test_printed_report_neither_claims_structure_nor_reads_its_route(self):
+        """U5PT-F02 / P15: output must not imply an unverified structure attestation."""
+        self.open(cite=ok([]))
+        self.require_print()
+        documents = self.print_document()
+        self.assertTrue(documents)
+        for document in documents:
+            text = self.page.evaluate("html => new DOMParser().parseFromString(html, 'text/html').body.textContent", document)
+            self.assertIn(BODY_LINE, text)
+            self.assertNotIn("structured", text.lower())
+        paths = self.page.evaluate("[...previewCalls, ...citeCalls].map(c => c.path)")
+        self.assertFalse(any('/report/structure' in path for path in paths), paths)
+
     # ── D3 · refused ──
 
     def test_a_refused_read_says_so_and_still_prints_the_report(self):

@@ -14,6 +14,38 @@ import auth_logout_dom_test as auth
 
 
 class ReportSite(auth.Site):
+    def __init__(self):
+        super().__init__()
+        self.arrival = False
+        self.held_patches = []
+
+    def list_body(self, account, rename=None):
+        body = super().list_body(account, rename)
+        if self.arrival:
+            body['studies'].append(self.study_row(account, auth.UID_B.rsplit('.', 1)[0] + '.3',
+                                                 'SYN PATIENT CHARLIE', 'SYN-P-003'))
+            body['pagination']['total'] += 1
+        return body
+
+    def api(self, route, request, method, path, query):
+        if method == 'GET' and path == '/api/studies' and not query:
+            account, refused = self.authenticate(request)
+            if refused:
+                return self.refuse(route, *refused)
+            return route.fulfill(json=self.list_body(account))
+        if method == 'PATCH' and path == '/api/studies/' + auth.UID:
+            account, refused = self.authenticate(request)
+            if refused:
+                return self.refuse(route, *refused)
+            self.held_patches.append((route, request.post_data_json, account))
+            return
+        return super().api(route, request, method, path, query)
+
+    def finish_patch(self, status=200):
+        route, patch, account = self.held_patches.pop(0)
+        self.answer(route, status, {**self.state(account), **patch} if status == 200
+                    else {'message': 'SYN refused metadata change'})
+
     def write(self, body, account):
         status, answer = super().write(body, account)
         if status == 200 and body.get("insert"):
@@ -21,6 +53,11 @@ class ReportSite(auth.Site):
                         "insertedAt": "2026-10-04T00:00:00.000Z"}
             self.rows[account["actor"]]["citations"].append(inserted["cid"])
             answer = {**self.envelope(account), "inserted": inserted}
+        if status == 200 and body.get('structure'):
+            self.rows[account['actor']]['structured'].append('SYN-STRUCTURE-1')
+            answer = {**self.envelope(account), 'applied': {
+                'sid': 'SYN-STRUCTURE-1', 'field': body['structure']['field'],
+                'enteredAt': '2026-10-04T00:00:00.000Z'}}
         return status, answer
 
 
@@ -37,6 +74,7 @@ class ReportSessionPageTest(unittest.TestCase):
 
     def setUp(self):
         self.site = ReportSite()
+        self.site.second_study = True
         self.context = self.browser.new_context(viewport={"width": 1400, "height": 900})
         self.errors, self.dialogs = [], []
         self.context.route("**/*", self.route)
@@ -157,6 +195,114 @@ class ReportSessionPageTest(unittest.TestCase):
         self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
         self.assertEqual([], self.site.logouts)
         self.assertEqual([], self.dialogs)
+
+    def prepare_two_studies(self):
+        expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT_B)
+        self.type_report()
+
+    def begin_metadata_change(self, kind):
+        # Invoke the real menu actions; delay their wire answer until the doctor is in B.
+        # No editor/appState/model replacement: the entire shipped page performs the merge.
+        if kind == 'tele':
+            self.page.evaluate('uid => { void setTs(uid, "cancelled"); }', auth.UID)
+        else:
+            self.page.evaluate('uid => setSs(uid, "Unverified")', auth.UID)
+        self.wait(lambda: len(self.site.held_patches) == 1)
+
+    def unconfirmed_study_survives(self, update):
+        self.prepare_two_studies()
+        if update in ('patch', 'refused-patch', 'tele'):
+            self.begin_metadata_change(update)
+        self.site.put_answers = [(503, {'code': 'REPORT_DRAFT_UNAVAILABLE', 'message': 'SYN'})]
+        self.page.locator('#rows tr', has_text=auth.PATIENT_B).first.click()
+        expect(self.page.locator('#clinical')).to_contain_text(auth.PATIENT_B)
+        self.wait(lambda: len(self.site.puts) == 1)
+        expect(self.page.locator('#toast')).to_contain_text('서버 저장 실패')
+        self.assertIsNone(self.site.stored())
+        lists = self.site.count('GET', '/api/studies')
+        if update == 'refresh':
+            self.page.locator('#refresh').click()
+        elif update == 'arrival':
+            self.site.arrival = True
+            self.page.clock.run_for(30001)
+            expect(self.page.locator('#rows')).to_contain_text('SYN PATIENT CHARLIE')
+        else:
+            self.site.finish_patch(403 if update == 'refused-patch' else 200)
+        if update in ('refresh', 'arrival', 'refused-patch'):
+            self.wait(lambda: self.site.count('GET', '/api/studies') > lists)
+        # Waiting for the accepted/refused action to repaint prevents a late answer after selection.
+        if update in ('patch', 'tele'):
+            expect(self.page.locator('#rows tr', has_text=auth.PATIENT).first).to_contain_text(
+                'Unverified' if update == 'patch' else 'cancelled', ignore_case=True)
+        self.page.locator('#rows tr', has_text=auth.PATIENT).first.click()
+        expect(self.page.locator('#clinical')).to_contain_text(auth.PATIENT)
+        self.assert_text()
+        self.page.clock.run_for(20001)
+        self.wait(lambda: self.site.stored() == auth.FIELDS)
+        self.assertEqual(auth.FIELDS, {k: self.site.puts[-1][k] for k in auth.FIELDS})
+        self.assertEqual(0, self.site.puts[-1]['baseVersion'])
+        self.assertEqual('SYNEPOCH1:0', self.site.puts[-1]['expectedRevision'])
+
+    def test_refresh_in_b_preserves_unconfirmed_a_and_its_next_save(self):
+        self.unconfirmed_study_survives('refresh')
+
+    def test_arrival_poll_in_b_preserves_unconfirmed_a_and_its_next_save(self):
+        self.unconfirmed_study_survives('arrival')
+
+    def test_metadata_answer_in_b_preserves_unconfirmed_a_and_its_next_save(self):
+        self.unconfirmed_study_survives('patch')
+
+    def test_refused_metadata_reload_in_b_preserves_unconfirmed_a_and_its_next_save(self):
+        self.unconfirmed_study_survives('refused-patch')
+
+    def test_tele_answer_in_b_preserves_unconfirmed_a_and_its_next_save(self):
+        self.unconfirmed_study_survives('tele')
+
+    def selected_versions_survive(self, update):
+        if update == 'arrival':
+            # Type after the first empty autosave tick, so the poll precedes the next save.
+            self.page.clock.run_for(20001)
+        self.type_report()
+        # Another document advances the server after this screen has shown version/revision 0.
+        self.site.report.update(version=7, rs='T')
+        self.site.revs[auth.RAD['actor']] = 3
+        self.site.rows[auth.RAD['actor']] = {**auth.MORE, 'baseVersion': 7, 'citations': [], 'structured': []}
+        lists = self.site.count('GET', '/api/studies')
+        if update == 'refresh':
+            self.page.locator('#refresh').click()
+            self.wait(lambda: self.site.count('GET', '/api/studies') > lists)
+        elif update == 'arrival':
+            self.site.arrival = True
+            self.page.clock.run_for(10001)
+            expect(self.page.locator('#rows')).to_contain_text('SYN PATIENT CHARLIE')
+        else:
+            self.begin_metadata_change(update)
+            self.site.finish_patch(403 if update == 'refused-patch' else 200)
+            if update == 'refused-patch':
+                self.wait(lambda: self.site.count('GET', '/api/studies') > lists)
+        self.assert_text()
+        sent = len(self.site.puts)
+        self.page.clock.run_for(20001)
+        self.wait(lambda: len(self.site.puts) > sent)
+        body = self.site.puts[-1]
+        self.assertEqual((0, 'SYNEPOCH1:0'), (body['baseVersion'], body['expectedRevision']))
+        self.assertEqual(auth.FIELDS, {k: body[k] for k in auth.FIELDS})
+        self.assertEqual(auth.MORE, self.site.stored(), 'the stale write must not overwrite the other document')
+
+    def test_refresh_preserves_the_selected_screens_version_and_revision(self):
+        self.selected_versions_survive('refresh')
+
+    def test_arrival_preserves_the_selected_screens_version_and_revision(self):
+        self.selected_versions_survive('arrival')
+
+    def test_metadata_answer_preserves_the_selected_screens_version_and_revision(self):
+        self.selected_versions_survive('patch')
+
+    def test_refused_metadata_reload_preserves_the_selected_screens_version_and_revision(self):
+        self.selected_versions_survive('refused-patch')
+
+    def test_tele_answer_preserves_the_selected_screens_version_and_revision(self):
+        self.selected_versions_survive('tele')
 
 
 if __name__ == "__main__":
