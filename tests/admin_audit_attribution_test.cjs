@@ -128,7 +128,9 @@ CONTRACT.synthetic_vectors.push({"row":31,"action":"study.question","rule":"hidd
 const AUTH_MEANING = "record-time institution from the token groups at the event";
 Object.assign(CONTRACT.field_rules, {"auth.login":{"source":"detail.institution","meaning":AUTH_MEANING},
   "auth.logout":{"source":"detail.institution","meaning":AUTH_MEANING},
-  "auth.session.expired":{"source":"detail.institution","meaning":AUTH_MEANING}});
+  "auth.session.expired":{"source":"detail.institution","meaning":AUTH_MEANING},
+  // S7-U5 (U5S-REQ-09): the entry of a login by its single-use proof, recorded from the stored token of that session.
+  "auth.entry":{"source":"detail.institution","meaning":AUTH_MEANING}});
 CONTRACT.synthetic_vectors.push(
   {"row":32,"action":"auth.login","rule":"field:detail.institution","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"m logs in while in A"},
   {"row":33,"action":"auth.logout","rule":"field:detail.institution","record_time_visible_to":["inst-a"],"withheld_sides":{"inst-a":[]},"note":"m logs out while in A"},
@@ -801,6 +803,12 @@ test('AT-04 an access row that does not clearly record one institution is hidden
     assert.deepEqual(Object.keys(shown.detail), Object.keys(recorded), `row ${n}`);
     assert.equal(shown.target, ROWS.get(n).target, `row ${n}`);
   }
+  // The entry of a login (auth.entry) is an access row like the others: the institution it recorded reads it, as recorded.
+  const entered = row(98, 'auth.entry', M, authDetail('inst-a', {}), 'syn-m-login@synthetic.test');
+  const attributed = A.attributeAuditRow(entered);
+  assert.deepEqual([attributed.rule, json(attributed.visible_to)], ['field:detail.institution', ['inst-a']]);
+  assert.deepEqual(json(A.projectAuditRow(entered, 'inst-a').detail), { institution: 'inst-a', ip: '198.51.100.7', dataSubject: null });
+  for (const reader of ['inst-b', 'inst-z']) assert.equal(A.projectAuditRow(entered, reader), null, reader);
 });
 
 test('AT-05 the SQL prefilter keeps every access row of a name with \\, ", % and _ and adds none', async () => {
@@ -3238,12 +3246,10 @@ function scanAuditWrites(sources = auditSources()) {
 
 // ── the verdict: the contract table is read here only ──
 
-const { nonWriteDeferrals, sourceFingerprint, repinSources, unresolvedFingerprint, deferralIdentity } = require('./admin-audit-deferrals.cjs');
-const NON_WRITE_DEFERRALS = JSON.parse(readFileSync(path.join(__dirname, 'admin-audit-nonwrite-deferrals.json'), 'utf8'));
-const nonWriteContext = () => Object.fromEntries([
-  'api/tsconfig.json', 'api/package-lock.json', 'api/prisma/schema.prisma',
-].map(file => [file, require('node:crypto').createHash('sha256')
-  .update(readFileSync(path.join(ROOT, file), 'utf8').replace(/\r\n/g, '\n')).digest('hex')]));
+// The D-NW list: the raw SQL sites the scan cannot prove, set aside by what they are (file, declaration, kind, count).
+// It is bound to no hash of the source tree, the schema or the compiler inputs - see admin-audit-deferrals.cjs.
+const { listedRawSites, rawSiteList } = require('./admin-audit-deferrals.cjs');
+const RAW_SITE_LIST = JSON.parse(readFileSync(path.join(__dirname, 'admin-audit-nonwrite-deferrals.json'), 'utf8'));
 
 const VERDICT = {
   unread_sources: 'every script file under api/src is read by the program',
@@ -3280,7 +3286,7 @@ const failing = found => Object.keys(VERDICT).filter(name => found[name].length 
 test('completeness: every api/src file is read, every candidate is proved or explicitly deferred, both directions hold', () => {
   const { sources, listing } = productSources();
   const scan = scanAuditWrites(sources);
-  const disposition = nonWriteDeferrals(scan, sources, NON_WRITE_DEFERRALS, nonWriteContext(), scanAuditWrites);
+  const disposition = listedRawSites(scan, sources, RAW_SITE_LIST);
   const found = verdict({ ...scan, unresolved: disposition.unresolved }, productTable(), listing);
   // The inventory, whatever the verdict: every write site with its kind, actions or prefixes and their basis, every
   // unresolved candidate, and every candidate proven not to be a write with its reason.
@@ -3292,7 +3298,9 @@ test('completeness: every api/src file is read, every candidate is proved or exp
   console.log('ADMIN_AUDIT_CANDIDATES ' + JSON.stringify(tally));
   for (const entry of scan.candidates.filter(entry => entry.status === 'proven_non_audit')) console.log('ADMIN_AUDIT_NON_AUDIT ' + JSON.stringify(entry));
   console.log('ADMIN_AUDIT_CLIENT_FLOW ' + JSON.stringify(scan.flow));
-  console.log('ADMIN_AUDIT_DEFERRAL_INPUT ' + JSON.stringify(NON_WRITE_DEFERRALS));
+  console.log('ADMIN_AUDIT_DEFERRAL_INPUT ' + JSON.stringify(RAW_SITE_LIST));
+  // The raw SQL sites of this tree in the list's own shape: what the list file holds when it is in step.
+  console.log('ADMIN_AUDIT_RAW_SITES ' + JSON.stringify(rawSiteList(scan, sources)));
   for (const entry of disposition.deferred) console.log('ADMIN_AUDIT_DEFERRED_NON_AUDIT ' + JSON.stringify(entry));
   console.log('ADMIN_AUDIT_DEFERRAL_ERRORS ' + JSON.stringify(disposition.errors));
   const literals = new Set(scan.sites.flatMap(site => site.actions)), byRule = {};
@@ -3535,7 +3543,7 @@ test('checker self-test: every counterexample F03 enumerates leaves its write or
       const writes = own.filter(candidate => WRITES_AND_RAW.has(candidate.kind) && candidate.status !== 'proven_non_audit');
       assert.ok(writes.length > 0 && writes.every(candidate => candidate.status === 'unresolved'), `${name}: ${JSON.stringify(own)}`);
       assert.equal(scan.sites.filter(site => site.file === entry.source.file).length, 0, `${name}: no write of it resolves`);
-      const disposition = nonWriteDeferrals(scan, [...baselineSources(), entry.source], NON_WRITE_DEFERRALS, nonWriteContext());
+      const disposition = listedRawSites(scan, [...baselineSources(), entry.source], RAW_SITE_LIST);
       assert.equal(disposition.deferred.length, 0, name);
       for (const reason of scan.unresolved) assert.ok(disposition.unresolved.includes(reason), name);
       assert.deepEqual(failing(verdict({ ...scan, unresolved: disposition.unresolved }, fixtureTable(entry.table))), ['unresolved'], name);
@@ -3883,261 +3891,75 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
 });
 
 
-test('D-NW: only the reviewed corpus, predecessor proof and every exact pin can receive a temporary disposition', () => {
-  const sources = auditSources(), scan = scanAuditWrites(sources), context = nonWriteContext();
+test('D-NW list: the listed raw SQL sites, and only they, are set aside - known by what they are, not where they stand', () => {
+  const sources = auditSources(), scan = scanAuditWrites(sources);
   const before = inventory(scan), raw = [...scan.unresolved];
-  const apply = (policy = NON_WRITE_DEFERRALS, input = sources, result = scan, env = context) =>
-    nonWriteDeferrals(result, input, policy, env, scanAuditWrites);
-  const allowed = apply();
+  const allowed = listedRawSites(scan, sources, RAW_SITE_LIST);
+  const total = RAW_SITE_LIST.sites.reduce((sum, row) => sum + row.count, 0);
   assert.deepEqual(allowed.errors, []);
-  assert.equal(allowed.deferred.length, NON_WRITE_DEFERRALS.entries.length);
   assert.deepEqual(allowed.unresolved, []);
+  assert.equal(allowed.deferred.length, total);
   assert.ok(allowed.deferred.every(entry => entry.status === 'deferred_non_audit'
     && entry.original_status === 'unresolved' && entry.disposition === 'D-NW'));
-  assert.deepEqual(allowed.deferred.map(entry => [entry.file, entry.line, entry.start, entry.kind]),
-    NON_WRITE_DEFERRALS.entries);
+  assert.deepEqual(rawSiteList(scan, sources), RAW_SITE_LIST.sites, 'the list file is the scan\'s own site list');
   assert.deepEqual(inventory(scan), before, 'the raw candidate inventory is not rewritten');
   assert.deepEqual(scan.unresolved, raw);
-  assert.deepEqual(apply(null), { unresolved: raw, deferred: [], errors: [] });
-  assert.deepEqual(apply(NON_WRITE_DEFERRALS, [...sources].reverse()), allowed);
-  assert.deepEqual(apply(NON_WRITE_DEFERRALS, sources.map(source =>
-    ({ ...source, text: source.text.replace(/\n/g, '\r\n') }))), allowed);
-
-  const refuse = (result, label, expected = raw) => {
-    assert.equal(result.deferred.length, 0, label);
-    assert.ok(result.errors.length > 0, label);
-    for (const entry of expected) assert.ok(result.unresolved.includes(entry), label);
-  };
-  for (const [field, value] of [['schema_version', 0], ['ruling', 'other'], ['owner', ''],
-    ['follow_up', ''], ['typescript', '0'], ['sources_sha256', '0'], ['unresolved_sha256', '0'], ['repin', null]]) {
-    refuse(apply({ ...NON_WRITE_DEFERRALS, [field]: value }), field);
-  }
-  refuse(apply({ ...NON_WRITE_DEFERRALS, entries: [] }), 'empty');
-  refuse(apply({ ...NON_WRITE_DEFERRALS, entries: [...NON_WRITE_DEFERRALS.entries, NON_WRITE_DEFERRALS.entries[0]] }), 'duplicate');
-  for (const slot of [0, 1, 2, 3]) {
-    const pins = NON_WRITE_DEFERRALS.entries.map(pin => [...pin]);
-    pins[0][slot] = typeof pins[0][slot] === 'number' ? pins[0][slot] + 1 : pins[0][slot] + '-changed';
-    refuse(apply({ ...NON_WRITE_DEFERRALS, entries: pins }), 'changed position ' + slot);
-  }
-  // Every single omission rejects the whole disposition and retains every raw diagnosis.
-  for (let omitted = 0; omitted < NON_WRITE_DEFERRALS.entries.length; omitted++) {
-    const label = 'omitted position ' + omitted;
-    const partial = apply({ ...NON_WRITE_DEFERRALS,
-      entries: NON_WRITE_DEFERRALS.entries.filter((_, index) => index !== omitted) });
-    refuse(partial, label);
-    assert.deepEqual(partial.unresolved, [...raw, ...partial.errors], label);
-    assert.deepEqual(failing(verdict({ ...scan, unresolved: partial.unresolved })), ['unresolved'], label);
-    assert.deepEqual(scan.unresolved, raw, label);
-    assert.deepEqual(inventory(scan), before, label);
-  }
-  for (const file of Object.keys(context)) refuse(apply(NON_WRITE_DEFERRALS, sources, scan,
-    { ...context, [file]: '0' }), 'changed context ' + file);
-  const first = sources[0];
-  refuse(apply(NON_WRITE_DEFERRALS, sources.map(source => source === first
-    ? { ...source, text: source.text + '\n// changed dependency\n' } : source)), 'changed dependency');
-  refuse(apply(NON_WRITE_DEFERRALS, sources.slice(1)), 'removed source');
-  refuse(apply(NON_WRITE_DEFERRALS, [...sources, first]), 'duplicate source');
-  const changed = scan.candidates.map(entry => entry.status === 'unresolved'
-    ? Object.defineProperty({ ...entry, reason: entry.reason + ' changed' }, 'start', { value: entry.start }) : entry);
-  const changedScan = { ...scan, candidates: changed,
-    unresolved: changed.filter(entry => entry.status === 'unresolved')
-      .map(entry => `${entry.file}:${entry.line} ${entry.kind}: ${entry.reason}`) };
-  refuse(apply(NON_WRITE_DEFERRALS, sources, changedScan), 'changed diagnosis', changedScan.unresolved);
+  // No list: the ordinary fail-closed verdict.
+  assert.deepEqual(listedRawSites(scan, sources, null), { unresolved: raw, deferred: [], errors: [] });
+  // The same tree in another line-ending form and another file order gives the same answer.
+  assert.deepEqual(listedRawSites(scan, [...sources].reverse().map(source =>
+    ({ ...source, text: source.text.replace(/\n/g, '\r\n') })), RAW_SITE_LIST), allowed);
+  // Positions do not matter: every file that bears a listed site gets lines in front of it, every other file a line
+  // at its end - no row of the list changes and the same sites are set aside.
+  const bearing = new Set(RAW_SITE_LIST.sites.map(row => row.file));
+  const shifted = sources.map(source => ({ ...source, text: bearing.has(source.file)
+    ? '// moved\n// moved again\n' + source.text : source.text + '\n// an unrelated change\n' }));
+  const shiftedScan = scanAuditWrites(shifted), moved = listedRawSites(shiftedScan, shifted, RAW_SITE_LIST);
+  assert.deepEqual([moved.errors, moved.unresolved, moved.deferred.length], [[], [], total]);
+  assert.deepEqual(failing(verdict({ ...shiftedScan, unresolved: moved.unresolved })), []);
   console.log('ADMIN_AUDIT_DEFERRAL_CONTROLS ' + JSON.stringify({
     raw_unresolved: raw.length, deferred: allowed.deferred.length, blocking_unresolved: allowed.unresolved.length,
+    list_rows: RAW_SITE_LIST.sites.length,
   }));
 });
 
-
-test('D-NW reviewed repin: missing, stale or broadened predecessor proof refuses every deferral', () => {
-  const sources = auditSources(), scan = scanAuditWrites(sources), context = nonWriteContext();
-  const raw = [...scan.unresolved], before = inventory(scan);
-  const refuse = (policy, input = sources, prior = scanAuditWrites) => {
-    const result = nonWriteDeferrals(scan, input, policy, context, prior);
-    assert.equal(result.deferred.length, 0);
-    assert.ok(result.errors.length > 0);
-    assert.deepEqual(result.unresolved, [...raw, ...result.errors]);
-    assert.deepEqual(scan.unresolved, raw);
-    assert.deepEqual(inventory(scan), before);
-    assert.deepEqual(failing(verdict({ ...scan, unresolved: result.unresolved })), ['unresolved']);
+test('D-NW list: a raw SQL site that is not on the list fails by itself; a row the scan no longer finds does too', () => {
+  const refused = (result, scan, label) => {
+    assert.equal(result.deferred.length, 0, label);
+    assert.ok(result.errors.length > 0, label);
+    for (const entry of scan.unresolved) assert.ok(result.unresolved.includes(entry), label);
+    return result;
   };
-  const changed = change => {
-    const policy = structuredClone(NON_WRITE_DEFERRALS);
-    change(policy);
-    return policy;
-  };
-  refuse(NON_WRITE_DEFERRALS, sources, null);
-  for (const field of ['ruling', 'source_sha', 'typescript', 'context_sha256',
-    'sources_sha256', 'unresolved_sha256', 'entries_sha256']) {
-    refuse(changed(policy => { policy.repin[field] = '0'; }));
-  }
-  refuse(changed(policy => { policy.repin.before = []; }));
-  refuse(changed(policy => { policy.repin.before.push(policy.repin.before[0]); }));
-  refuse(changed(policy => { policy.repin.before[0].file = 'api/src/missing-repin.ts'; }));
-  refuse(changed(policy => { policy.repin.before[0].text += '\n// stale predecessor\n'; }));
-  refuse(changed(policy => {
-    policy.repin.before[0].text = sources.find(source => source.file === policy.repin.before[0].file).text;
-  }));
-  const pinned = sources.find(source => source.file === NON_WRITE_DEFERRALS.entries[0][0]);
-  const altered = sources.map(source => source === pinned
-    ? { ...source, text: source.text + '\n// changed deferred file\n' } : source);
-  refuse(changed(policy => {
-    policy.sources_sha256 = sourceFingerprint(altered);
-    policy.repin.before.push(pinned);
-  }), altered);
-  // Even a self-consistent new current-corpus hash cannot hide an unrecorded dependency change.
-  const unrecorded = sources.find(source => !NON_WRITE_DEFERRALS.entries.some(pin => pin[0] === source.file)
-    && !NON_WRITE_DEFERRALS.repin.before.some(prior => prior.file === source.file));
-  assert.ok(unrecorded);
-  const extra = sources.map(source => source === unrecorded
-    ? { ...source, text: source.text + '\n// unrecorded dependency change\n' } : source);
-  refuse(changed(policy => { policy.sources_sha256 = sourceFingerprint(extra); }), extra);
-  for (const change of [
-    previous => ({ ...previous, typescript: '0' }),
-    previous => ({ ...previous, files: previous.files.slice(1) }),
-    previous => ({ ...previous, unresolved: [] }),
-    previous => {
-      const candidates = previous.candidates.map(entry => entry.status !== 'unresolved' ? entry
-        : Object.defineProperty({ ...entry, reason: entry.reason + ' changed' }, 'start', { value: entry.start }));
-      return { ...previous, candidates, unresolved: candidates.filter(entry => entry.status === 'unresolved')
-        .map(entry => `${entry.file}:${entry.line} ${entry.kind}: ${entry.reason}`) };
-    },
-  ]) refuse(NON_WRITE_DEFERRALS, sources, restored => change(scanAuditWrites(restored)));
-  const restored = repinSources(sources, NON_WRITE_DEFERRALS);
-  const previous = scanAuditWrites(restored);
-  if (NON_WRITE_DEFERRALS.repin.ruling === 'S7-U1c-SPEC-G-B-R-001') {
-    const identities = (result, input) => result.candidates.filter(entry => entry.status === 'unresolved')
-      .map(entry => entry.file === 'api/src/critical-result.service.ts'
-        ? deferralIdentity(entry, input, result.tools.ts).identity
-        : JSON.stringify([entry.file, entry.line, entry.start, entry.kind, entry.rule, entry.reason])).sort();
-    assert.deepEqual(identities(previous, restored), identities(scan, sources));
-  } else assert.deepEqual(previous.unresolved, raw);
-  console.log('ADMIN_AUDIT_REPIN ' + JSON.stringify({
-    baseline_source_sha: NON_WRITE_DEFERRALS.repin.source_sha,
-    before_sources_sha256: sourceFingerprint(restored),
-    after_sources_sha256: sourceFingerprint(sources),
-    unresolved_sha256: NON_WRITE_DEFERRALS.unresolved_sha256,
-    entries: NON_WRITE_DEFERRALS.entries.length,
-    changed_files: NON_WRITE_DEFERRALS.repin.before.map(source => source.file),
-  }));
-});
-
-test('D-NW: a new raw fragment remains unresolved and fails by itself, with or without the product disposition', () => {
+  // The checker fixture's own unresolved raw fragment, alone: unresolved without the list and with it.
   const source = asSource('deferral-boundary.ts', fixtureText('deferral-boundary.ts', MEMBER_FIXTURES));
-  const sources = [...baselineSources(), source], scan = scanAuditWrites(sources);
-  assertMarked(scan, source);
-  const before = verdict(scan, fixtureTable());
-  assert.deepEqual(failing(before), ['unresolved']);
-  assert.equal(scan.unresolved.length, 1);
-  const result = nonWriteDeferrals(scan, sources, NON_WRITE_DEFERRALS, nonWriteContext());
-  assert.equal(result.deferred.length, 0);
-  assert.ok(result.errors.length > 0);
-  assert.ok(result.unresolved.includes(scan.unresolved[0]));
-  assert.deepEqual(failing(verdict({ ...scan, unresolved: result.unresolved }, fixtureTable())), ['unresolved']);
-});
-
-test('D-NW SPEC-G: identities, complete inventory and bounded review inputs are all required', () => {
-  const file = 'api/src/critical-result.service.ts', tick = String.fromCharCode(96);
-  const text = 'export class SpecGFixture {\n' + ['first', 'second', 'third'].map((name, n) =>
-    '  ' + name + '(tx: any, body: any) { return tx.$queryRaw' + tick
-      + 'SELECT ' + (n + 1) + ' WHERE id=${body.value}' + tick + '; }\n').join('') + '}\n';
-  const old = [{ file, text }], context = nonWriteContext();
-  const digest = value => require('node:crypto').createHash('sha256').update(JSON.stringify(value)).digest('hex');
-  const pin = entry => [entry.file, entry.line, entry.start, entry.kind];
-  const unresolved = scan => scan.candidates.filter(entry => entry.status === 'unresolved');
-  const build = (input, prior = old) => {
-    const scan = scanAuditWrites(input), previous = scanAuditWrites(prior);
-    const entries = unresolved(scan), priorEntries = unresolved(previous);
-    const before = new Map(priorEntries.filter(entry => entry.file === file).map(entry => {
-      const id = deferralIdentity(entry, prior, previous.tools.ts); return [id.identity, id];
-    }));
-    const policy = { ...structuredClone(NON_WRITE_DEFERRALS), schema_version: 3,
-      baseline_source_sha: '1'.repeat(40), sources_sha256: sourceFingerprint(input),
-      unresolved_sha256: unresolvedFingerprint(entries), entries: entries.map(pin),
-      repin: { ruling: 'S7-U1c-SPEC-G-B-R-001', source_sha: '1'.repeat(40),
-        typescript: scan.typescript, context_sha256: digest(context),
-        sources_sha256: sourceFingerprint(prior), unresolved_sha256: unresolvedFingerprint(priorEntries),
-        entries: priorEntries.map(pin), entries_sha256: digest(priorEntries.map(pin)),
-        before: prior.filter(source => input.find(now => now.file === source.file)?.text !== source.text),
-        site_proofs: entries.filter(entry => entry.file === file).map(entry => {
-          const id = deferralIdentity(entry, input, scan.tools.ts);
-          return { identity: id.identity, before_call_sha256: before.get(id.identity)?.call_sha256,
-            after_call_sha256: id.call_sha256, sql: 'Synthetic SELECT; not a product proof.',
-            values: 'Synthetic body.value remains unresolved; test metadata only.',
-            dependencies: 'Synthetic fixture has no imports.',
-            evidence: [{ ref: 'test-owned in-memory fixture', sha256: digest(input) }] };
-        }),
-      } };
-    return { input, scan, policy };
-  };
-  const moved = [{ file, text: '// positions move\n' + text.replace('SELECT 2', 'SELECT 20') }];
-  const sample = build(moved);
-  const apply = item => nonWriteDeferrals(item.scan, item.input, item.policy, context, scanAuditWrites);
-  const product = auditSources();
-  const productMoved = product.map(source => source.file === file
-    ? { ...source, text: '// SPEC-G position rehearsal\n' + source.text } : source);
-  const rehearsal = build(productMoved, product), real = apply(rehearsal);
-  assert.deepEqual(real.errors, []);
-  assert.deepEqual(real.unresolved, []);
-  assert.equal(real.deferred.length, NON_WRITE_DEFERRALS.entries.length);
-  const good = apply(sample);
-  assert.deepEqual(good.errors, []);
-  assert.deepEqual(good.unresolved, []);
-  assert.equal(good.deferred.length, 3);
-  assert.equal(sample.scan.unresolved.length, 3, 'raw findings stay visible');
-  assert.deepEqual(apply({ ...sample, input: moved.map(source =>
-    ({ ...source, text: source.text.replace(/\n/g, '\r\n') })) }), good);
-  const refuse = item => {
-    const before = inventory(item.scan), raw = [...item.scan.unresolved], result = apply(item);
-    assert.equal(result.deferred.length, 0);
-    assert.ok(result.errors.length > 0);
-    assert.deepEqual(result.unresolved, [...raw, ...result.errors]);
-    assert.deepEqual(inventory(item.scan), before);
-    assert.deepEqual(failing(verdict({ ...item.scan, unresolved: result.unresolved },
-      { rows: [], wildcards: [], listed: () => true })), ['unresolved']);
-  };
-  const mutate = change => {
-    const item = { ...sample, policy: structuredClone(sample.policy) };
-    change(item.policy); refuse(item);
-  };
-  mutate(p => { p.repin.ruling = 'S7-U3a-AUDIT-SPEC-F-R-001'; });
-  mutate(p => { delete p.repin.entries; });
-  mutate(p => { p.repin.entries[0][1]++; p.repin.entries_sha256 = digest(p.repin.entries); });
-  mutate(p => { p.repin.site_proofs = []; });
-  mutate(p => { p.repin.site_proofs[1] = p.repin.site_proofs[0]; });
-  for (const field of ['identity', 'before_call_sha256', 'after_call_sha256', 'sql', 'values', 'dependencies']) {
-    mutate(p => { p.repin.site_proofs[0][field] = ''; });
-  }
-  mutate(p => { p.repin.site_proofs[0].evidence = []; });
-  mutate(p => { p.repin.site_proofs[0].evidence[0].sha256 = 'bad'; });
-  for (const changed of [
-    moved[0].text.replace('body.value', 'body.other'),
-    moved[0].text.replace('second(', 'first('),
-    moved[0].text.replace('  third(tx: any, body: any)', '  fourth(tx: any, body: any)'),
-    moved[0].text.replace('$queryRaw', '$queryRawUnsafe'),
-    moved[0].text.replace('SELECT 20', 'DELETE FROM OtherTable'),
-  ]) {
-    const input = [{ file, text: changed }];
-    const scan = scanAuditWrites(input), policy = structuredClone(sample.policy);
-    policy.sources_sha256 = sourceFingerprint(input);
-    policy.unresolved_sha256 = unresolvedFingerprint(unresolved(scan));
-    policy.entries = unresolved(scan).map(pin);
-    refuse({ input, scan, policy });
-  }
-  const other = { file: 'api/src/other.service.ts', text: text.replace('SpecGFixture', 'OtherFixture') };
-  refuse(build([...moved, { ...other, text: '// changed deferred file\n' + other.text }], [...old, other]));
-  refuse({ ...sample, scan: { ...sample.scan } }); // missing AST/compiler input
-  const more = [{ file, text: moved[0].text.replace('first(', 'extra(tx: any, body: any) { return tx.$queryRaw'
-    + tick + 'SELECT 4 WHERE id=${body.value}' + tick + '; }\n  first(') }];
-  const extraScan = scanAuditWrites(more), extraPolicy = structuredClone(sample.policy);
-  extraPolicy.sources_sha256 = sourceFingerprint(more);
-  extraPolicy.unresolved_sha256 = unresolvedFingerprint(unresolved(extraScan));
-  extraPolicy.entries = unresolved(extraScan).map(pin);
-  refuse({ input: more, scan: extraScan, policy: extraPolicy });
-  const less = [{ file, text: moved[0].text.split('\n').filter(line => !line.includes('third(')).join('\n') }];
-  const lessScan = scanAuditWrites(less), lessPolicy = structuredClone(sample.policy);
-  lessPolicy.sources_sha256 = sourceFingerprint(less);
-  lessPolicy.unresolved_sha256 = unresolvedFingerprint(unresolved(lessScan));
-  lessPolicy.entries = unresolved(lessScan).map(pin);
-  refuse({ input: less, scan: lessScan, policy: lessPolicy });
+  const alone = [...baselineSources(), source], aloneScan = scanAuditWrites(alone);
+  assertMarked(aloneScan, source);
+  assert.deepEqual(failing(verdict(aloneScan, fixtureTable())), ['unresolved']);
+  assert.equal(aloneScan.unresolved.length, 1);
+  const lone = refused(listedRawSites(aloneScan, alone, RAW_SITE_LIST), aloneScan, 'the fixture alone');
+  assert.deepEqual(failing(verdict({ ...aloneScan, unresolved: lone.unresolved }, fixtureTable())), ['unresolved']);
+  // The same fragment added to the product tree: every listed site is where it was, the new one is not listed, and
+  // the product verdict fails on `unresolved` alone, naming it.
+  const product = auditSources(), added = [...product, source], addedScan = scanAuditWrites(added);
+  const one = refused(listedRawSites(addedScan, added, RAW_SITE_LIST), addedScan, 'a new raw site in the product tree');
+  assert.ok(one.errors.every(error => error.includes('a new raw SQL site is not on the list') && error.includes(source.file)), JSON.stringify(one.errors));
+  // (the fixture's own audit actions are not rows of the product table: only the raw site is judged here)
+  assert.ok(failing(verdict({ ...addedScan, unresolved: one.unresolved })).includes('unresolved'));
+  // One more raw site inside a declaration that already has listed ones is new too.
+  const scan = scanAuditWrites(product);
+  const short = structuredClone(RAW_SITE_LIST);
+  short.sites[0].count -= 1;
+  if (short.sites[0].count === 0) short.sites.shift();
+  const more = refused(listedRawSites(scan, product, short), scan, 'a site beyond the listed count');
+  assert.deepEqual(failing(verdict({ ...scan, unresolved: more.unresolved })), ['unresolved']);
+  // A row for a site the scan no longer finds (it was resolved or removed) must leave the list.
+  const stale = structuredClone(RAW_SITE_LIST);
+  stale.sites.push({ file: 'api/src/pacs.service.ts', within: 'PacsService.noSuchMethod', kind: 'raw call', count: 1 });
+  const gone = refused(listedRawSites(scan, product, stale), scan, 'a listed site that is gone');
+  assert.ok(gone.errors.some(error => error.includes('take the resolved site off the list')));
+  // A malformed list sets nothing aside.
+  for (const broken of [{ ...RAW_SITE_LIST, schema_version: 3 }, { ...RAW_SITE_LIST, sites: null },
+    { ...RAW_SITE_LIST, sites: [...RAW_SITE_LIST.sites, RAW_SITE_LIST.sites[0]] },
+    { ...RAW_SITE_LIST, sites: [{ ...RAW_SITE_LIST.sites[0], kind: 'auditLog.create' }, ...RAW_SITE_LIST.sites.slice(1)] }])
+    refused(listedRawSites(scan, product, broken), scan, 'a malformed list');
 });
