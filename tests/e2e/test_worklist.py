@@ -238,7 +238,7 @@ class WorklistE2E(unittest.TestCase):
                                   and r.url.endswith(f"/studies/{fixture.uid}/report/commit")) as reply:
             page.locator(button).click()
         self.assertEqual(reply.value.status, 201)
-        self.assertEqual(reply.value.json()["rs"], rs)
+        self.assertEqual(reply.value.json()["state"]["rs"], rs)
         self.assertEqual(self.state(fixture)["rs"], rs)
 
     def locked(self, page):
