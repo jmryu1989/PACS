@@ -307,12 +307,26 @@ PROFILES = {
         # D-S8-14 (a)). The name does not start with 'volume-rendering' so the existing single-occurrence checks of that
         # profile keep counting one. The suite's time is unmeasured; its first hosted run records the MAX steps and the total,
         # and an overrun of 900s is a stop-and-decide point (D348), never an automatic increase: (900+35) = 935s. S8-U1a fix9:
-        # MAX's fixed 30s action bound and its frames of today's generator (BU-T03) run inside this one unit and this cap: no
-        # new suite, budget or attempt.
+        # MAX's fixed 30s action bound runs inside this one unit and this cap. S8-U1a fix10 (D531): its comparison with today's
+        # generator (BU-T03) runs in volume-bu-generator, not here, and this cap stays 900s.
         'suite_timeout': 900,
         # The module's load_tests is the allowlist: exactly the authored test_vr_voi_* cases of its own class, so the inherited
-        # test_vr_* cases stay in the volume-rendering profile.
+        # test_vr_* cases stay in the volume-rendering profile and the BU-T03 class stays in volume-bu-generator.
         'suites': (('e2e/test_volume_rendering_voi.py', None, 'ci-vr-voi'),),
+    },
+    'volume-bu-generator': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-bu-generator-ci',
+        'project_prefix': 'kin-bu-gen-ci-',
+        # S8-U1a fix10 (D531): BU-T03 in its own group. It runs the MAX flow again (28 steps, 20 render actions under their
+        # fixed 30s bound and BU-T04) and draws one frame of today's generator per distinct state, each under its own fixed
+        # 120s bound. The fix9 local software-GL run took 469.8s for the 15 generator frames (max 79.0s) and about 150s for the
+        # 20 actions, about 620s; hosted MPR suites ran at 0.9-1.5x local history, so about 560-930s is expected. The single
+        # suite gets the 1200s cap of the other single-suite volume groups: (1200+35) = 1235s leaves 265s of the shared 1500s
+        # deadline for a stack whose recorded hosted setup and cleanup took about 80s. A ceiling, not an estimate; an overrun
+        # is a stop-and-decide point (D348), never an automatic increase.
+        'suite_timeout': 1200,
+        # An explicit local class: exactly its one BU-T03 case, never the test_vr_voi_* cases it inherits (volume-vr-voi).
+        'suites': (('e2e/test_volume_rendering_voi.py', 'VolumeRenderingVoiGeneratorE2E', 'ci-bu-generator'),),
     },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',

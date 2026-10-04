@@ -23,6 +23,11 @@ install at the first mask and of one new display variant at Reset VR, and none f
 action leaves equals, pixel for pixel, today's generator (KinVolumeVrMasks.build) for the same applied masks drawn on the
 same mapper, camera, display and jitter texture; a generator frame is drawn once per distinct state and bounded on its own.
 NT-U1a-06 holds BU-T08 (install failures) and BU-T05 (write and frame failures); test_vr_voi_13 holds BU-T06a and BU-T06b.
+
+BU-T03 in its own unit (S8-U1a fix10, D531): drawing today's generator for every MAX state costs the compile B-u removes
+(15 frames, 470 s on the fix9 local run), so the generator comparison runs in VolumeRenderingVoiGeneratorE2E, the MAX flow
+again with BU-T03 on, under its own profile (volume-bu-generator) and cap GENERATOR_CAP_S. The 14 test_vr_voi_* cases keep
+MAX with its 30 s bound and BU-T04 in volume-vr-voi; BU-T03 runs in that one class only.
 """
 import base64, contextlib, io, json, math, os, re, signal, threading, time, unittest, uuid
 from pathlib import Path
@@ -33,6 +38,8 @@ from test_volume_rendering import VolumeRenderingE2E
 
 # The profile's suite_timeout (CI-T-01 compares the two); every wait is bounded by what is left of it minus a margin.
 SUITE_CAP_S = 900
+# The volume-bu-generator profile's suite_timeout (CI-T-06 compares the two), the bound of the BU-T03 class's waits.
+GENERATOR_CAP_S = 1200
 SUITE_MARGIN_S = 60
 T_AXIS, T_OBLIQUE = 1.0, 1.5
 SPACING, STEP, DIMS = (.5, .5), 2.5, (64, 64, 33)
@@ -710,6 +717,11 @@ def boundary_gaps(scene, polygons, slabs):
 
 
 class VolumeRenderingVoiE2E(VolumeRenderingE2E):
+    # The cap of this class's profile, and whether MAX also compares each action's frame with today's generator (BU-T03):
+    # only VolumeRenderingVoiGeneratorE2E does, in its own unit, so the generator frames never spend this suite's cap.
+    suite_cap_s = SUITE_CAP_S
+    generator_reference = False
+
     @classmethod
     def setUpClass(cls):
         cls.suite_started = time.monotonic()
@@ -721,7 +733,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
 
     # Bounds and observation helpers -----------------------------------------------------------------------------------
     def remaining(self, limit):
-        left = min(limit, self.suite_started + SUITE_CAP_S - SUITE_MARGIN_S - time.monotonic())
+        left = min(limit, self.suite_started + self.suite_cap_s - SUITE_MARGIN_S - time.monotonic())
         if left <= 0:
             raise AssertionError('suite-deadline')
         return left
@@ -1385,7 +1397,7 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         the action."""
         shown = v.evaluate('()=>vrVoi.rgba()'); key = v.evaluate('()=>vrVoi.referenceKey()'); fresh = key not in refs
         if fresh:
-            started = time.monotonic(); deadline = min(started + REFERENCE_S, self.suite_started + SUITE_CAP_S - SUITE_MARGIN_S)
+            started = time.monotonic(); deadline = min(started + REFERENCE_S, self.suite_started + self.suite_cap_s - SUITE_MARGIN_S)
             token = self.supervisor.arm(deadline, step + ' generator reference'); error = reference = None
             try:
                 if deadline <= time.monotonic():
@@ -1555,13 +1567,15 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
             """A MAX target action (REQ-S8-SCULPT-PERF-TARGET): one absolute deadline min(start + 30 s, suite deadline - 60 s)
             made just before the click and shared by everything up to the step's last assertion. Then BU-T04: its compile and
             link calls (the phase record's GL counts, every phase of the action) are `built`: (2, 1) for the install at the
-            VR's first mask and for the one new display variant Reset VR makes, (0, 0) for every other edit. Then BU-T03."""
-            started = time.monotonic(); deadline = min(started + TARGET_S, self.suite_started + SUITE_CAP_S - SUITE_MARGIN_S)
+            VR's first mask and for the one new display variant Reset VR makes, (0, 0) for every other edit. Then BU-T03 in the
+            class that runs it (generator_reference)."""
+            started = time.monotonic(); deadline = min(started + TARGET_S, self.suite_started + self.suite_cap_s - SUITE_MARGIN_S)
             self.bounded(v, self.supervisor, step_id, action, started, deadline, button, check, {'n': n, 'voi': voi, 'limit_s': TARGET_S}, phases)
             calls = [sum(table.get(name, [0])[0] for table in phases.gl.values()) for name in ('compileShader', 'linkProgram')]
             print('VRVOI-MAX ' + json.dumps({'step': step_id, 'action': action, 'compile_link': calls, 'expected': list(built)}), flush=True)
             self.assertEqual(calls, list(built), 'BU-T04 %s %s: compileShader and linkProgram calls of the action' % (step_id, action))
-            self.same_as_generator(v, step_id + ' ' + action, refs)
+            if self.generator_reference:
+                self.same_as_generator(v, step_id + ' ' + action, refs)
 
         def mx03():
             dialog.get_by_role('button', name='Apply Display', exact=True).click(); self.settle(v); self.view_from(v, 'Superior')
@@ -1973,6 +1987,22 @@ class VolumeRenderingVoiE2E(VolumeRenderingE2E):
         self.assertGreater(rgba_difference(shown, rgba_array(new['plain']))['pixels'], 0, 'negative control: the masks change the new viewport')
         v.evaluate('()=>vrBu.close()')
         self.assertEqual(self.originals(), start['originals']); self.unchanged_rows(start['rows']); v.close()
+
+
+class VolumeRenderingVoiGeneratorE2E(VolumeRenderingVoiE2E):
+    """BU-T03 (TEST-S8-SCULPT-PERF; S8-U1a fix10, D531) in its own unit: profile volume-bu-generator selects exactly this
+    class's one case, and load_tests below never does. The MAX flow of NT-U1a-05 runs unchanged, with its 30 s bound per
+    render action and BU-T04, and after each render action the frame is compared with today's generator for the same
+    applied masks (same_as_generator: 0 differing pixels, one generator frame per distinct state under REFERENCE_S)."""
+    suite_cap_s = GENERATOR_CAP_S
+    generator_reference = True
+
+    def test_bu_t03_max_frames_equal_todays_generator(self):
+        # MX-00 closes a V-MARK page whose S still holds; here that page is opened only for it (no V-MARK flow precedes).
+        ledger = []
+        a = voi_series(self.stack, 'G-AX', 'V-MARK'); p, v = self.open_series(a); start = self.start_state(v, (15.75, 15.75, 40))
+        self.max_combination(p, v, start, a.uid, ledger)
+        self.assertEqual(tuple(ledger), MAX_STEPS)
 
 
 def load_tests(loader, tests, pattern):

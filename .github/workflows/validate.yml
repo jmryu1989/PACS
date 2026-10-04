@@ -860,8 +860,8 @@ jobs:
     # S8-U1a VR VOI Slab cases in their own group, not extra cases inside volume-rendering, whose 1200s cap stays as it is.
     # The same 40-minute job policy and 28-minute live step; the profile's single cap (900+35) = 935s bounds the live step.
     # The suite's time is unmeasured until its first hosted run; an overrun is a stop-and-decide point, not a cap increase.
-    # S8-U1a fix9 (B-u): MAX has a fixed 30 s bound per render action and compares each frame with today's generator in the
-    # same page, so no other commit's files are read and the checkout needs no history.
+    # S8-U1a fix9 (B-u): MAX has a fixed 30 s bound per render action, so no other commit's files are read and the checkout
+    # needs no history. S8-U1a fix10 (D531): its comparison with today's generator (BU-T03) runs in volume-bu-generator.
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -892,6 +892,42 @@ jobs:
           path: |
             tests/e2e/artifacts/volume-vr-voi-ci/
             tmp/vrvoi-ci/
+          if-no-files-found: error
+          retention-days: 7
+  volume-bu-generator:
+    # S8-U1a fix10 (D531, TEST-S8-SCULPT-PERF BU-T03): the MAX flow again with each render action's frame compared to today's
+    # generator, in its own job so the generator frames (470 s on the fix9 local run) never spend volume-vr-voi's 900 s cap.
+    # The same 40-minute job policy and 28-minute live step; the profile's single cap (1200+35) = 1235s bounds the live step.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: B-u generator profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/bugen-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_volume_rendering_voi.py -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/bugen-python"
+          "$RUNNER_TEMP/bugen-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/bugen-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared B-u generator selection
+        run: python3 scripts/record-run.py --run-dir tmp/bugen-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_filter.py --file worklist-v0/hpacs-lite/main.html --file tests/e2e/test_volume_rendering_voi.py --file tests/e2e/test_volume_rendering.py -- "$RUNNER_TEMP/bugen-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared B-u generator equality test
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/bugen-python/bin/python" tests/measurement_ci.py --profile volume-bu-generator
+      - name: Sanitized synthetic B-u generator evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-volume-bu-generator-results
+          path: |
+            tests/e2e/artifacts/volume-bu-generator-ci/
+            tmp/bugen-ci/
           if-no-files-found: error
           retention-days: 7
   volume-bu-boundary:
