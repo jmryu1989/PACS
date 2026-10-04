@@ -26,7 +26,12 @@ const KinAuth = (() => {
    *   unconfirmed  서버의 종료를 확인하지 못했다(실패 구분이 함께 남는다). 다시 보내는 것은 Retry Log Out뿐이다.
    *   confirmed    서버가 그 세션의 종료를 확인했다.
    * 한 문서는 신원을 한 번만 받는다. 닫힌 문서는 늦은 답·지워진 기록·통지로 다시 열리지 않는다 — 다시 들어가는 길은 새 문서의
-   * 명시적 로그인이다. 로그아웃 준비(preparing)는 세션이 아니라 업무의 멈춤이라 work-context.js가 맡는다.
+   * 진입이다. 로그아웃 준비(preparing)는 세션이 아니라 업무의 멈춤이라 work-context.js가 맡는다.
+   *
+   * 일하는 문서를 닫는 것은 셋뿐이다: 이 세션에 묶인 명시적 종료 의도(이 문서나 같은 세션의 다른 문서의 Log out), 서버가
+   * 확인한 이 세션의 종료(AUTH_SESSION_ENDED), 서버가 확인한 세션 교체(AUTH_SESSION_MISMATCH·다른 계정의 답). 코드 없는
+   * 401·403·409, 결속 누락(428), 5xx, 시간 초과, 연결 끊김, 저장소 오류, 다른 세션의 통지는 닫지 않는다 — 그 요청 하나가
+   * 실패할 뿐이고 의사의 화면은 그대로다.
    */
   const CLOSED = ['ending', 'unconfirmed', 'confirmed'];
   const END_REASONS = ['conflict', 'storage', 'network', 'timeout', 'refused', 'credentials', 'replaced'];
@@ -47,6 +52,9 @@ const KinAuth = (() => {
   const REQUEST_WAIT_MS = 10000;
   // 페이지가 POST 앞에 끼우는 일(main.html의 점유 해제)의 한도. 그 일이 끝나지 않아도 종료는 막히지 않는다.
   const STEP_WAIT_MS = 5000;
+  // 자동 로그인이 세션을 만들지 못하고 되돌아온 탭은 이 시간 안에 다시 자동으로 보내지 않는다(IdP와의 되돌이 고리를 끊는다).
+  const AUTO_LOGIN_KEY = 'kin-auto-login';
+  const AUTO_LOGIN_GAP_MS = 60000;
   const UNREADABLE = Object.freeze({ unreadable: true });
 
   let state = 'unknown';
@@ -71,6 +79,8 @@ const KinAuth = (() => {
   let retrying = null;
   // 로그인 시작이 결속 거절을 받았다. 다음 누름은 이 브라우저의 지금 세션을 다시 확인한다.
   let rebind = false;
+  // 평소의 진입에서 서버가 "이 브라우저에 세션이 없다"고 방금 답했다. 자동 로그인의 유일한 근거다.
+  let absent = false;
   // 통지로 들은 종료(세션 식별값별). 신원 확인을 기다리는 문서가 그 답을 받기 직전에 대조한다.
   const heard = new Map();
   const lifecycleListeners = [];
@@ -288,6 +298,7 @@ const KinAuth = (() => {
     }
     // 명시적 로그인이 성공했고 그 세션에 묶인 신원 확인까지 끝났다. 앞선 세션의 종료 기록은 여기서만 지운다.
     if (viaProof && record) removeEnd();
+    tab.remove(AUTO_LOGIN_KEY);
     cached = identity;
     sessionId = id;
     state = 'active';
@@ -302,8 +313,12 @@ const KinAuth = (() => {
   async function bootstrap() {
     const answer = await send('/me');
     if (!undecided()) return null;
-    // 세션이 없다. 랜딩이 로그인 버튼을 보인다 — 자동으로 로그인 화면에 보내지 않는다.
-    if (answer.status === 401) return null;
+    // 세션이 없다고 서버가 답했다. 종료 기록도 없고 저장소도 믿을 수 있는 문서이므로(undecided) 페이지가 자동 로그인을
+    // 시작할 수 있다(autoLogin). 5xx·시간 초과·읽을 수 없는 답은 "세션 없음"이 아니라 확인 실패다 — 아래에서 던진다.
+    if (answer.status === 401) {
+      absent = true;
+      return null;
+    }
     const { id, identity } = readIdentity(answer);
     return adopt(id, identity, false);
   }
@@ -461,15 +476,15 @@ const KinAuth = (() => {
 
   /**
    * 종료 기록을 다시 읽는다(storage 알림, 창 초점·탭 표시·뒤로 가기 복원). 일하는 문서는 자기 세션의 기록에만 닫힌다 — 다른
-   * 세션의 기록은 그 문서들의 일이다. 읽을 수 없게 된 기록은 사용 중의 근거가 아니라서 닫는다. 아직 들어가지 않은 문서와
-   * 닫힌 문서(랜딩)는 가장 나중의 기록을 따르되, 기록이 지워진 것(다른 탭의 명시적 로그인)으로 다시 열리지 않는다.
+   * 세션의 기록은 그 문서들의 일이고, 읽을 수 없게 된 저장소는 종료 신호가 아니다(저장소 오류로 의사의 화면을 닫지 않는다;
+   * 그 세션이 정말 끝났으면 다음 요청의 답이 말한다). 아직 들어가지 않은 문서와 닫힌 문서(랜딩)는 가장 나중의 기록을
+   * 따르되, 기록이 지워진 것(다른 탭의 명시적 로그인)으로 다시 열리지 않는다.
    */
   function recheck() {
     const record = readEnd();
     if (state === 'active') {
-      // 처음부터 읽을 수 없던 저장소(증명으로 들어온 문서)는 새 소식이 아니다. 읽히던 저장소가 읽히지 않게 된 것만 닫는다.
-      if (record === UNREADABLE) { if (reliable) endedElsewhere('unknown', 'record'); }
-      else if (record && record.session === sessionId) endedElsewhere(record.status, record.reason, record.operation);
+      if (record && record !== UNREADABLE && record.session === sessionId)
+        endedElsewhere(record.status, record.reason, record.operation);
       return;
     }
     if (!record || record === UNREADABLE) return;
@@ -548,6 +563,17 @@ const KinAuth = (() => {
     location.href = `${API}${path}${query}`;
   }
 
+  /**
+   * 서버가 확인한 세션 교체: 이 브라우저의 쿠키가 다른 로그인의 것이 되었다(결속 불일치, 또는 이 세션에 묶어 보낸 요청에
+   * 다른 계정의 답이 왔다). 이 문서만 닫는다 — 종료 기록도 로그아웃 POST도 없다. 그 POST는 다른 로그인의 세션을 겨눌
+   * 뿐이고, 기록은 그 로그인의 새 문서까지 막는다. 같은 세션의 다른 문서에는 한 번 알린다(그 문서들도 쓸 수 없는 세션이다).
+   */
+  function closeReplaced() {
+    const session = sessionId, op = nextOperation();
+    tell(session, op);
+    endedElsewhere('unconfirmed', 'replaced', op);
+  }
+
   return {
     KC,
 
@@ -605,6 +631,23 @@ const KinAuth = (() => {
       return initiate('/auth/register', undefined, '');
     },
 
+    /**
+     * 평소의 진입에서 세션이 없을 때 스스로 로그인 화면으로 보낸다 — 의사가 로그인 단추를 한 번 더 누르게 하지 않는다.
+     * 근거는 하나뿐이다: 저장소를 믿을 수 있고 종료 기록이 없는 문서에서 서버가 방금 "세션 없음"(401)이라고 답했다.
+     * 종료 기록이 있거나(명시적 로그아웃·미확인 종료), 저장소를 믿을 수 없거나, 확인이 실패했으면(5xx·시간 초과·진입 증명
+     * 거절) 시작하지 않는다 — 그때는 랜딩이 사정을 보이고 사람이 누른다. 방금의 자동 로그인이 세션 없이 되돌아온 탭도 다시
+     * 보내지 않는다. 시작했으면 true다(부른 쪽은 그 뒤 화면을 그리지 않는다).
+     */
+    autoLogin() {
+      if (!absent || !undecided() || moved) return false;
+      const last = Number(tab.get(AUTO_LOGIN_KEY));
+      if (last > 0 && Date.now() - last < AUTO_LOGIN_GAP_MS) return false;
+      tab.set(AUTO_LOGIN_KEY, String(Date.now()));
+      moved = true;
+      location.href = `${API}/auth/login`;
+      return true;
+    },
+
     demo() {
       [...LEGACY_KEYS, 'kin-demo'].forEach(key => tab.remove(key));
       tab.set('kin-demo', '1');
@@ -612,11 +655,12 @@ const KinAuth = (() => {
     },
 
     /**
-     * 업무 화면의 Log out과, 종료를 확인하지 못한 인증 실패. 네트워크를 기다리기 전에 종료 기록을 남기고 이 문서의 신원을
+     * 업무 화면의 Log out — 이 세션에 묶인 명시적 종료 의도다. 네트워크를 기다리기 전에 종료 기록을 남기고 이 문서의 신원을
      * 내려놓으며 같은 세션의 다른 문서에 한 번 알린다. 페이지가 맡긴 일(beforeLogoutPost)을 한도 안에서 기다린 뒤 이 세션을
-     * 밝힌 POST 하나를 보내고, 결과를 기록한 뒤 랜딩으로 한 번 옮긴다. 같은 문서의 겹친 호출은 새 POST 없이 진행 중인
-     * 종료를 나눈다. 일하는 중이 아닌 문서(이미 닫혔다, 들어간 적 없다)와 다른 문서가 이 세션의 종료를 이미 기록한 문서는
-     * POST 없이 떠난다 — 다시 보내는 것은 랜딩의 Retry Log Out뿐이다. 데모는 서버 세션이 없어 로컬만 끝낸다.
+     * 밝힌 POST 하나를 보내고, 서버의 답(KIN 세션 폐기의 확인)을 기록하는 대로 랜딩으로 한 번 옮긴다 — 그 뒤의 IdP 처리는
+     * 서버의 일이고 이 문서는 기다리지 않는다. 같은 문서의 겹친 호출은 새 POST 없이 진행 중인 종료를 나눈다. 일하는 중이
+     * 아닌 문서(이미 닫혔다, 들어간 적 없다)와 다른 문서가 이 세션의 종료를 이미 기록한 문서는 POST 없이 떠난다 — 다시
+     * 보내는 것은 랜딩의 Retry Log Out뿐이다. 데모는 서버 세션이 없어 로컬만 끝낸다.
      */
     async logout() {
       if (ending) return stepping ? undefined : ending;
@@ -657,30 +701,49 @@ const KinAuth = (() => {
     },
 
     /**
-     * 요청의 답이 알려 준 인증 실패(session-transport.js가 그 요청이 실은 세션과 함께 넘긴다). 이 문서의 지금 세션이 아닌
-     * 실패는 아무것도 하지 않는다 — 이전 세션의 늦은 401이 지금 세션을 끝내지 못한다. 서버가 "그 세션은 끝났다"고 답했으면
-     * POST 없이 종료 확인으로 닫는다. 결속 거절(쿠키가 다른 로그인의 것)은 이 문서만 닫는다: 기록도 로그아웃 POST도 없다 —
-     * 그 POST는 다른 로그인의 세션을 겨눌 뿐이다. 그 밖의 401은 종료를 증명하지 않으므로 종료 요청 하나로 확인한다.
+     * 요청의 답이 알려 준 세션 종료 신호(session-transport.js가 그 요청이 실은 세션과 함께 넘긴다). 이 문서의 지금 세션이
+     * 아닌 신호는 아무것도 하지 않는다 — 이전 세션의 늦은 답이 지금 세션을 끝내지 못한다. 서버가 "그 세션은 끝났다"
+     * (AUTH_SESSION_ENDED)고 답했으면 POST 없이 종료 확인으로 닫고, 결속 불일치(AUTH_SESSION_MISMATCH)는 세션 교체로
+     * 닫는다. 그 밖의 것은 여기서 아무것도 닫지 않는다: 코드 없는 401, 자격 없음, 결속 누락(428), 403·409·5xx는 그 요청
+     * 하나의 실패이고 종료의 증거가 아니다 — 쿠키도 기록도 건드리지 않는다.
      */
     authFailure(failure) {
       if (!failure || state !== 'active' || failure.session !== sessionId) return;
       // 데모에는 끝낼 서버 세션이 없다 — 서버 없는 둘러보기의 거절은 세션 사건이 아니다.
       if (cached && cached.demo) return;
-      const session = sessionId;
       if (failure.code === 'AUTH_SESSION_ENDED') {
-        const op = nextOperation();
+        const session = sessionId, op = nextOperation();
         writeEnd({ session, operation: op, status: 'confirmed' });
         tell(session, op);
         endedElsewhere('confirmed', null, op);
-        return;
+      } else if (failure.code === 'AUTH_SESSION_MISMATCH') {
+        closeReplaced();
       }
-      if (failure.code === 'AUTH_SESSION_MISMATCH' || failure.code === 'AUTH_SESSION_REQUIRED') {
-        const op = nextOperation();
-        tell(session, op);
-        endedElsewhere('unconfirmed', 'replaced', op);
-        return;
-      }
-      this.logout();
+    },
+
+    /**
+     * 이 세션에 묶어 보낸 요청에 다른 계정의 답이 왔다(목록의 주인, 초안 작성자 대조의 거절). 서버가 확인한 세션 교체와
+     * 같게 이 문서만 닫는다. 페이지가 그 요청이 실은 세션과 함께 알린다 — 지금 세션의 것이 아니면 아무것도 하지 않는다.
+     */
+    replaced(failure) {
+      if (!failure || state !== 'active' || failure.session !== sessionId) return;
+      if (cached && cached.demo) return;
+      closeReplaced();
+    },
+
+    /**
+     * 로그아웃 준비의 시작('preparing')과 취소('resumed')를 이 세션의 뷰어 문서(판독 창의 iframe, 따로 연 영상 창)에
+     * 알린다. 준비는 종료가 아니다 — 뷰어는 닫히지 않고 멈춰 있다가 취소되면 보던 그대로 이어 간다. 세션 식별값과 준비
+     * 번호를 함께 싣는다: 받는 쪽은 자기 세션의 것만 따르고 지난 준비의 늦은 재개는 버린다. auth.js를 싣는 문서(다른 탭의
+     * 업무 화면)는 이 신호를 따르지 않는다 — 그 문서의 일은 그 문서의 관문이 정한다. 실제 종료는 따로 알린다(session-ended).
+     */
+    notifyPreparation(status, preparation) {
+      if (state !== 'active' || !sessionId || (status !== 'preparing' && status !== 'resumed')) return;
+      try {
+        const channel = new BroadcastChannel(CHANNEL);
+        channel.postMessage({ type: 'session-' + status, session: sessionId, preparation });
+        channel.close();
+      } catch (e) {}
     },
 
     /** 이 문서가 시작하는 종료마다 종료 기록·통지 뒤, POST 앞에 한도 안에서 기다릴 일(실패해도 종료는 막히지 않는다). */

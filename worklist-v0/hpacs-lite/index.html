@@ -241,7 +241,8 @@
       const authError = params.get('auth_error');
       if (authError) history.replaceState({}, '', location.pathname + location.hash);
 
-      // 종료 상태가 일반 자동 진입보다 먼저다: 기존 세션이 있어도 업무 화면으로 옮기지 않고 자동 로그인·자동 재시도도 하지 않는다.
+      // 종료 상태(명시적 로그아웃·미확인 종료·믿을 수 없는 저장소)가 일반 자동 진입보다 먼저다: 기존 세션이 있어도 업무
+      // 화면으로 옮기지 않고 자동 로그인·자동 재시도도 하지 않는다.
       const end = KinAuth.endState();
       if (end) {
         showEnd(end);
@@ -268,8 +269,15 @@
         location.replace(KinAuth.home(session));
       })) return;
 
-      // 세션이 없으면 로그인 버튼을 보인다. 여기서 로그인 화면으로 스스로 가지 않는다(U5S-REQ-06) — 로그인은 사람이 누를
-      // 때만 시작하고, 종료 기록을 지우거나 업무를 여는 것은 그 로그인이 성공한 뒤의 진입 확인이다.
+      // 평소의 첫 진입(저장소를 믿을 수 있고 종료 기록이 없는데 서버가 세션이 없다고 답했다)은 로그인 단추를 누르게 하지
+      // 않고 바로 로그인 화면으로 보낸다. 로그인 오류로 돌아온 문서, 확인이 실패한 문서, 닫힌 문서는 보내지 않는다 — 사람이
+      // 원인을 읽고 누를 수 있어야 하고, 자동 재시도가 되돌이 고리를 만들지 않아야 한다. 종료 기록을 지우거나 업무를 여는
+      // 것은 어느 쪽이든 그 로그인이 성공한 뒤의 진입 확인이다.
+      if (!session && !authError && !initError && KinAuth.autoLogin()) {
+        leaving = true;
+        return;
+      }
+
       const closed = KinAuth.endState();
       if (closed)
         showEnd(closed);

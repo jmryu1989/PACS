@@ -5,24 +5,45 @@
  *     일반 요청, 끝난 세션의 요청, 옮겨 간 검사의 요청은 네트워크에 닿지 않는다.
  *   · 결속: 모든 요청에 그 작업이 시작될 때의 세션 식별값을 `X-KIN-Session`으로 싣는다. 식별값 없는 요청은 보내지 않는다 —
  *     결속 없는 요청은 최초 신원 확인 하나뿐이고 그것은 auth.js만 한다(U5S-REQ-09).
- *   · 한도와 취소: 머리글과 본문을 합쳐 한 한도(기본 10초) 안에서 끝낸다. 부른 쪽의 signal, 한도, 문맥이 무효가 된 읽기는
- *     같은 AbortController로 끊는다. 쓰기는 문맥이 무효가 되어도 끊지 않는다 — 서버에서 이미 일어났을 수 있는 일의 결과를
- *     모르게 만들 뿐이다. 그 결과를 화면에 쓸지는 commit이 정한다.
- *   · 인증 실패의 귀속: 401과 결속 거절(AUTH_SESSION_REQUIRED·AUTH_SESSION_MISMATCH)은 그 요청이 실은 세션의 것으로
- *     알린다. 이전 세션의 늦은 401이 지금 세션을 끝내지 못한다(받는 쪽이 세션을 대조한다).
+ *   · 한도와 취소: 머리글과 본문을 합쳐 한 한도 안에서 끝낸다. 한도는 요청의 종류가 정한다 — 초안 명령은 10초, 그 밖의
+ *     업무 API는 60초, 영상·DICOM·스트림은 부른 쪽이 준 것만 건다(초안의 10초를 영상 전송에 일괄로 씌우면 느린 영상이
+ *     실패로 보인다). 부른 쪽의 signal, 한도, 문맥이 무효가 된 읽기는 같은 AbortController로 끊는다. 쓰기는 문맥이 무효가
+ *     되어도 끊지 않는다 — 서버에서 이미 일어났을 수 있는 일의 결과를 모르게 만들 뿐이다. 그 결과를 화면에 쓸지는 commit이
+ *     정한다.
+ *   · 세션 종료 신호의 귀속: 서버가 "그 세션은 끝났다"(401 AUTH_SESSION_ENDED) 또는 "쿠키가 다른 로그인의 것이다"
+ *     (AUTH_SESSION_MISMATCH)라고 답한 것만 그 요청이 실은 세션의 종료 신호로 알린다. 이전 세션의 늦은 답이 지금 세션을
+ *     끝내지 못한다(받는 쪽이 세션을 대조한다). 그 밖의 401·403·409·428·5xx와 시간 초과·연결 실패는 그 요청 하나의
+ *     실패다 — 한 번의 실패나 일시 오류로 화면을 닫지 않는다.
  *
  * Response의 메서드를 바꾸지 않고, 임의의 대입을 막아 준다고 하지도 않는다. 답은 값으로 돌려준다:
  *   { ok, status, code, body, headers, auth, incomplete }  (read: 'stream'이면 body 대신 stream)
+ * `auth`는 그 답이 세션 종료 신호였다는 뜻이다(이미 알렸다 — 부른 쪽은 그 답을 실패로 그리지 않는다).
  * 실패는 `transport`(not-admitted·unbound·cancelled·stale·timeout·network)와 `sent`(요청이 떠났는가)를 가진 오류로 던진다.
  */
 (function (root) {
   'use strict';
 
-  const DEADLINE_MS = 10000;
+  // 종류별 한도(ms). 0은 "부른 쪽이 준 것만"이다.
+  const DEADLINES = Object.freeze({ draft: 10000, api: 60000, media: 0 });
   const READS = ['json', 'text', 'blob', 'arrayBuffer', 'stream', 'none', 'response'];
-  // 서버(와 nginx의 auth_request)가 세션 결속을 거절할 때의 코드. 401은 코드와 무관하게 인증 실패다.
-  const BINDING_CODES = ['AUTH_SESSION_REQUIRED', 'AUTH_SESSION_MISMATCH'];
-  const BINDING_STATUSES = [403, 409, 428];
+  const MEDIA_READS = ['blob', 'arrayBuffer', 'stream', 'response'];
+  // nginx의 auth_request는 401·403만 넘길 수 있어, 보호된 DICOM 경로의 결속 불일치는 코드 머리글이 붙은 403으로 온다.
+  const MISMATCH_STATUSES = [403, 409];
+
+  /** 서버가 이 요청의 세션에 대해 말한 종료 신호인가. 판정은 코드로만 한다 — 상태 번호만으로는 세션을 끝내지 않는다. */
+  function endSignal(status, code) {
+    return (status === 401 && code === 'AUTH_SESSION_ENDED')
+      || (MISMATCH_STATUSES.includes(status) && code === 'AUTH_SESSION_MISMATCH');
+  }
+
+  /** 요청의 종류: 부른 쪽이 밝힌 것, 아니면 읽는 방식과 주소로 가린다(`/api/` 밖은 DICOM·영상 경로다). */
+  function kindOf(url, read, given) {
+    if (given !== undefined) return Object.prototype.hasOwnProperty.call(DEADLINES, given) ? given : null;
+    if (MEDIA_READS.includes(read)) return 'media';
+    let path = String(url);
+    try { path = new URL(path, 'http://kin.invalid').pathname; } catch (_) {}
+    return path.startsWith('/api/') ? 'api' : 'media';
+  }
   const MESSAGES = {
     'not-admitted': '지금 이 작업을 시작할 수 없어 요청을 보내지 않았습니다.',
     unbound: '세션 식별값이 없어 요청을 보내지 않았습니다.',
@@ -47,7 +68,8 @@
     // 다른 창의 요청을 대신 보내는 코드는 그 창의 fetch를 준다. 주지 않으면 이 문서의 fetch다(부를 때 찾는다).
     const send = options.fetch || ((input, init) => globalThis.fetch(input, init));
     const authFailure = typeof options.authFailure === 'function' ? options.authFailure : null;
-    const defaultDeadline = options.deadlineMs === undefined ? DEADLINE_MS : options.deadlineMs;
+    // 이 전송의 모든 요청에 한 한도를 주면(시험, 다른 창을 대신 조정하는 코드) 종류별 기본값 대신 그것을 쓴다.
+    const fixedDeadline = options.deadlineMs;
     const open = new Set();
 
     // 문맥이 무효가 된 읽기는 여기서 끊는다. 쓰기는 남긴다(위 설명).
@@ -64,6 +86,8 @@
     function request(url, init = {}) {
       const read = init.read === undefined ? 'json' : init.read;
       if (!READS.includes(read)) return Promise.reject(new TypeError('KinSessionTransport.request: unknown read ' + String(read)));
+      const kind = kindOf(url, read, init.kind);
+      if (kind === null) return Promise.reject(new TypeError('KinSessionTransport.request: unknown kind ' + String(init.kind)));
       const context = init.context;
       if (!gate.admits(context)) return Promise.reject(failure('not-admitted', false));
       // 식별값은 작업이 시작될 때의 것이다. `session`은 사람이 명시로 시작한 복구 작업이 자기 결속을 줄 때만 쓴다.
@@ -88,7 +112,8 @@
           control.abort();
         },
       };
-      const deadlineMs = init.deadlineMs === undefined ? defaultDeadline : init.deadlineMs;
+      const deadlineMs = init.deadlineMs !== undefined ? init.deadlineMs
+        : fixedDeadline !== undefined ? fixedDeadline : DEADLINES[kind];
       const timer = deadlineMs > 0 ? setTimeout(() => {
         operation.cancel('timeout');
         // Response를 그대로 넘긴 요청은 본문이 언제 끝났는지 이 전송이 모른다 — 한도가 그 끝이다.
@@ -130,9 +155,9 @@
           auth: false, incomplete: false, ...fields });
 
         if (read === 'response') {
-          // 본문은 부른 쪽이 읽는다. 인증 실패는 상태와 머리글의 코드로만 가린다(본문을 여기서 읽으면 부른 쪽이 읽지 못한다).
-          if (status === 401 || (BINDING_STATUSES.includes(status) && BINDING_CODES.includes(headerCode)))
-            report(session, status, headerCode);
+          // 본문은 부른 쪽이 읽는다. 종료 신호는 머리글의 코드로만 가린다(본문을 여기서 읽으면 부른 쪽이 읽지 못한다) —
+          // 서버는 AUTH_* 거절마다 같은 코드를 X-KIN-Auth-Code 머리글에도 싣는다.
+          if (endSignal(status, headerCode)) report(session, status, headerCode);
           // 한도가 없으면 여기까지가 이 전송의 몫이다. 한도가 있으면 그 시각까지 같은 신호가 본문 읽기도 끊는다.
           if (timer === null) finish();
           return response;
@@ -150,7 +175,7 @@
           }
           finish();
           const code = headerCode || (parsed && typeof parsed.code === 'string' ? parsed.code : null);
-          const auth = status === 401 || (BINDING_STATUSES.includes(status) && BINDING_CODES.includes(code));
+          const auth = endSignal(status, code);
           if (auth) report(session, status, code);
           return answer({ code, body: parsed, auth, incomplete });
         }
@@ -201,7 +226,7 @@
 
     /**
      * fetch처럼 Response를 그대로 돌려주는 보내기 — 답을 스스로 읽는 소비자(모듈에 넘기는 fetch)를 위한 것이다. 승인·결속·
-     * 취소·인증 실패의 귀속은 request와 같고, 문맥을 주지 않으면 부르는 순간의 문서 범위다. 한도는 주었을 때만 건다.
+     * 취소·종료 신호의 귀속은 request와 같고, 문맥을 주지 않으면 부르는 순간의 문서 범위다. 한도는 주었을 때만 건다.
      * 읽은 것을 화면에 쓰는 자리의 관문은 그 소비자의 몫이다 — 이 함수는 그것을 대신하지 않는다.
      */
     function fetchBound(url, init = {}) {
@@ -228,7 +253,7 @@
     return shared;
   }
 
-  const api = Object.freeze({ create, page, DEADLINE_MS });
+  const api = Object.freeze({ create, page, DEADLINES });
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.KinSessionTransport = api;
 })(typeof window === 'object' ? window : null);

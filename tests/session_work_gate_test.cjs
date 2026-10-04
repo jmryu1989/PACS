@@ -1,27 +1,47 @@
-// U5S-REQ-11/12/13 -> U5S-RISK-APPLY, U5S-RISK-SESSION, U5S-RISK-DRAFT -> TEST-U5S-GATE.
+// U5S-REQ-04/06/08/09/11/12/13/15/17 (with the 2026-10-04 amendments 1-9 and section 3) -> U5S-RISK-APPLY,
+// U5S-RISK-SESSION, U5S-RISK-DRAFT, U5S-RISK-SUCCESS -> TEST-U5S-GATE.
 //
-// The shipped modules, loaded as they are: worklist-v0/hpacs-lite/work-context.js (the apply gate) and
-// session-transport.js (request admission, the captured X-KIN-Session, the one deadline over headers and body,
-// cancellation, authentication failures attributed to the request's session). Every case drives the public contract
-// only - capture/commit and the lifecycle, selection, edit and preparation transitions - and observes what an effect did
-// or what reached the network. Nothing asserts a source string or an internal name.
+// The shipped modules, loaded as they are: worklist-v0/hpacs-lite/work-context.js (the apply gate),
+// session-transport.js (request admission, the captured X-KIN-Session, a deadline by request kind over headers and body,
+// cancellation, session-end signals attributed to the request's session), report-draft-client.js (the one draft command
+// path) and auth.js (the session authority, run in a browser-shaped context this file provides). Every case drives the
+// public contract only and observes what an effect did, what reached the network, or what the document was told to do.
+// Nothing asserts a source string or an internal name.
 //
 //   GATE-01..09  a stale effect never runs: before activation, across a preparation, its cancellation (a new work
 //                epoch), the end of the session, a replacement login, study A -> B -> A and an edit; the preparation
 //                context is the only thing that commits while preparing and is dead once it is cancelled, replaced or
 //                the session ends; an effect cannot defer work (async, generator, returned promise).
-//   SEND-01..10  a request leaves only for an admitted context and always carries that context's session; the deadline
-//                covers headers and body; a read whose context went stale is aborted, a write is not (its answer comes
-//                back and the gate refuses its effect); 401 and binding refusals are reported for the request's session.
+//   GATE-10      the combinations (U5S-REQ-24): every kind of completion (before the headers, after the headers and
+//                before the body, between stream chunks, after decoding and before the apply, a clipboard completion, the
+//                error path, the finally path) x every transition (preparation, its cancellation, the end, a replacement
+//                login, a selection change, A -> B -> A, an edit) x both completion orders of two operations.
+//   SEND-01..11  a request leaves only for an admitted context and always carries that context's session; the deadline
+//                is the request kind's (draft 10 s, other API 60 s, media only what the caller gives) and covers headers
+//                and body; a read whose context went stale is aborted, a write is not; only the server's word that the
+//                session ended or was replaced is reported as a session-end signal - any other 401/403/409/428/5xx is
+//                that request's failure.
+//   DRAFT-01..11 the draft command path: owner + revision + whole snapshot on every command; saved only on a matching
+//                envelope or a full read that shows the whole snapshot; a conflict or an unknown outcome is checked by
+//                one automatic read before anyone is asked; a write is re-sent by itself only when what the server holds
+//                is this document's own text (never after an unknown outcome, never over another draft, a deletion or a
+//                new epoch); queued saves of one document merge.
+//   AUTH-01..08  auth.js: entry (server-confirmed session, automatic login only when the server said there is no session
+//                in a document with reliable storage and no end record, with a loop guard), the entry proof, which
+//                answers close a document (session ended, session replaced) and which never do, session-bound notices
+//                without rebroadcast, the preparation notices for viewer documents, one logout POST.
 //
 // Run with: node --test tests/session_work_gate_test.cjs
 const assert = require('node:assert/strict');
+const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { test, mock } = require('node:test');
+const vm = require('node:vm');
 
 const lite = join(__dirname, '../worklist-v0/hpacs-lite');
 const KinWorkContext = require(join(lite, 'work-context.js'));
 const KinSessionTransport = require(join(lite, 'session-transport.js'));
+const KinReportDraftClient = require(join(lite, 'report-draft-client.js'));
 
 /** A session authority as the gate sees one: it replays its state on subscription and announces each transition. */
 function authority() {
@@ -353,7 +373,9 @@ test('SEND-02 nothing is sent for a context that is not admitted, or without a s
 
 test('SEND-03 one deadline covers the headers and the body', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const { gate, net, transport } = wired();
+  const { gate, net, transport: any } = wired();
+  // A draft command's limit (10 s) is used here; SEND-11 covers which request gets which limit.
+  const transport = { request: (url, init) => any.request(url, { ...init, kind: 'draft' }), pending: () => any.pending() };
   // No headers within the limit.
   const slow = transport.request('/api/slow', { context: gate.capture('document') });
   const slowSeen = assert.rejects(slow, error => error.transport === 'timeout' && error.name === 'TimeoutError' && error.sent === true);
@@ -426,15 +448,12 @@ test('SEND-05 the caller can cancel, before the request leaves and while it is o
   assert.equal(transport.pending(), 0);
 });
 
-test('SEND-06 authentication failures are reported for the session the request carried', async () => {
+test('SEND-06 only the server\'s word that the session ended or was replaced is a session-end signal', async () => {
   const { gate, source, net, failures, transport } = wired('S1');
   const context = gate.capture('document');
   const cases = [
     [401, { code: 'AUTH_SESSION_ENDED' }, {}, { session: 'S1', status: 401, code: 'AUTH_SESSION_ENDED' }],
-    [401, { code: 'AUTH_CREDENTIALS_MISSING' }, {}, { session: 'S1', status: 401, code: 'AUTH_CREDENTIALS_MISSING' }],
-    [401, { message: 'SYN token rejected' }, {}, { session: 'S1', status: 401, code: null }],
     [409, { code: 'AUTH_SESSION_MISMATCH' }, {}, { session: 'S1', status: 409, code: 'AUTH_SESSION_MISMATCH' }],
-    [428, { code: 'AUTH_SESSION_REQUIRED' }, {}, { session: 'S1', status: 428, code: 'AUTH_SESSION_REQUIRED' }],
     // nginx's auth_request answers the protected DICOM locations: the code is a header there.
     [403, undefined, { 'X-KIN-Auth-Code': 'AUTH_SESSION_MISMATCH' }, { session: 'S1', status: 403, code: 'AUTH_SESSION_MISMATCH' }],
     [401, undefined, { 'X-KIN-Auth-Code': 'AUTH_SESSION_ENDED' }, { session: 'S1', status: 401, code: 'AUTH_SESSION_ENDED' }],
@@ -447,14 +466,22 @@ test('SEND-06 authentication failures are reported for the session the request c
     assert.equal(answer.ok, false);
     assert.deepEqual(failures.pop(), expected);
   }
-  // Not authentication failures: an ordinary access refusal, a business conflict, a server error.
-  for (const [status, body] of [[403, { code: 'STUDY_FORBIDDEN' }], [403, undefined], [409, { code: 'REPORT_DRAFT_CONFLICT' }],
-    [409, { code: 'REPORT_HELD', holder: 'x' }], [500, { code: 'AUTH_STORAGE_FAILURE' }], [404, undefined]]) {
+  // One request's failure, never a session-end signal: a 401 that names no ended session (no code, no credentials), a
+  // missing binding (428, or nginx's 403 for it), a busy session, a CSRF refusal, an ordinary access refusal, a business
+  // conflict, a server error. Nothing is reported, and the answer keeps its status and code for the caller to show.
+  for (const [status, body, headers] of [[401, { message: 'SYN token rejected' }, {}], [401, { code: 'AUTH_CREDENTIALS_MISSING' }, {}],
+    [401, undefined, { 'X-KIN-Auth-Code': 'AUTH_CREDENTIALS_MISSING' }], [428, { code: 'AUTH_SESSION_REQUIRED' }, {}],
+    [403, undefined, { 'X-KIN-Auth-Code': 'AUTH_SESSION_REQUIRED' }], [409, { code: 'AUTH_SESSION_BUSY' }, {}],
+    [403, { code: 'AUTH_CSRF_REQUIRED' }, {}], [403, { code: 'STUDY_FORBIDDEN' }, {}], [403, undefined, {}],
+    [409, { code: 'REPORT_DRAFT_CONFLICT' }, {}], [409, { code: 'REPORT_DRAFT_OWNER_CHANGED' }, {}],
+    [409, { code: 'REPORT_HELD', holder: 'x' }, {}], [500, { code: 'AUTH_STORAGE_FAILURE' }, {}], [503, undefined, {}],
+    [404, undefined, {}]]) {
     const pending = transport.request('/api/x', { context, method: 'POST', json: {} });
-    net.calls.at(-1).answer(status, body);
+    net.calls.at(-1).answer(status, body, headers);
     const answer = await pending;
-    assert.equal(answer.auth, false, `${status} ${JSON.stringify(body)}`);
-    assert.equal(answer.code, body?.code ?? null);
+    assert.equal(answer.auth, false, `${status} ${JSON.stringify(body)} ${JSON.stringify(headers)}`);
+    assert.equal(answer.status, status);
+    assert.equal(answer.code, headers['X-KIN-Auth-Code'] ?? body?.code ?? null);
     assert.deepEqual(answer.body, body ?? null);
   }
   assert.deepEqual(failures, []);
@@ -558,3 +585,852 @@ test('SEND-10 the answer is a value: reading it later cannot be turned into an a
   assert.equal(gate.commit(context, () => { throw new Error('applied after the end'); }), false);
   assert.throws(() => KinSessionTransport.create({}), TypeError, 'a transport without a gate is not built');
 });
+
+test('SEND-11 the deadline is the request kind\'s: a draft command 10 s, other API work 60 s, media only what the caller gives', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { gate, net, transport } = wired();
+  const context = gate.capture('document');
+  const out = (url, init = {}) => {
+    const pending = transport.request(url, { context, ...init });
+    pending.catch(() => {});
+    return net.calls.at(-1);
+  };
+  const draft = out('/api/studies/A/report', { method: 'PUT', json: {}, kind: 'draft' });
+  const list = out('/api/studies');
+  const absolute = out('https://kin.test/api/prefs');
+  const dicom = out('/dicom-web/studies/A/instances');
+  const image = out('/instances/abc/preview', { read: 'blob' });
+  const stream = out('/api/dictation/stream', { read: 'stream' });
+  const bounded = out('/instances/abc/preview', { read: 'blob', deadlineMs: 30000 });
+  const state = () => [draft, list, absolute, dicom, image, stream, bounded].map(call => call.aborted);
+  t.mock.timers.tick(9999);
+  assert.deepEqual(state(), [false, false, false, false, false, false, false]);
+  t.mock.timers.tick(1);
+  assert.deepEqual(state(), [true, false, false, false, false, false, false], 'only the draft command is cut at 10 s');
+  t.mock.timers.tick(20000);
+  assert.deepEqual(state(), [true, false, false, false, false, false, true], 'the caller\'s own limit for an image');
+  t.mock.timers.tick(30000);
+  assert.deepEqual(state(), [true, true, true, false, false, false, true], 'other API work is cut at 60 s');
+  t.mock.timers.tick(3600000);
+  assert.deepEqual(state(), [true, true, true, false, false, false, true], 'DICOM, image and stream requests carry no blanket limit');
+  await assert.rejects(transport.request('/api/x', { context, kind: 'everything' }), TypeError);
+  assert.deepEqual(KinSessionTransport.DEADLINES, { draft: 10000, api: 60000, media: 0 });
+  for (const call of [dicom, image, stream]) call.drop();
+  await settle();
+});
+
+// ── the combinations (U5S-REQ-24) ──
+
+/** The transitions that can fall between the start of an operation and its completion. */
+const TRANSITIONS = {
+  prepare: ({ gate }) => { gate.prepare({ snapshot: {} }); },
+  cancel: ({ gate }) => { gate.cancelPreparation(gate.prepare({ snapshot: {} })); },
+  end: ({ source }) => { source.say('ending', 'S1'); },
+  'login replacement': ({ source }) => { source.say('active', 'S2'); },
+  'select B': ({ gate }) => { gate.select('B'); },
+  'A -> B -> A': ({ gate }) => { gate.select('B'); gate.select('A'); },
+  edit: ({ gate }) => { gate.edited(); },
+  none: () => {},
+};
+/** Which scopes a transition leaves standing. Everything else must never apply. */
+const SURVIVES = {
+  prepare: [], cancel: [], end: [], 'login replacement': [],
+  'select B': ['document'], 'A -> B -> A': ['document'], edit: ['document', 'study'], none: ['document', 'study', 'editor'],
+};
+
+/**
+ * One operation of a consumer, written the way gate-api.md section 4 tells consumers to write it: capture when the work
+ * starts, pass every continuation through commit. `cut` is where the transition falls. Returns what was applied.
+ */
+function operation(world, scope, cut, name, applied) {
+  const { gate, net, transport } = world;
+  const at = gate.capture(scope);
+  const apply = what => gate.commit(at, () => { applied.push(`${name}:${what}`); });
+  const steps = { release: null };
+  const done = (async () => {
+    try {
+      if (cut === 'clipboard') {
+        // Not a request at all: a clipboard promise (or a decoder) completing later.
+        await new Promise(resolve => { steps.release = resolve; });
+        apply('clipboard');
+        return;
+      }
+      const pending = transport.request('/api/work', { context: at, method: 'POST', json: {},
+        ...(cut === 'stream' ? { read: 'stream' } : {}) });
+      const call = net.calls.at(-1);
+      if (cut === 'headers') steps.release = () => call.answer(200, { ok: true });
+      else if (cut === 'error' || cut === 'finally') steps.release = () => call.drop();
+      else if (cut === 'body' || cut === 'stream') {
+        const body = call.headersThenBody(200);
+        steps.release = () => { body.push('{"ok":true}'); body.close(); };
+        if (cut === 'stream') {
+          const opened = await pending;
+          body.push('first');
+          await opened.stream.read();
+          apply('chunk');
+          steps.release = () => { body.push('second'); body.close(); };
+          await opened.stream.read();
+          apply('chunk after the cut');
+          return;
+        }
+      } else if (cut === 'decoded') {
+        call.answer(200, { ok: true });
+        const answer = await pending;
+        // The body is in hand; the decode (a later task) is what completes after the transition.
+        await new Promise(resolve => { steps.release = resolve; });
+        apply('decoded ' + answer.status);
+        return;
+      }
+      await pending;
+      apply('answer');
+    } catch (error) {
+      apply('error');
+    } finally {
+      if (cut === 'finally') apply('finally');
+    }
+  })();
+  return { done, steps };
+}
+
+test('GATE-10 no kind of completion applies across a transition that staled its context, in either completion order', async () => {
+  const cuts = ['headers', 'body', 'stream', 'decoded', 'clipboard', 'error', 'finally'];
+  let combinations = 0;
+  for (const cut of cuts) for (const [transition, change] of Object.entries(TRANSITIONS)) for (const scope of SCOPES)
+    for (const order of ['first then second', 'second then first']) {
+      const world = wired('S1');
+      world.gate.select('A');
+      const applied = [];
+      const first = operation(world, scope, cut, 'first', applied);
+      const second = operation(world, scope, cut, 'second', applied);
+      await settle();
+      await settle();
+      const before = applied.splice(0);
+      change(world);
+      for (const one of order === 'first then second' ? [first, second] : [second, first]) {
+        one.steps.release();
+        await settle();
+      }
+      await Promise.all([first.done, second.done]);
+      const label = `${cut} / ${transition} / ${scope} / ${order}`;
+      if (SURVIVES[transition].includes(scope)) {
+        // A write is not cut by staleness and nothing staled it: both operations complete and apply once each.
+        const names = applied.map(entry => entry.split(':')[0]).sort();
+        assert.deepEqual([...new Set(names)], ['first', 'second'], label);
+      } else {
+        assert.deepEqual(applied, [], label);
+      }
+      // What was applied before the transition (a stream's first chunk) was applied under the live context.
+      assert.ok(before.every(entry => entry.endsWith(':chunk')), label);
+      combinations += 1;
+    }
+  assert.equal(combinations, cuts.length * Object.keys(TRANSITIONS).length * SCOPES.length * 2);
+});
+
+// ── the draft command path (report-draft-client.js) ──
+
+const OWNER = { institution: 'SYN-INST', sub: 'SYN-SUB', author: 'syn@synthetic.test' };
+const TEXT = (findings, extra = {}) => ({ findings, conclusion: '', recommendation: '', baseVersion: 0, ...extra });
+
+/** The server's side of one study's draft row, as wire-contract.md section 5 says it answers. */
+function draftServer() {
+  const server = { epoch: 'E1', rev: 0, row: null, owner: OWNER, puts: 0, reads: 0, commits: 0, discards: 0, cid: 0,
+    revision: () => `${server.epoch}:${server.rev}`,
+    envelope: () => ({ uid: 'A', owner: server.owner, revision: server.revision(), present: !!server.row,
+      snapshot: server.row ? { ...server.row } : null, updatedAt: server.row ? '2026-10-04T00:00:00.000Z' : null }),
+    /** Applies the request to the stored row and returns [status, body] - what the server would answer. */
+    apply(call) {
+      const method = call.init.method, body = call.init.body ? JSON.parse(call.init.body) : null;
+      if (method === 'GET') { server.reads += 1; return [200, server.envelope()]; }
+      if (JSON.stringify(body.expectedOwner) !== JSON.stringify(server.owner)) return [409, { code: 'REPORT_DRAFT_OWNER_CHANGED' }];
+      if (body.expectedRevision !== server.revision()) return [409, { code: 'REPORT_DRAFT_CONFLICT' }];
+      server.rev += 1;
+      if (method === 'PUT') {
+        server.puts += 1;
+        const empty = !body.findings && !body.conclusion && !body.recommendation;
+        const citations = [...body.citationIds];
+        if (body.insert) citations.push(`cid-${++server.cid}`);
+        server.row = empty ? null : { findings: body.findings, conclusion: body.conclusion, recommendation: body.recommendation,
+          baseVersion: body.baseVersion, citations, structured: [...body.structureIds] };
+        return [200, { ...server.envelope(), ...(body.insert ? { inserted: { cid: `cid-${server.cid}` } } : {}) }];
+      }
+      if (method === 'DELETE') server.discards += 1; else server.commits += 1;
+      server.row = null;
+      return [200, { ...server.envelope(), state: { rs: 'T', draft: null, draftRevision: server.revision() } }];
+    },
+    answer(call) { call.answer(...server.apply(call)); },
+    /** The server stores the write; its answer reaches nobody. */
+    lose(call) { server.apply(call); call.drop(); },
+    /** Another document of the same reader writes first. */
+    other(findings) { server.rev += 1; server.row = { ...TEXT(findings), citations: [], structured: [] }; },
+  };
+  return server;
+}
+
+function drafting() {
+  const world = wired('S1');
+  const server = draftServer();
+  const client = KinReportDraftClient.create({ transport: world.transport, base: '/api' });
+  client.observe('A', server.revision(), null);
+  const at = () => world.gate.capture('document');
+  /** Answers every request that is out, as the server would, until the given promise settles. */
+  const serve = async promise => {
+    let result, settled = false;
+    promise.then(value => { result = value; settled = true; }, error => { result = error; settled = true; });
+    for (let turn = 0; !settled && turn < 50; turn += 1) {
+      await settle();
+      for (const call of world.net.calls) if (!call.done) { call.done = true; server.answer(call); }
+    }
+    assert.ok(settled, 'the command settled');
+    return result;
+  };
+  const next = async () => {
+    for (let turn = 0; turn < 20; turn += 1) {
+      const call = world.net.calls.find(one => !one.done);
+      if (call) { call.done = true; return call; }
+      await settle();
+    }
+    throw new Error('no request left the document');
+  };
+  return { ...world, server, client, at, serve, next };
+}
+
+test('DRAFT-01 every write carries the owner, the revision it stands on and the whole snapshot; saved only on a matching envelope', async () => {
+  const { server, client, at, serve, net } = drafting();
+  const saved = await serve(client.write('A', TEXT('SYN one'), { owner: OWNER, context: at() }));
+  assert.equal(saved.outcome, 'saved');
+  // The first command reads the stored draft once (the keep lists), then writes.
+  assert.deepEqual(net.calls.map(call => call.init.method), ['GET', 'PUT']);
+  assert.deepEqual(JSON.parse(net.calls[1].init.body), { expectedOwner: OWNER, expectedRevision: 'E1:0', findings: 'SYN one',
+    conclusion: '', recommendation: '', baseVersion: 0, citationIds: [], structureIds: [] });
+  assert.equal(net.calls[1].headers['X-KIN-Session'], 'S1');
+  assert.equal(client.revision('A'), 'E1:1');
+  // The next write stands on the revision the first one made, without another read.
+  const again = await serve(client.write('A', TEXT('SYN two'), { owner: OWNER, context: at() }));
+  assert.equal(again.outcome, 'saved');
+  assert.equal(JSON.parse(net.calls[2].init.body).expectedRevision, 'E1:1');
+  assert.equal(net.calls.length, 3);
+  assert.deepEqual(server.row.findings, 'SYN two');
+});
+
+test('DRAFT-02 a lost answer, a partial envelope or a 504: one automatic read decides - stored means saved, with no second write', async () => {
+  for (const loss of ['the answer is lost', 'a 200 without the envelope', 'the proxy answers 504 after the server stored it']) {
+    const { server, client, at, serve, next } = drafting();
+    const writing = client.write('A', TEXT('SYN typed'), { owner: OWNER, context: at() });
+    server.answer(await next());                       // the keep-list read
+    const put = await next();
+    if (loss === 'the answer is lost') server.lose(put);
+    else { server.apply(put); put.answer(loss.startsWith('a 200') ? 200 : 504, loss.startsWith('a 200') ? { ok: true } : undefined); }
+    const result = await serve(writing);
+    assert.equal(result.outcome, 'saved', loss);
+    assert.equal(result.confirmedByRead, true, loss);
+    assert.equal(server.puts, 1, 'the write was not sent again');
+    assert.equal(client.revision('A'), 'E1:1');
+    assert.equal(client.uncertain('A'), false);
+  }
+});
+
+test('DRAFT-03 an unknown outcome is never re-sent by itself; the next command reads the stored draft first', async () => {
+  for (const reading of ['the read shows nothing stored', 'the read fails too']) {
+    const { server, client, at, serve, next, net } = drafting();
+    const writing = client.write('A', TEXT('SYN typed'), { owner: OWNER, context: at() });
+    server.answer(await next());
+    const put = await next();
+    put.drop();                                        // the connection is cut; the server never had the write
+    const confirm = await next();
+    assert.equal(confirm.init.method, 'GET', 'the program reads before anyone is told');
+    if (reading === 'the read fails too') confirm.drop(); else server.answer(confirm);
+    const result = await writing;
+    assert.equal(result.outcome, 'unknown', reading);
+    assert.equal(server.puts, 0);
+    await settle();
+    assert.equal(net.calls.filter(call => call.init.method === 'PUT').length, 1, 'no write left by itself');
+    assert.equal(client.uncertain('A'), true);
+    // The next save: a read first, then one write of the newer text on the revision the read showed.
+    const later = await serve(client.write('A', TEXT('SYN typed more'), { owner: OWNER, context: at() }));
+    assert.equal(later.outcome, 'saved');
+    assert.deepEqual(net.calls.slice(-2).map(call => call.init.method), ['GET', 'PUT']);
+    assert.equal(server.row.findings, 'SYN typed more');
+  }
+});
+
+test('DRAFT-04 another draft on the server is a conflict: the attempt is kept, nothing is re-sent, automatic writes stop until the person decides', async () => {
+  const { server, client, at, serve, net } = drafting();
+  await serve(client.write('A', TEXT('SYN mine'), { owner: OWNER, context: at() }));
+  server.other('SYN the other tab');
+  const lost = await serve(client.write('A', TEXT('SYN mine, more'), { owner: OWNER, context: at() }));
+  assert.equal(lost.outcome, 'conflict');
+  assert.equal(lost.latest.snapshot.findings, 'SYN the other tab', 'the stored draft was read for the person to see');
+  assert.equal(lost.snapshot.findings, 'SYN mine, more', 'the attempt is kept');
+  assert.equal(server.row.findings, 'SYN the other tab');
+  const puts = net.calls.filter(call => call.init.method === 'PUT').length;
+  // Automatic writes stop: the next ones do not reach the network.
+  const calls = net.calls.length;
+  assert.equal((await client.write('A', TEXT('SYN mine, even more'), { owner: OWNER, context: at() })).outcome, 'conflict');
+  assert.equal((await client.commit('A', { action: 'save' }, { owner: OWNER, context: at() })).outcome, 'conflict');
+  assert.equal(net.calls.length, calls);
+  // The person decides (keep this text): the stored revision becomes the base, and one write goes on it.
+  assert.equal(client.resolve('A'), true);
+  const kept = await serve(client.write('A', TEXT('SYN mine, even more'), { owner: OWNER, context: at() }));
+  assert.equal(kept.outcome, 'saved');
+  assert.equal(net.calls.filter(call => call.init.method === 'PUT').length, puts + 1);
+  assert.equal(JSON.parse(net.calls.at(-1).init.body).expectedRevision, 'E1:2');
+});
+
+test('DRAFT-05 a conflict with this document\'s own late write is settled without asking: the base moves and the write goes once more', async () => {
+  const { server, client, at, serve, next } = drafting();
+  const first = client.write('A', TEXT('SYN first'), { owner: OWNER, context: at() });
+  server.answer(await next());
+  const cut = await next();
+  cut.drop();                                          // the browser lost the connection; the server still has the write to do
+  server.answer(await next());                         // the automatic read: not stored (yet)
+  assert.equal((await first).outcome, 'unknown');
+  const second = client.write('A', TEXT('SYN first and second'), { owner: OWNER, context: at() });
+  server.answer(await next());                         // the read before the next command: still not stored
+  server.apply(cut);                                   // now the server reaches the cut-off write: E1:1 holds "SYN first"
+  const result = await serve(second);
+  assert.equal(result.outcome, 'saved', 'the person is not asked about their own text');
+  assert.equal(server.row.findings, 'SYN first and second');
+  assert.equal(server.puts, 2, 'the cut-off write and one re-sent write');
+  assert.equal(client.conflict('A'), null);
+});
+
+test('DRAFT-06 a conflict over the same content converges without a second write', async () => {
+  const { server, client, at, serve, net } = drafting();
+  await serve(client.write('A', TEXT('SYN first'), { owner: OWNER, context: at() }));
+  // This reader's other document stored the very text this one is about to save.
+  server.other('SYN the same in both');
+  const puts = server.puts;
+  const result = await serve(client.write('A', TEXT('SYN the same in both'), { owner: OWNER, context: at() }));
+  assert.equal(result.outcome, 'saved');
+  assert.equal(result.confirmedByRead, true);
+  assert.equal(server.puts, puts, 'the refused write was not sent again: the stored draft already is this text');
+  assert.equal(client.revision('A'), 'E1:2');
+  assert.equal(client.conflict('A'), null);
+  // A save of text the server is already known to hold at this revision sends nothing at all.
+  const calls = net.calls.length;
+  assert.equal((await client.write('A', TEXT('SYN the same in both'), { owner: OWNER, context: at() })).outcome, 'saved');
+  assert.equal(net.calls.length, calls);
+});
+
+test('DRAFT-07 a draft deleted elsewhere, a new epoch or another owner is never written over by itself', async () => {
+  for (const change of ['discarded elsewhere', 'a new epoch (force-discard)', 'another owner']) {
+    const { server, client, at, serve } = drafting();
+    await serve(client.write('A', TEXT('SYN mine'), { owner: OWNER, context: at() }));
+    if (change === 'discarded elsewhere') { server.rev += 1; server.row = null; }
+    if (change === 'a new epoch (force-discard)') { server.epoch = 'E2'; server.rev = 0; server.row = null; }
+    if (change === 'another owner') server.owner = { ...OWNER, sub: 'SYN-OTHER-SUB' };
+    const puts = server.puts, stored = server.row && server.row.findings;
+    const result = await serve(client.write('A', TEXT('SYN mine, more'), { owner: OWNER, context: at() }));
+    assert.equal(result.outcome, change === 'another owner' ? 'owner' : 'conflict', change);
+    assert.equal(server.puts, puts, 'nothing was written by a retry');
+    assert.equal(server.row && server.row.findings, stored, 'the deleted draft was not resurrected, the other owner\'s row not touched');
+  }
+});
+
+test('DRAFT-08 queued saves of one document merge: the waiting one is not sent, the newest goes on the confirmed revision', async () => {
+  const { server, client, at, serve, next } = drafting();
+  const first = client.write('A', TEXT('SYN 1'), { owner: OWNER, context: at() });
+  const second = client.write('A', TEXT('SYN 12'), { owner: OWNER, context: at() });
+  const third = client.write('A', TEXT('SYN 123'), { owner: OWNER, context: at() });
+  server.answer(await next());
+  // The first write was already waiting when the newer ones queued up: only the newest of the waiting ones is sent.
+  assert.equal((await serve(first)).outcome, 'merged');
+  assert.equal((await serve(second)).outcome, 'merged');
+  assert.equal((await serve(third)).outcome, 'saved');
+  assert.equal(server.puts, 1);
+  assert.equal(server.row.findings, 'SYN 123');
+  // A write already out is not merged away: the next one waits for its answer and stands on its revision.
+  const out = client.write('A', TEXT('SYN 1234'), { owner: OWNER, context: at() });
+  const put = await next();
+  const queued = client.write('A', TEXT('SYN 12345'), { owner: OWNER, context: at() });
+  server.answer(put);
+  assert.equal((await out).outcome, 'saved');
+  assert.equal((await serve(queued)).outcome, 'saved');
+  assert.equal(server.revision(), 'E1:3');
+});
+
+test('DRAFT-09 the preservation save is bound to its capture: saved by envelope or by a full read, rebased only onto this document\'s own text', async () => {
+  const capture = (server, findings, lists = { citations: [], structured: [] }) => ({ uid: 'A', owner: OWNER,
+    expectedRevision: server.revision(), snapshot: { ...TEXT(findings), ...lists } });
+  {
+    const { server, client, gate, serve, next } = drafting();
+    const permit = gate.prepare({ owner: OWNER, expectedRevision: server.revision(), snapshot: TEXT('SYN kept') });
+    const base = await serve(client.base('A', { owner: OWNER, context: permit }));
+    assert.deepEqual(base, { outcome: 'ready', revision: 'E1:0', lists: { citations: [], structured: [] }, stored: null });
+    // The answer is lost; the read shows the whole capture stored: saved.
+    const saving = client.preserve(capture(server, 'SYN kept'), { context: permit });
+    server.lose(await next());
+    const result = await serve(saving);
+    assert.deepEqual([result.outcome, result.confirmedByRead, server.puts], ['saved', true, 1]);
+    assert.equal(client.proves(server.envelope(), capture({ revision: () => 'E1:0' }, 'SYN kept')), true);
+    assert.equal(client.proves(server.envelope(), capture({ revision: () => 'E1:0' }, 'SYN kept, altered')), false);
+    assert.equal(client.proves({ ...server.envelope(), owner: { ...OWNER, sub: 'X' } }, capture({ revision: () => 'E1:0' }, 'SYN kept')), false);
+  }
+  {
+    // A cut-off autosave of this document lands before the preservation: rebased, never a question.
+    const { server, client, gate, at, serve, next } = drafting();
+    const autosave = client.write('A', TEXT('SYN typed'), { owner: OWNER, context: at() });
+    server.answer(await next());
+    const cut = await next();
+    cut.drop();
+    server.answer(await next());
+    await autosave;
+    let permit = gate.prepare({ owner: OWNER, expectedRevision: null, snapshot: TEXT('SYN typed and more') });
+    const base = await serve(client.base('A', { owner: OWNER, context: permit }));
+    assert.equal(base.revision, 'E1:0');
+    server.apply(cut);
+    permit = gate.prepare({ owner: OWNER, expectedRevision: base.revision, snapshot: TEXT('SYN typed and more') });
+    const first = await serve(client.preserve(capture({ revision: () => base.revision }, 'SYN typed and more'), { context: permit }));
+    assert.deepEqual(first, { outcome: 'rebased', revision: 'E1:1' });
+    assert.equal(server.row.findings, 'SYN typed', 'nothing was written on the moved base by itself');
+    const again = await serve(client.base('A', { owner: OWNER, context: permit }));
+    assert.equal(again.revision, 'E1:1');
+    permit = gate.prepare({ owner: OWNER, expectedRevision: again.revision, snapshot: TEXT('SYN typed and more') });
+    const second = await serve(client.preserve(capture(server, 'SYN typed and more'), { context: permit }));
+    assert.equal(second.outcome, 'saved');
+    assert.equal(server.row.findings, 'SYN typed and more');
+  }
+  {
+    // Another draft is there: a conflict, and the capture is not written over it. A retired or ordinary context sends nothing.
+    const { server, client, gate, at, serve, net } = drafting();
+    const stale = gate.prepare({ snapshot: {} });
+    const permit = gate.prepare({ owner: OWNER, expectedRevision: server.revision(), snapshot: TEXT('SYN kept') });
+    await serve(client.base('A', { owner: OWNER, context: permit }));
+    const mine = capture(server, 'SYN kept');
+    server.other('SYN the other tab');
+    const result = await serve(client.preserve(mine, { context: permit }));
+    assert.equal(result.outcome, 'conflict');
+    assert.equal(server.row.findings, 'SYN the other tab');
+    const calls = net.calls.length;
+    for (const context of [stale, at(), null])
+      assert.equal((await client.preserve(capture(server, 'SYN kept'), { context })).outcome, 'unsent');
+    assert.equal((await client.preserve({ ...mine, expectedRevision: null }, { context: permit })).outcome, 'refused');
+    assert.equal(net.calls.length, calls, 'nothing left for a context that is not the live preparation');
+  }
+});
+
+test('DRAFT-10 discard and commit carry the same preconditions; a conflict is followed only onto this document\'s own text', async () => {
+  const { server, client, at, serve, next, net } = drafting();
+  await serve(client.write('A', TEXT('SYN mine'), { owner: OWNER, context: at() }));
+  const committed = await serve(client.commit('A', { action: 'save', findings: 'SYN mine' }, { owner: OWNER, context: at() }));
+  assert.equal(committed.outcome, 'saved');
+  assert.deepEqual(JSON.parse(net.calls.at(-1).init.body), { action: 'save', findings: 'SYN mine', expectedOwner: OWNER, expectedRevision: 'E1:1' });
+  assert.equal(committed.state.rs, 'T');
+  assert.equal(client.revision('A'), 'E1:2');
+  // A commit whose answer is lost: unknown, not re-sent; the next command reads and goes on from what is stored.
+  await serve(client.write('A', TEXT('SYN again'), { owner: OWNER, context: at() }));
+  const lost = client.commit('A', { action: 'save' }, { owner: OWNER, context: at() });
+  server.lose(await next());
+  assert.equal((await lost).outcome, 'unknown');
+  assert.equal(server.commits, 2);
+  const after = await serve(client.write('A', TEXT('SYN after the commit'), { owner: OWNER, context: at() }));
+  assert.equal(after.outcome, 'saved');
+  assert.equal(server.commits, 2, 'the commit was not sent again');
+  // A discard over another draft: a conflict, nothing deleted.
+  server.other('SYN the other tab');
+  const refused = await serve(client.discard('A', { owner: OWNER, context: at() }));
+  assert.equal(refused.outcome, 'conflict');
+  assert.equal(server.row.findings, 'SYN the other tab');
+  assert.equal(server.discards, 0);
+});
+
+test('DRAFT-11 an older revision of the same epoch is a stale observation; an operation write is not confirmed by a read', async () => {
+  const { server, client, at, serve, next } = drafting();
+  await serve(client.write('A', TEXT('SYN one'), { owner: OWNER, context: at() }));
+  assert.equal(client.observe('A', 'E1:0', null), false, 'a late list answer does not move the base back');
+  assert.equal(client.revision('A'), 'E1:1');
+  assert.equal(client.observe('A', 'E1:1', TEXT('SYN one')), true);
+  assert.equal(client.observe('A', 'not a revision'), false);
+  assert.equal(client.revision('A'), null);
+  assert.equal((await client.write('A', TEXT('SYN x'), { owner: OWNER, context: at() })).outcome, 'refused',
+    'without a base nothing is sent');
+  // An insertion whose answer is lost stays unknown (its citation id is the server's to name) - and is not re-sent.
+  client.observe('A', server.revision(), TEXT('SYN one'));
+  const inserting = client.write('A', TEXT('SYN one, cited'), { owner: OWNER, context: at(),
+    operation: { insert: { field: 'findings', insertedText: 'cited' } } });
+  server.answer(await next());
+  server.lose(await next());
+  const result = await serve(inserting);
+  assert.equal(result.outcome, 'unknown');
+  assert.equal(server.puts, 2);
+  // The next save keeps the citation the server made: the stored text is this document's, so nobody is asked.
+  const saved = await serve(client.write('A', TEXT('SYN one, cited, more'), { owner: OWNER, context: at() }));
+  assert.equal(saved.outcome, 'saved');
+  assert.deepEqual(server.row.citations, ['cid-1']);
+});
+
+test('DRAFT-12 a write cut by its 10 s deadline is looked for twice at most, never re-sent, and is saved when the server finished it', async t => {
+  for (const finished of ['before the second read', 'never']) {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { server, client, at, next, net } = drafting();
+    const writing = client.write('A', TEXT('SYN slow'), { owner: OWNER, context: at() });
+    server.answer(await next());
+    const put = await next();
+    t.mock.timers.tick(10000);                         // no answer within the draft deadline
+    const first = await next();
+    assert.equal(first.init.method, 'GET');
+    server.answer(first);                              // not there yet: the server is still working on it
+    await settle();
+    await settle();
+    assert.equal(net.calls.filter(call => !call.done).length, 0, 'the second look waits; nothing is sent meanwhile');
+    if (finished === 'before the second read') server.apply(put);
+    t.mock.timers.tick(3000);
+    server.answer(await next());
+    const result = await writing;
+    assert.equal(result.outcome, finished === 'never' ? 'unknown' : 'saved', finished);
+    await settle();
+    assert.deepEqual(net.calls.map(call => call.init.method), ['GET', 'PUT', 'GET', 'GET'], 'two reads, one write');
+    assert.equal(client.uncertain('A'), finished === 'never');
+    t.mock.timers.reset();
+  }
+});
+
+// ── auth.js, as shipped, in a browser-shaped context ──
+
+const AUTH_SOURCE = readFileSync(join(lite, 'auth.js'), 'utf8');
+const SITE = 'https://kin.test';
+
+/**
+ * One browser profile: its storage, its cookie jar's KIN session (the server's side of it) and its documents. Each
+ * document runs the shipped auth.js in its own context. The server answers as wire-contract.md sections 1-4 say.
+ */
+function browser({ storage = 'reliable' } = {}) {
+  const local = new Map(), documents = [], channels = [];
+  const server = { sessions: new Map(), ended: new Set(), cookie: null, serial: 0, calls: [], logouts: [], proofs: new Map(),
+    answers: [],
+    login(account = { sub: 'SYN-SUB', actor: 'syn@synthetic.test', institution: 'SYN-INST', roles: ['radiologist'], kind: 'member' }) {
+      const id = `S${++server.serial}`;
+      server.sessions.set(id, account);
+      server.cookie = id;
+      return id;
+    },
+  };
+  function respond(status, body, code) {
+    return new Response(body === undefined ? null : JSON.stringify(body),
+      { status, headers: code ? { 'X-KIN-Auth-Code': code } : {} });
+  }
+  function serve(url, init) {
+    const path = new URL(url).pathname, method = init.method || 'GET', bound = init.headers['X-KIN-Session'] ?? null;
+    server.calls.push([method, path, bound]);
+    const scripted = server.answers.find(entry => entry.path === path && !entry.used);
+    if (scripted) {
+      scripted.used = true;
+      if (scripted.fail) return Promise.reject(new TypeError('SYN network'));
+      if (scripted.hold) return new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+      return Promise.resolve(respond(scripted.status, scripted.body, scripted.code));
+    }
+    const refuse = (status, code) => Promise.resolve(respond(status, { code, message: 'SYN' }, code));
+    if (path === '/api/auth/entry') {
+      const proof = JSON.parse(init.body).proof, session = server.proofs.get(proof);
+      if (!session || session !== server.cookie) return refuse(403, 'AUTH_ENTRY_REFUSED');
+      server.proofs.delete(proof);
+      return Promise.resolve(respond(200, { sessionId: session }));
+    }
+    if (server.cookie === null) return refuse(401, 'AUTH_CREDENTIALS_MISSING');
+    if (bound !== null && bound !== server.cookie) return refuse(409, 'AUTH_SESSION_MISMATCH');
+    if (bound === null && path !== '/api/me') return refuse(428, 'AUTH_SESSION_REQUIRED');
+    if (server.ended.has(server.cookie)) return refuse(401, 'AUTH_SESSION_ENDED');
+    if (path === '/api/me') return Promise.resolve(respond(200, { ...server.sessions.get(server.cookie), sessionId: server.cookie }));
+    if (path === '/api/auth/logout') {
+      server.logouts.push(bound);
+      server.ended.add(server.cookie);
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    return refuse(404, 'SYN_NOT_STUBBED');
+  }
+  /** A new document. `tab` is a document whose tab this one loads in (the same sessionStorage); otherwise a new tab. */
+  function open(pathname = '/worklist/hpacs-lite/main.html', hash = '', tab = null) {
+    const listeners = { window: {}, document: {} }, moves = [], session = tab ? tab.tabStorage : new Map();
+    const doc = { moves, posts: [], hidden: false, tabStorage: session };
+    const area = map => ({
+      getItem(key) { if (storage === 'unreadable') throw new Error('SYN storage blocked'); return map.has(key) ? map.get(key) : null; },
+      setItem(key, value) {
+        if (storage === 'unreadable' || (storage === 'full' && map === local)) throw new Error('SYN storage refused');
+        map.set(key, String(value));
+        if (map === local) for (const other of documents) if (other !== doc) queueMicrotask(() => other.fire('storage', { key }));
+      },
+      removeItem(key) { if (storage === 'unreadable') throw new Error('SYN storage blocked'); map.delete(key); },
+    });
+    class Channel {
+      constructor(name) { this.name = name; this.onmessage = null; this.doc = doc; channels.push(this); }
+      postMessage(data) {
+        // Copied into this file's realm so that the cases can compare it structurally.
+        doc.posts.push(JSON.parse(JSON.stringify(data)));
+        for (const other of channels) if (other !== this && other.name === this.name && !other.closed)
+          queueMicrotask(() => { if (other.onmessage) other.onmessage({ data }); });
+      }
+      close() { this.closed = true; }
+    }
+    const location = { origin: SITE, protocol: 'https:', pathname, search: '', hash,
+      replace(url) { moves.push(['replace', String(url)]); },
+      get href() { return SITE + pathname; }, set href(url) { moves.push(['href', String(url)]); } };
+    const context = vm.createContext({
+      location, sessionStorage: area(session), localStorage: area(local),
+      document: { cookie: '', get hidden() { return doc.hidden; }, addEventListener(type, listener) { (listeners.document[type] ||= []).push(listener); } },
+      addEventListener(type, listener) { (listeners.window[type] ||= []).push(listener); },
+      history: { state: null, replaceState(state, title, url) { location.hash = ''; doc.address = url; } },
+      fetch: (url, init) => serve(url, init), BroadcastChannel: Channel, AbortController, URLSearchParams, URL, Response,
+      setTimeout, clearTimeout, console,
+    });
+    doc.auth = vm.runInContext(AUTH_SOURCE + '\n;KinAuth', context, { filename: 'auth.js' });
+    doc.fire = (type, event = {}) => { for (const listener of listeners.window[type] || []) listener(event); };
+    doc.states = [];
+    doc.auth.onLifecycle(event => doc.states.push(`${event.state}:${event.session}`));
+    doc.state = () => doc.auth.lifecycle().state;
+    doc.record = () => local.has('kin-session-end') ? JSON.parse(local.get('kin-session-end')) : null;
+    documents.push(doc);
+    return doc;
+  }
+  /** A message on a channel from outside these documents, as any same-origin document could post it. */
+  function broadcast(data, name = 'kin-session') {
+    for (const channel of channels) if (channel.name === name && !channel.closed)
+      queueMicrotask(() => { if (channel.onmessage) channel.onmessage({ data }); });
+  }
+  return { server, open, local, broadcast };
+}
+
+/** Lets the document's promises and the bus's microtasks run. */
+const turn = async (times = 6) => { for (let i = 0; i < times; i += 1) await settle(); };
+
+test('AUTH-01 entry asks the server once without a binding, then every request names the session', async () => {
+  const { server, open } = browser();
+  const session = server.login();
+  const doc = open();
+  assert.equal(doc.state(), 'unknown');
+  const identity = await doc.auth.init();
+  assert.deepEqual([doc.state(), doc.auth.sessionId(), identity.sub], ['active', session, 'SYN-SUB']);
+  assert.deepEqual(server.calls, [['GET', '/api/me', null]]);
+  assert.equal(doc.auth.autoLogin(), false, 'a document at work starts no login');
+  // A second document of the same session (a second tab, a viewer's opener) enters the same way: no error, no click.
+  const second = open();
+  await second.auth.init();
+  assert.deepEqual([second.state(), second.auth.sessionId(), doc.state()], ['active', session, 'active']);
+  assert.deepEqual(doc.posts.concat(second.posts), [], 'entering announces nothing');
+});
+
+test('AUTH-02 no session in a document with reliable storage and no end record: the login starts by itself, once', async () => {
+  const { server, open } = browser();
+  const doc = open('/worklist/hpacs-lite/index.html');
+  assert.equal(await doc.auth.init(), null);
+  assert.equal(doc.state(), 'unknown');
+  assert.equal(doc.auth.endState(), null);
+  assert.equal(doc.auth.autoLogin(), true);
+  assert.deepEqual(doc.moves, [['href', SITE + '/api/auth/login']]);
+  assert.equal(doc.auth.autoLogin(), false, 'one move per document');
+  assert.deepEqual(server.calls, [['GET', '/api/me', null]], 'the server was asked once and nothing was replaced');
+  assert.equal(doc.record(), null);
+});
+
+test('AUTH-03 the automatic login never starts over an end record, unverifiable storage, a failed confirmation or a refused entry proof', async () => {
+  const cases = {
+    'an explicit logout (confirmed end record)': async () => {
+      const { server, open, local } = browser();
+      local.set('kin-session-end', JSON.stringify({ session: 'S0', operation: 1, status: 'confirmed' }));
+      return { server, doc: open() };
+    },
+    'an unconfirmed logout': async () => {
+      const { server, open, local } = browser();
+      local.set('kin-session-end', JSON.stringify({ session: 'S0', operation: 1, status: 'unconfirmed', reason: 'network' }));
+      return { server, doc: open() };
+    },
+    'a record that cannot be read': async () => {
+      const { server, open, local } = browser();
+      local.set('kin-session-end', '{broken');
+      return { server, doc: open() };
+    },
+    'storage that cannot be read': async () => { const { server, open } = browser({ storage: 'unreadable' }); return { server, doc: open() }; },
+    'storage that takes no write': async () => { const { server, open } = browser({ storage: 'full' }); return { server, doc: open() }; },
+    'the confirmation fails (500)': async () => {
+      const { server, open } = browser();
+      server.answers.push({ path: '/api/me', status: 500, body: { message: 'SYN' } });
+      return { server, doc: open(), rejects: true };
+    },
+    'the confirmation fails (connection)': async () => {
+      const { server, open } = browser();
+      server.answers.push({ path: '/api/me', fail: true });
+      return { server, doc: open(), rejects: true };
+    },
+    'a refused entry proof': async () => {
+      const { server, open } = browser();
+      return { server, doc: open('/worklist/hpacs-lite/main.html', '#kin-entry=SYN-USED-PROOF') };
+    },
+  };
+  for (const [label, make] of Object.entries(cases)) {
+    const { server, doc, rejects } = await make();
+    if (rejects) await assert.rejects(doc.auth.init(), label); else assert.equal(await doc.auth.init(), null, label);
+    assert.equal(doc.auth.autoLogin(), false, label);
+    assert.deepEqual(doc.moves, [], label);
+    assert.notEqual(doc.state(), 'active', label);
+    if (!rejects && !label.includes('proof')) assert.deepEqual(server.calls, [], `${label}: the live session is not even read`);
+  }
+  // And a tab the automatic login just sent out comes back without a session: it is not sent again (no redirect loop).
+  const { server, open } = browser();
+  const first = open('/worklist/hpacs-lite/index.html');
+  await first.auth.init();
+  assert.equal(first.auth.autoLogin(), true);
+  const back = open('/worklist/hpacs-lite/index.html', '', first);
+  assert.equal(await back.auth.init(), null);
+  assert.deepEqual([back.auth.autoLogin(), back.moves, back.auth.endState()], [false, [], null],
+    'the same tab is not sent out again; the landing shows the login control');
+  // Another tab is not held by that tab's guard, and a tab that did enter is free again the next time it has no session.
+  const other = open('/worklist/hpacs-lite/index.html');
+  await other.auth.init();
+  assert.equal(other.auth.autoLogin(), true);
+  server.login();
+  const entered = open('/worklist/hpacs-lite/main.html', '', first);
+  await entered.auth.init();
+  assert.equal(entered.state(), 'active');
+  server.cookie = null;
+  const nextDay = open('/worklist/hpacs-lite/index.html', '', first);
+  await nextDay.auth.init();
+  assert.equal(nextDay.auth.autoLogin(), true);
+});
+
+test('AUTH-04 the entry proof is taken from the address at once, used once, and enters even where storage cannot be verified', async () => {
+  for (const storage of ['reliable', 'unreadable', 'full']) {
+    const { server, open } = browser({ storage });
+    const session = server.login();
+    server.proofs.set('SYN-PROOF', session);
+    const doc = open('/worklist/hpacs-lite/main.html', '#kin-entry=SYN-PROOF');
+    assert.equal(doc.address, '/worklist/hpacs-lite/main.html', 'the fragment left the address before any request');
+    await doc.auth.init();
+    assert.deepEqual([doc.state(), doc.auth.sessionId()], ['active', session], storage);
+    assert.deepEqual(server.calls, [['POST', '/api/auth/entry', null], ['GET', '/api/me', session]], 'the bootstrap after a proof is bound');
+    // The same proof again (history, a copied address): refused, nothing opens, and no login starts by itself.
+    const replay = open('/worklist/hpacs-lite/main.html', '#kin-entry=SYN-PROOF');
+    assert.equal(await replay.auth.init(), null);
+    assert.deepEqual([replay.state(), replay.auth.endState()?.reason, replay.auth.autoLogin()], ['unknown', storage === 'reliable' ? 'entry' : replay.auth.endState().reason, false]);
+    assert.equal(doc.state(), 'active');
+  }
+});
+
+test('AUTH-05 which answers close a document: the session ended, the session replaced - and nothing else', async () => {
+  const closing = [
+    [{ status: 401, code: 'AUTH_SESSION_ENDED' }, 'confirmed', true],
+    [{ status: 409, code: 'AUTH_SESSION_MISMATCH' }, 'unconfirmed', false],
+    [{ status: 403, code: 'AUTH_SESSION_MISMATCH' }, 'unconfirmed', false],
+  ];
+  for (const [failure, state, recorded] of closing) {
+    const { server, open } = browser();
+    const session = server.login();
+    const doc = open();
+    await doc.auth.init();
+    doc.auth.authFailure({ session, ...failure });
+    assert.equal(doc.state(), state, JSON.stringify(failure));
+    assert.equal(doc.auth.session(), null);
+    assert.equal(!!doc.record(), recorded, 'only a server-confirmed end is recorded; a replaced session leaves no record');
+    assert.deepEqual(server.logouts, [], 'no logout POST: it would aim at another login, or at a session already gone');
+    assert.deepEqual(doc.posts.map(post => [post.type, post.session]), [['session-ended', session]]);
+  }
+  const { server, open } = browser();
+  const session = server.login();
+  const doc = open();
+  await doc.auth.init();
+  const calls = server.calls.length;
+  for (const failure of [{ status: 401, code: null }, { status: 401, code: 'AUTH_CREDENTIALS_MISSING' },
+    { status: 428, code: 'AUTH_SESSION_REQUIRED' }, { status: 403, code: 'AUTH_SESSION_REQUIRED' },
+    { status: 409, code: 'AUTH_SESSION_BUSY' }, { status: 403, code: 'AUTH_CSRF_REQUIRED' }, { status: 403, code: null },
+    { status: 409, code: 'REPORT_DRAFT_OWNER_CHANGED' }, { status: 500, code: 'AUTH_STORAGE_FAILURE' }, { status: 503, code: null },
+    { status: 401, code: 'AUTH_SESSION_ENDED', session: 'S-OTHER' }, { status: 409, code: 'AUTH_SESSION_MISMATCH', session: 'S-OTHER' },
+    null]) {
+    doc.auth.authFailure(failure && { session, ...failure });
+    await turn(2);
+    assert.equal(doc.state(), 'active', JSON.stringify(failure));
+  }
+  assert.deepEqual([doc.record(), doc.posts, server.calls.length, doc.moves], [null, [], calls, []],
+    'no record, no notice, no request, no move: the screen stays as it was');
+  assert.equal(doc.auth.session().sub, 'SYN-SUB');
+  // The page's own evidence of a replaced account closes like a mismatch; for another session it does nothing.
+  doc.auth.replaced({ session: 'S-OTHER' });
+  assert.equal(doc.state(), 'active');
+  doc.auth.replaced({ session });
+  assert.deepEqual([doc.state(), doc.record(), server.logouts], ['unconfirmed', null, []]);
+});
+
+test('AUTH-06 notices are session-bound and never re-posted; storage trouble and preparation notices close nothing', async () => {
+  const { server, open, local, broadcast } = browser();
+  const first = server.login();
+  const a = open(), a2 = open();
+  await a.auth.init();
+  await a2.auth.init();
+  const second = server.login();
+  const b = open();
+  await b.auth.init();
+  assert.deepEqual([a.auth.sessionId(), a2.auth.sessionId(), b.auth.sessionId()], [first, first, second]);
+  // Session 1's document is told its session ended (the cookie is session 2's now): it and its sibling close, B does not.
+  a.auth.authFailure({ session: first, status: 409, code: 'AUTH_SESSION_MISMATCH' });
+  await turn();
+  assert.deepEqual([a.state(), a2.state(), b.state()], ['unconfirmed', 'ending', 'active']);
+  assert.deepEqual([a.posts.length, a2.posts.length, b.posts.length], [1, 0, 0], 'one notice, no echo');
+  assert.deepEqual(server.logouts, []);
+  // Notices that name no session, another session, or a preparation: nothing closes.
+  for (const data of [{ type: 'session-ended' }, { type: 'session-ended', session: 'S-NOBODY', operation: 9, status: 'ending' },
+    { type: 'session-ended', session: first, operation: 10, status: 'ending' },
+    { type: 'session-preparing', session: second, preparation: 1 }, { type: 'session-resumed', session: second, preparation: 1 }]) {
+    broadcast(data);
+    await turn();
+    assert.equal(b.state(), 'active', JSON.stringify(data));
+  }
+  assert.deepEqual(b.posts, [], 'nothing heard is posted again');
+  // Storage that becomes unreadable is not an end signal for a document at work.
+  local.set('kin-session-end', '{broken');
+  b.fire('storage', { key: 'kin-session-end' });
+  b.fire('focus');
+  assert.equal(b.state(), 'active');
+  local.delete('kin-session-end');
+  // The preparation notices: posted for this session only while it is at work, with the preparation's number.
+  b.auth.notifyPreparation('preparing', 3);
+  b.auth.notifyPreparation('resumed', 3);
+  b.auth.notifyPreparation('ended', 3);
+  assert.deepEqual(b.posts, [{ type: 'session-preparing', session: second, preparation: 3 },
+    { type: 'session-resumed', session: second, preparation: 3 }]);
+  a.auth.notifyPreparation('preparing', 1);
+  assert.equal(a.posts.length, 1, 'a closed document announces no preparation');
+});
+
+test('AUTH-07 one logout: the record and the notice before the network, one bound POST, one move after the server\'s answer', async () => {
+  const { server, open } = browser();
+  const session = server.login();
+  const doc = open(), sibling = open();
+  await doc.auth.init();
+  await sibling.auth.init();
+  const order = [];
+  doc.auth.beforeLogoutPost(async bound => { order.push(['step', bound, doc.state(), doc.record().status]); });
+  const leaving = doc.auth.logout();
+  assert.deepEqual([doc.state(), doc.auth.session(), doc.record().session, doc.record().status], ['ending', null, session, 'ending']);
+  // An overlapping press shares the one end: no second record, notice or POST.
+  await Promise.all([leaving, doc.auth.logout()]);
+  assert.equal(doc.posts.length, 1);
+  assert.deepEqual(order, [['step', session, 'ending', 'ending']]);
+  assert.deepEqual(server.logouts, [session]);
+  assert.deepEqual([doc.state(), doc.record().status], ['confirmed', 'confirmed']);
+  assert.deepEqual(doc.moves, [['replace', SITE + '/worklist/hpacs-lite/index.html']], 'one move, right after the server confirmed');
+  await turn();
+  assert.notEqual(sibling.state(), 'active');
+  assert.deepEqual(sibling.posts, [], 'the sibling re-posts nothing and sends no logout of its own');
+  assert.deepEqual(server.logouts, [session]);
+  // A new document after the confirmed end: closed, no request, no automatic login.
+  const later = open('/worklist/hpacs-lite/index.html');
+  const calls = server.calls.length;
+  assert.equal(await later.auth.init(), null);
+  assert.deepEqual([later.auth.endState().state, later.auth.autoLogin(), server.calls.length], ['confirmed', false, calls]);
+});
+
+test('AUTH-08 a logout that the server does not confirm is unconfirmed by its kind, never retried by itself, and never a confirmed end', async () => {
+  const kinds = [[{ status: 409, body: { code: 'AUTH_SESSION_BUSY' }, code: 'AUTH_SESSION_BUSY' }, 'conflict'],
+    [{ status: 500, body: { code: 'AUTH_STORAGE_FAILURE' }, code: 'AUTH_STORAGE_FAILURE' }, 'storage'],
+    [{ status: 401, body: { code: 'AUTH_CREDENTIALS_MISSING' }, code: 'AUTH_CREDENTIALS_MISSING' }, 'credentials'],
+    [{ status: 428, body: { code: 'AUTH_SESSION_REQUIRED' }, code: 'AUTH_SESSION_REQUIRED' }, 'refused'],
+    [{ fail: true }, 'network']];
+  for (const [answer, reason] of kinds) {
+    const { server, open } = browser();
+    server.login();
+    const doc = open();
+    await doc.auth.init();
+    server.answers.push({ path: '/api/auth/logout', ...answer });
+    await doc.auth.logout();
+    assert.deepEqual([doc.state(), doc.record().status, doc.record().reason], ['unconfirmed', 'unconfirmed', reason]);
+    assert.equal(server.calls.filter(call => call[1] === '/api/auth/logout').length, 1, 'nothing is sent again by itself');
+  }
+});
+
