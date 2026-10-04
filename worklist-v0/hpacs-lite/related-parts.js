@@ -16,15 +16,17 @@
     }
     return [...parts].sort();
   }
-  function create({owner,changed,fetcher=(...args)=>fetch(...args)}) {
+  function create({owner,changed}) {
+    const work=globalThis.KinWorkContext,transport=globalThis.KinSessionTransport.page();
+    let resume=null;
     let generation=0,scope='',bound=null,busy=false,ended=false,note='';
     const entries=new Map(),controllers=new Set();
     function cancel(){++generation;busy=false;controllers.forEach(c=>c.abort());controllers.clear();}
     function reset(next){cancel();scope=next;bound=owner();entries.clear();note='';}
     function current(){return !ended&&!!bound&&owner()===bound;}
     function get(uid){return current()?entries.get(uid):undefined;}
-    async function read(url,signal){
-      const response=await fetcher(url,{signal,credentials:'same-origin',cache:'no-store',headers:{Accept:'application/dicom+json'}});
+    async function read(url,signal,at){
+      const response=await transport.request(url,{context:at,read:'response',signal,credentials:'same-origin',cache:'no-store',headers:{Accept:'application/dicom+json'}});
       if(!response.ok){await response.body?.cancel();throw Object.assign(Error('조회 실패 (HTTP '+response.status+').'),{status:response.status});}
       const reader=response.body.getReader(),chunks=[];let size=0;
       while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>2*1024*1024){await reader.cancel();throw Error('응답이 2 MiB 상한을 초과했습니다.');}chunks.push(value);}
@@ -32,30 +34,31 @@
       return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
     }
     async function load(uids){
+      if(work.state()!=='active')return;const at=work.capture('document');resume=[...uids];
       cancel();if(!current()){note='로그인 계정을 확인할 수 없어 조회를 중단했습니다.';changed();return;}
       const mine=generation,queue=[...new Set(uids)];busy=true;entries.clear();note='';changed();
-      const active=()=>mine===generation&&current();
+      const active=()=>work.admits(at)&&mine===generation&&current();
       async function worker(){
         while(active()&&queue.length){
           const uid=queue.shift(),controller=new AbortController();controllers.add(controller);
           const timeout=setTimeout(()=>controller.abort(),15000);
           try{
             if(typeof uid!=='string'||uid.length>64||!uidPattern.test(uid))throw Error('검사 UID가 올바르지 않습니다.');
-            const rows=await read('/dicom-web/studies/'+encodeURIComponent(uid)+'/series?includefield=0020000D,0020000E,00180015&limit=501',controller.signal);
-            const parts=parse(rows,uid);if(active())entries.set(uid,{parts});
-          }catch(e){if(active()){
-            if([401,403].includes(e.status)){cancel();entries.clear();note='인증 또는 접근 권한 오류로 조회를 중단했습니다. 다시 로그인하거나 권한을 확인하세요.';changed();}
-            else entries.set(uid,{error:e.name==='AbortError'?'조회 시간이 초과되었습니다.':e.message});
-          }}
-          finally{clearTimeout(timeout);controllers.delete(controller);if(active())changed();}
+            const rows=await read('/dicom-web/studies/'+encodeURIComponent(uid)+'/series?includefield=0020000D,0020000E,00180015&limit=501',controller.signal,at);
+            const parts=parse(rows,uid);work.commit(at,()=>{if(active())entries.set(uid,{parts});});
+          }catch(e){work.commit(at,()=>{if(active())entries.set(uid,{error:e.name==='AbortError'?'조회 시간이 초과되었습니다.':e.message});});}
+          finally{clearTimeout(timeout);controllers.delete(controller);work.commit(at,()=>{if(active())changed();});}
         }
       }
-      await Promise.all([worker(),worker(),worker()]);if(active()){busy=false;changed();}
+      await Promise.all([worker(),worker(),worker()]);work.commit(at,()=>{if(active()){busy=false;resume=null;changed();}});
     }
     function end(){ended=true;reset('');changed();}
-    if(root){root.addEventListener('storage',e=>{if(e.key==='kin-session-ended')end();});
-      let channel;try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
-      root.addEventListener('pagehide',()=>{end();channel?.close();});}
+    work.onInvalidate(event=>{
+      if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
+      if(event.reason==='prepare')cancel();
+      if(event.reason==='cancel'&&resume){const uids=resume;resume=null;load(uids);}
+    });
+    if(root)root.addEventListener('pagehide',end);
     return {get,load,cancel:()=>{cancel();changed();},reset,
       sync(next){if(next!==scope||owner()!==bound)reset(next);},busy:()=>busy&&current(),note:()=>note};
   }

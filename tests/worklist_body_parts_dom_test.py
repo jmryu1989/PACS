@@ -8,6 +8,7 @@ import unittest
 from urllib.parse import unquote
 
 from playwright.sync_api import sync_playwright
+from module_session_harness import CORE, activate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,7 +52,7 @@ def extract_function(source, name):
 # S7-U5: the sliced page code passes its writes through the page's work-context gate and registers its end with the
 # page's session-end coordination. The shipped gate is loaded as it is, following a session that is at work for the whole
 # case; onSessionEnd() is main.html's two-line registry (the end coordination itself is tests/auth_logout_dom_test.py's).
-WORK_CONTEXT = ((Path(__file__).resolve().parents[1] / "worklist-v0/hpacs-lite/work-context.js").read_text(encoding="utf-8")
+WORK_CONTEXT = (CORE
                 + "\nconst work=KinWorkContext;work.follow({onLifecycle(listener){listener({state:'active',session:'SYN-SESSION'})}});"
                 + "const sessionEndHooks=[];function onSessionEnd(end){sessionEndHooks.push(end)}\n")
 MAIN_HARNESS = r"""
@@ -76,7 +77,7 @@ let fval={name:'manual criterion'},activeFilterName=null,renderCalls=0,managerRe
 const bodyRule=(op,value)=>({version:1,join:'and',rules:[{field:'bodyPart',op,...(value===undefined?{}:{value})}]});
 let userFilters=[{id:7,name:'Chest saved',mode:'Radiology',days:-1,quick:'',cols:{$compound:bodyRule('eq','chest')},sortKey:null,sortDir:0,isDefault:false}];
 const KinViewerOpening={key:()=> '["hospital","reader"]'};
-const KinAuth={session:()=>({sub:'reader'})};
+const KinAuth={session:()=>({sub:'reader'}),authFailure(){}};
 const savedFilterManager={refreshCounts:()=>managerRefreshes++};
 const withinDays=()=>true;
 function testCol(study,column,values){const value=values?.[column.k]??'';if(value==='')return true;
@@ -251,6 +252,7 @@ render();
         page.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8", body=MANAGER_HARNESS)
                    if route.request.url == "https://example.test/manager" else route.abort())
         page.goto("https://example.test/manager")
+        activate(page)
         page.add_style_tag(content=self.manager_css)
         page.add_script_tag(content=self.compound_source)
         page.add_script_tag(content=self.manager_source)

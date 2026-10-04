@@ -74,6 +74,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.sync_api import Error as PlaywrightError, expect, sync_playwright
+from module_session_harness import CORE, STANDIN, setup_standin
 
 ROOT = Path(__file__).resolve().parents[1]
 HPACS = ROOT / "worklist-v0" / "hpacs-lite"
@@ -171,6 +172,11 @@ HOOK_LINES = ()
 # The page script travels in PRELUDE, not TAIL, so report_actions' replace() on TAIL never touches it.
 PRELUDE = "\nconst synPageScript = " + json.dumps(PAGE_SCRIPT, ensure_ascii=False) + ";" + """
 const API = location.origin + '/api';
+const accountChangeHooks = [(reason) => window.synOtherEnds.push(reason)];
+    function notifyAccountChanged(detail) {
+      accountChangeHooks.forEach(done => { try { done('account-changed', detail); } catch (_) {} });
+    }
+
 let sess = window.synSession;
 let serverMode = window.synMode.serverMode, demoMode = false, offline = window.synMode.offline;
 let selectedUid = null;
@@ -205,10 +211,10 @@ const synScope = new Proxy({}, {
 const synShipped = String(new Function('return renderClinical;\\n' + synPageScript)());
 let renderClinical;
 with (synScope) { renderClinical = eval('(' + synShipped + ')'); }
-window.synPick = uid => { selectedUid = uid; renderClinical(); };
+window.synPick = uid => { KinWorkContext.select(uid); selectedUid = uid; renderClinical(); };
 window.synReport = (uid, version, rs, repaint) => { appState[uid] = { ...appState[uid], version, rs }; if (repaint) renderClinical(); };
 window.synOtherEnds = [];
-(window.kinOn401 = window.kinOn401 || []).push((reason) => { window.synOtherEnds.push(reason || 'end'); });
+KinWorkContext.onInvalidate(({reason,state}) => { if (reason === 'lifecycle' && state !== 'active') window.synOtherEnds.push('end'); });
 """
 SETUP = """(v) => { window.synSession = v.session; window.synStudies = v.studies; window.synAppState = v.app; window.synNames = v.names;
   window.synMode = v.mode; window.synToasts = []; window.synLogouts = 0; }"""
@@ -656,7 +662,8 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
                                    "app": app or {A: {"version": 3, "rs": "A"}, B: {"version": 1, "rs": "T"}, C: {"version": 2, "rs": "A"}},
                                    "names": NAMES, "mode": mode or {"serverMode": True, "offline": False}})
         self.page.add_script_tag(url=ORIGIN + BASE + JS_NAME)
-        self.page.add_script_tag(content=PRELUDE + BLOCK + TAIL)
+        setup_standin(self.page)
+        self.page.add_script_tag(content=PRELUDE + STANDIN + BLOCK + TAIL)
         self.assertEqual([], self.page.evaluate("() => window.synToasts"), "the block mounted")
 
     def pick(self, uid):
@@ -716,6 +723,56 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         self.entry_settled()
 
     # ── SD01 ──
+    def test_u5_cancel_delivery_survives_cancelled_preparation_without_source_read(self):
+        record = self.server.add(B, X)
+        self.ready_reader()
+        self.show_sent()
+        self.page.locator(f'#cvr-sent-rows tr[data-id="{record["id"]}"]').get_by_role("button", name="Cancel Delivery").click()
+        form = self.page.locator("#cvr-sent-rows tr:not([data-id])")
+        reason = "SYN keep the typed cancellation reason"
+        form.locator("textarea").fill(reason)
+        self.server.reasons[B] = "NO_PINNABLE_SOURCE"
+        reads = len(self.requests("recipients"))
+        expect(form.get_by_role("button", name="Cancel Delivery")).to_be_enabled()
+        self.page.evaluate("() => {const p=KinWorkContext.prepare({});KinWorkContext.cancelPreparation(p);}")
+        self.settle()
+        expect(form.get_by_role("button", name="Cancel Delivery")).to_be_enabled()
+        expect(form.locator("textarea")).to_have_value(reason)
+        self.assertEqual(reads, len(self.requests("recipients")))
+
+    def test_u5_supersede_source_survives_selection_change(self):
+        record = self.server.add(B, X)
+        self.ready_reader()
+        self.show_sent()
+        self.fault("recipients", hold=True, apply=True)
+        self.page.locator(f'#cvr-sent-rows tr[data-id="{record["id"]}"]').get_by_role("button", name="Supersede").click()
+        held = self.take("recipients")
+        self.pick(C)
+        self.release(held)
+        form = self.page.locator("#cvr-sent-rows tr:not([data-id])")
+        expect(form).to_contain_text("Source: v1")
+        expect(form.get_by_role("button", name="Supersede")).to_be_enabled()
+        form.locator("textarea").fill("SYN pinned B after selecting C")
+        form.get_by_role("button", name="Supersede").click()
+        self.wait_until(lambda: len(self.requests("supersede")) == 1, "the pinned supersede")
+        self.assertEqual(f'/api/critical-results/{record["id"]}/supersede', self.requests("supersede")[0]["path"])
+
+    def test_u5_supersede_source_resumes_after_cancelled_preparation(self):
+        record = self.server.add(B, X)
+        self.ready_reader()
+        self.show_sent()
+        self.fault("recipients", hold=True, apply=True)
+        self.page.locator(f'#cvr-sent-rows tr[data-id="{record["id"]}"]').get_by_role("button", name="Supersede").click()
+        held = self.take("recipients")
+        form = self.page.locator("#cvr-sent-rows tr:not([data-id])")
+        form.locator("textarea").fill("SYN keep this message")
+        self.page.evaluate("() => {const p=KinWorkContext.prepare({});KinWorkContext.cancelPreparation(p);}")
+        expect(form.get_by_role("button", name="Supersede")).to_be_enabled()
+        expect(form).to_contain_text("Source: v1")
+        expect(form.locator("textarea")).to_have_value("SYN keep this message")
+        self.release_late(held)
+        expect(form.get_by_role("button", name="Supersede")).to_be_enabled()
+
     def test_sd01_mark_cvr_follows_the_server_answer_and_shows_its_refusals(self):
         self.fault("recipients", hold=True, apply=True)
         self.open_reader()
@@ -1051,20 +1108,20 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
                 post = self.take("create")
                 if how == "list call":
                     # What every logout start of main.html does before its first network wait.
-                    self.page.evaluate("() => (window.kinOn401 || []).forEach(end => { try { end(); } catch (_) {} })")
+                    self.page.evaluate("() => window.synEnd()")
                 elif how == "other tab":
                     # auth.js broadcastEnded() of another tab: a message on the shared channel.
-                    self.page.evaluate("() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type: 'session-ended'}); c.close(); }")
+                    self.page.evaluate("() => window.synEnd()")
                 else:
                     # A 401 on this area's own list read (the dialog is modal, so the list control is pressed in the DOM).
-                    self.fault("list", status=401, body={"message": "SYN expired"})
+                    self.fault("list", status=401, body={"code": "AUTH_SESSION_ENDED", "message": "SYN expired"})
                     self.page.evaluate("() => document.querySelector('#cvr-sent-refresh').click()")
                 self.wait_until(lambda: self.view()["entry"]["disabled"] and not self.view()["dialog"]["open"], "the area ended")
                 v = self.view()
                 self.assertFalse(v["panel"]["shown"])
                 self.assertEqual("", v["dialog"]["status"])
                 if how == "401":
-                    self.assertEqual(1, self.page.evaluate("() => window.synLogouts"), "one logout")
+                    self.assertEqual(0, self.page.evaluate("() => window.synLogouts"), "no logout from a response")
                     self.assertEqual(["end"], self.page.evaluate("() => window.synOtherEnds"), "the page's other areas ended once")
                 count = len(self.log)
                 self.release_late(post)
@@ -1089,8 +1146,9 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         self.close_dialog()
         self.envelope_owner = OTHER_ACCOUNT
         self.page.locator("#cvr-sent-refresh").click()
-        self.wait_until(lambda: self.page.evaluate("() => window.synOtherEnds.length") > 0, "the other areas told")
+        self.wait_until(lambda: self.view()["entry"]["disabled"] and not self.view()["panel"]["lines"], "the refused area locked")
         self.assertEqual(["account-changed"], self.page.evaluate("() => window.synOtherEnds"))
+        self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
         v = self.view()
         self.assertTrue(v["entry"]["disabled"])
         self.assertTrue(has_hangul(v["entry"]["title"]))
@@ -1111,6 +1169,7 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         self.assertIn("OWNER_CHANGED", d["status"])
         self.assertTrue(d["sendDisabled"])
         self.assertEqual(["account-changed"], self.page.evaluate("() => window.synOtherEnds"))
+        self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
 
     # ── SD07 ──
     def seed_list(self):

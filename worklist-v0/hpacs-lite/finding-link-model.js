@@ -437,7 +437,7 @@
     if (error.status === 404) return comparison ? '소견이나 연결한 표식을 찾을 수 없거나 그 검사에 더 이상 접근할 수 없습니다. 작성 내용은 저장되지 않았습니다.'
       : '연결한 표식이 이 검사에 없습니다. 작성 내용은 저장되지 않았습니다.';
     const located = comparison || !!(context && context.job);
-    if (error.status === 403 && located) return '비교 검사가 이 검사와 다른 기관 소속이거나 접근할 수 없어 연결하지 않았습니다. 작성 내용은 저장되지 않았습니다.';
+    if (error.status === 403 && located && !String(error.code || '').startsWith('AUTH_')) return '비교 검사가 이 검사와 다른 기관 소속이거나 접근할 수 없어 연결하지 않았습니다. 작성 내용은 저장되지 않았습니다.';
     if (error.status === 400 && located) return '같은 환자의 비교 검사 하나만 연결할 수 있습니다. 비교 검사와 입력 내용을 확인하세요. 작성 내용은 저장되지 않았습니다.';
     if (error.status === 400 || error.status === 413) return '입력 길이와 연결 표식을 확인하세요. 작성 내용은 저장되지 않았습니다.';
     return '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.';
@@ -460,7 +460,7 @@
     new Set(value).size === value.length ? [...value] : null;
 
   /* Unsaved, editing and pending findings survive a study switch, a 403 and a mode exit as held
-   * copies bound to {subject, study}; only a logout, a 401 or a subject change destroys them. The
+   * copies bound to {subject, study}; the page lifecycle disposes them on session end. The
    * copy never shares an object with the entry an in-flight request still holds, so a late answer
    * cannot mutate or re-insert it, and its pending URL/body (with the requestId) stay byte-identical. */
   const heldKey = (subject, scope) => JSON.stringify([subject, scope]);
@@ -482,22 +482,11 @@
     catch (_) { return null; }
   }
 
-  /* The store owns scope, generation, read sequence and every pending request. `deps.fetch`,
-   * `deps.uuid`, `deps.navigate` (window.kinViewerHistoryNavigate) and `deps.notify` are injected
-   * so the same decisions run under Node with fake transports. `deps.recovered` carries the
-   * records a previous store of this same document handed over with detach().
-   * S2-B2: `deps.studies` is the viewer document's study set in URL order. With two studies the first
-   * anchors the store and the second is its comparison study: activating the comparison viewport keeps
-   * the anchor's entries, drafts and pending bodies, and the comparison heads come from that study's own
-   * viewer-items list. `deps.history`/`deps.activate` read the viewer for crossNavigate; `deps.setTimeout`,
-   * `deps.clearTimeout` and `deps.navigationMs` bound it.
-   * S5-U2b (Astra S5-U2b-X5-R-001 F01): `deps.session` is the viewer document's session (config/ohif.js
-   * kinViewerSession.writeModule, handed in by the Findings gate). Each /me answer is compared with the document's
-   * account before the store keeps it, a 401 (or a 403 on /me) ends the document's login, and the document's end —
-   * whoever saw it — ends this store in place. Without it the store keeps its own subject check only. */
+  /* The document's page gate and transport own session binding. The store retains its
+   * anchor and read sequences so a viewer mode change also invalidates old results. */
   function createStore(deps) {
-    const session = deps.session && typeof deps.session.answer === 'function' ? deps.session : null;
-    const fetchImpl = deps.fetch, makeId = deps.uuid, timeoutMs = Number.isFinite(deps.timeoutMs) ? deps.timeoutMs : 30000;
+    const work = root.KinWorkContext, transport = root.KinSessionTransport.page();
+    const makeId = deps.uuid, timeoutMs = Number.isFinite(deps.timeoutMs) ? deps.timeoutMs : 30000;
     const later = typeof deps.setTimeout === 'function' ? deps.setTimeout : (fn, ms) => setTimeout(fn, ms);
     const cancelLater = typeof deps.clearTimeout === 'function' ? deps.clearTimeout : id => clearTimeout(id);
     const navigationMs = Number.isFinite(deps.navigationMs) ? deps.navigationMs : 15000;
@@ -514,7 +503,7 @@
     for (const record of heldRecords(deps.recovered)) s.parked.set(heldKey(record.subject, record.scope), record);
     let controller = typeof AbortController === 'function' ? new AbortController() : null;
     const notify = () => { for (const fn of [...listeners]) { try { fn(); } catch (_) {} } };
-    const valid = ticket => !s.ended && !session?.ended() && ticket === s.generation;
+    const valid = ticket => work.state() === 'active' && !s.ended && ticket === s.generation;
     const writable = entry => !s.suspended && s.compat !== 'old-api' && s.me?.kind === 'member' && Array.isArray(s.me.roles) && s.me.roles.includes('radiologist') &&
       (!entry || !entry.head || entry.head.authorSub === s.subject);
     const hasWork = e => !!(e.editing || e.pending || e.busy);
@@ -590,7 +579,18 @@
       reset('로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'); s.ended = true; s.me = null; s.subject = ''; notify();
     }
     // The document's end reaches this store while it is attached (a mode exit detaches it first).
-    const offEnd = session && typeof session.onEnd === 'function' ? session.onEnd(end) : () => {};
+    let resume = false;
+    const offEnd = work.onInvalidate(({ reason, state }) => {
+      if (state === 'preparing') { resume = s.loading; controller?.abort(); }
+      else if (reason === 'cancel') {
+        s.generation++; s.loading = false; s.jobNavigation = null; controller = new AbortController();
+        for (const e of s.entries.values()) e.busy = false;
+        if (resume) { resume = false; void load(); }
+        if (s.pair.status === 'loading') void loadPair();
+        if (s.jobs.status === 'loading') void loadJobs();
+        notify();
+      } else if (reason === 'lifecycle' && state !== 'active') end();
+    });
     // Mode exit: hand every entry with work to the next store of this document and stop this one.
     function detach() {
       offEnd();
@@ -603,48 +603,35 @@
     function deny() { park(); reset('이 검사에 접근할 수 없습니다. 접근 확인 후 Refresh로 다시 불러오세요.'); s.me = null; }
     // `foreign`: a 403 may concern the comparison study, so it is returned to the caller instead of
     // holding this study's drafts; the caller re-reads the anchor list, which denies if the anchor is gone.
-    async function api(path, options, ticket, foreign) {
+    async function api(path, options, ticket, foreign, at) {
       options = options || {};
       const parentSignal = controller?.signal, request = typeof AbortController === 'function' ? new AbortController() : null;
       const abort = () => request?.abort();
       parentSignal?.addEventListener('abort', abort, { once: true });
       const timer = setTimeout(abort, timeoutMs);
       try {
-        // Nothing more leaves a document whose login has ended, whichever step of a read or write was next.
-        if (session?.ended()) { end(); throw { stale: true }; }
-        const res = await fetchImpl('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request?.signal,
+        if (!valid(ticket) || !work.admits(at)) throw { stale: true };
+        const res = await transport.request('/api' + path, { ...options, context: at, read: 'response', deadlineMs: 0, cache: 'no-store', credentials: 'same-origin', signal: request?.signal,
           headers: { 'X-KIN-CSRF': '1', [SCHEMA_HEADER]: String(SCHEMA), ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
-        // S5-U2c fix4 (Astra S5-U2c-C-R-001 F01): an answer valid() drops (its generation given up by a scope change, this store
-        // ended or detached, the document ended) is still the document's for what it says about the login, also when it came in
-        // just before the abort that gave it up: its 401 ends the login, and a /me answer of another account than the document's
-        // first one ends it (session.sameAccount: no verdict). An answer in use reaches the same below and through authenticate()'s
-        // answer(); a /me 403 refuses this account without ending the login and is read only then.
-        const drop = async data => {
-          if (res.status === 401) session?.refuse('unauthorized');
-          else if (path === '/me' && res.ok) session?.sameAccount(data === undefined ? await res.json().catch(() => null) : data);
-          return { stale: true };
-        };
-        if (!valid(ticket)) throw await drop();
-        if (res.status === 401 || (res.status === 403 && path === '/me')) { session?.refuse(res.status === 401 ? 'unauthorized' : 'forbidden'); end(); throw { stale: true }; }
-        if (res.status === 403 && !foreign) { deny(); throw { stale: true }; }
         const data = await res.json().catch(() => null);
-        if (!valid(ticket)) throw await drop(data);
-        if (!res.ok || !data) throw { status: res.status, code: data?.code, headRevision: data?.headRevision ?? null, headHidden: data?.headHidden ?? null, itemId: data?.itemId ?? null,
+        if (!valid(ticket) || !work.admits(at)) throw { stale: true };
+        const headerCode = res.headers?.get('X-KIN-Auth-Code');
+        const code = String(headerCode || '').startsWith('AUTH_') ? headerCode : data?.code;
+        if (res.status === 403 && !foreign && !String(code || '').startsWith('AUTH_')) { work.commit(at, deny); throw { stale: true }; }
+        if (!res.ok || !data) throw { status: res.status, code, headRevision: data?.headRevision ?? null, headHidden: data?.headHidden ?? null, itemId: data?.itemId ?? null,
           jobId: data?.jobId ?? null, markId: data?.markId ?? null };
         // R5: only a successful findings answer decides the API's record format; refusals and proxy errors never do.
-        if (/\/findings(?:[/?]|$)/.test(path)) s.compat = schemaOf(res) === String(SCHEMA) ? 'v2' : 'old-api';
+        work.commit(at, () => { if (/\/findings(?:[/?]|$)/.test(path)) s.compat = schemaOf(res) === String(SCHEMA) ? 'v2' : 'old-api'; });
         return data;
       } finally { clearTimeout(timer); parentSignal?.removeEventListener('abort', abort); }
     }
-    async function authenticate(ticket) {
-      const user = await api('/me', {}, ticket);
-      // The document's account first: another account (or a refused answer) has ended the document and this store with it, a
-      // clinician-only answer has taken the section down; neither is kept as this store's login.
-      if (session && !session.answer(user)) { end(); throw { stale: true }; }
-      if (!user || !user.sub || (s.subject && s.subject !== user.sub)) { end(); throw { stale: true }; }
-      s.me = user; s.subject = user.sub;
-      // Copies handed over from another login are never restored or counted for this one.
-      for (const [key, r] of [...s.parked]) if (r.subject !== s.subject) s.parked.delete(key);
+    async function authenticate(ticket, at) {
+      const user = await api('/me', {}, ticket, false, at);
+      if (!user || !user.sub || ((s.subject || s.history?.subject) && (s.subject || s.history?.subject) !== user.sub)) throw { status: 502 };
+      work.commit(at, () => {
+        s.me = user; s.subject = user.sub;
+        for (const [key, r] of [...s.parked]) if (r.subject !== s.subject) s.parked.delete(key);
+      });
       return user;
     }
     const path = () => '/studies/' + s.scope + '/findings';
@@ -679,19 +666,22 @@
       if (changed) notify();
     }
     async function load() {
+      const workAt = work.capture('document');
+      if (!work.admits(workAt)) return;
       if (!s.scope || s.ended || s.loading) return;
       const ticket = s.generation, seq = ++s.readSequence; s.loading = true;
       s.status = '소견 확인 중…'; notify();
       try {
-        await authenticate(ticket);
+        await authenticate(ticket, workAt);
         const heads = []; let cursor = null;
         do {
-          const page = await api(path() + '?includeHidden=true&limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
+          const page = await api(path() + '?includeHidden=true&limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket, false, workAt);
           if (seq !== s.readSequence) return;
           if (!page || !Array.isArray(page.items) || heads.length + page.items.length > LIMITS.findings || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           heads.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
         if (!valid(ticket) || seq !== s.readSequence) return;
+        work.commit(workAt, () => {
         s.suspended = false;
         restore();
         const seen = new Set();
@@ -717,12 +707,15 @@
           (dropped ? ' · 결과를 확인하지 못한 숨김·복원 요청이 있던 소견을 더 이상 볼 수 없어 목록에서 뺐습니다.' : '') +
           (s.compat === 'old-api' ? ' · ' + OLD_API_TEXT : '');
         if (pairOf()) loadPair();
-        if (s.continuation && !s.continuation.done) { s.continuation.done = true; Promise.resolve().then(continueLocation); }
-      } catch (e) { if (!e.stale && valid(ticket)) s.status = '소견 목록을 확인하지 못했습니다. Refresh로 다시 확인하세요.'; }
+        if (s.continuation && !s.continuation.done) { s.continuation.done = true; Promise.resolve().then(() => { work.commit(workAt, () => { void continueLocation(); }); }); }
+        });
+      } catch (e) { work.commit(workAt, () => { if (!e.stale && valid(ticket)) s.status = '소견 목록을 확인하지 못했습니다. Refresh로 다시 확인하세요.'; }); }
       finally {
         // A comparison refusal seen during this read asks for one more read of the anchor list.
-        if (ticket === s.generation) { s.loading = false; if (s.again) { s.again = false; Promise.resolve().then(load); } }
-        notify();
+        work.commit(workAt, () => {
+          if (ticket === s.generation) { s.loading = false; if (s.again) { s.again = false; Promise.resolve().then(() => { work.commit(workAt, () => { void load(); }); }); } }
+          notify();
+        });
       }
     }
     /* The authoritative list no longer contains a finding this login was working on (for example its
@@ -743,30 +736,34 @@
     // Saved, non-hidden heads of the comparison study from its own list; the pair ticket drops a late or
     // superseded answer, and a refusal clears the heads without a trace of their content.
     async function loadPair() {
+      const workAt = work.capture('document');
+      if (!work.admits(workAt)) return;
       const study = pairOf();
       if (!study || s.ended || s.suspended || !s.subject) return;
       const ticket = s.generation, seq = ++s.pair.sequence, subject = s.subject, anchor = s.scope;
-      const current = () => valid(ticket) && seq === s.pair.sequence && s.subject === subject && s.scope === anchor;
+      const current = () => work.admits(workAt) && valid(ticket) && seq === s.pair.sequence && s.subject === subject && s.scope === anchor;
       s.pair.status = 'loading'; notify();
       try {
         const items = []; let cursor = null;
         do {
-          const page = await api('/studies/' + study + '/viewer-items?limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket, true);
+          const page = await api('/studies/' + study + '/viewer-items?limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket, true, workAt);
           if (!current()) return;
           if (!page || !Array.isArray(page.items) || items.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           items.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
         const heads = items.map(item => comparisonHead(item, study)).filter(h => !h.hidden);
         if (!current()) return;
-        s.pair.heads = new Map(heads.map(h => [h.id, h])); s.pair.status = 'ready'; s.pair.refused = false;
+        work.commit(workAt, () => { s.pair.heads = new Map(heads.map(h => [h.id, h])); s.pair.status = 'ready'; s.pair.refused = false; });
       } catch (error) {
         if (!current()) return;
+        work.commit(workAt, () => {
         s.pair.heads = new Map();
-        s.pair.status = error && (error.status === 403 || error.status === 404) ? 'denied' : 'failed';
+        s.pair.status = error && ((error.status === 403 && !String(error.code || '').startsWith('AUTH_')) || error.status === 404) ? 'denied' : 'failed';
         // Findings naming that study are no longer readable either; the anchor list drops them, once per
         // refusal (the flag survives superseded reads and clears only with an answered list or a new anchor).
         if (s.pair.status === 'denied' && !s.pair.refused) { s.pair.refused = true; if (s.loading) s.again = true; else load(); }
-      } finally { if (current()) notify(); }
+        });
+      } finally { work.commit(workAt, () => { if (current()) notify(); }); }
     }
     function newDraft() {
       if (s.ended || s.suspended || !writable()) return null;
@@ -782,12 +779,14 @@
     /* S2-L2b: this anchor's Saved Comparison Jobs, for linking a saved view. The list is the viewer-jobs summary (no study set):
      * the server checks the anchor, the study set and N2 when the finding is saved. */
     async function loadJobs() {
+      const workAt = work.capture('document');
+      if (!work.admits(workAt)) return;
       if (!s.scope || s.ended || s.suspended || !s.subject) return;
       const ticket = s.generation, seq = ++s.jobs.sequence, anchor = s.scope;
-      const current = () => valid(ticket) && seq === s.jobs.sequence && s.scope === anchor;
+      const current = () => work.admits(workAt) && valid(ticket) && seq === s.jobs.sequence && s.scope === anchor;
       s.jobs.status = 'loading'; notify();
       try {
-        const page = await api('/studies/' + anchor + '/viewer-jobs?mine=false&includeHidden=false', {}, ticket);
+        const page = await api('/studies/' + anchor + '/viewer-jobs?mine=false&includeHidden=false', {}, ticket, false, workAt);
         if (!current()) return;
         if (!page || !Array.isArray(page.jobs) || page.jobs.length > 200) throw new Error('Invalid page');
         const list = new Map();
@@ -796,11 +795,11 @@
           list.set(job.id, { id: job.id, studyUid: anchor, revision: job.revision, hidden: false, snapshotVersion: job.snapshotVersion,
             title: typeof job.title === 'string' ? job.title : '', authorActor: typeof job.authorActor === 'string' ? job.authorActor : '' });
         }
-        s.jobs.list = list; s.jobs.status = 'ready';
+        work.commit(workAt, () => { s.jobs.list = list; s.jobs.status = 'ready'; });
       } catch (error) {
         if (!current() || error?.stale) return;
-        s.jobs.list = new Map(); s.jobs.status = 'failed';
-      } finally { if (current()) notify(); }
+        work.commit(workAt, () => { s.jobs.list = new Map(); s.jobs.status = 'failed'; });
+      } finally { work.commit(workAt, () => { if (current()) notify(); }); }
     }
     // The Job the viewer shows now with its 3D marks (kinViewerJobLocation.shown), copied as primitives.
     function shownJob() {
@@ -908,6 +907,8 @@
       e.editing = true; notify();
     }
     async function save(e, action, reason) {
+      const workAt = work.capture('document');
+      if (!work.admits(workAt)) return;
       if (s.compat === 'old-api' && !s.ended && s.entries.get(e.id) === e && !e.busy) {
         e.message = OLD_API_TEXT + ' 작성 내용은 저장되지 않았습니다.'; notify(); return false;
       }
@@ -929,39 +930,48 @@
       }
       const ticket = s.generation; e.busy = true; notify();
       try {
-        await authenticate(ticket);
+        await authenticate(ticket, workAt);
         // An API that no longer names this record format writes nothing more from this client.
         if (s.compat === 'old-api') throw { status: 0, oldApi: true };
-        const head = await api(e.pending.url, { method: 'POST', body: e.pending.body }, ticket, comparison || job);
+        const head = await api(e.pending.url, { method: 'POST', body: e.pending.body }, ticket, comparison || job, workAt);
         if (!valid(ticket) || !s.entries.has(e.id)) return false;
         if (!uuid(head?.id) || !head.item || !Array.isArray(head.item.sources)) throw { status: 200 };
+        if (!work.admits(workAt)) return false;
+        let reused = false;
+        work.commit(workAt, () => {
         const duplicate = s.entries.get(head.id);
         if (duplicate && duplicate !== e && hasWork(duplicate)) {
-          s.entries.delete(e.id); duplicate.message = '같은 요청의 저장 결과를 확인했습니다. 이 항목의 작성 내용은 유지됩니다.'; return true;
+          s.entries.delete(e.id); duplicate.message = '같은 요청의 저장 결과를 확인했습니다. 이 항목의 작성 내용은 유지됩니다.'; reused = true; return;
         }
         if (duplicate && duplicate !== e) s.entries.delete(duplicate.id);
         s.entries.delete(e.id); e.id = head.id; s.entries.set(e.id, e);
         Object.assign(e, { head, draft: itemOnly(head), links: e.links, pending: null, latest: null, editing: false, staleSource: null, message: '저장 완료' });
         notify();
+        });
+        if (reused) return true;
         // Link states are a server fact of the current heads; refresh them after every write.
         await load();
         return true;
       } catch (error) {
-        if (error.stale || !valid(ticket)) return false;
-        if (error.oldApi) { e.message = OLD_API_TEXT + ' 작성 내용은 저장되지 않았습니다.'; return false; }
+        if (error.stale || !valid(ticket) || !work.admits(workAt)) return false;
+        if (error.oldApi) { work.commit(workAt, () => { e.message = OLD_API_TEXT + ' 작성 내용은 저장되지 않았습니다.'; }); return false; }
+        work.commit(workAt, () => {
         e.message = errorMessage(error, { comparison, job });
         if (error.status >= 400 && error.status < 500) e.pending = null;
         if (error.code === 'FINDING_SOURCE_STALE' && error.jobId) e.staleSource = { jobId: error.jobId, markId: error.markId || undefined, headRevision: error.headRevision, headHidden: error.headHidden };
         else if (error.code === 'FINDING_SOURCE_STALE') e.staleSource = { itemId: error.itemId, headRevision: error.headRevision, headHidden: error.headHidden };
-        else if (error.status === 409 && error.code !== 'FINDING_COMPARISON_STUDY') await load();
+        });
+        if (error.status === 409 && error.code !== 'FINDING_SOURCE_STALE' && error.code !== 'FINDING_COMPARISON_STUDY') await load();
         // A saved finding that answers 404 may have become unreadable, and a comparison 403 may hide an
         // anchor refusal: the authoritative list decides (lose() or deny()) and the draft stays otherwise.
-        else if ((error.status === 404 && e.head) || (error.status === 403 && (comparison || job))) { e.busy = false; await load(); }
+        else if ((error.status === 404 && e.head) || (error.status === 403 && !String(error.code || '').startsWith('AUTH_') && (comparison || job))) { work.commit(workAt, () => { e.busy = false; }); await load(); }
         else if (error.status === 404 && comparison) loadPair();
         return false;
-      } finally { if (valid(ticket) && s.entries.has(e.id)) { e.busy = false; notify(); } }
+      } finally { work.commit(workAt, () => { if (valid(ticket) && s.entries.has(e.id)) { e.busy = false; notify(); } }); }
     }
     async function navigate(e, index) {
+      const workAt = work.capture('document');
+      if (!work.admits(workAt)) return;
       if (!valid(s.generation) || s.entries.get(e.id) !== e || !e.head) return refusal('invalid');
       const sources = e.head.item.sources, at = Number.isSafeInteger(index) ? index : (e.head.item.primary ?? 0);
       const source = sources[at];
@@ -987,17 +997,20 @@
       const away = !!shown && shown !== s.scope && !!studies && studies.includes(shown);
       // S2-C: the note comes only from the viewer's live entry, copied as primitives, never from the list's link state.
       const arrived = result.ok === true ? viewerResult(result) : null;
+      work.commit(workAt, () => {
       e.message = result.ok ? joined(annotationText(result.annotation), liveText(arrived, source.revision)) : away ? ANCHOR_SCOPE_TEXT : reasonText(result.reason);
-      notify(); return result;
+      notify(); }); return result;
     }
     /* S2-L2b: a saved location. The viewer's kinViewerJobLocation (read at call time) restores it in this document, or for another
      * study set continues in a new one; its outcome is copied field by field. The backstop only changes the text: navigation stays
      * suspended until the restore settles or this document ends, and a late answer is shown only for the same login, anchor and entry. */
     async function navigateJob(e, source, index, waitReady) {
+      const workAt = work.capture('document');
+      if (!work.admits(workAt)) return;
       const copy = jobCopy(source, s.scope), ticket = s.generation, seq = ++s.navigation, subject = s.subject;
       // `e.location` pairs the shown text with its machine-readable result (locationResult), so the panel never labels another text.
-      const say = (message, result) => { e.message = message; e.location = { result, message }; };
-      const finish = (message, result) => { say(message, result.result || result.reason); notify(); return result; };
+      const say = (message, result) => { work.commit(workAt, () => { e.message = message; e.location = { result, message }; }); };
+      const finish = (message, result) => { work.commit(workAt, () => { say(message, result.result || result.reason); notify(); }); return result; };
       if (!copy) return finish(LOCATION_TEXT.invalid, { ok: false, reason: 'invalid', state: 'refused' });
       if (s.ended) return finish(reasonText('ended'), { ok: false, reason: 'ended', state: 'refused' });
       if (s.suspended || !subject) return finish(reasonText('busy'), { ok: false, reason: 'busy', state: 'refused' });
@@ -1013,11 +1026,11 @@
         ...(same ? {} : { finding: { id: e.head.id, revision: e.head.revision, source: index } }) };
       const pending = { seq, ticket };
       s.jobNavigation = pending; say(LOCATION_TEXT.pending, 'pending'); notify();
-      const current = () => valid(ticket) && s.subject === subject && s.entries.get(e.id) === e;
-      const backstop = later(() => { if (s.jobNavigation === pending && current()) { say(LOCATION_TEXT.backstop, 'restore-timeout'); notify(); } }, jobMs);
+      const current = () => work.admits(workAt) && valid(ticket) && s.subject === subject && s.entries.get(e.id) === e;
+      const backstop = later(() => { work.commit(workAt, () => { if (s.jobNavigation === pending && current()) { say(LOCATION_TEXT.backstop, 'restore-timeout'); notify(); } }); }, jobMs);
       let value;
       try { value = await location.restore(request); } catch (_) { value = null; }
-      finally { cancelLater(backstop); if (s.jobNavigation === pending) s.jobNavigation = null; }
+      finally { cancelLater(backstop); work.commit(workAt, () => { if (s.jobNavigation === pending) s.jobNavigation = null; }); }
       const result = locationOutcome(value);
       if (!current()) return { ok: false, reason: 'superseded', state: result.state };
       const reached = locationResult(result, copy);
@@ -1045,6 +1058,8 @@
     // A source of the comparison study: only through crossNavigate within the 15 s bound; the newest
     // Go to Image of this store, an anchor/session change or a replaced entry stops it.
     async function navigateAcross(e, target, frozenRevision) {
+      const workAt = work.capture('document');
+      if (!work.admits(workAt)) return;
       const ticket = s.generation, seq = ++s.navigation;
       const history = deps.history, activate = deps.activate, go = deps.navigate;
       let result, phase = 'before', expired = false, timer = null;
@@ -1052,7 +1067,7 @@
       else if (s.pair.status === 'denied') result = refusal('busy');
       else if (typeof history !== 'function' || typeof activate !== 'function' || typeof go !== 'function') result = refusal('tool-missing');
       else {
-        const live = () => valid(ticket) && seq === s.navigation && s.entries.get(e.id) === e;
+        const live = () => work.admits(workAt) && valid(ticket) && seq === s.navigation && s.entries.get(e.id) === e;
         const control = { stopped: () => expired ? 'timeout' : live() ? null : 'superseded', phase: name => { phase = name; },
           wait: ms => new Promise(resolve => later(resolve, ms)) };
         const bound = new Promise(resolve => { timer = later(() => { expired = true; resolve(refusal('timeout')); }, navigationMs); });
@@ -1061,14 +1076,17 @@
         finally { cancelLater(timer); }
       }
       if (!valid(ticket) || seq !== s.navigation || s.entries.get(e.id) !== e) return { ...refusal('superseded'), phase };
+      work.commit(workAt, () => {
       e.message = result.ok ? joined(COMPARISON_ARRIVAL, annotationText(result.annotation), liveText(result, frozenRevision))
         : reasonText(result.reason) + phaseText(phase);
-      notify(); return { ...result, phase };
+      notify(); }); return { ...result, phase };
     }
     async function history(e, cursor) {
+      const workAt = work.capture('document');
+      if (!work.admits(workAt)) return;
       if (!valid(s.generation) || s.entries.get(e.id) !== e || !e.head) return null;
       const ticket = s.generation;
-      const data = await api(path() + '/' + e.head.id + '/revisions?limit=50' + (cursor ? '&cursor=' + cursor : ''), {}, ticket);
+      const data = await api(path() + '/' + e.head.id + '/revisions?limit=50' + (cursor ? '&cursor=' + cursor : ''), {}, ticket, false, workAt);
       if (!valid(ticket) || s.entries.get(e.id) !== e) return null;
       return data;
     }

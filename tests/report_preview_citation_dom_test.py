@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+from module_session_harness import CORE, STANDIN
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = Path(os.environ.get("KIN_PREVIEW_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")).read_text(encoding="utf-8")
@@ -123,10 +124,14 @@ CITATIONJS
 PREVIEWJS
 </script>
 <script>
+COREJS
 const API = "/api";
 let selectedUid = "UIDVALUE", warnedFor = null, appState = {};
 let previewCalls = [], citeCalls = [], toasts = [], logouts = 0;
 const KinAuth = { logout: async () => { logouts += 1; } };
+STANDINJS
+work.select(selectedUid);
+const staleAnswer = () => Object.assign(new Error('stale'), {stale: true});
 const displayActor = value => String(value ?? "").split("@")[0];
 function syncStudy() {}
 function updateReportButtons() {}
@@ -147,12 +152,12 @@ window.fetch = async (url, options = {}) => {
     citeCalls.push({ path, method: options.method ?? "GET" });
     if (citeQueue.length) citeLast = citeQueue.shift();
     const reply = citeLast ?? { status: 500, body: { message: "인용을 확인할 수 없습니다" } };
-    const answer = () => ({ ok: reply.status < 400, status: reply.status, json: async () => reply.body });
+    const answer = () => new Response(JSON.stringify(reply.body), {status: reply.status, headers: reply.headers});
     if (holdCite > 0) { holdCite -= 1; return new Promise(resolve => { heldCite.push(() => resolve(answer())); }); }
     return answer();
   }
   previewCalls.push({ path, method: options.method ?? "GET" });
-  return { ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(previewAnswer)) };
+  return new Response(JSON.stringify(previewAnswer), {status: 200});
 };
 APIFN
 
@@ -264,6 +269,8 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
         self.page.on("pageerror", lambda error: errors.append(str(error)))
         harness = (HARNESS
                    .replace("CITATIONJS", CITATION_JS)
+                   .replace("COREJS", CORE)
+                   .replace("STANDINJS", STANDIN)
                    .replace("PREVIEWJS", PREVIEW_JS)
                    .replace("APIFN", API_FN)
                    .replace("PREVIEWANSWER", json.dumps(answer or preview_answer(), ensure_ascii=False))
@@ -356,6 +363,23 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
         self.require_print()
 
     # ── D4 · a server failure is unknown, never empty ──
+
+    def test_coded_403_is_unknown_instead_of_outside_study_access(self):
+        for location in ("header", "body"):
+            with self.subTest(location=location):
+                reply = {"status": 403, "body": {"message": "SYN binding failed"}}
+                if location == "header":
+                    reply["headers"] = {"X-KIN-Auth-Code": "AUTH_CSRF_REQUIRED"}
+                else:
+                    reply["body"]["code"] = "AUTH_SESSION_BUSY"
+                self.open(cite=reply)
+                section = self.section()
+                self.assertIn(UNKNOWN, section)
+                self.assertNotIn(REFUSED, section)
+                self.assertIn(BODY_LINE, self.page.evaluate("ui.srcdoc()"))
+                self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
+                self.assertFalse(self.page.evaluate("ui.printDisabled()"))
+                self.page.close()
 
     def test_a_failed_read_is_unknown_and_does_not_blank_the_paper(self):
         self.open(cite={"status": 500, "body": {"message": "인용을 확인할 수 없습니다"}})
@@ -552,11 +576,11 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
     # ── D17 · a session that ended takes the paper with it ──
 
     def test_an_expired_session_blanks_the_paper_instead_of_drawing_unknown(self):
-        self.open(cite={"status": 401, "body": {}}, render=False)
-        self.page.wait_for_function("expired => ui.status() === expired", arg=EXPIRED)
+        self.open(cite={"status": 401, "body": {"code": "AUTH_SESSION_ENDED"}}, render=False)
+        self.page.wait_for_function("KinWorkContext.state() === 'ending'")
         self.assertEqual("", self.page.evaluate("ui.srcdoc()"), "nothing is drawn on a logged-out screen")
-        self.assertEqual(EXPIRED, self.page.evaluate("ui.status()"))
-        self.assertEqual(1, self.page.evaluate("ui.logouts()"), "the shipped api() ended the session")
+        self.assertEqual("", self.page.evaluate("ui.status()"))
+        self.assertEqual(0, self.page.evaluate("ui.logouts()"), "an authoritative end sends no logout request")
         self.assertTrue(self.page.evaluate("ui.printDisabled()"))
 
     # ── D14 · a head that was never saved has nothing to attest ──

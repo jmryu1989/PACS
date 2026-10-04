@@ -2,6 +2,9 @@
  * editor remains owned by the worklist; viewing a related image cannot retarget it. */
 window.KinReadingWorkspace = function (app) {
   'use strict';
+  const work=window.KinWorkContext;
+  const guarded=fn=>{const at=work.capture('document');return(...args)=>work.commit(at,()=>fn(...args));};
+  let renewFrame=()=>{},renewReturn=()=>{};
   const $ = s => document.querySelector(s);
   const node = (tag, text, parent) => {
     const el = document.createElement(tag); if (text) el.textContent = text;
@@ -220,10 +223,10 @@ window.KinReadingWorkspace = function (app) {
   separator('report', 'reading-resize-report', 'Image and Report Size', 'reading-viewer reading-report-column', host);
   separator('relatedHeight', 'reading-resize-related', 'Related Panel Height', relatedRegion.id, relatedRegion);
   separator('relatedListHeight', 'reading-resize-prior', 'Related List and Report Size', relatedList.id + ' ' + priorReport.id, relatedList);
-  const panelObserver = new ResizeObserver(() => { if (active && !ended) renderPanels(); });
+  let panelObserver = new ResizeObserver(guarded(() => { if (active && !ended) renderPanels(); }));
   panelObserver.observe(split); panelObserver.observe($('.workrow')); panelObserver.observe(relatedList);
   [...relatedList.children].filter(child => !child.classList.contains('grid2')).forEach(child => panelObserver.observe(child));
-  const panelWindowResize = () => { if (panelDrag) cancelPanelDrag(); if (active && !ended) renderPanels(); };
+  let panelWindowResize = guarded(() => { if (panelDrag) cancelPanelDrag(); if (active && !ended) renderPanels(); });
   window.addEventListener('resize', panelWindowResize);
   const boundDocuments = new WeakSet();
   let returnChannel=null;
@@ -234,7 +237,7 @@ window.KinReadingWorkspace = function (app) {
     if(!owner)return null;
     try{
       const token=crypto.randomUUID(),link=new BroadcastChannel('kin-reading-return:'+token);returnChannel=link;
-      link.onmessage=e=>{
+      const receive=e=>{
         const m=e.data;if(!m||m.type!=='request'||typeof m.request!=='string'||!/^[0-9a-f-]{36}$/.test(m.request))return;
         const reply=result=>{if(returnChannel===link)link.postMessage({type:'result',request:m.request,result});};
         const matchingScope=()=>sameTarget()&&shown&&JSON.stringify([shown.uid,...(shown.prior?[shown.prior]:[])])===JSON.stringify(studies)&&Array.isArray(m.studies)&&m.studies.length===studies.length&&m.studies.every((uid,i)=>uid===studies[i])&&studies.includes(m.activeUid);
@@ -245,17 +248,18 @@ window.KinReadingWorkspace = function (app) {
         focusPane('report');window.focus();
         // A background/occluded window may not receive animation frames. Still
         // answer with the manual-selection fallback if focus was not granted.
-        setTimeout(()=>{
+        setTimeout(guarded(()=>{
           if(ended||!app.allowed()||app.noteOwner?.()!==owner){reply('session');return;}
           if(!active||app.current()!==report||!matchingScope()||modalOpen(document)){reply('context');return;}
           if(!field.isConnected||!field.getClientRects().length||field.disabled||field.closest('[inert]')){reply('unavailable');return;}
           reply(document.hasFocus()&&document.activeElement===field?'focused':'ready');
-        },0);
+        }),0);
       };
+      renewReturn=()=>{link.onmessage=guarded(receive);};renewReturn();
       return token;
     }catch(_){return null;}
   }
-  const queueObserver = new MutationObserver(navigation);
+  let queueObserver = new MutationObserver(guarded(navigation));
   queueObserver.observe($('#rows'), { childList: true });
   function navigation() {
     const queue = app.queue(), i = queue.findIndex(s => s.uid === app.current());
@@ -590,13 +594,14 @@ window.KinReadingWorkspace = function (app) {
         pending = shown; recovery.hidden = false; back.hidden = discard.hidden = true; retry.hidden = false;
       }
     }
-    frame.onload = () => {
+    const onLoad = () => {
       if (ended || ticket !== epoch || currentFrame !== frame) return;
       loaded = false; failed = false; frame.inert = true; deadline = Date.now() + 45000; observedDocument = undefined; observedHref = undefined;
       if (sameTarget()) { info.textContent = ''; status.textContent = '영상 작업공간을 불러오는 중…'; separate.disabled = true; }
       check();
     };
-    frame.src = url(r); timer = setInterval(check, 250);
+    renewFrame=()=>{frame.onload=guarded(onLoad);clearInterval(timer);timer=setInterval(guarded(check),250);};
+    frame.src = url(r); renewFrame();
     return true;
   }
   function open(uid, prior = null, series = null) { return attempt(request(uid, prior, series), false); }
@@ -623,10 +628,20 @@ window.KinReadingWorkspace = function (app) {
   // Session invalidation must hide the embedded document even if its own request
   // has not yet noticed the expired account. Never reconnect it from a late load.
   function end() { ended = true; cancelPanelDrag(); panelObserver.disconnect(); window.removeEventListener('resize', panelWindowResize); shortcuts.end(); epoch++; returnChannel?.close();returnChannel=null;clearInterval(timer); timer = null; queueObserver.disconnect(); document.removeEventListener('keydown', parentKeyboard, true); frame?.remove(); frame = null; shown = pending = null; loaded = false; active = false; layout(); identify(); }
-  let channel;
-  try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
-  window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
-  window.addEventListener('pagehide', () => { end(); channel?.close(); });
+  work.onInvalidate(event=>{
+    if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state)){end();return;}
+    if(event.reason==='prepare'){cancelPanelDrag();clearInterval(timer);panelObserver.disconnect();queueObserver.disconnect();}
+    if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active'){
+      panelObserver.disconnect();queueObserver.disconnect();
+      panelObserver=new ResizeObserver(guarded(()=>{if(active&&!ended)renderPanels();}));
+      panelObserver.observe(split);panelObserver.observe($('.workrow'));panelObserver.observe(relatedList);
+      [...relatedList.children].filter(child=>!child.classList.contains('grid2')).forEach(child=>panelObserver.observe(child));
+      queueObserver=new MutationObserver(guarded(navigation));queueObserver.observe($('#rows'),{childList:true});
+      window.removeEventListener('resize',panelWindowResize);panelWindowResize=guarded(()=>{if(panelDrag)cancelPanelDrag();if(active&&!ended)renderPanels();});window.addEventListener('resize',panelWindowResize);
+      renewFrame();renewReturn();
+    }
+  });
+  window.addEventListener('pagehide',end);
   window.addEventListener('beforeunload', e => { const s = viewerState(); let warn=false;try{warn=frame?.contentWindow.kinViewerFrameCoverageState?.().warn;}catch(_){}if (s.busy || s.dirty || warn) { e.preventDefault(); e.returnValue = ''; } });
   return { open, openJob, resume, exit: leave, selectionChanged, refreshNote: updateNote, active: () => active, end, snapshotPanels, applyPanels, viewerTarget,
     preferences: { host: nav, read: () => autoNote.checked, generation: () => preferenceGeneration,

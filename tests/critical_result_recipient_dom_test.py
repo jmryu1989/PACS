@@ -24,7 +24,7 @@ the origin's storage or in what the origin's storage holds (contract §13's writ
   rd06 cancel or supersede first: the refusal, the server state and Open Replacement; the replacement acknowledged.
   rd07 the badge is the server `pending`.
   rd08 late answers, log out, another tab, account change, the storage observer, inbox values never stored, and the
-       product's session-end signal (S7-U5: one set/remove pair when the end begins; with the logout POST held the second
+       product's session-end signal (S7-U5: a session-bound persistent end record; with the logout POST held the second
        tab has already closed and moved and sends nothing). Steps after a logout use a new context, and the account A ->
        B step signs B in through the shipped landing's explicit login (the end state stays until then, §0.C 6).
   rd09 the reading panel's R3/R4 full rows: the contract sentence and the pinned body, no Acknowledge.
@@ -105,8 +105,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import Error as PlaywrightError, expect, sync_playwright
+from module_session_harness import CORE, STANDIN, setup_standin
 
-from clinician_home_dom_test import ACKNOWLEDGED, AVOIDED, BROADCAST_ENDED, CLOSED_VIEW, PAGE_TEXT, acknowledgement_outside
+from clinician_home_dom_test import ACKNOWLEDGED, AVOIDED, CLOSED_VIEW, PAGE_TEXT, acknowledgement_outside
 from critical_result_sender_dom_test import has_hangul, page_html, slice_between
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,7 +121,7 @@ def lf_text(path):
 
 MAIN = lf_text(HPACS / "main.html")
 INBOX_JS = lf_text(HPACS / INBOX)
-HOME_FILES = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", INBOX)}
+HOME_FILES = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", INBOX)}
 ORIGIN = "https://recipient.test"
 BASE = "/worklist/hpacs-lite/"
 
@@ -132,6 +133,11 @@ BLOCK = slice_between(MAIN, *BLOCK_MARKS)
 # run: KinAuth.init() gives the session and goOnline() connects the server. test_18d replaces the logout line.
 PRELUDE = """
 const API = location.origin + '/api';
+const accountChangeHooks = [(reason) => window.synOtherEnds.push(reason)];
+    function notifyAccountChanged(detail) {
+      accountChangeHooks.forEach(done => { try { done('account-changed', detail); } catch (_) {} });
+    }
+
 let sess = window.synSession, serverMode = !!window.synMode.serverMode, demoMode = !!window.synMode.demoMode;
 let offline = !!window.synMode.offline, selectedUid = null;
 const toast = (message, kind) => { window.synToasts.push([message, kind]); };
@@ -140,12 +146,12 @@ const KinAuth = {
   logout: async () => { window.synLogouts += 1; },
 };
 window.synBoot = session => { window.synSession = session; sess = session; serverMode = true; offline = false; };
-window.synPick = uid => { selectedUid = uid; };
+window.synPick = uid => { KinWorkContext.select(uid); selectedUid = uid; };
 """
-# The page's other areas in its end list (window.kinOn401): what each call told them.
+# Observe document lifecycle independently of the inbox.
 TAIL = """
 window.synOtherEnds = [];
-(window.kinOn401 = window.kinOn401 || []).push(reason => { window.synOtherEnds.push(reason || 'end'); });
+KinWorkContext.onInvalidate(({reason,state}) => { if (reason === 'lifecycle' && !['active','preparing'].includes(state)) window.synOtherEnds.push('end'); });
 """
 SETUP = """(v) => { window.synSession = v.session; window.synMode = v.mode; window.synToasts = []; window.synLogouts = 0; }"""
 
@@ -767,6 +773,8 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         # S7-U5 (§0.C 6): the shipped index.html, its Keycloak probe and the login round trip, for the one flow that signs
         # another account in after a logout in the same browser (rd08 S-11) through the explicit login the landing offers.
         self.real_index = False
+        self.auth_session = "SYN-SESSION-" + CLIN["sub"]
+        self.entry_proof = None
         self.documents = []
         self.report_requests = []
         self.envelope_owner = None
@@ -856,15 +864,26 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         if self.real_index and method == "GET" and path == "/auth/realms/kin/.well-known/openid-configuration":
             route.fulfill(json={"issuer": ORIGIN + "/auth/realms/kin"})
             return
-        if self.real_index and method == "GET" and path == "/api/auth/login":
-            # The OIDC round trip (Keycloak, then the callback) stands in as one page that moves on to where a clinician-only
-            # login lands (main.html hands it to Clinician Home); the account is the one the case set in self.me.
-            route.fulfill(body='<!doctype html><title>SYN login</title><script>location.replace("' + BASE + 'clinician.html")'
-                               '</script>', content_type="text/html; charset=utf-8")
+        if self.real_index and method == "GET" and path in ("/api/auth/login", "/auth/syn/login"):
+            self.auth_session = "SYN-SESSION-" + self.me["sub"]
+            self.entry_proof = "SYN-entry-" + self.me["sub"]
+            route.fulfill(body='<!doctype html><title>SYN login</title><script>location.replace("' + BASE
+                               + 'clinician.html#kin-entry=' + self.entry_proof + '")</script>',
+                          content_type="text/html; charset=utf-8")
             return
         if path.startswith("/api/") and request.headers.get("x-kin-csrf") != "1":
             self.unexpected.append(f"{method} {path} without X-KIN-CSRF")
             route.abort()
+            return
+        if self.real_index and method == "POST" and path == "/api/auth/login":
+            self.assertEqual(self.auth_session, request.headers.get("x-kin-session"))
+            route.fulfill(json={"location": ORIGIN + "/auth/syn/login"})
+            return
+        if self.real_index and method == "POST" and path == "/api/auth/entry":
+            self.assertIsNotNone(self.entry_proof)
+            self.assertEqual({"proof": self.entry_proof}, request.post_data_json)
+            self.entry_proof = None
+            route.fulfill(json={"sessionId": self.auth_session})
             return
         query = parse_qs(url.query, keep_blank_values=True)
         if self.host == "home" and method == "GET" and path == "/api/me":
@@ -941,7 +960,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         elif held["answer"][1] is None:
             route.fulfill(status=held["answer"][0], body="")
         else:
-            route.fulfill(status=held["answer"][0], json=held["answer"][1])
+            route.fulfill(status=held["answer"][0], json=held["answer"][1], headers=fault.get("headers"))
 
     # ── helpers ──
     def wait_until(self, predicate, what, timeout=10.0):
@@ -1065,7 +1084,8 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.page.evaluate(SETUP, {"session": session(person, list(roles)) if boot else None,
                                    "mode": mode or {"serverMode": boot, "offline": False, "demoMode": False}})
         self.page.add_script_tag(url=ORIGIN + BASE + INBOX)
-        self.page.add_script_tag(content=PRELUDE + BLOCK + TAIL)
+        setup_standin(self.page)
+        self.page.add_script_tag(content=PRELUDE + STANDIN + BLOCK + TAIL)
         self.assertEqual([], self.page.evaluate("() => window.synToasts"), "the block mounted")
         self.reads_settled()
         if fold_open and self.view()["shown"]:
@@ -1436,7 +1456,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.late_list_answers()
         self.ack_answer_after_log_out()
         self.another_tab_ends_the_session()
-        self.account_recheck_leaves()
+        self.bound_mismatch_leaves()
         self.another_accounts_envelope_locks()
         self.session_end_signal_reaches_the_second_tab()
         self.inbox_values_do_not_outlive_the_account()
@@ -1539,7 +1559,9 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         count, documents = len(self.log), len(self.documents)
         other = self.watch_page(self.context.new_page())
         other.goto(ORIGIN + BASE + "blank.html")
-        other.evaluate(BROADCAST_ENDED)
+        other.evaluate("""session => { const c=new BroadcastChannel('kin-session');
+          c.postMessage({type:'session-ended',session,operation:1,status:'ending'});c.close(); }""",
+                       self.page.evaluate("KinWorkContext.session()"))
         self.page.wait_for_url(ORIGIN + BASE + "index.html")
         self.release_late(held)
         self.page.wait_for_timeout(300)
@@ -1547,18 +1569,17 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.assertEqual(count, len(self.log))
         self.assertEqual([ORIGIN + BASE + "index.html"], [url for page, url in self.documents[documents:] if page is self.page])
 
-    def account_recheck_leaves(self):
-        # S-04: Studies' account re-check finds another account while the inbox read is held: the page leaves, nothing more.
-        self.me_queue = [me(CLIN, ["clinician"]), me(CLIN_B, ["clinician"])]
-        self.fault("list", hold=True)
+    def bound_mismatch_leaves(self):
+        # The bound work response, rather than a separate /me probe, identifies a replaced session.
+        self.fresh_context()
+        self.fault("list", hold=True, status=409, body={"code": "AUTH_SESSION_MISMATCH", "message": "SYN replaced"})
         self.page.goto(ORIGIN + BASE + "clinician.html")
         held = self.take("list")
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        count = len(self.log)
+        count, logouts = len(self.log), len(self.logouts)
         self.release_late(held)
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
         self.page.wait_for_timeout(300)
-        self.assertEqual(count, len(self.log))
-        self.me_queue = []
+        self.assertEqual((count, logouts), (len(self.log), len(self.logouts)))
 
     def another_accounts_envelope_locks(self):
         # S-07: the list answers for another account. The region locks, and so do the question and image request areas of
@@ -1595,8 +1616,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.assert_no_count("locked")
 
     def session_end_signal_reaches_the_second_tab(self):
-        # S-12: the product's session-end signal as auth.js sends it, read from the same write log: one setItem of
-        # kin-session-ended with the time in decimal milliseconds, then its removeItem; the second tab of the same account
+        # S7-U5 persists the bound ending record before the logout request. The second tab of the same session
         # closes on it and its inbox reads nothing more. S7-U5 §0.C 2: the signal leaves when the end begins, before the
         # logout POST; with that POST held the second tab has already closed and moved, and sends no logout of its own.
         self.server.add(rec(57))
@@ -1604,28 +1624,27 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         second = self.watch_page(self.context.new_page())
         second.goto(ORIGIN + BASE + "clinician.html")
         expect(second.locator("#critical-results")).to_contain_text("SYN-PT-57")
-        writes, before, logouts = len(self.writes), self.page.evaluate("() => Date.now()"), len(self.logouts)
+        ending_session = self.page.evaluate("KinWorkContext.session()")
+        writes, logouts = len(self.writes), len(self.logouts)
         self.hold_logouts = True
         self.log_out_home()
         self.wait_until(lambda: self.held_logouts, "POST /auth/logout")
         second.wait_for_url(ORIGIN + BASE + "index.html")
-        after = second.evaluate("() => Date.now()")
         count = len(self.log)
         second.wait_for_timeout(300)
         self.assertEqual((count, 1), (len(self.log), len(self.logouts) - logouts),
                          "while the POST is held the second tab has moved and sent nothing, no logout of its own either")
-        signal = [w for w in self.writes[writes:] if w["kind"] == "localStorage" and w["names"] == ["kin-session-ended"]]
-        self.assertEqual(["setItem", "removeItem"], [w["op"] for w in signal])
-        self.assertRegex(signal[0]["text"], r"^\d+$")
-        self.assertTrue(before <= int(signal[0]["text"]) <= after, (before, signal[0]["text"], after))
+        records = self.end_records(writes)
+        self.assertTrue(records)
+        self.assertTrue(all(r["session"] == ending_session for r in records))
+        self.assertEqual("ending", records[-1]["status"])
         self.hold_logouts = False
         self.held_logouts.pop().fulfill(status=204, body="")
         self.page.wait_for_url(ORIGIN + BASE + "index.html")
         second.wait_for_timeout(300)
-        signal = [w for w in self.writes[writes:] if w["kind"] == "localStorage" and w["names"] == ["kin-session-ended"]]
-        self.assertEqual((count, 1, ["setItem", "removeItem"]),
-                         (len(self.log), len(self.logouts) - logouts, [w["op"] for w in signal]),
-                         "the POST's answer sends no second signal")
+        self.assertEqual((count, 1), (len(self.log), len(self.logouts) - logouts))
+        self.assertEqual((ending_session, "confirmed"),
+                         (self.end_records(writes)[-1]["session"], self.end_records(writes)[-1]["status"]))
         second.close()
 
     def inbox_values_do_not_outlive_the_account(self):
@@ -2182,7 +2201,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                 self.press("Refresh")
                 held = self.take("list")
                 if end:
-                    self.page.evaluate("() => (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} })")
+                    self.page.evaluate("synEnd()")
                     self.assertFalse(self.view()["shown"], "the panel ended before the network answered")
                     self.release_late(held)
                     count = len(self.log)
@@ -2197,7 +2216,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.servers.append(s)
         s.add(rec(146, case="R2"))
         self.open_panel(fold_open=True)
-        self.page.evaluate("() => (window.kinOn401 || []).forEach(done => { try { done('account-changed', 'SYN other'); } catch (_) {} })")
+        self.page.evaluate("criticalInbox.end('account-changed', 'SYN other')")
         self.assertEqual([], self.view()["rows"])
         self.assert_no_count("locked")
         count = len(self.log)
@@ -2207,7 +2226,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.open_panel(fold_open=True)
         self.page.evaluate("() => window.dispatchEvent(new Event('pagehide'))")
         self.assertFalse(self.view()["shown"])
-        # A-17: a 401 on each of the panel's requests ends the panel, calls the end list once, then the logout option once.
+        # S7-U5: only a coded session end closes the panel, without an automatic logout POST.
         for kind in ("pending", "all", "more", "read", "ack"):
             with self.subTest(expired=kind):
                 s = self.server = RecipientServer([INSTITUTION, RAD["sub"]])
@@ -2216,7 +2235,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                 s.add(rec(146, case="R2"), rec(147, case="R2"), rec(148, case="R2"),
                       rec(149, case="R2", state="superseded", replacedBy=rid(148)))
                 s.page_size = 2
-                expired = {"status": 401, "body": {"statusCode": 401, "message": "SYN expired"}}
+                expired = {"status": 401, "body": {"statusCode": 401, "code": "AUTH_SESSION_ENDED", "message": "SYN expired"}}
                 if kind == "pending":
                     self.fault("list", **expired)
                     self.open_panel()
@@ -2236,11 +2255,48 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                     else:
                         self.fault("ack", **expired)
                         self.acknowledge("SYN-PT-148")
-                self.wait_until(lambda: self.page.evaluate("() => window.synLogouts") == 1, "the logout option")
+                self.wait_until(lambda: self.page.evaluate("() => KinWorkContext.state()") == "ending", "the page lifecycle end")
                 self.settle()
                 self.assertFalse(self.view()["shown"])
-                self.assertEqual((["end"], 1), (self.page.evaluate("() => window.synOtherEnds"),
+                self.assertEqual((["end"], 0), (self.page.evaluate("() => window.synOtherEnds"),
                                                 self.page.evaluate("() => window.synLogouts")))
+
+    def test_u5_panel_account_changes_notify_host_without_ending_session(self):
+        for cause in ("envelope", "OWNER_CHANGED"):
+            with self.subTest(cause=cause):
+                n = 3000
+                s = self.mx_server("panel")
+                s.add(self.mx_rec("panel", n))
+                self.mx_open("panel")
+                if cause == "envelope":
+                    self.fault("list", patch=lambda p: p.update(owner=OTHER_OWNER))
+                    self.press("Refresh")
+                else:
+                    self.fault("ack", status=409, body={"code": "OWNER_CHANGED", "message": "SYN owner changed"})
+                    self.mx_press("Acknowledge", mark(n))
+                self.wait_until(lambda: self.page.evaluate("synOtherEnds.length") == 1, "the host account change notice")
+                self.assertEqual(["account-changed"], self.page.evaluate("synOtherEnds"))
+                self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
+                self.assertEqual(0, self.page.evaluate("synLogouts"))
+                self.assertEqual([], self.view()["rows"])
+                expect(self.region().get_by_role("button", name="Refresh", exact=True)).to_be_disabled()
+
+    def test_u5_plain_panel_failures_close_nothing(self):
+        s = self.server = RecipientServer([INSTITUTION, RAD["sub"]])
+        self.servers.append(s)
+        s.add(rec(146, case="R2"))
+        self.open_panel(fold_open=True)
+        for status in (401, 500):
+            self.fault("list", status=status, body={"message": "SYN request failed"})
+            self.press("Refresh")
+            self.reads_settled()
+            self.assertTrue(self.view()["shown"])
+            self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
+            self.assertEqual(0, self.page.evaluate("synLogouts"))
+            expect(self.region().get_by_role("button", name="Refresh", exact=True)).to_be_enabled()
+            self.press("Refresh")
+            self.reads_settled()
+            self.row("SYN-PT-146")
 
     # ── RX15: wording, fonts, targets, keyboard, external strings ──
     def hostile_records(self, hostile):
@@ -2353,13 +2409,19 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         for name in ("Show All", "Refresh", "Acknowledge", "Check Again", "Open Replacement"):
             self.assertIn(name, stops)
 
+    def end_records(self, start):
+        return [json.loads(w["text"]) for w in self.writes[start:]
+                if w["kind"] == "localStorage" and w["names"] == ["kin-session-end"] and w["op"] == "setItem"]
+
     def log_out_signal(self):
+        ending_session = self.page.evaluate("KinWorkContext.session()")
         writes = len(self.writes)
         self.log_out_home()
         self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        signal = [w for w in self.writes[writes:] if w["kind"] == "localStorage" and w["names"] == ["kin-session-ended"]]
-        self.assertEqual(["setItem", "removeItem"], [w["op"] for w in signal])
-        self.assertRegex(signal[0]["text"], r"^\d+$")
+        records = self.end_records(writes)
+        self.assertTrue(any(r["status"] == "ending" for r in records))
+        self.assertTrue(all(r["session"] == ending_session for r in records))
+        self.assertEqual("confirmed", records[-1]["status"])
 
     # ── RX16: sessions that never read ──
     def test_rx16_sessions_that_never_read(self):
@@ -2465,12 +2527,12 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
         self.reads_settled()
         self.assertEqual({"view": ["received"], "state": ["pending"]}, self.requests("list")[-1]["query"])
         self.assertEqual(1, len(self.view()["rows"]))
-        # A 401 ends the session the way the page does: closed, one POST /auth/logout, one navigation.
-        self.fault("list", status=401, body={"statusCode": 401, "message": "SYN expired"})
+        # A coded session end closes the page without another logout request.
+        self.fault("list", status=401, body={"statusCode": 401, "code": "AUTH_SESSION_ENDED", "message": "SYN expired"})
         logouts, documents = len(self.logouts), len(self.documents)
         self.press("Refresh")
         self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        self.assertEqual(1, len(self.logouts) - logouts)
+        self.assertEqual(0, len(self.logouts) - logouts)
         self.assertEqual([ORIGIN + BASE + "index.html"], [url for page, url in self.documents[documents:] if page is self.page])
 
     # ── RX18: the reading panel's summary line, history and one bar ──
@@ -3876,7 +3938,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
             with self.subTest(host=host):
                 b = 1800 if host == "home" else 1850
                 s = self.mx_server(host)
-                kinds = ("404", "403", "500", "timeout", "other", "malformed")
+                kinds = ("404", "403", *(("auth_body", "auth_header") if host == "panel" else ()), "500", "timeout", "other", "malformed")
                 subject = {kind: b + 1 + 2 * i for i, kind in enumerate(kinds)}
                 for x in subject.values():
                     s.add(self.mx_rec(host, x), self.mx_rec(host, x + 1, state="superseded", replacedBy=rid(x)))
@@ -3885,7 +3947,9 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                     self.mx_press("Open Replacement", mark(x + 1))
                     self.idle()
                 opened = {x: self.mx_view(x) for x in subject.values()}
-                answers = {"404": ({"status": 404, "body": {"code": "CRITICAL_RESULT_NOT_FOUND", "message": "SYN gone"}},
+                answers = {"auth_body": ({"status": 403, "body": {"code": "AUTH_SESSION_BUSY", "message": "SYN binding failed"}}, "AUTH_SESSION_BUSY"),
+                           "auth_header": ({"status": 403, "headers": {"X-KIN-Auth-Code": "AUTH_CSRF_REQUIRED"}, "body": {"message": "SYN binding failed"}}, "AUTH_CSRF_REQUIRED"),
+                           "404": ({"status": 404, "body": {"code": "CRITICAL_RESULT_NOT_FOUND", "message": "SYN gone"}},
                                    "CRITICAL_RESULT_NOT_FOUND"),
                            "403": ({"status": 403, "body": {"code": "CRITICAL_RESULT_ROLE_REQUIRED", "message": "SYN role"}},
                                    "CRITICAL_RESULT_ROLE_REQUIRED"),
@@ -4038,7 +4102,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
             self.held_logouts.pop().fulfill(status=204, body="")
             self.page.wait_for_url(ORIGIN + BASE + "index.html")
         else:
-            self.page.evaluate("() => (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} })")
+            self.page.evaluate("synEnd()")
             self.assertFalse(self.view()["shown"], "the panel ended at once")
             count = len(self.log)
             self.release_late(held)
@@ -4072,7 +4136,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                     self.advance(1000)
                     self.page.evaluate("s => { window.synSession = s; }", session(RAD, ["radiologist"]))
                     self.advance(1000)
-                    self.assertIn("account-changed", self.page.evaluate("() => window.synOtherEnds"))
+                    self.assertEqual(["account-changed"], self.page.evaluate("() => window.synOtherEnds"), "domain locks propagate without ending the session")
                     count = len(self.log)
                     for held in (listed, read, ack):
                         self.release_late(held)
@@ -4566,13 +4630,13 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                 with self.subTest(host=host, l2="401"):
                     n += 10
                     x, j, k, l1, l2, at_l1, count = self.two_lists(
-                        host, n, second={"status": 401, "body": {"statusCode": 401, "message": "SYN expired"}})
+                        host, n, second={"status": 401, "body": {"statusCode": 401, "code": "AUTH_SESSION_ENDED", "message": "SYN expired"}})
                     reads = len(self.log)
                     self.release_late(l2)
                     if host == "home":
                         self.page.wait_for_url(ORIGIN + BASE + "index.html")
                     else:
-                        self.wait_until(lambda: self.page.evaluate("() => window.synLogouts") == 1, "the logout option")
+                        self.wait_until(lambda: self.page.evaluate("() => KinWorkContext.state()") == "ending", "the page lifecycle end")
                         self.assertFalse(self.view()["shown"])
                     self.release_late(l1)
                     if host == "panel":
@@ -4812,7 +4876,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                         self.advance(1000)
                         self.page.evaluate("s => { window.synSession = s; }", session(RAD, ["radiologist"]))
                         self.advance(1000)
-                        self.assertIn("account-changed", self.page.evaluate("() => window.synOtherEnds"))
+                        self.assertEqual(["account-changed"], self.page.evaluate("() => window.synOtherEnds"), "domain locks propagate without ending the session")
                         reads = len(self.log)
                         for held in (l1, l2):
                             self.release_late(held)

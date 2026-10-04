@@ -39,18 +39,30 @@ window.KinViewerIdentity=(()=>{
     if(saved)try{const c=new BroadcastChannel('kin-viewer-identity');c.postMessage({owner,persisted:true});c.close();}catch(_){}return saved;
   }
   function subscribe(owner,apply){
-    const receive=data=>{const v=data?.owner===owner&&normalize(data.value);if(v)apply(v);};
-    const raw=()=>{try{return localStorage.getItem(key(owner));}catch(_){return undefined;}};let seen=raw();
-    const persisted=()=>{const next=raw();if(next===undefined||next===seen)return;seen=next;apply(read(owner));};
-    // A delayed notification for an unchanged stored value must not erase a
-    // newer in-memory choice made while persistence was unavailable.
-    const local=e=>{if(e.detail?.owner!==owner)return;seen=raw();receive(e.detail);},storage=e=>{if(e.key===key(owner))persisted();};let channel,parent;
-    window.addEventListener('kin-viewer-identity-change',local);window.addEventListener('storage',storage);
-    try{if(window.parent!==window){parent=window.parent;parent.addEventListener('kin-viewer-identity-change',local);}}catch(_){}
-    try{channel=new BroadcastChannel('kin-viewer-identity');channel.onmessage=e=>{if(e.data?.owner===owner&&e.data.persisted===true)persisted();};}catch(_){}
-    return ()=>{window.removeEventListener('kin-viewer-identity-change',local);window.removeEventListener('storage',storage);try{parent?.removeEventListener('kin-viewer-identity-change',local);}catch(_){}channel?.close();};
+    const work=window.KinWorkContext;
+    const raw=()=>{try{return localStorage.getItem(key(owner));}catch(_){return undefined;}};
+    let seen=raw(),dispose=()=>{};
+    function bind(){
+      dispose();const at=work.capture('document');let channel,parent;
+      const persisted=()=>{const next=raw();if(next===undefined||next===seen)return;seen=next;apply(read(owner));};
+      const local=e=>work.commit(at,()=>{if(e.detail?.owner!==owner)return;const value=normalize(e.detail.value);if(value){seen=raw();apply(value);}});
+      const storage=e=>work.commit(at,()=>{if(e.key===key(owner))persisted();});
+      window.addEventListener('kin-viewer-identity-change',local);window.addEventListener('storage',storage);
+      try{if(window.parent!==window){parent=window.parent;parent.addEventListener('kin-viewer-identity-change',local);}}catch(_){}
+      try{channel=new BroadcastChannel('kin-viewer-identity');channel.onmessage=e=>work.commit(at,()=>{if(e.data?.owner===owner&&e.data.persisted===true)persisted();});}catch(_){}
+      dispose=()=>{window.removeEventListener('kin-viewer-identity-change',local);window.removeEventListener('storage',storage);try{parent?.removeEventListener('kin-viewer-identity-change',local);}catch(_){}channel?.close();};
+      work.commit(at,persisted);
+    }
+    const stop=work.onInvalidate(event=>{
+      if(event.reason==='prepare')dispose();
+      if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active')bind();
+      else if(event.reason==='lifecycle'&&event.state!=='preparing')dispose();
+    });
+    bind();return()=>{stop();dispose();};
   }
   function mount({services,resolve,owner,allowed,studies}){
+    const work=window.KinWorkContext;
+    const guarded=fn=>{const at=work.capture('document');return(...args)=>work.commit(at,()=>fn(...args));};
     const bound=JSON.stringify(owner());let value=read(bound),ended=false,observing=false;const labels=new Map(),loading=new Map(),titles=new Map();
     const neutral='판독 뷰어 — KOREA IMAGING NETWORK';let frame;try{frame=window.frameElement;}catch(_){}
     function setTitle(title){if(document.title!==title)document.title=title;if(frame?.isConnected&&frame.contentWindow===window)frame.title=title===neutral?'영상 뷰어':title;}
@@ -109,7 +121,7 @@ window.KinViewerIdentity=(()=>{
     function changed(id){
       if(ended)return;
       if(typeof id==='string'){labels.get(id)?.remove();labels.delete(id);titles.delete(id);pending.add(id);syncTitle();}else{clear();all=true;}
-      if(queued)return;queued=true;queueMicrotask(()=>{queued=false;if(ended)return;const refreshAll=all;all=false;const ids=[...pending];pending.clear();if(refreshAll)refresh();else for(const id of ids)refresh(id);});
+      if(queued)return;queued=true;queueMicrotask(guarded(()=>{queued=false;if(ended)return;const refreshAll=all;all=false;const ids=[...pending];pending.clear();if(refreshAll)refresh();else for(const id of ids)refresh(id);}));
     }
     const coreEvents=window.cornerstone?.Enums?.Events;
     const gridChanged=()=>changed(),imageChanged=e=>{
@@ -128,9 +140,25 @@ window.KinViewerIdentity=(()=>{
     // A completed fetch can precede the actual canvas render. Failed loads stay
     // unlabeled until a subsequent successful image/render or viewport removal.
     const events=['PRE_STACK_NEW_IMAGE','STACK_NEW_IMAGE','VOLUME_VIEWPORT_NEW_VOLUME','IMAGE_RENDERED'].map(k=>coreEvents?.[k]);
-    try{const grid=services.viewportGridService,keys=Object.values(grid.EVENTS);if(!keys.length||events.some(e=>!e))throw new Error('identity events unavailable');for(const event of new Set(keys))subscriptions.push(grid.subscribe(event,gridChanged));for(const event of events)document.addEventListener(event,imageChanged,true);observing=true;}catch(_){subscriptions.forEach(s=>s.unsubscribe());subscriptions.length=0;for(const event of events.filter(Boolean))document.removeEventListener(event,imageChanged,true);}
-    const unsubscribe=subscribe(bound,next=>{value=next;refresh();}),timer=setInterval(refresh,500);refresh();
-    return {dispose(){ended=true;clearInterval(timer);unsubscribe();subscriptions.forEach(s=>s.unsubscribe());for(const event of events.filter(Boolean))document.removeEventListener(event,imageChanged,true);loading.clear();clear();}};
+    let removeNative=()=>{},timer=null;
+    function bind(){
+      removeNative();clearInterval(timer);queued=false;
+      const grid=services.viewportGridService,keys=Object.values(grid.EVENTS),onGrid=guarded(gridChanged),onImage=guarded(imageChanged);
+      try{if(!keys.length||events.some(e=>!e))throw new Error('identity events unavailable');
+        for(const event of new Set(keys))subscriptions.push(grid.subscribe(event,onGrid));
+        for(const event of events)document.addEventListener(event,onImage,true);observing=true;
+      }catch(_){observing=false;}
+      removeNative=()=>{subscriptions.splice(0).forEach(s=>s.unsubscribe());for(const event of events.filter(Boolean))document.removeEventListener(event,onImage,true);};
+      timer=setInterval(guarded(refresh),500);
+    }
+    const unsubscribe=subscribe(bound,next=>{value=next;refresh();});
+    const stop=work.onInvalidate(event=>{
+      if(event.reason==='prepare'){removeNative();clearInterval(timer);}
+      if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active'){bind();refresh();}
+      else if(event.reason==='lifecycle'&&event.state!=='preparing')dispose();
+    });
+    function dispose(){ended=true;clearInterval(timer);unsubscribe();removeNative();stop();loading.clear();clear();}
+    bind();refresh();return {dispose};
   }
   return {positions:[...positions],modalities:[...modalities],defaults,normalize,read,publish,subscribe,mount};
 })();

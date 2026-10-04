@@ -3,6 +3,7 @@
   'use strict';
   window.KinSharedFilterManager = { mount };
   function mount(options) {
+    const work=window.KinWorkContext;
     const panel = document.createElement('details'); panel.id = 'sfm-shared';
     panel.innerHTML = `<summary>Institution Searches</summary>
       <p><small>기관 배포본을 개인 검색으로 복사한 뒤 편집·적용합니다. 복사본은 이후 배포 변경과 별개이며 기본 검색은 유지됩니다.</small></p>
@@ -81,10 +82,11 @@
       }
       $('count').textContent = `${checked.size} selected`; lock(busy);
     }
-    $('load').addEventListener('click', () => options.run(async signal => {
-      options.acceptPersonal(await options.api.readFolders(signal));
-      accept(await options.api.readShared(signal)); options.status('개인 폴더와 기관 검색 모음을 불러왔습니다. 편집 내용은 유지했습니다.');
-    }));
+    $('load').addEventListener('click', () => options.run(async (signal,at) => {
+      const personal=await options.api.readFolders(signal,at);
+      if(!work.commit(at,()=>options.acceptPersonal(personal)))return;
+      const shared=await options.api.readShared(signal,at);work.commit(at,()=>{accept(shared);options.status('개인 폴더와 기관 검색 모음을 불러왔습니다. 편집 내용은 유지했습니다.');});
+    }, true));
     $('source').addEventListener('change', () => {
       const initial = JSON.parse(baseline);
       if ($('description').value !== initial[4] || $('order').value !== initial[5]) return;
@@ -98,19 +100,21 @@
       if (!confirm(`기관 폴더 "${from || '전체 모음'}"의 검색 ${selected.length}개와 하위·빈 폴더를 개인 "${$('destination').value}"로 복사할까요?\n${selected.join('\n')}\n이름 접두사: ${$('prefix').value || '(없음)'}\n기존 검색과 기본 검색은 바꾸지 않으며 자동 적용하지 않습니다.`)) return;
       const body = { expectedOwner: library.owner, revision: library.revision, personalRevision: options.personal().revision,
         from, to: $('destination').value, namePrefix: $('prefix').value };
-      options.run(async signal => {
-        options.acceptPersonal(await options.api.copyShared(body, signal)); acknowledge([0,1,2]);
-        options.status('개인 검색으로 복사했습니다. 개인 목록에서 검색을 선택해 편집하거나 적용하세요.');
+      options.run(async (signal,at) => {
+        const personal=await options.api.copyShared(body, signal,at);
+        work.commit(at,()=>{options.acceptPersonal(personal); acknowledge([0,1,2]);
+        options.status('개인 검색으로 복사했습니다. 개인 목록에서 검색을 선택해 편집하거나 적용하세요.');});
       });
     });
     function change(command, message) {
       if (busy || !library?.canManage || !confirm(message)) return;
       const body = { expectedOwner: library.owner, revision: library.revision, command };
-      options.run(async signal => {
-        accept(await options.api.writeShared(body, signal));
+      options.run(async (signal,at) => {
+        const shared=await options.api.writeShared(body, signal,at);
+        work.commit(at,()=>{accept(shared);
         acknowledge({ 'publish-folder': [1,2,3,6], 'save-folder': [0,4,5], 'move-folder': [0,1],
           'remove-folder': [0], 'move-searches': [1], 'delete-searches': [] }[command.action]);
-        options.status('기관 검색 모음을 갱신했습니다. 기존 개인 복사본은 유지됩니다.');
+        options.status('기관 검색 모음을 갱신했습니다. 기존 개인 복사본은 유지됩니다.');});
       });
     }
     $('publish').addEventListener('click', () => {
@@ -137,6 +141,10 @@
       baseline = value(); lock(false);
     }
     reset();
-    return { lock, reset, dirty: () => value() !== baseline };
+    async function refresh(signal,at){
+      if(!library)return;
+      const shared=await options.api.readShared(signal,at);work.commit(at,()=>accept(shared));
+    }
+    return { lock, reset, refresh, dirty: () => value() !== baseline };
   }
 })();
