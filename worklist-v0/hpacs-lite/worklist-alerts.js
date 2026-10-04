@@ -34,8 +34,9 @@
     }};
   }
   function mount({button,owner,available,refresh=async()=>{}}){
+    const work=root.KinWorkContext;
     const bound=owner(),key=bound&&'kin-worklist-alerts:v1:'+bound,model=observer(),initial=initialObserver();
-    let ended=false,settings=defaults(),audio=null,armed=false,busy=false,channel,storage,feedback='',last='Waiting for List',generation=0,observations=0;
+    let ended=false,settings=defaults(),audio=null,armed=false,busy=false,storage,feedback='',last='Waiting for List',generation=0,observations=0;
     const tones=new Set(),live=()=>!ended&&!!bound&&owner()===bound&&available();
     try{storage=root.localStorage;const raw=key?storage.getItem(key):null;if(raw!==null){const value=raw.length<=256&&normalize(JSON.parse(raw));if(value)settings=value;else feedback='저장된 설정 오류 · 기본 Off';}}catch(_){feedback='저장소 사용 불가 · 이 창에서만 설정합니다.';}
     const initialEnabled=settings.initialEmergency;
@@ -53,6 +54,7 @@
     }
     function stopTones(){for(const oscillator of tones){try{oscillator.stop();}catch(_){}try{oscillator.disconnect();}catch(_){}}tones.clear();}
     function tone(emergency){
+      if(work.state()!=='active')return false;
       if(!live()||!armed||audio?.state!=='running'){feedback='목록 변화가 있습니다. 소리 알림은 Enable Sound로 직접 허용하세요.';return false;}
       let gain,oscillator;
       try{
@@ -72,19 +74,22 @@
       return played;
     }
     async function sound(testing){
-      if(!live()||busy)return;const ticket=++generation;busy=true;feedback='';render();
+      const at=work.capture('document');
+      if(!work.admits(at)||!live()||busy)return;const ticket=++generation;busy=true;feedback='';render();
       try{
         if(!testing&&armed){armed=false;stopTones();await audio.suspend();}
         else{
           const Audio=root.AudioContext||root.webkitAudioContext;if(!Audio)throw Error('이 브라우저는 소리 알림을 지원하지 않습니다.');
-          if(!audio){audio=new Audio();audio.onstatechange=()=>{if(audio?.state!=='running')armed=false;render();};}
+          if(!audio){audio=new Audio();bindAudio();}
           await audio.resume();
           if(!live()||ticket!==generation)return;
           if(audio.state!=='running')throw Error('브라우저에서 소리를 허용한 뒤 다시 시도하세요.');
-          armed=true;if(testing){if(tone(false))feedback='시험음 재생을 요청했습니다. 실제 스피커와 음량을 확인하세요.';}else if(initial.count()&&settings.initialEmergency){const before=observations;await refresh();if(live()&&ticket===generation&&observations===before)feedback='최신 목록을 확인하지 못해 첫 목록 알림을 보류했습니다. Refresh 후 다시 확인하세요.';}
+          if(!work.admits(at))return;
+          work.commit(at,()=>{armed=true;if(testing&&tone(false))feedback='시험음 재생을 요청했습니다. 실제 스피커와 음량을 확인하세요.';});
+          if(!testing&&initial.count()&&settings.initialEmergency){const before=observations;await refresh();work.commit(at,()=>{if(live()&&ticket===generation&&observations===before)feedback='최신 목록을 확인하지 못해 첫 목록 알림을 보류했습니다. Refresh 후 다시 확인하세요.';});}
         }
-      }catch(e){if(live()&&ticket===generation){armed=false;feedback=e.message==='이 브라우저는 소리 알림을 지원하지 않습니다.'?e.message:'소리를 시작하지 못했습니다. 브라우저 권한·출력 장치를 확인하고 다시 시도하세요.';}}
-      finally{if(ticket===generation){busy=false;render();}}
+      }catch(e){work.commit(at,()=>{if(live()&&ticket===generation){armed=false;feedback=e.message==='이 브라우저는 소리 알림을 지원하지 않습니다.'?e.message:'소리를 시작하지 못했습니다. 브라우저 권한·출력 장치를 확인하고 다시 시도하세요.';}});}
+      finally{work.commit(at,()=>{if(ticket===generation){busy=false;render();}});}
     }
     fresh.onchange=urgent.onchange=initialBox.onchange=volume.onchange=()=>{
       if(!live()){render();return;}
@@ -95,12 +100,17 @@
     enable.onclick=()=>sound(false);test.onclick=()=>sound(true);done.onclick=()=>dialog.close();
     button.onclick=()=>{render();if(live()){dialog.showModal();fresh.focus();}};
     dialog.addEventListener('close',()=>{if(live())button.focus();});
-    function end(){if(ended)return;ended=true;generation++;armed=false;busy=false;model.reset();initial.clear();stopTones();if(audio){audio.onstatechange=null;audio.close().catch(()=>{});}channel?.close();if(dialog.open)dialog.close();render();}
-    root.addEventListener('storage',e=>{if(e.key==='kin-session-ended')end();});root.addEventListener('pagehide',end);
-    try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+    function end(){if(ended)return;ended=true;generation++;armed=false;busy=false;model.reset();initial.clear();stopTones();if(audio){audio.onstatechange=null;audio.close().catch(()=>{});}if(dialog.open)dialog.close();render();}
+    function bindAudio(){const at=work.capture('document');if(audio)audio.onstatechange=()=>work.commit(at,()=>{if(audio?.state!=='running')armed=false;render();});}
+    work.onInvalidate(({reason,state})=>{
+      if(state==='preparing'){stopTones();if(audio)audio.onstatechange=null;}
+      else if(reason==='cancel'){generation++;busy=false;bindAudio();render();}
+      else if(reason==='lifecycle'&&state!=='active')end();
+    });
+    root.addEventListener('pagehide',end);
     render();
     return {observe(rows){
-      if(!live())return;
+      if(work.state()!=='active'||!live())return;
       try{
         const result=model.observe(rows);observations++;initial.observe(rows,initialEnabled&&settings.initialEmergency);last=result.baseline?'List Baseline Ready':'New to List '+result.newStudies+' · Emergency Changes '+result.emergency;
         const initialPlayed=initialSound();

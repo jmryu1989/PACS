@@ -1,3 +1,4 @@
+const {install} = require('./module_session_harness.cjs');
 'use strict';
 /* TEST-S2-PURE-NAV / TEST-S2-PURE-STORE (REQ-S2-NAVIGATE, REQ-S2-FRESHNESS, REQ-S2-IDEMPOTENT).
  * Two production sources run here, never a copy: the shipped finding-link-model.js (link state,
@@ -223,6 +224,8 @@ async function mounted(options) {
   window.fetch = fetch;
   const sandbox = { window, document, crypto: webcrypto, TextEncoder, console, Event, AbortController,
     setInterval: fn => { ticks.push(fn); return ticks.length; }, clearInterval() {}, setTimeout, clearTimeout, fetch };
+  install(window.fetch, sandbox);
+  window.KinWorkContext=sandbox.KinWorkContext;window.KinSessionTransport=sandbox.KinSessionTransport;
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
   const extension = window.config.extensions.find(e => e.id === 'kin.viewer-history');
@@ -406,7 +409,7 @@ function transport() {
     item: { schemaVersion: 1, title: 'T', text: 'X', hidden: false, primary: 0, sources: [{ itemId: ITEM, revision: 2, studyUid: A, kind: 'length', seriesUid: SERIES, sopUid: SOP, frame: 1, frameOfReferenceUid: '1.9', label: 'L', values: [20], calculator: 'kin-native-manual-v1', sourceDigest: 'd', authorActor: 'Reader' }] },
     links: [{ itemId: ITEM, linkState: 'current', headRevision: 2, headHidden: false }] }, extra);
   const state = { items: [], responses: [], hold: false };
-  const json = (status, body) => ({ status, ok: status >= 200 && status < 300, headers: API_HEADERS, json: async () => body });
+  const json = (status, body) => ({ status, ok: status >= 200 && status < 300, headers: {get: name => name.toLowerCase() === 'x-kin-auth-code' ? body?.code || null : API_HEADERS.get(name)}, json: async () => body });
   const fetch = async (url, options) => {
     const entry = { url, options, body: options.body ? JSON.parse(options.body) : null };
     log.push(entry);
@@ -420,9 +423,10 @@ function transport() {
 }
 const tick = async n => { for (let i = 0; i < (n || 20); i++) await new Promise(r => setImmediate(r)); };
 function makeStore(t, extra) {
+  const lifecycle = install(t.fetch);
   const navigations = [];
   const store = model.createStore(Object.assign({ fetch: t.fetch, uuid: () => REQUEST, navigate: async target => { navigations.push(target); return { ok: true, highlighted: true, annotation: 'shown' }; } }, extra));
-  return { store, navigations };
+  return { store, navigations, lifecycle };
 }
 const history = (scope, heads, extra) => Object.assign({ scope, subject: 'reader-1', ended: false, suspended: false, writable: true, heads: heads || [] }, extra);
 
@@ -507,7 +511,7 @@ test('store keeps the draft on 409/503, records a stale source and lets Refresh 
   store.useLatest(e); assert.equal(e.head.revision, 3); assert.equal(e.latest, null); assert.equal(e.draft.title, '내 수정');
 });
 
-test('store refuses writes for read-only, suspended or ended sessions and ends on 401', async () => {
+test('store refuses writes for read-only sessions; plain 401 and 403 remain read failures', async () => {
   const t = transport(); const { store } = makeStore(t);
   t.state.me = { sub: 'reader-1', kind: 'member', roles: ['technician'] };
   t.state.items = [t.head('f0000000-0000-4000-8000-000000000001', 1)];
@@ -518,15 +522,15 @@ test('store refuses writes for read-only, suspended or ended sessions and ends o
   assert.equal(await store.save(e, 'hide', '사유'), false);
   assert.equal(t.log.filter(x => x.options.method === 'POST').length, 0);
   t.state.meStatus = 401; store.load(); await tick();
-  assert.equal(store.state().ended, true); assert.equal(store.state().entries.size, 0);
+  assert.equal(store.state().ended, false); assert.equal(store.state().entries.size, 1);
   assert.equal(store.newDraft(), null);
-  store.syncHistory(history(A, [])); await tick();
-  assert.equal(store.state().ended, true, 'a later history sync does not revive an ended session');
+  t.state.meStatus=200; await store.load();
+  assert.equal(store.state().ended, false);
   const denied = transport(); const kit = makeStore(denied);
   denied.state.responses.push({ status: 403, body: { message: 'no' } });
   kit.store.syncHistory(history(A, [])); await tick();
   assert.equal(kit.store.state().suspended, true); assert.equal(kit.store.state().ended, false);
-  assert.equal(kit.store.state().status, '이 검사에 접근할 수 없습니다. 접근 확인 후 Refresh로 다시 불러오세요.');
+  assert.match(kit.store.state().status, /확인하지 못했습니다/);
 });
 
 test('store navigation uses the primary or chosen source, ignores a stale result and records refusals', async () => {
@@ -655,30 +659,22 @@ test('held drafts: a save in flight at the switch cannot touch the held copy; th
   assert.equal(store.state().entries.get(F1).head.revision, 1);
 });
 
-test('held drafts: a 403 holds every draft of the study without showing it and restores both after an authorized list', async () => {
-  const t = transport(); const { store, e } = await drafting(t);
+test('plain 403 preserves both editable drafts and can recover on the next read', async () => {
+  const t = transport(); const { store, e, lifecycle } = await drafting(t);
   const other = store.newDraft(); store.updateDraft(other, { title: '두 번째 초안' });
-  assert.notEqual(other.id, e.id);
+  const titles = [e.draft.title, other.draft.title];
   t.state.responses.push({ status: 403, body: { message: 'no' } });
   assert.equal(await store.save(e, 'create'), false);
-  assert.equal(store.state().entries.size, 0);
-  assert.equal(store.state().suspended, true); assert.equal(store.state().ended, false);
-  assert.equal(store.state().status, '이 검사에 접근할 수 없습니다. 접근 확인 후 Refresh로 다시 불러오세요.');
-  assert.deepEqual(plain(store.held()), { count: 2, studies: [{ scope: A, count: 2, current: true }] });
-  assert.deepEqual(store.workState(), { dirty: true, busy: false, held: 2 });
-  assert.equal(JSON.stringify(store.held()).includes('초안'), false);
+  assert.equal(store.state().ended, false); assert.equal(lifecycle.gate.state(), 'active');
+  assert.deepEqual([e.draft.title, other.draft.title], titles);
+  assert.equal(store.state().entries.size, 2); assert.equal(store.held().count, 0);
   t.state.responses.push({ status: 403, body: { message: 'still no' } });
-  await store.load(); await tick();
-  assert.equal(store.state().entries.size, 0, 'a refused list restores nothing'); assert.equal(store.held().count, 2);
-  await store.load(); await tick();
-  const back = store.state().entries.get(e.id), second = store.state().entries.get(other.id);
-  assert.ok(back && second && back !== e && second !== other);
-  assert.equal(second.draft.title, '두 번째 초안'); assert.equal(second.pending, null); assert.equal(second.editing, true);
-  assert.deepEqual(back.pending, { url: e.pending.url, body: e.pending.body }, 'the refused request stays retryable as sent');
-  assert.equal(store.held().count, 0);
+  await store.load(); assert.equal(store.state().entries.size, 2);
+  await store.load(); assert.equal(store.state().entries.size, 2);
+  assert.deepEqual([e.draft.title, other.draft.title], titles);
 });
 
-test('held drafts: logout, 401 and another login destroy live and held drafts; nothing crosses to another subject', async () => {
+test('held drafts: lifecycle end clears work; plain failures preserve it and a foreign owner is not applied', async () => {
   {
     const t = transport(); const { store } = await drafting(t);
     store.syncHistory(history(B, [])); await tick(); assert.equal(store.held().count, 1);
@@ -692,14 +688,14 @@ test('held drafts: logout, 401 and another login destroy live and held drafts; n
     const t = transport(); const { store } = await drafting(t);
     store.syncHistory(history(B, [])); await tick();
     t.state.meStatus = 401; store.syncHistory(history(A, heads2())); await tick();
-    assert.equal(store.state().ended, true); assert.equal(store.state().parked.size, 0); assert.equal(store.workState().dirty, false);
+    assert.equal(store.state().ended, false); assert.equal(store.state().parked.size, 1); assert.equal(store.workState().dirty, true);
   }
   {
     const t = transport(); const { store } = await drafting(t);
     store.syncHistory(history(B, [])); await tick();
     t.state.me = { sub: 'reader-2', kind: 'member', roles: ['radiologist'] };
     store.syncHistory(history(A, heads2())); await tick();
-    assert.equal(store.state().ended, true); assert.equal(store.state().parked.size, 0); assert.equal(store.workState().dirty, false);
+    assert.equal(store.state().ended, false); assert.equal(store.state().parked.size, 1); assert.equal(store.workState().dirty, true);
   }
   {
     const t = transport(); const { store } = await drafting(t);
@@ -708,7 +704,7 @@ test('held drafts: logout, 401 and another login destroy live and held drafts; n
     const kit = makeStore(next, { recovered: records, uuid: counter() });
     assert.equal(kit.store.workState().dirty, true, 'held until the login is known');
     assert.deepEqual(plain(kit.store.held()), { count: 0, studies: [] }, 'no summary before the login is known');
-    kit.store.syncHistory(history(A, heads2())); await tick();
+    kit.store.syncHistory(history(A, heads2(), {subject:'reader-2'})); await tick();
     assert.equal(kit.store.state().ended, false); assert.equal(kit.store.state().entries.size, 0);
     assert.deepEqual(kit.store.workState(), { dirty: false, busy: false, held: 0 });
   }
@@ -1228,9 +1224,9 @@ test('comparison list: late, superseded, other-login and other-anchor answers ar
     const { store } = await anchored(t);
     t.pair.manual = true; store.loadPair(); await tick();
     t.state.me = { sub: 'reader-2', kind: 'member', roles: ['radiologist'] }; await store.load(); await tick();
-    assert.equal(store.state().ended, true);
+    assert.equal(store.state().ended, false);assert.equal(store.state().subject, 'reader-1');
     t.pair.calls[0](200, [pItem(P1, 9)]); await tick();
-    assert.equal(store.state().pair.heads.size, 0, 'another login ends the store and drops the late list');
+    assert.equal(store.state().pair.heads.size, 1, 'the bound original document can still receive its valid comparison data');
   }
   {
     const t = pairTransport(); t.state.items = [t.head(F1, 1)];
@@ -1306,8 +1302,8 @@ test('comparison saves: 400/403/404/409 and quota texts keep the draft; a compar
   // The comparison 403 was really the anchor: the re-read denies and holds the draft as in B1.
   t.state.responses.push({ status: 403, body: {} }, { status: 403, body: {} });
   assert.equal(await store.save(e, 'create'), false); await tick(40);
-  assert.deepEqual([store.state().suspended, store.state().entries.size, store.held().count], [true, 0, 1]);
-  assert.equal(store.state().status, '이 검사에 접근할 수 없습니다. 접근 확인 후 Refresh로 다시 불러오세요.');
+  assert.deepEqual([store.state().suspended, store.state().entries.size, store.held().count], [false, 2, 0]);
+  assert.match(store.state().status, /확인하지 못했습니다/);
   // A same-study 403 still holds at once (B1), without an extra list read.
   const u = pairTransport(); u.state.items = [];
   const same = await anchored(u);
@@ -1315,7 +1311,7 @@ test('comparison saves: 400/403/404/409 and quota texts keep the draft; a compar
   const before = reads(u, A, 'findings');
   u.state.responses.push({ status: 403, body: {} });
   assert.equal(await same.store.save(x, 'create'), false); await tick(40);
-  assert.deepEqual([same.store.state().suspended, same.store.held().count, reads(u, A, 'findings')], [true, 1, before]);
+  assert.deepEqual([same.store.state().suspended, same.store.held().count, reads(u, A, 'findings')], [false, 0, before]);
   // An entry that already names another comparison study cannot pick from this one.
   const w = pairTransport(), other = w.head(F1, 1); other.item.sources = [{ ...pCopy(P1, 1), studyUid: '9.9.9' }];
   w.state.items = [other];
@@ -1592,6 +1588,8 @@ async function paired() {
   const sandbox = { window, document, crypto: webcrypto, TextEncoder, console, Event, AbortController, URLSearchParams, fetch,
     location: { search: '?StudyInstanceUIDs=' + XS + ',' + PS + '&hangingProtocolId=@ohif/hpCompare' },
     setInterval: fn => { ticks.push(fn); return ticks.length; }, clearInterval() {}, setTimeout, clearTimeout };
+  install(window.fetch, sandbox);
+  window.KinWorkContext=sandbox.KinWorkContext;window.KinSessionTransport=sandbox.KinSessionTransport;
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
   const extension = window.config.extensions.find(e => e.id === 'kin.viewer-history');
@@ -1955,6 +1953,8 @@ async function valueViewer() {
   window.prompt = () => '사유'; window.confirm = () => true;
   const sandbox = { window, document, crypto: webcrypto, console, Event, AbortController, URLSearchParams, setTimeout, clearTimeout,
     location: { search: '?StudyInstanceUIDs=' + VX + ',' + VP }, setInterval: fn => { ticks.push(fn); return ticks.length; }, clearInterval() {} };
+  install(window.fetch, sandbox);
+  window.KinWorkContext=sandbox.KinWorkContext;window.KinSessionTransport=sandbox.KinSessionTransport;
   vm.createContext(sandbox);
   vm.runInContext(shippedFile('finding-link-model.js'), sandbox);
   vm.runInContext(shippedFile('viewer-findings.js'), sandbox);
@@ -2385,6 +2385,8 @@ async function locationViewer({ schemaHeader = '2', modelOverride } = {}) {
   window.prompt = () => '사유'; window.confirm = () => true;
   const sandbox = { window, document, crypto: webcrypto, console, Event, AbortController, URLSearchParams, setTimeout, clearTimeout,
     location: { search: '?StudyInstanceUIDs=' + VX }, setInterval: fn => { ticks.push(fn); return ticks.length; }, clearInterval() {} };
+  install(window.fetch, sandbox);
+  window.KinWorkContext=sandbox.KinWorkContext;window.KinSessionTransport=sandbox.KinSessionTransport;
   vm.createContext(sandbox);
   vm.runInContext(shippedFile('finding-link-model.js'), sandbox);
   vm.runInContext(shippedFile('viewer-findings.js'), sandbox);
@@ -2546,7 +2548,9 @@ test('mounted continuation: the one-use nonce is consumed once; a missing record
         : { getItem: () => { throw new Error('blocked'); }, removeItem: () => { throw new Error('blocked'); } };
       const sandbox = { window, document, crypto: webcrypto, console, Event, AbortController, URLSearchParams, setTimeout, clearTimeout,
         location: { search }, setInterval: fn => { ticks.push(fn); return ticks.length; }, clearInterval() {} };
-      vm.createContext(sandbox);
+      install(window.fetch, sandbox);
+  window.KinWorkContext=sandbox.KinWorkContext;window.KinSessionTransport=sandbox.KinSessionTransport;
+  vm.createContext(sandbox);
       vm.runInContext(shippedFile('finding-link-model.js'), sandbox);
       vm.runInContext(shippedFile('viewer-findings.js'), sandbox);
       const findings = window.kinViewerFindings({}, sandbox.kinFindingLinkModel);
@@ -2577,223 +2581,54 @@ test('mounted continuation: the one-use nonce is consumed once; a missing record
   for (const v of [good, missing, mismatched, blocked, plainPage]) v.findings.stop();
 });
 
-/* ---------- S5-U2b (Astra S5-U2b-X5-R-001 F01): the store's own /me and its end go through the viewer document's session ---------- */
-// config/ohif.js kinViewerSession as shipped, in a context without a window or fetch (its logout receivers and decide()'s read stay off).
-function viewerSession() {
-  const from = source.indexOf('function kinViewerClinicianOnly('), to = source.indexOf('function kinCreateViewerLayout()');
-  assert.ok(from > 0 && to > from, 'the session anchors are present');
-  const context = vm.createContext({});
-  vm.runInContext(source.slice(from, to), context);
-  return vm.runInContext('kinViewerSession', context);
-}
-const FIRST = { kind: 'member', sub: 'reader-1', roles: ['radiologist'] };
-const ENDED_TEXT = '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.';
-// A store of a writer document the other panels confirmed with FIRST (the transport's own /me answers FIRST unless a case changes it).
-function sessionStore() {
-  const session = viewerSession(), t = transport();
-  assert.equal(session.note(FIRST), 'writer');
-  const { store } = makeStore(t, { session: session.writeModule });
-  return { session, t, store };
-}
-
-test('S5-U2b X5 F01: the store notes its own /me with the document before keeping it; another account ends the document and the store', async () => {
-  for (const other of [{ kind: 'member', sub: 'reader-2', roles: ['radiologist'] }, { kind: 'member', sub: 'reader-2', roles: ['clinician'] }]) {
-    const { session, t, store } = sessionStore();
-    t.state.me = other;
-    store.syncHistory(history(A, [])); await tick();
-    assert.equal(session.state(), 'refused', other.roles[0]);
-    assert.deepEqual([store.state().ended, store.state().status, store.state().subject, store.state().me], [true, ENDED_TEXT, '', null]);
-    assert.deepEqual(t.log.map(x => x.url), ['/api/me'], 'nothing is read after the other account');
-    assert.equal(store.newDraft(), null);
-  }
-  // The same account is noted and the store works; clinician-only for it turns the document read-only (the gate takes the section
-  // down) and the store keeps nothing of that answer, without ending the document's login.
-  const same = sessionStore();
-  same.store.syncHistory(history(A, [])); await tick();
-  assert.equal(same.session.state(), 'writer'); assert.ok(same.store.newDraft());
-  assert.deepEqual(same.t.log.map(x => x.url), ['/api/me', '/api/studies/' + A + '/findings?includeHidden=true&limit=100']);
-  const clinician = sessionStore();
-  clinician.t.state.me = { ...FIRST, roles: ['clinician'] };
-  clinician.store.syncHistory(history(A, [])); await tick();
-  assert.deepEqual([clinician.session.state(), clinician.session.ended(), clinician.store.state().ended, clinician.store.state().me],
-    ['read-only', false, true, null]);
-  assert.deepEqual(clinician.t.log.map(x => x.url), ['/api/me']);
-});
-
-test('S5-U2b X5 F01: a 401 or a 403 on the store\'s /me ends the document; a 403 on its list only refuses that study', async () => {
-  for (const status of [401, 403]) {
-    const { session, t, store } = sessionStore();
-    t.state.meStatus = status;
-    store.syncHistory(history(A, [])); await tick();
-    assert.deepEqual([session.state(), store.state().ended, store.state().status], ['refused', true, ENDED_TEXT], String(status));
-    assert.deepEqual(t.log.map(x => x.url), ['/api/me']);
-  }
-  // A 401 on the list itself ends the login too.
-  const listed = sessionStore();
-  listed.t.state.responses.push({ status: 401, body: { message: 'SYN' } });
-  listed.store.syncHistory(history(A, [])); await tick();
-  assert.deepEqual([listed.session.state(), listed.store.state().ended], ['refused', true]);
-  // A 403 on this study's list: the store holds its work (deny), the document's login goes on.
-  const denied = sessionStore();
-  denied.t.state.responses.push({ status: 403, body: { message: 'SYN' } });
-  denied.store.syncHistory(history(A, [])); await tick();
-  assert.deepEqual([denied.session.state(), denied.store.state().ended, denied.store.state().status],
-    ['writer', false, '이 검사에 접근할 수 없습니다. 접근 확인 후 Refresh로 다시 불러오세요.']);
-});
-
-test('S5-U2b X5 F01: the document\'s end, whoever saw it, ends the attached store in place and stops what it had started', async () => {
-  const { session, t, store } = sessionStore();
-  store.syncHistory(history(A, [])); await tick();
-  assert.ok(store.newDraft());
-  // Reload asked /me; the document ends (another panel's 401, the logout broadcast) before that answer comes back.
-  t.state.hold = true; store.load(); await tick();
-  assert.equal(t.log.at(-1).url, '/api/me');
-  const asked = t.log.length;
-  session.refuse();
-  assert.deepEqual([store.state().ended, store.state().entries.size, store.state().status], [true, 0, ENDED_TEXT], 'ended at once');
-  t.release(); await tick(40);
-  assert.equal(t.log.length, asked, 'the list that /me would have led to is never asked');
-  assert.equal(await store.save({ id: 'x' }), false);
-  // A store disposed at mode exit is no longer reached by the session.
-  const gone = sessionStore();
-  gone.store.syncHistory(history(A, [])); await tick();
-  gone.store.dispose(); gone.session.refuse();
-  assert.equal(gone.store.state().ended, false);
-});
-
-/* ---------- S5-U2c fix4 (Astra S5-U2c-C-R-001 F01): an answer the store drops is still the document's for the login ----------
- * fix3's rule (config/ohif.js: CT sync, the Measurements and layout panels) at the store's own request path, api(). A 401, or a /me
- * answer of another account than the document's first one, that reaches a generation the store gave up (a scope change), a store
- * the document's refusal of this account ended ('forbidden': another panel's /me 403), or a store detached at mode exit, ends the
- * document's login ('unauthorized' / 'account-changed'; over the refusal the reason is promoted once). The store applies none of it,
- * and the write modules' in-place end (enders) is not run again. The transport does not honour the store's abort: an answer already
- * on the wire when the store let it go still arrives. */
-const MODEL_FILE = path.join(__dirname, '..', 'worklist-v0', 'hpacs-lite', 'finding-link-model.js');
-const OTHER = { kind: 'member', sub: 'reader-2', roles: ['radiologist'] };
-const LISTED = '0개 소견 · 소견 저장은 판독 확정과 별개입니다.';
-// What the store shows and holds, as one comparable value (its UI is drawn from this state).
-const storeView = store => { const s = store.state(); return JSON.stringify([s.ended, s.status, s.scope, s.subject, s.me, s.generation, s.entries.size, s.loading, s.suspended, s.pair.status]); };
-// A writer document (FIRST confirmed by the other panels) with the store attached; `hold(url)` names the requests the case answers.
-function lateWorld(storeModel = model) {
-  const session = viewerSession(), t = transport(), held = [], reasons = [];
-  assert.equal(session.note(FIRST), 'writer');
-  session.onEnded(reason => { reasons.push(reason); });
-  // Another write module of the document: its in-place end runs once, at the document's first refusal or end.
-  let enders = 0; session.writeModule.onEnd(() => { enders++; });
-  let hold = () => false;
-  const response = (status, body, bad) => ({ status, ok: status >= 200 && status < 300, headers: API_HEADERS,
-    json: async () => { if (bad) throw new SyntaxError('SYN not JSON'); return JSON.parse(JSON.stringify(body)); } });
-  const fetch = (url, options) => {
-    if (!hold(url)) return t.fetch(url, options);
-    t.log.push({ url, options });
-    return new Promise(resolve => { held.push({ url, release: (status, body, bad) => resolve(response(status, body, bad)) }); });
-  };
-  const store = storeModel.createStore({ fetch, uuid: () => REQUEST, navigate: async () => ({ ok: true }), session: session.writeModule });
-  return { session, t, store, held, reasons, enders: () => enders, holdWhen: fn => { hold = fn; } };
-}
-// The store working for A, then one of its requests held: its /me (Reload) or its list page.
-async function heldRead(w, at) {
-  w.store.syncHistory(history(A, [])); await tick();
-  assert.equal(w.store.state().status, LISTED);
-  w.holdWhen(at === '/me' ? url => url === '/api/me' : url => url.startsWith('/api/studies/' + A + '/findings'));
-  w.store.load(); await tick();
-  assert.deepEqual([w.held.length, w.held[0].url.startsWith(at === '/me' ? '/api/me' : '/api/studies/' + A)], [1, true], at);
-  w.holdWhen(() => false);
-}
-// How the store lets the held request go: its scope moves on to B (the document still a writer), the document refuses this account
-// (another panel's /me 403, which ends the store in place), or mode exit detaches and disposes it.
-function letGo(w, drop) {
-  if (drop === 'scope') w.store.syncHistory(history(B, []));
-  else if (drop === 'refusal') w.session.refuse('forbidden');
-  else { w.store.detach(); w.store.dispose(); }
-}
-const LATE = { '401': [401, { message: 'SYN unauthorized' }, 'unauthorized'], 'another account': [200, OTHER, 'account-changed'] };
-
-test('S5-U2c fix4 (a)(b): a late 401 or another account reaching a store that let its request go is the document\'s end; the store applies none of it', async () => {
-  for (const drop of ['scope', 'refusal', 'exit']) {
-    for (const late of ['401', 'another account']) {
-      for (const at of late === '401' ? ['/me', 'list page'] : ['/me']) {
-        const label = [drop, late, at].join(' / ');
-        const w = lateWorld();
-        await heldRead(w, at);
-        letGo(w, drop); await tick();
-        const [status, body, reason] = LATE[late];
-        // Before the answer: a scope change leaves the document a writer and the store working for B; the refusal ended the store
-        // and the other write module once; mode exit ended nothing of the document.
-        assert.deepEqual([w.session.state(), w.reasons.join(), w.enders()],
-          drop === 'refusal' ? ['refused', 'forbidden', 1] : ['writer', '', 0], label);
-        if (drop === 'scope') assert.deepEqual([w.store.state().scope, w.store.state().status], [B, LISTED], label);
-        const seen = storeView(w.store), asked = w.t.log.length;
-        w.held[0].release(status, body); await tick();
-        assert.deepEqual([w.session.state(), w.reasons.join(), w.enders(), w.t.log.length],
-          ['refused', drop === 'refusal' ? 'forbidden,' + reason : reason, 1, asked], label);
-        if (drop === 'scope') {
-          // The document's end reaches the store attached for B, which ends in place: nothing of the answer is kept as its login.
-          assert.deepEqual([w.store.state().ended, w.store.state().status, w.store.state().me, w.store.state().subject], [true, ENDED_TEXT, null, ''], label);
-        } else {
-          assert.equal(storeView(w.store), seen, label + ': the store that had ended or left shows nothing new');
-        }
-        // Kept for the document's life: a later subscriber hears it; nothing ends again.
-        const later = []; w.session.onEnded(r => { later.push(r); });
-        assert.deepEqual([later.join(), w.enders(), w.session.writeModule.answer(FIRST)], [reason, 1, false], label);
-      }
-    }
+/* Session authority is the page gate. The store never owns a second session. */
+test('page defaults: bound store reads and writes; ordinary failures preserve the document and draft', async () => {
+  for (const status of [401,403,409,428,500]) {
+    const t=transport(), {store,e,lifecycle}=await drafting(t);
+    const title=e.draft.title;
+    t.state.responses.push({status,body:{message:'SYN failure'}});
+    assert.equal(await store.save(e,'create'),false);
+    assert.equal(lifecycle.gate.state(),'active');assert.equal(store.state().ended,false);
+    assert.equal(e.draft.title,title);assert.equal(store.state().entries.get(e.id),e);
+    for(const call of t.log) assert.equal(new Headers(call.options.headers).get('X-KIN-Session'),'SYN-MODULE-SESSION');
   }
 });
-
-test('S5-U2c fix4 (c): what else a dropped answer says changes nothing, and the answers the store uses go as before', async () => {
-  // A dropped /me of the document's own account (a writer, or the same account clinician-only) gives no verdict; a dropped /me 403,
-  // 500 or body that is not JSON, and a dropped list page's 403, end nothing: the document stays a writer, the store works for B.
-  const cases = [['/me', 200, FIRST, false, 'same account'], ['/me', 200, { ...FIRST, roles: ['clinician'] }, false, 'same account, clinician-only'],
-    ['/me', 403, { message: 'SYN forbidden' }, false, '/me 403'], ['/me', 500, { message: 'SYN' }, false, '/me 500'],
-    ['/me', 200, null, true, '/me not JSON'], ['list page', 403, { message: 'SYN forbidden' }, false, 'list 403'],
-    ['list page', 200, { items: [], nextCursor: null }, false, 'list answered']];
-  for (const [at, status, body, bad, label] of cases) {
-    const w = lateWorld();
-    await heldRead(w, at);
-    letGo(w, 'scope'); await tick();
-    const seen = storeView(w.store), asked = w.t.log.length;
-    w.held[0].release(status, body, bad); await tick();
-    assert.deepEqual([w.session.state(), w.reasons.join(), w.enders(), storeView(w.store), w.t.log.length], ['writer', '', 0, seen, asked], label);
-    assert.ok(w.store.newDraft(), label + ': the store still writes for B');
+test('page defaults: coded end and mismatch clear live and parked drafts without any later repaint', async () => {
+  for(const [status,code] of [[401,'AUTH_SESSION_ENDED'],[409,'AUTH_SESSION_MISMATCH']]){
+    const t=transport(),{store,lifecycle}=await drafting(t);
+    store.syncHistory(history(B,[]));await tick();assert.equal(store.held().count,1);
+    t.state.responses.push({status,body:{code}});await store.load();
+    assert.equal(lifecycle.gate.state(),'ending');assert.equal(store.state().ended,true);
+    assert.equal(store.state().entries.size,0);assert.equal(store.held().count,0);
+    const calls=t.log.length;await store.load();assert.equal(t.log.length,calls);
   }
-  // The answers the store uses: its live /me answering 401, 403 or another account ends the document with that reason once (the
-  // store in place, nothing more read); the same account reads the list.
-  for (const [status, body, reason] of [[401, { message: 'SYN' }, 'unauthorized'], [403, { message: 'SYN' }, 'forbidden'], [200, OTHER, 'account-changed']]) {
-    const w = lateWorld();
-    w.store.syncHistory(history(A, [])); await tick();
-    w.holdWhen(url => url === '/api/me'); w.store.load(); await tick(); w.holdWhen(() => false);
-    const asked = w.t.log.length;
-    w.held[0].release(status, body); await tick();
-    assert.deepEqual([w.session.state(), w.reasons.join(), w.enders(), w.store.state().ended, w.store.state().status, w.t.log.length],
-      ['refused', reason, 1, true, ENDED_TEXT, asked], reason);
-  }
-  const same = lateWorld();
-  same.store.syncHistory(history(A, [])); await tick();
-  same.holdWhen(url => url === '/api/me'); same.store.load(); await tick(); same.holdWhen(() => false);
-  same.held[0].release(200, FIRST); await tick();
-  assert.deepEqual([same.session.state(), same.reasons.join(), same.enders(), same.store.state().status, same.t.log.at(-1).url],
-    ['writer', '', 0, LISTED, '/api/studies/' + A + '/findings?includeHidden=true&limit=100']);
 });
-
-test('S5-U2c fix4 control: with the store dropping those answers unread (the file before fix4), the late 401 or account is lost', async () => {
-  // The shipped file with only its two drop points put back as they were: the answer valid() drops is thrown away unread.
-  let text = fs.readFileSync(MODEL_FILE, 'utf8');
-  for (const at of ['if (!valid(ticket)) throw await drop();', 'if (!valid(ticket)) throw await drop(data);']) {
-    assert.equal(text.split(at).length - 1, 1, at);
-    text = text.replace(at, 'if (!valid(ticket)) throw { stale: true };');
-  }
-  const box = { module: { exports: {} }, setTimeout, clearTimeout, AbortController };
-  vm.runInNewContext(text, box, { filename: 'finding-link-model.js (without fix4)' });
-  const unkept = box.module.exports;
-  for (const [drop, late, at, before] of [['scope', '401', '/me', ['writer', '', 0]], ['scope', '401', 'list page', ['writer', '', 0]],
-    ['refusal', '401', '/me', ['refused', 'forbidden', 1]], ['exit', 'another account', '/me', ['writer', '', 0]]]) {
-    const w = lateWorld(unkept);
-    await heldRead(w, at);
-    letGo(w, drop); await tick();
-    w.held[0].release(...LATE[late].slice(0, 2)); await tick();
-    assert.deepEqual([w.session.state(), w.reasons.join(), w.enders()], before, [drop, late, at].join(' / '));
-  }
+test('page defaults: an end while a read is held clears once and drops its late result',async()=>{
+  const t=transport(),{store,lifecycle}=await drafting(t);
+  t.state.hold=true;const reading=store.load();await tick();
+  lifecycle.end();const state=JSON.stringify([store.state().status,store.state().entries.size,store.held()]);
+  const count=t.log.length;t.release();await reading;
+  assert.equal(JSON.stringify([store.state().status,store.state().entries.size,store.held()]),state);
+  assert.equal(t.log.length,count);
+});
+test('page defaults: preparation pauses reads and cancel resumes without dropping an edit',async()=>{
+  const t=transport(),{store,e,lifecycle}=await drafting(t);
+  t.state.hold=true;void store.load();await tick();
+  const prep=lifecycle.gate.prepare({}), count=t.log.length;
+  await store.load();assert.equal(t.log.length,count);assert.equal(store.state().entries.get(e.id),e);
+  lifecycle.gate.cancelPreparation(prep);await tick();t.release();await tick();
+  assert.equal(lifecycle.gate.state(),'active');assert.equal(store.state().entries.get(e.id),e);
+  assert.equal(e.draft.title,'우상엽 결절');assert.equal(store.state().loading,false);
+});
+test('page defaults: a malformed owner is a local read failure, never a new session or accepted identity',async()=>{
+  const t=transport(),{store,e,lifecycle}=await drafting(t);
+  t.state.me={sub:'reader-2',kind:'member',roles:['radiologist']};await store.load();
+  assert.equal(lifecycle.gate.state(),'active');assert.equal(store.state().subject,'reader-1');
+  assert.equal(store.state().entries.get(e.id),e);assert.match(store.state().status,/확인하지 못했습니다/);
+});
+test('page defaults: a detached store no longer observes the page lifecycle',async()=>{
+  const t=transport(),{store,lifecycle}=await drafting(t);store.dispose();lifecycle.end();
+  assert.equal(store.state().ended,false);
 });
 
 // The S2-B1 list/command suite runs in this same process as well, so the existing hosted Validate step

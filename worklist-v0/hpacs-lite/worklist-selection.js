@@ -81,10 +81,14 @@
       renderDialog();dialog.showModal();
     };
     tbody.addEventListener('click',click,true);tbody.addEventListener('keydown',key,true);tbody.addEventListener('dblclick',double,true);
-    const storage=e=>{if(e.key==='kin-session-ended')end();};let channel=null;
-    function end(){if(ended)return;ended=true;model.clear();dialog?.remove();dialog=null;host.hidden=true;for(const tr of tbody.querySelectorAll('.multi-selected')){tr.classList.remove('multi-selected');tr.removeAttribute('aria-selected');}tbody.removeEventListener('click',click,true);tbody.removeEventListener('keydown',key,true);tbody.removeEventListener('dblclick',double,true);root.removeEventListener('storage',storage);root.removeEventListener('pagehide',end);channel?.close();}
-    root.addEventListener('storage',storage);root.addEventListener('pagehide',end);
-    try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+
+    const work = root.KinWorkContext;
+    work.onInvalidate(event => {
+      if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) end();
+    });
+    function end(){if(ended)return;ended=true;model.clear();dialog?.remove();dialog=null;host.hidden=true;for(const tr of tbody.querySelectorAll('.multi-selected')){tr.classList.remove('multi-selected');tr.removeAttribute('aria-selected');}tbody.removeEventListener('click',click,true);tbody.removeEventListener('keydown',key,true);tbody.removeEventListener('dblclick',double,true);root.removeEventListener('pagehide',end);}
+    root.addEventListener('pagehide',end);
+
     sync();return {sync,end};
   }
   const api={create,comparison,mount};

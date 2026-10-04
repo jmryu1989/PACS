@@ -2,6 +2,7 @@
 """Pure DOM coverage for the per-series image thumbnail browser."""
 import unittest
 from pathlib import Path
+from module_session_harness import CORE
 
 from playwright.sync_api import sync_playwright, expect
 
@@ -67,6 +68,8 @@ class WorklistImageThumbnailsDOMTest(unittest.TestCase):
     def setUp(self):
         self.page = self.browser.new_page()
         self.page.set_content(HARNESS)
+        self.page.add_script_tag(content=CORE)
+        self.page.evaluate("window.KinAuth={onLifecycle:f=>f({state:'active',session:'SYN-THUMB-SESSION'}),authFailure:()=>{}};KinWorkContext.follow(KinAuth);KinWorkContext.select(currentValue)")
         self.page.add_script_tag(content=PREVIEW)
         self.page.add_script_tag(content=THUMBNAILS)
 

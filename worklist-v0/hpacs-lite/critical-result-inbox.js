@@ -63,14 +63,12 @@
  *   일치하는 201(첫 적용·재전송): P·view·Source·본문은 그대로, U를 끝내고 E(서버 시각)를 둔다. P가 created면 상태만 더하고
  *     Acknowledge를 뺀다. P가 적용과 맞지 않는 종결이면 어느 쪽도 지어내지 않고 맞지 않는다는 안내만 둔다.
  *   이전 번호·범위·세션의 늦은 답: P·목록 소속·번호·안내를 바꾸지 않는다(위 흡수 종결 사실만 예외).
- *   로그아웃·401·계정 변경·pagehide: 세션 번호를 올리고 P·U·E·안내·나간 요청을 모두 버린다(늦은 답은 어디에도 쓰지 않는다).
+ * Session termination belongs to the page transport and work-context lifecycle.
  *   시간 경과·초점·스크롤·패널 접기: 아무것도 바꾸지 않는다. 자동 ACK·Check Again은 없고, POST 제한 시간은 불확실이지 미적용이 아니다.
  * - 서버가 바꾼 표시(full→stub, 행 제거, ACK 불가, 종결)는 초점과 무관하게 바로 그린다. 답이 같은 행만 다시 만들지 않아 초점이
  *   남는다. 초점이 있던 행·줄이 바뀌면 그 머리로, 사라지면 같은 기록의 남은 줄·행 머리로, 그것도 없으면 영역 제목으로 옮기고,
  *   다른 기록의 단추로는 옮기지 않는다.
- * - 세션을 끝내는 것은 호스트 페이지다. 이 파일은 로그아웃·이동·저장소 쓰기를 스스로 시작하지 않는다: 401이면 이 영역을 먼저
- *   끝내고 공통 종료 목록(window.kinOn401)을 부른 뒤 호스트가 준 logout을 부르고, 계정 변경은 같은 목록에 'account-changed'로,
- *   그리고 호스트가 준 onAccountChanged로 알린다.
+ * Session termination belongs to the page transport and work-context lifecycle.
  * 받은 목록·결과를 모르는 시도·requestId는 이 문서의 메모리에만 둔다 — 로그아웃·계정 전환에서 버린다.
  */
 (function () {
@@ -281,13 +279,21 @@
    *   root       영역 요소 id (임상의 홈 critical-results, 판독 화면 cvr-inbox-p)
    *   prefix     영역 안 요소 id의 앞부분
    *   fold       참이면 요약 줄(Show Received/Hide Received)과 접히는 본문이 있는 판독 화면 패널이다
-   *   logout()   이 영역의 401에서 로그아웃을 시작한다(공통 종료 목록 뒤)
    *   owner()    [institution, sub] — 모든 응답 봉투의 owner와 대조한다
    *   eligible() 지금 이 세션이 받은 목록을 읽는가(호스트가 세션 종류·서버 연결·역할로 정한다)
-   *   onAccountChanged(detail) 이 영역이 알아챈 계정 변경을 호스트의 다른 영역에 알린다(선택)
    * 반환값의 end()는 세션 종료, lock(detail)은 다른 영역이 알아챈 계정 변경이다.
    */
-  function mount({ apiBase, root, prefix, fold, logout, owner, eligible, onAccountChanged }) {
+  function mount({ apiBase, root, prefix, fold, owner, eligible }) {
+    const work = window.KinWorkContext, transport = window.KinSessionTransport.page();
+    // Capture at registration, not when a delayed callback runs.
+    const guarded = (effect, scope = 'document') => {
+      const context = work.capture(scope);
+      return (...args) => {
+        let result;
+        work.commit(context, () => { result = effect(...args); });
+        return result;
+      };
+    };
     const node = id => {
       const found = document.getElementById(id);
       if (!found) throw new Error(`#${id} is missing`);
@@ -319,7 +325,7 @@
     statusBox.replaceChildren(statusText, statusDetail);
     help.replaceChildren(...TEXT.help.map(line => make('p', null, line)));
 
-    let ended = false, lock = null, channel = null, timer = null, watch = null, reading = false;
+    let ended = false, lock = null, timer = null, watch = null, reading = false;
     const inflight = new Set();
     // 요청 식별(파일 머리의 최신 유효). gen은 목록·한 건 읽기·ACK를 보낸 순서다. epoch은 세션 번호로, 호스트의 계정이 바뀌거나
     // 영역이 잠기거나 끝나면 오른다. view는 투영 번호로, 투영 경계(Refresh·필터 바꿈·목록 실패)와 세션 끝에서 오른다.
@@ -379,7 +385,7 @@
       }
       return now;
     }
-    const allowed = () => { const now = observe(); return !ended && lock === null && !!eligible() && now !== null; };
+    const allowed = () => { if (work.state() !== 'active') return false; const now = observe(); return !ended && lock === null && !!eligible() && now !== null; };
     /** 요청을 보내는 순간의 식별: 요청 번호·세션 번호·계정·투영 번호. 답은 이 값으로만 판정한다. */
     const begin = () => { const sent = observe(); return { gen: ++gen, epoch, sent, view }; };
     /** 이 요청의 답을 받아도 되는가: 영역이 살아 있고 같은 세션·같은 계정이다. */
@@ -453,20 +459,16 @@
 
     /**
      * 중요 결과 route 요청(제한 시간 60초). 성공 응답은 HTTP 상태와 함께 돌려주고(쓰기는 201만 적용), 실패는 상태·code·JSON 본문
-     * 여부를 싣는다. 연결 실패·제한 시간·세션 종료로 멈춘 요청은 status 0이다 — 쓰기라면 서버가 적용했는지 모르는 답이다. 401은
-     * 본문을 기다리지 않고 이 영역부터 끝낸 뒤 로그아웃을 시작한다(expire).
+ * Session termination belongs to the page transport and work-context lifecycle.
+     * Session termination belongs to the page transport and lifecycle gate.
      */
-    async function call(method, path, raw) {
+    async function call(method, path, raw, context = work.capture('document')) {
       const controller = new AbortController(), stop = setTimeout(() => controller.abort(), TIMEOUT_MS);
       inflight.add(controller);
       try {
         const headers = raw === undefined ? { 'X-KIN-CSRF': '1' } : { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' };
-        const response = await fetch(apiBase + path, { method, signal: controller.signal, headers, body: raw });
-        if (response.status === 401) {
-          expire();
-          throw Object.assign(new Error(TEXT.expired), { kin: true, status: 401, code: null, json: false, body: null });
-        }
-        const data = await response.json().catch(() => undefined);
+        const response = await transport.request(apiBase + path, { context, deadlineMs: TIMEOUT_MS, method, signal: controller.signal, headers, body: raw });
+        const data = response.incomplete ? undefined : response.body;
         if (!response.ok) {
           throw Object.assign(new Error(isObject(data) && text(data.message) ? data.message : `HTTP ${response.status}`),
             { kin: true, status: response.status, code: isObject(data) && text(data.code) ? data.code : null, json: isObject(data),
@@ -505,7 +507,7 @@
         listing.delete(ctx);
         try { handle(value); } finally { retire(ctx.gen); }
       };
-      call('GET', `/critical-results?${query}`).then(settle(({ data }) => {
+      call('GET', `/critical-results?${query}`).then(guarded(settle(({ data }) => {
         if (!alive(ctx)) return;
         if (!inView(ctx)) { paint(); return; }
         const envelope = ownerOf(data && data.owner, ctx.sent);
@@ -513,9 +515,9 @@
         const read = envelope === 'same' ? readList(data, ctx.filter) : null;
         if (!read) listFailed(ctx, TEXT.malformed);
         else takeList(ctx, read);
-      }), settle(error => {
+      })), guarded(settle(error => {
         if (alive(ctx)) listFailed(ctx, describe(error));
-      }));
+      })));
     }
 
     /**
@@ -602,7 +604,7 @@
         retire(ctx.gen);
         return answer;
       };
-      return call('GET', `/critical-results/${encodeURIComponent(id)}`).then(({ data }) => {
+      return call('GET', `/critical-results/${encodeURIComponent(id)}`).then(guarded(({ data }) => {
         if (!alive(ctx)) return done(null);
         const envelope = ownerOf(data && data.owner, ctx.sent);
         if (envelope === 'other') { accountChanged(TEXT.otherEnvelope); return done(null); }
@@ -613,7 +615,7 @@
         const current = fresh && offer(id, ctx.gen, item);
         if (current) opened.add(id);
         return done({ item, current });
-      }, error => {
+      }), guarded(error => {
         if (!alive(ctx)) return done(null);
         const current = ctx.view === view && ctx.gen > slotGen(id) && !pages.some(page => page.gen > ctx.gen && page.ids.has(id));
         // 403·404는 지금 이 기록을 읽을 수 없다는 서버의 답이다: 목록 행까지 그 기록의 투영을 없앤다. 그 밖의 실패(5xx·답 없음·
@@ -623,7 +625,7 @@
           opened.delete(id);
         }
         return done({ error: describe(error), current });
-      });
+      }));
     }
 
     // ── 명시적 ACK(§5.3, §8.1) ──
@@ -652,7 +654,7 @@
       attempt.state = retry ? 'checking' : 'sending';
       attempt.gen = ++gen;
       paint();
-      call('POST', attempt.path, attempt.raw).then(result => settle(attempt, retry, result, null), error => settle(attempt, retry, null, error));
+      call('POST', attempt.path, attempt.raw).then(guarded(result => settle(attempt, retry, result, null)), guarded(error => settle(attempt, retry, null, error)));
     }
 
     /**
@@ -672,7 +674,6 @@
         unknown(attempt, retry, TEXT.unexpected(result.status), '');
         return;
       }
-      if (error.status === 401) return;
       if (error.status === 409 && error.code === 'OWNER_CHANGED') {
         accountChanged(describe(error));
         return;
@@ -705,11 +706,11 @@
         replacedBy: next });
       paint();
       loadList(false);
-      if (error.code === 'CRITICAL_RESULT_CANCELLED') readRecord(attempt.recordId, attempt.uid).then(answer => {
+      if (error.code === 'CRITICAL_RESULT_CANCELLED') readRecord(attempt.recordId, attempt.uid).then(guarded(answer => {
         if (!answer) return;
         if (answer.item && outcomes.get(attempt.recordId) === outcome && answer.item.state === 'cancelled') outcome.server = 'cancelled';
         paint();
-      });
+      }));
     }
 
     /**
@@ -738,7 +739,7 @@
      * 결과를 모르는 채로 같은 requestId·body를 보관한다.
      */
     function confirmByRead(attempt) {
-      readRecord(attempt.recordId, attempt.uid).then(answer => {
+      readRecord(attempt.recordId, attempt.uid).then(guarded(answer => {
         if (!answer) return;
         const item = answer.item;
         if (item && ownAttempt(attempt) && attempt.state === 'unknown') {
@@ -749,7 +750,7 @@
           }
         }
         paint();
-      });
+      }));
     }
 
     function check(recordId) {
@@ -767,7 +768,7 @@
       if (!allowed()) return;
       const origin = document.activeElement;
       openNotes.delete(from);
-      readRecord(id).then(answer => {
+      readRecord(id).then(guarded(answer => {
         if (!answer || !answer.current) return;
         if (!answer.item) {
           openNotes.set(from, `${TEXT.replacementFailed}\n${answer.error}`);
@@ -781,7 +782,7 @@
           const head = entry.element.querySelector('[tabindex="-1"]');
           if (head) head.focus();
         }
-      });
+      }));
     }
 
     // ── 그리기 ──
@@ -1046,12 +1047,10 @@
     function accountChanged(detail) {
       if (ended || lock !== null) return;
       lockArea(detail);
-      (window.kinOn401 || []).forEach(done => { try { done('account-changed', detail); } catch (_) {} });
-      if (typeof onAccountChanged === 'function') { try { onAccountChanged(detail); } catch (_) {} }
     }
 
     /**
-     * 세션이 끝났다(로그아웃·다른 탭·401·문서 떠남). 나간 요청을 멈추고 목록·시도를 버리며 늦은 답은 어디에도 그리지 않는다.
+ * Session termination belongs to the page transport and work-context lifecycle.
      * 방송·storage·pagehide·호스트가 겹쳐 여러 번 불러도 한 번만 끝낸다. 공통 목록이 'account-changed'로 부르면 잠근다.
      */
     function end(reason, detail) {
@@ -1066,19 +1065,11 @@
       rowNodes.clear();
       lineNodes.clear();
       region.hidden = true;
-      if (channel) channel.close();
-    }
-
-    /** 이 영역 요청의 401. 로그아웃 POST의 완료·지연과 무관하게 이 영역부터 끝내고, 공통 목록을 부른 뒤 호스트의 logout을 부른다. */
-    function expire() {
-      if (ended) return;
-      end();
-      (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} });
-      try { Promise.resolve(logout()).catch(() => {}); } catch (_) {}
     }
 
     /** 호스트의 판정이 수신 가능으로 바뀌면 첫 쪽을 읽고, 바뀌지 않으면 아무것도 하지 않는다. */
     function sync() {
+      if (work.state() !== 'active') return;
       if (ended) return;
       const now = allowed();
       if (now === reading) return;
@@ -1111,17 +1102,28 @@
       paint();
     });
     // 문서가 보이고 영역이 서 있는 동안만 다시 읽는다. 읽기는 어떤 기록도 바꾸지 않고(ACK·재알림이 아니다) 알림도 띄우지 않는다.
-    timer = setInterval(() => {
-      if (allowed() && !region.hidden && document.visibilityState === 'visible' && !listing.size) loadList(false);
-    }, PERIOD_MS);
-    watch = setInterval(sync, WATCH_MS);
-    try {
-      channel = new BroadcastChannel('kin-session');
-      channel.onmessage = event => { if (event.data && event.data.type === 'session-ended') end(); };
-    } catch (_) {}
-    window.addEventListener('storage', event => { if (event.key === 'kin-session-ended') end(); });
+    function startTimers() {
+      clearInterval(timer);
+      clearInterval(watch);
+      timer = setInterval(guarded(() => {
+        if (allowed() && !region.hidden && document.visibilityState === 'visible' && !listing.size) loadList(false);
+      }), PERIOD_MS);
+      watch = setInterval(guarded(sync), WATCH_MS);
+    }
+    work.onInvalidate(event => {
+      if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) { end(); return; }
+      if (event.reason === 'prepare') { clearInterval(timer); clearInterval(watch); }
+      if (event.reason === 'cancel') {
+        listing.clear(); outstanding.clear();
+        for (const attempt of attempts.values()) if (['sending', 'checking'].includes(attempt.state)) {
+          attempt.state = 'unknown'; attempt.detail = TEXT.noResponse;
+        }
+        paint(); loadList(false); sync();
+        startTimers();
+      } else if (event.reason === 'lifecycle' && event.state === 'active') startTimers();
+    });
+    if (work.state() === 'active') startTimers();
     window.addEventListener('pagehide', () => end());
-    (window.kinOn401 = window.kinOn401 || []).push(end);
     paint();
     sync();
     return { end, lock: detail => lockArea(detail) };

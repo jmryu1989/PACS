@@ -20,6 +20,7 @@
     return Object.keys(defaults).find(id => map[id] === e.code) || null;
   }
   function create({host, owner, allowed, changed}) {
+    const work=root.KinWorkContext,transport=root.KinSessionTransport.page();
     const d = host.ownerDocument;
     const el = (tag, text, parent) => { const n = d.createElement(tag); n.textContent = text; parent?.append(n); return n; };
     let map = {...defaults}, currentOwner = null, ended = false, draftOwner = null, baseline = null;
@@ -53,32 +54,32 @@
     const accountStatus=el('p','',dialog);accountStatus.id='workspace-shortcuts-account-status';accountStatus.setAttribute('role','status');
     function refreshAccount(){accountLoad.disabled=ended||accountBusy||!dialog.open||!allowed()||owner()!==draftOwner;accountSave.disabled=accountLoad.disabled||accountRevision===null;}
     function cancelAccount(){accountEpoch++;accountRequest?.abort();accountRequest=null;accountRevision=null;accountBusy=false;}
+    let interruptedAction=null;
     async function accountRun(action){
+      if(work.state()!=='active')return;const at=work.capture('document');
       if(ended||accountBusy||!dialog.open||!allowed()||!draftOwner||owner()!==draftOwner||action==='save'&&accountRevision===null)return;
       const snapshot=draft(), bound=draftOwner, ticket=++accountEpoch;
       if(action==='save'&&!valid(snapshot)){accountStatus.textContent='중복 또는 예약 단축키를 수정하세요.';return;}
       const live=()=>!ended&&ticket===accountEpoch&&dialog.open&&allowed()&&owner()===bound&&draftOwner===bound;
-      const controller=new AbortController();accountRequest=controller;accountBusy=true;refreshAccount();
+      const controller=new AbortController();accountRequest=controller;accountBusy=true;interruptedAction=action;refreshAccount();
       const timeout=setTimeout(()=>controller.abort(),10000);accountStatus.textContent='계정 단축키를 확인하는 중…';
       try{
-        const response=await fetch('/api/workspace-shortcuts',{method:action==='save'?'PUT':'GET',credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-KIN-CSRF':'1','Content-Type':'application/json'},...(action==='save'?{body:JSON.stringify({expectedOwner:JSON.parse(bound),revision:accountRevision,bindings:snapshot})}:{})});
+        const response=await transport.request('/api/workspace-shortcuts',{context:at,method:action==='save'?'PUT':'GET',credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-KIN-CSRF':'1','Content-Type':'application/json'},...(action==='save'?{body:JSON.stringify({expectedOwner:JSON.parse(bound),revision:accountRevision,bindings:snapshot})}:{})});
         if(!live())return;
-        if([401,403].includes(response.status))throw Error('계정이나 권한이 변경되었습니다. 다시 로그인하세요.');
+
         if(!response.ok)throw Error(response.status===409?'다른 창에서 설정이 바뀌었습니다. 불러온 뒤 다시 저장하세요.':'계정 설정을 확인하지 못했습니다. 다시 불러오세요.');
-        const data=await response.json();if(!live())return;
+        const data=response.body;if(!live())return;
         if(JSON.stringify(data.owner)!==bound||!Number.isInteger(data.revision)||data.revision<0||data.revision>2147483647||(data.revision===0?data.bindings!==null||data.invalid===true:!valid(data.bindings)&&!(data.invalid===true&&data.bindings===null)))throw Error('계정 단축키 응답을 확인할 수 없습니다.');
-        const check=await fetch('/api/me',{credentials:'same-origin',cache:'no-store',signal:controller.signal});if(!live())return;
-        if(!check.ok)throw Error('계정 상태를 확인한 뒤 다시 시도하세요.');
-        const me=await check.json();if(!live())return;
-        if(me.kind!=='member'||JSON.stringify([me.institution,me.sub])!==bound)throw Error('계정이 변경되었습니다. 다시 로그인하세요.');
+        work.commit(at,()=>{
         if(action==='load'&&JSON.stringify(snapshot)!==JSON.stringify(draft())){accountRevision=null;accountStatus.textContent='입력이 바뀌어 불러온 설정을 적용하지 않았습니다.';return;}
         accountRevision=data.revision;
         if(data.invalid===true){accountStatus.textContent='저장된 단축키를 읽을 수 없습니다. 현재 입력으로 계정에 다시 저장할 수 있습니다.';return;}
         if(action==='load'&&data.bindings!==null){fill(data.bindings);accountStatus.textContent='계정 단축키를 입력란에 불러왔습니다. Apply & Save로 적용하세요.';}
         else if(action==='save')accountStatus.textContent=JSON.stringify(snapshot)===JSON.stringify(draft())?'단축키를 계정에 저장했습니다.':'요청 당시 단축키를 저장했습니다. 이후 입력 변경은 저장되지 않았습니다.';
         else accountStatus.textContent=data.bindings===null?'계정에 저장된 단축키가 없습니다.':'계정 설정이 있습니다. 불러오면 입력란에 표시합니다.';
-      }catch(e){if(live()){accountRevision=null;accountStatus.textContent=e instanceof TypeError||e.name==='AbortError'?'응답을 확인하지 못했습니다. 입력은 유지했습니다. 다시 불러오세요.':e instanceof SyntaxError?'계정 응답 형식을 확인하지 못했습니다.':e.message;}}
-      finally{clearTimeout(timeout);if(ticket===accountEpoch){accountRequest=null;accountBusy=false;refreshAccount();}}
+        });
+      }catch(e){work.commit(at,()=>{if(live()){accountRevision=null;accountStatus.textContent=e instanceof TypeError||e.name==='AbortError'?'응답을 확인하지 못했습니다. 입력은 유지했습니다. 다시 불러오세요.':e instanceof SyntaxError?'계정 응답 형식을 확인하지 못했습니다.':e.message;}});}
+      finally{clearTimeout(timeout);if(ticket===accountEpoch){accountRequest=null;accountBusy=false;work.commit(at,()=>{interruptedAction=null;refreshAccount();});}}
     }
     button('Defaults','workspace-shortcuts-default',()=>{fill(defaults);message.textContent='기본값을 적용하려면 저장하세요.';});
     button('Cancel','workspace-shortcuts-cancel',close);
@@ -109,8 +110,16 @@
     };
     dialog.addEventListener('cancel',e=>{e.preventDefault();close();});
     dialog.addEventListener('keydown',e=>e.stopPropagation());
-    const timer=setInterval(sync,500);sync();
-    return {action:e=>{sync();return action(map,e);},end:()=>{ended=true;cancelAccount();clearInterval(timer);map={...defaults};dialog.remove();edit.remove();status.remove();},read:()=>({...map})};
+    let timer;
+    function startTimer(){clearInterval(timer);const at=work.capture('document');timer=setInterval(()=>work.commit(at,sync),500);}
+    function end(){ended=true;cancelAccount();clearInterval(timer);map={...defaults};dialog.remove();edit.remove();status.remove();}
+    work.onInvalidate(event=>{
+      if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
+      if(event.reason==='prepare')clearInterval(timer);
+      if(event.reason==='cancel'){const action=interruptedAction;interruptedAction=null;accountEpoch++;accountRequest=null;accountBusy=false;refreshAccount();startTimer();if(action&&dialog.open)accountRun(action==='load'?'load':'inspect');}
+    });
+    startTimer();sync();
+    return {action:e=>{sync();return action(map,e);},end,read:()=>({...map})};
   }
   function read(storage, owner) {
     if(owner)try{const raw=storage.getItem(prefix+owner);if(raw!==null&&raw.length<=2048){const value=JSON.parse(raw);if(valid(value))return value;}}catch(_){}

@@ -6,10 +6,11 @@
   const uidPattern = /^[0-9]+(?:\.[0-9]+)+$/;
   const responseLimit = 2 * 1024 * 1024;
 
-  function create({owner, changed, fetcher, requestTimeoutMs = 15000, budgetMs = 60000}) {
+  function create({owner, changed, requestTimeoutMs = 15000, budgetMs = 60000}) {
     if (typeof owner !== 'function' || typeof changed !== 'function' || !related?.parse)
       throw new TypeError('owner, changed, and KinRelatedParts.parse are required.');
-    const request = fetcher || ((...args) => fetch(...args));
+    const work=globalThis.KinWorkContext,transport=globalThis.KinSessionTransport.page();
+    let resume=false;
     let generation = 0, boundOwner = null, scopeKey = '', studies = [];
     let busy = false, ended = false, note = '';
     const results = new Map(), controllers = new Set(), cancelRejectors = new Set();
@@ -88,10 +89,10 @@
         remaining: total - verified - failed, note, allowed: current};
     }
 
-    async function read(uid, signal) {
-      const response = await request('/dicom-web/studies/' + encodeURIComponent(uid) +
+    async function read(uid, signal, at) {
+      const response = await transport.request('/dicom-web/studies/' + encodeURIComponent(uid) +
         '/series?includefield=0020000D,0020000E,00180015&limit=501', {
-        signal, credentials: 'same-origin', cache: 'no-store',
+        context:at,read:'response',signal, credentials: 'same-origin', cache: 'no-store',
         headers: {Accept: 'application/dicom+json'}
       });
       if (!response || typeof response.ok !== 'boolean') throw new Error('시리즈 응답 형식을 확인하지 못했습니다.');
@@ -122,6 +123,8 @@
     }
 
     async function load({refresh = false} = {}) {
+      if(work.state()!=='active')return snapshot();
+      const at=work.capture('document');resume=true;
       if (ended) return snapshot();
       stopRequests();
       const waveOwner = boundOwner, mine = generation;
@@ -139,7 +142,7 @@
       notify();
       let budgetExpired = false;
       const budgetRejectors = new Set();
-      const active = () => !ended && mine === generation && boundOwner === waveOwner && owner() === waveOwner;
+      const active = () => work.admits(at) && !ended && mine === generation && boundOwner === waveOwner && owner() === waveOwner;
       const budgetTimer = setTimeout(() => {
         if (!active()) return;
         budgetExpired = true;
@@ -152,8 +155,7 @@
         while (active() && !budgetExpired && queue.length) {
           const item = queue.shift();
           if (!uidPattern.test(item.uid) || item.uid.length > 64) {
-            results.set(item.uid, {error: '검사 UID가 올바르지 않습니다.'});
-            notify();
+            work.commit(at,()=>{results.set(item.uid, {error: '검사 UID가 올바르지 않습니다.'});notify();});
             continue;
           }
           const controller = new AbortController();
@@ -169,24 +171,17 @@
             rejectRequest(Object.assign(new Error('request timed out'), {requestExpired: true}));
           }, Math.max(0, requestTimeoutMs));
           try {
-            const rows = await Promise.race([read(item.uid, controller.signal), requestDeadline, budgetDeadline, cancellation]);
+            const rows = await Promise.race([read(item.uid, controller.signal, at), requestDeadline, budgetDeadline, cancellation]);
             const parts = related.parse(rows, item.uid).filter(Boolean);
             if (Number.isInteger(item.series) && item.series > 0 && rows.length !== item.series)
               throw new Error('시리즈 수가 목록과 일치하지 않습니다. 목록을 새로 고친 뒤 다시 조회하세요.');
-            if (active() && !budgetExpired) results.set(item.uid, {verified: true, parts});
+            work.commit(at,()=>{if (active() && !budgetExpired) results.set(item.uid, {verified: true, parts});});
           } catch (error) {
             if (!active()) break;
-            if (error?.status === 401 || error?.status === 403) {
-              stopRequests();
-              results.clear();
-              note = '인증 또는 접근 권한 오류로 부위 정보를 모두 지웠습니다. 계정과 목록을 다시 확인한 뒤 재조회하세요.';
-              notify();
-              break;
-            }
             if (budgetExpired || (error?.name === 'AbortError' && !requestExpired)) break;
-            results.set(item.uid, {error: requestExpired ? '시리즈 조회 시간이 초과되었습니다. 다시 조회하세요.' :
+            work.commit(at,()=>{results.set(item.uid, {error: requestExpired ? '시리즈 조회 시간이 초과되었습니다. 다시 조회하세요.' :
               (error?.message || '시리즈 부위 정보를 확인하지 못했습니다.')});
-            notify();
+            notify();});
           } finally {
             clearTimeout(requestTimer);
             budgetRejectors.delete(rejectBudget);
@@ -198,14 +193,19 @@
 
       await Promise.all([worker(), worker(), worker()]);
       clearTimeout(budgetTimer);
-      if (active()) {
-        busy = false;
+      work.commit(at,()=>{if (active()) {
+        busy = false;resume=false;
         if (budgetExpired) note = '전체 조회 시간이 초과되었습니다. 다시 조회하면 남은 검사를 이어서 확인합니다.';
         notify();
-      }
+      }});
       return snapshot();
     }
 
+    work.onInvalidate(event=>{
+      if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
+      if(event.reason==='prepare')stopRequests();
+      if(event.reason==='cancel'&&resume){resume=false;load();}
+    });
     return {sync, load, cancel, end, get, snapshot};
   }
 

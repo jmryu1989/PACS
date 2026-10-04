@@ -3,6 +3,7 @@
 import re
 import unittest
 from pathlib import Path
+from module_session_harness import activate
 from playwright.sync_api import sync_playwright, expect
 from worklist_image_thumbnails_dom_test import HARNESS, PREVIEW, THUMBNAILS
 
@@ -25,6 +26,7 @@ class WorklistNarrowLayoutDOMTest(unittest.TestCase):
             page.set_default_timeout(4000)
             page.route('**/*', lambda route: route.abort())
             page.set_content(html)
+            activate(page)
             page.evaluate("""()=>{
               document.querySelector('#heads').innerHTML='<th>Patient</th><th>Study</th>';
               document.querySelector('#rows').innerHTML='<tr tabindex="0" data-uid="2.25.10" style="position:relative"><td>Synthetic Patient</td><td>CT <button type="button" data-tech-note="2.25.10" style="position:absolute;left:42%;top:0;height:100%;width:30%">Tech Note</button></td></tr>';
@@ -50,7 +52,7 @@ class WorklistNarrowLayoutDOMTest(unittest.TestCase):
                 page.add_script_tag(content=harness.replace("document.querySelector('#host')", "document.querySelector('#thumbwrap')"))
                 page.add_script_tag(content=PREVIEW)
                 page.add_script_tag(content=THUMBNAILS)
-                page.evaluate('start()')
+                page.evaluate("KinWorkContext.select('2.25.10');start()")
                 expect(page.locator('#thumb-images-status')).to_have_text('12 / 12 images ready')
                 for selector in ['#thumb-images-back', '#thumb-images-order', '#thumb-images-retry', '#thumb-images-next', '.thumb-image-open']:
                     control = page.locator(selector).first

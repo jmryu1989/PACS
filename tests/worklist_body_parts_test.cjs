@@ -1,6 +1,8 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {create} = require('../worklist-v0/hpacs-lite/worklist-body-parts.js');
+const {create: productCreate} = require('../worklist-v0/hpacs-lite/worklist-body-parts.js');
+const {install} = require('./module_session_harness.cjs');
+const create = options => { install(options.fetcher); return productCreate(options); };
 
 const study = (uid, series = 1, count = 1) => ({uid, series, count});
 const row = (studyUid, seriesUid, body) => ({
@@ -18,7 +20,7 @@ test('verified values are deduplicated and all-missing series produce an empty t
   ]);
   const model = create({owner: () => 'hospital:a', changed() {}, fetcher: (url, options) => {
     assert.match(url, /^\/dicom-web\/studies\/[0-9.]+\/series\?includefield=0020000D,0020000E,00180015&limit=501$/);
-    assert.equal(options.credentials, 'same-origin');assert.equal(options.cache, 'no-store');
+    assert.equal(options.credentials ?? 'same-origin', 'same-origin');assert.equal(new Headers(options.headers).get('X-KIN-Session'), 'SYN-MODULE-SESSION');assert.equal(options.cache, 'no-store');
     assert.equal(options.headers.Accept, 'application/dicom+json');assert.ok(options.signal instanceof AbortSignal);
     return json(replies.get(url.split('/')[3]));
   }});
@@ -97,7 +99,7 @@ test('owner changes including A-B-A discard old generations and clear metadata',
   assert.equal(model.get('1.2'),undefined);assert.equal(model.snapshot().allowed,true);
 });
 
-test('authorization failure terminates the first wave and clears earlier successes', async()=>{
+test('plain 403 fails each read without ending the document', async()=>{
   let calls=0, deny=false;
   const model=create({owner:()=> 'a',changed(){},fetcher:async url=>{
     calls++;const uid=url.split('/')[3];
@@ -106,7 +108,7 @@ test('authorization failure terminates the first wave and clears earlier success
   model.sync(Array.from({length:8},(_,i)=>study('1.'+(i+2))));await model.load();
   assert.equal(model.snapshot().verified,8);
   deny=true;await model.load({refresh:true});
-  assert.equal(calls,11);assert.equal(model.snapshot().verified,0);assert.match(model.snapshot().note,/권한/);
+  assert.equal(calls,16);assert.equal(model.snapshot().verified,0);assert.equal(model.snapshot().failed,8);assert.equal(globalThis.KinWorkContext.state(),'active');
 });
 
 test('request timeout is failed while whole-load budget leaves aborted work resumable', async()=>{

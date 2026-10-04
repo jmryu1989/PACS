@@ -55,11 +55,15 @@
         }
       }
     }
-    function end(){if(ended)return;ended=true;last=restore=null;tabStops(null);tbody.removeEventListener('keydown',key,true);tbody.removeEventListener('focusin',focused);channel?.close();root.removeEventListener('storage',storage);root.removeEventListener('pagehide',end);}
-    const storage=e=>{if(e.key==='kin-session-ended')end();};let channel;
+    const work = root.KinWorkContext;
+    work.onInvalidate(event => {
+      if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) end();
+    });
+    function end(){if(ended)return;ended=true;last=restore=null;tabStops(null);tbody.removeEventListener('keydown',key,true);tbody.removeEventListener('focusin',focused);root.removeEventListener('pagehide',end);}
+
     tbody.addEventListener('keydown',key,true);tbody.addEventListener('focusin',focused);
-    root.addEventListener('storage',storage);root.addEventListener('pagehide',end);
-    try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+    root.addEventListener('pagehide',end);
+
     sync();return {beforeRender,sync,end};
   }
   const api={nextUid,mount};if(typeof module==='object'&&module.exports)module.exports=api;else root.KinWorklistRowNavigation=api;

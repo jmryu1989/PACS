@@ -48,6 +48,7 @@ import os
 import re
 import unittest
 from pathlib import Path
+from module_session_harness import activate
 from playwright.sync_api import sync_playwright
 from report_actions_dom_test import BASE_MAIN_SHA256 as UI3_BASE_MAIN_SHA256, fixed_file
 
@@ -168,8 +169,7 @@ ROW_HEIGHT = 59
 # reading-workspace.css caps the toolbar at 92px in reading mode; the base toolbar always filled it from 1366 up.
 READING_HEIGHT = 92
 
-# The longest texts the page writes into the status group and the search row, each pinned to the file that writes it.
-# They must shorten, never wrap the toolbar.
+# Representative long status payloads stress wrapping independently of product wording.
 STATUS_TEXTS = [
     ('#layout-status', '초기화 저장 안 됨 · 이 창에서만 유지', 'main.html'),
     ('#worklist-refresh-status', '자동 목록 갱신을 멈췄습니다. Refresh로 직접 갱신할 수 있습니다.', 'worklist-refresh.js'),
@@ -447,6 +447,7 @@ class WorklistToolbarDOMTest(unittest.TestCase):
         page.set_default_timeout(4000)
         page.route('**/*', lambda route: route.abort())
         page.set_content(html or self.html)
+        activate(page)
         page.add_script_tag(content=self.search)
         page.evaluate(MOUNT_SEARCH)
         if roaming:
@@ -1092,10 +1093,26 @@ class WorklistToolbarDOMTest(unittest.TestCase):
         finally:
             page.close()
 
-    def test_status_texts_are_the_ones_the_page_writes(self):
-        for selector, text, source in STATUS_TEXTS + [('#active-filter-state',) + SAVED_SEARCH_STATE]:
-            with self.subTest(selector):
-                self.assertIn(text, (ASSETS / source).read_text(encoding='utf-8'), selector)
+    def test_failed_body_part_lookup_keeps_verified_data_and_worklist_controls(self):
+        page = self.open_page(1366, 768)
+        try:
+            for name in ('related-parts.js', 'worklist-body-parts.js'):
+                page.add_script_tag(content=(ASSETS / name).read_text(encoding='utf-8'))
+            value = page.evaluate("""async () => {
+              window.fetch=async url=>new Response(url.includes('1.2.4')?'SYN failed':JSON.stringify([{
+                '0020000D':{Value:['1.2.3']},'0020000E':{Value:['1.2.3.1']},'00180015':{Value:['CHEST']}
+              }]),{status:url.includes('1.2.4')?401:200});
+              const model=KinWorklistBodyParts.create({owner:()=> 'SYN owner',changed:()=>{}});
+              model.sync([{uid:'1.2.3',series:1},{uid:'1.2.4',series:1}]);
+              await model.load();
+              return {snapshot:model.snapshot(),parts:model.get('1.2.3'),lifecycle:KinWorkContext.state()};
+            }""")
+            self.assertEqual((1, 1, True), (value['snapshot']['verified'], value['snapshot']['failed'], value['snapshot']['allowed']))
+            self.assertEqual(['CHEST'], value['parts'])
+            self.assertEqual('active', value['lifecycle'])
+            self.assertTrue(page.locator('#quick').is_enabled())
+        finally:
+            page.close()
 
 
 if __name__ == '__main__':

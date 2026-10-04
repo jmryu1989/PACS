@@ -34,10 +34,14 @@
     function configure(){if(!live()||!key)return;state.configure({version:1,mode:mode.value,clearResults:clear.checked},snapshot());
       try{root.localStorage.setItem(key,JSON.stringify(state.preferences()));note='';}catch(_){note='검색 설정을 저장하지 못했습니다. 현재 창에만 적용합니다.';}render();show();}
     mode.onchange=clear.onchange=configure;container.querySelector('button').onclick=apply;
+    const work = root.KinWorkContext;
+    work.onInvalidate(event => {
+      if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) end();
+    });
     function end(){ended=true;state.clear({});lock();}
-    const storage=e=>{if(e.key==='kin-session-ended')end();};let channel;
-    root.addEventListener('storage',storage);root.addEventListener('pagehide',()=>{end();channel?.close();root.removeEventListener('storage',storage);});
-    try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+
+    root.addEventListener('pagehide',()=>{end();});
+
     show();return {read:current=>live()?state.read(current):{criteria:current,empty:true,pending:false},apply,
       change(){if(live())state.change(snapshot());show();},clear(){if(live())state.clear(snapshot());show();},show};
   }

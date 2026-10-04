@@ -148,10 +148,11 @@
   function zero(bytes) { try { if (bytes && typeof bytes.fill === 'function') bytes.fill(0); } catch (_) {} }
 
   function createController(o) {
+    const work = globalThis.KinWorkContext, transport = globalThis.KinSessionTransport.page();
     if (!o || !o.session || typeof o.session.create !== 'function' || !o.capture ||
         typeof o.capture.createCapture !== 'function' || typeof o.readContext !== 'function' ||
-        typeof o.insert !== 'function' || typeof o.fetch !== 'function' || typeof o.apiBase !== 'string')
-      throw new TypeError('session, capture, readContext, insert, fetch and apiBase are required');
+        typeof o.insert !== 'function' || typeof o.apiBase !== 'string')
+      throw new TypeError('session, capture, readContext, insert and apiBase are required');
     const timers = o.timers || { set: (fn, ms) => setTimeout(fn, ms), clear: id => clearTimeout(id) };
     let server = OFF, browser = false, run = null, starting = false;
     let notice = null, extra = null, pinned = null, dismissed = -1;
@@ -169,7 +170,8 @@
       if (r.timer !== null) { try { timers.clear(r.timer); } catch (_) { failed = true; } r.timer = null; }
       try { r.abort.abort(); } catch (_) { failed = true; }
       try { if (r.capture) r.capture.cancel(); } catch (_) { failed = true; }
-      zero(r.wav); r.wav = null;
+      zero(r.wav); r.wav = null; zero(r.audio); r.audio = null;
+      if (r.stopped) void r.stopped.then(zero, () => {});
       // Rethrow so the session records cleanupFailed instead of the pane claiming a clean stop.
       if (failed) throw new Error('cleanup-failed');
     }
@@ -178,6 +180,7 @@
       readContext: o.readContext,
       validateTranscript: text => typeof text === 'string' && text.length <= TEXT_CAP,
       insert: o.insert,
+      canInsert: () => !gate() && !(o.busy && o.busy()),
       cleanup: release,
       hashText: o.hashText,
     });
@@ -204,7 +207,8 @@
     function gate() { try { return o.block ? o.block() || null : null; } catch (_) { return '지금은 받아쓸 수 없습니다'; } }
 
     async function start() {
-      if (starting || run) return;
+      const at = work.capture('study');
+      if (!work.admits(at) || starting || run) return;
       notice = null; extra = null;
       sync();
       if (!capable()) { emit(); return; }
@@ -212,83 +216,101 @@
       if (gate()) { notice = 'editor-blocked'; dismissed = -1; emit(); return; }
       starting = true;
       let r;
-      try { r = await session.begin(); } finally { starting = false; }
+      try { r = await session.begin(); } finally { work.commit(at, () => { starting = false; }); }
+      if (!work.admits(at)) return;
+      let acquisition;
+      work.commit(at, () => {
       if (!r.ok) {
         if (r.reason === 'editor-blocked') { notice = 'editor-blocked'; dismissed = -1; }
         emit();
         return;
       }
-      const cur = { token: r.token, abort: new AbortController(), capture: null, timer: null, wav: null,
+      const cur = { at, token: r.token, abort: new AbortController(), capture: null, timer: null, wav: null,
         stopping: false, auto: false, timedOut: false, meta: null };
       run = cur;
       remember(session.snapshot().pin.field);
       try {
         cur.capture = o.capture.createCapture({ env: o.env, maxBytes: server.maxBytes,
           // Only the worklet's own cap reaches here; a user Stop settles the stop() promise instead.
-          onComplete: () => { if (run === cur) { cur.auto = true; finish(cur); } },
-          onFailure: code => failRun(cur, captureReason(code)) });
+          onComplete: () => { work.commit(at, () => { if (run === cur) { cur.auto = true; void finish(cur); } }); },
+          onFailure: code => { work.commit(at, () => { failRun(cur, captureReason(code)); }); } });
       } catch (_) { failRun(cur, 'DICTATION_CAPTURE_FAILED'); return; }
       emit();
-      try { await cur.capture.start(); }
-      catch (e) { failRun(cur, captureReason(e && e.message)); return; }
+      cur.acquisition = cur.capture.start();
+      acquisition = beginCapture(cur, at);
+      });
+      await acquisition;
+    }
+
+    async function beginCapture(cur, at) {
+      try { await cur.acquisition; }
+      catch (e) { work.commit(at, () => { failRun(cur, captureReason(e && e.message)); }); return; }
       if (run !== cur) return;
-      session.recording(cur.token);
-      emit();
+      work.commit(at, () => { session.recording(cur.token); emit(); });
     }
 
     async function finish(cur) {
-      if (run !== cur || cur.stopping || session.snapshot().state !== 'recording') return;
+      const at = cur.at;
+      if (!work.admits(at) || run !== cur || cur.stopping || session.snapshot().state !== 'recording') return;
       cur.stopping = true;
       emit();
+      cur.stopped = cur.capture.stop();
+      await completeStop(cur, at);
+    }
+
+    async function completeStop(cur, at) {
       let wav;
-      try { wav = await cur.capture.stop(); }
-      catch (e) { failRun(cur, captureReason(e && e.message)); return; }
+      try { wav = await cur.stopped; }
+      catch (e) { work.commit(at, () => { failRun(cur, captureReason(e && e.message)); }); return; }
       if (run !== cur) { zero(wav); return; }
-      cur.wav = wav;
-      if (!session.uploading(cur.token).ok) { emit(); return; }
-      await send(cur);
+      work.commit(at, () => {
+        cur.audio = wav;
+        if (!session.uploading(cur.token).ok) emit(); else void send(cur);
+      });
     }
 
     async function send(cur) {
+      const at = cur.at;
       const pin = session.snapshot().pin;
       const url = `${o.apiBase}/studies/${encodeURIComponent(pin.uid)}/dictation`;
-      cur.timer = timers.set(() => { cur.timedOut = true; try { cur.abort.abort(); } catch (_) {} },
+      const abort = cur.abort = new AbortController(); let timedOut = false;
+      const timer = cur.timer = timers.set(() => { timedOut = true; try { abort.abort(); } catch (_) {} },
         server.timeoutMs + CLIENT_MARGIN_MS);
       emit();
       let res, raw;
+      const bytes = cur.audio.slice();
       try {
-        const pending = o.fetch(url, { method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        const pending = transport.request(url, { context: at, read: 'response', deadlineMs: 0, method: 'POST', credentials: 'same-origin', cache: 'no-store',
           redirect: 'error', headers: { 'Content-Type': 'audio/wav', 'X-KIN-CSRF': '1' },
-          body: cur.wav, signal: cur.abort.signal });
-        // fetch() copied the bytes when it built the request; the page keeps no audio after this.
-        zero(cur.wav); cur.wav = null;
+          body: bytes, signal: abort.signal });
+        // Clear the transmitted buffer; the run owns one RAM copy until its reply or cancellation.
+        zero(bytes);
         res = await pending;
         if (run !== cur) return;
-        if (res.status === 401) {
-          failRun(cur, 'unauthorized');
-          try { if (o.onUnauthorized) o.onUnauthorized(); } catch (_) {}
-          return;
-        }
         raw = await res.text();
       } catch (_) {
-        failRun(cur, cur.timedOut ? 'client-timeout' : 'network');
+        work.commit(at, () => { failRun(cur, timedOut ? 'client-timeout' : 'network'); });
         return;
+      } finally {
+        zero(bytes); timers.clear(timer); if (cur.timer === timer) cur.timer = null;
       }
       if (run !== cur) return;
-      if (cur.timer !== null) { timers.clear(cur.timer); cur.timer = null; }
+      work.commit(at, () => {
       if (!res.ok) { const f = refusal(res.status, raw); failRun(cur, f.code, f.message); return; }
       const value = readResponse(raw);
       if (!value) { failRun(cur, 'invalid-response'); return; }
       const problem = transcriptProblem(value.text);
       if (problem) { failRun(cur, problem); return; }
-      cur.meta = value;
+      cur.meta = value; zero(cur.audio); cur.audio = null;
       session.receive(cur.token, value.text);
       emit();
+      });
     }
 
     function stop() { if (run) finish(run); }
 
     async function insert() {
+      const at = work.capture('editor'); if (!work.admits(at)) return null;
       const snap = session.snapshot();
       if (snap.state !== 'review' || snap.pending || !run) return null;
       notice = null;
@@ -298,19 +320,26 @@
       if (busy) { notice = 'report-busy'; emit(); return null; }
       const field = snap.pin.field;
       const res = await session.insert(snap.asrSeq);
-      const inserted = res.inserted === true;
+      if (!work.admits(at)) return null;
+      let inserted = res.inserted === true;
+      work.commit(at, () => {
       if (!inserted && res.reason === 'field-changed') notice = 'field-changed';
       emit();
+      });
       return { ...res, inserted, field };
     }
 
     async function repin() {
+      const at = work.capture('editor'); if (!work.admits(at)) return null;
       const snap = session.snapshot();
       if (snap.state !== 'review' || !snap.needsRepin || snap.pending) return null;
       const res = await session.repin(snap.asrSeq);
+      if (!work.admits(at)) return null;
+      work.commit(at, () => {
       if (res.ok) { remember(session.snapshot().pin.field); notice = 'repinned'; }
       else if (res.reason === 'field-changed') notice = 'field-changed';
       emit();
+      });
       return res;
     }
     /** An explicit click in a report field is the re-pin gesture, and only when one is asked for. */
@@ -336,6 +365,7 @@
      * refuses (session rule).
      */
     function refresh() {
+      if (work.state() !== 'active') return;
       sync();
       const snap = session.snapshot();
       if (ACTIVE.has(snap.state) && snap.pin) {
@@ -373,10 +403,11 @@
         v.status = cur && cur.auto ? STATUS.capped : STATUS.uploading;
         v.controls.stop = 'disabled'; v.controls.cancel = 'enabled';
       } else if (s.state === 'review') {
-        v.status = s.needsRepin ? NOTICES['field-changed'] : (notice && NOTICES[notice]) || STATUS.review;
+        const blocked = gate();
+        v.status = blocked ? String(blocked) + UNCHANGED : s.needsRepin ? NOTICES['field-changed'] : (notice && NOTICES[notice]) || STATUS.review;
         v.text = s.text;
         v.controls.cancel = 'enabled';
-        v.controls.insert = s.pending || s.needsRepin ? 'disabled' : 'enabled';
+        v.controls.insert = s.pending || s.needsRepin || blocked ? 'disabled' : 'enabled';
         if (s.needsRepin) v.controls.repin = s.pending ? 'disabled' : 'enabled';
         if (s.pin) {
           const live = context(s.pin.field);
@@ -400,6 +431,27 @@
       return v;
     }
 
+    let resumeStart = false;
+    work.onInvalidate(({ reason, state }) => {
+      if (state === 'preparing') {
+        resumeStart = starting && !run;
+        run?.capture?.pause();
+        if (run && session.snapshot().state === 'uploading') run.abort.abort();
+      } else if (reason === 'cancel') {
+        starting = false;
+        if (run) {
+          const cur = run, resumedAt = work.capture('study'); cur.at = resumedAt;
+          const snap = session.snapshot();
+          cur.capture.resume({ onComplete: () => { work.commit(resumedAt, () => { cur.auto = true; void finish(cur); }); },
+            onFailure: code => { work.commit(resumedAt, () => { failRun(cur, captureReason(code)); }); } });
+          if (snap.state === 'requesting-permission') void beginCapture(cur, resumedAt);
+          else if (snap.state === 'recording' && cur.stopping) void completeStop(cur, resumedAt);
+          else if (snap.state === 'uploading' && cur.audio) void send(cur);
+        } else if (resumeStart) void start();
+        resumeStart = false;
+        emit();
+      } else if (reason === 'lifecycle' && state !== 'active') { cancel('page-exit'); listeners.clear(); }
+    });
     return Object.freeze({
       view, refresh, setServerCapability, start, stop, insert, repin, fieldClicked, cancel, close,
       pageExit: () => cancel('page-exit'),
@@ -415,6 +467,7 @@
    * takes the keyboard away.
    */
   function mount(controller, el, hooks = {}) {
+    const work = globalThis.KinWorkContext;
     const doc = el.pane.ownerDocument;
     // The unavailable title is the markup's own text, never a second copy of it (DI-13).
     const unavailableTitle = el.button.getAttribute('title');
@@ -476,8 +529,9 @@
     el.repin.addEventListener('click', () => { controller.repin(); });
     el.close.addEventListener('click', () => { controller.close(); if (hooks.closed) hooks.closed(); });
     el.insert.addEventListener('click', async () => {
+      const at = work.capture('study');
       const res = await controller.insert();
-      if (res && res.inserted && hooks.inserted) hooks.inserted(res.field);
+      work.commit(at, () => { if (res && res.inserted && hooks.inserted) hooks.inserted(res.field); });
     });
     controller.subscribe(render);
     render();

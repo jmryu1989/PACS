@@ -1,5 +1,7 @@
 /* A modal pins the viewed study for this edit; it never retargets the report. */
 window.KinTechNote = function (app) {
+  const work=window.KinWorkContext;
+  let interruptedRead=false;
   const d = document.createElement('dialog'); d.id = 'tech-note-dialog';
   d.setAttribute('aria-labelledby', 'tech-note-title');
   d.innerHTML = `<h2 id="tech-note-title">Tech Note</h2>
@@ -30,37 +32,43 @@ window.KinTechNote = function (app) {
     status(writable ? '내용을 확인한 뒤 명시적으로 저장하세요.' : '읽기 전용 · 촬영 기관의 작성 권한이 필요합니다.');
   }
   async function read() {
+    if(work.state()!=='active')return;
+    const at=work.capture('document'); interruptedRead=true;interruptedHistory=null;interruptedSave=false;
     const ticket = ++seq, target = uid; busy = true; controls(); status('메모를 불러오는 중…');
     try {
-      const result = await app.api('GET', '/studies/' + encodeURIComponent(target) + '/tech-note');
-      if (valid(ticket, target)) { adopt(result); $('history-items').replaceChildren(); cursor = null; $('more').hidden = true; }
-    } catch (e) { if (valid(ticket, target)) status('조회 실패: ' + e.message); }
-    finally { if (ticket === seq) { busy = false; controls(); } }
+      const result = await app.api('GET', '/studies/' + encodeURIComponent(target) + '/tech-note', undefined, undefined, at);
+      work.commit(at,()=>{if (valid(ticket, target)) { adopt(result); $('history-items').replaceChildren(); cursor = null; $('more').hidden = true; interruptedRead=false; }});
+    } catch (e) { work.commit(at,()=>{if (valid(ticket, target)) status('조회 실패: ' + e.message);}); }
+    finally { if (ticket === seq) busy=false; work.commit(at,()=>{if(ticket===seq){interruptedRead=false;controls();}}); }
   }
   $('save').onclick = async () => {
+    if(work.state()!=='active')return;
+    const at=work.capture('document');
     if (busy || !writable || !app.allowed() || ended) return;
     if (version && !$('reason').value.trim()) { status('수정·비우기 사유를 입력하세요.'); $('reason').focus(); return; }
     const ticket = ++seq, target = uid;
     const body = { baseVersion: version, text: $('text').value, reason: $('reason').value };
-    busy = true; controls(); status('저장 중…');
+    interruptedSave=true;busy = true; controls(); status('저장 중…');
     try {
-      const result = await app.api('POST', '/studies/' + encodeURIComponent(target) + '/tech-note', body);
-      if (valid(ticket, target)) {
+      const result = await app.api('POST', '/studies/' + encodeURIComponent(target) + '/tech-note', body, undefined, at);
+      work.commit(at,()=>{if (valid(ticket, target)) {
         adopt(result); $('history-items').replaceChildren(); $('more').hidden = true; cursor = null;
         status('저장되었습니다. v' + version);
-      }
-    } catch (e) { if (valid(ticket, target)) status('저장 확인 실패: ' + e.message + ' · 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.'); }
-    finally { if (ticket === seq) { busy = false; controls(); } }
+      }});
+    } catch (e) { work.commit(at,()=>{if (valid(ticket, target)) status('저장 확인 실패: ' + e.message + ' · 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.');}); }
+    finally { if (ticket === seq) busy=false; work.commit(at,()=>{if(ticket===seq){interruptedSave=false;controls();}}); }
   };
   $('reload').onclick = () => {
     if (!busy && (!dirty() || confirm('입력 중인 메모를 버리고 최신 저장본을 읽을까요?'))) read();
   };
   async function history(more) {
+    if(work.state()!=='active')return;
+    const at=work.capture('document');
     if (busy) return;
-    const ticket = ++seq, target = uid; busy = true; controls(); status('이력을 불러오는 중…');
+    const ticket = ++seq, target = uid;interruptedHistory=more;busy = true; controls(); status('이력을 불러오는 중…');
     try {
-      const result = await app.api('GET', '/studies/' + encodeURIComponent(target) + '/tech-note/history' + (more && cursor ? '?before=' + cursor : ''));
-      if (!valid(ticket, target)) return;
+      const result = await app.api('GET', '/studies/' + encodeURIComponent(target) + '/tech-note/history' + (more && cursor ? '?before=' + cursor : ''), undefined, undefined, at);
+      work.commit(at,()=>{if (!valid(ticket, target)) return;
       if (result.uid !== target || !Array.isArray(result.items) || result.items.some(x => x.studyUid !== target)) throw new Error('이력 대상이 일치하지 않습니다');
       if (!more) $('history-items').replaceChildren();
       for (const item of result.items) {
@@ -70,9 +78,9 @@ window.KinTechNote = function (app) {
         entry.append(title, text); $('history-items').append(entry);
       }
       cursor = result.nextBefore; $('more').hidden = !cursor;
-      status(result.items.length ? '저장 이력입니다. 입력 중인 메모는 유지됩니다.' : '저장 이력이 없습니다.');
-    } catch (e) { if (valid(ticket, target)) status('이력 조회 실패: ' + e.message); }
-    finally { if (ticket === seq) { busy = false; controls(); } }
+      status(result.items.length ? '저장 이력입니다. 입력 중인 메모는 유지됩니다.' : '저장 이력이 없습니다.');});
+    } catch (e) { work.commit(at,()=>{if (valid(ticket, target)) status('이력 조회 실패: ' + e.message);}); }
+    finally { if (ticket === seq) busy=false; work.commit(at,()=>{if(ticket===seq){interruptedHistory=null;controls();}}); }
   }
   $('history').onclick = () => history(false); $('more').onclick = () => history(true);
   function close(force = false) {
@@ -95,19 +103,27 @@ window.KinTechNote = function (app) {
   }
   $('close').onclick = () => close(); d.addEventListener('cancel', e => { e.preventDefault(); close(); });
   function end() { ended = true; close(true); }
-  let channel; try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
-  const storage = e => { if (e.key === 'kin-session-ended') end(); };
-  const pagehide = () => { end(); channel?.close(); };
+  let interruptedHistory=null,interruptedSave=false;
+  const unsubscribe=work.onInvalidate(event=>{
+    if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
+    if(event.reason==='cancel'){
+      ++seq;busy=false;controls();
+      if(d.open&&interruptedSave){interruptedSave=false;status('저장 확인 실패 · 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.');}
+      else if(d.open&&interruptedHistory!==null){const more=interruptedHistory;interruptedHistory=null;history(more);}
+      else if(d.open&&interruptedRead&&!dirty()){interruptedRead=false;read();}
+    }
+  });
+  const pagehide = () => { end(); unsubscribe(); };
   const pageshow = e => { if (e.persisted) location.reload(); };
   const beforeunload = e => { if (d.open && (busy || dirty())) { e.preventDefault(); e.returnValue = ''; } };
-  window.addEventListener('storage', storage); window.addEventListener('pagehide', pagehide);
+  window.addEventListener('pagehide', pagehide);
   window.addEventListener('pageshow', pageshow); window.addEventListener('beforeunload', beforeunload);
   return { dispose() {
-    end(); channel?.close(); d.remove();
-    window.removeEventListener('storage', storage); window.removeEventListener('pagehide', pagehide);
+    end(); unsubscribe(); d.remove();
+    window.removeEventListener('pagehide', pagehide);
     window.removeEventListener('pageshow', pageshow); window.removeEventListener('beforeunload', beforeunload);
   }, open(study) {
-    if (ended || d.open || !study || !app.allowed()) return;
+    if (work.state()!=='active' || ended || d.open || !study || !app.allowed()) return;
     uid = study.uid; opener = document.activeElement; cursor = null; $('more').hidden = true;
     openerDocument = innerOpener = null;
     try {

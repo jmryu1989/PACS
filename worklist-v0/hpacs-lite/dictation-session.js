@@ -17,6 +17,7 @@
   }
 
   function create(options) {
+    const work = globalThis.KinWorkContext;
     if (!options || typeof options.readContext !== 'function' ||
         typeof options.validateTranscript !== 'function' || typeof options.insert !== 'function') {
       throw new TypeError('readContext, validateTranscript and synchronous insert are required');
@@ -32,6 +33,7 @@
         pin: pin ? Object.freeze({ ...pin, caret: Object.freeze({ ...pin.caret }) }) : null });
     }
     function reply(ok, reason) { return { ok, reason: reason || null, token: seq, snapshot: snapshot() }; }
+    function apply(at, effect) { let result = reply(false, 'stale'); work.commit(at, () => { result = effect(); }); return result; }
     function release(reason) {
       if (!ownsResources) return;
       ownsResources = false; // Clear before the callback, including reentrant cleanup.
@@ -91,6 +93,8 @@
       return snapshot();
     }
     async function begin() {
+      const at = work.capture('editor');
+      if (!work.admits(at)) return reply(false, 'stale');
       if (finishing) return reply(false, 'busy');
       if (!available) return reply(false, 'unavailable');
       if (ACTIVE.has(state)) return reply(false, 'busy');
@@ -101,12 +105,14 @@
       needsRepin = false; pending = true; ownsResources = true;
       let h;
       try { h = await hashed(start.value); }
-      catch (_) { return current(token) ? end('failed', 'hash-failed') : reply(false, 'stale'); }
+      catch (_) { return apply(at, () => current(token) ? end('failed', 'hash-failed') : reply(false, 'stale')); }
+      return apply(at, () => {
       if (!current(token)) return reply(false, 'stale');
       const live = context(start.field);
       if (!sameScope(live, start) || live.value !== start.value) return end('failed', 'editor-changed');
       pin = makePin(start, h); pinnedValue = start.value; pending = false;
       return reply(true);
+      });
     }
     function advance(token, from, to) {
       if (!current(token) || state !== from || pending || !pin) return reply(false, 'stale');
@@ -123,6 +129,8 @@
       text = transcript; state = 'review'; return reply(true);
     }
     async function repin(token) {
+      const at = work.capture('editor');
+      if (!work.admits(at)) return reply(false, 'stale');
       if (!current(token) || state !== 'review') return reply(false, 'stale');
       if (pending) return reply(false, 'busy');
       if (!needsRepin) return reply(false, 'repin-not-required');
@@ -131,7 +139,8 @@
       pending = true;
       let h;
       try { h = await hashed(start.value); }
-      catch (_) { return current(token) ? end('failed', 'hash-failed') : reply(false, 'stale'); }
+      catch (_) { return apply(at, () => current(token) ? end('failed', 'hash-failed') : reply(false, 'stale')); }
+      return apply(at, () => {
       if (!current(token)) return reply(false, 'stale');
       const live = checkScope(token, start.field);
       if (!live) return reply(false, 'editor-changed');
@@ -139,17 +148,26 @@
       if (live.value !== start.value) return reply(false, 'field-changed');
       pin = makePin(start, h); pinnedValue = start.value; needsRepin = false; error = null;
       return reply(true); // Never inserts. A fresh, explicit Insert must follow.
+      });
+    }
+    // A transient connection/save barrier must not consume an already reviewed transcript.
+    function insertionAllowed() {
+      try { return !options.canInsert || options.canInsert() === true; } catch (_) { return false; }
     }
     async function insert(token) {
+      const at = work.capture('editor');
+      if (!work.admits(at)) return reply(false, 'stale');
       if (!current(token) || state !== 'review') return reply(false, 'stale');
       if (pending) return reply(false, 'busy');
       const start = checkScope(token, pin.field);
       if (!start) return reply(false, 'editor-changed');
       if (needsRepin) return reply(false, 'field-changed');
+      if (!insertionAllowed()) return reply(false, 'insertion-blocked');
       pending = true;
       let h;
       try { h = await hashed(start.value); }
-      catch (_) { return current(token) ? end('failed', 'hash-failed') : reply(false, 'stale'); }
+      catch (_) { return apply(at, () => current(token) ? end('failed', 'hash-failed') : reply(false, 'stale')); }
+      return apply(at, () => {
       if (!current(token)) return reply(false, 'stale');
       const live = checkScope(token, pin.field);
       if (!live) return reply(false, 'editor-changed');
@@ -158,6 +176,7 @@
       if (live.value !== start.value || start.value !== pinnedValue || h !== pin.fieldValueHash) {
         needsRepin = true; error = 'field-changed'; return reply(false, 'field-changed');
       }
+      if (!insertionAllowed()) return reply(false, 'insertion-blocked');
       const insertion = Object.freeze({ ...pin, caret: Object.freeze({ ...pin.caret }), text,
         expectedValue: start.value });
       // Consume before calling out: duplicate/reentrant Insert cannot use this session.
@@ -173,6 +192,7 @@
       release(state);
       finishing = false;
       return { ...reply(inserted, error), inserted };
+      });
     }
     function cancel(reason) {
       if (!ACTIVE.has(state)) return reply(false, 'inactive');
@@ -183,6 +203,12 @@
       if (!current(token) || state === 'review') return reply(false, 'stale');
       return end('failed', reason || 'failed');
     }
+    work.onInvalidate(({ reason, state: lifecycle }) => {
+      if (reason === 'cancel') {
+        pending = false;
+        if (state === 'requesting-permission' && !pin) { seq++; state = available ? 'idle' : 'unavailable'; release('cancelled'); }
+      } else if (reason === 'lifecycle' && lifecycle !== 'active' && lifecycle !== 'preparing') end('cancelled', 'logged-out');
+    });
     return Object.freeze({ snapshot, setAvailable, begin, receive, repin, insert, cancel, fail,
       recording: token => advance(token, 'requesting-permission', 'recording'),
       uploading: token => advance(token, 'recording', 'uploading'),

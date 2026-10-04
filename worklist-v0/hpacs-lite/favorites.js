@@ -1,5 +1,6 @@
 /* Personal study links; no original or report writes belong in this dialog. */
 window.KinFavorites = function (app) {
+  const work=window.KinWorkContext;
   const d=document.createElement('dialog');d.id='favorite-dialog';d.setAttribute('aria-labelledby','favorite-title');
   d.innerHTML=`<h2 id="favorite-title">개인 즐겨찾기</h2><p>검사 링크를 계정에 저장합니다. 폴더·링크를 제거해도 원검사와 판독문은 유지됩니다.</p>
     <div class="favorite-layout"><aside><label>새 폴더 이름<input id="favorite-new-name" maxlength="120"></label><button id="favorite-create" type="button">폴더 만들기</button><div id="favorite-folders"></div></aside>
@@ -10,7 +11,7 @@ window.KinFavorites = function (app) {
     <p id="favorite-status" role="status"></p><footer><button id="favorite-retry" type="button" hidden>같은 요청 다시 시도</button><button id="favorite-reload" type="button">최신 목록 다시 읽기</button><button id="favorite-close" type="button">닫기</button></footer>`;
   document.body.append(d);const $=id=>d.querySelector('#favorite-'+id);
   let owner=null,state=null,selected=null,current=null,seq=0,busy=false,pending=null,abort=null,ended=false,opener=null,viewUid=null;
-  const same=()=>!ended&&d.open&&app.allowed()&&JSON.stringify(owner)===JSON.stringify(app.identity());
+  const same=()=>work.state()==='active'&&!ended&&d.open&&app.allowed()&&JSON.stringify(owner)===JSON.stringify(app.identity());
   const folder=()=>state?.folders.find(f=>f.id===selected);
   const renamed=()=>!!folder()&&$('name').value!==folder().name;
   const dirty=()=>!!$('new-name').value||renamed();
@@ -26,7 +27,7 @@ window.KinFavorites = function (app) {
   }
   function message(text){$('status').textContent=text;}
   function adopt(value){
-    if(value&&JSON.stringify(value.owner)!==JSON.stringify(owner)){end();app.notice('계정이 바뀌었습니다. 페이지를 새로고침하세요.');throw new Error('즐겨찾기 계정이 바뀌었습니다');}
+    if(value&&JSON.stringify(value.owner)!==JSON.stringify(owner)){throw new Error('즐겨찾기 계정이 바뀌었습니다');}
     if(!value||!Number.isInteger(value.revision)||!Array.isArray(value.folders)
        ||value.folders.some(f=>typeof f.id!=='string'||typeof f.name!=='string'||!Array.isArray(f.uids)||f.uids.some(x=>typeof x!=='string')))
       throw new Error('즐겨찾기 계정·목록 형식을 확인할 수 없습니다');
@@ -45,14 +46,17 @@ window.KinFavorites = function (app) {
       button('검사 선택',()=>choose(uid),row);button('보기 상태 연결',()=>editView(uid),row);if(f.views?.[uid]){button('저장 보기 열기',()=>openView(uid),row);button('보기 연결 해제',()=>command('view',{uid,jobId:null}),row);}button('링크 제거',()=>command('remove',{uid}),row);$('links').append(row);}
     $('current').textContent=current?'추가할 선택 검사 · '+label(current):'목록에서 검사를 선택하면 폴더에 추가할 수 있습니다.';controls();
   }
-  async function request(method,body,path='/favorite-folders'){abort=new AbortController();const timer=setTimeout(()=>abort?.abort(),12000);try{return await app.api(method,path,body,abort.signal);}finally{clearTimeout(timer);abort=null;}}
+  async function request(method,body,path='/favorite-folders',at){const local=abort=new AbortController(),timer=setTimeout(()=>local.abort(),12000);try{return await app.api(method,path,body,local.signal,at);}finally{clearTimeout(timer);if(abort===local)abort=null;}}
   async function load(){
+    const at=work.capture('document');
     if(busy||!same())return;const unresolved=pending;const ticket=++seq;busy=true;controls();message('즐겨찾기를 읽는 중…');
-    try{const value=await request('GET');if(ticket!==seq||!same())return;adopt(value);pending=unresolved&&value.revision===unresolved.revision?unresolved:null;draw(true);message(pending?'요청이 아직 반영되지 않았습니다. 같은 요청을 다시 시도할 수 있습니다.':unresolved?'최신 목록을 읽었습니다. 이전 요청은 재시도 대기에서 해제했습니다. 반영 결과를 확인하세요.':'계정의 최신 즐겨찾기입니다.');}
-    catch(e){if(ticket===seq&&same()){if(e.status===401){end();app.notice('로그인이 만료되었습니다. 다시 로그인하세요.');return;}message('조회 실패: '+e.message);}}
-    finally{if(ticket===seq){busy=false;controls();}}
+    try{const value=await request('GET',undefined,undefined,at);
+      work.commit(at,()=>{if(ticket!==seq||!same())return;adopt(value);pending=unresolved&&value.revision===unresolved.revision?unresolved:null;draw(true);message(pending?'요청이 아직 반영되지 않았습니다. 같은 요청을 다시 시도할 수 있습니다.':unresolved?'최신 목록을 읽었습니다. 이전 요청은 재시도 대기에서 해제했습니다. 반영 결과를 확인하세요.':'계정의 최신 즐겨찾기입니다.');});}
+    catch(e){work.commit(at,()=>{if(ticket===seq&&same()){message('조회 실패: '+e.message);}});}
+    finally{work.commit(at,()=>{if(ticket===seq){busy=false;controls();}});}
   }
   async function command(action,extra={}){
+    const at=work.capture('document');
     if(busy||pending||!same()||!state)return;
     if(action==='add'&&current!==app.current()){current=app.current();draw(true);message('선택 검사가 바뀌었습니다. 추가할 검사를 확인하고 다시 누르세요.');return;}
     if(action==='create'&&renamed()&&!confirm('저장하지 않은 폴더 이름 변경을 버리고 새 폴더를 만들까요?'))return;
@@ -60,58 +64,68 @@ window.KinFavorites = function (app) {
     await send();
   }
   async function send(){
+    const at=work.capture('document');
     if(busy||!pending||!same())return;const ticket=++seq,body=pending;busy=true;controls();message('변경을 저장하는 중…');
-    try{const value=await request('POST',body);if(ticket!==seq||!same())return;adopt(value);pending=null;
+    try{const value=await request('POST',body,undefined,at);
+      work.commit(at,()=>{if(ticket!==seq||!same())return;adopt(value);pending=null;
       if(body.action==='view'){viewUid=null;$('view-editor').hidden=true;$('view-choice').replaceChildren();}
-      if(body.action==='create'){selected=body.folderId;$('new-name').value='';}draw();message('저장되었습니다.');}
-    catch(e){if(ticket===seq&&same()){
-      if(e.status===401){end();app.notice('로그인이 만료되었습니다. 다시 로그인하세요.');return;}
+      if(body.action==='create'){selected=body.folderId;$('new-name').value='';}draw();message('저장되었습니다.');});}
+    catch(e){work.commit(at,()=>{if(ticket===seq&&same()){
+
       if([400,403,404,409].includes(e.status))pending=null;
       message('저장 확인 실패: '+e.message+(pending?' · 같은 요청을 다시 시도하거나 최신 목록을 읽으세요.':' · 입력을 확인하거나 최신 목록을 읽으세요.')+' 입력은 유지했습니다.');
-    }}
-    finally{if(ticket===seq){busy=false;controls();}}
+    }});}
+    finally{work.commit(at,()=>{if(ticket===seq){busy=false;controls();}});}
   }
   async function editView(uid){
+    const at=work.capture('document');
     if(busy||pending||!same()||dirty()&&!confirm('저장하지 않은 폴더 이름 입력을 버리고 보기 상태를 고를까요?'))return;
     const ticket=++seq,wanted=selected;busy=true;controls();message('저장 보기 목록을 확인하는 중…');
-    try{const value=await request('GET');if(ticket!==seq||!same())return;adopt(value);
+    try{const value=await request('GET',undefined,undefined,at);if(ticket!==seq||!same())return;if(!work.commit(at,()=>adopt(value)))return;
       if(!state.folders.find(f=>f.id===wanted)?.uids.includes(uid))throw new Error('폴더에서 제거된 검사입니다');
-      const data=await request('GET',undefined,'/studies/'+encodeURIComponent(uid)+'/viewer-jobs');if(ticket!==seq||!same())return;
+      const data=await request('GET',undefined,'/studies/'+encodeURIComponent(uid)+'/viewer-jobs',at);
+      work.commit(at,()=>{if(ticket!==seq||!same())return;
       if(!Array.isArray(data.jobs))throw new Error('저장 보기 목록을 확인할 수 없습니다');
       viewUid=uid;$('view-choice').replaceChildren();
       for(const job of data.jobs){const option=document.createElement('option');option.value=job.id;option.textContent=job.title+' · '+job.id;$('view-choice').append(option);}
-      $('view-editor').hidden=false;message(data.jobs.length?'연결할 저장 보기를 선택하세요.':'이 검사에 저장된 보기 상태가 없습니다. 영상에서 비교 작업을 먼저 저장하세요.');
-    }catch(e){if(ticket===seq&&same())message('보기 목록 확인 실패: '+e.message);}
-    finally{if(ticket===seq){busy=false;controls();}}
+      $('view-editor').hidden=false;message(data.jobs.length?'연결할 저장 보기를 선택하세요.':'이 검사에 저장된 보기 상태가 없습니다. 영상에서 비교 작업을 먼저 저장하세요.');});
+    }catch(e){work.commit(at,()=>{if(ticket===seq&&same())message('보기 목록 확인 실패: '+e.message);});}
+    finally{work.commit(at,()=>{if(ticket===seq){busy=false;controls();}});}
   }
   async function openView(uid){
+    const at=work.capture('document');
     if(busy||pending||!same()||dirty()&&!confirm('저장하지 않은 폴더 이름 입력을 버리고 저장 보기를 열까요?'))return;
     const ticket=++seq,wanted=selected;busy=true;controls();message('저장 보기의 원본과 접근 권한을 확인하는 중…');
-    try{const value=await request('GET');if(ticket!==seq||!same())return;adopt(value);
+    try{const value=await request('GET',undefined,undefined,at);if(ticket!==seq||!same())return;if(!work.commit(at,()=>adopt(value)))return;
       const f=state.folders.find(f=>f.id===wanted),id=f?.views?.[uid];
       if(!f?.uids.includes(uid)||!id||!app.study(uid))throw new Error('연결된 저장 보기나 현재 검사 목록을 확인할 수 없습니다');
-      const job=await request('GET',undefined,'/studies/'+encodeURIComponent(uid)+'/viewer-jobs/'+encodeURIComponent(id));if(ticket!==seq||!same())return;
+      const job=await request('GET',undefined,'/studies/'+encodeURIComponent(uid)+'/viewer-jobs/'+encodeURIComponent(id),at);
+      work.commit(at,()=>{if(ticket!==seq||!same())return;
       if(job.id!==id||job.studyUid!==uid)throw new Error('저장 보기의 검사가 일치하지 않습니다');
-      busy=false;close(true);app.openSavedView(uid,job);
-    }catch(e){if(ticket===seq&&same())message('저장 보기를 열지 않았습니다: '+e.message);}
-    finally{if(ticket===seq){busy=false;controls();}}
+      busy=false;close(true);app.openSavedView(uid,job);});
+    }catch(e){work.commit(at,()=>{if(ticket===seq&&same())message('저장 보기를 열지 않았습니다: '+e.message);});}
+    finally{work.commit(at,()=>{if(ticket===seq){busy=false;controls();}});}
   }
   async function applyFolder(){
+    const at=work.capture('document');
     if(busy||pending||!same()||!folder()||dirty()&&!confirm('저장하지 않은 폴더 이름 입력을 버리고 목록을 볼까요?'))return;
     const ticket=++seq,wanted=selected;busy=true;controls();message('폴더를 확인하는 중…');
-    try{const value=await request('GET');if(ticket!==seq||!same())return;adopt(value);
+    try{const value=await request('GET',undefined,undefined,at);
+      work.commit(at,()=>{if(ticket!==seq||!same())return;adopt(value);
       if(!state.folders.some(f=>f.id===wanted)){draw();message('이 폴더는 삭제되었습니다. 다른 폴더를 선택하세요.');return;}
-      app.applyFolder(state,wanted);const focus=opener;busy=false;close(true);if(focus?.isConnected)focus.focus();
-    }catch(e){if(ticket===seq&&same())message('목록 적용 실패: '+e.message);}
-    finally{if(ticket===seq){busy=false;controls();}}
+      app.applyFolder(state,wanted);const focus=opener;busy=false;close(true);if(focus?.isConnected)focus.focus();});
+    }catch(e){work.commit(at,()=>{if(ticket===seq&&same())message('목록 적용 실패: '+e.message);});}
+    finally{work.commit(at,()=>{if(ticket===seq){busy=false;controls();}});}
   }
   async function choose(uid){
+    const at=work.capture('document');
     if(busy||pending||!same()||dirty()&&!confirm('저장하지 않은 폴더 이름 입력을 버리고 검사를 선택할까요?'))return;const ticket=++seq,wanted=selected;busy=true;controls();
-    try{const value=await request('GET');if(ticket!==seq||!same())return;adopt(value);
+    try{const value=await request('GET',undefined,undefined,at);
+      work.commit(at,()=>{if(ticket!==seq||!same())return;adopt(value);
       if(!state.folders.find(f=>f.id===wanted)?.uids.includes(uid)||!app.study(uid)){draw();message('이 검사를 지금 열 수 없습니다. 목록을 새로고침하거나 접근 권한을 확인하세요.');return;}
-      busy=false;const focus=opener;close(true);app.select(uid);if(focus?.isConnected)focus.focus();
-    }catch(e){if(ticket===seq&&same())message('검사 확인 실패: '+e.message);}
-    finally{if(ticket===seq){busy=false;controls();}}
+      busy=false;const focus=opener;close(true);app.select(uid);if(focus?.isConnected)focus.focus();});
+    }catch(e){work.commit(at,()=>{if(ticket===seq&&same())message('검사 확인 실패: '+e.message);});}
+    finally{work.commit(at,()=>{if(ticket===seq){busy=false;controls();}});}
   }
   function close(force=false){
     if(!force&&(busy||pending&&!confirm('처리 결과를 아직 확인하지 못했습니다. 닫은 뒤 다시 열어 최신 목록을 확인하세요. 닫을까요?')))return;
@@ -129,8 +143,10 @@ window.KinFavorites = function (app) {
   $('add').onclick=()=>command('add',{uid:current});$('retry').onclick=send;$('reload').onclick=load;$('close').onclick=()=>close();
   d.addEventListener('cancel',e=>{e.preventDefault();close();});
   function end(){ended=true;close(true);app.ended?.();}
-  let channel;function connect(){try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}}connect();
-  window.addEventListener('storage',e=>{if(e.key==='kin-session-ended')end();});window.addEventListener('pagehide',()=>{close(true);channel?.close();});
-  window.addEventListener('pageshow',e=>{if(e.persisted){close(true);connect();}});
+  work.onInvalidate(event=>{
+    if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
+    if(event.reason==='cancel'){const interrupted=busy;++seq;busy=false;controls();if(d.open&&(interrupted||!state))load();}
+  });
+  window.addEventListener('pagehide',end);
   return {open(){if(ended||d.open||!app.allowed())return;owner=app.identity();if(!owner)return;current=app.current();opener=document.activeElement;d.showModal();draw();load();}};
 };

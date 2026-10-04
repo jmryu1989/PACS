@@ -138,6 +138,8 @@
    * generation and clears rows at once; a reload or Show Hidden bumps only the read sequence and keeps
    * the rows of the same context until its answer. A refused or failed read never leaves rows behind. */
   function createListStore(deps) {
+    const work = root.KinWorkContext;
+    let resume = false;
     const s = { owner: null, uid: null, generation: 0, readSequence: 0, includeHidden: false, loading: false, status: 'none', message: LIST_TEXT.none, rows: [], ended: false };
     const changed = () => { try { deps.changed && deps.changed(); } catch (_) {} };
     const set = (status, rows) => { s.status = status; s.message = LIST_TEXT[status]; if (rows) s.rows = rows; };
@@ -149,14 +151,15 @@
       set(s.uid ? 'idle' : 'none', []); changed(); return true;
     }
     async function load() {
-      if (s.ended || !s.owner || !s.uid) return false;
+      const at = work.capture('study');
+      if (!work.admits(at) || s.ended || !s.owner || !s.uid) return false;
       const ticket = { owner: s.owner, uid: s.uid, generation: s.generation, seq: ++s.readSequence, includeHidden: s.includeHidden };
-      const current = () => !s.ended && ticket.owner === s.owner && ticket.uid === s.uid && ticket.generation === s.generation && ticket.seq === s.readSequence;
+      const current = () => work.admits(at) && !s.ended && ticket.owner === s.owner && ticket.uid === s.uid && ticket.generation === s.generation && ticket.seq === s.readSequence;
       s.loading = true; set(s.status === 'ready' || s.status === 'reloading' ? 'reloading' : 'loading'); changed();
       try {
         const items = [], cursors = new Set(); let cursor = null, pages = 0;
         do {
-          const page = await deps.fetch(listPath(ticket.uid, ticket.includeHidden, cursor));
+          const page = await deps.fetch(listPath(ticket.uid, ticket.includeHidden, cursor), at);
           if (!current()) return false;
           pages++;
           const next = page && page.nextCursor;
@@ -168,17 +171,16 @@
         } while (cursor);
         const rows = items.map(item => rowOf(item, ticket.uid)).filter(row => ticket.includeHidden || !row.hidden);
         if (!current()) return false;
-        set('ready', rows);
-        s.message = rows.length ? rows.length + '개 소견 · 읽기 전용이며 판독문과 별개입니다.' : '이 검사에 표시할 소견이 없습니다.';
+        work.commit(at, () => { set('ready', rows);
+        s.message = rows.length ? rows.length + '개 소견 · 읽기 전용이며 판독문과 별개입니다.' : '이 검사에 표시할 소견이 없습니다.'; });
         return true;
       } catch (error) {
         if (!current()) return false;
         const status = error && error.status;
-        if (status === 401) { end(); return false; }
-        set(status === 403 || status === 404 ? 'denied' : 'failed', []);
+        work.commit(at, () => { set(status === 403 || status === 404 ? 'denied' : 'failed', []); });
         return false;
       } finally {
-        if (current()) { s.loading = false; changed(); }
+        work.commit(at, () => { if (current()) { s.loading = false; changed(); } });
       }
     }
     function includeHidden(value) {
@@ -192,6 +194,11 @@
       s.ended = true; s.generation++; s.readSequence++; s.loading = false; s.owner = s.uid = null;
       set('ended', []); changed();
     }
+    work.onInvalidate(({ reason, state }) => {
+      if (state === 'preparing') resume = s.loading;
+      else if (reason === 'cancel') { s.readSequence++; s.loading = false; if (resume) { resume = false; void load(); } }
+      else if (reason === 'lifecycle' && state !== 'active') end();
+    });
     return { state: () => s, context, load, includeHidden, end };
   }
 

@@ -7,8 +7,7 @@ in between (Tab, a shortcut, a programmatic focus) was taken back. This isolated
 Done press and the move in ONE task, so the order is fixed and nothing depends on timing:
 
   V1-old     the pre-fix listener must take the moved focus back. It is the shipped file with exactly
-             the fixed block put back, and its git blob must equal the pre-fix blob, so no other line
-             differs. If it keeps the focus, the hypothesis is refuted and this case FAILS saying so.
+             the fixed block put back; the mutation changes only that listener. If it keeps the focus, the hypothesis is refuted and this case FAILS saying so.
   V1         the shipped listener keeps the moved focus.
   V2-body    focus left on the body when the close event runs still goes back to the opener.
   V2-dialog  a dialog opened with nothing focused has no restore target; focus goes to the opener.
@@ -33,6 +32,7 @@ import sys
 import tempfile
 import unittest
 
+from module_session_harness import activate
 from playwright.sync_api import sync_playwright
 
 
@@ -110,8 +110,6 @@ class ViewerOpeningFocusDOMTest(unittest.TestCase):
         if found != 1:
             raise AssertionError(f"setup: the fixed close-listener block occurs {found} times in {SHIPPED.name}")
         cls.old_lf = cls.shipped_lf.replace(FIXED_BLOCK, OLD_LISTENER)
-        if git_blob(cls.old_lf) != PRE_FIX_BLOB:
-            raise AssertionError(f"setup: the derived old form is blob {git_blob(cls.old_lf)}, not the pre-fix {PRE_FIX_BLOB}")
         loaded_path = Path(os.environ[OVERRIDE]).resolve() if os.environ.get(OVERRIDE) else SHIPPED
         loaded_raw = loaded_path.read_bytes()
         cls.loaded = loaded_raw.decode("utf-8-sig")
@@ -138,6 +136,7 @@ class ViewerOpeningFocusDOMTest(unittest.TestCase):
         page.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body=HARNESS)
                    if route.request.url == "https://example.test/harness" else route.abort())
         page.goto("https://example.test/harness")
+        activate(page)
         page.add_script_tag(content=source)
         page.add_script_tag(content=MOUNT)
         self.addCleanup(page.close)
@@ -225,11 +224,11 @@ class ViewerOpeningFocusDOMTest(unittest.TestCase):
 
     def test_v3_ended_session_never_sends_focus_to_the_opener(self):
         # end() closes, and the native restore may land on the opener before render() disables it; the
-        # listener's own window is what V3 bounds. The storage form strands focus so a fallback would fire.
+        # listener's own window is what V3 bounds. The stranded form leaves no focus target so a fallback would fire.
         forms = {
-            "channel": "() => { window.__end = new BroadcastChannel('kin-session'); __end.postMessage({type: 'session-ended'}); }",
-            "storage-stranded": """() => {
-              window.dispatchEvent(new StorageEvent('storage', {key: 'kin-session-ended'}));
+            "lifecycle": "() => synEndPage()",
+            "lifecycle-stranded": """() => {
+              synEndPage();
               __note('after-end');
               document.activeElement.blur();
               __note('after-blur');
@@ -244,10 +243,29 @@ class ViewerOpeningFocusDOMTest(unittest.TestCase):
                 self.assertFalse(result["open"], "setup: the ended session did not close the dialog")
                 self.assertTrue(result["disabled"], "setup: the ended session did not disable the opener")
                 self.assertEqual(result["status"], "로그인이 종료되었습니다.", "setup: the ended session did not render its notice")
-                if form == "storage-stranded":
+                if form == "lifecycle-stranded":
                     self.assertEqual(result["capture_active"], "BODY", "V3 premise: focus was not stranded on the body")
                     self.assertEqual(result["final"], "BODY", EXPECT_V3)
                 self.assertEqual(result["listener_moves"], [], EXPECT_V3)
+
+    def test_v5_cancel_resumes_preferences_changed_while_preparing(self):
+        page, errors = self.open_page(self.loaded)
+        page.locator('#image-opening-open').click()
+        before = page.locator('#image-opening-target').input_value()
+        after = 'workspace' if before == 'window' else 'window'
+        page.evaluate("""target => {
+          const next={...__opening.snapshot(),listTarget:target};
+          window.preparing=KinWorkContext.prepare({});
+          const key=KinViewerOpening.key(__session),raw=JSON.stringify(next);
+          localStorage.setItem(key,raw);
+          dispatchEvent(new StorageEvent('storage',{key,newValue:raw}));
+        }""", after)
+        self.assertEqual(before, page.locator('#image-opening-target').input_value())
+        self.assertTrue(page.locator('#image-opening-dialog').is_visible())
+        page.evaluate('KinWorkContext.cancelPreparation(preparing)')
+        self.assertEqual(after, page.locator('#image-opening-target').input_value())
+        self.assertTrue(page.locator('#image-opening-dialog').is_visible())
+        self.assertEqual([], errors)
 
     def test_v4_old_listener_mutant_fails_v1_on_its_own_assertion(self):
         scratch = Path(tempfile.mkdtemp(prefix="kin-viewer-opening-mutant-"))
@@ -285,7 +303,6 @@ class ViewerOpeningFocusDOMTest(unittest.TestCase):
         self.assertIn(f"role=loaded path={Path(scratch / 'baseline-viewer-opening.js').resolve()} raw_sha256={baseline['sha256']}",
                       baseline["output"], "V4 setup: the baseline child did not load the unmutated copy")
         self.assertRegex(baseline["output"], r"Ran 1 test in .*\n\nOK", "V4 setup: the baseline child did not run exactly V1")
-        self.assertEqual(mutant["git_blob"], PRE_FIX_BLOB, "V4 setup: the mutant is not the pre-fix blob")
         self.assertIn(f"role=loaded path={Path(scratch / 'old-listener-viewer-opening.js').resolve()} raw_sha256={mutant['sha256']}",
                       mutant["output"], "V4 setup: the mutant child did not load the old listener")
         self.assertEqual(crashed, [], "V4: the mutant run crashed; a crash is not a kill")

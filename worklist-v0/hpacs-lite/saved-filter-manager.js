@@ -4,6 +4,8 @@
   window.KinSavedFilterManager = { mount };
 
   function mount(options) {
+    const work=window.KinWorkContext;
+    let operation=null,interruptedAction=null;
     const dialog = document.createElement('dialog');
     dialog.id = 'saved-filter-manager';
     dialog.setAttribute('aria-labelledby', 'sfm-title');
@@ -400,23 +402,25 @@
       const index = visibleNames.indexOf(cursor), target = index + direction;
       if (target >= 0 && target < visibleNames.length) selectSearch(visibleNames[target], direction < 0 ? $('prev') : $('next'));
     }
-    async function run(action) {
-      if (busy) return;
+    async function run(action, repeatRead = false) {
+      if (work.state()!=='active'||busy) return;
+      const at=work.capture('document');interruptedAction=repeatRead?action:'reconcile';
       const requestFocus = document.activeElement, requestFocusId = requestFocus?.id;
       lock(true); status('처리 중…');
       // Disabling the active control can blur it to the document body. Keep busy
       // keyboard events inside the modal until the original control is available.
       focusAvailable($('status'));
-      const controller = new AbortController();
+      const controller = operation = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000);
-      try { await action(controller.signal); }
-      catch (error) { status(controller.signal.aborted
+      try { await action(controller.signal,at); }
+      catch (error) { work.commit(at,()=>status(controller.signal.aborted
         ? '응답 시간이 초과되었습니다. 입력은 유지했습니다. 서버 처리 여부는 목록을 다시 불러와 확인하세요.'
-        : error.message || '처리하지 못했습니다. 입력을 유지했습니다.', true); }
+        : error.message || '처리하지 못했습니다. 입력을 유지했습니다.', true)); }
       finally {
-        clearTimeout(timeout); lock(false);
+        clearTimeout(timeout);if(operation===controller)operation=null;
+        work.commit(at,()=>{interruptedAction=null;lock(false);
         focusAvailable(requestFocus, requestFocusId ? document.getElementById(requestFocusId) : null,
-          requestFocus === $('delete') ? $('new') : $('save'), $('reload'), $('status'));
+          requestFocus === $('delete') ? $('new') : $('save'), $('reload'), $('status'));});
       }
     }
     function acceptCollection(snapshot) {
@@ -436,10 +440,10 @@
       }
       list();
     }
-    $('load-folders').addEventListener('click', () => run(async signal => {
-      const snapshot = await options.readFolders(signal);
-      acceptCollection(snapshot); status('검색 모음을 불러왔습니다. 선택과 편집 내용은 유지했습니다.');
-    }));
+    $('load-folders').addEventListener('click', () => run(async (signal,at) => {
+      const snapshot = await options.readFolders(signal,at);
+      work.commit(at,()=>{acceptCollection(snapshot); status('검색 모음을 불러왔습니다. 선택과 편집 내용은 유지했습니다.');});
+    }, true));
     $('folder-path').addEventListener('change', () => {
       const initial = JSON.parse(folderBaseline);
       if ($('folder-description').value !== initial[1] || $('folder-order').value !== initial[2]) return;
@@ -455,15 +459,15 @@
       if (busy || !collection) return;
       if (!confirm(message)) return;
       const expected = collection;
-      run(async signal => {
-        const snapshot = await options.writeFolders({ expectedOwner: expected.owner, revision: expected.revision, command }, signal);
-        acceptCollection(snapshot);
+      run(async (signal,at) => {
+        const snapshot = await options.writeFolders({ expectedOwner: expected.owner, revision: expected.revision, command }, signal,at);
+        work.commit(at,()=>{acceptCollection(snapshot);
         const initial = JSON.parse(folderBaseline), current = JSON.parse(folderValue());
         const acknowledged = { 'save-folder': [0,1,2], 'move-folder': [0,3], 'remove-folder': [0],
           'move-searches': [3], 'delete-searches': [] }[command.action];
         for (const index of acknowledged) initial[index] = current[index];
         folderBaseline = JSON.stringify(initial);
-        status('검색 모음 변경을 저장했습니다. 현재 목록 조건과 판독문은 유지됩니다.');
+        status('검색 모음 변경을 저장했습니다. 현재 목록 조건과 판독문은 유지됩니다.');});
       });
     }
     $('folder-save').addEventListener('click', () => folderCommand({ action: 'save-folder', path: $('folder-path').value,
@@ -504,22 +508,27 @@
         }
         if (!confirm(`저장 검색 "${next.name}"을 덮어쓸까요? 검색 조건과 변경한 폴더·설명·순서를 저장합니다.\n저장할 폴더: ${next.folder || '미분류'} · 순서: ${next.ordinal}\n설명: ${next.description || '(없음)'}`)) return;
       }
-      run(async signal => {
-        const saved = await options.save(next, signal);
+      run(async (signal,at) => {
+        const saved = await options.save(next, signal,at);
+        if(!work.admits(at))return;
         if (!applyAfterSave) {
-          if (edit(saved)) status(`"${saved.name}" 저장 완료. 목록에 적용하려면 ‘Apply Saved’를 누르세요.`);
+          work.commit(at,()=>{if (edit(saved)) status(`"${saved.name}" 저장 완료. 목록에 적용하려면 ‘Apply Saved’를 누르세요.`);});
           return;
         }
         try {
           if (signal.aborted) throw new Error('응답 시간이 초과되었습니다.');
-          if (await options.apply(saved) === false) throw new Error('저장 검색을 적용하지 못했습니다.');
+          let applying;
+          if (!work.commit(at,()=>{applying=options.apply(saved,at);})) return;
+          const result=await applying;
+          if(!work.admits(at))return;
+          if (result === false) throw new Error('저장 검색을 적용하지 못했습니다.');
         } catch (error) {
           // Save can merge existing folder metadata. Retry from that acknowledged
           // value so the previous new-search defaults cannot erase it afterward.
-          if (edit(saved)) status(`"${saved.name}"은 저장됐지만 목록에 적용하지 못했습니다. ${error.message || ''} 저장된 조건을 유지했습니다. 조건을 확인하고 다시 적용하세요.`, true);
+          work.commit(at,()=>{if (edit(saved)) status(`"${saved.name}"은 저장됐지만 목록에 적용하지 못했습니다. ${error.message || ''} 저장된 조건을 유지했습니다. 조건을 확인하고 다시 적용하세요.`, true);});
           return;
         }
-        baseline = JSON.stringify(value()); dialog.close();
+        work.commit(at,()=>{baseline = JSON.stringify(value()); dialog.close();});
       });
     });
     $('copy').addEventListener('click', () => {
@@ -542,8 +551,8 @@
       const filter = named(selected);
       if (!filter) { status('저장 검색이 변경됐습니다. 목록을 다시 불러오세요.', true); list(); return; }
       if (!confirm(`저장 검색 "${filter.name}"을 삭제할까요? 검사와 판독문은 삭제되지 않습니다.`)) return;
-      run(async signal => {
-        await options.remove(filter, signal); edit(options.snapshot(), true); status('저장 검색을 삭제했습니다.');
+      run(async (signal,at) => {
+        await options.remove(filter, signal,at); work.commit(at,()=>{edit(options.snapshot(), true); status('저장 검색을 삭제했습니다.');});
       });
     });
     $('apply').addEventListener('click', () => {
@@ -580,15 +589,16 @@
     $('reload').addEventListener('click', () => {
       if (!mayLeave()) return;
       const name = cursor ?? missingName;
-      run(async signal => {
-        await options.reload(signal);
+      run(async (signal,at) => {
+        await options.reload(signal,at);
+        work.commit(at,()=>{
         if (name !== null && !named(name)) {
           edit(undefined); missingName = name;
           status(`저장 검색 "${name}"을 찾을 수 없습니다. 목록에서 검색을 선택하거나 ‘New from Current’로 새 검색을 만드세요.`, true);
           return;
         }
-        if (edit(name === null ? options.snapshot() : named(name), name === null)) status('저장 검색 목록을 불러왔습니다.');
-      });
+        if (edit(name === null ? options.snapshot() : named(name), name === null)) status('저장 검색 목록을 불러왔습니다.');});
+      }, true);
     });
     $('body-parts-load').addEventListener('click', () => options.bodyParts?.load(false));
     $('body-parts-refresh').addEventListener('click', () => options.bodyParts?.load(true));
@@ -607,6 +617,17 @@
     });
     window.addEventListener('beforeunload', e => {
       if (dialog.open && (busy || dirty() || organizerDirty())) { e.preventDefault(); e.returnValue = ''; }
+    });
+    work.onInvalidate(event=>{
+      if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state)){operation?.abort();operation=null;if(dialog.open)dialog.close();}
+      if(event.reason==='cancel'){
+        const action=interruptedAction;interruptedAction=null;operation=null;lock(false);
+        if(action&&dialog.open)run(typeof action==='function'?action:async(signal,at)=>{
+          const snapshot=await options.readFolders(signal,at);
+          work.commit(at,()=>{acceptCollection(snapshot);status('최신 검색 목록을 확인했습니다. 편집 내용은 유지했습니다.');});
+          await sharing.refresh(signal,at);
+        },true);
+      }
     });
     return { refreshCounts() { if (dialog.open) count(); }, open({ name } = {}) {
       if (dialog.open) return;

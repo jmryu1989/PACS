@@ -24,6 +24,7 @@
     } catch (_) { return null; }
   }
   function create({ storage, owner, newId, origin, describe, changed = () => {} }) {
+    const work=root.KinWorkContext;
     const bound = owner(), key = 'kin-viewer-windows:v1:' + bound;
     let state, error = null, ended = false, channel;
     const entries = Array.from({ length: 4 }, () => ({ popup: null, href: null, pending: null, document: null, committed: false }));
@@ -108,43 +109,53 @@
     }
     function refresh() { prune(); try { channel?.postMessage({ type: 'discover', owner: bound }); } catch (_) {} }
     function end() { ended = true; channel?.close(); entries.forEach(entry => { entry.popup = null; entry.href = null; entry.pending = null; entry.document = null; }); }
+    function subscribe(){
+    channel?.close();
     if (state && !error && typeof root.BroadcastChannel === 'function') {
       channel = new root.BroadcastChannel('kin-viewer-windows:' + state.id);
-      channel.onmessage = e => {
+      const at=work.capture('document');
+      channel.onmessage = e => work.commit(at,()=>{
         const m = e.data;
         if (!current() || m?.type !== 'present' || m.owner !== bound || !Number.isInteger(m.index) ||
             m.index < 0 || m.index > 3 || !state.slots[m.index] || !scope(m.href, origin)) return;
         if (entries[m.index].href !== m.href) { entries[m.index].href = m.href; changed(); }
-      };
+      });
       refresh();
     }
+    }
+    work.onInvalidate(event=>{if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active')subscribe();else if(event.reason==='lifecycle'&&event.state!=='preparing')end();});
+    subscribe();
     return { choose, attach, navigating, blocked, linked, rows, refresh, end, available: () => current() && !error, error: () => error };
   }
   function connect({ owner, live }) {
+    const work=root.KinWorkContext;
     let channel, ended = false, group, index;
     const bound = JSON.stringify(owner());
     const identity = () => !ended && live() && JSON.stringify(owner()) === bound ? bound : null;
     root.kinViewerWindowOwner = identity;
     function announce() {
-      if (ended || !live() || JSON.stringify(owner()) !== bound || !channel) return;
+      if (work.state()!=='active'||ended || !live() || JSON.stringify(owner()) !== bound || !channel) return;
       if (!scope(root.location.href, root.location.origin)) return;
       channel.postMessage({ type: 'present', owner: bound, index, href: root.location.href });
     }
     function bind() {
       channel?.close(); channel = null;
-      if (ended || !live() || JSON.stringify(owner()) !== bound) return;
+      if (work.state()!=='active'||ended || !live() || JSON.stringify(owner()) !== bound) return;
       const hash = new URLSearchParams(root.location.hash.slice(1));
       const groups = hash.getAll('kin-window-group'), slots = hash.getAll('kin-window-slot');
       if (groups.length !== 1 || slots.length !== 1 || !uuid(groups[0]) || !/^[0-3]$/.test(slots[0])) return;
       group = groups[0]; index = Number(slots[0]);
       try {
         channel = new root.BroadcastChannel('kin-viewer-windows:' + group);
-        channel.onmessage = e => { if (e.data?.type === 'discover' && e.data.owner === bound) announce(); };
+        const at=work.capture('document');channel.onmessage = e => work.commit(at,()=>{ if (e.data?.type === 'discover' && e.data.owner === bound) announce(); });
         announce();
       } catch (_) { channel = null; }
     }
-    root.addEventListener('hashchange', bind); root.addEventListener('kin-window-link-changed', bind); bind();
-    return { dispose() { ended = true; if (root.kinViewerWindowOwner === identity) root.kinViewerWindowOwner = () => null; channel?.close(); root.removeEventListener('hashchange', bind); root.removeEventListener('kin-window-link-changed', bind); } };
+    let changed;
+    function listen(){root.removeEventListener('hashchange',changed);root.removeEventListener('kin-window-link-changed',changed);const at=work.capture('document');changed=()=>work.commit(at,bind);root.addEventListener('hashchange',changed);root.addEventListener('kin-window-link-changed',changed);bind();}
+    work.onInvalidate(event=>{if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active')listen();else if(event.reason==='lifecycle'&&event.state!=='preparing'){ended=true;channel?.close();}});
+    listen();
+    return { dispose() { ended = true; if (root.kinViewerWindowOwner === identity) root.kinViewerWindowOwner = () => null; channel?.close(); root.removeEventListener('hashchange', changed); root.removeEventListener('kin-window-link-changed', changed); } };
   }
   const api = { normalize, scope, create, connect };
   if (typeof module === 'object' && module.exports) module.exports = api;

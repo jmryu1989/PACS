@@ -12,23 +12,34 @@
       panel.style.left = Math.max(12, Math.min(box.left, innerWidth - panel.offsetWidth - 12)) + 'px';
       panel.style.top = Math.max(12, Math.min(box.bottom, innerHeight - panel.offsetHeight - 12)) + 'px';
     };
-    menu.addEventListener('toggle', place); window.addEventListener('resize', place); window.addEventListener('scroll', place, true);
-    let revision = null, busy = false, ended = false, request, channel;
+    let placeListener;
+    let revision = null, busy = false, ended = false, request;
+  const work = window.KinWorkContext, transport = window.KinSessionTransport.page();
+  let interrupted = null;
+    function observePlace(){
+      if(placeListener){menu.removeEventListener('toggle',placeListener);window.removeEventListener('resize',placeListener);window.removeEventListener('scroll',placeListener,true);}
+      const at=work.capture('document');placeListener=()=>work.commit(at,place);
+      menu.addEventListener('toggle',placeListener);window.addEventListener('resize',placeListener);window.addEventListener('scroll',placeListener,true);
+    }
+    work.onInvalidate(event=>{if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active'){observePlace();place();}});
+    observePlace();
     const refresh = () => buttons.forEach(b => {
       b.disabled = ended || busy || !owner || (b.dataset.action !== 'load' && revision === null);
     });
     const stop = () => { ended = true; request?.abort(); refresh(); };
     const endSession = () => { stop(); status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 여세요.'; };
-    const storage = e => { if (e.key === 'kin-session-ended') endSession(); };
-    const message = e => { if (e.data?.type === 'session-ended') endSession(); };
-    window.addEventListener('storage', storage);
-    try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', message); } catch (_) {}
-    window.addEventListener('pagehide', () => {
-      stop(); window.removeEventListener('storage', storage); window.removeEventListener('resize', place); window.removeEventListener('scroll', place, true); channel?.close();
-    }, { once: true });
+      const unsubscribe = work.onInvalidate(event => {
+      if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) endSession();
+      if (event.reason === 'cancel') {
+        request = null; busy = false; refresh();
+        const action = interrupted; interrupted = null;
+        if (action) run(action === 'load' ? 'load' : 'inspect');
+      }
+    });
+    window.addEventListener('pagehide', () => { stop(); unsubscribe(); }, { once: true });
     function decode(data) {
       if (!data || JSON.stringify(data.owner) !== JSON.stringify(owner)) {
-        endSession(); throw new Error('계정이 변경되었습니다. 다시 로그인한 뒤 여세요.');
+        throw new Error('계정이 변경되었습니다. 다시 로그인한 뒤 여세요.');
       }
       if (!Number.isInteger(data.revision) || data.revision < 0 || data.revision > 2147483647 ||
           (data.layout !== null && !model.normalize(data.layout)))
@@ -36,37 +47,28 @@
       return data;
     }
     async function run(action) {
-      if (ended || busy || !owner || (action !== 'load' && action !== 'inspect' && revision === null)) return;
+      if (work.state() !== 'active' || ended || busy || !owner || (action !== 'load' && action !== 'inspect' && revision === null)) return;
+      const at = work.capture('document'); interrupted = action;
       busy = true; refresh(); const before = generation();
       const snapshot = model.normalize(read());
-      request = new AbortController(); const timer = setTimeout(() => request.abort(), 10000);
+      const local = request = new AbortController(); const timer = setTimeout(() => local.abort(), 10000);
       status.textContent = '서버 배치 확인 중…';
       try {
         const method = action === 'save' ? 'PUT' : action === 'clear' ? 'DELETE' : 'GET';
         const body = method === 'GET' ? undefined : { expectedOwner: owner, revision, ...(action === 'save' ? { layout: snapshot } : {}) };
-        const response = await fetch(endpoint, { method, credentials: 'same-origin', cache: 'no-store',
+        const response = await transport.request(endpoint, { context: at, method, credentials: 'same-origin', cache: 'no-store',
           headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' },
-          body: body === undefined ? undefined : JSON.stringify(body), signal: request.signal });
-        if (ended) return;
-        if (response.status === 401 || response.status === 403) {
-          endSession(); status.textContent = response.status === 403 ? '서버 배치 접근 권한이 없습니다. 계정 상태를 확인하세요.' : '세션이 만료되었습니다. 다시 로그인하세요.'; return;
-        }
-        const data = await response.json();
+          body: body === undefined ? undefined : JSON.stringify(body), signal: local.signal });
+        if (response.auth || !work.admits(at)) return;
+        const data = response.body;
         if (ended) return;
         if (!response.ok) {
-          if (data?.code === 'WORKSPACE_OWNER_CHANGED') { endSession(); return; }
+          if (data?.code === 'WORKSPACE_OWNER_CHANGED') throw new Error('계정이 변경되었습니다. 다시 불러오세요.');
           if (response.status === 409) throw new Error('다른 창에서 서버 배치가 변경되었습니다. 불러온 뒤 다시 시도하세요.');
           throw new Error('서버 배치 작업에 실패했습니다. 쓰기는 완료됐을 수 있으니 불러와 확인하세요.');
         }
         const saved = decode(data);
-        // A different tab can replace the cookie session without a logout broadcast.
-        // Recheck after the delayed response and immediately before touching this window's state.
-        const sessionResponse = await fetch(sessionEndpoint, { credentials: 'same-origin', cache: 'no-store', signal: request.signal });
-        if (ended) return;
-        if (!sessionResponse.ok) { endSession(); return; }
-        const session = await sessionResponse.json();
-        if (ended) return;
-        if (session.kind !== 'member' || JSON.stringify([session.institution, session.sub]) !== JSON.stringify(owner)) { endSession(); return; }
+        work.commit(at, () => {
         // A late read must not replace the user's newer local choice or update its write baseline.
         if ((action === 'load' || action === 'inspect') && before !== generation()) {
           status.textContent = '현재 배치가 변경되어 적용하지 않았습니다. 다시 불러오세요.'; return;
@@ -82,11 +84,18 @@
         } else {
           status.textContent = saved.layout ? '서버에 저장된 배치가 있습니다. 불러오기를 누르면 적용합니다.' : '계정에 저장한 배치가 없습니다. 현재 창의 배치를 유지합니다.';
         }
+        });
       } catch (error) {
+        work.commit(at, () => {
         if (!ended) status.textContent = error?.name === 'AbortError' || error instanceof TypeError ?
           '서버 응답을 확인할 수 없습니다. 쓰기는 완료됐을 수 있으니 불러와 확인하세요.' :
           error?.message || '서버 배치를 확인할 수 없습니다. 현재 배치를 유지합니다.';
-      } finally { clearTimeout(timer); request = null; busy = false; refresh(); place(); }
+        });
+      } finally {
+        clearTimeout(timer);
+        if (request === local) { request = null; busy = false; }
+        work.commit(at, () => { interrupted = null; refresh(); place(); });
+      }
     }
     buttons.forEach(b => b.addEventListener('click', () => run(b.dataset.action)));
     refresh();

@@ -73,6 +73,7 @@
         disabled: '로그인을 확인한 뒤 설정을 변경하세요.' })[status];
     }
     function save(next) {
+      if (work.state() !== 'active') return;
       if (!current()) { render('계정이 변경되었습니다. 다시 로그인한 뒤 설정을 여세요.'); return; }
       const clean = normalize(next);
       if (!clean) { render('설정을 확인하지 못했습니다. 다시 선택하세요.'); return; }
@@ -85,16 +86,37 @@
     dialog.querySelector('#image-opening-done').onclick = () => dialog.close();
     // close() has already restored focus and the close event is queued after it, so a later move belongs to the user: only focus left on nothing, the body or the closed dialog goes back to the opener.
     dialog.addEventListener('close', () => { const active = document.activeElement; if (current() && (!active || active === document.body || dialog.contains(active))) button.focus(); });
-    function end() { ended = true; if (dialog.open) dialog.close(); render('로그인이 종료되었습니다.'); }
-    root.addEventListener('storage', e => {
-      if (e.key === 'kin-session-ended') { end(); return; }
-      if (e.key !== owner && e.key !== null || !current()) return;
-      ({ value, status } = read(storage, owner)); feedback = null;
-      render(status === 'restored' ? '다른 창의 설정을 불러왔습니다 · 다음 영상 열기부터 적용' : null);
+    const work = root.KinWorkContext;
+    work.onInvalidate(event => {
+      if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) end();
     });
-    let channel;
-    try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
-    root.addEventListener('pagehide', () => { end(); channel?.close(); });
+    function end() { ended = true; if (dialog.open) dialog.close(); render('로그인이 종료되었습니다.'); }
+    let removeStorage = () => {};
+    function subscribe() {
+      removeStorage();
+      const at = work.capture('document');
+      const storageChanged = e => work.commit(at, () => {
+        if (e.key !== owner && e.key !== null || !current()) return;
+        ({ value, status } = read(storage, owner)); feedback = null;
+        render(status === 'restored' ? '다른 창의 설정을 불러왔습니다 · 다음 영상 열기부터 적용' : null);
+      });
+      root.addEventListener('storage', storageChanged);
+      removeStorage = () => root.removeEventListener('storage', storageChanged);
+    }
+    let pausedStorage;
+    const storedValue=()=>{try{return storage.getItem(owner);}catch(_){return undefined;}};
+    work.onInvalidate(event => {
+      if(event.reason==='prepare')pausedStorage=storedValue();
+      if(event.reason==='cancel'){
+        subscribe();const currentStorage=storedValue();
+        if(currentStorage!==undefined&&currentStorage!==pausedStorage){
+          const at=work.capture('document');work.commit(at,()=>{({value,status}=read(storage,owner));feedback=null;render();});
+        }
+        pausedStorage=undefined;
+      }
+    });
+    subscribe();
+    root.addEventListener('pagehide', () => { end();  });
     render();
     return { snapshot: () => current() ? normalize(value) : defaults() };
   }

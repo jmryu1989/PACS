@@ -694,6 +694,7 @@ class LogoutDOMTest(unittest.TestCase):
     def tearDown(self):
         self.context.close()
         UNBOUND.update(self.site.unbound)
+        self.assertEqual([], sorted(item for item in self.site.unbound if item[0] == "main.html"), "all main document requests are session-bound")
         self.assertEqual([], self.site.violations, "requests the harness does not answer, unbound requests of this unit's "
                                                    "files, or local files outside the table")
         self.assertEqual([], self.errors, "page errors")
@@ -1211,6 +1212,10 @@ class LogoutDOMTest(unittest.TestCase):
                 if when == "while its body is read":
                     me.fulfill(json=answer)
                     self.wait_until(lambda: self.page.evaluate("() => window.__heldMe.length") == 1, "the session body held")
+                # Keep the old document alive until the held body settles; otherwise an
+                # earlier navigation destroys the realm before the intended late continuation.
+                if when == "while its body is read":
+                    self.page.route(INDEX_URL, lambda route: route.fulfill(status=204, body=""))
                 # Another document of the same session ends it while this one still waits for its identity.
                 other = self.watch(self.context.new_page())
                 self.open_main(other)
@@ -1222,7 +1227,10 @@ class LogoutDOMTest(unittest.TestCase):
                     me.fulfill(json=answer)
                 else:
                     self.page.evaluate("() => window.__heldMe.splice(0).forEach(release => release())")
-                self.landing()
+                    self.assert_closed("the late body after another document ended the session")
+                    self.assertTrue(self.docs(name="index.html"), "the page requested its landing")
+                if when == "before its headers":
+                    self.landing()
                 self.page.wait_for_timeout(300)
                 self.assertIsNone(self.screen()["identity"], f"the late /api/me ({when}) restored the identity")
                 self.assertEqual([], self.site.calls[calls:], "no work read after the late session answer")
@@ -1418,12 +1426,18 @@ class LogoutDOMTest(unittest.TestCase):
         b.fill("#findings", "SYN-B typed in the second session")
         calls = len(self.site.calls)
         # Session 1's end, announced twice, plus a notice that names no session and one that names a third.
-        a.evaluate("""first => { for (const data of [
+        # A bound background read may already have closed A after the cookie changed.
+        # An independent same-origin sender keeps injected notices out of B's product-send log.
+        sender = self.context.new_page()
+        sender.route(ORIGIN + '/notice-fixture', lambda route: route.fulfill(body='<!doctype html>', content_type='text/html'))
+        sender.goto(ORIGIN + '/notice-fixture')
+        sender.evaluate("""first => { for (const data of [
             { type: 'session-ended', session: first, operation: 1, status: 'ending' },
             { type: 'session-ended', session: first, operation: 1, status: 'ending' },
             { type: 'session-ended' },
             { type: 'session-ended', session: 'SYN-SESSION-NOBODY', operation: 2, status: 'confirmed' }]) {
           const channel = new BroadcastChannel('kin-session'); channel.postMessage(data); channel.close(); } }""", first)
+        sender.close()
         a.wait_for_url(re.compile(re.escape(ORIGIN + BASE) + r"(index|main)\.html$"))
         b.wait_for_timeout(500)
         seen = self.screen(b)

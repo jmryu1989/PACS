@@ -1,12 +1,15 @@
 (function(root) {
   'use strict';
   function create({ request, identity, changed, timeoutMs = 60000 }) {
+    const work=root.KinWorkContext;
     let sequence = 0, controller, pending = null, busy = false, notice = '', boundOwner, paused = false;
     const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
     const state = message => { if (message !== undefined) notice = message; changed({ busy, resumable: !!pending, received: pending?.rows.length || 0, total: pending?.total, message:notice }); };
     function cancel() { paused = true; sequence++; controller?.abort(); busy = false; state('불러오기를 멈췄습니다. 이어받거나 새로고침할 수 있습니다.'); }
     function clear() { cancel(); pending = null; paused = false; state(''); }
     async function read({ resume = false, epoch, valid = () => true } = {}) {
+      const at=work.capture('document');
+      if(!work.admits(at))throw Object.assign(new Error('작업이 일시 중지되었습니다.'),{stale:true});
       paused = false; controller?.abort(); const mine = ++sequence, owner = identity();
       if (!Array.isArray(owner) || owner.length !== 2 || owner.some(x => typeof x !== 'string' || !x) || (boundOwner && !same(boundOwner,owner))) {
         pending = null; busy = false; throw Object.assign(new Error('계정 상태가 바뀌었습니다.'), {ownerChanged:true});
@@ -14,16 +17,16 @@
       boundOwner = [...owner];
       if (!resume || !pending || !same(pending.owner,owner) || pending.epoch !== epoch) pending = { owner, epoch, rows:[], next:null, total:null };
       const draft = pending; busy = true;
-      const active = () => mine === sequence && same(identity(),owner) && valid();
+      const active = () => work.admits(at) && mine === sequence && same(identity(),owner) && valid();
       async function get(path) {
         controller = new AbortController(); const ownController = controller;
         const timer = setTimeout(() => ownController.abort(), timeoutMs);
-        try { return await request(path, ownController.signal); }
+        try { return await request(path, ownController.signal,at); }
         finally { clearTimeout(timer); }
       }
       try {
         while (draft.total === null || draft.next !== null) {
-          state('검사 목록을 나누어 불러오는 중…');
+          work.commit(at,()=>state('검사 목록을 나누어 불러오는 중…'));
           const data = await get('/studies?limit=100' + (draft.next ? '&after=' + encodeURIComponent(draft.next) : ''));
           if (!active()) throw Object.assign(new Error('계정 또는 판독 작업이 바뀌어 목록 응답을 적용하지 않았습니다.'), { stale:true });
           const page = data?.pagination, rows = data?.studies;
@@ -41,33 +44,38 @@
               || !row.state || typeof row.state !== 'object') throw Object.assign(new Error('목록 페이지 순서 또는 검사 정보가 잘못되었습니다.'),{stale:true});
             previous = row.uid;
           }
-          draft.rows.push(...rows); draft.total = page.total; draft.next = page.next;
+          if(!work.commit(at,()=>{draft.rows.push(...rows); draft.total = page.total; draft.next = page.next;
           // S4-U1b: only the page that completes the list carries the absence answer and its time.
           if (page.next === null) draft.observation = { observedAt: data.observedAt, notObserved: data.notObserved };
           // S4-U2: the order answer comes from that same completing page; an absent one stays absent, never [].
           if (page.next === null && data.orderReconciliation !== undefined) draft.observation.orderReconciliation = data.orderReconciliation;
           state('검사 목록을 나누어 불러오는 중…');
+          }))throw Object.assign(new Error('목록 조회가 중단되었습니다.'),{stale:true});
         }
         const me = await get('/me');
         if (me?.kind !== 'member' || !same([me.institution,me.sub],owner)) throw Object.assign(new Error('계정이 바뀌어 목록 응답을 적용하지 않았습니다.'),{ownerChanged:true});
         if (!active()) throw Object.assign(new Error('판독 작업이 바뀌어 목록 응답을 적용하지 않았습니다.'),{stale:true});
-        const result = { studies:draft.rows, owner:[...owner], observation:draft.observation ?? null }; pending = null; notice = ''; return result;
+        const result = { studies:draft.rows, owner:[...owner], observation:draft.observation ?? null }; work.commit(at,()=>{pending = null; notice = '';}); return result;
       } catch (error) {
         if (mine !== sequence) { error.stale = true; throw error; }
-        if (error.status === 401 || error.status === 403) error.ownerChanged = true;
         if (error.code === 'STUDY_LIST_CHANGED') {
           try { const me = await get('/me'); if (me?.kind !== 'member' || !same([me.institution,me.sub],owner)) error.ownerChanged = true; }
-          catch (identityError) { if ([401,403].includes(identityError.status)) error.ownerChanged = true; }
+          catch (_) { /* A failed confirmation is not an owner change. */ }
         }
         if (mine !== sequence) { error.stale = true; throw error; }
         if (!same(identity(),owner)) error.ownerChanged = true;
-        if (error.stale || error.ownerChanged || error.code === 'STUDY_LIST_CHANGED' || !valid()) pending = null;
-        state(error.code === 'STUDY_LIST_CHANGED' ? '검사 목록이 바뀌었습니다. 새로고침하세요. 현재 화면은 유지했습니다.' : error.message || '응답을 확인하지 못했습니다. 이어받을 수 있습니다.');
+        work.commit(at,()=>{if (error.stale || error.ownerChanged || error.code === 'STUDY_LIST_CHANGED' || !valid()) pending = null;
+        state(error.code === 'STUDY_LIST_CHANGED' ? '검사 목록이 바뀌었습니다. 새로고침하세요. 현재 화면은 유지했습니다.' : error.message || '응답을 확인하지 못했습니다. 이어받을 수 있습니다.');});
         throw error;
       } finally {
-        if (mine === sequence) { busy = false; controller = null; state(); }
+        if (mine === sequence) { busy = false; controller = null; work.commit(at,()=>state()); }
       }
     }
+    work.onInvalidate(event=>{
+      if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))clear();
+      if(event.reason==='prepare'){controller?.abort();busy=false;sequence++;}
+      if(event.reason==='cancel')state();
+    });
     return { read, cancel, clear, get paused() { return paused; }, get busy() { return busy; }, get resumable() { return !!pending; } };
   }
   if (typeof module === 'object' && module.exports) module.exports = { create };

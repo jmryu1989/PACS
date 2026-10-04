@@ -1,6 +1,7 @@
 /* A folder narrows the loaded list; it never grants study access. */
 window.KinFavoriteList = function (app) {
-  let scope=null, sequence=0, controller=null;
+  const work=window.KinWorkContext;
+  let scope=null, sequence=0, controller=null,resume=false;
   const prefix=app.label??'즐겨찾기',noun=app.noun??'폴더';
   const identity=()=>JSON.stringify(app.identity());
   const owns=()=>scope&&JSON.stringify(scope.owner)===identity();
@@ -19,7 +20,7 @@ window.KinFavoriteList = function (app) {
     scope={...scope,revision:value.revision,name:folder?.name??scope.name,uids:new Set(folder?.uids??[]),
       status:folder?'':noun+'가 삭제되었습니다. 범위를 해제하거나 다른 '+noun+'를 선택하세요.'};changed();
   }
-  return {
+  const api = {
     apply(value,id){
       if(!app.identity()||JSON.stringify(value?.owner)!==identity())throw new Error(prefix+' 계정이 바뀌었습니다');
       if(!value.folders?.some(f=>f.id===id))throw new Error(noun+'를 찾을 수 없습니다');
@@ -33,13 +34,19 @@ window.KinFavoriteList = function (app) {
     key(){return scope?.id??(scope?'invalid':null);},
     label(){return scope?(owns()?prefix+': '+scope.name+(scope.status?' · '+scope.status:' · 기존 검색과 함께 적용'):prefix+': 계정 확인 필요'):'';},
     async refresh(){
-      if(!scope)return;
+      if(work.state()!=='active'||!scope)return;
       if(!owns()){accept(null);return;}
-      cancel();const ticket=sequence;controller=new AbortController();const local=controller;
+      const at=work.capture('document');cancel();resume=false;const ticket=sequence;controller=new AbortController();const local=controller;
       const timer=setTimeout(()=>local.abort(),12000);
-      try{const value=await (app.read?app.read(local.signal):app.api('GET','/favorite-folders',undefined,local.signal));if(ticket===sequence)accept(value);}
-      catch(e){if(ticket===sequence&&scope){scope.uids=new Set();scope.status='확인 실패 · Refresh로 다시 시도하세요.';changed();}}
+      try{const value=await (app.read?app.read(local.signal,at):app.api('GET','/favorite-folders',undefined,local.signal,at));work.commit(at,()=>{if(ticket===sequence)accept(value);});}
+      catch(e){work.commit(at,()=>{if(ticket===sequence&&scope){scope.uids=new Set();scope.status='확인 실패 · Refresh로 다시 시도하세요.';changed();}});}
       finally{clearTimeout(timer);if(controller===local)controller=null;}
     },
   };
+  work.onInvalidate(event=>{
+    if(event.reason==='prepare'){resume=!!controller;cancel();}
+    if(event.reason==='cancel'&&resume){resume=false;void api.refresh();}
+    if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))api.end();
+  });
+  return api;
 };

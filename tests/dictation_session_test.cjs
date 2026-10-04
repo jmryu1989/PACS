@@ -3,7 +3,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createHash, webcrypto } = require('node:crypto');
-const { create, hashText } = require('../worklist-v0/hpacs-lite/dictation-session.js');
+const { create: productCreate, hashText } = require('../worklist-v0/hpacs-lite/dictation-session.js');
+const { install } = require("./module_session_harness.cjs");
+const create = options => { install(options?.fetcher); return productCreate(options); };
 const sha = s => createHash('sha256').update(s, 'utf8').digest('hex');
 function deferred() {
   let resolve, reject;
@@ -305,4 +307,22 @@ test('cleanup failure preserves the primary failure and exposes separate cleanup
   assert.equal(f.model.snapshot().error, 'timeout');
   assert.equal(f.model.snapshot().cleanupFailed, true);
   assert.equal(f.model.snapshot().state, 'failed');
+});
+
+
+test('a transient insertion barrier before or during the hash keeps review for a later Insert', async () => {
+  for (const timing of ['before', 'during']) {
+    let allowed=true, hold=null;
+    const f=fixture({canInsert:()=>allowed,hashText:value=>hold?hold.promise:Promise.resolve(sha(value))});
+    const token=await review(f), before=f.model.snapshot(), value=f.value.value;
+    if(timing==='before')allowed=false;
+    else hold=deferred();
+    const pending=f.model.insert(token);
+    if(hold){allowed=false;hold.resolve(sha(value));}
+    assert.equal((await pending).reason,'insertion-blocked');
+    assert.equal(f.model.snapshot().state,'review');assert.equal(f.model.snapshot().text,before.text);
+    assert.deepEqual(f.model.snapshot().pin,before.pin);assert.equal(f.value.value,value);assert.equal(f.writes.length,0);
+    allowed=true;hold=null;
+    assert.equal((await f.model.insert(token)).inserted,true);assert.equal(f.writes.length,1);
+  }
 });

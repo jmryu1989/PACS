@@ -10,8 +10,7 @@
  *   STUDY_ACCESS_CHANGED, code 없는 503)과 답 없음은 결과를 모르는 답이고, 그때는 requestId와 body를 바꾸지 않고 보관해
  *   Check Again으로 같은 요청을 다시 보내거나 기록을 다시 읽어서만 끝낸다(§8.1 규칙 2~4).
  * - 모든 답은 화면에 쓰기 직전 요청 번호·판독 대상·계정·응답의 owner·requestId를 대조하고, 어긋나면 버린다(A→B→A, 로그아웃).
- * 요청은 페이지 api()가 아니라 이 파일의 call()로 보낸다: 쓰기의 HTTP 상태(201만 적용)를 알아야 하고, 세션이 끝나면 나간 요청을
- * 멈추며, 401이면 로그아웃 POST를 기다리기 전에 이 영역부터 끝내야 한다(S5-U4b와 같은 규칙).
+ * The page transport supplies status and session authority; only an acknowledged 201 applies a write.
  * 결과를 모르는 요청과 쓰던 글은 이 문서의 메모리에만 두고 저장소에 쓰지 않는다 — 로그아웃·계정 전환에서 버린다.
  */
 (function () {
@@ -250,9 +249,8 @@
 
   /**
    * mount(options): main.html이 한 번 부른다. 반환값의 sync()는 renderClinical()이 부르고(판독 대상이 바뀌었는지 이 파일이
-   * 판별한다), end()는 window.kinOn401 목록으로도 불린다.
+ * Session termination belongs to the page transport and work-context lifecycle.
    *   apiBase    API 주소(같은 출처 /api)
-   *   logout()   이 영역의 401에서 로그아웃을 시작한다(목록 호출 뒤)
    *   current()  판독 대상 검사 UID
    *   study(uid) 워크리스트 행(이름·ID·날짜 표시용)
    *   report(uid) 화면이 아는 판독 상태 {version, rs} — 바뀌면 #1을 다시 읽는다
@@ -261,7 +259,17 @@
    *   owner()    [institution, sub]
    *   actorName(actor) 표시 이름
    */
-  function mount({ apiBase, logout, current, study, report, online, radiologist, owner, actorName }) {
+  function mount({ apiBase, current, study, report, online, radiologist, owner, actorName }) {
+    const work = window.KinWorkContext, transport = window.KinSessionTransport.page();
+    // Capture at registration, not when a delayed callback runs.
+    const guarded = (effect, scope = 'document') => {
+      const context = work.capture(scope);
+      return (...args) => {
+        let result;
+        work.commit(context, () => { result = effect(...args); });
+        return result;
+      };
+    };
     const node = id => {
       const found = document.getElementById(id);
       if (!found) throw new Error(`#${id} is missing`);
@@ -291,7 +299,7 @@
     const statusWord = make('p', 'cvr-word'), statusText = make('p', 'cvr-text'), statusDetail = make('p', 'cvr-detail');
     statusBox.append(statusWord, statusText, statusDetail);
 
-    let ended = false, lock = null, channel = null, timer = null;
+    let ended = false, lock = null, timer = null;
     const inflight = new Set();
     // 진입 단추: 판독 대상(target)과 그 판독 상태(targetKey)마다 #1을 한 번 읽는다. 읽기마다 entrySeq가 오르고 답은 자기
     // 번호·대상·계정일 때만 쓴다.
@@ -311,7 +319,7 @@
       const value = owner();
       return Array.isArray(value) && value.length === 2 && value.every(part => text(part) && part.length > 0) ? JSON.stringify(value) : null;
     };
-    const sender = () => !ended && lock === null && online() && radiologist() && who() !== null;
+    const sender = () => work.state() === 'active' && !ended && lock === null && online() && radiologist() && who() !== null;
     const live = sent => !ended && lock === null && who() === sent;
     const keyOf = uid => {
       const state = report(uid);
@@ -328,19 +336,15 @@
     /**
      * 중요 결과 route 요청(제한 시간 60초). 성공 응답은 HTTP 상태와 함께 돌려주고(쓰기는 201만 적용), 실패는 상태·code·JSON
      * 본문 여부를 싣는다. 연결 실패·제한 시간·세션 종료로 멈춘 요청은 status 0이다 — 쓰기라면 서버가 적용했는지 모르는 답이다.
-     * 401은 본문을 기다리지 않고 이 영역부터 끝낸 뒤 로그아웃을 시작한다(expire).
+     * Session termination belongs to the page transport and lifecycle gate.
      */
-    async function call(method, path, body) {
+    async function call(method, path, body, context = work.capture('document')) {
       const controller = new AbortController(), stop = setTimeout(() => controller.abort(), TIMEOUT_MS);
       inflight.add(controller);
       try {
-        const response = await fetch(apiBase + path, { method, signal: controller.signal,
+        const response = await transport.request(apiBase + path, { context, deadlineMs: TIMEOUT_MS, method, signal: controller.signal,
           headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' }, body: body === undefined ? undefined : JSON.stringify(body) });
-        if (response.status === 401) {
-          expire();
-          throw Object.assign(new Error(TEXT.expired), { kin: true, status: 401, code: null, json: false, body: null });
-        }
-        const data = await response.json().catch(() => undefined);
+        const data = response.incomplete ? undefined : response.body;
         if (!response.ok) {
           throw Object.assign(new Error(isObject(data) && text(data.message) ? data.message : `HTTP ${response.status}`),
             { kin: true, status: response.status, code: isObject(data) && text(data.code) ? data.code : null, json: isObject(data),
@@ -383,18 +387,18 @@
       targetKey = keyOf(uid);
       entryView = { phase: 'loading' };
       paintEntry();
-      call('GET', `/studies/${encodeURIComponent(uid)}/critical-result-recipients`).then(({ data }) => {
+      call('GET', `/studies/${encodeURIComponent(uid)}/critical-result-recipients`, undefined, work.capture('study')).then(guarded(({ data }) => {
         if (seq !== entrySeq || uid !== target || !live(sent)) return;
         const mine = ownerOf(data && data.owner, sent);
         if (mine === 'other') { accountChanged(TEXT.otherEnvelope); return; }
         const read = mine === 'same' ? readCandidates(data, uid) : null;
         entryView = read ? { phase: 'ready', data: read } : { phase: 'failed', detail: TEXT.malformed };
         paintEntry();
-      }, error => {
+      }, 'study'), guarded(error => {
         if (seq !== entrySeq || uid !== target || !live(sent)) return;
         entryView = { phase: 'failed', detail: describe(error) };
         paintEntry();
-      });
+      }, 'study'));
     }
 
     /**
@@ -402,6 +406,7 @@
      * 다시 읽는다 — 같은 상태면 요청이 없다. 다른 검사로 옮기면 열린 발신 창을 닫는다(보내는 중이던 요청은 목록 위 줄로 남는다).
      */
     function sync() {
+      if (work.state() !== 'active') return;
       if (ended) return;
       const next = sender() ? current() || null : null;
       if (next !== target) {
@@ -516,7 +521,7 @@
       const chosen = moved && before ? before.recipients.find(r => r.sub === recipientField.value) || null : null;
       dialogView = { phase: 'loading', data: null, detail: '', moved };
       paintDialog();
-      call('GET', `/studies/${encodeURIComponent(uid)}/critical-result-recipients`).then(({ data }) => {
+      call('GET', `/studies/${encodeURIComponent(uid)}/critical-result-recipients`, undefined, work.capture('study')).then(guarded(({ data }) => {
         if (seq !== dialogSeq || dialogUid !== uid || !live(sent)) return;
         const mine = ownerOf(data && data.owner, sent);
         if (mine === 'other') { accountChanged(TEXT.otherEnvelope); return; }
@@ -539,11 +544,11 @@
         }
         paintDialog();
         if (dialogView.phase === 'ready') recipientField.focus();
-      }, error => {
+      }, 'study'), guarded(error => {
         if (seq !== dialogSeq || dialogUid !== uid || !live(sent)) return;
         dialogView = { phase: 'failed', data: null, detail: describe(error), moved };
         paintDialog();
-      });
+      }, 'study'));
     }
 
     /** 창을 닫는다. 보내는 중·결과를 모르는 요청은 버리지 않고 보낸 목록 위 줄로 옮긴다(§8.1 규칙 2). */
@@ -572,6 +577,7 @@
     }
 
     function send() {
+      if (work.state() !== 'active') return;
       if (ended || lock !== null || dialogUid === null || !dialogView || dialogView.phase !== 'ready') return;
       const previous = dialogAttempt ? attempts.get(dialogAttempt) : null;
       if (previous && previous.state !== 'rejected') return;
@@ -604,7 +610,7 @@
     function transmit(attempt, retry) {
       attempt.state = retry ? 'checking' : 'sending';
       paintAttempt(attempt);
-      call('POST', attempt.path, attempt.body).then(result => settle(attempt, retry, result, null), error => settle(attempt, retry, null, error));
+      call('POST', attempt.path, attempt.body).then(guarded(result => settle(attempt, retry, result, null)), guarded(error => settle(attempt, retry, null, error)));
     }
 
     /**
@@ -622,7 +628,6 @@
         unknown(attempt, retry, TEXT.unexpected(result.status), '');
         return;
       }
-      if (error.status === 401) return;
       if (error.status === 409 && error.code === 'OWNER_CHANGED') {
         if (!retry) Object.assign(attempt, { state: 'rejected', reason: TEXT.codes.OWNER_CHANGED, detail: describe(error) });
         paintAttempt(attempt);
@@ -674,18 +679,20 @@
     function confirmByRead(attempt) {
       const ids = attempt.action === 'cancel' ? [attempt.recordId] : attempt.action === 'create' ? [attempt.requestId]
         : [attempt.requestId, attempt.recordId];
-      const sent = attempt.sent;
+      const sent = attempt.sent, context = work.capture('document');
       (async () => {
         for (const id of ids) {
           if (attempts.get(attempt.requestId) !== attempt || attempt.state !== 'unknown' || !live(sent)) return;
           let data;
-          try { ({ data } = await call('GET', `/critical-results/${encodeURIComponent(id)}`)); }
+          try { ({ data } = await call('GET', `/critical-results/${encodeURIComponent(id)}`, undefined, context)); }
           catch (_) { continue; }   // 404·거절은 가시성과 구별되지 않아 미적용의 증거가 아니다.
+          if (!work.commit(context, () => {
           if (!live(sent)) return;
           const mine = ownerOf(data && data.owner, sent);
           if (mine === 'other') { accountChanged(TEXT.otherEnvelope); return; }
           const item = mine === 'same' && isObject(data) ? senderItem(data.item) : null;
           if (item && item.id === id) observe(item);
+          })) return;
         }
       })();
     }
@@ -747,7 +754,7 @@
       listPhase = 'loading';
       paintPanel();
       const query = `view=sent&state=${encodeURIComponent(chosen)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-      call('GET', `/critical-results?${query}`).then(({ data }) => {
+      call('GET', `/critical-results?${query}`).then(guarded(({ data }) => {
         if (seq !== listSeq || chosen !== filter || !live(sent)) return;
         const mine = ownerOf(data && data.owner, sent);
         if (mine === 'other') { accountChanged(TEXT.otherEnvelope); return; }
@@ -770,13 +777,13 @@
         paintPanel();
         // 목록에서 끝나지 않은 결과 모르는 요청은 한 건 읽기로 다시 확인한다(규칙 3 (b)). 읽기일 뿐 요청을 다시 보내지 않는다.
         for (const attempt of attempts.values()) if (attempt.state === 'unknown') confirmByRead(attempt);
-      }, error => {
+      }), guarded(error => {
         if (seq !== listSeq || !live(sent)) return;
         loadedOnce = true;
         listPhase = 'failed';
         listError = describe(error);
         paintPanel();
-      });
+      }));
     }
 
     function lined() { return [...attempts.values()].filter(attempt => attempt.lined); }
@@ -933,7 +940,7 @@
       const seq = ++form.seq, sent = who(), uid = form.item.studyUid;
       form.confirm.disabled = true;
       form.sourceLine.textContent = TEXT.form.loading;
-      call('GET', `/studies/${encodeURIComponent(uid)}/critical-result-recipients`).then(({ data }) => {
+      call('GET', `/studies/${encodeURIComponent(uid)}/critical-result-recipients`, undefined, work.capture('study')).then(guarded(({ data }) => {
         if (forms.get(form.item.id) !== form || seq !== form.seq || !live(sent)) return;
         const mine = ownerOf(data && data.owner, sent);
         if (mine === 'other') { accountChanged(TEXT.otherEnvelope); return; }
@@ -949,10 +956,10 @@
         form.note.textContent = listed ? '' : TEXT.form.notCandidate;
         form.note.hidden = listed;
         form.confirm.disabled = false;
-      }, error => {
+      }), guarded(error => {
         if (forms.get(form.item.id) !== form || seq !== form.seq || !live(sent)) return;
         form.sourceLine.textContent = `${TEXT.form.failed}\n${describe(error)}`;
-      });
+      }));
     }
 
     function closeForm(id) {
@@ -1010,7 +1017,6 @@
     function accountChanged(detail) {
       if (ended || lock !== null) return;
       lockArea(TEXT.dialog.locked, detail);
-      (window.kinOn401 || []).forEach(done => { try { done('account-changed', detail); } catch (_) {} });
     }
 
     function lockArea(message, detail) {
@@ -1032,7 +1038,7 @@
     }
 
     /**
-     * 세션이 끝났다(로그아웃·다른 탭·401). 창을 닫고 결과를 모르는 요청·쓰던 글·목록을 버리며 나간 요청을 멈춘다. 늦은 답은
+ * Session termination belongs to the page transport and work-context lifecycle.
      * 어디에도 그리지 않는다. 방송·storage·pagehide와 겹쳐 여러 번 불려도 한 번만 끝낸다.
      */
     function end(reason, detail) {
@@ -1054,15 +1060,6 @@
       target = null;
       paintEntry();
       paintPanel();
-      if (channel) channel.close();
-    }
-
-    /** 이 영역 요청의 401. 로그아웃 POST의 완료·지연과 무관하게 이 영역부터 끝내고, 공통 목록을 부른 뒤 로그아웃한다. */
-    function expire() {
-      if (ended) return;
-      end();
-      (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} });
-      try { Promise.resolve(logout()).catch(() => {}); } catch (_) {}
     }
 
     entry.addEventListener('click', openDialog);
@@ -1102,20 +1099,31 @@
     moreButton.addEventListener('click', () => loadList(true));
     rows.addEventListener('focusout', () => {
       if (!staleRows) return;
-      setTimeout(() => { if (staleRows && !rows.contains(document.activeElement)) paintRows(); }, 0);
+      setTimeout(guarded(() => { if (staleRows && !rows.contains(document.activeElement)) paintRows(); }), 0);
     });
     // 문서가 보이고 이 줄이 서 있는(보낼 수 있는 세션) 동안만 다시 읽는다. 읽기는 어떤 기록도 바꾸지 않고(ACK·재알림이 아니다)
     // 알림도 띄우지 않는다.
-    timer = setInterval(() => {
-      if (sender() && !panel.hidden && document.visibilityState === 'visible' && listPhase !== 'loading') loadList(false);
-    }, PERIOD_MS);
-    try {
-      channel = new BroadcastChannel('kin-session');
-      channel.onmessage = event => { if (event.data && event.data.type === 'session-ended') end(); };
-    } catch (_) {}
-    window.addEventListener('storage', event => { if (event.key === 'kin-session-ended') end(); });
+    function startTimers() {
+      clearInterval(timer);
+      timer = setInterval(guarded(() => {
+        if (sender() && !panel.hidden && document.visibilityState === 'visible' && listPhase !== 'loading') loadList(false);
+      }), PERIOD_MS);
+    }
+    work.onInvalidate(event => {
+      if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) { end(); return; }
+      if (event.reason === 'prepare') { clearInterval(timer); }
+      if (event.reason === 'cancel') {
+        for (const attempt of attempts.values()) if (['sending', 'checking'].includes(attempt.state)) {
+          attempt.state = 'unknown'; attempt.detail = TEXT.noResponse; paintAttempt(attempt);
+        }
+        if (entryView.phase === 'loading') targetKey = null;
+        if (dialogUid !== null && dialogView?.phase === 'loading') readDialog(false);
+        sync(); if (listPhase === 'loading') loadList(false);
+        startTimers();
+      } else if (event.reason === 'lifecycle' && event.state === 'active') startTimers();
+    });
+    if (work.state() === 'active') startTimers();
     window.addEventListener('pagehide', () => end());
-    (window.kinOn401 = window.kinOn401 || []).push(end);
     filterField.value = filter;
     paintEntry();
     paintPanel();

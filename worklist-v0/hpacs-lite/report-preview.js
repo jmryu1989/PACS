@@ -111,6 +111,8 @@
     } catch { return false; }
   }
   globalThis.KinReportPreview = function ({ api, context, actorName, toast }) {
+    const work = globalThis.KinWorkContext, transport = globalThis.KinSessionTransport.page();
+    let resume = false;
     const dialog = el('dialog'); dialog.id = 'report-preview'; dialog.setAttribute('aria-labelledby', 'report-preview-title');
     dialog.style.cssText = 'width:min(1150px,94vw);height:90vh;padding:0;border:1px solid #61748c;border-radius:8px;background:#18212b;color:#edf2f8';
     const top = el('div', undefined, dialog); top.style.cssText = 'display:flex;gap:12px;padding:12px;align-items:center;flex-wrap:wrap';
@@ -185,8 +187,8 @@
       try { return await work(controller.signal); }
       finally { clearTimeout(timer); controller.abort(); if (request === controller) request = null; }
     }
-    async function snapshot(s, signal) {
-      const data = await api('GET', '/studies/' + encodeURIComponent(s.uid) + '/report-preview', undefined, signal);
+    async function snapshot(s, signal, at) {
+      const data = await api('GET', '/studies/' + encodeURIComponent(s.uid) + '/report-preview', undefined, signal, at);
       check(s);
       if (data.study?.uid !== s.uid || !data.report || !Array.isArray(data.keys)) throw new Error('검사 정보를 확인할 수 없습니다');
       return data;
@@ -200,17 +202,17 @@
      * this reader may not see. It runs inside the caller's bounded unit and
      * signal - a second bounded() would abort the caller's own work - and its
      * failures are caught HERE so a citation problem can never blank the paper.
-     * An abort belongs to the whole unit, and a 401 arrives only after the
-     * session has already been torn down, so those two are rethrown.
+     * An abort or an authoritative session failure belongs to the whole unit.
+     * An ordinary request refusal does not end the document.
      */
-    async function readCitations(s, signal) {
+    async function readCitations(s, signal, at) {
       if (source.value === 'editor') return { state: 'editor' };
       if (!(s.data.report.version >= 1)) return null;
       let answer;
       try {
-        answer = await api('GET', '/studies/' + encodeURIComponent(s.uid) + '/report/citations', undefined, signal);
+        answer = await api('GET', '/studies/' + encodeURIComponent(s.uid) + '/report/citations', undefined, signal, at);
       } catch (error) {
-        if (error.name === 'AbortError' || error.status === 401) throw error;
+        if (error.name === 'AbortError' || error.auth) throw error;
         return { state: error.status === 403 ? 'refused' : 'unknown', entries: [] };
       }
       return citationAnswerOk(answer, s.data.report.version) ? { state: 'ok', entries: answer.head } : { state: 'unknown', entries: [] };
@@ -263,8 +265,8 @@
         '@bottom-right{content:counter(page) " / " counter(pages);font:9px sans-serif;vertical-align:middle}}';
       return '<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src blob:; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'"><title>KIN PACS 판독문</title><style>' + paperCss + margins + '</style></head><body>' + markup + '</body></html>';
     }
-    async function jsonResource(path, signal) {
-      const response = await fetch(path, { signal, cache: 'no-store' });
+    async function jsonResource(path, signal, at) {
+      const response = await transport.request(path, { context: at, read: 'response', signal, cache: 'no-store' });
       if (!response.ok || !response.body) throw new Error('키 이미지 원본을 확인하지 못했습니다');
       const reader = response.body.getReader(), chunks = []; let bytes = 0;
       try {
@@ -273,8 +275,8 @@
       } finally { await reader.cancel().catch(() => {}); }
       return JSON.parse(await new Blob(chunks).text());
     }
-    async function digest(path, signal) {
-      const info = await jsonResource(path + '/attachments/dicom/info', signal);
+    async function digest(path, signal, at) {
+      const info = await jsonResource(path + '/attachments/dicom/info', signal, at);
       if (!/^[a-f0-9]{32}$/i.test(info.UncompressedMD5)) throw new Error('원본 파일을 확인할 수 없습니다');
       return info.UncompressedMD5.toLowerCase();
     }
@@ -310,13 +312,13 @@
         return blob;
       } finally { canvas.width = canvas.height = 0; }
     }
-    async function frame(s, key, signal, budget, windowing, edit) {
+    async function frame(s, key, signal, budget, windowing, edit, at, ownedUrls) {
       const item = key.item;
-      const located = await api('POST', '/dicom/lookup', { studyUid: s.uid, sopUid: item.sopUid }, signal); check(s);
+      const located = await api('POST', '/dicom/lookup', { studyUid: s.uid, sopUid: item.sopUid }, signal, at); check(s);
       if (!/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(located.id)) throw new Error('원본 영상 식별을 확인할 수 없습니다');
       const prefix = '/instances/' + located.id;
-      const originalDigest = await digest(prefix, signal);
-      const tags = await jsonResource(prefix + '/simplified-tags', signal); check(s);
+      const originalDigest = await digest(prefix, signal, at);
+      const tags = await jsonResource(prefix + '/simplified-tags', signal, at); check(s);
       const frames = Number(tags.NumberOfFrames || 1);
       if (tags.StudyInstanceUID !== s.uid || tags.SeriesInstanceUID !== item.seriesUid || tags.SOPInstanceUID !== item.sopUid ||
           !Number.isSafeInteger(item.frame) || item.frame < 1 || item.frame > frames) throw new Error('키 이미지의 원본 프레임이 일치하지 않습니다');
@@ -331,7 +333,7 @@
         throw new Error('직접 W/L은 일반 흑백 CT 키 이미지에서 사용할 수 있습니다. 선택을 바꾸거나 자동 밝기로 돌아가세요.');
       const rendering = windowing ? (Number(tags.PixelRepresentation) === 1 ? '/image-int16' : '/image-uint16') : '/preview';
       const mime = windowing ? 'image/x-portable-arbitrarymap' : 'image/png';
-      const response = await fetch(prefix + '/frames/' + (item.frame - 1) + rendering, { signal, cache: 'no-store', headers: { Accept: mime } });
+      const response = await transport.request(prefix + '/frames/' + (item.frame - 1) + rendering, { context: at, read: 'response', signal, cache: 'no-store', headers: { Accept: mime } });
       if (!response.ok || !response.headers.get('content-type')?.startsWith(mime) || !response.body) throw new Error('키 이미지를 불러오지 못했습니다');
       const reader = response.body.getReader(), chunks = []; let bytes = 0;
       try {
@@ -347,7 +349,7 @@
       const width = header.getUint32(16), height = header.getUint32(20); if (!windowing) budget.pixels += width * height;
       if (!width || !height || width * height > 16777216 || budget.pixels > 33554432) throw new Error('출력 이미지 해상도 한도를 초과했습니다');
       if (signal.aborted) throw new Error('출력 이미지 확인이 취소됐습니다');
-      let url = URL.createObjectURL(blob); urls.push(url);
+      let url = URL.createObjectURL(blob); ownedUrls.push(url);
       const image = new Image(), abort = () => { image.removeAttribute('src'); }; image.src = url;
       signal.addEventListener('abort', abort, { once: true });
       try { if (signal.aborted) throw new Error('출력 이미지 확인이 취소됐습니다'); await image.decode(); }
@@ -381,14 +383,15 @@
           check(s); if (!output || signal.aborted) throw new Error('출력 이미지 확인이 취소됐습니다');
           budget.bytes += output.size;
           if (output.size > 8388608 || budget.bytes > 67108864) throw new Error('출력 이미지 용량 한도를 초과했습니다');
-          url = URL.createObjectURL(output); urls.push(url);
+          url = URL.createObjectURL(output); ownedUrls.push(url);
         } finally { canvas.width = canvas.height = 0; }
       }
-      if (await digest(prefix, signal) !== originalDigest) throw new Error('키 이미지 원본이 변경되었습니다. 다시 확인을 누르세요.');
+      if (await digest(prefix, signal, at) !== originalDigest) throw new Error('키 이미지 원본이 변경되었습니다. 다시 확인을 누르세요.');
       return { key, url, prefix, digest: originalDigest, edit };
     }
     async function prepare() {
-      const s = session; if (!s?.data) return;
+      const at = work.capture('study'), ownedUrls = [];
+      const s = session; if (!s?.data || !work.admits(at)) return;
       request?.abort(); releaseImages(); status.textContent = '출력할 내용을 확인하고 있습니다…';
       const keys = selectedKeys(), selection = keys.map(k => k.id); count.textContent = `${keys.length}장 선택 · 한 번에 최대32장`;
       if (keys.length > 32) { status.textContent = '키 이미지를32장 이하로 선택하세요.'; return; }
@@ -409,31 +412,37 @@
           if (source.value === 'editor' && !s.data.canPreviewEditor) throw new Error('현재 편집문을 출력할 권한이 없습니다');
           const images = new Array(keys.length), budget = { bytes: 0, pixels: 0 }; let next = 0;
           await Promise.all(Array.from({ length: Math.min(4, keys.length) }, async () => {
-            while (next < keys.length) { const i = next++; images[i] = await frame(s, keys[i], signal, budget, windowing, outputEdits[i]); }
+            while (next < keys.length) { const i = next++; images[i] = await frame(s, keys[i], signal, budget, windowing, outputEdits[i], at, ownedUrls); }
           }));
-          const current = await snapshot(s, signal);
+          const current = await snapshot(s, signal, at);
           if (!same(current, s.data)) throw new Error('저장본 또는 키 이미지가 변경되었습니다. 다시 확인을 누르세요.');
           // Last await of the render path, so the guards below stay the final
           // word before anything is drawn.
-          const citations = await readCitations(s, signal);
+          const citations = await readCitations(s, signal, at);
           check(s); if (selectionEpoch !== s.selectionEpoch) return;
           if (source.value === 'editor' && !same(context().editor, s.editor)) throw new Error('편집문이 바뀌었습니다. 다시 확인을 누르세요.');
+          work.commit(at, () => {
+          urls.push(...ownedUrls.splice(0));
           rendered = { html: html(documentBody(s, images, windowing, citations)), images, selection, source: source.value, selectionEpoch, citations };
           paper.srcdoc = rendered.html; printButton.disabled = !supportsPageIdentity();
           status.textContent = printButton.disabled ? '이 브라우저는 페이지별 식별정보 출력을 지원하지 않습니다. 최신 Chrome 또는 Edge에서 여세요.' :
             '미리보기 내용을 확인하세요. A4 · 기본 여백으로 출력하며, 인쇄 대화상자에서 페이지 나눔과 식별정보를 확인하세요.';
+          });
         });
       } catch (error) {
         if (session !== s || selectionEpoch !== s.selectionEpoch) return;
-        releaseImages(); status.textContent = error.name === 'AbortError' ? '불러오기가 지연됐습니다. 다시 확인을 누르세요.' : error.message;
-      }
+        work.commit(at, () => { releaseImages(); status.textContent = error.name === 'AbortError' ? '불러오기가 지연됐습니다. 다시 확인을 누르세요.' : error.message; });
+      } finally { ownedUrls.forEach(URL.revokeObjectURL); }
     }
     async function reload() {
-      const s = session; if (!s) return;
+      const at = work.capture('study');
+      const s = session; if (!s || !work.admits(at)) return;
       edits = new Map(); geometryDirty = false; geometry.disabled = true;
       s.selectionEpoch++; releaseImages(); choices.replaceChildren(); status.textContent = '저장본과 키 이미지를 불러오는 중…'; source.disabled = true; layout.disabled = true; windowControls.disabled = true;
       try {
-        s.data = await bounded(signal => snapshot(s, signal)); s.editor = { ...check(s).editor };
+        const data = await bounded(signal => snapshot(s, signal, at));
+        work.commit(at, () => {
+        s.data = data; s.editor = { ...check(s).editor };
         source.querySelector('[value=editor]').disabled = !s.data.canPreviewEditor;
         if (!s.data.canPreviewEditor) source.value = 'saved'; source.disabled = false; layout.disabled = false; windowControls.disabled = false;
         for (const key of s.data.keys) {
@@ -442,11 +451,13 @@
           el('span', ` ${key.item.title || '(제목 없음)'} · 프레임 ${key.item.frame}`, label); input.onchange = prepare;
         }
         if (!s.data.keys.length) el('p', '저장한 키 이미지가 없습니다.', choices);
-        await prepare();
-      } catch (error) { if (session === s) { releaseImages(); status.textContent = error.name === 'AbortError' ? '조회가 지연됐습니다. 다시 확인을 누르세요.' : error.message; } }
+        void prepare();
+        });
+      } catch (error) { work.commit(at, () => { if (session === s) { releaseImages(); status.textContent = error.name === 'AbortError' ? '조회가 지연됐습니다. 다시 확인을 누르세요.' : error.message; } }); }
     }
     async function print() {
-      const s = session, ready = rendered; if (!s || !ready || printButton.disabled) return;
+      const at = work.capture('study');
+      const s = session, ready = rendered; if (!s || !ready || printButton.disabled || !work.admits(at)) return;
       if (!supportsPageIdentity()) return;
       if (printWindow && !printWindow.closed) printWindow.close();
       printWindow = window.open('', '_blank');
@@ -457,30 +468,33 @@
           let next = 0;
           await Promise.all(Array.from({ length: Math.min(4, ready.images.length) }, async () => {
             while (next < ready.images.length) { const image = ready.images[next++];
-              if (await digest(image.prefix, signal) !== image.digest) throw new Error('키 이미지 원본이 변경되었습니다. 다시 확인을 누르세요.'); }
+              if (await digest(image.prefix, signal, at) !== image.digest) throw new Error('키 이미지 원본이 변경되었습니다. 다시 확인을 누르세요.'); }
           }));
-          const latest = await snapshot(s, signal);
+          const latest = await snapshot(s, signal, at);
           // The same re-check the saved text gets: a citation could have been
           // removed, or its source's readability revoked, since the render.
           // Only paper-relevant evidence is compared - the draft never reaches
           // this page, so a draft change must not refuse a print.
-          const latestCitations = await readCitations(s, signal);
+          const latestCitations = await readCitations(s, signal, at);
           if (ready !== rendered || !same(latest, s.data) || !same(latestCitations, ready.citations) ||
               (ready.source === 'editor' && !same(check(s).editor, s.editor)))
             throw new Error('출력 내용이 변경되었습니다. 다시 확인을 누르세요.');
           if (target.closed) throw new Error('인쇄 창이 닫혔습니다. 다시 인쇄를 누르세요.');
-          target.document.open(); target.document.write(ready.html); target.document.close();
+          if (!work.admits(at)) return;
+          work.commit(at, () => { target.document.open(); target.document.write(ready.html); target.document.close(); });
           await Promise.all(Array.from(target.document.images, image => image.decode())); check(s);
           if (target.closed || ready !== rendered) throw new Error('인쇄 창이 닫혔거나 출력 내용이 변경되었습니다');
+          work.commit(at, () => {
           target.focus(); target.print();
           if (session === s) status.textContent = '인쇄 대화상자에서 인쇄하거나 PDF로 저장하세요. 취소해도 원본은 바뀌지 않습니다.';
+          });
         });
       } catch (error) {
         if (!target.closed) target.close();
         // A late cancelled print owns only its captured output, not a newer layout.
-        if (session === s && rendered === ready) { releaseImages(); status.textContent = error.message; }
+        work.commit(at, () => { if (session === s && rendered === ready) { releaseImages(); status.textContent = error.message; } });
       }
-      finally { if (session === s && rendered === ready) printButton.disabled = !supportsPageIdentity(); }
+      finally { work.commit(at, () => { if (session === s && rendered === ready) printButton.disabled = !supportsPageIdentity(); }); }
     }
     closeButton.onclick = close; refresh.onclick = reload; source.onchange = prepare; layout.onchange = prepare; printButton.onclick = print;
     const invalidateWindow = () => {
@@ -512,8 +526,13 @@
     applyGeometry.onclick = () => changeGeometry(false); resetGeometry.onclick = () => changeGeometry(true);
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
     window.addEventListener('beforeunload', close);
-    window.addEventListener('storage', event => { if (event.key === 'kin-session-ended') close(); });
+    work.onInvalidate(({ reason, state }) => {
+      if (state === 'preparing') { resume = !!request; request?.abort(); }
+      else if (reason === 'cancel') { if (resume && session) { resume = false; if (session.data) void prepare(); else void reload(); } }
+      else if (reason === 'lifecycle' && state !== 'active') close();
+    });
     return { close, open() {
+      if (work.state() !== 'active') return;
       close(); const current = context();
       if (!current.uid || !current.online) { toast('검사를 선택하고 서버 연결을 확인하세요.', 'err'); return; }
       focusBefore = document.activeElement; source.value = 'saved'; layout.value = 'single'; session = { uid: current.uid, epoch, selectionEpoch: 0 };

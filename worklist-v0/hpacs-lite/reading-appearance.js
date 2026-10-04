@@ -1,5 +1,6 @@
 /* Display-only browser preferences; never store clinical text or viewer state. */
 window.KinReadingAppearance = function (options) {
+  const work=window.KinWorkContext;
   'use strict';
   const {owner}=options;
   const opener=document.querySelector('#reading-appearance-open');
@@ -20,7 +21,7 @@ window.KinReadingAppearance = function (options) {
   let colorValue=defaultColors();
   const normalize=v=>v&&typeof v==='object'&&!Array.isArray(v)&&v.version===1&&
     Object.keys(v).length===4&&['list','current','prior'].every(k=>sizes.includes(v[k]))?{version:1,list:v.list,current:v.current,prior:v.prior}:null;
-  let value=defaults(),ended=false,storage,channel,generation=0;
+  let value=defaults(),ended=false,storage,generation=0;
   const dockKey=initialOwner?'kin-viewer-dock:v1:'+initialOwner:null,normalizeDock=window.KinViewerWorkspaceDock.normalize;
   let dockValue={version:2,placement:'bottom',panel:-1,autoHide:false};
   const toolbarIds=['MeasurementTools','Zoom','Pan','TrackballRotate','WindowLevel','Capture','Layout','Crosshairs','MoreTools'];
@@ -41,7 +42,7 @@ window.KinReadingAppearance = function (options) {
     return true;
   }
   function mprChanged(e){if(!live()||e.detail?.owner!==initialOwner)return;const clean=mprModel?.normalize(e.detail.value);if(clean){mprValue=clean;generation++;}}
-  window.addEventListener('kin-mpr-preference-changed',mprChanged);
+
   const live=()=>!ended&&!!key&&owner()===initialOwner;
   const style=document.createElement('style');style.textContent=`
     #rows td, #rows td span, #relrows td, #relrows td span { font-size:var(--kin-list-text,var(--kin-column-text,12px)); font-family:var(--kin-list-font,var(--kin-column-font,inherit)); }
@@ -116,7 +117,7 @@ window.KinReadingAppearance = function (options) {
     return true;
   }
   function toolbarChanged(e){if(!live()||e.detail?.owner!==initialOwner)return;const clean=normalizeToolbar(e.detail.value);if(!clean)return;if(e.type==='kin-toolbar-preference-changed'||JSON.stringify(clean)!==JSON.stringify(toolbarValue))generation++;toolbarValue=clean;showToolbar();}
-  window.addEventListener('kin-toolbar-preference-changed',toolbarChanged);window.addEventListener('kin-toolbar-preference-mounted',toolbarChanged);
+
   const viewer=window.KinViewerIdentity,viewerModalities=viewer.modalities;let viewerValue=viewer.read(initialOwner);
   const clone=v=>JSON.parse(JSON.stringify(v)),viewerFields={},viewerProfiles={current:'general',prior:'general'},viewerSection=element('fieldset','',dialog);element('legend','Image Identification',viewerSection);
   element('p','기준 검사와 비교 검사의 환자 이름·검사 날짜·검사 설명 위치를 따로 정하고, 촬영 modality별 표시를 덮어쓸 수 있습니다. 환자 ID와 기준/비교 표시는 항상 유지합니다.',viewerSection);
@@ -163,7 +164,7 @@ window.KinReadingAppearance = function (options) {
     return true;
   }
   function dockChanged(e){if(!live()||e.detail?.owner!==initialOwner)return;let clean=normalizeDock(e.detail.value);if(!clean)return;clean={...clean,version:2,autoHide:clean.autoHide??dockValue.autoHide};if(e.type==='kin-dock-preference-changed'||JSON.stringify(clean)!==JSON.stringify(dockValue))generation++;dockValue=clean;showDock();}
-  window.addEventListener('kin-dock-preference-changed',dockChanged);window.addEventListener('kin-dock-preference-mounted',dockChanged);
+
   const status=element('p','',dialog);status.id='reading-appearance-status';status.setAttribute('role','status');
   const account=element('section','계정 저장 기능을 연결하지 못했습니다. 현재 브라우저 설정은 사용할 수 있습니다.',dialog);
   account.id='reading-appearance-account';account.style.cssText='border-top:1px solid #819bb7;padding-top:12px;display:flex;flex-wrap:wrap;gap:8px';
@@ -205,11 +206,11 @@ window.KinReadingAppearance = function (options) {
     for(const f of Object.values(fontFields))f.disabled=true;fontReset.disabled=true;
     colorValue=defaultColors();applyColors();for(const f of Object.values(colorFields))f.disabled=true;colorReset.disabled=true;
     for(const f of Object.values(dockFields))f.disabled=true;
-    window.removeEventListener('kin-mpr-preference-changed',mprChanged);toolbarReset.disabled=true;window.removeEventListener('kin-toolbar-preference-changed',toolbarChanged);window.removeEventListener('kin-toolbar-preference-mounted',toolbarChanged);
-    window.removeEventListener('kin-dock-preference-changed',dockChanged);window.removeEventListener('kin-dock-preference-mounted',dockChanged);
-    window.removeEventListener('storage',onStorage);window.removeEventListener('pagehide',end);channel?.close();
+    toolbarReset.disabled=true;
+
+    stopPreferences();window.removeEventListener('storage',storageListener);window.removeEventListener('pagehide',end);
   }
-  function onStorage(e){if(e.key==='kin-session-ended')end();else if(mprKey&&e.key===mprKey){try{const clean=e.newValue?.length<=1024&&mprModel?.normalize(JSON.parse(e.newValue));if(clean){mprValue=clean;generation++;mprStatus.textContent='다른 영상 창에서 MPR 설정을 저장했습니다.';}}catch(_){} }else if(toolbarKey&&e.key===toolbarKey){
+  function onStorage(e){if(mprKey&&e.key===mprKey){try{const clean=e.newValue?.length<=1024&&mprModel?.normalize(JSON.parse(e.newValue));if(clean){mprValue=clean;generation++;mprStatus.textContent='다른 영상 창에서 MPR 설정을 저장했습니다.';}}catch(_){} }else if(toolbarKey&&e.key===toolbarKey){
     let matches=false;try{const clean=e.newValue?.length<=2048?normalizeToolbar(JSON.parse(e.newValue)):null;matches=clean&&JSON.stringify(clean)===JSON.stringify(toolbarValue);}catch(_){}
     if(!matches){generation++;toolbarStatus.textContent='다른 창의 도구 모음 변경 · 현재 창 유지';}
   }else if(dockKey&&e.key===dockKey){
@@ -241,8 +242,27 @@ window.KinReadingAppearance = function (options) {
   try{const raw=toolbarKey?storage.getItem(toolbarKey):null;if(raw!==null){const clean=raw.length<=2048?normalizeToolbar(JSON.parse(raw)):null;if(clean)toolbarValue=clean;else toolbarStatus.textContent='저장된 도구 모음 오류 · 기본값';}}catch(_){toolbarStatus.textContent='도구 모음을 읽지 못해 기본값을 표시합니다.';}showToolbar();
   try{const raw=mprKey?storage.getItem(mprKey):null;const clean=raw&&raw.length<=1024&&mprModel?.normalize(JSON.parse(raw));if(clean)mprValue=clean;}catch(_){mprStatus.textContent='MPR 설정을 읽지 못해 기본 설정을 사용합니다.';}
   apply(hasText);applyFonts(hasFont);applyColors(hasColor);showDock();opener.disabled=!live();
-  window.addEventListener('storage',onStorage);window.addEventListener('pagehide',end);
-  try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+  let storageListener;
+  const preferenceListeners=new Map();
+  function stopPreferences(){for(const [type,listener] of preferenceListeners)window.removeEventListener(type,listener);preferenceListeners.clear();}
+  function subscribeStorage(){stopPreferences();const context=work.capture('document');for(const [type,fn] of [['kin-mpr-preference-changed',mprChanged],['kin-toolbar-preference-changed',toolbarChanged],['kin-toolbar-preference-mounted',toolbarChanged],['kin-dock-preference-changed',dockChanged],['kin-dock-preference-mounted',dockChanged]]){const listener=e=>work.commit(context,()=>fn(e));preferenceListeners.set(type,listener);window.addEventListener(type,listener);}if(storageListener)window.removeEventListener('storage',storageListener);const at=work.capture('document');storageListener=e=>work.commit(at,()=>onStorage(e));window.addEventListener('storage',storageListener);}
+  let pausedPreferences=null;
+  const storedPreferences=()=>new Map([key,fontKey,colorKey,mprKey,toolbarKey,dockKey].filter(Boolean).map(name=>{
+    try{return [name,storage.getItem(name)];}catch(_){return [name,undefined];}
+  }));
+  work.onInvalidate(event=>{
+    if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
+    if(event.reason==='prepare')pausedPreferences=storedPreferences();
+    if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active'){
+      subscribeStorage();
+      if(pausedPreferences){
+        const before=pausedPreferences;pausedPreferences=null;
+        const at=work.capture('document');
+        work.commit(at,()=>{for(const [name,value] of storedPreferences())if(value!==undefined&&value!==before.get(name))onStorage({key:name,newValue:value});});
+      }
+    }
+  });
+  subscribeStorage();window.addEventListener('pagehide',end);
   const normalizeAccount=v=>{
     const legacy=normalize(v);if(legacy)return legacy;
     if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5,6,7,8,9].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version>=7?'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer':v.version===6?'colors,current,dock,fonts,list,prior,toolbar,version,viewer':v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
