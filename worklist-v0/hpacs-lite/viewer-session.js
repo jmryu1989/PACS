@@ -428,7 +428,14 @@
         else this.native = null;
         this.emit('readystatechange');
       }
-      setRequestHeader(name, value) { this.headers[name] = value; }
+      // XHR combines repeated values of one header, names compared without case. The pinned DICOMweb client names a
+      // request's own Accept and then the data source's default one; keeping only the last made Orthanc refuse
+      // series metadata (400), so no series opened on a real stack.
+      setRequestHeader(name, value) {
+        const known = Object.keys(this.headers).find(key => key.toLowerCase() === String(name).toLowerCase());
+        if (known === undefined) this.headers[name] = String(value);
+        else this.headers[known] += ', ' + value;
+      }
       getResponseHeader(name) { return this.native ? this.native.getResponseHeader(name) : this.replyHeaders?.get(name) ?? null; }
       getAllResponseHeaders() { return this.native ? this.native.getAllResponseHeaders() : [...(this.replyHeaders || [])].map(([k, v]) => k + ': ' + v + '\r\n').join(''); }
       overrideMimeType(value) { this.mime = value; this.native?.overrideMimeType(value); }

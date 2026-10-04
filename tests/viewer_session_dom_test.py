@@ -1010,6 +1010,22 @@ class ViewerSessionDOMTest(unittest.TestCase):
             self.assertEqual(json.loads(reply["value"])["value"], "incoming")
         self.assertEqual(self.requests, [(path, "S1") for path in ["/api/me", "/dicom-web/studies", "/instances/abc/file"]])
 
+    def test_xhr_repeated_values_of_one_header_all_reach_the_server(self):
+        """The DICOMweb client names a request's own Accept, then the data source's default one. Orthanc answers
+        series metadata only while the JSON type is still in the list, so both values must arrive, as XHR sends them."""
+        view = self.open_viewer(); seen = []
+        self.context.route(BASE + "/dicom-web/studies/1.2/series/1.3/metadata", lambda route: (
+            seen.append(route.request.headers), route.fulfill(body="[]", content_type="application/dicom+json")))
+        status = view.evaluate("""() => new Promise((resolve,reject)=>{
+          const xhr=new XMLHttpRequest();xhr.open('GET','/dicom-web/studies/1.2/series/1.3/metadata');
+          xhr.setRequestHeader('Accept','application/dicom+json');
+          xhr.setRequestHeader('Accept','multipart/related; type=application/octet-stream; transfer-syntax=*');
+          xhr.onload=()=>resolve(xhr.status);xhr.onerror=reject;xhr.send();})""")
+        self.assertEqual(status, 200); self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].get("accept"),
+                         "application/dicom+json, multipart/related; type=application/octet-stream; transfer-syntax=*")
+        self.assertEqual(seen[0].get("x-kin-session"), "S1")
+
     def test_missed_notice_first_request_mismatch_closes_with_navigation_held(self):
         view = self.open_viewer()
         held = []
