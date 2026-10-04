@@ -517,6 +517,19 @@
     #toast.ok { border-left-color: #4ac06a; }
     #toast.info { border-left-color: #4da3ff; }
     #toast.err { border-left-color: #ff6b6b; color: #ffd9d9; }
+    /* 떠난 검사의 안내: 토스트 자리 위에 쌓이고, 사람이 닫거나 그 검사를 열 때까지 남는다 */
+    #leftnotes {
+      position: fixed; left: 50%; bottom: 72px; z-index: 40; transform: translateX(-50%);
+      display: flex; flex-direction: column; gap: 6px; max-width: min(92vw, 820px);
+    }
+    #leftnotes:empty { display: none; }
+    .leftnote {
+      display: flex; gap: 10px; align-items: center;
+      background: #232936; border: 1px solid #3a4356; border-left: 3px solid #4da3ff;
+      color: #dfe5ee; padding: 8px 12px; border-radius: 4px; font-size: 12px;
+      box-shadow: 0 6px 22px rgba(0,0,0,.55);
+    }
+    .leftnote span { flex: 1; }
 
     /* 판독문 이력 */
     .hist { max-height: 60vh; overflow: auto; padding: 8px 12px; }
@@ -1572,6 +1585,7 @@
   </div>
 
   <div id="toast"></div>
+  <div id="leftnotes" role="status" aria-live="polite"></div>
 
   <!-- 판독문 개정 이력 -->
   <div class="modal" id="histmodal">
@@ -5524,7 +5538,37 @@
       selectionSeq = work.select(uid);
       // 커서 자리는 그 검사의 그 글에 대한 것이다. A→B→A도 같은 화면이 아니다.
       caretFields.clear();
+      // 그 검사를 열었다 — 떠나 있는 동안 남겨 둔 안내는 이제 그 검사의 초안 표시줄이 이어받는다.
+      dropLeftNote(uid);
     }
+
+    /**
+     * 떠난 검사에 대한 안내(U5CLI-F13). 확정이 나가 있는 동안 글을 더 치고 다른 검사로 옮겼다면, 그 확정이 싣지 않은 글이
+     * 있다는 사실을 말할 자리가 지금 화면에는 없다 — 초안 표시줄은 고른 검사의 것이고, 토스트는 사라진다. 놓치면 그 문장은
+     * 승인본에도 없고 다시 상기되지도 않는다. 그래서 이 안내는 사람이 닫거나(Dismiss) 그 검사를 열 때까지 남는다. 뒤에 친
+     * 글이 없는 평소 경로에는 생기지 않고, Log out에 묻는 것을 더하지도 않는다 — 그 글은 초안으로 남아 평소처럼 저장된다.
+     */
+    const leftNotes = new Map();
+    function renderLeftNotes() {
+      $("#leftnotes").replaceChildren(...[...leftNotes].map(([uid, text]) => {
+        const row = document.createElement("div"), message = document.createElement("span");
+        const open = document.createElement("button"), dismiss = document.createElement("button");
+        row.className = "leftnote";
+        message.textContent = text;
+        open.type = dismiss.type = "button";
+        open.textContent = "Open Study";
+        dismiss.textContent = "Dismiss";
+        // 목록에 없는 검사는 여기서 열 수 없다(목록 조건이 바뀌었다) — 눌리지 않는 단추에 그 까닭을 적는다.
+        open.disabled = !studies.some(s => s.uid === uid);
+        if (open.disabled) open.title = "이 검사는 지금 목록에 없습니다. 목록 조건을 바꾼 뒤 여세요.";
+        open.addEventListener("click", () => { if (studies.some(s => s.uid === uid)) select(uid); else renderLeftNotes(); });
+        dismiss.addEventListener("click", () => dropLeftNote(uid));
+        row.append(message, open, dismiss);
+        return row;
+      }));
+    }
+    function noteLeftStudy(uid, text) { leftNotes.set(uid, text); renderLeftNotes(); }
+    function dropLeftNote(uid) { if (leftNotes.delete(uid)) renderLeftNotes(); }
 
     const reportOrigin = new Map();
     function recordReportOrigin(uid, version) {
@@ -5744,7 +5788,9 @@
      */
     function reportApart(r) {
       const d = r?.prelimHidden ? null : r?.draft;
-      return !!d && r.rs === "A" && RFIELDS.some(k => (d[k] ?? "") !== (r[k] ?? ""));
+      // 편집기(textarea)는 서버 글의 CR LF·CR을 LF로 바꿔 보이고, 그 값이 초안으로 저장된다. 줄 끝만 다른 초안은 승인본과
+      // 갈라진 것이 아니다(쳤다 되돌리기만 해도 생긴다) — 편집기와 같은 규칙으로 줄 끝을 모은 뒤 견준다(U5CLI-F12).
+      return !!d && r.rs === "A" && RFIELDS.some(k => KinReportCitation.toLf(d[k]) !== KinReportCitation.toLf(r[k]));
     }
 
     /**
@@ -7498,9 +7544,12 @@
       const missed = action === "approve" ? "Approve를 누른 뒤 입력한 글은 승인된 판독문에 포함되지 않았습니다"
         : action === "addendum" ? "Addendum을 누른 뒤 입력한 글은 승인된 판독문에 포함되지 않았습니다"
         : "단추를 누른 뒤 입력한 글은 저장된 판독문에 포함되지 않았습니다";
-      toast((uid === selectedUid ? "" : studyLabel(uid) + " — ") + `${done}. ${missed}` +
-        (uid === selectedUid ? " — 그 글은 초안으로 화면에 남아 있습니다." : " — 그 검사를 열면 초안으로 남아 있습니다."),
-        "info", 12000);
+      if (uid === selectedUid) {
+        toast(`${done}. ${missed} — 그 글은 초안으로 화면에 남아 있습니다.`, "info", 12000);
+        return;
+      }
+      // 그 검사를 떠나 있다: 그 검사의 표시줄이 보일 때까지 이 안내가 유일한 자리이므로 사라지게 두지 않는다(U5CLI-F13).
+      noteLeftStudy(uid, `${studyLabel(uid)} — ${done}. ${missed} — 그 검사를 열면 초안으로 남아 있습니다.`);
     }
 
     /** 검사를 사람에게 가리키는 표기: 환자 이름 · 접수번호 · 검사일. 목록에서 사라진 검사는 남은 이름(UID)으로 부른다. */
@@ -11409,7 +11458,8 @@
       relatedUid = null; studies = [];
       // 닫는 화면을 비우는 대입이다(편집이 아니다; 확인되지 않은 글은 위에서 이미 잡았다) — `editReport` 밖의 두 대입 가운데 하나.
       for (const k of RFIELDS) $("#" + k).value = "";
-      for (const id of ["rows", "relrows", "user", "roles", "clinical", "thumbwrap", "ctx", "err"]) $("#" + id)?.replaceChildren();
+      leftNotes.clear();
+      for (const id of ["rows", "relrows", "user", "roles", "clinical", "thumbwrap", "ctx", "err", "leftnotes"]) $("#" + id)?.replaceChildren();
       document.querySelectorAll(".modal.show").forEach(modal => modal.classList.remove("show"));
       document.querySelectorAll("dialog[open]").forEach(dialog => { if (!dialog.classList.contains("kin-logout")) dialog.close(); });
       document.documentElement.classList.add("kin-closed");

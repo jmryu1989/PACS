@@ -569,16 +569,41 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S7-U5 integration (corefix rounds 1-6, modules, F12-F14): the report text is kept by recorded edits (one function writes
+# the editor, per-study merge/replace of server states, the autosave of every retained study), the draft bar says when the
+# screen's text is not in the approved report and shows that report (View Approved Report), the logout preparation holds a
+# Web Lock, the page tells its areas of an account change through one function, and a notice about a study that was left
+# stays until it is dismissed. tests/report_text_boundaries_dom_test.py, tests/auth_logout_dom_test.py and
+# tests/session_modules_dom_test.py hold the behaviour; this entry only keeps the historic inventory current (the name
+# pin stays a D73 debt for S9-U0f).
+for _kind, _extra in {
+    "ids": {"b-approved-view": 1, "stale-draft-title": 1, "drafthint": 1, "leftnotes": 1},
+    "functions": {"notifyAccountChanged": 1, "renderLeftNotes": 1, "noteLeftStudy": 1, "dropLeftNote": 1,
+                  "renderDraftHint": 1, "reportApart": 1, "reloadServerReport": 1, "drawApprovedPane": 1,
+                  "viewApprovedReport": 1, "pristineEditor": 1, "insertLeftNoText": 1, "mergeObservedReportState": 1,
+                  "replaceReportState": 1, "saveReportDraft": 1, "unconfirmedReport": 1, "reconcileReportDrafts": 1,
+                  "recordReportEdit": 1, "editReport": 1, "reportEditOf": 1, "keepReportEditor": 1, "studyLabel": 1,
+                  "holdPreparation": 1},
+    "selectors": {"#leftnotes": 1, "#b-approved-view": 2, "#drafthint": 1, "#stale-title": 1, "#stale-draft-title": 1},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 # Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {
     "ids": {},
     # S7-U5 U5S: the page-order wait for an insertion (settleStash) is replaced by the draft command path's own ordering.
-    "functions": {"settleStash": (1, 0)},
+    # S7-U5 integration: the poll's merge is mergeObservedReportState (an observation merges, a person's choice replaces).
+    "functions": {"settleStash": (1, 0), "mergePolledState": (1, 0)},
     # S5-U6b (REQ-S5-U6b-OPS-METRICS): the two copies of the list loads' fetch-and-write, which left the '0.0GB / -'
     # default on a failed read, are now one refreshStorage() called from both, so one lookup remains.
     # S7-U5 U5S: the draft bar's conflict state hides Discard Draft / Reload Report and writes its own line.
-    "selectors": {"#storage": (2, 1), "#b-draft-discard": (2, 3), "#b-report-reload": (2, 3), "#draftmsg": (2, 3)},
+    # S7-U5 integration: Paste, Clear and the three insertions write the editor through editReport (fewer direct lookups
+    # of the three fields); the entry retry and failure lines are written to #err; the approved-report pane is drawn by
+    # one function for the rebase and for View Approved Report; the draft bar reads whether Addendum can be pressed.
+    "selectors": {"#storage": (2, 1), "#b-draft-discard": (2, 3), "#b-report-reload": (2, 3), "#draftmsg": (2, 3),
+                  "#findings": (12, 11), "#conclusion": (6, 5), "#recommendation": (6, 5), "#err": (4, 8),
+                  "#stale-rebase": (6, 7), "#b-addendum": (3, 4)},
 }
 for _kind in RECOUNTED:
     assert not set(RECOUNTED[_kind]) & set(ADDED[_kind]), _kind

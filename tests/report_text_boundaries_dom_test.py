@@ -1416,13 +1416,13 @@ class ReportTextBoundaries(h.LogoutDOMTest):
     LATER = {**h.FIELDS, "findings": h.FIELDS["findings"] + LATE}
     CONFIRMING = {"Save": "#b-save", "Approve": "#b-approve", "Addendum": "#b-addendum"}
 
-    def press_then_type(self, control="#b-approve", rs="A", leave=False):
-        """The reader presses a confirming control and, while the server still has it, types one more sentence
-        (and may move on to study B); then the server accepts the command as it was sent."""
+    def press_then_type(self, control="#b-approve", rs="A", leave=False, field="findings"):
+        """The reader presses a confirming control and, while the server still has it, types one more sentence into
+        one field (and may move on to study B); then the server accepts the command as it was sent."""
         self.site.commit_answers = ["hold"]
         self.page.locator(control).click()
         self.wait_until(lambda: self.site.held_commits, "the command is out")
-        self.page.locator("#findings").press_sequentially(self.LATE)
+        self.page.locator("#" + field).press_sequentially(self.LATE)
         if leave:
             self.switch(h.PATIENT_B)
             self.page.wait_for_timeout(200)
@@ -1549,14 +1549,23 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.select_and_type()
         self.press_then_type(leave=True)
         # The reader is on study B: the notice says which study it speaks of, the way the logout panel names a study.
-        said = self.late_notice(notices)
+        # It is the only place that says so until that study is opened, so it is not a notice that goes away by itself.
+        left = self.page.locator("#leftnotes")
+        expect(left).to_contain_text("포함되지 않았습니다")
+        said = left.inner_text()
         study = self.site.study_row(h.RAD)
         for part in (h.PATIENT, study["acc"], "Approve"):
             self.assertIn(part, said)
+        self.assertEqual([], [text for text, error in notices if error], "an accepted command was shown as a failure")
         self.assertEqual(EMPTY, self.editor(), "study B's editor was written by study A's answer")
         expect(self.page.locator("#draftbar")).not_to_be_visible()
-        # Back on study A: the sentence is there, and the same bar says it is not in the approved report.
-        self.switch(h.PATIENT)
+        self.page.clock.run_for(60000)
+        expect(left).to_contain_text(h.PATIENT)
+        # Opening that study from the notice: the sentence is there, the same bar says it is not in the approved report,
+        # and the notice has handed over to the bar.
+        left.get_by_role("button", name="Open Study").click()
+        expect(self.page.locator("#findings")).to_have_value(self.LATER["findings"])
+        expect(left).to_be_empty()
         self.assertEqual(self.LATER, self.editor())
         self.assert_apart("back on the study that was left")
         dialog, approved, mine = self.approved_view()
@@ -1576,6 +1585,83 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         expect(self.page.locator("#findings")).to_have_value(self.LATER["findings"])
         self.assert_apart("in a new document")
         self.assertEqual([], self.dialogs)
+
+    def test_the_notice_about_a_study_that_was_left_stays_until_it_is_dismissed_and_asks_nothing_at_log_out(self):
+        """U5CLI-F13. The notice about a study that is not on screen stays until a person closes it; closing it changes
+        nothing else - the text is still that study's draft - and Log out is still one press."""
+        self.page.clock.install()
+        self.open_main()
+        self.select_and_type()
+        self.press_then_type(leave=True)
+        left = self.page.locator("#leftnotes")
+        expect(left).to_contain_text("포함되지 않았습니다")
+        # Other work on study B (typing, its own autosave notices) does not take the notice away.
+        self.page.locator("#findings").press_sequentially("SYN-B typed while the notice is up")
+        self.page.clock.run_for(60000)
+        expect(left).to_contain_text(h.PATIENT)
+        self.assertEqual(1, left.get_by_role("button", name="Dismiss").count())
+        left.get_by_role("button", name="Dismiss").click()
+        expect(left).to_be_empty()
+        self.wait_until(lambda: self.site.stored_for(h.UID) == self.LATER, "the later text is stored as study A's draft")
+        self.assertEqual(h.FIELDS, {k: self.site.report[k] for k in h.FIELDS}, "the approved report is untouched")
+        self.wait_until(lambda: not self.leaving_asks(), "every draft confirmed to this document")
+        # Log out: one press, no question about the approved study.
+        self.page.locator("#logout").click()
+        self.wait_until(lambda: self.site.logouts, "the logout")
+        self.assertEqual([], self.dialogs)
+
+    def test_text_typed_after_approve_into_conclusion_or_recommendation_only_is_said_the_same_way(self):
+        """U5CLI-F14. The text the approval did not carry may sit in any of the three fields."""
+        for field in ("conclusion", "recommendation"):
+            with self.subTest(field=field):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.page.clock.install()
+                self.open_main()
+                notices = self.collect_notices()
+                self.select_and_type()
+                self.press_then_type(field=field)
+                later = {**h.FIELDS, field: h.FIELDS[field] + self.LATE}
+                self.assertIn("Approve", self.late_notice(notices))
+                self.assertEqual(later, self.editor())
+                self.assert_apart(f"right after the approval, the later text in {field} only")
+                dialog, approved, mine = self.approved_view()
+                expect(approved).not_to_contain_text(self.LATE.strip())
+                expect(mine).to_contain_text(self.LATE.strip())
+                dialog.get_by_role("button", name="Close").click()
+                # Stored as a draft on the approved version; a new document says the same from the server's state alone.
+                self.page.clock.run_for(21000)
+                self.wait_until(lambda: self.site.stored_for(h.UID) == later, "the later text stored as a draft")
+                self.wait_until(lambda: not self.leaving_asks(), "the stored draft confirmed to this document")
+                self.page.reload()
+                expect(self.page.locator("#rows")).to_contain_text(h.PATIENT)
+                self.switch(h.PATIENT)
+                expect(self.page.locator("#" + field)).to_have_value(later[field])
+                self.assert_apart(f"in a new document, the draft differing in {field} only")
+                self.assertEqual([], self.dialogs)
+
+    def test_an_approved_report_with_crlf_line_ends_is_not_said_to_differ_when_text_is_typed_and_taken_back(self):
+        """U5CLI-F12. The editor shows CR LF as LF and that is what an autosave stores: a draft that differs from the
+        approved report in its line ends only is not text outside the approved report."""
+        self.open_untouched(report={"version": 1, "rs": "A", **h.FIELDS, "findings": "SYN line one\r\nSYN line two"})
+        self.select_untouched()
+        findings = self.page.locator("#findings")
+        expect(findings).to_have_value("SYN line one\nSYN line two")
+        findings.press("Control+End")
+        findings.press_sequentially("x")
+        findings.press("Backspace")
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.stored_for(h.UID), "the autosave of the text as the editor shows it")
+        self.assertEqual("SYN line one\nSYN line two", self.site.stored_for(h.UID)["findings"])
+        bar = self.page.locator("#draftbar")
+        expect(bar).to_be_visible()
+        expect(bar).not_to_contain_text("승인된 판독문에 포함되지 않은 글")
+        expect(bar.get_by_role("button", name="View Approved Report")).not_to_be_visible()
+        # A real difference is still said (the bar is drawn again when the changed text has been saved).
+        findings.press_sequentially(" SYN-MORE")
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.stored_for(h.UID)["findings"].endswith("SYN-MORE"), "the autosave of the changed text")
+        self.assert_apart("after a real change to the CR LF report")
 
     def test_text_typed_after_save_is_said_and_the_next_save_takes_it(self):
         self.open_main()
@@ -1611,6 +1697,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                 self.assertEqual(1, len(set(notices)), notices)
                 self.assertEqual([], [text for text, error in notices if error or "포함되지" in text], notices)
                 expect(self.page.locator("#draftbar")).not_to_be_visible()
+                expect(self.page.locator("#leftnotes")).to_be_empty()
                 self.page.clock.run_for(21000)
                 self.page.wait_for_timeout(200)
                 self.assertEqual((1, [], [], h.FIELDS, False),
