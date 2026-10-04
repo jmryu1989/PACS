@@ -1186,7 +1186,7 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
             route.abort()
             return
         if method == "GET" and path == "/api/me":
-            route.fulfill(json=self.me)
+            route.fulfill(json={**self.me, "sessionId": "SYN-SESSION-" + self.me["sub"]})
             return
         query = parse_qs(url.query, keep_blank_values=True)
         if method == "GET" and path == "/api/clinician/studies":

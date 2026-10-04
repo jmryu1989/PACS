@@ -242,7 +242,7 @@ class Server:
 
     def api(self, route, method, path, query, body, entry, answer):
         if method == "GET" and path == "/api/me":
-            return answer(200, self.session)
+            return answer(200, {**self.session, "sessionId": "SYN-SESSION-" + self.session["sub"]})
         if method == "GET" and path == "/api/bootstrap":
             if query != "states=omit":
                 self.violations.append("bootstrap query: " + query)

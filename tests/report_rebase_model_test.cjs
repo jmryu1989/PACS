@@ -48,7 +48,8 @@ function extractFunction(source, name) {
 const blockStart = html.indexOf('    let selectionSeq = 0;');
 const blockEnd = html.indexOf('    function reportSource()', blockStart);
 assert.ok(blockStart >= 0 && blockEnd > blockStart, 'The base-version block moved; re-pin the test');
-const sandbox = vm.createContext({});
+// The selection sequence is counted by the page's work-context gate (S7-U5): the block runs against the shipped module.
+const sandbox = vm.createContext({ work: require(join(__dirname, '../worklist-v0/hpacs-lite/work-context.js')).create() });
 vm.runInContext(html.slice(blockStart, blockEnd), sandbox);
 const call = (expression, value) => { sandbox.__input = value; return vm.runInContext(expression, sandbox); };
 
@@ -149,14 +150,32 @@ test('TEST-S3-U3-PAYLOAD: the approved report shown to the human comes from the 
  * (the block records it) and `state` is what the page holds for it afterwards (a poll may have moved its version). What
  * the function reads around itself are stand-ins; `sent` is the body of every draft write it sends.
  */
-async function stashAfterRender({ rendered, state, options = '{}', kept = null }) {
-  const UID = '1.2.3', sent = [];
+async function stashAfterRender({ rendered, state }) {
+  const UID = '1.2.3', OWNER = { institution: 'SYN-INST', sub: 'syn-sub', author: 'syn-reader' }, sent = [];
+  // The page's own modules, as shipped (S7-U5): the gate at work for one session, the transport over a server that
+  // answers as the wire contract says (a full read of the draft, then the envelope of the write), the draft command path.
+  const lite = join(__dirname, '../worklist-v0/hpacs-lite');
+  const work = require(join(lite, 'work-context.js')).create();
+  work.follow({ onLifecycle(listener) { listener({ state: 'active', session: 'SYN-SESSION' }); } });
+  let revision = 0, stored = null;
+  const envelope = () => ({ uid: UID, owner: OWNER, revision: `SYNEPOCH:${revision}`, present: !!stored, snapshot: stored,
+    updatedAt: stored ? '2026-10-04T00:00:00.000Z' : null });
+  const transport = require(join(lite, 'session-transport.js')).create({ gate: work, fetch: async (url, init) => {
+    if (init.method === 'PUT') {
+      const body = JSON.parse(init.body);
+      sent.push(body);
+      revision += 1;
+      stored = { findings: body.findings, conclusion: body.conclusion, recommendation: body.recommendation,
+        baseVersion: body.baseVersion, citations: body.citationIds, structured: body.structureIds };
+    }
+    return new Response(JSON.stringify(envelope()), { status: 200 });
+  } });
+  const draftClient = require(join(lite, 'report-draft-client.js')).create({ transport, base: '/api' });
+  draftClient.observe(UID, 'SYNEPOCH:0', state.draft ?? null);
   const context = vm.createContext({
-    kept, reportConverge: new Set(), stashInFlight: new Map(), stashUnanswered: new Set(),
-    citations: { keepIds: () => undefined, emptied() {} }, structureState: { keepIds: () => undefined, emptied() {} },
+    work, draftClient, reportConverge: new Set(),
+    citations: { emptied() {} }, structureState: { emptied() {} },
     $: selector => ({ value: selector === '#findings' ? 'SYN typed findings' : '' }),
-    api: async (method, path, body) => { sent.push(JSON.parse(JSON.stringify(body))); return {}; },
-    fetch: async () => { throw new Error('this harness sends no keepalive write'); },
   });
   vm.runInContext(html.slice(blockStart, blockEnd), context, { filename: 'base-version-block.js' });
   vm.runInContext([
@@ -164,13 +183,14 @@ async function stashAfterRender({ rendered, state, options = '{}', kept = null }
     rendered === undefined ? '' : `recordReportOrigin(${JSON.stringify(UID)}, ${JSON.stringify(rendered)});`,
     `var appState = {}; appState[selectedUid] = ${JSON.stringify(state)};`,
     'var insertInFlight = false, serverMode = true, offline = false, API = "/api";',
-    'var RFIELDS = ["findings", "conclusion", "recommendation"], draftOwner = ["SYN-INST", "syn-sub", "syn-reader"];',
-    'var draftPage = "syn-page", draftSeq = 0, KinAuth = { has: role => role === "radiologist" };',
+    `var RFIELDS = ["findings", "conclusion", "recommendation"], draftOwner = ${JSON.stringify(OWNER)};`,
+    'var KinAuth = { has: role => role === "radiologist" };',
     'function heldByOther() { return false; } function cur() { return null; } function reportNeedsWrite() { return true; }',
-    'function renderDraftBar() {} function saveApp() {} function apiFail() {} function unanswered() { return false; }',
+    'function renderDraftBar() {} function saveApp() {} function draftNotSaved() {}',
+    extractFunction(html, 'sameDraftText'),
     // The scanner above returns the function without its `async` keyword.
     'async ' + extractFunction(html, 'stashReport'),
-    `var outcome = stashReport(${options});`,
+    'var outcome = stashReport();',
   ].join('\n'), context, { filename: 'stashReport.js' });
   const outcome = await context.outcome;
   const draft = JSON.parse(vm.runInContext('JSON.stringify(appState[selectedUid].draft ?? null)', context));
@@ -192,17 +212,17 @@ test('TEST-S3-U3-WIRING: the shipped callers use the rendered base and the prese
   // Without a recorded render the base falls back to what the page holds: the draft's base first, else the version.
   assert.equal((await stashAfterRender({ state: { version: 5, draft: { findings: 'SYN earlier', baseVersion: 3 } } })).sent[0].baseVersion, 3);
   assert.equal((await stashAfterRender({ state: { version: 5 } })).sent[0].baseVersion, 5);
-  // Log out's preparation sends the base it took when it began (S7-U5), not one read again at send time.
-  const taken = { uid: '1.2.3', fields: { findings: 'SYN taken', conclusion: '', recommendation: '' }, baseVersion: 2,
-    citationIds: undefined, structureIds: undefined, owner: ['SYN-INST', 'syn-sub', 'syn-reader'] };
-  const prepared = await stashAfterRender({ rendered: 7, state: { version: 9 }, options: '{ kept }', kept: taken });
-  assert.deepEqual([prepared.sent[0].baseVersion, prepared.sent[0].findings, prepared.draft.baseVersion], [2, 'SYN taken', 2]);
+  // Every draft write carries the whole snapshot and the revision it stands on (S7-U5): the base version is part of it.
+  assert.deepEqual([first.sent[0].expectedRevision, first.sent[0].findings, first.sent[0].citationIds, first.sent[0].structureIds],
+    ['SYNEPOCH:0', 'SYN typed findings', [], []]);
+  // Log out's preparation freezes the text and the base it took when it began; tests/auth_logout_dom_test.py (S01) holds
+  // that capture against the real page, so it is not repeated on a stand-in here.
 
   const commit = extractFunction(html, 'commitReport');
   assert.match(commit, /reportBaseVersion\(uid, appState\[uid\]\?\.version \?\? 0\)/);
   assert.doesNotMatch(commit, /baseVersion: appState\[uid\]\?\.version \?\? 0/,
     'a commit that carries the polled version defeats the optimistic lock');
-  const captured = commit.indexOf('const seq = selectionSeq;'), sent = commit.indexOf('await api("POST"');
+  const captured = commit.indexOf('const seq = selectionSeq;'), sent = commit.indexOf('await draftClient.commit(');
   assert.ok(captured >= 0 && sent > captured, 'the selection sequence must be captured before the request leaves');
   const routed = commit.indexOf('commitFailureRoute(e)'), substring = commit.indexOf('저장했습니다');
   assert.ok(routed >= 0 && substring > routed, 'the code branch must be decided before the substring branch');
@@ -229,7 +249,7 @@ test('TEST-S3-U3-WIRING: the shipped callers use the rendered base and the prese
   assert.match(open, /selSeq: selectionSeq/, 'the pane records the selection it belongs to');
 
   const load = extractFunction(html, 'loadReport');
-  assert.match(load, /if \(!preserveValue\) recordReportOrigin\(selectedUid, renderedOrigin\(r\)\);/,
+  assert.match(load, /if \(!preserveValue\) \{\s*recordReportOrigin\(selectedUid, renderedOrigin\(r\)\);/,
     'only a real render may move the base');
   assert.equal(load.indexOf('recordReportOrigin') < load.indexOf('el.value = locked'), true,
     'the recorded version belongs to the values this call is about to write');

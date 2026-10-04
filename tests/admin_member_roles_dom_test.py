@@ -71,7 +71,7 @@ SCRIPTS = {
 }
 INSTITUTION = "SYN-INST-A"
 ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"],
-      "institution": INSTITUTION}
+      "institution": INSTITUTION, "sessionId": "SYN-SESSION-ADMIN"}
 FUTURE_ROLE = "syn-future-role"
 # A role name is data. AdminService.row() filters roles to APP_ROLES today, so this cannot arrive
 # from the real server; it checks that the new read-only role display renders text, not markup.

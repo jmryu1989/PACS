@@ -57,6 +57,12 @@ IDENTITY = "\n".join(extract_function(MAIN, name) for name in ("applyStudyIdenti
 # S4-U4: renderObservation now draws Now Retry, and the request is the shipped function too. The slice starts at
 # `function`, so its `async` is put back here; api() and KinAuth.has() are the harness's recorded stand-ins.
 RETRY = "async " + extract_function(MAIN, "requestGatewayRetry")
+# S7-U5: the sliced functions pass their writes through the page's work-context gate. The shipped module is loaded as it
+# is and follows a session that is at work for the whole case (the gate's own transitions are tests/session_work_gate_test.cjs's
+# and tests/auth_logout_dom_test.py's); accountReplaced() is main.html's bound identity check, which has no server here.
+WORK = ((ROOT / "worklist-v0/hpacs-lite/work-context.js").read_text(encoding="utf-8")
+        + "\nconst work=KinWorkContext;work.follow({onLifecycle(listener){listener({state:'active',session:'SYN-SESSION'})}});"
+        + "async function accountReplaced(){return false}\n")
 CURRENT = {
     "uid": "1.2.3", "count": 5, "series": 2, "acc": "ACC-1", "id": "PID-1", "name": "Patient",
     "sourcePatientKey": "hospital|patient", "birth": "19800101", "date": "20260912", "sex": "O",
@@ -71,6 +77,7 @@ HARNESS = """<!doctype html><html><body>
 <table><tbody id=\"rows\"></tbody></table><textarea id=\"findings\">LOCAL FINDINGS</textarea>
 <textarea id=\"conclusion\">LOCAL CONCLUSION</textarea><textarea id=\"recommendation\">LOCAL RECOMMENDATION</textarea>
 <script>
+WORKCONTEXT
 window.setInterval=fn=>{window.pollCallback=fn;return 7};window.clearInterval=()=>{};
 const $=selector=>document.querySelector(selector);let poll=null,pollGeneration=0,pollFails=0,commitEpoch=4,commitInFlight=false,serverMode=true,offline=false,demoMode=false;
 let studies=INITIAL,selectedUid='1.2.3',heldUid='1.2.3',appState={'1.2.3':{...INITIAL[0].state,version:3,draft:'LOCAL DRAFT'}};
@@ -109,7 +116,7 @@ window.snapshot=()=>({studies:structuredClone(studies),state:structuredClone(app
 render();startPolling();
 </script></body></html>""".replace("INITIAL", json.dumps([CURRENT], ensure_ascii=False)) \
    .replace("PRESERVELOCAL", PRESERVE).replace("MERGESTATE", MERGE).replace("START", START_POLLING) \
-   .replace("OBSERVESTATE", OBSERVE).replace("ORDERSTATE", ORDERS).replace("IDENTITYSTATE", IDENTITY).replace("RETRYSTATE", RETRY)
+   .replace("WORKCONTEXT", WORK).replace("OBSERVESTATE", OBSERVE).replace("ORDERSTATE", ORDERS).replace("IDENTITYSTATE", IDENTITY).replace("RETRYSTATE", RETRY)
 
 OWNER = ["hospital", "reader-sub"]
 

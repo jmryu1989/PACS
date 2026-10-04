@@ -706,7 +706,8 @@ class MigrationPins(unittest.TestCase):
 def request_problems(main):
     body = js_function(main, "requestGatewayRetry")
     problems = []
-    if body.count("api(") != 1 or 'api("POST", `/studies/${encodeURIComponent(uid)}/gateway-retry`, {})' not in body:
+    # S7-U5: the same one empty POST, now sent under the work context captured when the press started (`at`).
+    if body.count("api(") != 1 or 'api("POST", `/studies/${encodeURIComponent(uid)}/gateway-retry`, {}, undefined, at)' not in body:
         problems.append("one empty POST")
     guard = "if (button.dataset.request !== token || button.dataset.uid !== uid || button.dataset.key !== key) return;"
     try:
@@ -746,8 +747,9 @@ class ClientPins(unittest.TestCase):
         self.assertEqual(request_problems(MAIN), [])
         mutants = {"no role gate": MAIN.replace(' && KinAuth.has("technician"));', ');'),
                    "no stale check": MAIN.replace("      if (button.dataset.request !== token || button.dataset.uid !== uid || button.dataset.key !== key) return;\n", ""),
-                   "a client epoch in the body": MAIN.replace("/gateway-retry`, {});", "/gateway-retry`, { key });"),
-                   "a toast": MAIN.replace("      renderObservation();\n    }\n    $(\"#receipt-retry\")", "      renderObservation(); toast(shown.text);\n    }\n    $(\"#receipt-retry\")")}
+                   "a client epoch in the body": MAIN.replace("/gateway-retry`, {}, undefined, at);", "/gateway-retry`, { key }, undefined, at);"),
+                   "a toast": MAIN.replace("        renderObservation();\n      });\n    }\n    $(\"#receipt-retry\")",
+                                           "        renderObservation(); toast(shown.text);\n      });\n    }\n    $(\"#receipt-retry\")")}
         for wrong, source in mutants.items():
             with self.subTest(wrong=wrong):
                 self.assertNotEqual(source, MAIN)

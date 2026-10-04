@@ -48,6 +48,12 @@ def extract_function(source, name):
     raise AssertionError(f"unterminated function {name}")
 
 
+# S7-U5: the sliced page code passes its writes through the page's work-context gate and registers its end with the
+# page's session-end coordination. The shipped gate is loaded as it is, following a session that is at work for the whole
+# case; onSessionEnd() is main.html's two-line registry (the end coordination itself is tests/auth_logout_dom_test.py's).
+WORK_CONTEXT = ((Path(__file__).resolve().parents[1] / "worklist-v0/hpacs-lite/work-context.js").read_text(encoding="utf-8")
+                + "\nconst work=KinWorkContext;work.follow({onLifecycle(listener){listener({state:'active',session:'SYN-SESSION'})}});"
+                + "const sessionEndHooks=[];function onSessionEnd(end){sessionEndHooks.push(end)}\n")
 MAIN_HARNESS = r"""
 <button id="body-parts-load"></button><button id="body-parts-refresh"></button>
 <button id="body-parts-cancel"></button><small id="body-parts-status"></small>
@@ -80,7 +86,7 @@ const renderActiveFilter=()=>{};
 const focusFilterChip=()=>{};
 function render(){renderCalls++;renderBodyParts();renderChips()}
 </script>
-"""
+""".replace("<script>\nconst $ = value", "<script>\n" + WORK_CONTEXT + "const $ = value", 1)
 
 
 MANAGER_HARNESS = r"""

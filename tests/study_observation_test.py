@@ -362,7 +362,7 @@ class SourcePins(unittest.TestCase):
     def test_main_reports_observations_only_after_the_generation_checks_and_failures_empty_nothing(self):
         self.assertEqual(3, self.main.count("applyObservation("))              # definition + load + poll
         self.assertEqual(4, self.main.count("markObservationUnavailable("))    # definition + offline + load + poll
-        load = body(self.main, "    async function load(options = {}) {", "      try {\n        const res = await fetch(\"/dicom-web/studies")
+        load = body(self.main, "    async function load(options = {}) {", "      try {\n        const res = await transport.request(\"/dicom-web/studies")
         offline = body(load, "      if (offline) {", "      try {")
         self.assertNotIn("studies = []", offline)
         self.assertIn("markObservationUnavailable();", offline)
@@ -370,7 +370,7 @@ class SourcePins(unittest.TestCase):
                         load.index("applyObservation(r);"))
         self.assertIn("if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') markObservationUnavailable();", load)
         poll = body(self.main, "    function startPolling() {", "    let pollFails = 0;")
-        self.assertLess(poll.index("if (generation !== pollGeneration || commitInFlight || epoch !== commitEpoch) return;\n          pollFails = 0;"),
+        self.assertLess(poll.index("if (!live() || commitInFlight || epoch !== commitEpoch) return;\n          pollFails = 0;"),
                         poll.index("applyObservation(r);"))
         self.assertLess(poll.index("if (e.stale || e.code === 'STUDY_LIST_CHANGED') return;"), poll.index("markObservationUnavailable();"))
         self.assertLess(poll.index("markObservationUnavailable();"), poll.index("if (++pollFails >= 2) goOffline(e);"))
@@ -547,10 +547,25 @@ for _kind, _extra in {
 # D73 structural debt for S9-U0f.
 for _kind, _extra in {
     "ids": {},
-    "functions": {"workPaused": 1, "pauseWork": 1, "resumeWork": 1, "captureReport": 1, "saveForLogout": 1, "failLogout": 1,
+    "functions": {"resumeWork": 1, "captureReport": 1, "saveForLogout": 1, "failLogout": 1,
                   "endUse": 1, "forgetCapture": 1, "discardAndLogOut": 1, "returnToEditing": 1, "dropEndedDraft": 1,
-                  "recoverEndedDraft": 1, "logoutStatus": 1, "showLogoutPanel": 1, "closeWork": 1, "endHere": 1},
+                  "recoverEndedDraft": 1, "logoutStatus": 1, "showLogoutPanel": 1, "closeWork": 1},
     "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
+# S7-U5 U5S redesign (fix9c/fix10c): the page's work goes through work-context.js / session-transport.js /
+# report-draft-client.js, so the Response-interception pause (workPaused, pauseWork) and endHere are gone and the names
+# below are the 4-space top-level functions git diff dffcda5.. adds; the draft bar gains the two conflict choices
+# (Keep This Text, Load Server Draft). tests/auth_logout_dom_test.py and tests/session_work_gate_test.cjs hold the
+# behaviour; this entry only keeps the historic inventory current (the name pin stays a D73 debt for S9-U0f).
+for _kind, _extra in {
+    "ids": {"b-draft-keep": 1, "b-draft-load": 1},
+    "functions": {"onSessionEnd": 1, "onCommonEnd": 1, "accountReplaced": 1, "staleAnswer": 1, "paintStorage": 1,
+                  "paintDemoList": 1, "noteHeld": 1, "draftFailureText": 1, "draftNotSaved": 1, "openDraftConflict": 1,
+                  "readDraftConflict": 1, "sameDraftText": 1, "workIdle": 1, "wakeIdle": 1, "overwriteServerDraft": 1,
+                  "closeSession": 1},
+    "selectors": {"#b-draft-keep": 3, "#b-draft-load": 3},
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
@@ -558,10 +573,12 @@ for _kind, _extra in {
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {
     "ids": {},
-    "functions": {},
+    # S7-U5 U5S: the page-order wait for an insertion (settleStash) is replaced by the draft command path's own ordering.
+    "functions": {"settleStash": (1, 0)},
     # S5-U6b (REQ-S5-U6b-OPS-METRICS): the two copies of the list loads' fetch-and-write, which left the '0.0GB / -'
     # default on a failed read, are now one refreshStorage() called from both, so one lookup remains.
-    "selectors": {"#storage": (2, 1)},
+    # S7-U5 U5S: the draft bar's conflict state hides Discard Draft / Reload Report and writes its own line.
+    "selectors": {"#storage": (2, 1), "#b-draft-discard": (2, 3), "#b-report-reload": (2, 3), "#draftmsg": (2, 3)},
 }
 for _kind in RECOUNTED:
     assert not set(RECOUNTED[_kind]) & set(ADDED[_kind]), _kind

@@ -286,7 +286,8 @@ test('TEST-S3-U6-WIRING: the screen asks the rule once, shows that answer, and s
   const from = html.indexOf('    let selectionSeq = 0;');
   const to = html.indexOf('    function reportSource()', from);
   assert.ok(from >= 0 && to > from, 'the base block markers moved; re-pin this test');
-  const sandbox = vm.createContext({});
+  // The selection sequence is counted by the page's work-context gate (S7-U5): the block runs against the shipped module.
+  const sandbox = vm.createContext({ work: require(join(__dirname, '../worklist-v0/hpacs-lite/work-context.js')).create() });
   vm.runInContext(html.slice(from, to), sandbox);
   vm.runInContext('markSelectionChanged("1.2.3"); noteCaret("findings"); forgetCaret("findings");', sandbox);
   assert.equal(vm.runInContext('caretFields.size', sandbox), 0, 'the caret set is real, empty and inert');

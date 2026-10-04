@@ -454,7 +454,7 @@ class ClinicianHomeDOMTest(unittest.TestCase):
             if isinstance(answer, tuple):
                 route.fulfill(status=answer[0], json=answer[1])
             else:
-                route.fulfill(json=answer)
+                route.fulfill(json={**answer, "sessionId": "SYN-SESSION-" + str(answer.get("sub"))})
             return
         if method == "GET" and path == "/api/clinician/studies":
             query = parse_qs(url.query, keep_blank_values=True)
