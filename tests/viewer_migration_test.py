@@ -242,6 +242,15 @@ const refused=async(fn,code)=>{const e=await fn().then(()=>null,x=>x);
  assert.ok(!/저장했습니다/.test(String(body&&body.message)),'an old tab would take the destructive branch');
  return body;};
 const body=(findings,extra)=>Object.assign({findings:findings,conclusion:'',recommendation:'',baseVersion:1},extra||{});
+// S7-U5: every draft mutation carries the account and the boundary its document read (the study's draft epoch and the
+// caller's own revision), and a draft PUT the whole snapshot - here, every citation the draft holds is kept.
+const OWNER={institution:CALLER.institution,sub:CALLER.sub,author:ACTOR};
+const read=async()=>{const s=await p.studyState.findUnique({where:{uid:UID},select:{draftEpoch:true}});const d=await draft();
+ return {epoch:s.draftEpoch,pre:{expectedOwner:OWNER,expectedRevision:s.draftEpoch+':'+(d?d.revision:0)},
+  kept:d&&Array.isArray(d.citations)?d.citations.map(e=>e.cid):[]};};
+const put=async b=>{const r=await read();return svc.putReport(UID,Object.assign({citationIds:r.kept,structureIds:[]},b,r.pre),CALLER,null);};
+const commit=async b=>{const r=await read();return svc.commitReport(UID,Object.assign({},b,r.pre),CALLER,null);};
+const force=async()=>{const r=await read();return svc.forceDiscardDrafts(UID,{expectedOwner:OWNER,expectedEpoch:r.epoch},CALLER,null);};
 /**
  * A failing assertion in here used to leave exit 1 and nothing else: ops.run raises on the exit code
  * without echoing the child, so print() never ran and the DRIVER line - the one fact pin A1 asks for -
@@ -268,13 +277,13 @@ report(async()=>{
  await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:many(64),findings:TEXT}});
  const insert={field:'findings',findingId:FINDING,findingRevision:1,sourceIndex:0,
   insertedText:TEXT,expectedLinkState:'current',expectedHeadRevision:1};
- await refused(()=>svc.putReport(UID,body(TEXT,{insert:insert}),CALLER),'REPORT_CITATION_LIMIT');
+ await refused(()=>put(body(TEXT,{insert:insert})),'REPORT_CITATION_LIMIT');
  assert.equal((await draft()).citations.length,64,'the refused insertion must leave the draft alone');
  // 4. commitReport - head 40 + draft 30, the contract's own named over-limit union.
  await p.reportVersion.update({where:{uid_version:{uid:UID,version:1}},data:{citations:many(40)}});
  await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:many(30,'11111111-0000-4000-8000-')}});
  const versions=await p.reportVersion.count({where:{uid:UID}});
- await refused(()=>svc.commitReport(UID,body(TEXT,{action:'save'}),CALLER),'REPORT_CITATION_LIMIT');
+ await refused(()=>commit(body(TEXT,{action:'save'})),'REPORT_CITATION_LIMIT');
  assert.equal(await p.reportVersion.count({where:{uid:UID}}),versions,'a refused commit writes no version');
  assert.equal((await draft()).citations.length,30,'and leaves the draft and its citations in place');
  console.log('PUT and COMMIT translated a real CHECK violation into REPORT_CITATION_LIMIT');
@@ -288,12 +297,12 @@ report(async()=>{
  //    refusal has to come from the ReportVersion CHECK inside createMany.
  assert.equal((await draft()).citations.length,65);
  const versions=await p.reportVersion.count({where:{uid:UID}});
- await refused(()=>svc.forceDiscardDrafts(UID,CALLER),'REPORT_CITATION_LIMIT');
+ await refused(()=>force(),'REPORT_CITATION_LIMIT');
  assert.equal(await p.reportVersion.count({where:{uid:UID}}),versions);
  assert.equal((await draft()).citations.length,65,'a refused forced release discards nothing');
  // 6. Negative control: a real CHECK violation that is NOT ours must stay what it is. Swallowing it
  //    would disguise a genuine fault as "remove a citation".
- const control=await svc.putReport(UID,body('SYNTHETIC-CONTROL'),CALLER).then(()=>null,e=>e);
+ const control=await put(body('SYNTHETIC-CONTROL')).then(()=>null,e=>e);
  assert.ok(control,'the control write was accepted');
  assert.notEqual(control.getStatus&&control.getStatus(),409);
  assert.ok(!JSON.stringify((control.getResponse&&control.getResponse())||'').includes('REPORT_CITATION_LIMIT'));
@@ -328,7 +337,7 @@ report(async()=>{
  },{timeout:20000});
  await acquired;
  const started=Date.now();
- const state=await svc.commitReport(UID,body(TEXT,{action:'save'}),CALLER);
+ const state=await commit(body(TEXT,{action:'save'}));
  const waited=Date.now()-started;
  await hold;
  assert.ok(state,'the commit did not resolve');
@@ -336,7 +345,9 @@ report(async()=>{
  const signed=await p.reportVersion.findUnique({where:{uid_version:{uid:UID,version:head.version}}});
  assert.deepEqual((signed.citations||[]).map(e=>e.cid).sort(),[mine.cid,other.cid].sort(),
   'the insertion that landed while the commit waited was signed away');
- assert.equal(await draft(),null,'the draft row is gone, under the same lock that protected it');
+ // S7-U5: the row stays as an emptied tombstone (its revision is the boundary); the draft itself is gone.
+ const left=await draft();
+ assert.deepEqual([left.present,left.findings,left.citations],[false,'',null],'the draft is gone, under the same lock that protected it');
  console.log('LOCK waited='+waited+'ms signed='+signed.citations.length+' entries');
  assert.ok(waited>=1000,'the commit did not wait for the row lock: '+waited+'ms');
  console.log('FORCE-DISCARD translated a real CHECK violation; control unmapped; commit serialized on the draft row');

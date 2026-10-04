@@ -659,12 +659,14 @@ class MigrationPins(unittest.TestCase):
         questions, image_requests = "20260926120000_study_questions", "20260926130000_study_image_requests"
         critical, assignment_scope = "20260928120000_critical_result", "20260928130000_reader_assignment_scope"
         audit_guard = "20260930120000_audit_log_append_only"
-        self.assertEqual(names[-7:], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope,
-                                      audit_guard],
+        # S7-U5: 20261004120000_draft_revision_session_entry (the draft boundary and the entry proof columns) follows that; 34 -> 35.
+        draft_boundary = "20261004120000_draft_revision_session_entry"
+        self.assertEqual(names[-8:], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope,
+                                      audit_guard, draft_boundary],
                          "U3 immediately before U4, U4 immediately before S5-U4a's study_questions, then S5-U4c's "
                          "study_image_requests, S7-U1a's critical_result, S7-U3a's reader_assignment_scope and "
-                         "S7-AUDIT-STORE's audit_log_append_only, which is last")
-        self.assertEqual(len(names), 34)
+                         "S7-AUDIT-STORE's audit_log_append_only and S7-U5's draft_revision_session_entry, which is last")
+        self.assertEqual(len(names), 35)
         self.assertIn("'" + MIGRATION_NAME + "'", text("tests", "production_image_test.py"))
         # the restore fixture applies exactly these migrations in this order: its list compared as data, so the order
         # above (U3, U4, study_questions, study_image_requests, critical_result, reader_assignment_scope last) is the fixture's too
@@ -690,10 +692,10 @@ class MigrationPins(unittest.TestCase):
         # S7-U3a: 33 migrations, the same 46 tables, rows + the tele institution's closed ReaderAssignment row, 80 in all.
         # S7-AUDIT-STORE: 34 migrations (a trigger only), the same 46 tables and 80 rows.
         rows = restore_fixture.expected_rows("2.25.1")
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 34)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 35)
         self.assertEqual(len(restore_fixture.TABLES), 46)
         self.assertEqual(set(rows), set(restore_fixture.TABLES))
-        self.assertEqual(sum(len(value) for value in rows.values()), 80)
+        self.assertEqual(sum(len(value) for value in rows.values()), 81)   # S7-U5: + the emptied draft row (tombstone)
         self.assertEqual({table: len(rows[table]) for table in ("GatewayRetryRequest", "CriticalResult", "CriticalResultEvent",
                                                                 "CriticalResultReceipt")},
                          {"GatewayRetryRequest": 1, "CriticalResult": 4, "CriticalResultEvent": 7, "CriticalResultReceipt": 6})

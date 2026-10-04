@@ -1,19 +1,24 @@
-// REQ-S7-U5-DRAFT-OWNER -> RISK-S7-U5-DRAFT-WRONG-AUTHOR -> TEST-S7-U5-DRAFT-OWNER (Astra S7-U5-SPEC-C-F01).
-// REQ-S7-U5-DRAFT-ORDER -> RISK-S7-U5-DRAFT-LATE-WRITE -> TEST-S7-U5-DRAFT-ORDER (Astra S7-U5-R-001-F03).
+// REQ-S7-U5-DRAFT-OWNER -> RISK-S7-U5-DRAFT-WRONG-AUTHOR -> TEST-S7-U5-DRAFT-OWNER (Astra S7-U5-SPEC-C-F01; U5S-REQ-15, D09).
 //
-// The compiled draft write (PUT /api/studies/:uid/report) against an `expectedOwner` binding: the screen sends the account it
-// took the report text from ([institution, subject, author]); a write whose cookie session is another account (an account
-// switch in another tab, or a swap between Recover Draft's /api/me check and its PUT) must not create, overwrite or delete
-// that account's draft. And against a `draftOrder` ([page id, sequence]): an earlier write of a page - one whose connection
-// the browser lost while the API still had it, or one that reaches the API late - must not replace what a later write of
-// that page stored, in whichever order the two finish. Every case goes in where the router does: the handler Nest's route
-// metadata maps that PUT to (looked up over the controllers AppModule registers, not by its name), its arguments placed as
-// its parameter decorators ask, the request carrying the fields the auth guard sets, over the real PacsService; one
-// controller per case, as the application has one. Runs against the built image (/app/dist)
-// exactly like report_stale_draft_test.cjs:
+// What a draft mutation refuses before it looks at anything. Every draft mutation - the draft PUT, the own discard, the
+// commit, the admin force-discard - carries the account its document took the text from (`expectedOwner`:
+// { institution, sub, author }) and the boundary it read (`expectedRevision`, or `expectedEpoch` for the force-discard).
+// A request whose cookie session is another account (an account switch in another tab, a swap between Recover Draft's
+// check and its write), or one that does not carry these fields in this shape (an older page, a hand-made request),
+// must be refused by name without reading the study, its drafts or the access policy, and without an audit row: a
+// refusal that had already read or prepared something could leak or lock on behalf of the wrong account.
+//
+// The stored outcome of these same refusals (zero mutation in the database), the conditional write itself, its
+// conflicts, the rollback of a failed audit write and the retry of the same revision (D08) are in
+// tests/report_draft_cas_service_test.cjs, over the real service and a real PostgreSQL. This file replaces the
+// process-memory write order (`draftOrder`, REPORT_DRAFT_SUPERSEDED) that the stored revision made unnecessary.
+//
+// Every case goes in where the router does: the handler Nest's route metadata maps the request to (looked up over the
+// controllers AppModule registers, not by its name), its arguments placed as its parameter decorators ask, the request
+// carrying the fields the auth guard sets, over the real PacsService. Runs against the built image (/app/dist):
 //   docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" \
 //     --entrypoint node kin-api:ci --test /tests/report_draft_owner_test.cjs
-// Every database call is a stub, so no Postgres, no Orthanc and no original data.
+// The store is a stand-in that records every touch: no Postgres, no Orthanc, no original data.
 const test = require('node:test'), assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
 const { PacsService } = require('/app/dist/pacs.service');
@@ -24,7 +29,7 @@ const { PATH_METADATA, METHOD_METADATA, MODULE_METADATA, ROUTE_ARGS_METADATA } =
 const { RequestMethod } = nest('@nestjs/common');
 const { RouteParamtypes } = nest('@nestjs/common/enums/route-paramtypes.enum');
 
-// ── the route ──
+// ── the routes ──
 const pattern = (...parts) => parts.flatMap(part => String(part).split('/')).filter(Boolean)
   .map(segment => (segment.startsWith(':') ? ':' : segment)).join('/');
 function controllersOf(module, seen = new Set()) {
@@ -53,77 +58,65 @@ function routed(method, path) {
   }
   return found;
 }
-const ROUTES = routed(RequestMethod.PUT, 'studies/:uid/report');
+const ROUTES = {
+  put: routed(RequestMethod.PUT, 'studies/:uid/report'),
+  discard: routed(RequestMethod.DELETE, 'studies/:uid/draft'),
+  commit: routed(RequestMethod.POST, 'studies/:uid/report/commit'),
+  force: routed(RequestMethod.DELETE, 'studies/:uid/draft/force'),
+};
 
 const UID = '2.25.7707';
 const INST = 'synthetic-a', OTHER_INST = 'synthetic-b';
 const A = { kind: 'member', institution: INST, sub: 'sub-a', actor: 'doctor-a@synthetic', roles: ['radiologist'] };
 const B = { kind: 'member', institution: INST, sub: 'sub-b', actor: 'doctor-b@synthetic', roles: ['radiologist'] };
-const OWNER_A = [INST, A.sub, A.actor];
-const STATE = { uid: UID, institutionId: INST, teleInstitutionId: null, rs: 'W', ss: 'Verified', em: 'N',
-  holder: null, heldAt: null, preDoc: null, preReviewer: null, repDoc: null, confirm: null };
-const TEXT = { findings: 'SYN captured findings', conclusion: 'SYN conclusion', recommendation: '' };
+const ADMIN = { kind: 'member', institution: INST, sub: 'sub-admin', actor: 'admin@synthetic', roles: ['admin'] };
+const ownerOf = p => ({ institution: p.institution, sub: p.sub, author: p.actor });
+const EPOCH = '0a1b2c3d-0000-4000-8000-00000000000a';
+const TOKEN = EPOCH + ':3';
+const SNAPSHOT = { findings: 'SYN captured findings', conclusion: 'SYN conclusion', recommendation: '', baseVersion: 0,
+  citationIds: [], structureIds: [] };
 
-function fixture({ state = STATE } = {}) {
-  // Every touch of the store, in order. A refusal must leave all of these empty.
-  const touched = [], writes = [], audits = [], prepared = [];
-  // The draft rows as the store holds them: the text the last write to reach each (study, author) row left, null once it
-  // was emptied. `gates` are closed by a case to keep the next transaction(s) open: a write the API is still working on.
-  const rows = new Map(), gates = [];
-  const row = (uid, author) => rows.get(JSON.stringify([uid, author]));
-  const tx = {
-    $executeRaw: async () => { touched.push('lock_timeout'); return 0; },
-    $queryRaw: async () => { touched.push('queryRaw'); return []; },
-    studyState: { findUnique: async () => { touched.push('studyState.findUnique'); return state; } },
-    report: { findUnique: async () => { touched.push('report.findUnique'); return { version: 0 }; } },
-    reportDraft: {
-      findUnique: async a => { touched.push('reportDraft.findUnique:' + a.where.uid_author.author); return null; },
-      upsert: async a => {
-        writes.push('reportDraft.upsert:' + a.where.uid_author.author + ':' + a.create.author);
-        rows.set(JSON.stringify([a.where.uid_author.uid, a.where.uid_author.author]),
-          { findings: a.create.findings, conclusion: a.create.conclusion, recommendation: a.create.recommendation });
-        return { uid: a.create.uid, author: a.create.author, baseVersion: a.create.baseVersion, updatedAt: new Date(0) };
-      },
-      deleteMany: async a => {
-        writes.push('reportDraft.deleteMany:' + a.where.author);
-        rows.set(JSON.stringify([a.where.uid, a.where.author]), null);
-        return { count: 1 };
-      },
-    },
-    auditLog: { create: async a => { audits.push(a.data.actor + ':' + a.data.action); return a.data; } },
-  };
-  const prisma = {
-    $transaction: async work => { touched.push('transaction'); await gates.shift(); return work(tx); },
-    studyState: { findUnique: async () => { touched.push('prisma.studyState.findUnique'); return state; } },
-    auditLog: { create: async a => { audits.push(a.data.actor + ':' + a.data.action); return a.data; } },
-  };
-  const studyAccess = {
-    prepare: async (c, uids) => { prepared.push(c.actor + ':' + JSON.stringify(uids ?? null)); },
-    require: async () => { touched.push('studyAccess.require'); },
-  };
-  const keycloak = { usersInGroupWithRole: async () => [] };
-  // Neither citation nor structure keys are sent, so the finding gate must never be reached.
-  const findings = { readableFindings: async () => { throw new Error('the owner cases must not ask about findings'); } };
-  /** Keeps the next transaction open until the returned function is called. */
-  const hold = () => { let open; gates.push(new Promise(resolve => { open = resolve; })); return open; };
-  return { svc: new PacsService(prisma, {}, keycloak, studyAccess, findings), touched, writes, audits, prepared, row, hold,
-    controller: null };
+/** A well-formed request of each mutation by `who`: the document read TOKEN (EPOCH for the force-discard). */
+const good = {
+  put: who => ({ ...SNAPSHOT, expectedOwner: ownerOf(who), expectedRevision: TOKEN }),
+  discard: who => ({ expectedOwner: ownerOf(who), expectedRevision: TOKEN }),
+  commit: who => ({ action: 'save', findings: 'SYN captured findings', conclusion: '', recommendation: '', baseVersion: 0,
+    expectedOwner: ownerOf(who), expectedRevision: TOKEN }),
+  force: who => ({ expectedOwner: ownerOf(who), expectedEpoch: EPOCH }),
+};
+/** The account a route's mutation belongs to in these cases, and the field that names its boundary. */
+const actorOf = route => (route === 'force' ? ADMIN : A);
+const boundaryOf = route => (route === 'force' ? 'expectedEpoch' : 'expectedRevision');
+
+function fixture() {
+  // Every touch of the store, the access policy, Keycloak and the audit log, in order. A refusal leaves all of it empty.
+  const touched = [];
+  const store = new Proxy({}, { get(_target, key) {
+    if (key === 'then') return undefined;
+    return new Proxy(() => {}, {
+      get: (_t, inner) => inner === 'then' ? undefined : async () => { touched.push(`${String(key)}.${String(inner)}`); throw new Error('harness: the store must not be reached'); },
+      apply: async () => { touched.push(String(key)); throw new Error('harness: the store must not be reached'); },
+    });
+  } });
+  const studyAccess = { prepare: async () => { touched.push('studyAccess.prepare'); }, require: async () => { touched.push('studyAccess.require'); } };
+  const keycloak = { usersInGroupWithRole: async () => { touched.push('keycloak.usersInGroupWithRole'); return []; } };
+  const findings = { readableFindings: async () => { touched.push('findings.readableFindings'); return []; } };
+  return { svc: new PacsService(store, {}, keycloak, studyAccess, findings), touched, controllers: new Map() };
 }
 
-/**
- * The PUT as the router hands it over: `caller` is the session the auth guard resolved (req.sub/actor/roles/institution/kind).
- * A fixture has one controller for all its writes, as the application has one for all requests.
- */
-function put(f, body, caller, uid = UID) {
-  assert.equal(ROUTES.length, 1, 'PUT studies/:uid/report must reach one handler');
-  const [{ controller, key }] = ROUTES;
-  const types = Reflect.getMetadata('design:paramtypes', controller) ?? [];
-  f.controller ??= new controller(...types.map(type => {
-    assert.equal(type, PacsService, `${controller.name} needs ${type?.name}, which these cases do not provide`);
-    return f.svc;
-  }));
-  const instance = f.controller;
-  const req = { sub: caller.sub, actor: caller.actor, roles: caller.roles, institution: caller.institution, kind: caller.kind };
+/** The request as the router hands it over: `caller` is the session the auth guard resolved. */
+function send(f, route, body, caller, uid = UID) {
+  assert.equal(ROUTES[route].length, 1, `${route} must reach one handler`);
+  const [{ controller, key }] = ROUTES[route];
+  if (!f.controllers.has(controller)) {
+    const types = Reflect.getMetadata('design:paramtypes', controller) ?? [];
+    f.controllers.set(controller, new controller(...types.map(type => {
+      assert.equal(type, PacsService, `${controller.name} needs ${type?.name}, which these cases do not provide`);
+      return f.svc;
+    })));
+  }
+  const req = { sub: caller.sub, actor: caller.actor, roles: caller.roles, institution: caller.institution, kind: caller.kind,
+    authMethod: 'session', sid: 'syn-session-of-' + caller.sub, headers: {} };
   const args = [];
   for (const [slot, { index, data }] of Object.entries(Reflect.getMetadata(ROUTE_ARGS_METADATA, controller, key) ?? {})) {
     const type = Number(slot.split(':')[0]);
@@ -132,275 +125,81 @@ function put(f, body, caller, uid = UID) {
     else if (type === RouteParamtypes.REQUEST) args[index] = req;
     else assert.fail(`the handler asks for argument ${slot} ${JSON.stringify(data)}, which these cases do not provide`);
   }
-  return (async () => instance[key](...args))();
+  return (async () => f.controllers.get(controller)[key](...args))();
 }
 
-const refusal = async (promise, status) => {
-  const e = await promise.then(() => null, error => error);
-  assert.ok(e, 'the call resolved instead of being refused');
-  assert.equal(e.getStatus?.(), status, e.message);
-  return e.getResponse();
-};
-
-const untouched = (f, what) => {
-  assert.deepEqual(f.touched, [], `${what}: nothing of the study or the draft is read`);
-  assert.deepEqual(f.writes, [], `${what}: no draft row is created, overwritten or deleted`);
-  assert.deepEqual(f.audits, [], `${what}: no audit row (the success audit included)`);
-  assert.deepEqual(f.prepared, [], `${what}: the access policy is not even prepared`);
-};
-
-test('PUT studies/:uid/report reaches exactly one handler, the one every case below goes through', () => {
-  console.log('S7-U5-DRAFT-OWNER-ROUTE ' + JSON.stringify(ROUTES.map(route => route.name)));
-  assert.equal(ROUTES.length, 1, JSON.stringify(ROUTES.map(route => route.name)));
-});
-
-test('the account the text was taken from writes its own draft, as before', async () => {
+/** The refusal of one request on a fresh fixture: [status, code, field], after checking that nothing was touched. */
+async function refused(route, body, caller, what) {
   const f = fixture();
-  const answer = await put(f, { ...TEXT, baseVersion: 0, expectedOwner: OWNER_A }, A);
-  assert.equal(answer.author, A.actor);
-  assert.deepEqual(f.writes, [`reportDraft.upsert:${A.actor}:${A.actor}`]);
-  assert.deepEqual(f.audits, [`${A.actor}:report.draft`]);
+  const e = await send(f, route, body, caller).then(() => null, error => error);
+  assert.ok(e, `${what}: the call resolved instead of being refused`);
+  assert.equal(typeof e.getStatus, 'function', `${what}: ${e.message}`);
+  assert.deepEqual(f.touched, [], `${what}: nothing of the study, the drafts, the access policy or the audit log is touched`);
+  const answer = e.getResponse();
+  return [e.getStatus(), answer?.code ?? null, answer?.field ?? null];
+}
+
+test('each draft mutation route reaches exactly one handler, the one every case below goes through', () => {
+  console.log('S7-U5-DRAFT-OWNER-ROUTE ' + JSON.stringify(Object.fromEntries(Object.entries(ROUTES).map(([name, found]) => [name, found.map(route => route.name)]))));
+  for (const [name, found] of Object.entries(ROUTES)) assert.equal(found.length, 1, name);
 });
 
-test('without expectedOwner the write is the caller\'s, exactly as before (the other callers of this PUT)', async () => {
-  for (const caller of [A, B]) {
-    const f = fixture();
-    const answer = await put(f, { ...TEXT, baseVersion: 0 }, caller);
-    assert.equal(answer.author, caller.actor);
-    assert.deepEqual(f.writes, [`reportDraft.upsert:${caller.actor}:${caller.actor}`]);
-    assert.deepEqual(f.audits, [`${caller.actor}:report.draft`]);
+test('the text of one account under another account\'s session is refused before any read, write, audit or access preparation - on every mutation', async () => {
+  for (const route of Object.keys(ROUTES)) {
+    const owner = actorOf(route);
+    // the old document's request (its account, its boundary) arrives under the other account's session
+    const other = route === 'force' ? { ...ADMIN, sub: 'sub-admin-2', actor: 'admin-2@synthetic' } : B;
+    assert.deepEqual(await refused(route, good[route](owner), other, route + ' under another session'),
+      [409, 'REPORT_DRAFT_OWNER_CHANGED', null]);
+    // each part of the owner is compared: another institution, another subject, another author
+    for (const [part, value] of [['institution', OTHER_INST], ['sub', 'sub-x'], ['author', 'someone-else@synthetic']])
+      assert.deepEqual(await refused(route, { ...good[route](owner), expectedOwner: { ...ownerOf(owner), [part]: value } }, owner, `${route} ${part}`),
+        [409, 'REPORT_DRAFT_OWNER_CHANGED', null]);
   }
 });
 
-test('A\'s captured text under B\'s session is refused before any read, write or audit', async () => {
-  const cases = [
-    ['another reader of the same institution', B],
-    ['the same subject under another author name', { ...A, actor: 'renamed@synthetic' }],
-    ['another subject under the same author name', { ...A, sub: 'sub-z' }],
-    ['the same reader moved to another institution', { ...A, institution: OTHER_INST }],
-    ['the same reader with no institution', { ...A, institution: null }],
-  ];
-  for (const [what, caller] of cases) {
-    for (const [shape, body] of [
-      ['a text write', { ...TEXT, baseVersion: 0 }],
-      // An empty write deletes the caller's draft: that is exactly what must not happen to B.
-      ['an emptying write', { findings: '', conclusion: '', recommendation: '', baseVersion: 0 }],
-      // An insertion prepares the access policy first; the binding is decided before that, too.
-      ['a write with an insertion', { ...TEXT, baseVersion: 0, insert: { field: 'findings' } }],
-    ]) {
-      const f = fixture();
-      const answer = await refusal(put(f, { ...body, expectedOwner: OWNER_A }, caller), 409);
-      assert.equal(answer.code, 'REPORT_DRAFT_OWNER_CHANGED', `${what}, ${shape}`);
-      assert.doesNotMatch(answer.message, /저장했습니다/, 'the refusal never reads as a stored write');
-      untouched(f, `${what}, ${shape}`);
-    }
+test('a mutation without its owner or its boundary, or with either in another shape, is refused by name before anything is read', async () => {
+  const without = (body, key) => { const next = { ...body }; delete next[key]; return next; };
+  for (const route of Object.keys(ROUTES)) {
+    const who = actorOf(route), body = good[route](who), boundary = boundaryOf(route);
+    assert.deepEqual(await refused(route, without(body, 'expectedOwner'), who, route + ' without an owner'),
+      [400, 'REPORT_DRAFT_PRECONDITION_REQUIRED', 'expectedOwner']);
+    assert.deepEqual(await refused(route, without(body, boundary), who, route + ' without a boundary'),
+      [400, 'REPORT_DRAFT_PRECONDITION_REQUIRED', boundary]);
+    // The removed shapes: the owner as an array (the fix3-fix8 page), a string, an object with other keys or values.
+    for (const owner of [[who.institution, who.sub, who.actor], who.actor, { ...ownerOf(who), extra: 1 }, { institution: who.institution, sub: who.sub },
+      { ...ownerOf(who), sub: 7 }, { ...ownerOf(who), institution: null }])
+      assert.deepEqual(await refused(route, { ...body, expectedOwner: owner }, who, `${route} owner ${JSON.stringify(owner)}`),
+        [400, 'REPORT_DRAFT_PRECONDITION_INVALID', 'expectedOwner']);
+    const malformed = route === 'force' ? [7, '', 'not-an-epoch', EPOCH + ':1', EPOCH.toUpperCase()]
+      : [7, '', EPOCH, '3', EPOCH + ':', EPOCH + ':-1', EPOCH + ':03', EPOCH + ':1.5', EPOCH + ':2147483648', 'x:1', [EPOCH, 3]];
+    for (const value of malformed)
+      assert.deepEqual(await refused(route, { ...body, [boundary]: value }, who, `${route} boundary ${JSON.stringify(value)}`),
+        [400, 'REPORT_DRAFT_PRECONDITION_INVALID', boundary]);
   }
 });
 
-test('a binding to another institution\'s reader is refused even when that reader is the caller\'s namesake', async () => {
-  const f = fixture();
-  const answer = await refusal(put(f, { ...TEXT, baseVersion: 0, expectedOwner: [OTHER_INST, A.sub, A.actor] }, A), 409);
-  assert.equal(answer.code, 'REPORT_DRAFT_OWNER_CHANGED');
-  untouched(f, 'another institution in the binding');
-});
-
-test('a malformed binding is a 400 and touches nothing', async () => {
-  for (const value of [null, 'sub-a', {}, { institution: INST, sub: A.sub, author: A.actor }, [], [INST, A.sub],
-                       [INST, A.sub, A.actor, 'extra'], [7, A.sub, A.actor], [INST, null, A.actor], [INST, A.sub, null]]) {
-    const f = fixture();
-    await refusal(put(f, { ...TEXT, baseVersion: 0, expectedOwner: value }, A), 400);
-    untouched(f, `expectedOwner ${JSON.stringify(value)}`);
+test('a draft PUT is the whole snapshot: a missing or mistyped part is refused by name, never read as "unchanged"', async () => {
+  const body = good.put(A);
+  for (const field of ['findings', 'conclusion', 'recommendation', 'baseVersion', 'citationIds', 'structureIds']) {
+    const next = { ...body }; delete next[field];
+    assert.deepEqual(await refused('put', next, A, 'without ' + field), [400, 'REPORT_DRAFT_PRECONDITION_REQUIRED', field]);
+    assert.deepEqual(await refused('put', { ...body, [field]: null }, A, field + ' null'), [400, 'REPORT_DRAFT_PRECONDITION_REQUIRED', field]);
   }
+  for (const [field, value] of [['findings', 7], ['conclusion', ['x']], ['recommendation', {}], ['baseVersion', -1], ['baseVersion', 1.5],
+    ['baseVersion', '0'], ['citationIds', 'cid'], ['citationIds', [7]], ['structureIds', {}], ['structureIds', [null]]])
+    assert.deepEqual(await refused('put', { ...body, [field]: value }, A, `${field} ${JSON.stringify(value)}`),
+      [400, 'REPORT_DRAFT_PRECONDITION_INVALID', field]);
+  // The fields of the removed write order are not a way in: an old page's body (array owner, draftOrder, no boundary).
+  assert.deepEqual(await refused('put', { findings: 'SYN', conclusion: '', recommendation: '', baseVersion: 0,
+    expectedOwner: [INST, A.sub, A.actor], draftOrder: ['syn-page', 4] }, A, 'the fix8 page'), [400, 'REPORT_DRAFT_PRECONDITION_INVALID', 'expectedOwner']);
 });
 
-test('a matching binding grants nothing: the role, institution and study gates are unchanged', async () => {
-  // Without the radiologist role the existing refusal stands (403) and nothing is written.
-  const tech = { ...A, roles: ['technician'] };
-  const f1 = fixture();
-  await refusal(put(f1, { ...TEXT, baseVersion: 0, expectedOwner: OWNER_A }, tech), 403);
-  assert.deepEqual([f1.writes, f1.audits], [[], []]);
-  // A study of another institution stays invisible (404) to a caller whose binding matches.
-  const f2 = fixture({ state: { ...STATE, institutionId: OTHER_INST } });
-  await refusal(put(f2, { ...TEXT, baseVersion: 0, expectedOwner: OWNER_A }, A), 404);
-  assert.deepEqual([f2.writes, f2.audits], [[], []]);
-  // A Preliminary report of someone else stays closed to the binding's own reader (403).
-  const f3 = fixture({ state: { ...STATE, rs: 'P', preDoc: 'doctor-c@synthetic', preReviewer: 'doctor-c@synthetic' } });
-  await refusal(put(f3, { ...TEXT, baseVersion: 0, expectedOwner: OWNER_A }, A), 403);
-  assert.deepEqual([f3.writes, f3.audits], [[], []]);
-  // The matching empty write still deletes only the caller's own draft.
-  const f4 = fixture();
-  await put(f4, { findings: '', conclusion: '', recommendation: '', baseVersion: 0, expectedOwner: OWNER_A }, A);
-  assert.deepEqual(f4.writes, [`reportDraft.deleteMany:${A.actor}`]);
-  assert.deepEqual(f4.audits, [`${A.actor}:report.draft.clear`]);
-});
-
-// ── the write order (Astra S7-U5-R-001-F03) ──
-// A page numbers its draft writes: `draftOrder` is [page id, sequence]. "Earlier" and "later" below are that sequence - the
-// order the page sent them in - never the order they reach or leave the API.
-const PAGE = 'syn-page-1', OTHER_PAGE = 'syn-page-2';
-const told = label => ({ findings: `SYN ${label} findings`, conclusion: `SYN ${label} conclusion`, recommendation: '' });
-const ordered = (label, seq, page = PAGE) => ({ ...told(label), baseVersion: 0, expectedOwner: OWNER_A, draftOrder: [page, seq] });
-const EMPTY = { findings: '', conclusion: '', recommendation: '', baseVersion: 0, expectedOwner: OWNER_A };
-/** Lets everything that can run without a held transaction run (timers phase, twice over the microtask queue). */
-const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(resolve => setImmediate(resolve)); };
-/** What a case compares before and after a refusal: every touch of the store. */
-const marks = f => JSON.stringify([f.touched, f.writes, f.audits, f.prepared]);
-const superseded = async (f, promise, what) => {
-  const before = marks(f);
-  const answer = await refusal(promise, 409);
-  assert.equal(answer.code, 'REPORT_DRAFT_SUPERSEDED', what);
-  assert.doesNotMatch(answer.message, /저장했습니다/, 'the refusal never reads as a stored write');
-  assert.equal(marks(f), before, `${what}: nothing is read, written, audited or prepared for the refused write`);
-};
-
-test('an ordered write is stored and answered with its order; a write without one is stored and answered as before', async () => {
-  const f = fixture();
-  const first = await put(f, ordered('one', 1), A);
-  assert.deepEqual(first.draftOrder, [PAGE, 1], 'the answer says which order the API kept');
-  assert.equal(first.author, A.actor);
-  assert.deepEqual(f.row(UID, A.actor), told('one'));
-  const plain = await put(f, { ...told('plain'), baseVersion: 0 }, A);
-  assert.equal('draftOrder' in plain, false, 'no order was sent, so none is confirmed');
-  assert.equal(plain.author, A.actor);
-  assert.deepEqual(f.row(UID, A.actor), told('plain'));
-  assert.deepEqual(f.audits, [`${A.actor}:report.draft`, `${A.actor}:report.draft`]);
-});
-
-test('F03: an earlier write that reaches the API after a later one of its page is refused; the draft stays the later text', async () => {
-  const f = fixture();
-  // The page sent 1 (its connection was lost on the way), then 2. The API sees 2 first.
-  assert.deepEqual((await put(f, ordered('later', 2), A)).draftOrder, [PAGE, 2]);
-  await superseded(f, put(f, ordered('earlier', 1), A), 'the earlier write arriving late');
-  assert.deepEqual(f.row(UID, A.actor), told('later'));
-  // The same write delivered twice is not a newer one either.
-  await superseded(f, put(f, ordered('later again', 2), A), 'the same sequence again');
-  // A refusal moves nothing: what is at or below the stored sequence stays refused, the page's next write is stored.
-  await superseded(f, put(f, ordered('still earlier', 1), A), 'after a refusal');
-  assert.deepEqual((await put(f, ordered('next', 3), A)).draftOrder, [PAGE, 3]);
-  assert.deepEqual(f.row(UID, A.actor), told('next'));
-  assert.deepEqual(f.writes, [`reportDraft.upsert:${A.actor}:${A.actor}`, `reportDraft.upsert:${A.actor}:${A.actor}`]);
-});
-
-test('F03: an earlier write the API is still working on finishes first; the later one is stored after it and stays', async () => {
-  const f = fixture();
-  // The browser lost the connection of write 1, but the API has it: its transaction is open (held here).
-  const finishEarlier = f.hold();
-  const earlier = put(f, ordered('earlier', 1), A);
-  await settle();
-  assert.deepEqual([f.prepared.length, f.touched.filter(t => t === 'transaction').length, f.writes], [1, 1, []],
-    'the earlier write is inside its transaction and has stored nothing yet');
-  // The recovery (write 2) arrives now. It is not handed to the service while the earlier one is unfinished.
-  const later = put(f, ordered('later', 2), A);
-  await settle();
-  assert.deepEqual([f.prepared.length, f.touched.filter(t => t === 'transaction').length, f.writes], [1, 1, []],
-    'the later write waits: nothing of it is prepared, read or written while the earlier one is open');
-  finishEarlier();
-  assert.deepEqual([(await earlier).draftOrder, (await later).draftOrder], [[PAGE, 1], [PAGE, 2]]);
-  assert.deepEqual(f.writes, [`reportDraft.upsert:${A.actor}:${A.actor}`, `reportDraft.upsert:${A.actor}:${A.actor}`]);
-  assert.deepEqual(f.row(UID, A.actor), told('later'), 'the draft is what the page sent last');
-});
-
-test('F03: an earlier write that arrives while the later one is still open waits, and is then refused', async () => {
-  const f = fixture();
-  const finishLater = f.hold();
-  const later = put(f, ordered('later', 2), A);
-  await settle();
-  const earlier = put(f, ordered('earlier', 1), A);
-  await settle();
-  assert.deepEqual([f.prepared.length, f.writes], [1, []], 'the earlier write is not decided while the later one is open');
-  finishLater();
-  assert.deepEqual((await later).draftOrder, [PAGE, 2]);
-  const answer = await refusal(earlier, 409);
-  assert.equal(answer.code, 'REPORT_DRAFT_SUPERSEDED');
-  assert.deepEqual([f.prepared.length, f.writes], [1, [`reportDraft.upsert:${A.actor}:${A.actor}`]],
-    'only the later write reached the service');
-  assert.deepEqual(f.row(UID, A.actor), told('later'));
-});
-
-test('an emptying write keeps its place: an earlier text write arriving late does not bring the text back', async () => {
-  const f = fixture();
-  await put(f, ordered('typed', 1), A);
-  const cleared = await put(f, { ...EMPTY, draftOrder: [PAGE, 3] }, A);
-  assert.deepEqual([cleared.cleared, cleared.draftOrder], [true, [PAGE, 3]]);
-  assert.equal(f.row(UID, A.actor), null);
-  await superseded(f, put(f, ordered('typed before the emptying', 2), A), 'a text write from before the emptying');
-  assert.equal(f.row(UID, A.actor), null, 'the emptied draft stays empty');
-});
-
-test('a write that was refused or failed leaves no order behind', async () => {
-  // Refused by the role gate inside the service (403): the page's next write is stored, and so is a retry of the same text.
-  const f = fixture();
-  await refusal(put(f, ordered('no role', 5), { ...A, roles: ['technician'] }), 403);
-  assert.deepEqual(f.writes, []);
-  assert.deepEqual((await put(f, ordered('next', 6), A)).draftOrder, [PAGE, 6]);
-  assert.deepEqual(f.row(UID, A.actor), told('next'));
-  // Refused for the account binding (another session carrying A's page): nothing is recorded for anyone.
-  const g = fixture();
-  const answer = await refusal(put(g, ordered('as B', 9), B), 409);
-  assert.equal(answer.code, 'REPORT_DRAFT_OWNER_CHANGED', 'the account binding is decided before the order');
-  untouched(g, 'another session with an order');
-  assert.deepEqual((await put(g, ordered('A after', 1), A)).draftOrder, [PAGE, 1]);
-});
-
-test('pages, authors and studies keep their own order', async () => {
-  const f = fixture();
-  await put(f, ordered('page one', 9), A);
-  // Another page of the same reader (another tab) starts its own sequence; the two are not ordered against each other.
-  assert.deepEqual((await put(f, ordered('page two', 1, OTHER_PAGE), A)).draftOrder, [OTHER_PAGE, 1]);
-  assert.deepEqual(f.row(UID, A.actor), told('page two'));
-  await superseded(f, put(f, ordered('page one, earlier', 8), A), 'page one below its own sequence');
-  await superseded(f, put(f, ordered('page two again', 1, OTHER_PAGE), A), 'page two at its own sequence');
-  // Another reader's draft of the same study is another row: the same page id and a lower sequence are stored.
-  const asB = await put(f, { ...told('B'), baseVersion: 0, expectedOwner: [INST, B.sub, B.actor], draftOrder: [PAGE, 1] }, B);
-  assert.deepEqual([asB.author, asB.draftOrder], [B.actor, [PAGE, 1]]);
-  assert.deepEqual([f.row(UID, B.actor), f.row(UID, A.actor)], [told('B'), told('page two')]);
-  // Another study of the same reader, from the same page.
-  const OTHER_UID = '2.25.7708';
-  assert.deepEqual((await put(f, ordered('other study', 2), A, OTHER_UID)).draftOrder, [PAGE, 2]);
-  assert.deepEqual([f.row(OTHER_UID, A.actor), f.row(UID, A.actor)], [told('other study'), told('page two')]);
-});
-
-test('a write without draftOrder takes its turn but is never refused for order and changes no order', async () => {
-  const f = fixture();
-  await put(f, ordered('five', 5), A);
-  // An open page from before the order, an insertion or an API client: stored whatever the page's sequence is.
-  const plain = await put(f, { ...told('plain'), baseVersion: 0, expectedOwner: OWNER_A }, A);
-  assert.equal('draftOrder' in plain, false);
-  assert.deepEqual(f.row(UID, A.actor), told('plain'));
-  await superseded(f, put(f, ordered('four', 4), A), 'below the sequence the page stored before the plain write');
-  assert.deepEqual((await put(f, ordered('six', 6), A)).draftOrder, [PAGE, 6]);
-  // Its turn: it is not handed to the service while an earlier write of the row is open.
-  const finishSeven = f.hold();
-  const seven = put(f, ordered('seven', 7), A);
-  await settle();
-  const prepared = f.prepared.length, writes = f.writes.length;
-  const late = put(f, { ...told('plain, later'), baseVersion: 0 }, A);
-  await settle();
-  assert.deepEqual([f.prepared.length, f.writes.length], [prepared, writes], 'the plain write waits for the open one');
-  finishSeven();
-  await seven;
-  assert.equal('draftOrder' in await late, false);
-  assert.deepEqual(f.row(UID, A.actor), told('plain, later'), 'writes of one row are applied in the order they arrived');
-});
-
-test('a malformed draftOrder is a 400 and touches nothing', async () => {
-  for (const value of [null, 'syn-page-1', {}, { page: PAGE, seq: 1 }, [], [PAGE], [PAGE, 1, 2], [1, 1], ['', 1], [null, 1],
-                       [PAGE, 0], [PAGE, -1], [PAGE, 1.5], [PAGE, '1'], [PAGE, null], [PAGE, 2 ** 53], ['p'.repeat(65), 1]]) {
-    const f = fixture();
-    await refusal(put(f, { ...TEXT, baseVersion: 0, expectedOwner: OWNER_A, draftOrder: value }, A), 400);
-    untouched(f, `draftOrder ${JSON.stringify(value)}`);
-  }
-  // The longest page id the API takes.
-  const f = fixture();
-  assert.deepEqual((await put(f, ordered('long id', 1, 'p'.repeat(64)), A)).draftOrder, ['p'.repeat(64), 1]);
-});
-
-test('an order grants nothing: the role, institution and study gates are unchanged', async () => {
-  const f1 = fixture();
-  await refusal(put(f1, ordered('no role', 1), { ...A, roles: ['technician'] }), 403);
-  const f2 = fixture({ state: { ...STATE, institutionId: OTHER_INST } });
-  await refusal(put(f2, ordered('other institution', 1), A), 404);
-  const f3 = fixture({ state: { ...STATE, rs: 'P', preDoc: 'doctor-c@synthetic', preReviewer: 'doctor-c@synthetic' } });
-  await refusal(put(f3, ordered('preliminary of another reader', 1), A), 403);
-  assert.deepEqual([f1.writes, f1.audits, f2.writes, f2.audits, f3.writes, f3.audits], [[], [], [], [], [], []]);
+test('the preconditions grant nothing: the role is refused first, whatever the request carries', async () => {
+  const technician = { ...A, roles: ['technician'] };
+  for (const route of ['put', 'discard', 'commit'])
+    assert.deepEqual((await refused(route, good[route](technician), technician, route + ' by a technician'))[0], 403);
+  assert.deepEqual((await refused('force', good.force(A), A, 'force-discard by a radiologist'))[0], 403);
+  // ... and a role refusal does not depend on the preconditions being there at all
+  assert.deepEqual((await refused('put', { findings: 'SYN' }, technician, 'a bare PUT by a technician'))[0], 403);
 });

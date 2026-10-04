@@ -547,8 +547,10 @@ class MigrationPins(unittest.TestCase):
         # 32 -> 33, tables unchanged: S7-U3a added 20260928130000_reader_assignment_scope (ReaderAssignment keyed by
         # study and institution).
         # 33 -> 34, tables unchanged: S7-AUDIT-STORE added 20260930120000_audit_log_append_only (the AuditLog guard trigger).
+        # 34 -> 35, tables unchanged: S7-U5 added 20261004120000_draft_revision_session_entry (ReportDraft revision/present, StudyState
+        # draftEpoch, AuthSession entry proof columns).
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 34)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 35)
         self.assertEqual(len(restore_fixture.TABLES), 46)
         self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 

@@ -213,8 +213,11 @@ BASE_SHA256 = {
     "u2_rule": "45a916d3d2cfa37b3e4d9dc04d5e7f2ee9dc6a86451249ed799aab40bc300dbd",
     "u2_client": "47abd1d5a00a69d37a8c7977e5f31c9d3a9ce16ca04a43d5fd8830a4369963d3",
     "unmatch": "d38480a356f864fb8084bedfe0f632a4d2541047ccff26cdd5dd57f6a7ed92cb",
-    "bootstrap": "2c8ae6afa501225b6b9c808f75065daafc5afd5e93013e43909b5bf4f200fbd9",
-    "toClient": "7a10e0e6f6cc5e487140f4b55d3a55b4b01214236b886819b2cf7e7ead7682a3",
+    # S7-U5 changed these two on purpose (re-set here, disclosed in fix10s-notes): bootstrap reads the caller's drafts of
+    # the visible studies only (emptied rows stay in the table), and toClient carries the draft boundary and hides an
+    # emptied row. Neither reads or writes an order value, which is what S4-U5's claim about them was.
+    "bootstrap": "ac48f4c6267c609a96d7d28c0b45fba7fa3355b7d3cf5355bbc3d649d50c980c",
+    "toClient": "80cae4499fe2a961f125071ae03be821d44316609d761eddb0b521c9dea3c65f",
 }
 # "S4-U5 left removeState as it was" is a claim about S4-U5's two commits, so (S7-PINS, AGENTS.md 1-B.14; Astra
 # S7-U3a-B-R-001-F02) it is checked on them - the base b6a317c and the main merge fb7dab9 that shipped 4760df0 - read with
@@ -230,7 +233,8 @@ S4U5_RESULT = "fb7dab9df54e6fe3c835dc6d2add89b1cfd62e0f"
 S4U5_SERVICE_SHA256 = {S4U5_BASE: "db21d0eaddf15473dbca19712fa49e669cfe1e18e6fbef76d5ee56df661f8d7e",
                        S4U5_RESULT: "c64229b96252eb484e5372fd03cf9ddde39089fd140e16b0baf70937ca8eb173"}
 # StudyState/Order/report write call sites in pacs.service.ts at b6a317c. U5 adds reads only.
-BASE_WRITES = {"studyState.update(": 8, "studyState.updateMany(": 1, "studyState.create(": 3, "studyState.delete(": 1,
+# S7-U5: studyState.update( 8 -> 9 - the forced release rotates the study's draft epoch (its one new write site).
+BASE_WRITES = {"studyState.update(": 9, "studyState.updateMany(": 1, "studyState.create(": 3, "studyState.delete(": 1,
                "order.update(": 2, "order.updateMany(": 2, "order.createMany(": 1}
 # "S4-U5 adds no route" the same way (S7-U5 fix4, commander decision D506; AGENTS.md 1-B.14/15). Until then this file held
 # the sha256 of the whole live pacs.controller.ts: any later edit of any handler failed it (S7-U5's draft PUT owner check
@@ -459,10 +463,11 @@ class ServicePins(unittest.TestCase):
         shipped = {commit: fixed_file(commit, "api/src/pacs.controller.ts", S4U5_CONTROLLER_SHA256)
                    for commit in (S4U5_BASE, S4U5_RESULT)}
         self.assertEqual(shipped[S4U5_BASE], shipped[S4U5_RESULT])
-        # No route since: the live controller serves exactly the routes of the one S4-U5 shipped, whatever its handlers do.
+        # The live controller serves the routes of the one S4-U5 shipped, whatever its handlers do, and the one route a
+        # later unit added on purpose: S7-U5's read of the caller's own draft and boundary (no order value in it).
         tables = controller_route_tables({"live": CONTROLLER, "s4u5": shipped[S4U5_RESULT]})
         self.assertTrue(tables["s4u5"])
-        self.assertEqual(tables["live"], tables["s4u5"])
+        self.assertEqual(tables["live"], sorted(tables["s4u5"] + ["GET studies/:uid/draft"]))
         self.assertEqual(sha(between(SERVICE, "  async bootstrap(c: Caller, query?: any) {", "\n  }\n")), BASE_SHA256["bootstrap"])
         self.assertEqual(sha(between(SERVICE, "function toClient(", "\n}\n")), BASE_SHA256["toClient"])
         self.assertNotIn("orderIdentity", between(SERVICE, "  async bootstrap(c: Caller, query?: any) {", "\n  }\n"))

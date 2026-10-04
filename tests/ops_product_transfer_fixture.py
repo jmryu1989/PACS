@@ -67,7 +67,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260926130000_study_image_requests/migration.sql',
               'api/prisma/migrations/20260928120000_critical_result/migration.sql',
               'api/prisma/migrations/20260928130000_reader_assignment_scope/migration.sql',
-              'api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql']
+              'api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql',
+              'api/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -137,7 +138,9 @@ def expected_rows(uid):
     rows['StudyState'] = [dict(uid=uid, institutionId='SYNTHETIC-hospital', teleInstitutionId='SYNTHETIC-tele',
         origin='dicom', rs='R', holdReason=None, ss='Verified', em='N', ts='none', matched='U', ward='',
         reqHosp='SYNTHETIC', repDoc='SYNTHETIC-reader', confirm=None, preDoc=None, preReviewer=None,
-        ov=None, orig=None, orderOid=None, holder=None, heldAt=None, updatedAt=STAMP, createdAt=STAMP)]
+        ov=None, orig=None, orderOid=None, holder=None, heldAt=None,
+        # S7-U5: the draft epoch is a value of the row (rotated by a forced release), not something a restore may re-draw.
+        draftEpoch='00000000-0000-4000-8000-0000000000d1', updatedAt=STAMP, createdAt=STAMP)]
     rows['Report'] = [dict(uid=uid, findings='SYNTHETIC findings\n합성', conclusion='SYNTHETIC conclusion',
         recommendation='', version=2, updatedBy='SYNTHETIC-reader', updatedAt=STAMP)]
     # 한 행은 인용을 들고, 한 행은 NULL이다. 둘 다 실제로 왕복해야 "추가 전용"이 말이 된다 —
@@ -162,7 +165,12 @@ def expected_rows(uid):
     rows['ReportDraft'] = [dict(uid=uid, author='SYNTHETIC-reader'+str(number),
         findings='SYNTHETIC private '+str(number), conclusion='', recommendation='', baseVersion=2,
         citations=citation if number == 1 else None,
-        structured=structured if number == 1 else None, updatedAt=STAMP) for number in (1, 2)]
+        structured=structured if number == 1 else None,
+        # S7-U5: the stored boundary. Two present drafts at different revisions and one emptied row (a tombstone:
+        # no content, its revision kept) - a restore that lost the revision or the tombstone would let an old write back in.
+        revision=4 - number, present=True, updatedAt=STAMP) for number in (1, 2)]
+    rows['ReportDraft'].append(dict(uid=uid, author='SYNTHETIC-reader3', findings='', conclusion='', recommendation='',
+        baseVersion=0, citations=None, structured=None, revision=5, present=False, updatedAt=STAMP))
     # S4-U2: the Order table had no synthetic row, so a dump that lost the new accession value would
     # pass on an empty table. One unlinked synthetic order carries a real (synthetic) accession.
     rows['Order'] = [dict(oid='SYNTHETIC-order-1', institutionId='SYNTHETIC-hospital', patientId='SYNTHETIC-patient',
@@ -588,6 +596,10 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing report FK'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
       BEGIN INSERT INTO "ReportDraft" SELECT * FROM "ReportDraft" LIMIT 1;
         RAISE EXCEPTION 'missing draft PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "ReportDraft" SET revision=0;
+        RAISE EXCEPTION 'missing draft revision constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "ReportDraft" SET present=false WHERE findings<>'';
+        RAISE EXCEPTION 'missing draft tombstone constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN DELETE FROM "StudyState" WHERE uid=UID;
         RAISE EXCEPTION 'missing viewer study restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
       BEGIN DELETE FROM "ViewerItem";

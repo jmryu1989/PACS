@@ -1706,7 +1706,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertIn("if (state !== 'APPROVED' && !isLogout)", guard)
         membership = guard.index("code: state === 'PENDING' ? 'INSTITUTION_PENDING' : 'INSTITUTION_INVALID'")
         gate = guard.index("req.clinicianOnly = clinicianOnly(req.roles);")
-        csrf = guard.index("req.headers['x-kin-csrf'] !== '1'")
+        # S7-U5: the CSRF check is AuthService.requireCsrf; the guard's last call of it is the one every non-GET cookie
+        # request passes after the membership and clinician gates (the earlier one is the logout's own).
+        csrf = guard.rindex("this.auth.requireCsrf(req)")
         returned = guard.rindex("return true;")
         self.assertLess(membership, gate)
         self.assertLess(gate, csrf)
@@ -1928,10 +1930,14 @@ class ClinicianPolicySpec(unittest.TestCase):
             for run in decorator_runs(path.read_text(encoding="utf-8")):
                 names = [name for name, _start, _end in run["items"]]
                 if "Public" in names:
-                    self.assertEqual((run["kind"], len(names), names[0]), ("member", 2, "Public"), path.name)
+                    # S7-U5: the POST entries answer 200 (@HttpCode) - a decorator that is neither a route nor Public may
+                    # follow the route decorator; @Public() is still first and the route decorator directly below it.
+                    self.assertEqual((run["kind"], names[0]), ("member", "Public"), path.name)
                     self.assertIn(names[1], HTTP_DECORATORS, path.name)
+                    self.assertLessEqual(set(names[2:]), {"HttpCode", "Header"}, path.name)
                     found.append(path.name)
-        self.assertEqual(sorted(found), ["auth.controller.ts"] * 3 + ["pacs.controller.ts"])
+        # health; the link logins and the callback; S7-U5's bound login starts (POST) and the entry of a login
+        self.assertEqual(sorted(found), ["auth.controller.ts"] * 6 + ["pacs.controller.ts"])
 
     def test_12_inventory_readers_see_every_route_decorator_and_method(self):
         """S5-U1c D6 (RequestMethod members, unreadable decorators) and D8 (the invariants_live reader)."""

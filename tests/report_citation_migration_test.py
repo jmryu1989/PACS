@@ -200,28 +200,32 @@ class LeakBoundaryTests(SourceCase):
         self.assertIn("for (const ids of [findingIds(head), findingIds(mine)])", read)
 
     def test_the_commit_locks_the_draft_row_it_deletes(self) -> None:
-        # Reading the draft's citations unlocked and deleting the row later loses a same-author
+        # Reading the draft's citations unlocked and emptying the row later loses a same-author
         # insertion that lands in between - the user's own confirmed work.
+        # S7-U5: the lock is `ownDraft`, the one read of the caller's row every draft mutation takes.
         commit = body_of(self.service, "async commitReport(")
+        own = body_of(self.service, "private async ownDraft(")
         statement = 'FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE'
         # assertIn first: a missing lock has to read as this failure, not as a ValueError from index().
-        self.assertIn(statement, commit, "the commit must take the row lock the insertion also takes")
-        lock = commit.index(statement)
-        self.assertLess(lock, commit.index("reportDraft.deleteMany"))
+        self.assertIn(statement, own, "the row lock the insertion also takes")
+        self.assertIn("this.ownDraft(", commit, "the commit must take that lock")
+        self.assertIn("this.ownDraft(", body_of(self.service, "async putReport("), "and so must the insertion")
+        lock = commit.index("this.ownDraft(")
+        self.assertLess(lock, commit.index("this.storeDraft("))
         self.assertLess(commit.index('FROM "Report" WHERE uid = ${uid} FOR UPDATE'), lock,
                         "one lock order for every path: StudyState, Report, then my draft")
 
     def test_the_forced_release_retry_is_inside_the_same_mapping(self) -> None:
         # S3-structured-report renamed this wrapper to `reportLimitChecked` because it now maps two
-        # CHECK families, not one. The assertion is the same one: the retry leg must sit INSIDE the
-        # mapping, or a CHECK raised by the second attempt escapes as a 500.
+        # CHECK families, not one. A CHECK raised by the release must sit INSIDE the mapping.
+        # S7-U5: the release and the commit stand in line on the study row, so the version race and its retry leg are
+        # gone - there is one attempt, and it is the one inside the mapping.
         force = body_of(self.service, "async forceDiscardDrafts(")
         self.assertIn("this.reportLimitChecked(", force)
         self.assertNotIn("this.citationChecked(", force, "the old name must not survive anywhere")
-        self.assertIn("if (e?.code !== 'P2002')", force)
-        self.assertLess(force.index("this.reportLimitChecked("), force.index("if (e?.code !== 'P2002')"),
-                        "a CHECK raised by the retry would otherwise surface as a 500")
-
+        self.assertNotIn("P2002", force, "no retry leg that could answer differently")
+        self.assertLess(force.index("this.reportLimitChecked("), force.index("this.draftTransaction("),
+                        "a CHECK raised by the release would otherwise surface as a 500")
     def test_both_counts_use_one_equivalence(self) -> None:
         counts = body_of(self.pure, "export function sameTextCounts(")
         self.assertIn("comparisonKey(", counts)
@@ -247,12 +251,15 @@ class LeakBoundaryTests(SourceCase):
         self.assertNotIn("assert.ok(blocked", harness, "an arbitrary rejection proves nothing about the lock")
 
     def test_the_insertion_prepares_access_outside_the_transaction(self) -> None:
+        # S7-U5: the preparation is the callback `draftTransaction` runs (bounded) before it opens its transaction.
         put = body_of(self.service, "async putReport(")
         prepare = put.index("studyAccess.prepare(c)")
-        scope = put.index("this.scopeWrite(")
-        self.assertLess(prepare, scope,
+        work = put.index("async (tx, state, audit) =>")
+        self.assertLess(put.index("this.draftTransaction("), prepare)
+        self.assertLess(prepare, work,
                         "inside the transaction `allowed` cannot prepare and answers 409 instead")
-
+        runner = body_of(self.service, "private async draftTransaction<T>(")
+        self.assertLess(runner.index("await draftBounded(prepare())"), runner.index("this.prisma.$transaction("))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

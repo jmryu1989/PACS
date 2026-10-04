@@ -31,7 +31,7 @@ import unittest
 import uuid
 from ipaddress import ip_address
 from urllib.error import HTTPError
-from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from invariants_live import ROOT, LiveStack, past_audit_guard, psql, purge_user_audit
@@ -94,6 +94,9 @@ class Browser:
         self.jar = http.cookiejar.CookieJar()
         self.opener = build_opener(HTTPCookieProcessor(self.jar), HTTPSHandler(context=stack.context), _NoRedirect())
         self.headers = {}
+        # S7-U5: the id of the login session this profile's document saw (GET me); sent as X-KIN-Session on /api calls.
+        self.session = None
+        self.proof = None
         if real_ip:
             self.headers["X-Real-IP"] = real_ip
         if forwarded:
@@ -101,7 +104,8 @@ class Browser:
 
     def call(self, method, url, data=None, headers=None):
         target = url if url.startswith("http") else self.stack.proxy + url
-        request = Request(target, data=data, method=method, headers={**self.headers, **(headers or {})})
+        bound = {"X-KIN-Session": self.session} if self.session and url.startswith("/api/") else {}
+        request = Request(target, data=data, method=method, headers={**self.headers, **bound, **(headers or {})})
         try:
             with self.opener.open(request, timeout=30) as response:
                 return response.status, dict(response.headers), response.read().decode("utf-8", "replace")
@@ -266,6 +270,15 @@ class AuthAuditLive(unittest.TestCase):
         self.assertEqual((status, urlparse(headers.get("Location", "")).path), (302, "/worklist/hpacs-lite/main.html"))
         self.assertIsNotNone(browser.sid())
         self.secret("sid", browser.sid())
+        # S7-U5: the single-use entry proof rides in the fragment; the document then learns its session id from its
+        # bootstrap (the one cookie request without a binding; a member awaiting approval gets the id with the 403).
+        browser.proof = urlparse(headers.get("Location", "")).fragment.partition("kin-entry=")[2] or None
+        self.assertTrue(browser.proof, "the callback hands the login's entry proof in the fragment")
+        self.secret("proof", unquote(browser.proof))
+        browser.session = None
+        _, _, me = browser.call("GET", "/api/me")
+        browser.session = json.loads(me).get("sessionId")
+        self.assertTrue(browser.session and browser.session != browser.sid(), "GET me answers the session id")
         row = psql(f'SELECT "accessToken" || E\'\\t\' || "refreshToken" FROM "AuthSession" WHERE sub=\'{member["id"]}\' ORDER BY "createdAt" DESC LIMIT 1;')
         for kind, value in zip(("access", "refresh"), row[0].split("\t")):
             self.secret(kind, value)
@@ -329,6 +342,19 @@ class AuthAuditLive(unittest.TestCase):
         self.assertTrue(secret_hits([json.dumps({"x": browser.sid()})], self.secrets))
         self.assertFalse(secret_hits([json.dumps({"x": "clean"})], self.secrets))
         self.check_rows("AL-01", rows)
+        # S7-U5 (U5S-REQ-09): the login is entered once with its proof - the answer is the session id the bootstrap
+        # gives, one auth.entry row is recorded with the login's institution, and the same proof does not enter again.
+        entry = lambda: browser.call("POST", "/api/auth/entry", data=json.dumps({"proof": unquote(browser.proof)}).encode("utf-8"),
+                                     headers={"X-KIN-CSRF": "1", "Content-Type": "application/json"})
+        status, _, body = entry()
+        self.assertEqual((status, json.loads(body)), (200, {"sessionId": browser.session}))
+        entered = psql(f'SELECT detail FROM "AuditLog" WHERE target=\'{self.members["ma"]["id"]}\' AND action=\'auth.entry\' ORDER BY id;')
+        self.assertEqual([json.loads(line) for line in entered],
+                         [{"institution": self.groups["A"][0], "ip": self.expected_ip, "dataSubject": None}])
+        self.assertFalse(secret_hits(entered, self.secrets))
+        status, _, body = entry()
+        self.assertEqual((status, json.loads(body).get("code")), (403, "AUTH_ENTRY_REFUSED"))
+        self.assertEqual(len(psql(f'SELECT id FROM "AuditLog" WHERE target=\'{self.members["ma"]["id"]}\' AND action=\'auth.entry\';')), 1)
         self.assertEqual(204, self.logout(browser))
 
     def test_02_the_address_is_the_proxys_not_a_forwarded_header(self):
@@ -352,18 +378,33 @@ class AuthAuditLive(unittest.TestCase):
         self.assertEqual(204, self.logout(browser))
         self.assertEqual(self.ends("ma")[-1], ("auth.logout", "logout", self.groups["A"][0], self.expected_ip))
         self.assertEqual(psql(f'SELECT count(*) FROM "AuthSession" WHERE sub=\'{self.members["ma"]["id"]}\';'), ["0"])
+        # The same logout again (S7-U5): without the session id it is refused as a request (428, nothing ended or
+        # recorded); with it, the session that is already gone is confirmed again - and still one row.
         replay = Browser(self.stack)
         status, _, body = replay.call("POST", "/api/auth/logout", data=b"", headers={"X-KIN-CSRF": "1", "Cookie": "kin_sid=" + sid})
-        self.assertEqual((status, json.loads(body).get("message")), (401, ABSENT))
+        self.assertEqual((status, json.loads(body).get("code")), (428, "AUTH_SESSION_REQUIRED"))
+        status, _, _ = replay.call("POST", "/api/auth/logout", data=b"", headers={"X-KIN-CSRF": "1", "Cookie": "kin_sid=" + sid,
+                                                                               "X-KIN-Session": browser.session})
+        self.assertEqual(status, 204)
+        status, _, body = replay.call("GET", "/api/me", headers={"Cookie": "kin_sid=" + sid})
+        self.assertEqual((status, json.loads(body).get("code"), json.loads(body).get("message")), (401, "AUTH_SESSION_ENDED", ABSENT))
         self.assertEqual(before + 1, len(self.rows_of("ma")))
         self.check_rows("AL-03", self.rows_of("ma"))
 
     def test_04_account_switch_row(self):
         for kind in ("login", "register"):
             browser = self.login("ma")
-            path = "/api/auth/login?prompt=login" if kind == "login" else "/api/auth/register"
-            status, _, _ = browser.call("GET", path)
-            self.assertEqual(302, status, kind)
+            path = "/api/auth/login" if kind == "login" else "/api/auth/register"
+            count = f'SELECT count(*) FROM "AuthSession" WHERE sub=\'{self.members["ma"]["id"]}\';'
+            # S7-U5: a link (GET) ends nothing - with a live session it goes back to the entrance. The switch is the
+            # bound POST: CSRF and the session id of the document that asks, then the session is ended with its row.
+            status, headers, _ = browser.call("GET", path + ("?prompt=login" if kind == "login" else ""))
+            self.assertEqual((status, urlparse(headers.get("Location", "")).query), (302, "auth_error=session_active"), kind)
+            self.assertEqual(psql(count), ["1"], kind)
+            status, _, body = browser.call("POST", path, data=json.dumps({"prompt": "login"} if kind == "login" else {}).encode("utf-8"),
+                                           headers={"X-KIN-CSRF": "1", "Content-Type": "application/json"})
+            self.assertEqual(200, status, kind)
+            self.assertIn("/protocol/openid-connect/auth?", json.loads(body).get("location", ""), kind)
             self.assertEqual(self.ends("ma")[-1], ("auth.logout", "account_switch", self.groups["A"][0], self.expected_ip), kind)
             self.assertEqual(psql(f'SELECT count(*) FROM "AuthSession" WHERE sub=\'{self.members["ma"]["id"]}\';'), ["0"], kind)
         self.check_rows("AL-04", self.rows_of("ma"))
@@ -483,7 +524,7 @@ class AuthAuditLive(unittest.TestCase):
         type(self).purge_owned_rows()
         ids = self.owned_ids()
         listed = ",".join(f"'{i}'" for i in ids)
-        actions = ",".join(f"'{a}'" for a in AUTH)
+        actions = ",".join(f"'{a}'" for a in AUTH + ("auth.entry",))
         self.assertEqual(["0"], psql(f'SELECT count(*) FROM "AuditLog" WHERE target IN ({listed}) AND action IN ({actions});'))
         self.assertEqual(["0"], psql(f'SELECT count(*) FROM "AuthSession" WHERE sub IN ({listed});'))
         if getattr(type(self), "failure_ids", None):

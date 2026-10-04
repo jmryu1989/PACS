@@ -20,7 +20,7 @@
     "POST studies/:uid/report/commit", "POST studies/:uid/hold", "GET colleagues", "GET unassigned"
   ],
   "denied_code": "CLINICIAN_ROUTE_DENIED",
-  "public_routes": ["GET health", "GET auth/login", "GET auth/register", "GET auth/callback"],
+  "public_routes": ["GET health", "GET auth/login", "GET auth/register", "GET auth/callback", "POST auth/login", "POST auth/register", "POST auth/entry"],
   "request_method_enum": {"0": "GET", "1": "POST", "2": "PUT", "3": "DELETE", "4": "PATCH", "5": "ALL", "6": "OPTIONS", "7": "HEAD", "8": "SEARCH"},
   "tokens": [
     {"id": "clinician-approved", "groups": ["hallym"], "roles": ["default-roles-kin", "offline_access", "clinician"], "state": "APPROVED", "clinicianOnly": true},
@@ -142,7 +142,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 133, "public": 4, "session": 2, "business": 20, "denied": 107},
+    "counts": {"routes": 137, "public": 7, "session": 2, "business": 20, "denied": 108},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -160,7 +160,7 @@
         "DELETE studies/:uid/draft/force", "POST studies/:uid/hold", "POST studies/:uid/release", "POST studies/:uid/release/force",
         "PUT studies/:uid/report", "POST studies/:uid/report/commit", "GET studies/:uid/report/versions",
         "GET studies/:uid/report/citations", "GET studies/:uid/report/versions/:version/citations",
-        "GET studies/:uid/report/structure", "GET studies/:uid/report-preview", "POST studies/:uid/dictation",
+        "GET studies/:uid/report/structure", "GET studies/:uid/draft", "GET studies/:uid/report-preview", "POST studies/:uid/dictation",
         "GET studies/:uid/clinical-context"
       ],
       "viewer": [

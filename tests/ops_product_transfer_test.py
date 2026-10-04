@@ -245,7 +245,8 @@ class Pure(unittest.TestCase):
         # S7-U3a keyed ReaderAssignment by (study, institution) (D-S7-09 a): 33 files, still 46 tables, and a second
         # ReaderAssignment row, the tele institution's closed one, on the same study.
         # S7-AUDIT-STORE made AuditLog append-only (a trigger, no table): 34 files, still 46 tables.
-        self.assertEqual(len(transfer.MIGRATIONS), 34)
+        # S7-U5 added the draft boundary and entry proof columns (no table): 35 files, still 46 tables.
+        self.assertEqual(len(transfer.MIGRATIONS), 35)
         self.assertEqual(len(transfer.TABLES), 46)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
@@ -256,7 +257,8 @@ class Pure(unittest.TestCase):
         [receipt] = rows['GatewayReceipt']
         self.assertEqual([(r['studyUid'], r['epoch'], r['seq']) for r in rows['GatewayRetryRequest']],
                          [(receipt['studyUid'], receipt['epoch'], receipt['seq'])])
-        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4 + 4 + 7 + 6 + 1)
+        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4 + 4 + 7 + 6 + 1
+                         + 1)   # S7-U5: the emptied draft row (tombstone) beside the two present drafts
         [question] = rows['StudyQuestion']
         receipts = sorted(rows['StudyQuestionEntry'], key=lambda r: r['seq'])
         self.assertEqual((question['studyUid'], question['state'], question['revision'], question['entryCount']), (UID, 'Closed', 3, 3))
@@ -337,6 +339,11 @@ class Pure(unittest.TestCase):
         self.assertEqual(json.loads(workspaces[0]['value'])['landscape']['main'],720)
         self.assertIsNone(workspaces[1]['value']);self.assertEqual(workspaces[1]['revision'],3)
         self.assertEqual({row['uid'] for table in ('StudyState', 'Report', 'ReportVersion', 'ReportDraft') for row in rows[table]}, {UID})
+        # S7-U5: the stored draft boundary travels as data - two present drafts at their revisions, an emptied row
+        # (tombstone) that keeps its revision, and the study's draft epoch.
+        self.assertEqual({row['author']: (row['revision'], row['present'], row['findings'] != '') for row in rows['ReportDraft']},
+            {'SYNTHETIC-reader1': (3, True, True), 'SYNTHETIC-reader2': (2, True, True), 'SYNTHETIC-reader3': (5, False, False)})
+        self.assertEqual(rows['StudyState'][0]['draftEpoch'], '00000000-0000-4000-8000-0000000000d1')
 
     def test_07_actual_observation_compares_every_section(self):
         body, _, _, _ = fixture(); product = body['product']

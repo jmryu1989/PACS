@@ -53,7 +53,7 @@ ADMITTED = (503, coded("DICTATION_NOT_CONFIGURED"))
 NOT_FOUND = (404, nest(404, "Not Found", "검사를 찾을 수 없습니다"))
 LITERAL = {
     "C-W": ADMITTED, "R-ROLE": ROLE_403, "R-ROLE-CT": ROLE_403, "R-ROLE-BIG": ROLE_403,
-    "R-UNAUTH": (401, nest(401, "Unauthorized", "인증 정보가 없습니다")),
+    "R-UNAUTH": (401, {"code": "AUTH_CREDENTIALS_MISSING", "message": "인증 정보가 없습니다"}),
     "R-GATEWAY": (403, nest(403, "Forbidden", "게이트웨이에 허용되지 않는 경로입니다")),
     "I-CT": (400, coded("DICTATION_AUDIO_INVALID")), "I-ENC": (400, coded("DICTATION_AUDIO_INVALID")),
     "I-FMT": (400, coded("DICTATION_AUDIO_INVALID")), "I-BIG": (413, coded("DICTATION_AUDIO_TOO_LARGE")),
@@ -67,8 +67,8 @@ LITERAL = {
     "R-UNVERIFIED": (409, nest(409, "Conflict", "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다")),
     "C-EMERGENCY": ADMITTED,
     "R-TENANT": NOT_FOUND, "C-TELE": ADMITTED, "R-NOSTATE": NOT_FOUND,
-    "R-CSRF": (403, nest(403, "Forbidden", "X-KIN-CSRF 헤더가 필요합니다")),
-    "R-FORGED": (401, nest(401, "Unauthorized", "인증 세션이 없습니다")),
+    "R-CSRF": (403, {"code": "AUTH_CSRF_REQUIRED", "message": "X-KIN-CSRF 헤더가 필요합니다"}),
+    "R-FORGED": (409, {"code": "AUTH_SESSION_MISMATCH", "message": "이 요청을 시작한 로그인 세션이 지금 브라우저의 세션과 다릅니다"}),
     "C-SESSION": ADMITTED, "C-A": ADMITTED,
 }
 CONTROL_AUDIT = (46, 0.0000625, "DICTATION_NOT_CONFIGURED")
@@ -220,12 +220,17 @@ class OracleTests(unittest.TestCase):
                 "await this.audit(c.actor, 'dictation.request', uid, detail);",
             ],
             "api/src/auth.guard.ts": [
-                "if (!raw) throw new UnauthorizedException('인증 정보가 없습니다');",
+                "if (!raw) throw this.auth.credentialsMissing();",
                 "throw new ForbiddenException({ code: 'GATEWAY_IDENTITY_INVALID' });",
                 "throw new ForbiddenException('게이트웨이에 허용되지 않는 경로입니다');",
-                "throw new ForbiddenException('X-KIN-CSRF 헤더가 필요합니다');",
             ],
-            "api/src/auth.service.ts": ["throw new UnauthorizedException('인증 세션이 없습니다');"],
+            # S7-U5: the authentication refusals are coded bodies made in AuthService.
+            "api/src/auth.service.ts": [
+                "return authRefusal(401, 'AUTH_CREDENTIALS_MISSING', '인증 정보가 없습니다');",
+                "throw authRefusal(403, 'AUTH_CSRF_REQUIRED', 'X-KIN-CSRF 헤더가 필요합니다');",
+                "throw authRefusal(409, 'AUTH_SESSION_MISMATCH', '이 요청을 시작한 로그인 세션이 지금 브라우저의 세션과 다릅니다');",
+                "return new HttpException({ code, message }, status);",
+            ],
             "api/src/asr.service.ts": ["return new HttpException({ code, message: code }, status);",
                                        "if (!config.available) throw dictationError('DICTATION_NOT_CONFIGURED');"],
             "api/src/dictation-audio.ts": ["export const DICTATION_AUDIO_MAX_BYTES = 1_048_576;",
@@ -245,14 +250,17 @@ class OracleTests(unittest.TestCase):
                          .replace("${role}", "radiologist"), u5.ROLE)
         # Refusal order at the pin: role, institution, filming, hold, no row, prelim; the first gate call
         # sits outside the audited try, and the audit's keys are exactly the controller's five.
-        gate = pacs[pacs.index("private async reportDraftGate("):pacs.index("async dictationGate(")]
-        order = ["need(c.roles, 'radiologist'", "this.gate(uid,c,tx)", "prev?.ss === 'Unverified'",
-                 "REPORT_HELD", "if (!prev)", "canReadPrelim(prev, c.actor)"]
-        self.assertEqual([gate.index(part) for part in order], sorted(gate.index(part) for part in order))
+        # S7-U5: the gate is the role and the institution read, then the report-state rules (shared with the draft write).
+        gate = pacs[pacs.index("private async reportDraftGate("):pacs.index("private async draftTransaction<T>(")]
+        entry = ["need(c.roles, 'radiologist'", "this.reportDraftRules(await this.gate(uid,c,tx), c)"]
+        self.assertEqual([gate.index(part) for part in entry], sorted(gate.index(part) for part in entry))
+        rules = pacs[pacs.index("private reportDraftRules("):pacs.index("private async reportDraftGate(")]
+        order = ["prev?.ss === 'Unverified'", "REPORT_HELD", "if (!prev)", "canReadPrelim(prev, c.actor)"]
+        self.assertEqual([rules.index(part) for part in order], sorted(rules.index(part) for part in order))
         controller = source("api/src/dictation.controller.ts")
         self.assertLess(controller.index("await this.pacs.dictationGate(uid, caller);"),
                         controller.index("let outcome = 'DICTATION_ENGINE_FAILED';"))
-        self.assertLess(guard.index("'인증 정보가 없습니다'"), guard.index("'X-KIN-CSRF 헤더가 필요합니다'"))
+        self.assertLess(guard.index("throw this.auth.credentialsMissing();"), guard.rindex("this.auth.requireCsrf(req)"))
         self.assertEqual(set(u5.AUDIT_KEYS), {"bytes", "seconds", "ms", "engine", "outcome"})
         self.assertTrue(PIN and PIN.startswith("whisper.cpp@"), PIN)
         self.assertEqual(u5.MAX_BYTES, 1048576)
@@ -409,9 +417,12 @@ class OracleTests(unittest.TestCase):
             ("tele-ignored", "C-TELE", answered(*NOT_FOUND, True), refused_and_admitted),
             ("csrf-exempted", "R-CSRF", admitted("R-CSRF", "doctor"), refused_and_admitted),
             ("gateway-invalid-identity-A3", "R-GATEWAY", answered(403, {"code": "GATEWAY_IDENTITY_INVALID"}), ["body"]),
-            ("forged-expired-message-A2", "R-FORGED", answered(401, nest(401, "Unauthorized", "인증 세션이 만료되었습니다")),
-             ["body"]),
-            ("forged-cookie-not-sent", "R-FORGED", answered(401, nest(401, "Unauthorized", "인증 정보가 없습니다")), ["body"]),
+            # S7-U5: the forged cookie rides with the real session's id. A guard that read the session before it
+            # compared the binding would answer "no such session"; a harness that lost the cookie, "no credentials".
+            ("forged-read-before-binding-A2", "R-FORGED", answered(401, {"code": "AUTH_SESSION_ENDED", "message": "인증 세션이 없습니다"}),
+             ["status", "body"]),
+            ("forged-cookie-not-sent", "R-FORGED", answered(401, {"code": "AUTH_CREDENTIALS_MISSING", "message": "인증 정보가 없습니다"}),
+             ["status", "body"]),
             ("held-holder-swapped", "R-HELD", answered(409, dict(LITERAL["R-HELD"][1], holder=ACTORS["doctor2"])), ["body"]),
             ("prelim-reviewer-swapped", "R-PRELIM", answered(403, nest(
                 403, "Forbidden", "예비 판독(RS: P) 중입니다. " + ACTORS["doctor2"] + "만 이어서 판독할 수 있습니다.")), ["body"]),

@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from unittest.mock import patch
 from urllib.error import HTTPError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode
 from urllib.request import (
     HTTPCookieProcessor, HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen,
 )
@@ -96,6 +96,11 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "auth/login"): Route(Kind.NEITHER),
     ("GET", "auth/register"): Route(Kind.NEITHER),
     ("GET", "auth/callback"): Route(Kind.NEITHER),
+    # S7-U5: the login starts that may replace a session (CSRF and, with a cookie, that session's binding) and the
+    # single-use entry of a login. Public to the guard; AuthService checks cookie, CSRF, binding and proof itself.
+    ("POST", "auth/login"): Route(Kind.NEITHER),
+    ("POST", "auth/register"): Route(Kind.NEITHER),
+    ("POST", "auth/entry"): Route(Kind.NEITHER),
     ("POST", "auth/logout"): Route(Kind.NEITHER),
     ("GET", "me"): Route(Kind.NEITHER),
     ("GET", "authz/dicom"): Route(Kind.TENANT),
@@ -206,6 +211,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("PATCH", "studies/:uid"): Route(Kind.REPORT, "patch"),
     ("PUT", "studies/:uid/report"): Route(Kind.REPORT, "draft-put"),
     ("POST", "studies/:uid/dictation"): Route(Kind.REPORT, "dictation"),
+    ("GET", "studies/:uid/draft"): Route(Kind.REPORT, "draft-read"),
     ("DELETE", "studies/:uid/draft"): Route(Kind.REPORT, "draft-delete"),
     ("DELETE", "studies/:uid/draft/force"): Route(Kind.REPORT, "draft-force"),
     ("POST", "studies/:uid/report/commit"): Route(Kind.REPORT, "commit"),
@@ -347,7 +353,7 @@ def psql(sql: str) -> list[str]:
 UUID_RE = r"^[0-9a-f-]{36}$"
 
 
-ACCESS_RECORD_ACTIONS = ("auth.login", "auth.logout", "auth.session.expired")
+ACCESS_RECORD_ACTIONS = ("auth.login", "auth.logout", "auth.session.expired", "auth.entry")
 
 
 def user_audit(user_id: str) -> list[tuple[str, dict[str, Any]]]:
@@ -771,7 +777,67 @@ class LiveStack:
         if failures:
             raise RuntimeError("로컬 시험 계정 정리 실패: " + "; ".join(failures))
 
+    # S7-U5: the draft mutation routes, by (method, tail of /studies/:uid/...).
+    _DRAFT_MUTATIONS = {("PUT", "report"): "put", ("DELETE", "draft"): "discard",
+                        ("DELETE", "draft/force"): "force", ("POST", "report/commit"): "commit"}
+    _NO_EPOCH = "00000000-0000-4000-8000-000000000000"
+
+    def _as_document(self, method: str, path: str, user: str | None, body: Any) -> Any:
+        """S7-U5: what a page that has just read the study sends with a draft mutation.
+
+        Every draft mutation carries the account and the boundary its document read (`expectedOwner`, and
+        `expectedRevision` or - for the admin's forced release - `expectedEpoch`), and a draft PUT is the whole snapshot.
+        The cases of the live suites say "this member saves this text"; this fills in the rest from the same reads a
+        page makes (GET me, the member's own draft read, the bootstrap state), keeping every citation and structure
+        entry the draft holds. A case that names one of these fields itself - to send a stale, a foreign or a malformed
+        one - is sent exactly as written, and a caller the server refuses anyway gets a well-formed request so that the
+        refusal under test (role, institution, report state) is the one that answers."""
+        found = re.fullmatch(r"/studies/([^/?]+)/(report|draft|draft/force|report/commit)", path)
+        kind = self._DRAFT_MUTATIONS.get((method, found.group(2))) if found else None
+        if kind is None or not user or not (body is None or isinstance(body, dict)):
+            return body
+        sent = dict(body or {})
+        if {"expectedOwner", "expectedRevision", "expectedEpoch"} & set(sent):
+            return body
+        owners = self.__dict__.setdefault("_draft_owners", {})
+        if user not in owners:
+            me = self._send("GET", "/me", user, None)
+            if me.status != 200 or not isinstance(me.body, dict):
+                return body
+            owners[user] = {"institution": me.body.get("institution"), "sub": me.body.get("sub"), "author": me.body.get("actor")}
+        sent["expectedOwner"] = owners[user]
+        uid = found.group(1)
+        read = self._send("GET", f"/studies/{uid}/draft", user, None)
+        mine = read.body if read.status == 200 and isinstance(read.body, dict) else None
+        state = None
+        if mine is None or kind == "force":
+            boot = self._send("GET", "/bootstrap", user, None)
+            states = boot.body.get("states") if boot.status == 200 and isinstance(boot.body, dict) else None
+            state = states.get(unquote(uid)) if isinstance(states, dict) else None
+        if kind == "force":
+            sent["expectedEpoch"] = (state or {}).get("draftEpoch") or (mine["revision"].split(":")[0] if mine else self._NO_EPOCH)
+            return sent
+        sent["expectedRevision"] = mine["revision"] if mine else (state or {}).get("draftRevision") or self._NO_EPOCH + ":0"
+        if kind == "put":
+            snapshot = (mine or {}).get("snapshot") or {}
+            for key in ("findings", "conclusion", "recommendation"):
+                sent.setdefault(key, "")
+            sent.setdefault("baseVersion", 0)
+            sent.setdefault("citationIds", list(snapshot.get("citations") or []))
+            sent.setdefault("structureIds", list(snapshot.get("structured") or []))
+        return sent
+
     def request(self, method: str, path: str, user: str | None = None, body: Any = None) -> HttpResult:
+        result = self._send(method, path, user, self._as_document(method, path, user, body))
+        # S7-U5: a commit or an own discard answers the draft envelope with the study state under `state`. The cases
+        # read the state's fields (rs, version, holder, ...) from the answer, so they are presented at the top as well;
+        # the envelope's own fields win.
+        if (isinstance(result.body, dict) and isinstance(result.body.get("state"), dict)
+                and re.fullmatch(r"/studies/[^/?]+/(draft|report/commit)", path)):
+            return HttpResult(result.status, {**result.body["state"], **result.body}, result.text)
+        return result
+
+    def _send(self, method: str, path: str, user: str | None, body: Any) -> HttpResult:
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Accept": "application/json"}
         if body is not None:
@@ -1195,6 +1261,11 @@ class BffInvariantTests(unittest.TestCase):
         sent = {"Accept": "application/json", **(headers or {})}
         if data is not None:
             sent["Content-Type"] = "application/json"
+        # S7-U5: a cookie session's requests name the session their document saw - the id its bootstrap `GET me` answered
+        # (bff_login keeps it on the opener). A caller that sets the header itself, or an opener without a login, is left alone.
+        bound = getattr(opener, "kin_session", None)
+        if bound and "X-KIN-Session" not in sent:
+            sent["X-KIN-Session"] = bound
         request = Request(self.stack.proxy + path, data=data, headers=sent, method=method)
         try:
             with opener.open(request, timeout=30) as response:
@@ -1270,6 +1341,12 @@ class BffInvariantTests(unittest.TestCase):
             response.read()
         sid = next((cookie.value for cookie in jar if cookie.name == "kin_sid"), None)
         self.assertIsNotNone(sid, "BFF 로그인 뒤 kin_sid가 없습니다")
+        # S7-U5: the document's bootstrap - the one cookie request without a binding. Its answer (200, or the 403 of a
+        # member awaiting approval) carries the session id every later request of this opener sends as X-KIN-Session.
+        me = self.proxy(opener, "GET", "/api/me")
+        session = me.body.get("sessionId") if isinstance(me.body, dict) else None
+        self.assertTrue(isinstance(session, str) and session and session != sid, "GET me가 세션 식별값을 주지 않았습니다")
+        opener.kin_session = session
         return opener, sid
 
     def create_member(self, with_group: bool) -> tuple[str, str, str]:
@@ -1347,13 +1424,16 @@ class BffInvariantTests(unittest.TestCase):
                 me = self.proxy(opener, "GET", "/api/me")
                 self.assertEqual((me.status, me.body.get("actor") if isinstance(me.body, dict) else None),
                                  (200, self.stack.actor("doctor")), "쿠키 세션의 행위자가 doctor가 아닙니다")
+                # S7-U5: each cookie call names its session; the forged cookie rides with the real session's id, so it
+                # is refused as another session's request.
+                bound = {"X-KIN-Session": opener.kin_session}
                 u5_call(records, "R-CSRF", uid, lambda: u5_post(
-                    self.stack, uid, wave, {"Content-Type": "audio/wav"}, opener=opener, base=base))
+                    self.stack, uid, wave, {"Content-Type": "audio/wav", **bound}, opener=opener, base=base))
                 u5_call(records, "R-FORGED", uid, lambda: u5_post(
-                    self.stack, uid, wave, {"Content-Type": "audio/wav", "Cookie": "kin_sid=forged", "X-KIN-CSRF": "1"},
+                    self.stack, uid, wave, {"Content-Type": "audio/wav", "Cookie": "kin_sid=forged", "X-KIN-CSRF": "1", **bound},
                     opener=raw, base=base))
                 u5_call(records, "C-SESSION", uid, lambda: u5_post(
-                    self.stack, uid, wave, {"Content-Type": "audio/wav", "X-KIN-CSRF": "1"}, opener=opener, base=base))
+                    self.stack, uid, wave, {"Content-Type": "audio/wav", "X-KIN-CSRF": "1", **bound}, opener=opener, base=base))
             finally:
                 try:
                     if opener is not None:
@@ -1371,6 +1451,10 @@ class BffInvariantTests(unittest.TestCase):
             ("GET", "auth/login"): 302,
             ("GET", "auth/register"): 302,
             ("GET", "auth/callback"): 302,
+            # S7-U5: the POST login starts are public to the guard and refuse a request without the CSRF header
+            # themselves (403); the entry of a login without a cookie is 401 like any other route.
+            ("POST", "auth/login"): 403,
+            ("POST", "auth/register"): 403,
         }
         for (method, route), _meta in ROUTES.items():
             path = route.replace(":uid", "1.2.3").replace(":id", "1")
@@ -3667,6 +3751,10 @@ class LiveInvariantTests(unittest.TestCase):
                 "PUT", f"/studies/{uid}/report", user,
                 {"findings": "ATTEMPT", "conclusion": "", "recommendation": "", "baseVersion": base_version},
             )
+        if operation == "draft-read":
+            # S7-U5: the caller's own draft and boundary. Its gates are the draft write's (role, institution,
+            # preliminary), and it never carries another author's text.
+            return self.stack.request("GET", f"/studies/{uid}/draft", user)
         if operation == "draft-delete":
             return self.stack.request("DELETE", f"/studies/{uid}/draft", user)
         if operation == "draft-force":
@@ -4183,7 +4271,7 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertIsNotNone(self.state(fixture, "doctor")["draft"])
             cleared = self.stack.request("PUT", path + "/report", "doctor", {})
             self.assert_status(cleared, 200)
-            self.assertTrue(cleared.body.get("cleared"))
+            self.assertEqual((cleared.body.get("present"), cleared.body.get("snapshot")), (False, None))
             self.assertIsNone(self.state(fixture, "doctor")["draft"], "초안 행이 남았습니다")
             after_clear = self.structure_read(fixture, "doctor")
             self.assertEqual({row["sid"] for row in after_clear["head"]},

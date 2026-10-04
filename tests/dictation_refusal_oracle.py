@@ -55,12 +55,18 @@ GATEWAY_PATH = "게이트웨이에 허용되지 않는 경로입니다"
 FILMING = "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다"
 NOT_FOUND = "검사를 찾을 수 없습니다"
 CSRF = "X-KIN-CSRF 헤더가 필요합니다"
-NO_SESSION = "인증 세션이 없습니다"
+# S7-U5: a cookie request names the session its document saw; a cookie that is not that session's is another session.
+OTHER_SESSION = "이 요청을 시작한 로그인 세션이 지금 브라우저의 세션과 다릅니다"
 
 
 def _nest(status: int, error: str, message: str) -> dict[str, Any]:
     # Nest 10's body for a string HttpException; a string refusal keeps this shape on this route too.
     return {"message": message, "error": error, "statusCode": status}
+
+
+def _auth(code: str, message: str) -> dict[str, str]:
+    # S7-U5: an authentication refusal is {code, message} (AuthService.authRefusal); the code is what a page reads.
+    return {"code": code, "message": message}
 
 
 def _coded(code: str) -> dict[str, str]:
@@ -69,14 +75,15 @@ def _coded(code: str) -> dict[str, str]:
 
 FIXED_BODIES = {
     "role": _nest(403, "Forbidden", ROLE),
-    "no-credential": _nest(401, "Unauthorized", NO_CREDENTIAL),
+    "no-credential": _auth("AUTH_CREDENTIALS_MISSING", NO_CREDENTIAL),
     # A3: only reachable after validGateway passed; an invalid identity answers {code: GATEWAY_IDENTITY_INVALID}.
     "gateway-path": _nest(403, "Forbidden", GATEWAY_PATH),
     "filming": _nest(409, "Conflict", FILMING),
     "not-found": _nest(404, "Not Found", NOT_FOUND),
-    "csrf": _nest(403, "Forbidden", CSRF),
-    # A2: authenticateSession's unknown sid (auth.service.ts:252-256), not the expired-session message.
-    "no-session": _nest(401, "Unauthorized", NO_SESSION),
+    "csrf": _auth("AUTH_CSRF_REQUIRED", CSRF),
+    # A2 (S7-U5): the forged cookie arrives with the real session's id, so the guard refuses it as another session's
+    # request before any session is read - not as an expired or a missing one.
+    "other-session": _auth("AUTH_SESSION_MISMATCH", OTHER_SESSION),
     "invalid": _coded(INVALID),
     "too-large": _coded(TOO_LARGE),
     "not-configured": _coded(NOT_CONFIGURED),
@@ -128,7 +135,7 @@ CASES = (
     Case("R-NOSTATE", "T6", "refusal", "doctor", 404, "not-found", None, "C-TELE", probe=True),
     # T7: a cookie call needs the CSRF header and a real session.
     Case("R-CSRF", "T7", "refusal", "doctor", 403, "csrf", None, "C-SESSION"),
-    Case("R-FORGED", "T7", "refusal", None, 401, "no-session", None, "C-SESSION"),
+    Case("R-FORGED", "T7", "refusal", None, 409, "other-session", None, "C-SESSION"),
     Case("C-SESSION", "T7", "control", "doctor", 503, "not-configured", CONTROL),
     # T8: approved (RS=A) admits a draft today, so it admits dictation (parity, not a new rule).
     Case("C-A", "T8", "control", "doctor2", 503, "not-configured", CONTROL),

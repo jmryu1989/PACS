@@ -152,7 +152,9 @@ function world() {
         if (w.failAudit?.(a.data)) throw new Error('SYNTHETIC audit failure');
         const row = { id: ++auditSeq, at: now(), ...a.data }; t.AuditLog.push(row); return clone(row); } },
       report: { findUnique: async () => null, findMany: async () => [] },
-      reportDraft: { findUnique: async () => null, findMany: async () => [], findFirst: held('ReportDraft').findFirst },
+      reportDraft: { findUnique: async () => null, findMany: async () => [], findFirst: held('ReportDraft').findFirst,
+      // S7-U5: a study delete also removes the emptied draft rows (tombstones) the study leaves behind.
+      deleteMany: async () => ({ count: 0 }) },
       reportVersion: held('ReportVersion'), viewerItem: held('ViewerItem'), techNoteRevision: held('TechNoteRevision'),
       viewerJob: held('ViewerJob'), studyQuestion: held('StudyQuestion'), studyImageRequest: held('StudyImageRequest'),
       criticalResult: held('CriticalResult'),
@@ -625,7 +627,7 @@ test('a delete is refused while a record holds the study or the caller may not d
     ['a tech note revision', 'TechNoteRevision', { studyUid: UID, version: 1 }, 409, null],
     ['a saved comparison of another study that includes it', 'ViewerJob', { id: id(5), studyUid: OTHER_UID, studies: [OTHER_UID, UID] }, 409, null],
     ['a report version', 'ReportVersion', { id: 1, uid: UID, version: 1, action: 'approve' }, 400, null],
-    ['a report draft', 'ReportDraft', { uid: UID, author: actorOf('aDoc') }, 400, null],
+    ['a report draft', 'ReportDraft', { uid: UID, author: actorOf('aDoc'), present: true }, 400, null],
   ];
   const refused = async (w, name, uid, expected, code, label) => {
     const before = w.snapshot();

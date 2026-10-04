@@ -40,33 +40,45 @@ const carried = (cid, at = '2026-09-01T00:00:00.000Z', by = 'other@synthetic') =
 // it names: which client read StudyState, whether the access re-check was the transaction-bound
 // one, and whether any draft was touched. Every existing case filters `calls` by name, so the new
 // entries change nothing for them, and the defaults are unchanged for every existing caller.
+const EPOCH = '0a1b2c3d-0000-4000-8000-00000000000a';
+
 function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@synthetic', findings: 'HEAD', conclusion: '', recommendation: '' },
   versions = new Map(), draft = null, readable = READABLE, readableAll = false, bytes = null, fail = null,
   refuseTxRequire = false } = {}) {
   const writes = [], audits = [], raw = [], calls = [], created = [];
+  // S7-U5: the caller's draft row as the store holds it, with its boundary; the study row carries the draft epoch.
+  let row = draft ? { uid: UID, author: CALLER.actor, findings: '', conclusion: '', recommendation: '', baseVersion: 0, citations: null,
+    structured: null, revision: 1, present: true, updatedAt: 'then', ...draft } : null;
+  const stored = { ...state, draftEpoch: EPOCH };
   const tx = {
     $executeRaw: async () => 0,
     $queryRaw: async (strings, ...values) => {
       const sql = strings.join('?').replace(/\s+/g, ' ').trim();
       raw.push(sql);
-      if (sql.includes('FROM "StudyState"')) return [{ uid: UID }];
+      if (sql.includes('FROM "StudyState"')) return [stored];
       if (sql.includes('FROM "Report" WHERE')) return report ? [report] : [];
-      if (sql.includes('FROM "ReportDraft"')) { calls.push({ call: 'reportDraft.raw' }); return draft ? [{ citations: draft.citations ?? null }] : []; }
+      if (sql.includes('FROM "ReportDraft"')) { calls.push({ call: 'reportDraft.raw' }); return row ? [row] : []; }
       if (sql.includes('octet_length')) return [{ bytes: bytes ?? Buffer.byteLength(String(values[0] ?? ''), 'utf8') }];
       throw new Error('unexpected raw query: ' + sql);
     },
-    studyState: { findUnique: async () => { calls.push({ call: 'studyState', tx: true }); return state; },
-      update: async () => { writes.push('studyState.update'); return state; } },
+    studyState: { findUnique: async () => { calls.push({ call: 'studyState', tx: true }); return stored; },
+      update: async () => { writes.push('studyState.update'); return stored; } },
     report: {
       findUnique: async () => (report ? { version: report.version } : null),
       upsert: async a => writes.push('report.upsert:v' + a.create.version),
     },
-    reportDraft: {
-      findUnique: async () => { calls.push({ call: 'reportDraft.findUnique', tx: true }); return draft; },
-      upsert: async a => { writes.push('reportDraft.upsert'); created.push({ call: 'draft', data: a.update });
-        return { uid: UID, author: CALLER.actor, baseVersion: a.update.baseVersion, updatedAt: 'now', ...a.update }; },
-      deleteMany: async () => { writes.push('reportDraft.deleteMany'); return { count: draft ? 1 : 0 }; },
-    },
+    // The draft row is written once per mutation, whichever statement the service uses for it. A write that leaves a
+    // draft is recorded as `reportDraft.upsert` with what it stored; one that leaves none (commit, clear) as
+    // `reportDraft.deleteMany` - the names the cases below have always used for "the draft is stored / is gone".
+    reportDraft: new Proxy({}, { get: (_target, method) => async a => {
+      if (method === 'findUnique') { calls.push({ call: 'reportDraft.findUnique', tx: true }); return row; }
+      const data = a.data ?? a.create ?? a.update;
+      if (data.present === false) writes.push('reportDraft.deleteMany');
+      else { writes.push('reportDraft.upsert'); created.push({ call: 'draft', data }); }
+      row = { ...(row ?? { uid: UID, author: CALLER.actor }), ...data, updatedAt: 'now' };
+      for (const key of ['citations', 'structured']) if (!Array.isArray(row[key])) row[key] = null;
+      return method === 'updateMany' ? { count: 1 } : row;
+    } }),
     reportVersion: {
       findFirst: async () => { const all = [...versions.keys()]; return all.length ? { version: Math.max(...all) } : null; },
       // The uid was ignored before, so a read bound to the wrong study would have passed unnoticed.
@@ -85,7 +97,7 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
       if (fail === 'upsert') throw fail_error(); return work(tx); },
     studyState: { findUnique: async () => { calls.push({ call: 'studyState', tx: false }); return state; } },
     report: { findUnique: async () => report },
-    reportDraft: { findUnique: async () => { calls.push({ call: 'reportDraft.findUnique', tx: false }); return draft; } },
+    reportDraft: { findUnique: async () => { calls.push({ call: 'reportDraft.findUnique', tx: false }); return row; } },
     reportVersion: { findMany: async a => { calls.push({ call: 'versions', args: a }); return []; } },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
@@ -106,7 +118,20 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
     return readable.filter(row => uid === UID && ids.includes(row.id));
   } };
   const keycloak = { usersInGroupWithRole: async () => [] };
-  return { svc: new PacsService(prisma, {}, keycloak, studyAccess, findings), writes, audits, raw, calls, created, tx };
+  // The document that read this fixture's study: every mutation carries its account and the boundary it read, and a
+  // draft PUT the whole snapshot - a keep list the case does not name is the draft's current list (nothing dropped).
+  const real = new PacsService(prisma, {}, keycloak, studyAccess, findings);
+  const pre = c => ({ expectedOwner: { institution: c.institution, sub: c.sub, author: c.actor }, expectedRevision: `${EPOCH}:${row?.revision ?? 0}` });
+  const ids = (key, id) => (Array.isArray(row?.[key]) ? row[key].map(entry => entry[id]) : []);
+  const svc = new Proxy(real, { get(target, name) {
+    if (name === 'putReport') return (uid, body, c) => target.putReport(uid, { findings: '', conclusion: '', recommendation: '', baseVersion: 0,
+      citationIds: ids('citations', 'cid'), structureIds: ids('structured', 'sid'), ...pre(c), ...body }, c, null);
+    if (name === 'commitReport') return (uid, body, c) => target.commitReport(uid, { ...pre(c), ...body }, c, null);
+    if (name === 'forceDiscardDrafts') return (uid, c) => target.forceDiscardDrafts(uid, { expectedOwner: pre(c).expectedOwner, expectedEpoch: EPOCH }, c, null);
+    const value = target[name];
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  return { svc, writes, audits, raw, calls, created, tx, stored };
 }
 
 // The shape PostgreSQL's driver gives us is unproven until the hosted run; the one thing the
@@ -128,7 +153,8 @@ const refusal = async (promise, status) => {
 };
 const put = (f, body, caller = CALLER) => f.svc.putReport(UID, { ...BODY, baseVersion: 4, ...body }, caller);
 const commit = (f, body, caller = CALLER) => f.svc.commitReport(UID, { action: 'save', baseVersion: 4, ...BODY, ...body }, caller);
-const stored = f => f.created.find(row => row.call === 'draft')?.data.citations;
+// The citation entries the draft write stored (no entries are stored as SQL NULL, never as an empty array).
+const stored = f => { const kept = f.created.find(row => row.call === 'draft')?.data.citations; return Array.isArray(kept) ? kept : []; };
 const signed = f => f.created.filter(row => row.call === 'version').pop()?.data.citations;
 
 test('the shared vectors decide the compiled rule, not the other way round', () => {
@@ -278,17 +304,22 @@ test('a missing source and an unreadable finding are refused with the same words
   assert.equal(gone.code, 'REPORT_CITATION_SOURCE');
 });
 
-test('an old client that sends no citation key changes nothing, and [] clears my own', async () => {
+test('a draft write carries its whole keep list: a list that is not sent is refused, the full list keeps, [] clears my own', async () => {
   const rows = [carried('a')];
-  const untouched = fixture({ draft: { baseVersion: 4, citations: rows } });
-  await put(untouched, {});
-  assert.equal(stored(untouched), undefined, 'the column is not written at all');
-  assert.deepEqual(untouched.raw, [], 'and the row is not even locked');
+  // S7-U5: a missing list used to mean "unchanged", which let a write that did not know the list keep or drop what it
+  // never saw. It is refused by name now, and nothing is written.
+  const missing = fixture({ draft: { baseVersion: 4, citations: rows } });
+  const refused = await refusal(put(missing, { citationIds: undefined }), 400);
+  assert.deepEqual([refused.code, refused.field], ['REPORT_DRAFT_PRECONDITION_REQUIRED', 'citationIds']);
+  assert.deepEqual(missing.writes, [], 'nothing is written');
+
+  const kept = fixture({ draft: { baseVersion: 4, citations: rows } });
+  await put(kept, { citationIds: ['a'] });
+  assert.deepEqual(stored(kept).map(e => e.cid), ['a']);
 
   const cleared = fixture({ draft: { baseVersion: 4, citations: rows } });
   await put(cleared, { citationIds: [] });
   assert.deepEqual(stored(cleared), []);
-
   const partial = fixture({ draft: { baseVersion: 4, citations: [carried('a'), carried('b')] } });
   await put(partial, { citationIds: ['b', 'unknown-cid'] });
   assert.deepEqual(stored(partial).map(e => e.cid), ['b']);
@@ -356,7 +387,7 @@ test('a forced release preserves each author\'s own citations and survives rows 
   const f = fixture({ draft: { baseVersion: 4 } });
   f.tx.$queryRaw = async (strings) => {
     const sql = strings.join('?').replace(/\s+/g, ' ').trim();
-    if (sql.includes('FROM "StudyState"')) return [{ uid: UID }];
+    if (sql.includes('FROM "StudyState"')) return [f.stored];
     return [{ uid: UID, author: 'a@synthetic', findings: 'A', conclusion: '', recommendation: '', baseVersion: 1, citations: [carried('mine')], updatedAt: 'now' },
       { uid: UID, author: 'b@synthetic', findings: 'B', conclusion: '', recommendation: '', baseVersion: 1, citations: null, updatedAt: 'now' }];
   };
@@ -402,7 +433,7 @@ test('an insertion is refused before the union can exceed the cap, and a keep li
 test('emptying the report deletes the draft row and the attestation of text that is gone', async () => {
   const f = fixture({ draft: { baseVersion: 4, citations: [carried('a')] } });
   const answer = await f.svc.putReport(UID, { findings: '', conclusion: '', recommendation: '', baseVersion: 4 }, CALLER);
-  assert.equal(answer.cleared, true);
+  assert.deepEqual([answer.present, answer.snapshot], [false, null]);
   assert.deepEqual(f.writes, ['reportDraft.deleteMany']);
   // No text, no attestation: the row carries both or neither.
   assert.deepEqual(f.audits.map(a => a.action), ['report.draft.clear']);
@@ -427,7 +458,7 @@ test('a citation CHECK becomes the same named 409 on all three write paths, and 
   const signing = await refusal(commit(fixture({ draft, fail: 'create' }), { action: 'approve' }), 409);
   assert.equal(signing.code, 'REPORT_CITATION_LIMIT');
   const forced = fixture({ draft, fail: 'createMany' });
-  forced.tx.$queryRaw = async strings => (strings.join('?').includes('StudyState') ? [{ uid: UID }]
+  forced.tx.$queryRaw = async strings => (strings.join('?').includes('StudyState') ? [forced.stored]
     : [{ uid: UID, author: 'a@synthetic', findings: 'A', conclusion: '', recommendation: '', baseVersion: 1, citations: null, updatedAt: 'now' }]);
   const release = await refusal(forced.svc.forceDiscardDrafts(UID, { ...CALLER, roles: ['admin'] }), 409);
   assert.equal(release.code, 'REPORT_CITATION_LIMIT');
@@ -441,23 +472,23 @@ test('a citation CHECK becomes the same named 409 on all three write paths, and 
   assert.notEqual(e.getStatus?.(), 409);
 });
 
-test('a version-number collision retries, and a CHECK on the retry leg is the same named 409', async () => {
+test('a forced release runs once under the study lock a commit takes: its CHECK is the named 409 and there is no retry leg', async () => {
+  // Before S7-U5 a forced release could collide with a concurrent commit on the version number and ran a second time,
+  // and that second leg needed the same mapping. Both now stand in line on the study row, so the release runs once.
   const f = fixture({ draft: { baseVersion: 4 } });
-  f.tx.$queryRaw = async strings => (strings.join('?').includes('StudyState') ? [{ uid: UID }]
-    : [{ uid: UID, author: 'a@synthetic', findings: 'A', conclusion: '', recommendation: '', baseVersion: 1, citations: [carried('mine')], updatedAt: 'now' }]);
-  let attempt = 0;
-  f.tx.reportVersion.createMany = async () => {
-    attempt += 1;
-    // First a real number collision with a concurrent commit, then the CHECK on the second try.
-    if (attempt === 1) throw Object.assign(new Error('unique constraint'), { code: 'P2002' });
-    throw fail_error();
+  f.tx.$queryRaw = async strings => {
+    const sql = strings.join('?').replace(/\s+/g, ' ').trim();
+    f.raw.push(sql);
+    return sql.includes('StudyState') ? [f.stored]
+      : [{ uid: UID, author: 'a@synthetic', findings: 'A', conclusion: '', recommendation: '', baseVersion: 1, citations: [carried('mine')], revision: 1, present: true, updatedAt: 'now' }];
   };
+  let attempt = 0;
+  f.tx.reportVersion.createMany = async () => { attempt += 1; throw fail_error(); };
   const body = await refusal(f.svc.forceDiscardDrafts(UID, { ...CALLER, roles: ['admin'] }), 409);
-  assert.equal(attempt, 2, 'the collision really did retry');
-  assert.equal(body.code, 'REPORT_CITATION_LIMIT',
-    'mapping only the first attempt would let the same request answer two different ways');
+  assert.equal(attempt, 1, 'one attempt');
+  assert.equal(body.code, 'REPORT_CITATION_LIMIT');
+  assert.match(f.raw[0], /FROM "StudyState".*FOR UPDATE/, 'the study row is locked before the drafts are read');
 });
-
 test('the history response names its columns and the new one is not among them', async () => {
   const f = fixture();
   await f.svc.versions(UID, CALLER);
