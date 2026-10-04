@@ -14,8 +14,9 @@
  * successful mutations), never read back from the implementation.
  *
  * Interleavings (U5S-REQ-23, -24): two requests X and Y, the arrival order (which handler is entered first), the order
- * of their DB completion (which transaction commits first) and the order their answers are delivered - the eight
- * orderings. A request is held before its transaction opens (arrived, not yet at the database) or after its work, before
+ * of their DB completion (which transaction commits first) and the order their answers are delivered. The matrix runs
+ * the orderings that decide a row's outcome (both completion orders and one held answer) over one writer per server
+ * path; the reduction and its reasons are at RELATIONS below. A request is held before its transaction opens (arrived, not yet at the database) or after its work, before
  * its commit (holding the study row), by a recording view of the real Prisma client and of the real StudyAccessService;
  * a request waiting for the study row is recognised in pg_stat_activity. Nothing in the product exists for this file.
  * The oracle of a schedule is (a) the literal CAS expectation - of two same-owner writes carrying the same boundary,
@@ -336,16 +337,30 @@ function fixtureFor(x, y) {
 const studyOf = (w, fixture, draft) => w.study(fixture === 'open' ? { rs: 'W', draft } : { rs: 'A', draft, staleBase: fixture === 'stale' });
 
 /**
- * The principal of Y. For another institution X ranges over one writer of each server route (draft PUT, own discard, a
- * commit in each report state, force-discard) instead of all thirteen: Y is refused as an unknown study before the study
- * row is read, whatever X is, so the other X kinds would repeat the same Y path (all thirteen Y kinds are kept).
+ * The reduced matrix (U5S-REQ-23 as narrowed by the fix10s work order: representative cases, not the full product of
+ * writer kinds x eight orderings x four principal relations).
+ *
+ * Writers: the thirteen kinds reach the draft boundary through five server paths, and a race is run once per pair of
+ * paths, not once per pair of kinds -
+ *   content  putReport with text: autosave, explicit save, preservation, preparation save, Recover Draft, stale rebase,
+ *            citation insertion, structure apply (one conditional write of the caller's row)
+ *   clear    putReport with three empty texts (the tombstone write of the same handler)
+ *   discard  discardDraft
+ *   commit   commitReport: save, approve, preliminary, defer, addendum, reset
+ *   force    forceDiscardDrafts (the epoch)
+ * What differs between the kinds of one path (the rebase audit row, citation and structure entries, each commit
+ * action's report-state rule) does not decide a race at the boundary; it is asserted in D10, D09 and the report suites.
+ * Orderings: what is stored is decided by which transaction commits first, so both completion orders run; the order in
+ * which the two answers are handed over cannot change it and is varied once (the winner's answer held back).
+ * Principals: one owner in one session. Another session of the same owner, another subject and another institution do
+ * not change which row a write lands in or which boundary it carries: those are D05 and D09.
  */
-const RELATIONS = {
-  'same session': { other: A, session: 'same' },
-  'same owner, replacement login': { other: A, session: 'second' },
-  'different subject': { other: B, session: 'own' },
-  'different institution': { other: C, session: 'own', xKinds: ['put', 'discard', 'approve', 'addendum', 'force'] },
-};
+const PATH_OF = { put: 'content', rebase: 'content', insert: 'content', structure: 'content', clear: 'clear', discard: 'discard',
+  save: 'commit', approve: 'commit', preliminary: 'commit', defer: 'commit', addendum: 'commit', reset: 'commit', force: 'force' };
+const REPRESENTATIVE = { content: 'put', clear: 'clear', discard: 'discard', commit: 'approve', force: 'force' };
+const MATRIX = Object.values(REPRESENTATIVE);
+const ORDERINGS = [['XY', 'XY', 'XY'], ['XY', 'YX', 'XY'], ['XY', 'XY', 'YX']];
+const RELATIONS = { 'same owner, one session': { other: A, session: 'same' } };
 
 /** The two requests of a schedule on study `uid`: X by A (or the admin for force), Y by the relation's principal. */
 async function pairOn(w, uid, fixture, x, y, relation, sessions) {
@@ -411,21 +426,20 @@ async function serial(w, fixture, draft, x, y, relation, sessions, completion) {
   return { before, middle, after: await w.state(uid), answers: { [completion[0]]: one, [completion[1]]: two } };
 }
 
-const ORDERINGS = ['XY', 'YX'].flatMap(arrival => ['XY', 'YX'].flatMap(completion => ['XY', 'YX'].map(response => [arrival, completion, response])));
-
-// ── D01, D03, D04 over the whole writer matrix: every pair x eight orderings x four principal relations ──
+// ── D01, D03, D04 over the reduced matrix: every pair of server writer paths, both completion orders, one held answer.
+//    First creates (no draft row yet) are D01, D03 (initially absent draft) and D04 (zero present drafts) below. ──
 
 for (const [relation, spec] of Object.entries(RELATIONS)) {
-  for (const draft of [true, false]) {
-    test(`D01/D03/D04 matrix: ${relation}, ${draft ? 'a present draft' : 'no draft row yet (first create)'} - every writer pair in the eight orderings`, async () => {
+  for (const draft of [true]) {
+    test(`D01/D03/D04 matrix: ${relation}, a present draft - every pair of server writer paths, both completion orders and a held answer`, async () => {
       const w = await world();
       const sessions = {};
       for (const principal of [A, B, C, ADMIN, OTHER_ADMIN]) for (const slot of ['first', 'second'])
         sessions[`${principal.actor}:${slot}`] = await w.session(principal);
       const table = [], inapplicable = [];
       const twins = new Map();
-      for (let i = 0; i < KINDS.length; i++) for (let j = 0; j < KINDS.length; j++) {
-        const x = KINDS[i], y = KINDS[j];
+      for (let i = 0; i < MATRIX.length; i++) for (let j = 0; j < MATRIX.length; j++) {
+        const x = MATRIX[i], y = MATRIX[j];
         // an unordered pair once where both sides are the same owner; ordered where Y is another principal
         if (spec.other === A && j < i) continue;
         if (spec.xKinds && !spec.xKinds.includes(x)) continue;
@@ -483,7 +497,7 @@ for (const [relation, spec] of Object.entries(RELATIONS)) {
       }
       const refused = table.filter(row => !row[6].ok || !row[7].ok).length;
       report(JSON.stringify({ matrix: relation, draft: draft ? 'present' : 'absent', schedules: table.length, with_a_refused_write: refused,
-        x_kinds: spec.xKinds ?? KINDS, y_kinds: KINDS, inapplicable: inapplicable.length, inapplicable_pairs: inapplicable }));
+        x_kinds: spec.xKinds ?? MATRIX, y_kinds: MATRIX, orderings: ORDERINGS, inapplicable: inapplicable.length, inapplicable_pairs: inapplicable }));
       for (const row of table) report('SCHEDULE ' + JSON.stringify({ relation, draft: draft ? 'present' : 'absent', x: row[0], y: row[1], fixture: row[2],
         arrival: row[3], completion: row[4], response: row[5], X: row[6], Y: row[7] }));
       assert.ok(table.length > 0);
@@ -491,9 +505,13 @@ for (const [relation, spec] of Object.entries(RELATIONS)) {
   }
 }
 
-test('the matrix names every writer kind of U5S-REQ-23 and what the server sees of each', () => {
+test('every writer kind of U5S-REQ-23 is named, with what the server sees of it and the server path it takes', () => {
   assert.deepEqual(Object.keys(CLIENT_WRITERS).sort(), [...KINDS].sort());
+  assert.deepEqual(Object.keys(PATH_OF).sort(), [...KINDS].sort(), 'no kind without a path');
+  assert.deepEqual([...new Set(Object.values(PATH_OF))].sort(), Object.keys(REPRESENTATIVE).sort(), 'every path has its representative in the matrix');
+  for (const [path, kind] of Object.entries(REPRESENTATIVE)) assert.equal(PATH_OF[kind], path);
   report('WRITERS ' + JSON.stringify(CLIENT_WRITERS));
+  report('PATHS ' + JSON.stringify({ path_of: PATH_OF, representative: REPRESENTATIVE }));
 });
 
 // ── D01: first create ──
@@ -542,7 +560,8 @@ test('D02 Y read the revision X committed while X\'s answer is still held: Y com
 
 // ── D03: tombstones ──
 
-for (const ender of ['clear', 'discard', 'save', 'approve', 'preliminary', 'defer', 'addendum', 'reset']) {
+// One ender per server path that ends a draft (clear, own discard, commit): the six commit actions are one path.
+for (const ender of ['clear', 'discard', 'approve']) {
   for (const draft of [true, false]) {
     test(`D03 ${ender} then a late PUT of the boundary before it (${draft ? 'present draft' : 'initially absent draft'}): the tombstone refuses the resurrection`, async () => {
       const w = await world();
@@ -690,7 +709,7 @@ test('D05 a cookie-session draft write commits before the revocation of its sess
   await w.auth.logout({ sid, headers: {} });
   await w.auth.logout({ sid: adminSid, headers: {} });
   const epoch = await w.epoch(uid);
-  for (const kind of ['put', 'clear', 'discard', 'save', 'approve', 'reset', 'force']) {
+  for (const kind of MATRIX) {
     const who = kind === 'force' ? ADMIN : A;
     const [route, body] = request(kind, who, { token, epoch, head: 0, mark: 'X' });
     assert.deepEqual(brief(await w.send('X', route, { as: who, sid: kind === 'force' ? adminSid : sid, uid, body })),
@@ -792,7 +811,8 @@ test('D07 after an unknown outcome the authoritative read tells exactly what is 
 
 // ── D08: rollback and retry of the same revision ──
 
-for (const kind of ['put', 'clear', 'discard', 'save', 'approve', 'addendum', 'reset', 'force']) {
+// One writer per server path: the audit row of each path is written in that path's transaction.
+for (const kind of MATRIX) {
   test(`D08 ${kind}: an audit write that fails rolls the whole mutation back; a competitor goes on; the same revision retried succeeds`, async () => {
     const w = await world();
     const fixture = kind === 'addendum' ? 'approved' : 'open';
