@@ -897,6 +897,29 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                 self.page.wait_for_url(h.INDEX_URL)
                 self.assertEqual((shown, []), (self.site.stored_for(h.UID), self.dialogs))
 
+    def test_text_typed_while_a_save_is_out_is_not_confirmed_by_that_save(self):
+        self.page.clock.install()
+        self.open_main()
+        self.select_and_type()
+        self.site.put_answers = ["hold"]
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.held_puts, "the autosave is out")
+        later = {**h.FIELDS, "findings": h.FIELDS["findings"] + " SYN typed while the save was out"}
+        self.page.fill("#findings", later["findings"])
+        self.assertEqual(200, self.site.finish_put())
+        self.wait_until(lambda: self.site.stored_for(h.UID) == h.FIELDS, "the earlier text stored")
+        self.page.wait_for_timeout(300)
+        # The server now holds the earlier text. A list read brings it; the later text is still this document's.
+        self.refresh()
+        self.page.wait_for_timeout(400)
+        self.assertEqual(later, self.editor(), "the list read replaced text typed while the save was out")
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.stored_for(h.UID) == later, "the later text stored by the next autosave")
+        # Saved text is said to be saved, with the time it was.
+        expect(self.page.locator("#draftmsg")).to_contain_text(re.compile(r"\d{2}:\d{2}"))
+        self.assertFalse(self.leaving_asks(), "everything is stored: leaving asks nothing")
+        self.assertEqual([], self.dialogs)
+
     def test_a_refused_or_unconfirmed_approve_or_save_of_an_unedited_study_writes_and_asks_nothing(self):
         cases = (("Approve refused for a newer version", "#b-approve", (409, {"message": "그 사이 다른 사용자가 저장했습니다 (v2)"}), [False]),
                  ("Save refused", "#b-save", (500, {"message": "SYN commit refused"}), []),
@@ -964,6 +987,115 @@ class ReportTextBoundaries(h.LogoutDOMTest):
             self.page.wait_for_timeout(200)
         self.assertEqual((1, None), (len(self.site.puts), self.site.stored_for(h.UID)),
                          "the saved report was written as a draft after a refused insertion")
+        self.assertFalse(self.leaving_asks())
+        self.log_out_main()
+        self.page.wait_for_url(h.INDEX_URL)
+        self.assertEqual((1, 1), (len(self.site.puts), len(self.site.logouts)))
+
+    def test_a_study_the_server_no_longer_accepts_is_announced_once_and_its_text_kept(self):
+        self.page.clock.install()
+        self.open_main()
+        notices = self.collect_notices()
+        self.select_and_type()
+        self.site.put_answers = [(403, {"statusCode": 403, "message": "SYN no access to this study"})] * 10
+        self.switch(h.PATIENT_B)
+        self.wait_until(lambda: len(self.site.puts) == 1, "A refused on leaving it")
+        self.site.hidden = {h.UID}          # the study left this reader's list (access removed, another institution)
+        for _ in range(4):
+            self.page.clock.run_for(21000)
+            self.page.wait_for_timeout(200)
+        expect(self.page.locator("#rows")).not_to_contain_text(h.PATIENT)
+        self.assertEqual(1, len(self.site.puts), "the refused text was sent again by itself")
+        self.assertEqual(1, len([text for text, error in notices if error]), notices)
+        # The text is kept: Log out asks, naming the study by the only name it still has.
+        self.log_out_main()
+        expect(self.panel_title()).to_have_text("Draft Not Saved")
+        expect(self.page.locator("dialog.kin-logout")).to_contain_text(h.UID)
+        self.assertEqual([], self.site.logouts)
+        self.site.put_answers = []
+        self.panel_button("Retry").click()
+        self.page.wait_for_url(h.INDEX_URL)
+        self.assertEqual(h.FIELDS, self.site.stored_for(h.UID))
+
+    def test_a_passing_save_failure_is_retried_without_repeating_the_notice(self):
+        self.page.clock.install()
+        self.open_main()
+        notices = self.collect_notices()
+        self.select_and_type()
+        self.site.put_answers = [(500, {"statusCode": 500, "message": "SYN passing failure"})] * 3
+        for _ in range(3):
+            self.page.clock.run_for(20500)
+            self.page.wait_for_timeout(200)
+        self.assertEqual(3, len(self.site.puts), "a failure that may pass is tried again")
+        self.assertEqual(1, len([text for text, error in notices if error]), notices)
+        self.page.clock.run_for(20500)
+        self.wait_until(lambda: self.site.stored_for(h.UID) == h.FIELDS, "stored once the server accepts")
+        self.assertEqual(h.FIELDS, self.editor())
+
+    def test_load_latest_without_that_study_in_the_answer_keeps_the_text_and_says_so(self):
+        self.context.add_init_script(h.CLIPBOARD)
+        self.site.bootstrap_states = {}     # the study is no longer among this reader's states
+        self.open_main()
+        notices = self.collect_notices()
+        self.select_and_type()
+        refusal = "그 사이 다른 사용자가 저장했습니다 (v1)"
+        self.site.report = {"version": 1, "rs": "T", "findings": "SYN server report v1", "conclusion": "", "recommendation": ""}
+        self.site.commit_answers = [(409, {"message": refusal})]
+        self.dialog_answers = [True]
+        reads = self.site.count("GET", "/api/bootstrap")
+        self.page.locator("#b-save").click()
+        self.wait_until(lambda: self.site.count("GET", "/api/bootstrap") > reads, "the read of the latest report")
+        self.wait_until(lambda: any(error and text != refusal for text, error in notices), "the failed load is said")
+        self.assertEqual(h.FIELDS, self.editor(), "the text the reader was writing stays")
+        expect(self.page.locator("#b-save")).to_be_enabled()
+        self.assertTrue(self.leaving_asks(), "the unsaved text is still this document's")
+        # (tearDown: no page error - the failure is handled, not thrown)
+
+    def save_and_leave_before_the_answer(self):
+        """Save of study A is out; the reader moves to study B; then the server accepts the Save (what the harness
+        answers for an unheld commit). The write of leaving A stood behind the Save."""
+        self.site.commit_answers = ["hold"]
+        self.page.locator("#b-save").click()
+        self.wait_until(lambda: self.site.held_commits, "Save is out")
+        self.switch(h.PATIENT_B)
+        self.page.wait_for_timeout(200)
+        route, body = self.site.held_commits.pop(), self.site.commits[-1]
+        self.site.revs[h.RAD["actor"]] = self.site.revs.get(h.RAD["actor"], 0) + 1
+        self.site.rows.pop(h.RAD["actor"], None)
+        self.site.report = {"version": 1, "rs": "T", **{k: body.get(k, "") for k in h.FIELDS}}
+        route.fulfill(json={**self.site.envelope(h.RAD), "state": self.site.state(h.RAD)})
+        row = self.page.locator("#rows tr", has_text=h.PATIENT).first
+        expect(row.get_by_role("cell", name="T", exact=True)).to_be_visible()
+
+    def test_a_save_accepted_after_the_study_was_left_is_not_reported_as_failed(self):
+        self.open_main()
+        notices = self.collect_notices()
+        self.select_and_type()
+        self.save_and_leave_before_the_answer()
+        self.page.wait_for_timeout(600)
+        self.assertEqual([], [text for text, error in notices if error], "an accepted Save was shown as a failure")
+        # The page stands on the saved version: the next Save names it.
+        self.switch(h.PATIENT)
+        expect(self.page.locator("#findings")).to_have_value(h.FIELDS["findings"])
+        self.page.locator("#b-save").click()
+        self.wait_until(lambda: len(self.site.commits) == 2, "the next Save")
+        self.assertEqual(1, self.site.commits[-1]["baseVersion"])
+
+    def test_a_refused_write_left_behind_an_accepted_save_is_not_a_failure_and_not_sent_again(self):
+        self.page.clock.install()
+        self.open_main()
+        notices = self.collect_notices()
+        self.select_and_type()
+        self.site.put_answers = [(403, {"statusCode": 403, "message": "SYN refused"})]
+        self.save_and_leave_before_the_answer()
+        self.wait_until(lambda: len(self.site.puts) == 1, "the write of leaving the study, refused")
+        self.page.wait_for_timeout(300)
+        for _ in range(2):
+            self.page.clock.run_for(21000)
+            self.page.wait_for_timeout(200)
+        # The Save stored that text as the report: nothing of this document is unconfirmed, whatever became of the write.
+        self.assertEqual((1, None), (len(self.site.puts), self.site.stored_for(h.UID)), "the saved report was sent again as a draft")
+        self.assertEqual([], [text for text, error in notices if error], "the reader was told of a failure that lost nothing")
         self.assertFalse(self.leaving_asks())
         self.log_out_main()
         self.page.wait_for_url(h.INDEX_URL)
