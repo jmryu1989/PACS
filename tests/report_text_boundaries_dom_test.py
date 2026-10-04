@@ -18,6 +18,7 @@ class MultiStudySite(h.Site):
         self.second_study = True
         self.current_uid = h.UID
         self.other_state = ({}, {}, {"version": 0, "rs": "W"})
+        self.bootstrap_states = None
 
     @contextlib.contextmanager
     def study(self, uid):
@@ -47,11 +48,30 @@ class MultiStudySite(h.Site):
             return row
 
     def api(self, route, request, method, path, query):
+        if method == "GET" and path == "/api/bootstrap" and self.bootstrap_states is not None:
+            return route.fulfill(json={"states": self.bootstrap_states, "orders": [], "filters": [], "templates": [],
+                "me": {"institution": h.INSTITUTION, "institutionName": "SYN Hospital A"}, "institutions": []})
         match = re.match(r"/api/studies/([^/]+)/", path)
         uid = match.group(1) if match else h.UID
         if uid == h.UID_B:
+            # Playwright may dispatch another request while fulfill yields. Restore the fixture's study before
+            # yielding, so another request (or the test's next server write) cannot accidentally use B's storage.
+            actions = []
+            class Answer:
+                deferred = True
+                def __getattr__(self, name):
+                    return getattr(route, name)
+                def fulfill(self, **kwargs):
+                    return actions.append(("fulfill", kwargs)) if self.deferred else route.fulfill(**kwargs)
+                def abort(self, error_code="failed"):
+                    return actions.append(("abort", {"error_code": error_code})) if self.deferred else route.abort(error_code)
+            answer = Answer()
             with self.study(uid):
-                return super().api(route, request, method, path.replace(h.UID_B, h.UID), query)
+                result = super().api(answer, request, method, path.replace(h.UID_B, h.UID), query)
+            answer.deferred = False
+            for action, kwargs in actions:
+                getattr(route, action)(**kwargs)
+            return result
         return super().api(route, request, method, path, query)
 
     def stored_for(self, uid):
@@ -283,6 +303,126 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.assertEqual(first["preparation"], resumed["preparation"])
         self.assertNotEqual(second["preparation"], resumed["preparation"])
         self.assertEqual("preparing", self.screen(other)["state"])
+
+    def go_offline(self, elapsed=61000):
+        self.site.list_answers = [(500, {"code": "SYN_OUTAGE"})] * 2
+        self.page.clock.run_for(elapsed)
+        expect(self.page.locator("#dbstat")).to_contain_text("서버 연결 끊김")
+
+    def test_reconnect_keeps_and_saves_unselected_offline_text(self):
+        for bootstrap in ("omitted", "included"):
+            with self.subTest(bootstrap=bootstrap):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.page.clock.install()
+                self.open_main()
+                self.select_and_type()
+                self.go_offline()
+                latest = "SYN offline unselected text"
+                self.page.fill("#findings", latest)
+                self.switch(h.PATIENT_B)
+                if bootstrap == "included":
+                    self.site.bootstrap_states = {h.UID: self.site.state(h.RAD)}
+                self.page.clock.run_for(16000)
+                expect(self.page.locator("#dbstat")).to_contain_text("DB Connected")
+                self.wait_until(lambda: self.site.stored_for(h.UID)["findings"] == latest, "A saved without reselecting")
+                self.switch(h.PATIENT)
+                self.assertEqual({**h.FIELDS, "findings": latest}, self.editor())
+                self.assertEqual([], self.dialogs)
+
+    def test_late_refresh_and_poll_merge_facts_without_losing_unconfirmed_text(self):
+        for arrival in ("refresh", "poll", "poll with arrival"):
+            with self.subTest(arrival=arrival):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.page.clock.install()
+                self.open_main()
+                self.site.held_lists = []
+                if arrival == "refresh":
+                    self.refresh()
+                else:
+                    self.page.clock.run_for(31000)
+                self.wait_until(lambda: self.site.held_lists, "list read held before editing")
+                route, account = self.site.held_lists.pop()
+                self.site.held_lists = None
+                self.select_and_type()
+                self.site.put_answers = ["hold"]
+                self.switch(h.PATIENT_B)
+                self.wait_until(lambda: self.site.held_puts, "unconfirmed A write")
+                self.site.write({**h.MORE, "baseVersion": 0, "citationIds": [], "structureIds": [],
+                    "expectedOwner": h.owner_of(h.RAD), "expectedRevision": "SYNEPOCH1:0"}, h.RAD)
+                self.site.report.update(version=4, rs="T")
+                body = self.site.list_body(account, rename="SYN PATIENT UPDATED")
+                body["studies"][0]["count"] = 42
+                if arrival == "poll with arrival":
+                    body["studies"].append({**body["studies"][0], "uid": h.UID + ".3", "name": "SYN NEW ARRIVAL"})
+                    body["studies"].sort(key=lambda row: row["uid"])
+                    body["pagination"]["total"] += 1
+                self.site.answer(route, 200, body)
+                patient = h.PATIENT if arrival == "poll" else "SYN PATIENT UPDATED"
+                row = self.page.locator("#rows tr", has_text=patient).first
+                expect(row.get_by_role("cell", name="42", exact=True)).to_be_visible()
+                expect(row.get_by_role("cell", name="T", exact=True)).to_be_visible()
+                row.click()
+                self.assertEqual(h.FIELDS, self.editor())
+                self.assertEqual("SYNEPOCH1:0", self.site.puts[0]["expectedRevision"])
+                self.site.finish_put()
+                expect(self.page.locator("#b-draft-keep")).to_be_visible()
+                self.assertEqual(h.FIELDS, self.editor())
+                self.page.locator("#b-draft-keep").click()
+                self.wait_until(lambda: self.site.stored_for(h.UID) == h.FIELDS, "explicitly kept A text")
+                self.assertEqual((0, "SYNEPOCH1:1"),
+                                 (self.site.puts[-1]["baseVersion"], self.site.puts[-1]["expectedRevision"]))
+
+    def test_reconnect_preserves_open_conflict_and_latest_attempt(self):
+        self.prepare_conflict()
+        latest = "SYN conflict typed offline"
+        self.go_offline(41000)
+        self.page.fill("#findings", latest)
+        self.switch(h.PATIENT_B)
+        self.site.bootstrap_states = {h.UID: self.site.state(h.RAD)}
+        puts = len(self.site.puts)
+        self.page.clock.run_for(16000)
+        expect(self.page.locator("#dbstat")).to_contain_text("DB Connected")
+        self.assertEqual(puts, len(self.site.puts), "reconnect cannot resolve another document's conflict")
+        self.assertEqual("SYN other document", self.site.stored_for(h.UID)["findings"])
+        self.switch(h.PATIENT)
+        expect(self.page.locator("#findings")).to_have_value(latest)
+        expect(self.page.locator("#b-draft-keep")).to_be_visible()
+        self.page.locator("#b-draft-keep").click()
+        self.wait_until(lambda: self.site.stored_for(h.UID)["findings"] == latest, "latest conflict attempt stored")
+
+    def test_reconnect_keeps_unknown_outcome_until_authoritative_read(self):
+        self.page.clock.install()
+        self.open_main()
+        self.select_and_type()
+        self.site.put_answers = ["abort"]
+        self.site.draft_read_answers = ["abort"] * 20
+        self.switch(h.PATIENT_B)
+        self.wait_until(lambda: self.site.puts and len(self.site.draft_reads) >= 2, "A uncertain")
+        self.go_offline()
+        self.site.bootstrap_states = {h.UID: self.site.state(h.RAD)}
+        puts = len(self.site.puts)
+        self.page.clock.run_for(16000)
+        expect(self.page.locator("#dbstat")).to_contain_text("DB Connected")
+        self.assertEqual(puts, len(self.site.puts), "bootstrap is not an authoritative draft confirmation")
+        self.switch(h.PATIENT)
+        self.assertEqual(h.FIELDS, self.editor())
+        self.site.draft_read_answers = []
+        self.log_out_main()
+        self.page.wait_for_url(h.INDEX_URL)
+        self.assertEqual(h.FIELDS, self.site.stored_for(h.UID))
+
+    def test_legacy_demo_text_never_becomes_an_authenticated_draft(self):
+        self.context.add_init_script("""localStorage.setItem('kin-app', JSON.stringify({
+            '""" + h.UID + """': {draft: {findings:'SYN DEMO PRIVATE', conclusion:'', recommendation:'', baseVersion:0}}
+        }));""")
+        self.open_main()
+        self.switch(h.PATIENT)
+        expect(self.page.locator("#findings")).to_have_value("")
+        self.assertEqual([], self.site.puts)
+        backups = self.page.evaluate("Object.keys(localStorage).filter(k => k.startsWith('kin-app-backup-')).map(k => localStorage[k])")
+        self.assertTrue(any("SYN DEMO PRIVATE" in value for value in backups))
 
 
 def load_tests(loader, tests, pattern):

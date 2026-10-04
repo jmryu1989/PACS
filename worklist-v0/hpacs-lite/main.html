@@ -2055,8 +2055,10 @@
     }
     function apiFail(e) { toast("서버 저장 실패: " + e.message, "err"); }
 
-    let appState = {};
-    try { appState = JSON.parse(localStorage.getItem("kin-app") ?? "{}"); } catch (e) {}
+    const appState = {};
+    // Legacy demo data has no authenticated owner; never merge it into this session's drafts.
+    let legacyAppState = {};
+    try { legacyAppState = JSON.parse(localStorage.getItem("kin-app") ?? "{}"); } catch (e) {}
 
     // PATCH로 보낼 수 있는 필드. 서버의 STATE_FIELDS와 같아야 한다.
     // 판독 생애주기는 commitReport, matched·orig는 /match·/unmatch만 움직인다.
@@ -5213,7 +5215,7 @@
           return;
         }
         work.commit(at, () => {
-          appState[s.uid] = { ...a, ...st };
+          appState[s.uid] = mergePolledState(s.uid, st);
           Object.assign(s, st.ov ?? {}, { matched: "M", ward: st.ward });
           o.matched = "M"; o.studyUid = s.uid;
           // S4-U5: a list answer requested before this match would re-install the unmatched row; drop it and read again.
@@ -5251,7 +5253,7 @@
           return;
         }
         work.commit(at, () => {
-          appState[s.uid] = { ...a, ...st, ov: undefined };
+          appState[s.uid] = { ...mergePolledState(s.uid, st), ov: undefined };
           // S4-U5: back to what the server last read from the DICOM, never to the client-claimed orig. Without
           // those tags the fields stay until the list read below repaints them.
           const read = studyIdentityModel ? KinStudyIdentity.tags(studyIdentityModel, s.uid) : null;
@@ -5968,7 +5970,8 @@
     function preservedLocal(uid, mine) {
       const local = {};
       if (uid === selectedUid) local.version = mine?.version ?? 0;
-      if (uid === selectedUid || reportConverge.has(uid)) {
+      // Retired page continuations may leave pending/uncertain commands without a page convergence marker.
+      if (uid === selectedUid || reportConverge.has(uid) || draftClient.unsettled(uid, mine?.draft)) {
         local.draft = mine?.draft ?? null;
         // 초안과 그 revision은 한 쌍이다. 화면의 초안을 지키면서 revision만 폴링의 것으로 바꾸면, 본 적 없는 서버 초안을
         // 기준으로 쓰게 된다.
@@ -5979,6 +5982,8 @@
     }
     /** 폴링 응답 한 건을 그 검사의 화면 상태에 합친다. 가려진 예비 판독은 서버가 본문을 안 준다. */
     function mergePolledState(uid, st) {
+      // A valid server observation owns facts, not edits made since the last confirmed draft.
+      if (uid === selectedUid && KinAuth.has("radiologist")) keepReportEditor();
       const mine = appState[uid] ?? {};
       return { ...mine, ...st, ...preservedLocal(uid, mine) };
     }
@@ -6957,8 +6962,13 @@
       if (deferWrite || offline || a.prelimHidden || heldByOther(cur()) || (serverMode && draftClient.conflict(uid))) return;
       if (!serverMode) { if (empty) appState[uid].draft = null; saveApp(); return "saved"; }
 
+      return saveReportDraft(uid, draft, { keepalive });
+    }
+
+    async function saveReportDraft(uid, draft, { keepalive = false } = {}) {
       const at = work.capture("document");
-      const texts = { ...next, baseVersion };
+      const texts = { ...Object.fromEntries(RFIELDS.map(k => [k, draft[k] ?? ""])), baseVersion: draft.baseVersion };
+      const empty = RFIELDS.every(k => !texts[k]);
       if (keepalive) {
         // 탭이 닫히는 중이라 응답을 볼 수 없다. 기준과 유지 목록을 이미 알 때만 보낼 수 있다 — 보내는 것까지가 우리 몫이다.
         draftClient.writeOnUnload(uid, texts, { owner: draftOwner, context: at });
@@ -6979,6 +6989,25 @@
         }
         if (uid === selectedUid) renderDraftBar();
       }) ? "saved" : undefined;
+    }
+
+    // Reconnect and later autosaves reconcile every retained edit, even when its study is no longer in the list.
+    function reconcileReportDrafts() {
+      if (!serverMode || offline || demoMode || commitInFlight || insertInFlight || work.state() !== "active"
+          || !KinAuth.has("radiologist")) return;
+      keepReportEditor();
+      for (const uid of new Set([...reportConverge, ...draftClient.studies()])) {
+        const a = appState[uid];
+        if (!a?.draft || (!reportConverge.has(uid) && !draftClient.unsettled(uid, a.draft))) continue;
+        if (a.prelimHidden || (a.holder && a.holder !== user) || draftClient.busy(uid)) continue;
+        const conflict = draftClient.conflict(uid);
+        if (conflict) {
+          draftClient.keep(uid, a.draft);
+          if (!conflict.latest) readDraftConflict(uid);
+          continue;
+        }
+        saveReportDraft(uid, a.draft);
+      }
     }
 
     // A blocked send must never leave the latest edit only in a disposable textarea.
@@ -7131,7 +7160,7 @@
                 [content.findings, content.conclusion, content.recommendation].filter(Boolean).join("\n\n"));
               const b = await api("GET", "/bootstrap", undefined, undefined, at);
               if (!work.admits(at)) return;
-              appState[uid] = { ...appState[uid], ...b.states[uid] };
+              appState[uid] = mergePolledState(uid, b.states[uid]);
               syncStudy(uid);
               // 확인창과 응답을 기다리는 사이에 다른 검사로 갔다면 그 화면을 덮지 않는다.
               // 받아온 상태는 남기되(자료다), 그리는 것은 그때 그 선택일 때만 한다.
@@ -7507,16 +7536,10 @@
     setInterval(() => {
       // 삽입이 나가 있는 동안은 확정과 똑같이 비켜선다(B1). `stashReport`에도 같은 검사가
       // 있지만, 다른 경로가 늘어도 여기 한 줄이 빠지지 않게 둘 다 둔다.
-      if (!serverMode || !selectedUid || commitInFlight || insertInFlight) return;
+      if (!serverMode || commitInFlight || insertInFlight) return;
       // 로그아웃 준비 중에는 보존 작업만 쓴다(S7-U5): 이 문서의 관문이 업무를 받아들일 때만 저장을 시작한다.
       if (work.state() !== "active") return;
-      // 서버의 초안을 읽지 못한 채 남은 충돌은 여기서 다시 읽는다 — 이 문서의 글과의 것이면 풀리고 다음 주기가 저장한다.
-      const conflict = draftClient.conflict(selectedUid);
-      if (conflict && !conflict.latest && !offline) { readDraftConflict(selectedUid); return; }
-      if (heldByOther(cur())) return;
-      // 글자가 같아 보여도 버려진 삽입 뒤에는 서버 행이 다를 수 있다(B3).
-      if (!reportNeedsWrite()) return;
-      stashReport();
+      reconcileReportDrafts();
     }, AUTOSAVE_MS);
 
     // ① 탭·브라우저를 닫거나 새로고침
@@ -7640,12 +7663,11 @@
       const attempt = ++prep.attempt;
       prep.state = "saving";
       prep.reason = null;
-      let permit = prep.permit = work.prepare({ owner: prep.owner, snapshot: prep.reports });
+      const announce = !prep.announced;
+      if (announce) prep.announced = crypto.randomUUID();
+      let permit = prep.permit = work.prepare({ preparationId: prep.announced, owner: prep.owner, snapshot: prep.reports });
       if (!permit) return;
-      if (!prep.announced) {
-        prep.announced = crypto.randomUUID();
-        KinAuth.notifyPreparation("preparing", prep.announced);
-      }
+      if (announce) KinAuth.notifyPreparation("preparing", prep.announced);
       clearInterval(poll); poll = null;
       const mine = () => logoutPrep === prep && prep.attempt === attempt && prep.permit === permit && work.admits(permit);
       const fail = reason => work.commit(permit, () => { if (mine()) failLogout(prep, reason); });
@@ -7683,7 +7705,7 @@
           if (base.outcome !== "ready") { failed(base); return; }
           const snapshot = { ...report.texts, citations: base.lists.citations, structured: base.lists.structured };
           if (KinReportDraftClient.sameSnapshot(base.stored, RFIELDS.every(k => !report.texts[k]) ? null : snapshot)) break;
-          permit = prep.permit = work.prepare({ owner: prep.owner, expectedRevision: base.revision, snapshot });
+          permit = prep.permit = work.prepare({ preparationId: prep.announced, owner: prep.owner, expectedRevision: base.revision, snapshot });
           if (!permit) return;
           const capture = { uid: report.uid, owner: permit.owner, expectedRevision: permit.expectedRevision, snapshot: permit.snapshot };
           const result = await draftClient.preserve(capture, { context: permit });
@@ -11147,7 +11169,7 @@
       serverMode = true; offline = false;
       $('#consultations-open').disabled=!!demoMode;consultations.refresh();
       stopReconnect();
-      appState = b.states;
+      for (const [uid, state] of Object.entries(b.states ?? {})) appState[uid] = mergePolledState(uid, state);
       orders = b.orders;
       myInstitution = b.me?.institution ?? null;
       myInstitutionName = b.me?.institutionName ?? "";
@@ -11175,6 +11197,7 @@
       // 미배정 통로는 관리자에게만. 평소엔 0건이라 숨어 있어야 맞다.
       $("#m-unassigned").style.display = KinAuth.has("admin") ? "" : "none";
       startPolling();
+      reconcileReportDrafts();
     }
 
     /**
@@ -11443,6 +11466,7 @@
       roleText = $("#roles").textContent;
       if (sess.demo) {
         serverMode = false; offline = false;
+        Object.assign(appState, legacyAppState);
         $("#dbstat").innerHTML = `<span style="color:#7f8899">●</span> 데모 모드`;
         $("#dbstat").title = "로그인하지 않은 둘러보기 모드 — 변경 내용은 이 브라우저에만 남습니다";
         await load();
@@ -11461,10 +11485,10 @@
          * 경고도, 무엇이 사라지는지도 없었다. 이제 서버 것이 이기되(그건 맞다),
          * 버리기 전에 날짜를 붙여 따로 떼어두고 알려준다.
          */
-        const localKeys = Object.keys(appState ?? {});
+        const localKeys = Object.keys(legacyAppState ?? {});
         if (localKeys.length) {
           const key = `kin-app-backup-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}`;
-          try { localStorage.setItem(key, JSON.stringify(appState)); } catch (e) {}
+          try { localStorage.setItem(key, JSON.stringify(legacyAppState)); } catch (e) {}
           localStorage.removeItem("kin-app");
           toast(`이 브라우저에 남아 있던 기록 ${localKeys.length}건은 서버 데이터로 대체됩니다 ` +
                 `(localStorage의 ${key}에 보관)`, "info");
