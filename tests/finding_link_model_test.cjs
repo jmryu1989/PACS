@@ -224,7 +224,7 @@ async function mounted(options) {
   window.fetch = fetch;
   const sandbox = { window, document, crypto: webcrypto, TextEncoder, console, Event, AbortController,
     setInterval: fn => { ticks.push(fn); return ticks.length; }, clearInterval() {}, setTimeout, clearTimeout, fetch };
-  install(window.fetch, sandbox);
+  const lifecycle = install(window.fetch, sandbox);
   window.KinWorkContext=sandbox.KinWorkContext;window.KinSessionTransport=sandbox.KinSessionTransport;
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
@@ -242,7 +242,8 @@ async function mounted(options) {
     assert.equal(findings.mount(), true, 'the Findings section mounts inside #kin-viewer-history');
     tick(); await flush();
   }
-  return { window, viewport, extension, all, findings, text: () => all().map(e => e.textContent).join('\n'),
+  // end(): this document's session ends at its gate - the only way a viewer document learns of an end (S7-U5).
+  return { window, viewport, extension, all, findings, end: lifecycle.end, text: () => all().map(e => e.textContent).join('\n'),
     button: name => { const found = all().filter(e => e.tagName === 'button' && e.textContent === name); assert.equal(found.length, 1, name); return found[0]; },
     switch: async uid => { study = uid; tick(); await flush(); },
     release: async () => { const next = viewport.pending.shift(); assert.ok(next, 'no pending image load'); next(); await flush(); } };
@@ -322,7 +323,10 @@ test('mounted history: session end and other-study targets are refused; the Save
   assert.deepEqual(plain(await h.window.kinViewerHistoryNavigate(findingTarget())), { ok: false, reason: 'series-missing' });
   h.button('Go to Image').click(); await flush();
   assert.match(h.text(), /현재 검사에서 원본 시리즈를 찾을 수 없습니다\./);
+  // A notice that names no session is not an end: the next navigation is judged as before.
   const e = new Event('storage'); e.key = 'kin-session-ended'; h.window.dispatchEvent(e);
+  assert.deepEqual(plain(await h.window.kinViewerHistoryNavigate(findingTarget())), { ok: false, reason: 'series-missing' });
+  h.end();
   assert.deepEqual(plain(await h.window.kinViewerHistoryNavigate(findingTarget())), { ok: false, reason: 'ended' });
 });
 
@@ -763,6 +767,10 @@ async function composeMounted(h, title) {
   assert.equal(labelled(h, 'Finding Title')[0].value, title);
 }
 const shippedFile = name => fs.readFileSync(path.join(__dirname, '..', 'worklist-v0', 'hpacs-lite', name), 'utf8');
+// viewer-findings.js ends with its document through the viewer's own subscription (config/ohif.js kinViewerOnEnd, which follows
+// the document gate). A harness that mounts the section without the whole viewer config runs that shipped function first.
+const VIEWER_ON_END = 'window.kinViewerOnEnd = kinViewerOnEnd;';
+const viewerOnEnd = source.slice(source.indexOf('function kinViewerOnEnd'), source.indexOf(VIEWER_ON_END) + VIEWER_ON_END.length);
 // Each consumer decision runs from its shipped text: Next Study/retarget, window reuse/close,
 // Hanging Protocol Apply, cell merge, and the mark-only Job guard.
 function consumers(win) {
@@ -839,7 +847,6 @@ test('mounted guard: the Job panel keeps its mark-only guard; only a document-re
 });
 
 test('mounted mode exit: drafts are held by this document in either exit order, restored after the next authenticated list and dropped by logout', async () => {
-  const logout = w => { const ended = new Event('storage'); ended.key = 'kin-session-ended'; w.dispatchEvent(ended); };
   for (const historyFirst of [true, false]) {
     const h = await mounted({ findings: true }), w = h.window, title = 'held across mode exit ' + historyFirst;
     await composeMounted(h, title);
@@ -856,7 +863,7 @@ test('mounted mode exit: drafts are held by this document in either exit order, 
     assert.equal(restored.length, 1); assert.equal(restored[0].value, title);
     assert.ok(h.text().includes('보관했던 작성 내용을 복원했습니다'));
     assert.deepEqual(plain(w.kinViewerHistoryWorkspaceState()), { dirty: true, busy: false });
-    logout(w); await flush();
+    h.end(); await flush();
     assert.equal(labelled(h, 'Finding Title').length, 0);
     assert.equal(w.kinViewerFindingsState().dirty, false); assert.equal(unload(w), false);
   }
@@ -865,12 +872,13 @@ test('mounted mode exit: drafts are held by this document in either exit order, 
   await composeMounted(h, 'dropped by logout');
   h.extension.onModeExit(); h.findings.stop();
   assert.equal(unload(w), true);
-  logout(w);
+  h.end();
   assert.equal(unload(w), false);
   h.extension.onModeEnter(); await flush();
   assert.equal(h.findings.mount(), true); await h.switch('1.1');
   assert.equal(labelled(h, 'Finding Title').length, 0);
-  assert.deepEqual(plain(w.kinViewerFindingsState()), { scope: '1.1', dirty: false, busy: false, held: 0 });
+  // The session of this document ended: a later mount restores nothing and reads no study.
+  assert.deepEqual(plain(w.kinViewerFindingsState()), { scope: '', dirty: false, busy: false, held: 0 });
 });
 
 test('mounted recovery line: held drafts are named by count and study only and can be discarded explicitly', async () => {
@@ -926,7 +934,7 @@ test('mounted viewer: the worklist command reaches the real exported navigation;
   const moved = await worklistCommand(switched, findingTarget({ itemId: key }), () => switched.switch('2.2'));
   assert.deepEqual([moved.result, moved.announced, moved.loads], [{ ok: false, reason: 'superseded', latest: true }, [{ ok: false, reason: 'superseded' }], 1]);
   const ended = await mounted();
-  const logout = await worklistCommand(ended, findingTarget(), () => { const e = new Event('storage'); e.key = 'kin-session-ended'; ended.window.dispatchEvent(e); });
+  const logout = await worklistCommand(ended, findingTarget(), () => ended.end());
   assert.deepEqual([logout.result, logout.loads], [{ ok: false, reason: 'superseded', latest: true }, 1]);
   // A source of another study is refused by the worklist before the viewer is asked at all.
   const foreign = await mounted();
@@ -1965,6 +1973,7 @@ async function valueViewer() {
   window.KinWorkContext=sandbox.KinWorkContext;window.KinSessionTransport=sandbox.KinSessionTransport;
   vm.createContext(sandbox);
   vm.runInContext(shippedFile('finding-link-model.js'), sandbox);
+  vm.runInContext(viewerOnEnd, sandbox);
   vm.runInContext(shippedFile('viewer-findings.js'), sandbox);
   // The shipped model, with its store kept for the tests that reshape a comparison head.
   const linkModel = sandbox.kinFindingLinkModel;
@@ -2139,7 +2148,7 @@ test('S2-L R5: only a successful findings answer without the schema header makes
   t.state.responses.push({ status: 409, body: { code: 'FINDING_SOURCE_STALE', itemId: ITEM, headRevision: 3, headHidden: false } });
   assert.equal(await store.save(d), false);
   assert.equal(store.state().compat, 'v2');
-  assert.ok(t.log.every(x => x.options.headers['X-KIN-Finding-Schema'] === '2'), 'every request names the record format');
+  assert.ok(t.log.every(x => new Headers(x.options.headers).get('X-KIN-Finding-Schema') === '2'), 'every request names the record format');
   // A pending body kept across an older API answer is not sent while that API answers.
   const p = store.newDraft(); store.updateDraft(p, { title: '보류' }); store.toggleSource(p, ITEM);
   t.state.responses.push({ status: 503, body: { message: 'later' } });
@@ -2397,6 +2406,7 @@ async function locationViewer({ schemaHeader = '2', modelOverride } = {}) {
   window.KinWorkContext=sandbox.KinWorkContext;window.KinSessionTransport=sandbox.KinSessionTransport;
   vm.createContext(sandbox);
   vm.runInContext(shippedFile('finding-link-model.js'), sandbox);
+  vm.runInContext(viewerOnEnd, sandbox);
   vm.runInContext(shippedFile('viewer-findings.js'), sandbox);
   const findings = window.kinViewerFindings({}, modelOverride ? modelOverride(sandbox.kinFindingLinkModel) : sandbox.kinFindingLinkModel);
   const mountedOk = findings.mount();
@@ -2479,7 +2489,7 @@ test('mounted locations: the editor names its characteristics field and helper, 
   assert.equal(post[0].body, JSON.stringify({ requestId: body.requestId, item: { schemaVersion: 2, title: '위치 소견', text: '본문', characteristics: '분엽상 경계',
     sources: [{ jobId: LJ, revision: 1, markId: LM }, { jobId: viewCopy().jobId, revision: 1 }, { jobId: LJ, revision: 1, markId: LM2 }, { jobId: LM2, revision: 1 }], primary: 0 },
     expectedRevision: 2, action: 'edit' }));
-  assert.equal(post[0].headers['X-KIN-Finding-Schema'], '2');
+  assert.equal(new Headers(post[0].headers).get('X-KIN-Finding-Schema'), '2');
   assert.ok(h.server.log.some(x => x.url === '/api/studies/' + VX + '/viewer-jobs?mine=false&includeHidden=false'));
   h.findings.stop();
 });
@@ -2560,6 +2570,7 @@ test('mounted continuation: the one-use nonce is consumed once; a missing record
   window.KinWorkContext=sandbox.KinWorkContext;window.KinSessionTransport=sandbox.KinSessionTransport;
   vm.createContext(sandbox);
       vm.runInContext(shippedFile('finding-link-model.js'), sandbox);
+      vm.runInContext(viewerOnEnd, sandbox);
       vm.runInContext(shippedFile('viewer-findings.js'), sandbox);
       const findings = window.kinViewerFindings({}, sandbox.kinFindingLinkModel);
       const sync = async () => { for (let i = 0; i < 3; i++) { for (const fn of [...ticks]) fn(); await flush(); } };

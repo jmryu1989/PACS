@@ -21,7 +21,7 @@ test('verified values are deduplicated and all-missing series produce an empty t
   const model = create({owner: () => 'hospital:a', changed() {}, fetcher: (url, options) => {
     assert.match(url, /^\/dicom-web\/studies\/[0-9.]+\/series\?includefield=0020000D,0020000E,00180015&limit=501$/);
     assert.equal(options.credentials ?? 'same-origin', 'same-origin');assert.equal(new Headers(options.headers).get('X-KIN-Session'), 'SYN-MODULE-SESSION');assert.equal(options.cache, 'no-store');
-    assert.equal(options.headers.Accept, 'application/dicom+json');assert.ok(options.signal instanceof AbortSignal);
+    assert.equal(new Headers(options.headers).get('Accept'), 'application/dicom+json');assert.ok(options.signal instanceof AbortSignal);
     return json(replies.get(url.split('/')[3]));
   }});
   model.sync([study('1.2', 2), study('2.3', 2)]);

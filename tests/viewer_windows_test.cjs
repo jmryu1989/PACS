@@ -1,5 +1,7 @@
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
+// The registry follows its document's gate (S7-U5): the shipped gate with a live synthetic session.
+require('./module_session_harness.cjs').install();
 const model = require('../worklist-v0/hpacs-lite/viewer-windows.js');
 const registries = [];
 const create = options => { const registry = model.create(options); registries.push(registry); return registry; };

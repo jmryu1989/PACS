@@ -1843,7 +1843,7 @@ test('adapter locations: the list read names the record format; characteristics 
   const frame = h.embed(v, () => ({ studies }));
   h.s.respond = () => Promise.resolve(page([v2Finding()]));
   await h.open();
-  assert.deepEqual(h.s.fetched.map(f => [f.url, f.init.method, f.init.headers['X-KIN-Finding-Schema'], f.init.headers['X-KIN-CSRF'], f.init.credentials ?? 'same-origin']),
+  assert.deepEqual(h.s.fetched.map(f => [f.url, f.init.method, new Headers(f.init.headers).get('X-KIN-Finding-Schema'), new Headers(f.init.headers).get('X-KIN-CSRF'), f.init.credentials ?? 'same-origin']),
     [['/api/studies/' + X + '/findings?includeHidden=false&limit=100', 'GET', '2', '1', 'same-origin']]);
   const article = h.articles()[0];
   assert.ok(article.all().some(e => e.dataset.kinCharacteristics === '' && e.textContent === 'Characteristics (병변 특성): 경계 불명확'));
