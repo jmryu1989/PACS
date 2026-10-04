@@ -262,7 +262,10 @@
     function queue(uid, run, changing = true) {
       const own = line(uid);
       own.open += 1;
-      if (changing) own.changing += 1;
+      if (changing) {
+        own.changing += 1;
+        options.onCommand?.(uid);
+      }
       const turn = own.tail.then(run, run).finally(() => { own.open -= 1; if (changing) own.changing -= 1; });
       own.tail = turn.then(() => {}, () => {});
       return turn;
@@ -389,12 +392,18 @@
       lists(uid) { return lines.has(uid) ? listsOf(lines.get(uid)) : null; },
       /** All studies touched by this document, including commands whose page continuation was retired. */
       studies() { return [...lines.keys()]; },
-      unsettled(uid, texts) {
-        const own = lines.get(uid);
-        if (!own) return false;
-        if (own.changing || own.uncertain || own.conflict) return true;
-        if (!texts || own.known === undefined) return false;
-        return own.known === null ? !emptyText(texts) : !sameTexts(own.known, texts);
+      /** Explicit server replacement, after pending commands have settled. Observations cannot clear conflicts. */
+      replace(uid, revision, seen) {
+        const own = line(uid);
+        if (own.open || !isRevision(revision)) return false;
+        own.conflict = null;
+        own.uncertain = null;
+        own.mine = [];
+        const known = own.revision === revision ? own.known : undefined;
+        own.revision = null;
+        const accepted = this.observe(uid, revision, seen);
+        own.known = known;
+        return accepted;
       },
       /** Keep the person's latest edit even when a conflict forbids sending it. */
       keep(uid, texts) {
@@ -467,6 +476,7 @@
       writeOnUnload(uid, texts, { owner, context } = {}) {
         const own = line(uid);
         if (!own.revision || own.known === undefined || own.conflict || own.uncertain || own.open) return false;
+        options.onCommand?.(uid);
         const lists = listsOf(own);
         const snapshot = { findings: texts.findings, conclusion: texts.conclusion, recommendation: texts.recommendation,
           baseVersion: texts.baseVersion, citations: lists.citations, structured: lists.structured };
