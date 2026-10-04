@@ -1981,6 +1981,9 @@
     const sessionEndHooks = [];
     function onSessionEnd(end) { sessionEndHooks.push(end); }
     const accountChangeHooks = [];
+    function notifyAccountChanged(detail) {
+      accountChangeHooks.forEach(done => { try { done('account-changed', detail); } catch (_) {} });
+    }
     function onCommonEnd(end) {
       accountChangeHooks.push(end);
       work.onInvalidate(({ reason, state }) => {
@@ -5043,7 +5046,7 @@
        */
       function accountChanged(detail) {
         lockPanel(TEXT.ownerChanged, detail, true);
-        accountChangeHooks.forEach(done => { try { done('account-changed', detail); } catch (_) {} });
+        notifyAccountChanged(detail);
       }
 
       /**
@@ -9215,10 +9218,11 @@
     let criticalInbox = null;
     try {
       criticalInbox = KinCriticalResultInbox.mount({ apiBase: API, root: 'cvr-inbox-p', prefix: 'cvr-inbox', fold: true,
-
+        onAccountChanged: notifyAccountChanged,
         eligible: () => { const s = KinAuth.session(); return !!sess && serverMode && !demoMode && !offline && s?.state === 'approved'
           && Array.isArray(s.roles) && (s.roles.includes('clinician') || s.roles.includes('radiologist')); },
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; } });
+      accountChangeHooks.push((reason, detail) => criticalInbox.lock(detail));
     } catch (_) { toast('중요 결과 수신 화면을 준비하지 못했습니다. 판독 작업은 계속할 수 있습니다.', 'err'); }
 
     // ── 중요 결과 발신(S7-U1b) ──
@@ -9229,12 +9233,14 @@
     let criticalResults = null;
     try {
       criticalResults = KinCriticalResultSend.mount({ apiBase: API,  current: () => selectedUid,
+        onAccountChanged: notifyAccountChanged,
         study: uid => studies.find(s => s.uid === uid),
         report: uid => { const a = appState[uid]; return a ? { version: a.version ?? 0, rs: a.rs ?? null } : null; },
         online: () => !!sess && serverMode && !demoMode && !offline,
         radiologist: () => { const s = KinAuth.session(); return s?.state === 'approved' && Array.isArray(s.roles) && s.roles.includes('radiologist'); },
         owner: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution ?? null, s.sub ?? null] : null; },
         actorName: value => displayActor(value) });
+      accountChangeHooks.push((reason, detail) => criticalResults.lock(detail));
     } catch (_) { toast('중요 결과 발신 화면을 준비하지 못했습니다. 판독 작업은 계속할 수 있습니다.', 'err'); }
 
     // ── 임상의 질문 답변(S5-U4b) ──
@@ -9865,7 +9871,7 @@
        */
       function accountChanged(detail) {
         lockPanel(TEXT.ownerChanged, detail, true);
-        accountChangeHooks.forEach(done => { try { done('account-changed', detail); } catch (_) {} });
+        notifyAccountChanged(detail);
       }
 
       /**

@@ -172,6 +172,11 @@ HOOK_LINES = ()
 # The page script travels in PRELUDE, not TAIL, so report_actions' replace() on TAIL never touches it.
 PRELUDE = "\nconst synPageScript = " + json.dumps(PAGE_SCRIPT, ensure_ascii=False) + ";" + """
 const API = location.origin + '/api';
+const accountChangeHooks = [(reason) => window.synOtherEnds.push(reason)];
+    function notifyAccountChanged(detail) {
+      accountChangeHooks.forEach(done => { try { done('account-changed', detail); } catch (_) {} });
+    }
+
 let sess = window.synSession;
 let serverMode = window.synMode.serverMode, demoMode = false, offline = window.synMode.offline;
 let selectedUid = null;
@@ -718,6 +723,39 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         self.entry_settled()
 
     # ── SD01 ──
+    def test_u5_supersede_source_survives_selection_change(self):
+        record = self.server.add(B, X)
+        self.ready_reader()
+        self.show_sent()
+        self.fault("recipients", hold=True, apply=True)
+        self.page.locator(f'#cvr-sent-rows tr[data-id="{record["id"]}"]').get_by_role("button", name="Supersede").click()
+        held = self.take("recipients")
+        self.pick(C)
+        self.release(held)
+        form = self.page.locator("#cvr-sent-rows tr:not([data-id])")
+        expect(form).to_contain_text("Source: v1")
+        expect(form.get_by_role("button", name="Supersede")).to_be_enabled()
+        form.locator("textarea").fill("SYN pinned B after selecting C")
+        form.get_by_role("button", name="Supersede").click()
+        self.wait_until(lambda: len(self.requests("supersede")) == 1, "the pinned supersede")
+        self.assertEqual(f'/api/critical-results/{record["id"]}/supersede', self.requests("supersede")[0]["path"])
+
+    def test_u5_supersede_source_resumes_after_cancelled_preparation(self):
+        record = self.server.add(B, X)
+        self.ready_reader()
+        self.show_sent()
+        self.fault("recipients", hold=True, apply=True)
+        self.page.locator(f'#cvr-sent-rows tr[data-id="{record["id"]}"]').get_by_role("button", name="Supersede").click()
+        held = self.take("recipients")
+        form = self.page.locator("#cvr-sent-rows tr:not([data-id])")
+        form.locator("textarea").fill("SYN keep this message")
+        self.page.evaluate("() => {const p=KinWorkContext.prepare({});KinWorkContext.cancelPreparation(p);}")
+        expect(form.get_by_role("button", name="Supersede")).to_be_enabled()
+        expect(form).to_contain_text("Source: v1")
+        expect(form.locator("textarea")).to_have_value("SYN keep this message")
+        self.release_late(held)
+        expect(form.get_by_role("button", name="Supersede")).to_be_enabled()
+
     def test_sd01_mark_cvr_follows_the_server_answer_and_shows_its_refusals(self):
         self.fault("recipients", hold=True, apply=True)
         self.open_reader()
@@ -1092,7 +1130,8 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         self.envelope_owner = OTHER_ACCOUNT
         self.page.locator("#cvr-sent-refresh").click()
         self.wait_until(lambda: self.view()["entry"]["disabled"] and not self.view()["panel"]["lines"], "the refused area locked")
-        self.assertEqual([], self.page.evaluate("() => window.synOtherEnds"), "an owner envelope is not a session end")
+        self.assertEqual(["account-changed"], self.page.evaluate("() => window.synOtherEnds"))
+        self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
         v = self.view()
         self.assertTrue(v["entry"]["disabled"])
         self.assertTrue(has_hangul(v["entry"]["title"]))
@@ -1112,7 +1151,8 @@ class CriticalResultSenderDOMTest(unittest.TestCase):
         d = self.dialog_says(NOT_DELIVERED)
         self.assertIn("OWNER_CHANGED", d["status"])
         self.assertTrue(d["sendDisabled"])
-        self.assertEqual([], self.page.evaluate("() => window.synOtherEnds"), "an owner envelope is not a session end")
+        self.assertEqual(["account-changed"], self.page.evaluate("() => window.synOtherEnds"))
+        self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
 
     # ── SD07 ──
     def seed_list(self):

@@ -511,7 +511,7 @@ test('store keeps the draft on 409/503, records a stale source and lets Refresh 
   store.useLatest(e); assert.equal(e.head.revision, 3); assert.equal(e.latest, null); assert.equal(e.draft.title, '내 수정');
 });
 
-test('store refuses writes for read-only sessions; plain 401 and 403 remain read failures', async () => {
+test('store refuses writes for read-only sessions; a plain 401 is a failed request and 403 refuses only the study', async () => {
   const t = transport(); const { store } = makeStore(t);
   t.state.me = { sub: 'reader-1', kind: 'member', roles: ['technician'] };
   t.state.items = [t.head('f0000000-0000-4000-8000-000000000001', 1)];
@@ -530,7 +530,7 @@ test('store refuses writes for read-only sessions; plain 401 and 403 remain read
   denied.state.responses.push({ status: 403, body: { message: 'no' } });
   kit.store.syncHistory(history(A, [])); await tick();
   assert.equal(kit.store.state().suspended, true); assert.equal(kit.store.state().ended, false);
-  assert.match(kit.store.state().status, /확인하지 못했습니다/);
+  assert.match(kit.store.state().status, /이 검사에 접근할 수 없습니다/);
 });
 
 test('store navigation uses the primary or chosen source, ignores a stale result and records refusals', async () => {
@@ -659,19 +659,27 @@ test('held drafts: a save in flight at the switch cannot touch the held copy; th
   assert.equal(store.state().entries.get(F1).head.revision, 1);
 });
 
-test('plain 403 preserves both editable drafts and can recover on the next read', async () => {
-  const t = transport(); const { store, e, lifecycle } = await drafting(t);
+test('held drafts: a 403 holds every draft of the study without showing it and restores both after an authorized list', async () => {
+  const t = transport(); const { store, e } = await drafting(t);
   const other = store.newDraft(); store.updateDraft(other, { title: '두 번째 초안' });
-  const titles = [e.draft.title, other.draft.title];
+  assert.notEqual(other.id, e.id);
   t.state.responses.push({ status: 403, body: { message: 'no' } });
   assert.equal(await store.save(e, 'create'), false);
-  assert.equal(store.state().ended, false); assert.equal(lifecycle.gate.state(), 'active');
-  assert.deepEqual([e.draft.title, other.draft.title], titles);
-  assert.equal(store.state().entries.size, 2); assert.equal(store.held().count, 0);
+  assert.equal(store.state().entries.size, 0);
+  assert.equal(store.state().suspended, true); assert.equal(store.state().ended, false);
+  assert.equal(store.state().status, '이 검사에 접근할 수 없습니다. 접근 확인 후 Refresh로 다시 불러오세요.');
+  assert.deepEqual(plain(store.held()), { count: 2, studies: [{ scope: A, count: 2, current: true }] });
+  assert.deepEqual(store.workState(), { dirty: true, busy: false, held: 2 });
+  assert.equal(JSON.stringify(store.held()).includes('초안'), false);
   t.state.responses.push({ status: 403, body: { message: 'still no' } });
-  await store.load(); assert.equal(store.state().entries.size, 2);
-  await store.load(); assert.equal(store.state().entries.size, 2);
-  assert.deepEqual([e.draft.title, other.draft.title], titles);
+  await store.load(); await tick();
+  assert.equal(store.state().entries.size, 0, 'a refused list restores nothing'); assert.equal(store.held().count, 2);
+  await store.load(); await tick();
+  const back = store.state().entries.get(e.id), second = store.state().entries.get(other.id);
+  assert.ok(back && second && back !== e && second !== other);
+  assert.equal(second.draft.title, '두 번째 초안'); assert.equal(second.pending, null); assert.equal(second.editing, true);
+  assert.deepEqual(back.pending, { url: e.pending.url, body: e.pending.body }, 'the refused request stays retryable as sent');
+  assert.equal(store.held().count, 0);
 });
 
 test('held drafts: lifecycle end clears work; plain failures preserve it and a foreign owner is not applied', async () => {
@@ -1302,8 +1310,8 @@ test('comparison saves: 400/403/404/409 and quota texts keep the draft; a compar
   // The comparison 403 was really the anchor: the re-read denies and holds the draft as in B1.
   t.state.responses.push({ status: 403, body: {} }, { status: 403, body: {} });
   assert.equal(await store.save(e, 'create'), false); await tick(40);
-  assert.deepEqual([store.state().suspended, store.state().entries.size, store.held().count], [false, 2, 0]);
-  assert.match(store.state().status, /확인하지 못했습니다/);
+  assert.deepEqual([store.state().suspended, store.state().entries.size, store.held().count], [true, 0, 1]);
+  assert.match(store.state().status, /이 검사에 접근할 수 없습니다/);
   // A same-study 403 still holds at once (B1), without an extra list read.
   const u = pairTransport(); u.state.items = [];
   const same = await anchored(u);
@@ -1311,7 +1319,7 @@ test('comparison saves: 400/403/404/409 and quota texts keep the draft; a compar
   const before = reads(u, A, 'findings');
   u.state.responses.push({ status: 403, body: {} });
   assert.equal(await same.store.save(x, 'create'), false); await tick(40);
-  assert.deepEqual([same.store.state().suspended, same.store.held().count, reads(u, A, 'findings')], [false, 0, before]);
+  assert.deepEqual([same.store.state().suspended, same.store.held().count, reads(u, A, 'findings')], [true, 1, before]);
   // An entry that already names another comparison study cannot pick from this one.
   const w = pairTransport(), other = w.head(F1, 1); other.item.sources = [{ ...pCopy(P1, 1), studyUid: '9.9.9' }];
   w.state.items = [other];
@@ -2589,7 +2597,12 @@ test('page defaults: bound store reads and writes; ordinary failures preserve th
     t.state.responses.push({status,body:{message:'SYN failure'}});
     assert.equal(await store.save(e,'create'),false);
     assert.equal(lifecycle.gate.state(),'active');assert.equal(store.state().ended,false);
-    assert.equal(e.draft.title,title);assert.equal(store.state().entries.get(e.id),e);
+    assert.equal(e.draft.title,title);
+    if (status === 403) {
+      assert.equal(store.state().entries.size,0); assert.equal(store.held().count,1);
+      assert.equal([...store.state().parked.values()][0].entries[0].draft.title,title);
+      assert.equal(store.newDraft(),null);
+    } else assert.equal(store.state().entries.get(e.id),e);
     for(const call of t.log) assert.equal(new Headers(call.options.headers).get('X-KIN-Session'),'SYN-MODULE-SESSION');
   }
 });
@@ -2634,3 +2647,22 @@ test('page defaults: a detached store no longer observes the page lifecycle',asy
 // The S2-B1 list/command suite runs in this same process as well, so the existing hosted Validate step
 // for this file also executes it; `node --test tests/finding_command_test.cjs` runs it alone.
 require('./finding_command_test.cjs');
+
+// U5MOD-F02: denial of this study's list hides stored heads as well as drafts.
+test('a 403 on the findings list hides stored findings and holds drafts without ending the session', async () => {
+  const t = transport(); const { store, e, lifecycle } = await drafting(t);
+  t.state.items = [t.head(F1, 1)]; await store.load();
+  assert.ok(store.state().entries.has(F1));
+  const title = e.draft.title;
+  t.state.responses.push({ status: 403, body: { message: 'study denied' } });
+  await store.load();
+  assert.equal(store.state().entries.size, 0);
+  assert.equal(store.state().suspended, true);
+  assert.equal(store.newDraft(), null);
+  assert.equal(store.held().count, 1);
+  assert.equal(lifecycle.gate.state(), 'active');
+  assert.equal(store.state().ended, false);
+  await store.load();
+  assert.equal(store.state().entries.get(e.id).draft.title, title);
+  assert.ok(store.state().entries.has(F1));
+});

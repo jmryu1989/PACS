@@ -89,6 +89,7 @@ function editor() {
     if (e.refuse) return false;
     const v = e.values[ins.field];
     e.values[ins.field] = v.slice(0, ins.caret.end) + ins.text + v.slice(ins.caret.end);
+    e.edited();
     return true;
   };
   return e;
@@ -106,15 +107,16 @@ function spySession() {
   };
   return spy;
 }
-function setup({ capability = CAP, media = {}, capture = Capture } = {}) {
+function setup({ capability = CAP, media = {}, capture = Capture, hashText } = {}) {
   const m = fakeMedia(media), ed = editor(), net = fakeFetch(), timers = fakeTimers(), spy = spySession();
   const lifecycle = install(net.fetch);
+  ed.edited = () => lifecycle.gate.edited();
   let logouts = 0;
   const c = D.createController({ session: spy, capture, env: m.env, apiBase: '/api', fetch: net.fetch,
     // The start gate is the editor gate plus the server connection (main.html dictationBlock).
     readContext: ed.readContext, insert: ed.insert, block: () => (ed.blocked ? '막힘' : ed.serverDown ? '서버 없음' : null),
     busy: () => ed.busy, placement: (pin, text) => `${pin.field}@${pin.caret.end}:${text.length}`,
-    onUnauthorized: () => { logouts += 1; }, timers });
+    onUnauthorized: () => { logouts += 1; }, timers, hashText });
   c.setServerCapability(capability);
   return { c, m, ed, net, timers, spy, lifecycle, logouts: () => logouts };
 }
@@ -498,4 +500,44 @@ test('coded session end drops a pending upload and releases all recording resour
   const t=setup(),call=await toUpload(t);call.respond(401,'','AUTH_SESSION_ENDED');await flush();
   assert.equal(t.lifecycle.gate.state(),'ending');assert.equal(t.c.snapshot().state,'cancelled');
   assert.deepEqual(t.ed.inserts,[]);assert.ok(t.m.allEnded());assert.equal(t.logouts(),0);
+});
+
+// U5MOD-F01: the page fires input -> gate.edited() inside the synchronous write.
+test('Insert returns its result and emits completion after its own editor write', async () => {
+  const t = setup(); await toReview(t);
+  const states = []; t.c.subscribe(() => states.push(t.c.view().state));
+  const result = await t.c.insert();
+  assert.equal(result.inserted, true);
+  assert.equal(result.field, 'findings');
+  assert.equal(t.ed.inserts.length, 1);
+  assert.equal(t.c.view().state, 'inserted');
+  assert.equal(states.at(-1), 'inserted');
+});
+
+test('a study change during the start hash releases the owned start flag', async () => {
+  let release, once = true;
+  const t = setup({hashText: async value => {
+    if (once) { once = false; await new Promise(resolve => { release = resolve; }); }
+    return Session.hashText(value);
+  }});
+  const first = t.c.start();
+  t.ed.uid = 'study-B'; t.ed.selectionSeq++;
+  t.lifecycle.gate.select('study-B'); release(); await first;
+  assert.equal(t.c.snapshot().pending, false);
+  await t.c.start();
+  assert.equal(t.c.snapshot().state, 'recording');
+  assert.equal(t.m.gumCalls, 1);
+  t.c.cancel();
+});
+
+test('HD06 read-only report disables Insert and preserves review without a failed outcome', async () => {
+  const t = setup(); await toReview(t, 'SYN retained transcript');
+  t.ed.blocked = true; t.c.refresh();
+  assert.equal(t.c.snapshot().state, 'review');
+  assert.equal(t.c.view().text, 'SYN retained transcript');
+  assert.equal(t.c.view().controls.insert, 'disabled');
+  assert.equal(t.ed.inserts.length, 0);
+  t.ed.blocked = false; t.c.refresh();
+  assert.equal(t.c.view().controls.insert, 'enabled');
+  assert.equal((await t.c.insert()).inserted, true);
 });

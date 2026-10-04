@@ -615,6 +615,7 @@
           headers: { 'X-KIN-CSRF': '1', [SCHEMA_HEADER]: String(SCHEMA), ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
         const data = await res.json().catch(() => null);
         if (!valid(ticket) || !work.admits(at)) throw { stale: true };
+        if (res.status === 403 && !foreign) { work.commit(at, deny); throw { stale: true }; }
         if (!res.ok || !data) throw { status: res.status, code: data?.code, headRevision: data?.headRevision ?? null, headHidden: data?.headHidden ?? null, itemId: data?.itemId ?? null,
           jobId: data?.jobId ?? null, markId: data?.markId ?? null };
         // R5: only a successful findings answer decides the API's record format; refusals and proxy errors never do.

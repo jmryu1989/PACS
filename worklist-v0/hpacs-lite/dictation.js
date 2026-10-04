@@ -214,9 +214,9 @@
       if (!capable()) { emit(); return; }
       // The start gate (editor + server connection); the session's own context covers the editor.
       if (gate()) { notice = 'editor-blocked'; dismissed = -1; emit(); return; }
-      starting = true;
+      const attempt = {}; starting = attempt;
       let r;
-      try { r = await session.begin(); } finally { work.commit(at, () => { starting = false; }); }
+      try { r = await session.begin(); } finally { if (starting === attempt) starting = false; }
       if (!work.admits(at)) return;
       let acquisition;
       work.commit(at, () => {
@@ -311,6 +311,8 @@
 
     async function insert() {
       const at = work.capture('editor'); if (!work.admits(at)) return null;
+      // The insert's input event advances the editor revision itself.
+      const afterWrite = work.capture('study');
       const snap = session.snapshot();
       if (snap.state !== 'review' || snap.pending || !run) return null;
       notice = null;
@@ -320,9 +322,9 @@
       if (busy) { notice = 'report-busy'; emit(); return null; }
       const field = snap.pin.field;
       const res = await session.insert(snap.asrSeq);
-      if (!work.admits(at)) return null;
+      if (!work.admits(afterWrite)) return null;
       let inserted = res.inserted === true;
-      work.commit(at, () => {
+      work.commit(afterWrite, () => {
       if (!inserted && res.reason === 'field-changed') notice = 'field-changed';
       emit();
       });
@@ -331,11 +333,12 @@
 
     async function repin() {
       const at = work.capture('editor'); if (!work.admits(at)) return null;
+      const afterHash = work.capture('study');
       const snap = session.snapshot();
       if (snap.state !== 'review' || !snap.needsRepin || snap.pending) return null;
       const res = await session.repin(snap.asrSeq);
-      if (!work.admits(at)) return null;
-      work.commit(at, () => {
+      if (!work.admits(afterHash)) return null;
+      work.commit(afterHash, () => {
       if (res.ok) { remember(session.snapshot().pin.field); notice = 'repinned'; }
       else if (res.reason === 'field-changed') notice = 'field-changed';
       emit();

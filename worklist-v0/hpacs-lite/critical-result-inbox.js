@@ -283,7 +283,7 @@
    *   eligible() 지금 이 세션이 받은 목록을 읽는가(호스트가 세션 종류·서버 연결·역할로 정한다)
    * 반환값의 end()는 세션 종료, lock(detail)은 다른 영역이 알아챈 계정 변경이다.
    */
-  function mount({ apiBase, root, prefix, fold, owner, eligible }) {
+  function mount({ apiBase, root, prefix, fold, owner, eligible, onAccountChanged }) {
     const work = window.KinWorkContext, transport = window.KinSessionTransport.page();
     // Capture at registration, not when a delayed callback runs.
     const guarded = (effect, scope = 'document') => {
@@ -1043,10 +1043,11 @@
       paint();
     }
 
-    /** 이 영역이 알아챈 계정 변경은 이 영역만의 일이 아니다: 공통 종료 목록과 호스트에 알린다. */
+    /** Account changes lock related areas through the host, without ending the session. */
     function accountChanged(detail) {
       if (ended || lock !== null) return;
       lockArea(detail);
+      if (onAccountChanged) onAccountChanged(detail);
     }
 
     /**

@@ -326,3 +326,49 @@ test('a transient insertion barrier before or during the hash keeps review for a
     assert.equal((await f.model.insert(token)).inserted,true);assert.equal(f.writes.length,1);
   }
 });
+
+// U5MOD-F04: hash completion must release only the pending operation it owns.
+for (const operation of ['begin', 'repin', 'insert']) {
+  for (const reject of [false, true]) test(`${operation}: hash then stale editor releases busy and permits recovery (${reject ? 'reject' : 'resolve'})`, async () => {
+    let hold = null;
+    const f = fixture({hashText: v => hold ? hold.promise : Promise.resolve(sha(v))});
+    let token;
+    if (operation === 'begin') f.model.setAvailable(true);
+    else {
+      token = await review(f);
+      if (operation === 'repin') { f.value.value += 'edit'; await f.model.insert(token); }
+    }
+    hold = deferred();
+    const pending = f.model[operation](token);
+    assert.equal(f.model.snapshot().pending, true);
+    f.value.value += 'changed while hashing';
+    globalThis.KinWorkContext.edited();
+    if (reject) hold.reject(new Error('hash failed')); else hold.resolve(sha(f.value.value));
+    const result = await pending; hold = null;
+    assert.equal(f.model.snapshot().pending, false);
+    assert.equal(f.writes.length, 0);
+    if (operation === 'begin') {
+      assert.equal(result.reason, 'editor-changed');
+      assert.equal((await f.model.begin()).ok, true);
+    } else {
+      assert.equal(result.reason, 'field-changed');
+      assert.equal(f.model.snapshot().state, 'review');
+      assert.equal(f.model.snapshot().text, '검토할 문장');
+      assert.equal(f.model.snapshot().needsRepin, true);
+      assert.equal((await f.model.repin(token)).ok, true);
+      assert.equal((await f.model.insert(token)).inserted, true);
+    }
+  });
+}
+test('an old hash cannot release the busy flag of an insert resumed after preparation', async () => {
+  let hold = null;
+  const f = fixture({hashText: v => hold ? hold.promise : Promise.resolve(sha(v))});
+  const token = await review(f), gate = globalThis.KinWorkContext;
+  const first = hold = deferred(), old = f.model.insert(token);
+  const preparation = gate.prepare({}); gate.cancelPreparation(preparation);
+  const second = hold = deferred(), fresh = f.model.insert(token);
+  first.resolve(sha(f.value.value)); await old;
+  assert.equal(f.model.snapshot().pending, true);
+  second.resolve(sha(f.value.value)); assert.equal((await fresh).inserted, true);
+  assert.equal(f.writes.length, 1);
+});

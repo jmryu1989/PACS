@@ -116,6 +116,7 @@
     work.onInvalidate(event=>{
       if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
       if(event.reason==='prepare')clearInterval(timer);
+      if(event.reason==='lifecycle'&&event.state==='active'){startTimer();sync();}
       if(event.reason==='cancel'){const action=interruptedAction;interruptedAction=null;accountEpoch++;accountRequest=null;accountBusy=false;refreshAccount();startTimer();if(action&&dialog.open)accountRun(action==='load'?'load':'inspect');}
     });
     startTimer();sync();

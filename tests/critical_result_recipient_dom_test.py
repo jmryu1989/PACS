@@ -133,6 +133,11 @@ BLOCK = slice_between(MAIN, *BLOCK_MARKS)
 # run: KinAuth.init() gives the session and goOnline() connects the server. test_18d replaces the logout line.
 PRELUDE = """
 const API = location.origin + '/api';
+const accountChangeHooks = [(reason) => window.synOtherEnds.push(reason)];
+    function notifyAccountChanged(detail) {
+      accountChangeHooks.forEach(done => { try { done('account-changed', detail); } catch (_) {} });
+    }
+
 let sess = window.synSession, serverMode = !!window.synMode.serverMode, demoMode = !!window.synMode.demoMode;
 let offline = !!window.synMode.offline, selectedUid = null;
 const toast = (message, kind) => { window.synToasts.push([message, kind]); };
@@ -2256,6 +2261,26 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                 self.assertEqual((["end"], 0), (self.page.evaluate("() => window.synOtherEnds"),
                                                 self.page.evaluate("() => window.synLogouts")))
 
+    def test_u5_panel_account_changes_notify_host_without_ending_session(self):
+        for cause in ("envelope", "OWNER_CHANGED"):
+            with self.subTest(cause=cause):
+                n = 3000
+                s = self.mx_server("panel")
+                s.add(self.mx_rec("panel", n))
+                self.mx_open("panel")
+                if cause == "envelope":
+                    self.fault("list", patch=lambda p: p.update(owner=OTHER_OWNER))
+                    self.press("Refresh")
+                else:
+                    self.fault("ack", status=409, body={"code": "OWNER_CHANGED", "message": "SYN owner changed"})
+                    self.mx_press("Acknowledge", mark(n))
+                self.wait_until(lambda: self.page.evaluate("synOtherEnds.length") == 1, "the host account change notice")
+                self.assertEqual(["account-changed"], self.page.evaluate("synOtherEnds"))
+                self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
+                self.assertEqual(0, self.page.evaluate("synLogouts"))
+                self.assertEqual([], self.view()["rows"])
+                expect(self.region().get_by_role("button", name="Refresh", exact=True)).to_be_disabled()
+
     def test_u5_plain_panel_failures_close_nothing(self):
         s = self.server = RecipientServer([INSTITUTION, RAD["sub"]])
         self.servers.append(s)
@@ -4109,7 +4134,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                     self.advance(1000)
                     self.page.evaluate("s => { window.synSession = s; }", session(RAD, ["radiologist"]))
                     self.advance(1000)
-                    self.assertEqual([], self.page.evaluate("() => window.synOtherEnds"), "a domain owner mismatch does not end the document")
+                    self.assertEqual(["account-changed"], self.page.evaluate("() => window.synOtherEnds"), "domain locks propagate without ending the session")
                     count = len(self.log)
                     for held in (listed, read, ack):
                         self.release_late(held)
@@ -4849,7 +4874,7 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
                         self.advance(1000)
                         self.page.evaluate("s => { window.synSession = s; }", session(RAD, ["radiologist"]))
                         self.advance(1000)
-                        self.assertEqual([], self.page.evaluate("() => window.synOtherEnds"), "a domain owner mismatch does not end the document")
+                        self.assertEqual(["account-changed"], self.page.evaluate("() => window.synOtherEnds"), "domain locks propagate without ending the session")
                         reads = len(self.log)
                         for held in (l1, l2):
                             self.release_late(held)

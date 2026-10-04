@@ -259,7 +259,7 @@
    *   owner()    [institution, sub]
    *   actorName(actor) 표시 이름
    */
-  function mount({ apiBase, current, study, report, online, radiologist, owner, actorName }) {
+  function mount({ apiBase, current, study, report, online, radiologist, owner, actorName, onAccountChanged }) {
     const work = window.KinWorkContext, transport = window.KinSessionTransport.page();
     // Capture at registration, not when a delayed callback runs.
     const guarded = (effect, scope = 'document') => {
@@ -940,7 +940,7 @@
       const seq = ++form.seq, sent = who(), uid = form.item.studyUid;
       form.confirm.disabled = true;
       form.sourceLine.textContent = TEXT.form.loading;
-      call('GET', `/studies/${encodeURIComponent(uid)}/critical-result-recipients`, undefined, work.capture('study')).then(guarded(({ data }) => {
+      call('GET', `/studies/${encodeURIComponent(uid)}/critical-result-recipients`, undefined, work.capture('document')).then(guarded(({ data }) => {
         if (forms.get(form.item.id) !== form || seq !== form.seq || !live(sent)) return;
         const mine = ownerOf(data && data.owner, sent);
         if (mine === 'other') { accountChanged(TEXT.otherEnvelope); return; }
@@ -1017,6 +1017,7 @@
     function accountChanged(detail) {
       if (ended || lock !== null) return;
       lockArea(TEXT.dialog.locked, detail);
+      if (onAccountChanged) onAccountChanged(detail);
     }
 
     function lockArea(message, detail) {
@@ -1118,6 +1119,7 @@
         }
         if (entryView.phase === 'loading') targetKey = null;
         if (dialogUid !== null && dialogView?.phase === 'loading') readDialog(false);
+        for (const form of forms.values()) if (!form.source) readFormSource(form);
         sync(); if (listPhase === 'loading') loadList(false);
         startTimers();
       } else if (event.reason === 'lifecycle' && event.state === 'active') startTimers();
@@ -1127,7 +1129,7 @@
     filterField.value = filter;
     paintEntry();
     paintPanel();
-    return { sync, end };
+    return { sync, end, lock: detail => lockArea(TEXT.dialog.locked, detail) };
   }
 
   window.KinCriticalResultSend = Object.freeze({ mount });

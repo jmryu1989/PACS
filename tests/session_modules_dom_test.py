@@ -9,7 +9,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import expect, sync_playwright
 from auth_logout_dom_test import Site, ORIGIN, BASE
@@ -273,6 +273,76 @@ class SessionModulesDOMTest(unittest.TestCase):
             expect(self.page.get_by_role("dialog")).to_be_visible()
             expect(self.page.locator("[data-status]")).to_contain_text("HTTP " + str(status))
             self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
+
+
+class ModulesBootDOMTest(unittest.TestCase):
+    def test_account_change_in_either_critical_area_locks_both_without_ending(self):
+        # Exercise the shipped mounts and common host dispatcher, in both directions.
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            for source, prefix in (("received", "cvr-inbox"), ("sent", "cvr-sent")):
+                with self.subTest(source=source):
+                    context = browser.new_context()
+                    site, changed, seen, errors = Site(), [], [], []
+                    def route_request(route):
+                        url = urlparse(route.request.url)
+                        if url.path == "/api/critical-results":
+                            view = parse_qs(url.query)["view"][0]
+                            seen.append(view)
+                            owner = [site.account["institution"], site.account["sub"]]
+                            if changed and view == source:
+                                owner = [owner[0], "SYN-OTHER-OWNER"]
+                            return route.fulfill(json={"owner": owner, "view": view, "items": [], "pending": 0, "nextCursor": None})
+                        site.handle(route, route.request)
+                    context.route("**/*", route_request)
+                    page = context.new_page()
+                    page.on("pageerror", lambda error: errors.append(str(error)))
+                    page.goto(ORIGIN + BASE + "main.html")
+                    page.wait_for_function("KinWorkContext.state()==='active'")
+                    page.locator('#cvr-inbox-toggle').click()
+                    page.locator('#cvr-sent-toggle').click()
+                    for area in ("cvr-inbox", "cvr-sent"):
+                        expect(page.locator('#'+area+'-refresh')).to_be_enabled()
+                    changed.append(True)
+                    page.locator('#'+prefix+'-refresh').click()
+                    for area in ("cvr-inbox", "cvr-sent"):
+                        expect(page.locator('#'+area+'-refresh')).to_be_disabled()
+                    self.assertIn(source, seen)
+                    self.assertEqual("active", page.evaluate("KinWorkContext.state()"))
+                    self.assertEqual([], site.logouts)
+                    self.assertEqual([], errors)
+                    self.assertEqual([], site.violations)
+                    context.close()
+            browser.close()
+
+    def test_shortcuts_mounted_before_boot_enable_and_load_the_accounts_map(self):
+        # U5MOD-F03: exercise the actual page's order, holding bootstrap until after mount.
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            context = browser.new_context()
+            site, held, errors = Site(), [], []
+            context.route("**/*", lambda route: site.handle(route, route.request))
+            page = context.new_page()
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("**/api/me", lambda route: held.append(route))
+            page.goto(ORIGIN + BASE + "main.html")
+            button = page.get_by_role("button", name="Edit Shortcuts", exact=True, include_hidden=True)
+            expect(button).to_be_disabled()
+            self.assertEqual("unknown", page.evaluate("KinWorkContext.state()"))
+            self.assertEqual(1, len(held))
+            page.evaluate("""owner => {
+                const map={...KinWorkspaceShortcuts.defaults,report:'KeyR'};
+                localStorage.setItem('kin-workspace-shortcuts:v1:'+JSON.stringify(owner),JSON.stringify(map));
+            }""", [site.account['institution'], site.account['sub']])
+            site.handle(held[0], held[0].request)
+            page.unroute("**/api/me")
+            expect(button).to_be_enabled()
+            expect(page.get_by_role("button", name="Report Editor", exact=True, include_hidden=True)).to_have_attribute("aria-keyshortcuts", "Control+Alt+R")
+            self.assertEqual("active", page.evaluate("KinWorkContext.state()"))
+            self.assertEqual([], errors)
+            self.assertEqual([], site.violations)
+            context.close()
+            browser.close()
 
 
 if __name__ == "__main__":
