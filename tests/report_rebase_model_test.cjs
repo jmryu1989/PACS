@@ -182,13 +182,16 @@ async function stashAfterRender({ rendered, state }) {
     `markSelectionChanged(${JSON.stringify(UID)});`,
     rendered === undefined ? '' : `recordReportOrigin(${JSON.stringify(UID)}, ${JSON.stringify(rendered)});`,
     `var appState = {}; appState[selectedUid] = ${JSON.stringify(state)};`,
-    'var insertInFlight = false, serverMode = true, offline = false, API = "/api";',
+    'var insertInFlight = false, serverMode = true, offline = false, demoMode = false, API = "/api";',
+    'var reportSaveFailures = new Map();',
     `var RFIELDS = ["findings", "conclusion", "recommendation"], draftOwner = ${JSON.stringify(OWNER)};`,
     'var KinAuth = { has: role => role === "radiologist" };',
     'function heldByOther() { return false; } function cur() { return null; } function reportNeedsWrite() { return true; }',
     'function renderDraftBar() {} function saveApp() {} function draftNotSaved() {}',
     extractFunction(html, 'sameDraftText'),
-    // The scanner above returns the function without its `async` keyword.
+    // The scanner above returns the function without its `async` keyword. stashReport keeps the text and hands the
+    // write to saveReportDraft (the same function the autosave of every retained study uses).
+    'async ' + extractFunction(html, 'saveReportDraft'),
     'async ' + extractFunction(html, 'stashReport'),
     'var outcome = stashReport();',
   ].join('\n'), context, { filename: 'stashReport.js' });

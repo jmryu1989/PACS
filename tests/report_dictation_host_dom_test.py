@@ -676,25 +676,42 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         self.assertEqual([expected, "", ""], self.snap()["text"])
 
     # ── HD-06 ──────────────────────────────────────────────────────────────────────────────
-    def test_hd06_a_changed_base_or_a_newly_read_only_field_refuses_and_invalidates(self):
-        for change in ("recordReportOrigin(%s, 2)" % json.dumps(UID),
-                       "(() => { appState[%s].holder = 'other@kin'; studies[0].holder = 'other@kin'; "
-                       "updateReportButtons(); })()" % json.dumps(UID)):
-            if self.opened:
-                self.tearDown()
-                self.setUp()
-            self.open()
-            self.caret("findings", 3)
-            self.review()
-            self.page.evaluate(change)
-            self.page.click("#dictation-insert")
-            self.wait_state("failed")
-            value = self.snap()
-            self.assertEqual(self.page.evaluate("KinDictation.REASONS['editor-changed']") + UNCHANGED,
-                             value["pane"]["status"], change)
-            self.assertEqual([EXISTING, "", ""], value["text"])
-            self.assertEqual("", value["session"]["text"])
-            self.assertEqual([], [c for c in value["calls"] if c["method"] == "PUT"])
+    def test_hd06_a_changed_base_refuses_and_invalidates(self):
+        self.open()
+        self.caret("findings", 3)
+        self.review()
+        self.page.evaluate("recordReportOrigin(%s, 2)" % json.dumps(UID))
+        self.page.click("#dictation-insert")
+        self.wait_state("failed")
+        value = self.snap()
+        self.assertEqual(self.page.evaluate("KinDictation.REASONS['editor-changed']") + UNCHANGED, value["pane"]["status"])
+        self.assertEqual([EXISTING, "", ""], value["text"])
+        self.assertEqual("", value["session"]["text"])
+        self.assertEqual([], [c for c in value["calls"] if c["method"] == "PUT"])
+
+    def test_hd06_a_newly_read_only_report_turns_insert_off_and_keeps_the_dictated_text(self):
+        """While the report cannot be edited (someone else holds the study) Insert is off and the dictated text
+        stays in review: nothing is inserted, sent, discarded or failed. When the report can be edited again the
+        person's own Insert puts it in."""
+        from playwright.sync_api import expect
+        self.open()
+        self.caret("findings", 3)
+        self.review()
+        hold = ("(holder => { appState[%s].holder = holder; studies[0].holder = holder; updateReportButtons(); })"
+                % json.dumps(UID))
+        self.page.evaluate(hold + "('other@kin')")
+        expect(self.page.locator("#dictation-insert")).to_be_disabled()
+        self.page.wait_for_timeout(100)
+        value = self.snap()
+        self.assertEqual("review", value["session"]["state"], "a read-only report is not a failed dictation")
+        self.assertEqual(TRANSCRIPT, value["session"]["text"], "the dictated text is kept")
+        self.assertEqual([EXISTING, "", ""], value["text"])
+        self.assertEqual([], [c for c in value["calls"] if c["method"] == "PUT"])
+        self.page.evaluate(hold + "(null)")
+        expect(self.page.locator("#dictation-insert")).to_be_enabled()
+        self.page.click("#dictation-insert")
+        self.page.wait_for_function("t => document.querySelector('#findings').value.includes(t)", arg=TRANSCRIPT.strip().split("\n")[0])
+        self.assertEqual(["", ""], self.snap()["text"][1:], "only the pinned field took the text")
 
     # ── HD-07 ──────────────────────────────────────────────────────────────────────────────
     def test_hd07_a_study_move_ends_the_session_and_the_late_answer_is_dropped(self):

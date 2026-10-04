@@ -198,7 +198,10 @@ window.reply = value => { replies.push(value); };
 window.hold = () => { holdNext = true; };
 window.release = () => { const resolve = releaseHeld; releaseHeld = null; resolve(); };
 window.text = () => RFIELDS.map(k => $("#" + k).value);
-window.type = values => { RFIELDS.forEach((k, i) => { $("#" + k).value = values[i]; }); };
+// A person's typing: the value changes and the browser fires `input`. The page records an edit from that event (it does
+// not compare texts), so a script that only assigned `.value` would describe text nobody typed.
+window.type = values => { RFIELDS.forEach((k, i) => { const el = $("#" + k); if (el.value === values[i]) return;
+  el.value = values[i]; el.dispatchEvent(new Event("input", { bubbles: true })); }); };
 // The real counter: select() does exactly this before it redraws the right pane.
 window.select = uid => { markSelectionChanged(uid); };
 window.snapshot = () => ({
@@ -331,8 +334,10 @@ class ReportRebaseDOMTest(unittest.TestCase):
         self.assertIn("v4", value["pane"]["action"])
         # Nothing was rewritten, reloaded or discarded.
         self.assertEqual(["MY ADDENDUM+", "", ""], value["text"])
+        # The page keeps the typed text as this study's own copy (it is what the next save carries); the refusal moved
+        # neither that text nor the version it stands on.
         self.assertEqual(2, value["state"]["draft"]["baseVersion"])
-        self.assertEqual("MY ADDENDUM", value["state"]["draft"]["findings"])
+        self.assertEqual("MY ADDENDUM+", value["state"]["draft"]["findings"])
         self.assertEqual(1, len(value["calls"]))
         self.assertEqual([], value["confirms"])
         self.assertEqual([], value["clipboard"])
@@ -353,6 +358,8 @@ class ReportRebaseDOMTest(unittest.TestCase):
         self.assertEqual({"findings": "MY ADDENDUM+", "conclusion": "C", "recommendation": "", "baseVersion": 4,
                           "expectedOwner": {"institution": "SYN-INST", "sub": "SYN-READER", "author": "doctor@kin"},
                           "expectedRevision": "SYNEPOCH:0", "citationIds": [], "structureIds": []}, put["body"])
+        # The pane closes when the answer has been read (the request being sent is not that moment).
+        self.page.wait_for_function("()=>!$('#stalemodal').classList.contains('show')")
         value = self.page.evaluate("snapshot()")
         self.assertFalse(value["shown"], "the pane closes once the human has chosen")
         self.assertEqual(["MY ADDENDUM+", "C", ""], value["text"], "the rebase must not redraw the editor")
@@ -414,9 +421,9 @@ class ReportRebaseDOMTest(unittest.TestCase):
         self.assertIn("다른 검사로 옮기기 전에", message)
         self.assertNotIn(HEAD_FINDINGS.strip(), message)
         self.assertNotIn("저장했습니다", message)
-        # The refused study keeps its draft bytes and its base.
+        # The refused study keeps the text its reader typed and its base.
         self.assertEqual(2, value["stored"][UID]["draft"]["baseVersion"])
-        self.assertEqual("MY ADDENDUM", value["stored"][UID]["draft"]["findings"])
+        self.assertEqual("MY ADDENDUM+", value["stored"][UID]["draft"]["findings"])
 
     def test_a_refusal_that_returns_after_a_round_trip_is_still_not_the_same_selection(self):
         # A -> B -> A. The uid matches again, so a uid-only guard would draw the pane,
@@ -440,10 +447,10 @@ class ReportRebaseDOMTest(unittest.TestCase):
         self.assertEqual(["", "", ""], value["pane"]["draft"])
         self.assertEqual(1, len(value["calls"]))
         self.assertIn("다른 검사로 옮기기 전에", value["toasts"][-1]["message"])
-        # Coming back redrew the stored draft, and nothing the server holds changed.
-        self.assertEqual(["MY ADDENDUM", "", ""], value["text"])
+        # Coming back redrew the text the reader had typed (the page kept it for this study), on the same base.
+        self.assertEqual(["MY ADDENDUM+", "", ""], value["text"])
         self.assertEqual(2, value["stored"][UID]["draft"]["baseVersion"])
-        self.assertEqual("MY ADDENDUM", value["stored"][UID]["draft"]["findings"])
+        self.assertEqual("MY ADDENDUM+", value["stored"][UID]["draft"]["findings"])
 
     def test_a_surviving_draft_is_never_reported_as_the_loaded_server_report(self):
         for rs, exit_words in [("T", "Discard Draft를 누르면"), ("A", "Addendum을 눌러")]:

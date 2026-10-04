@@ -530,7 +530,9 @@ class ReportStructureDOMTest(unittest.TestCase):
                 page = self.open(state(draft={"findings": EXISTING, "conclusion": "", "recommendation": "", "baseVersion": 4}),
                                  struct_replies=[{"version": 4, "unknown": False, "head": [],
                                                   "draft": [entry(sid=sid) for sid in ids]}])
-                page.evaluate("() => { $('#findings').value = 'typed more'; }")
+                # A person's typing fires `input`; the page records the edit from that event and saves only recorded edits.
+                page.evaluate("() => { const el = $('#findings'); el.value = 'typed more';"
+                              " el.dispatchEvent(new Event('input', { bubbles: true })); }")
                 page.evaluate("() => stash()")
                 page.wait_for_function("() => calls.length === 1")
                 self.assertEqual(ids, page.evaluate("() => calls[0].body.structureIds"))

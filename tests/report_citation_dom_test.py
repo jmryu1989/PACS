@@ -174,6 +174,8 @@ function startPolling() {}
 function closeSR() {}
 function endPatientCopy() {}
 const displayActor = value => String(value ?? "").split("@")[0];
+// The signed-in reader as the page holds it (the logout capture reads the role from it).
+const sess = { state: "approved", institution: "SYN-INST", sub: "SYN-READER", actor: "doctor@kin", roles: ["radiologist"] };
 function cur() { return studies.find(s => s.uid === selectedUid); }
 function heldByOther(s) { return s?.holder && s.holder !== user ? s.holder : null; }
 function shownStudyDesc(s) { return s?.desc ?? ""; }
@@ -279,14 +281,17 @@ window.release = () => { const fn = heldAnswers.shift(); if (fn) fn(); return !!
 window.releaseNewest = () => { const fn = heldAnswers.pop(); if (fn) fn(); return !!fn; };
 window.outstanding = () => heldAnswers.length;
 window.text = () => RFIELDS.map(k => $("#" + k).value);
-window.type = values => { RFIELDS.forEach((k, i) => { $("#" + k).value = values[i]; }); };
+// A person's typing: the value changes and the browser fires `input`. The page records an edit from that event (it does
+// not compare texts), so a script that only assigned `.value` would describe text nobody typed.
+window.type = values => { RFIELDS.forEach((k, i) => { const el = $("#" + k); if (el.value === values[i]) return;
+  el.value = values[i]; el.dispatchEvent(new Event("input", { bubbles: true })); }); };
 /* The shipped study move is already the global `select`: the sliced block above is a top-level
    function declaration in this classic script, so the cases call the product function by that
    name. There is deliberately NO `window.select = ...` helper - a top-level declaration is a
    writable property of the global object, so such a wrapper would replace the very binding its
    own body resolves and every move would throw RangeError before stashReport() ever ran. */
 // One line of the real 30 s poll, so the cases merge a server projection the way the product does.
-window.applyPoll = (uid, st) => { appState[uid] = mergePolledState(uid, st); };
+window.applyPoll = (uid, st) => { appState[uid] = mergeObservedReportState(uid, st); };
 window.closeTab = () => window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
 window.escapePane = () => $("#cite-preview").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 window.backdrop = () => $("#cite-preview").click();
@@ -473,6 +478,8 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.assertEqual("conclusion", put["body"]["insert"]["field"])
         self.assertEqual(BLOCK, put["body"]["conclusion"], "an empty field takes the block with no separator")
         self.assertEqual(EXISTING, put["body"]["findings"], "the other fields are sent unchanged")
+        # The sentence is written when the 200 has been read, not when the request was sent.
+        self.page.wait_for_function("()=>!snapshot().shown")
         value = self.page.evaluate("snapshot()")
         self.assertEqual([EXISTING, BLOCK, ""], value["text"])
 
@@ -508,7 +515,7 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.page.evaluate("reply({status: 200, body: {inserted: {cid: 'c-new', field: 'findings',"
                            " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
         self.press_insert()
-        self.page.wait_for_function("()=>calls.length===1")
+        self.page.wait_for_function("()=>calls.length===1 && !snapshot().shown")
         info = self.page.evaluate("citeInfo('%s')" % UID)
         self.assertEqual(["c-old", "c-new"], info["keep"], "both citations stay; the count tells the truth")
         # Two citations now claim the one occurrence, so neither may read 'present'.
@@ -563,7 +570,9 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.assertEqual([EXISTING, "", ""], value["text"], "a refused insertion must not touch the editor")
         self.assertEqual(EXISTING, value["state"]["draft"]["findings"], "the stored draft is byte identical")
         self.assertIn("판독문은 그대로입니다", value["pane"]["status"])
-        self.assertEqual([UID], value["converge"], "the screen no longer knows what the row holds")
+        # The server said plainly that it recorded nothing, and nobody had edited this study: there is no text of this
+        # document left to converge, so the saved report is not sent as a draft 20 s later (U5CLI-F10's class).
+        self.assertEqual([], value["converge"], "a definite refusal over unedited text leaves nothing to save")
         self.assertIn("Reload Findings", value["toasts"][-1]["message"])
         for item in value["toasts"]:
             self.assertNotIn("저장했습니다", item["message"])
@@ -659,7 +668,8 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.assertFalse(value["shown"], "a pane that belongs to the study we left must not stay open")
         self.assertEqual(["OTHER PATIENT TEXT", "", ""], value["text"], "the other study's editor is untouched")
         self.assertEqual(EXISTING, value["stored"][UID]["draft"]["findings"], "the refused study keeps its bytes")
-        self.assertEqual([UID], value["converge"], "the study whose row may have moved is marked")
+        self.assertEqual([UID, OTHER], value["converge"],
+                         "the study whose row may have moved is marked; the other one carries the text just typed into it")
         self.assertNotIn(BLOCK, json.dumps(value["stored"][OTHER], ensure_ascii=False))
         self.assertEqual(1, len(value["calls"]))
 
@@ -960,6 +970,8 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.page.wait_for_function("()=>calls.length===1")
         put = self.page.evaluate("snapshot().calls")[0]
         self.assertEqual([], put["body"]["citationIds"], "the authoritative draft read confirmed an empty list")
+        # Judge the state after the 200 was applied (the pane closes then), not while the insertion is still out.
+        self.page.wait_for_function("()=>!snapshot().shown")
         info = self.page.evaluate("citeInfo('%s')" % UID)
         self.assertFalse(info["known"], "pin B2: a 200 extends, it does not confirm")
         self.assertEqual("OMITTED", info["keep"])

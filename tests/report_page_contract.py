@@ -78,6 +78,10 @@ window.fetch = async (url, init={}) => {
   if (typeof result.text === 'function') return new Response(await result.text(),{status:result.status});
   let body;
   try { body=await result.json(); } catch (_) { return new Response('',{status:result.status}); }
+  // A list or bootstrap answer names each study's stored draft boundary, as the server's does.
+  if (result.ok && !uid && method==='GET' && body && body.states && typeof body.states==='object')
+    for (const [id,state] of Object.entries(body.states))
+      if (state && state.draftRevision===undefined) state.draftRevision=contractEnvelope(id).revision;
   if (!result.ok || !uid) return response(result.status,body);
   const row=contractRow(uid);
   if (method==='GET') return response(result.status,{...body,draftRevision:contractEnvelope(uid).revision});
@@ -111,10 +115,11 @@ def install_contract(html):
     html = html.replace('<head>', '<head>' + scripts, 1)
     # Fixtures retain their endpoint-specific fault injection, which is installed before BOOT.
     html = html.replace('APIFN', BOOT + '\nAPIFN', 1)
-    if 'id="draftbar"' in html and 'id="b-draft-keep"' not in html:
-        html = html.replace('<button id="b-report-reload"',
-                            '<button id="b-draft-keep"></button><button id="b-draft-load"></button>'
-                            '<button id="b-report-reload"', 1)
+    # A component fixture writes its own draft bar; the page's bar also carries the conflict choice (Keep This Text, Load
+    # Server Draft) and View Approved Report, whose listeners the sliced report region registers at load.
+    for control in ('b-draft-keep', 'b-draft-load', 'b-approved-view'):
+        if 'id="draftbar"' in html and f'id="{control}"' not in html:
+            html = html.replace('<button id="b-report-reload"', f'<button id="{control}"></button><button id="b-report-reload"', 1)
     return html.replace('</body>', '<script>if (typeof draftOwner !== "undefined") draftOwner = contractOwner; '
                         'if (typeof markSelectionChanged === "function") markSelectionChanged(selectedUid);'
                         'else if (typeof selectedUid !== "undefined") work.select(selectedUid);</script></body>')
