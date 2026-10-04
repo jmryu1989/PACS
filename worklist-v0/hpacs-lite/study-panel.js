@@ -68,30 +68,15 @@
     const outsideElement = el => el?.nodeType === 1 && el.ownerDocument === doc && el.isConnected
       && el !== doc.body && el !== doc.documentElement && !drawer.contains(el);
     function captureOpener(el = doc.activeElement) {
-      // Repeated API entry from inside the drawer refreshes the outside record,
-      // never making a drawer control its own return destination.
-      if (drawer.contains(el)) el = opener?.el;
-      if (!outsideElement(el)) return;
-      // Missing focus/selection information is not a new user destination.
-      opener = opener?.el === el ? { ...opener } : { el };
-      for (const key of ['scrollTop', 'scrollLeft']) {
-        if (Number.isFinite(el[key])) opener[key] = el[key];
-      }
-      if (Number.isFinite(el.selectionStart) && Number.isFinite(el.selectionEnd)) {
-        opener.selection = [el.selectionStart, el.selectionEnd, el.selectionDirection ?? opener.selection?.[2] ?? 'none'];
-      }
+      // Drawer controls and unknown focus must not replace the outside destination.
+      if (outsideElement(el)) opener = el;
     }
     function returnFocus(needed) {
       const saved = opener; opener = null;
       // Decide before hiding/removing DOM: browsers can then move focus to body.
       // An outside editor belongs to the user and must not be touched on close.
       if (!needed) return;
-      if (saved && focus(saved.el)) {
-        if (saved.selection) saved.el.setSelectionRange(...saved.selection);
-        for (const key of ['scrollTop', 'scrollLeft']) {
-          if (Number.isFinite(saved[key])) saved.el[key] = saved[key];
-        }
-      } else focus(resolve(app.fallbackFocus));
+      if (!focus(saved)) focus(resolve(app.fallbackFocus));
     }
     function changed() { app.onChange?.(snapshot()); }
     function applyState(value) {

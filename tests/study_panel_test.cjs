@@ -1,5 +1,5 @@
 // REQ-WS2/WS7 -> RISK-WS2/WS7 -> TEST-WS2/WS7 (D-01/04/05/06/07/10, A-01).
-// This stand-in models DOM identity, bubbling and focus; browser geometry remains an integration check.
+// This stand-in keeps text selection across blur/focus like a browser; geometry remains an integration check.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const create = require('../worklist-v0/hpacs-lite/study-panel.js');
@@ -54,7 +54,8 @@ class Element {
     for (let el = this; el; el = el.parentNode) if (el.style.display === 'none') return [];
     return [{}];
   }
-  focus() {
+  focus(options) {
+    this.lastFocusOptions = options;
     const visibility = this.ownerDocument.defaultView.getComputedStyle(this).visibility;
     if (this.disabled || !this.getClientRects().length || ['hidden', 'collapse'].includes(visibility)) return;
     if (!['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(this.tagName) && this.tabIndex < 0 && !this.attributes.has('tabindex')) return;
@@ -62,7 +63,12 @@ class Element {
     if (previous === this) return;
     previous?.dispatch('focusout', { relatedTarget: this });
     this.ownerDocument.activeElement = this;
-    this.dispatch('focusin', { relatedTarget: previous });
+    this.dispatch('focusin', { relatedTarget: previous === this.ownerDocument.body ? null : previous });
+  }
+  blur() {
+    if (this.ownerDocument.activeElement !== this) return;
+    this.dispatch('focusout', { relatedTarget: null });
+    this.ownerDocument.activeElement = this.ownerDocument.body;
   }
   setSelectionRange(start, end, direction) {
     this.selectionStart = start; this.selectionEnd = end; this.selectionDirection = direction;
@@ -147,14 +153,14 @@ test('A-01: 좌우 순환, Home/End 자동 활성화, Tab/Shift+Tab 비가로채
   f.opener.focus(); assert.equal(f.doc.activeElement, f.opener); assert.equal(f.panel.snapshot().open, true);
 });
 
-test('D-04: drawer 내부에서 중복 열기/탭 변경 뒤 편집기 선택·스크롤·본문 복원', () => {
+test('D-04: drawer 내부에서 중복 열기/탭 변경 뒤 편집기 자체의 최신 위치 보존', () => {
   const f = fixture(); f.panel.open('info'); f.panel.open('templates');
   f.opener.setSelectionRange(0, 0, 'none'); f.opener.scrollTop = 0; f.opener.scrollLeft = 0;
   const event = f.doc.activeElement.dispatch('keydown', { key: 'Escape' });
   assert.equal(event.defaultPrevented, true); assert.equal(event.stopped, true);
   assert.equal(f.panel.snapshot().open, false); assert.equal(f.doc.activeElement, f.opener);
-  assert.deepEqual([f.opener.selectionStart, f.opener.selectionEnd, f.opener.selectionDirection], [2, 7, 'backward']);
-  assert.equal(f.opener.scrollTop, 123); assert.equal(f.opener.scrollLeft, 9); assert.equal(f.opener.value, 'KEEP DRAFT');
+  assert.deepEqual([f.opener.selectionStart, f.opener.selectionEnd, f.opener.selectionDirection], [0, 0, 'none']);
+  assert.equal(f.opener.scrollTop, 0); assert.equal(f.opener.scrollLeft, 0); assert.equal(f.opener.value, 'KEEP DRAFT');
 });
 
 function editorState(el) {
@@ -244,10 +250,10 @@ test('W3M-F02: body/documentElement/null에서 열었으면 안정 fallback으�
 test('W3M-F05: 같은 drawer 요소로 정보 없이 복귀 후 Esc는 편집기 caret과 다음 입력 보존', () => {
   for (const source of [null, undefined, 'body', 'documentElement', 'detached', 'comment']) {
     const f = fixture(); f.opener.setSelectionRange(10, 10, 'none');
-    const before = editorState(f.opener); f.panel.open('info');
+    f.panel.open('info');
     const tab = f.tab('Info');
-    // A reactivation gives no new editor position, even if background work changed it.
     f.opener.setSelectionRange(0, 0, 'none'); f.opener.scrollTop = 0;
+    const before = editorState(f.opener);
     const relatedTarget = source === 'detached' ? f.doc.createElement('input')
       : source === 'comment' ? f.doc.createComment('unknown') : typeof source === 'string' ? f.doc[source] : source;
     tab.dispatch('focusin', { relatedTarget });
@@ -255,7 +261,7 @@ test('W3M-F05: 같은 drawer 요소로 정보 없이 복귀 후 Esc는 편집기
     const event = tab.dispatch('keydown', { key: 'Escape' });
     assert.equal(event.defaultPrevented, true); assert.equal(f.doc.activeElement, f.opener);
     assert.deepEqual(editorState(f.opener), before);
-    typeText(f.doc.activeElement, '!'); assert.equal(f.opener.value, 'KEEP DRAFT!');
+    typeText(f.doc.activeElement, '!'); assert.equal(f.opener.value, '!KEEP DRAFT');
   }
 });
 
@@ -271,19 +277,64 @@ test('W3M-F05: API 재진입의 알 수 없는 포커스도 opener·선택을 �
   }
 });
 
-test('W3M-F05: 같은 opener의 선택·스크롤 정보 누락은 보존하고 새 opener에는 이전 선택을 복사하지 않음', () => {
-  for (const missing of [null, undefined, NaN]) {
-    const f = fixture(), before = editorState(f.opener); f.panel.open('info');
-    f.opener.selectionStart = missing; f.opener.selectionEnd = missing;
-    f.opener.selectionDirection = null; f.opener.scrollTop = missing; f.opener.scrollLeft = missing;
-    f.panel.open('templates'); f.panel.close();
-    assert.equal(f.doc.activeElement, f.opener); assert.deepEqual(editorState(f.opener), before);
+test('W3M-F07: 편집 후 body를 거쳐 relatedTarget null로 drawer 복귀, Esc 다음 입력은 끝에 이어짐', () => {
+  const f = fixture(); f.opener.value = 'Findings: no acute abnormality.\n';
+  f.opener.setSelectionRange(10, 10, 'none'); f.panel.open('info');
+  f.opener.focus(); f.opener.setSelectionRange(f.opener.value.length, f.opener.value.length, 'none');
+  typeText(f.opener, 'Impression: normal.\n');
+  f.opener.scrollTop = 400; f.opener.scrollLeft = 25;
+  const before = editorState(f.opener); f.opener.blur();
+  assert.equal(f.doc.activeElement, f.doc.body);
+  const tab = f.tab('Info'), sources = [];
+  tab.addEventListener('focusin', event => sources.push(event.relatedTarget));
+  tab.focus(); assert.deepEqual(sources, [null]);
+  assert.equal(tab.dispatch('keydown', { key: 'Escape' }).defaultPrevented, true);
+  assert.equal(f.doc.activeElement, f.opener); assert.deepEqual(editorState(f.opener), before);
+  assert.deepEqual(f.opener.lastFocusOptions, { preventScroll: true });
+  typeText(f.doc.activeElement, 'Recommendation: none.');
+  assert.equal(f.opener.value, 'Findings: no acute abnormality.\nImpression: normal.\nRecommendation: none.');
+});
+
+test('W3M-F07: 모든 닫힘 경로는 요소 선택·스크롤 쓰기 없이 필요한 포커스만 복귀', () => {
+  const endings = {
+    Escape: f => f.doc.activeElement.dispatch('keydown', { key: 'Escape' }),
+    Close: f => f.close.dispatch('click'), close: f => f.panel.close(), toggle: f => f.panel.toggle(),
+    restore: f => f.panel.restore({ open: false, tab: 'info' }),
+    unavailable: f => f.panel.setAvailable([]), destroy: f => f.panel.destroy(),
+  };
+  for (const [name, end] of Object.entries(endings)) {
+    for (const destination of ['editor', 'other', 'vanished', 'hidden', 'body', 'outside']) {
+      const f = fixture(), other = f.attach('input'), writes = [];
+      other.value = 'search'; other.setSelectionRange(1, 4, 'backward');
+      // Observe browser APIs on all elements, including fallback and drawer controls.
+      for (const el of f.all(f.doc.documentElement)) {
+        const selection = el.setSelectionRange;
+        el.setSelectionRange = function (...args) { writes.push('setSelectionRange'); selection.apply(this, args); };
+        for (const key of ['selectionStart', 'selectionEnd', 'selectionDirection', 'scrollTop', 'scrollLeft']) {
+          let value = el[key];
+          Object.defineProperty(el, key, { configurable: true, get: () => value,
+            set: next => { writes.push(key); value = next; } });
+        }
+        el.scrollTo = () => writes.push('scrollTo');
+      }
+      if (destination === 'body') f.opener.blur();
+      f.panel.open('info');
+      if (destination === 'other') { other.focus(); f.tab('Info').focus(); }
+      if (destination === 'vanished') f.opener.remove();
+      if (destination === 'hidden') f.opener.hidden = true;
+      if (name === 'Close') f.close.focus();
+      if (destination === 'outside') other.focus();
+      const before = [editorState(f.opener), editorState(other)];
+      end(f);
+      assert.deepEqual(writes, [], name + '/' + destination);
+      assert.deepEqual([editorState(f.opener), editorState(other)], before);
+      const expected = ['other', 'outside'].includes(destination) ? other
+        : ['vanished', 'hidden', 'body'].includes(destination) ? f.fallback : f.opener;
+      assert.equal(f.doc.activeElement, expected, name + '/' + destination);
+      assert.equal(f.panel.snapshot().open, name === 'Escape' && destination === 'outside');
+      if (destination !== 'outside') assert.deepEqual(expected.lastFocusOptions, { preventScroll: true });
+    }
   }
-  const f = fixture(); f.panel.open('info');
-  f.opener.setSelectionRange(4, 8, null); f.panel.open('templates'); f.panel.close();
-  assert.deepEqual([f.opener.selectionStart, f.opener.selectionEnd, f.opener.selectionDirection], [4, 8, 'backward']);
-  f.panel.open(); const button = f.attach('button'); button.focus(); f.panel.open('info'); f.panel.close();
-  assert.equal(f.doc.activeElement, button); assert.equal(button.selectionStart, undefined);
 });
 
 test('W3M-F06: Technician 왕복은 저장된 Templates 유지, 표시·포커스만 복귀하고 onChange 없음', () => {
