@@ -72,17 +72,118 @@ test('TEST-WS3-EDIT: add, rename, reorder, remove notify with isolated data', ()
   assert.equal(api.snapshot().shortcuts[0].name, 'c');
 });
 
-test('TEST-WS3-SELECTION: exactly one selection, callbacks replace and removal falls back to All Studies', () => {
-  const { api, selections } = setup({ searches, shortcuts: [shortcut('a')] });
-  api.select('modality:CT'); api.select('shortcut:a');
-  assert.deepEqual(api.snapshot().items.filter(item => item.selected).map(item => item.id), ['shortcut:a']);
-  assert.deepEqual(selections.map(([item, policy]) => [item.id, policy.mode]), [['modality:CT','replace'],['shortcut:a','replace']]);
-  api.remove('a');
-  assert.equal(api.snapshot().selectedId, 'all');
-  assert.equal(selections.at(-1)[0].id, 'all');
-  assert.throws(() => api.select('missing'));
-  api.update({ rows: [{modality:'DX'}] }); api.select('modality:DX'); api.update({ rows: [] });
-  assert.equal(api.snapshot().selectedId, 'all');
+test('TEST-WS3-SELECTION: disappearing selected modality stays selected through empty, unknown and recovery', () => {
+  const { api, host, selections } = setup({ rows: [{modality:'DX'}, {modality:'CT'}], loadState:'complete' });
+  button(host, 'DX (1)').click();
+  for (const rows of [[{modality:'CT'}, {modality:'MR'}], []]) {
+    for (const [loadState, count] of [['complete','0'], ['partial','0 · Partial'], ['unknown','—']]) {
+      api.update({rows, loadState});
+      assert.equal(api.snapshot().selectedId, 'modality:DX');
+      assert.equal(get(api, 'modality:DX').count, count);
+      assert.deepEqual(api.filter(rows), []);
+      assert.ok(button(host, `DX (${count})`));
+      assert.equal(nodes(host).filter(node => node.getAttribute('aria-current') === 'true').length, 1);
+    }
+  }
+  api.update({rows:[{modality:'DX'}], loadState:'complete'});
+  assert.equal(get(api,'modality:DX').count, '1');
+  assert.deepEqual(api.filter([{modality:'DX'}, {modality:'CT'}]), [{modality:'DX'}]);
+  assert.equal(selections.length, 1);
+  api.select('all'); api.update({rows:[]});
+  assert.equal(get(api, 'modality:DX'), undefined);
+});
+
+test('TEST-WS3-REMOVAL: selected shortcut and search disappear without broadening or selection callbacks', () => {
+  for (const disappear of [api => api.remove('a'), api => api.update({shortcuts:[]}), api => api.update({searches:[]})]) {
+    const rows = [{modality:'CT'}, {modality:'MR'}];
+    const { api, selections } = setup({ searches, shortcuts:[shortcut('a')], rows, loadState:'complete' });
+    api.select('shortcut:a'); disappear(api);
+    for (const loadState of ['complete','partial','unknown']) {
+      api.update({loadState});
+      assert.equal(api.snapshot().selectedId, 'shortcut:a');
+      assert.equal(get(api, 'shortcut:a').unavailable, true);
+      assert.equal(get(api, 'shortcut:a').count, '—');
+      assert.deepEqual(api.filter(rows), []);
+      assert.equal(api.snapshot().items.filter(item => item.selected).length, 1);
+    }
+    assert.equal(selections.length, 1);
+    api.update({searches, shortcuts:[shortcut('a')], loadState:'complete'});
+    assert.deepEqual(api.filter(rows), [{modality:'CT'}]);
+    assert.equal(selections.length, 1);
+  }
+});
+
+test('TEST-WS3-EVENTS: user/programmatic reasons, silent updates and external applied-state alignment', () => {
+  const rows = [{modality:'CT'}, {modality:'MR'}];
+  const { api, host, selections, changes } = setup({ searches, shortcuts:[shortcut('a')], rows, loadState:'complete' });
+  button(host, 'a (1)').click();
+  assert.deepEqual(selections[0][1], {mode:'replace',reason:'user'});
+  api.update({searches:searches.map(search => ({...search}))});
+  api.rename('a','Renamed'); api.update({rows:[],loadState:'unknown'});
+  assert.equal(selections.length, 1);
+  assert.equal(changes.length, 1);
+  api.update({searches:[{...searches[0],matches:()=>true}]});
+  assert.deepEqual(api.filter(rows), [{modality:'CT'}]);
+  assert.equal(selections.length, 1);
+  api.select('shortcut:a');
+  assert.deepEqual(selections.at(-1)[1], {mode:'replace',reason:'programmatic'});
+  assert.deepEqual(api.filter(rows), rows);
+  api.setApplied('modality:MR');
+  assert.equal(api.snapshot().selectedId,'modality:MR');
+  assert.deepEqual(api.filter(rows), [{modality:'MR'}]);
+  api.setApplied('all');
+  assert.deepEqual(api.filter(rows), rows);
+  assert.equal(selections.length, 2); assert.equal(changes.length, 1);
+  const before = api.snapshot();
+  assert.throws(() => api.setApplied('missing'));
+  assert.deepEqual(api.snapshot(), before);
+});
+
+test('TEST-WS3-RETARGET: a changed shortcut target requires explicit selection or external alignment', () => {
+  const rows = [{modality:'CT'}, {modality:'MR'}];
+  const { api, selections } = setup({ searches:[...searches,{id:'any',name:'Any',matches:()=>true}],
+    shortcuts:[shortcut('a')],rows,loadState:'complete' });
+  api.select('shortcut:a');
+  api.update({shortcuts:[{...shortcut('a'),searchId:'any'}]});
+  assert.equal(api.snapshot().selectedId,'shortcut:a');
+  assert.equal(get(api,'shortcut:a').unavailable,true);
+  assert.deepEqual(api.filter(rows),[]);
+  assert.equal(selections.length,1);
+  api.setApplied('shortcut:a');
+  assert.deepEqual(api.filter(rows),rows);
+  assert.equal(get(api,'shortcut:a').count,'2');
+  assert.equal(selections.length,1);
+});
+
+test('TEST-WS3-NAMES: trim and refuse case-insensitive shortcut/default duplicates atomically', () => {
+  const { api, host, changes, selections } = setup({ searches, rows:[{modality:'DX'}], shortcuts:[shortcut('a','  Padded  ')] });
+  assert.equal(api.snapshot().shortcuts[0].name, 'Padded');
+  api.add(shortcut('b','  Other  ')); api.rename('b','  Renamed  ');
+  assert.equal(api.snapshot().shortcuts[1].name,'Renamed');
+  const before = api.snapshot(), counts = [changes.length,selections.length];
+  for (const name of ['Padded',' padded ', 'CT','ct',' mr ', 'US','CR','SC','dx',' all studies ']) {
+    for (const action of [() => api.add(shortcut('c',name)), () => api.rename('b',name),
+      () => api.update({shortcuts:[shortcut('a','Padded'),shortcut('b',name)]})]) {
+      assert.throws(action, /이미 사용 중인 폴더 또는 바로가기 이름/);
+      assert.deepEqual(api.snapshot(), before);
+      assert.deepEqual([changes.length,selections.length], counts);
+    }
+  }
+  const form = nodes(host).find(node => node.tagName === 'FORM');
+  nodes(form).find(node => node.tagName === 'INPUT').value = '  ct  ';
+  nodes(form).find(node => node.tagName === 'SELECT').value = 'ct';
+  form.onsubmit({preventDefault(){}});
+  assert.match(nodes(host).find(node => node.getAttribute('role') === 'status').textContent, /이미 사용 중인/);
+  assert.deepEqual(api.snapshot(), before);
+  assert.deepEqual([changes.length,selections.length], counts);
+  assert.throws(() => setup({searches,shortcuts:[shortcut('a','CT')]}), /이미 사용 중인/);
+  api.select('shortcut:a'); api.remove('a');
+  const removed = api.snapshot(), removedCounts = [changes.length,selections.length];
+  assert.throws(() => api.add(shortcut('c',' padded ')), /이미 사용 중인/);
+  assert.deepEqual(api.snapshot(),removed);
+  assert.deepEqual([changes.length,selections.length],removedCounts);
+  api.select('all'); api.add(shortcut('c',' padded '));
+  assert.equal(api.snapshot().shortcuts.at(-1).name,'padded');
 });
 
 test('TEST-WS3-VALIDATION: invalid input refuses atomically before callbacks or state changes', () => {
@@ -108,6 +209,7 @@ test('TEST-WS3-UNAVAILABLE: missing or indeterminate search never broadens the s
   assert.throws(() => api.select('shortcut:a'));
   for (const matches of [() => null, () => { throw new Error('unavailable'); }, () => Promise.resolve(true)]) {
     api.update({searches:[{id:'ct',name:'Search',matches}]});
+    api.select('shortcut:a');
     assert.equal(get(api,'shortcut:a').count, '—');
     assert.deepEqual(api.filter([{modality:'CT'}]), []);
   }

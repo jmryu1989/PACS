@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from urllib.parse import unquote
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -268,6 +268,84 @@ render();
         self.assertEqual(value.input_value(), "brain")
         self.assertIn("3건", page.locator("#sfm-count").inner_text())
         self.assertNotIn("Partial", page.locator("#sfm-count").inner_text())
+
+    # REQ-WS3 -> RISK-WS3 -> TEST-WS3-RELATIVE-EDITOR: exercise the public editor with synthetic saved searches.
+    def open_relative_manager(self, days="7"):
+        page = self.new_page(viewport={"width": 1280, "height": 900})
+        page.route("**/*", lambda route: route.abort())
+        page.set_content(MANAGER_HARNESS)
+        page.add_style_tag(content=self.manager_css)
+        page.add_script_tag(content=self.compound_source)
+        page.add_script_tag(content=self.manager_source)
+        page.evaluate("""days => {
+          current.cols.$compound={version:1,join:'and',rules:[{field:'date',op:'withinLastDays',value:days}]};
+          current.folder='Follow Up'; current.description='Keep description'; current.ordinal=3;
+          current.quick='Keep patient query'; current.sortKey='date'; current.sortDir=-1;
+          window.saved=[]; window.applied=[];
+          options.list=()=>[current];
+          options.save=async value=>{saved.push(structuredClone(value)); return value};
+          options.apply=value=>{applied.push(value);return true};
+          window.manager=KinSavedFilterManager.mount(options); manager.open({name:'Draft'});
+        }""", days)
+        return page
+
+    def test_relative_editor_opens_saves_and_reopens_integer_bounds_unchanged(self):
+        page = self.open_relative_manager()
+        value = page.get_by_label("Value", exact=True)
+        expect(page.get_by_role("combobox", name="Operator", exact=True).locator("option:checked")).to_have_text("Within Last N Days")
+        for attribute, expected in [("type", "number"), ("min", "0"), ("max", "365"), ("step", "1")]:
+            expect(value).to_have_attribute(attribute, expected)
+        expect(value).to_have_value("7")
+        expect(page.get_by_label("End Date", exact=True)).to_be_hidden()
+        for index, days in enumerate(["7", "0", "1", "365"], 1):
+            value.fill(days)
+            page.get_by_role("button", name="Save", exact=True).click()
+            page.wait_for_function("n=>saved.length===n", arg=index)
+            expect(page.locator("#sfm-status")).to_contain_text("저장 완료")
+            saved = page.evaluate("saved.at(-1)")
+            self.assertEqual(saved["cols"]["$compound"], {"version": 1, "join": "and", "rules": [
+                {"field": "date", "op": "withinLastDays", "value": days}]})
+            self.assertEqual([saved[key] for key in ["folder", "description", "ordinal", "quick", "sortKey", "sortDir"]],
+                             ["Follow Up", "Keep description", 3, "Keep patient query", "date", -1])
+            expect(value).to_have_value(days)
+            page.get_by_role("button", name="Close Saved Search Manager", exact=True).click()
+            page.evaluate("Object.assign(current,saved.at(-1));manager.open({name:'Draft'})")
+            expect(value).to_have_value(days)
+        self.assertEqual(page.evaluate("applied"), [])
+
+    def test_relative_editor_refuses_invalid_days_with_existing_korean_message(self):
+        page = self.open_relative_manager()
+        for days in ["-1", "366", "1.5", "", "1e2", "01"]:
+            page.get_by_label("Value", exact=True).fill(days)
+            expect(page.locator("#sfm-count")).to_contain_text("최근 일수는 0~365 사이의 정수로 입력해 주세요.")
+            page.get_by_role("button", name="Save", exact=True).click()
+            self.assertEqual(page.evaluate("saved"), [])
+            self.assertEqual(page.evaluate("applied"), [])
+            self.assertEqual(page.evaluate("current.cols.$compound.rules[0].value"), "7")
+
+    def test_relative_editor_switches_between_relative_and_existing_date_controls(self):
+        page = self.open_relative_manager()
+        operator = page.get_by_role("combobox", name="Operator", exact=True)
+        value = page.get_by_label("Value", exact=True)
+        operator.select_option(label="Between (Inclusive)")
+        expect(value).to_have_attribute("type", "date")
+        self.assertIsNone(value.get_attribute("min"))
+        self.assertIsNone(value.get_attribute("max"))
+        self.assertIsNone(value.get_attribute("step"))
+        value.fill("2026-10-01")
+        page.get_by_label("End Date", exact=True).fill("2026-10-04")
+        page.get_by_role("button", name="Save", exact=True).click()
+        expect(page.locator("#sfm-status")).to_contain_text("저장 완료")
+        self.assertEqual(page.evaluate("saved.at(-1).cols.$compound.rules[0]"),
+                         {"field": "date", "op": "between", "value": "2026-10-01", "value2": "2026-10-04"})
+        operator.select_option(label="Within Last N Days")
+        expect(value).to_have_attribute("type", "number")
+        expect(page.get_by_label("End Date", exact=True)).to_be_hidden()
+        value.fill("7")
+        page.get_by_role("button", name="Save", exact=True).click()
+        page.wait_for_function("saved.length===2")
+        self.assertEqual(page.evaluate("saved.at(-1).cols.$compound.rules[0]"),
+                         {"field": "date", "op": "withinLastDays", "value": "7"})
 
 
 if __name__ == "__main__":

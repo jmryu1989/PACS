@@ -18,13 +18,15 @@
   }
 
   // Searches are adapters: {id, name, matches(row)}. Compile/validate a saved search
-  // or compound filter before handing it in; null means its count is unknown.
+  // or compound filter before handing it in; a null match result means its count is unknown.
+  // Adapters capture immutable criteria. Updates refresh data, never reapply a selection;
+  // select(id) explicitly applies the current adapter, setApplied(id) aligns it silently.
   function mount({ host, rows = [], loadState = 'unknown', searches = [], shortcuts = [], onSelect, onChange }) {
     if (!host?.ownerDocument || typeof onSelect !== 'function' || typeof onChange !== 'function') {
       throw new Error('폴더 표시 영역과 변경 콜백을 확인해 주세요.');
     }
     const doc = host.ownerDocument;
-    let state, selected = 'all', ended = false;
+    let state, selected = 'all', applied = { id: 'all', name: 'All Studies', kind: 'all' }, appliedSearch, ended = false;
     const nav = doc.createElement('nav');
     nav.className = 'worklist-folder-tree'; nav.setAttribute('aria-label', 'Folders');
     const controls = new Map(), collapsed = new Set();
@@ -40,19 +42,40 @@
         || new Set(next.shortcuts.map(item => item.id)).size !== next.shortcuts.length) {
         throw new Error('폴더 목록 또는 바로가기 형식을 확인해 주세요.');
       }
+      const shortcuts = next.shortcuts.map(item => ({ ...item, name: item.name.trim() }));
+      const names = new Set(['All Studies', ...defaultModalities(next.rows),
+        ...(applied.kind === 'modality' ? [applied.modality] : []),
+        ...(applied.kind === 'shortcut' && !shortcuts.some(item => 'shortcut:' + item.id === selected)
+          ? [applied.name] : [])].map(name => name.toUpperCase()));
+      for (const item of shortcuts) {
+        const name = item.name.toUpperCase();
+        if (names.has(name)) throw new Error('이미 사용 중인 폴더 또는 바로가기 이름입니다. 다른 이름을 입력해 주세요.');
+        names.add(name);
+      }
       return { rows: [...next.rows], loadState: next.loadState,
-        searches: next.searches.map(search => ({ ...search })), shortcuts: next.shortcuts.map(item => ({ ...item })) };
+        searches: next.searches.map(search => ({ ...search })), shortcuts };
     }
-    function items() {
+    function availableItems() {
       return [{ id: 'all', name: 'All Studies', kind: 'all' },
         ...state.shortcuts.map(item => ({ ...item, id: 'shortcut:' + item.id, shortcutId: item.id, kind: 'shortcut',
           unavailable: !state.searches.some(search => search.id === item.searchId) })),
         ...defaultModalities(state.rows).map(modality => ({ id: 'modality:' + modality, name: modality, modality, kind: 'modality' }))];
     }
+    function items() {
+      const result = availableItems();
+      const at = result.findIndex(item => item.id === selected);
+      if (at < 0) result.push({ ...applied, unavailable: applied.kind === 'shortcut' });
+      else if (applied.kind === 'shortcut' && result[at].searchId !== applied.searchId) {
+        result[at] = { ...applied, unavailable: true };
+      }
+      return result;
+    }
     function matches(item, row) {
       if (item.kind === 'all') return true;
       if (item.kind === 'modality') return matchesModality(row.modality, item.modality);
-      const search = state.searches.find(search => search.id === item.searchId);
+      if (item.unavailable) return null;
+      // A refreshed adapter must not silently replace the doctor's applied criteria.
+      const search = item.id === selected ? appliedSearch : state.searches.find(search => search.id === item.searchId);
       if (!search) return null;
       try { const result = search.matches(row); return typeof result === 'boolean' ? result : null; }
       catch (_) { return null; }
@@ -70,25 +93,26 @@
     }
     function active() { if (ended) throw new Error('종료된 폴더 목록입니다.'); }
     // Selection policy extension point: only replace is supported until composition is agreed.
-    function notifySelection() { onSelect({ ...items().find(item => item.id === selected) }, { mode: 'replace' }); }
-    function select(id) {
+    function choose(id, reason) {
       active();
-      const item = items().find(item => item.id === id);
+      const item = availableItems().find(item => item.id === id) || items().find(item => item.id === id);
       if (!item || item.unavailable) throw new Error('사용할 수 없는 폴더입니다.');
-      selected = id; render(); notifySelection();
+      selected = id; applied = { ...item };
+      appliedSearch = state.searches.find(search => search.id === item.searchId);
+      render();
+      if (reason) onSelect({ ...item }, { mode: 'replace', reason });
     }
+    function select(id) { choose(id, 'programmatic'); }
+    function setApplied(id) { choose(id, null); }
     function update(patch) {
       active();
       if (!object(patch) || Object.keys(patch).some(key => !['rows', 'loadState', 'searches', 'shortcuts'].includes(key))) {
         throw new Error('폴더 갱신 형식을 확인해 주세요.');
       }
-      const previous = items().find(item => item.id === selected);
       state = validate({ ...state, ...patch });
-      if (!items().some(item => item.id === selected)) selected = 'all';
+      const current = state.shortcuts.find(item => 'shortcut:' + item.id === selected);
+      if (current && current.searchId === applied.searchId) applied.name = current.name;
       render();
-      const current = items().find(item => item.id === selected);
-      if (previous.id !== current.id || previous.name !== current.name || previous.searchId !== current.searchId
-        || previous.unavailable !== current.unavailable || (current.kind === 'shortcut' && Object.hasOwn(patch, 'searches'))) notifySelection();
     }
     function change(next) { update({ shortcuts: next }); onChange(state.shortcuts.map(item => ({ ...item }))); }
     function add(item) {
@@ -133,9 +157,9 @@
       const list = element('ul');
       function itemRow(item, parent) {
         const li = element('li'), label = item.name + ' (' + count(item) + ')' + (item.unavailable ? ' · Unavailable' : '');
-        const choose = button(label, () => attempt(() => select(item.id)), item.id);
-        if (item.id === selected) choose.setAttribute('aria-current', 'true');
-        choose.disabled = !!item.unavailable; li.append(choose); parent.append(li); return li;
+        const control = button(label, () => attempt(() => choose(item.id, 'user')), item.id);
+        if (item.id === selected) control.setAttribute('aria-current', 'true');
+        control.disabled = !!item.unavailable; li.append(control); parent.append(li); return li;
       }
       const all = items(); itemRow(all[0], list);
       for (const [kind, title] of [['shortcut', 'My Shortcuts'], ['modality', 'Modality']]) {
@@ -146,6 +170,7 @@
           const li = itemRow(item, children);
           if (kind !== 'shortcut') continue;
           const id = item.shortcutId, at = state.shortcuts.findIndex(shortcut => shortcut.id === id);
+          if (at < 0) continue;
           const editor = remember(element('details'), 'editor:' + id), summary = remember(element('summary', 'Edit Shortcut'), 'edit:' + id);
           editor.open = expanded.has('editor:' + id); editor.append(summary);
           const input = remember(element('input'), 'name:' + id); input.value = item.name; input.maxLength = 400;
@@ -180,7 +205,7 @@
     }
     state = validate({ rows, loadState, searches, shortcuts });
     host.append(nav); render();
-    return { update, snapshot, select, add, rename, remove, reorder,
+    return { update, snapshot, select, setApplied, add, rename, remove, reorder,
       filter(list) { active(); const item = items().find(item => item.id === selected); return list.filter(row => matches(item, row) === true); },
       destroy() { if (!ended) { ended = true; nav.remove(); controls.clear(); } },
     };

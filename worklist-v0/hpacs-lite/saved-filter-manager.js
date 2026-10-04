@@ -97,7 +97,7 @@
     const compound = KinCompoundFilter;
     const operatorLabels = { contains: 'Contains', eq: 'Equals', notContains: 'Does Not Contain',
       neq: 'Does Not Equal', empty: 'Is Empty', notEmpty: 'Is Not Empty', gte: 'On or After',
-      lte: 'On or Before', between: 'Between (Inclusive)' };
+      lte: 'On or Before', between: 'Between (Inclusive)', withinLastDays: 'Within Last N Days' };
     const named = name => options.list().find(f => f.name === name);
     const status = (message, error = false) => {
       $('status').textContent = message;
@@ -196,16 +196,24 @@
       choices(operator, field ? compound.operators(field).map(([op, label]) => [op, field.type === 'tokens' ? label : operatorLabels[op] || op]) : [[rule.op, rule.op]], rule.op);
       const input = make('Value', document.createElement(field?.type === 'select' ? 'select' : 'input'), 'ruleValue');
       if (field?.type === 'select') choices(input, [['', 'Select Value'], ...field.values.map(v => [v, v])], rule.value ?? '');
-      else { input.type = field?.type === 'date' ? 'date' : 'text'; input.maxLength = 1000; input.value = rule.value ?? ''; }
+      else { input.maxLength = 1000; }
       const end = make('End Date', document.createElement('input'), 'ruleValue2');
       end.type = 'date'; end.value = rule.value2 ?? '';
       const remove = document.createElement('button'); remove.type = 'button'; remove.dataset.ruleRemove = '';
       remove.textContent = 'Remove'; remove.setAttribute('aria-label', 'Remove Rule'); row.append(remove);
       const visibility = () => {
+        if (field?.type === 'date') {
+          const relative = operator.value === 'withinLastDays';
+          input.type = relative ? 'number' : 'date';
+          for (const [key, value] of [['min', '0'], ['max', '365'], ['step', '1']]) {
+            if (relative) input.setAttribute(key, value); else input.removeAttribute(key);
+          }
+        }
         input.parentElement.hidden = ['empty', 'notEmpty'].includes(operator.value);
         end.parentElement.hidden = operator.value !== 'between';
       };
       visibility();
+      if (field?.type !== 'select') input.value = rule.value ?? '';
       operator.addEventListener('change', () => { visibility(); count(); });
       fieldInput.addEventListener('change', () => {
         const nextField = fields.find(f => f.k === fieldInput.value);

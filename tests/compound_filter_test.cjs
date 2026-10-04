@@ -26,8 +26,20 @@ function localClock(year, month, day, hour = 12, minute = 0) {
   return { matcher: sandbox.window.KinCompoundFilter, advance: ms => { instant += ms; } };
 }
 const relative = days => expr([rule('date', 'withinLastDays', days)]);
+function localTest(name, run) {
+  for (const zone of ['Asia/Seoul', 'America/Los_Angeles']) test(`${name} [${zone}]`, () => {
+    const previous = process.env.TZ;
+    try {
+      process.env.TZ = zone;
+      assert.equal(new Date(2026, 0, 1).getTimezoneOffset(), zone === 'Asia/Seoul' ? -540 : 480);
+      run();
+    } finally {
+      if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous;
+    }
+  });
+}
 
-test('TEST-WS3-RELATIVE-VALIDATION: bounded integer day strings, no coercion or second value', () => {
+localTest('TEST-WS3-RELATIVE-VALIDATION: bounded integer day strings, no coercion or second value', () => {
   for (const days of ['0', '1', '365']) valid(relative(days));
   for (const days of [undefined, null, 0, 1, false, {}, [], '', ' ', '-1', '366', '1.5', '1e2', '7d', '01', ' 1', '1\n']) invalid(relative(days));
   invalid(expr([rule('date', 'withinLastDays', '1', '2026-10-04')]));
@@ -40,7 +52,7 @@ test('TEST-WS3-RELATIVE-VALIDATION: bounded integer day strings, no coercion or 
   }
 });
 
-test('TEST-WS3-RELATIVE-BOUNDS: today through N days ago, excluding future dates', () => {
+localTest('TEST-WS3-RELATIVE-BOUNDS: today through N days ago, excluding future dates', () => {
   const clock = localClock(2026, 10, 4);
   for (const [days, dates, expected] of [
     ['0', ['20261003', '20261004', '20261005'], [false, true, false]],
@@ -49,7 +61,7 @@ test('TEST-WS3-RELATIVE-BOUNDS: today through N days ago, excluding future dates
   ]) assert.deepEqual(dates.map(date => clock.matcher.matches({ date }, relative(days), columns)), expected);
 });
 
-test('TEST-WS3-RELATIVE-CALENDAR: month, leap year and year boundaries', () => {
+localTest('TEST-WS3-RELATIVE-CALENDAR: month, leap year and year boundaries', () => {
   for (const [year, month, day, previous, outside] of [
     [2026, 3, 1, '20260228', '20260227'], [2028, 3, 1, '20280229', '20280228'],
     [2027, 1, 1, '20261231', '20261230'], [2026, 11, 2, '20261101', '20261031'],
@@ -60,7 +72,7 @@ test('TEST-WS3-RELATIVE-CALENDAR: month, leap year and year boundaries', () => {
   }
 });
 
-test('TEST-WS3-RELATIVE-MIDNIGHT: an already compiled condition follows the local day', () => {
+localTest('TEST-WS3-RELATIVE-MIDNIGHT: an already compiled condition follows the local day', () => {
   const clock = localClock(2026, 12, 31, 23, 59), compiled = clock.matcher.compile(relative('0'), columns);
   assert.equal(compiled({ date: '20261231' }), true);
   assert.equal(compiled({ date: '20270101' }), false);
