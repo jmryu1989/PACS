@@ -80,10 +80,10 @@ export class AuthController {
       return;
     }
     try {
-      const { sid, proof } = await this.auth.finishLogin(req, code ?? '', state ?? '');
+      const { sid, proof, document } = await this.auth.finishLogin(req, code ?? '', state ?? '');
       // `kin_sid`를 쓰는 응답은 이것 하나다. 진입 증명은 fragment로만 나간다 — 서버·프록시 기록과 Referer에 실리지 않는다.
       this.auth.setSessionCookie(res, sid);
-      res.redirect(302, `${origin}/worklist/hpacs-lite/main.html#kin-entry=${encodeURIComponent(proof)}`);
+      res.redirect(302, `${origin}/worklist/hpacs-lite/${document}#kin-entry=${encodeURIComponent(proof)}`);
     } catch (caught: any) {
       if (caught?.getStatus?.() === 400) throw caught;
       res.redirect(302, `${origin}/worklist/hpacs-lite/index.html?auth_error=login_failed`);

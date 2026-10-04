@@ -346,6 +346,14 @@ const KinAuth = (() => {
       } catch (e) {}
     }
     if (!undecided()) return null;
+    // Roles may change after the callback chose this document. A consumed proof cannot be
+    // forwarded to a different document; only the bound identity may admit this one.
+    if (found && found.identity.state === 'approved') {
+      const roles = found.identity.roles;
+      if ((/\/main\.html$/.test(location.pathname) && home(found.identity) === 'clinician.html')
+        || (/\/clinician\.html$/.test(location.pathname) && !roles.includes('clinician') && !roles.includes('admin')))
+        found = null;
+    }
     if (!found) {
       classify();
       if (undecided()) reason = 'entry';
@@ -388,9 +396,9 @@ const KinAuth = (() => {
   }
 
   /**
-   * OIDC 콜백(api/src/auth.controller.ts)은 모든 로그인을 main.html로 돌려보낸다. clinician-only 세션이 그 페이지의
-   * 작업을 시작하지 않도록 main.html에서만 clinician.html로 옮기고, 옮기는 동안 init()을 끝내지 않는다 —
-   * main.html의 boot는 `await KinAuth.init()` 다음 줄로 넘어가지 않는다.
+   * Login callbacks already select the final document before delivering its proof. This redirect
+   * handles ordinary main.html entry without a proof. Keep boot pending until navigation finishes
+   * so a clinician-only account never starts the main worklist.
    */
   function land(session) {
     if (!/\/main\.html$/.test(location.pathname) || home(session) !== 'clinician.html') return session;

@@ -6,6 +6,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { isIP } from 'net';
 import { createRemoteJWKSet, decodeJwt, jwtVerify, JWTPayload } from 'jose';
 import { PrismaService } from './prisma.service';
+import { clinicianOnly } from './clinician-policy';
 
 const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
 const SESSION_TOUCH_MS = 5 * 60 * 1000;
@@ -436,7 +437,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 성공한 로그인은 세션과 함께 **진입 증명**을 만든다(U5S-REQ-09): 콜백이 이동시키는 그 문서가 "방금 이 로그인을 한
    * 문서"임을 한 번 보일 수 있는 값이다. 저장하는 것은 해시와 만료뿐이고, 원문은 이동 주소의 fragment로만 나간다.
    */
-  async finishLogin(req: any, code: string, state: string): Promise<{ sid: string; proof: string }> {
+  async finishLogin(req: any, code: string, state: string): Promise<{ sid: string; proof: string; document: 'main.html' | 'clinician.html' }> {
     const pending = this.readPending(req);
     if (!pending || pending.state !== state) {
       if (pending) await this.loginFailureRow(req, 'state_mismatch', null);
@@ -478,6 +479,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       throw error;
     }
     const who = this.identity(payload, String(payload.sub));
+    const roles = Array.isArray(payload.realm_access?.roles) ? payload.realm_access.roles : [];
+    // A single institution and a clinician role meet member approval; gateway identities are not members.
+    // Deliver the proof to its consumer, since a second document cannot reuse a consumed proof.
+    const document = who.institution !== null && clinicianOnly(roles) && !roles.includes('gateway')
+      && !(typeof payload.azp === 'string' && payload.azp.startsWith('gw-')) ? 'clinician.html' : 'main.html';
     const sid = randomBytes(32).toString('base64url');
     const proof = randomBytes(32).toString('base64url');
     const now = new Date();
@@ -502,7 +508,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       await this.loginFailureRow(req, 'session_failed', who);
       throw this.storageFailure();
     }
-    return { sid, proof };
+    return { sid, proof, document };
   }
 
   /**
