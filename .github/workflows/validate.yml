@@ -1262,6 +1262,19 @@ jobs:
             sleep 1
           done
           python3 scripts/record-run.py --run-dir tmp/runtime-ci/auth-session-service --cwd . --file api/src/auth.service.ts --file api/src/auth.controller.ts --file api/src/auth.guard.ts --file api/src/admin-audit.ts --file api/prisma/schema.prisma --file tests/auth_session_service_test.cjs --file worklist-v0/hpacs-lite/main.html -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_AUTH_SESSION_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_auth_session_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/auth_session_service_test.cjs
+      # S7-U5 (U5S-TEST-D01..D11): the compiled draft handlers and PacsService over a disposable postgres:16-alpine of the
+      # same shape as the two steps above - the stored draft revision and its tombstones, the study draft epoch, the one
+      # mutation path with its session fence and the audit row in the mutation's transaction. The run directory is also
+      # named in the upload list below.
+      - name: S7-U5 compiled draft boundary - stored revision CAS, tombstones, epoch, session fence, audit in the transaction
+        run: |
+          db="$(docker run -d --network none --tmpfs /var/lib/postgresql/data -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=kin_report_draft_test postgres:16-alpine)"
+          trap 'docker rm -f "$db" > /dev/null' EXIT
+          for attempt in $(seq 1 90); do
+            if docker exec "$db" psql -h 127.0.0.1 -U postgres -d kin_report_draft_test -c 'SELECT 1' > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-draft-cas --cwd . --file api/src/pacs.service.ts --file api/src/pacs.controller.ts --file api/src/auth.service.ts --file api/prisma/schema.prisma --file api/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql --file tests/report_draft_cas_service_test.cjs -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_REPORT_DRAFT_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_report_draft_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_draft_cas_service_test.cjs
       # S7-U1a SV11, the source half (S7-U1a-R-001-F03): TypeScript's compiler API reads api/src/critical-result*.ts in the
       # development target (its build layers are the ones the production build above just made) and PostgreSQL 16 plans
       # each raw query on a disposable postgres:16-alpine holding every migration.
@@ -1284,7 +1297,7 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/audit-store-db --cwd . --file api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql --file api/prisma/schema.prisma --file scripts/ops_audit_integrity.py --file scripts/ops_backup.py --file tests/audit_store_db_test.py -- python3 -B tests/audit_store_db_test.py
       - name: Compiled stale-draft addendum guard and draft base-version boundaries
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-stale-draft --cwd . --file api/src/pacs.service.ts --file tests/report_stale_draft_test.cjs --file api/src/worklist-columns.ts -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_stale_draft_test.cjs
-      - name: Compiled draft write owner binding (S7-U5)
+      - name: Compiled draft mutation refusals before any read - owner, boundary, snapshot (S7-U5)
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-draft-owner --cwd . --file api/src/pacs.controller.ts --file api/src/app.module.ts --file api/src/pacs.service.ts --file tests/report_draft_owner_test.cjs --file api/src/worklist-columns.ts -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_draft_owner_test.cjs
       - name: Compiled citation attestation, carry-forward, limits and guarded read
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-citations --cwd . --file api/src/pacs.service.ts --file api/src/report-citation.ts --file api/src/finding.service.ts --file tests/report_citation_vectors.json --file tests/report_citation_test.cjs --file api/src/worklist-columns.ts -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_citation_test.cjs
@@ -1377,6 +1390,7 @@ jobs:
             tmp/runtime-ci/audit-integrity/
             tmp/runtime-ci/audit-store-db/
             tmp/runtime-ci/auth-session-service/
+            tmp/runtime-ci/report-draft-cas/
           if-no-files-found: error
           retention-days: 7
       # The list above names directories one by one and missed later record-run steps (display-scope, viewer-branding,

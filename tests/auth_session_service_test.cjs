@@ -1703,7 +1703,9 @@ test('AS-12 T15 (RT-12, X-32): two end transitions overlap; the one that deleted
 // ── U5S session contract (Astra spec U5S-REQ-05, 08, 09, 10, 12 and the 2026-10-04 amendments 1-5, 9) ──
 // U5S-REQ-05/08/09/10/18 -> U5S-RISK-SESSION / -AUDIT / -WAIT / -SUCCESS -> U5S-TEST-S05, S06, S07 (server and cookie
 // half), S11 (one termination record) and the cases below. S06 (a failed or conflicting revocation confirms nothing and
-// tells Keycloak nothing) is AS-09 (2), (3) and AS-12 T9 above. The proxy half of S12 is tests/proxy_auth_code_test.py.
+// tells Keycloak nothing) is AS-09 (2), (3) and AS-12 T9 above. Of S12 this file holds the API half (what the DICOM
+// subrequest `GET authz/dicom` answers: 401 or 403 with its code); that nginx forwards X-KIN-Session and relays the code
+// header on the protected response is configuration read by a real proxy, which no case of this file starts.
 
 /** [status, body code, X-KIN-Auth-Code] of an answer. */
 const coded = out => [out.status, out.body?.code ?? null, out.authCode];
