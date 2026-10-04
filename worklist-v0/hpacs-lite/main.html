@@ -6522,7 +6522,9 @@
     function scheduleCitationRefresh() {
       if (!citationListOpen) return;
       clearTimeout(citationRefreshTimer);
-      citationRefreshTimer = setTimeout(() => { citationRefreshTimer = null; renderCitationBar(); }, 400);
+      // 다시 세는 일은 이 타건이 있던 그 선택의 것이다 — 그 사이 검사를 옮겼거나 로그아웃 준비·세션 종료가 있었으면 그리지 않는다.
+      const at = work.capture("study");
+      citationRefreshTimer = setTimeout(() => { citationRefreshTimer = null; work.commit(at, renderCitationBar); }, 400);
     }
     for (const k of RFIELDS) $("#" + k).addEventListener("input", scheduleCitationRefresh);
     // S3-U6: 커서 자리 자체는 그 칸이 들고 있다. 화면은 "이 칸을 짚은 적이 있다"만 표시해 둔다.
@@ -8474,7 +8476,8 @@
           clearInterval(timer); ohifRectPolls.delete(popup);
           return;
         }
-        rememberOhifRect(popup);
+        // 창 자리를 적는 일도 주기마다 그때의 문맥을 지난다: 로그아웃 준비 중이나 세션이 끝난 뒤에는 저장소에 쓰지 않는다.
+        work.commit(work.capture("document"), () => { rememberOhifRect(popup); });
       }, 2000);
       ohifRectPolls.set(popup, timer);
     }

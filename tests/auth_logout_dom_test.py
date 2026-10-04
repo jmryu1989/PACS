@@ -1182,12 +1182,14 @@ class LogoutDOMTest(unittest.TestCase):
         second = self.site.cookie
         self.log_out_main()
         self.wait_until(lambda: self.site.logouts, "POST /api/auth/logout")
-        self.page.wait_for_url(re.compile(re.escape(ORIGIN + BASE) + r"(index|main)\.html$"))
         self.assertEqual(([(MAIN_URL, first)], set()), (self.site.logouts, self.site.ended & {second}))
-        self.assertIsNone(self.screen()["end"], "no record stays for a session this browser can no longer use")
-        # The landing finds the other login's session and enters it; no logout for it was ever sent.
+        # The landing finds the other login's session and enters it (the page is read once it has settled there); no
+        # record stays for a session this browser can no longer use, and no logout for the other login was ever sent.
+        self.wait_until(lambda: len(self.docs(name="main.html")) == 2, "the entry into the other login's session")
         expect(self.page.locator("#rows")).to_contain_text(PATIENT)
-        self.assertEqual(1, len(self.site.logouts))
+        expect(self.page.locator("#user")).to_have_text(RAD["displayName"])
+        self.assertIsNone(self.screen()["end"], "no record stays for a session this browser can no longer use")
+        self.assertEqual((1, "active"), (len(self.site.logouts), self.screen()["state"]))
 
     # ── BR-06 ──
     def test_br06_a_late_session_answer_restores_nothing(self):
