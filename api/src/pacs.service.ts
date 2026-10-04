@@ -1,6 +1,6 @@
 import { StudyAccessService } from './study-access.service';
 import type { AccessSnapshot } from './study-access.service';
-import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, OnModuleInit, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
@@ -203,12 +203,121 @@ function toClient(s: any, r: any, actor = '', d: any = null) {
      * 내가 쓰다 만 초안. 없으면 `undefined`가 아니라 `null`이다 —
      * 클라이언트가 `{...기존, ...응답}`으로 병합하므로, 키가 없으면 "초안이 사라졌다"가
      * 전달되지 않아 확정한 뒤에도 옛 초안이 화면에 계속 남는다. (§14 — 비움도 값이다)
+     * 비운 초안의 행(present=false)은 초안이 아니다 — 경계(revision)만 남긴 자리다.
      */
-    draft: (hidden || !d) ? null : {
+    draft: (hidden || !d || !d.present) ? null : {
       findings: d.findings, conclusion: d.conclusion, recommendation: d.recommendation,
       baseVersion: d.baseVersion, at: d.updatedAt,
     },
+    // 초안이 없어도 내 경계는 나간다(S7-U5): 다음 쓰기가 무엇을 보고 쓰는지 말할 수 있어야 한다.
+    draftRevision: draftToken(s.draftEpoch, d?.revision ?? 0),
+    draftEpoch: s.draftEpoch,
   };
+}
+
+/**
+ * ── S7-U5 초안 경계 (U5S-REQ-14..17) ──
+ *
+ * 작성자별 행이라 남과는 부딪히지 않지만 **자기 자신과는 부딪힌다**: 연결이 끊겨 답을 못 받은 앞선 쓰기, 다른 탭,
+ * 다시 로그인한 같은 계정. 그래서 모든 초안 변경은 자기가 본 경계(검사의 세대 + 내 revision)를 함께 보내고, 저장된
+ * 경계와 같을 때만 적용된다. 경계는 불투명한 문자열 하나(`세대:revision`)로 나간다 — `Report.version`과 무관하다.
+ * 작성자(`expectedOwner`)는 대조에만 쓴다. 권한과 작성자는 언제나 인증된 호출자에서 정한다.
+ */
+const DRAFT_EPOCH = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const DRAFT_TOKEN = /^([0-9a-f-]{36}):(0|[1-9][0-9]{0,9})$/;
+const DRAFT_PREPARE_MS = 5000;
+const draftToken = (epoch: string, revision: number) => `${epoch}:${revision}`;
+
+const draftRequired = (field: string) => new BadRequestException({ code: 'REPORT_DRAFT_PRECONDITION_REQUIRED', field,
+  message: `판독문 초안 요청에 ${field} 값이 없습니다. 화면을 새로 고친 뒤 다시 시도하세요.` });
+const draftInvalid = (field: string) => new BadRequestException({ code: 'REPORT_DRAFT_PRECONDITION_INVALID', field,
+  message: `판독문 초안 요청의 ${field} 값이 잘못되었습니다. 화면을 새로 고친 뒤 다시 시도하세요.` });
+const draftConflict = () => new ConflictException({ code: 'REPORT_DRAFT_CONFLICT',
+  message: '판독문 초안이 그 사이 다른 저장·비우기·확정으로 바뀌었습니다. 이 글은 저장하지 않았습니다 — 최신 상태를 확인한 뒤 다시 저장하세요.' });
+const draftUnavailable = () => new ServiceUnavailableException({ code: 'REPORT_DRAFT_UNAVAILABLE',
+  message: '판독문 초안을 제때 처리하지 못했습니다. 저장되지 않았습니다 — 최신 상태를 확인한 뒤 다시 시도하세요.' });
+
+export interface DraftOwner { institution: string; sub: string; author: string }
+
+/** `expectedOwner`의 모양과 인증된 호출자와의 일치. 어떤 읽기보다 먼저 본다 — 거절은 아무것도 읽거나 쓰지 않는다. */
+function draftOwner(body: any, c: Caller): DraftOwner {
+  const owner = body?.expectedOwner;
+  if (owner === undefined || owner === null) throw draftRequired('expectedOwner');
+  if (typeof owner !== 'object' || Array.isArray(owner) || Object.keys(owner).length !== 3
+      || typeof owner.institution !== 'string' || typeof owner.sub !== 'string' || typeof owner.author !== 'string')
+    throw draftInvalid('expectedOwner');
+  if (owner.institution !== c.institution || owner.sub !== c.sub || owner.author !== c.actor)
+    throw new ConflictException({ code: 'REPORT_DRAFT_OWNER_CHANGED',
+      message: '판독문 초안을 쓰던 계정이 아닙니다. 그 계정으로 다시 로그인한 뒤 저장하세요.' });
+  return { institution: owner.institution, sub: owner.sub, author: owner.author };
+}
+
+function draftEpochOf(value: unknown, field: string): string {
+  if (value === undefined || value === null) throw draftRequired(field);
+  if (typeof value !== 'string' || !DRAFT_EPOCH.test(value)) throw draftInvalid(field);
+  return value;
+}
+
+function draftExpected(body: any): { epoch: string; revision: number } {
+  const token = body?.expectedRevision;
+  if (token === undefined || token === null) throw draftRequired('expectedRevision');
+  const parts = typeof token === 'string' ? DRAFT_TOKEN.exec(token) : null;
+  if (!parts || !DRAFT_EPOCH.test(parts[1]) || Number(parts[2]) > 2147483647) throw draftInvalid('expectedRevision');
+  return { epoch: parts[1], revision: Number(parts[2]) };
+}
+
+/** PUT이 싣는 전체 스냅숏의 모양. 칸이 빠진 요청은 "그대로 두라"가 아니라 거절이다 — 모르는 것을 지우거나 남기지 않는다. */
+function draftSnapshotInput(body: any) {
+  for (const field of ['findings', 'conclusion', 'recommendation']) {
+    if (body?.[field] === undefined || body[field] === null) throw draftRequired(field);
+    if (typeof body[field] !== 'string') throw draftInvalid(field);
+  }
+  if (body.baseVersion === undefined || body.baseVersion === null) throw draftRequired('baseVersion');
+  if (!Number.isSafeInteger(body.baseVersion) || body.baseVersion < 0 || body.baseVersion > 2147483647)
+    throw draftInvalid('baseVersion');
+  for (const field of ['citationIds', 'structureIds']) {
+    if (body[field] === undefined || body[field] === null) throw draftRequired(field);
+    if (!Array.isArray(body[field]) || !body[field].every((id: unknown) => typeof id === 'string')) throw draftInvalid(field);
+  }
+  return { findings: body.findings as string, conclusion: body.conclusion as string,
+    recommendation: body.recommendation as string, baseVersion: body.baseVersion as number };
+}
+
+/** 저장된 행의 표준 스냅숏. 인용·구조화는 식별자만 — 전문은 소견 가독을 다시 거는 전용 읽기로만 나간다. */
+function draftSnapshot(row: any) {
+  if (!row?.present) return null;
+  return { findings: row.findings, conclusion: row.conclusion, recommendation: row.recommendation,
+    baseVersion: row.baseVersion,
+    citations: citationArray(row.citations).map(entry => String(entry?.cid ?? '')),
+    structured: structureArray(row.structured).map(entry => String(entry?.sid ?? '')) };
+}
+
+/** 초안 변경·권위 있는 읽기의 답 봉투. `saved`는 이 봉투 전체가 보낸 것과 같을 때만이다. */
+function draftEnvelope(uid: string, owner: DraftOwner, epoch: string, row: any) {
+  return { uid, owner, revision: draftToken(epoch, row?.revision ?? 0), present: !!row?.present,
+    snapshot: draftSnapshot(row), updatedAt: row?.present ? row.updatedAt : null };
+}
+
+/** 트랜잭션 획득·잠금·제한 시간 초과. 한도를 넘긴 요청은 끝없이 기다리지 않고 저장되지 않은 채 503으로 끝난다. */
+function draftTransactionError(error: any): never {
+  if (error?.code === 'P2028' || error?.code === 'P2034'
+      || error?.code === 'P2010' && ['55P03', '57014', '40P01'].includes(error?.meta?.code))
+    throw draftUnavailable();
+  // 초안 행의 PK 충돌은 같은 경계에서 두 쓰기가 첫 행을 만들려 한 것이다 — 진 쪽은 충돌이다.
+  if (error?.code === 'P2002' && error?.meta?.modelName === 'ReportDraft') throw draftConflict();
+  throw error;
+}
+
+/** 외부 준비(원본 조회·계정 조회)는 트랜잭션 밖에서, 유한하게. 넘기면 저장하지 않고 끝낸다. */
+async function draftBounded<T>(work: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const limit = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(draftUnavailable()), DRAFT_PREPARE_MS);
+  });
+  // 한도 뒤에 늦게 실패한 준비는 이미 답한 요청의 것이다 — 처리되지 않은 거절로 남기지 않는다.
+  work.catch(() => undefined);
+  try { return await Promise.race([work, limit]); }
+  finally { clearTimeout(timer); }
 }
 
 /**
@@ -600,7 +709,7 @@ export class PacsService implements OnModuleInit {
       where: { uid }, data: { institutionId, reqHosp: this.instName(institutionId) },
     });
     await audit(c.actor, 'study.assign', uid, { institutionId });
-    return toClient(saved, await tx.report.findUnique({ where: { uid } }), c.actor, null);
+    return toClient(saved, await tx.report.findUnique({ where: { uid } }), c.actor, await this.myDraft(uid, c.actor, tx));
     });
   }
 
@@ -1317,7 +1426,9 @@ export class PacsService implements OnModuleInit {
     const byUid = Object.fromEntries(reports.map(r => [r.uid, r]));
     // 켤 때 내 초안도 함께 — "어제 쓰다 만 것"이 PC를 바꿔도 따라온다.
     // 필터·상용구를 계정에 붙인 것과 같은 이유다 (§6-A-4).
-    const drafts = omitStates ? [] : await this.prisma.reportDraft.findMany({ where: { author: c.actor } });
+    // 보이는 검사의 것만 읽는다: 비운 자리(present=false)도 행으로 남으므로 작성자 전체를 읽으면 끝없이 늘어난다.
+    const drafts = omitStates ? [] : await this.prisma.reportDraft.findMany({
+      where: { author: c.actor, uid: { in: states.map(s => s.uid) } } });
     const draftByUid = Object.fromEntries(drafts.map(d => [d.uid, d]));
     await this.studyAccess.unchanged(c,access);
     const prefs = await this.prefs(c);   // 필터·상용구도 첫 요청에 함께 (왕복을 늘리지 않는다)
@@ -2141,15 +2252,17 @@ export class PacsService implements OnModuleInit {
    * 사용자가 안 보고 있을 때 "충돌했습니다"를 띄워봐야 할 수 있는 일이 없다.
    *
    * 진짜 원인은 락이 없어서가 아니라 **한 칸을 둘이 썼기 때문**이었다.
-   * 초안을 쓴 사람에게 붙이면 충돌은 감지할 필요조차 없다. 같은 행을 안 쓰니까.
+   * 초안을 쓴 사람에게 붙이면 **남과의** 충돌은 감지할 필요조차 없다. 같은 행을 안 쓰니까.
    *
-   * 충돌은 확정할 때만 일어난다 — 사람이 화면 앞에 있고, 스스로 누른 순간이고,
-   * 물어볼 수 있는 자리다. 낙관적 락은 `commitReport` 한 곳에만 있으면 된다.
+   * 남과의 충돌은 확정할 때만 일어난다 — 사람이 화면 앞에 있고, 스스로 누른 순간이고,
+   * 물어볼 수 있는 자리다. 그 낙관적 락(`Report.version`)은 `commitReport` 한 곳에 있다.
+   *
+   * 자기 자신과의 충돌은 다른 문제다(S7-U5): 답을 못 받은 앞선 쓰기, 다른 탭, 다시 로그인한 같은 계정이 같은 행을
+   * 쓴다. 무조건 upsert는 늦게 닿은 옛 글로 나중 글을 덮고, 지운 초안을 되살렸다. 그래서 내 행에는 저장된 경계
+   * (`revision`)가 있고, 초안을 바꾸는 모든 길은 아래 `draftTransaction` 하나를 지난다.
    */
   // Shared with putReport: dictation cannot create a weaker copy of report refusal rules.
-  private async reportDraftGate(uid: string, c: Caller, tx: any) {
-    need(c.roles, 'radiologist', '판독문 저장');
-    const prev = await this.gate(uid,c,tx);
+  private reportDraftRules(prev: any, c: Caller) {
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
       throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
     const heldByOther = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
@@ -2162,6 +2275,104 @@ export class PacsService implements OnModuleInit {
     return prev;
   }
 
+  private async reportDraftGate(uid: string, c: Caller, tx: any) {
+    need(c.roles, 'radiologist', '판독문 저장');
+    return this.reportDraftRules(await this.gate(uid,c,tx), c);
+  }
+
+  /**
+   * 초안을 바꾸는 **모든** 길(저장·비우기·내 초안 버리기·확정·관리자 강제 해제)이 지나는 한 트랜잭션(U5S-REQ-16).
+   *
+   * 순서가 곧 계약이다:
+   *  1. 외부 준비(접근 정책의 원본 조회, 상급 판독의 조회)는 트랜잭션 **밖**에서, 5초 안에. 넘기면 아무것도 쓰지 않고 503이다.
+   *     기다리는 줄은 없다 — 앞선 요청의 준비가 멈춰도 뒤 요청은 자기 차례를 따로 가진다.
+   *  2. 쿠키 세션이 보낸 변경은 **그 세션 행을 먼저 잠근다**(FOR KEY SHARE). 로그아웃·만료의 행 삭제는 이 잠금을 기다리므로,
+   *     변경은 세션이 끝나기 전에 commit되거나 끝난 뒤에 401로 실패한다 — 끝난 세션의 글이 뒤늦게 저장되지 않는다. 토큰
+   *     갱신·접속 시각 갱신은 키를 바꾸지 않아 이 잠금과 부딪히지 않는다. Bearer 호출에는 세션이 없다.
+   *  3. 접근 범위를 트랜잭션 안에서 다시 보고, 검사 행을 잠근다(FOR UPDATE). 같은 검사의 초안 변경·확정·강제 해제·검사 삭제가
+   *     여기서 줄을 선다 — 행이 아직 없는 첫 쓰기 둘도 한 줄이다.
+   *  4. 세대(draftEpoch)가 요청이 본 것과 다르면 충돌이다. 내 행의 revision 대조는 `ownDraft`가, 조건부 쓰기와 revision
+   *     전진은 `storeDraft`가 한다. 감사 행은 같은 트랜잭션에서 쓴다 — 변경과 감사는 함께 남거나 함께 없다.
+   * 잠금 순서는 세션 → 검사 → (확정의 Report) → 초안 행으로 하나다. 대기는 유한하다: 연결 4초, 잠금 3초, 트랜잭션 8초.
+   */
+  private async draftTransaction<T>(uid: string, c: Caller, session: string | null, epoch: string,
+      prepare: () => Promise<unknown>,
+      work: (tx: Prisma.TransactionClient, state: any,
+        audit: (actor: string, action: string, target: string, detail?: any) => Promise<any>) => Promise<T>): Promise<T> {
+    const me = inst(c);
+    await draftBounded(prepare());
+    return this.prisma.$transaction(async tx => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      if (session !== null) {
+        const held = await tx.$queryRaw<any[]>`SELECT 1 AS held FROM "AuthSession" WHERE sid = ${session} FOR KEY SHARE`;
+        if (!held.length)
+          throw new UnauthorizedException({ code: 'AUTH_SESSION_ENDED', message: '인증 세션이 종료되어 판독문 초안을 저장하지 않았습니다' });
+      }
+      await this.studyAccess.require(c,[uid],tx);
+      const states = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
+      const state = states[0];
+      if (!state || !this.visible(state, me)) throw new NotFoundException('검사를 찾을 수 없습니다');
+      if (state.draftEpoch !== epoch) throw draftConflict();
+      const audit=(actor:string,action:string,target:string,detail?:any)=>tx.auditLog.create({data:{actor:actor||'unknown',action,target,detail:dump(detail)}});
+      return work(tx, state, audit);
+    },{maxWait:4000,timeout:8000}).catch(draftTransactionError);
+  }
+
+  /** 내 초안 행을 잠그고 요청이 본 revision과 대조한다. 행이 없으면 이 세대의 revision 0이다. */
+  private async ownDraft(tx: Prisma.TransactionClient, uid: string, c: Caller, revision: number) {
+    const rows = await tx.$queryRaw<any[]>`
+      SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt"
+      FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
+    const row = rows[0] ?? null;
+    if ((row?.revision ?? 0) !== revision) throw draftConflict();
+    return row;
+  }
+
+  /**
+   * 내 초안 행을 **읽은 revision일 때만** 쓰고 revision을 하나 올린다. `content`가 null이면 비운 자리다: 행은 남고
+   * (present=false) 내용 칸은 비운다 — 행을 지우면 revision이 사라져 지운 뒤에 닿은 옛 쓰기가 초안을 되살린다.
+   * 초안이 없던 작성자의 비우기·버리기·확정도 경계를 올린다(0 → 1). 0행 갱신은 충돌이다 — 덮지 않는다.
+   */
+  private async storeDraft(tx: Prisma.TransactionClient, uid: string, author: string, row: any,
+      content: { findings: string; conclusion: string; recommendation: string; baseVersion: number;
+        citations: any[]; structured: any[] } | null) {
+    const revision = (row?.revision ?? 0) + 1;
+    const text = content
+      ? { present: true, findings: content.findings, conclusion: content.conclusion,
+          recommendation: content.recommendation, baseVersion: content.baseVersion }
+      : { present: false, findings: '', conclusion: '', recommendation: '', baseVersion: 0 };
+    // "없음"의 모양은 SQL NULL 하나다(P13). 빈 배열을 저장하면 읽는 쪽이 두 가지를 구분해야 한다.
+    const citations = content?.citations.length ? content.citations : null;
+    const structured = content?.structured.length ? content.structured : null;
+    if (!row)
+      return tx.reportDraft.create({ data: { uid, author, ...text, revision,
+        ...(citations ? { citations } : {}), ...(structured ? { structured } : {}) } });
+    const changed = await tx.reportDraft.updateMany({
+      where: { uid, author, revision: row.revision },
+      data: { ...text, revision, citations: citations ?? Prisma.DbNull, structured: structured ?? Prisma.DbNull },
+    });
+    if (changed.count !== 1) throw draftConflict();
+    return tx.reportDraft.findUnique({ where: { uid_author: { uid, author } } });
+  }
+
+  /**
+   * 내 초안의 권위 있는 읽기(U5S-REQ-15, 17). 충돌이나 답을 받지 못한 저장 뒤에 화면이 무엇이 저장돼 있는지 확인하는
+   * 자리다 — 검사 행의 세대와 내 행을 한 스냅숏에서 읽는다. 관문은 초안 쓰기와 같은 역할·기관·예비 판독 규칙이다.
+   */
+  async readDraft(uid: string, c: Caller) {
+    need(c.roles, 'radiologist', '판독문 초안 조회');
+    const owner: DraftOwner = { institution: inst(c), sub: c.sub, author: c.actor };
+    await this.studyAccess.prepare(c,[uid]);
+    return this.prisma.$transaction(async tx => {
+      const state = await this.gate(uid, c, tx);
+      if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
+      if (!canReadPrelim(state, c.actor))
+        throw new ForbiddenException(
+          `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
+      return draftEnvelope(uid, owner, state.draftEpoch, await this.myDraft(uid, c.actor, tx));
+    }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
+  }
+
   async dictationGate(uid: string, c: Caller) {
     return this.scopeWrite(uid, c, async tx => { await this.reportDraftGate(uid, c, tx); });
   }
@@ -2170,28 +2381,29 @@ export class PacsService implements OnModuleInit {
     await this.audit(c.actor, 'dictation.request', uid, detail);
   }
 
-  async putReport(uid: string, body: any, c: Caller) {
-    /**
-     * 소견 계보의 접근 정책은 **트랜잭션 밖에서** 준비되어야 한다.
-     *
-     * `scopeWrite`가 미리 부르는 `prepare(c,[uid])`는 검사 하나만 요청하므로 전체 준비를
-     * 켜지 않는다(`study-access.service.ts`). 그러면 트랜잭션 안에서 비교 검사를 묻는 순간
-     * `allowed`는 준비를 못 하고 캐시가 없어 409를 던진다 — 비교 검사를 가진 소견의 인용이
-     * 권한 문제도 아닌데 조용히 실패한다. 소견 목록이 같은 이유로 같은 형태를 쓴다.
-     */
-    if (body?.insert !== undefined) await this.studyAccess.prepare(c);
-    return this.reportLimitChecked(() => this.scopeWrite(uid,c,async(tx,audit)=>{
-    const prev = await this.reportDraftGate(uid, c, tx);
-
-    const content = {
-      findings: body.findings ?? '',
-      conclusion: body.conclusion ?? '',
-      recommendation: body.recommendation ?? '',
-    };
+  async putReport(uid: string, body: any, c: Caller, session: string | null) {
+    need(c.roles, 'radiologist', '판독문 저장');
+    // 작성자·경계·전체 스냅숏의 모양을 어떤 읽기보다 먼저 본다. 거절은 검사·초안 행을 읽거나 쓰거나 감사를 남기지 않는다.
+    const owner = draftOwner(body, c);
+    const expected = draftExpected(body);
+    const content = draftSnapshotInput(body);
     const empty = !(content.findings || content.conclusion || content.recommendation);
+    return this.reportLimitChecked(() => this.draftTransaction(uid, c, session, expected.epoch, async () => {
+      await this.studyAccess.prepare(c,[uid]);
+      /**
+       * 소견 계보의 접근 정책은 **트랜잭션 밖에서** 준비되어야 한다.
+       *
+       * `prepare(c,[uid])`는 검사 하나만 요청하므로 전체 준비를 켜지 않는다(`study-access.service.ts`).
+       * 그러면 트랜잭션 안에서 비교 검사를 묻는 순간 `allowed`는 준비를 못 하고 캐시가 없어 409를 던진다 —
+       * 비교 검사를 가진 소견의 인용이 권한 문제도 아닌데 조용히 실패한다. 소견 목록이 같은 이유로 같은 형태를 쓴다.
+       */
+      if (body.insert !== undefined) await this.studyAccess.prepare(c);
+    }, async (tx, state, audit) => {
+    this.reportDraftRules(state, c);
+    const row = await this.ownDraft(tx, uid, c, expected.revision);
 
     /**
-     * 빈 초안은 **행을 지운다.** 빈 초안을 남겨두면 그게 확정본을 가려서,
+     * 빈 초안은 **초안이 아니다.** 빈 초안을 남겨두면 그게 확정본을 가려서,
      * 승인된 판독문을 열었는데 빈 칸이 보이는 상태가 된다.
      * "초안이 없다"와 "초안이 비어 있다"는 화면에서 같은 뜻이어야 한다.
      */
@@ -2205,25 +2417,21 @@ export class PacsService implements OnModuleInit {
       if (body.structure !== undefined)
         throw new ConflictException({ code: 'REPORT_STRUCTURE_TEXT',
           message: '구조화 항목의 문장이 그 칸의 본문에 줄 단위로 그대로 있지 않습니다' });
-      await tx.reportDraft.deleteMany({ where: { uid, author: c.actor } });
+      const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
       await audit(c.actor, 'report.draft.clear', uid, {});
-      return { uid, author: c.actor, cleared: true };
+      return draftEnvelope(uid, owner, state.draftEpoch, cleared);
     }
 
     /**
      * **기준 판은 화면이 실제로 본 판이어야 한다.**
      *
-     * 판 번호는 커지기만 하므로(`:1821`·`:1834`) 정직한 화면은 아직 없는 판을 기준으로
+     * 판 번호는 커지기만 하므로 정직한 화면은 아직 없는 판을 기준으로
      * 삼을 수 없다. 여기 걸린다면 `baseVersion`의 출처가 틀린 것이고, 그대로 저장하면
      * 확정 때 낙관적 락이 **아무도 본 적 없는 판**을 통과시킨다.
-     * 비우는 PUT(위)은 판 번호를 저장하지 않으므로 이 검사 앞에서 끝난다 —
-     * 자동 저장을 거절하지 않는다는 규칙은 그대로다.
+     * 비우는 PUT(위)은 판 번호를 저장하지 않으므로 이 검사 앞에서 끝난다.
      */
-    const baseVersion = body.baseVersion ?? 0;
-    if (!Number.isSafeInteger(baseVersion) || baseVersion < 0)
-      throw new BadRequestException('baseVersion은 0 이상의 정수여야 합니다 (화면이 마지막으로 본 판 번호)');
-    // 잠그지 않는다. 초안은 내 행에만 쓰므로 여기서 Report를 잠그면 20초 자동 저장이
-    // 남의 확정과 겹쳐 서로를 기다린다 — 이 파일이 한 번 겪은 실패다(:1501-1515).
+    const baseVersion = content.baseVersion;
+    // Report는 잠그지 않는다. 판 번호 대조는 예방이고, 실제 낙관적 락은 확정에 있다.
     const head = await tx.report.findUnique({ where: { uid }, select: { version: true } });
     if (baseVersion > (head?.version ?? 0))
       throw new BadRequestException(
@@ -2231,78 +2439,44 @@ export class PacsService implements OnModuleInit {
 
     // 기존 초안의 기준이 올라가는 PUT은 자동 저장이 아니라 **사람이 승인본을 확인하고
     // 다시 잡은 것**이다. 어느 판을 딛고 쓴 글인지는 나중에 되짚을 근거가 이것뿐이라
-    // 자동 저장과 구분해 남긴다.
-    const prior = await tx.reportDraft.findUnique({
-      where: { uid_author: { uid, author: c.actor } }, select: { baseVersion: true },
-    });
-    // 인용 키가 하나도 없으면 `null`이고, 그러면 칸을 아예 쓰지 않는다 — 옛 탭의 자동 저장이
-    // 자기가 모르는 증언을 지우는 일은 없어야 한다. 키 부재는 `[]`가 아니라 **변경 없음**이다.
-    const cited = await this.draftCitations(tx, uid, body, content, c, head?.version ?? 0);
-    const structure = await this.draftStructure(tx, uid, body, content, c, head?.version ?? 0);
+    // 자동 저장과 구분해 남긴다. 비운 자리(present=false)는 딛고 선 초안이 아니다.
+    const prior = row?.present ? row : null;
+    // 유지 목록은 전체 스냅숏의 일부라 언제나 온다 — 목록에 없는 건은 이 쓰기로 빠진다.
+    const cited = await this.draftCitations(tx, uid, prior, body, content, c, head?.version ?? 0);
+    const structure = await this.draftStructure(tx, uid, prior, body, content, c, head?.version ?? 0);
 
-    /**
-     * ── 비어 있음을 쓰는 세 가지 (A1) ──
-     *
-     * 요청이 구조화를 **건드리지 않았으면** 칸을 아예 빼야 한다. UPDATE에서 키를 빼는 것은
-     * "그대로 두라"는 뜻이고, 구조화를 모르는 옛 탭의 자동 저장이 남의 증언을 지우지 않는
-     * 유일한 방법이다.
-     *
-     * 요청이 구조화를 **명시적으로 비웠으면**(`structureIds: []`) 칸을 빼서는 안 된다 —
-     * 빼면 이전 배열이 그대로 남아 "지웠다"고 답해놓고 아무것도 지우지 않은 것이 된다.
-     * 그 경우에만 `Prisma.DbNull`로 **SQL NULL**을 쓴다. `Prisma.JsonNull`은 JSON 값 `null`이라
-     * 배열도 NULL도 아닌 세 번째 모양을 만들고, 읽는 쪽의 "배열이 아니면 없음"을 통과하면서
-     * CHECK의 `IS NULL`은 통과하지 못한다.
-     *
-     * CREATE에는 지울 이전 값이 없으므로 빈 결과는 그냥 생략한다(P13 — `[]`는 저장하지 않는다).
-     */
-    const structuredCreate = structure && structure.entries.length ? { structured: structure.entries } : {};
-    const structuredUpdate = !structure ? {}
-      : structure.entries.length ? { structured: structure.entries } : { structured: Prisma.DbNull };
-
-    const saved = await tx.reportDraft.upsert({
-      where: { uid_author: { uid, author: c.actor } },
-      create: { uid, author: c.actor, ...content, baseVersion,
-        ...(cited ? { citations: cited.entries } : {}), ...structuredCreate },
-      update: { ...content, baseVersion, ...(cited ? { citations: cited.entries } : {}), ...structuredUpdate },
-    });
+    const saved = await this.storeDraft(tx, uid, c.actor, row,
+      { ...content, citations: cited.entries, structured: structure.entries });
     // 판독문 전문을 감사로그에 통째로 넣지 않는다 — 길이와 개인정보 때문. 길이만 남긴다.
     await audit(c.actor, 'report.draft', uid, {
       len: [content.findings.length, content.conclusion.length, content.recommendation.length],
       // 인용 감사는 `cid`·칸·수만 남긴다. `findingId`·`sourceIndex`·삽입 문구를 남기면
       // 역할·예비 판독 관문이 없는 감사 통로(`audits()`)로 판독문↔소견 연결이 통째로 새어 나간다.
-      ...(cited?.detail ? { cits: cited.detail } : {}),
+      ...(cited.detail ? { cits: cited.detail } : {}),
       // 구조화 감사도 **건수와 `sid`만** 남긴다(P16). 고른 값·본문에 들어간 문장·항목 코드를
       // 남기면 역할 관문이 없는 감사 통로로 판독 내용이 새어 나간다.
-      ...(structure?.detail ? { strs: structure.detail } : {}),
+      ...(structure.detail ? { strs: structure.detail } : {}),
     });
     if (prior && baseVersion > prior.baseVersion)
       await audit(c.actor, 'report.draft.rebase', uid, { from: prior.baseVersion, to: baseVersion });
     /**
-     * 원시 행을 돌려주지 않는다. 본문을 되돌려 보내면 늦은 응답이 사용자가 그 사이 친 글자를
-     * 덮을 수 있고, 새로 생긴 인용 칸이 이 통로로 함께 나간다. 화면이 알아야 하는 것은
-     * **무엇이 기록되었는가**뿐이다.
+     * 답은 저장된 것의 표준 스냅숏이다(U5S-REQ-15). 화면은 owner·uid·revision·스냅숏 전체가 보낸 것과 같을 때만
+     * 저장됨으로 본다. 인용·구조화는 식별자만 싣는다 — 전문은 소견 가독을 다시 거는 전용 읽기로만 나간다.
      */
-    return { uid, author: c.actor, baseVersion: saved.baseVersion, updatedAt: saved.updatedAt,
-      ...(cited?.inserted ? { inserted: cited.inserted } : {}),
-      // 요청이 `structure`를 실어 보냈을 때만 이 칸이 있다(P9). 화면은 이 `sid` 하나로 유지
-      // 목록을 넓힌다 — 없으면 지어내지 않고 모르는 상태로 남긴다. 이 응답은 appState에
-      // 통째로 병합되지 않으므로 키가 없는 것이 옛 값을 남기지 않는다.
-      ...(structure?.applied ? { structured: structure.applied } : {}) };
+    return { ...draftEnvelope(uid, owner, state.draftEpoch, saved),
+      ...(cited.inserted ? { inserted: cited.inserted } : {}),
+      // 요청이 `structure`를 실어 보냈을 때만 이 칸이 있다(P9). 화면은 이 `sid` 하나로 유지 목록을 넓힌다.
+      ...(structure.applied ? { applied: structure.applied } : {}) };
     }));
   }
 
   /**
    * PUT 한 번에 들어온 인용 변경을 본문과 **같은 쓰기**로 풀어낸다.
-   * 인용 키가 하나도 없으면 `null` — 칸을 건드리지 않는다.
+   * `locked`는 `ownDraft`가 잠그고 경계를 대조한 내 행이다 — 두 탭의 PUT은 그 경계에서 하나만 이긴다.
    */
-  private async draftCitations(tx: any, uid: string, body: any, content: any, c: Caller, headVersion: number) {
+  private async draftCitations(tx: any, uid: string, locked: any, body: any, content: any, c: Caller, headVersion: number) {
     const keep = this.citationKeys(body.citationIds, 'citationIds');
     const wantsInsert = body.insert !== undefined;
-    if (keep === undefined && !wantsInsert) return null;
-    // 내 행을 먼저 잠근다. 두 탭의 PUT이 본문과 인용을 결정적으로 짝짓게 하는 유일한 방법이다.
-    // 남과 경합하지 않는다 — 초안 행의 키는 (uid, author)다.
-    const [locked] = await tx.$queryRaw`
-      SELECT citations FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
     const { kept, ignored } = applyKeepList(citationArray(locked?.citations), keep);
     let inserted: { cid: string; field: string; insertedAt: string } | null = null;
     if (wantsInsert) {
@@ -2324,19 +2498,14 @@ export class PacsService implements OnModuleInit {
   }
 
   /**
-   * PUT 한 번에 들어온 구조화 변경을 본문과 **같은 쓰기**로 풀어낸다.
-   * 구조화 키가 하나도 없으면 `null` — 칸을 건드리지 않는다(A1의 "변경 없음").
+   * PUT 한 번에 들어온 구조화 변경을 본문과 **같은 쓰기**로 풀어낸다. `locked`는 인용과 같은, 이미 잠근 내 행이다.
    *
    * `studyAccess.prepare(c)`를 부르지 않는다(P14). 구조화 항목은 소견 계보를 가리키지 않으므로
    * 비교 검사 정책을 준비할 이유가 없고, 준비하면 이 경로가 넓은 정책 읽기를 끌고 들어온다.
    */
-  private async draftStructure(tx: any, uid: string, body: any, content: any, c: Caller, headVersion: number) {
+  private async draftStructure(tx: any, uid: string, locked: any, body: any, content: any, c: Caller, headVersion: number) {
     const keep = this.structureKeys(body.structureIds, 'structureIds');
     const wantsApply = body.structure !== undefined;
-    if (keep === undefined && !wantsApply) return null;
-    // 내 행을 먼저 잠근다. 인용과 같은 행·같은 방향이라 두 잠금은 순서대로 선다.
-    const [locked] = await tx.$queryRaw`
-      SELECT structured FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
     const { kept, ignored } = applyStructureKeepList(structureArray(locked?.structured), keep);
     let applied: { sid: string; field: string; enteredAt: string } | null = null;
     if (wantsApply) {
@@ -2530,18 +2699,21 @@ export class PacsService implements OnModuleInit {
   /**
    * 초안 버리기. 확정본으로 돌아가고 싶을 때 — "쓰다 만 것"과 "저장된 것"이
    * 다를 때 사용자가 고를 수 있어야 한다.
-   * 내 초안만 지운다. 남의 초안은 애초에 보이지도 않는다.
+   * 내 초안만 비운다. 남의 초안은 애초에 보이지도 않는다. 행은 경계(revision)만 남긴 자리로 남는다.
    */
-  async discardDraft(uid: string, c: Caller) {
-    return this.scopeWrite(uid,c,async(tx,audit)=>{
+  async discardDraft(uid: string, body: any, c: Caller, session: string | null) {
     need(c.roles, 'radiologist', '판독문 저장');
-    await this.gate(uid,c,tx);
-    const r = await tx.reportDraft.deleteMany({ where: { uid, author: c.actor } });
-    if (r.count) await audit(c.actor, 'report.draft.discard', uid, {});
-    const s = await tx.studyState.findUnique({ where: { uid } });
-    const rep = await tx.report.findUnique({ where: { uid } });
-    return toClient(s, rep, c.actor, null);
-    });
+    const owner = draftOwner(body, c);
+    const expected = draftExpected(body);
+    return this.draftTransaction(uid, c, session, expected.epoch, () => this.studyAccess.prepare(c,[uid]),
+      async (tx, state, audit) => {
+        const row = await this.ownDraft(tx, uid, c, expected.revision);
+        // 초안이 없었어도 경계는 올린다 — 이 버리기보다 앞서 보낸 쓰기가 뒤늦게 닿아 초안을 만들지 못하게.
+        const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
+        await audit(c.actor, 'report.draft.discard', uid, {});
+        const rep = await tx.report.findUnique({ where: { uid } });
+        return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, rep, c.actor, cleared) };
+      });
   }
 
   /**
@@ -2551,28 +2723,33 @@ export class PacsService implements OnModuleInit {
    * 남의 초안을 일반 경로로 지우게 하면, 실수인지 강제 조치인지 이력에서 구분할 수 없다.
    * 그래서 별도 admin 경로에서만 모든 초안을 지우고, 지우기 직전 내용을 판으로 남긴다.
    *
-   * 현재 UID의 초안 행만 FOR UPDATE로 고정한다. 조회한 초안과 실제로 지운 초안이
-   * 달라지는 틈은 막되, 다른 검사의 자동 저장과 확정까지 멈추는 테이블 락은 잡지 않는다.
-   * 그 사이 다른 판독 확정이 같은 판 번호를 먼저 쓰면 이 트랜잭션은 P2002로 롤백되며,
-   * 최신 판 번호와 남은 초안을 다시 읽어 한 번 재시도한다.
+   * 검사 행을 잠근 채(`draftTransaction`) 그 검사의 초안 행을 FOR UPDATE로 고정한다. 조회한 초안과 실제로 비운
+   * 초안이 달라지는 틈이 없고, 다른 검사의 자동 저장과 확정까지 멈추는 테이블 락은 잡지 않는다. 같은 검사의 확정도
+   * 같은 잠금에 줄을 서므로 판 번호가 겹치지 않는다. 보존·비움·세대 교체·감사는 한 commit이다.
    */
-  async forceDiscardDrafts(uid: string, c: Caller) {
+  async forceDiscardDrafts(uid: string, body: any, c: Caller, session: string | null) {
     need(c.roles, 'admin', '판독문 초안 강제 해제');
     const me = inst(c);
-    await this.gate(uid, c);
-    await this.studyAccess.prepare(c,[uid]);
+    // 관리자도 자기가 본 세대를 보낸다: 그 사이 다른 강제 해제가 있었다면 이 요청은 옛 화면의 것이다.
+    draftOwner(body, c);
+    const epoch = draftEpochOf(body?.expectedEpoch, 'expectedEpoch');
 
-    const run = () => this.prisma.$transaction(async tx => {
-      await this.studyAccess.require(c,[uid],tx);
-      await tx.$queryRaw`
-        SELECT uid FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
+    // CHECK 백스톱의 409 변환은 그대로 둔다. 판 번호 충돌의 재시도는 없다 — 확정과 강제 해제가 같은 검사 잠금에 줄을 선다.
+    return this.reportLimitChecked(() => this.draftTransaction(uid, c, session, epoch, () => this.studyAccess.prepare(c,[uid]),
+      async tx => {
+      // 비운 자리(present=false)는 초안이 아니다: 판으로 보존하지도, 건수에 넣지도 않는다.
       const drafts = await tx.$queryRaw<any[]>`
-        SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, "updatedAt"
+        SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, revision, present, "updatedAt"
         FROM "ReportDraft"
-        WHERE uid = ${uid}
+        WHERE uid = ${uid} AND present
         ORDER BY author
         FOR UPDATE
       `;
+      /**
+       * 세대를 **언제나** 바꾼다 — 지울 초안이 없어도. 아직 한 번도 쓰지 않은 작성자의 화면이 강제 해제 전에 보낸
+       * 첫 쓰기(revision 0)는 행 대조로는 가릴 수 없다. 세대가 바뀌면 이 검사의 모든 옛 경계가 한꺼번에 거절된다.
+       */
+      const rotated = await tx.studyState.update({ where: { uid }, data: { draftEpoch: randomUUID() }, select: { draftEpoch: true } });
       if (!drafts.length) {
         // 강제 해제 호출 자체도 관리자 조치다. 지울 것이 없었어도 흔적은 남긴다.
         await tx.auditLog.create({
@@ -2581,7 +2758,7 @@ export class PacsService implements OnModuleInit {
             detail: dump({ by: me, drafts: [], versions: [] }),
           },
         });
-        return { ok: true, count: 0, drafts: [], versions: [] };
+        return { ok: true, count: 0, drafts: [], versions: [], epoch: rotated.draftEpoch };
       }
 
       const last = await tx.reportVersion.findFirst({
@@ -2611,10 +2788,8 @@ export class PacsService implements OnModuleInit {
           author: d.author,   // 지운 관리자가 아니라 실제로 **쓴 사람**이 저자다
         })),
       });
-      // 조회 뒤 새로 생긴 초안은 지우지 않는다. 판으로 보존한 바로 그 행들만 없앤다.
-      await tx.reportDraft.deleteMany({
-        where: { OR: drafts.map(d => ({ uid: d.uid, author: d.author })) },
-      });
+      // 판으로 보존한 바로 그 행들만 비운다(잠근 revision일 때만). 각 작성자의 경계도 하나씩 오른다.
+      for (const d of drafts) await this.storeDraft(tx, uid, d.author, d, null);
       // 판독문 전문은 감사로그에 넣지 않는다. 누구의 몇 글자를 지웠는지만 남긴다.
       await tx.auditLog.create({
         data: {
@@ -2623,20 +2798,8 @@ export class PacsService implements OnModuleInit {
         },
       });
 
-      return { ok: true, count: drafts.length, drafts: summary, versions };
-    });
-
-    // 재시도 다리까지 **같은 매핑 안에 둔다.** 첫 시도만 감싸면 번호 충돌로 다시 돈 실행에서
-    // 나온 CHECK 위반이 500으로 새어 나가고, 같은 요청이 두 가지 답을 갖게 된다.
-    return this.reportLimitChecked(async () => {
-      try {
-        return await run();
-      } catch (e: any) {
-        // 다른 판독 확정이 같은 (uid, version)을 먼저 썼다면, 새 번호로 전체 작업을 한 번만 다시 한다.
-        if (e?.code !== 'P2002') throw e;
-        return run();
-      }
-    });
+      return { ok: true, count: drafts.length, drafts: summary, versions, epoch: rotated.draftEpoch };
+    }));
   }
 
   /**
@@ -2646,12 +2809,15 @@ export class PacsService implements OnModuleInit {
    * 두 요청의 도착 순서가 뒤집히면 "승인됐는데 내용은 이전 것"인 상태가 남는다.
    * 판독문과 그 판독문의 상태는 같이 움직여야 하는 하나의 사실이다.
    */
-  async commitReport(uid: string, body: any, c: Caller) {
+  async commitReport(uid: string, body: any, c: Caller, session: string | null) {
     need(c.roles, 'radiologist', '판독문 확정');
     const me = inst(c);
-    const action = body.action;
+    const action = body?.action;
     if (!['save', 'approve', 'addendum', 'reset', 'preliminary', 'defer'].includes(action))
       throw new BadRequestException(`알 수 없는 action: ${action}`);
+    // 확정은 내 초안을 끝낸다. 그래서 초안 쓰기와 같은 작성자·경계를 함께 보내고(S7-U5), 판 번호의 낙관적 락은 그것과 따로 선다.
+    const owner = draftOwner(body, c);
+    const expected = draftExpected(body);
     /**
      * `citationIds`는 **내 초안 건에 대한 유지 목록**, `removeCitationIds`는 **머리 판 건에 대한
      * 명시적 제거 의사**다. 모양만 여기서 본다 — 모르는 값은 거절 사유가 아니라 무동작이다.
@@ -2663,13 +2829,23 @@ export class PacsService implements OnModuleInit {
     // 떠나는 것** 하나뿐이고, 그래야 지운 적 없는 증언이 목록 하나로 사라지지 않는다.
     const structureKeepIds = this.structureKeys(body.structureIds, 'structureIds');
 
-    const prev = await this.gate(uid, c);
+    /**
+     * 상급 판독의 목록은 Keycloak에 묻는다 — 외부 조회라 트랜잭션 밖에서, 유한하게 한다. 지정이 유효한지는 검사 상태와
+     * 무관하고(기관과 이름만 본다), 상태 규칙은 아래에서 **잠근 검사 행**에 건다. 빈 지정·자기 지정은 묻지 않고도 거절된다.
+     */
+    const wanted = action === 'preliminary' ? String(body.reviewer ?? '').trim() : '';
+    let peers: { id: string }[] = [];
+
+    try {
+      return await this.draftTransaction(uid, c, session, expected.epoch, async () => {
+        await this.studyAccess.prepare(c,[uid]);
+        if (wanted && wanted !== c.actor) peers = await this.keycloak.usersInGroupWithRole(me, 'radiologist');
+      }, async (tx, prev, audit) => {
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
       throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
     const heldByOther = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
     if (heldByOther)
       throw new ConflictException({ code: 'REPORT_HELD', holder: heldByOther, message: `${heldByOther} 님이 판독 중입니다` });
-    if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
 
     // 예비 판독 중인 검사는 지정된 두 사람 말고는 쓰지도 못한다.
     // 읽기만 막고 쓰기를 열어두면, 내용을 못 본 채로 덮어쓸 수 있다 — 더 나쁘다.
@@ -2740,10 +2916,9 @@ export class PacsService implements OnModuleInit {
       if (prev?.rs === 'P')
         throw new BadRequestException(
           '예비 판독(RS: P) 중에는 지정을 바꿀 수 없습니다 — 사유를 남기는 판독 취소(Reset) 뒤 다시 지정하세요');
-      reviewer = String(body.reviewer ?? '').trim();
+      reviewer = wanted;
       if (!reviewer) throw new BadRequestException('상급 판독의를 지정해야 합니다');
       if (reviewer === c.actor) throw new BadRequestException('자기 자신을 상급 판독의로 지정할 수 없습니다');
-      const peers = await this.keycloak.usersInGroupWithRole(me, 'radiologist');
       if (!peers.some(u => u.id === reviewer))
         throw new BadRequestException(`${reviewer} 은(는) 이 기관의 판독의가 아닙니다`);
     }
@@ -2754,7 +2929,7 @@ export class PacsService implements OnModuleInit {
       throw new ForbiddenException(
         `예비 판독의 최종 승인은 지정된 상급 판독의(${prev.preReviewer})만 할 수 있습니다`);
 
-    let rs = { save: 'T', approve: 'A', addendum: 'A', reset: 'W', preliminary: 'P', defer: 'H' }[action];
+    let rs = { save: 'T', approve: 'A', addendum: 'A', reset: 'W', preliminary: 'P', defer: 'H' }[action as string];
 
     /**
      * **예비 판독 중에는 임시 저장이 P를 풀지 못한다.**
@@ -2798,24 +2973,26 @@ export class PacsService implements OnModuleInit {
       if (prev?.teleInstitutionId === me && prev?.institutionId !== me) stateData.ts = 'completed';
     }
 
-    let results: [any, number];
-    // 감사는 트랜잭션 밖에서 남는다. 되돌아간 확정에는 감사도 남지 않으므로 이 값은
-    // 성공한 경로에서만 읽힌다.
-    let citationAudit: any = null;
-    let structureAudit: any = null;
-    let structured: any[] = [];
-    try {
-      results = await this.prisma.$transaction(async tx => {
-      await this.studyAccess.require(c,[uid],tx);
-        // 첫 확정에는 아직 Report 행이 없어 FOR UPDATE만으로 잠글 수 없다. B 적용 후
-        // 항상 존재하는 StudyState를 먼저 잠가 첫 판부터 같은 uid의 확정을 직렬화한다.
-        await tx.$queryRaw`
-          SELECT uid FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
-
+        // 검사 행(StudyState)은 `draftTransaction`이 이미 잠갔다 — 첫 확정에는 아직 Report 행이 없어 FOR UPDATE만으로
+        // 잠글 수 없으므로, 항상 존재하는 그 부모 잠금이 첫 판부터 같은 uid의 확정을 직렬화한다.
         // 안정된 부모 행을 잡은 뒤 현재 Report를 잠근 채 판 번호를 읽는다.
         const [cur] = await tx.$queryRaw<any[]>`
           SELECT version, "updatedBy", findings, conclusion, recommendation
           FROM "Report" WHERE uid = ${uid} FOR UPDATE`;
+
+        /**
+         * 내 초안 행을 **잠그고** 경계를 대조한 뒤 읽는다.
+         *
+         * 잠그지 않으면 다른 탭의 삽입이 이 읽기와 아래의 초안 비우기 사이에 끼어들 수 있고,
+         * 그러면 사용자가 미리보기에서 확인까지 마친 문장의 증언이 행과 함께 사라진다 —
+         * 잃는 것이 남의 것이 아니라 **본인이 방금 한 일**이다. 경계가 다르면(다른 탭이 그사이 저장·비움) 이 확정은
+         * 자기가 보지 못한 초안을 끝내려는 것이라 거절한다.
+         *
+         * 잠금 순서는 (세션 →) StudyState → Report → 내 초안이고, 강제 해제는 StudyState → 초안들,
+         * 초안 저장은 StudyState → 내 초안이다. 모두 같은 방향이라 순환이 없다.
+         */
+        const mine = await this.ownDraft(tx, uid, c, expected.revision);
+        const draft = mine?.present ? mine : null;
 
         if (body.baseVersion === undefined)
           throw new BadRequestException('baseVersion이 필요합니다 (화면이 마지막으로 본 판 번호)');
@@ -2824,7 +3001,7 @@ export class PacsService implements OnModuleInit {
          * **낡은 초안은 승인본에 덧붙지 못한다.**
          *
          * 화면이 보내는 `baseVersion`은 본문을 다시 그리지 않고도 올라간다 —
-         * PATCH 응답 한 번이면 `appState`의 판 번호가 최신이 된다(`main.html:1175`).
+         * PATCH 응답 한 번이면 `appState`의 판 번호가 최신이 된다.
          * 그러면 아래 낙관적 락은 통과하고, 며칠 전 초안이 그 사이 승인된 판독문을
          * 통째로 대체한다(원장 IF-A24 「승인본 자동 덮어쓰기 금지」).
          * 그래서 화면이 말하는 판이 아니라 **초안 행에 적힌 판**을 본다.
@@ -2837,22 +3014,17 @@ export class PacsService implements OnModuleInit {
          * 심층 방어다. 초안이 없는 확정은 구조적으로 이 관문을 지나가고,
          * `baseVersion`의 출처가 틀린 화면은 조용히 통과한다.
          */
-        if (action === 'addendum') {
-          const draft = await tx.reportDraft.findUnique({
-            where: { uid_author: { uid, author: c.actor } }, select: { baseVersion: true },
+        if (action === 'addendum' && draft && draft.baseVersion < (cur?.version ?? 0))
+          throw new ConflictException({
+            code: 'REPORT_DRAFT_STALE',
+            message: `이 초안은 v${draft.baseVersion}을 기준으로 씁니다. 지금 승인본은 ` +
+              `v${cur.version}입니다 — 승인본을 확인한 뒤 기준을 다시 잡아 주세요.`,
+            head: {
+              version: cur.version, updatedBy: cur.updatedBy ?? null,
+              findings: cur.findings, conclusion: cur.conclusion, recommendation: cur.recommendation,
+            },
+            draftBaseVersion: draft.baseVersion,
           });
-          if (draft && draft.baseVersion < (cur?.version ?? 0))
-            throw new ConflictException({
-              code: 'REPORT_DRAFT_STALE',
-              message: `이 초안은 v${draft.baseVersion}을 기준으로 씁니다. 지금 승인본은 ` +
-                `v${cur.version}입니다 — 승인본을 확인한 뒤 기준을 다시 잡아 주세요.`,
-              head: {
-                version: cur.version, updatedBy: cur.updatedBy ?? null,
-                findings: cur.findings, conclusion: cur.conclusion, recommendation: cur.recommendation,
-              },
-              draftBaseVersion: draft.baseVersion,
-            });
-        }
 
         if ((cur?.version ?? 0) !== body.baseVersion)
           throw new ConflictException(
@@ -2870,24 +3042,10 @@ export class PacsService implements OnModuleInit {
          * 낙관적 락 **뒤**에 읽는다. 거절되는 확정은 아무것도 더 읽지 않아야 한다.
          */
         const headCitations = await this.versionCitations(tx, uid, cur?.version ?? 0);
-        /**
-         * 내 초안 행을 **잠그고** 읽는다.
-         *
-         * 잠그지 않으면 다른 탭의 삽입이 이 읽기와 아래의 초안 삭제 사이에 끼어들 수 있고,
-         * 그러면 사용자가 미리보기에서 확인까지 마친 문장의 증언이 행과 함께 사라진다 —
-         * 잃는 것이 남의 것이 아니라 **본인이 방금 한 일**이다. 삽입도 같은 행을 같은 방식으로
-         * 잠그므로 둘은 순서대로 선다: 삽입이 먼저면 여기서 함께 읽히고, 확정이 먼저면 삽입은
-         * 행이 사라진 뒤에 자기 행을 새로 만든다. 어느 쪽도 조용히 없어지지 않는다.
-         *
-         * 잠금 순서는 StudyState → Report → 내 초안이고, 강제 해제는 StudyState → 초안들,
-         * 삽입은 내 초안 하나뿐이다. 모두 같은 방향이라 순환이 없다.
-         */
         const headStructured = await this.versionStructured(tx, uid, cur?.version ?? 0);
-        const [mine] = await tx.$queryRaw<any[]>`
-          SELECT citations, structured FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
-        const { kept, ignored } = applyKeepList(citationArray(mine?.citations), keepIds);
+        const { kept, ignored } = applyKeepList(citationArray(draft?.citations), keepIds);
         const union = citationUnion(headCitations, removeIds, kept);
-        const mineStructured = applyStructureKeepList(structureArray(mine?.structured), structureKeepIds);
+        const mineStructured = applyStructureKeepList(structureArray(draft?.structured), structureKeepIds);
         // 세 칸이 빈 확정과 reset은 본문이 없으니 증언할 것도 없다.
         const blank = !(content.findings || content.conclusion || content.recommendation);
         const citations = (action === 'reset' || blank) ? [] : union.entries;
@@ -2897,7 +3055,7 @@ export class PacsService implements OnModuleInit {
          * 한도 초과만이 새 거절이다.
          */
         await this.citationBudget(tx, citations);
-        citationAudit = (citations.length || union.removed.length || ignored)
+        const citationAudit = (citations.length || union.removed.length || ignored)
           ? { n: citations.length, ...(union.removed.length ? { dropped: union.removed } : {}),
               ...(ignored ? { ignored } : {}) } : null;
 
@@ -2908,9 +3066,9 @@ export class PacsService implements OnModuleInit {
          */
         const selection = commitStructureSelection(
           structureUnion(headStructured, mineStructured.kept), content, blank, action === 'reset');
-        structured = selection.entries;
+        const structured = selection.entries;
         await this.structureBudget(tx, structured);
-        structureAudit = (structured.length || selection.dropped.length || mineStructured.ignored)
+        const structureAudit = (structured.length || selection.dropped.length || mineStructured.ignored)
           ? { n: structured.length, ...(selection.dropped.length ? { dropped: selection.dropped } : {}),
               ...(mineStructured.ignored ? { ignored: mineStructured.ignored } : {}) } : null;
 
@@ -2940,7 +3098,7 @@ export class PacsService implements OnModuleInit {
         }
 
         const state = await tx.studyState.update({ where: { uid }, data: stateData });
-        await tx.report.upsert({ where: { uid },
+        const report = await tx.report.upsert({ where: { uid },
           create: { uid, ...content, version, updatedBy: c.actor },
           update: { ...content, version, updatedBy: c.actor } });
         // 인용은 **`ReportVersion` 행에만** 쓴다. `Report`에는 칸이 없다 — 거울을 두면
@@ -2949,9 +3107,27 @@ export class PacsService implements OnModuleInit {
           uid, version, action, ...content, citations,
           ...(structured.length ? { structured } : {}),
           reason: body.reason ?? null, author: c.actor } });
-        // 확정에 실패하면 초안도 남아야 하므로 같은 트랜잭션에서 지운다.
-        await tx.reportDraft.deleteMany({ where: { uid, author: c.actor } });
-        return [state, version] as [any, number];
+        // 확정에 실패하면 초안도 남아야 하므로 같은 트랜잭션에서 비운다. 초안이 없던 확정도 경계를 올린다 —
+        // 이 확정보다 앞서 보낸 초안 쓰기가 뒤늦게 닿아 확정 뒤에 초안을 만들지 못한다.
+        const cleared = await this.storeDraft(tx, uid, c.actor, mine, null);
+
+        /**
+         * 감사 행은 **같은 트랜잭션에서** 쓴다(U5S-REQ-03). 밖에서 쓰면 확정은 남고 감사만 실패한 판이 생긴다 —
+         * 누가 서명했는지의 기록이 없는 서명이다. 감사가 실패하면 확정·판·초안 비움이 모두 되돌아간다.
+         */
+        await audit(c.actor, `report.${action}`, uid, {
+          version, by: me,
+          len: [content.findings.length, content.conclusion.length, content.recommendation.length],
+          reason: body.reason ?? undefined,
+          reviewer,   // 누구에게 맡겼는가. 책임이 옮겨간 기록이므로 감사로그에 남아야 한다.
+          // 몇 건이 남았고 무엇이 **지워졌는가**. 지워진 증언은 되짚을 자리가 여기뿐이라
+          // `cid`는 남기지만, `findingId`·`sourceIndex`·문구는 남기지 않는다.
+          ...(citationAudit ? { cits: citationAudit } : {}),
+          // 구조화도 같은 규칙이다 — 건수와 `sid`만. 값·문장·항목 코드는 남기지 않는다(P16).
+          ...(structureAudit ? { strs: structureAudit } : {}),
+        });
+
+        return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, report, c.actor, cleared) };
       });
     } catch (e: any) {
       // CHECK 백스톱도 서버 고장이 아니라 명명된 409다. 우리 제약 이름일 때만 옮긴다.
@@ -2964,22 +3140,6 @@ export class PacsService implements OnModuleInit {
           '다른 사용자가 방금 이 판독문을 확정했습니다. 내용을 다시 불러온 뒤 확정해 주세요.');
       throw e;
     }
-    const [state, version] = results;
-
-    await this.audit(c.actor, `report.${action}`, uid, {
-      version, by: me,
-      len: [content.findings.length, content.conclusion.length, content.recommendation.length],
-      reason: body.reason ?? undefined,
-      reviewer,   // 누구에게 맡겼는가. 책임이 옮겨간 기록이므로 감사로그에 남아야 한다.
-      // 몇 건이 남았고 무엇이 **지워졌는가**. 지워진 증언은 되짚을 자리가 여기뿐이라
-      // `cid`는 남기지만, `findingId`·`sourceIndex`·문구는 남기지 않는다.
-      ...(citationAudit ? { cits: citationAudit } : {}),
-      // 구조화도 같은 규칙이다 — 건수와 `sid`만. 값·문장·항목 코드는 남기지 않는다(P16).
-      ...(structureAudit ? { strs: structureAudit } : {}),
-    });
-
-    const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(state, r, c.actor, await this.myDraft(uid, c.actor));
   }
 
   /**
@@ -3087,8 +3247,11 @@ export class PacsService implements OnModuleInit {
       const report = await tx.report.findUnique({ where: { uid }, select: { version: true } });
       const head = await this.versionCitations(tx, uid, report?.version ?? 0);
       const draft = await tx.reportDraft.findUnique({
-        where: { uid_author: { uid, author: c.actor } }, select: { citations: true } });
-      const mine = citationArray(draft?.citations);
+        where: { uid_author: { uid, author: c.actor } }, select: { citations: true, revision: true, present: true } });
+      // 같은 스냅숏의 세대 — 이 목록이 어느 경계의 것인지 화면이 알아야 유지 목록을 그 경계에 묶어 보낼 수 있다.
+      const epoch = await tx.studyState.findUnique({ where: { uid }, select: { draftEpoch: true } });
+      if (!epoch) throw new NotFoundException('검사를 찾을 수 없습니다');
+      const mine = citationArray(draft?.present ? draft.citations : null);
       /**
        * **행마다 따로 묻는다.** 한 행은 CHECK가 64건으로 묶지만 머리 + 초안은 128건까지 갈 수
        * 있고, 바로 그 상태(머리 40 + 초안 30)가 확정이 `REPORT_CITATION_LIMIT`으로 거절하는
@@ -3110,7 +3273,8 @@ export class PacsService implements OnModuleInit {
         const counts = sameTextCounts(entries);
         return entries.map((entry, i) => projectCitation(entry, readable.has(String(entry?.findingId ?? '')), counts[i]));
       };
-      return { version: report?.version ?? 0, head: project(head), draft: project(mine) };
+      return { version: report?.version ?? 0, head: project(head), draft: project(mine),
+        draftRevision: draftToken(epoch.draftEpoch, draft?.revision ?? 0) };
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }
 
@@ -3138,9 +3302,14 @@ export class PacsService implements OnModuleInit {
       const report = await tx.report.findUnique({ where: { uid },
         select: { version: true, findings: true, conclusion: true, recommendation: true } });
       const head = await this.versionStructured(tx, uid, report?.version ?? 0);
-      const draftRow = await tx.reportDraft.findUnique({
+      const stored = await tx.reportDraft.findUnique({
         where: { uid_author: { uid, author: c.actor } },
-        select: { findings: true, conclusion: true, recommendation: true, structured: true } });
+        select: { findings: true, conclusion: true, recommendation: true, structured: true, revision: true, present: true } });
+      const epoch = await tx.studyState.findUnique({ where: { uid }, select: { draftEpoch: true } });
+      if (!epoch) throw new NotFoundException('검사를 찾을 수 없습니다');
+      const draftRevision = draftToken(epoch.draftEpoch, stored?.revision ?? 0);
+      // 비운 자리(present=false)는 초안이 아니다 — 구조화 건도 본문도 없다.
+      const draftRow = stored?.present ? stored : null;
       const mine = structureArray(draftRow?.structured);
       /**
        * 한 건이라도 모양이 틀리면 **답 전체가 모른다**가 된다. 틀린 건만 빼고 나머지를
@@ -3148,14 +3317,14 @@ export class PacsService implements OnModuleInit {
        * 그 순간 읽지 못한 건이 조용히 지워진다.
        */
       if (!head.every(isStructureEntry) || !mine.every(isStructureEntry))
-        return { version: report?.version ?? 0, unknown: true, head: null, draft: null };
+        return { version: report?.version ?? 0, unknown: true, head: null, draft: null, draftRevision };
       const project = (entries: any[], body: any) => {
         const counts = structureSameTextCounts(entries);
         return entries.map((entry, i) =>
           projectStructure(entry, String(body?.[String(entry.field)] ?? ''), counts[i]));
       };
       return { version: report?.version ?? 0, unknown: false,
-        head: project(head, report), draft: project(mine, draftRow) };
+        head: project(head, report), draft: project(mine, draftRow), draftRevision };
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }
 
@@ -3530,7 +3699,8 @@ export class PacsService implements OnModuleInit {
       tx.reportVersion.findFirst({
         where: { uid, action: { not: 'discarded' } }, select: { id: true },
       }),
-      tx.reportDraft.findFirst({ where: { uid }, select: { author: true } }),
+      // 비운 자리(present=false)는 쓰는 중인 글이 아니다 — 삭제를 막지 않는다.
+      tx.reportDraft.findFirst({ where: { uid, present: true }, select: { author: true } }),
     ]);
     if (version)
       throw new BadRequestException(
@@ -3546,6 +3716,9 @@ export class PacsService implements OnModuleInit {
     // row lock taken above, so a study that arrives again under this UID never brings it back open.
     if (prev.teleInstitutionId)
       await closeReaderAssignments(tx, uid, { institutionId: prev.institutionId, teleInstitutionId: null }, c.actor, 'study-deleted');
+    // 남은 초안 행은 비운 자리뿐이다(위에서 present 행이 있으면 거절했다). 검사 행과 함께 치운다: 같은 UID로 다시 생긴
+    // 검사는 새 세대(draftEpoch)를 받으므로, 치운 자리의 revision이 없어도 옛 경계의 쓰기는 모두 거절된다.
+    await tx.reportDraft.deleteMany({ where: { uid, present: false } });
     await tx.studyState.delete({ where: { uid } });
     await tx.auditLog.create({ data: { actor: c.actor, action: 'state.delete', target: uid, detail: JSON.stringify({ by: me }) } });
     return { ok: true };

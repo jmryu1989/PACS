@@ -60,6 +60,12 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "no-referrer" always;
 
+    # 직접 DICOM 요청의 인증 거절이 어느 거절인지(S7-U5): 인증 서브요청(/kin-authz)은 본문을 전달하지 못하므로 API가
+    # 실은 X-KIN-Auth-Code를 보호 경로의 401/403 응답에 그대로 옮긴다. 값이 비면 nginx는 이 헤더를 내지 않는다 —
+    # 코드 없는 403은 평범한 열람 거절이다. 위 세 보안 헤더와 같은 수준에 두어야 보호 location이 넷을 함께 물려받는다.
+    set $kin_auth_code "";
+    add_header X-KIN-Auth-Code $kin_auth_code always;
+
     location = / { return 302 /worklist/hpacs-lite/index.html; }
 
     # This directory contains only the collector's four-field public heartbeat.
@@ -160,6 +166,7 @@ server {
     location ~ ^/dicom-web/studies/[0-9.]+$ {
         limit_except GET HEAD POST { deny all; }
         auth_request /kin-authz;
+        auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
         proxy_pass http://orthanc:8042;
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
     }
@@ -169,6 +176,7 @@ server {
     location /dicom-web/ {
         limit_except GET HEAD { deny all; }
         auth_request /kin-authz;
+        auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
         proxy_pass http://orthanc:8042;
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
     }
@@ -177,6 +185,7 @@ server {
     location /instances/ {
         limit_except GET HEAD { deny all; }
         auth_request /kin-authz;
+        auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
         proxy_pass http://orthanc:8042;
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
     }
@@ -184,6 +193,7 @@ server {
     location = /statistics {
         limit_except GET HEAD { deny all; }
         auth_request /kin-authz;
+        auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
         proxy_pass http://orthanc:8042;
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
     }
@@ -191,12 +201,14 @@ server {
     location = /system {
         limit_except GET HEAD { deny all; }
         auth_request /kin-authz;
+        auth_request_set $kin_auth_code $upstream_http_x_kin_auth_code;
         proxy_pass http://orthanc:8042;
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
     }
 
-    # 내부 인증 서브요청 — API가 Bearer 또는 kin_at 쿠키의 Keycloak 토큰을 검증한다.
+    # 내부 인증 서브요청 — API가 Bearer 토큰 또는 kin_sid 쿠키의 로그인 세션을 검증한다.
     # 2xx면 통과하고 401/403이면 원 요청도 거부한다. 외부에서는 직접 부를 수 없다.
+    # 401 = 자격 없음·끝난 세션, 403 + X-KIN-Auth-Code = 세션 결속 문제, 코드 없는 403 = 열람 거절(S7-U5).
     location = /kin-authz {
         internal;
         proxy_pass http://api:3000/api/authz/dicom;
@@ -206,6 +218,9 @@ server {
         proxy_set_header X-Original-Method $request_method;
         proxy_set_header Authorization $http_authorization;
         proxy_set_header Cookie $http_cookie;
+        # 요청을 시작한 문서가 본 세션의 식별값. API는 이것이 쿠키의 세션과 다르면 거절한다 — 다른 탭의 새 로그인이
+        # 옛 문서의 영상 요청을 대신 인증하지 않는다. 쿠키 만료(Set-Cookie)는 이 서브요청에서 원 응답으로 옮기지 않는다.
+        proxy_set_header X-KIN-Session $http_x_kin_session;
     }
 
     # 목록에 없는 Orthanc 관리·삭제 경로는 뒷단으로 넘기지 않는다.

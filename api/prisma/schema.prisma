@@ -25,6 +25,10 @@ model AuthSession {
   atExpiresAt  DateTime
   createdAt    DateTime @default(now())
   lastSeenAt   DateTime
+  /// S7-U5 진입 증명(U5S-REQ-09): 로그인 직후 그 문서가 한 번 쓰는 증명의 해시와 만료. 원문은 저장하지 않고,
+  /// 쓰면 두 칸을 비운다 — 같은 증명은 다시 통하지 않는다.
+  entryProofHash      String?
+  entryProofExpiresAt DateTime?
 
   @@index([sub])
 }
@@ -92,6 +96,9 @@ model StudyState {
   orderOid  String?  @unique                  // 매칭된 오더
   holder    String?                           // 지금 판독문을 쓰고 있는 사람
   heldAt    DateTime?                         // 마지막 하트비트. TTL이 지나면 점유가 풀린다
+  /// S7-U5 초안 경계의 세대(U5S-REQ-14). 행이 생길 때마다 DB가 새 값을 주고(지웠다 다시 생긴 검사도 새 세대),
+  /// 관리자 강제 해제가 바꾼다. 초안 쓰기는 자기가 본 세대를 함께 보내고, 다르면 거절된다.
+  draftEpoch String  @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
 
@@ -265,6 +272,12 @@ model Report {
 /// 없거나(NULL) 배열이 아니면 "인용 없음"이고, 그것이 이 칸이 생기기 전의 동작이다.
 /// structured: 구조화 서식으로 **고른 값**과 그래서 본문에 들어간 **그 한 줄**. 같은 이유로
 /// 같은 행에 있다. 기록의 본체는 여전히 자유문 세 칸이고 이 칸은 그 옆에 서는 증언이다.
+///
+/// revision·present (S7-U5, U5S-REQ-14): 같은 작성자의 늦게 닿은 쓰기·다른 탭의 쓰기가 나중 글을 덮지 않게 하는
+/// 저장된 경계다. 모든 쓰기·비우기·버리기·확정·강제 해제는 자기가 본 revision일 때만 적용되고 revision을 하나
+/// 올린다. 비운 초안은 행을 지우지 않고 present=false로 두며 내용 칸을 비운다 — 행을 지우면 revision도 사라져
+/// 지운 뒤에 닿은 옛 쓰기가 초안을 되살린다. present=false 행은 초안이 아니다(조회·인용·구조화·이력·삭제 판정에서
+/// 없는 것으로 읽는다). `Report.version`/`baseVersion`과는 별개의 수다.
 model ReportDraft {
   uid            String
   author         String
@@ -274,6 +287,8 @@ model ReportDraft {
   baseVersion    Int      @default(0)
   citations      Json?
   structured     Json?
+  revision       Int      @default(1)
+  present        Boolean  @default(true)
   updatedAt      DateTime @updatedAt
 
   @@id([uid, author])

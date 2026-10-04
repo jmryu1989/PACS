@@ -42,10 +42,12 @@ export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Obj
   "study.consultation": 'detail.institution',     // 소유 기관만 의뢰한다
   "hanging-protocol.site.save": 'target',         // target이 기관 id다
   "hanging-protocol.site.reset": 'target',
-  // S7-U5 접속기록: 사건 시점 토큰의 그룹이 정확히 하나일 때의 기관(로그인은 검증한 토큰, 종료는 지운 세션의 저장 토큰)
+  // S7-U5 접속기록: 사건 시점 토큰의 그룹이 정확히 하나일 때의 기관(로그인은 검증한 토큰, 종료는 지운 세션의 저장 토큰,
+  // 진입은 진입 증명을 쓴 세션의 저장 토큰)
   "auth.login": 'detail.institution',
   "auth.logout": 'detail.institution',
   "auth.session.expired": 'detail.institution',
+  "auth.entry": 'detail.institution',
 });
 
 /** `report.<action>` 확정 행은 detail.by(행위 기관)로 귀속한다. commitReport가 받는 여섯 동작이다. */
