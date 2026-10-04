@@ -59,7 +59,8 @@ window.kinViewerFindings = function (services, model) {
       activate: study => typeof window.kinViewerHistoryActivate === 'function' ? window.kinViewerHistoryActivate(study) : { ok: false, reason: 'tool-missing' },
       location: () => window.kinViewerJobLocation || null, continuation: continuation() });
     window.KinViewerSessionBoundary?.guardMethods(store, ['discardHeld', 'setScope', 'syncHistory', 'newDraft',
-      'updateDraft', 'toggleSource', 'setPrimary', 'refreshSource', 'useLatest', 'discard', 'edit', 'save', 'toggleJob']);
+      'updateDraft', 'toggleSource', 'setPrimary', 'refreshSource', 'useLatest', 'discard', 'edit', 'save', 'toggleJob',
+      'load', 'loadPair', 'loadJobs', 'navigate', 'history']);
     held = [];
     const panel = document.createElement('details'); panel.id = 'kin-viewer-findings'; panel.open = true;
     panel.style.cssText = 'border-top:1px solid #405777;margin-top:10px;padding-top:8px';

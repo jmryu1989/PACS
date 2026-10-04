@@ -5,13 +5,10 @@ const path=require('node:path');
 const test=require('node:test');
 const vm=require('node:vm');
 
+const { sessionWorld }=require('./viewer_session_fixture.cjs');
 let config=fs.readFileSync(path.join(__dirname,'..','config','ohif.js'),'utf8');
 if(process.env.KIN_PDF_KEY_MUTATION==='drop')config=config.replace(', key });', ' });');
-function extract(name){
-  const start=config.indexOf(`function ${name}(`);assert.notEqual(start,-1);const brace=config.indexOf('{',start);let depth=0,quote=null,escaped=false;
-  for(let i=brace;i<config.length;i++){const char=config[i];if(quote){if(escaped)escaped=false;else if(char==='\\')escaped=true;else if(char===quote)quote=null;continue;}if("'\"`".includes(char))quote=char;else if(char==='{')depth++;else if(char==='}'&&--depth===0)return config.slice(start,i+1);}throw Error(name);
-}
-function load(extra={}){const sandbox={AbortController,URL,setTimeout,clearTimeout,...extra};vm.createContext(sandbox);vm.runInContext(`${extract('kinDicomPdfViewportGuard')}\n${extract('kinCreateDicomPdf')}`,sandbox);return sandbox;}
+function load(extra={}){const sandbox={AbortController,URL,setTimeout,clearTimeout,...extra};const page=sessionWorld(sandbox,sandbox.fetch,config);sandbox.endSession=page.end;return sandbox;}
 function display(over={}){return {displaySetInstanceUID:'ds-pdf',SOPClassHandlerId:'@ohif/extension-dicom-pdf.sopClassHandlerModule.dicom-pdf',SOPClassUID:'1.2.840.10008.5.1.4.1.1.104.1',StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.4',pdfUrl:Promise.resolve('/pdf'),instance:{SOPClassUID:'1.2.840.10008.5.1.4.1.1.104.1',StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.4',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}},...over};}
 function manager(component){const entry={component};return {entry,manager:{getModuleEntry:id=>id==='@ohif/extension-dicom-pdf.viewportModule.dicom-pdf'?entry:null}};}
 const React={createElement:(type,props)=>({type,key:props.key==null?null:String(props.key),props})};
@@ -137,5 +134,5 @@ test('session-ended retires pending native work',async()=>{
   const listeners=new Map();let ended=0;class Channel{constructor(){this.onmessage=null}close(){this.closed=true}}
   const addEventListener=(name,fn)=>listeners.set(name,fn),removeEventListener=(name,fn)=>{if(listeners.get(name)===fn)listeners.delete(name)};
   const fetch=()=>new Promise(()=>{}),sandbox=load({fetch,location:{href:'https://pdf.test/ohif/viewer',origin:'https://pdf.test'},addEventListener,removeEventListener,BroadcastChannel:Channel}),fixture=manager(keyed),guard=sandbox.kinDicomPdfViewportGuard(fixture.manager,{onSessionEnd:()=>ended++});guard.install();guard.activate();
-  const promise=fixture.entry.component({displaySets:[display({pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.4/rendered')})]}).props.displaySets[0].pdfUrl;listeners.get('storage')({key:'kin-session-ended'});await assert.rejects(promise,/중단/);assert.equal(ended,1);
+  const promise=fixture.entry.component({displaySets:[display({pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.4/rendered')})]}).props.displaySets[0].pdfUrl;sandbox.endSession();await assert.rejects(promise,/중단/);assert.equal(ended,1);
 });

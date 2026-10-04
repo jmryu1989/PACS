@@ -1,6 +1,7 @@
 # coding: utf-8
 """Isolated Chromium DOM coverage for selected-stack Images Only fullscreen."""
 from pathlib import Path
+from viewer_session_fixture import install_viewer_session
 import unittest
 
 from playwright.sync_api import expect, sync_playwright
@@ -47,7 +48,7 @@ class ViewerImagesOnlyDOMTest(unittest.TestCase):
     def setUp(self):
         self.page = self.browser.new_page()
         self.page.route(URL, lambda route: route.fulfill(body=HARNESS, content_type="text/html; charset=utf-8"))
-        self.page.goto(URL); self.page.add_script_tag(path=str(MODULE)); self.assertTrue(self.page.evaluate("mountImagesOnly()"))
+        self.page.goto(URL); install_viewer_session(self.page); self.page.add_script_tag(path=str(MODULE)); self.assertTrue(self.page.evaluate("mountImagesOnly()"))
 
     def tearDown(self):
         self.page.close()
@@ -180,7 +181,7 @@ class ViewerImagesOnlyDOMTest(unittest.TestCase):
         expect(self.page.locator("#kin-images-only-status")).to_contain_text("허용하지 않았습니다")
         self.assertEqual(0, self.page.locator("#kin-images-only-exit").count())
         self.page.evaluate("requestMode='pending'"); self.page.locator("#kin-images-only-enter").click()
-        self.page.evaluate("dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))")
+        self.page.evaluate("KinViewerSessionBoundary.authFailure({session:'S1',status:401,code:'AUTH_SESSION_ENDED'})")
         expect(self.page.locator("#kin-images-only")).to_have_count(0)
         self.page.evaluate("releaseRequest()")
         self.page.wait_for_function("()=>document.fullscreenElement===null")

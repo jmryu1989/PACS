@@ -2,13 +2,13 @@
 /* REQ-S5-U2c-CLINICIAN-CT-SYNC -> RISK-S5-U2c-FALSE-SESSION-END / RISK-S5-U2c-ALLOWLIST-WIDENING / RISK-S5-U2c-WRONG-PATIENT-SYNC
    / RISK-S5-U2c-SYNC-AFTER-DOCUMENT-END -> TEST-S5-U2c-PURE (Astra S5-VIEWER-UXR-R-001 F01, VUI-02; fix1: Astra S5-U2c-R-001 F01;
    fix2: Astra S5-U2c-B-R-001 F01 an end after a refusal is kept, F02 every producer names its reason, F03 a dropped event's late
-   failure says nothing; fix3: Astra S5-U2c-C-R-001 F01 a late 401 or another account is the document's end whichever round or
-   mount it answers).
+   failure says nothing; U5 amendments: only the page authority ends a session. An ordinary HTTP refusal stays local,
+   including when it answers after mode exit. An incoming account mismatch never changes the bound identity).
 
    config/ohif.js runs unchanged in a vm and kinCreateCTSync is mounted against in-test stand-ins for the pinned OHIF services
    (sync group, grid, display sets, cornerstone viewports, metadata and image loader) and for the API. The API stand-in answers
-   GET me, GET studies and GET clinician/studies, and refuses a clinician-only caller every route outside the allowlist read from
-   api/src/clinician-policy.ts, as auth.guard.ts does before any service runs. Its native synchronizer is deliberately permissive:
+   GET me, GET studies and GET clinician/studies, and refuses a clinician-only caller every route outside the approved
+   clinician_policy_fixtures.json allowlist. Compiled policy parity belongs to the API suite. Its native synchronizer is deliberately permissive:
    it moves every enabled target to the nearest position (or by index when there is no geometry), so a target that stays put was
    held by the viewer's own gate. Synthetic data only: no network, server, browser or credentials. */
 const { test } = require('node:test');
@@ -16,23 +16,16 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { sessionWorld, response: respond } = require('./viewer_session_fixture.cjs');
 
 const ROOT = path.join(__dirname, '..');
-// LF as the repository stores it (a Windows checkout has CRLF), so the controls' multi-line anchors match on every platform.
-const SOURCE = fs.readFileSync(path.join(ROOT, 'config', 'ohif.js'), 'utf8').replace(/\r\n/g, '\n');
-const POLICY = fs.readFileSync(path.join(ROOT, 'api', 'src', 'clinician-policy.ts'), 'utf8');
-
-// ── the server rule, read from api/src/clinician-policy.ts ──
-function frozen(name) {
-  const found = POLICY.match(new RegExp(`export const ${name}\\b[^=]*=\\s*Object\\.freeze\\(\\[([\\s\\S]*?)\\]\\)`));
-  assert.ok(found, `${name} in api/src/clinician-policy.ts`);
-  return [...found[1].replace(/\/\/[^\n]*/g, '').matchAll(/'([^']*)'/g)].map(m => m[1]);
-}
-const SESSION_ROUTES = frozen('CLINICIAN_SESSION_ROUTES');
-const BUSINESS_ROUTES = frozen('CLINICIAN_BUSINESS_ROUTES');
+const SOURCE = fs.readFileSync(path.join(ROOT, 'config', 'ohif.js'), 'utf8');
+const POLICY = require('./clinician_policy_fixtures.json');
+const SESSION_ROUTES = POLICY.session_routes;
+const BUSINESS_ROUTES = POLICY.business_routes;
 const ALLOWED = new Set([...SESSION_ROUTES, ...BUSINESS_ROUTES]);
-const CLINICIAN_ROLE = POLICY.match(/export const CLINICIAN_ROLE = '([^']+)'/)[1];
-const APP_ROLES = new Set([...frozen('LEGACY_APP_ROLES'), CLINICIAN_ROLE]);
+const CLINICIAN_ROLE = POLICY.clinician_role;
+const APP_ROLES = new Set(POLICY.app_roles);
 const clinicianOnly = roles => { const app = roles.filter(role => APP_ROLES.has(role)); return app.length > 0 && app.every(role => role === CLINICIAN_ROLE); };
 
 // config/ohif.js kinCreateCTSync wording, verbatim.
@@ -91,15 +84,6 @@ const OPENED = `?StudyInstanceUIDs=${CUR},${PRI}&hangingProtocolId=@ohif/hpCompa
 const plain = value => JSON.parse(JSON.stringify(value));
 const flush = async (rounds = 6) => { for (let i = 0; i < rounds; i++) await new Promise(resolve => setImmediate(resolve)); };
 const NETWORK = Symbol('network failure');
-function respond(status, body, notJson = false) {
-  return { status, ok: status >= 200 && status < 300,
-    json: async () => { if (notJson) throw new SyntaxError('Unexpected token < in JSON'); return JSON.parse(JSON.stringify(body)); } };
-}
-function variant(from, to, text = SOURCE) {
-  assert.equal(text.split(from).length, 2, `control edit applies once: ${from}`);
-  return text.replace(from, to);
-}
-
 // A DOM node with what kinCreateCTSync touches.
 class Node {
   constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.parentNode = null; this.hidden = false; this.style = {};
@@ -172,7 +156,7 @@ function world(options = {}) {
     fetch: (url, init = {}) => new Promise((resolve, reject) => {
       const u = new URL(url, ORIGIN), method = String(init.method || 'GET').toUpperCase();
       const entry = { method, url: String(url), path: u.pathname, query: u.search, key: routeKey(method, u.pathname),
-        csrf: init.headers?.['X-KIN-CSRF'] ?? null, credentials: init.credentials ?? null, cache: init.cache ?? null,
+        binding: new Headers(init.headers).get('X-KIN-Session'), csrf: new Headers(init.headers).get('X-KIN-CSRF'), credentials: init.credentials ?? null, cache: init.cache ?? null,
         roles: [...(w.account.roles || [])], aborted: false };
       w.log.push(entry);
       const aborted = () => { entry.aborted = true; reject(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })); };
@@ -195,9 +179,7 @@ function world(options = {}) {
     }),
   };
   sandbox.window = sandbox;
-  vm.createContext(sandbox);
-  vm.runInContext((options.source || SOURCE) + '\n;globalThis.__kin = { kinCreateCTSync, kinViewerSession, kinViewerClinicianOnly };', sandbox,
-    { filename: 'config/ohif.js' });
+  w.page = sessionWorld(sandbox, sandbox.fetch, SOURCE + '\n;globalThis.__kin = { kinCreateCTSync, kinViewerSession, kinViewerClinicianOnly };');
   const kin = sandbox.__kin;
 
   // cornerstone viewports, display sets and the grid
@@ -301,6 +283,7 @@ function world(options = {}) {
 // on /me, GET studies or GET clinician/studies — never a write, never a route outside the pinned allowlist for a clinician-only caller.
 function finish(w) {
   for (const e of w.log) {
+    assert.equal(e.binding, 'S1', e.url);
     assert.equal(e.method, 'GET', e.url);
     assert.deepEqual([e.csrf, e.credentials, e.cache], ['1', 'same-origin', 'no-store'], e.url);
     assert.ok(['GET me', 'GET studies', 'GET clinician/studies'].includes(e.key), e.url);
@@ -309,7 +292,7 @@ function finish(w) {
   assert.deepEqual(w.badQueries, []);
 }
 
-test('the pinned clinician-only allowlist refuses GET studies and admits the narrow list; the viewer role rule is the server one', () => {
+test('the approved clinician-only route contract refuses GET studies and admits the narrow list; the viewer follows its role matrix', () => {
   assert.ok(SESSION_ROUTES.includes('GET me'));
   assert.ok(BUSINESS_ROUTES.includes('GET clinician/studies'));
   assert.equal(ALLOWED.has('GET studies'), false, 'GET studies stays refused to clinician-only');
@@ -446,10 +429,10 @@ test('message matrix of the access check: unconfirmed, 401, 403, unanswered and 
   finish(waiting);
 
   const cases = [
-    ['/me 401', e => e.key === 'GET me' ? respond(401, { statusCode: 401 }) : undefined, TEXT.ended, false, ['GET me']],
+    ['/me 401', e => e.key === 'GET me' ? respond(401, { statusCode: 401 }) : undefined, TEXT.failed, true, ['GET me']],
     ['/me 403', e => e.key === 'GET me' ? respond(403, { code: 'INSTITUTION_PENDING' }) : undefined, TEXT.denied, true, ['GET me']],
     ['list 403', e => e.key === 'GET clinician/studies' ? respond(403, { code: 'CLINICIAN_ROUTE_DENIED' }) : undefined, TEXT.denied, true, ['GET me', 'GET clinician/studies']],
-    ['list 401', e => e.key === 'GET clinician/studies' ? respond(401, {}) : undefined, TEXT.ended, false, ['GET me', 'GET clinician/studies']],
+    ['list 401', e => e.key === 'GET clinician/studies' ? respond(401, {}) : undefined, TEXT.failed, true, ['GET me', 'GET clinician/studies']],
     ['list 500', e => e.key === 'GET clinician/studies' ? respond(500, {}) : undefined, TEXT.failed, true, ['GET me', 'GET clinician/studies']],
     ['list 503', e => e.key === 'GET clinician/studies' ? respond(503, {}) : undefined, TEXT.failed, true, ['GET me', 'GET clinician/studies']],
     ['/me network', e => e.key === 'GET me' ? NETWORK : undefined, TEXT.failed, true, ['GET me']],
@@ -539,11 +522,11 @@ test('Recheck Access asks again from /me, says it is checking, and only a confir
   finish(refused);
 });
 
-test('checks inside a sync event: 401 ends, 403 only fails that event, another role stops until Recheck Access', async () => {
+test('checks inside a sync event: authenticated end stops work, ordinary 403 only fails that event, another role stops until Recheck Access', async () => {
   const unauth = world();
   await flush();
   const s1 = unauth.sync();
-  unauth.answer = e => e.key === 'GET me' ? respond(401, {}) : undefined;
+  unauth.answer = e => e.key === 'GET me' ? respond(401, {code:'AUTH_SESSION_ENDED'}) : undefined;
   await unauth.scroll(s1, 'vp-a', 4);
   assert.deepEqual(unauth.screen(), { mounted: true, visible: true, text: TEXT.ended, recheck: false });
   assert.equal(s1.isDisabled(), true, 'the synchronizers created in this mount are disabled');
@@ -636,8 +619,8 @@ test('late answers: Sync OFF, series replacement, account change, logout and A->
   await held(null, async w => { w.show('vp-b', 'S2'); w.held[0].release(); });
   const other = await held(null, async w => { w.account = OTHER_CLINICIAN; w.held[0].release(); }, TEXT.ended);
   assert.equal(other.sync.isDisabled(), true);
-  await held(null, async w => { w.storage('kin-session-ended'); w.held[0].release(); }, TEXT.ended);
-  await held(null, async w => { w.broadcast({ type: 'session-ended' }); w.held[0].release(); }, TEXT.ended);
+  await held(null, async w => { w.page.end(); w.held[0].release(); }, TEXT.ended);
+  await held(null, async w => { w.page.end(); w.held[0].release(); }, TEXT.ended);
   // A->B->A inside the mount: an event while B is shown asks nothing; the stack reloaded under A again is not the one it saw
   // (the source is left where the held event saw it, so only the target's reload stops it).
   await held(null, async (w, sync) => {
@@ -695,35 +678,7 @@ test('A->B->A across mode exits: the first mount\'s late answers touch nothing o
   }
 });
 
-// Astra S5-U2c-R-001 F01. What ends the document's login (kinViewerSession) as the viewer's other parts do it: the Measurements and
-// layout panels' sessionEnded() on their 401 (config/ohif.js kinCreateViewerHistory and kinCreateViewerLayout:
-// refuse('unauthorized'), fix2 F02), a write module's 401 (writeModule.refuse('unauthorized')), a refuse() that names no reason
-// (fail closed), another panel's /me answer of another account (note() after the document confirmed the first one), the
-// document's own /me read answering 401 (decide()), and the logout broadcast. pagehide ends the mount itself.
-const ENDS = {
-  "a Measurements or layout panel's 401 (refuse('unauthorized'))": w => { w.kin.kinViewerSession.refuse('unauthorized'); },
-  "a write module's 401 (writeModule.refuse('unauthorized'))": w => { w.kin.kinViewerSession.writeModule.refuse('unauthorized'); },
-  'a refuse() that names no reason': w => { w.kin.kinViewerSession.refuse(); },
-  'another account answering another panel (note())': w => { w.kin.kinViewerSession.note(CLINICIAN); w.kin.kinViewerSession.note(OTHER_CLINICIAN); },
-  "the document's own /me read answering 401 (decide())": w => w.decide(401),
-  'the storage logout': w => { w.storage('kin-session-ended'); },
-  'the BroadcastChannel logout': w => { w.broadcast({ type: 'session-ended' }); },
-};
-// A /me refusal of this account, whichever part of the viewer read it: the same answer this extension's own /me calls denied. The
-// panels' and the write modules' /me 403 name it 'forbidden' (fix2 F02) as the document's own read does.
-const REFUSALS = {
-  "the document's own /me read answering 403 (decide())": w => w.decide(403),
-  "another panel's /me answer that is no institution member's (note())": w => {
-    w.kin.kinViewerSession.note({ kind: 'anonymous', sub: 'SYN-CLIN', institution: INST }); },
-  "a Measurements or layout panel's /me 403 (refuse('forbidden'))": w => { w.kin.kinViewerSession.refuse('forbidden'); },
-  "a write module's /me 403 (writeModule.refuse('forbidden'))": w => { w.kin.kinViewerSession.writeModule.refuse('forbidden'); },
-};
-// fix2 F01: what can still end the login after a refusal of this account (the document's own /me read asks nothing once it has
-// stopped, so its 401 is not one of them).
-const LATER_ENDS = Object.fromEntries(Object.entries(ENDS).filter(([label]) => !label.includes('(decide())')));
-// Where the mount is waiting when the document's verdict arrives: an event's image preload (Astra's path, config/ohif.js the
-// native fire right after it), an event's /me already on the wire (it answers the first account), or the access check's second
-// list page already on the wire with an event waiting for that check.
+// Hold each asynchronous producer at the boundary where an end or a later mount can overtake it.
 const STAGES = {
   'an event waiting for its image': async () => {
     const w = world();
@@ -759,759 +714,181 @@ const STAGES = {
   },
 };
 
-test('a document whose login already ended starts ended; one that refused this account asks nothing until Recheck Access', async () => {
-  for (const [label, end] of Object.entries(ENDS)) {
-    const w = world({ mount: false });
-    await end(w);
-    const asked = w.log.length;
-    w.enter();
-    await flush();
-    assert.equal(w.log.length, asked, `${label}: the entry asks nothing`);
-    assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.ended, recheck: false }, label);
-    await w.scroll(w.sync(), 'vp-a', 4);
-    assert.deepEqual([w.log.length, w.moves], [asked, []], label);
-    finish(w);
-  }
-  for (const [label, refuse] of Object.entries(REFUSALS)) {
-    const w = world({ mount: false });
-    await refuse(w);
-    const asked = w.log.length;
-    w.enter();
-    await flush();
-    assert.equal(w.log.length, asked, `${label}: the entry asks nothing`);
-    assert.deepEqual(w.screen(), { mounted: true, visible: false, text: '', recheck: false }, `${label}: no notice before sync is used`);
-    const sync = w.sync();
-    await w.scroll(sync, 'vp-a', 4);
-    assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.denied, recheck: true }, label);
-    assert.deepEqual([w.log.length, w.moves, sync.isDisabled()], [asked, [], false], label);
-    await w.recheck();
-    assert.deepEqual(w.keys().slice(asked), ['GET me', 'GET clinician/studies', 'GET me'], `${label}: only Recheck Access asks again`);
-    assert.equal(w.screen().text, TEXT.confirmed, label);
-    await w.scroll(sync, 'vp-a', 4);
-    assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 }, label);
-    finish(w);
-  }
-});
-
-test('the document\'s end while mounted (a panel\'s 401, another account, logout, pagehide): no waiting event or check moves or asks anything', async () => {
-  for (const [stage, open] of Object.entries(STAGES)) {
-    for (const [label, end] of Object.entries({ ...ENDS, pagehide: w => { w.pagehide(); } })) {
-      const what = `${stage}, ${label}`;
-      const { w, sync, pending, release } = await open();
-      const before = w.at('vp-b'), registered = w.registrations.length;
-      await end(w);
-      const asked = w.log.length;
-      assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.ended, recheck: false }, what);
-      assert.equal(sync.isDisabled(), true, `${what}: the synchronizers of this mount are off`);
-      // The answer or the pixels arrive after the end: the account-A /me, the page, the preload.
-      release();
-      await pending;
-      await flush();
-      assert.deepEqual([w.moves, w.at('vp-b'), w.registrations.length], [[], before, registered], `${what}: no native fire`);
-      assert.equal(w.log.length, asked, `${what}: nothing more is asked (no next page, no /me)`);
-      assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.ended, recheck: false }, `${what}: no ready after the end`);
-      await w.scroll(sync, 'vp-a', 6);
-      assert.deepEqual([w.moves, w.log.length], [[], asked], `${what}: a later event`);
-      finish(w);
-    }
-  }
-});
-
-test('a /me refusal the document reads while mounted drops the waiting event and check; it is a refusal with Recheck Access, not an end', async () => {
-  for (const [stage, open] of Object.entries(STAGES)) {
-    for (const [label, refuse] of Object.entries(REFUSALS)) {
-      const what = `${stage}, ${label}`;
-      const { w, sync, pending, release } = await open();
-      const before = w.at('vp-b');
-      await refuse(w);
-      const asked = w.log.length;
-      assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.denied, recheck: true }, `${what}: said at once, sync is on`);
-      release();
-      await pending;
-      await flush();
-      assert.deepEqual([w.moves, w.at('vp-b'), w.log.length], [[], before, asked], `${what}: nothing moves, nothing more is asked`);
-      assert.equal(sync.isDisabled(), false, `${what}: a refusal is not an end; the synchronizer stays as the user set it`);
-      assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.denied, recheck: true }, what);
-      await w.scroll(sync, 'vp-a', 6);
-      assert.deepEqual([w.moves, w.log.length, w.screen().text], [[], asked, TEXT.denied], `${what}: an event meanwhile asks nothing`);
-      await w.recheck();
-      const again = w.keys().slice(asked);
-      assert.deepEqual([again[0], again.at(-1), again.slice(1, -1).every(k => k === 'GET clinician/studies'), again.length > 2],
-        ['GET me', 'GET me', true, true], `${what}: Recheck Access runs the whole check again`);
-      assert.equal(w.screen().text, TEXT.confirmed, what);
-      await w.scroll(sync, 'vp-a', 4);
-      assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 }, `${what}: sync is back`);
-      finish(w);
-    }
-  }
-  // A later logout ends the mount: the document tells it again (fix2 F01), and this mount's own receivers end it as well. Without
-  // those receivers the document's alone does.
-  const ownReceiversOff = variant("    const onStorage = e => { if (e.key === 'kin-session-ended') end(); };\n    const onMessage = e => { if (e.data?.type === 'session-ended') end(); };\n",
-    '    const onStorage = () => {};\n    const onMessage = () => {};\n');
-  for (const source of [SOURCE, ownReceiversOff]) {
-    for (const logout of [w => w.storage('kin-session-ended'), w => w.broadcast({ type: 'session-ended' })]) {
-      const w = world({ source });
-      await flush();
-      const sync = w.sync();
-      await w.decide(403);
-      logout(w);
-      assert.deepEqual([w.screen().text, sync.isDisabled()], [TEXT.ended, true]);
-      finish(w);
-    }
-  }
-});
-
-test('mode exit drops the subscription; an end after it touches no removed mount, and a re-entry cannot undo an end', async () => {
-  const w = world({ mount: false });
-  const shared = w.kin.kinViewerSession, subscribe = shared.onEnded;
-  let subscribed = 0;
-  shared.onEnded = watch => { subscribed++; const off = subscribe(watch); return () => { subscribed--; off(); }; };
-  w.enter();
-  await flush();
-  const first = w.sync();
-  assert.equal(subscribed, 1);
-  w.exit();
-  assert.equal(subscribed, 0, 'mode exit unsubscribes');
-  for (let i = 0; i < 3; i++) { w.enter(); await flush(); w.exit(); }
-  w.enter();
-  await flush();
-  assert.equal(subscribed, 1, 'one subscription per mount, never more');
-  shared.refuse();
-  assert.deepEqual([w.notices().length, w.screen().text], [1, TEXT.ended], 'only the current mount says it');
-  const asked = w.log.length;
-  w.exit();
-  w.enter();
-  await flush();
-  assert.deepEqual([w.log.length, w.screen().text], [asked, TEXT.ended], 're-entry asks nothing and stays ended');
+// U5S amendment ⑤: the page gate owns termination. These cases preserve every old
+// end/refusal/race scenario using the shipped transport and authenticated server answers.
+const authEnds = [
+  [401, 'AUTH_SESSION_ENDED'], [403, 'AUTH_SESSION_MISMATCH'], [409, 'AUTH_SESSION_MISMATCH'],
+];
+const failCheck = async w => {
+  w.answer = e => e.key === 'GET clinician/studies' ? respond(403, {}) : undefined;
+  w.exit(); w.enter(); await flush();
   await w.scroll(w.sync(), 'vp-a', 4);
-  await w.scroll(first, 'vp-a', 5);
-  assert.deepEqual([w.moves, w.log.length], [[], asked]);
-  w.exit();
-  assert.equal(subscribed, 0);
-  finish(w);
-});
-
-// ── fix2 (Astra S5-U2c-B-R-001) ──
-const DENIED = { mounted: true, visible: true, text: TEXT.denied, recheck: true };
-const ENDED = { mounted: true, visible: true, text: TEXT.ended, recheck: false };
-
-test('fix2 F01: an end after a refusal, while no mount is up, is kept; a re-entry of any account asks nothing and never syncs', async () => {
-  for (const [refusal, refuse] of Object.entries(REFUSALS)) {
-    for (const [label, end] of Object.entries(LATER_ENDS)) {
-      const what = `${refusal}, mode exit, ${label}`;
-      const w = world();
-      await flush();
-      const first = w.sync();
-      await w.scroll(first, 'vp-a', 4);
-      assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 }, `${what}: the first account synced`);
-      await refuse(w);
-      assert.deepEqual(w.screen(), DENIED, what);
-      w.exit();
-      await end(w);
-      // Astra's order: the next mode entry is of another account (and of the same one, below).
-      for (const account of [OTHER_CLINICIAN, CLINICIAN]) {
-        w.account = account;
-        const asked = w.log.length;
-        w.enter();
-        await flush();
-        assert.deepEqual([w.log.length, w.screen()], [asked, ENDED], `${what}, re-entry of ${account.sub}: starts ended`);
-        await w.scroll(w.sync(), 'vp-a', 6);
-        await w.scroll(first, 'vp-a', 6);
-        assert.deepEqual([w.log.length, w.at('vp-b'), w.moves.length, w.kin.kinViewerSession.state()], [asked, { index: 2, z: 8 }, 1, 'refused'],
-          `${what}, re-entry of ${account.sub}: nothing asked or moved`);
-        w.exit();
-      }
-      finish(w);
-    }
-  }
-});
-
-// Where a mount that Recheck Access brought back after the refusal is waiting when the end arrives.
-const RECOVERED = {
-  'an event waiting for its image': async (w, sync) => {
-    await w.recheck();
-    assert.equal(w.screen().text, TEXT.confirmed);
-    w.holdLoads = true;
-    const pending = w.scroll(sync, 'vp-a', 6);
-    await flush();
-    assert.equal(w.heldLoads.length, 1, 'the event waits for its preload');
-    return { pending, release: () => { w.holdLoads = false; w.heldLoads.splice(0).forEach(go => go()); } };
-  },
-  'an event waiting for its /me': async (w, sync) => {
-    await w.recheck();
-    assert.equal(w.screen().text, TEXT.confirmed);
-    w.hold(e => e.key === 'GET me', true);
-    const pending = w.scroll(sync, 'vp-a', 6);
-    await flush();
-    assert.equal(w.held.length, 1, 'the event waits for its /me');
-    return { pending, release: () => { w.held.splice(0).forEach(e => e.release()); } };
-  },
-  'Recheck Access waiting for its list, an event waiting for it': async (w, sync) => {
-    w.hold(e => e.key === 'GET clinician/studies', true);
-    await w.recheck();
-    assert.equal(w.held.length, 1, 'the recheck waits for its list');
-    const pending = w.scroll(sync, 'vp-a', 6);
-    await flush();
-    assert.equal(w.screen().text, TEXT.checking, 'the event waits for the recheck');
-    return { pending, release: () => { w.held.splice(0).forEach(e => e.release()); } };
-  },
+  assert.equal(w.screen().text, TEXT.denied); assert.equal(w.screen().recheck, true);
+  w.answer = null;
+};
+const endByReply = async (w, status, code) => {
+  w.answer = () => respond(status, { code });
+  await w.page.transport.request('/api/me', {context:w.page.gate.capture('document'),credentials:'same-origin',cache:'no-store'});
+  w.answer = null;
 };
 
-test('fix2 F01: an end after a refusal reaches a mount Recheck Access brought back, wherever it waits; nothing moves or asks after it', async () => {
-  for (const [refusal, refuse] of Object.entries(REFUSALS)) {
-    for (const [label, end] of Object.entries(LATER_ENDS)) {
-      for (const [stage, open] of Object.entries(RECOVERED)) {
-        const what = `${refusal}, ${stage}, then ${label}`;
-        const w = world();
-        await flush();
-        const sync = w.sync();
-        await w.scroll(sync, 'vp-a', 4);
-        await refuse(w);
-        const { pending, release } = await open(w, sync);
-        const before = w.at('vp-b'), registered = w.registrations.length;
-        await end(w);
-        const asked = w.log.length;
-        assert.deepEqual([w.screen(), sync.isDisabled()], [ENDED, true], what);
-        release();
-        await pending;
-        await flush();
-        assert.deepEqual([w.moves.length, w.at('vp-b'), w.registrations.length, w.log.length], [1, before, registered, asked],
-          `${what}: no native fire, nothing more asked`);
-        assert.deepEqual(w.screen(), ENDED, `${what}: no ready after the end`);
-        await w.scroll(sync, 'vp-a', 8);
-        w.exit();
-        w.enter();
-        await flush();
-        assert.deepEqual([w.log.length, w.screen(), w.moves.length], [asked, ENDED, 1], `${what}: a later event and a re-entry`);
-        finish(w);
-      }
-    }
+test('a document ended before mount asks nothing; a refused check recovers through Recheck Access', async () => {
+  const w=world({mount:false});w.page.end();w.enter();await flush();
+  await w.scroll(w.sync(),'vp-a',4);
+  assert.equal(w.log.length,0);assert.equal(w.screen().text,TEXT.ended);assert.deepEqual(w.moves,[]);
+  const x=world();await flush();await failCheck(x);await x.recheck();
+  await x.scroll(x.sync(),'vp-a',4);assert.deepEqual(x.at('vp-b'),{index:2,z:8});finish(x);
+});
+
+test('the page end at each held image, event or list page prevents every later move and request', async () => {
+  for(const open of Object.values(STAGES)) for(const signal of ['notice',...authEnds]) {
+    const {w,sync,pending,release}=await open();
+    if(signal==='notice')w.page.end();else await endByReply(w,...signal);
+    const asked=w.log.length;release();await pending;await flush();
+    assert.equal(w.screen().text,TEXT.ended);assert.equal(sync.isDisabled(),true);
+    assert.deepEqual([w.moves,w.registrations,w.log.length],[[],[],asked]);finish(w);
   }
 });
 
-test('fix2 F01: each /me of the check is compared with the document\'s first account, which no mount resets', async () => {
-  // Astra's order with another account and no logout broadcast: refused, mode exit, account B, re-entry, Recheck Access.
-  const w = world();
-  await flush();
-  await w.decide(403);
-  w.exit();
-  w.account = OTHER_CLINICIAN;
-  let asked = w.log.length;
-  w.enter();
-  await flush();
-  assert.equal(w.log.length, asked, 'the refused document asks nothing at entry');
-  const sync = w.sync();
-  await w.scroll(sync, 'vp-a', 4);
-  assert.deepEqual(w.screen(), DENIED);
-  await w.recheck();
-  assert.deepEqual(w.keys().slice(asked), ['GET me'], 'the other account ends the check at its first answer');
-  assert.deepEqual([w.screen(), w.moves, sync.isDisabled()], [ENDED, [], true]);
-  // The document keeps that end: a mount of the first account again asks nothing.
-  w.exit();
-  w.account = CLINICIAN;
-  asked = w.log.length;
-  w.enter();
-  await flush();
-  assert.deepEqual([w.log.length, w.screen(), w.kin.kinViewerSession.state()], [asked, ENDED, 'refused']);
-  finish(w);
-  // No refusal: this extension's first mount is compared with the account another panel confirmed before it ever mounted.
-  const first = world({ mount: false });
-  first.kin.kinViewerSession.note(CLINICIAN);
-  first.account = OTHER_CLINICIAN;
-  first.enter();
-  await flush();
-  assert.deepEqual([first.keys(), first.screen(), first.kin.kinViewerSession.state()], [['GET me'], ENDED, 'refused']);
-  finish(first);
-  // Between two mounts of this extension alone: account A confirmed, mode exit, account B at the re-entry — and the next one.
-  const again = world();
-  await flush();
-  again.exit();
-  again.account = OTHER_CLINICIAN;
-  again.enter();
-  await flush();
-  assert.deepEqual([again.keys().slice(3), again.screen(), again.kin.kinViewerSession.state()], [['GET me'], ENDED, 'refused']);
-  asked = again.log.length;
-  again.exit();
-  again.enter();
-  await flush();
-  assert.deepEqual([again.log.length, again.screen()], [asked, ENDED]);
-  finish(again);
-  // This extension's own 401 is kept by the document too: the next mount asks nothing.
-  const unauth = world({ mount: false });
-  unauth.answer = e => e.key === 'GET me' ? respond(401, {}) : undefined;
-  unauth.enter();
-  await flush();
-  unauth.answer = null;
-  unauth.exit();
-  asked = unauth.log.length;
-  unauth.enter();
-  await flush();
-  assert.deepEqual([asked, unauth.log.length, unauth.screen(), unauth.kin.kinViewerSession.state()], [1, 1, ENDED, 'refused']);
-  finish(unauth);
-});
-
-test('fix2 F01: the promotion moves only the reason — write modules end once, the verdict stays refused, an end never goes back', async () => {
-  const PROMOTIONS = {
-    unauthorized: s => s.refuse('unauthorized'),
-    'write module unauthorized': s => s.writeModule.refuse('unauthorized'),
-    refused: s => s.refuse(),
-    'account-changed': s => s.note(OTHER_CLINICIAN),
-    logout: (s, w) => w.storage('kin-session-ended'),
-  };
-  const told = { 'write module unauthorized': 'unauthorized' };
-  for (const [first, refuse] of [['forbidden', s => s.refuse('forbidden')], ['not-member', s => s.note({ kind: 'anonymous' })]]) {
-    for (const [label, promote] of Object.entries(PROMOTIONS)) {
-      const what = `${first}, then ${label}`;
-      const w = world({ mount: false });
-      const s = w.kin.kinViewerSession, reasons = [], changes = [];
-      let ends = 0;
-      assert.equal(s.note(CLINICIAN_NOW_MIXED), 'writer', what);
-      s.writeModule.onEnd(() => { ends++; });
-      s.onChange(next => { changes.push(next); });
-      s.onEnded(reason => { reasons.push(reason); });
-      refuse(s);
-      // Repeats of a refusal tell nothing more.
-      s.refuse('forbidden'); s.writeModule.refuse('forbidden'); s.note({ kind: 'anonymous' });
-      assert.deepEqual([s.state(), ends, changes, reasons], ['refused', 1, ['refused'], [first]], what);
-      promote(s, w);
-      const reason = told[label] || label;
-      assert.deepEqual([s.state(), s.writer(), s.ended(), ends, changes, reasons], ['refused', false, true, 1, ['refused'], [first, reason]], what);
-      // Nothing after it moves the reason again or back: another end, a refusal, a writer answer of the first account.
-      s.refuse('unauthorized'); s.refuse('forbidden'); s.note({ kind: 'anonymous' }); s.note(CLINICIAN_NOW_MIXED); w.broadcast({ type: 'session-ended' });
-      assert.deepEqual([s.state(), ends, changes, reasons, await s.decide()], ['refused', 1, ['refused'], [first, reason], 'refused'], what);
-      const late = [];
-      s.onEnded(r => { late.push(r); });
-      assert.deepEqual(late, [reason], `${what}: a subscriber that joins now hears the end`);
-      assert.deepEqual(w.log, [], `${what}: nothing was asked`);
-    }
-  }
-  // A real end first is never followed by a refusal's reason.
-  const w = world({ mount: false });
-  const s = w.kin.kinViewerSession, reasons = [];
-  s.onEnded(reason => { reasons.push(reason); });
-  s.refuse('unauthorized'); s.refuse('forbidden'); s.note({ kind: 'anonymous' }); w.storage('kin-session-ended');
-  assert.deepEqual(reasons, ['unauthorized']);
-});
-
-test('fix2 F02: the same /me 403 is a refusal of this account whichever part of the viewer met it first; only a real end speaks of the session', async () => {
-  // test_sync_06's overlap: the Measurements panel's periodic /me (its refuse('forbidden')) before or after this extension's own.
-  for (const panelFirst of [true, false]) {
-    const w = world();
-    await flush();
-    const sync = w.sync();
-    await w.scroll(sync, 'vp-a', 4);
-    w.answer = e => e.key === 'GET me' ? respond(403, { message: 'SYN refused' }) : undefined;
-    if (panelFirst) w.kin.kinViewerSession.refuse('forbidden');
-    const asked = w.log.length;
-    await w.scroll(sync, 'vp-a', 6);
-    if (!panelFirst) {
-      assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.applyDenied, recheck: false }, 'its own /me first: that event fails');
-      w.kin.kinViewerSession.refuse('forbidden');
-    }
-    assert.deepEqual([w.screen(), sync.isDisabled(), w.log.length - asked], [DENIED, false, panelFirst ? 0 : 1], `panel first: ${panelFirst}`);
-    await w.scroll(sync, 'vp-a', 8);
-    assert.deepEqual([w.screen(), w.log.length - asked, w.moves.length], [DENIED, panelFirst ? 0 : 1, 1], `panel first: ${panelFirst}: asks nothing`);
-    w.answer = null;
-    await w.recheck();
-    assert.equal(w.screen().text, TEXT.confirmed);
-    await w.scroll(sync, 'vp-a', 8);
-    assert.deepEqual(w.at('vp-b'), { index: 4, z: 16 }, `panel first: ${panelFirst}: back after Recheck Access`);
-    finish(w);
-  }
-  // This extension's own answer that is no member's refuses too — in the check's second /me and inside an event.
-  const second = world({ mount: false });
-  second.hold(e => e.key === 'GET me' && second.log.filter(x => x.key === 'GET me').length === 2);
-  second.enter();
-  await flush();
-  second.held[0].release(respond(200, { kind: 'anonymous', sub: 'SYN-CLIN', institution: INST }));
-  await flush();
-  await second.scroll(second.sync(), 'vp-a', 4);
-  assert.deepEqual([second.screen(), second.moves, second.kin.kinViewerSession.ended()], [DENIED, [], false]);
-  finish(second);
-  const inEvent = world();
-  await flush();
-  const s = inEvent.sync();
-  inEvent.answer = e => e.key === 'GET me' ? respond(200, { kind: 'anonymous', sub: 'SYN-CLIN', institution: INST }) : undefined;
-  await inEvent.scroll(s, 'vp-a', 4);
-  assert.deepEqual([inEvent.screen().text, s.isDisabled(), inEvent.moves], [TEXT.applyDenied, false, []]);
-  inEvent.answer = null;
-  await inEvent.scroll(s, 'vp-a', 4);
-  assert.deepEqual(inEvent.at('vp-b'), { index: 2, z: 8 }, 'the next event asks again and applies');
-  finish(inEvent);
-});
-
-test('fix2 F03: a dropped event\'s late failure changes neither the notice nor Recheck Access; its 401 still ends the login', async () => {
-  const LATE = { 403: () => respond(403, { message: 'SYN refused' }), network: () => NETWORK, 500: () => respond(500, {}),
-    'not JSON': () => respond(200, null, true) };
-  for (const [refusal, refuse] of Object.entries(REFUSALS)) {
-    for (const [late, answer] of Object.entries(LATE)) {
-      const what = `${refusal}, the held /me failing (${late})`;
-      const w = world();
-      await flush();
-      const sync = w.sync();
-      w.hold(e => e.key === 'GET me', true);
-      const pending = w.scroll(sync, 'vp-a', 4);
-      await flush();
-      assert.equal(w.held.length, 1, what);
-      await refuse(w);
-      assert.deepEqual(w.screen(), DENIED, what);
-      w.held.splice(0).forEach(e => e.release(answer()));
-      await pending;
-      await flush();
-      assert.deepEqual([w.screen(), w.moves], [DENIED, []], what);
-      await w.recheck();
-      await w.scroll(sync, 'vp-a', 4);
-      assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 }, `${what}: Recheck Access still works`);
-      finish(w);
-    }
-  }
-  // A new check confirmed, Sync OFF (the group off, or destroyed), or a newer event applied: the old preload failing says nothing.
-  const cases = {
-    'a refusal and a confirmed Recheck Access since': async (w) => { await w.decide(403); w.holdLoads = false; await w.recheck(); return { mounted: true, visible: true, text: TEXT.confirmed, recheck: false }; },
-    'the group turned off': async (w, sync) => { sync.setEnabled(false); return w.screen(); },
-    'the synchronizer destroyed': async (w, sync) => { sync.destroy(); return { mounted: true, visible: true, text: TEXT.off, recheck: false }; },
-    'a newer event applied': async (w, sync) => { w.holdLoads = false; await w.scroll(sync, 'vp-a', 6); return { mounted: true, visible: true, text: TEXT.synced, recheck: false }; },
-  };
-  for (const [label, act] of Object.entries(cases)) {
-    const w = world();
-    await flush();
-    const sync = w.sync();
-    w.holdLoads = true;
-    const pending = w.scroll(sync, 'vp-a', 4);
-    await flush();
-    assert.equal(w.heldLoads.length, 1, label);
-    const expected = await act(w, sync);
-    const moves = w.moves.length;
-    w.heldLoads.splice(0, 1).forEach(fail => fail(true));
-    await pending;
-    await flush();
-    assert.deepEqual([w.screen(), w.moves.length], [expected, moves], label);
-    finish(w);
-  }
-  // The dropped event's /me answering 401 is still the end of the login, kept by the document (the next mount asks nothing).
-  const w = world();
-  await flush();
-  const sync = w.sync();
-  w.hold(e => e.key === 'GET me', true);
-  const pending = w.scroll(sync, 'vp-a', 4);
-  await flush();
-  await w.decide(403);
-  w.held.splice(0).forEach(e => e.release(respond(401, {})));
-  await pending;
-  await flush();
-  assert.deepEqual([w.screen(), sync.isDisabled()], [ENDED, true]);
-  const asked = w.log.length;
-  w.exit();
-  w.enter();
-  await flush();
-  assert.deepEqual([w.log.length, w.screen()], [asked, ENDED]);
-  finish(w);
-});
-
-test('fix2 controls: without the promotion a logout after a refusal lets Recheck Access sync again; without the account comparison the other account is confirmed; without the event check a late 403 hides Recheck Access', async () => {
-  // Astra S5-U2c-B-R-001 F01's reproduction on the file without the promotion line.
-  const noPromotion = variant("    if (next === 'refused' && (ended || ending) && !loginEnd(why) && loginEnd(reason)) { why = reason; if (ended) tell(); }\n", '');
-  const w = world({ source: noPromotion });
-  await flush();
-  await w.decide(403);
-  w.exit();
-  w.storage('kin-session-ended');
-  w.enter();
-  await flush();
-  const sync = w.sync();
-  await w.scroll(sync, 'vp-a', 4);
-  assert.deepEqual(w.screen(), DENIED, 'the re-entry reads the logout as the refusal');
-  await w.recheck();
-  await w.scroll(sync, 'vp-a', 4);
-  assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 }, 'the target moved after the logout');
-  // The check comparing its answers with no account (as a new mount did): Recheck Access confirms another account. Since fix3 the
-  // comparison is made where each /me answer arrives (whoAmI), for the check and the events alike.
-  const noComparison = variant('      return { me, same: ownerOf(me) ? kinViewerSession.sameAccount(me) : null };\n',
-    '      return { me, same: true };\n');
-  const x = world({ source: noComparison });
-  await flush();
-  await x.decide(403);
-  x.exit();
-  x.account = OTHER_CLINICIAN;
-  x.enter();
-  await flush();
-  await x.scroll(x.sync(), 'vp-a', 4);
-  await x.recheck();
-  assert.equal(x.screen().text, TEXT.confirmed, 'the other account passed the check');
-  // F03's reproduction: a late 403 of the dropped event replaces the refusal and hides Recheck Access.
-  const unchecked = variant("            if (!usable(mine) || sync.isDisabled() || ticket !== serial || !current(sourceInfo, source)) return;\n            say(",
-    '            if (live()) say(');
-  const y = world({ source: unchecked });
-  await flush();
-  const s = y.sync();
-  y.hold(e => e.key === 'GET me', true);
-  const pending = y.scroll(s, 'vp-a', 4);
-  await flush();
-  await y.decide(403);
-  y.held.splice(0).forEach(e => e.release(respond(403, {})));
-  await pending;
-  await flush();
-  assert.deepEqual(y.screen(), { mounted: true, visible: true, text: TEXT.applyDenied, recheck: false });
-});
-
-// ── fix3 (Astra S5-U2c-C-R-001) ──
-const CONFIRMED = { mounted: true, visible: true, text: TEXT.confirmed, recheck: false };
-// What a late answer ends the login with: a 401 (any request of the check or an event) and an answer of another account than the
-// document's first one (a /me only).
-const LATE_ENDS = {
-  401: { answer: () => respond(401, {}), reason: 'unauthorized', me: false },
-  'another account': { answer: () => respond(200, OTHER_CLINICIAN), reason: 'account-changed', me: true },
-};
-// Where the check of a mount entered after the first account was confirmed waits: each request is already on the wire (a mode exit
-// cannot abort it) and is released after the refusal of this account has dropped that check's round.
-const HELD_CHECK = {
-  'its first /me': { me: true, hold: () => e => e.key === 'GET me' },
-  'its first list page': { me: false, hold: () => e => e.key === 'GET clinician/studies' },
-  'a later list page': { me: false, rows: MANY, hold: () => e => e.key === 'GET clinician/studies' && e.query.includes('after=') },
-  'its second /me': { me: true, hold: w => { const asked = () => w.log.filter(x => x.key === 'GET me').length, base = asked();
-    return e => e.key === 'GET me' && asked() === base + 2; } },
-};
-// When the late answer arrives: at once, after Recheck Access has confirmed the account again, or after a mode exit and re-entry
-// (the re-entered mount of the refused document asks nothing). Each returns the synchronizer of the mount then up.
-const RELEASED = {
-  'at once': async (w, sync) => sync,
-  'after Recheck Access confirmed': async (w, sync) => { await w.recheck(); assert.equal(w.screen().text, TEXT.confirmed); return sync; },
-  'after mode exit and re-entry': async w => { w.exit(); w.enter(); await flush(); return w.sync(); },
-};
-
-test('fix3 F01: a 401 or another account answering a check whose round a refusal dropped is the document\'s end, whenever it arrives', async () => {
-  for (const [stage, held] of Object.entries(HELD_CHECK)) {
-    for (const [late, end] of Object.entries(LATE_ENDS)) {
-      if (end.me && !held.me) continue;
-      for (const [refusal, refuse] of Object.entries(REFUSALS)) {
-        for (const [when, release] of Object.entries(RELEASED)) {
-          const what = `${stage} answering ${late} ${when}, after ${refusal}`;
-          const w = world({ rows: held.rows || ROWS });
-          const s = w.kin.kinViewerSession, reasons = [];
-          let ends = 0;
-          s.onEnded(reason => { reasons.push(reason); });
-          s.writeModule.onEnd(() => { ends++; });
-          await flush();
-          assert.equal(w.log.filter(e => e.key === 'GET me').length, 2, `${what}: the first account confirmed`);
-          w.exit();
-          w.hold(held.hold(w), true);
-          w.enter();
-          await flush();
-          assert.equal(w.held.length, 1, `${what}: the re-entry's check waits`);
-          const waiting = w.held[0], current = w.sync();
-          await refuse(w);
-          assert.deepEqual([w.screen(), reasons.length, ends, s.state()], [DENIED, 1, 1, 'refused'], `${what}: refused, write modules ended once`);
-          const sync = await release(w, current);
-          const asked = w.log.length;
-          waiting.release(end.answer());
-          await flush();
-          assert.deepEqual(reasons, [reasons[0], end.reason], `${what}: promoted to the end of the login`);
-          assert.deepEqual([w.screen(), sync.isDisabled(), w.log.length], [ENDED, true, asked], `${what}: this mount ends, nothing more asked`);
-          await w.scroll(sync, 'vp-a', 6);
-          for (const account of [CLINICIAN, OTHER_CLINICIAN]) {
-            w.account = account;
-            w.exit();
-            w.enter();
-            await flush();
-            await w.scroll(w.sync(), 'vp-a', 6);
-            assert.deepEqual([w.screen(), w.log.length], [ENDED, asked], `${what}: re-entry of ${account.sub} asks nothing`);
-          }
-          assert.deepEqual([w.moves, w.registrations, ends, s.writer(), await s.decide(), w.log.length, reasons.length],
-            [[], [], 1, false, 'refused', asked, 2], `${what}: no ready, no native fire, write modules ended once, authoring closed`);
-          finish(w);
-        }
-      }
-    }
+test('another request plain 401 or 403 does not drop a valid held sync event or its access check', async () => {
+  for(const open of Object.values(STAGES)) for(const status of [401,403,409,428,503]) {
+    const {w,pending,release}=await open();
+    await endByReply(w,status,'ORDINARY_FAILURE');
+    assert.equal(w.page.gate.state(),'active');release();await pending;await flush();
+    assert.deepEqual(w.at('vp-b'),{index:2,z:8});finish(w);
   }
 });
 
-test('fix3 F01: an event\'s /me on the wire across mode exit: its 401 or other account ends the document; the mount that left says nothing', async () => {
-  for (const [refusal, refuse] of Object.entries({ 'no refusal': null, ...REFUSALS })) {
-    for (const [late, end] of Object.entries(LATE_ENDS)) {
-      const what = `${refusal}, mode exit, the event's /me answering ${late}`;
-      const w = world();
-      const s = w.kin.kinViewerSession, reasons = [], later = [];
-      let ends = 0;
-      s.onEnded(reason => { reasons.push(reason); });
-      s.writeModule.onEnd(() => { ends++; });
-      await flush();
-      const sync = w.sync();
-      await w.scroll(sync, 'vp-a', 4);
-      assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 }, `${what}: the first account synced`);
-      w.hold(e => e.key === 'GET me', true);
-      const pending = w.scroll(sync, 'vp-a', 6);
-      await flush();
-      assert.equal(w.held.length, 1, `${what}: the event waits for its /me`);
-      if (refuse) {
-        await refuse(w);
-        assert.deepEqual([w.screen(), ends], [DENIED, 1], what);
-      }
-      const before = [...reasons];
-      w.exit();
-      assert.deepEqual(w.notices(), [], `${what}: mode exit removed the notice`);
-      const asked = w.log.length;
-      w.held.splice(0).forEach(e => e.release(end.answer()));
-      await pending;
-      await flush();
-      s.onEnded(reason => { later.push(reason); });
-      assert.deepEqual([reasons, later, ends, s.state()], [[...before, end.reason], [end.reason], 1, 'refused'],
-        `${what}: the current and a later subscriber hear the end; write modules ended once`);
-      assert.deepEqual([w.notices(), w.log.length, w.moves.length, w.registrations.length], [[], asked, 1, 1],
-        `${what}: the mount that left shows, asks and moves nothing`);
-      for (const account of [CLINICIAN, OTHER_CLINICIAN]) {
-        w.account = account;
-        w.enter();
-        await flush();
-        await w.scroll(w.sync(), 'vp-a', 8);
-        await w.scroll(sync, 'vp-a', 8);
-        assert.deepEqual([w.screen(), w.log.length, w.at('vp-b'), w.moves.length], [ENDED, asked, { index: 2, z: 8 }, 1],
-          `${what}: re-entry of ${account.sub} starts ended`);
-        w.exit();
-      }
-      finish(w);
-    }
+test('mode exit removes the old notice; an end during exit stays ended on re-entry', async () => {
+  const w=world();await flush();w.exit();assert.deepEqual(w.notices(),[]);
+  w.page.end();assert.deepEqual(w.notices(),[]);const asked=w.log.length;
+  w.enter();await flush();await w.scroll(w.sync(),'vp-a',4);
+  assert.equal(w.log.length,asked);assert.equal(w.screen().text,TEXT.ended);assert.deepEqual(w.moves,[]);finish(w);
+});
+
+test('an end after access refusal with no mount cannot be reversed by re-entry of either account', async () => {
+  const w=world();await flush();await failCheck(w);w.exit();w.page.end();const asked=w.log.length;
+  for(const account of [CLINICIAN,OTHER_CLINICIAN]){
+    w.account=account;w.enter();await flush();await w.scroll(w.sync(),'vp-a',4);
+    assert.equal(w.screen().text,TEXT.ended);assert.equal(w.log.length,asked);w.exit();
+  }
+  assert.deepEqual(w.moves,[]);finish(w);
+});
+
+test('Recheck Access cannot revive a document ended while its replacement check waits', async () => {
+  for(const match of [e=>e.key==='GET me',e=>e.key==='GET clinician/studies']){
+    const w=world();await flush();await failCheck(w);w.hold(match,true);await w.recheck();
+    assert.equal(w.held.length,1);w.page.end();const asked=w.log.length;
+    w.held[0].release();await flush();await w.scroll(w.sync(),'vp-a',4);
+    assert.equal(w.log.length,asked);assert.equal(w.screen().text,TEXT.ended);assert.deepEqual(w.moves,[]);finish(w);
   }
 });
 
-test('fix3: the round and mount checks keep only the use of a late answer — its account stays the document\'s; its failure says nothing', async () => {
-  // No account confirmed yet: the first mount's first /me is on the wire when a panel's /me 403 refuses this account. That answer
-  // confirms nothing (no list, no ready; the refusal and Recheck Access stay), but its account is the document's first: Recheck
-  // Access answered by another account ends the login, and by the same account brings sync back.
-  for (const [label, account, expected] of [['another account', OTHER_CLINICIAN, ENDED], ['the same account', CLINICIAN, CONFIRMED]]) {
-    const w = world({ mount: false });
-    const s = w.kin.kinViewerSession, reasons = [];
-    s.onEnded(reason => { reasons.push(reason); });
-    w.hold(e => e.key === 'GET me', true);
-    w.enter();
-    await flush();
-    const sync = w.sync();
-    s.refuse('forbidden');
-    w.held.splice(0).forEach(e => e.release());
-    await flush();
-    await w.scroll(sync, 'vp-a', 4);
-    assert.deepEqual([w.screen(), w.keys(), w.moves, reasons], [DENIED, ['GET me'], [], ['forbidden']], `${label}: the dropped round applied nothing`);
-    w.account = account;
-    await w.recheck();
-    assert.deepEqual([w.screen(), reasons], [expected, account === CLINICIAN ? ['forbidden'] : ['forbidden', 'account-changed']], label);
-    await w.scroll(sync, 'vp-a', 4);
-    assert.deepEqual(w.moves.length, account === CLINICIAN ? 1 : 0, label);
-    finish(w);
-  }
-  // A late 403, network failure, 500 or body that is not JSON of that dropped round changes neither the refusal nor Recheck Access.
-  const LATE = { 403: () => respond(403, { message: 'SYN refused' }), network: () => NETWORK, 500: () => respond(500, {}),
-    'not JSON': () => respond(200, null, true) };
-  for (const [stage, match] of [['its first /me', e => e.key === 'GET me'], ['its list page', e => e.key === 'GET clinician/studies']]) {
-    for (const [late, answer] of Object.entries(LATE)) {
-      const what = `${stage} failing late (${late})`;
-      const w = world({ mount: false });
-      w.hold(match, true);
-      w.enter();
-      await flush();
-      const sync = w.sync();
-      w.kin.kinViewerSession.refuse('forbidden');
-      w.held.splice(0).forEach(e => e.release(answer()));
-      await flush();
-      assert.deepEqual([w.screen(), w.moves, w.kin.kinViewerSession.ended()], [DENIED, [], true], what);
-      await w.recheck();
-      await w.scroll(sync, 'vp-a', 4);
-      assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 }, `${what}: Recheck Access still works`);
-      finish(w);
-    }
+test('each check compares the document first account after mode exit and never applies another account data', async () => {
+  for(const number of [1,2]){
+    const w=world();await flush();w.exit();const base=w.log.filter(e=>e.key==='GET me').length;
+    w.hold(e=>e.key==='GET me'&&w.log.filter(e=>e.key==='GET me').length===base+number,true);
+    w.enter();await flush();w.held[0].release(respond(200,OTHER_CLINICIAN));await flush();
+    await w.scroll(w.sync(),'vp-a',4);assert.deepEqual(w.moves,[]);
+    assert.equal(w.page.gate.state(),'active','invalid incoming account data does not rebind or terminate the session');
+    assert.equal(w.kin.kinViewerSession.sameAccount(CLINICIAN),true);finish(w);
   }
 });
 
-test('fix3 controls: without the 401 kept where it arrives, or with the account compared after the round check, Astra\'s order syncs again', async () => {
-  // Astra S5-U2c-C-R-001 F01's reproduction: the first account confirmed, a re-entry's check waiting, a panel's /me 403, the held
-  // answer released late, Recheck Access, a scroll: the reason stays 'forbidden' and the target moves from z=0 to z=12.
-  const unkept = variant("        if (r.status === 401) { kinViewerSession.refuse('unauthorized'); throw refusal('ended', 401); }\n",
-    "        if (r.status === 401) throw refusal('ended', 401);\n");
-  const after = variant("        if (!again.same) throw refusal('ended');\n", "        if (!kinViewerSession.sameAccount(again.me)) throw refusal('ended');\n",
-    variant("        if (!same) throw refusal('ended');\n", "        if (!kinViewerSession.sameAccount(me)) throw refusal('ended');\n",
-      variant('      return { me, same: ownerOf(me) ? kinViewerSession.sameAccount(me) : null };\n', '      return { me, same: true };\n')));
-  for (const [label, source, stage, answer] of [
-    ['the 401 not kept, first /me', unkept, 'its first /me', () => respond(401, {})],
-    ['the 401 not kept, first list page', unkept, 'its first list page', () => respond(401, {})],
-    ['the account compared after the round check, second /me', after, 'its second /me', () => respond(200, OTHER_CLINICIAN)],
-  ]) {
-    const w = world({ source });
-    const reasons = [];
-    w.kin.kinViewerSession.onEnded(reason => { reasons.push(reason); });
-    await flush();
-    w.exit();
-    w.hold(HELD_CHECK[stage].hold(w), true);
-    w.enter();
-    await flush();
-    const sync = w.sync();
-    w.kin.kinViewerSession.refuse('forbidden');
-    w.held.splice(0).forEach(e => e.release(answer()));
-    await flush();
-    await w.recheck();
-    await w.scroll(sync, 'vp-a', 6);
-    assert.deepEqual([reasons, w.at('vp-b')], [['forbidden'], { index: 3, z: 12 }], label);
+test('a true end disposes write modules once and late role verdicts cannot reopen them', async () => {
+  const w=world();await flush();const s=w.kin.kinViewerSession;let ends=0;s.writeModule.onEnd(()=>ends++);
+  w.page.end();w.page.end();s.note(RADIOLOGIST);s.writeModule.answer(RADIOLOGIST);
+  assert.equal(ends,1);assert.equal(s.writer(),false);const asked=w.log.length;
+  await s.decide();assert.equal(w.log.length,asked);finish(w);
+});
+
+test('ordinary me refusals from other panels never close or erase this document', async () => {
+  for(const status of [401,403,428]){
+    const w=world();await flush();await w.decide(status);
+    w.kin.kinViewerSession.refuse('forbidden');w.kin.kinViewerSession.writeModule.refuse('unauthorized');
+    assert.equal(w.page.gate.state(),'active');assert.equal(w.kin.kinViewerSession.ended(),false);
+    await w.scroll(w.sync(),'vp-a',4);assert.deepEqual(w.at('vp-b'),{index:2,z:8});finish(w);
   }
 });
 
-test('controls: without the subscription a panel\'s 401 lets the held image move the target; every end as a logout shows a refusal as one', async () => {
-  // Astra S5-U2c-R-001 F01's path in the file as fix1 found it: the end is seen only at mount.
-  const unsubscribed = variant('const unwatchEnd = kinViewerSession.onEnded(documentEnded);',
-    'const unwatchEnd = () => {}; if (kinViewerSession.ended()) end();');
-  const w = world({ source: unsubscribed });
-  await flush();
-  const sync = w.sync();
-  w.holdLoads = true;
-  const pending = w.scroll(sync, 'vp-a', 4);
-  await flush();
-  w.kin.kinViewerSession.refuse();
-  w.heldLoads[0]();
-  await pending;
-  assert.deepEqual(w.at('vp-b'), { index: 2, z: 8 }, 'the late image moved the target after the document ended');
-  // Without the reason: a refusal of this account reads as a logout and offers nothing to recover with.
-  const oneWay = variant("if (reason !== 'forbidden' && reason !== 'not-member') { end(); return; }", '{ end(); return; }');
-  const x = world({ source: oneWay });
-  await flush();
-  await x.scroll(x.sync(), 'vp-a', 4);
-  await x.decide(403);
-  assert.deepEqual(x.screen(), { mounted: true, visible: true, text: TEXT.ended, recheck: false });
-});
-
-test('control: the same file sending clinicians to GET studies is refused by the pinned allowlist, and says so without a logout', async () => {
-  const legacyForAll = variant('const role = kinViewerClinicianOnly(me), found = role ? await clinicianKeys(mine) : await legacyKeys();',
-    'const role = kinViewerClinicianOnly(me), found = await legacyKeys();');
-  const w = world({ source: legacyForAll });
-  await flush();
-  assert.deepEqual(w.keys(), ['GET me', 'GET studies']);
-  await w.scroll(w.sync(), 'vp-a', 4);
-  assert.deepEqual(w.screen(), { mounted: true, visible: true, text: TEXT.denied, recheck: true });
-  assert.deepEqual(w.moves, []);
-  assert.throws(() => finish(w), /clinician-only request inside the allowlist/);
-});
-
-test('notice and Recheck Access: status role, English control, Korean explanations, the pointer passes except on the button', async () => {
-  const w = world();
-  await flush();
-  const [notice] = w.notices();
-  const [message, button] = notice.children;
-  assert.equal(notice.getAttribute('role'), 'status');
-  assert.match(notice.style.cssText, /pointer-events:none/);
-  assert.equal(message.tagName, 'SPAN');
-  assert.deepEqual([button.tagName, button.type, button.id, button.textContent], ['BUTTON', 'button', 'kin-ct-sync-recheck', 'Recheck Access']);
-  assert.match(button.title, /[가-힣]/);
-  assert.match(button.style.cssText, /pointer-events:auto/);
-  assert.match(button.style.cssText, /min-height:24px/);
-  assert.match(button.style.cssText, /font:13px/);
-  for (const [name, text] of Object.entries(TEXT)) {
-    assert.match(text, /[가-힣]/, name);
-    assert.doesNotMatch(text, AVOIDED, name);
-    assert.ok(SOURCE.includes(`'${text}'`), `${name} is the shipped wording`);
+test('an old event late ordinary failure cannot replace the notice of a new mount', async () => {
+  for(const status of [401,403,500]){
+    const {w,pending}=await STAGES['an event waiting for its /me']();
+    w.exit();w.enter();await flush();const before=w.screen();
+    w.held[0].release(respond(status,{}));await pending;await flush();
+    assert.deepEqual(w.screen(),before);assert.deepEqual(w.moves,[]);assert.equal(w.page.gate.state(),'active');finish(w);
   }
-  assert.equal(new Set(Object.values(TEXT)).size, Object.keys(TEXT).length, 'every state has its own words');
-  assert.equal([TEXT.checking, TEXT.confirmed, TEXT.failed, TEXT.denied, TEXT.changed, TEXT.applyDenied].some(t => t.includes('세션')), false,
-    'only the real end speaks of the session');
-  assert.ok(TEXT.ended.includes('세션이 변경'), 'tests/e2e/test_ct_sync.py test_sync_04 (and 06a/06b, never) still find their words');
-  assert.ok(TEXT.denied.includes('이 계정으로 검사 접근 정보를 확인할 수 없어'), 'tests/e2e/test_ct_sync.py test_sync_06a/06b still find their words');
-  assert.ok(TEXT.confirmed.includes('검사 접근 정보를 확인했습니다'), 'tests/e2e/test_ct_sync.py test_sync_06a/06b still find their words');
-  assert.ok(TEXT.applyDenied.includes('적용하지 못했습니다'), 'tests/e2e/test_ct_sync.py test_sync_06b still finds its words');
-  w.exit();
-  assert.deepEqual(w.notices(), [], 'mode exit removes the notice');
-  finish(w);
+});
+
+// Replaces the source-line promotion/comparison/event-check mutants. The assertions
+// concern retained access, unchanged target and recoverability, not an internal verdict.
+test('refusal recovery requires the same account and late errors leave Recheck Access usable', async () => {
+  const w=world();await flush();await failCheck(w);w.account=OTHER_CLINICIAN;await w.recheck();
+  await w.scroll(w.sync(),'vp-a',4);assert.deepEqual(w.moves,[]);
+  const x=world();await flush();await failCheck(x);await x.recheck();
+  await x.scroll(x.sync(),'vp-a',4);assert.deepEqual(x.at('vp-b'),{index:2,z:8});finish(w);finish(x);
+  const {w:y,pending}=await STAGES['an event waiting for its /me']();
+  await failCheck(y);const before=y.screen();y.held[0].release(respond(403,{}));await pending;await flush();
+  assert.deepEqual(y.screen(),before);assert.equal(y.screen().recheck,true);assert.deepEqual(y.moves,[]);
+  await y.recheck();await y.scroll(y.sync(),'vp-a',4);assert.deepEqual(y.at('vp-b'),{index:2,z:8});finish(y);
+});
+
+test('late authenticated end from every check request closes the current mount even after mode re-entry', async () => {
+  for(const phase of ['first-me','list','second-me','later-page']) for(const [status,code] of authEnds){
+    const w=world({mount:false,rows:phase==='later-page'?MANY:ROWS});
+    w.hold(e=>phase==='first-me'?e.key==='GET me':phase==='second-me'?e.key==='GET me'&&w.log.filter(x=>x.key==='GET me').length===2:
+      e.key==='GET clinician/studies'&&(phase!=='later-page'||e.query.includes('after=')),true);
+    w.enter();await flush();assert.equal(w.held.length,1);w.exit();w.enter();await flush();
+    w.held[0].release(respond(status,{code}));await flush();const asked=w.log.length;
+    await w.scroll(w.sync(),'vp-a',6);assert.equal(w.screen().text,TEXT.ended);assert.equal(w.log.length,asked);
+    assert.deepEqual(w.moves,[]);finish(w);
+  }
+});
+
+test('event authenticated end across mode exit closes later mounts without touching the removed mount', async () => {
+  for(const [status,code] of authEnds){
+    const {w,pending}=await STAGES['an event waiting for its /me']();w.exit();
+    w.held[0].release(respond(status,{code}));await pending;await flush();assert.deepEqual(w.notices(),[]);
+    const asked=w.log.length;w.enter();await flush();await w.scroll(w.sync(),'vp-a',8);
+    assert.deepEqual(w.moves,[]);assert.equal(w.log.length,asked);assert.equal(w.screen().text,TEXT.ended);finish(w);
+  }
+});
+
+test('a late first account answer cannot make a later mount accept another account', async () => {
+  const w=world({mount:false});w.hold(e=>e.key==='GET me',true);w.enter();await flush();w.exit();
+  w.held[0].release();await flush();w.account=OTHER_CLINICIAN;w.enter();await flush();
+  await w.scroll(w.sync(),'vp-a',4);assert.deepEqual(w.moves,[]);assert.equal(w.kin.kinViewerSession.sameAccount(CLINICIAN),true);finish(w);
+});
+
+// Replaces source-order pins: the actual transport must classify an answer even when
+// the request's UI has left. Ordinary failures remain local at the same held boundary.
+test('late ordinary 401 stays local while authenticated mismatch ends every later mount', async () => {
+  for(const [status,code,ended] of [[401,null,false],[403,'AUTH_SESSION_MISMATCH',true]]){
+    const {w,pending}=await STAGES['an event waiting for its /me']();w.exit();w.enter();await flush();
+    w.held[0].release(respond(status,{code}));await pending;await flush();
+    await w.scroll(w.sync(),'vp-a',4);assert.equal(w.moves.length,ended?0:1);
+    assert.equal(w.page.gate.state(),ended?'ending':'active');finish(w);
+  }
+});
+
+// Replaces subscription and reason-string pins with the held pixel-load behaviour.
+test('end after a preload was issued prevents its native sync and every later request', async () => {
+  const {w,sync,pending,release}=await STAGES['an event waiting for its image']();w.page.end();
+  const asked=w.log.length;release();await pending;await w.scroll(sync,'vp-a',8);
+  assert.deepEqual([w.moves,w.registrations,w.log.length],[[],[],asked]);finish(w);
+});
+
+test('a role change rechecks against the new role allowlist without ending the login', async () => {
+  const w=world();await flush();w.account=CLINICIAN_NOW_MIXED;
+  await w.scroll(w.sync(),'vp-a',4);assert.equal(w.screen().text,TEXT.changed);
+  const before=w.log.length;await w.recheck();assert.deepEqual(w.keys().slice(before),['GET me','GET studies','GET me']);
+  await w.scroll(w.sync(),'vp-a',4);assert.deepEqual(w.at('vp-b'),{index:2,z:8});assert.equal(w.page.gate.state(),'active');finish(w);
+});
+
+test('notice and Recheck Access expose a status and an English recovery control', async () => {
+  const w=world();await flush();await failCheck(w);
+  const notice=w.notices()[0],button=notice.children[1];
+  assert.equal(notice.getAttribute('role'),'status');assert.equal(button.textContent,'Recheck Access');
+  assert.match(button.getAttribute('title')||button.title,/[가-힣]/);await w.recheck();
+  assert.equal(w.screen().text,TEXT.confirmed);w.exit();assert.deepEqual(w.notices(),[]);finish(w);
 });

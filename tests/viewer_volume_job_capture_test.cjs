@@ -1,3 +1,4 @@
+const { pageDefaults, response: sessionResponse }=require('./viewer_session_fixture.cjs');
 // TEST-VOLUME-JOB: browser-side snapshot capture over the real viewer-volume-job.js.
 // The v7 layout (Hanging Protocol 1x1/1x2/2x2 plus the existing 1x3/3x1) is chosen here,
 // so the grid, the vacancy cells, the per-cell orientation and the version selection are
@@ -1311,7 +1312,7 @@ async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
   list:null,hold:null};
  server.job=server.good=()=>({status:200,body:{id:L_JOB,revision:server.row.revision,snapshotVersion:snapshot.version,snapshot:structuredClone(snapshot)}});
  const jobsPath='/api/studies/'+L_STUDY+'/viewer-jobs';
- const answer=(status,body)=>({status,ok:status>=200&&status<300,json:async()=>body});
+ const answer=sessionResponse;
  const fetch=async url=>{
   calls.push(url);
   if(server.hold)await server.hold(url);
@@ -1354,7 +1355,7 @@ async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
   addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener(){},
   kinCreateVolumeJob:()=>volumeJob,kinMprMarks:marks,KinVolumeMarks:{normalize:v=>structuredClone(v)},
   cornerstone:{metaData:{get:(type,id)=>type==='instance'&&typeof id==='string'?{StudyInstanceUID:L_STUDY,SeriesInstanceUID:L_STACK_SERIES,SOPInstanceUID:id.slice(4)}:null}}};
- sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ sandbox.window=sandbox.top=sandbox;const page=pageDefaults(sandbox,fetch);const realm=vm.createContext(sandbox);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
  const panel=sandbox.kinViewerJobs({viewportGridService:grid,cornerstoneViewportService:cs,displaySetService:ds},{scope:()=>({})});
  panel.mount();
@@ -1363,7 +1364,7 @@ async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
  assert.equal(typeof sandbox.kinViewerJobLocation?.restore,'function','the location API is exported');
  return Object.assign(w,{c,log,calls,assigned,storage,server,marks,sandbox,planes,
   location:()=>sandbox.kinViewerJobLocation,restore:req=>sandbox.kinViewerJobLocation.restore(req),
-  endSession:()=>listeners.get('storage')({key:'kin-session-ended'}),
+  endSession:page.end,
   status:()=>find(layout,e=>e.id==='kin-viewer-jobs-status').textContent,button:label=>find(layout,e=>e.tagName==='button'&&e.textContent===label),
   gets:()=>calls.filter(u=>u.endsWith('/viewer-jobs/'+L_JOB)).length,stop:()=>panel.stop()});
 }
@@ -1598,10 +1599,12 @@ test('S2-L2a the Restore Job button keeps its texts and never moves a point, pre
   assert.equal(next.searchParams.get('kinJob'),L_JOB);assert.equal(next.searchParams.get('kinFindingNonce'),null);
   assert.equal(w.storage.size,0);
   assert.equal(w.status(),'저장한 비교 검사를 함께 여는 중…');
-  // A 403 on the button path still ends the panel, as it always did.
+  // An ordinary 403 refuses this restore and preserves the panel for a later attempt.
   w.server.job=()=>({status:403,body:{message:'no'}});
   w.button('Restore Job').onclick();await lSettle();
-  assert.equal(w.status(),'세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.');
+  assert.equal(w.status(),'검사 접근 권한을 확인할 수 없습니다. 입력은 유지됩니다.');
+  w.server.job=w.server.good;w.button('Restore Job').onclick();await lSettle();
+  assert.equal(w.status(),'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.');
  }finally{w.stop();}
 });
 

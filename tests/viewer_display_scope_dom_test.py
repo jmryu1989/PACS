@@ -1,6 +1,7 @@
 # coding: utf-8
 """Isolated Chromium coverage for the CT display-scope panel and its config loader."""
 from pathlib import Path
+from viewer_session_fixture import install_viewer_session
 from urllib.parse import urlparse
 import time
 import unittest
@@ -77,6 +78,7 @@ class ViewerDisplayScopeDOMTest(unittest.TestCase):
         page = self.browser.new_page(viewport={"width": width, "height": height})
         page.route(URL, lambda route: route.fulfill(body=HARNESS, content_type="text/html; charset=utf-8"))
         page.goto(URL)
+        install_viewer_session(page)
         if module:
             page.add_script_tag(content=MODULE)
         if factory:
@@ -157,10 +159,10 @@ class ViewerDisplayScopeDOMTest(unittest.TestCase):
                 finally:
                     page.close()
 
-    def test_session_storage_and_pagehide_each_remove_the_panel_and_disable_controller(self):
+    def test_session_code_and_pagehide_each_remove_the_panel_and_disable_controller(self):
         dispatches = [
-            "new BroadcastChannel('kin-session').postMessage({type:'session-ended'})",
-            "dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))",
+            "new BroadcastChannel('kin-session').postMessage({type:'session-ended',session:'S1'})",
+            "KinViewerSessionBoundary.authFailure({session:'S1',status:401,code:'AUTH_SESSION_ENDED'})",
             "dispatchEvent(new Event('pagehide'))",
         ]
         for dispatch in dispatches:
@@ -229,8 +231,8 @@ class ViewerDisplayScopeDOMTest(unittest.TestCase):
 
     def test_session_end_while_config_script_is_late_must_not_mount_after_logout(self):
         dispatches = [
-            "dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))",
-            "new BroadcastChannel('kin-session').postMessage({type:'session-ended'})",
+            "KinViewerSessionBoundary.authFailure({session:'S1',status:401,code:'AUTH_SESSION_ENDED'})",
+            "new BroadcastChannel('kin-session').postMessage({type:'session-ended',session:'S1'})",
             "dispatchEvent(new Event('pagehide'))",
         ]
         for dispatch in dispatches:

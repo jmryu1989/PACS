@@ -13,7 +13,7 @@ function response(status, body, bad = false) {
   });
 }
 
-function sessionWorld(sandbox, send) {
+function pageDefaults(sandbox, send = sandbox.fetch, source = config) {
   const window = sandbox.window || sandbox;
   sandbox.window = window;
   const gate = gates.create(); let announce;
@@ -25,9 +25,16 @@ function sessionWorld(sandbox, send) {
     authFailure: failure => { if (failure.session === gate.session()) end(); },
   });
   sandbox.fetch = transport.fetch;
+  window.KinSessionTransport = { page: () => transport };
+  sandbox.document ||= {};
+  sandbox.location ||= {};
   const context = vm.createContext(sandbox);
-  vm.runInContext(config, context, { filename: 'ohif.js' });
+  vm.runInContext(source, context, { filename: 'ohif.js' });
   const session = vm.runInContext('kinViewerSession', context);
-  return { session, gate, end, context };
+  return { session, gate, end, transport, context };
 }
-module.exports = { sessionWorld, response };
+const sessionWorld = pageDefaults;
+function loadPanel(page, name) {
+  vm.runInContext(fs.readFileSync(require.resolve('../worklist-v0/hpacs-lite/' + name), 'utf8'), page.context, {filename:name});
+}
+module.exports = { pageDefaults, sessionWorld, response, loadPanel };

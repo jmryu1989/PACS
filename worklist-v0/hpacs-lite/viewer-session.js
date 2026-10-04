@@ -8,6 +8,7 @@
   const closed = state => !['active', 'preparing'].includes(state);
 
   function connect(win) {
+    if (win.KinViewerSessionBoundary) return win.KinViewerSessionBoundary;
     const gate = win.KinWorkContext;
     const originalFetch = win.fetch.bind(win);
     const nativeTimeout = win.setTimeout.bind(win), nativeInterval = win.setInterval.bind(win);
@@ -20,19 +21,22 @@
     let peer = null, record = null;
     const enders = new Set(), changes = new Set();
     try { peer = win.opener || (win.parent !== win ? win.parent : null); } catch (_) {}
-    try { record = win.history.state?.[RECORD] || null; } catch (_) {}
+    try { record = win.history.state?.[RECORD] || null; } catch (_) { record = {}; }
     let peerGate = null;
     try { peerGate = peer?.KinWorkContext || null; } catch (_) {}
     const validRecord = record && typeof record.session === 'string' && record.session.length > 0 && typeof record.ended === 'boolean';
-    const session = validRecord ? record.session : record ? null : peerGate?.session() || null;
-    const initialEnd = record?.ended === true || !session ||
+    let session = validRecord ? record.session : record ? null : peerGate?.session() || null;
+    const needsBootstrap = !record && !peerGate && !session;
+    const heard = new Map();
+    const initialEnd = record?.ended === true || !session && !needsBootstrap ||
       (peerGate?.session() === session && closed(peerGate.state()));
     const remember = ending => {
-      try { nativeReplaceState({ ...win.history.state, [RECORD]: { session, ended: ending } }, ''); } catch (_) {}
+      try { nativeReplaceState({ ...win.history.state, [RECORD]: { session, ended: ending } }, ''); return true; }
+      catch (_) { return false; }
     };
     gate.follow({ onLifecycle(listener) {
       announce = listener;
-      listener({ state: initialEnd ? 'unknown' : 'active', session });
+      listener({ state: initialEnd || needsBootstrap ? 'unknown' : 'active', session });
     } });
     if (session) remember(initialEnd);
     // Router state changes must not erase this history entry's original session before a reload.
@@ -79,6 +83,13 @@
       for (const run of [...deferred]) { deferred.delete(run); if (!ended) run(); }
     }
     function notice(data) {
+      if (needsBootstrap && !session && data?.session) {
+        const previous = heard.get(data.session);
+        if (previous?.type === 'session-ended') return;
+        if (data.type === 'session-ended' || data.type === 'session-preparing') heard.set(data.session, data);
+        else if (data.type === 'session-resumed' && previous?.type === 'session-preparing' && previous.preparation === data.preparation)
+          heard.delete(data.session);
+      }
       if (!session || !data || data.session !== session) return;
       if (data.type === 'session-ended') end();
       else if (data.type === 'session-preparing') pause(data.preparation);
@@ -108,9 +119,24 @@
       if (gate.state() === 'active') run();
       else if (gate.state() === 'preparing') deferred.add(run);
     }
-    function wait(value) {
+    function wait(value, release) {
       return new Promise((resolve, reject) => Promise.resolve(value).then(
-        result => deliver(() => resolve(result)), error => deliver(() => reject(error))));
+        result => {
+          if (ended) { release?.(result); return; }
+          const dispose = () => release?.(result);
+          if (release) enders.add(dispose);
+          deliver(() => { enders.delete(dispose); resolve(result); });
+        }, error => deliver(() => reject(error))));
+    }
+    // Native decoders may finish after their network request. Guard delivery here, before any
+    // caller can paint, update its model or touch the opener; release an undelivered bitmap.
+    if (win.createImageBitmap) {
+      const decode = win.createImageBitmap.bind(win);
+      win.createImageBitmap = (...args) => wait(decode(...args), bitmap => bitmap.close());
+    }
+    if (win.HTMLImageElement?.prototype.decode) {
+      const decode = win.HTMLImageElement.prototype.decode;
+      win.HTMLImageElement.prototype.decode = function (...args) { return wait(decode.apply(this, args)); };
     }
     win.setTimeout = (run, ms, ...args) => {
       if (typeof run !== 'function') throw new TypeError('Viewer timers require a function');
@@ -203,8 +229,40 @@
         abortWhenStale: false })).then(responseFor);
     };
     const guarded = new WeakMap();
+    // A new noopener document follows the same entry rule as auth.js: reliable storage,
+    // no end record, one unbound /me. A history binding (including a failed entry) NEVER
+    // enters this path. Recheck records/notices after the body, before adopting its identity.
+    function entryAllowed() {
+      try {
+        const storage = win.localStorage, key = 'kin-viewer-entry-probe', value = win.crypto.randomUUID().padEnd(160, '.');
+        storage.setItem(key, value);
+        const reliable = storage.getItem(key) === value;
+        storage.removeItem(key);
+        return reliable && storage.getItem(key) === null && storage.getItem('kin-session-end') === null &&
+          !win.document.cookie.split(';').some(part => part.trim().startsWith('kin-session-end='));
+      } catch (_) { return false; }
+    }
+    async function bootstrap() {
+      if (!needsBootstrap) return;
+      // A reload of an unresolved entry must not start a second identity adoption.
+      if (!remember(true) || !entryAllowed()) { end(); return; }
+      const controller = new win.AbortController();
+      const deadline = nativeTimeout(() => controller.abort(), 10000);
+      try {
+        const response = await originalFetch('/api/me', { credentials: 'same-origin', cache: 'no-store',
+          headers: { 'X-KIN-CSRF': '1' }, signal: controller.signal });
+        const me = response.ok ? await response.json() : null;
+        if (ended || !entryAllowed() || !me || typeof me.sessionId !== 'string' || !me.sessionId ||
+            heard.get(me.sessionId)?.type === 'session-ended') { end(); return; }
+        session = me.sessionId;
+        remember(false);
+        announce({ state: 'active', session });
+        notice(heard.get(session));
+      } catch (_) { end(); }
+      finally { clearTimeout(deadline); }
+    }
     const api = Object.freeze({
-      gate, transport, wait, session: () => session,
+      gate, transport, wait, ready: Promise.resolve().then(bootstrap), session: () => session,
       active: () => gate.state() === 'active',
       ended: () => ended || closed(gate.state()),
       guardMethods(target, names) {

@@ -26,7 +26,6 @@ function kinCreateSessionBoundary() {
       });
     }
     const boundary = window.KinViewerSession.connect(window);
-    window.dispatchEvent(new Event('kin-viewer-session-ready'));
     boundary.onEnd(() => {
       kinViewerSession.refuse('logout');
       for (const extension of window.config.extensions) {
@@ -39,6 +38,8 @@ function kinCreateSessionBoundary() {
       try { window.close(); } catch (_) {}
       if (!window.closed) window.location.replace('/worklist/hpacs-lite/index.html');
     });
+    await boundary.ready;
+    window.dispatchEvent(new Event('kin-viewer-session-ready'));
     await boundary.wait();
   } };
 }

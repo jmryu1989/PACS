@@ -3,12 +3,15 @@
 
 Real page gate, transport, viewer authority and complete OHIF config in Chromium.
 The server is synthetic. This does not run the pinned OHIF bundle or a GPU renderer.
-Mutants can replace one served product file through KIN_VIEWER_SESSION_SOURCE.
+Mutants can replace served product files through KIN_VIEWER_*_SOURCE.
 """
 import json
+import base64
 import os
 from pathlib import Path
 import unittest
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from playwright.sync_api import sync_playwright
 
@@ -16,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = "https://viewer-session.test"
 HPACS = ROOT / "worklist-v0" / "hpacs-lite"
 SOURCE = Path(os.environ.get("KIN_VIEWER_SESSION_SOURCE", HPACS / "viewer-session.js"))
+MIP_SOURCE = Path(os.environ.get("KIN_VIEWER_MIP_SOURCE", HPACS / "viewer-volume-mip.js"))
 
 
 class ViewerSessionDOMTest(unittest.TestCase):
@@ -33,6 +37,9 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.context = self.browser.new_context()
         self.requests = []
         self.status, self.code = 200, None
+        self.server_session = "S1"
+        self.dialogs = []
+        self.context.on('page', lambda page: page.on('dialog', lambda dialog: (self.dialogs.append(dialog.message), dialog.dismiss())))
         self.extra_html = ""
         self.context.route(BASE + "/**", self.route)
         self.opener = self.context.new_page()
@@ -66,7 +73,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
             self.requests.append((path, route.request.headers.get("x-kin-session")))
             headers = {"X-KIN-Auth-Code": self.code} if self.code else {}
             route.fulfill(status=self.status, headers=headers,
-                          body=json.dumps({"code": self.code, "value": "incoming"}), content_type="application/json")
+                          body=json.dumps({"code": self.code, "value": "incoming", "sessionId": self.server_session}), content_type="application/json")
         else:
             route.fulfill(body="<p>Landing</p>", content_type="text/html")
 
@@ -182,11 +189,247 @@ class ViewerSessionDOMTest(unittest.TestCase):
         for route in held:
             route.abort()
 
-    def test_direct_entry_without_a_binding_opens_no_protected_work(self):
+    def test_clinician_noopener_bootstraps_once_then_reload_and_second_viewer_are_bound(self):
+        with self.context.expect_page() as created:
+            self.opener.evaluate("() => {const popup=window.open('/ohif/viewer?StudyInstanceUIDs=1.2.3','clinician-viewer');popup.opener=null;}")
+        page = created.value
+        page.wait_for_function("window.started===true")
+        self.assertTrue(page.evaluate("opener===null"))
+        self.assertEqual(self.requests, [("/api/me", None)])
+        for _ in range(2):
+            page.evaluate("fetch('/api/studies').then(r=>r.json())")
+            page.reload()
+            page.wait_for_function("window.started===true")
+        self.assertEqual(self.requests.count(("/api/me", None)), 1)
+        self.assertEqual(self.requests[-1], ("/api/studies", "S1"))
+        self.assertEqual(page.locator('#draft').input_value(), 'held draft')
+        with self.context.expect_page() as created:
+            self.opener.evaluate("() => {const popup=window.open('/ohif/viewer?StudyInstanceUIDs=4.5.6','clinician-viewer-two');popup.opener=null;}")
+        second = created.value
+        second.wait_for_function('window.started===true')
+        second.evaluate("fetch('/api/studies').then(r=>r.json())")
+        self.assertEqual(self.requests.count(('/api/me', None)), 2)
+        self.assertEqual(self.requests[-1], ('/api/studies', 'S1'))
+        self.assertFalse(page.is_closed())
+        self.assertFalse(second.is_closed())
+        self.assertEqual(self.dialogs, [])
+
+    def test_direct_entry_end_record_sends_nothing(self):
+        self.opener.evaluate("localStorage.setItem('kin-session-end',JSON.stringify({session:'S1',operation:1,status:'confirmed'}))")
         page = self.context.new_page()
         page.goto(BASE + "/ohif/viewer")
         page.wait_for_url(BASE + "/worklist/hpacs-lite/index.html")
         self.assertEqual(self.requests, [])
+
+    def test_direct_entry_unreliable_storage_or_history_sends_nothing(self):
+        for unavailable in ["Object.defineProperty(window,'localStorage',{get(){throw new DOMException('denied')}})",
+                            "Object.defineProperty(history,'state',{get(){throw new DOMException('denied')}})",
+                            "history.replaceState=()=>{throw new DOMException('denied')}"]:
+            with self.subTest(unavailable=unavailable):
+                page = self.context.new_page()
+                page.add_init_script(unavailable)
+                page.goto(BASE + '/ohif/viewer')
+                page.wait_for_url(BASE + '/worklist/hpacs-lite/index.html')
+                self.assertEqual(self.requests, [])
+                page.close()
+
+    def test_noopener_bound_document_never_bootstraps_the_replacement_login(self):
+        page=self.context.new_page()
+        page.goto(BASE+'/ohif/viewer')
+        page.wait_for_function('window.started===true')
+        self.server_session='S2'
+        page.reload()
+        page.wait_for_function('window.started===true')
+        self.assertEqual(page.evaluate('KinWorkContext.session()'),'S1')
+        self.status,self.code=409,'AUTH_SESSION_MISMATCH'
+        page.evaluate("() => {fetch('/api/studies');}")
+        page.wait_for_url(BASE+'/worklist/hpacs-lite/index.html')
+        self.assertEqual(self.requests, [('/api/me',None),('/api/studies','S1')])
+
+    def test_end_notice_while_bootstrap_body_waits_cannot_open_work(self):
+        held=[]
+        self.context.route(BASE+'/api/me',lambda route: held.append(route))
+        page=self.context.new_page();page.goto(BASE+'/ohif/viewer')
+        for _ in range(100):
+            if held:break
+            page.wait_for_timeout(10)
+        self.assertEqual(len(held),1)
+        self.notice('session-ended')
+        self.notice('session-resumed')
+        self.notice('session-preparing')
+        self.notice('session-resumed')
+        page.wait_for_timeout(50)
+        held.pop().fulfill(json={'sessionId':'S1'})
+        page.wait_for_url(BASE+'/worklist/hpacs-lite/index.html')
+        self.assertEqual(self.requests,[])
+
+    def test_ordinary_two_windows_reload_and_study_navigation_need_no_extra_interaction(self):
+        first=self.open_viewer()
+        first.reload();first.wait_for_function('window.started===true')
+        second=self.open_viewer()
+        for page in [first,second]:
+            page.locator('#draft').fill('working input')
+            page.evaluate("history.pushState({layout:'retained'},'', '/ohif/viewer?StudyInstanceUIDs=4.5.6')")
+            page.evaluate("fetch('/dicom-web/studies').then(r=>r.json())")
+            self.assertEqual(page.locator('#draft').input_value(),'working input')
+            self.assertEqual(page.evaluate('KinWorkContext.state()'),'active')
+            self.assertFalse(page.is_closed())
+        self.assertEqual(self.dialogs,[])
+        self.assertEqual(self.requests,[('/dicom-web/studies','S1')]*2)
+
+    def test_native_image_decode_finishing_during_pause_is_delivered_only_after_resume(self):
+        held=[]
+        view=self.open_viewer()
+        view.route(BASE+'/pixels.png',lambda route: held.append(route))
+        view.evaluate("""() => {
+          window.effects=[];window.img=new Image();img.src='/pixels.png';
+          img.decode().then(()=>{effects.push('decode');document.querySelector('#draft').value='decoded'});
+        }""")
+        for _ in range(100):
+            if held:break
+            view.wait_for_timeout(10)
+        self.notice('session-preparing');view.wait_for_function("KinWorkContext.state()==='preparing'")
+        held.pop().fulfill(body=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='),content_type='image/png')
+        view.wait_for_timeout(100)
+        self.assertEqual(view.evaluate('effects'),[])
+        self.assertEqual(view.locator('#draft').input_value(),'held draft')
+        self.notice('session-resumed');view.wait_for_function("effects.length===1")
+        self.assertEqual(view.locator('#draft').input_value(),'decoded')
+
+    def test_native_bitmap_and_worker_completion_cannot_write_while_paused(self):
+        view=self.open_viewer()
+        view.evaluate("""() => {
+          window.effects=[];
+          const url=URL.createObjectURL(new Blob([`onmessage=()=>setTimeout(()=>postMessage('decoded'),100)`],{type:'text/javascript'}));
+          window.worker=new Worker(url);URL.revokeObjectURL(url);
+          worker.onmessage=()=>{effects.push('worker');document.querySelector('#draft').value='worker'};
+          worker.postMessage('go');
+        }""")
+        self.notice('session-preparing');view.wait_for_function("KinWorkContext.state()==='preparing'")
+        view.evaluate("""() => {createImageBitmap(new ImageData(2,2)).then(bitmap=>{
+          effects.push('bitmap');document.querySelector('#draft').value='bitmap';bitmap.close();
+        });}""")
+        view.wait_for_timeout(200)
+        self.assertEqual(view.evaluate('effects'),[])
+        self.assertEqual(view.locator('#draft').input_value(),'held draft')
+        self.notice('session-resumed');view.wait_for_function('effects.length===2')
+        self.assertEqual(sorted(view.evaluate('effects')),['bitmap','worker'])
+
+    def test_native_decode_after_end_never_paints_writes_or_touches_parent_with_navigation_held(self):
+        held=[];view=self.open_viewer()
+        view.route(BASE+'/worklist/hpacs-lite/index.html',lambda route:held.append(route))
+        view.evaluate("""() => {
+          window.effects=[];const write=()=>{effects.push('late');opener.contaminated=true;document.body.append('late')};
+          createImageBitmap(new ImageData(64,64)).then(write).catch(write).finally(write);
+          const image=new Image();image.src='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"/>';
+          image.decode().then(write).catch(write).finally(write);
+          const url=URL.createObjectURL(new Blob([`onmessage=()=>setTimeout(()=>postMessage('done'),100)`],{type:'text/javascript'}));
+          const worker=new Worker(url);worker.onmessage=write;worker.postMessage('decode');
+          KinViewerSessionBoundary.authFailure({session:'S1',status:401,code:'AUTH_SESSION_ENDED'});
+        }""")
+        for _ in range(100):
+            if held:break
+            view.wait_for_timeout(10)
+        self.assertEqual(len(held),1)
+        self.opener.wait_for_timeout(200)
+        self.assertEqual(self.opener.evaluate('viewerRef.effects'),[])
+        self.assertFalse(self.opener.evaluate('!!window.contaminated'))
+        self.assertEqual(self.opener.evaluate('viewerRef.document.body.textContent'),'')
+        held.pop().abort()
+
+    def test_held_finding_real_store_entry_points_refuse_during_pause_and_restore_exact_text(self):
+        view=self.open_viewer()
+        view.route(BASE+'/api/me',lambda route:route.fulfill(json={'kind':'member','institution':'I1','sub':'u1','roles':['radiologist'],'sessionId':'S1'}))
+        view.route(BASE+'/api/studies/**/findings?*',lambda route:route.fulfill(json={'items':[],'nextCursor':None},headers={'X-KIN-Finding-Schema':'2'}))
+        for name in ['finding-link-model.js','viewer-findings.js']:
+            view.add_script_tag(path=str(HPACS/name))
+        view.evaluate("""() => {
+          const host=document.createElement('details');host.open=true;host.id='kin-viewer-history';document.body.append(host);
+          // Observe the exact store the real panel creates; no methods or results are replaced.
+          const create=kinFindingLinkModel.createStore;kinFindingLinkModel.createStore=(...args)=>window.findingStore=create(...args);
+          window.findings=kinViewerFindings({},kinFindingLinkModel);findings.mount();findingStore.setScope('1.2.3');
+        }""")
+        view.get_by_role('button',name='New Finding',exact=True).click()
+        view.get_by_label('Finding Title',exact=True).fill('held title')
+        view.get_by_label('Finding Text',exact=True).fill('held original body')
+        view.evaluate("findingStore.setScope('4.5.6')")
+        view.wait_for_function('findingStore.held().count===1 && !findingStore.state().loading')
+        held=view.evaluate('JSON.stringify([...findingStore.state().parked])')
+        self.notice('session-preparing');view.wait_for_function("KinWorkContext.state()==='preparing'")
+        for command in ["findingStore.discardHeld()","findingStore.setScope('1.2.3')","findingStore.newDraft()","findingStore.load()"]:
+            self.assertEqual(view.evaluate("() => {try {"+command+";return 'changed'}catch(e){return e.name}}"),'AbortError')
+        self.assertEqual(view.evaluate('JSON.stringify([...findingStore.state().parked])'),held)
+        self.notice('session-resumed');view.wait_for_function("KinWorkContext.state()==='active'")
+        view.evaluate("findingStore.setScope('1.2.3')")
+        self.assertEqual(view.get_by_label('Finding Title',exact=True).input_value(),'held title')
+        self.assertEqual(view.get_by_label('Finding Text',exact=True).input_value(),'held original body')
+
+    def test_mip_job_controls_and_capability_refuse_during_pause_preserving_the_open_job(self):
+        from tests.viewer_session_fixture import MIP_RENDERER
+        view=self.open_viewer()
+        view.route(BASE+'/api/me',lambda route:route.fulfill(json={'kind':'member','institution':'I1','sub':'u1','roles':['radiologist'],'sessionId':'S1'}))
+        view.route(BASE+'/api/studies',lambda route:route.fulfill(json={'studies':[{'uid':'1.2.3'}]}))
+        for name in ['volume-mip.js','volume-voi.js','volume-mip-job.js','viewer-volume-mip.js']:
+            view.add_script_tag(path=str(MIP_SOURCE if name == 'viewer-volume-mip.js' else HPACS/name))
+        view.evaluate(MIP_RENDERER)
+        before=view.evaluate('mip.job.capture()')
+        self.assertIsNotNone(before, view.evaluate('mipNotices'))
+        view.get_by_label('MIP Job Title',exact=True).fill('retained MIP job')
+        writes=view.evaluate('mipNativeWrites')
+        self.notice('session-preparing');view.wait_for_function("KinWorkContext.state()==='preparing'")
+        # Invoke the real controls directly: this bypasses both the overlay and capture input blocker.
+        for command in ["document.querySelector('[aria-label=\"MIP Projection\"]').onchange()",
+                        "[...document.querySelectorAll('#kin-volume-mip button')].find(b=>b.textContent==='Reset VOI').onclick()",
+                        'mip.job.clearForJob()', 'mip.job.restore(mip.job.capture())']:
+            self.assertEqual(view.evaluate("() => {try {"+command+";return 'changed'}catch(e){return e.name}}"),'AbortError')
+        self.assertEqual(view.evaluate('mip.job.capture()'),before)
+        self.assertEqual(view.evaluate('mipNativeWrites'),writes)
+        self.assertTrue(view.locator('#kin-volume-mip').evaluate('(element)=>element.open'))
+        self.notice('session-resumed');view.wait_for_function("KinWorkContext.state()==='active'")
+        self.assertEqual(view.get_by_label('MIP Job Title',exact=True).input_value(),'retained MIP job')
+        self.assertEqual(view.evaluate('mip.job.capture()'),before)
+
+    def test_real_back_forward_records_bfcache_or_the_exact_chromium_reason(self):
+        requests=[]
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*args):pass
+            def do_GET(self):
+                path=self.path.split('?')[0]
+                kind='text/html'
+                if path=='/config.js':body=(ROOT/'config/ohif.js').read_bytes();kind='application/javascript'
+                elif path.startswith('/worklist/hpacs-lite/') and path.endswith('.js'):
+                    name=path.rsplit('/',1)[-1];body=(SOURCE if name=='viewer-session.js' else HPACS/name).read_bytes();kind='application/javascript'
+                elif path=='/api/me':
+                    requests.append(self.headers.get('X-KIN-Session'));body=b'{"sessionId":"S1"}';kind='application/json'
+                elif path=='/ohif/viewer':body=b'''<input id="draft" value="original"><script>
+                  window.restored=false;addEventListener('pageshow',event=>window.restored=event.persisted);
+                  </script><script src="/config.js"></script><script>
+                  config.extensions.find(e=>e.id==='kin.session-boundary').preRegistration().then(()=>window.started=true);
+                  </script>'''
+                else:body=b'<a href="/ohif/viewer">Back</a>'
+                self.send_response(200);self.send_header('Content-Type',kind);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        browser=self.pw.chromium.launch(ignore_default_args=['--disable-back-forward-cache'])
+        try:
+            page=browser.new_page();client=page.context.new_cdp_session(page);client.send('Page.enable');reasons=[]
+            client.on('Page.backForwardCacheNotUsed',lambda event:reasons.append(event))
+            origin='http://127.0.0.1:'+str(server.server_port)
+            page.goto(origin+'/ohif/viewer');page.wait_for_function('window.started===true')
+            page.locator('#draft').fill('preserved through history')
+            page.goto(origin+'/away');page.go_back();page.wait_for_function('window.started===true')
+            persisted=page.evaluate('restored')
+            if persisted:self.assertEqual(page.locator('#draft').input_value(),'preserved through history')
+            else:
+                self.assertTrue(reasons,'Chromium must explain why this real back traversal did not use BFCache')
+                page.locator('#draft').fill('direct persisted path')
+                page.evaluate("dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}))")
+                self.assertEqual(page.locator('#draft').input_value(),'direct persisted path')
+            page.go_forward();self.assertTrue(page.url.endswith('/away'))
+            print('BFCACHE '+json.dumps({'persisted':persisted,'reasons':reasons,'bindings':requests}))
+            self.assertEqual(requests.count(None),1)
+        finally:
+            browser.close();server.shutdown();server.server_close();thread.join()
 
     def test_marks_and_unfinished_label_survive_pause_and_mutation_capabilities_refuse(self):
         from tests.viewer_volume_marks_progressive_dom_test import HARNESS
