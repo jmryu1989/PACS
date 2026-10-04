@@ -8,6 +8,7 @@ are mutation locations, not product-shape assertions. No new parser or byte pins
 """
 import argparse
 import io
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -462,6 +463,236 @@ class ReportEditorFrameDOM(unittest.TestCase):
         self.assertEqual(self.page.evaluate("editor.switchStudy({uid:'A',selectionSeq:1}, {findings:'overwrite',conclusion:'',recommendation:''})"), {"status":"refused","reason":"same-opening"})
         self.assert_text("mine")
 
+    def test_different_text_opening_types_at_end_and_unvisited_capture_uses_end(self):
+        """W6EF-F01: 다른 글의 숫자 커서/스크롤은 새 opening으로 옮기지 않는다."""
+        for focused in (False, True):
+            with self.subTest(focused=focused):
+                self.open('A', findings='old\n' * 70)
+                self.focus()
+                self.page.evaluate("editor.element('findings').setSelectionRange(3,6); editor.element('findings').scrollTop=200")
+                if not focused:
+                    self.focus('after')
+                self.open('B', findings='Liver normal.\nSpleen normal.')
+                self.assertEqual(self.page.evaluate("[editor.element('findings').selectionStart,editor.element('findings').selectionEnd]"), [28,28])
+                self.assertEqual(self.page.evaluate("document.activeElement.id"), 'findings' if focused else 'after')
+                self.focus()
+                self.page.keyboard.type('X')
+                self.assert_text('Liver normal.\nSpleen normal.X')
+        self.open('C', findings='untouched', conclusion='same')
+        # 프로그램이 선택 숫자를 설정했어도 사람이 사용하지 않은 칸은 끝으로 답한다.
+        self.page.evaluate("editor.element('conclusion').setSelectionRange(1,2)")
+        self.capture('conclusion')
+        self.assertEqual(self.insert('PASTED')['status'], 'applied')
+        self.assert_text('samePASTED', 'conclusion')
+        self.page.click('#findings')
+        self.page.evaluate("editor.element('findings').setSelectionRange(1,2)")
+        self.capture()
+        self.assertEqual(self.insert('X')['status'], 'applied')
+        self.assert_text('uXtouched')
+
+    def test_drag_across_opening_cannot_select_new_text(self):
+        self.open('A', findings='0123456789 abcdefghij')
+        box = self.page.locator('#findings').bounding_box()
+        self.page.mouse.move(box['x']+5, box['y']+8)
+        self.page.mouse.down()
+        self.page.mouse.move(box['x']+60, box['y']+8)
+        self.open('B', findings='B' * 20)
+        self.page.mouse.move(box['x']+120, box['y']+8)
+        self.page.mouse.up()
+        selection = self.page.evaluate("[editor.element('findings').selectionStart,editor.element('findings').selectionEnd]")
+        self.assertEqual(selection[0], selection[1])
+        self.capture()
+        self.assertEqual(self.insert('PASTED')['status'], 'applied')
+        self.assert_text('B' * 20 + 'PASTED')
+
+    def test_authoritative_same_selection_readonly_and_history_boundary(self):
+        """W6EF-F02: 강제 교체는 권한과 독립이며 같은 선택의 ticket/Undo를 폐기한다."""
+        self.type('old')
+        self.capture()
+        self.page.evaluate("allowed=false; for(const k of ['findings','conclusion','recommendation']) editor.element(k).readOnly=true")
+        texts = dict.fromkeys(FIELDS, 'server')
+        self.assertEqual(self.page.evaluate("x=>editor.replaceAuthoritative(x)", texts), {'status':'switched'})
+        self.assertEqual(self.read(), texts)
+        self.assertEqual(self.insert('late'), {'status':'refused','reason':'stale'})
+        self.assertEqual(self.page.evaluate("editor.switchStudy({uid:'A',selectionSeq:1},editor.read())"), {'status':'unchanged'})
+        self.page.evaluate("allowed=true; for(const k of ['findings','conclusion','recommendation']) editor.element(k).readOnly=false")
+        self.focus()
+        for key in ['Control+z','Control+y'] * 3:
+            self.key(key)
+            self.assertEqual(self.read(), texts)
+        self.type(' edit')
+        self.assertEqual(self.page.evaluate("editor.replaceAuthoritative(editor.read())")['status'], 'switched')
+        self.key('Control+z')
+        self.assert_text('server edit')
+
+    def test_authoritative_refuses_composition_then_retries_after_end(self):
+        self.focus()
+        cdp=self.compose()
+        self.assertEqual(self.page.evaluate("editor.replaceAuthoritative({findings:'',conclusion:'',recommendation:''})"), {'status':'refused','reason':'composing'})
+        self.assertTrue(self.page.evaluate('editor.isComposing()'))
+        cdp.send('Input.insertText', {'text':'한'})
+        self.assert_text('한')
+        self.assertEqual(self.page.evaluate("editor.replaceAuthoritative({findings:'',conclusion:'',recommendation:''})")['status'],'switched')
+        self.assert_text('')
+
+    def test_recorded_insertion_replans_current_text_after_modal_and_composition(self):
+        """W6EF-F03: 응답 시점의 현재 글로 계획. 거절 때 보존하고 해제 뒤 새 계획으로 재적용."""
+        self.type('local later')
+        self.page.evaluate("document.body.insertAdjacentHTML('beforeend','<dialog><button>OK</button></dialog>');document.querySelector('dialog').showModal()")
+        self.capture(start=len('local later'),end=len('local later'))
+        self.assertEqual(self.insert('\nRECORDED'), {'status':'refused','reason':'unavailable'})
+        self.assert_text('local later')
+        self.page.evaluate("document.querySelector('dialog').close()")
+        self.focus()
+        cdp=self.compose()
+        self.capture(start=len(self.read()['findings']),end=len(self.read()['findings']))
+        self.assertEqual(self.insert('\nRECORDED')['status'],'refused')
+        cdp.send('Input.insertText', {'text':'한'})
+        self.page.evaluate("window.at=editor.capture('findings',{start:editor.read('findings').length,end:editor.read('findings').length})")
+        self.assertEqual(self.insert('\nRECORDED')['status'],'applied')
+        self.assert_text('local later한\nRECORDED')
+
+    def test_many_prechecks_every_field_and_clear_undo_is_per_field(self):
+        """W6EF-F04: 숨김/권한/길이/낡은 ticket 하나라도 있으면 전 칸 보존."""
+        for refusal in ('hidden','readonly','length','changed','composing'):
+            with self.subTest(refusal=refusal):
+                self.open('A', **dict.fromkeys(FIELDS,'KEEP'))
+                self.page.evaluate("window.edits=['findings','conclusion','recommendation'].map(k=>({at:editor.capture(k,{start:0,end:4}),text:'REPLACED'}))")
+                if refusal=='hidden': self.page.evaluate("editor.element('recommendation').style.display='none'")
+                if refusal=='readonly': self.page.evaluate("editor.element('recommendation').readOnly=true")
+                if refusal=='length': self.page.evaluate("editor.element('recommendation').maxLength=5")
+                if refusal=='changed': self.page.evaluate("editor.element('recommendation').value='EXTERNAL'")
+                cdp=None
+                if refusal=='composing':
+                    self.focus(); cdp=self.compose()
+                before=self.read()
+                self.page.evaluate("window.batchInputs=0;document.addEventListener('input',()=>batchInputs++)")
+                self.assertEqual(self.page.evaluate('editor.insertMany(edits)')['status'],'refused')
+                self.assertEqual(self.read(),before)
+                self.assertEqual(self.page.evaluate('batchInputs'),0)
+                if cdp: cdp.send('Input.insertText',{'text':'한'})
+                self.page.evaluate("const e=editor.element('recommendation');e.style.display='';e.readOnly=false;e.removeAttribute('maxlength')")
+        self.open('B', **dict.fromkeys(FIELDS,'KEEP'))
+        self.assertEqual(self.page.evaluate("editor.insertMany(['findings','conclusion','recommendation'].map(k=>({at:editor.capture(k,{start:0,end:4}),text:''})))"), {'status':'applied'})
+        self.assertEqual(self.read(),dict.fromkeys(FIELDS,''))
+        self.focus()
+        for field in reversed(FIELDS):
+            self.key('Control+z')
+            self.assert_text('KEEP',field)
+        self.assertEqual(self.read(),dict.fromkeys(FIELDS,'KEEP'))
+
+    def test_many_focus_recheck_and_native_failure_leave_all_text_intact(self):
+        for failure in ('focus','native','partial'):
+            with self.subTest(failure=failure):
+                self.open('A', **dict.fromkeys(FIELDS,'KEEP'))
+                self.focus('after')
+                self.page.evaluate("allowed=true;window.edits=['findings','conclusion','recommendation'].map(k=>({at:editor.capture(k,{start:0,end:4}),text:''}))")
+                if failure=='focus':
+                    self.page.evaluate("editor.element('recommendation').addEventListener('focus',()=>{allowed=false},{once:true})")
+                else:
+                    self.page.evaluate("""failure=>{window.native=document.execCommand.bind(document);let n=0;document.execCommand=(cmd,...args)=>{
+                      if(cmd==='insertText' && ++n===2) { if(failure==='partial') native(cmd,false,'BROKEN'); return false; }
+                      return native(cmd,...args);
+                    }}""",failure)
+                result=self.page.evaluate('editor.insertMany(edits)')
+                self.assertEqual(result['status'],'refused')
+                self.assertEqual(result.get('historyReset',False),failure!='focus')
+                self.assertEqual(self.read(),dict.fromkeys(FIELDS,'KEEP'))
+                self.assertEqual(self.page.evaluate('document.activeElement.id'),'after')
+                self.page.evaluate("if(window.native) document.execCommand=window.native;allowed=true")
+                if failure!='focus':
+                    self.focus()
+                    for key in ['Control+y','Control+z','Control+Shift+z'] * 3:
+                        self.key(key)
+                        self.assertEqual(self.read(),dict.fromkeys(FIELDS,'KEEP'))
+
+    def test_external_value_change_refuses_insert_and_server_without_touching_text(self):
+        """W6EF-F06/R01: DOM 대입은 input revision을 올리지 않아도 감지해야 한다."""
+        for kind in ('insert','server'):
+            with self.subTest(kind=kind):
+                self.open('A',findings='before')
+                self.capture()
+                self.page.evaluate("editor.element('findings').value='outside'")
+                result=self.insert('X') if kind=='insert' else self.server('before','SERVER')
+                self.assertEqual(result,{'status':'refused','reason':'changed'})
+                self.assert_text('outside')
+
+    def test_same_text_server_has_no_event_caret_move_or_undo_step(self):
+        self.type('typed')
+        self.page.evaluate("editor.element('findings').setSelectionRange(1,3,'backward');window.n=0;document.addEventListener('input',()=>n++)")
+        self.capture()
+        self.assertEqual(self.server('typed','typed'),{'status':'unchanged'})
+        self.assertEqual(self.page.evaluate("[n,editor.element('findings').selectionStart,editor.element('findings').selectionEnd,editor.element('findings').selectionDirection]"),[0,1,3,'backward'])
+        self.key('Control+z')
+        self.assert_text('')
+
+    def test_failed_native_edit_restores_live_selection(self):
+        self.type('0123456789')
+        self.capture(start=1,end=3)
+        self.page.evaluate("editor.element('findings').setSelectionRange(5,8,'backward');document.execCommand=()=>false")
+        self.assertEqual(self.insert('X'),{'status':'refused','reason':'native-edit'})
+        self.assert_text('0123456789')
+        self.assertEqual(self.page.evaluate("[editor.element('findings').selectionStart,editor.element('findings').selectionEnd,editor.element('findings').selectionDirection]"),[5,8,'backward'])
+
+    def test_forged_ticket_and_invalid_range_cannot_edit(self):
+        self.type('keep')
+        self.capture()
+        self.assertEqual(self.page.evaluate("editor.insert({...at},'FORGED')"),{'status':'refused','reason':'stale'})
+        self.assert_text('keep')
+        for start,end in [(-1,0),(2,1),(0,5),(0.5,2),(0,None)]:
+            self.assertTrue(self.page.evaluate("r=>{try{editor.capture('findings',r);return false}catch(e){return e instanceof TypeError}}",{'start':start,'end':end}) if end is not None else self.page.evaluate("()=>{try{editor.capture('findings',{start:NaN,end:2});return false}catch(e){return e instanceof TypeError}}"))
+
+    def test_reentrant_switch_refused_and_ancestor_scroll_restored(self):
+        self.type('KEEP')
+        self.capture()
+        self.page.evaluate("document.addEventListener('input',()=>{window.reentry=editor.switchStudy({uid:'B',selectionSeq:9},{findings:'B',conclusion:'',recommendation:''})},{once:true})")
+        self.assertEqual(self.insert('X')['status'],'applied')
+        self.assertEqual(self.page.evaluate('reentry'),{'status':'refused','reason':'busy'})
+        self.assert_text('KEEPX')
+        # 노드 제거 시 overflow 높이 축소는 scrollTop을 제한한다. 복구 없으면 컨테이너가 점프한다.
+        self.page.evaluate("document.getElementById('frame').scrollTop=999;window.outerBefore=document.getElementById('frame').scrollTop")
+        before=self.page.evaluate('outerBefore')
+        self.assertGreater(before,0)
+        self.open('B', findings='B')
+        self.assertEqual(self.page.evaluate("document.getElementById('frame').scrollTop"),before)
+
+    def test_detached_field_is_refused_without_editing_another_field(self):
+        self.type('KEEP')
+        self.capture('conclusion')
+        self.page.evaluate("editor.element('conclusion').remove()")
+        self.assertEqual(self.insert('X'),{'status':'refused','reason':'unavailable'})
+        self.assert_text('KEEP')
+
+    def test_long_plain_text_insert_one_event_and_one_undo(self):
+        """W6EF-F05: 긴 상용구/이전 판독문은 그대로 한 편집. 실행 시간은 probe에서 기록."""
+        for lines in (50,150,300):
+            with self.subTest(lines=lines):
+                self.open('A')
+                self.type('before')
+                self.capture(start=2,end=4)
+                self.page.evaluate("window.n=0;editor.element('findings').addEventListener('input',()=>n++)")
+                text=('  간유리음영 없음 <img src=x onerror=alert(1)> &amp;\t  \n'*lines)
+                self.assertEqual(self.insert(text),{'status':'applied'})
+                self.assert_text('be'+text+'re')
+                self.assertEqual(self.page.evaluate('n'),1)
+                self.page.keyboard.type('!')
+                self.key('Control+z'); self.assert_text('be'+text+'re')
+                self.key('Control+z'); self.assert_text('before')
+                self.key('Control+y'); self.assert_text('be'+text+'re')
+
+    def test_multiline_special_characters_are_literal(self):
+        for text in ('\n\n','\n leading\ntrailing \n','a\x00b\nc','x\ud83dy\nz','\u2028\u00a0\n\u1112\u1161\u11ab👍🏽','<script>window.bad=1</script>\n& &#0;'):
+            with self.subTest(text=ascii(text)):
+                self.open('A')
+                self.type('keep')
+                self.capture()
+                # JSON escape로 UTF-16 코드 단위를 브라우저 안에서 비교한다. Python 전송층은
+                # 짝없는 surrogate를 응답 문자열에서 U+FFFD로 바꿀 수 있다.
+                result=self.page.evaluate("json=>{const t=JSON.parse(json);const r=editor.insert(at,t);return {result:r,exact:editor.read('findings')==='keep'+t}}",json.dumps(text,ensure_ascii=True))
+                self.assertEqual(result,{'result':{'status':'applied'},'exact':True})
+                self.assertFalse(self.page.evaluate('!!window.bad'))
+                self.key('Control+z'); self.assert_text('keep')
+
     def test_browser_fact_value_and_set_range_text_do_not_supply_undo_steps(self):
         """Negative controls justify using native insertion instead of value/setRangeText."""
         for expression in ("e.value='abcX'", "e.setRangeText('X',3,3,'end')"):
@@ -482,7 +713,8 @@ class ReportEditorFrameDOM(unittest.TestCase):
         self.assertEqual(self.page.evaluate("document.activeElement.id"), "conclusion")
 
 
-# Each mutation changes one product line; assertions never require these source spellings.
+# Each mutation changes one product line; unchanged context can disambiguate an anchor.
+# Assertions never require these source spellings.
 MUTANTS = [
     ("M01-reuse-node", "old.replaceWith(next);", "old.value = next.value; s.el = old;", [
         "test_t4_empty_study_boundary_all_fields", "test_t4_reopen_same_uid_and_mixed_history",
@@ -491,7 +723,7 @@ MUTANTS = [
         "test_ordinary_same_opening_preserves_history_selection_and_composition", "test_same_opening_cannot_bypass_safe_apply"]),
     ("M03-uid-only-request", "at.opening !== opening", "at.opening?.uid !== opening.uid", [
         "test_t3_requests_retired_on_different_study_and_same_uid_reopening"]),
-    ("M04-value-assignment", "const accepted = doc.execCommand('insertText', false, text);", "const accepted = (el.value = expected, true);", [
+    ("M04-value-assignment", "const accepted = nativeInsert(text);", "const accepted = (el.value = expected, true);", [
         "test_t5_each_insertion_kind_undo_redo", "test_t5_native_input_and_plain_text_newlines"]),
     ("M05-live-caret", "el.setSelectionRange(start, end);", "// Use the live caret instead of the requested range.", [
         "test_t3_captured_position_survives_caret_and_focus_move"]),
@@ -513,7 +745,7 @@ MUTANTS = [
         "test_t3_permission_changes_on_focus_and_native_failure"]),
     ("M14-reset-scroll", "for (const [el, top, left] of positions) { el.scrollTop = top; el.scrollLeft = left; }", "for (const [el] of positions) { el.scrollTop = 0; el.scrollLeft = 0; }", [
         "test_ordinary_insert_keeps_scroll_and_has_no_extra_focus_cycle"]),
-    ("M15-drop-focused-field", "if (focused) focused.next.focus({ preventScroll: true });", "// Drop editor focus on replacement.", [
+    ("M15-drop-focused-field", "if (focused) focused.next.focus();", "// Drop editor focus on replacement.", [
         "test_ordinary_new_opening_preserves_visible_caret_focus_scroll"]),
     ("M16-interrupt-composition", "if (isComposing()) return refused('composing');", "// Replace the active composing field.", [
         "test_ordinary_same_opening_preserves_history_selection_and_composition"]),
@@ -527,17 +759,31 @@ MUTANTS = [
         "test_t3_permission_changes_on_focus_and_native_failure"]),
     ("M21-hide-current-text", "return name === undefined ? Object.fromEntries(names.map(k => [k, state(k).el.value])) : state(name).el.value;", "return name === undefined ? Object.fromEntries(names.map(k => [k, ''])) : '';", [
         "test_browser_fact_value_and_set_range_text_do_not_supply_undo_steps", "test_browser_fact_history_is_document_wide"]),
-    ("M22-edit-active-instead-of-target", "if (doc.activeElement !== el) return refused('unavailable');", "// Edit whichever field still has focus.", [
+    ("M22-edit-active-instead-of-target", "if (doc.activeElement !== el) return refused('unavailable');\n        el.setSelectionRange(start, end);", "// Edit whichever field still has focus.\n        el.setSelectionRange(start, end);", [
         "test_unfocusable_target_never_edits_the_active_field"]),
     ("M23-allow-truncation", "if (el.maxLength >= 0 && expected.length > el.maxLength) return refused('length');", "// Let the browser silently truncate the insertion.", [
         "test_native_length_limit_cannot_partially_apply_text"]),
+    ("M24-carry-different-text-caret", "if (same) next.setSelectionRange(saved.start, saved.end, saved.direction);", "next.setSelectionRange(saved.start, saved.end, saved.direction);", [
+        "test_different_text_opening_types_at_end_and_unvisited_capture_uses_end", "test_drag_across_opening_cannot_select_new_text"]),
+    ("M25-unvisited-caret", "const start = range?.start ?? (s.caret ? el.selectionStart : el.value.length);", "const start = range?.start ?? el.selectionStart;", [
+        "test_different_text_opening_types_at_end_and_unvisited_capture_uses_end"]),
+    ("M26-authoritative-as-render", "return open(opening, texts);", "return switchStudy(opening, texts);", [
+        "test_authoritative_same_selection_readonly_and_history_boundary"]),
+    ("M27-no-batch-focus-precheck", "for (const { at } of edits) {", "for (const { at } of []) {", [
+        "test_many_prechecks_every_field_and_clear_undo_is_per_field"]),
+    ("M28-slow-multiline", "return doc.execCommand('insertHTML', false, escaped);", "return doc.execCommand('insertText', false, text);", [
+        "test_long_plain_text_insert_one_event_and_one_undo"]),
+    ("M29-interpret-markup", "return doc.execCommand('insertHTML', false, escaped);", "return doc.execCommand('insertHTML', false, text);", [
+        "test_t5_native_input_and_plain_text_newlines"]),
 ]
 
 
 def run_mutants():
     killed = 0
     for label, old, new, names in MUTANTS:
-        if SOURCE.count(old) != 1 or '\n' in old or '\n' in new:
+        old_lines, new_lines = old.split('\n'), new.split('\n')
+        if (SOURCE.count(old) != 1 or len(old_lines) != len(new_lines)
+                or sum(a != b for a, b in zip(old_lines, new_lines)) != 1):
             raise AssertionError("Mutation location must be unique and one line: " + label)
         ReportEditorFrameDOM.source = SOURCE.replace(old, new, 1)
         output = io.StringIO()
