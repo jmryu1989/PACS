@@ -224,6 +224,8 @@ render();
         self.responses["1.2.3"] = (200, dicom_series("1.2.3", "PELVIS"))
         page.locator("#body-parts-load").click()
         page.wait_for_function("!__body.model.snapshot().busy && __body.model.snapshot().verified === 3")
+        # The chip is redrawn by the page when the model reports the change (after the model's own state is set).
+        page.wait_for_function("document.querySelector('#chips').innerText === 'Chest saved (1)'")
         self.assertEqual(page.locator("#chips").inner_text(), "Chest saved (1)")
         self.assertNotIn("Partial", page.locator("#chips button").get_attribute("aria-label"))
 

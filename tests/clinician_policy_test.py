@@ -2531,7 +2531,7 @@ class ClinicianPolicySpec(unittest.TestCase):
 
         inject = "import { Injectable } from '@nestjs/common';\n"
         # the edits of auth.guard.ts below each change exactly the text they name
-        self.assertEqual(sources[API / "auth.guard.ts"].count("  SetMetadata, UnauthorizedException,\n"), 1)
+        self.assertEqual(sources[API / "auth.guard.ts"].count("  SetMetadata,\n"), 1)
         refused = {
             "reviewer: study-tags Get as Header and Public as HttpCode":
                 ({tags: reviewed}, renamed + r": \[\('Get', 'Header'\), \('Public', 'HttpCode'\)\]"),
@@ -2600,8 +2600,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                 {API / "auth.guard.ts": sources[API / "auth.guard.ts"] + "export default Public;\n"},
                 r"auth\.guard\.ts: Public occurs outside its declaration"),
             "SetMetadata of Public from another module": (
-                {API / "auth.guard.ts": sources[API / "auth.guard.ts"].replace("  SetMetadata, UnauthorizedException,\n",
-                                                                               "  UnauthorizedException,\n", 1)
+                {API / "auth.guard.ts": sources[API / "auth.guard.ts"].replace("  SetMetadata,\n", "", 1)
                  + "import { SetMetadata } from './clinician-policy';\n"},
                 r"auth\.guard\.ts: SetMetadata " + unbound + r" \{ SetMetadata \} from '@nestjs/common'"),
         }
@@ -2858,9 +2857,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
         # S7-U1a: 8 critical result rows, 3 allowed and 5 denied (132 = 4 + 2 + 20 + 106, read from the compiled app's Nest
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
-        # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata)
+        # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
+        # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
+        # (137 = 7 + 2 + 20 + 108)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (133, 4, 2, 20, 107), "the real inventory is unchanged: 133 = 4 + 2 + 20 + 107")
+                         (137, 7, 2, 20, 108), "the real inventory is unchanged: 137 = 7 + 2 + 20 + 108")
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
@@ -3112,9 +3113,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
         # S7-U1a: 8 critical result rows, 3 allowed and 5 denied (132 = 4 + 2 + 20 + 106, read from the compiled app's Nest
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
-        # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata)
+        # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
+        # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
+        # (137 = 7 + 2 + 20 + 108)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (133, 4, 2, 20, 107), "the real inventory is unchanged: 133 = 4 + 2 + 20 + 107")
+                         (137, 7, 2, 20, 108), "the real inventory is unchanged: 137 = 7 + 2 + 20 + 108")
         contract = CONTRACT["regex_or_division"]
         self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
                           sorted(UNREAD_PUNCT)),
@@ -3290,9 +3293,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
         # S7-U1a: 8 critical result rows, 3 allowed and 5 denied (132 = 4 + 2 + 20 + 106, read from the compiled app's Nest
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
-        # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata)
+        # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
+        # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
+        # (137 = 7 + 2 + 20 + 108)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (133, 4, 2, 20, 107), "the real inventory is unchanged: 133 = 4 + 2 + 20 + 107")
+                         (137, 7, 2, 20, 108), "the real inventory is unchanged: 137 = 7 + 2 + 20 + 108")
         contract = CONTRACT["class_heading"]
         # every class keyword of api/src has a heading class_heading reads, and no controller file's class extends
         keywords, extending = 0, set()

@@ -601,7 +601,9 @@ class PageSessionDOMTest(unittest.TestCase):
     def test_timeout_keeps_document_and_back_checks_end_record(self):
         for kind in ['admin','clinician']:
             with self.subTest(page=kind,case='timeout'):
-                self.fresh(kind); self.open(); self.page.clock.install()
+                # The transport keeps the timer functions it was created with (a viewer may later pause its own), so the
+                # controlled clock has to be in place before the page builds its transport.
+                self.fresh(kind); self.page.clock.install(); self.open()
                 path='/api/admin/users' if kind=='admin' else '/api/clinician/studies'
                 self.page.evaluate('synArm',dict(path=path,cut='headers',body={},respectAbort=True))
                 self.page.locator('#refresh').click()
