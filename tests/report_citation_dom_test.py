@@ -17,6 +17,7 @@ the collaborators that have nothing to do with the report, and it captures windo
 the shipped 20 s autosave callback runs on demand with its own declared delay asserted. Neither
 replaces a product function.
 """
+from page_source import read_page_source
 import json
 import os
 import unittest
@@ -27,7 +28,7 @@ from report_page_contract import install_contract
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = Path(os.environ.get("KIN_CITATION_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")).read_text(encoding="utf-8")
+MAIN = read_page_source(Path(os.environ.get("KIN_CITATION_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")))
 CITATION_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js").read_text(encoding="utf-8")
 # S3-structured-report added a block inside REPORT_BLOCK that builds its form object and registers
 # its listeners at the top level. The module and its markup must be here or the sliced script throws

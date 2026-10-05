@@ -1,3 +1,4 @@
+const { readPageSource } = require('./page_source.cjs');
 // TEST-S3-U3-CLIENT-MODEL: base-version origin, commit failure routing and the
 // refused-head payload, taken from the real main.html source (no copy, no DOM).
 // Run with: node --test tests/report_rebase_model_test.cjs
@@ -7,7 +8,7 @@ const { join } = require('node:path');
 const { test } = require('node:test');
 const vm = require('node:vm');
 
-const html = readFileSync(process.env.KIN_REBASE_MAIN || join(__dirname, '../worklist-v0/hpacs-lite/main.html'), 'utf8');
+const html = readPageSource(process.env.KIN_REBASE_MAIN || join(__dirname, '../worklist-v0/hpacs-lite/main.html'));
 
 /** The shipped function body, brace matched, so a test can never drift into a copy. */
 function extractFunction(source, name) {

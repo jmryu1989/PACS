@@ -80,6 +80,7 @@ receipts that replay the stored `applied` result, revision before state, author/
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is tests/clinician_question_live.py (hosted synthetic stack only).
 """
+from page_source import read_page_source
 import base64
 import copy
 import json
@@ -107,7 +108,7 @@ def lf_text(path):
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
 SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", "critical-result-inbox.js")}
-MAIN = lf_text(HPACS / "main.html")
+MAIN = read_page_source(HPACS / "main.html")
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
 INDEX_STAND_IN = ('<!doctype html><html><head><meta charset="utf-8"><title>SYN index stand-in</title></head>'
                   '<body><p id="stand-in">SYN index stand-in</p></body></html>')

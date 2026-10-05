@@ -23,6 +23,7 @@ measured a text the product never shows. The shipped refreshStorage() is cut out
 stubbed /statistics answer, so every header here carries a text the page itself produces; the longest one (the largest
 byte count it accepts) is the default, and each state it can draw is measured on its own at the one-row widths.
 """
+from page_source import read_page_source
 import json
 import os
 import re
@@ -90,7 +91,7 @@ STORAGE_SESSIONS = ('admin', 'max-offline')
 
 
 def page_html():
-    html = (ASSETS / 'main.html').read_text(encoding='utf-8')
+    html = read_page_source(ASSETS / 'main.html')
     html = re.sub(r'<script\b[^>]*>.*?</script>', '', html, flags=re.S)
     html = re.sub(r'<link rel="stylesheet" href="([^"]+)">',
                   lambda m: '<style>' + (ASSETS / m.group(1)).read_text(encoding='utf-8') + '</style>', html)
@@ -98,7 +99,7 @@ def page_html():
 
 
 def cut(start_marker, end_marker):
-    html = (ASSETS / 'main.html').read_text(encoding='utf-8')
+    html = read_page_source(ASSETS / 'main.html')
     start = html.find(start_marker)
     end = html.find(end_marker, start)
     return html[start:end] if start >= 0 and end > start else None

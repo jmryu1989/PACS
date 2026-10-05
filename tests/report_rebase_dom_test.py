@@ -6,6 +6,7 @@ the stale-rebase pane run on a blank page with a synthetic fetch, so there is no
 LiveStack, no Orthanc, no database and no original DICOM. Only the refusal body
 the test hands back can become the approved report shown to the user.
 """
+from page_source import read_page_source
 import json
 import os
 import unittest
@@ -16,7 +17,7 @@ from report_page_contract import install_contract
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = Path(os.environ.get("KIN_REBASE_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")).read_text(encoding="utf-8")
+MAIN = read_page_source(Path(os.environ.get("KIN_REBASE_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")))
 # S3-U2b put the citation state, the dedicated read and the insertion pane inside the same
 # contiguous product region this harness slices, so the real module has to be here too. The
 # citation behaviour itself is asserted in report_citation_dom_test.py.

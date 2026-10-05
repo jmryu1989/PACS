@@ -33,6 +33,7 @@ Rules, inherited from the U5 runner this is modelled on:
 
 stdlib only. It launches the browser test as a child process; it never drives a browser itself.
 """
+from page_source import read_page_source
 import argparse
 import hashlib
 import json
@@ -162,7 +163,7 @@ def main():
                         help="Check every anchor, marker and case name against the shipped sources and stop")
     args = parser.parse_args()
 
-    source = SOURCE.read_text(encoding="utf-8")
+    source = read_page_source(SOURCE)
     digest = hashlib.sha256(SOURCE.read_bytes()).hexdigest()
     print("main.html sha256 %s" % digest)
     problems = []

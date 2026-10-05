@@ -24,6 +24,7 @@ SYN- item is reachable from product code or HTTP.
 Two files may be replaced through KIN_STRUCT_MAIN / KIN_STRUCT_STRUCTURE_JS so the mutant runner can
 break the product on purpose without ever touching the source tree.
 """
+from page_source import read_page_source
 import json
 import os
 import re
@@ -38,7 +39,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN_PATH = Path(os.environ.get("KIN_STRUCT_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html"))
 STRUCTURE_PATH = Path(os.environ.get("KIN_STRUCT_STRUCTURE_JS",
                                      ROOT / "worklist-v0" / "hpacs-lite" / "report-structure.js"))
-MAIN = MAIN_PATH.read_text(encoding="utf-8")
+MAIN = read_page_source(MAIN_PATH)
 STRUCTURE_JS = STRUCTURE_PATH.read_text(encoding="utf-8")
 CITATION_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js").read_text(encoding="utf-8")
 VECTORS = json.loads((ROOT / "tests" / "report_structure_vectors.json").read_text(encoding="utf-8"))

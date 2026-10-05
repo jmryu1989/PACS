@@ -9,6 +9,7 @@ vectors are not decoration. agent.py is read by AST and never imported (it needs
 These are source pins and a model, not behaviour: the agent cases (SQLite), the compiled server cases, the DOM
 cases, the live route case and the restore probes are hosted-only and prove the behaviour this file only names.
 """
+from page_source import read_page_source
 import ast
 import hashlib
 import json
@@ -40,7 +41,7 @@ MIGRATION_NAME = "20260924140000_gateway_retry_request"
 U3_MIGRATION = "20260924130000_gateway_receipt"
 MIGRATION_PATH = ROOT / "api" / "prisma" / "migrations" / MIGRATION_NAME / "migration.sql"
 MIGRATION = text("api", "prisma", "migrations", MIGRATION_NAME, "migration.sql")
-MAIN = text("worklist-v0", "hpacs-lite", "main.html")
+MAIN = read_page_source(ROOT.joinpath("worklist-v0", "hpacs-lite", "main.html"))
 ARRIVALS = text("worklist-v0", "hpacs-lite", "study-arrivals.js")
 AUTH = text("worklist-v0", "hpacs-lite", "auth.js")
 INVARIANTS = text("tests", "invariants_live.py")

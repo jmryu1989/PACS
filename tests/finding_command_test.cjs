@@ -1,3 +1,4 @@
+const { readPageSource } = require('./page_source.cjs');
 const {install} = require('./module_session_harness.cjs');
 'use strict';
 /* TEST-S2B-PURE-TARGET / -RESULT / -LIST / -ADAPTER (REQ-S2B-LIST, REQ-S2B-COMMAND, REQ-S2B-BOUNDARY).
@@ -1571,7 +1572,7 @@ test('adapter: loading and switching the selected study sends only bound reads',
 
 test('wiring: review stands the Image Findings drawer down once per dictation run, and the reading review pane gives way down to its own rows', () => {
   // U4L attempt 1 (Astra B2/B3). Text pins only; what the rendered layout does is the hosted GEO proof.
-  const html = shipped('main.html'), css = shipped('reading-workspace.css');
+  const html = readPageSource(path.join(HP, 'main.html')), css = shipped('reading-workspace.css');
   // B2: one named host function inside the dictation block (the region the host DOM harness slices).
   const block = html.slice(html.indexOf('    // ══════════ 받아쓰기 (S3-ASR-U4) ══════════'),
                            html.indexOf('    $("#t-mod").addEventListener("change", renderTemplates);'));
