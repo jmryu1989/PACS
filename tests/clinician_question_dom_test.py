@@ -414,9 +414,10 @@ const draftClient = {
   },
 };
 const staleAnswer = () => Object.assign(new Error('SYN obsolete'), {stale:true});
-// Closure audit 2026-10-05: Log out also waits for a discard that is out (workBusy; nothing is out here) and reads the
-// report state first when a commit's outcome is unknown (none here). Both sit in the report region this file does not cut out.
-const workBusy = () => commitInFlight || insertInFlight, reportUnknownCommits = new Map();
+// The cut handler first asks whether a command of the report region is out (a save, an insertion, a discard). None is
+// in this file's cases: the stand-in answers that fact and copies no rule of the page (whether and how Log out waits for
+// one is tests/report_text_boundaries_dom_test.py's, on the real page). No commit of unknown outcome is kept either.
+const workBusy = () => false, reportUnknownCommits = new Map();
 """
 
 OTHER_PANEL = "() => { window.synOtherEnds = 0; KinWorkContext.onInvalidate(e => { if(e.reason === 'lifecycle' && !['active','preparing'].includes(e.state)) window.synOtherEnds += 1; }); }"

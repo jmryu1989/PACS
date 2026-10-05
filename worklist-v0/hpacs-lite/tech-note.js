@@ -146,7 +146,11 @@ window.KinTechNote = function (app) {
   const beforeunload = e => { if (d.open && (busy || dirty())) { e.preventDefault(); e.returnValue = ''; } };
   window.addEventListener('pagehide', pagehide);
   window.addEventListener('pageshow', pageshow); window.addEventListener('beforeunload', beforeunload);
-  return { dispose() {
+  return {
+  // S7-U5 A006: for Log Out's question - typed input differs from the saved note, or a save's result is not confirmed yet.
+  // Reading the note or its history is not unsaved work.
+  dirty: () => d.open && (dirty() || !!interruptedSave),
+  dispose() {
     end(); unsubscribe(); d.remove();
     window.removeEventListener('pagehide', pagehide);
     window.removeEventListener('pageshow', pageshow); window.removeEventListener('beforeunload', beforeunload);

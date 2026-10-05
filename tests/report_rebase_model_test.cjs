@@ -145,6 +145,37 @@ test('TEST-S3-U3-PAYLOAD: the approved report shown to the human comes from the 
 });
 
 /**
+ * A context whose globals are `stand` and, for any other name the running code reaches, main.html's own page-level
+ * function of that name (or a fresh `new Map()` / `new Set()` when the page declares the name as one), taken from the
+ * page when it is first reached. The test names only what it runs and what it stands in for; a page helper on the way
+ * that is renamed, split or inlined changes nothing here (AGENTS 1-B). `reached` lists what was taken.
+ */
+function pageScope(stand) {
+  const target = { ...stand }, reached = [];
+  let context = null;
+  const take = name => {
+    const fn = new RegExp(`^    (async )?function ${name}\\(`, 'm').exec(html);
+    if (fn && html.indexOf(`function ${name}(`) === fn.index + 4 + (fn[1] ? 6 : 0))
+      return vm.runInContext(`(${fn[1] || ''}${extractFunction(html, name)})`, context);
+    const store = new RegExp(`^    (?:const|let) ${name} = new (Map|Set)\\(\\);$`, 'm').exec(html);
+    return store ? new (store[1] === 'Map' ? Map : Set)() : undefined;
+  };
+  const scope = new Proxy(target, {
+    has: (t, name) => name in t || typeof name === 'string' && /^[A-Za-z_$][\w$]*$/.test(name)
+      && new RegExp(`^    (?:(?:async )?function ${name}\\(|(?:const|let) ${name} = new (?:Map|Set)\\(\\);$)`, 'm').test(html),
+    get: (t, name) => {
+      if (name in t || typeof name !== 'string') return t[name];
+      const value = take(name);
+      if (value !== undefined) { t[name] = value; reached.push(name); return value; }
+      // The language's own globals (Set, Promise, JSON, ...): a scope object that is a proxy is asked for those too.
+      return globalThis[name];
+    },
+  });
+  context = vm.createContext(scope);
+  return { context, reached };
+}
+
+/**
  * The shipped stashReport() over the shipped base-version block, executed (AGENTS 1-B, D73: the assertion below looks at
  * the base version the save carries and keeps, not at how the function reads it). The study was rendered at one version
  * (the block records it) and `state` is what the page holds for it afterwards (a poll may have moved its version). What
@@ -172,7 +203,7 @@ async function stashAfterRender({ rendered, state }) {
   } });
   const draftClient = require(join(lite, 'report-draft-client.js')).create({ transport, base: '/api' });
   draftClient.observe(UID, 'SYNEPOCH:0', state.draft ?? null);
-  const context = vm.createContext({
+  const { context } = pageScope({
     work, draftClient, reportConverge: new Set(),
     citations: { emptied() {} }, structureState: { emptied() {} },
     $: selector => ({ value: selector === '#findings' ? 'SYN typed findings' : '' }),
@@ -188,16 +219,9 @@ async function stashAfterRender({ rendered, state }) {
     'var KinAuth = { has: role => role === "radiologist" };',
     'function heldByOther() { return false; } function cur() { return null; } function reportNeedsWrite() { return true; }',
     'function renderDraftBar() {} function saveApp() {} function draftNotSaved() {}',
-    extractFunction(html, 'sameDraftText'),
-    // What the write sends is decided when its turn comes, from the page's kept text (closure audit 2026-10-05):
-    // saveReportDraft asks reportTextToSend, which reads the kept copy of the marked study; no commit is of unknown outcome here.
-    'var reportUnknownCommits = new Map();',
-    extractFunction(html, 'keepReportEditor'),
-    extractFunction(html, 'unconfirmedReport'),
-    'async ' + extractFunction(html, 'reportTextToSend'),
     // The scanner above returns the function without its `async` keyword. stashReport keeps the text and hands the
-    // write to saveReportDraft (the same function the autosave of every retained study uses).
-    'async ' + extractFunction(html, 'saveReportDraft'),
+    // write to the page's draft write (the same one the autosave of every retained study uses); what that reaches on
+    // the page is taken from the page as it is reached (pageScope).
     'async ' + extractFunction(html, 'stashReport'),
     'var outcome = stashReport();',
   ].join('\n'), context, { filename: 'stashReport.js' });

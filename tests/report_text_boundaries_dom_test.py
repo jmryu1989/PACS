@@ -31,7 +31,7 @@ leaving, Log out, pressing Save again, Recover Draft) and a Save that never arri
 on past a study the server refuses. Each case reads the stub server's stored draft row at the end and what the reader
 sees on coming back (same document, after a list read, a new document).
 Round 8 (A006, A015): Log out asks about unsaved work outside the report draft (a viewer's marks, finding text, Job
-edits; a dictation in review) in the same panel, only when a document of the session declares some - nothing is asked,
+edits, its Tech Note - review DR-F01; a dictation in review) in the same panel, only when a document of the session declares some - nothing is asked,
 posted or waited for otherwise, a closed window and another session's document count for nothing, and Back to Editing
 discards nothing; the viewer window the list opens is handed the list's session by its window name, and a viewer that
 stopped at its entry is read again when opened from the list.
@@ -2290,6 +2290,12 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                     self.work_viewer(["marks"], session="SYN-ANOTHER-SESSION")
                 else:
                     self.work_viewer(["marks"], answers=False).close()
+                    # Closing a page returns before the browser has dropped that document's locks; a person cannot
+                    # close a window and press Log out inside that gap. Press when the browser no longer holds the
+                    # closed window's declaration (main still counts any declaration it sees - the rule is unchanged).
+                    self.wait_until(lambda: not [name for name in self.locks(self.page)["held"]
+                                                 if name.startswith("kin-unsaved:")],
+                                    "the closed window's declaration is released by the browser")
                 # Keep the sending document alive until its outgoing channel traffic has been checked.
                 # The end notice can arrive on a different channel before an earlier question is delivered.
                 self.site.logout_answers = ["hold"]
@@ -2341,6 +2347,39 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.assertEqual((h.FIELDS, []), (self.editor(), self.dialogs))
         self.wait_until(lambda: self.heard(viewer, "session-resumed"), "the viewer goes on", page=viewer)
 
+    def test_an_unsaved_tech_note_in_a_viewer_is_named_in_the_unsaved_work_panel(self):
+        """Review DR-F01 (main's half; the viewer's side is tests/viewer_session_dom_test.py): a viewer window of the
+        session declares an unsaved Tech Note. Log out asks in the same panel and names it; Back to Editing ends nothing
+        and the viewer still holds its note."""
+        self.open_main()
+        viewer = self.work_viewer(["note"])
+        self.log_out_main()
+        expect(self.work_panel()).to_contain_text("Tech Note")
+        self.page.wait_for_timeout(300)
+        self.assertEqual(([], []), (self.site.logouts, self.dialogs), "DR-F01: the session ended over an unsaved Tech Note")
+        self.panel_button("Back to Editing").click()
+        expect(self.page.locator("dialog.kin-logout")).to_have_count(0)
+        self.wait_until(lambda: self.heard(viewer, "session-resumed"), "the viewer is told to go on", page=viewer)
+        self.assertEqual(([], []), (self.heard(viewer, "session-ended"), self.site.logouts))
+        self.assertTrue(any(name.startswith("kin-unsaved:" + self.site.cookie) and name.endswith(":note")
+                            for name in self.locks(viewer)["held"]), "the viewer's note is still there")
+        self.assertEqual([], self.dialogs)
+
+    def test_a_viewer_that_declared_an_unsaved_tech_note_and_does_not_answer_is_named_as_unconfirmed(self):
+        """Review DR-F01, as for the other kinds: a document that declared an unsaved Tech Note and does not answer
+        within the bound is not taken for clean - the panel names the note as not confirmed, and nothing ends."""
+        self.page.clock.install()
+        self.open_main()
+        viewer = self.work_viewer(["note"], answers=False)
+        self.log_out_main()
+        self.wait_until(lambda: viewer.evaluate("() => window.__synWork.queries.length") == 1, "the question", page=viewer)
+        self.assertEqual([], self.site.logouts)
+        self.page.clock.run_for(2000)
+        panel = self.work_panel()
+        expect(panel).to_contain_text("확인하지 못했습니다")
+        expect(panel).to_contain_text("Tech Note")
+        self.assertEqual([], self.site.logouts)
+
     def test_a_dictated_text_in_review_is_asked_about_at_log_out(self):
         """A006: a transcript the reader has not inserted yet is unsaved work of this page."""
         self.open_untouched()
@@ -2362,7 +2401,9 @@ class ReportTextBoundaries(h.LogoutDOMTest):
             with self.context.expect_page() as opened:
                 self.page.locator("#m-filmbox").click()
             viewer = self.watch(opened.value)
-            viewer.wait_for_load_state("load")
+            # The page event comes with the window's first document (the blank one window.open makes); the list then
+            # navigates it to the viewer. Wait for the viewer document itself to have loaded, not for that blank one.
+            viewer.wait_for_url("**/ohif/viewer?**", wait_until="load")
             return viewer
         self.page.locator("#m-filmbox").click()
         return known
