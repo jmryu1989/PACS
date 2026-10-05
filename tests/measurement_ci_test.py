@@ -583,7 +583,17 @@ class MeasurementCiTests(unittest.TestCase):
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
                           'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
-                          'gateway-e2e', 'critical-result-screens'})
+                          'gateway-e2e', 'critical-result-screens',
+                          # S7-U5: the session contract job's six profiles (validate.yml s7-u5-session-contracts matrix).
+                          'u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',
+                          'u5-session-mutants', 'u5-session-browser'})
+        validate = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        self.assertIn('profile: [u5-session-api, u5-session-draft, u5-session-regression, u5-session-boundaries, '
+                      'u5-session-mutants, u5-session-browser]', validate)
+        for name in ('u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',
+                     'u5-session-mutants', 'u5-session-browser'):
+            for suite in ci.PROFILES[name]['suites']:
+                self.assertTrue((ci.ROOT/'tests'/suite[0]).is_file(), (name, suite[0]))
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
