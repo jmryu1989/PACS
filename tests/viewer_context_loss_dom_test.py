@@ -517,7 +517,7 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.outcome)'), [409, 200])
         self.assertEqual(p.evaluate('noteServer.notes.map(n=>[n.version,n.text])'), [[1, 'SYN corrected dose 120 mAs']])
         expect(p.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
-        expect(p.get_by_label('Reason for Change')).to_have_value('  SYN correction  ')
+        expect(p.get_by_label('Reason for Change')).to_have_value('')
         self.assertEqual(p.evaluate('note.workspaceState()'), {'dirty': False, 'busy': False, 'unknown': False})
 
     def test_unknown_edited_save_first_commits_late_one_followup(self):

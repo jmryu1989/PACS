@@ -1,5 +1,5 @@
 # coding: utf-8
-"""REQ-S8-CTX -> RISK-CTX-WORK/SESSION -> CTX-NOTE-WRAPPER (R2-F01, R3-F01).
+"""REQ-S8-CTX -> RISK-CTX-WORK/SESSION -> CTX-NOTE-WRAPPER (R2-F01, R3-F01, R4-F01/F02).
 
 Real viewer-tech-note, note dialog, account verdict, page boundary and transport.
 Only renderer services and HTTP replies are synthetic; no stack or patient data.
@@ -143,19 +143,155 @@ class ViewerTechNoteDOMTest(unittest.TestCase):
     def assert_current_saved(self, version):
         expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v' + str(version))
         expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
-        expect(self.page.get_by_label('Reason for Change')).to_have_value('  SYN correction  ')
+        expect(self.page.get_by_label('Reason for Change')).to_have_value('')
         self.assertEqual({'dirty': False, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
 
-    def test_ordinary_save_preserves_text_and_reason_clean_one_request(self):
+    def test_ordinary_save_preserves_text_consumes_reason_clean_one_request(self):
         self.page.get_by_label('Reason for Change').fill('  SYN initial  ')
         self.save()
         expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
         expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN my note')
-        expect(self.page.get_by_label('Reason for Change')).to_have_value('  SYN initial  ')
+        expect(self.page.get_by_label('Reason for Change')).to_have_value('')
         self.assertEqual(len(self.posts), 1)
         self.assertEqual({'dirty': False, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
         self.page.keyboard.press('Escape')
         self.assertEqual(self.dialogs, [])
+
+    def test_open_reload_never_reuses_another_technicians_reason(self):
+        self.page.get_by_role('button', name='Close', exact=True).click()
+        self.dialogs.clear()
+        self.assertEqual(self.commit_note({'baseVersion': 0, 'text': 'SYN A', 'reason': ''}), 200)
+        self.assertEqual(self.commit_note({'baseVersion': 1, 'text': 'SYN B', 'reason': 'other tech: wrong kVp'}), 200)
+        self.notes[-1]['author'] = 'other technician'
+        self.page.get_by_role('button', name='Tech Note', exact=True).click()
+        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN B')
+        reason = self.page.get_by_label('Reason for Change')
+        expect(reason).to_have_value('')
+        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
+        self.page.keyboard.press('Escape')
+        self.assertEqual(self.dialogs, [])
+        self.page.get_by_role('button', name='Tech Note', exact=True).click()
+        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN B')
+        self.page.get_by_label('Note', exact=True).fill('SYN C')
+        self.save()
+        expect(self.page.locator('#tech-note-status')).to_contain_text('사유를 입력하세요')
+        self.assertEqual(self.posts, [])
+        reason.fill('my correction')
+        self.page.get_by_role('button', name='Reload Note', exact=True).click()
+        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN B')
+        expect(reason).to_have_value('')
+        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
+        self.page.get_by_label('Note', exact=True).fill('SYN C')
+        reason.fill('my current reason')
+        self.save()
+        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v3')
+        self.assertEqual([b['reason'] for b in self.posts], ['my current reason'])
+        expect(reason).to_have_value('')
+
+    def test_next_edit_or_clear_requires_a_new_reason_after_confirmed_save(self):
+        self.save()
+        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        note, reason = self.page.get_by_label('Note', exact=True), self.page.get_by_label('Reason for Change')
+        note.fill('SYN second'); reason.fill('R1')
+        self.save()
+        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v2')
+        expect(reason).to_have_value('')
+        for text in ('SYN third', ''):
+            with self.subTest(text=text):
+                note.fill(text)
+                self.save()
+                expect(self.page.locator('#tech-note-status')).to_contain_text('사유를 입력하세요')
+                expect(note).to_have_value(text)
+                self.assertEqual(len(self.posts), 2)
+        reason.fill('R2')
+        self.save()
+        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v3')
+        self.assertEqual([b['reason'] for b in self.posts], ['', 'R1', 'R2'])
+        expect(reason).to_have_value('')
+
+    def test_witness_consumes_sent_reason_and_gates_changed_text(self):
+        self.page.get_by_label('Reason for Change').fill('R1')
+        self.unknown_first(committed=True)
+        self.page.get_by_label('Note', exact=True).fill('SYN corrected dose 120 mAs')
+        self.save()
+        self.assert_followup_needs_reason(1)
+        expect(self.page.get_by_label('Reason for Change')).to_have_value('')
+
+    def test_unknown_existing_note_retry_without_reason_sends_nothing(self):
+        self.save()
+        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        self.edit_unknown()
+        self.unknown_first()
+        self.page.get_by_label('Reason for Change').fill('')
+        self.save()
+        expect(self.page.locator('#tech-note-status')).to_contain_text('사유를 입력하세요')
+        self.assertEqual(len(self.posts), 2)
+        self.assertEqual({'dirty': True, 'busy': False, 'unknown': True}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
+
+    def test_witness_preserves_a_retyped_equal_reason_for_the_current_text(self):
+        self.page.get_by_label('Reason for Change').fill('  SYN correction  ')
+        self.unknown_first(committed=True)
+        self.edit_unknown(reason='')
+        self.page.get_by_label('Reason for Change').fill('  SYN correction  ')
+        self.save()
+        self.assert_current_saved(2)
+        self.assertEqual([b['reason'] for b in self.posts], ['  SYN correction  ', '  SYN correction  '])
+
+    def test_reload_witness_consumes_sent_reason_without_writing(self):
+        self.page.get_by_label('Reason for Change').fill('R1')
+        self.unknown_first(committed=True)
+        self.page.get_by_role('button', name='Reload Note', exact=True).click()
+        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        expect(self.page.get_by_label('Reason for Change')).to_have_value('')
+        self.assertEqual(len(self.posts), 1)
+        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
+
+    def test_reload_witness_consumes_retyped_reason_sent_with_identical_retry(self):
+        reason = self.page.get_by_label('Reason for Change')
+        reason.fill('R1')
+        self.unknown_first()
+        reason.fill(''); reason.fill('R1')
+        self.post_modes = ['abort-commit']
+        self.save()
+        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+        self.page.get_by_role('button', name='Reload Note', exact=True).click()
+        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        expect(reason).to_have_value('')
+        self.assertEqual(len(self.posts), 2)
+        self.assertEqual(len(self.notes), 1)
+        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
+
+    def assert_followup_needs_reason(self, post_count):
+        status = self.page.locator('#tech-note-status')
+        expect(status).to_contain_text('앞의 메모는 v1으로 저장되었습니다')
+        expect(status).to_contain_text('사유를 입력한 뒤 Save Note')
+        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
+        expect(self.page.get_by_label('Reason for Change')).to_be_focused()
+        self.assertEqual(len(self.posts), post_count)
+        self.assertEqual({'dirty': True, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
+
+    def test_witness_followup_without_reason_sends_nothing_then_new_reason_saves(self):
+        self.unknown_first(committed=True)
+        self.edit_unknown(reason='')
+        self.save()
+        self.assert_followup_needs_reason(1)
+        self.save()
+        expect(self.page.locator('#tech-note-status')).to_contain_text('사유를 입력하세요')
+        self.assertEqual(len(self.posts), 1)
+        self.page.get_by_label('Reason for Change').fill('  SYN correction  ')
+        self.save()
+        self.assert_current_saved(2)
+        self.assertEqual([b['baseVersion'] for b in self.posts], [0, 1])
+
+    def test_cas_witness_followup_without_reason_sends_nothing_and_close_confirms(self):
+        self.first_commits_during_resend(reason='')
+        self.assert_followup_needs_reason(2)
+        self.assertEqual([b['baseVersion'] for b in self.posts], [0, 0])
+        self.assertEqual([n['text'] for n in self.notes], ['SYN my note'])
+        self.page.get_by_role('button', name='Close', exact=True).click()
+        self.assertEqual(len(self.dialogs), 1)
+        self.assertIn('저장하지 않은 메모 입력', self.dialogs[0])
+        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).not_to_be_visible()
 
     def test_unknown_old_read_sends_current_text_second_commits_first(self):
         self.unknown_first()
@@ -208,13 +344,14 @@ class ViewerTechNoteDOMTest(unittest.TestCase):
         self.assertTrue(self.page.evaluate('kinViewerTechNoteWorkspaceState().unknown'))
         self.assertEqual(len(self.posts), 1)
 
-    def first_commits_during_resend(self, reason='  SYN correction  ', change_account=False):
+    def first_commits_during_resend(self, reason='  SYN correction  ', change_account=False, followup_status=200):
         self.unknown_first()
         self.edit_unknown(reason)
         self.post_modes = ['hold', 'ok', 'hold']
         self.save()
         self.page.wait_for_function('window.heldNoteReady===true')
         expect(self.page.locator('#tech-note-status')).to_have_text('저장 중…')
+        self.post_status = followup_status
         if change_account:
             # A refused POST throws before the trailing check: only the re-check's
             # two identity reads precede the follow-up's leading check.
@@ -230,10 +367,11 @@ class ViewerTechNoteDOMTest(unittest.TestCase):
         self.assertEqual([n['text'] for n in self.notes], ['SYN my note', 'SYN corrected dose 120 mAs'])
 
     def test_followup_refusal_keeps_box_and_stops_after_one_write(self):
-        self.first_commits_during_resend(reason='')
+        self.first_commits_during_resend(followup_status=400)
         expect(self.page.locator('#tech-note-status')).to_contain_text('저장되지 않았습니다')
         self.page.wait_for_function('!kinViewerTechNoteWorkspaceState().busy', timeout=2000)
         expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
+        expect(self.page.get_by_label('Reason for Change')).to_have_value('  SYN correction  ')
         self.assertEqual([b['baseVersion'] for b in self.posts], [0, 0, 1])
         self.assertEqual([n['text'] for n in self.notes], ['SYN my note'])
         self.assertEqual({'dirty': True, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
@@ -248,9 +386,11 @@ class ViewerTechNoteDOMTest(unittest.TestCase):
         expect(self.page.get_by_label('Reason for Change')).to_have_value('  SYN correction  ')
         self.assertEqual(len(self.posts), 1)
         self.assertTrue(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-        # Matching the read server version is clean even though our attempt failed.
+        # Only note text has a server baseline; a newly typed reason stays dirty.
         self.page.get_by_label('Note', exact=True).fill('SYN other reader')
         self.page.get_by_label('Reason for Change').fill('SYN other reason')
+        self.assertTrue(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
+        self.page.get_by_label('Reason for Change').fill('')
         self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
         self.page.keyboard.press('Escape')
         self.assertEqual(self.dialogs, [])

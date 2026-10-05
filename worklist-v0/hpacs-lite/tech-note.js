@@ -14,8 +14,13 @@ window.KinTechNote = function (app) {
     <div id="tech-note-history-items"></div><button id="tech-note-more" type="button" hidden>Load More</button>`;
   document.body.append(d);
   const $ = id => d.querySelector('#tech-note-' + id);
-  let uid = null, seq = 0, busy = false, ended = false, writable = false, version = 0, saved = '', savedReason = '', cursor = null, opener, openerDocument, innerOpener;
-  const dirty = () => $('text').value !== saved || $('reason').value.trim() !== savedReason;
+  let uid = null, seq = 0, busy = false, ended = false, writable = false, version = 0, saved = '', reasonInput = 0, cursor = null, opener, openerDocument, innerOpener;
+  const dirty = () => $('text').value !== saved || !!$('reason').value.trim();
+  $('reason').addEventListener('input', () => { ++reasonInput; });
+  function consumeReason(attempt) {
+    // A witnessed write consumes only its own input, never a reason typed later.
+    if (attempt.reasonInput === reasonInput) $('reason').value = '';
+  }
   const status = text => { $('status').textContent = text; };
   function controls() {
     $('save').disabled = busy || !writable || !app.allowed() || ended;
@@ -27,13 +32,12 @@ window.KinTechNote = function (app) {
   function remember(result) {
     if (result.uid !== uid || result.note && result.note.studyUid !== uid) throw new Error('메모 대상이 일치하지 않습니다');
     writable = result.writable === true; version = result.note?.version ?? 0; saved = result.note?.text ?? '';
-    savedReason = result.note?.reason ?? '';
     app.changed?.(uid, result.note);
     $('meta').textContent = result.note ? `v${version} · ${result.note.author} · ${new Date(result.note.createdAt).toLocaleString()}` : '저장된 메모 없음';
   }
   function adopt(result) {
     remember(result);
-    $('text').value = saved; $('reason').value = savedReason;
+    $('text').value = saved; $('reason').value = '';
     status(writable ? '내용을 확인한 뒤 명시적으로 저장하세요.' : '읽기 전용 · 촬영 기관의 작성 권한이 필요합니다.');
   }
   async function read() {
@@ -52,28 +56,36 @@ window.KinTechNote = function (app) {
       const pending=interruptedSave;
       const outcome=await reconcileSave(pending);
       if(outcome==='unchanged')await saveCurrent(pending.body.baseVersion,pending);
-      else if(outcome==='stored'&&dirty())await saveCurrent(version);
+      else if(outcome==='stored'&&dirty())await saveFollowup();
       return;
     }
     if (busy || !writable || !app.allowed() || ended) return;
-    if (version && !$('reason').value.trim()) { status('수정·비우기 사유를 입력하세요.'); $('reason').focus(); return; }
     await saveCurrent(version);
   };
   const savedStatus = () => '저장되었습니다. v' + version + (dirty() ? ' · 이후 입력은 아직 저장되지 않았습니다.' : '');
   function saveCurrent(baseVersion, prior=null) {
+    if (baseVersion && !$('reason').value.trim()) { status('수정·비우기 사유를 입력하세요.'); $('reason').focus(); return; }
     return save({ baseVersion, text: $('text').value, reason: $('reason').value }, prior);
+  }
+  function saveFollowup() {
+    if (!$('reason').value.trim()) {
+      status('앞의 메모는 v' + version + '으로 저장되었습니다 · 고친 내용은 사유를 입력한 뒤 Save Note를 누르세요.');
+      $('reason').focus(); return;
+    }
+    return saveCurrent(version);
   }
   async function save(body, prior=null) {
     if(work.state()!=='active'||busy||!writable||!app.allowed()||ended||!d.open)return;
     const at=work.capture('document');
     const ticket = ++seq, target = uid;
     let settled, confirmed = false, recheck = false;
-    const pending={target,body,attempts:[...(prior?.attempts||[]),body],previous:prior?prior.previous:saved,done:new Promise(resolve=>{settled=resolve;})};
+    const attempt={body,reasonInput};
+    const pending={target,body,attempts:[...(prior?.attempts||[]),attempt],previous:prior?prior.previous:saved,done:new Promise(resolve=>{settled=resolve;})};
     interruptedSave=pending;busy = true; controls(); status('저장 중…');
     try {
       const result = await app.api('POST', '/studies/' + encodeURIComponent(target) + '/tech-note', body, undefined, at);
       work.commit(at,()=>{if (valid(ticket, target)) {
-        remember(result); $('history-items').replaceChildren(); $('more').hidden = true; cursor = null;
+        remember(result); consumeReason(attempt); $('history-items').replaceChildren(); $('more').hidden = true; cursor = null;
         confirmed = true;
         status(savedStatus());
       }});
@@ -95,7 +107,7 @@ window.KinTechNote = function (app) {
       const outcome=await reconcileSave(pending);
       // This Save press may follow a witnessed earlier write once. The new write
       // has no unresolved predecessor, so its own answer cannot start a retry loop.
-      if(outcome==='stored'&&dirty())await saveCurrent(version);
+      if(outcome==='stored'&&dirty())await saveFollowup();
     }
   }
   const unknownActions='저장 결과는 아직 알 수 없습니다 · 입력은 유지되며 Save Note는 확인 후 재시도하고 Reload Note는 결과만 확인합니다.';
@@ -126,7 +138,9 @@ window.KinTechNote = function (app) {
         if(!valid(ticket,target))return;
         if(result.uid!==target||result.note&&result.note.studyUid!==target)throw new Error('메모 대상이 일치하지 않습니다');
         const latest=result.note,revision=latest?.version??0;
-        const witnessed=next&&pending.attempts.some(body=>next.text===body.text&&(next.reason||'')===(body.reason||'').trim());
+        // Identical retries are the same write; consume the latest matching input.
+        const witnessed=next&&pending.attempts.findLast(({body})=>next.text===body.text&&(next.reason||'')===(body.reason||'').trim());
+        if(witnessed)consumeReason(witnessed);
         const stored=revision===pending.body.baseVersion+1&&witnessed;
         const unchanged=revision===pending.body.baseVersion&&(latest?.text??'')===pending.previous;
         if(stored){$('history-items').replaceChildren();$('more').hidden=true;cursor=null;}
@@ -172,7 +186,7 @@ window.KinTechNote = function (app) {
       ? '저장 결과를 알 수 없습니다. 메모 입력을 버리고 닫을까요? 다시 열어 최신 메모와 이력을 확인하세요.'
       : '저장하지 않은 메모 입력을 버리고 닫을까요?'))) return;
     const closedUid = uid;
-    ++seq; uid = null; busy = false; writable = false; saved = savedReason = ''; version = 0; interruptedSave = null;
+    ++seq; uid = null; busy = false; writable = false; saved = ''; version = 0; interruptedSave = null;
     $('text').value = $('reason').value = ''; $('history-items').replaceChildren(); $('target').textContent = $('meta').textContent = ''; status('');
     if (d.open) d.close();
     if (!force) {

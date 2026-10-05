@@ -2417,7 +2417,7 @@ class LogoutDOMTest(unittest.TestCase):
         expect(page.locator("#tech-note-status")).to_have_text(
             "저장되었습니다. v2" if stored else "저장 결과는 아직 알 수 없습니다 · 입력은 유지되며 Save Note는 확인 후 재시도하고 Reload Note는 결과만 확인합니다.")
         expect(page.locator("#tech-note-text")).to_have_value("SYN note before preparation")
-        expect(page.locator("#tech-note-reason")).to_have_value("  SYN correction  ")
+        expect(page.locator("#tech-note-reason")).to_have_value("" if stored else "  SYN correction  ")
         expect(page.locator("#tech-note-save")).to_be_enabled()
         if stored:
             page.fill("#tech-note-text", "SYN next edit")
