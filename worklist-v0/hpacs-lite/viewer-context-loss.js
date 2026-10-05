@@ -16,7 +16,7 @@
     const records = new Map(), borrowers = new Set(), subscribers = new Set(), covers = new Map(), rendered = new Map();
     const recovery = boundary.recovery;
     let active = false, timer = null, fault = null, attempt = 0, checking = false, account = recovery?.account || null;
-    let repeat = 1, auditState = 'unknown', resultSent = false;
+    let repeat = 1, auditState = 'unknown', resultSent = false, resultTimer = null, pendingReload = null;
     const previous = root.history.state?.kinViewerContext;
     let viewId = recovery?.viewId || root.crypto.randomUUID();
     const entry = root.crypto.randomUUID();
@@ -93,7 +93,7 @@
       if (record.lost || !lost(record.engine) || !rows.some(row => row.engine === record.engine)) return;
       record.lost = true;
       if (!fault) {
-        if (recovery && !resultSent) { resultSent = true; audit('recovery-result', 'none', 'failed', { ...recovery, id: recovery.faultId, kind: 'unknown' }); }
+        finishRecovery('failed');
         fault = { id: root.crypto.randomUUID(), kind: kind(rows.find(row => row.engine === record.engine)?.type) }; countFault(); audit('loss');
       }
       // Synchronous release precedes any consumer's later readback or commit.
@@ -105,7 +105,14 @@
       if (record?.restore.length) return record;
       if (!record) { record = { engine, lost: false, restore: [] }; records.set(engine, record); }
       const canvas = context(engine)?.canvas;
-      const detect = event => { if (active) confirmLoss(record, consumers()); if (record.lost) event?.preventDefault(); };
+      const detect = event => {
+        if (!active) return false;
+        const broken = record.lost || lost(engine);
+        if (!broken) return false;
+        try { confirmLoss(record, consumers()); } catch (_) { /* The scan retries discovery; a lost engine must not draw. */ }
+        if (record.lost) event?.preventDefault();
+        return true;
+      };
       if (canvas) {
         canvas.addEventListener('webglcontextlost', detect);
         record.restore.push(() => canvas.removeEventListener('webglcontextlost', detect));
@@ -114,7 +121,7 @@
       for (const name of ['render', 'renderViewport', 'renderViewports', 'renderFrameOfReference', '_renderFlaggedViewports', 'resize']) {
         const original = engine[name]; if (typeof original !== 'function') continue;
         const guarded = function (...args) {
-          detect(); if (record.lost) return;
+          if (detect()) return;
           return original.apply(this, args);
         };
         engine[name] = guarded;
@@ -146,8 +153,12 @@
     function recovered() {
       if (resultSent || fault || !account || account !== recovery?.account || !boundary.active()) return;
       const rows = consumers(); if (!rows.length || rows.some(row => lost(row.engine))) return;
-      resultSent = true;
-      audit('recovery-result', 'none', 'succeeded', { ...recovery, id: recovery.faultId, kind: 'unknown' });
+      finishRecovery('succeeded');
+    }
+    function finishRecovery(result) {
+      if (!recovery || resultSent) return;
+      resultSent = true; root.clearTimeout(resultTimer);
+      audit('recovery-result', 'none', result, { ...recovery, id: recovery.faultId, kind: 'unknown' });
     }
     function workState() {
       if (!['writer', 'read-only'].includes(session.state())) return { reason: 'guard-unavailable' };
@@ -189,7 +200,6 @@
         let admission = await boundary.recoveryAdmission();
         if (admission.status !== 'allowed') return refuse(admission.reason || 'unknown');
         if (!gate.admits(at) || at.session !== boundary.session()) return refuse('preparing');
-        audit('manual-retry');
         let work = workState();
         for (const cover of covers.values()) { cover.discard.hidden = !work.dirty || !!work.reason; cover.review.hidden = !work.dirty && !work.reason; }
         if (work.reason) return refuse(work.reason);
@@ -214,12 +224,39 @@
           if (admitted.status !== 'allowed') { refuse(admitted.reason || 'unknown'); return; }
           const final = workState(); if (final.reason || final.dirty && !discard) { refuse(final.reason || 'dirty'); return; }
           const marker = { entry, session: at.session, account, href: root.location.href, viewId, faultId: fault.id, repeatCount: repeat, attempt, at: now() };
-          try {
+          pendingReload?.();
+          const persist = () => {
             root.sessionStorage.setItem('kin-viewer-recovery', JSON.stringify(marker));
             root.history.replaceState({ ...root.history.state, kinViewerRecovery: marker }, '');
             if (root.sessionStorage.getItem('kin-viewer-recovery') !== JSON.stringify(marker)) throw Error();
-          } catch (_) { refuse('marker'); return; }
-          root.location.reload();
+          };
+          const clear = () => {
+            if (root.sessionStorage.getItem('kin-viewer-recovery') === JSON.stringify(marker)) root.sessionStorage.removeItem('kin-viewer-recovery');
+            const state = root.history.state;
+            if (state?.kinViewerRecovery?.entry === entry && state.kinViewerRecovery.attempt === marker.attempt) {
+              const { kinViewerRecovery, ...rest } = state; root.history.replaceState(rest, '');
+            }
+          };
+          try { persist(); clear(); } catch (_) { try { clear(); } catch (_) {} refuse('marker'); return; }
+          // Only pagehide proves that this reload left the document. A cancelled
+          // prompt writes no marker; the next beforeunload retires this attempt
+          // before an ordinary F5/back/link navigation can reach pagehide.
+          let unloadingSeen = false;
+          const retire = () => {
+            root.removeEventListener('beforeunload', unloading);
+            root.removeEventListener('pagehide', leaving);
+            if (pendingReload === retire) pendingReload = null;
+          };
+          const unloading = () => { if (unloadingSeen) retire(); else unloadingSeen = true; };
+          const leaving = () => {
+            retire();
+            try { root.sessionStorage.setItem('kin-viewer-recovery-departure', JSON.stringify(marker)); }
+            catch (_) { /* Without an actual departure receipt the next document starts normally. */ }
+          };
+          pendingReload = retire;
+          root.addEventListener('beforeunload', unloading);
+          root.addEventListener('pagehide', leaving);
+          try { root.location.reload(); } catch (error) { retire(); throw error; }
         })) refuse('preparing');
       } catch (_) { refuse('request'); }
       finally { checking = false; }
@@ -241,13 +278,17 @@
           if (session.sameAccount(me) !== true || me.sessionId !== boundary.session()) return;
           const who = accountOf(me); if (!who || account && who !== account) return;
           bindAccount(me, at);
-          if (recovery && !resultSent) audit('recovery-result', 'none', 'unknown', { ...recovery, id: recovery.faultId, kind: 'unknown' });
+          if (recovery) audit('manual-retry', 'none', 'unknown', { ...recovery, id: recovery.faultId, kind: 'unknown' });
         });
       } catch (_) { /* Retry performs its own bounded account confirmation. */ }
     }
     const api = Object.freeze({
-      start() { if (active) return; active = true; scan(); identify(); timer = root.setInterval(scan, 200); },
-      stop() { active = false; root.clearInterval(timer); for (const r of records.values()) for (const restore of r.restore.splice(0)) restore();
+      start() { if (active) return; active = true; scan(); identify(); timer = root.setInterval(scan, 200);
+        // No rendered receipt within this observation window is one unknown
+        // result, never an early unknown followed by a contradictory success.
+        if (recovery && !resultSent) resultTimer = root.setTimeout(() => finishRecovery('unknown'), 30000);
+      },
+      stop() { finishRecovery('unknown'); root.clearTimeout(resultTimer); active = false; root.clearInterval(timer); for (const r of records.values()) for (const restore of r.restore.splice(0)) restore();
         for (const remove of rendered.values()) remove(); rendered.clear();
         for (const [element, cover] of covers) { cover.box.remove(); element.style.position = cover.position; } covers.clear(); },
       onContextLoss(release) {

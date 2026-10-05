@@ -27,7 +27,6 @@ export type AuditFieldSource = 'detail.institutionId' | 'detail.by' | 'detail.in
 
 /** 검사·기관 행: 행이 기록한 칸 하나가 귀속 기관이다. 값이 없거나 문자열이 아니면 숨긴다. */
 export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Object.freeze({
-  'viewer-context.event': 'detail.institution',
   "study.arrived": 'detail.institutionId',        // 생성 때의 소유 기관(system 동기화, null = 미배정)
   "study.announce": 'detail.institutionId',       // 생성 때의 소유 기관(Gateway 자격증명 기관)
   "study.assign": 'detail.institutionId',         // 새로 배정한 소유 기관(재배정은 거절됨)
@@ -41,6 +40,7 @@ export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Obj
   "reader.assignment": 'detail.institution',      // 소유 기관만 배정한다
   "study.access": 'detail.institution',           // 정책 기관, 쓸 때 대상 회원이 그 기관 소속이었다
   "study.consultation": 'detail.institution',     // 소유 기관만 의뢰한다
+  "viewer-context.event": 'detail.institution',
   "hanging-protocol.site.save": 'target',         // target이 기관 id다
   "hanging-protocol.site.reset": 'target',
   // S7-U5 접속기록: 사건 시점 토큰의 그룹이 정확히 하나일 때의 기관(로그인은 검증한 토큰, 종료는 지운 세션의 저장 토큰,

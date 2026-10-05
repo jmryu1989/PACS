@@ -55,6 +55,7 @@ Retained (diagnosis scenario 0.C; U5S-REQ-25): BR-01..BR-09 with the contract up
 Mutants (U5S-REQ-26) are one-off copies run outside this file; nothing here edits a product file.
 """
 import json
+import os
 import re
 import sys
 import time
@@ -745,6 +746,86 @@ class LogoutDOMTest(unittest.TestCase):
         expect(page.locator("#rows")).to_contain_text(PATIENT)
         expect(page.locator("#user")).to_have_text(who["displayName"])
         return page
+
+    # S8-CTX F01/F02: the shared note must preserve the worklist's close/escape
+    # contract and tell apart a refused write and a missing receipt.
+    def note_save_failure(self, failure):
+        source = os.environ.get('KIN_CTX_TECH_NOTE_JS')
+        if source:
+            self.context.route('**/tech-note.js', lambda r: r.fulfill(body=Path(source).read_text(encoding='utf-8'), content_type='text/javascript'))
+        self.open_main()
+        self.page.locator('#rows tr').first.click()
+        self.note_calls = []
+        def reply(route):
+            method = route.request.method
+            self.note_calls.append(method)
+            if method == 'GET' and len(self.note_calls) == 1:
+                route.fulfill(json={'uid': UID, 'writable': True, 'note': None})
+            elif method == 'POST' and failure != 'network':
+                if failure == 'unreadable':
+                    route.fulfill(status=400, body='{', content_type='application/json')
+                else:
+                    status, body = failure
+                    route.fulfill(status=status, json=body)
+            else:
+                route.abort()
+        self.context.route('**/api/studies/*/tech-note', reply)
+        self.page.locator('#rows [data-tech-note]').first.click()
+        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_label('Note', exact=True)).to_be_editable()
+        self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_label('Note', exact=True).fill('SYN my note')
+        self.page.get_by_role('button', name='Save Note', exact=True).click()
+        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('button', name='Close', exact=True)).to_be_enabled()
+
+    def test_ctx_note_409_refusal_sentence_and_original_reload_confirmation(self):
+        self.note_save_failure((409, {'message': '다른 메모가 먼저 저장되었습니다. 최신 메모를 확인하세요.'}))
+        expect(self.page.locator('#tech-note-status')).to_have_text('저장되지 않았습니다: 다른 메모가 먼저 저장되었습니다. 최신 메모를 확인하세요. · 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.')
+        self.assertEqual(self.note_calls, ['GET', 'POST'])
+        self.dialog_answers.append(False)
+        self.page.get_by_role('button', name='Reload Note', exact=True).click()
+        self.assertIn('입력 중인 메모를 버리고', self.dialogs[-1])
+        self.assertEqual(self.note_calls, ['GET', 'POST'])
+        self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('button', name='Close', exact=True).click()
+        expect(self.page.locator('#tech-note-dialog')).not_to_be_visible()
+        expect(self.page.locator('#findings')).to_be_editable()
+
+    def test_ctx_note_answered_refusal_closes_without_history(self):
+        for code in (400, 403, 500):
+            with self.subTest(status=code):
+                if code != 400:
+                    self.fresh_context()
+                self.note_save_failure((code, {'message': 'SYN not stored', 'stored': False}))
+                expect(self.page.locator('#tech-note-status')).to_contain_text('저장되지 않았습니다')
+                expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_label('Note', exact=True)).to_have_value('SYN my note')
+                self.page.keyboard.press('Escape')
+                expect(self.page.locator('#tech-note-dialog')).not_to_be_visible()
+                self.assertEqual(self.note_calls, ['GET', 'POST'])
+                expect(self.page.locator('#findings')).to_be_editable()
+
+    def test_ctx_note_unknown_close_cancel_then_escape_during_minute_outage(self):
+        self.note_save_failure('network')
+        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+        self.dialog_answers.append(False)
+        self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('button', name='Close', exact=True).click()
+        self.assertIn('저장 결과를 알 수 없습니다', self.dialogs[-1])
+        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_label('Note', exact=True)).to_have_value('SYN my note')
+        self.page.get_by_role('button', name='Reload Note', exact=True).click()
+        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+        self.page.keyboard.press('Escape')
+        expect(self.page.locator('#tech-note-dialog')).not_to_be_visible()
+        # Synthetic API outage covers all subsequent traffic; wall-clock passage
+        # is simulated so the busy PC does not decide whether the dialog closes.
+        self.context.route('**/api/**', lambda r: r.abort())
+        self.page.clock.install()
+        self.page.clock.run_for(61000)
+        self.page.locator('#rows tr').first.click()
+        self.page.locator('#findings').fill('SYN report remains usable')
+        expect(self.page.locator('#findings')).to_have_value('SYN report remains usable')
+
+    def test_ctx_note_unreadable_answer_keeps_unknown_sentence_and_closes(self):
+        self.note_save_failure('unreadable')
+        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+        self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('button', name='Close', exact=True).click()
+        expect(self.page.locator('#tech-note-dialog')).not_to_be_visible()
 
     def open_admin(self):
         self.site.account = ADMIN

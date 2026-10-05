@@ -357,8 +357,10 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p = self.page; self.lose(); self.click_reload()
         p.wait_for_function('!new URL(location).searchParams.has("kinFinding")'); p.evaluate('boot'); p.wait_for_timeout(120)
         self.assertFalse(any(a['result'] == 'succeeded' for a in self.audit))
+        self.assertEqual([a for a in self.audit if a['stage'] == 'recovery-result'], [])
         p.evaluate('views.get("0").element.dispatchEvent(new Event("IMAGE_RENDERED"))'); p.wait_for_timeout(100)
         self.assertEqual(len([a for a in self.audit if a['result'] == 'succeeded']), 1)
+        self.assertEqual(len([a for a in self.audit if a['stage'] == 'recovery-result']), 1)
         p.evaluate('views.get("0").element.dispatchEvent(new Event("IMAGE_RENDERED"))'); p.wait_for_timeout(80)
         self.assertEqual(len([a for a in self.audit if a['result'] == 'succeeded']), 1)
         self.assertTrue(all('text' not in a and 'actor' not in a for a in self.audit))
@@ -397,8 +399,22 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.evaluate('lose(0);failNote()'); p.wait_for_timeout(80)
         expect(p.get_by_label('Note', exact=True)).to_have_value('kept note')
         self.assertTrue(p.evaluate('note.workspaceState().unknown'))
+        p.evaluate('role="writer";kinViewerTechNoteWorkspaceState=()=>note.workspaceState()')
+        # Recovery is outside this modal. Invoke its real button without stealing
+        # the dialog's focus; unknown cannot be bypassed by recovery discard.
+        p.locator('#image0 button').filter(has_text='Reload Viewer').first.evaluate('(b)=>b.click()')
+        expect(p.locator('#image0 [role="status"]')).to_contain_text('저장 결과')
+        expect(p.get_by_role('button', name='Discard Viewer Changes & Reload')).to_be_hidden()
+        p.remove_listener('dialog', self.accept_dialog)
+        reject = lambda d: d.dismiss()
+        p.on('dialog', reject)
         p.get_by_role('button', name='Close', exact=True).click()
         self.assertTrue(p.locator('#tech-note-dialog').evaluate('(d)=>d.open'))
+        self.assertTrue(p.evaluate('note.workspaceState().unknown'))
+        p.remove_listener('dialog', reject); p.on('dialog', self.accept_dialog)
+        p.keyboard.press('Escape')
+        self.assertFalse(p.locator('#tech-note-dialog').evaluate('(d)=>d.open'))
+        p.get_by_label('Report').fill('editor usable')
 
     def test_foreign_and_old_entry_markers_are_consumed_as_ordinary_entry(self):
         p = self.page
@@ -484,6 +500,7 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.wait_for_function('!note.workspaceState().unknown && !note.workspaceState().busy')
         expect(p.get_by_label('Note', exact=True)).to_have_value('my input')
         self.assertTrue(p.evaluate('note.workspaceState().dirty'))
+        expect(p.locator('#tech-note-status')).to_contain_text('저장되었습니다. v1')
 
     def test_tech_note_conflicting_revision_resolves_uncertainty_keeps_input(self):
         p = self.page; p.add_script_tag(url=BASE + '/worklist/hpacs-lite/tech-note.js')
@@ -500,6 +517,134 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.wait_for_function('!note.workspaceState().unknown && !note.workspaceState().busy')
         expect(p.get_by_label('Note', exact=True)).to_have_value('my input')
         self.assertTrue(p.evaluate('note.workspaceState().dirty'))
+        expect(p.locator('#tech-note-status')).to_have_text('저장되지 않았습니다. 다른 메모가 저장되었습니다. 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.')
+
+    def test_foreign_later_history_is_not_our_saved_attempt(self):
+        p = self.page; p.add_script_tag(url=BASE + '/worklist/hpacs-lite/tech-note.js')
+        p.evaluate('''() => {
+          window.posted=false;
+          window.note=KinTechNote({allowed:()=>true,api:async(method,path)=>{
+            if(method==='POST'){posted=true;throw Error('lost answer')}
+            if(path.includes('/history?'))return {uid:'1.2.3',items:[{studyUid:'1.2.3',version:1,text:'other input',reason:''}]};
+            return {uid:'1.2.3',writable:true,note:posted?{studyUid:'1.2.3',version:2,text:'later',reason:'change'}:null};
+          }});note.open({uid:'1.2.3'});
+        }''')
+        p.get_by_label('Note', exact=True).fill('my input')
+        p.get_by_role('button', name='Save Note', exact=True).click()
+        p.wait_for_function('note.workspaceState().unknown && !note.workspaceState().busy')
+        p.get_by_role('button', name='Reload Note', exact=True).click()
+        expect(p.locator('#tech-note-status')).to_have_text('저장되지 않았습니다. 다른 메모가 저장되었습니다. 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.')
+        self.assertFalse(p.evaluate('note.workspaceState().unknown'))
+        expect(p.get_by_label('Note', exact=True)).to_have_value('my input')
+
+    def test_cancelled_beforeunload_then_f5_is_ordinary_without_attempt_audit(self):
+        p = self.page; self.lose()
+        p.evaluate('window.block=true;addEventListener("beforeunload",e=>{if(block){e.preventDefault();e.returnValue=""}})')
+        p.remove_listener('dialog', self.accept_dialog)
+        dismiss = lambda d: d.dismiss()
+        p.on('dialog', dismiss)
+        self.click_reload()
+        p.wait_for_function('!sessionStorage.getItem("kin-viewer-recovery") && !history.state.kinViewerRecovery')
+        self.assertIsNone(p.evaluate('sessionStorage.getItem("kin-viewer-recovery-departure")'))
+        self.assertIn('kinFinding=once', p.url)
+        self.assertEqual([a for a in self.audit if a['stage'] != 'loss'], [])
+        p.remove_listener('dialog', dismiss); p.on('dialog', self.accept_dialog)
+        p.evaluate('block=false')
+        p.reload(); p.evaluate('boot')
+        self.assertIsNone(p.evaluate('KinViewerSessionBoundary.recovery'))
+        self.assertTrue(p.evaluate('findingConsumed'))
+        self.assertEqual([a for a in self.audit if a['stage'] != 'loss'], [])
+
+    def test_accepted_beforeunload_preserves_marker_until_new_document(self):
+        p = self.page; self.lose()
+        p.evaluate('addEventListener("beforeunload",e=>{e.preventDefault();e.returnValue=""})')
+        self.click_reload()
+        p.wait_for_function('!new URL(location).searchParams.has("kinFinding")'); p.evaluate('boot')
+        self.assertIsNotNone(p.evaluate('KinViewerSessionBoundary.recovery'))
+
+    def test_back_forward_after_cancel_is_ordinary(self):
+        p = self.page; self.lose()
+        p.evaluate('window.block=true;addEventListener("beforeunload",e=>{if(block){e.preventDefault();e.returnValue=""}})')
+        p.remove_listener('dialog', self.accept_dialog)
+        dismiss = lambda d: d.dismiss()
+        p.on('dialog', dismiss); self.click_reload()
+        p.wait_for_function('!sessionStorage.getItem("kin-viewer-recovery")')
+        p.remove_listener('dialog', dismiss); p.on('dialog', self.accept_dialog)
+        p.evaluate('block=false'); p.goto(BASE + '/other'); p.go_back(); p.evaluate('boot')
+        self.assertIsNone(p.evaluate('KinViewerSessionBoundary.recovery'))
+        self.assertTrue(p.evaluate('findingConsumed'))
+
+    def test_no_render_receipt_times_out_once_and_late_image_does_not_rewrite_result(self):
+        p = self.page; self.lose(); self.click_reload()
+        p.wait_for_function('!new URL(location).searchParams.has("kinFinding")'); p.evaluate('boot')
+        # Use the real clock: the boundary captures native timers and a clock
+        # installed across navigation can stall its bootstrap/animation polling.
+        deadline = time.monotonic() + 35
+        while not any(a['stage'] == 'recovery-result' for a in self.audit) and time.monotonic() < deadline:
+            p.wait_for_timeout(100)
+        self.assertEqual([a['result'] for a in self.audit if a['stage'] == 'recovery-result'], ['unknown'])
+        p.evaluate('views.get("0").element.dispatchEvent(new Event("IMAGE_RENDERED"));recovery.stop()')
+        p.wait_for_timeout(80)
+        self.assertEqual([a['result'] for a in self.audit if a['stage'] == 'recovery-result'], ['unknown'])
+
+    def test_recovery_loss_before_receipt_has_one_failed_result(self):
+        p = self.page; self.lose(); self.click_reload()
+        p.wait_for_function('!new URL(location).searchParams.has("kinFinding")'); p.evaluate('boot')
+        self.lose(); p.wait_for_timeout(100)
+        self.assertEqual([a['result'] for a in self.audit if a['stage'] == 'recovery-result'], ['failed'])
+
+    def test_healthy_render_skips_discovery_and_lost_render_survives_lookup_exception(self):
+        p = self.page
+        values = p.evaluate('''() => {
+          const original=services.viewportGridService.getState;
+          window.lookups=0;services.viewportGridService.getState=()=>{lookups++;throw Error('transition')};
+          for(let i=0;i<50;i++){engines[0].render();engines[1].resize()}
+          const healthy={counts:engines.map(e=>e.renders),lookups};
+          lose(0);engines[0].render();engines[1].render();
+          services.viewportGridService.getState=original;
+          return {healthy,counts:engines.map(e=>e.renders)};
+        }''')
+        self.assertEqual(values, {'healthy': {'counts': [50, 50], 'lookups': 0}, 'counts': [50, 51]})
+        expect(p.get_by_role('heading', name='Viewer Recovery')).to_be_visible()
+        self.assertEqual(self.errors, [])
+
+    def test_unused_and_released_borrowers_never_raise_notice(self):
+        p = self.page
+        p.evaluate('''() => {
+          engines[0].canvas.dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
+          const detached=makeEngine('detached');lose(2);recovery.borrow(detached,null,()=>false);
+          const released=makeEngine('released');recovery.borrow(released,document.getElementById('image0'),()=>true)();lose(3);
+          for(let i=0;i<50;i++){engines[0].render();engines[1].resize()}
+        }''')
+        p.wait_for_timeout(450)
+        self.assertEqual(p.get_by_role('heading', name='Viewer Recovery').count(), 0)
+        self.assertEqual(self.audit, [])
+
+    def test_optional_recovery_load_create_and_start_failures_keep_viewer_usable(self):
+        p = self.page
+        source = Path(os.environ.get('KIN_CTX_OHIF_JS', ROOT / 'config/ohif.js')).read_text(encoding='utf-8')
+        for failure in ('load', 'create', 'start'):
+            with self.subTest(failure=failure):
+                p.goto(BASE + '/other')
+                p.add_script_tag(content=source)
+                p.evaluate('''() => {
+                  const status=document.createElement('p');status.id='kin-viewer-layout-status';status.setAttribute('role','status');document.body.append(status);
+                }''')
+                def module(route):
+                    if failure == 'load':
+                        route.abort()
+                    else:
+                        route.fulfill(body="window.KinViewerContextLoss={create(){" + ("throw Error('create')" if failure == 'create' else "return {start(){throw Error('start')},stop(){}}") + "}}", content_type='text/javascript')
+                self.context.route(BASE + '/worklist/hpacs-lite/viewer-context-loss.js', module)
+                p.evaluate('''async () => {
+                  const extension=config.extensions.find(e=>e.id==='kin.context-loss');
+                  await extension.preRegistration({servicesManager:{services:{}}});
+                  extension.onModeEnter();document.getElementById('parent-report').value='viewer started';
+                }''')
+                expect(p.get_by_role('status')).to_have_text('영상 복구 도구를 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.')
+                expect(p.locator('#parent-report')).to_have_value('viewer started')
+                self.context.unroute(BASE + '/worklist/hpacs-lite/viewer-context-loss.js', module)
+        self.assertEqual(self.errors, [])
 
 
 if __name__ == '__main__':

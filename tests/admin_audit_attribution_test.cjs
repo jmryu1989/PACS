@@ -993,6 +993,27 @@ function typescript() {
   return compiler;
 }
 
+// The module documents a lexical contract with legacy write-site scanners:
+// rule-table keys use double quotes so they cannot be counted as action writers.
+test('audit rule keys cannot masquerade as legacy single-quoted write sites', () => {
+  const { ts } = typescript();
+  const filename = process.env.KIN_CTX_AUDIT_SOURCE || path.join(API, 'src/admin-audit.ts');
+  const source = ts.createSourceFile(filename, readFileSync(filename, 'utf8'), ts.ScriptTarget.Latest, true);
+  let checked = 0;
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'AUDIT_FIELD_RULES') {
+      const table = node.initializer.arguments[0];
+      for (const property of table.properties) {
+        assert.equal(property.name.getText(source)[0], '"', 'rule keys must not look like audit writes');
+        checked++;
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.ok(checked > 0);
+});
+
 /** Every entry under `dir` as found on the disk (anything that is neither a file nor a directory is named as such). */
 function onDisk(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {

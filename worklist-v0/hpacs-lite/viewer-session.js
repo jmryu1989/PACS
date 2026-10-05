@@ -36,6 +36,21 @@
       (peerGate?.session() === session && closed(peerGate.state()));
     // Consume before extensions can interpret a one-use finding link. Both copies bind the
     // marker to this history entry and its original account; a new entry never inherits it.
+    // pagehide storage survives reload, but history changes there are too late
+    // for the browser's navigation snapshot. Reconstitute only that departed
+    // attempt against the unchanged entry owner; the normal checks below still
+    // consume it once and grant no session authority.
+    try {
+      const key = 'kin-viewer-recovery-departure', raw = win.sessionStorage.getItem(key);
+      win.sessionStorage.removeItem(key);
+      const marker = raw && JSON.parse(raw), owner = win.history.state?.kinViewerContext;
+      if (marker && win.performance.getEntriesByType('navigation')[0]?.type === 'reload' &&
+          marker.entry === owner?.entry && marker.session === owner.session && marker.account === owner.account &&
+          marker.href === win.location.href) {
+        win.sessionStorage.setItem('kin-viewer-recovery', raw);
+        nativeReplaceState({ ...win.history.state, kinViewerRecovery: marker }, '');
+      }
+    } catch (_) { /* Unreadable departure proof leaves an ordinary entry. */ }
     let recovery = null;
     try {
       const key = 'kin-viewer-recovery', raw = win.sessionStorage.getItem(key);

@@ -59,7 +59,14 @@ window.KinTechNote = function (app) {
         confirmed = true;
         status('저장되었습니다. v' + version);
       }});
-    } catch (e) { work.commit(at,()=>{if (valid(ticket, target)) status('저장 확인 실패: ' + e.message + ' · 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.');}); }
+    } catch (e) { work.commit(at,()=>{if (valid(ticket, target)) {
+      // An answered refusal is not an uncertain write. A gateway error alone
+      // cannot prove whether the application committed the note.
+      confirmed = !e.incomplete && !e.responseIncomplete && (e.status >= 400 && e.status < 500 || e.status >= 500 && e.body?.stored === false);
+      status(confirmed
+        ? '저장되지 않았습니다: ' + e.message + ' · 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.'
+        : '저장 결과를 알 수 없습니다: ' + e.message + ' · 입력은 유지했습니다. Save Note 또는 Reload Note로 결과를 확인하세요.');
+    }}); }
     finally { settled();if (ticket === seq) busy=false; work.commit(at,()=>{if(ticket===seq){if(confirmed)interruptedSave=null;controls();}}); }
   };
   async function reconcileSave(pending) {
@@ -74,14 +81,14 @@ window.KinTechNote = function (app) {
       const result=await app.api('GET','/studies/'+encodeURIComponent(target)+'/tech-note',undefined,undefined,at);
       if (!work.admits(at) || !valid(ticket,target)) return;
       if(result.uid!==target||result.note&&result.note.studyUid!==target)throw new Error('메모 대상이 일치하지 않습니다');
-      let witnessed = result.note?.version === pending.body.baseVersion + 1 ? result.note : null;
+      let next = result.note?.version === pending.body.baseVersion + 1 ? result.note : null;
       // A later revision is not proof that this attempt failed. The immutable next
       // revision resolves that attempt without replacing the reader's current input.
       if ((result.note?.version ?? 0) > pending.body.baseVersion + 1) {
         const history = await app.api('GET','/studies/'+encodeURIComponent(target)+'/tech-note/history?before='+(pending.body.baseVersion+2),undefined,undefined,at);
         if (!work.admits(at) || !valid(ticket,target)) return;
         if (history.uid!==target || !Array.isArray(history.items)) throw new Error('메모 이력을 확인하지 못했습니다');
-        witnessed=history.items.find(item=>item.studyUid===target&&item.version===pending.body.baseVersion+1)||null;
+        next=history.items.find(item=>item.studyUid===target&&item.version===pending.body.baseVersion+1)||null;
       }
       work.commit(at,()=>{
         if(!valid(ticket,target))return;
@@ -93,12 +100,13 @@ window.KinTechNote = function (app) {
         if(stored){adopt(result);$('history-items').replaceChildren();$('more').hidden=true;cursor=null;}
         else if(unchanged){writable=result.writable===true;}
         else {
-          if(witnessed)interruptedSave=null;
-          status(witnessed?'저장 시도의 이력을 확인했습니다. 이후 메모가 변경되어 입력을 유지했습니다. 최신 메모와 비교하세요.':'다른 메모가 저장되었습니다. 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.');return;
+          const witnessed=next?.text===pending.body.text&&(next.reason||'')===(pending.body.reason||'').trim();
+          if(next)interruptedSave=null;
+          status(witnessed?'저장되었습니다. v'+next.version+' · 이후 메모가 변경되어 입력을 유지했습니다. 최신 메모와 비교하세요.':next?'저장되지 않았습니다. 다른 메모가 저장되었습니다. 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.':'저장 결과를 알 수 없습니다. 입력은 유지했습니다. 최신 메모와 이력을 다시 확인하세요.');return;
         }
         interruptedSave=null;status(stored?'저장되었습니다. v'+version:'저장되지 않았습니다 · 입력은 유지했습니다. 다시 Save Note를 누르세요.');
       });
-    } catch(e){work.commit(at,()=>{if(valid(ticket,target))status('저장 확인 실패: '+e.message+' · 입력은 유지했습니다.');});}
+    } catch(e){work.commit(at,()=>{if(valid(ticket,target))status('저장 결과를 알 수 없습니다: '+e.message+' · 입력은 유지했습니다. Save Note 또는 Reload Note로 다시 확인하세요.');});}
     finally {if(ticket===seq)busy=false;work.commit(at,()=>{if(ticket===seq)controls();});}
   }
   $('reload').onclick = () => {
@@ -128,10 +136,11 @@ window.KinTechNote = function (app) {
   }
   $('history').onclick = () => history(false); $('more').onclick = () => history(true);
   function close(force = false) {
-    if (!force && interruptedSave) { status('저장 결과를 먼저 확인하세요. Save Note로 같은 저장 결과를 확인할 수 있습니다.'); return; }
-    if (!force && (busy || dirty() && !confirm('저장하지 않은 메모 입력을 버리고 닫을까요?'))) return;
+    if (!force && (busy || (dirty() || interruptedSave) && !confirm(interruptedSave
+      ? '저장 결과를 알 수 없습니다. 메모 입력을 버리고 닫을까요? 다시 열어 최신 메모와 이력을 확인하세요.'
+      : '저장하지 않은 메모 입력을 버리고 닫을까요?'))) return;
     const closedUid = uid;
-    ++seq; uid = null; busy = false; writable = false; saved = ''; version = 0;
+    ++seq; uid = null; busy = false; writable = false; saved = ''; version = 0; interruptedSave = null;
     $('text').value = $('reason').value = ''; $('history-items').replaceChildren(); $('target').textContent = $('meta').textContent = ''; status('');
     if (d.open) d.close();
     if (!force) {
