@@ -153,7 +153,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.browser.close();cls.pw.stop()
 
-    def page_with_vr(self, controlled=False, missing_gate=None, csp=None, real_sculpt=False):
+    def page_with_vr(self, controlled=False, missing_gate=None, csp=None, real_sculpt=False, real_resize=False):
         context = self.browser.new_context()
         self.addCleanup(context.close)
         page = context.new_page()
@@ -184,7 +184,9 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         page.route("**/api/**", server)
         page.goto("https://vr-binding.test/")
         if controlled:
+            if real_resize:page.evaluate('()=>{window.nativeResizeObserver=ResizeObserver;}')
             page.add_script_tag(content=ACCESS_CLOCK)
+            if real_resize:page.evaluate('()=>{window.ResizeObserver=nativeResizeObserver;}')
         self.install_session(page)
         if missing_gate:
             page.evaluate("key=>delete engine[key]", missing_gate)
@@ -220,8 +222,8 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         expect(page.locator('#kin-volume-rendering')).to_have_attribute('open', '')
         expect(page.locator('#kin-volume-rendering [role=status]')).to_contain_text('VR 원본을 표시했습니다')
 
-    def access_page(self, real_sculpt=False):
-        page = self.page_with_vr(controlled=True, real_sculpt=real_sculpt)
+    def access_page(self, real_sculpt=False, real_resize=False):
+        page = self.page_with_vr(controlled=True, real_sculpt=real_sculpt, real_resize=real_resize)
         self.addCleanup(page.close)
         self.open_ready(page)
         page.evaluate("sim.frames();frameLog.length=0")
@@ -675,7 +677,8 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
             with self.subTest(refusal=refusal):
                 page=self.access_page()
                 result=page.evaluate("""async refusal=>{
-                  sim.delay=2500;sim.deny=refusal;sim.silent=!refusal;sim.visibility('hidden');
+                  sim.delay=2500;sim.deny=refusal;sim.silent=!refusal;
+                  await sim.advance(10000);sim.visibility('hidden');
                   const beforeSleep=sim.covered();sim.now+=60000;tick(250);await sim.flush();
                   await sim.advance(2500,{watch:false,timers:false});
                   return {beforeSleep,open:sim.open(),covered:sim.covered(),frames:frameLog};
@@ -765,7 +768,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         self.assertTrue(result['open']);self.assertFalse(result['covered'])
         self.assertEqual([{'at':2101,'drawn':True}],result['frames']);self.assertEqual(2,result['requests'])
 
-    def test_p3_hidden_failed_minute_wake_retries_at_next_wake_and_recovers(self):
+    def test_p3_hidden_minute_wakes_never_poll_and_show_recovers(self):
         for timer_window in (0,3000):
             with self.subTest(window=timer_window):
                 page=self.access_page()
@@ -781,7 +784,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                   sim.visibility('visible');await sim.advance(2500);sim.frames();
                   return {states,open:sim.open(),covered:sim.covered()};
                 }""",timer_window)
-                self.assertTrue(all(s['open'] and s['covered'] and s['requests']>=2 for s in result['states']))
+                self.assertTrue(all(s['open'] and s['covered'] and s['requests']==0 for s in result['states']))
                 self.assertTrue(result['open']);self.assertFalse(result['covered'])
                 self.assert_surface(page,False)
 
@@ -809,8 +812,186 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         page.mouse.move(box['x']+box['width']*.6,box['y']+box['height']*.6)
         if finish:page.mouse.up()
 
+    def test_r4_real_resize_cancels_draft_equally_under_cover(self):
+        end_states=[]
+        for covered in (False,True):
+            with self.subTest(covered=covered):
+                page=self.access_page(real_sculpt=True,real_resize=True)
+                page.set_viewport_size({'width':1280,'height':720});page.wait_for_timeout(100)
+                page.get_by_label('I Max',exact=True).fill('0')
+                page.get_by_role('button',name='Apply Crop',exact=True).click()
+                page.get_by_label('Transfer Mode',exact=True).select_option('Custom')
+                page.get_by_label('Knot 1 HU',exact=True).fill('-900')
+                page.get_by_label('VR Opacity',exact=True).fill('45')
+                page.get_by_role('button',name='Apply Display',exact=True).click()
+                self.sculpt_draft(page);page.get_by_role('button',name='Apply Sculpt',exact=True).click()
+                page.evaluate('()=>{sim.frames();sim.frames();sim.frames()}')
+                self.sculpt_draft(page)
+                page.evaluate("""()=>{
+                  window.readerEdits=()=>({properties:JSON.stringify(mapper.getViewSpecificProperties()),
+                    planes:mapper.getClippingPlanes().map(p=>({normal:p.getNormal(),origin:p.getOrigin()})),
+                    camera:vrView.getCamera(),values:[...document.querySelectorAll('#kin-volume-rendering input')].map(e=>e.value)});
+                  window.resizeCalls=0;const resize=engine.resize;
+                  engine.resize=function(...args){resizeCalls++;return resize.apply(this,args)};
+                }""")
+                before=page.evaluate('readerEdits()')
+                size=page.locator('[data-kin-vr-render]').bounding_box()
+                if covered:
+                    page.evaluate("async()=>{sim.offline=true;await sim.advance(30000);frameLog.length=0}")
+                    self.assertEqual(size,page.locator('[data-kin-vr-render]').bounding_box())
+                    self.assertEqual(1,page.locator('[data-kin-vr-sculpt]').count())
+                page.set_viewport_size({'width':1100,'height':600})
+                # The AC fixture owns rAF; poll from Python so the native observer
+                # can deliver without waiting for the fixture's next VR frame.
+                for _ in range(100):
+                    if page.evaluate('resizeCalls>0'):break
+                    page.wait_for_timeout(20)
+                self.assertGreater(page.evaluate('resizeCalls'),0,'real resize must reach the engine even under cover')
+                self.assertNotEqual(size,page.locator('[data-kin-vr-render]').bounding_box())
+                self.assertEqual(0,page.locator('[data-kin-vr-sculpt]').count())
+                self.assertEqual(before,page.evaluate('readerEdits()'))
+                page.evaluate('sim.frames()')
+                if covered:
+                    self.assertFalse(page.evaluate('frameLog.some(f=>f.drawn)'))
+                    self.assert_surface(page,True)
+                    page.evaluate("async()=>{sim.offline=false;await sim.advance(2000);sim.frames()}")
+                    self.assertEqual(1,page.evaluate('frameLog.filter(f=>f.drawn).length'))
+                self.assert_surface(page,False)
+                end_states.append({'edits':page.evaluate('readerEdits()'),
+                    'drafts':page.locator('[data-kin-vr-sculpt]').count(),
+                    'apply':page.get_by_role('button',name='Apply Sculpt',exact=True).is_enabled(),
+                    'size':page.locator('[data-kin-vr-render]').bounding_box()})
+        self.assertEqual(2,len(end_states))
+        self.assertEqual(end_states[0],end_states[1])
+
+    def test_r4_show_reuses_valid_confirmation_or_checks_immediately(self):
+        for event in ('visibility','page'):
+            for hidden_ms in (3000,40000):
+                with self.subTest(event=event,hidden_ms=hidden_ms):
+                    page=self.access_page()
+                    result=page.evaluate("""async ([event,hiddenMs])=>{
+                      sim.delay=50;await sim.advance(5000);
+                      const before=sim.requests.length;
+                      if(event==='visibility')sim.visibility('hidden');else window.dispatchEvent(new Event('pagehide'));
+                      await sim.advance(hiddenMs);const hiddenRequests=sim.requests.length-before,hiddenCovered=sim.covered();
+                      if(event==='visibility')sim.visibility('visible');else window.dispatchEvent(new Event('pageshow'));
+                      const shownAt=sim.now,immediateCovered=sim.covered(),showRequests=sim.requests.length-before;
+                      sim.frame();const drawnAtShow=frameLog.at(-1).drawn;
+                      await sim.advance(49);const beforeAnswer=sim.covered();await sim.advance(1);sim.frames();
+                      return {hiddenRequests,hiddenCovered,immediateCovered,showRequests,drawnAtShow,beforeAnswer,
+                        afterAnswer:sim.covered(),open:sim.open(),requestOffsets:sim.requests.slice(before).map(r=>r.at-shownAt)};
+                    }""",[event,hidden_ms])
+                    expired=hidden_ms==40000
+                    self.assertEqual({'hiddenRequests':0,'hiddenCovered':True,'immediateCovered':expired,
+                        'showRequests':2 if expired else 0,'drawnAtShow':not expired,'beforeAnswer':expired,
+                        'afterAnswer':False,'open':True,'requestOffsets':[0,0] if expired else []},result)
+                    self.assert_surface(page,False)
+                    print('R4_SHOW',event,hidden_ms,result,flush=True)
+
+    def test_r4_show_bypasses_failure_pace_and_hidden_positive_is_not_failure(self):
+        for hidden_answer in (False,True):
+            with self.subTest(hidden_answer=hidden_answer):
+                page=self.access_page()
+                result=page.evaluate("""async hiddenAnswer=>{
+                  if(hiddenAnswer){
+                    sim.delay=11000;await sim.advance(10000);sim.visibility('hidden');await sim.advance(11000);
+                  }else{
+                    sim.offline=true;await sim.advance(31000);sim.visibility('hidden');await sim.advance(100);
+                  }
+                  const before=sim.requests.length;sim.delay=50;sim.offline=false;sim.visibility('visible');
+                  const immediate=sim.requests.length-before,covered=sim.covered();await sim.advance(50);
+                  return {immediate,covered,afterAnswer:sim.covered()};
+                }""",hidden_answer)
+                self.assertEqual({'immediate':2,'covered':True,'afterAnswer':False},result)
+
+    def test_r4_revoked_while_hidden_closes_on_show_without_a_frame(self):
+        for refusal in ('denied','session','account'):
+            with self.subTest(refusal=refusal):
+                page=self.access_page()
+                result=page.evaluate("""async refusal=>{
+                  sim.visibility('hidden');const before=sim.requests.length;await sim.advance(40000);
+                  if(refusal==='denied')sim.deny=true;
+                  if(refusal==='session'){sim.httpStatus=401;sim.authCode='AUTH_SESSION_ENDED';}
+                  if(refusal==='account')sim.account='other-reader';
+                  sim.delay=50;const hiddenRequests=sim.requests.length-before;sim.visibility('visible');
+                  const showRequests=sim.requests.length-before,covered=sim.covered();sim.frame();
+                  await sim.advance(50);sim.frames();
+                  return {hiddenRequests,showRequests,covered,open:sim.open(),drawn:frameLog.some(f=>f.drawn)};
+                }""",refusal)
+                self.assertEqual({'hiddenRequests':0,'showRequests':2,'covered':True,'open':False,'drawn':False},result)
+
+    def test_r4_pre_hidden_positive_does_not_delay_due_refresh(self):
+        for answer_hidden in (False,True):
+            with self.subTest(answer_hidden=answer_hidden):
+                page=self.access_page()
+                result=page.evaluate("""async answerHidden=>{
+                  sim.delay=3000;await sim.advance(10010);sim.visibility('hidden');
+                  const before=sim.requests.length;
+                  await sim.advance(answerHidden?3000:1000);sim.visibility('visible');const atShow=sim.covered();
+                  sim.delay=50;if(!answerHidden)await sim.advance(1990);
+                  const waiting=sim.covered(),requests=sim.requests.length-before;
+                  await sim.advance(50);return {atShow,waiting,requests,afterAnswer:sim.covered()};
+                }""",answer_hidden)
+                self.assertEqual({'atShow':False,'waiting':False,'requests':2,'afterAnswer':False},result)
+
+    def test_r4_pre_hidden_request_cannot_uncover_after_show(self):
+        for transition in ('visibility','page','session'):
+            with self.subTest(transition=transition):
+                page=self.access_page()
+                page.evaluate("""async transition=>{
+                  sim.delay=7000;await sim.advance(10010);
+                  window.pendingStart=sim.requests.at(-1).at;window.before=sim.requests.length;
+                  if(transition==='page')window.dispatchEvent(new Event('pagehide'));
+                  if(transition==='visibility')sim.visibility('hidden');
+                }""",transition)
+                if transition=='session':
+                    peer=self.session_preparation_peer(page)
+                    page.wait_for_function("KinWorkContext.state()==='preparing'")
+                self.assert_surface(page,True)
+                page.evaluate('async()=>await sim.advance(6000)')
+                self.assertEqual(page.evaluate('before'),page.evaluate('sim.requests.length'))
+                if transition=='session':
+                    peer.evaluate("release();channel.postMessage({type:'session-resumed',session:'S1',preparation:'P1'})")
+                    page.wait_for_function("KinWorkContext.state()==='active'")
+                result=page.evaluate("""async transition=>{
+                  if(transition==='page')window.dispatchEvent(new Event('pageshow'));
+                  if(transition==='visibility')sim.visibility('visible');
+                  const shownAt=sim.now,atShow=sim.covered(),showRequests=sim.requests.length-before;
+                  sim.delay=50;await sim.advance(pendingStart+7000-sim.now);
+                  const atOldAnswer=sim.covered(),requests=sim.requests.slice(before).map(r=>r.at-shownAt);
+                  sim.frame();const oldDrawn=frameLog.at(-1).drawn;
+                  await sim.advance(49);const beforeNewAnswer=sim.covered();await sim.advance(1);sim.frames();
+                  return {atShow,showRequests,atOldAnswer,oldDrawn,requests,beforeNewAnswer,afterNewAnswer:sim.covered()};
+                }""",transition)
+                self.assertEqual({'atShow':True,'showRequests':0,'atOldAnswer':True,'oldDrawn':False,
+                    'requests':[990,990],'beforeNewAnswer':True,'afterNewAnswer':False},result)
+
+    def test_r4_hidden_answer_cannot_uncover_or_renew_confirmation(self):
+        page=self.access_page()
+        result=page.evaluate("""async()=>{
+          sim.delay=1000;await sim.advance(10000);sim.visibility('hidden');const before=sim.requests.length;
+          await sim.advance(1000);const hiddenCovered=sim.covered();
+          await sim.advance(5000);sim.delay=50;sim.visibility('visible');
+          const covered=sim.covered(),requests=sim.requests.length-before;await sim.advance(50);
+          return {hiddenCovered,covered,requests,afterAnswer:sim.covered()};
+        }""")
+        self.assertEqual({'hiddenCovered':True,'covered':True,'requests':2,'afterAnswer':False},result)
+
+    def session_preparation_peer(self,page):
+        peer=page.context.new_page();self.addCleanup(peer.close)
+        peer.route('https://vr-binding.test/peer',lambda r:r.fulfill(body='<p>peer</p>',content_type='text/html'))
+        peer.goto('https://vr-binding.test/peer')
+        peer.evaluate("""async()=>{
+          window.channel=new BroadcastChannel('kin-session');
+          await new Promise(done=>navigator.locks.request('kin-preparation:P1',()=>new Promise(release=>{
+            window.release=release;done();})));
+          channel.postMessage({type:'session-preparing',session:'S1',preparation:'P1'});
+        }""")
+        return peer
+
     def test_cover_preserves_crop_transfer_applied_and_unfinished_sculpt_on_screen(self):
-        page=self.access_page(real_sculpt=True)
+        page=self.access_page(real_sculpt=True,real_resize=True)
+        page.wait_for_timeout(100)
         page.get_by_label('I Max',exact=True).fill('0')
         page.get_by_role('button',name='Apply Crop',exact=True).click()
         page.get_by_label('Transfer Mode',exact=True).select_option('Custom')
@@ -833,7 +1014,6 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
           const overlay=document.querySelector('[data-kin-vr-sculpt]');
           overlay.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,pointerId:1,clientX:900,clientY:500}));
           document.querySelector('[aria-label="VR Opacity"]').dispatchEvent(new Event('change',{bubbles:true}));
-          window.dispatchEvent(new Event('resize'));
         }""")
         after=page.evaluate("""()=>({
           properties:JSON.stringify(mapper.getViewSpecificProperties()),planes:mapper.getClippingPlanes().map(p=>({normal:p.getNormal(),origin:p.getOrigin()})),
@@ -894,7 +1074,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
     def test_cover_each_display_event_requires_new_confirmation(self):
         page=self.access_page()
         result=page.evaluate("""async()=>{
-          sim.silent=true;sim.visibility('hidden');const states=[sim.covered()];
+          sim.silent=true;await sim.advance(30000);sim.visibility('hidden');const states=[sim.covered()];
           sim.visibility('visible');states.push(sim.covered());
           window.dispatchEvent(new Event('pagehide'));states.push(sim.covered());
           window.dispatchEvent(new Event('pageshow'));states.push(sim.covered());
@@ -1072,21 +1252,32 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
           window.orientation=mountOrientation();window.nativeObserved=[];
           window.testTimingObserver=new PerformanceObserver(list=>nativeObserved.push(...list.getEntries().filter(e=>new URL(e.name).pathname.startsWith('/api/'))));
           testTimingObserver.observe({type:'resource'});
-          window.nativeIssues=[];const bound=window.fetch;
-          window.fetch=(...args)=>{nativeIssues.push({name:String(args[0]),at:performance.now()});return bound(...args)};
-          const draw=engine.performVtkDrawCall;
-          engine.performVtkDrawCall=function(){
-            draw.call(this);
-            if(window.busyFrame){window.busyFrame=false;window.frameBegin=performance.now();
-              void unboundFetch('/release');
-              while(performance.now()-frameBegin<20000){}
-              window.frameEnd=performance.now();}
+          window.nativeIssues=[];window.heldBodies=0;const bound=window.fetch;
+          const bodyGate=new Promise(resolve=>window.releaseBodies=resolve);
+          window.fetch=async(...args)=>{
+            const index=nativeIssues.push({name:String(args[0]),at:performance.now()});
+            const response=await bound(...args);
+            if(index>2&&index<=4){
+              const read=response.json.bind(response);
+              response.json=async()=>{const body=await read();heldBodies++;await bodyGate;return body;};
+            }
+            return response;
           };
         }""")
         self.open_ready(page)
         page.get_by_label('VR Opacity',exact=True).fill('45')
         page.wait_for_function('nativeIssues.length===4',timeout=15000)
-        page.evaluate("window.busyFrame=true;vrView.render()")
+        release.set()
+        page.wait_for_function('heldBodies===2')
+        # Both real HTTP bodies have arrived. Hold their delivery to the caller until
+        # an ordinary task, then keep that task busy past request-start + 15 s.
+        # Promise continuations run at its microtask checkpoint, before timer tasks;
+        # no frame finally/timeout can mask a missing confirmation-age check.
+        page.evaluate("""()=>setTimeout(()=>{
+          window.frameBegin=performance.now();releaseBodies();
+          while(performance.now()-frameBegin<20000){}
+          window.frameEnd=performance.now();
+        },0)""")
         page.wait_for_function("window.frameEnd>0",timeout=30000)
         # Only the old, now expired answer has completed. Hold the replacement on the server.
         for _ in range(50):
@@ -1101,7 +1292,9 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         self.assert_surface(page,True)
         self.assertEqual('45',page.get_by_label('VR Opacity',exact=True).input_value())
         entries=page.evaluate("""()=>({begin:frameBegin,end:frameEnd,entries:nativeObserved.map(e=>({start:e.startTime,end:e.responseEnd,name:e.name}))})""")
-        self.assertEqual(2,len([e for e in entries['entries'] if entries['begin']<e['end']<entries['end']]))
+        refresh=entries['entries'][-2:]
+        self.assertEqual(2,len(refresh))
+        self.assertTrue(all(e['end']<=entries['begin'] and entries['end']-e['start']>=15000 for e in refresh))
         self.assertEqual([],page.evaluate("performance.getEntriesByType('resource').filter(e=>new URL(e.name).pathname.startsWith('/api/'))"))
         replacement.set()
         page.wait_for_function(f"frameLog.filter(f=>f.drawn).length>{before}",timeout=5000)

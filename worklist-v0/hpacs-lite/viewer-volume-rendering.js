@@ -48,12 +48,22 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     else if(op.ready){disableControls(false);groups.forEach(group=>group.disabled=drawing||!!op.libraryBusy);}
   }
   function invalidateDisplay(op){
-    op.displayEpoch++;op.confirmedExpired=true;cover(op,'access',accessMessage);
+    op.displayEpoch++;cover(op,'access',accessMessage);
+  }
+  function resumeDisplay(op){
+    if(op.pageHidden||document.visibilityState==='hidden'||window.KinViewerSessionBoundary&&!window.KinViewerSessionBoundary.active())return;
+    try{
+      check(op);
+      // Hiding invalidates pending answers, not an already confirmed reading interval.
+      if(op.confirmed&&!op.confirmedExpired&&age(clock(),op.confirmed)<ACCESS_VALID_MS)cover(op,'access',null);
+      else{op.confirmedExpired=true;cover(op,'access',accessMessage);op.checkOnShow=true;}
+      if(mayStartFrame(op)&&op.held&&op.view){op.held=false;render(op);}
+    }catch(error){fail(op,error);}
   }
   function access(op){
     if(op.asking)return op.accessReady;
     check(op);const asking={started:clock(),epoch:op.displayEpoch,controller:new AbortController()};
-    op.asking=asking;op.requests.add(asking);
+    op.asking=asking;op.checkOnShow=false;op.requests.add(asking);
     const get=async path=>{
       const response=await fetch(new URL(path,location.origin).href,{credentials:'same-origin',cache:'no-store',headers:{'X-KIN-Subject':JSON.parse(op.owner)[1]},signal:asking.controller.signal});
       const refusal=window.KinSessionTransport?.refusal(response);
@@ -78,6 +88,8 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
       const now=clock();op.asking=null;op.completed=now;
       try{
         check(op);
+        // A positive answer discarded only across a display boundary is not a failed check.
+        if(replies.every(Boolean)&&(asking.epoch!==op.displayEpoch||op.pageHidden||document.visibilityState==='hidden'))op.completed=null;
         if(replies.every(Boolean)&&age(now,asking.started)<ACCESS_VALID_MS&&asking.epoch===op.displayEpoch
           &&!op.pageHidden&&document.visibilityState!=='hidden'&&(!window.KinViewerSessionBoundary||window.KinViewerSessionBoundary.active())){
           op.confirmed=asking.started;op.confirmedExpired=false;cover(op,'access',null);op.resolveAccess();
@@ -107,8 +119,9 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
       // Expiry is latched: a later wall-clock correction cannot resurrect permission.
       const confirmedAge=op.confirmed?age(now,op.confirmed):Infinity;
       if(confirmedAge>=ACCESS_VALID_MS)op.confirmedExpired=true;
-      if(confirmedAge>=ACCESS_COVER_MS||op.pageHidden||document.visibilityState==='hidden')cover(op,'access',accessMessage);
-      if((op.confirmedExpired||confirmedAge>=ACCESS_REFRESH_MS)&&!op.asking&&(!op.completed||age(now,op.completed)>=ACCESS_RETRY_MS))access(op);
+      const hidden=op.pageHidden||document.visibilityState==='hidden';
+      if(confirmedAge>=ACCESS_COVER_MS||hidden)cover(op,'access',accessMessage);
+      if(!hidden&&(op.confirmedExpired||confirmedAge>=ACCESS_REFRESH_MS)&&!op.asking&&(op.checkOnShow||!op.completed||age(now,op.completed)>=ACCESS_RETRY_MS))access(op);
       clearTimeout(op.accessTimer);op.accessTimer=setTimeout(()=>mayStartFrame(op),250);
       return !op.confirmedExpired&&!op.covers.size;
     }catch(error){fail(op,error);return false;}
@@ -217,8 +230,8 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     op.unwatchSession=window.KinViewerSessionBoundary?.onState(state=>{
       if(operation!==op)return;
       if(state==='ended'){fail(op,Error('VR 세션이 종료되었습니다.'));return;}
-      if(state!=='active'){invalidateDisplay(op);cover(op,'session','세션 변경을 확인하는 중입니다. 편집값은 유지됩니다.');}
-      else{cover(op,'session',null);mayStartFrame(op);}
+      if(state!=='active'){op.confirmedExpired=true;invalidateDisplay(op);cover(op,'session','세션 변경을 확인하는 중입니다. 편집값은 유지됩니다.');}
+      else{cover(op,'session',null);resumeDisplay(op);}
     });
     try{
       mayStartFrame(op);await op.accessReady;op.preparationStarted=clock();const source=t.views.find(v=>v.id===t.source.viewportId),volume=cornerstone.cache.getVolume(source.getVolumeId());check(op);
@@ -240,13 +253,13 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
   closeButton.onclick=close;dialog.addEventListener('cancel',e=>{e.preventDefault();close();});
   // Keep browser input/Tab/Escape behavior while isolating native viewer hotkeys.
   for(const name of ['keydown','keyup','keypress'])dialog.addEventListener(name,e=>e.stopPropagation(),true);
-  const observer=new ResizeObserver(()=>{const op=operation;if(op?.ready&&current(op)&&!op.covers.size){try{sculpt.cancel();op.engine.resize(true,true);render(op);}catch(error){fail(op,error);}}});observer.observe(canvasHost);
-  const windowResized=()=>{if(operation?.ready&&!operation.covers.size)sculpt.cancel();};window.addEventListener('resize',windowResized);
+  const observer=new ResizeObserver(()=>{const op=operation;if(op?.ready&&current(op)){try{sculpt.cancel();op.engine.resize(true,true);render(op);}catch(error){fail(op,error);}}});observer.observe(canvasHost);
+  const windowResized=()=>{if(operation?.ready)sculpt.cancel();};window.addEventListener('resize',windowResized);
   const watch=()=>{const op=operation;if(op)mayStartFrame(op);};
   const timer=setInterval(watch,250);
-  const visibilityChanged=()=>{const op=operation;if(!op)return;if(document.visibilityState==='hidden')invalidateDisplay(op);watch();};
+  const visibilityChanged=()=>{const op=operation;if(!op)return;if(document.visibilityState==='hidden')invalidateDisplay(op);else resumeDisplay(op);watch();};
   const pageHidden=()=>{const op=operation;if(op){op.pageHidden=true;invalidateDisplay(op);}};
-  const pageShown=()=>{if(operation)operation.pageHidden=false;watch();};
+  const pageShown=()=>{const op=operation;if(op){op.pageHidden=false;resumeDisplay(op);}watch();};
   document.addEventListener('visibilitychange',visibilityChanged);window.addEventListener('pagehide',pageHidden);window.addEventListener('pageshow',pageShown);
   // Block edits without resetting any form, camera or sculpt draft. Close stays usable.
   for(const name of ['pointerdown','pointermove','pointerup','pointercancel','click','dblclick','wheel','keydown','beforeinput','input','change','contextmenu'])

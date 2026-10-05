@@ -283,6 +283,27 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
   dialog.get_by_role('button',name='Finish Region',exact=True).click()
   expect(dialog.get_by_role('button',name='Apply Sculpt',exact=True)).to_be_enabled()
   dialog.get_by_role('button',name='Cancel Sculpt',exact=True).click()
+  # A real layout change cancels the draft under either display state. Cover alone
+  # was checked above; applied sculpt, crop and transfer remain in both cases.
+  size=v.viewport_size
+  for covered_resize in (False,True):
+   self.sculpt_region(v,dialog)
+   edits=v.evaluate('vrReaderState()');edits.pop('draft')
+   if covered_resize:v.evaluate("window.dispatchEvent(new Event('pagehide'))")
+   try:
+    frames=v.evaluate('vrGateEvents')
+    v.set_viewport_size({'width':size['width']-30,'height':size['height']-30})
+    expect(dialog.locator('[data-kin-vr-sculpt]')).to_have_count(0)
+    v.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+    actual=v.evaluate('vrReaderState()');actual.pop('draft',None);self.assertEqual(edits,actual)
+    if covered_resize:
+     self.assertEqual(frames,v.evaluate('vrGateEvents'))
+     expect(dialog.locator('.kin-vr-identity')).not_to_be_visible()
+   finally:
+    if covered_resize:v.evaluate("window.dispatchEvent(new Event('pageshow'))")
+    v.set_viewport_size(size)
+   expect(dialog.locator('.kin-vr-identity')).to_be_visible()
+   expect(dialog.get_by_role('button',name='Apply Sculpt',exact=True)).to_be_disabled()
   v.evaluate('()=>vrGateView.element.removeEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,vrGateListener)')
   dialog.get_by_role('button',name='Close VR',exact=True).click()
   self.mpr_live_after_mask_failure(v,before)
