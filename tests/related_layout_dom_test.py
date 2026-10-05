@@ -706,6 +706,78 @@ class RelatedLayoutDOMTest(Base):
                     w.assert_panel_stacked(tag)
                     w.screen.finish()
 
+    # ── RL-11 (S7-U5 fix-up D; triage M, stop-rule counterexample 4) ─────────────────────────────────────────────────
+    # The Reading Workspace sizes the Related list itself (reading-workspace.js); its table kept only 40px under the fixed
+    # rows, less than its sticky header and one row, so the header covered the row a click aimed at (six live modules).
+    # Supported windows, landscape and portrait, the narrow stacked layout included.
+    READING_SIZES = [(1280, 720), (1366, 768), (1024, 768), (1600, 1050), (1920, 1080), (900, 1200), (768, 1024), (900, 1400)]
+
+    def open_reading(self, size, row_set=None):
+        """Boot large, choose the reading target, open the Reading Workspace, then size the window."""
+        w = self.boot(harness.Server(rows=row_set or rows()), viewport=LARGE)
+        # The workspace's viewer frame: an empty document here (the viewer is not what this case measures).
+        w.page.route("**/ohif/**", lambda route: route.fulfill(status=200, content_type="text/html",
+                                                               body="<!doctype html><title>SYN viewer</title>"))
+        w.worklist_row(CURRENT_DESC).click()
+        harness.until(lambda: w.target_label.inner_text().startswith("판독 대상 · "), 10, "reading target chosen")
+        w.page.get_by_role("button", name="Reading Workspace", exact=True).click()
+        harness.until(lambda: w.page.evaluate("() => document.body.classList.contains('reading')"), 10, "reading workspace open")
+        w.page.set_viewport_size({"width": size[0], "height": size[1]})
+        w.page.wait_for_timeout(150)
+        return w
+
+    def table_floor(self, w):
+        """The table's own scroll box against its header and its first row, from layout."""
+        return js(w.page, """
+          const t = arg, grid = t.parentElement, head = t.tHead.getBoundingClientRect(), row = t.tBodies[0].rows[0].getBoundingClientRect();
+          return {box: grid.clientHeight, head: head.height, row: row.height};""", w.related_table.element_handle())
+
+    def test_rl11_reading_workspace_header_never_covers_a_row(self):
+        many = [harness.row(f"2.25.79{i:02d}", PID, date=f"2025{1 + i % 12:02d}{1 + i % 28:02d}", rs="W", modality="CT",
+                            desc=f"SYN RL READ {i:02d}") for i in range(30)]
+        for size in self.READING_SIZES:
+            name = f"{size[0]}x{size[1]}"
+            for label, row_set, targets in [("rows", None, [REPORT_DESC, NOREPORT_DESC, CT_DESC, REPORT_DESC]),
+                                            ("30 rows", rows(many), ["SYN RL READ 00", "SYN RL READ 17", "SYN RL READ 29", "SYN RL READ 03"])]:
+                with self.subTest(size=name, case=label):
+                    w = self.open_reading(size, row_set)
+                    tag = f"RL-11 {name} {label}"
+                    floor = self.table_floor(w)
+                    measure(tag, floor=floor)
+                    self.assertGreaterEqual(floor["box"] + 0.5, floor["head"] + floor["row"],
+                                            f"{tag}: the table shows its header and one whole row")
+                    for desc in targets:
+                        row = w.related_row(desc)
+                        # A wheel or a focus move brings it in (down the list, then back up); then it must be whole and on top.
+                        w.scroll_into_view(row)
+                        self.assert_row_on_top_in_its_table(w, f"{tag} {desc}", row)
+                    w.screen.finish()
+
+    def assert_row_on_top_in_its_table(self, w, tag, row):
+        """In the Reading Workspace the Related table is wider than its column and scrolls sideways, so a row is judged
+        inside the table's own visible box: its full height below the sticky header and above the box's bottom, every
+        sampled point of its visible width on the row itself (nothing painted over it), and a click there reaches it."""
+        seen = js(w.page, """
+          const r = arg, grid = r.closest('table').parentElement, g = grid.getBoundingClientRect(), b = r.getBoundingClientRect();
+          const head = r.closest('table').tHead.getBoundingClientRect();
+          const left = Math.max(b.left, g.left + grid.clientLeft), right = Math.min(b.right, g.left + grid.clientLeft + grid.clientWidth);
+          const top = g.top + grid.clientTop, bottom = top + grid.clientHeight, covered = [];
+          for (const fx of [0.1, 0.5, 0.9]) for (const fy of [0.1, 0.5, 0.9]) {
+            const x = left + (right - left) * fx, y = b.top + b.height * fy;
+            if (!within(document.elementFromPoint(x, y), r)) covered.push([x, y]); }
+          return {row: [b.left, b.top, b.right, b.bottom], head: head.bottom, box: [top, bottom], width: right - left, covered,
+                  centre: [(left + right) / 2, (b.top + b.bottom) / 2]};""", row.element_handle())
+        measure(tag, seen=seen)
+        self.assertGreaterEqual(seen["row"][1] + 0.5, seen["head"], f"{tag}: the row starts below the table header")
+        self.assertLessEqual(seen["row"][3], seen["box"][1] + 0.5, f"{tag}: the row ends inside the table's box")
+        self.assertGreater(seen["width"], 40, f"{tag}: the row is visible across the table's width")
+        self.assertEqual([], seen["covered"], f"{tag}: points of the row under another element")
+        handle = row.element_handle()
+        handle.evaluate("r => { r.landed = null; document.addEventListener('click', e => { r.landed = r.contains(e.target); }, {capture: true, once: true}); }")
+        w.page.mouse.click(*seen["centre"])
+        self.assertTrue(handle.evaluate("r => r.landed"), f"{tag}: a click at the row reached the row")
+        harness.until(lambda: "열람 중" in row.get_by_role("cell").first.inner_text(), 5, f"{tag} row opened")
+
 
 # ── RelatedLayoutEquivalence (R-EQ; local record, not in CI) ────────────────────────────────────────────────────────
 BASE_SHA = "0856c1bda1b4a66a5abf59467f4926b7e75c8d78"   # implementation base B (S7-AUDIT-STORE merge)

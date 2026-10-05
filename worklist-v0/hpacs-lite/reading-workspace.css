@@ -45,7 +45,7 @@ body.reading #reading-context-return { display: block; margin: 6px 10px; align-s
 body.reading .workrow { display: flex; flex-direction: column; flex: 1; min-height: 621px; }
 body.reading .related-p { width: 100% !important; height: var(--reading-related-height, 245px) !important; min-height: 211px; flex: none; border-bottom: 1px solid #45658b; }
 body.reading .related-list-pane { height: var(--reading-related-list-height, 125px) !important; min-height: 125px; flex: none !important; }
-body.reading .related-list-pane .grid2 { min-height: 40px; }
+body.reading .related-list-pane .grid2 { min-height: var(--reading-related-table-floor, 40px); scroll-padding-top: var(--reading-related-table-head, 0px); }
 body.reading .prior-report-pane { height: auto; flex: 1; min-height: 80px; }
 body.reading #resize-related, body.reading #resize-prior { display: none; }
 body.reading.reading-related-hidden .related-p { display: none; }

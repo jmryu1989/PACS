@@ -110,12 +110,25 @@ window.KinReadingWorkspace = function (app) {
   const panelHelp = node('p', '패널 경계는 드래그하거나 Tab으로 선택한 뒤 방향키로 조절합니다. Shift는 크게 이동, Home/End는 최소/최대, Enter는 해당 경계의 기본값입니다. 좁은 창의 영상·판독은 위아래로 배치하며, 숨긴 관련 패널은 Related Report로 다시 엽니다.', shortcutHelp);
   panelHelp.id = 'reading-panel-help';
   const panelSeparators = [];
-  function panelGeometry() {
+  /**
+   * The Related table's floor is its sticky header plus one whole row, read from layout (fonts, zoom and the row's own
+   * content decide both). A fixed 40px left a table whose header covered the row under it: a click aimed at that row
+   * reached the header instead (S7-U5 fix-up D). The header height is also the table's scroll padding, so a row brought
+   * into view by the wheel, the keyboard or a click is placed below the header, never under it.
+   */
+  function relatedTableFloor() {
     const grid = relatedList.querySelector('.grid2');
+    const head = grid?.querySelector('thead')?.getBoundingClientRect().height || 0;
+    const row = grid?.querySelector('tbody tr')?.getBoundingClientRect().height || 0;
+    return { head: Math.ceil(head), floor: Math.max(40, Math.ceil(head + row)) };
+  }
+  function panelGeometry() {
+    const grid = relatedList.querySelector('.grid2'), table = relatedTableFloor();
     const listMin = [...relatedList.children].filter(child => child !== grid && child.getClientRects().length)
-      .reduce((total, child) => total + child.getBoundingClientRect().height, 40);
-    return panelModel.resolve(panelValues, { width: split.clientWidth || innerWidth, narrow: matchMedia('(max-width: 850px)').matches,
+      .reduce((total, child) => total + child.getBoundingClientRect().height, table.floor);
+    const geometry = panelModel.resolve(panelValues, { width: split.clientWidth || innerWidth, narrow: matchMedia('(max-width: 850px)').matches,
       height: innerHeight, workHeight: $('.workrow').clientHeight, listMin });
+    return geometry && { ...geometry, table };
   }
   function snapshotPanels() { return panelModel.normalize(panelValues); }
   function applyPanels(value) {
@@ -137,7 +150,7 @@ window.KinReadingWorkspace = function (app) {
   }
   function renderPanels() {
     const geometry = panelGeometry(), values = geometry.effective;
-    const signature = JSON.stringify([active, ended, panelValues.relatedHidden, values]);
+    const signature = JSON.stringify([active, ended, panelValues.relatedHidden, values, geometry.table]);
     document.body.classList.toggle('reading-related-hidden', active && panelValues.relatedHidden);
     relatedRegion.inert = active && panelValues.relatedHidden;
     if (active && panelValues.relatedHidden) relatedRegion.setAttribute('aria-hidden', 'true');
@@ -163,6 +176,8 @@ window.KinReadingWorkspace = function (app) {
     split.style.setProperty('--reading-image-height', values.imageHeight + 'px');
     split.style.setProperty('--reading-related-height', values.relatedHeight + 'px');
     split.style.setProperty('--reading-related-list-height', values.relatedListHeight + 'px');
+    split.style.setProperty('--reading-related-table-floor', geometry.table.floor + 'px');
+    split.style.setProperty('--reading-related-table-head', geometry.table.head + 'px');
     if (active) redrawRetainedViewer();
   }
   function cancelPanelDrag() {
@@ -226,6 +241,8 @@ window.KinReadingWorkspace = function (app) {
   let panelObserver = new ResizeObserver(guarded(() => { if (active && !ended) renderPanels(); }));
   panelObserver.observe(split); panelObserver.observe($('.workrow')); panelObserver.observe(relatedList);
   [...relatedList.children].filter(child => !child.classList.contains('grid2')).forEach(child => panelObserver.observe(child));
+  // The table's header and rows decide its floor (relatedTableFloor): a new row height or header font re-sizes the list.
+  const relatedTable = relatedList.querySelector('.grid2 table'); if (relatedTable) panelObserver.observe(relatedTable);
   let panelWindowResize = guarded(() => { if (panelDrag) cancelPanelDrag(); if (active && !ended) renderPanels(); });
   window.addEventListener('resize', panelWindowResize);
   const boundDocuments = new WeakSet();
@@ -636,6 +653,7 @@ window.KinReadingWorkspace = function (app) {
       panelObserver=new ResizeObserver(guarded(()=>{if(active&&!ended)renderPanels();}));
       panelObserver.observe(split);panelObserver.observe($('.workrow'));panelObserver.observe(relatedList);
       [...relatedList.children].filter(child=>!child.classList.contains('grid2')).forEach(child=>panelObserver.observe(child));
+      if(relatedTable)panelObserver.observe(relatedTable);
       queueObserver=new MutationObserver(guarded(navigation));queueObserver.observe($('#rows'),{childList:true});
       window.removeEventListener('resize',panelWindowResize);panelWindowResize=guarded(()=>{if(panelDrag)cancelPanelDrag();if(active&&!ended)renderPanels();});window.addEventListener('resize',panelWindowResize);
       renewFrame();renewReturn();
