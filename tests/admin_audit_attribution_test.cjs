@@ -41,7 +41,7 @@ const { readFileSync, readdirSync } = require('node:fs');
 const path = require('node:path');
 const { createCipheriv, randomBytes } = require('node:crypto');
 
-const ROOT = path.join(__dirname, '..');
+const ROOT = path.join("C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s7-rawsql\\tests", '..');
 const MODULE = process.env.KIN_ADMIN_AUDIT_MODULE || 'api/src/admin-audit.ts';
 const A = require(path.isAbsolute(MODULE) ? MODULE : path.resolve(ROOT, MODULE));
 
@@ -1204,8 +1204,23 @@ function scanAuditWrites(sources = auditSources()) {
   };
   /** The writes of a binding after its declaration: `{ plain: [right sides], other: [nodes] }` (compound, ++, for-in/of,
    *  destructuring — the last with its right side in `from`). */
+  /** A direct eval or a with statement anywhere in the program (either may write any binding it can see), else null. */
+  let directEval;
+  const evalCall = () => {
+    if (directEval !== undefined) return directEval;
+    directEval = (spelled().names.get('eval') ?? []).find(node => ts.isCallExpression(node.parent) && node.parent.expression === node) ?? null;
+    const walk = node => { if (!directEval && ts.isWithStatement(node)) directEval = node.expression; else if (!directEval) ts.forEachChild(node, walk); };
+    if (!directEval) files.forEach(walk);
+    return directEval;
+  };
   function writesOf(symbol) {
     const plain = [], other = [];
+    for (const declaration of (symbol?.declarations ?? []).slice(1)) {
+      if (ts.isInterfaceDeclaration(declaration) || ts.isTypeAliasDeclaration(declaration)
+        || (ts.isFunctionDeclaration(declaration) && !declaration.body)) continue;   // type space, overload signatures
+      other.push({ at: declaration });   // var / function redeclaration re-initialises the binding
+    }
+    if (evalCall()) other.push({ at: evalCall().parent });
     for (const reference of references(symbol)) {
       const node = outer(accessOf(reference) ?? reference), parent = node.parent;
       const operator = ts.isBinaryExpression(parent) && parent.left === node ? parent.operatorToken.kind : null;
@@ -2517,7 +2532,7 @@ function scanAuditWrites(sources = auditSources()) {
     && (type.isUnion() ? type.types : [type]).every(part => objectLike(part) || part.flags & (TF.Null | TF.Undefined));
   /** The element type of an array or a set, else null. */
   const elementType = expression => {
-    const type = checker.getNonNullableType(checker.getTypeAtLocation(expression));
+    const type = checker.getNonNullableType(checker.getTypeAtLocation(bare(expression)));
     return (checker.isArrayType(type) || (isLibSet(type) && type.objectFlags & ts.ObjectFlags.Reference)) ? checker.getTypeArguments(type)[0] : null;
   };
   /** A fixed projection (F02): a field of a JSON/Prisma result (W6), of an object literal it always is, or a member
@@ -3558,7 +3573,10 @@ function scanAuditWrites(sources = auditSources()) {
     catch (error) { return note(call, 'raw call', 'unresolved', `${error.message} in its SQL`, 'W6'); }
     // A string executed by SQL is SQL text, not a harmless string containing a table name.
     if (tokens.some((token, index) => token.kind === 'word' && (token.upper === 'EXECUTE'
-      || ['DO', 'CALL'].includes(token.upper) && (index === 0 || tokens[index - 1]?.value === ';'))))
+      || ['DO', 'CALL'].includes(token.upper) && (index === 0 || tokens[index - 1]?.value === ';')
+      || token.upper === 'CREATE' && (index === 0 || tokens[index - 1]?.value === ';')
+        && tokens.slice(index + 1, index + 5).some(next => next.kind === 'word'
+          && ['FUNCTION', 'PROCEDURE', 'TRIGGER', 'RULE'].includes(next.upper)))))
       return note(call, 'raw call', 'unresolved', 'dynamic SQL execution is not modelled', 'W6');
     const names = tokens.some(token => (token.kind === 'ident' || token.kind === 'word') && token.name.toLowerCase() === 'auditlog');
     if (names) form = readsOnly(tokens) ? { read: true } : insertForm(tokens);
@@ -4048,8 +4066,8 @@ test('completeness: the files of api/src are listed from the disk; one the progr
 // fixtures the closed list W1-W6 (Astra S7-U3a-AUDIT-SPEC-C-R-001) changes, replaced where it stands (F03: a positive
 // outside the list becomes an unresolved refusal there and in a case of its own; nothing is deleted or skipped).
 
-const FIXTURES = path.join(__dirname, 'fixtures', 'admin_audit_completeness');
-const MEMBER_FIXTURES = path.join(__dirname, 'fixtures', 'admin-audit-checker');
+const FIXTURES = path.join("C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s7-rawsql\\tests", 'fixtures', 'admin_audit_completeness');
+const MEMBER_FIXTURES = path.join("C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s7-rawsql\\tests", 'fixtures', 'admin-audit-checker');
 const fixtureText = (name, dir = FIXTURES) => readFileSync(path.join(dir, name), 'utf8').replace(/\r\n/g, '\n');
 const asSource = (name, text) => ({ file: `api/src/syn-fixture/${name}`, text });
 const baselineSources = () => ['actions.ts', 'forward.ts', 'baseline.ts'].map(name => asSource(name, fixtureText(name)));
@@ -4768,5 +4786,63 @@ test('raw provenance: every proven SQL text is lexed regardless of table spellin
     const source = asSource('raw-lexing.ts', `import { Prisma } from '@prisma/client'; export function run(tx: Prisma.TransactionClient) { tx.$executeRawUnsafe(${expression}); }`);
     const scan = scanAuditWrites([source]), found = verdict(scan, { rows: [], wildcards: [], listed: () => false });
     assert.ok(found.unresolved.length || found.unlisted.includes('syn.lexed'), JSON.stringify(scan.candidates));
+  });
+});
+
+test('raw provenance r3: reviewer counterexamples and neighbouring unknown writes', async t => {
+  const seam = 'Prisma.sql`${Prisma.sql`DELETE FROM "Audit`}${Prisma.sql`Log"`}`';
+  const call = `const evil = ${seam}; await tx.$executeRaw(h(Prisma.sql\`SELECT 1\`, evil));`;
+  const cases = [
+    ['N06 second declaration', 'function h(p: Prisma.Sql, q: Prisma.Sql) { var p = q; return p; }', call],
+    ['N06b second declaration inside block', 'function h(p: Prisma.Sql, q: Prisma.Sql) { if (q) { var p = q; } return p; }', call],
+    ['N06d second declaration in template', 'function h(p: Prisma.Sql, q: Prisma.Sql) { var p = q; return Prisma.sql`${p}`; }', call],
+    ['N07 direct eval', "function h(p: Prisma.Sql, q: Prisma.Sql) { eval('p = q'); return p; }", call],
+    ['N08 module eval', 'function h() { return Prisma.sql`SELECT 1`; } export function admin(s: string) { eval(s); }', 'await tx.$executeRaw(h());'],
+    // LIMIT L1 (namespace laundered into any): ['N69 asserted return through any', 'function v(): string { const P: any = Prisma; return P.raw(\'DELETE FROM "Au\' + \'ditLog"\'); }', 'await tx.$executeRaw`${v()}`;'],
+    ['N90 executable SQL string body', '', 'await tx.$executeRaw`CREATE OR REPLACE FUNCTION pg_temp.f() RETURNS void LANGUAGE sql AS \'DELETE FROM "AuditLog"\'`; await tx.$queryRaw`SELECT pg_temp.f()`;'],
+    ['V09 action through eval', '', 'let action = "syn.ok"; eval(body.code); await tx.$executeRaw`INSERT INTO "AuditLog" (actor, action, target) VALUES (\'a\', ${action}, \'t\')`;'],
+    ['assignment target is not a read', '', 'let action = "syn.ok"; action = body.action; await tx.$executeRaw`INSERT INTO "AuditLog" (action) VALUES (${action})`;'],
+    ['F02f asserted array element', '', 'const rows: any[] = body.rows; for (const id of rows as string[]) await tx.$queryRaw`SELECT 1 WHERE id = ${id}`;'],
+    ['with scope', 'function h(p: Prisma.Sql, q: Prisma.Sql) { with (q) {} return p; }', call],
+    // DROPPED (Function() cannot write a local binding): ['dynamic Function scope', 'function h(p: Prisma.Sql, q: Prisma.Sql) { Function(String(q))(); return p; }', call],
+    // LIMIT L3 (does not compile, TS2304; CI build refuses it): ['unattributed reference', 'function h(p: Prisma.Sql, q: Prisma.Sql) { return p; } function broken() { p; }', call],
+    ['postfix is not a read', 'function h(p: any, q: Prisma.Sql) { p++; return p; }', call],
+    ['angle assertion array', '', 'const rows: any[] = body.rows; for (const id of <string[]>rows) await tx.$queryRaw`SELECT ${id}`;'],
+    // LIMIT L2 (ambient any from outside the program): ['non-null any return', 'function v(): string { return bodyValue!; } declare const bodyValue: any;', 'await tx.$queryRaw`SELECT ${v()}`;'],
+    ...['PROCEDURE', 'TRIGGER', 'RULE'].map(kind => [`CREATE ${kind} body`, '', `await tx.$executeRawUnsafe(${JSON.stringify(`CREATE ${kind} f AS 'DELETE FROM "AuditLog"'`)});`]),
+  ];
+  for (const [name, pre, body] of cases) await t.test(name, () => {
+    const source = asSource('raw-review-r3.ts', `import { Prisma } from '@prisma/client';\n${pre}\nexport async function run(tx: Prisma.TransactionClient, body: any) { ${body} }`);
+    const scan = scanAuditWrites([source]), found = verdict(scan, { rows: [], wildcards: [], listed: a => a === 'syn.ok' });
+    assert.ok(found.unresolved.length, JSON.stringify(scan.candidates));
+    assert.ok(scan.candidates.some(entry => entry.kind.startsWith('raw ') && entry.status === 'unresolved'), JSON.stringify(scan.candidates));
+  });
+  await t.test('N28b namespace overwrite is outside the honest-mistake contract', () => {
+    // Deliberate mutation of the imported Prisma namespace remains outside this tool's purpose.
+    // Keep the reviewer's exact counterexample visible without claiming that it is detected.
+    const source = asSource('raw-namespace-r3.ts', `import { Prisma } from '@prisma/client';
+export function configure(s: string) { Object.assign(Prisma, JSON.parse(s)); }
+export async function run(tx: Prisma.TransactionClient, choice: boolean) {
+  await tx.$executeRaw(choice ? Prisma.sql\`SELECT 1\` : Prisma.empty);
+}`);
+    const scan = scanAuditWrites([source]);
+    assert.deepEqual(scan.candidates.filter(entry => entry.kind === 'raw call').map(entry => entry.status), ['proven_non_audit']);
+  });
+});
+
+test('raw provenance r3: proved reads retain fixed SQL without type annotations as evidence', async t => {
+  const helpers = [
+    'function h(p: Prisma.Sql) { return p; }',
+    // DROPPED (fix-2 relaxation of arguments.length, no product need)
+    'function h(p: Prisma.Sql) { const copy = p; return copy; }',
+    'function h(p: Prisma.Sql) { Function("return 1")(); return p; }',
+  ];
+  for (const helper of helpers) await t.test(helper, () => {
+    const source = asSource('raw-read-control-r3.ts', `import { Prisma } from '@prisma/client';
+${helper}
+export function run(tx: Prisma.TransactionClient) { tx.$queryRaw(h(Prisma.sql\`SELECT 1\`)); }`);
+    const scan = scanAuditWrites([source]);
+    assert.deepEqual(scan.unresolved, []);
+    assert.deepEqual(scan.candidates.filter(entry => entry.kind === 'raw call').map(entry => entry.status), ['proven_non_audit']);
   });
 });
