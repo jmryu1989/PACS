@@ -211,46 +211,78 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
   v.evaluate('()=>vrRestoreMaskRenderer()');dialog.get_by_role('button',name='Cancel Sculpt',exact=True).click();dialog.get_by_role('button',name='Close VR',exact=True).click();self.mpr_live_after_mask_failure(v,native);self.preserved_volume(source,self.volume_state(v));self.vr(v)
 
  def test_vr_22_native_frame_gate_blocks_engine_and_resize_until_fresh_access(self):
-  """REQ-S8-D-A -> RISK-S8-UNGATED/EXPIRED-FRAME -> hosted real-bundle frame events/pixels."""
-  a,p,v=self.opened_projection(constant=True);dialog=self.vr(v);before=self.native_pixels(v);pixels=self.vr_pixels(v)
-  held=[];wire=[]
-  def hold(route):
-   if '/viewer-jobs' in route.request.url or route.request.url.endswith('/api/me'):
-    wire.append(route.request.headers);held.append(route)
-   else:route.continue_()
-  v.route('**/api/**',hold)
+  """REQ-S8-D-A -> RISK-S8-UNGATED/EXPIRED-FRAME/EDIT-LOSS -> native cover and recovery."""
+  a,p,v=self.opened_projection(constant=True);dialog=self.vr(v);before=self.native_pixels(v)
+  dialog.get_by_label('K Max',exact=True).fill('7');dialog.get_by_role('button',name='Apply Crop',exact=True).click()
+  dialog.get_by_label('VR Opacity',exact=True).fill('50');dialog.get_by_role('button',name='Apply Display',exact=True).click()
+  self.sculpt_region(v,dialog);dialog.get_by_role('button',name='Apply Sculpt',exact=True).click()
+  pixels=self.vr_pixels(v);self.assertGreater(pixels['count'],0)
+  # Keep a real unfinished curved draft while access is unavailable.
+  dialog.get_by_label('Sculpt Tool',exact=True).select_option('Curved Area')
+  dialog.get_by_role('button',name='Draw Region',exact=True).click()
+  box=dialog.get_by_label('Sculpt removal preview').bounding_box()
+  for x,y in ((.2,.2),(.6,.2),(.6,.6)):
+   v.mouse.click(box['x']+x*box['width'],box['y']+y*box['height'])
   v.evaluate("""()=>{
     window.vrGateView=cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport;
     window.vrGateEngine=vrGateView.getRenderingEngine();window.vrGateEvents=0;
     window.vrGateListener=()=>vrGateEvents++;
     vrGateView.element.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,vrGateListener);
-    vrGateView.render();
+    window.vrReaderState=()=>{
+      const mapper=vrGateView.getActors()[0].actor.getMapper();
+      return {camera:vrGateView.getCamera(),planes:mapper.getClippingPlanes().map(p=>({normal:p.getNormal(),origin:p.getOrigin()})),
+        properties:JSON.stringify(mapper.getViewSpecificProperties()),
+        draft:document.querySelector('[data-kin-vr-sculpt] path')?.getAttribute('d'),
+        inputs:[...document.querySelectorAll('#kin-volume-rendering input')].map(e=>e.value)};
+    };
   }""")
-  v.wait_for_function('()=>vrGateEvents>0')
-  # The next check starts at age 10 s. Hold both answers across expiry, inside the
-  # 15 s no-answer allowance counted from the previous confirmation's expiry.
-  for _ in range(130):
-   if len(held)>=2:break
-   v.wait_for_timeout(100)
-  self.assertGreaterEqual(len(held),2,'the real document must refresh both access answers')
-  v.wait_for_timeout(5250)
-  v.evaluate("""async()=>{
-    vrGateEvents=0;
-    const c=vrGateView.getCamera();vrGateView.setCamera({parallelScale:c.parallelScale*.5});
-    vrGateView.render();vrGateEngine.renderViewport(vrGateView.id);
-    vrGateEngine.renderViewports([vrGateView.id]);vrGateEngine.render();vrGateEngine.resize(true,true);
-    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-  }""")
-  expect(dialog).to_be_visible();self.assertEqual(0,v.evaluate('vrGateEvents'))
-  # resize reassigns canvas.width and clears pixels even when no VR draw occurs.
-  # IMAGE_RENDERED is emitted by the real engine only for a viewport it actually copies.
-  self.assertEqual(before,self.native_pixels(v))
-  for headers in wire:
-   self.assertTrue(headers.get('x-kin-session'));self.assertEqual('1',headers.get('x-kin-csrf'))
-  v.unroute('**/api/**',hold)
-  for route in held:route.continue_()
-  v.wait_for_function('()=>vrGateEvents>0')
-  self.assertNotEqual(pixels,self.vr_pixels(v));expect(dialog).to_be_visible()
+  state=v.evaluate('vrReaderState()');wire=[]
+  # Fail only this study's access endpoint; other viewer session probes keep running normally.
+  def unavailable(route):
+   wire.append(route.request.headers);route.fulfill(status=503,json={})
+  route_pattern='**/api/studies/'+a.uid+'/viewer-jobs'
+  v.route(route_pattern,unavailable)
+  try:
+   v.wait_for_timeout(16000)
+   v.evaluate("""async()=>{
+     vrGateEvents=0;vrGateView.render();vrGateEngine.renderViewport(vrGateView.id);
+     vrGateEngine.renderViewports([vrGateView.id]);vrGateEngine.render();
+     await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+   }""")
+   expect(dialog).to_be_visible();self.assertEqual(0,v.evaluate('vrGateEvents'))
+   self.assertEqual(before,self.native_pixels(v))
+   expect(dialog.locator('.kin-vr-identity')).not_to_be_visible(timeout=20000)
+   expect(dialog.get_by_label('Sculpt removal preview')).not_to_be_visible()
+   expect(dialog.get_by_role('button',name='Close VR',exact=True)).to_be_visible()
+   # A composed-screen comparison detects canvas, SVG and identity leaks together.
+   clip=dialog.bounding_box();covered=v.screenshot(clip=clip)
+   old=v.evaluate("""()=>{
+     return [...document.querySelectorAll('#kin-volume-rendering canvas,#kin-volume-rendering svg,#kin-volume-rendering .kin-vr-identity,#kin-volume-rendering .kin-vr-source')].map(e=>{const old=e.style.opacity;e.style.opacity='0';return old});
+   }""")
+   try:self.assertEqual(covered,v.screenshot(clip=clip))
+   finally:v.evaluate("""values=>document.querySelectorAll('#kin-volume-rendering canvas,#kin-volume-rendering svg,#kin-volume-rendering .kin-vr-identity,#kin-volume-rendering .kin-vr-source').forEach((e,i)=>e.style.opacity=values[i])""",old)
+   if os.environ.get('KIN_EVIDENCE_DIR'):
+    v.screenshot(path=str(Path(os.environ['KIN_EVIDENCE_DIR'])/'vr-access-covered.png'))
+   self.assertEqual(state,v.evaluate('vrReaderState()'))
+   requests_at_cover=len(wire);v.wait_for_timeout(2500)
+   self.assertGreater(len(wire),requests_at_cover,'checks continue under the cover')
+   v.evaluate("""async()=>{
+     vrGateEngine.resize(true,true);
+     await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+   }""")
+   self.assertEqual(0,v.evaluate('vrGateEvents'));self.assertEqual(state,v.evaluate('vrReaderState()'))
+   self.assertEqual(before,self.native_pixels(v))
+   for headers in wire:
+    self.assertTrue(headers.get('x-kin-session'));self.assertEqual('1',headers.get('x-kin-csrf'))
+  finally:
+   v.unroute(route_pattern,unavailable)
+  v.wait_for_function('()=>vrGateEvents>0',timeout=20000)
+  expect(dialog.locator('.kin-vr-identity')).to_be_visible()
+  expect(dialog.get_by_label('Sculpt removal preview')).to_be_visible()
+  self.assertEqual(state,v.evaluate('vrReaderState()'));self.assertEqual(pixels,self.vr_pixels(v))
+  dialog.get_by_role('button',name='Finish Region',exact=True).click()
+  expect(dialog.get_by_role('button',name='Apply Sculpt',exact=True)).to_be_enabled()
+  dialog.get_by_role('button',name='Cancel Sculpt',exact=True).click()
   v.evaluate('()=>vrGateView.element.removeEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,vrGateListener)')
   dialog.get_by_role('button',name='Close VR',exact=True).click()
   self.mpr_live_after_mask_failure(v,before)
