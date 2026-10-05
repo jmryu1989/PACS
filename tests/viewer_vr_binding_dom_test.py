@@ -864,6 +864,121 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         self.assertEqual(2,len(end_states))
         self.assertEqual(end_states[0],end_states[1])
 
+    def assert_clock_change_requires_show_confirmation(self, change):
+        page=self.access_page()
+        result=page.evaluate("""async change=>{
+          await sim.advance(3000);sim.visibility('hidden');
+          const before=sim.requests.length;
+          if(change==='sleep')sim.wallOffset+=20000;
+          if(change==='wall-forward'){sim.wallOffset+=20000;sim.now+=1000;}
+          if(change==='latched'){
+            sim.wallOffset+=20000;tick(250);sim.wallOffset-=20000;sim.now+=1000;
+          }
+          const hiddenRequests=sim.requests.length-before;
+          sim.delay=5000;sim.visibility('visible');const shown=sim.now,log=[];
+          for(const offset of [0,1000,4999,5000]){
+            await sim.advance(shown+offset-sim.now);sim.frame();
+            log.push({offset,covered:sim.covered(),drawn:frameLog.at(-1).drawn});
+          }
+          return {hiddenRequests,requests:sim.requests.slice(before).map(r=>({path:r.path,offset:r.at-shown})),
+            log,open:sim.open()};
+        }""",change)
+        print('R5_SHOW',change,result,flush=True)
+        self.assertEqual(0,result['hiddenRequests'])
+        self.assertEqual([{'path':'/api/me','offset':0},
+                          {'path':'/api/studies/study-1/viewer-jobs','offset':0}],result['requests'])
+        self.assertEqual([{'offset':t,'covered':t<5000,'drawn':t==5000}
+                          for t in (0,1000,4999,5000)],result['log'])
+        self.assertTrue(result['open'])
+        self.assert_surface(page,False)
+
+    def test_r5_show_uses_both_clocks_after_sleep_or_wall_jump(self):
+        for change in ('sleep','wall-forward'):
+            with self.subTest(change=change):
+                self.assert_clock_change_requires_show_confirmation(change)
+
+    def test_r5_show_keeps_observed_expiry_after_clock_correction(self):
+        self.assert_clock_change_requires_show_confirmation('latched')
+
+    def test_r5_confirmation_requires_account_and_study_access(self):
+        for failure in ('study-network','study-503','study-silent','account-503'):
+            with self.subTest(failure=failure):
+                page=self.access_page()
+                result=page.evaluate("""async failure=>{
+                  // Give the last complete check a nonzero RTT: deadlines belong to its request start.
+                  sim.delay=500;await sim.advance(10500);const confirmedStart=sim.requests.at(-1).at;
+                  const completedAt=sim.now,fetch=window.fetch;
+                  if(failure==='study-network')sim.failJobs=true;
+                  if(failure==='study-silent')sim.jobsSilent=true;
+                  if(failure==='account-503')sim.meStatus=503;
+                  if(failure==='study-503')window.fetch=(url,options)=>{
+                    if(new URL(url,location.href).pathname.endsWith('/viewer-jobs'))
+                      return Promise.resolve(new Response('',{status:503}));
+                    return fetch(url,options);
+                  };
+                  const log=[];
+                  for(const age of [14000,14999,15000,16000,29999,30000,60000]){
+                    await sim.advance(confirmedStart+age-sim.now);sim.frame();
+                    log.push({age,covered:sim.covered(),drawn:frameLog.at(-1).drawn,open:sim.open()});
+                  }
+                  window.fetch=fetch;sim.failJobs=false;sim.jobsSilent=false;sim.meStatus=0;
+                  await sim.advance(18000);sim.frame();
+                  return {confirmedStart,completedAt,log,
+                    recovered:{covered:sim.covered(),drawn:frameLog.at(-1).drawn,open:sim.open()}};
+                }""",failure)
+                print('R5_HALVES',failure,result,flush=True)
+                self.assertEqual(500,result['completedAt']-result['confirmedStart'])
+                self.assertEqual([{'age':t,'covered':t>=30000,'drawn':t<15000,'open':True}
+                                  for t in (14000,14999,15000,16000,29999,30000,60000)],result['log'])
+                self.assertEqual({'covered':False,'drawn':True,'open':True},result['recovered'])
+                self.assert_surface(page,False)
+
+    def test_r5_session_resume_requires_fresh_confirmation_within_old_validity(self):
+        page=self.access_page()
+        page.evaluate('async()=>{await sim.advance(3000);sim.delay=500;}')
+        peer=self.session_preparation_peer(page)
+        page.wait_for_function("KinWorkContext.state()==='preparing'")
+        self.assert_surface(page,True)
+        page.evaluate('async()=>{await sim.advance(1000);window.beforeResume=sim.requests.length;}')
+        peer.evaluate("release();channel.postMessage({type:'session-resumed',session:'S1',preparation:'P1'})")
+        page.wait_for_function("KinWorkContext.state()==='active'")
+        result=page.evaluate("""async()=>{
+          const atResume=sim.covered();sim.frame();const drawnAtResume=frameLog.at(-1).drawn;
+          const requested=sim.requests.slice(beforeResume).map(r=>r.at-sim.now);
+          await sim.advance(499);sim.frame();const beforeAnswer={covered:sim.covered(),drawn:frameLog.at(-1).drawn};
+          await sim.advance(1);sim.frames();
+          return {atResume,drawnAtResume,requested,beforeAnswer,
+            afterAnswer:{covered:sim.covered(),drawn:frameLog.at(-1).drawn},open:sim.open()};
+        }""")
+        print('R5_SESSION',result,flush=True)
+        self.assertEqual({'atResume':True,'drawnAtResume':False,'requested':[0,0],
+            'beforeAnswer':{'covered':True,'drawn':False},
+            'afterAnswer':{'covered':False,'drawn':True},'open':True},result)
+        self.assert_surface(page,False)
+
+    def test_r5_context_cover_does_not_publish_a_frame_completed_under_cover(self):
+        page=self.access_page()
+        result=page.evaluate("""()=>{
+          const canvas=vrView.element.querySelector('canvas'),g=canvas.getContext('2d');
+          const pixel=()=>[...g.getImageData(0,0,1,1).data];
+          const visible=()=>getComputedStyle(canvas).visibility==='visible';
+          const before=pixel(),requests=sim.requests.length,fill=g.fillRect;
+          // Distinguish the next synthetic image from the already displayed magenta image.
+          g.fillRect=function(...args){this.fillStyle='#00ff00';return fill.apply(this,args)};
+          vrControl.setContextLoss('컨텍스트 복구를 확인하는 중입니다.');
+          sim.frame();const underCover={covered:sim.covered(),visible:visible(),drawn:frameLog.at(-1).drawn,pixel:pixel()};
+          vrControl.setContextLoss(null);
+          const atUncover={covered:sim.covered(),visible:visible(),pixel:pixel(),requests:sim.requests.length-requests};
+          sim.frames();return {before,underCover,atUncover,
+            afterFrame:{drawn:frameLog.at(-1).drawn,pixel:pixel()}};
+        }""")
+        print('R5_COVER_FRAME',result,flush=True)
+        self.assertEqual({'before':[255,0,255,255],
+            'underCover':{'covered':True,'visible':False,'drawn':False,'pixel':[255,0,255,255]},
+            'atUncover':{'covered':False,'visible':True,'pixel':[255,0,255,255],'requests':0},
+            'afterFrame':{'drawn':True,'pixel':[0,255,0,255]}},result)
+        self.assert_surface(page,False)
+
     def test_r4_show_reuses_valid_confirmation_or_checks_immediately(self):
         for event in ('visibility','page'):
             for hidden_ms in (3000,40000):
