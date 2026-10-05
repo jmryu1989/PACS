@@ -2533,6 +2533,61 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.ended_value("void fetch('/api/should-not-leave',{method:'POST',body:'{}'}).catch(()=>{})")
         self.settle();self.assertEqual(before,len(self.finished))
 
+    def unsaved_work(self):
+        """What the viewer document tells Log out (S7-U5 A006): the kinds its `kin-unsaved:` lock declares now, and its
+        answer to the session's unsaved-work question."""
+        return self.page.evaluate("""async () => {
+          const session = KinWorkContext.session(), prefix = 'kin-unsaved:' + session + ':';
+          const held = (await navigator.locks.query()).held.map(lock => lock.name).filter(name => name.startsWith(prefix))
+            .map(name => name.split(':').pop()).sort();
+          const answers = await new Promise(done => {
+            const query = crypto.randomUUID(), seen = [], channel = new BroadcastChannel('kin-session');
+            channel.onmessage = event => { if (event.data?.type === 'session-work' && event.data.query === query) seen.push(event.data.unsaved); };
+            channel.postMessage({ type: 'session-work-query', session, query });
+            setTimeout(() => { channel.close(); done(seen); }, 300);
+          });
+          return [held, answers]; }""")
+
+    def test_29_log_out_asks_about_a_job_save_that_is_out_but_not_about_a_job_restore(self):
+        """S7-U5 A006 / review DR-F04 (commander's decision): with the shipped Job panel, a restore in progress is not
+        unsaved work - nothing is declared and Log out's question is answered with nothing; a Job save whose answer has
+        not come is declared as `jobs` until the save is confirmed."""
+        row = {'id': 'syn-job-1', 'revision': 1, 'title': 'SYN saved job', 'description': 'SYN description', 'hidden': False,
+               'authorActor': 'syn-radiologist', 'authorSub': RADIOLOGIST['sub'], 'createdAt': '2026-10-05T00:00:00.000Z',
+               'snapshotVersion': 2}
+        held_saves = []
+        def jobs(route):
+            path = urlparse(route.request.url).path
+            if route.request.method == 'POST':
+                return held_saves.append(route)
+            if path.endswith('/viewer-jobs'):
+                return route.fulfill(json={'jobs': [row]})
+            route.fulfill(status=404, json={'statusCode': 404, 'message': 'SYN job unavailable'})
+        self.real_writer_document('jobs')
+        self.page.route('**/api/studies/*/viewer-jobs**', jobs)
+        self.page.get_by_role('button', name='Refresh Jobs', exact=True).click()
+        self.wait_until(lambda: self.page.get_by_role('button', name='Restore Job', exact=True).count() == 1, 'the listed Job')
+        self.settle()
+        self.assertEqual([[], [[]]], self.unsaved_work())
+        # Restore Job: the panel is busy with the restore (its account check held). Not unsaved work.
+        self.hold_me = True
+        self.page.get_by_role('button', name='Restore Job', exact=True).click()
+        self.wait_until(lambda: any('x-kin-subject' in route.request.headers for route in self.held_me), "the restore's /me held")
+        self.page.wait_for_timeout(700)
+        self.assertEqual([[], [[]]], self.unsaved_work(), 'a Job restore in progress would be asked about at Log out')
+        self.release_held(RADIOLOGIST)
+        self.wait_until(lambda: 'SYN job unavailable' in (self.text_of('#kin-viewer-jobs-status') or '')
+                        or '복원' in (self.text_of('#kin-viewer-jobs-status') or ''), 'the restore finished')
+        self.settle()
+        # Save Changes of the Job's details: declared while its answer is out, withdrawn when the save is confirmed.
+        self.page.get_by_role('button', name='Edit Details', exact=True).click()
+        self.page.get_by_role('button', name='Save Changes', exact=True).click()
+        self.wait_until(lambda: held_saves, 'the Job save sent')
+        self.wait_until(lambda: self.unsaved_work()[0] == ['jobs'], 'the Job save that is out declared')
+        self.assertEqual([['jobs']], self.unsaved_work()[1])
+        held_saves.pop().fulfill(json={'id': row['id'], 'revision': 2})
+        self.wait_until(lambda: self.unsaved_work() == [[], [[]]], 'the confirmed Job save withdrawn')
+
     def notice(self,session,kind='broadcast'):
         self.observer.evaluate("""([session,kind])=>{const notice={type:'session-ended',session,operation:Date.now(),status:'ending'};
           if(kind==='storage')localStorage.setItem('kin-session-end',JSON.stringify(notice));

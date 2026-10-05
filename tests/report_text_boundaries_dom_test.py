@@ -23,6 +23,23 @@ away by Discard Draft. The ordinary path (nothing typed after the press) keeps i
 request that throws or is rejected leaves Log out pressable; a busy session store (409) does not stop the autosave.
 The wording asserted is the part the unit's instruction fixed (the approved report "does not contain" the text; the
 English control names of AGENTS section 4), not whole sentences.
+Round 7 (closure audit 2026-10-05; draft claims 1-3, A020, A021): a draft write that waited behind a Save, an Approve
+or a Discard Draft is decided when its turn comes - the text just committed or discarded is not stored again as a
+draft (answer received or lost), and text typed after the press is; the answer of Discard Draft does not wipe text
+typed after the press; a Save whose answer was lost is looked up on the server before anything is written (autosave,
+leaving, Log out, pressing Save again, Recover Draft) and a Save that never arrived keeps its text; Recover Draft goes
+on past a study the server refuses. Each case reads the stub server's stored draft row at the end and what the reader
+sees on coming back (same document, after a list read, a new document).
+Round 8 (A006, A015): Log out asks about unsaved work outside the report draft (a viewer's marks, finding text, Job
+edits, its Tech Note - review DR-F01; a dictation in review) in the same panel, only when a document of the session declares some - nothing is asked,
+posted or waited for otherwise, a closed window and another session's document count for nothing, and Back to Editing
+discards nothing; the viewer window the list opens is handed the list's session by its window name, and a viewer that
+stopped at its entry is read again when opened from the list.
+Stand-ins added for rounds 7-8, named: a held or lost Discard Draft, a Save / Approve the server commits without the
+answer arriving, a failing read of the study states, the viewer document the list opens (/ohif/viewer; its first
+script takes the hand-over as config/ohif.js does), and a viewer document's side of the unsaved-work contract (the
+`kin-unsaved:` lock and the answer to `session-work-query`, as viewer-session.js does; the real one is exercised in
+tests/viewer_session_dom_test.py).
 Stand-ins added here, named: the clipboard (the harness's), the media devices of a dictation (an audio context, a
 worklet node and a microphone stream - nothing else of the browser), the server's answers for a dictation, a
 findings list, an insertion and a discard, a blank same-origin document standing in for a viewer, a recorder of
@@ -78,6 +95,31 @@ SAVED_REPORT = {"version": 1, "rs": "T", "findings": "SYN-SAVED-V1 report", "con
 EMPTY = dict.fromkeys(h.FIELDS, "")
 # A same-origin document that is not one of the product's pages (the viewer stand-in of the lock cases).
 VIEWER_URL = h.ORIGIN + "/syn-viewer.html"
+# The viewer document the list opens (/ohif/viewer), standing in for OHIF. Its first script does what config/ohif.js
+# does first with a hand-over from the list: reads it from the window name and gives the window its name back.
+VIEWER_STAND_IN = """<!doctype html><title>SYN viewer stand-in</title><script>
+  window.__synEntry = null; window.__synNameAtLoad = window.name;
+  if (window.name.startsWith('kin-viewer-entry:')) {
+    try { window.__synEntry = JSON.parse(window.name.slice('kin-viewer-entry:'.length)); window.name = window.__synEntry.name; }
+    catch (_) {}
+  }
+</script>"""
+# A viewer document's side of the unsaved-work contract (viewer-session.js), for the stand-in: while it holds unsaved
+# work it holds the lock `kin-unsaved:<session>:<document>:<kinds>`, and it answers `session-work-query` of its
+# session with `session-work` (when `answers`).
+WORK_STAND_IN = """([session, kinds, answers]) => new Promise(held => {
+  const id = crypto.randomUUID(), channel = new BroadcastChannel('kin-session');
+  window.__synWork = { id, queries: [], release: null };
+  channel.addEventListener('message', event => {
+    const data = event.data;
+    if (!data || data.type !== 'session-work-query' || data.session !== session) return;
+    window.__synWork.queries.push(data.query);
+    if (answers) channel.postMessage({ type: 'session-work', session, document: id, query: data.query, unsaved: kinds });
+  });
+  if (!kinds.length) return held(id);
+  navigator.locks.request('kin-unsaved:' + session + ':' + id + ':' + kinds.join(','),
+    () => new Promise(release => { window.__synWork.release = release; held(id); }));
+})"""
 # What a document asks of the browser's lock manager and posts on the session channel, in the order it happened, each
 # with the state of the document's work gate at that moment. The lock manager and the channel stay the browser's own.
 ORDER_RECORDER = """(() => {
@@ -126,9 +168,22 @@ class MultiStudySite(h.Site):
         self.other_state = ({}, {}, {"version": 0, "rs": "W"})
         self.bootstrap_states = None
         self.hidden = set()             # studies the list no longer shows (access removed, another institution)
-        self.discard_answers = []       # DELETE draft of UID: (status, body) | "abort" | "lost" (done, answer lost)
+        self.discard_answers = []       # DELETE draft of UID: (status, body) | "abort" | "lost" (done, answer lost) | "hold"
+        self.held_discards = []         # held Discard Drafts: (route, body)
+        self.bootstrap_answers = []     # the read of every study's state: "abort" | (status, body); none queued: the states
+        self.viewer_opens = []          # the query strings of the viewer documents the list asked for
+        self.held_viewers = None        # a list: the viewer document's answer is held (the window is still loading)
         self.templates, self.dictation, self.findings = [], None, None
         self.dictations, self.sids = [], 0
+
+    def handle(self, route, request):
+        url = h.urlparse(request.url)
+        if request.method == "GET" and url.path == "/ohif/viewer" and f"{url.scheme}://{url.netloc}" == h.ORIGIN:
+            self.viewer_opens.append(url.query)
+            if self.held_viewers is not None:
+                return self.held_viewers.append(route)
+            return route.fulfill(content_type="text/html; charset=utf-8", body=VIEWER_STAND_IN)
+        return super().handle(route, request)
 
     def list_body(self, account, rename=None):
         body = super().list_body(account, rename)
@@ -221,11 +276,16 @@ class MultiStudySite(h.Site):
         if method == "DELETE" and path == f"/api/studies/{h.UID}/draft" and self.discard_answers:
             reply = self.discard_answers.pop(0)
             self.discards.append(request.post_data_json)
+            if reply == "hold":
+                return self.held_discards.append((route, request.post_data_json))
             if reply == "lost":             # the server discards the draft; its answer reaches nobody
                 account = self.sessions[self.cookie]
                 self.revs[account["actor"]] = self.revs.get(account["actor"], 0) + 1
                 self.rows.pop(account["actor"], None)
             return route.abort("connectionreset") if reply in ("abort", "lost") else self.answer(route, *reply)
+        if method == "GET" and path == "/api/bootstrap" and "states=omit" not in query and self.bootstrap_answers:
+            reply = self.bootstrap_answers.pop(0)
+            return route.abort("connectionreset") if reply == "abort" else self.answer(route, *reply)
         if method == "GET" and path == "/api/bootstrap" and (self.bootstrap_states is not None or "states=omit" not in query):
             states = self.bootstrap_states
             if states is None:
@@ -260,6 +320,36 @@ class MultiStudySite(h.Site):
     def stored_for(self, uid):
         with self.study(uid):
             return self.stored()
+
+    def finish_discard(self, lost=False):
+        """The server reaches a held Discard Draft of study A now: the author's row goes when its revision is the
+        expected one (`lost`: and the answer reaches nobody). Returns the status the server answered."""
+        route, body = self.held_discards.pop(0)
+        refused = self.preconditions(body, h.RAD)
+        if refused:
+            self.answer(route, *refused)
+            return refused[0]
+        self.revs[h.RAD["actor"]] = self.revs.get(h.RAD["actor"], 0) + 1
+        self.rows.pop(h.RAD["actor"], None)
+        if lost:
+            route.abort("connectionreset")
+        else:
+            route.fulfill(json={**self.envelope(h.RAD), "state": self.state(h.RAD)})
+        return 200
+
+    def lose(self, route, body, rs):
+        """The server accepts a held Approve or Save as it was sent (as `accept` does); its answer reaches nobody."""
+        self.revs[h.RAD["actor"]] = self.revs.get(h.RAD["actor"], 0) + 1
+        self.rows.pop(h.RAD["actor"], None)
+        self.report = {"version": self.report["version"] + 1, "rs": rs, "action": body.get("action"),
+                       **{k: body.get(k, "") for k in h.FIELDS}}
+        route.abort("connectionreset")
+
+    def draft_row(self, uid=h.UID):
+        """The author's whole stored draft row of a study (texts, base version, lists), or None."""
+        with self.study(uid):
+            row = self.rows.get(h.RAD["actor"])
+            return dict(row) if row else None
 
 
 class ReportTextBoundaries(h.LogoutDOMTest):
@@ -1151,24 +1241,27 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.assertEqual(1, self.site.commits[-1]["baseVersion"])
 
     def test_a_refused_write_left_behind_an_accepted_save_is_not_a_failure_and_not_sent_again(self):
+        """The write of leaving the study stood behind the Save. The Save stored that text as the report, so when the
+        write's turn comes it has nothing to send - a write the server would refuse (403) is not a failure of anything.
+        (Until the closure audit of 2026-10-05 the write was still sent with the text captured on leaving; this case
+        waited for it. Sent and accepted, it put the saved text back as a draft - the cases of round 7 below.)"""
         self.page.clock.install()
         self.open_main()
         notices = self.collect_notices()
         self.select_and_type()
         self.site.put_answers = [(403, {"statusCode": 403, "message": "SYN refused"})]
         self.save_and_leave_before_the_answer()
-        self.wait_until(lambda: len(self.site.puts) == 1, "the write of leaving the study, refused")
-        self.page.wait_for_timeout(300)
+        self.page.wait_for_timeout(600)
         for _ in range(2):
             self.page.clock.run_for(21000)
             self.page.wait_for_timeout(200)
-        # The Save stored that text as the report: nothing of this document is unconfirmed, whatever became of the write.
-        self.assertEqual((1, None), (len(self.site.puts), self.site.stored_for(h.UID)), "the saved report was sent again as a draft")
+        # The Save stored that text as the report: nothing of this document is unconfirmed, and nothing was sent as a draft.
+        self.assertEqual((0, None), (len(self.site.puts), self.site.stored_for(h.UID)), "the saved report was sent as a draft")
         self.assertEqual([], [text for text, error in notices if error], "the reader was told of a failure that lost nothing")
         self.assertFalse(self.leaving_asks())
         self.log_out_main()
         self.page.wait_for_url(h.INDEX_URL)
-        self.assertEqual((1, 1), (len(self.site.puts), len(self.site.logouts)))
+        self.assertEqual((0, 1), (len(self.site.puts), len(self.site.logouts)))
 
     def test_text_typed_while_a_save_or_approve_is_out_is_kept_when_the_server_accepts_it(self):
         for control, rs in (("#b-save", "T"), ("#b-approve", "A")):
@@ -1759,6 +1852,614 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.wait_until(lambda: self.site.stored_for(h.UID) == h.FIELDS, "the next autosave stores the text")
         self.assertEqual((2, h.FIELDS), (len(self.site.puts), self.editor()))
         self.assertLessEqual(len([text for text, error in notices if error]), 1, notices)
+
+    # ── round 7 (closure audit 2026-10-05): a draft write that waited is decided at its turn; an answer never wipes
+    #    text typed after its request; an unknown outcome is not "not done"; one refused study does not block the rest ──
+    DISCARDED = " SYN typed, then thrown away"
+
+    def shown(self, page=None):
+        """What the reader sees of the selected study's report: the three fields, whether the draft bar is up and
+        whether it offers Discard Draft."""
+        page = page or self.page
+        return {"editor": self.editor(page), "bar": page.locator("#draftbar").is_visible(),
+                "discard": page.locator("#b-draft-discard").is_visible()}
+
+    def assert_reopened(self, editor, draft, what):
+        """Study A as the reader finds it again - in this document, after a list read, and in a new document. `draft`:
+        whether the screen says the text is a draft (the bar with Discard Draft)."""
+        expected = {"editor": editor, "bar": draft, "discard": draft}
+        if self.page.locator("#rows tr.sel", has_text=h.PATIENT).count():
+            self.switch(h.PATIENT_B)
+        self.switch(h.PATIENT)
+        self.page.wait_for_timeout(500)
+        self.assertEqual(expected, self.shown(), f"{what}: on coming back to the study in the same document")
+        self.refresh()
+        self.page.wait_for_timeout(600)
+        self.assertEqual(expected, self.shown(), f"{what}: after a list read")
+        other = self.watch(self.context.new_page())
+        self.open_main(page=other)
+        other.locator("#rows tr", has_text=h.PATIENT).first.click()
+        other.wait_for_timeout(700)
+        seen = self.shown(other)
+        other.close()
+        self.assertEqual(expected, seen, f"{what}: in a new document")
+
+    def a_writes(self):
+        """The draft writes that carried study A's typed text (the list of writes is shared with study B)."""
+        return [put for put in self.site.puts if put["findings"].startswith(h.FIELDS["findings"])]
+
+    def let_everything_go(self):
+        """Two autosave periods and a list poll."""
+        for _ in range(2):
+            self.page.clock.run_for(21000)
+            self.page.wait_for_timeout(300)
+
+    def press_and_leave(self, control):
+        """Press a confirming control of study A and move to study B before the answer; work goes on in study B."""
+        self.site.commit_answers = ["hold"]
+        self.page.locator(control).click()
+        self.wait_until(lambda: self.site.held_commits, "the command is out")
+        self.switch(h.PATIENT_B)
+        self.page.locator("#findings").press_sequentially("SYN-B typed meanwhile")
+        self.page.wait_for_timeout(300)
+        return self.site.held_commits.pop(), self.site.commits[-1]
+
+    def test_a_save_or_approve_accepted_after_the_study_was_left_puts_no_draft_back(self):
+        """Closure audit claim 1. The write of leaving study A waits behind the Save / Approve. When its turn comes the
+        text is the report: nothing is written, with the answer received or lost."""
+        for control, rs in (("#b-save", "T"), ("#b-approve", "A")):
+            for answer in ("received", "lost"):
+                with self.subTest(command=control, answer=answer):
+                    self.fresh_context()
+                    self.site = MultiStudySite()
+                    self.page.clock.install()
+                    self.open_main()
+                    notices = self.collect_notices()
+                    self.select_and_type()
+                    route, body = self.press_and_leave(control)
+                    self.assertEqual([], self.a_writes(), "a write of study A left while its command was out")
+                    getattr(self.site, "accept" if answer == "received" else "lose")(route, body, rs)
+                    self.page.wait_for_timeout(800)
+                    self.let_everything_go()
+                    self.assertIsNone(self.site.draft_row(), "claim 1: the text just committed was stored again as a draft")
+                    self.assertEqual([], self.a_writes(), "claim 1: the committed text was sent as a draft")
+                    self.assertEqual((1, rs, h.FIELDS), (self.site.report["version"], self.site.report["rs"],
+                                                        {k: self.site.report[k] for k in h.FIELDS}))
+                    # Nothing of study A was applied to study B: its own text is on screen and stored as its own draft.
+                    self.assertEqual("SYN-B typed meanwhile", self.editor()["findings"])
+                    self.assertEqual("SYN-B typed meanwhile", self.site.stored_for(h.UID_B)["findings"])
+                    self.assertFalse(self.leaving_asks(), "everything is stored: leaving asks nothing")
+                    errors = [text for text, error in notices if error]
+                    self.assertLessEqual(len(errors), 0 if answer == "received" else 1, errors)
+                    self.assert_reopened(h.FIELDS, False, "claim 1")
+                    self.assertEqual(1, len(self.site.commits), "the command was sent once")
+                    if rs == "T":
+                        # The reader's next ordinary Save stands on the version just saved; nothing is asked.
+                        self.page.locator("#b-save").click()
+                        self.wait_until(lambda: len(self.site.commits) == 2, "the next Save")
+                        self.assertEqual(1, self.site.commits[-1]["baseVersion"])
+                    self.assertEqual([], self.dialogs)
+
+    def test_text_typed_after_the_press_and_left_is_stored_once_on_the_accepted_version(self):
+        """The opposite of claim 1: text typed after pressing Save / Approve and before leaving is not what was
+        committed. It is stored as a draft - by one write, standing on the version the command made."""
+        for control, rs in (("#b-save", "T"), ("#b-approve", "A")):
+            with self.subTest(command=control):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.page.clock.install()
+                self.open_main()
+                self.select_and_type()
+                self.press_then_type(control, rs, leave=True)
+                self.wait_until(lambda: self.site.stored_for(h.UID) == self.LATER, "the later text stored as a draft")
+                self.let_everything_go()
+                self.assertEqual([1], [put["baseVersion"] for put in self.a_writes()],
+                                 "the later text is written once, on the accepted version")
+                self.assertEqual({**self.LATER, "baseVersion": 1}, {k: self.site.draft_row()[k] for k in (*h.FIELDS, "baseVersion")})
+                self.assertEqual(h.FIELDS, {k: self.site.report[k] for k in h.FIELDS}, "the committed report is untouched")
+                self.assert_reopened(self.LATER, True, "text typed after the press")
+                self.assertEqual([], self.dialogs)
+
+    def lose_a_save(self, typed_after=False, stored=True):
+        """Save of study A; the answer never arrives. `stored`: the server committed it (else the request never reached
+        the server). `typed_after`: one more sentence is typed while the Save is out."""
+        self.site.commit_answers = ["hold"]
+        self.page.locator("#b-save").click()
+        self.wait_until(lambda: self.site.held_commits, "Save is out")
+        if typed_after:
+            self.page.locator("#findings").press_sequentially(self.LATE)
+        route, body = self.site.held_commits.pop(), self.site.commits[-1]
+        if stored:
+            self.site.lose(route, body, "T")
+        else:
+            route.abort("connectionreset")
+        self.page.wait_for_timeout(600)
+
+    def begin_lost_save(self):
+        self.fresh_context()
+        self.site = MultiStudySite()
+        self.page.clock.install()
+        self.open_main()
+        self.select_and_type()
+
+    def test_a_save_whose_answer_was_lost_is_not_written_again_as_a_draft(self):
+        """A021. The server committed the Save; the answer was lost. The reader stays on the study: the page reads
+        what the server holds before any write, so the saved text is not stored again as a draft and nothing is asked."""
+        for first_read in ("answered", "failed"):
+            with self.subTest(the_read_after_the_lost_answer=first_read):
+                self.begin_lost_save()
+                if first_read == "failed":
+                    # The read right after the lost answer fails too: the autosave is what reads before it writes.
+                    self.site.bootstrap_answers = ["abort"]
+                self.lose_a_save()
+                self.let_everything_go()
+                self.assertEqual(([], None), (self.site.puts, self.site.draft_row()), "A021: the committed text was written as a draft")
+                self.assertEqual({"editor": h.FIELDS, "bar": False, "discard": False}, self.shown())
+                self.assertFalse(self.leaving_asks(), "the text is the saved report: leaving asks nothing")
+                self.assert_reopened(h.FIELDS, False, "A021")
+                self.page.locator("#b-save").click()
+                self.wait_until(lambda: len(self.site.commits) == 2, "the next Save")
+                self.assertEqual((1, []), (self.site.commits[-1]["baseVersion"], self.dialogs), "the next Save stands on the saved version")
+
+    def test_log_out_after_a_save_whose_answer_was_lost_writes_no_draft_and_asks_nothing(self):
+        """A021 at Log out. The read right after the lost answer fails too, so the preparation is what learns that the
+        text is already the report: nothing to preserve, one press."""
+        self.begin_lost_save()
+        self.site.bootstrap_answers = ["abort"]
+        self.lose_a_save()
+        self.assertTrue(self.leaving_asks(), "the outcome is unknown: the text is still held as unconfirmed")
+        self.log_out_main()
+        self.page.wait_for_url(h.INDEX_URL)
+        self.assertEqual(([], None, 1, []), (self.site.puts, self.site.draft_row(), len(self.site.logouts), self.dialogs),
+                         "A021: Log out wrote the committed text as a draft, or asked")
+
+    def test_pressing_save_again_after_a_lost_answer_does_not_commit_twice_or_ask(self):
+        """A021. After "the outcome could not be confirmed" the reader presses Save again. The page first reads what
+        the server holds: the Save is there, so the press ends there - no second version, no dialog naming himself."""
+        self.begin_lost_save()
+        self.site.bootstrap_answers = ["abort"]
+        self.lose_a_save()
+        self.page.locator("#b-save").click()
+        row = self.page.locator("#rows tr", has_text=h.PATIENT).first
+        expect(row.get_by_role("cell", name="T", exact=True)).to_be_visible()
+        self.page.wait_for_timeout(400)
+        self.assertEqual((1, 1, []), (len(self.site.commits), self.site.report["version"], self.dialogs))
+        self.assertEqual({"editor": h.FIELDS, "bar": False, "discard": False}, self.shown())
+        self.let_everything_go()
+        self.assertEqual(([], None), (self.site.puts, self.site.draft_row()))
+
+    def test_a_save_that_never_reached_the_server_keeps_the_text_and_stores_it_as_a_draft(self):
+        """The opposite of A021: an unknown outcome is not "done" either. The Save never reached the server, so the
+        text is still this document's - it is asked about on leaving and stored by the next autosave."""
+        self.begin_lost_save()
+        self.lose_a_save(stored=False)
+        self.assertEqual(h.FIELDS, self.editor())
+        self.assertTrue(self.leaving_asks(), "the text is stored nowhere yet: leaving asks")
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.stored_for(h.UID) == h.FIELDS, "the text stored as a draft by the autosave")
+        self.assertEqual((0, 0), (self.site.report["version"], self.site.draft_row()["baseVersion"]))
+        self.page.locator("#b-save").click()
+        self.wait_until(lambda: self.site.report["version"] == 1, "the next Save is accepted")
+        self.assertEqual((0, None, []), (self.site.commits[-1]["baseVersion"], self.site.draft_row(), self.dialogs))
+
+    def test_text_typed_after_a_save_whose_answer_was_lost_is_kept_on_the_saved_version(self):
+        """A021 with later text: the server committed what was sent; the sentence typed afterwards stays on screen and
+        is stored as a draft standing on the saved version."""
+        self.begin_lost_save()
+        self.lose_a_save(typed_after=True)
+        self.assertEqual(self.LATER, self.editor(), "the text typed after the press was replaced")
+        self.page.clock.run_for(21000)
+        self.wait_until(lambda: self.site.stored_for(h.UID) == self.LATER, "the later text stored as a draft")
+        self.assertEqual(([1], 1, h.FIELDS), ([put["baseVersion"] for put in self.site.puts], self.site.report["version"],
+                                             {k: self.site.report[k] for k in h.FIELDS}))
+        self.assertEqual([], self.dialogs)
+
+    def test_recover_draft_after_a_save_whose_answer_was_lost_stores_no_draft(self):
+        """A021 after the session ended: the capture of a study whose Save the server had committed is not written
+        as a draft by Recover Draft - the page reads the report state under the new login first."""
+        self.begin_lost_save()
+        self.site.bootstrap_answers = ["abort"]
+        self.lose_a_save()
+        self.site.ended.add(self.site.cookie)
+        self.page.evaluate("""session => {
+          const channel = new BroadcastChannel('kin-session');
+          channel.postMessage({type:'session-ended',session,operation:1,status:'ending'}); channel.close();
+        }""", self.site.cookie)
+        expect(self.panel_title()).to_have_text("Session Ended")
+        self.site.account = h.RAD
+        self.panel_button("Recover Draft").click()
+        self.page.wait_for_url(h.INDEX_URL)
+        self.assertEqual(([], None, 1), (self.site.puts, self.site.draft_row(), self.site.report["version"]))
+
+    def discard_out(self, typed_before=False):
+        """Study A with a stored draft on a saved report; the reader presses Discard Draft and the server holds it."""
+        self.open_untouched(report=SAVED_REPORT, draft=h.FIELDS)
+        self.select_untouched()
+        expect(self.page.locator("#b-draft-discard")).to_be_visible()
+        if typed_before:
+            self.page.locator("#findings").press("Control+End")
+            self.page.locator("#findings").press_sequentially(self.DISCARDED)
+        self.site.discard_answers = ["hold"]
+        self.dialogs.clear()
+        self.dialog_answers = [True]
+        self.page.locator("#b-draft-discard").click()
+        self.wait_until(lambda: self.site.held_discards, "the discard is out")
+
+    SAVED = {k: SAVED_REPORT[k] for k in h.FIELDS}
+
+    def test_text_typed_while_a_discard_is_out_stays_when_the_server_accepts_the_discard(self):
+        """Closure audit claim 2. The answer of Discard Draft does not wipe a sentence typed after the press: it stays
+        on screen as unsaved text, leaving asks, and the next autosave stores it. With nothing typed after the press
+        the discard is exact."""
+        for typed in (True, False):
+            for answer in ("received", "lost"):
+                with self.subTest(typed_after_the_press=typed, answer=answer):
+                    self.discard_out()
+                    if typed:
+                        self.page.locator("#findings").press("Control+End")
+                        self.page.locator("#findings").press_sequentially(self.LATE)
+                    self.assertEqual(200, self.site.finish_discard(lost=answer == "lost"))
+                    self.page.wait_for_timeout(700)
+                    if not typed:
+                        self.assertEqual({"editor": self.SAVED, "bar": False, "discard": False}, self.shown())
+                        self.assertFalse(self.leaving_asks())
+                        self.let_everything_go()
+                        self.assertEqual(([], None), (self.site.puts, self.site.draft_row()), "the discarded draft was written again")
+                        self.assert_reopened(self.SAVED, False, "an exact discard")
+                        continue
+                    self.assertEqual(self.LATER, self.editor(), "claim 2: the text typed after the press was wiped")
+                    self.assertTrue(self.leaving_asks(), "claim 2: the later text is stored nowhere yet - leaving asks")
+                    expect(self.page.locator("#draftbar")).to_be_visible()
+                    self.page.clock.run_for(21000)
+                    self.wait_until(lambda: self.site.stored_for(h.UID) == self.LATER, "the later text stored by the autosave")
+                    self.assertEqual(SAVED_REPORT["version"], self.site.draft_row()["baseVersion"])
+                    self.wait_until(lambda: not self.leaving_asks(), "the stored draft confirmed to this document")
+                    self.assert_reopened(self.LATER, True, "claim 2")
+                    self.assertEqual(1, len(self.dialogs), "only Discard Draft's own confirmation was asked")
+
+    def test_a_discard_accepted_after_the_study_was_left_does_not_store_the_discarded_text(self):
+        """Closure audit claim 3. The reader types, presses Discard Draft and moves to study B before the answer; the
+        write of leaving waits behind the discard. The discarded text is not stored again - with the answer received or
+        lost. A sentence typed AFTER the press is new text and is stored."""
+        for typed_after in (False, True):
+            for answer in ("received", "lost"):
+                with self.subTest(typed_after_the_press=typed_after, answer=answer):
+                    self.discard_out(typed_before=True)
+                    if typed_after:
+                        self.page.locator("#findings").press_sequentially(self.LATE)
+                    self.switch(h.PATIENT_B)
+                    self.page.wait_for_timeout(300)
+                    self.assertEqual([], self.site.puts, "a write of study A left while its discard was out")
+                    self.assertEqual(200, self.site.finish_discard(lost=answer == "lost"))
+                    self.page.wait_for_timeout(800)
+                    self.let_everything_go()
+                    self.assertEqual(EMPTY, self.editor(), "study B's editor was written by study A's answer")
+                    if not typed_after:
+                        self.assertEqual(([], None), (self.site.puts, self.site.draft_row()),
+                                         "claim 3: the text the reader discarded was stored again as a draft")
+                        self.assertFalse(self.leaving_asks())
+                        self.assert_reopened(self.SAVED, False, "claim 3")
+                        continue
+                    later = {**h.FIELDS, "findings": h.FIELDS["findings"] + self.DISCARDED + self.LATE}
+                    self.assertEqual((later, SAVED_REPORT["version"]), (self.site.stored_for(h.UID), self.site.draft_row()["baseVersion"]),
+                                     "text typed after the press is new text and is stored")
+                    self.assert_reopened(later, True, "text typed after pressing Discard Draft, then leaving")
+
+    def test_log_out_pressed_while_a_discard_is_out_waits_for_it_and_preserves_nothing_discarded(self):
+        """Claim 3 at Log out: the preparation captures the text only after the discard's answer, so the text the
+        reader threw away is not preserved as a draft. One press, nothing asked."""
+        self.discard_out(typed_before=True)
+        self.log_out_main()
+        expect(self.panel_title()).to_have_text("Logging Out")
+        self.page.wait_for_timeout(300)
+        self.assertEqual([], self.site.logouts, "the logout went on before the discard was answered")
+        self.assertEqual(200, self.site.finish_discard())
+        self.page.wait_for_url(h.INDEX_URL)
+        self.assertEqual(([], None, 1, 1), (self.site.puts, self.site.draft_row(), len(self.site.logouts), len(self.dialogs)))
+
+    def test_a_draft_edited_back_to_the_saved_text_is_stored_as_the_reader_left_it(self):
+        """What is unconfirmed is decided by what this document did, not by comparing texts: a stored draft that the
+        reader edits back to exactly the saved report's text is an edit, and it is stored (or the old draft returns)."""
+        self.open_untouched(report=SAVED_REPORT, draft={**self.SAVED, "findings": SAVED_REPORT["findings"] + " SYN more"})
+        self.select_untouched()
+        expect(self.page.locator("#findings")).to_have_value(SAVED_REPORT["findings"] + " SYN more")
+        self.page.locator("#findings").press("Control+End")
+        for _ in " SYN more":
+            self.page.locator("#findings").press("Backspace")
+        self.assertEqual(self.SAVED, self.editor())
+        self.switch(h.PATIENT_B)
+        self.wait_until(lambda: self.site.stored_for(h.UID) == self.SAVED, "the edit stored on leaving the study")
+        self.let_everything_go()
+        self.switch(h.PATIENT)
+        expect(self.page.locator("#findings")).to_have_value(SAVED_REPORT["findings"])
+        self.assertEqual(self.SAVED, self.site.stored_for(h.UID), "the reader's edit was not stored: the older draft is still there")
+
+    def test_recover_draft_goes_on_past_a_study_the_server_refuses(self):
+        """A020. Unconfirmed text in studies A and B when the session ends; the server refuses A's write (a standing
+        refusal). Recover Draft stores B, keeps A listed with its reason and unsaved, and Discard Draft names A only."""
+        refusal = (403, {"statusCode": 403, "message": "SYN no access to this study"})
+        self.open_main()
+        self.select_and_type()
+        self.site.put_answers = [refusal]
+        self.switch(h.PATIENT_B)
+        self.wait_until(lambda: len(self.site.puts) == 1, "A refused on leaving it")
+        self.page.fill("#findings", "SYN B recovery")
+        self.site.ended.add(self.site.cookie)
+        self.page.evaluate("""session => {
+          const channel = new BroadcastChannel('kin-session');
+          channel.postMessage({type:'session-ended',session,operation:1,status:'ending'}); channel.close();
+        }""", self.site.cookie)
+        expect(self.panel_title()).to_have_text("Session Ended")
+        panel = self.page.locator("dialog.kin-logout")
+        expect(panel).to_contain_text(h.UID)
+        expect(panel).to_contain_text(h.UID_B)
+        self.site.account = h.RAD
+        self.site.put_answers = [refusal]
+        self.panel_button("Recover Draft").click()
+        self.wait_until(lambda: (self.site.stored_for(h.UID_B) or {}).get("findings") == "SYN B recovery",
+                        "A020: study B is stored although study A before it was refused")
+        expect(self.panel_status()).to_contain_text("그대로 있습니다")
+        expect(self.panel_title()).to_have_text("Session Ended")
+        # What is left is A alone, with why; B is no longer among the studies that need preserving.
+        listed = panel.locator("p", has_text="보존이 필요한 검사")
+        expect(listed).to_contain_text(h.UID)
+        expect(listed).to_contain_text("받아들이지 않았습니다")
+        self.assertNotIn(h.UID_B, listed.inner_text())
+        self.assertEqual((None, []), (self.site.stored_for(h.UID), self.docs(name="index.html")), "the refused study was not declared saved")
+        # Another press tries A again and does not write B a second time.
+        b_writes = lambda: len([put for put in self.site.puts if put["findings"] == "SYN B recovery"])
+        puts, written = len(self.site.puts), b_writes()
+        self.site.put_answers = [refusal]
+        self.panel_button("Recover Draft").click()
+        self.wait_until(lambda: len(self.site.puts) == puts + 1, "A tried again")
+        self.page.wait_for_timeout(300)
+        self.assertEqual((written, None), (b_writes(), self.site.stored_for(h.UID)))
+        # Discard Draft says what it discards: A only.
+        self.dialog_answers = [True]
+        self.panel_button("Discard Draft").click()
+        self.page.wait_for_url(h.INDEX_URL)
+        self.assertIn(h.UID, self.dialogs[-1])
+        self.assertNotIn(h.UID_B, self.dialogs[-1])
+        self.assertEqual("SYN B recovery", self.site.stored_for(h.UID_B)["findings"])
+
+    # ── round 8 (closure audit A006): Log out asks about unsaved work outside the report draft - only when there is
+    #    some, in the same panel; (A015) every viewer the list opens is handed the list's session ──
+    def work_viewer(self, kinds, answers=True, session=None):
+        """A viewer document of the session (stand-in) that holds `kinds` of unsaved work the way viewer-session.js
+        declares it. It also hears the session's notices (self.heard)."""
+        page = self.viewer()
+        page.evaluate(WORK_STAND_IN, [session or self.site.cookie, list(kinds), answers])
+        return page
+
+    def work_panel(self):
+        panel = self.page.locator("dialog.kin-logout")
+        expect(self.panel_title()).to_have_text("Unsaved Work")
+        return panel
+
+    def test_log_out_with_unsaved_viewer_work_asks_in_the_same_panel_and_names_it(self):
+        """A006. The report is saved; a viewer window of the session holds an unsaved measurement and finding text.
+        One press on Log out ends nothing: the panel says what would be lost. Discard and Log Out then ends."""
+        self.open_main()
+        viewer = self.work_viewer(["findings", "marks"])
+        self.log_out_main()
+        panel = self.work_panel()
+        expect(panel).to_contain_text("측정")
+        expect(panel).to_contain_text("소견")
+        self.page.wait_for_timeout(300)
+        self.assertEqual(([], []), (self.site.logouts, self.dialogs), "A006: the session ended over unsaved viewer work")
+        self.assertEqual([], self.heard(viewer, "session-ended"), "the viewer was told to end")
+        self.assertEqual(1, len(self.heard(viewer, "session-preparing")), "the viewer is paused while the reader is asked")
+        self.assertEqual(["Back to Editing", "Discard and Log Out"], panel.get_by_role("button").all_inner_texts())
+        self.panel_button("Discard and Log Out").click()
+        self.page.wait_for_url(h.INDEX_URL)
+        self.assertEqual((1, []), (len(self.site.logouts), self.dialogs), "the choice in the panel is the confirmation")
+        self.wait_until(lambda: self.heard(viewer, "session-ended"), "the end reaches the viewer after the choice", page=viewer)
+
+    def test_back_to_editing_from_the_unsaved_work_question_discards_nothing(self):
+        """A006, the opposite mistake: Back to Editing ends nothing - the viewer resumes with its work, the session
+        stays, and the page works again."""
+        self.open_main()
+        viewer = self.work_viewer(["jobs"])
+        self.log_out_main()
+        expect(self.work_panel()).to_contain_text("Job")
+        self.panel_button("Back to Editing").click()
+        expect(self.page.locator("dialog.kin-logout")).to_have_count(0)
+        self.wait_until(lambda: self.heard(viewer, "session-resumed"), "the viewer is told to go on", page=viewer)
+        self.assertEqual(([], []), (self.heard(viewer, "session-ended"), self.site.logouts))
+        held = self.locks(viewer)["held"]
+        self.assertTrue(any(name.startswith("kin-unsaved:" + self.site.cookie) for name in held), "the viewer's work is still there")
+        self.assertEqual("active", self.screen()["state"])
+        self.select_and_type()
+        self.assertEqual(h.FIELDS, self.editor())
+        self.assertEqual([], self.dialogs)
+
+    def test_log_out_with_nothing_unsaved_asks_nothing_and_waits_for_nothing(self):
+        """A006, the opposite mistakes: with nothing unsaved Log out is one press without a prompt or a question to
+        other documents (the only thing it would wait for is the answer to that question) - also with a clean viewer
+        open, with a viewer of another session that holds unsaved work, and after a window that held unsaved work was
+        closed."""
+        for case in ("a clean viewer", "another session's unsaved work", "a closed window that held unsaved work"):
+            with self.subTest(case=case):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.open_main()
+                listener = self.viewer()
+                if case == "a clean viewer":
+                    self.work_viewer([])
+                elif case == "another session's unsaved work":
+                    self.work_viewer(["marks"], session="SYN-ANOTHER-SESSION")
+                else:
+                    self.work_viewer(["marks"], answers=False).close()
+                    # Closing a page returns before the browser has dropped that document's locks; a person cannot
+                    # close a window and press Log out inside that gap. Press when the browser no longer holds the
+                    # closed window's declaration (main still counts any declaration it sees - the rule is unchanged).
+                    self.wait_until(lambda: not [name for name in self.locks(self.page)["held"]
+                                                 if name.startswith("kin-unsaved:")],
+                                    "the closed window's declaration is released by the browser")
+                # Keep the sending document alive until its outgoing channel traffic has been checked.
+                # The end notice can arrive on a different channel before an earlier question is delivered.
+                self.site.logout_answers = ["hold"]
+                self.log_out_main()
+                self.wait_until(lambda: self.site.held_logouts, "the logout request without another reader action")
+                self.assertEqual([], [notice for notice in self.posts() if notice.get("type") == "session-work-query"],
+                                 "A006: other documents were asked (and waited for) although none declared unsaved work")
+                self.release_logout()
+                self.page.wait_for_url(h.INDEX_URL)
+                self.assertEqual((1, []), (len(self.site.logouts), self.dialogs))
+                self.wait_until(lambda: self.heard(listener, "session-ended"), "the end reaches the other documents", page=listener)
+                self.assertEqual([], self.heard(listener, "session-work-query"),
+                                 "A006: other documents were asked (and waited for) although none declared unsaved work")
+
+    def test_no_question_goes_to_other_documents_when_nothing_was_declared(self):
+        """The ordinary Log out posts nothing new on the session channel: only a declared holder is asked."""
+        self.open_main()
+        viewer = self.work_viewer([])
+        self.log_out_main()
+        self.wait_until(lambda: self.site.logouts, "the logout")
+        self.assertEqual([], viewer.evaluate("() => window.__synWork.queries"))
+
+    def test_a_document_that_declared_unsaved_work_and_does_not_answer_is_reported_as_unconfirmed(self):
+        """A006: a live document that declared unsaved work but does not answer within the bound is not taken for
+        clean - the panel says its state could not be confirmed, and nothing ends."""
+        self.page.clock.install()
+        self.open_main()
+        viewer = self.work_viewer(["marks"], answers=False)
+        self.log_out_main()
+        self.wait_until(lambda: viewer.evaluate("() => window.__synWork.queries.length") == 1, "the question", page=viewer)
+        self.assertEqual([], self.site.logouts)
+        self.page.clock.run_for(2000)
+        panel = self.work_panel()
+        expect(panel).to_contain_text("확인하지 못했습니다")
+        expect(panel).to_contain_text("측정")
+        self.assertEqual([], self.site.logouts)
+
+    def test_unsaved_report_text_is_stored_before_the_question_about_viewer_work(self):
+        """A006 with typed report text: the draft is stored first (as before), then the reader is asked about the
+        viewer's work; Back to Editing keeps both."""
+        self.open_main()
+        self.select_and_type()
+        viewer = self.work_viewer(["marks"])
+        self.log_out_main()
+        self.work_panel()
+        self.assertEqual((h.FIELDS, []), (self.site.stored_for(h.UID), self.site.logouts))
+        self.panel_button("Back to Editing").click()
+        expect(self.page.locator("dialog.kin-logout")).to_have_count(0)
+        self.assertEqual((h.FIELDS, []), (self.editor(), self.dialogs))
+        self.wait_until(lambda: self.heard(viewer, "session-resumed"), "the viewer goes on", page=viewer)
+
+    def test_an_unsaved_tech_note_in_a_viewer_is_named_in_the_unsaved_work_panel(self):
+        """Review DR-F01 (main's half; the viewer's side is tests/viewer_session_dom_test.py): a viewer window of the
+        session declares an unsaved Tech Note. Log out asks in the same panel and names it; Back to Editing ends nothing
+        and the viewer still holds its note."""
+        self.open_main()
+        viewer = self.work_viewer(["note"])
+        self.log_out_main()
+        expect(self.work_panel()).to_contain_text("Tech Note")
+        self.page.wait_for_timeout(300)
+        self.assertEqual(([], []), (self.site.logouts, self.dialogs), "DR-F01: the session ended over an unsaved Tech Note")
+        self.panel_button("Back to Editing").click()
+        expect(self.page.locator("dialog.kin-logout")).to_have_count(0)
+        self.wait_until(lambda: self.heard(viewer, "session-resumed"), "the viewer is told to go on", page=viewer)
+        self.assertEqual(([], []), (self.heard(viewer, "session-ended"), self.site.logouts))
+        self.assertTrue(any(name.startswith("kin-unsaved:" + self.site.cookie) and name.endswith(":note")
+                            for name in self.locks(viewer)["held"]), "the viewer's note is still there")
+        self.assertEqual([], self.dialogs)
+
+    def test_a_viewer_that_declared_an_unsaved_tech_note_and_does_not_answer_is_named_as_unconfirmed(self):
+        """Review DR-F01, as for the other kinds: a document that declared an unsaved Tech Note and does not answer
+        within the bound is not taken for clean - the panel names the note as not confirmed, and nothing ends."""
+        self.page.clock.install()
+        self.open_main()
+        viewer = self.work_viewer(["note"], answers=False)
+        self.log_out_main()
+        self.wait_until(lambda: viewer.evaluate("() => window.__synWork.queries.length") == 1, "the question", page=viewer)
+        self.assertEqual([], self.site.logouts)
+        self.page.clock.run_for(2000)
+        panel = self.work_panel()
+        expect(panel).to_contain_text("확인하지 못했습니다")
+        expect(panel).to_contain_text("Tech Note")
+        self.assertEqual([], self.site.logouts)
+
+    def test_a_dictated_text_in_review_is_asked_about_at_log_out(self):
+        """A006: a transcript the reader has not inserted yet is unsaved work of this page."""
+        self.open_untouched()
+        self.site.dictation = DICTATION
+        self.select_untouched()
+        self.page.locator("#b-dictate").click()
+        self.page.locator("#dictation-stop").click()
+        expect(self.page.locator("#dictation-text")).to_have_text(DICTATED)
+        self.log_out_main()
+        expect(self.work_panel()).to_contain_text("받아쓰기")
+        self.assertEqual([], self.site.logouts)
+        self.panel_button("Back to Editing").click()
+        expect(self.page.locator("#dictation-text")).to_have_text(DICTATED)
+        self.assertEqual([], self.dialogs)
+
+    def open_images(self, known):
+        """Film Box for the selected study; returns the viewer window (a new one, or the one already open)."""
+        if known is None:
+            with self.context.expect_page() as opened:
+                self.page.locator("#m-filmbox").click()
+            viewer = self.watch(opened.value)
+            # The page event comes with the window's first document (the blank one window.open makes); the list then
+            # navigates it to the viewer. Wait for the viewer document itself to have loaded, not for that blank one.
+            viewer.wait_for_url("**/ohif/viewer?**", wait_until="load")
+            return viewer
+        self.page.locator("#m-filmbox").click()
+        return known
+
+    def test_the_viewer_the_list_opens_is_handed_the_lists_session(self):
+        """A015. The viewer window is opener-less; the list hands its session over by the window name before the
+        navigation, as the clinician page does. One press, nothing in the address, the window keeps its slot name."""
+        self.open_main()
+        self.switch(h.PATIENT)
+        viewer = self.open_images(None)
+        entry = viewer.evaluate("() => window.__synEntry")
+        self.assertEqual(self.site.cookie, (entry or {}).get("session"), "A015: the viewer was not told which session opened it")
+        self.assertEqual([entry["name"], True], viewer.evaluate("() => [window.name, window.opener === null]"))
+        self.assertNotIn(self.site.cookie, viewer.url)
+        self.assertEqual(1, len(self.site.viewer_opens), "one press opened one viewer document")
+        self.assertEqual([], self.dialogs)
+
+    def test_a_second_press_while_the_viewer_is_loading_opens_no_second_window(self):
+        """A015, the opposite mistake: the hand-over rides on the window's name until the viewer's first script takes it.
+        A second press on the same study while that window is still loading must find the same window - not open
+        another one under the slot's name."""
+        self.open_main()
+        self.switch(h.PATIENT)
+        self.site.held_viewers = []
+        with self.context.expect_page() as opened:
+            self.page.locator("#m-filmbox").click()
+        viewer = self.watch(opened.value)
+        self.wait_until(lambda: self.site.held_viewers, "the viewer document is being loaded")
+        self.page.locator("#m-filmbox").click()
+        self.page.wait_for_timeout(500)
+        self.assertEqual(2, len(self.context.pages), "A015: a second window was opened while the first was loading")
+        self.site.held_viewers.pop().fulfill(content_type="text/html; charset=utf-8", body=VIEWER_STAND_IN)
+        viewer.wait_for_function("() => window.__synEntry !== undefined && window.__synEntry !== null")
+        self.assertEqual(self.site.cookie, viewer.evaluate("() => window.__synEntry.session"))
+        self.assertEqual((1, []), (len(self.site.viewer_opens), self.dialogs))
+
+    def test_reopening_from_the_list_rechecks_a_viewer_that_stopped_at_its_entry(self):
+        """A015. A viewer that stopped at its entry tells the reader to open it again from the list. Doing so now
+        reloads that window with a fresh hand-over (same study or another); a viewer that did not stop is only focused."""
+        self.open_main()
+        self.switch(h.PATIENT)
+        viewer = self.open_images(None)
+        # Not stopped: opening the same study again does not reload the window.
+        self.open_images(viewer)
+        self.page.wait_for_timeout(400)
+        self.assertEqual(1, len(self.site.viewer_opens), "an ordinary reopen of the same study reloaded the viewer")
+        # The viewer records that its entry stopped (what viewer-session.js keeps in its history entry).
+        viewer.evaluate("""() => { window.__synEntry = 'old document';
+            history.replaceState({ ...history.state, kinViewerSession: { session: null, ended: false, unresolved: true,
+                                   expected: 'SYN-GONE', entryStopped: true } }, ''); }""")
+        self.open_images(viewer)
+        self.wait_until(lambda: len(self.site.viewer_opens) == 2, "A015: the stopped viewer is read again", page=viewer)
+        viewer.wait_for_function("() => window.__synEntry && window.__synEntry !== 'old document'")
+        self.assertEqual(self.site.cookie, viewer.evaluate("() => window.__synEntry.session"))
+        self.assertEqual(1, len([page for page in self.context.pages if "/ohif/viewer" in page.url]), "no second window")
+        self.assertEqual([], self.dialogs)
 
 
 def load_tests(loader, tests, pattern):

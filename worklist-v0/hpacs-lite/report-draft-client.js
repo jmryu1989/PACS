@@ -17,7 +17,14 @@
  *             저장됐을 수도 아닐 수도 있다. 쓰기를 스스로 다시 보내지 않는다 — 다음 명령이 서버 상태부터 읽는다.
  *   refused   서버가 이유를 대고 거절했다(권한·점유·형식). 아무것도 바뀌지 않았다.
  * 그 밖에 unsent(요청이 떠나지 않았다 — 문맥이 무효였다), owner(작성자가 지금 세션의 계정이 아니다), auth(서버가 그 세션의
- * 종료를 알렸다 — 전송 계층이 이미 넘겼다), merged(더 새 저장에 합쳐져 보내지 않았다)가 있다.
+ * 종료를 알렸다 — 전송 계층이 이미 넘겼다), merged(더 새 저장에 합쳐져 보내지 않았다), withdrawn(차례가 왔을 때 부른 쪽에
+ * 보낼 글이 없었다 — 아래)이 있다.
+ *
+ * 줄 서서 기다린 쓰기가 무엇을 보낼지는 **차례가 왔을 때** 정한다. 줄 설 때의 글을 얼려 두면, 그 사이 앞선 확정이 그 글을
+ * 판독문으로 받아들였거나 사람이 그 초안을 버렸어도 뒤늦게 그 글이 새 revision 위에 초안으로 다시 선다(revision 대조는
+ * 순서만 지키고 뜻은 모른다). 그래서 일반 쓰기는 글 대신 "지금 보낼 글"을 답하는 함수를 받을 수 있다: 앞선 명령이 모두
+ * 끝나고 기준을 확인한 뒤에 한 번 묻고, 없다고 하면(null) 아무것도 보내지 않는다(withdrawn). 무엇이 아직 확인되지 않은
+ * 글인가는 부른 쪽이 기록한 사실로 답한다 — 여기서 글을 견주어 짐작하지 않는다.
  *
  * 사람에게 묻기 전에 프로그램이 먼저 확인한다. 충돌(409)이나 결과 모름 뒤에는 서버의 지금 초안을 한 번 읽는다:
  *   · 거기에 보낸 원문이 전부 있으면 저장이다(답만 잃었다).
@@ -349,7 +356,23 @@
           return sent;
         }
         // 버리기도 확정도 끝나면 초안이 없다. 결과를 모르면 다음 명령이 서버 상태부터 읽는다.
-        if (sent.outcome === 'unknown') own.uncertain = { snapshot: null };
+        if (sent.outcome === 'unknown') {
+          own.uncertain = { snapshot: null };
+          /**
+           * 답을 잃은 버리기는 쓰기와 같이 전체 읽기로 먼저 확인한다(다시 보내지 않는다). 버리기가 바꾸는 것은 초안 행
+           * 하나뿐이므로, 그 행이 이 명령이 실은 revision 뒤에서 없어져 있으면 버려진 것이다 — 그때 "버렸는지 모른다"로
+           * 남기면 뒤에 줄 선 쓰기가 사람이 버린 글을 되살린다. 확정은 여기서 확인하지 않는다: 확정이 바꾸는 것은 판독문
+           * 이고 초안 행이 없어진 것만으로는(다른 창의 버리기일 수 있다) 확정됐다고 할 수 없다 — 판독 상태를 읽는 것은
+           * 부른 쪽의 일이다.
+           */
+          if (method !== 'DELETE') return sent;
+          const got = await confirm(uid, own, owner, { ...sent, expected: null }, { context });
+          if (got.outcome === 'read' && !got.read.present && got.read.revision !== own.revision && follows(own, got.read)) {
+            adopt(own, got.read);
+            return { outcome: 'saved', envelope: got.read, confirmedByRead: true, answer: sent.answer };
+          }
+          return sent;
+        }
         if (sent.outcome !== 'conflict') return sent;
         const got = await look(uid, owner, { context });
         if (got.outcome === 'owner') return got;
@@ -459,6 +482,9 @@
        * 서버가 가진 인용·구조화 id 전부다 — 초안의 증언은 쓰기로 조용히 지우지 않는다(지우는 길은 초안을 비우거나 버리는
        * 것뿐이다). 그 목록은 앞선 쓰기의 답이나 전체 읽기에서만 온다. 줄 서 있는 사이 더 새 일반 쓰기가 뒤에 서면 이 쓰기는
        * 보내지 않는다(merged) — 그 쓰기가 더 새 글을 가져간다.
+       *
+       * `texts`가 함수이면 차례가 왔을 때(앞선 명령이 모두 끝나고 기준을 확인한 뒤, 보내기 직전에) 한 번 불러 그때의 글을
+       * 받는다(약속을 돌려줘도 된다). null이면 보낼 글이 없다는 답이다 — 아무것도 보내지 않고 withdrawn으로 끝난다.
        */
       write(uid, texts, { owner, context, operation } = {}) {
         const own = line(uid);
@@ -470,7 +496,9 @@
           if (!own.revision) return { outcome: 'refused', code: 'KIN_DRAFT_BASE_UNKNOWN', message: '이 검사의 초안 기준을 알 수 없어 저장하지 않았습니다.' };
           const blocked = await settle(uid, own, owner, { context });
           if (blocked) return blocked;
-          return deliver(uid, own, texts, { owner, context, operation });
+          const now = typeof texts === 'function' ? await texts() : texts;
+          if (!now) return { outcome: 'withdrawn' };
+          return deliver(uid, own, now, { owner, context, operation });
         });
       },
 

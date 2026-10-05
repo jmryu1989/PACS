@@ -45,6 +45,22 @@ function kinCreateSessionBoundary() {
       });
     }
     const boundary = window.KinViewerSession.connect(window, KIN_VIEWER_EXPECTED_SESSION);
+    // S7-U5 A006 (added): what this viewer holds unsaved, read from the guards its modules already keep for window
+    // reuse and close - marks (kinViewerHistoryHasUnsaved), finding text (kinViewerFindingsState), Job / MIP edits
+    // (kinViewerJobWorkspaceState), the Tech Note dialog (kinViewerTechNoteState). Log Out reads it before the real end
+    // and asks only when something is there. A save still out counts as unsaved in each of these (the logout preparation
+    // pauses this document, so its answer cannot arrive before the real end): marks count a busy entry, findings count a
+    // pending/busy entry (set only by a save), Jobs count the kept request body from its build until the save is confirmed,
+    // the note counts a save not yet confirmed. Their `busy` is not read here: for Jobs it is also a restore or a list read,
+    // which is not unsaved work. A guard that is missing or throws says nothing: unreadable is not unsaved.
+    boundary.unsaved(() => {
+      const kinds = [], holds = (kind, read) => { try { if (read() === true) kinds.push(kind); } catch (_) {} };
+      holds('marks', () => window.kinViewerHistoryHasUnsaved?.());
+      holds('findings', () => window.kinViewerFindingsState?.().dirty);
+      holds('jobs', () => window.kinViewerJobWorkspaceState?.().dirty);
+      holds('note', () => window.kinViewerTechNoteState?.().dirty);
+      return kinds;
+    });
     boundary.onEnd(() => {
       kinViewerSession.refuse('logout');
       for (const extension of window.config.extensions) {

@@ -1525,6 +1525,167 @@ class ViewerSessionDOMTest(unittest.TestCase):
         view.wait_for_function("events.length===2")
         self.assertEqual(view.evaluate("events"), ["timeout", "loadend"])
 
+    # ── S7-U5 closure audit A006: the viewer's side of "Log out asks about unsaved work" ──
+    def unsaved_declared(self):
+        """The unsaved-work declarations the browser holds right now, read from another document: the kinds of each."""
+        names = self.opener.evaluate(
+            "async()=>(await navigator.locks.query()).held.map(lock=>lock.name).filter(name=>name.startsWith('kin-unsaved:'))")
+        return sorted(name.rsplit(':', 1)[-1] for name in names if name.startswith('kin-unsaved:S1:'))
+
+    def wait_declared(self, expected):
+        for _ in range(300):
+            if self.unsaved_declared() == expected:
+                return
+            self.opener.wait_for_timeout(10)
+        self.assertEqual(self.unsaved_declared(), expected)
+
+    def ask_unsaved(self, session='S1'):
+        """Main's question on the session channel; what the documents of that session answered within a short wait."""
+        return self.opener.evaluate("""session=>new Promise(done=>{
+          const query=crypto.randomUUID(),answers=[],listener=new BroadcastChannel('kin-session');
+          listener.onmessage=event=>{if(event.data?.type==='session-work'&&event.data.query===query)answers.push([event.data.session,event.data.unsaved]);};
+          channel.postMessage({type:'session-work-query',session,query});
+          setTimeout(()=>{listener.close();done(answers);},300);
+        })""", session)
+
+    def test_unsaved_work_is_declared_by_a_lock_and_answered_from_the_viewers_own_guards(self):
+        view = self.open_viewer()
+        view.wait_for_function('window.started===true')
+        # The guards the viewer's modules keep for window reuse and close (marks, finding text, Job edits), as stand-ins.
+        view.evaluate("""()=>{window.work={};
+          window.kinViewerHistoryHasUnsaved=()=>!!work.marks;
+          window.kinViewerFindingsState=()=>{if(work.unreadable)throw new Error('unreadable');return{dirty:!!work.findings,busy:false};};
+          window.kinViewerJobWorkspaceState=()=>({dirty:!!work.jobs,busy:false});}""")
+        # Nothing unsaved: nothing is declared (so Log out waits for nothing), and a question is answered with nothing.
+        self.assertEqual((self.unsaved_declared(), self.ask_unsaved()), ([], [['S1', []]]))
+        view.evaluate("work.marks=true")
+        self.wait_declared(['marks'])
+        self.assertEqual(self.ask_unsaved(), [['S1', ['marks']]])
+        view.evaluate("work.findings=true")
+        self.wait_declared(['findings,marks'])
+        # The question of another session is not this document's to answer.
+        self.assertEqual(self.ask_unsaved('S2'), [], "another session's question was answered")
+        # A guard that cannot be read says nothing; the others still count.
+        view.evaluate("work.unreadable=true")
+        self.wait_declared(['marks'])
+        # Paused by a logout preparation: the declaration stands and the question is still answered.
+        self.notice('session-preparing')
+        view.wait_for_function("KinWorkContext.state()==='preparing'")
+        self.assertEqual((self.unsaved_declared(), self.ask_unsaved()), (['marks'], [['S1', ['marks']]]))
+        self.notice('session-resumed')
+        view.wait_for_function("KinWorkContext.state()==='active'")
+        # Saved or cleared: the declaration is withdrawn.
+        view.evaluate("work.marks=false")
+        self.wait_declared([])
+        # At the real end nothing stays declared and nothing answers.
+        view.evaluate("work.jobs=true")
+        self.wait_declared(['jobs'])
+        self.notice('session-ended')
+        self.wait_declared([])
+        self.assertEqual(self.ask_unsaved(), [])
+
+    def test_a_closed_viewer_declares_nothing(self):
+        view = self.open_viewer()
+        view.wait_for_function('window.started===true')
+        view.evaluate("window.kinViewerHistoryHasUnsaved=()=>true")
+        self.wait_declared(['marks'])
+        view.close()
+        self.wait_declared([])
+
+    # The viewer window's own Tech Note (viewer-tech-note.js over tech-note.js, both as shipped) needs a few page services
+    # of the pinned OHIF: one stack viewport showing a frame of study 1.2.3, and the window helpers the bridge mounts beside
+    # the note (stand-ins that do nothing). /api/me answers a radiologist; the note read answers "no note yet".
+    NOTE_SERVICES = """()=>{
+      window.KinViewerWindows={connect:()=>({dispose(){}})};window.KinViewerIdentity={mount:()=>({dispose(){}})};
+      window.KinViewerWorkspaceDock=()=>null;
+      window.KinWorkspaceShortcuts={read:()=>({image:'Control+Alt+2',report:'Control+Alt+4',note:'Control+Alt+6',
+        tools:'Control+Alt+7',nativeTools:'Control+Alt+9'}),display:value=>String(value),action:()=>null};
+      window.kinCreateVolumeProjection=()=>({dispose(){}});window.kinCreateViewerToolbarPreferences=()=>({dispose(){}});
+      const image='wadors:'+location.origin+'/dicom-web/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/frames/1';
+      const services={
+        viewportGridService:{EVENTS:{},subscribe:()=>({unsubscribe(){}}),
+          getState:()=>({activeViewportId:'vp',viewports:new Map([['vp',{displaySetInstanceUIDs:['ds']}]])})},
+        cornerstoneViewportService:{getCornerstoneViewport:()=>({type:'stack',getCurrentImageId:()=>image})},
+        displaySetService:{getDisplaySetByUID:()=>({StudyInstanceUID:'1.2.3',SeriesInstanceUID:'1.2.3.4',
+          PatientName:'SYN',PatientID:'SYN-1',StudyDate:'20261005',StudyDescription:'SYN study'})}};
+      return kinViewerTechNote(services,kinViewerSession.writeModule).mount();}"""
+    ME = {"kind": "member", "sub": "syn-rad-sub", "institution": "SYN-INST", "roles": ["radiologist"], "sessionId": "S1"}
+
+    def test_an_unsaved_tech_note_in_the_viewer_window_is_declared_until_it_is_saved(self):
+        """Review DR-F01: the viewer window's Tech Note holding typed text is declared as `note` (and answered), also
+        while its save is out and while a logout preparation pauses the document (the text stays); a note window that is
+        just opening (its read out), loading its history, or open and clean declares nothing - Log out would ask nothing;
+        a saved note withdraws it; the real end withdraws it."""
+        self.extra_html = '<div id="kin-viewer-layout"></div>'
+        view = self.open_viewer()
+        view.wait_for_function('window.started===true')
+        held, reads = [], []
+        def note(route):
+            if route.request.method == "POST":
+                return held.append(route)
+            reads.append(route)
+        view.route(BASE + "/api/me", lambda route: route.fulfill(json=self.ME))
+        view.route(BASE + "/api/studies/1.2.3/tech-note", note)
+        view.route(BASE + "/api/studies/1.2.3/tech-note/history**", lambda route: reads.append(route))
+        for name in ("tech-note.js", "viewer-tech-note.js"):
+            view.add_script_tag(path=str(HPACS / name))
+        self.assertTrue(view.evaluate(self.NOTE_SERVICES))
+        view.wait_for_function("document.querySelector('#kin-viewer-note-status')?.textContent.includes('검사 메모')")
+        def held_read():
+            for _ in range(300):
+                if reads:
+                    return reads.pop()
+                view.wait_for_timeout(10)
+            self.fail("the note window's read was not sent")
+        # The note window is opening: its read is out. Reading is not unsaved work - nothing declared, nothing answered.
+        view.locator("#kin-viewer-note-open").click()
+        opening = held_read()
+        view.wait_for_timeout(700)
+        self.assertEqual((self.unsaved_declared(), self.ask_unsaved()), ([], [['S1', []]]),
+                         "a Tech Note window that is only opening would be asked about at Log out")
+        opening.fulfill(json={"uid": "1.2.3", "writable": True, "note": None})
+        view.wait_for_function("document.querySelector('#tech-note-status')?.textContent.includes('명시적으로 저장')")
+        # Its history is loading: still nothing.
+        view.locator("#tech-note-history").click()
+        history = held_read()
+        view.wait_for_timeout(700)
+        self.assertEqual((self.unsaved_declared(), self.ask_unsaved()), ([], [['S1', []]]),
+                         "a Tech Note window loading its history would be asked about at Log out")
+        history.fulfill(json={"uid": "1.2.3", "items": [], "nextBefore": None})
+        view.wait_for_function("document.querySelector('#tech-note-status')?.textContent.includes('이력이 없습니다')")
+        # Open and clean: nothing is declared, so Log out would ask nothing.
+        view.wait_for_timeout(700)
+        self.assertEqual((self.unsaved_declared(), self.ask_unsaved()), ([], [['S1', []]]))
+        view.locator("#tech-note-text").fill("SYN unsaved note")
+        self.wait_declared(['note'])
+        self.assertEqual(self.ask_unsaved(), [['S1', ['note']]], "DR-F01: the typed Tech Note was not declared")
+        # Paused by a logout preparation (the reader is asked): the declaration and the text stay; Back to Editing resumes.
+        self.notice('session-preparing')
+        view.wait_for_function("KinWorkContext.state()==='preparing'")
+        self.assertEqual((self.unsaved_declared(), self.ask_unsaved()), (['note'], [['S1', ['note']]]))
+        self.notice('session-resumed')
+        view.wait_for_function("KinWorkContext.state()==='active'")
+        self.assertEqual("SYN unsaved note", view.locator("#tech-note-text").input_value())
+        # Save Note: while its answer is out the note is still declared; the confirmed save withdraws it.
+        view.locator("#tech-note-save").click()
+        for _ in range(200):
+            if held:
+                break
+            view.wait_for_timeout(10)
+        self.assertEqual(1, len(held))
+        view.wait_for_timeout(700)
+        self.assertEqual(self.unsaved_declared(), ['note'], "DR-F04: the Tech Note save that is out was not declared")
+        held.pop().fulfill(json={"uid": "1.2.3", "writable": True, "note": {
+            "studyUid": "1.2.3", "text": "SYN unsaved note", "version": 1, "author": "syn", "createdAt": "2026-10-05T00:00:00Z"}})
+        view.wait_for_function("document.querySelector('#tech-note-status')?.textContent.includes('저장되었습니다')")
+        self.wait_declared([])
+        # Typed again, then the session ends: nothing stays declared and the window no longer offers the note's state.
+        view.locator("#tech-note-text").fill("SYN typed after the save")
+        self.wait_declared(['note'])
+        self.notice('session-ended')
+        self.wait_declared([])
+        self.assertEqual(self.ask_unsaved(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

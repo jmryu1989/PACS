@@ -169,6 +169,49 @@
     }
     let channel = null;
     try { channel = new win.BroadcastChannel('kin-session'); channel.onmessage = event => notice(event.data); } catch (_) {}
+    // ── Unsaved work outside the report draft (S7-U5 closure audit A006). Added; nothing else in this file changed. ──
+    // Log Out asks every document of the session before the real end. This document answers from what its own modules
+    // record as unsaved (the readers registered through `unsaved` below), in two ways:
+    //   · a standing declaration: while anything is unsaved it holds the Web Lock
+    //     `kin-unsaved:<session>:<document>:<kinds>`. The browser drops the lock when this document closes, crashes
+    //     or ends, so a window that is gone is never counted as holding unsaved work, and a document that holds
+    //     nothing is never waited for.
+    //   · a fresh answer: to `session-work-query` of its own session it posts `session-work` with the kinds it holds
+    //     now. It answers while paused too - a preparation stops edits, not this reading.
+    // A reader that throws says nothing: an unreadable state is not unsaved work.
+    const unsavedReaders = new Set(), documentId = win.crypto.randomUUID();
+    let unsavedHeld = null;
+    function unsavedKinds() {
+      const kinds = [];
+      if (!ended) for (const read of unsavedReaders) {
+        try { for (const kind of read() || []) if (typeof kind === 'string' && /^[a-z-]{1,24}$/.test(kind) && !kinds.includes(kind)) kinds.push(kind); }
+        catch (_) {}
+      }
+      return kinds.sort();
+    }
+    function declareUnsaved() {
+      const kinds = session && locks ? unsavedKinds() : [];
+      const name = kinds.length ? 'kin-unsaved:' + session + ':' + documentId + ':' + kinds.join(',') : null;
+      if ((unsavedHeld ? unsavedHeld.name : null) === name) return;
+      const previous = unsavedHeld, next = name ? { name, release: null, dropped: false } : null;
+      const drop = held => { if (held) { held.dropped = true; held.release?.(); } };
+      unsavedHeld = next;
+      if (!next) { drop(previous); return; }
+      // The new declaration is granted before the old one is released: no moment passes without one.
+      try {
+        locks.request(name, () => new Promise(resolve => { next.release = resolve; drop(previous); if (next.dropped) resolve(); }))
+          .catch(() => { drop(previous); if (unsavedHeld === next) unsavedHeld = null; });
+      } catch (_) { drop(previous); unsavedHeld = null; }
+    }
+    channel?.addEventListener('message', event => {
+      const data = event.data;
+      if (ended || !session || !data || data.type !== 'session-work-query' || data.session !== session) return;
+      declareUnsaved();
+      try { channel.postMessage({ type: 'session-work', session, document: documentId, query: data.query, unsaved: unsavedKinds() }); } catch (_) {}
+    });
+    const unsavedWatch = nativeInterval(declareUnsaved, 500);
+    for (const type of ['pointerup', 'keyup', 'change']) win.addEventListener(type, () => nativeTimeout(declareUnsaved, 0), true);
+    enders.add(() => { clearInterval(unsavedWatch); unsavedReaders.clear(); declareUnsaved(); });
     // A storage notice must retire even a viewer with no mounted extension or active request.
     win.addEventListener('storage', event => {
       if (event.key !== 'kin-session-end' && event.key !== null) return;
@@ -395,6 +438,8 @@
       },
       onEnd(run) { if (ended) run(); else enders.add(run); return () => enders.delete(run); },
       onState(run) { changes.add(run); run(gate.state()); return () => changes.delete(run); },
+      // A006 (added): a module says what it holds unsaved - `read()` returns kind names, none when clean (see above).
+      unsaved(read) { unsavedReaders.add(read); declareUnsaved(); return () => { unsavedReaders.delete(read); declareUnsaved(); }; },
       authFailure,
     });
     win.KinViewerSessionBoundary = api;
