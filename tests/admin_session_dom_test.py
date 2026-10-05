@@ -588,7 +588,8 @@ class PageSessionDOMTest(unittest.TestCase):
                     self.assertNotEqual('active',self.probes[-1]['work'])
                     self.assertEqual(self.probes[-1]['protectedRows'],0)
                     self.assertEqual(len(self.moves),1)
-                    record=json.loads(self.probes[-1]['storage'][0]).get('kin-session-end')
+                    # auth.js keeps the end record under the session's own key (kin-session-end:<session>).
+                    record=json.loads(self.probes[-1]['storage'][0]).get('kin-session-end:'+SESSION)
                     if code=='AUTH_SESSION_ENDED':
                         self.assertEqual(json.loads(record)['status'],'confirmed')
                         self.assertEqual(json.loads(record)['session'],SESSION)
@@ -616,7 +617,7 @@ class PageSessionDOMTest(unittest.TestCase):
                 self.pump(lambda:self.moves and len(self.probes)>8)
                 self.assertEqual(len(self.moves),1,'two ended responses must leave only once without BroadcastChannel')
                 self.assertEqual(self.probes[-1]['protectedRows'],0)
-                record=json.loads(json.loads(self.probes[-1]['storage'][0])['kin-session-end'])
+                record=json.loads(json.loads(self.probes[-1]['storage'][0])['kin-session-end:'+SESSION])
                 self.assertEqual((record['session'],record['status']),(SESSION,'confirmed'))
                 self.assertFalse(any(p=='/api/auth/logout' for _,p,_ in self.calls))
 
