@@ -81,7 +81,7 @@ window.KinTechNote = function (app) {
         if(stored){adopt(result);$('history-items').replaceChildren();$('more').hidden=true;cursor=null;}
         else if(unchanged){writable=result.writable===true;}
         else {status('다른 메모가 저장되었습니다. 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.');return;}
-        interruptedSave=null;status('');
+        interruptedSave=null;status(stored?'저장되었습니다. v'+version:'저장되지 않았습니다 · 입력은 유지했습니다. 다시 Save Note를 누르세요.');
       });
     } catch(e){work.commit(at,()=>{if(valid(ticket,target))status('저장 확인 실패: '+e.message+' · 입력은 유지했습니다.');});}
     finally {if(ticket===seq)busy=false;work.commit(at,()=>{if(ticket===seq)controls();});}

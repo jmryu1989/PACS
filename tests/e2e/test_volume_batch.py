@@ -1,5 +1,6 @@
 # coding: utf-8
 """TEST-VOLUME-BATCH: real reconstructed pixels, source cameras and cancellation."""
+from viewer_session import end_viewer
 import unittest
 from pathlib import Path
 import numpy as np
@@ -39,7 +40,7 @@ class VolumeBatchE2E(VolumeOrientationE2E):
   for row in v.evaluate('()=>batchSamples'):self.assertAlmostEqual(row['pixel'][0],229,delta=3)
   v.screenshot(path=str(Path(__file__).parent/'artifacts/MPR-batch-preview.png'))
   self.open_note(v);expect(v.get_by_role('button',name='Make Batch',exact=True)).to_be_disabled();v.locator('#tech-note-close').click();expect(v.locator('#kin-volume-batch .frame')).to_contain_text('1 / 3');self.preserved_volume(before,self.volume_state(v))
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-volume-batch')).to_have_count(0);self.assertTrue(v.evaluate('()=>batchURLs.every(url=>batchRevoked.includes(url))'));expect(v.locator('[data-kin-batch-render]')).to_have_count(0);self.assertEqual(len(self.versions(a)),1)
+  v=end_viewer(v);self.assertEqual(v.count('#kin-volume-batch'),0);self.assertTrue(v.evaluate('()=>batchURLs.every(url=>batchRevoked.includes(url))'));self.assertEqual(v.count('[data-kin-batch-render]'),0);self.assertEqual(len(self.versions(a)),1)
  def test_batch_06_cancel_late_volume_attachment_and_denied_account(self):
   a,p,v=self.batch_start();before=self.volume_state(v)
   v.route('**/api/me',lambda r:r.fulfill(status=403,json={'message':'Synthetic denied'}));v.get_by_role('button',name='Make Batch',exact=True).click();expect(v.locator('#kin-volume-batch [role=status]')).to_contain_text('로그인');expect(v.locator('[data-kin-batch-render]')).to_have_count(0);self.assertEqual(v.evaluate('()=>batchSamples'),[]);v.unroute('**/api/me')

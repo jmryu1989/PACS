@@ -59,17 +59,17 @@ MUTANTS = [
         "id": "M5a",
         "title": "the print-time re-read is dropped and the rendered evidence is trusted",
         "case": "test_print_refuses_when_the_evidence_changed_since_the_render",
-        "old": "          const latestCitations = await readCitations(s, signal);",
+        "old": "          const latestCitations = await readCitations(s, signal, at);",
         "new": "          const latestCitations = ready.citations;",
     },
     {
         "id": "M5b",
         "title": "the citations await moves after the last guard, so a late answer is painted",
         "case": "test_a_late_citation_answer_cannot_overwrite_a_newer_paper",
-        "old": "          const citations = await readCitations(s, signal);\n"
+        "old": "          const citations = await readCitations(s, signal, at);\n"
                "          check(s); if (selectionEpoch !== s.selectionEpoch) return;",
         "new": "          check(s); if (selectionEpoch !== s.selectionEpoch) return;\n"
-               "          const citations = await readCitations(s, signal);",
+               "          const citations = await readCitations(s, signal, at);",
     },
     {
         "id": "M5b-close",

@@ -1,5 +1,6 @@
 # coding: utf-8
 """TEST-VOLUME-DISPLAY: selected reset preserves reconstructed plane and work."""
+from viewer_session import end_viewer
 import json,re,unittest
 from pathlib import Path
 import numpy as np
@@ -53,7 +54,7 @@ class VolumeDisplayE2E(VolumeOrientationE2E):
   v.get_by_role('button',name='Reset Windowing',exact=True).click();expect(v.locator('#kin-volume-display [role=status]')).to_contain_text('INJECTED WINDOWING FAILURE');self.preserved_volume(before,self.volume_state(v))
   self.assertTrue(v.evaluate('()=>JSON.stringify(displaySyncBefore)===JSON.stringify(cornerstoneTools.SynchronizerManager.getAllSynchronizers().map(g=>[g.id,g.isDisabled()]))'));self.reset_display(v,'windowing')
   self.open_note(v);expect(v.get_by_role('button',name='Reset Windowing',exact=True)).to_be_disabled();v.locator('#tech-note-close').click();expect(v.get_by_role('button',name='Reset Windowing',exact=True)).to_be_enabled()
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-volume-display')).to_have_count(0)
+  v=end_viewer(v);self.assertEqual(v.count('#kin-volume-display'),0)
  def test_mpr_display_04_embedded_owner_and_plane_selection(self):
   a,b=self.pair();p,f=EmbeddedPatientCopyE2E.opened(self,a);self.mpr(f);self.choose_volume(p,f,0);p.locator('#findings').fill('KEEP EMBEDDED DISPLAY')
   button=f.get_by_role('button',name='Reset Windowing',exact=True,include_hidden=True);expect(button).to_be_enabled();before=self.volume_state(f)

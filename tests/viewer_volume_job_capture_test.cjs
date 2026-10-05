@@ -561,12 +561,12 @@ async function mipSaveWorld(){
   if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};
   else if(url===jobs&&options.method==='POST'){const sent=JSON.parse(options.body);posts.push(sent);body={id:sent.id,snapshotVersion:sent.snapshot.version};}
   else if(url.startsWith(jobs+'?'))body={jobs:[]};
-  return {status:body?200:404,ok:!!body,json:async()=>body};};
+  return sessionResponse(body?200:404,body);};
  const sandbox={document:{createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
   location:{search:'?StudyInstanceUIDs='+STUDY,origin:'https://kin.test'},fetch,crypto,AbortController,URL,URLSearchParams,setTimeout,clearTimeout,clearInterval,
   setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},addEventListener(){},removeEventListener(){},
   kinCreateVolumeJob:real,kinMprMarks:marks,kinVolumeMipJob:mip};
- sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ sandbox.window=sandbox.top=sandbox;pageDefaults(sandbox,fetch);const realm=vm.createContext(sandbox);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
  const panel=sandbox.kinViewerJobs({viewportGridService:parts.grid,cornerstoneViewportService:parts.cs,displaySetService:parts.ds},{scope:()=>({})});
  panel.mount();const command=sandbox.kinViewerJobCommand,idle=async()=>{for(let n=0;n<200&&command.busy();n++)await new Promise(r=>setTimeout(r,0));};
@@ -897,12 +897,12 @@ async function batchSaveWorld(){
    if(network.lose){network.lose=false;const error=new Error('receipt lost after commit');error.name='AbortError';throw error;}
    body={id:sent.id,snapshotVersion:sent.snapshot.version};
   }else if(url.startsWith(jobs+'?'))body={jobs:rows.map(row=>({...row}))};
-  return {status:body?200:404,ok:!!body,json:async()=>body};};
+  return sessionResponse(body?200:404,body);};
  const sandbox={document:{createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
   location:{search:'?StudyInstanceUIDs='+STUDY,origin:'https://kin.test'},fetch,crypto,AbortController,URL,URLSearchParams,setTimeout,clearTimeout,clearInterval,
   setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},addEventListener(){},removeEventListener(){},
   kinCreateVolumeJob:real,kinVolumeMipJob:mip,KinVolumeMipJob:require('../worklist-v0/hpacs-lite/volume-mip-job.js')};
- sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ sandbox.window=sandbox.top=sandbox;pageDefaults(sandbox,fetch);const realm=vm.createContext(sandbox);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
  const panel=sandbox.kinViewerJobs({viewportGridService:parts.grid,cornerstoneViewportService:parts.cs,displaySetService:parts.ds},{scope:()=>({})});
  panel.mount();const command=sandbox.kinViewerJobCommand,idle=async()=>{for(let n=0;n<200&&command.busy();n++)await new Promise(r=>setTimeout(r,0));};
@@ -972,14 +972,14 @@ async function printWorld({versions,present={},answer=(file,s)=>PRINT_FILES[file
   setTimeout(()=>{let failed;try{failed=answer(file,sandbox)==='error';}catch(_){failed=true;}(failed?script.onerror:script.onload)?.();},0);}};
  const rows=versions.map((version,i)=>({id:'00000000-0000-4000-8000-'+String(i).padStart(12,'0'),title:'Job v'+version,description:'',snapshotVersion:version,hidden:false,authorActor:'dr.synthetic',authorSub:'u1',createdAt:0,revision:1}));
  const jobs='/api/studies/'+STUDY+'/viewer-jobs';
- const base=async url=>{let body=null;if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};else if(url.startsWith(jobs+'?'))body={jobs:rows.map(row=>({...row}))};return {status:body?200:404,ok:!!body,json:async()=>body};};
+ const base=async url=>{let body=null;if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};else if(url.startsWith(jobs+'?'))body={jobs:rows.map(row=>({...row}))};return sessionResponse(body?200:404,body);};
  // A test may stand between the panel and these answers, as the network does.
  const fetch=transport?(url,init={})=>transport(url,init,base):base;
  sandbox={document:{createElement:element,head,querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
   location:{search:'?StudyInstanceUIDs='+STUDY,origin:'https://kin.test'},fetch,crypto,AbortController,URL,URLSearchParams,setTimeout,clearTimeout,clearInterval,
   setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},addEventListener(){},removeEventListener(){},
   kinCreateVolumeJob:capture?()=>({capture,apply(){},resolve(){}}):real,printOpened:[],...present};
- sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ sandbox.window=sandbox.top=sandbox;pageDefaults(sandbox,fetch);const realm=vm.createContext(sandbox);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
  const panel=sandbox.kinViewerJobs({viewportGridService:parts.grid,cornerstoneViewportService:parts.cs,displaySetService:parts.ds},{scope:()=>({})});
  panel.mount();
@@ -1000,7 +1000,7 @@ async function printWorld({versions,present={},answer=(file,s)=>PRINT_FILES[file
 // arrived before the request's stream existed, with ERR_FAILED and no resend of its own, so fetch() rejected it with a TypeError before
 // any response. The real viewer-jobs.js api() sends such a read once more; a write, an abort and an HTTP answer are never sent again.
 test('api() sends a read rejected before any response once more, a declared read-only POST too, and never a write, an abort or an HTTP answer',async()=>{
- const sends=[],rejected=()=>Promise.reject(new TypeError('Failed to fetch')),ok=value=>({status:200,ok:true,json:async()=>value});
+ const sends=[],rejected=()=>Promise.reject(new TypeError('Failed to fetch')),ok=value=>sessionResponse(200,value);
  let rule=()=>undefined,factory=null;
  const transport=(url,init,base)=>{sends.push({url,init});const answer=rule(url,init,sends.filter(s=>s.url===url).length);return answer===undefined?base(url):answer;};
  const count=url=>sends.filter(s=>s.url===url).length;
@@ -1010,7 +1010,7 @@ test('api() sends a read rejected before any response once more, a declared read
   answer:(file,s)=>file==='viewer-job-print.js'?void(s.kinViewerJobPrint=args=>{factory=args;return {open(){},openCurrent(){},close(){},destroy(){}};}):PRINT_FILES[file](s)});
  try{
   const account=sends.filter(s=>s.url==='/api/me');
-  assert.ok(account.length>=2,'the rejected account read was sent once more');assert.equal(account[1].init.signal,account[0].init.signal,'on the same request signal');
+  assert.ok(account.length>=2,'the rejected account read was sent once more');assert.ok(account.slice(0,2).every(s=>new Headers(s.init.headers).get('X-KIN-Session')==='S1'),'both attempts stay bound to this document');
   assert.ok(!w.status().includes('Failed to fetch'),w.status());
   rule=()=>undefined;await w.print(12);assert.ok(factory,'the print dialog received the panel api');const api=factory.api;
   // A POST its caller declares read-only (the source lookup) is sent once more, and the declaration never reaches fetch.
@@ -1020,11 +1020,11 @@ test('api() sends a read rejected before any response once more, a declared read
   // A write is never sent again.
   const write='/api/studies/'+STUDY+'/viewer-jobs/00000000-0000-4000-8000-000000000000/revisions';
   rule=url=>url===write?rejected():undefined;
-  await assert.rejects(api(write.slice(4),{method:'POST',body:'{}'}),{name:'TypeError',message:'Failed to fetch'});assert.equal(count(write),1);
+  await assert.rejects(api(write.slice(4),{method:'POST',body:'{}'}),{name:'TypeError',transport:'network'});assert.equal(count(write),1);
   // A read rejected on both sends is sent exactly twice and keeps the browser's own error in this panel.
   const job='/api/studies/'+STUDY+'/viewer-jobs/00000000-0000-4000-8000-000000000000';
   rule=url=>url===job?rejected():undefined;
-  await assert.rejects(api(job.slice(4)),{name:'TypeError',message:'Failed to fetch'});assert.equal(count(job),2);
+  await assert.rejects(api(job.slice(4)),{name:'TypeError',transport:'network'});assert.equal(count(job),2);
   // An abort is never sent again: one while the read was pending, and a rejection that arrives after its caller aborted.
   const held='/api/studies/'+STUDY+'/report-preview',controller=new AbortController();
   rule=(url,init)=>url===held?new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(Object.assign(Error('aborted'),{name:'AbortError'})),{once:true})):undefined;
@@ -1032,10 +1032,18 @@ test('api() sends a read rejected before any response once more, a declared read
   await assert.rejects(pending,{name:'AbortError'});assert.equal(count(held),1);
   const late='/api/studies/'+STUDY+'/viewer-jobs/preview',gone=new AbortController();
   rule=url=>url===late?(gone.abort(),rejected()):undefined;
-  await assert.rejects(api(late.slice(4),{method:'POST',idempotent:true,body:'{}',signal:gone.signal}),{name:'TypeError'});assert.equal(count(late),1);
+  await assert.rejects(api(late.slice(4),{method:'POST',idempotent:true,body:'{}',signal:gone.signal}),{name:'AbortError'});assert.equal(count(late),1);
+  // Cancelling the caller while the second attempt waits must cancel that attempt too.
+  const retried='/api/studies/'+STUDY+'/retried-read',stopRetry=new AbortController();
+  rule=(url,init,n)=>url!==retried?undefined:n===1?rejected():new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(Object.assign(Error('aborted'),{name:'AbortError'})),{once:true}));
+  const retryPending=api(retried.slice(4),{signal:stopRetry.signal});
+  for(let n=0;n<100&&count(retried)<2;n++)await new Promise(setImmediate);
+  assert.equal(count(retried),2);stopRetry.abort();
+  await assert.rejects(retryPending,{name:'AbortError'});
+  assert.equal(count(retried),2);assert.equal(sends.filter(s=>s.url===retried)[1].init.signal.aborted,true);
   // An HTTP answer is final.
   const study='/api/studies/'+STUDY;
-  rule=url=>url===study?{status:503,ok:false,json:async()=>({})}:undefined;
+  rule=url=>url===study?sessionResponse(503,{}):undefined;
   await assert.rejects(api(study.slice(4)),{message:'서버 연결을 확인한 뒤 다시 시도하세요.'});assert.equal(count(study),1);
  }finally{w.stop();}
 });
@@ -1602,7 +1610,7 @@ test('S2-L2a the Restore Job button keeps its texts and never moves a point, pre
   // An ordinary 403 refuses this restore and preserves the panel for a later attempt.
   w.server.job=()=>({status:403,body:{message:'no'}});
   w.button('Restore Job').onclick();await lSettle();
-  assert.equal(w.status(),'검사 접근 권한을 확인할 수 없습니다. 입력은 유지됩니다.');
+  assert.equal(w.status(),'검사 접근이 거절되었습니다. 접근 권한을 확인하세요. 입력은 유지됩니다.');
   w.server.job=w.server.good;w.button('Restore Job').onclick();await lSettle();
   assert.equal(w.status(),'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.');
  }finally{w.stop();}

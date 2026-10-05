@@ -97,8 +97,8 @@ MUTANTS = [
         "title": "the screen goes back to appending at the end instead of writing what was sent",
         "case": "test_d11_the_body_the_screen_and_the_attestation_are_one_string",
         "expect": "S3-U6 M4: the string that was sent is the string on the screen",
-        "old": "        el.value = shown.text;",
-        "new": "        el.value += (el.value ? \"\\n\" : \"\") + pane.block;",
+        "old": "        editReport([reportEditOf(field, shown.text, shown.end)]);",
+        "new": "        editReport([reportEditOf(field, el.value + (el.value ? \"\\n\" : \"\") + pane.block, shown.end)]);",
     },
     {
         "id": "M5",
@@ -115,8 +115,8 @@ MUTANTS = [
         "title": "the caret is parked at the end of the field instead of on the inserted block",
         "case": "test_d01_caret_in_the_middle_of_the_field_places_whole_lines_and_the_caret",
         "expect": "S3-U6 M6: the caret must end on the inserted block, not at the end of the field",
-        "old": "        el.setSelectionRange(shown.end, shown.end);",
-        "new": "        el.setSelectionRange(el.value.length, el.value.length);",
+        "old": "        editReport([reportEditOf(field, shown.text, shown.end)]);",
+        "new": "        editReport([reportEditOf(field, shown.text, shown.text.length)]);",
     },
 ]
 

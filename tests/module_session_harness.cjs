@@ -12,7 +12,7 @@ function install(fetch, target = globalThis) {
       publish({ state: 'ending', session });
   } });
   target.KinWorkContext = gate;
-  target.KinSessionTransport = { page: () => transport };
+  target.KinSessionTransport = { ...transports, page: () => transport };
   return { gate, transport, end: () => publish({ state: 'ending', session }) };
 }
 module.exports = { install };

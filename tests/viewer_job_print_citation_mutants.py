@@ -115,7 +115,7 @@ MUTANTS = [
         "title": "the per-entry catch rethrows everything, so one failed read blanks the output",
         "case": "test_05_a_failed_read_loses_only_its_own_section",
         "expect": "one failed citation read must not blank the whole output",
-        "old": "          const terminal = identity.citationTerminal({ aborted: signal.aborted, live: live(), status: error?.status });",
+        "old": "          const terminal = identity.citationTerminal({ aborted: signal.aborted, live: live(), status: error?.status, code: error?.code });",
         "new": "          const terminal = 'rethrow';",
     },
     {

@@ -304,7 +304,7 @@ const KinAuth = (() => {
       announce();
       return null;
     }
-    // 명시적 로그인이 성공했고 그 세션에 묶인 신원 확인까지 끝났다. 앞선 세션의 종료 기록은 여기서만 지운다.
+    // 증명 진입 또는 사람이 누른 Login이 현재 세션을 확인했다. 앞선 세션의 종료 기록은 여기서만 지운다.
     if (viaProof && record) removeEnd();
     tab.remove(AUTO_LOGIN_KEY);
     cached = identity;
@@ -582,50 +582,35 @@ const KinAuth = (() => {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) recheck(); });
 
   /**
-   * 로그인·가입 시작(U5S-REQ-09). 누르는 것만으로는 종료 기록을 지우지도 업무를 열지도 않는다 — 그것은 성공한 로그인의 진입
-   * 증명이 한다. 이 브라우저에 세션이 남아 있으면 그 세션을 밝혀 POST로 시작한다: 서버가 그 세션을 감사와 함께 끝낸 뒤
+   * 로그인·가입 시작(U5S-REQ-09). Login은 현재 쿠키의 신원을 확인하고 다른 세션의 종료 기록만 넘겨받아 진입한다.
+   * 자기 세션의 종료 기록·저장소 불신·계정 전환은 그 세션을 밝혀 POST로 시작한다: 서버가 그 세션을 감사와 함께 끝낸 뒤
    * 로그인 주소를 준다. 밝힌 세션이 쿠키의 세션과 다르면(그사이 다른 로그인) 서버는 아무것도 끝내지 않고 거절하며, 다음
    * 누름이 지금 세션을 다시 확인한다. 남은 세션이 없으면 평범한 링크로 간다.
    */
   async function initiate(path, json, query) {
-    if (uncertainEntry && path === '/auth/login' && !json?.prompt) {
-      // A lost entry answer is not an account-switch request. Reconfirm first;
-      // even an unreadable end record must never turn this click into a revoke.
+    let binding = rebind ? null : sessionId;
+    if (path === '/auth/login' && !json?.prompt) {
+      // 종료 기록은 이름 붙은 세션에만 적용한다. Login은 현재 쿠키를 먼저 확인하므로
+      // 어제의 종료 때문에 오늘의 로그인을 끝내거나 확인 오류를 영원히 반복하지 않는다.
       const answer = await send('/me');
-      if (answer.status !== 401) {
-        const { id, identity } = readIdentity(answer);
-        if (reliable && readEnd() === null && state === 'unknown' && reason === 'entry-unconfirmed') {
-          reason = null;
-          if (adopt(id, identity, false)) { moved = true; location.href = home(cached); }
-          return;
-        }
-        throw new Error('로그인 세션은 유지되고 있지만 업무 화면 진입을 확인하지 못했습니다. 잠시 뒤 다시 확인해 주세요.');
-      }
-      location.href = `${API}${path}${query}`;
-      return;
-    }
-    const reuse = path === '/auth/login' && !json?.prompt && reliable && readEnd() === null
-      && (undecided() || state === 'active');
-    if (reuse) {
-      // Login after a failed confirmation is entry, not an implicit account switch.
-      if (state !== 'active') {
-        const answer = await send('/me');
-        if (answer.status !== 401) {
-          const { id, identity } = readIdentity(answer);
-          if (!adopt(id, identity, false)) return;
-        }
-      }
-      if (state === 'active') {
+      if (answer.status === 401) {
         moved = true;
-        location.href = home(cached);
+        location.href = `${API}${path}${query}`;
         return;
       }
-      if (!undecided() || readEnd() !== null) return;
-      moved = true;
-      location.href = `${API}${path}${query}`;
-      return;
+      let current;
+      try { current = readIdentity(answer); }
+      catch (error) { throw new Error(error.message + (error.retryable
+        ? ' · 잠시 뒤 Login을 다시 누르세요.' : ' · Switch account로 다시 로그인하세요.')); }
+      const { id, identity } = current, record = readEnd();
+      if (reliable && record !== UNREADABLE && record?.session !== id && !heard.has(id)) {
+        // 이 명시적 확인은 성공한 증명 진입처럼 앞선 세션의 기록만 넘겨받는다.
+        state = 'unknown'; reason = null; sessionId = null; operation = 0;
+        if (adopt(id, identity, true)) { moved = true; location.href = home(cached); return; }
+      }
+      // 자기 세션의 종료 의도 또는 믿을 수 없는 저장소는 새 명시적 로그인으로 복구한다.
+      binding = id;
     }
-    let binding = rebind ? null : sessionId;
     if (!binding) {
       // 명시적 로그인을 위한 한 번의 확인: 이 POST가 대신할 세션이 무엇인지 알 뿐, 이 문서의 신원으로 삼지 않는다.
       const answer = await send('/me');

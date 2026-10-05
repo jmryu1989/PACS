@@ -1358,8 +1358,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.assertEqual(view.locator("#tech-note-text").input_value(), "unsaved original")
         # The resumed document confirms the old write by reading it, without a repair prompt.
         status = view.locator("#tech-note-status").inner_text()
-        self.assertNotIn("저장되었습니다", status)
-        self.assertEqual("", status)
+        self.assertEqual("저장되었습니다. v1", status)
         self.assertTrue(view.get_by_role("button", name="Save Note", exact=True).is_enabled())
 
     def test_pause_retires_cancelled_timers_and_defers_an_xhr_completion(self):

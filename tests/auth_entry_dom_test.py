@@ -100,6 +100,8 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.page.expose_function("synAuthState", lambda event: self.auth_states.append(event))
         self.roles = ["clinician"]
         self.me_code = None
+        self.me_absent = False
+        self.login_starts = []
         self.me_failures = []
         self.lose_entry = False
         self.real_landing = False
@@ -145,7 +147,14 @@ class AuthEntryDOMTest(unittest.TestCase):
                     self.held_entry = route
                     return
                 return self.answer_entry(route)
+            if path == "/api/auth/login":
+                self.login_starts.append((request.method, request.headers, request.post_data))
+                if request.method == "POST":
+                    return route.fulfill(json={"location": self.origin + "/auth/synthetic-login"})
+                return route.fulfill(content_type="text/html", body="<p>Identity provider login</p>")
             if path == "/api/me":
+                if self.me_absent:
+                    return route.fulfill(status=401, json={})
                 if self.me_failures:
                     failure = self.me_failures.pop(0)
                     if failure == "network":
@@ -164,6 +173,8 @@ class AuthEntryDOMTest(unittest.TestCase):
                 return route.fulfill(json={"items": [], "nextCursor": None})
             if path == "/api/syn-work":
                 return route.fulfill(json={"ok": True})
+        if path == "/auth/synthetic-login":
+            return route.fulfill(content_type="text/html", body="<p>Identity provider login</p>")
         if path == "/auth/realms/kin/.well-known/openid-configuration":
             return route.fulfill(json={})
         if path.startswith("/branding/"):
@@ -218,18 +229,81 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.login(denied=False)
         self.assert_uncertain_landing_recovers()
 
-    def test_lost_entry_with_old_end_record_keeps_live_session_on_repeated_login(self):
-        self.real_landing = self.lose_entry = True
-        self.context.add_init_script("localStorage.setItem('kin-session-end',JSON.stringify({session:'old-ended',operation:1,status:'confirmed'}))")
-        self.login(denied=False)
-        self.page.wait_for_url('**/index.html*')
-        for _ in range(2):
-            expect(self.page.locator('#msg')).to_contain_text('확인하지 못해')
-            self.page.locator('#signin').click()
-            expect(self.page.locator('#msg')).to_contain_text('세션은 유지되고 있지만')
-            self.page.reload()
-        self.assertFalse(any(path in ('/api/auth/login', '/api/auth/logout') for path, _ in self.requests))
+    def landing(self, record=None, query="?auth_error=entry_unconfirmed"):
+        self.real_landing = True
+        if record:
+            import json
+            self.context.add_init_script("""if (!sessionStorage.getItem('syn-seeded')) {
+              sessionStorage.setItem('syn-seeded','1');
+              localStorage.setItem('kin-session-end',JSON.stringify(%s));
+            }""" % json.dumps({"session": record, "operation": 1, "status": "confirmed"}))
+        self.page.goto(self.origin + BASE + "index.html" + query)
+        expect(self.page.locator('#signin')).to_be_enabled()
+
+    def test_lost_entry_with_old_end_record_enters_on_first_login_and_clears_only_old_record(self):
+        self.landing("S0-yesterday")
+        self.page.reload()
+        self.page.locator('#signin').click()
+        expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
+        self.assertEqual(self.page.evaluate("localStorage.getItem('kin-session-end')"), None)
+        self.assertNotIn('kin-session-end=', self.page.evaluate('document.cookie'))
+        self.assertEqual(self.login_starts, [])
+        self.assertEqual(self.page.evaluate('KinAuth.sessionId()'), SESSION)
+
+    def test_confirmation_login_with_own_end_starts_bound_explicit_login(self):
+        self.landing(SESSION)
+        self.page.locator('#signin').click()
+        self.page.wait_for_url('**/auth/synthetic-login')
+        self.assertEqual(len(self.login_starts), 1)
+        method, headers, _ = self.login_starts[0]
+        self.assertEqual(method, 'POST')
+        self.assertEqual(headers.get('x-kin-session'), SESSION)
+        self.assertEqual(headers.get('x-kin-csrf'), '1')
         self.assertNotIn('active', [event['state'] for event in self.auth_states])
+
+    def test_confirmation_login_with_untrusted_storage_starts_bound_explicit_login(self):
+        self.context.add_init_script(STORAGE_DENIED)
+        self.landing()
+        self.page.locator('#signin').click()
+        self.page.wait_for_url('**/auth/synthetic-login')
+        self.assertEqual(len(self.login_starts), 1)
+        method, headers, _ = self.login_starts[0]
+        self.assertEqual((method, headers.get('x-kin-session')), ('POST', SESSION))
+        self.assertNotIn('active', [event['state'] for event in self.auth_states])
+
+    def test_confirmation_login_without_cookie_session_starts_ordinary_login(self):
+        self.me_absent = True
+        self.landing('S0-yesterday')
+        self.page.locator('#signin').click()
+        self.page.wait_for_url('**/api/auth/login*')
+        self.assertEqual([start[0] for start in self.login_starts], ['GET'])
+        self.assertNotIn('active', [event['state'] for event in self.auth_states])
+
+    def test_confirmation_transient_failure_allows_same_login_button_to_retry(self):
+        self.landing('S0-yesterday')
+        self.me_failures = [503]
+        self.page.locator('#signin').click()
+        expect(self.page.locator('#msg')).to_contain_text('다시 누르세요')
+        self.page.wait_for_timeout(1200)
+        self.assertEqual(self.requests, [('/api/me', None)])
+        self.assertEqual(self.login_starts, [])
+        self.page.locator('#signin').click()
+        expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
+        self.assertEqual(self.login_starts, [])
+
+    def test_ordinary_landing_old_record_also_enters_without_revoking_live_session(self):
+        self.landing('S0-yesterday', query='')
+        self.page.locator('#signin').click()
+        expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
+        self.assertEqual(self.login_starts, [])
+
+    def test_refused_proof_on_landing_can_confirm_live_session_with_login(self):
+        self.refuse = True
+        self.landing(query='#kin-entry=refused-proof')
+        expect(self.page.locator('#msg')).to_contain_text('다시 로그인')
+        self.page.locator('#signin').click()
+        expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
+        self.assertEqual(self.login_starts, [])
         self.assertEqual(len(self.entries), 1)
 
     def test_consumed_proof_definitive_refusal_does_not_retry(self):

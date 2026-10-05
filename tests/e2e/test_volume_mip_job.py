@@ -1,5 +1,6 @@
 # coding: utf-8
 """TEST-MIP-JOB-DOM (A11-VOI-2): MIP Viewer Job save/restore of the confirmed MIP display and VOI Slab with its three-plane MPR."""
+from viewer_session import end_viewer, ended_job_status
 import copy,io,json,time,unittest,uuid
 import numpy as np
 from playwright.sync_api import expect
@@ -40,7 +41,6 @@ VOI_REPLAY="""([preset,center,pivot,thickness,rotations,move])=>{const V=KinVolu
 # Jobs panel status text together with the MIP dialog state at the moment the text changed.
 STATUS_WATCH="""()=>{if(window.jobStatusStates)return;const s=document.querySelector('#kin-viewer-jobs-status');window.jobStatusStates=[];
  new MutationObserver(()=>{const d=document.querySelector('#kin-volume-mip');jobStatusStates.push([s.textContent,d?.open?d.dataset.kinMipState:'closed',d?.querySelector('.kin-mip-voi-state')?.textContent||''])}).observe(s,{childList:true,characterData:true,subtree:true})}"""
-SESSION_END="()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:String(Date.now())}))"
 # Faults go where the viewer reads through a changeable object (d6271d2): the VOI plane factory and the rendering engine's
 # window slot. Each proves it is installed and fires once inside the product step it targets.
 PLANE_FAULT="""()=>{"use strict";const model=window.KinVolumeMip,real=model.voiPlane;window.mipFault=[];
@@ -243,12 +243,12 @@ class VolumeMipJobE2E(VolumeMipE2E):
   expect(dialog.get_by_label('MIP Projection',exact=True)).to_have_value('MIP')
   # Session end disposes the MPR tools and the MIP Viewer with them, which closes its dialog and removes it from the page
   # (viewer-volume-mip.js dispose), so the VOI Slab summary the reader saw is held by reference and read after the POST ends.
-  self.assertTrue(v.evaluate("()=>!!(window.mipHeldSummary=document.querySelector('#kin-volume-mip .kin-mip-voi-state'))"));v.evaluate(SESSION_END)
-  expect(v.locator('#kin-volume-mip[open]')).to_have_count(0,timeout=10000);expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('세션이 변경되었습니다')
+  self.assertTrue(v.evaluate("()=>!!(window.mipHeldSummary=document.querySelector('#kin-volume-mip .kin-mip-voi-state'))"));v=end_viewer(v)
+  self.assertEqual(v.count('#kin-volume-mip[open]'),0);self.assertIn('세션이 변경되었습니다',ended_job_status(v))
   try:held[0].abort()
   except Exception:pass
-  v.wait_for_timeout(500);expect(v.locator('#kin-volume-mip[open]')).to_have_count(0);self.assertNotIn('Saved',v.evaluate('()=>mipHeldSummary.textContent'))
-  self.assertNotIn('저장했습니다',v.locator('#kin-viewer-jobs-status').text_content())
+  v.wait_for_timeout(500);self.assertEqual(v.count('#kin-volume-mip[open]'),0);self.assertNotIn('Saved',v.evaluate('()=>mipHeldSummary.textContent'))
+  self.assertNotIn('저장했습니다',ended_job_status(v))
   self.assertEqual(len(self.jobs(a)),jobs_before);self.assertEqual(self.originals(),original)
 
  def test_mip_job_03_restore_failure_missing_tool_cancel_stale_rollback(self):
@@ -284,9 +284,9 @@ class VolumeMipJobE2E(VolumeMipE2E):
    self.rolled_back(v,'MIP 작업 복원을 취소했습니다',previous);self.assertEqual(v.evaluate('()=>mipCount()'),0)
    v.evaluate('()=>{mipHold=false}');v.wait_for_timeout(500);self.assertNotIn('final',v.evaluate('m=>mipTransitions.slice(m)',mark),how)
   # A session ended during the MIP restore step closes the viewer without a success status.
-  v.evaluate('()=>{mipHold=true;mipHeldFrames=0}');mark=self.mark(v);self.restore_titled(v,a,'MIP VOI job');v.wait_for_function('()=>mipHeldFrames>0',timeout=60000);v.evaluate(SESSION_END)
-  expect(v.locator('#kin-volume-mip[open]')).to_have_count(0,timeout=10000);v.evaluate('()=>{mipHold=false}');v.wait_for_timeout(500)
-  self.assertNotIn('복원했습니다',status.text_content());self.assertNotIn('final',v.evaluate('m=>mipTransitions.slice(m)',mark))
+  v.evaluate('()=>{mipHold=true;mipHeldFrames=0}');mark=self.mark(v);self.restore_titled(v,a,'MIP VOI job');v.wait_for_function('()=>mipHeldFrames>0',timeout=60000);v=end_viewer(v)
+  self.assertEqual(v.count('#kin-volume-mip[open]'),0);v.evaluate('()=>{mipHold=false}');v.wait_for_timeout(500)
+  self.assertNotIn('복원했습니다',ended_job_status(v));self.assertNotIn('final',v.evaluate('m=>mipTransitions.slice(m)',mark))
   # A missing MIP Viewer module on a fresh page refuses and rolls back; nothing is created.
   fresh=self.login();fresh.route('**/viewer-volume-mip.js',lambda route:route.abort());self.launch(fresh,[a]);self.ready(fresh);before=fresh.evaluate(LAYOUT)
   self.restore_titled(fresh,a,'MIP VOI job');expect(fresh.locator('#kin-viewer-jobs-status')).to_contain_text('MIP Viewer 도구를 불러오지 못해',timeout=90000)

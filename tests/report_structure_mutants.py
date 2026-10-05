@@ -95,9 +95,9 @@ MUTANTS = [
         "title": "the field is written even when the server refused the apply",
         "case": "test_d07_a_refused_apply_leaves_the_body_untouched",
         "expect": "S3-STRUCT M3c: a refused apply must leave every byte of the report alone",
-        "old": '        pane.status = "적용하지 못했습니다: " + e.message + " — 판독문은 그대로입니다.";',
+        "old": '          pane.status = "적용하지 못했습니다: " + draftFailureText(result) + " — 판독문은 그대로입니다.";',
         "new": '        $("#" + pane.field).value = fresh.text;\n'
-               '        pane.status = "적용하지 못했습니다: " + e.message + " — 판독문은 그대로입니다.";',
+               '          pane.status = "적용하지 못했습니다: " + draftFailureText(result) + " — 판독문은 그대로입니다.";',
     },
     {
         "id": "M4c",

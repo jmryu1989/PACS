@@ -2316,7 +2316,8 @@ class LogoutDOMTest(unittest.TestCase):
         held.pop().fulfill(status=200 if stored else 503,
                            json={"uid": UID, "writable": True, "note": dict(note)} if stored else {"message": "SYN not stored"})
         self.wait_until(lambda: len(reads) == 2, "the automatic note confirmation")
-        expect(page.locator("#tech-note-status")).to_have_text("")
+        expect(page.locator("#tech-note-status")).to_have_text(
+            "저장되었습니다. v2" if stored else "저장되지 않았습니다 · 입력은 유지했습니다. 다시 Save Note를 누르세요.")
         expect(page.locator("#tech-note-text")).to_have_value("SYN note before preparation")
         expect(page.locator("#tech-note-reason")).to_have_value("" if stored else "  SYN correction  ")
         expect(page.locator("#tech-note-save")).to_be_enabled()

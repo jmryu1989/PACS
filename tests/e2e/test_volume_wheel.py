@@ -1,4 +1,5 @@
 # coding: utf-8
+from viewer_session import end_viewer
 import math,unittest
 import numpy as np
 from playwright.sync_api import expect
@@ -45,7 +46,11 @@ class VolumeWheelE2E(VolumeGestureE2E):
   for i in [1,2]:self.assertAlmostEqual(self.slabs(v)[i]['total'],before[i]['total']+3,delta=1e-6)
   maximum=math.hypot(63,63,32);v.evaluate("maximum=>{for(const id of ['mpr-sagittal','mpr-coronal']){const v=services.cornerstoneViewportService.getCornerstoneViewport(id);v.setSlabThickness((maximum-.5)/2);v.render()}gestureVP.render()}",maximum);v.wait_for_timeout(150);self.wheel_at(v,center)
   for i in [1,2]:self.assertAlmostEqual(self.slabs(v)[i]['total'],maximum,delta=1e-6)
-  before=self.slabs(v);v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-volume-crosshair')).to_have_count(0);self.wheel_at(v,center);self.assertEqual(self.slabs(v),before);self.assertEqual(len(self.versions(a)),1)
+  v.evaluate("""()=>{window.endedWheelTarget=document.querySelector('#svg-layer-'+gestureVP.id);window.endedWheelInput=new WheelEvent('wheel',{deltaY:-120,bubbles:true});window.slabWrites=0;
+   for(const id of services.viewportGridService.getState().viewports.keys()){const view=services.cornerstoneViewportService.getCornerstoneViewport(id),write=view.setSlabThickness;view.setSlabThickness=function(...args){slabWrites++;return write.apply(this,args)}}}""")
+  v=end_viewer(v);self.assertEqual(v.count('#kin-volume-crosshair'),0);writes=v.evaluate('slabWrites')
+  v.evaluate('()=>endedWheelTarget.dispatchEvent(endedWheelInput)')
+  self.assertEqual(v.evaluate('slabWrites'),writes);self.assertEqual(v.evaluate('()=>cornerstone.getRenderingEngines().flatMap(e=>e.getViewports()).map(v=>v.id)'),[]);self.assertEqual(len(self.versions(a)),1)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeWheelE2E(n) for n in loader.getTestCaseNames(VolumeWheelE2E) if n.startswith('test_wheel_'))
 if __name__=='__main__':unittest.main(verbosity=2)

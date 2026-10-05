@@ -39,7 +39,10 @@ class ThumbnailSeriesE2E(previous.ReturnToCurrentE2E):
         return fixture
 
     def metadata(self,page,fixture):
-        response=page.request.get(self.stack.proxy+f"/dicom-web/studies/{fixture.uid}/instances")
+        session=page.evaluate("KinWorkContext.session()")
+        self.assertTrue(session, "Metadata assertions use the authenticated document's session")
+        response=page.request.get(self.stack.proxy+f"/dicom-web/studies/{fixture.uid}/instances",
+                                  headers={"X-KIN-Session":session})
         self.assertEqual(response.status,200)
         return response.json()
 
