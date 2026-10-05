@@ -49,15 +49,15 @@ const mapper={getClippingPlanes:()=>[],removeAllClippingPlanes(){},addClippingPl
 const vrActor={getMapper:()=>mapper,getProperty:()=>property};
 const frameLog=[],renderRequests=[],nativeFrames=[],renderer=Object.freeze({getDraw:()=>true}),shader={pending:false,compiled:false};
 const vrView={id:null,suppressEvents:false,async setVolumes(){},getActors:()=>[{actor:vrActor}],getRenderer:()=>renderer,resetCamera(){},getCamera:camera,setCamera(){},setProperties(){},render(){engine.renderViewport(this.id)}};
-const engine={privateViews:new Map(),_needsRender:new Set(),enableElement(config){vrView.id=config.viewportId;this.privateViews.set(config.viewportId,vrView)},getViewport(id){return this.privateViews.get(id)||views.get(id)},disableElement(id){this.privateViews.delete(id);this._needsRender.delete(id)},
+const engine={privateViews:new Map(),_needsRender:new Set(),enableElement(config){vrView.id=config.viewportId;vrView.element=config.element;this.privateViews.set(config.viewportId,vrView)},getViewport(id){return this.privateViews.get(id)||views.get(id)},disableElement(id){this.privateViews.delete(id);this._needsRender.delete(id)},
   performVtkDrawCall(){for(const id of this._needsRender){if(this.privateViews.has(id)){this.drawn.add(id);if(shader.pending)shader.compiled=true;if(window.sim?.frameDuration){const ms=sim.frameDuration;sim.frameDuration=0;sim.burn(ms);}}else if(views.has(id))nativeFrames.push(id)}},
-  renderViewport(id){renderRequests.push(id);this._needsRender.add(id);requestAnimationFrame(()=>{if(this.privateViews.has(id)){
-    this.drawn=new Set();const at=performance.now();this.performVtkDrawCall();frameLog.push({at,drawn:this.drawn.has(id)});this._needsRender.clear();}})},
+  renderViewport(id){renderRequests.push(id);this._needsRender.add(id);if(this.frameQueued)return;this.frameQueued=true;requestAnimationFrame(()=>{this.frameQueued=false;if(this.privateViews.has(id)){
+    this.drawn=new Set();const at=performance.now();(this.bypassDraw||this.performVtkDrawCall).call(this);frameLog.push({at,drawn:this.drawn.has(id)});if(this.drawn.has(id))vrView.element.dispatchEvent(new CustomEvent('CORNERSTONE_IMAGE_RENDERED'));this._needsRender.clear();}})},
   renderViewports(ids){ids.forEach(id=>this.renderViewport(id))},render(){this.renderViewports([...this.privateViews.keys()])},resize(){this.render()},
   offscreenMultiRenderWindow:{getOpenGLRenderWindow:()=>({getViewNodeFor:()=>({get:()=>({tris:{getProgram:()=>({getCompiled:()=>shader.compiled,getLinked:()=>shader.compiled,getFragmentShader:()=>({getSource:()=>shader.compiled?'kinSculptPoint0':''})})}})})})}};
 const volume={volumeId:'volume-1',loadStatus:{loaded:true},framesLoaded:2,imageIds:['frame-0','frame-1'],dimensions:[2,2,2],spacing:[1,1,1],direction:[1,0,0,0,1,0,0,0,1],imageData:{getDimensions:()=>[2,2,2],indexToWorld:([i,j,k])=>[i,j,k]}};
 const alternate={...volume,volumeId:'volume-2'};
-window.cornerstone={cache:{getVolume:id=>id==='volume-1'?volume:id==='volume-2'?alternate:null},getEnabledElement:element=>enabled.get(element),metaData:{get:(_,id)=>({SOPClassUID:'1.2.840.10008.5.1.4.1.1.2',Modality:'CT',SamplesPerPixel:1,PhotometricInterpretation:'MONOCHROME2',Rows:2,Columns:2,PixelSpacing:[1,1],ImagePositionPatient:[0,0,id==='frame-0'?0:1],ImageOrientationPatient:[1,0,0,0,1,0]})},Enums:{ViewportType:{VOLUME_3D:'3d'}}};
+window.cornerstone={cache:{getVolume:id=>id==='volume-1'?volume:id==='volume-2'?alternate:null},getEnabledElement:element=>enabled.get(element),metaData:{get:(_,id)=>({SOPClassUID:'1.2.840.10008.5.1.4.1.1.2',Modality:'CT',SamplesPerPixel:1,PhotometricInterpretation:'MONOCHROME2',Rows:2,Columns:2,PixelSpacing:[1,1],ImagePositionPatient:[0,0,id==='frame-0'?0:1],ImageOrientationPatient:[1,0,0,0,1,0]})},Enums:{ViewportType:{VOLUME_3D:'3d'},Events:{IMAGE_RENDERED:'CORNERSTONE_IMAGE_RENDERED'}}};
 const services={viewportGridService:{getState:()=>grid,setViewportIsReady:(id,value)=>repairs.push([id,value])},cornerstoneViewportService:{getCornerstoneViewport:id=>views.get(id),resizeQueue:[],gridResizeTimeOut:null},displaySetService:{getDisplaySetByUID:()=>({StudyInstanceUID:'study-1',SeriesInstanceUID:'series-1',Modality:'CT'})}};
 window.KinVolumeOrientation={intersection:()=>[0,0,0],rotate:c=>c};
 window.KinVolumeSculpt={};window.KinVolumeMaskRenderer={preflight(){} };let sculptCancels=0;
@@ -73,11 +73,20 @@ window.sourceState=()=>JSON.stringify({source,cameras:[...views.values()].map(v=
 """
 
 ACCESS_CLOCK = r"""
-window.sim={now:1,entries:[],requests:[],tasks:[],raf:[],delay:0,bodyDelay:0,jobsBodyDelay:0,
+window.sim={now:1,wallOffset:0,entries:[],observers:[],requests:[],tasks:[],raf:[],delay:0,bodyDelay:0,jobsBodyDelay:0,
   deny:false,account:'reader',silent:false,jobsSilent:false,missingTiming:false,frameDuration:0,timerId:0};
 const sim=window.sim;
 Object.defineProperty(performance,'now',{value:()=>sim.now});
+Date.now=()=>sim.now+sim.wallOffset;
 performance.getEntriesByName=(name)=>sim.missingTiming?[]:sim.entries.filter(e=>e.name===name);
+window.PerformanceObserver=class {
+  static supportedEntryTypes=['resource','longtask'];
+  constructor(callback){this.callback=callback;this.types=new Set();this.records=[];sim.observers.push(this)}
+  observe({type}){this.types.add(type)}
+  takeRecords(){return this.records.splice(0)}
+  disconnect(){this.types.clear();this.records=[]}
+};
+sim.entry=entry=>{sim.entries.push(entry);for(const obs of sim.observers)if(obs.types.has(entry.entryType)&&!(entry.entryType==='resource'&&(sim.missingTiming||sim.missingMe&&entry.name.endsWith('/api/me'))))obs.records.push(entry)};
 window.requestAnimationFrame=fn=>{sim.raf.push(fn);return sim.raf.length};window.cancelAnimationFrame=()=>{};
 window.ResizeObserver=class {observe(){}disconnect(){}};
 const turnChannel=new MessageChannel(),turns=[];
@@ -93,20 +102,23 @@ window.fetch=(url,options={})=>{
   const started=sim.now,isMe=path==='/api/me';
   const record={url:name,path,at:started,session:headers.get('X-KIN-Session'),csrf:headers.get('X-KIN-CSRF')};
   sim.requests.push(record);
+  if(sim.offline)return Promise.reject(new TypeError('Failed to fetch'));
   let status=200,body=isMe?{kind:'member',institution:'hospital',sub:sim.account,sessionId:'S1'}:[];
   if(!record.session&&!isMe){status=428;body={code:'AUTH_SESSION_REQUIRED'};}
   else if(record.session&&record.session!=='S1'){status=409;body={code:'AUTH_SESSION_MISMATCH'};}
   else if(sim.deny){status=403;body={};}
+  else if(sim.httpStatus){status=sim.httpStatus;body={};}
+  else if(sim.invalidBody){body=isMe?null:{};}
   else if(!isMe&&[...new URL(name).searchParams].some(([k,v])=>!['mine','includeHidden'].includes(k)||!['true','false'].includes(v))){status=400;body={};}
   if(sim.silent||sim.jobsSilent&&!isMe)return new Promise(()=>{});
   const delay=sim.delay,bodyDelay=isMe?sim.bodyDelay:sim.jobsBodyDelay;
   return new Promise(resolve=>{
     let stream;
-    const response=new Response(new ReadableStream({start(c){stream=c}}),{status,headers:{'Content-Type':'application/json'}});
+    const response=new Response(new ReadableStream({start(c){stream=c}}),{status,headers:{'Content-Type':'application/json',...(sim.authCode?{'X-KIN-Auth-Code':sim.authCode}:{})}});
     sim.task(()=>resolve(response),delay);
     sim.task(()=>{
-      sim.entries.push({name,initiatorType:'fetch',startTime:started,responseEnd:sim.now});
-      stream.enqueue(new TextEncoder().encode(JSON.stringify(body)));stream.close();
+      sim.entry({entryType:'resource',name,initiatorType:'fetch',startTime:started,responseEnd:sim.now});
+      stream.enqueue(new TextEncoder().encode(sim.badJson?'{':JSON.stringify(body)));stream.close();
     },delay+bodyDelay);
   });
 };
@@ -120,7 +132,8 @@ sim.runUntil=(end,timers)=>{
 };
 // A real synchronous draw has no JS task/microtask delivery. Network arrival still occurs.
 sim.burn=ms=>sim.runUntil(sim.now+ms,false);
-sim.flush=async()=>{sim.runUntil(sim.now,false);await sim.microtasks()};
+sim.busy=ms=>{const startTime=sim.now;sim.burn(ms);sim.entry({entryType:'longtask',startTime,duration:ms})};
+sim.flush=async()=>{sim.runUntil(sim.now,true);await sim.microtasks();sim.runUntil(sim.now,true);await sim.microtasks()};
 sim.advance=async(ms,{watch=true,timers=true}={})=>{
   const end=sim.now+ms;
   while(sim.now<end){
@@ -311,7 +324,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                   sim.jobsBodyDelay=14999;await sim.advance(10000);
                   const revokedAt=sim.now;sim.silent=true;
                   await sim.advance(14999);sim.frame(duration);sim.frame();
-                  await sim.advance(Math.max(250,15000-duration));
+                  await sim.advance(Math.max(250,15001-duration));
                   return {open:sim.open(),elapsed:sim.now-revokedAt,message:sim.message(),frames:frameLog};
                 }""", duration)
                 self.assertFalse(result['open']);self.assertLessEqual(result['elapsed'], bound)
@@ -332,7 +345,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         page = self.access_page()
         result = page.evaluate("""async()=>{
           sim.silent=true;await sim.advance(14999);sim.frame();await sim.advance(1);sim.frame();
-          await sim.advance(9999);const before=sim.open();await sim.advance(1);
+          await sim.advance(14999);const before=sim.open();await sim.advance(1);
           return {before,open:sim.open(),frames:frameLog,message:sim.message()};
         }""")
         self.assertTrue(result['before']);self.assertFalse(result['open'])
@@ -389,11 +402,11 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                 self.assertTrue(result['open'])
                 self.assertEqual([{'at':15001,'drawn':False}], result['frames'])
 
-    def test_ac_09_known_late_body_is_refused_even_after_a_long_frame(self):
+    def test_ac_09_old_confirmation_does_not_extend_the_silent_limit(self):
         page = self.access_page()
         result = page.evaluate("""async()=>{
           sim.jobsBodyDelay=15000;await sim.advance(10000);sim.frame(30000);
-          await sim.flush();return {open:sim.open(),message:sim.message()};
+          sim.silent=true;await sim.flush();await sim.advance(250);return {open:sim.open(),message:sim.message()};
         }""")
         self.assertFalse(result['open']);self.assertIn('접근 확인 시간이', result['message'])
 
@@ -404,7 +417,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                 result = page.evaluate("""async deny=>{
                   sim.delay=1;await sim.advance(10000);
                   const before=sim.requests.length;sim.now+=120000;sim.deny=deny;
-                  sim.frame();tick(250);sim.frame();
+                  sim.frame();tick(250);sim.frame();await sim.flush();
                   const waiting={open:sim.open(),drawn:frameLog.filter(f=>f.drawn).length,
                     newRequests:sim.requests.length-before};
                   await sim.advance(1);sim.frames();
@@ -473,11 +486,11 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
     def test_ac_15_missing_timing_is_strict_without_a_long_frame(self):
         page = self.access_page()
         result = page.evaluate("""async()=>{
-          sim.missingTiming=true;sim.jobsBodyDelay=15000;await sim.advance(25000);
+          sim.missingTiming=true;sim.jobsBodyDelay=15000;await sim.advance(30000);
           return {open:sim.open(),message:sim.message(),requests:sim.requests.length};
         }""")
         self.assertFalse(result['open']);self.assertIn('접근 확인 시간이', result['message'])
-        self.assertEqual(4, result['requests'])
+        self.assertEqual(6, result['requests'])
 
     def test_ac_16_missing_or_unwritable_gate_refuses_before_native_open(self):
         for member in ('performVtkDrawCall','_needsRender','readonly'):
@@ -492,11 +505,11 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                 self.assertIn('지원 담당자', page.evaluate('sim.message()'))
                 self.assertEqual([], page.evaluate('frameLog'))
 
-    def test_ac_17_wall_clock_changes_cannot_change_validity(self):
+    def test_ac_17_backward_wall_jump_cannot_extend_validity(self):
         page = self.access_page()
         result = page.evaluate("""async()=>{
-          sim.silent=true;Date.now=()=>-900000;await sim.advance(15000);sim.frame();
-          Date.now=()=>900000;await sim.advance(10000);return {open:sim.open(),frames:frameLog,message:sim.message()};
+          sim.silent=true;sim.wallOffset=-900000;await sim.advance(15000);sim.frame();
+          await sim.advance(15000);return {open:sim.open(),frames:frameLog,message:sim.message()};
         }""")
         self.assertFalse(result['open']);self.assertEqual([{'at':15001,'drawn':False}],result['frames'])
         self.assertIn('접근 확인 시간이',result['message'])
@@ -518,7 +531,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                   if(loading)vrView.setVolumes=()=>new Promise(resolve=>window.releaseVolume=resolve);
                   else sim.silent=true;
                   const opening=openVr();await sim.flush();
-                  sim.now+=120000;sim.silent=false;sim.delay=1;tick(250);
+                  sim.now+=120000;sim.silent=false;sim.delay=1;tick(250);await sim.flush();
                   const waiting={open:sim.open(),drawn:frameLog.filter(f=>f.drawn).length};
                   await sim.advance(1);if(loading)releaseVolume();await opening;sim.frames();
                   return {waiting,open:sim.open(),message:sim.message()};
@@ -541,7 +554,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
     def test_ac_21_unavailable_timing_api_rechecks_without_false_close(self):
         page=self.access_page()
         result=page.evaluate("""async()=>{
-          performance.getEntriesByName=undefined;sim.delay=1;await sim.advance(10000);sim.frame(30000);
+          sim.missingTiming=true;sim.delay=1;await sim.advance(10000);sim.frame(30000);
           await sim.flush();await sim.advance(1);sim.frames();
           return {open:sim.open(),message:sim.message(),requests:sim.requests.length};
         }""")
@@ -553,8 +566,8 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         result=page.evaluate("""async()=>{
           sim.jobsBodyDelay=16000;await sim.advance(10000);
           const request=sim.requests.at(-1);
-          sim.entries.push({name:request.url,initiatorType:'fetch',startTime:sim.now+1,responseEnd:sim.now+2});
-          sim.frame(30000);await sim.flush();
+          sim.entry({entryType:'resource',name:request.url,initiatorType:'fetch',startTime:sim.now+1,responseEnd:sim.now+2});
+          sim.frame(30000);sim.silent=true;await sim.flush();await sim.advance(250);
           return {open:sim.open(),message:sim.message()};
         }""")
         self.assertFalse(result['open']);self.assertIn('접근 확인 시간이',result['message'])
@@ -573,13 +586,12 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
     def test_ac_24_known_late_body_is_not_hidden_by_other_missing_entry(self):
         page=self.access_page()
         result=page.evaluate("""async()=>{
-          const entries=performance.getEntriesByName;
-          performance.getEntriesByName=(name,type)=>name.endsWith('/api/me')?[]:entries(name,type);
-          sim.jobsBodyDelay=16000;await sim.advance(10000);sim.frame(30000);await sim.flush();
+          sim.missingMe=true;
+          sim.jobsBodyDelay=16000;await sim.advance(10000);sim.frame(30000);sim.silent=true;await sim.flush();await sim.advance(250);
           return {open:sim.open(),message:sim.message(),requests:sim.requests.length};
         }""")
         self.assertFalse(result['open']);self.assertIn('접근 확인 시간이',result['message'])
-        self.assertEqual(4,result['requests'])
+        self.assertEqual(6,result['requests'])
 
     def test_ac_25_source_loading_keeps_original_whole_open_limit(self):
         page=self.page_with_vr(controlled=True);self.addCleanup(page.close)
@@ -590,6 +602,172 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         }""")
         self.assertTrue(result['before']);self.assertFalse(result['open'])
         self.assertIn('VR 원본 확인 시간이',result['message'])
+
+    def test_ac_26_no_answer_during_validity_keeps_frames_and_edits(self):
+        for failure in ('sim.offline=true', 'sim.httpStatus=503', 'sim.httpStatus=429',
+                        "sim.httpStatus=403;sim.authCode='AUTH_IDP_UNAVAILABLE'",
+                        'sim.badJson=true', 'sim.invalidBody=true'):
+            with self.subTest(failure=failure):
+                page=self.access_page()
+                result=page.evaluate("""async failure=>{
+                  document.querySelector('[aria-label="VR Opacity"]').value='45';
+                  eval(failure);await sim.advance(10000);sim.frame();
+                  const during={open:sim.open(),message:sim.message(),drawn:frameLog.at(-1)?.drawn??false};
+                  sim.offline=false;sim.httpStatus=0;sim.authCode=null;sim.badJson=false;sim.invalidBody=false;
+                  await sim.advance(2000);sim.frame();
+                  return {during,open:sim.open(),message:sim.message(),drawn:frameLog.at(-1)?.drawn??false,
+                    opacity:document.querySelector('[aria-label="VR Opacity"]').value};
+                }""",failure)
+                self.assertEqual({'open':True,'message':'','drawn':True},result['during'])
+                self.assertTrue(result['open']);self.assertTrue(result['drawn'])
+                self.assertEqual('',result['message']);self.assertEqual('45',result['opacity'])
+
+    def test_ac_27_failure_retries_without_extending_expiry_or_silent_limit(self):
+        page=self.access_page()
+        result=page.evaluate("""async()=>{
+          sim.offline=true;await sim.advance(15000);sim.frame();
+          const blocked=frameLog.at(-1);await sim.advance(14999);const before=sim.open();
+          await sim.advance(1);return {blocked,before,open:sim.open(),message:sim.message(),
+            starts:sim.requests.filter(r=>r.path==='/api/me').map(r=>r.at)};
+        }""")
+        self.assertEqual({'at':15001,'drawn':False},result['blocked']);self.assertTrue(result['before'])
+        self.assertFalse(result['open']);self.assertIn('VR 접근 확인 시간이 지났습니다.',result['message'])
+        self.assertEqual([1,*range(10001,30001,2000)],result['starts'])
+
+    def test_ac_28_wake_offline_five_seconds_then_recovers_without_closing(self):
+        page=self.access_page()
+        result=page.evaluate("""async()=>{
+          await sim.advance(10000);sim.now+=600000;sim.offline=true;tick(250);await sim.flush();
+          for(let i=0;i<20;i++){sim.frame();await sim.advance(250);}
+          const waiting={open:sim.open(),message:sim.message(),drawn:frameLog.filter(f=>f.drawn).length};
+          sim.offline=false;await sim.advance(1000);sim.frames();sim.frame();
+          return {waiting,open:sim.open(),message:sim.message(),drawn:frameLog.at(-1).drawn};
+        }""")
+        self.assertEqual({'open':True,'message':'','drawn':0},result['waiting'])
+        self.assertTrue(result['open']);self.assertTrue(result['drawn']);self.assertEqual('',result['message'])
+
+    def test_ac_29_refusal_after_pause_including_superseded_request_closes_before_frame(self):
+        for changed in ('sim.deny=true', "sim.account='other-reader'"):
+            with self.subTest(changed=changed):
+                page=self.access_page()
+                result=page.evaluate("""async changed=>{
+                  eval(changed);sim.delay=2500;await sim.advance(10000);
+                  sim.now+=600000;sim.silent=true;tick(250);
+                  // Classify wake before delivering the old response, then deliver it.
+                  const timers=sim.tasks.filter(t=>t.timer&&t.at===sim.now);
+                  for(const t of timers){sim.tasks=sim.tasks.filter(x=>x!==t);t.fn();}
+                  await sim.flush();sim.frame();
+                  return {open:sim.open(),message:sim.message(),frames:frameLog};
+                }""",changed)
+                self.assertFalse(result['open']);self.assertIn('닫았습니다',result['message'])
+                self.assertFalse(any(f['drawn'] for f in result['frames']))
+
+    def test_ac_30_hidden_minute_ticks_and_slow_revoked_server_have_finite_bound(self):
+        for refusal in (True,False):
+            with self.subTest(refusal=refusal):
+                page=self.access_page()
+                result=page.evaluate("""async refusal=>{
+                  const start=sim.now;sim.delay=2500;sim.deny=refusal;sim.silent=!refusal;
+                  Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});
+                  let closedAt=null;
+                  for(let minute=0;minute<3&&sim.open();minute++){
+                    sim.now=start+(minute+1)*60000;tick(250);await sim.flush();
+                    if(!sim.open()){closedAt=sim.now-start;break;}
+                    await sim.advance(2500,{watch:false,timers:false});
+                    if(!sim.open())closedAt=sim.now-start;
+                  }
+                  return {open:sim.open(),closedAt,message:sim.message(),frames:frameLog,requests:sim.requests.length};
+                }""",refusal)
+                self.assertFalse(result['open']);self.assertLessEqual(result['closedAt'],120000)
+                self.assertEqual([],result['frames']);self.assertLessEqual(result['requests'],4)
+                self.assertIn('닫았습니다',result['message'])
+
+    def test_ac_31_repeated_gaps_cannot_restart_one_unanswered_wake(self):
+        page=self.access_page()
+        result=page.evaluate("""async()=>{
+          sim.offline=true;sim.now+=600000;tick(250);await sim.flush();const wake=sim.now;
+          for(let i=0;i<4&&sim.open();i++){sim.now+=4000;tick(250);await sim.flush();sim.frame();}
+          return {open:sim.open(),elapsed:sim.now-wake,message:sim.message(),frames:frameLog};
+        }""")
+        self.assertFalse(result['open']);self.assertEqual(16000,result['elapsed'])
+        self.assertIn('접근 확인 시간이',result['message']);self.assertFalse(any(f['drawn'] for f in result['frames']))
+
+    def test_ac_32_busy_nonframe_tasks_never_earn_suspension_credit(self):
+        for refused in (False,True):
+            with self.subTest(refused=refused):
+                page=self.access_page()
+                result=page.evaluate("""async refused=>{
+                  sim.deny=refused;sim.offline=!refused;sim.delay=50;
+                  if(!refused)await sim.advance(14000);
+                  for(let i=0;i<15&&sim.open();i++){sim.busy(2100);tick(250);await sim.flush();sim.frame();}
+                  return {open:sim.open(),at:sim.now,message:sim.message(),frames:frameLog};
+                }""",refused)
+                self.assertFalse(result['open']);self.assertLessEqual(result['at'],31501)
+                self.assertTrue(all(f['at']<15001 for f in result['frames'] if f['drawn']))
+        # Reviewer p5: a short busy task keeps a still-valid account usable without new credit.
+        page=self.access_page()
+        result=page.evaluate("""async()=>{await sim.advance(5000);sim.busy(2100);sim.frame();await sim.flush();sim.frame();
+          return {open:sim.open(),message:sim.message(),drawn:frameLog.at(-1).drawn,requests:sim.requests.length};}""")
+        self.assertEqual({'open':True,'message':'','drawn':True,'requests':2},result)
+
+    def test_ac_33_forward_wall_jump_and_sleep_with_frozen_monotonic_block(self):
+        for setup in ('sim.wallOffset+=600000', 'sim.now+=600000', 'sim.wallOffset+=600000;sim.now+=1',
+                      "sim.entry({entryType:'longtask',startTime:sim.now,duration:60});sim.now+=600100",
+                      "sim.entry({entryType:'longtask',startTime:sim.now,duration:60});sim.now+=100;sim.wallOffset+=600000"):
+            with self.subTest(clock=setup):
+                page=self.access_page()
+                result=page.evaluate("""async setup=>{
+                  sim.offline=true;eval(setup);sim.frame();await sim.flush();
+                  const waiting={open:sim.open(),drawn:frameLog.at(-1).drawn,message:sim.message()};
+                  await sim.advance(14999);const before=sim.open();await sim.advance(1);
+                  return {waiting,before,open:sim.open(),message:sim.message()};
+                }""",setup)
+                self.assertEqual({'open':True,'drawn':False,'message':''},result['waiting'])
+                self.assertTrue(result['before']);self.assertFalse(result['open']);self.assertIn('접근 확인 시간이',result['message'])
+
+    def test_ac_34_observer_with_full_buffer_preserves_timely_answer_not_read_time(self):
+        page=self.access_page()
+        result=page.evaluate("""async()=>{
+          performance.getEntriesByName=()=>[];
+          sim.delay=1;await sim.advance(10000);sim.frame(20000);sim.delay=500;
+          await sim.flush();await sim.advance(500);sim.frames();sim.frame();
+          return {open:sim.open(),message:sim.message(),drawn:frameLog.at(-1).drawn};
+        }""")
+        self.assertEqual({'open':True,'message':'','drawn':True},result)
+
+    def test_ac_35_present_but_bypassed_gate_closes_at_first_real_frame(self):
+        page=self.page_with_vr(controlled=True);self.addCleanup(page.close)
+        page.evaluate('()=>{engine.bypassDraw=engine.performVtkDrawCall;}')
+        self.open_ready(page)
+        result=page.evaluate("""()=>{sim.frames();return {open:sim.open(),message:sim.message(),views:engine.privateViews.size,
+          frames:frameLog.filter(f=>f.drawn).length};}""")
+        self.assertFalse(result['open']);self.assertEqual(0,result['views']);self.assertEqual(1,result['frames'])
+        self.assertIn('지원 담당자',result['message'])
+
+    def test_ac_36_resize_clears_canvas_without_implying_a_draw(self):
+        page=self.access_page()
+        result=page.evaluate("""async()=>{
+          const c=document.createElement('canvas');c.width=c.height=40;const g=c.getContext('2d');
+          g.fillStyle='#fff';g.fillRect(0,0,40,40);const before=g.getImageData(20,20,1,1).data[0];
+          sim.silent=true;await sim.advance(15000);c.width=c.width;engine.resize();sim.frames();
+          return {before,after:g.getImageData(20,20,1,1).data[0],drawn:frameLog.at(-1).drawn,open:sim.open()};
+        }""")
+        self.assertEqual({'before':255,'after':0,'drawn':False,'open':True},result)
+
+    def test_ac_37_short_pause_does_not_discard_still_valid_confirmation(self):
+        for answer in (True,False):
+            with self.subTest(confirmation=answer):
+                page=self.access_page()
+                result=page.evaluate("""async answer=>{
+                  sim.delay=2500;sim.offline=!answer;await sim.advance(10000);
+                  sim.burn(2500);await sim.flush();sim.frame();
+                  const resumed={open:sim.open(),drawn:frameLog.at(-1)?.drawn??false,requests:sim.requests.length};
+                  sim.silent=true;await sim.advance(answer?12500:2500);sim.frame();
+                  return {resumed,blocked:!frameLog.at(-1).drawn,at:sim.now};
+                }""",answer)
+                self.assertTrue(result['resumed']['open']);self.assertTrue(result['resumed']['drawn'])
+                if answer:self.assertEqual(4,result['resumed']['requests'])
+                self.assertTrue(result['blocked']);self.assertEqual(25001 if answer else 15001,result['at'])
 
     def test_session_both_access_requests_carry_binding_and_csrf_on_wire(self):
         page = self.page_with_vr();self.addCleanup(page.close);self.open_ready(page)
@@ -646,16 +824,36 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         page=self.page_with_vr(csp=csp);self.addCleanup(page.close);self.open_ready(page)
         self.assertTrue(all(r['session']=='S1' for r in page.server_state['wire']))
 
+    def test_native_busy_task_does_not_buy_a_suspension_restart(self):
+        page=self.page_with_vr();self.addCleanup(page.close);self.open_ready(page)
+        page.evaluate("""()=>{
+          // DevTools evaluate itself is not reported as a long task by Chromium.
+          // Run the work as a document task, as real viewer callbacks run.
+          setTimeout(()=>{
+            const start=performance.now();while(performance.now()-start<2100){}
+            tick(250);vrView.render();window.busyFinished=true;
+          },0);
+        }""")
+        page.wait_for_function('window.busyFinished')
+        page.wait_for_timeout(300)
+        expect(page.locator('#kin-volume-rendering')).to_have_attribute('open','')
+        self.assertEqual(2,len(page.server_state['wire']), 'a busy task must keep the original confirmation, without a wake check')
+
     def test_native_same_origin_response_end_survives_busy_document_and_full_buffer(self):
-        records=[]
+        records=[];release=threading.Event()
         class Server(BaseHTTPRequestHandler):
             def log_message(self,*args):pass
             def do_GET(self):
                 path=urlparse(self.path).path
                 if path=='/':
                     body=HARNESS.encode();kind='text/html'
+                elif path in ('/fill','/release'):
+                    if path=='/release':
+                        time.sleep(.08);release.set()
+                    body=b'{}';kind='application/json'
                 else:
                     records.append({'path':path,'session':self.headers.get('X-KIN-Session'),'csrf':self.headers.get('X-KIN-CSRF')})
+                    if len(records)>2:release.wait(20)
                     time.sleep(.08)
                     if not self.headers.get('X-KIN-Session') and path!='/api/me':
                         self.send_response(428);self.end_headers();return
@@ -670,10 +868,18 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
         page=self.browser.new_page();self.addCleanup(page.close)
         page.goto(f'http://127.0.0.1:{server.server_port}/')
+        page.evaluate("""async()=>{
+          for(let i=0;i<26;i++)await Promise.all(Array.from({length:10},async(_,j)=>(await fetch('/fill?'+i+'-'+j)).arrayBuffer()));
+        }""")
+        page.wait_for_function("performance.getEntriesByType('resource').length===250")
+        self.assertEqual(250,page.evaluate("performance.getEntriesByType('resource').length"))
         self.install_session(page)
         for path in (MODEL,ORIENTATION,RENDERING):page.add_script_tag(content=path.read_text(encoding='utf-8'))
         page.evaluate("""()=>{
           window.orientation=mountOrientation();
+          window.nativeObserved=[];
+          window.testTimingObserver=new PerformanceObserver(list=>nativeObserved.push(...list.getEntries().filter(e=>new URL(e.name).pathname.startsWith('/api/'))));
+          testTimingObserver.observe({type:'resource'});
           window.nativeIssues=[];const bound=window.fetch;
           window.fetch=(...args)=>{
             const started=performance.now(),response=bound(...args);
@@ -683,34 +889,31 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
           engine.performVtkDrawCall=function(){
             draw.call(this);
             if(window.busyFrame){window.busyFrame=false;window.frameBegin=performance.now();
+              void unboundFetch('/release');
               while(performance.now()-frameBegin<30000){}
               window.frameEnd=performance.now();}
           };
         }""")
         self.open_ready(page)
-        page.wait_for_timeout(10010)
-        page.evaluate("tick(250);window.busyFrame=true;vrView.render()")
+        page.wait_for_function('nativeIssues.length===4',timeout=15000)
+        page.evaluate("window.busyFrame=true;vrView.render()")
         page.wait_for_function("window.frameEnd>0",timeout=45000)
         page.wait_for_function("""()=>{
-          tick(250);
-          return performance.getEntriesByType('resource').filter(e=>new URL(e.name).pathname.startsWith('/api/')).length>=6;
+          return nativeObserved.length>=6;
         }""")
         entries=page.evaluate("""()=>({begin:frameBegin,end:frameEnd,issues:nativeIssues,
-          entries:performance.getEntriesByType('resource').filter(e=>new URL(e.name).pathname.startsWith('/api/')).map(e=>({start:e.startTime,end:e.responseEnd,name:e.name})),
+          entries:nativeObserved.map(e=>({start:e.startTime,end:e.responseEnd,name:e.name})),
           open:document.querySelector('#kin-volume-rendering').open,
           message:document.querySelector('#kin-volume-orientation [role=status]').textContent})""")
         self.assertTrue(entries['open']);self.assertEqual('',entries['message'])
+        self.assertEqual(6,len(entries['issues']));self.assertEqual(6,len(records))
+        self.assertEqual([],page.evaluate("performance.getEntriesByType('resource').filter(e=>new URL(e.name).pathname.startsWith('/api/'))"))
         during=[e for e in entries['entries'] if entries['begin']<e['end']<entries['end']]
         self.assertEqual(2,len(during),'both real HTTP responses arrived during the synchronous draw')
         for entry in entries['entries']:
             matches=[r for r in entries['issues'] if r['name']==entry['name'] and r['start']<=entry['start']<=r['end']]
             self.assertEqual(1,len(matches),'native fetch startTime identifies its issuing interval in the document clock')
         for r in records:self.assertEqual('S1',r['session']);self.assertEqual('1',r['csrf'])
-        # The browser really drops resource records when its buffer is full. The same supported
-        # browser must still succeed via the conservative missing-entry path on prompt replies.
-        page.evaluate("performance.clearResourceTimings();performance.setResourceTimingBufferSize(0);closeVr()")
-        self.open_ready(page)
-        self.assertEqual([],page.evaluate("performance.getEntriesByType('resource')"))
         print('NATIVE_TIMING',entries,flush=True)
 
 

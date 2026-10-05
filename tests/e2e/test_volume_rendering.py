@@ -227,8 +227,8 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
     vrGateView.render();
   }""")
   v.wait_for_function('()=>vrGateEvents>0')
-  # The next check starts at age 10 s. Hold both answers, then cross the 15 s validity
-  # while still inside the check's own 15 s no-answer limit.
+  # The next check starts at age 10 s. Hold both answers across expiry, inside the
+  # 15 s no-answer allowance counted from the previous confirmation's expiry.
   for _ in range(130):
    if len(held)>=2:break
    v.wait_for_timeout(100)
@@ -242,7 +242,9 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
     await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
   }""")
   expect(dialog).to_be_visible();self.assertEqual(0,v.evaluate('vrGateEvents'))
-  self.assertEqual(pixels,self.vr_pixels(v));self.assertEqual(before,self.native_pixels(v))
+  # resize reassigns canvas.width and clears pixels even when no VR draw occurs.
+  # IMAGE_RENDERED is emitted by the real engine only for a viewport it actually copies.
+  self.assertEqual(before,self.native_pixels(v))
   for headers in wire:
    self.assertTrue(headers.get('x-kin-session'));self.assertEqual('1',headers.get('x-kin-csrf'))
   v.unroute('**/api/**',hold)
@@ -257,17 +259,26 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
   """Unsupported shipped engines must give an actionable failure, never an ungated VR."""
   a,p,v=self.opened_projection(constant=True);before=self.native_pixels(v)
   v.evaluate("""()=>{
-    const engine=projectionVP.getRenderingEngine();
-    window.restoreVRGate=()=>{engine.performVtkDrawCall=original};
-    const original=engine.performVtkDrawCall;engine.performVtkDrawCall=undefined;
+    const engine=projectionVP.getRenderingEngine(),original=projectionVP.getRenderingEngine;
+    const own=Object.prototype.hasOwnProperty.call(projectionVP,'getRenderingEngine');
+    // Only VR's capability lookup sees the missing adapter. MPR's render methods
+    // remain bound to the real engine, including frames queued during the two GETs.
+    const unsupported=new Proxy(engine,{get(target,key){
+      if(key==='performVtkDrawCall')return undefined;
+      const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
+    }});
+    projectionVP.getRenderingEngine=()=>unsupported;
+    window.restoreVRGate=()=>{if(own)projectionVP.getRenderingEngine=original;else delete projectionVP.getRenderingEngine;};
   }""")
   try:
+   self.mpr_live_after_mask_failure(v,before)
    v.get_by_role('button',name='Open Volume Rendering',exact=True).click()
+   v.evaluate('()=>projectionVP.render()')
    expect(v.locator('#kin-volume-rendering')).not_to_be_visible()
    expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('지원 담당자')
    self.assertEqual(v.evaluate("()=>projectionVP.getRenderingEngine().getViewports().filter(v=>v.id.startsWith('kin-vr-')).length"),0)
   finally:v.evaluate('restoreVRGate()')
-  self.assertEqual(before,self.native_pixels(v));self.vr(v)
+  self.assertEqual(before,self.native_pixels(v));self.mpr_live_after_mask_failure(v,before);self.vr(v)
 
  def mpr_live_after_mask_failure(self,v,native):
   v.evaluate("()=>{window.vrSourceProperties=structuredClone(projectionVP.getProperties());window.vrSourceFrames=0;window.vrFrameListener=()=>vrSourceFrames++;projectionVP.element.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,vrFrameListener);projectionVP.setProperties({voiRange:{lower:65535,upper:65536}});projectionVP.render()}")

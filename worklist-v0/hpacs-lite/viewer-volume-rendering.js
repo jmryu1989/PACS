@@ -29,106 +29,139 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
   function renderKnots(){knotHost.replaceChildren();for(const field of ['HU','Color','Opacity'])el('strong',field,knotHost);knots.forEach((k,index)=>{for(const field of ['HU','Color','Opacity']){const input=el('input',undefined,knotHost);input.setAttribute('aria-label','Knot '+(index+1)+' '+field);input.value=k[field.toLowerCase()];input.type=field==='Color'?'color':'number';if(field==='HU'){input.min='-32768';input.max='65535';input.step='1';}if(field==='Opacity'){input.min='0';input.max='1';input.step='0.05';}input.oninput=()=>{knots[index][field.toLowerCase()]=input.value;};}});const custom=transferMode.value==='Custom';preset.disabled=custom;knotHost.hidden=!custom;addKnot.hidden=removeKnot.hidden=!custom;removeKnot.disabled=knots.length<=2;addKnot.disabled=knots.length>=16;}
   function resetEditors(op){preset.value='CT-Bone';opacity.value='100';shade.checked=false;direction.value='Anterior';transferMode.value='Preset';knots=[{hu:'-1000',color:'#000000',opacity:'0'},{hu:'2000',color:'#FFFFFF',opacity:'1'}];if(op?.dimensions){['i','j','k'].forEach((axis,index)=>{cropInputs[axis+'Min'].value='0';cropInputs[axis+'Max'].value=String(op.dimensions[index]-1);cropInputs[axis+'Min'].min=cropInputs[axis+'Max'].min='0';cropInputs[axis+'Min'].max=cropInputs[axis+'Max'].max=String(op.dimensions[index]-1);});}renderKnots();}
   const current=op=>{try{const t=target(true,true,{requireRenderReady:false});return !ended&&alive()&&dialog.open&&operation===op&&!op.controller.signal.aborted&&JSON.stringify(owner())===op.owner&&t?.group===op.target.group&&t.selection===op.target.selection&&t.views.every((v,i)=>v===op.target.views[i])&&(!op.view||op.engine?.getViewport(op.id)===op.view);}catch(_){return false;}};
-  function close(){const op=operation;operation=null;sculpt.cancel();drag=null;librarySnapshot=null;libraryStale=false;libraryFailure=null;disableControls(true);if(op){op.controller.abort();op.asking?.controller.abort();clearTimeout(op.asking?.timer);op.asking?.reject(Error('VR 표시가 닫혔습니다.'));op.unguard?.();try{if(op.engine?.getViewport(op.id))op.engine.disableElement(op.id);}catch(_){} }canvasHost.replaceChildren();savedPreset.replaceChildren();presetName.value='';identity.textContent=sourceText.textContent='';sourceDetails.open=false;dialog.close();}
+  function close(){const op=operation;operation=null;sculpt.cancel();drag=null;librarySnapshot=null;libraryStale=false;libraryFailure=null;disableControls(true);if(op){op.controller.abort();for(const request of op.requests)request.controller.abort();clearTimeout(op.accessTimer);clearTimeout(op.gapTimer);op.rejectAccess(Error('VR 표시가 닫혔습니다.'));op.timingObserver?.disconnect();op.unguard?.();try{if(op.engine?.getViewport(op.id))op.engine.disableElement(op.id);}catch(_){} }canvasHost.replaceChildren();savedPreset.replaceChildren();presetName.value='';identity.textContent=sourceText.textContent='';sourceDetails.open=false;dialog.close();}
   function fail(op,error){if(operation!==op)return;close();notice('VR 표시를 닫았습니다. '+(error.message||'다시 열어 확인하세요.'));}
   function check(op){if(!current(op))throw Error('원본이나 계정이 변경되어 VR 표시를 닫았습니다.');}
-  const ACCESS_VALID_MS=15000,ACCESS_SILENT_MS=15000,ACCESS_REFRESH_MS=10000,OBSERVATION_GAP_MS=2000;
+  const ACCESS_VALID_MS=15000,ACCESS_SILENT_MS=15000,ACCESS_REFRESH_MS=10000,ACCESS_RETRY_MS=2000,OBSERVATION_GAP_MS=2000;
   const timeoutError=()=>Error('VR 접근 확인 시간이 지났습니다.');
-  // Match the URL and the interval in which fetch was issued. Zero or multiple matches,
-  // eviction or redacted timing is unknown. Do not change the server's accepted query shape.
-  function arrival(url,started,issuedThrough,readAt){
-    try{
-      const entries=performance.getEntriesByName(url,'resource').filter(e=>e.initiatorType==='fetch'&&e.startTime>=started&&e.startTime<=issuedThrough&&e.responseEnd>0&&e.responseEnd>=e.startTime&&e.responseEnd<=readAt);
-      if(entries.length===1)return {at:entries[0].responseEnd,known:true};
-    }catch(_){}
-    return {at:readAt,known:false};
+  const clock=()=>({mono:performance.now(),wall:Date.now()}),age=(now,then)=>Math.max(now.mono-then.mono,now.wall-then.wall);
+  const after=(time,ms)=>({mono:time.mono+ms,wall:time.wall+ms});
+  function observeTiming(op){
+    op.timings=[];
+    const collect=entries=>{for(const entry of entries){
+      if(entry.entryType==='longtask')op.busyTask={start:entry.startTime,end:entry.startTime+entry.duration};
+      else if(op.urls.includes(entry.name)&&op.asking&&entry.startTime>=op.asking.started.mono)op.timings.push(entry);
+    }};
+    try{op.timingObserver=new PerformanceObserver(list=>collect(list.getEntries()));op.timingObserver.observe({type:'resource'});
+      if(PerformanceObserver.supportedEntryTypes.includes('longtask'))op.timingObserver.observe({type:'longtask'});
+    }catch(_){} // Missing timing remains unknown; it can never lengthen access.
+    op.drainTiming=()=>collect(op.timingObserver?.takeRecords()||[]);
   }
-  function access(op,retried=false){
-    if(op.asking)return op.asking.promise;
-    check(op);const asking={started:performance.now(),controller:new AbortController(),retried};op.asking=asking;
-    asking.promise=new Promise((resolve,reject)=>{asking.resolve=resolve;asking.reject=reject;});
-    asking.promise.catch(()=>{});
-    asking.timer=setTimeout(()=>mayStartFrame(op),ACCESS_SILENT_MS);
+  // The observer survives a full global resource buffer. Match only this fetch's issue interval.
+  function arrival(op,url,started,issuedThrough,readAt){
+    op.drainTiming();
+    const entries=op.timings.filter(e=>e.name===url&&e.initiatorType==='fetch'&&e.startTime>=started&&e.startTime<=issuedThrough&&e.responseEnd>0&&e.responseEnd>=e.startTime&&e.responseEnd<=readAt);
+    return entries.length===1?entries[0].responseEnd:readAt;
+  }
+  function access(op){
+    if(op.asking)return op.accessReady;
+    check(op);const asking={started:clock(),controller:new AbortController()};op.asking=asking;op.lastAsked=asking.started;op.timings=[];op.requests.add(asking);
     const get=async path=>{
       const url=new URL(path,location.origin);
       const started=performance.now();
       const request=fetch(url.href,{credentials:'same-origin',cache:'no-store',headers:{'X-KIN-Subject':JSON.parse(op.owner)[1]},signal:asking.controller.signal});
       const issuedThrough=performance.now(),response=await request;
-      if(!response.ok)throw Error('VR 원본 접근 권한을 확인하지 못했습니다.');
+      const refusal=window.KinSessionTransport?.refusal(response);
+      // Refusals belong to the operation, including a superseded request. Never age them out.
+      if(refusal==='denied'||refusal==='ended'||response.status===404){fail(op,Error('VR 원본 접근 권한을 확인하지 못했습니다.'));return null;}
+      if(!response.ok)return null;
       const body=await response.json(),readAt=performance.now();
-      if(path==='/api/me'&&(body.kind!=='member'||JSON.stringify([body.institution,body.sub])!==op.owner))throw Error('VR 계정이 변경되었습니다.');
-      return arrival(url.href,started,issuedThrough,readAt);
+      if(path==='/api/me'){
+        if(!body||typeof body.kind!=='string')return null;
+        if(body.kind!=='member'){fail(op,Error('VR 계정이 변경되었습니다.'));return null;}
+        if(typeof body.institution!=='string'||typeof body.sub!=='string')return null;
+        if(JSON.stringify([body.institution,body.sub])!==op.owner){fail(op,Error('VR 계정이 변경되었습니다.'));return null;}
+      }else if(!Array.isArray(body))return null;
+      return arrival(op,url.href,started,issuedThrough,readAt);
     };
-    // Both bound document requests leave before a synchronous frame can occupy the thread.
-    Promise.all([get('/api/me'),get('/api/studies/'+encodeURIComponent(op.target.source.uid)+'/viewer-jobs')]).then(([me,jobs])=>{
+    // A failed half must not hide a refusal from the other half. Each reads its own result.
+    Promise.all(op.paths.map(path=>get(path).catch(()=>null))).then(replies=>{
+      op.requests.delete(asking);
       if(operation!==op||op.asking!==asking)return;
-      asking.answer={at:Math.max(me.at,jobs.at),known:me.known&&jobs.known,
-        late:[me,jobs].some(reply=>reply.known&&reply.at-asking.started>=ACCESS_SILENT_MS)};
+      asking.answer={confirmed:replies.every(at=>at!==null&&at-asking.started.mono<ACCESS_VALID_MS)};
       mayStartFrame(op);
-      if(operation===op&&op.held&&op.view&&!op.asking){op.held=false;render(op);}
-    },error=>{
-      if(operation!==op||op.asking!==asking)return;
-      asking.answer={error};mayStartFrame(op);
+      if(operation===op&&op.held&&op.view&&op.confirmed&&age(clock(),op.confirmed)<ACCESS_VALID_MS){op.held=false;render(op);}
     });
-    return asking.promise;
+    return op.accessReady;
   }
-  function freshAccess(op,retried=false){
-    const old=op.asking;op.asking=null;op.confirmed=null;
-    if(op.loadingSince!==undefined)op.loadingSince=performance.now();
-    if(old){clearTimeout(old.timer);old.controller.abort();}
-    const next=access(op,retried);old?.resolve(next);
+  // A gap is classified in the following task so a just-finished long task is observable.
+  // A busy page earns no suspension credit. One outage can consume that credit only once.
+  function finishGap(op){
+    if(operation!==op)return;
+    const gap=op.gap;op.drainTiming();op.gap=null;
+    // A short task just before sleep does not explain the whole gap. Wall time that
+    // outruns a stopped monotonic clock is suspension even beside an observed task.
+    const busy=op.busyTask&&op.busyTask.start<=gap.before.mono+OBSERVATION_GAP_MS&&op.busyTask.end>=gap.at.mono-OBSERVATION_GAP_MS
+      &&gap.at.wall-gap.before.wall-(gap.at.mono-gap.before.mono)<=OBSERVATION_GAP_MS;
+    if(!busy){
+      if(!op.wakeUsed){
+        op.wakeUsed=true;
+        if(!op.confirmed||age(gap.at,op.confirmed)>=ACCESS_VALID_MS)op.silentFrom=gap.at;
+        op.loadingSince=gap.at.mono;
+      }
+      // A short pause does not erase a still-valid answer or move its request start.
+      if(op.asking&&age(gap.at,op.asking.started)>=ACCESS_VALID_MS)op.asking=null;
+    }
+    op.observed=clock();mayStartFrame(op);
   }
-  // One decision for watch, response delivery and EVERY queued native frame entry.
-  // All dates belong to this document's performance clock.
   function mayStartFrame(op){
     try{
       check(op);
       if(window.KinViewerSessionBoundary&&!window.KinViewerSessionBoundary.active()){op.held=true;return false;}
-      const now=performance.now(),gap=now-op.observed;op.observed=now;
-      // A gap outside a draw is a suspended/unobservable document, not a server refusal.
-      if(!op.inFrame&&gap>OBSERVATION_GAP_MS){op.held=true;freshAccess(op);return false;}
-      if(!op.ready&&op.loadingSince!==undefined&&now-op.loadingSince>=30000)throw Error('VR 원본 확인 시간이 지났습니다. 다시 열어 주세요.');
+      const now=clock(),previous=op.observed;op.observed=now;
+      if(op.gap){op.held=true;return false;}
+      if(!op.inFrame&&age(now,previous)>OBSERVATION_GAP_MS){
+        op.gap={before:previous,at:now};op.held=true;op.gapTimer=setTimeout(()=>finishGap(op),0);return false;
+      }
+      if(!op.ready&&now.mono-op.loadingSince>=30000)throw Error('VR 원본 확인 시간이 지났습니다. 다시 열어 주세요.');
       const pending=op.asking;
       if(pending?.answer){
-        const answer=pending.answer;
-        if(answer.error)throw answer.error;
-        if(answer.at-pending.started>=ACCESS_SILENT_MS){
-          // Missing timing cannot prove late arrival during a long draw. Give exactly one
-          // fresh blocked check; a known late answer or a second timeout closes normally.
-          if(!answer.known&&!answer.late&&pending.frameDelayed&&!pending.retried){op.held=true;freshAccess(op,true);return false;}
-          throw timeoutError();
+        if(pending.answer.confirmed){
+          op.confirmed=pending.started;op.silentFrom=after(pending.started,ACCESS_VALID_MS);
+          if(age(now,pending.started)<ACCESS_VALID_MS){op.wakeUsed=false;op.resolveAccess();}
         }
-        op.confirmed=pending.started;op.asking=null;clearTimeout(pending.timer);pending.resolve();
-      }else if(pending&&now-pending.started>=ACCESS_SILENT_MS&&now>=(pending.drainUntil||0))throw timeoutError();
-      const age=op.confirmed===null?Infinity:now-op.confirmed;
-      if(age>=ACCESS_REFRESH_MS&&!op.asking)access(op);
-      if(age<ACCESS_VALID_MS)return true;
+        op.asking=null;
+      }else if(pending&&age(now,pending.started)>=ACCESS_VALID_MS&&now.mono>=(op.drainUntil||0)){
+        pending.controller.abort();op.requests.delete(pending);op.asking=null;
+      }
+      if(age(now,op.silentFrom)>=ACCESS_SILENT_MS&&now.mono>=(op.drainUntil||0))throw timeoutError();
+      const confirmedAge=op.confirmed===null?Infinity:age(now,op.confirmed);
+      if(confirmedAge>=ACCESS_REFRESH_MS&&!op.asking&&age(now,op.lastAsked)>=ACCESS_RETRY_MS)access(op);
+      clearTimeout(op.accessTimer);op.accessTimer=setTimeout(()=>mayStartFrame(op),250);
+      if(confirmedAge<ACCESS_VALID_MS)return true;
       op.held=true;return false;
     }catch(error){fail(op,error);return false;}
   }
   function guardFrames(op){
     // Gating public render()/renderViewport()/resize() calls cannot stop already queued work.
     // This adapter gates VTK traversal instead. Detect both internal members before creating
-    // a VR; hosted frame/pixel regression must also verify the gate on the shipped bundle.
+    // a VR, then prove traversal at its first IMAGE_RENDERED. Remove that listener afterwards.
     const engine=op.engine,was=engine.performVtkDrawCall,own=Object.prototype.hasOwnProperty.call(engine,'performVtkDrawCall');
     const unsupported=()=>Error('이 뷰어 버전에서는 3D 표시를 열 수 없습니다. 뷰어 지원 담당자에게 문의하세요.');
     if(typeof was!=='function'||!(engine._needsRender instanceof Set))throw unsupported();
+    let entered=false;
+    const event=cornerstone.Enums.Events.IMAGE_RENDERED;
+    const firstFrame=()=>{canvasHost.removeEventListener(event,firstFrame);if(!entered)fail(op,unsupported());};
+    canvasHost.addEventListener(event,firstFrame);
     const guarded=function(){
       if(this._needsRender.has(op.id)&&!mayStartFrame(op))this._needsRender.delete(op.id);
-      const started=performance.now();op.inFrame=true;
+      const started=clock();op.inFrame=true;
       try{return was.call(this);}finally{
-        const now=performance.now();op.inFrame=false;op.observed=now;
-        const pending=op.asking;
-        if(pending&&started<pending.started+ACCESS_SILENT_MS&&now>=pending.started+ACCESS_SILENT_MS){
-          pending.frameDelayed=true;pending.drainUntil=now+250;
+        const now=clock();op.inFrame=false;op.observed=now;
+        if(age(started,op.silentFrom)<ACCESS_SILENT_MS&&age(now,op.silentFrom)>=ACCESS_SILENT_MS){
+          op.drainUntil=now.mono+250;
           // Give the already queued body completion a turn before declaring no answer.
-          clearTimeout(pending.timer);pending.timer=setTimeout(()=>mayStartFrame(op),250);
+          clearTimeout(op.accessTimer);op.accessTimer=setTimeout(()=>mayStartFrame(op),250);
         }
       }
     };
-    engine.performVtkDrawCall=guarded;
-    if(engine.performVtkDrawCall!==guarded)throw unsupported();
-    op.unguard=()=>{if(engine.performVtkDrawCall===guarded){if(own)engine.performVtkDrawCall=was;else delete engine.performVtkDrawCall;}};
+    const proving=function(){
+      if(this._needsRender.has(op.id)){entered=true;engine.performVtkDrawCall=guarded;}
+      return guarded.call(this);
+    };
+    engine.performVtkDrawCall=proving;
+    if(engine.performVtkDrawCall!==proving){canvasHost.removeEventListener(event,firstFrame);throw unsupported();}
+    op.unguard=()=>{canvasHost.removeEventListener(event,firstFrame);if(engine.performVtkDrawCall===guarded||engine.performVtkDrawCall===proving){if(own)engine.performVtkDrawCall=was;else delete engine.performVtkDrawCall;}};
   }
 
   function render(op){if(mayStartFrame(op))op.view.render();}
@@ -192,9 +225,13 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     if(ended||operation||!alive()||!permitted()||window.kinViewerJobWorkspaceState?.().busy||window.kinVolumeBatchState?.busy?.()||window.kinMprRenderingState?.busy?.())return;
     const t=target(true);if(!t)throw Error('완전히 로드된 일반 CT의 MPR에서 여세요.');
     const capturedOwner=owner();if(!capturedOwner)throw Error('로그인 상태를 확인하세요.');const bound=JSON.stringify(KinVolumeRendering.normalizeOwner(capturedOwner));
-    const op={target:t,owner:bound,controller:new AbortController(),id:'kin-vr-'+crypto.randomUUID(),confirmed:null,observed:performance.now()};op.loadingSince=op.observed;operation=op;dialog.showModal();disableControls(true);status.textContent='원본과 계정을 확인하는 중…';
+    const op={target:t,owner:bound,controller:new AbortController(),id:'kin-vr-'+crypto.randomUUID(),confirmed:null,observed:clock(),requests:new Set()};
+    op.loadingSince=op.observed.mono;op.silentFrom=op.observed;
+    op.accessReady=new Promise((resolve,reject)=>{op.resolveAccess=resolve;op.rejectAccess=reject;});op.accessReady.catch(()=>{});
+    op.paths=['/api/me','/api/studies/'+encodeURIComponent(t.source.uid)+'/viewer-jobs'];op.urls=op.paths.map(path=>new URL(path,location.origin).href);observeTiming(op);
+    operation=op;dialog.showModal();disableControls(true);status.textContent='원본과 계정을 확인하는 중…';
     try{
-      await access(op);const source=t.views.find(v=>v.id===t.source.viewportId),volume=cornerstone.cache.getVolume(source.getVolumeId());check(op);
+      access(op);mayStartFrame(op);await op.accessReady;const source=t.views.find(v=>v.id===t.source.viewportId),volume=cornerstone.cache.getVolume(source.getVolumeId());check(op);
       identity.textContent='CT · Patient '+t.source.study.id;sourceText.textContent='Study '+t.source.uid+' · Series '+t.source.series;
       // Keep the existing GL context, but allocate a separate actor and camera.
       // Private viewport creation must not trigger OHIF's crosshair reset binder.
