@@ -119,9 +119,8 @@ window.kinViewerJobs = function (services, model, session = null) {
     }
     function end() { ended = true; serial++; printer?.close(); abort.abort(); me = null; pending = editRow = null; title.value = description.value = ''; list.replaceChildren(); status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
     async function api(url, options = {}) {
-      // `foreign`: a saved-location restore reads a Job that may name a comparison study; its 403 is that Job's refusal,
-      // and only the anchor list read that follows may end the panel.
-      const { idempotent = false, foreign = false, ...request } = options;
+      // A plain 403 refuses this resource. Session termination belongs to the page transport's authenticated end signals.
+      const { idempotent = false, ...request } = options;
       const controller = new AbortController(), cancel = () => controller.abort(); abort.signal.addEventListener('abort', cancel, { once: true });
       options.signal?.addEventListener('abort', cancel, { once: true });
       if (options.signal?.aborted || abort.signal.aborted) cancel();
@@ -345,7 +344,7 @@ window.kinViewerJobs = function (services, model, session = null) {
         if (listed.snapshotVersion !== located.request.snapshotVersion) throw refusal('source-changed', LOCATION_TEXT['source-changed']);
         located.ensure();
       }
-      const job = await api(path + '/' + row.id, located ? { signal: located.signal, foreign: true } : {}); await authenticate(located?.signal);
+      const job = await api(path + '/' + row.id, located ? { signal: located.signal } : {}); await authenticate(located?.signal);
       // On a fresh kinJob document, native hanging-protocol initialization
       // can change the grid while the saved job is fetched. User interaction
       // still advances serial; only that initial automatic layout is allowed.

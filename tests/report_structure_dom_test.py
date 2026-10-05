@@ -491,18 +491,45 @@ class ReportStructureDOMTest(unittest.TestCase):
         page.wait_for_function("() => structKnown()")
         self.assertEqual(page.evaluate("() => structKeep()"), ["s-draft"])
         page.evaluate("() => commit('save')")
-        # BOUNDED, and the same wait for the correct code and for M5c. `commit()` resolves once its
-        # own POST is done; the dedicated re-read is fire-and-forget from loadReport, so give it a
-        # bounded moment and then ASSERT. An unbounded wait_for_function here would raise a
-        # Playwright TimeoutError under M5c - an ERROR carrying no AssertionError and matching a
-        # crash marker - and the mutant would be scored a survivor for a harness reason (B5).
+        # The dedicated re-read is fire-and-forget from loadReport; assert its outcome
+        # after a bounded wait so a missing read fails a behaviour assertion.
         page.wait_for_timeout(400)
         self.assertEqual(page.evaluate("() => structCalls.length"), 2,
-                         "S3-STRUCT M5c: after a commit the state must be re-read, not kept")
+                         "after a commit the state must be re-read, not kept")
         self.assertEqual(page.evaluate("() => calls[0].body.structureIds"), ["s-draft"])
         self.assertTrue(page.evaluate("() => structKnown()"))
         self.assertEqual(page.evaluate("() => structKeep()"), [],
                          "the re-read replaced the keep list with the server's own answer")
+
+    def test_d08b_load_server_draft_re_reads_structure_before_the_next_save(self):
+        draft = {"findings": CHOICE_LINE, "conclusion": "", "recommendation": "", "baseVersion": 4}
+        server_draft = {**draft, "findings": "server text"}
+        page = self.open(state(draft=draft),
+                         struct_replies=[{"version": 4, "unknown": False, "head": [],
+                                          "draft": [entry(sid="s-old")]},
+                                         {"version": 4, "unknown": False, "head": [],
+                                          "draft": [entry(sid="s-server")]}],
+                         replies=[{"status": 200, "body": {"states": state(draft=server_draft)}}])
+        page.wait_for_function("() => structKnown()")
+        self.assertEqual(page.evaluate("() => structKeep()"), ["s-old"])
+        # A second document has saved a different draft. The first document's write
+        # must conflict before Load Server Draft becomes an available choice.
+        page.evaluate("uid => { const row = contractRow(uid); row.revision++;"
+                      "row.snapshot.findings = 'server text'; row.snapshot.structured = ['s-server']; }", UID)
+        page.fill('#findings', 'local text')
+        page.evaluate("() => stash()")
+        page.wait_for_function("() => !document.querySelector('#b-draft-load').disabled")
+        page.locator('#b-draft-load').click()
+        page.wait_for_function("() => toasts.some(t => t.message === '서버의 판독문을 불러왔습니다')")
+        page.wait_for_timeout(400)
+        self.assertEqual(page.evaluate("() => structKeep()"), ["s-server"],
+                         "S3-STRUCT M5c: loading the server draft must replace the stale keep list")
+        self.assertEqual(page.evaluate("() => structCalls.length"), 2)
+        page.fill('#findings', CHOICE_LINE + '\nmore text')
+        page.evaluate("() => stash()")
+        page.wait_for_function("() => calls.some(c => c.method === 'PUT')")
+        self.assertEqual(page.evaluate("() => calls.find(c => c.method === 'PUT').body.structureIds"),
+                         ["s-server"])
 
     # D9 ───────────────────────────────────────────────────────────────────────────────────────
     def test_d09_a_late_answer_is_not_applied_to_the_study_that_is_open_now(self):

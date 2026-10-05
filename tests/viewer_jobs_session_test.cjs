@@ -8,7 +8,7 @@ const fs = require('node:fs'), path = require('node:path'), vm = require('node:v
 
 const ROOT = path.join(__dirname, '..');
 const { sessionWorld, response } = require('./viewer_session_fixture.cjs');
-const JOBS = fs.readFileSync(path.join(ROOT, 'worklist-v0', 'hpacs-lite', 'viewer-jobs.js'), 'utf8');
+const JOBS = fs.readFileSync(process.env.KIN_VIEWER_JOBS_JS || path.join(ROOT, 'worklist-v0', 'hpacs-lite', 'viewer-jobs.js'), 'utf8');
 const STUDY = '1.2.840.99.1', OTHER_STUDY = '1.2.840.99.2';
 const FIRST = { kind: 'member', institution: 'SYN-INST', sub: 'SYN-READER-1', roles: ['radiologist'] };
 const OTHER = { ...FIRST, sub: 'SYN-READER-2' };
@@ -103,6 +103,7 @@ test('U5 Job: plain failures, including dropped answers, do not end the document
       if (departed) letGo(w, 'screen');
       w.held[0].release(status, { message: 'Synthetic failure' }); await run; await tick();
       assert.deepEqual([w.session.state(), w.reasons.length, w.enders()], ['writer', 0, 0]);
+      assert.notEqual(w.status(), ENDED, 'a plain refusal must not end the viewer panel');
       w.sandbox.location.search = '?StudyInstanceUIDs=' + STUDY;
       await w.refresh(); await tick();
       assert.equal(w.status(), LISTED);
