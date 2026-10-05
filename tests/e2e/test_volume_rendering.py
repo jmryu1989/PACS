@@ -210,6 +210,65 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
   dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();expect(dialog).to_be_visible();expect(dialog.locator('[role=status]')).to_contain_text('GPU');self.assertEqual(self.vr_pixels(v),before);self.assertEqual(self.native_pixels(v),native)
   v.evaluate('()=>vrRestoreMaskRenderer()');dialog.get_by_role('button',name='Cancel Sculpt',exact=True).click();dialog.get_by_role('button',name='Close VR',exact=True).click();self.mpr_live_after_mask_failure(v,native);self.preserved_volume(source,self.volume_state(v));self.vr(v)
 
+ def test_vr_22_native_frame_gate_blocks_engine_and_resize_until_fresh_access(self):
+  """REQ-S8-D-A -> RISK-S8-UNGATED/EXPIRED-FRAME -> hosted real-bundle frame events/pixels."""
+  a,p,v=self.opened_projection(constant=True);dialog=self.vr(v);before=self.native_pixels(v);pixels=self.vr_pixels(v)
+  held=[];wire=[]
+  def hold(route):
+   if '/viewer-jobs' in route.request.url or route.request.url.endswith('/api/me'):
+    wire.append(route.request.headers);held.append(route)
+   else:route.continue_()
+  v.route('**/api/**',hold)
+  v.evaluate("""()=>{
+    window.vrGateView=cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport;
+    window.vrGateEngine=vrGateView.getRenderingEngine();window.vrGateEvents=0;
+    window.vrGateListener=()=>vrGateEvents++;
+    vrGateView.element.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,vrGateListener);
+    vrGateView.render();
+  }""")
+  v.wait_for_function('()=>vrGateEvents>0')
+  # The next check starts at age 10 s. Hold both answers, then cross the 15 s validity
+  # while still inside the check's own 15 s no-answer limit.
+  for _ in range(130):
+   if len(held)>=2:break
+   v.wait_for_timeout(100)
+  self.assertGreaterEqual(len(held),2,'the real document must refresh both access answers')
+  v.wait_for_timeout(5250)
+  v.evaluate("""async()=>{
+    vrGateEvents=0;
+    const c=vrGateView.getCamera();vrGateView.setCamera({parallelScale:c.parallelScale*.5});
+    vrGateView.render();vrGateEngine.renderViewport(vrGateView.id);
+    vrGateEngine.renderViewports([vrGateView.id]);vrGateEngine.render();vrGateEngine.resize(true,true);
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  }""")
+  expect(dialog).to_be_visible();self.assertEqual(0,v.evaluate('vrGateEvents'))
+  self.assertEqual(pixels,self.vr_pixels(v));self.assertEqual(before,self.native_pixels(v))
+  for headers in wire:
+   self.assertTrue(headers.get('x-kin-session'));self.assertEqual('1',headers.get('x-kin-csrf'))
+  v.unroute('**/api/**',hold)
+  for route in held:route.continue_()
+  v.wait_for_function('()=>vrGateEvents>0')
+  self.assertNotEqual(pixels,self.vr_pixels(v));expect(dialog).to_be_visible()
+  v.evaluate('()=>vrGateView.element.removeEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,vrGateListener)')
+  dialog.get_by_role('button',name='Close VR',exact=True).click()
+  self.mpr_live_after_mask_failure(v,before)
+
+ def test_vr_23_missing_frame_gate_refuses_before_native_open(self):
+  """Unsupported shipped engines must give an actionable failure, never an ungated VR."""
+  a,p,v=self.opened_projection(constant=True);before=self.native_pixels(v)
+  v.evaluate("""()=>{
+    const engine=projectionVP.getRenderingEngine();
+    window.restoreVRGate=()=>{engine.performVtkDrawCall=original};
+    const original=engine.performVtkDrawCall;engine.performVtkDrawCall=undefined;
+  }""")
+  try:
+   v.get_by_role('button',name='Open Volume Rendering',exact=True).click()
+   expect(v.locator('#kin-volume-rendering')).not_to_be_visible()
+   expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('지원 담당자')
+   self.assertEqual(v.evaluate("()=>projectionVP.getRenderingEngine().getViewports().filter(v=>v.id.startsWith('kin-vr-')).length"),0)
+  finally:v.evaluate('restoreVRGate()')
+  self.assertEqual(before,self.native_pixels(v));self.vr(v)
+
  def mpr_live_after_mask_failure(self,v,native):
   v.evaluate("()=>{window.vrSourceProperties=structuredClone(projectionVP.getProperties());window.vrSourceFrames=0;window.vrFrameListener=()=>vrSourceFrames++;projectionVP.element.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,vrFrameListener);projectionVP.setProperties({voiRange:{lower:65535,upper:65536}});projectionVP.render()}")
   v.wait_for_function('()=>vrSourceFrames>0');self.assertNotEqual(self.native_pixels(v),native)

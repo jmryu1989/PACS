@@ -29,86 +29,108 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
   function renderKnots(){knotHost.replaceChildren();for(const field of ['HU','Color','Opacity'])el('strong',field,knotHost);knots.forEach((k,index)=>{for(const field of ['HU','Color','Opacity']){const input=el('input',undefined,knotHost);input.setAttribute('aria-label','Knot '+(index+1)+' '+field);input.value=k[field.toLowerCase()];input.type=field==='Color'?'color':'number';if(field==='HU'){input.min='-32768';input.max='65535';input.step='1';}if(field==='Opacity'){input.min='0';input.max='1';input.step='0.05';}input.oninput=()=>{knots[index][field.toLowerCase()]=input.value;};}});const custom=transferMode.value==='Custom';preset.disabled=custom;knotHost.hidden=!custom;addKnot.hidden=removeKnot.hidden=!custom;removeKnot.disabled=knots.length<=2;addKnot.disabled=knots.length>=16;}
   function resetEditors(op){preset.value='CT-Bone';opacity.value='100';shade.checked=false;direction.value='Anterior';transferMode.value='Preset';knots=[{hu:'-1000',color:'#000000',opacity:'0'},{hu:'2000',color:'#FFFFFF',opacity:'1'}];if(op?.dimensions){['i','j','k'].forEach((axis,index)=>{cropInputs[axis+'Min'].value='0';cropInputs[axis+'Max'].value=String(op.dimensions[index]-1);cropInputs[axis+'Min'].min=cropInputs[axis+'Max'].min='0';cropInputs[axis+'Min'].max=cropInputs[axis+'Max'].max=String(op.dimensions[index]-1);});}renderKnots();}
   const current=op=>{try{const t=target(true,true,{requireRenderReady:false});return !ended&&alive()&&dialog.open&&operation===op&&!op.controller.signal.aborted&&JSON.stringify(owner())===op.owner&&t?.group===op.target.group&&t.selection===op.target.selection&&t.views.every((v,i)=>v===op.target.views[i])&&(!op.view||op.engine?.getViewport(op.id)===op.view);}catch(_){return false;}};
-  function close(){const op=operation;operation=null;sculpt.cancel();drag=null;librarySnapshot=null;libraryStale=false;libraryFailure=null;disableControls(true);if(op){op.controller.abort();op.accessWorker?.terminate();op.asking?.reject(Error('VR 표시가 닫혔습니다.'));op.unguard?.();clearTimeout(op.timeout);try{if(op.engine?.getViewport(op.id))op.engine.disableElement(op.id);}catch(_){} }canvasHost.replaceChildren();savedPreset.replaceChildren();presetName.value='';identity.textContent=sourceText.textContent='';sourceDetails.open=false;dialog.close();}
+  function close(){const op=operation;operation=null;sculpt.cancel();drag=null;librarySnapshot=null;libraryStale=false;libraryFailure=null;disableControls(true);if(op){op.controller.abort();op.asking?.controller.abort();clearTimeout(op.asking?.timer);op.asking?.reject(Error('VR 표시가 닫혔습니다.'));op.unguard?.();try{if(op.engine?.getViewport(op.id))op.engine.disableElement(op.id);}catch(_){} }canvasHost.replaceChildren();savedPreset.replaceChildren();presetName.value='';identity.textContent=sourceText.textContent='';sourceDetails.open=false;dialog.close();}
   function fail(op,error){if(operation!==op)return;close();notice('VR 표시를 닫았습니다. '+(error.message||'다시 열어 확인하세요.'));}
   function check(op){if(!current(op))throw Error('원본이나 계정이 변경되어 VR 표시를 닫았습니다.');}
-  const ACCESS_VALID_MS=15000,ACCESS_SILENT_MS=15000,ACCESS_REFRESH_MS=5000;
-  const stamp=()=>({wall:Date.now(),mono:performance.timeOrigin+performance.now()});
-  const elapsed=(from,to=stamp())=>Math.max(to.wall-from.wall,to.mono-from.mono);
-  // The worker reads both complete responses independently of a synchronous VR frame. Its first
-  // completion callback records arrival, so delivery to a busy page cannot turn an on-time answer
-  // into a timeout. The deadline includes worker startup, both requests and both response bodies.
-  function accessWorkerMain(){
-    const stamp=()=>({wall:Date.now(),mono:performance.timeOrigin+performance.now()});
-    const elapsed=(from,to=stamp())=>Math.max(to.wall-from.wall,to.mono-from.mono);
-    self.onmessage=async({data:job})=>{
-      const controller=new AbortController();let settled=false,timer;
-      const timeout='VR 접근 확인 시간이 지났습니다.';
-      const finish=(error,arrived=stamp())=>{
-        if(settled)return;settled=true;clearTimeout(timer);controller.abort();
-        self.postMessage({id:job.id,owner:job.owner,arrived,error:elapsed(job.started,arrived)>=job.limit?timeout:error});
-      };
-      const deadline=()=>{const remaining=job.limit-elapsed(job.started);if(remaining<=0)finish(timeout);else timer=setTimeout(deadline,remaining);};
-      deadline();if(settled)return;
-      try{
-        const get=async path=>{const response=await fetch(new URL(path,job.origin).href,{credentials:'same-origin',cache:'no-store',headers:{'X-KIN-Subject':JSON.parse(job.owner)[1]},signal:controller.signal});if(!response.ok)throw Error('VR 원본 접근 권한을 확인하지 못했습니다.');return response.json();};
-        const me=await get('/api/me');if(settled)return;
-        if(me.kind!=='member'||JSON.stringify([me.institution,me.sub])!==job.owner)throw Error('VR 계정이 변경되었습니다.');
-        await get('/api/studies/'+encodeURIComponent(job.uid)+'/viewer-jobs');finish(null,stamp());
-      }catch(error){finish(error.message||'VR 원본 접근 권한을 확인하지 못했습니다.');}
-    };
-  }
-  function access(op){
-    if(op.asking)return op.asking.promise;
-    check(op);const asking={id:crypto.randomUUID(),started:stamp()};op.asking=asking;
-    asking.promise=new Promise((resolve,reject)=>{asking.resolve=resolve;asking.reject=reject;});
-    // Background refreshes and opening share the same rejection path; open still awaits the result.
-    asking.promise.catch(()=>{});
+  const ACCESS_VALID_MS=15000,ACCESS_SILENT_MS=15000,ACCESS_REFRESH_MS=10000,OBSERVATION_GAP_MS=2000;
+  const timeoutError=()=>Error('VR 접근 확인 시간이 지났습니다.');
+  // Match the URL and the interval in which fetch was issued. Zero or multiple matches,
+  // eviction or redacted timing is unknown. Do not change the server's accepted query shape.
+  function arrival(url,started,issuedThrough,readAt){
     try{
-      if(!op.accessWorker){
-        const url=URL.createObjectURL(new Blob(['('+accessWorkerMain.toString()+')();'],{type:'text/javascript'}));
-        try{op.accessWorker=new Worker(url);}finally{URL.revokeObjectURL(url);}
-        op.accessWorker.onerror=()=>fail(op,Error('VR 원본 접근 권한을 확인하지 못했습니다.'));
-        op.accessWorker.onmessage=({data:answer})=>{
-          const pending=op.asking;
-          if(operation!==op||!pending||answer.id!==pending.id||answer.owner!==op.owner)return;
-          try{
-            check(op);
-            if(answer.error)throw Error(answer.error);
-            if(elapsed(pending.started,answer.arrived)>=ACCESS_SILENT_MS)throw Error('VR 접근 확인 시간이 지났습니다.');
-            op.confirmed=pending.started;op.asking=null;pending.resolve();
-            if(op.held&&op.view){op.held=false;render(op);}
-          }catch(error){fail(op,error);}
-        };
-      }
-      op.accessWorker.postMessage({id:asking.id,owner:op.owner,uid:op.target.source.uid,origin:location.origin,started:asking.started,limit:ACCESS_SILENT_MS});
-    }catch(error){fail(op,error);}
+      const entries=performance.getEntriesByName(url,'resource').filter(e=>e.initiatorType==='fetch'&&e.startTime>=started&&e.startTime<=issuedThrough&&e.responseEnd>0&&e.responseEnd>=e.startTime&&e.responseEnd<=readAt);
+      if(entries.length===1)return {at:entries[0].responseEnd,known:true};
+    }catch(_){}
+    return {at:readAt,known:false};
+  }
+  function access(op,retried=false){
+    if(op.asking)return op.asking.promise;
+    check(op);const asking={started:performance.now(),controller:new AbortController(),retried};op.asking=asking;
+    asking.promise=new Promise((resolve,reject)=>{asking.resolve=resolve;asking.reject=reject;});
+    asking.promise.catch(()=>{});
+    asking.timer=setTimeout(()=>mayStartFrame(op),ACCESS_SILENT_MS);
+    const get=async path=>{
+      const url=new URL(path,location.origin);
+      const started=performance.now();
+      const request=fetch(url.href,{credentials:'same-origin',cache:'no-store',headers:{'X-KIN-Subject':JSON.parse(op.owner)[1]},signal:asking.controller.signal});
+      const issuedThrough=performance.now(),response=await request;
+      if(!response.ok)throw Error('VR 원본 접근 권한을 확인하지 못했습니다.');
+      const body=await response.json(),readAt=performance.now();
+      if(path==='/api/me'&&(body.kind!=='member'||JSON.stringify([body.institution,body.sub])!==op.owner))throw Error('VR 계정이 변경되었습니다.');
+      return arrival(url.href,started,issuedThrough,readAt);
+    };
+    // Both bound document requests leave before a synchronous frame can occupy the thread.
+    Promise.all([get('/api/me'),get('/api/studies/'+encodeURIComponent(op.target.source.uid)+'/viewer-jobs')]).then(([me,jobs])=>{
+      if(operation!==op||op.asking!==asking)return;
+      asking.answer={at:Math.max(me.at,jobs.at),known:me.known&&jobs.known,
+        late:[me,jobs].some(reply=>reply.known&&reply.at-asking.started>=ACCESS_SILENT_MS)};
+      mayStartFrame(op);
+      if(operation===op&&op.held&&op.view&&!op.asking){op.held=false;render(op);}
+    },error=>{
+      if(operation!==op||op.asking!==asking)return;
+      asking.answer={error};mayStartFrame(op);
+    });
     return asking.promise;
   }
-  // A refresh does not suspend a still-valid confirmation. With ordinary frames the 10 s head
-  // start leaves prompt responses invisible to the reader. Expiry is derived from request time,
-  // never a timer flag or response delivery time, including after sleep or a backwards wall clock.
+  function freshAccess(op,retried=false){
+    const old=op.asking;op.asking=null;op.confirmed=null;
+    if(op.loadingSince!==undefined)op.loadingSince=performance.now();
+    if(old){clearTimeout(old.timer);old.controller.abort();}
+    const next=access(op,retried);old?.resolve(next);
+  }
+  // One decision for watch, response delivery and EVERY queued native frame entry.
+  // All dates belong to this document's performance clock.
   function mayStartFrame(op){
     try{
-      check(op);const age=op.confirmed?elapsed(op.confirmed):Infinity;
+      check(op);
+      if(window.KinViewerSessionBoundary&&!window.KinViewerSessionBoundary.active()){op.held=true;return false;}
+      const now=performance.now(),gap=now-op.observed;op.observed=now;
+      // A gap outside a draw is a suspended/unobservable document, not a server refusal.
+      if(!op.inFrame&&gap>OBSERVATION_GAP_MS){op.held=true;freshAccess(op);return false;}
+      if(!op.ready&&op.loadingSince!==undefined&&now-op.loadingSince>=30000)throw Error('VR 원본 확인 시간이 지났습니다. 다시 열어 주세요.');
+      const pending=op.asking;
+      if(pending?.answer){
+        const answer=pending.answer;
+        if(answer.error)throw answer.error;
+        if(answer.at-pending.started>=ACCESS_SILENT_MS){
+          // Missing timing cannot prove late arrival during a long draw. Give exactly one
+          // fresh blocked check; a known late answer or a second timeout closes normally.
+          if(!answer.known&&!answer.late&&pending.frameDelayed&&!pending.retried){op.held=true;freshAccess(op,true);return false;}
+          throw timeoutError();
+        }
+        op.confirmed=pending.started;op.asking=null;clearTimeout(pending.timer);pending.resolve();
+      }else if(pending&&now-pending.started>=ACCESS_SILENT_MS&&now>=(pending.drainUntil||0))throw timeoutError();
+      const age=op.confirmed===null?Infinity:now-op.confirmed;
       if(age>=ACCESS_REFRESH_MS&&!op.asking)access(op);
-      if(operation!==op)return false;
       if(age<ACCESS_VALID_MS)return true;
       op.held=true;return false;
     }catch(error){fail(op,error);return false;}
   }
   function guardFrames(op){
-    // The pinned Cornerstone engine consumes _needsRender at its queued VTK draw, then copies
-    // those same viewports to their canvases. Remove only this VR before either step, leaving MPR
-    // untouched. Gating viewport.render() alone misses already queued frames and native resize.
-    // vtk public APIs are frozen, so their renderer methods cannot be wrapped safely.
+    // Gating public render()/renderViewport()/resize() calls cannot stop already queued work.
+    // This adapter gates VTK traversal instead. Detect both internal members before creating
+    // a VR; hosted frame/pixel regression must also verify the gate on the shipped bundle.
     const engine=op.engine,was=engine.performVtkDrawCall,own=Object.prototype.hasOwnProperty.call(engine,'performVtkDrawCall');
-    if(typeof was!=='function'||!(engine._needsRender instanceof Set))throw Error('이 뷰어에서는 VR 접근 확인을 적용할 수 없습니다.');
-    const guarded=function(){if(this._needsRender.has(op.id)&&!mayStartFrame(op))this._needsRender.delete(op.id);return was.call(this);};
+    const unsupported=()=>Error('이 뷰어 버전에서는 3D 표시를 열 수 없습니다. 뷰어 지원 담당자에게 문의하세요.');
+    if(typeof was!=='function'||!(engine._needsRender instanceof Set))throw unsupported();
+    const guarded=function(){
+      if(this._needsRender.has(op.id)&&!mayStartFrame(op))this._needsRender.delete(op.id);
+      const started=performance.now();op.inFrame=true;
+      try{return was.call(this);}finally{
+        const now=performance.now();op.inFrame=false;op.observed=now;
+        const pending=op.asking;
+        if(pending&&started<pending.started+ACCESS_SILENT_MS&&now>=pending.started+ACCESS_SILENT_MS){
+          pending.frameDelayed=true;pending.drainUntil=now+250;
+          // Give the already queued body completion a turn before declaring no answer.
+          clearTimeout(pending.timer);pending.timer=setTimeout(()=>mayStartFrame(op),250);
+        }
+      }
+    };
     engine.performVtkDrawCall=guarded;
-    if(engine.performVtkDrawCall!==guarded)throw Error('이 뷰어에서는 VR 접근 확인을 적용할 수 없습니다.');
+    if(engine.performVtkDrawCall!==guarded)throw unsupported();
     op.unguard=()=>{if(engine.performVtkDrawCall===guarded){if(own)engine.performVtkDrawCall=was;else delete engine.performVtkDrawCall;}};
   }
+
   function render(op){if(mayStartFrame(op))op.view.render();}
   function renderSculpt(op){
     render(op);const generation=op.sculptRenderGeneration=(op.sculptRenderGeneration||0)+1;
@@ -170,17 +192,15 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
     if(ended||operation||!alive()||!permitted()||window.kinViewerJobWorkspaceState?.().busy||window.kinVolumeBatchState?.busy?.()||window.kinMprRenderingState?.busy?.())return;
     const t=target(true);if(!t)throw Error('완전히 로드된 일반 CT의 MPR에서 여세요.');
     const capturedOwner=owner();if(!capturedOwner)throw Error('로그인 상태를 확인하세요.');const bound=JSON.stringify(KinVolumeRendering.normalizeOwner(capturedOwner));
-    const op={target:t,owner:bound,controller:new AbortController(),id:'kin-vr-'+crypto.randomUUID()};operation=op;dialog.showModal();disableControls(true);status.textContent='원본과 계정을 확인하는 중…';
-    op.timeout=setTimeout(()=>fail(op,Error('VR 원본 확인 시간이 지났습니다. 다시 열어 주세요.')),30000);
+    const op={target:t,owner:bound,controller:new AbortController(),id:'kin-vr-'+crypto.randomUUID(),confirmed:null,observed:performance.now()};op.loadingSince=op.observed;operation=op;dialog.showModal();disableControls(true);status.textContent='원본과 계정을 확인하는 중…';
     try{
       await access(op);const source=t.views.find(v=>v.id===t.source.viewportId),volume=cornerstone.cache.getVolume(source.getVolumeId());check(op);
       identity.textContent='CT · Patient '+t.source.study.id;sourceText.textContent='Study '+t.source.uid+' · Series '+t.source.series;
       // Keep the existing GL context, but allocate a separate actor and camera.
       // Private viewport creation must not trigger OHIF's crosshair reset binder.
-      op.engine=source.getRenderingEngine();op.engine.enableElement({viewportId:op.id,type:cornerstone.Enums.ViewportType.VOLUME_3D,element:canvasHost,defaultOptions:{parallelProjection:true,suppressEvents:true}});op.view=op.engine.getViewport(op.id);op.view.suppressEvents=false;
-      guardFrames(op);
+      op.engine=source.getRenderingEngine();guardFrames(op);op.engine.enableElement({viewportId:op.id,type:cornerstone.Enums.ViewportType.VOLUME_3D,element:canvasHost,defaultOptions:{parallelProjection:true,suppressEvents:true}});op.view=op.engine.getViewport(op.id);op.view.suppressEvents=false;
       await op.view.setVolumes([{volumeId:volume.volumeId}]);check(op);op.imageData=volume.imageData;op.dimensions=Array.from(op.imageData?.getDimensions?.()||volume.dimensions||[]);KinVolumeRendering.validateCropBounds({i:[0,op.dimensions[0]-1],j:[0,op.dimensions[1]-1],k:[0,op.dimensions[2]-1]},op.dimensions);op.mapper=op.view.getActors()[0].actor.getMapper();const sourceMapper=source.getActors?.()[0]?.actor?.getMapper?.();if(!op.mapper||op.mapper===sourceMapper)throw Error('독립 VR 표시를 만들지 못했습니다.');
-      op.view.resetCamera();op.base=structuredClone(op.view.getCamera());resetEditors(op);op.view.setCamera(KinVolumeRendering.orient(op.base,'Anterior'));op.base=structuredClone(op.view.getCamera());applyDisplay(true);clearTimeout(op.timeout);op.ready=true;disableControls(false);renderKnots();const locksAvailable=typeof navigator?.locks?.request==='function';writeButtons.forEach(button=>button.disabled=!locksAvailable);presetHelp.textContent=presetHelpText+(locksAvailable?'':' 이 브라우저에서는 안전한 프리셋 저장과 변경을 사용할 수 없습니다.');try{reloadLibrary(op,false);status.textContent=locksAvailable?'VR 원본을 표시했습니다.':'VR 원본을 표시했습니다. 안전한 개인 프리셋 저장은 이 브라우저에서 사용할 수 없습니다.';}catch(error){if(!current(op))throw error;status.textContent=error.message;}
+      op.view.resetCamera();op.base=structuredClone(op.view.getCamera());resetEditors(op);op.view.setCamera(KinVolumeRendering.orient(op.base,'Anterior'));op.base=structuredClone(op.view.getCamera());applyDisplay(true);op.ready=true;disableControls(false);renderKnots();const locksAvailable=typeof navigator?.locks?.request==='function';writeButtons.forEach(button=>button.disabled=!locksAvailable);presetHelp.textContent=presetHelpText+(locksAvailable?'':' 이 브라우저에서는 안전한 프리셋 저장과 변경을 사용할 수 없습니다.');try{reloadLibrary(op,false);status.textContent=locksAvailable?'VR 원본을 표시했습니다.':'VR 원본을 표시했습니다. 안전한 개인 프리셋 저장은 이 브라우저에서 사용할 수 없습니다.';}catch(error){if(!current(op))throw error;status.textContent=error.message;}
     }catch(error){if(operation===op){close();throw error;}}
   }
   direction.onchange=()=>{const op=operation;if(!op?.view)return;try{check(op);op.view.setCamera(KinVolumeRendering.orient(op.view.getCamera(),direction.value));render(op);}catch(e){fail(op,e);}};
@@ -195,7 +215,7 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
   for(const name of ['keydown','keyup','keypress'])dialog.addEventListener(name,e=>e.stopPropagation(),true);
   const observer=new ResizeObserver(()=>{const op=operation;if(op?.ready&&current(op)){try{sculpt.cancel();op.engine.resize(true,true);render(op);}catch(error){fail(op,error);}}});observer.observe(canvasHost);
   const windowResized=()=>{if(operation?.ready)sculpt.cancel();};window.addEventListener('resize',windowResized);
-  const watch=()=>{const op=operation;if(!op)return;if(!current(op)){fail(op,Error('원본·선택 또는 계정이 변경되었습니다.'));return;}if(op.confirmed&&!op.asking&&elapsed(op.confirmed)>=ACCESS_REFRESH_MS)access(op);};
+  const watch=()=>{const op=operation;if(op)mayStartFrame(op);};
   const timer=setInterval(watch,250),pageShown=()=>{if(document.visibilityState==='visible')watch();};document.addEventListener('visibilitychange',pageShown);
   const storageChanged=event=>{const op=operation;if(!op?.ready||!current(op)||!librarySnapshot||event.key!==null&&event.key!==librarySnapshot.key)return;libraryStale=true;libraryFailure=null;status.textContent='다른 창에서 VR 프리셋 목록이 변경되었습니다. 편집과 표시는 유지됩니다. Reload Presets를 누르세요.';};window.addEventListener('storage',storageChanged);
   return {open,dispose(){ended=true;clearInterval(timer);document.removeEventListener('visibilitychange',pageShown);window.removeEventListener('storage',storageChanged);observer.disconnect();window.removeEventListener('resize',windowResized);close();sculpt.dispose();dialog.remove();}};

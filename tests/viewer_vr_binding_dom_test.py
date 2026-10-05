@@ -1,13 +1,19 @@
 # coding: utf-8
 """VR binding and D-A access timing: real product callbacks, controlled clocks/network.
 
-REQ-S8-D-A -> RISK-S8-ACCESS-LATE/FALSE-CLOSE -> AC-01..AC-13 below.
+REQ-S8-D-A -> RISK-S8-ACCESS-LATE/FALSE-CLOSE/SESSION -> AC and session cases below.
 The engine fixture queues a VTK draw and copies only its flagged viewports, as Cornerstone does.
-The worker fixture executes the shipped Blob source, not a second access policy model.
+The shipped document session transport runs in every case. Only network time and the engine
+are synthetic in AC cases; the loopback case verifies native ResourceTiming under a busy thread.
 """
 from pathlib import Path
 import os
 import unittest
+import json
+import threading
+import time
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse,parse_qs
 
 from playwright.sync_api import sync_playwright, expect
 
@@ -44,9 +50,9 @@ const vrActor={getMapper:()=>mapper,getProperty:()=>property};
 const frameLog=[],renderRequests=[],nativeFrames=[],renderer=Object.freeze({getDraw:()=>true}),shader={pending:false,compiled:false};
 const vrView={id:null,suppressEvents:false,async setVolumes(){},getActors:()=>[{actor:vrActor}],getRenderer:()=>renderer,resetCamera(){},getCamera:camera,setCamera(){},setProperties(){},render(){engine.renderViewport(this.id)}};
 const engine={privateViews:new Map(),_needsRender:new Set(),enableElement(config){vrView.id=config.viewportId;this.privateViews.set(config.viewportId,vrView)},getViewport(id){return this.privateViews.get(id)||views.get(id)},disableElement(id){this.privateViews.delete(id);this._needsRender.delete(id)},
-  performVtkDrawCall(){for(const id of this._needsRender){if(this.privateViews.has(id)){this.drawn.add(id);if(shader.pending)shader.compiled=true;}else if(views.has(id))nativeFrames.push(id)}},
+  performVtkDrawCall(){for(const id of this._needsRender){if(this.privateViews.has(id)){this.drawn.add(id);if(shader.pending)shader.compiled=true;if(window.sim?.frameDuration){const ms=sim.frameDuration;sim.frameDuration=0;sim.burn(ms);}}else if(views.has(id))nativeFrames.push(id)}},
   renderViewport(id){renderRequests.push(id);this._needsRender.add(id);requestAnimationFrame(()=>{if(this.privateViews.has(id)){
-    this.drawn=new Set();this.performVtkDrawCall();frameLog.push({at:Date.now(),drawn:this.drawn.has(id)});this._needsRender.clear();}})},
+    this.drawn=new Set();const at=performance.now();this.performVtkDrawCall();frameLog.push({at,drawn:this.drawn.has(id)});this._needsRender.clear();}})},
   renderViewports(ids){ids.forEach(id=>this.renderViewport(id))},render(){this.renderViewports([...this.privateViews.keys()])},resize(){this.render()},
   offscreenMultiRenderWindow:{getOpenGLRenderWindow:()=>({getViewNodeFor:()=>({get:()=>({tris:{getProgram:()=>({getCompiled:()=>shader.compiled,getLinked:()=>shader.compiled,getFragmentShader:()=>({getSource:()=>shader.compiled?'kinSculptPoint0':''})})}})})})}};
 const volume={volumeId:'volume-1',loadStatus:{loaded:true},framesLoaded:2,imageIds:['frame-0','frame-1'],dimensions:[2,2,2],spacing:[1,1,1],direction:[1,0,0,0,1,0,0,0,1],imageData:{getDimensions:()=>[2,2,2],indexToWorld:([i,j,k])=>[i,j,k]}};
@@ -57,7 +63,7 @@ window.KinVolumeOrientation={intersection:()=>[0,0,0],rotate:c=>c};
 window.KinVolumeSculpt={};window.KinVolumeMaskRenderer={preflight(){} };let sculptCancels=0;
 window.kinCreateVolumeSculpt=({controlsPane,getOperation,render})=>{const fieldset=document.createElement('fieldset');controlsPane.append(fieldset);const apply=document.createElement('button');apply.textContent='Apply Sculpt';fieldset.append(apply);apply.onclick=()=>{const op=getOperation();op.sculptOperations=[{}];shader.pending=true;shader.compiled=false;render(op)};return {fieldset,cancel(){sculptCancels++},reset(){},dispose(){}}};
 window.kinViewerJobWorkspaceState=()=>({busy:false});window.kinVolumeBatchState={busy:()=>false};window.kinMprRenderingState={busy:()=>false};
-window.fetch=async url=>({ok:true,json:async()=>url.endsWith('/api/me')?{kind:'member',institution:'hospital',sub:'reader'}:[]});
+
 const intervalCallbacks=new Map(),nativeSetInterval=window.setInterval;window.setInterval=(fn,ms)=>{const list=intervalCallbacks.get(ms)||[];list.push(fn);intervalCallbacks.set(ms,list);return {ms,fn}};window.clearInterval=()=>{};window.tick=ms=>(intervalCallbacks.get(ms)||[]).forEach(fn=>fn());
 window.mountOrientation=()=>window.kinCreateVolumeOrientation({services,selected:()=>source,live:()=>true,allowed:()=>true,owner:()=>currentOwner,host:document.querySelector('#host')});
 window.openVr=async()=>document.querySelector('#kin-volume-orientation button:last-of-type').onclick();
@@ -67,49 +73,68 @@ window.sourceState=()=>JSON.stringify({source,cameras:[...views.values()].map(v=
 """
 
 ACCESS_CLOCK = r"""
-window.sim={now:0,wallOffset:0,messages:[],history:[],jobs:[],requests:[],tasks:[],raf:[],workers:[],
-  delay:0,bodyDelay:0,jobsBodyDelay:0,deny:false,account:'reader',silent:false,holdMessages:false,timerId:0};
+window.sim={now:1,entries:[],requests:[],tasks:[],raf:[],delay:0,bodyDelay:0,jobsBodyDelay:0,
+  deny:false,account:'reader',silent:false,jobsSilent:false,missingTiming:false,frameDuration:0,timerId:0};
 const sim=window.sim;
-Date.now=()=>sim.now+sim.wallOffset;
-Object.defineProperty(performance,'timeOrigin',{value:0});Object.defineProperty(performance,'now',{value:()=>sim.now});
+Object.defineProperty(performance,'now',{value:()=>sim.now});
+performance.getEntriesByName=(name)=>sim.missingTiming?[]:sim.entries.filter(e=>e.name===name);
 window.requestAnimationFrame=fn=>{sim.raf.push(fn);return sim.raf.length};window.cancelAnimationFrame=()=>{};
-// Layout is outside this clock's subject. Native resize requests are exercised explicitly below.
 window.ResizeObserver=class {observe(){}disconnect(){}};
-const blobs=new Map(),createURL=URL.createObjectURL.bind(URL),revokeURL=URL.revokeObjectURL.bind(URL);
-URL.createObjectURL=blob=>{const url=createURL(blob);blobs.set(url,blob);return url};
-URL.revokeObjectURL=url=>{blobs.delete(url);revokeURL(url)};
-sim.microtasks=async()=>{for(let i=0;i<30;i++)await Promise.resolve()};
+const turnChannel=new MessageChannel(),turns=[];
+turnChannel.port1.onmessage=()=>turns.shift()();
+sim.microtasks=async()=>{for(let j=0;j<2;j++){for(let i=0;i<40;i++)await Promise.resolve();await new Promise(resolve=>{turns.push(resolve);turnChannel.port2.postMessage(0)});}};
 sim.task=(fn,delay,timer=false)=>{const id=++sim.timerId;sim.tasks.push({id,at:sim.now+delay,fn,timer});return id};
-sim.clear=id=>{sim.tasks=sim.tasks.filter(t=>t.id!==id)};
-sim.network=async(url,options)=>{
-  sim.requests.push({url,at:sim.now,subject:options.headers['X-KIN-Subject'],credentials:options.credentials,cache:options.cache});
-  const plan={delay:sim.delay,bodyDelay:url.endsWith('/viewer-jobs')?sim.jobsBodyDelay:sim.bodyDelay,deny:sim.deny,account:sim.account,silent:sim.silent};
-  const wait=delay=>delay?new Promise(resolve=>sim.task(resolve,delay)):Promise.resolve();
-  if(plan.silent)return new Promise(()=>{});
-  await wait(plan.delay);
-  return {ok:!plan.deny,json:async()=>{await wait(plan.bodyDelay);return url.endsWith('/api/me')?{kind:'member',institution:'hospital',sub:plan.account}:[]}};
+window.setTimeout=(fn,ms=0)=>sim.task(fn,ms,true);
+window.clearTimeout=id=>{sim.tasks=sim.tasks.filter(t=>t.id!==id)};
+// This is the server side of the real transport: an unbound non-bootstrap GET is 428.
+// Arrival is recorded independently of document delivery, as the browser's network service does.
+window.fetch=(url,options={})=>{
+  const name=new URL(String(url),location.href).href,path=new URL(name).pathname,headers=new Headers(options.headers);
+  const started=sim.now,isMe=path==='/api/me';
+  const record={url:name,path,at:started,session:headers.get('X-KIN-Session'),csrf:headers.get('X-KIN-CSRF')};
+  sim.requests.push(record);
+  let status=200,body=isMe?{kind:'member',institution:'hospital',sub:sim.account,sessionId:'S1'}:[];
+  if(!record.session&&!isMe){status=428;body={code:'AUTH_SESSION_REQUIRED'};}
+  else if(record.session&&record.session!=='S1'){status=409;body={code:'AUTH_SESSION_MISMATCH'};}
+  else if(sim.deny){status=403;body={};}
+  else if(!isMe&&[...new URL(name).searchParams].some(([k,v])=>!['mine','includeHidden'].includes(k)||!['true','false'].includes(v))){status=400;body={};}
+  if(sim.silent||sim.jobsSilent&&!isMe)return new Promise(()=>{});
+  const delay=sim.delay,bodyDelay=isMe?sim.bodyDelay:sim.jobsBodyDelay;
+  return new Promise(resolve=>{
+    let stream;
+    const response=new Response(new ReadableStream({start(c){stream=c}}),{status,headers:{'Content-Type':'application/json'}});
+    sim.task(()=>resolve(response),delay);
+    sim.task(()=>{
+      sim.entries.push({name,initiatorType:'fetch',startTime:started,responseEnd:sim.now});
+      stream.enqueue(new TextEncoder().encode(JSON.stringify(body)));stream.close();
+    },delay+bodyDelay);
+  });
 };
-window.Worker=class {
-  constructor(url){
-    this.terminated=false;sim.workers.push(this);const blob=blobs.get(url);
-    const scope={postMessage:data=>{const message={worker:this,data:structuredClone(data)};sim.history.push(message);sim.messages.push(message);if(!sim.holdMessages)sim.deliver()}};
-    this.ready=blob.text().then(code=>{new Function('self','fetch','Date','performance','setTimeout','clearTimeout',code)(scope,sim.network,Date,performance,(fn,ms)=>sim.task(fn,ms,true),sim.clear);this.scope=scope});
+sim.runUntil=(end,timers)=>{
+  for(;;){
+    const task=sim.tasks.filter(t=>t.at<=end&&(timers||!t.timer)).sort((a,b)=>a.at-b.at||a.id-b.id)[0];
+    if(!task)break;
+    sim.tasks=sim.tasks.filter(t=>t!==task);sim.now=Math.max(sim.now,task.at);task.fn();
   }
-  postMessage(data){sim.jobs.push(structuredClone(data));this.ready.then(()=>{if(!this.terminated)this.scope.onmessage({data:structuredClone(data)})})}
-  terminate(){this.terminated=true}
+  sim.now=end;
 };
-sim.deliver=()=>{while(sim.messages.length){const {worker,data}=sim.messages.shift();if(!worker.terminated)worker.onmessage?.({data})}};
-sim.advance=async(ms,{deliver=true,timers=true}={})=>{
-  const end=sim.now+ms;sim.holdMessages=!deliver;await sim.microtasks();
-  while(true){const task=sim.tasks.filter(t=>t.at<=end&&(timers||!t.timer)).sort((a,b)=>a.at-b.at||a.id-b.id)[0];if(!task)break;
-    sim.tasks=sim.tasks.filter(t=>t!==task);sim.now=Math.max(sim.now,task.at);task.fn();await sim.microtasks();}
-  sim.now=end;await sim.microtasks();if(deliver)sim.deliver();
+// A real synchronous draw has no JS task/microtask delivery. Network arrival still occurs.
+sim.burn=ms=>sim.runUntil(sim.now+ms,false);
+sim.flush=async()=>{sim.runUntil(sim.now,false);await sim.microtasks()};
+sim.advance=async(ms,{watch=true,timers=true}={})=>{
+  const end=sim.now+ms;
+  while(sim.now<end){
+    const next=Math.min(end,sim.now+250);
+    const due=sim.tasks.filter(t=>t.at<=next&&(timers||!t.timer)).sort((a,b)=>a.at-b.at||a.id-b.id)[0];
+    if(due){sim.tasks=sim.tasks.filter(t=>t!==due);sim.now=Math.max(sim.now,due.at);due.fn();await sim.microtasks();}
+    else{sim.now=next;if(watch)tick(250);await sim.flush();}
+  }
+  await sim.flush();
 };
 sim.frames=()=>{const queued=sim.raf.splice(0);queued.forEach(fn=>fn(sim.now));};
-sim.frame=()=>{engine.renderViewport(vrView.id);sim.frames()};
-sim.flush=async()=>{await sim.microtasks();sim.deliver();await sim.microtasks()};
-sim.open=()=>document.querySelector('#kin-volume-rendering').open;
-sim.message=()=>document.querySelector('#kin-volume-orientation [role=status]').textContent;
+sim.frame=(duration=0)=>{sim.frameDuration=duration;engine.renderViewport(vrView.id);sim.frames()};
+sim.open=()=>!!document.querySelector('#kin-volume-rendering')?.open;
+sim.message=()=>document.querySelector('#kin-volume-orientation [role=status]')?.textContent||'';
 """
 
 
@@ -123,21 +148,67 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.browser.close();cls.pw.stop()
 
-    def page_with_vr(self, controlled=False):
-        page = self.browser.new_page()
-        page.route("https://vr-binding.test/", lambda route: route.fulfill(body=HARNESS, content_type="text/html"))
-        page.route("**/api/me", lambda route: route.fulfill(json={"kind": "member", "institution": "hospital", "sub": "reader"}))
-        page.route("**/api/studies/*/viewer-jobs", lambda route: route.fulfill(json=[]))
+    def page_with_vr(self, controlled=False, missing_gate=None, csp=None):
+        context = self.browser.new_context()
+        self.addCleanup(context.close)
+        page = context.new_page()
+        state = {'session': 'S1', 'end': None, 'wire': []}
+        page.server_state = state
+        page.route("https://vr-binding.test/", lambda r: r.fulfill(
+            body=HARNESS, content_type="text/html",
+            headers={'Content-Security-Policy': csp} if csp else {}))
+        def server(route):
+            request = route.request
+            path = urlparse(request.url).path
+            headers = request.headers
+            state['wire'].append({'path': path, 'session': headers.get('x-kin-session'),
+                                  'csrf': headers.get('x-kin-csrf')})
+            if not headers.get('x-kin-session') and path != '/api/me':
+                return route.fulfill(status=428, headers={'X-KIN-Auth-Code':'AUTH_SESSION_REQUIRED'}, json={'code': 'AUTH_SESSION_REQUIRED'})
+            if headers.get('x-kin-session') and headers.get('x-kin-session') != state['session']:
+                return route.fulfill(status=409, headers={'X-KIN-Auth-Code':'AUTH_SESSION_MISMATCH'}, json={'code': 'AUTH_SESSION_MISMATCH'})
+            if state['end']:
+                status, code = state['end']
+                return route.fulfill(status=status, headers={'X-KIN-Auth-Code':code}, json={'code': code})
+            if path.endswith('/viewer-jobs') and any(k not in ('mine','includeHidden') or
+                    len(values)!=1 or values[0] not in ('true','false')
+                    for k,values in parse_qs(urlparse(request.url).query).items()):
+                return route.fulfill(status=400,json={})
+            route.fulfill(json={'kind': 'member', 'institution': 'hospital', 'sub': 'reader',
+                                'sessionId': state['session']} if path == '/api/me' else [])
+        page.route("**/api/**", server)
         page.goto("https://vr-binding.test/")
         if controlled:
             page.add_script_tag(content=ACCESS_CLOCK)
-        page.add_script_tag(path=str(MODEL));page.add_script_tag(path=str(ORIENTATION));page.add_script_tag(path=str(RENDERING))
-        page.evaluate("window.orientation=mountOrientation()")
+        self.install_session(page)
+        if missing_gate:
+            page.evaluate("key=>delete engine[key]", missing_gate)
+        for path in (MODEL, ORIENTATION, RENDERING):
+            page.add_script_tag(content=path.read_text(encoding='utf-8'))
+        page.evaluate("""()=>{
+          window.orientation=mountOrientation();
+          KinViewerSessionBoundary.onEnd(()=>{window.documentEnded=true;orientation.dispose();});
+        }""")
         return page
 
+    def install_session(self, page):
+        page.evaluate('()=>{window.unboundFetch=window.fetch.bind(window);}')
+        for name in ('work-context.js', 'session-transport.js', 'viewer-resources.js', 'viewer-session.js'):
+            page.add_script_tag(content=(MODEL.parent/name).read_text(encoding='utf-8'))
+        page.evaluate("""async()=>{
+          history.replaceState({kinViewerSession:{session:'S1',ended:false}},'');
+          const boundary=KinViewerSession.connect(window);
+          window.kinViewerOnEnd=run=>({close:boundary.onEnd(run)});
+          await boundary.ready;
+        }""")
+
     def open_ready(self, page):
-        page.evaluate("openVr()")
+        if page.evaluate("!!window.sim"):
+            page.evaluate("async()=>{const opening=openVr();await sim.flush();await opening;}")
+        else:
+            page.evaluate("openVr()")
         expect(page.locator('#kin-volume-rendering')).to_have_attribute('open', '')
+        expect(page.locator('#kin-volume-rendering [role=status]')).to_contain_text('VR 원본을 표시했습니다')
 
     def access_page(self):
         page = self.page_with_vr(controlled=True)
@@ -221,176 +292,427 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
     def test_ac_01_timely_answer_during_30_second_frame_is_not_a_false_timeout(self):
         page = self.access_page()
         result = page.evaluate("""async()=>{
-          await sim.advance(5000);sim.delay=1;tick(250);sim.frame();
-          await sim.advance(30000,{deliver:false});tick(250);sim.frame();
+          sim.delay=1;await sim.advance(10000);sim.frame(30000);sim.frame();
           const waiting={open:sim.open(),drawn:frameLog.filter(f=>f.drawn).length};
-          sim.deliver();await sim.advance(2);sim.frames();
-          return {waiting,open:sim.open(),message:sim.message(),frames:frameLog,arrivals:sim.history.map(m=>m.data.arrived.wall)};
+          await sim.flush();await sim.advance(1);sim.frames();
+          return {waiting,open:sim.open(),message:sim.message(),frames:frameLog,
+            arrivals:sim.entries.map(e=>e.responseEnd)};
         }""")
         self.assertEqual({'open': True, 'drawn': 1}, result['waiting'])
         self.assertTrue(result['open']);self.assertEqual('', result['message'])
-        self.assertEqual([5000, 35002], [f['at'] for f in result['frames'] if f['drawn']])
-        self.assertIn(5002, result['arrivals'], 'the answer arrived during the frame, not at delivery at 35000')
+        self.assertEqual([10001, 40002], [f['at'] for f in result['frames'] if f['drawn']])
+        self.assertIn(10002, result['arrivals'])
 
     def test_ac_02_consecutive_long_frames_revocation_and_silent_bound(self):
         for duration, bound in [(30000, 60000), (10000, 40000)]:
             with self.subTest(frame_ms=duration):
                 page = self.access_page()
                 result = page.evaluate("""async duration=>{
-                  sim.frame();await sim.advance(duration,{deliver:false});
-                  sim.holdMessages=false;sim.jobsBodyDelay=14999;tick(250);await sim.flush();
-                  // The server allowed the request, then access disappeared while its body was in transit.
+                  sim.jobsBodyDelay=14999;await sim.advance(10000);
                   const revokedAt=sim.now;sim.silent=true;
-                  await sim.advance(14999);sim.frame();
-                  await sim.advance(duration,{deliver:false});sim.frame();
-                  sim.deliver();await sim.advance(Math.max(0,15000-duration));sim.frames();
+                  await sim.advance(14999);sim.frame(duration);sim.frame();
+                  await sim.advance(Math.max(250,15000-duration));
                   return {open:sim.open(),elapsed:sim.now-revokedAt,message:sim.message(),frames:frameLog};
                 }""", duration)
                 self.assertFalse(result['open']);self.assertLessEqual(result['elapsed'], bound)
                 self.assertIn('접근 확인 시간이', result['message'])
-                starts = [f['at'] for f in result['frames'] if f['drawn']]
-                self.assertEqual([0, duration + 14999], starts, 'no next frame starts after expiry')
-                self.assertEqual(14999 + max(duration, 15000), result['elapsed'])
-                print(f"AC-02 frame={duration}ms starts={starts} revoke-to-close={result['elapsed']}ms bound={bound}ms")
+                self.assertEqual([25000], [f['at'] for f in result['frames'] if f['drawn']])
+                print(f"AC-02 frame={duration} close={result['elapsed']} bound={bound}", flush=True)
 
     def test_ac_03_fourteen_second_answer_only_has_one_second_left(self):
         page = self.access_page()
         result = page.evaluate("""async()=>{
-          await sim.advance(5000);sim.jobsBodyDelay=14000;tick(250);await sim.flush();
-          await sim.advance(14000);sim.silent=true;sim.frame();
-          await sim.advance(1000);sim.frame();
-          return {open:sim.open(),frames:frameLog};
+          sim.jobsBodyDelay=14000;await sim.advance(24000);sim.silent=true;sim.frame();
+          await sim.advance(1000);sim.frame();return {open:sim.open(),frames:frameLog};
         }""")
         self.assertTrue(result['open'])
-        self.assertEqual([{'at': 19000, 'drawn': True}, {'at': 20000, 'drawn': False}], result['frames'])
+        self.assertEqual([{'at':24001,'drawn':True},{'at':25001,'drawn':False}], result['frames'])
 
-    def test_ac_04_no_answer_deadline_and_expiry_without_page_timer(self):
+    def test_ac_04_document_closes_without_an_answer(self):
         page = self.access_page()
         result = page.evaluate("""async()=>{
-          await sim.advance(5000);sim.silent=true;tick(250);
-          await sim.advance(9999);sim.frame();await sim.advance(1);sim.frame();
-          await sim.advance(4999);const before=sim.open();await sim.advance(1);sim.frames();
-          return {before,open:sim.open(),frames:frameLog,message:sim.message(),now:sim.now};
+          sim.silent=true;await sim.advance(14999);sim.frame();await sim.advance(1);sim.frame();
+          await sim.advance(9999);const before=sim.open();await sim.advance(1);
+          return {before,open:sim.open(),frames:frameLog,message:sim.message()};
         }""")
         self.assertTrue(result['before']);self.assertFalse(result['open'])
-        self.assertEqual([{'at': 14999, 'drawn': True}, {'at': 15000, 'drawn': False}], result['frames'])
-        self.assertEqual(20000, result['now']);self.assertIn('접근 확인 시간이', result['message'])
+        self.assertEqual([{'at':15000,'drawn':True},{'at':15001,'drawn':False}], result['frames'])
+        self.assertIn('VR 접근 확인 시간이 지났습니다.', result['message'])
 
     def test_ac_05_refusal_and_account_change_precede_next_render(self):
-        for change in ["sim.deny=true", "sim.account='other-reader'", "currentOwner=['hospital','other-reader']"]:
+        for change in ["sim.deny=true","sim.account='other-reader'","currentOwner=['hospital','other-reader']"]:
             with self.subTest(change=change):
                 page = self.access_page()
                 result = page.evaluate("""async change=>{
-                  await sim.advance(5000);eval(change);tick(250);await sim.flush();
-                  engine.render();sim.frames();return {open:sim.open(),frames:frameLog,message:sim.message()};
+                  eval(change);await sim.advance(10000);engine.render();sim.frames();
+                  return {open:sim.open(),frames:frameLog,message:sim.message()};
                 }""", change)
                 self.assertFalse(result['open']);self.assertEqual([], result['frames'])
                 self.assertIn('닫았습니다', result['message'])
 
-    def test_ac_06_old_operation_request_and_other_account_answers_are_discarded(self):
+    def test_ac_06_old_operation_answers_cannot_reopen_after_owner_aba(self):
         page = self.access_page()
         result = page.evaluate("""async()=>{
-          const old=sim.history[0];closeVr();currentOwner=['hospital','other-reader'];sim.account='other-reader';
-          await openVr();const other=sim.history.at(-1);closeVr();currentOwner=['hospital','reader'];sim.account='reader';
-          await openVr();sim.frames();frameLog.length=0;
-          await sim.advance(15000);sim.silent=true;sim.frame();await sim.flush();
-          // These are stale transport deliveries, including A -> B -> A. None may renew access.
-          old.worker.onmessage({data:old.data});
-          other.worker.onmessage({data:other.data});
-          const current=sim.workers.at(-1),pending=sim.jobs.at(-1);
-          current.onmessage({data:{...old.data,id:pending.id,owner:JSON.stringify(['hospital','other-reader'])}});
-          current.onmessage({data:old.data});sim.frames();
-          const before={open:sim.open(),drawn:frameLog.filter(f=>f.drawn).length};
-          await sim.advance(15000);return {before,open:sim.open(),message:sim.message()};
+          sim.delay=100;sim.deny=true;await sim.advance(10000);closeVr();
+          sim.deny=false;sim.account='other-reader';currentOwner=['hospital','other-reader'];
+          let opening=openVr();await sim.flush();await sim.advance(10);closeVr();await opening;
+          sim.account='reader';currentOwner=['hospital','reader'];
+          opening=openVr();await sim.advance(100);await opening;sim.frames();
+          return {open:sim.open(),message:sim.message(),drawn:frameLog.filter(f=>f.drawn).length};
         }""")
-        self.assertEqual({'open': True, 'drawn': 0}, result['before'])
-        self.assertFalse(result['open']);self.assertIn('접근 확인 시간이', result['message'])
+        self.assertTrue(result['open']);self.assertEqual('', result['message'])
+        self.assertGreater(result['drawn'], 0)
 
     def test_ac_07_two_minutes_prompt_checks_never_block_or_notify(self):
         page = self.access_page()
         result = page.evaluate("""async()=>{
-          sim.delay=1;
-          for(let i=0;i<7500;i++){tick(250);sim.frame();await sim.advance(16);}
-          return {now:sim.now,frames:frameLog.length,blocked:frameLog.filter(f=>!f.drawn).length,
-            checks:sim.jobs.length,message:sim.message(),open:sim.open()};
+          const start=sim.now;sim.delay=1;
+          for(let i=0;i<7500;i++){sim.frame();await sim.advance(16);}
+          return {elapsed:sim.now-start,frames:frameLog.length,blocked:frameLog.filter(f=>!f.drawn).length,
+            requests:sim.requests.filter(r=>r.at<start+120000).length,message:sim.message(),open:sim.open()};
         }""")
         self.assertEqual(0, result['blocked']);self.assertEqual('', result['message']);self.assertTrue(result['open'])
-        self.assertEqual(120000, result['now']);self.assertEqual(7500, result['frames'])
-        self.assertGreaterEqual(result['checks'], 8, 'two minutes cannot reuse a 15-second confirmation')
-        print(f"AC-07 simulated={result['now']}ms frames={result['frames']} checks={result['checks']} blocked=0 messages=0")
+        self.assertEqual(120000, result['elapsed']);self.assertEqual(7500, result['frames'])
+        self.assertGreaterEqual(result['requests'], 16)
+        self.assertLessEqual(result['requests'], 24, 'at most 12 GET/min in the half-open two-minute window')
+        print('AC-07', result, flush=True)
 
-    def test_ac_08_queued_viewport_engine_and_resize_frames_check_at_traversal(self):
-        for request in ['vrView.render()', 'engine.renderViewport(vrView.id)', 'engine.renderViewports([vrView.id])', 'engine.render()', 'engine.resize()']:
+    def test_ac_08_queued_viewport_engine_and_resize_check_at_frame_start(self):
+        for request in ['vrView.render()','engine.renderViewport(vrView.id)',
+                        'engine.renderViewports([vrView.id])','engine.render()','engine.resize()']:
             with self.subTest(request=request):
                 page = self.access_page()
                 result = page.evaluate("""async request=>{
-                  await sim.advance(14999);eval(request);
-                  await sim.advance(1);sim.silent=true;sim.frames();
-                  return {open:sim.open(),frames:frameLog};
+                  sim.silent=true;await sim.advance(14999);eval(request);
+                  await sim.advance(1);sim.frames();return {open:sim.open(),frames:frameLog};
                 }""", request)
-                self.assertTrue(result['open']);self.assertEqual([{'at': 15000, 'drawn': False}], result['frames'])
+                self.assertTrue(result['open'])
+                self.assertEqual([{'at':15001,'drawn':False}], result['frames'])
 
-    def test_ac_09_full_body_deadline_even_when_worker_timer_is_delayed(self):
+    def test_ac_09_known_late_body_is_refused_even_after_a_long_frame(self):
         page = self.access_page()
         result = page.evaluate("""async()=>{
-          await sim.advance(5000);sim.jobsBodyDelay=15000;tick(250);await sim.flush();
-          await sim.advance(15000,{timers:false});sim.frame();
-          return {open:sim.open(),frames:frameLog,message:sim.message()};
+          sim.jobsBodyDelay=15000;await sim.advance(10000);sim.frame(30000);
+          await sim.flush();return {open:sim.open(),message:sim.message()};
         }""")
-        self.assertFalse(result['open']);self.assertEqual([], result['frames'])
-        self.assertIn('접근 확인 시간이', result['message'])
+        self.assertFalse(result['open']);self.assertIn('접근 확인 시간이', result['message'])
 
-    def test_ac_10_wall_clock_rollback_and_resume_do_not_extend_confirmation(self):
-        page = self.access_page()
-        result = page.evaluate("""async()=>{
-          await sim.advance(15000);sim.wallOffset=-60000;sim.silent=true;
-          document.dispatchEvent(new Event('visibilitychange'));sim.frame();
-          await sim.advance(15000);return {open:sim.open(),frames:frameLog,message:sim.message()};
-        }""")
-        self.assertFalse(result['open']);self.assertEqual([{'at': -45000, 'drawn': False}], result['frames'])
-        self.assertIn('접근 확인 시간이', result['message'])
+    def test_ac_10_suspension_blocks_and_one_fresh_answer_decides(self):
+        for deny in (False, True):
+            with self.subTest(refused=deny):
+                page = self.access_page()
+                result = page.evaluate("""async deny=>{
+                  sim.delay=1;await sim.advance(10000);
+                  const before=sim.requests.length;sim.now+=120000;sim.deny=deny;
+                  sim.frame();tick(250);sim.frame();
+                  const waiting={open:sim.open(),drawn:frameLog.filter(f=>f.drawn).length,
+                    newRequests:sim.requests.length-before};
+                  await sim.advance(1);sim.frames();
+                  return {waiting,open:sim.open(),message:sim.message(),newRequests:sim.requests.length-before};
+                }""", deny)
+                self.assertEqual({'open':True,'drawn':0,'newRequests':2}, result['waiting'])
+                self.assertEqual(2, result['newRequests'])
+                self.assertEqual(not deny, result['open'])
+                if not deny:self.assertEqual('', result['message'])
 
-    def test_ac_11_initial_check_and_two_response_bodies_share_one_deadline(self):
-        for setup in ['sim.silent=true', 'sim.bodyDelay=8000;sim.jobsBodyDelay=8000']:
+    def test_ac_11_initial_check_includes_both_complete_bodies(self):
+        for setup in ['sim.silent=true','sim.jobsBodyDelay=16000']:
             with self.subTest(setup=setup):
                 page = self.page_with_vr(controlled=True);self.addCleanup(page.close)
                 result = page.evaluate("""async setup=>{
-                  eval(setup);const opening=openVr();await Promise.all(sim.workers.map(w=>w.ready));
-                  await sim.advance(14999);const before=sim.open();await sim.advance(1);await opening;
-                  return {before,open:sim.open(),message:sim.message(),frames:frameLog,terminated:sim.workers.every(w=>w.terminated)};
+                  eval(setup);const opening=openVr();await sim.flush();await sim.advance(14999);
+                  const before=sim.open();await sim.advance(1);await opening;
+                  return {before,open:sim.open(),message:sim.message(),frames:frameLog};
                 }""", setup)
                 self.assertTrue(result['before']);self.assertFalse(result['open'])
-                self.assertEqual([], result['frames']);self.assertTrue(result['terminated'])
-                self.assertIn('접근 확인 시간이', result['message'])
+                self.assertEqual([], result['frames']);self.assertIn('접근 확인 시간이', result['message'])
 
     def test_ac_12_blocked_vr_preserves_mpr_and_close_restores_engine(self):
         page = self.access_page()
         result = page.evaluate("""async()=>{
-          const sourceBefore=sourceState();await sim.advance(15000);sim.silent=true;
+          const before=sourceState();sim.silent=true;await sim.advance(15000);
           engine.renderViewport(vrView.id);engine._needsRender.add('axial');sim.frames();
           const blocked=frameLog.at(-1);closeVr();
           engine._needsRender.add('coronal');engine.drawn=new Set();engine.performVtkDrawCall();engine._needsRender.clear();
-          const old=sim.history[0];old.worker.onmessage({data:{...old.data,error:'old refusal'}});
-          sim.silent=false;await openVr();sim.frames();
-          return {blocked,native:nativeFrames,sourcePreserved:sourceBefore===sourceState(),open:sim.open(),message:sim.message()};
+          sim.silent=false;const opening=openVr();await sim.flush();await opening;sim.frames();
+          return {blocked,native:nativeFrames,preserved:before===sourceState(),open:sim.open(),message:sim.message()};
         }""")
-        self.assertEqual({'at': 15000, 'drawn': False}, result['blocked'])
-        self.assertEqual(['axial', 'coronal'], result['native']);self.assertTrue(result['sourcePreserved'])
+        self.assertEqual({'at':15001,'drawn':False}, result['blocked'])
+        self.assertEqual(['axial','coronal'], result['native']);self.assertTrue(result['preserved'])
         self.assertTrue(result['open']);self.assertEqual('', result['message'])
 
-    def test_ac_13_access_held_sculpt_waits_for_its_actual_shader_frame(self):
+    def test_ac_13_access_held_sculpt_waits_for_actual_shader_frame(self):
         page = self.access_page()
         result = page.evaluate("""async()=>{
-          await sim.advance(15000);sim.delay=100;
+          sim.delay=100;await sim.advance(14999);sim.frame(30000);
           [...document.querySelectorAll('button')].find(b=>b.textContent==='Apply Sculpt').click();
           sim.frames();sim.frames();const waiting=sim.open();
-          await sim.advance(200);sim.frames();sim.frames();sim.frames();
-          return {waiting,open:sim.open(),message:sim.message(),compiled:shader.compiled,frames:frameLog};
+          await sim.flush();await sim.advance(100);sim.frames();sim.frames();sim.frames();
+          return {waiting,open:sim.open(),message:sim.message(),compiled:shader.compiled};
         }""")
         self.assertTrue(result['waiting']);self.assertTrue(result['open'])
         self.assertEqual('', result['message']);self.assertTrue(result['compiled'])
-        self.assertEqual([{'at': 15200, 'drawn': True}], result['frames'])
+
+    def test_ac_14_missing_timing_rechecks_once_after_long_frame(self):
+        for silent in (False, True):
+            with self.subTest(fresh_silent=silent):
+                page = self.access_page()
+                result = page.evaluate("""async silent=>{
+                  sim.missingTiming=true;sim.delay=1;await sim.advance(10000);sim.frame(30000);
+                  const before=sim.requests.length;sim.silent=silent;await sim.flush();
+                  const waiting={open:sim.open(),newRequests:sim.requests.length-before};
+                  if(silent)await sim.advance(15000);else await sim.advance(1);
+                  sim.frames();return {waiting,open:sim.open(),message:sim.message(),newRequests:sim.requests.length-before};
+                }""", silent)
+                self.assertEqual({'open':True,'newRequests':2}, result['waiting'])
+                self.assertEqual(2, result['newRequests'])
+                self.assertEqual(not silent, result['open'])
+                if silent:self.assertIn('접근 확인 시간이', result['message'])
+                else:self.assertEqual('', result['message'])
+
+    def test_ac_15_missing_timing_is_strict_without_a_long_frame(self):
+        page = self.access_page()
+        result = page.evaluate("""async()=>{
+          sim.missingTiming=true;sim.jobsBodyDelay=15000;await sim.advance(25000);
+          return {open:sim.open(),message:sim.message(),requests:sim.requests.length};
+        }""")
+        self.assertFalse(result['open']);self.assertIn('접근 확인 시간이', result['message'])
+        self.assertEqual(4, result['requests'])
+
+    def test_ac_16_missing_or_unwritable_gate_refuses_before_native_open(self):
+        for member in ('performVtkDrawCall','_needsRender','readonly'):
+            with self.subTest(member=member):
+                page = self.page_with_vr(controlled=True, missing_gate=member if member!='readonly' else None)
+                self.addCleanup(page.close)
+                if member=='readonly':
+                    page.evaluate("Object.defineProperty(engine,'performVtkDrawCall',{writable:false})")
+                page.evaluate("async()=>{const opening=openVr();await sim.flush();await opening}")
+                self.assertFalse(page.evaluate('sim.open()'))
+                self.assertEqual(0, page.evaluate('engine.privateViews.size'))
+                self.assertIn('지원 담당자', page.evaluate('sim.message()'))
+                self.assertEqual([], page.evaluate('frameLog'))
+
+    def test_ac_17_wall_clock_changes_cannot_change_validity(self):
+        page = self.access_page()
+        result = page.evaluate("""async()=>{
+          sim.silent=true;Date.now=()=>-900000;await sim.advance(15000);sim.frame();
+          Date.now=()=>900000;await sim.advance(10000);return {open:sim.open(),frames:frameLog,message:sim.message()};
+        }""")
+        self.assertFalse(result['open']);self.assertEqual([{'at':15001,'drawn':False}],result['frames'])
+        self.assertIn('접근 확인 시간이',result['message'])
+
+    def test_ac_18_identity_refusal_does_not_wait_for_other_response(self):
+        page=self.access_page()
+        result=page.evaluate("""async()=>{
+          sim.account='other-reader';sim.jobsSilent=true;await sim.advance(10000);sim.frame();
+          return {open:sim.open(),frames:frameLog,message:sim.message()};
+        }""")
+        self.assertFalse(result['open']);self.assertEqual([],result['frames'])
+        self.assertIn('계정이 변경',result['message'])
+
+    def test_ac_19_suspension_during_initial_check_and_source_loading(self):
+        for loading in (False,True):
+            with self.subTest(source_loading=loading):
+                page=self.page_with_vr(controlled=True);self.addCleanup(page.close)
+                result=page.evaluate("""async loading=>{
+                  if(loading)vrView.setVolumes=()=>new Promise(resolve=>window.releaseVolume=resolve);
+                  else sim.silent=true;
+                  const opening=openVr();await sim.flush();
+                  sim.now+=120000;sim.silent=false;sim.delay=1;tick(250);
+                  const waiting={open:sim.open(),drawn:frameLog.filter(f=>f.drawn).length};
+                  await sim.advance(1);if(loading)releaseVolume();await opening;sim.frames();
+                  return {waiting,open:sim.open(),message:sim.message()};
+                }""",loading)
+                self.assertEqual({'open':True,'drawn':0},result['waiting'])
+                self.assertTrue(result['open']);self.assertEqual('',result['message'])
+
+    def test_ac_20_consecutive_30_second_frames_allow_timely_checks_without_false_close(self):
+        page=self.access_page()
+        result=page.evaluate("""async()=>{
+          sim.delay=1;await sim.advance(10000);
+          for(let i=0;i<4;i++){
+            sim.frame(30000);await sim.flush();await sim.advance(1);sim.frames();
+          }
+          return {open:sim.open(),message:sim.message(),drawn:frameLog.filter(f=>f.drawn).length};
+        }""")
+        self.assertTrue(result['open']);self.assertEqual('',result['message'])
+        self.assertGreaterEqual(result['drawn'],4)
+
+    def test_ac_21_unavailable_timing_api_rechecks_without_false_close(self):
+        page=self.access_page()
+        result=page.evaluate("""async()=>{
+          performance.getEntriesByName=undefined;sim.delay=1;await sim.advance(10000);sim.frame(30000);
+          await sim.flush();await sim.advance(1);sim.frames();
+          return {open:sim.open(),message:sim.message(),requests:sim.requests.length};
+        }""")
+        self.assertTrue(result['open']);self.assertEqual('',result['message'])
+        self.assertEqual(6,result['requests'])
+
+    def test_ac_22_other_request_timing_cannot_turn_a_late_answer_into_permission(self):
+        page=self.access_page()
+        result=page.evaluate("""async()=>{
+          sim.jobsBodyDelay=16000;await sim.advance(10000);
+          const request=sim.requests.at(-1);
+          sim.entries.push({name:request.url,initiatorType:'fetch',startTime:sim.now+1,responseEnd:sim.now+2});
+          sim.frame(30000);await sim.flush();
+          return {open:sim.open(),message:sim.message()};
+        }""")
+        self.assertFalse(result['open']);self.assertIn('접근 확인 시간이',result['message'])
+
+    def test_ac_23_continuous_blocked_frame_requests_cannot_postpone_close(self):
+        page=self.access_page()
+        result=page.evaluate("""async()=>{
+          sim.silent=true;await sim.advance(10000);sim.frame(30000);let closedAt=null;
+          for(let i=0;i<40;i++){sim.frame();await sim.advance(16);if(!sim.open()){closedAt=sim.now;break;}}
+          return {open:sim.open(),closedAt,message:sim.message(),frames:frameLog};
+        }""")
+        self.assertFalse(result['open']);self.assertLessEqual(result['closedAt'],40267)
+        self.assertIn('접근 확인 시간이',result['message'])
+        self.assertTrue(all(f['at']<15001 for f in result['frames'] if f['drawn']))
+
+    def test_ac_24_known_late_body_is_not_hidden_by_other_missing_entry(self):
+        page=self.access_page()
+        result=page.evaluate("""async()=>{
+          const entries=performance.getEntriesByName;
+          performance.getEntriesByName=(name,type)=>name.endsWith('/api/me')?[]:entries(name,type);
+          sim.jobsBodyDelay=16000;await sim.advance(10000);sim.frame(30000);await sim.flush();
+          return {open:sim.open(),message:sim.message(),requests:sim.requests.length};
+        }""")
+        self.assertFalse(result['open']);self.assertIn('접근 확인 시간이',result['message'])
+        self.assertEqual(4,result['requests'])
+
+    def test_ac_25_source_loading_keeps_original_whole_open_limit(self):
+        page=self.page_with_vr(controlled=True);self.addCleanup(page.close)
+        result=page.evaluate("""async()=>{
+          sim.jobsBodyDelay=14000;vrView.setVolumes=()=>new Promise(()=>{});
+          void openVr();await sim.flush();await sim.advance(29999);const before=sim.open();
+          await sim.advance(251);return {before,open:sim.open(),message:sim.message()};
+        }""")
+        self.assertTrue(result['before']);self.assertFalse(result['open'])
+        self.assertIn('VR 원본 확인 시간이',result['message'])
+
+    def test_session_both_access_requests_carry_binding_and_csrf_on_wire(self):
+        page = self.page_with_vr();self.addCleanup(page.close);self.open_ready(page)
+        wire = page.server_state['wire']
+        self.assertEqual(['/api/me','/api/studies/study-1/viewer-jobs'], sorted(r['path'] for r in wire))
+        for request in wire:
+            self.assertEqual('S1',request['session']);self.assertEqual('1',request['csrf'])
+
+    def test_session_same_account_relogin_in_another_tab_ends_viewer(self):
+        page = self.page_with_vr();self.addCleanup(page.close);self.open_ready(page)
+        other = page.context.new_page();self.addCleanup(other.close)
+        other.route('**/test/relogin',lambda r:(page.server_state.update(session='S2'),r.fulfill(json={'sub':'reader','sessionId':'S2'}))[-1])
+        other.goto('https://vr-binding.test/test/relogin')
+        page.evaluate("()=>{closeVr();void openVr()}")
+        page.wait_for_function("KinViewerSessionBoundary.ended() && window.documentEnded")
+        self.assertEqual('S1',page.evaluate('KinViewerSessionBoundary.session()'))
+        self.assertEqual(0,page.evaluate('engine.privateViews.size'))
+
+    def test_session_end_answers_on_access_end_the_document(self):
+        for status,code in [(401,'AUTH_SESSION_ENDED'),(409,'AUTH_SESSION_MISMATCH'),(403,'AUTH_SESSION_MISMATCH')]:
+            with self.subTest(status=status):
+                page=self.page_with_vr();self.addCleanup(page.close);self.open_ready(page)
+                page.server_state['end']=(status,code)
+                page.evaluate("()=>{closeVr();void openVr()}")
+                page.wait_for_function("KinViewerSessionBoundary.ended() && window.documentEnded")
+                self.assertEqual(0,page.evaluate('engine.privateViews.size'))
+
+    def test_session_logout_preparation_holds_access_and_frames(self):
+        page=self.access_page()
+        other=page.context.new_page();self.addCleanup(other.close)
+        other.route('https://vr-binding.test/peer',lambda r:r.fulfill(body='<p>peer</p>',content_type='text/html'))
+        other.goto('https://vr-binding.test/peer')
+        other.evaluate("""async()=>{
+          window.channel=new BroadcastChannel('kin-session');
+          await new Promise(done=>navigator.locks.request('kin-preparation:P1',()=>new Promise(release=>{
+            window.release=release;done();})));
+          channel.postMessage({type:'session-preparing',session:'S1',preparation:'P1'});
+        }""")
+        page.wait_for_function("KinWorkContext.state()==='preparing'")
+        result=page.evaluate("""async()=>{
+          const before=sim.requests.length;await sim.advance(20000);
+          document.dispatchEvent(new Event('visibilitychange'));engine.resize();sim.frames();await sim.flush();
+          return {requests:sim.requests.length-before,frames:frameLog.length,open:sim.open(),message:sim.message()};
+        }""")
+        self.assertEqual({'requests':0,'frames':0,'open':True,'message':''},result)
+        other.evaluate("release();channel.postMessage({type:'session-resumed',session:'S1',preparation:'P1'})")
+        page.wait_for_function("KinWorkContext.state()==='active'")
+        page.evaluate("async()=>{await sim.flush();sim.frames()}")
+        self.assertTrue(page.evaluate('sim.open()'))
+        self.assertEqual(4,page.evaluate('sim.requests.length'))
+
+    def test_no_blob_worker_csp_does_not_prevent_bound_vr(self):
+        csp="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; worker-src 'none'"
+        page=self.page_with_vr(csp=csp);self.addCleanup(page.close);self.open_ready(page)
+        self.assertTrue(all(r['session']=='S1' for r in page.server_state['wire']))
+
+    def test_native_same_origin_response_end_survives_busy_document_and_full_buffer(self):
+        records=[]
+        class Server(BaseHTTPRequestHandler):
+            def log_message(self,*args):pass
+            def do_GET(self):
+                path=urlparse(self.path).path
+                if path=='/':
+                    body=HARNESS.encode();kind='text/html'
+                else:
+                    records.append({'path':path,'session':self.headers.get('X-KIN-Session'),'csrf':self.headers.get('X-KIN-CSRF')})
+                    time.sleep(.08)
+                    if not self.headers.get('X-KIN-Session') and path!='/api/me':
+                        self.send_response(428);self.end_headers();return
+                    if self.headers.get('X-KIN-Session') and self.headers.get('X-KIN-Session')!='S1':
+                        self.send_response(409);self.send_header('X-KIN-Auth-Code','AUTH_SESSION_MISMATCH');self.end_headers();return
+                    body=json.dumps({'kind':'member','institution':'hospital','sub':'reader','sessionId':'S1'} if path=='/api/me' else []).encode()
+                    kind='application/json'
+                self.send_response(200);self.send_header('Content-Type',kind);self.send_header('Content-Length',str(len(body)))
+                self.end_headers();self.wfile.write(body)
+        server=ThreadingHTTPServer(('127.0.0.1',0),Server)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+        page=self.browser.new_page();self.addCleanup(page.close)
+        page.goto(f'http://127.0.0.1:{server.server_port}/')
+        self.install_session(page)
+        for path in (MODEL,ORIENTATION,RENDERING):page.add_script_tag(content=path.read_text(encoding='utf-8'))
+        page.evaluate("""()=>{
+          window.orientation=mountOrientation();
+          window.nativeIssues=[];const bound=window.fetch;
+          window.fetch=(...args)=>{
+            const started=performance.now(),response=bound(...args);
+            nativeIssues.push({name:String(args[0]),start:started,end:performance.now()});return response;
+          };
+          const draw=engine.performVtkDrawCall;
+          engine.performVtkDrawCall=function(){
+            draw.call(this);
+            if(window.busyFrame){window.busyFrame=false;window.frameBegin=performance.now();
+              while(performance.now()-frameBegin<30000){}
+              window.frameEnd=performance.now();}
+          };
+        }""")
+        self.open_ready(page)
+        page.wait_for_timeout(10010)
+        page.evaluate("tick(250);window.busyFrame=true;vrView.render()")
+        page.wait_for_function("window.frameEnd>0",timeout=45000)
+        page.wait_for_function("""()=>{
+          tick(250);
+          return performance.getEntriesByType('resource').filter(e=>new URL(e.name).pathname.startsWith('/api/')).length>=6;
+        }""")
+        entries=page.evaluate("""()=>({begin:frameBegin,end:frameEnd,issues:nativeIssues,
+          entries:performance.getEntriesByType('resource').filter(e=>new URL(e.name).pathname.startsWith('/api/')).map(e=>({start:e.startTime,end:e.responseEnd,name:e.name})),
+          open:document.querySelector('#kin-volume-rendering').open,
+          message:document.querySelector('#kin-volume-orientation [role=status]').textContent})""")
+        self.assertTrue(entries['open']);self.assertEqual('',entries['message'])
+        during=[e for e in entries['entries'] if entries['begin']<e['end']<entries['end']]
+        self.assertEqual(2,len(during),'both real HTTP responses arrived during the synchronous draw')
+        for entry in entries['entries']:
+            matches=[r for r in entries['issues'] if r['name']==entry['name'] and r['start']<=entry['start']<=r['end']]
+            self.assertEqual(1,len(matches),'native fetch startTime identifies its issuing interval in the document clock')
+        for r in records:self.assertEqual('S1',r['session']);self.assertEqual('1',r['csrf'])
+        # The browser really drops resource records when its buffer is full. The same supported
+        # browser must still succeed via the conservative missing-entry path on prompt replies.
+        page.evaluate("performance.clearResourceTimings();performance.setResourceTimingBufferSize(0);closeVr()")
+        self.open_ready(page)
+        self.assertEqual([],page.evaluate("performance.getEntriesByType('resource')"))
+        print('NATIVE_TIMING',entries,flush=True)
 
 
 if __name__ == '__main__':
-    unittest.main()
+    unittest.main(verbosity=2)
