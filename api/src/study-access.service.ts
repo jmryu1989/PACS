@@ -7,6 +7,7 @@ import type { Caller } from './pacs.service';
 import { StudyAccessPolicy, StudyAccessMetadata, normalizeAccessPolicy, accessPolicyMatches, accessWindowOpen, ruleNeedsMetadata, validAccessUid } from './study-access-policy';
 
 export interface AccessSnapshot { revision:number; policy:StudyAccessPolicy; windowOpen:boolean; needsInstitutionReview:boolean; management?:{reason:string;updatedBy:string|null;updatedAt:Date|null} }
+type WriteRequest = { expectedOwner: unknown; policy: unknown; reason: string; requestId: string; revision: number };
 const unrestricted=():StudyAccessPolicy=>({version:1,restricted:false,startsAt:null,endsAt:null,rules:[]});
 const digest=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const uuid=(v:unknown):v is string=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
@@ -122,7 +123,7 @@ export class StudyAccessService {
     return {owner:this.owner(c),subject,revision:effective.revision,policy:effective.policy,needsInstitutionReview:effective.needsInstitutionReview,
       ...(effective.management??{reason:'',updatedBy:null,updatedAt:null})};
   }
-  async write(subject:string,c:Caller,b:any) {
+  async write(subject:string,c:Caller,b:WriteRequest) {
     await this.target(c,subject);
     if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).sort().join()!=='expectedOwner,policy,reason,requestId,revision'||!uuid(b.requestId)||!Number.isInteger(b.revision)||b.revision<0||b.revision>=2147483646||typeof b.reason!=='string'||!b.reason.trim()||b.reason.length>2000||/[\x00-\x1f\x7f]/.test(b.reason))
       throw new BadRequestException('접근 조건·기준 버전·변경 사유를 확인하세요');

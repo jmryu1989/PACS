@@ -16,7 +16,7 @@
  *    institution names carrying \, ", % and _; the removed LIKE form, modelled, loses exactly the \ and " names' rows;
  *  - completeness (Astra S7-U3a-AUDIT-SPEC-R-001 F01-F04, F01/F03 amended by S7-U3a-AUDIT-SPEC-B-R-001 with the second
  *    raw SQL form, the positive reading closed to the list W1-W6 of S7-U3a-AUDIT-SPEC-C-R-001): every file of api/src
- *    is read; every audit candidate there is resolved, proven not a write, or raw unresolved (see D-NW below);
+ *    is read; every audit candidate there is resolved or proven not an audit write;
  *    every action a write can record has a contract row and every row is written somewhere. The TypeScript compiler
  *    api/package-lock.json installs reads the program of api/src (see the completeness section). The checker's own tests
  *    run on test-owned fixtures (tests/fixtures/admin_audit_completeness, and tests/fixtures/admin-audit-checker for the
@@ -25,22 +25,10 @@
  *    rewritten in other notations keeps every write site; unlisted, dynamic and unwritten actions each fail alone, and so
  *    does each write given one more path through a helper called by a constant key or a fragment written or handed on.
  *
- * D-NW (S7-U3a-AUDIT-SPEC-D-R-001) temporarily defers exactly the reviewed 27 raw unresolved candidates; it is
- * not W1-W6 proof. The raw inventory and diagnoses remain unchanged, with 35 resolved writers (S7-U5 added the three
- * access-record writes of auth.service.ts: the login transaction, a login failure row, the end transaction). The verdict uses
- * blocking unresolved: raw unresolved without a valid disposition, plus disposition errors; any such entry fails.
- * Byte identity (after CRLF-to-LF normalization) of the reviewed source corpus and compiler inputs, the compiler
- * version, and the exact positions and diagnoses are the boundary of this temporary ruling (AGENTS 1-B.14).
- * SPEC-F permits a reviewed whole-corpus repin only for non-deferral files: the policy carries their prior text,
- * reconstructs the hash-pinned predecessor and scans it with the same compiler. Its complete unresolved inventory,
- * positions, diagnoses, entries and compiler inputs must equal the current ones. Deferral-bearing files stay
- * byte-identical. A new corpus hash alone is insufficient; missing proof rejects the whole disposition.
- * SPEC-G additionally binds the three critical-result calls by unique AST identity and exact raw diagnosis,
- * with predecessor/current call hashes and mandatory provenance review inputs. Call/scope byte identity is
- * required only to bind this temporary disposition, never as a product behavior requirement (AGENTS 1-B.14).
- * The checker checks bindings, not the truth of provenance narratives; candidate review must verify the evidence.
- * No automatic repinning: every policy change needs the changing candidate's independent review. This is still
- * temporary, not a non-write proof; S7-U3a-RAW-PROVENANCE remains required. Other fixtures gain no exemption.
+ * S7-U3a-RAW-PROVENANCE: every raw site must be proved without a set-aside list. Local fixed
+ * compositions are enumerated before SQL classification; any unproved variant fails the verdict.
+ * REQ-S7-RAW-PROVENANCE -> RISK-S7-RAW-HIDDEN-WRITE / RISK-S7-RAW-BEHAVIOUR-DRIFT
+ *   -> TEST-S7-RAW-COMPOSITION / TEST-S7-RAW-MUTANTS.
  *
  * Module: KIN_ADMIN_AUDIT_MODULE, default api/src/admin-audit.ts loaded through Node type stripping (Node >= 22.18);
  * the compiled /app/dist/admin-audit (kin-api:ci) is the same rule. The completeness cases read api/src and use
@@ -918,7 +906,8 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    parameter through every call's argument, a parameter of a function outside callers call declared a primitive or a
 //    Date, a JSON/Prisma result (a delegate method's or raw query's rows, `JSON.parse`, through consts, W3 arguments and
 //    returns, `??`, destructuring and for-of) and its fields (W6), a field of an object literal it always is, a member
-//    declared a primitive or a Date of a record (a parameter declared an object type, a call typed as one), or a call the
+//    declared a primitive or a Date of a record (a parameter declared an object type, a call typed as one), an inferred
+//    primitive field of a typed function result, a contextually typed callback parameter, or a call the
 //    checker types a primitive or a Date. A type stated by an assertion or an annotation is never evidence (wrappers are
 //    read through); a type is taken only where no fragment is handed on in code connected by calls to it (W4). Anything
 //    typed any or unknown is a value only as a JSON/Prisma result or its field. Nothing typed as a fragment is a value.
@@ -936,11 +925,13 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    to such a helper, aliased by a const, tested). Everything else that names AuditLog (a missing, doubled or miscounted
 //    column list, an empty value, an unclosed token, an interpolation where SQL structure goes, WITH before VALUES,
 //    several statements, ON CONFLICT, RETURNING, UPDATE, DELETE ...) is unresolved.
-//  W6 not writes: a read method of the delegate; a raw call whose every interpolation is an F02 value and whose fixed SQL
-//    names no AuditLog, names it only in strings or comments, or is one SELECT that changes no row. A fragment in a raw
-//    call that writes no audit row is unresolved (F02 takes only values there). The SQL must be the fixed text of its raw
-//    call: a text naming AuditLog anywhere else, and SQL the program does not fix (an Unsafe call with a computed text,
-//    Prisma.raw of a computed text, a computed join separator), is unresolved.
+//  W6 not audit writes: a read method of the delegate; every alternative of a raw call names no AuditLog, names it only
+//    in strings/comments, or is one SELECT that changes no row. RAW-PROVENANCE adds local const fragments, ?:, sql/empty,
+//    literal raw, fixed-array join and same-file helper returns. Text is concatenated before lexing. Comma-separated
+//    repetitions of proved bound values (optionally cast) cannot introduce identifiers; unknown arrays/spreads fail.
+//    A composition exposing an audit INSERT still needs W5 and W2 attribution. Existing direct audit INSERTs retain W5's
+//    narrower predicate grammar. Cross-module SQL helpers, nonliteral raw/concatenation/separators and any unproved
+//    alternative remain unresolved. Data projection through array producers does not admit SQL from another module.
 //  Closure (Astra S7-U3a-AUDIT-SPEC-C-R-001-F03, the conditions of S7-U3a-G-R-001): (a) W1-W6 alone resolve every write of
 //    the baseline and give every other candidate its classification, with no writer left out, no exception by place and
 //    no product change; (b) each enumerated counterexample, alone next to the baseline, leaves its write unresolved and
@@ -1977,7 +1968,8 @@ function scanAuditWrites(sources = auditSources()) {
     }
     const parent = node.parent;
     const found = why => ({ use: node, why });
-    if (ts.isArrayLiteralExpression(node) && !(ts.isCallExpression(parent) && prismaMember(parent.expression) === 'join')) {
+    if (ts.isArrayLiteralExpression(node) && !(ts.isCallExpression(parent) && prismaMember(parent.expression) === 'join')
+      && !(isConst(parent) && parent.initializer === node && ts.isIdentifier(parent.name))) {
       return found(`is kept in an array at ${where(node)}`);
     }
     if (ts.isTemplateSpan(parent) && parent.expression === node) {
@@ -2199,7 +2191,18 @@ function scanAuditWrites(sources = auditSources()) {
     if (W3_KINDS.has(kind.kind)) {
       const index = owner.parameters.indexOf(declaration) - shift(owner);
       const { calls: found, escapes } = callsOf(owner, 'w3');
-      if (escapes.length) return { why: `\`${name}\` is a parameter of ${describe(owner)}, which is handed on at ${escapes.join(', ')}` };
+      if (escapes.length) {
+        // A contextually typed callback has the same value boundary as a public function parameter.
+        // Only an explicit function annotation or the library's Array#map supplies that context.
+        const held = constHolder(owner), parent = owner.parent;
+        const mapped = ts.isCallExpression(parent) && parent.arguments[0] === owner
+          && isAccess(bare(parent.expression)) && w1(bare(parent.expression)).key === 'map'
+          && lib(checker.getResolvedSignature(parent)?.declaration ?? parent);
+        const type = checker.getTypeAtLocation(declaration);
+        if ((held?.type || mapped) && (record ? isRecordType(type) : valueType(type)) && !plain.length)
+          return byType(declaration, `F02 contextually typed callback parameter \`${name}\`: \`${typeText(type)}\``);
+        return { why: `\`${name}\` is a parameter of ${describe(owner)}, which is handed on at ${escapes.join(', ')}` };
+      }
       if (!found.length) return { why: `\`${name}\` is a parameter of ${describe(owner)}, which nothing in the program calls` };
       const argumentsOf = [];
       for (const call of found) {
@@ -2261,7 +2264,9 @@ function scanAuditWrites(sources = auditSources()) {
       }
       if (declarations.length === 1 && ts.isParameter(declaration) && W3_KINDS.has(helperKind(declaration.parent).kind)) {
         const inputs = parameterInputs(declaration, symbol, node.text);
-        return inputs.why ? inputs : fieldsOf(inputs.found, key, seen, `W3 \`${node.text}\` of ${describe(declaration.parent)}: every call's argument`);
+        if (!inputs.why) return fieldsOf(inputs.found, key, seen, `W3 \`${node.text}\` of ${describe(declaration.parent)}: every call's argument`);
+        const context = parameterValue(declaration, symbol, node.text, true);
+        if (context.why) return context.why.includes('so its type is no evidence') ? context : inputs;
       }
       if (declarations.length === 1 && ts.isBindingElement(declaration)) {
         const element = destructuredValue(declaration);
@@ -2277,6 +2282,12 @@ function scanAuditWrites(sources = auditSources()) {
     const type = checker.getNonNullableType(checker.getTypeAtLocation(node));
     const symbol = checker.getPropertyOfType(type, key), [declaration] = symbol?.declarations ?? [];
     if (!symbol) return { why: `\`${key}\` is a property the program does not fix (\`${snippet(node)}\` is typed \`${typeText(type)}\`)` };
+    // A function result is already an F02 type boundary. Its inferred primitive fields are as much
+    // values as an explicitly declared field; local annotations and assertions still are not evidence.
+    if ((ts.isCallExpression(node) || ts.isAwaitExpression(node)) && valueType(checker.getTypeOfSymbolAtLocation(symbol, node))) {
+      const base = recordOf(node);
+      return base.why ? base : ok(`F02 primitive result field \`${key}\``, ...base.rules);
+    }
     const declared = declaration && (ts.isPropertySignature(declaration) || ts.isPropertyDeclaration(declaration) || ts.isParameter(declaration)) && declaration.type
       ? checker.getTypeFromTypeNode(declaration.type) : null;
     if (!declared || !valueType(declared)) return { why: `\`${key}\` is declared \`${declared ? typeText(declared) : declaration ? K[declaration.kind] : '?'}\`, not a primitive or a Date` };
@@ -2813,13 +2824,311 @@ function scanAuditWrites(sources = auditSources()) {
     && tokens.every((token, n) => token.kind !== 'word' || !WRITES.has(token.upper)
       || (token.upper === 'UPDATE' && ['FOR', 'KEY'].includes(tokens[n - 1]?.upper)));
   const isFragment = expression => containsSql(checker.getTypeAtLocation(expression));
+  // Finite SQL alternatives retain the boundary between text and bound values. Concatenate before
+  // lexing, so two innocent-looking fragments cannot hide a table name across their seam.
+  class SqlProofError extends Error {}
+  const sqlText = value => ({ parts: [value], spans: [] });
+  const sqlParameter = expression => ({ parts: ['', ''], spans: [expression] });
+  const appendSql = (left, right) => ({
+    parts: [...left.parts.slice(0, -1), left.parts.at(-1) + right.parts[0], ...right.parts.slice(1)],
+    spans: [...left.spans, ...right.spans],
+    repeated: new Set([...(left.repeated ?? []), ...(right.repeated ?? [])]),
+  });
+  function sqlProduct(left, right) {
+    if (!left.length || !right.length || left.length * right.length > 256)
+      throw new SqlProofError('SQL alternatives are empty or exceed the enumeration limit');
+    return left.flatMap(a => right.map(b => appendSql(a, b)));
+  }
+  function fragmentArray(expression, writer, seen = new Set()) {
+    const node = bare(expression);
+    if (ts.isArrayLiteralExpression(node)) return node;
+    if (!ts.isIdentifier(node)) return null;
+    const symbol = symbolAt(node), declarations = symbol?.declarations ?? [], [declaration] = declarations;
+    if (declarations.length !== 1 || !isConst(declaration) || !declaration.initializer
+      || declaration.getSourceFile() !== writer.getSourceFile() || seen.has(declaration)) return null;
+    // No writes or opaque aliases to this array: even a const's elements are mutable.
+    if (references(symbol).some(reference => {
+      const held = outer(reference), parent = held.parent;
+      return !inTypePosition(reference) && !inert(held)
+        && !(ts.isCallExpression(parent) && prismaMember(parent.expression) === 'join' && parent.arguments[0] === held);
+    })) return null;
+    return fragmentArray(declaration.initializer, writer, new Set(seen).add(declaration));
+  }
+  /** A primitive projection through array-producing code. This follows data, never SQL fragments:
+   * local arrays populated by push, record returns, map/filter/slice/sort/find and Map#values.
+   * It lets a JSON-shaped service result retain the proof of its string uid even when the enclosing
+   * record was declared any. An unknown producer, write, spread or projection fails the proof. */
+  function projectedValue(expression, keys, bound = new Map(), seen = new Set()) {
+    const node = bare(expression);
+    const mark = `${where(node)}@${node.pos}:${node.end}:${K[node.kind]}:${keys.join('.')}`;
+    if (seen.has(mark) || seen.size > 80 || containsSql(checker.getTypeAtLocation(node))) return false;
+    const next = new Set(seen).add(mark);
+    const read = (value, path = keys, scope = bound) => projectedValue(value, path, scope, next);
+    const given = boundArgument(node, bound);
+    if (given) return read(given.expression, [...(given.keys ?? []), ...keys], given.outer);
+    if (!keys.length && !sqlValue(node).why) return true;
+    if (ts.isAwaitExpression(node)) return read(node.expression);
+    if (ts.isConditionalExpression(node)) return read(node.whenTrue) && read(node.whenFalse);
+    if (ts.isIdentifier(node)) {
+      const symbol = symbolAt(node), declarations = symbol?.declarations ?? [], [declaration] = declarations;
+      if (declarations.length !== 1 || !isConst(declaration) || !declaration.initializer || writesOf(symbol).plain.length || writesOf(symbol).other.length) return false;
+      const pushed = [];
+      for (const reference of references(symbol)) {
+        const holder = outer(reference), parent = holder.parent;
+        if (ts.isVariableDeclaration(parent) && parent.initializer === holder) return false;
+        if (ts.isCallExpression(parent) && parent.arguments.includes(holder)
+          && prismaMember(parent.expression) !== 'join' && !functionsOf(parent.expression, 'flow')?.length) return false;
+        if (isAccess(parent) && parent.expression === holder) {
+          const access = outer(parent), use = access.parent;
+          let member = access;
+          while (isAccess(member.parent) && member.parent.expression === member) member = outer(member.parent);
+          if (mutated(member)) return false;
+          if (ts.isCallExpression(use) && use.expression === access && w1(parent).key === 'push') {
+            if (use.arguments.some(ts.isSpreadElement)) return false;
+            pushed.push(...use.arguments);
+          } else if (ts.isCallExpression(use) && use.expression === access && !['map', 'filter', 'slice', 'sort', 'find', 'some', 'every', 'findIndex'].includes(w1(parent).key)) return false;
+        }
+      }
+      return read(declaration.initializer) && (!pushed.length || keys[0] === '*' && pushed.every(value => read(value, keys.slice(1))));
+    }
+    if (isAccess(node)) {
+      const { key } = w1(node);
+      return key !== undefined && read(node.expression, [key, ...keys]);
+    }
+    if (ts.isObjectLiteralExpression(node) && keys.length) {
+      const [key, ...rest] = keys;
+      for (const member of [...node.properties].reverse()) {
+        if (ts.isSpreadAssignment(member)) {
+          const type = checker.getTypeAtLocation(member.expression);
+          const parts = type.isUnion() ? type.types : [type];
+          if (parts.every(part => !(part.flags & (TF.Any | TF.Unknown)) && !checker.getPropertyOfType(part, key)
+            && !checker.getIndexTypeOfType(part, ts.IndexKind.String))) continue;
+          return false;
+        }
+        const name = member.name && w1(member.name).key;
+        if (name === undefined) return false;
+        if (name !== key) continue;
+        return ts.isPropertyAssignment(member) ? read(member.initializer, rest)
+          : ts.isShorthandPropertyAssignment(member) && read(member.name, rest);
+      }
+      return !rest.length; // an absent field is a bound undefined
+    }
+    if (ts.isArrayLiteralExpression(node) && keys.length) {
+      const [key, ...rest] = keys;
+      if (key !== '*') return !node.elements.some(ts.isSpreadElement) && !!node.elements[Number(key)] && read(node.elements[Number(key)], rest);
+      return node.elements.every(item => ts.isSpreadElement(item) ? read(item.expression, keys) : read(item, rest));
+    }
+    if (ts.isCallExpression(node)) {
+      const callee = bare(node.expression);
+      if (isAccess(callee) && lib(checker.getResolvedSignature(node)?.declaration ?? node)) {
+        const method = w1(callee).key, receiver = bare(callee.expression);
+        if (['filter', 'slice', 'sort'].includes(method)) return read(receiver);
+        if (method === 'find') return read(receiver, ['*', ...keys]);
+        if (method === 'map' && keys[0] === '*') {
+          const fn = node.arguments[0];
+          if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) || !fn.parameters.length) return false;
+          const scope = new Map(bound).set(fn.parameters[0], { expression: receiver, keys: ['*'], outer: bound });
+          const returned = returnsOf(fn);
+          return returned.length > 0 && returned.every(value => read(value, keys.slice(1), scope));
+        }
+        if (method === 'values' && keys[0] === '*' && ts.isNewExpression(receiver)
+          && ts.isIdentifier(receiver.expression) && receiver.expression.text === 'Map'
+          && (symbolAt(receiver.expression)?.declarations ?? []).some(lib) && receiver.arguments?.length === 1)
+          return read(receiver.arguments[0], ['*', '1', ...keys.slice(1)]);
+        return false;
+      }
+      const owners = functionsOf(callee, 'flow');
+      if (!owners?.length || node.arguments.some(ts.isSpreadElement)) return false;
+      return owners.every(owner => {
+        const scope = new Map(bound);
+        for (const [index, parameter] of owner.parameters.entries()) {
+          const argument = node.arguments[index - shift(owner)] ?? parameter.initializer;
+          if (!argument && parameter.questionToken) continue;
+          if (parameter.dotDotDotToken || !argument) return false;
+          scope.set(parameter, { expression: argument, outer: bound });
+        }
+        const returned = returnsOf(owner);
+        return returned.length > 0 && returned.every(value => read(value, keys, scope));
+      });
+    }
+    return false;
+  }
+  /** Local fixed compositions only. Unknown text never becomes an empty fragment. W4 continues to
+   *  reject fragments written through an alias or handed to code whose use we cannot follow. */
+  function composedSql(expression, writer, seen = new Set(), bound = null, templates = new Set()) {
+    const node = bare(expression);
+    const fail = why => { throw new SqlProofError(`${where(node)}: ${why}`); };
+    if (seen.has(node) || seen.size > 64) fail('recursive SQL composition');
+    const next = new Set(seen).add(node);
+    const compose = value => composedSql(value, writer, next, bound, templates);
+    const given = boundArgument(node, bound);
+    if (given) return composedSql(given.expression, writer, next, given.outer, templates);
+    if (node.getSourceFile() !== writer.getSourceFile()) fail('SQL fragment comes from another module');
+    // A nullable fragment's null branch is a bound null, not SQL text. Keeping even unreachable
+    // branches is a conservative superset (e.g. a later truthiness check selects the fragment).
+    if (nothing(node)) return [sqlParameter(node)];
+    if (ts.isConditionalExpression(node)) return [...compose(node.whenTrue), ...compose(node.whenFalse)];
+    if (prismaMember(node) === 'empty') return [sqlText('')];
+    if (ts.isTaggedTemplateExpression(node) && prismaMember(node.tag) === 'sql') {
+      templates.add(node.template);
+      return composedTemplate(node.template, writer, next, bound, templates);
+    }
+    if (ts.isIdentifier(node)) {
+      const symbol = symbolAt(node), declarations = symbol?.declarations ?? [], [declaration] = declarations;
+      if (declarations.length !== 1 || declaration.getSourceFile() !== writer.getSourceFile()) fail('SQL holder is not local');
+      if (references(symbol).some(reference => mutated(outer(reference)))) fail('SQL holder is changed');
+      if (isConst(declaration) && declaration.initializer) return compose(declaration.initializer);
+      if (ts.isParameter(declaration) && W3_KINDS.has(helperKind(declaration.parent).kind)) {
+        const inputs = parameterInputs(declaration, symbol, node.text);
+        if (inputs.why) fail(inputs.why);
+        return inputs.found.flatMap(compose);
+      }
+      fail('SQL holder is not a const or a closed helper parameter');
+    }
+    if (ts.isCallExpression(node)) {
+      const name = prismaMember(node.expression);
+      if (name === 'raw') {
+        const literal = bare(node.arguments[0]);
+        if (node.arguments.length !== 1 || !(ts.isStringLiteral(literal) || ts.isNoSubstitutionTemplateLiteral(literal)))
+          fail('Prisma.raw text is not literal');
+        templates.add(literal);
+        return [sqlText(literal.text)];
+      }
+      if (name === 'join') {
+        const args = node.arguments.slice(1).map(bare);
+        if (args.some(arg => !(ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)))) fail('join punctuation is not literal');
+        const [separator = ',', prefix = '', suffix = ''] = args.map(arg => arg.text);
+        if (args.length > 3 || !node.arguments[0]) fail('unsupported join arguments');
+        const array = bare(node.arguments[0]), literal = fragmentArray(array, writer);
+        // A literal array is a finite composition (including each conditional fragment).
+        if (literal && !literal.elements.some(ts.isSpreadElement)) {
+          let variants = [sqlText(prefix)];
+          for (const [index, item] of literal.elements.entries()) {
+            if (index) variants = sqlProduct(variants, [sqlText(separator)]);
+            variants = sqlProduct(variants, composedInterpolation(item, writer, next, bound, templates));
+          }
+          if (!literal.elements.length) fail('an empty join throws before SQL is sent');
+          return sqlProduct(variants, [sqlText(suffix)]);
+        }
+        // An arbitrary number of *parameters*, separated by commas, cannot add identifiers. This
+        // is repetition of a token class, not sampling array elements. Other separators fail closed.
+        if (separator !== ',' || prefix || suffix) fail('unbounded join with structural punctuation');
+        const element = elementType(array);
+        if (element && (valueType(element) || projectedValue(array, ['*']))) {
+          const lost = keptNote(array);
+          if (lost) fail(lost);
+          const value = sqlValue(array);
+          if (value.why && !projectedValue(array, ['*'])) fail(value.why);
+          // The repetition proof concerns each element, not the array as one F02 parameter.
+          return [{ ...sqlParameter(array), repeated: new Set([array]) }];
+        }
+        // Array#map of bound values with casts is the other repetition used by the product.
+        // Restrict its grammar to parameter[::type]; arbitrary repeated SQL is not enumerated.
+        if (ts.isCallExpression(array) && isAccess(bare(array.expression)) && w1(bare(array.expression)).key === 'map'
+          && lib(checker.getResolvedSignature(array)?.declaration ?? array)) {
+          const fn = array.arguments[0];
+          if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) fail('map callback is not local');
+          const returned = returnsOf(fn);
+          if (!returned.length) fail('map callback has no return');
+          const variants = returned.flatMap(compose);
+          for (const variant of variants) {
+            let tokens;
+            try { tokens = sqlTokens(variant.parts); } catch (error) { fail(error.message); }
+            if (!(tokens[0]?.kind === 'param' && (tokens.length === 1 || tokens.length === 3
+              && tokens[1].value === '::' && ['word', 'ident'].includes(tokens[2].kind)))) fail('map is not a bound value with an optional cast');
+            for (const span of variant.spans) { const value = sqlValue(span); if (value.why) fail(value.why); }
+          }
+          return variants;
+        }
+        fail('join array elements are unknown');
+      }
+      const owners = functionsOf(node.expression, 'w3');
+      if (!owners?.length || node.arguments.some(ts.isSpreadElement)) fail('SQL helper is not followed');
+      return owners.flatMap(owner => {
+        if (owner.getSourceFile() !== writer.getSourceFile()) fail('SQL helper comes from another module');
+        const bindings = new Map();
+        owner.parameters.forEach((parameter, index) => {
+          const argument = node.arguments[index - shift(owner)] ?? parameter.initializer;
+          if (parameter.dotDotDotToken || !argument) fail('SQL helper arguments are not fixed');
+          bindings.set(parameter, { expression: argument, outer: bound });
+        });
+        const returned = returnsOf(owner);
+        if (!returned.length) fail('SQL helper has no return');
+        return returned.flatMap(value => composedSql(value, writer, next, bindings, templates));
+      });
+    }
+    fail(`unsupported SQL composition \`${snippet(node)}\``);
+  }
+  function composedInterpolation(expression, writer, seen, bound, templates) {
+    const node = bare(expression), given = boundArgument(node, bound);
+    if (given) return composedInterpolation(given.expression, writer, seen, given.outer, templates);
+    if (ts.isConditionalExpression(node)) return [node.whenTrue, node.whenFalse]
+      .flatMap(value => composedInterpolation(value, writer, seen, bound, templates));
+    if (isFragment(node)) return composedSql(node, writer, seen, bound, templates);
+    const value = sqlValue(node);
+    if (value.why) throw new SqlProofError(value.why);
+    return [sqlParameter(node)];
+  }
+  function composedTemplate(source, writer, seen, bound, templates) {
+    if (!ts.isTemplateExpression(source)) return [sqlText(source.text)];
+    let variants = [sqlText(source.head.text)];
+    for (const span of source.templateSpans) {
+      variants = sqlProduct(variants, composedInterpolation(span.expression, writer, seen, bound, templates));
+      variants = sqlProduct(variants, [sqlText(span.literal.text)]);
+    }
+    return variants;
+  }
+  function rawCall(call) {
+    let source = ts.isTaggedTemplateExpression(call) ? call.template : null;
+    const argument = !source && call.arguments.length === 1 ? bare(call.arguments[0]) : null;
+    if (argument && ts.isTaggedTemplateExpression(argument) && prismaMember(argument.tag) === 'sql') source = argument.template;
+    if (argument && (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))) source = argument;
+    // Keep the existing two positive audit-write grammars and their narrower WITH predicate rule.
+    // For a read or a composition, enumerate first, then apply those same grammars to every variant.
+    if (source) {
+      const parts = ts.isTemplateExpression(source) ? [source.head.text, ...source.templateSpans.map(span => span.literal.text)] : [source.text];
+      if (parts.some(part => TABLE_WORDS.test(part))) {
+        try { if (!readsOnly(sqlTokens(parts))) return rawVariant(call); }
+        catch { return rawVariant(call); }
+      }
+      if (!ts.isTemplateExpression(source) || !source.templateSpans.some(span => isFragment(bare(span.expression)))) return rawVariant(call);
+    }
+    let variants;
+    const templates = new Set();
+    try {
+      variants = source ? composedTemplate(source, call, new Set(), null, templates)
+        : argument ? composedSql(argument, call, new Set(), null, templates) : null;
+    } catch (error) {
+      if (!(error instanceof SqlProofError)) throw error;
+      // The original diagnosis also identifies cast/escape paths guarded by W4 and F02.
+      const entry = rawVariant(call);
+      entry.reason += `; composition: ${error.message}`;
+      return entry;
+    }
+    if (!variants?.length) return rawVariant(call);
+    if (variants.length > 256) return note(call, 'raw call', 'unresolved', 'SQL alternatives exceed the enumeration limit', 'F02 composition');
+    for (const template of templates) claimed.add(template);
+    if (source) claimed.add(source);
+    const at = candidates.length, written = sites.length;
+    for (const variant of variants) rawVariant(call, variant);
+    const results = candidates.splice(at), writers = sites.splice(written);
+    const failed = results.filter(result => result.status === 'unresolved');
+    if (failed.length) return note(call, failed[0].kind, 'unresolved', [...new Set(failed.map(result => result.reason))].join('; '), 'F02 composition; W5');
+    if (writers.length) {
+      const found = union(...writers.map(site => site.actions.map(action => text(action, site.origins, 'W5 composition'))),
+        ...writers.map(site => site.prefixes.map(value => prefix(value, 'composed action', site.rules))));
+      return record(call, writers[0].via, found, null, [...new Set(writers.flatMap(site => site.basis))],
+        [...new Set(writers.flatMap(site => site.fragments))], [...new Set(writers.flatMap(site => site.rules))]);
+    }
+    return note(call, results[0].kind, 'proven_non_audit', `all ${variants.length} SQL alternatives: ${[...new Set(results.map(result => result.reason))].join('; ')}`, 'W6 composition');
+  }
   /**
    * A raw call. Its SQL must be one fixed text of the program. Every interpolation is judged first (F02), whatever the SQL
    * says: a value (sqlValue), or — only inside a G2 WITH body — a fixed predicate (W5); a fragment anywhere else leaves it
    * unresolved. Then: SQL naming no AuditLog, AuditLog only in strings or comments, and one SELECT that changes no row are
    * not writes (W6); G1 and G2 are writes (W5); every other statement naming AuditLog is unresolved.
    */
-  function rawCall(call) {
+  function rawVariant(call, composed = null) {
     let source = null;
     if (ts.isTaggedTemplateExpression(call)) source = call.template;
     else if (call.arguments.length === 1) {
@@ -2827,10 +3136,10 @@ function scanAuditWrites(sources = auditSources()) {
       if (ts.isTaggedTemplateExpression(argument) && prismaMember(argument.tag) === 'sql') source = argument.template;
       else if (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument)) source = argument;
     }
-    if (!source) return note(call, 'raw call', 'unresolved', `its SQL is not one fixed text of the program: \`${snippet(call)}\``, 'W6');
-    claimed.add(source);
-    const parts = ts.isTemplateExpression(source) ? [source.head.text, ...source.templateSpans.map(span => span.literal.text)] : [source.text];
-    const spans = ts.isTemplateExpression(source) ? source.templateSpans.map(span => span.expression) : [];
+    if (!source && !composed) return note(call, 'raw call', 'unresolved', `its SQL is not one fixed text of the program: \`${snippet(call)}\``, 'W6');
+    if (source) claimed.add(source);
+    const parts = composed?.parts ?? (ts.isTemplateExpression(source) ? [source.head.text, ...source.templateSpans.map(span => span.literal.text)] : [source.text]);
+    const spans = composed?.spans ?? (ts.isTemplateExpression(source) ? source.templateSpans.map(span => span.expression) : []);
     const names = parts.some(part => TABLE_WORDS.test(part));
     let tokens = null, form = null;
     if (names) {
@@ -2851,6 +3160,7 @@ function scanAuditWrites(sources = auditSources()) {
     const basis = [], rules = new Set(), fragments = [], problems = [];
     for (const [index, expression] of spans.entries()) {
       if (slot && slot.index === index) continue;   // the action: read by W2 below
+      if (composed?.repeated?.has(expression)) { rules.add('F02 comma-separated bound values (every element proved)'); continue; }
       const token = tokens?.find(item => item.kind === 'param' && item.index === index);
       if (isFragment(expression)) {
         if (token && inWith(token)) {
@@ -3246,14 +3556,9 @@ function scanAuditWrites(sources = auditSources()) {
 
 // ── the verdict: the contract table is read here only ──
 
-// The D-NW list: the raw SQL sites the scan cannot prove, set aside by what they are (file, declaration, kind, count).
-// It is bound to no hash of the source tree, the schema or the compiler inputs - see admin-audit-deferrals.cjs.
-const { listedRawSites, rawSiteList } = require('./admin-audit-deferrals.cjs');
-const RAW_SITE_LIST = JSON.parse(readFileSync(path.join(__dirname, 'admin-audit-nonwrite-deferrals.json'), 'utf8'));
-
 const VERDICT = {
   unread_sources: 'every script file under api/src is read by the program',
-  unresolved: 'an audit candidate lacks proof or an explicit valid D-NW disposition',
+  unresolved: 'an audit candidate lacks proof',
   unlisted: 'an audit action written under api/src without a contract row',
   uncovered_prefixes: 'a dynamic audit action without a wildcard row',
   unwritten_rows: 'contract rows nothing writes',
@@ -3283,11 +3588,10 @@ function verdict(scan, table = productTable(), listing = null) {
 const failing = found => Object.keys(VERDICT).filter(name => found[name].length > 0);
 
 
-test('completeness: every api/src file is read, every candidate is proved or explicitly deferred, both directions hold', () => {
+test('completeness: every api/src file is read, every candidate is proved, both directions hold', () => {
   const { sources, listing } = productSources();
   const scan = scanAuditWrites(sources);
-  const disposition = listedRawSites(scan, sources, RAW_SITE_LIST);
-  const found = verdict({ ...scan, unresolved: disposition.unresolved }, productTable(), listing);
+  const found = verdict(scan, productTable(), listing);
   // The inventory, whatever the verdict: every write site with its kind, actions or prefixes and their basis, every
   // unresolved candidate, and every candidate proven not to be a write with its reason.
   console.log('ADMIN_AUDIT_SOURCES ' + JSON.stringify(listing));
@@ -3298,16 +3602,11 @@ test('completeness: every api/src file is read, every candidate is proved or exp
   console.log('ADMIN_AUDIT_CANDIDATES ' + JSON.stringify(tally));
   for (const entry of scan.candidates.filter(entry => entry.status === 'proven_non_audit')) console.log('ADMIN_AUDIT_NON_AUDIT ' + JSON.stringify(entry));
   console.log('ADMIN_AUDIT_CLIENT_FLOW ' + JSON.stringify(scan.flow));
-  console.log('ADMIN_AUDIT_DEFERRAL_INPUT ' + JSON.stringify(RAW_SITE_LIST));
-  // The raw SQL sites of this tree in the list's own shape: what the list file holds when it is in step.
-  console.log('ADMIN_AUDIT_RAW_SITES ' + JSON.stringify(rawSiteList(scan, sources)));
-  for (const entry of disposition.deferred) console.log('ADMIN_AUDIT_DEFERRED_NON_AUDIT ' + JSON.stringify(entry));
-  console.log('ADMIN_AUDIT_DEFERRAL_ERRORS ' + JSON.stringify(disposition.errors));
   const literals = new Set(scan.sites.flatMap(site => site.actions)), byRule = {};
   for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
   console.log('ADMIN_AUDIT_COMPLETENESS ' + JSON.stringify({ typescript: scan.typescript, files_listed: listing.disk, files_read: scan.files.length,
     write_sites: scan.sites.length, raw_sql_sites: scan.sites.filter(site => site.via.startsWith('raw')).length,
-    unresolved: scan.unresolved.length, deferred_non_audit: disposition.deferred.length, blocking_unresolved: found.unresolved.length,
+    unresolved: scan.unresolved.length,
     distinct_actions: literals.size, dynamic_prefixes: [...new Set(scan.sites.flatMap(site => site.prefixes))].sort(),
     by_rule: byRule, write_files: new Set(scan.sites.map(site => site.file)).size }));
   console.log('ADMIN_AUDIT_VERDICT ' + JSON.stringify(found));
@@ -3543,10 +3842,6 @@ test('checker self-test: every counterexample F03 enumerates leaves its write or
       const writes = own.filter(candidate => WRITES_AND_RAW.has(candidate.kind) && candidate.status !== 'proven_non_audit');
       assert.ok(writes.length > 0 && writes.every(candidate => candidate.status === 'unresolved'), `${name}: ${JSON.stringify(own)}`);
       assert.equal(scan.sites.filter(site => site.file === entry.source.file).length, 0, `${name}: no write of it resolves`);
-      const disposition = listedRawSites(scan, [...baselineSources(), entry.source], RAW_SITE_LIST);
-      assert.equal(disposition.deferred.length, 0, name);
-      for (const reason of scan.unresolved) assert.ok(disposition.unresolved.includes(reason), name);
-      assert.deepEqual(failing(verdict({ ...scan, unresolved: disposition.unresolved }, fixtureTable(entry.table))), ['unresolved'], name);
       results[`${finding} / ${variant}`] = { case: name, unresolved: writes.map(candidate => `${candidate.line} ${candidate.kind}: ${candidate.reason}`),
         beside: own.filter(candidate => !writes.includes(candidate)).map(candidate => `${candidate.line} ${candidate.kind} ${candidate.status}`) };
     }
@@ -3890,76 +4185,60 @@ test('completeness negative controls on api/src: unlisted, dynamic without a wil
     one_write_paths: reasons }));
 });
 
-
-test('D-NW list: the listed raw SQL sites, and only they, are set aside - known by what they are, not where they stand', () => {
-  const sources = auditSources(), scan = scanAuditWrites(sources);
-  const before = inventory(scan), raw = [...scan.unresolved];
-  const allowed = listedRawSites(scan, sources, RAW_SITE_LIST);
-  const total = RAW_SITE_LIST.sites.reduce((sum, row) => sum + row.count, 0);
-  assert.deepEqual(allowed.errors, []);
-  assert.deepEqual(allowed.unresolved, []);
-  assert.equal(allowed.deferred.length, total);
-  assert.ok(allowed.deferred.every(entry => entry.status === 'deferred_non_audit'
-    && entry.original_status === 'unresolved' && entry.disposition === 'D-NW'));
-  assert.deepEqual(rawSiteList(scan, sources), RAW_SITE_LIST.sites, 'the list file is the scan\'s own site list');
-  assert.deepEqual(inventory(scan), before, 'the raw candidate inventory is not rewritten');
-  assert.deepEqual(scan.unresolved, raw);
-  // No list: the ordinary fail-closed verdict.
-  assert.deepEqual(listedRawSites(scan, sources, null), { unresolved: raw, deferred: [], errors: [] });
-  // The same tree in another line-ending form and another file order gives the same answer.
-  assert.deepEqual(listedRawSites(scan, [...sources].reverse().map(source =>
-    ({ ...source, text: source.text.replace(/\n/g, '\r\n') })), RAW_SITE_LIST), allowed);
-  // Positions do not matter: every file that bears a listed site gets lines in front of it, every other file a line
-  // at its end - no row of the list changes and the same sites are set aside.
-  const bearing = new Set(RAW_SITE_LIST.sites.map(row => row.file));
-  const shifted = sources.map(source => ({ ...source, text: bearing.has(source.file)
-    ? '// moved\n// moved again\n' + source.text : source.text + '\n// an unrelated change\n' }));
-  const shiftedScan = scanAuditWrites(shifted), moved = listedRawSites(shiftedScan, shifted, RAW_SITE_LIST);
-  assert.deepEqual([moved.errors, moved.unresolved, moved.deferred.length], [[], [], total]);
-  assert.deepEqual(failing(verdict({ ...shiftedScan, unresolved: moved.unresolved })), []);
-  console.log('ADMIN_AUDIT_DEFERRAL_CONTROLS ' + JSON.stringify({
-    raw_unresolved: raw.length, deferred: allowed.deferred.length, blocking_unresolved: allowed.unresolved.length,
-    list_rows: RAW_SITE_LIST.sites.length,
-  }));
+test('raw provenance: fixed alternatives are classified after composition, including newly exposed audit writes', () => {
+  const source = asSource('raw-composition.ts', String.raw`
+import { Prisma } from '@prisma/client';
+const table = Prisma.sql\`"AuditLog"\`;
+function predicate(uid: string) { return Prisma.sql\`uid = \${uid}\`; }
+export function run(tx: Prisma.TransactionClient, uid: string, choice: boolean, ids: string[]) {
+  const optional = choice ? Prisma.sql\` FOR SHARE\` : Prisma.empty;
+  const columns = [Prisma.sql\`uid\`, choice ? Prisma.sql\`ward\` : Prisma.sql\`rs\`];
+  tx.$queryRaw(Prisma.sql\`SELECT \${Prisma.join(columns)} FROM "StudyState" WHERE \${predicate(uid)}\${optional}\`);
+  tx.$queryRaw\`SELECT uid FROM "StudyState" WHERE uid IN (\${Prisma.join(ids)})\`;
+  tx.$queryRaw\`SELECT uid FROM "StudyState" WHERE uid IN (\${Prisma.join(ids.map(id => Prisma.sql\`\${id}::text\`))})\`;
+  tx.$executeRaw\`UPDATE "StudyState" SET ward=\${uid} WHERE \${predicate(uid)}\`;
+  tx.$executeRaw\`INSERT INTO \${table} (action) VALUES ('syn.allowed')\`;
+  const statement = choice ? Prisma.sql\`SELECT 1\` : Prisma.sql\`INSERT INTO "AuditLog" (action) VALUES ('syn.new-action')\`;
+  tx.$executeRaw(statement);
+}
+`.replace(/\\([`$])/g, '$1'));
+  const scan = scanAuditWrites([source]);
+  assert.deepEqual(scan.unresolved, []);
+  assert.equal(scan.candidates.filter(entry => entry.status === 'proven_non_audit' && WRITES_AND_RAW.has(entry.kind)).length, 4);
+  assert.deepEqual(scan.sites.map(site => site.actions), [['syn.allowed'], ['syn.new-action']]);
+  const table = { rows: ['syn.allowed'], wildcards: [], listed: action => action === 'syn.allowed' };
+  assert.deepEqual(failing(verdict(scan, table)), ['unlisted']);
+  assert.deepEqual(verdict(scan, table).unlisted, ['syn.new-action']);
 });
 
-test('D-NW list: a raw SQL site that is not on the list fails by itself; a row the scan no longer finds does too', () => {
-  const refused = (result, scan, label) => {
-    assert.equal(result.deferred.length, 0, label);
-    assert.ok(result.errors.length > 0, label);
-    for (const entry of scan.unresolved) assert.ok(result.unresolved.includes(entry), label);
-    return result;
+test('raw provenance: every unenumerable input fails closed on its own', async t => {
+  const cases = {
+    'nonliteral SQL': 'tx.$executeRawUnsafe(body.sql);',
+    'nonliteral raw': 'tx.$queryRaw(Prisma.sql`SELECT ${Prisma.raw(body.sql)}`);',
+    'concatenation': 'tx.$executeRawUnsafe("SELECT " + body.sql);',
+    'unknown spread': 'tx.$queryRaw`SELECT ${Prisma.join([...body.parts])}`;',
+    'unknown array behind an annotation': 'const ids: string[] = body.ids; tx.$queryRaw`SELECT ${Prisma.join(ids)}`;',
+    'unknown conditional': 'const part = choice ? Prisma.sql`SELECT 1` : body.sql; tx.$queryRaw(part);',
+    'array mutation': 'const parts = [Prisma.sql`SELECT 1`]; parts.push(body.sql); tx.$queryRaw`${Prisma.join(parts)}`;',
+    'array alias mutation': 'const rows: any[] = []; const alias = rows; alias.push(body.row); const ids: string[] = rows.map(row => row.uid); tx.$queryRaw`SELECT ${Prisma.join(ids)}`;',
+    'opaque array consumer': 'const rows: any[] = []; opaque(rows); const ids: string[] = rows.map(row => row.uid); tx.$queryRaw`SELECT ${Prisma.join(ids)}`;',
+    'cross-module helper': 'tx.$queryRaw`SELECT ${fragment()}`;',
+    'fragment mutation': 'const part = Prisma.sql`SELECT 1`; (part as any).strings[0] = body.sql; tx.$queryRaw(part);',
+    'text seam': 'tx.$executeRaw`${Prisma.raw("INSERT INTO \\\"Au")}${Prisma.raw("ditLog\\\" (action) VALUES (\\\'syn.new-action\\\')")}`;',
   };
-  // The checker fixture's own unresolved raw fragment, alone: unresolved without the list and with it.
-  const source = asSource('deferral-boundary.ts', fixtureText('deferral-boundary.ts', MEMBER_FIXTURES));
-  const alone = [...baselineSources(), source], aloneScan = scanAuditWrites(alone);
-  assertMarked(aloneScan, source);
-  assert.deepEqual(failing(verdict(aloneScan, fixtureTable())), ['unresolved']);
-  assert.equal(aloneScan.unresolved.length, 1);
-  const lone = refused(listedRawSites(aloneScan, alone, RAW_SITE_LIST), aloneScan, 'the fixture alone');
-  assert.deepEqual(failing(verdict({ ...aloneScan, unresolved: lone.unresolved }, fixtureTable())), ['unresolved']);
-  // The same fragment added to the product tree: every listed site is where it was, the new one is not listed, and
-  // the product verdict fails on `unresolved` alone, naming it.
-  const product = auditSources(), added = [...product, source], addedScan = scanAuditWrites(added);
-  const one = refused(listedRawSites(addedScan, added, RAW_SITE_LIST), addedScan, 'a new raw site in the product tree');
-  assert.ok(one.errors.every(error => error.includes('a new raw SQL site is not on the list') && error.includes(source.file)), JSON.stringify(one.errors));
-  // (the fixture's own audit actions are not rows of the product table: only the raw site is judged here)
-  assert.ok(failing(verdict({ ...addedScan, unresolved: one.unresolved })).includes('unresolved'));
-  // One more raw site inside a declaration that already has listed ones is new too.
-  const scan = scanAuditWrites(product);
-  const short = structuredClone(RAW_SITE_LIST);
-  short.sites[0].count -= 1;
-  if (short.sites[0].count === 0) short.sites.shift();
-  const more = refused(listedRawSites(scan, product, short), scan, 'a site beyond the listed count');
-  assert.deepEqual(failing(verdict({ ...scan, unresolved: more.unresolved })), ['unresolved']);
-  // A row for a site the scan no longer finds (it was resolved or removed) must leave the list.
-  const stale = structuredClone(RAW_SITE_LIST);
-  stale.sites.push({ file: 'api/src/pacs.service.ts', within: 'PacsService.noSuchMethod', kind: 'raw call', count: 1 });
-  const gone = refused(listedRawSites(scan, product, stale), scan, 'a listed site that is gone');
-  assert.ok(gone.errors.some(error => error.includes('take the resolved site off the list')));
-  // A malformed list sets nothing aside.
-  for (const broken of [{ ...RAW_SITE_LIST, schema_version: 3 }, { ...RAW_SITE_LIST, sites: null },
-    { ...RAW_SITE_LIST, sites: [...RAW_SITE_LIST.sites, RAW_SITE_LIST.sites[0]] },
-    { ...RAW_SITE_LIST, sites: [{ ...RAW_SITE_LIST.sites[0], kind: 'auditLog.create' }, ...RAW_SITE_LIST.sites.slice(1)] }])
-    refused(listedRawSites(scan, product, broken), scan, 'a malformed list');
+  for (const [name, body] of Object.entries(cases)) await t.test(name, () => {
+    const source = asSource('raw-unknown.ts', `import { Prisma } from '@prisma/client';
+import { fragment } from './foreign-fragment';
+declare function opaque(value: unknown): void;
+export function run(tx: Prisma.TransactionClient, body: any, choice: boolean) { ${body} }`);
+    const foreign = asSource('foreign-fragment.ts', 'import { Prisma } from "@prisma/client"; export function fragment() { return Prisma.sql`1`; }');
+    const scan = scanAuditWrites([source, foreign]);
+    const found = verdict(scan, { rows: [], wildcards: [], listed: () => false });
+    assert.ok(failing(found).length > 0, name);
+    if (name === 'text seam') {
+      assert.deepEqual(failing(found), ['unlisted']);
+      assert.deepEqual(found.unlisted, ['syn.new-action']);
+    }
+    else assert.ok(found.unresolved.length > 0, `${name}: ${JSON.stringify(scan.candidates)}`);
+  });
 });
