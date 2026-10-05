@@ -44,25 +44,6 @@ class ThumbnailFailuresE2E(ThumbnailLabelsE2E):
         folder=Path(__file__).parent/'artifacts';folder.mkdir(exist_ok=True)
         page.locator('#thumbwrap').screenshot(path=str(folder/('D02G-'+label+'.png')))
 
-    def closed_on_401(self,page,calls,fixture,label):
-        # A lookup's 401 goes through the page's api(), which runs the end list before KinAuth.logout: since S7-U5 that
-        # list closes the work screen at the first 401 (Astra S7-U5-SPEC-B-F01 clauses 3-4, BR-01), so no thumbnail of the
-        # session is left to mark as stopped. What D02G asks of this wave stays: only the first wave was sent and nothing
-        # was scheduled after it.
-        page.evaluate('() => thumbDone')
-        print('D02G requests '+json.dumps(dict(case=label,requests=len(calls))),flush=True)
-        self.assertGreater(len(calls),0)
-        self.assertLessEqual(len(calls),4,'First-wave common failure must not schedule the rest of 24 items')
-        text=page.evaluate('() => document.body.innerText')
-        self.assertNotIn('D02G item',text,'a series label of the session is still on screen after the 401')
-        self.assertNotIn(fixture.patient_id,text,'the study is still on screen after the 401')
-        self.assertEqual(page.evaluate("() => ['findings','conclusion','recommendation'].map(k => document.querySelector('#'+k).value)"),
-                         ['','',''],'the report text is still on screen after the 401')
-        sent=len(calls);page.wait_for_timeout(1000)
-        self.assertEqual(len(calls),sent,'a lookup was scheduled after the page closed')
-        folder=Path(__file__).parent/'artifacts';folder.mkdir(exist_ok=True)
-        page.screenshot(path=str(folder/('D02G-'+label+'.png')))
-
     def setup_page(self):
         fixture=self.ct('D02G-'+uuid.uuid4().hex[:16],'current','20260801');self.seed_report(fixture)
         self.assertEqual(self.stack.request('PUT',f'/studies/{fixture.uid}/report','doctor',dict(
@@ -81,43 +62,34 @@ class ThumbnailFailuresE2E(ThumbnailLabelsE2E):
         self.assertEqual(writes,[]);self.assertEqual(self.report_rows(fixture),rows);self.assertEqual(self.originals(),originals)
 
     def test_d02g_02_401_bound_and_real_session_end(self):
-        """AUTH: isolated logout counting followed by a real BFF-revoked session and original logout."""
-        fixture,page,originals,rows=self.setup_page();series,gets=self.variants(page,fixture);calls=[]
-        page.evaluate('() => { window.d02gLogouts=0; KinAuth.logout=async()=>{ d02gLogouts++; }; }')
+        """Plain 401 stops only its wave; a bound ENDED clears the document without a second logout."""
+        fixture,page,originals,rows=self.setup_page();series,gets=self.variants(page,fixture);calls=[];logouts=[];logins=[]
+        page.on('request',lambda request:logouts.append(request.url) if request.url.endswith('/api/auth/logout') else None)
+        page.on('request',lambda request:logins.append(request.url) if request.url.endswith('/api/auth/login') else None)
         def unauthorized(route):calls.append(route.request.url);route.fulfill(status=401,json={'message':'arbitrary 401 text'})
         pattern='**/api/dicom/lookup';page.route(pattern,unauthorized)
-        self.refresh_thumbnails(page);self.closed_on_401(page,calls,fixture,'lookup-401-observer')
-        self.assertEqual(page.evaluate('d02gLogouts'),len(calls));self.assertLessEqual(len(calls),4)
+        self.refresh_thumbnails(page);self.stopped(page,calls,series,'lookup-plain-401')
+        self.assertEqual(page.evaluate('KinWorkContext.state()'),'active');self.assertEqual(logouts,[])
+        expect(page.locator('#findings')).to_have_value('D02G private draft')
         page.unroute(pattern,unauthorized)
-        # Reload removes the observer; the next branch uses actual server401 and the product's unchanged logout.
-        page.reload();page.wait_for_selector('#rows tr[data-uid]');self.select(page,fixture);self.thumbs(page,24)
-        writes=self.source_writes(page);actual=[];logouts=[];navigations=[];logins=[]
-        page.on('framenavigated',lambda frame:navigations.append(urlsplit(frame.url).path) if frame==page.main_frame else None)
-        page.on('response',lambda r:actual.append(r.status) if r.url.endswith('/api/dicom/lookup') else None)
-        page.on('response',lambda r:logouts.append(r.status) if r.url.endswith('/api/auth/logout') else None)
-        page.on('request',lambda r:logins.append(r.url) if urlsplit(r.url).path=='/api/auth/login' else None)
-        response=document_request(page, "POST", self.stack.api+'/auth/logout',headers={'X-KIN-CSRF':'1'})
-        self.assertIn(response.status,(200,204));self.assertEqual(page.context.request.get(self.stack.api+'/me').status,401)
-        # The revocation expired this profile's session cookie, so the page's own logout POST carries no session.
-        self.assertNotIn('kin_sid',[c['name'] for c in page.context.cookies()])
-        with page.expect_response(lambda r:r.url.endswith('/api/dicom/lookup') and r.status==401):
+        self.refresh_thumbnails(page);self.thumbs(page,24)
+        writes=self.source_writes(page);actual=[]
+        page.on('response',lambda response:actual.append((response.status,response.headers.get('x-kin-auth-code')))
+                if response.url.endswith('/api/dicom/lookup') else None)
+        response=document_request(page,'POST',self.stack.api+'/auth/logout',headers={'X-KIN-CSRF':'1'})
+        self.assertEqual(response.status,204)
+        self.assertIn('kin_sid',[cookie['name'] for cookie in page.context.cookies()])
+        ended=document_request(page,'GET',self.stack.api+'/me')
+        self.assertEqual(ended.status,401);self.assertEqual(ended.json()['code'],'AUTH_SESSION_ENDED')
+        with page.expect_response(lambda response:response.url.endswith('/api/dicom/lookup') and response.status==401):
             page.evaluate('() => { renderThumbs(); }')
-        # S7-U5: the 401 ends the page once and moves it to the landing, which starts no login by itself. That POST gets the
-        # general 401 of a request without a session (no session was looked up), so the end is recorded as not confirmed
-        # (Astra S7-U5-SPEC-C-F03) and the landing offers Retry Log Out - not the confirmed notice, not the login form.
         page.wait_for_url('**/worklist/hpacs-lite/index.html',timeout=30000)
-        expect(page.locator('#retry-logout')).to_be_visible()
-        self.assertEqual({'state':'unconfirmed','reason':'credentials'},page.evaluate('KinAuth.endState()'))
+        expect(page.locator('#retry-logout')).to_be_hidden()
+        self.assertEqual({'state':'confirmed','reason':None},page.evaluate('KinAuth.endState()'))
         page.wait_for_timeout(500)
-        self.assertEqual([],logins,'the landing started a login by itself')
-        expect(page.locator('#username')).to_have_count(0)
-        self.assertIn('/worklist/hpacs-lite/index.html',navigations)
-        self.assertTrue(actual);self.assertTrue(all(x==401 for x in actual));self.assertLessEqual(len(actual),4)
-        print('D02G real session '+json.dumps(dict(lookupStatus=actual,logoutStatus=logouts,
-              indexObserved=True,finalPath=urlsplit(page.url).path)),flush=True)
-        # The explicit revocation returned204; further logout calls carry no valid session and the auth guard returns401.
-        self.assertTrue(logouts);self.assertTrue(all(x==401 for x in logouts),logouts)
-        self.assertEqual(page.context.request.get(self.stack.api+'/me').status,401)
+        self.assertEqual(logins,[]);self.assertEqual(logouts,[])
+        self.assertTrue(actual);self.assertLessEqual(len(actual),4)
+        self.assertTrue(all(reply==(401,'AUTH_SESSION_ENDED') for reply in actual),actual)
         self.assertEqual(writes,[]);self.assertEqual(self.report_rows(fixture),rows);self.assertEqual(self.originals(),originals)
 
     def test_d02g_03_preview_failures_individual_errors_and_retry(self):

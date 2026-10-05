@@ -8,6 +8,7 @@ from test_viewer_tech_note import ViewerTechNoteE2E
 from test_prior_selection import canvas_ready
 from test_dock_preferences import dock_settings
 from document_session import document_request
+from viewer_session import end_document
 
 class DockAccountE2E(AppearanceAccountE2E):
  def saved(self,p):expect(p.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')
@@ -45,7 +46,7 @@ class DockAccountE2E(AppearanceAccountE2E):
   p.locator('#reading-dock-placement').select_option('bottom');f.evaluate("()=>{const save=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k.startsWith('kin-viewer-dock:v1:'))throw Error('synthetic denial');return save.call(this,k,v)}}")
   p.locator('#appearance-account-load').click();expect(f.locator('#kin-dock-placement')).to_have_value('top');expect(p.locator('#reading-dock-status')).to_contain_text('이 창에만');expect(p.locator('#appearance-account-status')).to_have_text('계정의 표시 설정을 불러왔습니다.')
   pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…');self.assertEqual(len(pending),1)
-  p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(p.locator('#reading-frame')).to_have_count(0);expect(p.locator('#reading-dock-placement')).to_be_disabled();expect(p.locator('#appearance-account-save')).to_be_disabled()
+  end_document(p);expect(p.locator('#reading-frame')).to_have_count(0);expect(p.locator('#reading-dock-placement')).to_be_disabled();expect(p.locator('#appearance-account-save')).to_be_disabled()
   for route in pending:route.abort()
 
  def test_dock_account_05_parent_storage_denial_and_popup_late_load(self):

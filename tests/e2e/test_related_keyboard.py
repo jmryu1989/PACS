@@ -4,6 +4,7 @@ import json,unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_workspace import ReadingWorkspaceE2E,canvas_ready
+from viewer_session import end_document
 
 class RelatedKeyboardE2E(ReadingWorkspaceE2E):
  def test_related_keyboard_01_preview_compare_and_report_draft(self):
@@ -27,7 +28,13 @@ class RelatedKeyboardE2E(ReadingWorkspaceE2E):
   p.evaluate("()=>{relatedModality='';renderRelated()}");expect(p.locator('#relrows tr[tabindex="0"]')).to_have_count(1)
   button.focus();p.evaluate("()=>{selectedUid=null;renderRelated()}");expect(p.locator('#related-current')).to_be_focused()
   p.evaluate('uid=>{selectedUid=uid;renderRelated()}',a.uid)
-  p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(p.locator('#relrows tr[tabindex="0"]')).to_have_count(0);expect(button).to_have_attribute('tabindex','-1')
+  expect(button).to_be_visible();retired=button.element_handle();pages=len(p.context.pages)
+  end_document(p);expect(p.locator('#relrows tr[tabindex="0"]')).to_have_count(0);expect(button).to_have_count(0)
+  self.assertFalse(retired.evaluate('node=>node.isConnected'))
+  requests=[];p.on('request',lambda r:requests.append(r.url) if '/api/' in r.url or '/dicom-web/' in r.url else None)
+  retired.evaluate('node=>node.click()');p.keyboard.press('Enter');p.wait_for_timeout(350)
+  self.assertIsNone(p.evaluate('selectedUid'));self.assertIsNone(p.evaluate('relatedUid'));expect(p.locator('#reading-frame')).to_have_count(0)
+  self.assertEqual(len(p.context.pages),pages);self.assertEqual(requests,[])
  def test_related_keyboard_03_loaded_rows_cross_page_without_selection(self):
   a,b=self.pair();p=self.login();self.choose(p,a);p.locator('#findings').fill('KEEP PAGED RELATED DRAFT')
   p.evaluate("""uid=>{clearInterval(poll);const base=studies.find(s=>s.uid===uid);studies.push(...Array.from({length:51},(_,i)=>({...base,uid:'related-dom-'+String(i).padStart(2,'0')})));renderRelated()}""",b.uid)

@@ -8,6 +8,7 @@ from test_viewer_jobs import ViewerJobsE2E
 from test_prior_selection import canvas_ready
 from invariants_live import psql
 from viewer_api_test import literal
+from viewer_session import release_after_end, end_document
 
 class FavoriteViewE2E(ViewerJobsE2E):
  account=FavoritesE2E.account
@@ -97,10 +98,14 @@ class FavoriteViewE2E(ViewerJobsE2E):
   full=self.stack.request('GET',f'/studies/{a.uid}/viewer-jobs/{job["id"]}','doctor').body
   p=self.login();self.select(p,b);self.open_toolbar_group(p,'#favorite-open');p.locator('#favorite-open').click();waiting=[];pattern='**/viewer-jobs/'+job['id'];p.route(pattern,lambda r:waiting.append(r))
   with p.expect_request(pattern):p.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True).click()
-  p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-  expect(p.locator('#favorite-dialog')).not_to_be_visible()
-  for route in waiting:route.fulfill(status=200,content_type='application/json',body=json.dumps(full))
-  expect(p.locator('#rows tr.sel')).to_have_attribute('data-uid',b.uid);expect(p.locator('#reading-frame')).to_have_count(0)
+  expect(p.locator('#rows tr.sel')).to_have_attribute('data-uid',b.uid)
+  end_document(p)
+  expect(p.locator('#favorite-dialog')).not_to_be_visible();self.assertFalse(p.locator('#favorite-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
+  requests=[];p.on('request',lambda r:requests.append(r.url) if '/api/' in r.url or '/dicom-web/' in r.url else None)
+  for route in waiting:release_after_end(route,status=200,content_type='application/json',body=json.dumps(full))
+  p.wait_for_timeout(350)
+  expect(p.locator('#rows tr[data-uid]')).to_have_count(0);expect(p.locator('#reading-frame')).to_have_count(0)
+  self.assertEqual(requests,[],'A late favorite view must not restart study or viewer reads')
 
 def load_tests(loader,tests,pattern):
  return unittest.TestSuite(FavoriteViewE2E(n) for n in loader.getTestCaseNames(FavoriteViewE2E) if n.startswith('test_favorite_view_'))

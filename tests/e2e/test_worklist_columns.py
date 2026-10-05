@@ -9,6 +9,7 @@ import uuid
 from playwright.sync_api import expect
 import test_worklist as base
 from document_session import document_request
+from viewer_session import end_document
 
 
 class WorklistColumnsE2E(base.WorklistE2E):
@@ -156,8 +157,8 @@ class WorklistColumnsE2E(base.WorklistE2E):
         for selector in ('#wc-close','#wc-list','#wc-save'):
             page.locator(selector).scroll_into_view_if_needed();expect(page.locator(selector)).to_be_in_viewport()
         self.assertTrue(page.locator('#column-manager').evaluate('e=>e.scrollWidth<=e.clientWidth+1'))
-        page.evaluate("() => {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close();}")
-        expect(page.locator('#column-manager')).not_to_be_visible()
+        end_document(page)
+        expect(page.locator('#column-manager')).not_to_be_visible();self.assertFalse(page.locator('#column-manager').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
         expect(page.locator('#columnsettings')).to_be_disabled()
 
 

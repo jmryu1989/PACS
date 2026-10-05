@@ -6,6 +6,8 @@ from playwright.sync_api import expect
 from test_reading_note import ReadingNoteE2E,canvas_ready
 from test_display_controls import DisplayControlsE2E
 from document_session import document_request
+from access_assertions import permission_denied
+from viewer_session import end_viewer, release_after_end
 
 class ViewerTechNoteE2E(ReadingNoteE2E):
  def active(self,p,uid):
@@ -41,12 +43,12 @@ class ViewerTechNoteE2E(ReadingNoteE2E):
   v.locator('#tech-note-history').click();expect(v.locator('#tech-note-history-items section')).to_have_count(2);expect(v.locator('#tech-note-text')).to_have_value('KEEP UNSAVED NOTE');v.once('dialog',lambda d:d.accept());v.locator('#tech-note-reload').click();expect(v.locator('#tech-note-text')).to_have_value('CONCURRENT NOTE');v.locator('#tech-note-close').click()
   v.reload();canvas_ready(v,1);self.ready(v);self.open_note(v);expect(v.locator('#tech-note-text')).to_have_value('CONCURRENT NOTE')
  def test_viewer_note_03_bound_headers_reject_before_read_write(self):
-  a=self.ct('VIEWER-OWNER-'+uuid.uuid4().hex[:10],'owner','20260801');v=self.launch(self.login('tech'),[a]);self.ready(v);me=document_request(v, "GET", self.stack.api+'/me').json();path=self.stack.api+f'/studies/{a.uid}/tech-note';body=dict(baseVersion=0,text='MUST NOT SAVE',reason='')
+  a=self.ct('VIEWER-OWNER-'+uuid.uuid4().hex[:10],'owner','20260801');v=self.launch(self.login('tech'),[a]);self.ready(v);path=self.stack.api+f'/studies/{a.uid}/tech-note';body=dict(baseVersion=0,text='MUST NOT SAVE',reason='')
   for headers in [{'X-KIN-Subject':self.stack.user_ids['doctor']},{'X-KIN-Institution':'kin-center'}]:
    headers['X-KIN-CSRF']='1'
-   self.assertEqual(document_request(v, "GET", path,headers=headers).status,403);self.assertEqual(document_request(v, "GET", path+'/history',headers=headers).status,403);self.assertEqual(document_request(v, "POST", path,headers=headers,data=body).status,403)
+   permission_denied(self,document_request(v, "GET", path,headers=headers));permission_denied(self,document_request(v, "GET", path+'/history',headers=headers));permission_denied(self,document_request(v, "POST", path,headers=headers,data=body))
   self.assertIsNone(self.stack.request('GET',f'/studies/{a.uid}/tech-note','tech').body['note']);self.open_note(v);expect(v.locator('#tech-note-text')).to_have_value('')
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#tech-note-dialog')).to_have_count(0);expect(v.locator('#kin-viewer-note-open')).to_be_disabled()
+  ended=end_viewer(v, ['#tech-note-text','#kin-viewer-note-open']);self.assertEqual(ended.retained('#tech-note-text','node => node.value'),['']);self.assertEqual(ended.retained('#kin-viewer-note-open','node => node.disabled'),[True]);ended.assert_quiet()
  def test_viewer_note_04_wrong_target_and_late_response(self):
   a=self.ct('VIEWER-LATE-'+uuid.uuid4().hex[:10],'late','20260801');self.note(a,'SAFE NOTE');v=self.launch(self.login(),[a]);self.ready(v);path='**/api/studies/'+a.uid+'/tech-note'
   v.route(path,lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(uid='1.2.3.4',note=dict(studyUid='1.2.3.4',text='WRONG NOTE'),writable=True))))
@@ -56,17 +58,19 @@ class ViewerTechNoteE2E(ReadingNoteE2E):
    if waiting:break
    v.wait_for_timeout(50)
   self.assertEqual(len(waiting),1,'Actual note GET must be pending before session end')
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#tech-note-dialog')).to_have_count(0)
-  for route in waiting:route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(uid=a.uid,note=dict(studyUid=a.uid,text='LATE NOTE'),writable=False)))
-  expect(v.locator('#tech-note-dialog')).to_have_count(0);expect(v.locator('#kin-viewer-note-open')).to_be_disabled()
+  ended=end_viewer(v, ['#tech-note-text','#kin-viewer-note-open'])
+  for route in waiting:release_after_end(route,status=200,content_type='application/json',body=json.dumps(dict(uid=a.uid,note=dict(studyUid=a.uid,text='LATE NOTE'),writable=False)))
+  ended.assert_quiet();self.assertEqual(ended.retained('#tech-note-text','node => node.value'),['']);self.assertEqual(ended.retained('#kin-viewer-note-open','node => node.disabled'),[True])
  def test_viewer_note_05_initial_connection_retry_preserves_view(self):
   a=self.ct('VIEWER-RETRY-'+uuid.uuid4().hex[:10],'retry','20260801');self.note(a,'RECONNECTED NOTE')
-  p=self.login();fail=[True]
+  p=self.login();v=self.launch(p,[a]);canvas_ready(v,1);self.ready(v);fail=[True]
   def intermittent(route):
-   if '/ohif/viewer' in route.request.frame.url and fail[0]:route.fulfill(status=503,content_type='application/json',body='{}')
+   if '/ohif/viewer' in route.request.frame.url and route.request.headers.get('x-kin-session') and fail[0]:route.fulfill(status=503,content_type='application/json',body='{}')
    else:route.continue_()
   p.context.route('**/api/me',intermittent)
-  v=self.launch(p,[a]);canvas_ready(v,1)
+  # The document and writer gate have already confirmed this account. Re-enter
+  # the note extension so only its own first connection check is unavailable.
+  v.evaluate("()=>{const extension=window.config.extensions.find(e=>e.id==='kin.viewer-tech-note');extension.onModeExit();extension.onModeEnter()}")
   expect(v.locator('#kin-viewer-note-status')).to_contain_text('다시 시도하세요')
   layout=v.locator('#kin-viewer-layout')
   if layout.get_attribute('open') is None:layout.locator('summary').first.click()
@@ -90,7 +94,8 @@ class ViewerTechNoteE2E(ReadingNoteE2E):
   self.assertEqual([after_box[k] for k in ['width','height']],[before_box[k] for k in ['width','height']])
   self.assertEqual(v.url,url);self.assertEqual(self.snapshot(v),before);expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP RETRY JOB TITLE')
   self.open_note(v);expect(v.locator('#tech-note-text')).to_have_value('RECONNECTED NOTE');v.locator('#tech-note-close').click()
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-  expect(v.locator('#kin-viewer-note-open')).to_be_disabled();expect(v.locator('#kin-viewer-note-retry')).to_be_disabled()
+  ended=end_viewer(v, ['#kin-viewer-note-open','#kin-viewer-note-retry'])
+  for selector in ['#kin-viewer-note-open','#kin-viewer-note-retry']:self.assertEqual(ended.retained(selector,'node => node.disabled'),[True])
+  ended.assert_quiet()
 def load_tests(loader,tests,pattern):return unittest.TestSuite(ViewerTechNoteE2E(n) for n in loader.getTestCaseNames(ViewerTechNoteE2E) if n.startswith('test_viewer_note_'))
 if __name__=='__main__':unittest.main(verbosity=2)

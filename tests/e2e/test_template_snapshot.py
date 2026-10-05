@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import unittest
 import uuid
+import json
+from urllib.parse import urlsplit
 
 from playwright.sync_api import expect
 import test_report_template as previous
@@ -15,7 +17,7 @@ class TemplateSnapshotE2E(previous.ReportTemplateE2E):
 
     def refresh(self, page):
         # Existing UI event may arrive while an editor is open; do not change app variables.
-        with page.expect_response(lambda r: r.request.method == "GET" and r.url.endswith("/api/studies")):
+        with page.expect_response(lambda r: r.request.method == "GET" and urlsplit(r.url).path == "/api/studies"):
             page.locator("#refresh").dispatch_event("click")
 
     def test_d09e_01_delayed_draft_discard_preserves_copied_editor(self):
@@ -27,9 +29,11 @@ class TemplateSnapshotE2E(previous.ReportTemplateE2E):
         self.assertEqual(response.status, 200)
         page = self.login(); self.select(page, fixture)
         expect(page.locator("#findings")).to_have_value(values["findings"])
+        before_drafts=[json.loads(row) for row in self.report_rows(fixture)['ReportDraft']]
+        self.assertEqual(len(before_drafts),1)
         pending = []
         pattern = f"**/api/studies/{fixture.uid}/draft"
-        page.route(pattern, lambda route: pending.append(route))
+        page.route(pattern, lambda route: pending.append(route) if route.request.method=='DELETE' else route.continue_())
         try:
             page.once("dialog", lambda dialog: dialog.accept())
             with page.expect_request(lambda r: r.method == "DELETE" and r.url.endswith(f"/studies/{fixture.uid}/draft")):
@@ -48,7 +52,12 @@ class TemplateSnapshotE2E(previous.ReportTemplateE2E):
             expect(page.locator("#tpl-save")).to_be_enabled()
             # The user explicitly discarded the source draft. Snapshot saving must add no further source write.
             after_discard = self.report_rows(fixture)
-            self.assertEqual(after_discard["ReportDraft"], [])
+            drafts=[json.loads(row) for row in after_discard['ReportDraft']]
+            self.assertEqual(len(drafts),1)
+            self.assertEqual((drafts[0]['uid'],drafts[0]['author']), (fixture.uid,before_drafts[0]['author']))
+            self.assertFalse(drafts[0]['present'])
+            self.assertEqual(drafts[0]['revision'],before_drafts[0]['revision']+1)
+            self.assertEqual([drafts[0][key] for key in values],['','',''])
             writes = self.template_writes(page)
             source_writes = []
             page.on("request", lambda r: source_writes.append(r.url) if r.method in ("POST", "PUT", "PATCH", "DELETE")
@@ -76,9 +85,11 @@ class TemplateSnapshotE2E(previous.ReportTemplateE2E):
         writes = self.template_writes(page)
         def without_source(route):
             reply = route.fetch(); data = reply.json()
+            count=len(data["studies"])
             data["studies"] = [row for row in data["studies"] if row["uid"] != fixture.uid]
+            data["pagination"]["total"] -= count-len(data["studies"])
             route.fulfill(response=reply, json=data)
-        page.route("**/api/studies", without_source)
+        page.route("**/api/studies?*", without_source)
         try:
             self.refresh(page)
             expect(page.locator(f'#rows tr[data-uid="{fixture.uid}"]')).to_have_count(0)
@@ -92,7 +103,7 @@ class TemplateSnapshotE2E(previous.ReportTemplateE2E):
             self.assertEqual(writes, [])
             self.assertEqual(self.report_rows(fixture), before)
         finally:
-            page.unroute("**/api/studies")
+            page.unroute("**/api/studies?*")
         self.refresh(page)
         expect(page.locator("#tpl-save")).to_be_enabled()
         self.remember(self.save(page))

@@ -6,6 +6,7 @@ import uuid
 from playwright.sync_api import expect
 from test_study_access import StudyAccessE2E,policy,lit
 from test_worklist import psql
+from viewer_session import end_document
 
 class StudyAccessRecoveryE2E(StudyAccessE2E):
     def test_recovery_03_institution_move_requires_explicit_new_scope(self):
@@ -36,7 +37,7 @@ class StudyAccessRecoveryE2E(StudyAccessE2E):
         expect(p.locator('#findings')).to_have_value('SYNTHETIC UNSAVED ACCESS TEXT')
         self.write(policy(endsAt='2020-01-01T00:00:00.000Z'),revision=1);d.locator('[data-refresh]').click();expect(d.locator('[data-status]')).to_contain_text('Denied')
         expect(p.locator('#findings')).to_have_value('SYNTHETIC UNSAVED ACCESS TEXT')
-        p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close();}")
+        end_document(p)
         expect(d).to_have_count(0);expect(p.locator('#study-access-open')).to_be_disabled()
 
     def test_recovery_04_poll_recovers_changed_policy_after_outage(self):

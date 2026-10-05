@@ -7,6 +7,7 @@ from test_dock_account import DockAccountE2E
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
 from test_dock_preferences import dock_settings
 from document_session import document_request
+from viewer_session import end_document
 
 class DockAutohideE2E(DockAccountE2E):
  def tab(self,f):return f.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]')
@@ -49,7 +50,7 @@ class DockAutohideE2E(DockAccountE2E):
   other=self.login();g=self.opened(other,a);self.ready(other);expect(other.locator('#reading-dock-autohide')).not_to_be_checked();other.locator('#appearance-account-load').click();expect(other.locator('#appearance-account-status')).to_have_text('계정의 표시 설정을 불러왔습니다.');expect(other.locator('#reading-dock-autohide')).to_be_checked();expect(g.locator('#kin-dock-autohide')).to_be_checked()
   legacy=json.loads(json.dumps(saved));legacy['sizes']['version']=4;legacy['sizes'].pop('toolbar');legacy['sizes']['dock']=dict(version=1,placement='top',panel=0)
   other.route('**/api/reading-appearance',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(legacy)));other.locator('#appearance-account-load').click();expect(other.locator('#reading-dock-placement')).to_have_value('top');expect(other.locator('#reading-dock-autohide')).to_be_checked();expect(g.locator('#kin-dock-autohide')).to_be_checked()
-  other.locator('#reading-appearance-close').click();other.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(other.locator('#reading-frame')).to_have_count(0);expect(other.locator('#reading-dock-autohide')).to_be_disabled()
+  other.locator('#reading-appearance-close').click();end_document(other);expect(other.locator('#reading-frame')).to_have_count(0);expect(other.locator('#reading-dock-autohide')).to_be_disabled()
 
  def test_auto_04_history_busy_and_native_modal_guard(self):
   a,b=self.pair();p=self.login();f=self.opened(p,a);dock_settings(f).locator('#kin-dock-autohide').check();f.evaluate("()=>{window.originalHistoryState=kinViewerHistoryWorkspaceState;window.kinViewerHistoryWorkspaceState=()=>({busy:true,dirty:false})}")

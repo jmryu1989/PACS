@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 from test_toolbar_preferences import ToolbarPreferencesE2E,BASE,canvas_ready
 from workspace_roaming_support import cleanup_workspace
 from document_session import document_request
+from viewer_session import end_document
 
 class ToolbarAccountE2E(ToolbarPreferencesE2E):
  def setUp(self):super().setUp();self.addCleanup(cleanup_workspace,self.stack,'ReadingAppearance')
@@ -52,7 +53,7 @@ class ToolbarAccountE2E(ToolbarPreferencesE2E):
   a,b=self.pair();p=self.login();f=self.customized(p,a);wanted=self.section(f);p.locator('#reading-toolbar-reset').click();self.assertEqual(self.section(f),BASE)
   for target in [p,f]:target.evaluate("()=>{const old=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k.startsWith('kin-viewer-toolbar:v1:'))throw Error('synthetic storage denial');return old.call(this,k,v)}}")
   p.locator('#appearance-account-load').click();self.loaded(p);self.assertEqual(self.section(f),wanted);expect(p.locator('#reading-toolbar-status')).to_contain_text('이 화면에만');expect(f.locator('#kin-native-toolbar-status')).to_contain_text('이 창에만')
-  pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…');self.assertEqual(len(pending),1);p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(p.locator('#reading-frame')).to_have_count(0);expect(p.locator('#reading-toolbar-reset')).to_be_disabled();expect(p.locator('#appearance-account-save')).to_be_disabled()
+  pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…');self.assertEqual(len(pending),1);end_document(p);expect(p.locator('#reading-frame')).to_have_count(0);expect(p.locator('#reading-toolbar-reset')).to_be_disabled();expect(p.locator('#appearance-account-save')).to_be_disabled()
   for route in pending:route.abort()
 
  def test_account_05_other_window_invalidates_late_load_without_live_change(self):

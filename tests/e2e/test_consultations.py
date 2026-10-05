@@ -6,6 +6,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from playwright.sync_api import expect
 from test_worklist import WorklistE2E, psql
+from viewer_session import release_after_end, end_document
 
 
 def lit(value): return "'"+str(value).replace("'","''")+"'"
@@ -138,9 +139,9 @@ class ConsultationE2E(WorklistE2E):
         p.locator('#co-close').click();waiting=[];p.route('**/api/consultations?*',lambda route:waiting.append(route))
         self.open_toolbar_group(p,'#consultations-open')
         p.locator('#consultations-open').click();expect(p.locator('#co-status')).to_contain_text('읽는 중')
-        p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close();}")
-        expect(p.locator('#consultations-dialog')).not_to_be_visible()
-        for route in waiting:route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(owner=self.owner(),direction='received',items=[],nextCursor=None)))
+        end_document(p)
+        expect(p.locator('#consultations-dialog')).not_to_be_visible();self.assertFalse(p.locator('#consultations-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
+        for route in waiting:release_after_end(route,status=200,content_type='application/json',body=json.dumps(dict(owner=self.owner(),direction='received',items=[],nextCursor=None)))
         expect(p.locator('#co-list')).to_be_empty();expect(p.locator('#co-original')).to_be_empty()
 
 

@@ -6,6 +6,7 @@ from urllib.parse import parse_qs,urlsplit
 from playwright.sync_api import expect
 from test_reading_workspace import ReadingWorkspaceE2E
 from test_prior_selection import canvas_ready
+from viewer_session import end_document
 
 class WorklistSelectionE2E(ReadingWorkspaceE2E):
     def mark(self,p,uid):p.locator('#rows tr[data-uid="'+uid+'"]').click(modifiers=['Control'])
@@ -30,7 +31,7 @@ class WorklistSelectionE2E(ReadingWorkspaceE2E):
         expect(p.locator('#multi-selection-count')).to_have_text('Selected: 2');self.assertEqual(p.evaluate('selectedUid'),a.uid)
         p.locator('#multi-selection-page').click();expect(p.locator('#multi-selection-count')).to_have_text('Selected: 2')
         p.locator('#multi-selection-details').click();folder=Path('../tmp/worklist-selection/screens');folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'selection-details.png'))
-        p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close();}")
+        end_document(p)
         expect(d).to_have_count(0);expect(p.locator('#worklist-selection')).not_to_be_visible()
 
     def test_selection_02_real_comparison_preserves_report_and_originals(self):

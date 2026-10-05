@@ -129,3 +129,29 @@ test('responses over 2 MiB are rejected without being treated as missing metadat
   model.sync([study('1.2')]);await model.load();
   assert.equal(model.get('1.2'),undefined);assert.equal(model.snapshot().failed,1);
 });
+
+// U5S-REQ-11/22 -> U5S-RISK-APPLY -> worklist body parts lifecycle.
+test('preparation pauses remaining UIDs, cancellation resumes them, and coded end clears all values',async()=>{
+  const calls=[],pending=[];let hold=false;
+  const {gate}=install(url=>{
+    const uid=url.split('/')[3];calls.push(uid);
+    return hold ? new Promise(resolve=>pending.push({uid,resolve})) : json([row(uid,uid+'.1',['CHEST'])]);
+  });
+  const model=productCreate({owner:()=> 'a',changed(){}});
+  model.sync([study('1.2')]);await model.load();assert.deepEqual(model.get('1.2'),['CHEST']);
+  model.sync(Array.from({length:6},(_,i)=>study('1.'+(i+2))));hold=true;
+  const loading=model.load();const preparation=gate.prepare({});const count=calls.length;
+  assert.equal(model.snapshot().busy,false);
+  pending.splice(0).forEach(({uid,resolve})=>resolve(json([row(uid,uid+'.1',['OLD'])])));await loading;
+  assert.equal(calls.length,count);assert.equal(model.get('1.3'),undefined);
+  hold=false;assert.equal(gate.cancelPreparation(preparation),true);
+  for(let n=0;n<50&&model.snapshot().busy;n++)await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(model.snapshot().verified,6);assert.deepEqual(model.get('1.7'),['CHEST']);
+  hold=true;const late=model.load({refresh:true});const endedCalls=calls.length;
+  pending.shift().resolve(json({code:'AUTH_SESSION_ENDED'},{status:401,headers:{'X-KIN-Auth-Code':'AUTH_SESSION_ENDED'}}));
+  for(let n=0;n<50&&gate.state()==='active';n++)await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(gate.state(),'ending');assert.equal(model.snapshot().busy,false);
+  pending.splice(0).forEach(({uid,resolve})=>resolve(json([row(uid,uid+'.1',['LATE'])])));await late;await model.load();
+  assert.equal(calls.length,endedCalls);assert.equal(model.snapshot().verified,0);
+  for(let i=2;i<8;i++)assert.equal(model.get('1.'+i),undefined);
+});

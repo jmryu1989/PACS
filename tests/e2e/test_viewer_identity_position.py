@@ -7,6 +7,7 @@ from playwright.sync_api import expect
 from test_viewer_identity import ViewerIdentityE2E
 from test_viewer_tech_note import canvas_ready
 from document_session import document_request
+from viewer_session import end_viewer
 
 
 class ViewerIdentityPositionE2E(ViewerIdentityE2E):
@@ -132,8 +133,8 @@ class ViewerIdentityPositionE2E(ViewerIdentityE2E):
         expect(self.label(viewer, prior.uid)).to_contain_text(prior.patient_id)
         viewer.evaluate('()=>positionMetadata.SOPInstanceUID=positionSop')
         expect(self.label(viewer, current.uid)).to_contain_text(current.patient_id)
-        viewer.evaluate("""() => {const channel=new BroadcastChannel('kin-session');channel.postMessage({type:'session-ended'});channel.close()}""")
-        expect(viewer.locator('.kin-viewer-identity')).to_have_count(0)
+        ended=end_viewer(viewer, ['.kin-viewer-identity'])
+        self.assertTrue(all(ended.retained('.kin-viewer-identity')));ended.assert_quiet()
 
 
 def load_tests(loader, tests, pattern):

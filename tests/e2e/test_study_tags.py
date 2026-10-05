@@ -5,6 +5,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_worklist import WorklistE2E,psql
 from invariants_live import past_audit_guard
+from viewer_session import release_after_end, end_document
 
 def literal(x):return "'"+str(x).replace("'","''")+"'"
 class StudyTagsE2E(WorklistE2E):
@@ -98,8 +99,8 @@ class StudyTagsE2E(WorklistE2E):
   tid=self.catalog(s)['tags'][0]['id'];self.change(self.body(s,'rename',tid,name='SYNTHETIC concurrent'));p.locator('#study-tag-name').fill('SYNTHETIC intended');p.locator('#study-tag-rename').click();expect(p.locator('#study-tag-status')).to_contain_text('바뀌었습니다')
   expect(p.locator('#study-tag-name')).to_have_value('SYNTHETIC intended');p.locator('#study-tag-reload').click();expect(p.locator('#study-tag-list')).to_contain_text('SYNTHETIC concurrent');expect(p.locator('#study-tag-name')).to_have_value('SYNTHETIC intended');p.locator('#study-tag-rename').click();expect(p.locator('#study-tag-list')).to_contain_text('SYNTHETIC intended')
   p.locator('#study-tag-close').click();waiting=[];p.route('**/api/study-tags',lambda r:waiting.append(r));self.open_toolbar_group(p,'#study-tag-open');p.locator('#study-tag-open').click();expect(p.locator('#study-tag-status')).to_contain_text('읽는 중')
-  p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(p.locator('#study-tag-dialog')).not_to_be_visible()
-  for route in waiting:route.fulfill(status=200,content_type='application/json',body=json.dumps(s))
+  end_document(p);expect(p.locator('#study-tag-dialog')).not_to_be_visible();self.assertFalse(p.locator('#study-tag-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
+  for route in waiting:release_after_end(route,status=200,content_type='application/json',body=json.dumps(s))
   expect(p.locator('#study-tag-list')).to_be_empty();expect(p.locator('#study-tag-name')).to_have_value('')
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(StudyTagsE2E(n) for n in loader.getTestCaseNames(StudyTagsE2E) if n.startswith('test_tags_'))

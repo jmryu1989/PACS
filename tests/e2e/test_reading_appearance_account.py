@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 from test_reading_appearance import ReadingAppearanceE2E
 from workspace_roaming_support import cleanup_workspace
 from document_session import document_request
+from viewer_session import end_document, hold_landing
 
 class AppearanceAccountE2E(ReadingAppearanceE2E):
  def setUp(self):
@@ -59,8 +60,8 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   expect(p.locator('#appearance-account-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다')
   expect(p.locator('#findings')).to_have_css('font-size','18px')
   p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…')
-  p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-  expect(p.locator('#appearance-account-save')).to_be_disabled();expect(p.locator('#reading-appearance-dialog')).not_to_be_visible()
+  end_document(p)
+  expect(p.locator('#appearance-account-save')).to_be_disabled();expect(p.locator('#reading-appearance-dialog')).not_to_be_visible();self.assertFalse(p.locator('#reading-appearance-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
   for route in pending:route.abort()
  def test_roam_05_legacy_load_retains_local_font_color_then_upgrades(self):
   p=self.login();self.ready(p);head=document_request(p, "GET", self.stack.api+'/reading-appearance').json()
@@ -89,7 +90,7 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   self.assertEqual(document_request(p, "GET", self.stack.api+'/reading-appearance').json()['sizes']['colors']['current'],'warm')
 
  def test_roam_04_failed_write_empty_load_and_wrong_owner_response(self):
-  a,b=self.pair();p=self.login();self.ready(p);p.locator('#reading-text-current').select_option('20')
+  a,b=self.pair();p=self.login();self.ready(p);neutral=p.locator('#findings').evaluate('node=>getComputedStyle(node).fontSize');p.locator('#reading-text-current').select_option('20')
   p.route('**/api/reading-appearance',lambda route:route.fulfill(status=500,content_type='application/json',body='{}'))
   p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_contain_text('설정 저장 여부를 확인하지 못했습니다')
   expect(p.locator('#appearance-account-save')).to_be_disabled();expect(p.locator('#findings')).to_have_css('font-size','20px')
@@ -99,11 +100,15 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   expect(p.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')
   other=self.login('doctor2');self.ready(other);other.locator('#appearance-account-load').click()
   expect(other.locator('#appearance-account-status')).to_have_text('계정에 저장된 표시 설정이 없습니다.')
-  me=document_request(other, "GET", self.stack.api+'/me').json()
-  p.route('**/api/me',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(me)))
-  p.locator('#reading-text-current').select_option('16');p.locator('#appearance-account-load').click()
-  expect(p.locator('#appearance-account-status')).to_contain_text('세션이 변경되었습니다')
-  expect(p.locator('#findings')).to_have_css('font-size','16px');expect(p.locator('#appearance-account-save')).to_be_disabled()
+  landing=hold_landing(p)
+  p.route('**/api/reading-appearance',lambda route:route.fulfill(status=409,json={'code':'AUTH_SESSION_MISMATCH'},headers={'X-KIN-Auth-Code':'AUTH_SESSION_MISMATCH'}))
+  p.locator('#reading-text-current').select_option('16')
+  preferences=p.evaluate("Object.fromEntries(Object.entries(localStorage).filter(([k])=>k.startsWith('kin-reading-')))" )
+  with p.expect_response(lambda r:r.url.endswith('/worklist/hpacs-lite/index.html') and r.status==204):
+   p.locator('#appearance-account-load').click()
+  p.wait_for_function("KinWorkContext.state() !== 'active'");self.assertTrue(landing)
+  expect(p.locator('#findings')).to_have_css('font-size',neutral);expect(p.locator('#appearance-account-save')).to_be_disabled()
+  self.assertEqual(p.evaluate("Object.fromEntries(Object.entries(localStorage).filter(([k])=>k.startsWith('kin-reading-')))"),preferences)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(AppearanceAccountE2E(n) for n in loader.getTestCaseNames(AppearanceAccountE2E) if n.startswith('test_roam_'))
 if __name__=='__main__':unittest.main(verbosity=2)

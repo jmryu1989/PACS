@@ -8,6 +8,7 @@ from pypdf import PdfReader
 from pydicom import dcmread
 from playwright.sync_api import expect
 from test_viewer_jobs import ViewerJobsE2E, literal, psql, canvas_ready
+from access_assertions import permission_denied
 
 
 class ViewerJobPrintE2E(ViewerJobsE2E):
@@ -213,14 +214,30 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   j=self.jobs(a,suffix='?includeHidden=true')[0];revised=self.revised(j);revised.update(hidden=False,reason='시험 복원');self.post(a,revised,suffix='/'+j['id']+'/revisions')
   self.output(p)
   psql(f'UPDATE "StudyState" SET rs=\'P\', "preDoc"=\'other\', "preReviewer"=\'other2\' WHERE uid={literal(b.uid)}')
+  denied=[];pattern=f'**/api/studies/{a.uid}/viewer-jobs/{j["id"]}'
+  def read_denial(route):
+   # Retain the real response before the print loader aborts its failed read;
+   # Chromium may discard that body's CDP handle after cancellation.
+   response=route.fetch();response.body();denied.append(response);route.fulfill(response=response)
+  p.route(pattern,read_denial)
   try:
    with p.expect_popup() as opened:p.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF').click()
-   expect(p.locator('#kin-job-print')).not_to_be_visible();self.assertTrue(opened.value.is_closed())
-  finally:psql(f'UPDATE "StudyState" SET rs=\'W\', "preDoc"=NULL, "preReviewer"=NULL WHERE uid={literal(b.uid)}')
+   expect(p.locator('#kin-job-print [role=status]')).to_have_text('검사 접근이 거절되었습니다. 접근 권한을 확인하세요.')
+   self.assertEqual(len(denied),1);permission_denied(self,denied[0])
+   self.assertEqual(p.evaluate('KinWorkContext.state()'),'active')
+   self.assertTrue(opened.value.is_closed())
+   self.assertEqual(p.locator('#kin-job-print iframe').get_attribute('srcdoc'),'')
+   expect(p.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF')).to_be_disabled()
+  finally:
+   p.unroute(pattern,read_denial)
+   psql(f'UPDATE "StudyState" SET rs=\'W\', "preDoc"=NULL, "preReviewer"=NULL WHERE uid={literal(b.uid)}')
   p.close();p=self.launch_job([a]);self.output(p)
-  # relog silently replaces cookies; it does not emit the logout broadcast.
-  # The fallback checks after 15 s on a 1 s tick, then awaits the server.
-  work=p.context.new_page();self.relog(work,'doctor2');expect(p.locator('#kin-job-print')).not_to_be_visible(timeout=30000)
+  # The old document detects replacement on its next bound request.
+  from viewer_session import observe_viewer
+  ended=observe_viewer(p,['#kin-job-print'])
+  work=p.context.new_page();self.relog(work,'doctor2')
+  p.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click()
+  ended.ended();ended.assert_quiet();self.assertEqual(ended.retained('#kin-job-print','node => node.open'),[False])
 
  def test_print_06_actual_source_replacement_blocks_cached_display(self):
   f=self.ct('JOBPRINT-'+uuid.uuid4().hex[:12],'current','20260801');p=self.launch_job([f]);j=self.saved(p,f);self.output(p)

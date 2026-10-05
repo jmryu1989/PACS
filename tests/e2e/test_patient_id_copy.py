@@ -6,6 +6,7 @@ import pydicom
 from playwright.sync_api import expect
 from test_related_context import RelatedContextE2E
 from document_session import document_request
+from access_assertions import permission_denied
 
 class PatientIdCopyE2E(RelatedContextE2E):
  def clipboard(self,p):return p.evaluate('()=>navigator.clipboard.readText()')
@@ -28,7 +29,7 @@ class PatientIdCopyE2E(RelatedContextE2E):
   other=self.login('kdoctor');expect(other.locator('#rows tr[data-uid="'+a.uid+'"]').first).to_have_count(0)
   self.assertEqual(document_request(p, "GET", self.stack.proxy+'/api/studies/'+a.uid+'/report/versions').status,200)
   self.assertEqual(document_request(other, "GET", self.stack.proxy+'/api/studies/'+a.uid+'/report/versions').status,404)
-  self.assertEqual(document_request(other, "GET", self.stack.proxy+'/dicom-web/studies/'+a.uid+'/metadata').status,403)
+  permission_denied(self,document_request(other, "GET", self.stack.proxy+'/dicom-web/studies/'+a.uid+'/metadata'))
 
  def test_copy_02_rejection_unsupported_late_completion_and_retry(self):
   a=self.ct('000A-'+uuid.uuid4().hex[:12],'a','20260801');b=self.ct('000B-'+uuid.uuid4().hex[:12],'b','20260802');p=self.login();self.permit(p);self.select(p,a)

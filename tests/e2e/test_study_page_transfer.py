@@ -6,6 +6,8 @@ from playwright.sync_api import expect
 from test_worklist import WorklistE2E
 from study_page_stub import fulfill_page
 from document_session import document_request
+from viewer_session import hold_landing
+from test_viewer_layout import ViewerLayoutE2E
 
 class StudyPageTransferE2E(WorklistE2E):
     def test_transfer_01_failure_resume_cancel_and_related_pages(self):
@@ -46,10 +48,28 @@ class StudyPageTransferE2E(WorklistE2E):
         phase['name']='ok';page.locator('#study-fetch-resume').click();expect(page.locator('#study-fetch')).not_to_be_visible()
         expect(page.locator('#findings')).to_have_value('Transfer keeps unsaved report')
         folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);page.screenshot(path=str(folder/'resumed-related-pages.png'))
-    def test_transfer_02_owner_response_change_ends_session(self):
-        page=self.login()
-        page.route('**/api/studies?*',lambda route:route.fulfill(status=200,json={'studies':[], 'pagination':{'owner':['other','other'],'limit':100,'offset':0,'total':0,'next':None}}))
-        page.locator('#refresh').click();page.wait_for_url('**/worklist/hpacs-lite/index.html')
+    def test_transfer_02_owner_response_requires_confirmed_session_replacement(self):
+        page=self.login();expect(page.locator('#rows tr[data-uid]').first).to_be_visible()
+        before=page.locator('#rows tr[data-uid]').count();logouts=[]
+        page.on('request',lambda r:logouts.append(r.url) if r.method=='POST' and r.url.endswith('/auth/logout') else None)
+        pattern='**/api/studies?*'
+        page.route(pattern,lambda route:route.fulfill(status=200,json={'studies':[], 'pagination':{'owner':['other','other'],'limit':100,'offset':0,'total':0,'next':None}}))
+        with page.expect_response(lambda r:r.url.endswith('/api/me')):
+            page.locator('#refresh').click()
+        page.wait_for_timeout(200)
+        self.assertEqual(page.evaluate('KinWorkContext.state()'),'active')
+        expect(page.locator('#rows tr[data-uid]')).to_have_count(before)
+        self.assertEqual(logouts,[])
+        page.unroute(pattern);landing=hold_landing(page)
+        other=page.context.new_page();ViewerLayoutE2E.relog(self,other,'doctor2')
+        page.locator('#refresh').click();page.wait_for_function("KinWorkContext.state() !== 'active'")
+        self.assertTrue(landing);self.assertEqual(logouts,[])
+        self.assertIsNone(page.evaluate("localStorage.getItem('kin-session-end')"),'replacement must not write a logout record')
+        protected=[]
+        page.on('request',lambda request:protected.append(request.url) if '/api/' in request.url else None)
+        expect(page.locator('#refresh')).not_to_be_visible()
+        page.locator('#refresh').dispatch_event('click');page.wait_for_timeout(300)
+        self.assertEqual(protected,[],'An ended document must not fetch another account\'s list')
 
     def test_transfer_03_poll_retry_offline_and_final_apply_barrier(self):
         a=self.fixture();self.seed_report(a);page=self.login();self.select(page,a)

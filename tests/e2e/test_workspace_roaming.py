@@ -5,6 +5,7 @@ from playwright.sync_api import expect
 from test_workspace_persistence import WorkspacePersistenceE2E
 from workspace_roaming_support import cleanup_workspace
 from document_session import document_request
+from viewer_session import hold_landing, release_after_end
 
 class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
     def hashes(self):
@@ -69,9 +70,13 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
 
     def test_roam_02_owner_switch_new_login_and_conflict(self):
         x=self.device();a=self.sign_in(x);self.action(a,'Save to Account','저장했습니다');saved_a=self.remote(a)
+        landing=hold_landing(a)
         b=self.sign_in(x,'doctor2');self.assertIsNone(self.remote(b)['layout']);self.mode_is(b,'auto')
-        self.open_menu(a);a.get_by_role('button',name='Save to Account',exact=True).click()
-        expect(a.locator('#workspace-server-status')).to_contain_text('세션이 변경');expect(a.get_by_role('button',name='Save to Account',exact=True)).to_be_disabled()
+        self.open_menu(a)
+        with a.expect_response(lambda r:r.url.endswith('/worklist/hpacs-lite/index.html') and r.status==204):
+            a.get_by_role('button',name='Save to Account',exact=True).click()
+        a.wait_for_function("KinWorkContext.state() !== 'active'");self.assertTrue(landing)
+        expect(a.get_by_role('button',name='Save to Account',exact=True,include_hidden=True)).to_be_disabled()
         self.open_toolbar_group(b,'#layout-toggle')
         b.locator('#layout-toggle').click();self.action(b,'Save to Account','저장했습니다');saved_b=self.remote(b)
         by=self.sign_in(self.device(),'doctor2');self.mode_is(by,'auto');self.action(by,'Load from Account','불러왔습니다');self.mode_is(by,'portrait')
@@ -125,7 +130,7 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
     def test_roam_04_failure_storage_denial_and_csrf(self):
         page=self.sign_in(self.device());self.open_toolbar_group(page,'#layout-toggle');page.locator('#layout-toggle').click();self.action(page,'Save to Account','저장했습니다');remote=self.remote(page)
         denied=document_request(page, "PUT", self.stack.proxy+'/api/workspace-layout',data=dict(expectedOwner=remote['owner'],revision=remote['revision'],layout=remote['layout']))
-        self.assertEqual(denied.status,403);self.assertEqual(self.remote(page),remote)
+        self.assertEqual(denied.status,403);self.assertEqual(denied.json()['code'],'AUTH_CSRF_REQUIRED');self.assertEqual(denied.headers.get('x-kin-auth-code'),'AUTH_CSRF_REQUIRED');self.assertEqual(self.remote(page),remote)
         self.open_toolbar_group(page,'#layout-reset')
         page.locator('#layout-reset').click();before=self.stored(page);pattern='**/api/workspace-layout'
         bad=dict(remote,layout=dict(remote['layout'],mode='wrong'))
@@ -144,11 +149,14 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         page.get_by_role('button',name='Load from Account',exact=True).click();page.wait_for_timeout(100);self.assertEqual(len(pending),1)
         response=pending[0].fetch()
         # A session can be replaced in another tab without this old document receiving logout.
+        owner_key=self.owner(page);landing=hold_landing(page)
         other=self.sign_in(context,'doctor2');self.assertIsNone(self.remote(other)['layout'])
-        pending[0].fulfill(response=response)
-        expect(page.locator('#workspace-server-status')).to_contain_text('세션이 변경')
-        expect(page.get_by_role('button',name='Load from Account',exact=True)).to_be_disabled()
-        self.assertEqual(self.stored(page),before);self.mode_is(page,'auto');self.assertIsNone(self.remote(other)['layout'])
+        with page.expect_response(lambda r:r.url.endswith('/worklist/hpacs-lite/index.html') and r.status==204):
+            page.evaluate("() => { void KinSessionTransport.page().request('/api/me').catch(()=>null); }")
+        page.wait_for_function("KinWorkContext.state() !== 'active'");self.assertTrue(landing)
+        release_after_end(pending[0],response=response)
+        expect(page.get_by_role('button',name='Load from Account',exact=True,include_hidden=True)).to_be_disabled()
+        self.assertEqual(page.evaluate('key=>JSON.parse(localStorage.getItem(key))',owner_key),before);self.mode_is(page,'auto');self.assertIsNone(self.remote(other)['layout'])
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(WorkspaceRoamingE2E(n) for n in loader.getTestCaseNames(WorkspaceRoamingE2E) if n.startswith('test_roam_'))
 if __name__=='__main__':unittest.main(verbosity=2)

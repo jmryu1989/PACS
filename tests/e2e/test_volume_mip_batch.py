@@ -340,8 +340,8 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
    v.wait_for_timeout(100)
   self.assertEqual(len(held),1);body=json.loads(held[0].request.post_data)['snapshot'];self.assertEqual([body['version'],body['mipBatch']],[13,A]);expect(summary).to_contain_text('· Saving')
   make.click();expect(status).to_have_text('MIP 작업 저장이 끝난 뒤 MIP Batch를 만드세요.')
-  self.assertTrue(v.evaluate("()=>!!(window.batchHeldSummary=document.querySelector('#kin-volume-mip .kin-mip-voi-state'))"));v=end_viewer(v)
-  self.assertEqual(v.count('#kin-volume-mip[open]'),0);self.assertIn('세션이 변경되었습니다',ended_job_status(v))
+  self.assertTrue(v.evaluate("()=>!!(window.batchHeldSummary=document.querySelector('#kin-volume-mip .kin-mip-voi-state'))"));v=end_viewer(v);v.assert_quiet()
+  v.assert_quiet();self.assertIn('세션이 변경되었습니다',ended_job_status(v))
   try:held[0].abort()
   except Exception:pass
   v.wait_for_timeout(500);self.assertNotIn('Saved',v.evaluate('()=>batchHeldSummary.textContent'));self.assertNotIn('저장했습니다',ended_job_status(v))
@@ -381,8 +381,8 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
    self.rolled_back(v,'MIP 작업 복원을 취소했습니다',previous);self.assertEqual(v.evaluate('()=>mipCount()'),0);self.assertFalse(v.evaluate('()=>!!batchView()'))
    v.evaluate('()=>{batchHoldFrame=null}');v.wait_for_timeout(500);self.assert_unannounced(v)
   # A session ended during regeneration closes the viewer without a success status.
-  v.evaluate('()=>{batchStatuses.length=0;batchHoldFrame=2;batchHeld=0}');self.restore_titled(v,a,'MIP batch VOI job');v.wait_for_function('()=>batchHeld>0',timeout=90000);v=end_viewer(v)
-  self.assertEqual(v.count('#kin-volume-mip[open]'),0);v.evaluate('()=>{batchHoldFrame=null}');v.wait_for_timeout(500)
+  v.evaluate('()=>{batchStatuses.length=0;batchHoldFrame=2;batchHeld=0}');self.restore_titled(v,a,'MIP batch VOI job');v.wait_for_function('()=>batchHeld>0',timeout=90000);v=end_viewer(v);v.assert_quiet()
+  v.assert_quiet();v.evaluate('()=>{batchHoldFrame=null}');v.wait_for_timeout(500)
   self.assertNotIn('복원했습니다',ended_job_status(v));self.assert_unannounced(v);self.assertFalse(v.evaluate('()=>!!batchView()'));self.assertEqual(self.originals(),original)
   # A MIP Batch model that cannot load on a fresh page refuses the version 13 Job with rollback, while the version 12 Job restores
   # there with the MIP Batch panel reporting the missing tool.

@@ -4,6 +4,7 @@ import os,unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_workspace import ReadingWorkspaceE2E,canvas_ready
+from viewer_session import end_document
 
 class ReadingNoteE2E(ReadingWorkspaceE2E):
  def note(self,f,text):
@@ -28,7 +29,7 @@ class ReadingNoteE2E(ReadingWorkspaceE2E):
   expect(f.get_by_label('Job Title',exact=True)).to_have_value('UNSAVED VIEWER NOTE ROUNDTRIP')
   expect(p.locator('#findings')).to_have_value('UNSAVED REPORT NOTE ROUNDTRIP');self.assertEqual(f.url,url);canvas_ready(f,2);self.assertEqual(f.evaluate(view),before)
   button.click();expect(p.locator('#tech-note-text')).to_have_value('CURRENT IMAGE NOTE');p.locator('#tech-note-close').click();expect(button).to_be_focused()
-  p.evaluate("""uid=>{const w=document.querySelector('#reading-frame').contentWindow,old=w.location.href;try{const u=new URL(old);u.searchParams.set('StudyInstanceUIDs',uid);w.history.replaceState(null,'',u);document.querySelector('#reading-tech-note').click();if(document.querySelector('#tech-note-dialog').open)throw Error('Stale viewer target opened note');}finally{w.history.replaceState(null,'',old)}}""",b.uid)
+  p.evaluate("""uid=>{const w=document.querySelector('#reading-frame').contentWindow,old=w.location.href,state=w.history.state;try{const u=new URL(old);u.searchParams.set('StudyInstanceUIDs',uid);w.history.replaceState(state,'',u);document.querySelector('#reading-tech-note').click();if(document.querySelector('#tech-note-dialog').open)throw Error('Stale viewer target opened note');}finally{w.history.replaceState(state,'',old)}}""",b.uid)
   self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);self.assertEqual(self.jobs(a),[])
 
  def test_reading_note_02_related_image_keeps_report_target(self):
@@ -42,8 +43,8 @@ class ReadingNoteE2E(ReadingWorkspaceE2E):
   p.locator('#reading-tech-note').click();expect(p.locator('#tech-note-target')).to_contain_text(b.uid)
   expect(p.locator('#tech-note-text')).to_have_value('RELATED IMAGE NOTE');expect(p.locator('#reading-target')).to_contain_text(a.uid)
   p.locator('#tech-note-close').click();expect(p.locator('#findings')).to_have_value('KEEP REPORT TARGET')
-  p.evaluate("() => {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-  expect(p.locator('#reading-tech-note')).to_be_disabled();expect(p.locator('#tech-note-dialog')).not_to_be_visible()
+  end_document(p)
+  expect(p.locator('#reading-tech-note')).to_be_disabled();expect(p.locator('#tech-note-dialog')).not_to_be_visible();self.assertFalse(p.locator('#tech-note-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
 
  def test_reading_note_03_active_second_image(self):
   from test_viewer_tech_note import ViewerTechNoteE2E
@@ -97,7 +98,7 @@ class ReadingNoteE2E(ReadingWorkspaceE2E):
   self.assertEqual(f.evaluate('() => kinViewerSelectedNoteTarget()?.uid'),b.uid)
   p.locator('#reading-tech-note').click();expect(p.locator('#tech-note-target')).to_contain_text(b.uid)
   expect(p.locator('#tech-note-text')).to_have_value('RECOVERED SECOND IMAGE NOTE');p.keyboard.press('Escape')
-  p.evaluate("() => {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
+  end_document(p)
   expect(p.locator('#reading-tech-note')).to_be_disabled();expect(retry).to_be_disabled()
 
 def load_tests(loader,tests,pattern):

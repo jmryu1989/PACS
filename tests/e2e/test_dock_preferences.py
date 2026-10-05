@@ -5,6 +5,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_workspace import ReadingWorkspaceE2E
 from test_prior_selection import canvas_ready
+from viewer_session import end_document
 
 def dock_settings(f):
  # S5-UI6: Dock Position, Auto-hide and Reset Dock live in the collapsed Dock Settings disclosure; open it before acting on them.
@@ -53,7 +54,7 @@ class DockPreferencesE2E(ReadingWorkspaceE2E):
   f.evaluate("()=>{const original=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k.startsWith('kin-viewer-dock:v1:'))throw new DOMException('blocked','QuotaExceededError');return original.call(this,k,v)}}")
   f.get_by_role('button',name='Comparison',exact=True).click();dock_settings(f).locator('#kin-dock-placement').select_option('top');expect(f.locator('#kin-dock-preference-status')).to_contain_text('이 창에만 적용');self.assertEqual(self.stored(p),{});canvas_ready(f,2);self.bounds(f,True)
   dock_settings(f).locator('#kin-dock-reset').scroll_into_view_if_needed();expect(f.locator('#kin-dock-reset')).to_be_in_viewport()
-  p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(p.locator('#reading-frame')).to_have_count(0);self.assertEqual(self.stored(p),{})
+  end_document(p);expect(p.locator('#reading-frame')).to_have_count(0);self.assertEqual(self.stored(p),{})
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(DockPreferencesE2E(n) for n in loader.getTestCaseNames(DockPreferencesE2E) if n.startswith('test_dock_pref_'))
 if __name__=='__main__':unittest.main(verbosity=2)

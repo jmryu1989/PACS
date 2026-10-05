@@ -9,6 +9,7 @@ from pynetdicom import AE
 from playwright.sync_api import expect
 from test_related_context import RelatedContextE2E
 from document_session import document_request
+from access_assertions import permission_denied
 
 def code(value,meaning,scheme='99KIN'):
  d=Dataset();d.CodeValue=value[:16];d.CodingSchemeDesignator=scheme;d.CodeMeaning=meaning;return d
@@ -84,7 +85,7 @@ class SRReaderE2E(RelatedContextE2E):
   self.assertEqual(p.locator('#sr-tree').inner_text(),before);print('SR real response body held locally, abort ignored: old body delivered after A-B-A, current document unchanged',flush=True)
   expect(p.locator('#sr-tree')).to_contain_text('Content Sequence');p.locator('#sr-close').click()
   self.related(p,b).click();self.open_source(p,sb);self.read_source(p);expect(p.locator('#sr-context')).to_contain_text('2026-07-01');expect(p.locator('#sr-tree')).to_contain_text(sb['sop'])
-  other=self.login('kdoctor');self.assertEqual(document_request(other, "GET", self.stack.proxy+self.path(sa)).status,403)
+  other=self.login('kdoctor');permission_denied(self,document_request(other, "GET", self.stack.proxy+self.path(sa)))
   expect(other.locator('#rows tr[data-uid="'+a.uid+'"]').first).to_have_count(0)
   p.locator('#sr-close').click();self.open_source(p,sb)
   p.route('**'+self.path(sb),lambda route:route.fulfill(status=403,body='denied'));p.locator('#sr-read').click();expect(p.locator('#sr-status')).to_contain_text('HTTP 403');expect(p.locator('#sr-tree')).to_be_empty();expect(p.locator('#sr-series option, #sr-document option')).to_have_count(0);expect(p.locator('#sr-read')).to_be_disabled()

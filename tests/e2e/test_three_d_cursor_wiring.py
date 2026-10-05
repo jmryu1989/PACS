@@ -22,6 +22,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect
 
+from viewer_session import end_viewer
 import three_d_cursor_accuracy_fixture as fx
 from test_prior_selection import canvas_ready
 from test_viewer_layout import ViewerLayoutE2E
@@ -338,25 +339,17 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
             self.observations.append(dict(step="listener-net-growth", growth=growth))
             self.assertEqual(growth, {}, "listeners were not returned across the re-entry")
 
-            # 6. Session end. Same signal the other viewer extensions listen for.
-            page.evaluate("""() => {
-              const channel = new BroadcastChannel('kin-session');
-              channel.postMessage({type: 'session-ended'});
-              channel.close();
-            }""")
-            page.wait_for_function("() => !document.querySelector('#kin-3d-cursor')")
-            page.wait_for_function("() => kinViewerThreeDCursorState().ended === true")
-            ended = self.record(page, "session-end")
-            self.assertEqual(ended["panels"], 0)
-            self.assertEqual(ended["layers"], 0)
-            self.assertEqual(ended["marks"], 0)
-            self.assertEqual(ended["probe"]["mounted"], False)
-            self.assertEqual(ended["probe"]["listeners"], 0, "the event bindings outlived the session")
-            # A re-entry after the session ended must not bring the mode back.
-            page.evaluate(call("onModeEnter"))
-            page.wait_for_timeout(500)
-            self.assertEqual(page.evaluate("() => document.querySelectorAll('#kin-3d-cursor').length"), 0)
-            self.assertEqual(page.evaluate("() => kinViewerThreeDCursorState().mounts"), 2)
+            page.evaluate('window.endedCursorState=kinViewerThreeDCursorState')
+            observer=end_viewer(page,['#kin-3d-cursor'])
+            probe=observer.evaluate('()=>endedCursorState()')
+            self.observations.append(dict(step='session-end',probe=probe))
+            self.assertTrue(probe['ended'])
+            self.assertFalse(probe['mounted'])
+            self.assertEqual(probe['listeners'],0,'the event bindings outlived the session')
+            self.assertEqual(observer.retained('#kin-3d-cursor'),[True])
+            observer.evaluate(call('onModeEnter'))
+            observer.assert_quiet(500)
+            self.assertEqual(observer.evaluate('()=>endedCursorState().mounts'),2)
         finally:
             self.report("flag-on-lifecycle")
         self.assertEqual(self.originals(), originals)

@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 from test_volume_mpr_print import VolumeMprPrintE2E
 from test_live_print import LivePrintE2E
 from test_volume_batch_save import CAPTURE
+from viewer_session import end_viewer
 
 class VolumeCurrentPrintE2E(VolumeMprPrintE2E):
  rows=LivePrintE2E.rows
@@ -51,7 +52,7 @@ class VolumeCurrentPrintE2E(VolumeMprPrintE2E):
   expect(v.locator('#kin-job-print [role=status]')).to_contain_text('변경');self.assertTrue(opened.value.is_closed());v.unroute(endpoint)
   v.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click();expect(v.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=120000)
   v.evaluate('()=>{projectionVP.setCamera({parallelScale:projectionVP.getCamera().parallelScale*1.2});projectionVP.render()}');v.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click();expect(v.locator('#kin-job-print [role=status]')).to_contain_text('현재 영상 표시가 바뀌었습니다');expect(v.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF')).to_be_disabled()
-  v.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click();self.assertTrue(v.evaluate('()=>kinMprMarks.dirty()'));self.current_output(v);v.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:String(Date.now())}))");expect(v.locator('#kin-job-print')).not_to_be_visible();self.unchanged_rows(before)
+  v.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click();self.assertTrue(v.evaluate('()=>kinMprMarks.dirty()'));self.current_output(v);ended=end_viewer(v, ['#kin-job-print']);self.assertEqual(ended.retained('#kin-job-print','node => node.open'),[False]);ended.assert_quiet();self.unchanged_rows(before)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeCurrentPrintE2E(n) for n in loader.getTestCaseNames(VolumeCurrentPrintE2E) if n.startswith('test_mpr_current_'))
 if __name__=='__main__':unittest.main(verbosity=2)
