@@ -1348,26 +1348,30 @@ class ReportTextBoundaries(h.LogoutDOMTest):
     def test_a_preparation_holds_its_lock_from_before_its_notice_until_back_to_editing_releases_it(self):
         self.page.clock.install()
         viewer, session, first = self.begin_preparation([(403, {"statusCode": 403, "message": "SYN refused"})])
-        name = "kin-preparation:" + first
+        name, leaving = "kin-preparation:" + first, "kin-leaving:" + first
         expect(self.panel_title()).to_have_text("Draft Not Saved")
-        # (1) The lock is granted first; only then the document prepares and posts its notice.
+        # (0) The press of Log out first asks for its leaving marker's lock (A017: the window that is leaving is alive) -
+        # before any wait, so before the preparation's own lock.
+        self.assertEqual(["request", leaving, "active"], self.order()[0], "the leaving marker is the press's first step")
+        # (1) The preparation's lock is granted first; only then the document prepares and posts its notice.
         self.assertEqual([["request", name, "active"], ["granted", name, "active"], ["post", "session-preparing", "preparing"]],
-                         self.order())
+                         [step for step in self.order() if step[1] != leaving])
         # What a viewer can read when the notice reaches it: the lock is already held.
         paused = self.heard(viewer, "session-preparing")
         self.assertEqual([("session-preparing", session, first)], [(n["type"], n["session"], n["preparation"]) for n in paused])
         self.assertIn(name, paused[0]["locks"], "the notice arrived before the lock it stands on")
-        self.assertEqual({"held": [name], "pending": []}, self.locks(viewer))
+        held = {"held": sorted([leaving, name]), "pending": []}
+        self.assertEqual(held, self.locks(viewer))
         # Nothing of this depends on a timer of the preparing document: ten minutes pass, nothing is posted, it is held.
         self.page.clock.run_for(600000)
         self.assertEqual((1, "preparing"), (len(self.posts()), self.screen()["state"]))
-        self.assertEqual({"held": [name], "pending": []}, self.locks(viewer))
-        # (2) Retry is the same preparation: the same lock, no second notice.
+        self.assertEqual(held, self.locks(viewer))
+        # (2) Retry is the same preparation: the same locks, no second notice.
         self.site.put_answers = ["hold"]
         self.panel_button("Retry").click()
         self.wait_until(lambda: self.site.held_puts, "the retried save")
-        self.assertEqual((1, 3), (len(self.posts()), len(self.order())), "a retry asked for another lock or posted again")
-        self.assertEqual({"held": [name], "pending": []}, self.locks(viewer))
+        self.assertEqual((1, 5), (len(self.posts()), len(self.order())), "a retry asked for another lock or posted again")
+        self.assertEqual(held, self.locks(viewer))
         # (3) Back to Editing: the resume notice, then the release.
         self.panel_button("Back to Editing").click()
         self.wait_until(lambda: self.locks(viewer) == {"held": [], "pending": []}, "the lock released", page=viewer)
@@ -1379,8 +1383,9 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.wait_until(lambda: len(self.preparing()) == 2, "the second preparation")
         second = self.preparing()[1]["preparation"]
         self.assertNotEqual(first, second)
-        self.wait_until(lambda: self.locks(viewer) == {"held": ["kin-preparation:" + second], "pending": []},
-                        "the second preparation's lock", page=viewer)
+        self.wait_until(lambda: self.locks(viewer) == {"held": ["kin-leaving:" + second, "kin-preparation:" + second],
+                                                       "pending": []},
+                        "the second preparation's locks", page=viewer)
 
     def test_a_real_end_asks_for_the_end_lock_before_its_notice_and_never_releases_the_preparation(self):
         for ending in ("Log out completes", "the server ended the session", "the session became another login's",
@@ -1445,7 +1450,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
     def test_closing_the_preparing_tab_releases_its_lock_and_posts_nothing(self):
         viewer, session, first = self.begin_preparation(["hold"])
         self.wait_until(lambda: self.site.held_puts, "the preparation's save")
-        self.assertEqual({"held": ["kin-preparation:" + first], "pending": []}, self.locks(viewer))
+        self.assertEqual({"held": ["kin-leaving:" + first, "kin-preparation:" + first], "pending": []}, self.locks(viewer))
         self.page.close()                   # the tab is closed in the middle of its preparation
         self.page = viewer
         # The browser releases what the document held; nobody posts anything, and nothing says the session ended.
@@ -1462,10 +1467,14 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         self.site.logout_answers = ["hold"]
         self.log_out_main()
         self.wait_until(lambda: self.site.held_logouts, "the real end")
-        name, end = "kin-preparation:" + self.preparing()[0]["preparation"], "kin-session-ended:" + session
-        # The same contract as with text to save, in one press: nothing waits for the end lock's grant.
+        preparation = self.preparing()[0]["preparation"]
+        name, end, leaving = "kin-preparation:" + preparation, "kin-session-ended:" + session, "kin-leaving:" + preparation
+        # The same contract as with text to save, in one press: the leaving marker first (A017), then nothing waits for
+        # the end lock's grant.
+        self.assertEqual(["request", leaving], self.order()[0][:2])
         self.assertEqual([["request", name], ["granted", name], ["post", "session-preparing"], ["request", end],
-                          ["post", "session-ended"]], [step[:2] for step in self.order() if step[:2] != ["granted", end]])
+                          ["post", "session-ended"]],
+                         [step[:2] for step in self.order() if step[:2] != ["granted", end] and step[1] != leaving])
         self.assertEqual(([], []), (self.site.puts, self.dialogs))
         self.release_logout()
         self.page.wait_for_url(h.INDEX_URL)
