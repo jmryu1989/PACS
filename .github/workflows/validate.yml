@@ -243,7 +243,7 @@ jobs:
       - name: S3-U5 job print citation evidence browser mutants
         timeout-minutes: 5
         run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/job-print-citation-mutants --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file tests/viewer_job_print_citation_dom_test.py --file tests/viewer_job_print_citation_mutants.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_job_print_citation_mutants.py --out tmp/workspace-ui-ci/job-print-citation-mutants/mutants.json
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/job-print-citation-mutants --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file tests/viewer_job_print_citation_dom_test.py --file tests/viewer_job_print_citation_mutants.py --file tests/viewer_jobs_session_test.cjs --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_job_print_citation_mutants.py --out tmp/workspace-ui-ci/job-print-citation-mutants/mutants.json
       - name: S3-U5b report history citation DOM
         timeout-minutes: 3
         run: |
@@ -420,6 +420,11 @@ jobs:
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-session-dom --cwd . --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/finding-link-model.js --file worklist-v0/hpacs-lite/index.html --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/tech-note.js --file worklist-v0/hpacs-lite/viewer-dicom-pdf.js --file worklist-v0/hpacs-lite/viewer-findings.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/volume-mip-job.js --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/work-context.js --file config/ohif.js --file tests/viewer_session_fixture.py --file tests/viewer_session_dom_test.py --file worklist-v0/hpacs-lite/session-transport.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_session_dom_test.py
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-resource-guard-dom --cwd . --file tests/viewer_session_fixture.py --file tests/viewer_resource_guard_dom_test.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_resource_guard_dom_test.py
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-clinician-entry-dom --cwd . --file config/ohif.js --file tests/viewer_clinician_entry_dom_test.py --file worklist-v0/hpacs-lite/clinician.html --file proxy/branding/kin-emblem-j1.svg --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/critical-result-inbox.js --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js --file tests/clinician_home_dom_test.py --file worklist-v0/hpacs-lite/index.html -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_clinician_entry_dom_test.py
+      - name: S7-U5 clinician negative controls on served copies
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-viewer-mutants --file tests/clinician_viewer_mutants.py --file tests/clinician_viewer_dom_test.py --file config/ohif.js --file worklist-v0/hpacs-lite/clinician.js --file tests/document_session.py --file tests/module_session_harness.py --file tests/viewer_session_fixture.py --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/viewer-session.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_viewer_mutants.py
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-request-mutants --file tests/clinician_request_mutants.py --file tests/clinician_request_dom_test.py --file tests/clinician_question_dom_test.py --file worklist-v0/hpacs-lite/main.html --file tests/document_session.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_request_mutants.py
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         timeout-minutes: 28
         run: |
@@ -908,6 +913,36 @@ jobs:
             tmp/miporient-ci/
           if-no-files-found: error
           retention-days: 7
+  s7-u5-session-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [u5-session-api, u5-session-draft, u5-session-regression, u5-session-boundaries, u5-session-mutants, u5-session-browser]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install pinned synthetic stack test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/u5-python"
+          "$RUNNER_TEMP/u5-python/bin/python" -m pip install -r tests/e2e/requirements.txt -r gateway/agent/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/u5-python/bin/python" -m playwright install --with-deps chromium
+      - name: Run session contract profile on an empty hosted daemon
+        timeout-minutes: 28
+        run: '"$RUNNER_TEMP/u5-python/bin/python" tests/measurement_ci.py --profile ${{ matrix.profile }}'
+      - name: Sanitized session contract evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-${{ matrix.profile }}
+          path: tests/e2e/artifacts/${{ matrix.profile }}-ci/
+          if-no-files-found: error
+          retention-days: 7
   hanging-protocols:
     # A separate job, not extra suites inside measurements: the four hanging-protocol
     # suites must not consume that job's budget, and each profile needs its own fresh
@@ -1125,7 +1160,7 @@ jobs:
       - name: S7-U5 work-context gate, session-bound transport, draft command path and session authority over the shipped modules
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/session-work-gate --cwd . --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/report-draft-client.js --file worklist-v0/hpacs-lite/auth.js --file tests/session_work_gate_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/session_work_gate_test.cjs
       - name: Finding link state, exact-frame navigation and findings store model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/finding-link-model --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/finding-link-model.js --file worklist-v0/hpacs-lite/viewer-findings.js --file tests/finding_link_model_test.cjs --file worklist-v0/hpacs-lite/main.html --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/finding_link_model_test.cjs
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/finding-link-model --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/finding-link-model.js --file worklist-v0/hpacs-lite/viewer-findings.js --file tests/finding_link_model_test.cjs --file worklist-v0/hpacs-lite/main.html --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file tests/study_pages_client_test.cjs --file worklist-v0/hpacs-lite/study-pages.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/finding_link_model_test.cjs tests/study_pages_client_test.cjs
       - name: Existing study instance and series arrival model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/study_arrivals_test.cjs --file tests/study_observation_vectors.json -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/study_arrivals_test.cjs
       - name: S4-U2 order reconciliation client model against the shared vectors
@@ -1357,7 +1392,7 @@ jobs:
       - name: Pure dictation host adapter over the shipped session and capture modules
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dictation-host --cwd . --file worklist-v0/hpacs-lite/dictation.js --file worklist-v0/hpacs-lite/dictation-session.js --file worklist-v0/hpacs-lite/dictation-capture.js --file tests/dictation_host_test.cjs --file tests/module_session_harness.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/dictation_host_test.cjs
       - name: Compiled volume job command and volume mark boundary models
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs --file tests/study_query_scope_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs /tests/study_query_scope_test.cjs
       - name: Observe an isolated real restart loop
         run: python3 tests/ops_monitor_container_test.py
       - name: Production image migration, startup and refusal checks

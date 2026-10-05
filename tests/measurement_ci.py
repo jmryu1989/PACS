@@ -27,6 +27,63 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'CineE2E', 'VolumeCineE2E',
                  'FindingAPI', 'FindingNavigationE2E', 'FindingWorklistE2E', 'DictationLiveE2E']
 PROFILES = {
+    'u5-session-api': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-api-ci',
+        'project_prefix': 'kin-u5-session-api-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        'suite_timeout': 360,
+        'suites': (
+            ('auth_audit_live.py', 'AuthAuditLive', 'ci-u5-auth-audit'),
+            ('live/session_proxy_live.py', 'SessionProxyLive', 'ci-u5-session-proxy'),
+            ('live/logout_order_live.py', 'LogoutOrderLive', 'ci-u5-logout-order'),
+        ),
+    },
+    'u5-session-draft': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-draft-ci',
+        'project_prefix': 'kin-u5-session-draft-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        'suite_timeout': 900,
+        'suites': (
+            ('live/report_draft_cas_live.py', 'ReportDraftCasLive', 'ci-u5-report-draft-cas'),
+        ),
+    },
+    'u5-session-regression': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-regression-ci',
+        'project_prefix': 'kin-u5-session-regression-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        'suite_timeout': 900,
+        'suites': (
+            ('live/server_contract_regression_live.py', None, 'ci-u5-server-contract-regression'),
+        ),
+    },
+    'u5-session-boundaries': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-boundaries-ci',
+        'project_prefix': 'kin-u5-session-boundaries-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        'suite_timeout': 900,
+        'suites': (
+            ('e2e/test_session_draft_boundaries.py', None, 'ci-u5-session-draft-boundaries'),
+        ),
+    },
+    'u5-session-mutants': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-mutants-ci',
+        'project_prefix': 'kin-u5-session-mutants-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        'suite_timeout': 900,
+        'suites': (
+            ('e2e/test_session_draft_mutants.py', None, 'ci-u5-session-draft-mutants'),
+        ),
+    },
+    'u5-session-browser': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-browser-ci',
+        'project_prefix': 'kin-u5-session-browser-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        'suite_timeout': 540,
+        'suites': (
+            ('e2e/test_session_worklist_regression.py', None, 'ci-u5-session-worklist-regression'),
+            ('e2e/test_document_session.py', None, 'ci-u5-document-session'),
+        ),
+    },
     'image-text': {
         'out': ROOT / 'tests/e2e/artifacts/image-text-ci',
         'project_prefix': 'kin-image-text-ci-',
