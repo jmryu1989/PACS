@@ -148,9 +148,55 @@
     },
     {
       "id": "REQ-S7-U5-AUTH-AUDIT",
-      "statement": "로그인·로그아웃·만료의 기관별 감사와 세션 종료 시 판독문/저장 충돌/늦은 응답 보호를 검증한다.",
-      "tests": [],
-      "pending": "미정: U5 최종 구현 병합 후 실제 시험 ID를 추가해야 함; 기존 로그인 회귀로 대체하지 않음"
+      "statement": "로그인·로그아웃·만료는 기록 시점 기관·주체·대상·IP·결과/종료 원인을 남기고 자격증명은 기록하지 않는다. 보존 체크포인트의 retain_until은 최소 달력 2년이다.",
+      "tests": [
+        "node:tests/auth_session_service_test.cjs",
+        "auth_audit_live.AuthAuditLive.test_01_login_success_row_and_no_secret",
+        "auth_audit_live.AuthAuditLive.test_03_logout_row_csrf_and_absence",
+        "auth_audit_live.AuthAuditLive.test_05_idle_row",
+        "auth_audit_live.AuthAuditLive.test_06_refused_refresh_row",
+        "auth_audit_live.AuthAuditLive.test_07_admins_read_record_time_institutions_only",
+        "ops_audit_integrity_test.AuditIntegrityPure.test_pv06_calendar_retention_and_plan_years"
+      ]
+    },
+    {
+      "id": "REQ-S7-U5-SESSION-END",
+      "statement": "로그아웃은 IdP 호출 전에 서버 세션 폐기와 감사를 확정한다. 종료된 세션과 다른 세션의 요청은 거절하며 브라우저 전송과 nginx 보호 경로까지 X-KIN-Session 결속을 유지한다.",
+      "tests": [
+        "node:tests/auth_session_service_test.cjs",
+        "node:tests/session_work_gate_test.cjs",
+        "logout_order_live.LogoutOrderLive.test_revocation_and_audit_visible_before_real_idp_fetch",
+        "report_draft_cas_live.ReportDraftCasLive.test_d05_ended_session_write_refused_preserves_draft_and_one_termination_audit",
+        "session_proxy_live.SessionProxyLive.test_s12_all_protected_locations_binding_and_browser_headers"
+      ]
+    },
+    {
+      "id": "REQ-S7-U5-SESSION-UI",
+      "statement": "세션 종료·계정 변경 뒤 이전 세션의 응답은 목록·판독 편집기·뷰어·관리·임상의 페이지에 적용되거나 다시 그려지지 않으며 새 세션의 문서를 바꾸지 않는다.",
+      "tests": [
+        "auth_logout_dom_test.LogoutDOMTest.test_br01_main_log_out_closes_before_the_post_and_shares_it",
+        "auth_logout_dom_test.LogoutDOMTest.test_br06_a_late_session_answer_restores_nothing",
+        "auth_logout_dom_test.LogoutDOMTest.test_s03_the_session_ending_during_the_preparation_closes_at_once_and_quarantines_the_text",
+        "viewer_session_dom_test.ViewerSessionDOMTest.test_end_cuts_headers_body_stream_and_error_finally_with_navigation_held",
+        "viewer_session_dom_test.ViewerSessionDOMTest.test_reload_does_not_adopt_the_openers_replacement_session",
+        "admin_session_dom_test.PageSessionDOMTest.test_admin_end_cuts_across_all_panels",
+        "admin_session_dom_test.PageSessionDOMTest.test_clinician_report_question_request_and_inbox_end_cuts",
+        "admin_session_dom_test.PageSessionDOMTest.test_s1_late_answer_and_notice_leave_s2_document_unchanged"
+      ]
+    },
+    {
+      "id": "REQ-S7-U5-DRAFT-SAFETY",
+      "statement": "초안 충돌·늦은 쓰기는 새 글을 덮지 않으며 Save/Approve 중 타건과 종료 시 보존할 판독문을 잃지 않는다. 준비 취소를 가로지른 Tech Note 저장은 적용 여부를 읽어 확인하고 입력과 다음 저장의 기준 판을 보존한다.",
+      "tests": [
+        "node:tests/report_draft_cas_service_test.cjs",
+        "report_session_page_dom_test.ReportSessionPageTest.test_another_documents_newer_draft_is_not_overwritten_and_local_text_stays",
+        "auth_logout_dom_test.LogoutDOMTest.test_dp15_d12_a_cut_off_write_finishing_late_never_replaces_the_recovery",
+        "report_text_boundaries_dom_test.ReportTextBoundaries.test_text_typed_while_a_save_or_approve_is_out_is_kept_when_the_server_accepts_it",
+        "auth_logout_dom_test.LogoutDOMTest.test_note_stored_across_cancel_confirms_itself_before_the_next_save",
+        "auth_logout_dom_test.LogoutDOMTest.test_note_not_stored_across_cancel_keeps_input_and_the_next_save_works",
+        "viewer_session_dom_test.ViewerSessionDOMTest.test_tech_note_save_across_cancel_is_confirmed_by_read_without_a_repair_click",
+        "test_session_draft_boundaries.SessionDraftBoundaries.test_one_click_logout_saves_draft_and_ends_the_second_tab"
+      ]
     }
   ],
   "left_out": [

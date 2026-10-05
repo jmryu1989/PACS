@@ -1,8 +1,7 @@
 # Stage 7 필수 시험 판정
 
-`stage7-exit.json`의 13개 요구사항과 66개 시험 항목을 **한 최종 main commit**의
-원문 결과와 대조한다. U5는 아직 실제 시험 ID가 없으므로 반드시 FAIL이다.
-U5 병합 시 최종 계약의 실제 시험 ID를 그 행에 넣고 `pending`을 제거한다.
+`stage7-exit.json`의 명시적 필수 시험 항목을 **한 최종 main commit**의
+원문 결과와 대조한다. U5는 접속기록·서버 종료/결속·화면 종료·글 보존으로 나누었다.
 목록의 `left_out`에 제외 이유가 있다. 이 표는 의사 확인·규제/위험 처분·운영 검증·출시 승인이나
 PR CI/독립 검토를 대신하지 않는다. 기존 CI와 시험 실행 예산도 바꾸지 않는다.
 
@@ -21,6 +20,28 @@ JSON에는 각 시험의 이유와 원문 경로를 남기며, 콘솔은 요구�
 누락·건너뜀·중단·시간 초과·SHA 불일치는 PASS가 아니다. 모두 PASS이면 exit 0, 그 외 exit 1
 (명령/목록 입력 오류는 argparse의 exit 2)이다.
 
+U5 항목은 `tests/README.md`의 U5S-REQ와 U5S-RISK-AUDIT/SESSION/APPLY/DRAFT에 연결된
+실제 동작 시험에서 골랐다. 전체 파일을 실행하는 CI와 이 목록의 필수 사례 부분집합은 다르다.
+같은 Node 파일이나 보존 시험을 두 요구사항이 쓰더라도 같은 실행 결과를 재사용한다.
+
+| 요구사항 | 실제 선택 경로 |
+|---|---|
+| `U5-AUTH-AUDIT` | validate `runtime`: `auth_session_service_test.cjs`, `ops_audit_integrity_test.py`; 아래 live 실행: `auth_audit_live.AuthAuditLive` |
+| `U5-SESSION-END` | validate `runtime`: `auth_session_service_test.cjs`, `session_work_gate_test.cjs`; 아래 live 실행: `LogoutOrderLive`, `ReportDraftCasLive`, `SessionProxyLive` |
+| `U5-SESSION-UI` | validate `measurements`: `auth_logout_dom_test.py`, `viewer_session_dom_test.py`, `admin_session_dom_test.py` |
+| `U5-DRAFT-SAFETY` | validate `runtime`: `report_draft_cas_service_test.cjs`; `measurements`: `report_session_page_dom_test.py`, `auth_logout_dom_test.py`, `report_text_boundaries_dom_test.py`, `viewer_session_dom_test.py`; 아래 live 실행: `SessionDraftBoundaries` |
+
+S7-U5 workflow를 병합할 때 `measurements`의 `viewer-session-dom` 기록 명령 끝을
+`-B tests/viewer_session_dom_test.py -v`로 한다. 이 파일의 `unittest.main()` 기본 출력은
+사례 이름이 없는 점이므로 기존 명령의 성공 요약만으로 필수 ID를 통과시킬 수 없다.
+다른 위 DOM 파일은 `verbosity=2`이며 Node 세 파일은 각각 필터 없는 단일 파일 실행이다.
+도구는 job/계획 이름을 고정하지 않는다. `run.json`·unittest/TAP 및 G3 산출물 형식은 그대로 쓴다.
+
+접속기록 필드와 비밀 제외는 U5 시험, 체크포인트의 달력 2년 `retain_until`은 PV-06,
+변조·유실·복원은 기존 `REQ-S7-AUDIT-STORE`가 맡는다. 확인한 U5 서버/live 시험은
+`AuditLog.at` 자체의 시각 정확성을 직접 단언하지 않는다. 이 공백과 실제 2년 운영 보관의
+이행 여부는 이 표의 PASS로 닫지 않는다.
+
 최종 main을 깨끗하게 checkout한 **원본과 분리된 합성 환경**에서 다음 PowerShell 명령을 쓴다.
 이 문서의 실행 예시는 환경 기동이나 원본 연결을 허가하지 않는다. `record-run.py`는 HEAD와
 파일 해시를 기록하지만 dirty tree 자체를 증명하지 않으므로 실행 전에 수정 상태를 확인한다.
@@ -31,13 +52,17 @@ if ($sha -ne (git rev-parse main).Trim()) { throw '최종 main checkout 필요' 
 if (git status --porcelain -- . ':(exclude)tmp') { throw '실행할 소스의 수정 상태 확인 필요' }
 $shortSha = $sha.Substring(0, 12)
 $out = "tmp/stage7-final-$shortSha"
-# U5 병합 후에는 아래 실행 목록에도 그 실제 시험을 추가한다.
 $live = @(
   @('tests/e2e/test_critical_result.py', 'CriticalResultE2E'),
   @('tests/e2e/test_critical_result.py', 'CriticalResultScreensE2E'),
   @('tests/critical_result_live.py', 'CriticalResultTeleLiveTests'),
   @('tests/e2e/test_reader_assignment.py', 'ReaderAssignmentE2E'),
-  @('tests/clinical_context_live.py', 'ClinicalContextLive')
+  @('tests/clinical_context_live.py', 'ClinicalContextLive'),
+  @('tests/auth_audit_live.py', 'AuthAuditLive'),
+  @('tests/live/logout_order_live.py', 'LogoutOrderLive'),
+  @('tests/live/report_draft_cas_live.py', 'ReportDraftCasLive'),
+  @('tests/live/session_proxy_live.py', 'SessionProxyLive'),
+  @('tests/e2e/test_session_draft_boundaries.py', 'SessionDraftBoundaries')
 )
 foreach ($item in $live) {
   $unit = 's7-exit-' + $shortSha + '-' + $item[1].ToLowerInvariant()
@@ -61,6 +86,9 @@ foreach ($item in $live) {
 이전 실패는 최종 판정 입력과 구분해 보존하며, `$out/failed/`를 `--runs`에 넣지 않는다.
 단위 이름·SHA·출력 폴더를 바꿔 같은 실패의 예산이나 점검 marker를 우회하지 않는다.
 새 최종 SHA의 검증은 새 단위로 식별하되 이전 실행의 정리 의무는 그대로다.
+U5의 위 live 모듈·브라우저 e2e는 G3 선택에 포함되지 않는다. `SessionDraftBoundaries` 전체
+클래스의 뷰어 사례에는 `KIN_U5_DICOM_SOURCE` 공개 CT 입력도 필요하다(`tests/README.md`).
+실행기는 `--class`에 그 클래스가 직접 선언한 사례를 고정하므로 상속한 worklist 시험은 추가하지 않는다.
 
 동일 SHA의 validate 및 G3 실행 artifact를 받아 각각 `$out/validate`, `$out/candidate`에 푼다.
 validate에서는 `synthetic-runtime-record-runs`와 `synthetic-workspace-dom-results`가 필요하다.
