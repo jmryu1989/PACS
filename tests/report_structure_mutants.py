@@ -13,7 +13,7 @@ case to fail on its own named assertion:
   M2  the structure path stops asking for the citation guards        -> D6
   M3c the field is written even when the server refused              -> D7
   M4c the shown plan is no longer compared with the one being sent   -> D15
-  M5c the state is kept across a commit instead of being re-read     -> D8
+  M5c Load Server Draft keeps the old structure state                -> D8b
   M6  two identical sentences are replaced by guessing the first     -> D5
 
 Every mutant here is a CLIENT file (P4). The server rules of this unit - the line-block attestation,
@@ -58,7 +58,7 @@ CASE = "ReportStructureDOMTest"
 
 # Narrow on purpose: a marker that also appears in an ordinary failing run would turn every real
 # kill into a survivor.
-CRASH_MARKERS = ("playwright._impl._errors", "ModuleNotFoundError")
+CRASH_MARKERS = ("playwright._impl._errors", "ModuleNotFoundError", "ReferenceError:", "SyntaxError:")
 
 # The harness slices these out of main.html; if one of them moves, the browser file compiles into
 # something else and no case means what it says.
@@ -111,11 +111,11 @@ MUTANTS = [
     {
         "id": "M5c",
         "file": "main",
-        "title": "the structure state is kept across a commit instead of being re-read",
-        "case": "test_d08_after_a_commit_the_state_is_re_read_and_carries_no_stale_keep_list",
-        "expect": "S3-STRUCT M5c: after a commit the state must be re-read, not kept",
-        "old": "          structureState.forget(uid);\n          structureNotes.delete(uid);",
-        "new": "          void uid;",
+        "title": "loading the server draft keeps the previous structure state",
+        "case": "test_d08b_load_server_draft_re_reads_structure_before_the_next_save",
+        "expect": "S3-STRUCT M5c: loading the server draft must replace the stale keep list",
+        "old": "      structureState.forget(uid); structureNotes.delete(uid);",
+        "new": "      void uid;",
     },
     {
         "id": "M6",
@@ -204,6 +204,10 @@ def main():
             shutil.copyfile(path, copy)
             clean[name] = copy
         done, output = run_case(clean, None, args.timeout)
+        if args.out:
+            log = pathlib.Path(args.out).with_name("baseline.log")
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(output, encoding="utf-8")
         baseline_ok = done.returncode == 0 and not any(marker in output for marker in CRASH_MARKERS)
         ran = re.search(r"Ran (\d+) tests?", output)
         print("BASELINE exit=%d tests=%s ok=%s" % (done.returncode, ran.group(1) if ran else "?", baseline_ok))
@@ -223,6 +227,8 @@ def main():
             overrides = dict(clean)
             overrides[mutant["file"]] = broken
             done, output = run_case(overrides, mutant["case"], args.timeout)
+            if args.out:
+                pathlib.Path(args.out).with_name(mutant["id"] + ".log").write_text(output, encoding="utf-8")
             named, block, assertion = failure_block(output, mutant["case"])
             crashed = any(marker in output for marker in CRASH_MARKERS)
             matched = mutant["expect"] if mutant["expect"] in block else ""

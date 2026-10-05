@@ -586,21 +586,25 @@ const KinAuth = (() => {
    * 자기 세션의 종료 기록·저장소 불신·계정 전환은 그 세션을 밝혀 POST로 시작한다: 서버가 그 세션을 감사와 함께 끝낸 뒤
    * 로그인 주소를 준다. 밝힌 세션이 쿠키의 세션과 다르면(그사이 다른 로그인) 서버는 아무것도 끝내지 않고 거절하며, 다음
    * 누름이 지금 세션을 다시 확인한다. 남은 세션이 없으면 평범한 링크로 간다.
+   * 이 단추는 사람이 그 세션을 끝냈거나 Switch account를 고른 경우, 또는 이 브라우저가 종료 기록을 보관할 수 없는
+   * 경우에만 살아 있는 세션을 정리한다. 마지막 경우 Login은 인증 서버를 거치는 새 로그인(평소 비밀번호 없음)이다.
    */
   async function initiate(path, json, query) {
     let binding = rebind ? null : sessionId;
     if (path === '/auth/login' && !json?.prompt) {
       // 종료 기록은 이름 붙은 세션에만 적용한다. Login은 현재 쿠키를 먼저 확인하므로
       // 어제의 종료 때문에 오늘의 로그인을 끝내거나 확인 오류를 영원히 반복하지 않는다.
-      const answer = await send('/me');
-      if (answer.status === 401) {
-        moved = true;
-        location.href = `${API}${path}${query}`;
-        return;
-      }
       let current;
-      try { current = readIdentity(answer); }
-      catch (error) { throw new Error(error.message + (error.retryable
+      try {
+        const answer = await send('/me');
+        if (answer.status === 401) {
+          moved = true;
+          location.href = `${API}${path}${query}`;
+          return;
+        }
+        current = readIdentity(answer);
+      }
+      catch (error) { throw new Error(error.message + (error.retryable || ['network', 'timeout'].includes(error.kind)
         ? ' · 잠시 뒤 Login을 다시 누르세요.' : ' · Switch account로 다시 로그인하세요.')); }
       const { id, identity } = current, record = readEnd();
       if (reliable && record !== UNREADABLE && record?.session !== id && !heard.has(id)) {

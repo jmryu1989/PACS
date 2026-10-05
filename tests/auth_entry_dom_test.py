@@ -297,6 +297,19 @@ class AuthEntryDOMTest(unittest.TestCase):
         expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
         self.assertEqual(self.login_starts, [])
 
+    def test_confirmation_network_failure_names_login_retry_and_second_press_enters(self):
+        self.landing('S0-yesterday')
+        self.me_failures = ['network']
+        self.page.locator('#signin').click()
+        expect(self.page.locator('#msg')).to_contain_text('서버에 연결하지 못했습니다')
+        expect(self.page.locator('#msg')).to_contain_text('잠시 뒤 Login을 다시 누르세요.')
+        self.page.wait_for_timeout(1200)
+        self.assertEqual(self.requests, [('/api/me', None)])
+        self.assertEqual(self.login_starts, [])
+        self.page.locator('#signin').click()
+        expect(self.page.locator('#list-state')).to_have_attribute('data-state', 'empty')
+        self.assertEqual(self.login_starts, [])
+
     def test_refused_proof_on_landing_can_confirm_live_session_with_login(self):
         self.refuse = True
         self.landing(query='#kin-entry=refused-proof')
