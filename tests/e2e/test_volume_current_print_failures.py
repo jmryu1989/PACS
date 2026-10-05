@@ -11,7 +11,10 @@ class VolumeCurrentPrintFailuresE2E(VolumeCurrentPrintE2E):
  def test_current_extra_06_pdf_saved_report_preserves_draft(self):
   a,p,v=self.starting();self.add_mark(v,'Unsaved PDF point')
   with p.expect_response(lambda r:r.url.endswith('/hold') and r.request.method=='POST') as held:p.locator('#findings').fill('DO NOT PRINT UNSAVED REPORT')
-  self.assertEqual(held.value.status,201);before=self.rows();state=self.volume_state(v);paper=self.current_output(v);v.get_by_label('함께 출력할 판독문',exact=True).select_option('saved');expect(v.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=120000);expect(paper.locator('.report')).to_contain_text(a.secret);expect(paper.locator('main')).not_to_contain_text('DO NOT PRINT UNSAVED REPORT')
+  self.assertEqual(held.value.status,201)
+  # Compare output preservation only after the pending autosave has reached the server.
+  self.wait_state(p,a,lambda state:(state.get('draft') or {}).get('findings')=='DO NOT PRINT UNSAVED REPORT',timeout=30000)
+  before=self.rows();state=self.volume_state(v);paper=self.current_output(v);v.get_by_label('함께 출력할 판독문',exact=True).select_option('saved');expect(v.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=120000);expect(paper.locator('.report')).to_contain_text(a.secret);expect(paper.locator('main')).not_to_contain_text('DO NOT PRINT UNSAVED REPORT')
   v.evaluate('''()=>{const open=window.open;window.open=(...args)=>{const w=open(...args);if(w)w.print=()=>w.__printCalled=true;return w}}''')
   with v.expect_popup() as opened:v.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF').click()
   printed=opened.value;printed.wait_for_function('()=>window.__printCalled===true',timeout=120000);output=Path(os.environ['KIN_EVIDENCE_DIR'])/'current-mpr.pdf';printed.pdf(path=str(output),prefer_css_page_size=True);pdf=PdfReader(output);self.assertGreaterEqual(len(pdf.pages),3);text='\n'.join(page.extract_text() for page in pdf.pages)
