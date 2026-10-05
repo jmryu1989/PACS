@@ -126,6 +126,7 @@ CONTRACT.synthetic_vectors.push({"row":31,"action":"study.question","rule":"hidd
  * the stored token of the session that ended), never the member's group now. Vectors 32-41 continue the numbering; the
  * card block above stays verbatim. */
 const AUTH_MEANING = "record-time institution from the token groups at the event";
+CONTRACT.field_rules['viewer-context.event'] = {source:'detail.institution',meaning:'verified viewer actor institution at event receipt'};
 Object.assign(CONTRACT.field_rules, {"auth.login":{"source":"detail.institution","meaning":AUTH_MEANING},
   "auth.logout":{"source":"detail.institution","meaning":AUTH_MEANING},
   "auth.session.expired":{"source":"detail.institution","meaning":AUTH_MEANING},

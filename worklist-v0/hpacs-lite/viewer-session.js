@@ -34,6 +34,30 @@
     const heard = new Map();
     const initialEnd = record?.ended === true || !session && !needsBootstrap ||
       (peerGate?.session() === session && closed(peerGate.state()));
+    // Consume before extensions can interpret a one-use finding link. Both copies bind the
+    // marker to this history entry and its original account; a new entry never inherits it.
+    let recovery = null;
+    try {
+      const key = 'kin-viewer-recovery', raw = win.sessionStorage.getItem(key);
+      win.sessionStorage.removeItem(key);
+      const marker = raw && JSON.parse(raw), entry = win.history.state?.kinViewerRecovery;
+      const owner = win.history.state?.kinViewerContext;
+      const navigation = win.performance.getEntriesByType('navigation')[0];
+      if (navigation?.type === 'reload' && marker && entry && marker.entry === entry.entry &&
+          marker.session === session && marker.session === entry.session &&
+          marker.account === entry.account && marker.account === owner?.account && marker.entry === owner?.entry &&
+          marker.session === owner?.session && marker.href === win.location.href &&
+          marker.href === entry.href && !initialEnd) {
+        const url = new URL(win.location.href);
+        for (const name of ['kinFinding', 'kinFindingRevision', 'kinFindingSource', 'kinFindingNonce']) url.searchParams.delete(name);
+        recovery = Object.freeze(marker);
+        nativeReplaceState(win.history.state, '', url.href);
+      }
+      if (win.history.state?.kinViewerRecovery) {
+        const state = { ...win.history.state }; delete state.kinViewerRecovery;
+        nativeReplaceState(state, '');
+      }
+    } catch (_) { /* An unavailable or foreign marker has no session authority. */ }
     const entryRecord = ending => ({ session, ended: ending, unresolved: !session && needsBootstrap && !ending,
       expected: expected || null, entryStopped });
     const remember = ending => {
@@ -95,6 +119,34 @@
         if ([...snapshot.held, ...snapshot.pending].some(lock => lock.name === 'kin-session-ended:' + id)) end();
         return !ended;
       } catch (_) { return false; } // An unreadable snapshot is not permission to resume.
+    }
+    // Recovery asks the existing end/preparation questions without ending or resuming work.
+    // Unlike the legacy read fallback, this admission must inspect BOTH storage locations.
+    function recoveryAdmission(synchronous = false) {
+      const refused = reason => ({ status: 'refused', reason });
+      const local = () => {
+        if (ended || initialEnd || closed(gate.state()) && gate.state() !== 'unknown') return refused('session-ended');
+        const source = peer && !peer.closed ? peer.KinWorkContext : null;
+        if (source?.session() === session && closed(source.state())) return refused('session-ended');
+        if (source?.session() === session && preparingPeer(source.preparation()?.preparation)) return refused('preparing');
+        if (preparation || gate.state() === 'preparing' || preparingPeer(preparingId)) return refused('preparing');
+        if (!session || gate.state() !== 'active') return { status: 'unknown' };
+        const stored = readEndRecord();
+        const cookie = win.document.cookie.split(';').map(part => part.trim()).find(part => part.startsWith('kin-session-end='));
+        const records = [stored, cookie ? decodeURIComponent(cookie.slice('kin-session-end='.length)) : null];
+        if (records.some(value => JSON.parse(value)?.session === session)) return refused('session-ended');
+        return { status: 'allowed' };
+      };
+      if (synchronous) { try { return local(); } catch (_) { return { status: 'unknown' }; } }
+      return (async () => { try {
+        const before = local(); if (before.status !== 'allowed') return before;
+        if (locks) {
+          const snapshot = await locks.query();
+          if ([...snapshot.held, ...snapshot.pending].some(lock => lock.name === 'kin-session-ended:' + session))
+            return refused('session-ended');
+        }
+        return local();
+      } catch (_) { return { status: 'unknown' }; } })();
     }
     function preparingPeer(id) {
       try {
@@ -376,6 +428,7 @@
       }
     }
     const api = Object.freeze({
+      recoveryAdmission, recovery,
       gate, transport, wait, ready: Promise.resolve().then(bootstrap), session: () => session,
       active: () => gate.state() === 'active',
       ended: () => ended,

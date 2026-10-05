@@ -107,6 +107,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   function disableBatch(run){if(!run)return;try{if(run.enabled&&run.engine?.getViewport(run.id))run.engine.disableElement(run.id);}catch(_){}run.element?.remove();}
   function close(){
     const op=operation;operation=null;controls.disabled=presetBar.disabled=voi.disabled=jobBox.disabled=batchBox.disabled=true;
+    op?.unwatchContext?.();op?.releaseContext?.();
     // Nothing unsaved outlives the dialog: a VOI Slab persists only inside a MIP Job saved with Save MIP Job.
     voiEnable.checked=voiOriginal.checked=false;voiDraftNormal=null;voiState.textContent=voiNote.textContent=voiNormal.textContent='';for(const input of [...voiCenter,...voiPivot,voiThickness,voiMove,voiDegrees])input.value='';
     saveState?.open(null);jobTitle.value=jobDescription.value=jobNote.textContent='';
@@ -116,8 +117,21 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   }
   // The first failure is kept on the operation: a restore learns of a failed display only through this close, and must
   // throw that reason into the Job rollback rather than a generic one.
-  function fail(op,error){if(operation!==op)return;op.failure??=error;close();notice('MIP Viewer를 닫았습니다. '+(error?.message||'다시 열어 확인하세요.'));}
-  function check(op){if(!current(op))throw Error('원본이나 계정이 변경되어 MIP Viewer를 닫았습니다.');}
+  function stopContext(op){
+    if(operation!==op||op.contextLost)return;
+    op.contextLost=true;op.sequence?.dispose();op.batchRun?.controller.abort();
+    for(const cancel of [...op.pending])cancel();
+    clearTimeout(op.timeout);clearTimeout(op.accessTimer);stopBatchPlay();
+    controls.disabled=presetBar.disabled=voi.disabled=batchBox.disabled=true;
+    dialog.dataset.kinMipState='stopped';label.textContent=render.textContent='Display Stopped';
+    status.textContent='영상 표시가 중단되었습니다. 입력과 저장 상태는 유지했습니다. Viewer Recovery에서 다시 불러올 수 있습니다.';
+  }
+  function contextLost(op){
+    const gl=op.engine?.offscreenMultiRenderWindow?.getOpenGLRenderWindow?.()?.getContext?.();
+    if(op.contextLost||gl?.isContextLost()||window.kinViewerContextLoss?.usable(op.engine)===false){stopContext(op);return true;}return false;
+  }
+  function fail(op,error){if(operation!==op)return;if(contextLost(op))return;op.failure??=error;close();notice('MIP Viewer를 닫았습니다. '+(error?.message||'다시 열어 확인하세요.'));}
+  function check(op){if(contextLost(op))throw Error('영상 표시가 중단되어 결과로 사용할 수 없습니다.');if(!current(op))throw Error('원본이나 계정이 변경되어 MIP Viewer를 닫았습니다.');}
   async function access(op){
     const get=async url=>{const r=await fetch(url,{credentials:'same-origin',cache:'no-store',headers:{'X-KIN-Subject':JSON.parse(op.owner)[1]},signal:op.controller.signal});if(!r.ok)throw Error('MIP 원본 접근 권한을 확인하지 못했습니다.');return r.json();};
     const me=await get('/api/me');if(me.kind!=='member'||JSON.stringify([me.institution,me.sub])!==op.owner)throw Error('MIP Viewer 계정이 변경되었습니다.');
@@ -125,6 +139,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   }
   function show(op,{status:state,request,message}){
     if(operation!==op)return;
+    if(contextLost(op))return;
     if(request){projection.value=request.mode;orientation.value=request.orientation;voiOriginal.checked=request.original===true;
       for(const button of presetButtons)button.setAttribute('aria-pressed',String(button.dataset.kinMipPreset===request.orientation));}
     const text=request?model.describe(request,op.thickness):'';dialog.dataset.kinMipState=state;
@@ -421,7 +436,11 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     identity.textContent='CT · Patient '+t.source.study.id;sourceText.textContent='Study '+t.source.uid+' · Series '+t.source.series;
     // An orthographic volume viewport, not the VR type: the pinned VolumeViewport3D ignores blend mode and slab thickness.
     // It shares the GL context but owns its actor and camera; suppressed creation keeps OHIF's viewport binders off it.
-    op.engine=source.getRenderingEngine();op.engine.enableElement({viewportId:op.id,type:cornerstone.Enums.ViewportType.ORTHOGRAPHIC,element:canvasHost,defaultOptions:{orientation:'axial',background:[0,0,0],suppressEvents:true}});op.view=op.engine.getViewport(op.id);op.view.suppressEvents=false;
+    op.engine=source.getRenderingEngine();
+    op.releaseContext=window.kinViewerContextLoss?.borrow(op.engine,canvasHost,()=>operation===op&&dialog.open);
+    op.unwatchContext=window.kinViewerContextLoss?.onContextLoss(({engine})=>{if(engine===op.engine)stopContext(op);});
+    check(op);
+    op.engine.enableElement({viewportId:op.id,type:cornerstone.Enums.ViewportType.ORTHOGRAPHIC,element:canvasHost,defaultOptions:{orientation:'axial',background:[0,0,0],suppressEvents:true}});op.view=op.engine.getViewport(op.id);op.view.suppressEvents=false;
     await wait(op.view.setVolumes([{volumeId:volume.volumeId}]));check(op);
     op.mapper=op.view.getActors()[0]?.actor?.getMapper?.();
     if(op.view.getActors().length!==1||!op.mapper||op.mapper===source.getActors()[0].actor.getMapper())throw Error('독립 MIP 표시를 만들지 못했습니다.');
@@ -447,12 +466,12 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
       clearTimeout(op.timeout);
       op.sequence=sequenceFor(op);
       op.ready=true;controls.disabled=presetBar.disabled=false;voi.disabled=!!op.voiProblem;refreshJob(op);await op.sequence.start({mode:'MIP',orientation:'Axial'});
-    }catch(error){if(operation===op){close();throw error;}}
+    }catch(error){if(operation===op){if(!contextLost(op))close();throw error;}}
   }
   const otherDialog=()=>[...document.querySelectorAll('dialog[open],[role="dialog"][aria-modal="true"],.modal.show')].some(e=>e!==dialog&&!dialog.contains(e));
   /* A MIP Job restore opens the viewer on the restored active plane with the saved request. Unlike open() it runs while the
      Jobs workspace is busy (that is this restore) and never returns silently: a refusal, failure, timeout or user cancel
-     throws into the Job rollback and nothing of the failed request stays open. Every wait of the Final display is bounded by
+     throws into the Job rollback. Context loss keeps its stopped dialog until an explicit choice. Every wait of the Final display is bounded by
      the Job deadline; a version 13 restore then regenerates its MIP Batch under a second, explicit budget. */
   async function restore(value,{current:jobCurrent=()=>true,deadline=Date.now()+60000,viewportId,batch=null,version=12}={}){
     if(!jobs||!saveState)throw Error('MIP Viewer 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
@@ -515,7 +534,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
       status.textContent=recipe?'MIP Batch 작업을 복원했습니다. 회전 투영 미리보기는 표시 전용이며 원본 영상과 W/L은 바뀌지 않았습니다.':'저장한 MIP 작업을 복원했습니다. 표시 전용 투영이며 되돌릴 VOI Slab 변경은 없습니다.';paintJob(op);
     }catch(error){
       const failure=op.cancelled?Error('MIP 작업 복원을 취소했습니다.'):op.failure||error;
-      if(operation===op)close();
+      if(operation===op&&!contextLost(op))close();
       throw failure;
     }finally{clearTimeout(timer);}
   }
@@ -618,14 +637,15 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   }
   jobSave.onclick=()=>saveJob(false);jobRetry.onclick=()=>saveJob(true);
   // Closing is the user's cancel of a restore that opened this dialog; the restore then throws into the Job rollback.
-  const userClose=()=>{if(operation?.restoring)operation.cancelled=true;close();};
+  const userClose=()=>{const op=operation;if(op?.contextLost&&(saveState?.saving(op)||window.kinViewerJobCommand?.pending?.())){status.textContent='저장 결과를 먼저 확인하세요.';return;}if(op?.contextLost&&job.dirty()&&!confirm('미저장 MIP 입력을 버리고 닫을까요?'))return;if(operation?.restoring)operation.cancelled=true;close();};
   closeButton.onclick=userClose;dialog.addEventListener('cancel',e=>{e.preventDefault();userClose();});
   // Keep browser input/Tab/Escape behavior while isolating native viewer hotkeys.
   for(const name of ['keydown','keyup','keypress'])dialog.addEventListener(name,e=>e.stopPropagation(),true);
-  const observer=new ResizeObserver(()=>{const op=operation;if(op?.ready&&current(op)){try{op.engine.resize(true,true);}catch(error){fail(op,error);}}});observer.observe(canvasHost);
-  const timer=setInterval(()=>{const op=operation;if(!op)return;if(!current(op)){fail(op,Error('원본·선택 또는 계정이 변경되었습니다.'));return;}if(op.ready&&!op.checking&&Date.now()-op.checkedAt>15000){op.checking=true;op.accessTimer=setTimeout(()=>fail(op,Error('MIP 접근 확인 시간이 지났습니다.')),15000);access(op).catch(error=>fail(op,error)).finally(()=>{op.checking=false;clearTimeout(op.accessTimer);});}refreshJob(op);},250);
+  const observer=new ResizeObserver(()=>{const op=operation;if(op?.ready&&!contextLost(op)&&current(op)){try{op.engine.resize(true,true);}catch(error){fail(op,error);}}});observer.observe(canvasHost);
+  const timer=setInterval(()=>{const op=operation;if(!op||contextLost(op))return;if(!current(op)){fail(op,Error('원본·선택 또는 계정이 변경되었습니다.'));return;}if(op.ready&&!op.checking&&Date.now()-op.checkedAt>15000){op.checking=true;op.accessTimer=setTimeout(()=>fail(op,Error('MIP 접근 확인 시간이 지났습니다.')),15000);access(op).catch(error=>fail(op,error)).finally(()=>{op.checking=false;clearTimeout(op.accessTimer);});}refreshJob(op);},250);
   // The MIP Viewer Job capability viewer-volume-orientation.js lends to viewer-volume-job.js as window.kinVolumeMipJob.
   const job={
+    recoveryState(){const op=operation;return {dirty:job.dirty(),busy:!!op&&!!saveState?.saving(op),unknown:!!window.kinViewerJobCommand?.pending?.()};},
     capture(){
       const op=operation;if(!op)return null;
       if(!op.ready||op.restoring)throw Error('MIP Viewer 표시를 확인하는 중에는 MIP 작업을 저장할 수 없습니다.');

@@ -522,6 +522,8 @@ window.kinViewerTechNote=function(services,session=null){
     // Reject an invalid owner locally before retaining it. Only the page transport can end the document.
     async function authenticate(){const me=await raw('GET','/me');if(session&&!session.answer(me)){end();throw new Error('메모 계정이 변경되었습니다');}const next=[me.institution,me.sub];if(me.kind!=='member'||next.some(v=>typeof v!=='string'||!v)||owner&&!same(owner,next)){end();throw new Error('메모 계정이 변경되었습니다');}owner=next;return next;}
     const note=KinTechNote({allowed:()=>window.KinWorkContext.state()==='active'&&live()&&!!owner,api:async(method,path,body)=>{const before=await authenticate();const result=await raw(method,path,body);if(!live()||!same(before,await authenticate()))throw new Error('메모 계정이 변경되었습니다');return result;}});
+    const recoveryState=()=>note.workspaceState();
+    window.kinViewerTechNoteWorkspaceState=recoveryState;
     async function open(){
       if(!live()||busy||!owner||document.querySelector('dialog[open]'))return;
       const focus=document.activeElement,target=selectedStudy();if(!target){status.textContent='원본 검사가 확인되는 영상 칸을 선택하세요. 메모 대상을 확인할 수 없습니다.';return;}
@@ -553,7 +555,7 @@ window.kinViewerTechNote=function(services,session=null){
     try{channel = window.kinViewerOnEnd(() => end());}catch(_){}
     const offEnd=session?.onEnd(end)||(()=>{});
     const timer=setInterval(()=>{if(!live())end();else refreshReturnSelection();},500);
-    stop=()=>{offEnd();end();dock?.dispose();dock=null;clearInterval(timer);document.removeEventListener('keydown',key);window.removeEventListener('pagehide',end);patientCopy.dispose();channel?.close();returnStatus.remove();panel.remove();};
+    stop=()=>{if(window.kinViewerTechNoteWorkspaceState===recoveryState)delete window.kinViewerTechNoteWorkspaceState;offEnd();end();dock?.dispose();dock=null;clearInterval(timer);document.removeEventListener('keydown',key);window.removeEventListener('pagehide',end);patientCopy.dispose();channel?.close();returnStatus.remove();panel.remove();};
     async function connect(){
       if(!live()||busy)return;
       const restore=document.activeElement===retry;busy=true;refresh();status.textContent='메모 연결 확인 중…';

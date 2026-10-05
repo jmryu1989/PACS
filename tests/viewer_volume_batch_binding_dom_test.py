@@ -186,6 +186,35 @@ class ViewerVolumeBatchBindingDOMTest(unittest.TestCase):
         finally:
             page.close()
 
+    def test_context_loss_before_readback_and_late_blob_never_commit(self):
+        # REQ-S8-CTX -> RISK-CTX-BLANK -> CTX-CONSUMER: existing preview and draft survive.
+        for boundary in ('frame', 'blob'):
+            with self.subTest(boundary=boundary):
+                page, errors = self.open_page()
+                try:
+                    before = self.make_batch(page)
+                    page.evaluate('''boundary => {
+                      const canvas=document.createElement('canvas'),gl=canvas.getContext('webgl2');
+                      if(!gl?.getExtension('WEBGL_lose_context'))throw Error('WebGL unavailable');
+                      engine.offscreenMultiRenderWindow={getOpenGLRenderWindow:()=>({getContext:()=>gl})};
+                      window.loseBatch=()=>gl.getExtension('WEBGL_lose_context').loseContext();
+                      const enable=engine.enableElement.bind(engine);
+                      engine.enableElement=config=>{enable(config);const v=engine.getViewport(config.viewportId);
+                        if(boundary==='frame'){const render=v.render;v.render=()=>{loseBatch();render()};}
+                        else {const out=v.getCanvas(),blob=out.toBlob.bind(out);out.toBlob=(fn,...args)=>{window.finishBlob=()=>{loseBatch();blob(fn,...args)}};}
+                      };
+                    }''', boundary)
+                    page.get_by_label('Batch Interval', exact=True).fill('0.5')
+                    page.get_by_role('button', name='Make Batch', exact=True).click()
+                    if boundary == 'blob':
+                        page.wait_for_function('!!window.finishBlob'); page.evaluate('finishBlob()')
+                    expect(page.locator('#kin-volume-batch [role=status]')).to_contain_text('취소')
+                    self.assertEqual(before, page.evaluate('batchState()'))
+                    self.assertEqual('0.5', page.get_by_label('Batch Interval', exact=True).input_value())
+                    self.assertEqual(errors, [])
+                finally:
+                    page.close()
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

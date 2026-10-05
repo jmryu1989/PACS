@@ -3769,8 +3769,23 @@ function kinCreateSeriesMetadataRecovery() {
   };
 }
 
+function kinCreateContextLoss() {
+  let ready, current;
+  return { id: 'kin.context-loss', preRegistration({ servicesManager }) {
+    ready = new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-context-loss.js';
+      script.onload = () => {
+        current = window.KinViewerContextLoss.create({ services: servicesManager.services, session: kinViewerSession });
+        window.kinViewerContextLoss = current; resolve();
+      };
+      script.onerror = () => reject(new Error('영상 복구 도구를 불러오지 못했습니다.')); document.head.append(script);
+    });
+    return ready;
+  }, onModeEnter() { ready?.then(() => current.start()); }, onModeExit() { current?.stop(); } };
+}
+
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },
