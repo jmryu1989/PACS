@@ -50,6 +50,13 @@ server {
     include /etc/nginx/snippets/hsts.conf;
     include /etc/nginx/snippets/keycloak-admin-guards.conf;
 
+    # Keycloak 계정 콘솔(S7-U5 A018). 제품은 이 화면을 쓰지 않고 어디에서도 가리키지 않는다. 열어 두면 Keycloak 자신의
+    # SSO만으로 열려 제품의 콜백(끝내기로 한 세션을 막는 자리)을 지나지 않는다 — 제품이 세션을 끝낸 뒤 인증 서버의 종료가
+    # 확인되기 전의 틈에 다음 사람이 앞사람의 계정 화면에 닿는다. 로그인·가입·비밀번호 재설정·필수 동작
+    # (login-actions, protocol/openid-connect)과 테마 자산(resources)은 다른 경로라 영향이 없다.
+    location = /auth/realms/kin/account { return 404; }
+    location ^~ /auth/realms/kin/account/ { return 404; }
+
     # Optional, administrator-owned auxiliary routes. Empty on installations
     # without workflow collection; no credentials or captured data live here.
     include /etc/nginx/workflow/*.conf;
@@ -113,6 +120,11 @@ server {
         # Keycloak 로그인 템플릿은 단일 favicon.ico 링크만 낸다. 테마 템플릿을
         # 복제하지 않고 그 링크만 J1 SVG + 32px PNG 폴백으로 확장한다.
         proxy_set_header Accept-Encoding "";
+        # 이 location이 자기 proxy_set_header를 두므로 서버 수준의 것은 물려받지 않는다(S7-U5 A007): 접속지를 여기서
+        # 다시 정하지 않으면 클라이언트가 보낸 X-Real-IP·X-Forwarded-For가 그대로 Keycloak에 닿는다. 프록시가 본 주소로
+        # 덮어쓴다 — 클라이언트가 보낸 값은 이어 붙이지 않고 버린다.
+        proxy_set_header X-Real-IP       $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_pass http://keycloak:8080;
         proxy_buffer_size       16k;
         proxy_buffers        8  16k;
@@ -218,6 +230,11 @@ server {
         proxy_set_header X-Original-Method $request_method;
         proxy_set_header Authorization $http_authorization;
         proxy_set_header Cookie $http_cookie;
+        # 접속지(S7-U5 A007). 이 location은 자기 proxy_set_header를 두어 서버 수준의 X-Real-IP를 물려받지 않는다 — 여기서
+        # 정하지 않으면 영상 요청이 끝낸 세션(유휴 만료·갱신 거절)의 접속기록에 주소가 없거나, 클라이언트가 보낸 값이
+        # 남는다. 프록시가 본 원 요청의 주소로 덮어쓴다(서브요청의 $remote_addr는 원 요청의 것이다).
+        proxy_set_header X-Real-IP       $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
         # 요청을 시작한 문서가 본 세션의 식별값. API는 이것이 쿠키의 세션과 다르면 거절한다 — 다른 탭의 새 로그인이
         # 옛 문서의 영상 요청을 대신 인증하지 않는다. 쿠키 만료(Set-Cookie)는 이 서브요청에서 원 응답으로 옮기지 않는다.
         proxy_set_header X-KIN-Session $http_x_kin_session;

@@ -36,14 +36,35 @@ const KinAuth = (() => {
   const CLOSED = ['ending', 'unconfirmed', 'confirmed'];
   const END_REASONS = ['conflict', 'storage', 'network', 'timeout', 'refused', 'credentials', 'replaced'];
   /**
-   * 종료 기록(U5S-REQ-06). 담는 것은 세션 식별값·요청 번호·닫힘 상태(와 실패 구분)뿐이다 — sid·토큰·쿠키·계정·기관·환자
-   * 값은 담지 않는다. 같은 출처의 모든 문서가 읽는 localStorage에 두어 새로고침·뒤로 가기·나중에 연 탭도 같은 상태를 본다.
-   * 이 기록은 화면을 닫고 알리고 다시 보여 주는 데만 쓴다 — 서버 세션이 끝났다는 증거도, 초안의 보관소도 아니다.
-   * localStorage가 받지 않으면(용량 초과처럼 읽기는 되는데 쓰기만 실패) 같은 기록을 같은 출처의 세션 쿠키에 둔다.
-   * 어느 쪽에도 남기지 못해도 새 문서는 열리지 않는다: 저장소에 쓰고 되읽을 수 없는 문서는 unknown으로 시작한다(아래 probe).
+   * 종료 기록(U5S-REQ-06, S7-U5 세션 종료 설계 3.1). 담는 것은 세션 식별값·요청 번호·상태(와 실패 구분)·출처뿐이다 — sid·토큰·
+   * 쿠키·계정·기관·환자 값은 담지 않는다. 같은 출처의 모든 문서가 읽는 localStorage에 두어 새로고침·뒤로 가기·나중에 연 탭도
+   * 같은 상태를 본다. 이 기록은 화면을 닫고 알리고 다시 보여 주는 데만 쓴다 — 서버 세션이 끝났다는 증거도, 초안의 보관소도 아니다.
+   *
+   * 기록은 **세션마다 자기 키**에 둔다(`kin-session-end:<세션>`). 한 칸에 두던 때에는 옛 세션 문서의 Log out이 지금 세션의
+   * 기록을 덮거나 지웠다. 여러 세션의 기록을 한 값(지도)에 모으지도 않는다 — 읽고 고쳐 쓰는 사이 다른 탭의 쓰기를 잃는다.
+   *
+   * 출처(origin)는 그 세션이 **왜** 끝났는지다:
+   *   logout      사람이 Log out을 눌렀다. 새 문서는 이 기록이 있으면 스스로 들어가지 않는다(명시적 로그아웃 뒤에는 Login 한 번).
+   *   server_end  서버가 그 세션이 끝났다고 답했다(만료 등). 새 문서를 랜딩에 세우지 않는다 — 평소처럼 로그인으로 간다.
+   *   replaced    다른 로그인이 그 세션을 대신했다. 역시 새 문서를 세우지 않는다.
+   * 같은 세션의 logout은 뒤에 온 server_end·replaced가 낮추지 못한다. 출처 없는 기록(이 형식 전의 한 칸짜리 기록)은 사람이
+   * 떠난 것으로도, 아무 일 없던 것으로도 읽지 않는다 — "알 수 없음"이고, 새 문서는 명시적 로그인만 받는다.
+   *
+   * 상태 `leaving`은 종료가 아니다: Log out을 누른 순간부터 실제 종료 전까지의 "떠나려는 중"이다(준비 번호와 함께). 다른 탭도
+   * 뷰어도 닫지 않고 알리지도 않으며, Back to Editing이 자기 준비의 것만 지운다. 그 준비를 하던 창이 사라졌을 때에만 새 문서가
+   * 끝내지 못한 로그아웃으로 읽는다(아래 leavingAlive).
+   *
+   * localStorage가 받지 않으면(용량 초과처럼 읽기는 되는데 쓰기만 실패) 같은 기록을 같은 출처의 세션 쿠키에, 역시 세션마다
+   * 따로 둔다. 어느 쪽에도 남기지 못해도 새 문서는 열리지 않는다: 저장소에 쓰고 되읽을 수 없는 문서는 unknown으로 시작한다.
    */
   const END_KEY = 'kin-session-end';
+  const END_PREFIX = 'kin-session-end:';
   const END_COOKIE = 'kin-session-end';
+  const END_COOKIE_PREFIX = 'kin-session-end.';
+  const STATUSES = ['leaving', ...CLOSED];
+  const ORIGINS = ['logout', 'server_end', 'replaced'];
+  // 사람의 로그아웃이 아닌 기록(server_end·replaced)은 아무도 막지 않는다. SSO 세션의 최대 수명이 지나면 쓸 데가 없어 치운다.
+  const PASSIVE_KEEP_MS = 12 * 60 * 60 * 1000;
   const PROBE_KEY = 'kin-session-probe';
   const CHANNEL = 'kin-session';
   // 로그인 콜백이 주소 조각으로 넘기는 일회용 진입 증명의 이름(U5S-REQ-09).
@@ -52,6 +73,8 @@ const KinAuth = (() => {
   const REQUEST_WAIT_MS = 10000;
   // 페이지가 POST 앞에 끼우는 일(main.html의 점유 해제)의 한도. 그 일이 끝나지 않아도 종료는 막히지 않는다.
   const STEP_WAIT_MS = 5000;
+  // 인증 서버가 답하는지 보는 확인의 한도(A011). 넘으면 "닿지 않음"이다 — 확인 중인 채로 남지 않는다.
+  const IDP_WAIT_MS = 5000;
   // 자동 로그인이 세션을 만들지 못하고 되돌아온 탭은 이 시간 안에 다시 자동으로 보내지 않는다(IdP와의 되돌이 고리를 끊는다).
   const AUTO_LOGIN_KEY = 'kin-auto-login';
   const AUTO_LOGIN_GAP_MS = 60000;
@@ -77,12 +100,12 @@ const KinAuth = (() => {
   // 페이지가 알린 "지금 이 문서를 떠나면 잃는 것이 있다" 판정(main.html의 저장을 확인하지 못한 판독문 초안).
   let keep = null;
   let retrying = null;
-  // 로그인 시작이 결속 거절을 받았다. 다음 누름은 이 브라우저의 지금 세션을 다시 확인한다.
-  let rebind = false;
   // 평소의 진입에서 서버가 "이 브라우저에 세션이 없다"고 방금 답했다. 자동 로그인의 유일한 근거다.
   let absent = false;
-  // 통지로 들은 종료(세션 식별값별). 신원 확인을 기다리는 문서가 그 답을 받기 직전에 대조한다.
+  // 통지로 들은 종료(세션 식별값별: 요청 번호와 출처). 신원 확인을 기다리는 문서가 그 답을 받기 직전에 대조한다.
   const heard = new Map();
+  // 이 문서가 남긴 "떠나려는 중" 표지(준비 번호별)와, 그 표지가 살아 있는 창의 것임을 알리는 잠금의 해제.
+  const leavings = new Map();
   const lifecycleListeners = [];
   const endedListeners = [];
 
@@ -95,73 +118,156 @@ const KinAuth = (() => {
     for (const listener of [...endedListeners]) { try { listener(); } catch (e) {} }
   }
 
-  /** 종료 기록 하나(저장한 글자 또는 통지에 실린 값)를 읽는다. 없으면 null, 모양이 다르면 UNREADABLE. */
+  /** 종료 기록 하나(저장한 글자 또는 통지에 실린 값)를 읽는다. 없으면 null, 모양이 다르거나 출처가 없으면 UNREADABLE. */
   function endOf(value) {
     if (value === null || value === undefined) return null;
     try {
       if (typeof value === 'string') value = JSON.parse(value);
       if (value && typeof value.session === 'string' && value.session && Number.isFinite(value.operation)
-        && CLOSED.includes(value.status))
-        return { session: value.session, operation: value.operation, status: value.status,
-          reason: END_REASONS.includes(value.reason) ? value.reason : null };
+        && STATUSES.includes(value.status) && ORIGINS.includes(value.origin)
+        && (value.status !== 'leaving' || (typeof value.preparation === 'string' && value.preparation)))
+        return { session: value.session, operation: value.operation, status: value.status, origin: value.origin,
+          reason: END_REASONS.includes(value.reason) ? value.reason : null,
+          preparation: value.status === 'leaving' ? value.preparation : null };
     } catch (e) {}
     return UNREADABLE;
   }
 
-  /** 두 기록 중 나중 것. 같은 요청이면 결과(확인·미확인)가 요청 중(ending)보다 나중이다. */
+  /** 두 기록 중 나중 것. 같은 요청이면 떠나려는 중 < 요청 중(ending) < 결과(확인·미확인) 순이다. */
   function later(a, b) {
     if (!a || !b) return a || b;
     if (a.operation !== b.operation) return a.operation > b.operation ? a : b;
-    return a.status === 'ending' ? b : a;
+    const rank = record => record.status === 'leaving' ? 0 : record.status === 'ending' ? 1 : 2;
+    return rank(a) >= rank(b) ? a : b;
   }
 
-  /** 대체 쿠키의 글자. 없으면 null, 풀 수 없으면 ''(모양이 다른 기록). */
-  function cookieEnd() {
+  /** 종료 기록의 대체 쿠키들: [이름, 글자]. 풀 수 없는 값은 ''(모양이 다른 기록)이다. */
+  function cookieEnds() {
     let jar;
-    try { jar = document.cookie; } catch (e) { return null; }
-    for (const part of jar.split(';')) {
+    try { jar = document.cookie; } catch (e) { return []; }
+    const found = [];
+    for (const part of String(jar || '').split(';')) {
       const at = part.indexOf('=');
-      if (at > 0 && part.slice(0, at).trim() === END_COOKIE) {
-        try { return decodeURIComponent(part.slice(at + 1).trim()); } catch (e) { return ''; }
-      }
+      const name = at > 0 ? part.slice(0, at).trim() : '';
+      if (name !== END_COOKIE && !name.startsWith(END_COOKIE_PREFIX)) continue;
+      let text = '';
+      try { text = decodeURIComponent(part.slice(at + 1).trim()); } catch (e) { text = ''; }
+      found.push([name, text]);
     }
-    return null;
+    return found;
   }
 
-  function setCookieEnd(text) {
+  function setCookieEnd(name, text) {
     const secure = location.protocol === 'https:' ? '; Secure' : '';
     try {
       document.cookie = text === null
-        ? `${END_COOKIE}=; Path=/; Max-Age=0; SameSite=Strict${secure}`
-        : `${END_COOKIE}=${encodeURIComponent(text)}; Path=/; SameSite=Strict${secure}`;
+        ? `${name}=; Path=/; Max-Age=0; SameSite=Strict${secure}`
+        : `${name}=${encodeURIComponent(text)}; Path=/; SameSite=Strict${secure}`;
     } catch (e) {}
-    return cookieEnd() === text;
+    const kept = cookieEnds().find(([other]) => other === name);
+    return text === null ? !kept : !!kept && kept[1] === text;
   }
 
-  /** 남아 있는 종료 기록. 없으면 null, 읽지 못하거나 모양이 다르면 UNREADABLE — 어느 쪽도 사용 중의 근거가 아니다. */
-  function readEnd() {
-    let text;
-    try { text = localStorage.getItem(END_KEY); }
-    catch (e) { return UNREADABLE; }
-    const stored = endOf(text), mirrored = endOf(cookieEnd());
-    if (stored === UNREADABLE || mirrored === UNREADABLE) return UNREADABLE;
-    return later(stored, mirrored);
-  }
-
-  /** 종료 기록을 남긴다. localStorage에 쓰고 되읽어 확인하며, 남지 않았으면 쿠키에 둔다. 남았는지를 돌려준다. */
-  function writeEnd(record) {
-    const text = JSON.stringify(record.reason ? record
-      : { session: record.session, operation: record.operation, status: record.status });
+  /**
+   * 남아 있는 종료 기록 전부: 세션별 기록과, 읽지 못했거나 모양이 다르거나 출처 없는 기록이 있었는가(unreadable).
+   * 출처 없는 옛 기록(한 칸짜리 키·쿠키)은 여기서 unreadable로 센다 — 어느 쪽도 사용 중의 근거가 아니다.
+   */
+  function readAll() {
+    const records = new Map();
+    let unreadable = false;
+    const take = (session, text) => {
+      const record = endOf(text);
+      if (record === null) return;
+      if (record === UNREADABLE || record.session !== session) { unreadable = true; return; }
+      records.set(session, later(records.get(session), record));
+    };
     try {
-      localStorage.setItem(END_KEY, text);
-      if (localStorage.getItem(END_KEY) === text) return true;
-    } catch (e) {}
-    return setCookieEnd(text);
+      if (localStorage.getItem(END_KEY) !== null) unreadable = true;
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (typeof key === 'string' && key.startsWith(END_PREFIX)) take(key.slice(END_PREFIX.length), localStorage.getItem(key));
+      }
+    } catch (e) {
+      unreadable = true;
+    }
+    for (const [name, text] of cookieEnds()) {
+      if (name === END_COOKIE) unreadable = true;
+      else take(name.slice(END_COOKIE_PREFIX.length), text);
+    }
+    return { records, unreadable };
   }
 
-  function removeEnd() {
-    try { localStorage.removeItem(END_KEY); } catch (e) {}
-    if (cookieEnd() !== null) setCookieEnd(null);
+  /** 새 문서를 세우는 기록: 사람의 로그아웃(출처 logout)의 닫힘 상태 가운데 가장 나중 것. 없으면 null. */
+  function blocking(records) {
+    let found = null;
+    for (const record of records.values())
+      if (record.origin === 'logout' && CLOSED.includes(record.status)) found = later(found, record);
+    return found;
+  }
+
+  /**
+   * 그 세션 자신의 종료 기록(떠나려는 중은 종료가 아니다). 일하는 문서를 닫는 것은 이것뿐이다 — 다른 세션의 기록은 그
+   * 문서들의 일이다. 이 형식 전의 한 칸짜리 기록이 그 세션을 가리키면 그것도 종료다(배포 전부터 열려 있던 탭의 Log out).
+   */
+  function ownEnd(session) {
+    const { records } = readAll();
+    const own = records.get(session);
+    if (own && own.status !== 'leaving') return own;
+    try {
+      const old = JSON.parse(localStorage.getItem(END_KEY));
+      if (old && old.session === session)
+        return { session, operation: Number.isFinite(old.operation) ? old.operation : 0,
+          status: CLOSED.includes(old.status) ? old.status : 'ending',
+          reason: END_REASONS.includes(old.reason) ? old.reason : null, origin: 'logout', preparation: null };
+    } catch (e) {}
+    return null;
+  }
+
+  /**
+   * 종료 기록을 그 세션의 키에 남긴다. localStorage에 쓰고 되읽어 확인하며, 남지 않았으면 그 세션의 쿠키에 둔다. 남았는지를
+   * 돌려준다. 같은 세션에 사람의 로그아웃 기록이 이미 있으면 출처는 logout으로 남는다(뒤의 server_end가 낮추지 못한다).
+   */
+  function writeEnd(record) {
+    const before = readAll().records.get(record.session);
+    const origin = before && before.origin === 'logout' ? 'logout' : record.origin;
+    const stored = { session: record.session, operation: record.operation, status: record.status, origin };
+    if (record.reason) stored.reason = record.reason;
+    if (record.status === 'leaving') stored.preparation = record.preparation;
+    const text = JSON.stringify(stored), key = END_PREFIX + record.session;
+    try {
+      localStorage.setItem(key, text);
+      if (localStorage.getItem(key) === text) return true;
+    } catch (e) {}
+    return setCookieEnd(END_COOKIE_PREFIX + record.session, text);
+  }
+
+  /** 그 세션의 기록만 지운다. 다른 세션의 기록은 건드리지 않는다. */
+  function removeEnd(session) {
+    try { localStorage.removeItem(END_PREFIX + session); } catch (e) {}
+    if (cookieEnds().some(([name]) => name === END_COOKIE_PREFIX + session)) setCookieEnd(END_COOKIE_PREFIX + session, null);
+  }
+
+  /**
+   * 명시적 로그인이 지금 세션을 확인했다: 앞선 세션들의 기록(과 출처 없는 옛 기록)은 여기서만 넘겨받아 지운다. 지금 세션
+   * 자신의 기록은 지우지 않는다.
+   */
+  function supersede(current) {
+    try {
+      localStorage.removeItem(END_KEY);
+      const keys = [];
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (typeof key === 'string' && key.startsWith(END_PREFIX) && key !== END_PREFIX + current) keys.push(key);
+      }
+      for (const key of keys) localStorage.removeItem(key);
+    } catch (e) {}
+    for (const [name] of cookieEnds()) if (name !== END_COOKIE_PREFIX + current) setCookieEnd(name, null);
+  }
+
+  /** 아무도 막지 않는 오래된 기록(server_end·replaced)을 치운다. 사람의 로그아웃 기록은 다음 로그인까지 남는다. */
+  function prune() {
+    for (const record of readAll().records.values())
+      if (record.origin !== 'logout' && Date.now() - record.operation > PASSIVE_KEEP_MS) removeEnd(record.session);
   }
 
   /**
@@ -199,31 +305,94 @@ const KinAuth = (() => {
   const reliable = probeStorage();
   let proof = takeProof();
   let entryBinding = null;
-  // This URL flag conveys a failed confirmation, never authority to enter a session.
-  const uncertainEntry = /\/index\.html$/.test(location.pathname)
-    && new URLSearchParams(location.search).get('auth_error') === 'entry_unconfirmed';
+  /**
+   * 이 문서는 로그인 증명으로 들어가는 중이다(A013). 그동안에는 이 브라우저에 남은 **다른** 세션의 기록·통지로 판정하지
+   * 않는다: 어제의 Log out 기록은 이 로그인이 넘겨받을 것이고, 확인을 기다리는 사이의 창 초점·탭 표시·저장소 알림이 그
+   * 기록으로 이 문서를 닫으면 방금 한 로그인이 버려진다. 새 세션의 식별값을 알게 된 뒤에는 그 세션 자신의 종료만 따른다.
+   */
+  let proofEntry = !!proof;
+  // 진입 증명의 답을 잃었다(A012). 증명은 다시 내지 않고, 이 문서는 증명 없는 평소의 문서로 한 번 확인한다.
+  let entryLost = false;
+  // 새 문서가 발견한 "떠나려는 중" 기록. 그 준비를 하던 창이 살아 있는지는 비동기로만 알 수 있어 진입(enter)이 가린다.
+  let pendingLeaving = null;
 
-  /** 저장소가 말하는 이 문서의 시작 상태. 종료 기록이 있으면 그 상태로 닫혀 있고, 저장소를 믿을 수 없으면 unknown이다. */
+  /** 저장소가 말하는 이 문서의 시작 상태. 사람의 로그아웃 기록이 있으면 그 상태로 닫혀 있고, 저장소를 믿을 수 없으면 unknown이다. */
   function classify() {
-    const record = readEnd();
-    if (record === UNREADABLE) {
+    const { records, unreadable } = readAll();
+    pendingLeaving = null;
+    if (unreadable) {
       state = 'unknown';
       reason = 'record';
-    } else if (record) {
+      return;
+    }
+    const record = blocking(records);
+    if (record) {
       state = record.status;
       reason = record.reason;
       sessionId = record.session;
       operation = record.operation;
-    } else if (!reliable) {
+      return;
+    }
+    for (const other of records.values())
+      if (other.status === 'leaving' && other.origin === 'logout') pendingLeaving = later(pendingLeaving, other);
+    if (!pendingLeaving && !reliable) {
       state = 'unknown';
       reason = 'storage';
     }
   }
+  prune();
   if (!proof) classify();
-  if (uncertainEntry && state === 'unknown') reason = 'entry-unconfirmed';
 
   /** 서버에 물을 수 있는 시작인가: 아직 아무것도 정해지지 않은 unknown뿐이다. */
   function undecided() { return state === 'unknown' && reason === null; }
+
+  /**
+   * 그 "떠나려는 중" 표지를 남긴 창이 아직 살아 있는가(A017). 표지를 남긴 문서는 그 순간부터 Web Lock `kin-leaving:<준비>`를
+   * 쥐고, 준비에 들어서면 페이지가 `kin-preparation:<준비>`도 쥔다 — 창이 닫히거나 죽으면 브라우저가 둘 다 푼다. 어느 하나라도
+   * 쥐였거나 요청 중이면 살아 있다. 잠금은 요청 직후 잠깐 보이지 않을 수 있어 한 번 더 본다. 잠금을 쓸 수 없는 브라우저에서는
+   * 알 길이 없다 — 살아 있다고 보지 않는다(스스로 들어가지 않고 랜딩이 사정을 보인다; 끝내는 것은 사람이 Login을 누를 때뿐이다).
+   */
+  async function leavingAlive(record) {
+    let manager = null;
+    try { manager = navigator.locks; } catch (e) {}
+    if (!manager || typeof manager.query !== 'function') return false;
+    const names = ['kin-leaving:' + record.preparation, 'kin-preparation:' + record.preparation];
+    for (const wait of [0, 300]) {
+      if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+      try {
+        const snapshot = await manager.query();
+        if ([...(snapshot.held || []), ...(snapshot.pending || [])].some(lock => names.includes(lock.name))) return true;
+      } catch (e) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 새 문서가 본 "떠나려는 중" 기록을 가린다. 그 창이 살아 있으면 막는 것이 없다 — 그 창의 미저장 글을 지키기 위해 아무것도
+   * 끝내지 않고, 이 문서는 평소처럼 들어간다(뷰어는 그 준비의 정지를 따른다). 창이 사라졌으면 끝내지 못한 로그아웃이다:
+   * 스스로 들어가지 않고 랜딩에 선다. 그사이 기록이 실제 종료로 올라갔거나 지워졌으면 그 새 상태를 따른다.
+   */
+  async function settleLeaving() {
+    const record = pendingLeaving;
+    pendingLeaving = null;
+    if (!record || await leavingAlive(record)) return;
+    if (!undecided()) return;
+    const now = readAll().records.get(record.session);
+    if (!now || now.status !== 'leaving' || now.preparation !== record.preparation) {
+      classify();
+      pendingLeaving = null;
+      if (!undecided()) { announce(); notifyEnded(); }
+      return;
+    }
+    state = 'unconfirmed';
+    reason = 'abandoned';
+    sessionId = record.session;
+    operation = record.operation;
+    announce();
+    notifyEnded();
+  }
 
   /**
    * 이 파일의 요청 하나. 머리글과 본문을 한 한도 안에서 읽고, 서버의 코드(머리글 X-KIN-Auth-Code 또는 본문 code)를 함께
@@ -250,6 +419,24 @@ const KinAuth = (() => {
     } catch (e) {
       throw Object.assign(new Error(control.signal.aborted ? '서버가 제한 시간 안에 답하지 않았습니다' : '서버에 연결하지 못했습니다'),
         { kind: control.signal.aborted ? 'timeout' : 'network' });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 인증 서버가 지금 답하는가(A011). 한도 안에 답이 없으면 닿지 않는 것이다. 랜딩의 상태 줄과, 인증 서버로 이동하기 직전의
+   * 확인이 쓴다 — 닿지 않는 인증 서버로 사람을 보내 프록시의 오류 화면에 세우지 않는다. 살아 있는 세션으로 들어가는 Login은
+   * 이것을 기다리지 않는다(그 길은 `/api/me`만으로 간다).
+   */
+  async function idpReachable() {
+    const control = new AbortController();
+    const timer = setTimeout(() => control.abort(), IDP_WAIT_MS);
+    try {
+      const response = await fetch(`${KC}/realms/kin/.well-known/openid-configuration`, { signal: control.signal });
+      return response.ok;
+    } catch (e) {
+      return false;
     } finally {
       clearTimeout(timer);
     }
@@ -284,32 +471,34 @@ const KinAuth = (() => {
 
   /**
    * 확인한 신원을 이 문서의 것으로 삼는다 — 삼기 직전에 한 번 더 본다(Sol U5R2-F02). 답을 기다리는 사이 이 문서가 닫혔거나,
-   * 그 세션의 종료가 기록되었거나 통지되었으면 그 답은 신원을 만들지 않는다.
+   * 그 세션의 종료가 기록되었거나 통지되었으면 그 답은 신원을 만들지 않는다. 증명 없는 진입은 어느 세션의 것이든 사람의
+   * 로그아웃 기록 앞에 선다. 그 세션의 "떠나려는 중"은 막지 않는다 — 살아 있는 창의 것인지는 진입이 이미 가렸다.
    */
   function adopt(id, identity, viaProof) {
     if (!undecided()) return null;
     // 증명으로 들어가는 문서는 저장소를 읽지 못해도 들어간다(서버가 방금의 로그인을 확인했다). 그 밖에는 읽지 못하면 닫힌다.
-    const read = readEnd(), record = read === UNREADABLE ? null : read;
-    if (read === UNREADABLE && !viaProof) {
+    const { records, unreadable } = readAll();
+    if (unreadable && !viaProof) {
       reason = 'record';
       announce();
       return null;
     }
-    const ended = record && (record.session === id || !viaProof) ? record : null;
-    if (ended || heard.has(id)) {
-      state = ended ? ended.status : 'ending';
-      reason = ended ? ended.reason : null;
+    const own = records.get(id), told = heard.get(id);
+    const ended = own && own.status !== 'leaving' ? own : viaProof ? null : blocking(records);
+    if (ended || told) {
+      [state, reason] = ended ? [ended.status, ended.reason] : heardState(told);
       sessionId = ended ? ended.session : id;
-      operation = ended ? ended.operation : heard.get(id);
+      operation = ended ? ended.operation : told.operation;
       announce();
       return null;
     }
     // 증명 진입 또는 사람이 누른 Login이 현재 세션을 확인했다. 앞선 세션의 종료 기록은 여기서만 지운다.
-    if (viaProof && record) removeEnd();
+    if (viaProof) supersede(id);
     tab.remove(AUTO_LOGIN_KEY);
     cached = identity;
     sessionId = id;
     state = 'active';
+    proofEntry = false;
     announce();
     return cached;
   }
@@ -335,16 +524,25 @@ const KinAuth = (() => {
    * 명시적 로그인을 마친 문서의 진입: 증명을 서버에 한 번 내고(쓰면 사라진다), 받은 세션 식별값에 묶어 신원을 확인한다.
    * 저장소를 쓸 수 없거나 앞선 종료 기록이 남아 있어도 이 길로는 들어간다 — 서버가 방금의 로그인을 확인했기 때문이다.
    * 거절된 증명(다른 세션·만료·재사용)은 아무것도 열지 않는다.
+   *
+   * 증명의 답을 잃었으면(연결 끊김·5xx·읽지 못한 답, A012) 그 증명은 다시 내지 않는다 — 쓰였는지 모른다. 이 문서는 증명
+   * 없는 평소의 문서로 돌아가 한 번 확인한다: 서버가 살아 있는 세션을 답하고 막는 기록이 없으면 새 탭이 그러듯 클릭 없이
+   * 들어간다. 그 확인도 얻지 못할 때에만 랜딩이 사정을 한 번 알린다.
    */
   async function enterWithProof() {
     if (!entryBinding) {
       const offered = proof;
       proof = null;
-      let entry;
+      let entry = null;
       try { entry = await send('/auth/entry', { method: 'POST', json: { proof: offered } }); }
-      catch (_) { return entryUnconfirmed(); }
-      if (entry.status >= 500 || entry.status === 429 || entry.status === 200 && !entry.body?.sessionId)
-        return entryUnconfirmed();
+      catch (_) { entry = null; }
+      if (!entry || entry.status >= 500 || entry.status === 429 || (entry.status === 200 && !entry.body?.sessionId)) {
+        proofEntry = false;
+        entryLost = true;
+        classify();
+        if (!undecided()) { announce(); return null; }
+        return enterPlain();
+      }
       entryBinding = entry.status === 200 && typeof entry.body?.sessionId === 'string' && entry.body.sessionId
         ? entry.body.sessionId : null;
     }
@@ -367,12 +565,23 @@ const KinAuth = (() => {
         found = null;
     }
     if (!found) {
+      proofEntry = false;
       classify();
+      pendingLeaving = null;
       if (undecided()) reason = 'entry';
       announce();
       return null;
     }
     return adopt(found.id, found.identity, true);
+  }
+
+  /** 증명 없는 문서의 진입: 남은 "떠나려는 중" 표지를 먼저 가리고, 막는 것이 없으면 서버에 한 번 묻는다. */
+  async function enterPlain() {
+    if (pendingLeaving) await settleLeaving();
+    const result = undecided() ? await bootstrap() : null;
+    // 증명의 답을 잃은 문서가 세션을 확인하지 못했다(서버가 세션 없음을 답했다): 스스로 로그인을 다시 시작하지 않는다.
+    if (entryLost && !result && undecided() && !moved) return entryUnconfirmed();
+    return result;
   }
 
   function entryUnconfirmed() {
@@ -395,9 +604,9 @@ const KinAuth = (() => {
       announce();
       return cached;
     }
-    // 종료가 기록된 동안, 또는 저장소를 믿을 수 없는 동안에는 남은 서버 세션으로 업무에 들어가지 않는다. 어느 문서든 같다 —
-    // 랜딩이 상태를 보이고, 다시 들어가는 길은 사용자의 명시적 로그인뿐이다.
-    const result = proof || entryBinding ? await enterWithProof() : undecided() ? await bootstrap() : null;
+    // 사람의 로그아웃이 기록된 동안, 또는 저장소를 믿을 수 없는 동안에는 남은 서버 세션으로 업무에 들어가지 않는다. 어느
+    // 문서든 같다 — 랜딩이 상태를 보이고, 다시 들어가는 길은 사용자의 명시적 로그인뿐이다.
+    const result = proof || entryBinding ? await enterWithProof() : await enterPlain();
     // 답을 기다리는 사이 이 문서가 이동을 시작했으면 기다리던 쪽(boot)이 두 번째 이동을 하지 않게 끝나지 않는 약속을 준다.
     if (moved) return new Promise(() => {});
     return result;
@@ -429,6 +638,7 @@ const KinAuth = (() => {
   function leave() {
     if (moved || (keep && keep())) return;
     moved = true;
+    // 진입을 확인하지 못했다는 표지는 랜딩이 한 번 읽고 지우는 알림일 뿐이다 — 상태도, 들어갈 권한도 아니다.
     location.replace(location.origin + location.pathname.replace(/[^/]*$/, 'index.html')
       + (reason === 'entry-unconfirmed' ? '?auth_error=entry_unconfirmed' : ''));
   }
@@ -443,9 +653,9 @@ const KinAuth = (() => {
     announce();
   }
 
-  function nextOperation() {
-    const last = readEnd();
-    return Math.max(Date.now(), operation + 1, (last && last !== UNREADABLE ? last.operation : 0) + 1);
+  function nextOperation(session = sessionId) {
+    const last = session ? readAll().records.get(session) : null;
+    return Math.max(Date.now(), operation + 1, (last ? last.operation : 0) + 1);
   }
 
   /**
@@ -467,12 +677,15 @@ const KinAuth = (() => {
     } catch (e) {}
   }
 
-  /** 종료를 시작한 문서가 같은 세션의 다른 문서에 한 번 알린다. 화면을 닫으라는 뜻이지 서버 종료의 증거가 아니다. */
-  function tell(session, op) {
+  /**
+   * 종료를 시작한 문서가 같은 세션의 다른 문서에 한 번 알린다. 화면을 닫으라는 뜻이지 서버 종료의 증거가 아니다. 출처를 함께
+   * 싣는다 — 듣는 쪽이 서버가 끝낸 세션을 사람의 로그아웃으로 읽지 않게.
+   */
+  function tell(session, op, origin) {
     markEnded(session);
     try {
       const channel = new BroadcastChannel(CHANNEL);
-      channel.postMessage({ type: 'session-ended', session, operation: op, status: 'ending' });
+      channel.postMessage({ type: 'session-ended', session, operation: op, status: 'ending', origin });
       channel.close();
     } catch (e) {}
   }
@@ -496,16 +709,16 @@ const KinAuth = (() => {
   }
 
   /**
-   * 종료 요청 하나의 결과를 남긴다. 그사이 더 새 요청(Retry)이나 명시적 로그인이 기록을 넘겨받았으면 늦은 결과로 덮지
-   * 않는다. 쿠키가 다른 로그인의 것이면 이 세션은 이 브라우저의 새 문서가 다시 쓸 수 없으므로 그 기록은 치운다 — 남겨 두면
-   * 그 로그인의 새 문서까지 막는다.
+   * 종료 요청 하나의 결과를 그 세션의 기록에 남긴다. 그사이 더 새 요청(Retry)이나 명시적 로그인이 기록을 넘겨받았으면 늦은
+   * 결과로 덮지 않는다. 쿠키가 다른 로그인의 것이면 이 세션은 이 브라우저의 새 문서가 다시 쓸 수 없으므로 그 기록은 치운다 —
+   * 남겨 두면 그 로그인의 새 문서까지 막는다. 다른 세션의 기록은 어느 경우에도 건드리지 않는다.
    */
   async function conclude(session, op) {
     const result = await post(session);
-    const current = readEnd();
-    if (current && current !== UNREADABLE && current.session === session && current.operation === op) {
-      if (result.reason === 'replaced') removeEnd();
-      else writeEnd({ session, operation: op, status: result.state, reason: result.reason });
+    const current = readAll().records.get(session);
+    if (current && current.operation === op) {
+      if (result.reason === 'replaced') removeEnd(session);
+      else writeEnd({ session, operation: op, status: result.state, reason: result.reason, origin: 'logout' });
     }
     if (sessionId === session && operation === op && CLOSED.includes(state)) {
       state = result.state;
@@ -526,20 +739,50 @@ const KinAuth = (() => {
     notifyEnded();
   }
 
+  /** 증명으로 들어가는 중인 문서가 **자기 새 세션의** 종료를 알았다: 그 종료는 언제나 따른다(증명도 자기 종료는 넘지 못한다). */
+  function closeEntry() {
+    if (!undecided() || !entryBinding) return;
+    const own = ownEnd(entryBinding), told = heard.get(entryBinding);
+    if (!own && !told) return;
+    proofEntry = false;
+    [state, reason] = own ? [own.status, own.reason] : heardState(told);
+    sessionId = entryBinding;
+    operation = own ? own.operation : told.operation;
+    announce();
+    notifyEnded();
+  }
+
+  /**
+   * 통지로만 들은 종료의 [상태, 사유]: 서버가 끝낸 세션은 끝난 세션, 다른 로그인이 대신한 세션은 교체(확인되지 않은 종료),
+   * 그 밖(사람의 로그아웃·출처 모름)은 요청 중이다.
+   */
+  function heardState(told) {
+    if (told.origin === 'server_end') return ['confirmed', null];
+    if (told.origin === 'replaced') return ['unconfirmed', 'replaced'];
+    return ['ending', null];
+  }
+
   /**
    * 종료 기록을 다시 읽는다(storage 알림, 창 초점·탭 표시·뒤로 가기 복원). 일하는 문서는 자기 세션의 기록에만 닫힌다 — 다른
-   * 세션의 기록은 그 문서들의 일이고, 읽을 수 없게 된 저장소는 종료 신호가 아니다(저장소 오류로 의사의 화면을 닫지 않는다;
-   * 그 세션이 정말 끝났으면 다음 요청의 답이 말한다). 아직 들어가지 않은 문서와 닫힌 문서(랜딩)는 가장 나중의 기록을
-   * 따르되, 기록이 지워진 것(다른 탭의 명시적 로그인)으로 다시 열리지 않는다.
+   * 세션의 기록과 "떠나려는 중"은 그 문서들의 일이고, 읽을 수 없게 된 저장소는 종료 신호가 아니다(저장소 오류로 의사의 화면을
+   * 닫지 않는다; 그 세션이 정말 끝났으면 다음 요청의 답이 말한다). 증명으로 들어가는 중인 문서는 자기 새 세션의 종료만
+   * 따른다(A013). 아직 들어가지 않은 문서와 닫힌 문서(랜딩)는 가장 나중의 사람의 로그아웃 기록을 따르되, 기록이 지워진 것
+   * (다른 탭의 명시적 로그인)으로 다시 열리지 않는다.
    */
   function recheck() {
-    const record = readEnd();
     if (state === 'active') {
-      if (record && record !== UNREADABLE && record.session === sessionId)
-        endedElsewhere(record.status, record.reason, record.operation);
+      const own = ownEnd(sessionId);
+      if (own) endedElsewhere(own.status, own.reason, own.operation);
       return;
     }
-    if (!record || record === UNREADABLE) return;
+    if (proofEntry && undecided()) {
+      if (entryBinding && (ownEnd(entryBinding) || heard.has(entryBinding))) closeEntry();
+      return;
+    }
+    const { records, unreadable } = readAll();
+    if (unreadable) return;
+    const record = blocking(records);
+    if (!record) return;
     if (CLOSED.includes(state)) {
       // 이 문서가 이미 아는 것보다 나중의 기록만 따른다.
       if (record.operation === operation && record.status === state && record.session === sessionId) return;
@@ -548,6 +791,7 @@ const KinAuth = (() => {
       // 사유가 있는 unknown(저장소·진입 실패)은 기록이 생겨도 명시적 로그인만 받는다.
       return;
     }
+    pendingLeaving = null;
     state = record.status;
     reason = record.reason;
     sessionId = record.session;
@@ -559,13 +803,19 @@ const KinAuth = (() => {
   function noticed(data) {
     // 세션을 밝히지 않은 통지는 아무것도 닫지 않는다 — 어느 로그인의 종료인지 모르는 소식으로 지금 세션을 끝내지 않는다.
     if (!data || data.type !== 'session-ended' || typeof data.session !== 'string' || !data.session) return;
-    heard.set(data.session, Number.isFinite(data.operation) ? data.operation : 0);
+    // 출처를 밝히지 않은 통지(이 형식 전의 문서)는 사람의 로그아웃으로 읽지 않는다.
+    heard.set(data.session, { operation: Number.isFinite(data.operation) ? data.operation : 0,
+      origin: ORIGINS.includes(data.origin) ? data.origin : null });
     if (state === 'active') {
       if (data.session !== sessionId) return;
-      const record = readEnd();
-      if (record && record !== UNREADABLE && record.session === sessionId)
-        endedElsewhere(record.status, record.reason, record.operation);
-      else endedElsewhere('ending', null, heard.get(data.session));
+      const own = ownEnd(sessionId), told = heard.get(data.session);
+      if (own) endedElsewhere(own.status, own.reason, own.operation);
+      else endedElsewhere(...heardState(told), told.operation);
+      return;
+    }
+    // A013: 증명으로 들어가는 중에는 들은 것을 적어 둘 뿐, 자기 새 세션의 통지만 따른다.
+    if (proofEntry && undecided()) {
+      if (entryBinding && data.session === entryBinding) closeEntry();
       return;
     }
     recheck();
@@ -574,82 +824,102 @@ const KinAuth = (() => {
     const channel = new BroadcastChannel(CHANNEL);
     channel.onmessage = event => noticed(event.data);
   } catch (e) {}
-  addEventListener('storage', event => { if (event.key === END_KEY || event.key === null) recheck(); });
+  addEventListener('storage', event => {
+    if (event.key === null || event.key === END_KEY || (typeof event.key === 'string' && event.key.startsWith(END_PREFIX))) recheck();
+  });
   // 통지가 오지 않는 길(BroadcastChannel이 없고 종료 기록이 쿠키에만 남은 경우)에도 사람이 이 문서로 돌아오는 순간(창 초점,
-  // 탭 표시, 뒤로 가기 캐시 복원) 기록을 다시 본다 — 신원 확인을 기다리는 중이어도 같다.
+  // 탭 표시, 뒤로 가기 캐시 복원) 기록을 다시 본다 — 무엇을 따를지는 recheck가 문서의 상태에 따라 정한다.
   addEventListener('focus', recheck);
   addEventListener('pageshow', event => { if (event.persisted) recheck(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) recheck(); });
 
+  /** 인증 서버로 이동한다 — 닿는지 먼저 본다. 닿지 않으면 이동하지 않고, 같은 버튼으로 다시 할 수 있는 문장을 준다. */
+  async function toIdp(url) {
+    if (!await idpReachable()) throw new Error('인증 서버에 연결하지 못했습니다. 잠시 뒤 다시 눌러 주세요.');
+    moved = true;
+    location.href = url;
+  }
+
   /**
-   * 로그인·가입 시작(U5S-REQ-09). Login은 현재 쿠키의 신원을 확인하고 다른 세션의 종료 기록만 넘겨받아 진입한다.
-   * 자기 세션의 종료 기록·저장소 불신·계정 전환은 그 세션을 밝혀 POST로 시작한다: 서버가 그 세션을 감사와 함께 끝낸 뒤
-   * 로그인 주소를 준다. 밝힌 세션이 쿠키의 세션과 다르면(그사이 다른 로그인) 서버는 아무것도 끝내지 않고 거절하며, 다음
-   * 누름이 지금 세션을 다시 확인한다. 남은 세션이 없으면 평범한 링크로 간다.
-   * 이 단추는 사람이 그 세션을 끝냈거나 Switch account를 고른 경우, 또는 이 브라우저가 종료 기록을 보관할 수 없는
-   * 경우에만 살아 있는 세션을 정리한다. 마지막 경우 Login은 인증 서버를 거치는 새 로그인(평소 비밀번호 없음)이다.
+   * 로그인·계정 전환·가입 시작(U5S-REQ-09, S7-U5 세션 종료 설계 3.2). 누를 때마다 이 브라우저의 지금 세션을 서버에 먼저
+   * 묻는다(`/api/me`) — 무엇을 할지는 그 답과 이 브라우저의 기록이 정한다:
+   *
+   *   살아 있는 세션 + 그 세션의 기록 없음(기록이 없거나 다른 세션의 것뿐)  → 그 세션으로 들어간다. 추가 클릭도 재인증도 없다.
+   *   살아 있는 세션 + 그 세션의 사람의 로그아웃 기록(또는 들은 로그아웃)   → 재인증, 사유 logout_unfinished
+   *   살아 있는 세션 + 믿을 수 없는 저장소 / 읽을 수 없는 기록              → 재인증, 사유 storage_untrusted / record_unreadable
+   *   세션 없음(401) + 사람의 로그아웃 기록 또는 믿을 수 없는 저장소·기록    → 재인증(끝낼 세션은 없다 — 서버가 SSO를 알아내 끝낸다)
+   *   세션 없음(401) + 그 밖(서버가 끝낸 세션의 기록, 기록 없음)            → 평범한 로그인 링크
+   *   계정 전환                                                            → 재인증, 사유 switch_account
+   *   확인 실패(5xx·시간 초과·연결)                                         → 안내, 같은 버튼으로 다시
+   *
+   * 재인증은 사유를 밝힌 POST로만 시작한다: 서버가 그 세션을 감사와 함께 끝내고 인증 서버의 세션도 끝낸 뒤에 로그인 주소를
+   * 준다 — 그 로그인은 자격을 실제로 입력해야 한다. 밝힌 세션이 쿠키의 세션과 다르면(그사이 다른 로그인) 서버는 아무것도
+   * 끝내지 않고 거절하며, 다음 누름이 지금 세션을 다시 확인한다.
    */
-  async function initiate(path, json, query) {
-    let binding = rebind ? null : sessionId;
-    if (path === '/auth/login' && !json?.prompt) {
-      // 종료 기록은 이름 붙은 세션에만 적용한다. Login은 현재 쿠키를 먼저 확인하므로
-      // 어제의 종료 때문에 오늘의 로그인을 끝내거나 확인 오류를 영원히 반복하지 않는다.
-      let current;
-      try {
-        const answer = await send('/me');
-        if (answer.status === 401) {
-          moved = true;
-          location.href = `${API}${path}${query}`;
-          return;
-        }
-        current = readIdentity(answer);
-      }
-      catch (error) { throw new Error(error.message + (error.retryable || ['network', 'timeout'].includes(error.kind)
-        ? ' · 잠시 뒤 Login을 다시 누르세요.' : ' · Switch account로 다시 로그인하세요.')); }
-      const { id, identity } = current, record = readEnd();
-      if (reliable && record !== UNREADABLE && record?.session !== id && !heard.has(id)) {
+  async function begin(kind) {
+    let answer;
+    try { answer = await send('/me'); }
+    catch (error) { throw new Error(error.message + ' · 잠시 뒤 Login을 다시 누르세요.'); }
+    const body = answer.body || {};
+    const id = (answer.status === 200 || answer.status === 403) && typeof body.sessionId === 'string' && body.sessionId
+      ? body.sessionId : null;
+    if (!id && answer.status !== 401) throw new Error('세션을 확인하지 못했습니다. 잠시 뒤 Login을 다시 누르세요.');
+
+    const { records, unreadable } = readAll();
+    const own = id ? records.get(id) || null : null, told = id ? heard.get(id) || null : null;
+    if (kind === 'login' && id) {
+      // 그 세션의 "떠나려는 중"이 살아 있는 창의 것이면 막는 것이 아니다 — 그 창의 글을 지키기 위해 아무것도 끝내지 않는다.
+      const preparing = !!own && own.status === 'leaving' && await leavingAlive(own);
+      if (reliable && !unreadable && (!own || preparing) && !told) {
+        let read;
+        try { read = readIdentity(answer); }
+        catch (error) { throw new Error(error.message + ' · "다른 계정으로 로그인"을 눌러 다시 로그인하세요.'); }
         // 이 명시적 확인은 성공한 증명 진입처럼 앞선 세션의 기록만 넘겨받는다.
-        state = 'unknown'; reason = null; sessionId = null; operation = 0;
-        if (adopt(id, identity, true)) { moved = true; location.href = home(cached); return; }
+        state = 'unknown'; reason = null; sessionId = null; operation = 0; pendingLeaving = null;
+        if (adopt(read.id, read.identity, true)) { moved = true; location.href = home(cached); return; }
+        throw new Error('그사이 이 로그인 세션의 종료가 기록되었습니다. 버튼을 다시 눌러 주세요.');
       }
-      // 자기 세션의 종료 의도 또는 믿을 수 없는 저장소는 새 명시적 로그인으로 복구한다.
-      binding = id;
     }
-    if (!binding) {
-      // 명시적 로그인을 위한 한 번의 확인: 이 POST가 대신할 세션이 무엇인지 알 뿐, 이 문서의 신원으로 삼지 않는다.
-      const answer = await send('/me');
-      const id = answer.body && typeof answer.body.sessionId === 'string' ? answer.body.sessionId : null;
-      binding = (answer.status === 200 || answer.status === 403) && id ? id : null;
-      if (!binding && answer.status !== 401) throw new Error('세션을 확인하지 못했습니다. 잠시 뒤 다시 눌러 주세요.');
+
+    let why = null;
+    if (kind === 'switch') why = 'switch_account';
+    else if (kind === 'login') {
+      const human = id ? !!own && own.origin === 'logout' || !!told && told.origin === 'logout'
+        : !!blocking(records) || [...records.values()].some(record => record.status === 'leaving');
+      // 저장소 자체를 믿을 수 없으면(읽기·쓰기 실패) 그것이 사유다. 저장소는 멀쩡한데 기록만 읽을 수 없거나 출처가 없으면
+      // 기록의 문제다. 어느 쪽이든 떠났는지 알 수 없는 것이고, 서버는 둘을 재인증으로 적는다.
+      if (human) why = 'logout_unfinished';
+      else if (!reliable) why = 'storage_untrusted';
+      else if (unreadable || own || told) why = 'record_unreadable';
     }
-    if (binding) {
-      const answer = await send(path, { method: 'POST', session: binding, ...(json === undefined ? {} : { json }) });
-      const target = answer.status === 200 && answer.body && typeof answer.body.location === 'string' ? answer.body.location : null;
-      if (target && new URL(target, location.origin).origin === location.origin) {
-        location.href = target;
-        return;
-      }
-      if (answer.code === 'AUTH_SESSION_MISMATCH' || answer.code === 'AUTH_SESSION_REQUIRED') {
-        rebind = true;
-        throw new Error('이 브라우저의 로그인 세션이 바뀌어 로그인을 시작하지 않았습니다. 버튼을 다시 눌러 주세요.');
-      }
-      if (answer.status !== 401) {
-        throw new Error(answer.status === 409 ? '다른 요청과 겹쳐 로그인을 시작하지 못했습니다. 버튼을 다시 눌러 주세요.'
-          : '로그인을 시작하지 못했습니다. 잠시 뒤 다시 눌러 주세요.');
-      }
-      // 401: 밝힌 세션은 이미 없다 — 대신할 세션이 없으므로 평범한 링크로 간다.
-    }
-    location.href = `${API}${path}${query}`;
+    if (kind === 'login' && !why) return toIdp(`${API}/auth/login`);
+    if (kind === 'register' && !id) return toIdp(`${API}/auth/register`);
+
+    // 401을 받은 문서는 지금 쿠키의 세션을 모른다: 결속 없이 보낸다(서버는 끝낼 세션이 있을 때에만 결속을 요구한다).
+    try {
+      answer = kind === 'register' ? await send('/auth/register', { method: 'POST', session: id })
+        : await send('/auth/login', { method: 'POST', session: id, json: { intent: 'reauthenticate', reason: why } });
+    } catch (error) { throw new Error(error.message + ' · 잠시 뒤 다시 눌러 주세요.'); }
+    const target = answer.status === 200 && answer.body && typeof answer.body.location === 'string' ? answer.body.location : null;
+    if (target && new URL(target, location.origin).origin === location.origin) return toIdp(target);
+    if (answer.code === 'AUTH_IDP_END_UNCONFIRMED')
+      throw new Error('이전 로그인 종료를 확인하지 못했습니다. 잠시 뒤 Login을 다시 누르세요.');
+    if (answer.code === 'AUTH_SESSION_MISMATCH' || answer.code === 'AUTH_SESSION_REQUIRED')
+      throw new Error('이 브라우저의 로그인 세션이 바뀌어 로그인을 시작하지 않았습니다. 버튼을 다시 눌러 주세요.');
+    throw new Error(answer.status === 409 ? '다른 요청과 겹쳐 로그인을 시작하지 못했습니다. 버튼을 다시 눌러 주세요.'
+      : '로그인을 시작하지 못했습니다. 잠시 뒤 다시 눌러 주세요.');
   }
 
   /**
    * 서버가 확인한 세션 교체: 이 브라우저의 쿠키가 다른 로그인의 것이 되었다(결속 불일치, 또는 이 세션에 묶어 보낸 요청에
    * 다른 계정의 답이 왔다). 이 문서만 닫는다 — 종료 기록도 로그아웃 POST도 없다. 그 POST는 다른 로그인의 세션을 겨눌
-   * 뿐이고, 기록은 그 로그인의 새 문서까지 막는다. 같은 세션의 다른 문서에는 한 번 알린다(그 문서들도 쓸 수 없는 세션이다).
+   * 뿐이고, 기록은 쓸모가 없다(그 세션의 식별값은 다시 살아 돌아오지 않고, 새 문서는 그 로그인의 것이다). 떠나려는 중이던
+   * 세션이면 그 표지는 치운다. 같은 세션의 다른 문서에는 출처 replaced로 한 번 알린다(그 문서들도 쓸 수 없는 세션이다).
    */
   function closeReplaced() {
     const session = sessionId, op = nextOperation();
-    tell(session, op);
+    removeEnd(session);
+    tell(session, op, 'replaced');
     endedElsewhere('unconfirmed', 'replaced', op);
   }
 
@@ -666,19 +936,13 @@ const KinAuth = (() => {
             catch (error) {
               if (!undecided() || moved) return null;
               if (attempt >= delays.length || !(error.retryable || ['network', 'timeout'].includes(error.kind))) {
-                if (entryBinding) return entryUnconfirmed();
+                if (entryBinding || entryLost) return entryUnconfirmed();
                 throw error;
               }
               if (typeof onRetry === 'function') onRetry();
               await new Promise(resolve => setTimeout(resolve, delays[attempt]));
-              if (entryBinding) {
-                // A proof may supersede an older login's record, never its own end.
-                const record = readEnd();
-                if (record?.session === entryBinding || heard.has(entryBinding)) {
-                  adopt(entryBinding, null, true);
-                  return null;
-                }
-              } else recheck();
+              // 기다리는 사이의 기록을 다시 본다: 증명으로 들어가는 문서는 자기 새 세션의 종료만, 그 밖의 문서는 평소대로.
+              recheck();
               if (!undecided() || moved) return null;
             }
           }
@@ -724,21 +988,29 @@ const KinAuth = (() => {
       return null;
     },
 
+    /** 랜딩의 Login. `{ prompt: 'login' }`은 계정 전환이다(switchAccount와 같다). */
     async login(opts = {}) {
-      const prompt = opts.prompt ? String(opts.prompt) : '';
-      return initiate('/auth/login', prompt ? { prompt } : {}, prompt ? `?prompt=${encodeURIComponent(prompt)}` : '');
+      return begin(opts && opts.prompt === 'login' ? 'switch' : 'login');
+    },
+
+    /** 다른 계정으로 로그인: 지금 세션(있다면)을 끝내고, 이름을 칠 수 있는 로그인 화면으로 간다. */
+    async switchAccount() {
+      return begin('switch');
     },
 
     async register() {
-      return initiate('/auth/register', undefined, '');
+      return begin('register');
     },
+
+    /** 인증 서버가 지금 답하는가(랜딩의 상태 줄). 한도 안에 답이 없으면 false다. */
+    idpReachable() { return idpReachable(); },
 
     /**
      * 평소의 진입에서 세션이 없을 때 스스로 로그인 화면으로 보낸다 — 의사가 로그인 단추를 한 번 더 누르게 하지 않는다.
-     * 근거는 하나뿐이다: 저장소를 믿을 수 있고 종료 기록이 없는 문서에서 서버가 방금 "세션 없음"(401)이라고 답했다.
-     * 종료 기록이 있거나(명시적 로그아웃·미확인 종료), 저장소를 믿을 수 없거나, 확인이 실패했으면(5xx·시간 초과·진입 증명
-     * 거절) 시작하지 않는다 — 그때는 랜딩이 사정을 보이고 사람이 누른다. 방금의 자동 로그인이 세션 없이 되돌아온 탭도 다시
-     * 보내지 않는다. 시작했으면 true다(부른 쪽은 그 뒤 화면을 그리지 않는다).
+     * 근거는 하나뿐이다: 저장소를 믿을 수 있고 사람의 로그아웃 기록이 없는 문서에서 서버가 방금 "세션 없음"(401)이라고
+     * 답했다. 그런 기록이 있거나(명시적 로그아웃·미확인 종료), 저장소를 믿을 수 없거나, 확인이 실패했으면(5xx·시간 초과·
+     * 진입 증명 거절) 시작하지 않는다 — 그때는 랜딩이 사정을 보이고 사람이 누른다. 방금의 자동 로그인이 세션 없이 되돌아온
+     * 탭도 다시 보내지 않는다. 시작했으면 true다(부른 쪽은 그 뒤 화면을 그리지 않는다).
      */
     autoLogin() {
       if (!absent || !undecided() || moved) return false;
@@ -757,12 +1029,46 @@ const KinAuth = (() => {
     },
 
     /**
-     * 업무 화면의 Log out — 이 세션에 묶인 명시적 종료 의도다. 네트워크를 기다리기 전에 종료 기록을 남기고 이 문서의 신원을
-     * 내려놓으며 같은 세션의 다른 문서에 한 번 알린다. 페이지가 맡긴 일(beforeLogoutPost)을 한도 안에서 기다린 뒤 이 세션을
-     * 밝힌 POST 하나를 보내고, 서버의 답(KIN 세션 폐기의 확인)을 기록하는 대로 랜딩으로 한 번 옮긴다 — 그 뒤의 IdP 처리는
-     * 서버의 일이고 이 문서는 기다리지 않는다. 같은 문서의 겹친 호출은 새 POST 없이 진행 중인 종료를 나눈다. 일하는 중이
-     * 아닌 문서(이미 닫혔다, 들어간 적 없다)와 다른 문서가 이 세션의 종료를 이미 기록한 문서는 POST 없이 떠난다 — 다시
-     * 보내는 것은 랜딩의 Retry Log Out뿐이다. 데모는 서버 세션이 없어 로컬만 끝낸다.
+     * Log out을 누른 그 순간의 표지(A017): 이 세션에 "떠나려는 중"을 남긴다 — 초안 저장이나 나가 있는 확정의 답을 기다리기
+     * **전에** 부른다. 그 기다림 사이에 창이 닫혀도 떠나려던 뜻이 남아, 다음 사람이 연 새 문서가 앞사람의 세션으로 스스로
+     * 들어가지 않는다. 이 표지는 종료가 아니다: 다른 탭도 뷰어도 닫거나 멈추지 않고 아무에게도 알리지 않는다. 표지와 함께
+     * 이 문서가 살아 있는 동안 쥐는 잠금을 건다 — 새 문서는 그것으로 "그 창이 아직 있다"를 안다(있으면 아무것도 끝내지 않는다).
+     * 준비 번호는 페이지가 그 Log out 누름에 붙인 값이다. 남겼으면 true다.
+     */
+    leaving(preparation) {
+      if (state !== 'active' || !sessionId || typeof preparation !== 'string' || !preparation) return false;
+      if (cached && cached.demo) return false;
+      const entry = { session: sessionId, release: null };
+      leavings.set(preparation, entry);
+      try {
+        const request = navigator.locks && navigator.locks.request('kin-leaving:' + preparation, { mode: 'exclusive' },
+          () => leavings.get(preparation) !== entry ? undefined : new Promise(release => { entry.release = release; }));
+        if (request) request.catch(() => {});
+      } catch (e) {}
+      return writeEnd({ session: sessionId, operation: nextOperation(), status: 'leaving', origin: 'logout', preparation });
+    },
+
+    /**
+     * Back to Editing: 자기 준비의 "떠나려는 중"만 지운다. 그사이 실제 종료로 올라간 기록이나 다른 준비·다른 세션의 기록은
+     * 건드리지 않는다.
+     */
+    cancelLeaving(preparation) {
+      const entry = leavings.get(preparation);
+      if (!entry) return;
+      leavings.delete(preparation);
+      if (entry.release) entry.release();
+      const own = readAll().records.get(entry.session);
+      if (own && own.status === 'leaving' && own.preparation === preparation) removeEnd(entry.session);
+    },
+
+    /**
+     * 업무 화면의 Log out — 이 세션에 묶인 명시적 종료 의도다. 네트워크를 기다리기 전에 종료 기록을 남기고(떠나려는 중이
+     * 있었으면 여기서 실제 종료로 올린다) 이 문서의 신원을 내려놓으며 같은 세션의 다른 문서에 한 번 알린다. 페이지가 맡긴
+     * 일(beforeLogoutPost)을 한도 안에서 기다린 뒤 이 세션을 밝힌 POST 하나를 보내고, 서버의 답(KIN 세션 폐기의 확인)을
+     * 기록하는 대로 랜딩으로 한 번 옮긴다 — 그 뒤의 IdP 처리는 서버의 일이고 이 문서는 기다리지 않는다. 같은 문서의 겹친
+     * 호출은 새 POST 없이 진행 중인 종료를 나눈다. 일하는 중이 아닌 문서(이미 닫혔다, 들어간 적 없다)와 다른 문서가 이
+     * 세션의 종료를 이미 기록한 문서는 POST 없이 떠난다 — 다시 보내는 것은 랜딩의 Retry Log Out뿐이다. 데모는 서버 세션이
+     * 없어 로컬만 끝낸다.
      */
     async logout() {
       if (ending) return stepping ? undefined : ending;
@@ -779,9 +1085,9 @@ const KinAuth = (() => {
         return;
       }
       const session = sessionId, op = nextOperation();
-      writeEnd({ session, operation: op, status: 'ending' });
+      writeEnd({ session, operation: op, status: 'ending', origin: 'logout' });
       closeHere('ending', null, op);
-      tell(session, op);
+      tell(session, op, 'logout');
       ending = (async () => {
         if (step) {
           stepping = true;
@@ -805,9 +1111,9 @@ const KinAuth = (() => {
     /**
      * 요청의 답이 알려 준 세션 종료 신호(session-transport.js가 그 요청이 실은 세션과 함께 넘긴다). 이 문서의 지금 세션이
      * 아닌 신호는 아무것도 하지 않는다 — 이전 세션의 늦은 답이 지금 세션을 끝내지 못한다. 서버가 "그 세션은 끝났다"
-     * (AUTH_SESSION_ENDED)고 답했으면 POST 없이 종료 확인으로 닫고, 결속 불일치(AUTH_SESSION_MISMATCH)는 세션 교체로
-     * 닫는다. 그 밖의 것은 여기서 아무것도 닫지 않는다: 코드 없는 401, 자격 없음, 결속 누락(428), 403·409·5xx는 그 요청
-     * 하나의 실패이고 종료의 증거가 아니다 — 쿠키도 기록도 건드리지 않는다.
+     * (AUTH_SESSION_ENDED)고 답했으면 POST 없이 종료 확인으로 닫고(기록의 출처는 server_end다 — 사람이 누른 것이 아니다),
+     * 결속 불일치(AUTH_SESSION_MISMATCH)는 세션 교체로 닫는다. 그 밖의 것은 여기서 아무것도 닫지 않는다: 코드 없는 401,
+     * 자격 없음, 결속 누락(428), 403·409·5xx는 그 요청 하나의 실패이고 종료의 증거가 아니다 — 쿠키도 기록도 건드리지 않는다.
      */
     authFailure(failure) {
       if (!failure || state !== 'active' || failure.session !== sessionId) return;
@@ -815,8 +1121,8 @@ const KinAuth = (() => {
       if (cached && cached.demo) return;
       if (failure.code === 'AUTH_SESSION_ENDED') {
         const session = sessionId, op = nextOperation();
-        writeEnd({ session, operation: op, status: 'confirmed' });
-        tell(session, op);
+        writeEnd({ session, operation: op, status: 'confirmed', origin: 'server_end' });
+        tell(session, op, 'server_end');
         endedElsewhere('confirmed', null, op);
       } else if (failure.code === 'AUTH_SESSION_MISMATCH') {
         closeReplaced();
@@ -851,12 +1157,16 @@ const KinAuth = (() => {
     /** 이 문서가 시작하는 종료마다 종료 기록·통지 뒤, POST 앞에 한도 안에서 기다릴 일(실패해도 종료는 막히지 않는다). */
     beforeLogoutPost(work) { step = typeof work === 'function' ? work : null; },
 
-    /** 랜딩의 Retry Log Out: 누를 때마다 기록된 세션을 밝힌 POST 하나(누르는 동안의 겹친 호출은 나눈다). 이동하지 않는다. */
+    /**
+     * 랜딩의 Retry Log Out: 누를 때마다 기록된 세션을 밝힌 POST 하나(누르는 동안의 겹친 호출은 나눈다). 이동하지 않는다.
+     * 기록은 그 세션 자신의 키에만 쓴다 — 그사이 이 브라우저의 세션이 다른 로그인으로 바뀌었어도 그 로그인의 기록은 건드리지
+     * 않고, 서버가 결속 불일치로 답하면 이 기록은 치워진다(conclude).
+     */
     retryLogout() {
       if (retrying) return retrying;
       if (!CLOSED.includes(state) || !sessionId) return Promise.resolve(null);
       const session = sessionId, op = nextOperation();
-      writeEnd({ session, operation: op, status: 'ending' });
+      writeEnd({ session, operation: op, status: 'ending', origin: 'logout' });
       state = 'ending';
       reason = null;
       operation = op;

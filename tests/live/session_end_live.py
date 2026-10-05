@@ -1,0 +1,378 @@
+"""TEST-S7-U5-END-LIVE (SE-01..SE-08): the session end on the real stack - real BFF, nginx, PostgreSQL and the real
+Keycloak login form driven by a browser. No mock of the form, the authorization endpoint or the callback.
+
+REQ-S7-U5-SESSION-END (R1: whenever the product ends a product session the provider session ends too, and a provider
+session the product decided to end never produces a product session again; R2: a login started to leave, to switch, or
+from a browser that cannot say whether the person left, makes a session only from credentials entered after that press)
+  -> RISK-S7-U5-SILENT-REENTRY -> TEST-S7-U5-END-LIVE (this file; the ordered races are tests/auth_session_service_test.cjs
+  U5E-01..U5E-10, the landing table is tests/auth_entry_dom_test.py).
+Design: session-end design v2 (2026-10-05) section 5, acceptance cases 6 and 7, and the pre-review's real-Keycloak list:
+the provider frozen during a Log out (F6-C), the next person at an unfinished-logout landing and at Switch account (an
+editable user name, never the previous doctor's fixed re-authentication screen - F5), the probe and fresh steps, the
+same doctor's other PC untouched, a provider end racing a refresh (F2), and what `auth_time` does across a refresh.
+
+Run only through the guarded runner, on the isolated synthetic stack, after the unit's migration is applied there:
+    python scripts/run-tests.py --module tests/live/session_end_live.py --mode live --unit s7-u5-session-end --timeout 1800
+SE-02 pauses and unpauses the stack's own keycloak service for about four seconds (`docker compose pause keycloak`,
+no restart, no configuration change); every other case only reads Keycloak and the database.
+
+Owned data: the LiveStack test identities doctor (A) and doctor2 (B), their product sessions, their access rows and the
+end marks (IdpSessionEnd) of their own provider sessions - all removed at the end. Nothing secret is printed: each case
+prints one line `S7-U5-END-LIVE {case, ...}` of names, counts and booleans.
+
+STATUS WHEN WRITTEN (2026-10-05): not run - this job had no stack (Docker was out of bounds). The first run on the
+stack is its first execution; a harness error there is not evidence about the product.
+"""
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+import time
+import unittest
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from playwright.sync_api import sync_playwright
+
+from invariants_live import ROOT, psql, purge_user_audit
+from session_support import cleanup_sessions, setup_stack
+
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+CASES = (
+    "test_01_log_out_ends_the_provider_session_and_login_meets_the_form",
+    "test_02_provider_frozen_during_log_out_cannot_be_ridden_back_in",
+    "test_03_next_person_at_an_unfinished_logout_logs_in_as_themselves",
+    "test_04_switch_account_shows_an_editable_name",
+    "test_05_the_same_doctors_other_pc_keeps_working",
+    "test_06_an_untrusted_browser_is_probed_then_asked_for_credentials",
+    "test_07_a_provider_end_racing_a_refresh_still_ends_the_session",
+    "test_08_what_auth_time_does_across_a_refresh",
+)
+APP = "/worklist/hpacs-lite/"
+STORAGE_DENIED = """(() => { for (const name of ['localStorage']) Object.defineProperty(window, name,
+  { get() { throw new DOMException('SYN denied', 'SecurityError'); } }); })();"""
+# What the Keycloak page in front of the person is (the product's theme keeps Keycloak's field ids).
+FORM = """() => { const q = s => document.querySelector(s);
+  const u = q('#username') || q('input[name=username]'), p = q('#password') || q('input[name=password]');
+  const shown = el => !!el && el.type !== 'hidden' && el.offsetParent !== null;
+  return { username: u ? { shown: shown(u), editable: !u.readOnly && !u.disabled, value: u.value } : null,
+    password: shown(p), attempted: q('#kc-attempted-username')?.innerText?.trim() ?? null }; }"""
+WHERE = """() => { const p = location.pathname;
+  if (p.startsWith('/auth/realms/kin/')) return document.readyState === 'complete' ? 'keycloak' : null;
+  if (/\\/index\\.html$/.test(p)) { const b = document.querySelector('#signin');
+    return b && !document.documentElement.classList.contains('auto-entry') ? 'landing' : null; }
+  if (/\\/(main|clinician)\\.html$/.test(p)) return typeof KinAuth !== 'undefined' && KinAuth.lifecycle().state === 'active' ? 'main' : null;
+  return null; }"""
+
+
+def compose(*arguments: str) -> None:
+    done = subprocess.run(["docker", "compose", *arguments], cwd=ROOT, capture_output=True, text=True, timeout=60)
+    if done.returncode:
+        raise RuntimeError("harness: docker compose " + " ".join(arguments) + " failed")
+
+
+class SessionEndLive(unittest.TestCase):
+    provider_sessions: list = []
+
+    @classmethod
+    def setUpClass(cls):
+        declared = [name for name in sorted(vars(cls)) if name.startswith("test_")]
+        if list(CASES) != declared:
+            raise RuntimeError(f"CASES {CASES} differ from the declared cases {declared}")
+        setup_stack(cls)
+        cls.stack.provision_test_identities()
+        cls.addClassCleanup(cls.purge)
+        cls.ids = {"A": cls.stack.user_ids["doctor"], "B": cls.stack.user_ids["doctor2"]}
+        cls.logins = {"A": "doctor", "B": "doctor2"}
+        cls.playwright = sync_playwright().start()
+        cls.addClassCleanup(cls.playwright.stop)
+        cls.browser = cls.playwright.chromium.launch(headless=True)
+        cls.addClassCleanup(cls.browser.close)
+
+    @classmethod
+    def purge(cls):
+        cleanup_sessions(cls.stack)
+        for user_id in cls.ids.values():
+            purge_user_audit(user_id)
+            cls.stack.kc_admin("POST", f"/users/{user_id}/logout")
+        owned = [value for value in cls.provider_sessions if re.fullmatch(r"[0-9A-Za-z-]{8,64}", value)]
+        if owned:
+            psql('DELETE FROM "IdpSessionEnd" WHERE "idpSid" IN (' + ",".join(f"'{value}'" for value in owned) + ");")
+
+    # ── a browser profile and what it asked ──
+    def setUp(self):
+        self.contexts = []
+        for user_id in self.ids.values():
+            self.stack.kc_admin("POST", f"/users/{user_id}/logout")
+        cleanup_sessions(self.stack)
+
+    def tearDown(self):
+        for context in self.contexts:
+            context.close()
+
+    def profile(self, script: str | None = None):
+        context = self.browser.new_context(ignore_https_errors=True, locale="ko-KR")
+        context.set_default_timeout(30000)
+        if script:
+            context.add_init_script(script)
+        context.asked = []
+
+        def note(request):
+            url = urlparse(request.url)
+            if url.path == "/api/auth/login" and request.method == "POST":
+                body = json.loads(request.post_data or "{}")
+                context.asked.append(("start", body.get("reason"), "x-kin-session" in request.headers))
+            elif url.path.endswith("/protocol/openid-connect/auth"):
+                context.asked.append(("authorize", parse_qs(url.query).get("prompt", [None])[0]))
+        context.on("request", note)
+        self.contexts.append(context)
+        return context, context.new_page()
+
+    def settle(self, page) -> str:
+        return page.wait_for_function(WHERE).json_value()
+
+    def credentials(self, page, who: str, name: bool = True) -> str:
+        if name:
+            page.fill("#username", self.stack.username(self.logins[who]))
+        page.fill("#password", self.stack.passwords[self.logins[who]])
+        page.click("#kc-login")
+        page.wait_for_function("() => !location.pathname.startsWith('/auth/realms/kin/login-actions/authenticate') || !!document.querySelector('#input-error')")
+        return self.settle(page)
+
+    def sign_in(self, page, who: str) -> str:
+        """Open the app; the ordinary entry goes to the provider's form by itself. Returns the session id of the document."""
+        page.goto(self.stack.proxy + APP + "index.html")
+        at = self.settle(page)
+        if at == "landing":
+            page.click("#signin")
+            at = self.settle(page)
+        self.assertEqual(at, "keycloak", "a browser without a session meets the provider's form")
+        self.assertEqual(self.credentials(page, who), "main")
+        for line in psql(f'SELECT coalesce("idpSid", \'\') FROM "AuthSession" WHERE sub=\'{self.ids[who]}\';'):
+            self.assertTrue(line, "every session remembers its provider session")
+            type(self).provider_sessions.append(line)
+        return page.evaluate("KinAuth.sessionId()")
+
+    # ── what the server and the provider hold ──
+    def product_sessions(self, who: str) -> int:
+        return int(psql(f'SELECT count(*) FROM "AuthSession" WHERE sub=\'{self.ids[who]}\';')[0])
+
+    def provider_alive(self, who: str) -> int:
+        answer = self.stack.kc_admin("GET", f"/users/{self.ids[who]}/sessions")
+        return len(answer.body) if isinstance(answer.body, list) else -1
+
+    def ends(self, who: str) -> list:
+        rows = psql(f'SELECT action || E\'\\t\' || detail FROM "AuditLog" WHERE target=\'{self.ids[who]}\' '
+                    "AND action IN ('auth.logout','auth.session.expired') ORDER BY id;")
+        return [(row.split("\t")[0], json.loads(row.split("\t", 1)[1]).get("cause")) for row in rows]
+
+    def marks(self, who: str) -> list:
+        """(cause, confirmed) of the end marks of this account's provider sessions seen in this run."""
+        owned = ",".join(f"'{value}'" for value in self.provider_sessions) or "''"
+        return [tuple(row.split("\t")) for row in psql(
+            f'SELECT cause || E\'\\t\' || ("confirmedAt" IS NOT NULL)::text FROM "IdpSessionEnd" WHERE "idpSid" IN ({owned}) ORDER BY "decidedAt";')]
+
+    def wait(self, what: str, check, seconds: float = 15.0):
+        until = time.monotonic() + seconds
+        while time.monotonic() < until:
+            if check():
+                return
+            time.sleep(0.2)
+        self.fail("not observed within %.0f s: %s" % (seconds, what))
+
+    def me(self, context) -> tuple:
+        answer = context.request.get(self.stack.proxy + "/api/me", headers={"X-KIN-CSRF": "1"})
+        body = answer.json() if "json" in (answer.headers.get("content-type") or "") else {}
+        return answer.status, body.get("sub")
+
+    def report(self, case: str, **facts):
+        print("S7-U5-END-LIVE " + json.dumps({"case": case, **facts}, ensure_ascii=False))
+
+    def assert_editable_form(self, page, what: str):
+        form = page.evaluate(FORM)
+        self.assertTrue(form["username"] and form["username"]["shown"] and form["username"]["editable"], what + ": a user name can be typed")
+        self.assertEqual((form["username"]["value"], form["attempted"]), ("", None), what + ": nobody's name is fixed on the form")
+        self.assertTrue(form["password"], what)
+
+    # ── cases ──
+    def test_01_log_out_ends_the_provider_session_and_login_meets_the_form(self):
+        context, page = self.profile()
+        self.sign_in(page, "A")
+        started = time.monotonic()
+        page.click("#logout")
+        page.wait_for_url("**/index.html")
+        took = time.monotonic() - started
+        self.assertEqual(self.settle(page), "landing")
+        self.assertIn("끝냈습니다", page.inner_text("#msg"))
+        self.assertEqual((self.product_sessions("A"), self.ends("A")[-1]), (0, ("auth.logout", "logout")))
+        # R1: the provider session is ended - by the product, confirmed in its mark - without the person waiting for it.
+        self.wait("the provider session ended and the mark confirmed", lambda: self.provider_alive("A") == 0 and self.marks("A")[-1:] == [("logout", "true")])
+        # The day after (or a minute after): one Login press, then credentials. Never a silent entry.
+        page.click("#signin")
+        self.assertEqual(self.settle(page), "keycloak")
+        self.assert_editable_form(page, "after a Log out")
+        self.assertEqual(context.asked[-3:], [("start", "logout_unfinished", False), ("authorize", "none"), ("authorize", "login")],
+                         "the explicit logout's Login declares its intent, probes, then asks for credentials")
+        self.assertEqual(self.credentials(page, "A"), "main")
+        self.report("SE-01", logout_seconds=round(took, 2), ends=len(self.ends("A")))
+
+    def test_02_provider_frozen_during_log_out_cannot_be_ridden_back_in(self):
+        """Acceptance 6 (F6-C): the provider does not answer while the Log out runs. The Log out is answered at once;
+        afterwards the provider session may still be alive - and Login must not ride it."""
+        context, page = self.profile()
+        self.sign_in(page, "A")
+        compose("pause", "keycloak")
+        try:
+            started = time.monotonic()
+            page.click("#logout")
+            page.wait_for_url("**/index.html")
+            took = time.monotonic() - started
+            self.assertEqual(self.settle(page), "landing")
+            self.assertLess(took, 2.0, "an ordinary Log out does not wait for the provider")
+            self.assertEqual(self.product_sessions("A"), 0)
+            time.sleep(3.5)
+        finally:
+            compose("unpause", "keycloak")
+        # Login right away: whether or not the retry has ended the provider session yet, nobody enters without the form.
+        seen = []
+        for press in range(3):
+            page.click("#signin")
+            page.wait_for_function("b => location.pathname.startsWith('/auth/realms/kin/') || document.querySelector('#msg').textContent !== b",
+                                   arg=page.inner_text("#msg") if "/index.html" in page.url else "")
+            at = self.settle(page)
+            seen.append(at)
+            self.assertNotEqual(at, "main", "a silent re-entry as the previous doctor")
+            if at == "keycloak":
+                break
+            # The landing said the previous login's end is not confirmed yet: the same button, a moment later.
+            self.assertIn("이전 로그인 종료를 확인하지 못했습니다", page.inner_text("#msg"))
+            time.sleep(2)
+        self.assertEqual(seen[-1], "keycloak")
+        self.assert_editable_form(page, "after a Log out the provider did not answer")
+        self.wait("the provider session ended by the retry", lambda: self.provider_alive("A") == 0 and ("logout", "true") in self.marks("A"))
+        self.assertEqual(self.ends("A"), [("auth.logout", "logout")], "one record of the end; retries add none")
+        self.report("SE-02", logout_seconds=round(took, 2), presses=len(seen))
+
+    def unfinished_logout(self):
+        """Doctor A at an unfinished-logout landing: the Log out POST never left the browser; both sessions are alive."""
+        context, page = self.profile()
+        self.sign_in(page, "A")
+        context.route("**/api/auth/logout", lambda route: route.abort("connectionfailed"))
+        page.click("#logout")
+        page.wait_for_url("**/index.html")
+        self.assertEqual(self.settle(page), "landing")
+        self.assertTrue(page.is_visible("#retry-logout"))
+        self.assertEqual((self.product_sessions("A"), self.provider_alive("A")), (1, 1))
+        return context, page
+
+    def test_03_next_person_at_an_unfinished_logout_logs_in_as_themselves(self):
+        """Acceptance 7: the next person B presses Login once at doctor A's unfinished-logout landing."""
+        context, page = self.unfinished_logout()
+        page.click("#signin")
+        self.assertEqual(self.settle(page), "keycloak")
+        self.assert_editable_form(page, "the next person's Login")
+        self.assertEqual(context.asked[-2:], [("start", "logout_unfinished", True), ("authorize", "login")],
+                         "a bound start with the intent, then the fresh step - no probe is needed after a confirmed end")
+        self.assertEqual((self.product_sessions("A"), self.provider_alive("A"), self.ends("A")), (0, 0, [("auth.logout", "logout")]),
+                         "A's sessions are ended before the form is shown; the record says logout, not account_switch")
+        self.assertEqual(self.credentials(page, "B"), "main")
+        self.assertEqual(self.me(context), (200, self.ids["B"]))
+        self.assertEqual((self.product_sessions("A"), self.provider_alive("A"), self.product_sessions("B")), (0, 0, 1))
+        self.report("SE-03", a_ends=self.ends("A"))
+
+    def test_04_switch_account_shows_an_editable_name(self):
+        context, page = self.unfinished_logout()
+        page.click("#switch")
+        self.assertEqual(self.settle(page), "keycloak")
+        self.assert_editable_form(page, "Switch account")
+        self.assertEqual(self.ends("A"), [("auth.logout", "account_switch")])
+        self.assertEqual(self.credentials(page, "B"), "main")
+        self.assertEqual((self.me(context), self.product_sessions("A"), self.provider_alive("A")), ((200, self.ids["B"]), 0, 0))
+        self.report("SE-04", a_ends=self.ends("A"))
+
+    def test_05_the_same_doctors_other_pc_keeps_working(self):
+        """Acceptance 3: two PCs of doctor A are two provider sessions; the Log out of one leaves the other, also after
+        the other refreshed its token."""
+        first, page1 = self.profile()
+        second, page2 = self.profile()
+        self.sign_in(page1, "A")
+        self.sign_in(page2, "A")
+        self.assertEqual((self.product_sessions("A"), self.provider_alive("A")), (2, 2))
+        page1.click("#logout")
+        page1.wait_for_url("**/index.html")
+        self.wait("PC1's provider session ended", lambda: self.provider_alive("A") == 1)
+        psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["A"]}\';')
+        self.assertEqual(self.me(second), (200, self.ids["A"]), "PC2 refreshes and goes on")
+        self.assertEqual(page2.evaluate("KinAuth.lifecycle().state"), "active")
+        self.assertEqual((self.product_sessions("A"), self.provider_alive("A")), (1, 1))
+        self.report("SE-05", ends=self.ends("A"))
+
+    def test_06_an_untrusted_browser_is_probed_then_asked_for_credentials(self):
+        """Acceptance 4: the browser cannot keep an end record, its product cookie is gone, doctor A's SSO is alive."""
+        context, page = self.profile(STORAGE_DENIED)
+        self.sign_in(page, "A")
+        context.clear_cookies(name="kin_sid")
+        page.goto(self.stack.proxy + APP + "index.html")
+        self.assertEqual(self.settle(page), "landing", "an untrusted browser does not enter by itself")
+        time.sleep(1)
+        self.assertEqual(urlparse(page.url).path, APP + "index.html")
+        del context.asked[:]
+        page.click("#signin")
+        self.assertEqual(self.settle(page), "keycloak")
+        self.assert_editable_form(page, "the recovery Login")
+        self.assertEqual(context.asked, [("start", "storage_untrusted", False), ("authorize", "none"), ("authorize", "login")])
+        # The probe identified A's SSO and ended it - with A's product session of that SSO - before the form.
+        self.assertEqual((self.provider_alive("A"), self.product_sessions("A"), self.ends("A")), (0, 0, [("auth.logout", "reauthentication")]))
+        self.assertEqual(self.credentials(page, "A"), "main")
+        self.report("SE-06", asked=len(context.asked))
+
+    def test_07_a_provider_end_racing_a_refresh_still_ends_the_session(self):
+        """F2: an end that overlaps a refresh of the same provider session. Whatever the provider does with the overlap,
+        the product's mark keeps that session out and the end is asked again until the form is what a login meets."""
+        outcomes = []
+        for attempt in range(5):
+            context, page = self.profile()
+            self.sign_in(page, "A")
+            psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["A"]}\';')
+            # A Log out and three requests that each need the refresh, at once.
+            page.evaluate("""() => { const h = { 'X-KIN-CSRF': '1', 'X-KIN-Session': KinAuth.sessionId() };
+              return Promise.allSettled([fetch('/api/auth/logout', { method: 'POST', headers: h }),
+                fetch('/api/me', { headers: h }), fetch('/api/me', { headers: h }), fetch('/api/me', { headers: h })]); }""")
+            self.wait("the product session ended", lambda: self.product_sessions("A") == 0)
+            # A plain link login with this browser's provider cookies: it may get a code from a session that survived its
+            # end - and must not get a product session from it.
+            fresh = context.new_page()
+            fresh.goto(self.stack.proxy + "/api/auth/login")
+            at = self.settle(fresh)
+            outcomes.append(at)
+            self.assertNotEqual(at, "main", f"attempt {attempt}: a product session from an ended provider session")
+            self.assertEqual(self.product_sessions("A"), 0)
+            self.wait("the provider session ended", lambda: self.provider_alive("A") == 0, 30)
+            context.close()
+            self.contexts.remove(context)
+        self.report("SE-07", outcomes=outcomes)
+
+    def test_08_what_auth_time_does_across_a_refresh(self):
+        """An observation the design asked for (the pre-review's section 3), not a rule of the product: whether the
+        `auth_time` of the stored access token changes when the product refreshes it."""
+        context, page = self.profile()
+        self.sign_in(page, "A")
+        read = lambda: psql(f'SELECT "accessToken" FROM "AuthSession" WHERE sub=\'{self.ids["A"]}\';')[0]
+        claims = lambda token: json.loads(__import__("base64").urlsafe_b64decode(token.split(".")[1] + "=" * (-len(token.split(".")[1]) % 4)))
+        before = claims(read())
+        psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["A"]}\';')
+        self.assertEqual(self.me(context)[0], 200)
+        after = claims(read())
+        self.assertNotEqual(before.get("jti"), after.get("jti"), "the token was refreshed")
+        self.assertEqual(before.get("sid"), after.get("sid"), "a refresh continues its provider session")
+        self.report("SE-08", auth_time_present=[("auth_time" in before), ("auth_time" in after)],
+                    auth_time_same=before.get("auth_time") == after.get("auth_time"))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

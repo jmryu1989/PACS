@@ -205,7 +205,9 @@ class PageSessionDOMTest(unittest.TestCase):
         before, after = [list(map(json.loads, p['storage'])) for p in [first,last]]
         if mode == 'logout':
             # The logout receipt may confirm its own end record while ordinary work is already closed.
-            started, confirmed = before[0].pop('kin-session-end'), after[0].pop('kin-session-end')
+            # (auth.js keeps the end record under the session's own key: kin-session-end:<session>)
+            [key] = [name for name in before[0] if name.startswith('kin-session-end:')]
+            started, confirmed = before[0].pop(key), after[0].pop(key)
             started, confirmed = json.loads(started), json.loads(confirmed)
             self.assertIn(started['status'],['ending','confirmed'])
             self.assertEqual({**started,'status':'confirmed'},confirmed)

@@ -18,12 +18,12 @@ export class AuthController {
 
   /**
    * 링크로 여는 로그인. 어떤 세션도 끝내지 않는다 — 살아 있는 세션의 쿠키가 있으면 Keycloak으로 보내지 않고 입구로
-   * 돌려보낸다(그 세션을 바꾸는 로그인은 결속된 POST다).
+   * 돌려보낸다. 주소의 매개변수로는 재인증을 청할 수 없다: 그 의도는 CSRF로 보호된 POST만 시작한다.
    */
   @Public()
   @Get('login')
-  async login(@Req() req: any, @Res() res: any, @Query('prompt') prompt?: string) {
-    const url = await this.auth.beginLogin(req, res, prompt === 'login' ? 'login' : undefined);
+  async login(@Req() req: any, @Res() res: any) {
+    const url = await this.auth.beginLogin(req, res);
     res.redirect(302, url ?? `${this.origin()}/worklist/hpacs-lite/index.html?auth_error=session_active`);
   }
 
@@ -35,24 +35,28 @@ export class AuthController {
   }
 
   /**
-   * 세션을 바꿀 수 있는 로그인 개시(계정 전환, 끝내지 못한 세션 뒤의 다시 로그인). CSRF와, 쿠키가 있으면 그 세션의
-   * 결속을 확인한 뒤에만 그 세션을 끝낸다. 답은 이동할 주소다 — 헤더를 실어야 하는 요청이라 링크로는 보낼 수 없다.
+   * 재인증 의도의 로그인 개시(끝내지 못한 로그아웃 뒤의 Login, 계정 전환, 떠났는지 알 수 없는 브라우저의 Login). 본문은
+   * `{intent: 'reauthenticate', reason}`이다. CSRF와, 살아 있는 세션이 있으면 그 세션의 결속을 확인한 뒤에만 그 세션을
+   * 끝낸다. 답은 이동할 주소다 — 헤더를 실어야 하는 요청이라 링크로는 보낼 수 없다.
    */
   @Public()
   @Post('login')
   @HttpCode(200)
   async startLogin(@Req() req: any, @Res({ passthrough: true }) res: any, @Body() body: any) {
-    return this.coded(res, async () =>
-      ({ location: await this.auth.beginBoundLogin(req, res, body?.prompt === 'login' ? 'login' : undefined) }));
+    return this.coded(res, async () => ({ location: await this.auth.beginReauthentication(req, res, body) }));
   }
 
   @Public()
   @Post('register')
   @HttpCode(200)
   async startRegister(@Req() req: any, @Res({ passthrough: true }) res: any) {
-    return this.coded(res, async () => ({ location: await this.auth.beginBoundLogin(req, res, 'create') }));
+    return this.coded(res, async () => ({ location: await this.auth.beginBoundRegister(req, res) }));
   }
 
+  /**
+   * 로그인 콜백은 브라우저의 최상위 이동이다: 어느 경우에도 JSON 오류로 답하지 않고 갈 곳으로 보낸다(업무 문서, 인증
+   * 서버의 다음 단계, 사유가 붙은 랜딩). 판정은 서비스가 한다 — 여기는 그 답을 이동으로 옮길 뿐이다.
+   */
   @Public()
   @Get('callback')
   async callback(
@@ -62,31 +66,23 @@ export class AuthController {
     @Query('state') state?: string,
     @Query('error') error?: string,
   ) {
-    this.auth.expirePendingCookie(res);
-    const origin = this.origin();
-    if ((!code || !state) && await this.auth.hasSession(req)) {
-      res.redirect(302, `${origin}/worklist/hpacs-lite/main.html`);
-      return;
-    }
-    if (error) {
-      // 실패 행은 이 서버가 시작한 로그인일 때만 남고, error 원문은 행에 싣지 않는다(OP-2 A).
-      await this.auth.recordLoginFailure(req, 'provider_error');
-      res.redirect(302, `${origin}/worklist/hpacs-lite/index.html?auth_error=${encodeURIComponent(error)}`);
-      return;
-    }
-    if (!code) {
-      await this.auth.recordLoginFailure(req, 'no_code');
-      res.redirect(302, `${origin}/worklist/hpacs-lite/index.html?auth_error=stale`);
-      return;
-    }
+    const pages = `${this.origin()}/worklist/hpacs-lite`;
+    let result;
     try {
-      const { sid, proof, document } = await this.auth.finishLogin(req, code ?? '', state ?? '');
+      result = await this.auth.finishCallback(req, res, { code, state, error });
+    } catch {
+      result = { kind: 'landing' as const, error: 'login_failed' };
+    }
+    if (result.kind === 'entered') {
       // `kin_sid`를 쓰는 응답은 이것 하나다. 진입 증명은 fragment로만 나간다 — 서버·프록시 기록과 Referer에 실리지 않는다.
-      this.auth.setSessionCookie(res, sid);
-      res.redirect(302, `${origin}/worklist/hpacs-lite/${document}#kin-entry=${encodeURIComponent(proof)}`);
-    } catch (caught: any) {
-      if (caught?.getStatus?.() === 400) throw caught;
-      res.redirect(302, `${origin}/worklist/hpacs-lite/index.html?auth_error=login_failed`);
+      this.auth.setSessionCookie(res, result.sid);
+      res.redirect(302, `${pages}/${result.document}#kin-entry=${encodeURIComponent(result.proof)}`);
+    } else if (result.kind === 'redirect') {
+      res.redirect(302, result.location);
+    } else if (result.kind === 'work') {
+      res.redirect(302, `${pages}/main.html`);
+    } else {
+      res.redirect(302, `${pages}/index.html?auth_error=${encodeURIComponent(result.error)}`);
     }
   }
 

@@ -358,9 +358,9 @@ class ViewerSessionDOMTest(unittest.TestCase):
                 landing = []
                 view.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
                 preparer.evaluate("""storage=>{
-                  const record=JSON.stringify({session:'S1',status:'ending'});
-                  if(storage==='cookie')document.cookie='kin-session-end='+encodeURIComponent(record)+';path=/';
-                  else localStorage.setItem('kin-session-end',record);
+                  const record=JSON.stringify({session:'S1',operation:5,status:'ending',origin:'logout'});
+                  if(storage==='cookie')document.cookie='kin-session-end.S1='+encodeURIComponent(record)+';path=/';
+                  else localStorage.setItem('kin-session-end:S1',record);
                 }""", storage)
                 preparer.close()
                 for _ in range(200):
@@ -372,7 +372,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
                 self.assertEqual(self.requests, [])
                 for route in landing: route.abort()
                 view.close()
-                self.opener.evaluate("localStorage.removeItem('kin-session-end');document.cookie='kin-session-end=;max-age=0;path=/'")
+                self.opener.evaluate("localStorage.removeItem('kin-session-end:S1');document.cookie='kin-session-end.S1=;max-age=0;path=/'")
 
     def test_both_locks_vanish_without_matching_end_record_resumes_and_loads(self):
         self.observe_deferred_reads()
@@ -380,7 +380,12 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.context.route(BASE + '/dicom-web/deferred', lambda route: (
             self.requests.append(('/dicom-web/deferred', route.request.headers.get('x-kin-session'))),
             route.fulfill(body=png, content_type='image/png')))
-        for record in [None, 'invalid-json', '{"session":"S2"}']:
+        # No record; an unreadable one; another session's end (in its own key, and in the one key of the older format);
+        # and this session's `leaving` marker (Log Out pressed and cancelled - not an end): the viewer resumes.
+        for record in [None, ('kin-session-end:S1', 'invalid-json'),
+                       ('kin-session-end:S2', '{"session":"S2","operation":5,"status":"confirmed","origin":"logout"}'),
+                       ('kin-session-end', '{"session":"S2"}'),
+                       ('kin-session-end:S1', '{"session":"S1","operation":5,"status":"leaving","origin":"logout","preparation":"vanishing"}')]:
             preparer = self.preparer()
             view = self.open_viewer()
             self.hold_lock(preparer, 'kin-preparation:vanishing')
@@ -388,7 +393,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
             view.wait_for_function("KinWorkContext.state()==='preparing'")
             self.queue_image_and_work(view)
             self.hold_lock(preparer, 'kin-session-ended:S1')
-            if record is not None: preparer.evaluate("r=>localStorage.setItem('kin-session-end',r)", record)
+            if record is not None: preparer.evaluate("([key,text])=>localStorage.setItem(key,text)", list(record))
             preparer.close()
             for _ in range(200):
                 if view.evaluate("events.includes('load')"): break
@@ -397,15 +402,17 @@ class ViewerSessionDOMTest(unittest.TestCase):
             self.assertEqual(self.requests, [('/dicom-web/deferred','S1')])
             self.requests.clear()
             view.close()
-            self.opener.evaluate("localStorage.removeItem('kin-session-end')")
+            self.opener.evaluate("for(const key of Object.keys(localStorage))if(key.startsWith('kin-session-end'))localStorage.removeItem(key)")
 
     def test_end_record_blocks_bound_startup_without_web_locks(self):
         self.context.add_init_script("Object.defineProperty(navigator,'locks',{value:undefined})")
-        for storage in ['localStorage', 'cookie']:
+        # (the last two: a record written before the per-session keys still ends the session it names)
+        for storage in ['localStorage', 'cookie', 'old localStorage', 'old cookie']:
             self.opener.evaluate("""storage=>{
-              const record=JSON.stringify({session:'S1',status:'ending'});
-              if(storage==='cookie')document.cookie='kin-session-end='+encodeURIComponent(record)+';path=/';
-              else localStorage.setItem('kin-session-end',record);
+              const old=storage.startsWith('old');
+              const record=JSON.stringify(old?{session:'S1',status:'ending'}:{session:'S1',operation:5,status:'ending',origin:'logout'});
+              if(storage.endsWith('cookie'))document.cookie='kin-session-end'+(old?'':'.S1')+'='+encodeURIComponent(record)+';path=/';
+              else localStorage.setItem('kin-session-end'+(old?'':':S1'),record);
             }""", storage)
             landing = []
             self.context.route(BASE + '/worklist/hpacs-lite/index.html', lambda route: landing.append(route))
@@ -422,7 +429,8 @@ class ViewerSessionDOMTest(unittest.TestCase):
             for route in landing: route.abort()
             view.close()
             self.context.unroute(BASE + '/worklist/hpacs-lite/index.html')
-            self.opener.evaluate("localStorage.removeItem('kin-session-end');document.cookie='kin-session-end=;max-age=0;path=/'")
+            self.opener.evaluate("""()=>{for(const key of Object.keys(localStorage))if(key.startsWith('kin-session-end'))localStorage.removeItem(key);
+              for(const name of ['kin-session-end','kin-session-end.S1'])document.cookie=name+'=;max-age=0;path=/';}""")
 
 
     def test_router_reload_cannot_adopt_replacement_session(self):
@@ -1073,10 +1081,98 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.assertEqual(self.dialogs, [])
 
     def test_direct_entry_end_record_sends_nothing(self):
-        self.opener.evaluate("localStorage.setItem('kin-session-end',JSON.stringify({session:'S1',operation:1,status:'confirmed'}))")
+        # A window nobody handed a session (a typed address) keeps the strict rule: an end record of ANY session, in
+        # either copy and in either format, and it asks the server nothing.
+        records = [("localStorage.setItem('kin-session-end:S1',JSON.stringify({session:'S1',operation:1,status:'confirmed',origin:'logout'}))",
+                    "localStorage.removeItem('kin-session-end:S1')"),
+                   ("localStorage.setItem('kin-session-end:S9',JSON.stringify({session:'S9',operation:1,status:'unconfirmed',origin:'logout',reason:'network'}))",
+                    "localStorage.removeItem('kin-session-end:S9')"),
+                   ("document.cookie='kin-session-end.S9='+encodeURIComponent(JSON.stringify({session:'S9',operation:1,status:'confirmed',origin:'server_end'}))+';path=/'",
+                    "document.cookie='kin-session-end.S9=;max-age=0;path=/'"),
+                   ("localStorage.setItem('kin-session-end',JSON.stringify({session:'S1',operation:1,status:'confirmed'}))",
+                    "localStorage.removeItem('kin-session-end')")]
+        for put, clear in records:
+            with self.subTest(record=put):
+                self.opener.evaluate(put)
+                page = self.context.new_page()
+                page.goto(BASE + "/ohif/viewer")
+                page.wait_for_url(BASE + "/worklist/hpacs-lite/index.html")
+                self.assertEqual(self.requests, [])
+                page.close()
+                self.opener.evaluate(clear)
+        # The opposite side: a `leaving` marker is not an end record - the typed window enters as with none.
+        self.opener.evaluate("localStorage.setItem('kin-session-end:S1',JSON.stringify({session:'S1',operation:1,status:'leaving',origin:'logout',preparation:'P'}))")
         page = self.context.new_page()
         page.goto(BASE + "/ohif/viewer")
-        page.wait_for_url(BASE + "/worklist/hpacs-lite/index.html")
+        page.wait_for_function('window.started===true')
+        self.assertEqual((self.requests, page.evaluate('KinWorkContext.session()')), ([('/api/me', None)], 'S1'))
+
+    # A014: a window that was handed its session ends on THAT session's end only.
+    HANDED = {
+        "another session's logout, confirmed": "localStorage.setItem('kin-session-end:S2',JSON.stringify({session:'S2',operation:5,status:'confirmed',origin:'logout'}))",
+        "another session's logout, unconfirmed": "localStorage.setItem('kin-session-end:S2',JSON.stringify({session:'S2',operation:5,status:'unconfirmed',origin:'logout',reason:'network'}))",
+        "another session's record in the cookie copy only": "document.cookie='kin-session-end.S2='+encodeURIComponent(JSON.stringify({session:'S2',operation:5,status:'confirmed',origin:'logout'}))+';path=/'",
+        "another session's record of the older format": "localStorage.setItem('kin-session-end',JSON.stringify({session:'S2',operation:5,status:'confirmed'}))",
+        "a record that cannot be read": "localStorage.setItem('kin-session-end:S1','{broken')",
+        "this session's leaving marker": "localStorage.setItem('kin-session-end:S1',JSON.stringify({session:'S1',operation:5,status:'leaving',origin:'logout',preparation:'P'}))",
+        "this session: a later leaving over an earlier end of the cookie copy":
+            "localStorage.setItem('kin-session-end:S1',JSON.stringify({session:'S1',operation:9,status:'leaving',origin:'logout',preparation:'P'}));"
+            "document.cookie='kin-session-end.S1='+encodeURIComponent(JSON.stringify({session:'S1',operation:5,status:'unconfirmed',origin:'logout'}))+';path=/'",
+    }
+    OWN_END = {
+        "this session's end, still ending": "localStorage.setItem('kin-session-end:S1',JSON.stringify({session:'S1',operation:5,status:'ending',origin:'logout'}))",
+        "this session's end, confirmed by the server": "localStorage.setItem('kin-session-end:S1',JSON.stringify({session:'S1',operation:5,status:'confirmed',origin:'server_end'}))",
+        "this session's end in the cookie copy only": "document.cookie='kin-session-end.S1='+encodeURIComponent(JSON.stringify({session:'S1',operation:5,status:'unconfirmed',origin:'logout',reason:'network'}))+';path=/'",
+        "this session: a later end of the cookie copy over an earlier leaving":
+            "localStorage.setItem('kin-session-end:S1',JSON.stringify({session:'S1',operation:5,status:'leaving',origin:'logout',preparation:'P'}));"
+            "document.cookie='kin-session-end.S1='+encodeURIComponent(JSON.stringify({session:'S1',operation:9,status:'ending',origin:'logout'}))+';path=/'",
+    }
+    CLEAR_ENDS = """()=>{for(const key of Object.keys(localStorage))if(key.startsWith('kin-session-end'))localStorage.removeItem(key);
+      for(const part of document.cookie.split(';')){const name=part.split('=')[0].trim();
+        if(name.startsWith('kin-session-end'))document.cookie=name+'=;max-age=0;path=/';}}"""
+
+    def test_a_handed_over_window_is_not_ended_by_another_sessions_record_a_leaving_marker_or_a_full_storage(self):
+        for label, put in self.HANDED.items():
+            with self.subTest(case=label):
+                self.opener.evaluate(put)
+                page = self.open_noopener()
+                page.wait_for_function('window.started===true')
+                self.assertEqual((page.evaluate('[KinWorkContext.session(),KinWorkContext.state()]'), self.requests, page.get_by_role('alert').count()),
+                                 (['S1', 'active'], [('/api/me', None)], 0))
+                self.assertFalse(page.evaluate('!!window.closeAttempted'))
+                # ... and it still works: a bound request goes out.
+                page.evaluate("fetch('/api/studies').then(r=>r.json())")
+                self.assertEqual(self.requests[-1], ('/api/studies', 'S1'))
+                page.close()
+                self.requests.clear()
+                self.opener.evaluate(self.CLEAR_ENDS)
+        # A storage that takes no write (full) says nothing about the handed session either.
+        self.context.add_init_script("""(()=>{const set=Storage.prototype.setItem;Storage.prototype.setItem=function(key,value){
+          if(this===window.localStorage)throw new DOMException('SYN full','QuotaExceededError');return set.call(this,key,value);};})()""")
+        page = self.open_noopener()
+        page.wait_for_function('window.started===true')
+        self.assertEqual((page.evaluate('KinWorkContext.session()'), self.requests), ('S1', [('/api/me', None)]))
+
+    def test_a_handed_over_window_ends_at_once_on_its_own_sessions_end(self):
+        # The opposite side: the handed session's own end record (either copy, the later of the two) ends the window
+        # before any request; so does a storage notice of that record while it works.
+        for label, put in self.OWN_END.items():
+            with self.subTest(case=label):
+                self.opener.evaluate(put)
+                page = self.open_noopener()
+                page.wait_for_url(BASE + '/worklist/hpacs-lite/index.html')
+                self.assertEqual(self.requests, [])
+                page.close()
+                self.opener.evaluate(self.CLEAR_ENDS)
+        page = self.open_noopener()
+        page.wait_for_function('window.started===true')
+        self.requests.clear()
+        # another session's record arrives: nothing; this session's record arrives: the window ends
+        self.opener.evaluate(self.HANDED["another session's logout, confirmed"])
+        page.wait_for_timeout(200)
+        self.assertEqual((page.evaluate('KinWorkContext.state()'), page.url), ('active', BASE + '/ohif/viewer?StudyInstanceUIDs=1.2.3'))
+        self.opener.evaluate(self.OWN_END["this session's end, still ending"])
+        page.wait_for_url(BASE + '/worklist/hpacs-lite/index.html')
         self.assertEqual(self.requests, [])
 
     def test_direct_entry_unreliable_storage_or_history_sends_nothing(self):

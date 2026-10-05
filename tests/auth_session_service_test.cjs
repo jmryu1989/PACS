@@ -64,9 +64,10 @@ const IP = '198.51.100.7';
 const A = 'syn-inst-a', B = 'syn-inst-b', Z = 'syn-inst-z';
 
 // ── environment the compiled service reads (set before any instance is built) ──
-const SECRETS = { client: 'syn-client-secret-' + randomBytes(12).toString('hex'), cookie: 'syn-cookie-secret-' + randomBytes(24).toString('hex') };
+const SECRETS = { client: 'syn-client-secret-' + randomBytes(12).toString('hex'), cookie: 'syn-cookie-secret-' + randomBytes(24).toString('hex'),
+  service: 'syn-service-secret-' + randomBytes(12).toString('hex'), serviceToken: 'syn-service-token-' + randomBytes(12).toString('hex') };
 Object.assign(process.env, { KC_ISSUER: ISSUER, KC_AUDIENCE: 'kin-api', PUBLIC_ORIGIN: ORIGIN, KC_WEB_SECRET: SECRETS.client,
-  KIN_COOKIE_SECRET: SECRETS.cookie });
+  KIN_COOKIE_SECRET: SECRETS.cookie, KC_REALM: 'kin', KC_CLIENT_ID: 'kin-api', KC_CLIENT_SECRET: SECRETS.service });
 delete process.env.AUTH_REQUIRED;
 
 // ── the disposable database ──
@@ -97,8 +98,14 @@ function database() {
 // ── the fake Keycloak (127.0.0.1, the container's own loopback) ──
 
 const KEYS = {};
+// The provider end (S7-U5 R1): the product ends a provider session with the service account's
+// DELETE /admin/realms/kin/sessions/{sid} (204 = ended now, 404 = no such session). `logouts` counts those requests as
+// they arrive, `logoutMode` is how the fake answers them ('ok', 'drop' = connection cut, 'hang' = never answered,
+// 'error' = 503, 'lost' = the session is ended and the answer is cut), `ended` holds the provider sessions it ended,
+// `alive` (when a case sets it) the only ones it knows. `serviceTokens` counts client_credentials grants, apart from
+// `tokens` (the user-token requests a case holds and counts); `serviceMode` 'stale' answers the next DELETE 401 once.
 const kc = { server: null, port: 0, held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
-  certs: 'ok', certRequests: 0, abandoned: 0 };
+  certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [] };
 
 async function keycloak() {
   if (kc.server) return;
@@ -122,20 +129,44 @@ async function keycloak() {
         if (kc.certs === 'drop') return req.socket.destroy();
         return kc.certs === 'error' ? send(503, { error: 'unavailable' }) : send(200, { keys: [jwk] });
       }
-      if (path === '/realms/kin/protocol/openid-connect/logout') {
+      const ending = /^\/admin\/realms\/kin\/sessions\/([^/]+)$/.exec(path);
+      if (ending && req.method === 'DELETE') {
+        const idpSid = decodeURIComponent(ending[1]);
+        if (req.headers.authorization !== 'Bearer ' + SECRETS.serviceToken) return send(403, { error: 'forbidden' });
+        if (kc.serviceMode === 'stale') { kc.serviceMode = 'ok'; return send(401, { error: 'HTTP 401 Unauthorized' }); }
         kc.logouts++;
+        kc.endRequests.push(idpSid);
+        const mode = kc.logoutMode;
         // A request Keycloak never answers ends when the caller gives it up: counted, so a case can tell an answer
         // that waited for that from one that did not.
-        if (kc.logoutMode === 'hang') res.on('close', () => { kc.abandoned++; });
-        // 'drop' cuts the connection, 'hang' never answers (the caller's own bound ends the wait).
-        const answer = () => kc.logoutMode === 'drop' ? req.socket.destroy() : kc.logoutMode === 'hang' ? undefined : send(204);
+        if (mode === 'hang') res.on('close', () => { kc.abandoned++; });
+        const answer = () => {
+          // 'drop' cuts the connection and 'error' fails before anything is ended; 'hang' never answers (the caller's
+          // own bound ends the wait); 'lost' ends the session and cuts the answer.
+          if (mode === 'drop') return req.socket.destroy();
+          if (mode === 'hang') return undefined;
+          if (mode === 'error') return send(503, { error: 'unavailable' });
+          const known = kc.alive ? kc.alive.includes(idpSid) : true;
+          const present = known && !kc.ended.includes(idpSid);
+          if (present) kc.ended.push(idpSid);
+          if (mode === 'lost') return req.socket.destroy();
+          return present ? send(204) : send(404, { error: 'Sesssion not found' });
+        };
         // What the store holds at the moment Keycloak is told: a case reads it here, before the answer.
         if (kc.onLogout) return void kc.onLogout().then(answer, answer);
         return answer();
       }
       if (path === '/realms/kin/protocol/openid-connect/token') {
-        kc.tokens++;
         const form = Object.fromEntries(new URLSearchParams(body));
+        // The service account's own token (the admin call above): answered at once, apart from the user tokens.
+        if (form.grant_type === 'client_credentials') {
+          kc.serviceTokens++;
+          if (kc.serviceMode === 'hang') return undefined;
+          return form.client_id === 'kin-api' && form.client_secret === SECRETS.service
+            ? send(200, { access_token: SECRETS.serviceToken, expires_in: 300, token_type: 'Bearer' })
+            : send(401, { error: 'unauthorized_client' });
+        }
+        kc.tokens++;
         if (form.grant_type === 'authorization_code') kc.codes.push({ code: form.code, verifier: form.code_verifier });
         const request = {
           form,
@@ -157,15 +188,21 @@ async function keycloak() {
   await new Promise(resolve => kc.server.listen(0, '127.0.0.1', resolve));
   kc.port = kc.server.address().port;
   process.env.KC_JWKS_URL = `http://127.0.0.1:${kc.port}/realms/kin/protocol/openid-connect/certs`;
+  process.env.KC_ADMIN_URL = `http://127.0.0.1:${kc.port}`;
 }
 
-// Keycloak logout requests the process has started (a logout tells Keycloak after its answer is decided and does not
-// wait for it): the cases wait until what was started has arrived before they count arrivals.
-const idp = { started: 0 };
+// Provider end requests the process has started (an end tells Keycloak after its answer is decided and does not wait
+// for it): the cases wait until what was started has arrived - and been answered or given up - before they count.
+const idp = { started: 0, open: 0 };
 const realFetch = globalThis.fetch;
 globalThis.fetch = (input, init) => {
-  if (String(input).endsWith('/protocol/openid-connect/logout')) idp.started++;
-  return realFetch(input, init);
+  if (!/\/admin\/realms\/kin\/sessions\/[^/]+$/.test(String(input))) return realFetch(input, init);
+  idp.started++;
+  idp.open++;
+  const settle = () => { idp.open--; };
+  const sent = realFetch(input, init);
+  sent.then(settle, settle);
+  return sent;
 };
 
 /** The n-th /token request held since the world began (1-based), in arrival order. */
@@ -300,10 +337,18 @@ const DETAIL_KEYS = {
   'auth.login:success': ['dataSubject', 'institution', 'ip', 'outcome'],
   'auth.login:failure': ['cause', 'dataSubject', 'institution', 'ip', 'outcome'],
   'auth.logout': ['cause', 'dataSubject', 'institution', 'ip'],
+  // A session ended by a re-authentication also says what asked for it (trigger: the declared reason, or register).
+  'auth.logout:reauthentication': ['cause', 'dataSubject', 'institution', 'ip', 'trigger'],
   'auth.session.expired': ['cause', 'dataSubject', 'institution', 'ip'],
   'auth.entry': ['dataSubject', 'institution', 'ip'],
 };
-const shapeOf = row => row.action === 'auth.login' ? 'auth.login:' + row.detail.outcome : row.action;
+const shapeOf = row => row.action === 'auth.login' ? 'auth.login:' + row.detail.outcome
+  : row.action === 'auth.logout' && row.detail.cause === 'reauthentication' ? 'auth.logout:reauthentication' : row.action;
+// The login starts that carry an intent (POST /api/auth/login): what the landing declares.
+const SWITCH = { intent: 'reauthenticate', reason: 'switch_account' };
+const UNFINISHED = { intent: 'reauthenticate', reason: 'logout_unfinished' };
+const UNTRUSTED = { intent: 'reauthenticate', reason: 'storage_untrusted' };
+const UNREADABLE = { intent: 'reauthenticate', reason: 'record_unreadable' };
 
 /** [action, cause or outcome, institution] of every auth row, sorted: order of commits is not the contract. */
 const summary = rows => rows.map(r => [r.action, r.detail.cause ?? r.detail.outcome, r.detail.institution]).sort();
@@ -311,6 +356,7 @@ const summary = rows => rows.map(r => [r.action, r.detail.cause ?? r.detail.outc
 // ── a world: one empty database state, a fresh fake Keycloak state, two service instances ──
 
 const { AuthService } = require('/app/dist/auth.service');
+const { KeycloakService } = require('/app/dist/keycloak.service');
 const { AuthGuard } = require('/app/dist/auth.guard');
 const { AuthController } = require('/app/dist/auth.controller');
 const { PacsController } = require('/app/dist/pacs.controller');
@@ -328,18 +374,21 @@ async function world(t, { now = START } = {}) {
   await keycloak();
   t.mock.timers.enable({ apis: ['setInterval', 'Date'], now });
   await base.$executeRawUnsafe('TRUNCATE "AuthSession"');
+  await base.$executeRawUnsafe('TRUNCATE "IdpSessionEnd"');
   await base.$transaction([base.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
     base.$executeRawUnsafe(`TRUNCATE "AuditLog" RESTART IDENTITY`)]);
-  const [{ left }] = await base.$queryRawUnsafe(`SELECT (SELECT count(*) FROM "AuditLog") + (SELECT count(*) FROM "AuthSession") AS left`);
-  assert.equal(Number(left), 0, 'every world starts with no session and no audit row');
+  const [{ left }] = await base.$queryRawUnsafe(`SELECT (SELECT count(*) FROM "AuditLog") + (SELECT count(*) FROM "AuthSession") + (SELECT count(*) FROM "IdpSessionEnd") AS left`);
+  assert.equal(Number(left), 0, 'every world starts with no session, no end mark and no audit row');
   Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
-    certs: 'ok', certRequests: 0, abandoned: 0 });
+    certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [] });
   idp.started = 0;
 
   const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [] };
   w.secret = (kind, value) => { for (const entry of secretEntries(kind, value)) w.secrets.push(entry); };
   w.secret('client-secret', SECRETS.client);
   w.secret('cookie-secret', SECRETS.cookie);
+  w.secret('service-secret', SECRETS.service);
+  w.secret('service-token', SECRETS.serviceToken);
 
   // A gate holds an instance before it runs the named point; a fault makes the named point throw once.
   w.gate = (inst, point) => {
@@ -355,9 +404,13 @@ async function world(t, { now = START } = {}) {
     const n = w.faults.findIndex(f => f.inst === inst && f.point === point);
     if (n >= 0) { const [fault] = w.faults.splice(n, 1); throw fault.error; }
   }
-  // Points: read, sweepRead, store (a refresh's token write), touch, tx.open, tx.delete, tx.create, tx.audit, audit.
+  // Points: read, sweepRead, store (a refresh's token write), touch, tx.open, tx.delete, tx.create, tx.audit, audit; and
+  // of the end mark (IdpSessionEnd): tx.mark (the end's write), tx.markRead (the callback's check), tx.markWake, and
+  // outside a transaction mark.<method> (the confirmation and retry writes, the Bearer path's read).
   const pointOf = (scope, model, method, args) => {
     if (model === 'auditLog') return scope === 'tx' ? 'tx.audit' : 'audit';
+    if (model === 'idpSessionEnd')
+      return scope !== 'tx' ? 'mark.' + method : method === 'upsert' ? 'tx.mark' : method === 'findUnique' ? 'tx.markRead' : 'tx.markWake';
     if (scope === 'tx') return method === 'deleteMany' ? 'tx.delete' : method === 'create' ? 'tx.create' : 'tx.' + method;
     if (method === 'findUnique') return 'read';
     if (method === 'findMany') return 'sweepRead';
@@ -375,7 +428,7 @@ async function world(t, { now = START } = {}) {
       return base.$transaction(async tx => {
         w.calls.push(inst + ':tx:start');
         const view = new Proxy({}, { get(_t, k) {
-          if (k === 'authSession' || k === 'auditLog') return delegate(inst, tx, k, 'tx');
+          if (k === 'authSession' || k === 'auditLog' || k === 'idpSessionEnd') return delegate(inst, tx, k, 'tx');
           const value = tx[k];
           return typeof value === 'function' ? value.bind(tx) : value;
         } });
@@ -384,12 +437,13 @@ async function world(t, { now = START } = {}) {
         return out;
       }, options);
     };
-    if (key === 'authSession' || key === 'auditLog') return delegate(inst, base, key, 'root');
+    if (key === 'authSession' || key === 'auditLog' || key === 'idpSessionEnd') return delegate(inst, base, key, 'root');
     const value = base[key];
     return typeof value === 'function' ? value.bind(base) : value;
   } });
   const make = name => {
-    const service = new AuthService(recorder(name));
+    // The product's own Keycloak admin client, over the fake's address: each instance its own (its own service token).
+    const service = new AuthService(recorder(name), new KeycloakService());
     return { name, service, guard: new AuthGuard(new Reflector(), service), controller: new AuthController(service), handled: 0 };
   };
   w.I1 = make('I1');
@@ -456,14 +510,19 @@ async function world(t, { now = START } = {}) {
       w.exceptions.next(error, new ExecutionContextHost([req, res]));
     }
     const set = name => res.setCookies.filter(c => c.startsWith(name + '='));
-    const sidCookie = set('kin_sid'), pending = set('kin_pending');
+    // A pending login is one cookie per flow (kin_pending_<derived from its state>): `pending` is the value of the flow
+    // this answer started, `pendingCookie` that cookie as a browser sends it back, `consumed` the flow cookies it expired.
+    const sidCookie = set('kin_sid'), pending = res.setCookies.filter(c => c.startsWith('kin_pending_'));
     const value = c => decodeURIComponent(c.slice(c.indexOf('=') + 1, c.indexOf(';')));
+    const started = pending.filter(c => !/Max-Age=0/.test(c));
     const out = {
       status: res.statusCode, body: res.body, location: res.location ?? res.body?.location ?? null,
       authCode: res.sentHeaders['x-kin-auth-code'] ?? null,
       expired: sidCookie.some(c => c.startsWith('kin_sid=;') || /Max-Age=0/.test(c)),
       newSid: sidCookie.filter(c => !/Max-Age=0/.test(c)).map(value)[0] ?? null,
-      pending: pending.filter(c => !/Max-Age=0/.test(c)).map(value)[0] ?? null,
+      pending: started.map(value)[0] ?? null,
+      pendingCookie: started.map(c => c.slice(0, c.indexOf(';')))[0] ?? null,
+      consumed: pending.filter(c => /Max-Age=0/.test(c)).map(c => c.slice(0, c.indexOf('='))),
       sidCookies: sidCookie.length, texts: [JSON.stringify(res.body ?? null), res.location ?? '', ...res.setCookies],
     };
     // What the answer does to the browser's cookies: E = it expires kin_sid (no answer may), S = a new kin_sid (the login
@@ -481,25 +540,40 @@ async function world(t, { now = START } = {}) {
   w.expiries = [];
 
   /** A token version: a signed access token (RS256, the fake Keycloak's key) and an opaque refresh token. */
-  w.issue = async (label, { sub, groups = [A], email, roles = ['radiologist'], expIn = HOUR / 1000, key = 'main', same } = {}) => {
+  /**
+   * `idp` is the provider session the token belongs to (its `sid` claim). Every token of one account is of one provider
+   * session unless the case names another - a refresh continues its session's provider session, and two logins of one
+   * browser share its SSO; a case about two PCs, or about sessions that must end apart, names them. `idp: null` issues
+   * a token without the claim.
+   */
+  w.issue = async (label, { sub, groups = [A], email, roles = ['radiologist'], expIn = HOUR / 1000, key = 'main', same, idp } = {}) => {
     const now = Math.floor(Date.now() / 1000);
     const jti = label + '-' + randomUUID();
-    const access = await new jose.SignJWT({ email: email ?? sub + '@synthetic.test', groups, realm_access: { roles }, azp: 'kin-bff', jti })
+    const sid = idp === undefined ? 'syn-idp-' + sub : idp;
+    const access = await new jose.SignJWT({ email: email ?? sub + '@synthetic.test', groups, realm_access: { roles }, azp: 'kin-bff', jti,
+      ...(sid === null ? {} : { sid }) })
       .setProtectedHeader({ alg: 'RS256', kid: KEYS[key].kid }).setIssuer(ISSUER).setAudience('kin-api').setSubject(sub)
       .setIssuedAt(now).setExpirationTime(same?.exp ?? now + expIn).sign(KEYS[key].privateKey);
-    const v = { label, sub, access, refresh: 'syn-rt-' + randomUUID(), jti, exp: same?.exp ?? now + expIn };
+    const v = { label, sub, access, refresh: 'syn-rt-' + randomUUID(), jti, exp: same?.exp ?? now + expIn, idp: sid };
     w.labels.set(jti, label);
     w.secret('access', v.access);
     w.secret('refresh', v.refresh);
     return v;
   };
-  /** A session row put by the harness (never the race's own version: those the product stores). */
-  w.session = async (v, { lastSeenAt = new Date(), atExpiresAt = new Date(v.exp * 1000 - 30_000) } = {}) => {
+  /**
+   * A session row put by the harness (never the race's own version: those the product stores), as a login of that token
+   * stores it - with the token's provider session. `legacy: true` leaves the column empty: a row from before the column.
+   */
+  w.session = async (v, { lastSeenAt = new Date(), atExpiresAt = new Date(v.exp * 1000 - 30_000), legacy = false } = {}) => {
     const sid = randomBytes(32).toString('base64url');
     w.secret('sid', sid);
-    await base.authSession.create({ data: { sid, sub: v.sub, accessToken: v.access, refreshToken: v.refresh, atExpiresAt, lastSeenAt } });
+    await base.authSession.create({ data: { sid, sub: v.sub, accessToken: v.access, refreshToken: v.refresh, atExpiresAt, lastSeenAt,
+      idpSid: legacy ? null : v.idp } });
     return sid;
   };
+  /** The end marks: [provider session, cause, confirmed?] sorted, and one mark's row. */
+  w.marks = async () => (await base.idpSessionEnd.findMany()).map(m => [m.idpSid, m.cause, m.confirmedAt !== null]).sort();
+  w.mark = idp => base.idpSessionEnd.findUnique({ where: { idpSid: idp } });
   /** The version label left in the session (or null), compared by jti - no token value is printed. */
   w.version = async sid => {
     const row = await base.authSession.findUnique({ where: { sid } });
@@ -517,7 +591,13 @@ async function world(t, { now = START } = {}) {
    */
   w.told = async () => {
     const until = performance.now() + 5_000;
-    while (kc.logouts < idp.started && performance.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+    // An end is told after its answer (a store write, then the request) and confirmed after Keycloak's answer (another
+    // write): quiet means nothing open and nothing newly started for a moment.
+    for (let seen = -1; performance.now() < until;) {
+      if (idp.open === 0 && seen === idp.started) break;
+      seen = idp.open === 0 ? idp.started : -1;
+      await new Promise(resolve => setTimeout(resolve, idp.open === 0 ? 120 : 10));
+    }
     return kc.logouts;
   };
 
@@ -535,9 +615,10 @@ async function world(t, { now = START } = {}) {
   capture.texts = [];
   /** World end (AS-10 a): every auth row has its exact key set; no secret in rows, responses or captured output. */
   w.finish = async (name, { output = [] } = {}) => {
-    // Every Keycloak logout request this world started has arrived: a telling does not hold its logout's answer, so
-    // the world waits for the stragglers here instead of leaving them to the next world's counters.
-    assert.equal(await w.told(), idp.started, `${name}: Keycloak logout requests started and arrived`);
+    // Every provider end request this world started has been answered or given up: a telling does not hold its end's
+    // answer, so the world waits for the stragglers here instead of leaving them to the next world's counters.
+    await w.told();
+    assert.equal(idp.open, 0, `${name}: every provider end request started was answered or given up`);
     capture.on = false;
     const rows = await w.rows();
     for (const row of rows) {
@@ -570,19 +651,38 @@ async function within(promise, what, ms = 10_000) {
 }
 
 /** A full browser login through the compiled controller: login -> fake Keycloak code -> callback. */
-async function login(w, inst, v, { ip = IP, prompt } = {}) {
-  const begin = await w.call(inst, 'login', { query: prompt ? { prompt } : {} });
+async function login(w, inst, v, { ip = IP } = {}) {
+  const begin = await w.call(inst, 'login');
   assert.equal(begin.status, 302);
+  const state = new URL(begin.location).searchParams.get('state');
+  w.secret('state', state);
+  const done = await answerFlow(w, inst, begin, v, { ip });
+  return { begin, done, state, pending: begin.pending };
+}
+
+/** The provider answers a started flow with a code for token version v: the browser comes back to the callback. */
+async function answerFlow(w, inst, begin, v, { ip = IP, sid, cookies = [] } = {}) {
   const state = new URL(begin.location).searchParams.get('state');
   w.secret('state', state);
   const code = 'syn-code-' + randomUUID();
   w.secret('code', code);
   kc.auto = form => form.grant_type === 'authorization_code' ? reply.tokens(v) : reply.reject();
-  const done = await w.call(inst, 'callback', { cookie: 'kin_pending=' + encodeURIComponent(begin.pending), ip, query: { code, state } });
+  const done = await w.call(inst, 'callback', { sid, cookie: [begin.pendingCookie, ...cookies].join('; '), ip, query: { code, state } });
   kc.auto = null;
   for (const entry of kc.codes) w.secret('verifier', entry.verifier);
-  return { begin, done, state, pending: begin.pending };
+  return done;
 }
+
+/** The provider answers a started flow with an error (prompt=none without an SSO session: login_required). */
+function refuseFlow(w, inst, begin, error, { cookies = [] } = {}) {
+  const state = new URL(begin.location).searchParams.get('state');
+  w.secret('state', state);
+  return w.call(inst, 'callback', { cookie: [begin.pendingCookie, ...cookies].join('; '), query: { error, state } });
+}
+
+const promptOf = out => new URL(out.location).searchParams.get('prompt');
+const atProvider = out => typeof out.location === 'string' && out.location.startsWith(ISSUER + '/protocol/openid-connect/auth?');
+const landing = error => ORIGIN + '/worklist/hpacs-lite/index.html?auth_error=' + error;
 
 const rowsOf = (rows, target) => rows.filter(r => r.target === target);
 
@@ -642,7 +742,8 @@ test('AS-01 a login writes its session and one success row in one transaction', 
     detail: { institution: A, ip: IP, dataSubject: null, outcome: 'success' } }]);
   const start = w.calls.indexOf('I1:tx:start');
   assert.deepEqual(w.calls.slice(start, w.calls.indexOf('I1:tx:end', start) + 1),
-    ['I1:tx:start', 'I1:tx.create', 'I1:tx.audit', 'I1:tx:end'], 'the session and its row in one transaction');
+    ['I1:tx:start', 'I1:tx.markRead', 'I1:tx.create', 'I1:tx.audit', 'I1:tx:end'],
+    'the end mark of the provider session is read, then the session and its row are written, in one transaction');
   // Preserving pair: the same member again - a session and a row per login.
   await login(w, w.I1, await w.issue('ma2', { sub: 'syn-sub-ma', groups: ['/' + A], email: 'syn-ma@synthetic.test' }));
   assert.equal(await w.sessions(), 2);
@@ -661,9 +762,10 @@ test('AS-02 the record-time institution is the token\'s one group, as the guard 
     const v = await w.issue('login-' + n, { sub, groups, roles });
     assert.equal((await guardView(w, v.access)).institution, expected, label + ': the guard rule');
     await login(w, w.I1, v);
-    const out = await w.call(w.I1, 'logout', { sid: await w.session(await w.issue('out-' + n, { sub, groups, roles })) });
+    // Three logins of one account on three PCs (three provider sessions): each ends by itself.
+    const out = await w.call(w.I1, 'logout', { sid: await w.session(await w.issue('out-' + n, { sub, groups, roles, idp: 'syn-idp-out-' + n })) });
     assert.equal(out.status, 204, label);
-    const idle = await w.call(w.I1, 'get', { sid: await w.session(await w.issue('idle-' + n, { sub, groups, roles }),
+    const idle = await w.call(w.I1, 'get', { sid: await w.session(await w.issue('idle-' + n, { sub, groups, roles, idp: 'syn-idp-idle-' + n }),
       { lastSeenAt: past(IDLE + 60_000) }) });
     assert.equal(idle.status, 401, label);
     assert.deepEqual(rowsOf(await w.rows(), sub).map(r => [r.action, r.detail.cause ?? r.detail.outcome, r.detail.institution]),
@@ -679,7 +781,7 @@ test('AS-03 a failed login of a login this server started leaves one failure row
     const out = await w.call(w.I1, 'login');
     const state = new URL(out.location).searchParams.get('state');
     w.secret('state', state);
-    return { pending: 'kin_pending=' + encodeURIComponent(out.pending), state };
+    return { pending: out.pendingCookie, state };
   };
   const failure = cause => ({ actor: 'unknown', action: 'auth.login', target: '',
     detail: { institution: null, ip: IP, dataSubject: null, outcome: 'failure', cause } });
@@ -692,9 +794,18 @@ test('AS-03 a failed login of a login this server started leaves one failure row
   await w.call(w.I1, 'callback', { cookie: p.pending, query: { error: 'temporarily_unavailable', state: p.state } });
   assert.deepEqual(await last(), failure('provider_error'), 'another error value: the same row, no error text');
   p = await begin();
+  // A callback whose state is not a flow of this browser while a login this server started is pending (A010): the code
+  // is not exchanged, the row is written, and - the browser has no session - the login is started again once, never a
+  // JSON error page. The restarted flow's own stray callback is not restarted again.
+  let exchanged = kc.tokens;
   out = await w.call(w.I1, 'callback', { cookie: p.pending, query: { code: 'syn-code-x', state: 'syn-other-state' } });
-  assert.equal(out.status, 400);
+  assert.deepEqual([out.status, atProvider(out), out.body, kc.tokens - exchanged, out.consumed], [302, true, undefined, 0, []],
+    'restarted at the provider; the pending flow of the other tab is not consumed');
   assert.deepEqual(await last(), failure('state_mismatch'));
+  const restarted = new URL(out.location).searchParams.get('state');
+  w.secret('state', restarted);
+  out = await w.call(w.I1, 'callback', { query: { code: 'syn-code-x2', state: restarted } });
+  assert.deepEqual([out.status, out.location, kc.tokens - exchanged], [302, landing('stale'), 0], 'the second stray callback goes to the landing');
   p = await begin();
   out = await w.call(w.I1, 'callback', { cookie: p.pending, query: { state: p.state } });
   assert.equal(out.location, ORIGIN + '/worklist/hpacs-lite/index.html?auth_error=stale');
@@ -721,14 +832,22 @@ test('AS-03 a failed login of a login this server started leaves one failure row
   const tampered = p.pending.slice(0, -2) + (p.pending.endsWith('A') ? 'BB' : 'AA');
   await w.call(w.I1, 'callback', { cookie: tampered, query: { error: 'access_denied', state: p.state } });
   p = await begin();
-  w.tick(11 * 60_000);
+  // A flow is good for as long as the provider's login form is (30 min): at 29 min it still fails as its own flow ...
+  w.tick(29 * 60_000);
+  out = await w.call(w.I1, 'callback', { cookie: p.pending, query: { state: p.state } });
+  assert.deepEqual([out.location, (await last()).detail.cause, await count()], [landing('stale'), 'no_code', before + 1]);
+  // ... and past it, it is no longer a login this server vouches for: no row.
+  p = await begin();
+  w.tick(31 * 60_000);
   await w.call(w.I1, 'callback', { cookie: p.pending, query: { error: 'access_denied', state: p.state } });
-  await w.call(w.I1, 'callback', { cookie: p.pending, query: { code: 'syn-c', state: p.state } });
+  exchanged = kc.tokens;
+  out = await w.call(w.I1, 'callback', { cookie: p.pending, query: { code: 'syn-c', state: p.state } });
+  assert.deepEqual([out.status, atProvider(out), kc.tokens - exchanged], [302, true, 0], 'an expired own flow is started again, its code unused');
   // A browser that already has a session: a callback without code is not a login event.
   const sid = await w.session(await w.issue('has', { sub: 'syn-sub-has' }));
   out = await w.call(w.I1, 'callback', { sid, query: {} });
   assert.equal(out.location, ORIGIN + '/worklist/hpacs-lite/main.html');
-  assert.equal(await count(), before, 'no pending, a forged or expired pending, or a session callback: no row');
+  assert.equal(await count(), before + 1, 'no pending, a forged or expired pending, or a session callback: no row');
   await w.finish('AS-03');
 });
 
@@ -745,7 +864,8 @@ test('AS-04 logout: one row from the ended session, Bearer none, overlap one, a 
   kc.logoutMode = 'drop';
   const logouts = kc.logouts;
   out = await w.call(w.I1, 'logout', { sid: await w.session(await w.issue('b', { sub: 'syn-sub-b', groups: [B] })) });
-  assert.deepEqual([out.status, out.cookie, await w.told() - logouts], [204, 'K', 1]);
+  // (a cut connection may be tried again by the HTTP client within the request's bound: asked at least once)
+  assert.deepEqual([out.status, out.cookie, await w.told() - logouts >= 1], [204, 'K', true]);
   kc.logoutMode = 'ok';
   assert.deepEqual(summary(rowsOf(await w.rows(), 'syn-sub-b')), [['auth.logout', 'logout', B]]);
   // (c) two logouts of one session overlap (RT-12), in both orders: the one that deleted writes the row.
@@ -783,23 +903,48 @@ test('AS-04 logout: one row from the ended session, Bearer none, overlap one, a 
   await w.finish('AS-04');
 });
 
-test('AS-05 an account switch or a registration ends the browser session with one account_switch row', async t => {
+test('AS-05 a login start that ends the browser session records the cause it declared: logout, account_switch or reauthentication (A019)', async t => {
   const w = await world(t);
-  for (const [kind, body, sub, options] of [['switch', { prompt: 'login' }, 'syn-sub-s1', {}],
-    ['signup', undefined, 'syn-sub-s2', {}], ['switch', { prompt: 'login' }, 'syn-sub-s3', { lastSeenAt: past(13 * HOUR) }]]) {
+  // [kind, body, account, session options, the row's cause, its trigger, the prompt of the final step]
+  for (const [kind, body, sub, options, cause, trigger, prompt] of [
+    ['switch', SWITCH, 'syn-sub-s1', {}, 'account_switch', undefined, 'login'],
+    ['signup', undefined, 'syn-sub-s2', {}, 'reauthentication', 'register', 'create'],
+    ['switch', SWITCH, 'syn-sub-s3', { lastSeenAt: past(13 * HOUR) }, 'account_switch', undefined, 'login'],
+    ['switch', UNFINISHED, 'syn-sub-s4', {}, 'logout', undefined, 'login'],
+    ['switch', UNTRUSTED, 'syn-sub-s5', {}, 'reauthentication', 'storage_untrusted', 'login'],
+    ['switch', UNREADABLE, 'syn-sub-s6', {}, 'reauthentication', 'record_unreadable', 'login']]) {
     const sid = await w.session(await w.issue(sub, { sub, groups: [B] }), options);
     const out = await w.call(w.I1, kind, { sid, body });
-    assert.deepEqual([out.status, out.cookie, out.location.startsWith(ISSUER + '/protocol/openid-connect/auth?')], [200, 'P', true], sub);
-    assert.equal(new URL(out.location).searchParams.get('prompt'), kind === 'switch' ? 'login' : 'create', sub);
+    assert.deepEqual([out.status, out.cookie, atProvider(out)], [200, 'P', true], sub);
+    // The provider session was ended and its end confirmed before the address is given: the final step asks for
+    // credentials on a form with an editable name (prompt=login), or opens the registration.
+    assert.deepEqual([promptOf(out), kc.ended.includes('syn-idp-' + sub), await w.marks().then(m => m.find(x => x[0] === 'syn-idp-' + sub))],
+      [prompt, true, ['syn-idp-' + sub, cause, true]], sub);
     assert.equal(await w.version(sid), null, sub);
-    assert.deepEqual(summary(rowsOf(await w.rows(), sub)), [['auth.logout', 'account_switch', B]], sub + ': account_switch even when idle');
+    const rows = rowsOf(await w.rows(), sub);
+    assert.deepEqual(summary(rows), [['auth.logout', cause, B]], sub + ': one row, the declared cause, never an expiry - also when idle');
+    assert.equal(rows[0].detail.trigger, trigger, sub);
   }
   const before = (await w.rows()).length;
+  // A link (GET) carries no intent whatever its address says, and ends nothing; a start for a session that is already
+  // gone writes no row either.
   for (const sid of [undefined, 'syn-unknown-sid-' + randomUUID()]) {
-    const out = await w.call(w.I1, 'login', { sid, query: { prompt: 'login' } });
-    assert.deepEqual([out.status, !!out.pending], [302, true]);
+    const out = await w.call(w.I1, 'login', { sid, query: { prompt: 'login', intent: 'reauthenticate', reason: 'switch_account' } });
+    assert.deepEqual([out.status, !!out.pending, promptOf(out)], [302, true, null]);
+    const gone = await w.call(w.I1, 'switch', { sid, body: SWITCH, binding: null });
+    assert.deepEqual([gone.status, gone.cookie, promptOf(gone)], [200, 'P', 'none'], 'nothing to end: the SSO is probed first');
+    const signup = await w.call(w.I1, 'signup', { sid, binding: null });
+    assert.deepEqual([signup.status, signup.cookie, promptOf(signup)], [200, 'P', 'create']);
   }
   assert.equal((await w.rows()).length, before, 'no cookie or an absent session: no row');
+  // A start without a declared reason, or with one the server does not know, starts nothing and ends nothing.
+  const kept = await w.session(await w.issue('syn-sub-s7', { sub: 'syn-sub-s7', groups: [B] }));
+  for (const body of [undefined, {}, { prompt: 'login' }, { intent: 'reauthenticate' }, { intent: 'reauthenticate', reason: 'register' },
+    { intent: 'other', reason: 'switch_account' }]) {
+    const out = await w.call(w.I1, 'switch', { sid: kept, body });
+    assert.deepEqual([...coded(out), out.cookie, out.pending, await w.version(kept)],
+      [400, 'AUTH_LOGIN_INTENT_INVALID', 'AUTH_LOGIN_INTENT_INVALID', 'K', null, 'syn-sub-s7'], JSON.stringify(body ?? null));
+  }
   await w.finish('AS-05');
 });
 
@@ -981,16 +1126,18 @@ test('AS-09 a DB failure on any path is a fixed 500 with nothing committed and n
     assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.logout', 'logout', A]]);
   }
   // (3) account switch and registration: 500, no pending cookie, no Keycloak address, the session kept; then 200 and one row.
-  for (const [kind, body, point] of [['switch', { prompt: 'login' }, 'tx.delete'], ['signup', undefined, 'tx.audit']]) {
+  for (const [kind, body, point] of [['switch', SWITCH, 'tx.delete'], ['signup', undefined, 'tx.audit']]) {
     const s = sub(), sid = await w.session(await w.issue(s, { sub: s, groups: [B] }));
     w.fault('I2', point, dbError('switch-' + point));
     const out = await w.call(w.I2, kind, { sid, body });
     assert.ok(storageFailure(out), kind);
     assert.deepEqual([out.cookie, out.pending, out.location, await w.version(sid)], ['K', null, null, s], kind);
-    assert.deepEqual(rowsOf(await w.rows(), s), [], kind);
+    assert.deepEqual([rowsOf(await w.rows(), s), await w.mark('syn-idp-' + s), kc.endRequests.includes('syn-idp-' + s)], [[], null, false], kind);
     const retry = await w.call(w.I2, kind, { sid, body });
     assert.deepEqual([retry.status, retry.cookie, await w.version(sid)], [200, 'P', null], kind);
-    assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.logout', 'account_switch', B]], kind);
+    assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.logout', kind === 'switch' ? 'account_switch' : 'reauthentication', B]], kind);
+    // The retry that ended the session left the one end mark, with its cause, and the provider confirmed the end.
+    assert.deepEqual((await w.marks()).filter(m => m[0] === 'syn-idp-' + s), [['syn-idp-' + s, kind === 'switch' ? 'account_switch' : 'reauthentication', true]], kind);
   }
   // (4) idle: 500 before the handler, no cookie change; then 401 and one idle row.
   for (const point of ['tx.delete', 'tx.audit']) {
@@ -1105,7 +1252,7 @@ test('AS-10 (b) synthetic DB error markers never reach a response, the logger, s
     await run('guard-read', async tag => { const sid = await session(tag); w.fault('I1', 'read', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'get', { sid }))); });
     await run('logout-delete', async tag => { const sid = await session(tag); w.fault('I1', 'tx.delete', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'logout', { sid }))); });
     await run('logout-audit', async tag => { const sid = await session(tag); w.fault('I1', 'tx.audit', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'logout', { sid }))); });
-    await run('switch-read', async tag => { const sid = await session(tag); w.fault('I1', 'read', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'switch', { sid, body: { prompt: 'login' } }))); });
+    await run('switch-read', async tag => { const sid = await session(tag); w.fault('I1', 'read', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'switch', { sid, body: SWITCH }))); });
     await run('switch-audit', async tag => { const sid = await session(tag); w.fault('I1', 'tx.audit', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'signup', { sid }))); });
     await run('idle-delete', async tag => { const sid = await session(tag, { lastSeenAt: past(13 * HOUR) }); w.fault('I1', 'tx.delete', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'get', { sid }))); });
     await run('refused-audit', async tag => {
@@ -1131,7 +1278,7 @@ test('AS-10 (b) synthetic DB error markers never reach a response, the logger, s
       const done = (await login(w, w.I1, await w.issue(tag, { sub: 'syn-sub-' + tag, groups: [A] }))).done;
       assert.equal(done.location, ORIGIN + '/worklist/hpacs-lite/index.html?auth_error=login_failed');
     });
-    await run('callback-read', async tag => { const sid = await session(tag); w.fault('I1', 'read', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'callback', { sid, query: {} }))); });
+    await run('callback-read', async tag => { const sid = await session(tag); w.fault('I1', 'read', dbError(tag)); const out = await w.call(w.I1, 'callback', { sid, query: {} }); assert.deepEqual([out.status, out.location], [302, landing('login_failed')], 'a callback is a top-level navigation: it is sent to the landing, never answered with an error body'); });
     w.I2.service.onModuleInit();
     try {
       await run('sweep-read', async tag => {
@@ -1215,7 +1362,7 @@ test('AS-12 T1 (RT-01, X-11) and its sequential attribution variants (X-18)', as
       chain.set(a.refresh, b);
       const sidX = await w.session(a, { atExpiresAt: lapsed() });
       assert.deepEqual([(await w.call(w.I1, 'get', { sid: sidX })).status, await w.version(sidX)], [200, sub + '-b']);
-      if (end === 'switch') await w.call(w.I1, 'switch', { sid: sidX, body: { prompt: 'login' } });
+      if (end === 'switch') await w.call(w.I1, 'switch', { sid: sidX, body: SWITCH });
       else if (end === 'logout') await w.call(w.I1, 'logout', { sid: sidX });
       else {
         await w.base.authSession.update({ where: { sid: sidX }, data: { lastSeenAt: past(13 * HOUR) } });
@@ -1301,7 +1448,7 @@ test('AS-12 T3 (RT-05, X-13; logout order per U5S-REQ-05): a logout ends v1 whil
 
 test('AS-12 T4 (RT-05, X-14): an account switch or registration ends v1 while its refresh is held', async t => {
   const w = await world(t);
-  for (const [kind, body, late] of [['switch', { prompt: 'login' }, 'success'], ['switch', { prompt: 'login' }, 'refusal'],
+  for (const [kind, body, late] of [['switch', SWITCH, 'success'], ['switch', SWITCH, 'refusal'],
     ['signup', undefined, 'success'], ['signup', undefined, 'refusal']]) {
     kc.held = [];
     const s = `syn-sub-t4-${kind}-${late}`;
@@ -1310,11 +1457,12 @@ test('AS-12 T4 (RT-05, X-14): an account switch or registration ends v1 while it
     const r1 = w.call(w.I1, 'get', { sid });
     const k1 = await heldToken(1);
     const out = await w.call(w.I2, kind, { sid, body });
-    assert.deepEqual([out.status, out.cookie, await endsOf(w, s)], [200, 'P', [['auth.logout', 'account_switch', A]]], s);
+    const cause = kind === 'switch' ? 'account_switch' : 'reauthentication';
+    assert.deepEqual([out.status, out.cookie, await endsOf(w, s)], [200, 'P', [['auth.logout', cause, A]]], s);
     k1.answer(late === 'success' ? reply.tokens(v2) : reply.reject());
     const o1 = await r1;
     assert.deepEqual([o1.status, o1.cookie, await w.version(sid), await endsOf(w, s)],
-      [401, 'K', null, [['auth.logout', 'account_switch', A]]], s);
+      [401, 'K', null, [['auth.logout', cause, A]]], s);
   }
   await w.finish('AS-12 T4');
 });
@@ -1466,7 +1614,7 @@ test('AS-12 T7 (RT-13, RT-14, RT-02; X-21, X-22): same-exp tokens of different v
 
 test('AS-12 T8 (RT-06, X-23): an account switch read v1; v2 (B) is stored before its delete; it ends v2 and records B', async t => {
   const w = await world(t);
-  for (const [kind, body] of [['switch', { prompt: 'login' }], ['signup', undefined]]) {
+  for (const [kind, body] of [['switch', SWITCH], ['signup', undefined]]) {
     const s = 'syn-sub-t8-' + kind;
     const v1 = await w.issue(s + '-v1', { sub: s, groups: [A] }), v2 = await w.issue(s + '-v2', { sub: s, groups: [B] });
     const sid = await w.session(v1, { atExpiresAt: lapsed() });
@@ -1480,7 +1628,7 @@ test('AS-12 T8 (RT-06, X-23): an account switch read v1; v2 (B) is stored before
     gate.release();
     const out = await sw;
     assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)],
-      [200, 'P', null, [['auth.logout', 'account_switch', B]]], kind);
+      [200, 'P', null, [['auth.logout', kind === 'switch' ? 'account_switch' : 'reauthentication', B]]], kind);
   }
   await w.finish('AS-12 T8');
 });
@@ -1511,11 +1659,11 @@ test('AS-12 T9 (RT-15, X-24, O-10, X-33): three interleaved refreshes give an en
   const w = await world(t);
   // account switch: 409, no cookie change, no pending, no redirect, the competitor's last version kept, no row.
   let s = 'syn-sub-t9-switch';
-  let { out, sid } = await interleavedEnds(w, { s, kind: 'switch', body: { prompt: 'login' }, rounds: 3 });
+  let { out, sid } = await interleavedEnds(w, { s, kind: 'switch', body: SWITCH, rounds: 3 });
   assert.deepEqual([out.status, out.cookie, out.pending, out.location, await endsOf(w, s)], [409, 'K', null, null, []]);
   const kept = await w.version(sid);
   assert.ok(kept && kept.startsWith(s + '-v'), 'a later version remains');
-  out = await w.call(w.I1, 'switch', { sid, body: { prompt: 'login' } });
+  out = await w.call(w.I1, 'switch', { sid, body: SWITCH });
   assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)], [200, 'P', null, [['auth.logout', 'account_switch', B]]]);
   // logout (the competitor's refreshes keep winning its three deletes): 409 AUTH_SESSION_BUSY - not ended, Keycloak not
   // told (S06) - then the next logout ends the kept version as it stands, without a refresh of its own.
@@ -1533,7 +1681,7 @@ test('AS-12 T9 (RT-15, X-24, O-10, X-33): three interleaved refreshes give an en
   // and the row is the one of the transition that deleted it.
   for (const kind of ['switch', 'logout']) {
     s = 'syn-sub-t9-absent-' + kind;
-    ({ out, sid } = await interleavedEnds(w, { s, kind, body: kind === 'switch' ? { prompt: 'login' } : undefined, rounds: 3,
+    ({ out, sid } = await interleavedEnds(w, { s, kind, body: kind === 'switch' ? SWITCH : undefined, rounds: 3,
       last: async sidX => assert.equal((await w.call(w.I2, 'logout', { sid: sidX })).status, 204) }));
     assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)],
       [kind === 'switch' ? 200 : 204, kind === 'switch' ? 'P' : 'K', null, [['auth.logout', 'logout', B]]], kind);
@@ -1729,7 +1877,7 @@ test('AS-12 T15 (RT-12, X-32): two end transitions overlap; the one that deleted
     const s = `syn-sub-t15-${firstKind}-held`;
     const sid = await w.session(await w.issue(s + '-v1', { sub: s, groups: [A] }));
     const gate = w.gate(first, 'tx.open');
-    const body = kind => kind === 'switch' ? { prompt: 'login' } : undefined;
+    const body = kind => kind === 'switch' ? SWITCH : undefined;
     const held = w.call(w.I1, firstKind, { sid, body: body(firstKind) });
     await gate.arrived();
     const won = await w.call(w.I2, secondKind, { sid, body: body(secondKind) });
@@ -1907,13 +2055,14 @@ test('U5S-TEST-S07 a newer login S2: the held logout, the late 401 and every lat
   // which revokes S1 with its record; the callback then sets S2's cookie.
   const boot = deliver(await w.call(w.I2, 'me', { sid: jar }));
   assert.deepEqual([boot.status, boot.body.sessionId], [200, id1]);
-  const begin = deliver(await w.call(w.I2, 'switch', { sid: jar, binding: boot.body.sessionId, body: { prompt: 'login' } }));
+  const begin = deliver(await w.call(w.I2, 'switch', { sid: jar, binding: boot.body.sessionId, body: SWITCH }));
   assert.deepEqual([begin.status, begin.cookie, jar], [200, 'P', s1], 'a login start sets a pending cookie and leaves kin_sid alone');
-  const v2 = await w.issue('s07-v2', { sub: s, groups: [A] });
+  // (the bound start ended S1's provider session; the new login is a new provider session)
+  const v2 = await w.issue('s07-v2', { sub: s, groups: [A], idp: 'syn-idp-s07-second' });
   kc.auto = form => form.grant_type === 'authorization_code' ? reply.tokens(v2) : reply.reject();
   const state = new URL(begin.location).searchParams.get('state');
   w.secret('state', state);
-  const done = deliver(await w.call(w.I2, 'callback', { sid: jar, cookie: 'kin_pending=' + encodeURIComponent(begin.pending), query: { code: 'syn-code-' + randomUUID(), state } }));
+  const done = deliver(await w.call(w.I2, 'callback', { sid: jar, cookie: begin.pendingCookie, query: { code: 'syn-code-' + randomUUID(), state } }));
   kc.auto = null;
   const s2 = jar;
   assert.deepEqual([done.status, done.cookie, s2 !== s1 && !!s2], [302, 'S', true]);
@@ -1930,7 +2079,7 @@ test('U5S-TEST-S07 a newer login S2: the held logout, the late 401 and every lat
   // Every later request of the S1 document rides the browser's cookie (S2) with S1's id: refused before any refresh,
   // handler, revocation or Keycloak call - and the refusal does not name S2.
   const logouts = await w.told();
-  for (const [kind, options, status] of [['get', {}, 409], ['logout', {}, 409], ['switch', { body: { prompt: 'login' } }, 409],
+  for (const [kind, options, status] of [['get', {}, 409], ['logout', {}, 409], ['switch', { body: SWITCH }, 409],
     ['signup', {}, 409], ['authz', {}, 403], ['me', {}, 409]]) {
     const calls = w.calls.length, tokens = kc.tokens, handled = w.I1.handled;
     const out = deliver(await w.call(w.I1, kind, { sid: jar, binding: id1, ...options }));
@@ -1983,19 +2132,23 @@ test('U5S-REQ-08 binding: no credentials 401, no binding 428, another session 40
   // reading the session would end it, so "nothing read, nothing asked, no handler" is what keeps it alive.
   const lapsedSid = await w.session(await w.issue('syn-sub-b3', { sub: 'syn-sub-b3', groups: [A] }), { atExpiresAt: lapsed() });
   kc.auto = () => reply.reject();
-  const refused = async (label, kind, options, expected) => {
+  const refused = async (label, kind, options, expected, reads = 0) => {
     const calls = w.calls.length, tokens = kc.tokens, handled = w.I1.handled;
     const out = await w.call(w.I1, kind, options);
-    assert.deepEqual([...coded(out), out.cookie, out.pending, w.calls.length - calls, kc.tokens - tokens, w.I1.handled - handled],
-      [...expected, 'K', null, 0, 0, 0], label);
+    assert.deepEqual([...coded(out), out.cookie, out.pending, w.calls.slice(calls), kc.tokens - tokens, w.I1.handled - handled],
+      [...expected, 'K', null, Array(reads).fill('I1:read'), 0, 0], label);
     return out;
   };
   const otherId = d3.body.sessionId;
   await refused('no cookie and no token', 'get', {}, [401, 'AUTH_CREDENTIALS_MISSING', 'AUTH_CREDENTIALS_MISSING']);
   await refused('no cookie and no token, DICOM subrequest', 'authz', {}, [401, 'AUTH_CREDENTIALS_MISSING', 'AUTH_CREDENTIALS_MISSING']);
   for (const kind of ['get', 'logout', 'switch', 'signup']) {
-    await refused(kind + ' without a binding', kind, { sid: lapsedSid, binding: null }, [428, 'AUTH_SESSION_REQUIRED', 'AUTH_SESSION_REQUIRED']);
-    await refused(kind + ' with another session\'s id', kind, { sid: lapsedSid, binding: otherId }, [409, 'AUTH_SESSION_MISMATCH', 'AUTH_SESSION_MISMATCH']);
+    const body = kind === 'switch' ? SWITCH : undefined;
+    // A login start without a binding looks whether there is a session to end at all (one read - it neither refreshes
+    // nor ends anything): only then is the missing binding a refusal. A document that got 401 holds no id to send.
+    await refused(kind + ' without a binding', kind, { sid: lapsedSid, binding: null, body }, [428, 'AUTH_SESSION_REQUIRED', 'AUTH_SESSION_REQUIRED'],
+      ['switch', 'signup'].includes(kind) ? 1 : 0);
+    await refused(kind + ' with another session\'s id', kind, { sid: lapsedSid, binding: otherId, body }, [409, 'AUTH_SESSION_MISMATCH', 'AUTH_SESSION_MISMATCH']);
   }
   await refused('a binding that is no id at all', 'get', { sid: lapsedSid, binding: 'x' }, [409, 'AUTH_SESSION_MISMATCH', 'AUTH_SESSION_MISMATCH']);
   // The DICOM subrequest answers the same two as 403 (the proxy passes 401 and 403 only); the code keeps them apart.
@@ -2072,4 +2225,415 @@ test('U5S-REQ-09 entry proof: a login is entered once, by the document that hold
   assert.deepEqual([out.status, out.cookie, await w.version(pending.done.newSid)], [204, 'K', null]);
   assert.equal(w.faults.length, 0, 'the injected failure was reached');
   await w.finish('U5S-REQ-09', { output: markers('entry') });
+});
+
+// ── U5E: the session end is completed (S7-U5 session-end design v2, 2026-10-05; rules R1 and R2) ──
+// REQ-S7-U5-SESSION-END (R1: whenever the product ends a product session, the provider session it was born from ends
+// too, and a provider session the product decided to end never produces a product session again; R2: a login the
+// person started to leave, to switch, or from a browser that cannot say whether they left, makes a session only from an
+// authentication with credentials entered after that press)
+//   -> RISK-S7-U5-SILENT-REENTRY (the next person at the PC enters as the previous doctor without a form)
+//   -> TEST-S7-U5-END (the cases below; the real-Keycloak half is tests/e2e/test_session_end_stack.py).
+// The order of the racing steps is fixed by barriers (a held /token answer, a gate before a statement or inside the
+// critical section), never by timing. The expected values are the design's literals. `idpOf(account)` is the provider
+// session every token of that account carries unless the case names another.
+const idpOf = sub => 'syn-idp-' + sub;
+
+test('U5E-01 (acceptance 1) a callback that exchanged its code before a Log out completed makes no session when it resumes', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-u5e1', X = idpOf(s);
+  const sid = await w.session(await w.issue('u5e1-v1', { sub: s, groups: [A] }));
+  // C: a second tab's login. The provider answered without a form (the SSO is alive); the callback has exchanged the
+  // code and verified the token, and is held before the transaction that would create S2.
+  const begin = await w.call(w.I2, 'login');
+  const gate = w.gate('I2', 'tx.open');
+  const exchanged = kc.tokens;
+  const heldC = answerFlow(w, w.I2, begin, await w.issue('u5e1-v2', { sub: s, groups: [A] }));
+  await gate.arrived();
+  assert.deepEqual([kc.tokens - exchanged, await w.sessions()], [1, 1], 'C holds a verified token and has created nothing yet');
+  // L: the Log out of S1 completes meanwhile.
+  const out = await w.call(w.I1, 'logout', { sid });
+  assert.deepEqual([out.status, await w.sessions(), (await w.marks()).map(m => m.slice(0, 2))], [204, 0, [[X, 'logout']]]);
+  gate.release();
+  const done = await heldC;
+  // C resumes after L: no product session, no kin_sid, no entry proof. The provider session is ended (again) and the
+  // login starts over once - this time the provider has no session, so the person meets the form.
+  assert.deepEqual([done.status, atProvider(done), promptOf(done), done.newSid, done.proof, done.cookie, await w.sessions()],
+    [302, true, null, null, undefined, 'P', 0]);
+  assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.login', 'idp_session_ended', A], ['auth.logout', 'logout', A]]);
+  assert.ok(kc.ended.includes(X) && (await w.mark(X)).confirmedAt, 'the provider session is ended and the mark says so');
+  // The restarted flow: if the same ended provider session answers again (it survived its end), the person is sent to
+  // the landing instead of round and round; credentials on the form (a new provider session) enter.
+  const zombie = await answerFlow(w, w.I2, done, await w.issue('u5e1-v3', { sub: s, groups: [A] }));
+  assert.deepEqual([zombie.status, zombie.location, zombie.newSid, await w.sessions()], [302, landing('end_unconfirmed'), null, 0]);
+  const again = await w.call(w.I2, 'login');
+  const entered = await answerFlow(w, w.I2, again, await w.issue('u5e1-v4', { sub: s, groups: [A], idp: X + '-new' }));
+  assert.deepEqual([entered.status, entered.cookie, !!entered.proof, await w.sessions()], [302, 'S', true, 1]);
+  await w.finish('U5E-01');
+});
+
+test('U5E-02 (acceptance 2) a session a callback created first on the same provider session ends with the Log out of its sibling; a row from before the column too', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-u5e2', X = idpOf(s);
+  const s1 = await w.session(await w.issue('u5e2-v1', { sub: s, groups: [A] }));
+  // C first: the browser lost its cookie, the SSO answered without a form, S2 exists on the same provider session.
+  const c = await login(w, w.I2, await w.issue('u5e2-v2', { sub: s, groups: [B] }));
+  const s2 = c.done.newSid;
+  assert.deepEqual([await w.sessions(), !!s2], [2, true]);
+  const asked = kc.logouts;
+  const out = await w.call(w.I1, 'logout', { sid: s1 });
+  assert.deepEqual([out.status, await w.sessions(), await w.told() - asked], [204, 0, 1], 'both rows gone, the provider told once');
+  // One record per product row really ended, each with its own recorded institution; no row twice.
+  assert.deepEqual(await endsOf(w, s), [['auth.logout', 'logout', A], ['auth.logout', 'logout', B]]);
+  const after = await w.call(w.I2, 'get', { sid: s2 });
+  assert.deepEqual([...coded(after), after.cookie], [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED', 'K']);
+  assert.deepEqual(await w.marks(), [[X, 'logout', true]]);
+  // A session stored before the column existed (idpSid empty): its end reads the provider session from its stored token.
+  const old = 'syn-sub-u5e2-old';
+  const legacy = await w.session(await w.issue('u5e2-old', { sub: old, groups: [A] }), { legacy: true });
+  assert.equal((await w.call(w.I1, 'logout', { sid: legacy })).status, 204);
+  await w.told();
+  assert.deepEqual([(await w.marks()).find(m => m[0] === idpOf(old)), kc.endRequests.includes(idpOf(old))], [[idpOf(old), 'logout', true], true]);
+  await w.finish('U5E-02');
+});
+
+test('U5E-03 (acceptance 3) the same doctor on two PCs: the Log out of one leaves the other working, also after its refresh; a Bearer token of the ended provider session is refused, any other is not', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-u5e3';
+  const pc1 = await w.issue('u5e3-pc1', { sub: s, groups: [A], idp: 'syn-idp-pc1' });
+  const pc2 = await w.issue('u5e3-pc2', { sub: s, groups: [A], idp: 'syn-idp-pc2' });
+  const pc2next = await w.issue('u5e3-pc2-next', { sub: s, groups: [A], idp: 'syn-idp-pc2' });
+  const sid1 = await w.session(pc1), sid2 = await w.session(pc2, { atExpiresAt: lapsed() });
+  assert.equal((await w.call(w.I1, 'logout', { sid: sid1 })).status, 204);
+  await w.told();
+  kc.auto = chainAnswers(new Map([[pc2.refresh, pc2next]]));
+  const other = await w.call(w.I2, 'get', { sid: sid2 });
+  kc.auto = null;
+  assert.deepEqual([other.status, await w.version(sid2), await w.marks(), kc.endRequests], [200, 'u5e3-pc2-next', [['syn-idp-pc1', 'logout', true]], ['syn-idp-pc1']],
+    'PC2 goes on with a refreshed token of its own provider session; only PC1\'s was ended');
+  // Bearer: the stored token of the ended session is still validly signed - and refused; PC2's is not.
+  const refused = await w.call(w.I1, 'get', { bearer: pc1.access });
+  assert.deepEqual(coded(refused), [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED']);
+  assert.equal((await w.call(w.I1, 'get', { bearer: pc2next.access })).status, 200);
+  // A token without a provider session (a service account) is not the Bearer check's subject.
+  const service = await w.issue('u5e3-service', { sub: 'syn-sub-u5e3-service', groups: [A], idp: null });
+  assert.equal((await w.call(w.I1, 'get', { bearer: service.access })).status, 200);
+  // The mark cannot be read: the Bearer request fails closed with the fixed storage answer.
+  w.fault('I1', 'mark.findUnique', dbError('bearer-mark'));
+  assert.ok(storageFailure(await w.call(w.I1, 'get', { bearer: pc2next.access })));
+  // A refresh that answers with another provider session's token is not this session's: not stored, nothing ended.
+  const sid3 = await w.session(await w.issue('u5e3-v', { sub: s, groups: [A], idp: 'syn-idp-pc3' }), { atExpiresAt: lapsed() });
+  kc.auto = () => reply.tokens(pc2next);
+  const strange = await w.call(w.I1, 'get', { sid: sid3 });
+  kc.auto = null;
+  assert.deepEqual([...coded(strange), await w.version(sid3)], [503, 'AUTH_IDP_UNAVAILABLE', 'AUTH_IDP_UNAVAILABLE', 'u5e3-v']);
+  await w.finish('U5E-03', { output: markers('bearer-mark') });
+});
+
+test('U5E-04 the end marks a provider session only after its end condition holds again under the lock; a lost race or a rollback leaves no mark and tells the provider nothing', async t => {
+  const w = await world(t);
+  // (a) an idle end that loses to a touch: judged idle, held before its transaction, touched meanwhile.
+  let s = 'syn-sub-u5e4-idle';
+  let sid = await w.session(await w.issue(s, { sub: s, groups: [A] }), { lastSeenAt: past(13 * HOUR) });
+  let gate = w.gate('I1', 'tx.open');
+  let held = w.call(w.I1, 'get', { sid });
+  await gate.arrived();
+  await w.base.authSession.updateMany({ where: { sid }, data: { lastSeenAt: new Date() } });
+  gate.release();
+  let out = await held;
+  assert.deepEqual([out.status, await w.version(sid), await w.marks(), kc.endRequests, await endsOf(w, s)], [200, s, [], [], []],
+    'the session was touched: not ended, no mark, the provider not told');
+  // (b) a Log out whose three deletes lose to refreshes: 409, no mark, the provider not told.
+  s = 'syn-sub-u5e4-busy';
+  ({ out, sid } = await interleavedEnds(w, { s, kind: 'logout', rounds: 3 }));
+  assert.deepEqual([out.status, !!(await w.version(sid)), await w.marks(), kc.endRequests], [409, true, [], []]);
+  // (c) rollback: the mark write or the record fails inside the end transaction - nothing of it stays.
+  for (const point of ['tx.mark', 'tx.audit']) {
+    s = 'syn-sub-u5e4-' + point;
+    sid = await w.session(await w.issue(s, { sub: s, groups: [B] }));
+    w.fault('I1', point, dbError('end-' + point));
+    out = await w.call(w.I1, 'logout', { sid });
+    assert.ok(storageFailure(out), point);
+    assert.deepEqual([await w.version(sid), await w.mark(idpOf(s)), kc.endRequests, await endsOf(w, s)], [s, null, [], []], point);
+  }
+  // (d) the lock, L first: the Log out is inside its critical section (lock taken, before its delete). A callback of
+  // the same provider session does not get to read the mark until L commits - then it finds it.
+  s = 'syn-sub-u5e4-l-first';
+  sid = await w.session(await w.issue(s + '-v1', { sub: s, groups: [A] }));
+  const begin = await w.call(w.I2, 'login');
+  gate = w.gate('I1', 'tx.delete');
+  held = w.call(w.I1, 'logout', { sid });
+  await gate.arrived();
+  let reads = w.calls.filter(c => c === 'I2:tx.markRead').length;
+  const heldC = answerFlow(w, w.I2, begin, await w.issue(s + '-v2', { sub: s, groups: [A] }));
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(w.calls.filter(c => c === 'I2:tx.markRead').length, reads, 'the callback waits for the lock the Log out holds');
+  gate.release();
+  assert.equal((await held).status, 204);
+  const blocked = await heldC;
+  assert.deepEqual([blocked.newSid, blocked.cookie, atProvider(blocked), await w.base.authSession.count({ where: { sub: s } })], [null, 'P', true, 0]);
+  // (e) the lock, C first: the callback is inside its critical section (mark read: none; before its create). The Log
+  // out of the sibling does not delete until C commits - then it ends both rows.
+  s = 'syn-sub-u5e4-c-first';
+  sid = await w.session(await w.issue(s + '-v1', { sub: s, groups: [A] }));
+  const begin2 = await w.call(w.I2, 'login');
+  gate = w.gate('I2', 'tx.create');
+  const heldC2 = answerFlow(w, w.I2, begin2, await w.issue(s + '-v2', { sub: s, groups: [A] }));
+  await gate.arrived();
+  const deletes = w.calls.filter(c => c === 'I1:tx.delete').length;
+  held = w.call(w.I1, 'logout', { sid });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(w.calls.filter(c => c === 'I1:tx.delete').length, deletes, 'the Log out waits for the lock the callback holds');
+  gate.release();
+  const created = await heldC2;
+  assert.deepEqual([created.cookie, (await held).status], ['S', 204]);
+  assert.deepEqual([await w.version(created.newSid), await endsOf(w, s)], [null, [['auth.logout', 'logout', A], ['auth.logout', 'logout', A]]],
+    'the session the callback created first is ended by the Log out that waited for it');
+  assert.equal(w.faults.length, 0, 'every injected failure was reached');
+  await w.finish('U5E-04', { output: ['end-tx.mark', 'end-tx.audit'].flatMap(markers) });
+});
+
+test('U5E-05 (acceptance 5) an end the provider did not confirm survives a restart: the mark blocks a callback at once, a new process resumes the end, retries back off and add no record', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-u5e5', X = idpOf(s);
+  const sid = await w.session(await w.issue('u5e5-v1', { sub: s, groups: [A] }));
+  // The admin API fails while the end commits (the process then dies: nothing in memory is left of the attempt).
+  kc.logoutMode = 'error';
+  const out = await w.call(w.I1, 'logout', { sid });
+  await w.told();
+  assert.deepEqual([out.status, await w.marks(), kc.ended], [204, [[X, 'logout', false]], []], 'ended and recorded; the provider end unconfirmed');
+  // A callback of that provider session before the restart: blocked by the mark although the token endpoint works.
+  const begin = await w.call(w.I2, 'login');
+  const early = await answerFlow(w, w.I2, begin, await w.issue('u5e5-v2', { sub: s, groups: [A] }));
+  assert.deepEqual([early.status, early.location, early.newSid, await w.sessions()], [302, landing('end_unconfirmed'), null, 0]);
+  await w.told();
+  const rows = (await w.rows()).length;
+  // The restart: a new process, the provider reachable again. Its start resumes the unconfirmed end whatever its due time.
+  kc.logoutMode = 'ok';
+  const asked = kc.logouts;
+  const restarted = w.instance('R');
+  restarted.service.onModuleInit();
+  try {
+    await w.until('the resumed provider end', async () => (await w.mark(X)).confirmedAt !== null);
+    assert.deepEqual([kc.ended, kc.logouts - asked, (await w.rows()).length], [[X], 1, rows], 'ended at the provider by one request; no record added');
+    // The periodic retry: an end that keeps failing is asked again at growing intervals and never dropped.
+    const s2 = 'syn-sub-u5e5-retry', Y = idpOf(s2);
+    kc.logoutMode = 'error';
+    assert.equal((await w.call(w.I1, 'logout', { sid: await w.session(await w.issue(s2, { sub: s2, groups: [B] })) })).status, 204);
+    await w.told();
+    const count = () => kc.endRequests.filter(x => x === Y).length;
+    assert.deepEqual([count(), (await w.mark(Y)).attempts], [1, 1]);
+    w.tick(4000);
+    await w.told();
+    assert.equal(count(), 1, 'not before its due time');
+    w.tick(1000);
+    await w.until('the second attempt', async () => count() === 2);
+    await w.told();
+    w.tick(5000);
+    await w.told();
+    assert.equal(count(), 2, 'the interval has grown');
+    kc.logoutMode = 'ok';
+    w.tick(5000);
+    await w.until('the confirmed retry', async () => (await w.mark(Y)).confirmedAt !== null);
+    assert.deepEqual([count(), await endsOf(w, s2)], [3, [['auth.logout', 'logout', B]]]);
+    // Keeping: a confirmed mark goes once no token of that provider session can exist (13 h after the decision); an
+    // unconfirmed one is never dropped for its age.
+    const at = hours => new Date(Date.now() - hours * HOUR);
+    kc.logoutMode = 'error';
+    for (const [idp, decided, confirmed] of [['syn-idp-old-confirmed', 14, true], ['syn-idp-recent-confirmed', 11, true], ['syn-idp-old-open', 14, false]])
+      await w.base.idpSessionEnd.create({ data: { idpSid: idp, cause: 'logout', decidedAt: at(decided), confirmedAt: confirmed ? at(decided) : null,
+        attempts: 9, nextAttemptAt: new Date(Date.now() + 2 * HOUR) } });
+    w.tick(HOUR);
+    await w.until('the sweep of old confirmed marks', async () => (await w.mark('syn-idp-old-confirmed')) === null);
+    assert.deepEqual((await w.marks()).filter(m => m[0].startsWith('syn-idp-old') || m[0].startsWith('syn-idp-recent')),
+      [['syn-idp-old-open', 'logout', false], ['syn-idp-recent-confirmed', 'logout', true]]);
+  } finally {
+    restarted.service.onModuleDestroy();
+    kc.logoutMode = 'ok';
+  }
+  await w.finish('U5E-05');
+});
+
+test('U5E-06 a lost answer of the provider end: the end is asked again, "no such session" confirms it, the first cause and time stay, no record is added', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-u5e6', X = idpOf(s);
+  const sid = await w.session(await w.issue(s, { sub: s, groups: [A] }));
+  kc.logoutMode = 'lost';
+  assert.equal((await w.call(w.I1, 'logout', { sid })).status, 204);
+  await w.told();
+  const first = await w.mark(X);
+  assert.deepEqual([kc.ended, first.confirmedAt, first.cause], [[X], null, 'logout'], 'the provider ended it; the product does not know');
+  kc.logoutMode = 'ok';
+  w.tick(60_000);
+  const restarted = w.instance('R');
+  restarted.service.onModuleInit();
+  try {
+    await w.until('the confirmation by absence', async () => (await w.mark(X)).confirmedAt !== null);
+  } finally {
+    restarted.service.onModuleDestroy();
+  }
+  const mark = await w.mark(X);
+  assert.deepEqual([mark.cause, mark.decidedAt.getTime(), await endsOf(w, s)], ['logout', first.decidedAt.getTime(), [['auth.logout', 'logout', A]]]);
+  // The service token the admin call holds has died (Keycloak restarted): re-acquired once inside the same bounded call.
+  const s2 = 'syn-sub-u5e6-stale';
+  kc.serviceMode = 'stale';
+  const tokens = kc.serviceTokens;
+  assert.equal((await w.call(w.I1, 'logout', { sid: await w.session(await w.issue(s2, { sub: s2, groups: [A] })) })).status, 204);
+  await w.told();
+  assert.deepEqual([(await w.marks()).find(m => m[0] === idpOf(s2)), kc.serviceTokens - tokens], [[idpOf(s2), 'logout', true], 1]);
+  await w.finish('U5E-06');
+});
+
+test('U5E-07 (acceptance 4, R2) a re-authentication intent starts by POST, probes and ends the SSO without making a session, and only the fresh step enters', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-u5e7', X = idpOf(s);
+  // The browser cannot say whether the doctor left (storage untrusted), its product cookie is gone (401), the SSO of
+  // doctor A is alive, and A's product session S1 of that SSO still exists server-side.
+  const s1 = await w.session(await w.issue('u5e7-a', { sub: s, groups: [A] }));
+  // Without the CSRF header nothing starts.
+  const forged = await w.call(w.I1, 'switch', { body: UNTRUSTED, csrf: false });
+  assert.deepEqual([...coded(forged), forged.pending], [403, 'AUTH_CSRF_REQUIRED', 'AUTH_CSRF_REQUIRED', null]);
+  const begin = await w.call(w.I1, 'switch', { body: UNTRUSTED });
+  assert.deepEqual([begin.status, begin.cookie, promptOf(begin)], [200, 'P', 'none'], 'the probe step: no screen, the SSO is only identified');
+  // The provider answers the probe with a code (A's SSO). No session, no proof: that SSO is ended, with A's product session.
+  const probed = await answerFlow(w, w.I1, begin, await w.issue('u5e7-a2', { sub: s, groups: [A] }));
+  assert.deepEqual([probed.status, atProvider(probed), promptOf(probed), probed.newSid, probed.proof, await w.sessions(), await w.version(s1)],
+    [302, true, 'login', null, undefined, 0, null]);
+  assert.deepEqual([await w.marks(), kc.ended], [[[X, 'reauthentication', true]], [X]]);
+  const ended = rowsOf(await w.rows(), s);
+  assert.deepEqual([summary(ended), ended[0].detail.trigger], [[['auth.logout', 'reauthentication', A]], 'storage_untrusted'], 'no login row: a probe is not a login');
+  // The fresh step: the next person types credentials (a new provider session) and enters.
+  const b = 'syn-sub-u5e7-b';
+  const fresh = await answerFlow(w, w.I1, probed, await w.issue('u5e7-b', { sub: b, groups: [B] }));
+  assert.deepEqual([fresh.status, fresh.cookie, !!fresh.proof, fresh.location.split('#')[0]], [302, 'S', true, ORIGIN + '/worklist/hpacs-lite/main.html']);
+  assert.deepEqual([(await w.base.authSession.findUnique({ where: { sid: fresh.newSid } })).idpSid, summary(rowsOf(await w.rows(), b))],
+    [idpOf(b), [['auth.login', 'success', B]]]);
+  // No SSO to end: the probe comes back login_required and the flow goes on to the fresh step; nothing is recorded.
+  const rows = (await w.rows()).length;
+  const begin2 = await w.call(w.I2, 'switch', { body: UNREADABLE });
+  const none = await refuseFlow(w, w.I2, begin2, 'login_required');
+  assert.deepEqual([none.status, atProvider(none), promptOf(none), none.cookie, (await w.rows()).length], [302, true, 'login', 'P', rows]);
+  // Any other answer of the probe is a failed login of this server's own flow: the landing, with its row.
+  const begin3 = await w.call(w.I2, 'switch', { body: UNREADABLE });
+  const failed = await refuseFlow(w, w.I2, begin3, 'interaction_required');
+  assert.deepEqual([failed.location, (await w.rows()).at(-1).detail.cause], [landing('interaction_required'), 'provider_error']);
+  // The provider end cannot be confirmed (the admin API is down, the token endpoint works): no fresh step - the
+  // landing says so, the SSO stays marked, and the same press works once the provider answers.
+  const c = 'syn-sub-u5e7-c', Z = idpOf(c);
+  kc.logoutMode = 'error';
+  const begin4 = await w.call(w.I1, 'switch', { body: UNTRUSTED });
+  const unconfirmed = await answerFlow(w, w.I1, begin4, await w.issue('u5e7-c', { sub: c, groups: [A] }));
+  assert.deepEqual([unconfirmed.location, unconfirmed.newSid, (await w.marks()).find(m => m[0] === Z)], [landing('end_unconfirmed'), null, [Z, 'reauthentication', false]]);
+  kc.logoutMode = 'ok';
+  const begin5 = await w.call(w.I1, 'switch', { body: UNTRUSTED });
+  const retried = await answerFlow(w, w.I1, begin5, await w.issue('u5e7-c2', { sub: c, groups: [A] }));
+  assert.deepEqual([atProvider(retried), promptOf(retried), (await w.marks()).find(m => m[0] === Z)], [true, 'login', [Z, 'reauthentication', true]]);
+  await w.finish('U5E-07');
+});
+
+test('U5E-08 a re-authentication intent this browser holds is not downgraded by a link, a registration or another tab\'s plain login; the fresh login that fulfils it clears it', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-u5e8', X = idpOf(s);
+  // A plain login was already on its way in tab 0 (the provider form or an SSO answer pending).
+  const plain = await w.call(w.I1, 'login');
+  assert.equal(promptOf(plain), null);
+  // The landing of tab 1 declares the intent.
+  const intent = await w.call(w.I1, 'switch', { body: UNTRUSTED });
+  assert.equal(promptOf(intent), 'none');
+  // Tab 2 starts by a link, tab 3 opens the registration - with the browser's cookies: both start as the same intent.
+  const jar = [plain.pendingCookie, intent.pendingCookie];
+  const link = await w.call(w.I2, 'login', { cookie: jar.join('; ') });
+  const signup = await w.call(w.I2, 'register', { cookie: jar.join('; ') });
+  assert.deepEqual([promptOf(link), promptOf(signup), link.consumed, signup.consumed], ['none', 'none', [], []],
+    'no plain start while the intent is pending; nobody else\'s flow is consumed');
+  // Tab 0's plain flow comes back with a code of the live SSO: it is handled as the probe - no session, the SSO ended.
+  const early = await answerFlow(w, w.I1, plain, await w.issue('u5e8-a', { sub: s, groups: [A] }), { cookies: [intent.pendingCookie] });
+  assert.deepEqual([early.newSid, atProvider(early), promptOf(early), await w.sessions(), await w.marks()],
+    [null, true, 'login', 0, [[X, 'reauthentication', true]]]);
+  assert.deepEqual(early.consumed.length, 1, 'a callback consumes its own flow only');
+  // The registration tab: its probe finds no SSO any more and goes on to the registration form.
+  const registered = await refuseFlow(w, w.I2, signup, 'login_required', { cookies: [intent.pendingCookie] });
+  assert.deepEqual([atProvider(registered), promptOf(registered)], [true, 'create']);
+  // The fresh login of tab 0 enters and clears the intent the other flows still carry: the next plain start is plain.
+  const b = 'syn-sub-u5e8-b';
+  const fresh = await answerFlow(w, w.I1, early, await w.issue('u5e8-b', { sub: b, groups: [B] }), { cookies: [intent.pendingCookie, link.pendingCookie] });
+  assert.deepEqual([fresh.cookie, fresh.consumed.length], ['S', 3], 'its own flow and the two that carried the intent');
+  assert.equal(promptOf(await w.call(w.I2, 'login')), null);
+  await w.finish('U5E-08');
+});
+
+test('U5E-09 the bound start waits for the provider end: unconfirmed is 503 with the session ended and marked; the same press then goes through the probe', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-u5e9', X = idpOf(s);
+  const sid = await w.session(await w.issue('u5e9-v1', { sub: s, groups: [A] }));
+  kc.logoutMode = 'error';
+  const out = await w.call(w.I1, 'switch', { sid, body: UNFINISHED });
+  assert.deepEqual([...coded(out), out.cookie, out.pending, out.location], [503, 'AUTH_IDP_END_UNCONFIRMED', 'AUTH_IDP_END_UNCONFIRMED', 'K', null, null]);
+  assert.deepEqual([await w.version(sid), await w.marks(), await endsOf(w, s)], [null, [[X, 'logout', false]], [['auth.logout', 'logout', A]]],
+    'the product session is ended and recorded as the completion of the Log out; the SSO is marked');
+  // An ordinary link meanwhile (the SSO is alive and answers without a form): blocked by the mark, no session.
+  const link = await w.call(w.I2, 'login');
+  const silent = await answerFlow(w, w.I2, link, await w.issue('u5e9-v2', { sub: s, groups: [A] }));
+  assert.deepEqual([silent.location, silent.newSid, await w.sessions()], [landing('end_unconfirmed'), null, 0]);
+  // The same press again, the provider back: the session is gone (the document's binding is of no use and not asked
+  // for), so the SSO is probed, ended, and the fresh step follows. One record of the end in all.
+  kc.logoutMode = 'ok';
+  const again = await w.call(w.I1, 'switch', { sid, body: UNFINISHED, binding: null });
+  assert.deepEqual([again.status, promptOf(again)], [200, 'none']);
+  const probed = await answerFlow(w, w.I1, again, await w.issue('u5e9-v3', { sub: s, groups: [A] }), { sid });
+  assert.deepEqual([atProvider(probed), promptOf(probed), await w.marks(), await endsOf(w, s)],
+    [true, 'login', [[X, 'logout', true]], [['auth.logout', 'logout', A]]], 'the first cause stays; no second record');
+  // The service account's token endpoint does not answer: the whole admin call is bounded, the start answers 503.
+  const s2 = 'syn-sub-u5e9-hang';
+  const sid2 = await w.session(await w.issue(s2, { sub: s2, groups: [B] }));
+  const hung = w.instance('H');
+  kc.serviceMode = 'hang';
+  const from = performance.now();
+  const slow = await w.call(hung, 'switch', { sid: sid2, body: SWITCH });
+  kc.serviceMode = 'ok';
+  assert.deepEqual([slow.status, slow.body?.code, performance.now() - from < 8000, await endsOf(w, s2)],
+    [503, 'AUTH_IDP_END_UNCONFIRMED', true, [['auth.logout', 'account_switch', B]]]);
+  await w.finish('U5E-09');
+});
+
+test('U5E-10 a callback is never answered with an error body: a stray one enters the live session or restarts once; a token that expired while the callback waited makes no session', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-u5e10';
+  // Back from the work document re-submits an old authorize answer while the session is alive: the work document.
+  const live = await w.session(await w.issue('u5e10-live', { sub: s, groups: [A] }));
+  const exchanged = kc.tokens;
+  const back = await w.call(w.I1, 'callback', { sid: live, query: { code: 'syn-old-code', state: 'syn-old-state' } });
+  assert.deepEqual([back.status, back.location, back.body, kc.tokens - exchanged, await w.sessions()],
+    [302, ORIGIN + '/worklist/hpacs-lite/main.html', undefined, 0, 1]);
+  // The verified token expires while the callback waits for its turn: after the lock it is looked at again.
+  const b = 'syn-sub-u5e10-b';
+  const begin = await w.call(w.I2, 'login');
+  const gate = w.gate('I2', 'tx.open');
+  const held = answerFlow(w, w.I2, begin, await w.issue('u5e10-short', { sub: b, groups: [B], expIn: 5 }));
+  await gate.arrived();
+  w.tick(6000);
+  gate.release();
+  const late = await held;
+  assert.deepEqual([late.status, atProvider(late), late.newSid, await w.sessions(), rowsOf(await w.rows(), b)], [302, true, null, 1, []],
+    'no session from the expired token; the login starts again once');
+  const gate2 = w.gate('I2', 'tx.open');
+  const held2 = answerFlow(w, w.I2, late, await w.issue('u5e10-short2', { sub: b, groups: [B], expIn: 5 }));
+  await gate2.arrived();
+  w.tick(6000);
+  gate2.release();
+  assert.deepEqual([(await held2).location, await w.sessions()], [landing('stale'), 1], 'the second time: the landing, not a loop');
+  // A token that names no provider session cannot be bound to one: no session.
+  const begin3 = await w.call(w.I2, 'login');
+  const unbound = await answerFlow(w, w.I2, begin3, await w.issue('u5e10-nosid', { sub: b, groups: [B], idp: null }));
+  assert.deepEqual([unbound.location, unbound.newSid, (await w.rows()).at(-1).detail.cause], [landing('login_failed'), null, 'token_invalid']);
+  // The provider end of a session without a known provider session (an old row whose stored token is unreadable) is
+  // not guessed: the row ends, with its record, and no mark is made.
+  const odd = randomBytes(32).toString('base64url');
+  w.secret('sid', odd);
+  await w.base.authSession.create({ data: { sid: odd, sub: 'syn-sub-u5e10-odd', accessToken: 'syn-not-a-jwt', refreshToken: 'syn-rt-odd',
+    atExpiresAt: new Date(Date.now() + HOUR), lastSeenAt: new Date() } });
+  assert.equal((await w.call(w.I1, 'logout', { sid: odd })).status, 204);
+  assert.deepEqual([await w.base.authSession.count({ where: { sid: odd } }), await w.marks(), summary(rowsOf(await w.rows(), 'syn-sub-u5e10-odd'))],
+    [0, [], [['auth.logout', 'logout', null]]]);
+  await w.finish('U5E-10');
 });

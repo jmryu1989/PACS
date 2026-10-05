@@ -76,16 +76,46 @@
           [403, 409].includes(failure.status) && failure.code === 'AUTH_SESSION_MISMATCH') end();
     }
     const transport = win.KinSessionTransport.page({ fetch: originalFetch, authFailure });
-    function readEndRecord() {
-      const stored = win.localStorage.getItem('kin-session-end');
-      if (stored !== null) return stored;
-      const cookie = win.document.cookie.split(';').map(part => part.trim()).find(part => part.startsWith('kin-session-end='));
-      return cookie ? decodeURIComponent(cookie.slice('kin-session-end='.length)) : null;
+    // S7-U5 session end: auth.js keeps the end record of each session under that session's own key
+    // (`kin-session-end:<session>`, or the cookie `kin-session-end.<session>` when localStorage takes no write).
+    // One reader for both copies, the later of the two as auth.js reads them. A viewer ends on the record of ITS OWN
+    // session only; `leaving` (Log Out pressed, not ended - Back to Editing removes it) is not an end. A record from
+    // before the per-session keys (one key, no origin) still ends the session it names.
+    const END = 'kin-session-end', ENDED = ['ending', 'unconfirmed', 'confirmed'];
+    const cookieEnds = () => win.document.cookie.split(';').map(part => part.trim()).filter(part => part.startsWith(END))
+      .map(part => [part.slice(0, part.indexOf('=')), part.slice(part.indexOf('=') + 1)]);
+    function ownEnd(id) {
+      if (!id) return false;
+      const cookies = new Map(cookieEnds());
+      const cookie = name => cookies.has(name) ? decodeURIComponent(cookies.get(name)) : null;
+      try {
+        if (JSON.parse(win.localStorage.getItem(END) ?? cookie(END))?.session === id) return true;
+      } catch (_) { /* An unreadable record is not evidence of an end. */ }
+      const rank = status => status === 'leaving' ? 0 : status === 'ending' ? 1 : 2;
+      let latest = null;
+      for (const text of [win.localStorage.getItem(END + ':' + id), cookie(END + '.' + id)]) {
+        let record = null;
+        try { record = JSON.parse(text); } catch (_) { /* An unreadable copy is not evidence of an end. */ }
+        if (!record || record.session !== id || !Number.isFinite(record.operation)) continue;
+        if (!latest || record.operation > latest.operation ||
+            record.operation === latest.operation && rank(record.status) > rank(latest.status)) latest = record;
+      }
+      return !!latest && ENDED.includes(latest.status);
+    }
+    // The strict rule of a window nobody handed a session (a typed URL): any end record of any session, in either copy.
+    function anyEnd() {
+      const ends = text => { try { return JSON.parse(text)?.status !== 'leaving'; } catch (_) { return true; } };
+      const storage = win.localStorage;
+      for (let index = 0; index < storage.length; index++) {
+        const key = storage.key(index);
+        if (key === END || key?.startsWith(END + ':') && ends(storage.getItem(key))) return true;
+      }
+      return cookieEnds().some(([name, value]) => name === END || name.startsWith(END + '.') && ends(decodeURIComponent(value)));
     }
     async function mayStartWork(id = session) {
       if (ended) return false;
       try {
-        if (JSON.parse(readEndRecord())?.session === id) { end(); return false; }
+        if (ownEnd(id)) { end(); return false; }
       } catch (_) { /* An unreadable record is not evidence of an end. */ }
       if (!locks) return true;
       try {
@@ -171,8 +201,8 @@
     try { channel = new win.BroadcastChannel('kin-session'); channel.onmessage = event => notice(event.data); } catch (_) {}
     // A storage notice must retire even a viewer with no mounted extension or active request.
     win.addEventListener('storage', event => {
-      if (event.key !== 'kin-session-end' && event.key !== null) return;
-      try { if (session && JSON.parse(readEndRecord())?.session === session) end(); }
+      if (event.key !== null && event.key !== END && event.key !== END + ':' + session) return;
+      try { if (session && ownEnd(session)) end(); }
       catch (_) { /* An unreadable record is not evidence of an end. */ }
     });
     // Polling also repairs missed preparation notifications. A different peer session is never adopted.
@@ -306,12 +336,16 @@
     // A list-opened noopener verifies the handed-over session. Only a typed URL without
     // an expected id can bootstrap an identity, and never after hearing an unresolved end.
     function entryAllowed() {
+      // A handed-over window (expected session) is stopped by that session's own end only - its record or end lock
+      // (mayStartWork), its notice, or /api/me answering another id (bootstrap). Another session's record, a `leaving`
+      // marker and a storage that takes no write say nothing about the handed session: they do not end the window.
+      if (expected) return true;
       try {
         const storage = win.localStorage, key = 'kin-viewer-entry-probe', value = win.crypto.randomUUID().padEnd(160, '.');
         storage.setItem(key, value);
         const reliable = storage.getItem(key) === value;
         storage.removeItem(key);
-        return reliable && storage.getItem(key) === null && readEndRecord() === null;
+        return reliable && storage.getItem(key) === null && !anyEnd();
       } catch (_) { return false; }
     }
     let entryNotice = null;

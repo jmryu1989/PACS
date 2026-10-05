@@ -1206,6 +1206,8 @@ function browser({ storage = 'reliable' } = {}) {
         if (map === local) for (const other of documents) if (other !== doc) queueMicrotask(() => other.fire('storage', { key }));
       },
       removeItem(key) { if (storage === 'unreadable') throw new Error('SYN storage blocked'); map.delete(key); },
+      get length() { if (storage === 'unreadable') throw new Error('SYN storage blocked'); return map.size; },
+      key(index) { if (storage === 'unreadable') throw new Error('SYN storage blocked'); return [...map.keys()][index] ?? null; },
     });
     class Channel {
       constructor(name) { this.name = name; this.onmessage = null; this.doc = doc; channels.push(this); }
@@ -1233,7 +1235,12 @@ function browser({ storage = 'reliable' } = {}) {
     doc.states = [];
     doc.auth.onLifecycle(event => doc.states.push(`${event.state}:${event.session}`));
     doc.state = () => doc.auth.lifecycle().state;
-    doc.record = () => local.has('kin-session-end') ? JSON.parse(local.get('kin-session-end')) : null;
+    // The end record of one session (its own key), or - with no session named - the one record there is.
+    doc.record = session => {
+      const keys = [...local.keys()].filter(key => session ? key === 'kin-session-end:' + session : key.startsWith('kin-session-end:'));
+      assert.ok(keys.length <= 1, 'one end record expected, found ' + keys.length);
+      return keys.length ? JSON.parse(local.get(keys[0])) : null;
+    };
     documents.push(doc);
     return doc;
   }
@@ -1281,17 +1288,27 @@ test('AUTH-03 the automatic login never starts over an end record, unverifiable 
   const cases = {
     'an explicit logout (confirmed end record)': async () => {
       const { server, open, local } = browser();
-      local.set('kin-session-end', JSON.stringify({ session: 'S0', operation: 1, status: 'confirmed' }));
+      local.set('kin-session-end:S0', JSON.stringify({ session: 'S0', operation: 1, status: 'confirmed', origin: 'logout' }));
       return { server, doc: open() };
     },
     'an unconfirmed logout': async () => {
       const { server, open, local } = browser();
-      local.set('kin-session-end', JSON.stringify({ session: 'S0', operation: 1, status: 'unconfirmed', reason: 'network' }));
+      local.set('kin-session-end:S0', JSON.stringify({ session: 'S0', operation: 1, status: 'unconfirmed', reason: 'network', origin: 'logout' }));
       return { server, doc: open() };
     },
     'a record that cannot be read': async () => {
       const { server, open, local } = browser();
-      local.set('kin-session-end', '{broken');
+      local.set('kin-session-end:S0', '{broken');
+      return { server, doc: open() };
+    },
+    'a record that does not say why the session ended (no origin)': async () => {
+      const { server, open, local } = browser();
+      local.set('kin-session-end:S0', JSON.stringify({ session: 'S0', operation: 1, status: 'confirmed' }));
+      return { server, doc: open() };
+    },
+    'a record from before the per-session keys (one key, no origin)': async () => {
+      const { server, open, local } = browser();
+      local.set('kin-session-end', JSON.stringify({ session: 'S0', operation: 1, status: 'confirmed' }));
       return { server, doc: open() };
     },
     'storage that cannot be read': async () => { const { server, open } = browser({ storage: 'unreadable' }); return { server, doc: open() }; },
@@ -1318,6 +1335,27 @@ test('AUTH-03 the automatic login never starts over an end record, unverifiable 
     assert.deepEqual(doc.moves, [], label);
     assert.notEqual(doc.state(), 'active', label);
     if (!rejects && !label.includes('proof')) assert.deepEqual(server.calls, [], `${label}: the live session is not even read`);
+  }
+  // The opposite side (A005): a session the SERVER ended (expiry) or another login replaced is not the person leaving.
+  // Its record holds no new document: the ordinary entry asks the server and, with no session, the login starts by
+  // itself - no notice and no click every morning. A record older than the SSO lifetime is dropped.
+  for (const origin of ['server_end', 'replaced']) {
+    const { server, open, local } = browser();
+    local.set('kin-session-end:S0', JSON.stringify({ session: 'S0', operation: Date.now() - 1000, status: origin === 'replaced' ? 'unconfirmed' : 'confirmed',
+      origin, ...(origin === 'replaced' ? { reason: 'replaced' } : {}) }));
+    local.set('kin-session-end:S-OLD', JSON.stringify({ session: 'S-OLD', operation: Date.now() - 13 * 3600 * 1000, status: 'confirmed', origin }));
+    const doc = open('/worklist/hpacs-lite/index.html');
+    assert.equal(doc.auth.endState(), null, origin);
+    assert.equal(await doc.auth.init(), null, origin);
+    assert.deepEqual([doc.auth.autoLogin(), doc.moves, server.calls, local.has('kin-session-end:S0'), local.has('kin-session-end:S-OLD')],
+      [true, [['href', SITE + '/api/auth/login']], [['GET', '/api/me', null]], true, false], origin);
+    // ... and with a live session of the browser the new document simply enters it.
+    const live = browser();
+    live.local.set('kin-session-end:S0', JSON.stringify({ session: 'S0', operation: Date.now() - 1000, status: 'confirmed', origin }));
+    const session = live.server.login();
+    const tab = live.open();
+    await tab.auth.init();
+    assert.deepEqual([tab.state(), tab.auth.sessionId()], ['active', session], origin);
   }
   // And a tab the automatic login just sent out comes back without a session: it is not sent again (no redirect loop).
   const { server, open } = browser();
@@ -1362,11 +1400,13 @@ test('AUTH-04 the entry proof is taken from the address at once, used once, and 
 
 test('AUTH-05 which answers close a document: the session ended, the session replaced - and nothing else', async () => {
   const closing = [
-    [{ status: 401, code: 'AUTH_SESSION_ENDED' }, 'confirmed', true],
-    [{ status: 409, code: 'AUTH_SESSION_MISMATCH' }, 'unconfirmed', false],
-    [{ status: 403, code: 'AUTH_SESSION_MISMATCH' }, 'unconfirmed', false],
+    [{ status: 401, code: 'AUTH_SESSION_ENDED' }, 'confirmed', 'server_end'],
+    [{ status: 409, code: 'AUTH_SESSION_MISMATCH' }, 'unconfirmed', 'replaced'],
+    [{ status: 403, code: 'AUTH_SESSION_MISMATCH' }, 'unconfirmed', 'replaced'],
   ];
-  for (const [failure, state, recorded] of closing) {
+  for (const [failure, state, origin] of closing) {
+    // A session the server ended is recorded with that origin (never as the person's logout); a replaced session
+    // leaves no record - its id does not come back, and the browser's new login is not to be held by it.
     const { server, open } = browser();
     const session = server.login();
     const doc = open();
@@ -1374,9 +1414,10 @@ test('AUTH-05 which answers close a document: the session ended, the session rep
     doc.auth.authFailure({ session, ...failure });
     assert.equal(doc.state(), state, JSON.stringify(failure));
     assert.equal(doc.auth.session(), null);
-    assert.equal(!!doc.record(), recorded, 'only a server-confirmed end is recorded; a replaced session leaves no record');
+    assert.deepEqual(origin === 'replaced' ? doc.record(session) : [doc.record(session).status, doc.record(session).origin],
+      origin === 'replaced' ? null : [state, origin]);
     assert.deepEqual(server.logouts, [], 'no logout POST: it would aim at another login, or at a session already gone');
-    assert.deepEqual(doc.posts.map(post => [post.type, post.session]), [['session-ended', session]]);
+    assert.deepEqual(doc.posts.map(post => [post.type, post.session, post.origin]), [['session-ended', session, origin]]);
   }
   const { server, open } = browser();
   const session = server.login();
@@ -1400,7 +1441,7 @@ test('AUTH-05 which answers close a document: the session ended, the session rep
   doc.auth.replaced({ session: 'S-OTHER' });
   assert.equal(doc.state(), 'active');
   doc.auth.replaced({ session });
-  assert.deepEqual([doc.state(), doc.record(), server.logouts], ['unconfirmed', null, []]);
+  assert.deepEqual([doc.state(), doc.record(session), server.logouts], ['unconfirmed', null, []]);
 });
 
 test('AUTH-06 notices are session-bound and never re-posted; storage trouble and preparation notices close nothing', async () => {
@@ -1416,7 +1457,8 @@ test('AUTH-06 notices are session-bound and never re-posted; storage trouble and
   // Session 1's document is told its session ended (the cookie is session 2's now): it and its sibling close, B does not.
   a.auth.authFailure({ session: first, status: 409, code: 'AUTH_SESSION_MISMATCH' });
   await turn();
-  assert.deepEqual([a.state(), a2.state(), b.state()], ['unconfirmed', 'ending', 'active']);
+  assert.deepEqual([a.state(), a2.state(), b.state()], ['unconfirmed', 'unconfirmed', 'active'], 'the sibling heard a replacement: unconfirmed, not a logout in progress');
+  assert.deepEqual([a.record(first), b.record(second)], [null, null], 'a replaced session leaves no record; session 2 has none');
   assert.deepEqual([a.posts.length, a2.posts.length, b.posts.length], [1, 0, 0], 'one notice, no echo');
   assert.deepEqual(server.logouts, []);
   // Notices that name no session, another session, or a preparation: nothing closes.
@@ -1429,11 +1471,13 @@ test('AUTH-06 notices are session-bound and never re-posted; storage trouble and
   }
   assert.deepEqual(b.posts, [], 'nothing heard is posted again');
   // Storage that becomes unreadable is not an end signal for a document at work.
-  local.set('kin-session-end', '{broken');
-  b.fire('storage', { key: 'kin-session-end' });
-  b.fire('focus');
-  assert.equal(b.state(), 'active');
-  local.delete('kin-session-end');
+  for (const key of ['kin-session-end', 'kin-session-end:' + second]) {
+    local.set(key, '{broken');
+    b.fire('storage', { key });
+    b.fire('focus');
+    assert.equal(b.state(), 'active', key);
+    local.delete(key);
+  }
   // The preparation notices: posted for this session only while it is at work, with the preparation's number.
   b.auth.notifyPreparation('preparing', 3);
   b.auth.notifyPreparation('resumed', 3);
@@ -1453,7 +1497,8 @@ test('AUTH-07 one logout: the record and the notice before the network, one boun
   const order = [];
   doc.auth.beforeLogoutPost(async bound => { order.push(['step', bound, doc.state(), doc.record().status]); });
   const leaving = doc.auth.logout();
-  assert.deepEqual([doc.state(), doc.auth.session(), doc.record().session, doc.record().status], ['ending', null, session, 'ending']);
+  assert.deepEqual([doc.state(), doc.auth.session(), doc.record().session, doc.record().status, doc.record().origin],
+    ['ending', null, session, 'ending', 'logout']);
   // An overlapping press shares the one end: no second record, notice or POST.
   await Promise.all([leaving, doc.auth.logout()]);
   assert.equal(doc.posts.length, 1);

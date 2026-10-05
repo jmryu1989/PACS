@@ -1,6 +1,9 @@
-"""TEST-S7-U5-LIVE (AL-01..AL-10, test-plan section 3): the access records of the real BFF, Keycloak, nginx and
-PostgreSQL - login success and failure, logout, account switch, idle expiry and a refused refresh - their fields, the
-proxy's client address, the record-time institution an institution's admin reads, and no secret in any column.
+"""TEST-S7-U5-LIVE (AL-01..AL-13, test-plan section 3): the access records of the real BFF, Keycloak, nginx and
+PostgreSQL - login success and failure, logout, the login starts that end a session (account switch, the completion of
+an unfinished logout, re-authentication, registration), idle expiry and a refused refresh - their fields, the proxy's
+client address (also on the DICOM authorization path, A007), the record-time institution an institution's admin reads,
+and no secret in any column; and of the same unit: every /api/ answer is `no-store` (A016) and the Keycloak account
+console is not exposed (A018).
 
 REQ-S7-U5-AUTH-AUDIT -> RISK-S7-U5-SECRET-IN-LOG / RISK-S7-U5-CROSS-INSTITUTION -> TEST-S7-U5-LIVE. The sweep is not here:
 it is an hourly timer with no route (tests/auth_session_service_test.cjs AS-08, CFC-4).
@@ -42,13 +45,15 @@ CASES = (
     "test_01_login_success_row_and_no_secret",
     "test_02_the_address_is_the_proxys_not_a_forwarded_header",
     "test_03_logout_row_csrf_and_absence",
-    "test_04_account_switch_row",
+    "test_04_login_starts_record_their_declared_cause",
     "test_05_idle_row",
     "test_06_refused_refresh_row",
     "test_07_admins_read_record_time_institutions_only",
     "test_08_login_failures_of_this_servers_logins_only",
     "test_09_bearer_logout_writes_nothing",
-    "test_10_cleanup_leaves_no_owned_row_or_session",
+    "test_10_a_session_ended_on_the_dicom_path_records_the_proxys_address",
+    "test_11_api_answers_are_not_stored_and_the_account_console_is_closed",
+    "test_12_cleanup_leaves_no_owned_row_or_session",
 )
 AUTH = ("auth.login", "auth.logout", "auth.session.expired")
 GROUP = re.compile(r"kin-test-[0-9a-f]{12}-[abz]")
@@ -56,7 +61,15 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 KEYS = {"auth.login:success": ["dataSubject", "institution", "ip", "outcome"],
         "auth.login:failure": ["cause", "dataSubject", "institution", "ip", "outcome"],
         "auth.logout": ["cause", "dataSubject", "institution", "ip"],
+        # a session ended by a re-authentication also records what asked for it (the declared reason, or register)
+        "auth.logout:reauthentication": ["cause", "dataSubject", "institution", "ip", "trigger"],
         "auth.session.expired": ["cause", "dataSubject", "institution", "ip"]}
+
+
+def shape_of(action, detail):
+    if action == "auth.login":
+        return action + ":" + detail.get("outcome")
+    return action + (":reauthentication" if action == "auth.logout" and detail.get("cause") == "reauthentication" else "")
 ABSENT, EXPIRED, REFUSED = "인증 세션이 없습니다", "인증 세션이 만료되었습니다", "인증 세션을 갱신할 수 없습니다"
 
 
@@ -115,12 +128,17 @@ class Browser:
     def cookie(self, name):
         return next((c.value for c in self.jar if c.name == name), None)
 
+    def pending(self):
+        """The newest pending login flow of this profile (one cookie per flow: kin_pending_<derived from its state>)."""
+        return next((c.value for c in reversed(list(self.jar)) if c.name.startswith("kin_pending_")), None)
+
     def sid(self):
         return self.cookie("kin_sid")
 
 
 class AuthAuditLive(unittest.TestCase):
     secrets: list = []
+    provider_sessions: list = []
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -199,6 +217,10 @@ class AuthAuditLive(unittest.TestCase):
         for user_id in cls.owned_ids():
             purge_user_audit(user_id)
             psql(f'DELETE FROM "AuthSession" WHERE sub=\'{user_id}\';')
+        # The end marks of this run's own provider sessions (ids read from this run's own session rows).
+        owned = [value for value in cls.provider_sessions if re.fullmatch(r"[0-9A-Za-z-]{8,64}", value)]
+        if owned:
+            psql('DELETE FROM "IdpSessionEnd" WHERE "idpSid" IN (' + ",".join(f"'{value}'" for value in owned) + ");")
         ids = [int(i) for i in getattr(cls, "failure_ids", [])]
         if ids:
             psql(past_audit_guard('DELETE FROM "AuditLog" WHERE id IN (' + ",".join(map(str, ids)) + ");"))
@@ -247,15 +269,15 @@ class AuthAuditLive(unittest.TestCase):
         return address
 
     # ── the BFF login, one redirect at a time ──
-    def login(self, name: str, browser: Browser | None = None, prompt: str | None = None) -> Browser:
+    def login(self, name: str, browser: Browser | None = None) -> Browser:
         member = self.members[name]
         browser = browser or Browser(self.stack)
-        status, headers, _ = browser.call("GET", "/api/auth/login" + (f"?prompt={prompt}" if prompt else ""))
+        status, headers, _ = browser.call("GET", "/api/auth/login")
         self.assertEqual(status, 302)
         location = headers.get("Location", "")
         state = parse_qs(urlparse(location).query)["state"][0]
         self.secret("state", state)
-        self.secret("pending", browser.cookie("kin_pending"))
+        self.secret("pending", browser.pending())
         status, _, page = browser.call("GET", location)
         self.assertEqual(status, 200, "the Keycloak login form")
         form = re.search(r'<form[^>]+action="([^"]+)"', page, re.I)
@@ -279,9 +301,15 @@ class AuthAuditLive(unittest.TestCase):
         _, _, me = browser.call("GET", "/api/me")
         browser.session = json.loads(me).get("sessionId")
         self.assertTrue(browser.session and browser.session != browser.sid(), "GET me answers the session id")
-        row = psql(f'SELECT "accessToken" || E\'\\t\' || "refreshToken" FROM "AuthSession" WHERE sub=\'{member["id"]}\' ORDER BY "createdAt" DESC LIMIT 1;')
-        for kind, value in zip(("access", "refresh"), row[0].split("\t")):
+        row = psql(f'SELECT "accessToken" || E\'\\t\' || "refreshToken" || E\'\\t\' || coalesce("idpSid", \'\') FROM "AuthSession" WHERE sub=\'{member["id"]}\' ORDER BY "createdAt" DESC LIMIT 1;')
+        access, refresh, provider = row[0].split("\t")
+        for kind, value in (("access", access), ("refresh", refresh)):
             self.secret(kind, value)
+        # S7-U5 session end: every login is stored with the provider session it was born from; its end mark is this
+        # run's to clean up.
+        self.assertTrue(provider, "the session remembers its provider session")
+        type(self).provider_sessions.append(provider)
+        browser.provider = provider
         return browser
 
     def logout(self, browser: Browser, csrf: bool = True) -> int:
@@ -302,8 +330,7 @@ class AuthAuditLive(unittest.TestCase):
     def check_rows(self, case: str, rows: list[dict], ip_ok: bool = True) -> None:
         for row in rows:
             detail = json.loads(row["detail"])
-            shape = row["action"] + (":" + detail.get("outcome") if row["action"] == "auth.login" else "")
-            self.assertEqual(sorted(detail), KEYS[shape], f"{case}: the detail keys")
+            self.assertEqual(sorted(detail), KEYS[shape_of(row["action"], detail)], f"{case}: the detail keys")
             self.assertIsNone(detail["dataSubject"])
         hits = secret_hits([v for row in rows for v in (row["actor"], row["action"], row["target"], row["detail"])], self.secrets)
         print("S7-U5-AUTH-LIVE " + json.dumps({"case": case, "rows": len(rows), "hits": hits, "ip_ok": ip_ok}))
@@ -322,7 +349,7 @@ class AuthAuditLive(unittest.TestCase):
             self.assertEqual(answer.status, 200, answer.text)
             for row in answer.body["rows"]:
                 if row["action"] in AUTH:
-                    self.assertEqual(sorted(row["detail"]), KEYS[row["action"] + (":" + row["detail"]["outcome"] if row["action"] == "auth.login" else "")])
+                    self.assertEqual(sorted(row["detail"]), KEYS[shape_of(row["action"], row["detail"])])
                     seen.add((row["action"], row["target"], row["detail"].get("cause") or row["detail"].get("outcome"),
                               row["detail"].get("institution")))
             after = answer.body.get("next")
@@ -391,22 +418,62 @@ class AuthAuditLive(unittest.TestCase):
         self.assertEqual(before + 1, len(self.rows_of("ma")))
         self.check_rows("AL-03", self.rows_of("ma"))
 
-    def test_04_account_switch_row(self):
-        for kind in ("login", "register"):
+    def test_04_login_starts_record_their_declared_cause(self):
+        """A019: the row of a session a login start ended says what the start declared - the completion of the person's
+        own Log out is `logout`, only Switch account is `account_switch`, an unknown leave state and a registration are
+        `reauthentication` (with what asked for it); one row per session, none for a session already gone."""
+        count = f'SELECT count(*) FROM "AuthSession" WHERE sub=\'{self.members["ma"]["id"]}\';'
+        for kind, reason, cause, trigger, prompt in (
+                ("login", "switch_account", "account_switch", None, "login"),
+                ("register", None, "reauthentication", "register", "create"),
+                ("login", "logout_unfinished", "logout", None, "login"),
+                ("login", "storage_untrusted", "reauthentication", "storage_untrusted", "login"),
+                ("login", "record_unreadable", "reauthentication", "record_unreadable", "login")):
+            label = f"{kind}/{reason}"
             browser = self.login("ma")
             path = "/api/auth/login" if kind == "login" else "/api/auth/register"
-            count = f'SELECT count(*) FROM "AuthSession" WHERE sub=\'{self.members["ma"]["id"]}\';'
-            # S7-U5: a link (GET) ends nothing - with a live session it goes back to the entrance. The switch is the
-            # bound POST: CSRF and the session id of the document that asks, then the session is ended with its row.
-            status, headers, _ = browser.call("GET", path + ("?prompt=login" if kind == "login" else ""))
-            self.assertEqual((status, urlparse(headers.get("Location", "")).query), (302, "auth_error=session_active"), kind)
-            self.assertEqual(psql(count), ["1"], kind)
-            status, _, body = browser.call("POST", path, data=json.dumps({"prompt": "login"} if kind == "login" else {}).encode("utf-8"),
-                                           headers={"X-KIN-CSRF": "1", "Content-Type": "application/json"})
-            self.assertEqual(200, status, kind)
-            self.assertIn("/protocol/openid-connect/auth?", json.loads(body).get("location", ""), kind)
-            self.assertEqual(self.ends("ma")[-1], ("auth.logout", "account_switch", self.groups["A"][0], self.expected_ip), kind)
-            self.assertEqual(psql(f'SELECT count(*) FROM "AuthSession" WHERE sub=\'{self.members["ma"]["id"]}\';'), ["0"], kind)
+            body = json.dumps({"intent": "reauthenticate", "reason": reason} if kind == "login" else {}).encode("utf-8")
+            start = lambda: browser.call("POST", path, data=body, headers={"X-KIN-CSRF": "1", "Content-Type": "application/json"})
+            # A link (GET) ends nothing and carries no intent, whatever its address says: with a live session it goes
+            # back to the entrance.
+            status, headers, _ = browser.call("GET", path + "?prompt=login&intent=reauthenticate&reason=switch_account")
+            self.assertEqual((status, urlparse(headers.get("Location", "")).query), (302, "auth_error=session_active"), label)
+            self.assertEqual(psql(count), ["1"], label)
+            before = len(self.rows_of("ma"))
+            # The start is the bound POST: CSRF and the session id of the document that asks. The session is ended with
+            # its row, the provider session is ended and that end confirmed, and only then the address is given - it
+            # asks for credentials (prompt=login) or opens the registration.
+            status, _, answer = start()
+            self.assertEqual(200, status, label)
+            location = json.loads(answer).get("location", "")
+            self.assertIn("/protocol/openid-connect/auth?", location, label)
+            self.assertEqual(parse_qs(urlparse(location).query).get("prompt"), [prompt], label)
+            self.assertEqual(self.ends("ma")[-1], ("auth.logout", cause, self.groups["A"][0], self.expected_ip), label)
+            self.assertEqual(json.loads(self.rows_of("ma")[-1]["detail"]).get("trigger"), trigger, label)
+            self.assertEqual(before + 1, len(self.rows_of("ma")), label + ": one row")
+            self.assertEqual(psql(count), ["0"], label)
+            mark = psql(f'SELECT cause || E\'\\t\' || ("confirmedAt" IS NOT NULL)::text FROM "IdpSessionEnd" WHERE "idpSid"=\'{browser.provider}\';')
+            self.assertEqual(mark, [cause + "\ttrue"], label + ": the provider session is marked and its end confirmed")
+            if kind == "login":
+                # The provider has no session of this browser any more: the address shows the form with a name field.
+                status, _, page = browser.call("GET", location)
+                self.assertEqual(200, status, label)
+                self.assertRegex(page, r'<input[^>]+name="username"', label + ": an editable user name")
+            # The same start again: the session is gone - nothing to end, no row; the SSO is probed first.
+            browser.session = None
+            status, _, answer = start()
+            self.assertEqual(200, status, label)
+            if kind == "login":
+                self.assertEqual(parse_qs(urlparse(json.loads(answer)["location"]).query).get("prompt"), ["none"], label)
+            self.assertEqual(before + 1, len(self.rows_of("ma")), label + ": no second row")
+        # A start that declares no reason, or one the server does not know, starts nothing and ends nothing.
+        browser = self.login("ma")
+        for bad in ({}, {"prompt": "login"}, {"intent": "reauthenticate", "reason": "register"}):
+            status, _, answer = browser.call("POST", "/api/auth/login", data=json.dumps(bad).encode("utf-8"),
+                                             headers={"X-KIN-CSRF": "1", "Content-Type": "application/json"})
+            self.assertEqual((status, json.loads(answer).get("code")), (400, "AUTH_LOGIN_INTENT_INVALID"), bad)
+        self.assertEqual(psql(count), ["1"])
+        self.assertEqual(204, self.logout(browser))
         self.check_rows("AL-04", self.rows_of("ma"))
 
     def test_05_idle_row(self):
@@ -520,7 +587,44 @@ class AuthAuditLive(unittest.TestCase):
         self.assertEqual(["0"], after)
         print("S7-U5-AUTH-LIVE " + json.dumps({"case": "AL-09", "rows": 0, "hits": [], "ip_ok": True}))
 
-    def test_10_cleanup_leaves_no_owned_row_or_session(self):
+    def test_10_a_session_ended_on_the_dicom_path_records_the_proxys_address(self):
+        """A007: a session that ends on a DICOM request (the proxy's authorization subrequest) is recorded with the
+        address the proxy observed - not with none, and not with a header the client sent."""
+        sub = self.members["mb"]["id"]
+        browser = self.login("mb", Browser(self.stack, real_ip="203.0.113.9", forwarded="203.0.113.10"))
+        before = len(self.rows_of("mb"))
+        psql(f'UPDATE "AuthSession" SET "lastSeenAt" = now() - interval \'12 hours 1 minute\' WHERE sub=\'{sub}\';')
+        status, headers, _ = browser.call("GET", "/dicom-web/studies?limit=1", headers={"X-KIN-Session": browser.session})
+        self.assertEqual((status, headers.get("X-KIN-Auth-Code")), (401, "AUTH_SESSION_ENDED"))
+        rows = self.rows_of("mb")
+        self.assertEqual(before + 1, len(rows))
+        self.assertEqual(self.ends("mb")[-1], ("auth.session.expired", "idle", self.groups["B"][0], self.expected_ip),
+                         "the proxy-observed address on the DICOM authorization path")
+        ip_ok = json.loads(rows[-1]["detail"])["ip"] not in (None, "203.0.113.9", "203.0.113.10", *self.proxy_addresses())
+        self.check_rows("AL-10", rows[-1:], ip_ok)
+        self.assertTrue(ip_ok)
+
+    def test_11_api_answers_are_not_stored_and_the_account_console_is_closed(self):
+        """A016: every /api/ answer is `no-store` - success, refusal, unknown route alike. A018: the Keycloak account
+        console is not reachable through the proxy; the login surfaces stay reachable."""
+        browser = self.login("ma")
+        anonymous = Browser(self.stack)
+        answers = [("health", anonymous.call("GET", "/api/health")), ("me without a session", anonymous.call("GET", "/api/me")),
+                   ("an unknown route", anonymous.call("GET", "/api/no-such-route-" + uuid.uuid4().hex)),
+                   ("me", browser.call("GET", "/api/me")),
+                   ("a refused write", browser.call("POST", "/api/auth/logout", data=b""))]
+        self.assertEqual([(label, status) for label, (status, _, _) in answers],
+                         [("health", 200), ("me without a session", 401), ("an unknown route", 404), ("me", 200), ("a refused write", 403)])
+        for label, (_, headers, _) in answers:
+            self.assertEqual(headers.get("Cache-Control"), "no-store", label)
+        for path in ("/auth/realms/kin/account", "/auth/realms/kin/account/", "/auth/realms/kin/account/account-security/signing-in"):
+            self.assertEqual(404, browser.call("GET", path)[0], path)
+        # The opposite side: discovery and the login form are still served (every login of this suite passes them).
+        self.assertEqual(200, anonymous.call("GET", "/auth/realms/kin/.well-known/openid-configuration")[0])
+        self.assertEqual(204, self.logout(browser))
+        print("S7-U5-AUTH-LIVE " + json.dumps({"case": "AL-11", "rows": 0, "hits": [], "ip_ok": True}))
+
+    def test_12_cleanup_leaves_no_owned_row_or_session(self):
         type(self).purge_owned_rows()
         ids = self.owned_ids()
         listed = ",".join(f"'{i}'" for i in ids)
@@ -529,7 +633,7 @@ class AuthAuditLive(unittest.TestCase):
         self.assertEqual(["0"], psql(f'SELECT count(*) FROM "AuthSession" WHERE sub IN ({listed});'))
         if getattr(type(self), "failure_ids", None):
             self.assertEqual(["0"], psql('SELECT count(*) FROM "AuditLog" WHERE id IN (' + ",".join(map(str, self.failure_ids)) + ");"))
-        print("S7-U5-AUTH-LIVE " + json.dumps({"case": "AL-10", "rows": 0, "hits": [], "ip_ok": True}))
+        print("S7-U5-AUTH-LIVE " + json.dumps({"case": "AL-12", "rows": 0, "hits": [], "ip_ok": True}))
 
 
 if __name__ == "__main__":
