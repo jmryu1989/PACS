@@ -127,20 +127,63 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
             if time.monotonic()>deadline:raise AssertionError('the logout POST was not sent')
             page.wait_for_timeout(50)
 
+    def menu(self,page):
+        """The Account Layout panel open, whatever its Load button is called (Retry after a failed read)."""
+        self.open_toolbar_group(page,'#workspace-server-menu')
+        menu=page.locator('#workspace-server-menu')
+        if menu.get_attribute('open') is None:menu.locator('summary').click()
+
+    def blocked(self,page,writes):
+        """After a failed read of the account copy: Save and Reset are off, Load is Retry, and no write left (decision:
+        roaming-403 consult 2026-10-05 - the revision a write would replace is not known)."""
+        self.menu(page)
+        expect(page.get_by_role('button',name='Save to Account',exact=True)).to_be_disabled()
+        expect(page.get_by_role('button',name='Reset Account Layout',exact=True)).to_be_disabled()
+        expect(page.get_by_role('button',name='Retry',exact=True)).to_be_enabled()
+        self.assertEqual(writes,[],'no PUT or DELETE while the account copy is not known')
+
     def test_roam_04_failure_storage_denial_and_csrf(self):
         page=self.sign_in(self.device());self.open_toolbar_group(page,'#layout-toggle');page.locator('#layout-toggle').click();self.action(page,'Save to Account','저장했습니다');remote=self.remote(page)
+        # The server's CSRF rule: a write without the header is refused (and says so in its code); a read is not checked.
         denied=document_request(page, "PUT", self.stack.proxy+'/api/workspace-layout',data=dict(expectedOwner=remote['owner'],revision=remote['revision'],layout=remote['layout']))
         self.assertEqual(denied.status,403);self.assertEqual(denied.json()['code'],'AUTH_CSRF_REQUIRED');self.assertEqual(denied.headers.get('x-kin-auth-code'),'AUTH_CSRF_REQUIRED');self.assertEqual(self.remote(page),remote)
-        self.open_toolbar_group(page,'#layout-reset')
-        page.locator('#layout-reset').click();before=self.stored(page);pattern='**/api/workspace-layout'
-        bad=dict(remote,layout=dict(remote['layout'],mode='wrong'))
-        page.route(pattern,lambda r:r.fulfill(status=200,json=bad));self.action(page,'Load from Account','형식을 확인할 수 없습니다');self.assertEqual(self.stored(page),before);page.unroute(pattern)
-        page.route(pattern,lambda r:r.fulfill(status=500,json=dict(message='Synthetic failure')));self.action(page,'Save to Account','완료됐을 수 있으니');self.assertEqual(self.stored(page),before);page.unroute(pattern)
+        # Local storage refused: a Load applies to this window only and says so.
         page.context.add_init_script("""(() => {const original=Storage.prototype.setItem;Storage.prototype.setItem=function(key,...rest){if(String(key).startsWith('kin-workspace:'))throw new DOMException('Synthetic denied','QuotaExceededError');return original.call(this,key,...rest);};})();""")
+        self.open_toolbar_group(page,'#layout-reset');page.locator('#layout-reset').click()
         page.reload();expect(page.locator('#dbstat')).to_contain_text('DB Connected');self.action(page,'Load from Account','이 창에만 적용됨');self.mode_is(page,'portrait');self.assertIsNone(self.stored(page))
         self.assertEqual(self.remote(page),remote)
-        page.route(pattern,lambda r:r.fulfill(status=403,json=dict(message='Synthetic denied')));self.open_menu(page);page.get_by_role('button',name='Load from Account',exact=True).click()
-        expect(page.locator('#workspace-server-status')).to_contain_text('접근 권한이 없습니다');expect(page.get_by_role('button',name='Save to Account',exact=True)).to_be_disabled();self.mode_is(page,'portrait')
+        # A refused read of the account copy: the window keeps its layout, writes nothing, says nothing about a write.
+        pattern='**/api/workspace-layout';writes=[]
+        def refused(route):
+            if route.request.method!='GET':writes.append(route.request.method);return route.continue_()
+            route.fulfill(status=403,json=dict(message='Synthetic denied'))
+        page.route(pattern,refused);self.open_menu(page);page.get_by_role('button',name='Load from Account',exact=True).click()
+        expect(page.locator('#workspace-server-status')).to_contain_text('접근이 거절되어');expect(page.locator('#workspace-server-status')).not_to_contain_text('쓰기')
+        self.blocked(page,writes);self.mode_is(page,'portrait')
+        # Retry reads again without changing the screen; a confirmed copy gives the writes back.
+        page.unroute(pattern);page.get_by_role('button',name='Retry',exact=True).click()
+        expect(page.get_by_role('button',name='Save to Account',exact=True)).to_be_enabled();self.mode_is(page,'portrait')
+        self.assertEqual(self.remote(page),remote)
+
+    def test_roam_04b_write_failure_starts_from_a_normal_read(self):
+        page=self.sign_in(self.device());self.open_toolbar_group(page,'#layout-toggle');page.locator('#layout-toggle').click();self.action(page,'Save to Account','저장했습니다');remote=self.remote(page)
+        self.open_toolbar_group(page,'#layout-reset');page.locator('#layout-reset').click();before=self.stored(page);pattern='**/api/workspace-layout'
+        # A normal read first: the account copy is known, so Save may replace it. The server then fails that Save with a
+        # 5xx: whether the write happened is not known - said so; the local layout and the account copy are unchanged.
+        self.action(page,'Load from Account','불러왔습니다');self.open_toolbar_group(page,'#layout-reset');page.locator('#layout-reset').click();before=self.stored(page)
+        page.route(pattern,lambda r:r.fulfill(status=500,json=dict(message='Synthetic failure')) if r.request.method=='PUT' else r.continue_())
+        self.action(page,'Save to Account','결과를 확인하지 못했으며');self.assertEqual(self.stored(page),before);page.unroute(pattern)
+        self.assertEqual(self.remote(page),remote)
+        # An answer that is not an account copy is a failed read: the writes go off until a later read confirms the copy.
+        bad=dict(remote,layout=dict(remote['layout'],mode='wrong'));writes=[]
+        def malformed(route):
+            if route.request.method!='GET':writes.append(route.request.method);return route.continue_()
+            route.fulfill(status=200,json=bad)
+        page.route(pattern,malformed);self.open_menu(page);page.get_by_role('button',name='Load from Account',exact=True).click()
+        expect(page.locator('#workspace-server-status')).to_contain_text('확인하지 못해');self.assertEqual(self.stored(page),before)
+        self.blocked(page,writes);page.unroute(pattern)
+        page.get_by_role('button',name='Retry',exact=True).click()
+        expect(page.get_by_role('button',name='Save to Account',exact=True)).to_be_enabled();self.assertEqual(self.stored(page),before)
 
     def test_roam_05_account_changes_while_old_read_is_pending(self):
         context=self.device();page=self.sign_in(context);self.open_toolbar_group(page,'#layout-toggle');page.locator('#layout-toggle').click()

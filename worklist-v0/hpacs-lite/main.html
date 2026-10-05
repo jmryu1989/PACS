@@ -11104,6 +11104,9 @@
     const clampPanel = (value, min, max) => Math.max(min, Math.min(max, value));
     let layoutMode = "auto";
     let workspaceState = KinWorkspaceLayout.defaults(), workspaceOwner = null, workspaceStorage = null, workspaceGeneration = 0;
+    // 이 브라우저에 배치를 남겼는가(마지막 쓰기·읽기의 결과). 계정 배치를 확인하지 못했을 때 "이 브라우저에서 계속 쓴다"고
+    // 말해도 되는지를 이것이 정한다 — 남기지 못했으면 새로고침하면 사라진다고 말한다(workspace-roaming.js).
+    let workspaceLocalKept = true;
     const portraitLayout = () => document.body.classList.contains("portrait");
     const workspaceAxis = () => portraitLayout() ? "portrait" : "landscape";
     function saveWorkspace() {
@@ -11111,6 +11114,7 @@
       workspaceState.mode = layoutMode;
       workspaceState = KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels());
       const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, workspaceState);
+      workspaceLocalKept = !!saved;
       $("#layout-status").textContent = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
     }
     function rememberPanelSize(selector) {
@@ -11126,6 +11130,7 @@
       try { workspaceStorage = localStorage; } catch (_) { workspaceStorage = null; }
       const result = KinWorkspaceLayout.read(workspaceStorage, workspaceOwner);
       workspaceState = result.state;
+      workspaceLocalKept = !["disabled", "unavailable"].includes(result.status);
       layoutMode = workspaceState.mode;
       readingWorkspace.applyPanels(workspaceState.reading || KinReadingPanelLayout.defaults());
       $("#layout-status").textContent = ({ restored: "배치 복원됨 · 이 브라우저", empty: "배치 · 이 브라우저",
@@ -11177,6 +11182,7 @@
     $("#layout-reset").addEventListener("click", () => {
       workspaceGeneration++;
       const removed = KinWorkspaceLayout.remove(workspaceStorage, workspaceOwner);
+      workspaceLocalKept = !!removed;
       workspaceState = KinWorkspaceLayout.defaults(); layoutMode = "auto";
       readingWorkspace.applyPanels(KinReadingPanelLayout.defaults());
       applyLayout();
@@ -12234,12 +12240,14 @@
         read: () => KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels()),
         generation: () => workspaceGeneration,
         model: KinWorkspaceLayout, endpoint: API + '/workspace-layout', sessionEndpoint: API + '/me',
+        localKept: () => workspaceLocalKept,
         apply: state => {
           state = KinWorkspaceLayout.mergeLoaded(workspaceState, state);
           if (!state) return false;
           workspaceGeneration++; workspaceState = state; layoutMode = state.mode; applyLayout();
           if (state.reading) readingWorkspace.applyPanels(state.reading);
           const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, state);
+          workspaceLocalKept = !!saved;
           $("#layout-status").textContent = saved ? "배치 복원됨 · 이 브라우저" : "배치 · 이 창에서만 유지";
           return saved;
         },
