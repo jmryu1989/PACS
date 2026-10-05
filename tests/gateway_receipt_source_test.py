@@ -550,9 +550,10 @@ class MigrationPins(unittest.TestCase):
         # 34 -> 35, tables unchanged: S7-U5 added 20261004120000_draft_revision_session_entry (ReportDraft revision/present, StudyState
         # draftEpoch, AuthSession entry proof columns).
         # 35 -> 36, one table: S7-U5 session end added 20261005120000_idp_session_end (IdpSessionEnd, AuthSession.idpSid).
+        # 36 -> 37, one table: S7-U5 member isolation added 20261005130000_member_isolation (MemberIsolation).
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 36)
-        self.assertEqual(len(restore_fixture.TABLES), 47)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 37)
+        self.assertEqual(len(restore_fixture.TABLES), 48)
         self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 
 

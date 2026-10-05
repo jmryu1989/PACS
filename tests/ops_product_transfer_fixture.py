@@ -71,8 +71,9 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260928130000_reader_assignment_scope/migration.sql',
               'api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql',
               'api/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql',
-              'api/prisma/migrations/20261005120000_idp_session_end/migration.sql']
-TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'Institution', 'StudyState', 'Report', 'ReportVersion',
+              'api/prisma/migrations/20261005120000_idp_session_end/migration.sql',
+              'api/prisma/migrations/20261005130000_member_isolation/migration.sql']
+TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
@@ -387,6 +388,13 @@ def expected_rows(uid):
              nextAttemptAt='2026-10-06T00:00:00.123'),
         dict(idpSid='SYNTHETIC-idp-session-confirmed',cause='reauthentication',decidedAt=STAMP,confirmedAt=STAMP,attempts=1,
              nextAttemptAt=STAMP)]
+    # S7-U5 member isolation: our own record that a member is isolated is state a restore must keep - while it exists the
+    # member gets no session, and an unfinished one is provider work still owed. One of each, every column with a value
+    # (providerDoneAt NULL on the owed one).
+    rows['MemberIsolation'] = [
+        dict(sub='SYNTHETIC-member-isolation-owed',decidedAt=STAMP,providerDoneAt=None,attempts=2,
+             nextAttemptAt='2026-10-06T00:00:00.456'),
+        dict(sub='SYNTHETIC-member-isolation-done',decidedAt=STAMP,providerDoneAt=STAMP,attempts=0,nextAttemptAt=STAMP)]
     rows['TransferBasis'] = [dict(id=basis_id,studyUid=uid,institutionId='SYNTHETIC-hospital',kind='PATIENT_CONSENT',
         reference='SYNTHETIC consent reference',obtainedAt=STAMP,expiresAt=None,recordedBy='SYNTHETIC-admin',recordedAt=STAMP,
         revokedBy=None,revokedAt=None,revokeReason=None)]
@@ -434,7 +442,7 @@ def create_product(name, db, uid):
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                   'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
-                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd',
+                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd', 'MemberIsolation',
                   'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:

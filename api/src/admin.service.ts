@@ -95,16 +95,27 @@ export class AdminService {
    * (원인 isolation)을 남기는 auth의 종료 절차다. 행만 지우면 격리 전에 code를 교환해 둔 콜백이 같은 SSO로 세션을 다시
    * 만들고, 끝난 세션의 기록도 남지 않는다. 사용자 전체 로그아웃(logoutUser)은 그대로 둔다 — 정지된 회원의 다른 PC의
    * 세션도 끝나야 한다. 그 사이 만들어진 세션까지 한 번 더 같은 절차로 끝낸 뒤 0건을 확인한다.
+   *
+   * 격리는 우리 쪽 사실을 **먼저** 남긴다(auth.isolateMember): 그 뒤의 인증 서버 일(나열·표식·비활성화·전체 로그아웃)이
+   * 어디서 끊겨도 로그인 콜백과 갱신은 그 사실을 보고 막고, 남은 인증 서버 일은 종료 재시도 주기가 잇는다. 사실은 재활성화가
+   * 끝까지 성공한 뒤에만 지운다(reactivated).
    */
   private async isolate(id: string): Promise<void> {
-    await this.keycloak.setEnabled(id, false);
-    // 비활성으로 바꾼 뒤 그 회원의 provider 세션을 읽어 전부 표식으로 남긴다: 제품 행이 아직 없는 SSO(격리 전에 code를
-    // 교환해 둔 로그인)도 다시는 제품 세션을 만들지 못한다 — 나중에 다시 활성화되어도(승인 변경·취소) 그렇다.
-    await this.auth.endMemberSessions(id, await this.keycloak.userSessions(id));
-    await this.keycloak.logoutUser(id);
-    await this.auth.endMemberSessions(id);
+    await this.auth.isolateMember(id);
     const remaining = await this.prisma.authSession.count({ where: { sub: id } });
     if (remaining !== 0) throw new Error('AuthSession 격리 확인 실패');
+  }
+
+  /**
+   * 다시 활성화. 남은 격리의 인증 서버 일이 있으면 먼저 끝낸다 — 그 일이 끝나지 않은 채 사실을 지우면, 나열·표식하지 못한
+   * provider 세션에서 격리 전에 교환한 code가 통한다. 활성화가 성공한 **뒤에** 사실을 지운다; 그 전 어디서 실패해도 사실은
+   * 남아 로그인을 계속 막는다(부른 쪽이 격리 충돌로 답한다).
+   */
+  private async reactivate(id: string): Promise<void> {
+    const isolation = await this.auth.isolation(id);
+    if (isolation && !isolation.providerDone) await this.auth.finishIsolation(id);
+    await this.keycloak.setEnabled(id, true);
+    await this.auth.clearIsolation(id);
   }
 
   private async isolatedConflict(id: string): Promise<never> {
@@ -143,7 +154,8 @@ export class AdminService {
       const changed = await this.managed(id);
       if (memberState(changed.groups, changed.roles) !== 'APPROVED')
         throw new Error('승인 상태 재검증 실패');
-      if (targetEnabled) await this.keycloak.setEnabled(id, true);
+      // 비활성으로 남기는 승인은 격리 사실도 남긴다 — 나중의 Activate가 지운다.
+      if (targetEnabled) await this.reactivate(id);
       return this.row(await this.managed(id));
     } catch {
       return this.isolatedConflict(id);
@@ -159,7 +171,7 @@ export class AdminService {
       if (memberState(changed.groups, changed.roles) !== 'PENDING')
         throw new Error('대기 상태 재검증 실패');
       // BFF는 PENDING 세션을 허용해 승인 대기 안내를 보여 준다.
-      await this.keycloak.setEnabled(id, true);
+      await this.reactivate(id);
       return this.row(await this.managed(id));
     } catch {
       return this.isolatedConflict(id);
@@ -289,7 +301,7 @@ export class AdminService {
         if (before.approvalState === 'INVALID')
           throw new BadRequestException('INVALID 사용자는 자격을 바로잡기 전 활성화할 수 없습니다');
         try {
-          await this.keycloak.setEnabled(id, true);
+          await this.reactivate(id);
           after = this.row(await this.managed(id));
         } catch {
           await this.isolatedConflict(id);

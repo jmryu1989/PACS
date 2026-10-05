@@ -42,8 +42,8 @@ const IDP_END_BACKOFF_MS = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_
 const IDP_END_KEEP_MS = 13 * 60 * 60 * 1000;
 // provider 세션 잠금(pg_advisory_xact_lock)의 고정 이름공간. 다른 용도의 advisory lock과 키가 겹치지 않게 한다.
 const IDP_LOCK_SPACE = 0x4b494e55;
-// 콜백·갱신이 회원 상태(Keycloak의 enabled — 격리가 쓰는 값)를 읽는 한도. 읽지 못하면 막지 않으므로 짧게 둔다.
-const MEMBER_READ_MS = 2000;
+// 회원 잠금의 이름공간. 격리 사실을 쓰는 트랜잭션과 콜백의 세션 생성(그 사실을 읽는다)이 같은 회원에 대해 줄을 선다.
+const MEMBER_LOCK_SPACE = 0x4b494e4d;
 // 인증 서버 자체가 답하지 못했다는 OAuth 오류(그 밖의 probe 오류는 SSO를 알아내지 못한 것일 뿐이다).
 const PROVIDER_DOWN = ['temporarily_unavailable', 'server_error'];
 // Keycloak 토큰 교환(로그인 code, refresh) 한 번이 쓸 수 있는 시간(U5S-REQ-18의 외부 조회 한도).
@@ -103,11 +103,12 @@ type Session = {
 type Who = { actor: string; target: string; institution: string | null };
 export type LoginFailureCause =
   'provider_error' | 'state_mismatch' | 'no_code' | 'exchange_failed' | 'token_invalid' | 'session_failed' | 'idp_session_ended'
-  // 비활성(관리자가 격리했거나 끈) 회원의 로그인: 세션을 만들지 않는다.
+  // 격리된 회원(우리 쪽 격리 사실이 있는 회원)의 로그인: 세션을 만들지 않는다.
   | 'member_isolated';
 type StorageStep = 'session_read' | 'session_write' | 'end_transaction' | 'login_transaction' | 'login_failure_row'
   | 'entry_transaction' | 'sweep_read' | 'sweep_target' | 'sweep_cycle'
-  | 'idp_end_read' | 'idp_end_write' | 'idp_end_cycle';
+  | 'idp_end_read' | 'idp_end_write' | 'idp_end_cycle'
+  | 'isolation_read' | 'isolation_write' | 'isolation_cycle';
 type EndResult = { ended: boolean; idpSid: string | null };
 /**
  * 콜백의 답. `entered`만 제품 세션을 만든다. `redirect`는 인증 서버로 다시 보내는 이동(복구의 다음 단계, 한 번의 자동
@@ -428,8 +429,21 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 우연히 겹친 두 세션은 잠깐 줄을 설 뿐 서로의 판정에 섞이지 않는다(판정은 잠금 뒤에 읽은 행이 한다).
    */
   private async lockIdpSession(tx: any, idpSid: string): Promise<void> {
-    const key = createHash('sha256').update(`${process.env.KC_ISSUER}\n${idpSid}`).digest().readInt32BE(0);
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${IDP_LOCK_SPACE}::int4, ${key}::int4)`;
+    await this.advisoryLock(tx, IDP_LOCK_SPACE, idpSid);
+  }
+
+  /**
+   * 회원 하나에 대한 줄 세우기(같은 트랜잭션 advisory lock, 다른 이름공간). 격리 사실의 쓰기와 콜백의 "사실을 보고 → 세션을
+   * 만든다"가 겹치지 않는다: 콜백이 먼저면 그 세션 행은 격리가 사실 뒤에 끝내는 행에 들고, 사실이 먼저면 콜백이 그것을 본다.
+   * 잡는 순서는 늘 provider 세션 잠금 → 회원 잠금이다(사실을 쓰는 쪽은 회원 잠금 하나만 잡는다) — 교착이 없다.
+   */
+  private async lockMember(tx: any, sub: string): Promise<void> {
+    await this.advisoryLock(tx, MEMBER_LOCK_SPACE, sub);
+  }
+
+  private async advisoryLock(tx: any, space: number, name: string): Promise<void> {
+    const key = createHash('sha256').update(`${process.env.KC_ISSUER}\n${name}`).digest().readInt32BE(0);
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${space}::int4, ${key}::int4)`;
   }
 
   /**
@@ -505,6 +519,65 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const result = await this.endSession(session, cause, ip, { idleCutoff });
     if (result.ended && result.idpSid) this.tellIdp(result.idpSid);
     return result.ended;
+  }
+
+  /**
+   * 관리자의 회원 격리(정지·승인 변경·승인 취소). 순서가 계약이다:
+   *   1. 우리 쪽 사실을 먼저 남긴다(MemberIsolation, 회원 잠금 안에서 한 commit). 이때부터 콜백과 갱신은 이 회원에게 세션을
+   *      만들거나 잇지 않는다 — 인증 서버의 관리 API가 그 뒤에 답하지 않아도 그렇다(로그인 길에서 관리 API를 읽지 않는다).
+   *   2. 그 회원의 지금 제품 세션을 끝낸다(우리 DB만의 일; 표식·접속기록·provider 종료 요청은 끝내기의 한 길 그대로).
+   *   3. 인증 서버 일(finishIsolation). 어디서 끊기면 던지고, 사실은 "인증 서버 일이 남음"으로 남아 종료 재시도 주기가 잇는다.
+   * 이미 사실이 있으면(앞선 격리가 끝나지 않았거나 정지된 회원을 다시 격리) 남은 인증 서버 일을 다시 하도록 되돌린다.
+   */
+  async isolateMember(sub: string): Promise<void> {
+    const now = new Date();
+    try {
+      await this.prisma.$transaction(async tx => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+        await this.lockMember(tx, sub);
+        await tx.memberIsolation.upsert({
+          where: { sub },
+          create: { sub, decidedAt: now, nextAttemptAt: new Date(now.getTime() + IDP_END_BACKOFF_MS[0]) },
+          update: { providerDoneAt: null, nextAttemptAt: new Date(now.getTime() + IDP_END_BACKOFF_MS[0]) },
+        });
+      }, { maxWait: 4000, timeout: 8000 });
+    } catch (error: any) {
+      if (lockWaitExceeded(error)) throw this.conflict();
+      this.storageWarning('isolation_write');
+      throw this.storageFailure();
+    }
+    await this.endMemberSessions(sub);
+    await this.finishIsolation(sub);
+  }
+
+  /**
+   * 격리의 인증 서버 일: 그 회원의 provider 세션을 나열해 전부 표식 → 비활성화 → 다시 나열해 그사이 생긴 것도 표식 →
+   * 사용자 전체 로그아웃 → 남은 제품 행을 끝냄. 나열·표식은 비활성화 **앞에도** 한다: 비활성화가 성공하고 나열이 실패해도
+   * 이미 본 provider 세션은 표식으로 막혀 있다. 모두 몇 번을 다시 해도 같은 결과가 되는 일이라 재시도 주기가 처음부터 다시
+   * 한다. 끝까지 가면 사실에 완료 시각을 적는다(사실 자체는 남는다 — 지우는 것은 끝까지 성공한 재활성화뿐이다).
+   */
+  async finishIsolation(sub: string): Promise<void> {
+    await this.endMemberSessions(sub, await this.keycloak.userSessions(sub));
+    await this.keycloak.setEnabled(sub, false);
+    await this.endMemberSessions(sub, await this.keycloak.userSessions(sub));
+    await this.keycloak.logoutUser(sub);
+    await this.endMemberSessions(sub);
+    await this.storage('isolation_write', () => this.prisma.memberIsolation.updateMany({
+      where: { sub, providerDoneAt: null }, data: { providerDoneAt: new Date() } }));
+  }
+
+  /** 격리 사실이 있는가(콜백 밖의 읽기: 재활성화가 남은 인증 서버 일을 먼저 끝내야 하는지 본다). */
+  async isolation(sub: string): Promise<{ providerDone: boolean } | null> {
+    const row = await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
+    return row ? { providerDone: row.providerDoneAt !== null } : null;
+  }
+
+  /**
+   * 재활성화의 마지막 걸음: 회원을 다시 활성으로 만든 일이 끝까지 성공한 **뒤에** 부른다. 그 전에 실패하면 사실은 남고
+   * 콜백은 계속 막는다. 격리가 표식으로 남긴 provider 세션은 이것으로 다시 열리지 않는다(표식은 따로 남는다).
+   */
+  async clearIsolation(sub: string): Promise<void> {
+    await this.storage('isolation_write', () => this.prisma.memberIsolation.deleteMany({ where: { sub } }));
   }
 
   /**
@@ -616,6 +689,27 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       }
     } catch {
       this.storageWarning('idp_end_cycle');
+    }
+    // 끝나지 않은 격리의 인증 서버 일도 같은 대기열 규칙으로 잇는다(우리 쪽 사실이 곧 대기열이다): 프로세스 시작 때는 전부,
+    // 주기마다는 기한이 된 것만. 시도 횟수를 조건으로 한 갱신이 여러 인스턴스 중 하나만 통과시킨다. 실패는 다음 기한을 늦출 뿐이다.
+    try {
+      const owed = await this.prisma.memberIsolation.findMany({
+        where: all ? { providerDoneAt: null } : { providerDoneAt: null, nextAttemptAt: { lte: new Date() } },
+        orderBy: { nextAttemptAt: 'asc' },
+        take: 20,
+      });
+      for (const row of owed) {
+        const wait = IDP_END_BACKOFF_MS[Math.min(row.attempts + 1, IDP_END_BACKOFF_MS.length - 1)];
+        const { count } = await this.prisma.memberIsolation.updateMany({
+          where: { sub: row.sub, providerDoneAt: null, attempts: row.attempts },
+          data: { attempts: row.attempts + 1, nextAttemptAt: new Date(Date.now() + wait) },
+        });
+        if (count !== 1) continue;
+        try { await this.finishIsolation(row.sub); }
+        catch { /* 사실은 남고 다음 기한에 다시 한다. */ }
+      }
+    } catch {
+      this.storageWarning('isolation_cycle');
     } finally {
       this.resuming = false;
     }
@@ -922,26 +1016,15 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       && !(typeof payload.azp === 'string' && payload.azp.startsWith('gw-')) ? 'clinician.html' : 'main.html';
     const sid = randomBytes(32).toString('base64url');
     const proof = randomBytes(32).toString('base64url');
-    /**
-     * 회원 상태(격리가 쓰는 Keycloak enabled). 격리 자체는 이 읽기에 기대지 않는다 — 격리는 그 회원의 provider 세션을 모두
-     * 표식으로 남기므로(endMemberSessions) 격리 전에 교환한 code도 아래의 표식 검사가 막는다. 이 읽기는 그 밖의 비활성
-     * (Keycloak에서 직접 끈 계정)을 위한 것이라 잠금 밖에서 한다. 읽은 값이 비활성이면 거절하고(member_isolated), 읽지
-     * 못하면(관리 API만 장애) 들어간다 — 인증 서버가 방금 code를 냈고, 격리도 같은 관리 API 없이는 돌지 않으며 그 표식은
-     * 어차피 본다. 평소 로그인을 관리 API 장애로 막지 않는다(소유자 규칙: 거짓 발동 금지). 성공 행에 그 사실을 남긴다.
-     */
-    const member = await this.keycloak.memberState(String(payload.sub), MEMBER_READ_MS);
-    if (member === 'disabled') {
-      await this.loginFailureRow(req, 'member_isolated', who);
-      return { kind: 'landing', error: 'login_failed' };
-    }
-    const detail = JSON.stringify({ institution: who.institution, ip, dataSubject: null, outcome: 'success',
-      ...(member === 'unknown' ? { memberState: 'member_state_unverified' } : {}) });
-    let outcome: 'created' | 'blocked' | 'expired';
+    const detail = JSON.stringify({ institution: who.institution, ip, dataSubject: null, outcome: 'success' });
+    let outcome: 'created' | 'blocked' | 'expired' | 'isolated';
     try {
       /**
        * 표식 검사와 세션 생성은 그 provider 세션의 잠금 안에서 한 번에 한다: 교환과 잠금 사이에 완료된 Log out은 표식으로
        * 남아 여기서 막히고, 이 생성이 먼저면 뒤의 Log out이 이 행까지 지운다. 먼저 검증한 토큰을 무기한 믿지 않는다 —
        * 잠금을 얻은 뒤 토큰의 exp와 흐름의 기한을 다시 본다(확인된 표식의 보존 기한이 이 재검사에 기대어 선다).
+       * 회원의 격리는 우리 쪽 사실(MemberIsolation)로 본다 — 인증 서버의 관리 API를 이 길에서 읽지 않는다(그 API가 멈춰도
+       * 평소 로그인은 막히지 않고, 격리는 그 API의 답에 기대지 않는다). 사실의 쓰기와 같은 회원 잠금 안에서 읽는다.
        * 세션 생성과 성공 행은 함께 commit되거나 함께 롤백된다.
        */
       outcome = await this.prisma.$transaction(async tx => {
@@ -955,6 +1038,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
           await tx.idpSessionEnd.update({ where: { idpSid: idpSid! }, data: { confirmedAt: null, nextAttemptAt: now } });
           return 'blocked';
         }
+        await this.lockMember(tx, String(payload.sub));
+        if (await tx.memberIsolation.findUnique({ where: { sub: String(payload.sub) } })) return 'isolated';
         await tx.authSession.create({ data: {
           sid,
           sub: String(payload.sub),
@@ -975,6 +1060,10 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       return { kind: 'landing', error: 'login_failed' };
     }
 
+    if (outcome === 'isolated') {
+      await this.loginFailureRow(req, 'member_isolated', who);
+      return { kind: 'landing', error: 'login_failed' };
+    }
     const again = { phase: flow.phase, reason: flow.reason, prompt: flow.prompt, restarts: flow.restarts + 1 };
     if (outcome === 'expired')
       return flow.restarts > 0 ? { kind: 'landing', error: 'stale' }
@@ -1090,10 +1179,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const idpSid = this.idpSidOfClaims(answer.payload), known = this.idpSidOf(session);
     if (String(answer.payload.sub) !== session.sub || !idpSid || (known !== null && idpSid !== known))
       return { kind: 'unavailable' };
-    // 비활성 회원의 세션은 갱신하지 않고 그 자리에서 끝낸다(원인 isolation) — 인증 서버의 갱신 답을 믿지 않는다. 회원
-    // 상태를 읽지 못한 것(관리 API만 장애)은 종료의 증거도 거절의 근거도 아니다: 갱신을 그대로 잇는다(콜백과 같은 규칙).
-    const member = await this.keycloak.memberState(session.sub, MEMBER_READ_MS);
-    if (member === 'disabled')
+    // 격리된 회원의 세션은 갱신하지 않고 그 자리에서 끝낸다(원인 isolation) — 인증 서버의 갱신 답을 믿지 않는다. 격리는
+    // 우리 쪽 사실로 본다(콜백과 같은 규칙): 인증 서버의 관리 API는 이 길에서 읽지 않는다.
+    const isolated = await this.storage('isolation_read', () =>
+      this.prisma.memberIsolation.findUnique({ where: { sub: session.sub }, select: { sub: true } }));
+    if (isolated)
       return await this.endAndTell(session, 'isolation', ip) ? { kind: 'ended' } : { kind: 'conflict' };
     const data = {
       accessToken: answer.tokens.access_token as string,

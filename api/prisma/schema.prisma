@@ -53,6 +53,21 @@ model IdpSessionEnd {
   @@index([confirmedAt, nextAttemptAt])
 }
 
+/// S7-U5 "이 회원은 격리됐다"는 우리 쪽 사실(관리자의 정지·승인 변경·승인 취소). 격리는 인증 서버에 무엇을 하기 **전에**
+/// 이 행부터 남긴다 — 그 뒤의 인증 서버 일(세션 나열·표식·비활성화·전체 로그아웃)이 어디서 끊겨도 로그인 콜백과 갱신은
+/// 이 행을 보고 막는다(인증 서버의 관리 API를 로그인 길에서 읽지 않는다). `providerDoneAt`이 비어 있으면 그 인증 서버
+/// 일이 아직 끝나지 않았고, 종료 재시도 주기가 `nextAttemptAt`부터 이어서 한다. 행은 다시 활성화하는 일이 끝까지 성공한
+/// 뒤에만 지운다 — 시간이나 다른 경로로 지우지 않는다.
+model MemberIsolation {
+  sub            String    @id
+  decidedAt      DateTime
+  providerDoneAt DateTime?
+  attempts       Int       @default(0)
+  nextAttemptAt  DateTime
+
+  @@index([providerDoneAt, nextAttemptAt])
+}
+
 /// 기관. 병원 하나, 판독센터 하나가 각각 한 행이다.
 ///
 /// 왜 필요한가: Connect(5단계)는 "병원 A의 검사를 병원 B가 본다"이므로,

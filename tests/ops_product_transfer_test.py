@@ -248,8 +248,10 @@ class Pure(unittest.TestCase):
         # S7-U5 added the draft boundary and entry proof columns (no table): 35 files, still 46 tables.
         # S7-U5 session end added IdpSessionEnd and AuthSession.idpSid: 36 files, 47 tables, and two end marks (one the
         # provider has not confirmed yet, one confirmed).
-        self.assertEqual(len(transfer.MIGRATIONS), 36)
-        self.assertEqual(len(transfer.TABLES), 47)
+        # S7-U5 member isolation added MemberIsolation: 37 files, 48 tables, and two isolation facts (one with provider
+        # work still owed, one done).
+        self.assertEqual(len(transfer.MIGRATIONS), 37)
+        self.assertEqual(len(transfer.TABLES), 48)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
         self.assertEqual([(r['oid'], r['accession'], r['studyUid']) for r in rows['Order']],
@@ -261,7 +263,10 @@ class Pure(unittest.TestCase):
                          [(receipt['studyUid'], receipt['epoch'], receipt['seq'])])
         self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4 + 4 + 7 + 6 + 1
                          + 1    # S7-U5: the emptied draft row (tombstone) beside the two present drafts
-                         + 2)   # S7-U5 session end: the pending and the confirmed end mark
+                         + 2    # S7-U5 session end: the pending and the confirmed end mark
+                         + 2)   # S7-U5 member isolation: the owed and the done isolation fact
+        self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),
+                         [('SYNTHETIC-member-isolation-done', False, 0), ('SYNTHETIC-member-isolation-owed', True, 2)])
         self.assertEqual(sorted((r['idpSid'], r['cause'], r['confirmedAt'] is None, r['attempts']) for r in rows['IdpSessionEnd']),
                          [('SYNTHETIC-idp-session-confirmed', 'reauthentication', False, 1),
                           ('SYNTHETIC-idp-session-pending', 'logout', True, 3)])

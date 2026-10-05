@@ -105,11 +105,13 @@ const KEYS = {};
 // `alive` (when a case sets it) the only ones it knows. `serviceTokens` counts client_credentials grants, apart from
 // `tokens` (the user-token requests a case holds and counts); `serviceMode` 'stale' answers the next DELETE 401 once.
 // `members` are the accounts the member administration reads (id -> {username, email, enabled, groups, roles}) and
-// `userLogouts` the ids it logged out as a whole (the admin isolation, SEA-F08). Every login callback and every refresh
-// reads its member's state (enabled) there too; a member a case does not describe is an ordinary enabled one.
+// `userLogouts` the ids it logged out as a whole (the admin isolation, SEA-F08). `adminCalls` lists every request to the
+// member administration ('<METHOD> <what>'); `adminDown` answers all of them 503 (the admin API out), and `adminFail`
+// fails the next n requests of one kind: 'sessions' (GET users/{id}/sessions), 'disable' / 'enable' (PUT users/{id}),
+// 'logout' (POST users/{id}/logout). No login callback or refresh reaches the member administration.
 const kc = { server: null, port: 0, held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
   certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
-  members: {}, userLogouts: [], memberRead: 'ok', memberReads: 0 };
+  members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [] };
 
 async function keycloak() {
   if (kc.server) return;
@@ -160,21 +162,23 @@ async function keycloak() {
         if (kc.onLogout) return void kc.onLogout().then(answer, answer);
         return answer();
       }
-      // The member administration the admin isolation reaches (read a member, disable it, log it out as a whole).
-      // `sessions` of an account are its live provider sessions (GET users/{id}/sessions); `kc.memberRead = 'error'` makes
-      // the member read itself fail (the admin API down for it) while everything else answers.
+      // The member administration the admin isolation reaches (read a member, disable it, list its provider sessions, log
+      // it out as a whole). `sessions` of an account are its live provider sessions (GET users/{id}/sessions).
       const member = /^\/admin\/realms\/kin\/users\/([^/]+)(\/groups|\/role-mappings\/realm|\/logout|\/sessions)?$/.exec(path);
       if (member) {
         if (req.headers.authorization !== 'Bearer ' + SECRETS.serviceToken) return send(403, { error: 'forbidden' });
-        // An account the case did not describe is an ordinary enabled member (every synthetic login reads its state).
         const id = decodeURIComponent(member[1]);
+        const sent = (() => { try { return JSON.parse(body || '{}'); } catch { return {}; } })();
+        const kind = member[2] === '/sessions' ? 'sessions' : member[2] === '/logout' ? 'logout'
+          : !member[2] && req.method === 'PUT' ? (sent.enabled === false ? 'disable' : sent.enabled === true ? 'enable' : 'update')
+            : !member[2] ? 'read' : member[2].slice(1);
+        kc.adminCalls.push(req.method + ' ' + kind);
+        if (kc.adminDown) return send(503, { error: 'unavailable' });
+        if (kc.adminFail[kind] > 0) { kc.adminFail[kind]--; return send(503, { error: 'unavailable' }); }
         const account = kc.members[id] ?? (kc.members[id] = { username: id, email: id + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'] });
-        if (!member[2] && req.method === 'GET') {
-          kc.memberReads++;
-          if (kc.memberRead === 'error') return send(503, { error: 'unavailable' });
+        if (!member[2] && req.method === 'GET')
           return send(200, { id, username: account.username, email: account.email, enabled: account.enabled, emailVerified: true });
-        }
-        if (!member[2] && req.method === 'PUT') { Object.assign(account, JSON.parse(body || '{}')); return send(204); }
+        if (!member[2] && req.method === 'PUT') { Object.assign(account, sent); return send(204); }
         if (member[2] === '/groups' && req.method === 'GET') return send(200, account.groups.map(name => ({ id: 'syn-group-' + name, name, path: '/' + name })));
         if (member[2] === '/role-mappings/realm' && req.method === 'GET') return send(200, account.roles.map(name => ({ name })));
         if (member[2] === '/sessions' && req.method === 'GET')
@@ -364,8 +368,6 @@ function secretEntries(kind, value) {
 
 const DETAIL_KEYS = {
   'auth.login:success': ['dataSubject', 'institution', 'ip', 'outcome'],
-  // A login entered while the member's state could not be read (the admin API down) says so.
-  'auth.login:success:unverified': ['dataSubject', 'institution', 'ip', 'memberState', 'outcome'],
   'auth.login:failure': ['cause', 'dataSubject', 'institution', 'ip', 'outcome'],
   'auth.logout': ['cause', 'dataSubject', 'institution', 'ip'],
   // A session ended by a re-authentication also says what asked for it (trigger: the declared reason, or register).
@@ -374,7 +376,7 @@ const DETAIL_KEYS = {
   'auth.entry': ['dataSubject', 'institution', 'ip'],
 };
 const shapeOf = row => row.action === 'auth.login'
-  ? 'auth.login:' + row.detail.outcome + (row.detail.memberState === undefined ? '' : ':unverified')
+  ? 'auth.login:' + row.detail.outcome
   : row.action === 'auth.logout' && row.detail.cause === 'reauthentication' ? 'auth.logout:reauthentication' : row.action;
 // The login starts that carry an intent (POST /api/auth/login): what the landing declares.
 const SWITCH = { intent: 'reauthenticate', reason: 'switch_account' };
@@ -407,13 +409,14 @@ async function world(t, { now = START } = {}) {
   t.mock.timers.enable({ apis: ['setInterval', 'Date'], now });
   await base.$executeRawUnsafe('TRUNCATE "AuthSession"');
   await base.$executeRawUnsafe('TRUNCATE "IdpSessionEnd"');
+  await base.$executeRawUnsafe('TRUNCATE "MemberIsolation"');
   await base.$transaction([base.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
     base.$executeRawUnsafe(`TRUNCATE "AuditLog" RESTART IDENTITY`)]);
-  const [{ left }] = await base.$queryRawUnsafe(`SELECT (SELECT count(*) FROM "AuditLog") + (SELECT count(*) FROM "AuthSession") + (SELECT count(*) FROM "IdpSessionEnd") AS left`);
-  assert.equal(Number(left), 0, 'every world starts with no session, no end mark and no audit row');
+  const [{ left }] = await base.$queryRawUnsafe(`SELECT (SELECT count(*) FROM "AuditLog") + (SELECT count(*) FROM "AuthSession") + (SELECT count(*) FROM "IdpSessionEnd") + (SELECT count(*) FROM "MemberIsolation") AS left`);
+  assert.equal(Number(left), 0, 'every world starts with no session, no end mark, no isolation fact and no audit row');
   Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
     certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
-    members: {}, userLogouts: [], memberRead: 'ok', memberReads: 0 });
+    members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [] });
   idp.started = 0;
 
   const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [] };
@@ -2814,7 +2817,7 @@ test('U5E-13 an administrator\'s isolation ends every session of the member thro
   const heldC = answerFlow(w, w.I2, begin, await w.issue('u5e13-pc1-again', { sub: m, groups: [A], idp: P1 }));
   await gate.arrived();
   // And on a third PC a first login of the member, a NEW provider session no product row knows, has exchanged its code
-  // before the isolation too (its member read said "enabled") and commits after the cleanup. The provider lists the
+  // before the isolation too and commits after the cleanup. The provider lists the
   // member's live provider sessions: those of PC1, PC2 and PC3.
   const P3 = 'syn-idp-u5e13-pc3';
   kc.members[m].sessions = [P1, P2, P3];
@@ -2855,22 +2858,24 @@ test('U5E-13 an administrator\'s isolation ends every session of the member thro
   await w.told();
   assert.deepEqual([(await w.marks()).find(x => x[0] === 'syn-idp-u5e13-left'), (await endsOf(w, m)).length],
     [['syn-idp-u5e13-left', 'isolation', true], 3]);
-  // The opposite side: the other (enabled) member's refresh goes on - also when its state cannot be read (admin API down).
+  // The isolation is our own recorded fact, its provider work done.
+  assert.deepEqual((await w.base.memberIsolation.findMany()).map(r => [r.sub, r.providerDoneAt !== null]), [[m, true]]);
+  // The opposite side: the other member's refresh goes on - also with the admin API out, which the refresh never asks.
   const ov = await w.issue('u5e13-other-next', { sub: other, groups: [A] });
   const oldOther = await w.session(await w.issue('u5e13-other-2', { sub: other, groups: [A] }), { atExpiresAt: lapsed() });
   kc.auto = () => reply.tokens(ov);
-  kc.memberRead = 'error';
-  const reads = kc.memberReads;
-  assert.deepEqual([(await w.call(w.I1, 'get', { sid: oldOther })).status, kc.memberReads - reads], [200, 1]);
-  kc.memberRead = 'ok';
+  kc.adminDown = true;
+  const calls = kc.adminCalls.length;
+  assert.deepEqual([(await w.call(w.I1, 'get', { sid: oldOther })).status, kc.adminCalls.length - calls], [200, 0]);
+  kc.adminDown = false;
   kc.auto = null;
   await w.finish('U5E-13');
 });
 
 // Commander decisions on SEA-F08 (fix round 1): the isolation's marks are a recorded fact - re-activating the member
-// (approval change, cancel, Activate) does not reopen a provider session the isolation listed. The member read at the
-// callback refuses a readable "disabled" (member_isolated) and never blocks a login because it could not be read.
-test('U5E-14 a code exchanged before an isolation stays refused after the member is active again; the member read refuses "disabled" and lets an unreadable state through, recorded', async t => {
+// (approval change, cancel, Activate) does not reopen a provider session the isolation listed. Integration round 6 (A):
+// the login path reads no provider state at all - the member's isolation is our own fact (MemberIsolation).
+test('U5E-14 a code exchanged before an isolation stays refused after the member is active again; the login path never asks the admin API', async t => {
   const w = await world(t);
   const { AdminService } = require('/app/dist/admin.service');
   const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
@@ -2894,25 +2899,102 @@ test('U5E-14 a code exchanged before an isolation stays refused after the member
     [true, null, undefined, 0], 'active again, and still no session from the provider session the isolation marked');
   assert.deepEqual([(await w.marks()).find(x => x[0] === Q)?.slice(0, 2), rowsOf(await w.rows(), m).at(-1).detail.cause],
     [[Q, 'isolation'], 'idp_session_ended']);
+  // The re-activation finished: our fact is gone (only a finished re-activation removes it).
+  assert.equal(await w.base.memberIsolation.count({ where: { sub: m } }), 0);
   // A new login after the re-activation (a new provider session, credentials entered) enters as usual.
   const again = await login(w, w.I2, await w.issue('u5e14-new', { sub: m, groups: [A], idp: 'syn-idp-u5e14-new' }));
   assert.deepEqual([again.done.cookie, !!again.done.proof], ['S', true]);
-  // A member made inactive outside the isolation (no mark names its provider session): a readable "disabled" refuses.
-  const d = 'syn-sub-u5e14-disabled';
-  kc.members[d] = { username: 'syn-member-u5e14-d', email: d + '@synthetic.test', enabled: false, groups: [A], roles: ['radiologist'] };
-  const refused = await login(w, w.I2, await w.issue('u5e14-d', { sub: d, groups: [A] }));
-  assert.deepEqual([refused.done.location, refused.done.newSid, await w.base.authSession.count({ where: { sub: d } }),
-    rowsOf(await w.rows(), d).at(-1).detail.cause], [landing('login_failed'), null, 0, 'member_isolated']);
-  // The admin API cannot answer the member read: the login is not blocked (no false trigger on the ordinary path) and its
-  // success row records that the state was not verified.
-  const u = 'syn-sub-u5e14-unread';
-  kc.memberRead = 'error';
-  const reads = kc.memberReads;
-  const unread = await login(w, w.I2, await w.issue('u5e14-u', { sub: u, groups: [A] }));
-  kc.memberRead = 'ok';
-  assert.deepEqual([unread.done.cookie, !!unread.done.proof, kc.memberReads - reads], ['S', true, 1]);
-  assert.deepEqual(rowsOf(await w.rows(), u).map(r => [r.detail.outcome, r.detail.memberState]), [['success', 'member_state_unverified']]);
-  // ... and a readable "enabled" records nothing extra.
-  assert.equal(rowsOf(await w.rows(), m).filter(r => r.detail.outcome === 'success').at(-1).detail.memberState, undefined);
+  // The admin API out: an ordinary login enters, asks it nothing, and its success row is the ordinary one.
+  const u = 'syn-sub-u5e14-out';
+  kc.adminDown = true;
+  const calls = kc.adminCalls.length;
+  const out = await login(w, w.I2, await w.issue('u5e14-u', { sub: u, groups: [A] }));
+  kc.adminDown = false;
+  assert.deepEqual([out.done.cookie, !!out.done.proof, kc.adminCalls.length - calls], ['S', true, 0]);
+  assert.deepEqual(rowsOf(await w.rows(), u).map(r => r.detail.outcome), ['success']);
   await w.finish('U5E-14');
+});
+
+// Integration round 6 (A): the reviewers' counter-example to "an unreadable member state lets the login through" -
+// the disable succeeded, the session listing failed, nothing was marked, the state read fails, and a code exchanged
+// before the isolation passes. The rule now: the isolation FIRST writes our own durable fact, THEN does the provider work;
+// the callback and the refresh read only that fact; the retry cycle finishes unfinished provider work from the fact; only
+// a finished re-activation removes it. Every interleaving the reviewers named makes no session.
+test('U5E-15 isolation is our own fact written before any provider work: listing or disabling fails, a code exchanged before it, a re-activation in between - no session; the cycle finishes the provider work', async t => {
+  const w = await world(t);
+  const { AdminService } = require('/app/dist/admin.service');
+  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
+  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
+  const fact = async sub => (await w.base.memberIsolation.findUnique({ where: { sub } })) ?? null;
+  const sessionsOf = sub => w.base.authSession.count({ where: { sub } });
+
+  for (const failing of ['sessions', 'disable']) {
+    // (1) A code exchanged before the isolation (an SSO no product row knows) waits for its transaction; the member also
+    // has a live product session. The provider fails one step of the isolation: the listing, or the disable.
+    const m = 'syn-sub-u5e15-' + failing, P = 'syn-idp-u5e15-' + failing, L = P + '-live';
+    kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [P, L] };
+    const live = await w.session(await w.issue('u5e15-live-' + failing, { sub: m, groups: [A], idp: L }));
+    const begin = await w.call(w.I2, 'login');
+    const gate = w.gate('I2', 'tx.open');
+    const held = answerFlow(w, w.I2, begin, await w.issue('u5e15-' + failing, { sub: m, groups: [A], idp: P }));
+    await gate.arrived();
+    kc.adminFail = { [failing]: 99 };
+    const calls = kc.adminCalls.length;
+    await assert.rejects(admin.patchUser(m, { enabled: false }, caller), error => error?.response?.code === 'USER_ISOLATED' || /USER_ISOLATED/.test(JSON.stringify(error?.response ?? '')),
+      failing + ': the isolation reports that it did not finish');
+    // Our fact was written before any provider call, and its provider work is owed.
+    const owed = await fact(m);
+    assert.deepEqual([!!owed, owed?.providerDoneAt ?? null], [true, null], failing + ': the fact is recorded, provider work owed');
+    assert.ok(kc.adminCalls.slice(calls).includes('GET sessions'), failing + ': the provider work started after the fact');
+    // The member's existing session ended at once (our own data; no provider answer needed), with cause isolation.
+    assert.deepEqual([await w.version(live), (await w.marks()).find(x => x[0] === L)?.slice(0, 2)], [null, [L, 'isolation']]);
+    // (2) The code exchanged before the isolation resumes: no session. With the listing failed nothing marked its
+    // provider session and the provider's state is not read - our fact refuses it (member_isolated); with the disable
+    // failed the listing had already marked it (idp_session_ended).
+    gate.release();
+    const late = await held;
+    assert.deepEqual([late.newSid, late.proof, await sessionsOf(m), rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause],
+      [null, undefined, 0, failing === 'sessions' ? 'member_isolated' : 'idp_session_ended'], failing + ': the earlier code passes no more');
+    // Even with the admin API out entirely, the same: the login path does not depend on it.
+    kc.adminDown = true;
+    const before = kc.adminCalls.length;
+    const again = await login(w, w.I1, await w.issue('u5e15-again-' + failing, { sub: m, groups: [A], idp: P + '-2' }));
+    assert.deepEqual([again.done.newSid, kc.adminCalls.length - before], [null, 0], failing + ': refused without asking the admin API');
+    kc.adminDown = false;
+    // (3) A re-activation while the provider work is owed and still failing: it does not remove the fact - it must
+    // finish the owed provider work first - so the member stays refused.
+    await assert.rejects(admin.patchUser(m, { enabled: true }, caller), undefined, failing + ': Activate over unfinished provider work fails');
+    assert.ok(await fact(m), failing + ': the fact stays after a failed re-activation');
+    // (4) The provider recovers; the end retry cycle finishes the provider work from the fact (no admin action): every
+    // provider session listed is marked, the member is disabled and logged out, the fact says done - and stays.
+    kc.adminFail = {};
+    const restarted = w.instance('R-' + failing);
+    restarted.service.onModuleInit();
+    try {
+      await w.until(failing + ': the owed provider work finished', async () => (await fact(m))?.providerDoneAt != null);
+    } finally {
+      restarted.service.onModuleDestroy();
+    }
+    await w.told();
+    assert.deepEqual([kc.members[m].enabled, kc.userLogouts.includes(m), (await w.marks()).filter(x => x[0] === P || x[0] === L).map(x => x.slice(0, 2))],
+      [false, true, [[P, 'isolation'], [L, 'isolation']]], failing + ': provider work done from the fact');
+    // (5) A finished re-activation removes the fact; the provider session the isolation listed stays closed, a new login enters.
+    assert.equal((await admin.patchUser(m, { enabled: true }, caller)).enabled, true);
+    assert.equal(await fact(m), null, failing + ': only a finished re-activation removes the fact');
+    const old = await login(w, w.I2, await w.issue('u5e15-old-' + failing, { sub: m, groups: [A], idp: P }));
+    assert.equal(old.done.newSid, null, failing + ': the listed provider session stays closed after the re-activation');
+    const fresh = await login(w, w.I2, await w.issue('u5e15-new-' + failing, { sub: m, groups: [A], idp: P + '-new' }));
+    assert.deepEqual([fresh.done.cookie, !!fresh.done.proof], ['S', true], failing + ': a new login enters again');
+  }
+  // (6) Opposite side: another member is untouched by all of this, and its refresh never reads provider state.
+  const o = 'syn-sub-u5e15-other';
+  const ov = await w.issue('u5e15-other-next', { sub: o, groups: [A] });
+  const oldOther = await w.session(await w.issue('u5e15-other', { sub: o, groups: [A] }), { atExpiresAt: lapsed() });
+  kc.auto = () => reply.tokens(ov);
+  kc.adminDown = true;
+  const calls = kc.adminCalls.length;
+  assert.deepEqual([(await w.call(w.I1, 'get', { sid: oldOther })).status, kc.adminCalls.length - calls], [200, 0]);
+  kc.adminDown = false;
+  kc.auto = null;
+  await w.finish('U5E-15');
 });
