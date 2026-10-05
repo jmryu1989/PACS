@@ -15,6 +15,7 @@ from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import EncapsulatedPDFStorage, ExplicitVRLittleEndian, generate_uid
 from pynetdicom import AE
 from playwright.sync_api import expect
+from failure_diagnostics import failure_details
 from pypdf import PdfReader
 
 from test_viewer_layout import ViewerLayoutE2E
@@ -204,7 +205,8 @@ class DicomPdfE2E(ViewerLayoutE2E):
         self.assertEqual(self.read_paths(), {first["pdf"], second["pdf"]}); self.assertEqual(self.bound_read(page, second).body(), second["payload"])
         page.wait_for_function("()=>document.querySelectorAll('object[type=\"application/pdf\"]').length===2", timeout=60000)
         self.assertNotEqual(first_url, second_url); self.assertEqual(self.object_url(page, 0, first_url), first_url)
-        expect(page.locator("#kin-source-pdf")).to_contain_text("PDF Second")
+        with failure_details(page,"PDF selection failure","() => ({status:document.querySelector('#kin-source-pdf-status')?.textContent,panel:document.querySelector('#kin-source-pdf')?.textContent,activeViewportId:services.viewportGridService.getState().activeViewportId,cells:[...services.viewportGridService.getState().viewports.values()].map(v=>({id:v.viewportId,displaySets:v.displaySetInstanceUIDs}))})"):
+            expect(page.locator("#kin-source-pdf")).to_contain_text("PDF Second")
         page.evaluate("""s=>{const d=services.displaySetService.getActiveDisplaySets().find(x=>x.SOPInstanceUID===s),original=d.pdfUrl;
           window.pdfLate=new Promise(resolve=>window.releasePdfLate=()=>resolve(original));d.pdfUrl=window.pdfLate;}""", first["sop"])
         self.place(page, first, 1); expect(page.locator("#kin-source-pdf")).to_contain_text("PDF First")
@@ -286,7 +288,9 @@ class DicomPdfE2E(ViewerLayoutE2E):
         expect(page.locator("#kin-source-pdf-status")).to_have_text(
             "선택한 원본 PDF를 지원하지 않거나 식별 정보가 일치하지 않습니다.")
         expect(page.locator("#kin-source-pdf-open")).to_be_disabled()
-        self.place(page, malformed); expect(page.locator("#kin-source-pdf-open")).to_be_enabled()
+        self.place(page, malformed)
+        with failure_details(page,"PDF malformed-source failure","() => ({status:document.querySelector('#kin-source-pdf-status')?.textContent,panel:document.querySelector('#kin-source-pdf')?.textContent,activeViewportId:services.viewportGridService.getState().activeViewportId,cells:[...services.viewportGridService.getState().viewports.values()].map(v=>({id:v.viewportId,displaySets:v.displaySetInstanceUIDs}))})"):
+            expect(page.locator("#kin-source-pdf-open")).to_be_enabled()
         # Core 1.12.5 returns malformed bytes as PDF. Native browser error controls
         # are not asserted here; the MIME check of the read does not validate PDF syntax.
         response = self.bound_read(page, malformed)

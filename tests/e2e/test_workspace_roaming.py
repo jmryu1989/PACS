@@ -2,6 +2,7 @@
 import json,unittest,hashlib,time
 from pathlib import Path
 from playwright.sync_api import expect
+from failure_diagnostics import failure_details
 from test_workspace_persistence import WorkspacePersistenceE2E
 from workspace_roaming_support import cleanup_workspace
 from document_session import document_request
@@ -40,7 +41,8 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
             page.set_viewport_size(viewport)
             for key,selector in [('main','.left'),('top','.rw'),('related','.related-p'),('prior','.related-list-pane')]:
                 dim='width' if axis=='landscape' and key in ('main','related') else 'height'
-                self.size_is(page,selector,dim,layout[axis][key])
+                with failure_details(page,'ROAM size failure '+json.dumps(dict(axis=axis,selector=selector,dimension=dim,expected=layout[axis][key])),"() => Object.fromEntries(['.left','.rw','.related-p','.related-list-pane'].map(k=>{const r=document.querySelector(k).getBoundingClientRect();return [k,{width:r.width,height:r.height}]}))"):
+                    self.size_is(page,selector,dim,layout[axis][key])
         print('ROAM actual sizes '+json.dumps(page.evaluate("() => Object.fromEntries(['.left','.rw','.related-p','.related-list-pane'].map(k=>{const r=document.querySelector(k).getBoundingClientRect();return [k,{width:r.width,height:r.height}]}))")),flush=True)
 
     def test_roam_01_two_browsers_all_panels_and_report(self):

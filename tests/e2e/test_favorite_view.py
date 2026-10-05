@@ -50,6 +50,13 @@ class FavoriteViewE2E(ViewerJobsE2E):
   p.locator('#favorite-view-save').click();expect(p.locator('#favorite-retry')).to_be_visible();expect(p.locator('#favorite-retry')).to_be_enabled()
   p.unroute('**/api/favorite-folders');p.locator('#favorite-retry').click();expect(p.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True)).to_be_visible()
   p.locator('#favorite-close').click();other=self.login();self.select(other,b);self.open_toolbar_group(other,'#favorite-open');other.locator('#favorite-open').click()
+  # Native resize preserves zoom per canvas pixel. Observe the actual saved-camera
+  # application so the later worklist layout change cannot hide a wrong restore.
+  other.context.add_init_script('''window.favoriteCameraSamples=[];
+    document.addEventListener('CORNERSTONE_CAMERA_MODIFIED',event=>{
+      const canvas=event.target.querySelector?.('canvas'),detail=event.detail;
+      if(canvas&&detail?.camera)favoriteCameraSamples.push({id:detail.viewportId,height:canvas.height,camera:JSON.parse(JSON.stringify(detail.camera))});
+    },true);''')
   other.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True).click();expect(other.locator('#reading-target')).to_contain_text(a.uid)
   frame=other.locator('#reading-frame').element_handle().content_frame();canvas_ready(frame,2);expect(frame.locator('#kin-viewer-jobs-status')).to_contain_text('복원했습니다',timeout=60000)
   self.assertIn('kinJob='+job['id'],other.locator('#reading-frame').get_attribute('src'))
@@ -64,11 +71,18 @@ class FavoriteViewE2E(ViewerJobsE2E):
   other.bring_to_front();frame.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');canvas_ready(frame,2)
   expected=self.stack.request('GET',f'/studies/{a.uid}/viewer-jobs/{job["id"]}','doctor').body['snapshot']
   observed=self.display(frame);self.assertEqual(len(observed),len(expected['cells']))
+  samples=frame.evaluate('favoriteCameraSamples')
+  heights=frame.evaluate("()=>Object.fromEntries([...services.viewportGridService.getState().viewports.values()].map(g=>[g.viewportId,services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId).element.querySelector('canvas').height]))")
   for cell,actual in zip(expected['cells'],observed):
    self.assertIn(cell['sop'],actual['image']);self.assertIn('/frames/'+str(cell['frame']),actual['image'])
    for key in ['focalPoint','position','viewUp','viewPlaneNormal']:
     for x,y in zip(cell['camera'][key],actual['camera'][key]):self.assertAlmostEqual(x,y,places=5)
-   for key in ['rotation','flipHorizontal','flipVertical','parallelScale']:self.assertAlmostEqual(cell['camera'][key],actual['camera'][key],places=5)
+   for key in ['rotation','flipHorizontal','flipVertical']:self.assertAlmostEqual(cell['camera'][key],actual['camera'][key],places=5)
+   applied=[sample for sample in samples if sample['id']==actual['id'] and all(sample['camera'].get(key)==value for key,value in cell['camera'].items())]
+   self.assertTrue(applied,'Saved camera was never applied: '+json.dumps(dict(expected=cell['camera'],samples=samples)))
+   source_height=applied[-1]['height'];self.assertGreater(source_height,0);self.assertGreater(heights[actual['id']],0)
+   self.assertAlmostEqual(cell['camera']['parallelScale']*heights[actual['id']]/source_height,actual['camera']['parallelScale'],places=5,
+    msg=json.dumps(dict(savedHeight=source_height,restoredHeight=heights[actual['id']],savedScale=cell['camera']['parallelScale'],restoredScale=actual['camera']['parallelScale'])))
   print('FAVORITE SAVED DISPLAY',json.dumps(dict(expected=expected,observed=observed)),flush=True)
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);other.screenshot(path=str(folder/'favorite-view.png'))
  def test_favorite_view_03_revoked_prior_does_not_change_report_target(self):

@@ -79,9 +79,9 @@ class ViewerTechNoteE2E(ReadingNoteE2E):
   v.locator('#kin-viewer-note-retry').click();expect(v.locator('#kin-viewer-note-status')).to_contain_text('다시 시도하세요')
   expect(v.locator('#kin-viewer-note-retry')).to_be_focused();self.assertEqual(self.snapshot(v),before)
   fail[0]=False;v.locator('#kin-viewer-note-retry').click()
-  # Successful authentication now mounts the automatic dock. Focus must land
-  # on its visible Comparison control before reopening the preserved contents.
-  tab=v.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]');expect(tab).to_be_focused();tab.click();expect(v.locator('#kin-viewer-note-open')).to_be_enabled()
+  # ready() saved the expanded Comparison panel; reconnection returns focus to
+  # its visible Tech Note control without toggling the remembered panel closed.
+  tab=v.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]');expect(tab).to_have_attribute('aria-expanded','true');expect(v.locator('#kin-viewer-note-open')).to_be_focused();expect(v.locator('#kin-viewer-note-open')).to_be_enabled()
   # The dock reserves image space. Compare pixels at the same canvas size,
   # preserving the original camera/VOI/image/pixel assertions after recovery.
   for _ in range(3):
