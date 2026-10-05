@@ -43,14 +43,22 @@ window.KinTechNote = function (app) {
   }
   $('save').onclick = async () => {
     if(work.state()!=='active')return;
-    if(interruptedSave){await reconcileSave(interruptedSave);return;}
-    const at=work.capture('document');
+    if(interruptedSave){
+      if(busy)return;
+      const pending=interruptedSave;
+      if(await reconcileSave(pending)==='unchanged')await save(pending.body,pending);
+      return;
+    }
     if (busy || !writable || !app.allowed() || ended) return;
     if (version && !$('reason').value.trim()) { status('수정·비우기 사유를 입력하세요.'); $('reason').focus(); return; }
+    await save({ baseVersion: version, text: $('text').value, reason: $('reason').value });
+  };
+  async function save(body, prior=null) {
+    if(work.state()!=='active'||busy||!writable||!app.allowed()||ended||!d.open)return;
+    const at=work.capture('document');
     const ticket = ++seq, target = uid;
-    const body = { baseVersion: version, text: $('text').value, reason: $('reason').value };
-    let settled, confirmed = false;
-    const pending={target,body,previous:saved,done:new Promise(resolve=>{settled=resolve;})};
+    let settled, confirmed = false, recheck = false;
+    const pending={target,body,previous:prior?prior.previous:saved,done:new Promise(resolve=>{settled=resolve;})};
     interruptedSave=pending;busy = true; controls(); status('저장 중…');
     try {
       const result = await app.api('POST', '/studies/' + encodeURIComponent(target) + '/tech-note', body, undefined, at);
@@ -62,19 +70,26 @@ window.KinTechNote = function (app) {
     } catch (e) { work.commit(at,()=>{if (valid(ticket, target)) {
       // An answered refusal is not an uncertain write. A gateway error alone
       // cannot prove whether the application committed the note.
-      confirmed = !e.incomplete && !e.responseIncomplete && (e.status >= 400 && e.status < 500 || e.status >= 500 && e.body?.stored === false);
-      status(confirmed
+      confirmed = e.notSent === true || e.status >= 400 && e.status < 500;
+      // Refusing the retry does not refuse the original in-flight write. In
+      // particular, its 409 may mean that the original has just committed.
+      if(prior&&confirmed){confirmed=false;recheck=true;return;}
+      status(e.notSent === true
+        ? '저장 요청을 보내지 못했습니다: ' + e.message + ' · 입력은 유지했습니다.'
+        : confirmed
         ? '저장되지 않았습니다: ' + e.message + ' · 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.'
         : '저장 결과를 알 수 없습니다: ' + e.message + ' · 입력은 유지했습니다. Save Note 또는 Reload Note로 결과를 확인하세요.');
     }}); }
     finally { settled();if (ticket === seq) busy=false; work.commit(at,()=>{if(ticket===seq){if(confirmed)interruptedSave=null;controls();}}); }
-  };
+    if(recheck&&work.admits(at)&&valid(ticket,target))await reconcileSave(pending);
+  }
+  const unknownActions='저장 결과는 아직 알 수 없습니다 · 입력은 유지되며 Save Note는 확인 후 재시도하고 Reload Note는 결과만 확인합니다.';
   async function reconcileSave(pending) {
     if(work.state()!=='active'||ended||!d.open||uid!==pending.target)return;
     const at=work.capture('document'),ticket=++seq,target=uid;
     busy=true;controls();
-    // A write can finish after preparation is cancelled. Wait for that attempt,
-    // then read its result before another save can reuse the old version.
+    // Client completion is not server completion. Only a witnessed revision
+    // resolves an unanswered write; an old read permits a same-base CAS retry.
     await pending.done;
     if(!work.admits(at)||!valid(ticket,target))return;
     try {
@@ -98,14 +113,15 @@ window.KinTechNote = function (app) {
           (latest?.reason||'')===(pending.body.reason||'').trim();
         const unchanged=revision===pending.body.baseVersion&&(latest?.text??'')===pending.previous;
         if(stored){adopt(result);$('history-items').replaceChildren();$('more').hidden=true;cursor=null;}
-        else if(unchanged){writable=result.writable===true;}
+        else if(unchanged){writable=result.writable===true;status(unknownActions);return;}
         else {
           const witnessed=next?.text===pending.body.text&&(next.reason||'')===(pending.body.reason||'').trim();
           if(next)interruptedSave=null;
           status(witnessed?'저장되었습니다. v'+next.version+' · 이후 메모가 변경되어 입력을 유지했습니다. 최신 메모와 비교하세요.':next?'저장되지 않았습니다. 다른 메모가 저장되었습니다. 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.':'저장 결과를 알 수 없습니다. 입력은 유지했습니다. 최신 메모와 이력을 다시 확인하세요.');return;
         }
-        interruptedSave=null;status(stored?'저장되었습니다. v'+version:'저장되지 않았습니다 · 입력은 유지했습니다. 다시 Save Note를 누르세요.');
+        interruptedSave=null;status('저장되었습니다. v'+version);
       });
+      if(interruptedSave===pending&&(result.note?.version??0)===pending.body.baseVersion&&(result.note?.text??'')===pending.previous)return 'unchanged';
     } catch(e){work.commit(at,()=>{if(valid(ticket,target))status('저장 결과를 알 수 없습니다: '+e.message+' · 입력은 유지했습니다. Save Note 또는 Reload Note로 다시 확인하세요.');});}
     finally {if(ticket===seq)busy=false;work.commit(at,()=>{if(ticket===seq)controls();});}
   }

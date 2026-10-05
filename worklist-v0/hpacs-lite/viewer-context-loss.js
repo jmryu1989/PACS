@@ -51,7 +51,7 @@
       if (!source || !account || !boundary.active() || session.ended()) return;
       const at = gate.capture('document'), uid = new URLSearchParams(root.location.search).get('StudyInstanceUIDs')?.split(',')[0];
       if (!uid) return;
-      const event = { eventId: root.crypto.randomUUID(), faultId: source.id, stage, occurredAt: new Date().toISOString(),
+      const event = { eventId: root.crypto.randomUUID(), faultId: source.id, stage, occurredAt: new Date(stage === 'manual-retry' ? source.at : now()).toISOString(),
         engine: 'webgl', viewport: source.kind, cause: 'context-lost', repeatCount: source.repeatCount || repeat, attempt: source.attempt || attempt, reason, result };
       if ((await boundary.recoveryAdmission()).status !== 'allowed' || !gate.admits(at)) return;
       boundary.transport.request('/api/studies/' + encodeURIComponent(uid) + '/viewer-context-events',

@@ -521,7 +521,18 @@ window.kinViewerTechNote=function(services,session=null){
     }
     // Reject an invalid owner locally before retaining it. Only the page transport can end the document.
     async function authenticate(){const me=await raw('GET','/me');if(session&&!session.answer(me)){end();throw new Error('메모 계정이 변경되었습니다');}const next=[me.institution,me.sub];if(me.kind!=='member'||next.some(v=>typeof v!=='string'||!v)||owner&&!same(owner,next)){end();throw new Error('메모 계정이 변경되었습니다');}owner=next;return next;}
-    const note=KinTechNote({allowed:()=>window.KinWorkContext.state()==='active'&&live()&&!!owner,api:async(method,path,body)=>{const before=await authenticate();const result=await raw(method,path,body);if(!live()||!same(before,await authenticate()))throw new Error('메모 계정이 변경되었습니다');return result;}});
+    const note=KinTechNote({allowed:()=>window.KinWorkContext.state()==='active'&&live()&&!!owner,api:async(method,path,body)=>{
+      let before;
+      try{before=await authenticate();}catch(error){throw Object.assign(new Error(error.message),{notSent:true});}
+      const result=await raw(method,path,body);
+      try{if(!live()||!same(before,await authenticate()))throw new Error('메모 계정이 변경되었습니다');}
+      catch(error){
+        // The account check owns session validity, never the write's receipt.
+        // A different account still ends the document through authenticate().
+        if(!live()||method!=='POST')throw new Error(error.message);
+      }
+      return result;
+    }});
     const recoveryState=()=>note.workspaceState();
     window.kinViewerTechNoteWorkspaceState=recoveryState;
     async function open(){

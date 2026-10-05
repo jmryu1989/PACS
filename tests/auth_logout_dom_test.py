@@ -789,11 +789,11 @@ class LogoutDOMTest(unittest.TestCase):
         expect(self.page.locator('#findings')).to_be_editable()
 
     def test_ctx_note_answered_refusal_closes_without_history(self):
-        for code in (400, 403, 500):
+        for code in (400, 403):
             with self.subTest(status=code):
                 if code != 400:
                     self.fresh_context()
-                self.note_save_failure((code, {'message': 'SYN not stored', 'stored': False}))
+                self.note_save_failure((code, {'message': 'SYN not stored'}))
                 expect(self.page.locator('#tech-note-status')).to_contain_text('저장되지 않았습니다')
                 expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_label('Note', exact=True)).to_have_value('SYN my note')
                 self.page.keyboard.press('Escape')
@@ -810,6 +810,9 @@ class LogoutDOMTest(unittest.TestCase):
         expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_label('Note', exact=True)).to_have_value('SYN my note')
         self.page.get_by_role('button', name='Reload Note', exact=True).click()
         expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+        # The unknown sentence also remains visible during the read; Escape is
+        # available only after that request settles and Close is enabled again.
+        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('button', name='Close', exact=True)).to_be_enabled()
         self.page.keyboard.press('Escape')
         expect(self.page.locator('#tech-note-dialog')).not_to_be_visible()
         # Synthetic API outage covers all subsequent traffic; wall-clock passage
@@ -821,11 +824,25 @@ class LogoutDOMTest(unittest.TestCase):
         self.page.locator('#findings').fill('SYN report remains usable')
         expect(self.page.locator('#findings')).to_have_value('SYN report remains usable')
 
-    def test_ctx_note_unreadable_answer_keeps_unknown_sentence_and_closes(self):
+    def test_ctx_note_unreadable_400_is_still_an_answered_refusal(self):
         self.note_save_failure('unreadable')
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+        expect(self.page.locator('#tech-note-status')).to_contain_text('저장되지 않았습니다')
         self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('button', name='Close', exact=True).click()
         expect(self.page.locator('#tech-note-dialog')).not_to_be_visible()
+
+    def test_ctx_note_every_5xx_is_unknown_including_real_503_body(self):
+        for code in (500, 502, 503, 504):
+            with self.subTest(status=code):
+                if code != 500:
+                    self.fresh_context()
+                self.note_save_failure((code, {'statusCode': code, 'message': '검사 처리 중입니다. 잠시 후 최신 메모를 확인하고 다시 시도하세요', 'error': 'Service Unavailable'}))
+                expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+                self.dialog_answers.append(False)
+                self.page.keyboard.press('Escape')
+                self.assertIn('저장 결과를 알 수 없습니다', self.dialogs[-1])
+                expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_label('Note', exact=True)).to_have_value('SYN my note')
+                self.page.keyboard.press('Escape')
+                expect(self.page.locator('#tech-note-dialog')).not_to_be_visible()
 
     def open_admin(self):
         self.site.account = ADMIN
@@ -2398,7 +2415,7 @@ class LogoutDOMTest(unittest.TestCase):
                            json={"uid": UID, "writable": True, "note": dict(note)} if stored else {"message": "SYN not stored"})
         self.wait_until(lambda: len(reads) == 2, "the automatic note confirmation")
         expect(page.locator("#tech-note-status")).to_have_text(
-            "저장되었습니다. v2" if stored else "저장되지 않았습니다 · 입력은 유지했습니다. 다시 Save Note를 누르세요.")
+            "저장되었습니다. v2" if stored else "저장 결과는 아직 알 수 없습니다 · 입력은 유지되며 Save Note는 확인 후 재시도하고 Reload Note는 결과만 확인합니다.")
         expect(page.locator("#tech-note-text")).to_have_value("SYN note before preparation")
         expect(page.locator("#tech-note-reason")).to_have_value("" if stored else "  SYN correction  ")
         expect(page.locator("#tech-note-save")).to_be_enabled()

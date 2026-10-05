@@ -7,6 +7,7 @@ grid adapters provide current ownership; they do not emulate the pinned OHIF ren
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 import unittest
 from playwright.sync_api import sync_playwright, expect
@@ -396,7 +397,12 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.get_by_label('Note', exact=True).fill('kept note')
         p.get_by_role('button', name='Save Note', exact=True).click()
         self.assertTrue(p.evaluate('note.workspaceState().busy'))
-        p.evaluate('lose(0);failNote()'); p.wait_for_timeout(80)
+        p.evaluate('role="writer";kinViewerTechNoteWorkspaceState=()=>note.workspaceState();lose(0)')
+        expect(p.get_by_role('heading', name='Viewer Recovery')).to_be_visible()
+        p.locator('#image0 button').filter(has_text='Reload Viewer').first.evaluate('(b)=>b.click()')
+        expect(p.locator('#image0 [role="status"]')).to_contain_text('진행 중인 작업')
+        self.assertIn('kinFinding=once', p.url)
+        p.evaluate('failNote()'); p.wait_for_timeout(80)
         expect(p.get_by_label('Note', exact=True)).to_have_value('kept note')
         self.assertTrue(p.evaluate('note.workspaceState().unknown'))
         p.evaluate('role="writer";kinViewerTechNoteWorkspaceState=()=>note.workspaceState()')
@@ -415,6 +421,127 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.keyboard.press('Escape')
         self.assertFalse(p.locator('#tech-note-dialog').evaluate('(d)=>d.open'))
         p.get_by_label('Report').fill('editor usable')
+
+    def mount_note_cas(self):
+        """The server's per-study lock/CAS is atomic; barriers order commits, not clocks.
+
+        A client abort settles only the first response. Its server operation remains
+        at the barrier until finishWrite(0), like a handler surviving client timeout.
+        """
+        p = self.page
+        p.add_script_tag(url=BASE + '/worklist/hpacs-lite/tech-note.js')
+        p.evaluate('''() => {
+          window.noteServer={notes:[],writes:[],reads:0};
+          const snapshot=()=>({uid:'1.2.3',writable:true,note:noteServer.notes.at(-1)||null});
+          window.finishWrite=index=>{
+            const request=noteServer.writes[index],body=request.body;
+            if((noteServer.notes.at(-1)?.version??0)!==body.baseVersion){
+              request.outcome=409;request.reject?.(Object.assign(Error('version conflict'),{status:409}));return;
+            }
+            noteServer.notes.push({studyUid:'1.2.3',version:body.baseVersion+1,text:body.text,
+              reason:body.reason.trim(),author:'tech',createdAt:'2026-10-05T00:00:00Z'});
+            request.outcome=200;request.resolve?.(snapshot());
+          };
+          window.note=KinTechNote({allowed:()=>true,api:async(method,path,body)=>{
+            if(method==='GET'){
+              noteServer.reads++;
+              if(noteServer.writes[1]?.outcome===409)return new Promise(resolve=>window.releaseRead=()=>resolve(snapshot()));
+              return snapshot();
+            }
+            const request={body:structuredClone(body)};noteServer.writes.push(request);
+            if(noteServer.writes.length===1)throw new DOMException('client timeout','AbortError');
+            return new Promise((resolve,reject)=>Object.assign(request,{resolve,reject}));
+          }});note.open({uid:'1.2.3'});
+        }''')
+        p.get_by_label('Note', exact=True).fill('SYN pending note')
+        p.get_by_role('button', name='Save Note', exact=True).click()
+        p.wait_for_function('note.workspaceState().unknown && !note.workspaceState().busy')
+
+    def test_unchanged_read_stays_unknown_until_late_commit_is_witnessed(self):
+        self.mount_note_cas()
+        p = self.page
+        p.get_by_role('button', name='Reload Note', exact=True).click()
+        expect(p.locator('#tech-note-status')).to_have_text('저장 결과는 아직 알 수 없습니다 · 입력은 유지되며 Save Note는 확인 후 재시도하고 Reload Note는 결과만 확인합니다.')
+        self.assertTrue(p.evaluate('note.workspaceState().unknown'))
+        self.assertEqual(p.evaluate('noteServer.writes.length'), 1)
+        expect(p.get_by_label('Note', exact=True)).to_have_value('SYN pending note')
+        p.evaluate('finishWrite(0)')
+        p.get_by_role('button', name='Save Note', exact=True).click()
+        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        self.assertEqual(p.evaluate('noteServer.writes.length'), 1)
+
+    def test_unknown_save_resends_same_base_first_commits_late_409_rechecks(self):
+        self.mount_note_cas()
+        p = self.page
+        p.get_by_role('button', name='Save Note', exact=True).click()
+        p.wait_for_function('noteServer.writes.length===2')
+        self.assertEqual(p.evaluate('noteServer.reads'), 2)
+        p.evaluate('finishWrite(0);finishWrite(1)')
+        p.wait_for_function('!!window.releaseRead')
+        self.assertNotIn('저장되지 않았습니다', p.locator('#tech-note-status').inner_text())
+        self.assertTrue(p.evaluate('note.workspaceState().busy && note.workspaceState().unknown'))
+        p.evaluate('releaseRead()')
+        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.outcome)'), [200, 409])
+        self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.body.baseVersion)'), [0, 0])
+        self.assertEqual(p.evaluate('noteServer.notes.map(n=>[n.version,n.text])'), [[1, 'SYN pending note']])
+        self.assertFalse(p.evaluate('note.workspaceState().unknown'))
+
+    def test_unknown_save_resends_second_commits_first_cannot_add_revision(self):
+        self.mount_note_cas()
+        p = self.page
+        p.get_by_role('button', name='Save Note', exact=True).click()
+        p.wait_for_function('noteServer.writes.length===2')
+        p.evaluate('finishWrite(1)')
+        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        p.evaluate('finishWrite(0)')
+        self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.outcome)'), [409, 200])
+        self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.body.baseVersion)'), [0, 0])
+        self.assertEqual(p.evaluate('noteServer.notes.map(n=>[n.version,n.text])'), [[1, 'SYN pending note']])
+
+    def committed_note_without_receipt(self, failure_status):
+        p = self.page
+        p.add_script_tag(url=BASE + '/worklist/hpacs-lite/tech-note.js')
+        p.evaluate('''failureStatus => {
+          window.posts=0;window.storedNote=null;
+          window.note=KinTechNote({allowed:()=>true,api:async(method,path,body)=>{
+            if(method==='GET')return {uid:'1.2.3',writable:true,note:storedNote};
+            posts++;storedNote={studyUid:'1.2.3',version:1,text:body.text,reason:body.reason.trim(),author:'tech',createdAt:'2026-10-05T00:00:00Z'};
+            throw Object.assign(Error('lost receipt'),failureStatus?{status:failureStatus}:{});
+          }});note.open({uid:'1.2.3'});
+        }''', failure_status)
+        p.get_by_label('Note', exact=True).fill('SYN committed note')
+        p.get_by_role('button', name='Save Note', exact=True).click()
+        expect(p.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+        self.assertTrue(p.evaluate('note.workspaceState().unknown'))
+        p.get_by_role('button', name='Save Note', exact=True).click()
+        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        self.assertEqual(p.evaluate('posts'), 1)
+
+    def test_gateway_502_after_commit_is_unknown_then_witnessed_without_resend(self):
+        self.committed_note_without_receipt(502)
+
+    def test_lost_answer_after_commit_is_witnessed_without_resend(self):
+        self.committed_note_without_receipt(None)
+
+    def test_manual_retry_occurs_at_marker_time_not_document_arrival(self):
+        p = self.page; self.lose()
+        # Advance time at the new document's identity-response barrier, after
+        # consuming the marker, so arrival can never equal the reader's click.
+        def on_identity():
+            marker = p.evaluate('window.KinViewerSessionBoundary?.recovery?.at ?? null')
+            if marker is not None:
+                p.clock.set_fixed_time(datetime.fromtimestamp((marker + 5000) / 1000, timezone.utc))
+        self.me_hook = on_identity
+        self.click_reload()
+        p.wait_for_function('!new URL(location).searchParams.has("kinFinding")')
+        p.evaluate('boot')
+        marker = p.evaluate('KinViewerSessionBoundary.recovery.at')
+        self.assertEqual(p.evaluate('Date.now()'), marker + 5000)
+        p.wait_for_function('recovery.auditState()==="recorded"')
+        retries = [a for a in self.audit if a['stage'] == 'manual-retry']
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0]['occurredAt'], p.evaluate('(at)=>new Date(at).toISOString()', marker))
 
     def test_foreign_and_old_entry_markers_are_consumed_as_ordinary_entry(self):
         p = self.page
