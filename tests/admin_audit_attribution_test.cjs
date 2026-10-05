@@ -41,7 +41,7 @@ const { readFileSync, readdirSync } = require('node:fs');
 const path = require('node:path');
 const { createCipheriv, randomBytes } = require('node:crypto');
 
-const ROOT = path.join("C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s7-rawsql\\tests", '..');
+const ROOT = path.join(__dirname, '..');
 const MODULE = process.env.KIN_ADMIN_AUDIT_MODULE || 'api/src/admin-audit.ts';
 const A = require(path.isAbsolute(MODULE) ? MODULE : path.resolve(ROOT, MODULE));
 
@@ -932,6 +932,14 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    A composition exposing an audit INSERT still needs W5 and W2 attribution. Existing direct audit INSERTs retain W5's
 //    narrower predicate grammar. Cross-module SQL helpers, nonliteral raw/concatenation/separators and any unproved
 //    alternative remain unresolved. Data projection through array producers does not admit SQL from another module.
+//  Named limits (final hardening round; this scan guards against honest mistakes, not against a developer who hides a
+//    write on purpose). Each shape below passes the scan and is left so because no realistic honest mistake in this
+//    codebase was found that produces it: L1 the Prisma namespace used as a plain value (held in an `any` variable,
+//    handed to Object.assign) and its methods called through that value; L2 an ambient `declare` value typed any that
+//    comes from outside the program; L3 code that does not compile (an unresolved name — the API image build refuses
+//    it); L4 an SQL function that executes a text argument inside an ordinary query (dblink_exec and the like). That
+//    none of them is used today is an observation, not a proof: a change that introduces one of these shapes reopens
+//    the limit. The cases are kept as comments beside the negative table (LIMIT L1-L3) so that they are not rediscovered.
 //  Closure (Astra S7-U3a-AUDIT-SPEC-C-R-001-F03, the conditions of S7-U3a-G-R-001): (a) W1-W6 alone resolve every write of
 //    the baseline and give every other candidate its classification, with no writer left out, no exception by place and
 //    no product change; (b) each enumerated counterexample, alone next to the baseline, leaves its write unresolved and
@@ -1208,7 +1216,8 @@ function scanAuditWrites(sources = auditSources()) {
   let directEval;
   const evalCall = () => {
     if (directEval !== undefined) return directEval;
-    directEval = (spelled().names.get('eval') ?? []).find(node => ts.isCallExpression(node.parent) && node.parent.expression === node) ?? null;
+    // `(eval)(...)` is still a direct eval: the callee is looked for through the wrappers around the name.
+    directEval = (spelled().names.get('eval') ?? []).find(node => { const whole = outer(node); return ts.isCallExpression(whole.parent) && whole.parent.expression === whole; }) ?? null;
     const walk = node => { if (!directEval && ts.isWithStatement(node)) directEval = node.expression; else if (!directEval) ts.forEachChild(node, walk); };
     if (!directEval) files.forEach(walk);
     return directEval;
@@ -4066,8 +4075,8 @@ test('completeness: the files of api/src are listed from the disk; one the progr
 // fixtures the closed list W1-W6 (Astra S7-U3a-AUDIT-SPEC-C-R-001) changes, replaced where it stands (F03: a positive
 // outside the list becomes an unresolved refusal there and in a case of its own; nothing is deleted or skipped).
 
-const FIXTURES = path.join("C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s7-rawsql\\tests", 'fixtures', 'admin_audit_completeness');
-const MEMBER_FIXTURES = path.join("C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s7-rawsql\\tests", 'fixtures', 'admin-audit-checker');
+const FIXTURES = path.join(__dirname, 'fixtures', 'admin_audit_completeness');
+const MEMBER_FIXTURES = path.join(__dirname, 'fixtures', 'admin-audit-checker');
 const fixtureText = (name, dir = FIXTURES) => readFileSync(path.join(dir, name), 'utf8').replace(/\r\n/g, '\n');
 const asSource = (name, text) => ({ file: `api/src/syn-fixture/${name}`, text });
 const baselineSources = () => ['actions.ts', 'forward.ts', 'baseline.ts'].map(name => asSource(name, fixtureText(name)));
@@ -4797,6 +4806,7 @@ test('raw provenance r3: reviewer counterexamples and neighbouring unknown write
     ['N06b second declaration inside block', 'function h(p: Prisma.Sql, q: Prisma.Sql) { if (q) { var p = q; } return p; }', call],
     ['N06d second declaration in template', 'function h(p: Prisma.Sql, q: Prisma.Sql) { var p = q; return Prisma.sql`${p}`; }', call],
     ['N07 direct eval', "function h(p: Prisma.Sql, q: Prisma.Sql) { eval('p = q'); return p; }", call],
+    ['N07 parenthesised direct eval', "function h(p: Prisma.Sql, q: Prisma.Sql) { (eval)('p = q'); return p; }", call],
     ['N08 module eval', 'function h() { return Prisma.sql`SELECT 1`; } export function admin(s: string) { eval(s); }', 'await tx.$executeRaw(h());'],
     // LIMIT L1 (namespace laundered into any): ['N69 asserted return through any', 'function v(): string { const P: any = Prisma; return P.raw(\'DELETE FROM "Au\' + \'ditLog"\'); }', 'await tx.$executeRaw`${v()}`;'],
     ['N90 executable SQL string body', '', 'await tx.$executeRaw`CREATE OR REPLACE FUNCTION pg_temp.f() RETURNS void LANGUAGE sql AS \'DELETE FROM "AuditLog"\'`; await tx.$queryRaw`SELECT pg_temp.f()`;'],
