@@ -70,10 +70,13 @@ WHERE = """() => { const p = location.pathname;
   return null; }"""
 
 
-def compose(*arguments: str) -> None:
-    done = subprocess.run(["docker", "compose", *arguments], cwd=ROOT, capture_output=True, text=True, timeout=60)
+def compose_done(done: subprocess.CompletedProcess, verb: str) -> None:
+    # The two Compose calls (SE-02) are written out where they run, each with its whole argv as a literal list: the CI
+    # execution guard (TG-02) reads them there. cwd is the repository root and env is not passed, so Compose follows the
+    # selection the guarded runner set (COMPOSE_PROJECT_NAME / COMPOSE_FILE) - only that synthetic stack, never a stack
+    # this file names.
     if done.returncode:
-        raise RuntimeError("harness: docker compose " + " ".join(arguments) + " failed")
+        raise RuntimeError("harness: docker compose " + verb + " keycloak failed")
 
 
 class SessionEndLive(unittest.TestCase):
@@ -226,7 +229,8 @@ class SessionEndLive(unittest.TestCase):
         afterwards the provider session may still be alive - and Login must not ride it."""
         context, page = self.profile()
         self.sign_in(page, "A")
-        compose("pause", "keycloak")
+        compose_done(subprocess.run(["docker", "compose", "pause", "keycloak"], cwd=ROOT, capture_output=True, text=True,
+                                    timeout=60), "pause")
         try:
             started = time.monotonic()
             page.click("#logout")
@@ -237,7 +241,8 @@ class SessionEndLive(unittest.TestCase):
             self.assertEqual(self.product_sessions("A"), 0)
             time.sleep(3.5)
         finally:
-            compose("unpause", "keycloak")
+            compose_done(subprocess.run(["docker", "compose", "unpause", "keycloak"], cwd=ROOT, capture_output=True, text=True,
+                                        timeout=60), "unpause")
         # Login right away: whether or not the retry has ended the provider session yet, nobody enters without the form.
         seen = []
         for press in range(3):

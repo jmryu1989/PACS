@@ -79,6 +79,10 @@ const KinAuth = (() => {
   const AUTO_LOGIN_KEY = 'kin-auto-login';
   const AUTO_LOGIN_GAP_MS = 60000;
   const UNREADABLE = Object.freeze({ unreadable: true });
+  // 다른 창의 로그아웃 준비가 살아 있는 동안 새 문서가 보이는 문장(A017·SEB-F06). 그 창의 결과를 기다릴 뿐 아무것도 끝내지 않는다.
+  const PREPARING_ELSEWHERE = '다른 창에서 로그아웃을 준비하고 있습니다. 그 창에서 편집으로 돌아가면 이 화면도 이어서 열립니다.';
+  // 그 기다림 동안 다시 보는 간격. 창이 닫혀 잠금이 풀리는 것은 사건으로 오지 않는다.
+  const PREPARING_RECHECK_MS = 1000;
 
   let state = 'unknown';
   // unknown의 사유(storage·record·entry) 또는 unconfirmed의 실패 구분.
@@ -108,6 +112,10 @@ const KinAuth = (() => {
   const leavings = new Map();
   const lifecycleListeners = [];
   const endedListeners = [];
+  // 페이지가 init({ onHold })로 맡긴 안내: 다른 창의 로그아웃 준비를 기다리는 동안 문장, 끝나면 null로 한 번씩 부른다.
+  let holdListener = null;
+  // 그 기다림을 깨우는 일(기록의 storage 알림·종료 통지·창 초점). 기다리는 중이 아니면 null이다.
+  let wake = null;
 
   function announce() {
     const event = Object.freeze({ state, session: sessionId });
@@ -316,7 +324,13 @@ const KinAuth = (() => {
   // 새 문서가 발견한 "떠나려는 중" 기록. 그 준비를 하던 창이 살아 있는지는 비동기로만 알 수 있어 진입(enter)이 가린다.
   let pendingLeaving = null;
 
-  /** 저장소가 말하는 이 문서의 시작 상태. 사람의 로그아웃 기록이 있으면 그 상태로 닫혀 있고, 저장소를 믿을 수 없으면 unknown이다. */
+  /**
+   * 저장소가 말하는 이 문서의 시작 상태. 사람의 로그아웃 기록이 있으면 그 상태로 닫혀 있고, 저장소를 믿을 수 없으면 unknown이다.
+   * "떠나려는 중" 기록이 있으면 저장소 판정은 그 준비가 끝난 뒤로 미룬다(settleLeaving이 다시 부른다) — 판정이 먼저 서면 Login이
+   * 살아 있는 준비의 세션을 끝낼 수 있다. 미루는 것이지 건너뛰는 것이 아니다.
+   * 증명의 답을 잃은 문서(entryLost)는 방금 명시적 로그인을 마친 문서다: 다른 세션의 사람의 로그아웃 기록(어제의 Log out)은
+   * 이 문서를 세우지 않는다 — 그 기록은 이 로그인이 넘겨받을 것이고, 자기 세션의 기록·통지는 진입(adopt)이 따로 막는다.
+   */
   function classify() {
     const { records, unreadable } = readAll();
     pendingLeaving = null;
@@ -325,7 +339,7 @@ const KinAuth = (() => {
       reason = 'record';
       return;
     }
-    const record = blocking(records);
+    const record = entryLost ? null : blocking(records);
     if (record) {
       state = record.status;
       reason = record.reason;
@@ -369,29 +383,69 @@ const KinAuth = (() => {
     return false;
   }
 
+  /** 기다림을 깨운다(기록이 바뀌었을 수 있다). */
+  function rouse() {
+    const run = wake;
+    wake = null;
+    if (run) run();
+  }
+
+  function holding(text) {
+    try { if (holdListener) holdListener(text); } catch (e) {}
+  }
+
   /**
-   * 새 문서가 본 "떠나려는 중" 기록을 가린다. 그 창이 살아 있으면 막는 것이 없다 — 그 창의 미저장 글을 지키기 위해 아무것도
-   * 끝내지 않고, 이 문서는 평소처럼 들어간다(뷰어는 그 준비의 정지를 따른다). 창이 사라졌으면 끝내지 못한 로그아웃이다:
-   * 스스로 들어가지 않고 랜딩에 선다. 그사이 기록이 실제 종료로 올라갔거나 지워졌으면 그 새 상태를 따른다.
+   * 그 기록의 준비를 하던 창이 살아 있는 동안 기다린다(A017·SEB-F06). 이 문서는 들어가지도, 아무것도 끝내지도 않고 준비 중
+   * 정지를 따른다 — 페이지에는 그동안 PREPARING_ELSEWHERE를 보이게 한다. 기록이 바뀌거나(편집으로 돌아감·실제 종료로
+   * 올라감·다른 준비), 창이 사라지거나, 이 문서가 그사이 정해지면(종료 통지·기록) 돌아온다. 기다림은 그 준비의 수명만큼이다.
+   */
+  async function waitWhileAlive(record) {
+    holding(PREPARING_ELSEWHERE);
+    try {
+      for (;;) {
+        await new Promise(resolve => {
+          const timer = setTimeout(resolve, PREPARING_RECHECK_MS);
+          wake = () => { clearTimeout(timer); resolve(); };
+        });
+        wake = null;
+        if (!undecided()) return;
+        const now = readAll().records.get(record.session);
+        if (!now || now.status !== 'leaving' || now.preparation !== record.preparation) return;
+        if (!await leavingAlive(record)) return;
+      }
+    } finally {
+      holding(null);
+    }
+  }
+
+  /**
+   * 새 문서가 본 "떠나려는 중" 기록을 가린다. 그 창이 살아 있으면 그 준비가 끝날 때까지 기다린다 — 그 창의 미저장 글을
+   * 지키기 위해 아무것도 끝내지 않고, 이 문서도 그 준비의 정지를 따른다(들어가지 않는다). 창이 사라졌으면 끝내지 못한
+   * 로그아웃이다: 스스로 들어가지 않고 랜딩에 선다. 기록이 실제 종료로 올라갔거나 지워졌거나 다른 준비로 바뀌었으면 처음부터
+   * 다시 판정한다 — 미뤄 둔 저장소 판정(믿을 수 없는 저장소는 unknown)도 여기서 선다.
    */
   async function settleLeaving() {
-    const record = pendingLeaving;
-    pendingLeaving = null;
-    if (!record || await leavingAlive(record)) return;
-    if (!undecided()) return;
-    const now = readAll().records.get(record.session);
-    if (!now || now.status !== 'leaving' || now.preparation !== record.preparation) {
-      classify();
+    while (pendingLeaving && undecided()) {
+      const record = pendingLeaving;
       pendingLeaving = null;
-      if (!undecided()) { announce(); notifyEnded(); }
-      return;
+      // 이미 본 답(창이 없다)은 다시 묻지 않는다. 기다린 뒤에는 그 끝이 무엇이었는지 다시 본다.
+      const gone = !await leavingAlive(record);
+      if (!gone) await waitWhileAlive(record);
+      if (!undecided()) return;
+      const now = readAll().records.get(record.session);
+      if (now && now.status === 'leaving' && now.preparation === record.preparation && (gone || !await leavingAlive(record))) {
+        if (!undecided()) return;
+        state = 'unconfirmed';
+        reason = 'abandoned';
+        sessionId = record.session;
+        operation = record.operation;
+        announce();
+        notifyEnded();
+        return;
+      }
+      classify();
+      if (!undecided()) { pendingLeaving = null; announce(); notifyEnded(); return; }
     }
-    state = 'unconfirmed';
-    reason = 'abandoned';
-    sessionId = record.session;
-    operation = record.operation;
-    announce();
-    notifyEnded();
   }
 
   /**
@@ -476,9 +530,10 @@ const KinAuth = (() => {
    */
   function adopt(id, identity, viaProof) {
     if (!undecided()) return null;
-    // 증명으로 들어가는 문서는 저장소를 읽지 못해도 들어간다(서버가 방금의 로그인을 확인했다). 그 밖에는 읽지 못하면 닫힌다.
+    // 증명으로 들어가는 문서는 저장소를 읽지 못해도 들어간다(서버가 방금의 로그인을 확인했다). 그 밖에는 읽지 못하면 닫힌다 —
+    // 증명의 답을 잃은 문서도 그렇다(서버의 확인은 증명이 아니라 결속 없는 /api/me였다).
     const { records, unreadable } = readAll();
-    if (unreadable && !viaProof) {
+    if (unreadable && (!viaProof || entryLost)) {
       reason = 'record';
       announce();
       return null;
@@ -517,7 +572,9 @@ const KinAuth = (() => {
       return null;
     }
     const { id, identity } = readIdentity(answer);
-    return adopt(id, identity, false);
+    // 증명의 답을 잃은 문서(A012·SEB-F01)는 방금 명시적 로그인을 마친 문서다: 서버가 확인해 준 세션으로, 성공한 증명 진입처럼
+    // 앞선 세션들의 기록을 넘겨받는다. 그 세션 자신의 기록·통지는 여전히 막는다(adopt).
+    return adopt(id, identity, entryLost);
   }
 
   /**
@@ -537,10 +594,13 @@ const KinAuth = (() => {
       try { entry = await send('/auth/entry', { method: 'POST', json: { proof: offered } }); }
       catch (_) { entry = null; }
       if (!entry || entry.status >= 500 || entry.status === 429 || (entry.status === 200 && !entry.body?.sessionId)) {
-        proofEntry = false;
+        // A012·SEB-F01: 어제의 Log out 기록(다른 세션)은 이 문서를 세우지 않는다 — 결속 없는 /api/me 한 번이 정한다. 그 답을
+        // 기다리는 동안에도 다른 세션의 기록·통지·창 사건으로 판정하지 않는다(A013과 같은 보류: proofEntry는 그대로이고,
+        // 새 세션의 식별값을 아직 모르므로 닫는 것은 진입이 확인한 그 세션 자신의 기록·통지뿐이다). 믿을 수 없는 저장소와
+        // 읽을 수 없는 기록은 지금처럼 랜딩이다.
         entryLost = true;
         classify();
-        if (!undecided()) { announce(); return null; }
+        if (!undecided()) { proofEntry = false; announce(); return null; }
         return enterPlain();
       }
       entryBinding = entry.status === 200 && typeof entry.body?.sessionId === 'string' && entry.body.sessionId
@@ -581,10 +641,12 @@ const KinAuth = (() => {
     const result = undecided() ? await bootstrap() : null;
     // 증명의 답을 잃은 문서가 세션을 확인하지 못했다(서버가 세션 없음을 답했다): 스스로 로그인을 다시 시작하지 않는다.
     if (entryLost && !result && undecided() && !moved) return entryUnconfirmed();
+    if (entryLost && !undecided()) proofEntry = false;
     return result;
   }
 
   function entryUnconfirmed() {
+    proofEntry = false;
     if (!undecided()) return null;
     reason = 'entry-unconfirmed';
     announce();
@@ -770,6 +832,8 @@ const KinAuth = (() => {
    * (다른 탭의 명시적 로그인)으로 다시 열리지 않는다.
    */
   function recheck() {
+    // 다른 창의 준비를 기다리는 중이면 그 기다림도 지금 다시 본다(기록이 바뀌었을 수 있다).
+    rouse();
     if (state === 'active') {
       const own = ownEnd(sessionId);
       if (own) endedElsewhere(own.status, own.reason, own.operation);
@@ -867,10 +931,12 @@ const KinAuth = (() => {
 
     const { records, unreadable } = readAll();
     const own = id ? records.get(id) || null : null, told = id ? heard.get(id) || null : null;
+    // 그 세션의 Log out 준비가 다른 창에서 살아 있다(A017·SEB-F06): 어느 버튼이든 그 세션으로 들어가지도, 끝내지도 않는다 —
+    // 끝내면 그 창의 저장하지 못한 글을 잃고, 들어가면 떠나려는 사람의 세션으로 일하게 된다. 그 창의 결과를 기다린다. 저장소를
+    // 믿을 수 없는 브라우저에서도 같다(그 경우 준비가 끝난 뒤의 판정은 저장소 규칙이 한다).
+    if (own && own.status === 'leaving' && await leavingAlive(own)) throw new Error(PREPARING_ELSEWHERE);
     if (kind === 'login' && id) {
-      // 그 세션의 "떠나려는 중"이 살아 있는 창의 것이면 막는 것이 아니다 — 그 창의 글을 지키기 위해 아무것도 끝내지 않는다.
-      const preparing = !!own && own.status === 'leaving' && await leavingAlive(own);
-      if (reliable && !unreadable && (!own || preparing) && !told) {
+      if (reliable && !unreadable && !own && !told) {
         let read;
         try { read = readIdentity(answer); }
         catch (error) { throw new Error(error.message + ' · "다른 계정으로 로그인"을 눌러 다시 로그인하세요.'); }
@@ -926,7 +992,12 @@ const KinAuth = (() => {
   return {
     KC,
 
-    async init({ retry = false, onRetry } = {}) {
+    /**
+     * `onHold(text)`: 다른 창의 로그아웃 준비가 살아 있어 이 문서가 그 결과를 기다리는 동안 보일 문장(끝나면 null). 이 문서는
+     * 그동안 들어가지 않고 아무것도 끝내지 않는다 — 그 창이 편집으로 돌아가면 클릭 없이 이어서 들어간다.
+     */
+    async init({ retry = false, onRetry, onHold } = {}) {
+      if (typeof onHold === 'function') holdListener = onHold;
       if (entered) return cached;
       if (!initializing) {
         initializing = (async () => {
@@ -1166,7 +1237,13 @@ const KinAuth = (() => {
       if (retrying) return retrying;
       if (!CLOSED.includes(state) || !sessionId) return Promise.resolve(null);
       const session = sessionId, op = nextOperation();
-      writeEnd({ session, operation: op, status: 'ending', origin: 'logout' });
+      /**
+       * A014·SEB-F05: 기록은 그 세션의 기록이 아직 이 브라우저에 있을 때만 고쳐 쓴다. 없으면(이 브라우저의 나중 명시적 로그인이
+       * 넘겨받아 지웠다) 이 랜딩은 지난 세션의 것이다 — 요청은 그대로 보내되(서버가 그 세션을 아직 알면 끝내고, 모르면 아무것도
+       * 하지 않는다) 기록을 다시 만들지 않는다. 다시 만들면 사람의 로그아웃 기록이 되살아나 살아 있는 새 세션의 새 탭·뷰어가
+       * 모두 랜딩에 선다. 결과도 같은 이유로 그 세션의 기록이 있을 때만 남는다(conclude).
+       */
+      if (readAll().records.get(session)) writeEnd({ session, operation: op, status: 'ending', origin: 'logout' });
       state = 'ending';
       reason = null;
       operation = op;

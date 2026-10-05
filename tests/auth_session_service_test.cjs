@@ -104,8 +104,12 @@ const KEYS = {};
 // 'error' = 503, 'lost' = the session is ended and the answer is cut), `ended` holds the provider sessions it ended,
 // `alive` (when a case sets it) the only ones it knows. `serviceTokens` counts client_credentials grants, apart from
 // `tokens` (the user-token requests a case holds and counts); `serviceMode` 'stale' answers the next DELETE 401 once.
+// `members` are the accounts the member administration reads (id -> {username, email, enabled, groups, roles}) and
+// `userLogouts` the ids it logged out as a whole (the admin isolation, SEA-F08). Every login callback and every refresh
+// reads its member's state (enabled) there too; a member a case does not describe is an ordinary enabled one.
 const kc = { server: null, port: 0, held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
-  certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [] };
+  certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
+  members: {}, userLogouts: [], memberRead: 'ok', memberReads: 0 };
 
 async function keycloak() {
   if (kc.server) return;
@@ -155,6 +159,31 @@ async function keycloak() {
         // What the store holds at the moment Keycloak is told: a case reads it here, before the answer.
         if (kc.onLogout) return void kc.onLogout().then(answer, answer);
         return answer();
+      }
+      // The member administration the admin isolation reaches (read a member, disable it, log it out as a whole).
+      // `sessions` of an account are its live provider sessions (GET users/{id}/sessions); `kc.memberRead = 'error'` makes
+      // the member read itself fail (the admin API down for it) while everything else answers.
+      const member = /^\/admin\/realms\/kin\/users\/([^/]+)(\/groups|\/role-mappings\/realm|\/logout|\/sessions)?$/.exec(path);
+      if (member) {
+        if (req.headers.authorization !== 'Bearer ' + SECRETS.serviceToken) return send(403, { error: 'forbidden' });
+        // An account the case did not describe is an ordinary enabled member (every synthetic login reads its state).
+        const id = decodeURIComponent(member[1]);
+        const account = kc.members[id] ?? (kc.members[id] = { username: id, email: id + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'] });
+        if (!member[2] && req.method === 'GET') {
+          kc.memberReads++;
+          if (kc.memberRead === 'error') return send(503, { error: 'unavailable' });
+          return send(200, { id, username: account.username, email: account.email, enabled: account.enabled, emailVerified: true });
+        }
+        if (!member[2] && req.method === 'PUT') { Object.assign(account, JSON.parse(body || '{}')); return send(204); }
+        if (member[2] === '/groups' && req.method === 'GET') return send(200, account.groups.map(name => ({ id: 'syn-group-' + name, name, path: '/' + name })));
+        if (member[2] === '/role-mappings/realm' && req.method === 'GET') return send(200, account.roles.map(name => ({ name })));
+        if (member[2] === '/sessions' && req.method === 'GET')
+          return send(200, (account.sessions ?? []).filter(sid => !kc.ended.includes(sid)).map(sid => ({ id: sid, userId: id })));
+        if (member[2] === '/logout' && req.method === 'POST') {
+          kc.userLogouts.push(id);
+          for (const sid of account.sessions ?? []) if (!kc.ended.includes(sid)) kc.ended.push(sid);
+          return send(204);
+        }
       }
       if (path === '/realms/kin/protocol/openid-connect/token') {
         const form = Object.fromEntries(new URLSearchParams(body));
@@ -335,6 +364,8 @@ function secretEntries(kind, value) {
 
 const DETAIL_KEYS = {
   'auth.login:success': ['dataSubject', 'institution', 'ip', 'outcome'],
+  // A login entered while the member's state could not be read (the admin API down) says so.
+  'auth.login:success:unverified': ['dataSubject', 'institution', 'ip', 'memberState', 'outcome'],
   'auth.login:failure': ['cause', 'dataSubject', 'institution', 'ip', 'outcome'],
   'auth.logout': ['cause', 'dataSubject', 'institution', 'ip'],
   // A session ended by a re-authentication also says what asked for it (trigger: the declared reason, or register).
@@ -342,7 +373,8 @@ const DETAIL_KEYS = {
   'auth.session.expired': ['cause', 'dataSubject', 'institution', 'ip'],
   'auth.entry': ['dataSubject', 'institution', 'ip'],
 };
-const shapeOf = row => row.action === 'auth.login' ? 'auth.login:' + row.detail.outcome
+const shapeOf = row => row.action === 'auth.login'
+  ? 'auth.login:' + row.detail.outcome + (row.detail.memberState === undefined ? '' : ':unverified')
   : row.action === 'auth.logout' && row.detail.cause === 'reauthentication' ? 'auth.logout:reauthentication' : row.action;
 // The login starts that carry an intent (POST /api/auth/login): what the landing declares.
 const SWITCH = { intent: 'reauthenticate', reason: 'switch_account' };
@@ -380,7 +412,8 @@ async function world(t, { now = START } = {}) {
   const [{ left }] = await base.$queryRawUnsafe(`SELECT (SELECT count(*) FROM "AuditLog") + (SELECT count(*) FROM "AuthSession") + (SELECT count(*) FROM "IdpSessionEnd") AS left`);
   assert.equal(Number(left), 0, 'every world starts with no session, no end mark and no audit row');
   Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
-    certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [] });
+    certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
+    members: {}, userLogouts: [], memberRead: 'ok', memberReads: 0 });
   idp.started = 0;
 
   const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [] };
@@ -443,8 +476,10 @@ async function world(t, { now = START } = {}) {
   } });
   const make = name => {
     // The product's own Keycloak admin client, over the fake's address: each instance its own (its own service token).
-    const service = new AuthService(recorder(name), new KeycloakService());
-    return { name, service, guard: new AuthGuard(new Reflector(), service), controller: new AuthController(service), handled: 0 };
+    // `prisma` is the instance's recording view, for the other product services a case builds over the same instance.
+    const prisma = recorder(name);
+    const service = new AuthService(prisma, new KeycloakService());
+    return { name, service, prisma, guard: new AuthGuard(new Reflector(), service), controller: new AuthController(service), handled: 0 };
   };
   w.I1 = make('I1');
   w.I2 = make('I2');
@@ -2513,10 +2548,33 @@ test('U5E-07 (acceptance 4, R2) a re-authentication intent starts by POST, probe
   const begin2 = await w.call(w.I2, 'switch', { body: UNREADABLE });
   const none = await refuseFlow(w, w.I2, begin2, 'login_required');
   assert.deepEqual([none.status, atProvider(none), promptOf(none), none.cookie, (await w.rows()).length], [302, true, 'login', 'P', rows]);
-  // Any other answer of the probe is a failed login of this server's own flow: the landing, with its row.
+  // Any other answer of the probe (here interaction_required) has not identified the SSO - it is neither "no SSO" nor a
+  // licence to enter (SEA-F07). The probe is asked once more; a second such answer goes on to the fresh step
+  // (prompt=login, commander's decision of fix round 1): only credentials entered there make a session - never the
+  // probe step, never a plain login, and no dead end at the landing.
+  const live3 = await w.sessions();
   const begin3 = await w.call(w.I2, 'switch', { body: UNREADABLE });
-  const failed = await refuseFlow(w, w.I2, begin3, 'interaction_required');
-  assert.deepEqual([failed.location, (await w.rows()).at(-1).detail.cause], [landing('interaction_required'), 'provider_error']);
+  const retried3 = await refuseFlow(w, w.I2, begin3, 'interaction_required');
+  assert.deepEqual([retried3.status, atProvider(retried3), promptOf(retried3), retried3.newSid, retried3.cookie, (await w.rows()).length],
+    [302, true, 'none', null, 'P', rows], 'one more probe, nothing recorded yet');
+  const fresh3 = await refuseFlow(w, w.I2, retried3, 'interaction_required');
+  assert.deepEqual([fresh3.status, atProvider(fresh3), promptOf(fresh3), fresh3.newSid, fresh3.proof, await w.sessions(), (await w.rows()).length],
+    [302, true, 'login', null, undefined, live3, rows], 'the fresh step: credentials required; the probe step made no session');
+  const d = 'syn-sub-u5e7-d';
+  const entered3 = await answerFlow(w, w.I2, fresh3, await w.issue('u5e7-d', { sub: d, groups: [B] }));
+  assert.deepEqual([entered3.cookie, !!entered3.proof, await w.sessions(), summary(rowsOf(await w.rows(), d))],
+    [ 'S', true, live3 + 1, [['auth.login', 'success', B]]], 'credentials entered at the fresh step: the session');
+  // Only an answer that the provider itself is down ends at the landing with the sentence; the intent stays with the
+  // browser meanwhile (a plain start is the probe again) and the same press works again.
+  const begin4a = await w.call(w.I2, 'switch', { body: UNREADABLE });
+  const retried4a = await refuseFlow(w, w.I2, begin4a, 'temporarily_unavailable');
+  const down = await refuseFlow(w, w.I2, retried4a, 'temporarily_unavailable');
+  assert.deepEqual([promptOf(retried4a), down.location, down.newSid, (await w.rows()).at(-1).detail.cause],
+    ['none', landing('sso_unidentified'), null, 'provider_error']);
+  assert.ok(down.pendingCookie, 'the intent is kept with the browser');
+  const link3 = await w.call(w.I2, 'login', { cookie: down.pendingCookie });
+  assert.deepEqual([link3.status, promptOf(link3)], [302, 'none'], 'a plain start meanwhile does not ride the unidentified SSO');
+  assert.equal(await w.sessions(), live3 + 1, 'no session from the probe steps');
   // The provider end cannot be confirmed (the admin API is down, the token endpoint works): no fresh step - the
   // landing says so, the SSO stays marked, and the same press works once the provider answers.
   const c = 'syn-sub-u5e7-c', Z = idpOf(c);
@@ -2636,4 +2694,225 @@ test('U5E-10 a callback is never answered with an error body: a stray one enters
   assert.deepEqual([await w.base.authSession.count({ where: { sid: odd } }), await w.marks(), summary(rowsOf(await w.rows(), 'syn-sub-u5e10-odd'))],
     [0, [], [['auth.logout', 'logout', null]]]);
   await w.finish('U5E-10');
+});
+
+// SEA-F02 (review A of 757e37f): design 5-0 item 4 - the first cause and decidedAt of a mark are never overwritten by a
+// later end or a retry; decidedAt also anchors the 13 h keep window. The opposite side: a later end still re-wakes the
+// provider end of a mark whose provider session produced a code again.
+test('U5E-11 a later end of the same provider session for another cause keeps the first cause and time, and still wakes the provider end', async t => {
+  const w = await world(t);
+  const s = 'syn-sub-u5e11', X = idpOf(s);
+  const sid = await w.session(await w.issue('u5e11-v1', { sub: s, groups: [A] }));
+  kc.logoutMode = 'error';
+  assert.equal((await w.call(w.I1, 'logout', { sid })).status, 204);
+  await w.told();
+  const first = await w.mark(X);
+  assert.deepEqual([first.cause, first.confirmedAt], ['logout', null], 'the doctor\'s Log out; the provider end not confirmed');
+  // A minute later the SSO is still alive. This browser (its product cookie gone) presses Switch account: the probe finds
+  // that SSO and ends it again - this time for account_switch - and the provider confirms.
+  w.tick(60_000);
+  kc.logoutMode = 'ok';
+  const begin = await w.call(w.I1, 'switch', { body: SWITCH });
+  const probed = await answerFlow(w, w.I1, begin, await w.issue('u5e11-v2', { sub: s, groups: [A] }));
+  assert.deepEqual([atProvider(probed), promptOf(probed), probed.newSid], [true, 'login', null]);
+  let mark = await w.mark(X);
+  assert.deepEqual([mark.cause, mark.decidedAt.getTime(), mark.confirmedAt !== null], ['logout', first.decidedAt.getTime(), true],
+    'the first cause and decision time stay; the end is now confirmed');
+  // The confirmed mark's SSO answers once more (another recovery start, record_unreadable) while the admin API is down: the
+  // end re-wakes the mark (unconfirmed again, asked again) and still keeps the first cause and time.
+  w.tick(60_000);
+  kc.logoutMode = 'error';
+  const asked = kc.endRequests.filter(x => x === X).length;
+  const begin2 = await w.call(w.I2, 'switch', { body: UNREADABLE });
+  const probed2 = await answerFlow(w, w.I2, begin2, await w.issue('u5e11-v3', { sub: s, groups: [A] }));
+  assert.deepEqual([probed2.location, probed2.newSid], [landing('end_unconfirmed'), null]);
+  mark = await w.mark(X);
+  assert.deepEqual([mark.cause, mark.decidedAt.getTime(), mark.confirmedAt, kc.endRequests.filter(x => x === X).length - asked],
+    ['logout', first.decidedAt.getTime(), null, 1], 'woken: unconfirmed again and asked again; the first cause and time stay');
+  kc.logoutMode = 'ok';
+  assert.deepEqual(await endsOf(w, s), [['auth.logout', 'logout', A]], 'one record: the probes ended no product session');
+  await w.finish('U5E-11');
+});
+
+// SEA-F03 (review A): the provider-session lock has a bounded wait (lock_timeout 3 s). A Log out that cannot get it answers
+// 409 AUTH_SESSION_BUSY with nothing written; a callback that cannot get it answers the landing with no session. Only a
+// real PostgreSQL (the CI runtime job) proves the lock itself; the case holds one side inside its transaction past the wait.
+test('U5E-12 a provider-session lock held past its wait: the Log out answers 409 with no mark, record or provider call; a callback answers the landing with no session', async t => {
+  const w = await world(t);
+  // (a) the callback C holds the lock of X (inside its transaction: mark read, before its create) for longer than the wait.
+  let s = 'syn-sub-u5e12-c';
+  const X = idpOf(s);
+  const sid = await w.session(await w.issue(s + '-v1', { sub: s, groups: [A] }));
+  const begin = await w.call(w.I2, 'login');
+  let gate = w.gate('I2', 'tx.create');
+  const heldC = answerFlow(w, w.I2, begin, await w.issue(s + '-v2', { sub: s, groups: [A] }));
+  await gate.arrived();
+  // The held transaction is released whatever the assertions find: a failure here must not leave it holding its lock.
+  let busy, waited, before;
+  try {
+    const from = performance.now();
+    busy = await w.call(w.I1, 'logout', { sid });
+    waited = performance.now() - from;
+    before = [await w.version(sid), await w.mark(X), await endsOf(w, s), [...kc.endRequests]];
+  } finally {
+    gate.release();
+  }
+  const created = await heldC;
+  assert.deepEqual([...coded(busy), busy.cookie], [409, 'AUTH_SESSION_BUSY', 'AUTH_SESSION_BUSY', 'K']);
+  assert.ok(waited >= 2500 && waited < 10000, `the Log out waited for the lock and gave up by its bound (${Math.round(waited)} ms)`);
+  assert.deepEqual(before, [s + '-v1', null, [], []], 'a lost lock wait ends nothing, leaves no mark or record and tells the provider nothing');
+  assert.equal(created.cookie, 'S', 'the holder goes on');
+  // The opposite side: the next Log out gets the lock and ends both rows of X.
+  assert.equal((await w.call(w.I1, 'logout', { sid })).status, 204);
+  assert.deepEqual([await w.version(created.newSid), (await w.mark(X)).cause, await endsOf(w, s)],
+    [null, 'logout', [['auth.logout', 'logout', A], ['auth.logout', 'logout', A]]]);
+  // (b) a Log out holds the lock of Y (inside its transaction: deleted, before its mark) for longer than the wait; a callback
+  // of Y meanwhile cannot get the lock: the landing, no session, its failure row. The Log out then completes.
+  s = 'syn-sub-u5e12-l';
+  const Y = idpOf(s);
+  const sidY = await w.session(await w.issue(s + '-v1', { sub: s, groups: [B] }));
+  const beginY = await w.call(w.I2, 'login');
+  gate = w.gate('I1', 'tx.mark');
+  const heldL = w.call(w.I1, 'logout', { sid: sidY });
+  await gate.arrived();
+  let callback;
+  try {
+    const opened = w.calls.filter(c => c === 'I2:tx.open').length;
+    callback = answerFlow(w, w.I2, beginY, await w.issue(s + '-v2', { sub: s, groups: [B] }));
+    // Held for longer than the lock wait counted from the moment the callback asks for its transaction (the exchange
+    // and the token check before it take their own time).
+    await w.until('the callback asking for its transaction', async () => w.calls.filter(c => c === 'I2:tx.open').length > opened);
+    await new Promise(resolve => setTimeout(resolve, 3600));
+  } finally {
+    gate.release();
+  }
+  const [ended, refused] = await Promise.all([heldL, callback]);
+  assert.deepEqual([ended.status, refused.location, refused.newSid, await w.base.authSession.count({ where: { sub: s } })],
+    [204, landing('login_failed'), null, 0]);
+  assert.deepEqual([(await w.mark(Y)).cause, rowsOf(await w.rows(), s).filter(r => r.action === 'auth.login').map(r => r.detail.cause)],
+    ['logout', ['session_failed']]);
+  await w.finish('U5E-12');
+});
+
+// SEA-F08 (review A): R1 - no product path ends a session without the mark. An administrator's isolation of a member
+// (suspend here; approval changes and their cancellation take the same isolate) ends the member's sessions through the
+// same end: a mark per provider session, the provider told, one record per ended session with cause isolation. The
+// whole-user logout stays (the member's other PCs end too). A callback that had exchanged its code before the isolation
+// makes no session. Another member is untouched.
+test('U5E-13 an administrator\'s isolation ends every session of the member through the same end: marks, provider end, records with cause isolation; a callback in flight makes no session', async t => {
+  const w = await world(t);
+  const { AdminService } = require('/app/dist/admin.service');
+  const m = 'syn-sub-u5e13', other = 'syn-sub-u5e13-other';
+  const P1 = 'syn-idp-u5e13-pc1', P2 = 'syn-idp-u5e13-pc2';
+  kc.members[m] = { username: 'syn-member-u5e13', email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'] };
+  const sid1 = await w.session(await w.issue('u5e13-pc1', { sub: m, groups: [A], idp: P1 }));
+  const sid2 = await w.session(await w.issue('u5e13-pc2', { sub: m, groups: [A], idp: P2 }));
+  const kept = await w.session(await w.issue('u5e13-other', { sub: other, groups: [A] }));
+  // A login of the member on PC1 has exchanged its code (PC1's SSO answered without a form) and waits for its transaction.
+  const begin = await w.call(w.I2, 'login');
+  const gate = w.gate('I2', 'tx.open');
+  const heldC = answerFlow(w, w.I2, begin, await w.issue('u5e13-pc1-again', { sub: m, groups: [A], idp: P1 }));
+  await gate.arrived();
+  // And on a third PC a first login of the member, a NEW provider session no product row knows, has exchanged its code
+  // before the isolation too (its member read said "enabled") and commits after the cleanup. The provider lists the
+  // member's live provider sessions: those of PC1, PC2 and PC3.
+  const P3 = 'syn-idp-u5e13-pc3';
+  kc.members[m].sessions = [P1, P2, P3];
+  const I3 = w.instance('I3');
+  const begin3 = await w.call(I3, 'login');
+  const gate3 = w.gate('I3', 'tx.open');
+  const heldNew = answerFlow(w, I3, begin3, await w.issue('u5e13-pc3', { sub: m, groups: [A], idp: P3 }));
+  await gate3.arrived();
+  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
+  const after = await admin.patchUser(m, { enabled: false }, { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' });
+  await w.told();
+  assert.deepEqual([after.enabled, kc.members[m].enabled, kc.userLogouts], [false, false, [m]], 'disabled and logged out as a whole');
+  assert.deepEqual([await w.version(sid1), await w.version(sid2), await w.version(kept)], [null, null, 'u5e13-other']);
+  assert.deepEqual(await w.marks(), [[P1, 'isolation', true], [P2, 'isolation', true], [P3, 'isolation', true]],
+    'a mark for every provider session the provider lists - also the one no product row knows - confirmed');
+  assert.deepEqual(await endsOf(w, m), [['auth.logout', 'isolation', A], ['auth.logout', 'isolation', A]], 'one record per ended session');
+  assert.deepEqual([...kc.endRequests].sort(), [P1, P2, P3]);
+  gate.release();
+  const late = await heldC;
+  assert.deepEqual([late.newSid, late.proof, await w.base.authSession.count({ where: { sub: m } })], [null, undefined, 0],
+    'the mark blocks the callback that had exchanged its code before the isolation');
+  assert.equal(rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause, 'idp_session_ended');
+  // The new provider session's callback commits after the cleanup: its provider session is marked (a recorded fact, not
+  // a timing) - no session; its failure row says so.
+  gate3.release();
+  const isolated = await heldNew;
+  assert.deepEqual([isolated.newSid, isolated.proof, await w.base.authSession.count({ where: { sub: m } })],
+    [null, undefined, 0], 'a code exchanged before the isolation makes no session after it');
+  assert.equal(rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause, 'idp_session_ended');
+  // A session of the isolated member that exists anyway (put here directly): its next refresh is refused by this server
+  // at once - ended with cause isolation and its mark - whatever the provider's refresh answer says.
+  const v = await w.issue('u5e13-left', { sub: m, groups: [A], idp: 'syn-idp-u5e13-left' });
+  const left = await w.session(v, { atExpiresAt: lapsed() });
+  kc.auto = () => reply.tokens(v);
+  const refused = await w.call(w.I1, 'get', { sid: left });
+  kc.auto = null;
+  assert.deepEqual([...coded(refused), await w.version(left)], [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED', null]);
+  await w.told();
+  assert.deepEqual([(await w.marks()).find(x => x[0] === 'syn-idp-u5e13-left'), (await endsOf(w, m)).length],
+    [['syn-idp-u5e13-left', 'isolation', true], 3]);
+  // The opposite side: the other (enabled) member's refresh goes on - also when its state cannot be read (admin API down).
+  const ov = await w.issue('u5e13-other-next', { sub: other, groups: [A] });
+  const oldOther = await w.session(await w.issue('u5e13-other-2', { sub: other, groups: [A] }), { atExpiresAt: lapsed() });
+  kc.auto = () => reply.tokens(ov);
+  kc.memberRead = 'error';
+  const reads = kc.memberReads;
+  assert.deepEqual([(await w.call(w.I1, 'get', { sid: oldOther })).status, kc.memberReads - reads], [200, 1]);
+  kc.memberRead = 'ok';
+  kc.auto = null;
+  await w.finish('U5E-13');
+});
+
+// Commander decisions on SEA-F08 (fix round 1): the isolation's marks are a recorded fact - re-activating the member
+// (approval change, cancel, Activate) does not reopen a provider session the isolation listed. The member read at the
+// callback refuses a readable "disabled" (member_isolated) and never blocks a login because it could not be read.
+test('U5E-14 a code exchanged before an isolation stays refused after the member is active again; the member read refuses "disabled" and lets an unreadable state through, recorded', async t => {
+  const w = await world(t);
+  const { AdminService } = require('/app/dist/admin.service');
+  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
+  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
+  const m = 'syn-sub-u5e14', Q = 'syn-idp-u5e14-q';
+  kc.members[m] = { username: 'syn-member-u5e14', email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [Q] };
+  // The member's login has exchanged its code (no product row yet) and is held; the member is suspended and then made
+  // active again before that login commits.
+  const begin = await w.call(w.I2, 'login');
+  const gate = w.gate('I2', 'tx.open');
+  const held = answerFlow(w, w.I2, begin, await w.issue('u5e14-q', { sub: m, groups: [A], idp: Q }));
+  await gate.arrived();
+  try {
+    assert.equal((await admin.patchUser(m, { enabled: false }, caller)).enabled, false);
+    assert.equal((await admin.patchUser(m, { enabled: true }, caller)).enabled, true);
+  } finally {
+    gate.release();
+  }
+  const late = await held;
+  assert.deepEqual([kc.members[m].enabled, late.newSid, late.proof, await w.base.authSession.count({ where: { sub: m } })],
+    [true, null, undefined, 0], 'active again, and still no session from the provider session the isolation marked');
+  assert.deepEqual([(await w.marks()).find(x => x[0] === Q)?.slice(0, 2), rowsOf(await w.rows(), m).at(-1).detail.cause],
+    [[Q, 'isolation'], 'idp_session_ended']);
+  // A new login after the re-activation (a new provider session, credentials entered) enters as usual.
+  const again = await login(w, w.I2, await w.issue('u5e14-new', { sub: m, groups: [A], idp: 'syn-idp-u5e14-new' }));
+  assert.deepEqual([again.done.cookie, !!again.done.proof], ['S', true]);
+  // A member made inactive outside the isolation (no mark names its provider session): a readable "disabled" refuses.
+  const d = 'syn-sub-u5e14-disabled';
+  kc.members[d] = { username: 'syn-member-u5e14-d', email: d + '@synthetic.test', enabled: false, groups: [A], roles: ['radiologist'] };
+  const refused = await login(w, w.I2, await w.issue('u5e14-d', { sub: d, groups: [A] }));
+  assert.deepEqual([refused.done.location, refused.done.newSid, await w.base.authSession.count({ where: { sub: d } }),
+    rowsOf(await w.rows(), d).at(-1).detail.cause], [landing('login_failed'), null, 0, 'member_isolated']);
+  // The admin API cannot answer the member read: the login is not blocked (no false trigger on the ordinary path) and its
+  // success row records that the state was not verified.
+  const u = 'syn-sub-u5e14-unread';
+  kc.memberRead = 'error';
+  const reads = kc.memberReads;
+  const unread = await login(w, w.I2, await w.issue('u5e14-u', { sub: u, groups: [A] }));
+  kc.memberRead = 'ok';
+  assert.deepEqual([unread.done.cookie, !!unread.done.proof, kc.memberReads - reads], ['S', true, 1]);
+  assert.deepEqual(rowsOf(await w.rows(), u).map(r => [r.detail.outcome, r.detail.memberState]), [['success', 'member_state_unverified']]);
+  // ... and a readable "enabled" records nothing extra.
+  assert.equal(rowsOf(await w.rows(), m).filter(r => r.detail.outcome === 'success').at(-1).detail.memberState, undefined);
+  await w.finish('U5E-14');
 });

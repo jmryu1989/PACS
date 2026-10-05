@@ -617,7 +617,13 @@ class AuthAuditLive(unittest.TestCase):
                          [("health", 200), ("me without a session", 401), ("an unknown route", 404), ("me", 200), ("a refused write", 403)])
         for label, (_, headers, _) in answers:
             self.assertEqual(headers.get("Cache-Control"), "no-store", label)
-        for path in ("/auth/realms/kin/account", "/auth/realms/kin/account/", "/auth/realms/kin/account/account-security/signing-in"):
+        # Every spelling that can reach Keycloak's account console (SEA-F05): a matrix parameter (Keycloak's path matching
+        # ignores it), a sub-path, another case, and the forms nginx normalises before it matches a location
+        # (%-encoding, a doubled slash, a dot segment).
+        for path in ("/auth/realms/kin/account", "/auth/realms/kin/account/", "/auth/realms/kin/account/account-security/signing-in",
+                     "/auth/realms/kin/account;x=1", "/auth/realms/kin/account;jsessionid=1/", "/auth/realms/kin/ACCOUNT/",
+                     "/auth/realms/KIN/Account", "/auth/realms/kin/%61ccount/", "/auth/realms/kin//account/",
+                     "/auth/realms/kin/./account/", "/auth/realms/kin/x/../account/"):
             self.assertEqual(404, browser.call("GET", path)[0], path)
         # The opposite side: discovery and the login form are still served (every login of this suite passes them).
         self.assertEqual(200, anonymous.call("GET", "/auth/realms/kin/.well-known/openid-configuration")[0])

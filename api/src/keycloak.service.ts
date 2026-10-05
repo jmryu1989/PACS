@@ -231,6 +231,44 @@ export class KeycloakService {
     this.cache.clear();
   }
 
+  /**
+   * 회원 하나의 상태(로그인 세션을 만들거나 이어도 되는가) — 관리자 격리가 쓰는 값(enabled)을 읽는다. 고정 동작이고, 한도
+   * `limitMs`는 서비스 토큰 취득·401 재취득까지 포함한 전체의 것이다. `disabled`는 비활성이거나 없는 회원, `unknown`은
+   * 읽지 못했다(시간 초과·연결 실패·5xx) — 부른 쪽이 각자 닫는다.
+   */
+  async memberState(id: string, limitMs: number): Promise<'enabled' | 'disabled' | 'unknown'> {
+    const signal = AbortSignal.timeout(limitMs);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await fetch(`${this.base}/admin/realms/${this.realm}/users/${encodeURIComponent(id)}`, {
+          headers: { Authorization: 'Bearer ' + (await this.admToken(signal)) },
+          signal,
+        });
+        if (res.status === 401 && attempt === 0) {
+          this.token = null;
+          continue;
+        }
+        if (res.status === 404) return 'disabled';
+        if (!res.ok) return 'unknown';
+        const user: any = await res.json();
+        return user && user.enabled === true ? 'enabled' : 'disabled';
+      }
+    } catch {
+      // 모른다.
+    }
+    return 'unknown';
+  }
+
+  /**
+   * 회원 하나의 지금 provider(SSO) 세션 id들 — 격리가 그 전부에 표식을 남기려고 읽는다(서비스 계정의 view-users로 읽을 수
+   * 있음: closure-audit facts.md "GET users/{id}/sessions 200"). 읽지 못하면 던진다 — 격리는 그 자리에서 실패로 끝난다.
+   */
+  async userSessions(id: string): Promise<string[]> {
+    const sessions: any[] = await this.adm(`/users/${encodeURIComponent(id)}/sessions`) ?? [];
+    if (!Array.isArray(sessions)) throw new ServiceUnavailableException('Keycloak 사용자 세션 목록을 읽지 못했습니다');
+    return sessions.map(session => session?.id).filter((sid): sid is string => typeof sid === 'string' && !!sid);
+  }
+
   async logoutUser(id: string): Promise<void> {
     await this.adm(`/users/${encodeURIComponent(id)}/logout`, 'POST');
   }

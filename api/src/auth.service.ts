@@ -42,6 +42,10 @@ const IDP_END_BACKOFF_MS = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_
 const IDP_END_KEEP_MS = 13 * 60 * 60 * 1000;
 // provider 세션 잠금(pg_advisory_xact_lock)의 고정 이름공간. 다른 용도의 advisory lock과 키가 겹치지 않게 한다.
 const IDP_LOCK_SPACE = 0x4b494e55;
+// 콜백·갱신이 회원 상태(Keycloak의 enabled — 격리가 쓰는 값)를 읽는 한도. 읽지 못하면 막지 않으므로 짧게 둔다.
+const MEMBER_READ_MS = 2000;
+// 인증 서버 자체가 답하지 못했다는 OAuth 오류(그 밖의 probe 오류는 SSO를 알아내지 못한 것일 뿐이다).
+const PROVIDER_DOWN = ['temporarily_unavailable', 'server_error'];
 // Keycloak 토큰 교환(로그인 code, refresh) 한 번이 쓸 수 있는 시간(U5S-REQ-18의 외부 조회 한도).
 const IDP_TOKEN_MS = 5000;
 /**
@@ -66,7 +70,8 @@ const AUTH_ENTRY = 'auth.entry';
  */
 const LOGIN_REASONS = ['logout_unfinished', 'switch_account', 'storage_untrusted', 'record_unreadable'] as const;
 type Reason = typeof LOGIN_REASONS[number] | 'register';
-type EndCause = 'logout' | 'account_switch' | 'reauthentication' | 'idle' | 'refresh_failed' | 'sweep';
+// isolation: 관리자가 회원을 격리(정지·승인 변경·승인 취소)하며 그 회원의 세션을 끝냈다(사람의 Log out도 만료도 아니다).
+type EndCause = 'logout' | 'account_switch' | 'reauthentication' | 'idle' | 'refresh_failed' | 'sweep' | 'isolation';
 /** 사유가 접속기록의 원인이 되는 표(A019): 사람의 Log out의 완료는 logout, 계정 바꾸기만 account_switch, 그 밖은 재인증이다. */
 const REASON_CAUSE: Record<Reason, EndCause> = {
   logout_unfinished: 'logout',
@@ -97,7 +102,9 @@ type Session = {
 };
 type Who = { actor: string; target: string; institution: string | null };
 export type LoginFailureCause =
-  'provider_error' | 'state_mismatch' | 'no_code' | 'exchange_failed' | 'token_invalid' | 'session_failed' | 'idp_session_ended';
+  'provider_error' | 'state_mismatch' | 'no_code' | 'exchange_failed' | 'token_invalid' | 'session_failed' | 'idp_session_ended'
+  // 비활성(관리자가 격리했거나 끈) 회원의 로그인: 세션을 만들지 않는다.
+  | 'member_isolated';
 type StorageStep = 'session_read' | 'session_write' | 'end_transaction' | 'login_transaction' | 'login_failure_row'
   | 'entry_transaction' | 'sweep_read' | 'sweep_target' | 'sweep_cycle'
   | 'idp_end_read' | 'idp_end_write' | 'idp_end_cycle';
@@ -501,6 +508,42 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * 관리자의 회원 격리(정지·승인 변경·승인 취소, admin.service isolate)가 그 회원의 제품 세션을 끝낸다. 길은 하나다(R1):
+   * 세션마다 그 provider 세션의 잠금 안에서 표식·삭제·접속기록(원인 isolation)을 한 commit으로 하고, commit 뒤 provider
+   * 종료를 청한다. 표식이 있으므로 격리 전에 code를 교환해 둔 콜백도 그 provider 세션으로는 세션을 만들지 못한다.
+   * 경쟁에 진 관찰(그사이 갱신된 행)은 다시 읽어 끝내고, 그래도 남으면 409다 — 부른 쪽이 격리 실패로 다룬다.
+   * 다른 PC의 provider 세션까지 끝내는 것은 부른 쪽의 사용자 전체 로그아웃(logoutUser)이다: 격리는 그 회원 전체의 일이다.
+   */
+  async endMemberSessions(sub: string, idpSids: string[] = []): Promise<void> {
+    /**
+     * 먼저, 부른 쪽이 인증 서버에서 읽어 온 그 회원의 provider 세션 **전부**에 표식을 남긴다(제품 행이 아직 없는 것까지 —
+     * 격리 전에 code를 교환해 둔 콜백의 SSO도 여기 있다). 기록된 사실이라 시점에 기대지 않는다: 그 콜백은 언제 commit하든,
+     * 그 사이 회원이 다시 활성화되었든 콜백의 표식 검사가 막는다. 각 표식은 그 provider 세션의 잠금 안에서 남기고 그
+     * provider 세션의 행을 함께 끝낸다(endRows — 같은 잠금이라 먼저 잠금을 쥔 콜백의 세션은 그 commit 뒤 여기서 끝난다).
+     */
+    for (const idpSid of new Set(idpSids)) {
+      try {
+        await this.prisma.$transaction(async tx => {
+          await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+          await this.lockIdpSession(tx, idpSid);
+          await this.endRows(tx, idpSid, [], 'isolation', null);
+        }, { maxWait: 4000, timeout: 8000 });
+      } catch (error: any) {
+        if (lockWaitExceeded(error)) throw this.conflict();
+        this.storageWarning('end_transaction');
+        throw this.storageFailure();
+      }
+      this.tellIdp(idpSid);
+    }
+    for (let rounds = 0; ; rounds++) {
+      const rows: Session[] = await this.storage('session_read', () => this.prisma.authSession.findMany({ where: { sub } }));
+      if (!rows.length) return;
+      if (rounds === TRANSITION_LIMIT) throw this.conflict();
+      for (const row of rows) await this.endAndTell(row, 'isolation', null);
+    }
+  }
+
+  /**
    * 로그아웃·계정 전환·재인증·가입 진입. 0행이면 지금 세션으로 인증을 이어 가지 않고 다시 읽는다 — 없으면 이미 끝난
    * 것이고, 있으면 그 새 관찰로 삭제를 다시 한다. 세 번째 0행 뒤에도 남아 있으면 409(종료 행 0, 쿠키 그대로).
    * 이 호출이 실제로 끝냈을 때만 `ended`이고, 그때의 provider 세션을 함께 돌려준다.
@@ -800,6 +843,25 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       if (flow.phase === 'probe' && error === 'login_required')
         return { kind: 'redirect', location: this.startFlow(req, res,
           { phase: 'fresh', reason: flow.reason, prompt: flow.prompt, restarts: flow.restarts }) };
+      if (flow.phase === 'probe') {
+        /**
+         * probe의 그 밖의 답(interaction_required·consent_required 같은): 이 브라우저의 SSO를 알아내지 못했다 — 끝낼 SSO가
+         * 없다는 뜻도, 자격 없이 들어가도 된다는 뜻도 아니다. 한 번 다시 묻는다(일시적인 답이면 이번에 code나 login_required가
+         * 온다). 또 그러면 fresh 단계(prompt=login)로 간다: 자격을 실제로 입력해야만 세션이 생기므로 R2가 지켜지고, 랜딩에서
+         * 같은 답만 되풀이하는 막다른 길이 없다(지휘자 결정, 수정 1회차). 평범한 로그인으로 낮추지 않고, probe 단계는 어떤
+         * 답에도 제품 세션을 만들지 않는다. 인증 서버 자체가 답하지 못한 것(temporarily_unavailable·server_error)만 랜딩의
+         * 문장이다 — 그때는 그 의도를 실은 흐름 하나를 남겨 그동안의 평범한 시작도 probe로 간다.
+         */
+        if (flow.restarts === 0)
+          return { kind: 'redirect', location: this.startFlow(req, res,
+            { phase: 'probe', reason: flow.reason, prompt: flow.prompt, restarts: 1 }) };
+        if (!PROVIDER_DOWN.includes(error))
+          return { kind: 'redirect', location: this.startFlow(req, res,
+            { phase: 'fresh', reason: flow.reason, prompt: flow.prompt, restarts: flow.restarts }) };
+        await this.loginFailureRow(req, 'provider_error', null);
+        this.startFlow(req, res, { phase: 'probe', reason: flow.reason, prompt: flow.prompt, restarts: flow.restarts });
+        return { kind: 'landing', error: 'sso_unidentified' };
+      }
       // 실패 행의 error 원문은 행에 싣지 않는다(OP-2 A).
       await this.loginFailureRow(req, 'provider_error', null);
       return { kind: 'landing', error };
@@ -860,7 +922,20 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       && !(typeof payload.azp === 'string' && payload.azp.startsWith('gw-')) ? 'clinician.html' : 'main.html';
     const sid = randomBytes(32).toString('base64url');
     const proof = randomBytes(32).toString('base64url');
-    const detail = JSON.stringify({ institution: who.institution, ip, dataSubject: null, outcome: 'success' });
+    /**
+     * 회원 상태(격리가 쓰는 Keycloak enabled). 격리 자체는 이 읽기에 기대지 않는다 — 격리는 그 회원의 provider 세션을 모두
+     * 표식으로 남기므로(endMemberSessions) 격리 전에 교환한 code도 아래의 표식 검사가 막는다. 이 읽기는 그 밖의 비활성
+     * (Keycloak에서 직접 끈 계정)을 위한 것이라 잠금 밖에서 한다. 읽은 값이 비활성이면 거절하고(member_isolated), 읽지
+     * 못하면(관리 API만 장애) 들어간다 — 인증 서버가 방금 code를 냈고, 격리도 같은 관리 API 없이는 돌지 않으며 그 표식은
+     * 어차피 본다. 평소 로그인을 관리 API 장애로 막지 않는다(소유자 규칙: 거짓 발동 금지). 성공 행에 그 사실을 남긴다.
+     */
+    const member = await this.keycloak.memberState(String(payload.sub), MEMBER_READ_MS);
+    if (member === 'disabled') {
+      await this.loginFailureRow(req, 'member_isolated', who);
+      return { kind: 'landing', error: 'login_failed' };
+    }
+    const detail = JSON.stringify({ institution: who.institution, ip, dataSubject: null, outcome: 'success',
+      ...(member === 'unknown' ? { memberState: 'member_state_unverified' } : {}) });
     let outcome: 'created' | 'blocked' | 'expired';
     try {
       /**
@@ -1015,6 +1090,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const idpSid = this.idpSidOfClaims(answer.payload), known = this.idpSidOf(session);
     if (String(answer.payload.sub) !== session.sub || !idpSid || (known !== null && idpSid !== known))
       return { kind: 'unavailable' };
+    // 비활성 회원의 세션은 갱신하지 않고 그 자리에서 끝낸다(원인 isolation) — 인증 서버의 갱신 답을 믿지 않는다. 회원
+    // 상태를 읽지 못한 것(관리 API만 장애)은 종료의 증거도 거절의 근거도 아니다: 갱신을 그대로 잇는다(콜백과 같은 규칙).
+    const member = await this.keycloak.memberState(session.sub, MEMBER_READ_MS);
+    if (member === 'disabled')
+      return await this.endAndTell(session, 'isolation', ip) ? { kind: 'ended' } : { kind: 'conflict' };
     const data = {
       accessToken: answer.tokens.access_token as string,
       refreshToken: (answer.tokens.refresh_token ?? session.refreshToken) as string,

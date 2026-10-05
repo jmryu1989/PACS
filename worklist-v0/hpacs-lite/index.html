@@ -194,6 +194,8 @@
       entry_unconfirmed: '로그인 세션을 확인하지 못해 업무 화면을 열지 않았습니다. 로그인 버튼을 누르면 다시 확인합니다.',
       end_unconfirmed: '이전 로그인 종료를 확인하지 못했습니다. 잠시 뒤 Login을 다시 누르세요.',
       login_failed: '로그인을 마치지 못했습니다. 잠시 뒤 로그인 버튼을 다시 눌러 주세요.',
+      // 재인증의 확인 단계에 인증 서버가 두 번 모두 "지금 처리할 수 없음"으로 답했다. 들어가지도 끝내지도 않았다.
+      sso_unidentified: '인증 서버에서 이 브라우저의 이전 로그인을 확인하지 못했습니다. 잠시 뒤 Login을 다시 누르세요.',
     };
 
     let shownEnd = false;
@@ -265,12 +267,23 @@
       }
 
       let initError = null;
+      // 다른 창의 로그아웃 준비를 기다리는 동안의 문장(A017). 그 준비가 끝나면 지우고, 결과(진입·닫힘)는 아래가 정한다.
+      let held = null;
       try {
         await KinAuth.init({ retry: true, onRetry: () => {
           if (shownEnd || leaving) return;
           $("#msg").textContent = '세션을 다시 확인하고 있습니다. 확인되면 자동으로 들어갑니다…';
           revealLanding();
           probe();
+        }, onHold: text => {
+          if (shownEnd || leaving) return;
+          if (text) {
+            held = $("#msg").textContent = text;
+            revealLanding();
+            probe();
+          } else if (held !== null && $("#msg").textContent === held) {
+            $("#msg").textContent = '';
+          }
         } });
       } catch (e) {
         initError = e;
@@ -314,7 +327,8 @@
      * 서버 없이 간다. 확인에는 한도가 있고(auth.js), 닿지 않았던 확인은 사람이 이 창으로 돌아오거나 버튼을 눌렀을 때 다시
      * 한다 — 장애가 지나간 뒤에도 "연결 안 됨"이 남지 않고, 스스로 끝없이 묻지도 않는다.
      */
-    let probing = false, probedAt = 0, reachable = null;
+    let probing = false, probedAt = 0, reachable = null, reprobeTimer = null;
+    const REPROBE_GAP_MS = 3000;
     async function probe() {
       if (probing || leaving) return;
       probing = true;
@@ -327,7 +341,17 @@
         ? '<span class="stat-dot online">●</span> 인증 서버 연결됨'
         : '<span class="stat-dot offline">●</span> 인증 서버에 연결하지 못했습니다. 이 창으로 돌아오거나 버튼을 누르면 다시 확인합니다.';
     }
-    function reprobe() { if (reachable !== true && Date.now() - probedAt >= 3000) probe(); }
+    /**
+     * 닿지 않았던 확인을 다시 한다(창 초점·탭 표시·버튼 실패 뒤). 직전 확인에서 3초가 지나지 않았으면 버리지 않고 그 3초가
+     * 끝나는 때로 한 번 미룬다(SEB-F07: 돌아온 사람이 보는 "연결 안 됨"이 남지 않게). 타이머는 하나뿐이고, 스스로 다시
+     * 걸지 않는다 — 끝없이 묻지 않는다. 닿았으면 아무것도 하지 않는다(인증 서버로 스스로 이동하지도 않는다).
+     */
+    function reprobe() {
+      if (reachable === true || leaving || reprobeTimer) return;
+      const wait = REPROBE_GAP_MS - (Date.now() - probedAt);
+      if (wait <= 0) { probe(); return; }
+      reprobeTimer = setTimeout(() => { reprobeTimer = null; if (reachable !== true) probe(); }, wait);
+    }
     addEventListener('focus', reprobe);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) reprobe(); });
 
