@@ -4,6 +4,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_worklist_columns import WorklistColumnsE2E
 from workspace_roaming_support import cleanup_workspace
+from document_session import document_request
 
 class ColumnsRoamingE2E(WorklistColumnsE2E):
     @classmethod
@@ -16,7 +17,7 @@ class ColumnsRoamingE2E(WorklistColumnsE2E):
         expect(page.locator('#wc-server-status')).to_contain_text(message)
         expect(button).to_be_enabled()
     def remote(self,page):
-        r=page.request.get(self.stack.api+'/worklist-columns');self.assertEqual(r.status,200);return r.json()
+        r=document_request(page, "GET", self.stack.api+'/worklist-columns');self.assertEqual(r.status,200);return r.json()
     def test_roam_columns_01_two_browsers_explicit_apply_and_clear(self):
         f=self.fixture();self.seed_report(f);page=self.login();self.select(page,f)
         page.locator('#findings').fill('Column roaming unsaved report')

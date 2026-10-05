@@ -9,6 +9,7 @@ from test_thumbnail_series import ThumbnailSeriesE2E
 from test_cine import CineE2E
 from pydicom import dcmread
 from pydicom.uid import generate_uid
+from document_session import document_request
 
 class WorklistImagePreviewE2E(ThumbnailSeriesE2E):
     def preview(self,p,n=0):
@@ -29,7 +30,7 @@ class WorklistImagePreviewE2E(ThumbnailSeriesE2E):
         d.locator('[data-width]').fill('400');d.locator('[data-center]').fill('40');d.locator('[data-apply]').click()
         expect(d.locator('[data-status]')).to_have_text('Rendered · W 400 / L 40');adjusted=self.png(p)
         self.assertFalse(np.array_equal(initial,adjusted));self.assertIn('window-width=400',requests[-1]);self.assertIn('window-center=40',requests[-1])
-        expected=p.request.get(requests[-1],headers={'Accept':'image/png'});self.assertEqual(expected.status,200)
+        expected=document_request(p, "GET", requests[-1],headers={'Accept':'image/png'});self.assertEqual(expected.status,200)
         np.testing.assert_array_equal(adjusted,np.asarray(Image.open(io.BytesIO(expected.body())).convert('RGB')))
         d.locator('[data-reset]').click();expect(d.locator('[data-status]')).to_have_text('Rendered · Original Window');np.testing.assert_array_equal(self.png(p),initial)
         d.locator('[data-frame]').fill('1');d.locator('[data-frame]').dispatch_event('change');expect(d.locator('[data-status]')).to_contain_text('Rendered')

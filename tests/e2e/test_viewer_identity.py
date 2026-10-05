@@ -5,6 +5,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_viewer_patient_copy import ViewerPatientCopyE2E
 from workspace_roaming_support import cleanup_workspace
+from document_session import document_request
 
 class ViewerIdentityE2E(ViewerPatientCopyE2E):
  def setUp(self):
@@ -45,7 +46,7 @@ class ViewerIdentityE2E(ViewerPatientCopyE2E):
   v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('.kin-viewer-identity')).to_have_count(0)
  def test_identity_03_late_account_load_retains_newer_viewer_choice(self):
   a,b=self.pair();p,v=self.popup(a);self.settings(p);p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')
-  pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…');p.locator('#viewer-identity-current-size').select_option('18');self.assertEqual(len(pending),1);pending.pop().fulfill(response=p.request.get(self.stack.api+'/reading-appearance'));expect(p.locator('#appearance-account-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다');expect(p.locator('#viewer-identity-current-size')).to_have_value('18');expect(self.label(v,a.uid)).to_have_css('font-size','18px')
+  pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…');p.locator('#viewer-identity-current-size').select_option('18');self.assertEqual(len(pending),1);pending.pop().fulfill(response=document_request(p, "GET", self.stack.api+'/reading-appearance'));expect(p.locator('#appearance-account-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다');expect(p.locator('#viewer-identity-current-size')).to_have_value('18');expect(self.label(v,a.uid)).to_have_css('font-size','18px')
  def test_identity_04_late_notification_and_storage_failure(self):
   a,b=self.pair();p,v=self.popup(a);self.settings(p);p.locator('#viewer-identity-current-size').select_option('20');expect(self.label(v,a.uid)).to_have_css('font-size','20px')
   p.evaluate("""()=>{const owner=JSON.stringify([KinAuth.session().institution,KinAuth.session().sub]),c=new BroadcastChannel('kin-viewer-identity');c.postMessage({owner,persisted:true,value:KinViewerIdentity.defaults()});c.close();}""");expect(p.locator('#viewer-identity-current-size')).to_have_value('20');expect(self.label(v,a.uid)).to_have_css('font-size','20px')

@@ -4,6 +4,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_workspace_persistence import WorkspacePersistenceE2E
 from workspace_roaming_support import cleanup_workspace
+from document_session import document_request
 
 class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
     def hashes(self):
@@ -20,7 +21,7 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
     def tearDown(self):
         super().tearDown();cleanup_workspace(self.stack)
     def remote(self,page):
-        r=page.request.get(self.stack.proxy+'/api/workspace-layout');self.assertEqual(r.status,200);return r.json()
+        r=document_request(page, "GET", self.stack.proxy+'/api/workspace-layout');self.assertEqual(r.status,200);return r.json()
     def open_menu(self,page):
         self.open_toolbar_group(page,'#workspace-server-menu')
         menu=page.locator('#workspace-server-menu')
@@ -123,7 +124,7 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
 
     def test_roam_04_failure_storage_denial_and_csrf(self):
         page=self.sign_in(self.device());self.open_toolbar_group(page,'#layout-toggle');page.locator('#layout-toggle').click();self.action(page,'Save to Account','저장했습니다');remote=self.remote(page)
-        denied=page.request.put(self.stack.proxy+'/api/workspace-layout',data=dict(expectedOwner=remote['owner'],revision=remote['revision'],layout=remote['layout']))
+        denied=document_request(page, "PUT", self.stack.proxy+'/api/workspace-layout',data=dict(expectedOwner=remote['owner'],revision=remote['revision'],layout=remote['layout']))
         self.assertEqual(denied.status,403);self.assertEqual(self.remote(page),remote)
         self.open_toolbar_group(page,'#layout-reset')
         page.locator('#layout-reset').click();before=self.stored(page);pattern='**/api/workspace-layout'

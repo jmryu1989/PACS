@@ -5,6 +5,7 @@ from urllib.parse import urlsplit,parse_qs
 from playwright.sync_api import expect
 from test_worklist import WorklistE2E
 from study_page_stub import fulfill_page
+from document_session import document_request
 
 class StudyPageTransferE2E(WorklistE2E):
     def test_transfer_01_failure_resume_cancel_and_related_pages(self):
@@ -12,11 +13,11 @@ class StudyPageTransferE2E(WorklistE2E):
         a=self.fixture(patient_id=prefix);b=self.fixture(patient_id=prefix)
         self.seed_report(a);self.seed_report(b);page=self.login();self.select(page,a)
         page.locator('#findings').fill('Transfer keeps unsaved report')
-        original=page.request.get(self.stack.api+'/studies');self.assertIn('no-store',original.headers.get('cache-control',''))
+        original=document_request(page, "GET", self.stack.api+'/studies');self.assertIn('no-store',original.headers.get('cache-control',''))
         raw={s['uid']:s for s in original.json()['studies']};items=[raw[a.uid],raw[b.uid]]
         for i in range(199):
             item=copy.deepcopy(raw[a.uid]);item['uid']='9.999.'+str(i).zfill(4);items.append(item)
-        me=page.request.get(self.stack.api+'/me').json();owner=[me['institution'],me['sub']]
+        me=document_request(page, "GET", self.stack.api+'/me').json();owner=[me['institution'],me['sub']]
         phase={'name':'fail'};requests=[];held=[]
         def response(route):
             offset=int(parse_qs(urlsplit(route.request.url).query).get('after',['0'])[0]);requests.append(offset)

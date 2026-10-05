@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import expect
 from test_portrait_workspace import PortraitWorkspaceE2E
 import test_worklist as base
+from document_session import document_request
 
 # Browser profiles whose last session ended with sign_out(): S7-U5 keeps that end until the next explicit login. Kept at
 # module level because other suites borrow sign_in/sign_out as plain functions onto test classes of their own.
@@ -69,7 +70,7 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
             raise RuntimeError('D02B real login failed') from None
         page.wait_for_url('**/worklist/hpacs-lite/main.html', timeout=30000)
         expect(page.locator('#dbstat')).to_contain_text('DB Connected')
-        me = page.context.request.get(self.stack.api + '/me').json()
+        me = document_request(page, "GET", self.stack.api + '/me').json()
         self.assertEqual(page.evaluate('KinAuth.session().sub'), me['sub'])
         self.assertTrue(me['sub'])
         return page

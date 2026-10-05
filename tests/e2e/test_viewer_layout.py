@@ -8,6 +8,7 @@ import uuid
 from playwright.sync_api import expect
 from test_thumbnail_series import ThumbnailSeriesE2E
 from test_prior_selection import canvas_ready
+from document_session import document_request
 
 
 class ViewerLayoutE2E(ThumbnailSeriesE2E):
@@ -159,7 +160,7 @@ class ViewerLayoutE2E(ThumbnailSeriesE2E):
         expect(page.get_by_role('button',name='Save Recent Layout',exact=True)).to_be_disabled()
         self.assertEqual(self.cells(page),before);self.assertEqual(self.records(page),a);page.unroute(pattern)
         self.launch(page,[f]);self.open_layout_tools(page)
-        response=page.request.post(self.stack.proxy+'/api/auth/logout',headers={'X-KIN-CSRF':'1'})
+        response=document_request(page, "POST", self.stack.proxy+'/api/auth/logout',headers={'X-KIN-CSRF':'1'})
         self.assertEqual(response.status,204)
         page.get_by_role('button',name='Restore Recent Layout',exact=True).click()
         expect(page.locator('#kin-viewer-layout-status')).to_contain_text('세션이 변경')

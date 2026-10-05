@@ -10,6 +10,7 @@ from playwright.sync_api import expect, Error as PlaywrightError
 from test_worklist_image_preview import WorklistImagePreviewE2E
 from test_cine import CineE2E
 from test_prior_selection import synthetic_ct
+from document_session import document_request
 
 
 class ImageThumbnailsE2E(WorklistImagePreviewE2E):
@@ -41,7 +42,7 @@ class ImageThumbnailsE2E(WorklistImagePreviewE2E):
         self.assertEqual([multi["sops"][0]] * 12, cards.evaluate_all("xs=>xs.map(x=>x.dataset.sop)"))
         self.assertEqual([str(i) for i in range(12)], cards.evaluate_all("xs=>xs.map(x=>x.dataset.frame)"))
         expect(cards.first.locator(".thumb-description")).to_have_text(f"SOP {multi['sops'][0]} · Frame 1 / 14")
-        self.assertTrue(requests); expected = page.request.get(requests[0], headers={"Accept": "image/png"})
+        self.assertTrue(requests); expected = document_request(page, "GET", requests[0], headers={"Accept": "image/png"})
         self.assertEqual(200, expected.status)
         np.testing.assert_array_equal(self.pixels(cards.first.locator("img")), np.asarray(Image.open(io.BytesIO(expected.body())).convert("RGB")))
         view.locator("#thumb-images-next").click(); cards = self.ready(view, 2)
@@ -75,7 +76,7 @@ class ImageThumbnailsE2E(WorklistImagePreviewE2E):
         expect(dialog.locator("[data-position]")).to_contain_text(f"8 / 14 · SOP {multi['sops'][0]} · Frame 8 / 14")
         lookup = self.stack.request("POST", "/dicom/lookup", "doctor", {"studyUid": f.uid, "sopUid": multi["sops"][0]})
         self.assertEqual(200, lookup.status)
-        expected = page.request.get(self.stack.proxy + f"/instances/{lookup.body['id']}/frames/7/rendered?width=1024&height=1024", headers={"Accept": "image/png"})
+        expected = document_request(page, "GET", self.stack.proxy + f"/instances/{lookup.body['id']}/frames/7/rendered?width=1024&height=1024", headers={"Accept": "image/png"})
         self.assertEqual(200, expected.status)
         np.testing.assert_array_equal(self.pixels(dialog.locator('img')), np.asarray(Image.open(io.BytesIO(expected.body())).convert('RGB')))
         dialog.locator("[data-close]").click(); view.locator("#thumb-images-back").click(); self.thumbs(page)

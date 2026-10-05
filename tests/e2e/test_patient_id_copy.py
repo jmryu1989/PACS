@@ -5,6 +5,7 @@ from pathlib import Path
 import pydicom
 from playwright.sync_api import expect
 from test_related_context import RelatedContextE2E
+from document_session import document_request
 
 class PatientIdCopyE2E(RelatedContextE2E):
  def clipboard(self,p):return p.evaluate('()=>navigator.clipboard.readText()')
@@ -14,7 +15,7 @@ class PatientIdCopyE2E(RelatedContextE2E):
   patient='0007-한글<&-'+uuid.uuid4().hex[:10];a=self.ct(patient,'current','20260801');b=self.ct(patient,'past','20260701');c=self.ct('0009-'+uuid.uuid4().hex[:12],'other','20260802')
   p=self.login();self.permit(p);expect(p.locator('#copy-patient-id')).to_be_disabled();self.select(p,a)
   original=pydicom.dcmread(io.BytesIO(self.stack.orthanc_bytes('/instances/'+self.stack.first_instance_id(a.uid)+'/file')))
-  row=next(x for x in p.context.request.get(self.stack.proxy+'/api/studies').json()['studies'] if x['uid']==a.uid)
+  row=next(x for x in document_request(p, "GET", self.stack.proxy+'/api/studies').json()['studies'] if x['uid']==a.uid)
   self.assertEqual(row['id'],str(original.PatientID));self.assertEqual(row['id'],patient)
   expect(p.locator('#clinical')).to_contain_text(patient);p.locator('#copy-patient-id').click();self.copied(p);self.assertEqual(self.clipboard(p),patient)
   for value in [row['institutionName'],row['name'],patient,'2026-08-01']:expect(p.locator('#copy-patient-context')).to_contain_text(value)
@@ -25,9 +26,9 @@ class PatientIdCopyE2E(RelatedContextE2E):
   self.select(p,a);p.set_viewport_size(dict(width=900,height=1050));p.locator('#copy-patient-id').click();self.copied(p)
   p.screenshot(path=str(Path(__file__).parent/'artifacts/COPY-context.png'))
   other=self.login('kdoctor');expect(other.locator('#rows tr[data-uid="'+a.uid+'"]').first).to_have_count(0)
-  self.assertEqual(p.context.request.get(self.stack.proxy+'/api/studies/'+a.uid+'/report/versions').status,200)
-  self.assertEqual(other.context.request.get(self.stack.proxy+'/api/studies/'+a.uid+'/report/versions').status,404)
-  self.assertEqual(other.context.request.get(self.stack.proxy+'/dicom-web/studies/'+a.uid+'/metadata').status,403)
+  self.assertEqual(document_request(p, "GET", self.stack.proxy+'/api/studies/'+a.uid+'/report/versions').status,200)
+  self.assertEqual(document_request(other, "GET", self.stack.proxy+'/api/studies/'+a.uid+'/report/versions').status,404)
+  self.assertEqual(document_request(other, "GET", self.stack.proxy+'/dicom-web/studies/'+a.uid+'/metadata').status,403)
 
  def test_copy_02_rejection_unsupported_late_completion_and_retry(self):
   a=self.ct('000A-'+uuid.uuid4().hex[:12],'a','20260801');b=self.ct('000B-'+uuid.uuid4().hex[:12],'b','20260802');p=self.login();self.permit(p);self.select(p,a)

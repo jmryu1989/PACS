@@ -5,6 +5,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_note import ReadingNoteE2E,canvas_ready
 from test_display_controls import DisplayControlsE2E
+from document_session import document_request
 
 class ViewerTechNoteE2E(ReadingNoteE2E):
  def active(self,p,uid):
@@ -40,10 +41,10 @@ class ViewerTechNoteE2E(ReadingNoteE2E):
   v.locator('#tech-note-history').click();expect(v.locator('#tech-note-history-items section')).to_have_count(2);expect(v.locator('#tech-note-text')).to_have_value('KEEP UNSAVED NOTE');v.once('dialog',lambda d:d.accept());v.locator('#tech-note-reload').click();expect(v.locator('#tech-note-text')).to_have_value('CONCURRENT NOTE');v.locator('#tech-note-close').click()
   v.reload();canvas_ready(v,1);self.ready(v);self.open_note(v);expect(v.locator('#tech-note-text')).to_have_value('CONCURRENT NOTE')
  def test_viewer_note_03_bound_headers_reject_before_read_write(self):
-  a=self.ct('VIEWER-OWNER-'+uuid.uuid4().hex[:10],'owner','20260801');v=self.launch(self.login('tech'),[a]);self.ready(v);me=v.context.request.get(self.stack.api+'/me').json();path=self.stack.api+f'/studies/{a.uid}/tech-note';body=dict(baseVersion=0,text='MUST NOT SAVE',reason='')
+  a=self.ct('VIEWER-OWNER-'+uuid.uuid4().hex[:10],'owner','20260801');v=self.launch(self.login('tech'),[a]);self.ready(v);me=document_request(v, "GET", self.stack.api+'/me').json();path=self.stack.api+f'/studies/{a.uid}/tech-note';body=dict(baseVersion=0,text='MUST NOT SAVE',reason='')
   for headers in [{'X-KIN-Subject':self.stack.user_ids['doctor']},{'X-KIN-Institution':'kin-center'}]:
    headers['X-KIN-CSRF']='1'
-   self.assertEqual(v.context.request.get(path,headers=headers).status,403);self.assertEqual(v.context.request.get(path+'/history',headers=headers).status,403);self.assertEqual(v.context.request.post(path,headers=headers,data=body).status,403)
+   self.assertEqual(document_request(v, "GET", path,headers=headers).status,403);self.assertEqual(document_request(v, "GET", path+'/history',headers=headers).status,403);self.assertEqual(document_request(v, "POST", path,headers=headers,data=body).status,403)
   self.assertIsNone(self.stack.request('GET',f'/studies/{a.uid}/tech-note','tech').body['note']);self.open_note(v);expect(v.locator('#tech-note-text')).to_have_value('')
   v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#tech-note-dialog')).to_have_count(0);expect(v.locator('#kin-viewer-note-open')).to_be_disabled()
  def test_viewer_note_04_wrong_target_and_late_response(self):

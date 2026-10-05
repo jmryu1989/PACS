@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from pydicom.uid import generate_uid
 from playwright.sync_api import expect
 from test_thumbnail_labels import ThumbnailLabelsE2E
+from document_session import document_request
 
 
 class ThumbnailFailuresE2E(ThumbnailLabelsE2E):
@@ -95,7 +96,7 @@ class ThumbnailFailuresE2E(ThumbnailLabelsE2E):
         page.on('response',lambda r:actual.append(r.status) if r.url.endswith('/api/dicom/lookup') else None)
         page.on('response',lambda r:logouts.append(r.status) if r.url.endswith('/api/auth/logout') else None)
         page.on('request',lambda r:logins.append(r.url) if urlsplit(r.url).path=='/api/auth/login' else None)
-        response=page.context.request.post(self.stack.api+'/auth/logout',headers={'X-KIN-CSRF':'1'})
+        response=document_request(page, "POST", self.stack.api+'/auth/logout',headers={'X-KIN-CSRF':'1'})
         self.assertIn(response.status,(200,204));self.assertEqual(page.context.request.get(self.stack.api+'/me').status,401)
         # The revocation expired this profile's session cookie, so the page's own logout POST carries no session.
         self.assertNotIn('kin_sid',[c['name'] for c in page.context.cookies()])

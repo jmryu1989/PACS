@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 import uuid
 from playwright.sync_api import expect
 import test_worklist as base
+from document_session import document_request
 
 
 class WorklistColumnsE2E(base.WorklistE2E):
@@ -44,7 +45,7 @@ class WorklistColumnsE2E(base.WorklistE2E):
         page.wait_for_url('**/worklist/hpacs-lite/main.html',timeout=30000)
         expect(page.locator('#dbstat')).to_contain_text('DB Connected')
         self.assertNotEqual(next(c['value'] for c in page.context.cookies() if c['name']=='kin_sid'),old_sid)
-        self.assertEqual(page.context.request.get(self.stack.api+'/me').json()['actor'],self.stack.actor(actor))
+        self.assertEqual(document_request(page, "GET", self.stack.api+'/me').json()['actor'],self.stack.actor(actor))
 
     def test_columns_01_hide_order_restore_filter_and_report(self):
         prefix='COL-'+uuid.uuid4().hex[:8]

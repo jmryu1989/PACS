@@ -7,6 +7,7 @@ from pydicom import dcmread
 from pydicom.uid import generate_uid
 from pypdf import PdfReader
 from test_viewer_history import ViewerHistoryE2E, expect, base, literal
+from document_session import document_request
 
 
 def flat(text):return re.sub(r'\s+','',text)
@@ -76,7 +77,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
         other=self.stack.request('PUT','/studies/'+f.uid+'/report','doctor2',dict(baseVersion=1,findings='OTHER PRIVATE',conclusion='',recommendation=''))
         self.assertEqual(other.status,200,other.text)
         p=self.login();self.select(p,f);before=self.saved_rows(f);original=self.hashes(); writes=[]
-        response=p.request.get(self.stack.proxy+'/api/studies/'+f.uid+'/report-preview')
+        response=document_request(p, "GET", self.stack.proxy+'/api/studies/'+f.uid+'/report-preview')
         self.assertEqual(response.status,200);self.assertEqual(response.headers.get('cache-control'),'no-store')
         p.on('request',lambda r:writes.append(r.url) if r.method in ['POST','PUT','PATCH','DELETE'] and '/report' in r.url else None)
         self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();paper=self.ready(p)

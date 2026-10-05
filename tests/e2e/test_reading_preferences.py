@@ -5,6 +5,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_note import ReadingNoteE2E
 from workspace_roaming_support import cleanup_workspace
+from document_session import document_request
 
 class ReadingPreferencesE2E(ReadingNoteE2E):
  def setUp(self):
@@ -39,7 +40,7 @@ class ReadingPreferencesE2E(ReadingNoteE2E):
   waiting=[];p.route('**/api/reading-preferences',lambda route:waiting.append(route))
   p.locator('#reading-prefs-load').click();expect(p.locator('#reading-prefs-status')).to_have_text('메모 설정 확인 중…')
   p.locator('#reading-note-auto').check()
-  self.assertEqual(len(waiting),1);waiting.pop().fulfill(response=p.request.get(self.stack.api+'/reading-preferences'))
+  self.assertEqual(len(waiting),1);waiting.pop().fulfill(response=document_request(p, "GET", self.stack.api+'/reading-preferences'))
   expect(p.locator('#reading-prefs-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다')
   expect(p.locator('#reading-note-auto')).to_be_checked()
   p.locator('#reading-prefs-load').click();expect(p.locator('#reading-prefs-status')).to_have_text('메모 설정 확인 중…')

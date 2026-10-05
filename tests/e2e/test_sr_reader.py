@@ -8,6 +8,7 @@ from pydicom.uid import BasicTextSRStorage,ComprehensiveSRStorage,ExplicitVRLitt
 from pynetdicom import AE
 from playwright.sync_api import expect
 from test_related_context import RelatedContextE2E
+from document_session import document_request
 
 def code(value,meaning,scheme='99KIN'):
  d=Dataset();d.CodeValue=value[:16];d.CodingSchemeDesignator=scheme;d.CodeMeaning=meaning;return d
@@ -55,7 +56,7 @@ class SRReaderE2E(RelatedContextE2E):
   body=p.locator('#sr-tree').inner_text()
   for value in ['원문 <img src=x','두 번째 줄','12.34','UCUM','millimeter','SCT','20260908','061500.125','10.5','20.25',full['reference'],'Referenced Frame']:self.assertIn(value,body)
   self.assertIsNone(p.evaluate('window.srBad'));self.assertEqual(p.locator('#sr-tree img, #sr-tree a, #sr-tree script').count(),0)
-  response=p.context.request.get(self.stack.proxy+self.path(full));self.assertEqual(response.status,200);raw=response.json()[0]
+  response=document_request(p, "GET", self.stack.proxy+self.path(full));self.assertEqual(response.status,200);raw=response.json()[0]
   print('SR source metadata '+json.dumps(raw,ensure_ascii=False),flush=True)
   tree=p.evaluate('arg=>srTree(arg.raw,arg.source)',dict(raw=raw,source=full));self.assertIn(str(raw['0040A730']['Value'][0]['0040A730']['Value'][3]['0040A300']['Value'][0]['0040A30A']['Value'][0]),json.dumps(tree))
   print('SR source identities and values '+json.dumps(dict(full=full,basic=basic,rendered=body),ensure_ascii=False),flush=True)
@@ -83,7 +84,7 @@ class SRReaderE2E(RelatedContextE2E):
   self.assertEqual(p.locator('#sr-tree').inner_text(),before);print('SR real response body held locally, abort ignored: old body delivered after A-B-A, current document unchanged',flush=True)
   expect(p.locator('#sr-tree')).to_contain_text('Content Sequence');p.locator('#sr-close').click()
   self.related(p,b).click();self.open_source(p,sb);self.read_source(p);expect(p.locator('#sr-context')).to_contain_text('2026-07-01');expect(p.locator('#sr-tree')).to_contain_text(sb['sop'])
-  other=self.login('kdoctor');self.assertEqual(other.context.request.get(self.stack.proxy+self.path(sa)).status,403)
+  other=self.login('kdoctor');self.assertEqual(document_request(other, "GET", self.stack.proxy+self.path(sa)).status,403)
   expect(other.locator('#rows tr[data-uid="'+a.uid+'"]').first).to_have_count(0)
   p.locator('#sr-close').click();self.open_source(p,sb)
   p.route('**'+self.path(sb),lambda route:route.fulfill(status=403,body='denied'));p.locator('#sr-read').click();expect(p.locator('#sr-status')).to_contain_text('HTTP 403');expect(p.locator('#sr-tree')).to_be_empty();expect(p.locator('#sr-series option, #sr-document option')).to_have_count(0);expect(p.locator('#sr-read')).to_be_disabled()
@@ -95,7 +96,7 @@ class SRReaderE2E(RelatedContextE2E):
 
  def test_sr_03_explicit_failures_bounds_and_retry(self):
   f=self.ct('SR-FAIL-'+uuid.uuid4().hex[:12],'current','20260801');source=self.source(f);p=self.login();self.select(p,f);self.open_source(p,source)
-  path='**'+self.path(source);original=p.context.request.get(self.stack.proxy+self.path(source)).json()
+  path='**'+self.path(source);original=document_request(p, "GET", self.stack.proxy+self.path(source)).json()
   cases=[(500,'oops','HTTP 500'),(200,'not json','SR 열람 실패'),(200,' '* (2*1024*1024+1),'2 MiB')]
   wrong=json.loads(json.dumps(original));wrong[0]['0020000D']['Value']=['9.8.7'];cases.append((200,json.dumps(wrong),'식별'))
   unsupported=json.loads(json.dumps(original));unsupported[0]['77770010']={'vr':'OB','BulkDataURI':'https://invalid.example/secret'};cases.append((200,json.dumps(unsupported),'바이너리'))

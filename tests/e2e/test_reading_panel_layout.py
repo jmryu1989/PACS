@@ -17,6 +17,7 @@ from test_reading_workspace import ReadingWorkspaceE2E
 from test_workspace_persistence import WorkspacePersistenceE2E
 from test_workspace_roaming import WorkspaceRoamingE2E
 from workspace_roaming_support import cleanup_workspace
+from document_session import document_request
 
 
 class ReadingPanelLayoutE2E(ReadingWorkspaceE2E):
@@ -269,7 +270,7 @@ class ReadingPanelLayoutE2E(ReadingWorkspaceE2E):
         remote = self.remote(source)
         self.assertIsNone(remote['layout'])
         legacy = dict(version=1, mode='auto', landscape={'main': 650}, portrait={})
-        seeded = source.request.put(self.stack.proxy + '/api/workspace-layout',
+        seeded = document_request(source, "PUT", self.stack.proxy + '/api/workspace-layout',
                                     headers={'X-KIN-CSRF': '1'},
                                     data=dict(expectedOwner=remote['owner'], revision=remote['revision'], layout=legacy))
         self.assertEqual(seeded.status, 200)

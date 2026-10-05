@@ -3,6 +3,7 @@ import copy,json,unittest,uuid
 from playwright.sync_api import expect
 from test_compound_search import CompoundSearchE2E
 from study_page_stub import fulfill_page
+from document_session import document_request
 
 class NestedPagesE2E(CompoundSearchE2E):
     def fill_rule(self,row,field,op,value):
@@ -48,14 +49,14 @@ class NestedPagesE2E(CompoundSearchE2E):
         a=self.fixture(patient_id=prefix+'0024');b=self.fixture(patient_id=prefix+'0025')
         self.seed_report(a);self.seed_report(b);page=self.login();self.select(page,a)
         page.locator('#findings').fill('Page browsing preserves this report')
-        source=page.request.get(self.stack.api+'/studies').json()['studies'];by_uid={s['uid']:s for s in source}
+        source=document_request(page, "GET", self.stack.api+'/studies').json()['studies'];by_uid={s['uid']:s for s in source}
         items=[]
         for i in range(1001):
             item=copy.deepcopy(by_uid[a.uid]);item.update(uid='synthetic-page-'+str(i),id=prefix+str(i).zfill(4))
             if i in (24,25):item=by_uid[a.uid if i==24 else b.uid]
             items.append(item)
         # Browser-only synthetic scale response: no dummy study or report is stored.
-        me=page.request.get(self.stack.api+'/me').json();owner=[me['institution'],me['sub']]
+        me=document_request(page, "GET", self.stack.api+'/me').json();owner=[me['institution'],me['sub']]
         page.route('**/api/studies?*',lambda route:fulfill_page(route,items,owner))
         page.locator('#refresh').click();page.locator('#quick').fill(prefix)
         page.locator('#heads [data-key=id]').click();page.locator('#page-size').select_option('25')

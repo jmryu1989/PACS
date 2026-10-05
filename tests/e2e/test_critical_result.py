@@ -71,6 +71,7 @@ import measurement_ci  # noqa: E402
 # that plan as "Discovery included an imported TestCase").
 import test_worklist as base  # noqa: E402
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout, expect  # noqa: E402
+from document_session import document_request
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -1885,9 +1886,9 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
         return page
 
     def session_read(self, sess: Session, path: str) -> dict:
-        """A verification GET with the context's own cookie session (the same X-KIN-CSRF as the page, no Authorization). It
+        """A verification GET with this page's own session binding and context cookies (no Authorization). It
         never passes a route handler, so it is the server's real answer to that session even while a variant is active."""
-        response = sess.context.request.get(self.stack.api + path, headers={"X-KIN-CSRF": "1"})
+        response = document_request(sess.page, "GET", self.stack.api + path, headers={"X-KIN-CSRF": "1"})
         try:
             data = response.json()
         except Exception:

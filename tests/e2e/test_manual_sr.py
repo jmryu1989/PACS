@@ -9,6 +9,7 @@ from test_sr_provenance import SRProvenanceE2E
 from test_viewer_history import expect, base, literal
 from viewer_api_test import ViewerAPI
 from test_worklist import ROOT
+from document_session import document_request
 
 
 def nums(ds):
@@ -147,7 +148,7 @@ class ManualSrE2E(SRProvenanceE2E):
         self.post(f,[dict(id=head['id'],revision=head['revision']+1)],status=409)
         self.post(f,items*2,status=400)
         r,command=self.post(f,items); report=r.body
-        headers_response=p.request.post(self.stack.proxy+'/api/studies/'+f.uid+'/manual-sr', data=command, headers={'X-KIN-CSRF':'1'})
+        headers_response=document_request(p, "POST", self.stack.proxy+'/api/studies/'+f.uid+'/manual-sr', data=command, headers={'X-KIN-CSRF':'1'})
         self.assertEqual(headers_response.status,200)
         self.assertEqual(headers_response.headers.get('cache-control'),'no-store')
         again,_=self.post(f,items,request_id=command['requestId']);self.assertEqual(again.body,report)
@@ -257,7 +258,7 @@ class ManualSrE2E(SRProvenanceE2E):
         self.post(f,[dict(id=head['id'],revision=hidden.body['revision'])],status=409)
         self.store_api(f,report,status=409)
         # No browser-wide STOW permission was introduced.
-        response=p.request.post(self.stack.proxy+'/dicom-web/studies/'+f.uid,data=b'not a DICOM',headers={'X-KIN-CSRF':'1','Content-Type':'application/dicom'})
+        response=document_request(p, "POST", self.stack.proxy+'/dicom-web/studies/'+f.uid,data=b'not a DICOM',headers={'X-KIN-CSRF':'1','Content-Type':'application/dicom'})
         self.assertEqual(response.status,403)
         self.assertEqual(self.state(f),original);self.assertEqual(self.hashes(),original_bytes)
 

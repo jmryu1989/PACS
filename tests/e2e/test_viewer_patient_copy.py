@@ -5,6 +5,7 @@ from pathlib import Path
 import pydicom
 from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
+from document_session import document_request
 
 class ViewerPatientCopyE2E(ViewerTechNoteE2E):
  def popup(self,a):
@@ -23,7 +24,7 @@ class ViewerPatientCopyE2E(ViewerTechNoteE2E):
   patient='0007-한글<&-'+uuid.uuid4().hex[:8];a=self.ct(patient,'current','20260801');b=self.ct(patient,'past','20260701');self.seed_report(a);self.seed_report(b,action='approve')
   p,v=self.popup(a);p.locator('#findings').fill('KEEP COPY PARENT');v.get_by_label('Job Title',exact=True).fill('KEEP COPY VIEWER');before=self.snapshot(v);url=v.url
   original=pydicom.dcmread(io.BytesIO(self.stack.orthanc_bytes('/instances/'+self.stack.first_instance_id(a.uid)+'/file')))
-  row=next(s for s in p.context.request.get(self.stack.api+'/studies').json()['studies'] if s['uid']==a.uid)
+  row=next(s for s in document_request(p, "GET", self.stack.api+'/studies').json()['studies'] if s['uid']==a.uid)
   v.locator('#kin-viewer-copy-id').click();self.copied(v);self.assertEqual(self.clipboard(v),str(original.PatientID));self.assertEqual(self.clipboard(v),row['id']);self.assertEqual(self.clipboard(v),patient)
   self.active(v,b.uid);expect(v.locator('#kin-viewer-copy-context')).to_contain_text(b.uid);v.locator('#kin-viewer-copy-id').focus();v.keyboard.press('Control+Alt+c');self.copied(v);self.assertEqual(self.clipboard(v),patient);expect(v.locator('#kin-viewer-copy-id')).to_be_focused()
   expect(v.locator('#kin-viewer-copy-context')).to_contain_text(patient);expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP COPY VIEWER');expect(p.locator('#findings')).to_have_value('KEEP COPY PARENT')

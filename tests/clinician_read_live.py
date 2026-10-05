@@ -42,6 +42,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 
 from invariants_live import HttpResult, LiveStack, _json_or_text, psql, purge_user_audit
+from document_session import session_headers
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -379,7 +380,7 @@ class ClinicianReadLive(unittest.TestCase):
         if deleted.status not in (204, 404):
             raise RuntimeError(f"revocation probe client cleanup failed: {deleted.status}")
 
-    def bff_session(self, username: str, password: str) -> str:
+    def bff_session(self, username: str, password: str) -> tuple[str, str]:
         """The browser's own login (BffInvariantTests.bff_login): /api/auth/login -> Keycloak form -> callback."""
         jar = http.cookiejar.CookieJar()
         opener = build_opener(HTTPCookieProcessor(jar), HTTPSHandler(context=self.stack.context))
@@ -394,11 +395,17 @@ class ClinicianReadLive(unittest.TestCase):
             response.read()
         sid = next((cookie.value for cookie in jar if cookie.name == "kin_sid"), None)
         self.assertIsNotNone(sid, "no kin_sid after the BFF login")
-        return sid
+        # 같은 cookie jar의 최초 문서 부트스트랩만 읽고 이후에는 이 결속값을 보존한다.
+        with opener.open(self.stack.proxy + "/api/me", timeout=30) as response:
+            session = json.load(response)["sessionId"]
+        session_headers(session)
+        return sid, session
 
-    def session_call(self, sid: str, method: str, path: str, body: Any = None) -> HttpResult:
+    def session_call(self, document: tuple[str, str], method: str, path: str, body: Any = None) -> HttpResult:
         """One call on the kept session id. No cookie jar: an expiring Set-Cookie must not swap the credential."""
-        headers = {"Accept": "application/json" if path.startswith("/api/") else "*/*", "Cookie": "kin_sid=" + sid}
+        sid, session = document
+        headers = session_headers(session, {"Accept": "application/json" if path.startswith("/api/") else "*/*"})
+        headers["Cookie"] = "kin_sid=" + sid
         data = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
@@ -412,7 +419,7 @@ class ClinicianReadLive(unittest.TestCase):
             payload, text = _json_or_text(error.read())
             return HttpResult(error.code, payload, text)
 
-    def through(self, kind: str, secret: str, row: tuple) -> HttpResult:
+    def through(self, kind: str, secret: str | tuple[str, str], row: tuple) -> HttpResult:
         _name, method, path, body = row
         if kind == "session":
             return self.session_call(secret, method, path, body)
@@ -647,7 +654,7 @@ class ClinicianReadLive(unittest.TestCase):
             self.assertLessEqual(claims["exp"] - claims["iat"], SHORT_BEARER_SECONDS,
                                  "the probe client's lifespan was not applied; the post-exp answer cannot be observed")
 
-            def observe(kind: str, secret: str) -> dict[str, HttpResult]:
+            def observe(kind: str, secret: str | tuple[str, str]) -> dict[str, HttpResult]:
                 return {row[0]: self.through(kind, secret, row) for row in rows}
 
             def summary(results: dict[str, HttpResult]) -> dict[str, list]:

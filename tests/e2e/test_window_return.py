@@ -5,6 +5,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
 from test_dock_preferences import dock_button
+from document_session import document_request
 
 class WindowReturnE2E(ViewerTechNoteE2E):
  def popup(self,a):
@@ -49,7 +50,7 @@ class WindowReturnE2E(ViewerTechNoteE2E):
   v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_contain_text('영상 새 창으로');self.assertTrue(v.evaluate('()=>window.opener===null'))
 
  def test_return_05_wrong_owner_and_scope_cannot_move_editor_focus(self):
-  a,b=self.pair();p,f,v=self.popup(a);target=p.locator('#reading-tools-focus');target.focus();me=v.request.get(self.stack.api+'/me').json();owner=json.dumps([me['institution'],me['sub']],ensure_ascii=False,separators=(',',':'))
+  a,b=self.pair();p,f,v=self.popup(a);target=p.locator('#reading-tools-focus');target.focus();me=document_request(v, "GET", self.stack.api+'/me').json();owner=json.dumps([me['institution'],me['sub']],ensure_ascii=False,separators=(',',':'))
   for message,expected in [(dict(owner='wrong-owner',studies=[a.uid,b.uid],activeUid=a.uid),'session'),(dict(owner=owner,studies=['1.2.3'],activeUid='1.2.3'),'context')]:
    result=v.evaluate("""message=>new Promise((resolve,reject)=>{const token=new URLSearchParams(location.hash.slice(1)).get('kin-reading-return'),c=new BroadcastChannel('kin-reading-return:'+token),request=crypto.randomUUID();const timer=setTimeout(()=>{c.close();reject(Error('no scoped reply'))},5000);c.onmessage=e=>{if(e.data.type==='result'&&e.data.request===request){clearTimeout(timer);c.close();resolve(e.data.result)}};c.postMessage({...message,type:'request',request})})""",message)
    self.assertEqual(result,expected);expect(target).to_be_focused();expect(p.locator('#reading-target')).to_contain_text(a.uid)

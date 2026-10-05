@@ -5,6 +5,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_appearance import ReadingAppearanceE2E
 from workspace_roaming_support import cleanup_workspace
+from document_session import document_request
 
 class AppearanceAccountE2E(ReadingAppearanceE2E):
  def setUp(self):
@@ -54,7 +55,7 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route))
   p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…')
   p.locator('#reading-text-current').select_option('18');self.assertEqual(len(pending),1)
-  pending.pop().fulfill(response=p.request.get(self.stack.api+'/reading-appearance'))
+  pending.pop().fulfill(response=document_request(p, "GET", self.stack.api+'/reading-appearance'))
   expect(p.locator('#appearance-account-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다')
   expect(p.locator('#findings')).to_have_css('font-size','18px')
   p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…')
@@ -62,21 +63,21 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   expect(p.locator('#appearance-account-save')).to_be_disabled();expect(p.locator('#reading-appearance-dialog')).not_to_be_visible()
   for route in pending:route.abort()
  def test_roam_05_legacy_load_retains_local_font_color_then_upgrades(self):
-  p=self.login();self.ready(p);head=p.request.get(self.stack.api+'/reading-appearance').json()
+  p=self.login();self.ready(p);head=document_request(p, "GET", self.stack.api+'/reading-appearance').json()
   legacy=dict(expectedOwner=head['owner'],revision=head['revision'],sizes=dict(version=1,list=16,current=18,prior=20))
-  r=p.request.put(self.stack.api+'/reading-appearance',headers={'X-KIN-CSRF':'1'},data=legacy);self.assertEqual(r.status,200,r.text())
+  r=document_request(p, "PUT", self.stack.api+'/reading-appearance',headers={'X-KIN-CSRF':'1'},data=legacy);self.assertEqual(r.status,200,r.text())
   p.locator('#reading-font-current').select_option('serif');p.locator('#reading-color-current').select_option('cool')
   p.locator('#appearance-account-load').click();expect(p.locator('#findings')).to_have_css('font-size','18px')
   expect(p.locator('#reading-font-current')).to_have_value('serif');expect(p.locator('#reading-color-current')).to_have_value('cool')
   p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')
-  saved=p.request.get(self.stack.api+'/reading-appearance').json()['sizes'];self.assertEqual(saved['version'],6);self.assertEqual(saved['fonts']['current'],'serif');self.assertEqual(saved['colors']['current'],'cool')
+  saved=document_request(p, "GET", self.stack.api+'/reading-appearance').json()['sizes'];self.assertEqual(saved['version'],6);self.assertEqual(saved['fonts']['current'],'serif');self.assertEqual(saved['colors']['current'],'cool')
 
  def test_roam_06_late_load_does_not_replace_new_font_or_color(self):
   p=self.login();self.ready(p);p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')
   pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route))
   for selector,value in [('#reading-font-current','mono'),('#reading-color-current','warm')]:
    p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…');p.locator(selector).select_option(value)
-   self.assertEqual(len(pending),1);pending.pop().fulfill(response=p.request.get(self.stack.api+'/reading-appearance'))
+   self.assertEqual(len(pending),1);pending.pop().fulfill(response=document_request(p, "GET", self.stack.api+'/reading-appearance'))
    expect(p.locator('#appearance-account-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다');expect(p.locator(selector)).to_have_value(value)
   expect(p.locator('#reading-font-current')).to_have_value('mono')
 
@@ -85,7 +86,7 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…')
   p.locator('#reading-color-current').select_option('cool');self.assertEqual(len(pending),1);route=pending.pop();route.fulfill(response=route.fetch())
   expect(p.locator('#appearance-account-status')).to_contain_text('요청 당시 설정을 저장했습니다');expect(p.locator('#reading-color-current')).to_have_value('cool')
-  self.assertEqual(p.request.get(self.stack.api+'/reading-appearance').json()['sizes']['colors']['current'],'warm')
+  self.assertEqual(document_request(p, "GET", self.stack.api+'/reading-appearance').json()['sizes']['colors']['current'],'warm')
 
  def test_roam_04_failed_write_empty_load_and_wrong_owner_response(self):
   a,b=self.pair();p=self.login();self.ready(p);p.locator('#reading-text-current').select_option('20')
@@ -98,7 +99,7 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   expect(p.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')
   other=self.login('doctor2');self.ready(other);other.locator('#appearance-account-load').click()
   expect(other.locator('#appearance-account-status')).to_have_text('계정에 저장된 표시 설정이 없습니다.')
-  me=other.request.get(self.stack.api+'/me').json()
+  me=document_request(other, "GET", self.stack.api+'/me').json()
   p.route('**/api/me',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(me)))
   p.locator('#reading-text-current').select_option('16');p.locator('#appearance-account-load').click()
   expect(p.locator('#appearance-account-status')).to_contain_text('세션이 변경되었습니다')

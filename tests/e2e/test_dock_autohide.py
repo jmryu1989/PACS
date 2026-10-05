@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 from test_dock_account import DockAccountE2E
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
 from test_dock_preferences import dock_settings
+from document_session import document_request
 
 class DockAutohideE2E(DockAccountE2E):
  def tab(self,f):return f.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]')
@@ -44,7 +45,7 @@ class DockAutohideE2E(DockAccountE2E):
   self.assertFalse(f.evaluate("()=>window.oldAutoDock.applyPreference({version:2,placement:'top',panel:1,autoHide:true})"));self.assertFalse(f.evaluate("()=>document.body.classList.contains('kin-docked')"))
   f.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeEnter()");expect(f.locator('#kin-dock-autohide')).to_be_checked(timeout=45000);expect(f.locator('#kin-workspace-dock')).to_have_count(1)
  def test_auto_03_account_legacy_load_and_session(self):
-  a,b=self.pair();p=self.login();f=self.opened(p,a);self.ready(p);p.locator('#reading-dock-autohide').check();p.locator('#appearance-account-save').click();self.saved(p);saved=p.request.get(self.stack.api+'/reading-appearance').json();self.assertEqual(saved['sizes']['version'],6);self.assertTrue(saved['sizes']['dock']['autoHide']);p.locator('#reading-appearance-close').click()
+  a,b=self.pair();p=self.login();f=self.opened(p,a);self.ready(p);p.locator('#reading-dock-autohide').check();p.locator('#appearance-account-save').click();self.saved(p);saved=document_request(p, "GET", self.stack.api+'/reading-appearance').json();self.assertEqual(saved['sizes']['version'],6);self.assertTrue(saved['sizes']['dock']['autoHide']);p.locator('#reading-appearance-close').click()
   other=self.login();g=self.opened(other,a);self.ready(other);expect(other.locator('#reading-dock-autohide')).not_to_be_checked();other.locator('#appearance-account-load').click();expect(other.locator('#appearance-account-status')).to_have_text('계정의 표시 설정을 불러왔습니다.');expect(other.locator('#reading-dock-autohide')).to_be_checked();expect(g.locator('#kin-dock-autohide')).to_be_checked()
   legacy=json.loads(json.dumps(saved));legacy['sizes']['version']=4;legacy['sizes'].pop('toolbar');legacy['sizes']['dock']=dict(version=1,placement='top',panel=0)
   other.route('**/api/reading-appearance',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(legacy)));other.locator('#appearance-account-load').click();expect(other.locator('#reading-dock-placement')).to_have_value('top');expect(other.locator('#reading-dock-autohide')).to_be_checked();expect(g.locator('#kin-dock-autohide')).to_be_checked()
