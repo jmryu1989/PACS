@@ -2389,6 +2389,85 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         expect(panel).to_contain_text("Tech Note")
         self.assertEqual([], self.site.logouts)
 
+    # ── S7-U5 fix-up E (review note of the draft branch; input loss): a Tech Note typed in ANOTHER Worklist tab of the
+    #    same session is asked about at Log out like a viewer's, through the same lock and answer (the real main.html
+    #    on both sides) ──
+    def note_tab(self, saves=None):
+        """A second Worklist tab of the session with its Tech Note dialog open on the patient's study (saved note v1).
+        `saves` answers the note's Save requests in order: 'hold' keeps one unanswered, 'ok' stores it."""
+        tab = self.open_main(self.watch(self.context.new_page()))
+        note = {"studyUid": h.UID, "version": 1, "text": "SYN saved note", "reason": "", "author": h.RAD["actor"],
+                "createdAt": "2026-10-05T00:00:00Z"}
+        answers, held = list(saves or []), []
+
+        def answer(route):
+            if route.request.method == "GET":
+                return route.fulfill(json={"uid": h.UID, "writable": True, "note": dict(note)})
+            body = route.request.post_data_json
+            if (answers.pop(0) if answers else "ok") == "hold":
+                return held.append(route)
+            note.update(version=note["version"] + 1, text=body["text"], reason=body["reason"].strip())
+            route.fulfill(json={"uid": h.UID, "writable": True, "note": dict(note)})
+        tab.route("**/api/studies/*/tech-note", answer)
+        tab.locator("#rows tr", has_text=h.PATIENT).first.click()
+        tab.locator("#tech-note-open").click()
+        expect(tab.locator("#tech-note-text")).to_have_value("SYN saved note")
+        tab.held_note_saves = held
+        return tab
+
+    def declared_by(self, page, kind):
+        return [name for name in self.locks(page)["held"] if name.startswith("kin-unsaved:" + self.site.cookie) and name.endswith(":" + kind)]
+
+    def test_a_tech_note_typed_in_another_worklist_tab_is_asked_about_at_log_out(self):
+        for case in ("typed, not saved", "saving, no answer yet"):
+            with self.subTest(case=case):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.open_main()
+                tab = self.note_tab(saves=["hold"] if case.startswith("saving") else [])
+                tab.fill("#tech-note-text", "SYN worklist note typed in the other tab")
+                if case.startswith("saving"):
+                    tab.fill("#tech-note-reason", "SYN reason")
+                    tab.locator("#tech-note-save").click()
+                    self.wait_until(lambda: tab.held_note_saves, "the note's save is out", page=tab)
+                self.wait_until(lambda: self.declared_by(self.page, "worklist-note"), "the other tab declares its note")
+                self.log_out_main()
+                panel = self.work_panel()
+                expect(panel).to_contain_text("Worklist 탭의 Tech Note")
+                self.page.wait_for_timeout(300)
+                self.assertEqual(([], []), (self.site.logouts, self.dialogs), "the session ended over the other tab's note")
+                # Back to Editing ends nothing; the other tab keeps its text and its declaration.
+                self.panel_button("Back to Editing").click()
+                expect(self.page.locator("dialog.kin-logout")).to_have_count(0)
+                expect(tab.locator("#tech-note-text")).to_have_value("SYN worklist note typed in the other tab")
+                self.assertTrue(self.declared_by(self.page, "worklist-note"), "the other tab still declares its note")
+                self.assertEqual([], self.site.logouts)
+
+    def test_an_opened_or_saved_tech_note_in_another_worklist_tab_asks_nothing(self):
+        """The opposite side: a note opened and read but not edited, or edited and then saved (answer received), is no
+        unsaved work - Log out is one press with no question and nothing waited for."""
+        for case in ("opened, nothing typed", "typed and saved"):
+            with self.subTest(case=case):
+                self.fresh_context()
+                self.site = MultiStudySite()
+                self.open_main()
+                tab = self.note_tab()
+                if case == "typed and saved":
+                    tab.fill("#tech-note-text", "SYN worklist note saved")
+                    tab.fill("#tech-note-reason", "SYN reason")
+                    tab.locator("#tech-note-save").click()
+                    expect(tab.locator("#tech-note-status")).to_contain_text("저장되었습니다")
+                tab.wait_for_timeout(700)   # past one declaration cycle (500 ms): nothing is declared
+                self.assertEqual([], self.declared_by(self.page, "worklist-note"))
+                self.site.logout_answers = ["hold"]
+                self.log_out_main()
+                self.wait_until(lambda: self.site.held_logouts, "the logout without a question")
+                self.assertEqual([], [notice for notice in self.posts() if notice.get("type") == "session-work-query"],
+                                 "a clean note made Log out ask (and wait for) the other tab")
+                self.release_logout()
+                self.page.wait_for_url(h.INDEX_URL)
+                self.assertEqual((1, []), (len(self.site.logouts), self.dialogs))
+
     def test_a_dictated_text_in_review_is_asked_about_at_log_out(self):
         """A006: a transcript the reader has not inserted yet is unsaved work of this page."""
         self.open_untouched()
