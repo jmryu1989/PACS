@@ -563,7 +563,12 @@ class WorkflowPins(unittest.TestCase):
                        "--entrypoint node kin-api:ci --test /tests/gateway_receipt_server_test.cjs",
                        "tmp/runtime-ci/gateway-receipt-server/"):
             self.assertEqual(1, WORKFLOW.count(needle), needle)
-        self.assertEqual(1, WORKFLOW.count("-r gateway/agent/requirements.txt numpy"), "the invariants interpreter keeps the agent dependency")
+        # Each live-stack interpreter that reaches the gateway keeps the agent dependency: the invariants one, and since
+        # S7-U5 the session contract job's (s7-u5-session-contracts, the same requirement line).
+        for interpreter in ("hp-python", "u5-python"):
+            self.assertEqual(1, WORKFLOW.count('"$RUNNER_TEMP/%s/bin/python" -m pip install -r tests/e2e/requirements.txt '
+                                               '-r gateway/agent/requirements.txt numpy' % interpreter), interpreter)
+        self.assertEqual(2, WORKFLOW.count("-r gateway/agent/requirements.txt numpy"), "no other interpreter installs it")
 
 
 class Encoding(unittest.TestCase):
