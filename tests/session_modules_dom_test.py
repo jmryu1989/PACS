@@ -147,7 +147,7 @@ class SessionModulesDOMTest(unittest.TestCase):
         self.page.evaluate("syn.prepare();syn.cancel();syn.holds.shift()()")
         expect(self.page.locator("#tech-note-dialog")).to_be_visible()
         expect(note).to_have_value("SYN edited")
-        expect(reason).to_have_value("")
+        expect(reason).to_have_value("SYN reason")
         expect(self.page.get_by_role("button", name="Save Note", exact=True)).to_be_enabled()
         expect(self.page.locator("#tech-note-status")).to_have_text("저장되었습니다. v2")
         self.assertEqual(['GET','POST','GET'],self.page.evaluate("syn.calls.map(c=>c.method)"))

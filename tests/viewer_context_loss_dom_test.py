@@ -499,6 +499,114 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.body.baseVersion)'), [0, 0])
         self.assertEqual(p.evaluate('noteServer.notes.map(n=>[n.version,n.text])'), [[1, 'SYN pending note']])
 
+    def edit_pending_note(self):
+        self.page.get_by_label('Note', exact=True).fill('SYN corrected dose 120 mAs')
+        self.page.get_by_label('Reason for Change').fill('  SYN correction  ')
+
+    def test_unknown_edited_save_sends_current_text_second_commits_first(self):
+        self.mount_note_cas()
+        p = self.page
+        self.edit_pending_note()
+        p.get_by_role('button', name='Save Note', exact=True).click()
+        p.wait_for_function('noteServer.writes.length===2')
+        self.assertEqual(p.evaluate('noteServer.writes.map(w=>[w.body.baseVersion,w.body.text])'),
+                         [[0, 'SYN pending note'], [0, 'SYN corrected dose 120 mAs']])
+        p.evaluate('finishWrite(1)')
+        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        p.evaluate('finishWrite(0)')
+        self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.outcome)'), [409, 200])
+        self.assertEqual(p.evaluate('noteServer.notes.map(n=>[n.version,n.text])'), [[1, 'SYN corrected dose 120 mAs']])
+        expect(p.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
+        expect(p.get_by_label('Reason for Change')).to_have_value('  SYN correction  ')
+        self.assertEqual(p.evaluate('note.workspaceState()'), {'dirty': False, 'busy': False, 'unknown': False})
+
+    def test_unknown_edited_save_first_commits_late_one_followup(self):
+        self.mount_note_cas()
+        p = self.page
+        self.edit_pending_note()
+        p.get_by_role('button', name='Save Note', exact=True).click()
+        p.wait_for_function('noteServer.writes.length===2')
+        p.evaluate('finishWrite(0);finishWrite(1)')
+        p.wait_for_function('!!window.releaseRead')
+        self.assertNotIn('저장되지 않았습니다', p.locator('#tech-note-status').inner_text())
+        expect(p.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
+        p.evaluate('releaseRead()')
+        p.wait_for_function('noteServer.writes.length===3')
+        self.assertEqual(p.evaluate('noteServer.writes.map(w=>[w.body.baseVersion,w.body.text])'),
+                         [[0, 'SYN pending note'], [0, 'SYN corrected dose 120 mAs'], [1, 'SYN corrected dose 120 mAs']])
+        p.evaluate('finishWrite(2)')
+        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v2')
+        self.assertEqual(p.evaluate('noteServer.notes.map(n=>[n.version,n.text])'),
+                         [[1, 'SYN pending note'], [2, 'SYN corrected dose 120 mAs']])
+        self.assertEqual(p.evaluate('noteServer.writes.length'), 3)
+        self.assertFalse(p.evaluate('note.workspaceState().dirty || note.workspaceState().unknown'))
+
+    def test_unknown_witness_with_edits_saves_current_input(self):
+        self.mount_note_cas()
+        p = self.page
+        p.evaluate('finishWrite(0)')
+        self.edit_pending_note()
+        p.get_by_role('button', name='Save Note', exact=True).click()
+        p.wait_for_function('noteServer.writes.length===2')
+        self.assertEqual(p.evaluate('noteServer.writes[1].body'),
+                         {'baseVersion': 1, 'text': 'SYN corrected dose 120 mAs', 'reason': '  SYN correction  '})
+        p.evaluate('finishWrite(1)')
+        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v2')
+        expect(p.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
+
+    def test_unknown_reload_witness_keeps_edits_against_known_baseline(self):
+        self.mount_note_cas()
+        p = self.page
+        p.evaluate('finishWrite(0)')
+        self.edit_pending_note()
+        p.get_by_role('button', name='Reload Note', exact=True).click()
+        expect(p.locator('#tech-note-status')).to_contain_text('저장되었습니다. v1 · 이후 입력은 아직 저장되지 않았습니다')
+        expect(p.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
+        expect(p.get_by_label('Reason for Change')).to_have_value('  SYN correction  ')
+        self.assertEqual(p.evaluate('note.workspaceState()'), {'dirty': True, 'busy': False, 'unknown': False})
+        self.assertEqual(p.evaluate('noteServer.writes.length'), 1)
+        p.get_by_label('Note', exact=True).fill('SYN pending note')
+        p.get_by_label('Reason for Change').fill('')
+        self.assertFalse(p.evaluate('note.workspaceState().dirty'))
+
+    def test_unknown_edited_reload_old_version_never_sends(self):
+        self.mount_note_cas()
+        self.edit_pending_note()
+        self.page.get_by_role('button', name='Reload Note', exact=True).click()
+        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과는 아직 알 수 없습니다')
+        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
+        self.assertEqual(self.page.evaluate('noteServer.writes.length'), 1)
+        self.assertTrue(self.page.evaluate('note.workspaceState().unknown'))
+
+    def test_followup_unknown_requires_another_save_press(self):
+        self.mount_note_cas()
+        p = self.page
+        self.edit_pending_note()
+        p.get_by_role('button', name='Save Note', exact=True).click()
+        p.wait_for_function('noteServer.writes.length===2')
+        p.evaluate('finishWrite(0);finishWrite(1)')
+        p.wait_for_function('!!window.releaseRead')
+        p.evaluate('releaseRead()')
+        p.wait_for_function('noteServer.writes.length===3')
+        p.evaluate("noteServer.writes[2].reject(Object.assign(Error('lost answer'),{status:502}))")
+        expect(p.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+        self.assertTrue(p.evaluate('note.workspaceState().unknown'))
+        self.assertEqual(p.evaluate('noteServer.writes.length'), 3)
+        expect(p.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
+
+    def test_reload_witnesses_resend_after_both_answers_lost(self):
+        self.mount_note_cas()
+        p = self.page
+        self.edit_pending_note()
+        p.get_by_role('button', name='Save Note', exact=True).click()
+        p.wait_for_function('noteServer.writes.length===2')
+        p.evaluate("noteServer.writes[1].reject(Error('lost receipt')); finishWrite(1)")
+        p.wait_for_function('!note.workspaceState().busy')
+        p.get_by_role('button', name='Reload Note', exact=True).click()
+        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        self.assertFalse(p.evaluate('note.workspaceState().dirty || note.workspaceState().unknown'))
+        self.assertEqual(p.evaluate('noteServer.writes.length'), 2)
+
     def committed_note_without_receipt(self, failure_status):
         p = self.page
         p.add_script_tag(url=BASE + '/worklist/hpacs-lite/tech-note.js')

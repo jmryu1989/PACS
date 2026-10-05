@@ -14,8 +14,8 @@ window.KinTechNote = function (app) {
     <div id="tech-note-history-items"></div><button id="tech-note-more" type="button" hidden>Load More</button>`;
   document.body.append(d);
   const $ = id => d.querySelector('#tech-note-' + id);
-  let uid = null, seq = 0, busy = false, ended = false, writable = false, version = 0, saved = '', cursor = null, opener, openerDocument, innerOpener;
-  const dirty = () => $('text').value !== saved || !!$('reason').value;
+  let uid = null, seq = 0, busy = false, ended = false, writable = false, version = 0, saved = '', savedReason = '', cursor = null, opener, openerDocument, innerOpener;
+  const dirty = () => $('text').value !== saved || $('reason').value.trim() !== savedReason;
   const status = text => { $('status').textContent = text; };
   function controls() {
     $('save').disabled = busy || !writable || !app.allowed() || ended;
@@ -23,12 +23,17 @@ window.KinTechNote = function (app) {
     for (const id of ['reload', 'history', 'more', 'close']) $(id).disabled = busy;
   }
   function valid(ticket, target) { return !ended && d.open && ticket === seq && uid === target && app.allowed(); }
-  function adopt(result) {
+  // A receipt/read records the server baseline; only an explicit read replaces input.
+  function remember(result) {
     if (result.uid !== uid || result.note && result.note.studyUid !== uid) throw new Error('메모 대상이 일치하지 않습니다');
     writable = result.writable === true; version = result.note?.version ?? 0; saved = result.note?.text ?? '';
-    $('text').value = saved; $('reason').value = '';
+    savedReason = result.note?.reason ?? '';
     app.changed?.(uid, result.note);
     $('meta').textContent = result.note ? `v${version} · ${result.note.author} · ${new Date(result.note.createdAt).toLocaleString()}` : '저장된 메모 없음';
+  }
+  function adopt(result) {
+    remember(result);
+    $('text').value = saved; $('reason').value = savedReason;
     status(writable ? '내용을 확인한 뒤 명시적으로 저장하세요.' : '읽기 전용 · 촬영 기관의 작성 권한이 필요합니다.');
   }
   async function read() {
@@ -42,30 +47,35 @@ window.KinTechNote = function (app) {
     finally { if (ticket === seq) busy=false; work.commit(at,()=>{if(ticket===seq){interruptedRead=false;controls();}}); }
   }
   $('save').onclick = async () => {
-    if(work.state()!=='active')return;
+    if(work.state()!=='active'||busy||!writable||!app.allowed()||ended)return;
     if(interruptedSave){
-      if(busy)return;
       const pending=interruptedSave;
-      if(await reconcileSave(pending)==='unchanged')await save(pending.body,pending);
+      const outcome=await reconcileSave(pending);
+      if(outcome==='unchanged')await saveCurrent(pending.body.baseVersion,pending);
+      else if(outcome==='stored'&&dirty())await saveCurrent(version);
       return;
     }
     if (busy || !writable || !app.allowed() || ended) return;
     if (version && !$('reason').value.trim()) { status('수정·비우기 사유를 입력하세요.'); $('reason').focus(); return; }
-    await save({ baseVersion: version, text: $('text').value, reason: $('reason').value });
+    await saveCurrent(version);
   };
+  const savedStatus = () => '저장되었습니다. v' + version + (dirty() ? ' · 이후 입력은 아직 저장되지 않았습니다.' : '');
+  function saveCurrent(baseVersion, prior=null) {
+    return save({ baseVersion, text: $('text').value, reason: $('reason').value }, prior);
+  }
   async function save(body, prior=null) {
     if(work.state()!=='active'||busy||!writable||!app.allowed()||ended||!d.open)return;
     const at=work.capture('document');
     const ticket = ++seq, target = uid;
     let settled, confirmed = false, recheck = false;
-    const pending={target,body,previous:prior?prior.previous:saved,done:new Promise(resolve=>{settled=resolve;})};
+    const pending={target,body,attempts:[...(prior?.attempts||[]),body],previous:prior?prior.previous:saved,done:new Promise(resolve=>{settled=resolve;})};
     interruptedSave=pending;busy = true; controls(); status('저장 중…');
     try {
       const result = await app.api('POST', '/studies/' + encodeURIComponent(target) + '/tech-note', body, undefined, at);
       work.commit(at,()=>{if (valid(ticket, target)) {
-        adopt(result); $('history-items').replaceChildren(); $('more').hidden = true; cursor = null;
+        remember(result); $('history-items').replaceChildren(); $('more').hidden = true; cursor = null;
         confirmed = true;
-        status('저장되었습니다. v' + version);
+        status(savedStatus());
       }});
     } catch (e) { work.commit(at,()=>{if (valid(ticket, target)) {
       // An answered refusal is not an uncertain write. A gateway error alone
@@ -81,7 +91,12 @@ window.KinTechNote = function (app) {
         : '저장 결과를 알 수 없습니다: ' + e.message + ' · 입력은 유지했습니다. Save Note 또는 Reload Note로 결과를 확인하세요.');
     }}); }
     finally { settled();if (ticket === seq) busy=false; work.commit(at,()=>{if(ticket===seq){if(confirmed)interruptedSave=null;controls();}}); }
-    if(recheck&&work.admits(at)&&valid(ticket,target))await reconcileSave(pending);
+    if(recheck&&work.admits(at)&&valid(ticket,target)){
+      const outcome=await reconcileSave(pending);
+      // This Save press may follow a witnessed earlier write once. The new write
+      // has no unresolved predecessor, so its own answer cannot start a retry loop.
+      if(outcome==='stored'&&dirty())await saveCurrent(version);
+    }
   }
   const unknownActions='저장 결과는 아직 알 수 없습니다 · 입력은 유지되며 Save Note는 확인 후 재시도하고 Reload Note는 결과만 확인합니다.';
   async function reconcileSave(pending) {
@@ -96,6 +111,7 @@ window.KinTechNote = function (app) {
       const result=await app.api('GET','/studies/'+encodeURIComponent(target)+'/tech-note',undefined,undefined,at);
       if (!work.admits(at) || !valid(ticket,target)) return;
       if(result.uid!==target||result.note&&result.note.studyUid!==target)throw new Error('메모 대상이 일치하지 않습니다');
+      work.commit(at,()=>{if(valid(ticket,target))remember(result);});
       let next = result.note?.version === pending.body.baseVersion + 1 ? result.note : null;
       // A later revision is not proof that this attempt failed. The immutable next
       // revision resolves that attempt without replacing the reader's current input.
@@ -105,23 +121,23 @@ window.KinTechNote = function (app) {
         if (history.uid!==target || !Array.isArray(history.items)) throw new Error('메모 이력을 확인하지 못했습니다');
         next=history.items.find(item=>item.studyUid===target&&item.version===pending.body.baseVersion+1)||null;
       }
+      let outcome;
       work.commit(at,()=>{
         if(!valid(ticket,target))return;
         if(result.uid!==target||result.note&&result.note.studyUid!==target)throw new Error('메모 대상이 일치하지 않습니다');
         const latest=result.note,revision=latest?.version??0;
-        const stored=revision===pending.body.baseVersion+1&&latest?.text===pending.body.text&&
-          (latest?.reason||'')===(pending.body.reason||'').trim();
+        const witnessed=next&&pending.attempts.some(body=>next.text===body.text&&(next.reason||'')===(body.reason||'').trim());
+        const stored=revision===pending.body.baseVersion+1&&witnessed;
         const unchanged=revision===pending.body.baseVersion&&(latest?.text??'')===pending.previous;
-        if(stored){adopt(result);$('history-items').replaceChildren();$('more').hidden=true;cursor=null;}
-        else if(unchanged){writable=result.writable===true;status(unknownActions);return;}
+        if(stored){$('history-items').replaceChildren();$('more').hidden=true;cursor=null;}
+        else if(unchanged){outcome='unchanged';status(unknownActions);return;}
         else {
-          const witnessed=next?.text===pending.body.text&&(next.reason||'')===(pending.body.reason||'').trim();
           if(next)interruptedSave=null;
           status(witnessed?'저장되었습니다. v'+next.version+' · 이후 메모가 변경되어 입력을 유지했습니다. 최신 메모와 비교하세요.':next?'저장되지 않았습니다. 다른 메모가 저장되었습니다. 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.':'저장 결과를 알 수 없습니다. 입력은 유지했습니다. 최신 메모와 이력을 다시 확인하세요.');return;
         }
-        interruptedSave=null;status('저장되었습니다. v'+version);
+        interruptedSave=null;outcome='stored';status(savedStatus());
       });
-      if(interruptedSave===pending&&(result.note?.version??0)===pending.body.baseVersion&&(result.note?.text??'')===pending.previous)return 'unchanged';
+      return outcome;
     } catch(e){work.commit(at,()=>{if(valid(ticket,target))status('저장 결과를 알 수 없습니다: '+e.message+' · 입력은 유지했습니다. Save Note 또는 Reload Note로 다시 확인하세요.');});}
     finally {if(ticket===seq)busy=false;work.commit(at,()=>{if(ticket===seq)controls();});}
   }
@@ -156,7 +172,7 @@ window.KinTechNote = function (app) {
       ? '저장 결과를 알 수 없습니다. 메모 입력을 버리고 닫을까요? 다시 열어 최신 메모와 이력을 확인하세요.'
       : '저장하지 않은 메모 입력을 버리고 닫을까요?'))) return;
     const closedUid = uid;
-    ++seq; uid = null; busy = false; writable = false; saved = ''; version = 0; interruptedSave = null;
+    ++seq; uid = null; busy = false; writable = false; saved = savedReason = ''; version = 0; interruptedSave = null;
     $('text').value = $('reason').value = ''; $('history-items').replaceChildren(); $('target').textContent = $('meta').textContent = ''; status('');
     if (d.open) d.close();
     if (!force) {
