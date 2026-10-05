@@ -776,6 +776,79 @@ class LogoutDOMTest(unittest.TestCase):
         self.page.get_by_role('button', name='Save Note', exact=True).click()
         expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('button', name='Close', exact=True)).to_be_enabled()
 
+    def open_note_with_lost_receipt(self):
+        # R5-F01/F02: exercise the worklist consumer with the same note API contract.
+        source = os.environ.get('KIN_CTX_TECH_NOTE_JS')
+        if source:
+            self.context.route('**/tech-note.js', lambda r: r.fulfill(body=Path(source).read_text(encoding='utf-8'), content_type='text/javascript'))
+        self.open_main()
+        self.page.locator('#rows tr').first.click()
+        notes = [dict(studyUid=UID, version=1, text='SYN A', reason='', author='tech', createdAt='2026-10-05T00:00:00Z')]
+        posts = []
+        def reply(route):
+            request = route.request
+            if urlparse(request.url).path.endswith('/history'):
+                before = int(parse_qs(urlparse(request.url).query).get('before', [len(notes)+1])[0])
+                return route.fulfill(json=dict(uid=UID, items=[n for n in reversed(notes) if n['version'] < before], nextBefore=None))
+            if request.method == 'POST':
+                body = request.post_data_json
+                posts.append(body)
+                if body['baseVersion'] != len(notes):
+                    return route.fulfill(status=409, json={'message': 'SYN conflict'})
+                if body['text'] == notes[-1]['text'] or not body['reason'].strip():
+                    return route.fulfill(status=400, json={'message': 'SYN invalid edit'})
+                notes.append(dict(notes[-1], version=len(notes)+1, text=body['text'], reason=body['reason'].strip(), author='tech'))
+                if len(posts) == 1:
+                    return route.abort()
+            route.fulfill(json=dict(uid=UID, writable=True, note=notes[-1]))
+        self.context.route('**/api/studies/*/tech-note**', reply)
+        self.page.locator('#rows [data-tech-note]').first.click()
+        dialog = self.page.get_by_role('dialog', name='Tech Note', exact=True)
+        expect(dialog.get_by_label('Note', exact=True)).to_have_value('SYN A')
+        dialog.get_by_label('Note', exact=True).fill('SYN B')
+        dialog.get_by_label('Reason for Change').fill('R1')
+        dialog.get_by_role('button', name='Save Note', exact=True).click()
+        expect(dialog.get_by_role('status')).to_contain_text('저장 결과를 알 수 없습니다')
+        return dialog, notes, posts
+
+    def test_ctx_note_witness_unchanged_text_keeps_typed_reason_and_closes_without_prompt(self):
+        for current_reason in ('R1', 'R1 (typo fixed)'):
+            with self.subTest(reason=current_reason):
+                if current_reason != 'R1':
+                    self.fresh_context()
+                dialog, notes, posts = self.open_note_with_lost_receipt()
+                reason = dialog.get_by_label('Reason for Change')
+                reason.fill(''); reason.fill(current_reason)
+                dialog.get_by_role('button', name='Save Note', exact=True).click()
+                expect(dialog.get_by_role('status')).to_have_text('저장되었습니다. v2')
+                expect(dialog.get_by_label('Note', exact=True)).to_have_value('SYN B')
+                expect(reason).to_have_value(current_reason)
+                self.assertEqual(posts, [{'baseVersion': 1, 'text': 'SYN B', 'reason': 'R1'}])
+                self.assertEqual(len(notes), 2)
+                prompts = list(self.dialogs)
+                dialog.get_by_role('button', name='Close', exact=True).click()
+                expect(dialog).not_to_be_visible()
+                self.assertEqual(self.dialogs, prompts)
+                expect(self.page.locator('#findings')).to_be_editable()
+
+    def test_ctx_note_witness_before_foreign_revision_clears_only_confirmed_reason(self):
+        dialog, notes, posts = self.open_note_with_lost_receipt()
+        notes.append(dict(notes[-1], version=3, text='SYN foreign v3', reason='foreign reason', author='other technician'))
+        save, reason = dialog.get_by_role('button', name='Save Note', exact=True), dialog.get_by_label('Reason for Change')
+        save.click()
+        expect(dialog.get_by_role('status')).to_have_text('저장되었습니다. v2 · 이후 메모가 변경되어 입력을 유지했습니다. 최신 메모와 비교하세요.')
+        expect(dialog.get_by_label('Note', exact=True)).to_have_value('SYN B')
+        expect(reason).to_have_value('')
+        save.click()
+        expect(dialog.get_by_role('status')).to_have_text('수정·비우기 사유를 입력하세요.')
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(notes[-1]['text'], 'SYN foreign v3')
+        reason.fill('R2 after comparing v3')
+        save.click()
+        expect(dialog.get_by_role('status')).to_have_text('저장되었습니다. v4')
+        self.assertEqual(posts[-1], {'baseVersion': 3, 'text': 'SYN B', 'reason': 'R2 after comparing v3'})
+        self.assertEqual(len(posts), 2)
+
     def test_ctx_note_409_refusal_sentence_and_original_reload_confirmation(self):
         self.note_save_failure((409, {'message': '다른 메모가 먼저 저장되었습니다. 최신 메모를 확인하세요.'}))
         expect(self.page.locator('#tech-note-status')).to_have_text('저장되지 않았습니다: 다른 메모가 먼저 저장되었습니다. 최신 메모를 확인하세요. · 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.')

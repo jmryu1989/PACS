@@ -1,5 +1,5 @@
 # coding: utf-8
-"""REQ-S8-CTX -> RISK-CTX-WORK/SESSION -> CTX-NOTE-WRAPPER (R2-F01, R3-F01, R4-F01/F02).
+"""REQ-S8-CTX -> RISK-CTX-WORK/SESSION -> CTX-NOTE-WRAPPER (R2-F01, R3-F01, R4-F01/F02, R5-F01/F02).
 
 Real viewer-tech-note, note dialog, account verdict, page boundary and transport.
 Only renderer services and HTTP replies are synthetic; no stack or patient data.
@@ -7,6 +7,7 @@ Only renderer services and HTTP replies are synthetic; no stack or patient data.
 import os
 from pathlib import Path
 import unittest
+from urllib.parse import parse_qs, urlparse
 from playwright.sync_api import sync_playwright, expect
 
 try:
@@ -77,6 +78,9 @@ class ViewerTechNoteDOMTest(unittest.TestCase):
 
     def route(self, route):
         path = route.request.url[len(BASE):].split('?')[0]
+        if path.endswith('/tech-note/history'):
+            before = int(parse_qs(urlparse(route.request.url).query).get('before', [len(self.notes)+1])[0])
+            return route.fulfill(json=dict(uid='1.2.3', items=[n for n in reversed(self.notes) if n['version'] < before], nextBefore=None))
         if path == '/api/me':
             self.calls.append('me')
             failure = self.me_answers.pop(0) if self.me_answers else self.trailing if self.posts else self.leading
@@ -156,6 +160,87 @@ class ViewerTechNoteDOMTest(unittest.TestCase):
         self.assertEqual({'dirty': False, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
         self.page.keyboard.press('Escape')
         self.assertEqual(self.dialogs, [])
+
+    def open_existing_note(self):
+        self.page.get_by_role('button', name='Close', exact=True).click()
+        self.dialogs.clear()
+        self.assertEqual(self.commit_note({'baseVersion': 0, 'text': 'SYN A', 'reason': ''}), 200)
+        self.page.get_by_role('button', name='Tech Note', exact=True).click()
+        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN A')
+
+    def check_reason_only_after_witness(self, current_reason):
+        self.open_existing_note()
+        note, reason = self.page.get_by_label('Note', exact=True), self.page.get_by_label('Reason for Change')
+        note.fill('SYN B'); reason.fill('R1')
+        self.unknown_first(committed=True)
+        reason.fill(''); reason.fill(current_reason)
+        self.save()
+        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text('저장되었습니다. v2')
+        expect(note).to_have_value('SYN B')
+        expect(reason).to_have_value(current_reason)
+        self.assertEqual({'dirty': False, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
+        self.assertEqual(self.posts, [{'baseVersion': 1, 'text': 'SYN B', 'reason': 'R1'}])
+        self.assertEqual([(n['version'], n['text']) for n in self.notes], [(1, 'SYN A'), (2, 'SYN B')])
+        self.save()
+        expect(reason).to_have_value(current_reason)
+        self.assertEqual(len(self.posts), 1)
+        self.page.get_by_role('button', name='Close', exact=True).click()
+        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).not_to_be_visible()
+        self.assertEqual(self.dialogs, [])
+
+    def test_witness_unchanged_text_retyped_same_reason_is_clean_without_post(self):
+        self.check_reason_only_after_witness('R1')
+
+    def test_witness_unchanged_text_corrected_reason_is_clean_without_post(self):
+        self.check_reason_only_after_witness('R1 (typo fixed)')
+
+    def test_ordinary_unchanged_text_never_posts_with_or_without_reason(self):
+        self.open_existing_note()
+        for value in ('', 'R1'):
+            with self.subTest(reason=value):
+                self.page.get_by_label('Reason for Change').fill(value)
+                self.save()
+                expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text('저장되었습니다. v1')
+                expect(self.page.get_by_label('Reason for Change')).to_have_value(value)
+                self.assertEqual(self.posts, [])
+                self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
+
+    def test_witness_existing_note_changed_text_sends_one_followup(self):
+        self.open_existing_note()
+        note, reason = self.page.get_by_label('Note', exact=True), self.page.get_by_label('Reason for Change')
+        note.fill('SYN B'); reason.fill('R1')
+        self.unknown_first(committed=True)
+        note.fill('SYN C'); reason.fill('R2')
+        self.save()
+        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text('저장되었습니다. v3')
+        self.assertEqual(self.posts, [{'baseVersion': 1, 'text': 'SYN B', 'reason': 'R1'},
+                                     {'baseVersion': 2, 'text': 'SYN C', 'reason': 'R2'}])
+        expect(note).to_have_value('SYN C')
+        expect(reason).to_have_value('')
+        self.assertEqual({'dirty': False, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
+
+    def test_witness_before_foreign_revision_consumes_reason_and_requires_new_reason(self):
+        self.open_existing_note()
+        note, reason = self.page.get_by_label('Note', exact=True), self.page.get_by_label('Reason for Change')
+        note.fill('SYN B'); reason.fill('R1')
+        self.unknown_first(committed=True)
+        self.assertEqual(self.commit_note({'baseVersion': 2, 'text': 'SYN foreign v3', 'reason': 'foreign reason'}), 200)
+        self.notes[-1]['author'] = 'other technician'
+        self.save()
+        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text('저장되었습니다. v2 · 이후 메모가 변경되어 입력을 유지했습니다. 최신 메모와 비교하세요.')
+        expect(note).to_have_value('SYN B')
+        expect(reason).to_have_value('')
+        self.assertEqual({'dirty': True, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
+        self.save()
+        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text('수정·비우기 사유를 입력하세요.')
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.notes[-1]['text'], 'SYN foreign v3')
+        reason.fill('R2 after comparing v3')
+        self.save()
+        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text('저장되었습니다. v4')
+        self.assertEqual(self.posts[-1], {'baseVersion': 3, 'text': 'SYN B', 'reason': 'R2 after comparing v3'})
+        self.assertEqual(len(self.posts), 2)
+        expect(reason).to_have_value('')
 
     def test_open_reload_never_reuses_another_technicians_reason(self):
         self.page.get_by_role('button', name='Close', exact=True).click()
@@ -386,12 +471,13 @@ class ViewerTechNoteDOMTest(unittest.TestCase):
         expect(self.page.get_by_label('Reason for Change')).to_have_value('  SYN correction  ')
         self.assertEqual(len(self.posts), 1)
         self.assertTrue(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-        # Only note text has a server baseline; a newly typed reason stays dirty.
+        # Matching the known text is clean even if a reason remains in the box.
         self.page.get_by_label('Note', exact=True).fill('SYN other reader')
         self.page.get_by_label('Reason for Change').fill('SYN other reason')
-        self.assertTrue(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-        self.page.get_by_label('Reason for Change').fill('')
         self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
+        self.save()
+        self.assertEqual(len(self.posts), 1)
+        expect(self.page.get_by_label('Reason for Change')).to_have_value('SYN other reason')
         self.page.keyboard.press('Escape')
         self.assertEqual(self.dialogs, [])
 
@@ -432,11 +518,15 @@ class ViewerTechNoteDOMTest(unittest.TestCase):
         self.assertEqual([n['text'] for n in self.notes], ['SYN my note'])
         self.assertNotIn('저장되었습니다', self.page.locator('body').inner_text())
 
-    def test_rejected_unchanged_box_is_clean_from_known_version(self):
-        self.page.get_by_label('Note', exact=True).fill('')
+    def test_rejected_edit_returned_to_known_text_is_clean(self):
         self.post_status = 403
         self.save()
         expect(self.page.locator('#tech-note-status')).to_contain_text('저장되지 않았습니다')
+        self.assertEqual(len(self.posts), 1)
+        self.page.get_by_label('Note', exact=True).fill('')
+        self.save()
+        expect(self.page.locator('#tech-note-status')).to_have_text('변경된 내용이 없습니다.')
+        self.assertEqual(len(self.posts), 1)
         self.assertEqual({'dirty': False, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
         self.page.keyboard.press('Escape')
         self.assertEqual(self.dialogs, [])

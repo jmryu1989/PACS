@@ -15,7 +15,8 @@ window.KinTechNote = function (app) {
   document.body.append(d);
   const $ = id => d.querySelector('#tech-note-' + id);
   let uid = null, seq = 0, busy = false, ended = false, writable = false, version = 0, saved = '', reasonInput = 0, cursor = null, opener, openerDocument, innerOpener;
-  const dirty = () => $('text').value !== saved || !!$('reason').value.trim();
+  // A reason belongs to a text edit; by itself it is not an unsaved note.
+  const dirty = () => $('text').value !== saved;
   $('reason').addEventListener('input', () => { ++reasonInput; });
   function consumeReason(attempt) {
     // A witnessed write consumes only its own input, never a reason typed later.
@@ -64,6 +65,7 @@ window.KinTechNote = function (app) {
   };
   const savedStatus = () => '저장되었습니다. v' + version + (dirty() ? ' · 이후 입력은 아직 저장되지 않았습니다.' : '');
   function saveCurrent(baseVersion, prior=null) {
+    if (!dirty()) { status(prior ? unknownActions : version ? savedStatus() : '변경된 내용이 없습니다.'); return; }
     if (baseVersion && !$('reason').value.trim()) { status('수정·비우기 사유를 입력하세요.'); $('reason').focus(); return; }
     return save({ baseVersion, text: $('text').value, reason: $('reason').value }, prior);
   }
