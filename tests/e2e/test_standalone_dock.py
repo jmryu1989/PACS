@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
 from test_dock_preferences import DockPreferencesE2E,dock_button,dock_settings
 from document_session import document_request
+from viewer_session import end_viewer
 
 class StandaloneDockE2E(ViewerTechNoteE2E):
  def test_standalone_dock_01_parent_popup_preferences_and_work(self):
@@ -33,8 +34,9 @@ class StandaloneDockE2E(ViewerTechNoteE2E):
    self.ready(v);expect(v.locator('#kin-workspace-dock')).to_have_count(1);expect(v.locator('#kin-viewer-tech-note')).to_have_count(1);expect(v.locator('#kin-dock-placement')).to_have_value('top')
   canvas_ready(v,1);self.assertEqual(self.snapshot(v),before)
   saved=DockPreferencesE2E.stored(self,v)
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-  expect(v.locator('#kin-dock-placement')).to_be_disabled();expect(v.locator('#kin-viewer-note-open')).to_be_disabled();expect(v.locator('#kin-viewer-layout')).not_to_be_visible();self.assertEqual(DockPreferencesE2E.stored(self,v),saved)
+  ended=end_viewer(v, ['#kin-dock-placement','#kin-viewer-note-open'])
+  for selector in ['#kin-dock-placement','#kin-viewer-note-open']:self.assertEqual(ended.retained(selector,'node => node.disabled'),[True])
+  self.assertEqual(DockPreferencesE2E.stored(self,ended),saved);ended.assert_quiet()
 
  def test_standalone_dock_03_storage_denial_and_narrow_window(self):
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=800,height=1100))

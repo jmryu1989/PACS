@@ -6,6 +6,7 @@ from urllib.parse import parse_qs,urlsplit
 from playwright.sync_api import expect
 from test_viewer_job_report import ViewerJobReportE2E
 from test_prior_selection import canvas_ready
+from viewer_session import end_document
 
 class ReadingWorkspaceE2E(ViewerJobReportE2E):
  def pair(self):
@@ -100,7 +101,7 @@ class ReadingWorkspaceE2E(ViewerJobReportE2E):
   p.get_by_role('button',name='Reopen Viewer',exact=True).click()
   expect(p.locator('#reading-status')).to_have_text('영상 작업공간 연결됨',timeout=60000)
   f=p.locator('#reading-frame').element_handle().content_frame();canvas_ready(f,2)
-  p.evaluate("() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type:'session-ended'}); c.close(); }")
+  end_document(p)
   expect(p.locator('#reading-frame')).to_have_count(0);expect(p.locator('#reading-viewer')).not_to_be_visible()
   self.assertEqual(self.jobs(a),[])
 

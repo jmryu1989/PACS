@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 from test_reading_note import ReadingNoteE2E
 from workspace_roaming_support import cleanup_workspace
 from document_session import document_request
+from viewer_session import end_document
 
 class ReadingPreferencesE2E(ReadingNoteE2E):
  def setUp(self):
@@ -44,7 +45,7 @@ class ReadingPreferencesE2E(ReadingNoteE2E):
   expect(p.locator('#reading-prefs-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다')
   expect(p.locator('#reading-note-auto')).to_be_checked()
   p.locator('#reading-prefs-load').click();expect(p.locator('#reading-prefs-status')).to_have_text('메모 설정 확인 중…')
-  p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
+  end_document(p)
   expect(p.locator('#reading-prefs-load')).to_be_disabled();expect(p.locator('#reading-prefs-save')).to_be_disabled()
   for route in waiting:route.abort()
 

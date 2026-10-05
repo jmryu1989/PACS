@@ -38,20 +38,11 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         page = context.new_page()
         logins = []
         page.on('request', lambda r: logins.append(r.url) if urlsplit(r.url).path == '/api/auth/login' else None)
-        if context not in ENDED_CONTEXTS and any(c['name'] == SESSION_COOKIE for c in context.cookies()):
-            # The profile is still signed in, and another of its pages may be open: replace the session the way a login in
-            # another tab does. Keycloak's sign-in cookies go so that the login is a real one; the BFF session cookie stays
-            # until the callback replaces it. Dropping it first would let the open page send a request without a session
-            # - the general 401, which ends this profile's session state (S7-U5, Astra S7-U5-SPEC-C-F03) while the new
-            # login is under way. An expired copy removes just that cookie; clear_cookies(name=...) clears all and re-adds.
-            context.add_cookies([dict(c, value='', expires=1) for c in context.cookies() if c['name'] != SESSION_COOKIE])
-            # The landing would enter the session that is still there; the login it would start is this request.
-            page.goto(self.stack.proxy + '/api/auth/login')
-        else:
-            # An empty cookie jar forces a fresh real BFF/Keycloak login, while the
-            # same browser profile's localStorage stays intact for account switching.
-            context.clear_cookies()
-            page.goto(self.stack.proxy + '/')
+        # A second account in this profile starts a fresh credential flow. Cookie
+        # loss is temporary for the older documents; their next bound request
+        # after the callback must detect S1/S2 mismatch, never adopt the new user.
+        context.clear_cookies()
+        page.goto(self.stack.proxy + '/')
         if context in ENDED_CONTEXTS:
             # S7-U5: after this profile's logout the landing shows the confirmed end and starts no login by itself; the
             # login is the person's own press of the landing's control. The end record is not cleared behind its back.
@@ -76,9 +67,11 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         return page
 
     def sign_out(self, page):
-        page.once('dialog', lambda d: d.accept())
+        dialogs = []
+        page.on('dialog', lambda dialog: (dialogs.append(dialog.message), dialog.dismiss()))
         page.locator('#logout').click()
         page.wait_for_url('**/index.html', timeout=30000)
+        self.assertEqual(dialogs, [], 'Clean logout must not ask for confirmation')
         ENDED_CONTEXTS.add(page.context)
         page.close()
 

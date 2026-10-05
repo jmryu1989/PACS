@@ -57,7 +57,7 @@ class VolumeSyncE2E(VolumeDisplayE2E):
   expect(v.get_by_role('checkbox',name='Sync MPR Windowing',exact=True)).to_be_disabled();before=self.volume_state(v)
   v.evaluate('()=>{projectionVP.setZoom(projectionVP.getZoom()*1.2);projectionVP.render()}');self.preserved_volume(before[1:],self.volume_state(v)[1:])
   v.locator('#tech-note-close').click();expect(v.get_by_role('checkbox',name='Sync MPR Zoom',exact=True)).to_be_enabled()
-  v=end_viewer(v);self.assertEqual(v.count('#kin-volume-sync'),0)
+  v=end_viewer(v);v.assert_quiet()
   self.assertTrue(v.evaluate('()=>window.kinVolumeSynchronization===undefined'))
   self.assertTrue(v.evaluate('()=>services.cornerstoneViewportService.performResize!==syncResizeHook'))
   self.assertTrue(v.evaluate('()=>syncEngine.resize!==syncEngineHook'))

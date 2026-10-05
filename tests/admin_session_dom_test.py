@@ -59,7 +59,7 @@ INIT = r"""(() => {
     }});
     return Promise.resolve(new Response(stream, options));
   };
-  const snapshot = () => ({html: document.body.innerHTML, protectedRows:document.querySelectorAll('#users tr,#metrics-rows tr,#audit-rows tr,#gateway-rows > li,#study-access-dialog,dialog[open]').length, values:[...document.querySelectorAll('input,textarea')].map(el=>el.value),
+  const snapshot = () => ({html: document.body.innerHTML, protectedRows:document.querySelectorAll('#users tr,#studies tr,#metrics-rows tr,#audit-rows tr,#gateway-rows > li,#study-access-dialog,dialog[open]').length, values:[...document.querySelectorAll('input,textarea')].map(el=>el.value),
     storage: [JSON.stringify({...localStorage}), JSON.stringify({...sessionStorage})],
     work: window.KinWorkContext?.state(), seen: window.synSeen});
   window.synWatch = () => {
@@ -70,7 +70,7 @@ INIT = r"""(() => {
     setTimeout(() => window.synRelease?.(), 100);
     if (mode === 'logout') document.querySelector('#logout').click();
     else if (mode === 'replace') KinAuth.replaced({session: KinAuth.sessionId()});
-    else {
+    else if (mode !== 'server-ended') {
       const c = new BroadcastChannel('kin-session');
       c.postMessage({type:'session-ended',session:KinAuth.sessionId(),operation:55,status:'ending'}); c.close();
     }
@@ -117,6 +117,7 @@ class PageSessionDOMTest(unittest.TestCase):
         self.kind, self.session = kind, session
         self.calls, self.errors, self.unexpected, self.probes, self.moves = [], [], [], [], []
         self.me_status, self.me_code = 200, None
+        self.me_extra = {}
         self.cancel_moves = False
         self.completed_moves = set()
         self.me_owner = SUB
@@ -146,7 +147,7 @@ class PageSessionDOMTest(unittest.TestCase):
         elif path == '/api/me':
             body = {'kind':'member','sub':self.me_owner,'institution':OWNER[0], 'user':'syn-user',
                     'displayName':'SYN Actor','roles':['admin'] if self.kind=='admin' else ['clinician'], 'sessionId':self.session}
-            if self.me_status != 200: body = {'message':'SYN failed', 'code':self.me_code}
+            if self.me_status != 200: body = {'message':'SYN failed', 'code':self.me_code, **self.me_extra}
             route.fulfill(status=self.me_status, json=body)
         elif path == '/api/auth/logout':
             route.fulfill(status=204)
@@ -234,13 +235,19 @@ class PageSessionDOMTest(unittest.TestCase):
                       ('gateway','/api/studies','#gateway-refresh',FIVE)]
         for label,path,button,body in operations:
             for cut in ['headers','body','error']:
-                for mode in ['logout','notice','replace']:
+                for mode in ['logout','notice','replace','server-ended']:
                     with self.subTest(panel=label,cut=cut,end=mode):
                         self.fresh('admin'); self.open()
                         if label != 'members':
                             self.page.locator(button).click()
                             self.page.wait_for_timeout(60)
-                        self.hold(path,cut,body)
+                        if mode == 'server-ended':
+                            # The refusal arrives through the bound transport. A
+                            # late body/error is tested by the three other modes.
+                            if cut != 'headers': continue
+                            self.hold(path,cut,{'code':'AUTH_SESSION_ENDED'},401,'AUTH_SESSION_ENDED')
+                        else:
+                            self.hold(path,cut,body)
                         self.page.locator(button).click()
                         self.page.wait_for_function('synRelease !== null')
                         self.close_and_check(mode)
@@ -577,10 +584,52 @@ class PageSessionDOMTest(unittest.TestCase):
                     self.page.evaluate('() => { synWatch(); synRelease(); }')
                     self.pump(lambda:self.moves and len(self.probes)>5)
                     self.assertNotEqual('active',self.probes[-1]['work'])
+                    self.assertEqual(self.probes[-1]['protectedRows'],0)
+                    self.assertEqual(len(self.moves),1)
+                    record=json.loads(self.probes[-1]['storage'][0]).get('kin-session-end')
+                    if code=='AUTH_SESSION_ENDED':
+                        self.assertEqual(json.loads(record)['status'],'confirmed')
+                        self.assertEqual(json.loads(record)['session'],SESSION)
+                    else:
+                        self.assertIsNone(record)
                     self.assertFalse(any(p=='/api/auth/logout' for _,p,_ in self.calls))
                     issued=[r for r in self.probes[-1]['seen'] if r['path']==path]
                     self.assertTrue(issued)
                     self.assertTrue(all(r['session']==SESSION for r in issued))
+
+    def test_two_server_ends_without_channel_leave_once(self):
+        for kind in ['admin','clinician']:
+            with self.subTest(page=kind):
+                self.fresh(kind,init='window.BroadcastChannel = undefined;'); self.open()
+                path='/api/admin/users' if kind=='admin' else '/api/clinician/studies'
+                for first in [True,False]:
+                    self.hold(path,'headers',{'code':'AUTH_SESSION_ENDED'},401,'AUTH_SESSION_ENDED')
+                    self.page.locator('#refresh').click()
+                    self.page.wait_for_function('typeof synRelease === "function"')
+                    if first: self.page.evaluate('() => { window.synFirstRelease=synRelease; synRelease=null; }')
+                issued=self.page.evaluate('path => synSeen.filter(r=>r.path===path)',path)
+                self.assertEqual(len(issued),3,'initial list plus two real pending refreshes')
+                self.assertTrue(all(r['session']==SESSION for r in issued))
+                self.page.evaluate('() => { synWatch(); synFirstRelease(); synRelease(); }')
+                self.pump(lambda:self.moves and len(self.probes)>8)
+                self.assertEqual(len(self.moves),1,'two ended responses must leave only once without BroadcastChannel')
+                self.assertEqual(self.probes[-1]['protectedRows'],0)
+                record=json.loads(json.loads(self.probes[-1]['storage'][0])['kin-session-end'])
+                self.assertEqual((record['session'],record['status']),(SESSION,'confirmed'))
+                self.assertFalse(any(p=='/api/auth/logout' for _,p,_ in self.calls))
+
+    def test_pending_admin_bootstrap_never_reads_protected_panels(self):
+        self.fresh('admin')
+        self.me_status,self.me_code=403,'INSTITUTION_PENDING'
+        self.me_extra={'kind':'member','sub':SUB,'user':'syn-user','institution':OWNER[0],
+                       'roles':['admin'],'sessionId':SESSION}
+        self.page.goto(ORIGIN+BASE+'admin.html')
+        self.pump(lambda:bool(self.moves))
+        for route in self.moves: self.complete_move(route)
+        self.assertEqual([p for _,p,_ in self.calls if p.startswith('/api/')],['/api/me'])
+        self.assertEqual(self.page.evaluate('KinAuth.session().state'),'pending')
+        self.assertEqual(self.page.locator('#users tr,#gateway-rows > li,#metrics-rows tr,#audit-rows tr').count(),0)
+        self.assertIsNone(self.page.evaluate("localStorage.getItem('kin-session-end')"))
 
     def test_notice_during_bootstrap_never_starts_protected_work(self):
         for kind in ['admin','clinician']:

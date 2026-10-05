@@ -4,6 +4,7 @@ import os,re,unittest
 from pathlib import Path
 from urllib.parse import urlparse,parse_qs
 from playwright.sync_api import expect
+from viewer_session import end_document, end_viewer, observe_viewer
 from test_viewer_identity import ViewerIdentityE2E
 from test_embedded_patient_copy import EmbeddedPatientCopyE2E
 
@@ -25,8 +26,14 @@ class ViewerTitleE2E(ViewerIdentityE2E):
   p.evaluate('()=>KinWorkspaceLayout.key=titleOwnerKey');expect(p.locator('#reading-frame')).to_have_attribute('title',expected)
   f.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeExit()");expect(p.locator('#reading-frame')).to_have_attribute('title','영상 뷰어')
   f.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeEnter()");expect(p.locator('#reading-frame')).to_have_attribute('title',expected,timeout=45000)
-  p.evaluate("()=>localStorage.setItem('kin-session-ended',String(Date.now()))");expect(v).to_have_title(NEUTRAL);expect(p.locator('#reading-frame')).to_have_attribute('title','영상 뷰어')
-  samples=v.evaluate("""()=>new Promise(resolve=>{const samples=[],start=performance.now();function frame(){samples.push(document.title);if(performance.now()-start>=700)resolve(samples);else requestAnimationFrame(frame)}requestAnimationFrame(frame)})""");self.assertGreaterEqual(len(samples),3);self.assertEqual(set(samples),{NEUTRAL});expect(p.locator('#reading-frame')).to_have_attribute('title','영상 뷰어');print('ENDED TITLE FRAMES',len(samples),samples,flush=True)
+  ended=observe_viewer(v);p.evaluate("window.endedReadingFrame=document.querySelector('#reading-frame')")
+  end_document(p);ended.ended()
+  self.assertEqual(ended.evaluate('()=>document.title'),NEUTRAL)
+  self.assertEqual(p.evaluate("endedReadingFrame.getAttribute('title')"),'영상 뷰어')
+  ended.assert_quiet(700)
+  self.assertEqual(ended.evaluate('()=>document.title'),NEUTRAL)
+  self.assertEqual(p.evaluate("endedReadingFrame.getAttribute('title')"),'영상 뷰어')
+
  def test_title_02_loading_frames_and_invalid_metadata_clear(self):
   a,b=self.pair();p,v=self.popup(a);self.active(v,b.uid);expect(v).to_have_title(re.compile('비교 검사.*20260701'))
   v.evaluate("""()=>{window.titleVp=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId);const ids=titleVp.getImageIds(),index=(titleVp.getCurrentImageIdIndex()+1)%ids.length;window.titleTarget=ids[index];window.titleLoader=titleVp.imagesLoader;window.titleOriginal=titleLoader.loadImages;titleLoader.loadImages=function(images,...args){if(!images.includes(titleTarget))return titleOriginal.call(this,images,...args);return new Promise((resolve,reject)=>{window.titleRelease=()=>titleOriginal.call(this,images,...args).then(resolve,reject)})};window.titlePromise=titleVp.setImageIdIndex(index);}""")
@@ -37,7 +44,7 @@ class ViewerTitleE2E(ViewerIdentityE2E):
   finally:v.evaluate('()=>{titleLoader.loadImages=titleOriginal;window.titleRelease?.();window.titleRelease=null}')
   v.evaluate("()=>{window.titleMeta=cornerstone.metaData.get('instance',titleVp.getCurrentImageId());window.titleSop=titleMeta.SOPInstanceUID;titleMeta.SOPInstanceUID='1.2.3'}");expect(v).to_have_title(NEUTRAL)
   v.evaluate('()=>titleMeta.SOPInstanceUID=titleSop');expect(v).to_have_title(re.compile('비교 검사.*20260701'))
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v).to_have_title(NEUTRAL)
+  ended=end_viewer(v);self.assertEqual(ended.evaluate('()=>document.title'),NEUTRAL);ended.assert_quiet()
  def test_title_03_no_competing_qido_writer_and_mode_lifecycle(self):
   a,b=self.pair();p=self.login();legacy=[]
   def route_qido(route):

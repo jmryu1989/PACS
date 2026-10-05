@@ -61,7 +61,7 @@ class VolumeProjectionE2E(VolumeStudyWorkflowE2E):
   for value in ['', '-1','1001']:
    v.get_by_label('Total Thickness (mm)',exact=True).fill(value);v.get_by_role('button',name='Apply to Active Plane',exact=True).click();expect(v.locator('#kin-volume-projection [role=status]')).to_contain_text('두께를');self.preserved_volume(before,self.volume_state(v))
   v.get_by_label('Total Thickness (mm)',exact=True).fill('20');v.evaluate("""()=>{const vol=cornerstone.cache.getVolume(projectionVP.getVolumeId());window.projectionMeta=cornerstone.metaData.get('instance',vol.imageIds.at(-1));window.projectionPosition=projectionMeta.ImagePositionPatient;projectionMeta.ImagePositionPatient=[0,0,99]}""");v.get_by_role('button',name='Apply to Active Plane',exact=True).click();expect(v.locator('#kin-volume-projection [role=status]')).to_contain_text('원본 좌표');self.preserved_volume(before,self.volume_state(v));v.evaluate('()=>projectionMeta.ImagePositionPatient=projectionPosition');self.project(v,1,20)
-  v=end_viewer(v);self.assertEqual(v.count('#kin-volume-projection'),0);self.assertEqual(v.count('.kin-volume-projection-label'),0)
+  v=end_viewer(v);v.assert_quiet();v.assert_quiet()
 
  def test_projection_03_negative_rescale_average_and_note_lock(self):
   a,p,v=self.opened_projection(intercept=-1000)

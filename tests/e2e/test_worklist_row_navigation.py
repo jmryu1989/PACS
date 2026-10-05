@@ -5,6 +5,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_workspace import ReadingWorkspaceE2E
 from test_prior_selection import canvas_ready
+from viewer_session import end_document
 
 class WorklistRowNavigationE2E(ReadingWorkspaceE2E):
     def setup_rows(self):
@@ -75,7 +76,7 @@ class WorklistRowNavigationE2E(ReadingWorkspaceE2E):
         expect(p.locator('#rows tr[tabindex="0"]')).to_have_count(1)
         p.evaluate('()=>{studies=[];render();}');expect(p.locator('#quick')).to_be_focused()
         p.evaluate('load()');expect(p.locator('#rows tr[tabindex="0"]')).to_have_count(1)
-        p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close();}")
+        end_document(p)
         expect(p.locator('#rows tr[tabindex="0"]')).to_have_count(0)
 
     def test_keyboard_03_page_boundary_uses_loaded_order(self):

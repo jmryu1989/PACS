@@ -7,6 +7,7 @@ from viewer_precision_support import ThumbnailRequestsE2E,canvas_ready,expect,ho
 from viewer_api_test import ViewerStack,literal
 from pydicom import dcmread
 from pydicom.uid import generate_uid
+from viewer_session import end_viewer, observe_viewer
 
 class ViewerHistoryE2E(ThumbnailRequestsE2E):
     @classmethod
@@ -150,8 +151,16 @@ class ViewerHistoryE2E(ThumbnailRequestsE2E):
         p2.get_by_role('button',name='Refresh',exact=True).click();expect(p2.locator('#kin-viewer-history')).to_contain_text('이 검사에 접근할 수 없습니다.')
         self.assertEqual(p2.locator('#kin-viewer-history section').count(),0)
         self.assertEqual(p2.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').length"),0)
-        p.context.clear_cookies();p.get_by_role('button',name='Refresh',exact=True).click();expect(p.locator('#kin-viewer-history')).to_contain_text('다시 로그인')
-        self.assertEqual(p.locator('#kin-viewer-history section').count(),0)
+        sections=p.locator('#kin-viewer-history section').all_text_contents();self.assertTrue(sections)
+        logouts=[];p.on('request',lambda request:logouts.append(request.url) if request.url.endswith('/api/auth/logout') else None)
+        p.context.clear_cookies();p.get_by_role('button',name='Refresh',exact=True).click()
+        expect(p.locator('#kin-viewer-history')).to_contain_text('목록을 확인하지 못했습니다')
+        self.assertEqual(p.locator('#kin-viewer-history section').all_text_contents(),sections)
+        self.assertEqual(p.evaluate('KinWorkContext.state()'),'active');self.assertEqual(logouts,[])
+        ended=observe_viewer(p)
+        p.route('**/api/me',lambda route:route.fulfill(status=401,headers={'X-KIN-Auth-Code':'AUTH_SESSION_ENDED'},json={'code':'AUTH_SESSION_ENDED'}))
+        p.get_by_role('button',name='Refresh',exact=True).click()
+        ended.ended();ended.assert_quiet();self.assertEqual(logouts,[])
 
     def test_05_a_b_a_late_list_and_logout(self):
         f=self.fixture();b=self.fixture(f.patient_id);w,p=self.open_viewer(f,extra=b,observer=True)
@@ -176,8 +185,8 @@ class ViewerHistoryE2E(ThumbnailRequestsE2E):
             try:r.fulfill(response=response)
             except Exception:pass  # Aborted requests may already be disposed.
         p.wait_for_timeout(500);expect(p.locator('#kin-viewer-history')).not_to_contain_text('old A')
-        p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-        expect(p.locator('#kin-viewer-history')).to_contain_text('다시 로그인');self.assertEqual(p.locator('#kin-viewer-history section').count(),0)
+        p=end_viewer(p);p.assert_quiet()
+        self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').length"),0)
 
     def test_06_large_oblique_pan_zoom_coordinates(self):
         a=math.sqrt(.5);c=math.cos(math.radians(31));s=math.sin(math.radians(31));iop=[a,a,0,-c*a,c*a,s]

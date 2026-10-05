@@ -9,6 +9,7 @@ from playwright.sync_api import expect
 
 from test_display_controls import DisplayControlsE2E
 from test_prior_selection import canvas_ready
+from viewer_session import end_viewer
 
 
 class ViewerImagesOnlyE2E(DisplayControlsE2E):
@@ -233,9 +234,9 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
         page.evaluate("""()=>{const id=services.viewportGridService.getState().activeViewportId;
           services.cornerstoneViewportService.getCornerstoneViewport(id).element.requestFullscreen=__imagesOnlyRequestFullscreen;}""")
         page.locator("#kin-images-only-enter").click(); page.wait_for_function("()=>document.fullscreenElement !== null")
-        page.evaluate("window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:String(Date.now())}))")
-        page.wait_for_function("()=>document.fullscreenElement === null")
-        expect(page.locator("#kin-images-only")).to_have_count(0)
+        ended=end_viewer(page)
+        ended.wait_for_function('()=>document.fullscreenElement === null')
+        ended.assert_quiet()
 
     def test_images_only_04_native_double_click_one_up_restores_grid_without_fullscreen(self):
         _, page = self.open_pair(); self.panel(page); before = self.stable_state(page)

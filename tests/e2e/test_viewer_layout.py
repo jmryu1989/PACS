@@ -9,6 +9,7 @@ from playwright.sync_api import expect
 from test_thumbnail_series import ThumbnailSeriesE2E
 from test_prior_selection import canvas_ready
 from document_session import document_request
+from viewer_session import observe_viewer
 
 
 class ViewerLayoutE2E(ThumbnailSeriesE2E):
@@ -72,7 +73,9 @@ class ViewerLayoutE2E(ThumbnailSeriesE2E):
         return page.evaluate("() => Object.fromEntries(Object.entries(localStorage).filter(([k])=>k.startsWith('kin-viewer-layout-v1:')))")
 
     def relog(self,page,actor):
-        page.context.clear_cookies();page.goto(self.stack.proxy+'/')
+        # With both BFF and IdP cookies removed, GET /login starts a credential
+        # flow without reusing this viewer document's landing entry state.
+        page.context.clear_cookies();page.goto(self.stack.proxy+'/api/auth/login')
         try:
             page.locator('#username').fill(self.stack.username(actor));page.locator('#password').fill(self.stack.passwords[actor]);page.locator('#kc-login').click()
         except Exception:raise RuntimeError('Temporary BFF login failed') from None
@@ -138,9 +141,10 @@ class ViewerLayoutE2E(ThumbnailSeriesE2E):
         page=self.launch(self.login(),[f]);self.action(page,'저장','저장했습니다');a=self.records(page)
         y=self.launch(self.login(),[f]);self.action(y,'복원','없습니다');self.assertEqual(self.records(y),{})
         stale=self.launch(page.context.new_page(),[f]);self.open_layout_tools(stale)
+        ended=observe_viewer(stale)
         self.relog(page,'doctor2');self.launch(page,[f]);self.action(page,'복원','없습니다')
         stale.get_by_role('button',name='Save Recent Layout',exact=True).click()
-        expect(stale.locator('#kin-viewer-layout-status')).to_contain_text('세션이 변경')
+        ended.ended();ended.assert_quiet()
         self.assertEqual(self.records(page),a);stale.close()
         self.grid(page,2);self.action(page,'저장','저장했습니다');both=self.records(page)
         self.assertEqual(len(both),2);self.assertTrue(all(both[k]==v for k,v in a.items()))
@@ -156,15 +160,23 @@ class ViewerLayoutE2E(ThumbnailSeriesE2E):
         self.assertEqual(len(self.cells(page)),2);self.assertEqual(self.records(page),a);page.unroute(pattern)
         page.route(pattern,lambda route:route.fulfill(status=403,json={'message':'Synthetic denied'}))
         before=self.cells(page);page.get_by_role('button',name='Restore Recent Layout',exact=True).click()
-        expect(page.locator('#kin-viewer-layout-status')).to_contain_text('세션이 변경')
-        expect(page.get_by_role('button',name='Save Recent Layout',exact=True)).to_be_disabled()
+        expect(page.locator('#kin-viewer-layout-status')).to_contain_text('접근 권한')
+        self.assertEqual(page.evaluate('KinWorkContext.state()'),'active')
         self.assertEqual(self.cells(page),before);self.assertEqual(self.records(page),a);page.unroute(pattern)
+        page.route(pattern,lambda route:route.fulfill(status=403,json={'code':'AUTH_SESSION_BUSY'},headers={'X-KIN-Auth-Code':'AUTH_SESSION_BUSY'}))
+        page.get_by_role('button',name='Restore Recent Layout',exact=True).click()
+        expect(page.locator('#kin-viewer-layout-status')).to_contain_text('잠시 뒤')
+        self.assertEqual(page.evaluate('KinWorkContext.state()'),'active')
+        self.assertEqual(self.cells(page),before);self.assertEqual(self.records(page),a)
+        expect(page.get_by_role('button',name='Save Recent Layout',exact=True)).to_be_enabled()
+        page.unroute(pattern)
         self.launch(page,[f]);self.open_layout_tools(page)
         response=document_request(page, "POST", self.stack.proxy+'/api/auth/logout',headers={'X-KIN-CSRF':'1'})
         self.assertEqual(response.status,204)
+        ended=observe_viewer(page)
         page.get_by_role('button',name='Restore Recent Layout',exact=True).click()
-        expect(page.locator('#kin-viewer-layout-status')).to_contain_text('세션이 변경')
-        self.assertEqual(self.records(page),a)
+        ended.ended();ended.assert_quiet()
+        self.assertEqual(self.records(ended),a)
         self.assertEqual(self.originals(),originals)
 
     def test_layout_04_corruption_storage_and_missing_reference(self):

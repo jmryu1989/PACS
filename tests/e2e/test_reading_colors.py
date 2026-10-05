@@ -4,6 +4,7 @@ import os,json,unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_appearance import ReadingAppearanceE2E
+from viewer_session import end_document
 
 class ReadingColorsE2E(ReadingAppearanceE2E):
  def color_storage(self,p):
@@ -45,7 +46,7 @@ class ReadingColorsE2E(ReadingAppearanceE2E):
   p.evaluate('(key)=>window.dispatchEvent(new StorageEvent("storage",{key}))',key);expect(p.locator('#reading-color-status')).to_contain_text('현재 창은 유지');expect(p.locator('#reading-color-current')).to_have_value('white')
   p.locator('#reading-appearance-close').scroll_into_view_if_needed();expect(p.locator('#reading-appearance-close')).to_be_in_viewport()
   box=p.locator('#reading-appearance-dialog').bounding_box();self.assertGreaterEqual(box['x'],0);self.assertLessEqual(box['x']+box['width'],800);self.assertGreaterEqual(box['y'],0);self.assertLessEqual(box['y']+box['height'],768)
-  p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(p.locator('#reading-appearance-dialog')).not_to_be_visible();expect(p.locator('#reading-color-current')).to_be_disabled()
+  end_document(p);expect(p.locator('#reading-appearance-dialog')).not_to_be_visible();self.assertFalse(p.locator('#reading-appearance-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog');expect(p.locator('#reading-color-current')).to_be_disabled()
   p.evaluate("()=>{const s=document.querySelector('#reading-color-current');s.value='warm';s.dispatchEvent(new Event('change'))}");expect(p.locator('#reading-color-current')).to_have_value('default');self.assertEqual(self.color_storage(p),{})
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(ReadingColorsE2E(n) for n in loader.getTestCaseNames(ReadingColorsE2E) if n.startswith('test_colors_'))

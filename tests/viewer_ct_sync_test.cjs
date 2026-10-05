@@ -626,7 +626,7 @@ test('late answers: Sync OFF, series replacement, account change, logout and A->
   const other = await held(null, async w => { w.account = OTHER_CLINICIAN; w.held[0].release(); }, TEXT.applyDenied);
   assert.equal(other.w.page.gate.state(), 'active');
   await held(null, async w => { w.page.end(); w.held[0].release(); }, TEXT.ended);
-  await held(null, async w => { w.page.end(); w.held[0].release(); }, TEXT.ended);
+  await held(null, async w => { w.held[0].release(respond(401,{code:'AUTH_SESSION_ENDED'})); }, TEXT.ended);
   // A->B->A inside the mount: an event while B is shown asks nothing; the stack reloaded under A again is not the one it saw
   // (the source is left where the held event saw it, so only the target's reload stops it).
   await held(null, async (w, sync) => {
@@ -897,4 +897,17 @@ test('notice and Recheck Access expose a status and an English recovery control'
   assert.equal(notice.getAttribute('role'),'status');assert.equal(button.textContent,'Recheck Access');
   assert.match(button.getAttribute('title')||button.title,/[가-힣]/);await w.recheck();
   assert.equal(w.screen().text,TEXT.confirmed);w.exit();assert.deepEqual(w.notices(),[]);finish(w);
+});
+
+// Wording is observed on the live notice, so a denial presented as an end fails.
+test('each access outcome has a distinct Korean notice and only the end says session', async()=>{
+  const seen=[];
+  for(const [status,code] of [[200,null],[403,null],[503,null],[401,'AUTH_SESSION_ENDED']]){
+    const w=world();await flush();
+    if(status!==200){w.answer=e=>e.key==='GET me'?respond(status,{code}):undefined;w.exit();w.enter();await flush();}
+    await w.scroll(w.sync(),'vp-a',4);const text=w.screen().text;seen.push(text);
+    assert.match(text,/[가-힣]/);assert.equal(text.includes('세션'),!!code);assert.doesNotMatch(text,AVOIDED);
+    finish(w);
+  }
+  assert.equal(new Set(seen).size,seen.length);
 });

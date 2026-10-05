@@ -48,7 +48,7 @@ class VolumeWheelE2E(VolumeGestureE2E):
   for i in [1,2]:self.assertAlmostEqual(self.slabs(v)[i]['total'],maximum,delta=1e-6)
   v.evaluate("""()=>{window.endedWheelTarget=document.querySelector('#svg-layer-'+gestureVP.id);window.endedWheelInput=new WheelEvent('wheel',{deltaY:-120,bubbles:true});window.slabWrites=0;
    for(const id of services.viewportGridService.getState().viewports.keys()){const view=services.cornerstoneViewportService.getCornerstoneViewport(id),write=view.setSlabThickness;view.setSlabThickness=function(...args){slabWrites++;return write.apply(this,args)}}}""")
-  v=end_viewer(v);self.assertEqual(v.count('#kin-volume-crosshair'),0);writes=v.evaluate('slabWrites')
+  v=end_viewer(v);v.assert_quiet();writes=v.evaluate('slabWrites')
   v.evaluate('()=>endedWheelTarget.dispatchEvent(endedWheelInput)')
   self.assertEqual(v.evaluate('slabWrites'),writes);self.assertEqual(v.evaluate('()=>cornerstone.getRenderingEngines().flatMap(e=>e.getViewports()).map(v=>v.id)'),[]);self.assertEqual(len(self.versions(a)),1)
 

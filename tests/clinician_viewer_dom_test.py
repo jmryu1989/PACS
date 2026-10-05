@@ -3,7 +3,7 @@
 U5S-REQ-04/08/12 -> U5S-RISK-SESSION/WRITE -> TEST-CLINICIAN-VIEWER.
 Only OHIF rendering services and server responses are synthetic. The gate, transport,
 viewer authority and clinician window.name handoff are shipped assets.
-No product source is rewritten to create a control variant.
+Negative controls are served copies in clinician_viewer_mutants.py; this baseline serves the shipped assets.
 """
 from collections import Counter
 
@@ -2534,8 +2534,9 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.settle();self.assertEqual(before,len(self.finished))
 
     def notice(self,session,kind='broadcast'):
-        self.observer.evaluate("""([session,kind])=>{if(kind==='storage')localStorage.setItem('kin-session-end',JSON.stringify({session}));
-          else {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended',session});c.close();}}""",[session,kind])
+        self.observer.evaluate("""([session,kind])=>{const notice={type:'session-ended',session,operation:Date.now(),status:'ending'};
+          if(kind==='storage')localStorage.setItem('kin-session-end',JSON.stringify(notice));
+          else {const c=new BroadcastChannel('kin-session');c.postMessage(notice);c.close();}}""",[session,kind])
 
     def ct_pair(self):
         self.rows=[study(VA,'SYN KIM','SYN-P-100',patient(INST_A,'SYN-P-100'),'20260320',FINAL),

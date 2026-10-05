@@ -54,7 +54,7 @@ class VolumeGestureE2E(VolumeCrosshairE2E):
   a,p,v=self.starting();original=self.originals();self.activate(v);data=self.handles(v);start=data['rotation'][0];v.evaluate('()=>window.dragWrapper=gestureTool._dragCallback');self.drag(v,start,[start[0]-10,start[1]],release=False)
   v.evaluate("""()=>{window.lateDragMove=new MouseEvent('mousemove',{clientX:500,clientY:500,buttons:1,bubbles:true});window.lateDragUp=new MouseEvent('mouseup',{clientX:500,clientY:500,bubbles:true});window.lateDragErrors=[];addEventListener('error',e=>lateDragErrors.push(e.message));window.lateCameraWrites=0;
    for(const id of services.viewportGridService.getState().viewports.keys()){const view=services.cornerstoneViewportService.getCornerstoneViewport(id),write=view.setCamera;view.setCamera=function(...args){lateCameraWrites++;return write.apply(this,args)}}}""")
-  v=end_viewer(v);self.assertEqual(v.count('#kin-volume-crosshair'),0);self.assertTrue(v.evaluate('()=>gestureTool._dragCallback!==dragWrapper&&gestureTool.editData===null'))
+  v=end_viewer(v);v.assert_quiet();self.assertTrue(v.evaluate('()=>gestureTool._dragCallback!==dragWrapper&&gestureTool.editData===null'))
   # The actual window is closed: dispatch late input on its retained document,
   # then prove that no camera work or render target survives that input.
   writes=v.evaluate('lateCameraWrites');v.evaluate('()=>{document.dispatchEvent(lateDragMove);document.dispatchEvent(lateDragUp)}');v.wait_for_timeout(450)

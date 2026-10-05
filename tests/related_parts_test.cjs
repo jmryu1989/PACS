@@ -22,3 +22,29 @@ test('plain 403 fails the batch requests without ending the document',async()=>{
   assert.equal(calls,9);assert.equal(model.busy(),false);assert.equal(globalThis.KinWorkContext.state(),'active');
   assert.match(model.get('1.2').error,/HTTP 403/);
 });
+
+// U5S-REQ-11/22 -> U5S-RISK-APPLY -> related parts lifecycle.
+test('preparation cancels the wave, Back to Editing reloads it, and end drops late results', async()=>{
+  const calls=[], pending=[];
+  let hold=true;
+  const {gate,end}=install(url=>{
+    const uid=url.split('/')[3];calls.push(uid);
+    const answer=()=>new Response(JSON.stringify([{'0020000D':{Value:[uid]},'0020000E':{Value:[uid+'.1']},'00180015':{Value:['CHEST']}}]));
+    return hold ? new Promise(resolve=>pending.push(()=>resolve(answer()))) : answer();
+  });
+  const model=productCreate({owner:()=> 'a',changed(){}}), uids=['1.2','1.3','1.4','1.5','1.6'];
+  model.reset('1.2');const loading=model.load(uids);
+  assert.equal(calls.length,3);assert.equal(model.busy(),true);
+  const preparation=gate.prepare({});
+  assert.equal(model.busy(),false);pending.splice(0).forEach(release=>release());await loading;
+  assert.equal(calls.length,3);assert.equal(model.get('1.2'),undefined);
+  hold=false;assert.equal(gate.cancelPreparation(preparation),true);
+  for(let n=0;n<50&&model.busy();n++)await new Promise(resolve=>setImmediate(resolve));
+  for(const uid of uids)assert.deepEqual(model.get(uid),{parts:['CHEST']});
+  assert.equal(calls.filter(uid=>uid==='1.2').length,2);
+  hold=true;const late=model.load(uids);assert.equal(model.busy(),true);
+  const count=calls.length;end();
+  assert.equal(model.busy(),false);for(const uid of uids)assert.equal(model.get(uid),undefined);
+  pending.splice(0).forEach(release=>release());await late;await model.load(uids);
+  assert.equal(calls.length,count);for(const uid of uids)assert.equal(model.get(uid),undefined);
+});

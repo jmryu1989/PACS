@@ -4,6 +4,7 @@ import os,json,unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_appearance import ReadingAppearanceE2E
+from viewer_session import end_document
 
 class ReadingFontsE2E(ReadingAppearanceE2E):
  def font_storage(self,p):
@@ -48,8 +49,8 @@ class ReadingFontsE2E(ReadingAppearanceE2E):
   p.evaluate('(key)=>window.dispatchEvent(new StorageEvent("storage",{key,newValue:JSON.stringify({version:1,list:"serif",current:"serif",prior:"serif"})}))',key)
   expect(p.locator('#reading-font-status')).to_contain_text('현재 창은 유지');expect(p.locator('#reading-font-current')).to_have_value('mono')
   box=p.locator('#reading-appearance-dialog').bounding_box();self.assertGreaterEqual(box['x'],0);self.assertLessEqual(box['x']+box['width'],800);self.assertGreaterEqual(box['y'],0);self.assertLessEqual(box['y']+box['height'],768)
-  p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-  expect(p.locator('#reading-appearance-dialog')).not_to_be_visible();expect(p.locator('#reading-font-current')).to_be_disabled()
+  end_document(p)
+  expect(p.locator('#reading-appearance-dialog')).not_to_be_visible();self.assertFalse(p.locator('#reading-appearance-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog');expect(p.locator('#reading-font-current')).to_be_disabled()
   p.evaluate("()=>{const s=document.querySelector('#reading-font-current');s.value='serif';s.dispatchEvent(new Event('change'))}")
   expect(p.locator('#reading-font-current')).to_have_value('default');self.assertEqual(self.font_storage(p),{})
 

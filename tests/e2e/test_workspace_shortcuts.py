@@ -4,6 +4,7 @@ import os, unittest, re
 from pathlib import Path
 from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E
+from viewer_session import end_document
 
 class WorkspaceShortcutsE2E(ViewerTechNoteE2E):
  def editor(self,p):p.locator('#workspace-shortcuts-edit').click();expect(p.locator('#workspace-shortcuts-dialog')).to_be_visible()
@@ -78,7 +79,7 @@ class WorkspaceShortcutsE2E(ViewerTechNoteE2E):
   p.evaluate("()=>{window.originalShortcutSet=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k.startsWith('kin-workspace-shortcuts:'))throw Error('synthetic failure');return originalShortcutSet.call(this,k,v)}}")
   self.assign(p,'report','Control+Alt+R');self.apply(p);expect(p.locator('#workspace-shortcuts-message')).to_contain_text('저장하지 못');expect(p.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+R')
   p.evaluate('()=>Storage.prototype.setItem=originalShortcutSet');self.apply(p)
-  self.editor(p);p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(p.locator('#workspace-shortcuts-dialog')).to_have_count(0)
+  self.editor(p);end_document(p);expect(p.locator('#workspace-shortcuts-dialog')).to_have_count(0)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(WorkspaceShortcutsE2E(n) for n in loader.getTestCaseNames(WorkspaceShortcutsE2E) if n.startswith('test_shortcuts_'))
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -4,6 +4,7 @@ import unittest
 from playwright.sync_api import expect
 from test_workspace_shortcuts import WorkspaceShortcutsE2E
 from workspace_roaming_support import cleanup_workspace
+from viewer_session import end_document
 
 class ShortcutAccountE2E(WorkspaceShortcutsE2E):
  def setUp(self):
@@ -31,7 +32,23 @@ class ShortcutAccountE2E(WorkspaceShortcutsE2E):
   q=self.login();self.workspace(q,a);self.editor(q);self.account_ready(q);self.assign(q,'report','Control+Alt+T');self.save(q)
   self.assign(p,'report','Control+Alt+N');p.locator('#workspace-shortcuts-account-save').click();expect(p.locator('#workspace-shortcuts-account-status')).to_contain_text('다른 창');expect(p.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+N')
   p.locator('#workspace-shortcuts-account-load').click();expect(p.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+T');self.account_ready(p)
-  p.route('**/api/workspace-shortcuts',lambda route:route.abort() if route.request.method=='PUT' else route.continue_());self.assign(p,'report','Control+Alt+N');p.locator('#workspace-shortcuts-account-save').click();expect(p.locator('#workspace-shortcuts-account-status')).to_contain_text('입력은 유지');expect(p.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+N')
+  refused=[]
+  def fail_save(route):
+   if route.request.method!='PUT':route.continue_();return
+   refused.append(route.request.method);route.abort()
+  p.route('**/api/workspace-shortcuts',fail_save);self.assign(p,'report','Control+Alt+N');p.locator('#workspace-shortcuts-account-save').click()
+  expect(p.locator('#workspace-shortcuts-account-status')).to_have_text('서버에 연결하지 못했습니다.');expect(p.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+N')
+  self.assertEqual(refused,['PUT']);self.assertEqual(p.evaluate('KinWorkContext.state()'),'active')
+  expect(p.locator('#workspace-shortcuts-account-save')).to_be_disabled();expect(p.locator('#workspace-shortcuts-account-load')).to_be_enabled()
+  with q.expect_response(lambda r:r.request.method=='GET' and r.url.endswith('/api/workspace-shortcuts')) as saved:
+   q.locator('#workspace-shortcuts-account-load').click()
+  self.assertEqual(saved.value.json()['bindings']['report'],'KeyT')
+  p.unroute('**/api/workspace-shortcuts',fail_save)
+  p.locator('#workspace-shortcuts-account-load').click();expect(p.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+T');self.account_ready(p)
+  self.assign(p,'report','Control+Alt+N');self.save(p)
+  with q.expect_response(lambda r:r.request.method=='GET' and r.url.endswith('/api/workspace-shortcuts')) as saved:
+   q.locator('#workspace-shortcuts-account-load').click()
+  self.assertEqual(saved.value.json()['bindings']['report'],'KeyN');expect(q.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+N')
 
  def test_account_04_invalid_saved_keys_can_be_repaired(self):
   a,b=self.pair();p=self.login();self.workspace(p,a);self.seed(p)
@@ -44,7 +61,7 @@ class ShortcutAccountE2E(WorkspaceShortcutsE2E):
   p.evaluate("""()=>{window.shortcutFetch=window.fetch;window.holdShortcuts=false;window.holdMethod='PUT';window.fetch=async(...args)=>{const response=await shortcutFetch(...args);if(String(args[0]).endsWith('/workspace-shortcuts')&&(args[1]?.method||'GET')===holdMethod){holdShortcuts=true;await new Promise(resolve=>window.releaseShortcuts=resolve)}return response}}""")
   p.locator('#workspace-shortcuts-account-save').click();p.wait_for_function('()=>holdShortcuts');p.locator('#workspace-shortcuts-cancel').click();p.evaluate('()=>{window.fetch=shortcutFetch;releaseShortcuts()}');self.editor(p);self.account_ready(p);expect(p.locator('#workspace-shortcuts-account-status')).to_contain_text('계정 설정이 있습니다');expect(p.locator('#workspace-shortcut-report')).to_have_value('Control+Alt+4')
   p.evaluate("""()=>{window.holdShortcuts=false;window.fetch=async(...args)=>{const response=await shortcutFetch(...args);if(String(args[0]).endsWith('/workspace-shortcuts')){holdShortcuts=true;await new Promise(resolve=>window.releaseShortcuts=resolve)}return response}}""")
-  p.locator('#workspace-shortcuts-account-load').click();p.wait_for_function('()=>holdShortcuts');p.evaluate("()=>{const channel=new BroadcastChannel('kin-session');channel.postMessage({type:'session-ended'});channel.close()}");expect(p.locator('#workspace-shortcuts-dialog')).to_have_count(0);p.evaluate('()=>releaseShortcuts()');expect(p.locator('#workspace-shortcuts-account-status')).to_have_count(0)
+  p.locator('#workspace-shortcuts-account-load').click();p.wait_for_function('()=>holdShortcuts');end_document(p);expect(p.locator('#workspace-shortcuts-dialog')).to_have_count(0);p.evaluate('()=>releaseShortcuts()');expect(p.locator('#workspace-shortcuts-account-status')).to_have_count(0)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(ShortcutAccountE2E(n) for n in loader.getTestCaseNames(ShortcutAccountE2E) if n.startswith('test_account_'))
 if __name__=='__main__':unittest.main(verbosity=2)

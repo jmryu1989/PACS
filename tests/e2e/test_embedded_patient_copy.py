@@ -4,6 +4,7 @@ import os,unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
+from viewer_session import end_document
 
 class EmbeddedPatientCopyE2E(ViewerTechNoteE2E):
  def active(self,f,uid):
@@ -33,7 +34,7 @@ class EmbeddedPatientCopyE2E(ViewerTechNoteE2E):
   f.evaluate('''()=>{const g=services.viewportGridService.getState(),vp=services.cornerstoneViewportService.getCornerstoneViewport(g.activeViewportId);window.syntheticCopyMeta=cornerstone.metaData.get('instance',vp.getCurrentImageId());window.syntheticCopySop=syntheticCopyMeta.SOPInstanceUID;syntheticCopyMeta.SOPInstanceUID='1.2.3.4';}''');expect(f.locator('#kin-viewer-copy-id')).to_be_disabled();f.evaluate('()=>syntheticCopyMeta.SOPInstanceUID=syntheticCopySop');expect(f.locator('#kin-viewer-copy-id')).to_be_enabled()
   f.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeExit()");expect(f.locator('#kin-viewer-copy-id')).to_have_count(0);f.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeEnter()");expect(f.locator('#kin-viewer-copy-id')).to_be_enabled(timeout=45000);expect(f.locator('#kin-viewer-copy-id')).to_have_count(1)
   f.locator('#kin-viewer-copy-id').click();expect(f.locator('#kin-viewer-copy-status')).to_have_text('환자 ID를 복사했습니다.');self.assertEqual(self.clipboard(f),a.patient_id)
-  p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(p.locator('#reading-frame')).to_have_count(0)
+  end_document(p);expect(p.locator('#reading-frame')).to_have_count(0)
 
  def test_embedded_04_hidden_report_target_and_owner_failure_recover(self):
   a,b=self.pair();p,f=self.opened(a);f.get_by_label('Job Title',exact=True).fill('KEEP HIDDEN COPY');f.evaluate('()=>navigator.clipboard.writeText("KEEP HIDDEN CLIPBOARD")');self.choose(p,b)

@@ -332,7 +332,7 @@ class VolumeMipE2E(VolumeProjectionE2E):
   self.preserved_volume(before,self.volume_state(v));self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);self.assertEqual(self.jobs(a),[])
   # Session end tears the viewer down.
   dialog=self.open_mip(v);v=end_viewer(v)
-  self.assertEqual(v.count('#kin-volume-mip[open]'),0);self.assertEqual(v.evaluate('()=>mipCount()'),0);self.assertEqual(self.originals(),original)
+  v.assert_quiet();self.assertEqual(self.originals(),original)
 
  # A11-VOI-1 display-only VOI Slab. Helpers wait for the first Final after an action's pending render (the requested display
  # or, after a failure, the kept one) so a wrong display fails an assertion rather than a timeout. A refused request re-shows
@@ -526,7 +526,7 @@ class VolumeMipE2E(VolumeProjectionE2E):
   expect(dialog).not_to_be_visible();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('MIP Viewer를 닫았습니다');self.assertEqual(v.evaluate('()=>mipCount()'),0);v.evaluate('()=>{mipSource.getVolumeId=mipVolumeId}')
   dialog=self.open_voi(v);expect(summary).to_have_text('VOI Slab · Off · Not Saved');self.settled(v,self.apply_voi_case(v,dialog,perpendicular),worlds)
   v=end_viewer(v)
-  self.assertEqual(v.count('#kin-volume-mip[open]'),0);self.assertEqual(v.evaluate('()=>mipCount()'),0);self.assertEqual(self.originals(),original);self.assertEqual(writes,[])
+  v.assert_quiet();self.assertEqual(self.originals(),original);self.assertEqual(writes,[])
 
 # The VOI Slab cases run once, in their own volume-mip-voi profile through test_volume_mip_voi.py, so the ci-slab-mip-viewer
 # cap keeps bounding only the three MIP Viewer cases it was sized for.

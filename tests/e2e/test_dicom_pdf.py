@@ -251,11 +251,7 @@ class DicomPdfE2E(ViewerLayoutE2E):
         expected = [("GET", "/api/me", None),
             ("POST", "/api/dicom/lookup", {"studyUid": source["study"], "sopUid": source["sop"]}),
             ("GET", "/api/studies", None), ("GET", source["pdf"], None), ("GET", "/api/me", None)]
-        step = 0
-        for item in requests:
-            if step < len(expected) and item == expected[step]: step += 1
-        self.assertEqual(step, len(expected), requests)
-        self.assertEqual([item for item in requests if item[1] == source["pdf"]], [("GET", source["pdf"], None)])
+        self.assertEqual(requests,expected)
         self.assertEqual(self.bound_read(page, source).body(), source["payload"])
         expect(page.locator("#kin-source-pdf [data-patient]")).to_have_text("Verified Patient ID: " + fixture.patient_id)
         self.assertEqual(self.object_url(page), native_url); self.assertNotEqual(address, native_url)

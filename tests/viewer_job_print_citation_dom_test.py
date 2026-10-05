@@ -19,7 +19,7 @@ import os
 import unittest
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = Path(os.environ.get("KIN_JOB_PRINT_JS", ROOT / "worklist-v0" / "hpacs-lite" / "viewer-job-print.js"))
@@ -67,7 +67,6 @@ SETUP = """args => {
   window.__data = args.data;
   window.__requests = [];
   window.__writes = [];
-  window.__ended = false;
   window.__printCalls = 0;
   window.__written = [];
   window.__editorReads = 0;
@@ -84,7 +83,7 @@ SETUP = """args => {
   };
   // Synthetic endpoint outcomes use the shipped refusal classifier. A plain
   // HTTP failure cannot impersonate the document's session-end port.
-  const api = async (url, options = {}) => {
+  const send = async (url, options = {}) => {
     const { foreign = false } = options;
     const method = options.method || 'GET';
     window.__requests.push(method + ' ' + url);
@@ -99,10 +98,15 @@ SETUP = """args => {
       else if (citations) reply = nextCitation(citations[1]) || { status: 404 };
       else reply = { status: 404 };
     }
-    if (reply.status >= 400 || !reply.body) {
-      throw KinSessionTransport.responseError(reply);
-    }
-    return copy(reply.body);
+    return new Response(JSON.stringify(reply.body || {code:reply.code}), {status:reply.status,
+      headers:{'Content-Type':'application/json',...(reply.code?{'X-KIN-Auth-Code':reply.code}:{})}});
+  };
+  const transport=KinSessionTransport.create({gate:KinWorkContext,fetch:send,
+    authFailure:failed=>KinAuth.authFailure(failed)});
+  const api=async(url,options={})=>{
+    const reply=await transport.request(url,{...options,context:KinWorkContext.capture('document')});
+    if(!reply.ok || reply.incomplete)throw KinSessionTransport.responseError(reply);
+    return reply.body;
   };
   const editor = args.editor === false ? undefined : {
     available: () => true,
@@ -118,7 +122,8 @@ SETUP = """args => {
     focus() {}, print() { window.__printCalls += 1; }, close() { this.closed = true; },
   });
   window.__printer = globalThis.kinViewerJobPrint({ api, authenticate: async () => {},
-    live: () => !window.__ended, editor });
+    live: () => KinWorkContext.state()==='active', editor });
+  KinWorkContext.onInvalidate(()=>{if(KinWorkContext.state()!=='active')window.__printer.destroy();});
 }"""
 
 READY = ("() => { const s = document.querySelector('#kin-job-print [role=status]');"
@@ -223,7 +228,8 @@ class ViewerJobPrintCitationDOM(unittest.TestCase):
         page = self.context.new_page()
         page.set_content("<!doctype html><html><body></body></html>")
         page.evaluate(CORNERSTONE)
-        page.add_script_tag(path=str(ROOT / 'worklist-v0/hpacs-lite/session-transport.js'))
+        from module_session_harness import activate
+        activate(page)
         page.add_script_tag(path=str(MODULE))
         if modules:
             page.add_script_tag(path=str(CITATION_MODULE))
@@ -360,7 +366,7 @@ class ViewerJobPrintCitationDOM(unittest.TestCase):
         self.choose_settled(page, "both")
         # J4 / foreign:true - a read that only looks for evidence must never be
         # the thing that ends a viewer session, and it must say no more than '밖'.
-        self.assertFalse(page.evaluate("() => window.__ended"),
+        self.assertEqual(page.evaluate("() => KinWorkContext.state()"), 'active',
                          "a refused citation read must not end the viewer session")
         self.assertNotEqual(self.srcdoc(page), "",
                             "a refused citation read must not end the viewer session")
@@ -412,6 +418,18 @@ class ViewerJobPrintCitationDOM(unittest.TestCase):
                 self.assertEqual(len(sections), 2)
                 self.assertEqual(sections[1]['lines'], ['인용 증적 확인: doctor2의 열람 권한 기준', UNKNOWN])
                 self.assertFalse(page.eval_on_selector("#kin-job-print button:text-is('다시 확인')", 'b => b.disabled'))
+                self.assert_no_writes(page)
+
+    def test_16_coded_session_end_closes_output_without_printing(self):
+        for status,code in ((401,'AUTH_SESSION_ENDED'),(409,'AUTH_SESSION_MISMATCH')):
+            with self.subTest(code=code):
+                page=self.open_page(self.pair(),{UID_A:[dict(status=status,code=code)]})
+                page.wait_for_function(READY,timeout=60000)
+                page.select_option(SELECT,'saved')
+                page.wait_for_function("KinWorkContext.state() !== 'active'")
+                expect(page.locator('#kin-job-print')).to_have_count(0)
+                self.assertEqual(page.evaluate('__printCalls'),0)
+                self.assertEqual(page.evaluate('__written'),[])
                 self.assert_no_writes(page)
 
     def test_06_editor_mode_prints_a_notice_and_never_reads_citations(self):

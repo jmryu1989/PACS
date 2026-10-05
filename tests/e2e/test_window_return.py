@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
 from test_dock_preferences import dock_button
 from document_session import document_request
+from viewer_session import end_viewer
 
 class WindowReturnE2E(ViewerTechNoteE2E):
  def popup(self,a):
@@ -43,7 +44,7 @@ class WindowReturnE2E(ViewerTechNoteE2E):
   v.locator('#kin-viewer-focus-4').focus();v.keyboard.press('Control+Alt+4');v.keyboard.press('Control+Alt+4');p.wait_for_function('()=>window.syntheticReplies.length===1');expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-busy','true')
   self.active(v,b.uid);self.active(v,a.uid);p.evaluate('()=>{for(const [c,m] of window.syntheticReplies.splice(0))window.syntheticSend.call(c,m)}');expect(v.locator('#kin-viewer-return-status')).to_contain_text('영상 선택이나 세션이 바뀌어');expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-busy','false')
   p.close();v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_contain_text('응답이 없습니다',timeout=10000)
-  v.keyboard.press('Control+Alt+4');v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-viewer-focus-4')).to_be_disabled();expect(v.locator('#kin-viewer-return-status')).to_have_text('세션이나 영상 창이 변경되었습니다.')
+  v.keyboard.press('Control+Alt+4');ended=end_viewer(v, ['#kin-viewer-focus-4','#kin-viewer-return-status']);self.assertEqual(ended.retained('#kin-viewer-focus-4','node => node.disabled'),[True]);self.assertEqual(ended.retained('#kin-viewer-return-status','node => node.textContent'),['세션이나 영상 창이 변경되었습니다.']);ended.assert_quiet()
 
  def test_return_04_direct_viewer_has_no_parent_link(self):
   a,b=self.pair();v=self.launch(self.login(),[a]);self.ready(v);expect(v.locator('#kin-viewer-focus-4')).to_be_disabled();expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-describedby','kin-viewer-return-hint');expect(v.locator('#kin-viewer-return-hint')).to_contain_text('영상 새 창으로');self.assertIn('영상 새 창으로',v.locator('#kin-viewer-focus-4').get_attribute('title'));expect(v.locator('#kin-viewer-return-status')).to_be_empty()

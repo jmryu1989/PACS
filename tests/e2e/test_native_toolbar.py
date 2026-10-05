@@ -4,6 +4,7 @@ import os, re, unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E, canvas_ready
+from viewer_session import end_viewer
 
 class NativeToolbarE2E(ViewerTechNoteE2E):
  def zoom(self,f):return f.locator('#root button[data-cy="Zoom"]')
@@ -53,7 +54,7 @@ class NativeToolbarE2E(ViewerTechNoteE2E):
   self.assertEqual(v.evaluate("()=>kinMountStyles.filter(s=>s.isConnected).length"),0);self.assertFalse(v.evaluate("()=>typeof kinViewerFocusNativeToolbar==='function'"))
   expect(self.zoom(v)).to_have_attribute('aria-label','Zoom');expect(self.zoom(v)).to_have_attribute('data-kin-tool-label','Zoom');expect(self.zoom(v)).to_have_attribute('title',re.compile(r'^확대/축소( · 사용 중)?$'))
   v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeEnter()");self.ready(v);v.locator('#kin-viewer-focus-9').click();expect(self.zoom(v)).to_be_focused();self.assertEqual(self.snapshot(v),before)
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-viewer-focus-9')).to_be_disabled();self.assertFalse(v.evaluate("()=>typeof kinViewerFocusNativeToolbar==='function'"))
+  ended=end_viewer(v, ['#kin-viewer-focus-9']);self.assertEqual(ended.retained('#kin-viewer-focus-9','node => node.disabled'),[True]);self.assertFalse(ended.evaluate("()=>typeof kinViewerFocusNativeToolbar==='function'"));ended.assert_quiet()
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(NativeToolbarE2E(n) for n in loader.getTestCaseNames(NativeToolbarE2E) if n.startswith('test_native_'))
 if __name__=='__main__':unittest.main(verbosity=2)

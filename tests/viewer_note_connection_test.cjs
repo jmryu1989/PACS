@@ -187,7 +187,9 @@ test('U5 Note: ordinary failures stay local; a later request works with the same
       const w=await noteWorld(),{outcome}=await noteHeld(w,at);
       if(departed)noteLetGo(w,'screen');
       w.held[0].release(status,{message:'Synthetic failure'});
-      assert.notEqual(await outcome,'sent');await noteTick();
+      assert.equal(await outcome,departed?NOTE_DROPPED:[401,403].includes(status)?'메모 계정 또는 접근 권한을 확인하세요':'Synthetic failure');await noteTick();
+      assert.equal(w.status(),NOTE_READY,'a local failed request must not claim save or session end');
+      assert.doesNotMatch(w.status(),/저장|세션/);
       assert.deepEqual([w.session.state(),w.reasons.length,w.enders()],['writer',0,0]);
       w.sandbox.location.search='?StudyInstanceUIDs='+NOTE_STUDY;
       assert.equal(await w.request(),'sent');

@@ -106,8 +106,8 @@ class VolumePreferencesE2E(VolumeSyncE2E):
  def test_properties_09_teardown_preserves_newer_native_tool_choice(self):
   a,p,v=self.starting();self.mouse(v);v.locator('[data-cy=WindowLevel]').click()
   native=v.evaluate('()=>{window.prefTools=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(projectionVP.id,projectionVP.renderingEngineId);return prefTools.toolOptions}')
-  v=end_viewer(v)
-  self.assertEqual(v.count('.kin-mpr-configured'),0);self.assertEqual(v.count('.kin-mpr-zoom'),0);self.assertEqual(v.evaluate('()=>prefTools.toolOptions'),authoring_closed(native))
+  v=end_viewer(v);v.assert_quiet()
+  v.assert_quiet();v.assert_quiet();self.assertEqual(v.evaluate('()=>prefTools.toolOptions'),authoring_closed(native))
  def test_properties_10_saved_profile_applies_after_job_restore(self):
   a,p,v=self.starting();self.mouse(v);self.sync(v,'Windowing',False);self.sync(v,'Zoom',True);panel=self.properties(v);panel.get_by_role('button',name='Save MPR Preferences',exact=True).click();self.save_volume(v);before=self.volume_state(v)
   capture='()=>kinCreateVolumeJob({grid:services.viewportGridService,cs:services.cornerstoneViewportService,ds:services.displaySetService,studies:new URLSearchParams(location.search).get("StudyInstanceUIDs").split(",")}).capture()';saved=v.evaluate(capture)
@@ -150,7 +150,7 @@ class VolumePreferencesE2E(VolumeSyncE2E):
   a,p,v=self.starting()
   original=v.evaluate('()=>{window.prefTools=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(projectionVP.id,projectionVP.renderingEngineId);prefTools.setToolActive("Zoom",{bindings:[{mouseButton:2,modifierKey:16},{numTouchPoints:2}]});return prefTools.toolOptions}')
   self.mouse(v);bindings=v.evaluate('()=>prefTools.getToolOptions("Zoom").bindings');self.assertIn({'mouseButton':2,'modifierKey':16},bindings);self.assertIn({'numTouchPoints':2},bindings)
-  v=end_viewer(v);self.assertEqual(v.count('.kin-mpr-configured'),0);self.assertEqual(v.evaluate('()=>prefTools.toolOptions'),authoring_closed(original))
+  v=end_viewer(v);v.assert_quiet();self.assertEqual(v.evaluate('()=>prefTools.toolOptions'),authoring_closed(original))
  def test_properties_18_passive_tool_bound_by_apply_mouse_restores_after_hanging_protocol_retirement(self):
   # IF-A06. Choosing Zoom on the native toolbar leaves WindowLevel Passive; Apply Mouse then binds it to the middle button.
   # Retiring the Hanging Protocol planes must hand the reused native tool group back exactly as the toolbar left it, and the

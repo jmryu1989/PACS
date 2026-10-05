@@ -69,21 +69,16 @@ block cut from main.html and run over small stand-ins):
        wrapping line, whole inside the section even when the panel is narrow (an ellipsis on that line is seen: control).
   m07  session ended, another account's answer and OWNER_CHANGED: nothing is drawn afterwards.
   m08  wording, 12px text, 24px targets and keyboard reach for both areas.
-  m09  (B-R-001 F1) the page's api() over the shipped auth.js with POST /auth/logout held: a 401 on a queue read or on a
-       write ends the area before the logout answers; a held read and a held write answered afterwards draw nothing and
-       nothing new is read or sent. (Its control, api() without the hook line, is retired by S7-U5: auth.js's end notice
-       before the network ends the area through its own listener.)
+  m09  plain failures keep the queue usable; coded ENDED/MISMATCH closes it. Held list and Accept replies released
+       afterwards cannot repaint the queue, keep its note or send another read/write.
   m10  (B-R-001 F2) the queue's receipts, as c07 (accept and an admin's cancel).
   m11  (C-R-001 F2) Cancel is enabled for an admin (note still required, nothing read) or for a clinician whose own
        requests (#7 view=mine, followed across pages) hold the request: the same sub after an actor change yes, another
        sub with the same actor no; an older request is decided without reading further pages; while checking and after
        a failed read Cancel is disabled with the reason, and Reload checks again; a late answer after the session ended
        draws nothing. Control: the fix2 actor rule gets both actor cases wrong.
-  m12  (C-R-001 F1, S7-U5 §8) the page's Log out handler over the shipped auth.js: confirmed, it first saves the draft
-       (held: the area is still in use, its note kept, no logout POST), then ends the area through the end list before
-       the logout POST (held) answers; late read and write answers draw nothing, nothing new is read, and the identity is
-       gone. Cancelled confirm and an insertion in flight end nothing. (The control without the hook line is retired by
-       S7-U5; the hold release now runs inside auth.js's end, between its notice and the POST — the logout DOM test.)
+  m12  the whole shipped main document and its real Log out handler: report preservation failure pauses queue reads;
+       Back to Editing keeps the queue note and resumes reads; a completed end drops that note and the detail.
   m13  (S5-U4bc-R-001 F02) the queue's writes go through the block's own transport, which keeps the HTTP status (api()
        is unchanged): Accept answered 200, Close 202, Decline a body-less 204 and an admin's Cancel 200 each stay unknown
        with the status shown, the note kept read-only and Retry / Discard; Retry sends the same body and gets the stored
@@ -284,40 +279,6 @@ CLINICIAN_ACTOR_RULE = variant(SHIPPED["clinician.js"], [(
     "      || requestAttempts.has(key);\n", 1),
 ], "clinician.js")
 # B-R-001 control: the fix1 receipt checks (revision >= 1, `to` any state).
-# C-R-001 F1: the page's Log out handler as shipped (the same cut report_citation_dom_test.py and
-# report_dictation_host_dom_test.py take). Its controls without the end-list call (and api()'s) are retired by S7-U5: auth.js
-# now tells every document of the intent before the network, so this area's own session-ended listener ends it without
-# them (Astra S7-U5-SPEC-B-F01/F02; the one-off counterexamples are kept with the S7-U5 fix1 evidence).
-LOGOUT_BLOCK = slice_between(MAIN, "    // ② 로그아웃", "    // 다른 사람이 잡거나 놓은 걸")
-# What the handler calls, as stand-ins that log their order. stashReport() is the draft write of the logout's preparation
-# (S7-U5 §8-b): a POST the test can hold, answered "saved" as the shipped stashReport() answers a stored write; it logs
-# whether the request area had ended when it began. The page state the preparation reads (the selected study's base
-# version, the citation and structure keep lists, the settle wait) is the empty case here: nothing else is under test.
-LOGOUT_STANDINS = """
-let insertInFlight = false, commitInFlight = false, selectionSeq = 0, user = 'syn-technician';
-const RFIELDS = ['findings', 'conclusion', 'recommendation'];
-const reportBaseVersion = (uid, fallback) => fallback;
-const citations = { keepIds: () => undefined }, structureState = { keepIds: () => undefined };
-const settleStash = async () => true, markConverge = () => {}, heldByOther = () => null, cur = () => null;
-const reportNeedsWrite = () => true;
-window.synInsert = value => { insertInFlight = value; };
-const reportPreview = { close() { window.synOrder.push('preview'); } };
-function closeSR() { window.synOrder.push('closeSR'); }
-function endPatientCopy() { window.synOrder.push('endPatientCopy'); }
-// S7-U5 fix2: the account the page binds its draft writes to (none here), and the list and poll generations the
-// preparation moves and the poll restart of Back to Editing (F02), inert here.
-let draftOwner = null, poll = null, pollGeneration = 0, listLoadSequence = 0;
-function startPolling() {}
-// S7-U5 fix7 (Astra S7-U5-R-001-F02): the report's citation and structure read tickets the preparation drops; none here.
-const citationReads = new Map(), structureReads = new Map();
-async function stashReport() {
-  window.synOrder.push('stash:' + (document.querySelector('#image-request-queue-lock').hidden ? 'open' : 'ended'));
-  // The request the shipped draft write sends: the selected study's draft PUT, the one write the paused page lets out.
-  await fetch(API + '/studies/' + encodeURIComponent(selectedUid) + '/report', { method: 'PUT', headers: { 'X-KIN-CSRF': '1' } });
-  window.synOrder.push('stashed');
-  return 'saved';
-}
-"""
 CLINICIAN_FIX1_RECEIPT = variant(SHIPPED["clinician.js"], [(
     "      && applied.id === (create ? attempt.requestId : attempt.itemId) && applied.kind === attempt.kind\n"
     "      && applied.from === attempt.from && applied.to === (create ? 'Requested' : 'Cancelled')\n"
@@ -332,10 +293,7 @@ CLINICIAN_ANY_2XX = variant(SHIPPED["clinician.js"], [
     ("    return sent.status === 201 && !!applied && typeof applied === 'object' && typeof reply.replayed === 'boolean'\n",
      "    return !!applied && typeof applied === 'object' && typeof reply.replayed === 'boolean'\n", 1),
 ], "clinician.js")
-# S5-U4bc-R-001 F01: an account change seen by one area must not leave the other open with the previous account's text.
-# Since S7-U5 the clinician document has one answer to a verified account change - the whole document closes as a replaced
-# session (KinAuth.replaced; no area-by-area lock is left to remove), so the two "one area only" control files are retired.
-ACCOUNT_LIST = "        (window.kinOn401 || []).forEach(done => { try { done('account-changed', detail); } catch (_) {} });\n"
+# Session-end and the two-area mutation controls run through the real document gate.
 
 # Everything the cut block and the shipped api()/setMode() read from the page script, as small stand-ins. The page's
 # renderClinical() is the shipped HOOK line (pinned in s02); synPick() is a selection followed by it.
@@ -363,10 +321,7 @@ HOOK}
 window.synPick = uid => { KinWorkContext.select(uid); selectedUid = uid; renderClinical(); };
 window.synSetMode = m => setMode(m);
 """.replace("HOOK", HOOK)
-# m09 runs the shipped auth.js instead of the KinAuth stand-in: its logout() awaits POST /auth/logout before it clears the
-# session and broadcasts the end, which is the wait the 401 hook must not depend on.
-_STUB_AUTH = PRELUDE[PRELUDE.index("const KinAuth = {\n"):PRELUDE.index("};\n", PRELUDE.index("const KinAuth = {\n")) + 3]
-PRELUDE_REAL_AUTH = variant(PRELUDE, [(_STUB_AUTH, "", 1)], "PRELUDE")
+# m09 uses the shipped auth.js and transport; coded refusal ends the bound document before late queue work.
 # m14 runs the S5-U4b block beside this one: renderClinical() carries both shipped hook lines, and select() (the S5-U4b
 # Inbox's Open Study) is the page's early return for the same study followed by renderClinical().
 PRELUDE_BOTH = variant(PRELUDE, [(
@@ -2033,25 +1988,20 @@ class MainRequestDOMTest(Harness):
         route.abort()
 
     # ── page helpers ──
-    def open_main(self, block=BLOCK, api_fn=API_FN, real_auth=False, logout=None, questions=None):
-        """`logout`: the page's Log out handler (LOGOUT_BLOCK or its control) to run after the block, over LOGOUT_STANDINS;
-        confirm() answers window.synConfirm and logs itself. `questions`: the S5-U4b block (or its control) to run after
-        this one, with renderClinical() calling both hooks (m14; the stand-in KinAuth only)."""
+    def open_main(self, block=BLOCK, api_fn=API_FN, questions=None):
+        """Mount the shipped request block and optional question block on the real gate/transport."""
         head = ("<script>window.synSession = " + json.dumps(self.session) + "; window.synStudies = " + json.dumps(self.STUDIES)
                 + "; window.synInstitutions = " + json.dumps(self.INSTITUTIONS) + "; window.synToasts = []; window.synLogouts = 0;"
                 + " window.synOrder = []; window.synConfirm = true;"
                 + " window.confirm = () => { window.synOrder.push('confirm'); return window.synConfirm; };</script>")
-        if real_auth:
-            head += "<script>\n" + SHIPPED["auth.js"] + "\n</script>"
-        tail = "" if logout is None else LOGOUT_STANDINS + logout
-        prelude = PRELUDE_REAL_AUTH if real_auth else PRELUDE if questions is None else PRELUDE_BOTH
+        prelude = PRELUDE if questions is None else PRELUDE_BOTH
         head += "<script>" + CORE + "</script>"
-        defaults = "const work=KinWorkContext; work.follow(KinAuth); const transport=KinSessionTransport.page();" if real_auth else STANDIN
+        defaults = STANDIN
         defaults += "const sessionEndHooks=[],accountChangeHooks=[]; function onSessionEnd(fn){work.onInvalidate(e=>{if(e.reason==='lifecycle'&&!['active','preparing'].includes(e.state))fn();});} function onCommonEnd(fn){onSessionEnd(fn);accountChangeHooks.push(fn);}"
         defaults += "function staleAnswer(){return Object.assign(new Error('Stale'),{name:'AbortError'});} const activeWork=()=>work.state()==='active';"
         defaults += NOTIFY_ACCOUNT
         script = ("<script>\n" + prelude + defaults + api_fn + "\n" + SET_MODE + "\n" + block + "\n" + (questions or "") + "\n"
-                  + tail + "\nwork.onInvalidate(e=>{if(e.reason==='cancel'){imageRequests?.resume();}});</script>")
+                  + "\nwork.onInvalidate(e=>{if(e.reason==='cancel'){imageRequests?.resume();}});</script>")
         at = MAIN_PAGE.rindex("</body>")
         self.html = MAIN_PAGE[:at] + head + script + MAIN_PAGE[at:]
         self.queue_calls.clear()
@@ -2492,14 +2442,41 @@ class MainRequestDOMTest(Harness):
         for status, code in ((401, None), (500, None), (401, "AUTH_SESSION_ENDED"), (409, "AUTH_SESSION_MISMATCH")):
             with self.subTest(status=status, code=code):
                 self.fresh_context()
+                self.server.items[rid(21)].update(state='Requested',revision=1,note=None,handler=None)
                 self.open_main()
                 self.open_queue()
+                if code:
+                    self.held_reads=[];self.pick(11)
+                    self.wait_until(lambda:bool(self.held_reads),'the reading list held before end')
+                    self.open_item(21,'Requested')
+                    self.page.locator('#image-request-note').fill('SYN late receipt note')
+                    self.held_writes=[];self.act('accept')
+                    self.wait_until(lambda:bool(self.held_writes),'the Accept held before end')
                 self.queue_errors = [(status, {"message": "SYN failure", **({"code": code} if code else {})})]
                 self.page.locator("#image-request-queue-state").select_option("all")
                 if code:
                     self.wait_until(lambda: self.page.evaluate("KinWorkContext.state()") != "active", "the bound session failure")
                     self.assertEqual([], self.queue()["items"])
                     self.assertIsNone(self.queue()["detail"])
+                    counts=(len(self.queue_calls),len(self.detail_calls),len(self.writes),len(self.reads))
+                    ended_detail=self.page.locator('#image-request-detail').text_content()
+                    expect(self.page.locator('#image-request-note')).to_have_value('')
+                    for target,route in self.held_reads:
+                        if route.request.failure:
+                            self.assertIn('ABORTED',route.request.failure)
+                        else:
+                            self.release(route,self.server.study(target))
+                    for route,apply,body in self.held_writes:
+                        reply_status,reply=apply(body)
+                        self.release(route,reply,reply_status)
+                    self.page.locator('#image-request-queue-reload').dispatch_event('click');self.settle()
+                    self.assertEqual([],self.queue()['items'],'ended queue must not repaint a late list')
+                    self.assertIsNone(self.queue()['detail'],'ended queue must not paint the late Accept receipt')
+                    self.assertEqual(ended_detail,self.page.locator('#image-request-detail').text_content(),'late receipt must not repaint even a hidden detail')
+                    expect(self.page.locator('#image-request-note')).to_have_value('')
+                    expect(self.page.locator('#image-request-detail')).to_be_hidden()
+                    self.assertEqual(counts,(len(self.queue_calls),len(self.detail_calls),len(self.writes),len(self.reads)),
+                                     'late answers and a Reload cannot send after end')
                 else:
                     self.queue_state("failed")
                     self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
@@ -2679,20 +2656,51 @@ class MainRequestDOMTest(Harness):
                              request.headers.get("x-kin-session"), request.url)
 
     def test_m12_preparation_preserves_the_request_note_and_cancel_resumes(self):
-        self.open_main()
-        self.open_queue()
-        self.open_item(21, "Requested")
-        self.page.locator("#image-request-note").fill("SYN kept through preparation")
-        self.page.evaluate("window.synPreparation=KinWorkContext.prepare({})")
-        before = len(self.queue_calls)
-        self.page.locator("#image-request-queue-reload").click()
-        self.settle()
-        self.assertEqual(before, len(self.queue_calls))
-        self.page.evaluate("KinWorkContext.cancelPreparation(window.synPreparation)")
-        expect(self.page.locator("#image-request-note")).to_have_value("SYN kept through preparation")
-        self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
-        self.page.locator("#image-request-queue-reload").click()
-        self.wait_until(lambda: len(self.queue_calls) > before, "reads resume after Back to Editing")
+        # The queue shares the whole shipped main document with the report editor.
+        # A failed report preservation makes Back to Editing available; the queue
+        # note must survive that preparation and disappear only on the real end.
+        import auth_logout_dom_test as whole
+        full=whole.LogoutDOMTest();full.browser=self.browser;full.setUp()
+        try:
+            actor={**whole.RAD,'roles':['radiologist','technician']};full.site.account=actor
+            server=RequestServer([whole.INSTITUTION,actor['sub']],actor['actor'],actor['displayName'],staff=True)
+            server.add(item(21,whole.UID,'Requested',at=5))
+            original_api=full.site.api
+            def api(route,request,method,path,query):
+                if path.startswith('/api/image-requests') or path.endswith('/image-requests'):
+                    _,refused=full.site.authenticate(request)
+                    if refused:return full.site.refuse(route,*refused)
+                    if path=='/api/image-requests':
+                        return route.fulfill(json=server.queue({key:values[0] for key,values in parse_qs(query).items()}))
+                    if path.endswith('/image-requests'):return route.fulfill(json=server.study(whole.UID))
+                    status,body=server.read(path.rsplit('/',1)[1]);return route.fulfill(status=status,json=body)
+                return original_api(route,request,method,path,query)
+            full.site.api=api;full.open_main(who=actor)
+            full.site.put_answers=[(503,{'code':'SYN_UNAVAILABLE'})]*8
+            full.select_and_type()
+            full.page.locator('[data-tab="Technician"]').click()
+            full.page.locator('#image-request-queue-summary').click()
+            full.page.locator(f'#image-request-queue-list [data-id="{rid(21)}"] [data-open]').click()
+            note=full.page.locator('#image-request-note');note.fill('SYN kept through preparation')
+            full.log_out_main();expect(full.panel_button('Back to Editing')).to_be_visible()
+            before=full.site.count('GET','/api/image-requests')
+            full.page.locator('#image-request-queue-reload').dispatch_event('click');full.page.wait_for_timeout(150)
+            self.assertEqual(full.site.count('GET','/api/image-requests'),before)
+            full.panel_button('Back to Editing').click()
+            expect(note).to_have_value('SYN kept through preparation')
+            self.assertEqual(full.page.evaluate('KinWorkContext.state()'),'active')
+            full.page.locator('#image-request-queue-reload').click()
+            full.wait_until(lambda:full.site.count('GET','/api/image-requests')>before,'queue reload after Back to Editing')
+            full.page.evaluate('window.u5QueueNote=document.querySelector("#image-request-note")')
+            full.site.put_answers=[];held=[]
+            full.context.route('**/worklist/hpacs-lite/index.html',lambda route:held.append(route))
+            full.log_out_main();full.wait_until(lambda:bool(held),'the real end landing')
+            for route in held:route.fulfill(status=204)
+            self.assertEqual(full.page.evaluate('u5QueueNote.value'),'')
+            expect(full.page.locator('#image-request-detail')).to_be_hidden()
+            self.assertEqual(full.dialogs,[],'preparation and clean completion do not use browser confirms')
+        finally:
+            full.tearDown()
 
     def unknown_until_replayed(self, n, state, action, note, status, after):
         """One write of the open request answered with a correct receipt but HTTP `status`: unknown, then Retry's 201."""

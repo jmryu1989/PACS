@@ -6,6 +6,7 @@ import pydicom
 from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
 from document_session import document_request
+from viewer_session import EndedViewer, end_viewer
 
 class ViewerPatientCopyE2E(ViewerTechNoteE2E):
  def popup(self,a):
@@ -18,7 +19,12 @@ class ViewerPatientCopyE2E(ViewerTechNoteE2E):
    print('COPY IDENTITY DIAGNOSTIC',v.evaluate('''()=>{const grid=services.viewportGridService,g=grid.getState(),v=services.cornerstoneViewportService.getCornerstoneViewport(g.activeViewportId),id=v.getCurrentImageId(),m=cornerstone.metaData.get('instance',id),ds=services.displaySetService.getDisplaySetByUID(g.viewports.get(g.activeViewportId).displaySetInstanceUIDs[0]);return {image:id,instance:{study:m?.StudyInstanceUID,series:m?.SeriesInstanceUID,sop:m?.SOPInstanceUID,id:m?.PatientID},display:{study:ds.StudyInstanceUID,series:ds.SeriesInstanceUID,id:ds.PatientID},stackEvent:cornerstone.Enums?.Events?.STACK_NEW_IMAGE,gridEvents:grid.EVENTS}}'''),flush=True);raise
   return p,v
  def copied(self,v):expect(v.locator('#kin-viewer-copy-status')).to_have_text('환자 ID를 복사했습니다.')
- def clipboard(self,v):return v.evaluate('()=>navigator.clipboard.readText()')
+ def clipboard(self,v):
+  # A closed document cannot read the browser clipboard; the same-origin
+  # observer retains permission and reads the actual shared clipboard.
+  reader=v.observer if isinstance(v,EndedViewer) else v
+  if isinstance(v,EndedViewer):reader.bring_to_front()
+  return reader.evaluate('()=>navigator.clipboard.readText()')
 
  def test_copy_01_actual_dicom_literal_id_active_prior_and_preservation(self):
   patient='0007-한글<&-'+uuid.uuid4().hex[:8];a=self.ct(patient,'current','20260801');b=self.ct(patient,'past','20260701');self.seed_report(a);self.seed_report(b,action='approve')
@@ -55,7 +61,7 @@ class ViewerPatientCopyE2E(ViewerTechNoteE2E):
   field=v.get_by_label('Job Title',exact=True);field.fill('KEEP COPY INPUT');field.focus();v.keyboard.press('Control+Alt+c');self.assertEqual(self.clipboard(v),'UNCHANGED');expect(field).to_have_value('KEEP COPY INPUT')
   self.open_note(v);v.keyboard.press('Control+Alt+c');self.assertEqual(self.clipboard(v),'UNCHANGED');v.locator('#tech-note-close').click()
   v.evaluate('()=>{window.copyNativeDialog=document.createElement("dialog");document.body.append(copyNativeDialog);copyNativeDialog.showModal()}');v.keyboard.press('Control+Alt+c');self.assertEqual(self.clipboard(v),'UNCHANGED');v.evaluate('()=>copyNativeDialog.remove()')
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-viewer-copy-id')).to_be_disabled();expect(v.locator('#kin-viewer-copy-context')).not_to_contain_text(a.patient_id);v.keyboard.press('Control+Alt+c');self.assertEqual(self.clipboard(v),'UNCHANGED')
+  ended=end_viewer(v, ['#kin-viewer-copy-id','#kin-viewer-copy-context']);self.assertEqual(ended.retained('#kin-viewer-copy-id','node => node.disabled'),[True]);self.assertTrue(all(a.patient_id not in text for text in ended.retained('#kin-viewer-copy-context','node => node.textContent')));ended.dispatch_key('KeyC',ctrlKey=True,altKey=True);self.assertEqual(self.clipboard(ended),'UNCHANGED');ended.assert_quiet()
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(ViewerPatientCopyE2E(n) for n in loader.getTestCaseNames(ViewerPatientCopyE2E) if n.startswith('test_copy_'))
 if __name__=='__main__':unittest.main(verbosity=2)

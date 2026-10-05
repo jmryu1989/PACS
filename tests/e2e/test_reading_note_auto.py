@@ -3,6 +3,7 @@
 import json,unittest
 from playwright.sync_api import expect
 from test_reading_note import ReadingNoteE2E
+from viewer_session import end_document
 
 class ReadingNoteAutoE2E(ReadingNoteE2E):
  def test_auto_note_01_default_opt_in_once_and_reload(self):
@@ -30,7 +31,7 @@ class ReadingNoteAutoE2E(ReadingNoteE2E):
   p.wait_for_timeout(750);expect(p.locator('#tech-note-dialog')).not_to_be_visible()
   self.note(b,'LATER NOTE');p.locator('#refresh').click();expect(p.locator('#reading-tech-note')).to_contain_text('있음')
   p.wait_for_timeout(750);expect(p.locator('#tech-note-dialog')).not_to_be_visible()
-  p.evaluate("() => {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
+  end_document(p)
   expect(p.locator('#reading-note-auto')).to_be_disabled()
 
  def test_auto_note_03_other_owner_and_storage_failure(self):

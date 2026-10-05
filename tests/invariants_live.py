@@ -312,6 +312,7 @@ class HttpResult:
     status: int
     body: Any
     text: str
+    headers: dict[str, str] | None = None
 
     def contains(self, value: str) -> bool:
         return value in self.text
@@ -870,10 +871,10 @@ class LiveStack:
         try:
             with self._open(request) as response:
                 payload, text = _json_or_text(response.read())
-                return HttpResult(response.status, payload, text)
+                return HttpResult(response.status, payload, text, dict(response.headers.items()))
         except HTTPError as error:
             payload, text = _json_or_text(error.read())
-            return HttpResult(error.code, payload, text)
+            return HttpResult(error.code, payload, text, dict(error.headers.items()))
 
     def token(self, user: str, *, refused: bool = False) -> str:
         """The member's cached token; a new one is confirmed with GET /me = 200 and its actor recorded.

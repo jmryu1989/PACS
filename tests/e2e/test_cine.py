@@ -8,6 +8,7 @@ from pydicom.uid import generate_uid
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError,expect
 from test_viewer_layout import ViewerLayoutE2E
 from test_prior_selection import canvas_ready
+from viewer_session import observe_viewer
 
 class CineE2E(ViewerLayoutE2E):
  def series(self,f,count,label):
@@ -111,8 +112,9 @@ class CineE2E(ViewerLayoutE2E):
 
  def test_cine_04_logout_and_spa_exit(self):
   f,a,b=self.pair();work=self.login();p=self.open_cine(f,[a],work.context.new_page());self.play(p);p.wait_for_timeout(350)
-  work.once('dialog',lambda d:d.accept());work.locator('#logout').click();work.wait_for_url('**/worklist/hpacs-lite/index.html')
-  self.wait_stopped(p,0);before=self.snapshot(p);p.wait_for_timeout(500);self.assertEqual(self.snapshot(p),before);self.assertFalse(before[0]['playing']);expect(p.locator('#kin-cine')).not_to_be_visible()
+  self.watch(p);ended=observe_viewer(p);dialogs=[];work.on('dialog',lambda d:(dialogs.append(d.message),d.dismiss()))
+  work.locator('#logout').click();work.wait_for_url('**/worklist/hpacs-lite/index.html')
+  ended.ended();count=ended.evaluate('()=>cineRenders.length');ended.assert_quiet(500);self.assertEqual(ended.evaluate('()=>cineRenders.length'),count);self.assertEqual(dialogs,[])
   p=self.open_cine(f,[a]);self.play(p);p.wait_for_timeout(350);p.evaluate('()=>{window.cineExitMarker=true}');p.mouse.click(20,24)
   expect(p.locator('#kin-cine')).to_have_count(0);self.assertTrue(p.evaluate('window.cineExitMarker===true'));self.assertNotIn('/ohif/viewer?',p.url)
 

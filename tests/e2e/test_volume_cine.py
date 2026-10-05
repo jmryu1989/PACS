@@ -4,6 +4,7 @@ import unittest
 import numpy as np
 from playwright.sync_api import expect
 from test_volume_orientation import VolumeOrientationE2E
+from viewer_session import end_viewer
 
 class VolumeCineE2E(VolumeOrientationE2E):
  CAPTURE_TIMEOUT_MS=10000
@@ -34,8 +35,12 @@ class VolumeCineE2E(VolumeOrientationE2E):
  def test_volume_cine_02_selection_modal_session_stop(self):
   a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=3');self.choose_volume(v,v,1);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(250);self.assertEqual(v.evaluate('()=>cinePositions.length'),count)  # negative assertion: fixed window is the delivery margin for frames that must not arrive after the modal stop
   self.choose_volume(v,v,0);v.wait_for_timeout(600);v.get_by_label('Playback Direction',exact=True).select_option('reverse');v.get_by_label('Loop',exact=True).uncheck();self.cine_play(v);v.wait_for_function('(count)=>cinePositions.length>count',arg=count);self.open_note(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");v.locator('#tech-note-close').click();expect(v.get_by_label('Playback Direction',exact=True)).to_have_value('reverse');expect(v.get_by_label('Loop',exact=True)).not_to_be_checked();self.cine_play(v);v.wait_for_timeout(200)
-  # The 300ms and 100ms windows below are negative-assertion delivery margins: no frame may arrive after session end, and play must never start.
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");v.wait_for_timeout(200);count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(300);self.assertEqual(v.evaluate('()=>cinePositions.length'),count);self.cine_play(v);v.wait_for_timeout(100);self.assertFalse(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));self.assertEqual(len(self.versions(a)),1)
+  # Keep looping so a natural last frame cannot masquerade as session cleanup.
+  v.get_by_label('Loop',exact=True).check()
+  if not v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"):self.cine_play(v)
+  v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===true")
+  count=v.evaluate('cinePositions.length');v.wait_for_function('n=>cinePositions.length>n',arg=count)
+  ended=end_viewer(v);count=ended.evaluate('()=>cinePositions.length');ended.assert_quiet(500);self.assertEqual(ended.evaluate('()=>cinePositions.length'),count);self.assertEqual(len(self.versions(a)),1)
  def test_volume_cine_03_oblique_spacing_and_loop(self):
   a,p,v=self.starting();self.rotate_planes(v,0,25);self.rotate_planes(v,1,-35);self.cine_open(v);v.get_by_label('Loop',exact=True).uncheck();v.get_by_role('button',name='First Plane',exact=True).click();v.wait_for_timeout(200);before=self.volume_state(v);normal=np.array(before[0]['camera']['viewPlaneNormal']);first=np.array(before[0]['camera']['focalPoint']);last=int(np.floor(float(np.dot(np.abs(normal),[63,63,32]))));self.assertAlmostEqual(float(np.dot(first,normal)),float(np.minimum(normal*[63,63,32],0).sum()),delta=2e-5);self.watch_cine(v);self.cine_play(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=10000);positions=v.evaluate('()=>cinePositions');self.assertEqual(len(positions),last)
   for i,row in enumerate(positions,1):np.testing.assert_allclose(row['point'],first+normal*i,atol=2e-5,rtol=0)

@@ -5,6 +5,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_image_context_copy import ImageContextCopyE2E
 from test_embedded_patient_copy import EmbeddedPatientCopyE2E
+from viewer_session import end_document
 
 class VolumePatientCopyE2E(ImageContextCopyE2E):
  def active(self,v,uid):
@@ -52,7 +53,7 @@ class VolumePatientCopyE2E(ImageContextCopyE2E):
  def test_volume_03_embedded_parent_modal_and_session(self):
   a,b=self.pair();p,f=EmbeddedPatientCopyE2E.opened(self,a);self.mpr(f);self.choose_volume(p,f,1);f.locator('#kin-viewer-copy-id').click();self.copied(f);self.assertEqual(p.evaluate('()=>navigator.clipboard.readText()'),a.patient_id)
   p.evaluate('()=>navigator.clipboard.writeText("KEEP PARENT VOLUME")');p.evaluate('()=>{window.volumeDialog=document.createElement("dialog");document.body.append(volumeDialog);volumeDialog.showModal()}');expect(f.locator('#kin-viewer-copy-id')).to_be_disabled();f.evaluate("()=>document.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyC',ctrlKey:true,altKey:true,bubbles:true}))");self.assertEqual(p.evaluate('()=>navigator.clipboard.readText()'),'KEEP PARENT VOLUME');p.evaluate('()=>volumeDialog.remove()');expect(f.locator('#kin-viewer-copy-id')).to_be_enabled()
-  p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(p.locator('#reading-viewer iframe')).to_have_count(0);self.assertEqual(p.evaluate('()=>navigator.clipboard.readText()'),'KEEP PARENT VOLUME')
+  end_document(p);expect(p.locator('#reading-viewer iframe')).to_have_count(0);self.assertEqual(p.evaluate('()=>navigator.clipboard.readText()'),'KEEP PARENT VOLUME')
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumePatientCopyE2E(n) for n in loader.getTestCaseNames(VolumePatientCopyE2E) if n.startswith('test_volume_'))
 if __name__=='__main__':unittest.main(verbosity=2)

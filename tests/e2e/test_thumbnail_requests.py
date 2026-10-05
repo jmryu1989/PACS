@@ -56,7 +56,7 @@ class ThumbnailRequestsE2E(PortraitWorkspaceE2E):
         page.evaluate('''({uids, ids, nonce}) => {
           const raw = window.fetch, create = URL.createObjectURL, revoke = URL.revokeObjectURL;
           const sources = new WeakMap();
-          window._d02c = { sources: {}, created: 0, revoked: 0, pending: 0, peak: 0, lifecycle: [] };
+          window._d02c = { sources: {}, created: 0, revoked: 0, aborts: [] };
           let seq = 0;
           window.fetch = async (input, init) => {
             let url = String(input);
@@ -64,32 +64,14 @@ class ThumbnailRequestsE2E(PortraitWorkspaceE2E):
               (url.includes('/instances/') && url.includes('/preview') && ids.some(id => url.includes(id))) ||
               (url.endsWith('/api/dicom/lookup') && uids.some(u => String(init?.body).includes(u)));
             if (owned) url += (url.includes('?') ? '&' : '?') + 'd02c=' + nonce + (++seq);
-            if (owned) {
-              _d02c.pending++; _d02c.peak=Math.max(_d02c.peak,_d02c.pending);
-              _d02c.lifecycle.push({kind:'start',url,at:performance.now()});
+            if (owned && init?.signal) {
+              const aborted=()=>_d02c.aborts.push({url:new URL(url,location.href).href,at:performance.timeOrigin+performance.now()});
+              if(init.signal.aborted)aborted();else init.signal.addEventListener('abort',aborted,{once:true});
             }
-            let done=false;
-            const finish = () => {
-              if (owned && !done) {
-                done=true; _d02c.pending--;
-                _d02c.lifecycle.push({kind:'settled',url,at:performance.now()});
-              }
-            };
-            let res;
-            try { res = await raw(url, init); }
-            catch (e) { finish(); throw e; }
+            const res = await raw(url, init);
             if (owned) {
-              for (const method of ['blob','json']) {
-                const read=res[method].bind(res);
-                res[method]=async () => {
-                  try { const value=await read(); if (method==='blob') sources.set(value,url); return value; }
-                  finally { finish(); }
-                };
-              }
-              if (res.body) {
-                const cancel=res.body.cancel.bind(res.body);
-                res.body.cancel=async () => { try { return await cancel(); } finally { finish(); } };
-              }
+              const read=res.blob.bind(res);
+              res.blob=async () => {const value=await read();sources.set(value,url);return value;};
             }
             return res;
           };
@@ -113,11 +95,11 @@ class ThumbnailRequestsE2E(PortraitWorkspaceE2E):
             url = e['request']['url']
             if 'd02c='+self.nonce not in url: return
             self.active[e['requestId']] = url
-            self.events.append({'kind':'start','id':e['requestId'],'url':url,'at':time.perf_counter()})
+            self.events.append({'kind':'start','id':e['requestId'],'url':url,'at':e['timestamp'],'wall':e['wallTime']*1000})
         def end(e, kind):
             if e['requestId'] not in self.active: return
             self.active.pop(e['requestId'])
-            self.events.append({'kind':kind,'id':e['requestId'],'at':time.perf_counter(),
+            self.events.append({'kind':kind,'id':e['requestId'],'at':e['timestamp'],
                                 'canceled':e.get('canceled',False),'error':e.get('errorText')})
         cdp.on('Network.requestWillBeSent', start)
         cdp.on('Network.loadingFinished', lambda e:end(e,'finished'))
@@ -155,19 +137,32 @@ class ThumbnailRequestsE2E(PortraitWorkspaceE2E):
         known = {urlsplit(u).path+'?'+urlsplit(u).query for u in starts.values()}
         self.assertTrue(rows)
         self.assertTrue(all(row['path'] in known for row in rows))
-        pending = peak = 0
-        for e in self.events:
-            pending += 1 if e['kind']=='start' else -1
-            peak = max(peak,pending)
-        lifecycle = page.evaluate('({peak:_d02c.peak,pending:_d02c.pending,events:_d02c.lifecycle})')
-        self.assertEqual(lifecycle['pending'],0)
-        self.assertLessEqual(lifecycle['peak'],4)
-        if label != 'cancel': self.assertLessEqual(peak,4)
+        pending = network_peak = 0
+        for event in self.events:
+            pending += 1 if event['kind']=='start' else -1
+            network_peak=max(network_peak,pending)
+        self.assertEqual(pending,0,'Every started request must have a CDP completion or failure')
+        aborts=page.evaluate('_d02c.aborts');aborted={row['url']:row['at'] for row in aborts}
+        edges=[]
+        for event in self.events:
+            if event['kind']!='start':continue
+            done=terminal[event['id']]
+            completed=event['wall']+(done['at']-event['at'])*1000
+            # Abort is synchronous; CDP may report the cancellation after the new
+            # generation starts. Cancelled requests still owe a CDP terminal above.
+            stopped=min(completed,aborted.get(event['url'],completed))
+            edges.extend([(event['wall'],1),(max(event['wall'],stopped),-1)])
+        pending=peak=0
+        for _,delta in sorted(edges,key=lambda x:(x[0],x[1])):
+            pending+=delta;peak=max(peak,pending)
+        self.assertEqual(pending,0)
+        self.assertLessEqual(peak,4,'At most four non-cancelled thumbnail requests may be in flight')
+        self.assertLessEqual(network_peak,8 if label=='cancel' else 4)
         folder = Path(__file__).parent/'artifacts'
         folder.mkdir(exist_ok=True)
         (folder/('D02C-'+label+'.json')).write_text(json.dumps({
             'startedUTC':self.started,'events':self.events,'nginxTerminals':rows,
-            'peakCDP':peak,'fetchBodyLifecycle':lifecycle,'browserTerminalMissing':0,'liveBlobURLs':len(self.live_urls),
+            'peakCDP':network_peak,'peakActive':peak,'abortSignals':aborts,'browserTerminalMissing':0,'liveBlobURLs':len(self.live_urls),
             'note':'Nginx status is gateway completion/disconnect, not proof that upstream computation aborted.'
         },indent=2)+'\n',encoding='utf-8')
         return rows

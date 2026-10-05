@@ -4,6 +4,7 @@ import json,os,unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_native_toolbar import NativeToolbarE2E,canvas_ready
+from viewer_session import end_viewer
 
 BASE=['MeasurementTools','Zoom','Pan','TrackballRotate','WindowLevel','Capture','Layout','Crosshairs','MoreTools']
 class ToolbarPreferencesE2E(NativeToolbarE2E):
@@ -33,7 +34,7 @@ class ToolbarPreferencesE2E(NativeToolbarE2E):
   self.editor(v);v.locator('#kin-native-toolbar-default').click();self.applied(v);self.assertEqual(self.section(v),BASE);self.assertEqual(self.section(f),saved);expect(f.locator('#kin-native-toolbar-status')).to_contain_text('현재 창 유지')
   self.editor(v);self.customize(v);self.applied(v);v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeExit()");expect(v.locator('#kin-native-toolbar-dialog')).to_have_count(0);self.assertEqual(self.section(v),BASE)
   v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeEnter()");self.ready(v);self.assertEqual(self.section(v),saved);expect(v.locator('#kin-native-toolbar-edit')).to_have_count(1)
-  self.editor(v);v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-native-toolbar-dialog')).to_have_count(0);expect(v.locator('#kin-native-toolbar-edit')).to_have_count(0);self.assertEqual(self.section(v),BASE)
+  self.editor(v);ended=end_viewer(v, ['#kin-native-toolbar-dialog','#kin-native-toolbar-edit']);self.assertTrue(all(ended.retained('#kin-native-toolbar-dialog')));self.assertTrue(all(ended.retained('#kin-native-toolbar-edit')));self.assertEqual(self.section(ended),BASE);ended.assert_quiet()
 
  def test_toolbar_03_corrupt_owner_isolation_and_storage_denial(self):
   a,b=self.pair();v=self.launch(self.login(),[a]);self.ready(v);self.editor(v);self.customize(v);self.applied(v);saved=self.stored(v);self.assertEqual(len(saved),1);key=next(iter(saved))

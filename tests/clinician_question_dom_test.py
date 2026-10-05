@@ -420,9 +420,9 @@ OTHER_PANEL = "() => { window.synOtherEnds = 0; KinWorkContext.onInvalidate(e =>
 TOGGLES = """() => { for (const id of ['question-toggle', 'question-inbox', 'question-toggle'])
   document.getElementById(id).click(); }"""
 
-# Another tab runs auth.js broadcastEnded(): one channel message, then a localStorage set and remove.
-BROADCAST_ENDED = """() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type: 'session-ended',session:'SYN-SESSION-SYN-CLIN-SUB'}); c.close();
-  localStorage.setItem('kin-session-ended', String(Date.now())); localStorage.removeItem('kin-session-ended'); }"""
+# An end notice names the exact document session; the removed storage key is never used.
+BROADCAST_ENDED = """() => { const c = new BroadcastChannel('kin-session');
+  c.postMessage({type:'session-ended',session:'SYN-SESSION-SYN-CLIN-SUB',operation:Date.now(),status:'ending'});c.close(); }"""
 
 CLINICIAN_VIEW = """() => { const s = document.querySelector('#questions'); if (!s) return null;
   const q = sel => s.querySelector(sel), text = e => e ? e.textContent : null, st = q('#questions-state'), th = q('#question-thread');
@@ -1450,6 +1450,8 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                 self.fresh_context()
                 self.open_home()
                 self.pick(A)
+                exits=[]
+                self.page.route(ORIGIN+BASE+'index.html',lambda route:(exits.append(route.request.url),route.fulfill(status=204)))
                 if changed == 'read':
                     self.envelope_owner = [INSTITUTION, "SYN-OTHER-SUB"]
                     self.page.locator('#questions-summary').click()
@@ -1458,7 +1460,8 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
                     self.faults.append({"kind":"create", "status":409,
                                         "body":{"code":"OWNER_CHANGED", "message":"SYN owner changed"}})
                     self.write('ask', 'SYN owner question')
-                self.page.wait_for_url(ORIGIN + BASE + 'index.html')
+                self.wait_until(lambda:bool(exits),'replacement requested its landing')
+                self.assertEqual({'children':['P@status'],'text':CLOSING},self.page.evaluate(CLOSED_VIEW),'no other account content before navigation')
                 self.assertEqual([], self.logouts)
                 self.envelope_owner = None
 
@@ -2459,6 +2462,7 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         # A named end closes the consumer before pending read/write completions, without a logout POST.
         opened, answered, _ = self.seed_threads()
         self.open_reader(me(RADIOLOGIST, ["radiologist"]), real_auth=True)
+        self.page.evaluate(OTHER_PANEL)
         self.target(A)
         self.reader_state("ready")
         self.page.locator("#question-toggle").click()
@@ -2478,6 +2482,8 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.assertEqual((False, "ended", None, [], None, [], []),
                          (seen["shown"], seen["state"], seen["mode"], seen["items"], seen["thread"],
                           seen["composers"], seen["notes"]))
+        self.assertEqual(1,self.page.evaluate("synOtherEnds"),"the other panel ends once")
+        self.assertIn("ABORTED",read["route"].request.failure or "","the pending read is cancelled")
         count = len(self.q_requests)
         for held in (write, read):
             self.release_after_end(held)
@@ -2487,6 +2493,7 @@ class ClinicianQuestionDOMTest(unittest.TestCase):
         self.assertEqual(seen, self.reader())
         self.assertEqual(count, len(self.q_requests))
         self.assertEqual([], self.logouts)
+        self.assertEqual(1,self.page.evaluate("synOtherEnds"))
 
     # ── B-R-001 F1: the page's other logout starts ──
     def exits_in_flight(self, api_fn=None, log_out=None):

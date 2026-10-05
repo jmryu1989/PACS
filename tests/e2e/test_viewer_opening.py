@@ -9,6 +9,7 @@ from playwright.sync_api import expect
 from test_reading_workspace import ReadingWorkspaceE2E
 from test_prior_selection import canvas_ready
 from test_workspace_persistence import WorkspacePersistenceE2E
+from viewer_session import end_document
 
 
 class ViewerOpeningE2E(ReadingWorkspaceE2E):
@@ -165,8 +166,8 @@ class ViewerOpeningE2E(ReadingWorkspaceE2E):
         self.assertEqual(self.ids(frame), [a.uid, b.uid])
         self.open_toolbar_group(p, '#image-opening-open')
         p.locator('#image-opening-open').click()
-        q.evaluate('''() => { const c=new BroadcastChannel('kin-session'); c.postMessage({type:'session-ended'}); setTimeout(()=>c.close(),0); }''')
-        expect(p.locator('#image-opening-dialog')).not_to_be_visible()
+        end_document(q)
+        expect(p.locator('#image-opening-dialog')).not_to_be_visible();self.assertFalse(p.locator('#image-opening-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
         expect(p.locator('#image-opening-open')).to_be_disabled()
 
 
