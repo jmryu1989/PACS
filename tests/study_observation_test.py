@@ -588,6 +588,22 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S7-U5 closure audit 2026-10-05 (report-draft defects 1-3, A020, A021; A006, A015): a draft write that waited decides
+# what to send at its turn (reportTextToSend), an accepted commit is applied by one function whether its answer came or
+# a read found it (applyAcceptedCommit, announceCommit, learnCommitOutcome, readCommitOutcome), Log out also waits for a
+# discard that is out (workBusy) and asks about unsaved work outside the report draft before the real end
+# (otherUnsavedWork, concludeLogout, logOutAnyway), and a viewer the list opens is handed the list's session
+# (handOverSession, viewerEntryStopped). tests/report_text_boundaries_dom_test.py (rounds 7-8) holds the behaviour; this
+# entry only keeps the historic inventory current (the name pin stays a D73 debt for S9-U0f).
+for _kind, _extra in {
+    "ids": {},
+    "functions": {"workBusy": 1, "reportEditedSince": 1, "reportTextToSend": 1, "applyAcceptedCommit": 1,
+                  "announceCommit": 1, "learnCommitOutcome": 1, "readCommitOutcome": 1, "otherUnsavedWork": 1,
+                  "concludeLogout": 1, "logOutAnyway": 1, "handOverSession": 1, "viewerEntryStopped": 1},
+    "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 # Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {

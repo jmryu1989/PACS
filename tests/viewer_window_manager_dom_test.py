@@ -152,8 +152,11 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
               f"lf_sha256={hashlib.sha256(main_lf).hexdigest()}")
         cls.main_source = main_bytes.decode("utf-8-sig")
         cls.manager_source = extract_function(cls.main_source, "mountViewerWindows")
+        # handOverSession / viewerEntryStopped (S7-U5 closure audit A015) are part of the shipped open path: the list
+        # hands its session to the window before a navigation and reads whether a viewer stopped at its entry.
         cls.open_source = "\n".join(extract_function(cls.main_source, name)
-                                    for name in ("ohifScope", "sameOhifScope", "openOhifWindow"))
+                                    for name in ("ohifScope", "sameOhifScope", "handOverSession", "viewerEntryStopped",
+                                                 "openOhifWindow"))
         cls.windows_source = WINDOWS.read_text(encoding="utf-8")
 
     @classmethod

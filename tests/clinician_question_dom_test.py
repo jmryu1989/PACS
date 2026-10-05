@@ -414,6 +414,9 @@ const draftClient = {
   },
 };
 const staleAnswer = () => Object.assign(new Error('SYN obsolete'), {stale:true});
+// Closure audit 2026-10-05: Log out also waits for a discard that is out (workBusy; nothing is out here) and reads the
+// report state first when a commit's outcome is unknown (none here). Both sit in the report region this file does not cut out.
+const workBusy = () => commitInFlight || insertInFlight, reportUnknownCommits = new Map();
 """
 
 OTHER_PANEL = "() => { window.synOtherEnds = 0; KinWorkContext.onInvalidate(e => { if(e.reason === 'lifecycle' && !['active','preparing'].includes(e.state)) window.synOtherEnds += 1; }); }"

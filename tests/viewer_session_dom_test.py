@@ -1525,6 +1525,73 @@ class ViewerSessionDOMTest(unittest.TestCase):
         view.wait_for_function("events.length===2")
         self.assertEqual(view.evaluate("events"), ["timeout", "loadend"])
 
+    # ── S7-U5 closure audit A006: the viewer's side of "Log out asks about unsaved work" ──
+    def unsaved_declared(self):
+        """The unsaved-work declarations the browser holds right now, read from another document: the kinds of each."""
+        names = self.opener.evaluate(
+            "async()=>(await navigator.locks.query()).held.map(lock=>lock.name).filter(name=>name.startsWith('kin-unsaved:'))")
+        return sorted(name.rsplit(':', 1)[-1] for name in names if name.startswith('kin-unsaved:S1:'))
+
+    def wait_declared(self, expected):
+        for _ in range(300):
+            if self.unsaved_declared() == expected:
+                return
+            self.opener.wait_for_timeout(10)
+        self.assertEqual(self.unsaved_declared(), expected)
+
+    def ask_unsaved(self, session='S1'):
+        """Main's question on the session channel; what the documents of that session answered within a short wait."""
+        return self.opener.evaluate("""session=>new Promise(done=>{
+          const query=crypto.randomUUID(),answers=[],listener=new BroadcastChannel('kin-session');
+          listener.onmessage=event=>{if(event.data?.type==='session-work'&&event.data.query===query)answers.push([event.data.session,event.data.unsaved]);};
+          channel.postMessage({type:'session-work-query',session,query});
+          setTimeout(()=>{listener.close();done(answers);},300);
+        })""", session)
+
+    def test_unsaved_work_is_declared_by_a_lock_and_answered_from_the_viewers_own_guards(self):
+        view = self.open_viewer()
+        view.wait_for_function('window.started===true')
+        # The guards the viewer's modules keep for window reuse and close (marks, finding text, Job edits), as stand-ins.
+        view.evaluate("""()=>{window.work={};
+          window.kinViewerHistoryHasUnsaved=()=>!!work.marks;
+          window.kinViewerFindingsState=()=>{if(work.unreadable)throw new Error('unreadable');return{dirty:!!work.findings,busy:false};};
+          window.kinViewerJobWorkspaceState=()=>({dirty:!!work.jobs,busy:false});}""")
+        # Nothing unsaved: nothing is declared (so Log out waits for nothing), and a question is answered with nothing.
+        self.assertEqual((self.unsaved_declared(), self.ask_unsaved()), ([], [['S1', []]]))
+        view.evaluate("work.marks=true")
+        self.wait_declared(['marks'])
+        self.assertEqual(self.ask_unsaved(), [['S1', ['marks']]])
+        view.evaluate("work.findings=true")
+        self.wait_declared(['findings,marks'])
+        # The question of another session is not this document's to answer.
+        self.assertEqual(self.ask_unsaved('S2'), [], "another session's question was answered")
+        # A guard that cannot be read says nothing; the others still count.
+        view.evaluate("work.unreadable=true")
+        self.wait_declared(['marks'])
+        # Paused by a logout preparation: the declaration stands and the question is still answered.
+        self.notice('session-preparing')
+        view.wait_for_function("KinWorkContext.state()==='preparing'")
+        self.assertEqual((self.unsaved_declared(), self.ask_unsaved()), (['marks'], [['S1', ['marks']]]))
+        self.notice('session-resumed')
+        view.wait_for_function("KinWorkContext.state()==='active'")
+        # Saved or cleared: the declaration is withdrawn.
+        view.evaluate("work.marks=false")
+        self.wait_declared([])
+        # At the real end nothing stays declared and nothing answers.
+        view.evaluate("work.jobs=true")
+        self.wait_declared(['jobs'])
+        self.notice('session-ended')
+        self.wait_declared([])
+        self.assertEqual(self.ask_unsaved(), [])
+
+    def test_a_closed_viewer_declares_nothing(self):
+        view = self.open_viewer()
+        view.wait_for_function('window.started===true')
+        view.evaluate("window.kinViewerHistoryHasUnsaved=()=>true")
+        self.wait_declared(['marks'])
+        view.close()
+        self.wait_declared([])
+
 
 if __name__ == "__main__":
     unittest.main()

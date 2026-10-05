@@ -45,6 +45,17 @@ function kinCreateSessionBoundary() {
       });
     }
     const boundary = window.KinViewerSession.connect(window, KIN_VIEWER_EXPECTED_SESSION);
+    // S7-U5 A006 (added): what this viewer holds unsaved, read from the guards its modules already keep for window
+    // reuse and close - marks (kinViewerHistoryHasUnsaved), finding text (kinViewerFindingsState), Job / MIP edits
+    // (kinViewerJobWorkspaceState). Log Out reads it before the real end and asks only when something is there.
+    // A guard that is missing or throws says nothing: unreadable is not unsaved.
+    boundary.unsaved(() => {
+      const kinds = [], holds = (kind, read) => { try { if (read() === true) kinds.push(kind); } catch (_) {} };
+      holds('marks', () => window.kinViewerHistoryHasUnsaved?.());
+      holds('findings', () => window.kinViewerFindingsState?.().dirty);
+      holds('jobs', () => window.kinViewerJobWorkspaceState?.().dirty);
+      return kinds;
+    });
     boundary.onEnd(() => {
       kinViewerSession.refuse('logout');
       for (const extension of window.config.extensions) {

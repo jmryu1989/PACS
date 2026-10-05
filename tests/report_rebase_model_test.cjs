@@ -189,6 +189,12 @@ async function stashAfterRender({ rendered, state }) {
     'function heldByOther() { return false; } function cur() { return null; } function reportNeedsWrite() { return true; }',
     'function renderDraftBar() {} function saveApp() {} function draftNotSaved() {}',
     extractFunction(html, 'sameDraftText'),
+    // What the write sends is decided when its turn comes, from the page's kept text (closure audit 2026-10-05):
+    // saveReportDraft asks reportTextToSend, which reads the kept copy of the marked study; no commit is of unknown outcome here.
+    'var reportUnknownCommits = new Map();',
+    extractFunction(html, 'keepReportEditor'),
+    extractFunction(html, 'unconfirmedReport'),
+    'async ' + extractFunction(html, 'reportTextToSend'),
     // The scanner above returns the function without its `async` keyword. stashReport keeps the text and hands the
     // write to saveReportDraft (the same function the autosave of every retained study uses).
     'async ' + extractFunction(html, 'saveReportDraft'),

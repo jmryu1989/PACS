@@ -26,6 +26,9 @@
 //                one automatic read before anyone is asked; a write is re-sent by itself only when what the server holds
 //                is this document's own text (never after an unknown outcome, never over another draft, a deletion or a
 //                new epoch); queued saves of one document merge.
+//   DRAFT-13..14 (closure audit 2026-10-05) a write that waited behind another command asks its caller for the text at
+//                its turn, after the caller heard of that command, and sends nothing when there is none; a discard whose
+//                answer was lost is confirmed by one read, a commit is left to the caller's read of the report.
 //   AUTH-01..08  auth.js: entry (server-confirmed session, automatic login only when the server said there is no session
 //                in a document with reliable storage and no end record, with a loop guard), the entry proof, which
 //                answers close a document (session ended, session replaced) and which never do, session-bound notices
@@ -1138,6 +1141,87 @@ test('DRAFT-12 a write cut by its 10 s deadline is looked for twice at most, nev
     assert.deepEqual(net.calls.map(call => call.init.method), ['GET', 'PUT', 'GET', 'GET'], 'two reads, one write');
     assert.equal(client.uncertain('A'), finished === 'never');
     t.mock.timers.reset();
+  }
+});
+
+test('DRAFT-13 a write that waited sends what its caller has when its turn comes, or nothing; the caller hears of the command before it first', async () => {
+  // The caller's text is asked for at the write's turn - after the command before it was answered and after the caller
+  // was told so - not when the write was queued.
+  {
+    const { server, client, at, serve, next } = drafting();
+    await serve(client.write('A', TEXT('SYN typed'), { owner: OWNER, context: at() }));
+    const order = [];
+    let unconfirmed = TEXT('SYN typed, at queue time');
+    const committing = client.commit('A', { action: 'save', findings: 'SYN typed' }, { owner: OWNER, context: at() });
+    committing.then(result => { order.push('the caller hears ' + result.outcome); unconfirmed = null; });
+    const waiting = client.write('A', () => { order.push('the write asks'); return unconfirmed; }, { owner: OWNER, context: at() });
+    const post = await next();
+    assert.equal(post.init.method, 'POST');
+    assert.deepEqual(order, [], 'nothing is asked while the command before it is out');
+    server.answer(post);
+    assert.deepEqual(await serve(waiting), { outcome: 'withdrawn' });
+    assert.deepEqual(order, ['the caller hears saved', 'the write asks']);
+    assert.deepEqual([server.puts, server.row, server.revision()], [1, null, 'E1:2'], 'nothing was written after the commit');
+    // With text at its turn the same write goes, on the revision the commit made.
+    const later = await serve(client.write('A', () => TEXT('SYN typed after the press', { baseVersion: 1 }), { owner: OWNER, context: at() }));
+    assert.equal(later.outcome, 'saved');
+    assert.deepEqual([server.row.findings, server.row.baseVersion, server.revision()], ['SYN typed after the press', 1, 'E1:3']);
+  }
+  {
+    // The answer may be a promise (the caller reads something first); the write waits for it and nothing else leaves.
+    const { server, client, at, serve, net } = drafting();
+    let answer;
+    const waiting = client.write('A', () => new Promise(resolve => { answer = resolve; }), { owner: OWNER, context: at() });
+    for (let turn = 0; turn < 10 && !answer; turn += 1) {
+      await settle();
+      for (const call of net.calls) if (!call.done) { call.done = true; server.answer(call); }
+    }
+    assert.equal(server.puts, 0);
+    answer(TEXT('SYN decided late'));
+    assert.equal((await serve(waiting)).outcome, 'saved');
+    assert.equal(server.row.findings, 'SYN decided late');
+    // Queued writes still merge: the one that waited is not asked at all.
+    let asked = 0;
+    const first = client.write('A', () => { asked += 1; return TEXT('SYN 1'); }, { owner: OWNER, context: at() });
+    const second = client.write('A', () => { asked += 1; return TEXT('SYN 12'); }, { owner: OWNER, context: at() });
+    assert.deepEqual([(await serve(first)).outcome, (await serve(second)).outcome, asked, server.row.findings], ['merged', 'saved', 1, 'SYN 12']);
+  }
+});
+
+test('DRAFT-14 a discard whose answer was lost is confirmed by a read; a commit is not (a missing draft row does not say the report changed)', async () => {
+  {
+    // The server discarded the draft; the answer was lost. One read shows the row gone after the revision sent: discarded.
+    const { server, client, at, serve, next, net } = drafting();
+    await serve(client.write('A', TEXT('SYN to discard'), { owner: OWNER, context: at() }));
+    const calls = net.calls.length;
+    const discarding = client.discard('A', { owner: OWNER, context: at() });
+    server.lose(await next());
+    const result = await serve(discarding);
+    assert.deepEqual([result.outcome, result.confirmedByRead, result.envelope.revision, client.uncertain('A')], ['saved', true, 'E1:2', false]);
+    assert.deepEqual(net.calls.slice(calls).map(call => call.init.method), ['DELETE', 'GET'], 'one read, the discard is not sent again');
+    assert.equal(server.discards, 1);
+  }
+  {
+    // The discard never reached the server: the row is still there at the revision sent - unknown, not done.
+    const { server, client, at, serve, next } = drafting();
+    await serve(client.write('A', TEXT('SYN kept'), { owner: OWNER, context: at() }));
+    const discarding = client.discard('A', { owner: OWNER, context: at() });
+    (await next()).drop();
+    const result = await serve(discarding);
+    assert.deepEqual([result.outcome, client.uncertain('A'), server.discards, server.row.findings], ['unknown', true, 0, 'SYN kept']);
+  }
+  {
+    // A commit whose answer was lost stays unknown without a read here: what it changes is the report, which this path
+    // cannot see. The caller is the one to read the report state before anything else is written.
+    const { server, client, at, serve, next, net } = drafting();
+    await serve(client.write('A', TEXT('SYN to commit'), { owner: OWNER, context: at() }));
+    const calls = net.calls.length;
+    const committing = client.commit('A', { action: 'save' }, { owner: OWNER, context: at() });
+    server.lose(await next());
+    assert.equal((await committing).outcome, 'unknown');
+    await settle();
+    assert.deepEqual(net.calls.slice(calls).map(call => call.init.method), ['POST']);
+    assert.equal(client.uncertain('A'), true);
   }
 });
 
