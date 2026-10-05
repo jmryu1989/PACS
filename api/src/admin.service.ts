@@ -8,6 +8,7 @@ import {
   openAuditCursor, readAuditPage, sealAuditCursor,
 } from './admin-audit';
 import { memberState } from './auth.guard';
+import { AuthService } from './auth.service';
 // 역할 목록은 clinician-policy 한 곳에서 온다. 여기서 별도 literal을 두면 guard와 어긋난다.
 import { APP_ROLES } from './clinician-policy';
 import { KeycloakService, KeycloakUser } from './keycloak.service';
@@ -34,6 +35,7 @@ export class AdminService {
     private prisma: PrismaService,
     private keycloak: KeycloakService,
     private studyAccess: StudyAccessService,
+    private auth: AuthService,
   ) {}
 
   private admin(c: Caller) {
@@ -88,13 +90,21 @@ export class AdminService {
   /**
    * KC 변경은 트랜잭션이 아니므로 자격을 건드리기 전에 이 순서를 끝까지 통과해야 한다.
    * disabled만으로 기존 JWT는 죽지 않는다. DB 세션 0건과 KC logout까지가 한 장벽이다.
+   *
+   * 세션은 행만 지우지 않는다(S7-U5 R1): 제품이 세션을 끝내는 길은 하나 — provider 세션마다 표식·provider 종료·접속기록
+   * (원인 isolation)을 남기는 auth의 종료 절차다. 행만 지우면 격리 전에 code를 교환해 둔 콜백이 같은 SSO로 세션을 다시
+   * 만들고, 끝난 세션의 기록도 남지 않는다. 사용자 전체 로그아웃(logoutUser)은 그대로 둔다 — 정지된 회원의 다른 PC의
+   * 세션도 끝나야 한다. 그 사이 만들어진 세션까지 한 번 더 같은 절차로 끝낸 뒤 0건을 확인한다.
    */
   private async isolate(id: string): Promise<void> {
     await this.keycloak.setEnabled(id, false);
-    await this.prisma.authSession.deleteMany({ where: { sub: id } });
+    // 비활성으로 바꾼 뒤 그 회원의 provider 세션을 읽어 전부 표식으로 남긴다: 제품 행이 아직 없는 SSO(격리 전에 code를
+    // 교환해 둔 로그인)도 다시는 제품 세션을 만들지 못한다 — 나중에 다시 활성화되어도(승인 변경·취소) 그렇다.
+    await this.auth.endMemberSessions(id, await this.keycloak.userSessions(id));
+    await this.keycloak.logoutUser(id);
+    await this.auth.endMemberSessions(id);
     const remaining = await this.prisma.authSession.count({ where: { sub: id } });
     if (remaining !== 0) throw new Error('AuthSession 격리 확인 실패');
-    await this.keycloak.logoutUser(id);
   }
 
   private async isolatedConflict(id: string): Promise<never> {

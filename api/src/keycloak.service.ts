@@ -45,7 +45,7 @@ export class KeycloakService {
   private cache = new Map<string, { at: number; users: any[] }>();
   private static TTL = 60_000;
 
-  private async admToken(): Promise<string> {
+  private async admToken(signal?: AbortSignal): Promise<string> {
     if (this.token && Date.now() < this.token.exp) return this.token.value;
     if (!this.secret) throw new ServiceUnavailableException('KC_CLIENT_SECRET이 설정되지 않았습니다');
 
@@ -60,6 +60,7 @@ export class KeycloakService {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body,
+        signal,
       });
     } catch (e: any) {
       throw new ServiceUnavailableException(`Keycloak에 연결할 수 없습니다: ${e.message}`);
@@ -230,8 +231,79 @@ export class KeycloakService {
     this.cache.clear();
   }
 
+  /**
+   * 회원 하나의 상태(로그인 세션을 만들거나 이어도 되는가) — 관리자 격리가 쓰는 값(enabled)을 읽는다. 고정 동작이고, 한도
+   * `limitMs`는 서비스 토큰 취득·401 재취득까지 포함한 전체의 것이다. `disabled`는 비활성이거나 없는 회원, `unknown`은
+   * 읽지 못했다(시간 초과·연결 실패·5xx) — 부른 쪽이 각자 닫는다.
+   */
+  async memberState(id: string, limitMs: number): Promise<'enabled' | 'disabled' | 'unknown'> {
+    const signal = AbortSignal.timeout(limitMs);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await fetch(`${this.base}/admin/realms/${this.realm}/users/${encodeURIComponent(id)}`, {
+          headers: { Authorization: 'Bearer ' + (await this.admToken(signal)) },
+          signal,
+        });
+        if (res.status === 401 && attempt === 0) {
+          this.token = null;
+          continue;
+        }
+        if (res.status === 404) return 'disabled';
+        if (!res.ok) return 'unknown';
+        const user: any = await res.json();
+        return user && user.enabled === true ? 'enabled' : 'disabled';
+      }
+    } catch {
+      // 모른다.
+    }
+    return 'unknown';
+  }
+
+  /**
+   * 회원 하나의 지금 provider(SSO) 세션 id들 — 격리가 그 전부에 표식을 남기려고 읽는다(서비스 계정의 view-users로 읽을 수
+   * 있음: closure-audit facts.md "GET users/{id}/sessions 200"). 읽지 못하면 던진다 — 격리는 그 자리에서 실패로 끝난다.
+   */
+  async userSessions(id: string): Promise<string[]> {
+    const sessions: any[] = await this.adm(`/users/${encodeURIComponent(id)}/sessions`) ?? [];
+    if (!Array.isArray(sessions)) throw new ServiceUnavailableException('Keycloak 사용자 세션 목록을 읽지 못했습니다');
+    return sessions.map(session => session?.id).filter((sid): sid is string => typeof sid === 'string' && !!sid);
+  }
+
   async logoutUser(id: string): Promise<void> {
     await this.adm(`/users/${encodeURIComponent(id)}/logout`, 'POST');
+  }
+
+  /**
+   * provider 세션 **하나**를 끝낸다(S7-U5 R1). 고정 동작이다: 대상은 그 세션 id 하나뿐이고, 사용자 전체 로그아웃
+   * (`logoutUser`)으로 대신하지 않는다 — 다른 PC에서 일하는 같은 의사의 세션은 건드리지 않는다. 끝나는 것은 그 SSO 세션
+   * 전체다(같은 SSO에 묶인 다른 client도 함께 끝난다).
+   *
+   * 답은 셋뿐이다: `ended`(204, 지금 끝냈다) · `absent`(404, 그런 세션이 없다) · `unconfirmed`(그 밖 전부 — 시간 초과,
+   * 연결 실패, 5xx, 권한 거절). `unconfirmed`는 "끝나지 않았다"가 아니라 "모른다"이고, 부른 쪽이 다시 청한다.
+   * 한도 `limitMs`는 이 호출 **전체**의 것이다: 서비스 계정 토큰 취득과 401 뒤의 재취득·재요청까지 그 안에서 끝난다 —
+   * 인증 서버가 멈춰 있어도 부른 쪽은 그 시간 뒤에 답을 받는다.
+   */
+  async endSession(sid: string, limitMs: number): Promise<'ended' | 'absent' | 'unconfirmed'> {
+    const signal = AbortSignal.timeout(limitMs);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await fetch(`${this.base}/admin/realms/${this.realm}/sessions/${encodeURIComponent(sid)}`, {
+          method: 'DELETE',
+          headers: { Authorization: 'Bearer ' + (await this.admToken(signal)) },
+          signal,
+        });
+        // 죽은 서비스 토큰(Keycloak 재시작·키 교체)은 한 번만 다시 받아 같은 한도 안에서 다시 청한다.
+        if (res.status === 401 && attempt === 0) {
+          this.token = null;
+          continue;
+        }
+        await res.arrayBuffer().catch(() => undefined);
+        return res.status === 204 ? 'ended' : res.status === 404 ? 'absent' : 'unconfirmed';
+      }
+    } catch {
+      // 시간 초과·연결 실패·서비스 계정 인증 실패: 모른다.
+    }
+    return 'unconfirmed';
   }
 
   /**

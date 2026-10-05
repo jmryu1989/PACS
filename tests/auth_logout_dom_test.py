@@ -220,7 +220,9 @@ HOLD_LOGOUT_BODY = """(() => {
 # keys are written as usual.
 WRITES_FAIL = """(keys => { const set = Storage.prototype.setItem;
   Storage.prototype.setItem = function (key, value) {
-    if (keys.includes(String(key))) throw new DOMException('SYN storage full', 'QuotaExceededError');
+    // (the end record of a session lies under its own key: kin-session-end:<session>)
+    if (keys.some(name => String(key) === name || String(key).startsWith(name + ':')))
+      throw new DOMException('SYN storage full', 'QuotaExceededError');
     return set.call(this, key, value); }; })(%s);"""
 # And the browser keeps no cookie a page script writes either (the server's cookies are untouched) - nothing a page
 # could keep the end in survives the page.
@@ -253,7 +255,15 @@ CLIPBOARD = """(() => { const reads = [], written = [];
 SCREEN = """() => ({ text: document.body.innerText, values: [...document.querySelectorAll('textarea, input')].map(e => e.value),
   identity: typeof KinAuth === 'undefined' ? 'no auth.js' : KinAuth.session(),
   state: typeof KinWorkContext === 'undefined' ? null : KinWorkContext.state(),
-  end: (() => { try { return localStorage.getItem('kin-session-end'); } catch (e) { return 'unreadable'; } })() })"""
+  // The browser's end record: auth.js keeps one per session under its own key; `end` is the latest of them that is an
+  // end (a `leaving` marker - Log Out pressed, not ended - is reported apart).
+  ...(() => { try {
+    const records = Object.keys(localStorage).filter(key => key.startsWith('kin-session-end'))
+      .map(key => { const text = localStorage.getItem(key); try { return [text, JSON.parse(text)]; } catch (e) { return [text, {}]; } });
+    const latest = list => list.sort((a, b) => (a[1].operation || 0) - (b[1].operation || 0)).map(item => item[0]).pop() ?? null;
+    return { end: latest(records.filter(item => item[1].status !== 'leaving')),
+      leaving: latest(records.filter(item => item[1].status === 'leaving')) };
+  } catch (e) { return { end: 'unreadable', leaving: 'unreadable' }; } })() })"""
 
 
 def has_hangul(text):
@@ -272,6 +282,7 @@ class Site:
         self.sessions, self.ended, self.cookie = {}, set(), None   # session id -> account; revoked ids; the browser's kin_sid
         self.login_as = RAD             # the account a login leaves the browser with; None: the login sets no session
         self.proofs, self.logins, self.login_posts, self.entries = {}, 0, [], []
+        self.login_bodies = []          # the JSON body of each login start (POST), beside login_posts (its binding)
         self.logout_answers = []        # each: (status, body) | "hold" | "abort"; none queued ends the bound session: 204
         self.held_logouts, self.logouts = [], []            # logouts: (page url, X-KIN-Session)
         self.epoch, self.revs, self.rows, self.cids = "SYNEPOCH1", {}, {}, 0   # the draft rows of UID, by author
@@ -496,7 +507,9 @@ class Site:
         if method == "POST" and path in ("/api/auth/login", "/api/auth/register"):
             bound = request.headers.get("x-kin-session")
             self.login_posts.append(bound)
-            if self.cookie is not None:
+            self.login_bodies.append(request.post_data_json if request.post_data else None)
+            # The binding is asked for only when there is a session to end (a document that got 401 holds no id).
+            if self.cookie is not None and self.cookie not in self.ended:
                 if bound is None:
                     return self.refuse(route, 428, "AUTH_SESSION_REQUIRED")
                 if bound != self.cookie:
@@ -925,8 +938,9 @@ class LogoutDOMTest(unittest.TestCase):
         self.assertTrue(preparation.strip(), "preparation is a non-empty opaque id")
         self.assertEqual([{"type": "session-preparing", "session": session, "preparation": preparation},
                           {"type": "session-ended", "session": session, "operation": self.end_state()["operation"],
-                           "status": "ending"}], self.posts(),
-                         "the viewers' pause notice, then one end notice - each naming its session")
+                           "status": "ending", "origin": "logout"}], self.posts(),
+                         "the viewers' pause notice, then one end notice - each naming its session, the end its origin")
+        self.assertEqual("logout", self.end_state()["origin"], "the record says the person logged out")
         self.release_logout(204)
         message, retry = self.landing()
         self.assertEqual((CONFIRMED, False), (message, retry))
@@ -977,9 +991,23 @@ class LogoutDOMTest(unittest.TestCase):
         self.open_main()
         session = self.site.cookie
         self.site.ended.add(session)       # the server ended this session (idle, refresh refused, another device's logout)
+        self.site.held_me = []             # the landing's own question is held, so that what it found can be read
         self.refresh()
-        self.assertEqual((CONFIRMED, False), self.landing())
-        self.assertEqual(([], "confirmed", session), (self.site.logouts, self.end_state()["status"], self.end_state()["session"]))
+        self.page.wait_for_url(INDEX_URL)
+        self.wait_until(lambda: self.site.held_me, "the landing asking the server")
+        # The document closed without a logout POST and recorded the end as the server's - not as the person leaving.
+        end = self.end_state()
+        self.assertEqual(([], "confirmed", session, "server_end"), (self.site.logouts, end["status"], end["session"], end["origin"]))
+        # A session the server ended holds no new document on the landing (A005): the landing asked the server, and with
+        # no session the login starts by itself - no notice to read, no button to press. (On the real provider that is
+        # the login form: the server ended the provider session with the product session.)
+        held, self.site.held_me = self.site.held_me, None
+        for route in held:
+            self.site.refuse(route, 401, "AUTH_SESSION_ENDED")
+        self.page.wait_for_url(MAIN_URL)
+        expect(self.page.locator("#rows")).to_contain_text(PATIENT)
+        self.assertEqual((1, [], [], None), (self.site.logins, self.site.login_posts, self.site.logouts, self.screen()["end"]))
+        self.assertNotEqual(session, self.site.cookie)
 
     def test_br01_admin_and_clinician_close_before_the_post(self):
         for page_name in ("admin", "clinician"):
@@ -1486,7 +1514,10 @@ class LogoutDOMTest(unittest.TestCase):
         # One notice per preparation: the pause is held by a Web Lock, not renewed by a timer.
         self.assertEqual(([], [], [{"type": "session-preparing", "session": session, "preparation": preparation}]),
                          (self.site.releases, self.site.logouts, self.posts()))
-        self.assertEqual([], [w for w in self.writes()[writes:] if w[2] == END_KEY])
+        self.assertEqual([], [w for w in self.writes()[writes:] if w[2].startswith(END_KEY) and seen["leaving"] is None],
+                         "no end record is written by the preparation (a `leaving` marker of this preparation is not one)")
+        if seen["leaving"] is not None:
+            self.assertEqual(preparation, json.loads(seen["leaving"])["preparation"])
         self.assertEqual([], self.dialogs, "one press: no confirmation")
         # The save: the owner, the revision the text stands on, the whole snapshot - and the session it belongs to.
         sent = self.site.puts[0]
@@ -1716,8 +1747,10 @@ class LogoutDOMTest(unittest.TestCase):
         self.assertEqual([], self.docs(name="index.html"), "a dismissed discard keeps the text")
         self.dialog_answers = [True]
         self.panel_button("Discard Draft").click()
-        self.assertEqual((CONFIRMED, False), self.landing())
-        self.assertIsNone(self.site.stored())
+        # The session was ended by the server, and that is what the record says (nothing on this page marked the press
+        # of Log Out as the person leaving): the landing holds nobody and the login starts by itself.
+        self.page.wait_for_url(MAIN_URL)
+        self.assertEqual((1, [], None), (self.site.logins, self.site.login_posts, self.site.stored()))
 
     def test_dp06_with_nothing_to_write_the_end_follows_at_once(self):
         self.open_main()

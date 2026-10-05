@@ -2415,7 +2415,8 @@ class CriticalResultRecipientDOMTest(unittest.TestCase):
 
     def end_records(self, start):
         return [json.loads(w["text"]) for w in self.writes[start:]
-                if w["kind"] == "localStorage" and w["names"] == ["kin-session-end"] and w["op"] == "setItem"]
+                if w["kind"] == "localStorage" and len(w["names"]) == 1 and w["names"][0].startswith("kin-session-end:")
+                and w["op"] == "setItem"]
 
     def log_out_signal(self):
         ending_session = self.page.evaluate("KinWorkContext.session()")

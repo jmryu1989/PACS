@@ -175,6 +175,13 @@ export class AuthGuard implements CanActivate {
 
     req.kind = 'member';
 
+    /**
+     * Bearer로 온 사용자 토큰도 종료 표식을 본다(S7-U5 R1). 쿠키 요청은 제품 세션 행이 지워진 순간 거절되지만, 이미 발급된
+     * access token은 만료까지 서명이 유효하다 — 제품이 끝내기로 한 provider 세션의 토큰은 여기서 끝난 세션으로 답한다.
+     * gateway·서비스 계정의 토큰(위에서 갈렸거나 `sid`가 없다)은 대상이 아니다.
+     */
+    if (method === 'bearer') await this.auth.refuseEndedIdpSession(payload);
+
     const state = memberState(groups, req.roles);
     req.memberState = state;
     if (state !== 'APPROVED' && !isLogout)

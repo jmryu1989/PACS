@@ -90,8 +90,8 @@ class SessionEntry(h.LogoutDOMTest):
         self.page.clock.install()
         self.page.goto(h.INDEX_URL)
         expect(self.page.locator('#msg')).to_contain_text('다시 확인')
-        record = {'session': self.site.cookie, 'operation': 9999999999999, 'status': 'confirmed'}
-        self.page.evaluate('(record) => {localStorage.setItem("kin-session-end", JSON.stringify(record)); window.dispatchEvent(new Event("focus"));}', record)
+        record = {'session': self.site.cookie, 'operation': 9999999999999, 'status': 'confirmed', 'origin': 'logout'}
+        self.page.evaluate('(record) => {localStorage.setItem("kin-session-end:" + record.session, JSON.stringify(record)); window.dispatchEvent(new Event("focus"));}', record)
         self.page.clock.run_for(10000)
         self.assertEqual(h.INDEX_URL, self.page.url)
         self.assertEqual((0, [], 'confirmed'), (self.site.logins, self.site.login_posts, self.screen()['state']))
@@ -104,16 +104,60 @@ class SessionEntry(h.LogoutDOMTest):
         expect(self.page.locator('#rows')).to_contain_text(h.PATIENT)
         self.assertEqual((1, [], ['SYN-PROOF-1']), (self.site.logins, self.site.login_posts, self.site.entries))
 
+    def seed(self, record):
+        """An end record as auth.js keeps it (its session's own key), put once per tab before any page script."""
+        self.context.add_init_script('if (!sessionStorage.getItem("syn-seeded")) { sessionStorage.setItem("syn-seeded", "1"); '
+                                     'localStorage.setItem(' + json.dumps('kin-session-end:' + record['session']) + ', '
+                                     + json.dumps(json.dumps(record)) + '); }')
+
     def test_end_record_still_needs_explicit_login(self):
-        record = {'session': self.site.cookie, 'operation': 1, 'status': 'confirmed'}
-        self.context.add_init_script('localStorage.setItem("kin-session-end", ' + json.dumps(json.dumps(record)) + ');')
+        # The person's own Log out of this (still live) session is recorded: no entry by itself; Login is the
+        # re-authentication of the unfinished Log out, bound to that session - never a silent re-entry.
+        live = self.site.cookie
+        self.seed({'session': live, 'operation': 1, 'status': 'confirmed', 'origin': 'logout'})
         self.page.goto(h.INDEX_URL)
         expect(self.page.locator('#signin')).to_be_enabled()
         self.page.wait_for_timeout(1200)
         self.assertEqual((0, 0), (self.site.logins, self.site.count('GET', '/api/me')))
         self.page.get_by_role('button', name=h.SIGN_IN).click()
         self.page.wait_for_url(h.MAIN_URL)
-        self.assertEqual(1, len(self.site.login_posts))
+        self.assertEqual(([live], [{'intent': 'reauthenticate', 'reason': 'logout_unfinished'}]),
+                         (self.site.login_posts, self.site.login_bodies))
+        self.assertIn(live, self.site.ended)
+
+    def test_yesterdays_logout_costs_one_login_press_and_ends_nothing(self):
+        # Design section 5 case 9 (the opposite side): yesterday's explicit Log out of ANOTHER session is on record and
+        # today's session is alive. As before: the landing waits for one Login press, which enters the live session - no
+        # login start, nothing ended, the old record taken over.
+        live = self.site.cookie
+        self.seed({'session': 'SYN-SESSION-YESTERDAY', 'operation': 1, 'status': 'confirmed', 'origin': 'logout'})
+        self.page.goto(h.INDEX_URL)
+        expect(self.page.locator('#msg')).to_have_text(h.CONFIRMED)
+        self.page.wait_for_timeout(700)
+        self.assertEqual((0, 0, h.INDEX_URL), (self.site.logins, self.site.count('GET', '/api/me'), self.page.url))
+        self.page.get_by_role('button', name=h.SIGN_IN).click()
+        self.page.wait_for_url(h.MAIN_URL)
+        expect(self.page.locator('#rows')).to_contain_text(h.PATIENT)
+        self.assertEqual(([], 0, live, None), (self.site.login_posts, self.site.logins, self.site.cookie, self.screen()['end']))
+        self.assertNotIn(live, self.site.ended)
+
+    def test_no_record_or_a_server_ended_sessions_record_enters_with_no_click(self):
+        # Design section 5 case 9: with no record, or with only the record of a session the SERVER ended or another
+        # login replaced, a new document (the landing, the work page, a second tab) enters the live session by itself.
+        for origin in (None, 'server_end', 'replaced'):
+            with self.subTest(origin=origin):
+                self.fresh_context()
+                live = self.site.cookie
+                if origin:
+                    self.seed({'session': 'SYN-SESSION-OLD', 'operation': 9999999999999,
+                               'status': 'confirmed' if origin == 'server_end' else 'unconfirmed', 'origin': origin})
+                for url in (h.INDEX_URL, h.MAIN_URL):
+                    page = self.watch(self.context.new_page())
+                    page.goto(url)
+                    page.wait_for_url(h.MAIN_URL)
+                    expect(page.locator('#rows')).to_contain_text(h.PATIENT)
+                self.assertEqual(([], 0, live), (self.site.login_posts, self.site.logins, self.site.cookie))
+                self.assertNotIn(live, self.site.ended)
 
     def test_explicit_account_switch_still_replaces_the_live_session(self):
         self.site.me_answers = [(503, {"code": "AUTH_IDP_UNAVAILABLE"})]
@@ -122,7 +166,8 @@ class SessionEntry(h.LogoutDOMTest):
         expect(self.page.locator('#switch')).to_be_visible()
         self.page.locator('#switch').click()
         self.page.wait_for_url(h.MAIN_URL)
-        self.assertEqual([live], self.site.login_posts)
+        self.assertEqual(([live], [{'intent': 'reauthenticate', 'reason': 'switch_account'}]),
+                         (self.site.login_posts, self.site.login_bodies))
         self.assertIn(live, self.site.ended)
 
 

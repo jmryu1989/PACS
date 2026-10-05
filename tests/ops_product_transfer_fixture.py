@@ -31,6 +31,8 @@ LIMITS = combined.LIMITS
 # S7-U3a (46 tables, one more ReaderAssignment row): measured the same way (43-digit UID), the product section grew from
 # 234,975 to 236,487 bytes (+1,052 catalog: 2 columns, 1 constraint, the pair key's index; +460 rows); with the 33rd
 # migration record the whole receipt is about 244 KB, about 18 KB under this cap.
+# S7-U5 session end (47 tables: IdpSessionEnd, its two rows, AuthSession.idpSid and two indexes): not measured on a
+# stack when written - estimated at about 4 KB of catalog and rows, inside what the cap left; measure with the next run.
 RECEIPT_LIMIT = 256*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
@@ -68,8 +70,9 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260928120000_critical_result/migration.sql',
               'api/prisma/migrations/20260928130000_reader_assignment_scope/migration.sql',
               'api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql',
-              'api/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql']
-TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
+              'api/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql',
+              'api/prisma/migrations/20261005120000_idp_session_end/migration.sql']
+TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
@@ -376,6 +379,14 @@ def expected_rows(uid):
         dataset=None if n==3 else dict(SOPInstanceUID=uid+'.'+str(n)),dicom=None if n==3 else '\\x'+('01'*132),
         attemptedAt=STAMP if n<3 else None,nextCheckAt=STAMP if n==1 else None,
         storedAt=STAMP if n==2 else None,orthancId='SYNTHETIC-stored' if n==2 else None) for n in (1,2,3)]
+    # S7-U5 session end: the marks of provider sessions the product decided to end are state a restore must keep - an
+    # unconfirmed one is still owed to the provider and still blocks that session's logins, a confirmed one blocks until
+    # it is swept. One of each, every column with a value (confirmedAt NULL on the pending one).
+    rows['IdpSessionEnd'] = [
+        dict(idpSid='SYNTHETIC-idp-session-pending',cause='logout',decidedAt=STAMP,confirmedAt=None,attempts=3,
+             nextAttemptAt='2026-10-06T00:00:00.123'),
+        dict(idpSid='SYNTHETIC-idp-session-confirmed',cause='reauthentication',decidedAt=STAMP,confirmedAt=STAMP,attempts=1,
+             nextAttemptAt=STAMP)]
     rows['TransferBasis'] = [dict(id=basis_id,studyUid=uid,institutionId='SYNTHETIC-hospital',kind='PATIENT_CONSENT',
         reference='SYNTHETIC consent reference',obtainedAt=STAMP,expiresAt=None,recordedBy='SYNTHETIC-admin',recordedAt=STAMP,
         revokedBy=None,revokedAt=None,revokeReason=None)]
@@ -423,7 +434,7 @@ def create_product(name, db, uid):
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                   'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
-                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt',
+                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd',
                   'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:

@@ -246,8 +246,10 @@ class Pure(unittest.TestCase):
         # ReaderAssignment row, the tele institution's closed one, on the same study.
         # S7-AUDIT-STORE made AuditLog append-only (a trigger, no table): 34 files, still 46 tables.
         # S7-U5 added the draft boundary and entry proof columns (no table): 35 files, still 46 tables.
-        self.assertEqual(len(transfer.MIGRATIONS), 35)
-        self.assertEqual(len(transfer.TABLES), 46)
+        # S7-U5 session end added IdpSessionEnd and AuthSession.idpSid: 36 files, 47 tables, and two end marks (one the
+        # provider has not confirmed yet, one confirmed).
+        self.assertEqual(len(transfer.MIGRATIONS), 36)
+        self.assertEqual(len(transfer.TABLES), 47)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
         self.assertEqual([(r['oid'], r['accession'], r['studyUid']) for r in rows['Order']],
@@ -258,7 +260,11 @@ class Pure(unittest.TestCase):
         self.assertEqual([(r['studyUid'], r['epoch'], r['seq']) for r in rows['GatewayRetryRequest']],
                          [(receipt['studyUid'], receipt['epoch'], receipt['seq'])])
         self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4 + 4 + 7 + 6 + 1
-                         + 1)   # S7-U5: the emptied draft row (tombstone) beside the two present drafts
+                         + 1    # S7-U5: the emptied draft row (tombstone) beside the two present drafts
+                         + 2)   # S7-U5 session end: the pending and the confirmed end mark
+        self.assertEqual(sorted((r['idpSid'], r['cause'], r['confirmedAt'] is None, r['attempts']) for r in rows['IdpSessionEnd']),
+                         [('SYNTHETIC-idp-session-confirmed', 'reauthentication', False, 1),
+                          ('SYNTHETIC-idp-session-pending', 'logout', True, 3)])
         [question] = rows['StudyQuestion']
         receipts = sorted(rows['StudyQuestionEntry'], key=lambda r: r['seq'])
         self.assertEqual((question['studyUid'], question['state'], question['revision'], question['entryCount']), (UID, 'Closed', 3, 3))
