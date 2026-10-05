@@ -1514,10 +1514,14 @@ class LogoutDOMTest(unittest.TestCase):
         # One notice per preparation: the pause is held by a Web Lock, not renewed by a timer.
         self.assertEqual(([], [], [{"type": "session-preparing", "session": session, "preparation": preparation}]),
                          (self.site.releases, self.site.logouts, self.posts()))
-        self.assertEqual([], [w for w in self.writes()[writes:] if w[2].startswith(END_KEY) and seen["leaving"] is None],
-                         "no end record is written by the preparation (a `leaving` marker of this preparation is not one)")
-        if seen["leaving"] is not None:
-            self.assertEqual(preparation, json.loads(seen["leaving"])["preparation"])
+        # The press wrote this preparation's `leaving` marker (A017) - and nothing that is an end: the marker names this
+        # preparation and this session and carries the person's origin; no end record exists.
+        self.assertIsNotNone(seen["leaving"], "the press of Log Out writes its marker before any wait")
+        marker = json.loads(seen["leaving"])
+        self.assertEqual((preparation, session, "leaving", "logout"),
+                         (marker["preparation"], marker["session"], marker["status"], marker["origin"]))
+        self.assertEqual([["local", "setItem", END_KEY + ":" + session]], [w for w in self.writes()[writes:] if w[2].startswith(END_KEY)],
+                         "the one write under the end keys is that marker; no end record is written by the preparation")
         self.assertEqual([], self.dialogs, "one press: no confirmation")
         # The save: the owner, the revision the text stands on, the whole snapshot - and the session it belongs to.
         sent = self.site.puts[0]
@@ -1747,10 +1751,12 @@ class LogoutDOMTest(unittest.TestCase):
         self.assertEqual([], self.docs(name="index.html"), "a dismissed discard keeps the text")
         self.dialog_answers = [True]
         self.panel_button("Discard Draft").click()
-        # The session was ended by the server, and that is what the record says (nothing on this page marked the press
-        # of Log Out as the person leaving): the landing holds nobody and the login starts by itself.
-        self.page.wait_for_url(MAIN_URL)
-        self.assertEqual((1, [], None), (self.site.logins, self.site.login_posts, self.site.stored()))
+        # The person pressed Log Out (the marker written at the press carries origin logout) and then the server ended the
+        # session: a later server_end never downgrades the same session's logout (design 5-0 item 8), so the landing
+        # stays at the explicit Log out - the end shown, no login started by itself.
+        self.assertEqual((CONFIRMED, False), self.landing())
+        self.assertEqual((0, [], None), (self.site.logins, self.site.login_posts, self.site.stored()))
+        self.assertEqual(("confirmed", "logout"), (self.end_state()["status"], self.end_state()["origin"]))
 
     def test_dp06_with_nothing_to_write_the_end_follows_at_once(self):
         self.open_main()
