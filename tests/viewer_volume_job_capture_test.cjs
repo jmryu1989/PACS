@@ -42,7 +42,7 @@ const frameHelper=(size={width:256,height:256})=>({cell:(g,measure)=>{measure(si
 // cell, null a vacancy, and {normal} a plane whose request carries no orientation at all.
 // `rects` places the cells in explicit fractional rectangles instead of the uniform grid,
 // which is what a merged screen is; without it every cell fills its own grid position.
-function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null,curved,path,mip}={}){
+function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null,curved,path,mip,setLayout}={}){
   // The curved tool's own capture rules are proved in viewer_volume_curved_dom_test.py; here it
   // is the capability shape this module consumes: capture() on a target, dirty() without one.
   // The 3D path tool (viewer_volume_path_dom_test.py) is consumed through the same shape, and so is
@@ -66,7 +66,7 @@ function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,
     ?{capture:()=>{if(cells.some(c=>c==='frame'))throw Error('표식 입력을 마친 뒤 저장하세요.');return marks;},dirty:()=>dirtyMarks}
     :undefined;
   return context.window.kinCreateVolumeJob({
-    grid:{getState:()=>({layout:{numRows:rows,numCols:cols,layoutType:'grid'},viewports,activeViewportId:'vp-'+active})},
+    grid:{getState:()=>({layout:{numRows:rows,numCols:cols,layoutType:'grid'},viewports,activeViewportId:'vp-'+active}),setLayout},
     cs:{getCornerstoneViewport:id=>lookup.get(id)},
     ds:{getActiveDisplaySets:()=>[{StudyInstanceUID:STUDY,SeriesInstanceUID:SERIES,displaySetInstanceUID:SET,
       images:SOPS.map(sop=>({SOPInstanceUID:sop,SOPClassUID:'1.2.840.10008.5.1.4.1.1.2'}))}]},
@@ -1711,4 +1711,56 @@ test('S2-L2a marks goTo: exact expected copy, refusals change nothing, a failure
   assert.equal(w.panel.parts.status.textContent,'현재 MPR 원본과 작업 상태를 확인하세요.');
   assert.equal(start.length,3);
  }finally{w.dispose();}
+});
+// S7-U5 (triage P, volume_crosshair 07): a restore parks on its own timers and frames; the end of the viewer's session
+// cancels every one of them (viewer-session.js end()), so the restore's `finally` never runs. The temporary hold on the
+// Crosshairs reset must still be given back at that end, through the session boundary's end hook - and only once, and
+// never on top of a reset handler somebody else installed after a normal finish.
+function crosshairWorld(){
+  const enders=new Set();let ended=false;
+  const boundary={onEnd(run){if(ended)run();else enders.add(run);return ()=>enders.delete(run);},
+    end(){ended=true;for(const run of [...enders]){try{run();}catch(_){}}enders.clear();}};
+  const native=function(){native.calls++;};native.calls=0;
+  const tool={onResetCamera:native};
+  const group={getToolInstance:name=>name==='Crosshairs'?tool:null,getToolOptions:()=>({mode:'Active'})};
+  context.window.KinViewerSessionBoundary=boundary;
+  context.window.cornerstoneTools={ToolGroupManager:{getToolGroup:id=>id==='mpr'?group:null}};
+  return {boundary,enders,native,tool,dispose(){delete context.window.KinViewerSessionBoundary;delete context.window.cornerstoneTools;}};
+}
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+
+test('a restore parked when the session ends gives the Crosshairs reset back at the end, once',async()=>{
+  const x=crosshairWorld();
+  try{
+    const value=world(1,3,PLANES).capture();
+    // The layout change never settles: the restore stays parked as it does on a timer the end cancels.
+    let layouts=0;
+    const job=world(1,3,PLANES,{setLayout:()=>{layouts++;return new Promise(()=>{});}});
+    void job.apply(value,()=>true);
+    await settle();
+    assert.equal(layouts,1,'the restore reached the layout change');
+    assert.notEqual(x.tool.onResetCamera,x.native,'while it restores, the native reset is held');
+    x.tool.onResetCamera();
+    assert.equal(x.native.calls,0,'a held reset does not reach the native handler');
+    x.boundary.end();
+    assert.equal(x.tool.onResetCamera,x.native,'the end gave the native reset back although the restore never finished');
+    assert.equal(x.enders.size,0);
+    x.tool.onResetCamera();
+    assert.equal(x.native.calls,1);
+  }finally{x.dispose();}
+});
+
+test('a restore that finishes releases the hold itself and leaves nothing for the end to undo',async()=>{
+  const x=crosshairWorld();
+  try{
+    const value=world(1,3,PLANES).capture();
+    const job=world(1,3,PLANES,{setLayout:async()=>{throw Error('SYN layout refused');}});
+    await assert.rejects(job.apply(value,()=>true),/SYN layout refused/);
+    assert.equal(x.tool.onResetCamera,x.native,'the finally released the hold');
+    assert.equal(x.enders.size,0,'the release withdrew its end hook');
+    // Another handler installed afterwards is not touched by a later end.
+    const later=function(){};x.tool.onResetCamera=later;
+    x.boundary.end();
+    assert.equal(x.tool.onResetCamera,later);
+  }finally{x.dispose();}
 });
