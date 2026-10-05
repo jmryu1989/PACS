@@ -811,7 +811,7 @@ class LogoutDOMTest(unittest.TestCase):
         expect(dialog.get_by_role('status')).to_contain_text('저장 결과를 알 수 없습니다')
         return dialog, notes, posts
 
-    def test_ctx_note_witness_unchanged_text_keeps_typed_reason_and_closes_without_prompt(self):
+    def test_ctx_note_witness_unchanged_text_keeps_reason_and_confirms_only_unsent_correction(self):
         for current_reason in ('R1', 'R1 (typo fixed)'):
             with self.subTest(reason=current_reason):
                 if current_reason != 'R1':
@@ -820,15 +820,19 @@ class LogoutDOMTest(unittest.TestCase):
                 reason = dialog.get_by_label('Reason for Change')
                 reason.fill(''); reason.fill(current_reason)
                 dialog.get_by_role('button', name='Save Note', exact=True).click()
-                expect(dialog.get_by_role('status')).to_have_text('저장되었습니다. v2')
+                corrected = current_reason != 'R1'
+                expect(dialog.get_by_role('status')).to_have_text(
+                    '변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v2 · 사유만 바꾸려면 본문을 함께 수정해야 합니다'
+                    if corrected else '저장되었습니다. v2')
                 expect(dialog.get_by_label('Note', exact=True)).to_have_value('SYN B')
                 expect(reason).to_have_value(current_reason)
                 self.assertEqual(posts, [{'baseVersion': 1, 'text': 'SYN B', 'reason': 'R1'}])
                 self.assertEqual(len(notes), 2)
+                self.assertEqual(notes[-1]['reason'], 'R1')
                 prompts = list(self.dialogs)
                 dialog.get_by_role('button', name='Close', exact=True).click()
                 expect(dialog).not_to_be_visible()
-                self.assertEqual(self.dialogs, prompts)
+                self.assertEqual(self.dialogs, prompts + (['저장하지 않은 메모 입력을 버리고 닫을까요?'] if corrected else []))
                 expect(self.page.locator('#findings')).to_be_editable()
 
     def test_ctx_note_witness_before_foreign_revision_clears_only_confirmed_reason(self):

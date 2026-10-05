@@ -15,11 +15,15 @@ window.KinTechNote = function (app) {
   document.body.append(d);
   const $ = id => d.querySelector('#tech-note-' + id);
   let uid = null, seq = 0, busy = false, ended = false, writable = false, version = 0, saved = '', reasonInput = 0, cursor = null, opener, openerDocument, innerOpener;
-  // A reason belongs to a text edit; by itself it is not an unsaved note.
-  const dirty = () => $('text').value !== saved;
+  let confirmedReason = '', conflictStatus = '';
+  const textChanged = () => $('text').value !== saved;
+  // Retyping a witnessed reason is clean; a different, unsent reason is input to protect.
+  const unsentReason = () => !!$('reason').value.trim() && $('reason').value.trim() !== confirmedReason;
+  const dirty = () => textChanged() || unsentReason() || !!conflictStatus;
   $('reason').addEventListener('input', () => { ++reasonInput; });
   function consumeReason(attempt) {
     // A witnessed write consumes only its own input, never a reason typed later.
+    confirmedReason = attempt.body.reason.trim();
     if (attempt.reasonInput === reasonInput) $('reason').value = '';
   }
   const status = text => { $('status').textContent = text; };
@@ -38,6 +42,7 @@ window.KinTechNote = function (app) {
   }
   function adopt(result) {
     remember(result);
+    confirmedReason = ''; conflictStatus = '';
     $('text').value = saved; $('reason').value = '';
     status(writable ? '내용을 확인한 뒤 명시적으로 저장하세요.' : '읽기 전용 · 촬영 기관의 작성 권한이 필요합니다.');
   }
@@ -57,15 +62,20 @@ window.KinTechNote = function (app) {
       const pending=interruptedSave;
       const outcome=await reconcileSave(pending);
       if(outcome==='unchanged')await saveCurrent(pending.body.baseVersion,pending);
-      else if(outcome==='stored'&&dirty())await saveFollowup();
+      else if(outcome==='stored'&&textChanged())await saveFollowup();
       return;
     }
     if (busy || !writable || !app.allowed() || ended) return;
     await saveCurrent(version);
   };
-  const savedStatus = () => '저장되었습니다. v' + version + (dirty() ? ' · 이후 입력은 아직 저장되지 않았습니다.' : '');
+  const unchangedStatus = () => '변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v' + version
+    + (unsentReason() ? ' · 사유만 바꾸려면 본문을 함께 수정해야 합니다' : '');
+  const savedStatus = () => !textChanged() && unsentReason() ? unchangedStatus()
+    : '저장되었습니다. v' + version + (textChanged() ? ' · 이후 입력은 아직 저장되지 않았습니다.' : '');
   function saveCurrent(baseVersion, prior=null) {
-    if (!dirty()) { status(prior ? unknownActions : version ? savedStatus() : '변경된 내용이 없습니다.'); return; }
+    // A known conflict must keep its warning even when input matches the old baseline.
+    if (conflictStatus && !textChanged()) { status(conflictStatus); return; }
+    if (!textChanged()) { status(prior ? unknownActions : unchangedStatus()); return; }
     if (baseVersion && !$('reason').value.trim()) { status('수정·비우기 사유를 입력하세요.'); $('reason').focus(); return; }
     return save({ baseVersion, text: $('text').value, reason: $('reason').value }, prior);
   }
@@ -87,7 +97,7 @@ window.KinTechNote = function (app) {
     try {
       const result = await app.api('POST', '/studies/' + encodeURIComponent(target) + '/tech-note', body, undefined, at);
       work.commit(at,()=>{if (valid(ticket, target)) {
-        remember(result); consumeReason(attempt); $('history-items').replaceChildren(); $('more').hidden = true; cursor = null;
+        remember(result); consumeReason(attempt); conflictStatus = ''; $('history-items').replaceChildren(); $('more').hidden = true; cursor = null;
         confirmed = true;
         status(savedStatus());
       }});
@@ -103,13 +113,14 @@ window.KinTechNote = function (app) {
         : confirmed
         ? '저장되지 않았습니다: ' + e.message + ' · 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.'
         : '저장 결과를 알 수 없습니다: ' + e.message + ' · 입력은 유지했습니다. Save Note 또는 Reload Note로 결과를 확인하세요.');
+      if(e.status===409)conflictStatus=$('status').textContent;
     }}); }
     finally { settled();if (ticket === seq) busy=false; work.commit(at,()=>{if(ticket===seq){if(confirmed)interruptedSave=null;controls();}}); }
     if(recheck&&work.admits(at)&&valid(ticket,target)){
       const outcome=await reconcileSave(pending);
       // This Save press may follow a witnessed earlier write once. The new write
       // has no unresolved predecessor, so its own answer cannot start a retry loop.
-      if(outcome==='stored'&&dirty())await saveFollowup();
+      if(outcome==='stored'&&textChanged())await saveFollowup();
     }
   }
   const unknownActions='저장 결과는 아직 알 수 없습니다 · 입력은 유지되며 Save Note는 확인 후 재시도하고 Reload Note는 결과만 확인합니다.';
@@ -149,9 +160,10 @@ window.KinTechNote = function (app) {
         else if(unchanged){outcome='unchanged';status(unknownActions);return;}
         else {
           if(next)interruptedSave=null;
+          if(next)conflictStatus='저장되지 않았습니다. 다른 메모가 저장되었습니다. 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.';
           status(witnessed?'저장되었습니다. v'+next.version+' · 이후 메모가 변경되어 입력을 유지했습니다. 최신 메모와 비교하세요.':next?'저장되지 않았습니다. 다른 메모가 저장되었습니다. 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.':'저장 결과를 알 수 없습니다. 입력은 유지했습니다. 최신 메모와 이력을 다시 확인하세요.');return;
         }
-        interruptedSave=null;outcome='stored';status(savedStatus());
+        interruptedSave=null;conflictStatus='';outcome='stored';status(savedStatus());
       });
       return outcome;
     } catch(e){work.commit(at,()=>{if(valid(ticket,target))status('저장 결과를 알 수 없습니다: '+e.message+' · 입력은 유지했습니다. Save Note 또는 Reload Note로 다시 확인하세요.');});}
@@ -188,7 +200,7 @@ window.KinTechNote = function (app) {
       ? '저장 결과를 알 수 없습니다. 메모 입력을 버리고 닫을까요? 다시 열어 최신 메모와 이력을 확인하세요.'
       : '저장하지 않은 메모 입력을 버리고 닫을까요?'))) return;
     const closedUid = uid;
-    ++seq; uid = null; busy = false; writable = false; saved = ''; version = 0; interruptedSave = null;
+    ++seq; uid = null; busy = false; writable = false; saved = ''; version = 0; interruptedSave = null; confirmedReason = ''; conflictStatus = '';
     $('text').value = $('reason').value = ''; $('history-items').replaceChildren(); $('target').textContent = $('meta').textContent = ''; status('');
     if (d.open) d.close();
     if (!force) {
