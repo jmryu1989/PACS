@@ -77,9 +77,9 @@ FRAME_SECONDS = 30                   # the one longer wait: the embedded viewer'
 PANE_NOT_CONFIGURED = '음성 인식기가 연결되지 않았습니다. — 판독문은 그대로입니다'   # dictation.js:55 + :28
 ACTIVE_STATES = ('requesting-permission', 'recording', 'uploading', 'review')        # dictation-session.js:9
 TERMINAL_STATES = ('failed', 'cancelled', 'unavailable', 'inserted')
-# The observer's `fetchIsNative` stays recorded in `environment` but is not a P2 check here: since S7-U5 F02 the page
-# itself replaces fetch (main.html's logout-pause gate), so it is false by product design. P2 judges fetch through
-# fetch_verdict instead - the same risk, harness code between the page and the browser's fetch (D521).
+# The observer's `fetchIsNative` stays recorded in `environment` but is not a P2 check here: P2 judges fetch through
+# fetch_verdict (D521), which also accepts a function a file of the page declares - the same risk, harness code
+# between the page and the browser's fetch. The imported OBSERVER saves fetch and never wraps it (U4b CAP-00).
 ENVIRONMENT_TRUE = ('secure', 'gumIsWrapper', 'gumNative', 'contextObserved', 'nodeObserved', 'contextTarget',
                     'nodeTarget')
 # Header evidence is an allowlist: no credential header name or value is ever written anywhere.
@@ -1110,6 +1110,10 @@ def oracle_self_check():
                          ('scripts that are not a list', seen(source=wrapper, scripts=script)),
                          ('an unreadable probe', None)):
         expect_problem(label, fetch_verdict(value, texts.get)['problems'])
+    # P2's premise: the one init script, the imported observer, saves fetch and never replaces it (76677d8 did).
+    wraps_fetch = lambda text: bool(re.search(r"replace\(\s*window\s*,\s*'fetch'", text)) or 'window.fetch =' in text
+    if wraps_fetch(OBSERVER) or not wraps_fetch("  replace(window,'fetch',observedFetch);"):
+        problems.append('the imported OBSERVER must save fetch and never replace it')
     if product_text(page, origin) != (ROOT / 'worklist-v0' / 'hpacs-lite' / 'main.html').read_text(encoding='utf-8'):
         problems.append('product_text must read the served page from worklist-v0')
     for label, url in (('another origin', 'https://other.test' + MAIN_PATH),
