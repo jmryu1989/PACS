@@ -2179,7 +2179,8 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         server's answer is lost AND the read that would confirm it fails too - the outcome is unknown. The text up to
         the press is what the reader threw away: the 20 s autosave and Log out do not store it, and the next successful
         read shows the server's state (a new document too). A DELETE that never reached the server is not taken as
-        done: the stored draft is shown again with Discard Draft. Text typed after the press is new text and is stored."""
+        done: the stored draft is shown again with Discard Draft. Text typed after the press is new text and is stored -
+        also when it is typed after the answer, and the next successful read comes before it is stored."""
         for then in ("autosave and the next read", "Log out before any read"):
             with self.subTest(server="discarded", then=then):
                 self.discard_out(typed_before=True)
@@ -2224,6 +2225,37 @@ class ReportTextBoundaries(h.LogoutDOMTest):
             later = {**h.FIELDS, "findings": h.FIELDS["findings"] + self.DISCARDED + self.LATE}
             self.wait_until(lambda: self.site.stored_for(h.UID) == later, "the text typed after the press is stored")
             self.assert_reopened(later, True, "text typed after a discard of unknown outcome")
+        # The same, typed only once the outcome is known to be unknown (review of 8c2cf37, F-01): the next successful
+        # read tells the discard's outcome, and the sentence typed after the answer is the reader's - kept and stored.
+        # The autosave write is held so that read is answered while the sentence is stored nowhere yet.
+        for then in ("a redraw of the study", "the autosave period"):
+            with self.subTest(server="discarded", typed_after_the_answer=True, then=then):
+                self.discard_out(typed_before=True)
+                self.site.draft_read_answers = ["abort"]
+                self.assertEqual(200, self.site.finish_discard(lost=True))
+                self.page.wait_for_timeout(800)
+                self.assertEqual([], self.site.draft_read_answers, "the confirming read was the one that failed")
+                self.assertFalse(self.leaving_asks(), "the discarded text is not unsaved work")
+                self.page.locator("#findings").press("Control+End")
+                self.page.locator("#findings").press_sequentially(self.LATE)
+                self.assertTrue(self.leaving_asks(), "the text typed after the answer is unsaved work")
+                later = {**h.FIELDS, "findings": h.FIELDS["findings"] + self.DISCARDED + self.LATE}
+                reads = len(self.site.draft_reads)
+                self.site.put_answers = ["hold"]
+                if then == "a redraw of the study":
+                    self.refresh()
+                else:
+                    self.page.clock.run_for(21000)
+                self.wait_until(lambda: len(self.site.draft_reads) > reads, "the next read of study A's draft")
+                self.page.wait_for_timeout(600)
+                self.assertEqual(later, self.editor(), "the read of the discard's outcome took the text typed after the answer away")
+                self.assertTrue(self.leaving_asks(), "the text typed after the answer is still unsaved work")
+                if then == "a redraw of the study":
+                    self.page.clock.run_for(21000)
+                self.wait_until(lambda: self.site.held_puts, "the autosave write of the text typed after the answer")
+                self.site.finish_put()
+                self.wait_until(lambda: self.site.stored_for(h.UID) == later, "the text typed after the answer is stored")
+                self.assert_reopened(later, True, "text typed after the answer of a discard of unknown outcome")
 
     def test_log_out_pressed_while_a_discard_is_out_waits_for_it_and_preserves_nothing_discarded(self):
         """Claim 3 at Log out: the preparation captures the text only after the discard's answer, so the text the
