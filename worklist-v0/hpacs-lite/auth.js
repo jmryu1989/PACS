@@ -968,8 +968,9 @@ const KinAuth = (() => {
     } catch (error) { throw new Error(error.message + ' · 잠시 뒤 다시 눌러 주세요.'); }
     const target = answer.status === 200 && answer.body && typeof answer.body.location === 'string' ? answer.body.location : null;
     if (target && new URL(target, location.origin).origin === location.origin) return toIdp(target);
+    // 랜딩의 end_unconfirmed와 같은 사정·같은 안내다: 답을 잃은 종료는 저절로 확인되지 않으므로 관리자에게 넘긴다.
     if (answer.code === 'AUTH_IDP_END_UNCONFIRMED')
-      throw new Error('이전 로그인 종료를 확인하지 못했습니다. 잠시 뒤 Login을 다시 누르세요.');
+      throw new Error('이전 로그인 종료를 확인하지 못했습니다. 이 상태는 기다려도 풀리지 않을 수 있으니 관리자에게 문의하세요. Login을 다시 누를 수는 있습니다.');
     if (answer.code === 'AUTH_SESSION_MISMATCH' || answer.code === 'AUTH_SESSION_REQUIRED')
       throw new Error('이 브라우저의 로그인 세션이 바뀌어 로그인을 시작하지 않았습니다. 버튼을 다시 눌러 주세요.');
     throw new Error(answer.status === 409 ? '다른 요청과 겹쳐 로그인을 시작하지 못했습니다. 버튼을 다시 눌러 주세요.'

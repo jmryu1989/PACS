@@ -101,32 +101,44 @@ const KEYS = {};
 // The provider end (S7-U5 R1): the product ends a provider session with the service account's
 // DELETE /admin/realms/kin/sessions/{sid} (204 = ended now, 404 = no such session). `logouts` counts those requests as
 // they arrive, `logoutMode` is how the fake answers them ('ok', 'drop' = connection cut, 'hang' = held unanswered until
-// the case calls the releasers in `hung`, 'error' = 503 (not handled), 'error500' = 500 (an answer that does not say whether
-// it was done), 'lost' = the session is ended and the answer is cut); `beforeEnd(sid)` (when a case sets it) holds a
+// the case calls the releasers in `hung`, 'error' = 503 and 'error500' = 500 (answers that do not say whether it was done:
+// S7-U5 fix round 7 - a 503 is not proof that Keycloak turned the request away before carrying it out), 'lost' = the
+// session is ended and the answer is cut, 'refused' = the connection is refused (the admin API is not listening: the
+// request never reaches the provider, see the fetch below)); `beforeEnd(sid)` (when a case sets it) holds a
 // request before it is carried out ('drop' / '500' instead), `afterEnd(sid)` holds the answer of a request already
 // carried out ('drop' cuts it) - a case releases the effect and the answer independently. `abandoned` counts requests the
 // caller closed before an answer. `ended` holds the provider sessions it ended,
-// `alive` (when a case sets it) the only ones it knows. `serviceTokens` counts client_credentials grants, apart from
-// `tokens` (the user-token requests a case holds and counts); `serviceMode` 'stale' answers the next DELETE 401 once.
+// `alive` (when a case sets it) the only ones it knows. `endRequests` lists the sid of every end request the product sent
+// (a refused one included), `logouts` counts those that arrived. `serviceTokens` counts client_credentials grants, apart from
+// `tokens` (the user-token requests a case holds and counts); `serviceMode` 'stale' answers the next DELETE 401 once,
+// 'error' answers the service account's token request 503 (no change request is sent), 'hang' never answers it.
 // `members` are the accounts the member administration reads (id -> {username, email, enabled, groups, roles}) and
 // `userLogouts` the ids a whole-user logout (POST users/{id}/logout) named - the product sends none (S7-U5 D600; the route stays so that a case can tell). `adminCalls` lists every request to the
-// member administration ('<METHOD> <what>'); `adminDown` answers all of them 503 (the admin API out), and `adminFail`
-// fails the next n requests of one kind: 'sessions' (GET users/{id}/sessions), 'disable' / 'enable' (PUT users/{id}),
-// 'logout' (POST users/{id}/logout). No login callback or refresh reaches the member administration. `onAdmin` (when a
+// member administration ('<METHOD> <what>', a refused one included); `adminDown` answers all of them 503, and `adminFail`
+// answers the next n requests of one kind 503: 'sessions' (GET users/{id}/sessions), 'disable' / 'enable' (PUT users/{id}),
+// 'logout' (POST users/{id}/logout) - for a change that is an answer that does not say whether it was done. `adminRefuse`
+// refuses the connection of the next n changes of one kind ('disable' / 'enable'): never sent to the provider.
+// No login callback or refresh reaches the member administration. `onAdmin` (when a
 // case sets it) is told each member-administration request ('<METHOD> <what>') after the fake has carried it out, and the
 // answer waits for what it returns: a case holds the answer of a request the provider has already done. `beforeAdmin`
 // (when a case sets it) is told each such request when it arrives, BEFORE the fake carries it out: the request is carried
 // out and answered only when what it returns resolves - a case holds a request the provider has not done yet, so its
 // effect lands when the case lets it. Resolving to 'drop' cuts the connection without carrying the request out, '500'
-// answers 500 without it; onAdmin resolving to 'drop' cuts the answer of a request carried out, '500' answers it 500.
+// answers 500 without it; onAdmin (and afterEnd) resolving to 'drop' cuts the answer of a request carried out, '500' /
+// '503' answers it 500 / 503.
 // `userLogouts` stays empty unless the product asks for a whole-user logout (it must not: S7-U5 D600).
 const kc = { server: null, port: 0, held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
   certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
   members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null,
-  beforeEnd: null, afterEnd: null, hung: [], adminStale: {} };
+  beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {}, closedPort: 0 };
 
 async function keycloak() {
   if (kc.server) return;
+  // A port nobody listens on: a refused request goes there, so the real fetch fails as it does when the admin API is down.
+  const closed = http.createServer();
+  await new Promise(resolve => closed.listen(0, '127.0.0.1', resolve));
+  kc.closedPort = closed.address().port;
+  await new Promise(resolve => closed.close(resolve));
   for (const name of ['main', 'other']) {
     const { publicKey, privateKey } = await jose.generateKeyPair('RS256', { extractable: true });
     KEYS[name] = { kid: 'syn-' + name, publicKey, privateKey };
@@ -159,8 +171,8 @@ async function keycloak() {
         res.on('close', () => { if (!res.writableEnded && !res.cutHere) kc.abandoned++; });
         const cut = () => { res.cutHere = true; req.socket.destroy(); };
         const carry = (mode, how) => {
-          // 'drop' cuts the connection and 'error' answers 503 (not handled) before anything is ended; 'error500' answers
-          // 500 without ending (an answer that does not say whether it was done); 'hang' holds the request unanswered
+          // 'drop' cuts the connection before anything is ended; 'error' answers 503 and 'error500' 500 without ending
+          // (answers that do not say whether it was done); 'hang' holds the request unanswered
           // until the case releases it (kc.hung); 'lost' ends the session and cuts the answer. `how` is what a case's
           // beforeEnd hook said: 'drop' / '500' before the effect, or nothing (carry it out now).
           if (how === 'drop' || mode === 'drop') return cut();
@@ -175,7 +187,7 @@ async function keycloak() {
           // afterEnd (when a case sets it): the effect is done; the answer waits for what it returns ('drop' cuts it).
           if (kc.afterEnd)
             return void Promise.resolve(kc.afterEnd(idpSid)).then(after => after === 'drop' ? cut()
-              : after === '500' ? send(500, { error: 'unknown_error' }) : reply());
+              : after === '500' ? send(500, { error: 'unknown_error' }) : after === '503' ? send(503, { error: 'unavailable' }) : reply());
           return reply();
         };
         const mode = kc.logoutMode;
@@ -203,10 +215,11 @@ async function keycloak() {
           if (kc.adminDown) return send(503, { error: 'unavailable' });
           if (kc.adminFail[kind] > 0) { kc.adminFail[kind]--; return send(503, { error: 'unavailable' }); }
           const account = kc.members[id] ?? (kc.members[id] = { username: id, email: id + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'] });
-          // onAdmin resolving to 'drop' cuts the answer of a request already carried out, '500' answers it 500.
+          // onAdmin resolving to 'drop' cuts the answer of a request already carried out, '500' / '503' answers it so.
           const done = (status, value) => kc.onAdmin
             ? void Promise.resolve(kc.onAdmin(req.method + ' ' + kind, id)).then(how => how === 'drop' ? req.socket.destroy()
-              : how === '500' ? send(500, { error: 'unknown_error' }) : send(status, value)) : send(status, value);
+              : how === '500' ? send(500, { error: 'unknown_error' }) : how === '503' ? send(503, { error: 'unavailable' })
+                : send(status, value)) : send(status, value);
           if (!member[2] && req.method === 'GET')
             return done(200, { id, username: account.username, email: account.email, enabled: account.enabled, emailVerified: true });
           if (!member[2] && req.method === 'PUT') { Object.assign(account, sent); return done(204); }
@@ -232,6 +245,7 @@ async function keycloak() {
         if (form.grant_type === 'client_credentials') {
           kc.serviceTokens++;
           if (kc.serviceMode === 'hang') return undefined;
+          if (kc.serviceMode === 'error') return send(503, { error: 'unavailable' });
           return form.client_id === 'kin-api' && form.client_secret === SECRETS.service
             ? send(200, { access_token: SECRETS.serviceToken, expires_in: 300, token_type: 'Bearer' })
             : send(401, { error: 'unauthorized_client' });
@@ -265,8 +279,19 @@ async function keycloak() {
 // for it): the cases wait until what was started has arrived - and been answered or given up - before they count.
 const idp = { started: 0, open: 0 };
 const realFetch = globalThis.fetch;
+// A refused change (kc.logoutMode 'refused' for an end, kc.adminRefuse for a member change) goes to the closed port: the
+// real fetch fails to connect and the provider never sees it; it is listed where the fake lists what arrives.
+const changeKind = body => { try { const sent = JSON.parse(body); return sent.enabled === false ? 'disable' : sent.enabled === true ? 'enable' : null; } catch { return null; } };
 globalThis.fetch = (input, init) => {
-  if (!/\/admin\/realms\/kin\/sessions\/[^/]+$/.test(String(input))) return realFetch(input, init);
+  const url = String(input);
+  const end = /\/admin\/realms\/kin\/sessions\/([^/]+)$/.exec(url);
+  const change = !end && init?.method === 'PUT' && /\/admin\/realms\/kin\/users\/[^/?]+$/.test(url) ? changeKind(init.body) : null;
+  if (end ? kc.logoutMode === 'refused' : kc.adminRefuse[change] > 0) {
+    if (end) kc.endRequests.push(decodeURIComponent(end[1]));
+    else { kc.adminRefuse[change]--; kc.adminCalls.push('PUT ' + change); }
+    input = url.replace(`//127.0.0.1:${kc.port}/`, `//127.0.0.1:${kc.closedPort}/`);
+  }
+  if (!end) return realFetch(input, init);
   idp.started++;
   idp.open++;
   const settle = () => { idp.open--; };
@@ -455,7 +480,7 @@ async function world(t, { now = START } = {}) {
   Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
     certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
     members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null,
-    beforeEnd: null, afterEnd: null, hung: [], adminStale: {} });
+    beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {} });
   idp.started = 0;
 
   const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [] };
@@ -2490,8 +2515,9 @@ test('U5E-05 (acceptance 5) an end the provider did not confirm survives a resta
   const w = await world(t);
   const s = 'syn-sub-u5e5', X = idpOf(s);
   const sid = await w.session(await w.issue('u5e5-v1', { sub: s, groups: [A] }));
-  // The admin API fails while the end commits (the process then dies: nothing in memory is left of the attempt).
-  kc.logoutMode = 'error';
+  // The admin API is down (its connection refused: the request never sent) while the end commits (the process then dies:
+  // nothing in memory is left of the attempt).
+  kc.logoutMode = 'refused';
   const out = await w.call(w.I1, 'logout', { sid });
   await w.told();
   assert.deepEqual([out.status, await w.marks(), kc.ended], [204, [[X, 'logout', false]], []], 'ended and recorded; the provider end unconfirmed');
@@ -2511,7 +2537,7 @@ test('U5E-05 (acceptance 5) an end the provider did not confirm survives a resta
     assert.deepEqual([kc.ended, kc.logouts - asked, (await w.rows()).length], [[X], 1, rows], 'ended at the provider by one request; no record added');
     // The periodic retry: an end that keeps failing is asked again at growing intervals and never dropped.
     const s2 = 'syn-sub-u5e5-retry', Y = idpOf(s2);
-    kc.logoutMode = 'error';
+    kc.logoutMode = 'refused';
     assert.equal((await w.call(w.I1, 'logout', { sid: await w.session(await w.issue(s2, { sub: s2, groups: [B] })) })).status, 204);
     await w.told();
     const count = () => kc.endRequests.filter(x => x === Y).length;
@@ -2532,7 +2558,7 @@ test('U5E-05 (acceptance 5) an end the provider did not confirm survives a resta
     // Keeping: a confirmed mark goes once no token of that provider session can exist (13 h after its confirmation - here
     // the decision and the confirmation are one instant; U5E-21 g separates them); an unconfirmed one is never dropped for its age.
     const at = hours => new Date(Date.now() - hours * HOUR);
-    kc.logoutMode = 'error';
+    kc.logoutMode = 'refused';
     for (const [idp, decided, confirmed] of [['syn-idp-old-confirmed', 14, true], ['syn-idp-recent-confirmed', 11, true], ['syn-idp-old-open', 14, false]])
       await w.base.idpSessionEnd.create({ data: { idpSid: idp, cause: 'logout', decidedAt: at(decided), confirmedAt: confirmed ? at(decided) : null,
         attempts: 9, nextAttemptAt: new Date(Date.now() + 2 * HOUR) } });
@@ -2657,7 +2683,7 @@ test('U5E-07 (acceptance 4, R2) a re-authentication intent starts by POST, probe
   // The provider end cannot be confirmed (the admin API is down, the token endpoint works): no fresh step - the
   // landing says so, the SSO stays marked, and the same press works once the provider answers.
   const c = 'syn-sub-u5e7-c', Z = idpOf(c);
-  kc.logoutMode = 'error';
+  kc.logoutMode = 'refused';
   const begin4 = await w.call(w.I1, 'switch', { body: UNTRUSTED });
   const unconfirmed = await answerFlow(w, w.I1, begin4, await w.issue('u5e7-c', { sub: c, groups: [A] }));
   assert.deepEqual([unconfirmed.location, unconfirmed.newSid, (await w.marks()).find(m => m[0] === Z)], [landing('end_unconfirmed'), null, [Z, 'reauthentication', false]]);
@@ -2703,7 +2729,7 @@ test('U5E-09 the bound start waits for the provider end: unconfirmed is 503 with
   const w = await world(t);
   const s = 'syn-sub-u5e9', X = idpOf(s);
   const sid = await w.session(await w.issue('u5e9-v1', { sub: s, groups: [A] }));
-  kc.logoutMode = 'error';
+  kc.logoutMode = 'refused';
   const out = await w.call(w.I1, 'switch', { sid, body: UNFINISHED });
   assert.deepEqual([...coded(out), out.cookie, out.pending, out.location], [503, 'AUTH_IDP_END_UNCONFIRMED', 'AUTH_IDP_END_UNCONFIRMED', 'K', null, null]);
   assert.deepEqual([await w.version(sid), await w.marks(), await endsOf(w, s)], [null, [[X, 'logout', false]], [['auth.logout', 'logout', A]]],
@@ -2782,7 +2808,7 @@ test('U5E-11 a later end of the same provider session for another cause keeps th
   const w = await world(t);
   const s = 'syn-sub-u5e11', X = idpOf(s);
   const sid = await w.session(await w.issue('u5e11-v1', { sub: s, groups: [A] }));
-  kc.logoutMode = 'error';
+  kc.logoutMode = 'refused';
   assert.equal((await w.call(w.I1, 'logout', { sid })).status, 204);
   await w.told();
   const first = await w.mark(X);
@@ -2800,7 +2826,7 @@ test('U5E-11 a later end of the same provider session for another cause keeps th
   // The confirmed mark's SSO answers once more (another recovery start, record_unreadable) while the admin API is down: the
   // end re-wakes the mark (unconfirmed again, asked again) and still keeps the first cause and time.
   w.tick(60_000);
-  kc.logoutMode = 'error';
+  kc.logoutMode = 'refused';
   const asked = kc.endRequests.filter(x => x === X).length;
   const begin2 = await w.call(w.I2, 'switch', { body: UNREADABLE });
   const probed2 = await answerFlow(w, w.I2, begin2, await w.issue('u5e11-v3', { sub: s, groups: [A] }));
@@ -3020,7 +3046,9 @@ test('U5E-15 isolation is our own fact written before any provider work: listing
     const gate = w.gate('I2', 'tx.open');
     const held = answerFlow(w, w.I2, begin, await w.issue('u5e15-' + failing, { sub: m, groups: [A], idp: P }));
     await gate.arrived();
-    kc.adminFail = { [failing]: 99 };
+    // The listing is answered 503 (a read: nothing to settle); the disable does not connect (never sent - a 503 to a change
+    // would leave it unknown, and an unknown disable is never finished by anyone: U5E-27).
+    if (failing === 'sessions') kc.adminFail = { sessions: 99 }; else kc.adminRefuse = { disable: 99 };
     const calls = kc.adminCalls.length;
     await assert.rejects(admin.patchUser(m, { enabled: false }, caller), error => error?.response?.code === 'USER_ISOLATED' || /USER_ISOLATED/.test(JSON.stringify(error?.response ?? '')),
       failing + ': the isolation reports that it did not finish');
@@ -3050,6 +3078,7 @@ test('U5E-15 isolation is our own fact written before any provider work: listing
     // (4) The provider recovers; the end retry cycle finishes the provider work from the fact (no admin action): every
     // provider session listed is marked and ended by its own id, the member is disabled, the fact says done - and stays.
     kc.adminFail = {};
+    kc.adminRefuse = {};
     const restarted = w.instance('R-' + failing);
     restarted.service.onModuleInit();
     try {
@@ -3402,12 +3431,17 @@ function holdEnd(sid, when) {
   return { arrived: () => within(held.arrived.promise, `the end of ${sid} reaching the provider`), release: how => held.release.resolve(how) };
 }
 
-/** A member whose isolation leaves its provider work owed (the listing fails; the disable too when `disable` is false). */
+/**
+ * A member whose isolation leaves its provider work owed (the listing fails; when `disable` is false the disable does not
+ * connect either - never sent, so nothing of it is unknown).
+ */
 async function owedIsolation(admin, caller, m, P, { disable = true } = {}) {
   kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [P] };
-  kc.adminFail = disable ? { sessions: 99 } : { sessions: 99, disable: 1 };
+  kc.adminFail = { sessions: 99 };
+  kc.adminRefuse = disable ? {} : { disable: 1 };
   await assert.rejects(admin.patchUser(m, { enabled: false }, caller), undefined, m + ': the isolation did not finish');
   kc.adminFail = {};
+  kc.adminRefuse = {};
 }
 
 // Final review part 1, blocker 1, as replaced by S7-U5 D600: an Activate that lands while one of the isolation retry cycle's
@@ -3646,7 +3680,7 @@ test('U5E-21 (S7-U5 CE1) a mark covers the ended SSO\'s authentication, not its 
 
   // f. B's SSO ends in its turn; the provider does not confirm it yet.
   w.tick(1000);
-  kc.logoutMode = 'error';
+  kc.logoutMode = 'refused';
   assert.equal((await w.call(w.I1, 'logout', { sid: entered.newSid })).status, 204);
   await w.told();
   assert.deepEqual([(await w.mark(X)).cause, await confirmedAt(X)], ['logout', null], 'f: the same mark, unconfirmed again; the first cause stays');
@@ -3816,7 +3850,7 @@ test('U5E-23 (D600 2) the old disable\'s effect held past the deadline and a re-
   const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
   const fact = sub => w.base.memberIsolation.findUnique({ where: { sub } });
   const m = 'syn-sub-u5e23', P = 'syn-idp-u5e23';
-  // The isolation's listing fails and its disable is answered "not handled" (503): the member is still enabled, the work owed.
+  // The isolation's listing fails and its disable does not connect (never sent): the member is still enabled, the work owed.
   await owedIsolation(admin, caller, m, P, { disable: false });
   assert.equal(kc.members[m].enabled, true);
   // The retry cycle sends its disable; the provider holds it unexecuted.
@@ -4089,4 +4123,141 @@ test('U5E-26 (D600 5) with the admin API frozen ordinary doctors log in, refresh
   }
   assert.deepEqual([kc.members[n].enabled, !!await fact(n)], [false, true], 'b: disabled and isolated - the latest command stands');
   await w.finish('U5E-26');
+});
+
+// S7-U5 fix round 7 (Astra, fix-6 decision b): a 503 to a CHANGE request is not proof that the provider turned it away
+// before carrying it out - Keycloak sheds queued requests with 503, but its error handler also answers the status of an
+// exception raised while handling a request - so the change stays unknown, like a 500.
+//   a. An end request carried out and then answered 503, and one answered 503 without being carried out: each stays
+//      unknown. Another request's 404 / 204 for the same sid, a restart and an hour do not settle it; the mark stays
+//      unconfirmed and the sid's next login is refused.
+//   b. A disable carried out and answered 503, an enable answered 503: unknown. The retry cycle's own answered disable and a
+//      re-read of the provider settle nothing; the Activate answers 409 ACTIVATION_UNCONFIRMED within 15 s, the isolation
+//      is kept and the member's login refused.
+//   c. Opposite side: a 503 to the service account's TOKEN request means the change was never sent - void, nothing reaches
+//      the provider, and nothing is left that blocks: the next answered request confirms the end / the next Activate succeeds.
+test('U5E-27 (fix round 7) a 503 to a change request leaves it unknown whether or not it was carried out: no other request, re-read, restart or hour settles it; a 503 to the token request means not sent (void)', async t => {
+  const w = await world(t);
+  const { AdminService } = require('/app/dist/admin.service');
+  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
+  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
+  const fact = sub => w.base.memberIsolation.findUnique({ where: { sub } });
+  const member = m => { kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [] }; return m; };
+  // The answer of a record has come in (its summary noted) - its state is what the answer decided.
+  const answered = async (target, kind) => (await w.base.providerChange.findMany({ where: kind ? { target, kind } : { target }, orderBy: { id: 'asc' } }))
+    .map(row => row.outcome !== null);
+  const refusedLogin = async (label, sub, idp) => {
+    const begin = await w.call(w.I2, 'login');
+    return answerFlow(w, w.I2, begin, await w.issue(label, { sub, groups: [A], idp }));
+  };
+
+  // (a)
+  const a = 'syn-sub-u5e27-a', X = 'syn-idp-u5e27-carried', b = 'syn-sub-u5e27-b', Y = 'syn-idp-u5e27-shed';
+  const sidA = await w.session(await w.issue('u5e27-a', { sub: a, groups: [A], idp: X }));
+  const sidB = await w.session(await w.issue('u5e27-b', { sub: b, groups: [A], idp: Y }));
+  holdEnd(X, 'after').release('503');
+  assert.equal((await w.call(w.I1, 'logout', { sid: sidA })).status, 204);
+  // (The end request goes out after the Log out's answer: X's answer is taken in before the next mode.)
+  await w.until('a: X\'s 503 taken in', async () => (await answered(X)).every(Boolean) && (await answered(X)).length === 1);
+  kc.logoutMode = 'error';
+  assert.equal((await w.call(w.I1, 'logout', { sid: sidB })).status, 204);
+  await w.until('a: Y\'s 503 taken in', async () => (await answered(Y)).every(Boolean) && (await answered(Y)).length === 1);
+  kc.logoutMode = 'ok';
+  assert.deepEqual([kc.ended.includes(X), kc.ended.includes(Y), await w.changes(X), await w.changes(Y), (await w.mark(X)).confirmedAt, (await w.mark(Y)).confirmedAt],
+    [true, false, ['unknown'], ['unknown'], null, null], 'a: carried out or not, a 503 leaves the end unknown and unconfirmed');
+  // A new process asks again: X is answered "no such session" (404), Y is ended now (204) - those requests only.
+  const asked = kc.endRequests.length;
+  const restarted = w.instance('R27');
+  restarted.service.onModuleInit();
+  try {
+    await w.until('a: the ends asked again and answered', async () =>
+      (await w.changes(X)).length >= 2 && (await w.changes(Y)).length >= 2 && (await answered(X)).concat(await answered(Y)).every(Boolean));
+    w.tick(HOUR);
+    await quiet(w);
+  } finally {
+    restarted.service.onModuleDestroy();
+  }
+  assert.ok(kc.endRequests.length > asked && kc.ended.includes(Y), 'a: the later requests reached the provider; Y is ended now');
+  for (const sid of [X, Y]) {
+    const states = await w.changes(sid);
+    assert.deepEqual([states[0], states.slice(1).every(state => state === 'done'), (await w.mark(sid)).confirmedAt], ['unknown', true, null],
+      sid + ': another request\'s 404/204, a restart and an hour settle nothing; the end stays unconfirmed');
+  }
+  for (const [label, sub, sid] of [['u5e27-a-again', a, X], ['u5e27-b-again', b, Y]]) {
+    const again = await refusedLogin(label, sub, sid);
+    assert.deepEqual([again.location, again.newSid], [landing('end_unconfirmed'), null], sid + ': the sid\'s next login is refused');
+  }
+
+  // (b)
+  const d = member('syn-sub-u5e27-disable'), e = member('syn-sub-u5e27-enable');
+  holdAdmin('PUT disable', 'after', d).release('503');                  // carried out, answered 503
+  assert.equal(await admin.patchUser(d, { enabled: false }, caller).then(() => 'ok', error => error?.response?.code), 'USER_ISOLATED',
+    'b: the Suspend does not say its isolation finished');
+  await w.until('b: the disable\'s 503 taken in', async () => (await answered(d, 'disable')).every(Boolean));
+  assert.deepEqual([await w.changes(d, 'disable'), kc.members[d].enabled], [['unknown'], false], 'b: disabled at the provider, the record unknown');
+  const cycle = w.instance('C27');
+  cycle.service.onModuleInit();
+  try {
+    await w.until('b: the cycle\'s own disable answered', async () => (await w.changes(d, 'disable')).length >= 2
+      && (await w.changes(d, 'disable')).slice(1).every(state => state === 'done'));
+    await quiet(w);
+  } finally {
+    cycle.service.onModuleDestroy();
+  }
+  assert.equal((await new KeycloakService().getUser(d)).enabled, false, 'b: re-read: disabled - no evidence about the first request');
+  assert.equal((await admin.patchUser(e, { enabled: false }, caller)).enabled, false);
+  kc.adminFail = { enable: 1 };                                          // answered 503, not carried out
+  const first = await activation(admin, e, caller).result;
+  kc.adminFail = {};
+  assert.deepEqual([...unconfirmedOf(first), await w.changes(e, 'enable'), kc.members[e].enabled, !!await fact(e)],
+    [...UNCONFIRMED, ['unknown'], false, true], 'b: the enable answered 503 is unknown; 409, the isolation kept');
+  const runs = [d, e].map(m => activation(admin, m, caller));
+  const results = await Promise.all(runs.map(run => run.result));
+  for (const [n, m] of [d, e].entries()) {
+    assert.deepEqual([...unconfirmedOf(results[n]), runs[n].took < 15_000, !!await fact(m)], [...UNCONFIRMED, true, true],
+      m + ': 409 ACTIVATION_UNCONFIRMED within 15 s, the isolation kept');
+    const tried = await refusedLogin(m + '-try', m, 'syn-idp-' + m + '-try');
+    assert.deepEqual([tried.newSid, rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause],
+      [null, 'member_isolated'], m + ': its login refused');
+  }
+  assert.deepEqual([(await w.changes(d, 'disable'))[0], (await w.changes(e, 'enable'))[0]], ['unknown', 'unknown'], 'b: still unknown');
+
+  // (c) the token request answered 503: nothing sent.
+  const q = member('syn-sub-u5e27-token');
+  assert.equal((await admin.patchUser(q, { enabled: false }, caller)).enabled, false);
+  const enables = kc.adminCalls.length;
+  kc.adminStale = { enable: 1 };                                         // the held token refused: a new one is asked for
+  kc.serviceMode = 'error';
+  let refused;
+  try {
+    refused = await activation(admin, q, caller).result;
+  } finally {
+    kc.serviceMode = 'ok';
+  }
+  assert.deepEqual([...unconfirmedOf(refused), await w.changes(q, 'enable'), kc.adminCalls.slice(enables).filter(c => c === 'PUT enable').length],
+    [...UNCONFIRMED, ['void'], 1], 'c: the enable after the refused token was never sent (void); only the 401-answered one arrived');
+  assert.deepEqual([(await activation(admin, q, caller).result).status, kc.members[q].enabled, await fact(q)], [200, true, null],
+    'c: nothing unknown is left: the next Activate succeeds');
+  const r = 'syn-sub-u5e27-token-end', Z = 'syn-idp-u5e27-token-end';
+  const sidR = await w.session(await w.issue('u5e27-token-end', { sub: r, groups: [A], idp: Z }));
+  w.tick(10 * 60_000);                                                   // the held service token has expired
+  const arrived = kc.logouts;
+  kc.serviceMode = 'error';
+  try {
+    assert.equal((await w.call(w.I1, 'logout', { sid: sidR })).status, 204);
+    await w.until('c: the end settled without being sent', async () => (await w.changes(Z))[0] === 'void');
+  } finally {
+    kc.serviceMode = 'ok';
+  }
+  assert.deepEqual([kc.logouts - arrived, kc.endRequests.includes(Z), (await w.mark(Z)).confirmedAt], [0, false, null],
+    'c: nothing reached the provider; the end is not confirmed yet');
+  const resumer = w.instance('Z27');
+  resumer.service.onModuleInit();
+  try {
+    await w.until('c: the end asked again and confirmed', async () => (await w.mark(Z)).confirmedAt !== null);
+  } finally {
+    resumer.service.onModuleDestroy();
+  }
+  assert.deepEqual(await w.changes(Z), ['void', 'done'], 'c: a request never sent blocks nothing');
+  await w.finish('U5E-27');
 });

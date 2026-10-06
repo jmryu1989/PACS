@@ -129,9 +129,11 @@ export class KeycloakService {
    * 그 답이 결과를 정한다 — 기한에 끊으면 인증 서버가 그 요청을 나중에 처리해도 우리는 끝내 모른다. 기한(`signal`)은
    * 서비스 계정 토큰 취득에만 건다: 토큰을 얻기 전에 기한이 지나면 변경 요청은 나가지 않았다(`void`).
    * 판정은 상태 코드로만 한다(본문 유무로 하지 않는다): 2xx done; 404는 세션 종료면 "그런 세션이 없다"(done), 그 밖은 대상
-   * 없음(void); 그 밖의 4xx는 인증 서버가 처리하지 않았다는 답(void, 401은 토큰을 한 번 다시 받아 다시 청한다); 501·503은
-   * 인증 서버가 그 요청을 다루지 못했다는 답(void — Keycloak은 넘친 요청을 처리 전에 503으로 돌려보낸다); 그 밖의 5xx와
-   * 연결 오류(연결이 맺어지지 않은 것 제외)는 처리됐는지 알 수 없다(unknown).
+   * 없음(void); 그 밖의 4xx는 인증 서버가 처리하지 않았다는 답(void, 401은 토큰을 한 번 다시 받아 다시 청한다); 501은
+   * 그 요청을 다루는 곳이 없다는 답(void); 그 밖의 5xx와 연결 오류(연결이 맺어지지 않은 것 제외)는 처리됐는지 알 수 없다
+   * (unknown). 503도 unknown이다: Keycloak은 넘친 요청을 처리 전에 503으로 돌려보내지만, 처리 중에 난 오류도 같은 상태
+   * 코드로 돌려줄 수 있고(오류 처리기가 예외의 상태를 그대로 쓴다) 이 답만으로는 둘을 가르지 못한다 — 처리 전 거절이라고
+   * 믿으면 실제로 수행된 변경을 "하지 않았다"로 지운다. 토큰 취득의 503은 다르다: 변경 요청이 나가지 않았다(void).
    */
   private async change(path: string, method: 'PUT' | 'DELETE', body: any, signal: AbortSignal | undefined, absentIsDone: boolean)
     : Promise<ChangeAnswer> {
@@ -157,7 +159,7 @@ export class KeycloakService {
       }
       if (res.status >= 200 && res.status < 300) return { state: 'done', outcome };
       if (res.status === 404) return absentIsDone ? { state: 'done', outcome: 'absent' } : { state: 'void', outcome };
-      if ((res.status >= 400 && res.status < 500) || res.status === 501 || res.status === 503) return { state: 'void', outcome };
+      if ((res.status >= 400 && res.status < 500) || res.status === 501) return { state: 'void', outcome };
       return { state: 'unknown', outcome };
     }
     return { state: 'void', outcome: 'http_401' };

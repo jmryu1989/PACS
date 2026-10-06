@@ -24,10 +24,12 @@ const { KeycloakService } = require('/app/dist/keycloak.service');
 const path = '/app/dist/auth.service.js';
 let source = fs.readFileSync(path, 'utf8');
 if (input.mutant) {
-  // The Log out's own end commit; the mutant asks the provider to end the SSO session before it.
+  // The Log out's own end commit; the mutant asks the provider to end the SSO session before it. The end call takes
+  // a token deadline as an AbortSignal (D600): a bare number makes the token fetch throw, nothing is sent, and the
+  // mutant would be inert. Same bound the product's recorded end uses.
   const call = "await this.endByRequest(sid, session, 'logout', ";
   if (source.split(call).length !== 2) throw Error('Mutation anchor changed');
-  source = source.replace(call, 'await this.keycloak.endSession(this.idpSidOf(session), IDP_END_MS) && ' + call);
+  source = source.replace(call, 'await this.keycloak.endSession(this.idpSidOf(session), AbortSignal.timeout(IDP_END_MS)) && ' + call);
 }
 const copy = new Module(path, module);
 copy.filename = path;
