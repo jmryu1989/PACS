@@ -8,7 +8,7 @@ run's study identities, run-owned readers' SYNTHETIC access policies and lock, f
 setup; every write effect is compared through the persisted rows. No clinical fixture is used.
 """
 from __future__ import annotations
-import io, json, re, subprocess, sys, time, unittest, urllib.error, urllib.request, uuid
+import copy, io, json, re, subprocess, sys, time, unittest, urllib.error, urllib.request, uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +22,21 @@ FINDING_TABLES = ('Finding', 'FindingRevision')
 SNAPSHOT_TABLES = FINDING_TABLES+('ViewerItem', 'ViewerRevision', 'ViewerRequest', 'ViewerStorageBudget', 'AuditLog')
 # The StudyState columns that decide who may read a study; comparison tests change and restore only these.
 BOUNDARY_COLUMNS = ('rs', 'preDoc', 'preReviewer', 'institutionId', 'teleInstitutionId')
+
+def payload_differences(old, new, path='$'):
+    """Every path at which two JSON payloads differ, with both values: unittest's diff of two long one-line reprs
+    can be cut or hard to read, and a failed "nothing else moved" check must name all that moved."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        found = []
+        for key in sorted(set(old) | set(new), key=str):
+            where = f'{path}.{key}'
+            if key not in old: found.append(f'{where}: added {new[key]!r}')
+            elif key not in new: found.append(f'{where}: removed {old[key]!r}')
+            else: found += payload_differences(old[key], new[key], where)
+        return found
+    if isinstance(old, list) and isinstance(new, list) and len(old) == len(new):
+        return [line for i, (a, b) in enumerate(zip(old, new)) for line in payload_differences(a, b, f'{path}[{i}]')]
+    return [] if old == new else [f'{path}: {old!r} -> {new!r}']
 
 class FindingStack(ViewerStack):
     """ViewerStack already tears down Finding/FindingRevision before StudyState; this name marks the suites that rely on it."""
@@ -1313,19 +1328,34 @@ class FindingAPI(unittest.TestCase):
             self.assertTrue(state, 'bootstrap must carry this study')
             return state
 
+        # S7-U5 sends my draft boundary beside the draft (`draftRevision` = `<draftEpoch>:<revision>`, toClient in
+        # pacs.service.ts). The citation PUT is the one draft write between the two reads, so the boundary moves by
+        # exactly one, to the revision that PUT answered, inside the same epoch. Everything else in the entry is then
+        # compared whole, and a mismatch prints every differing path so a second change cannot hide behind the first.
+        self.maxDiff = None
+
+        def boundary(token):
+            epoch, _, revision = str(token).rpartition(':')
+            return epoch, int(revision)
+
         for before, after, pick in ((listed_before, listed_after, listed_state), (boot_before, boot_after, boot_state)):
             self.assertNotIn('citation', after.text)
-            new, old = pick(after), pick(before)
-            # S7-U5 sends my draft boundary (draftRevision) beside the draft; the citation PUT stores the
-            # draft, so that boundary moves with it. draftEpoch stays in the comparison: a citation never rotates it.
-            drafts, revisions = [], []
-            for entry in (new, old):
-                state = entry.get('state', entry)
-                drafts.append(state.pop('draft', None) if isinstance(state, dict) else None)
-                revisions.append(state.pop('draftRevision', None) if isinstance(state, dict) else None)
-            self.assertEqual(new, old, 'nothing but the draft may move when a citation is written')
+            new, old = copy.deepcopy(pick(after)), copy.deepcopy(pick(before))
+            new_state, old_state = new.get('state', new), old.get('state', old)
+            self.assertIsInstance(new_state, dict); self.assertIsInstance(old_state, dict)
+            self.assertEqual(new_state['draftEpoch'], old_state['draftEpoch'], 'a citation never rotates the draft epoch')
+            old_epoch, old_revision = boundary(old_state['draftRevision'])
+            self.assertEqual(old_epoch, old_state['draftEpoch'])
+            self.assertEqual(boundary(new_state['draftRevision']), (old_epoch, old_revision+1),
+                             'the one citation save advances my draft revision by exactly one')
+            self.assertEqual(new_state['draftRevision'], answer['revision'], 'the payload carries the revision the save answered')
+            drafts = []
+            for state in (new_state, old_state):
+                drafts.append(state.pop('draft', None))
+                state.pop('draftRevision')
+            self.assertEqual(new, old, 'nothing but the draft body and its revision may move when a citation is written:\n'
+                             + '\n'.join(payload_differences(old, new)))
             self.assertTrue(any(drafts), 'the draft that carries the citation must be in at least one payload')
-            self.assertNotEqual(revisions[0], revisions[1], 'the citation write moves the draft boundary')
             for draft in drafts:
                 if draft is not None:
                     self.assertEqual(sorted(draft), ['at', 'baseVersion', 'conclusion', 'findings', 'recommendation'])
@@ -1336,6 +1366,18 @@ class FindingAPI(unittest.TestCase):
         self.cite(crossed, 1, text, link=stale, status=409)
         self.cite(crossed, 1, text, revision=crossed['revision']+1, status=409)
         self.assertEqual(self.draft_row(), rows)
+
+        # 17 raw - a client built before S7-U5 sends the old body as it is: no expectedOwner, no expectedRevision, no
+        # citationIds. S7-U5 keeps no compatibility path (tests/README.md "S7-U5 서버 재설계": every draft change
+        # carries owner, boundary and the whole snapshot), and putReport checks the owner before any read, write or
+        # audit. bearer_request bypasses the harness's fill-in (invariants_live.py _as_document), so this is that client.
+        audit = self.state(tables=('AuditLog',))
+        legacy = self.stack.bearer_request('PUT', report, self.stack.token('xauthor'),
+                                           dict(findings=text, conclusion='', recommendation='', baseVersion=0))
+        self.assertEqual(legacy.status, 400, legacy.text)
+        self.assertEqual((legacy.body['code'], legacy.body['field']), ('REPORT_DRAFT_PRECONDITION_REQUIRED', 'expectedOwner'), legacy.text)
+        self.assertEqual(self.draft_row(), rows, 'the refused old write leaves the draft row byte-identical')
+        self.assertEqual(self.state(tables=('AuditLog',)), audit, 'the refused old write is not audited')
 
         # 17 - an old client that knows nothing about citations neither clears nor duplicates them.
         self.call('PUT', dict(findings=text, conclusion='', recommendation='', baseVersion=0), 'xauthor', report)
