@@ -1,5 +1,7 @@
 # 살아 있는 불변조건 테스트
 
+REQ-SITE-NOTICE → RISK-FALSE-FACT/OMISSION/UNVERIFIED-CITATION → TEST-LEGAL-PAGES: `python -B tests/legal_pages_test.py`는 표준 라이브러리 HTML 파서로 `/worklist/legal/`의 문서 존재·한국어·정적 문서 구조, 초안 v2의 공개 절 제목과 문장, 각 사업 사실 자리표시자의 `확정 전` 표시, API manifest/lock의 전체 의존성·버전·라이선스, 로컬 링크·문의 앵커와 법령 식별자를 검사한다. `fixtures/legal/draft-contract.json`은 게시 대상 문안만, `verified-statutes.md`와 `verified-statutes-addendum-20261006.md`는 원본과 2026-10-06 보충 검증표에서 추출한 공개 조문 식별자만 보존한다. 시험은 glob 없이 저장소 안의 고정된 두 표(	ests/fixtures/legal/)만 읽고, 저장소 밖 경로·환경 변수 지정·대체 경로는 없다. 표 파일 누락·조문 미수록은 실패한다. 조문 대조 단위는 법령 종류와 조 번호(가지번호 포함)이며 법률 해석·항호의 실체 검증을 대신하지 않는다. 추가 8개 조문은 시행판 원문을 확인한 보충표(erified-statutes-addendum-20261006.md)와 대조한다. 로컬 설치본·vendored 소스가 없는 `busboy@1.6.0`과 `streamsearch@1.1.0`은 `라이선스 파일 없음 — 배포 전 확인` 표시를 명시적으로 단언하며 건너뛰지 않는다. `validate.yml`의 순수 시험 단계에 등록하며 브라우저·Docker·네트워크는 사용하지 않는다. 약관은 확정된 본문이 없어 생성하지 않는다. 실제 HTTPS 제공·라이선스 원문/NOTICE·배포 상태 확인은 별도다.
+
 REQ-D02-IDENTITY-POSITION → RISK-D02-WRONG-IDENTITY/OCCLUSION/PREFERENCE-LOSS/STALE → TEST-VIEWER-IDENTITY-POSITION: `viewer_identity_position_dom_test.py`는 현재/비교 정보 묶음의 네 모서리 배치·복사, 작은 viewport와 native overlay 겹침, 원본 식별/교체/소유자 경계 및 이전 설정 이행을 격리 DOM에서 검사한다. `reading_appearance_position_live.py`는 v7→v8 계정 왕복, viewer v2 위치의 엄격한 형식, 원자적 거절·구버전 작성자와 소유자 분리를 검사한다. `e2e/test_viewer_identity_position.py`는 실제 영상에서 위치 변경→복사→계정 저장/다른 브라우저 복원과 영상·편집 보존, 기존 로컬 설정·늦은 응답을 검사한다. 두 live 모듈은 각각 선언한 시험만 선택하며 fresh hosted CI가 기존 표시 설정 API 회귀와 함께 실행한다. 로컬 원본 연결 fixture는 실행하지 않는다. 필드별/modality별 배치·발표 모드·물리 모니터는 별도 잔여다.
 
 ## 실행 입구와 중단 조건 (2026-09-11)
