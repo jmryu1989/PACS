@@ -712,13 +712,13 @@ class RelatedLayoutDOMTest(Base):
     # Supported windows, landscape and portrait, the narrow stacked layout included.
     READING_SIZES = [(1280, 720), (1366, 768), (1024, 768), (1600, 1050), (1920, 1080), (900, 1200), (768, 1024), (900, 1400)]
 
-    def open_reading(self, size, row_set=None):
+    def open_reading(self, size, row_set=None, target=CURRENT_DESC):
         """Boot large, choose the reading target, open the Reading Workspace, then size the window."""
         w = self.boot(harness.Server(rows=row_set or rows()), viewport=LARGE)
         # The workspace's viewer frame: an empty document here (the viewer is not what this case measures).
         w.page.route("**/ohif/**", lambda route: route.fulfill(status=200, content_type="text/html",
                                                                body="<!doctype html><title>SYN viewer</title>"))
-        w.worklist_row(CURRENT_DESC).click()
+        w.worklist_row(target).click()
         harness.until(lambda: w.target_label.inner_text().startswith("판독 대상 · "), 10, "reading target chosen")
         w.page.get_by_role("button", name="Reading Workspace", exact=True).click()
         harness.until(lambda: w.page.evaluate("() => document.body.classList.contains('reading')"), 10, "reading workspace open")
@@ -752,6 +752,34 @@ class RelatedLayoutDOMTest(Base):
                         w.scroll_into_view(row)
                         self.assert_row_on_top_in_its_table(w, f"{tag} {desc}", row)
                     w.screen.finish()
+
+    def test_rl11b_related_rows_that_change_without_a_resize_are_measured_again(self):
+        """RL-11b (integration review F05): inside the Reading Workspace at a fixed window size the Related rows change
+        while nothing is resized - Previous Study from a patient with no other study to one with three (0 -> 3), then a
+        Modality filter that matches none (3 -> the one-line notice, which is taller than a row), then all again (0 -> 3).
+        After each change the table's floor follows what it now shows: its header and one whole row (the notice included,
+        so the reader can read it), and a click on a row lands on that row."""
+        for size in [(1366, 768), (1920, 1080), (900, 1200)]:
+            name = f"{size[0]}x{size[1]}"
+            with self.subTest(size=name):
+                w = self.open_reading(size, target="SYN RL OTHER PATIENT")
+                tag = f"RL-11b {name}"
+                harness.expect(w.related_table).to_contain_text("관련 검사 없음")
+                w.page.get_by_role("button", name="Previous Study", exact=True).click()
+                harness.until(lambda: w.related_row(NOREPORT_DESC).count() == 1, 10, f"{tag}: the other study's related rows")
+                for step, choose, shown in (("filtered to none", "Unspecified", "조건에 맞는 관련 검사 없음"),
+                                            ("all again", "All Modalities", NOREPORT_DESC)):
+                    w.select.select_option(label=choose)
+                    harness.expect(w.related_table).to_contain_text(shown)
+                    w.page.wait_for_timeout(300)
+                    floor = self.table_floor(w)
+                    measure(f"{tag} {step}", floor=floor)
+                    self.assertGreaterEqual(floor["box"] + 0.5, floor["head"] + floor["row"],
+                                            f"{tag} {step}: the table shows its header and one whole row")
+                row = w.related_row(NOREPORT_DESC)
+                w.scroll_into_view(row)
+                self.assert_row_on_top_in_its_table(w, f"{tag} {NOREPORT_DESC}", row)
+                w.screen.finish()
 
     def assert_row_on_top_in_its_table(self, w, tag, row):
         """In the Reading Workspace the Related table is wider than its column and scrolls sideways, so a row is judged

@@ -560,12 +560,21 @@
       const original = tool.onResetCamera; let held = true;
       const guarded = function (...args) { if (!held) return original.apply(this, args); };
       tool.onResetCamera = guarded;
+      // The end of this viewer's session cancels every timer and frame an operation may be
+      // parked on, so its `finally` never runs then: the same release is also the session
+      // end's own (once; withdrawn by a normal release). The operation itself is not resumed.
+      let withdraw = null;
+      const release = () => {
+        held = false; const hook = withdraw; withdraw = null; hook?.();
+        if (tool.onResetCamera === guarded) tool.onResetCamera = original;
+      };
+      try { withdraw = (win?.KinViewerSessionBoundary || root.KinViewerSessionBoundary)?.onEnd?.(release) ?? null; } catch (_) { withdraw = null; }
       return {
         // Once the cameras are confirmed, the crosshair widget is placed on them. Its centre
         // is derived from those cameras, so it lands on the position the user last set rather
         // than on a reset one; this is the only crosshair write this module makes.
         center() { try { if (group.getToolOptions?.('Crosshairs')?.mode !== 'Disabled') tool.computeToolCenter?.(); } catch (_) { } },
-        release() { held = false; if (tool.onResetCamera === guarded) tool.onResetCamera = original; },
+        release,
       };
     }
 
