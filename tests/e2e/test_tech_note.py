@@ -99,7 +99,7 @@ class TechNoteE2E(WorklistE2E):
   expect(p.locator('#tech-note-text')).to_have_value('SYNTHETIC Tech communication <b>literal</b>')
   p.locator('#tech-note-text').fill('SYNTHETIC revised');p.locator('#tech-note-reason').fill('correct communication')
   p.route('**/tech-note',lambda route: route.abort() if route.request.method=='POST' else route.continue_())
-  p.locator('#tech-note-save').click();expect(p.locator('#tech-note-status')).to_contain_text('저장 확인 실패')
+  p.locator('#tech-note-save').click();expect(p.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다:')
   expect(p.locator('#tech-note-text')).to_have_value('SYNTHETIC revised')
   p.unroute('**/tech-note');p.locator('#tech-note-save').click();expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v2')
   p.locator('#tech-note-history').click();expect(p.locator('#tech-note-history-items section')).to_have_count(2)

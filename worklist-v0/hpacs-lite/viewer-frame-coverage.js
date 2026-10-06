@@ -86,6 +86,9 @@
         // A redraw of the previous actor must not credit the requested image.
         if(v.csImage?.imageId!==image||v.stackInvalidated)return;
         const ref=reference(image,core.metaData.get('instance',image));
+        const engine=v.getRenderingEngine?.();
+        if(engine?.offscreenMultiRenderWindow?.getOpenGLRenderWindow?.()?.getContext?.()?.isContextLost()||
+          root.kinViewerContextLoss?.usable(engine)===false)return;
         if(tracking.mark(ref))render();
       }catch(_){}
     }

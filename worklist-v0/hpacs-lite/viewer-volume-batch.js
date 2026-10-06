@@ -42,7 +42,7 @@ window.kinCreateVolumeBatch=function({target,permitted,alive,owner,host}){
   }
   async function generate(saved=null,externalCurrent=()=>true){
     if(operation||!live()||!permitted()){if(saved)throw Error('다른 작업을 마친 뒤 단면 묶음을 복원하세요.');return;}
-    let op,engine,element,view,viewportId;
+    let op,engine,element,view,viewportId,unwatchContext,releaseContext;
     try{
       const t=target(true);if(!t)throw Error('선택한 정규 CT MPR을 확인하세요.');
       const source=t.views.find(v=>v.id===t.source.viewportId),volume=cornerstone.cache.getVolume(source.getVolumeId()),camera=saved?{...structuredClone(saved.cell.camera),parallelProjection:true}:structuredClone(source.getCamera()),canvas=saved?saved.cell.viewport:source.getCanvas();
@@ -59,12 +59,15 @@ window.kinCreateVolumeBatch=function({target,permitted,alive,owner,host}){
       const plan=window.KinVolumeBatch.plan({camera,corners,...parameters,width:canvas.width,height:canvas.height});
       const bound=JSON.stringify(owner());if(!owner())throw Error('로그인 상태를 확인하세요.');
       op={target:t,state:state(t),controller:new AbortController()};operation=op;refresh();status.textContent='로그인과 생성 범위를 확인 중입니다.';
-      const check=()=>{if(op.controller.signal.aborted||operation!==op||!externalCurrent()||!current(t)||JSON.stringify(owner())!==bound||state(t)!==op.state)throw Error('화면이 변경되어 단면 생성을 취소했습니다.');};
+      const check=()=>{if(engine?.offscreenMultiRenderWindow?.getOpenGLRenderWindow?.()?.getContext?.()?.isContextLost()||window.kinViewerContextLoss?.usable(engine)===false){op.controller.abort();throw Error('영상 표시가 중단되어 단면 생성을 취소했습니다.');}if(op.controller.signal.aborted||operation!==op||!externalCurrent()||!current(t)||JSON.stringify(owner())!==bound||state(t)!==op.state)throw Error('화면이 변경되어 단면 생성을 취소했습니다.');};
       const me=await pending(op.controller.signal,(resolve,reject)=>{fetch('/api/me',{credentials:'same-origin',cache:'no-store',signal:op.controller.signal}).then(r=>{if(!r.ok)throw Error('로그인 상태를 확인할 수 없습니다.');return r.json();}).then(resolve,reject);});
       if(me.kind!=='member'||JSON.stringify([me.institution,me.sub])!==bound)throw Error('계정이 변경되어 단면 생성을 취소했습니다.');check();
       // A volume's native texture belongs to its existing GL context. A second
       // engine renders black and may invalidate that shared source texture.
       engine=source.getRenderingEngine();viewportId='kin-batch-'+crypto.randomUUID();element=document.createElement('div');element.dataset.kinBatchRender='1';element.style.cssText='position:fixed;left:-10000px;top:0;pointer-events:none;width:'+(plan.columns/devicePixelRatio)+'px;height:'+(plan.rows/devicePixelRatio)+'px';document.body.append(element);
+      releaseContext=window.kinViewerContextLoss?.borrow(engine,null,()=>operation===op);
+      unwatchContext=window.kinViewerContextLoss?.onContextLoss(info=>{if(info.engine===engine)op.controller.abort();});
+      check();
       // This viewport has no OHIF tool group. Do not broadcast its creation to
       // the native crosshair reset binder; retain our own image-render events.
       engine.enableElement({viewportId,type:cornerstone.Enums.ViewportType.ORTHOGRAPHIC,element,defaultOptions:{suppressEvents:true}});view=engine.getViewport(viewportId);view.suppressEvents=false;await pending(op.controller.signal,(resolve,reject)=>{view.setVolumes([{volumeId:volume.volumeId}]).then(resolve,reject);});check();
@@ -90,7 +93,7 @@ window.kinCreateVolumeBatch=function({target,permitted,alive,owner,host}){
       clearOutput();output={target:t,reference,recipe,saveError,display:['MPR','MIP','MinIP','Average'][blend]+' '+Number((view.getSlabThickness()*2).toFixed(3))+' mm',scout:referenceImage?{...referenceImage,url:URL.createObjectURL(referenceImage.blob)}:null,frames:frames.map(row=>({...row,url:URL.createObjectURL(row.blob)}))};index=0;result.hidden=false;show();status.textContent=frames.length+'개 단면 미리보기를 생성했습니다.'+(referenceImage?'':' 위치 안내선 도구를 불러오지 못했습니다.');
       if(saved){inputs[0].value=parameters.offset;inputs[1].value=parameters.interval;inputs[2].value=parameters.count;inputs[3].checked=parameters.reverse;}
     }catch(error){if(live())status.textContent=error.message||'단면을 생성하지 못했습니다.';if(saved)throw error;}
-    finally{op?.controller.abort();if(viewportId)try{engine?.disableElement(viewportId);}catch(_){}element?.remove();if(operation===op)operation=null;refresh();}
+    finally{unwatchContext?.();releaseContext?.();op?.controller.abort();if(viewportId)try{engine?.disableElement(viewportId);}catch(_){}element?.remove();if(operation===op)operation=null;refresh();}
   }
   make.onclick=()=>generate();cancel.onclick=()=>operation?.controller.abort();
   previous.onclick=()=>{stopPlay();if(output&&index>0){index--;show();}};next.onclick=()=>{stopPlay();if(output&&index<output.frames.length-1){index++;show();}};
