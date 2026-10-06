@@ -72,6 +72,7 @@ CASES = (
     "test_08_what_auth_time_does_across_a_refresh",
     "test_09_an_isolated_member_cannot_come_back_until_activated",
     "test_10_a_member_disabled_at_the_provider_gets_nothing_from_a_live_provider_session",
+    "test_11_an_isolation_ends_each_provider_session_by_its_id_and_the_next_sso_given_that_id_lives",
 )
 APP = "/worklist/hpacs-lite/"
 STORAGE_DENIED = """(() => { for (const name of ['localStorage']) Object.defineProperty(window, name,
@@ -140,6 +141,9 @@ class SessionEndLive(unittest.TestCase):
         owned = [value for value in cls.provider_sessions if re.fullmatch(r"[0-9A-Za-z_-]{8,64}", value)]
         if owned:
             psql('DELETE FROM "IdpSessionEnd" WHERE "idpSid" IN (' + ",".join(f"'{value}'" for value in owned) + ");")
+            psql('DELETE FROM "ProviderChange" WHERE kind = \'end_session\' AND target IN (' + ",".join(f"'{value}'" for value in owned) + ");")
+        # The provider change records of A's and B's isolation and re-activation (SE-09, SE-11).
+        psql('DELETE FROM "ProviderChange" WHERE sub IN (' + ",".join(f"'{value}'" for value in cls.ids.values()) + ");")
         # SE-09's isolation fact of A (an Activate clears it; a case that stopped before it leaves it).
         psql('DELETE FROM "MemberIsolation" WHERE sub IN (' + ",".join(f"'{value}'" for value in cls.ids.values()) + ");")
 
@@ -264,6 +268,10 @@ class SessionEndLive(unittest.TestCase):
         self.case_sessions[who].append(idp)
         return idp, token
 
+    def end_requests(self, idp: str) -> list:
+        """The states of the product's recorded end requests (ProviderChange) of one provider session, in order."""
+        return psql(f'SELECT state FROM "ProviderChange" WHERE kind = \'end_session\' AND target = \'{idp}\' ORDER BY id;')
+
     def refusals(self, who: str) -> int:
         """Login refusals of this account as a provider session the product had ended, written during this case."""
         return int(psql(f'SELECT count(*) FROM "AuditLog" WHERE target=\'{self.ids[who]}\' AND id > {self.audit_floor} '
@@ -367,6 +375,11 @@ class SessionEndLive(unittest.TestCase):
             self.assertLess(took, 2.0, "an ordinary Log out does not wait for the provider")
             self.assertEqual(self.product_sessions("A"), 0)
             time.sleep(3.5)
+            # S7-U5 D600: past the product's 2 s wait the end request is kept open, not given up - its outcome is unknown
+            # and the end is not confirmed while Keycloak holds it.
+            a_sid = self.case_sessions["A"][-1]
+            self.assertEqual((self.end_requests(a_sid), self.marks("A")), (["unknown"], [("logout", "false")]),
+                             "the held end request stays unknown; the end unconfirmed")
         finally:
             compose_done(subprocess.run(["docker", "compose", "unpause", "keycloak"], cwd=ROOT, capture_output=True, text=True,
                                         timeout=60), "unpause")
@@ -385,7 +398,10 @@ class SessionEndLive(unittest.TestCase):
         self.assert_editable_form(page, "after a Log out the provider did not answer")
         self.wait("the provider session ended by the retry", lambda: self.provider_alive("A") == 0 and ("logout", "true") in self.marks("A"))
         self.assertEqual(self.ends("A"), [("auth.logout", "logout")], "one record of the end; retries add none")
-        self.report("SE-02", logout_seconds=round(took, 2), presses=len(seen))
+        # The held request was answered once Keycloak ran again: that answer, its own, settled it.
+        requests = self.end_requests(self.case_sessions["A"][-1])
+        self.assertTrue(requests and all(state == "done" for state in requests), requests)
+        self.report("SE-02", logout_seconds=round(took, 2), presses=len(seen), end_requests=len(requests))
 
     def unfinished_logout(self):
         """Doctor A at an unfinished-logout landing: the Log out POST never left the browser; both sessions are alive."""
@@ -632,6 +648,80 @@ class SessionEndLive(unittest.TestCase):
             self.report("SE-10", provider_sessions_after_disable=alive, probe_errors=[c["error"] for c in callbacks if not c["code"]])
         finally:
             if self.provider_enabled("A") is False:
+                self.stack.kc_admin("PUT", f"/users/{self.ids['A']}", {"enabled": True})
+
+    def activate(self, who: str):
+        """Activate through the product's admin route; an answer that could not be confirmed (409 ACTIVATION_UNCONFIRMED,
+        retryAfterSeconds) is pressed again after the interval it names, as the console lets the administrator do."""
+        for _ in range(4):
+            answer = self.admin_sets_enabled(who, True)
+            body = answer.body if isinstance(answer.body, dict) else {}
+            if answer.status != 409 or body.get("code") != "ACTIVATION_UNCONFIRMED":
+                return answer
+            time.sleep(float(body.get("retryAfterSeconds") or 5))
+        return answer
+
+    def test_11_an_isolation_ends_each_provider_session_by_its_id_and_the_next_sso_given_that_id_lives(self):
+        """S7-U5 D600 (fix round 6) on the real Keycloak, with the sid reuse of D598: doctor A is signed in on two PCs, one
+        a profile that once closed a login page (so Keycloak gives that browser's next SSO the same id, SE-03b). The
+        administrator suspends A: each of A's provider sessions is ended by its own id (an end request recorded per id and
+        settled by its own answer; there is no whole-user logout). The next person B signs in in A's browser: B's new SSO
+        gets the ended SSO's id, B enters with one credential entry and B's session survives a refresh - no end request of
+        that id is left to land on it. The premise, shown on the real Keycloak: an end request of that id issued now ends
+        B's SSO and B's refresh fails - which is why the product keeps an id closed while an end request of it is unknown.
+        Not coverable here: an end request HELD while B's new SSO is made and released afterwards. This stack can pause only
+        the whole Keycloak (SE-02), so no new SSO can be made while a request is held, and a Suspend reads the member from
+        Keycloak before it ends a session, so a pause before it holds the Suspend itself; that order is U5E-24 of
+        tests/auth_session_service_test.cjs (real PostgreSQL, a fake provider holding the request's effect and answer)."""
+        context, page = self.profile()
+        spare = context.new_page()
+        spare.goto(self.stack.proxy + "/api/auth/login")
+        self.assertEqual(self.settle(spare), "keycloak")
+        spare.close()
+        self.sign_in(page, "A")
+        self.assertTrue(self.keycloak_kept_the_login_screen(context), "precondition: the abandoned login screen outlived A's login")
+        a_sid, _ = self.provider_session_and_token("A")
+        other, page2 = self.profile()
+        self.sign_in(page2, "A")
+        a_sids = list(dict.fromkeys(self.case_sessions["A"]))
+        self.assertEqual((len(a_sids), self.provider_alive("A")), (2, 2), "A has two provider sessions")
+        try:
+            changed = self.admin_sets_enabled("A", False)
+            self.assertEqual((changed.status, (changed.body or {}).get("enabled")), (200, False), changed.text)
+            self.assertEqual((self.isolation("A"), self.product_sessions("A"), self.provider_alive("A")), ((True, True), 0, 0),
+                             "isolated: the fact done, no product or provider session of A left")
+            for sid in a_sids:
+                requests = self.end_requests(sid)
+                self.assertTrue(requests and all(state == "done" for state in requests), (sid, requests))
+            # B in A's browser: the landing, Login, B's credentials.
+            page.goto(self.stack.proxy + APP + "index.html")
+            at = self.settle(page)
+            if at == "landing":
+                at = self.press(page, "#signin")
+            self.assertEqual(at, "keycloak")
+            self.assert_editable_form(page, "the next person's Login after the isolation")
+            asked = len(context.asked)
+            self.assertEqual(self.credentials(page, "B"), "main", "B enters with one credential entry")
+            self.assertEqual(context.asked[asked:], [], "no second form, no restarted flow")
+            self.assertEqual(self.me(context), (200, self.ids["B"]))
+            b_sid, _ = self.provider_session_and_token("B")
+            self.assertEqual(b_sid, a_sid, "precondition: Keycloak gave B's new SSO the ended SSO's id - else this case proves nothing")
+            # B's session survives a refresh: nothing of the isolation is left to end that id.
+            psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["B"]}\';')
+            self.assertEqual((self.me(context), self.provider_alive("B"), self.refusals("B")), ((200, self.ids["B"]), 1, 0),
+                             "B refreshes and B's provider session lives")
+            # The premise on the real Keycloak: an end request of that id issued now ends B's SSO, and B's refresh fails.
+            premise = self.stack.kc_admin("DELETE", f"/sessions/{b_sid}")
+            psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["B"]}\';')
+            ended_b = (premise.status, self.provider_alive("B"), self.me(context))
+            self.assertEqual(ended_b, (204, 0, (401, None)), "a late end request of that id would end the next person's SSO")
+            activated = self.activate("A")
+            self.assertEqual((activated.status, (activated.body or {}).get("enabled")), (200, True), activated.text)
+            self.assertEqual((self.isolation("A"), self.provider_enabled("A")), ((False, False), True))
+            self.report("SE-11", same_sid=True, a_provider_sessions=len(a_sids), held_end_released_after_new_sso="not coverable here")
+        finally:
+            if self.isolation("A")[0] or self.provider_enabled("A") is False:
+                psql(f'DELETE FROM "MemberIsolation" WHERE sub=\'{self.ids["A"]}\';')
                 self.stack.kc_admin("PUT", f"/users/{self.ids['A']}", {"enabled": True})
 
 
