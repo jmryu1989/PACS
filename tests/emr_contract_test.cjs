@@ -5,6 +5,7 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 
 // Prisma invokes this file as a generator to supply freshly parsed DMMF, without generating a client.
 if (process.argv.includes('--emr-inventory-generator')) {
@@ -49,8 +50,8 @@ if (process.argv.includes('--emr-inventory-generator')) {
   const ref = versionId => ({ recordId: 'report-1', versionId, sha256: 'ab'.repeat(32) });
 
   function modelInventory() {
-    const parent = path.join(root, 'tmp/emr-a'); fs.mkdirSync(parent, { recursive: true });
-    const dir = fs.mkdtempSync(path.join(parent, 'schema-inventory-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-schema-inventory-'));
+    try {
     const output = path.join(dir, 'inventory.json');
     const provider = `"${process.execPath.replaceAll('\\', '/')}" "${__filename.replaceAll('\\', '/')}" --emr-inventory-generator`;
     const schema = `generator emr_contract_inventory {\n provider = ${JSON.stringify(provider)}\n output = ${JSON.stringify(output.replaceAll('\\', '/'))}\n}\n` +
@@ -62,6 +63,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     fs.writeFileSync(path.join(dir, 'stdout.log'), result.stdout || ''); fs.writeFileSync(path.join(dir, 'stderr.log'), result.stderr || '');
     assert.equal(result.status, 0, result.error?.message || result.stderr || result.stdout);
     return JSON.parse(fs.readFileSync(output, 'utf8')).models;
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   }
 
   function routeInventory() {
@@ -161,13 +163,13 @@ if (process.argv.includes('--emr-inventory-generator')) {
     for (const value of [defaults, C.RECORD_CLASSIFICATION, D.PRODUCT_DEFAULTS, D.KEY_MANAGEMENT, B.LEGAL_SOURCES]) complete(value);
     // Independent legal expectations: verified 시행규칙 제15조①2/5/6 and 고시 제8조①2.
     for (const kind of ['image', 'report-head', 'report-version', 'manual-sr']) {
-      assert.equal(defaults[kind].retentionYears, 5);
-      assert(C.RECORD_CLASSIFICATION[kind].retention.statutoryMinimum.some(m => m.basis === '의료법 시행규칙 제15조①6' && m.years === 5));
+      assert.equal(defaults[kind].retentionYears, kind.startsWith('report-') ? 10 : 5);
+      assert(C.RECORD_CLASSIFICATION[kind].retention.statutoryMinimum.some(m => m.clauseId === 'medical-rules:15.1.6' && m.years === 5));
     }
     assert.equal(defaults['access-audit'].retentionYears, 2);
     for (const kind of ['clinical-question', 'clinical-answer', 'consultation', 'critical-result', 'finding', 'comparison-description']) {
       assert.equal(defaults[kind].retentionYears, 10);
-      assert(C.RECORD_CLASSIFICATION[kind].retention.statutoryMinimum.some(m => m.basis === '의료법 시행규칙 제15조①2' && m.years === 10));
+      assert(C.RECORD_CLASSIFICATION[kind].retention.statutoryMinimum.some(m => m.clauseId === 'medical-rules:15.1.2' && m.years === 10));
     }
     for (const [kind, row] of Object.entries(C.RECORD_CLASSIFICATION)) {
       for (const minimum of row.retention.statutoryMinimum) assert(defaults[kind].retentionYears >= minimum.years, kind);
@@ -176,7 +178,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
       assert(Object.isFrozen(defaults[kind]));
     }
     assert.equal(D.PRODUCT_DEFAULTS.automaticDestruction, true);
-    assert.equal(B.STATUTORY_MINIMUM.access.basis, '개인정보의 안전성 확보조치 기준 제8조①2');
+    assert.equal(B.STATUTORY_MINIMUM.access.clauseId, 'access-safety:8.1.2');
     assert.equal(B.STATUTORY_MINIMUM.access.years, 2);
   });
   test('TEST-EMR-01/17-A: clinical candidates, operational placement and signature duties remain distinct', () => {
@@ -186,7 +188,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     for (const kind of ['assignment', 'comparison-layout', 'preferences']) assert.equal(C.RECORD_CLASSIFICATION[kind].clinicalAdoption, 'operational-record');
     for (const kind of ['report-head', 'report-version', 'clinical-question', 'clinical-answer', 'consultation', 'critical-result', 'finding', 'manual-sr', 'comparison-description']) {
       assert.equal(D.signatureRequired(kind), true);
-      assert.equal(C.RECORD_CLASSIFICATION[kind].signature.basis, '의료법 제22조①·제23조①');
+      assert.throws(() => D.tightenConfiguration({ [kind]: { requireSignature: false } }));
     }
     for (const kind of ['private-draft', 'tech-note', 'critical-result-ack', 'measurement', 'key-image', 'image', 'external-sr-seg', 'patient-match', 'study-correction']) {
       assert.equal(D.signatureRequired(kind), false);
@@ -211,8 +213,8 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.throws(() => D.retentionFor(['image'], clone(D.DEFAULT_CONFIGURATION)), 'Unvalidated policy cannot bypass floors');
   });
   test('TEST-EMR-17/19-A: only security tightening is accepted; all duration settings are refused', () => {
-    const settings = D.tightenConfiguration({ image: { requireSignature: true }, 'private-draft': { requireSignature: true } });
-    assert.deepEqual(settings.image, { retentionYears: 5, accessYears: 2, requireSignature: true });
+    const settings = D.tightenConfiguration({ 'tech-note': { requireSignature: true }, 'private-draft': { requireSignature: true } });
+    assert.deepEqual(settings['tech-note'], { retentionYears: 5, accessYears: 2, requireSignature: true });
     assert.deepEqual(D.retentionFor(['image', 'private-draft'], settings), { retentionYears: 5, accessYears: 2, requireSignature: true });
     assert.equal(D.retentionFor(['image', 'clinical-answer']).retentionYears, 10);
     assert.deepEqual(D.tightenConfiguration({}, settings), settings); complete(settings);
@@ -223,23 +225,24 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.equal(D.DEFAULT_CONFIGURATION.image.retentionYears, 5, 'Tightening never mutates defaults');
     assert.throws(() => D.retentionFor([])); assert.throws(() => D.retentionFor(['toString']));
   });
-  test('TEST-EMR-01/19-A: references and candidates do not silently turn five-year reports into ten-year charts', () => {
+  test('TEST-EMR-01/19-A: navigation and derived records do not acquire independent clocks', () => {
     for (const kind of ['report-evidence', 'clinical-context', 'signature-evidence', 'thumbnail', 'pdf', 'copy', 'download', 'print', 'disclosure']) {
       assert.equal(C.RECORD_CLASSIFICATION[kind].retention.mode, 'source-record');
-      assert.equal(D.retentionFor(['report-version', kind]).retentionYears, 5);
+      assert.equal(D.retentionFor(['report-version', kind]).retentionYears, 10);
     }
-    for (const kind of ['private-draft', 'tech-note', 'image-request', 'dictation', 'study-organization', 'transfer-governance']) {
+    for (const kind of ['private-draft', 'dictation', 'study-organization', 'transfer-governance']) {
       assert.equal(C.RECORD_CLASSIFICATION[kind].retention.mode, 'purpose');
       assert.equal(D.DEFAULT_CONFIGURATION[kind].retentionYears, 0);
     }
     assert.equal(D.DEFAULT_CONFIGURATION['patient-match'].retentionYears, 5);
     assert.equal(D.retentionFor(['report-version', 'clinical-answer']).retentionYears, 10, 'One actual mixed chart must meet both obligations');
   });
-  const baseRecord = () => D.newRetentionRecord('synthetic-record', 'imageReport', t0);
+  const baseRecord = () => D.recordVersionAdded(D.newRetentionRecord('synthetic-record', ['image'], t0, 'synthetic-original'), 'synthetic-amended', t0);
   const extension = (overrides = {}) => ({ cause: 'continuing-treatment', actorId: 'synthetic-reader', reason: '계속 진료 필요',
     at: '2031-10-04T00:00:00.000Z', until: '2036-10-05T00:00:00.000Z', ...overrides });
   function disposal(overrides = {}) {
-    return { record: baseRecord(), versionIds: ['synthetic-original', 'synthetic-amended'], requestedAt: '2031-10-05T00:00:00.000Z', ...overrides };
+    const record = overrides.record ?? baseRecord();
+    return { record, versionIds: record.parts.map(p => p.partId), requestedAt: '2031-10-05T15:00:00.000Z', graph: { records: [record], references: [] }, ...overrides };
   }
   const destroyed = request => ({ completedAt: request.requestedAt, method: 'irreversible-permanent-deletion' });
   const durable = { append: async e => ({ durableAt: `${e.day}T23:59:59.999Z` }) };
@@ -247,8 +250,8 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const expected = { patientRegister: [5, 1], chart: [10, 2], prescription: [2, 3], surgery: [10, 4],
       examination: [5, 5], imageReport: [5, 6], nursing: [5, 7], midwifery: [5, 8], certificateCopy: [3, 9] };
     for (const [kind, [years, clause]] of Object.entries(expected)) {
-      assert.equal(B.STATUTORY_MINIMUM[kind].basis, `의료법 시행규칙 제15조①${clause}`);
-      assert.equal(D.retentionDeadline(D.newRetentionRecord('synthetic-record', kind, t0)), `${2026 + years}-10-05T00:00:00.000Z`);
+      assert.equal(B.STATUTORY_MINIMUM[kind].clauseId, `medical-rules:15.1.${clause}`);
+      assert.equal(D.civilPeriodEnd(t0, years), `${2026 + years}-10-05T15:00:00.000Z`);
     }
     assert.throws(() => D.newRetentionRecord('x', 'unknown', t0));
     assert.throws(() => D.newRetentionRecord('x', 'toString', t0));
@@ -259,21 +262,21 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const original = clone(baseRecord()), before = clone(original);
     const extended = D.extendRetention(original, extension());
     assert.equal(D.retentionDeadline(extended), '2036-10-05T00:00:00.000Z');
-    assert.equal(extended.startedAt, t0); assert.deepEqual(extended.extension, extension());
+    assert.equal(extended.parts[0].startedAt, t0); assert.deepEqual(extended.extension, extension());
     assert.deepEqual(original, before); assert(Object.isFrozen(extended.extension));
     assert.throws(() => D.extendRetention(extended, extension()));
     const shorter = D.extendRetention(original, extension({ until: '2031-10-06T00:00:00.000Z' }));
     assert.throws(() => D.extendRetention(shorter, extension()), 'Even a one-day extension consumes the single allowance');
-    assert.equal(D.retentionDeadline(D.extendRetention(D.newRetentionRecord('chart', 'chart', t0),
+    assert.equal(D.retentionDeadline(D.extendRetention(D.newRetentionRecord('chart', ['clinical-answer'], t0),
       extension({ at: '2036-10-04T00:00:00.000Z', until: '2046-10-05T00:00:00.000Z' }))), '2046-10-05T00:00:00.000Z');
   });
   test('TEST-EMR-19-A: requests, generic holds, overdue changes and missing reasons cannot extend retention', () => {
     for (const patch of [{ cause: 'patient-request' }, { cause: 'legal-hold' }, { actorId: '' }, { reason: ' ' },
-      { at: '2031-10-05T00:00:00.000Z' }, { at: '2026-10-04T23:59:59.999Z' }, { until: '2031-10-05T00:00:00.000Z' },
-      { until: '2036-10-05T00:00:00.001Z' }, { count: 2 }])
+      { at: '2031-10-05T15:00:00.000Z' }, { at: '2026-10-04T23:59:59.999Z' }, { until: '2031-10-05T15:00:00.000Z' },
+      { until: '2036-10-05T15:00:00.001Z' }, { count: 2 }])
       assert.throws(() => D.extendRetention(baseRecord(), extension(patch)));
     assert.throws(() => D.extendRetention(baseRecord(), null));
-    assert.throws(() => D.extendRetention(D.newRetentionRecord('audit', 'access', t0), extension()));
+    assert.throws(() => D.extendRetention(D.newRetentionRecord('audit', ['access-audit'], t0), extension({ at: '2027-10-05T00:00:00.000Z', until: '2029-10-05T15:00:00.000Z' })));
   });
   test('TEST-EMR-19-A: expiry destroys every original/version, with durable nonpersonal completion only after deletion', async () => {
     const order = [], events = [];
@@ -289,7 +292,9 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.deepEqual(order, ['started', 'erase-original-and-amendment', 'completed']);
     assert.equal(result.phase, 'completed');
     for (const event of events) {
-      assert.deepEqual(Object.keys(event).sort(), ['basis', 'day', 'formatVersion', 'method', 'phase']);
+      assert.deepEqual(Object.keys(event).sort(), ['basis', 'classes', 'clauseIds', 'day', 'disposalUnitId', 'dueDay', 'expiryDay', 'extensionUsed', 'formatVersion', 'method', 'partCount', 'phase', 'timeliness']);
+      assert.equal(event.disposalUnitId, request.record.disposalUnitId);
+      assert.equal(event.partCount, 2);
       assert(!JSON.stringify(event).includes('synthetic'));
       assert.equal(event.method, 'irreversible-permanent-deletion'); complete(event);
     }
@@ -311,10 +316,10 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.equal(erased, 1, 'Deletion cannot be undone by a completion log failure; B must reconcile it');
   });
   test('TEST-EMR-19-A: leap day and a used extension enforce exact expiry boundaries', async () => {
-    const record = D.newRetentionRecord('leap', 'imageReport', '2024-02-29T00:00:00.000Z');
-    assert.equal(D.retentionDeadline(record), '2029-03-01T00:00:00.000Z');
-    await assert.rejects(D.destroyAtExpiry(durable, disposal({ record, requestedAt: '2029-02-28T23:59:59.999Z' }), async () => assert.fail('early')));
-    await D.destroyAtExpiry(durable, disposal({ record, requestedAt: '2029-03-01T00:00:00.000Z' }), async r => destroyed(r));
+    const record = D.newRetentionRecord('leap', ['image'], '2024-02-29T00:00:00.000Z');
+    assert.equal(D.retentionDeadline(record), '2029-02-28T15:00:00.000Z');
+    await assert.rejects(D.destroyAtExpiry(durable, disposal({ record, requestedAt: '2029-02-28T14:59:59.999Z' }), async () => assert.fail('early')));
+    await D.destroyAtExpiry(durable, disposal({ record, requestedAt: '2029-02-28T15:00:00.000Z' }), async r => destroyed(r));
     const extended = D.extendRetention(baseRecord(), extension());
     await assert.rejects(D.destroyAtExpiry(durable, disposal({ record: extended }), async () => assert.fail('extended')));
     await D.destroyAtExpiry(durable, disposal({ record: extended, requestedAt: '2036-10-05T00:00:00.000Z' }), async r => destroyed(r));
@@ -344,18 +349,18 @@ if (process.argv.includes('--emr-inventory-generator')) {
   });
   test('TEST-EMR-07/19-A: access records expire independently, two years after each event', async () => {
     const event = access(), first = A.accessRetention(event);
-    assert.equal(D.retentionDeadline(first), '2028-10-05T00:00:00.000Z');
+    assert.equal(D.retentionDeadline(first), '2028-10-05T15:00:00.000Z');
     const late = A.accessRetention(access({ eventId: 'late-access', occurredAt: '2031-10-04T00:00:00.000Z' }));
-    assert.equal(D.retentionDeadline(late), '2033-10-04T00:00:00.000Z');
-    assert.equal(D.retentionDeadline(first), '2028-10-05T00:00:00.000Z');
-    assert.equal(D.retentionDeadline(baseRecord()), '2031-10-05T00:00:00.000Z');
-    await D.destroyAtExpiry(durable, disposal({ record: first, versionIds: ['access-version'], requestedAt: '2028-10-05T00:00:00.000Z' }), async r => destroyed(r));
+    assert.equal(D.retentionDeadline(late), '2033-10-04T15:00:00.000Z');
+    assert.equal(D.retentionDeadline(first), '2028-10-05T15:00:00.000Z');
+    assert.equal(D.retentionDeadline(baseRecord()), '2031-10-05T15:00:00.000Z');
+    await D.destroyAtExpiry(durable, disposal({ record: first, requestedAt: '2028-10-05T15:00:00.000Z' }), async r => destroyed(r));
     await D.destroyAtExpiry(durable, disposal(), async r => destroyed(r));
     await assert.rejects(D.destroyAtExpiry(durable, disposal({ record: late }), async () => assert.fail('late access still required')));
   });
   test('TEST-EMR-07-A: all requested action/cause categories remain distinct', () => {
     const expected = {
-      write: ['write', 'additional-entry', 'modify', 'approve-sign', 'amend', 'addendum', 'cancel', 'release', 'draft-save', 'clear', 'discard'],
+      write: ['write', 'additional-entry', 'modify', 'approve-sign', 'amend', 'addendum', 'cancel', 'release', 'draft-save', 'clear', 'discard', 'finalize', 'archive', 'resume-clinical-use', 'extend-retention', 'legal-hold', 'lift-legal-hold', 'destroy'],
       read: ['provide-prepared', 'transfer-ended', 'transfer-aborted', 'client-shown', 'explicit-ack'],
       export: ['print-opened', 'print-done', 'pdf', 'copy', 'download', 'disclosure'],
       failure: ['auth-refused', 'permission-refused', 'conflict', 'storage-failed', 'signature-failed'],
@@ -440,7 +445,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
   function command(facts, action, overrides = {}) { return { action, actor: reader('reader-1'), at: t0,
     expectedClaimGeneration: facts.claimGeneration, expectedPublishedVersionId: facts.publishedVersion?.versionId ?? null, ...overrides }; }
   function step(facts, action, overrides) { return L.transitionReport(facts, command(facts, action, overrides)); }
-  function inProgress() { return step(L.newReportFacts('report-1'), 'start').facts; }
+  function inProgress() { return step(L.newReportFacts('report-1', 'study-1'), 'start').facts; }
   function approved() { return step(inProgress(), 'approve', { version: ref('v1') }).facts; }
   function finalized() { return step(approved(), 'finalize', { actor: { ...reader('finalizer'), kind: 'service' }, at: deadline }).facts; }
   const archiveCommand = (overrides = {}) => ({ actor: reader('reader-1'), at: deadline, reason: '진료 목적 종료 확인',
@@ -455,14 +460,14 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.equal(archive.actorId, 'reader-1'); assert.equal(archive.reason, '진료 목적 종료 확인');
     assert.deepEqual(L.reportRetentionAccess(f, archive), { state: 'retention-only', ordinaryClinicalAccess: false, separateStorage: true });
     assert.deepEqual(f, before); assert.equal(Object.isFrozen(f.publishedVersion), false);
-    assert.equal(D.retentionDeadline(recordBefore), '2031-10-05T00:00:00.000Z', 'Archive cannot reset retention');
+    assert.equal(D.retentionDeadline(recordBefore), '2031-10-05T15:00:00.000Z', 'Archive cannot reset retention');
     for (const patch of [{ reason: '' }, { at: t0 }, { purpose: 'timer-elapsed' }, { expectedPublishedVersionId: 'stale' },
       { actor: { ...reader('service'), kind: 'service' } }, { actor: { ...reader('reader-1'), canReadStudy: false } },
       { actor: { ...reader('admin'), roles: ['admin'] } }]) assert.throws(() => L.archiveFinalizedReport(f, archiveCommand(patch)));
     for (const patch of [{ recordId: 'other' }, { version: ref('other') }, { finalizedAt: t0 }, { reason: '' }])
       assert.throws(() => L.reportRetentionAccess(f, { ...archive, ...patch }));
     const added = step(f, 'addendum', { at: deadline, version: ref('v2') }).facts;
-    assert.throws(() => L.reportRetentionAccess(added, archive), 'A new version cannot inherit a stale purpose-end declaration');
+    assert.equal(L.reportRetentionAccess(added, archive).state, 'normal-retention');
   });
   test('TEST-EMR-13/19-A: statutory expiry requires destruction with or without a purpose-end event', async () => {
     const f = finalized(), archive = L.archiveFinalizedReport(f, archiveCommand());
@@ -540,8 +545,243 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const mutableAdded = clone(step(approved(), 'addendum', { version: ref('v2') }).facts);
     step(mutableAdded, 'addendum', { version: ref('v3') });
     assert.equal(Object.isFrozen(mutableAdded.addenda[0].version), false);
-    assert.throws(() => L.validateReportFacts({ ...L.newReportFacts('report-1'), state: 'Approved' }));
+    assert.throws(() => L.validateReportFacts({ ...L.newReportFacts('report-1', 'study-1'), state: 'Approved' }));
     assert.throws(() => step(approved(), 'amend', { version: { ...ref('v2'), recordId: 'other-report' } }));
     assert.throws(() => L.validateReportFacts({ ...approved(), lastEditedAt: t0 }));
   });
+  test('TEST-EMR-19-A F01: classification alone gives reports ten years and prevents class substitution', async () => {
+    const report = D.newRetentionRecord('report-1', ['report-version'], t0, 'v1');
+    assert.equal(D.retentionDeadline(report), '2036-10-05T15:00:00.000Z');
+    assert.deepEqual(D.statutoryClasses(report.kinds), ['chart', 'examination', 'imageReport']);
+    assert.deepEqual(D.statutoryClasses(['clinical-answer', 'consultation']), ['chart']);
+    for (const wrong of ['prescription', 'access', ['prescription'], ['access'], ['report-version', 'thumbnail'], ['private-draft']])
+      assert.throws(() => D.newRetentionRecord('report-1', wrong, t0));
+    assert.throws(() => D.parseRetentionRecord({ ...report, recordClass: 'access' }));
+    await assert.rejects(D.destroyAtExpiry(durable, disposal({ record: report }), async () => assert.fail('report cannot expire at five years')));
+    assert.equal((await D.destroyAtExpiry(durable, disposal({ record: report, requestedAt: '2036-10-05T15:00:00.000Z' }), async r => destroyed(r))).phase, 'completed');
+  });
+  const edge = (from, to, relation = 'incorporation') => ({ fromRecordId: from.recordId, fromPartId: from.parts[0].partId,
+    toRecordId: to.recordId, toPartId: to.parts[0].partId, relation });
+  test('TEST-EMR-19-A F02: CVR, Addendum base and later citations retain content transitively; navigation does not', async () => {
+    const image = D.newRetentionRecord('image', ['image'], t0, 'i1');
+    const report = D.newRetentionRecord('report', ['report-version'], t0, 'v1');
+    const cvr = D.newRetentionRecord('cvr', ['critical-result'], '2030-10-05T00:00:00.000Z', 'c1');
+    const later = D.newRetentionRecord('later-report', ['report-version'], '2033-10-05T00:00:00.000Z', 'v2');
+    const graph = { records: [image, report, cvr, later], references: [edge(cvr, report), edge(report, image), edge(later, cvr)] };
+    for (const record of [image, report, cvr]) {
+      assert.equal(D.retentionDeadline(record, graph), '2043-10-05T15:00:00.000Z');
+      await assert.rejects(D.destroyAtExpiry(durable, disposal({ record, graph, requestedAt: '2037-10-05T15:00:00.000Z' }), async () => assert.fail('incorporated content lost')));
+    }
+    const navigation = { records: [image, later], references: [edge(later, image, 'navigation')] };
+    assert.equal(D.retentionDeadline(image, navigation), '2031-10-05T15:00:00.000Z');
+    assert.equal((await D.destroyAtExpiry(durable, disposal({ record: image, graph: navigation }), async r => destroyed(r))).phase, 'completed');
+    assert.equal(D.retentionDeadline(report, { ...graph, references: [...graph.references, edge(image, later)] }), '2043-10-05T15:00:00.000Z', 'Cycles terminate');
+    const stale = { ...graph, records: graph.records.filter(r => r.recordId !== 'later-report') };
+    assert.throws(() => D.retentionDeadline(report, stale));
+  });
+  test('TEST-EMR-19-A F03: late Addendum or correction retains every part until the latest part expires', async () => {
+    const original = D.newRetentionRecord('report', ['report-version'], t0, 'v1');
+    const added = D.recordVersionAdded(original, 'addendum', '2036-09-01T00:00:00.000Z');
+    const corrected = D.recordVersionAdded(added, 'correction', '2036-09-02T00:00:00.000Z');
+    assert.equal(D.retentionDeadline(corrected), '2046-09-02T15:00:00.000Z');
+    assert.equal(D.retentionDeadline(original), '2036-10-05T15:00:00.000Z');
+    await assert.rejects(D.destroyAtExpiry(durable, disposal({ record: corrected, requestedAt: '2036-10-05T15:00:00.000Z' }), async () => assert.fail('late part')));
+    await assert.rejects(D.destroyAtExpiry(durable, disposal({ record: corrected, versionIds: ['v1'], requestedAt: '2046-09-02T15:00:00.000Z' }), async () => assert.fail('partial destruction')));
+    assert.equal((await D.destroyAtExpiry(durable, disposal({ record: corrected, requestedAt: '2046-09-02T15:00:00.000Z' }), async r => destroyed(r))).partCount, 3);
+    const note = D.recordVersionAdded(D.newRetentionRecord('note', ['tech-note'], t0, 'n1'), 'n2', '2031-09-01T00:00:00.000Z');
+    assert.equal(D.retentionDeadline(note), '2036-09-01T15:00:00.000Z');
+    assert.throws(() => D.recordVersionAdded(added, 'addendum', '2036-09-02T00:00:00.000Z'));
+    assert.throws(() => D.recordVersionAdded(added, 'earlier', t0));
+  });
+  test('TEST-EMR-19-A F04: Seoul civil-day expiry excludes the initial day except midnight, including leap years', async () => {
+    const cases = [
+      ['2026-10-04T15:00:00.000Z', '2031-10-04T15:00:00.000Z'], // 00:00 KST
+      ['2026-10-04T15:01:00.000Z', '2031-10-05T15:00:00.000Z'], // 00:01 KST
+      ['2026-10-05T14:59:00.000Z', '2031-10-05T15:00:00.000Z'], // 23:59 KST
+      ['2024-02-28T15:00:00.000Z', '2029-02-28T15:00:00.000Z'], // Feb 29 midnight
+      ['2024-02-29T14:59:00.000Z', '2029-02-28T15:00:00.000Z'],
+      ['2026-12-31T14:59:59.999Z', '2031-12-31T15:00:00.000Z'],
+    ];
+    for (const [start, end] of cases) {
+      const record = D.newRetentionRecord('civil', ['image'], start);
+      assert.equal(D.retentionDeadline(record), end);
+      await assert.rejects(D.destroyAtExpiry(durable, disposal({ record, requestedAt: new Date(Date.parse(end) - 1).toISOString() }), async () => assert.fail('inside final civil day')));
+      assert.equal((await D.destroyAtExpiry(durable, disposal({ record, requestedAt: end }), async r => destroyed(r))).phase, 'completed');
+    }
+    const record = baseRecord(), end = D.retentionDeadline(record);
+    assert.equal(D.extendRetention(record, extension({ at: new Date(Date.parse(end) - 1).toISOString() })).extension.at, '2031-10-05T14:59:59.999Z');
+    assert.throws(() => D.extendRetention(record, extension({ at: end })));
+  });
+  test('TEST-EMR-06/07-A F05: hash chain detects mutation, internal omission and missing tail; expiry checkpoint preserves verification', () => {
+    const pos = e => ({ sequence: e.sequence, hash: e.hash });
+    const a = A.sealAccessEvent(A.ACCESS_CHAIN_GENESIS, access());
+    const b = A.sealAccessEvent(pos(a), access({ eventId: 'event-2' }));
+    assert.equal(b.previousHash, a.hash);
+    assert(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [a, b], pos(b)));
+    const changed = clone(b); changed.payload.event.targets[0].versionId.value = 'changed';
+    assert.equal(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [a, changed], pos(b)), false);
+    assert.equal(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [b], pos(b)), false);
+    assert.equal(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [a], pos(b)), false);
+    const checkpoint = A.sealAccessExpiry(pos(b), pos(a), 1, '2028-10-05T15:00:00.000Z');
+    assert(A.verifyAccessChain(pos(a), [b, checkpoint], pos(checkpoint)));
+    assert(!JSON.stringify(checkpoint.payload).includes('SYN-1'));
+    assert.throws(() => A.sealAccessExpiry(pos(a), pos(b), 2, t0));
+  });
+  test('TEST-EMR-07-A P06-success-with-unresolved-target: each required success fact must resolve', () => {
+    assert(A.parseAccessEvent(access()));
+    for (const field of ['patientLinkSnapshot', 'studyId', 'recordId', 'versionId']) {
+      const bad = access(); bad.targets[0][field] = { status: 'unresolved', reason: 'not-resolved' };
+      assert.throws(() => A.parseAccessEvent(bad), field);
+      assert(A.parseAccessEvent({ ...bad, action: 'permission-refused', result: 'refused' }));
+    }
+  });
+  test('TEST-EMR-07-A F06: non-record exemptions are closed; free text never replaces patient/version evidence', () => {
+    for (const kind of Object.keys(C.RECORD_CLASSIFICATION)) {
+      const event = access(); event.targets[0].kind = kind;
+      for (const field of ['patientLinkSnapshot', 'studyId', 'recordId', 'versionId']) event.targets[0][field] = { status: 'not-applicable', reason: 'non-record-target' };
+      if (['preferences', 'reading-template', 'institution', 'identity-access', 'authentication-session', 'system-operation'].includes(kind)) assert(A.parseAccessEvent(event));
+      else assert.throws(() => A.parseAccessEvent(event), kind);
+    }
+    const event = access(); event.targets[0].patientLinkSnapshot = { status: 'not-applicable', reason: 'I cannot find the patient' };
+    assert.throws(() => A.parseAccessEvent(event));
+    assert.deepEqual(A.parseAccessEvent(access({ targets: [] })).targets, []);
+  });
+  test('TEST-EMR-07-A P09-success-with-unresolved-proxy-ip: member success always needs a trusted proxy', () => {
+    assert(A.parseAccessEvent(access()));
+    assert.throws(() => A.parseAccessEvent(access({ trustedProxyIp: { status: 'unresolved', reason: 'not-observed' } })));
+    assert(A.parseAccessEvent(access({ action: 'permission-refused', result: 'refused', trustedProxyIp: { status: 'unresolved', reason: 'not-observed' } })));
+  });
+  test('TEST-EMR-07-A P08-print-done-without-preceding-event: print completion is linked to its opened event', () => {
+    const event = access({ action: 'print-done', result: 'reported', relatedEventId: 'print-opened-1' });
+    assert(A.parseAccessEvent(event));
+    assert.throws(() => A.parseAccessEvent({ ...event, relatedEventId: null }));
+  });
+  test('TEST-EMR-19-A P10-access-record-extendable: refusal is within the access retention window', () => {
+    const record = D.newRetentionRecord('access', ['access-audit'], t0);
+    const validTiming = extension({ at: '2027-10-05T00:00:00.000Z', until: '2029-10-05T15:00:00.000Z' });
+    assert(validTiming.at > t0 && validTiming.at < D.retentionDeadline(record));
+    assert(validTiming.until > D.retentionDeadline(record) && validTiming.until <= D.civilPeriodEnd(D.retentionDeadline(record), 2));
+    assert.throws(() => D.extendRetention(record, validTiming));
+    assert(D.extendRetention(baseRecord(), extension({ at: validTiming.at })));
+  });
+  test('TEST-EMR-19-A F07: Tech Notes and worklist image requests have five-year statutory units', () => {
+    for (const [kind, clause] of [['tech-note', 'medical-rules:15.1.5'], ['image-request', 'medical-rules:15.1.1']]) {
+      const record = D.newRetentionRecord(kind, [kind], t0);
+      assert.equal(D.retentionDeadline(record), '2031-10-05T15:00:00.000Z');
+      assert(C.RECORD_CLASSIFICATION[kind].retention.statutoryMinimum.some(m => m.clauseId === clause));
+      assert.throws(() => D.newPurposeRecord('x', kind, 'owner', t0, ['v1']));
+    }
+  });
+  test('TEST-EMR-12/19-A F07: every purpose kind has a closed end; drafts are destroyed on approval/finalization/discard', async () => {
+    for (const [kind, row] of Object.entries(C.RECORD_CLASSIFICATION).filter(([, r]) => r.retention.mode === 'purpose')) {
+      assert(row.retention.purposeEnds.length > 0);
+      for (const trigger of row.retention.purposeEnds) {
+        const record = D.newPurposeRecord('private', kind, 'owner', t0, ['private-v1', 'private-v2']);
+        const end = { recordId: 'private', trigger, actorId: 'owner', at: deadline };
+        const events = [];
+        const result = await D.destroyAtPurposeEnd({ append: async e => { events.push(e); return durable.append(e); } }, record, end, deadline,
+          async target => { assert.deepEqual(target.partIds, record.partIds); return { completedAt: deadline, method: 'irreversible-permanent-deletion' }; });
+        assert.equal(result.phase, 'completed'); assert.deepEqual(events.map(e => e.phase), ['started', 'completed']);
+        await assert.rejects(D.destroyAtPurposeEnd(durable, record, { ...end, trigger: 'arbitrary-timer' }, deadline, async () => assert.fail('invented purpose')));
+      }
+    }
+    const draft = D.newPurposeRecord('draft', 'private-draft', 'owner', t0, ['v1']);
+    for (const trigger of ['explicit-discard', 'owner-deleted']) await assert.rejects(D.destroyAtPurposeEnd(durable, draft,
+      { recordId: 'draft', trigger, actorId: 'other', at: deadline }, deadline, async () => assert.fail('wrong owner')));
+    assert(step(inProgress(), 'approve', { version: ref('v1') }).effects.includes('end-private-draft-purpose'));
+    assert(!step(inProgress(), 'approve', { version: ref('v1') }).effects.includes('preserve-private-drafts'));
+  });
+  test('TEST-EMR-13-A F08: cancelled study gets a fresh report unit without rewriting or reopening the cancelled unit', () => {
+    const cancelled = step(finalized(), 'cancel', { at: '2026-10-07T00:00:00.000Z', reason: 'wrong study', eventId: 'cancel', version: ref('cancel-v') }).facts;
+    const before = clone(cancelled), at = '2026-10-08T00:00:00.000Z';
+    const next = L.newReportAfterCancellation(cancelled, 'report-2', reader('reader-1'), at);
+    assert.equal(next.studyId, cancelled.studyId); assert.equal(next.previousCancelledRecordId, cancelled.recordId);
+    const active = step(next, 'start', { at }).facts;
+    const published = step(active, 'approve', { at, version: { ...ref('new-v1'), recordId: 'report-2' } }).facts;
+    assert.equal(published.firstApprovedAt, at); assert.equal(published.amendUntil, '2026-10-09T00:00:00.000Z');
+    assert.deepEqual(cancelled, before);
+    assert.throws(() => step(cancelled, 'amend', { at, version: ref('forbidden') }));
+    assert.throws(() => L.newReportAfterCancellation(cancelled, 'report-1', reader('reader-1'), at));
+  });
+  test('TEST-EMR-13/19-A P07-archive-ignores-content-hash: same version id with another digest is rejected', () => {
+    const f = finalized(), archive = L.archiveFinalizedReport(f, archiveCommand());
+    assert.equal(L.reportRetentionAccess(f, archive).state, 'retention-only');
+    assert.throws(() => L.reportRetentionAccess(f, { ...archive, version: { ...archive.version, sha256: 'cd'.repeat(32) } }));
+    const added = step(f, 'addendum', { at: deadline, version: ref('v2') }).facts;
+    assert.equal(L.reportRetentionAccess(added, archive).state, 'normal-retention');
+    assert.throws(() => L.reportRetentionAccess(added, { ...archive, version: { ...archive.version, sha256: 'cd'.repeat(32) } }));
+  });
+  test('TEST-EMR-13/19-A F09: explicit lawful resumption and Addendum supersede archive without resetting any clock', () => {
+    const f = finalized(), archive = L.archiveFinalizedReport(f, archiveCommand()), retention = baseRecord(), expiry = D.retentionDeadline(retention);
+    for (const basis of ['new-study-same-patient', 'lawful-addendum', 'lawful-correction', 'legal-preservation']) {
+      const resume = L.resumeClinicalUse(f, archive, { actor: reader('reader-1'), at: deadline, basis, evidenceId: 'lawful-event' });
+      assert.equal(L.reportRetentionAccess(f, archive, resume).state, 'normal-retention');
+      assert.throws(() => L.reportRetentionAccess(f, archive, { ...resume, recordId: 'wrong' }));
+    }
+    assert.equal(D.retentionDeadline(retention), expiry);
+    assert.throws(() => L.resumeClinicalUse(f, archive, { actor: reader('reader-1'), at: deadline, basis: 'hospital-default', evidenceId: 'setting' }));
+  });
+  test('TEST-EMR-19-A F10: record-specific legal hold suspends destruction until an explicit lift, including incorporated content', async () => {
+    const record = baseRecord(), now = '2032-10-05T00:00:00.000Z';
+    const hold = { holdId: 'order-1', recordId: record.recordId, basis: { law: 'synthetic-preservation-duty', authority: 'synthetic-court', documentReference: 'order-42' }, actorId: 'custodian', at: t0 };
+    const held = D.placeLegalHold(record, hold);
+    assert.equal(D.retentionState(held).state, 'legal-hold');
+    await assert.rejects(D.destroyAtExpiry(durable, disposal({ record: held, requestedAt: now }), async () => assert.fail('held')));
+    const image = D.newRetentionRecord('incorporated-image', ['image'], t0);
+    const graph = { records: [held, image], references: [edge(held, image)] };
+    await assert.rejects(D.destroyAtExpiry(durable, disposal({ record: image, graph, requestedAt: now }), async () => assert.fail('held signed content')));
+    for (const patch of [{ recordId: 'other' }, { basis: { ...hold.basis, law: '' } }, { basis: { ...hold.basis, authority: '' } }, { actorId: '' }])
+      assert.throws(() => D.placeLegalHold(record, { ...hold, ...patch }));
+    const lifted = D.liftLegalHold(held, 'order-1', { actorId: 'custodian', at: now, documentReference: 'release-42' });
+    assert.equal(D.retentionDeadline(lifted), D.retentionDeadline(record));
+    assert.equal((await D.destroyAtExpiry(durable, disposal({ record: lifted, requestedAt: now }), async r => destroyed(r))).phase, 'completed');
+    assert.throws(() => D.liftLegalHold(lifted, 'order-1', { actorId: 'custodian', at: now, documentReference: 'twice' }));
+  });
+  test('TEST-EMR-19-A F11: destruction names opaque units and classes, flags overdue execution, and confirms completed batches', async () => {
+    const record = baseRecord(), run = requestedAt => D.destroyAtExpiry(durable, disposal({ record, requestedAt }), async r => destroyed(r));
+    const timely = await run('2031-10-05T15:00:00.000Z');
+    assert.equal(timely.timeliness, 'within-five-days'); assert.equal(timely.expiryDay, '2031-10-05');
+    assert.deepEqual(timely.classes, ['examination', 'imageReport']);
+    assert.equal(timely.disposalUnitId, record.disposalUnitId);
+    const overdue = await run('2034-10-05T15:00:00.000Z');
+    assert.equal(overdue.timeliness, 'overdue');
+    assert.equal((await run('2031-10-10T14:59:59.999Z')).timeliness, 'within-five-days');
+    assert.equal((await run('2031-10-10T15:00:00.000Z')).timeliness, 'overdue');
+    const confirmed = D.confirmDestruction('batch-1', [timely], 'privacy-officer', '2031-10-06T01:00:00.000Z');
+    assert.deepEqual(confirmed.disposalUnitIds, [record.disposalUnitId]);
+    assert.throws(() => D.confirmDestruction('batch-1', [{ ...timely, phase: 'failed' }], 'privacy-officer', '2031-10-06T01:00:00.000Z'));
+    for (const text of [record.recordId, ...record.parts.map(p => p.partId), 'SYN-1']) assert(!JSON.stringify([timely, overdue, confirmed]).includes(text));
+  });
+  test('TEST-EMR-07-A F12: in-process jobs log lifecycle success with explicit statutory act mappings', () => {
+    const noProxy = { status: 'not-applicable', reason: 'in-process-service' };
+    for (const action of ['finalize', 'archive', 'resume-clinical-use', 'extend-retention', 'legal-hold', 'lift-legal-hold', 'destroy']) {
+      assert(A.parseAccessEvent(access({ action, result: 'succeeded', executor: 'service', cause: 'service-job', trustedProxyIp: noProxy })));
+      assert.equal(A.STATUTORY_ACT[action], 'none');
+    }
+    for (const [action, act] of [['write', '기재'], ['approve-sign', '기재'], ['additional-entry', '추가기재'], ['addendum', '추가기재'], ['modify', '수정'], ['amend', '수정'], ['cancel', '수정'], ['provide-prepared', '열람'], ['client-shown', '열람']]) assert.equal(A.STATUTORY_ACT[action], act);
+    for (const action of Object.values(A.ACCESS_ACTIONS).flat()) assert(A.STATUTORY_ACT[action]);
+    assert.throws(() => A.parseAccessEvent(access({ trustedProxyIp: noProxy })));
+    assert.throws(() => A.parseAccessEvent(access({ executor: 'service', cause: 'background-fetch', trustedProxyIp: noProxy })));
+  });
+  test('TEST-EMR-17-A F14: signature tightening is limited to human clinical authors', () => {
+    for (const [kind, row] of Object.entries(C.RECORD_CLASSIFICATION)) {
+      if (['required', 'clinical-entry-only'].includes(row.signature.rule)) assert.equal(D.signatureRequired(kind, 'described-content', D.tightenConfiguration({ [kind]: { requireSignature: true } })), true);
+      else assert.throws(() => D.tightenConfiguration({ [kind]: { requireSignature: true } }), kind);
+    }
+    for (const kind of ['image', 'thumbnail', 'access-audit', 'system-operation']) assert.equal(D.signatureRequired(kind), false);
+  });
+
+  test('TEST-EMR-19-A F10: a legally preserved private draft is destroyed only after purpose end and explicit release', async () => {
+    const draft = D.newPurposeRecord('draft', 'private-draft', 'owner', t0, ['v1']);
+    const hold = { holdId: 'draft-duty', recordId: 'draft', basis: { law: 'synthetic-law', authority: 'court', documentReference: 'duty-1' }, actorId: 'custodian', at: t0 };
+    const held = D.placePurposeLegalHold(draft, hold);
+    const end = { recordId: 'draft', trigger: 'report-approved', actorId: 'owner', at: deadline };
+    await assert.rejects(D.destroyAtPurposeEnd(durable, held, end, deadline, async () => assert.fail('legal duty')));
+    const releasedAt = '2026-10-07T00:00:00.000Z';
+    const lifted = D.liftPurposeLegalHold(held, hold.holdId, { actorId: 'custodian', at: releasedAt, documentReference: 'release-1' });
+    await assert.rejects(D.destroyAtPurposeEnd(durable, lifted, end, deadline, async () => assert.fail('before release')));
+    assert.equal((await D.destroyAtPurposeEnd(durable, lifted, end, releasedAt,
+      async () => ({ completedAt: releasedAt, method: 'irreversible-permanent-deletion' }))).phase, 'completed');
+  });
+
 }

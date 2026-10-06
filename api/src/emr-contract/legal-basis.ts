@@ -21,17 +21,17 @@ export const LEGAL_SOURCES = freeze({
     verification: '제2조·제3조·제4조·제5조·제6조 본문 확인; 별표·부칙 원문 미확인' },
 });
 
-export interface StatutoryMinimum { years: number; basis: string; scope: string; verification: string }
+export interface StatutoryMinimum { clauseId: string; years: number; basis: string; scope: string; verification: string }
 export const STATUTORY_MINIMUM = freeze({
-  chart: { years: 10, basis: '의료법 시행규칙 제15조①2', scope: '진료기록부', verification: '본문 확인' },
-  prescription: { years: 2, basis: '의료법 시행규칙 제15조①3', scope: '처방전', verification: '본문 확인' },
-  surgery: { years: 10, basis: '의료법 시행규칙 제15조①4', scope: '수술기록', verification: '본문 확인' },
-  examination: { years: 5, basis: '의료법 시행규칙 제15조①5', scope: '검사내용 및 검사소견기록', verification: '본문 확인' },
-  imageReport: { years: 5, basis: '의료법 시행규칙 제15조①6', scope: '방사선 사진(영상물 포함) 및 그 소견서', verification: '본문 확인' },
-  patientRegister: { years: 5, basis: '의료법 시행규칙 제15조①1', scope: '환자 명부', verification: '본문 확인' },
-  nursing: { years: 5, basis: '의료법 시행규칙 제15조①7', scope: '간호기록부', verification: '본문 확인' },
-  midwifery: { years: 5, basis: '의료법 시행규칙 제15조①8', scope: '조산기록부', verification: '본문 확인' },
-  certificateCopy: { years: 3, basis: '의료법 시행규칙 제15조①9', scope: '진단서 등의 부본', verification: '본문 확인' },
-  access: { years: 2, basis: '개인정보의 안전성 확보조치 기준 제8조①2', scope: '민감정보 처리 시스템 접속기록',
+  chart: { clauseId: 'medical-rules:15.1.2', years: 10, basis: '의료법 시행규칙 제15조①2', scope: '진료기록부', verification: '본문 확인' },
+  prescription: { clauseId: 'medical-rules:15.1.3', years: 2, basis: '의료법 시행규칙 제15조①3', scope: '처방전', verification: '본문 확인' },
+  surgery: { clauseId: 'medical-rules:15.1.4', years: 10, basis: '의료법 시행규칙 제15조①4', scope: '수술기록', verification: '본문 확인' },
+  examination: { clauseId: 'medical-rules:15.1.5', years: 5, basis: '의료법 시행규칙 제15조①5', scope: '검사내용 및 검사소견기록', verification: '본문 확인' },
+  imageReport: { clauseId: 'medical-rules:15.1.6', years: 5, basis: '의료법 시행규칙 제15조①6', scope: '방사선 사진(영상물 포함) 및 그 소견서', verification: '본문 확인' },
+  patientRegister: { clauseId: 'medical-rules:15.1.1', years: 5, basis: '의료법 시행규칙 제15조①1', scope: '환자 명부', verification: '본문 확인' },
+  nursing: { clauseId: 'medical-rules:15.1.7', years: 5, basis: '의료법 시행규칙 제15조①7', scope: '간호기록부', verification: '본문 확인' },
+  midwifery: { clauseId: 'medical-rules:15.1.8', years: 5, basis: '의료법 시행규칙 제15조①8', scope: '조산기록부', verification: '본문 확인' },
+  certificateCopy: { clauseId: 'medical-rules:15.1.9', years: 3, basis: '의료법 시행규칙 제15조①9', scope: '진단서 등의 부본', verification: '본문 확인' },
+  access: { clauseId: 'access-safety:8.1.2', years: 2, basis: '개인정보의 안전성 확보조치 기준 제8조①2', scope: '민감정보 처리 시스템 접속기록',
     verification: '본문 확인' },
 } satisfies Record<string, StatutoryMinimum>);

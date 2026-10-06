@@ -1,6 +1,7 @@
 import { STATUTORY_MINIMUM as FLOOR, StatutoryMinimum } from './legal-basis';
 import { freeze } from './validation';
 
+export type PurposeEnd = 'report-approved' | 'report-finalized' | 'explicit-discard' | 'owner-deleted' | 'assignment-ended' | 'setting-replaced' | 'session-ended' | 'institution-closed' | 'transfer-obligations-ended' | 'operation-completed';
 export type SignatureRule = 'required' | 'clinical-entry-only' | 'source-evidence' | 'not-required';
 export interface RecordClassification {
   author: { observedSource: string; responsibility: 'immutable-actual-author-or-source' };
@@ -8,7 +9,7 @@ export interface RecordClassification {
   legalOriginalLocation: 'product-version-store-and-protected-object-store';
   managingInstitution: 'persisted-record-managing-institution';
   retention: { years: number; statutoryMinimum: readonly StatutoryMinimum[]; basis: string;
-    mode: 'statutory' | 'source-record' | 'purpose' };
+    mode: 'statutory' | 'source-record' | 'purpose'; purposeEnds: readonly PurposeEnd[] };
   signature: { rule: SignatureRule; basis: string; explanation: string };
   provenance: readonly ['author', 'server-time', 'sha256'];
   preserveEarlierVersions: true;
@@ -28,12 +29,13 @@ const unsigned = (explanation: string): RecordClassification['signature'] => ({ 
 
 function record(author: string, signature: RecordClassification['signature'],
   minima: readonly StatutoryMinimum[], clinicalAdoption: RecordClassification['clinicalAdoption'] = 'emr-candidate',
-  mode: RecordClassification['retention']['mode'] = minima.length ? 'statutory' : 'purpose'): RecordClassification {
+  mode: RecordClassification['retention']['mode'] = minima.length ? 'statutory' : 'purpose',
+  purposeEnds: readonly PurposeEnd[] = []): RecordClassification {
   return {
     author: { observedSource: author, responsibility: 'immutable-actual-author-or-source' }, clinicalAdoption,
     legalOriginalLocation: 'product-version-store-and-protected-object-store',
     managingInstitution: 'persisted-record-managing-institution',
-    retention: { years: Math.max(0, ...minima.map(m => m.years)), statutoryMinimum: minima, mode,
+    retention: { years: Math.max(0, ...minima.map(m => m.years)), statutoryMinimum: minima, mode, purposeEnds,
       basis: minima.length ? '이 기록 자체의 법정 종류별 기간; 계속 진료 1회 연장 외 기간 설정 금지; 만료 파기' :
         mode === 'source-record' ? '독립 기간 없음; 고정 원기록의 종류·기산·연장·만료를 그대로 따름; 연결만으로 기간 전파 금지' :
         '독립 법정 연수 없음; 명시적 목적 종료 시 파기; 실제 진료 기재로 채택한 내용은 해당 법정 종류로 분류' },
@@ -48,23 +50,23 @@ const clinical = signed('의료인이 진료에 관한 사항·의견을 작성�
 
 /** Classify actual content, not every referenced record. Source evidence has no independent retention clock. */
 export const RECORD_CLASSIFICATION = freeze({
-  'report-head': record('Report.updatedBy; immutable ReportVersion projection', clinical, images),
-  'report-version': record('ReportVersion.author; immutable author/signer identity', clinical, images),
-  'private-draft': record('ReportDraft.author; private to (uid, author)', conditional('개인 작업 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재/사용할 때 서명, 적용 보유기간 중 모든 저장판 보존'), []),
+  'report-head': record('Report.updatedBy; immutable ReportVersion projection', clinical, [...images, FLOOR.chart]),
+  'report-version': record('ReportVersion.author; immutable author/signer identity', clinical, [...images, FLOOR.chart]),
+  'private-draft': record('ReportDraft.author; private to (uid, author)', conditional('개인 작업 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재/사용할 때 서명, 적용 보유기간 중 모든 저장판 보존'), [], 'emr-candidate', 'purpose', ['report-approved', 'report-finalized', 'explicit-discard']),
   'report-evidence': record('Pinned ReportVersion/ReportDraft provenance', source('첨부·인용 해시 보존; 임상 기재를 담은 문서는 해당 작성자의 서명 보존'), [], 'emr-candidate', 'source-record'),
-  'tech-note': record('TechNoteRevision.authorSub/author', conditional('촬영기사의 업무 메모 자체의 전자서명 의무는 명시되지 않음; 의료인의 진료 기재이면 제22조①·제23조① 적용'), []),
+  'tech-note': record('TechNoteRevision.authorSub/author', conditional('촬영기사의 업무 메모 자체의 전자서명 의무는 명시되지 않음; 의료인의 진료 기재이면 제22조①·제23조① 적용'), [FLOOR.examination]),
   'clinical-question': record('StudyQuestion/StudyQuestionEntry.authorSub', clinical, chart),
   'clinical-answer': record('StudyQuestionEntry answer author', clinical, chart),
   consultation: record('StudyConsultation requester/recipient/changedBy', clinical, chart),
   'critical-result': record('CriticalResult.senderSub; pinned report version', clinical, chart),
   'critical-result-ack': record('CriticalResultEvent.actorSub; pinned acknowledgment', conditional('단순 수신 확인에 별도 서명 의무는 명시되지 않음; 임상 판단/조치 기재가 더해지면 서명'), [FLOOR.access]),
-  'image-request': record('StudyImageRequest requester/handler/changedBy', conditional('영상 전달 요청 자체에 별도 서명 의무는 명시되지 않음; 진료 지시/의견 기재이면 서명'), []),
+  'image-request': record('StudyImageRequest requester/handler/changedBy', conditional('영상 전달 요청 자체에 별도 서명 의무는 명시되지 않음; 진료 지시/의견 기재이면 서명'), [FLOOR.patientRegister]),
   finding: record('Finding/FindingRevision author/actor', clinical, chart),
   measurement: record('ViewerItem/ViewerRevision author/actor', source('수동 점·ROI·수치 자체의 개별 서명 의무는 명시되지 않음; 이를 진료 소견으로 기록한 문서에는 서명'), images),
   'key-image': record('ViewerItem author; SOP/frame reference', source('원영상/선택 이력 보존; 별도 영상 선택 서명 의무는 명시되지 않음'), images),
   'manual-sr': record('ManualSr.authorSub; immutable DICOM bytes', clinical, images),
   'external-sr-seg': record('External DICOM producer; unchanged bytes', source('원작성자·원서명 증거를 보존하고 재서명/재해석하지 않음; 원자료를 새 진료기록으로 기재할 때 별도 서명'), images),
-  'comparison-layout': record('ViewerJob.authorSub; image placement only', unsigned('배치만 있는 운영 기록; 임상 문구는 comparison-description으로 함께 분류'), [], 'operational-record'),
+  'comparison-layout': record('ViewerJob.authorSub; image placement only', unsigned('배치만 있는 운영 기록; 임상 문구는 comparison-description으로 함께 분류'), [], 'operational-record', 'purpose', ['owner-deleted']),
   'comparison-description': record('ViewerJob/ViewerJobRevision clinical title/description/actor', clinical, chart),
   'study-correction': record('StudyState.ov/orig; immutable modifying actor', conditional('정정 이력 자체의 별도 서명 의무는 명시되지 않음; 서명된 진료 기재를 정정하면 새 서명판 필요'), [], 'emr-candidate', 'source-record'),
   'patient-match': record('StudyState/Order; immutable matching actor', conditional('환자 명부 연결 정보; 진료기록 인적사항을 정정하면 해당 원기록 분류와 새 서명판 필요'), [FLOOR.patientRegister]),
@@ -80,17 +82,17 @@ export const RECORD_CLASSIFICATION = freeze({
   'access-audit': record('System recorder; immutable acting identity', unsigned('접속사건은 작성자·시각·해시 및 내구성으로 증명'), [FLOOR.access], 'evidence-record'),
   'signature-evidence': record('Registered signer/key registrar; exact signed bytes', unsigned('기존 서명 검증 증거에 재귀적 서명 의무는 명시되지 않음'), [], 'evidence-record', 'source-record'),
   order: record('RIS origin/requesting clinician', clinical, chart),
-  dictation: record('Radiologist; preserved voice/transcript versions', conditional('개인 음성 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재할 때 서명'), []),
-  assignment: record('ReaderAssignment.changedBy; allocation only', unsigned('업무 배정'), [], 'operational-record'),
-  preferences: record('Account/site setting author', unsigned('필터·배치 설정만; 환자 임상 문구가 있으면 임상 종류로 추가 분류'), [], 'operational-record'),
-  'reading-template': record('ReadingTemplate.owner', unsigned('환자 없는 문구 양식; 환자별 채택 내용은 서명된 임상 기재'), [], 'operational-record'),
-  'study-organization': record('StudyTagCatalog.ownerSub; FavoriteWorkspace.subject', conditional('분류표/즐겨찾기 동작 자체는 서명 의무 없음; 임상 기재로 채택하면 해당 종류로 분류'), []),
-  'identity-access': record('Keycloak/member/StudyAccessRevision author', unsigned('권한 부여 증거; 진료기록 서명과 구분'), [], 'operational-record'),
-  'authentication-session': record('Authentication service; no credential copying', unsigned('인증 상태; 종료한 비밀은 의무기록 보존 대상에서 제외'), [], 'operational-record'),
-  institution: record('Institution administrator', unsigned('기관 설정'), [], 'operational-record'),
-  'transfer-governance': record('TransferBasis/ProcessingAgreement/Transfer author', unsigned('법 제23조①의 진료기록 서명과 별개; 전송 근거·동의 계약은 유지'), [], 'evidence-record'),
+  dictation: record('Radiologist; preserved voice/transcript versions', conditional('개인 음성 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재할 때 서명'), [], 'emr-candidate', 'purpose', ['report-approved', 'report-finalized', 'explicit-discard']),
+  assignment: record('ReaderAssignment.changedBy; allocation only', unsigned('업무 배정'), [], 'operational-record', 'purpose', ['assignment-ended']),
+  preferences: record('Account/site setting author', unsigned('필터·배치 설정만; 환자 임상 문구가 있으면 임상 종류로 추가 분류'), [], 'operational-record', 'purpose', ['setting-replaced', 'owner-deleted']),
+  'reading-template': record('ReadingTemplate.owner', unsigned('환자 없는 문구 양식; 환자별 채택 내용은 서명된 임상 기재'), [], 'operational-record', 'purpose', ['owner-deleted']),
+  'study-organization': record('StudyTagCatalog.ownerSub; FavoriteWorkspace.subject', conditional('분류표/즐겨찾기 동작 자체는 서명 의무 없음; 임상 기재로 채택하면 해당 종류로 분류'), [], 'emr-candidate', 'purpose', ['owner-deleted']),
+  'identity-access': record('Keycloak/member/StudyAccessRevision author', unsigned('권한 부여 증거; 진료기록 서명과 구분'), [], 'operational-record', 'purpose', ['assignment-ended']),
+  'authentication-session': record('Authentication service; no credential copying', unsigned('인증 상태; 종료한 비밀은 의무기록 보존 대상에서 제외'), [], 'operational-record', 'purpose', ['session-ended']),
+  institution: record('Institution administrator', unsigned('기관 설정'), [], 'operational-record', 'purpose', ['institution-closed']),
+  'transfer-governance': record('TransferBasis/ProcessingAgreement/Transfer author', unsigned('법 제23조①의 진료기록 서명과 별개; 전송 근거·동의 계약은 유지'), [], 'evidence-record', 'purpose', ['transfer-obligations-ended']),
   'delivery-receipt': record('Gateway/service/request actor; fixed source reference', unsigned('전달 결과 증거; 원기록 서명 보존'), [FLOOR.access], 'evidence-record'),
-  'system-operation': record('System process; health/statistics/accounting', unsigned('운영 상태'), [], 'operational-record'),
+  'system-operation': record('System process; health/statistics/accounting', unsigned('운영 상태'), [], 'operational-record', 'purpose', ['operation-completed']),
 });
 export type RecordKind = keyof typeof RECORD_CLASSIFICATION;
 
