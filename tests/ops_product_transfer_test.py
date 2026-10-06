@@ -253,7 +253,9 @@ class Pure(unittest.TestCase):
         # S7-U5 then added the provider call in flight to MemberIsolation (three columns): 38 files, still 48 tables and the
         # same rows. S7-U5 D600 replaced it by the provider change records (ProviderChange, the three columns dropped): 39 files,
         # 49 tables, and two records (an unknown disable of the owed member, a settled end of a provider session).
-        self.assertEqual(len(transfer.MIGRATIONS), 39)
+        # S7-U5 round 9 gave MemberIsolation its own row number from a sequence (epoch: a re-created fact never takes an
+        # earlier number): 40 files, still 49 tables and the same rows, numbered 1 and 2 in insertion order.
+        self.assertEqual(len(transfer.MIGRATIONS), 40)
         self.assertEqual(len(transfer.TABLES), 49)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
@@ -271,7 +273,10 @@ class Pure(unittest.TestCase):
                          + 2)   # S7-U5 D600: the unknown and the settled provider change record
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),
                          [('SYNTHETIC-member-isolation-done', False, 0), ('SYNTHETIC-member-isolation-owed', True, 2)])
-        self.assertEqual(sorted(rows['MemberIsolation'][0]), ['attempts', 'decidedAt', 'nextAttemptAt', 'providerDoneAt', 'sub'])
+        self.assertEqual(sorted(rows['MemberIsolation'][0]), ['attempts', 'decidedAt', 'epoch', 'nextAttemptAt', 'providerDoneAt', 'sub'])
+        self.assertEqual(sorted((r['sub'], r['epoch']) for r in rows['MemberIsolation']),
+                         [('SYNTHETIC-member-isolation-done', 2), ('SYNTHETIC-member-isolation-owed', 1)])
+        self.assertEqual(transfer.expected_sequences()['MemberIsolation_epoch_seq'], dict(last_value=2, is_called=True))
         self.assertEqual(sorted((r['kind'], r['target'], r['state'], r['settledAt'] is None) for r in rows['ProviderChange']),
                          [('disable', 'SYNTHETIC-member-isolation-owed', 'unknown', True),
                           ('end_session', 'SYNTHETIC-idp-session-confirmed', 'done', False)])

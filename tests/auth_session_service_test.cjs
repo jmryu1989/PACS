@@ -4261,3 +4261,174 @@ test('U5E-27 (fix round 7) a 503 to a change request leaves it unknown whether o
   assert.deepEqual(await w.changes(Z), ['void', 'done'], 'c: a request never sent blocks nothing');
   await w.finish('U5E-27');
 });
+
+// S7-U5 fix round 9 (review N-1 of c282c6b; D600 line 6 "current-generation-conditional"): an Activate deletes the member's
+// isolation fact and the next Suspend writes a new one, so the generation must tell the two isolations apart - nothing that
+// worked for the earlier isolation may complete, change or clear the later one. A provider READ (a session listing) is not a
+// change call, so an Activate does not wait for it; a listing answered after its sender lost the work is discarded.
+//   a. Suspend #1's isolation is held in its second listing (after its disable); an Activate succeeds; Suspend #2 writes a
+//      new fact and is held in its first listing. Released, the stalled work of #1 records nothing for #2 and sends nothing:
+//      #2 is not recorded finished (the member is enabled at the provider at that moment) and Suspend #1 does not say its
+//      isolation finished. Released, Suspend #2 finishes as itself: disabled at the provider after the Activate's enable,
+//      recorded finished, nothing unknown - no isolation is left recorded finished while the member is enabled.
+//   b. A listing names provider session P and the work that listed it is held - (1) Suspend #1's first listing, its answer
+//      held; (2) the retry cycle's listing answered, the cycle held just before the store transaction of its first mark. An
+//      Activate finishes the work itself (P marked and ended by its id, the end confirmed), enables and clears; the member
+//      signs in again and the provider gives the new SSO the same id P (D598). The held work then goes on with its list: it
+//      marks nothing, asks no end of P and ends nothing - the member's new session and its SSO live, P's end stays confirmed.
+//   c. The retry cycle read the owed fact of an isolation; before it takes the work over, an Activate clears that fact and
+//      a new Suspend writes another, held in its first listing. The cycle takes nothing over (what it read is gone, even
+//      if the new fact's counter is the same) and asks the provider nothing; the new Suspend finishes as itself.
+//   d. Opposite side: an isolation held in its second listing while other members' isolations are written and cleared
+//      resumes and finishes - its own generation is unchanged.
+// What a case holds is the fake provider's request or answer (beforeAdmin / onAdmin) or the harness gate before a store
+// transaction, so the order is the same on the stand-in and on PostgreSQL.
+test('U5E-28 (fix round 9) an isolation\'s generation is never reused: work of an earlier isolation, resumed after an Activate and a new Suspend, completes, changes and ends nothing of the new one; the same isolation resumed still finishes', async t => {
+  const w = await world(t);
+  const { AdminService } = require('/app/dist/admin.service');
+  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
+  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
+  const fact = sub => w.base.memberIsolation.findUnique({ where: { sub } });
+  const member = (m, sessions = []) => { kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions }; return m; };
+  const answerOf = p => p.then(user => ({ status: 200, enabled: user?.enabled }),
+    error => ({ status: typeof error?.getStatus === 'function' ? error.getStatus() : 500, code: error?.response?.code ?? String(error) }));
+  const suspend = m => answerOf(admin.patchUser(m, { enabled: false }, caller));
+  const memberChanges = () => kc.adminCalls.filter(c => c === 'PUT disable' || c === 'PUT enable');
+  const sec = ms => Math.floor(ms / 1000);
+  // A Suspend held in its second listing: the provider read that follows its answered disable.
+  const heldAfterDisable = async m => {
+    const disable = holdAdmin('PUT disable', 'after', m);
+    const run = suspend(m);
+    await disable.arrived();
+    const listing = holdAdmin('GET sessions', 'before', m);
+    disable.release();
+    await listing.arrived();
+    return { run, release: () => listing.release() };
+  };
+
+  // (a)
+  {
+    const m = member('syn-sub-u5e28a');
+    const first = await heldAfterDisable(m);
+    const act = await activation(admin, m, caller).result;
+    assert.deepEqual([act.status, act.user?.enabled, await fact(m), kc.members[m].enabled], [200, true, null, true],
+      'a: the Activate succeeded while the first isolation\'s listing was held: enabled, the fact cleared');
+    const second = holdAdmin('GET sessions', 'before', m);
+    const s2 = suspend(m);
+    await second.arrived();
+    const secondFact = await fact(m);
+    assert.deepEqual([!!secondFact, secondFact.providerDoneAt, kc.members[m].enabled], [true, null, true],
+      'a: the second Suspend wrote a new fact, its work owed; the member is still enabled at the provider');
+    const changes = await w.base.providerChange.count({ where: { sub: m } }), calls = memberChanges().length;
+    first.release();
+    const s1 = await first.run;
+    assert.deepEqual([s1, (await fact(m)).providerDoneAt, memberChanges().length - calls, await w.base.providerChange.count({ where: { sub: m } }) - changes],
+      [{ status: 409, code: 'USER_ISOLATED' }, null, 0, 0],
+      'a: the first isolation\'s resumed work records the new isolation as nothing, sends and records no change; the first Suspend does not say it finished');
+    second.release();
+    const s2Answer = await s2;
+    await quiet(w);
+    const after = await fact(m), order = memberChanges();
+    assert.deepEqual([s2Answer, !!after?.providerDoneAt, kc.members[m].enabled, order.lastIndexOf('PUT disable') > order.lastIndexOf('PUT enable'),
+      await w.base.providerChange.count({ where: { sub: m, state: 'unknown' } })], [{ status: 200, enabled: false }, true, false, true, 0],
+      'a: the second Suspend finishes as itself - disabled after the Activate\'s enable, recorded finished, nothing unknown');
+  }
+
+  // (b)
+  for (const place of ['1', '2']) {
+    const at = 'b' + place + (place === '1' ? ', the first listing\'s answer held' : ', the cycle held before its first mark');
+    const P = 'syn-idp-u5e28b' + place;
+    const m = 'syn-sub-u5e28b' + place;
+    let resume, finished, cycle = null;
+    if (place === '1') {
+      member(m, [P]);
+      const late = holdAdmin('GET sessions', 'after', m);
+      finished = suspend(m);
+      await late.arrived();
+      resume = () => late.release();
+    } else {
+      await owedIsolation(admin, caller, m, P);
+      // The cycle's first store transaction takes the owed work over; its second marks what its listing named.
+      cycle = w.instance('C28b');
+      const taken = w.gate('C28b', 'tx.open'), marking = w.gate('C28b', 'tx.open');
+      cycle.service.onModuleInit();
+      await taken.arrived();
+      taken.release();
+      await marking.arrived();
+      resume = () => marking.release();
+    }
+    try {
+      const act = activation(admin, m, caller);
+      const result = await act.result;
+      assert.deepEqual([result.status, act.took < 15_000, await fact(m), kc.ended.includes(P), (await w.mark(P))?.confirmedAt != null,
+        (await w.changes(P)).every(state => state === 'done')], [200, true, null, true, true, true],
+        at + ': the Activate listed P itself, ended it by its id (confirmed) and cleared the fact');
+      // The member signs in again in the same browser: the provider gives the new SSO the id P again.
+      w.tick(1000);
+      kc.ended = kc.ended.filter(sid => sid !== P);
+      const again = await login(w, w.I2, await w.issue('u5e28b-again-' + place, { sub: m, groups: [A], idp: P, authTime: sec(Date.now()) }));
+      assert.deepEqual([again.done.cookie, !!again.done.proof], ['S', true], at + ': the active member enters with the new SSO');
+      const ends = (await w.changes(P)).length, asked = kc.endRequests.filter(sid => sid === P).length, calls = kc.adminCalls.length;
+      resume();
+      if (finished) assert.deepEqual(await finished, { status: 409, code: 'USER_ISOLATED' }, at + ': the first Suspend does not say it finished');
+      await quiet(w);
+      await w.told();
+      assert.deepEqual([await w.base.authSession.count({ where: { sub: m } }), await w.version(again.done.newSid), kc.ended.includes(P),
+        (await w.mark(P))?.confirmedAt != null, (await w.changes(P)).length - ends, kc.endRequests.filter(sid => sid === P).length - asked,
+        kc.adminCalls.slice(calls).filter(c => c.startsWith('PUT')), await fact(m), kc.members[m].enabled],
+        [1, 'u5e28b-again-' + place, false, true, 0, 0, [], null, true],
+        at + ': the late list marks nothing and ends nothing: the new session and its SSO live, P\'s end stays confirmed, nothing is sent');
+    } finally {
+      resume();
+      if (cycle) cycle.service.onModuleDestroy();
+    }
+  }
+
+  // (c)
+  {
+    const P = 'syn-idp-u5e28c';
+    const m = 'syn-sub-u5e28c';
+    await owedIsolation(admin, caller, m, P);
+    const owed = await fact(m);
+    assert.deepEqual([!!owed, owed?.providerDoneAt], [true, null], 'c: the isolation\'s work is owed');
+    // The cycle has read the owed fact and is held before the store transaction that would take it over.
+    const cycle = w.instance('C28c');
+    const taking = w.gate('C28c', 'tx.open');
+    cycle.service.onModuleInit();
+    try {
+      await taking.arrived();
+      assert.equal((await activation(admin, m, caller).result).status, 200, 'c: the Activate finished the work and cleared the fact');
+      const second = holdAdmin('GET sessions', 'before', m);
+      const s2 = suspend(m);
+      await second.arrived();
+      const calls = kc.adminCalls.length, changes = await w.base.providerChange.count({ where: { sub: m } });
+      taking.release();
+      await quiet(w);
+      assert.deepEqual([kc.adminCalls.slice(calls), await w.base.providerChange.count({ where: { sub: m } }) - changes, (await fact(m)).providerDoneAt],
+        [[], 0, null], 'c: the cycle takes nothing over - it asks the provider nothing and records nothing for the new isolation');
+      second.release();
+      assert.deepEqual(await s2, { status: 200, enabled: false }, 'c: the new Suspend finishes as itself');
+    } finally {
+      taking.release();
+      cycle.service.onModuleDestroy();
+    }
+    await quiet(w);
+    assert.deepEqual([!!(await fact(m))?.providerDoneAt, kc.members[m].enabled], [true, false]);
+  }
+
+  // (d)
+  {
+    const m = member('syn-sub-u5e28d');
+    const held = await heldAfterDisable(m);
+    // Other members' isolations are written and cleared meanwhile.
+    for (const other of [member('syn-sub-u5e28d-x'), member('syn-sub-u5e28d-y')]) {
+      assert.deepEqual(await suspend(other), { status: 200, enabled: false });
+      assert.equal((await activation(admin, other, caller).result).status, 200);
+    }
+    held.release();
+    assert.deepEqual(await held.run, { status: 200, enabled: false }, 'd: the same isolation, resumed, finishes');
+    assert.deepEqual([!!(await fact(m))?.providerDoneAt, kc.members[m].enabled, await w.base.providerChange.count({ where: { sub: m, state: 'unknown' } })],
+      [true, false, 0], 'd: recorded finished, disabled at the provider, nothing unknown');
+  }
+  await w.finish('U5E-28');
+});

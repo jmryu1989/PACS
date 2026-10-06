@@ -37,6 +37,8 @@ LIMITS = combined.LIMITS
 # stack when written - estimated at well under 1 KB of catalog and rows.
 # S7-U5 D600 provider change records (49 tables: ProviderChange, its two rows, its sequence and two indexes; the three
 # in-flight columns of MemberIsolation dropped): not measured on a stack when written - estimated at about 2 KB.
+# S7-U5 round 9 isolation row identity (MemberIsolation.epoch, its sequence and unique index): not measured on a stack
+# when written - estimated at well under 1 KB.
 RECEIPT_LIMIT = 256*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
@@ -78,7 +80,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261005120000_idp_session_end/migration.sql',
               'api/prisma/migrations/20261005130000_member_isolation/migration.sql',
               'api/prisma/migrations/20261006120000_member_isolation_call/migration.sql',
-              'api/prisma/migrations/20261007120000_provider_change/migration.sql']
+              'api/prisma/migrations/20261007120000_provider_change/migration.sql',
+              'api/prisma/migrations/20261007130000_member_isolation_epoch/migration.sql']
 TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -87,7 +90,7 @@ TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderCha
                  'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt',
                  'GatewayReceipt', 'GatewayRetryRequest'])
-SEQUENCES = ['AuditLog_id_seq', 'ProviderChange_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
+SEQUENCES = ['AuditLog_id_seq', 'MemberIsolation_epoch_seq', 'ProviderChange_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
 
@@ -396,11 +399,11 @@ def expected_rows(uid):
              nextAttemptAt=STAMP)]
     # S7-U5 member isolation: our own record that a member is isolated is state a restore must keep - while it exists the
     # member gets no session, and an unfinished one is provider work still owed. One of each, every column with a value
-    # (providerDoneAt NULL on the owed one).
+    # (providerDoneAt NULL on the owed one). The row's own number (epoch) comes from its sequence, in insertion order.
     rows['MemberIsolation'] = [
-        dict(sub='SYNTHETIC-member-isolation-owed',decidedAt=STAMP,providerDoneAt=None,attempts=2,
+        dict(sub='SYNTHETIC-member-isolation-owed',epoch=1,decidedAt=STAMP,providerDoneAt=None,attempts=2,
              nextAttemptAt='2026-10-06T00:00:00.456'),
-        dict(sub='SYNTHETIC-member-isolation-done',decidedAt=STAMP,providerDoneAt=STAMP,attempts=0,nextAttemptAt=STAMP)]
+        dict(sub='SYNTHETIC-member-isolation-done',epoch=2,decidedAt=STAMP,providerDoneAt=STAMP,attempts=0,nextAttemptAt=STAMP)]
     # S7-U5 D600: the provider change records are state a restore must keep - an unknown one (here the owed member's disable
     # whose answer was lost) keeps that member's re-activation from succeeding until that call's own answer settles it, and
     # a settled one is the newest end request of a provider session (its mark may be confirmed). One of each, every column
@@ -424,8 +427,9 @@ def expected_rows(uid):
 
 
 def expected_sequences():
-    return {name: dict(last_value=2 if name in ('ReportVersion_id_seq', 'ProviderChange_id_seq') else 1,
-                       is_called=name in ('ReportVersion_id_seq', 'UserFilter_id_seq', 'ProviderChange_id_seq')) for name in SEQUENCES}
+    return {name: dict(last_value=2 if name in ('ReportVersion_id_seq', 'ProviderChange_id_seq', 'MemberIsolation_epoch_seq') else 1,
+                       is_called=name in ('ReportVersion_id_seq', 'UserFilter_id_seq', 'ProviderChange_id_seq',
+                                          'MemberIsolation_epoch_seq')) for name in SEQUENCES}
 
 
 def sql_literal(text):
@@ -462,7 +466,8 @@ def create_product(name, db, uid):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.
-            fields = [key for key in row if not (table in ('ReportVersion', 'UserFilter', 'ProviderChange') and key == 'id')]
+            fields = [key for key in row if not ((table in ('ReportVersion', 'UserFilter', 'ProviderChange') and key == 'id')
+                                                 or (table == 'MemberIsolation' and key == 'epoch'))]
             quoted = ','.join('"'+key+'"' for key in fields)
             execute(name, db, 'INSERT INTO "'+table+'" ('+quoted+') SELECT '+quoted+
                 ' FROM json_populate_record(NULL::"'+table+'", '+sql_literal(json.dumps(row))+')')

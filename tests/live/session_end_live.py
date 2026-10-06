@@ -650,17 +650,6 @@ class SessionEndLive(unittest.TestCase):
             if self.provider_enabled("A") is False:
                 self.stack.kc_admin("PUT", f"/users/{self.ids['A']}", {"enabled": True})
 
-    def activate(self, who: str):
-        """Activate through the product's admin route; an answer that could not be confirmed (409 ACTIVATION_UNCONFIRMED,
-        retryAfterSeconds) is pressed again after the interval it names, as the console lets the administrator do."""
-        for _ in range(4):
-            answer = self.admin_sets_enabled(who, True)
-            body = answer.body if isinstance(answer.body, dict) else {}
-            if answer.status != 409 or body.get("code") != "ACTIVATION_UNCONFIRMED":
-                return answer
-            time.sleep(float(body.get("retryAfterSeconds") or 5))
-        return answer
-
     def test_11_an_isolation_ends_each_provider_session_by_its_id_and_the_next_sso_given_that_id_lives(self):
         """S7-U5 D600 (fix round 6) on the real Keycloak, with the sid reuse of D598: doctor A is signed in on two PCs, one
         a profile that once closed a login page (so Keycloak gives that browser's next SSO the same id, SE-03b). The
@@ -715,10 +704,14 @@ class SessionEndLive(unittest.TestCase):
             psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["B"]}\';')
             ended_b = (premise.status, self.provider_alive("B"), self.me(context))
             self.assertEqual(ended_b, (204, 0, (401, None)), "a late end request of that id would end the next person's SSO")
-            activated = self.activate("A")
+            # Every change of A has its own answer by now (the disable answered with the Suspend's 200, A's end requests
+            # done above; the premise's DELETE went to Keycloak directly and B's ended session is B's), so the FIRST press
+            # must succeed: a 409 ACTIVATION_UNCONFIRMED here would be a real unconfirmed state, not one to press through.
+            activated = self.admin_sets_enabled("A", True)
             self.assertEqual((activated.status, (activated.body or {}).get("enabled")), (200, True), activated.text)
             self.assertEqual((self.isolation("A"), self.provider_enabled("A")), ((False, False), True))
-            self.report("SE-11", same_sid=True, a_provider_sessions=len(a_sids), held_end_released_after_new_sso="not coverable here")
+            self.report("SE-11", same_sid=True, a_provider_sessions=len(a_sids), activate_first_answer=activated.status,
+                        held_end_released_after_new_sso="not coverable here")
         finally:
             if self.isolation("A")[0] or self.provider_enabled("A") is False:
                 psql(f'DELETE FROM "MemberIsolation" WHERE sub=\'{self.ids["A"]}\';')

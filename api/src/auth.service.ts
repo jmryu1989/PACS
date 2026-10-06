@@ -122,6 +122,14 @@ type StorageStep = 'session_read' | 'session_write' | 'end_transaction' | 'login
 /** 보내기 전에 기록한 변경 호출 하나(ProviderChange 행). */
 type Change = { id: number; kind: 'disable' | 'enable' | 'end_session'; target: string };
 type EndResult = { ended: boolean; idpSid: string | null; change: Change | null };
+/**
+ * 격리의 세대: 사실 행 자체의 번호(`epoch`, DB 순번 — 재활성화가 지운 뒤 다시 만든 행도 앞의 번호를 받지 않는다)와 그 행에서
+ * 일을 쥔 번호(`attempts`, 새 행에서 0부터 다시 센다). 둘 다 같아야 같은 세대다: attempts만 보면 앞선 격리의 일을 쥐었던
+ * 쪽이 다시 만들어진 행의 같은 번호를 자기 것으로 안다.
+ */
+type Generation = { epoch: number; attempts: number };
+const sameGeneration = <T extends Generation>(row: T | null, claim: Generation): row is T =>
+  !!row && row.epoch === claim.epoch && row.attempts === claim.attempts;
 /** 재활성화의 답: 끝났다(그때 다시 읽은 회원), 기한 안에 확정하지 못했다(격리 유지), 더 새 정지가 넘겨받았다. */
 export type Reactivation = { outcome: 'activated'; user: KeycloakUser } | { outcome: 'unconfirmed' } | { outcome: 'superseded' };
 /**
@@ -586,8 +594,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 관리자의 회원 격리(정지·승인 변경·승인 취소). 순서가 계약이다:
    *   1. 우리 쪽 사실을 먼저 남긴다(MemberIsolation, 회원 잠금 안에서 한 commit). 이때부터 콜백과 갱신은 이 회원에게 세션을
    *      만들거나 잇지 않는다 — 인증 서버의 관리 API가 그 뒤에 답하지 않아도 그렇다(로그인 길에서 관리 API를 읽지 않는다).
-   *      사실의 세대 번호(attempts)도 같은 commit에서 올린다: 끝나 가던 재활성화는 자기가 쥔 번호일 때만 사실을 지우므로 이
-   *      새 정지를 지우지 못한다.
+   *      사실의 세대도 같은 commit에서 바뀐다(있던 행은 attempts를 올리고, 새로 만든 행은 앞의 어느 행과도 다른 epoch를
+   *      받는다): 끝나 가던 재활성화와 앞선 격리의 처리는 자기가 쥔 세대일 때만 사실을 지우거나 완료로 적으므로, 이 새 정지를
+   *      지우지도 끝났다고 적지도 못한다.
    *   2. 그 회원의 지금 제품 세션을 끝낸다(우리 DB만의 일; 표식·접속기록·provider 종료 요청은 끝내기의 한 길 그대로).
    *   3. 인증 서버 일(finishIsolation). 어디서 끊기면 던지고, 사실은 "인증 서버 일이 남음"으로 남아 종료 재시도 주기가 잇는다.
    * 이미 사실이 있으면(앞선 격리가 끝나지 않았거나 정지된 회원을 다시 격리) 남은 인증 서버 일을 다시 하도록 되돌린다.
@@ -614,23 +623,28 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 실패를 알린다. 모두 몇 번을 다시 해도 같은 결과가 되는 일이라 재시도 주기가 처음부터 다시 한다. 완료 시각을 적어도 사실
    * 자체는 남는다 — 지우는 것은 끝까지 성공한 재활성화뿐이다.
    *
-   * 한 번에 하나(F04): 시작할 때 사실의 세대 번호(attempts)를 올려 그 번호를 자기 몫으로 쥔다(정지·재활성화·주기가 모두 같은
+   * 한 번에 하나(F04): 시작할 때 사실의 세대(Generation)를 올려 그 세대를 자기 몫으로 쥔다(정지·재활성화·주기가 모두 같은
    * 길로 넘겨받는다). 인증 서버를 부르는 동안 트랜잭션·잠금은 쥐지 않는다. 나열 앞마다 몫을 다시 확인하고, 변경 호출(비활성화)은
-   * 회원 잠금 안에서 그 번호가 아직 자기 것일 때만 기록되며 기록된 것만 보낸다 — 넘겨받힌 쪽은 인증 서버에 더 묻지도 바꾸지도
+   * 회원 잠금 안에서 그 세대가 아직 자기 것일 때만 기록되며 기록된 것만 보낸다 — 넘겨받힌 쪽은 인증 서버에 더 묻지도 바꾸지도
    * 않는다. 넘겨받힌 쪽이 이미 보낸 호출은 넘겨받은 쪽이 그 기록으로 안다(reactivateMember가 그 답을 기다린다).
+   * 나열은 읽기라 재활성화가 기다리지 않는다(변경 호출이 아니다; 한도 ISOLATION_CALL_MS에 끊는다). 늦게 온 목록은 쓰기 직전에
+   * 버린다: 목록의 sid마다 표식·종료 요청 기록과 같은 commit에서, 회원 잠금 아래 세대를 확인한다(endMemberSessions의 `still`).
+   * 몫을 잃었으면 아무것도 적거나 보내지 않고 멈춘다 — 그 회원에게 아직 할 일이 있으면 넘겨받은 쪽이 자기 나열로 한다.
    *
    * 완료(providerDoneAt)는 이 처리를 시작할 때 이 회원에게 답을 모르는 변경 호출이 없었고 끝날 때도 없을 때만 적는다: 앞선
    * 재활성화의 활성화가 늦게 닿으면 이 처리의 비활성화 뒤에 회원이 다시 활성이 된다. 그때는 일은 하되 완료를 적지 않고, 그
    * 호출이 자기 답을 받은 뒤의 주기가 처음부터 다시 한다(그 답을 기다리는 동안에도 비활성화는 다시 보낸다 — 격리 쪽으로만 움직인다).
-   * `claimed`는 이미 번호를 올린 쪽(주기·재활성화)이 넘기는 그 번호, `until`은 기다림의 기한(이 프로세스 단조 시계)이다.
+   * `claimed`는 이미 세대를 올린 쪽(주기·재활성화)이 넘기는 그 세대, `until`은 기다림의 기한(이 프로세스 단조 시계)이다.
    * 완료를 적었으면 true, 사실이 없거나 넘겨받혀 멈췄으면 false, 인증 서버 일이 끝나지 않았으면 던진다.
    */
-  async finishIsolation(sub: string, claimed?: number, until = Number.POSITIVE_INFINITY): Promise<boolean> {
+  async finishIsolation(sub: string, claimed?: Generation, until = Number.POSITIVE_INFINITY): Promise<boolean> {
     const claim = claimed ?? await this.claimIsolation(sub);
     if (claim === null) return false;
-    const owned = async () => {
-      const row = await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
-      return !!row && row.providerDoneAt === null && row.attempts === claim;
+    // `tx`를 주면 그 트랜잭션(회원 잠금을 쥔) 안에서 읽는다.
+    const owned = async (tx?: any) => {
+      const row = tx ? await tx.memberIsolation.findUnique({ where: { sub } })
+        : await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
+      return sameGeneration(row, claim) && row.providerDoneAt === null;
     };
     const left = () => Math.min(ISOLATION_CALL_MS, until - performance.now());
     // 시작할 때 답을 모르는 회원 상태 변경(앞선 쪽의 비활성화·활성화)이 있었는가. 세션 종료는 아래 기다림이 따로 본다.
@@ -654,8 +668,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     if (!await this.endMemberSessions(sub, [], owned)) return false;
     if (!clean) throw this.isolationUnfinished();
     const done = await this.memberTx(sub, async tx => {
-      const row = await tx.memberIsolation.findUnique({ where: { sub } });
-      if (!row || row.providerDoneAt !== null || row.attempts !== claim) return 'lost';
+      if (!await owned(tx)) return 'lost';
       if (await tx.providerChange.findFirst({ where: { sub, state: 'unknown' }, select: { id: true } })) return 'open';
       await tx.memberIsolation.update({ where: { sub }, data: { providerDoneAt: new Date() } });
       return 'done';
@@ -684,25 +697,26 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 격리의 남은 일을 자기 몫으로 쥔다: 회원 잠금 안에서 사실의 세대 번호를 하나 올리고 그 번호를 돌려준다. 변경 호출의 기록도
-   * 같은 잠금 안에서 번호를 보므로, 번호가 올라간 뒤에는 앞선 쪽이 새 변경을 기록하지 못하고, 그 전에 기록된 것은 올린 쪽이
-   * 본다. 다음 시도 시각도 미뤄 두어 이 일을 하는 동안 주기가 같은 사실을 집지 않게 한다. `owedAt`(재시도 주기)이면 사실이 그
-   * 번호이고 일이 남았을 때만 쥔다. 쥐지 못하면 null.
+   * 격리의 남은 일을 자기 몫으로 쥔다: 회원 잠금 안에서 사실의 attempts를 하나 올리고 그 세대(그 행의 epoch와 올린 번호)를
+   * 돌려준다. 변경 호출의 기록도 같은 잠금 안에서 세대를 보므로, 올라간 뒤에는 앞선 쪽이 새 변경을 기록하지 못하고, 그 전에
+   * 기록된 것은 올린 쪽이 본다. 다음 시도 시각도 미뤄 두어 이 일을 하는 동안 주기가 같은 사실을 집지 않게 한다. `owedAt`(재시도
+   * 주기가 읽은 행의 세대)이면 사실이 아직 그 세대이고 일이 남았을 때만 쥔다 — 읽은 뒤 재활성화가 지우고 새 정지가 다시 만든
+   * 행은 attempts가 같아도 쥐지 않는다(그 행의 일은 그 정지가 하고 있다). 쥐지 못하면 null.
    */
-  private async claimIsolation(sub: string, owedAt?: number): Promise<number | null> {
+  private async claimIsolation(sub: string, owedAt?: Generation): Promise<Generation | null> {
     return this.memberTx(sub, async tx => {
       const row = await tx.memberIsolation.findUnique({ where: { sub } });
-      if (!row || (owedAt !== undefined && (row.attempts !== owedAt || row.providerDoneAt !== null))) return null;
+      if (!row || (owedAt !== undefined && (!sameGeneration(row, owedAt) || row.providerDoneAt !== null))) return null;
       const next = row.attempts + 1;
       await tx.memberIsolation.update({ where: { sub }, data: { attempts: next,
         nextAttemptAt: new Date(Date.now() + IDP_END_BACKOFF_MS[Math.min(next, IDP_END_BACKOFF_MS.length - 1)]) } });
-      return next;
+      return { epoch: row.epoch, attempts: next };
     });
   }
 
   /**
    * 나열 한 번: 몫을 쥔 동안만 묻는다(null = 넘겨받혔다). 읽기라 한도에 끊고, 실패는 `error`로 돌려준다(변경 결과 불명이 아니다).
-   * 늦게 온 목록은 다음 표식 앞의 몫 확인(endMemberSessions의 still)이 버린다.
+   * 늦게 온 목록은 쓰기 직전의 몫 확인(endMemberSessions의 still — 표식과 같은 commit)이 버린다.
    */
   private async listSessions(sub: string, owned: () => Promise<boolean>, limitMs: number)
     : Promise<{ value: string[] } | { error: unknown } | null> {
@@ -713,20 +727,20 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 회원 비활성화/활성화 — 변경 호출 하나. 회원 잠금 안에서 세대 번호가 아직 `claim`일 때만(사실 없이 하는 재활성화는 `claim`
+   * 회원 비활성화/활성화 — 변경 호출 하나. 회원 잠금 안에서 세대가 아직 `claim`일 때만(사실 없이 하는 재활성화는 `claim`
    * null: 사실이 여전히 없을 때만; 비활성화는 일이 남은 사실일 때만) 보내기 전에 기록하고, commit 뒤에 보낸다. 기록하지
    * 못했으면 null(넘겨받혔다 또는 새 정지가 왔다). 기다림(`waitMs`)이 끝나면 'pending' — 그 호출은 자기 답이 올 때까지 남는다.
    * 남은 시간이 없으면 기록하지도 보내지도 않고 'pending'이다.
    */
-  private async memberChange(sub: string, claim: number | null, enabled: boolean, waitMs: number)
+  private async memberChange(sub: string, claim: Generation | null, enabled: boolean, waitMs: number)
     : Promise<'done' | 'void' | 'unknown' | 'pending' | null> {
     if (waitMs <= 0) return 'pending';
     const kind = enabled ? 'enable' : 'disable';
     const change: Change | null = await this.memberTx(sub, async tx => {
       const fact = await tx.memberIsolation.findUnique({ where: { sub } });
-      if (claim === null ? fact !== null : !fact || fact.attempts !== claim || (!enabled && fact.providerDoneAt !== null)) return null;
+      if (claim === null ? fact !== null : !sameGeneration(fact, claim) || (!enabled && fact.providerDoneAt !== null)) return null;
       const row = await tx.providerChange.create({ data: {
-        kind, target: sub, sub, generation: claim ?? 0, state: 'unknown', createdAt: new Date(),
+        kind, target: sub, sub, generation: claim?.attempts ?? 0, state: 'unknown', createdAt: new Date(),
       } });
       return { id: row.id, kind, target: sub };
     });
@@ -806,13 +820,14 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * 재활성화(Activate)의 한 길(S7-U5 D600) — 기한 `until`(이 프로세스 단조 시계) 안에 답한다. 순서가 계약이다:
-   *   1. 남은 일을 넘겨받는다(세대 번호를 올린다): 앞선 정지의 처리·재시도 주기는 다음 걸음에서 멈추고 새 변경을 보내지 못한다.
+   *   1. 남은 일을 넘겨받는다(세대를 올린다): 앞선 정지의 처리·재시도 주기는 다음 걸음에서 멈추고 새 변경을 보내지 못한다.
    *   2. 옛 효과 배제: 이 회원에게 보낸 변경 호출(비활성화·활성화·그 회원 세션의 종료)이 모두 **자기 답으로** 정해질 때까지
    *      기다린다(DB만 읽는다, 잠금 없이). 시간·재조회·다른 호출의 답으로 대신하지 않는다.
    *   3. 남은 격리 일(나열·표식·세션 종료)이 있으면 끝낸다 — 격리 전에 교환해 둔 code는 표식이 막는다(U5E-14/15).
    *   4. 활성화를 보내고 그 답으로 확정한다. 5. 인증 서버에서 다시 읽어 활성임을 본다.
-   *   6. 회원 잠금 안에서 세대 번호가 그대로이고 답을 모르는 변경이 없을 때만 격리 사실을 지운다 — 그사이 들어온 새 정지는
-   *      번호를 올렸으므로 지워지지도, 이 활성화로 뒤집히지도 않는다(그 정지의 비활성화가 이 활성화 뒤에 다시 보내진다).
+   *   6. 회원 잠금 안에서 세대가 그대로이고 답을 모르는 변경이 없을 때만 격리 사실을 지운다 — 그사이 들어온 새 정지는
+   *      세대를 바꿨으므로(있던 행은 attempts, 다른 재활성화가 지운 뒤 다시 만든 행은 epoch) 지워지지도, 이 활성화로 뒤집히지도
+   *      않는다(그 정지의 비활성화가 이 활성화 뒤에 다시 보내진다).
    * 어느 걸음이든 기한 안에 끝나지 않으면 'unconfirmed'(격리 유지; 부른 쪽이 5초 뒤 다시 하게 한다), 새 정지가 넘겨받았으면
    * 'superseded'. 기한이 지나도 이미 보낸 호출은 그대로 둔다(그 답이 기록을 정한다). 사실이 없으면(우리가 격리하지 않은 비활성
    * 회원) 2·4·5를 하고, 6에서 그사이 사실이 생기지 않았는지 본다. 로그인·갱신 길은 이 일을 기다리지 않는다.
@@ -822,9 +837,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const claim = known ? await this.claimIsolation(sub) : null;
     if (!await this.changesSettled(sub, [], until)) return { outcome: 'unconfirmed' };
     if (claim !== null) {
-      // 번호를 쥔 뒤에 다시 읽는다: 그 전에 주기가 남은 일을 끝냈을 수 있고, 쥔 뒤에는 이 쪽만 완료를 적는다.
+      // 세대를 쥔 뒤에 다시 읽는다: 그 전에 주기가 남은 일을 끝냈을 수 있고, 쥔 뒤에는 이 쪽만 완료를 적는다.
       const owed = await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
-      if (!owed || owed.attempts !== claim) return { outcome: 'superseded' };
+      if (!sameGeneration(owed, claim)) return { outcome: 'superseded' };
       if (owed.providerDoneAt === null) {
         try {
           if (!await this.finishIsolation(sub, claim, until)) return { outcome: 'superseded' };
@@ -842,7 +857,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     if (!user?.enabled) return { outcome: 'unconfirmed' };
     const cleared = await this.memberTx(sub, async tx => {
       const fact = await tx.memberIsolation.findUnique({ where: { sub } });
-      if (claim === null ? fact !== null : !!fact && fact.attempts !== claim) return 'superseded' as const;
+      if (claim === null ? fact !== null : !!fact && !sameGeneration(fact, claim)) return 'superseded' as const;
       if (await tx.providerChange.findFirst({ where: { sub, state: 'unknown' }, select: { id: true } })) return 'unconfirmed' as const;
       if (fact) await tx.memberIsolation.delete({ where: { sub } });
       return 'activated' as const;
@@ -857,22 +872,27 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 경쟁에 진 관찰(그사이 갱신된 행)은 다시 읽어 끝내고, 그래도 남으면 409다 — 부른 쪽이 격리 실패로 다룬다.
    * 다른 PC의 provider 세션은 부른 쪽(finishIsolation)이 나열해 넘긴 sid마다 같은 길로 끝낸다 — 사용자 전체 로그아웃은 쓰지 않는다.
    * `still`은 격리의 남은 일을 하는 쪽이 아직 그 몫을 쥐고 있는지 묻는다(finishIsolation): 표식 하나·제품 행 끝냄 앞마다
-   * 묻고, 아니면 멈춰 false를 돌려준다 — 그사이 재활성화된 회원의 새 세션을 옛 격리가 끝내지 않는다.
+   * 묻고, 아니면 멈춰 false를 돌려준다 — 그사이 재활성화된 회원의 새 세션을 옛 격리가 끝내지 않는다. 표식 앞의 물음은 그
+   * 표식의 트랜잭션 안에서 회원 잠금을 쥐고 한다(`still(tx)`).
    */
-  async endMemberSessions(sub: string, idpSids: string[] = [], still: () => Promise<boolean> = async () => true): Promise<boolean> {
+  async endMemberSessions(sub: string, idpSids: string[] = [], still: (tx?: any) => Promise<boolean> = async () => true): Promise<boolean> {
     /**
      * 먼저, 부른 쪽이 인증 서버에서 읽어 온 그 회원의 provider 세션 **전부**에 표식을 남긴다(제품 행이 아직 없는 것까지 —
      * 격리 전에 code를 교환해 둔 콜백의 SSO도 여기 있다). 기록된 사실이라 시점에 기대지 않는다: 그 콜백은 언제 commit하든,
      * 그 사이 회원이 다시 활성화되었든 콜백의 표식 검사가 막는다. 각 표식은 그 provider 세션의 잠금 안에서 남기고 그
      * provider 세션의 행을 함께 끝낸다(endRows — 같은 잠금이라 먼저 잠금을 쥔 콜백의 세션은 그 commit 뒤 여기서 끝난다).
+     * 목록은 늦게 올 수 있는 읽기의 결과다: 그 목록으로 표식하고 종료 요청을 기록하는 것은 몫을 쥔 동안만이고, 그 확인은
+     * 같은 commit 안에서 회원 잠금(provider 세션 잠금 다음 — 콜백과 같은 순서)을 쥐고 한다. 따로 물으면 물은 뒤 commit 전에
+     * 재활성화가 끝나고 그 sid를 다시 받은 새 SSO로 회원이 들어올 수 있다 — 그러면 옛 목록이 그 새 세션을 끝낸다.
      */
     for (const idpSid of new Set(idpSids)) {
-      if (!await still()) return false;
-      let change: Change | null;
+      let change: Change | null | 'lost';
       try {
         change = await this.prisma.$transaction(async tx => {
           await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
           await this.lockIdpSession(tx, idpSid);
+          await this.lockMember(tx, sub);
+          if (!await still(tx)) return 'lost' as const;
           return this.endRows(tx, idpSid, [], 'isolation', null, undefined, sub);
         }, { maxWait: 4000, timeout: 8000 });
       } catch (error: any) {
@@ -880,6 +900,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         this.storageWarning('end_transaction');
         throw this.storageFailure();
       }
+      if (change === 'lost') return false;
       if (change) this.tellIdp(change);
     }
     for (let rounds = 0; ; rounds++) {
@@ -1020,7 +1041,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       this.storageWarning('idp_end_cycle');
     }
     // 끝나지 않은 격리의 인증 서버 일도 같은 대기열 규칙으로 잇는다(우리 쪽 사실이 곧 대기열이다): 프로세스 시작 때는 전부,
-    // 주기마다는 기한이 된 것만. 세대 번호를 조건으로 한 넘겨받기가 여러 인스턴스 중 하나만 통과시킨다. 실패는 다음 기한을
+    // 주기마다는 기한이 된 것만. 세대를 조건으로 한 넘겨받기가 여러 인스턴스 중 하나만 통과시킨다. 실패는 다음 기한을
     // 늦출 뿐이다. 이 프로세스가 그 회원에게 보낸 변경 호출이 아직 답을 기다리면 이번에는 넘어간다.
     try {
       const owed = await this.prisma.memberIsolation.findMany({
@@ -1031,8 +1052,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       for (const row of owed) {
         if (this.flying.has('member:' + row.sub)) continue;
         try {
-          // 넘겨받은 번호가 이 주기의 몫이다(finishIsolation이 걸음마다 확인한다).
-          const claim = await this.claimIsolation(row.sub, row.attempts);
+          // 넘겨받은 세대가 이 주기의 몫이다(finishIsolation이 걸음마다 확인한다). 읽은 행의 세대일 때만 넘겨받는다.
+          const claim = await this.claimIsolation(row.sub, { epoch: row.epoch, attempts: row.attempts });
           if (claim !== null) await this.finishIsolation(row.sub, claim);
         } catch { /* 사실은 남고 다음 기한에 다시 한다. */ }
       }
