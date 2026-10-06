@@ -273,11 +273,16 @@ window.kinViewerJobs = function (services, model, session = null) {
       return ids;
     }
     // A restore of a version 1-3 layout (Restore Job, the kinJob page and a saved location) proves what the stack cells show
-    // before it reports a restore: every saved cell's original instance and the active cell (confirmStack below). Versions 4
-    // and later are proved inside the MPR apply.
+    // before it reports a restore: every saved cell's original instance and camera, and the active cell (confirmStack below).
+    // Versions 4 and later are proved inside the MPR apply. The camera is its focal point (pan) and parallel scale (zoom), with
+    // the MPR read-back's tolerance: a native step that resets only the camera keeps the frame, so the instance alone would
+    // report a restore whose saved zoom and pan are gone (S7-U5 review of 8c2cf37, F-03).
+    const sameCamera = (shown, saved) => !!shown && Array.isArray(shown.focalPoint) && Math.abs(shown.parallelScale - saved.parallelScale) < 1e-6 &&
+      saved.focalPoint.every((n, i) => Math.abs(n - shown.focalPoint[i]) < 1e-6);
     function showsCell(viewportId, cell) {
       const v = cs.getCornerstoneViewport(viewportId), shown = window.cornerstone.metaData.get('instance', v?.getCurrentImageId?.());
-      return shown?.StudyInstanceUID === cell.study && shown?.SeriesInstanceUID === cell.series && shown?.SOPInstanceUID === cell.sop;
+      return shown?.StudyInstanceUID === cell.study && shown?.SeriesInstanceUID === cell.series && shown?.SOPInstanceUID === cell.sop &&
+        sameCamera(v.getCamera?.(), cell.camera);
     }
     function readBack(value, ids) {
       if (!Array.isArray(ids)) return;
@@ -290,15 +295,15 @@ window.kinViewerJobs = function (services, model, session = null) {
      * A restore of a version 1-3 layout reports only what the stack cells show once the native viewer has stopped changing
      * them. Observed (S7-U5 fix round, job_03 alone twice): the second study's cell showed its first frame and initial
      * camera when "restored" was reported and stayed so - the native viewer had set that cell's stack again after the
-     * saved frame was applied. So: wait until no cell's viewport, stack or shown frame has changed for a few samples
+     * saved frame was applied. So: wait until no cell's viewport, stack, shown frame or camera has changed for a few samples
      * (bounded), read every cell back, apply a cell the native viewer moved once more, wait again, and if a cell still is
      * not the saved one the restore fails (and is rolled back like any failed apply). Input outside the panel is swallowed
      * while the restore applies (interaction), so this never overrides the person's own work, and nothing re-applies after
      * the restore has reported.
      */
     async function settleStack(ids) {
-      const look = () => ids.map(id => { const v = cs.getCornerstoneViewport(id), stack = v?.getImageIds?.() || [];
-        return [v, stack.length, stack[0], v?.getCurrentImageId?.()]; });
+      const look = () => ids.map(id => { const v = cs.getCornerstoneViewport(id), stack = v?.getImageIds?.() || [], camera = v?.getCamera?.();
+        return [v, stack.length, stack[0], v?.getCurrentImageId?.(), JSON.stringify([camera?.focalPoint, camera?.parallelScale])]; });
       let last = look(), still = 0;
       for (let n = 0; n < 60 && still < 6; n++) {
         await new Promise(r => setTimeout(r, 50));

@@ -1334,10 +1334,17 @@ async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
  const views=new Map(),lookup=new Map();
  // `w.nativeResets` (n): the native viewer sets the cell's stack again just after each of the next n frame applies, so the
  // cell shows another original (`w.resetShown`) until the next apply; `w.setIndexCalls` counts the applies.
- const stackView=()=>{let index=0;return {type:'stack',getImageIds:()=>['img:'+L_STACK_SOP],getCurrentImageId:()=>'img:'+(w.resetShown||w.shows),
+ // `w.nativeCameraResets` (n): the native viewer resets the cell's camera (zoom and pan; the frame stays) just after each of the
+ // next n camera writes; `w.cameraWrites` counts the writes that carry a camera. `w.stackView` is the last stack cell made, and
+ // its `person(camera)` is the person zooming or panning it.
+ const stackView=()=>{let index=0,camera={};const view={type:'stack',getImageIds:()=>['img:'+L_STACK_SOP],getCurrentImageId:()=>'img:'+(w.resetShown||w.shows),
   setImageIdIndex:async i=>{index=i;w.setIndexCalls=(w.setIndexCalls||0)+1;w.resetShown=null;
    if(w.nativeResets>0){w.nativeResets--;setImmediate(()=>{w.resetShown='1.2.99';});}},
-  scroll(){},getTargetImageIdIndex:()=>index,setProperties(){},setCamera(){},render(){},getDefaultActor:()=>({actor:{}})};};
+  scroll(){},getTargetImageIdIndex:()=>index,setProperties(){},render(){},getDefaultActor:()=>({actor:{}}),
+  getCamera:()=>structuredClone(camera),
+  setCamera:value=>{camera={...camera,...structuredClone(value)};if(!value.focalPoint)return;w.cameraWrites=(w.cameraWrites||0)+1;
+   if(w.nativeCameraResets>0){w.nativeCameraResets--;setImmediate(()=>{camera={...camera,focalPoint:[9,9,9],parallelScale:50};});}},
+  person:value=>{camera={...camera,...structuredClone(value)};}};w.stackView=view;return view;};
  const grid={active:'vp-0',
   getState:()=>({layout:{numRows:1,numCols:views.size,layoutType:'grid'},viewports:views,activeViewportId:grid.active}),
   setLayout:async opts=>{log.push('setLayout');views.clear();lookup.clear();const n=opts.numRows*opts.numCols;
@@ -1611,6 +1618,30 @@ test('S7-U5 a version 1-3 restore is read back after the native viewer settles: 
   assert.deepEqual([w.setIndexCalls,w.resetShown],[calls,'1.2.98'],'no re-apply after the restore reported');
   // The native reset comes back after the one re-apply: the restore fails and the previous screen is put back.
   w.resetShown=null;w.planes();w.log.length=0;w.nativeResets=2;
+  w.button('Restore Job').onclick();await lSettle(600);
+  assert.equal(w.status(),'저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요. 입력은 유지됩니다.');
+  assert.deepEqual(w.log,['setLayout','apply:4'],'the saved layout, then the previous screen');
+ }finally{w.stop();}
+});
+
+// S7-U5 review of 8c2cf37 (F-03): the read-back proves each cell's camera too - its focal point (pan) and parallel scale (zoom).
+// A native step that resets only the camera after the saved one was applied (the frame stays) is applied once more; one that
+// stays fails the restore (rolled back); a camera the person changes after the restore has reported is not applied again.
+test('S7-U5 a version 1-3 restore reads each cell\'s camera back: a late camera-only reset is applied once more, one that stays is rolled back, a later zoom is kept',async()=>{
+ const w=await locationWorld();
+ try{
+  const saved=lStack().cells[0].camera,shown=()=>{const c=w.stackView.getCamera();return [c.focalPoint,c.parallelScale];};
+  w.server.job=()=>({status:200,body:{id:L_JOB,revision:1,snapshotVersion:2,snapshot:lStack()}});w.server.row.snapshotVersion=2;
+  w.nativeCameraResets=1;w.cameraWrites=0;w.setIndexCalls=0;
+  w.button('Restore Job').onclick();await lSettle(600);
+  assert.equal(w.status(),'비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.');
+  assert.deepEqual([w.cameraWrites,w.setIndexCalls,shown()],[2,2,[saved.focalPoint,saved.parallelScale]],
+   'the cell whose camera the native viewer reset was applied once more and shows the saved camera');
+  // The person zooms and pans the cell afterwards: the saved camera is not applied again.
+  w.stackView.person({focalPoint:[5,5,5],parallelScale:7});const writes=w.cameraWrites;await lSettle(600);
+  assert.deepEqual([w.cameraWrites,shown()],[writes,[[5,5,5],7]],'no re-apply after the restore reported');
+  // The camera reset comes back after the one re-apply: the restore fails and the previous screen is put back.
+  w.planes();w.log.length=0;w.nativeCameraResets=2;
   w.button('Restore Job').onclick();await lSettle(600);
   assert.equal(w.status(),'저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요. 입력은 유지됩니다.');
   assert.deepEqual(w.log,['setLayout','apply:4'],'the saved layout, then the previous screen');
