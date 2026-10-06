@@ -1,10 +1,21 @@
 # coding: utf-8
-"""REQ-S8-CTX -> RISK-CTX-WORK/SESSION -> CTX-NOTE-WRAPPER (R2-F01, R3-F01, R4-F01/F02, R5-F01/F02, R6-F01/F02).
+"""REQ-S8-CTX-NOTE -> RISK-CTX-NOTE-OUTCOME/WORK/SESSION -> TEST-S8-NOTE-T01..T27 (Astra S8-CTX contract 2026-10-05, s3/s4).
 
-Real viewer-tech-note, note dialog, account verdict, page boundary and transport.
-Only renderer services and HTTP replies are synthetic; no stack or patient data.
+Every row of the save contract's transition table is one behaviour test, run twice on the same vector:
+  - ModuleNoteTest: the shared module tech-note.js as the Worklist page uses it, over an api with the page's error
+    contract (status on an answered failure, `sent:false` when nothing left);
+  - WrapperNoteTest: the real viewer window (viewer-tech-note.js over tech-note.js, viewer session, gate, transport) with
+    its account checks before and after each request.
+Only HTTP answers are synthetic: NoteApi below is the server contract of section 2 (revisions keep the attempt id, the same
+attempt sent again answers its revision, another request with that id is 400, reads answer attemptId and the
+server-computed isOwnAttempt, CAS on the base version, the edit and first-note rules). Observed: the POST bodies (ids,
+bases, count), the stored revisions, the input, the sentence shown, the published state and the questions asked.
+No stack, no patient data. A source can be replaced for a negative control through KIN_CTX_TECH_NOTE_JS /
+KIN_CTX_VIEWER_TECH_NOTE_JS.
 """
 import os
+import re
+import uuid
 from pathlib import Path
 import unittest
 from urllib.parse import parse_qs, urlparse
@@ -18,10 +29,100 @@ except ImportError:
 ROOT = Path(__file__).resolve().parents[1]
 HP = ROOT / 'worklist-v0/hpacs-lite'
 BASE = 'https://viewer-note.test'
+UID = '1.2.3'
 ME = dict(kind='member', sub='tech', institution='hospital', sessionId='S1', roles=['technician'])
+UUID4 = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+OTHER_ID = '99999999-9999-4999-8999-999999999999'
 
 
-class ViewerTechNoteDOMTest(unittest.TestCase):
+def source(name):
+    return Path(os.environ.get('KIN_CTX_' + name.replace('-', '_').replace('.', '_').upper(), HP / name))
+
+
+# The contract's sentences (section 3), one per row. A Korean particle after a version number follows how the number is
+# read: written out per version (v1 일, v2 이, v3 삼, v4 사), not computed, so a wrong rule in the screen cannot pass.
+RO = {1: 'v1로', 2: 'v2로', 3: 'v3으로', 4: 'v4로'}
+GWA = {1: 'v1과', 2: 'v2와', 3: 'v3과'}
+EUL = {1: 'v1을', 2: 'v2를', 3: 'v3을'}
+def opened(v): return f'마지막으로 확인한 메모는 v{v}입니다.' if v else '마지막으로 확인한 메모가 없습니다.'
+DIFFERS, SAME = '현재 입력은 마지막 확인본과 다릅니다.', '현재 입력은 마지막 확인본과 같습니다.'
+SAVING = '입력을 저장하는 중입니다.'
+NEED_REASON = '이번 수정의 사유를 입력하세요.'
+NEED_TEXT = '메모 내용을 입력하세요.'
+def unchanged(v, reason_only=False):
+    return f'새 저장은 보내지 않았으며 본문은 마지막 확인한 {GWA[v]} 같' + ('고 사유만의 변경은 저장되지 않습니다.' if reason_only else '습니다.')
+def other_found(v): return f'다른 저장 {EUL[v]} 확인했으며 입력은 유지되므로 비교 후 Save Note 또는 Reload Note를 선택하세요.'
+RESENDING = '앞선 저장 결과를 확인하며 같은 입력을 다시 요청합니다.'
+PARALLEL = '현재 입력을 저장하는 중이며 앞선 시도와 결과를 구분해 확인합니다.'
+REVERTED_UNKNOWN = '본문은 마지막 확인본과 같지만 앞선 저장 결과는 아직 알 수 없습니다.'
+def saved(v): return f'입력이 {RO[v]} 저장되었습니다.'
+REFUSED = '이번 저장은 거절되어 입력을 유지합니다'
+UNSENT = '저장 요청을 보내지 못해 입력을 유지합니다.'
+UNKNOWN = '저장 결과를 알 수 없으며 입력은 유지되므로 Save Note 또는 Reload Note로 확인하세요.'
+STILL_UNKNOWN = '앞선 저장 결과는 아직 확인되지 않았으며 입력은 유지됩니다.'
+OPEN_RESULT = ' 앞선 저장 결과는 아직 확인되지 않았습니다.'
+def earlier(v): return f'앞선 입력은 {RO[v]} 저장되었습니다.'
+def not_saved(v): return f'이 시도는 저장되지 않았고 마지막 확인본은 다른 저장인 v{v}이며 입력은 유지됩니다.'
+def mine_then_other(m, v): return f'앞선 입력은 {RO[m]} 저장되었고 마지막 확인본은 다른 저장인 v{v}입니다.'
+def followup_reason(v): return f'앞선 입력은 {RO[v]} 저장되었으며 현재 수정은 새 사유를 입력한 뒤 저장하세요.'
+RELOAD_Q = '현재 입력을 버리고 마지막 저장본을 불러올까요?'
+CLOSE_Q = '현재 입력이 마지막 확인본과 다른데 입력을 버리고 닫을까요?'
+CLOSE_U = '저장 결과가 미확정이고 닫아도 저장이 취소되지는 않는데 닫을까요?'
+HISTORY = '저장 이력을 표시하며 현재 입력은 유지됩니다.'
+PREPARING = '로그아웃 확인 중이며 입력은 유지됩니다.'
+
+
+class NoteApi:
+    """The Tech Note API of contract section 2 for one study, no timing of its own."""
+
+    def __init__(self):
+        self.notes, self.posts, self.calls = [], [], []
+        self.post_modes, self.get_modes, self.history_modes = [], [], []
+        self.held, self.late, self.headers = {}, None, []
+
+    def view(self, note):
+        public = {k: note[k] for k in ('studyUid', 'version', 'text', 'reason', 'author', 'createdAt')}
+        return dict(public, attemptId=note['attemptId'], isOwnAttempt=bool(note['attemptId']) and note['authorSub'] == ME['sub'])
+
+    def latest(self):
+        return self.view(self.notes[-1]) if self.notes else None
+
+    def commit(self, body, sub=ME['sub'], author='tech'):
+        """(status, note) - the order of section 2: the id first (after the permission checks), then the CAS."""
+        attempt = body.get('attemptId')
+        if attempt is not None and not (isinstance(attempt, str) and UUID4.match(attempt)):
+            return 400, None
+        reason = body['reason'].strip()
+        if attempt:
+            for note in self.notes:
+                if note['attemptId'] == attempt:
+                    same = (note['authorSub'], note['version'], note['text'], note['reason']) == (sub, body['baseVersion'] + 1, body['text'], reason)
+                    return (200, note) if same else (400, None)
+        if body['baseVersion'] != len(self.notes):
+            return 409, None
+        if self.notes and (not reason or self.notes[-1]['text'] == body['text']):
+            return 400, None
+        if not self.notes and not body['text'].strip():
+            return 400, None
+        note = dict(studyUid=UID, version=len(self.notes) + 1, text=body['text'], reason=reason, author=author,
+                    authorSub=sub, createdAt='2026-10-06T00:00:00Z', attemptId=attempt)
+        self.notes.append(note)
+        return 200, note
+
+    def foreign(self, text, reason='SYN their reason', sub='other-tech', attempt='new', author='other technician'):
+        attempt = str(uuid.uuid4()) if attempt == 'new' else attempt
+        status, note = self.commit(dict(baseVersion=len(self.notes), text=text, reason=reason, attemptId=attempt), sub=sub, author=author)
+        assert status == 200, status
+        return note
+
+    def receipt(self, note):
+        return dict(uid=UID, writable=True, note=self.view(note), latestNote=self.latest())
+
+
+class Harness:
+    """What both consumers share: the page, the routes over NoteApi and the observations."""
+    STATE = None
+
     @classmethod
     def setUpClass(cls):
         cls.pw = sync_playwright().start()
@@ -33,23 +134,727 @@ class ViewerTechNoteDOMTest(unittest.TestCase):
         cls.pw.stop()
 
     def setUp(self):
+        self.api = NoteApi()
+        self.me_answers = []
         self.context = self.browser.new_context()
         self.context.route(BASE + '/**', self.route)
-        self.notes, self.posts, self.calls = [], [], []
-        self.me_answers, self.post_modes, self.post_headers, self.held = [], [], [], {}
-        self.leading = self.trailing = None
-        self.post_status = 200
         self.page = self.context.new_page()
-        self.errors, self.dialogs = [], []
+        self.errors, self.dialogs, self.answers = [], [], []
         self.page.on('pageerror', lambda e: self.errors.append(str(e)))
-        self.accept_dialogs = True
-        self.page.on('dialog', lambda d: (self.dialogs.append(d.message), d.accept() if self.accept_dialogs else d.dismiss()))
-        self.page.goto(BASE + '/ohif/viewer?StudyInstanceUIDs=1.2.3')
+        self.page.on('dialog', self.on_dialog)
+        self.page.goto(BASE + '/ohif/viewer?StudyInstanceUIDs=' + UID)
         self.unbound = install_viewer_session(self.page)
+        self.mount()
+
+    def tearDown(self):
+        self.context.close()
+        self.assertEqual(self.errors, [])
+        self.assertEqual(self.unbound, [])
+
+    def on_dialog(self, dialog):
+        self.dialogs.append(dialog.message)
+        dialog.accept() if (self.answers.pop(0) if self.answers else True) else dialog.dismiss()
+
+    # ── routes ──
+    def route(self, route):
+        request = route.request
+        path = request.url[len(BASE):].split('?')[0]
+        if path == '/api/me':
+            self.api.calls.append('me')
+            answer = self.me_answers.pop(0) if self.me_answers else None
+            if answer == 'account':
+                return route.fulfill(json={**ME, 'sub': 'different'})
+            if answer == 'network':
+                return route.abort()
+            if answer:
+                return route.fulfill(status=answer, json={'message': 'SYN account busy', 'code': 'AUTH_SESSION_BUSY'})
+            return route.fulfill(json=ME)
+        if path.endswith('/tech-note/history'):
+            self.api.calls.append('HISTORY')
+            mode = self.api.history_modes.pop(0) if self.api.history_modes else 'ok'
+            if mode == 'fail':
+                return route.fulfill(status=500, json={'message': 'SYN history unavailable'})
+            before = int(parse_qs(urlparse(request.url).query).get('before', [len(self.api.notes) + 1])[0])
+            items = [self.api.view(n) for n in reversed(self.api.notes) if n['version'] < before]
+            if mode == 'missing':
+                items = [i for i in items if i['version'] != before - 1]
+            return route.fulfill(json=dict(uid=UID, items=items, nextBefore=None))
+        if path.endswith('/tech-note') and request.method == 'GET':
+            self.api.calls.append('GET')
+            mode = self.api.get_modes.pop(0) if self.api.get_modes else 'ok'
+            if mode == 'fail':
+                return route.fulfill(status=500, json={'message': 'SYN read unavailable'})
+            if mode == 'hold':
+                self.api.held['GET'] = route
+                return
+            if mode == 'old':
+                old = self.api.notes[:-1]
+                return route.fulfill(json=dict(uid=UID, writable=True, note=self.api.view(old[-1]) if old else None))
+            return route.fulfill(json=dict(uid=UID, writable=True, note=self.api.latest()))
+        if path.endswith('/tech-note') and request.method == 'POST':
+            self.api.calls.append('POST')
+            body = request.post_data_json
+            self.api.posts.append(body)
+            self.api.headers.append({k: v for k, v in request.headers.items() if k.startswith('x-kin')})
+            if self.api.late is not None:  # an earlier lost write commits now, just before this one is handled
+                self.api.commit(self.api.late)
+                self.api.late = None
+            mode = self.api.post_modes.pop(0) if self.api.post_modes else 'ok'
+            if mode == 'hold':
+                self.api.held[len(self.api.posts) - 1] = route
+                return
+            if mode == 'abort':
+                return route.abort()
+            if mode == 'late':
+                self.api.late = body
+                return route.abort()
+            if isinstance(mode, int):
+                return route.fulfill(status=mode, json={'message': 'SYN write refused'})
+            if mode == 'foreign-409':  # another save lands just before this write reaches the version check
+                self.api.foreign('SYN v3 theirs')
+                return route.fulfill(status=409, json={'message': 'SYN write refused'})
+            status, note = self.api.commit(body)
+            if mode == 'abort-commit':
+                return route.abort()
+            if mode == '500-commit':
+                return route.fulfill(status=500, json={'message': 'SYN gateway'})
+            if status != 200:
+                return route.fulfill(status=status, json={'message': 'SYN write refused'})
+            if mode == 'broken':
+                receipt = self.api.receipt(note)
+                receipt['note'].pop('attemptId')
+                return route.fulfill(json=receipt)
+            return route.fulfill(json=self.api.receipt(note))
+        route.fulfill(body='<div id="root"><div id="image"></div><section id="kin-viewer-layout"></section></div>', content_type='text/html')
+
+    def finish(self, index, commit=True, status=None):
+        route = self.api.held.pop(index)
+        if not commit:
+            return route.fulfill(status=status or 500, json={'message': 'SYN not stored'})
+        code, note = self.api.commit(self.api.posts[index])
+        route.fulfill(status=code, json=self.api.receipt(note) if code == 200 else {'message': 'SYN write refused'})
+
+    # ── observations and actions ──
+    @property
+    def note(self): return self.page.get_by_label('Note', exact=True)
+
+    @property
+    def reason(self): return self.page.get_by_label('Reason for Change')
+
+    @property
+    def status(self): return self.page.locator('#tech-note-status')
+
+    @property
+    def dialog(self): return self.page.locator('#tech-note-dialog')
+
+    def state(self): return self.page.evaluate(self.STATE)
+
+    def idle(self): self.page.wait_for_function('!(' + self.STATE + ').busy')
+
+    def press(self, name):
+        self.page.locator('#tech-note-dialog').get_by_role('button', name=name, exact=True).click()
+
+    def save(self, wait=True):
+        self.press('Save Note')
+        if wait:
+            self.idle()
+
+    def reload(self):
+        self.press('Reload Note'); self.idle()
+
+    def opened_with(self, *texts, author_sub='other-tech'):
+        """The dialog opened on a note whose revisions are `texts` (NULL ids, as before attempts had ids)."""
+        for text in texts:
+            self.api.commit(dict(baseVersion=len(self.api.notes), text=text, reason='SYN earlier' if self.api.notes else '', attemptId=None), sub=author_sub, author='SYN earlier')
+        self.open()
+        expect(self.note).to_be_editable()
+        expect(self.status).to_have_text(opened(len(texts)))
+
+    def edit(self, text, reason=None):
+        self.note.fill(text)
+        if reason is not None:
+            self.reason.fill(reason)
+
+    def lost_first_write(self, mode='abort'):
+        """An edit of v1 whose POST answer is lost (`abort` not stored, `abort-commit` stored, `late` stored later)."""
+        self.opened_with('SYN v1')
+        self.edit('SYN v2 mine', 'SYN R1')
+        self.api.post_modes = [mode]
+        self.save()
+        expect(self.status).to_have_text(UNKNOWN)
+        self.assertTrue(self.state()['unknown'])
+
+    def posts_of(self, key): return [p[key] for p in self.api.posts]
+
+
+class Vectors:
+    """TEST-S8-NOTE-T01..T27 on whichever consumer the harness mounts."""
+
+    def test_T01_open_records_L_fills_text_and_leaves_reason_untyped(self):
+        self.api.commit(dict(baseVersion=0, text='SYN v1', reason='', attemptId=None), sub='other-tech')
+        self.api.commit(dict(baseVersion=1, text='SYN v2', reason='their reason', attemptId=None), sub='other-tech')
+        self.open()
+        expect(self.status).to_have_text(opened(2))
+        expect(self.note).to_have_value('SYN v2'); expect(self.reason).to_have_value('')
+        self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+        self.assertEqual(self.api.posts, [])
+        self.page.keyboard.press('Escape')
+        expect(self.dialog).not_to_be_visible(); self.assertEqual(self.dialogs, [])
+
+    def test_T01_open_without_a_note(self):
+        self.open()
+        expect(self.status).to_have_text(opened(0))
+        expect(self.note).to_have_value('')
+
+    def test_T02_typing_reverting_and_reason_only_change_only_the_input(self):
+        self.opened_with('SYN v1')
+        self.note.fill('SYN v1 edited')
+        expect(self.status).to_have_text(DIFFERS); self.assertTrue(self.state()['dirty'])
+        self.note.fill('SYN v1')
+        expect(self.status).to_have_text(SAME); self.assertFalse(self.state()['dirty'])
+        self.reason.fill('SYN reason only')
+        expect(self.status).to_have_text(DIFFERS); self.assertTrue(self.state()['dirty'])
+        self.reason.fill('')
+        self.assertFalse(self.state()['dirty'])
+        self.assertEqual(self.api.posts, [])
+        self.press('Close'); expect(self.dialog).not_to_be_visible(); self.assertEqual(self.dialogs, [])
+
+    def test_T03_T11_one_save_one_post_with_an_attempt_id_and_its_receipt(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN v2', '  SYN dose corrected  ')
+        self.api.post_modes = ['hold']
+        self.save(wait=False)
+        self.page.wait_for_function('(' + self.STATE + ').busy')
+        expect(self.status).to_have_text(SAVING)
+        self.assertEqual(self.state(), {'dirty': True, 'busy': True, 'unknown': True})
+        self.finish(0)
+        self.idle()
+        expect(self.status).to_have_text(saved(2))
+        [body] = self.api.posts
+        self.assertEqual((body['baseVersion'], body['text'], body['reason']), (1, 'SYN v2', '  SYN dose corrected  '))
+        self.assertRegex(body['attemptId'], UUID4)
+        self.assertEqual(self.api.notes[-1]['attemptId'], body['attemptId'])
+        # The receipt changes no input: text and the reason as typed stay; the state is clean.
+        expect(self.note).to_have_value('SYN v2'); expect(self.reason).to_have_value('  SYN dose corrected  ')
+        self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+        self.assertEqual(self.api.calls.count('POST'), 1)
+        self.page.keyboard.press('Escape'); self.assertEqual(self.dialogs, [])
+
+    def test_T04_an_edit_needs_its_own_reason_and_a_used_reason_is_used(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN v2')
+        self.save()
+        expect(self.status).to_have_text(NEED_REASON)
+        expect(self.reason).to_be_focused()
+        self.assertEqual(self.api.posts, [])
+        self.reason.fill('SYN R1'); self.save()
+        expect(self.status).to_have_text(saved(2))
+        # The reason of a saved attempt is used: the next edit needs a reason typed for it (the box keeps the text).
+        self.edit('SYN v3'); self.save()
+        expect(self.status).to_have_text('앞선 입력은 v2로 저장되었으며 ' + NEED_REASON)
+        expect(self.reason).to_have_value('SYN R1')
+        self.assertEqual(len(self.api.posts), 1)
+        # Typing the same words again is a new reason for this edit.
+        self.reason.fill(''); self.reason.fill('SYN R1'); self.save()
+        expect(self.status).to_have_text(saved(3))
+        self.assertEqual(self.posts_of('reason'), ['SYN R1', 'SYN R1'])
+        self.assertNotEqual(*self.posts_of('attemptId'))
+
+    def test_T04_an_earlier_save_is_said_even_after_a_later_other_save(self):
+        self.lost_first_write('abort-commit')
+        self.api.foreign('SYN v3 theirs')
+        self.reload()
+        expect(self.status).to_have_text(mine_then_other(2, 3))
+        self.note.fill('SYN v4 mine'); self.save()
+        expect(self.status).to_have_text(f'앞선 입력은 {RO[2]} 저장되었으며 ' + NEED_REASON)
+        self.assertEqual(len(self.api.posts), 1)
+
+    def test_T04_a_reason_retyped_before_the_resend_is_used_by_it(self):
+        # The same words typed again before the resend of the same request: that input is carried by the resend and used
+        # up when it is saved, so the next edit still needs a reason typed for it.
+        self.lost_first_write('abort')
+        self.reason.fill(''); self.reason.fill('SYN R1')
+        self.save()
+        expect(self.status).to_have_text(saved(2))
+        self.assertEqual(len(set(self.posts_of('attemptId'))), 1)
+        self.note.fill('SYN v3 mine'); self.save()
+        expect(self.status).to_have_text(f'앞선 입력은 {RO[2]} 저장되었으며 ' + NEED_REASON)
+        self.assertEqual(len(self.api.posts), 2)
+
+    def test_T05_a_blank_first_note_is_not_sent(self):
+        self.open()
+        for text in ('', '   '):
+            with self.subTest(text=text):
+                self.note.fill(text); self.save()
+                expect(self.status).to_have_text(NEED_TEXT)
+        self.assertEqual(self.api.posts, [])
+        self.note.fill('SYN first'); self.save()
+        expect(self.status).to_have_text(saved(1))
+        self.assertEqual(self.posts_of('reason'), [''])
+
+    def test_T06_unchanged_text_sends_nothing_and_a_reason_only_change_stays_unsaved(self):
+        self.opened_with('SYN v1')
+        self.save()
+        expect(self.status).to_have_text(unchanged(1))
+        self.assertFalse(self.state()['dirty'])
+        self.reason.fill('SYN reason only'); self.save()
+        expect(self.status).to_have_text(unchanged(1, reason_only=True))
+        self.assertTrue(self.state()['dirty'])
+        self.assertEqual(self.api.posts, [])
+        self.answers.append(False)
+        self.press('Close')
+        self.assertEqual(self.dialogs, [CLOSE_Q]); expect(self.dialog).to_be_visible()
+        expect(self.reason).to_have_value('SYN reason only')
+
+    def test_T07_a_409_reads_the_other_save_stops_this_click_and_the_next_save_builds_on_it(self):
+        self.opened_with('SYN v1')
+        self.api.foreign('SYN v2 theirs')
+        self.edit('SYN mine', 'SYN R1'); self.save()
+        expect(self.status).to_have_text(other_found(2))
+        self.assertEqual(self.api.calls.count('POST'), 1)
+        expect(self.note).to_have_value('SYN mine'); expect(self.reason).to_have_value('SYN R1')
+        self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': False})
+        # Save Note after seeing v2: the current input on the version already shown.
+        self.save()
+        expect(self.status).to_have_text(saved(3))
+        self.assertEqual(self.posts_of('baseVersion'), [1, 2])
+        self.assertEqual(self.api.notes[-1]['text'], 'SYN mine')
+
+    def test_T08_unknown_old_read_same_input_resends_the_same_id_once(self):
+        self.lost_first_write('abort')
+        self.api.get_modes = ['ok']
+        self.api.post_modes = ['hold']
+        self.save(wait=False)
+        for _ in range(200):
+            if self.api.held:
+                break
+            self.page.wait_for_timeout(10)
+        expect(self.status).to_have_text(RESENDING)
+        self.finish(1)
+        self.idle()
+        expect(self.status).to_have_text(saved(2))
+        self.assertEqual(len(set(self.posts_of('attemptId'))), 1, 'the same attempt id')
+        self.assertEqual(self.api.posts[0], self.api.posts[1], 'the same request')
+        self.assertEqual(len(self.api.notes), 2)
+        self.assertFalse(self.state()['unknown'])
+
+    def test_T08_resend_of_a_stored_attempt_answers_its_receipt_and_writes_nothing_more(self):
+        # The opposite side of T08: the first send was stored; the same id comes back with that revision.
+        self.lost_first_write('abort')
+        self.api.commit(self.api.posts[0])  # stored after all, only after the read showed v1
+        self.api.get_modes = ['old']
+        self.save()
+        expect(self.status).to_have_text(saved(2))
+        self.assertEqual(len(self.api.posts), 2)
+        self.assertEqual(len(self.api.notes), 2, 'no second revision')
+        self.assertEqual(self.api.posts[0]['attemptId'], self.api.posts[1]['attemptId'])
+
+    def test_T09_unknown_old_read_changed_input_sends_a_new_id_on_the_same_base(self):
+        self.lost_first_write('abort')
+        self.edit('SYN v2 corrected', 'SYN R2')
+        self.save()
+        expect(self.status).to_have_text(saved(2))
+        a, b = self.api.posts
+        self.assertNotEqual(a['attemptId'], b['attemptId'])
+        self.assertEqual((a['baseVersion'], b['baseVersion']), (1, 1))
+        self.assertEqual(self.api.notes[-1]['text'], 'SYN v2 corrected')
+        self.assertFalse(self.state()['unknown'], 'the first attempt is settled by the receipt of v2 with another id')
+
+    def test_T09_the_earlier_attempt_wins_meanwhile_and_the_current_input_follows_once(self):
+        # Either attempt may win; the ids decide. Here the lost first write is stored just before the second arrives.
+        self.lost_first_write('late')
+        self.edit('SYN v2 corrected', 'SYN R2')
+        self.save()
+        expect(self.status).to_have_text(saved(3))
+        self.assertEqual(self.posts_of('baseVersion'), [1, 1, 2])
+        self.assertEqual([n['text'] for n in self.api.notes], ['SYN v1', 'SYN v2 mine', 'SYN v2 corrected'])
+        self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+
+    def test_T10_unknown_with_text_back_at_L_sends_nothing_and_stays_unknown(self):
+        self.lost_first_write('abort')
+        self.note.fill('SYN v1'); self.save()
+        expect(self.status).to_have_text(REVERTED_UNKNOWN)
+        self.assertEqual(len(self.api.posts), 1)
+        self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': True})
+        self.answers.append(False)
+        self.press('Close')
+        self.assertEqual(self.dialogs, [CLOSE_U]); expect(self.dialog).to_be_visible()
+
+    def test_T11_a_receipt_without_this_attempts_id_is_not_a_receipt(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN v2', 'SYN R1')
+        self.api.post_modes = ['broken']
+        self.save()
+        expect(self.status).to_have_text(UNKNOWN)
+        self.assertTrue(self.state()['unknown'])
+        self.reload()  # the read finds the revision with this id
+        expect(self.status).to_have_text(earlier(2))
+        self.assertFalse(self.state()['unknown'])
+
+    def test_T12_an_answered_refusal_is_final_at_once(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN v2', 'SYN R1')
+        self.api.post_modes = [403]
+        self.save()
+        expect(self.status).to_contain_text(REFUSED)
+        self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': False})
+        self.assertEqual(self.api.calls.count('POST'), 1)
+        self.assertEqual(self.api.calls.count('GET'), 1, 'no read to settle a refusal')
+        self.answers.append(True); self.press('Close')
+        self.assertEqual(self.dialogs, [CLOSE_Q])
+
+    def test_T12_a_refused_resend_does_not_settle_an_earlier_unknown_send(self):
+        self.lost_first_write('abort')
+        self.api.post_modes = [400]
+        self.save()
+        # Both facts: this send was refused, and the earlier send of the same id is still unknown.
+        expect(self.status).to_have_text(re.compile(re.escape(REFUSED) + '.*' + re.escape(OPEN_RESULT) + '$'))
+        self.assertEqual(len(set(self.posts_of('attemptId'))), 1)
+        self.assertTrue(self.state()['unknown'], 'the first send of this id may still have been stored')
+
+    def test_T13_a_5xx_or_lost_answer_is_unknown_and_never_resent_by_itself(self):
+        for mode in (500, 'abort', '500-commit'):
+            with self.subTest(mode=mode):
+                if mode != 500:
+                    self.setUp_again()
+                self.opened_with('SYN v1')
+                self.edit('SYN v2', 'SYN R1')
+                self.api.post_modes = [mode]
+                self.save()
+                expect(self.status).to_have_text(UNKNOWN)
+                self.page.wait_for_timeout(200)
+                self.assertEqual(self.api.calls.count('POST'), 1)
+                self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': True})
+                self.answers.append(False); self.press('Close')
+                self.assertEqual(self.dialogs[-1], CLOSE_U)
+
+    def test_T14_an_older_read_a_missing_history_row_or_a_failed_read_leave_the_attempt_unknown(self):
+        self.lost_first_write('abort-commit')
+        self.api.foreign('SYN v3 theirs')
+        self.api.history_modes = ['missing']
+        self.reload()
+        expect(self.status).to_have_text(STILL_UNKNOWN)
+        self.assertTrue(self.state()['unknown'])
+        expect(self.page.locator('#tech-note-meta')).to_contain_text('v3')
+        # A later older read never takes L back.
+        self.api.get_modes = ['fail']
+        self.reload()
+        expect(self.status).to_contain_text(STILL_UNKNOWN[:-1])
+        self.assertTrue(self.state()['unknown'])
+        expect(self.note).to_have_value('SYN v2 mine')
+        # An older read (it answers v2, this attempt's own revision) settles the attempt but never takes L back to v2.
+        self.api.get_modes = ['old']
+        self.reload()
+        expect(self.status).to_have_text(mine_then_other(2, 3))
+        expect(self.page.locator('#tech-note-meta')).to_contain_text('v3')
+        self.assertEqual(len(self.api.posts), 1)
+
+    def test_T15_the_attempts_own_revision_settles_it_and_keeps_the_input(self):
+        self.lost_first_write('abort-commit')
+        self.reload()
+        expect(self.status).to_have_text(earlier(2))
+        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('SYN R1')
+        self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+        # Its reason is used: a further edit needs a new one.
+        self.edit('SYN v3'); self.save()
+        expect(self.status).to_have_text('앞선 입력은 v2로 저장되었으며 ' + NEED_REASON)
+        self.assertEqual(len(self.api.posts), 1)
+
+    def test_T15_a_different_reason_after_the_settled_attempt_is_said_unsaved(self):
+        self.lost_first_write('abort-commit')
+        self.reason.fill('SYN R1 typo fixed')
+        self.reload()
+        expect(self.status).to_have_text('앞선 입력은 v2로 저장되었으며 현재 사유는 저장되지 않았습니다.')
+        self.assertTrue(self.state()['dirty'])
+
+    def test_T16_the_exact_next_revision_with_another_or_no_id_proves_not_saved(self):
+        for attempt, sub in ((OTHER_ID, ME['sub']), (None, ME['sub']), (OTHER_ID, 'other-tech')):
+            with self.subTest(attempt=attempt, sub=sub):
+                if (attempt, sub) != (OTHER_ID, ME['sub']):
+                    self.setUp_again()
+                self.lost_first_write('abort')
+                # Same author (or not), same text, same reason - only the id tells.
+                self.api.foreign('SYN v2 mine', 'SYN R1', sub=sub, attempt=attempt, author='tech')
+                self.reload()
+                expect(self.status).to_have_text(not_saved(2))
+                self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+                expect(self.reason).to_have_value('SYN R1')
+                # Not mine: its reason is not used up; the next Save of a change is allowed with it.
+                self.note.fill('SYN v3 mine'); self.save()
+                expect(self.status).to_have_text(saved(3))
+
+    def test_T17_my_v2_and_a_later_other_v3_are_both_said(self):
+        self.lost_first_write('abort-commit')
+        self.api.foreign('SYN v3 theirs')
+        self.reload()
+        expect(self.status).to_have_text(mine_then_other(2, 3))
+        self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': False})
+        self.assertEqual(self.api.calls.count('HISTORY'), 1)
+        self.note.fill('SYN v3 theirs')
+        self.assertTrue(self.state()['dirty'], 'a reason typed for this edit that differs from v3''s is still input')
+        self.reason.fill('')
+        self.assertFalse(self.state()['dirty'], 'input equal to the last confirmed version is clean')
+
+    def test_T18_my_earlier_save_found_and_a_changed_box_send_one_followup(self):
+        self.lost_first_write('abort-commit')
+        self.edit('SYN v3 mine', 'SYN R2')
+        self.save()
+        expect(self.status).to_have_text(saved(3))
+        self.assertEqual(self.posts_of('baseVersion'), [1, 2])
+        self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+
+    def test_T18_without_a_new_reason_the_followup_waits(self):
+        self.lost_first_write('abort-commit')
+        self.note.fill('SYN v3 mine'); self.save()
+        expect(self.status).to_have_text(followup_reason(2))
+        expect(self.reason).to_be_focused()
+        self.assertEqual(len(self.api.posts), 1)
+        self.assertTrue(self.state()['dirty'])
+
+    def test_T18_another_save_found_stops_the_followup(self):
+        self.lost_first_write('abort-commit')
+        self.api.foreign('SYN v3 theirs')
+        self.edit('SYN v4 mine', 'SYN R2'); self.save()
+        expect(self.status).to_have_text(mine_then_other(2, 3))
+        self.assertEqual(len(self.api.posts), 1)
+
+    def test_T19_a_refused_or_unknown_followup_keeps_both_facts_and_writes_no_more(self):
+        for mode, said in ((400, '앞선 입력은 v2로 저장되었지만 이번 입력은 거절되어 유지됩니다'),
+                           (500, '앞선 입력은 v2로 저장되었지만 이번 입력의 저장 결과는 알 수 없으며'),
+                           ('foreign-409', f'앞선 입력은 v2로 저장되었지만 이번 입력은 다른 저장 {GWA[3]} 충돌해 거절되었으며')):
+            with self.subTest(mode=mode):
+                if mode != 400:
+                    self.setUp_again()
+                self.lost_first_write('abort-commit')
+                self.edit('SYN v3 mine', 'SYN R2')
+                self.api.post_modes = [mode]
+                self.save()
+                expect(self.status).to_contain_text(said)
+                self.page.wait_for_timeout(200)
+                self.assertEqual(len(self.api.posts), 2)
+                expect(self.note).to_have_value('SYN v3 mine'); expect(self.reason).to_have_value('SYN R2')
+
+    def test_T20_reload_while_unknown_only_reads(self):
+        self.lost_first_write('abort')
+        self.edit('SYN typed after', 'SYN R9')
+        self.reload()
+        expect(self.status).to_have_text(STILL_UNKNOWN)
+        expect(self.note).to_have_value('SYN typed after')
+        self.assertEqual(len(self.api.posts), 1)
+        self.assertEqual(self.dialogs, [])
+
+    def test_T21_reload_asks_once_when_input_would_be_lost_and_keeps_it_on_cancel(self):
+        self.opened_with('SYN v1')
+        self.reload(); self.assertEqual(self.dialogs, [])  # nothing to lose: no question
+        self.edit('SYN typed', 'SYN R')
+        reads = self.api.calls.count('GET')
+        self.answers.append(False); self.press('Reload Note')
+        self.assertEqual(self.dialogs, [RELOAD_Q])
+        expect(self.note).to_have_value('SYN typed')
+        self.assertEqual(self.api.calls.count('GET'), reads)
+        self.api.foreign('SYN v2 theirs')
+        self.answers.append(True); self.reload()
+        expect(self.note).to_have_value('SYN v2 theirs'); expect(self.reason).to_have_value('')
+        expect(self.status).to_have_text(opened(2))
+        self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+        # A conflict alone is no question: after a 409 with the input put back to the last version, Reload asks nothing.
+        self.api.foreign('SYN v3 theirs')
+        self.edit('SYN mine', 'SYN R1'); self.save()
+        expect(self.status).to_have_text(other_found(3))
+        self.note.fill('SYN v3 theirs'); self.reason.fill('')
+        prompts = len(self.dialogs)
+        self.reload(); self.assertEqual(len(self.dialogs), prompts)
+
+    def test_T22_close_is_immediate_when_clean_asks_once_otherwise_and_a_write_in_flight_does_not_trap(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN v2', 'SYN R1')
+        self.answers.append(False); self.press('Close')
+        self.assertEqual(self.dialogs, [CLOSE_Q]); expect(self.note).to_have_value('SYN v2')
+        self.api.post_modes = ['hold']
+        self.save(wait=False)
+        for _ in range(200):
+            if self.api.held:
+                break
+            self.page.wait_for_timeout(10)
+        expect(self.page.locator('#tech-note-close')).to_be_enabled()
+        self.answers.append(True); self.press('Close')
+        self.assertEqual(self.dialogs[-1], CLOSE_U)
+        expect(self.dialog).not_to_be_visible()
+        self.finish(0)
+        self.page.wait_for_timeout(200)
+        expect(self.dialog).not_to_be_visible()
+        self.assertEqual(len(self.api.notes), 2, 'closing does not cancel the write')
+
+    def test_T23_history_reads_only_settles_by_id_and_keeps_the_input(self):
+        self.lost_first_write('abort-commit')
+        self.edit('SYN typed after', 'SYN R9')
+        self.press('History'); self.idle()
+        expect(self.status).to_have_text(HISTORY)
+        self.assertFalse(self.state()['unknown'], 'the history row carrying this id settles the attempt')
+        expect(self.note).to_have_value('SYN typed after')
+        self.assertEqual(len(self.api.posts), 1)
+        expect(self.page.locator('#tech-note-history-items section')).to_have_count(2)
+
+    def test_T23_history_says_an_unresolved_result(self):
+        self.lost_first_write('abort')
+        self.press('History'); self.idle()
+        expect(self.status).to_have_text(HISTORY + ' 앞선 저장 결과는 아직 확인되지 않았습니다.')
+
+    def test_T24_logout_preparation_stops_writes_keeps_input_and_cancel_only_reads(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN typed', 'SYN R1')
+        peer = self.prepare()
+        expect(self.status).to_have_text(PREPARING)
+        self.press('Save Note')
+        self.page.wait_for_timeout(150)
+        self.assertEqual(self.api.posts, [])
+        self.resume(peer)
+        expect(self.status).to_have_text(DIFFERS)
+        expect(self.note).to_have_value('SYN typed'); expect(self.reason).to_have_value('SYN R1')
+        self.assertEqual(self.api.posts, [])
+
+    def test_T24_cancel_after_an_interrupted_write_reads_its_result_without_writing(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN v2', 'SYN R1')
+        self.api.post_modes = ['hold']
+        self.save(wait=False)
+        for _ in range(200):
+            if self.api.held:
+                break
+            self.page.wait_for_timeout(10)
+        peer = self.prepare()
+        self.finish(0)
+        self.page.wait_for_timeout(100)
+        self.resume(peer)
+        expect(self.status).to_have_text(earlier(2))
+        self.assertEqual(len(self.api.posts), 1)
+        self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+
+    def test_T25_a_real_session_end_closes_the_note_and_nothing_is_sent_after(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN typed', 'SYN R1')
+        self.notice('session-ended')
+        expect(self.dialog).not_to_be_visible()
+        self.page.wait_for_timeout(150)
+        self.assertEqual(self.api.posts, [])
+        self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+
+    def test_T26_the_published_state_tells_busy_unknown_and_input_apart(self):
+        self.opened_with('SYN v1')
+        self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+        self.edit('SYN v2', 'SYN R1')
+        self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': False})
+        self.api.post_modes = [500]
+        self.save()
+        self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': True})
+        self.api.get_modes = ['hold']
+        self.press('Reload Note')
+        for _ in range(300):
+            if 'GET' in self.api.held:
+                break
+            self.page.wait_for_timeout(10)
+        self.assertEqual(self.state(), {'dirty': True, 'busy': True, 'unknown': True})
+        self.api.held.pop('GET').fulfill(json=dict(uid=UID, writable=True, note=self.api.latest()))
+        self.idle()
+        self.assertTrue(self.state()['unknown'])
+
+    def test_T27_late_answers_of_a_closed_dialog_change_nothing_A_B_A(self):
+        self.api.commit(dict(baseVersion=0, text='SYN v1', reason='', attemptId=None), sub='other-tech')
+        self.api.get_modes = ['hold']
+        self.open()
+        for _ in range(200):
+            if 'GET' in self.api.held:
+                break
+            self.page.wait_for_timeout(10)
+        stale = self.api.held.pop('GET')
+        self.page.keyboard.press('Escape'); expect(self.dialog).not_to_be_visible()
+        self.api.foreign('SYN v2 theirs')
+        self.open()
+        expect(self.note).to_have_value('SYN v2 theirs')
+        stale.fulfill(json=dict(uid=UID, writable=True, note=self.api.view(self.api.notes[0])))
+        self.page.wait_for_timeout(150)
+        expect(self.note).to_have_value('SYN v2 theirs'); expect(self.status).to_have_text(opened(2))
+        # A write answered after its dialog closed (and another opened) does not speak in the new one.
+        self.edit('SYN v3 mine', 'SYN R1')
+        self.api.post_modes = ['hold']
+        self.save(wait=False)
+        for _ in range(200):
+            if self.api.held:
+                break
+            self.page.wait_for_timeout(10)
+        self.answers.append(True); self.press('Close')
+        self.open()
+        expect(self.status).to_have_text(opened(2))
+        self.finish(0)
+        self.page.wait_for_timeout(150)
+        expect(self.status).to_have_text(opened(2)); expect(self.note).to_have_value('SYN v2 theirs')
+
+    # ── session notices (the viewer's own gate) ──
+    def prepare(self):
+        peer = self.context.new_page(); peer.goto(BASE + '/peer')
+        peer.evaluate('void navigator.locks.request("kin-preparation:P1",()=>new Promise(r=>window.release=r));window.channel=new BroadcastChannel("kin-session")')
+        peer.wait_for_function('!!window.release')
+        peer.evaluate('channel.postMessage({type:"session-preparing",session:"S1",preparation:"P1"})')
+        self.page.wait_for_function('KinWorkContext.state()==="preparing"')
+        return peer
+
+    def resume(self, peer):
+        peer.evaluate('channel.postMessage({type:"session-resumed",session:"S1",preparation:"P1"});release()')
+        self.page.wait_for_function('KinWorkContext.state()==="active"')
+        self.idle()
+
+    def notice(self, kind):
+        self.page.evaluate('kind=>{const c=new BroadcastChannel("kin-session");c.postMessage({type:kind,session:"S1",operation:1,status:"ending"});c.close();}', kind)
+        self.page.wait_for_function('KinWorkContext.state()!=="active"')
+
+    def setUp_again(self):
+        self.context.close()
+        self.setUp()
+
+
+class ModuleNoteTest(Vectors, Harness, unittest.TestCase):
+    """The shared module as the Worklist page drives it: its api ends an answered failure with `status`, a request that
+    never left with `sent:false`, and an unreadable success with `incomplete`."""
+    STATE = 'note.workspaceState()'
+
+    def mount(self):
+        self.page.add_script_tag(path=str(source('tech-note.js')))
+        self.page.evaluate('''() => {
+          window.moduleUnsent=0;
+          const api=async(method,path,body)=>{
+            if(moduleUnsent){moduleUnsent--;throw Object.assign(new Error('SYN not sent'),{sent:false});}
+            let r;
+            try{r=await fetch('/api'+path,{method,cache:'no-store',headers:body===undefined?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});}
+            catch(e){throw Object.assign(new Error('SYN network'),{sent:true});}
+            let value=null;try{value=await r.json();}catch(_){}
+            if(!r.ok)throw Object.assign(new Error(value?.message??'HTTP '+r.status),{status:r.status,body:value});
+            if(!value)throw Object.assign(new Error('SYN unreadable'),{status:r.status,incomplete:true});
+            return value;
+          };
+          window.note=KinTechNote({allowed:()=>KinWorkContext.state()==='active',api});
+        }''')
+
+    def open(self):
+        self.page.evaluate('note.open({uid:"1.2.3"})')
+
+    def test_module_a_request_that_never_left_is_not_saved(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN v2', 'SYN R1')
+        self.page.evaluate('moduleUnsent=1')
+        self.save()
+        expect(self.status).to_have_text(UNSENT)
+        self.assertEqual(self.api.posts, [])
+        self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': False})
+
+
+class WrapperNoteTest(Vectors, Harness, unittest.TestCase):
+    """The viewer window's Tech Note: viewer-tech-note.js checks the account before and after each request."""
+    STATE = 'kinViewerTechNoteWorkspaceState()'
+
+    def mount(self):
         self.page.add_script_tag(path=str(ROOT / 'config/ohif.js'))
         for name in ('workspace-shortcuts.js', 'tech-note.js', 'viewer-tech-note.js'):
-            source = Path(os.environ.get('KIN_CTX_' + name.replace('-', '_').replace('.', '_').upper(), HP / name))
-            self.page.add_script_tag(path=str(source))
+            self.page.add_script_tag(path=str(source(name)))
         self.page.evaluate('''() => {
           const image='/studies/1.2.3/series/1.2.4/instances/1.2.5/frames/1';
           const view={id:'v',type:'stack',element:document.getElementById('image'),getCurrentImageId:()=>image};
@@ -58,685 +863,61 @@ class ViewerTechNoteDOMTest(unittest.TestCase):
           window.services={viewportGridService:{getState:()=>({activeViewportId:'v',viewports:new Map([['v',row]])})},
             cornerstoneViewportService:{getCornerstoneViewport:()=>view},displaySetService:{getDisplaySetByUID:()=>ds}};
           window.cornerstone={Enums:{Events:{STACK_NEW_IMAGE:'STACK_NEW_IMAGE'}},metaData:{get:()=>undefined}};
-          const createNote=KinTechNote;
-          window.noteErrors=[];
-          window.KinTechNote=app=>createNote({...app,api:async(...args)=>{
-            try{return await app.api(...args);}
-            catch(error){noteErrors.push({method:args[0],status:error.status??null});throw error;}
-          }});
           window.noteBridge=kinViewerTechNote(services,kinViewerSession.writeModule);
           noteBridge.mount();
         }''')
+        expect(self.page.get_by_role('button', name='Tech Note', exact=True)).to_be_enabled()
+
+    def open(self):
         self.page.get_by_role('button', name='Tech Note', exact=True).click()
-        expect(self.page.get_by_label('Note', exact=True)).to_be_editable()
-        self.page.get_by_label('Note', exact=True).fill('SYN my note')
 
-    def tearDown(self):
-        self.context.close()
-        self.assertEqual(self.errors, [])
-        self.assertEqual(self.unbound, [])
-
-    def route(self, route):
-        path = route.request.url[len(BASE):].split('?')[0]
-        if path.endswith('/tech-note/history'):
-            before = int(parse_qs(urlparse(route.request.url).query).get('before', [len(self.notes)+1])[0])
-            return route.fulfill(json=dict(uid='1.2.3', items=[n for n in reversed(self.notes) if n['version'] < before], nextBefore=None))
-        if path == '/api/me':
-            self.calls.append('me')
-            failure = self.me_answers.pop(0) if self.me_answers else self.trailing if self.posts else self.leading
-            if failure == 'account':
-                return route.fulfill(json={**ME, 'sub': 'different'})
-            if failure == 'network':
-                return route.abort()
-            if failure:
-                return route.fulfill(status=failure, json={'message': 'SYN account busy', 'code': 'AUTH_SESSION_BUSY'})
-            return route.fulfill(json=ME)
-        if path.endswith('/tech-note'):
-            self.calls.append(route.request.method)
-            if route.request.method == 'POST':
-                body = route.request.post_data_json
-                self.posts.append(body)
-                self.post_headers.append({k: v for k, v in route.request.headers.items() if k.startswith('x-kin')})
-                if self.post_status != 200:
-                    return route.fulfill(status=self.post_status, json={'message': 'SYN write refused'})
-                mode = self.post_modes.pop(0) if self.post_modes else 'ok'
-                if mode == 'hold':
-                    self.held[len(self.posts)-1] = route
-                    self.page.evaluate('window.heldNoteReady=true')
-                    return
-                if mode == 'abort':
-                    return route.abort()
-                code = self.commit_note(body)
-                if mode == 'abort-commit':
-                    return route.abort()
-                if code != 200:
-                    return route.fulfill(status=code, json={'message': 'SYN write refused'})
-            return route.fulfill(json=dict(uid='1.2.3', writable=True, note=self.notes[-1] if self.notes else None))
-        route.fulfill(body='<div id="root"><div id="image"></div><section id="kin-viewer-layout"></section></div>', content_type='text/html')
-
-    def save(self):
-        self.page.get_by_role('button', name='Save Note', exact=True).click()
-
-    def commit_note(self, body):
-        """Atomic CAS and validation from the Tech Note API contract, no timing."""
-        if body['baseVersion'] != len(self.notes):
-            return 409
-        if self.notes and (not body['reason'].strip() or self.notes[-1]['text'] == body['text']):
-            return 400
-        if not self.notes and not body['text'].strip():
-            return 400
-        self.notes.append(dict(studyUid='1.2.3', version=len(self.notes)+1, text=body['text'],
-                               reason=body['reason'].strip(), author='tech', createdAt='2026-10-05T00:00:00Z'))
-        return 200
-
-    def finish_held(self, index):
-        route = self.held.pop(index)
-        code = self.commit_note(self.posts[index])
-        route.fulfill(status=code, json=dict(uid='1.2.3', writable=True, note=self.notes[-1]) if code == 200 else {'message': 'SYN write refused'})
-
-    def unknown_first(self, committed=False):
-        self.post_modes = ['abort-commit' if committed else 'abort']
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
-        self.page.wait_for_function('!kinViewerTechNoteWorkspaceState().busy')
-
-    def edit_unknown(self, reason='  SYN correction  '):
-        self.page.get_by_label('Note', exact=True).fill('SYN corrected dose 120 mAs')
-        self.page.get_by_label('Reason for Change').fill(reason)
-
-    def assert_current_saved(self, version):
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v' + str(version))
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
-        expect(self.page.get_by_label('Reason for Change')).to_have_value('')
-        self.assertEqual({'dirty': False, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
-
-    def test_ordinary_save_preserves_text_consumes_reason_clean_one_request(self):
-        self.page.get_by_label('Reason for Change').fill('  SYN initial  ')
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN my note')
-        expect(self.page.get_by_label('Reason for Change')).to_have_value('')
-        self.assertEqual(len(self.posts), 1)
-        self.assertEqual({'dirty': False, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
-        self.page.keyboard.press('Escape')
-        self.assertEqual(self.dialogs, [])
-
-    def open_existing_note(self):
-        self.page.get_by_role('button', name='Close', exact=True).click()
-        self.dialogs.clear()
-        self.assertEqual(self.commit_note({'baseVersion': 0, 'text': 'SYN A', 'reason': ''}), 200)
-        self.page.get_by_role('button', name='Tech Note', exact=True).click()
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN A')
-
-    def check_reason_only_after_witness(self, current_reason):
-        self.open_existing_note()
-        note, reason = self.page.get_by_label('Note', exact=True), self.page.get_by_label('Reason for Change')
-        note.fill('SYN B'); reason.fill('R1')
-        self.unknown_first(committed=True)
-        reason.fill(''); reason.fill(current_reason)
-        self.save()
-        corrected = current_reason != 'R1'
-        status = self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')
-        unchanged = '변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v2'
-        if corrected:
-            unchanged += ' · 사유만 바꾸려면 본문을 함께 수정해야 합니다'
-        expect(status).to_have_text(unchanged if corrected else '저장되었습니다. v2')
-        expect(note).to_have_value('SYN B')
-        expect(reason).to_have_value(current_reason)
-        self.assertEqual({'dirty': corrected, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
-        self.assertEqual(self.posts, [{'baseVersion': 1, 'text': 'SYN B', 'reason': 'R1'}])
-        self.assertEqual([(n['version'], n['text']) for n in self.notes], [(1, 'SYN A'), (2, 'SYN B')])
-        self.assertEqual(self.notes[-1]['reason'], 'R1')
-        self.save()
-        expect(status).to_have_text(unchanged)
-        expect(reason).to_have_value(current_reason)
-        self.assertEqual(len(self.posts), 1)
-        self.page.get_by_role('button', name='Close', exact=True).click()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).not_to_be_visible()
-        self.assertEqual(self.dialogs, ['저장하지 않은 메모 입력을 버리고 닫을까요?'] if corrected else [])
-
-    def test_witness_unchanged_text_retyped_same_reason_is_clean_without_post(self):
-        self.check_reason_only_after_witness('R1')
-
-    def test_witness_unchanged_text_corrected_reason_is_unsaved_without_post(self):
-        self.check_reason_only_after_witness('R1 (typo fixed)')
-
-    def test_ordinary_unchanged_text_never_posts_with_or_without_reason(self):
-        self.open_existing_note()
-        for value in ('', 'R1'):
-            with self.subTest(reason=value):
-                self.page.get_by_label('Reason for Change').fill(value)
+    # The wrapper's own pairs: the answer of the POST is the write's answer, never the account check's.
+    def test_wrapper_post_2xx_then_a_failing_account_check_keeps_the_receipt(self):
+        for trailing in (409, 'network'):
+            with self.subTest(trailing=trailing):
+                if trailing != 409:
+                    self.setUp_again()
+                self.opened_with('SYN v1')
+                self.edit('SYN v2', 'SYN R1')
+                self.me_answers = [None, trailing]
                 self.save()
-                expected = '변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v1'
-                if value:
-                    expected += ' · 사유만 바꾸려면 본문을 함께 수정해야 합니다'
-                expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text(expected)
-                expect(self.page.get_by_label('Reason for Change')).to_have_value(value)
-                self.assertEqual(self.posts, [])
-                self.assertEqual(bool(value), self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
+                expect(self.status).to_have_text(saved(2))
+                self.assertEqual(self.api.calls[-2:], ['POST', 'me'])
+                self.assertFalse(self.state()['unknown'])
 
-    def test_reason_only_correction_keeps_input_and_close_confirms_once(self):
-        self.open_existing_note()
-        reason = self.page.get_by_label('Reason for Change')
-        reason.fill('kVp typo in v1 reason')
+    def test_wrapper_a_failing_account_check_before_the_post_sends_nothing(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN v2', 'SYN R1')
+        self.me_answers = [409]
         self.save()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text(
-            '변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v1 · 사유만 바꾸려면 본문을 함께 수정해야 합니다')
-        expect(reason).to_have_value('kVp typo in v1 reason')
-        self.assertEqual(self.notes[-1]['reason'], '')
-        self.assertEqual(self.posts, [])
-        self.assertTrue(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-        self.accept_dialogs = False
-        self.page.get_by_role('button', name='Close', exact=True).click()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).to_be_visible()
-        expect(reason).to_have_value('kVp typo in v1 reason')
-        self.assertEqual(self.dialogs, ['저장하지 않은 메모 입력을 버리고 닫을까요?'])
+        expect(self.status).to_have_text(UNSENT)
+        self.assertEqual(self.api.posts, [])
+        self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': False})
 
-    def test_conflict_then_reverted_text_keeps_warning_and_never_posts_again(self):
-        self.open_existing_note()
-        self.assertEqual(self.commit_note({'baseVersion': 1, 'text': 'SYN foreign v2', 'reason': 'foreign'}), 200)
-        self.notes[-1]['author'] = 'other technician'
-        note, reason = self.page.get_by_label('Note', exact=True), self.page.get_by_label('Reason for Change')
-        note.fill('SYN mine'); reason.fill('R1'); self.save()
-        status = self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')
-        expect(status).to_contain_text('저장되지 않았습니다')
-        self.assertIn({'method': 'POST', 'status': 409}, self.page.evaluate('noteErrors'))
-        warning = status.inner_text()
-        note.fill('SYN A')
-        for value in ('R1', ''):
-            with self.subTest(reason=value):
-                reason.fill(value); self.save()
-                expect(status).to_have_text(warning)
-                self.assertNotIn('저장되었습니다', status.inner_text())
-                expect(note).to_have_value('SYN A')
-                expect(reason).to_have_value(value)
-                self.assertEqual(self.posts, [{'baseVersion': 1, 'text': 'SYN mine', 'reason': 'R1'}])
-        self.assertEqual(self.notes[-1]['text'], 'SYN foreign v2')
-        self.page.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(note).to_have_value('SYN foreign v2')
-        self.save()
-        expect(status).to_have_text('변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v2')
-        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-        self.assertEqual(len(self.posts), 1)
-
-    def test_unread_foreign_version_reason_only_uses_last_read_baseline(self):
-        # Probe p2b has no preceding 409/read: the client can only know v1.
-        self.open_existing_note()
-        self.assertEqual(self.commit_note({'baseVersion': 1, 'text': 'SYN foreign v2', 'reason': 'foreign'}), 200)
-        self.page.get_by_label('Reason for Change').fill('restore A')
-        self.save()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text(
-            '변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v1 · 사유만 바꾸려면 본문을 함께 수정해야 합니다')
-        expect(self.page.get_by_label('Reason for Change')).to_have_value('restore A')
-        self.assertEqual(self.posts, [])
-        self.assertEqual(len(self.notes), 2)
-
-    def test_clear_and_retype_baseline_is_clean_without_write_or_close_prompt(self):
-        self.open_existing_note()
-        note = self.page.get_by_label('Note', exact=True)
-        note.fill('')
-        self.assertTrue(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-        note.fill('SYN A'); self.save()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text(
-            '변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v1')
-        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-        self.page.get_by_role('button', name='Close', exact=True).click()
-        self.assertEqual(self.dialogs, [])
-        self.assertEqual(self.posts, [])
-
-    def test_new_note_first_save_needs_no_reason_and_next_save_does_not_post(self):
-        self.save()
-        status = self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')
-        expect(status).to_have_text('저장되었습니다. v1')
-        self.assertEqual(self.posts, [{'baseVersion': 0, 'text': 'SYN my note', 'reason': ''}])
-        self.save()
-        expect(status).to_have_text('변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v1')
-        self.assertEqual(len(self.posts), 1)
-        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-
-    def test_empty_new_note_does_not_post_but_whitespace_is_validated_by_server(self):
-        note = self.page.get_by_label('Note', exact=True)
-        note.fill(''); self.save()
-        status = self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')
-        expect(status).to_have_text('변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v0')
-        self.assertEqual(self.posts, [])
-        note.fill('   '); self.save()
-        expect(status).to_contain_text('저장되지 않았습니다')
-        self.assertEqual(self.posts, [{'baseVersion': 0, 'text': '   ', 'reason': ''}])
-        self.assertEqual(self.notes, [])
-
-    def test_trailing_space_is_a_real_change_and_is_sent_once_with_reason(self):
-        self.open_existing_note()
-        self.page.get_by_label('Note', exact=True).fill('SYN A ')
-        self.save()
-        status = self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')
-        expect(status).to_contain_text('사유를 입력하세요')
-        self.assertEqual(self.posts, [])
-        self.page.get_by_label('Reason for Change').fill('spacing'); self.save()
-        expect(status).to_have_text('저장되었습니다. v2')
-        self.assertEqual(self.posts, [{'baseVersion': 1, 'text': 'SYN A ', 'reason': 'spacing'}])
-        self.assertEqual(self.notes[-1]['text'], 'SYN A ')
-        self.save()
-        expect(status).to_have_text('변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v2')
-        self.assertEqual(len(self.posts), 1)
-
-    def test_witness_existing_note_changed_text_sends_one_followup(self):
-        self.open_existing_note()
-        note, reason = self.page.get_by_label('Note', exact=True), self.page.get_by_label('Reason for Change')
-        note.fill('SYN B'); reason.fill('R1')
-        self.unknown_first(committed=True)
-        note.fill('SYN C'); reason.fill('R2')
-        self.save()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text('저장되었습니다. v3')
-        self.assertEqual(self.posts, [{'baseVersion': 1, 'text': 'SYN B', 'reason': 'R1'},
-                                     {'baseVersion': 2, 'text': 'SYN C', 'reason': 'R2'}])
-        expect(note).to_have_value('SYN C')
-        expect(reason).to_have_value('')
-        self.assertEqual({'dirty': False, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
-
-    def test_witness_before_foreign_revision_consumes_reason_and_requires_new_reason(self):
-        self.open_existing_note()
-        note, reason = self.page.get_by_label('Note', exact=True), self.page.get_by_label('Reason for Change')
-        note.fill('SYN B'); reason.fill('R1')
-        self.unknown_first(committed=True)
-        self.assertEqual(self.commit_note({'baseVersion': 2, 'text': 'SYN foreign v3', 'reason': 'foreign reason'}), 200)
-        self.notes[-1]['author'] = 'other technician'
-        self.save()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text('저장되었습니다. v2 · 이후 메모가 변경되어 입력을 유지했습니다. 최신 메모와 비교하세요.')
-        expect(note).to_have_value('SYN B')
-        expect(reason).to_have_value('')
-        self.assertEqual({'dirty': True, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
-        self.save()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text('수정·비우기 사유를 입력하세요.')
-        self.assertEqual(len(self.posts), 1)
-        self.assertEqual(self.notes[-1]['text'], 'SYN foreign v3')
-        reason.fill('R2 after comparing v3')
-        self.save()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_have_text('저장되었습니다. v4')
-        self.assertEqual(self.posts[-1], {'baseVersion': 3, 'text': 'SYN B', 'reason': 'R2 after comparing v3'})
-        self.assertEqual(len(self.posts), 2)
-        expect(reason).to_have_value('')
-
-    def test_open_reload_never_reuses_another_technicians_reason(self):
-        self.page.get_by_role('button', name='Close', exact=True).click()
-        self.dialogs.clear()
-        self.assertEqual(self.commit_note({'baseVersion': 0, 'text': 'SYN A', 'reason': ''}), 200)
-        self.assertEqual(self.commit_note({'baseVersion': 1, 'text': 'SYN B', 'reason': 'other tech: wrong kVp'}), 200)
-        self.notes[-1]['author'] = 'other technician'
-        self.page.get_by_role('button', name='Tech Note', exact=True).click()
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN B')
-        reason = self.page.get_by_label('Reason for Change')
-        expect(reason).to_have_value('')
-        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-        self.page.keyboard.press('Escape')
-        self.assertEqual(self.dialogs, [])
-        self.page.get_by_role('button', name='Tech Note', exact=True).click()
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN B')
-        self.page.get_by_label('Note', exact=True).fill('SYN C')
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('사유를 입력하세요')
-        self.assertEqual(self.posts, [])
-        reason.fill('my correction')
-        self.page.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN B')
-        expect(reason).to_have_value('')
-        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-        self.page.get_by_label('Note', exact=True).fill('SYN C')
-        reason.fill('my current reason')
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v3')
-        self.assertEqual([b['reason'] for b in self.posts], ['my current reason'])
-        expect(reason).to_have_value('')
-
-    def test_next_edit_or_clear_requires_a_new_reason_after_confirmed_save(self):
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
-        note, reason = self.page.get_by_label('Note', exact=True), self.page.get_by_label('Reason for Change')
-        note.fill('SYN second'); reason.fill('R1')
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v2')
-        expect(reason).to_have_value('')
-        for text in ('SYN third', ''):
-            with self.subTest(text=text):
-                note.fill(text)
-                self.save()
-                expect(self.page.locator('#tech-note-status')).to_contain_text('사유를 입력하세요')
-                expect(note).to_have_value(text)
-                self.assertEqual(len(self.posts), 2)
-        reason.fill('R2')
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v3')
-        self.assertEqual([b['reason'] for b in self.posts], ['', 'R1', 'R2'])
-        expect(reason).to_have_value('')
-
-    def test_witness_consumes_sent_reason_and_gates_changed_text(self):
-        self.page.get_by_label('Reason for Change').fill('R1')
-        self.unknown_first(committed=True)
-        self.page.get_by_label('Note', exact=True).fill('SYN corrected dose 120 mAs')
-        self.save()
-        self.assert_followup_needs_reason(1)
-        expect(self.page.get_by_label('Reason for Change')).to_have_value('')
-
-    def test_unknown_existing_note_retry_without_reason_sends_nothing(self):
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
-        self.edit_unknown()
-        self.unknown_first()
-        self.page.get_by_label('Reason for Change').fill('')
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('사유를 입력하세요')
-        self.assertEqual(len(self.posts), 2)
-        self.assertEqual({'dirty': True, 'busy': False, 'unknown': True}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
-
-    def test_witness_preserves_a_retyped_equal_reason_for_the_current_text(self):
-        self.page.get_by_label('Reason for Change').fill('  SYN correction  ')
-        self.unknown_first(committed=True)
-        self.edit_unknown(reason='')
-        self.page.get_by_label('Reason for Change').fill('  SYN correction  ')
-        self.save()
-        self.assert_current_saved(2)
-        self.assertEqual([b['reason'] for b in self.posts], ['  SYN correction  ', '  SYN correction  '])
-
-    def test_reload_witness_consumes_sent_reason_without_writing(self):
-        self.page.get_by_label('Reason for Change').fill('R1')
-        self.unknown_first(committed=True)
-        self.page.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
-        expect(self.page.get_by_label('Reason for Change')).to_have_value('')
-        self.assertEqual(len(self.posts), 1)
-        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-
-    def test_reload_witness_consumes_retyped_reason_sent_with_identical_retry(self):
-        reason = self.page.get_by_label('Reason for Change')
-        reason.fill('R1')
-        self.unknown_first()
-        reason.fill(''); reason.fill('R1')
-        self.post_modes = ['abort-commit']
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
-        self.page.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
-        expect(reason).to_have_value('')
-        self.assertEqual(len(self.posts), 2)
-        self.assertEqual(len(self.notes), 1)
-        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-
-    def assert_followup_needs_reason(self, post_count):
-        status = self.page.locator('#tech-note-status')
-        expect(status).to_contain_text('앞의 메모는 v1으로 저장되었습니다')
-        expect(status).to_contain_text('사유를 입력한 뒤 Save Note')
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
-        expect(self.page.get_by_label('Reason for Change')).to_be_focused()
-        self.assertEqual(len(self.posts), post_count)
-        self.assertEqual({'dirty': True, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
-
-    def test_witness_followup_without_reason_sends_nothing_then_new_reason_saves(self):
-        self.unknown_first(committed=True)
-        self.edit_unknown(reason='')
-        self.save()
-        self.assert_followup_needs_reason(1)
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('사유를 입력하세요')
-        self.assertEqual(len(self.posts), 1)
-        self.page.get_by_label('Reason for Change').fill('  SYN correction  ')
-        self.save()
-        self.assert_current_saved(2)
-        self.assertEqual([b['baseVersion'] for b in self.posts], [0, 1])
-
-    def test_cas_witness_followup_without_reason_sends_nothing_and_close_confirms(self):
-        self.first_commits_during_resend(reason='')
-        self.assert_followup_needs_reason(2)
-        self.assertEqual([b['baseVersion'] for b in self.posts], [0, 0])
-        self.assertEqual([n['text'] for n in self.notes], ['SYN my note'])
-        self.page.get_by_role('button', name='Close', exact=True).click()
-        self.assertEqual(len(self.dialogs), 1)
-        self.assertIn('저장하지 않은 메모 입력', self.dialogs[0])
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).not_to_be_visible()
-
-    def test_unknown_old_read_sends_current_text_second_commits_first(self):
-        self.unknown_first()
-        self.edit_unknown()
-        self.save()
-        self.assert_current_saved(1)
-        self.assertEqual([(b['baseVersion'], b['text']) for b in self.posts], [(0, 'SYN my note'), (0, 'SYN corrected dose 120 mAs')])
-        self.assertEqual(self.commit_note(self.posts[0]), 409)
-        self.assertEqual([(n['version'], n['text']) for n in self.notes], [(1, 'SYN corrected dose 120 mAs')])
-        for headers in self.post_headers:
-            self.assertEqual({k: headers[k] for k in ('x-kin-subject', 'x-kin-institution', 'x-kin-session')},
-                             {'x-kin-subject': 'tech', 'x-kin-institution': 'hospital', 'x-kin-session': 'S1'})
-
-    def test_unknown_witness_sends_current_text_from_known_version(self):
-        self.unknown_first(committed=True)
-        self.edit_unknown()
-        self.save()
-        self.assert_current_saved(2)
-        self.assertEqual([b['baseVersion'] for b in self.posts], [0, 1])
-        self.assertEqual([n['text'] for n in self.notes], ['SYN my note', 'SYN corrected dose 120 mAs'])
-
-    def test_unknown_witness_same_input_is_clean_without_resend(self):
-        self.unknown_first(committed=True)
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
-        self.assertEqual(len(self.posts), 1)
-        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-
-    def test_unknown_reload_witness_keeps_edits_and_never_writes(self):
-        self.unknown_first(committed=True)
-        self.edit_unknown()
-        self.page.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장되었습니다. v1 · 이후 입력은 아직 저장되지 않았습니다')
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
-        expect(self.page.get_by_label('Reason for Change')).to_have_value('  SYN correction  ')
-        self.assertEqual({'dirty': True, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
-        self.assertEqual(len(self.posts), 1)
-        self.assertEqual(self.dialogs, [])
-        self.accept_dialogs = False
-        self.page.keyboard.press('Escape')
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).to_be_visible()
-        self.assertEqual(len(self.dialogs), 1)
-
-    def test_unknown_old_reload_keeps_current_input_and_never_writes(self):
-        self.unknown_first()
-        self.edit_unknown()
-        self.page.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과는 아직 알 수 없습니다')
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
-        self.assertTrue(self.page.evaluate('kinViewerTechNoteWorkspaceState().unknown'))
-        self.assertEqual(len(self.posts), 1)
-
-    def first_commits_during_resend(self, reason='  SYN correction  ', change_account=False, followup_status=200):
-        self.unknown_first()
-        self.edit_unknown(reason)
-        self.post_modes = ['hold', 'ok', 'hold']
-        self.save()
-        self.page.wait_for_function('window.heldNoteReady===true')
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장 중…')
-        self.post_status = followup_status
-        if change_account:
-            # A refused POST throws before the trailing check: only the re-check's
-            # two identity reads precede the follow-up's leading check.
-            self.me_answers = [None, None, 'account']
-        with self.page.expect_response(lambda r: r.request.method == 'POST'):
-            self.assertEqual(self.commit_note(self.posts[0]), 200)
-            self.finish_held(1)
-
-    def test_first_commits_during_resend_current_text_gets_one_followup(self):
-        self.first_commits_during_resend()
-        self.assert_current_saved(2)
-        self.assertEqual([b['baseVersion'] for b in self.posts], [0, 0, 1])
-        self.assertEqual([n['text'] for n in self.notes], ['SYN my note', 'SYN corrected dose 120 mAs'])
-
-    def test_followup_refusal_keeps_box_and_stops_after_one_write(self):
-        self.first_commits_during_resend(followup_status=400)
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장되지 않았습니다')
-        self.page.wait_for_function('!kinViewerTechNoteWorkspaceState().busy', timeout=2000)
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
-        expect(self.page.get_by_label('Reason for Change')).to_have_value('  SYN correction  ')
-        self.assertEqual([b['baseVersion'] for b in self.posts], [0, 0, 1])
-        self.assertEqual([n['text'] for n in self.notes], ['SYN my note'])
-        self.assertEqual({'dirty': True, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
-
-    def test_foreign_version_is_not_saved_and_baseline_comes_from_read(self):
-        self.unknown_first()
-        self.edit_unknown()
-        self.assertEqual(self.commit_note({'baseVersion': 0, 'text': 'SYN other reader', 'reason': 'SYN other reason'}), 200)
-        self.notes[-1]['author'] = 'other technician'
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장되지 않았습니다. 다른 메모가 저장되었습니다')
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
-        expect(self.page.get_by_label('Reason for Change')).to_have_value('  SYN correction  ')
-        self.assertEqual(len(self.posts), 1)
-        self.assertTrue(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-        warning = self.page.locator('#tech-note-status').inner_text()
-        # Equal foreign text is not evidence of this person's write or reason.
-        self.page.get_by_label('Note', exact=True).fill('SYN other reader')
-        self.page.get_by_label('Reason for Change').fill('SYN other reason')
-        self.assertTrue(self.page.evaluate('kinViewerTechNoteWorkspaceState().dirty'))
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_have_text(warning)
-        self.assertFalse(warning.startswith('저장되었습니다'))
-        self.assertEqual(len(self.posts), 1)
-        expect(self.page.get_by_label('Reason for Change')).to_have_value('SYN other reason')
-        self.page.keyboard.press('Escape')
-        self.assertEqual(self.dialogs, ['저장하지 않은 메모 입력을 버리고 닫을까요?'])
-
-    def test_reload_differing_box_requires_confirmation(self):
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
-        self.edit_unknown()
-        self.accept_dialogs = False
-        self.page.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
-        self.assertEqual(len(self.dialogs), 1)
-        self.accept_dialogs = True
-        self.page.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN my note')
-        self.assertEqual(len(self.dialogs), 2)
-        self.assertEqual(len(self.posts), 1)
-
-    def test_resend_stops_at_account_change_before_leading_check(self):
-        self.unknown_first()
-        self.edit_unknown()
-        self.me_answers = [None, None, 'account']
-        self.save()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).to_have_count(0)
-        self.assertEqual(len(self.posts), 1)
-        self.assertNotIn('저장되었습니다', self.page.locator('body').inner_text())
-
-    def test_recheck_stops_at_account_change(self):
-        self.unknown_first(committed=True)
-        self.me_answers = ['account']
-        self.save()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).to_have_count(0)
-        self.assertEqual(len(self.posts), 1)
-
-    def test_followup_stops_at_account_change(self):
-        self.first_commits_during_resend(change_account=True)
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).to_have_count(0)
-        self.assertEqual(len(self.posts), 2)
-        self.assertEqual([n['text'] for n in self.notes], ['SYN my note'])
-        self.assertNotIn('저장되었습니다', self.page.locator('body').inner_text())
-
-    def test_rejected_edit_returned_to_known_text_is_clean(self):
-        self.post_status = 403
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장되지 않았습니다')
-        self.assertEqual(len(self.posts), 1)
-        self.page.get_by_label('Note', exact=True).fill('')
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_have_text('변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v0')
-        self.assertEqual(len(self.posts), 1)
-        self.assertEqual({'dirty': False, 'busy': False, 'unknown': False}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
-        self.page.keyboard.press('Escape')
-        self.assertEqual(self.dialogs, [])
-
-    def test_unknown_with_clean_box_still_requires_close_confirmation(self):
-        self.unknown_first()
-        self.page.get_by_label('Note', exact=True).fill('')
-        self.assertEqual({'dirty': False, 'busy': False, 'unknown': True}, self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
-        self.accept_dialogs = False
-        self.page.keyboard.press('Escape')
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).to_be_visible()
-        self.assertEqual(len(self.dialogs), 1)
-        self.assertIn('저장 결과를 알 수 없습니다', self.dialogs[0])
-        self.assertEqual(len(self.posts), 1)
-
-    def test_unknown_existing_save_reverted_to_baseline_never_resends_and_close_confirms(self):
-        self.open_existing_note()
-        note, reason = self.page.get_by_label('Note', exact=True), self.page.get_by_label('Reason for Change')
-        note.fill('SYN B'); reason.fill('R1')
-        self.unknown_first()
-        note.fill('SYN A'); self.save()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('status')).to_contain_text('저장 결과는 아직 알 수 없습니다')
-        self.page.wait_for_function('!kinViewerTechNoteWorkspaceState().busy')
-        self.assertEqual(self.posts, [{'baseVersion': 1, 'text': 'SYN B', 'reason': 'R1'}])
-        self.assertEqual([(n['version'], n['text']) for n in self.notes], [(1, 'SYN A')])
-        self.assertTrue(self.page.evaluate('kinViewerTechNoteWorkspaceState().unknown'))
-        expect(note).to_have_value('SYN A')
-        expect(reason).to_have_value('R1')
-        self.accept_dialogs = False
-        self.page.get_by_role('button', name='Close', exact=True).click()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).to_be_visible()
-        self.assertEqual(len(self.dialogs), 1)
-        self.assertIn('저장 결과를 알 수 없습니다', self.dialogs[0])
-
-    def test_typing_and_cancelled_close_never_send_without_save(self):
-        self.edit_unknown()
-        self.accept_dialogs = False
-        self.page.get_by_role('button', name='Close', exact=True).click()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).to_be_visible()
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
-        self.assertEqual(self.posts, [])
-        self.assertEqual(self.notes, [])
-
-    def test_post_200_trailing_me_409_keeps_write_receipt(self):
-        self.trailing = 409
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
-        self.assertEqual(len(self.posts), 1)
-        self.assertEqual(self.calls[-2:], ['POST', 'me'])
-        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().unknown'))
-
-    def test_post_200_trailing_network_failure_keeps_write_receipt(self):
-        self.trailing = 'network'
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
-        self.assertEqual(len(self.notes), 1)
-
-    def test_leading_check_failure_never_sends_write(self):
-        self.leading = 409
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 요청을 보내지 못했습니다')
-        self.assertEqual(self.posts, [])
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN my note')
-        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().unknown'))
-        self.page.keyboard.press('Escape')
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).not_to_be_visible()
-
-    def test_write_403_is_not_unknown_and_close_is_available(self):
-        self.post_status = 403
-        self.save()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장되지 않았습니다')
-        expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN my note')
-        self.assertFalse(self.page.evaluate('kinViewerTechNoteWorkspaceState().unknown'))
-        self.page.keyboard.press('Escape')
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).not_to_be_visible()
-        self.assertEqual(len(self.posts), 1)
-
-    def test_post_200_trailing_different_account_ends_note_module(self):
-        self.trailing = 'account'
-        self.save()
-        expect(self.page.get_by_role('dialog', name='Tech Note', exact=True)).to_have_count(0)
+    def test_wrapper_another_account_after_the_post_ends_the_window_without_painting_the_receipt(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN v2', 'SYN R1')
+        self.me_answers = [None, 'account']
+        self.save(wait=False)
+        expect(self.dialog).to_have_count(0)
         expect(self.page.get_by_role('button', name='Tech Note', exact=True)).to_be_disabled()
-        expect(self.page.locator('#kin-viewer-note-status')).to_contain_text('세션이나 영상창이 변경되었습니다')
-        expect(self.page.get_by_label('Note', exact=True)).to_have_count(0)
-        expect(self.page.locator('#tech-note-meta, #tech-note-status')).to_have_count(0)
-        self.assertEqual({'dirty': False, 'busy': False, 'unknown': False},
-                         self.page.evaluate('kinViewerTechNoteWorkspaceState()'))
-        self.assertEqual([{'method': 'POST', 'status': None}], self.page.evaluate('noteErrors'))
-        self.assertEqual(len(self.notes), 1)
+        self.assertEqual(len(self.api.notes), 2)
         self.assertNotIn('저장되었습니다', self.page.locator('body').inner_text())
-        self.assertNotIn('SYN my note', self.page.locator('body').inner_text())
+        self.assertEqual({'dirty': False, 'busy': False, 'unknown': False}, self.state())
+
+    def test_wrapper_the_resend_stops_at_an_account_change(self):
+        self.lost_first_write('abort')
+        self.me_answers = [None, None, 'account']   # the re-check's GET passes; the resend's leading check sees B
+        self.save(wait=False)
+        expect(self.dialog).to_have_count(0)
+        self.assertEqual(len(self.api.posts), 1)
+
+    def test_wrapper_requests_carry_the_window_owner(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN v2', 'SYN R1'); self.save()
+        expect(self.status).to_have_text(saved(2))
+        self.assertEqual([{k: h[k] for k in ('x-kin-subject', 'x-kin-institution', 'x-kin-session')} for h in self.api.headers],
+                         [{'x-kin-subject': 'tech', 'x-kin-institution': 'hospital', 'x-kin-session': 'S1'}])
 
 
 if __name__ == '__main__':

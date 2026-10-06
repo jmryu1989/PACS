@@ -441,6 +441,8 @@ class ViewerContextLossDOMTest(unittest.TestCase):
 
         A client abort settles only the first response. Its server operation remains
         at the barrier until finishWrite(0), like a handler surviving client timeout.
+        The server is the S8-CTX contract (section 2): a revision keeps its attemptId, the same id
+        resent answers that revision without a new one, reads answer attemptId and isOwnAttempt.
         """
         p = self.page
         p.add_script_tag(url=BASE + '/worklist/hpacs-lite/tech-note.js')
@@ -449,12 +451,14 @@ class ViewerContextLossDOMTest(unittest.TestCase):
           const snapshot=()=>({uid:'1.2.3',writable:true,note:noteServer.notes.at(-1)||null});
           window.finishWrite=index=>{
             const request=noteServer.writes[index],body=request.body;
+            const sent=noteServer.notes.find(n=>n.attemptId===body.attemptId);
+            if(sent){request.outcome=200;request.resolve?.({uid:'1.2.3',writable:true,note:sent,latestNote:noteServer.notes.at(-1)});return;}
             if((noteServer.notes.at(-1)?.version??0)!==body.baseVersion){
               request.outcome=409;request.reject?.(Object.assign(Error('version conflict'),{status:409}));return;
             }
             noteServer.notes.push({studyUid:'1.2.3',version:body.baseVersion+1,text:body.text,
-              reason:body.reason.trim(),author:'tech',createdAt:'2026-10-05T00:00:00Z'});
-            request.outcome=200;request.resolve?.(snapshot());
+              reason:body.reason.trim(),author:'tech',createdAt:'2026-10-05T00:00:00Z',attemptId:body.attemptId,isOwnAttempt:true});
+            request.outcome=200;request.resolve?.({...snapshot(),latestNote:noteServer.notes.at(-1)});
           };
           window.note=KinTechNote({allowed:()=>true,api:async(method,path,body)=>{
             if(method==='GET'){
@@ -471,45 +475,44 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.get_by_role('button', name='Save Note', exact=True).click()
         p.wait_for_function('note.workspaceState().unknown && !note.workspaceState().busy')
 
+    # S8-CTX contract sentences (section 3) used by the note cases below.
+    STILL_UNKNOWN = '앞선 저장 결과는 아직 확인되지 않았으며 입력은 유지됩니다.'
+
     def test_unchanged_read_stays_unknown_until_late_commit_is_witnessed(self):
         self.mount_note_cas()
         p = self.page
         p.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(p.locator('#tech-note-status')).to_have_text('저장 결과는 아직 알 수 없습니다 · 입력은 유지되며 Save Note는 확인 후 재시도하고 Reload Note는 결과만 확인합니다.')
+        expect(p.locator('#tech-note-status')).to_have_text(self.STILL_UNKNOWN)
         self.assertTrue(p.evaluate('note.workspaceState().unknown'))
         self.assertEqual(p.evaluate('noteServer.writes.length'), 1)
         expect(p.get_by_label('Note', exact=True)).to_have_value('SYN pending note')
         p.evaluate('finishWrite(0)')
         p.get_by_role('button', name='Save Note', exact=True).click()
-        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        expect(p.locator('#tech-note-status')).to_have_text('앞선 입력은 v1로 저장되었습니다.')
         self.assertEqual(p.evaluate('noteServer.writes.length'), 1)
 
-    def test_unknown_save_resends_same_base_first_commits_late_409_rechecks(self):
+    def test_unknown_save_resends_same_id_first_commits_late_resend_answers_its_receipt(self):
         self.mount_note_cas()
         p = self.page
         p.get_by_role('button', name='Save Note', exact=True).click()
         p.wait_for_function('noteServer.writes.length===2')
         self.assertEqual(p.evaluate('noteServer.reads'), 2)
+        self.assertEqual(p.evaluate('noteServer.writes[0].body'), p.evaluate('noteServer.writes[1].body'), 'the same attempt, the same request')
         p.evaluate('finishWrite(0);finishWrite(1)')
-        p.wait_for_function('!!window.releaseRead')
-        self.assertNotIn('저장되지 않았습니다', p.locator('#tech-note-status').inner_text())
-        self.assertTrue(p.evaluate('note.workspaceState().busy && note.workspaceState().unknown'))
-        p.evaluate('releaseRead()')
-        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
-        self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.outcome)'), [200, 409])
-        self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.body.baseVersion)'), [0, 0])
+        expect(p.locator('#tech-note-status')).to_have_text('입력이 v1로 저장되었습니다.')
+        self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.outcome)'), [200, 200])
         self.assertEqual(p.evaluate('noteServer.notes.map(n=>[n.version,n.text])'), [[1, 'SYN pending note']])
         self.assertFalse(p.evaluate('note.workspaceState().unknown'))
 
-    def test_unknown_save_resends_second_commits_first_cannot_add_revision(self):
+    def test_unknown_save_resends_same_id_second_commits_first_cannot_add_revision(self):
         self.mount_note_cas()
         p = self.page
         p.get_by_role('button', name='Save Note', exact=True).click()
         p.wait_for_function('noteServer.writes.length===2')
         p.evaluate('finishWrite(1)')
-        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        expect(p.locator('#tech-note-status')).to_have_text('입력이 v1로 저장되었습니다.')
         p.evaluate('finishWrite(0)')
-        self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.outcome)'), [409, 200])
+        self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.outcome)'), [200, 200])
         self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.body.baseVersion)'), [0, 0])
         self.assertEqual(p.evaluate('noteServer.notes.map(n=>[n.version,n.text])'), [[1, 'SYN pending note']])
 
@@ -517,7 +520,7 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         self.page.get_by_label('Note', exact=True).fill('SYN corrected dose 120 mAs')
         self.page.get_by_label('Reason for Change').fill('  SYN correction  ')
 
-    def test_unknown_edited_save_sends_current_text_second_commits_first(self):
+    def test_unknown_edited_save_sends_a_new_id_second_commits_first(self):
         self.mount_note_cas()
         p = self.page
         self.edit_pending_note()
@@ -525,13 +528,14 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.wait_for_function('noteServer.writes.length===2')
         self.assertEqual(p.evaluate('noteServer.writes.map(w=>[w.body.baseVersion,w.body.text])'),
                          [[0, 'SYN pending note'], [0, 'SYN corrected dose 120 mAs']])
+        self.assertNotEqual(*p.evaluate('noteServer.writes.map(w=>w.body.attemptId)'))
         p.evaluate('finishWrite(1)')
-        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        expect(p.locator('#tech-note-status')).to_have_text('입력이 v1로 저장되었습니다.')
         p.evaluate('finishWrite(0)')
         self.assertEqual(p.evaluate('noteServer.writes.map(w=>w.outcome)'), [409, 200])
         self.assertEqual(p.evaluate('noteServer.notes.map(n=>[n.version,n.text])'), [[1, 'SYN corrected dose 120 mAs']])
         expect(p.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
-        expect(p.get_by_label('Reason for Change')).to_have_value('')
+        expect(p.get_by_label('Reason for Change')).to_have_value('  SYN correction  ')
         self.assertEqual(p.evaluate('note.workspaceState()'), {'dirty': False, 'busy': False, 'unknown': False})
 
     def test_unknown_edited_save_first_commits_late_one_followup(self):
@@ -542,14 +546,14 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.wait_for_function('noteServer.writes.length===2')
         p.evaluate('finishWrite(0);finishWrite(1)')
         p.wait_for_function('!!window.releaseRead')
-        self.assertNotIn('저장되지 않았습니다', p.locator('#tech-note-status').inner_text())
+        self.assertNotIn('저장되지 않았', p.locator('#tech-note-status').inner_text())
         expect(p.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
         p.evaluate('releaseRead()')
         p.wait_for_function('noteServer.writes.length===3')
         self.assertEqual(p.evaluate('noteServer.writes.map(w=>[w.body.baseVersion,w.body.text])'),
                          [[0, 'SYN pending note'], [0, 'SYN corrected dose 120 mAs'], [1, 'SYN corrected dose 120 mAs']])
         p.evaluate('finishWrite(2)')
-        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v2')
+        expect(p.locator('#tech-note-status')).to_have_text('입력이 v2로 저장되었습니다.')
         self.assertEqual(p.evaluate('noteServer.notes.map(n=>[n.version,n.text])'),
                          [[1, 'SYN pending note'], [2, 'SYN corrected dose 120 mAs']])
         self.assertEqual(p.evaluate('noteServer.writes.length'), 3)
@@ -562,10 +566,12 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         self.edit_pending_note()
         p.get_by_role('button', name='Save Note', exact=True).click()
         p.wait_for_function('noteServer.writes.length===2')
-        self.assertEqual(p.evaluate('noteServer.writes[1].body'),
+        body = p.evaluate('noteServer.writes[1].body')
+        self.assertEqual({k: body[k] for k in ('baseVersion', 'text', 'reason')},
                          {'baseVersion': 1, 'text': 'SYN corrected dose 120 mAs', 'reason': '  SYN correction  '})
+        self.assertNotEqual(body['attemptId'], p.evaluate('noteServer.writes[0].body.attemptId'))
         p.evaluate('finishWrite(1)')
-        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v2')
+        expect(p.locator('#tech-note-status')).to_have_text('입력이 v2로 저장되었습니다.')
         expect(p.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
 
     def test_unknown_reload_witness_keeps_edits_against_known_baseline(self):
@@ -574,7 +580,7 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.evaluate('finishWrite(0)')
         self.edit_pending_note()
         p.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(p.locator('#tech-note-status')).to_contain_text('저장되었습니다. v1 · 이후 입력은 아직 저장되지 않았습니다')
+        expect(p.locator('#tech-note-status')).to_have_text('앞선 입력은 v1로 저장되었으며 현재 입력은 아직 저장되지 않았습니다.')
         expect(p.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
         expect(p.get_by_label('Reason for Change')).to_have_value('  SYN correction  ')
         self.assertEqual(p.evaluate('note.workspaceState()'), {'dirty': True, 'busy': False, 'unknown': False})
@@ -587,7 +593,7 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         self.mount_note_cas()
         self.edit_pending_note()
         self.page.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과는 아직 알 수 없습니다')
+        expect(self.page.locator('#tech-note-status')).to_have_text(self.STILL_UNKNOWN)
         expect(self.page.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
         self.assertEqual(self.page.evaluate('noteServer.writes.length'), 1)
         self.assertTrue(self.page.evaluate('note.workspaceState().unknown'))
@@ -603,7 +609,7 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.evaluate('releaseRead()')
         p.wait_for_function('noteServer.writes.length===3')
         p.evaluate("noteServer.writes[2].reject(Object.assign(Error('lost answer'),{status:502}))")
-        expect(p.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+        expect(p.locator('#tech-note-status')).to_contain_text('앞선 입력은 v1로 저장되었지만 이번 입력의 저장 결과는 알 수 없으며')
         self.assertTrue(p.evaluate('note.workspaceState().unknown'))
         self.assertEqual(p.evaluate('noteServer.writes.length'), 3)
         expect(p.get_by_label('Note', exact=True)).to_have_value('SYN corrected dose 120 mAs')
@@ -617,7 +623,7 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.evaluate("noteServer.writes[1].reject(Error('lost receipt')); finishWrite(1)")
         p.wait_for_function('!note.workspaceState().busy')
         p.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        expect(p.locator('#tech-note-status')).to_have_text('앞선 입력은 v1로 저장되었습니다.')
         self.assertFalse(p.evaluate('note.workspaceState().dirty || note.workspaceState().unknown'))
         self.assertEqual(p.evaluate('noteServer.writes.length'), 2)
 
@@ -628,16 +634,16 @@ class ViewerContextLossDOMTest(unittest.TestCase):
           window.posts=0;window.storedNote=null;
           window.note=KinTechNote({allowed:()=>true,api:async(method,path,body)=>{
             if(method==='GET')return {uid:'1.2.3',writable:true,note:storedNote};
-            posts++;storedNote={studyUid:'1.2.3',version:1,text:body.text,reason:body.reason.trim(),author:'tech',createdAt:'2026-10-05T00:00:00Z'};
+            posts++;storedNote={studyUid:'1.2.3',version:1,text:body.text,reason:body.reason.trim(),author:'tech',createdAt:'2026-10-05T00:00:00Z',attemptId:body.attemptId,isOwnAttempt:true};
             throw Object.assign(Error('lost receipt'),failureStatus?{status:failureStatus}:{});
           }});note.open({uid:'1.2.3'});
         }''', failure_status)
         p.get_by_label('Note', exact=True).fill('SYN committed note')
         p.get_by_role('button', name='Save Note', exact=True).click()
-        expect(p.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+        expect(p.locator('#tech-note-status')).to_have_text('저장 결과를 알 수 없으며 입력은 유지되므로 Save Note 또는 Reload Note로 확인하세요.')
         self.assertTrue(p.evaluate('note.workspaceState().unknown'))
         p.get_by_role('button', name='Save Note', exact=True).click()
-        expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+        expect(p.locator('#tech-note-status')).to_have_text('앞선 입력은 v1로 저장되었습니다.')
         self.assertEqual(p.evaluate('posts'), 1)
 
     def test_gateway_502_after_commit_is_unknown_then_witnessed_without_resend(self):
@@ -734,13 +740,14 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         self.assertTrue(p.evaluate('KinViewerSessionBoundary.active()'))
 
     def test_tech_note_later_revision_resolves_uncertainty_without_discard(self):
+        # The exact next revision carries this attempt's id (and is the caller's own): saved, though a later v2 exists.
         p = self.page; p.add_script_tag(url=BASE + '/worklist/hpacs-lite/tech-note.js')
         p.evaluate('''() => {
-          window.noteRevision=0;
-          window.note=KinTechNote({allowed:()=>true,api:async(method,path)=>{
-            if(method==='POST'){noteRevision=2;throw Error('lost receipt')}
-            if(path.includes('/history?before=2'))return {uid:'1.2.3',items:[{studyUid:'1.2.3',version:1,text:'my input',reason:''}],nextBefore:null};
-            return {uid:'1.2.3',writable:true,note:noteRevision?{studyUid:'1.2.3',version:2,text:'later input',reason:'later',author:'reader',createdAt:'2026-10-05T00:00:00Z'}:null};
+          window.noteRevision=0;window.postedId=null;
+          window.note=KinTechNote({allowed:()=>true,api:async(method,path,body)=>{
+            if(method==='POST'){noteRevision=2;postedId=body.attemptId;throw Error('lost receipt')}
+            if(path.includes('/history?before=2'))return {uid:'1.2.3',items:[{studyUid:'1.2.3',version:1,text:'my input',reason:'',attemptId:postedId,isOwnAttempt:true}],nextBefore:null};
+            return {uid:'1.2.3',writable:true,note:noteRevision?{studyUid:'1.2.3',version:2,text:'later input',reason:'later',author:'reader',createdAt:'2026-10-05T00:00:00Z',attemptId:'99999999-9999-4999-8999-999999999999',isOwnAttempt:false}:null};
           }});note.open({uid:'1.2.3'});
         }''')
         p.get_by_label('Note', exact=True).fill('my input'); p.get_by_role('button', name='Save Note', exact=True).click()
@@ -749,15 +756,16 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.wait_for_function('!note.workspaceState().unknown && !note.workspaceState().busy')
         expect(p.get_by_label('Note', exact=True)).to_have_value('my input')
         self.assertTrue(p.evaluate('note.workspaceState().dirty'))
-        expect(p.locator('#tech-note-status')).to_contain_text('저장되었습니다. v1')
+        expect(p.locator('#tech-note-status')).to_have_text('앞선 입력은 v1로 저장되었고 마지막 확인본은 다른 저장인 v2입니다.')
 
     def test_tech_note_conflicting_revision_resolves_uncertainty_keeps_input(self):
+        # The exact next revision has no id (or another one): this attempt can never be saved, whatever its text.
         p = self.page; p.add_script_tag(url=BASE + '/worklist/hpacs-lite/tech-note.js')
         p.evaluate('''() => {
           window.noteRevision=0;
           window.note=KinTechNote({allowed:()=>true,api:async(method,path)=>{
             if(method==='POST'){noteRevision=1;throw Error('conflicting attempt')}
-            return {uid:'1.2.3',writable:true,note:noteRevision?{studyUid:'1.2.3',version:1,text:'other input',reason:'',author:'other',createdAt:'2026-10-05T00:00:00Z'}:null};
+            return {uid:'1.2.3',writable:true,note:noteRevision?{studyUid:'1.2.3',version:1,text:'other input',reason:'',author:'other',createdAt:'2026-10-05T00:00:00Z',attemptId:null,isOwnAttempt:false}:null};
           }});note.open({uid:'1.2.3'});
         }''')
         p.get_by_label('Note', exact=True).fill('my input'); p.get_by_role('button', name='Save Note', exact=True).click()
@@ -766,7 +774,7 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.wait_for_function('!note.workspaceState().unknown && !note.workspaceState().busy')
         expect(p.get_by_label('Note', exact=True)).to_have_value('my input')
         self.assertTrue(p.evaluate('note.workspaceState().dirty'))
-        expect(p.locator('#tech-note-status')).to_have_text('저장되지 않았습니다. 다른 메모가 저장되었습니다. 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.')
+        expect(p.locator('#tech-note-status')).to_have_text('이 시도는 저장되지 않았고 마지막 확인본은 다른 저장인 v1이며 입력은 유지됩니다.')
 
     def test_foreign_later_history_is_not_our_saved_attempt(self):
         p = self.page; p.add_script_tag(url=BASE + '/worklist/hpacs-lite/tech-note.js')
@@ -774,15 +782,15 @@ class ViewerContextLossDOMTest(unittest.TestCase):
           window.posted=false;
           window.note=KinTechNote({allowed:()=>true,api:async(method,path)=>{
             if(method==='POST'){posted=true;throw Error('lost answer')}
-            if(path.includes('/history?'))return {uid:'1.2.3',items:[{studyUid:'1.2.3',version:1,text:'other input',reason:''}]};
-            return {uid:'1.2.3',writable:true,note:posted?{studyUid:'1.2.3',version:2,text:'later',reason:'change'}:null};
+            if(path.includes('/history?'))return {uid:'1.2.3',items:[{studyUid:'1.2.3',version:1,text:'my input',reason:'',attemptId:'99999999-9999-4999-8999-999999999999',isOwnAttempt:false}]};
+            return {uid:'1.2.3',writable:true,note:posted?{studyUid:'1.2.3',version:2,text:'later',reason:'change',attemptId:null,isOwnAttempt:false}:null};
           }});note.open({uid:'1.2.3'});
         }''')
         p.get_by_label('Note', exact=True).fill('my input')
         p.get_by_role('button', name='Save Note', exact=True).click()
         p.wait_for_function('note.workspaceState().unknown && !note.workspaceState().busy')
         p.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(p.locator('#tech-note-status')).to_have_text('저장되지 않았습니다. 다른 메모가 저장되었습니다. 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.')
+        expect(p.locator('#tech-note-status')).to_have_text('이 시도는 저장되지 않았고 마지막 확인본은 다른 저장인 v2이며 입력은 유지됩니다.')
         self.assertFalse(p.evaluate('note.workspaceState().unknown'))
         expect(p.get_by_label('Note', exact=True)).to_have_value('my input')
 

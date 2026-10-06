@@ -2397,7 +2397,7 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         `saves` answers the note's Save requests in order: 'hold' keeps one unanswered, 'ok' stores it."""
         tab = self.open_main(self.watch(self.context.new_page()))
         note = {"studyUid": h.UID, "version": 1, "text": "SYN saved note", "reason": "", "author": h.RAD["actor"],
-                "createdAt": "2026-10-05T00:00:00Z"}
+                "createdAt": "2026-10-05T00:00:00Z", "attemptId": None, "isOwnAttempt": False}
         answers, held = list(saves or []), []
 
         def answer(route):
@@ -2406,8 +2406,10 @@ class ReportTextBoundaries(h.LogoutDOMTest):
             body = route.request.post_data_json
             if (answers.pop(0) if answers else "ok") == "hold":
                 return held.append(route)
-            note.update(version=note["version"] + 1, text=body["text"], reason=body["reason"].strip())
-            route.fulfill(json={"uid": h.UID, "writable": True, "note": dict(note)})
+            # S8-CTX: the stored revision keeps the save attempt's id; the receipt is the caller's own.
+            note.update(version=note["version"] + 1, text=body["text"], reason=body["reason"].strip(),
+                        attemptId=body["attemptId"], isOwnAttempt=True)
+            route.fulfill(json={"uid": h.UID, "writable": True, "note": dict(note), "latestNote": dict(note)})
         tab.route("**/api/studies/*/tech-note", answer)
         tab.locator("#rows tr", has_text=h.PATIENT).first.click()
         tab.locator("#tech-note-open").click()

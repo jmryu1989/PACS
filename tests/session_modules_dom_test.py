@@ -27,12 +27,13 @@ BOOT = """async () => {
   const nativeFetch=window.fetch.bind(window), nativeDecode=HTMLImageElement.prototype.decode;
   window.syn={calls:[],holds:[],decodes:[],hold:false,holdDecode:false,status:200,applied:[],value:false,revision:1};
   const syn=window.syn, me=KinAuth.session(), owner=[me.institution,me.sub];
-  syn.note={studyUid:'1.2.3',version:1,text:'SYN saved',reason:'',author:'SYN author',createdAt:'2026-10-04T00:00:00Z'};
+  // S8-CTX: reads and receipts carry the revision's attempt id and whether it is the caller's own (section 2).
+  syn.note={studyUid:'1.2.3',version:1,text:'SYN saved',reason:'',author:'SYN author',createdAt:'2026-10-04T00:00:00Z',attemptId:null,isOwnAttempt:false};
   syn.storeNote=true;
   const response=(path,status)=>{
     if(status!==200)return new Response(JSON.stringify({message:'SYN request failed'}),{status,headers:{'Content-Type':'application/json'}});
     if(path==='/api/preferences/reading')return new Response(JSON.stringify({owner,revision:syn.revision,autoNote:syn.value}));
-    if(path.endsWith('/tech-note'))return new Response(JSON.stringify({uid:'1.2.3',writable:true,note:syn.note}));
+    if(path.endsWith('/tech-note'))return new Response(JSON.stringify({uid:'1.2.3',writable:true,note:syn.note,latestNote:syn.note}));
     if(path==='/api/study-access')return new Response(JSON.stringify({owner,revision:syn.revision,restricted:false,windowOpen:true,denied:false}));
     if(path==='/api/dicom/lookup')return new Response(JSON.stringify({id:'12345678-12345678-12345678-12345678-12345678'}));
     if(path.startsWith('/dicom-web/'))return new Response(JSON.stringify([{
@@ -49,7 +50,7 @@ BOOT = """async () => {
     if(path.endsWith('/tech-note')&&init.method==='POST'){
       const body=JSON.parse(init.body);
       if(body.baseVersion!==syn.note.version)return Promise.resolve(new Response('{}',{status:409}));
-      if(syn.storeNote)syn.note={...syn.note,version:syn.note.version+1,text:body.text,reason:body.reason};
+      if(syn.storeNote)syn.note={...syn.note,version:syn.note.version+1,text:body.text,reason:body.reason.trim(),attemptId:body.attemptId,isOwnAttempt:true};
       const reply=response(path,syn.storeNote?200:503);
       if(syn.holdNoteWrite)return new Promise(resolve=>syn.holds.push(()=>resolve(reply)));
       return Promise.resolve(reply);
@@ -64,7 +65,7 @@ BOOT = """async () => {
   };
   syn.api=async(method,path,body,signal,context)=>{
     const r=await KinSessionTransport.page().request('/api'+path,{method,json:body,signal,context});
-    if(!r.ok)throw new Error('HTTP '+r.status);return r.body;
+    if(!r.ok)throw Object.assign(new Error('HTTP '+r.status),{status:r.status});return r.body;
   };
   syn.mount=kind=>{
     if(kind==='request')KinReadingPreferences({owner,host:document.querySelector('#prefs'),read:()=>syn.value,
@@ -147,14 +148,14 @@ class SessionModulesDOMTest(unittest.TestCase):
         self.page.evaluate("syn.prepare();syn.cancel();syn.holds.shift()()")
         expect(self.page.locator("#tech-note-dialog")).to_be_visible()
         expect(note).to_have_value("SYN edited")
-        expect(reason).to_have_value("")
+        expect(reason).to_have_value("SYN reason")  # S8-CTX: no outcome changes the input
         expect(self.page.get_by_role("button", name="Save Note", exact=True)).to_be_enabled()
-        expect(self.page.locator("#tech-note-status")).to_have_text("저장되었습니다. v2")
+        expect(self.page.locator("#tech-note-status")).to_have_text("앞선 입력은 v2로 저장되었습니다.")
         self.assertEqual(['GET','POST','GET'],self.page.evaluate("syn.calls.map(c=>c.method)"))
         self.page.evaluate("syn.holdNoteWrite=false")
         note.fill("SYN next edit"); reason.fill("SYN next reason")
         self.page.get_by_role("button", name="Save Note", exact=True).click()
-        expect(self.page.locator("#tech-note-status")).to_have_text("저장되었습니다. v3")
+        expect(self.page.locator("#tech-note-status")).to_have_text("입력이 v3으로 저장되었습니다.")
         self.end()
         expect(self.page.locator("#tech-note-dialog")).not_to_be_visible()
 
@@ -171,19 +172,19 @@ class SessionModulesDOMTest(unittest.TestCase):
         self.page.evaluate("syn.cancel()")
         expect(self.page.get_by_role("button",name="Save Note",exact=True)).to_be_enabled()
         expect(note).to_have_value("SYN not stored"); expect(reason).to_have_value("SYN reason")
-        expect(self.page.locator("#tech-note-status")).to_have_text("저장 결과는 아직 알 수 없습니다 · 입력은 유지되며 Save Note는 확인 후 재시도하고 Reload Note는 결과만 확인합니다.")
+        expect(self.page.locator("#tech-note-status")).to_have_text("앞선 저장 결과는 아직 확인되지 않았으며 입력은 유지됩니다.")
         self.assertEqual({"dirty": True, "busy": False, "unknown": True}, self.page.evaluate("syn.module.workspaceState()"))
         self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
         with self.page.expect_event("dialog") as confirmation:
             self.page.once("dialog", lambda dialog: dialog.dismiss())
             self.page.get_by_role("button", name="Close", exact=True).click()
-        self.assertIn("저장 결과를 알 수 없습니다", confirmation.value.message)
+        self.assertIn("저장 결과가 미확정", confirmation.value.message)
         expect(note).to_have_value("SYN not stored")
         expect(reason).to_have_value("SYN reason")
         self.assertEqual(['GET','POST','GET'],self.page.evaluate("syn.calls.map(c=>c.method)"))
         self.page.evaluate("syn.holdNoteWrite=false;syn.storeNote=true")
         self.page.get_by_role("button",name="Save Note",exact=True).click()
-        expect(self.page.locator("#tech-note-status")).to_have_text("저장되었습니다. v2")
+        expect(self.page.locator("#tech-note-status")).to_have_text("입력이 v2로 저장되었습니다.")
 
     def test_request_prepare_cancel_drops_old_and_resumes(self):
         self.mount("request")

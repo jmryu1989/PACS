@@ -796,7 +796,7 @@ class LogoutDOMTest(unittest.TestCase):
             self.context.route('**/tech-note.js', lambda r: r.fulfill(body=Path(source).read_text(encoding='utf-8'), content_type='text/javascript'))
         self.open_main()
         self.page.locator('#rows tr').first.click()
-        notes = [dict(studyUid=UID, version=1, text='SYN A', reason='', author='tech', createdAt='2026-10-05T00:00:00Z')]
+        notes = [dict(studyUid=UID, version=1, text='SYN A', reason='', author='tech', createdAt='2026-10-05T00:00:00Z', attemptId=None, isOwnAttempt=False)]
         posts = []
         def reply(route):
             request = route.request
@@ -810,7 +810,8 @@ class LogoutDOMTest(unittest.TestCase):
                     return route.fulfill(status=409, json={'message': 'SYN conflict'})
                 if body['text'] == notes[-1]['text'] or not body['reason'].strip():
                     return route.fulfill(status=400, json={'message': 'SYN invalid edit'})
-                notes.append(dict(notes[-1], version=len(notes)+1, text=body['text'], reason=body['reason'].strip(), author='tech'))
+                notes.append(dict(notes[-1], version=len(notes)+1, text=body['text'], reason=body['reason'].strip(), author='tech',
+                                  attemptId=body['attemptId'], isOwnAttempt=True))
                 if len(posts) == 1:
                     return route.abort()
             route.fulfill(json=dict(uid=UID, writable=True, note=notes[-1]))
@@ -821,7 +822,7 @@ class LogoutDOMTest(unittest.TestCase):
         dialog.get_by_label('Note', exact=True).fill('SYN B')
         dialog.get_by_label('Reason for Change').fill('R1')
         dialog.get_by_role('button', name='Save Note', exact=True).click()
-        expect(dialog.get_by_role('status')).to_contain_text('저장 결과를 알 수 없습니다')
+        expect(dialog.get_by_role('status')).to_contain_text('저장 결과를 알 수 없으며')
         return dialog, notes, posts
 
     def test_ctx_note_witness_unchanged_text_keeps_reason_and_confirms_only_unsent_correction(self):
@@ -835,45 +836,46 @@ class LogoutDOMTest(unittest.TestCase):
                 dialog.get_by_role('button', name='Save Note', exact=True).click()
                 corrected = current_reason != 'R1'
                 expect(dialog.get_by_role('status')).to_have_text(
-                    '변경된 내용이 없어 저장하지 않았습니다 · 현재 메모 v2 · 사유만 바꾸려면 본문을 함께 수정해야 합니다'
-                    if corrected else '저장되었습니다. v2')
+                    '앞선 입력은 v2로 저장되었으며 현재 사유는 저장되지 않았습니다.' if corrected else '앞선 입력은 v2로 저장되었습니다.')
                 expect(dialog.get_by_label('Note', exact=True)).to_have_value('SYN B')
                 expect(reason).to_have_value(current_reason)
-                self.assertEqual(posts, [{'baseVersion': 1, 'text': 'SYN B', 'reason': 'R1'}])
+                self.assertEqual([{k: p[k] for k in ('baseVersion', 'text', 'reason')} for p in posts], [{'baseVersion': 1, 'text': 'SYN B', 'reason': 'R1'}])
                 self.assertEqual(len(notes), 2)
                 self.assertEqual(notes[-1]['reason'], 'R1')
                 prompts = list(self.dialogs)
                 dialog.get_by_role('button', name='Close', exact=True).click()
                 expect(dialog).not_to_be_visible()
-                self.assertEqual(self.dialogs, prompts + (['저장하지 않은 메모 입력을 버리고 닫을까요?'] if corrected else []))
+                self.assertEqual(self.dialogs, prompts + (['현재 입력이 마지막 확인본과 다른데 입력을 버리고 닫을까요?'] if corrected else []))
                 expect(self.page.locator('#findings')).to_be_editable()
 
-    def test_ctx_note_witness_before_foreign_revision_clears_only_confirmed_reason(self):
+    def test_ctx_note_witness_before_foreign_revision_keeps_and_uses_up_the_confirmed_reason(self):
         dialog, notes, posts = self.open_note_with_lost_receipt()
-        notes.append(dict(notes[-1], version=3, text='SYN foreign v3', reason='foreign reason', author='other technician'))
+        notes.append(dict(notes[-1], version=3, text='SYN foreign v3', reason='foreign reason', author='other technician',
+                          attemptId='99999999-9999-4999-8999-999999999999', isOwnAttempt=False))
         save, reason = dialog.get_by_role('button', name='Save Note', exact=True), dialog.get_by_label('Reason for Change')
         save.click()
-        expect(dialog.get_by_role('status')).to_have_text('저장되었습니다. v2 · 이후 메모가 변경되어 입력을 유지했습니다. 최신 메모와 비교하세요.')
+        expect(dialog.get_by_role('status')).to_have_text('앞선 입력은 v2로 저장되었고 마지막 확인본은 다른 저장인 v3입니다.')
         expect(dialog.get_by_label('Note', exact=True)).to_have_value('SYN B')
-        expect(reason).to_have_value('')
+        expect(reason).to_have_value('R1')  # S8-CTX: kept as typed, used up by the saved v2
         save.click()
-        expect(dialog.get_by_role('status')).to_have_text('수정·비우기 사유를 입력하세요.')
+        expect(dialog.get_by_role('status')).to_have_text('앞선 입력은 v2로 저장되었으며 이번 수정의 사유를 입력하세요.')
         self.assertEqual(len(posts), 1)
         self.assertEqual(notes[-1]['text'], 'SYN foreign v3')
         reason.fill('R2 after comparing v3')
         save.click()
-        expect(dialog.get_by_role('status')).to_have_text('저장되었습니다. v4')
-        self.assertEqual(posts[-1], {'baseVersion': 3, 'text': 'SYN B', 'reason': 'R2 after comparing v3'})
+        expect(dialog.get_by_role('status')).to_have_text('입력이 v4로 저장되었습니다.')
+        self.assertEqual({k: posts[-1][k] for k in ('baseVersion', 'text', 'reason')}, {'baseVersion': 3, 'text': 'SYN B', 'reason': 'R2 after comparing v3'})
         self.assertEqual(len(posts), 2)
 
     def test_ctx_note_409_refusal_sentence_and_original_reload_confirmation(self):
+        # S8-CTX T07: a 409 reads the latest at once; that read failing here leaves the refusal and the re-check owed.
         self.note_save_failure((409, {'message': '다른 메모가 먼저 저장되었습니다. 최신 메모를 확인하세요.'}))
-        expect(self.page.locator('#tech-note-status')).to_have_text('저장되지 않았습니다: 다른 메모가 먼저 저장되었습니다. 최신 메모를 확인하세요. · 입력은 유지했습니다. 최신 메모와 이력을 확인하세요.')
-        self.assertEqual(self.note_calls, ['GET', 'POST'])
+        expect(self.page.locator('#tech-note-status')).to_have_text('이번 저장은 다른 저장과 충돌해 거절되었으며 최신본을 확인하지 못했으므로 입력은 유지되고 Reload Note로 다시 확인하세요.')
+        self.assertEqual(self.note_calls, ['GET', 'POST', 'GET'])
         self.dialog_answers.append(False)
         self.page.get_by_role('button', name='Reload Note', exact=True).click()
-        self.assertIn('입력 중인 메모를 버리고', self.dialogs[-1])
-        self.assertEqual(self.note_calls, ['GET', 'POST'])
+        self.assertIn('현재 입력을 버리고 마지막 저장본을 불러올까요?', self.dialogs[-1])
+        self.assertEqual(self.note_calls, ['GET', 'POST', 'GET'])
         self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('button', name='Close', exact=True).click()
         expect(self.page.locator('#tech-note-dialog')).not_to_be_visible()
         expect(self.page.locator('#findings')).to_be_editable()
@@ -884,7 +886,7 @@ class LogoutDOMTest(unittest.TestCase):
                 if code != 400:
                     self.fresh_context()
                 self.note_save_failure((code, {'message': 'SYN not stored'}))
-                expect(self.page.locator('#tech-note-status')).to_contain_text('저장되지 않았습니다')
+                expect(self.page.locator('#tech-note-status')).to_contain_text('이번 저장은 거절되어 입력을 유지합니다')
                 expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_label('Note', exact=True)).to_have_value('SYN my note')
                 self.page.keyboard.press('Escape')
                 expect(self.page.locator('#tech-note-dialog')).not_to_be_visible()
@@ -893,13 +895,13 @@ class LogoutDOMTest(unittest.TestCase):
 
     def test_ctx_note_unknown_close_cancel_then_escape_during_minute_outage(self):
         self.note_save_failure('network')
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없으며')
         self.dialog_answers.append(False)
         self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('button', name='Close', exact=True).click()
-        self.assertIn('저장 결과를 알 수 없습니다', self.dialogs[-1])
+        self.assertIn('저장 결과가 미확정', self.dialogs[-1])
         expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_label('Note', exact=True)).to_have_value('SYN my note')
         self.page.get_by_role('button', name='Reload Note', exact=True).click()
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+        expect(self.page.locator('#tech-note-status')).to_contain_text('앞선 저장 결과는 아직 확인되지 않았으며')
         # The unknown sentence also remains visible during the read; Escape is
         # available only after that request settles and Close is enabled again.
         expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('button', name='Close', exact=True)).to_be_enabled()
@@ -916,7 +918,7 @@ class LogoutDOMTest(unittest.TestCase):
 
     def test_ctx_note_unreadable_400_is_still_an_answered_refusal(self):
         self.note_save_failure('unreadable')
-        expect(self.page.locator('#tech-note-status')).to_contain_text('저장되지 않았습니다')
+        expect(self.page.locator('#tech-note-status')).to_contain_text('이번 저장은 거절되어 입력을 유지합니다')
         self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_role('button', name='Close', exact=True).click()
         expect(self.page.locator('#tech-note-dialog')).not_to_be_visible()
 
@@ -926,10 +928,10 @@ class LogoutDOMTest(unittest.TestCase):
                 if code != 500:
                     self.fresh_context()
                 self.note_save_failure((code, {'statusCode': code, 'message': '검사 처리 중입니다. 잠시 후 최신 메모를 확인하고 다시 시도하세요', 'error': 'Service Unavailable'}))
-                expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없습니다')
+                expect(self.page.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없으며')
                 self.dialog_answers.append(False)
                 self.page.keyboard.press('Escape')
-                self.assertIn('저장 결과를 알 수 없습니다', self.dialogs[-1])
+                self.assertIn('저장 결과가 미확정', self.dialogs[-1])
                 expect(self.page.get_by_role('dialog', name='Tech Note', exact=True).get_by_label('Note', exact=True)).to_have_value('SYN my note')
                 self.page.keyboard.press('Escape')
                 expect(self.page.locator('#tech-note-dialog')).not_to_be_visible()
@@ -2496,7 +2498,8 @@ class LogoutDOMTest(unittest.TestCase):
     def check_note_after_cancel(self, stored):
         page = self.open_main()
         self.select_and_type()
-        note = {"studyUid": UID, "version": 1, "text": "SYN saved note", "reason": "", "author": RAD["actor"], "createdAt": "2026-10-05T00:00:00Z"}
+        note = {"studyUid": UID, "version": 1, "text": "SYN saved note", "reason": "", "author": RAD["actor"], "createdAt": "2026-10-05T00:00:00Z",
+                "attemptId": None, "isOwnAttempt": False}
         held, reads, writes = [], [], []
         def answer(route):
             request = route.request
@@ -2509,11 +2512,13 @@ class LogoutDOMTest(unittest.TestCase):
             self.assertEqual(note["version"], body["baseVersion"], "the next Save uses the reconciled version")
             if len(writes) == 1:
                 if stored:
-                    note.update(version=note["version"] + 1, text=body["text"], reason=body["reason"].strip())
+                    note.update(version=note["version"] + 1, text=body["text"], reason=body["reason"].strip(),
+                                attemptId=body["attemptId"], isOwnAttempt=True)
                 held.append(route)
             else:
-                note.update(version=note["version"] + 1, text=body["text"], reason=body["reason"].strip())
-                route.fulfill(json={"uid": UID, "writable": True, "note": dict(note)})
+                note.update(version=note["version"] + 1, text=body["text"], reason=body["reason"].strip(),
+                            attemptId=body["attemptId"], isOwnAttempt=True)
+                route.fulfill(json={"uid": UID, "writable": True, "note": dict(note), "latestNote": dict(note)})
         page.route("**/api/studies/*/tech-note", answer)
         page.locator("#tech-note-open").click()
         expect(page.locator("#tech-note-text")).to_have_value("SYN saved note")
@@ -2531,9 +2536,9 @@ class LogoutDOMTest(unittest.TestCase):
                            json={"uid": UID, "writable": True, "note": dict(note)} if stored else {"message": "SYN not stored"})
         self.wait_until(lambda: len(reads) == 2, "the automatic note confirmation")
         expect(page.locator("#tech-note-status")).to_have_text(
-            "저장되었습니다. v2" if stored else "저장 결과는 아직 알 수 없습니다 · 입력은 유지되며 Save Note는 확인 후 재시도하고 Reload Note는 결과만 확인합니다.")
+            "앞선 입력은 v2로 저장되었습니다." if stored else "앞선 저장 결과는 아직 확인되지 않았으며 입력은 유지됩니다.")
         expect(page.locator("#tech-note-text")).to_have_value("SYN note before preparation")
-        expect(page.locator("#tech-note-reason")).to_have_value("" if stored else "  SYN correction  ")
+        expect(page.locator("#tech-note-reason")).to_have_value("  SYN correction  ")  # S8-CTX: no outcome changes the input
         expect(page.locator("#tech-note-save")).to_be_enabled()
         if stored:
             page.fill("#tech-note-text", "SYN next edit")
