@@ -25,7 +25,11 @@ export interface StatutoryMinimum { clauseId: string; years: number; basis: stri
 export interface ClauseVersion { law: string; article: string; publication: string; publishedAt: string; effectiveAt: string }
 /** Stable clause keys; preserve historical entries when adding a reviewed publication. */
 export const HOLD_CLAUSE_VERSIONS: Readonly<Record<string, readonly ClauseVersion[]>> = freeze(Object.fromEntries(
-  ['35.3', '36.2'].map(article => [`privacy:${article}`, [LEGAL_SOURCES.privacy, LEGAL_SOURCES.privacyAmended].map(source => ({
+  ['35.3', '36.2'].map(article => [`privacy:${article}`, [
+    // https://www.law.go.kr/LSW/lsLinkCommonInfo.do?chrClsCd=010202&lsJoLnkSeq=1029335723
+    { publication: '20897', publishedAt: '2025-04-01', effectiveAt: '2025-10-02' },
+    LEGAL_SOURCES.privacy, LEGAL_SOURCES.privacyAmended,
+  ].map(source => ({
     law: 'privacy', article, publication: source.publication, publishedAt: source.publishedAt, effectiveAt: source.effectiveAt,
   }))])));
 export function clauseVersionAt(versions: readonly ClauseVersion[], at: string): Readonly<ClauseVersion> {

@@ -13,6 +13,14 @@
 
 D590 소비자: B 접속 원장·신원 context·공통 선언, C 판독 작성·서명·공개·출력, D 임상 부가 업무, E 영상·객체 전송, F 감사 조사·사본, G 미서명 자료 이관, H 보존·분리·만료 파기(복제본·백업 포함), I 요구·법령·운영 증거.
 
+## 소비 단위에 넘기는 계약 질문
+
+- B — 초기 구성 위치는? 제안: B의 실제 서버 시작 모듈에서 `composeEmrAdapters`를 한 번 호출하고, 현재 A의 파일만 허용하는 호출 위치 시험을 B의 시작 경계로 확장하며 A에 DB 의존성을 넣지 않는다.
+- C/H — archive 없는 만료·보전 기록의 접근은? 제안: 읽기에도 `reportRetentionAccess(facts, archive, resume, {record, at})`로 자체 만료를 확인하고 보전 기재의 `retentionOnlySince`를 판독·보존 사실과 같은 transaction에 저장한다.
+- C/H — 보전 기재가 기한을 늘린 뒤 일반 Addendum 재개는? 제안: 보전 상태를 유지하여 `HeldCorrectionAuthorityRequired`로 거절하고 새 진료는 새 단위에 기록한다.
+- H — 상호 편입의 동시 만료 호출은? 제안: `destroyBatchAtExpiry`에 전체 만료 묶음을 주고 `withRetentionBatchLock` 안에서 편입 기록 우선 순서와 SCC별 한 번의 원자적 집합 삭제를 이행한다.
+- F/H/I — 응답기한과 의무 종료 증빙은? 제안: `responseDueAt`의 산정·연장 근거, 요청 `resolution`, hold `validity.until`, 귀속된 해제 `endingFact`를 구분하여 저장하고 기한 경과를 요청 완료로 기록하지 않는다.
+
 ## 분류와 기간의 단일 원천
 
 `RECORD_CLASSIFICATION[kind].retention.statutoryMinimum`이 기간의 단일 원천이다. B의 서버 초기 구성은 `composeEmrAdapters({stored, legal, purpose, clinical})`를 프로세스당 한 번 실행한다. private binder로 생성한 동결 capability만 각 resolver가 인정하며 두 번째 구성은 `EmrAdaptersAlreadyComposed`로 거절한다. 요청별 reader 등록 함수는 공개하지 않는다. 등록 뒤 원 reader 메서드를 교체해도 capability는 바뀌지 않는다. 구성 함수를 요청 handler가 최초로 호출하지 않도록 B의 시작 순서와 TypeScript symbol 검사로 결속해야 한다. A 자체가 Prisma·HTTP·서버 시작을 구현하지는 않는다.
@@ -54,6 +62,8 @@ D590 소비자: B 접속 원장·신원 context·공통 선언, C 판독 작성�
 
 자체 기간 경과와 파기 가능 상태를 구분한다. `recordVersionAdded()`에는 사건 시점의 완전한 graph가 필수다. CVR 편입·적법 연장·유효 hold로 존속하는 단위는 적법한 새 part를 받을 수 있지만, 보존 근거 없이 만료한 단위는 부활시키지 않고 새 진료는 새 단위에 기록한다. hold 중에도 분류표가 허용하는 Addendum·ACK·취득·비서명 정정 모두 가능하며, 독립 처리 근거·권한·모든 hold의 조건·원본 보존을 확인한다. 서명은 해당 종류가 요구할 때만 필요하다. 수명주기 전이 후에도 보존 전용으로 남거나 hold만으로 만료 후 존속하는 때에는 분리 관리도 요구한다. 만료 전 archived 판독의 적법한 임상 Addendum은 분리 관리 주장을 요구하지 않고 공개·접근 복귀를 수명주기로 결정한다. C는 기존 단위의 서명판을 저장하기 전에 `transitionRetainedReport()`로 수명주기와 part 계약을 함께 검사한다. hold만으로 존속하는 보전 정정은 임상 접근이나 공개를 재개하지 않는다.
 
+자체 기한(적법 연장 포함)을 넘겨 hold 또는 다른 기록의 참조로만 존속하는 판독은 archive 유무와 무관하게 보존 전용이다. C/H의 읽기는 `reportRetentionAccess`에 `{record, at}`를 함께 전달한다. 적법한 `preservationEntry`/`preservationCorrection`는 기존 공개판·본문판을 유지하고 공개 효과를 만들지 않는다. `transitionRetainedReport`가 남긴 `retentionOnlySince`는 보전 기재의 새 자체 기한이나 resume 사건으로 지워지지 않으며 `ordinaryClinicalAccess=false`, `separateStorage=true`를 유지한다. 이 사실은 재적재 때도 보존한다. 일반 임상 Addendum은 `HeldCorrectionAuthorityRequired`로 거절한다. 자체 기간 안의 일반 Addendum은 기존과 같이 공개할 수 있다.
+
 `RetentionGraph`의 편입은 실제 본문을 이루는 바이트와 수정 전 원본으로 한정한다. CVR→차분판→기초 원본처럼 여러 단계로 저장되더라도 필요한 모든 판/바이트를 서명 시 **완전한 직접 구성요소 목록**으로 고정한다. `newRetentionRecord()`와 `recordVersionAdded()`가 생성/서명 사건 시점에 고정 해시·중첩 의존성·기존 보존 근거를 검사한다. 보존 근거 없이 만료한 구성요소와 파기된 구성요소는 `ComponentExpired`/`ComponentDestroyed`로 거절한다. hold만으로 남은 만료 구성요소를 새 임상 기록에 편입하려면 그 새 기록의 검증된 `processing`에 독립 근거·권한·원본 보존, 해당 `componentRecordIds`, 모든 활성 `permittedHoldIds`가 있어야 한다. 없으면 `ComponentProcessingBasisRequired`다. 이 근거로 적법하게 편입한 뒤에도 새 직접 편입 기록의 자체 기한만 적용하고 상속 기한을 재전파하지 않는다. 파기 시의 동일한 누락·해시 검사는 유지한다. 단순 비교·과거 검사·후속 판독 인용은 navigation이며 필요한 인용문 자체는 새 문서의 서명 바이트에 넣는다. 임의의 한 홉 제한도, 상속 기한의 재전파도 없다.
 
 생성 검사에는 새 part를 추가하기 전의 snapshot을 전달한다. transaction 안에서 아직 확정하지 않은 새 참조판도 snapshot에 포함하면 `ComponentAdmissionSnapshotRefused`다. 새 참조판의 긴 기한을 먼저 반영하여 자기 구성요소의 만료를 가리는 순환 논증을 허용하지 않는다.
@@ -63,6 +73,8 @@ D590 소비자: B 접속 원장·신원 context·공통 선언, C 판독 작성�
 B/H의 저장소 어댑터는 같은 잠금 안에서 역참조 전수 조회·모든 구성요소 및 법적 의무의 현재 상태를 확인하여 `complete/revision/checkedAt`을 공급한다. `destroyAtExpiry()`는 null/undefined/불완전 graph를 거절하고 `withRetentionLock()`이 다시 읽은 최신 snapshot의 내용 전체를 요청 snapshot과 대조한다. 잠금은 시작 원장·삭제·완료까지 유지한다. 잠금 안에서 저장 hold 전수 집합도 다시 읽어 누락·오래된 해제 상태를 거절한다. 기존 단위의 part/연장/hold는 `withRetentionChange()` 안에서 순수 결정을 실행하고 반환 값을 같은 잠금에서 저장한다. 새 편입도 구성요소와 역참조 변경 전체를 같은 잠금에 참여시킨다. `destroyedAt`은 B가 실제 완료/복구 상태에서 확인하는 파기 사실이며, 파기된 기록에는 hold·part를 추가할 수 없다. 조회 실패나 오래된 cache를 빈 목록으로 바꾸면 안 된다. 빈 참조는 완전한 조사 결과 0건일 때만 유효하다. 접속 단위에는 원환자 기록의 참조 의존성을 넣지 않으며 자기 hold/시계만 검사한다. 공통 만료 시점에는 **편입 기록 → 구성요소** 순으로 한 파기 작업을 수행한다. 같이 만료한 직접 편입 기록이 남으면 구성요소 파기는 `IncorporatorStillPresent`로 거절하므로 H가 선행 기록을 파기한 뒤 같은 시점에 재시도한다. 다른 부분만 참조한 후속 기록에서 편입 기록이 물려받은 더 긴 기한은 이 순서 검사로 재전파하지 않는다. 이 경우 구성요소는 자신의 직접 보존기한에 파기하고 관계없는 부분의 보존은 계속한다. 완료 tombstone의 참조는 보존을 연장하지 않는다. 파기 시에는 해당 대상을 보존하는 편입 기록의 완전한 목록·해시를 검사하되 대상 자신의 이미 소실된 outgoing 구성요소는 대상 파기의 근거가 아니다. 무관한 manifest 결함이나 자신의 구성요소 손실 때문에 기록 자체의 hold·적법한 Addendum을 거절하지 않는다. A의 순수 시험은 실제 DB의 잠금·역참조 전수성을 증명하지 않는다.
 
 기간은 **Asia/Seoul 기관 역일**로 민법 제157조·제159조·제160조에 따라 계산한다. 초일은 불산입하되 오전 0시에 시작하면 산입한다. 연 단위는 역으로 계산하고 해당일이 없으면 그 월 말일의 종료까지 보존한다. `civilPeriodEnd()`/`retentionDeadline()`은 **말일이 완전히 끝난 직후 00:00 KST 경계**를 UTC로 반환한다. 파기는 이 경계 이상에서만 가능하다. 경계 직전 1ms도 보존 중이다. 별도 유예기간은 없다.
+
+상호 편입으로 단일 파기가 교착되는 경우 H는 `destroyBatchAtExpiry({append, withRetentionBatchLock}, {units, requestedAt, graph}, destroySet)`을 사용한다. 과거 판 편입은 계속 허용한다. 계약은 전체 집합의 최신 graph·전수 hold·완전한 판 목록·각 기한을 먼저 확인하고, 묶음 밖의 미파기 편입 기록이 있으면 시작 원장/삭제 전에 거절한다. 강연결요소(SCC)는 한 집합으로 유지하고 축약 그래프에서 **편입 기록 → 구성요소** 순서로 처리한다. 각 SCC의 모든 시작 원장이 내구성을 얻은 뒤 `destroySet`을 정확히 한 번 호출하며 모든 구성원의 완료를 함께 확인한다. H는 그 집합의 모든 판·복제본·복구 가능한 백업을 원자적으로 파기해야 하며 구성원별 독립 삭제로 구현하면 안 된다. 실패 시 해당 SCC의 실패 원장을 남기고 다음 SCC로 진행하지 않는다. 시작/완료 원장 저장 실패의 복구와 재시도는 실제 저장소의 tombstone·원장 대조로 수행한다. A는 콜백 계약을 검사하며 실제 저장소 원자성을 구현하거나 증명하지 않는다.
 
 | 시작 (KST) / 기간 | 보존 말일 종료 → 최초 파기 가능 경계 (KST) | 반환 UTC |
 |---|---|---|
@@ -80,6 +92,10 @@ hold는 **파기만 정지**하며 기산/기한/일반 접근권을 바꾸지 �
 파기되지 않고 존속하는 기록에는 자체 기한이 지난 뒤에도 검증된 hold를 등록한다. CVR가 보존 중인 기록·다른 hold가 보존 중인 기록·만료 후 파기 실행 전 기록을 모두 포함한다. hold는 집합이며 하나의 해제로 나머지를 해제하지 않는다. 법정 의무는 `HOLD_DUTY_CLAUSES`의 고정 clauseId·법률·조항·권한 주체를 대조한다. clauseId는 판본과 무관한 절 키이며 `HOLD_CLAUSE_VERSIONS`가 공포번호·공포일·시행일을 대응한다. 등록 시점의 KST 시행판을 hold에 고정하고, 재적재·해제도 그 등록 시점 판본으로 검사한다. 새 시행판을 추가해도 과거 표 항목을 제거하지 않는다. 표 밖의 명령 근거는 I가 검토한 절 버전 표를 결속된 `loadClauseVersions()`로 공급하며 자유문구·알 수 없는 판본은 거절한다. 현재 열거된 `privacy:36.2`는 `loadCorrectionRequest()`가 읽은 실제 정정·삭제 요청(범위·접수·응답기한·해결 사건)에 결속한다. 해당 개인정보처리자만 권한 주체이며 응답기한 이내의 유한한 until이 필수다. 등록자 자기 선언이나 존재하지 않는 요청·무기한 의무는 거절한다. 응답기한의 법적 산정·적법 연장은 어댑터가 근거와 함께 검증한다. A는 미검증 시행령 조문을 새 기간 상수로 만들지 않는다. 다른 의무의 지원에는 검토된 표 항목이 필요하며 기관이 표나 기간을 편집하지 않는다.
 
 미처리 열람 요청은 `privacy:35.3`과 해당 요청의 유한한 `until`을 요구한다. 결속된 reader가 원 요청의 응답기한(검증된 적법 연장 포함)·대상과 이행/철회/적법 거절 사건을 읽는다. 요청이 해결되거나 효력이 끝나면 `retentionState().releaseNotRecorded`에 미해제 holdId를 보고한다. 효력 종료된 hold는 Addendum·취득·편입의 처리 조건을 추가하지 않는다. 파기는 해제 기록이 남을 때까지 `HoldReleaseRequired`로 거절한다. 원래 보존기한을 넘긴 기록의 임상 재개 금지는 별개로 유지한다. 해제는 그 해결 사건 ID와 해당 종료 사유를 대조한다. 종료일 없는 유효 법원 명령을 이 요청 규칙으로 자동 해제하지 않는다.
+
+`effect-ended`는 **효력 종료 확인** 해제 사유다. 기존 `holdId`, 확인한 권한자·시각·증빙 ID에 `endingFact`를 결속한다. `validity-expired`는 저장된 `validity.until`과 같은 시각이고 해제 시각 이전이어야 하며, `request-resolved`는 검증된 요청 해결 사건의 ID·시각과 같아야 한다. 실제 요청의 이행·철회·적법 거절 사유도 기존대로 허용한다. 만료한 hold의 효력 확인은 미처리 요청을 완료로 바꾸지 않는다. 응답기한 자체는 실제 의무 종료 증빙이 아니며, I가 확인한 hold 유효 종료나 실제 요청 해결 사실을 읽어야 한다. 종료 사실 없는 미처리 요청의 해제·파기는 거절하고, 종료 사실이 있어도 해제를 자동 기록하지 않는다. 제35조·제36조 요청에 동일하게 적용한다.
+
+등록 당시 절 판본은 20897(2025-10-02 시행), 기존 21445·21910을 내장 이력으로 보존한다. 20897의 공포·시행 메타데이터는 [국가법령정보센터 과거 시행판](https://www.law.go.kr/LSW/lsLinkCommonInfo.do?chrClsCd=010202&lsJoLnkSeq=1029335723)으로 확인했다. 첫 내장판보다 앞선 등록일은 결속된 `loadClauseVersions`의 검증된 과거 표를 우선 사용한다. 내장 범위의 시행판은 외부 표로 덮어쓰지 않는다. 외부 표도 공포번호·공포일·시행일과 조항을 검사하며 자유문구 판본, 미공급 이력, 등록일 재작성으로 대체하지 않는다. 이전에 수용한 표 항목은 삭제하지 않고, 실제 저장 이력에 추가 과거판이 있으면 I/B가 그 검증된 표를 재적재 전에 공급한다.
 
 H/B는 파기/추가 잠금 안에서 명령·요청의 현재 유효 조건도 재확인한다. 조건이 소멸하면 **같은 holdId**에 종료 근거·권한자·시각을 담은 해제 사건을 즉시 저장하고 `liftLegalHold()` 또는 `liftPurposeLegalHold()`로 반영한다. 해제 증빙 ID는 원명령 ID와 달라도 된다. 유효 종료가 지났는데 해제가 없으면 `HoldReleaseRequired`로 근거 재확인/해제 처리를 요구하며 이를 계속 유효한 hold로 보고하지 않는다. 처리한 열람 요청이나 소멸한 근거를 무기한 보전 사유로 사용하면 안 된다. 남은 의무가 없으면 본래 만료와 마지막 해제 중 늦은 시점부터 즉시 파기한다. 해제는 새 시계를 만들지 않는다.
 

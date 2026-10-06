@@ -116,7 +116,10 @@ export interface LegalHold {
     validity: { from: string; until: string | null; condition: 'order-in-force' | 'duty-active' | 'request-pending' };
   };
   actorId: string; at: string;
-  release: { holdId: string; actorId: string; at: string; evidenceId: string; authorityVerified: true; reason: 'order-ended' | 'request-fulfilled' | 'request-withdrawn' | 'request-refused' | 'duty-ended' } | null;
+  release: { holdId: string; actorId: string; at: string; evidenceId: string; authorityVerified: true } & (
+    { reason: 'order-ended' | 'request-fulfilled' | 'request-withdrawn' | 'request-refused' | 'duty-ended' } |
+    { reason: 'effect-ended'; endingFact: { kind: 'validity-expired'; at: string } | { kind: 'request-resolved'; at: string; eventId: string } }
+  ) | null;
 }
 export interface AccessRequestFacts {
   requestId: string; recordIds: readonly string[]; receivedAt: string; responseDueAt: string;
@@ -127,7 +130,7 @@ export interface LegalDutyReader {
   listHolds(recordId: string): unknown;
   loadAccessRequest?(requestId: string): unknown;
   loadCorrectionRequest?(requestId: string): unknown;
-  /** I's reviewed clause table for order grounds outside the built-in request clauses. */
+  /** I's verified history supplies dates before the first built-in version, or external order grounds. */
   loadClauseVersions?(clauseId: string): readonly ClauseVersion[];
 }
 const dutySources = new WeakMap<object, LegalDutyReader>();
@@ -195,7 +198,9 @@ function readLegalDuty(reader: LegalDutyReader, holdId: string): Readonly<LegalH
     if (b.authorityKind !== 'personal-information-controller' || b.authorityId !== b.managingInstitutionId) refuse('HoldAuthorityRefused');
   } else if (b.authorityKind !== ({ 'court-order': 'court', 'investigative-order': 'investigative-authority', 'supervisory-order': 'supervisory-authority' })[b.type]) refuse('HoldAuthorityRefused');
   if (typeof b.clauseId !== 'string' || !b.clauseId.trim()) refuse('HoldClauseRequired');
-  const versions = Object.hasOwn(HOLD_CLAUSE_VERSIONS, b.clauseId) ? HOLD_CLAUSE_VERSIONS[b.clauseId] : reader.loadClauseVersions?.(b.clauseId);
+  const builtIn = Object.hasOwn(HOLD_CLAUSE_VERSIONS, b.clauseId) ? HOLD_CLAUSE_VERSIONS[b.clauseId] : null;
+  const beforeBuiltIn = builtIn && seoulDay(h.at) < builtIn.map(v => v.effectiveAt).sort()[0];
+  const versions = !builtIn || beforeBuiltIn ? reader.loadClauseVersions?.(b.clauseId) : builtIn;
   const registeredClause = clauseVersionAt(versions, h.at);
   if (c.law !== registeredClause.law || c.article !== registeredClause.article || c.version !== registeredClause.publication) refuse('HoldClauseRequired');
   if (h.holdId !== holdId || b.verified !== true || !Array.isArray(b.scope) || !b.scope.includes(h.recordId) || new Set(b.scope).size !== b.scope.length)
@@ -209,12 +214,24 @@ function readLegalDuty(reader: LegalDutyReader, holdId: string): Readonly<LegalH
     if (v.until === null || v.until > request.responseDueAt || h.at < request.receivedAt) refuse('HoldValidityRefused');
   }
   if (h.release !== null) {
-    const r = object(h.release, ['holdId', 'actorId', 'at', 'evidenceId', 'authorityVerified', 'reason']);
+    const r = object(h.release, ['holdId', 'actorId', 'at', 'evidenceId', 'authorityVerified', 'reason',
+      ...(h.release.reason === 'effect-ended' ? ['endingFact'] : [])]);
     string(r.actorId); string(r.evidenceId);
-    try { choice(r.reason, ['order-ended', 'request-fulfilled', 'request-withdrawn', 'request-refused', 'duty-ended']); }
+    try { choice(r.reason, ['order-ended', 'request-fulfilled', 'request-withdrawn', 'request-refused', 'duty-ended', 'effect-ended']); }
     catch { refuse('HoldReleaseReasonRefused'); }
     if (r.holdId !== h.holdId || r.authorityVerified !== true || utc(r.at) < h.at) refuse('HoldReleaseBindingRefused');
-    if (['pending-access-request', 'statutory-duty'].includes(b.type)) {
+    if (r.reason === 'effect-ended') {
+      // Expiry confirms only this hold's validity, never the completion of an unresolved request.
+      const end = object(r.endingFact, r.endingFact?.kind === 'request-resolved' ? ['kind', 'at', 'eventId'] : ['kind', 'at']);
+      if (utc(end.at) > r.at) refuse('HoldReleaseBindingRefused');
+      if (end.kind === 'validity-expired') {
+        if (v.until === null || end.at !== v.until) refuse('HoldReleaseBindingRefused');
+      } else if (end.kind === 'request-resolved' && ['pending-access-request', 'statutory-duty'].includes(b.type)) {
+        const resolution = readAccessRequest(reader, h as LegalHold).resolution;
+        if (!resolution || end.at !== resolution.at || end.eventId !== resolution.eventId || r.evidenceId !== resolution.eventId)
+          refuse('HoldReleaseBindingRefused');
+      } else refuse('HoldReleaseBindingRefused');
+    } else if (['pending-access-request', 'statutory-duty'].includes(b.type)) {
       const request = readAccessRequest(reader, h as LegalHold), end = request.resolution;
       const reasons = { fulfilled: b.type === 'statutory-duty' ? 'duty-ended' : 'request-fulfilled', withdrawn: 'request-withdrawn', 'lawfully-refused': 'request-refused' };
       if (!end || r.evidenceId !== end.eventId || r.at < end.at || r.reason !== reasons[end.outcome]) refuse('HoldReleaseBindingRefused');
@@ -498,12 +515,10 @@ function dueBy(at: string): string {
   // The five-day outside bound is no grace period: the job is due immediately.
   return new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + (local.getUTCHours() === 0 && local.getUTCMinutes() === 0 && local.getUTCSeconds() === 0 && local.getUTCMilliseconds() === 0 ? 5 : 6)) - SEOUL_MS).toISOString();
 }
-async function destroyWithJournal<T>(store: DisposalAuditStore, request: T, requestedAt: string, eligibleAt: string,
-  details: Pick<DestructionRecord, 'disposalUnitId' | 'classes' | 'clauseIds' | 'partCount' | 'expiryDay' | 'extensionUsed'>,
-  destroy: (request: T) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecord>> {
-  if (requestedAt < eligibleAt) refuse('RetentionNotElapsed');
+type DestructionDetails = Pick<DestructionRecord, 'disposalUnitId' | 'classes' | 'clauseIds' | 'partCount' | 'expiryDay' | 'extensionUsed'>;
+function destructionJournal(store: Pick<DisposalAuditStore, 'append'>, eligibleAt: string, details: DestructionDetails) {
   const due = dueBy(eligibleAt);
-  const append = async (phase: DestructionRecord['phase'], at: string) => {
+  return async (phase: DestructionRecord['phase'], at: string) => {
     const event: Readonly<DestructionRecord> = freeze({ formatVersion: 1, phase, day: seoulDay(at), ...details,
       dueDay: seoulDay(new Date(Date.parse(due) - 1).toISOString()), timeliness: at < due ? 'within-five-days' : 'overdue',
       method: 'irreversible-permanent-deletion', basis: 'privacy-act-21-and-decree-16-1-1' });
@@ -513,6 +528,12 @@ async function destroyWithJournal<T>(store: DisposalAuditStore, request: T, requ
     if (utc(receipt.durableAt) < at) refuse('DestructionJournalReceiptInvalid');
     return event;
   };
+}
+async function destroyWithJournal<T>(store: DisposalAuditStore, request: T, requestedAt: string, eligibleAt: string,
+  details: DestructionDetails,
+  destroy: (request: T) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecord>> {
+  if (requestedAt < eligibleAt) refuse('RetentionNotElapsed');
+  const append = destructionJournal(store, eligibleAt, details);
   await append('started', requestedAt);
   let completedAt: string;
   try {
@@ -551,6 +572,95 @@ export async function destroyAtExpiry(store: DisposalAuditStore, input: Disposal
     disposalUnitId: record.disposalUnitId, classes, clauseIds: classes.map(c => STATUTORY_MINIMUM[c].clauseId), partCount: record.parts.length,
     expiryDay: seoulDay(new Date(Date.parse(state.deadline) - 1).toISOString()), extensionUsed: retainingUnits(record, v.graph).some(r => r.extension !== null),
   }, destroy);
+  });
+}
+export interface BatchDisposalRequest {
+  units: readonly { record: RetentionRecord; versionIds: readonly string[] }[];
+  requestedAt: string; graph: RetentionGraph;
+}
+export interface BatchDisposalAuditStore extends Pick<DisposalAuditStore, 'append'> {
+  /** One lock covers every member, reverse reference, hold, journal and deletion through completion. */
+  withRetentionBatchLock<T>(recordIds: readonly string[], at: string, work: (current: RetentionGraph) => Promise<T>): Promise<T>;
+}
+/** Tarjan SCCs keep lawful older-version incorporation intact; the condensation is ordered incorporator-first. */
+function orderedDisposalSets(ids: readonly string[], incoming: ReadonlyMap<string, readonly string[]>): string[][] {
+  const edges = new Map(ids.map(id => [id, ids.filter(target => incoming.get(target)!.includes(id))]));
+  const indices = new Map<string, number>(), low = new Map<string, number>(), stack: string[] = [], active = new Set<string>();
+  const sets: string[][] = [];
+  function visit(id: string): void {
+    indices.set(id, indices.size); low.set(id, indices.get(id)!); stack.push(id); active.add(id);
+    for (const target of edges.get(id)!) {
+      if (!indices.has(target)) { visit(target); low.set(id, Math.min(low.get(id)!, low.get(target)!)); }
+      else if (active.has(target)) low.set(id, Math.min(low.get(id)!, indices.get(target)!));
+    }
+    if (low.get(id) === indices.get(id)) {
+      const members: string[] = []; let member: string;
+      do { member = stack.pop()!; active.delete(member); members.push(member); } while (member !== id);
+      sets.push(members.sort());
+    }
+  }
+  ids.forEach(id => { if (!indices.has(id)) visit(id); });
+  const pending = [...sets], ordered: string[][] = [], removed = new Set<string>();
+  while (pending.length) {
+    const index = pending.findIndex(set => set.every(id => incoming.get(id)!.every(from => set.includes(from) || removed.has(from))));
+    if (index < 0) refuse('IncorporatorStillPresent');
+    const [set] = pending.splice(index, 1); ordered.push(set); set.forEach(id => removed.add(id));
+  }
+  return ordered;
+}
+/** H's callback must atomically erase the entire supplied SCC, including replicas/backups and source mappings.
+ * It must never implement the callback as independently committed per-record deletions.
+ */
+export async function destroyBatchAtExpiry(store: BatchDisposalAuditStore, input: BatchDisposalRequest,
+  destroySet: (requests: readonly Readonly<DisposalRequest>[]) => Promise<DestructionReceipt>): Promise<readonly Readonly<DestructionRecord>[]> {
+  const v = object(input, ['units', 'requestedAt', 'graph']), requestedAt = utc(v.requestedAt);
+  if (!Array.isArray(v.units) || !v.units.length) refuse('DisposalRequestInvalid');
+  const units = v.units.map(unit => {
+    object(unit, ['record', 'versionIds']);
+    const record = parseRetentionRecord(unit.record);
+    requireCurrentGraph(record, v.graph, requestedAt);
+    if (!Array.isArray(unit.versionIds) || new Set(unit.versionIds).size !== unit.versionIds.length ||
+        unit.versionIds.length !== record.parts.length || record.parts.some(p => !unit.versionIds.includes(p.partId))) refuse('CompleteVersionSetRequired');
+    return { record, versionIds: [...unit.versionIds] };
+  });
+  const ids: string[] = units.map(u => u.record.recordId).sort();
+  if (new Set(ids).size !== ids.length) refuse('DisposalRequestInvalid');
+  if (typeof store.withRetentionBatchLock !== 'function') refuse('RetentionLockRequired');
+  return store.withRetentionBatchLock(ids, requestedAt, async current => {
+    if (JSON.stringify(current) !== JSON.stringify(v.graph)) refuse('ReferenceSnapshotStale');
+    const incoming = new Map<string, string[]>(), requests = new Map<string, Readonly<DisposalRequest>>();
+    const journals = new Map<string, ReturnType<typeof destructionJournal>>();
+    // Validate the entire batch before any started record or destructive callback.
+    for (const { record, versionIds } of units) {
+      requireCurrentGraph(record, current, requestedAt);
+      const retainers = retainingUnits(record, current); retainers.forEach(requireStoredHolds);
+      const state = retentionState(record, current, requestedAt);
+      if (state.releaseNotRecorded.length) refuse('HoldReleaseRequired');
+      if (state.destroyNotBefore === null) refuse('LegalHoldActive');
+      if (requestedAt < state.destroyNotBefore) refuse('RetentionNotElapsed');
+      incoming.set(record.recordId, retainers.filter(r => r.recordId !== record.recordId).map(r => r.recordId));
+      requests.set(record.recordId, freeze({ record, versionIds, requestedAt, graph: current }));
+      const classes = statutoryClasses(record.kinds);
+      journals.set(record.recordId, destructionJournal(store, state.destroyNotBefore, {
+        disposalUnitId: record.disposalUnitId, classes, clauseIds: classes.map(c => STATUTORY_MINIMUM[c].clauseId), partCount: record.parts.length,
+        expiryDay: seoulDay(new Date(Date.parse(state.deadline) - 1).toISOString()), extensionUsed: retainers.some(r => r.extension !== null),
+      }));
+    }
+    const sets = orderedDisposalSets(ids, incoming), completed: Readonly<DestructionRecord>[] = [];
+    for (const set of sets) {
+      for (const id of set) await journals.get(id)!('started', requestedAt);
+      let completedAt: string;
+      try {
+        const receipt = object(await destroySet(freeze(set.map(id => requests.get(id)!))), ['completedAt', 'method']);
+        completedAt = utc(receipt.completedAt);
+        if (receipt.method !== 'irreversible-permanent-deletion' || completedAt < requestedAt) refuse('DestructionReceiptInvalid');
+      } catch (error) {
+        for (const id of set) await journals.get(id)!('failed', requestedAt);
+        throw error;
+      }
+      for (const id of set) completed.push(await journals.get(id)!('completed', completedAt));
+    }
+    return freeze(completed);
   });
 }
 export interface PurposeRecord {

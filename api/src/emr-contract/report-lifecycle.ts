@@ -2,7 +2,7 @@ import { isEmrReader } from './composition';
 import { VersionReference, versionReference } from './signature';
 import { choice, freeze, integer, object, string, utc, refuse } from './validation';
 import { ResolvedRecord, verifiedRecord } from './classification';
-import { RetentionRecord, RetentionGraph, recordVersionAdded, retentionState } from './lawful-defaults';
+import { RetentionRecord, RetentionGraph, recordVersionAdded, retentionDeadline } from './lawful-defaults';
 
 export type ReportState = 'Unread' | 'In Progress' | 'Preliminary' | 'On Hold' | 'Approved' | 'Finalized' | 'Cancelled';
 export interface ReportFacts {
@@ -22,6 +22,7 @@ export interface ReportFacts {
   preliminary: { authorId: string; reviewerId: string } | null;
   cancellation: { eventId: string; actorId: string; at: string; reason: string; version: VersionReference } | null;
   finalized: { effectiveAt: string; processedAt: string } | null;
+  retentionOnlySince: string | null;
 }
 export type LifecycleAction = 'start' | 'renew-claim' | 'save' | 'release' | 'preliminary' | 'cancel-preliminary' | 'defer' | 'approve' | 'amend' | 'addendum' | 'cancel' | 'finalize';
 export const REPORT_TRANSITIONS: Readonly<Record<ReportState, readonly LifecycleAction[]>> = freeze({
@@ -118,7 +119,8 @@ export function resumeClinicalUse(facts: ReportFacts, archive: RetentionOnlyEven
   verifiedResumptions.add(result); return result;
 }
 export function reportRetentionAccess(facts: ReportFacts, event: RetentionOnlyEvent | null,
-  resume: ResumeClinicalUseEvent | null = null): Readonly<{
+  resume: ResumeClinicalUseEvent | null = null,
+  retained: { record: RetentionRecord; at: string } | null = null): Readonly<{
   state: 'normal-retention' | 'retention-only'; ordinaryClinicalAccess: boolean; separateStorage: boolean;
 }> {
   validateReportFacts(facts);
@@ -134,12 +136,15 @@ export function reportRetentionAccess(facts: ReportFacts, event: RetentionOnlyEv
     if (!event || r.recordId !== facts.recordId || r.archiveAt !== event.at || utc(r.at) < event.at) throw new Error('Resumption does not match archive');
     archived = false;
   }
-  return freeze({ state: archived ? 'retention-only' : 'normal-retention', ordinaryClinicalAccess: !archived, separateStorage: archived });
+  if (retained && retained.record.recordId !== facts.recordId) refuse('RecordEventBindingRefused');
+  // A preservation part can extend storage, but cannot reopen an expired clinical unit.
+  const expired = facts.retentionOnlySince !== null || (retained !== null && utc(retained.at) >= retentionDeadline(retained.record));
+  return freeze({ state: archived || expired ? 'retention-only' : 'normal-retention', ordinaryClinicalAccess: !archived && !expired, separateStorage: archived || expired });
 }
 export function newReportFacts(recordId: string, studyId: string): Readonly<ReportFacts> {
   return freeze({ recordId: string(recordId), studyId: string(studyId), previousCancelledRecordId: null, contentHistory: [],
     state: 'Unread', firstApprovedAt: null, originalSignerId: null, amendUntil: null,
-    publishedVersion: null, bodyVersion: null, addenda: [], claimantId: null, claimGeneration: 0, preliminary: null, cancellation: null, finalized: null });
+    publishedVersion: null, bodyVersion: null, addenda: [], claimantId: null, claimGeneration: 0, preliminary: null, cancellation: null, finalized: null, retentionOnlySince: null });
 }
 /** Cancellation closes one unit. B creates the successor and its predecessor link atomically, retaining both units. */
 export function newReportAfterCancellation(cancelled: ReportFacts, recordId: string, actor: LifecycleActor, at: string): Readonly<ReportFacts> {
@@ -152,8 +157,9 @@ export function newReportAfterCancellation(cancelled: ReportFacts, recordId: str
 
 export function validateReportFacts(input: ReportFacts): void {
   const f = object(input, ['recordId', 'studyId', 'previousCancelledRecordId', 'contentHistory', 'state', 'firstApprovedAt', 'originalSignerId', 'amendUntil', 'publishedVersion', 'bodyVersion',
-    'addenda', 'claimantId', 'claimGeneration', 'preliminary', 'cancellation', 'finalized']) as unknown as ReportFacts;
+    'addenda', 'claimantId', 'claimGeneration', 'preliminary', 'cancellation', 'finalized', 'retentionOnlySince']) as unknown as ReportFacts;
   string(f.recordId); string(f.studyId);
+  if (f.retentionOnlySince !== null) utc(f.retentionOnlySince);
   if (f.previousCancelledRecordId !== null && string(f.previousCancelledRecordId) === f.recordId) throw new Error('Self predecessor');
   if (!Array.isArray(f.contentHistory)) throw new Error('Content history required');
   f.contentHistory.forEach((h, i) => {
@@ -206,10 +212,10 @@ export function transitionRetainedReport(facts: ReportFacts, command: LifecycleC
     ['amend', 'cancel'].includes(command.action) ? 'correction' : 'entry';
   if (record.recordId !== facts.recordId || e.recordId !== facts.recordId || e.versionId !== ref.versionId ||
       e.sha256 !== ref.sha256 || e.at !== command.at || e.act !== act || !e.signature) refuse('RecordEventBindingRefused');
-  const state = retentionState(record, graph, command.at, false);
-  if (state.state === 'legal-hold' && command.at >= state.deadline && (command.preservationCorrection ?? command.preservationEntry) !== source) refuse('HeldCorrectionAuthorityRequired');
-  const outcome = transitionReport(facts, command);
-  const separated = reportRetentionAccess(outcome.facts, archive).state === 'retention-only';
+  const expired = facts.retentionOnlySince !== null || command.at >= retentionDeadline(record);
+  if (expired && (command.preservationCorrection ?? command.preservationEntry) !== source) refuse('HeldCorrectionAuthorityRequired');
+  const outcome = transitionReport(expired ? { ...facts, retentionOnlySince: facts.retentionOnlySince ?? command.at } : facts, command);
+  const separated = reportRetentionAccess(outcome.facts, archive, null, { record, at: command.at }).state === 'retention-only';
   return freeze({ ...outcome, retention: recordVersionAdded(record, source, graph, separated) });
 }
 /** Pure lifecycle table; signed persistence also requires the combined retention pre-check above. */
@@ -306,7 +312,11 @@ export function transitionReport(facts: ReportFacts, command: LifecycleCommand):
   }
   if (['addendum', 'amend'].includes(action)) {
     effects.splice(effects.indexOf('preserve-private-drafts'), 1); effects.push('end-private-draft-purpose');
-    if (command.preservationCorrection || command.preservationEntry) effects.splice(effects.indexOf('publish-immediately'), 1);
+    if (command.preservationCorrection || command.preservationEntry) {
+      next.publishedVersion = facts.publishedVersion;
+      next.bodyVersion = facts.bodyVersion;
+      effects.splice(effects.indexOf('publish-immediately'), 1);
+    }
   }
   validateReportFacts(next);
   return freeze({ facts: next, effects });
