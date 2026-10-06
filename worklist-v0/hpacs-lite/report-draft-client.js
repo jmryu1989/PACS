@@ -385,6 +385,18 @@
       }
     }
 
+    /**
+     * 읽기 하나의 답(revision)을 이 문서가 그 사이 넘어섰는가. `issued`는 그 읽기가 나갈 때의 기준이다. 같은 epoch이면
+     * 번호로 견준다: 지금 기준보다 앞선 답은 낡았다(더 뒤의 답 — 다른 창의 저장 — 은 낡지 않았다). epoch이 다르면 앞뒤를
+     * 견줄 수 없으므로 읽는 사이 이 문서의 기준이 바뀌었을 때만 낡은 것으로 본다 — 그 답은 그 사이 확인한 상태보다 먼저
+     * 읽힌 것일 수 있다. 버린 답은 다음 읽기가 다시 알려 준다.
+     */
+    function overtaken(own, issued, revision) {
+      if (!own.revision || revision === own.revision) return false;
+      if (epochOf(revision) === epochOf(own.revision)) return notBefore(revision, own.revision);
+      return own.revision !== issued;
+    }
+
     /** 전체 읽기 하나가 잡아 둔 원문의 저장을 증명하는가(아래 proves). */
     function provesCapture(read, capture) {
       return !!read && read.uid === capture.uid && sameOwner(read.owner, capture.owner)
@@ -419,10 +431,15 @@
       lists(uid) { return lines.has(uid) ? listsOf(lines.get(uid)) : null; },
       /** All studies touched by this document, including commands whose page continuation was retired. */
       studies() { return [...lines.keys()]; },
-      /** Explicit server replacement, after pending commands have settled. Observations cannot clear conflicts. */
+      /**
+       * Explicit server replacement, after pending commands have settled. Observations cannot clear conflicts. 지금
+       * 기준보다 앞선 revision(같은 epoch의 더 낮은 번호)으로는 바꾸지 않는다 — 늦게 온 읽기가 그 뒤에 확인된 저장의
+       * 기준을 되돌리면 다음 쓰기가 그 저장을 모르는 채 나간다.
+       */
       replace(uid, revision, seen) {
         const own = line(uid);
         if (own.open || !isRevision(revision)) return false;
+        if (own.revision && own.revision !== revision && notBefore(revision, own.revision)) return false;
         own.conflict = null;
         own.uncertain = null;
         own.mine = [];
@@ -459,7 +476,18 @@
         }, false);
       },
 
-      read(uid, opts) { return fetchDraft(uid, opts || {}); },
+      /**
+       * 부른 쪽이 화면에 반영할 전체 읽기 하나. 나갈 때의 기준을 들고 나가, 답이 왔을 때 이 문서가 그 사이 더 새 상태를
+       * 확인했으면(그 사이의 저장·확인 읽기) 그 답은 `stale`이다(read는 그대로 실린다) — 부른 쪽은 그것을 화면에도 기준에도
+       * 쓰지 않는다. 기준은 여기서 바꾸지 않는다.
+       */
+      async read(uid, opts) {
+        const own = line(uid);
+        const issued = own.revision;
+        const got = await fetchDraft(uid, opts || {});
+        if (got.outcome !== 'read' || !overtaken(own, issued, got.read.revision)) return got;
+        return { outcome: 'stale', read: got.read, revision: own.revision };
+      },
 
       /**
        * 보존 쓰기(로그아웃 준비·Recover Draft)가 실을 기준을 정한다: 결과를 모르는 앞선 쓰기와 유지 목록을 전체 읽기로
