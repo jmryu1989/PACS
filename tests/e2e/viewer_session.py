@@ -20,7 +20,9 @@ class EndedViewer:
             self.requests.append((request.method, path))
 
     def ended(self):
-        self.observer.wait_for_function('window.endObserved')
+        # A function, not an expression: Playwright re-evaluates an expression string with eval() on every poll after
+        # the first, and the observer inherits the viewer's CSP (no 'unsafe-eval'); a function is compiled once.
+        self.observer.wait_for_function('() => window.endObserved')
         assert self.observer.evaluate('endObserved.state') != 'active'
         assert self.observer.evaluate('endObserved.empty'), 'The ended viewer still displays patient content'
         for _ in range(100):
@@ -137,7 +139,7 @@ def end_document(page):
         operation:Date.now(), status:'ending'});
       channel.close();
     }""")
-    page.wait_for_function("KinWorkContext.state() !== 'active'")
+    page.wait_for_function("() => KinWorkContext.state() !== 'active'")
     page.wait_for_timeout(100)
     assert not logouts, 'Receiving an end must not send a logout request'
     return held

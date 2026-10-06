@@ -37,8 +37,9 @@ class SessionDraftMutants(boundary.SessionDraftBoundaries):
         self.mutation = None
         self.test_entry_proof_consumed_automatically_once()
         self.mutation = (
-            "const result = proof || entryBinding ? await enterWithProof() : undecided() ? await bootstrap() : null;",
-            "const result = undecided() ? await bootstrap() : null;")
+            # Since the session end split enter() in two, this line chooses between the proof entry and the plain one.
+            "const result = proof || entryBinding ? await enterWithProof() : await enterPlain();",
+            "const result = await enterPlain();")
         with self.assertRaisesRegex(AssertionError, "U5_ENTRY_PROOF"):
             self.test_entry_proof_consumed_automatically_once()
         print("U5-MUTANT M02 killed: U5_ENTRY_PROOF")
@@ -47,7 +48,7 @@ class SessionDraftMutants(boundary.SessionDraftBoundaries):
         self.mutation = None
         self.test_entry_valid_session_and_second_tab_require_no_click()
         self.mutation = (
-            "const result = proof || entryBinding ? await enterWithProof() : undecided() ? await bootstrap() : null;",
+            "const result = proof || entryBinding ? await enterWithProof() : await enterPlain();",
             "const result = proof || entryBinding ? await enterWithProof() : null;")
         with self.assertRaisesRegex(AssertionError, "U5_ENTRY_ACTIVE"):
             self.test_entry_valid_session_and_second_tab_require_no_click()

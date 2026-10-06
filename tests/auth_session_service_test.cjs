@@ -2834,7 +2834,11 @@ test('U5E-13 an administrator\'s isolation ends every session of the member thro
   assert.deepEqual(await w.marks(), [[P1, 'isolation', true], [P2, 'isolation', true], [P3, 'isolation', true]],
     'a mark for every provider session the provider lists - also the one no product row knows - confirmed');
   assert.deepEqual(await endsOf(w, m), [['auth.logout', 'isolation', A], ['auth.logout', 'isolation', A]], 'one record per ended session');
-  assert.deepEqual([...kc.endRequests].sort(), [P1, P2, P3]);
+  // Whom the provider was asked to end, not how often: a session the provider still lists while the first end request
+  // is on its way is asked again (designed and idempotent - a repeat is answered 404 and counts as confirmed). How often
+  // that happens depends on the database's round trips, not on a contract.
+  assert.deepEqual([...new Set(kc.endRequests)].sort(), [P1, P2, P3],
+    'every provider session the isolation listed or ended is told (a repeat answered 404 is allowed)');
   gate.release();
   const late = await heldC;
   assert.deepEqual([late.newSid, late.proof, await w.base.authSession.count({ where: { sub: m } })], [null, undefined, 0],

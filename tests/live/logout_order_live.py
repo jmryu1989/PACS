@@ -20,12 +20,14 @@ PROBE = r"""
 const fs = require('node:fs');
 const Module = require('node:module');
 const { PrismaService } = require('/app/dist/prisma.service');
+const { KeycloakService } = require('/app/dist/keycloak.service');
 const path = '/app/dist/auth.service.js';
 let source = fs.readFileSync(path, 'utf8');
 if (input.mutant) {
-  const line = "const last = await this.endByRequest(sid, session, 'logout', this.requestIp(req));";
-  if (source.split(line).length !== 2) throw Error('Mutation anchor changed');
-  source = source.replace(line, 'await this.idpLogout(session.refreshToken); ' + line);
+  // The Log out's own end commit; the mutant asks the provider to end the SSO session before it.
+  const call = "await this.endByRequest(sid, session, 'logout', ";
+  if (source.split(call).length !== 2) throw Error('Mutation anchor changed');
+  source = source.replace(call, 'await this.keycloak.endSession(this.idpSidOf(session), IDP_END_MS) && ' + call);
 }
 const copy = new Module(path, module);
 copy.filename = path;
@@ -35,14 +37,21 @@ const { AuthService } = copy.exports;
 (async () => {
   const db = new PrismaService(), observer = new PrismaService();
   await db.$connect(); await observer.$connect();
-  const auth = new AuthService(db);
+  // The product's wiring: one Nest provider each, no constructor arguments, the container's environment.
+  const auth = new AuthService(db, new KeycloakService());
   const sid = auth.sessionId({headers:{cookie:'kin_sid=' + input.cookie}});
+  const row = await observer.authSession.findUnique({where:{sid}});
+  if (!row || !row.idpSid) throw Error('The logged-in session must name its provider session');
+  const endPath = '/sessions/' + encodeURIComponent(row.idpSid);
   const baseline = await observer.auditLog.count({where:{target:input.sub,action:'auth.logout'}});
   const realFetch = global.fetch;
   const observations = [], pending = [];
   global.fetch = (url, init) => {
+    const target = String(url), method = (init && init.method) || 'GET';
+    // The service-account token grant only authorises the end request; it ends nothing.
+    if (method === 'POST' && target.endsWith('/protocol/openid-connect/token')) return realFetch(url, init);
     const observed = (async () => {
-      if (!String(url).endsWith('/logout')) throw Error('Unexpected IdP request');
+      if (method !== 'DELETE' || !target.endsWith(endPath)) throw Error('Unexpected IdP request');
       // Separate connection: an uncommitted deletion/audit cannot satisfy this read.
       const sessions = await observer.authSession.count({where:{sid}});
       const audits = await observer.auditLog.count({where:{target:input.sub,action:'auth.logout'}});
@@ -52,10 +61,14 @@ const { AuthService } = copy.exports;
     pending.push(observed);
     return observed;
   };
+  const until = async (done, ms) => { for (const end = Date.now() + ms; Date.now() < end && !(await done()); ) await new Promise(r => setTimeout(r, 50)); };
   try {
     await auth.logout({sid,headers:{'x-real-ip':'127.0.0.1'}});
+    // The answer does not wait for Keycloak: wait (bounded) for this session's post-commit provider end and its recorded answer.
+    await until(() => observations.some(o => o.sessions === 0), 10000);
     await Promise.allSettled(pending);
-    console.log(JSON.stringify({observations}));
+    await until(async () => !!(await observer.idpSessionEnd.findUnique({where:{idpSid:row.idpSid}}))?.confirmedAt, 5000);
+    console.log('ORDER ' + JSON.stringify({observations}));
   } finally {
     global.fetch = realFetch;
     await db.$disconnect(); await observer.$disconnect();
@@ -75,7 +88,10 @@ class LogoutOrderLive(unittest.TestCase):
         result = subprocess.run(["docker", "compose", "exec", "-T", "api", "node"], cwd=ROOT,
                                 input=script, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, "The order probe must execute; a harness error is not evidence")
-        observed = json.loads(result.stdout)["observations"]
+        # The probe prints one ORDER line; anything else on stdout (a warning of the service) is not the result.
+        lines = [line for line in result.stdout.splitlines() if line.startswith("ORDER ")]
+        self.assertEqual(len(lines), 1, "One order result")
+        observed = json.loads(lines[0][len("ORDER "):])["observations"]
         self.assertTrue(observed, "The real IdP call must have been observed")
         return observed
 

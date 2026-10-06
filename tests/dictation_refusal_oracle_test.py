@@ -228,7 +228,8 @@ class OracleTests(unittest.TestCase):
             "api/src/auth.service.ts": [
                 "return authRefusal(401, 'AUTH_CREDENTIALS_MISSING', '인증 정보가 없습니다');",
                 "throw authRefusal(403, 'AUTH_CSRF_REQUIRED', 'X-KIN-CSRF 헤더가 필요합니다');",
-                "throw authRefusal(409, 'AUTH_SESSION_MISMATCH', '이 요청을 시작한 로그인 세션이 지금 브라우저의 세션과 다릅니다');",
+                # Since the session end the mismatch body is made by one factory (bindingMismatch) and thrown by its callers.
+                "return authRefusal(409, 'AUTH_SESSION_MISMATCH', '이 요청을 시작한 로그인 세션이 지금 브라우저의 세션과 다릅니다');",
                 "return new HttpException({ code, message }, status);",
             ],
             "api/src/asr.service.ts": ["return new HttpException({ code, message: code }, status);",
