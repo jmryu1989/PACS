@@ -595,14 +595,15 @@ async function world(t, { now = START } = {}) {
    * `idp` is the provider session the token belongs to (its `sid` claim). Every token of one account is of one provider
    * session unless the case names another - a refresh continues its session's provider session, and two logins of one
    * browser share its SSO; a case about two PCs, or about sessions that must end apart, names them. `idp: null` issues
-   * a token without the claim.
+   * a token without the claim. `authTime` (seconds, as Keycloak truncates it) is the `auth_time` claim: when the provider
+   * authenticated that SSO; without it the token carries none (U5E-21 is the case about it).
    */
-  w.issue = async (label, { sub, groups = [A], email, roles = ['radiologist'], expIn = HOUR / 1000, key = 'main', same, idp } = {}) => {
+  w.issue = async (label, { sub, groups = [A], email, roles = ['radiologist'], expIn = HOUR / 1000, key = 'main', same, idp, authTime } = {}) => {
     const now = Math.floor(Date.now() / 1000);
     const jti = label + '-' + randomUUID();
     const sid = idp === undefined ? 'syn-idp-' + sub : idp;
     const access = await new jose.SignJWT({ email: email ?? sub + '@synthetic.test', groups, realm_access: { roles }, azp: 'kin-bff', jti,
-      ...(sid === null ? {} : { sid }) })
+      ...(sid === null ? {} : { sid }), ...(authTime === undefined ? {} : { auth_time: authTime }) })
       .setProtectedHeader({ alg: 'RS256', kid: KEYS[key].kid }).setIssuer(ISSUER).setAudience('kin-api').setSubject(sub)
       .setIssuedAt(now).setExpirationTime(same?.exp ?? now + expIn).sign(KEYS[key].privateKey);
     const v = { label, sub, access, refresh: 'syn-rt-' + randomUUID(), jti, exp: same?.exp ?? now + expIn, idp: sid };
@@ -2487,8 +2488,8 @@ test('U5E-05 (acceptance 5) an end the provider did not confirm survives a resta
     w.tick(5000);
     await w.until('the confirmed retry', async () => (await w.mark(Y)).confirmedAt !== null);
     assert.deepEqual([count(), await endsOf(w, s2)], [3, [['auth.logout', 'logout', B]]]);
-    // Keeping: a confirmed mark goes once no token of that provider session can exist (13 h after the decision); an
-    // unconfirmed one is never dropped for its age.
+    // Keeping: a confirmed mark goes once no token of that provider session can exist (13 h after its confirmation - here
+    // the decision and the confirmation are one instant; U5E-21 g separates them); an unconfirmed one is never dropped for its age.
     const at = hours => new Date(Date.now() - hours * HOUR);
     kc.logoutMode = 'error';
     for (const [idp, decided, confirmed] of [['syn-idp-old-confirmed', 14, true], ['syn-idp-recent-confirmed', 11, true], ['syn-idp-old-open', 14, false]])
@@ -2713,7 +2714,7 @@ test('U5E-10 a callback is never answered with an error body: a stray one enters
 });
 
 // SEA-F02 (review A of 757e37f): design 5-0 item 4 - the first cause and decidedAt of a mark are never overwritten by a
-// later end or a retry; decidedAt also anchors the 13 h keep window. The opposite side: a later end still re-wakes the
+// later end or a retry (the 13 h keep window counts from the last confirmation, U5E-21 g). The opposite side: a later end still re-wakes the
 // provider end of a mark whose provider session produced a code again.
 test('U5E-11 a later end of the same provider session for another cause keeps the first cause and time, and still wakes the provider end', async t => {
   const w = await world(t);
@@ -3469,4 +3470,169 @@ test('U5E-20 an Activate that lands while the isolation retry cycle\'s provider 
       'c: then it finished the owed work and enabled the member; nothing after the enable undoes it');
   }
   await w.finish('U5E-20');
+});
+
+// S7-U5 CE1 (S1 real-screen counterexample 1, candidate-diag-S1 ce1-diagnosis): Keycloak names an SSO by the browser's
+// authentication-session id, so the next SSO of a browser that kept an unfinished login screen (a login tab closed, the
+// app's address opened twice before logging in) gets the ENDED SSO's sid - the next person's SSO or the same doctor's. A mark
+// covers the ended SSO's authentication (auth_time before the confirmed end), not the sid:
+//   a. the previous doctor's barrier stays: a callback that exchanged its code before the Log out and resumes after the end
+//      was confirmed makes no session (acceptance 1); a code authenticated in the very second of the confirmation, before
+//      it, is refused too when its flow cannot prove a later start (no rounding down for a plain flow);
+//   b. a new SSO with the SAME sid, authenticated after the confirmed end, enters with one credential entry: the next person
+//      at the unfinished-logout landing in the second of the confirmation (the bound start's fresh step; measured 0.08 s
+//      on the real stack), and the same doctor after an ordinary Log out (the probe's fresh step) - the mark stays as it
+//      was and that new SSO is not ended;
+//   c. a replay of the ended SSO's token or code after that is refused;
+//   d. the Bearer path judges as the callback: the ended SSO's token refused, the new SSO's accepted, also when its
+//      authentication shares the second of the confirmation (the authentication the callback admitted);
+//   e. the edges: a fresh step started after the end counts from the second it started - one second earlier is refused, its
+//      own second passes; a fresh step started before the end was confirmed counts from the confirmation; the same second
+//      on the Bearer path without an admitted session (another person, a token without auth_time) is refused;
+//   f. the new SSO ended in its turn: until that end is confirmed every authentication of the sid is refused (also a later
+//      one), afterwards the new SSO's own authentication too - a newer one enters;
+//   g. the keep window counts from the last confirmation, not from the first decision of a re-ended sid.
+// The clock starts 400 ms into a second, so that "the second of the confirmation, before it" exists.
+test('U5E-21 (S7-U5 CE1) a mark covers the ended SSO\'s authentication, not its sid: the browser\'s next SSO with the same sid enters, the ended SSO\'s code and token stay refused', async t => {
+  const w = await world(t, { now: START + 400 });
+  const sec = ms => Math.floor(ms / 1000);
+  const ENDED = [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED'];
+  const bearer = async v => { const out = await w.call(w.I1, 'get', { bearer: v.access }); return out.status === 200 ? [200] : coded(out); };
+  const confirmedAt = async idp => (await w.mark(idp))?.confirmedAt?.getTime() ?? null;
+
+  // ── 1. the next person at the previous doctor's unfinished-logout landing (CE1 round 2, SE-03b) ──
+  const a = 'syn-sub-u5e21-a', b = 'syn-sub-u5e21-b', X = 'syn-idp-u5e21-pc1';
+  const aOld = await w.issue('u5e21-a', { sub: a, groups: [A], idp: X, authTime: sec(Date.now()) - 3600 });
+  const s1 = await w.session(aOld);
+  const start = await w.call(w.I1, 'switch', { sid: s1, body: UNFINISHED });
+  assert.deepEqual([start.status, promptOf(start)], [200, 'login'], 'the bound start ended A and goes to the fresh step');
+  assert.deepEqual(await bearer(aOld), ENDED, 'a: the ended SSO\'s token is refused once its end is confirmed');
+  const end1 = await confirmedAt(X);
+  assert.equal(end1 % 1000, 400, 'the end is confirmed 400 ms into a second');
+  // B types credentials at once: the provider authenticates B in the second of the confirmation and names B's new SSO by
+  // the browser's id - the ended SSO's sid.
+  const asked1 = kc.endRequests.length;
+  const bv = await w.issue('u5e21-b', { sub: b, groups: [B], idp: X, authTime: sec(end1) });
+  const entered = await answerFlow(w, w.I1, start, bv);
+  assert.deepEqual([entered.status, entered.cookie, !!entered.proof], [302, 'S', true], 'b: B enters with one credential entry');
+  assert.deepEqual([(await w.base.authSession.findUnique({ where: { sid: entered.newSid } })).idpSid, summary(rowsOf(await w.rows(), b))],
+    [X, [['auth.login', 'success', B]]], 'b: B\'s session is of the reused sid; no idp_session_ended refusal');
+  assert.deepEqual([(await w.mark(X)).cause, await confirmedAt(X), kc.endRequests.length - asked1], ['logout', end1, 0],
+    'b: the mark stays as it was and B\'s new SSO is not ended');
+  // c + d: the Bearer path.
+  assert.deepEqual(await bearer(aOld), ENDED, 'c/d: the ended SSO\'s token (authenticated an hour before the end) is refused');
+  assert.deepEqual(await bearer(bv), [200], 'd: B\'s token - same sid, the second of the confirmation - is the authentication the callback admitted');
+  const other = await w.issue('u5e21-other', { sub: 'syn-sub-u5e21-other', groups: [B], idp: X, authTime: sec(end1) });
+  assert.deepEqual(await bearer(other), ENDED, 'e: the same second, nobody admitted with that authentication: covered');
+  assert.deepEqual(await bearer(await w.issue('u5e21-b-untimed', { sub: b, groups: [B], idp: X })), ENDED, 'e: a token without auth_time: covered');
+  w.tick(1000);
+  const bLaterAuth = sec(Date.now());
+  const bLater = await w.issue('u5e21-b-later', { sub: b, groups: [B], idp: X, authTime: bLaterAuth });
+  assert.deepEqual(await bearer(bLater), [200], 'b/d: an authentication of a later second than the confirmed end needs no admitted session');
+
+  // f. B's SSO ends in its turn; the provider does not confirm it yet.
+  w.tick(1000);
+  kc.logoutMode = 'error';
+  assert.equal((await w.call(w.I1, 'logout', { sid: entered.newSid })).status, 204);
+  await w.told();
+  assert.deepEqual([(await w.mark(X)).cause, await confirmedAt(X)], ['logout', null], 'f: the same mark, unconfirmed again; the first cause stays');
+  assert.deepEqual([await bearer(bv), await bearer(bLater)], [ENDED, ENDED], 'f: unconfirmed: every authentication of the sid is covered');
+  const during = await w.call(w.I2, 'login');
+  const refusedDuring = await answerFlow(w, w.I2, during, await w.issue('u5e21-during', { sub: b, groups: [B], idp: X, authTime: sec(Date.now()) }));
+  assert.deepEqual([refusedDuring.location, refusedDuring.newSid], [landing('end_unconfirmed'), null], 'f: a code of this second, while unconfirmed: no session');
+  kc.logoutMode = 'ok';
+  w.tick(1000);
+  const resumer = w.instance('R21');
+  resumer.service.onModuleInit();
+  try {
+    await w.until('the re-ended SSO confirmed', async () => (await confirmedAt(X)) !== null);
+  } finally {
+    resumer.service.onModuleDestroy();
+  }
+  const end2 = await confirmedAt(X);
+  assert.ok(end2 > end1 && sec(end2) > bLaterAuth, 'f: confirmed later, in a later second than B\'s authentications');
+  assert.deepEqual(await bearer(bLater), ENDED, 'f: B\'s own authentication is now before a confirmed end');
+  w.tick(1000);
+  const newer = await login(w, w.I2, await w.issue('u5e21-newer', { sub: b, groups: [B], idp: X, authTime: sec(Date.now()) }));
+  assert.deepEqual([newer.done.cookie, !!newer.done.proof], ['S', true], 'f: a newer authentication after that end enters');
+
+  // ── 2. the previous doctor's barrier, and the same doctor after an ordinary Log out (X6, SE-03c) ──
+  const c = 'syn-sub-u5e21-c', Y = 'syn-idp-u5e21-pc2';
+  const cOld = await w.issue('u5e21-c', { sub: c, groups: [A], idp: Y, authTime: sec(Date.now()) - 600 });
+  const s2 = await w.session(cOld);
+  // a. C's second tab: the provider answered without a form, the code is exchanged, the callback held before its transaction.
+  const tab2 = await w.call(w.I2, 'login');
+  const gate = w.gate('I2', 'tx.open');
+  const heldC = answerFlow(w, w.I2, tab2, await w.issue('u5e21-c-tab2', { sub: c, groups: [A], idp: Y, authTime: sec(Date.now()) - 600 }));
+  await gate.arrived();
+  assert.equal((await w.call(w.I1, 'logout', { sid: s2 })).status, 204);
+  await w.told();
+  gate.release();
+  const resumed = await heldC;
+  assert.deepEqual([resumed.newSid, resumed.cookie, atProvider(resumed), await w.base.authSession.count({ where: { sub: c } })], [null, 'P', true, 0],
+    'a: the callback that exchanged before the end makes no session once the end is confirmed');
+  const endY = await confirmedAt(Y);
+  assert.equal(endY % 1000, 400, 'the ordinary Log out\'s end was confirmed 400 ms into a second');
+  const sameSecond = await w.call(w.I2, 'login');
+  const refusedSame = await answerFlow(w, w.I2, sameSecond, await w.issue('u5e21-c-same', { sub: c, groups: [A], idp: Y, authTime: sec(endY) }));
+  assert.deepEqual([refusedSame.newSid, atProvider(refusedSame)], [null, true],
+    'a/e: authenticated in the second of the confirmation, by a flow that proves no later start: covered (no rounding down)');
+  assert.deepEqual(summary(rowsOf(await w.rows(), c)),
+    [['auth.login', 'idp_session_ended', A], ['auth.login', 'idp_session_ended', A], ['auth.logout', 'logout', A]]);
+  assert.deepEqual(await bearer(cOld), ENDED, 'c: the replayed token of the ended SSO is refused');
+  // b. the same doctor comes back three seconds later: Login, the probe finds no SSO, the fresh step, C's credentials -
+  // and Keycloak hands C's new SSO the ended sid.
+  w.tick(3000);
+  const back = await w.call(w.I1, 'switch', { body: UNFINISHED });
+  const fresh = await refuseFlow(w, w.I1, back, 'login_required');
+  assert.deepEqual([promptOf(back), promptOf(fresh)], ['none', 'login']);
+  const asked2 = kc.endRequests.length;
+  const cBack = await answerFlow(w, w.I1, fresh, await w.issue('u5e21-c-back', { sub: c, groups: [A], idp: Y, authTime: sec(Date.now()) }));
+  assert.deepEqual([cBack.cookie, !!cBack.proof, kc.endRequests.length - asked2, (await w.mark(Y)).confirmedAt !== null], ['S', true, 0, true],
+    'b: the same doctor enters with one credential entry; the new SSO is not ended, the mark stays');
+
+  // ── 3. the fresh step's own edges (doctor D) ──
+  const d = 'syn-sub-u5e21-d', Z = 'syn-idp-u5e21-pc3';
+  const s3 = await w.session(await w.issue('u5e21-d', { sub: d, groups: [A], idp: Z, authTime: sec(Date.now()) - 600 }));
+  // Two fresh steps started BEFORE the end (another tab's recovery Login), then D's Log out ends Z 300 ms later.
+  const early = [];
+  while (early.length < 2) early.push(await refuseFlow(w, w.I1, await w.call(w.I1, 'switch', { body: UNTRUSTED }), 'login_required'));
+  w.tick(300);
+  assert.equal((await w.call(w.I1, 'logout', { sid: s3 })).status, 204);
+  await w.told();
+  const endZ = await confirmedAt(Z);
+  assert.ok(endZ % 1000 !== 0, 'the end is confirmed inside a second');
+  const before = await answerFlow(w, w.I1, early[0], await w.issue('u5e21-d-early', { sub: d, groups: [A], idp: Z, authTime: sec(endZ) }));
+  assert.deepEqual([before.newSid, atProvider(before)], [null, true],
+    'e: a fresh step started before the end counts from the confirmation: the same second before it is covered');
+  w.tick(1000);
+  const after = await answerFlow(w, w.I1, early[1], await w.issue('u5e21-d-after', { sub: d, groups: [A], idp: Z, authTime: sec(Date.now()) }));
+  assert.equal(after.cookie, 'S', 'e: ... and the following second enters');
+  // A fresh step started after the end, 700 ms into its second: one second before that second is not its authentication.
+  w.tick(1000);
+  const late = await refuseFlow(w, w.I1, await w.call(w.I1, 'switch', { body: UNTRUSTED }), 'login_required');
+  const lateStart = Date.now();
+  assert.ok(lateStart > (await confirmedAt(Z)) + 1000 && lateStart % 1000 !== 0);
+  const tooEarly = await answerFlow(w, w.I1, late, await w.issue('u5e21-d-too-early', { sub: d, groups: [A], idp: Z, authTime: sec(lateStart) - 1 }));
+  assert.deepEqual([tooEarly.newSid, atProvider(tooEarly), promptOf(tooEarly)], [null, true, 'login'],
+    'e: authenticated a second before the fresh step\'s own second (after the end, but not by this step): covered, the step restarts');
+  const own = await answerFlow(w, w.I1, tooEarly, await w.issue('u5e21-d-own', { sub: d, groups: [A], idp: Z, authTime: sec(Date.now()) }));
+  assert.ok(sec(Date.now()) * 1000 < (await confirmedAt(Z)), 'the restarted step\'s own second began before the re-confirmed end');
+  assert.equal(own.cookie, 'S', 'e: the restarted fresh step admits an authentication from the second it started');
+
+  // ── g. keeping: from the last confirmation ──
+  const at = hours => new Date(Date.now() - hours * HOUR);
+  for (const [idp, decided, confirmed] of [['syn-idp-u5e21-reended', 14, 1], ['syn-idp-u5e21-old', 14, 14]])
+    await w.base.idpSessionEnd.create({ data: { idpSid: idp, cause: 'logout', decidedAt: at(decided), confirmedAt: at(confirmed),
+      attempts: 1, nextAttemptAt: at(decided) } });
+  const sweeper = w.instance('S21');
+  sweeper.service.onModuleInit();
+  try {
+    w.tick(HOUR);
+    await w.until('the sweep of old confirmed marks', async () => (await w.mark('syn-idp-u5e21-old')) === null);
+  } finally {
+    sweeper.service.onModuleDestroy();
+  }
+  assert.ok(await w.mark('syn-idp-u5e21-reended'), 'g: decided 15 h ago, re-ended and confirmed 2 h ago: kept');
+  await w.finish('U5E-21');
 });

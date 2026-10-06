@@ -38,6 +38,8 @@ const IDP_END_BACKOFF_MS = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_
 /**
  * 확인된 표식을 남겨 두는 시간: Keycloak SSO 세션의 최대 수명(kin-realm.json ssoSessionMaxLifespan 43200초) + 여유.
  * 그 뒤에는 그 provider 세션의 유효한 토큰이 올 수 없다 — 콜백이 잠금 뒤에 토큰의 exp를 다시 보는 것과 짝이다.
+ * 마지막으로 확인된 종료(confirmedAt)부터 센다: 같은 sid가 다시 쓰이면(S7-U5 CE1) decidedAt은 첫 종료의 시각이라, 그것으로
+ * 세면 방금 다시 끝낸 SSO의 표식이 그 토큰이 아직 유효할 때 지워진다.
  */
 const IDP_END_KEEP_MS = 13 * 60 * 60 * 1000;
 // provider 세션 잠금(pg_advisory_xact_lock)의 고정 이름공간. 다른 용도의 advisory lock과 키가 겹치지 않게 한다.
@@ -172,7 +174,9 @@ export function markAuthCode(res: any, error: any) {
  *
  * 세션 종료의 완성(S7-U5 R1): 제품이 어떤 이유로든 제품 세션을 끝내면 그 세션이 태어난 provider 세션(`idpSid`)도 끝낸다.
  * 끝내기와 콜백의 세션 생성은 같은 provider 세션에 대해 하나의 잠금(트랜잭션 advisory lock)으로 줄을 서고, 끝내기는
- * 그 잠금 안에서 표식(IdpSessionEnd)을 남긴다 — 표식이 있는 provider 세션에서는 다시는 제품 세션이 만들어지지 않는다.
+ * 그 잠금 안에서 표식(IdpSessionEnd)을 남긴다 — 표식이 덮는 인증(그 종료가 확인되기 전의 인증, `markCovers`)으로는 다시는
+ * 제품 세션이 만들어지지 않는다. 표식은 sid가 아니라 그 SSO의 인증을 막는다: Keycloak은 같은 브라우저의 다음 SSO에 끝난 SSO의
+ * sid를 다시 줄 수 있다.
  * provider에 종료를 청하는 일(DELETE sessions/{sid})은 commit 뒤, 잠금 밖에서 하고, 확인될 때까지 표식이 다시 부른다.
  * 그 답(204·404)은 "그 SSO 세션이 인증 서버에서 끝났다"까지만 말한다: 이미 발급된 토큰은 자기 만료까지 서명이 유효하고
  * (그래서 Bearer 경로도 표식을 본다), 같은 SSO에 묶인 다른 애플리케이션의 자체 세션은 그 애플리케이션의 일이다.
@@ -387,6 +391,30 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   /** 검증한 토큰의 provider 세션 id(`sid`). 비어 있지 않은 문자열만 받는다. */
   private idpSidOfClaims(claims: Record<string, any>): string | null {
     return typeof claims?.sid === 'string' && claims.sid ? claims.sid : null;
+  }
+
+  /**
+   * 표식이 이 인증을 덮는가(R1). 표식은 끝내기로 한 **그 SSO의 인증**을 막는다 — sid가 같다는 것만으로는 아니다(S7-U5 CE1).
+   * Keycloak은 SSO 세션 id로 그 브라우저의 인증 세션 id(AUTH_SESSION_ID)를 쓰고, 그 브라우저에 끝나지 않은 로그인 화면(닫은
+   * 로그인 탭, 로그인 전에 앱 주소를 한 번 더 연 것)이 남아 있으면 그 id가 로그인 뒤에도 남는다. 그래서 같은 브라우저의 다음
+   * SSO가 — 다음 사람이든 같은 사람이든 — 끝난 SSO의 sid를 다시 받는다. 끝난 SSO의 code·토큰은 그 종료가 확인되기 전에
+   * 인증된 것이다:
+   *   - 종료가 아직 확인되지 않았거나 auth_time이 없으면 덮는다(그 SSO가 아직 살아 있을 수 있다).
+   *   - 확인된 종료 이후의 인증(auth_time ≥ confirmedAt)은 덮지 않는다 — 그 sid를 다시 받은 새 SSO다.
+   *   - 확인된 종료 뒤에 시작한 fresh 흐름(prompt=login·create)의 code는 그 흐름이 시작된 **초**부터 받는다. 그 흐름의
+   *     prompt가 인증 서버에 그 시작 뒤의 인증을 요구하므로 그 code의 인증은 흐름보다 늦다. 초로 내리는 것은 auth_time이
+   *     초 단위로 잘린 값이기 때문이다(종료 확인과 같은 초에 자격을 넣은 사람도 한 번에 들어간다).
+   * 시계: auth_time은 인증 서버의 시계, confirmedAt·흐름의 시작은 이 서버의 시계다(같은 호스트에 둔다). 그 밖의 여유는 두지
+   * 않는다 — 여유는 앞 의사의 종료 직전 인증까지 받아 들인다. 인증 서버 시계가 늦으면 흐름 시작 직후의 입력이 한 번 거절되고
+   * (막힘 → 확인 → 새 흐름의 폼), 빠르면 끝난 SSO의 종료 직전 인증이 통할 수 있다 — 두 서버를 나누어 둘 때는 시계 동기가 전제다.
+   * 같은 초의 인증은 흐름 없이(평범한 흐름·Bearer) 앞뒤를 가리지 못하므로 덮는 쪽으로 판정한다.
+   */
+  private markCovers(mark: { confirmedAt: Date | null }, claims: Record<string, any>, flow?: PendingLogin): boolean {
+    const authTime = Number(claims?.auth_time);
+    if (!mark.confirmedAt || !Number.isFinite(authTime)) return true;
+    const ended = mark.confirmedAt.getTime();
+    const since = flow?.phase === 'fresh' && flow.issuedAt >= ended ? Math.floor(flow.issuedAt / 1000) * 1000 : ended;
+    return authTime * 1000 < since;
   }
 
   /** 이 세션이 태어난 provider 세션. 열이 생기기 전의 행은 저장된 access token(저장 전에 검증한 토큰)에서 읽는다. */
@@ -830,14 +858,29 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Bearer 경로의 표식 검사(가드가 부른다). 제품 세션 행을 지워도 이미 발급된 access token은 만료까지 서명이 유효하다 —
-   * 끝내기로 한 provider 세션의 사용자 토큰은 여기서 거절한다. `sid`가 없는 토큰(서비스 계정·gateway)은 대상이 아니다.
+   * 끝내기로 한 SSO의 인증(표식이 덮는 인증, 콜백과 같은 판정)의 사용자 토큰은 여기서 거절한다. `sid`가 없는 토큰(서비스
+   * 계정·gateway)은 대상이 아니다.
+   * 이 길에는 흐름이 없어 확인된 종료와 **같은 초**의 인증은 auth_time만으로 앞뒤를 가리지 못한다. 그 인증을 콜백이 이미 받아
+   * 들였으면 받는다: 표식이 있는 sid의 제품 세션은 종료(그 sid의 행을 모두 지운다) 뒤에 콜백이 덮지 않는다고 판정한 인증으로만
+   * 생기므로, 그 sid에 살아 있는 세션의 토큰과 사람·auth_time이 같으면 같은 인증이다.
    */
   async refuseEndedIdpSession(claims: Record<string, any>): Promise<void> {
     const idpSid = this.idpSidOfClaims(claims);
     if (!idpSid) return;
     const mark = await this.storage('idp_end_read', () =>
-      this.prisma.idpSessionEnd.findUnique({ where: { idpSid }, select: { idpSid: true } }));
-    if (mark) throw this.ended('인증 세션이 없습니다');
+      this.prisma.idpSessionEnd.findUnique({ where: { idpSid }, select: { confirmedAt: true } }));
+    if (!mark || !this.markCovers(mark, claims)) return;
+    const authTime = Number(claims.auth_time);
+    if (mark.confirmedAt && Number.isFinite(authTime) && authTime === Math.floor(mark.confirmedAt.getTime() / 1000)) {
+      const admitted = await this.storage('idp_end_read', () => this.prisma.authSession.findMany({
+        where: { idpSid, sub: String(claims.sub) }, select: { accessToken: true },
+      }));
+      if (admitted.some(row => {
+        try { return Number(decodeJwt(row.accessToken).auth_time) === authTime; }
+        catch { return false; }
+      })) return;
+    }
+    throw this.ended('인증 세션이 없습니다');
   }
 
   // ── 로그인 시작 ──
@@ -1146,8 +1189,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         const now = new Date();
         if (Number(payload.exp) * 1000 <= now.getTime() || now.getTime() - flow.issuedAt > PENDING_VALID_MS) return 'expired';
         const mark = await tx.idpSessionEnd.findUnique({ where: { idpSid: idpSid! } });
-        if (mark) {
-          // 끝내기로 한 provider 세션이 code를 냈다: 아직 살아 있다. 확인돼 있었더라도 종료 요청을 다시 깨운다.
+        if (mark && this.markCovers(mark, payload, flow)) {
+          // 끝내기로 한 SSO의 인증이 code를 냈다: 그 SSO가 아직 살아 있다. 확인돼 있었더라도 종료 요청을 다시 깨운다.
+          // 덮지 않는 인증(확인된 종료 뒤에 그 sid를 다시 받은 새 SSO)은 표식을 그대로 두고 지나간다 — 옛 인증은 계속 막힌다.
           await tx.idpSessionEnd.update({ where: { idpSid: idpSid! }, data: { confirmedAt: null, nextAttemptAt: now } });
           return 'blocked';
         }
@@ -1423,7 +1467,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     }
     try {
       await this.prisma.idpSessionEnd.deleteMany({
-        where: { confirmedAt: { not: null }, decidedAt: { lt: new Date(Date.now() - IDP_END_KEEP_MS) } },
+        where: { confirmedAt: { lt: new Date(Date.now() - IDP_END_KEEP_MS) } },
       });
     } catch {
       this.storageWarning('idp_end_write');

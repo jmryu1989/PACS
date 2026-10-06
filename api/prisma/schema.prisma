@@ -38,9 +38,10 @@ model AuthSession {
 }
 
 /// S7-U5 "이 provider 세션은 끝내기로 했다"는 표식이자 provider 종료 요청의 대기열(R1).
-/// 표식이 있는 provider 세션에서는 제품 세션이 다시 만들어지지 않고 그 토큰의 Bearer 호출도 거절된다.
+/// 표식이 덮는 인증(그 종료가 확인되기 전의 인증)으로는 제품 세션이 다시 만들어지지 않고 그 토큰의 Bearer 호출도 거절된다.
+/// Keycloak은 같은 브라우저의 다음 SSO에 끝난 SSO의 sid를 다시 줄 수 있어, 확인된 종료 뒤의 새 인증은 덮지 않는다(markCovers).
 /// 처음 정한 cause·decidedAt은 뒤의 재시도·재종료가 덮지 않는다. 확인(confirmedAt) 뒤에도 바로 지우지 않는다 —
-/// 그 provider 세션의 토큰이 더 올 수 없을 때(decidedAt + SSO 최대 수명 + 여유)까지 남는다. 미확인 행은 시간만으로 지우지 않는다.
+/// 그 provider 세션의 토큰이 더 올 수 없을 때(마지막 confirmedAt + SSO 최대 수명 + 여유)까지 남는다. 미확인 행은 시간만으로 지우지 않는다.
 model IdpSessionEnd {
   idpSid        String    @id
   cause         String
