@@ -11293,17 +11293,21 @@
      * 돌아오면 저장한 크기를 다시 적용해야 한다 — 그러지 않으면 메뉴를 연 채 불러온 Related 목록이 창 크기를 바꿀 때까지 깎인
      * 높이로 남는다(roam_01). 크기가 바뀐 프레임마다 한 번, 끌기 중에는 하지 않는다(끌기의 끝이 적용하거나 저장한다).
      * `.split`의 크기는 applyLayout이 바꾸는 자식 크기와 무관하다 — 되먹임이 없다.
+     * 작업 영역이 문서에서 빠지면(가입 승인 대기·계정 설정 화면이 body를 바꾼다) 관찰은 크기 0을 한 번 알린다 — 배치할 곳이 없으니
+     * 아무것도 하지 않는다.
      */
+    const workArea = $(".split");
     let splitFrame = 0, splitSize = "";
     new ResizeObserver(() => {
-      const box = $(".split").getBoundingClientRect(), size = Math.round(box.width) + "x" + Math.round(box.height);
+      if (!workArea.isConnected) return;
+      const box = workArea.getBoundingClientRect(), size = Math.round(box.width) + "x" + Math.round(box.height);
       if (size === splitSize || splitFrame) { splitSize = size; return; }
       splitSize = size;
       splitFrame = requestAnimationFrame(() => {
         splitFrame = 0;
-        if (!document.body.classList.contains("resizing")) applyLayout();
+        if (workArea.isConnected && !document.body.classList.contains("resizing")) applyLayout();
       });
-    }).observe($(".split"));
+    }).observe(workArea);
     applyLayout();
 
     bindPanelResize("#resize-main", () => portraitLayout() ? "y" : "x", (e, axis) => {
