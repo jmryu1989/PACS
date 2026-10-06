@@ -38,6 +38,8 @@ Cases (the RL ids are test-plan section 3 of the S7-RELATED-LAYOUT diagnosis, PA
   rl04 keyboard: More Filters -> Tab reaches a related row, the arrow keys and End move to visible rows.
   rl05 a stored 400px list height: capped in the small window without being rewritten, back at 400px in a large one;
        a drag in the small window stores what is visible; Reset Layout.
+  rl05b (S7-U5 H1) a stored list height capped while the View group is open (a layout applied inside it) is back in full
+       once the group is closed, with no window resize, and the capped height is not stored.
   rl07 900x700, 1024x600, 1366x600, 1024x700, Technician at 900x600, Layout: Portrait at 900x600, 900x500 (no overlap
        only). 1024x700 (D390) is a window whose work row lands in the band the hosted Linux fonts exposed at 900x700
        (292px there, 270px here): about 300px with either font set, where a short-row rule that ends at 286px lets the
@@ -580,6 +582,31 @@ class RelatedLayoutDOMTest(Base):
         w.menu_button("Reset Layout")
         w.page.wait_for_timeout(150)
         w.assert_context("RL-05 reset", "none", False)
+        w.screen.finish()
+
+    def test_rl05b_stored_size_back_when_the_work_area_grows_without_a_resize(self):
+        """RL-05b (S7-U5 H1, review of 8c2cf37 F-02): an open View group is a second toolbar row in the flow, so the work
+        area is smaller while it is open, and a layout applied then (Layout: Portrait, then Layout: Landscape, pressed
+        inside the group) fits the stored list height into that smaller space. Closing the group gives the space back
+        with the window unchanged: the stored size comes back - the Related list is as tall as before the group opened -
+        and the squeezed height was never stored. The stored height is larger than any window, so it is always capped."""
+        stored = {"version": 1, "mode": "auto", "portrait": {}, "landscape": {"prior": 5000}}
+        w = self.boot(harness.Server(rows=rows()), viewport=LARGE, storage={LAYOUT_KEY: json.dumps(stored)})
+        harness.expect(w.page.get_by_text("배치 복원됨 · 이 브라우저", exact=True)).to_be_visible()
+        before = w.list_region.bounding_box()["height"]
+        # The layout button is named by what it shows (Layout: Auto -> Portrait -> Landscape).
+        toggle = w.screen.menu("View").get_by_role("button").filter(has_text=re.compile(r"^Layout: "))
+        for shown in ("Layout: Portrait", "Layout: Landscape"):
+            toggle.click()
+            harness.expect(toggle).to_have_text(shown)
+        w.page.wait_for_timeout(150)
+        squeezed = w.list_region.bounding_box()["height"]
+        measure("RL-05b", before=before, squeezed=squeezed)
+        self.assertLess(squeezed, before - 1, "RL-05b precondition: the open View group leaves the list less room")
+        w.screen.menu("View", open_=False)
+        harness.until(lambda: abs(w.list_region.bounding_box()["height"] - before) <= 1, 5,
+                      "RL-05b the stored size back once the closed View group gave the space back (window unchanged)")
+        self.assertEqual(5000, self.stored_prior(w), "RL-05b the squeezed height was stored")
         w.screen.finish()
 
     # ── RL-07 ───────────────────────────────────────────────────────────────────────────────────────────────────────
