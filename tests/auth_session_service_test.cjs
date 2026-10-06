@@ -3002,3 +3002,54 @@ test('U5E-15 isolation is our own fact written before any provider work: listing
   kc.auto = null;
   await w.finish('U5E-15');
 });
+
+// Integration review F01 (R2-F02): "a probe never makes a session" holds for every probe of a flow, not only its first.
+// A probe is asked again after an answer that did not identify the SSO (interaction_required), and a probe flow that
+// expired before its callback is started again as a probe - both with restarts 1. If such a retried probe is answered
+// with a code of the previous doctor's still-live SSO and were handled as a login, the next person would hold the previous
+// doctor's product session without typing anything.
+test('U5E-16 a retried probe (after interaction_required, or restarted from an expired own flow) answered with the previous doctor\'s SSO code makes no session: that SSO and its product session end, then the form', async t => {
+  const w = await world(t);
+  // (1) Shared PC, untrusted storage, product cookie gone; doctor A's SSO X is alive and A's product session S1 of it too.
+  const s = 'syn-sub-u5e16', X = idpOf(s);
+  const s1 = await w.session(await w.issue('u5e16-a', { sub: s, groups: [A] }));
+  const begin = await w.call(w.I1, 'switch', { body: UNTRUSTED });
+  assert.deepEqual([begin.status, promptOf(begin)], [200, 'none']);
+  // The first probe is answered with interaction_required: asked once more, nothing recorded.
+  const rows = (await w.rows()).length;
+  const retried = await refuseFlow(w, w.I1, begin, 'interaction_required');
+  assert.deepEqual([retried.status, atProvider(retried), promptOf(retried), retried.newSid, (await w.rows()).length],
+    [302, true, 'none', null, rows], 'the probe is asked again');
+  // The retried probe gets a code of A's SSO: still a probe - no session, no proof; X and S1 are ended, then the form.
+  const probed = await answerFlow(w, w.I1, retried, await w.issue('u5e16-a2', { sub: s, groups: [A] }));
+  assert.deepEqual([probed.status, atProvider(probed), promptOf(probed), probed.newSid, probed.proof, await w.sessions(), await w.version(s1)],
+    [302, true, 'login', null, undefined, 0, null], 'a retried probe makes no session; the next step asks for credentials');
+  assert.deepEqual([await w.marks(), kc.ended], [[[X, 'reauthentication', true]], [X]], 'the SSO is marked reauthentication and ended');
+  const ended = rowsOf(await w.rows(), s);
+  assert.deepEqual([summary(ended), ended[0].detail.trigger], [[['auth.logout', 'reauthentication', A]], 'storage_untrusted'],
+    'A\'s product session of that SSO ended with its record; no login row');
+  // Only credentials typed at that fresh step enter (here the next person B).
+  const b = 'syn-sub-u5e16-b';
+  const fresh = await answerFlow(w, w.I1, probed, await w.issue('u5e16-b', { sub: b, groups: [B] }));
+  assert.deepEqual([fresh.cookie, !!fresh.proof, summary(rowsOf(await w.rows(), b))], ['S', true, [['auth.login', 'success', B]]]);
+
+  // (2) The probe flow expired before its callback came back (the person left the browser at the provider): the callback
+  // starts it again as a probe (restarts 1), its code unused. That restarted probe is answered by doctor C's live SSO Z.
+  const c = 'syn-sub-u5e16-c', Z = idpOf(c);
+  const c1 = await w.session(await w.issue('u5e16-c', { sub: c, groups: [A] }));
+  const begin2 = await w.call(w.I2, 'switch', { body: UNREADABLE });
+  assert.deepEqual([begin2.status, promptOf(begin2)], [200, 'none']);
+  w.tick(31 * 60_000);
+  const exchanged = kc.tokens;
+  const restarted = await answerFlow(w, w.I2, begin2, await w.issue('u5e16-c-old', { sub: c, groups: [A] }));
+  assert.deepEqual([restarted.status, atProvider(restarted), promptOf(restarted), restarted.newSid, kc.tokens - exchanged],
+    [302, true, 'none', null, 0], 'the expired own flow is started again as the probe, its code unused');
+  const live = await w.sessions();
+  const probed2 = await answerFlow(w, w.I2, restarted, await w.issue('u5e16-c2', { sub: c, groups: [A] }));
+  assert.deepEqual([probed2.status, atProvider(probed2), promptOf(probed2), probed2.newSid, probed2.proof, await w.sessions(), await w.version(c1)],
+    [302, true, 'login', null, undefined, live - 1, null], 'the restarted probe makes no session; C\'s session of that SSO ends');
+  assert.deepEqual([(await w.marks()).find(m => m[0] === Z), kc.ended.includes(Z)], [[Z, 'reauthentication', true], true]);
+  const endedC = rowsOf(await w.rows(), c);
+  assert.deepEqual([summary(endedC), endedC[0].detail.trigger], [[['auth.logout', 'reauthentication', A]], 'record_unreadable']);
+  await w.finish('U5E-16');
+});
