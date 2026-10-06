@@ -14,7 +14,7 @@
     const timeoutMs=Number.isInteger(options.timeoutMs)&&options.timeoutMs>0?options.timeoutMs:10000;
     let ended=false,mounted=false,hostTimer=null,channel=null,boundOwner=null,ownerError=null,source=null,generation=0,request=null,sourceRequest=null,ownerRequest=null,documentView=null,nativeRetryNeeded=false,nativeRetryPending=false,nativeRetrySource=null;
     const subscriptions=[];
-    let nativeError=null;
+    let nativeError=null,seenState=null,followTimer=null,followUntil=0;
     const panel=root.document.createElement('section');panel.id='kin-source-pdf';panel.hidden=true;
     panel.innerHTML='<style>#kin-source-pdf{border-top:1px solid #355272;padding:8px 10px}#kin-source-pdf h3{margin:0 0 5px;font-size:14px}#kin-source-pdf p{margin:3px 0;overflow-wrap:anywhere}#kin-source-pdf button{margin-top:5px;padding:4px 7px;border:1px solid #657c9f;border-radius:4px}</style><h3>Source Documents</h3><p data-title></p><p data-role></p><p data-patient></p><p id="kin-source-pdf-status" role="status"></p><button id="kin-source-pdf-open" type="button" disabled>Open Source PDF</button>';
     const title=panel.querySelector('[data-title]'),role=panel.querySelector('[data-role]'),patient=panel.querySelector('[data-patient]'),status=panel.querySelector('[role=status]'),button=panel.querySelector('button');
@@ -90,6 +90,11 @@
       if(!boundOwner)return;
       resolveSource(next,generation);
     }
+    // OHIF 3.9 announces a grid change from a timer, but its provider hands the service the new cells only in a later React
+    // effect (ViewportGridProvider getState). Under load the event reads the previous cells and no event follows, so the
+    // panel kept the previous document's title, status and button. After an event, read again whenever that state changes.
+    function gridChanged(){refresh();seenState=currentState();followUntil=Date.now()+3000;if(!followTimer)followTimer=setInterval(followState,50);}
+    function followState(){if(ended||Date.now()>followUntil){clearInterval(followTimer);followTimer=null;if(ended)return;}const state=currentState();if(state!==seenState){seenState=state;refresh();}}
     function assertLive(operation){if(request!==operation||operation.controller.signal.aborted||operation.generation!==generation||!live(operation.before)||source?.url!==operation.before.url||source?.orthancId!==operation.before.orthancId||!sameOwner(source?.owner,operation.before.owner))throw Error('선택한 원본 문서가 변경되어 열지 않았습니다.');}
     async function response(path,init,operation){
       const result=await fetcher(path,init);assertLive(operation);if(!result?.ok)throw root.KinSessionTransport.responseError(result,'원본 PDF 확인 요청을 완료하지 못했습니다.','로그인 또는 검사 접근 권한을 확인하세요.');const data=await json(result);assertLive(operation);return data;
@@ -131,11 +136,11 @@
     function attach(){const host=root.document.querySelector('#kin-viewer-layout');if(!host)return false;if(!panel.isConnected)host.append(panel);mounted=true;refresh();return true;}
     function mount(){
       if(ended||mounted)return api;let attempts=0;if(!attach())hostTimer=setInterval(()=>{if(ended||attach()){clearInterval(hostTimer);hostTimer=null;}else if(++attempts>=200)stop();},100);
-      try{for(const event of new Set(Object.values(grid?.EVENTS||{})))subscriptions.push(grid.subscribe(event,refresh));}catch(_){subscriptions.splice(0).forEach(item=>item.unsubscribe?.());}
+      try{for(const event of new Set(Object.values(grid?.EVENTS||{})))subscriptions.push(grid.subscribe(event,gridChanged));}catch(_){subscriptions.splice(0).forEach(item=>item.unsubscribe?.());}
       try{channel = window.kinViewerOnEnd(() => stop());}catch(_){}
       bindOwner();return api;
     }
-    function stop(){if(ended)return;ended=true;generation++;cancelOperation();cancelSource();closeDocument();ownerRequest?.abort();ownerRequest=null;if(hostTimer)clearInterval(hostTimer);hostTimer=null;subscriptions.splice(0).forEach(item=>item.unsubscribe?.());channel?.close();panel.remove();}
+    function stop(){if(ended)return;ended=true;generation++;cancelOperation();cancelSource();closeDocument();ownerRequest?.abort();ownerRequest=null;if(hostTimer)clearInterval(hostTimer);hostTimer=null;if(followTimer)clearInterval(followTimer);followTimer=null;subscriptions.splice(0).forEach(item=>item.unsubscribe?.());channel?.close();panel.remove();}
     function nativeFailure(error,displaySet,pdfUrl){const selected=snapshot(candidate());if(ended||!sameNativeSource(selected,displaySet,pdfUrl))return;nativeError=error;nativeRetryNeeded=!!error?.retryable;nativeRetryPending=false;nativeRetrySource={displaySet,pdfUrl};panel.hidden=false;button.textContent=nativeRetryNeeded?'Retry Source PDF':'Open Source PDF';button.disabled=!nativeRetryNeeded||!!request||!boundOwner;status.textContent=error?.message||'원본 PDF 표시를 완료하지 못했습니다.';}
     function nativeReady(displaySet,pdfUrl){const selected=snapshot(candidate());if(ended||!nativeRetryNeeded||!nativeRetrySource||nativeRetrySource.displaySet!==displaySet||nativeRetrySource.pdfUrl!==pdfUrl||!sameNativeSource(selected,displaySet,pdfUrl))return;nativeError=null;nativeRetryNeeded=false;nativeRetryPending=false;nativeRetrySource=null;button.textContent='Open Source PDF';const ready=!!source&&sameOwner(boundOwner,source.owner);button.disabled=!ready;status.textContent=ready?'Ready · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.':'Checking source path…';}
 

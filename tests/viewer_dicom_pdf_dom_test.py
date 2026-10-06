@@ -36,7 +36,9 @@ window.fetch=(url,options={})=>{if(String(url).startsWith('blob:'))return native
  const done=()=>{const configured=routes[url],value=typeof configured==='function'?configured():configured;return response(value?.status||200,value?.body??value,url,value?.contentType,value?.headers);};
  if(holdPath===url)return new Promise((resolve,reject)=>{const item={resolve:()=>resolve(done()),reject};held.push(item);if(!ignoreAbort)options.signal?.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});});return Promise.resolve(done());};
 window.open=()=>{if(blockPopup)return null;const popup={closed:false,opener:{unsafe:true},navigated:null,close(){this.closed=true},location:{replace(value){if(throwNavigation)throw Error('synthetic navigation detail');popup.navigated=value;}}};popups.push(popup);return popup;};
-const state={activeViewportId:'vp1',viewports:new Map([['vp1',view]])};
+let state={activeViewportId:'vp1',viewports:new Map([['vp1',view]])};
+// OHIF's grid provider hands the service a new state object after its event (React effect), without another event.
+window.commitLater=(next,ms)=>setTimeout(()=>{displaySet=next.displaySet||displaySet;view={viewportId:'vp1',displaySetInstanceUIDs:[displaySet.displaySetInstanceUID]};state={activeViewportId:'vp1',viewports:new Map([['vp1',view]])};},ms);
 window.services={viewportGridService:{EVENTS:{ACTIVE:'active',GRID:'grid'},getState:()=>state,getActiveViewportId:()=>state.activeViewportId,subscribe:(_,fn)=>{subscribers.push(fn);return {unsubscribe(){subscribers=subscribers.filter(x=>x!==fn)}}}},displaySetService:{getDisplaySetByUID:id=>id===displaySet.displaySetInstanceUID?displaySet:null}};
 window.emit=()=>subscribers.forEach(fn=>fn());
 window.mountPdf=(options={})=>{window.pdfController=KinDicomPdf.create(services,options);pdfController.mount();};
@@ -176,6 +178,38 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         self.page.wait_for_timeout(0)
         expect(self.page.locator("#kin-source-pdf [data-title]")).to_have_text("New PDF")
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Ready")
+
+    def test_panel_follows_a_grid_state_that_arrives_after_its_event(self):
+        # OHIF announces a grid change before its getState() returns the new cells (live dicom_pdf 02/04). A person who
+        # puts another document, or a supported one after an unsupported one, in the cell sees that one in the panel.
+        title, status = self.page.locator("#kin-source-pdf [data-title]"), self.page.locator("#kin-source-pdf-status")
+        button = self.page.locator("#kin-source-pdf-open")
+        late = ("makeSet({displaySetInstanceUID:'late-pdf',SOPInstanceUID:'1.5',SeriesDescription:'Late PDF',"
+                "pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),"
+                "instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',"
+                "MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}})")
+        with self.subTest("another document"):
+            self.page.evaluate("() => { emit(); commitLater({displaySet:" + late + "}, 200); }")
+            expect(title).to_have_text("Late PDF"); expect(status).to_contain_text("Ready"); expect(button).to_be_enabled()
+        with self.subTest("a supported document after an unsupported one"):
+            self.page.evaluate("""() => { displaySet=makeSet({displaySetInstanceUID:'text-mime'});
+              displaySet.instance.MIMETypeOfEncapsulatedDocument='text/plain'; view.displaySetInstanceUIDs=['text-mime']; emit(); }""")
+            expect(status).to_have_text("선택한 원본 PDF를 지원하지 않거나 식별 정보가 일치하지 않습니다."); expect(button).to_be_disabled()
+            self.page.evaluate("""() => { emit();
+              commitLater({displaySet:makeSet({displaySetInstanceUID:'supported-pdf',SeriesDescription:'Supported PDF'})}, 200); }""")
+            expect(title).to_have_text("Supported PDF"); expect(status).to_contain_text("Ready"); expect(button).to_be_enabled()
+
+    def test_a_new_grid_state_with_the_same_selection_leaves_the_open_document_alone(self):
+        button, patient = self.page.locator("#kin-source-pdf-open"), self.page.locator("#kin-source-pdf [data-patient]")
+        button.click(); dialog = self.page.locator("dialog[open]"); expect(dialog).to_have_count(1)
+        expect(patient).to_have_text("Verified Patient ID: PID-001")
+        url = self.page.get_by_title('Source PDF', exact=True).get_attribute('src'); before = self.page.evaluate("requests.length")
+        # An event, then a new state object holding the same cells (OHIF re-renders, e.g. when a viewport becomes ready).
+        self.page.evaluate("() => { emit(); setTimeout(() => { state={activeViewportId:'vp1',viewports:new Map([['vp1',{...view}]])}; }, 100); }")
+        self.page.wait_for_timeout(400)
+        expect(dialog).to_have_count(1); self.assertTrue(self.page.evaluate("u=>KinViewerResource.has(u)", url))
+        self.assertEqual(self.page.evaluate("requests.length"), before, "the same selection is not checked again")
+        expect(patient).to_have_text("Verified Patient ID: PID-001"); expect(button).to_be_enabled()
 
     def test_source_timeout_exposes_retry_and_ignores_the_late_provider(self):
         self.page.evaluate("""() => {
