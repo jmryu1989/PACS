@@ -52,6 +52,42 @@ export interface LifecycleOutcome {
 }
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+export interface RetentionOnlyEvent {
+  action: 'archive'; purpose: 'clinical-purpose-ended'; recordId: string; version: VersionReference;
+  finalizedAt: string; at: string; actorId: string; reason: string;
+}
+export interface ArchiveCommand {
+  actor: LifecycleActor; at: string; reason: string; purpose: 'clinical-purpose-ended'; expectedPublishedVersionId: string;
+}
+
+/** Finalized alone is a timed report state, not evidence that treatment has ended. Archive is an explicit declaration. */
+export function archiveFinalizedReport(facts: ReportFacts, command: ArchiveCommand): Readonly<RetentionOnlyEvent> {
+  validateReportFacts(facts);
+  const c = object(command, ['actor', 'at', 'reason', 'purpose', 'expectedPublishedVersionId']);
+  if (facts.state !== 'Finalized' || !facts.finalized || !c.actor.canReadStudy || c.actor.kind !== 'member' ||
+      !c.actor.roles.includes('radiologist') || c.expectedPublishedVersionId !== facts.publishedVersion.versionId ||
+      utc(c.at) < facts.finalized.processedAt) throw new Error('Explicit archive of the current finalized report required');
+  return freeze({ action: 'archive', purpose: choice(c.purpose, ['clinical-purpose-ended']), recordId: facts.recordId,
+    version: versionReference(facts.publishedVersion), finalizedAt: facts.finalized.effectiveAt,
+    at: c.at, actorId: string(c.actor.id), reason: string(c.reason) });
+}
+
+/** B stores archived information separately; G enforces a dedicated statutory-access purpose and institution check. */
+export function reportRetentionAccess(facts: ReportFacts, event: RetentionOnlyEvent | null): Readonly<{
+  state: 'normal-retention' | 'retention-only'; ordinaryClinicalAccess: boolean; separateStorage: boolean;
+}> {
+  validateReportFacts(facts);
+  if (event === null) return freeze({ state: 'normal-retention', ordinaryClinicalAccess: true, separateStorage: false });
+  const e = object(event, ['action', 'purpose', 'recordId', 'version', 'finalizedAt', 'at', 'actorId', 'reason']);
+  const version = versionReference(e.version);
+  choice(e.action, ['archive']); choice(e.purpose, ['clinical-purpose-ended']); string(e.actorId); string(e.reason);
+  if (facts.state !== 'Finalized' || !facts.finalized || e.recordId !== facts.recordId || version.recordId !== facts.recordId ||
+      version.versionId !== facts.publishedVersion.versionId || version.sha256 !== facts.publishedVersion.sha256 ||
+      utc(e.finalizedAt) !== facts.finalized.effectiveAt || utc(e.at) < facts.finalized.processedAt)
+    throw new Error('Archive must match a stored finalization and current version');
+  return freeze({ state: 'retention-only', ordinaryClinicalAccess: false, separateStorage: true });
+}
+
 export function newReportFacts(recordId: string): Readonly<ReportFacts> {
   return freeze({ recordId: string(recordId), state: 'Unread', firstApprovedAt: null, originalSignerId: null, amendUntil: null,
     publishedVersion: null, bodyVersion: null, addenda: [], claimantId: null, claimGeneration: 0, preliminary: null, cancellation: null, finalized: null });

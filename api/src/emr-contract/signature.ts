@@ -34,7 +34,7 @@ export function versionReference(input: unknown): VersionReference {
   return { recordId: string(v.recordId), versionId: string(v.versionId), sha256: sha256(v.sha256) };
 }
 
-/** Field order below is format v1. Preserve Unicode scalar sequence, whitespace and array order exactly. */
+/** Field order below is format v1. Preserve bytes during retention; expiry also destroys payloads containing personal data. */
 export function canonicalPayload(input: unknown): Buffer {
   const v = object(input, ['formatVersion', 'text', 'patient', 'studyId', 'managingInstitutionId', 'actingInstitutionId', 'recordKind',
     'recordId', 'versionId', 'author', 'signer', 'identityRegistrationId', 'action', 'serverTime', 'previousVersion', 'attachments', 'reason']);
@@ -110,6 +110,8 @@ export const SIGNATURE_VERIFICATION_CONTRACT = freeze({
   registeredIdentity: 'match signer id + issuer + subject and identityRegistrationId to product-verified identity and signing authority',
   keyAtSigningTime: 'verify ownership and validity interval at signed serverTime from retained registration/rotation/revocation evidence',
   keyHistory: 'rotation gets a new kid; later retirement does not invalidate an earlier active key; retain public keys and compromise intervals',
+  retention: 'signature-payload-and-person-linked-key-evidence-follow-their-own-source-record-expiry; no-independent-10-year-clock',
+  expiry: 'delete-expired-payloads-and-source-references-irreversibly; signature-or-content-hash-is-not-an-anonymous-destruction-record',
   atomicity: 'failed signing/verification cannot publish; preserve submitted and later private input',
   addendum: 'new author/signature and immutable references; never overwrite another author addendum',
   encoding: 'JSON fixed property order, UTF-8 no BOM/trailing newline; no Unicode normalization, trim, newline conversion or array sorting; reject lone surrogates',

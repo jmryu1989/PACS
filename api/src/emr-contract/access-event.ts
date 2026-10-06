@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { RECORD_CLASSIFICATION, RecordKind } from './classification';
+import { newRetentionRecord } from './lawful-defaults';
 import { choice, freeze, object, string, utc } from './validation';
 
 export const ACCESS_ACTIONS = freeze({
@@ -124,8 +125,14 @@ export function parseAccessEvent(input: unknown): Readonly<AccessEvent> {
 }
 
 export interface DurableAccessReceipt { eventId: string; durableAt: string }
-/** B must implement durable append; there is intentionally no update/delete API. */
+/** Append-only while retained. B performs expiry destruction through the separate retention contract. */
 export interface AppendOnlyAccessStore { append(event: Readonly<AccessEvent>): Promise<DurableAccessReceipt> }
+
+/** 제8조①2: this sensitive-data system retains each staff/service access event for two years from occurrence. */
+export function accessRetention(input: AccessEvent) {
+  const event = parseAccessEvent(input);
+  return newRetentionRecord(event.eventId, 'access', event.occurredAt);
+}
 
 /** A resolved Promise from enqueue/transaction-start is not a durable receipt. */
 export async function provideAfterDurableEvent<T>(store: AppendOnlyAccessStore, input: AccessEvent,
@@ -140,6 +147,9 @@ export async function provideAfterDurableEvent<T>(store: AppendOnlyAccessStore, 
 
 export const ACCESS_INVARIANTS = freeze({
   mutation: 'append-only',
+  retention: 'each-event-2-years; independent-of-source-record; no-last-access-reset-or-institution-override',
+  retentionBasis: '안전성 확보조치 기준 제8조① 본문(정보주체 제외)·①2; 개인정보 보호법 제3조①②·제21조①',
+  expiry: 'destroy-irreversibly-when-the-two-year-security-purpose-ends; no-automatic-longer-retention',
   successfulWrite: 'record, signature, publication reference and access event commit atomically',
   read: 'provide-prepared must be durable before any body bytes; later stages append separate events',
   failure: 'independent transaction or protected failure journal; business rollback cannot erase failure',
