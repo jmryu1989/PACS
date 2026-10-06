@@ -3053,3 +3053,149 @@ test('U5E-16 a retried probe (after interaction_required, or restarted from an e
   assert.deepEqual([summary(endedC), endedC[0].detail.trigger], [[['auth.logout', 'reauthentication', A]], 'record_unreadable']);
   await w.finish('U5E-16');
 });
+
+/**
+ * Waits (real time) until the provider and the database have been quiet for a moment: no new member-administration
+ * call, provider end request or store access for 400 ms (bounded 8 s). A retry cycle has no answer to wait for.
+ */
+async function quiet(w) {
+  const until = performance.now() + 8_000;
+  let last = '', since = performance.now();
+  while (performance.now() < until) {
+    const now = [kc.adminCalls.length, idp.started, idp.open, w.calls.length].join();
+    if (now !== last) { last = now; since = performance.now(); }
+    else if (idp.open === 0 && performance.now() - since >= 400) return;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error('harness: the provider and the store did not become quiet within 8 s');
+}
+
+// Integration review F04 (a) and F03: the isolation's second step (ending the member's product sessions - our own data,
+// no provider needed) fails, and the provider's session listing keeps failing. The retry cycle must still end the
+// member's surviving product session and disable the member at the provider - not leave that session working until its
+// access token's expiry, nor the member enabled, because the listing failed first. The whole-user logout waits for a
+// listing that marks the member's provider sessions first (ending them unlisted would lose which ones a code exchanged
+// before the isolation belongs to); the fact stays owed (no providerDoneAt without a successful listing). Once the
+// listing answers, the next cycle marks, logs out and finishes.
+// On the in-memory stand-in (tmp/.../local-svc) the store fault and the cycle run the same way, so these assertions are
+// not vacuous there; what the stand-in does not model is PostgreSQL's locking (advisory locks, lock_timeout), which this
+// case does not rely on.
+test('U5E-17 a failed second isolation step and a failing provider listing: the retry cycle still ends the member\'s surviving session and disables the member; the fact stays owed until a listing lets it mark and log out', async t => {
+  const w = await world(t);
+  const { AdminService } = require('/app/dist/admin.service');
+  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
+  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
+  const m = 'syn-sub-u5e17', L = 'syn-idp-u5e17-live';
+  kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [L] };
+  const live = await w.session(await w.issue('u5e17-live', { sub: m, groups: [A], idp: L }));
+  // Step 2 (the read of the member's product sessions) fails once; the provider's listing fails throughout.
+  w.fault('I1', 'sweepRead', new Error('syn: the store failed'));
+  kc.adminFail = { sessions: 99 };
+  await assert.rejects(admin.patchUser(m, { enabled: false }, caller),
+    error => /USER_ISOLATED/.test(JSON.stringify(error?.response ?? error?.message ?? '')), 'the isolation reports that it did not finish');
+  const fact = await w.base.memberIsolation.findUnique({ where: { sub: m } });
+  assert.deepEqual([!!fact, fact?.providerDoneAt ?? null], [true, null], 'the fact is recorded, its provider work owed');
+  // One retry cycle (a process start resumes every owed isolation), the listing still failing.
+  const cycle = w.instance('C17');
+  cycle.service.onModuleInit();
+  try { await quiet(w); } finally { cycle.service.onModuleDestroy(); }
+  await w.told();
+  // The surviving product session is ended (cause isolation) and refused - it does not keep working until atExpiresAt.
+  const used = await w.call(w.I1, 'get', { sid: live });
+  assert.deepEqual([await w.version(live), used.status, await endsOf(w, m)], [null, 401, [['auth.logout', 'isolation', A]]],
+    'the member\'s surviving session is ended by the cycle and refused');
+  // What needs no listing is done anyway: the member is disabled at the provider. No whole-user logout before a listing.
+  assert.deepEqual([kc.members[m].enabled, kc.userLogouts.includes(m)], [false, false], 'disabled without the listing; logout waits for it');
+  // No listing succeeded: the provider work stays owed.
+  assert.equal((await w.base.memberIsolation.findUnique({ where: { sub: m } }))?.providerDoneAt ?? null, null, 'still owed');
+  // The listing answers again: the next cycle marks the listed provider session, logs the member out and finishes.
+  kc.adminFail = {};
+  const next = w.instance('C17b');
+  next.service.onModuleInit();
+  try {
+    await w.until('the owed provider work finished', async () =>
+      (await w.base.memberIsolation.findUnique({ where: { sub: m } }))?.providerDoneAt != null);
+  } finally {
+    next.service.onModuleDestroy();
+  }
+  await w.told();
+  assert.deepEqual([kc.userLogouts.includes(m), (await w.marks()).filter(x => x[0] === L).map(x => x.slice(0, 2))],
+    [true, [[L, 'isolation']]], 'marked, then logged out as a whole');
+  await w.finish('U5E-17');
+});
+
+// Integration review F04 (b): an administrator's Activate runs while the retry cycle is inside the isolation's provider
+// work (held after it listed the member's provider sessions). The re-activation finishes the owed work itself, enables
+// the member and clears the fact; the member logs in again. The cycle, when it goes on, must not disable the member,
+// log the member out or end the new session after that Activate.
+// On the stand-in the hold is the harness gate on the cycle's store transaction (not a lock), so the order is the same
+// on both; the assertion is not vacuous there.
+test('U5E-18 an Activate during the isolation retry cycle: the cycle does not disable, log out or end the member after the enable', async t => {
+  const w = await world(t);
+  const { AdminService } = require('/app/dist/admin.service');
+  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
+  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
+  const m = 'syn-sub-u5e18', P = 'syn-idp-u5e18-p';
+  kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [P] };
+  // The isolation's listing fails: the fact stays owed for the cycle.
+  kc.adminFail = { sessions: 99 };
+  await assert.rejects(admin.patchUser(m, { enabled: false }, caller), undefined, 'the isolation did not finish');
+  kc.adminFail = {};
+  // The cycle lists the member's provider sessions and is held at its next store transaction (before its provider steps).
+  const cycle = w.instance('C18');
+  const gate = w.gate('C18', 'tx.open');
+  cycle.service.onModuleInit();
+  try {
+    await gate.arrived();
+    // Activate meanwhile: the owed work is finished by the re-activation itself, the member enabled, the fact cleared.
+    assert.equal((await admin.patchUser(m, { enabled: true }, caller)).enabled, true);
+    assert.equal(await w.base.memberIsolation.count({ where: { sub: m } }), 0, 'the finished re-activation cleared the fact');
+    // The member logs in again (a new provider session, credentials entered).
+    const P2 = 'syn-idp-u5e18-p2';
+    kc.members[m].sessions = [P2];
+    const again = await login(w, w.I2, await w.issue('u5e18-again', { sub: m, groups: [A], idp: P2 }));
+    assert.equal(again.done.cookie, 'S', 'the active member enters');
+    const calls = kc.adminCalls.length;
+    gate.release();
+    await quiet(w);
+    await w.told();
+    // The cycle went on after the Activate: it disabled nobody, logged nobody out and ended nothing of the active member.
+    const after = kc.adminCalls.slice(calls);
+    assert.deepEqual([kc.members[m].enabled, after.filter(c => c === 'PUT disable' || c === 'POST logout'),
+      await w.base.authSession.count({ where: { sub: m } }), kc.ended.includes(P2)], [true, [], 1, false],
+      'the re-activated member stays enabled with its new session');
+  } finally {
+    gate.release();
+    cycle.service.onModuleDestroy();
+  }
+  // The same, with the re-activation still in progress when the cycle goes on (the fact not cleared yet): the
+  // re-activation has taken the owed work over, so the older cycle stops at its next step - it does not disable or log
+  // out the member in the middle of the Activate.
+  const m2 = 'syn-sub-u5e18-b', Q = 'syn-idp-u5e18-q';
+  kc.members[m2] = { username: m2, email: m2 + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [Q] };
+  kc.adminFail = { sessions: 99 };
+  await assert.rejects(admin.patchUser(m2, { enabled: false }, caller), undefined, 'the isolation did not finish');
+  kc.adminFail = {};
+  const older = w.instance('C18b');
+  const held = w.gate('C18b', 'tx.open');
+  older.service.onModuleInit();
+  const activateHeld = w.gate('I1', 'tx.open');
+  let activating = null;
+  try {
+    await held.arrived();
+    activating = admin.patchUser(m2, { enabled: true }, caller);
+    await activateHeld.arrived();
+    const calls = kc.adminCalls.length;
+    held.release();
+    await quiet(w);
+    assert.deepEqual(kc.adminCalls.slice(calls).filter(c => c === 'PUT disable' || c === 'POST logout'), [],
+      'the older cycle stopped: the re-activation holds the owed work');
+  } finally {
+    held.release();
+    activateHeld.release();
+    older.service.onModuleDestroy();
+  }
+  assert.equal((await activating).enabled, true);
+  assert.deepEqual([kc.members[m2].enabled, await w.base.memberIsolation.count({ where: { sub: m2 } })], [true, 0]);
+  await w.finish('U5E-18');
+});

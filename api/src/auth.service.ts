@@ -547,23 +547,72 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       throw this.storageFailure();
     }
     await this.endMemberSessions(sub);
-    await this.finishIsolation(sub);
+    // 그사이 재활성화가 남은 일을 넘겨받았으면 이 격리는 끝났다고 답하지 않는다(부른 쪽이 격리 충돌로 답한다).
+    if (!await this.finishIsolation(sub)) throw this.conflict();
   }
 
   /**
-   * 격리의 인증 서버 일: 그 회원의 provider 세션을 나열해 전부 표식 → 비활성화 → 다시 나열해 그사이 생긴 것도 표식 →
-   * 사용자 전체 로그아웃 → 남은 제품 행을 끝냄. 나열·표식은 비활성화 **앞에도** 한다: 비활성화가 성공하고 나열이 실패해도
-   * 이미 본 provider 세션은 표식으로 막혀 있다. 모두 몇 번을 다시 해도 같은 결과가 되는 일이라 재시도 주기가 처음부터 다시
-   * 한다. 끝까지 가면 사실에 완료 시각을 적는다(사실 자체는 남는다 — 지우는 것은 끝까지 성공한 재활성화뿐이다).
+   * 격리의 남은 일: 그 회원의 남은 제품 행을 끝냄(우리 DB만의 일 — 인증 서버가 답하지 않아도 한다) → provider 세션을
+   * 나열해 전부 표식 → 비활성화 → 다시 나열해 그사이 생긴 것도 표식 → 사용자 전체 로그아웃 → 남은 제품 행을 끝냄. 나열·
+   * 표식은 비활성화 **앞에도** 한다: 비활성화가 성공하고 나열이 실패해도 이미 본 provider 세션은 표식으로 막혀 있다. 나열이
+   * 실패해도 나열이 필요 없는 일(제품 행 끝냄·비활성화)은 하고 나서 실패를 알린다 — 나열이 먼저 실패했다고 격리된 회원의
+   * 남은 세션이 access token 만료까지 일하거나 회원이 인증 서버에서 활성으로 남지 않게(전체 로그아웃은 아래 이유로
+   * 나열 뒤에만 한다). 모두 몇 번을 다시 해도
+   * 같은 결과가 되는 일이라 재시도 주기가 처음부터 다시 한다. 나열이 성공해 끝까지 가면 사실에 완료 시각을 적는다(사실 자체는
+   * 남는다 — 지우는 것은 끝까지 성공한 재활성화뿐이다).
+   *
+   * 이 일을 하는 쪽은 한 번에 하나다(F04): 시작할 때 사실의 시도 번호(attempts)를 하나 올려 그 번호를 자기 몫으로 쥐고,
+   * 인증 서버에 무엇을 하기 **전마다** 사실이 아직 있고 그 번호가 아직 자기 것인지 본다. 재활성화도 같은 길로 남은 일을
+   * 넘겨받으므로(번호를 올린다), 그 전에 시작한 재시도 주기는 다음 걸음 앞에서 멈춘다 — 재활성화가 회원을 활성으로 만든
+   * 뒤에 옛 주기가 비활성화·전체 로그아웃·제품 행 끝냄을 하지 않는다. 인증 서버 호출 동안 트랜잭션·잠금은 쥐지 않는다.
+   * `claimed`는 이미 번호를 올린 쪽(재시도 주기)이 넘기는 그 번호다. 끝까지 해 완료 시각을 적었으면 true, 사실이 없거나 다른
+   * 쪽이 넘겨받아 멈췄으면 false다(부른 쪽은 그때 "끝났다"고 답하지 않는다).
    */
-  async finishIsolation(sub: string): Promise<void> {
-    await this.endMemberSessions(sub, await this.keycloak.userSessions(sub));
+  async finishIsolation(sub: string, claimed?: number): Promise<boolean> {
+    const claim = claimed ?? await this.claimIsolation(sub);
+    if (claim === null) return false;
+    const owned = async () => {
+      const row = await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
+      return !!row && row.providerDoneAt === null && row.attempts === claim;
+    };
+    if (!await this.endMemberSessions(sub, [], owned)) return false;
+    let first: string[] | null = null, failure: unknown = null;
+    try { first = await this.keycloak.userSessions(sub); } catch (error) { failure = error; }
+    if (first && !await this.endMemberSessions(sub, first, owned)) return false;
+    if (!await owned()) return false;
     await this.keycloak.setEnabled(sub, false);
-    await this.endMemberSessions(sub, await this.keycloak.userSessions(sub));
+    /**
+     * 사용자 전체 로그아웃은 나열이 그 회원의 provider 세션을 표식한 **뒤에만** 한다. 나열 전에 인증 서버에서 끝내 버리면
+     * 어느 provider 세션을 표식해야 하는지 알 길이 사라진다 — 격리 전에 code를 교환해 둔 콜백(승인 변경이면 옛 역할의
+     * 토큰)은 재활성화 뒤에도 막혀야 하고, 그것을 막는 것이 그 표식이다. 그동안 비활성화된 회원의 provider 세션은 인증
+     * 서버가 새 토큰도 갱신도 내주지 않는다. 나열이 실패했으면 여기서 알린다(사실은 남고 주기가 잇는다).
+     */
+    if (failure) throw failure;
+    const second = await this.keycloak.userSessions(sub);
+    if (!await this.endMemberSessions(sub, second, owned)) return false;
+    if (!await owned()) return false;
     await this.keycloak.logoutUser(sub);
-    await this.endMemberSessions(sub);
-    await this.storage('isolation_write', () => this.prisma.memberIsolation.updateMany({
-      where: { sub, providerDoneAt: null }, data: { providerDoneAt: new Date() } }));
+    if (!await this.endMemberSessions(sub, [], owned)) return false;
+    const { count } = await this.storage('isolation_write', () => this.prisma.memberIsolation.updateMany({
+      where: { sub, providerDoneAt: null, attempts: claim }, data: { providerDoneAt: new Date() } }));
+    return count === 1;
+  }
+
+  /**
+   * 격리의 남은 일을 자기 몫으로 쥔다: 사실의 시도 번호를 그 값일 때만 하나 올리고(경쟁하면 다시 읽어 한다) 올린 번호를
+   * 돌려준다. 다음 시도 시각도 미뤄 두어, 이 일을 하는 동안 주기가 같은 사실을 집어 가지 않게 한다. 사실이 없으면
+   * null(할 일이 없다).
+   */
+  private async claimIsolation(sub: string): Promise<number | null> {
+    for (let tries = 0; tries < TRANSITION_LIMIT; tries++) {
+      const row = await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
+      if (!row) return null;
+      const { count } = await this.storage('isolation_write', () => this.prisma.memberIsolation.updateMany({
+        where: { sub, attempts: row.attempts }, data: { attempts: row.attempts + 1,
+          nextAttemptAt: new Date(Date.now() + IDP_END_BACKOFF_MS[Math.min(row.attempts + 1, IDP_END_BACKOFF_MS.length - 1)]) } }));
+      if (count === 1) return row.attempts + 1;
+    }
+    throw this.conflict();
   }
 
   /** 격리 사실이 있는가(콜백 밖의 읽기: 재활성화가 남은 인증 서버 일을 먼저 끝내야 하는지 본다). */
@@ -586,8 +635,10 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 종료를 청한다. 표식이 있으므로 격리 전에 code를 교환해 둔 콜백도 그 provider 세션으로는 세션을 만들지 못한다.
    * 경쟁에 진 관찰(그사이 갱신된 행)은 다시 읽어 끝내고, 그래도 남으면 409다 — 부른 쪽이 격리 실패로 다룬다.
    * 다른 PC의 provider 세션까지 끝내는 것은 부른 쪽의 사용자 전체 로그아웃(logoutUser)이다: 격리는 그 회원 전체의 일이다.
+   * `still`은 격리의 남은 일을 하는 쪽이 아직 그 몫을 쥐고 있는지 묻는다(finishIsolation): 표식 하나·제품 행 끝냄 앞마다
+   * 묻고, 아니면 멈춰 false를 돌려준다 — 그사이 재활성화된 회원의 새 세션을 옛 격리가 끝내지 않는다.
    */
-  async endMemberSessions(sub: string, idpSids: string[] = []): Promise<void> {
+  async endMemberSessions(sub: string, idpSids: string[] = [], still: () => Promise<boolean> = async () => true): Promise<boolean> {
     /**
      * 먼저, 부른 쪽이 인증 서버에서 읽어 온 그 회원의 provider 세션 **전부**에 표식을 남긴다(제품 행이 아직 없는 것까지 —
      * 격리 전에 code를 교환해 둔 콜백의 SSO도 여기 있다). 기록된 사실이라 시점에 기대지 않는다: 그 콜백은 언제 commit하든,
@@ -595,6 +646,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
      * provider 세션의 행을 함께 끝낸다(endRows — 같은 잠금이라 먼저 잠금을 쥔 콜백의 세션은 그 commit 뒤 여기서 끝난다).
      */
     for (const idpSid of new Set(idpSids)) {
+      if (!await still()) return false;
       try {
         await this.prisma.$transaction(async tx => {
           await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
@@ -609,8 +661,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       this.tellIdp(idpSid);
     }
     for (let rounds = 0; ; rounds++) {
+      if (!await still()) return false;
       const rows: Session[] = await this.storage('session_read', () => this.prisma.authSession.findMany({ where: { sub } }));
-      if (!rows.length) return;
+      if (!rows.length) return true;
       if (rounds === TRANSITION_LIMIT) throw this.conflict();
       for (const row of rows) await this.endAndTell(row, 'isolation', null);
     }
@@ -705,7 +758,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
           data: { attempts: row.attempts + 1, nextAttemptAt: new Date(Date.now() + wait) },
         });
         if (count !== 1) continue;
-        try { await this.finishIsolation(row.sub); }
+        // 이 갱신이 올린 번호가 이 주기의 몫이다(finishIsolation이 걸음마다 확인한다).
+        try { await this.finishIsolation(row.sub, row.attempts + 1); }
         catch { /* 사실은 남고 다음 기한에 다시 한다. */ }
       }
     } catch {

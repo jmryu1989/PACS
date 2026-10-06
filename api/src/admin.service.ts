@@ -113,7 +113,10 @@ export class AdminService {
    */
   private async reactivate(id: string): Promise<void> {
     const isolation = await this.auth.isolation(id);
-    if (isolation && !isolation.providerDone) await this.auth.finishIsolation(id);
+    // 남은 일은 재활성화가 넘겨받아 끝낸다(진행 중인 재시도 주기는 다음 걸음 앞에서 멈춘다). 다른 쪽이 넘겨받아 끝내지
+    // 못했으면 활성화하지 않는다 — 그 쪽이 아직 비활성화·전체 로그아웃을 할 수 있다.
+    if (isolation && !isolation.providerDone && !await this.auth.finishIsolation(id))
+      throw new Error('격리의 남은 일을 끝내지 못했습니다');
     await this.keycloak.setEnabled(id, true);
     await this.auth.clearIsolation(id);
   }
