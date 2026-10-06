@@ -62,7 +62,10 @@ class StudyPageTransferE2E(WorklistE2E):
         self.assertEqual(logouts,[])
         page.unroute(pattern);landing=hold_landing(page)
         other=page.context.new_page();ViewerLayoutE2E.relog(self,other,'doctor2')
-        page.locator('#refresh').click();page.wait_for_function("KinWorkContext.state() !== 'active'")
+        # 첫 탭은 이 세션에 묶어 보내는 자기 요청 어느 것으로든 교체를 안다 — 이 Refresh일 수도, relog 사이에 나간 시작·주기 요청일
+        # 수도 있다. 이미 닫혔으면 Refresh는 숨어 있고(:70) 눌러도 요청이 없다(:71-72): 보임과 상관없이 같은 클릭 사건을 보낸다.
+        page.locator('#refresh').dispatch_event('click');page.wait_for_function("KinWorkContext.state() !== 'active'")
+        self.assertEqual(page.evaluate('KinAuth.endState()'),{'state':'unconfirmed','reason':'replaced'})
         self.assertTrue(landing);self.assertEqual(logouts,[])
         self.assertIsNone(page.evaluate("localStorage.getItem('kin-session-end')"),'replacement must not write a logout record')
         protected=[]

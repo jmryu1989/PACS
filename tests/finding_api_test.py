@@ -38,6 +38,16 @@ def payload_differences(old, new, path='$'):
         return [line for i, (a, b) in enumerate(zip(old, new)) for line in payload_differences(a, b, f'{path}[{i}]')]
     return [] if old == new else [f'{path}: {old!r} -> {new!r}']
 
+def psql_input(sql):
+    """invariants_live.psql with the statement on standard input instead of `-c`: a 60 000-byte filler snapshot is longer
+    than a Windows command line (32 767 characters), and stdin has no such limit on either platform."""
+    completed = subprocess.run(['docker', 'compose', 'exec', '-T', '-e', 'PGTZ=UTC', 'db', 'psql', '-U', 'kin', '-d', 'kin',
+                                '-v', 'ON_ERROR_STOP=1', '-qAt'], cwd=ROOT, input=sql+';\n', capture_output=True, text=True,
+                               encoding='utf-8', errors='replace', timeout=30)
+    if completed.returncode:
+        raise RuntimeError('psql 실패: ' + completed.stdout + completed.stderr)
+    return [line for line in completed.stdout.splitlines() if line.strip()]
+
 class FindingStack(ViewerStack):
     """ViewerStack already tears down Finding/FindingRevision before StudyState; this name marks the suites that rely on it."""
     def cleanup_fixture(self, uid):
@@ -49,6 +59,7 @@ class FindingAPI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.stack = FindingStack()
+        cls.addClassCleanup(cls.stack.cleanup_test_identities)
         cls.addClassCleanup(cls.stack.cleanup_all)
         cls.stack.require_stack()
         cls.stack.create_test_identity('adminonly', ['admin'], 'hallym')
@@ -492,7 +503,7 @@ class FindingAPI(unittest.TestCase):
                 kind='length', seriesUid='2.25.1', sopUid='2.25.2', frame=1, frameOfReferenceUid=None, label='', values=None, calculator=None, sourceDigest=None, authorActor='SYNTHETIC')]))
         def seed_findings(count, filler=''):
             snapshot = literal(synthetic_snapshot(filler))
-            psql(f'''INSERT INTO "Finding" (id,"studyUid","authorSub","authorActor",revision,hidden,snapshot,"updatedAt")
+            psql_input(f'''INSERT INTO "Finding" (id,"studyUid","authorSub","authorActor",revision,hidden,snapshot,"updatedAt")
                 SELECT gen_random_uuid(),{uid},'SYNTHETIC','SYNTHETIC',1,false,{snapshot}::jsonb,now() FROM generate_series(1,{count})''')
             psql(f'''INSERT INTO "FindingRevision" ("findingId",revision,snapshot,action,reason,actor,"authorSub","requestId",fingerprint,"payloadBytes")
                 SELECT id,1,snapshot,'create','','SYNTHETIC','SYNTHETIC',gen_random_uuid(),repeat('0',64),octet_length(convert_to(snapshot::text,'UTF8')) FROM "Finding"
