@@ -6,7 +6,7 @@ from playwright.sync_api import expect
 from test_favorites import FavoritesE2E
 from test_viewer_jobs import ViewerJobsE2E
 from test_prior_selection import canvas_ready
-from invariants_live import psql
+from invariants_live import psql, ROOT
 from viewer_api_test import literal
 from viewer_session import release_after_end, end_document
 
@@ -101,7 +101,8 @@ class FavoriteViewE2E(ViewerJobsE2E):
    self.assertAlmostEqual(report['camera']['parallelScale'],cell['camera']['parallelScale'],places=5,msg=detail)
    self.assertAlmostEqual(report['zoom'],zoom,places=5,msg=detail)
   print('FAVORITE SAVED DISPLAY',json.dumps(dict(expected=expected,observed=observed)),flush=True)
-  folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);other.screenshot(path=str(folder/'favorite-view.png'))
+  # The evidence folder is optional (measurement_ci removes it from every profile but VR): a run-local folder outside the repository, never uploaded.
+  folder=Path(os.environ.get('KIN_EVIDENCE_DIR') or str(ROOT.parent/'tmp'/('favorite-view-'+uuid.uuid4().hex[:12])));folder.mkdir(parents=True,exist_ok=True);other.screenshot(path=str(folder/'favorite-view.png'))
  def test_favorite_view_03_revoked_prior_does_not_change_report_target(self):
   a,b,job,s,fid=self.prepare_favorite();c=self.ct(a.patient_id,'other','20260601');self.seed_report(c);self.change(self.body(s,'view',fid,uid=a.uid,jobId=job['id']));p=self.login();self.select(p,c);p.locator('#findings').fill('KEEP BLOCKED VIEW');self.open_toolbar_group(p,'#favorite-open');p.locator('#favorite-open').click()
   audit=self.favorite_audits();self.assertEqual(psql('SELECT ("teleInstitutionId" IS NULL)::text FROM "StudyState" WHERE uid='+literal(b.uid)),['true'])

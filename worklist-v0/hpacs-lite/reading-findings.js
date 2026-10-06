@@ -85,19 +85,47 @@ window.KinReadingFindings = function (app) {
    *
    * There is no feedback loop to guard against: the panel is out of flow, so resizing it cannot
    * move or resize the field region it measures.
+   *
+   * That bound alone has an edge: when the field region starts less than the panel's own first line
+   * above the bottom inset, `max-height` reaches 0 and the panel still keeps its padding and border
+   * (22px) at `bottom: 12px` - over the button row. A Related table floor of header + one row (S7-U5
+   * fix-up D) put the reading layout's button row at 736-764 of 768 on the hosted fonts, and that
+   * 22px panel then sat on Approve, Save, Prelim and Dictate. In that case the panel docks above the
+   * report column instead (`--reading-findings-bottom`), with its top under the Related list, so
+   * neither the report's controls nor the Related rows and the Image Findings toggle are under it;
+   * what it covers is the read-only Related Report pane of the region it belongs to.
    */
   const fields = () => document.querySelector('.report-p .redit');
-  let boundTop = '';
+  const reportColumn = () => document.querySelector('.report-p');
+  const relatedList = () => document.querySelector('.related-p .related-list-pane');
+  // Padding, border and the title line with Close: less than this shows nothing a reader can use.
+  function leastHeight() {
+    const style = getComputedStyle(panel), px = name => parseFloat(style[name]) || 0;
+    return px('paddingTop') + px('paddingBottom') + px('borderTopWidth') + px('borderBottomWidth') +
+      Math.max(title.getBoundingClientRect().height, close.getBoundingClientRect().height);
+  }
+  let bound = '';
   function bindTop() {
     if (panel.hidden) return;
     const box = fields()?.getBoundingClientRect();
     // Not laid out, or a mode without a report column: fall back to the shipped behaviour rather
     // than writing a bound nobody measured.
-    const next = box && box.height ? Math.max(0, Math.round(box.top)) + 'px' : '';
-    if (next === boundTop) return;          // the common case: measure, change nothing
-    boundTop = next;
-    if (next) panel.style.setProperty('--reading-findings-top', next);
-    else panel.style.removeProperty('--reading-findings-top');
+    let top = '', bottom = '';
+    if (box && box.height) {
+      if (innerHeight - 12 - box.top >= leastHeight()) top = Math.max(0, Math.round(box.top)) + 'px';
+      else {
+        const report = reportColumn().getBoundingClientRect(), list = relatedList()?.getBoundingClientRect();
+        bottom = Math.max(12, Math.round(innerHeight - report.top + 4)) + 'px';
+        top = Math.max(0, Math.round(list && list.height ? list.bottom + 4 : 0)) + 'px';
+      }
+    }
+    const next = top + ' ' + bottom;
+    if (next === bound) return;             // the common case: measure, change nothing
+    bound = next;
+    for (const [name, value] of [['--reading-findings-top', top], ['--reading-findings-bottom', bottom]]) {
+      if (value) panel.style.setProperty(name, value);
+      else panel.style.removeProperty(name);
+    }
   }
   /**
    * Three sources:
@@ -111,9 +139,11 @@ window.KinReadingFindings = function (app) {
    *             resizing it. That is not hypothetical - at 1366x768 the review pane grew from 68 to
    *             168px, the bound stayed 100px stale, and this panel covered Insert and Cancel. Each
    *             element above `.redit` changes size when it causes such a move, so observing them
-   *             catches it.
-   * Known limit: in the reading layout, content outside the report column (above `.report-p` in
-   * the scrolling `.right` column) that changes height while `.report-p` sits at its own minimum
+   *             catches it. The Related region and its list are observed too: the docked panel
+   *             is bounded by the list's bottom and the report column's top, and a separator
+   *             move changes both by resizing exactly those two.
+   * Known limit: in the reading layout, other content outside the report column (above `.report-p`
+   * in the scrolling `.right` column) that changes height while `.report-p` sits at its own minimum
    * moves the field region without any of these firing. It is not observed here; broader layout
    * observers would be guessing at a cause nothing has measured.
    */
@@ -130,6 +160,9 @@ window.KinReadingFindings = function (app) {
       if (el && window.ResizeObserver) {
         sizeWatch = new ResizeObserver(onLayout);
         for (let node = el; node; node = node.previousElementSibling) sizeWatch.observe(node);
+        // A Related height or list/report separator move shifts the report and the list's bottom
+        // without resizing anything above `.redit`; the docked panel reads both.
+        for (const node of [region, relatedList()]) if (node) sizeWatch.observe(node);
       }
     } else {
       window.removeEventListener('resize', onLayout);

@@ -310,7 +310,10 @@ def page_html(state):
 # ── The only page code touching media or network APIs: it records and delegates, nothing else.
 # getUserMedia keeps the real MediaDevices receiver (Reflect.apply) and resolves the same stream;
 # the constructors are construct-only Proxies whose trap lets newTarget default to the native
-# target and returns the native instance (N-7). fetch is saved, never wrapped.
+# target and returns the native instance (N-7). fetch is saved, never wrapped: this is the observer
+# test_dictation_live.py imports, and its P2 counts any function between the page and the saved
+# native fetch as harness interception (D521). Request recording lives only in
+# OBSERVER_WITH_REQUESTS below, which this file's own browser cases install.
 OBSERVER = r"""(() => {
   'use strict';
   if (Object.prototype.hasOwnProperty.call(window, '__u4b')) return;
@@ -320,7 +323,7 @@ OBSERVER = r"""(() => {
     AudioWorkletNode: window.AudioWorkletNode,
     fetch: window.fetch,
   });
-  const reg = { gum: [], tracks: [], contexts: [], nodes: [], violations: [], clicks: [], requests: [] };
+  const reg = { gum: [], tracks: [], contexts: [], nodes: [], violations: [], clicks: [] };
   const plain = value => { try { return JSON.parse(JSON.stringify(value === undefined ? null : value)); } catch (_) { return null; } };
   const nativeCode = fn => typeof fn === 'function' && /\{\s*\[native code\]\s*\}\s*$/.test(Function.prototype.toString.call(fn));
 
@@ -374,12 +377,6 @@ OBSERVER = r"""(() => {
   replace(typeof MediaDevices === 'function' ? MediaDevices.prototype : null, 'getUserMedia', natives.getUserMedia && getUserMedia);
   replace(window, 'AudioContext', wrappers.AudioContext);
   replace(window, 'AudioWorkletNode', wrappers.AudioWorkletNode);
-  function observedFetch(url, init = {}) {
-    reg.requests.push({url:String(url),method:init.method||'GET',redirect:init.redirect,
-      credentials:init.credentials,cache:init.cache,headers:[...new Headers(init.headers)]});
-    return Reflect.apply(natives.fetch,this,[url,init]);
-  }
-  replace(window,'fetch',observedFetch);
 
   // One entry per violation event, wherever it is seen first; seenOn says where it was observed.
   const seen = new WeakMap();
@@ -428,7 +425,6 @@ OBSERVER = r"""(() => {
   });
   const api = Object.freeze({
     natives, wrappers, media, released,
-    requests:()=>plain(reg.requests),
     violations: () => plain(reg.violations),
     clicks: () => plain(reg.clicks),
     trackStates: () => reg.tracks.map(t => t.readyState),
@@ -437,7 +433,7 @@ OBSERVER = r"""(() => {
     permission: () => navigator.permissions.query({ name: 'microphone' }).then(s => s.state, e => 'error:' + (e && e.name)),
     environment: () => ({
       secure: window.isSecureContext, crossOriginIsolated: window.crossOriginIsolated,
-      fetchDelegatesNative: window.fetch === observedFetch && nativeCode(natives.fetch),
+      fetchIsNative: natives.fetch === window.fetch && nativeCode(natives.fetch),
       gumIsWrapper: typeof MediaDevices === 'function' && MediaDevices.prototype.getUserMedia === getUserMedia &&
         navigator.mediaDevices.getUserMedia === getUserMedia,
       gumNative: nativeCode(natives.getUserMedia) && natives.getUserMedia !== getUserMedia,
@@ -452,6 +448,37 @@ OBSERVER = r"""(() => {
   });
   Object.defineProperty(window, '__u4b', { value: api });
 })();"""
+
+# This file's browser cases only: the observer above plus a fetch that records each request's
+# options and delegates to the saved native (CAP-02 upload-fetch-policy, CAP-01 fetch-delegates-
+# to-native). Built from OBSERVER at fixed anchors so the two never drift apart; never exported to
+# the live suite (CAP-00 checks both).
+REQUEST_RECORDER = (
+    ("  replace(window, 'AudioWorkletNode', wrappers.AudioWorkletNode);\n",
+     "  const requests = [];\n"
+     "  function observedFetch(url, init = {}) {\n"
+     "    requests.push({url:String(url),method:init.method||'GET',redirect:init.redirect,\n"
+     "      credentials:init.credentials,cache:init.cache,headers:[...new Headers(init.headers)]});\n"
+     "    return Reflect.apply(natives.fetch,this,[url,init]);\n"
+     "  }\n"
+     "  replace(window,'fetch',observedFetch);\n"),
+    ("    natives, wrappers, media, released,\n",
+     "    requests:()=>plain(requests),\n"),
+)
+
+
+def with_request_recorder(observer):
+    for anchor, added in REQUEST_RECORDER:
+        if observer.count(anchor) != 1:
+            raise AssertionError("observer anchor moved: %r" % anchor)
+        observer = observer.replace(anchor, anchor + added)
+    native = "      fetchIsNative: natives.fetch === window.fetch && nativeCode(natives.fetch),\n"
+    if observer.count(native) != 1:
+        raise AssertionError("observer fetchIsNative moved")
+    return observer.replace(native, "      fetchDelegatesNative: window.fetch === observedFetch && nativeCode(natives.fetch),\n")
+
+
+OBSERVER_WITH_REQUESTS = with_request_recorder(OBSERVER)
 
 # Page-side test steps. Every evaluate/wait goes through this table (CAP-01 observes it), and none
 # of it names a media or network API: those are reached only through the product or the observer.
@@ -696,6 +723,41 @@ def csp_log_self_check():
     return problems
 
 
+def observer_problems(observer=None, with_requests=None):
+    """The observer only records and delegates (restored from U4b CAP-00). OBSERVER is what the live
+    suite installs, so it must leave fetch the saved native; only this file's variant adds the
+    request-recording fetch, and nothing else."""
+    observer = OBSERVER if observer is None else observer
+    with_requests = OBSERVER_WITH_REQUESTS if with_requests is None else with_requests
+    problems = []
+    for token in OBSERVER_FORBIDDEN:
+        if token in observer:
+            problems.append("the observer contains %r" % token)
+    for required, count in (("Reflect.apply(natives.getUserMedia, this, args)", 1),
+                            ("const o = Reflect.construct(target, args);", 1),
+                            ("Object.defineProperty(owner, name, { ...descriptor, value });", 1),
+                            ("Object.defineProperty(window, '__u4b', { value: api });", 1),
+                            ("replace(typeof MediaDevices === 'function' ? MediaDevices.prototype : null, "
+                             "'getUserMedia', natives.getUserMedia && getUserMedia);", 1),
+                            ("replace(window, 'AudioContext', wrappers.AudioContext);", 1),
+                            ("replace(window, 'AudioWorkletNode', wrappers.AudioWorkletNode);", 1),
+                            ("fetchIsNative: natives.fetch === window.fetch && nativeCode(natives.fetch),", 1)):
+        if observer.count(required) != count:
+            problems.append("the observer must contain %r exactly %d time(s)" % (required, count))
+    if observer.count("defineProperty(") != 2 or observer.count("replace(") != 4:
+        problems.append("the observer replaces exactly getUserMedia, AudioContext and AudioWorkletNode")
+    listened = re.findall(r"addEventListener\('([a-z]+)'", observer)
+    if sorted(listened) != ["click", "click", "processorerror", "securitypolicyviolation",
+                            "securitypolicyviolation", "statechange"]:
+        problems.append("the observer listens to unexpected events: %r" % listened)
+    try:
+        if with_requests != with_request_recorder(observer) or with_requests.count("replace(") != 5:
+            problems.append("the request-recording variant is not the observer plus the recorder alone")
+    except AssertionError as error:
+        problems.append(str(error))
+    return problems
+
+
 def static_report():
     """CAP-00 checks the harness oracles by behaviour; the browser cases check product behaviour.
 
@@ -704,7 +766,10 @@ def static_report():
     (cancel, read-only, exit), CAP-06/08/09/10/NC-11/12 (failure with no report write).
     Bytes are pinned only for the deterministic synthetic signal, whose spectrum is the oracle.
     """
-    problems = harness_self_check()
+    problems = harness_self_check() + observer_problems()
+    # 76677d8's shape: the exported observer itself wrapping fetch.
+    if not observer_problems(OBSERVER_WITH_REQUESTS, OBSERVER_WITH_REQUESTS):
+        problems.append("the observer guard must reject an observer that wraps fetch")
     wav = signal.fixture_wav()
     if sha256(wav) != signal.FIXTURE_SHA256:
         problems.append("the synthetic signal fixture changed")
@@ -1243,7 +1308,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             context = self.browser.new_context(viewport={"width": 1680, "height": 1100})
             if grant:
                 context.grant_permissions(["microphone"], origin=self.origin)
-            context.add_init_script(script=OBSERVER)
+            context.add_init_script(script=OBSERVER_WITH_REQUESTS)
             case.page = context.new_page()
             case.page.on("pageerror", lambda error: case.page_errors.append(str(error)[:500]))
             case.page.on("console", lambda message: case.console.append(
