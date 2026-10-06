@@ -667,13 +667,15 @@ class MigrationPins(unittest.TestCase):
         isolation = "20261005130000_member_isolation"
         # S7-U5 member isolation's call in flight: 20261006120000_member_isolation_call (three columns) follows that; 37 -> 38.
         isolation_call = "20261006120000_member_isolation_call"
-        self.assertEqual(names[-11:], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope,
-                                       audit_guard, draft_boundary, session_end, isolation, isolation_call],
+        # S7-U5 D600: 20261007120000_provider_change (ProviderChange; the in-flight columns dropped) follows that; 38 -> 39.
+        provider_change = "20261007120000_provider_change"
+        self.assertEqual(names[-12:], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope,
+                                       audit_guard, draft_boundary, session_end, isolation, isolation_call, provider_change],
                          "U3 immediately before U4, U4 immediately before S5-U4a's study_questions, then S5-U4c's "
                          "study_image_requests, S7-U1a's critical_result, S7-U3a's reader_assignment_scope and "
                          "S7-AUDIT-STORE's audit_log_append_only, S7-U5's draft_revision_session_entry and its "
-                         "idp_session_end, member_isolation and member_isolation_call, which is last")
-        self.assertEqual(len(names), 38)
+                         "idp_session_end, member_isolation, member_isolation_call and provider_change, which is last")
+        self.assertEqual(len(names), 39)
         self.assertIn("'" + MIGRATION_NAME + "'", text("tests", "production_image_test.py"))
         # the restore fixture applies exactly these migrations in this order: its list compared as data, so the order
         # above (U3, U4, study_questions, study_image_requests, critical_result, reader_assignment_scope last) is the fixture's too
@@ -701,11 +703,12 @@ class MigrationPins(unittest.TestCase):
         # S7-U5 session end: 36 migrations, 47 tables (IdpSessionEnd), rows + the pending and the confirmed end mark, 83.
         # S7-U5 member isolation: 37 migrations, 48 tables (MemberIsolation), rows + the owed and the done fact, 85.
         # S7-U5 member isolation's call in flight: 38 migrations (three columns), the same 48 tables and 85 rows.
+        # S7-U5 D600 provider change records: 39 migrations, 49 tables (ProviderChange), rows + the unknown and the settled record, 87.
         rows = restore_fixture.expected_rows("2.25.1")
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 38)
-        self.assertEqual(len(restore_fixture.TABLES), 48)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 39)
+        self.assertEqual(len(restore_fixture.TABLES), 49)
         self.assertEqual(set(rows), set(restore_fixture.TABLES))
-        self.assertEqual(sum(len(value) for value in rows.values()), 85)   # S7-U5: + the emptied draft row (tombstone); + 2 end marks; + 2 isolation facts
+        self.assertEqual(sum(len(value) for value in rows.values()), 87)   # S7-U5: + the emptied draft row (tombstone); + 2 end marks; + 2 isolation facts; + 2 change records
         self.assertEqual({table: len(rows[table]) for table in ("GatewayRetryRequest", "CriticalResult", "CriticalResultEvent",
                                                                 "CriticalResultReceipt")},
                          {"GatewayRetryRequest": 1, "CriticalResult": 4, "CriticalResultEvent": 7, "CriticalResultReceipt": 6})

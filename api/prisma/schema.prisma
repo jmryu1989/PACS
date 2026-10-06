@@ -58,21 +58,40 @@ model IdpSessionEnd {
 /// 이 행부터 남긴다 — 그 뒤의 인증 서버 일(세션 나열·표식·비활성화·전체 로그아웃)이 어디서 끊겨도 로그인 콜백과 갱신은
 /// 이 행을 보고 막는다(인증 서버의 관리 API를 로그인 길에서 읽지 않는다). `providerDoneAt`이 비어 있으면 그 인증 서버
 /// 일이 아직 끝나지 않았고, 종료 재시도 주기가 `nextAttemptAt`부터 이어서 한다. 행은 다시 활성화하는 일이 끝까지 성공한
-/// 뒤에만 지운다 — 시간이나 다른 경로로 지우지 않는다.
-/// `callAttempt`·`call`·`callStartedAt`은 그 일을 하는 쪽이 지금 인증 서버에 보낸 호출(진행 중 표식)이다: 호출 **전에** 자기
-/// 시도 번호로 적고 호출이 돌아오면 지운다. 남은 일을 넘겨받은 쪽(재활성화)은 앞선 번호의 표식이 풀리거나 그 호출의 한도를
-/// 넘길 때까지 기다린 뒤에야 자기 일을 한다 — 이미 보낸 호출이 그 뒤에 닿지 않게.
+/// 뒤에만 지운다 — 시간이나 다른 경로로 지우지 않는다. `attempts`는 그 일을 지금 쥔 쪽의 번호(세대)다: 정지·재활성화·재시도
+/// 주기가 번호를 올려 넘겨받고, 인증 서버에 보내는 변경 호출(ProviderChange)은 그 번호가 아직 자기 것일 때만 적힌다.
 model MemberIsolation {
   sub            String    @id
   decidedAt      DateTime
   providerDoneAt DateTime?
   attempts       Int       @default(0)
   nextAttemptAt  DateTime
-  callAttempt    Int?
-  call           String?
-  callStartedAt  DateTime?
 
   @@index([providerDoneAt, nextAttemptAt])
+}
+
+/// S7-U5 (D600) 인증 서버에 보낸 **변경** 호출 하나: 회원 비활성화(disable)·활성화(enable), provider 세션 하나의 종료
+/// (end_session). 보내기 **전에** 적고(고유 번호 `id`, 보낸 쪽의 세대 `generation`, 대상 `target`, 상태 `state`), 결과는 그
+/// 호출 **자신의** 답으로만 적는다 — 시간·lease·재조회·같은 대상에 보낸 다른 호출의 답으로 적지 않는다.
+///   unknown  결과를 모른다: 아직 답을 기다리거나, 답을 잃었다(연결 끊김·불확실한 5xx·프로세스 소실). 시간으로 바뀌지 않는다.
+///   done     인증 서버가 그 호출을 했다고 답했다(세션 종료는 204 끝냄 또는 404 "그런 세션이 없다").
+///   void     그 호출이 일어나지 않았다고 확정됐다(보내지 않았다, 또는 인증 서버가 처리하지 않았다고 답했다: 4xx·501·503).
+/// unknown이 남은 회원은 재활성화가 끝나지 않고, unknown인 세션 종료가 남은 provider 세션의 표식은 확인되지 않는다 — sid가 다시
+/// 쓰이면 늦게 닿은 종료가 다음 SSO를 끝낼 수 있기 때문이다. `sub`은 관련 회원(알 때), `outcome`은 진단용 요약이다.
+/// unknown 행은 시간만으로 지우지 않는다(정해진 행만 오래되면 치운다).
+model ProviderChange {
+  id         Int       @id @default(autoincrement())
+  kind       String
+  target     String
+  sub        String?
+  generation Int
+  state      String
+  outcome    String?
+  createdAt  DateTime
+  settledAt  DateTime?
+
+  @@index([kind, target, state])
+  @@index([sub, state])
 }
 
 /// 기관. 병원 하나, 판독센터 하나가 각각 한 행이다.

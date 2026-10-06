@@ -35,6 +35,8 @@ LIMITS = combined.LIMITS
 # stack when written - estimated at about 4 KB of catalog and rows, inside what the cap left; measure with the next run.
 # S7-U5 member isolation's call in flight (three columns on MemberIsolation, their values on the owed row): not measured on a
 # stack when written - estimated at well under 1 KB of catalog and rows.
+# S7-U5 D600 provider change records (49 tables: ProviderChange, its two rows, its sequence and two indexes; the three
+# in-flight columns of MemberIsolation dropped): not measured on a stack when written - estimated at about 2 KB.
 RECEIPT_LIMIT = 256*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
@@ -75,8 +77,9 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql',
               'api/prisma/migrations/20261005120000_idp_session_end/migration.sql',
               'api/prisma/migrations/20261005130000_member_isolation/migration.sql',
-              'api/prisma/migrations/20261006120000_member_isolation_call/migration.sql']
-TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'Institution', 'StudyState', 'Report', 'ReportVersion',
+              'api/prisma/migrations/20261006120000_member_isolation_call/migration.sql',
+              'api/prisma/migrations/20261007120000_provider_change/migration.sql']
+TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
@@ -84,7 +87,7 @@ TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'Institution
                  'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt',
                  'GatewayReceipt', 'GatewayRetryRequest'])
-SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
+SEQUENCES = ['AuditLog_id_seq', 'ProviderChange_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
 
@@ -393,13 +396,20 @@ def expected_rows(uid):
              nextAttemptAt=STAMP)]
     # S7-U5 member isolation: our own record that a member is isolated is state a restore must keep - while it exists the
     # member gets no session, and an unfinished one is provider work still owed. One of each, every column with a value
-    # (providerDoneAt NULL on the owed one). The owed one also has a provider call in flight (callAttempt, call,
-    # callStartedAt): a re-activation after the restore waits for it until its bound has passed; the done one has none.
+    # (providerDoneAt NULL on the owed one).
     rows['MemberIsolation'] = [
         dict(sub='SYNTHETIC-member-isolation-owed',decidedAt=STAMP,providerDoneAt=None,attempts=2,
-             nextAttemptAt='2026-10-06T00:00:00.456',callAttempt=2,call='disable',callStartedAt='2026-10-06T00:00:00.789'),
-        dict(sub='SYNTHETIC-member-isolation-done',decidedAt=STAMP,providerDoneAt=STAMP,attempts=0,nextAttemptAt=STAMP,
-             callAttempt=None,call=None,callStartedAt=None)]
+             nextAttemptAt='2026-10-06T00:00:00.456'),
+        dict(sub='SYNTHETIC-member-isolation-done',decidedAt=STAMP,providerDoneAt=STAMP,attempts=0,nextAttemptAt=STAMP)]
+    # S7-U5 D600: the provider change records are state a restore must keep - an unknown one (here the owed member's disable
+    # whose answer was lost) keeps that member's re-activation from succeeding until that call's own answer settles it, and
+    # a settled one is the newest end request of a provider session (its mark may be confirmed). One of each, every column
+    # with a value (sub, outcome and settledAt NULL where a record has none); the ids come from the sequence.
+    rows['ProviderChange'] = [
+        dict(id=1,kind='disable',target='SYNTHETIC-member-isolation-owed',sub='SYNTHETIC-member-isolation-owed',generation=2,
+             state='unknown',outcome='transport',createdAt='2026-10-06T00:00:00.789',settledAt=None),
+        dict(id=2,kind='end_session',target='SYNTHETIC-idp-session-confirmed',sub=None,generation=1,state='done',
+             outcome='http_204',createdAt=STAMP,settledAt=STAMP)]
     rows['TransferBasis'] = [dict(id=basis_id,studyUid=uid,institutionId='SYNTHETIC-hospital',kind='PATIENT_CONSENT',
         reference='SYNTHETIC consent reference',obtainedAt=STAMP,expiresAt=None,recordedBy='SYNTHETIC-admin',recordedAt=STAMP,
         revokedBy=None,revokedAt=None,revokeReason=None)]
@@ -414,8 +424,8 @@ def expected_rows(uid):
 
 
 def expected_sequences():
-    return {name: dict(last_value=2 if name == 'ReportVersion_id_seq' else 1,
-                       is_called=name in ('ReportVersion_id_seq', 'UserFilter_id_seq')) for name in SEQUENCES}
+    return {name: dict(last_value=2 if name in ('ReportVersion_id_seq', 'ProviderChange_id_seq') else 1,
+                       is_called=name in ('ReportVersion_id_seq', 'UserFilter_id_seq', 'ProviderChange_id_seq')) for name in SEQUENCES}
 
 
 def sql_literal(text):
@@ -447,12 +457,12 @@ def create_product(name, db, uid):
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                   'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
-                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd', 'MemberIsolation',
+                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange',
                   'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.
-            fields = [key for key in row if not (table in ('ReportVersion', 'UserFilter') and key == 'id')]
+            fields = [key for key in row if not (table in ('ReportVersion', 'UserFilter', 'ProviderChange') and key == 'id')]
             quoted = ','.join('"'+key+'"' for key in fields)
             execute(name, db, 'INSERT INTO "'+table+'" ('+quoted+') SELECT '+quoted+
                 ' FROM json_populate_record(NULL::"'+table+'", '+sql_literal(json.dumps(row))+')')
