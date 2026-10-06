@@ -250,7 +250,9 @@ class Pure(unittest.TestCase):
         # provider has not confirmed yet, one confirmed).
         # S7-U5 member isolation added MemberIsolation: 37 files, 48 tables, and two isolation facts (one with provider
         # work still owed, one done).
-        self.assertEqual(len(transfer.MIGRATIONS), 37)
+        # S8-CTX added TechNoteRevision.attemptId and its unique index (no table): 38 files, still 48 tables, and a second
+        # Tech Note revision carrying an attempt id beside the older one without.
+        self.assertEqual(len(transfer.MIGRATIONS), 38)
         self.assertEqual(len(transfer.TABLES), 48)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
@@ -264,7 +266,8 @@ class Pure(unittest.TestCase):
         self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4 + 4 + 7 + 6 + 1
                          + 1    # S7-U5: the emptied draft row (tombstone) beside the two present drafts
                          + 2    # S7-U5 session end: the pending and the confirmed end mark
-                         + 2)   # S7-U5 member isolation: the owed and the done isolation fact
+                         + 2    # S7-U5 member isolation: the owed and the done isolation fact
+                         + 1)   # S8-CTX: the Tech Note revision written by a save attempt (attemptId) beside the older one
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),
                          [('SYNTHETIC-member-isolation-done', False, 0), ('SYNTHETIC-member-isolation-owed', True, 2)])
         self.assertEqual(sorted((r['idpSid'], r['cause'], r['confirmedAt'] is None, r['attempts']) for r in rows['IdpSessionEnd']),
@@ -333,7 +336,8 @@ class Pure(unittest.TestCase):
         self.assertEqual(len({(r['institution'], r['subject']) for r in hp}), 3)
         self.assertEqual(sum(r['value'] is None for r in hp), 1)
         self.assertEqual([(r['revision'],r['value'] is None) for r in rows['WorklistColumns']],[(2,False),(3,True)])
-        self.assertEqual([(r['studyUid'],r['version'],r['text']) for r in rows['TechNoteRevision']],[(UID,1,'SYNTHETIC tech note')])
+        self.assertEqual(sorted((r['studyUid'],r['version'],r['text'],r['attemptId']) for r in rows['TechNoteRevision']),
+                         [(UID,1,'SYNTHETIC tech note',None),(UID,2,'SYNTHETIC tech note v2','00000000-0000-4000-8000-000000000d01')])
         job=rows['ViewerJob'][0]
         self.assertEqual(job['snapshot']['cells'][0]['sop'],UID+'.2')
         self.assertEqual(job['studies'],[UID]);self.assertTrue(job['hidden'])

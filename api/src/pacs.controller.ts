@@ -262,7 +262,14 @@ export class PacsController {
 
   @Post('studies/:uid/tech-note')
   saveTechNote(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.saveTechNote(uid, body, noteCaller(req));
+    const who = noteCaller(req);
+    // S8-CTX: a save attempt id, when sent, is a lowercase random (v4) UUID as crypto.randomUUID() makes it. Anything
+    // else - including null or another UUID version - is refused here, before it can reach the UUID column. An older
+    // screen sends no id and keeps the old behaviour.
+    if (body && typeof body === 'object' && 'attemptId' in body &&
+        !(typeof body.attemptId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.attemptId)))
+      throw new BadRequestException('저장 시도 ID를 확인하세요');
+    return this.svc.saveTechNote(uid, body, who);
   }
 
   @Get('studies/:uid/tech-note/history')

@@ -460,6 +460,7 @@ class MigrationPins(unittest.TestCase):
         # S7-U5's 20261004120000_draft_revision_session_entry (draft boundary and entry proof columns): 35 files.
         # S7-U5 session end's 20261005120000_idp_session_end (IdpSessionEnd, AuthSession.idpSid): 36 files.
         # S7-U5 member isolation's 20261005130000_member_isolation (MemberIsolation): 37 files.
+        # S8-CTX's 20261006000000_tech_note_attempt_id (TechNoteRevision.attemptId): 38 files.
         self.assertIn("'api/prisma/migrations/" + MIGRATION_NAME + "/migration.sql',", fixture)
         self.assertIn("accession='SYNTHETIC-ACC-1'", fixture)
         self.assertIn("'ReportDraft', 'Order', 'UserFilter',", fixture)
@@ -467,7 +468,7 @@ class MigrationPins(unittest.TestCase):
         # the restore fixture applies every migration directory, in order: its list compared as data
         # (S7-U1a-B-R-001-F03: not the text of ops_product_transfer_test.py's count assertion)
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 37)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 38)
         later =[MIGRATION_NAME, "20260924130000_gateway_receipt", "20260924140000_gateway_retry_request"]
         self.assertEqual(names[names.index(MIGRATION_NAME):names.index(MIGRATION_NAME) + 3], later)
 
