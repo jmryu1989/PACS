@@ -584,16 +584,21 @@ class MeasurementCiTests(unittest.TestCase):
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
                           'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
                           'gateway-e2e', 'critical-result-screens',
-                          # S7-U5: the session contract job's seven profiles (validate.yml s7-u5-session-contracts matrix).
+                          # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
+                          # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).
                           'u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',
-                          'u5-session-mutants', 'u5-session-browser', 'u5-session-end'})
+                          'u5-session-mutants', 'u5-session-browser', 'u5-session-end', 'u5-fixups'})
         validate = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
         self.assertIn('profile: [u5-session-api, u5-session-draft, u5-session-regression, u5-session-boundaries, '
-                      'u5-session-mutants, u5-session-browser, u5-session-end]', validate)
+                      'u5-session-mutants, u5-session-browser, u5-session-end, u5-fixups]', validate)
         self.assertEqual(ci.PROFILES['u5-session-end']['suites'],
                          (('live/session_end_live.py', 'SessionEndLive', 'ci-u5-session-end'),))
+        self.assertEqual(ci.PROFILES['u5-fixups']['suites'], (('e2e/test_u5_fixups.py', None, 'ci-u5-fixups'),))
+        self.assertEqual(ci.PROFILES['u5-fixups']['suite_timeout'], 900)
+        self.assertNotIn('suite_budgets', ci.PROFILES['u5-fixups'])
+        self.assertEqual(ci.PROFILES['u5-fixups']['out'].name, 'u5-fixups-ci')
         for name in ('u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',
-                     'u5-session-mutants', 'u5-session-browser', 'u5-session-end'):
+                     'u5-session-mutants', 'u5-session-browser', 'u5-session-end', 'u5-fixups'):
             for suite in ci.PROFILES[name]['suites']:
                 self.assertTrue((ci.ROOT/'tests'/suite[0]).is_file(), (name, suite[0]))
         measurements = ci.PROFILES['measurements']
