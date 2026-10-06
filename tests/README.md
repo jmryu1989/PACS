@@ -1343,7 +1343,9 @@ from a developer checkout does not grant deployment authority.
 
 `node --test tests/viewer_precision_test.cjs`는 고정 upstream 함수 fingerprint,
 버전/상속 불일치와 비동기 등록 충돌 거부, base/volume 보존, reset 네 조합,
-큰 좌표의 좌우/상하 반전 복귀를 확인한다. CI에서도 격리 Node 컨테이너로 실행한다.
+큰 좌표의 좌우/상하 반전 복귀를 확인한다. 같은 스택의 다음 프레임에서 반전(과 함께 둔 회전)이
+유지되고 새 스택·reset에는 아무것도 되돌리지 않음도 고정 upstream 프레임 갱신(`fixtures/viewer-frame-source.cjs`)으로
+확인한다. CI에서도 격리 Node 컨테이너로 실행한다.
 
 `python tests/e2e/test_viewer_precision.py`는 로컬 스택에서 합성 CT 2검사/4 SOP의
 좌우·상하·회전 후 반전과 pan/zoom, 주석 편집·초기화 12조건을 확인한다.

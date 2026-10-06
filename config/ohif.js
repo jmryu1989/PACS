@@ -455,6 +455,49 @@ const kinStackPrecision = (() => {
     return state;
   }
 
+  /*
+   * A flip stays while the person scrolls the same stack (S7-U5 fix round H2, the commander's decision: the OHIF default
+   * and the expectation of main's Images Only test). The pinned viewer re-centres the camera on every frame it shows
+   * (_updateActorToDisplayImageId -> resetCameraNoEvent, which clears both flips) and then gives back rotation, zoom and
+   * pan (its view presentation) but not the flips, so a flipped image silently un-flipped on the next slice. The flips are
+   * given back only for a frame of the same stack: setStack clears the flips and invalidates the stack before its first
+   * frame, so a new stack starts unflipped, and every explicit reset (Space/Reset, Reset Display, a Job restore, a cell
+   * merge) clears them outside this method. Pinned like the methods above; on another source the stock method stays.
+   * The rotation is given back again after the flips: the frame update re-applies the angle the flipped camera reported
+   * to the unflipped camera, where the same number is another orientation (a 90 degree turn then a flip came back turned
+   * 180 degrees); with the flips back first the angle means what it meant before the frame.
+   */
+  const KEEP = '_updateActorToDisplayImageId';
+  const KEEP_HASH = '1d0c256a7758f34b11ff56cd2a14df83780f318d1c86264c014a0320045b0f91';
+  function keepFlips(original) {
+    return function (image) {
+      const same = !this.stackInvalidated, horizontal = !!this.flipHorizontal, vertical = !!this.flipVertical;
+      const rotation = same && (horizontal || vertical) ? this.getRotation() : null;
+      const result = original.call(this, image);
+      if (same && !this.stackInvalidated) {
+        const flipHorizontal = horizontal && !this.flipHorizontal, flipVertical = vertical && !this.flipVertical;
+        if (flipHorizontal || flipVertical) {
+          this.flip({ flipHorizontal, flipVertical });
+          if (Number.isFinite(rotation)) this.setRotation(rotation);
+        }
+      }
+      return result;
+    };
+  }
+  async function installKeepFlips(target) {
+    const original = Object.hasOwn(target, KEEP) ? target[KEEP] : null;
+    if (typeof original !== 'function' || !Object.isExtensible(target)) return 'unsupported';
+    const bytes = new TextEncoder().encode(Function.prototype.toString.call(original).replace(/\r\n/g, '\n').trim());
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    const actual = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+    if (actual !== KEEP_HASH || target[KEEP] !== original) {
+      console.warn('KIN stack flip keeper: unsupported viewer source; the stock frame update is retained.');
+      return 'unsupported';
+    }
+    Object.defineProperty(target, KEEP, { configurable: true, writable: true, value: keepFlips(original) });
+    return 'ready';
+  }
+
   async function install() {
     const core = window.cornerstone;
     const base = core?.Viewport?.prototype;
@@ -480,6 +523,8 @@ const kinStackPrecision = (() => {
       },
     }]));
     Object.defineProperties(target, descriptors);
+    // The flip keeper relies on the flip installed just above (double precision on GPU stacks).
+    window.kinViewerFlipKeeper = Object.freeze({ version: 1, state: await installKeepFlips(target).catch(() => 'unsupported') });
     return status('ready');
   }
   return { id: 'kin.stack-precision', preRegistration() {
