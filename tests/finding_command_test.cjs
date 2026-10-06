@@ -550,6 +550,8 @@ class FakeElement extends EventTarget {
     for (let at = siblings.indexOf(this) - 1; at >= 0; at--) if (siblings[at].tagName !== '#text') return siblings[at];
     return null;
   }
+  // No layout here: an element is an empty box at the origin unless a test places it by hand.
+  getBoundingClientRect() { return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }; }
 }
 function makeDocument() {
   const doc = {};
@@ -624,7 +626,9 @@ function worklist(options) {
   const document = makeDocument();
   const sandbox = { console, Event, URL, URLSearchParams, document, location: { origin: ORIGIN }, BroadcastChannel: FakeChannel, setTimeout, clearTimeout,
     setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval: id => { intervals[id - 1] = null; },
-    addEventListener: (...a) => events.addEventListener(...a), removeEventListener: (...a) => events.removeEventListener(...a), dispatchEvent: e => events.dispatchEvent(e) };
+    addEventListener: (...a) => events.addEventListener(...a), removeEventListener: (...a) => events.removeEventListener(...a), dispatchEvent: e => events.dispatchEvent(e),
+    // The window height the panel compares the field region against, and a stylesheet-free computed style.
+    innerHeight: (options && options.innerHeight) || 1100, getComputedStyle: () => ({}) };
   // Opt-in: a ResizeObserver that records what it watches, whether it was given back, and fires on
   // demand. Without it the realm has none, which is the shipped fallback every older case relies on.
   if (options && options.resizeObserver) {
@@ -739,13 +743,15 @@ test('adapter: the open panel observes the field region and every element above 
   const pane = make('', 'dictation-pane'), redit = make('redit'), rfoot = make('rfoot2');
   report.append(rbtns, draftbar, doc.createTextNode(' '), citelist, pane, redit, rfoot);
   doc.body.append(report);
-  const above = new Set([redit, pane, citelist, draftbar, rbtns]);
+  // The Related region is watched too (S4 GEO): a separator move shifts the report by resizing it.
+  const region = h.document.querySelector('.related-p');
+  const above = new Set([redit, pane, citelist, draftbar, rbtns, region]);
   let top = 576;
   redit.getBoundingClientRect = () => ({ top, height: 180 });
   await h.open();
   assert.equal(h.observers.length, 1, 'one observer while the panel is open');
   const [first] = h.observers;
-  assert.deepEqual(new Set(first.targets), above, 'the field region and every element above it');
+  assert.deepEqual(new Set(first.targets), above, 'the field region, every element above it and the Related region');
   assert.equal(first.targets.length, above.size, 'each observed once');
   assert.ok(!first.targets.includes(rfoot) && !first.targets.includes(report), 'nothing below it and not the column itself');
   const bound = () => h.panel().style.getPropertyValue('--reading-findings-top');
@@ -772,6 +778,42 @@ test('adapter: the open panel observes the field region and every element above 
   assert.equal(second.live, false);
   assert.deepEqual(second.targets, []);
   assert.equal(h.document.live('scroll:capture'), 0);
+});
+
+test('adapter: with no room below the field region for its first line the panel docks above the report column, under the Related list', async () => {
+  // S4 GEO, hosted 1366x768 reading layout after fix-up D: the button row at 736-764 and the field region at
+  // 764, so `100vh - 12 - top` was -8 and the panel kept its 22px of padding and border on Approve, Save,
+  // Prelim and Dictate. This realm has no layout: every box is placed by hand with those numbers.
+  const h = worklist({ resizeObserver: true, innerHeight: 768 });
+  const doc = h.document;
+  const list = doc.createElement('div'); list.className = 'related-list-pane';
+  doc.querySelector('.related-p').append(list);
+  const report = doc.createElement('div'); report.className = 'panel report-p';
+  const rbtns = doc.createElement('div'); rbtns.className = 'rbtns';
+  const redit = doc.createElement('div'); redit.className = 'redit';
+  report.append(rbtns, redit); doc.body.append(report);
+  let fieldsTop = 764;
+  list.getBoundingClientRect = () => ({ top: 358, bottom: 553, height: 195 });
+  report.getBoundingClientRect = () => ({ top: 676, bottom: 1076, height: 400 });
+  redit.getBoundingClientRect = () => ({ top: fieldsTop, height: 180 });
+  // The panel's first line: 10px padding and 1px border each side, Close 22px tall.
+  h.sandbox.getComputedStyle = () => ({ paddingTop: '10px', paddingBottom: '10px', borderTopWidth: '1px', borderBottomWidth: '1px' });
+  await h.open();
+  h.named(h.panel(), 'Close Image Findings')[0].getBoundingClientRect = () => ({ top: 0, bottom: 22, height: 22 });
+  const prop = name => h.panel().style.getPropertyValue(name);
+  const [watch] = h.observers;
+  watch.fire();
+  assert.equal(prop('--reading-findings-bottom'), '96px', 'docked 4px above the report column: 768 - 676 + 4');
+  assert.equal(prop('--reading-findings-top'), '557px', 'its top 4px under the Related list: 553 + 4');
+  assert.ok(watch.targets.includes(list), 'the Related list is watched while the panel is open');
+  // dffcda5's numbers: 24px of room is less than the 44px first line, so it docks as well.
+  fieldsTop = 732; watch.fire();
+  assert.equal(prop('--reading-findings-bottom'), '96px');
+  // Room for the first line again (the column scrolled): back to the shipped bound and the 12px inset.
+  fieldsTop = 700; watch.fire();
+  assert.equal(prop('--reading-findings-top'), '700px');
+  assert.equal(prop('--reading-findings-bottom'), '', 'the inset variable is removed, not left behind');
+  h.ui.end();
 });
 
 test('adapter: the panel lists the selected study read-only with textContent, link states and Show Hidden, and writes nothing', async () => {

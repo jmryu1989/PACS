@@ -51,6 +51,10 @@ Cases (the RL ids are test-plan section 3 of the S7-RELATED-LAYOUT diagnosis, PA
        centre reaches it; with no related exam the table's message is visible text (T8); in every prior report state the
        first body text line is T8; the list, the separator and the prior report pane stay inside the panel in that order.
        The hidden-filter notice case is not part of it (follow-up S7-RL-NOTICE-PORTRAIT).
+  rl12 (S7-U5 S4 GEO) Image Findings open in the Reading Workspace (1366x768 as is and with the report's button row at
+       the window's bottom edge, 1280x720, 1920x1080, 900x1200, 768x1024): the panel is apart from Approve, Save, Prelim,
+       Dictate and its own toggle, each of them whole and on top, its Close reachable, and the first Related row apart
+       from it and clickable.
   RelatedLayoutEquivalence rl06/rl08: work rows of 360px or more (1600x1050, 1366x768, 1920x1080, 1280x800, 1024x768),
        portrait (900x1400, 900x1200, 768x1024) and the report window at 900x600/900x700 lay out exactly as on the
        implementation base. Why a fixed-commit comparison (AGENTS 1-B 14): this unit's requirement there IS sameness with
@@ -832,6 +836,53 @@ class RelatedLayoutDOMTest(Base):
         w.page.mouse.click(*seen["centre"])
         self.assertTrue(handle.evaluate("r => r.landed"), f"{tag}: a click at the row reached the row")
         harness.until(lambda: "열람 중" in row.get_by_role("cell").first.inner_text(), 5, f"{tag} row opened")
+
+    # ── RL-12 (S7-U5 S4 GEO) ────────────────────────────────────────────────────────────────────────────────────────────
+    # Image Findings open in the Reading Workspace. After fix-up D raised the table floor, the hosted fonts put the report's
+    # button row at 736-764 of a 768px window and the panel, fixed above a 12px inset with no room left below the report's
+    # fields, sat on Approve/Save/Prelim/Dictate. `long` reads a study whose description wraps the report's target line, so
+    # the row starts below the window and is brought up to its bottom edge, as a reader's wheel over the column does: the
+    # hosted position, whatever this machine's fonts. 1280x720 reaches it without that.
+    LONG_DESC = " ".join(["SYN RL CURRENT CT CHEST ABDOMEN PELVIS WITH CONTRAST ARTERIAL AND PORTAL VENOUS PHASE FOLLOW UP"] * 2)
+    FINDINGS_CASES = [((1366, 768), False), ((1366, 768), True), ((1280, 720), False), ((1920, 1080), False),
+                      ((900, 1200), False), ((768, 1024), False)]
+    REPORT_BUTTONS = ("Approve", "Save", "Prelim", "Dictate")
+
+    def test_rl12_image_findings_never_covers_the_report_buttons_or_the_first_related_row(self):
+        long_rows = [harness.row("2.25.7001", PID, date="20261005", rs="W", modality="CT", desc=self.LONG_DESC)] + rows()[1:]
+        for size, long in self.FINDINGS_CASES:
+            name = f"{size[0]}x{size[1]}" + (" long description" if long else "")
+            with self.subTest(case=name):
+                w = self.open_reading(size, long_rows, self.LONG_DESC) if long else self.open_reading(size)
+                page, tag = w.page, f"RL-12 {name}"
+                toggle = page.get_by_role("button", name="Image Findings", exact=True)
+                toggle.click()
+                panel = page.get_by_role("region", name="Image Findings", exact=True)
+                harness.expect(panel).to_be_visible()
+                buttons = [(label, page.get_by_role("button", name=label, exact=True)) for label in self.REPORT_BUTTONS]
+                # What a wheel over the column does when the row is below the window (the stacked portrait layout too).
+                w.scroll_into_view(buttons[-1][1])
+                page.wait_for_timeout(150)
+                w.assert_no_document_scroll(f"{tag} buttons in view")
+                box = w.visible(panel)["box"]
+                row = w.related_table.get_by_role("row").nth(1)
+                measure(tag, panel=box, toggle=w.visible(toggle)["box"], row=w.visible(row)["box"],
+                        buttons={label: w.visible(button)["box"] for label, button in buttons})
+                apart = lambda b: b[2] <= box[0] + 0.5 or b[0] >= box[2] - 0.5 or b[3] <= box[1] + 0.5 or b[1] >= box[3] - 0.5
+                # The panel itself still shows its title line and Close, so docking did not shrink it out of use.
+                self.assertTrue(w.pointable(panel.get_by_role("button", name="Close Image Findings", exact=True)),
+                                f"{tag}: Close Image Findings reachable")
+                for label, control in buttons:
+                    seen = w.visible(control)
+                    self.assertTrue(apart(seen["box"]), f"{tag}: the panel {box} lies over {label} {seen['box']}")
+                    self.assertGreaterEqual(seen["ratio"], 0.999, f"{tag}: {label} whole in the window")
+                    self.assertEqual([], w.covered_points(control), f"{tag}: points of {label} under another element")
+                # The toggle scrolls with its column (out of view once the button row is brought up); the panel is
+                # never what hides it.
+                self.assertTrue(apart(w.visible(toggle)["box"]), f"{tag}: the panel lies over its own toggle")
+                self.assertTrue(apart(w.visible(row)["box"]), f"{tag}: the panel lies over the first Related row")
+                self.assert_row_on_top_in_its_table(w, f"{tag} first Related row", row)
+                w.screen.finish()
 
 
 # ── RelatedLayoutEquivalence (R-EQ; local record, not in CI) ────────────────────────────────────────────────────────
