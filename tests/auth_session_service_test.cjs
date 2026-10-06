@@ -2284,7 +2284,7 @@ test('U5S-REQ-09 entry proof: a login is entered once, by the document that hold
 // person started to leave, to switch, or from a browser that cannot say whether they left, makes a session only from an
 // authentication with credentials entered after that press)
 //   -> RISK-S7-U5-SILENT-REENTRY (the next person at the PC enters as the previous doctor without a form)
-//   -> TEST-S7-U5-END (the cases below; the real-Keycloak half is tests/e2e/test_session_end_stack.py).
+//   -> TEST-S7-U5-END (the cases below; the real-Keycloak half is tests/live/session_end_live.py).
 // The order of the racing steps is fixed by barriers (a held /token answer, a gate before a statement or inside the
 // critical section), never by timing. The expected values are the design's literals. `idpOf(account)` is the provider
 // session every token of that account carries unless the case names another.
