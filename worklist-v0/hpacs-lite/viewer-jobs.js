@@ -272,17 +272,51 @@ window.kinViewerJobs = function (services, model, session = null) {
       if (!current()) throw new Error('화면이 변경되었습니다.'); grid.setActiveViewportId(ids[value.active]);
       return ids;
     }
-    // A saved-location restore of a version 1-3 layout proves what the stack cells show before it reports a restore: every
-    // saved cell's original instance and the active cell. Versions 4 and later are proved inside the MPR apply.
+    // A restore of a version 1-3 layout (Restore Job, the kinJob page and a saved location) proves what the stack cells show
+    // before it reports a restore: every saved cell's original instance and the active cell (confirmStack below). Versions 4
+    // and later are proved inside the MPR apply.
+    function showsCell(viewportId, cell) {
+      const v = cs.getCornerstoneViewport(viewportId), shown = window.cornerstone.metaData.get('instance', v?.getCurrentImageId?.());
+      return shown?.StudyInstanceUID === cell.study && shown?.SeriesInstanceUID === cell.series && shown?.SOPInstanceUID === cell.sop;
+    }
     function readBack(value, ids) {
       if (!Array.isArray(ids)) return;
       value.cells.forEach((cell, i) => {
-        if (!cell) return;
-        const v = cs.getCornerstoneViewport(ids[i]), shown = window.cornerstone.metaData.get('instance', v?.getCurrentImageId?.());
-        if (shown?.StudyInstanceUID !== cell.study || shown?.SeriesInstanceUID !== cell.series || shown?.SOPInstanceUID !== cell.sop)
-          throw new Error('저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
+        if (cell && !showsCell(ids[i], cell)) throw new Error('저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
       });
       if (grid.getState().activeViewportId !== ids[value.active]) throw new Error('저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
+    }
+    /**
+     * A restore of a version 1-3 layout reports only what the stack cells show once the native viewer has stopped changing
+     * them. Observed (S7-U5 fix round, job_03 alone twice): the second study's cell showed its first frame and initial
+     * camera when "restored" was reported and stayed so - the native viewer had set that cell's stack again after the
+     * saved frame was applied. So: wait until no cell's viewport, stack or shown frame has changed for a few samples
+     * (bounded), read every cell back, apply a cell the native viewer moved once more, wait again, and if a cell still is
+     * not the saved one the restore fails (and is rolled back like any failed apply). Input outside the panel is swallowed
+     * while the restore applies (interaction), so this never overrides the person's own work, and nothing re-applies after
+     * the restore has reported.
+     */
+    async function settleStack(ids) {
+      const look = () => ids.map(id => { const v = cs.getCornerstoneViewport(id), stack = v?.getImageIds?.() || [];
+        return [v, stack.length, stack[0], v?.getCurrentImageId?.()]; });
+      let last = look(), still = 0;
+      for (let n = 0; n < 60 && still < 6; n++) {
+        await new Promise(r => setTimeout(r, 50));
+        const now = look();
+        still = now.every((cell, i) => cell.every((part, j) => part === last[i][j])) ? still + 1 : 0;
+        last = now;
+      }
+    }
+    async function confirmStack(value, ids, ticket) {
+      const current = () => live() && serial === ticket;
+      await settleStack(ids);
+      const moved = value.cells.map((cell, i) => cell && !showsCell(ids[i], cell) ? i : -1).filter(i => i >= 0);
+      if (moved.length) {
+        for (const i of moved) await applyStackCell(ids[i], value.cells[i], current);
+        await settleStack(ids);
+      }
+      if (!current()) throw new Error('화면이 변경되었습니다.');
+      readBack(value, ids);
     }
     /* One restore for Restore Job, the kinJob page and a finding's saved location (S2-L2a). It returns {state:'restored'|'continuing',
        message} or throws an Error carrying kinRestore {state, reason}: 'refused' changed nothing on screen, 'rolled-back' applied the
@@ -415,7 +449,7 @@ window.kinViewerJobs = function (services, model, session = null) {
       catch (e) { throw refusal(/도구/.test(e.message) ? 'tool-missing' : 'job-studies', e.message); }
       located?.ensure();
       ctx.mutating = true; applying = true;
-      try { const ids = await apply(job.snapshot, ticket); if (located && !VOLUME_VERSIONS.includes(job.snapshot.version)) readBack(job.snapshot, ids); }
+      try { const ids = await apply(job.snapshot, ticket); if (!VOLUME_VERSIONS.includes(job.snapshot.version)) await confirmStack(job.snapshot, ids, ticket); }
       catch (e) {
         const message = /[가-힣]/.test(e.message) ? e.message : '영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.';
         if (!(live() && serial === ticket)) throw outcome('screen-unknown', 'apply-failed', message);
