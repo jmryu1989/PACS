@@ -393,6 +393,52 @@ test('maximizing an MPR plane keeps its volume and orientation and puts every pl
   assert.equal(x.crosshairs.calls, 1);
 });
 
+// The viewer's session boundary as the module meets it (viewer-session.js onEnd): an end hook runs once at the end,
+// at once when the boundary has already ended, and its returned function withdraws it.
+function sessionBoundary() {
+  const enders = new Set();
+  const boundary = { ended: false, hooks: () => enders.size,
+    onEnd(run) { if (boundary.ended) run(); else enders.add(run); return () => enders.delete(run); },
+    end() { boundary.ended = true; for (const run of [...enders]) run(); enders.clear(); } };
+  return boundary;
+}
+const until = async (what, check) => {
+  for (const end = Date.now() + 5000; Date.now() < end;) { if (check()) return; await new Promise(r => setTimeout(r, 5)); }
+  throw new Error('harness: ' + what + ' not reached within 5 s');
+};
+
+// Integration review F06: the session end cancels every timer and frame an operation may be parked on, so the
+// operation's `finally` never gives the Crosshairs reset back then. The end itself gives it back (the operation is
+// not resumed); the opposite side: an operation that finishes gives it back itself and withdraws its end hook.
+test('an operation parked when the viewer session ends gives the Crosshairs reset back at the end', async () => {
+  const x = fixture({ rows: 1, cols: 3, planes: ['axial', 'sagittal', 'coronal'], slow: 150 });
+  const boundary = sessionBoundary();
+  x.win.KinViewerSessionBoundary = boundary;
+  const native = x.crosshairs.onResetCamera;
+  const merging = x.controller.merge('maximize', 'B');
+  await until('the operation holding the reset', () => x.crosshairs.onResetCamera !== native);
+  assert.equal(boundary.hooks(), 1, 'the hold registered its release with the session end');
+  boundary.end();
+  assert.equal(x.crosshairs.onResetCamera, native, 'the end gave the native reset back although the operation never finished');
+  // Here the parked layout still lands (a real end cancels its timer); the operation's own release then has nothing left.
+  await merging;
+  assert.equal(x.crosshairs.onResetCamera, native);
+});
+
+test('an operation that finishes gives the Crosshairs reset back itself and leaves no end hook behind', async () => {
+  const x = fixture({ rows: 1, cols: 3, planes: ['axial', 'sagittal', 'coronal'] });
+  const boundary = sessionBoundary();
+  x.win.KinViewerSessionBoundary = boundary;
+  const native = x.crosshairs.onResetCamera;
+  assert.equal((await x.controller.merge('maximize', 'B')).ok, true);
+  assert.deepEqual([x.crosshairs.onResetCamera === native, boundary.hooks()], [true, 0], 'released and withdrawn by the operation');
+  // A handler installed afterwards (another module's hold) is not touched by a later end.
+  const later = function () { };
+  x.crosshairs.onResetCamera = later;
+  boundary.end();
+  assert.equal(x.crosshairs.onResetCamera, later);
+});
+
 test('work the user did on a maximized plane is kept while the pane refit is not', async () => {
   const x = fixture({ rows: 1, cols: 3, planes: ['axial', 'sagittal', 'coronal'], refitOnResize: true });
   const zoom = x.viewports.get('B').camera.parallelScale;

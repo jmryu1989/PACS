@@ -125,6 +125,13 @@ class DicomPdfE2E(ViewerLayoutE2E):
                                    arg=obj.element_handle(), timeout=60000)
         return obj.evaluate("node=>node.data")
 
+    def cell_bytes(self, page, index):
+        """The bytes of the document a PDF cell shows (the Blob behind its object URL), or None."""
+        values = page.evaluate("""async i=>{const cell=document.querySelectorAll('[data-cy=viewport-grid] > div')[i];
+          const url=cell?.querySelector('object[type="application/pdf"]')?.data,blob=url&&window.__kinTestBlobs?.get(url);
+          return blob?Array.from(new Uint8Array(await blob.arrayBuffer())):null;}""", index)
+        return None if values is None else bytes(values)
+
     def read_paths(self):
         return {urlsplit(response.url).path for response in self.pdf_reads}
 
@@ -196,15 +203,24 @@ class DicomPdfE2E(ViewerLayoutE2E):
         fixture = self.ct("PDF-TWO-" + uuid.uuid4().hex[:12], "current", "20260801")
         first = self.pdf_source(fixture, ["FIRST PDF PAGE 1", "FIRST PDF PAGE 2"], "PDF First")
         second = self.pdf_source(fixture, ["SECOND PDF PAGE 1", "SECOND PDF PAGE 2"], "PDF Second")
-        page = self.launch_pdf_viewer(self.login(), [fixture]); self.grid(page, 2)
-        # Each cell's blob is made from the one read that its placement caused, so the order of reads says which
-        # document a cell shows.
+        work = self.login()
+        # Which bytes each cell shows: the Blob behind each object URL the viewer makes (test-owned record, read in the
+        # page; the viewer's CSP has no connect-src for blob: URLs).
+        work.context.add_init_script("""(()=>{const make=URL.createObjectURL;window.__kinTestBlobs=new Map();
+          URL.createObjectURL=function(value){const url=make.call(this,value);if(value instanceof Blob)__kinTestBlobs.set(url,value);return url;};})();""")
+        page = self.launch_pdf_viewer(work, [fixture]); self.grid(page, 2)
+        # A new empty cell is filled by the viewer itself with a series not yet shown - here one of the two PDFs - and a
+        # PDF cell reads its document before it shows it. So the reads are those of this study's two documents (never
+        # another), and each cell is checked by the bytes it shows, not by the order of the reads.
         self.place(page, first, 0); first_url = self.object_url(page, 0)
-        self.assertEqual(self.read_paths(), {first["pdf"]}); self.assertEqual(self.bound_read(page, first).body(), first["payload"])
+        self.assertIn(first["pdf"], self.read_paths()); self.assertLessEqual(self.read_paths(), {first["pdf"], second["pdf"]})
+        self.assertEqual(self.bound_read(page, first).body(), first["payload"])
         self.place(page, second, 1); second_url = self.object_url(page, 1)
         self.assertEqual(self.read_paths(), {first["pdf"], second["pdf"]}); self.assertEqual(self.bound_read(page, second).body(), second["payload"])
         page.wait_for_function("()=>document.querySelectorAll('object[type=\"application/pdf\"]').length===2", timeout=60000)
         self.assertNotEqual(first_url, second_url); self.assertEqual(self.object_url(page, 0, first_url), first_url)
+        self.assertEqual((self.cell_bytes(page, 0), self.cell_bytes(page, 1)), (first["payload"], second["payload"]),
+                         "each cell shows its own document's bytes")
         with failure_details(page,"PDF selection failure","() => ({status:document.querySelector('#kin-source-pdf-status')?.textContent,panel:document.querySelector('#kin-source-pdf')?.textContent,activeViewportId:services.viewportGridService.getState().activeViewportId,cells:[...services.viewportGridService.getState().viewports.values()].map(v=>({id:v.viewportId,displaySets:v.displaySetInstanceUIDs}))})"):
             expect(page.locator("#kin-source-pdf")).to_contain_text("PDF Second")
         page.evaluate("""s=>{const d=services.displaySetService.getActiveDisplaySets().find(x=>x.SOPInstanceUID===s),original=d.pdfUrl;

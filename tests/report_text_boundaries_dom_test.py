@@ -175,6 +175,9 @@ class MultiStudySite(h.Site):
         self.held_viewers = None        # a list: the viewer document's answer is held (the window is still loading)
         self.templates, self.dictation, self.findings = [], None, None
         self.dictations, self.sids = [], 0
+        # Study B's own GET draft answers. B's requests run through study A's handler (api below), so without its own
+        # queue a read of study B would take the answer a test queued for study A's read.
+        self.draft_read_answers_b = []
 
     def handle(self, route, request):
         url = h.urlparse(request.url)
@@ -309,8 +312,12 @@ class MultiStudySite(h.Site):
                 def abort(self, error_code="failed"):
                     return actions.append(("abort", {"error_code": error_code})) if self.deferred else route.abort(error_code)
             answer = Answer()
-            with self.study(uid):
-                result = super().api(answer, request, method, path.replace(h.UID_B, h.UID), query)
+            a_reads, self.draft_read_answers = self.draft_read_answers, self.draft_read_answers_b
+            try:
+                with self.study(uid):
+                    result = super().api(answer, request, method, path.replace(h.UID_B, h.UID), query)
+            finally:
+                self.draft_read_answers_b, self.draft_read_answers = self.draft_read_answers, a_reads
             answer.deferred = False
             for action, kwargs in actions:
                 getattr(route, action)(**kwargs)
@@ -336,6 +343,11 @@ class MultiStudySite(h.Site):
         else:
             route.fulfill(json={**self.envelope(h.RAD), "state": self.state(h.RAD)})
         return 200
+
+    def drop_discard(self):
+        """A held Discard Draft of study A never reaches the server: the connection breaks, the row stays."""
+        route, _ = self.held_discards.pop(0)
+        route.abort("connectionreset")
 
     def lose(self, route, body, rs):
         """The server accepts a held Approve or Save as it was sent (as `accept` does); its answer reaches nobody."""
@@ -2129,9 +2141,10 @@ class ReportTextBoundaries(h.LogoutDOMTest):
     def test_a_discard_accepted_after_the_study_was_left_does_not_store_the_discarded_text(self):
         """Closure audit claim 3. The reader types, presses Discard Draft and moves to study B before the answer; the
         write of leaving waits behind the discard. The discarded text is not stored again - with the answer received or
-        lost. A sentence typed AFTER the press is new text and is stored."""
+        lost, and also when the first read that would confirm a lost answer fails too (the discard's outcome is then
+        unknown; a later successful read tells it). A sentence typed AFTER the press is new text and is stored."""
         for typed_after in (False, True):
-            for answer in ("received", "lost"):
+            for answer in ("received", "lost", "lost, first read lost too"):
                 with self.subTest(typed_after_the_press=typed_after, answer=answer):
                     self.discard_out(typed_before=True)
                     if typed_after:
@@ -2139,20 +2152,78 @@ class ReportTextBoundaries(h.LogoutDOMTest):
                     self.switch(h.PATIENT_B)
                     self.page.wait_for_timeout(300)
                     self.assertEqual([], self.site.puts, "a write of study A left while its discard was out")
-                    self.assertEqual(200, self.site.finish_discard(lost=answer == "lost"))
+                    if answer == "lost, first read lost too":
+                        self.site.draft_read_answers = ["abort"]       # study A's next GET draft: the confirming read
+                    self.assertEqual(200, self.site.finish_discard(lost=answer != "received"))
                     self.page.wait_for_timeout(800)
                     self.let_everything_go()
+                    self.assertEqual([], self.site.draft_read_answers, "the confirming read of study A was the one that failed")
                     self.assertEqual(EMPTY, self.editor(), "study B's editor was written by study A's answer")
                     if not typed_after:
                         self.assertEqual(([], None), (self.site.puts, self.site.draft_row()),
                                          "claim 3: the text the reader discarded was stored again as a draft")
                         self.assertFalse(self.leaving_asks())
                         self.assert_reopened(self.SAVED, False, "claim 3")
+                        self.log_out_main()
+                        self.page.wait_for_url(h.INDEX_URL)
+                        self.assertEqual(([], None, 1), (self.site.puts, self.site.draft_row(), len(self.site.logouts)),
+                                         "claim 3: Log out preserved the discarded text")
                         continue
                     later = {**h.FIELDS, "findings": h.FIELDS["findings"] + self.DISCARDED + self.LATE}
                     self.assertEqual((later, SAVED_REPORT["version"]), (self.site.stored_for(h.UID), self.site.draft_row()["baseVersion"]),
                                      "text typed after the press is new text and is stored")
                     self.assert_reopened(later, True, "text typed after pressing Discard Draft, then leaving")
+
+    def test_a_discard_of_unknown_outcome_brings_back_nothing_discarded_and_keeps_what_was_typed_after(self):
+        """Draft resurrection (Astra 2026-10-06): the reader types, presses Discard Draft and stays on study A; the
+        server's answer is lost AND the read that would confirm it fails too - the outcome is unknown. The text up to
+        the press is what the reader threw away: the 20 s autosave and Log out do not store it, and the next successful
+        read shows the server's state (a new document too). A DELETE that never reached the server is not taken as
+        done: the stored draft is shown again with Discard Draft. Text typed after the press is new text and is stored."""
+        for then in ("autosave and the next read", "Log out before any read"):
+            with self.subTest(server="discarded", then=then):
+                self.discard_out(typed_before=True)
+                self.site.draft_read_answers = ["abort"]
+                self.assertEqual(200, self.site.finish_discard(lost=True))
+                self.page.wait_for_timeout(800)
+                self.assertEqual([], self.site.draft_read_answers, "the confirming read was the one that failed")
+                self.assertFalse(self.leaving_asks(), "the discarded text is not unsaved work")
+                if then == "Log out before any read":
+                    self.log_out_main()
+                    self.page.wait_for_url(h.INDEX_URL)
+                    self.assertEqual(([], None, 1), (self.a_writes(), self.site.draft_row(), len(self.site.logouts)),
+                                     "Log out preserved the discarded text as a draft")
+                    continue
+                self.let_everything_go()
+                self.assertEqual(([], None), (self.a_writes(), self.site.draft_row()),
+                                 "the autosave stored the discarded text again as a draft")
+                self.assertEqual({"editor": self.SAVED, "bar": False, "discard": False}, self.shown(),
+                                 "the next read shows the discard on the screen")
+                self.assert_reopened(self.SAVED, False, "a discard learnt by a later read")
+        with self.subTest(server="never reached"):
+            self.discard_out(typed_before=True)
+            self.site.draft_read_answers = ["abort"]
+            # No list read answers from here on: what the screen shows is what the discard's own outcome read learnt,
+            # not a later list poll repainting the server's draft over it.
+            self.site.held_lists = []
+            self.site.drop_discard()
+            self.page.wait_for_timeout(800)
+            self.let_everything_go()
+            self.assertEqual(([], h.FIELDS), (self.a_writes(), self.site.stored_for(h.UID)),
+                             "nothing is written and the stored draft stays")
+            self.assertEqual({"editor": h.FIELDS, "bar": True, "discard": True}, self.shown(),
+                             "a lost DELETE is not taken as done: the stored draft is shown again with Discard Draft")
+        with self.subTest(server="discarded", typed_after_the_press=True):
+            self.discard_out(typed_before=True)
+            self.page.locator("#findings").press_sequentially(self.LATE)
+            self.site.draft_read_answers = ["abort"]
+            self.assertEqual(200, self.site.finish_discard(lost=True))
+            self.page.wait_for_timeout(800)
+            self.assertTrue(self.leaving_asks(), "the text typed after the press is unsaved work")
+            self.let_everything_go()
+            later = {**h.FIELDS, "findings": h.FIELDS["findings"] + self.DISCARDED + self.LATE}
+            self.wait_until(lambda: self.site.stored_for(h.UID) == later, "the text typed after the press is stored")
+            self.assert_reopened(later, True, "text typed after a discard of unknown outcome")
 
     def test_log_out_pressed_while_a_discard_is_out_waits_for_it_and_preserves_nothing_discarded(self):
         """Claim 3 at Log out: the preparation captures the text only after the discard's answer, so the text the

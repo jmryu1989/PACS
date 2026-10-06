@@ -1332,8 +1332,12 @@ async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
  const w={shows:L_STACK_SOP,apply:[],captured:{version:4,studies:[L_STUDY],cells:[]}};
  // The screen: three orthographic planes (captured by the MPR Job stub) or the stack cells a version 2 restore laid out.
  const views=new Map(),lookup=new Map();
- const stackView=()=>{let index=0;return {type:'stack',getImageIds:()=>['img:'+L_STACK_SOP],getCurrentImageId:()=>'img:'+w.shows,
-  setImageIdIndex:async i=>{index=i;},scroll(){},getTargetImageIdIndex:()=>index,setProperties(){},setCamera(){},render(){},getDefaultActor:()=>({actor:{}})};};
+ // `w.nativeResets` (n): the native viewer sets the cell's stack again just after each of the next n frame applies, so the
+ // cell shows another original (`w.resetShown`) until the next apply; `w.setIndexCalls` counts the applies.
+ const stackView=()=>{let index=0;return {type:'stack',getImageIds:()=>['img:'+L_STACK_SOP],getCurrentImageId:()=>'img:'+(w.resetShown||w.shows),
+  setImageIdIndex:async i=>{index=i;w.setIndexCalls=(w.setIndexCalls||0)+1;w.resetShown=null;
+   if(w.nativeResets>0){w.nativeResets--;setImmediate(()=>{w.resetShown='1.2.99';});}},
+  scroll(){},getTargetImageIdIndex:()=>index,setProperties(){},setCamera(){},render(){},getDefaultActor:()=>({actor:{}})};};
  const grid={active:'vp-0',
   getState:()=>({layout:{numRows:1,numCols:views.size,layoutType:'grid'},viewports:views,activeViewportId:grid.active}),
   setLayout:async opts=>{log.push('setLayout');views.clear();lookup.clear();const n=opts.numRows*opts.numCols;
@@ -1588,6 +1592,29 @@ test('S2-L2a continuation: another study set continues in a new page with a one-
   assert.equal(new URL(pair.assigned[0]).searchParams.get('StudyInstanceUIDs'),L_STUDY);
   assert.equal(single.message.includes('비교 검사를 함께 여는'),false);
  }finally{pair.stop();}
+});
+
+// S7-U5 fix round H3 (job_03 observed alone twice: the second study's cell showed its first frame when "restored" was
+// reported - the native viewer had set that cell's stack again after the saved frame was applied). A version 1-3 restore
+// reads its cells back once the native viewer has settled; a cell the native viewer moved is applied once more; one that
+// stays moved fails the restore (rolled back); and nothing applies the saved frame again after the restore has reported.
+test('S7-U5 a version 1-3 restore is read back after the native viewer settles: a late reset is applied once more, one that stays is rolled back, nothing re-applies afterwards',async()=>{
+ const w=await locationWorld();
+ try{
+  w.server.job=()=>({status:200,body:{id:L_JOB,revision:1,snapshotVersion:2,snapshot:lStack()}});w.server.row.snapshotVersion=2;
+  w.nativeResets=1;w.setIndexCalls=0;
+  w.button('Restore Job').onclick();await lSettle(600);
+  assert.equal(w.status(),'비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.');
+  assert.deepEqual([w.setIndexCalls,w.resetShown],[2,null],'the cell the native viewer moved was applied once more and shows the saved original');
+  // The person moves the cell afterwards: the saved frame is not applied again.
+  w.resetShown='1.2.98';const calls=w.setIndexCalls;await lSettle(600);
+  assert.deepEqual([w.setIndexCalls,w.resetShown],[calls,'1.2.98'],'no re-apply after the restore reported');
+  // The native reset comes back after the one re-apply: the restore fails and the previous screen is put back.
+  w.resetShown=null;w.planes();w.log.length=0;w.nativeResets=2;
+  w.button('Restore Job').onclick();await lSettle(600);
+  assert.equal(w.status(),'저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요. 입력은 유지됩니다.');
+  assert.deepEqual(w.log,['setLayout','apply:4'],'the saved layout, then the previous screen');
+ }finally{w.stop();}
 });
 
 test('S2-L2a the Restore Job button keeps its texts and never moves a point, pre-reads or writes a continuation nonce',async()=>{

@@ -121,3 +121,108 @@ test('PRECISION: mirror twice returns a large-origin camera without changing sou
     assert.equal(JSON.stringify(initial), snapshot);
   }
 });
+
+// S7-U5 fix round H2: a flip (and the rotation with it) stays while the person scrolls the same stack; a new stack and a
+// reset are left to the pinned viewer. The frame update is the pinned upstream text (fixtures/viewer-frame-source.cjs);
+// its collaborators are a plain camera with the pinned viewer's GPU rotation (getRotationGPU / setRotationGPU without the
+// pan bookkeeping; vtk's roll turns viewUp about the direction of projection) and a reset that clears both flips.
+const frame = require('./fixtures/viewer-frame-source.cjs');
+const vec = {
+  dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+  cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+  negate: a => [-a[0], -a[1], -a[2]],
+  unit: a => { const n = Math.hypot(a[0], a[1], a[2]); return [a[0] / n, a[1] / n, a[2] / n]; },
+};
+function roll(camera, degrees) {
+  const k = vec.unit([0, 1, 2].map(i => camera.focalPoint[i] - camera.position[i])), t = degrees * Math.PI / 180;
+  const v = camera.viewUp, kv = vec.cross(k, v), d = vec.dot(k, v);
+  return [0, 1, 2].map(i => v[i] * Math.cos(t) + kv[i] * Math.sin(t) + k[i] * d * (1 - Math.cos(t)));
+}
+async function frameWorld() {
+  const c = context();
+  Object.defineProperty(c.StackViewport.prototype, '_updateActorToDisplayImageId',
+    { value: frame._updateActorToDisplayImageId, configurable: true, writable: true });
+  assert.equal(await c.extension.preRegistration(), 'ready');
+  const initial = { viewPlaneNormal: [0, 0, 1], viewUp: [0, -1, 0], focalPoint: [10000.5, -20000.25, 30000.75],
+    position: [10000.5, -20000.25, 30100.75] };
+  const viewport = () => {
+    const v = new c.StackViewport();
+    let camera = structuredClone(initial);
+    Object.assign(v, {
+      initialViewUp: initial.viewUp, stackInvalidated: false,
+      getDefaultImageData: () => ({ getDimensions: () => [256, 256, 1],
+        indexToWorld: (_idx, out) => { out.set(initial.focalPoint); return out; } }),
+      getCamera: () => ({ ...camera, flipHorizontal: !!v.flipHorizontal, flipVertical: !!v.flipVertical }),
+      setCamera: change => { camera = { ...camera, ...change }; },
+      render() {},
+      resetCameraNoEvent() { camera = structuredClone(initial); v.flipHorizontal = false; v.flipVertical = false; },
+      getRotation() {
+        const { viewUp, viewPlaneNormal, flipVertical } = v.getCamera();
+        const start = flipVertical ? vec.negate(v.initialViewUp) : v.initialViewUp;
+        const angle = Math.acos(Math.max(-1, Math.min(1, vec.dot(start, viewUp)))) * 180 / Math.PI;
+        return vec.dot(vec.cross(start, viewUp), viewPlaneNormal) >= 0 ? angle : (360 - angle) % 360;
+      },
+      setRotation(rotation) {
+        camera.viewUp = v.flipVertical ? vec.negate(v.initialViewUp) : v.initialViewUp;
+        camera.viewUp = roll(camera, -rotation);
+      },
+      getViewPresentation: () => ({ rotation: v.getRotation() }),
+      setViewPresentation: p => { if (p.rotation >= 0) v.setRotation(p.rotation); },
+      _checkVTKImageDataMatchesCornerstoneImage: () => true,
+      _updateVTKImageDataFromCornerstoneImage() {}, _setPropertiesFromCache() {},
+      getImageDataMetadata: () => ({ origin: [0, 0, 0], direction: [1, 0, 0, 0, 1, 0, 0, 0, 1], dimensions: [256, 256, 1],
+        spacing: [1, 1, 1], numberOfComponents: 1, imagePixelModule: { photometricInterpretation: 'MONOCHROME2' } }),
+      _createVTKImageData() {}, createActorMapper: () => ({}), getActors: () => [], setActors() {},
+      _getCameraOrientation: () => ({ viewPlaneNormal: initial.viewPlaneNormal, viewUp: initial.viewUp }),
+      setCameraNoEvent: change => { camera = { ...camera, ...change }; },
+      triggerCameraEvent() {}, _getInitialVOIRange: () => ({ lower: 0, upper: 1 }), setVOI() {}, setInvertColor() {},
+    });
+    // What the person does: a 90 degree turn ('r'), then the flips; then the viewer shows frames.
+    v.person = flips => { v.setRotation((v.getRotation() + 90) % 360); v.flip(flips); };
+    v.state = () => ({ viewUp: Array.from(camera.viewUp, n => Math.round(n * 1e9) / 1e9 + 0),
+      viewPlaneNormal: Array.from(camera.viewPlaneNormal, n => Math.round(n * 1e9) / 1e9 + 0),
+      flipHorizontal: !!v.flipHorizontal, flipVertical: !!v.flipVertical, rotation: Math.round(v.getRotation() * 1e6) / 1e6 });
+    v.frame = () => v._updateActorToDisplayImageId({ voxelManager: { getScalarData: () => new Float32Array(1) } });
+    v.stockFrame = () => frame._updateActorToDisplayImageId.call(v, { voxelManager: { getScalarData: () => new Float32Array(1) } });
+    return v;
+  };
+  return { c, viewport };
+}
+
+test('S7-U5 a flip and the turn with it stay while the same stack is scrolled', async () => {
+  const world = await frameWorld();
+  assert.equal(world.c.window.kinViewerFlipKeeper.state, 'ready');
+  for (const flips of [{ flipHorizontal: true }, { flipVertical: true }, { flipHorizontal: true, flipVertical: true }]) {
+    const v = world.viewport();
+    v.person(flips);
+    const shown = v.state();
+    v.frame(); assert.deepEqual(v.state(), shown, 'next frame: ' + JSON.stringify(flips));
+    v.frame(); assert.deepEqual(v.state(), shown, 'the frame after: ' + JSON.stringify(flips));
+  }
+});
+
+test('S7-U5 the pinned frame update alone drops the flip and turns the image (what the keeper corrects)', async () => {
+  const v = (await frameWorld()).viewport();
+  v.person({ flipHorizontal: true });
+  const shown = v.state();
+  v.stockFrame();
+  assert.equal(v.state().flipHorizontal, false);
+  assert.notDeepEqual(v.state().viewUp, shown.viewUp, 'without the flip the 90 degree turn comes back as 270');
+});
+
+test('S7-U5 a new stack and a reset are left to the pinned viewer: nothing is given back', async () => {
+  const world = await frameWorld();
+  const pair = () => { const a = world.viewport(), b = world.viewport(); a.person({ flipHorizontal: true }); b.person({ flipHorizontal: true }); return [a, b]; };
+  // setStack clears both flips and invalidates the stack before its first frame (camera vectors untouched).
+  let [kept, stock] = pair();
+  for (const v of [kept, stock]) Object.assign(v, { stackInvalidated: true, flipHorizontal: false, flipVertical: false });
+  kept.frame(); stock.stockFrame();
+  assert.deepEqual(kept.state(), stock.state());
+  assert.equal(kept.state().flipHorizontal, false);
+  // An explicit reset (Space/Reset, Reset Display) clears the flips outside the frame update; the next frame keeps that.
+  [kept, stock] = pair();
+  for (const v of [kept, stock]) v.resetCameraNoEvent();
+  kept.frame(); stock.stockFrame();
+  assert.deepEqual(kept.state(), stock.state());
+  assert.equal(kept.state().flipHorizontal, false);
+});
