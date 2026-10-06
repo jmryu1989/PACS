@@ -919,7 +919,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [u5-session-api, u5-session-draft, u5-session-regression, u5-session-boundaries, u5-session-mutants, u5-session-browser]
+        profile: [u5-session-api, u5-session-draft, u5-session-regression, u5-session-boundaries, u5-session-mutants, u5-session-browser, u5-session-end]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

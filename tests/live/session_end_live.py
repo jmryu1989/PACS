@@ -13,6 +13,8 @@ same doctor's other PC untouched, a provider end racing a refresh (F2), and what
 
 Run only through the guarded runner, on the isolated synthetic stack, after the unit's migration is applied there:
     python scripts/run-tests.py --module tests/live/session_end_live.py --mode live --unit s7-u5-session-end --timeout 1800
+Hosted CI: the `u5-session-end` profile of tests/measurement_ci.py (validate.yml s7-u5-session-contracts matrix), on
+its own empty runner because SE-02 pauses Keycloak.
 SE-02 pauses and unpauses the stack's own keycloak service for about four seconds (`docker compose pause keycloak`,
 no restart, no configuration change); every other case only reads Keycloak and the database.
 
@@ -68,6 +70,15 @@ WHERE = """() => { const p = location.pathname;
     return b && !document.documentElement.classList.contains('auto-entry') ? 'landing' : null; }
   if (/\\/(main|clinician)\\.html$/.test(p)) return typeof KinAuth !== 'undefined' && KinAuth.lifecycle().state === 'active' ? 'main' : null;
   return null; }"""
+# A landing press is answered when the document leaves the landing (on its way to the provider or the work screen) or
+# when the landing writes its answer into the notice line. The landing is itself the stable state before the press, so
+# reading it right after the click would read the press's start, not its answer. The notice line is watched for any
+# write, not for a changed text: a press that fails the same way twice ("the previous login's end is not confirmed yet")
+# writes the same sentence again.
+WATCH_NOTICE = """() => { window.kinTestNoticeWritten = false;
+  new MutationObserver(() => { window.kinTestNoticeWritten = true; })
+    .observe(document.querySelector('#msg'), { childList: true, characterData: true, subtree: true }); }"""
+ANSWERED = """() => !/\\/index\\.html$/.test(location.pathname) || window.kinTestNoticeWritten === true"""
 
 
 def compose_done(done: subprocess.CompletedProcess, verb: str) -> None:
@@ -113,6 +124,11 @@ class SessionEndLive(unittest.TestCase):
         for user_id in self.ids.values():
             self.stack.kc_admin("POST", f"/users/{user_id}/logout")
         cleanup_sessions(self.stack)
+        # What this case wrote: end records after this floor and end marks of the provider sessions this case signed in
+        # to. The append-only audit is not cleared between cases (the class end purges the owned rows); without the
+        # floor an earlier case's Log out record would count as this case's.
+        self.audit_floor = int(psql('SELECT coalesce(max(id), 0) FROM "AuditLog";')[0])
+        self.case_sessions = {"A": [], "B": []}
 
     def tearDown(self):
         for context in self.contexts:
@@ -139,6 +155,13 @@ class SessionEndLive(unittest.TestCase):
     def settle(self, page) -> str:
         return page.wait_for_function(WHERE).json_value()
 
+    def press(self, page, selector: str) -> str:
+        """One press of a landing button; where the browser is once the press has been answered."""
+        page.evaluate(WATCH_NOTICE)
+        page.click(selector)
+        page.wait_for_function(ANSWERED)
+        return self.settle(page)
+
     def credentials(self, page, who: str, name: bool = True) -> str:
         if name:
             page.fill("#username", self.stack.username(self.logins[who]))
@@ -152,13 +175,13 @@ class SessionEndLive(unittest.TestCase):
         page.goto(self.stack.proxy + APP + "index.html")
         at = self.settle(page)
         if at == "landing":
-            page.click("#signin")
-            at = self.settle(page)
+            at = self.press(page, "#signin")
         self.assertEqual(at, "keycloak", "a browser without a session meets the provider's form")
         self.assertEqual(self.credentials(page, who), "main")
         for line in psql(f'SELECT coalesce("idpSid", \'\') FROM "AuthSession" WHERE sub=\'{self.ids[who]}\';'):
             self.assertTrue(line, "every session remembers its provider session")
             type(self).provider_sessions.append(line)
+            self.case_sessions[who].append(line)
         return page.evaluate("KinAuth.sessionId()")
 
     # ── what the server and the provider hold ──
@@ -170,13 +193,14 @@ class SessionEndLive(unittest.TestCase):
         return len(answer.body) if isinstance(answer.body, list) else -1
 
     def ends(self, who: str) -> list:
+        """(action, cause) of the end records of this account written during this case."""
         rows = psql(f'SELECT action || E\'\\t\' || detail FROM "AuditLog" WHERE target=\'{self.ids[who]}\' '
-                    "AND action IN ('auth.logout','auth.session.expired') ORDER BY id;")
+                    f"AND action IN ('auth.logout','auth.session.expired') AND id > {self.audit_floor} ORDER BY id;")
         return [(row.split("\t")[0], json.loads(row.split("\t", 1)[1]).get("cause")) for row in rows]
 
     def marks(self, who: str) -> list:
-        """(cause, confirmed) of the end marks of this account's provider sessions seen in this run."""
-        owned = ",".join(f"'{value}'" for value in self.provider_sessions) or "''"
+        """(cause, confirmed) of the end marks of this account's provider sessions signed in to during this case."""
+        owned = ",".join(f"'{value}'" for value in self.case_sessions[who]) or "''"
         return [tuple(row.split("\t")) for row in psql(
             f'SELECT cause || E\'\\t\' || ("confirmedAt" IS NOT NULL)::text FROM "IdpSessionEnd" WHERE "idpSid" IN ({owned}) ORDER BY "decidedAt";')]
 
@@ -216,8 +240,7 @@ class SessionEndLive(unittest.TestCase):
         # R1: the provider session is ended - by the product, confirmed in its mark - without the person waiting for it.
         self.wait("the provider session ended and the mark confirmed", lambda: self.provider_alive("A") == 0 and self.marks("A")[-1:] == [("logout", "true")])
         # The day after (or a minute after): one Login press, then credentials. Never a silent entry.
-        page.click("#signin")
-        self.assertEqual(self.settle(page), "keycloak")
+        self.assertEqual(self.press(page, "#signin"), "keycloak")
         self.assert_editable_form(page, "after a Log out")
         self.assertEqual(context.asked[-3:], [("start", "logout_unfinished", False), ("authorize", "none"), ("authorize", "login")],
                          "the explicit logout's Login declares its intent, probes, then asks for credentials")
@@ -245,11 +268,8 @@ class SessionEndLive(unittest.TestCase):
                                         timeout=60), "unpause")
         # Login right away: whether or not the retry has ended the provider session yet, nobody enters without the form.
         seen = []
-        for press in range(3):
-            page.click("#signin")
-            page.wait_for_function("b => location.pathname.startsWith('/auth/realms/kin/') || document.querySelector('#msg').textContent !== b",
-                                   arg=page.inner_text("#msg") if "/index.html" in page.url else "")
-            at = self.settle(page)
+        for _ in range(3):
+            at = self.press(page, "#signin")
             seen.append(at)
             self.assertNotEqual(at, "main", "a silent re-entry as the previous doctor")
             if at == "keycloak":
@@ -278,8 +298,7 @@ class SessionEndLive(unittest.TestCase):
     def test_03_next_person_at_an_unfinished_logout_logs_in_as_themselves(self):
         """Acceptance 7: the next person B presses Login once at doctor A's unfinished-logout landing."""
         context, page = self.unfinished_logout()
-        page.click("#signin")
-        self.assertEqual(self.settle(page), "keycloak")
+        self.assertEqual(self.press(page, "#signin"), "keycloak")
         self.assert_editable_form(page, "the next person's Login")
         self.assertEqual(context.asked[-2:], [("start", "logout_unfinished", True), ("authorize", "login")],
                          "a bound start with the intent, then the fresh step - no probe is needed after a confirmed end")
@@ -292,12 +311,13 @@ class SessionEndLive(unittest.TestCase):
 
     def test_04_switch_account_shows_an_editable_name(self):
         context, page = self.unfinished_logout()
-        page.click("#switch")
-        self.assertEqual(self.settle(page), "keycloak")
+        self.assertEqual(self.press(page, "#switch"), "keycloak")
         self.assert_editable_form(page, "Switch account")
         self.assertEqual(self.ends("A"), [("auth.logout", "account_switch")])
+        # The switch is complete only when B's credentials made B's session in this browser - arriving at the form is not.
         self.assertEqual(self.credentials(page, "B"), "main")
-        self.assertEqual((self.me(context), self.product_sessions("A"), self.provider_alive("A")), ((200, self.ids["B"]), 0, 0))
+        self.assertEqual(self.me(context), (200, self.ids["B"]))
+        self.assertEqual((self.product_sessions("A"), self.provider_alive("A"), self.product_sessions("B")), (0, 0, 1))
         self.report("SE-04", a_ends=self.ends("A"))
 
     def test_05_the_same_doctors_other_pc_keeps_working(self):
@@ -327,8 +347,7 @@ class SessionEndLive(unittest.TestCase):
         time.sleep(1)
         self.assertEqual(urlparse(page.url).path, APP + "index.html")
         del context.asked[:]
-        page.click("#signin")
-        self.assertEqual(self.settle(page), "keycloak")
+        self.assertEqual(self.press(page, "#signin"), "keycloak")
         self.assert_editable_form(page, "the recovery Login")
         self.assertEqual(context.asked, [("start", "storage_untrusted", False), ("authorize", "none"), ("authorize", "login")])
         # The probe identified A's SSO and ended it - with A's product session of that SSO - before the form.
