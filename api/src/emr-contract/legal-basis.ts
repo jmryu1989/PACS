@@ -1,4 +1,4 @@
-import { freeze } from './validation';
+import { freeze, object, refuse, string, utc } from './validation';
 
 /** Publication identifiers survive upstream history rewrites. Dates are legal metadata, not delivery deadlines. */
 export const LEGAL_SOURCES = freeze({
@@ -22,11 +22,34 @@ export const LEGAL_SOURCES = freeze({
 });
 
 export interface StatutoryMinimum { clauseId: string; years: number; basis: string; scope: string; verification: string }
+export interface ClauseVersion { law: string; article: string; publication: string; publishedAt: string; effectiveAt: string }
+/** Stable clause keys; preserve historical entries when adding a reviewed publication. */
+export const HOLD_CLAUSE_VERSIONS: Readonly<Record<string, readonly ClauseVersion[]>> = freeze(Object.fromEntries(
+  ['35.3', '36.2'].map(article => [`privacy:${article}`, [LEGAL_SOURCES.privacy, LEGAL_SOURCES.privacyAmended].map(source => ({
+    law: 'privacy', article, publication: source.publication, publishedAt: source.publishedAt, effectiveAt: source.effectiveAt,
+  }))])));
+export function clauseVersionAt(versions: readonly ClauseVersion[], at: string): Readonly<ClauseVersion> {
+  if (!Array.isArray(versions) || !versions.length) refuse('HoldClauseRequired');
+  const day = new Date(Date.parse(utc(at)) + 9 * 3_600_000).toISOString().slice(0, 10);
+  for (const version of versions) {
+    object(version, ['law', 'article', 'publication', 'publishedAt', 'effectiveAt']);
+    string(version.law); string(version.article); string(version.publication);
+    for (const date of [version.publishedAt, version.effectiveAt]) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || new Date(date).toISOString().slice(0, 10) !== date) refuse('HoldClauseRequired');
+    }
+    if (version.publishedAt > version.effectiveAt) refuse('HoldClauseRequired');
+  }
+  if (new Set(versions.map(v => v.publication)).size !== versions.length ||
+      new Set(versions.map(v => v.effectiveAt)).size !== versions.length) refuse('HoldClauseRequired');
+  const applicable = [...versions].filter(v => v.effectiveAt <= day).sort((a, b) => a.effectiveAt.localeCompare(b.effectiveAt)).at(-1);
+  if (!applicable) refuse('HoldClauseRequired');
+  return applicable;
+}
 /** D591: a real correction duty may be registered by the controller; this is not a retention setting.
  * Further statutory duties require a reviewed entry, including the authority named by that clause.
  */
 export const HOLD_DUTY_CLAUSES = freeze({
-  'privacy:36.2': { law: 'privacy', article: '36.2', version: LEGAL_SOURCES.privacy.publication,
+  'privacy:36.2': { law: 'privacy', article: '36.2',
     authority: 'personal-information-controller', condition: 'duty-active' },
 });
 export const STATUTORY_MINIMUM = freeze({

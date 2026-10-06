@@ -1,6 +1,7 @@
+import { resolveAccessRecord } from './composition';
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
-import { RECORD_CLASSIFICATION, RecordKind, resolveStoredRecord, ResolvedRecord, verifiedRecord, bindStoredRecordReader } from './classification';
+import { RECORD_CLASSIFICATION, RecordKind, resolveStoredRecord, ResolvedRecord, verifiedRecord } from './classification';
 import { newAccessRetentionRecord } from './lawful-defaults';
 import { routeContract, EXTERNAL_SURFACES } from './routes';
 import { choice, freeze, integer, object, sha256, string, utc, refuse } from './validation';
@@ -165,24 +166,8 @@ export interface DurableAccessReceipt { eventId: string; durableAt: string }
  */
 export interface AppendOnlyAccessStore { append(event: Readonly<AccessEvent>): Promise<DurableAccessReceipt> }
 
-// One module-owned adapter, with a fixed model and event mapping. No per-call reader/model injection.
-const accessRows = new Map<string, AccessEvent>();
-const accessReader = bindStoredRecordReader({ load(recordId, eventId) {
-  const event = accessRows.get(eventId);
-  if (!event || recordId !== event.eventId) refuse('AccessRecordRequired');
-  const digest = createHash('sha256').update(JSON.stringify(event)).digest('hex');
-  return { recordId, model: 'AuditLog', row: {}, event: {
-    eventId, recordId, versionId: eventId, sha256: digest, contentSha256: digest, at: event.occurredAt,
-    act: 'access', signature: null, predecessor: null, components: [], processing: null,
-  } };
-} });
-/** 제8조①2: this sensitive-data system retains each staff/service access event for two years from occurrence. */
-export function accessRetention(input: AccessEvent) {
-  const event = parseAccessEvent(input);
-  accessRows.set(event.eventId, event);
-  try { return newAccessRetentionRecord(resolveStoredRecord(accessReader, event.eventId, event.eventId)); }
-  finally { accessRows.delete(event.eventId); }
-}
+/** 제8조①2: each event has its own two-year clock. */
+export function accessRetention(input: AccessEvent) { return newAccessRetentionRecord(resolveAccessRecord(input)); }
 export function deliveryRetention(source: ResolvedRecord) { return newAccessRetentionRecord(source); }
 
 /** A resolved Promise from enqueue/transaction-start is not a durable receipt. */
@@ -211,7 +196,7 @@ export const ACCESS_INVARIANTS = freeze({
   correlation: 'followups retain the prepared event target/version set; ACK never migrates to a new version',
   link: 'random audit-only ID; never a session ID, cookie, bearer token, or authentication credential',
   emptyTargets: 'only an actually empty result or non-record operation; never omitted discovered targets',
-  proxy: 'G supplies verified proxy context, never an untrusted forwarded header',
+  proxy: 'B supplies verified proxy context, never an untrusted forwarded header',
   exports: 'print-done/pdf/copy describe client reports only, not proof of physical output or OS completion',
 });
 

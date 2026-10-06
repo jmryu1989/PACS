@@ -1,3 +1,4 @@
+import { isEmrReader } from './composition';
 import { VersionReference, versionReference } from './signature';
 import { choice, freeze, integer, object, string, utc, refuse } from './validation';
 import { ResolvedRecord, verifiedRecord } from './classification';
@@ -87,12 +88,6 @@ export interface ClinicalStudyReader {
   loadStudy(studyId: string): unknown;
   loadReportPatient(recordId: string): unknown;
 }
-const clinicalReaders = new WeakSet<object>();
-export function bindClinicalStudyReader(reader: ClinicalStudyReader): Readonly<ClinicalStudyReader> {
-  if (!reader || typeof reader.loadStudy !== 'function' || typeof reader.loadReportPatient !== 'function') refuse('ClinicalResumeBasisRefused');
-  const bound = Object.freeze({ loadStudy: reader.loadStudy.bind(reader), loadReportPatient: reader.loadReportPatient.bind(reader) });
-  clinicalReaders.add(bound); return bound;
-}
 const verifiedResumptions = new WeakSet<object>();
 function validateArchive(facts: ReportFacts, event: RetentionOnlyEvent): void {
   const e = object(event, ['action', 'purpose', 'recordId', 'version', 'finalizedAt', 'at', 'actorId', 'reason']);
@@ -104,14 +99,14 @@ function validateArchive(facts: ReportFacts, event: RetentionOnlyEvent): void {
       utc(e.finalizedAt) !== facts.finalized.effectiveAt || utc(e.at) < facts.finalized.processedAt)
     throw new Error('Archive must match retained signed content and stored finalization');
 }
-/** G supplies stored patient/study facts; a preservation order never creates clinical access. */
+/** The clinical storage adapter supplies stored patient/study facts; a preservation order never creates clinical access. */
 export function resumeClinicalUse(facts: ReportFacts, archive: RetentionOnlyEvent,
   command: { actor: LifecycleActor; at: string; basis: ResumeClinicalUseEvent['basis']; studyId: string }, reader: ClinicalStudyReader): Readonly<ResumeClinicalUseEvent> {
   validateReportFacts(facts); validateArchive(facts, archive);
   const c = object(command, ['actor', 'at', 'basis', 'studyId']);
   if (!c.actor.canReadStudy || c.actor.kind !== 'member' || !c.actor.roles.includes('radiologist') || utc(c.at) < archive.at)
     refuse('ClinicalResumeAuthorityRefused');
-  if (c.basis !== 'new-study-same-patient' || !clinicalReaders.has(reader)) refuse('ClinicalResumeBasisRefused');
+  if (c.basis !== 'new-study-same-patient' || !isEmrReader('clinical', reader)) refuse('ClinicalResumeBasisRefused');
   const study = object(reader.loadStudy(string(c.studyId)), ['studyId', 'patientId', 'assigningAuthority', 'createdAt']);
   const patient = object(reader.loadReportPatient(facts.recordId), ['recordId', 'patientId', 'assigningAuthority']);
   string(patient.patientId); string(patient.assigningAuthority);
@@ -201,7 +196,7 @@ export function validateReportFacts(input: ReportFacts): void {
   } else if (f.state === 'Finalized') throw new Error('Stored finalization required');
 }
 
-/** B/I must use this combined pre-check for additions to an existing retention unit, in withRetentionChange.
+/** C must use this combined pre-check for additions to an existing retention unit, in withRetentionChange.
  * Both decisions are persisted atomically; a hold is never a clinical processing basis.
  */
 export function transitionRetainedReport(facts: ReportFacts, command: LifecycleCommand, record: RetentionRecord,
@@ -211,10 +206,10 @@ export function transitionRetainedReport(facts: ReportFacts, command: LifecycleC
     ['amend', 'cancel'].includes(command.action) ? 'correction' : 'entry';
   if (record.recordId !== facts.recordId || e.recordId !== facts.recordId || e.versionId !== ref.versionId ||
       e.sha256 !== ref.sha256 || e.at !== command.at || e.act !== act || !e.signature) refuse('RecordEventBindingRefused');
-  const state = retentionState(record, graph, command.at);
+  const state = retentionState(record, graph, command.at, false);
   if (state.state === 'legal-hold' && command.at >= state.deadline && (command.preservationCorrection ?? command.preservationEntry) !== source) refuse('HeldCorrectionAuthorityRequired');
-  const separated = reportRetentionAccess(facts, archive).state === 'retention-only';
   const outcome = transitionReport(facts, command);
+  const separated = reportRetentionAccess(outcome.facts, archive).state === 'retention-only';
   return freeze({ ...outcome, retention: recordVersionAdded(record, source, graph, separated) });
 }
 /** Pure lifecycle table; signed persistence also requires the combined retention pre-check above. */

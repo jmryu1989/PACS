@@ -1,3 +1,4 @@
+import { isEmrReader } from './composition';
 import { STATUTORY_MINIMUM as FLOOR, StatutoryMinimum } from './legal-basis';
 import { choice, freeze, object, refuse, string, utc, sha256 } from './validation';
 
@@ -121,17 +122,10 @@ export function classifyModel(name: string): readonly RecordKind[] {
   return MODEL_CLASSIFICATION[name];
 }
 
-/** These adapters are bound by B/G to server storage at composition time, never deserialized from a request.
+/** These adapters are bound by the server composition root to server storage at composition time, never deserialized from a request.
  * The caller supplies an opaque row/event ID, not the model, kind, signature verdict or row discriminator.
  */
 export interface StoredRecordReader { load(recordId: string, eventId: string): unknown }
-const storedReaders = new WeakSet<object>();
-/** Composition root only: handlers receive this sealed capability, never a reader from a request. */
-export function bindStoredRecordReader(reader: StoredRecordReader): Readonly<StoredRecordReader> {
-  if (!reader || typeof reader.load !== 'function') refuse('StoredReaderRequired');
-  const bound = Object.freeze({ load: reader.load.bind(reader) });
-  storedReaders.add(bound); return bound;
-}
 export interface Component { recordId: string; partId: string; sha256: string }
 export interface RecordEvent {
   eventId: string; recordId: string; versionId: string; sha256: string; contentSha256: string; at: string;
@@ -139,7 +133,7 @@ export interface RecordEvent {
   signature: { versionId: string; sha256: string; signedAt: string; verified: boolean } | null;
   predecessor: Component | null;
   components: readonly Component[];
-  processing: { basisId: string; authorized: boolean; preservesOriginals: boolean; separateManagement: boolean; permittedHoldIds: readonly string[] } | null;
+  processing: { basisId: string; authorized: boolean; preservesOriginals: boolean; separateManagement: boolean; permittedHoldIds: readonly string[]; componentRecordIds?: readonly string[] } | null;
 }
 export interface ResolvedRecord {
   recordId: string; model: string; kinds: readonly RecordKind[]; row: Readonly<Record<string, any>>; event: Readonly<RecordEvent>;
@@ -195,7 +189,7 @@ function rowKinds(model: string, row: Record<string, any>, event: RecordEvent): 
 }
 export function resolveStoredRecord(reader: StoredRecordReader, recordId: string, eventId: string): Readonly<ResolvedRecord> {
   string(recordId); string(eventId);
-  if (!storedReaders.has(reader)) refuse('StoredReaderRequired');
+  if (!isEmrReader('stored', reader)) refuse('StoredReaderRequired');
   const v = object(reader.load(recordId, eventId), ['recordId', 'model', 'row', 'event']);
   const e = object(v.event, ['eventId', 'recordId', 'versionId', 'sha256', 'contentSha256', 'at', 'act', 'signature', 'predecessor', 'components', 'processing']);
   if (v.recordId !== recordId || e.recordId !== recordId || e.eventId !== eventId) refuse('RecordEventBindingRefused');
@@ -212,10 +206,14 @@ export function resolveStoredRecord(reader: StoredRecordReader, recordId: string
   for (const c of e.components) { object(c, ['recordId', 'partId', 'sha256']); string(c.recordId); string(c.partId); sha256(c.sha256); }
   if (new Set(e.components.map(c => `${c.recordId}\0${c.partId}`)).size !== e.components.length) refuse('ComponentManifestRequired');
   if (e.processing !== null) {
-    const p = object(e.processing, ['basisId', 'authorized', 'preservesOriginals', 'separateManagement', 'permittedHoldIds']);
+    const p = object(e.processing, ['basisId', 'authorized', 'preservesOriginals', 'separateManagement', 'permittedHoldIds', ...(Object.hasOwn(e.processing, 'componentRecordIds') ? ['componentRecordIds'] : [])]);
     string(p.basisId);
     if (![p.authorized, p.preservesOriginals, p.separateManagement].every(x => typeof x === 'boolean') || !Array.isArray(p.permittedHoldIds)) refuse('ProcessingBasisRequired');
     p.permittedHoldIds.forEach(x => string(x));
+    if (p.componentRecordIds !== undefined) {
+      if (!Array.isArray(p.componentRecordIds) || new Set(p.componentRecordIds).size !== p.componentRecordIds.length) refuse('ProcessingBasisRequired');
+      p.componentRecordIds.forEach(x => string(x));
+    }
   }
   const model = string(v.model), row = object(v.row, Object.keys(v.row ?? {}));
   const result = freeze({ recordId, model, row: structuredClone(row), event: structuredClone(e) as RecordEvent, kinds: rowKinds(model, row, e as RecordEvent) });
