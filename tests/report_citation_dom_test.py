@@ -1003,6 +1003,8 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.page.wait_for_function("()=>calls.length===1")
         put = self.page.evaluate("snapshot().calls")[0]
         self.assertEqual(["d1"], put["body"]["citationIds"], "the request keeps what the read confirmed")
+        # Judge the state after the 200 was applied (the pane closes then), not while the insertion is still out.
+        self.page.wait_for_function("()=>!snapshot().shown")
         self.assertEqual(["d1", "d2"], self.page.evaluate("citeInfo('%s')" % UID)["keep"],
                          "pin B2: the 200 extends the confirmed list")
         self.page.evaluate(type_js([EXISTING + "\n" + BLOCK + "\n계속", "", ""]))
