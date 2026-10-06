@@ -610,6 +610,12 @@ for _kind, _extra in {
 for _kind, _extra in {"ids": {}, "functions": {"declareOwnWork": 1}, "selectors": {}}.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S7-U5 fix round E (draft resurrection): a Discard Draft whose outcome is unknown lowers the unconfirmed-text marker
+# and is learnt by the next successful read (noteUnknownDiscard, learnDiscardOutcome); its draft-bar line is the
+# #draftmsg recount below. tests/report_text_boundaries_dom_test.py holds the behaviour.
+for _kind, _extra in {"ids": {}, "functions": {"noteUnknownDiscard": 1, "learnDiscardOutcome": 1}, "selectors": {}}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 # Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {
@@ -624,7 +630,8 @@ RECOUNTED = {
     # of the three fields); the entry retry and failure lines are written to #err; the approved-report pane is drawn by
     # one function for the rebase and for View Approved Report; the draft bar reads whether Addendum can be pressed.
     # S7-U5 integration (845899e): a Log out preparation of another window held -> the boot's onHold writes its line to #err.
-    "selectors": {"#storage": (2, 1), "#b-draft-discard": (2, 3), "#b-report-reload": (2, 3), "#draftmsg": (2, 3),
+    # S7-U5 fix round E: the draft bar says a discard's outcome is not known yet (#draftmsg 3 -> 4).
+    "selectors": {"#storage": (2, 1), "#b-draft-discard": (2, 3), "#b-report-reload": (2, 3), "#draftmsg": (2, 4),
                   "#findings": (12, 11), "#conclusion": (6, 5), "#recommendation": (6, 5), "#err": (4, 9),
                   "#stale-rebase": (6, 7), "#b-addendum": (3, 4)},
 }
