@@ -564,7 +564,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 이 일을 하는 쪽은 한 번에 하나다(F04): 시작할 때 사실의 시도 번호(attempts)를 하나 올려 그 번호를 자기 몫으로 쥐고,
    * 인증 서버에 무엇을 하기 **전마다** 사실이 아직 있고 그 번호가 아직 자기 것인지 본다. 재활성화도 같은 길로 남은 일을
    * 넘겨받으므로(번호를 올린다), 그 전에 시작한 재시도 주기는 다음 걸음 앞에서 멈춘다 — 재활성화가 회원을 활성으로 만든
-   * 뒤에 옛 주기가 비활성화·전체 로그아웃·제품 행 끝냄을 하지 않는다. 인증 서버 호출 동안 트랜잭션·잠금은 쥐지 않는다.
+   * 뒤에 옛 주기가 비활성화·전체 로그아웃·제품 행 끝냄을 하지 않는다(나열도 하지 않는다 — 넘겨받힌 주기는 인증 서버에 더
+   * 묻지 않는다). 인증 서버 호출 동안 트랜잭션·잠금은 쥐지 않는다 — 그래서 확인을 지난 뒤 이미 보낸 호출이 늦게 닿아
+   * 재활성화 뒤에 도착하는 창은 남는다(확인과 호출 사이; 호출을 잠금으로 감싸지 않기로 한 값이다).
    * `claimed`는 이미 번호를 올린 쪽(재시도 주기)이 넘기는 그 번호다. 끝까지 해 완료 시각을 적었으면 true, 사실이 없거나 다른
    * 쪽이 넘겨받아 멈췄으면 false다(부른 쪽은 그때 "끝났다"고 답하지 않는다).
    */
@@ -577,6 +579,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     };
     if (!await this.endMemberSessions(sub, [], owned)) return false;
     let first: string[] | null = null, failure: unknown = null;
+    if (!await owned()) return false;
     try { first = await this.keycloak.userSessions(sub); } catch (error) { failure = error; }
     if (first && !await this.endMemberSessions(sub, first, owned)) return false;
     if (!await owned()) return false;
@@ -588,6 +591,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
      * 서버가 새 토큰도 갱신도 내주지 않는다. 나열이 실패했으면 여기서 알린다(사실은 남고 주기가 잇는다).
      */
     if (failure) throw failure;
+    if (!await owned()) return false;
     const second = await this.keycloak.userSessions(sub);
     if (!await this.endMemberSessions(sub, second, owned)) return false;
     if (!await owned()) return false;
@@ -665,7 +669,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       const rows: Session[] = await this.storage('session_read', () => this.prisma.authSession.findMany({ where: { sub } }));
       if (!rows.length) return true;
       if (rounds === TRANSITION_LIMIT) throw this.conflict();
-      for (const row of rows) await this.endAndTell(row, 'isolation', null);
+      // 읽은 뒤에도 행마다 다시 묻는다: 읽는 동안 재활성화가 끝나고 회원이 다시 로그인했으면 읽힌 것은 그 새 세션이다.
+      for (const row of rows) {
+        if (!await still()) return false;
+        await this.endAndTell(row, 'isolation', null);
+      }
     }
   }
 

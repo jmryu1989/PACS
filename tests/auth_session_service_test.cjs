@@ -108,10 +108,12 @@ const KEYS = {};
 // `userLogouts` the ids it logged out as a whole (the admin isolation, SEA-F08). `adminCalls` lists every request to the
 // member administration ('<METHOD> <what>'); `adminDown` answers all of them 503 (the admin API out), and `adminFail`
 // fails the next n requests of one kind: 'sessions' (GET users/{id}/sessions), 'disable' / 'enable' (PUT users/{id}),
-// 'logout' (POST users/{id}/logout). No login callback or refresh reaches the member administration.
+// 'logout' (POST users/{id}/logout). No login callback or refresh reaches the member administration. `onAdmin` (when a
+// case sets it) is told each member-administration request ('<METHOD> <what>') after the fake has carried it out, and the
+// answer waits for what it returns: a case holds the answer of a request the provider has already done.
 const kc = { server: null, port: 0, held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
   certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
-  members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [] };
+  members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null };
 
 async function keycloak() {
   if (kc.server) return;
@@ -176,17 +178,19 @@ async function keycloak() {
         if (kc.adminDown) return send(503, { error: 'unavailable' });
         if (kc.adminFail[kind] > 0) { kc.adminFail[kind]--; return send(503, { error: 'unavailable' }); }
         const account = kc.members[id] ?? (kc.members[id] = { username: id, email: id + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'] });
+        const done = (status, value) => kc.onAdmin
+          ? void Promise.resolve(kc.onAdmin(req.method + ' ' + kind)).then(() => send(status, value)) : send(status, value);
         if (!member[2] && req.method === 'GET')
-          return send(200, { id, username: account.username, email: account.email, enabled: account.enabled, emailVerified: true });
-        if (!member[2] && req.method === 'PUT') { Object.assign(account, sent); return send(204); }
-        if (member[2] === '/groups' && req.method === 'GET') return send(200, account.groups.map(name => ({ id: 'syn-group-' + name, name, path: '/' + name })));
-        if (member[2] === '/role-mappings/realm' && req.method === 'GET') return send(200, account.roles.map(name => ({ name })));
+          return done(200, { id, username: account.username, email: account.email, enabled: account.enabled, emailVerified: true });
+        if (!member[2] && req.method === 'PUT') { Object.assign(account, sent); return done(204); }
+        if (member[2] === '/groups' && req.method === 'GET') return done(200, account.groups.map(name => ({ id: 'syn-group-' + name, name, path: '/' + name })));
+        if (member[2] === '/role-mappings/realm' && req.method === 'GET') return done(200, account.roles.map(name => ({ name })));
         if (member[2] === '/sessions' && req.method === 'GET')
-          return send(200, (account.sessions ?? []).filter(sid => !kc.ended.includes(sid)).map(sid => ({ id: sid, userId: id })));
+          return done(200, (account.sessions ?? []).filter(sid => !kc.ended.includes(sid)).map(sid => ({ id: sid, userId: id })));
         if (member[2] === '/logout' && req.method === 'POST') {
           kc.userLogouts.push(id);
           for (const sid of account.sessions ?? []) if (!kc.ended.includes(sid)) kc.ended.push(sid);
-          return send(204);
+          return done(204);
         }
       }
       if (path === '/realms/kin/protocol/openid-connect/token') {
@@ -416,7 +420,7 @@ async function world(t, { now = START } = {}) {
   assert.equal(Number(left), 0, 'every world starts with no session, no end mark, no isolation fact and no audit row');
   Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
     certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
-    members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [] });
+    members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null });
   idp.started = 0;
 
   const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [] };
@@ -3198,4 +3202,73 @@ test('U5E-18 an Activate during the isolation retry cycle: the cycle does not di
   assert.equal((await activating).enabled, true);
   assert.deepEqual([kc.members[m2].enabled, await w.base.memberIsolation.count({ where: { sub: m2 } })], [true, 0]);
   await w.finish('U5E-18');
+});
+
+// Review of 8c2cf37 (F-04): the cycle asks whether it still holds the owed work immediately before each provider call (and
+// before each product session it ends, which tells the provider), so an Activate that lands in between stops it - it asks
+// the provider nothing more (not even a listing) and ends nothing. Three places:
+//   a. the cycle is reading the member's product sessions (its first step, just before its first listing) when the
+//      Activate lands; the cycle goes on before the member logs in again: it does not list;
+//   a2. the same, but the member has logged in again when the cycle goes on: what the cycle read is the new session, and
+//      the cycle does not end it;
+//   b. one of the cycle's provider calls was already carried out when the Activate lands (its disable: the provider disabled
+//      the member, the answer is still on its way) - the opposite side: the Activate still ends with the member enabled and
+//      the fact cleared, and the cycle's later answer does not flip the member back.
+// The Activate finishes the owed work itself, enables the member and clears the fact. On the stand-in the holds are the
+// harness gate on the cycle's store read and the fake provider's answer (onAdmin), not locks, so the order is the same on
+// both.
+test('U5E-19 an Activate that lands between the isolation retry cycle\'s provider calls stops the cycle: the member ends enabled, the fact cleared, nothing asked or ended after it', async t => {
+  const w = await world(t);
+  const { AdminService } = require('/app/dist/admin.service');
+  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
+  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
+  for (const tag of ['a', 'a2', 'b']) {
+    const at = { a: 'before the first listing', a2: 'before the first listing, logged in again', b: 'after the disable was carried out' }[tag];
+    const m = 'syn-sub-u5e19' + tag, P = 'syn-idp-u5e19-' + tag, P2 = P + '-again';
+    kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [P] };
+    kc.adminFail = { sessions: 99 };
+    await assert.rejects(admin.patchUser(m, { enabled: false }, caller), undefined, at + ': the isolation did not finish');
+    kc.adminFail = {};
+    const cycle = w.instance('C19' + tag);
+    let arrived, release;
+    if (tag !== 'b') {
+      const gate = w.gate('C19' + tag, 'sweepRead');
+      arrived = gate.arrived; release = gate.release;
+    } else {
+      const held = { arrived: deferred(), release: deferred() };
+      kc.onAdmin = call => {
+        if (call !== 'PUT disable') return undefined;
+        kc.onAdmin = null;
+        held.arrived.resolve();
+        return held.release.promise;
+      };
+      arrived = () => within(held.arrived.promise, 'the cycle\'s disable reaching the provider');
+      release = () => held.release.resolve();
+    }
+    cycle.service.onModuleInit();
+    try {
+      await arrived();
+      assert.equal(kc.members[m].enabled, false, at + ': the member is disabled at the provider');
+      assert.equal((await admin.patchUser(m, { enabled: true }, caller)).enabled, true);
+      assert.equal(await w.base.memberIsolation.count({ where: { sub: m } }), 0, at + ': the finished re-activation cleared the fact');
+      const relogin = tag !== 'a';
+      if (relogin) {
+        kc.members[m].sessions = [P2];
+        const again = await login(w, w.I2, await w.issue('u5e19-again-' + tag, { sub: m, groups: [A], idp: P2 }));
+        assert.equal(again.done.cookie, 'S', at + ': the active member enters');
+      }
+      const calls = kc.adminCalls.length;
+      release();
+      await quiet(w);
+      await w.told();
+      assert.deepEqual([kc.adminCalls.slice(calls), kc.members[m].enabled, await w.base.memberIsolation.count({ where: { sub: m } }),
+        await w.base.authSession.count({ where: { sub: m } }), kc.ended.includes(P2)], [[], true, 0, relogin ? 1 : 0, false],
+        at + ': the cycle stopped - no provider call after the Activate, the member enabled (with its new session)');
+    } finally {
+      kc.onAdmin = null;
+      release();
+      cycle.service.onModuleDestroy();
+    }
+  }
+  await w.finish('U5E-19');
 });
