@@ -250,7 +250,9 @@ class Pure(unittest.TestCase):
         # provider has not confirmed yet, one confirmed).
         # S7-U5 member isolation added MemberIsolation: 37 files, 48 tables, and two isolation facts (one with provider
         # work still owed, one done).
-        self.assertEqual(len(transfer.MIGRATIONS), 37)
+        # S7-U5 then added the provider call in flight to MemberIsolation (three columns): 38 files, still 48 tables and the
+        # same rows; the owed fact carries a call in flight, the done one none.
+        self.assertEqual(len(transfer.MIGRATIONS), 38)
         self.assertEqual(len(transfer.TABLES), 48)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
@@ -267,6 +269,8 @@ class Pure(unittest.TestCase):
                          + 2)   # S7-U5 member isolation: the owed and the done isolation fact
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),
                          [('SYNTHETIC-member-isolation-done', False, 0), ('SYNTHETIC-member-isolation-owed', True, 2)])
+        self.assertEqual(sorted((r['sub'], r['callAttempt'], r['call'], r['callStartedAt'] is None) for r in rows['MemberIsolation']),
+                         [('SYNTHETIC-member-isolation-done', None, None, True), ('SYNTHETIC-member-isolation-owed', 2, 'disable', False)])
         self.assertEqual(sorted((r['idpSid'], r['cause'], r['confirmedAt'] is None, r['attempts']) for r in rows['IdpSessionEnd']),
                          [('SYNTHETIC-idp-session-confirmed', 'reauthentication', False, 1),
                           ('SYNTHETIC-idp-session-pending', 'logout', True, 3)])

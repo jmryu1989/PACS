@@ -44,6 +44,15 @@ const IDP_END_KEEP_MS = 13 * 60 * 60 * 1000;
 const IDP_LOCK_SPACE = 0x4b494e55;
 // 회원 잠금의 이름공간. 격리 사실을 쓰는 트랜잭션과 콜백의 세션 생성(그 사실을 읽는다)이 같은 회원에 대해 줄을 선다.
 const MEMBER_LOCK_SPACE = 0x4b494e4d;
+// 격리의 남은 일이 인증 서버에 하는 호출(나열·비활성화·전체 로그아웃) 한 번의 한도. 서비스 토큰 취득까지 포함한 전체 한도다.
+const ISOLATION_CALL_MS = 10_000;
+/**
+ * 진행 중 표식이 "그 호출이 아직 진행 중"으로 통하는 시간: 호출의 한도 + 여유. 이보다 오래된 표식은 그것을 쓴 쪽이 호출
+ * 중에 죽은 것으로 본다 — 넘겨받은 쪽은 그때부터 기다리지 않는다. 관리자의 요청이 기다리는 최대 시간이기도 하다.
+ */
+const ISOLATION_CALL_LEASE_MS = ISOLATION_CALL_MS + 5_000;
+// 넘겨받은 쪽이 앞선 쪽의 진행 중 표식이 풀렸는지 다시 보는 간격.
+const ISOLATION_CALL_POLL_MS = 100;
 // 인증 서버 자체가 답하지 못했다는 OAuth 오류(그 밖의 probe 오류는 SSO를 알아내지 못한 것일 뿐이다).
 const PROVIDER_DOWN = ['temporarily_unavailable', 'server_error'];
 // Keycloak 토큰 교환(로그인 code, refresh) 한 번이 쓸 수 있는 시간(U5S-REQ-18의 외부 조회 한도).
@@ -561,12 +570,16 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 같은 결과가 되는 일이라 재시도 주기가 처음부터 다시 한다. 나열이 성공해 끝까지 가면 사실에 완료 시각을 적는다(사실 자체는
    * 남는다 — 지우는 것은 끝까지 성공한 재활성화뿐이다).
    *
-   * 이 일을 하는 쪽은 한 번에 하나다(F04): 시작할 때 사실의 시도 번호(attempts)를 하나 올려 그 번호를 자기 몫으로 쥐고,
-   * 인증 서버에 무엇을 하기 **전마다** 사실이 아직 있고 그 번호가 아직 자기 것인지 본다. 재활성화도 같은 길로 남은 일을
-   * 넘겨받으므로(번호를 올린다), 그 전에 시작한 재시도 주기는 다음 걸음 앞에서 멈춘다 — 재활성화가 회원을 활성으로 만든
-   * 뒤에 옛 주기가 비활성화·전체 로그아웃·제품 행 끝냄을 하지 않는다(나열도 하지 않는다 — 넘겨받힌 주기는 인증 서버에 더
-   * 묻지 않는다). 인증 서버 호출 동안 트랜잭션·잠금은 쥐지 않는다 — 그래서 확인을 지난 뒤 이미 보낸 호출이 늦게 닿아
-   * 재활성화 뒤에 도착하는 창은 남는다(확인과 호출 사이; 호출을 잠금으로 감싸지 않기로 한 값이다).
+   * 이 일을 하는 쪽은 한 번에 하나다(F04): 시작할 때 사실의 시도 번호(attempts)를 하나 올려 그 번호를 자기 몫으로 쥔다.
+   * 재활성화도 같은 길로 남은 일을 넘겨받는다(번호를 올린다). 인증 서버 호출 동안 트랜잭션·잠금은 쥐지 않는다 — 대신 호출
+   * 하나하나를 사실 위의 진행 중 표식으로 감싼다(isolationCall): 호출 **전에** "그 번호가 아직 자기 것일 때만" 표식을 적고
+   * (확인과 적기가 한 commit이라 그 사이에 넘겨받힐 틈이 없다), 호출이 돌아오면 성공이든 실패든 자기 표식을 지운다.
+   * 넘겨받은 쪽은 번호를 올린 **뒤** 앞선 번호의 표식이 풀리거나 그 호출의 한도를 넘길 때까지 기다린 다음에야 자기 일을
+   * 한다(settleIsolationCalls). 번호가 올라간 뒤에는 앞선 쪽이 새 표식을 적지 못하므로, 기다림이 끝나면 앞선 쪽이 이미 보낸
+   * 호출은 모두 돌아와 있다 — 재활성화가 회원을 활성으로 만든 뒤에 옛 처리의 비활성화·전체 로그아웃이 닿지 않는다. 넘겨받힌
+   * 쪽은 다음 걸음(표식 적기, 제품 행을 끝내기 전의 확인)에서 멈추고 인증 서버에 더 묻지 않는다(나열도 하지 않는다).
+   * 남는 경우: 표식을 쓴 쪽이 호출 중에 죽으면 표식은 한도 뒤에 무시된다 — 인증 서버가 그 호출을 한도+여유보다 늦게 처리하는
+   * 경우만 남는다(호출 한도가 그 창을 좁힌다). 로그인 콜백과 갱신은 이 표식을 읽지도 기다리지도 않는다.
    * `claimed`는 이미 번호를 올린 쪽(재시도 주기)이 넘기는 그 번호다. 끝까지 해 완료 시각을 적었으면 true, 사실이 없거나 다른
    * 쪽이 넘겨받아 멈췄으면 false다(부른 쪽은 그때 "끝났다"고 답하지 않는다).
    */
@@ -577,25 +590,28 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       const row = await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
       return !!row && row.providerDoneAt === null && row.attempts === claim;
     };
+    if (!await this.settleIsolationCalls(sub, claim)) return false;
     if (!await this.endMemberSessions(sub, [], owned)) return false;
-    let first: string[] | null = null, failure: unknown = null;
-    if (!await owned()) return false;
-    try { first = await this.keycloak.userSessions(sub); } catch (error) { failure = error; }
-    if (first && !await this.endMemberSessions(sub, first, owned)) return false;
-    if (!await owned()) return false;
-    await this.keycloak.setEnabled(sub, false);
+    const first = await this.isolationCall(sub, claim, 'sessions', () => this.keycloak.userSessions(sub, ISOLATION_CALL_MS));
+    if (!first) return false;
+    if (!('error' in first) && !await this.endMemberSessions(sub, first.value, owned)) return false;
+    const disabled = await this.isolationCall(sub, claim, 'disable', () => this.keycloak.setEnabled(sub, false, ISOLATION_CALL_MS));
+    if (!disabled) return false;
+    if ('error' in disabled) throw disabled.error;
     /**
      * 사용자 전체 로그아웃은 나열이 그 회원의 provider 세션을 표식한 **뒤에만** 한다. 나열 전에 인증 서버에서 끝내 버리면
      * 어느 provider 세션을 표식해야 하는지 알 길이 사라진다 — 격리 전에 code를 교환해 둔 콜백(승인 변경이면 옛 역할의
      * 토큰)은 재활성화 뒤에도 막혀야 하고, 그것을 막는 것이 그 표식이다. 그동안 비활성화된 회원의 provider 세션은 인증
      * 서버가 새 토큰도 갱신도 내주지 않는다. 나열이 실패했으면 여기서 알린다(사실은 남고 주기가 잇는다).
      */
-    if (failure) throw failure;
-    if (!await owned()) return false;
-    const second = await this.keycloak.userSessions(sub);
-    if (!await this.endMemberSessions(sub, second, owned)) return false;
-    if (!await owned()) return false;
-    await this.keycloak.logoutUser(sub);
+    if ('error' in first) throw first.error;
+    const second = await this.isolationCall(sub, claim, 'sessions', () => this.keycloak.userSessions(sub, ISOLATION_CALL_MS));
+    if (!second) return false;
+    if ('error' in second) throw second.error;
+    if (!await this.endMemberSessions(sub, second.value, owned)) return false;
+    const out = await this.isolationCall(sub, claim, 'logout', () => this.keycloak.logoutUser(sub, ISOLATION_CALL_MS));
+    if (!out) return false;
+    if ('error' in out) throw out.error;
     if (!await this.endMemberSessions(sub, [], owned)) return false;
     const { count } = await this.storage('isolation_write', () => this.prisma.memberIsolation.updateMany({
       where: { sub, providerDoneAt: null, attempts: claim }, data: { providerDoneAt: new Date() } }));
@@ -617,6 +633,39 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       if (count === 1) return row.attempts + 1;
     }
     throw this.conflict();
+  }
+
+  /**
+   * 격리의 남은 일이 인증 서버에 하는 호출 하나를 진행 중 표식으로 감싼다: 그 번호가 아직 이 쪽 몫일 때만 표식을 적고(아니면
+   * 호출하지 않고 null — 넘겨받혔다), 호출이 돌아오면 성공이든 실패든 이 쪽 번호의 표식만 지운다(넘겨받은 쪽의 것은 건드리지
+   * 않는다). 호출의 결과나 오류를 돌려주고, 저장소 오류는 그대로 던진다 — 지우지 못한 표식은 한도 뒤에 무시된다.
+   */
+  private async isolationCall<T>(sub: string, claim: number, call: string, work: () => Promise<T>)
+    : Promise<{ value: T } | { error: unknown } | null> {
+    const { count } = await this.storage('isolation_write', () => this.prisma.memberIsolation.updateMany({
+      where: { sub, providerDoneAt: null, attempts: claim }, data: { callAttempt: claim, call, callStartedAt: new Date() } }));
+    if (count !== 1) return null;
+    let result: { value: T } | { error: unknown };
+    try { result = { value: await work() }; } catch (error) { result = { error }; }
+    await this.storage('isolation_write', () => this.prisma.memberIsolation.updateMany({
+      where: { sub, callAttempt: claim }, data: { callAttempt: null, call: null, callStartedAt: null } }));
+    return result;
+  }
+
+  /**
+   * 남은 일을 막 넘겨받은 쪽(번호를 올린 쪽)이 자기 일 전에 기다린다: 앞선 번호의 진행 중 표식이 풀리거나 한도를 넘길 때까지.
+   * 번호가 올라간 뒤에는 앞선 쪽이 새 표식을 적지 못하므로, 기다리는 것은 그때 이미 보낸 호출 하나뿐이다. 그 표식은 이
+   * 기다림보다 먼저 적혔으므로 기다림 자체도 한도만큼으로 묶는다(이 프로세스의 단조 시계) — 표식을 쓴 인스턴스의 시계가
+   * 앞서 있어도 더 기다리지 않는다. 그사이 또 넘겨받혔거나 사실이 끝났으면 false.
+   */
+  private async settleIsolationCalls(sub: string, claim: number): Promise<boolean> {
+    const until = performance.now() + ISOLATION_CALL_LEASE_MS;
+    for (;;) {
+      const row = await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
+      if (!row || row.providerDoneAt !== null || row.attempts !== claim) return false;
+      if (!callInFlight(row) || performance.now() >= until) return true;
+      await new Promise(resolve => setTimeout(resolve, ISOLATION_CALL_POLL_MS));
+    }
   }
 
   /** 격리 사실이 있는가(콜백 밖의 읽기: 재활성화가 남은 인증 서버 일을 먼저 끝내야 하는지 본다). */
@@ -760,6 +809,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         take: 20,
       });
       for (const row of owed) {
+        // 다른 쪽이 지금 인증 서버를 부르고 있는 사실은 집지 않는다 — 그 쪽이 아직 일하고 있다(넘겨받으면 그 호출을 기다려야 한다).
+        if (callInFlight(row)) continue;
         const wait = IDP_END_BACKOFF_MS[Math.min(row.attempts + 1, IDP_END_BACKOFF_MS.length - 1)];
         const { count } = await this.prisma.memberIsolation.updateMany({
           where: { sub: row.sub, providerDoneAt: null, attempts: row.attempts },
@@ -1385,4 +1436,10 @@ function lockWaitExceeded(error: any): boolean {
   if (error?.code === 'P2028') return true;
   if (error?.meta?.code === '55P03') return true;
   return typeof error?.message === 'string' && error.message.includes('55P03');
+}
+
+/** 격리 사실 위의 진행 중 표식이 아직 살아 있는가(한도 안). 한도를 넘긴 표식은 그것을 쓴 쪽이 호출 중에 죽은 것이다. */
+function callInFlight(row: { callAttempt: number | null; callStartedAt: Date | null }): boolean {
+  return row.callAttempt !== null && row.callStartedAt !== null
+    && Date.now() - row.callStartedAt.getTime() < ISOLATION_CALL_LEASE_MS;
 }

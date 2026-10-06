@@ -499,10 +499,11 @@ class SessionEndLive(unittest.TestCase):
         isolation's session listing fails, the cycle still disables the member but does not log it out as a whole, so the
         member's provider session (SSO) may live on while the member is disabled. The deviation's safety rests on the
         provider refusing that member. That state is made here through Keycloak's own admin API (disable, no logout): the
-        harness can pause the whole of Keycloak (SE-02), not its admin API alone, and while Keycloak is paused the
-        product's admin calls wait instead of failing - so the product path into this state (a listing that fails while
-        the disable succeeds) is not coverable on this stack; the product half (fact first, rows ended, the cycle, one
-        finisher) is U5E-13..U5E-19 of tests/auth_session_service_test.cjs. Asserted: with a provider session of A alive in
+        harness can pause the whole of Keycloak (SE-02), not its admin API alone, and while Keycloak is paused every
+        admin call of the product waits (an isolation's call until its bound) - the listing cannot fail while the disable
+        succeeds - so the product path into this state is not coverable on this stack; the product half (fact first, rows
+        ended, the cycle, one finisher, the Activate that waits for a call in flight) is U5E-13..U5E-20 of
+        tests/auth_session_service_test.cjs. Asserted: with a provider session of A alive in
         each of two browsers, A's recovery Login probes with prompt=none and gets no code, A's credentials are refused,
         and the product's refresh of A's other session is refused (the session ends). Enabled again, A logs in."""
         first, page1 = self.profile()

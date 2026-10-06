@@ -58,12 +58,18 @@ model IdpSessionEnd {
 /// 이 행을 보고 막는다(인증 서버의 관리 API를 로그인 길에서 읽지 않는다). `providerDoneAt`이 비어 있으면 그 인증 서버
 /// 일이 아직 끝나지 않았고, 종료 재시도 주기가 `nextAttemptAt`부터 이어서 한다. 행은 다시 활성화하는 일이 끝까지 성공한
 /// 뒤에만 지운다 — 시간이나 다른 경로로 지우지 않는다.
+/// `callAttempt`·`call`·`callStartedAt`은 그 일을 하는 쪽이 지금 인증 서버에 보낸 호출(진행 중 표식)이다: 호출 **전에** 자기
+/// 시도 번호로 적고 호출이 돌아오면 지운다. 남은 일을 넘겨받은 쪽(재활성화)은 앞선 번호의 표식이 풀리거나 그 호출의 한도를
+/// 넘길 때까지 기다린 뒤에야 자기 일을 한다 — 이미 보낸 호출이 그 뒤에 닿지 않게.
 model MemberIsolation {
   sub            String    @id
   decidedAt      DateTime
   providerDoneAt DateTime?
   attempts       Int       @default(0)
   nextAttemptAt  DateTime
+  callAttempt    Int?
+  call           String?
+  callStartedAt  DateTime?
 
   @@index([providerDoneAt, nextAttemptAt])
 }

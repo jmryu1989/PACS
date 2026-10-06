@@ -33,6 +33,8 @@ LIMITS = combined.LIMITS
 # migration record the whole receipt is about 244 KB, about 18 KB under this cap.
 # S7-U5 session end (47 tables: IdpSessionEnd, its two rows, AuthSession.idpSid and two indexes): not measured on a
 # stack when written - estimated at about 4 KB of catalog and rows, inside what the cap left; measure with the next run.
+# S7-U5 member isolation's call in flight (three columns on MemberIsolation, their values on the owed row): not measured on a
+# stack when written - estimated at well under 1 KB of catalog and rows.
 RECEIPT_LIMIT = 256*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
@@ -72,7 +74,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260930120000_audit_log_append_only/migration.sql',
               'api/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql',
               'api/prisma/migrations/20261005120000_idp_session_end/migration.sql',
-              'api/prisma/migrations/20261005130000_member_isolation/migration.sql']
+              'api/prisma/migrations/20261005130000_member_isolation/migration.sql',
+              'api/prisma/migrations/20261006120000_member_isolation_call/migration.sql']
 TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -390,11 +393,13 @@ def expected_rows(uid):
              nextAttemptAt=STAMP)]
     # S7-U5 member isolation: our own record that a member is isolated is state a restore must keep - while it exists the
     # member gets no session, and an unfinished one is provider work still owed. One of each, every column with a value
-    # (providerDoneAt NULL on the owed one).
+    # (providerDoneAt NULL on the owed one). The owed one also has a provider call in flight (callAttempt, call,
+    # callStartedAt): a re-activation after the restore waits for it until its bound has passed; the done one has none.
     rows['MemberIsolation'] = [
         dict(sub='SYNTHETIC-member-isolation-owed',decidedAt=STAMP,providerDoneAt=None,attempts=2,
-             nextAttemptAt='2026-10-06T00:00:00.456'),
-        dict(sub='SYNTHETIC-member-isolation-done',decidedAt=STAMP,providerDoneAt=STAMP,attempts=0,nextAttemptAt=STAMP)]
+             nextAttemptAt='2026-10-06T00:00:00.456',callAttempt=2,call='disable',callStartedAt='2026-10-06T00:00:00.789'),
+        dict(sub='SYNTHETIC-member-isolation-done',decidedAt=STAMP,providerDoneAt=STAMP,attempts=0,nextAttemptAt=STAMP,
+             callAttempt=None,call=None,callStartedAt=None)]
     rows['TransferBasis'] = [dict(id=basis_id,studyUid=uid,institutionId='SYNTHETIC-hospital',kind='PATIENT_CONSENT',
         reference='SYNTHETIC consent reference',obtainedAt=STAMP,expiresAt=None,recordedBy='SYNTHETIC-admin',recordedAt=STAMP,
         revokedBy=None,revokedAt=None,revokeReason=None)]

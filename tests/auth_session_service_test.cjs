@@ -110,10 +110,13 @@ const KEYS = {};
 // fails the next n requests of one kind: 'sessions' (GET users/{id}/sessions), 'disable' / 'enable' (PUT users/{id}),
 // 'logout' (POST users/{id}/logout). No login callback or refresh reaches the member administration. `onAdmin` (when a
 // case sets it) is told each member-administration request ('<METHOD> <what>') after the fake has carried it out, and the
-// answer waits for what it returns: a case holds the answer of a request the provider has already done.
+// answer waits for what it returns: a case holds the answer of a request the provider has already done. `beforeAdmin`
+// (when a case sets it) is told each such request when it arrives, BEFORE the fake carries it out: the request is carried
+// out and answered only when what it returns resolves - a case holds a request the provider has not done yet, so its
+// effect lands when the case lets it. Resolving to 'drop' cuts the connection without carrying the request out.
 const kc = { server: null, port: 0, held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
   certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
-  members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null };
+  members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null };
 
 async function keycloak() {
   if (kc.server) return;
@@ -175,23 +178,29 @@ async function keycloak() {
           : !member[2] && req.method === 'PUT' ? (sent.enabled === false ? 'disable' : sent.enabled === true ? 'enable' : 'update')
             : !member[2] ? 'read' : member[2].slice(1);
         kc.adminCalls.push(req.method + ' ' + kind);
-        if (kc.adminDown) return send(503, { error: 'unavailable' });
-        if (kc.adminFail[kind] > 0) { kc.adminFail[kind]--; return send(503, { error: 'unavailable' }); }
-        const account = kc.members[id] ?? (kc.members[id] = { username: id, email: id + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'] });
-        const done = (status, value) => kc.onAdmin
-          ? void Promise.resolve(kc.onAdmin(req.method + ' ' + kind)).then(() => send(status, value)) : send(status, value);
-        if (!member[2] && req.method === 'GET')
-          return done(200, { id, username: account.username, email: account.email, enabled: account.enabled, emailVerified: true });
-        if (!member[2] && req.method === 'PUT') { Object.assign(account, sent); return done(204); }
-        if (member[2] === '/groups' && req.method === 'GET') return done(200, account.groups.map(name => ({ id: 'syn-group-' + name, name, path: '/' + name })));
-        if (member[2] === '/role-mappings/realm' && req.method === 'GET') return done(200, account.roles.map(name => ({ name })));
-        if (member[2] === '/sessions' && req.method === 'GET')
-          return done(200, (account.sessions ?? []).filter(sid => !kc.ended.includes(sid)).map(sid => ({ id: sid, userId: id })));
-        if (member[2] === '/logout' && req.method === 'POST') {
-          kc.userLogouts.push(id);
-          for (const sid of account.sessions ?? []) if (!kc.ended.includes(sid)) kc.ended.push(sid);
-          return done(204);
-        }
+        const carry = () => {
+          if (kc.adminDown) return send(503, { error: 'unavailable' });
+          if (kc.adminFail[kind] > 0) { kc.adminFail[kind]--; return send(503, { error: 'unavailable' }); }
+          const account = kc.members[id] ?? (kc.members[id] = { username: id, email: id + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'] });
+          const done = (status, value) => kc.onAdmin
+            ? void Promise.resolve(kc.onAdmin(req.method + ' ' + kind)).then(() => send(status, value)) : send(status, value);
+          if (!member[2] && req.method === 'GET')
+            return done(200, { id, username: account.username, email: account.email, enabled: account.enabled, emailVerified: true });
+          if (!member[2] && req.method === 'PUT') { Object.assign(account, sent); return done(204); }
+          if (member[2] === '/groups' && req.method === 'GET') return done(200, account.groups.map(name => ({ id: 'syn-group-' + name, name, path: '/' + name })));
+          if (member[2] === '/role-mappings/realm' && req.method === 'GET') return done(200, account.roles.map(name => ({ name })));
+          if (member[2] === '/sessions' && req.method === 'GET')
+            return done(200, (account.sessions ?? []).filter(sid => !kc.ended.includes(sid)).map(sid => ({ id: sid, userId: id })));
+          if (member[2] === '/logout' && req.method === 'POST') {
+            kc.userLogouts.push(id);
+            for (const sid of account.sessions ?? []) if (!kc.ended.includes(sid)) kc.ended.push(sid);
+            return done(204);
+          }
+          return send(404, { error: 'not_found' });
+        };
+        if (kc.beforeAdmin)
+          return void Promise.resolve(kc.beforeAdmin(req.method + ' ' + kind)).then(how => how === 'drop' ? req.socket.destroy() : carry());
+        return carry();
       }
       if (path === '/realms/kin/protocol/openid-connect/token') {
         const form = Object.fromEntries(new URLSearchParams(body));
@@ -420,7 +429,7 @@ async function world(t, { now = START } = {}) {
   assert.equal(Number(left), 0, 'every world starts with no session, no end mark, no isolation fact and no audit row');
   Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
     certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
-    members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null });
+    members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null });
   idp.started = 0;
 
   const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [] };
@@ -3206,45 +3215,28 @@ test('U5E-18 an Activate during the isolation retry cycle: the cycle does not di
 
 // Review of 8c2cf37 (F-04): the cycle asks whether it still holds the owed work immediately before each provider call (and
 // before each product session it ends, which tells the provider), so an Activate that lands in between stops it - it asks
-// the provider nothing more (not even a listing) and ends nothing. Three places:
+// the provider nothing more (not even a listing) and ends nothing. Two places:
 //   a. the cycle is reading the member's product sessions (its first step, just before its first listing) when the
 //      Activate lands; the cycle goes on before the member logs in again: it does not list;
 //   a2. the same, but the member has logged in again when the cycle goes on: what the cycle read is the new session, and
-//      the cycle does not end it;
-//   b. one of the cycle's provider calls was already carried out when the Activate lands (its disable: the provider disabled
-//      the member, the answer is still on its way) - the opposite side: the Activate still ends with the member enabled and
-//      the fact cleared, and the cycle's later answer does not flip the member back.
-// The Activate finishes the owed work itself, enables the member and clears the fact. On the stand-in the holds are the
-// harness gate on the cycle's store read and the fake provider's answer (onAdmin), not locks, so the order is the same on
-// both.
+//      the cycle does not end it.
+// (An Activate that lands while one of the cycle's provider calls is in flight waits for that call: U5E-20.)
+// The Activate finishes the owed work itself, enables the member and clears the fact. On the stand-in the hold is the
+// harness gate on the cycle's store read, not a lock, so the order is the same on both.
 test('U5E-19 an Activate that lands between the isolation retry cycle\'s provider calls stops the cycle: the member ends enabled, the fact cleared, nothing asked or ended after it', async t => {
   const w = await world(t);
   const { AdminService } = require('/app/dist/admin.service');
   const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
   const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
-  for (const tag of ['a', 'a2', 'b']) {
-    const at = { a: 'before the first listing', a2: 'before the first listing, logged in again', b: 'after the disable was carried out' }[tag];
+  for (const tag of ['a', 'a2']) {
+    const at = { a: 'before the first listing', a2: 'before the first listing, logged in again' }[tag];
     const m = 'syn-sub-u5e19' + tag, P = 'syn-idp-u5e19-' + tag, P2 = P + '-again';
     kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [P] };
     kc.adminFail = { sessions: 99 };
     await assert.rejects(admin.patchUser(m, { enabled: false }, caller), undefined, at + ': the isolation did not finish');
     kc.adminFail = {};
     const cycle = w.instance('C19' + tag);
-    let arrived, release;
-    if (tag !== 'b') {
-      const gate = w.gate('C19' + tag, 'sweepRead');
-      arrived = gate.arrived; release = gate.release;
-    } else {
-      const held = { arrived: deferred(), release: deferred() };
-      kc.onAdmin = call => {
-        if (call !== 'PUT disable') return undefined;
-        kc.onAdmin = null;
-        held.arrived.resolve();
-        return held.release.promise;
-      };
-      arrived = () => within(held.arrived.promise, 'the cycle\'s disable reaching the provider');
-      release = () => held.release.resolve();
-    }
+    const { arrived, release } = w.gate('C19' + tag, 'sweepRead');
     cycle.service.onModuleInit();
     try {
       await arrived();
@@ -3265,10 +3257,216 @@ test('U5E-19 an Activate that lands between the isolation retry cycle\'s provide
         await w.base.authSession.count({ where: { sub: m } }), kc.ended.includes(P2)], [[], true, 0, relogin ? 1 : 0, false],
         at + ': the cycle stopped - no provider call after the Activate, the member enabled (with its new session)');
     } finally {
-      kc.onAdmin = null;
       release();
       cycle.service.onModuleDestroy();
     }
   }
   await w.finish('U5E-19');
+});
+
+// Final review part 1, blocker 1: an Activate that lands while one of the isolation retry cycle's provider calls is in
+// flight must not be undone by that call. The side doing the owed work marks each provider call on the member's isolation
+// fact before it is sent (only while the owed work is still its own) and clears the mark when the call comes back; the
+// re-activation takes the owed work over and waits until the earlier call has come back - or that call's bound has passed
+// - before it finishes the work, enables the member and clears the fact. Places:
+//   a. the cycle's disable is in flight - not carried out yet (it lands when the case lets it), or carried out with its
+//      answer on its way: the Activate waits for it; the member ends enabled, the fact cleared, no disable or whole-user
+//      logout after the enable;
+//   e. (inside a) a login while the Activate waits is not delayed: the isolated member's is refused at once, another
+//      member's enters;
+//   b. the cycle's whole-user logout is in flight: the provider session the member makes after the Activate is not ended;
+//   f. the cycle has passed its last check before its disable when the Activate takes the owed work over: the cycle asks
+//      the provider nothing more (it may not mark a call of work that is no longer its own);
+//   d. opposite side: without an Activate the cycle finishes the owed work as before and leaves no call in flight - the
+//      next isolation of the member goes through at once;
+//   c. the side that marked its disable died before the call came back (its mark is all that is left): the Activate waits
+//      while the mark is fresh and goes on once the call's bound has passed.
+// What a case holds is the fake provider's request (beforeAdmin / onAdmin) or the harness gate on a store read, not a
+// lock, so the order is the same on the stand-in and on PostgreSQL; the waiting itself is the product's on both.
+test('U5E-20 an Activate that lands while the isolation retry cycle\'s provider call is in flight waits for that call: the member ends enabled, its new provider session is not ended, logins are not delayed', async t => {
+  const w = await world(t);
+  const { AdminService } = require('/app/dist/admin.service');
+  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
+  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const facts = sub => w.base.memberIsolation.count({ where: { sub } });
+  // The member's isolation leaves its provider work owed (the listing fails; the disable is done): the cycle takes it up.
+  const owe = async (m, P) => {
+    kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [P] };
+    kc.adminFail = { sessions: 99 };
+    await assert.rejects(admin.patchUser(m, { enabled: false }, caller), undefined, m + ': the isolation did not finish');
+    kc.adminFail = {};
+    assert.equal(kc.members[m].enabled, false, m + ': disabled at the provider, the fact owed');
+  };
+  // Holds the next member-administration request of that kind: before the provider carries it out, or after (its answer).
+  const hold = (call, when) => {
+    const slot = when === 'before' ? 'beforeAdmin' : 'onAdmin';
+    const held = { arrived: deferred(), release: deferred() };
+    kc[slot] = name => {
+      if (name !== call) return undefined;
+      kc[slot] = null;
+      held.arrived.resolve();
+      return held.release.promise;
+    };
+    return { arrived: () => within(held.arrived.promise, call + ' reaching the provider'), release: () => held.release.resolve() };
+  };
+  // An Activate started now; `settled` says whether it has answered yet.
+  const activate = m => {
+    const run = { settled: false, done: admin.patchUser(m, { enabled: true }, caller) };
+    run.done.then(() => { run.settled = true; }, () => { run.settled = true; });
+    return run;
+  };
+  // What reached the provider after the last enable that would undo it.
+  const undoing = () => kc.adminCalls.slice(kc.adminCalls.lastIndexOf('PUT enable') + 1).filter(c => c === 'PUT disable' || c === 'POST logout');
+  const own = c => ['GET sessions', 'PUT disable', 'POST logout', 'PUT enable'].includes(c);
+
+  // (a) + (e)
+  for (const when of ['before', 'after']) {
+    const at = 'a, the disable ' + (when === 'before' ? 'not carried out yet' : 'carried out, its answer on its way');
+    const m = 'syn-sub-u5e20a-' + when, P = 'syn-idp-u5e20a-' + when;
+    await owe(m, P);
+    const disable = hold('PUT disable', when);
+    const cycle = w.instance('C20a-' + when);
+    cycle.service.onModuleInit();
+    try {
+      await disable.arrived();
+      const run = activate(m);
+      if (when === 'before') {
+        // (e) Meanwhile the isolated member tries to log in: refused at once, from our own fact; another member enters.
+        const refused = await within(login(w, w.I2, await w.issue('u5e20-during', { sub: m, groups: [A], idp: P + '-during' })),
+          'the isolated member\'s login while the Activate waits', 5000);
+        assert.deepEqual([refused.done.newSid, rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause],
+          [null, 'member_isolated'], 'e: the isolated member\'s login is refused at once');
+        const o = 'syn-sub-u5e20-other';
+        const entered = await within(login(w, w.I2, await w.issue('u5e20-other', { sub: o, groups: [A] })),
+          'another member\'s login while the Activate waits', 5000);
+        assert.deepEqual([entered.done.cookie, !!entered.done.proof], ['S', true], 'e: another member\'s login enters');
+      }
+      await pause(600);
+      const waited = !run.settled;
+      disable.release();
+      const after = await run.done;
+      await quiet(w);
+      await w.told();
+      assert.deepEqual([after.enabled, kc.members[m].enabled, await facts(m), undoing()], [true, true, 0, []],
+        at + ': the member ends enabled, the fact cleared, nothing after the enable undoes it');
+      assert.equal(waited, true, at + ': the Activate waited for the cycle\'s call to come back');
+    } finally {
+      kc.beforeAdmin = null;
+      kc.onAdmin = null;
+      disable.release();
+      cycle.service.onModuleDestroy();
+    }
+  }
+
+  // (b)
+  {
+    const m = 'syn-sub-u5e20b', P = 'syn-idp-u5e20b', P2 = P + '-again';
+    await owe(m, P);
+    const logout = hold('POST logout', 'before');
+    const cycle = w.instance('C20b');
+    cycle.service.onModuleInit();
+    // The member logs in again after the Activate (a new provider session, credentials typed).
+    const relogin = async () => {
+      kc.members[m].sessions = [P2];
+      const again = await login(w, w.I2, await w.issue('u5e20b-again', { sub: m, groups: [A], idp: P2 }));
+      assert.equal(again.done.cookie, 'S', 'b: the active member enters');
+    };
+    try {
+      await logout.arrived();
+      const run = activate(m);
+      await pause(600);
+      const waited = !run.settled;
+      if (!waited) await relogin();
+      logout.release();
+      assert.equal((await run.done).enabled, true);
+      if (waited) await relogin();
+      await quiet(w);
+      await w.told();
+      assert.deepEqual([kc.ended.includes(P2), await w.base.authSession.count({ where: { sub: m } }), kc.members[m].enabled, await facts(m), undoing()],
+        [false, 1, true, 0, []], 'b: the provider session made after the Activate is not ended; the member stays enabled');
+      assert.equal(waited, true, 'b: the Activate waited for the cycle\'s whole-user logout to come back');
+    } finally {
+      kc.beforeAdmin = null;
+      logout.release();
+      cycle.service.onModuleDestroy();
+    }
+  }
+
+  // (f)
+  {
+    const m = 'syn-sub-u5e20f', P = 'syn-idp-u5e20f';
+    await owe(m, P);
+    const cycle = w.instance('C20f');
+    // The cycle's two reads of the member's product sessions: before its first listing, and after it marked what that
+    // listing named. Held at the second, its last check before the disable is behind it.
+    const early = w.gate('C20f', 'sweepRead'), late = w.gate('C20f', 'sweepRead');
+    const activating = w.gate('I1', 'sweepRead');
+    let run = null;
+    cycle.service.onModuleInit();
+    try {
+      await early.arrived();
+      early.release();
+      await late.arrived();
+      run = activate(m);
+      // The Activate has taken the owed work over and is held at its own first read.
+      await activating.arrived();
+      const calls = kc.adminCalls.length;
+      late.release();
+      await quiet(w);
+      assert.deepEqual(kc.adminCalls.slice(calls), [], 'f: the cycle that lost the owed work asks the provider nothing more');
+    } finally {
+      early.release();
+      late.release();
+      activating.release();
+      cycle.service.onModuleDestroy();
+    }
+    assert.equal((await run.done).enabled, true);
+    await quiet(w);
+    assert.deepEqual([kc.members[m].enabled, await facts(m), undoing()], [true, 0, []], 'f: the member ends enabled, the fact cleared');
+  }
+
+  // (d)
+  {
+    const m = 'syn-sub-u5e20d', P = 'syn-idp-u5e20d';
+    await owe(m, P);
+    const cycle = w.instance('C20d');
+    cycle.service.onModuleInit();
+    try {
+      await w.until('d: the cycle finished the owed provider work', async () =>
+        (await w.base.memberIsolation.findUnique({ where: { sub: m } }))?.providerDoneAt != null);
+    } finally {
+      cycle.service.onModuleDestroy();
+    }
+    await quiet(w);
+    await w.told();
+    assert.deepEqual([kc.members[m].enabled, kc.userLogouts.includes(m), (await w.marks()).filter(x => x[0] === P).map(x => x.slice(0, 2))],
+      [false, true, [[P, 'isolation']]], 'd: the cycle marked, disabled and logged out as before');
+    // The clock does not move here: a call the cycle had left marked would hold the next isolation's own provider work.
+    assert.equal((await within(admin.patchUser(m, { enabled: false }, caller), 'd: the next isolation of the member', 5000)).enabled, false);
+    assert.equal((await within(admin.patchUser(m, { enabled: true }, caller), 'd: the Activate after it', 5000)).enabled, true);
+    assert.equal(await facts(m), 0);
+  }
+
+  // (c)
+  {
+    const m = 'syn-sub-u5e20c', P = 'syn-idp-u5e20c';
+    await owe(m, P);
+    // A side took the owed work over (its attempt number), marked its disable and died before the call came back.
+    const row = await w.base.memberIsolation.findUnique({ where: { sub: m } });
+    await w.base.memberIsolation.updateMany({ where: { sub: m },
+      data: { attempts: row.attempts + 1, callAttempt: row.attempts + 1, call: 'disable', callStartedAt: new Date() } });
+    const calls = kc.adminCalls.length;
+    const run = activate(m);
+    await pause(600);
+    const waited = !run.settled, meanwhile = kc.adminCalls.slice(calls).filter(own);
+    // A minute passes: an administrator's request must answer long before the proxy's 300 s, and one provider call's bound
+    // with its margin lies well inside that minute.
+    w.tick(60_000);
+    const after = await within(run.done, 'c: the Activate once the dead call\'s bound has passed', 5000);
+    assert.deepEqual([waited, meanwhile], [true, []], 'c: while that mark was fresh the Activate waited and asked the provider nothing of its own');
+    assert.deepEqual([after.enabled, kc.members[m].enabled, await facts(m), undoing()], [true, true, 0, []],
+      'c: then it finished the owed work and enabled the member; nothing after the enable undoes it');
+  }
+  await w.finish('U5E-20');
 });

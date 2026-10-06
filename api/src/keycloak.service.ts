@@ -4,6 +4,7 @@ import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { APP_ROLES as MANAGED_ROLES } from './clinician-policy';
 const USER_PAGE_SIZE = 25;
 const USER_SCAN_SIZE = 100;
+const bound = (limitMs?: number) => limitMs === undefined ? undefined : AbortSignal.timeout(limitMs);
 
 export interface KeycloakUser {
   id: string;
@@ -81,18 +82,19 @@ export class KeycloakService {
    * 실제로 렐름을 다시 import한 직후 이 상태에 빠졌다.
    * **만료는 시계가 아니라 상대방이 정한다.**
    */
-  private async adm(path: string, method = 'GET', body?: any, retry = true): Promise<any> {
+  private async adm(path: string, method = 'GET', body?: any, retry = true, signal?: AbortSignal): Promise<any> {
     const res = await fetch(`${this.base}/admin/realms/${this.realm}${path}`, {
       method,
       headers: {
-        Authorization: 'Bearer ' + (await this.admToken()),
+        Authorization: 'Bearer ' + (await this.admToken(signal)),
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
     if (res.status === 401 && retry) {
       this.token = null;
-      return this.adm(path, method, body, false);
+      return this.adm(path, method, body, false, signal);
     }
     if (res.status === 404) return null;
     if (!res.ok) throw new ServiceUnavailableException(`Keycloak Admin API HTTP ${res.status} (${path})`);
@@ -226,8 +228,12 @@ export class KeycloakService {
     await this.adm(`/users/${encodeURIComponent(id)}/execute-actions-email`, 'PUT', ['UPDATE_PASSWORD']);
   }
 
-  async setEnabled(id: string, enabled: boolean): Promise<void> {
-    await this.adm(`/users/${encodeURIComponent(id)}`, 'PUT', { enabled });
+  /**
+   * `limitMs`(선택)는 이 호출 **전체**의 한도다(서비스 계정 토큰 취득·401 뒤의 재요청까지). 격리의 남은 일이 이 호출들에
+   * 한도를 준다: 그 호출이 돌아올 때까지 넘겨받은 쪽(재활성화)이 기다리므로, 기다림이 끝없지 않게 한다. 넘기면 던진다.
+   */
+  async setEnabled(id: string, enabled: boolean, limitMs?: number): Promise<void> {
+    await this.adm(`/users/${encodeURIComponent(id)}`, 'PUT', { enabled }, true, bound(limitMs));
     this.cache.clear();
   }
 
@@ -235,14 +241,14 @@ export class KeycloakService {
    * 회원 하나의 지금 provider(SSO) 세션 id들 — 격리가 그 전부에 표식을 남기려고 읽는다(서비스 계정의 view-users로 읽을 수
    * 있음: closure-audit facts.md "GET users/{id}/sessions 200"). 읽지 못하면 던진다 — 격리는 그 자리에서 실패로 끝난다.
    */
-  async userSessions(id: string): Promise<string[]> {
-    const sessions: any[] = await this.adm(`/users/${encodeURIComponent(id)}/sessions`) ?? [];
+  async userSessions(id: string, limitMs?: number): Promise<string[]> {
+    const sessions: any[] = await this.adm(`/users/${encodeURIComponent(id)}/sessions`, 'GET', undefined, true, bound(limitMs)) ?? [];
     if (!Array.isArray(sessions)) throw new ServiceUnavailableException('Keycloak 사용자 세션 목록을 읽지 못했습니다');
     return sessions.map(session => session?.id).filter((sid): sid is string => typeof sid === 'string' && !!sid);
   }
 
-  async logoutUser(id: string): Promise<void> {
-    await this.adm(`/users/${encodeURIComponent(id)}/logout`, 'POST');
+  async logoutUser(id: string, limitMs?: number): Promise<void> {
+    await this.adm(`/users/${encodeURIComponent(id)}/logout`, 'POST', undefined, true, bound(limitMs));
   }
 
   /**
