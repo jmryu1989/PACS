@@ -86,9 +86,21 @@ class DisplayControlsE2E(ViewerLayoutE2E):
   print('DISPLAY transforms '+json.dumps(dict(initial=initial,operations=observations,inverted=inverted,fit=fit,reset=reset)),flush=True)
   p.screenshot(path=str(Path(__file__).parent/'artifacts/DISPLAY-reset.png'));self.assertEqual(self.originals(),original);self.assertEqual(self.report_rows(f),rows)
 
+ def settled(self,p):
+  # Opening a dock tab shortens the image area and the viewer redraws at the new size; compare from a display that
+  # stayed the same for 1 s (4 reads 250 ms apart), within 15 s.
+  last,same=None,0
+  for _ in range(60):
+   now=self.display(p);same=same+1 if now==last else 0;last=now
+   if same>=4:return now
+   p.wait_for_timeout(250)
+  self.fail('the viewer display did not settle after the Measurements tab opened')
+
  def test_display_04_input_annotation_and_reporting_preservation(self):
   from test_viewer_history import ViewerHistoryE2E
-  f,p=self.open_pair();self.seed_report(f)
+  f,p=self.open_pair()
+  # Saved items (Add Key Image) live in the dock's Measurements tab since 6e5b667; a person opens it before working there.
+  ViewerHistoryE2E.open_measurement_tools(self,p);self.settled(p);self.seed_report(f)
   values=dict(findings='Display draft',conclusion='Display conclusion',recommendation='Display recommendation')
   self.assertEqual(self.stack.request('PUT','/studies/'+f.uid+'/report','doctor',dict(values,baseVersion=1)).status,200)
   self.assertEqual(self.stack.request('POST','/studies/'+f.uid+'/hold','doctor').status,201)
@@ -97,7 +109,8 @@ class DisplayControlsE2E(ViewerLayoutE2E):
   b=p.locator('[data-cy=viewport-grid] > div').first.locator('canvas').bounding_box();x,y=b['x']+b['width']*.5,b['y']+b['height']*.5
   p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+45,y+28,steps=8);p.mouse.up();entry=p.get_by_placeholder('Enter label');expect(entry).to_be_visible()
   before=self.display(p);entry.press_sequentially('12345');expect(entry).to_have_value('12345');self.assertEqual(self.display(p),before)
-  p.get_by_role('button',name='Save',exact=True).click()
+  # The label dialog's own Save: the open Measurements tab lists drawn arrows with a Save button of their own.
+  p.locator('#draggableItem-select-annotation').get_by_role('button',name='Save',exact=True).click()
   arrows=p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').map(a=>({metadata:a.metadata,points:a.data.handles.points,text:a.data.text}))")
   self.choose(p,0);p.keyboard.press('2');p.keyboard.press('r');p.keyboard.press('h');p.keyboard.press('Space');p.wait_for_timeout(150)
   self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').map(a=>({metadata:a.metadata,points:a.data.handles.points,text:a.data.text}))"),arrows)

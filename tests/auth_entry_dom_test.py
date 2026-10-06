@@ -1020,6 +1020,8 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.assertEqual(self.end_records(fresh), {})
         self.logout_lost = True
         stale.locator("#retry-logout").click()
+        # The notice before and after a lost retry is the same sentence: wait for the retry itself to end.
+        expect(stale.locator("#retry-logout")).to_be_enabled()
         expect(stale.locator("#msg")).to_contain_text("서버에 연결하지 못해")
         self.assertEqual(self.logouts, [OTHER], "the Retry was sent, naming its own session")
         self.assertEqual(self.end_records(stale), {}, "no record of the old session is made again")
@@ -1037,6 +1039,8 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.page.goto(self.origin + BASE + "index.html")
         self.logout_lost = True
         self.page.locator("#retry-logout").click()
+        # The notice before and after a lost retry is the same sentence: wait for the retry itself to end.
+        expect(self.page.locator("#retry-logout")).to_be_enabled()
         expect(self.page.locator("#msg")).to_contain_text("서버에 연결하지 못해")
         record = self.end_records()["kin-session-end:" + OTHER]
         self.assertEqual((record["status"], record["origin"], record.get("reason"), record["operation"] > 1), ("unconfirmed", "logout", "network", True))
