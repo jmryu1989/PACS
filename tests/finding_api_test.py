@@ -1316,12 +1316,16 @@ class FindingAPI(unittest.TestCase):
         for before, after, pick in ((listed_before, listed_after, listed_state), (boot_before, boot_after, boot_state)):
             self.assertNotIn('citation', after.text)
             new, old = pick(after), pick(before)
-            drafts = []
+            # S7-U5 sends my draft boundary (draftRevision) beside the draft; the citation PUT stores the
+            # draft, so that boundary moves with it. draftEpoch stays in the comparison: a citation never rotates it.
+            drafts, revisions = [], []
             for entry in (new, old):
                 state = entry.get('state', entry)
                 drafts.append(state.pop('draft', None) if isinstance(state, dict) else None)
+                revisions.append(state.pop('draftRevision', None) if isinstance(state, dict) else None)
             self.assertEqual(new, old, 'nothing but the draft may move when a citation is written')
             self.assertTrue(any(drafts), 'the draft that carries the citation must be in at least one payload')
+            self.assertNotEqual(revisions[0], revisions[1], 'the citation write moves the draft boundary')
             for draft in drafts:
                 if draft is not None:
                     self.assertEqual(sorted(draft), ['at', 'baseVersion', 'conclusion', 'findings', 'recommendation'])
