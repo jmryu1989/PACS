@@ -1,4 +1,4 @@
-"""TEST-S7-U5-END-LIVE (SE-01..SE-10): the session end on the real stack - real BFF, nginx, PostgreSQL and the real
+"""TEST-S7-U5-END-LIVE (SE-01..SE-10, SE-03b, SE-03c): the session end on the real stack - real BFF, nginx, PostgreSQL and the real
 Keycloak login form driven by a browser. No mock of the form, the authorization endpoint or the callback.
 
 REQ-S7-U5-SESSION-END (R1: whenever the product ends a product session the provider session ends too, and a provider
@@ -13,6 +13,12 @@ same doctor's other PC untouched, a provider end racing a refresh (F2), and what
 SE-09/SE-10 (integration review F02, review of 8c2cf37 F-05): the administrator's isolation of a signed-in member on the
 real provider (prompt=none, credentials and refresh refused; Activate lets the member in again), and the provider side of
 the failed-listing path - a member disabled at the provider whose provider session was not logged out.
+SE-03b/SE-03c (S1 real-screen counterexample 1, candidate-diag-S1 ce1-diagnosis): Keycloak names a new SSO by the browser's
+authentication-session id, and a login screen left unfinished in that browser keeps the id alive past a login - the next
+SSO of the browser, the next person's or the same doctor's, gets the ENDED SSO's id. The end mark must not refuse it
+(it covers the ended SSO's authentication, not the id): the next person at an unfinished-logout landing in a profile that
+once closed a login page (SE-03b), and the same doctor after an ordinary Log out in one tab that opened the app twice
+before logging in (SE-03c), each enter with one credential entry; the ended SSO's token stays refused on the Bearer path.
 
 Run only through the guarded runner, on the isolated synthetic stack, after the unit's migration is applied there:
     python scripts/run-tests.py --module tests/live/session_end_live.py --mode live --unit s7-u5-session-end --timeout 1800
@@ -30,7 +36,8 @@ end. Nothing secret is printed: each case prints one line `S7-U5-END-LIVE {case,
 STATUS WHEN WRITTEN (2026-10-05): not run - this job had no stack (Docker was out of bounds). The first run on the
 stack is its first execution; a harness error there is not evidence about the product. SE-01..SE-08 ran 8/8 on the
 synthetic stack on 2026-10-06; SE-09 and SE-10 were added the same day and have NOT run (the stack was reserved for
-another operator) - their first run is their first execution.
+another operator) - their first run is their first execution. SE-03b and SE-03c were added with the CE1 fix (fix round
+5b, 2026-10-06); their result is in that round's run record, not here.
 """
 from __future__ import annotations
 
@@ -56,6 +63,8 @@ CASES = (
     "test_01_log_out_ends_the_provider_session_and_login_meets_the_form",
     "test_02_provider_frozen_during_log_out_cannot_be_ridden_back_in",
     "test_03_next_person_at_an_unfinished_logout_logs_in_as_themselves",
+    "test_03b_next_person_in_a_profile_that_kept_an_abandoned_login_page",
+    "test_03c_the_same_doctor_logs_in_again_in_a_tab_that_opened_the_app_twice",
     "test_04_switch_account_shows_an_editable_name",
     "test_05_the_same_doctors_other_pc_keeps_working",
     "test_06_an_untrusted_browser_is_probed_then_asked_for_credentials",
@@ -127,7 +136,8 @@ class SessionEndLive(unittest.TestCase):
         for user_id in cls.ids.values():
             purge_user_audit(user_id)
             cls.stack.kc_admin("POST", f"/users/{user_id}/logout")
-        owned = [value for value in cls.provider_sessions if re.fullmatch(r"[0-9A-Za-z-]{8,64}", value)]
+        # Keycloak 26 session ids are base64url: '_' as well as '-'.
+        owned = [value for value in cls.provider_sessions if re.fullmatch(r"[0-9A-Za-z_-]{8,64}", value)]
         if owned:
             psql('DELETE FROM "IdpSessionEnd" WHERE "idpSid" IN (' + ",".join(f"'{value}'" for value in owned) + ");")
         # SE-09's isolation fact of A (an Activate clears it; a case that stopped before it leaves it).
@@ -185,13 +195,16 @@ class SessionEndLive(unittest.TestCase):
         page.wait_for_function("() => !location.pathname.startsWith('/auth/realms/kin/login-actions/authenticate') || !!document.querySelector('#input-error')")
         return self.settle(page)
 
-    def sign_in(self, page, who: str) -> str:
-        """Open the app; the ordinary entry goes to the provider's form by itself. Returns the session id of the document."""
-        page.goto(self.stack.proxy + APP + "index.html")
-        at = self.settle(page)
-        if at == "landing":
-            at = self.press(page, "#signin")
-        self.assertEqual(at, "keycloak", "a browser without a session meets the provider's form")
+    def sign_in(self, page, who: str, opens: int = 1) -> str:
+        """Open the app; the ordinary entry goes to the provider's form by itself. `opens` > 1 opens the app's address that
+        many times before typing (a second bookmark click: the earlier authorization is left unfinished). Returns the
+        session id of the document."""
+        for _ in range(opens):
+            page.goto(self.stack.proxy + APP + "index.html")
+            at = self.settle(page)
+            if at == "landing":
+                at = self.press(page, "#signin")
+            self.assertEqual(at, "keycloak", "a browser without a session meets the provider's form")
         self.assertEqual(self.credentials(page, who), "main")
         for line in psql(f'SELECT coalesce("idpSid", \'\') FROM "AuthSession" WHERE sub=\'{self.ids[who]}\';'):
             self.assertTrue(line, "every session remembers its provider session")
@@ -231,6 +244,35 @@ class SessionEndLive(unittest.TestCase):
         answer = context.request.get(self.stack.proxy + "/api/me", headers={"X-KIN-CSRF": "1"})
         body = answer.json() if "json" in (answer.headers.get("content-type") or "") else {}
         return answer.status, body.get("sub")
+
+    def bearer_me(self, token: str) -> tuple:
+        """`GET /api/me` with the access token as Bearer and no cookie (the guard's Bearer path): (status, sub or code)."""
+        api = self.playwright.request.new_context(ignore_https_errors=True)
+        try:
+            answer = api.get(self.stack.proxy + "/api/me", headers={"Authorization": "Bearer " + token})
+            body = answer.json() if "json" in (answer.headers.get("content-type") or "") else {}
+            return answer.status, body.get("sub") if answer.status == 200 else body.get("code")
+        finally:
+            api.dispose()
+
+    def provider_session_and_token(self, who: str) -> tuple:
+        """(provider session id, stored access token) of the account's one product session; the id is owned by the case."""
+        rows = psql(f'SELECT "idpSid" || E\'\\t\' || "accessToken" FROM "AuthSession" WHERE sub=\'{self.ids[who]}\';')
+        self.assertEqual(len(rows), 1, who + " has one product session")
+        idp, token = rows[0].split("\t")
+        type(self).provider_sessions.append(idp)
+        self.case_sessions[who].append(idp)
+        return idp, token
+
+    def refusals(self, who: str) -> int:
+        """Login refusals of this account as a provider session the product had ended, written during this case."""
+        return int(psql(f'SELECT count(*) FROM "AuditLog" WHERE target=\'{self.ids[who]}\' AND id > {self.audit_floor} '
+                        "AND action = 'auth.login' AND detail::json->>'cause' = 'idp_session_ended';")[0])
+
+    def keycloak_kept_the_login_screen(self, context) -> bool:
+        """Whether the browser's Keycloak authentication session holds an unfinished login screen after a login (its
+        restart cookie outlives the login - ce1-diagnosis 3.4). A precondition, not a product rule."""
+        return "KC_RESTART" in [cookie["name"] for cookie in context.cookies()]
 
     def report(self, case: str, **facts):
         print("S7-U5-END-LIVE " + json.dumps({"case": case, **facts}, ensure_ascii=False))
@@ -370,6 +412,69 @@ class SessionEndLive(unittest.TestCase):
         self.assertEqual(self.me(context), (200, self.ids["B"]))
         self.assertEqual((self.product_sessions("A"), self.provider_alive("A"), self.product_sessions("B")), (0, 0, 1))
         self.report("SE-03", a_ends=self.ends("A"))
+
+    def test_03b_next_person_in_a_profile_that_kept_an_abandoned_login_page(self):
+        """S1 real-screen counterexample 1, round 2: the same as SE-03, in a profile that once opened a login page and
+        closed it without logging in - so Keycloak gives the next SSO of this browser the id of the ended one. The next
+        person B still enters as B with one credential entry; the ended SSO's token stays refused, B's is not."""
+        context, page = self.profile()
+        spare = context.new_page()
+        spare.goto(self.stack.proxy + "/api/auth/login")
+        self.assertEqual(self.settle(spare), "keycloak")
+        # Closed, not left open: an open login page may finish its own login screen by itself (ce1-diagnosis 3.4).
+        spare.close()
+        self.sign_in(page, "A")
+        self.assertTrue(self.keycloak_kept_the_login_screen(context), "precondition: the abandoned login screen outlived A's login")
+        a_sid, a_token = self.provider_session_and_token("A")
+        context.route("**/api/auth/logout", lambda route: route.abort("connectionfailed"))
+        page.click("#logout")
+        page.wait_for_url("**/index.html")
+        self.assertEqual(self.settle(page), "landing")
+        self.assertTrue(page.is_visible("#retry-logout"))
+        self.assertEqual(self.press(page, "#signin"), "keycloak")
+        self.assert_editable_form(page, "the next person's Login")
+        self.assertEqual(context.asked[-2:], [("start", "logout_unfinished", True), ("authorize", "login")])
+        asked = len(context.asked)
+        self.assertEqual(self.credentials(page, "B"), "main", "B enters with one credential entry")
+        self.assertEqual(context.asked[asked:], [], "no second form, no restarted flow")
+        self.assertEqual(self.me(context), (200, self.ids["B"]))
+        b_sid, b_token = self.provider_session_and_token("B")
+        self.assertEqual(b_sid, a_sid, "precondition: Keycloak gave B's new SSO the ended SSO's id - else this case proves nothing")
+        self.assertEqual((self.product_sessions("A"), self.provider_alive("A"), self.product_sessions("B"), self.provider_alive("B")),
+                         (0, 0, 1, 1))
+        self.assertEqual((self.ends("A"), self.refusals("B")), ([("auth.logout", "logout")], 0))
+        # The Bearer path judges as the callback: same id, the ended SSO's token refused, the new SSO's accepted.
+        self.assertEqual((self.bearer_me(a_token), self.bearer_me(b_token)), ((401, "AUTH_SESSION_ENDED"), (200, self.ids["B"])))
+        self.report("SE-03b", same_sid=True)
+
+    def test_03c_the_same_doctor_logs_in_again_in_a_tab_that_opened_the_app_twice(self):
+        """ce1-diagnosis X6 with the same doctor: one tab opens the app's address twice before A types (a second bookmark
+        click - the first login screen is left unfinished), A logs in; an ordinary Log out ends A's SSO; A comes back with
+        one Login press and one credential entry, although Keycloak gives A's new SSO the ended SSO's id. The ended SSO's
+        token stays refused, the new one is not."""
+        context, page = self.profile()
+        self.sign_in(page, "A", opens=2)
+        self.assertTrue(self.keycloak_kept_the_login_screen(context), "precondition: the abandoned login screen outlived A's login")
+        a_sid, a_token = self.provider_session_and_token("A")
+        page.click("#logout")
+        page.wait_for_url("**/index.html")
+        self.assertEqual(self.settle(page), "landing")
+        self.wait("A's provider session ended and the mark confirmed",
+                  lambda: self.provider_alive("A") == 0 and self.marks("A")[-1:] == [("logout", "true")])
+        asked = len(context.asked)
+        self.assertEqual(self.press(page, "#signin"), "keycloak")
+        self.assert_editable_form(page, "the same doctor's Login after a Log out")
+        self.assertEqual(context.asked[asked:], [("start", "logout_unfinished", False), ("authorize", "none"), ("authorize", "login")])
+        asked = len(context.asked)
+        self.assertEqual(self.credentials(page, "A"), "main", "A enters with one credential entry")
+        self.assertEqual(context.asked[asked:], [], "no second form, no restarted flow")
+        self.assertEqual(self.me(context), (200, self.ids["A"]))
+        again_sid, again_token = self.provider_session_and_token("A")
+        self.assertEqual(again_sid, a_sid, "precondition: Keycloak gave A's new SSO the ended SSO's id - else this case proves nothing")
+        self.assertEqual((self.product_sessions("A"), self.provider_alive("A"), self.ends("A"), self.refusals("A")),
+                         (1, 1, [("auth.logout", "logout")], 0))
+        self.assertEqual((self.bearer_me(a_token), self.bearer_me(again_token)), ((401, "AUTH_SESSION_ENDED"), (200, self.ids["A"])))
+        self.report("SE-03c", same_sid=True)
 
     def test_04_switch_account_shows_an_editable_name(self):
         context, page = self.unfinished_logout()
