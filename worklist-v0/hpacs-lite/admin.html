@@ -50,6 +50,7 @@
     .badge { border-radius: 999px; background: #5c4215; color: #ffe09b; padding: 5px 10px; font-weight: 700; }
     .message { display: none; margin: 0 0 14px; border: 1px solid #7c343e; border-radius: 8px; background: #3c1b23; color: #ffd9dd; padding: 10px 12px; white-space: pre-wrap; }
     .message.show { display: block; }
+    .retry-line { margin: -6px 0 14px; }
     .table-wrap { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
     table { width: 100%; border-collapse: collapse; }
     th, td { border-bottom: 1px solid #22364f; padding: 10px 11px; text-align: left; vertical-align: middle; }
@@ -171,6 +172,7 @@
     </div>
 
     <p class="message" id="message" role="alert"></p>
+    <p class="retry-line" id="activation-retry" hidden><button type="button" id="retry-activate" title="서버가 알려 준 간격이 지나면 다시 시도할 수 있습니다." disabled>Retry Activate</button></p>
     <div class="table-wrap">
       <table>
         <thead>
@@ -405,7 +407,9 @@
         if (!KinWorkContext.admits(context)) throw new Error("세션이 종료되었습니다");
         if (epoch !== membersEpoch) throw Object.assign(new Error("이전 조회의 응답입니다"), { stale: true });
         const payload = response.body;
-        if (!response.ok || response.incomplete) throw Object.assign(new Error(errorText(payload, response.status)), { status: response.status });
+        if (!response.ok || response.incomplete) throw Object.assign(new Error(errorText(payload, response.status)), {
+          status: response.status, code: payload && payload.code, retryAfterSeconds: payload && payload.retryAfterSeconds,
+        });
         return payload;
       }
 
@@ -500,14 +504,43 @@
         $("#membership-dialog").showModal();
       }
 
+      /**
+       * Activate가 기한 안에 확정되지 않았다는 답(409 ACTIVATION_UNCONFIRMED): 이용 제한은 그대로다. 서버의 문장을 보이고, 다시
+       * 시도는 서버가 말한 간격(retryAfterSeconds)이 지난 뒤에만 누를 수 있다 — 저절로 다시 보내지 않는다. 다른 변경을 시작하거나
+       * 세션이 끝나면 거둔다.
+       */
+      let activationRetry = null;
+      function offerActivationRetry(user, seconds) {
+        clearActivationRetry();
+        const wait = Number.isFinite(seconds) && seconds > 0 ? seconds : 5;
+        $("#retry-activate").disabled = true;
+        $("#activation-retry").hidden = false;
+        activationRetry = { user, timer: setTimeout(() => { $("#retry-activate").disabled = false; }, wait * 1000) };
+      }
+
+      function clearActivationRetry() {
+        if (activationRetry) clearTimeout(activationRetry.timer);
+        activationRetry = null;
+        $("#retry-activate").disabled = true;
+        $("#activation-retry").hidden = true;
+      }
+
+      $("#retry-activate").addEventListener("click", () => {
+        const pending = activationRetry;
+        if (!pending || $("#retry-activate").disabled) return;
+        mutate(pending.user, { enabled: true });
+      });
+
       async function mutate(user, body) {
         setMessage("");
+        clearActivationRetry();
         try {
           await request("PATCH", `/admin/users/${encodeURIComponent(user.id)}`, body);
           await loadUsers();
         } catch (error) {
           if (KinConsoleSession.ended() || error.stale || membersDenied) return;
           setMessage(error.message);
+          if (error.code === "ACTIVATION_UNCONFIRMED" && body.enabled === true) offerActivationRetry(user, Number(error.retryAfterSeconds));
         }
       }
 
@@ -726,6 +759,7 @@
         setDialogMessage("#create-message", "");
         setDialogMessage("#membership-message", "");
         setMessage("");
+        clearActivationRetry();
         $("#search").value = "";
         rebuildInstitutionOptions();
         $("#users").replaceChildren();
