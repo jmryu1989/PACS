@@ -8,10 +8,10 @@ import {
   openAuditCursor, readAuditPage, sealAuditCursor,
 } from './admin-audit';
 import { memberState } from './auth.guard';
-import { AuthService } from './auth.service';
+import { AuthService, Reactivation } from './auth.service';
 // 역할 목록은 clinician-policy 한 곳에서 온다. 여기서 별도 literal을 두면 guard와 어긋난다.
 import { APP_ROLES } from './clinician-policy';
-import { KeycloakService, KeycloakUser } from './keycloak.service';
+import { KeycloakService, KeycloakUser, within } from './keycloak.service';
 import { Caller } from './pacs.service';
 import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
@@ -19,6 +19,12 @@ import { StudyAccessService } from './study-access.service';
 // 감사 기록 다음 쪽 값의 봉인 키. 프로세스마다 새로 만든다 — API가 다시 시작되면 이어받기는 만료(409)되고
 // 처음부터 다시 읽는다. 키를 설정으로 두면 값이 재시작을 넘어 살아남을 이유만 생긴다.
 const AUDIT_CURSOR_KEY = randomBytes(32);
+/**
+ * Activate(S7-U5 D600)는 요청 전체가 15초 안에 답한다: 인증 서버를 읽고 바꾸고 다시 읽는 일은 시작부터 14초 안에 멈추고,
+ * 남은 1초는 우리 감사 기록과 답에 쓴다. 기한 안에 확정하지 못하면 격리를 유지한 채 409 ACTIVATION_UNCONFIRMED다.
+ */
+const ACTIVATE_LIMIT_MS = 14_000;
+const ACTIVATE_RETRY_SECONDS = 5;
 
 function text(value: unknown, field: string, max: number, required = true): string {
   if (value == null && !required) return '';
@@ -57,8 +63,8 @@ export class AdminService {
     };
   }
 
-  private async managed(id: string): Promise<KeycloakUser> {
-    const user = await this.keycloak.getUser(id);
+  private async managed(id: string, signal?: AbortSignal): Promise<KeycloakUser> {
+    const user = await this.keycloak.getUser(id, signal);
     if (!user) throw new NotFoundException('사용자를 찾을 수 없습니다');
     if (user.serviceAccountClientId)
       throw new ForbiddenException('서비스 계정은 회원 관리 API로 변경할 수 없습니다');
@@ -89,16 +95,16 @@ export class AdminService {
 
   /**
    * KC 변경은 트랜잭션이 아니므로 자격을 건드리기 전에 이 순서를 끝까지 통과해야 한다.
-   * disabled만으로 기존 JWT는 죽지 않는다. DB 세션 0건과 KC logout까지가 한 장벽이다.
+   * disabled만으로 기존 JWT는 죽지 않는다. DB 세션 0건과 회원의 provider 세션 종료까지가 한 장벽이다.
    *
    * 세션은 행만 지우지 않는다(S7-U5 R1): 제품이 세션을 끝내는 길은 하나 — provider 세션마다 표식·provider 종료·접속기록
    * (원인 isolation)을 남기는 auth의 종료 절차다. 행만 지우면 격리 전에 code를 교환해 둔 콜백이 같은 SSO로 세션을 다시
-   * 만들고, 끝난 세션의 기록도 남지 않는다. 사용자 전체 로그아웃(logoutUser)은 그대로 둔다 — 정지된 회원의 다른 PC의
-   * 세션도 끝나야 한다. 그 사이 만들어진 세션까지 한 번 더 같은 절차로 끝낸 뒤 0건을 확인한다.
+   * 만들고, 끝난 세션의 기록도 남지 않는다. 정지된 회원의 다른 PC의 세션은 나열해 하나씩 끝낸다(사용자 전체 로그아웃은 쓰지
+   * 않는다 — D600). 그 사이 만들어진 세션까지 한 번 더 같은 절차로 끝낸 뒤 0건을 확인한다.
    *
-   * 격리는 우리 쪽 사실을 **먼저** 남긴다(auth.isolateMember): 그 뒤의 인증 서버 일(나열·표식·비활성화·전체 로그아웃)이
+   * 격리는 우리 쪽 사실을 **먼저** 남긴다(auth.isolateMember): 그 뒤의 인증 서버 일(나열·표식·비활성화·세션 종료)이
    * 어디서 끊겨도 로그인 콜백과 갱신은 그 사실을 보고 막고, 남은 인증 서버 일은 종료 재시도 주기가 잇는다. 사실은 재활성화가
-   * 끝까지 성공한 뒤에만 지운다(reactivated).
+   * 끝까지 성공한 뒤에만 지운다(auth.reactivateMember).
    */
   private async isolate(id: string): Promise<void> {
     await this.auth.isolateMember(id);
@@ -107,27 +113,29 @@ export class AdminService {
   }
 
   /**
-   * 다시 활성화. 남은 격리의 인증 서버 일이 있으면 먼저 끝낸다 — 그 일이 끝나지 않은 채 사실을 지우면, 나열·표식하지 못한
-   * provider 세션에서 격리 전에 교환한 code가 통한다. 활성화가 성공한 **뒤에** 사실을 지운다; 그 전 어디서 실패해도 사실은
-   * 남아 로그인을 계속 막는다(부른 쪽이 격리 충돌로 답한다).
+   * 다시 활성화 — auth.reactivateMember의 한 길(옛 변경 호출의 답 → 남은 격리 일 → 활성화 확정 → 다시 읽기 → 같은 세대일 때만
+   * 사실 지움). 기한 안에 끝내지 못했거나 새 정지가 넘겨받았으면 던진다 — 사실은 남아 로그인을 계속 막는다(승인 변경·승인
+   * 취소는 격리 충돌로 답한다). 성공하면 그때 다시 읽은 회원을 돌려준다.
    */
-  private async reactivate(id: string): Promise<void> {
-    const isolation = await this.auth.isolation(id);
-    // 남은 일은 재활성화가 넘겨받아 끝낸다: 넘겨받은 뒤 앞선 처리가 이미 보낸 인증 서버 호출이 돌아올 때까지(그 호출의
-    // 한도까지) 기다리고, 그다음 남은 일을 끝낸다 — 그래서 아래 활성화 뒤에 옛 비활성화·전체 로그아웃이 닿지 않는다(앞선
-    // 처리는 다음 걸음 앞에서 멈춘다). 다른 쪽이 넘겨받아 끝내지 못했으면 활성화하지 않는다 — 그 쪽이 아직 비활성화·전체
-    // 로그아웃을 할 수 있다. 끝까지 끝난 사실(providerDone)에는 진행 중인 호출이 없다: 끝낸 쪽은 자기 호출이 모두 돌아온 뒤에
-    // 완료를 적고, 그 전에 앞선 쪽의 호출도 기다렸다.
-    if (isolation && !isolation.providerDone && !await this.auth.finishIsolation(id))
-      throw new Error('격리의 남은 일을 끝내지 못했습니다');
-    await this.keycloak.setEnabled(id, true);
-    await this.auth.clearIsolation(id);
+  private async reactivate(id: string, until = performance.now() + ACTIVATE_LIMIT_MS): Promise<KeycloakUser> {
+    const result = await this.auth.reactivateMember(id, until);
+    if (result.outcome !== 'activated') throw new Error('재활성화를 확정하지 못했습니다');
+    return result.user;
   }
 
-  private async isolatedConflict(id: string): Promise<never> {
+  /** Activate가 기한 안에 확정하지 못했다는 답: 이용 제한(격리)은 그대로이고 5초 뒤 다시 하면 된다. */
+  private activationUnconfirmed() {
+    return new ConflictException({
+      code: 'ACTIVATION_UNCONFIRMED',
+      message: '활성화를 확인하지 못했습니다. 이용 제한을 유지합니다. 5초 뒤 다시 시도하세요.',
+      retryAfterSeconds: ACTIVATE_RETRY_SECONDS,
+    });
+  }
+
+  private async isolatedConflict(id: string, signal?: AbortSignal): Promise<never> {
     let user: any = null;
     try {
-      const current = await this.keycloak.getUser(id);
+      const current = await this.keycloak.getUser(id, signal);
       if (current && !current.serviceAccountClientId) user = this.row(current);
     } catch {}
     throw new ConflictException({
@@ -256,7 +264,20 @@ export class AdminService {
 
   async patchUser(id: string, body: any, c: Caller) {
     this.admin(c);
-    const beforeUser = await this.managed(id);
+    // Activate의 15초는 이 요청의 시작부터 센다: 처음의 회원 읽기도, 실패 기록 전의 다시 읽기도 그 기한 안에서 끊는다.
+    const activating = body?.enabled === true && body?.approvalState === undefined
+      && body?.institution === undefined && body?.roles === undefined;
+    const until = performance.now() + ACTIVATE_LIMIT_MS;
+    const bounded = () => activating ? within(until - performance.now()) : undefined;
+    let beforeUser: KeycloakUser;
+    try {
+      beforeUser = await this.managed(id, bounded());
+    } catch (error) {
+      // 기한 안에 회원을 읽지 못한 Activate는 아무것도 바꾸지 않았다(이용 제한 그대로).
+      if (activating && !(error instanceof NotFoundException) && !(error instanceof ForbiddenException))
+        throw this.activationUnconfirmed();
+      throw error;
+    }
     const before = this.row(beforeUser);
     if (body?.enabled !== undefined && typeof body.enabled !== 'boolean')
       throw new BadRequestException('enabled는 boolean이어야 합니다');
@@ -306,12 +327,15 @@ export class AdminService {
         action = 'activate';
         if (before.approvalState === 'INVALID')
           throw new BadRequestException('INVALID 사용자는 자격을 바로잡기 전 활성화할 수 없습니다');
-        try {
-          await this.reactivate(id);
-          after = this.row(await this.managed(id));
-        } catch {
-          await this.isolatedConflict(id);
+        let result: Reactivation;
+        try { result = await this.auth.reactivateMember(id, until); }
+        catch { result = { outcome: 'unconfirmed' }; }
+        if (result.outcome !== 'activated') {
+          // 새 정지가 넘겨받았으면 그 정지가 지금 상태다(격리 충돌), 아니면 확정하지 못한 채 이용 제한을 유지한다.
+          if (result.outcome === 'superseded') await this.isolatedConflict(id, bounded());
+          throw this.activationUnconfirmed();
         }
+        after = this.row(result.user);
       } else {
         throw new BadRequestException('변경할 회원 상태가 없습니다');
       }
@@ -322,7 +346,7 @@ export class AdminService {
     } catch (error) {
       if (!(error instanceof ConflictException)) throw error;
       let current: any = null;
-      try { current = this.row(await this.managed(id)); } catch {}
+      try { current = this.row(await this.managed(id, bounded())); } catch {}
       await this.audit(c.actor, 'admin.user.patch.failed', id, {
         before, after: current, verificationOverride: body?.verificationOverride === true, failed: true,
       });
