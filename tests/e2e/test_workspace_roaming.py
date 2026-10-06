@@ -29,6 +29,14 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         menu=page.locator('#workspace-server-menu')
         if menu.get_attribute('open') is None:menu.locator('summary').click()
         expect(page.get_by_role('button',name='Load from Account',exact=True)).to_be_enabled()
+    def close_toolbar_groups(self,page,selector):
+        """Close every open toolbar group that holds `selector`, innermost first, by clicking its summary - as a person
+        does after using a menu. An open group is a second toolbar row in the flow; closing it gives the space back."""
+        groups=page.locator(selector).first.evaluate("""e => { const out = [];
+            for (let d = e.closest('details'); d; d = d.parentElement.closest('details')) out.push(d.id); return out; }""")
+        for group in groups:
+            menu=page.locator('#'+group)
+            if menu.get_attribute('open') is not None:menu.locator(':scope > summary').click()
     def action(self,page,name,message):
         self.open_menu(page);button=page.get_by_role('button',name=name,exact=True)
         expect(button).to_be_enabled();button.click();expect(button).to_be_enabled()
@@ -59,7 +67,10 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         y=self.sign_in(self.device());self.select(y,f);self.wait_thumbnail(y)
         self.assertIsNone(self.stored(y));self.mode_is(y,'auto')
         writes=[];y.on('request',lambda r:writes.append(r.url.split('?')[0]) if r.method not in ('GET','HEAD','OPTIONS') and '/api/' in r.url else None)
-        self.action(y,'Load from Account','불러왔습니다');self.assertEqual(self.stored(y),layout);self.same_sizes(y,layout);self.shot(y,'portrait-restored')
+        # The Load is pressed inside the open View group and Account Layout menu, which take toolbar space; the stored sizes are
+        # applied within the space of that moment. The person then closes the menus: the stored sizes come back in full.
+        self.action(y,'Load from Account','불러왔습니다');self.assertEqual(self.stored(y),layout)
+        self.close_toolbar_groups(y,'#workspace-server-menu');self.same_sizes(y,layout);self.shot(y,'portrait-restored')
         y.set_viewport_size(dict(width=768,height=1024))
         self.open_toolbar_group(y,'#layout-reset')
         self.open_toolbar_group(y,'#b-history')
