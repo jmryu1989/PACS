@@ -12,7 +12,7 @@
 
 ## 분류와 기간의 단일 원천
 
-`RECORD_CLASSIFICATION[kind].retention.statutoryMinimum`이 기간의 단일 원천이다. B/G가 서버 저장소에 결속한 `StoredRecordReader.load(recordId, eventId)`에서 모델·행 사실·수명주기 사건을 조회하고 `resolveStoredRecord()`가 불변의 검증 결과를 만든다. `newRetentionRecord(resolved)`는 이 결과만 받으며 호출자의 model/kind/기간 선언이나 복제·역직렬화한 검증 결과를 받지 않는다. `retentionDisposition()`이 법정/목적/원기록/접속 처리 경로를 도출한다. 실제 적용 class와 `clauseId` 중 최장 기간을 사용한다. 사람이 서명하는 판독은 10년이며 임상 답변·협진은 처방전이 아니다.
+`RECORD_CLASSIFICATION[kind].retention.statutoryMinimum`이 기간의 단일 원천이다. B/G의 초기 구성에서 `bindStoredRecordReader()`로 서버 저장소 조회 메서드를 결속한다. `resolveStoredRecord()`는 등록된 capability와 opaque ID만 받고 모델·행 사실·수명주기 사건으로 불변의 검증 결과를 만든다. 요청별 reader, 호출자의 model/kind/기간 선언, 복제·역직렬화한 검증 결과는 거절한다. 법적 의무·초안 종료·재진료 조회도 각각 `bindLegalDutyReader()`·`bindPurposeEndReader()`·`bindClinicalStudyReader()`로 결속하며, 등록 뒤 원 reader 메서드를 교체해도 capability는 바뀌지 않는다. `retentionDisposition()`이 법정/목적/원기록/접속 처리 경로를 도출한다. 실제 적용 class와 `clauseId` 중 최장 기간을 사용한다. 사람이 서명하는 판독은 10년이며 임상 답변·협진은 처방전이 아니다.
 
 | 법정 종류 | 기간 | clauseId (의료법 시행규칙 제15조①) |
 |---|---|---|
@@ -36,10 +36,10 @@
 | 임상 인계 완료 ACK | 수신자·고정판을 검증한 `CriticalResultEvent`를 CVR의 part로 보존, 진료기록부 10년 |
 | 별도 접속·단순 전송 영수증 | 각 사건 2년. ACK API의 재전송 영수증도 실제 임상 ACK 원본과 별개 |
 | 고정 원기록의 출력·다운로드·썸네일·서명 증거 | `source-record`, 원기록을 따라 파기, 독립 기산 금지 |
-| 개인 초안·dictation | 그 초안이 만드는 결과판의 실제 승인/서명 또는 그 초안의 명시적 discard에서 목적 종료 |
+| 개인 초안·dictation | 해당 결과판 서명·명시적 discard 또는 그 intent를 불가능하게 만든 저장 사건에서 목적 종료 |
 | 배치·분류 자유 문구·양식·개인 설정·기타 운영 자료 | 아래 닫힌 목적 종료 사건, 임상 5/10년을 부여하지 않음 |
 
-혼합 모델 목록은 가능한 내용의 영향 조사 목록이다. 저장소 어댑터는 같은 테이블의 모든 종류를 합치지 않고 저장 행의 discriminator와 실제 임상 채택·기재 사건을 확인한다. 예를 들어 단순 ViewerJob 배치는 목적 자료, 임상 설명을 기재한 판은 10년이다. StudyState 정정은 고정 원기록, 환자 매칭은 명부, 배정은 목적 자료 경로다. `source-record`는 독립 시계가 없으며 B가 원기록 결속을 조회한다. 접속기록은 `accessRetention(parsed event)`, 단순 전달은 `deliveryRetention(resolved)`로만 만들고 판독과 섞지 않는다. 임상 ACK는 새 독립 단위로 만들지 않고 같은 CVR에 추가한다.
+혼합 모델 목록은 가능한 내용의 영향 조사 목록이다. 저장소 어댑터는 같은 테이블의 모든 종류를 합치지 않고 저장 행의 discriminator와 실제 임상 채택·기재 사건을 확인한다. 예를 들어 단순 ViewerJob 배치는 목적 자료, 임상 설명을 기재한 판은 10년이다. StudyState 메타데이터 정정은 동일 메타데이터 단위의 `correction` part로 검사/영상 5년을 적용하고 이전 판과 `orig`를 보존한다. 환자 매칭은 명부, 배정은 목적 자료 경로다. Order의 `product-authored`는 새 제품 서명을 요구하고 `received-ris`는 검증된 수신 사건·원시스템·원서명 증거에 결속한 `received-order`로 10년을 적용한다. 수신 사건에 제품 서명을 만들어 붙이지 않는다. `source-record`인 썸네일·출력 등은 독립 시계가 없다. 접속기록은 `accessRetention(parsed event)`, 단순 전달은 `deliveryRetention(resolved)`로만 만들고 판독과 섞지 않는다. 임상 ACK는 새 독립 단위로 만들지 않고 같은 CVR에 추가한다.
 
 이 어댑터는 HTTP 입력이 아니다. 서버가 저장된 모델을 찾아 행을 읽고 서명 검증·원내용 해시·행위·시각·원판·구성요소와 업무 사건을 대조한다. `verified`/`clinicalEntry` 같은 검증 사실을 클라이언트 body에서 복사하면 계약 위반이다. 저장 후 다시 읽을 때에도 B는 실제 저장 사실을 재검증하여 capability를 재발급하고 이를 part/hold에 결속한다. A는 이 순수 계약과 거절 경계를 제공하며 실제 DB 조회·암호 검증은 B/C/G가 이행한다.
 
@@ -47,13 +47,15 @@
 
 새 part는 실제 적법한 기록 사건에만 결속한다. `recordVersionAdded()`는 검증된 저장 사건의 record/version·원내용 SHA-256·기재/추가기재/정정·실제 시각과 바로 이전 판을 대조한다. 서명 대상은 검증된 해당 서명판, 영상은 취득 사건, 비서명 내용은 분류에 맞는 생성/ACK 사건이 필요하다. 열람·동일 내용 재서명·이관·장부정리를 거절한다. 각 part의 기산과 단위 최댓값은 완전한 기록 보존을 위한 제품 계약이며 법령이 모든 기산을 서명 시각이라고 직접 정했다는 주장이 아니다.
 
-자체 기간 경과와 파기 가능 상태를 구분한다. 보존 근거 없이 만료한 단위는 새 part로 부활시키지 않고 새 진료는 새 단위에 기록한다. 유효 hold 중 정정은 검증된 독립 처리 근거·권한·해당 hold들의 허용 조건·기존 원본 보존·분리 관리가 모두 있는 새 서명판만 가능하다. 이 정정은 보존 전용을 임상 접근으로 복귀시키지 않는다.
+자체 기간 경과와 파기 가능 상태를 구분한다. `recordVersionAdded()`에는 사건 시점의 완전한 graph가 필수다. CVR 편입·적법 연장·유효 hold로 존속하는 단위는 적법한 새 part를 받을 수 있지만, 보존 근거 없이 만료한 단위는 부활시키지 않고 새 진료는 새 단위에 기록한다. hold 중에도 분류표가 허용하는 Addendum·ACK·취득·비서명 정정 모두 가능하며, 독립 처리 근거·권한·모든 hold의 조건·원본 보존을 확인한다. 서명은 해당 종류가 요구할 때만 필요하다. 보존 전용이거나 hold만으로 만료 후 존속하는 때에는 분리 관리도 요구한다. I는 기존 단위의 서명판을 저장하기 전에 `transitionRetainedReport()`로 수명주기와 part 계약을 함께 검사한다. hold만으로 존속하는 보전 정정은 임상 접근이나 공개를 재개하지 않는다.
 
-`RetentionGraph`의 편입은 실제 본문을 이루는 바이트와 수정 전 원본으로 한정한다. CVR→차분판→기초 원본처럼 여러 단계로 저장되더라도 필요한 모든 판/바이트를 서명 시 **완전한 직접 구성요소 목록**으로 고정한다. 구성요소의 고정 해시와 중첩 의존성 누락을 대조한다. 단순 비교·과거 검사·후속 판독 인용은 navigation이며 필요한 인용문 자체는 새 문서의 서명 바이트에 넣는다. 임의의 한 홉 제한도, 상속 기한의 재전파도 없다.
+`RetentionGraph`의 편입은 실제 본문을 이루는 바이트와 수정 전 원본으로 한정한다. CVR→차분판→기초 원본처럼 여러 단계로 저장되더라도 필요한 모든 판/바이트를 서명 시 **완전한 직접 구성요소 목록**으로 고정한다. `newRetentionRecord()`와 `recordVersionAdded()`가 생성/서명 사건 시점에 고정 해시·중첩 의존성·기존 보존 근거를 검사한다. 만료·파기된 구성요소의 뒤늦은 편입은 `ComponentExpired`/`ComponentDestroyed`로 거절하며 새 참조 자신의 기한을 근거로 되살리지 않는다. 파기 시의 동일한 누락·해시 검사는 유지한다. 단순 비교·과거 검사·후속 판독 인용은 navigation이며 필요한 인용문 자체는 새 문서의 서명 바이트에 넣는다. 임의의 한 홉 제한도, 상속 기한의 재전파도 없다.
+
+생성 검사에는 새 part를 추가하기 전의 snapshot을 전달한다. transaction 안에서 아직 확정하지 않은 새 참조판도 snapshot에 포함하면 `ComponentAdmissionSnapshotRefused`다. 새 참조판의 긴 기한을 먼저 반영하여 자기 구성요소의 만료를 가리는 순환 논증을 허용하지 않는다.
 
 대상 단위의 기한은 자체 part/적법 연장의 최댓값과 대상을 직접 구성요소로 포함하는 각 법정기록의 **자체** 기한 중 최댓값이다. 다른 기록에서 물려받은 기한은 다시 계산에 넣지 않는다. 30년 비교 인용이 첫 판독의 자체 기한을 늘리지 않는다. 유효 hold는 필요한 직접 구성요소에도 별도로 검사한다.
 
-B는 같은 잠금 안에서 역참조 전수 조회·모든 구성요소 및 법적 의무의 현재 상태를 확인하여 `complete/revision/checkedAt`을 공급한다. `destroyAtExpiry()`는 null/undefined/불완전 graph를 거절하고 `withRetentionLock()`이 다시 읽은 최신 snapshot과 요청 snapshot이 같은지 확인한다. 잠금은 시작 원장·삭제·완료까지 유지한다. 신규 편입/part/연장/hold도 같은 잠금에 참여한다. 조회 실패나 오래된 cache를 빈 목록으로 바꾸면 안 된다. 빈 참조는 완전한 조사 결과 0건일 때만 유효하다. 접속 단위에는 원환자 기록의 참조 의존성을 넣지 않으며 자기 hold/시계만 검사한다. A의 순수 시험은 실제 DB의 잠금·역참조 전수성을 증명하지 않는다.
+B는 같은 잠금 안에서 역참조 전수 조회·모든 구성요소 및 법적 의무의 현재 상태를 확인하여 `complete/revision/checkedAt`을 공급한다. `destroyAtExpiry()`는 null/undefined/불완전 graph를 거절하고 `withRetentionLock()`이 다시 읽은 최신 snapshot의 내용 전체를 요청 snapshot과 대조한다. 잠금은 시작 원장·삭제·완료까지 유지한다. 기존 단위의 part/연장/hold는 `withRetentionChange()` 안에서 순수 결정을 실행하고 반환 값을 같은 잠금에서 저장한다. 새 편입도 구성요소와 역참조 변경 전체를 같은 잠금에 참여시킨다. `destroyedAt`은 B가 실제 완료/복구 상태에서 확인하는 파기 사실이며, 파기된 기록에는 hold·part를 추가할 수 없다. 조회 실패나 오래된 cache를 빈 목록으로 바꾸면 안 된다. 빈 참조는 완전한 조사 결과 0건일 때만 유효하다. 접속 단위에는 원환자 기록의 참조 의존성을 넣지 않으며 자기 hold/시계만 검사한다. A의 순수 시험은 실제 DB의 잠금·역참조 전수성을 증명하지 않는다.
 
 기간은 **Asia/Seoul 기관 역일**로 민법 제157조·제159조·제160조에 따라 계산한다. 초일은 불산입하되 오전 0시에 시작하면 산입한다. 연 단위는 역으로 계산하고 해당일이 없으면 그 월 말일의 종료까지 보존한다. `civilPeriodEnd()`/`retentionDeadline()`은 **말일이 완전히 끝난 직후 00:00 KST 경계**를 UTC로 반환한다. 파기는 이 경계 이상에서만 가능하다. 경계 직전 1ms도 보존 중이다. 별도 유예기간은 없다.
 
@@ -70,13 +72,17 @@ D589의 시행규칙 제15조① 단서에 따른 **계속 진료 1회 연장**�
 
 hold는 **파기만 정지**하며 기산/기한/일반 접근권을 바꾸지 않는다. `LegalDutyReader`가 실제 요청·명령을 검증하여 고정 유형(법원/수사/감독 명령·법정 의무·미처리 열람 요청), 적용 법률·조항·판본, 검증한 requestId, 권한 주체, 대상 기록 범위, 효력 시작/종료와 유효 조건을 공급한다. `placeLegalHold()`는 이 조회 결과에 기록·행위자·시각을 결속한다. 병원 방침/가짜 문서번호/자유문구만으로 성립하지 않는다. 기관이 실제 법정 의무를 이행하려고 등록하는 경우는 허용한다. `verified`는 G가 실제 문서·권한·대상·조건을 대조한 결과이며 관리자 입력값이 아니다.
 
+파기되지 않고 존속하는 기록에는 자체 기한이 지난 뒤에도 검증된 hold를 등록한다. CVR가 보존 중인 기록·다른 hold가 보존 중인 기록·만료 후 파기 실행 전 기록을 모두 포함한다. hold는 집합이며 하나의 해제로 나머지를 해제하지 않는다. 법정 의무는 `HOLD_DUTY_CLAUSES`의 고정 clauseId·법률·조항·판본·권한 주체를 모두 대조한다. 현재 열거된 `privacy:36.2`는 검증된 정정 의무이고 해당 개인정보처리자인 기관만 권한 주체로 인정한다. 다른 의무의 지원에는 검토된 표 항목이 필요하며 기관이 표나 기간을 편집하지 않는다.
+
+미처리 열람 요청은 `privacy:35.3`과 해당 요청의 유한한 `until`을 요구한다. 결속된 reader가 원 요청의 응답기한(검증된 적법 연장 포함)·대상과 이행/철회/적법 거절 사건을 읽는다. 파기/추가 검사에서는 요청을 다시 읽어 응답기한 전이라도 해결되었으면 `HoldReleaseRequired`를 반환한다. 해제는 그 해결 사건 ID와 해당 종료 사유를 대조한다. 종료일 없는 유효 법원 명령을 이 요청 규칙으로 자동 해제하지 않는다.
+
 G/B는 파기/추가 잠금 안에서 명령·요청의 현재 유효 조건도 재확인한다. 조건이 소멸하면 **같은 holdId**에 종료 근거·권한자·시각을 담은 해제 사건을 즉시 저장하고 `liftLegalHold()` 또는 `liftPurposeLegalHold()`로 반영한다. 해제 증빙 ID는 원명령 ID와 달라도 된다. 유효 종료가 지났는데 해제가 없으면 `HoldReleaseRequired`로 근거 재확인/해제 처리를 요구하며 이를 계속 유효한 hold로 보고하지 않는다. 처리한 열람 요청이나 소멸한 근거를 무기한 보전 사유로 사용하면 안 된다. 남은 의무가 없으면 본래 만료와 마지막 해제 중 늦은 시점부터 즉시 파기한다. 해제는 새 시계를 만들지 않는다.
 
 `purpose` 종류는 분류표의 `purposeEnds`에 다음 사건을 모두 고정한다. 모든 사건은 B가 실제 해당 기록/부모 판독/소유자와 결속한다. 기관이 시점·보유연수를 고르는 설정은 없다.
 
 | 목적 자료 | 종료 사건 |
 |---|---|
-| 개인 초안·dictation 및 이전/비운 초안판 | 그 초안의 결과판 실제 승인/서명 또는 소유자의 명시적 discard. Addendum 초안은 해당 Addendum의 서명만 해당 |
+| 개인 초안·dictation 및 이전/비운 초안판 | 해당 결과판 서명·소유자의 명시적 discard 또는 `intent-superseded`: approve 초안의 타 판독자 승인, 부모 판독 취소, amend 초안의 수정창 종료 |
 | study-organization·comparison-layout·reading-template | 소유자 삭제 |
 | preferences | 설정 교체 또는 소유자 삭제 |
 | assignment·identity-access | 배정/권한 관계 종료; 남겨야 할 변경 증거는 별도 접속기록 단위 |
@@ -87,7 +93,9 @@ G/B는 파기/추가 잠금 안에서 명령·요청의 현재 유효 조건도 
 
 `PurposeRecord`는 서버가 저장한 소유자·생성 시각·draftBinding(부모 기록·작업 intent·approve/addendum/amend)을 가진다. `resolvePurposeEnd()`가 저장 종료 사건을 읽고 `destroyAtPurposeEnd()`가 그 초안·intent·결과판·서명 action·실제 서명 시각과 초안 생성 **이후** 여부를 대조한다. 과거 부모 승인에 현재 시각을 붙이거나 Finalized timer로 새 Addendum 초안을 끝낼 수 없다. 해당 초안 소유자의 명시적 discard도 실제 저장된 사건이어야 한다. 모든 파기 거절은 구체적인 오류 code와 삭제 호출 0회·시작 원장 0건으로 시험한다.
 
-`destroyAtPurposeEnd()`는 최신 목적 자료/hold를 `withPurposeLock()` 아래 다시 확인하고 지체 없이 파기·시작/완료/실패 원장을 남긴다. 승인 전 Save/Release는 개인 자료를 보존한다. 승인/새 Addendum/수정의 서명은 해당 결과판 초안의 `end-private-draft-purpose` 효과를 내지만 단순 최종화는 초안 종료 효과를 내지 않는다. 다른 intent의 후속 입력은 별도 목적 자료로 보존한다.
+`intent-superseded`는 원인이 된 저장 사건을 포함하고 별도 `loadIntentEndingFact()` 결과와 대조한다. 다른 독자의 승인판·작성자·초안, 사유 있는 취소판, 최초 승인으로 고정된 amendUntil 도달을 구별한다. 취소는 해당 부모의 초안에, 수정창 종료는 amend intent에만 적용한다. 단순 Finalized·Release·이전 부모 승인은 새 Addendum 초안의 종료 사건이 아니다. 실제 종료 즉시 제21조① 파기 경로를 사용한다.
+
+`destroyAtPurposeEnd()`는 최신 목적 자료/hold를 `withPurposeLock()` 아래 다시 확인하고 지체 없이 파기·시작/완료/실패 원장을 남긴다. 목적 자료의 hold 등록도 `withPurposeChange()` 안에서 최신 자료를 확인하고 저장한다. 목적은 종료됐어도 아직 파기되지 않은 자료에는 실제 hold를 등록할 수 있으며, `destroyedAt`이 있는 자료의 hold 등록/재파기는 거절한다. 승인 전 Save/Release는 개인 자료를 보존한다. 승인/새 Addendum/수정의 서명은 해당 결과판 초안의 `end-private-draft-purpose` 효과를 내지만 단순 최종화는 초안 종료 효과를 내지 않는다. 다른 intent의 후속 입력은 별도 목적 자료로 보존한다.
 
 `destroyAtExpiry()`는 모든 단위 판의 정확한 집합을 요구하고, 내구성 있는 시작 기록 → 원본·이전 판·서명 payload·사본·복제본·복구 가능한 백업의 복원 불가능한 영구 삭제 → 성공 영수증 → 완료 기록 순서를 강제한다(제21조①②, 시행령 제16조①1). 실패/중단 및 완료 기록 실패는 B가 실제 삭제 상태와 대조·복구한다. 파기 지연은 파기를 더 막지 않으며, 표준 개인정보 보호지침 제10조①의 5일 경계를 넘어선 요청/완료에는 `overdue`를 남긴다. 작업은 만료/해제/목적 종료 즉시 실행하고 5일을 대기 설정으로 쓰지 않는다.
 
@@ -97,7 +105,7 @@ G/B는 파기/추가 잠금 안에서 명령·요청의 현재 유효 조건도 
 
 Finalized는 24시간 수정창 종료일 뿐 목적 종료가 아니다. `archiveFinalizedReport()`는 저장된 finalization과 현재 공개판·해시·행위자·사유·시각에 명시적 진료 목적 종료를 결속한다. 보존 전용은 제21조③에 따라 다른 업무 자료와 분리 저장·관리하고 일반 조회에서 제외한다. G는 별도 보존 열람의 목적·역할·기관을 검사하고 접속을 기록한다.
 
-`resumeClinicalUse()`는 권한 있는 radiologist의 명시적 요청과 서버 `ClinicalStudyReader`가 읽은 새 검사·원판독의 동일 환자/발급기관을 대조한다. 단순 evidenceId나 hold는 복귀 근거가 아니다. 일반 임상 목적의 적법한 후속 Addendum/수정은 원 Archive의 판/해시 검증 후 정상 보존을 반환한다. 반면 보전 정정은 검증된 독립 처리 근거와 `preservation-correction`을 이력에 기록하고 일반 임상 접근·공개 효과를 재개하지 않는다. 단순 열람은 아무 상태도 바꾸지 않는다. 재사용 사건은 기산/만료를 변경하지 않는다.
+`resumeClinicalUse()`는 권한 있는 radiologist의 명시적 요청과 서버 `ClinicalStudyReader`가 읽은 새 검사·원판독의 동일 환자/발급기관을 대조한다. 단순 evidenceId나 hold는 복귀 근거가 아니다. 일반 임상 목적의 적법한 후속 Addendum/수정은 원 Archive의 판/해시 검증 후 정상 보존을 반환한다. 보전 정정(`preservationCorrection`)과 보전 목적의 적법한 기재(`preservationEntry`)는 독립 처리 근거·권한·서명·원본 보존·분리를 확인하고 이력에 각각 `preservation-correction`/`preservation-entry`로 남긴다. 두 경로 모두 일반 임상 접근·공개를 재개하지 않는다. 단순 열람은 아무 상태도 바꾸지 않는다. 재사용 사건은 기산/만료를 변경하지 않는다.
 
 첫 입력→In Progress, Save→개인 저장, Release→Unread 및 점유 세대 증가. Approve는 즉시 공개하며 `firstApprovedAt`·`originalSignerId`·24시간 `amendUntil`을 고정한다. 수정은 원서명자만 기한 직전까지 가능하고 모든 수정/추가기재는 새 서명판이다. 다른 작성자의 Addendum도 보존한다. Finalized 처리 지연이 기한을 늘리지 않는다. Preliminary의 지정 상급자·자기 승인 금지, Defer 사유를 유지한다.
 
@@ -106,6 +114,8 @@ Finalized는 24시간 수정창 종료일 뿐 목적 종료가 아니다. `archi
 ## 접속 사건과 별도 저장소
 
 성공한 환자 기록 사건은 환자 연결 snapshot·검사·기록·판이 모두 `known`이어야 한다. `surface`는 서버의 실제 라우트/외부 제공 경계에서 기록하며 target.kind가 그 경계 분류에 속하는지 대조한다. 판독 조회를 preferences로 바꾸어 면제할 수 없다. `not-applicable: non-record-target`은 **preferences, reading-template, institution, identity-access, authentication-session, system-operation**에만 허용한다. 자유문구 사유는 사실을 대체하지 못한다. 인증/인가 실패 전에 확인 불가능한 값은 `unresolved`; 실제 빈 결과는 명시적 빈 targets다.
+
+`GET bootstrap`처럼 기록/비기록을 함께 제공하는 경계에서는 `parseAccessEvent(input, servedRows)`에 서버가 실제 제공한 검증 행 목록을 전달해야 한다. 목록 길이·행의 분류·기록/판을 대조하므로 target 라벨만 preferences로 바꾸어 면제할 수 없다. 실제 설정 행과 비기록 전용 경로의 면제는 유지한다. 저장된 혼합 사건의 재검증도 해당 서버 행 manifest가 필요하다. 접속 보존 생성에는 모듈 내부의 고정 AuditLog 어댑터를 쓰며 호출별 reader를 만들지 않는다.
 
 멤버 성공 사건은 신뢰 프록시 IP가 필수다. `executor: service` + `cause: service-job`인 프로세스 내부 작업만 `not-applicable: in-process-service` IP를 허용한다. 서비스도 자기 불변 신원·역할·기관을 기록한다. 감사 연결 ID는 독립 난수 `audit:<UUID>`이며 인증 수단이 아니다.
 

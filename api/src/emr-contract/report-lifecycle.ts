@@ -1,13 +1,14 @@
 import { VersionReference, versionReference } from './signature';
 import { choice, freeze, integer, object, string, utc, refuse } from './validation';
 import { ResolvedRecord, verifiedRecord } from './classification';
+import { RetentionRecord, RetentionGraph, recordVersionAdded, retentionState } from './lawful-defaults';
 
 export type ReportState = 'Unread' | 'In Progress' | 'Preliminary' | 'On Hold' | 'Approved' | 'Finalized' | 'Cancelled';
 export interface ReportFacts {
   recordId: string;
   studyId: string;
   previousCancelledRecordId: string | null;
-  contentHistory: readonly { version: VersionReference; at: string; action: 'preliminary' | 'approve' | 'amend' | 'addendum' | 'cancel'; use: 'clinical' | 'preservation-correction' }[];
+  contentHistory: readonly { version: VersionReference; at: string; action: 'preliminary' | 'approve' | 'amend' | 'addendum' | 'cancel'; use: 'clinical' | 'preservation-correction' | 'preservation-entry' }[];
   state: ReportState;
   firstApprovedAt: string | null;
   originalSignerId: string | null;
@@ -50,6 +51,7 @@ export interface LifecycleCommand {
   eventId?: string;
   reviewerId?: string;
   preservationCorrection?: ResolvedRecord;
+  preservationEntry?: ResolvedRecord;
 }
 export interface LifecycleOutcome {
   facts: Readonly<ReportFacts>;
@@ -85,6 +87,12 @@ export interface ClinicalStudyReader {
   loadStudy(studyId: string): unknown;
   loadReportPatient(recordId: string): unknown;
 }
+const clinicalReaders = new WeakSet<object>();
+export function bindClinicalStudyReader(reader: ClinicalStudyReader): Readonly<ClinicalStudyReader> {
+  if (!reader || typeof reader.loadStudy !== 'function' || typeof reader.loadReportPatient !== 'function') refuse('ClinicalResumeBasisRefused');
+  const bound = Object.freeze({ loadStudy: reader.loadStudy.bind(reader), loadReportPatient: reader.loadReportPatient.bind(reader) });
+  clinicalReaders.add(bound); return bound;
+}
 const verifiedResumptions = new WeakSet<object>();
 function validateArchive(facts: ReportFacts, event: RetentionOnlyEvent): void {
   const e = object(event, ['action', 'purpose', 'recordId', 'version', 'finalizedAt', 'at', 'actorId', 'reason']);
@@ -103,7 +111,7 @@ export function resumeClinicalUse(facts: ReportFacts, archive: RetentionOnlyEven
   const c = object(command, ['actor', 'at', 'basis', 'studyId']);
   if (!c.actor.canReadStudy || c.actor.kind !== 'member' || !c.actor.roles.includes('radiologist') || utc(c.at) < archive.at)
     refuse('ClinicalResumeAuthorityRefused');
-  if (c.basis !== 'new-study-same-patient' || !reader || typeof reader.loadStudy !== 'function') refuse('ClinicalResumeBasisRefused');
+  if (c.basis !== 'new-study-same-patient' || !clinicalReaders.has(reader)) refuse('ClinicalResumeBasisRefused');
   const study = object(reader.loadStudy(string(c.studyId)), ['studyId', 'patientId', 'assigningAuthority', 'createdAt']);
   const patient = object(reader.loadReportPatient(facts.recordId), ['recordId', 'patientId', 'assigningAuthority']);
   string(patient.patientId); string(patient.assigningAuthority);
@@ -154,7 +162,7 @@ export function validateReportFacts(input: ReportFacts): void {
   if (f.previousCancelledRecordId !== null && string(f.previousCancelledRecordId) === f.recordId) throw new Error('Self predecessor');
   if (!Array.isArray(f.contentHistory)) throw new Error('Content history required');
   f.contentHistory.forEach((h, i) => {
-    object(h, ['version', 'at', 'action', 'use']); choice(h.use, ['clinical', 'preservation-correction']);
+    object(h, ['version', 'at', 'action', 'use']); choice(h.use, ['clinical', 'preservation-correction', 'preservation-entry']);
     if (versionReference(h.version).recordId !== f.recordId || (i && utc(h.at) < f.contentHistory[i - 1].at)) throw new Error('Invalid content history');
     utc(h.at); choice(h.action, ['preliminary', 'approve', 'amend', 'addendum', 'cancel']);
   });
@@ -193,9 +201,26 @@ export function validateReportFacts(input: ReportFacts): void {
   } else if (f.state === 'Finalized') throw new Error('Stored finalization required');
 }
 
-/** Pure decision only. I commits facts, immutable signed versions and events atomically after C verifies signatures. */
+/** B/I must use this combined pre-check for additions to an existing retention unit, in withRetentionChange.
+ * Both decisions are persisted atomically; a hold is never a clinical processing basis.
+ */
+export function transitionRetainedReport(facts: ReportFacts, command: LifecycleCommand, record: RetentionRecord,
+  source: ResolvedRecord, graph: RetentionGraph, archive: RetentionOnlyEvent | null = null): LifecycleOutcome & { retention: Readonly<RetentionRecord> } {
+  const e = verifiedRecord(source).event, ref = versionReference(command.version);
+  const act = command.preservationCorrection ? 'correction' : command.action === 'addendum' ? 'additional-entry' :
+    ['amend', 'cancel'].includes(command.action) ? 'correction' : 'entry';
+  if (record.recordId !== facts.recordId || e.recordId !== facts.recordId || e.versionId !== ref.versionId ||
+      e.sha256 !== ref.sha256 || e.at !== command.at || e.act !== act || !e.signature) refuse('RecordEventBindingRefused');
+  const state = retentionState(record, graph, command.at);
+  if (state.state === 'legal-hold' && command.at >= state.deadline && (command.preservationCorrection ?? command.preservationEntry) !== source) refuse('HeldCorrectionAuthorityRequired');
+  const separated = reportRetentionAccess(facts, archive).state === 'retention-only';
+  const outcome = transitionReport(facts, command);
+  return freeze({ ...outcome, retention: recordVersionAdded(record, source, graph, separated) });
+}
+/** Pure lifecycle table; signed persistence also requires the combined retention pre-check above. */
 export function transitionReport(facts: ReportFacts, command: LifecycleCommand): LifecycleOutcome {
   validateReportFacts(facts);
+  if (command.preservationCorrection && command.preservationEntry) refuse('HeldCorrectionAuthorityRequired');
   const { action, actor } = command;
   const at = utc(command.at);
   if (!REPORT_TRANSITIONS[facts.state].includes(action)) throw new Error('Forbidden report transition');
@@ -224,8 +249,15 @@ export function transitionReport(facts: ReportFacts, command: LifecycleCommand):
           e.sha256 !== ref.sha256 || e.at !== at || !e.signature || !e.processing?.authorized || !e.processing.preservesOriginals || !e.processing.separateManagement)
         refuse('HeldCorrectionAuthorityRequired');
     }
+    if (command.preservationEntry) {
+      const e = verifiedRecord(command.preservationEntry).event;
+      const expectedAct = action === 'addendum' ? 'additional-entry' : 'correction';
+      if (!['amend', 'addendum'].includes(action) || e.act !== expectedAct || e.recordId !== facts.recordId || e.versionId !== ref.versionId ||
+          e.sha256 !== ref.sha256 || e.at !== at || !e.signature || !e.processing?.authorized || !e.processing.preservesOriginals || !e.processing.separateManagement)
+        refuse('HeldEntryAuthorityRequired');
+    }
     next.contentHistory = [...next.contentHistory, { version: ref, at, action: action as 'preliminary' | 'approve' | 'amend' | 'addendum' | 'cancel',
-      use: command.preservationCorrection ? 'preservation-correction' : 'clinical' }];
+      use: command.preservationCorrection ? 'preservation-correction' : command.preservationEntry ? 'preservation-entry' : 'clinical' }];
     effects.push('append-signed-version'); return ref;
   };
   switch (action) {
@@ -279,7 +311,7 @@ export function transitionReport(facts: ReportFacts, command: LifecycleCommand):
   }
   if (['addendum', 'amend'].includes(action)) {
     effects.splice(effects.indexOf('preserve-private-drafts'), 1); effects.push('end-private-draft-purpose');
-    if (command.preservationCorrection) effects.splice(effects.indexOf('publish-immediately'), 1);
+    if (command.preservationCorrection || command.preservationEntry) effects.splice(effects.indexOf('publish-immediately'), 1);
   }
   validateReportFacts(next);
   return freeze({ facts: next, effects });

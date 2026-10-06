@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
-import { RECORD_CLASSIFICATION, RecordKind, resolveStoredRecord, ResolvedRecord } from './classification';
+import { RECORD_CLASSIFICATION, RecordKind, resolveStoredRecord, ResolvedRecord, verifiedRecord, bindStoredRecordReader } from './classification';
 import { newAccessRetentionRecord } from './lawful-defaults';
 import { routeContract, EXTERNAL_SURFACES } from './routes';
-import { choice, freeze, integer, object, sha256, string, utc } from './validation';
+import { choice, freeze, integer, object, sha256, string, utc, refuse } from './validation';
 
 export const ACCESS_ACTIONS = freeze({
   write: ['write', 'additional-entry', 'modify', 'approve-sign', 'amend', 'addendum', 'cancel', 'release', 'draft-save', 'clear', 'discard', 'finalize', 'archive', 'resume-clinical-use', 'extend-retention', 'legal-hold', 'lift-legal-hold', 'destroy'],
@@ -89,7 +89,11 @@ export function accessPersistence(action: AccessAction): 'business-transaction' 
 /** Generated independently of credentials; auth middleware must never accept this namespace. */
 export function newAuditLinkId(): string { return `audit:${randomUUID()}`; }
 
-export function parseAccessEvent(input: unknown): Readonly<AccessEvent> {
+const servedManifests = new WeakMap<object, readonly ResolvedRecord[]>();
+/** On mixed surfaces B supplies the rows actually served, in target order, from its bound storage capability.
+ * Rehydrating a persisted mixed event likewise requires its server-verified row manifest.
+ */
+export function parseAccessEvent(input: unknown, served?: readonly ResolvedRecord[]): Readonly<AccessEvent> {
   const v = object(input, ['formatVersion', 'surface', 'eventId', 'userId', 'rolesAtTime', 'actingInstitution', 'managingInstitution', 'occurredAt',
     'trustedProxyIp', 'cause', 'executor', 'targets', 'action', 'result', 'requestId', 'auditLinkId', 'relatedEventId']);
   if (v.formatVersion !== 1) throw new Error('Unknown access format');
@@ -97,6 +101,9 @@ export function parseAccessEvent(input: unknown): Readonly<AccessEvent> {
   const surfaceKinds: readonly RecordKind[] = Object.prototype.hasOwnProperty.call(EXTERNAL_SURFACES, surface) ? EXTERNAL_SURFACES[surface] : routeContract(surface).kinds;
   const action = choice(v.action, actions);
   const failure = accessPersistence(action) === 'independent-failure';
+  const mixed = surfaceKinds.some(k => NON_RECORD_TARGETS.includes(k)) && surfaceKinds.some(k => !NON_RECORD_TARGETS.includes(k));
+  const manifest = served ?? servedManifests.get(v);
+  if (mixed && !failure && (!manifest || manifest.length !== v.targets?.length)) refuse('ServedRecordManifestRequired');
   const result = choice(v.result, ['prepared', 'succeeded', 'aborted', 'refused', 'failed', 'reported']);
   const expected = action === 'provide-prepared' ? 'prepared' : action === 'transfer-aborted' ? 'aborted' :
     ['auth-refused', 'permission-refused'].includes(action) ? 'refused' : failure ? 'failed' :
@@ -124,9 +131,14 @@ export function parseAccessEvent(input: unknown): Readonly<AccessEvent> {
       (action === 'auth-refused' && executor !== 'unauthenticated') ||
       (cause === 'service-job' && executor !== 'service')) throw new Error('Unresolved or inconsistent actor context');
   if (!Array.isArray(v.targets)) throw new Error('Actual returned target set required');
-  const targets: AccessTarget[] = v.targets.map(target => {
+  const targets: AccessTarget[] = v.targets.map((target, index) => {
     const t = object(target, ['kind', 'patientLinkSnapshot', 'studyId', 'recordId', 'versionId']);
     const kind = choice(t.kind, Object.keys(RECORD_CLASSIFICATION) as RecordKind[]);
+    if (manifest) {
+      const source = verifiedRecord(manifest[index]);
+      if (!source.kinds.includes(kind)) refuse('AccessTargetBindingRefused');
+      if (!NON_RECORD_TARGETS.includes(kind) && (t.recordId?.value !== source.recordId || t.versionId?.value !== source.event.versionId)) refuse('AccessTargetBindingRefused');
+    }
     if (!surfaceKinds.includes(kind)) throw new Error('Target kind does not belong to the server route');
     const parsed = { kind, patientLinkSnapshot: fact(t.patientLinkSnapshot, patientLink), studyId: fact(t.studyId, value => string(value)),
       recordId: fact(t.recordId, value => string(value)), versionId: fact(t.versionId, value => string(value)) };
@@ -141,8 +153,10 @@ export function parseAccessEvent(input: unknown): Readonly<AccessEvent> {
   const relatedEventId = v.relatedEventId === null ? null : string(v.relatedEventId);
   if ((readFollowups.includes(action) || action === 'print-done') && relatedEventId === null) throw new Error('Preceding event reference required');
   if (relatedEventId === v.eventId) throw new Error('Event cannot reference itself');
-  return freeze({ formatVersion: 1, surface, eventId: string(v.eventId), userId, rolesAtTime, actingInstitution, managingInstitution,
+  const parsed = freeze({ formatVersion: 1 as const, surface, eventId: string(v.eventId), userId, rolesAtTime, actingInstitution, managingInstitution,
     occurredAt: utc(v.occurredAt), trustedProxyIp, cause, executor, targets, action, result, requestId: string(v.requestId), auditLinkId, relatedEventId });
+  if (manifest) servedManifests.set(parsed, Object.freeze([...manifest]));
+  return parsed;
 }
 
 export interface DurableAccessReceipt { eventId: string; durableAt: string }
@@ -151,14 +165,23 @@ export interface DurableAccessReceipt { eventId: string; durableAt: string }
  */
 export interface AppendOnlyAccessStore { append(event: Readonly<AccessEvent>): Promise<DurableAccessReceipt> }
 
+// One module-owned adapter, with a fixed model and event mapping. No per-call reader/model injection.
+const accessRows = new Map<string, AccessEvent>();
+const accessReader = bindStoredRecordReader({ load(recordId, eventId) {
+  const event = accessRows.get(eventId);
+  if (!event || recordId !== event.eventId) refuse('AccessRecordRequired');
+  const digest = createHash('sha256').update(JSON.stringify(event)).digest('hex');
+  return { recordId, model: 'AuditLog', row: {}, event: {
+    eventId, recordId, versionId: eventId, sha256: digest, contentSha256: digest, at: event.occurredAt,
+    act: 'access', signature: null, predecessor: null, components: [], processing: null,
+  } };
+} });
 /** 제8조①2: this sensitive-data system retains each staff/service access event for two years from occurrence. */
 export function accessRetention(input: AccessEvent) {
   const event = parseAccessEvent(input);
-  const digest = createHash('sha256').update(JSON.stringify(event)).digest('hex');
-  return newAccessRetentionRecord(resolveStoredRecord({ load: () => ({ recordId: event.eventId, model: 'AuditLog', row: {}, event: {
-    eventId: event.eventId, recordId: event.eventId, versionId: event.eventId, sha256: digest, contentSha256: digest,
-    at: event.occurredAt, act: 'access', signature: null, predecessor: null, components: [], processing: null,
-  } }) }, event.eventId, event.eventId));
+  accessRows.set(event.eventId, event);
+  try { return newAccessRetentionRecord(resolveStoredRecord(accessReader, event.eventId, event.eventId)); }
+  finally { accessRows.delete(event.eventId); }
 }
 export function deliveryRetention(source: ResolvedRecord) { return newAccessRetentionRecord(source); }
 

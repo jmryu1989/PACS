@@ -22,6 +22,13 @@ export const LEGAL_SOURCES = freeze({
 });
 
 export interface StatutoryMinimum { clauseId: string; years: number; basis: string; scope: string; verification: string }
+/** D591: a real correction duty may be registered by the controller; this is not a retention setting.
+ * Further statutory duties require a reviewed entry, including the authority named by that clause.
+ */
+export const HOLD_DUTY_CLAUSES = freeze({
+  'privacy:36.2': { law: 'privacy', article: '36.2', version: LEGAL_SOURCES.privacy.publication,
+    authority: 'personal-information-controller', condition: 'duty-active' },
+});
 export const STATUTORY_MINIMUM = freeze({
   chart: { clauseId: 'medical-rules:15.1.2', years: 10, basis: '의료법 시행규칙 제15조①2', scope: '진료기록부', verification: '본문 확인' },
   prescription: { clauseId: 'medical-rules:15.1.3', years: 2, basis: '의료법 시행규칙 제15조①3', scope: '처방전', verification: '본문 확인' },
