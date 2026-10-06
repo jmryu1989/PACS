@@ -1,12 +1,13 @@
 import { VersionReference, versionReference } from './signature';
-import { choice, freeze, integer, object, string, utc } from './validation';
+import { choice, freeze, integer, object, string, utc, refuse } from './validation';
+import { ResolvedRecord, verifiedRecord } from './classification';
 
 export type ReportState = 'Unread' | 'In Progress' | 'Preliminary' | 'On Hold' | 'Approved' | 'Finalized' | 'Cancelled';
 export interface ReportFacts {
   recordId: string;
   studyId: string;
   previousCancelledRecordId: string | null;
-  contentHistory: readonly { version: VersionReference; at: string; action: 'preliminary' | 'approve' | 'amend' | 'addendum' | 'cancel' }[];
+  contentHistory: readonly { version: VersionReference; at: string; action: 'preliminary' | 'approve' | 'amend' | 'addendum' | 'cancel'; use: 'clinical' | 'preservation-correction' }[];
   state: ReportState;
   firstApprovedAt: string | null;
   originalSignerId: string | null;
@@ -48,6 +49,7 @@ export interface LifecycleCommand {
   reason?: string;
   eventId?: string;
   reviewerId?: string;
+  preservationCorrection?: ResolvedRecord;
 }
 export interface LifecycleOutcome {
   facts: Readonly<ReportFacts>;
@@ -77,8 +79,13 @@ export function archiveFinalizedReport(facts: ReportFacts, command: ArchiveComma
 
 export interface ResumeClinicalUseEvent {
   action: 'resume-clinical-use'; recordId: string; archiveAt: string; at: string; actorId: string;
-  basis: 'new-study-same-patient' | 'lawful-addendum' | 'lawful-correction' | 'legal-preservation'; evidenceId: string;
+  basis: 'new-study-same-patient'; evidence: { studyId: string; patientId: string; assigningAuthority: string; createdAt: string };
 }
+export interface ClinicalStudyReader {
+  loadStudy(studyId: string): unknown;
+  loadReportPatient(recordId: string): unknown;
+}
+const verifiedResumptions = new WeakSet<object>();
 function validateArchive(facts: ReportFacts, event: RetentionOnlyEvent): void {
   const e = object(event, ['action', 'purpose', 'recordId', 'version', 'finalizedAt', 'at', 'actorId', 'reason']);
   const version = versionReference(e.version);
@@ -89,15 +96,23 @@ function validateArchive(facts: ReportFacts, event: RetentionOnlyEvent): void {
       utc(e.finalizedAt) !== facts.finalized.effectiveAt || utc(e.at) < facts.finalized.processedAt)
     throw new Error('Archive must match retained signed content and stored finalization');
 }
-/** G verifies the stated lawful basis and the evidence's patient/record binding; B appends without moving any clock. */
+/** G supplies stored patient/study facts; a preservation order never creates clinical access. */
 export function resumeClinicalUse(facts: ReportFacts, archive: RetentionOnlyEvent,
-  command: { actor: LifecycleActor; at: string; basis: ResumeClinicalUseEvent['basis']; evidenceId: string }): Readonly<ResumeClinicalUseEvent> {
+  command: { actor: LifecycleActor; at: string; basis: ResumeClinicalUseEvent['basis']; studyId: string }, reader: ClinicalStudyReader): Readonly<ResumeClinicalUseEvent> {
   validateReportFacts(facts); validateArchive(facts, archive);
-  const c = object(command, ['actor', 'at', 'basis', 'evidenceId']);
+  const c = object(command, ['actor', 'at', 'basis', 'studyId']);
   if (!c.actor.canReadStudy || c.actor.kind !== 'member' || !c.actor.roles.includes('radiologist') || utc(c.at) < archive.at)
-    throw new Error('Authorized explicit clinical resumption required');
-  return freeze({ action: 'resume-clinical-use', recordId: facts.recordId, archiveAt: archive.at, at: c.at, actorId: string(c.actor.id),
-    basis: choice(c.basis, ['new-study-same-patient', 'lawful-addendum', 'lawful-correction', 'legal-preservation']), evidenceId: string(c.evidenceId) });
+    refuse('ClinicalResumeAuthorityRefused');
+  if (c.basis !== 'new-study-same-patient' || !reader || typeof reader.loadStudy !== 'function') refuse('ClinicalResumeBasisRefused');
+  const study = object(reader.loadStudy(string(c.studyId)), ['studyId', 'patientId', 'assigningAuthority', 'createdAt']);
+  const patient = object(reader.loadReportPatient(facts.recordId), ['recordId', 'patientId', 'assigningAuthority']);
+  string(patient.patientId); string(patient.assigningAuthority);
+  if (patient.recordId !== facts.recordId || study.studyId !== c.studyId || study.studyId === facts.studyId ||
+      study.patientId !== patient.patientId || study.assigningAuthority !== patient.assigningAuthority ||
+      utc(study.createdAt) < archive.at || study.createdAt > c.at) refuse('ClinicalResumePatientBindingRefused');
+  const result = freeze({ action: 'resume-clinical-use' as const, recordId: facts.recordId, archiveAt: archive.at, at: c.at, actorId: string(c.actor.id),
+    basis: 'new-study-same-patient' as const, evidence: { studyId: study.studyId, patientId: study.patientId, assigningAuthority: study.assigningAuthority, createdAt: study.createdAt } });
+  verifiedResumptions.add(result); return result;
 }
 export function reportRetentionAccess(facts: ReportFacts, event: RetentionOnlyEvent | null,
   resume: ResumeClinicalUseEvent | null = null): Readonly<{
@@ -108,12 +123,11 @@ export function reportRetentionAccess(facts: ReportFacts, event: RetentionOnlyEv
   if (event) {
     validateArchive(facts, event);
     const archivedIndex = facts.contentHistory.findIndex(h => h.version.versionId === event.version.versionId);
-    if (facts.contentHistory.slice(archivedIndex + 1).some(h => ['addendum', 'amend'].includes(h.action) && h.at >= event.at)) archived = false;
+    if (facts.contentHistory.slice(archivedIndex + 1).some(h => ['addendum', 'amend'].includes(h.action) && h.use === 'clinical' && h.at >= event.at)) archived = false;
   }
   if (resume !== null) {
-    const r = object(resume, ['action', 'recordId', 'archiveAt', 'at', 'actorId', 'basis', 'evidenceId']);
-    choice(r.action, ['resume-clinical-use']); choice(r.basis, ['new-study-same-patient', 'lawful-addendum', 'lawful-correction', 'legal-preservation']);
-    string(r.actorId); string(r.evidenceId);
+    if (!verifiedResumptions.has(resume)) refuse('ClinicalResumeBasisRefused');
+    const r = resume;
     if (!event || r.recordId !== facts.recordId || r.archiveAt !== event.at || utc(r.at) < event.at) throw new Error('Resumption does not match archive');
     archived = false;
   }
@@ -140,7 +154,7 @@ export function validateReportFacts(input: ReportFacts): void {
   if (f.previousCancelledRecordId !== null && string(f.previousCancelledRecordId) === f.recordId) throw new Error('Self predecessor');
   if (!Array.isArray(f.contentHistory)) throw new Error('Content history required');
   f.contentHistory.forEach((h, i) => {
-    object(h, ['version', 'at', 'action']);
+    object(h, ['version', 'at', 'action', 'use']); choice(h.use, ['clinical', 'preservation-correction']);
     if (versionReference(h.version).recordId !== f.recordId || (i && utc(h.at) < f.contentHistory[i - 1].at)) throw new Error('Invalid content history');
     utc(h.at); choice(h.action, ['preliminary', 'approve', 'amend', 'addendum', 'cancel']);
   });
@@ -204,7 +218,14 @@ export function transitionReport(facts: ReportFacts, command: LifecycleCommand):
     if (ref.recordId !== facts.recordId || [facts.publishedVersion, facts.bodyVersion, ...facts.addenda.map(a => a.version)]
       .some(v => v?.versionId === ref.versionId)) throw new Error('New version required');
     if (facts.contentHistory.some(h => h.version.versionId === ref.versionId) || facts.contentHistory.some(h => h.at > at)) throw new Error('New chronological content required');
-    next.contentHistory = [...next.contentHistory, { version: ref, at, action: action as 'preliminary' | 'approve' | 'amend' | 'addendum' | 'cancel' }];
+    if (command.preservationCorrection) {
+      const e = verifiedRecord(command.preservationCorrection).event;
+      if (!['amend', 'addendum'].includes(action) || e.act !== 'correction' || e.recordId !== facts.recordId || e.versionId !== ref.versionId ||
+          e.sha256 !== ref.sha256 || e.at !== at || !e.signature || !e.processing?.authorized || !e.processing.preservesOriginals || !e.processing.separateManagement)
+        refuse('HeldCorrectionAuthorityRequired');
+    }
+    next.contentHistory = [...next.contentHistory, { version: ref, at, action: action as 'preliminary' | 'approve' | 'amend' | 'addendum' | 'cancel',
+      use: command.preservationCorrection ? 'preservation-correction' : 'clinical' }];
     effects.push('append-signed-version'); return ref;
   };
   switch (action) {
@@ -254,7 +275,11 @@ export function transitionReport(facts: ReportFacts, command: LifecycleCommand):
     }
     case 'finalize':
       if (Date.parse(at) < Date.parse(facts.amendUntil)) throw new Error('Not yet finalizable');
-      next.state = 'Finalized'; next.finalized = { effectiveAt: facts.amendUntil, processedAt: at }; effects.splice(effects.indexOf('preserve-private-drafts'), 1); effects.push('append-finalization', 'end-private-draft-purpose'); break;
+      next.state = 'Finalized'; next.finalized = { effectiveAt: facts.amendUntil, processedAt: at }; effects.push('append-finalization'); break;
+  }
+  if (['addendum', 'amend'].includes(action)) {
+    effects.splice(effects.indexOf('preserve-private-drafts'), 1); effects.push('end-private-draft-purpose');
+    if (command.preservationCorrection) effects.splice(effects.indexOf('publish-immediately'), 1);
   }
   validateReportFacts(next);
   return freeze({ facts: next, effects });

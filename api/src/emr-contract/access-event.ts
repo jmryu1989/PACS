@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
-import { RECORD_CLASSIFICATION, RecordKind } from './classification';
-import { newRetentionRecord } from './lawful-defaults';
+import { RECORD_CLASSIFICATION, RecordKind, resolveStoredRecord, ResolvedRecord } from './classification';
+import { newAccessRetentionRecord } from './lawful-defaults';
+import { routeContract, EXTERNAL_SURFACES } from './routes';
 import { choice, freeze, integer, object, sha256, string, utc } from './validation';
 
 export const ACCESS_ACTIONS = freeze({
@@ -39,6 +40,7 @@ export interface AccessTarget {
 }
 export interface AccessEvent {
   formatVersion: 1;
+  surface: string;
   eventId: string;
   userId: EvidenceFact<ImmutableIdentity>;
   rolesAtTime: EvidenceFact<readonly string[]>;
@@ -88,9 +90,11 @@ export function accessPersistence(action: AccessAction): 'business-transaction' 
 export function newAuditLinkId(): string { return `audit:${randomUUID()}`; }
 
 export function parseAccessEvent(input: unknown): Readonly<AccessEvent> {
-  const v = object(input, ['formatVersion', 'eventId', 'userId', 'rolesAtTime', 'actingInstitution', 'managingInstitution', 'occurredAt',
+  const v = object(input, ['formatVersion', 'surface', 'eventId', 'userId', 'rolesAtTime', 'actingInstitution', 'managingInstitution', 'occurredAt',
     'trustedProxyIp', 'cause', 'executor', 'targets', 'action', 'result', 'requestId', 'auditLinkId', 'relatedEventId']);
   if (v.formatVersion !== 1) throw new Error('Unknown access format');
+  const surface = string(v.surface);
+  const surfaceKinds: readonly RecordKind[] = Object.prototype.hasOwnProperty.call(EXTERNAL_SURFACES, surface) ? EXTERNAL_SURFACES[surface] : routeContract(surface).kinds;
   const action = choice(v.action, actions);
   const failure = accessPersistence(action) === 'independent-failure';
   const result = choice(v.result, ['prepared', 'succeeded', 'aborted', 'refused', 'failed', 'reported']);
@@ -123,6 +127,7 @@ export function parseAccessEvent(input: unknown): Readonly<AccessEvent> {
   const targets: AccessTarget[] = v.targets.map(target => {
     const t = object(target, ['kind', 'patientLinkSnapshot', 'studyId', 'recordId', 'versionId']);
     const kind = choice(t.kind, Object.keys(RECORD_CLASSIFICATION) as RecordKind[]);
+    if (!surfaceKinds.includes(kind)) throw new Error('Target kind does not belong to the server route');
     const parsed = { kind, patientLinkSnapshot: fact(t.patientLinkSnapshot, patientLink), studyId: fact(t.studyId, value => string(value)),
       recordId: fact(t.recordId, value => string(value)), versionId: fact(t.versionId, value => string(value)) };
     const facts = [parsed.patientLinkSnapshot, parsed.studyId, parsed.recordId, parsed.versionId];
@@ -136,7 +141,7 @@ export function parseAccessEvent(input: unknown): Readonly<AccessEvent> {
   const relatedEventId = v.relatedEventId === null ? null : string(v.relatedEventId);
   if ((readFollowups.includes(action) || action === 'print-done') && relatedEventId === null) throw new Error('Preceding event reference required');
   if (relatedEventId === v.eventId) throw new Error('Event cannot reference itself');
-  return freeze({ formatVersion: 1, eventId: string(v.eventId), userId, rolesAtTime, actingInstitution, managingInstitution,
+  return freeze({ formatVersion: 1, surface, eventId: string(v.eventId), userId, rolesAtTime, actingInstitution, managingInstitution,
     occurredAt: utc(v.occurredAt), trustedProxyIp, cause, executor, targets, action, result, requestId: string(v.requestId), auditLinkId, relatedEventId });
 }
 
@@ -149,8 +154,13 @@ export interface AppendOnlyAccessStore { append(event: Readonly<AccessEvent>): P
 /** 제8조①2: this sensitive-data system retains each staff/service access event for two years from occurrence. */
 export function accessRetention(input: AccessEvent) {
   const event = parseAccessEvent(input);
-  return newRetentionRecord(event.eventId, ['access-audit'], event.occurredAt);
+  const digest = createHash('sha256').update(JSON.stringify(event)).digest('hex');
+  return newAccessRetentionRecord(resolveStoredRecord({ load: () => ({ recordId: event.eventId, model: 'AuditLog', row: {}, event: {
+    eventId: event.eventId, recordId: event.eventId, versionId: event.eventId, sha256: digest, contentSha256: digest,
+    at: event.occurredAt, act: 'access', signature: null, predecessor: null, components: [], processing: null,
+  } }) }, event.eventId, event.eventId));
 }
+export function deliveryRetention(source: ResolvedRecord) { return newAccessRetentionRecord(source); }
 
 /** A resolved Promise from enqueue/transaction-start is not a durable receipt. */
 export async function provideAfterDurableEvent<T>(store: AppendOnlyAccessStore, input: AccessEvent,

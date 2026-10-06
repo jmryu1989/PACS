@@ -1,7 +1,7 @@
 import { STATUTORY_MINIMUM as FLOOR, StatutoryMinimum } from './legal-basis';
-import { freeze } from './validation';
+import { choice, freeze, object, refuse, string, utc, sha256 } from './validation';
 
-export type PurposeEnd = 'report-approved' | 'report-finalized' | 'explicit-discard' | 'owner-deleted' | 'assignment-ended' | 'setting-replaced' | 'session-ended' | 'institution-closed' | 'transfer-obligations-ended' | 'operation-completed';
+export type PurposeEnd = 'result-version-signed' | 'explicit-discard' | 'owner-deleted' | 'assignment-ended' | 'setting-replaced' | 'session-ended' | 'institution-closed' | 'transfer-obligations-ended' | 'operation-completed';
 export type SignatureRule = 'required' | 'clinical-entry-only' | 'source-evidence' | 'not-required';
 export interface RecordClassification {
   author: { observedSource: string; responsibility: 'immutable-actual-author-or-source' };
@@ -52,14 +52,14 @@ const clinical = signed('의료인이 진료에 관한 사항·의견을 작성�
 export const RECORD_CLASSIFICATION = freeze({
   'report-head': record('Report.updatedBy; immutable ReportVersion projection', clinical, [...images, FLOOR.chart]),
   'report-version': record('ReportVersion.author; immutable author/signer identity', clinical, [...images, FLOOR.chart]),
-  'private-draft': record('ReportDraft.author; private to (uid, author)', conditional('개인 작업 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재/사용할 때 서명, 적용 보유기간 중 모든 저장판 보존'), [], 'emr-candidate', 'purpose', ['report-approved', 'report-finalized', 'explicit-discard']),
+  'private-draft': record('ReportDraft.author; private to (uid, author)', conditional('개인 작업 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재/사용할 때 서명, 적용 보유기간 중 모든 저장판 보존'), [], 'emr-candidate', 'purpose', ['result-version-signed', 'explicit-discard']),
   'report-evidence': record('Pinned ReportVersion/ReportDraft provenance', source('첨부·인용 해시 보존; 임상 기재를 담은 문서는 해당 작성자의 서명 보존'), [], 'emr-candidate', 'source-record'),
   'tech-note': record('TechNoteRevision.authorSub/author', conditional('촬영기사의 업무 메모 자체의 전자서명 의무는 명시되지 않음; 의료인의 진료 기재이면 제22조①·제23조① 적용'), [FLOOR.examination]),
   'clinical-question': record('StudyQuestion/StudyQuestionEntry.authorSub', clinical, chart),
   'clinical-answer': record('StudyQuestionEntry answer author', clinical, chart),
   consultation: record('StudyConsultation requester/recipient/changedBy', clinical, chart),
   'critical-result': record('CriticalResult.senderSub; pinned report version', clinical, chart),
-  'critical-result-ack': record('CriticalResultEvent.actorSub; pinned acknowledgment', conditional('단순 수신 확인에 별도 서명 의무는 명시되지 않음; 임상 판단/조치 기재가 더해지면 서명'), [FLOOR.access]),
+  'critical-result-ack': record('CriticalResultEvent.actorSub; pinned acknowledgment', conditional('임상 인계 완료는 CVR의 일부; 별도 접속/전송 영수증과 구별; 임상 판단/조치 기재가 더해지면 서명'), chart),
   'image-request': record('StudyImageRequest requester/handler/changedBy', conditional('영상 전달 요청 자체에 별도 서명 의무는 명시되지 않음; 진료 지시/의견 기재이면 서명'), [FLOOR.patientRegister]),
   finding: record('Finding/FindingRevision author/actor', clinical, chart),
   measurement: record('ViewerItem/ViewerRevision author/actor', source('수동 점·ROI·수치 자체의 개별 서명 의무는 명시되지 않음; 이를 진료 소견으로 기록한 문서에는 서명'), images),
@@ -82,7 +82,7 @@ export const RECORD_CLASSIFICATION = freeze({
   'access-audit': record('System recorder; immutable acting identity', unsigned('접속사건은 작성자·시각·해시 및 내구성으로 증명'), [FLOOR.access], 'evidence-record'),
   'signature-evidence': record('Registered signer/key registrar; exact signed bytes', unsigned('기존 서명 검증 증거에 재귀적 서명 의무는 명시되지 않음'), [], 'evidence-record', 'source-record'),
   order: record('RIS origin/requesting clinician', clinical, chart),
-  dictation: record('Radiologist; preserved voice/transcript versions', conditional('개인 음성 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재할 때 서명'), [], 'emr-candidate', 'purpose', ['report-approved', 'report-finalized', 'explicit-discard']),
+  dictation: record('Radiologist; preserved voice/transcript versions', conditional('개인 음성 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재할 때 서명'), [], 'emr-candidate', 'purpose', ['result-version-signed', 'explicit-discard']),
   assignment: record('ReaderAssignment.changedBy; allocation only', unsigned('업무 배정'), [], 'operational-record', 'purpose', ['assignment-ended']),
   preferences: record('Account/site setting author', unsigned('필터·배치 설정만; 환자 임상 문구가 있으면 임상 종류로 추가 분류'), [], 'operational-record', 'purpose', ['setting-replaced', 'owner-deleted']),
   'reading-template': record('ReadingTemplate.owner', unsigned('환자 없는 문구 양식; 환자별 채택 내용은 서명된 임상 기재'), [], 'operational-record', 'purpose', ['owner-deleted']),
@@ -108,7 +108,7 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
   ViewerStorageBudget: ['system-operation'], ViewerRequest: ['delivery-receipt'], Finding: ['finding'], FindingRevision: ['finding'],
   WorklistColumns: ['preferences'], ReadingPreferences: ['preferences'], ReadingAppearance: ['preferences'], WorkspaceLayout: ['preferences'],
   StudyTagCatalog: ['study-organization'], FavoriteWorkspace: ['study-organization'],
-  ViewerJob: ['comparison-layout', 'comparison-description'], ViewerJobRevision: ['comparison-description'], ReaderAssignment: ['assignment'],
+  ViewerJob: ['comparison-layout', 'comparison-description'], ViewerJobRevision: ['comparison-layout', 'comparison-description'], ReaderAssignment: ['assignment'],
   WorkspaceShortcuts: ['preferences'], StudyConsultation: ['consultation'], StudyQuestion: ['clinical-question'], StudyQuestionEntry: ['clinical-question', 'clinical-answer'],
   StudyImageRequest: ['image-request'], StudyImageRequestReceipt: ['delivery-receipt', 'image-request'],
   CriticalResult: ['critical-result', 'report-version'], CriticalResultEvent: ['critical-result', 'critical-result-ack'], CriticalResultReceipt: ['delivery-receipt', 'critical-result-ack'],
@@ -118,4 +118,100 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
 export function classifyModel(name: string): readonly RecordKind[] {
   if (!Object.prototype.hasOwnProperty.call(MODEL_CLASSIFICATION, name)) throw new Error(`Unclassified model: ${name}`);
   return MODEL_CLASSIFICATION[name];
+}
+
+/** These adapters are bound by B/G to server storage at composition time, never deserialized from a request.
+ * The caller supplies an opaque row/event ID, not the model, kind, signature verdict or row discriminator.
+ */
+export interface StoredRecordReader { load(recordId: string, eventId: string): unknown }
+export interface Component { recordId: string; partId: string; sha256: string }
+export interface RecordEvent {
+  eventId: string; recordId: string; versionId: string; sha256: string; contentSha256: string; at: string;
+  act: 'entry' | 'additional-entry' | 'correction' | 'acquisition' | 'creation' | 'handoff-ack' | 'access' | 'delivery' | 'read' | 'resign' | 'migration' | 'bookkeeping';
+  signature: { versionId: string; sha256: string; signedAt: string; verified: boolean } | null;
+  predecessor: Component | null;
+  components: readonly Component[];
+  processing: { basisId: string; authorized: boolean; preservesOriginals: boolean; separateManagement: boolean; permittedHoldIds: readonly string[] } | null;
+}
+export interface ResolvedRecord {
+  recordId: string; model: string; kinds: readonly RecordKind[]; row: Readonly<Record<string, any>>; event: Readonly<RecordEvent>;
+}
+const resolvedRecords = new WeakSet<object>();
+export function verifiedRecord(input: ResolvedRecord): ResolvedRecord {
+  if (!resolvedRecords.has(input)) refuse('StoredRecordRequired');
+  return input;
+}
+function rowKinds(model: string, row: Record<string, any>, event: RecordEvent): readonly RecordKind[] {
+  if (model === 'DicomInstance') return [row.sopClass === 'image' ? 'image' : choice(row.sopClass, ['external-sr-seg', 'pdf'])];
+  if (model === 'Dictation') return ['dictation'];
+  const possible = classifyModel(model);
+  switch (model) {
+    case 'StudyState':
+      switch (choice(row.change, ['acquisition', 'correction', 'patient-match', 'assignment'])) {
+        case 'acquisition': return ['study-metadata'];
+        case 'correction': string(row.sourceRecordId); return ['study-correction'];
+        case 'patient-match': string(row.orderOid); return ['patient-match'];
+        case 'assignment': return ['assignment'];
+      }
+      break;
+    case 'Transfer': return row.localPatientId === null ? ['transfer-governance'] : (string(row.localPatientId), ['patient-match']);
+    case 'ViewerItem': case 'ViewerRevision': return [choice(row.snapshot?.type, ['measurement', 'key-image'])];
+    case 'ViewerJob': case 'ViewerJobRevision':
+      // B resolves clinical adoption against the stored text and signed event, not an HTTP flag.
+      if (typeof row.clinicalEntry !== 'boolean') refuse('RowFactsRequired');
+      string(row.title, true); string(row.description, true);
+      if (row.clinicalEntry && !(row.title.trim() || row.description.trim())) refuse('RowFactsRequired');
+      return row.clinicalEntry ? ['comparison-description'] : ['comparison-layout'];
+    case 'StudyQuestionEntry': return [choice(row.kind, ['question', 'answer']) === 'answer' ? 'clinical-answer' : 'clinical-question'];
+    case 'CriticalResult': return ['critical-result'];
+    case 'CriticalResultEvent':
+      string(row.recordId);
+      if (row.recordId !== event.recordId) refuse('RecordEventBindingRefused');
+      if (row.event === 'ack') {
+        const pin = object(row.acknowledgedVersion, ['recordId', 'partId', 'sha256']);
+        string(row.recipientId);
+        if (row.actorId !== row.recipientId || !event.components.some(c => c.recordId === pin.recordId && c.partId === pin.partId && c.sha256 === pin.sha256)) refuse('CvrAckBindingRefused');
+      }
+      return [choice(row.event, ['created', 'replaced', 'ack']) === 'ack' ? 'critical-result-ack' : 'critical-result'];
+    case 'StudyImageRequestReceipt': case 'CriticalResultReceipt': return ['delivery-receipt'];
+    default: return possible.filter(k => RECORD_CLASSIFICATION[k].retention.mode !== 'source-record');
+  }
+  return refuse('RowFactsRequired');
+}
+export function resolveStoredRecord(reader: StoredRecordReader, recordId: string, eventId: string): Readonly<ResolvedRecord> {
+  string(recordId); string(eventId);
+  if (!reader || typeof reader.load !== 'function') refuse('StoredRecordRequired');
+  const v = object(reader.load(recordId, eventId), ['recordId', 'model', 'row', 'event']);
+  const e = object(v.event, ['eventId', 'recordId', 'versionId', 'sha256', 'contentSha256', 'at', 'act', 'signature', 'predecessor', 'components', 'processing']);
+  if (v.recordId !== recordId || e.recordId !== recordId || e.eventId !== eventId) refuse('RecordEventBindingRefused');
+  string(e.versionId); sha256(e.sha256); sha256(e.contentSha256); utc(e.at);
+  choice(e.act, ['entry', 'additional-entry', 'correction', 'acquisition', 'creation', 'handoff-ack', 'access', 'delivery', 'read', 'resign', 'migration', 'bookkeeping']);
+  if (e.signature !== null) {
+    const s = object(e.signature, ['versionId', 'sha256', 'signedAt', 'verified']);
+    if (s.verified !== true || s.versionId !== e.versionId || s.sha256 !== e.sha256 || utc(s.signedAt) !== e.at) refuse('SignatureBindingRefused');
+  }
+  if (e.predecessor !== null) {
+    const p = object(e.predecessor, ['recordId', 'partId', 'sha256']); string(p.recordId); string(p.partId); sha256(p.sha256);
+  }
+  if (!Array.isArray(e.components)) refuse('ComponentManifestRequired');
+  for (const c of e.components) { object(c, ['recordId', 'partId', 'sha256']); string(c.recordId); string(c.partId); sha256(c.sha256); }
+  if (new Set(e.components.map(c => `${c.recordId}\0${c.partId}`)).size !== e.components.length) refuse('ComponentManifestRequired');
+  if (e.processing !== null) {
+    const p = object(e.processing, ['basisId', 'authorized', 'preservesOriginals', 'separateManagement', 'permittedHoldIds']);
+    string(p.basisId);
+    if (![p.authorized, p.preservesOriginals, p.separateManagement].every(x => typeof x === 'boolean') || !Array.isArray(p.permittedHoldIds)) refuse('ProcessingBasisRequired');
+    p.permittedHoldIds.forEach(x => string(x));
+  }
+  const model = string(v.model), row = object(v.row, Object.keys(v.row ?? {}));
+  const result = freeze({ recordId, model, row: structuredClone(row), event: structuredClone(e) as RecordEvent, kinds: rowKinds(model, row, e as RecordEvent) });
+  if (!result.kinds.length) refuse('RowFactsRequired');
+  resolvedRecords.add(result);
+  return result;
+}
+/** A consumer selects the handling path from resolved facts, never chooses kinds from the model inventory. */
+export function retentionDisposition(source: ResolvedRecord): 'statutory' | 'purpose' | 'source-record' | 'access-event' {
+  const s = verifiedRecord(source);
+  if (s.kinds.some(k => ['access-audit', 'delivery-receipt'].includes(k))) return 'access-event';
+  if (s.kinds.some(k => RECORD_CLASSIFICATION[k].retention.mode === 'statutory')) return 'statutory';
+  return RECORD_CLASSIFICATION[s.kinds[0]].retention.mode;
 }

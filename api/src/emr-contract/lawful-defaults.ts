@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { RECORD_CLASSIFICATION, RecordKind, PurposeEnd } from './classification';
+import { RECORD_CLASSIFICATION, RecordKind, PurposeEnd, ResolvedRecord, verifiedRecord } from './classification';
 import { STATUTORY_MINIMUM } from './legal-basis';
-import { choice, freeze, object, string, utc } from './validation';
+import { choice, freeze, object, string, utc, refuse } from './validation';
 
 export interface RecordPolicy { retentionYears: number; accessYears: number; requireSignature: boolean }
 export type ProductConfiguration = Readonly<Record<RecordKind, Readonly<RecordPolicy>>>;
@@ -12,7 +12,7 @@ const validated = new WeakSet<object>();
 export const PRODUCT_DEFAULTS = freeze({
   keepEveryVersion: true, recordAuthorTimeHash: true, logEveryAccess: true, automaticDestruction: true,
   retentionStart: 'each-content-part-own-start; unit-latest-part-expiry; Asia/Seoul-civil-calendar',
-  linkedEvidence: 'incorporation-inherits-latest-referencing-deadline; navigation-never-propagates',
+  linkedEvidence: 'complete-direct-components; own-deadlines-only; no-inherited-deadline-repropagation; navigation-excluded',
   disposal: 'irreversible-permanent-deletion-at-expiry; no-personal-data-in-destruction-record',
   extension: 'continuing-treatment-only; once-per-record; at-most-its-statutory-period',
   retentionOnly: 'explicit-purpose-end-with-stored-lifecycle-event; separate-storage-and-restricted-access',
@@ -99,18 +99,25 @@ export function statutoryClasses(recordKinds: readonly RecordKind[]): readonly S
       classes.add((Object.keys(STATUTORY_MINIMUM) as StatutoryClass[]).find(key => STATUTORY_MINIMUM[key].clauseId === minimum.clauseId)!);
     }
   }
-  if (classes.has('access') && classes.size > 1) throw new Error('Access events must have separate retention units');
+  if (classes.has('access') && classes.size > 1) refuse('AccessUnitMixed');
   return freeze([...classes].sort());
 }
 export interface ContinuingTreatmentExtension {
   cause: 'continuing-treatment'; actorId: string; reason: string; at: string; until: string;
 }
-export interface RetentionPart { partId: string; startedAt: string }
+export interface RetentionPart { partId: string; startedAt: string; evidence: ResolvedRecord }
 export interface LegalHold {
-  holdId: string; recordId: string; basis: { law: string; authority: string; documentReference: string };
+  holdId: string; recordId: string; basis: {
+    type: 'court-order' | 'investigative-order' | 'supervisory-order' | 'statutory-duty' | 'pending-access-request';
+    clause: { law: string; article: string; version: string }; requestId: string; authorityId: string;
+    scope: readonly string[]; verified: true;
+    validity: { from: string; until: string | null; condition: 'order-in-force' | 'duty-active' | 'request-pending' };
+  };
   actorId: string; at: string;
-  release: { actorId: string; at: string; documentReference: string } | null;
+  release: { holdId: string; actorId: string; at: string; evidenceId: string; authorityVerified: true; reason: 'order-ended' | 'request-fulfilled' | 'duty-ended' } | null;
 }
+export interface LegalDutyReader { load(holdId: string): unknown }
+const verifiedDuties = new WeakSet<object>();
 export interface RetentionRecord {
   recordId: string; disposalUnitId: string; kinds: readonly RecordKind[]; parts: readonly RetentionPart[];
   extension: ContinuingTreatmentExtension | null; holds: readonly LegalHold[];
@@ -126,25 +133,58 @@ function yearsFor(recordKinds: readonly RecordKind[]): number {
 function partDeadline(record: Pick<RetentionRecord, 'kinds' | 'parts'>): string {
   return record.parts.map(p => civilPeriodEnd(p.startedAt, yearsFor(record.kinds))).sort().slice(-1)[0];
 }
-export function newRetentionRecord(recordId: string, recordKinds: readonly RecordKind[], startedAt: string,
-  partId: string = recordId): Readonly<RetentionRecord> {
-  return parseRetentionRecord({ recordId, disposalUnitId: `disposal:${randomUUID()}`, kinds: recordKinds,
-    parts: [{ partId, startedAt }], extension: null, holds: [] });
+function lawfulPart(source: ResolvedRecord): RetentionPart {
+  const s = verifiedRecord(source), e = s.event;
+  const signature = s.kinds.some(k => RECORD_CLASSIFICATION[k].signature.rule === 'required') || s.row.clinicalEntry === true;
+  const allowed = signature ? ['entry', 'additional-entry', 'correction'] :
+    s.kinds.includes('critical-result-ack') ? ['handoff-ack'] :
+    s.kinds.includes('access-audit') ? ['access'] : s.kinds.includes('delivery-receipt') ? ['delivery'] :
+    s.kinds.some(k => ['image', 'external-sr-seg', 'study-metadata'].includes(k)) ? ['acquisition', 'correction'] : ['creation', 'entry', 'additional-entry', 'correction'];
+  if (!allowed.includes(e.act) || (signature && !e.signature)) refuse('NewLawfulRecordEventRequired');
+  return { partId: e.versionId, startedAt: e.at, evidence: s };
+}
+export function newRetentionRecord(source: ResolvedRecord): Readonly<RetentionRecord> {
+  const s = verifiedRecord(source);
+  if (s.kinds.some(k => ['access-audit', 'delivery-receipt'].includes(k))) refuse('AccessRetentionConstructorRequired');
+  if (s.kinds.includes('critical-result-ack')) refuse('CvrParentRequired');
+  return createRetentionRecord(s);
+}
+/** Only the parsed access/delivery event adapter may provide this stored evidence. */
+export function newAccessRetentionRecord(source: ResolvedRecord): Readonly<RetentionRecord> {
+  const s = verifiedRecord(source);
+  if (s.kinds.length !== 1 || !['access-audit', 'delivery-receipt'].includes(s.kinds[0])) refuse('AccessRecordRequired');
+  return createRetentionRecord(s);
+}
+function createRetentionRecord(s: ResolvedRecord): Readonly<RetentionRecord> {
+  return parseRetentionRecord({ recordId: s.recordId, disposalUnitId: `disposal:${randomUUID()}`, kinds: s.kinds,
+    parts: [lawfulPart(s)], extension: null, holds: [] });
+}
+function readLegalDuty(reader: LegalDutyReader, holdId: string): Readonly<LegalHold> {
+  if (!reader || typeof reader.load !== 'function') refuse('VerifiedHoldBasisRequired');
+  const h = object(reader.load(string(holdId)), ['holdId', 'recordId', 'basis', 'actorId', 'at', 'release']);
+  const b = object(h.basis, ['type', 'clause', 'requestId', 'authorityId', 'scope', 'verified', 'validity']);
+  choice(b.type, ['court-order', 'investigative-order', 'supervisory-order', 'statutory-duty', 'pending-access-request']);
+  const c = object(b.clause, ['law', 'article', 'version']); string(c.law); string(c.article); string(c.version);
+  string(b.requestId); string(b.authorityId); string(h.actorId); string(h.recordId); utc(h.at);
+  if (h.holdId !== holdId || b.verified !== true || !Array.isArray(b.scope) || !b.scope.includes(h.recordId) || new Set(b.scope).size !== b.scope.length)
+    refuse('VerifiedHoldBasisRequired');
+  b.scope.forEach(x => string(x));
+  const v = object(b.validity, ['from', 'until', 'condition']); utc(v.from);
+  const condition = b.type === 'pending-access-request' ? 'request-pending' : b.type === 'statutory-duty' ? 'duty-active' : 'order-in-force';
+  if (v.condition !== condition || v.from > h.at || (v.until !== null && utc(v.until) <= h.at)) refuse('HoldValidityRefused');
+  if (h.release !== null) {
+    const r = object(h.release, ['holdId', 'actorId', 'at', 'evidenceId', 'authorityVerified', 'reason']);
+    string(r.actorId); string(r.evidenceId); choice(r.reason, ['order-ended', 'request-fulfilled', 'duty-ended']);
+    if (r.holdId !== h.holdId || r.authorityVerified !== true || utc(r.at) < h.at) refuse('HoldReleaseBindingRefused');
+  }
+  const hold = freeze(structuredClone(h)) as Readonly<LegalHold>;
+  verifiedDuties.add(hold); return hold;
 }
 function parseLegalHolds(input: unknown, recordId: string, startedAt: string): readonly LegalHold[] {
   if (!Array.isArray(input)) throw new Error('Explicit hold history required');
   const holds = input.map(h => {
-    object(h, ['holdId', 'recordId', 'basis', 'actorId', 'at', 'release']);
-    const b = object(h.basis, ['law', 'authority', 'documentReference']);
-    if (h.recordId !== recordId || utc(h.at) < startedAt) throw new Error('Record-specific legal duty required');
-    let release: LegalHold['release'] = null;
-    if (h.release !== null) {
-      const r = object(h.release, ['actorId', 'at', 'documentReference']);
-      release = { actorId: string(r.actorId), at: utc(r.at), documentReference: string(r.documentReference) };
-      if (release.at < h.at) throw new Error('Release precedes hold');
-    }
-    return { holdId: string(h.holdId), recordId, basis: { law: string(b.law), authority: string(b.authority), documentReference: string(b.documentReference) },
-      actorId: string(h.actorId), at: h.at, release };
+    if (!verifiedDuties.has(h) || h.recordId !== recordId || h.at < startedAt) refuse('VerifiedHoldBasisRequired');
+    return h as LegalHold;
   });
   if (new Set(holds.map(h => h.holdId)).size !== holds.length) throw new Error('Duplicate hold');
   return holds;
@@ -153,9 +193,21 @@ export function parseRetentionRecord(input: unknown): Readonly<RetentionRecord> 
   const v = object(input, ['recordId', 'disposalUnitId', 'kinds', 'parts', 'extension', 'holds']);
   const recordId = string(v.recordId); statutoryClasses(v.kinds);
   if (!Array.isArray(v.parts) || !v.parts.length) throw new Error('All content parts required');
-  const parts = v.parts.map(p => { object(p, ['partId', 'startedAt']); return { partId: string(p.partId), startedAt: utc(p.startedAt) }; });
+  const parts = v.parts.map(p => {
+    object(p, ['partId', 'startedAt', 'evidence']);
+    const part = lawfulPart(p.evidence);
+    if (part.partId !== p.partId || part.startedAt !== p.startedAt || part.evidence.recordId !== recordId) refuse('RecordEventBindingRefused');
+    return part;
+  });
+  const derived = [...new Set(parts.flatMap(p => p.evidence.kinds))].sort();
+  if (JSON.stringify([...v.kinds].sort()) !== JSON.stringify(derived)) refuse('RecordKindBindingRefused');
   if (new Set(parts.map(p => p.partId)).size !== parts.length || parts.some((p, i) => i && p.startedAt < parts[i - 1].startedAt))
     throw new Error('Distinct chronological parts required');
+  if (new Set(parts.map(p => p.evidence.event.contentSha256)).size !== parts.length) refuse('UnchangedContentRefused');
+  for (let i = 1; i < parts.length; i++) {
+    const previous = parts[i - 1], e = parts[i].evidence.event, p = e.predecessor;
+    if (!p || p.recordId !== recordId || p.partId !== previous.partId || p.sha256 !== previous.evidence.event.sha256) refuse('PredecessorBindingRefused');
+  }
   let extension: ContinuingTreatmentExtension | null = null;
   if (v.extension !== null) {
     const e = object(v.extension, ['cause', 'actorId', 'reason', 'at', 'until']);
@@ -169,60 +221,80 @@ export function parseRetentionRecord(input: unknown): Readonly<RetentionRecord> 
   const holds = parseLegalHolds(v.holds, recordId, parts[0].startedAt);
   return freeze({ recordId, disposalUnitId: opaqueUnit(v.disposalUnitId), kinds: [...v.kinds], parts, extension, holds });
 }
-/** Persist only a new content part, after signature verification where that kind requires it. Never call for a read/copy. */
-export function recordVersionAdded(input: RetentionRecord, partId: string, startedAt: string): Readonly<RetentionRecord> {
+/** Only a new lawful event can change the part maximum; a hold never supplies clinical processing authority. */
+export function recordVersionAdded(input: RetentionRecord, source: ResolvedRecord, graph?: RetentionGraph): Readonly<RetentionRecord> {
   const record = parseRetentionRecord(input);
   if (statutoryClasses(record.kinds).includes('access')) throw new Error('Each access event has its own unit');
-  return parseRetentionRecord({ ...record, parts: [...record.parts, { partId, startedAt }] });
+  const part = lawfulPart(source), state = retentionState(record, graph, part.startedAt);
+  const activeHolds = retainingUnits(record, graph).flatMap(r => r.holds.filter(h => h.at <= part.startedAt && (!h.release || h.release.at > part.startedAt)));
+  if (activeHolds.length) {
+    const p = source.event.processing;
+    if (source.event.act !== 'correction' || !source.event.signature || !p?.authorized || !p.preservesOriginals || !p.separateManagement ||
+        activeHolds.some(h => !p.permittedHoldIds.includes(h.holdId))) refuse('HeldCorrectionAuthorityRequired');
+  } else if (part.startedAt >= state.deadline) refuse('ExpiredUnitCannotResume');
+  return parseRetentionRecord({ ...record, kinds: [...new Set([...record.kinds, ...source.kinds])], parts: [...record.parts, part] });
 }
 export function extendRetention(input: RetentionRecord, extension: ContinuingTreatmentExtension): Readonly<RetentionRecord> {
   const record = parseRetentionRecord(input);
   if (record.extension !== null || extension === null) throw new Error('Extension already used or missing');
   return parseRetentionRecord({ ...record, extension });
 }
-export function placeLegalHold(input: RetentionRecord, hold: Omit<LegalHold, 'release'>): Readonly<RetentionRecord> {
+export function placeLegalHold(input: RetentionRecord, reader: LegalDutyReader, holdId: string): Readonly<RetentionRecord> {
   const record = parseRetentionRecord(input);
-  object(hold, ['holdId', 'recordId', 'basis', 'actorId', 'at']);
-  return parseRetentionRecord({ ...record, holds: [...record.holds, { ...hold, release: null }] });
+  const hold = readLegalDuty(reader, holdId);
+  if (hold.release !== null || hold.at >= retentionDeadline(record)) refuse('HoldCannotReviveExpiredUnit');
+  return parseRetentionRecord({ ...record, holds: [...record.holds, hold] });
 }
-export function liftLegalHold(input: RetentionRecord, holdId: string, release: NonNullable<LegalHold['release']>): Readonly<RetentionRecord> {
+export function liftLegalHold(input: RetentionRecord, holdId: string, reader: LegalDutyReader): Readonly<RetentionRecord> {
   const record = parseRetentionRecord(input), held = record.holds.find(h => h.holdId === holdId);
-  if (!held || held.release || !release) throw new Error('An active hold and explicit release required');
-  return parseRetentionRecord({ ...record, holds: record.holds.map(h => h === held ? { ...h, release } : h) });
+  const released = readLegalDuty(reader, holdId);
+  if (!held || held.release || !released.release || JSON.stringify({ ...released, release: null }) !== JSON.stringify(held)) refuse('HoldReleaseBindingRefused');
+  return parseRetentionRecord({ ...record, holds: record.holds.map(h => h === held ? released : h) });
 }
 export interface RecordReference {
   fromRecordId: string; fromPartId: string; toRecordId: string; toPartId: string; relation: 'incorporation' | 'navigation';
 }
-/** B supplies the complete current reverse-reference closure under the same lock as disposal/append/hold. */
-export interface RetentionGraph { records: readonly RetentionRecord[]; references: readonly RecordReference[] }
+/** B reads manifests and the reverse index under the same lock as append/hold/disposal. */
+export interface RetentionGraph {
+  records: readonly RetentionRecord[]; references: readonly RecordReference[];
+  complete: true; revision: string; checkedAt: string;
+}
 function retainingUnits(input: RetentionRecord, graph?: RetentionGraph): readonly RetentionRecord[] {
   const record = parseRetentionRecord(input);
-  if (!graph) return [record];
-  object(graph, ['records', 'references']);
-  if (!Array.isArray(graph.records) || !Array.isArray(graph.references)) throw new Error('Complete graph required');
+  if (graph === undefined) return [record]; // Own-unit scheduling only; destruction validates a mandatory snapshot separately.
+  try { object(graph, ['records', 'references', 'complete', 'revision', 'checkedAt']); } catch { refuse('ReferenceSnapshotRequired'); }
+  if (graph.complete !== true || !Array.isArray(graph.records) || !Array.isArray(graph.references)) refuse('ReferenceSnapshotIncomplete');
+  string(graph.revision); utc(graph.checkedAt);
   const records = graph.records.map(parseRetentionRecord), byId = new Map(records.map(r => [r.recordId, r]));
-  if (byId.size !== records.length || JSON.stringify(byId.get(record.recordId)) !== JSON.stringify(record)) throw new Error('Stale or missing graph unit');
+  if (byId.size !== records.length || JSON.stringify(byId.get(record.recordId)) !== JSON.stringify(record)) refuse('ReferenceSnapshotStale');
   for (const ref of graph.references) {
     object(ref, ['fromRecordId', 'fromPartId', 'toRecordId', 'toPartId', 'relation']); choice(ref.relation, ['incorporation', 'navigation']);
     if (!byId.get(string(ref.fromRecordId))?.parts.some(p => p.partId === ref.fromPartId) ||
-        !byId.get(string(ref.toRecordId))?.parts.some(p => p.partId === ref.toPartId)) throw new Error('Pinned part missing');
+        !byId.get(string(ref.toRecordId))?.parts.some(p => p.partId === ref.toPartId)) refuse('ComponentMissing');
   }
-  const retained = new Set([record.recordId]);
-  // Cycles terminate, and transitive incorporation keeps the entire signed content verifiable.
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const ref of graph.references) if (ref.relation === 'incorporation' && retained.has(ref.toRecordId) && !retained.has(ref.fromRecordId)) {
-      retained.add(ref.fromRecordId); changed = true;
+  for (const unit of records) for (const part of unit.parts) {
+    const components = part.evidence.event.components;
+    const edges = graph.references.filter(r => r.relation === 'incorporation' && r.fromRecordId === unit.recordId && r.fromPartId === part.partId);
+    if (edges.length !== components.length || components.some(c => !edges.some(e => e.toRecordId === c.recordId && e.toPartId === c.partId))) refuse('ComponentManifestIncomplete');
+    for (const component of components) {
+      const target = byId.get(component.recordId)?.parts.find(p => p.partId === component.partId);
+      if (!target || target.evidence.event.sha256 !== component.sha256) refuse('ComponentMissing');
+      // Flatten actual byte dependencies, including delta bases and retained originals, at signing.
+      // This is completeness validation, never propagation of a previously inherited deadline.
+      if (target.evidence.event.components.some(c => !(c.recordId === unit.recordId && c.partId === part.partId) &&
+          !components.some(d => d.recordId === c.recordId && d.partId === c.partId && d.sha256 === c.sha256))) refuse('ComponentManifestIncomplete');
     }
   }
+  const retained = new Set([record.recordId]);
+  for (const ref of graph.references) if (ref.relation === 'incorporation' && ref.toRecordId === record.recordId) retained.add(ref.fromRecordId);
   return [...retained].map(id => byId.get(id)!);
 }
 export function retentionDeadline(input: RetentionRecord, graph?: RetentionGraph): string {
   return retainingUnits(input, graph).flatMap(r => [partDeadline(r), ...(r.extension ? [r.extension.until] : [])]).sort().slice(-1)[0];
 }
-export function retentionState(input: RetentionRecord, graph?: RetentionGraph): Readonly<{ state: 'retained' | 'legal-hold'; deadline: string; destroyNotBefore: string | null }> {
+export function retentionState(input: RetentionRecord, graph?: RetentionGraph, at?: string): Readonly<{ state: 'retained' | 'legal-hold'; deadline: string; destroyNotBefore: string | null }> {
   const units = retainingUnits(input, graph), deadline = retentionDeadline(input, graph);
+  if (at && units.some(r => r.holds.some(h => !h.release && h.basis.validity.until !== null && h.basis.validity.until <= at))) refuse('HoldReleaseRequired');
   const held = units.some(r => r.holds.some(h => h.release === null));
   const releases = units.flatMap(r => r.holds.flatMap(h => h.release ? [h.release.at] : []));
   return freeze({ state: held ? 'legal-hold' : 'retained', deadline,
@@ -236,7 +308,11 @@ export interface DestructionRecord {
   expiryDay: string; extensionUsed: boolean; dueDay: string; timeliness: 'within-five-days' | 'overdue';
   method: 'irreversible-permanent-deletion'; basis: 'privacy-act-21-and-decree-16-1-1';
 }
-export interface DisposalAuditStore { append(event: Readonly<DestructionRecord>): Promise<{ durableAt: string }> }
+export interface DisposalAuditStore {
+  append(event: Readonly<DestructionRecord>): Promise<{ durableAt: string }>;
+  /** Hold the lock through journal, deletion and completion. No request-provided callback/flags. */
+  withRetentionLock<T>(recordId: string, at: string, work: (current: RetentionGraph) => Promise<T>): Promise<T>;
+}
 export interface DestructionReceipt { completedAt: string; method: 'irreversible-permanent-deletion' }
 function seoulDay(at: string): string { return new Date(Date.parse(utc(at)) + SEOUL_MS).toISOString().slice(0, 10); }
 function dueBy(at: string): string {
@@ -247,14 +323,16 @@ function dueBy(at: string): string {
 async function destroyWithJournal<T>(store: DisposalAuditStore, request: T, requestedAt: string, eligibleAt: string,
   details: Pick<DestructionRecord, 'disposalUnitId' | 'classes' | 'clauseIds' | 'partCount' | 'expiryDay' | 'extensionUsed'>,
   destroy: (request: T) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecord>> {
-  if (requestedAt < eligibleAt) throw new Error('Retention period has not elapsed');
+  if (requestedAt < eligibleAt) refuse('RetentionNotElapsed');
   const due = dueBy(eligibleAt);
   const append = async (phase: DestructionRecord['phase'], at: string) => {
     const event: Readonly<DestructionRecord> = freeze({ formatVersion: 1, phase, day: seoulDay(at), ...details,
       dueDay: seoulDay(new Date(Date.parse(due) - 1).toISOString()), timeliness: at < due ? 'within-five-days' : 'overdue',
       method: 'irreversible-permanent-deletion', basis: 'privacy-act-21-and-decree-16-1-1' });
-    const receipt = object(await store.append(event), ['durableAt']);
-    if (utc(receipt.durableAt) < at) throw new Error('Invalid durable destruction receipt');
+    let receipt: Record<string, any>;
+    try { receipt = object(await store.append(event), ['durableAt']); }
+    catch { refuse('DestructionJournalUnavailable'); }
+    if (utc(receipt.durableAt) < at) refuse('DestructionJournalReceiptInvalid');
     return event;
   };
   await append('started', requestedAt);
@@ -262,59 +340,118 @@ async function destroyWithJournal<T>(store: DisposalAuditStore, request: T, requ
   try {
     const receipt = object(await destroy(request), ['completedAt', 'method']);
     completedAt = utc(receipt.completedAt);
-    if (receipt.method !== 'irreversible-permanent-deletion' || completedAt < requestedAt) throw new Error('Irreversible destruction completion required');
+    if (receipt.method !== 'irreversible-permanent-deletion' || completedAt < requestedAt) refuse('DestructionReceiptInvalid');
   } catch (error) { await append('failed', requestedAt); throw error; }
   return append('completed', completedAt);
 }
 /** B erases all parts/signatures/replicas/recoverable backups atomically against the reference/hold snapshot. */
 export async function destroyAtExpiry(store: DisposalAuditStore, input: DisposalRequest,
   destroy: (request: Readonly<DisposalRequest>) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecord>> {
-  const v = object(input, ['record', 'versionIds', 'requestedAt', 'graph']);
+  let v: Record<string, any>;
+  try { v = object(input, ['record', 'versionIds', 'requestedAt', 'graph']); } catch { refuse('DisposalRequestInvalid'); }
   const record = parseRetentionRecord(v.record), requestedAt = utc(v.requestedAt);
   if (!Array.isArray(v.versionIds) || new Set(v.versionIds).size !== v.versionIds.length ||
-      v.versionIds.length !== record.parts.length || record.parts.some(p => !v.versionIds.includes(p.partId))) throw new Error('Complete version set required');
-  const state = retentionState(record, v.graph);
-  if (state.destroyNotBefore === null) throw new Error('Record-specific legal preservation is active');
-  const request = freeze({ record, versionIds: [...v.versionIds], requestedAt, graph: structuredClone(v.graph) }) as Readonly<DisposalRequest>;
+      v.versionIds.length !== record.parts.length || record.parts.some(p => !v.versionIds.includes(p.partId))) refuse('CompleteVersionSetRequired');
+  if (v.graph === undefined || v.graph === null) refuse('ReferenceSnapshotRequired');
+  retainingUnits(record, v.graph);
+  if (typeof store.withRetentionLock !== 'function') refuse('RetentionLockRequired');
+  return store.withRetentionLock(record.recordId, requestedAt, async current => {
+  retainingUnits(record, current);
+  if (!current || current.checkedAt !== requestedAt || JSON.stringify(current) !== JSON.stringify(v.graph)) refuse('ReferenceSnapshotStale');
+  const state = retentionState(record, v.graph, requestedAt);
+  if (state.destroyNotBefore === null) refuse('LegalHoldActive');
+  const request = freeze({ record, versionIds: [...v.versionIds], requestedAt, graph: v.graph }) as Readonly<DisposalRequest>;
   const classes = statutoryClasses(record.kinds);
   return destroyWithJournal(store, request, requestedAt, state.destroyNotBefore, {
     disposalUnitId: record.disposalUnitId, classes, clauseIds: classes.map(c => STATUTORY_MINIMUM[c].clauseId), partCount: record.parts.length,
     expiryDay: seoulDay(new Date(Date.parse(state.deadline) - 1).toISOString()), extensionUsed: retainingUnits(record, v.graph).some(r => r.extension !== null),
   }, destroy);
+  });
 }
-export interface PurposeRecord { recordId: string; disposalUnitId: string; kind: RecordKind; ownerId: string; createdAt: string; partIds: readonly string[]; holds: readonly LegalHold[] }
-export interface PurposeEndEvent { recordId: string; trigger: PurposeEnd; actorId: string; at: string }
-export function newPurposeRecord(recordId: string, kind: RecordKind, ownerId: string, createdAt: string, partIds: readonly string[]): Readonly<PurposeRecord> {
-  const row = RECORD_CLASSIFICATION[choice(kind, kinds)];
+export interface PurposeRecord {
+  recordId: string; disposalUnitId: string; kind: RecordKind; ownerId: string; createdAt: string;
+  partIds: readonly string[]; holds: readonly LegalHold[]; source: ResolvedRecord;
+}
+export interface PurposeEndEvent {
+  eventId: string; recordId: string; trigger: PurposeEnd; actorId: string; at: string;
+  result: { draftId: string; intentId: string; recordId: string; versionId: string; signedAt: string; action: 'approve' | 'addendum' | 'amend'; verified: true } | null;
+}
+export interface PurposeEndReader {
+  load(eventId: string): unknown;
+  loadSignedResult(recordId: string, versionId: string): unknown;
+}
+const verifiedEnds = new WeakSet<object>();
+export function resolvePurposeEnd(reader: PurposeEndReader, eventId: string): Readonly<PurposeEndEvent> {
+  if (!reader || typeof reader.load !== 'function') refuse('PurposeBindingRefused');
+  const e = object(reader.load(string(eventId)), ['eventId', 'recordId', 'trigger', 'actorId', 'at', 'result']);
+  string(e.recordId); string(e.actorId); utc(e.at);
+  if (e.eventId !== eventId) refuse('PurposeBindingRefused');
+  if (e.result !== null) {
+    const r = object(e.result, ['draftId', 'intentId', 'recordId', 'versionId', 'signedAt', 'action', 'verified']);
+    for (const k of ['draftId', 'intentId', 'recordId', 'versionId']) string(r[k]);
+    choice(r.action, ['approve', 'addendum', 'amend']);
+    if (r.verified !== true || utc(r.signedAt) !== e.at) refuse('PurposeBindingRefused');
+    if (typeof reader.loadSignedResult !== 'function') refuse('PurposeBindingRefused');
+    const signed = object(reader.loadSignedResult(r.recordId, r.versionId), ['draftId', 'intentId', 'recordId', 'versionId', 'signedAt', 'action', 'verified']);
+    if (Object.keys(r).some(k => signed[k] !== r[k])) refuse('PurposeBindingRefused');
+  }
+  const result = freeze(structuredClone(e)) as Readonly<PurposeEndEvent>;
+  verifiedEnds.add(result); return result;
+}
+export function newPurposeRecord(source: ResolvedRecord, partIds: readonly string[]): Readonly<PurposeRecord> {
+  const s = verifiedRecord(source);
+  if (s.kinds.length !== 1) refuse('PurposeKindRequired');
+  const kind = s.kinds[0], row = RECORD_CLASSIFICATION[kind];
   if (row.retention.mode !== 'purpose' || !row.retention.purposeEnds.length || !Array.isArray(partIds) || !partIds.length || new Set(partIds).size !== partIds.length)
     throw new Error('Purpose kind and complete revisions required');
-  return freeze({ recordId: string(recordId), disposalUnitId: `disposal:${randomUUID()}`, kind, ownerId: string(ownerId), createdAt: utc(createdAt), partIds: partIds.map(id => string(id)), holds: [] });
+  if (['private-draft', 'dictation'].includes(kind)) {
+    const b = object(s.row.draftBinding, ['reportId', 'intentId', 'action']);
+    string(b.reportId); string(b.intentId); choice(b.action, ['approve', 'addendum', 'amend']);
+  }
+  return freeze({ recordId: s.recordId, disposalUnitId: `disposal:${randomUUID()}`, kind, ownerId: string(s.row.ownerId),
+    createdAt: s.event.at, partIds: partIds.map(id => string(id)), holds: [], source: s });
 }
 function parsePurposeRecord(record: PurposeRecord): Readonly<PurposeRecord> {
-  object(record, ['recordId', 'disposalUnitId', 'kind', 'ownerId', 'createdAt', 'partIds', 'holds']);
-  const parsed = newPurposeRecord(record.recordId, record.kind, record.ownerId, record.createdAt, record.partIds);
+  object(record, ['recordId', 'disposalUnitId', 'kind', 'ownerId', 'createdAt', 'partIds', 'holds', 'source']);
+  const parsed = newPurposeRecord(record.source, record.partIds);
+  if (['recordId', 'kind', 'ownerId', 'createdAt'].some(k => parsed[k] !== record[k])) refuse('PurposeBindingRefused');
   return freeze({ ...parsed, disposalUnitId: opaqueUnit(record.disposalUnitId), holds: parseLegalHolds(record.holds, record.recordId, record.createdAt) });
 }
-export function placePurposeLegalHold(input: PurposeRecord, hold: Omit<LegalHold, 'release'>): Readonly<PurposeRecord> {
-  const record = parsePurposeRecord(input); object(hold, ['holdId', 'recordId', 'basis', 'actorId', 'at']);
-  return parsePurposeRecord({ ...record, holds: [...record.holds, { ...hold, release: null }] });
+export function placePurposeLegalHold(input: PurposeRecord, reader: LegalDutyReader, holdId: string): Readonly<PurposeRecord> {
+  const record = parsePurposeRecord(input), hold = readLegalDuty(reader, holdId);
+  if (hold.release !== null) refuse('HoldReleaseBindingRefused');
+  return parsePurposeRecord({ ...record, holds: [...record.holds, hold] });
 }
-export function liftPurposeLegalHold(input: PurposeRecord, holdId: string, release: NonNullable<LegalHold['release']>): Readonly<PurposeRecord> {
+export function liftPurposeLegalHold(input: PurposeRecord, holdId: string, reader: LegalDutyReader): Readonly<PurposeRecord> {
   const record = parsePurposeRecord(input), held = record.holds.find(h => h.holdId === holdId);
-  if (!held || held.release || !release) throw new Error('An active hold and explicit release required');
-  return parsePurposeRecord({ ...record, holds: record.holds.map(h => h === held ? { ...h, release } : h) });
+  const released = readLegalDuty(reader, holdId);
+  if (!held || held.release || !released.release || JSON.stringify({ ...released, release: null }) !== JSON.stringify(held)) refuse('HoldReleaseBindingRefused');
+  return parsePurposeRecord({ ...record, holds: record.holds.map(h => h === held ? released : h) });
 }
-/** B binds approval/finalization to the parent report and discards to the owner; no arbitrary timer can end purpose. */
-export async function destroyAtPurposeEnd(store: DisposalAuditStore, record: PurposeRecord, event: PurposeEndEvent, requestedAt: string,
+export interface PurposeDisposalStore extends DisposalAuditStore {
+  withPurposeLock<T>(recordId: string, at: string, work: (current: PurposeRecord) => Promise<T>): Promise<T>;
+}
+/** The stored end identifies THIS draft's result, not an earlier approval of its parent. */
+export async function destroyAtPurposeEnd(store: PurposeDisposalStore, record: PurposeRecord, event: PurposeEndEvent, requestedAt: string,
   destroy: (record: Readonly<PurposeRecord>) => Promise<DestructionReceipt>): Promise<Readonly<DestructionRecord>> {
   const parsed = parsePurposeRecord(record);
-  if (parsed.holds.some(h => !h.release)) throw new Error('Record-specific legal preservation is active');
-  const e = object(event, ['recordId', 'trigger', 'actorId', 'at']);
-  choice(e.trigger, RECORD_CLASSIFICATION[parsed.kind].retention.purposeEnds); string(e.actorId);
-  if (e.recordId !== parsed.recordId || utc(e.at) < parsed.createdAt ||
-      (['explicit-discard', 'owner-deleted'].includes(e.trigger) && e.actorId !== parsed.ownerId)) throw new Error('Purpose-end binding refused');
+  const e = event;
+  if (!verifiedEnds.has(e) || !RECORD_CLASSIFICATION[parsed.kind].retention.purposeEnds.includes(e.trigger) ||
+      e.recordId !== parsed.recordId || e.at <= parsed.createdAt) refuse('PurposeBindingRefused');
+  if (['explicit-discard', 'owner-deleted'].includes(e.trigger) && e.actorId !== parsed.ownerId) refuse('PurposeOwnerRefused');
+  if (e.trigger === 'result-version-signed') {
+    const b = parsed.source.row.draftBinding, r = e.result;
+    if (!b || !r || r.draftId !== parsed.recordId || r.intentId !== b.intentId || r.recordId !== b.reportId ||
+        r.action !== b.action || r.signedAt !== e.at) refuse('PurposeBindingRefused');
+  } else if (e.result !== null) refuse('PurposeBindingRefused');
+  if (typeof store.withPurposeLock !== 'function') refuse('RetentionLockRequired');
+  return store.withPurposeLock(parsed.recordId, utc(requestedAt), async current => {
+  if (JSON.stringify(parsePurposeRecord(current)) !== JSON.stringify(parsed)) refuse('PurposeSnapshotStale');
+  if (parsed.holds.some(h => !h.release && h.basis.validity.until !== null && h.basis.validity.until <= requestedAt)) refuse('HoldReleaseRequired');
+  if (parsed.holds.some(h => !h.release)) refuse('LegalHoldActive');
   return destroyWithJournal(store, freeze(parsed), utc(requestedAt), [e.at, ...parsed.holds.map(h => h.release!.at)].sort().slice(-1)[0], { disposalUnitId: parsed.disposalUnitId, classes: [], clauseIds: ['privacy:21.1'],
     partCount: parsed.partIds.length, expiryDay: seoulDay(e.at), extensionUsed: false }, destroy);
+  });
 }
 export interface DestructionConfirmation {
   action: 'destruction-confirmed'; batchId: string; disposalUnitIds: readonly string[]; officerId: string; role: 'privacy-officer'; at: string;

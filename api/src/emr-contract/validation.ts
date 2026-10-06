@@ -1,4 +1,9 @@
 /** Closed, JSON-compatible contracts prevent silent loss of evidence fields. */
+export class ContractError extends Error {
+  constructor(readonly code: string) { super(code); this.name = 'ContractError'; }
+}
+export function refuse(code: string): never { throw new ContractError(code); }
+
 export function object(value: unknown, keys: readonly string[]): Record<string, any> {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error('Expected a plain object');
