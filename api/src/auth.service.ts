@@ -38,12 +38,23 @@ const IDP_END_BACKOFF_MS = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_
 /**
  * 확인된 표식을 남겨 두는 시간: Keycloak SSO 세션의 최대 수명(kin-realm.json ssoSessionMaxLifespan 43200초) + 여유.
  * 그 뒤에는 그 provider 세션의 유효한 토큰이 올 수 없다 — 콜백이 잠금 뒤에 토큰의 exp를 다시 보는 것과 짝이다.
+ * 마지막으로 확인된 종료(confirmedAt)부터 센다: 같은 sid가 다시 쓰이면(S7-U5 CE1) decidedAt은 첫 종료의 시각이라, 그것으로
+ * 세면 방금 다시 끝낸 SSO의 표식이 그 토큰이 아직 유효할 때 지워진다.
  */
 const IDP_END_KEEP_MS = 13 * 60 * 60 * 1000;
 // provider 세션 잠금(pg_advisory_xact_lock)의 고정 이름공간. 다른 용도의 advisory lock과 키가 겹치지 않게 한다.
 const IDP_LOCK_SPACE = 0x4b494e55;
 // 회원 잠금의 이름공간. 격리 사실을 쓰는 트랜잭션과 콜백의 세션 생성(그 사실을 읽는다)이 같은 회원에 대해 줄을 선다.
 const MEMBER_LOCK_SPACE = 0x4b494e4d;
+// 격리의 남은 일이 인증 서버에 하는 호출(나열·비활성화·전체 로그아웃) 한 번의 한도. 서비스 토큰 취득까지 포함한 전체 한도다.
+const ISOLATION_CALL_MS = 10_000;
+/**
+ * 진행 중 표식이 "그 호출이 아직 진행 중"으로 통하는 시간: 호출의 한도 + 여유. 이보다 오래된 표식은 그것을 쓴 쪽이 호출
+ * 중에 죽은 것으로 본다 — 넘겨받은 쪽은 그때부터 기다리지 않는다. 관리자의 요청이 기다리는 최대 시간이기도 하다.
+ */
+const ISOLATION_CALL_LEASE_MS = ISOLATION_CALL_MS + 5_000;
+// 넘겨받은 쪽이 앞선 쪽의 진행 중 표식이 풀렸는지 다시 보는 간격.
+const ISOLATION_CALL_POLL_MS = 100;
 // 인증 서버 자체가 답하지 못했다는 OAuth 오류(그 밖의 probe 오류는 SSO를 알아내지 못한 것일 뿐이다).
 const PROVIDER_DOWN = ['temporarily_unavailable', 'server_error'];
 // Keycloak 토큰 교환(로그인 code, refresh) 한 번이 쓸 수 있는 시간(U5S-REQ-18의 외부 조회 한도).
@@ -163,7 +174,9 @@ export function markAuthCode(res: any, error: any) {
  *
  * 세션 종료의 완성(S7-U5 R1): 제품이 어떤 이유로든 제품 세션을 끝내면 그 세션이 태어난 provider 세션(`idpSid`)도 끝낸다.
  * 끝내기와 콜백의 세션 생성은 같은 provider 세션에 대해 하나의 잠금(트랜잭션 advisory lock)으로 줄을 서고, 끝내기는
- * 그 잠금 안에서 표식(IdpSessionEnd)을 남긴다 — 표식이 있는 provider 세션에서는 다시는 제품 세션이 만들어지지 않는다.
+ * 그 잠금 안에서 표식(IdpSessionEnd)을 남긴다 — 표식이 덮는 인증(그 종료가 확인되기 전의 인증, `markCovers`)으로는 다시는
+ * 제품 세션이 만들어지지 않는다. 표식은 sid가 아니라 그 SSO의 인증을 막는다: Keycloak은 같은 브라우저의 다음 SSO에 끝난 SSO의
+ * sid를 다시 줄 수 있다.
  * provider에 종료를 청하는 일(DELETE sessions/{sid})은 commit 뒤, 잠금 밖에서 하고, 확인될 때까지 표식이 다시 부른다.
  * 그 답(204·404)은 "그 SSO 세션이 인증 서버에서 끝났다"까지만 말한다: 이미 발급된 토큰은 자기 만료까지 서명이 유효하고
  * (그래서 Bearer 경로도 표식을 본다), 같은 SSO에 묶인 다른 애플리케이션의 자체 세션은 그 애플리케이션의 일이다.
@@ -380,6 +393,30 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     return typeof claims?.sid === 'string' && claims.sid ? claims.sid : null;
   }
 
+  /**
+   * 표식이 이 인증을 덮는가(R1). 표식은 끝내기로 한 **그 SSO의 인증**을 막는다 — sid가 같다는 것만으로는 아니다(S7-U5 CE1).
+   * Keycloak은 SSO 세션 id로 그 브라우저의 인증 세션 id(AUTH_SESSION_ID)를 쓰고, 그 브라우저에 끝나지 않은 로그인 화면(닫은
+   * 로그인 탭, 로그인 전에 앱 주소를 한 번 더 연 것)이 남아 있으면 그 id가 로그인 뒤에도 남는다. 그래서 같은 브라우저의 다음
+   * SSO가 — 다음 사람이든 같은 사람이든 — 끝난 SSO의 sid를 다시 받는다. 끝난 SSO의 code·토큰은 그 종료가 확인되기 전에
+   * 인증된 것이다:
+   *   - 종료가 아직 확인되지 않았거나 auth_time이 없으면 덮는다(그 SSO가 아직 살아 있을 수 있다).
+   *   - 확인된 종료 이후의 인증(auth_time ≥ confirmedAt)은 덮지 않는다 — 그 sid를 다시 받은 새 SSO다.
+   *   - 확인된 종료 뒤에 시작한 fresh 흐름(prompt=login·create)의 code는 그 흐름이 시작된 **초**부터 받는다. 그 흐름의
+   *     prompt가 인증 서버에 그 시작 뒤의 인증을 요구하므로 그 code의 인증은 흐름보다 늦다. 초로 내리는 것은 auth_time이
+   *     초 단위로 잘린 값이기 때문이다(종료 확인과 같은 초에 자격을 넣은 사람도 한 번에 들어간다).
+   * 시계: auth_time은 인증 서버의 시계, confirmedAt·흐름의 시작은 이 서버의 시계다(같은 호스트에 둔다). 그 밖의 여유는 두지
+   * 않는다 — 여유는 앞 의사의 종료 직전 인증까지 받아 들인다. 인증 서버 시계가 늦으면 흐름 시작 직후의 입력이 한 번 거절되고
+   * (막힘 → 확인 → 새 흐름의 폼), 빠르면 끝난 SSO의 종료 직전 인증이 통할 수 있다 — 두 서버를 나누어 둘 때는 시계 동기가 전제다.
+   * 같은 초의 인증은 흐름 없이(평범한 흐름·Bearer) 앞뒤를 가리지 못하므로 덮는 쪽으로 판정한다.
+   */
+  private markCovers(mark: { confirmedAt: Date | null }, claims: Record<string, any>, flow?: PendingLogin): boolean {
+    const authTime = Number(claims?.auth_time);
+    if (!mark.confirmedAt || !Number.isFinite(authTime)) return true;
+    const ended = mark.confirmedAt.getTime();
+    const since = flow?.phase === 'fresh' && flow.issuedAt >= ended ? Math.floor(flow.issuedAt / 1000) * 1000 : ended;
+    return authTime * 1000 < since;
+  }
+
   /** 이 세션이 태어난 provider 세션. 열이 생기기 전의 행은 저장된 access token(저장 전에 검증한 토큰)에서 읽는다. */
   private idpSidOf(session: Session): string | null {
     if (session.idpSid) return session.idpSid;
@@ -561,10 +598,16 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 같은 결과가 되는 일이라 재시도 주기가 처음부터 다시 한다. 나열이 성공해 끝까지 가면 사실에 완료 시각을 적는다(사실 자체는
    * 남는다 — 지우는 것은 끝까지 성공한 재활성화뿐이다).
    *
-   * 이 일을 하는 쪽은 한 번에 하나다(F04): 시작할 때 사실의 시도 번호(attempts)를 하나 올려 그 번호를 자기 몫으로 쥐고,
-   * 인증 서버에 무엇을 하기 **전마다** 사실이 아직 있고 그 번호가 아직 자기 것인지 본다. 재활성화도 같은 길로 남은 일을
-   * 넘겨받으므로(번호를 올린다), 그 전에 시작한 재시도 주기는 다음 걸음 앞에서 멈춘다 — 재활성화가 회원을 활성으로 만든
-   * 뒤에 옛 주기가 비활성화·전체 로그아웃·제품 행 끝냄을 하지 않는다. 인증 서버 호출 동안 트랜잭션·잠금은 쥐지 않는다.
+   * 이 일을 하는 쪽은 한 번에 하나다(F04): 시작할 때 사실의 시도 번호(attempts)를 하나 올려 그 번호를 자기 몫으로 쥔다.
+   * 재활성화도 같은 길로 남은 일을 넘겨받는다(번호를 올린다). 인증 서버 호출 동안 트랜잭션·잠금은 쥐지 않는다 — 대신 호출
+   * 하나하나를 사실 위의 진행 중 표식으로 감싼다(isolationCall): 호출 **전에** "그 번호가 아직 자기 것일 때만" 표식을 적고
+   * (확인과 적기가 한 commit이라 그 사이에 넘겨받힐 틈이 없다), 호출이 돌아오면 성공이든 실패든 자기 표식을 지운다.
+   * 넘겨받은 쪽은 번호를 올린 **뒤** 앞선 번호의 표식이 풀리거나 그 호출의 한도를 넘길 때까지 기다린 다음에야 자기 일을
+   * 한다(settleIsolationCalls). 번호가 올라간 뒤에는 앞선 쪽이 새 표식을 적지 못하므로, 기다림이 끝나면 앞선 쪽이 이미 보낸
+   * 호출은 모두 돌아와 있다 — 재활성화가 회원을 활성으로 만든 뒤에 옛 처리의 비활성화·전체 로그아웃이 닿지 않는다. 넘겨받힌
+   * 쪽은 다음 걸음(표식 적기, 제품 행을 끝내기 전의 확인)에서 멈추고 인증 서버에 더 묻지 않는다(나열도 하지 않는다).
+   * 남는 경우: 표식을 쓴 쪽이 호출 중에 죽으면 표식은 한도 뒤에 무시된다 — 인증 서버가 그 호출을 한도+여유보다 늦게 처리하는
+   * 경우만 남는다(호출 한도가 그 창을 좁힌다). 로그인 콜백과 갱신은 이 표식을 읽지도 기다리지도 않는다.
    * `claimed`는 이미 번호를 올린 쪽(재시도 주기)이 넘기는 그 번호다. 끝까지 해 완료 시각을 적었으면 true, 사실이 없거나 다른
    * 쪽이 넘겨받아 멈췄으면 false다(부른 쪽은 그때 "끝났다"고 답하지 않는다).
    */
@@ -575,23 +618,28 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       const row = await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
       return !!row && row.providerDoneAt === null && row.attempts === claim;
     };
+    if (!await this.settleIsolationCalls(sub, claim)) return false;
     if (!await this.endMemberSessions(sub, [], owned)) return false;
-    let first: string[] | null = null, failure: unknown = null;
-    try { first = await this.keycloak.userSessions(sub); } catch (error) { failure = error; }
-    if (first && !await this.endMemberSessions(sub, first, owned)) return false;
-    if (!await owned()) return false;
-    await this.keycloak.setEnabled(sub, false);
+    const first = await this.isolationCall(sub, claim, 'sessions', () => this.keycloak.userSessions(sub, ISOLATION_CALL_MS));
+    if (!first) return false;
+    if (!('error' in first) && !await this.endMemberSessions(sub, first.value, owned)) return false;
+    const disabled = await this.isolationCall(sub, claim, 'disable', () => this.keycloak.setEnabled(sub, false, ISOLATION_CALL_MS));
+    if (!disabled) return false;
+    if ('error' in disabled) throw disabled.error;
     /**
      * 사용자 전체 로그아웃은 나열이 그 회원의 provider 세션을 표식한 **뒤에만** 한다. 나열 전에 인증 서버에서 끝내 버리면
      * 어느 provider 세션을 표식해야 하는지 알 길이 사라진다 — 격리 전에 code를 교환해 둔 콜백(승인 변경이면 옛 역할의
      * 토큰)은 재활성화 뒤에도 막혀야 하고, 그것을 막는 것이 그 표식이다. 그동안 비활성화된 회원의 provider 세션은 인증
      * 서버가 새 토큰도 갱신도 내주지 않는다. 나열이 실패했으면 여기서 알린다(사실은 남고 주기가 잇는다).
      */
-    if (failure) throw failure;
-    const second = await this.keycloak.userSessions(sub);
-    if (!await this.endMemberSessions(sub, second, owned)) return false;
-    if (!await owned()) return false;
-    await this.keycloak.logoutUser(sub);
+    if ('error' in first) throw first.error;
+    const second = await this.isolationCall(sub, claim, 'sessions', () => this.keycloak.userSessions(sub, ISOLATION_CALL_MS));
+    if (!second) return false;
+    if ('error' in second) throw second.error;
+    if (!await this.endMemberSessions(sub, second.value, owned)) return false;
+    const out = await this.isolationCall(sub, claim, 'logout', () => this.keycloak.logoutUser(sub, ISOLATION_CALL_MS));
+    if (!out) return false;
+    if ('error' in out) throw out.error;
     if (!await this.endMemberSessions(sub, [], owned)) return false;
     const { count } = await this.storage('isolation_write', () => this.prisma.memberIsolation.updateMany({
       where: { sub, providerDoneAt: null, attempts: claim }, data: { providerDoneAt: new Date() } }));
@@ -613,6 +661,39 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       if (count === 1) return row.attempts + 1;
     }
     throw this.conflict();
+  }
+
+  /**
+   * 격리의 남은 일이 인증 서버에 하는 호출 하나를 진행 중 표식으로 감싼다: 그 번호가 아직 이 쪽 몫일 때만 표식을 적고(아니면
+   * 호출하지 않고 null — 넘겨받혔다), 호출이 돌아오면 성공이든 실패든 이 쪽 번호의 표식만 지운다(넘겨받은 쪽의 것은 건드리지
+   * 않는다). 호출의 결과나 오류를 돌려주고, 저장소 오류는 그대로 던진다 — 지우지 못한 표식은 한도 뒤에 무시된다.
+   */
+  private async isolationCall<T>(sub: string, claim: number, call: string, work: () => Promise<T>)
+    : Promise<{ value: T } | { error: unknown } | null> {
+    const { count } = await this.storage('isolation_write', () => this.prisma.memberIsolation.updateMany({
+      where: { sub, providerDoneAt: null, attempts: claim }, data: { callAttempt: claim, call, callStartedAt: new Date() } }));
+    if (count !== 1) return null;
+    let result: { value: T } | { error: unknown };
+    try { result = { value: await work() }; } catch (error) { result = { error }; }
+    await this.storage('isolation_write', () => this.prisma.memberIsolation.updateMany({
+      where: { sub, callAttempt: claim }, data: { callAttempt: null, call: null, callStartedAt: null } }));
+    return result;
+  }
+
+  /**
+   * 남은 일을 막 넘겨받은 쪽(번호를 올린 쪽)이 자기 일 전에 기다린다: 앞선 번호의 진행 중 표식이 풀리거나 한도를 넘길 때까지.
+   * 번호가 올라간 뒤에는 앞선 쪽이 새 표식을 적지 못하므로, 기다리는 것은 그때 이미 보낸 호출 하나뿐이다. 그 표식은 이
+   * 기다림보다 먼저 적혔으므로 기다림 자체도 한도만큼으로 묶는다(이 프로세스의 단조 시계) — 표식을 쓴 인스턴스의 시계가
+   * 앞서 있어도 더 기다리지 않는다. 그사이 또 넘겨받혔거나 사실이 끝났으면 false.
+   */
+  private async settleIsolationCalls(sub: string, claim: number): Promise<boolean> {
+    const until = performance.now() + ISOLATION_CALL_LEASE_MS;
+    for (;;) {
+      const row = await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
+      if (!row || row.providerDoneAt !== null || row.attempts !== claim) return false;
+      if (!callInFlight(row) || performance.now() >= until) return true;
+      await new Promise(resolve => setTimeout(resolve, ISOLATION_CALL_POLL_MS));
+    }
   }
 
   /** 격리 사실이 있는가(콜백 밖의 읽기: 재활성화가 남은 인증 서버 일을 먼저 끝내야 하는지 본다). */
@@ -665,7 +746,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       const rows: Session[] = await this.storage('session_read', () => this.prisma.authSession.findMany({ where: { sub } }));
       if (!rows.length) return true;
       if (rounds === TRANSITION_LIMIT) throw this.conflict();
-      for (const row of rows) await this.endAndTell(row, 'isolation', null);
+      // 읽은 뒤에도 행마다 다시 묻는다: 읽는 동안 재활성화가 끝나고 회원이 다시 로그인했으면 읽힌 것은 그 새 세션이다.
+      for (const row of rows) {
+        if (!await still()) return false;
+        await this.endAndTell(row, 'isolation', null);
+      }
     }
   }
 
@@ -752,6 +837,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         take: 20,
       });
       for (const row of owed) {
+        // 다른 쪽이 지금 인증 서버를 부르고 있는 사실은 집지 않는다 — 그 쪽이 아직 일하고 있다(넘겨받으면 그 호출을 기다려야 한다).
+        if (callInFlight(row)) continue;
         const wait = IDP_END_BACKOFF_MS[Math.min(row.attempts + 1, IDP_END_BACKOFF_MS.length - 1)];
         const { count } = await this.prisma.memberIsolation.updateMany({
           where: { sub: row.sub, providerDoneAt: null, attempts: row.attempts },
@@ -771,14 +858,29 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Bearer 경로의 표식 검사(가드가 부른다). 제품 세션 행을 지워도 이미 발급된 access token은 만료까지 서명이 유효하다 —
-   * 끝내기로 한 provider 세션의 사용자 토큰은 여기서 거절한다. `sid`가 없는 토큰(서비스 계정·gateway)은 대상이 아니다.
+   * 끝내기로 한 SSO의 인증(표식이 덮는 인증, 콜백과 같은 판정)의 사용자 토큰은 여기서 거절한다. `sid`가 없는 토큰(서비스
+   * 계정·gateway)은 대상이 아니다.
+   * 이 길에는 흐름이 없어 확인된 종료와 **같은 초**의 인증은 auth_time만으로 앞뒤를 가리지 못한다. 그 인증을 콜백이 이미 받아
+   * 들였으면 받는다: 표식이 있는 sid의 제품 세션은 종료(그 sid의 행을 모두 지운다) 뒤에 콜백이 덮지 않는다고 판정한 인증으로만
+   * 생기므로, 그 sid에 살아 있는 세션의 토큰과 사람·auth_time이 같으면 같은 인증이다.
    */
   async refuseEndedIdpSession(claims: Record<string, any>): Promise<void> {
     const idpSid = this.idpSidOfClaims(claims);
     if (!idpSid) return;
     const mark = await this.storage('idp_end_read', () =>
-      this.prisma.idpSessionEnd.findUnique({ where: { idpSid }, select: { idpSid: true } }));
-    if (mark) throw this.ended('인증 세션이 없습니다');
+      this.prisma.idpSessionEnd.findUnique({ where: { idpSid }, select: { confirmedAt: true } }));
+    if (!mark || !this.markCovers(mark, claims)) return;
+    const authTime = Number(claims.auth_time);
+    if (mark.confirmedAt && Number.isFinite(authTime) && authTime === Math.floor(mark.confirmedAt.getTime() / 1000)) {
+      const admitted = await this.storage('idp_end_read', () => this.prisma.authSession.findMany({
+        where: { idpSid, sub: String(claims.sub) }, select: { accessToken: true },
+      }));
+      if (admitted.some(row => {
+        try { return Number(decodeJwt(row.accessToken).auth_time) === authTime; }
+        catch { return false; }
+      })) return;
+    }
+    throw this.ended('인증 세션이 없습니다');
   }
 
   // ── 로그인 시작 ──
@@ -1087,8 +1189,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         const now = new Date();
         if (Number(payload.exp) * 1000 <= now.getTime() || now.getTime() - flow.issuedAt > PENDING_VALID_MS) return 'expired';
         const mark = await tx.idpSessionEnd.findUnique({ where: { idpSid: idpSid! } });
-        if (mark) {
-          // 끝내기로 한 provider 세션이 code를 냈다: 아직 살아 있다. 확인돼 있었더라도 종료 요청을 다시 깨운다.
+        if (mark && this.markCovers(mark, payload, flow)) {
+          // 끝내기로 한 SSO의 인증이 code를 냈다: 그 SSO가 아직 살아 있다. 확인돼 있었더라도 종료 요청을 다시 깨운다.
+          // 덮지 않는 인증(확인된 종료 뒤에 그 sid를 다시 받은 새 SSO)은 표식을 그대로 두고 지나간다 — 옛 인증은 계속 막힌다.
           await tx.idpSessionEnd.update({ where: { idpSid: idpSid! }, data: { confirmedAt: null, nextAttemptAt: now } });
           return 'blocked';
         }
@@ -1364,7 +1467,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     }
     try {
       await this.prisma.idpSessionEnd.deleteMany({
-        where: { confirmedAt: { not: null }, decidedAt: { lt: new Date(Date.now() - IDP_END_KEEP_MS) } },
+        where: { confirmedAt: { lt: new Date(Date.now() - IDP_END_KEEP_MS) } },
       });
     } catch {
       this.storageWarning('idp_end_write');
@@ -1377,4 +1480,10 @@ function lockWaitExceeded(error: any): boolean {
   if (error?.code === 'P2028') return true;
   if (error?.meta?.code === '55P03') return true;
   return typeof error?.message === 'string' && error.message.includes('55P03');
+}
+
+/** 격리 사실 위의 진행 중 표식이 아직 살아 있는가(한도 안). 한도를 넘긴 표식은 그것을 쓴 쪽이 호출 중에 죽은 것이다. */
+function callInFlight(row: { callAttempt: number | null; callStartedAt: Date | null }): boolean {
+  return row.callAttempt !== null && row.callStartedAt !== null
+    && Date.now() - row.callStartedAt.getTime() < ISOLATION_CALL_LEASE_MS;
 }

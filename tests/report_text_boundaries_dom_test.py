@@ -40,6 +40,10 @@ answer arriving, a failing read of the study states, the viewer document the lis
 script takes the hand-over as config/ohif.js does), and a viewer document's side of the unsaved-work contract (the
 `kin-unsaved:` lock and the answer to `session-work-query`, as viewer-session.js does; the real one is exercised in
 tests/viewer_session_dom_test.py).
+Final review part 1 (blocker 2): a late read of the draft that is older than what this document has confirmed since
+(a save after a Discard Draft of unknown outcome) does not take that text back; a newer one (another window's later
+draft) is shown. Stand-in added for it, named: a read of study A's draft the server holds and answers later, with what
+it read when the request arrived or with what it has now.
 Stand-ins added here, named: the clipboard (the harness's), the media devices of a dictation (an audio context, a
 worklet node and a microphone stream - nothing else of the browser), the server's answers for a dictation, a
 findings list, an insertion and a discard, a blank same-origin document standing in for a viewer, a recorder of
@@ -178,6 +182,9 @@ class MultiStudySite(h.Site):
         # Study B's own GET draft answers. B's requests run through study A's handler (api below), so without its own
         # queue a read of study B would take the answer a test queued for study A's read.
         self.draft_read_answers_b = []
+        # Held reads of study A's draft ("hold" queued in draft_read_answers): (route, the envelope the server read when
+        # the request arrived). The answer is on its way until finish_draft_read.
+        self.held_draft_reads = []
 
     def handle(self, route, request):
         url = h.urlparse(request.url)
@@ -322,7 +329,18 @@ class MultiStudySite(h.Site):
             for action, kwargs in actions:
                 getattr(route, action)(**kwargs)
             return result
+        if (method == "GET" and path == f"/api/studies/{h.UID}/draft" and self.draft_read_answers
+                and self.draft_read_answers[0] == "hold"):
+            self.draft_read_answers.pop(0)
+            self.draft_reads.append(request.headers.get("x-kin-session"))
+            return self.held_draft_reads.append((route, self.envelope(self.sessions[self.cookie])))
         return super().api(route, request, method, path, query)
+
+    def finish_draft_read(self, now=False):
+        """Answer a held read of study A's draft: with what the server read when the request arrived (the answer was
+        on its way since), or - `now` - with what it has now."""
+        route, read = self.held_draft_reads.pop(0)
+        route.fulfill(json=self.envelope(h.RAD) if now else read)
 
     def stored_for(self, uid):
         with self.study(uid):
@@ -2179,7 +2197,8 @@ class ReportTextBoundaries(h.LogoutDOMTest):
         server's answer is lost AND the read that would confirm it fails too - the outcome is unknown. The text up to
         the press is what the reader threw away: the 20 s autosave and Log out do not store it, and the next successful
         read shows the server's state (a new document too). A DELETE that never reached the server is not taken as
-        done: the stored draft is shown again with Discard Draft. Text typed after the press is new text and is stored."""
+        done: the stored draft is shown again with Discard Draft. Text typed after the press is new text and is stored -
+        also when it is typed after the answer, and the next successful read comes before it is stored."""
         for then in ("autosave and the next read", "Log out before any read"):
             with self.subTest(server="discarded", then=then):
                 self.discard_out(typed_before=True)
@@ -2224,6 +2243,91 @@ class ReportTextBoundaries(h.LogoutDOMTest):
             later = {**h.FIELDS, "findings": h.FIELDS["findings"] + self.DISCARDED + self.LATE}
             self.wait_until(lambda: self.site.stored_for(h.UID) == later, "the text typed after the press is stored")
             self.assert_reopened(later, True, "text typed after a discard of unknown outcome")
+        # The same, typed only once the outcome is known to be unknown (review of 8c2cf37, F-01): the next successful
+        # read tells the discard's outcome, and the sentence typed after the answer is the reader's - kept and stored.
+        # The autosave write is held so that read is answered while the sentence is stored nowhere yet.
+        for then in ("a redraw of the study", "the autosave period"):
+            with self.subTest(server="discarded", typed_after_the_answer=True, then=then):
+                self.discard_out(typed_before=True)
+                self.site.draft_read_answers = ["abort"]
+                self.assertEqual(200, self.site.finish_discard(lost=True))
+                self.page.wait_for_timeout(800)
+                self.assertEqual([], self.site.draft_read_answers, "the confirming read was the one that failed")
+                self.assertFalse(self.leaving_asks(), "the discarded text is not unsaved work")
+                self.page.locator("#findings").press("Control+End")
+                self.page.locator("#findings").press_sequentially(self.LATE)
+                self.assertTrue(self.leaving_asks(), "the text typed after the answer is unsaved work")
+                later = {**h.FIELDS, "findings": h.FIELDS["findings"] + self.DISCARDED + self.LATE}
+                reads = len(self.site.draft_reads)
+                self.site.put_answers = ["hold"]
+                if then == "a redraw of the study":
+                    self.refresh()
+                else:
+                    self.page.clock.run_for(21000)
+                self.wait_until(lambda: len(self.site.draft_reads) > reads, "the next read of study A's draft")
+                self.page.wait_for_timeout(600)
+                self.assertEqual(later, self.editor(), "the read of the discard's outcome took the text typed after the answer away")
+                self.assertTrue(self.leaving_asks(), "the text typed after the answer is still unsaved work")
+                if then == "a redraw of the study":
+                    self.page.clock.run_for(21000)
+                self.wait_until(lambda: self.site.held_puts, "the autosave write of the text typed after the answer")
+                self.site.finish_put()
+                self.wait_until(lambda: self.site.stored_for(h.UID) == later, "the text typed after the answer is stored")
+                self.assert_reopened(later, True, "text typed after the answer of a discard of unknown outcome")
+
+    def test_a_late_read_of_an_unknown_discard_does_not_take_back_text_stored_after_it(self):
+        """Final review part 1, blocker 2. Discard Draft is accepted and its answer lost, the read that would confirm it
+        fails; the next read of the draft (the discard's outcome) is answered late - the server read "no draft" at the
+        revision after the discard, and that answer is on its way. Meanwhile the reader types new text and the autosave
+        stores it at a newer revision. The late "no draft" arrives: the screen keeps the new text, nothing is asked, the
+        next autosave goes on the stored revision, and the server keeps the text. Opposite side: a late answer newer
+        than what this document has confirmed - another window's draft, stored after this document's save - is shown,
+        and the next write goes on it."""
+        other = {**h.FIELDS, "findings": "SYN draft of another window"}
+        for late in ("older: no draft", "newer: another window's draft"):
+            with self.subTest(late=late):
+                self.discard_out(typed_before=True)
+                self.site.draft_read_answers = ["abort"]
+                self.assertEqual(200, self.site.finish_discard(lost=True))
+                self.page.wait_for_timeout(800)
+                self.assertEqual([], self.site.draft_read_answers, "the confirming read was the one that failed")
+                # The read of the discard's outcome goes out with the autosave period; its answer is held.
+                self.site.draft_read_answers = ["hold"]
+                self.page.clock.run_for(21000)
+                self.wait_until(lambda: self.site.held_draft_reads, "the read of the discard's outcome")
+                held_at = self.page.evaluate("Date.now()")
+                # Within that read's deadline the reader types new text and moves to study B: leaving stores it at once.
+                self.page.locator("#findings").press("Control+End")
+                self.page.locator("#findings").press_sequentially(self.LATE)
+                later = self.editor()
+                self.assertTrue(later["findings"].endswith(self.LATE))
+                self.switch(h.PATIENT_B)
+                self.wait_until(lambda: self.site.stored_for(h.UID) == later, "the text typed after the answer is stored on leaving")
+                self.wait_until(lambda: not self.leaving_asks(), "the stored text confirmed to this document")
+                if late.startswith("newer"):
+                    self.assertEqual(200, self.site.write({**other, "baseVersion": SAVED_REPORT["version"], "citationIds": [],
+                        "structureIds": [], "expectedOwner": h.owner_of(h.RAD),
+                        "expectedRevision": self.site.revision(h.RAD["actor"])}, h.RAD)[0])
+                # A draft read is given up after 10 s (the transport's deadline): the late answer must reach the page.
+                self.assertLess(self.page.evaluate("Date.now()") - held_at, 9000, "the held read is still within its deadline")
+                self.site.finish_draft_read(now=late.startswith("newer"))
+                self.page.wait_for_timeout(800)
+                self.switch(h.PATIENT)
+                self.page.wait_for_timeout(600)
+                shown, stored = (later, later) if late.startswith("older") else (other, other)
+                self.assertEqual((shown, stored), (self.editor(), self.site.stored_for(h.UID)),
+                                 late + ": what the screen shows and what the server keeps after the late answer")
+                self.assertFalse(self.leaving_asks(), late + ": nothing unsaved")
+                expect(self.page.locator("#b-draft-keep")).to_be_hidden()
+                # The next write goes on the revision this document holds now: stored, nobody asked.
+                self.page.locator("#findings").press("Control+End")
+                self.page.locator("#findings").press_sequentially(" SYN more")
+                more = {**shown, "findings": shown["findings"] + " SYN more"}
+                self.page.clock.run_for(21000)
+                self.wait_until(lambda: self.site.stored_for(h.UID) == more, late + ": the next autosave is stored")
+                self.wait_until(lambda: not self.leaving_asks(), late + ": the next autosave confirmed")
+                expect(self.page.locator("#b-draft-keep")).to_be_hidden()
+                self.assert_reopened(more, True, late + ": after the late answer of a discard's outcome")
 
     def test_log_out_pressed_while_a_discard_is_out_waits_for_it_and_preserves_nothing_discarded(self):
         """Claim 3 at Log out: the preparation captures the text only after the discard's answer, so the text the

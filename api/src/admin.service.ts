@@ -113,8 +113,11 @@ export class AdminService {
    */
   private async reactivate(id: string): Promise<void> {
     const isolation = await this.auth.isolation(id);
-    // 남은 일은 재활성화가 넘겨받아 끝낸다(진행 중인 재시도 주기는 다음 걸음 앞에서 멈춘다). 다른 쪽이 넘겨받아 끝내지
-    // 못했으면 활성화하지 않는다 — 그 쪽이 아직 비활성화·전체 로그아웃을 할 수 있다.
+    // 남은 일은 재활성화가 넘겨받아 끝낸다: 넘겨받은 뒤 앞선 처리가 이미 보낸 인증 서버 호출이 돌아올 때까지(그 호출의
+    // 한도까지) 기다리고, 그다음 남은 일을 끝낸다 — 그래서 아래 활성화 뒤에 옛 비활성화·전체 로그아웃이 닿지 않는다(앞선
+    // 처리는 다음 걸음 앞에서 멈춘다). 다른 쪽이 넘겨받아 끝내지 못했으면 활성화하지 않는다 — 그 쪽이 아직 비활성화·전체
+    // 로그아웃을 할 수 있다. 끝까지 끝난 사실(providerDone)에는 진행 중인 호출이 없다: 끝낸 쪽은 자기 호출이 모두 돌아온 뒤에
+    // 완료를 적고, 그 전에 앞선 쪽의 호출도 기다렸다.
     if (isolation && !isolation.providerDone && !await this.auth.finishIsolation(id))
       throw new Error('격리의 남은 일을 끝내지 못했습니다');
     await this.keycloak.setEnabled(id, true);

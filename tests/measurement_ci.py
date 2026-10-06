@@ -94,6 +94,18 @@ PROFILES = {
             ('live/session_end_live.py', 'SessionEndLive', 'ci-u5-session-end'),
         ),
     },
+    'u5-fixups': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-fixups-ci',
+        'project_prefix': 'kin-u5-fixups-ci-',
+        # Admission ceiling, not a measured hosted duration: the five cases took about 3.5 minutes in local whole-module
+        # runs. Setup/cleanup use the same 1500s deadline. The module's load_tests is the allowlist: exactly the five
+        # authored cases that pin the S7-U5 fix round (roam_01, roam_04b, job_03, favorite_view_02, display_04), on
+        # local subclasses that declare nothing - no class is passed, so that selection stays authoritative.
+        'suite_timeout': 900,
+        'suites': (
+            ('e2e/test_u5_fixups.py', None, 'ci-u5-fixups'),
+        ),
+    },
     'image-text': {
         'out': ROOT / 'tests/e2e/artifacts/image-text-ci',
         'project_prefix': 'kin-image-text-ci-',

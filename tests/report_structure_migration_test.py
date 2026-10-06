@@ -190,10 +190,11 @@ class ReportStructureMigration(unittest.TestCase):
         # S7-U5's 20261004120000_draft_revision_session_entry (draft boundary and entry proof columns) from 34 to 35.
         # S7-U5 session end's 20261005120000_idp_session_end (IdpSessionEnd, AuthSession.idpSid) from 35 to 36.
         # S7-U5 member isolation's 20261005130000_member_isolation (MemberIsolation) from 36 to 37.
+        # S7-U5's 20261006120000_member_isolation_call (MemberIsolation's call in flight, three columns) from 37 to 38.
         names = sorted(p.name for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
         self.assertIn(MIGRATION_DIR.name, names)
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 37)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 38)
 
     def test_the_synthetic_catalog_never_reaches_product_code(self) -> None:
         # P6/P7. The seam is one instance property a test overwrites on its own instance; anything

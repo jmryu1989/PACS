@@ -5899,6 +5899,9 @@
      * 주기나 그 검사를 다시 그릴 때 다시 읽는다). 읽었으면 화면을 서버의 지금 초안으로 바꾼다: 초안이 없으면 버려진 것이고,
      * 있으면 버리기가 닿지 않은 것(또는 그 뒤에 쓰인 초안)이다 — 어느 쪽인지 사실대로 알린다. 그 사이 사람이 그 검사의 글을
      * 고쳤으면(표시가 다시 섰다) 그 글이 사람의 글이다: 화면은 건드리지 않고 기록만 지운다.
+     * 읽기가 나가 있는 사이 이 문서가 그 검사의 더 새 초안 상태를 확인했으면(누른 뒤에 친 글의 저장) 그 답은 낡은 관측이다
+     * (`stale`): 화면에도 기준에도 쓰지 않는다 — 늦게 온 "초안 없음"이 그 뒤에 저장된 글을 지우지 않게. 그때 버리기의
+     * 결과는 더 물을 것이 없다: 그 검사의 초안은 이제 확인된 그 저장이다.
      */
     async function learnDiscardOutcome(uid) {
       const known = reportUnknownDiscards.get(uid);
@@ -5909,8 +5912,13 @@
       try { got = await draftClient.read(uid, { context: at }); }
       finally { known.reading = false; }
       work.commit(at, () => {
-        if (reportUnknownDiscards.get(uid) !== known || got.outcome !== "read" || got.read.uid !== uid) return;
+        if (reportUnknownDiscards.get(uid) !== known || !["read", "stale"].includes(got.outcome) || got.read.uid !== uid) return;
         reportUnknownDiscards.delete(uid);
+        if (got.outcome === "stale") {
+          console.warn("KIN report draft: a late draft read was older than the state this document has confirmed since; not applied",
+            uid, got.read.revision, got.revision);
+          return;
+        }
         if (reportConverge.has(uid)) return;
         const read = got.read;
         const draft = read.present

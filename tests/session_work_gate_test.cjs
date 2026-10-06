@@ -1225,6 +1225,44 @@ test('DRAFT-14 a discard whose answer was lost is confirmed by a read; a commit 
   }
 });
 
+// Final review part 1, blocker 2: a read whose answer this document has overtaken (it confirmed a newer state of the same
+// draft while the read was out) is stale - handed back as such, never taken as the base; replace() never moves the base
+// back to an older revision. A read newer than the base (another window's later write, a new epoch while this document
+// stood still) is an ordinary read.
+test('DRAFT-15 a read this document overtook is stale and moves nothing; replace never moves the base back; a newer read stays a read', async () => {
+  const { server, client, at, serve, next, net } = drafting();
+  await serve(client.write('A', TEXT('SYN one'), { owner: OWNER, context: at() }));
+  // The server answers a read at E1:1; the answer is on its way while this document stores more text (E1:2).
+  const reading = client.read('A', { context: at() });
+  const read = await next();
+  const answered = server.apply(read);
+  await serve(client.write('A', TEXT('SYN two'), { owner: OWNER, context: at() }));
+  read.answer(...answered);
+  const late = await reading;
+  assert.deepEqual([late.outcome, late.read.revision, late.revision, client.revision('A')], ['stale', 'E1:1', 'E1:2', 'E1:2']);
+  assert.equal(client.replace('A', 'E1:1', TEXT('SYN one')), false, 'the late state does not take the base back');
+  assert.equal(client.revision('A'), 'E1:2');
+  const calls = net.calls.length;
+  assert.equal((await serve(client.write('A', TEXT('SYN three'), { owner: OWNER, context: at() }))).outcome, 'saved');
+  assert.deepEqual(net.calls.slice(calls).map(call => [call.init.method, call.init.body && JSON.parse(call.init.body).expectedRevision]),
+    [['PUT', 'E1:2']], 'the next write stands on the stored revision');
+  // Opposite side: another window writes after this document's save - a read of that is newer, not stale.
+  server.other('SYN other window');
+  const newer = await serve(client.read('A', { context: at() }));
+  assert.deepEqual([newer.outcome, newer.read.revision], ['read', 'E1:4']);
+  assert.equal(client.replace('A', 'E1:4', TEXT('SYN other window')), true);
+  assert.equal(client.revision('A'), 'E1:4');
+  // A new epoch read while this document stood still is a read; read while its base moved, it cannot be ordered: stale.
+  server.epoch = 'E2'; server.rev = 0; server.row = null;
+  assert.equal((await serve(client.read('A', { context: at() }))).outcome, 'read');
+  const crossing = client.read('A', { context: at() });
+  const second = await next();
+  const now = server.apply(second);
+  assert.equal(client.observe('A', 'E1:5', null), true);
+  second.answer(...now);
+  assert.deepEqual([(await crossing).outcome, client.revision('A')], ['stale', 'E1:5']);
+});
+
 // ── auth.js, as shipped, in a browser-shaped context ──
 
 const AUTH_SOURCE = readFileSync(join(lite, 'auth.js'), 'utf8');

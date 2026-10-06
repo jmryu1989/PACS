@@ -3056,11 +3056,31 @@ function kinCreateDisplayScope() {
 // mounted into the same panel with its own id, so the Recent Layout and Hanging
 // Protocol sections keep their markup and their own tests.
 function kinCreateCellMerge() {
-  let ready, current, epoch = 0, ended = false, listening = false, channel;
+  let ready, current, epoch = 0, ended = false, listening = false, channel, restoreOneUp;
   function endSession() {
     if (ended) return; ended = true; epoch++; current?.stop(); current = null;
+    restoreOneUp?.(); restoreOneUp = null;
      window.removeEventListener('pagehide', endSession);
     channel?.close(); channel = null;
+  }
+  // One double click reaches both the native one-up (on the viewport element) and the cell
+  // merge (on document). The native toggle reads only numRows/numCols, so on a screen the
+  // merge holds - 1x2 with one cell covering it, or still settling - it switches to its own
+  // 1x1 and the merge can no longer put its grid back. While the merge holds the screen the
+  // gesture is the merge's alone; everywhere else (3x3, VR/SR/PDF cells, no merge module)
+  // the native toggle runs unchanged. Only this one command is replaced, so the click
+  // bindings and the right-click menu that share its customization are untouched.
+  function guardOneUp(commandsManager) {
+    restoreOneUp?.(); restoreOneUp = null;
+    const native = commandsManager?.getCommand?.('toggleOneUp', 'DEFAULT');
+    if (typeof native?.commandFn !== 'function') return;
+    const guarded = { ...native, commandFn: options => {
+      const merge = current?.state?.();
+      if (merge && (merge.busy || merge.merged)) return;
+      return native.commandFn(options);
+    } };
+    commandsManager.registerCommand('DEFAULT', 'toggleOneUp', guarded);
+    restoreOneUp = () => { if (commandsManager.getCommand('toggleOneUp', 'DEFAULT') === guarded) commandsManager.registerCommand('DEFAULT', 'toggleOneUp', native); };
   }
 
   function watchSession() {
@@ -3080,16 +3100,17 @@ function kinCreateCellMerge() {
     }).catch(error => { ready = null; throw error; });
     return ready;
   }
-  return { id: 'kin.cell-merge', onModeEnter({ servicesManager }) {
+  return { id: 'kin.cell-merge', onModeEnter({ servicesManager, commandsManager }) {
     if (ended) return; watchSession();
     const ticket = ++epoch; current?.stop(); current = null;
+    guardOneUp(commandsManager);
     prepare().then(module => {
       if (ticket !== epoch) return;
       const connected = module.create(servicesManager.services);
       if (!connected.mount()) { connected.stop(); throw new Error('칸 병합 패널을 연결하지 못했습니다.'); }
       current = connected;
     }).catch(error => { if (ticket === epoch) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = error.message; } });
-  }, onModeExit() { epoch++; current?.stop(); current = null; } };
+  }, onModeExit() { epoch++; current?.stop(); current = null; restoreOneUp?.(); restoreOneUp = null; } };
 }
 
 function kinCreateImagesOnly() {
