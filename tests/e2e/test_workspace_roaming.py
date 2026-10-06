@@ -84,11 +84,14 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
     def test_roam_02_owner_switch_new_login_and_conflict(self):
         x=self.device();a=self.sign_in(x);self.action(a,'Save to Account','저장했습니다');saved_a=self.remote(a)
         landing=hold_landing(a)
+        puts=[];a.on('request',lambda r:puts.append(r.url) if r.method in ('PUT','DELETE') and '/workspace-layout' in r.url else None)
         b=self.sign_in(x,'doctor2');self.assertIsNone(self.remote(b)['layout']);self.mode_is(b,'auto')
-        self.open_menu(a)
-        with a.expect_response(lambda r:r.url.endswith('/worklist/hpacs-lite/index.html') and r.status==204):
-            a.get_by_role('button',name='Save to Account',exact=True).click()
-        a.wait_for_function("KinWorkContext.state() !== 'active'");self.assertTrue(landing)
+        # The old document a learns of the replaced session from its own next bound request - whichever that is (a
+        # background read of its own may come first). If none has gone yet, one bound request is sent for it. Either way
+        # a ends and writes nothing to the new account's layout.
+        if a.evaluate("() => KinWorkContext.state()")=='active':
+            a.evaluate("() => { void KinSessionTransport.page().request('/api/me', {context: KinWorkContext.capture('document')}).catch(()=>null); }")
+        a.wait_for_function("() => KinWorkContext.state() !== 'active'");self.assertTrue(landing);self.assertEqual(puts,[])
         expect(a.get_by_role('button',name='Save to Account',exact=True,include_hidden=True)).to_be_disabled()
         self.open_toolbar_group(b,'#layout-toggle')
         b.locator('#layout-toggle').click();self.action(b,'Save to Account','저장했습니다');saved_b=self.remote(b)
@@ -207,11 +210,16 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         # A session can be replaced in another tab without this old document receiving logout.
         owner_key=self.owner(page);landing=hold_landing(page)
         other=self.sign_in(context,'doctor2');self.assertIsNone(self.remote(other)['layout'])
+        # The trigger is a real bound request of this document (a request without a work context is refused by the
+        # transport before it leaves).
         with page.expect_response(lambda r:r.url.endswith('/worklist/hpacs-lite/index.html') and r.status==204):
-            page.evaluate("() => { void KinSessionTransport.page().request('/api/me').catch(()=>null); }")
-        page.wait_for_function("KinWorkContext.state() !== 'active'");self.assertTrue(landing)
+            page.evaluate("() => { void KinSessionTransport.page().request('/api/me', {context: KinWorkContext.capture('document')}).catch(()=>null); }")
+        page.wait_for_function("() => KinWorkContext.state() !== 'active'");self.assertTrue(landing)
         release_after_end(pending[0],response=response)
-        expect(page.get_by_role('button',name='Load from Account',exact=True,include_hidden=True)).to_be_disabled()
+        # Every Account Layout control of the ended document is off, whatever its name (a timed-out read names Load Retry).
+        buttons=page.locator('#workspace-server-panel').get_by_role('button',include_hidden=True)
+        self.assertGreater(buttons.count(),0)
+        for i in range(buttons.count()):expect(buttons.nth(i)).to_be_disabled()
         self.assertEqual(page.evaluate('key=>JSON.parse(localStorage.getItem(key))',owner_key),before);self.mode_is(page,'auto');self.assertIsNone(self.remote(other)['layout'])
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(WorkspaceRoamingE2E(n) for n in loader.getTestCaseNames(WorkspaceRoamingE2E) if n.startswith('test_roam_'))

@@ -50,12 +50,14 @@ class FavoriteViewE2E(ViewerJobsE2E):
   p.locator('#favorite-view-save').click();expect(p.locator('#favorite-retry')).to_be_visible();expect(p.locator('#favorite-retry')).to_be_enabled()
   p.unroute('**/api/favorite-folders');p.locator('#favorite-retry').click();expect(p.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True)).to_be_visible()
   p.locator('#favorite-close').click();other=self.login();self.select(other,b);self.open_toolbar_group(other,'#favorite-open');other.locator('#favorite-open').click()
-  # Native resize preserves zoom per canvas pixel. Observe the actual saved-camera
-  # application so the later worklist layout change cannot hide a wrong restore.
+  # A native resize keeps the zoom relative to the fitted image (getZoom), not the absolute parallelScale. Observe the
+  # product's own application of the saved camera (the first event carrying it; a resize inside cornerstone may emit the
+  # old camera once more at the new height) with its zoom, so a later worklist layout change cannot hide a wrong restore.
   other.context.add_init_script('''window.favoriteCameraSamples=[];
     document.addEventListener('CORNERSTONE_CAMERA_MODIFIED',event=>{
       const canvas=event.target.querySelector?.('canvas'),detail=event.detail;
-      if(canvas&&detail?.camera)favoriteCameraSamples.push({id:detail.viewportId,height:canvas.height,camera:JSON.parse(JSON.stringify(detail.camera))});
+      let zoom=null;try{zoom=cornerstone.getRenderingEngine(detail.renderingEngineId)?.getViewport(detail.viewportId)?.getZoom?.()??null}catch(_){}
+      if(canvas&&detail?.camera)favoriteCameraSamples.push({id:detail.viewportId,height:canvas.height,zoom,camera:JSON.parse(JSON.stringify(detail.camera))});
     },true);''')
   other.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True).click();expect(other.locator('#reading-target')).to_contain_text(a.uid)
   frame=other.locator('#reading-frame').element_handle().content_frame();canvas_ready(frame,2);expect(frame.locator('#kin-viewer-jobs-status')).to_contain_text('복원했습니다',timeout=60000)
@@ -80,9 +82,11 @@ class FavoriteViewE2E(ViewerJobsE2E):
    for key in ['rotation','flipHorizontal','flipVertical']:self.assertAlmostEqual(cell['camera'][key],actual['camera'][key],places=5)
    applied=[sample for sample in samples if sample['id']==actual['id'] and all(sample['camera'].get(key)==value for key,value in cell['camera'].items())]
    self.assertTrue(applied,'Saved camera was never applied: '+json.dumps(dict(expected=cell['camera'],samples=samples)))
-   source_height=applied[-1]['height'];self.assertGreater(source_height,0);self.assertGreater(heights[actual['id']],0)
-   self.assertAlmostEqual(cell['camera']['parallelScale']*heights[actual['id']]/source_height,actual['camera']['parallelScale'],places=5,
-    msg=json.dumps(dict(savedHeight=source_height,restoredHeight=heights[actual['id']],savedScale=cell['camera']['parallelScale'],restoredScale=actual['camera']['parallelScale'])))
+   first=applied[0];self.assertIsNotNone(first['zoom']);self.assertGreater(heights[actual['id']],0)
+   zoom=frame.evaluate("id=>services.cornerstoneViewportService.getCornerstoneViewport(id).getZoom()",actual['id'])
+   self.assertAlmostEqual(first['zoom'],zoom,places=5,
+    msg=json.dumps(dict(appliedHeight=first['height'],restoredHeight=heights[actual['id']],appliedZoom=first['zoom'],restoredZoom=zoom,
+                        savedScale=cell['camera']['parallelScale'],restoredScale=actual['camera']['parallelScale'])))
   print('FAVORITE SAVED DISPLAY',json.dumps(dict(expected=expected,observed=observed)),flush=True)
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);other.screenshot(path=str(folder/'favorite-view.png'))
  def test_favorite_view_03_revoked_prior_does_not_change_report_target(self):

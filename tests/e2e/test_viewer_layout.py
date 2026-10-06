@@ -193,8 +193,13 @@ class ViewerLayoutE2E(ThumbnailSeriesE2E):
         page.evaluate('() => {Storage.prototype.setItem=function(){throw undefined;};}')
         self.action(page,'저장','배치 작업에 실패했습니다');self.assertEqual(self.cells(page),before);self.assertEqual(self.records(page),records)
         page.evaluate('() => {Storage.prototype.setItem=originalLayoutSet;}')
-        # Current display-set ambiguity is refused before any grid mutation.
-        page.evaluate('''() => {window.originalSets=services.displaySetService.getActiveDisplaySets;services.displaySetService.getActiveDisplaySets=function(){const a=originalSets.call(this);return [...a,a[0]];};}''')
+        # Current display-set ambiguity is refused before any grid mutation. The display set shown twice is the saved
+        # cell's own series (the order of the active display sets is the order their metadata arrived, not a contract).
+        saved=json.loads(raw)['cells'][0]
+        page.evaluate('''s => {window.originalSets=services.displaySetService.getActiveDisplaySets;
+          services.displaySetService.getActiveDisplaySets=function(){const a=originalSets.call(this);
+            const d=a.find(x=>x.StudyInstanceUID===s.study&&x.SeriesInstanceUID===s.series);
+            if(!d)throw Error('saved series is not displayed');return [...a,d];};}''',saved)
         self.action(page,'복원','시리즈를 찾을 수 없거나');self.assertEqual(self.cells(page),before)
         page.evaluate('() => {services.displaySetService.getActiveDisplaySets=originalSets;}')
         page.evaluate('''() => {window.originalViewportGetter=services.cornerstoneViewportService.getCornerstoneViewport;
