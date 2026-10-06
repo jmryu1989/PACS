@@ -528,6 +528,18 @@ class Vectors:
                 self.answers.append(False); self.press('Close')
                 self.assertEqual(self.dialogs[-1], CLOSE_U)
 
+    def test_T12_an_unsent_resend_keeps_the_earlier_unknown_and_both_facts(self):
+        self.lost_first_write('abort')
+        self.prevent_resend()
+        self.save()
+        expect(self.status).to_have_text(UNSENT + OPEN_RESULT)
+        self.assertEqual(len(self.api.posts), 1, 'the resend never left, but the first send may have committed')
+        self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': True})
+        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('SYN R1')
+        self.answers.append(False); self.press('Close')
+        self.assertEqual(self.dialogs, [CLOSE_U])
+        expect(self.dialog).to_be_visible()
+
     def test_T14_an_older_read_a_missing_history_row_or_a_failed_read_leave_the_attempt_unknown(self):
         self.lost_first_write('abort-commit')
         self.api.foreign('SYN v3 theirs')
@@ -594,6 +606,18 @@ class Vectors:
         self.assertTrue(self.state()['dirty'], 'a reason typed for this edit that differs from v3''s is still input')
         self.reason.fill('')
         self.assertFalse(self.state()['dirty'], 'input equal to the last confirmed version is clean')
+
+    def test_T16_matching_id_without_ownership_is_not_my_save(self):
+        self.lost_first_write('abort')
+        # Defensive read contract: a matching id alone never proves this caller's save.
+        self.api.foreign('SYN v2 mine', 'SYN R1', sub='other-tech', attempt=self.api.posts[0]['attemptId'])
+        self.reload()
+        expect(self.status).to_have_text(not_saved(2))
+        self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('SYN R1')
+        self.note.fill('SYN v3 mine'); self.save()
+        expect(self.status).to_have_text(saved(3))
+        self.assertEqual(self.posts_of('baseVersion'), [1, 2])
 
     def test_T18_my_earlier_save_found_and_a_changed_box_send_one_followup(self):
         self.lost_first_write('abort-commit')
@@ -685,6 +709,32 @@ class Vectors:
         expect(self.dialog).not_to_be_visible()
         self.assertEqual(len(self.api.notes), 2, 'closing does not cancel the write')
 
+    def test_T21_accepted_older_read_keeps_the_newer_last_confirmed_revision(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN v2 mine', 'SYN R1'); self.save()
+        expect(self.status).to_have_text(saved(2))
+        self.edit('SYN unsaved', 'SYN R2')
+        self.api.get_modes = ['old']
+        self.reload()
+        self.assertEqual(self.dialogs, [RELOAD_Q])
+        expect(self.status).to_have_text(opened(2))
+        expect(self.page.locator('#tech-note-meta')).to_contain_text('v2 ·')
+        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('')
+        self.assertFalse(self.state()['dirty'])
+        self.save(); expect(self.status).to_have_text(unchanged(2))
+        self.assertEqual(len(self.api.posts), 1)
+
+    def test_T22_conflict_alone_closes_without_a_question(self):
+        self.opened_with('SYN v1')
+        self.api.foreign('SYN v2 theirs')
+        self.edit('SYN mine', 'SYN R1'); self.save()
+        expect(self.status).to_have_text(other_found(2))
+        self.note.fill('SYN v2 theirs'); self.reason.fill('')
+        self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+        self.press('Close')
+        expect(self.dialog).not_to_be_visible()
+        self.assertEqual(self.dialogs, [])
+
     def test_T23_history_reads_only_settles_by_id_and_keeps_the_input(self):
         self.lost_first_write('abort-commit')
         self.edit('SYN typed after', 'SYN R9')
@@ -699,6 +749,49 @@ class Vectors:
         self.lost_first_write('abort')
         self.press('History'); self.idle()
         expect(self.status).to_have_text(HISTORY + ' 앞선 저장 결과는 아직 확인되지 않았습니다.')
+
+    def test_T23_history_settles_the_latest_save_then_save_is_noop_and_close_silent(self):
+        self.lost_first_write('abort-commit')
+        self.press('History'); self.idle()
+        expect(self.status).to_have_text(HISTORY)
+        expect(self.page.locator('#tech-note-meta')).to_contain_text('v2 ·')
+        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('SYN R1')
+        self.assertEqual(self.state(), {'dirty': False, 'busy': False, 'unknown': False})
+        self.save(); expect(self.status).to_have_text(unchanged(2))
+        self.assertEqual(len(self.api.posts), 1)
+        self.press('Close'); expect(self.dialog).not_to_be_visible()
+        self.assertEqual(self.dialogs, [])
+
+    def test_T23_history_settles_my_v2_but_keeps_others_v3_as_last_confirmed(self):
+        self.lost_first_write('abort-commit')
+        self.api.foreign('SYN v3 theirs')
+        self.press('History'); self.idle()
+        expect(self.page.locator('#tech-note-meta')).to_contain_text('v3 ·')
+        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('SYN R1')
+        self.assertEqual(self.state(), {'dirty': True, 'busy': False, 'unknown': False})
+        self.answers.append(False); self.press('Close')
+        self.assertEqual(self.dialogs, [CLOSE_Q])
+        expect(self.dialog).to_be_visible()
+        # Read the facts without replacing the input, then observe both the saved attempt and the conflict.
+        self.api.post_modes = [409]; self.reason.fill('SYN R2'); self.save()
+        expect(self.status).to_have_text(other_found(3))
+        self.reason.fill(''); self.save()
+        expect(self.status).to_have_text('앞선 입력은 v2로 저장되었으며 이번 수정의 사유를 입력하세요.')
+        self.note.fill('SYN v3 theirs'); self.save()
+        expect(self.status).to_have_text(unchanged(3))
+        self.assertFalse(self.state()['dirty'])
+        self.assertEqual(self.posts_of('baseVersion'), [1, 3])
+
+    def test_T23_older_history_cannot_move_last_confirmed_back(self):
+        self.opened_with('SYN v1')
+        self.edit('SYN v2 mine', 'SYN R1'); self.save()
+        self.api.history_modes = ['missing']  # first page is stale/incomplete: only v1 is returned
+        self.press('History'); self.idle()
+        expect(self.page.locator('#tech-note-meta')).to_contain_text('v2 ·')
+        expect(self.note).to_have_value('SYN v2 mine'); expect(self.reason).to_have_value('SYN R1')
+        self.assertFalse(self.state()['dirty'])
+        self.save(); expect(self.status).to_have_text(unchanged(2))
+        self.assertEqual(len(self.api.posts), 1)
 
     def test_T24_logout_preparation_stops_writes_keeps_input_and_cancel_only_reads(self):
         self.opened_with('SYN v1')
@@ -837,6 +930,15 @@ class ModuleNoteTest(Vectors, Harness, unittest.TestCase):
     def open(self):
         self.page.evaluate('note.open({uid:"1.2.3"})')
 
+    def prevent_resend(self):
+        self.page.evaluate('''() => { const fetchBefore = window.fetch; window.fetch = async (url, init) => {
+            const response = await fetchBefore(url, init);
+            if (String(url).endsWith('/tech-note') && init.method === 'GET') {
+                window.fetch = fetchBefore; window.moduleUnsent = 1;
+            }
+            return response;
+        }; }''')
+
     def test_module_a_request_that_never_left_is_not_saved(self):
         self.opened_with('SYN v1')
         self.edit('SYN v2', 'SYN R1')
@@ -870,6 +972,9 @@ class WrapperNoteTest(Vectors, Harness, unittest.TestCase):
 
     def open(self):
         self.page.get_by_role('button', name='Tech Note', exact=True).click()
+
+    def prevent_resend(self):
+        self.me_answers = [None, None, 409]  # the result GET passes; the resend's leading /me refuses
 
     # The wrapper's own pairs: the answer of the POST is the write's answer, never the account check's.
     def test_wrapper_post_2xx_then_a_failing_account_check_keeps_the_receipt(self):

@@ -313,6 +313,8 @@ window.KinTechNote = function (app) {
         body.textContent = (item.text || '(메모 비움)') + '\n수정 사유: ' + (item.reason || '(최초 작성)');
         entry.append(title, body); $('history-items').append(entry);
       }
+      // Only the first page identifies the latest confirmed revision; older pages supply attempt evidence only.
+      if (!more) advance(result.items[0]);
       cursor = result.nextBefore; $('more').hidden = !cursor;
       const open = unresolved().length ? ' 앞선 저장 결과는 아직 확인되지 않았습니다.' : '';
       status((result.items.length ? '저장 이력을 표시하며 현재 입력은 유지됩니다.' : '저장 이력이 없으며 현재 입력은 유지됩니다.') + open);});
