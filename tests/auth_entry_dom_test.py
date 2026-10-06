@@ -696,17 +696,46 @@ class AuthEntryDOMTest(unittest.TestCase):
         self.assertEqual(self.page.evaluate("Object.keys(localStorage).filter(key => key.startsWith('kin-session-end'))"), [])
         self.assertEqual(self.starts(), [])
 
+    # S7-U5 fix round 7 (Astra fix-6 decision a): an end the server could not confirm may stay unconfirmed for good (a lost
+    # answer is settled by nothing but itself), so its guidance says the end is not confirmed and sends the person to the
+    # administrator - pressing Login again is not promised as the remedy. The button stays usable; nothing is sent by itself.
+    ADMIN_GUIDANCE = "관리자에게 문의"
+
+    def assert_end_unconfirmed_guidance(self):
+        expect(self.page.locator("#msg")).to_contain_text(self.ADMIN_GUIDANCE)
+        self.assertIn("종료를 확인하지 못했습니다", self.page.locator("#msg").inner_text())
+        expect(self.page.locator("#signin")).to_be_enabled()
+
     def test_a_start_the_provider_end_did_not_confirm_says_so_and_the_same_button_works(self):
-        # 503 AUTH_IDP_END_UNCONFIRMED: the session is ended and marked server-side; the landing says the sentence and
-        # stays, and the same press goes through once the server answers.
+        # 503 AUTH_IDP_END_UNCONFIRMED: the session is ended and marked server-side; the landing gives the unconfirmed-end
+        # guidance and stays without sending anything again by itself, and the same press goes through once the server answers.
         self.start_answers = [(503, {"code": "AUTH_IDP_END_UNCONFIRMED", "message": "SYN"})]
         self.landing(SESSION, query="")
         self.page.locator("#signin").click()
-        expect(self.page.locator("#msg")).to_have_text("이전 로그인 종료를 확인하지 못했습니다. 잠시 뒤 Login을 다시 누르세요.")
-        self.assertEqual(urlparse(self.page.url).path, BASE + "index.html")
+        self.assert_end_unconfirmed_guidance()
+        self.page.wait_for_timeout(1500)
+        self.assertEqual((urlparse(self.page.url).path, len(self.starts())), (BASE + "index.html", 1), "no start again by itself")
         self.page.locator("#signin").click()
         self.page.wait_for_url("**/auth/synthetic-login")
         self.assertEqual(len(self.starts()), 2)
+
+    def test_an_arrival_refused_for_an_unconfirmed_end_names_the_administrator_and_other_refusals_do_not(self):
+        # The callback refused the login because the previous SSO's end is unconfirmed (end_unconfirmed): the same guidance
+        # as the refused start, no login started by itself. The opposite side: refusals that a later press does resolve
+        # (the provider briefly unavailable, a login not finished) keep their own guidance and do not send the person to
+        # the administrator.
+        for notice, administrator in (("end_unconfirmed", True), ("sso_unidentified", False), ("login_failed", False)):
+            with self.subTest(notice=notice):
+                self.renew()
+                self.me_absent = True
+                self.landing(query="?auth_error=" + notice)
+                if administrator:
+                    self.assert_end_unconfirmed_guidance()
+                else:
+                    expect(self.page.locator("#msg")).not_to_have_text("")
+                    self.assertNotIn(self.ADMIN_GUIDANCE, self.page.locator("#msg").inner_text())
+                self.page.wait_for_timeout(1000)
+                self.assertEqual((urlparse(self.page.url).path, self.starts()), (BASE + "index.html", []), "no login by itself")
 
     def test_a_start_refused_for_a_changed_session_ends_nothing_and_asks_again(self):
         # The browser's session changed between the check and the start (another tab logged in): the server refuses.

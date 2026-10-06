@@ -40,6 +40,8 @@ leaves out, and records every PATCH body:
   10  S7-U5 D600: an Activate the server could not confirm (409 ACTIVATION_UNCONFIRMED, retryAfterSeconds 5)
       shows the server's sentence and one "Retry Activate" that can be pressed only after the interval; nothing
       is resent by itself; a confirmed retry reloads the list and removes it; another conflict offers none.
+      Fix round 7: with the retry, a note that the interval is not a resolution time and that an unconfirmed
+      change needs the administrator's follow-up; another conflict shows no such note.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does
 not answer is aborted and fails the case. The service half (approve [clinician] -> mixed -> revoke on
@@ -679,6 +681,11 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         expect(self.page.locator("#message")).to_have_text(ACTIVATION_UNCONFIRMED)
         expect(retry).to_be_visible()
         self.assertEqual(("Retry Activate", True), (retry.text_content(), retry.is_disabled()), "the retry is offered, not yet pressable")
+        # Fix round 7 (Astra fix-6 decision a): with the retry the console says that the server's interval is when a retry
+        # may be pressed, not when it resolves, and that a change that stays unconfirmed needs the administrator's follow-up.
+        note = self.page.locator("#activation-retry")
+        expect(note).to_contain_text("5초")
+        expect(note).to_contain_text("관리자")
         started = time.monotonic()
         retry.click(force=True)
         self.page.wait_for_timeout(3500)
@@ -708,6 +715,7 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         self.wait_until(lambda: len(self.patches) == 4, "the Suspend PATCH")
         expect(self.page.locator("#message")).to_contain_text("변경을 완료하지 못했습니다")
         expect(self.page.locator("#activation-retry")).to_be_hidden()
+        self.assertNotIn("관리자", self.page.locator("#activation-retry").inner_text(), "no unconfirmed-change guidance for another conflict")
 
 
 ACTIVATION_UNCONFIRMED = "활성화를 확인하지 못했습니다. 이용 제한을 유지합니다. 5초 뒤 다시 시도하세요."

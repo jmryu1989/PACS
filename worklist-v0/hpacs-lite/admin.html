@@ -172,7 +172,7 @@
     </div>
 
     <p class="message" id="message" role="alert"></p>
-    <p class="retry-line" id="activation-retry" hidden><button type="button" id="retry-activate" title="서버가 알려 준 간격이 지나면 다시 시도할 수 있습니다." disabled>Retry Activate</button></p>
+    <p class="retry-line" id="activation-retry" hidden><button type="button" id="retry-activate" title="서버가 알려 준 간격이 지나면 다시 시도할 수 있습니다." disabled>Retry Activate</button> <span id="activation-retry-note"></span></p>
     <div class="table-wrap">
       <table>
         <thead>
@@ -507,12 +507,15 @@
       /**
        * Activate가 기한 안에 확정되지 않았다는 답(409 ACTIVATION_UNCONFIRMED): 이용 제한은 그대로다. 서버의 문장을 보이고, 다시
        * 시도는 서버가 말한 간격(retryAfterSeconds)이 지난 뒤에만 누를 수 있다 — 저절로 다시 보내지 않는다. 다른 변경을 시작하거나
-       * 세션이 끝나면 거둔다.
+       * 세션이 끝나면 거둔다. 그 간격은 다시 시도할 수 있는 때일 뿐 해소 시한이 아니다: 답을 잃은 변경은 시간이 지나도, 다시
+       * 시도해도 확인되지 않을 수 있다(S7-U5 D600) — 관리자에게 그렇게 말하고 후속 확인을 넘긴다.
        */
       let activationRetry = null;
       function offerActivationRetry(user, seconds) {
         clearActivationRetry();
         const wait = Number.isFinite(seconds) && seconds > 0 ? seconds : 5;
+        $("#activation-retry-note").textContent = `${wait}초는 다시 시도할 수 있는 간격일 뿐, 그 뒤 저절로 확정되거나 풀리지 않습니다. `
+          + "다시 시도해도 계속 확인되지 않으면 인증 서버에 보낸 변경의 결과를 알 수 없는 상태이므로 관리자의 후속 확인이 필요합니다(이용 제한은 유지됩니다).";
         $("#retry-activate").disabled = true;
         $("#activation-retry").hidden = false;
         activationRetry = { user, timer: setTimeout(() => { $("#retry-activate").disabled = false; }, wait * 1000) };
@@ -523,6 +526,7 @@
         activationRetry = null;
         $("#retry-activate").disabled = true;
         $("#activation-retry").hidden = true;
+        $("#activation-retry-note").textContent = "";
       }
 
       $("#retry-activate").addEventListener("click", () => {
