@@ -33,6 +33,67 @@ def normalized(value):
     return ' '.join(value.split())
 
 
+def public_text(value):
+    return normalized(value.replace('확정 전: ', ''))
+
+
+def statement_units(node):
+    """Read all body prose, including bare text and new containers, without selectors.
+
+    Inline markup and wrapper choices do not change a statement. Headings and
+    captions have their own wording check; inventory cells are checked against
+    the manifest rather than copied into the draft fixture.
+    """
+    boundaries = {'p', 'li', 'td', 'th', 'div', 'section', 'article', 'aside',
+                  'blockquote', 'ul', 'ol', 'dl', 'dt', 'dd', 'table', 'tr',
+                  'thead', 'tbody', 'tfoot', 'main', 'figure', 'figcaption'}
+    pending = []
+
+    def flush():
+        text = public_text(''.join(pending))
+        pending.clear()
+        return [text] if text else []
+
+    def walk(element):
+        if isinstance(element, str):
+            pending.append(element)
+            return
+        if element.tag in {'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'caption'}:
+            yield from flush()
+            return
+        if element.tag == 'br':
+            pending.append(' ')
+            return
+        if element.tag in boundaries:
+            yield from flush()
+        for child in element.children:
+            yield from walk(child)
+        if element.tag in boundaries:
+            yield from flush()
+
+    yield from walk(node)
+    yield from flush()
+
+
+def table_records(doc, columns):
+    """Associate values by visible column names, allowing column/row reordering."""
+    matches = []
+    for table in doc.root.all('table'):
+        headers = [public_text(cell.text()) for cell in table.all('th')]
+        if all(column in headers for column in columns):
+            records = []
+            for row in table.all('tr'):
+                cells = [public_text(cell.text()) for cell in row.all('td')]
+                if cells:
+                    if len(cells) != len(headers):
+                        raise AssertionError('표의 열 수가 맞지 않습니다')
+                    records.append(tuple(cells[headers.index(column)] for column in columns))
+            matches.append(Counter(records))
+    if len(matches) != 1:
+        raise AssertionError('표를 하나로 식별할 수 없습니다: ' + repr(columns))
+    return matches[0]
+
+
 class Element:
     def __init__(self, tag, attrs=(), parent=None):
         self.tag, self.attrs, self.parent = tag, dict(attrs), parent
@@ -140,7 +201,7 @@ def verification_citations(path, minimum_rows=10):
 
 
 def verified_citations():
-    return verification_citations(VERIFY_TABLES[0]) | verification_citations(VERIFY_TABLES[1], 8)
+    return verification_citations(VERIFY_TABLES[0]) | verification_citations(VERIFY_TABLES[1], 9)
 
 
 def dependency_rows(root):
@@ -189,13 +250,39 @@ class LegalPagesTest(unittest.TestCase):
     def test_all_draft_headings_and_sentences_are_preserved(self):
         for name, requirements in CONTRACT['pages'].items():
             doc = self.docs[name]
-            headings = [normalized(node.text()) for node in doc.root.all('h2', 'h3', 'h4')]
-            self.assertEqual(headings[:len(requirements['headings'])], requirements['headings'], name)
-            # Text nodes are joined per block, so CSS/layout changes cannot weaken the contract.
-            blocks = [normalized(node.text().replace('확정 전: ', '')) for node in doc.root.all('p', 'li', 'td', 'th')]
-            for expected in requirements['text']:
-                with self.subTest(page=name, text=expected[:50]):
-                    self.assertIn(normalized(expected), blocks)
+            headings = [normalized(node.text()) for node in doc.root.all('h2', 'h3', 'h4', 'h5', 'h6')]
+            self.assertEqual(Counter(headings), Counter(requirements['headings']), name)
+            main = next(doc.root.all('main'))
+            actual = Counter(statement_units(main))
+            expected = Counter(normalized(text) for text in (
+                requirements['text'] + requirements.get('presentation_text', [])
+                + CONTRACT['common_presentation_text']))
+            if name == 'open-source-notices.html':
+                expected.update(requirements['inventory_headers'])
+                for row, count in dependency_rows(ROOT).items():
+                    for cell in row:
+                        expected[cell] += count
+            # Equality detects additions, alterations and duplicate statements,
+            # not just whether an approved sentence occurs somewhere on the page.
+            with self.subTest(page=name):
+                self.assertEqual(actual, expected, name)
+            allowed_captions = set(requirements['headings'])
+            if name == 'open-source-notices.html':
+                allowed_captions.add(f'API 잠금 파일의 구성요소 {sum(dependency_rows(ROOT).values())}개')
+            for caption in main.all('caption'):
+                self.assertIn(normalized(caption.text()), allowed_captions, name)
+
+    def test_retention_clause_item_and_period_stay_in_the_same_row(self):
+        expected = CONTRACT['pages']['privacy.html']['retention_rows']
+        self.assertEqual(
+            table_records(self.docs['privacy.html'], ['보존 근거 조문', '보존 항목', '보존기간']),
+            Counter(tuple(row) for row in expected))
+
+    def test_conditional_duties_keep_their_own_conditions(self):
+        expected = CONTRACT['pages']['operator-notice.html']['condition_rows']
+        self.assertEqual(
+            table_records(self.docs['operator-notice.html'], ['항목', '적용 판정과 결정 사실']),
+            Counter(tuple(row) for row in expected))
 
     def test_every_business_placeholder_has_its_own_visible_marker(self):
         counts = {}
@@ -277,11 +364,15 @@ class LegalPagesTest(unittest.TestCase):
         exported = verification_citations(VERIFY_TABLES[0])
         self.assertIn(('G-안전', '8'), exported)
         self.assertIn(('CO령', '6'), exported)
-        addendum = verification_citations(VERIFY_TABLES[1], 8)
+        addendum = verification_citations(VERIFY_TABLES[1], 9)
         self.assertEqual(addendum, {
-            ('MA규', '15'), ('PI법', '35'), ('PI법', '36'), ('PI법', '37'),
+            ('MA규', '15'), ('PI법', '26'), ('PI법', '35'), ('PI법', '36'), ('PI법', '37'),
             ('PI령', '16'), ('PI령', '41'), ('PI령', '43'), ('PI령', '44'),
         })
+        rows = [tuple(cell.strip() for cell in line.strip('|').split('|'))
+                for line in VERIFY_TABLES[1].read_text(encoding='utf-8').splitlines()
+                if line.startswith('|')]
+        self.assertIn(('PR23', 'PI법 제26조⑤'), rows)
 
 
 if __name__ == '__main__':

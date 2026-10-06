@@ -41,6 +41,7 @@ footer { margin: 24px 0; color: var(--kin-muted); font-size: .9rem; }
 @media print {
   :root { color-scheme: light; }
   body, main { color: #111; background: white; box-shadow: none; }
+  caption, .brand, footer { color: #444; }
   a { color: #154279; }
   .pending { color: #754500; }
   th, .draft-note { background: #eee; }
