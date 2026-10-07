@@ -40,11 +40,11 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = sorted((ROOT / "api" / "src").glob("critical-result*.ts"))
+SOURCES = sorted([*(ROOT / "api" / "src").glob("critical-result*.ts"), ROOT / "api/src/member-rights.ts"])
 MIGRATIONS = sorted(p for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())
 DEV_IMAGE = os.environ.get("KIN_TEST_API_DEV_IMAGE")
 DATABASE = "kin_critical_result_source"
-IMPORTS = {"@nestjs/common", "node:crypto", "./prisma.service", "./study-access.service", "./keycloak.service",
+IMPORTS = {"@nestjs/common", "node:crypto", "crypto", "./member-rights", "./prisma.service", "./study-access.service", "./keycloak.service",
            "./orthanc.service", "./clinician-policy", "./critical-result-policy", "./critical-result.service"}
 TYPE_ONLY_IMPORTS = {"./pacs.service"}
 REPORT_COLUMNS = {"uid", "version"}
@@ -322,6 +322,9 @@ FORBIDDEN = {
         r"imports './clinician-question\.service' \(a value\)"),
 }
 
+
+# D623: member eligibility is a DB module; it is also scanned above, never an unchecked report escape.
+EQUIVALENT["member authority import"] = probe("return rightsUser(null);", "import { rightsUser } from './member-rights';\n")
 
 class CriticalResultSourceTest(unittest.TestCase):
     maxDiff = None

@@ -46,6 +46,17 @@ class Pure(unittest.TestCase):
         catalog['constraints']=[dict(name='synthetic') for _ in range(257)]
         with self.assertRaises(ValueError):transfer.catalog_contract(catalog)
 
+    def test_member_rights_restore_preserves_boundary_and_authority(self):
+        body, _, _, _ = fixture(); expected = body['product']
+        for table, field, value in [('MemberRights', 'approved', False), ('MemberRights', 'suspended', True),
+                ('MemberRights', 'institution', 'SYNTHETIC-tele'), ('MemberRights', 'roles', []),
+                ('MemberRights', 'version', 1), ('MemberRights', 'newAuthAfter', None),
+                ('MemberRightsImport', 'id', 'wrong-import')]:
+            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog', 'rows', 'sequences')}
+            actual['rows'][table][0][field] = value
+            with self.subTest(table=table, field=field), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned', 'kin', expected)
+
     def test_current_git_migrations_are_covered(self):
         self.assertEqual(len(transfer.migration_sources()),len(transfer.MIGRATIONS))
 
@@ -253,8 +264,8 @@ class Pure(unittest.TestCase):
         # S7-U5 then added the provider call in flight to MemberIsolation (three columns): 38 files, still 48 tables and the
         # same rows. S7-U5 D600 replaced it by the provider change records (ProviderChange, the three columns dropped): 39 files,
         # 49 tables, and two records (an unknown disable of the owed member, a settled end of a provider session).
-        self.assertEqual(len(transfer.MIGRATIONS), 39)
-        self.assertEqual(len(transfer.TABLES), 49)
+        self.assertEqual(len(transfer.MIGRATIONS), 40)
+        self.assertEqual(len(transfer.TABLES), 51)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
         self.assertEqual([(r['oid'], r['accession'], r['studyUid']) for r in rows['Order']],
@@ -268,6 +279,7 @@ class Pure(unittest.TestCase):
                          + 1    # S7-U5: the emptied draft row (tombstone) beside the two present drafts
                          + 2    # S7-U5 session end: the pending and the confirmed end mark
                          + 2    # S7-U5 member isolation: the owed and the done isolation fact
+                         + 2    # S7-U5 member rights/import
                          + 2)   # S7-U5 D600: the unknown and the settled provider change record
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),
                          [('SYNTHETIC-member-isolation-done', False, 0), ('SYNTHETIC-member-isolation-owed', True, 2)])

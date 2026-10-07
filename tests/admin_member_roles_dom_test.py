@@ -37,11 +37,7 @@ leaves out, and records every PATCH body:
   09  control: the c59e039 submit (all four fields on every Save) is served through the same route and
       must PATCH on an unchanged Save and overwrite the newer roles, so cases 01 and 08 cannot pass on a
       harness that misses the request or a store that ignores it.
-  10  S7-U5 D600: an Activate the server could not confirm (409 ACTIVATION_UNCONFIRMED, retryAfterSeconds 5)
-      shows the server's sentence and one "Retry Activate" that can be pressed only after the interval; nothing
-      is resent by itself; a confirmed retry reloads the list and removes it; another conflict offers none.
-      Fix round 7: with the retry, a note that the interval is not a resolution time and that an unconfirmed
-      change needs the administrator's follow-up; another conflict shows no such note.
+  10  S7-U5 D623: uncertain roster work is Korean text; a DB version conflict adds no retry button.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does
 not answer is aborted and fails the case. The service half (approve [clinician] -> mixed -> revoke on
@@ -668,57 +664,20 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         self.assertEqual(["clinician", "radiologist"], self.user("syn-mixed")["roles"],
                          "full-body: the technician another admin added is overwritten")
 
-    def test_10_an_unconfirmed_activate_shows_the_sentence_and_a_retry_after_the_servers_interval_never_by_itself(self):
-        # S7-U5 D600 (REQ-S7-U5-SESSION-END, the isolation's re-activation): AdminService.patchUser answers an Activate it
-        # could not confirm within 15 s with 409 {code: ACTIVATION_UNCONFIRMED, message, retryAfterSeconds: 5}; the member
-        # stays suspended. The console shows the server's sentence and one retry that can be pressed only after that
-        # interval; nothing is sent again by itself. Another conflict (USER_ISOLATED) offers no such retry.
-        self.patch_error = (409, {"code": "ACTIVATION_UNCONFIRMED", "message": ACTIVATION_UNCONFIRMED, "retryAfterSeconds": 5})
+    def test_10_roster_unknown_is_text_and_activation_conflict_never_adds_a_retry_button(self):
+        # REQ-S7-U5-D623 -> RISK-ROSTER-UNCERTAIN -> no new recovery control in core.
+        self.user("syn-suspended")["rosterUnconfirmed"] = True
+        self.user("syn-suspended")["version"] = 7
         self.load()
-        retry = self.page.locator("#retry-activate")
+        expect(self.row("syn-suspended")).to_contain_text("명부 반영 미확인")
+        expect(self.page.get_by_role("button", name="Retry Activate", exact=True)).to_have_count(0)
+        self.patch_error = (409, {"code": "MEMBER_VERSION_CONFLICT", "message": "회원 상태가 바뀌었습니다. 새로고침하세요"})
         self.row("syn-suspended").get_by_role("button", name="Activate", exact=True).click()
         self.wait_until(lambda: len(self.patches) == 1, "the Activate PATCH")
-        expect(self.page.locator("#message")).to_have_text(ACTIVATION_UNCONFIRMED)
-        expect(retry).to_be_visible()
-        self.assertEqual(("Retry Activate", True), (retry.text_content(), retry.is_disabled()), "the retry is offered, not yet pressable")
-        # Fix round 7 (Astra fix-6 decision a): with the retry the console says that the server's interval is when a retry
-        # may be pressed, not when it resolves, and that a change that stays unconfirmed needs the administrator's follow-up.
-        note = self.page.locator("#activation-retry")
-        expect(note).to_contain_text("5초")
-        expect(note).to_contain_text("관리자")
-        started = time.monotonic()
-        retry.click(force=True)
-        self.page.wait_for_timeout(3500)
-        self.assertEqual((1, True), (len(self.patches), retry.is_disabled()), "before the interval: pressing does nothing")
-        expect(retry).to_be_enabled(timeout=4000)
-        self.assertGreaterEqual(time.monotonic() - started, 4.0, "pressable only after the server's interval")
-        self.page.wait_for_timeout(1500)
-        self.assertEqual(1, len(self.patches), "nothing is sent again by itself")
-        # One press is one Activate; the answer is again unconfirmed, so the retry is offered again from the start.
-        retry.click()
-        self.wait_until(lambda: len(self.patches) == 2, "the retried Activate")
-        self.assertEqual([("SYN-U-SUSPENDED", {"enabled": True})] * 2, self.patches)
-        expect(retry).to_be_disabled()
-        expect(self.page.locator("#message")).to_have_text(ACTIVATION_UNCONFIRMED)
-        # Confirmed at last: the list reloads with the member active, and the retry is gone.
-        expect(retry).to_be_enabled(timeout=7000)
-        self.patch_error = None
-        reads = self.list_reads
-        retry.click()
-        self.wait_until(lambda: len(self.patches) == 3 and self.list_reads > reads, "the confirmed Activate and the list reload")
-        expect(self.page.locator("#activation-retry")).to_be_hidden()
-        self.assertFalse(self.message_shown())
-        self.assertIn("Suspend", self.actions("syn-suspended"))
-        # The opposite side: a different conflict shows its message and offers no retry.
-        self.patch_error = (409, {"code": "USER_ISOLATED", "message": "사용자를 비활성 격리했지만 변경을 완료하지 못했습니다. 현재 상태를 확인해 재시도하세요."})
-        self.row("syn-suspended").get_by_role("button", name="Suspend", exact=True).click()
-        self.wait_until(lambda: len(self.patches) == 4, "the Suspend PATCH")
-        expect(self.page.locator("#message")).to_contain_text("변경을 완료하지 못했습니다")
-        expect(self.page.locator("#activation-retry")).to_be_hidden()
-        self.assertNotIn("관리자", self.page.locator("#activation-retry").inner_text(), "no unconfirmed-change guidance for another conflict")
+        expect(self.page.locator("#message")).to_have_text("회원 상태가 바뀌었습니다. 새로고침하세요")
+        expect(self.page.get_by_role("button", name="Retry Activate", exact=True)).to_have_count(0)
+        self.assertEqual([("SYN-U-SUSPENDED", {"enabled": True, "version": 7})], self.patches)
 
-
-ACTIVATION_UNCONFIRMED = "활성화를 확인하지 못했습니다. 이용 제한을 유지합니다. 5초 뒤 다시 시도하세요."
 
 
 if __name__ == "__main__":

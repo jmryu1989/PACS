@@ -92,6 +92,7 @@ export class AuthGuard implements CanActivate {
     const header = req.headers.authorization ?? '';
     let raw = header.startsWith('Bearer ') ? header.slice(7) : '';
     let method: 'bearer' | 'session' | null = raw ? 'bearer' : null;
+    let admittedSession: any;
     if (!raw) {
       const sid = this.auth.sessionId(req);
       if (sid) {
@@ -115,6 +116,7 @@ export class AuthGuard implements CanActivate {
           return true;
         }
         const session = await this.auth.authenticateSession(sid, res);
+        admittedSession = session;
         raw = session.accessToken;
         method = 'session';
       }
@@ -180,9 +182,13 @@ export class AuthGuard implements CanActivate {
      * access token은 만료까지 서명이 유효하다 — 제품이 끝내기로 한 provider 세션의 토큰은 여기서 끝난 세션으로 답한다.
      * gateway·서비스 계정의 토큰(위에서 갈렸거나 `sid`가 없다)은 대상이 아니다.
      */
-    if (method === 'bearer') await this.auth.refuseEndedIdpSession(payload);
+    const rights = method === 'bearer' ? await this.auth.bearerRights(payload, raw)
+      : await this.auth.sessionRights(admittedSession);
+    req.roles = rights.roles;
+    req.institution = rights.institution;
+    req.groups = [rights.institution];
 
-    const state = memberState(groups, req.roles);
+    const state = memberState(req.groups, req.roles);
     req.memberState = state;
     if (state !== 'APPROVED' && !isLogout)
       throw new ForbiddenException({

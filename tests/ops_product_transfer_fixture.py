@@ -78,8 +78,9 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261005120000_idp_session_end/migration.sql',
               'api/prisma/migrations/20261005130000_member_isolation/migration.sql',
               'api/prisma/migrations/20261006120000_member_isolation_call/migration.sql',
-              'api/prisma/migrations/20261007120000_provider_change/migration.sql']
-TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'Institution', 'StudyState', 'Report', 'ReportVersion',
+              'api/prisma/migrations/20261007120000_provider_change/migration.sql',
+              'api/prisma/migrations/20261007170000_member_db_rights/migration.sql']
+TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
@@ -410,6 +411,10 @@ def expected_rows(uid):
              state='unknown',outcome='transport',createdAt='2026-10-06T00:00:00.789',settledAt=None),
         dict(id=2,kind='end_session',target='SYNTHETIC-idp-session-confirmed',sub=None,generation=1,state='done',
              outcome='http_204',createdAt=STAMP,settledAt=STAMP)]
+    rows['MemberRights'] = [dict(sub='SYNTHETIC-member',username='SYNTHETIC-member',email='synthetic@example.test',
+        name='SYNTHETIC Member',emailVerified=True,approved=True,suspended=False,institution='SYNTHETIC-hospital',
+        roles=['radiologist'],version=4,newAuthAfter=STAMP,updatedAt=STAMP)]
+    rows['MemberRightsImport'] = [dict(id='realm-v1',completedAt=STAMP)]
     rows['TransferBasis'] = [dict(id=basis_id,studyUid=uid,institutionId='SYNTHETIC-hospital',kind='PATIENT_CONSENT',
         reference='SYNTHETIC consent reference',obtainedAt=STAMP,expiresAt=None,recordedBy='SYNTHETIC-admin',recordedAt=STAMP,
         revokedBy=None,revokedAt=None,revokeReason=None)]
@@ -457,7 +462,7 @@ def create_product(name, db, uid):
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                   'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
-                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange',
+                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport',
                   'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:

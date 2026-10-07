@@ -1,3 +1,4 @@
+import { rightsUser, lockMemberRights } from './member-rights';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, HttpException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
@@ -104,19 +105,19 @@ export class CriticalResultService {
   }
 
   /**
-   * 쓰기 전 Keycloak 재확인(T-9, §4 순서 5). 유효 역할 = 토큰 ∩ Keycloak이고 route 역할을 잃었으면 403, Keycloak을 읽지
+   * 쓰기 전 DB 권한 재확인(D623). 요청과 현재 DB 역할에 route 권한이 있어야 하며 철회되었으면 403, DB를 읽지
    * 못하면 503이다. 토큰이 남아 있어도 철회된 사람의 새 쓰기는 여기서 멈춘다(CR18).
    */
   private async recheck(c: CriticalCaller, allowed: (roles: string[]) => boolean): Promise<string[]> {
     let user: KeycloakUser | null;
-    try { user = await this.keycloak.getUser(c.sub); } catch { throw unavailable(); }
+    try { user = rightsUser(await this.prisma.memberRights.findUnique({ where: { sub: c.sub } })); } catch { throw unavailable(); }
     const roles = effectiveRoles(user, c);
     if (!roles || !allowed(roles)) throw roleRequired();
     return roles;
   }
 
   private async user(sub: string): Promise<KeycloakUser | null> {
-    try { return await this.keycloak.getUser(sub); } catch { throw unavailable(); }
+    try { return rightsUser(await this.prisma.memberRights.findUnique({ where: { sub } })); } catch { throw unavailable(); }
   }
 
   /** 원본 신원 한 건(§3.2). 트랜잭션 밖에서만 부른다. 영상 저장·전송·변경 호출은 없다. */
@@ -304,7 +305,11 @@ export class CriticalResultService {
    */
   private async judgeRecipient(tx: any, uid: string, institution: string, c: Caller, sub: string, recipient: KeycloakUser | null,
     subject: Caller | null, head: Head, state: any): Promise<RecipientClass> {
+    await lockMemberRights(tx, sub);
+    recipient = rightsUser(await tx.memberRights.findUnique({ where: { sub } }));
     const cls = eligibleRecipient(recipient, { sub, institution, sender: c.sub });
+    // Keep the prepared subject object: StudyAccess binds source metadata to its identity.
+    if (subject && recipient) { subject.roles = recipient.roles; subject.institution = recipient.groups[0]; }
     if (!cls || !subject) throw recipientInvalid();
     const visible = await this.readableBy(subject, uid, tx);
     const kase = createCase({ cls, visible, head, state, actor: userActor(recipient) });
@@ -361,7 +366,7 @@ export class CriticalResultService {
 
   // ── #2 생성 ──
 
-  /** POST studies/:uid/critical-results. 귀속(발신자·기관·이름)은 토큰에서만, 수신자 이름·actor는 Keycloak에서만 온다. */
+  /** POST studies/:uid/critical-results. 발신자는 인증된 요청, 수신자 자격·귀속은 DB 회원에서 온다. */
   async create(uid: string, c: CriticalCaller, b: any) {
     this.member(c);
     if (!holds(c.roles, RADIOLOGIST)) throw roleRequired();

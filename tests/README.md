@@ -1,5 +1,7 @@
 # 살아 있는 불변조건 테스트
 
+REQ-S7-U5-DB-RIGHTS (D621/D623) → RISK-STALE-CREDENTIAL / RISK-LOST-REVOCATION → `auth_session_service_test.cjs`: DB 차단·권한 버전·새 인증·CAS·commit 경계, R10-05/06/09와 sid 종료 U1–5/9. Migration은 40개, 복원 표는 51개다. `20261007170000_member_db_rights` 적용 후 트래픽과 회원 변경을 멈춘 상태에서 `node prisma/import-member-rights.cjs`를 실행한다. 모든 realm 회원과 기존 세션을 이관하며 기존 provider-disabled/미확인 회원 변경은 차단으로 보존한다. 이관 실패·누락은 JWT 권한으로 대체하지 않는다. 외부 realm 사전 대조와 실제 이관은 배포 관문이다. 명부 수렴·복구와 회원 provider 조정은 U5b다. 정상 회원 진입에는 새 클릭·prompt·관리 API 조회를 추가하지 않는다. 아래 과거 S7-U5 전체 코스 설명 중 회원 provider 격리·15초 Activate·U5E-13/14/17~20/22~27 기대는 `fable/s7-u5b-20261007`에 보류되며 core 완료 근거가 아니다. core의 U5E-15는 차단 중 거절·명령 후 새 인증·옛 권한 거절을 검사한다. 실제 realm 이관, core 권한 fixture를 반영한 live/CE1–4, 새 SHA PR CI·G3·독립 검수는 최종 전달 관문이다.
+
 REQ-D02-IDENTITY-POSITION → RISK-D02-WRONG-IDENTITY/OCCLUSION/PREFERENCE-LOSS/STALE → TEST-VIEWER-IDENTITY-POSITION: `viewer_identity_position_dom_test.py`는 현재/비교 정보 묶음의 네 모서리 배치·복사, 작은 viewport와 native overlay 겹침, 원본 식별/교체/소유자 경계 및 이전 설정 이행을 격리 DOM에서 검사한다. `reading_appearance_position_live.py`는 v7→v8 계정 왕복, viewer v2 위치의 엄격한 형식, 원자적 거절·구버전 작성자와 소유자 분리를 검사한다. `e2e/test_viewer_identity_position.py`는 실제 영상에서 위치 변경→복사→계정 저장/다른 브라우저 복원과 영상·편집 보존, 기존 로컬 설정·늦은 응답을 검사한다. 두 live 모듈은 각각 선언한 시험만 선택하며 fresh hosted CI가 기존 표시 설정 API 회귀와 함께 실행한다. 로컬 원본 연결 fixture는 실행하지 않는다. 필드별/modality별 배치·발표 모드·물리 모니터는 별도 잔여다.
 
 ## 실행 입구와 중단 조건 (2026-09-11)

@@ -150,6 +150,8 @@ async function within(promise, what, ms = 8000) {
 async function world() {
   const base = await database();
   const w = { base, gates: [], faults: [], points: [] };
+  for(const p of [A,B,C,ADMIN,OTHER_ADMIN,REVIEWER]) await base.memberRights.upsert({where:{sub:p.sub},update:{},create:{
+    sub:p.sub,username:p.actor,email:p.actor,name:p.actor,emailVerified:true,approved:true,suspended:false,institution:p.institution,roles:p.roles}});
   /** Holds the request `label` at `point` (prepare | commit) until released; `fault` makes its next audit write throw. */
   w.gate = (label, point) => {
     const gate = { label, point, arrived: deferred(), release: deferred(), used: false };
@@ -243,7 +245,7 @@ async function world() {
     const sid = randomBytes(32).toString('base64url');
     const b64 = value => Buffer.from(JSON.stringify(value)).toString('base64url');
     const token = `${b64({ alg: 'none' })}.${b64({ sub: principal.sub, email: principal.actor, groups: [principal.institution] })}.syn`;
-    await base.authSession.create({ data: { sid, sub: principal.sub, accessToken: token, refreshToken: 'syn-rt-' + randomUUID(),
+    await base.authSession.create({ data: { sid, sub: principal.sub, institution: principal.institution, rightsVersion: 1, accessToken: token, refreshToken: 'syn-rt-' + randomUUID(),
       atExpiresAt: new Date(Date.now() + 3600_000), lastSeenAt: new Date() } });
     return sid;
   };
@@ -1094,4 +1096,21 @@ test('REQ-18 migration: existing drafts become present at revision 1 with their 
   const [session] = await w.base.$queryRawUnsafe(`SELECT "entryProofHash", "entryProofExpiresAt" FROM ${schema}."AuthSession"`);
   assert.deepEqual(session, { entryProofHash: null, entryProofExpiresAt: null });
   await run(`DROP SCHEMA ${schema} CASCADE`);
+});
+
+// REQ-S7-U5-DB-RIGHTS -> RISK-STALE-REVIEWER -> CORE-REVIEWER, D623.
+test('CORE-REVIEWER preliminary assignment uses current DB eligibility while the provider list is stale',async()=>{
+  const w=await world();
+  for(const change of [{suspended:true},{institution:OTHER},{roles:['technician']},{approved:false,roles:[],institution:null}]){
+    await w.base.memberRights.update({where:{sub:REVIEWER.sub},data:{...change,version:{increment:1}}});
+    const uid=await w.study(),token=await w.token(uid,A);
+    const [route,body]=request('preliminary',A,{token,head:0,mark:'rights-refusal'});
+    assert.equal((await w.send('rights',route,{as:A,uid,body})).status,400);
+    assert.equal((await w.state(uid)).study.rs,'W');
+    await w.base.memberRights.update({where:{sub:REVIEWER.sub},data:{suspended:false,approved:true,institution:INST,roles:['radiologist'],version:{increment:1}}});
+  }
+  const uid=await w.study(),token=await w.token(uid,A);
+  const [route,body]=request('preliminary',A,{token,head:0,mark:'rights-admitted'});
+  assert.equal((await w.send('rights',route,{as:A,uid,body})).status,200);
+  assert.equal((await w.state(uid)).study.preReviewer,REVIEWER.actor);
 });

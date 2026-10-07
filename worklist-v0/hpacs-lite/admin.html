@@ -50,7 +50,6 @@
     .badge { border-radius: 999px; background: #5c4215; color: #ffe09b; padding: 5px 10px; font-weight: 700; }
     .message { display: none; margin: 0 0 14px; border: 1px solid #7c343e; border-radius: 8px; background: #3c1b23; color: #ffd9dd; padding: 10px 12px; white-space: pre-wrap; }
     .message.show { display: block; }
-    .retry-line { margin: -6px 0 14px; }
     .table-wrap { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
     table { width: 100%; border-collapse: collapse; }
     th, td { border-bottom: 1px solid #22364f; padding: 10px 11px; text-align: left; vertical-align: middle; }
@@ -172,7 +171,6 @@
     </div>
 
     <p class="message" id="message" role="alert"></p>
-    <p class="retry-line" id="activation-retry" hidden><button type="button" id="retry-activate" title="서버가 알려 준 간격이 지나면 다시 시도할 수 있습니다." disabled>Retry Activate</button> <span id="activation-retry-note"></span></p>
     <div class="table-wrap">
       <table>
         <thead>
@@ -448,6 +446,11 @@
           warning.textContent = "기관·역할 설정을 확인하세요";
           cell.append(warning);
         }
+        if (user.rosterUnconfirmed) {
+          const note = document.createElement("div");
+          note.textContent = "명부 반영 미확인";
+          cell.append(note);
+        }
         row.append(cell);
       }
 
@@ -476,7 +479,7 @@
         // 저장할 필드는 대화상자가 보여 준 값과 비교해 정한다. 제출 때 state.users를 다시 찾으면 그 사이
         // 목록이 새로 읽혔을 때 화면에 없던 값이 기준이 된다.
         state.editing = {
-          id: user.id, approvalState: user.approvalState, institution: (user.institution || "").trim(),
+          id: user.id, version: user.version, approvalState: user.approvalState, institution: (user.institution || "").trim(),
           roles: [...user.roles], unmanaged: unmanagedRoles(user),
         };
         setDialogMessage("#membership-message", "");
@@ -504,47 +507,14 @@
         $("#membership-dialog").showModal();
       }
 
-      /**
-       * Activate가 기한 안에 확정되지 않았다는 답(409 ACTIVATION_UNCONFIRMED): 이용 제한은 그대로다. 서버의 문장을 보이고, 다시
-       * 시도는 서버가 말한 간격(retryAfterSeconds)이 지난 뒤에만 누를 수 있다 — 저절로 다시 보내지 않는다. 다른 변경을 시작하거나
-       * 세션이 끝나면 거둔다. 그 간격은 다시 시도할 수 있는 때일 뿐 해소 시한이 아니다: 답을 잃은 변경은 시간이 지나도, 다시
-       * 시도해도 확인되지 않을 수 있다(S7-U5 D600) — 관리자에게 그렇게 말하고 후속 확인을 넘긴다.
-       */
-      let activationRetry = null;
-      function offerActivationRetry(user, seconds) {
-        clearActivationRetry();
-        const wait = Number.isFinite(seconds) && seconds > 0 ? seconds : 5;
-        $("#activation-retry-note").textContent = `${wait}초는 다시 시도할 수 있는 간격일 뿐, 그 뒤 저절로 확정되거나 풀리지 않습니다. `
-          + "다시 시도해도 계속 확인되지 않으면 인증 서버에 보낸 변경의 결과를 알 수 없는 상태이므로 관리자의 후속 확인이 필요합니다(이용 제한은 유지됩니다).";
-        $("#retry-activate").disabled = true;
-        $("#activation-retry").hidden = false;
-        activationRetry = { user, timer: setTimeout(() => { $("#retry-activate").disabled = false; }, wait * 1000) };
-      }
-
-      function clearActivationRetry() {
-        if (activationRetry) clearTimeout(activationRetry.timer);
-        activationRetry = null;
-        $("#retry-activate").disabled = true;
-        $("#activation-retry").hidden = true;
-        $("#activation-retry-note").textContent = "";
-      }
-
-      $("#retry-activate").addEventListener("click", () => {
-        const pending = activationRetry;
-        if (!pending || $("#retry-activate").disabled) return;
-        mutate(pending.user, { enabled: true });
-      });
-
       async function mutate(user, body) {
         setMessage("");
-        clearActivationRetry();
         try {
-          await request("PATCH", `/admin/users/${encodeURIComponent(user.id)}`, body);
+          await request("PATCH", `/admin/users/${encodeURIComponent(user.id)}`, { ...body, version: user.version });
           await loadUsers();
         } catch (error) {
           if (KinConsoleSession.ended() || error.stale || membersDenied) return;
           setMessage(error.message);
-          if (error.code === "ACTIVATION_UNCONFIRMED" && body.enabled === true) offerActivationRetry(user, Number(error.retryAfterSeconds));
         }
       }
 
@@ -763,7 +733,6 @@
         setDialogMessage("#create-message", "");
         setDialogMessage("#membership-message", "");
         setMessage("");
-        clearActivationRetry();
         $("#search").value = "";
         rebuildInstitutionOptions();
         $("#users").replaceChildren();

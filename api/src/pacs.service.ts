@@ -1,3 +1,4 @@
+import { rightsAllow, lockMemberRights } from './member-rights';
 import { StudyAccessService } from './study-access.service';
 import type { AccessSnapshot } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, OnModuleInit, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
@@ -2830,16 +2831,16 @@ export class PacsService implements OnModuleInit {
     const structureKeepIds = this.structureKeys(body.structureIds, 'structureIds');
 
     /**
-     * 상급 판독의 목록은 Keycloak에 묻는다 — 외부 조회라 트랜잭션 밖에서, 유한하게 한다. 지정이 유효한지는 검사 상태와
-     * 무관하고(기관과 이름만 본다), 상태 규칙은 아래에서 **잠근 검사 행**에 건다. 빈 지정·자기 지정은 묻지 않고도 거절된다.
+     * 화면의 명부와 별개로, 지정 권한은 아래 트랜잭션에서 DB 회원을 잠그고 판정한다.
+     * 명부 반영이 늦어도 철회된 판독의나 다른 기관 회원을 지정할 수 없다.
      */
     const wanted = action === 'preliminary' ? String(body.reviewer ?? '').trim() : '';
-    let peers: { id: string }[] = [];
+
 
     try {
       return await this.draftTransaction(uid, c, session, expected.epoch, async () => {
         await this.studyAccess.prepare(c,[uid]);
-        if (wanted && wanted !== c.actor) peers = await this.keycloak.usersInGroupWithRole(me, 'radiologist');
+
       }, async (tx, prev, audit) => {
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
       throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
@@ -2919,7 +2920,11 @@ export class PacsService implements OnModuleInit {
       reviewer = wanted;
       if (!reviewer) throw new BadRequestException('상급 판독의를 지정해야 합니다');
       if (reviewer === c.actor) throw new BadRequestException('자기 자신을 상급 판독의로 지정할 수 없습니다');
-      if (!peers.some(u => u.id === reviewer))
+      const candidates = await tx.memberRights.findMany({ where: { OR: [{ email: reviewer }, { email: '', username: reviewer }] }, take: 2 });
+      const candidate = candidates.length === 1 ? candidates[0] : null;
+      if (candidate) await lockMemberRights(tx, candidate.sub);
+      const current = candidate && await tx.memberRights.findUnique({ where: { sub: candidate.sub } });
+      if (!rightsAllow(current) || current.institution !== me || !current.roles.includes('radiologist'))
         throw new BadRequestException(`${reviewer} 은(는) 이 기관의 판독의가 아닙니다`);
     }
 
@@ -3529,7 +3534,7 @@ export class PacsService implements OnModuleInit {
 
   /**
    * 내 기관의 판독의 목록 — Preliminary에서 상급 판독의를 고를 때 쓴다.
-   * 사용자 목록은 Keycloak에 있고, 우리 DB에 복사본을 만들면 두 곳이 어긋난다.
+   * D623: 선택 명부는 Keycloak에 남고, 실제 지정 자격은 commitReport에서 DB로 판정한다.
    */
   async colleagues(c: Caller) {
     need(c.roles, 'radiologist', '판독의 목록 조회');   // Preliminary 지정 화면 전용

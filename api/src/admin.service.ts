@@ -7,11 +7,11 @@ import {
   AUDIT_CANDIDATE_ACTIONS, AUDIT_TARGET_ACTIONS, AuditCursor, AuditLogRow, AuditSource, auditMention, auditPageQuery,
   openAuditCursor, readAuditPage, sealAuditCursor,
 } from './admin-audit';
-import { memberState } from './auth.guard';
-import { AuthService, Reactivation } from './auth.service';
+import { lockMemberRights, rightsAllow } from './member-rights';
+import { AuthService } from './auth.service';
 // 역할 목록은 clinician-policy 한 곳에서 온다. 여기서 별도 literal을 두면 guard와 어긋난다.
 import { APP_ROLES } from './clinician-policy';
-import { KeycloakService, KeycloakUser, within } from './keycloak.service';
+import { KeycloakService, KeycloakUser } from './keycloak.service';
 import { Caller } from './pacs.service';
 import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
@@ -19,13 +19,6 @@ import { StudyAccessService } from './study-access.service';
 // 감사 기록 다음 쪽 값의 봉인 키. 프로세스마다 새로 만든다 — API가 다시 시작되면 이어받기는 만료(409)되고
 // 처음부터 다시 읽는다. 키를 설정으로 두면 값이 재시작을 넘어 살아남을 이유만 생긴다.
 const AUDIT_CURSOR_KEY = randomBytes(32);
-/**
- * Activate(S7-U5 D600)는 요청 전체가 15초 안에 답한다: 인증 서버를 읽고 바꾸고 다시 읽는 일은 시작부터 14초 안에 멈추고,
- * 남은 1초는 우리 감사 기록과 답에 쓴다. 기한 안에 확정하지 못하면 격리를 유지한 채 409 ACTIVATION_UNCONFIRMED다.
- */
-const ACTIVATE_LIMIT_MS = 14_000;
-const ACTIVATE_RETRY_SECONDS = 5;
-
 function text(value: unknown, field: string, max: number, required = true): string {
   if (value == null && !required) return '';
   if (typeof value !== 'string') throw new BadRequestException(`${field}은(는) 문자열이어야 합니다`);
@@ -48,19 +41,24 @@ export class AdminService {
     if (!c.roles?.includes('admin')) throw new ForbiddenException('회원 관리는 admin 권한이 필요합니다');
   }
 
-  private row(user: KeycloakUser) {
-    const roles = user.roles.filter(role => APP_ROLES.has(role)).sort();
-    return {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      emailVerified: user.emailVerified,
+  private row(user: any) {
+    return { id: user.sub, username: user.username, email: user.email, emailVerified: user.emailVerified,
+      name: user.name, institution: user.institution, roles: user.roles, version: user.version,
+      enabled: !user.suspended, approvalState: user.approved ? 'APPROVED' : 'PENDING' };
+  }
+
+  private async member(id: string) {
+    const row = await this.prisma.memberRights.findUnique({ where: { sub: id } });
+    if (!row) throw new NotFoundException('회원 권한 이관 또는 등록이 필요합니다');
+    return row;
+  }
+
+  private async register(user: KeycloakUser) {
+    return this.prisma.memberRights.upsert({ where: { sub: user.id }, update: {}, create: {
+      sub: user.id, username: user.username, email: user.email,
       name: [user.lastName, user.firstName].filter(Boolean).join(' ') || user.username,
-      institution: user.groups.length === 1 ? user.groups[0] : null,
-      roles,
-      enabled: user.enabled,
-      approvalState: memberState(user.groups, roles),
-    };
+      emailVerified: user.emailVerified, approved: false, suspended: false, institution: null, roles: [],
+    } });
   }
 
   private async managed(id: string, signal?: AbortSignal): Promise<KeycloakUser> {
@@ -93,111 +91,22 @@ export class AdminService {
     return institution;
   }
 
-  /**
-   * KC 변경은 트랜잭션이 아니므로 자격을 건드리기 전에 이 순서를 끝까지 통과해야 한다.
-   * disabled만으로 기존 JWT는 죽지 않는다. DB 세션 0건과 회원의 provider 세션 종료까지가 한 장벽이다.
-   *
-   * 세션은 행만 지우지 않는다(S7-U5 R1): 제품이 세션을 끝내는 길은 하나 — provider 세션마다 표식·provider 종료·접속기록
-   * (원인 isolation)을 남기는 auth의 종료 절차다. 행만 지우면 격리 전에 code를 교환해 둔 콜백이 같은 SSO로 세션을 다시
-   * 만들고, 끝난 세션의 기록도 남지 않는다. 정지된 회원의 다른 PC의 세션은 나열해 하나씩 끝낸다(사용자 전체 로그아웃은 쓰지
-   * 않는다 — D600). 그 사이 만들어진 세션까지 한 번 더 같은 절차로 끝낸 뒤 0건을 확인한다.
-   *
-   * 격리는 우리 쪽 사실을 **먼저** 남긴다(auth.isolateMember): 그 뒤의 인증 서버 일(나열·표식·비활성화·세션 종료)이
-   * 어디서 끊겨도 로그인 콜백과 갱신은 그 사실을 보고 막고, 남은 인증 서버 일은 종료 재시도 주기가 잇는다. 사실은 재활성화가
-   * 끝까지 성공한 뒤에만 지운다(auth.reactivateMember).
-   */
-  private async isolate(id: string): Promise<void> {
-    await this.auth.isolateMember(id);
-    const remaining = await this.prisma.authSession.count({ where: { sub: id } });
-    if (remaining !== 0) throw new Error('AuthSession 격리 확인 실패');
-  }
-
-  /**
-   * 다시 활성화 — auth.reactivateMember의 한 길(옛 변경 호출의 답 → 남은 격리 일 → 활성화 확정 → 다시 읽기 → 같은 세대일 때만
-   * 사실 지움). 기한 안에 끝내지 못했거나 새 정지가 넘겨받았으면 던진다 — 사실은 남아 로그인을 계속 막는다(승인 변경·승인
-   * 취소는 격리 충돌로 답한다). 성공하면 그때 다시 읽은 회원을 돌려준다.
-   */
-  private async reactivate(id: string, until = performance.now() + ACTIVATE_LIMIT_MS): Promise<KeycloakUser> {
-    const result = await this.auth.reactivateMember(id, until);
-    if (result.outcome !== 'activated') throw new Error('재활성화를 확정하지 못했습니다');
-    return result.user;
-  }
-
-  /** Activate가 기한 안에 확정하지 못했다는 답: 이용 제한(격리)은 그대로이고 5초 뒤 다시 하면 된다. */
-  private activationUnconfirmed() {
-    return new ConflictException({
-      code: 'ACTIVATION_UNCONFIRMED',
-      message: '활성화를 확인하지 못했습니다. 이용 제한을 유지합니다. 5초 뒤 다시 시도하세요.',
-      retryAfterSeconds: ACTIVATE_RETRY_SECONDS,
-    });
-  }
-
-  private async isolatedConflict(id: string, signal?: AbortSignal): Promise<never> {
-    let user: any = null;
-    try {
-      const current = await this.keycloak.getUser(id, signal);
-      if (current && !current.serviceAccountClientId) user = this.row(current);
-    } catch {}
-    throw new ConflictException({
-      code: 'USER_ISOLATED',
-      message: '사용자를 비활성 격리했지만 변경을 완료하지 못했습니다. 현재 상태를 확인해 재시도하세요.',
-      user,
-    });
-  }
-
-  /**
-   * POST 생성의 대면 확인과 PATCH 승인이 반드시 이 함수 하나를 지난다.
-   * 이메일 검증 예외를 다른 경로에 복사하면 어느 한쪽이 조용한 우회로가 된다.
-   */
-  private async approve(
-    id: string,
-    institutionValue: unknown,
-    rolesValue: unknown,
-    verificationOverride: boolean,
-    targetEnabled: boolean,
-  ) {
-    const institution = await this.institution(institutionValue);
-    const roles = this.roles(rolesValue);
-    const before = await this.managed(id);
-    if (!before.emailVerified && !verificationOverride)
-      throw new BadRequestException('이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다');
-    try {
-      await this.isolate(id);
-      await this.keycloak.setGroups(id, [institution]);
-      await this.keycloak.setRoles(id, roles);
-      const changed = await this.managed(id);
-      if (memberState(changed.groups, changed.roles) !== 'APPROVED')
-        throw new Error('승인 상태 재검증 실패');
-      // 비활성으로 남기는 승인은 격리 사실도 남긴다 — 나중의 Activate가 지운다.
-      if (targetEnabled) await this.reactivate(id);
-      return this.row(await this.managed(id));
-    } catch {
-      return this.isolatedConflict(id);
-    }
-  }
-
-  private async cancelApproval(id: string) {
-    try {
-      await this.isolate(id);
-      await this.keycloak.setGroups(id, []);
-      await this.keycloak.setRoles(id, []);
-      const changed = await this.managed(id);
-      if (memberState(changed.groups, changed.roles) !== 'PENDING')
-        throw new Error('대기 상태 재검증 실패');
-      // BFF는 PENDING 세션을 허용해 승인 대기 안내를 보여 준다.
-      await this.reactivate(id);
-      return this.row(await this.managed(id));
-    } catch {
-      return this.isolatedConflict(id);
-    }
-  }
-
   async listUsers(pageValue: unknown, c: Caller) {
     this.admin(c);
     const page = pageValue == null || pageValue === '' ? 1 : Number(pageValue);
     if (!Number.isInteger(page) || page < 1) throw new BadRequestException('page는 1 이상의 정수여야 합니다');
     const result = await this.keycloak.listUsers(page);
-    const response = { ...result, users: result.users.map(user => this.row(user)) };
+    const users = [];
+    for (const user of result.users) {
+      const rights = await this.register(user);
+      const latest = await this.prisma.providerChange.findFirst({ where: { kind: 'credentials', sub: user.id }, orderBy: { id: 'desc' } });
+      const unknown = await this.prisma.providerChange.findFirst({ where: { kind: 'credentials', sub: user.id, state: 'unknown' } });
+      const overlap = latest && await this.prisma.providerChange.findFirst({ where: {
+        kind: 'credentials', sub: user.id, id: { lt: latest.id }, settledAt: { gte: latest.createdAt },
+      } });
+      users.push({ ...this.row(rights), rosterUnconfirmed: !!unknown || !!overlap || (!!latest && latest.generation !== rights.version) });
+    }
+    const response = { ...result, pendingCount: await this.prisma.memberRights.count({ where: { approved: false } }), users };
     await this.audit(c.actor, 'admin.user.list', 'admin-users', {
       page, count: response.users.length, pendingCount: response.pendingCount,
     });
@@ -239,12 +148,13 @@ export class AdminService {
       await this.keycloak.setGroups(created.id, []);
       await this.keycloak.setRoles(created.id, []);
       await this.keycloak.resetPassword(created.id, 'temp', temporaryPassword);
+      await this.register(created);
+      await this.keycloak.setEnabled(created.id, true);
       let after;
       if (verificationOverride) {
-        after = await this.approve(created.id, body.institution, body.roles, true, true);
+        after = await this.patchUser(created.id, { institution: body.institution, roles: body.roles, verificationOverride: true, enabled: true }, c);
       } else {
-        await this.keycloak.setEnabled(created.id, true);
-        after = this.row(await this.managed(created.id));
+        after = this.row(await this.member(created.id));
       }
       await this.audit(c.actor, 'admin.user.create', created.id, {
         before: null, after, verificationOverride,
@@ -253,32 +163,21 @@ export class AdminService {
     } catch (error) {
       if (!created) throw error;
       let after: any = null;
-      try { after = this.row(await this.managed(created.id)); } catch {}
+      try { after = this.row(await this.member(created.id)); } catch {}
       await this.audit(c.actor, 'admin.user.create.failed', created.id, {
         before: null, after, verificationOverride, failed: true,
       });
       if (error instanceof ConflictException) throw error;
-      return this.isolatedConflict(created.id);
+      throw new ServiceUnavailableException('회원 생성의 일부 처리를 완료하지 못했습니다');
     }
   }
 
   async patchUser(id: string, body: any, c: Caller) {
     this.admin(c);
-    // Activate의 15초는 이 요청의 시작부터 센다: 처음의 회원 읽기도, 실패 기록 전의 다시 읽기도 그 기한 안에서 끊는다.
-    const activating = body?.enabled === true && body?.approvalState === undefined
-      && body?.institution === undefined && body?.roles === undefined;
-    const until = performance.now() + ACTIVATE_LIMIT_MS;
-    const bounded = () => activating ? within(until - performance.now()) : undefined;
-    let beforeUser: KeycloakUser;
-    try {
-      beforeUser = await this.managed(id, bounded());
-    } catch (error) {
-      // 기한 안에 회원을 읽지 못한 Activate는 아무것도 바꾸지 않았다(이용 제한 그대로).
-      if (activating && !(error instanceof NotFoundException) && !(error instanceof ForbiddenException))
-        throw this.activationUnconfirmed();
-      throw error;
-    }
-    const before = this.row(beforeUser);
+    const observed = await this.member(id);
+    const before = this.row(observed);
+    if (body?.version !== undefined && body.version !== observed.version)
+      throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
     if (body?.enabled !== undefined && typeof body.enabled !== 'boolean')
       throw new BadRequestException('enabled는 boolean이어야 합니다');
     if (body?.verificationOverride !== undefined && typeof body.verificationOverride !== 'boolean')
@@ -290,7 +189,7 @@ export class AdminService {
     if (body?.verificationOverride === true && !approvalMutation)
       throw new BadRequestException('verificationOverride는 승인·자격 변경에만 사용할 수 있습니다');
     if (body?.approvalState === 'PENDING' && body?.enabled !== undefined)
-      throw new BadRequestException('승인 취소는 대기 안내를 위해 enabled=true로 끝납니다');
+      throw new BadRequestException('승인 취소와 활성 상태 변경을 섞을 수 없습니다');
 
     if (c.sub === id) {
       if (body?.enabled === false) throw new BadRequestException('자기 자신을 정지할 수 없습니다');
@@ -300,55 +199,60 @@ export class AdminService {
     }
 
     let action = 'update';
-    let after;
+    let institution = observed.institution, roles = observed.roles;
+    let approved = observed.approved, suspended = observed.suspended, emailVerified = observed.emailVerified;
+    if (body?.approvalState === 'PENDING') {
+      if (body?.institution !== undefined || body?.roles !== undefined)
+        throw new BadRequestException('승인 취소와 기관·역할 변경을 한 요청에 섞을 수 없습니다');
+      action = 'unapprove'; approved = false; suspended = true; institution = null; roles = [];
+    } else if (approvalMutation) {
+      action = observed.approved ? 'update' : 'approve';
+      institution = await this.institution(body?.institution ?? observed.institution);
+      roles = this.roles(body?.roles ?? observed.roles);
+      const identity = await this.managed(id);
+      emailVerified = identity.emailVerified;
+      if (!emailVerified && body?.verificationOverride !== true)
+        throw new BadRequestException('이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다');
+      approved = true;
+      if (body?.enabled !== undefined) suspended = !body.enabled;
+    } else if (body?.enabled === false) {
+      action = 'suspend'; suspended = true;
+    } else if (body?.enabled === true) {
+      action = 'activate';
+      if (!rightsAllow({ ...observed, suspended: false }))
+        throw new BadRequestException('승인된 회원만 활성화할 수 있습니다');
+      suspended = false;
+    } else throw new BadRequestException('변경할 회원 상태가 없습니다');
+
     try {
-      if (body?.approvalState === 'PENDING') {
-        if (body?.institution !== undefined || body?.roles !== undefined)
-          throw new BadRequestException('승인 취소와 기관·역할 변경을 한 요청에 섞을 수 없습니다');
-        action = 'unapprove';
-        after = await this.cancelApproval(id);
-      } else if (approvalMutation) {
-        action = before.approvalState === 'PENDING' ? 'approve' : 'update';
-        const institution = body?.institution ?? before.institution;
-        const roles = body?.roles ?? before.roles;
-        const targetEnabled = body?.enabled === undefined ? before.enabled : body.enabled;
-        after = await this.approve(
-          id, institution, roles, body?.verificationOverride === true, targetEnabled,
-        );
-      } else if (body?.enabled === false) {
-        action = 'suspend';
-        try {
-          await this.isolate(id);
-          after = this.row(await this.managed(id));
-        } catch {
-          await this.isolatedConflict(id);
+      const committed = await this.prisma.$transaction(async tx => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+        await lockMemberRights(tx, id);
+        const { count } = await tx.memberRights.updateMany({ where: { sub: id, version: observed.version }, data: {
+          approved, suspended, institution, roles, emailVerified,
+          version: { increment: 1 }, newAuthAfter: new Date(),
+        } });
+        if (count !== 1) throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
+        // No remote end is scheduled here: this deletion cannot outlive this version's commit.
+        const sessions = await tx.authSession.findMany({ where: { sub: id } });
+        await tx.authSession.deleteMany({ where: { sub: id } });
+        for (const session of sessions) {
+          await tx.auditLog.create({ data: { actor: observed.email || observed.username, action: 'auth.logout', target: id,
+            detail: JSON.stringify({ institution: session.institution, ip: null, dataSubject: null, cause: 'isolation' }) } });
         }
-      } else if (body?.enabled === true) {
-        action = 'activate';
-        if (before.approvalState === 'INVALID')
-          throw new BadRequestException('INVALID 사용자는 자격을 바로잡기 전 활성화할 수 없습니다');
-        let result: Reactivation;
-        try { result = await this.auth.reactivateMember(id, until); }
-        catch { result = { outcome: 'unconfirmed' }; }
-        if (result.outcome !== 'activated') {
-          // 새 정지가 넘겨받았으면 그 정지가 지금 상태다(격리 충돌), 아니면 확정하지 못한 채 이용 제한을 유지한다.
-          if (result.outcome === 'superseded') await this.isolatedConflict(id, bounded());
-          throw this.activationUnconfirmed();
-        }
-        after = this.row(result.user);
-      } else {
-        throw new BadRequestException('변경할 회원 상태가 없습니다');
-      }
-      await this.audit(c.actor, `admin.user.${action}`, id, {
-        before, after, verificationOverride: body?.verificationOverride === true,
-      });
-      return after;
+        const after = this.row(await tx.memberRights.findUnique({ where: { sub: id } }));
+        await tx.auditLog.create({ data: { actor: c.actor, action: `admin.user.${action}`, target: id,
+          detail: JSON.stringify({ before, after, verificationOverride: body?.verificationOverride === true }) } });
+        const change = approvalMutation ? await tx.providerChange.create({ data: {
+          kind: 'credentials', target: id, sub: id, generation: after.version, state: 'unknown', createdAt: new Date(),
+        } }) : null;
+        return { after, change };
+      }, { maxWait: 4000, timeout: 8000 });
+      if (committed.change) this.auth.publishCredentials({ id: committed.change.id, kind: 'credentials', target: id }, institution!, roles);
+      return { ...committed.after, rosterUnconfirmed: !!committed.change };
     } catch (error) {
-      if (!(error instanceof ConflictException)) throw error;
-      let current: any = null;
-      try { current = this.row(await this.managed(id, bounded())); } catch {}
       await this.audit(c.actor, 'admin.user.patch.failed', id, {
-        before, after: current, verificationOverride: body?.verificationOverride === true, failed: true,
+        before, after: null, verificationOverride: body?.verificationOverride === true, failed: true,
       });
       throw error;
     }
@@ -360,16 +264,16 @@ export class AdminService {
     if (!['temp', 'email'].includes(body?.mode))
       throw new BadRequestException('mode는 temp 또는 email이어야 합니다');
     const mode: 'temp' | 'email' = body.mode;
-    const before = this.row(user);
+    const before = this.row(await this.member(id));
     if (mode === 'temp') {
       const temporaryPassword = randomBytes(18).toString('base64url') + 'aA1!';
       await this.keycloak.resetPassword(id, mode, temporaryPassword);
-      const after = this.row(await this.managed(id));
+      const after = this.row(await this.member(id));
       await this.audit(c.actor, 'admin.user.reset-password', id, { before, after, mode });
       return { ...after, temporaryPassword };
     }
     await this.keycloak.resetPassword(id, mode);
-    const after = this.row(await this.managed(id));
+    const after = this.row(await this.member(id));
     await this.audit(c.actor, 'admin.user.reset-password', id, { before, after, mode });
     return after;
   }

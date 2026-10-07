@@ -130,7 +130,7 @@ const KEYS = {};
 const kc = { server: null, port: 0, held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
   certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
   members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null,
-  beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {}, closedPort: 0 };
+  beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {}, transportTimeoutMs: 0, closedPort: 0 };
 
 async function keycloak() {
   if (kc.server) return;
@@ -186,7 +186,7 @@ async function keycloak() {
           const reply = () => present ? send(204) : send(404, { error: 'Sesssion not found' });
           // afterEnd (when a case sets it): the effect is done; the answer waits for what it returns ('drop' cuts it).
           if (kc.afterEnd)
-            return void Promise.resolve(kc.afterEnd(idpSid)).then(after => after === 'drop' ? cut()
+            return void Promise.resolve(kc.afterEnd(idpSid)).then(after => typeof after === 'number' ? send(after) : after === 'drop' ? cut()
               : after === '500' ? send(500, { error: 'unknown_error' }) : after === '503' ? send(503, { error: 'unavailable' }) : reply());
           return reply();
         };
@@ -200,7 +200,10 @@ async function keycloak() {
       // The member administration the admin isolation reaches (read a member, disable or enable it, list its provider sessions;
       // a whole-user logout is answered but must never be asked). `sessions` of an account are its live provider sessions
       // (GET users/{id}/sessions).
-      const member = /^\/admin\/realms\/kin\/users\/([^/]+)(\/groups|\/role-mappings\/realm|\/logout|\/sessions)?$/.exec(path);
+      if (path === '/admin/realms/kin/groups') return send(200, [A, B, Z].map(name => ({ id: 'syn-group-' + name, name })));
+      const role = /^\/admin\/realms\/kin\/roles\/([^/]+)$/.exec(path);
+      if (role) return send(200, { id: 'syn-role-' + role[1], name: role[1] });
+      const member = /^\/admin\/realms\/kin\/users\/([^/]+)(\/groups(?:\/[^/]+)?|\/role-mappings\/realm|\/logout|\/sessions)?$/.exec(path);
       if (member) {
         if (req.headers.authorization !== 'Bearer ' + SECRETS.serviceToken) return send(403, { error: 'forbidden' });
         const id = decodeURIComponent(member[1]);
@@ -217,7 +220,7 @@ async function keycloak() {
           const account = kc.members[id] ?? (kc.members[id] = { username: id, email: id + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'] });
           // onAdmin resolving to 'drop' cuts the answer of a request already carried out, '500' / '503' answers it so.
           const done = (status, value) => kc.onAdmin
-            ? void Promise.resolve(kc.onAdmin(req.method + ' ' + kind, id)).then(how => how === 'drop' ? req.socket.destroy()
+            ? void Promise.resolve(kc.onAdmin(req.method + ' ' + kind, id)).then(how => typeof how === 'number' ? send(how) : how === 'drop' ? req.socket.destroy()
               : how === '500' ? send(500, { error: 'unknown_error' }) : how === '503' ? send(503, { error: 'unavailable' })
                 : send(status, value)) : send(status, value);
           if (!member[2] && req.method === 'GET')
@@ -225,6 +228,18 @@ async function keycloak() {
           if (!member[2] && req.method === 'PUT') { Object.assign(account, sent); return done(204); }
           if (member[2] === '/groups' && req.method === 'GET') return done(200, account.groups.map(name => ({ id: 'syn-group-' + name, name, path: '/' + name })));
           if (member[2] === '/role-mappings/realm' && req.method === 'GET') return done(200, account.roles.map(name => ({ name })));
+          if (member[2]?.startsWith('/groups/') && ['PUT', 'DELETE'].includes(req.method)) {
+            const name = decodeURIComponent(member[2].slice('/groups/syn-group-'.length));
+            account.groups = account.groups.filter(g => g !== name);
+            if (req.method === 'PUT') account.groups.push(name);
+            return done(204);
+          }
+          if (member[2] === '/role-mappings/realm' && ['POST', 'DELETE'].includes(req.method)) {
+            const names = sent.map(r => r.name);
+            account.roles = account.roles.filter(r => !names.includes(r));
+            if (req.method === 'POST') account.roles.push(...names);
+            return done(204);
+          }
           if (member[2] === '/sessions' && req.method === 'GET')
             return done(200, (account.sessions ?? []).filter(sid => !kc.ended.includes(sid)).map(sid => ({ id: sid, userId: id })));
           if (member[2] === '/logout' && req.method === 'POST') {
@@ -235,7 +250,7 @@ async function keycloak() {
           return send(404, { error: 'not_found' });
         };
         if (kc.beforeAdmin)
-          return void Promise.resolve(kc.beforeAdmin(req.method + ' ' + kind, id)).then(how => how === 'drop' ? req.socket.destroy()
+          return void Promise.resolve(kc.beforeAdmin(req.method + ' ' + kind, id)).then(how => typeof how === 'number' ? send(how) : how === 'drop' ? req.socket.destroy()
             : how === '500' ? send(500, { error: 'unknown_error' }) : carry());
         return carry();
       }
@@ -295,6 +310,7 @@ globalThis.fetch = (input, init) => {
   idp.started++;
   idp.open++;
   const settle = () => { idp.open--; };
+  if (end && kc.transportTimeoutMs) init = { ...init, signal: AbortSignal.timeout(kc.transportTimeoutMs) };
   const sent = realFetch(input, init);
   sent.then(settle, settle);
   return sent;
@@ -324,7 +340,11 @@ const reply = {
 
 test.after(async () => {
   if (prepared) await (await prepared).$disconnect();
-  if (kc.server) await new Promise(resolve => kc.server.close(resolve));
+  if (kc.server) {
+    // A failed behavioural assertion can leave a deliberately held HTTP response. Teardown must still report the failure.
+    kc.server.closeAllConnections();
+    await new Promise(resolve => kc.server.close(resolve));
+  }
 });
 
 // U5S-REQ-06/09 + amendments 1/2 -> U5S-RISK-SESSION -> U5S-ENTRY-01/02.
@@ -349,6 +369,7 @@ test('U5S-ENTRY-01 callback delivers a single-use proof to the approved member f
     const sub = 'syn-entry-' + label;
     const { done } = await login(w, w.I1, await w.issue(label, { sub, groups, roles }));
     assert.equal(done.status, 302, label);
+    if (status !== 200) { assert.equal(done.newSid, null, label + ': unapproved identity is refused'); continue; }
     const target = new URL(done.location);
     assert.equal(target.origin + target.pathname, ORIGIN + '/worklist/hpacs-lite/' + document, label);
     assert.equal(target.search, '', 'proof never rides in the query');
@@ -357,7 +378,7 @@ test('U5S-ENTRY-01 callback delivers a single-use proof to the approved member f
     assert.equal(entry.status, 200, label);
     const me = await w.call(w.I1, 'me', { sid: done.newSid, binding: entry.body.sessionId });
     assert.equal(me.status, status, label);
-    if (status === 200) assert.deepEqual(me.body.roles, roles, label);
+    if (status === 200) assert.deepEqual(me.body.roles, roles.filter(r => ['admin','radiologist','technician','clinician'].includes(r)), label);
     assert.deepEqual(coded(await w.call(w.I2, 'entry', { sid: done.newSid, body: { proof: done.proof } })),
       [403, 'AUTH_ENTRY_REFUSED', 'AUTH_ENTRY_REFUSED'], label);
     assert.equal(rowsOf(await w.rows(), sub).filter(row => row.action === 'auth.entry').length, 1, label);
@@ -365,7 +386,7 @@ test('U5S-ENTRY-01 callback delivers a single-use proof to the approved member f
   await w.finish('U5S-ENTRY-01');
 });
 
-test('U5S-ENTRY-02 bound me after proof consumption uses refreshed member roles, not the callback destination', async t => {
+test('U5S-ENTRY-02 bound me after proof consumption uses DB rights when refreshed JWT claims change', async t => {
   const w = await world(t);
   for (const [label, before, after, groups, status] of [
     ['reader-to-clinician', ['radiologist'], ['clinician'], [A], 200],
@@ -383,9 +404,8 @@ test('U5S-ENTRY-02 bound me after proof consumption uses refreshed member roles,
     const entry = await w.call(w.I1, 'entry', { sid: done.newSid, body: { proof: done.proof } });
     assert.equal(entry.status, 200);
     const me = await w.call(w.I1, 'me', { sid: done.newSid, binding: entry.body.sessionId });
-    assert.equal(me.status, status, label);
-    if (status === 200) assert.deepEqual(me.body.roles, after, label);
-    else assert.equal(me.body.code, groups.length ? 'INSTITUTION_INVALID' : 'INSTITUTION_PENDING', label);
+    assert.equal(me.status, 200, label);
+    assert.deepEqual(me.body.roles, before, label);
     assert.equal(me.body.sessionId, entry.body.sessionId, label);
     kc.auto = null;
   }
@@ -472,6 +492,8 @@ async function world(t, { now = START } = {}) {
   await base.$executeRawUnsafe('TRUNCATE "AuthSession"');
   await base.$executeRawUnsafe('TRUNCATE "IdpSessionEnd"');
   await base.$executeRawUnsafe('TRUNCATE "MemberIsolation"');
+  await base.$executeRawUnsafe('TRUNCATE "MemberRights"');
+  await base.$executeRawUnsafe('TRUNCATE "MemberRightsImport"');
   await base.$executeRawUnsafe('TRUNCATE "ProviderChange" RESTART IDENTITY');
   await base.$transaction([base.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
     base.$executeRawUnsafe(`TRUNCATE "AuditLog" RESTART IDENTITY`)]);
@@ -480,10 +502,23 @@ async function world(t, { now = START } = {}) {
   Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
     certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
     members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null,
-    beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {} });
+    beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {}, transportTimeoutMs: 0 });
   idp.started = 0;
 
-  const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [] };
+const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [], observations: [] };
+  // Store-operation boundaries, independent of service method names or implementation text. Hooks may observe or hold
+  // an actual Prisma statement before/after it executes; PG cases still use real transactions and real connections.
+  w.observe = (match, work) => w.observations.push({ match, work });
+  const observe = async event => {
+    for (const hook of w.observations)
+      if (Object.entries(hook.match).every(([k, v]) => event[k] === v)) await hook.work(event);
+  };
+  w.pause = (match, predicate = () => true) => {
+    const arrived = deferred(), release = deferred(); let taken = false;
+    w.observe(match, async event => { if (!taken && predicate(event)) { taken = true; arrived.resolve(event); await release.promise; } });
+    t.after(() => release.resolve());
+    return { arrived: () => within(arrived.promise, 'store boundary'), release: () => release.resolve() };
+  };
   w.secret = (kind, value) => { for (const entry of secretEntries(kind, value)) w.secrets.push(entry); };
   w.secret('client-secret', SECRETS.client);
   w.secret('cookie-secret', SECRETS.cookie);
@@ -508,27 +543,36 @@ async function world(t, { now = START } = {}) {
   // of the end mark (IdpSessionEnd): tx.mark (the end's write), tx.markRead (the callback's check), tx.markWake, and
   // outside a transaction mark.<method> (the confirmation and retry writes, the Bearer path's read).
   const pointOf = (scope, model, method, args) => {
+    if (model === 'memberIsolation' || model === 'memberRights' || model === 'providerChange') return model + '.' + method;
     if (model === 'auditLog') return scope === 'tx' ? 'tx.audit' : 'audit';
     if (model === 'idpSessionEnd')
       return scope !== 'tx' ? 'mark.' + method : method === 'upsert' ? 'tx.mark' : method === 'findUnique' ? 'tx.markRead' : 'tx.markWake';
     if (scope === 'tx') return method === 'deleteMany' ? 'tx.delete' : method === 'create' ? 'tx.create' : 'tx.' + method;
     if (method === 'findUnique') return 'read';
-    if (method === 'findMany') return 'sweepRead';
+    if (method === 'findMany') return args?.select?.sid ? 'admissions' : 'sweepRead';
     if (method === 'updateMany') return Object.keys(args?.data ?? {}).join() === 'lastSeenAt' ? 'touch' : 'store';
     return method;
   };
   const delegate = (inst, client, model, scope) => new Proxy({}, { get(_target, method) {
     const real = client[model][method];
     if (typeof real !== 'function') return real;
-    return async args => { await hit(inst, pointOf(scope, model, method, args)); return real.call(client[model], args); };
+    return async args => {
+      if (['authSession', 'auditLog', 'idpSessionEnd'].includes(model)) await hit(inst, pointOf(scope, model, method, args));
+      await observe({ inst, scope, model, method, args, phase: 'before' });
+      const result = await real.call(client[model], args);
+      await observe({ inst, scope, model, method, args, result, phase: 'after' });
+      return result;
+    };
   } });
   const recorder = inst => new Proxy({}, { get(_target, key) {
     if (key === '$transaction') return async (fn, options) => {
       await hit(inst, 'tx.open');
-      return base.$transaction(async tx => {
+      await observe({ inst, model: '$transaction', phase: 'before' });
+      const result = await base.$transaction(async tx => {
         w.calls.push(inst + ':tx:start');
+        await observe({ inst, model: '$transaction', phase: 'started', client: tx });
         const view = new Proxy({}, { get(_t, k) {
-          if (k === 'authSession' || k === 'auditLog' || k === 'idpSessionEnd') return delegate(inst, tx, k, 'tx');
+          if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'providerChange'].includes(k)) return delegate(inst, tx, k, 'tx');
           const value = tx[k];
           return typeof value === 'function' ? value.bind(tx) : value;
         } });
@@ -536,8 +580,10 @@ async function world(t, { now = START } = {}) {
         w.calls.push(inst + ':tx:end');
         return out;
       }, options);
+      await observe({ inst, model: '$transaction', phase: 'after', result });
+      return result;
     };
-    if (key === 'authSession' || key === 'auditLog' || key === 'idpSessionEnd') return delegate(inst, base, key, 'root');
+    if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'providerChange'].includes(key)) return delegate(inst, base, key, 'root');
     const value = base[key];
     return typeof value === 'function' ? value.bind(base) : value;
   } });
@@ -650,6 +696,12 @@ async function world(t, { now = START } = {}) {
    * authenticated that SSO; without it the token carries none (U5E-21 is the case about it).
    */
   w.issue = async (label, { sub, groups = [A], email, roles = ['radiologist'], expIn = HOUR / 1000, key = 'main', same, idp, authTime } = {}) => {
+    // Provisioning fixture, independent of token issuance after the first version. JWT changes never change this row.
+    const cleanGroups = groups.filter(g => typeof g === 'string').map(g => g.replace(/^\//, ''));
+    const managedRoles = roles.filter(role => ['admin','radiologist','technician','clinician'].includes(role));
+    if (!await base.memberRights.findUnique({where:{sub}})) await base.memberRights.create({ data: { sub, username: sub, email: email ?? sub + '@synthetic.test',
+      name: sub, emailVerified: true, approved: cleanGroups.length === 1 && managedRoles.length > 0 && !roles.includes('gateway'),
+      suspended: false, institution: cleanGroups.length === 1 ? cleanGroups[0] : null, roles: managedRoles, version: 1 } });
     const now = Math.floor(Date.now() / 1000);
     const jti = label + '-' + randomUUID();
     const sid = idp === undefined ? 'syn-idp-' + sub : idp;
@@ -670,7 +722,8 @@ async function world(t, { now = START } = {}) {
   w.session = async (v, { lastSeenAt = new Date(), atExpiresAt = new Date(v.exp * 1000 - 30_000), legacy = false } = {}) => {
     const sid = randomBytes(32).toString('base64url');
     w.secret('sid', sid);
-    await base.authSession.create({ data: { sid, sub: v.sub, accessToken: v.access, refreshToken: v.refresh, atExpiresAt, lastSeenAt,
+    const rights = await base.memberRights.findUnique({ where: { sub: v.sub } });
+    await base.authSession.create({ data: { rightsVersion: rights.version, institution: rights.institution, sid, sub: v.sub, accessToken: v.access, refreshToken: v.refresh, atExpiresAt, lastSeenAt,
       idpSid: legacy ? null : v.idp } });
     return sid;
   };
@@ -767,12 +820,16 @@ async function login(w, inst, v, { ip = IP } = {}) {
 }
 
 /** The provider answers a started flow with a code for token version v: the browser comes back to the callback. */
-async function answerFlow(w, inst, begin, v, { ip = IP, sid, cookies = [] } = {}) {
+async function answerFlow(w, inst, begin, v, { ip = IP, sid, cookies = [], nonce } = {}) {
   const state = new URL(begin.location).searchParams.get('state');
   w.secret('state', state);
   const code = 'syn-code-' + randomUUID();
   w.secret('code', code);
-  kc.auto = form => form.grant_type === 'authorization_code' ? reply.tokens(v) : reply.reject();
+  const identity = await new jose.SignJWT({ nonce: nonce ?? state, auth_time: jose.decodeJwt(v.access).auth_time ?? Math.floor(Date.now()/1000) })
+    .setProtectedHeader({ alg: 'RS256', kid: KEYS.main.kid }).setIssuer(ISSUER).setAudience('kin-bff').setSubject(v.sub)
+    .setIssuedAt().setExpirationTime(Math.floor(Date.now()/1000)+3600).sign(KEYS.main.privateKey);
+  w.secret('id-token', identity);
+  kc.auto = form => form.grant_type === 'authorization_code' ? [200, {...reply.tokens(v)[1], id_token: identity}] : reply.reject();
   const done = await w.call(inst, 'callback', { sid, cookie: [begin.pendingCookie, ...cookies].join('; '), ip, query: { code, state } });
   kc.auto = null;
   for (const entry of kc.codes) w.secret('verifier', entry.verifier);
@@ -867,7 +924,12 @@ test('AS-02 the record-time institution is the token\'s one group, as the guard 
     const sub = 'syn-sub-v' + (++n);
     const v = await w.issue('login-' + n, { sub, groups, roles });
     assert.equal((await guardView(w, v.access)).institution, expected, label + ': the guard rule');
-    await login(w, w.I1, v);
+    const result = await login(w, w.I1, v);
+    if (!expected || !roles.length) {
+      assert.equal(result.done.newSid, null, label + ': invalid DB member cannot authenticate');
+      assert.equal((await w.call(w.I2, 'get', { bearer: v.access })).status, 401, label);
+      continue;
+    }
     // Three logins of one account on three PCs (three provider sessions): each ends by itself.
     const out = await w.call(w.I1, 'logout', { sid: await w.session(await w.issue('out-' + n, { sub, groups, roles, idp: 'syn-idp-out-' + n })) });
     assert.equal(out.status, 204, label);
@@ -1289,7 +1351,7 @@ test('AS-09 a DB failure on any path is a fixed 500 with nothing committed and n
     const s = sub(), sid = await w.session(await w.issue(s, { sub: s, groups: [A] }), { atExpiresAt: lapsed() });
     const next = await w.issue(s + '-next', { sub: s, groups: [A] }), later = await w.issue(s + '-later', { sub: s, groups: [A] });
     kc.auto = () => reply.tokens(next);
-    w.fault('I1', 'store', dbError('store-' + nextAnswer));
+    w.fault('I1', 'tx.updateMany', dbError('store-' + nextAnswer));
     const out = await w.call(w.I1, 'get', { sid });
     assert.ok(storageFailure(out), nextAnswer);
     assert.deepEqual([out.cookie, await w.version(sid)], ['K', s], nextAnswer);
@@ -1377,7 +1439,7 @@ test('AS-10 (b) synthetic DB error markers never reach a response, the logger, s
     await run('store', async tag => {
       const sid = await session(tag, { atExpiresAt: lapsed() }), next = await w.issue(tag + '-next', { sub: 'syn-sub-' + tag, groups: [A] });
       kc.auto = () => reply.tokens(next);
-      w.fault('I1', 'store', dbError(tag));
+      w.fault('I1', 'tx.updateMany', dbError(tag));
       const out = await w.call(w.I1, 'get', { sid });
       kc.auto = null;
       assert.ok(storageFailure(out));
@@ -1467,8 +1529,8 @@ test('AS-12 T1 (RT-01, X-11) and its sequential attribution variants (X-18)', as
   kc.auto = chainAnswers(chain);
   w.I2.service.onModuleInit();
   try {
-    for (const [end, row] of [['switch', ['auth.logout', 'account_switch', B]], ['logout', ['auth.logout', 'logout', B]],
-      ['idle', ['auth.session.expired', 'idle', B]], ['sweep', ['auth.session.expired', 'sweep', B]]]) {
+    for (const [end, row] of [['switch', ['auth.logout', 'account_switch', A]], ['logout', ['auth.logout', 'logout', A]],
+      ['idle', ['auth.session.expired', 'idle', A]], ['sweep', ['auth.session.expired', 'sweep', A]]]) {
       const sub = 'syn-sub-t1-' + end;
       const a = await w.issue(sub + '-a', { sub, groups: [A] }), b = await w.issue(sub + '-b', { sub, groups: [B] });
       chain.set(a.refresh, b);
@@ -1691,7 +1753,7 @@ test('AS-12 T7 (RT-13, RT-14, RT-02; X-21, X-22): same-exp tokens of different v
       const o1 = await r1;
       if (then === 'success') assert.deepEqual([o1.status, await w.version(sid), await endsOf(w, s)], [200, s + '-v3', []]);
       else assert.deepEqual([o1.status, o1.cookie, await w.version(sid), await endsOf(w, s)],
-        [401, 'K', null, [['auth.session.expired', 'refresh_failed', B]]]);
+        [401, 'K', null, [['auth.session.expired', 'refresh_failed', A]]]);
     });
   }
   // (b) v2 stored, then v1's late success v2' is discarded; the follow-up refresh of v2 is held with v2 in place.
@@ -1724,7 +1786,7 @@ test('AS-12 T7 (RT-13, RT-14, RT-02; X-21, X-22): same-exp tokens of different v
   await w.finish('AS-12 T7');
 });
 
-test('AS-12 T8 (RT-06, X-23): an account switch read v1; v2 (B) is stored before its delete; it ends v2 and records B', async t => {
+test('AS-12 T8 (RT-06, X-23): an account switch read v1; v2 (B) is stored before its delete; it ends v2 and retains DB institution A', async t => {
   const w = await world(t);
   for (const [kind, body] of [['switch', SWITCH], ['signup', undefined]]) {
     const s = 'syn-sub-t8-' + kind;
@@ -1740,7 +1802,7 @@ test('AS-12 T8 (RT-06, X-23): an account switch read v1; v2 (B) is stored before
     gate.release();
     const out = await sw;
     assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)],
-      [200, 'P', null, [['auth.logout', kind === 'switch' ? 'account_switch' : 'reauthentication', B]]], kind);
+      [200, 'P', null, [['auth.logout', kind === 'switch' ? 'account_switch' : 'reauthentication', A]]], kind);
   }
   await w.finish('AS-12 T8');
 });
@@ -1776,7 +1838,7 @@ test('AS-12 T9 (RT-15, X-24, O-10, X-33): three interleaved refreshes give an en
   const kept = await w.version(sid);
   assert.ok(kept && kept.startsWith(s + '-v'), 'a later version remains');
   out = await w.call(w.I1, 'switch', { sid, body: SWITCH });
-  assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)], [200, 'P', null, [['auth.logout', 'account_switch', B]]]);
+  assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)], [200, 'P', null, [['auth.logout', 'account_switch', A]]]);
   // logout (the competitor's refreshes keep winning its three deletes): 409 AUTH_SESSION_BUSY - not ended, Keycloak not
   // told (S06) - then the next logout ends the kept version as it stands, without a refresh of its own.
   s = 'syn-sub-t9-logout';
@@ -1788,7 +1850,7 @@ test('AS-12 T9 (RT-15, X-24, O-10, X-33): three interleaved refreshes give an en
   const asked = kc.tokens;
   out = await w.call(w.I1, 'logout', { sid });
   assert.deepEqual([out.status, out.cookie, kc.tokens - asked, await w.told() - logouts, await w.version(sid), await endsOf(w, s)],
-    [204, 'K', 0, 1, null, [['auth.logout', 'logout', B]]]);
+    [204, 'K', 0, 1, null, [['auth.logout', 'logout', A]]]);
   // X-33: after the third conflict the session is already gone (I2 logged out): the end completes, 409 is not given,
   // and the row is the one of the transition that deleted it.
   for (const kind of ['switch', 'logout']) {
@@ -1796,12 +1858,12 @@ test('AS-12 T9 (RT-15, X-24, O-10, X-33): three interleaved refreshes give an en
     ({ out, sid } = await interleavedEnds(w, { s, kind, body: kind === 'switch' ? SWITCH : undefined, rounds: 3,
       last: async sidX => assert.equal((await w.call(w.I2, 'logout', { sid: sidX })).status, 204) }));
     assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)],
-      [kind === 'switch' ? 200 : 204, kind === 'switch' ? 'P' : 'K', null, [['auth.logout', 'logout', B]]], kind);
+      [kind === 'switch' ? 200 : 204, kind === 'switch' ? 'P' : 'K', null, [['auth.logout', 'logout', A]]], kind);
   }
   await w.finish('AS-12 T9');
 });
 
-test('AS-12 T10 (RT-06, X-25): a logout read v1 (A); v2 (B) is stored before its delete; it ends v2 and records B', async t => {
+test('AS-12 T10 (RT-06, X-25): a logout read v1 (A); v2 (B) is stored before its delete; it ends v2 and retains DB institution A', async t => {
   const w = await world(t);
   const s = 'syn-sub-t10';
   const v1 = await w.issue(s + '-v1', { sub: s, groups: [A], expIn: 2 });
@@ -1817,7 +1879,7 @@ test('AS-12 T10 (RT-06, X-25): a logout read v1 (A); v2 (B) is stored before its
   gate.release();
   const out = await held;
   kc.auto = null;
-  assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)], [204, 'K', null, [['auth.logout', 'logout', B]]]);
+  assert.deepEqual([out.status, out.cookie, await w.version(sid), await endsOf(w, s)], [204, 'K', null, [['auth.logout', 'logout', A]]]);
   await w.finish('AS-12 T10');
 });
 
@@ -1839,12 +1901,12 @@ test('AS-12 T11 (RT-15, X-26, X-33): a request whose every refresh write loses t
     };
     const sid = await w.session(versions[0]);
     const tokens = kc.tokens, handled = w.I1.handled;
-    let gate = w.gate('I1', 'store');
+    let gate = w.gate('I1', 'tx.open');
     const held = w.call(w.I1, 'get', { sid });
     for (let n = 1; n <= 3; n++) {
       await gate.arrived();
       const current = gate;
-      if (n < 3) gate = w.gate('I1', 'store');
+      if (n < 3) gate = w.gate('I1', 'tx.open');
       if (n === 3 && last) await last(sid);
       else assert.equal((await w.call(w.I2, 'get', { sid })).status, 200, 'I2 stores first in round ' + n);
       current.release();
@@ -1868,7 +1930,7 @@ test('AS-12 T11 (RT-15, X-26, X-33): a request whose every refresh write loses t
   await w.finish('AS-12 T11');
 });
 
-test('AS-12 T12 (RT-09, X-29): R2 judged v1 idle and waits; R stored v2 (B) - (a) touched: R2 proceeds; (b) not yet: R2 ends v2, idle B', async t => {
+test('AS-12 T12 (RT-09, X-29): R2 judged v1 idle and waits; R stored v2 (B) - (a) touched: R2 proceeds; (b) not yet: R2 ends v2, DB institution A', async t => {
   const w = await world(t);
   for (const variant of ['a', 'b']) {
     kc.held = [];
@@ -1897,7 +1959,7 @@ test('AS-12 T12 (RT-09, X-29): R2 judged v1 idle and waits; R stored v2 (B) - (a
       gate2.release();
       const o2 = await r2;
       assert.deepEqual([o2.status, o2.body?.message, o2.cookie, await w.version(sid), await endsOf(w, s)],
-        [401, EXPIRED, 'K', null, [['auth.session.expired', 'idle', B]]], '(b) exactly one idle row, institution B');
+        [401, EXPIRED, 'K', null, [['auth.session.expired', 'idle', A]]], '(b) exactly one idle row, institution B');
       touch.release();
       assert.deepEqual([(await r).status, (await r).cookie], [200, 'K'], '(b) R, already adopted, completes');
     }
@@ -2334,13 +2396,11 @@ test('U5S-REQ-09 entry proof: a login is entered once, by the document that hold
   assert.deepEqual(coded(await w.call(w.I2, 'entry', { sid: second.done.newSid, body: { proof: second.done.proof } })), [403, 'AUTH_ENTRY_REFUSED', 'AUTH_ENTRY_REFUSED']);
   const tab = await w.call(w.I2, 'me', { sid: second.done.newSid });
   assert.deepEqual([tab.status, typeof tab.body.sessionId, await entries('syn-sub-e2')], [200, 'string', []]);
-  // A member waiting for approval can enter, is told so with the id it needs, and can log out with it.
+  // Pending membership does not create an authentication or an entry proof (D621).
   const pending = await login(w, w.I1, await w.issue('e3', { sub: 'syn-sub-e3', groups: [] }));
-  const pe = await w.call(w.I1, 'entry', { sid: pending.done.newSid, body: { proof: pending.done.proof } });
-  const pm = await w.call(w.I1, 'me', { sid: pending.done.newSid });
-  assert.deepEqual([pe.status, pm.status, pm.body?.code, pm.body?.sessionId === pe.body.sessionId], [200, 403, 'INSTITUTION_PENDING', true]);
-  const out = await w.call(w.I1, 'logout', { sid: pending.done.newSid, binding: pe.body.sessionId });
-  assert.deepEqual([out.status, out.cookie, await w.version(pending.done.newSid)], [204, 'K', null]);
+  assert.equal(pending.done.newSid, null);
+  assert.equal(pending.done.proof, undefined);
+  assert.equal(await w.base.authSession.count({where:{sub:'syn-sub-e3'}}),0);
   assert.equal(w.faults.length, 0, 'the injected failure was reached');
   await w.finish('U5S-REQ-09', { output: markers('entry') });
 });
@@ -2402,7 +2462,7 @@ test('U5E-02 (acceptance 2) a session a callback created first on the same provi
   const out = await w.call(w.I1, 'logout', { sid: s1 });
   assert.deepEqual([out.status, await w.sessions(), await w.told() - asked], [204, 0, 1], 'both rows gone, the provider told once');
   // One record per product row really ended, each with its own recorded institution; no row twice.
-  assert.deepEqual(await endsOf(w, s), [['auth.logout', 'logout', A], ['auth.logout', 'logout', B]]);
+  assert.deepEqual(await endsOf(w, s), [['auth.logout', 'logout', A], ['auth.logout', 'logout', A]]);
   const after = await w.call(w.I2, 'get', { sid: s2 });
   assert.deepEqual([...coded(after), after.cookie], [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED', 'K']);
   assert.deepEqual(await w.marks(), [[X, 'logout', true]]);
@@ -2804,7 +2864,7 @@ test('U5E-10 a callback is never answered with an error body: a stray one enters
 // SEA-F02 (review A of 757e37f): design 5-0 item 4 - the first cause and decidedAt of a mark are never overwritten by a
 // later end or a retry (the 13 h keep window counts from the last confirmation, U5E-21 g). The opposite side: a later end still re-wakes the
 // provider end of a mark whose provider session produced a code again.
-test('U5E-11 a later end of the same provider session for another cause keeps the first cause and time, and still wakes the provider end', async t => {
+test('U5E-11 a later end keeps the first cause; an already-ended authentication never reopens its mark', async t => {
   const w = await world(t);
   const s = 'syn-sub-u5e11', X = idpOf(s);
   const sid = await w.session(await w.issue('u5e11-v1', { sub: s, groups: [A] }));
@@ -2823,17 +2883,16 @@ test('U5E-11 a later end of the same provider session for another cause keeps th
   let mark = await w.mark(X);
   assert.deepEqual([mark.cause, mark.decidedAt.getTime(), mark.confirmedAt !== null], ['logout', first.decidedAt.getTime(), true],
     'the first cause and decision time stay; the end is now confirmed');
-  // The confirmed mark's SSO answers once more (another recovery start, record_unreadable) while the admin API is down: the
-  // end re-wakes the mark (unconfirmed again, asked again) and still keeps the first cause and time.
+  // R10-O6: a delayed code of the confirmed authentication is refused without reopening the mark or sending a new DELETE.
   w.tick(60_000);
   kc.logoutMode = 'refused';
   const asked = kc.endRequests.filter(x => x === X).length;
   const begin2 = await w.call(w.I2, 'switch', { body: UNREADABLE });
   const probed2 = await answerFlow(w, w.I2, begin2, await w.issue('u5e11-v3', { sub: s, groups: [A] }));
-  assert.deepEqual([probed2.location, probed2.newSid], [landing('end_unconfirmed'), null]);
+  assert.deepEqual([probed2.location, probed2.newSid], [landing('stale'), null]);
   mark = await w.mark(X);
-  assert.deepEqual([mark.cause, mark.decidedAt.getTime(), mark.confirmedAt, kc.endRequests.filter(x => x === X).length - asked],
-    ['logout', first.decidedAt.getTime(), null, 1], 'woken: unconfirmed again and asked again; the first cause and time stay');
+  assert.deepEqual([mark.cause, mark.decidedAt.getTime(), mark.confirmedAt !== null, kc.endRequests.filter(x => x === X).length - asked],
+    ['logout', first.decidedAt.getTime(), true, 0], 'confirmed authentication stays ended; no new DELETE');
   kc.logoutMode = 'ok';
   assert.deepEqual(await endsOf(w, s), [['auth.logout', 'logout', A]], 'one record: the probes ended no product session');
   await w.finish('U5E-11');
@@ -2905,211 +2964,19 @@ test('U5E-12 a provider-session lock held past its wait: the Log out answers 409
 // member's other PCs end too - each provider session the provider lists is ended by its own id; there is no whole-user
 // logout (S7-U5 D600). A callback that had exchanged its code before the isolation makes no session. Another member is
 // untouched.
-test('U5E-13 an administrator\'s isolation ends every session of the member through the same end: marks, provider end, records with cause isolation; a callback in flight makes no session', async t => {
-  const w = await world(t);
-  const { AdminService } = require('/app/dist/admin.service');
-  const m = 'syn-sub-u5e13', other = 'syn-sub-u5e13-other';
-  const P1 = 'syn-idp-u5e13-pc1', P2 = 'syn-idp-u5e13-pc2';
-  kc.members[m] = { username: 'syn-member-u5e13', email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'] };
-  const sid1 = await w.session(await w.issue('u5e13-pc1', { sub: m, groups: [A], idp: P1 }));
-  const sid2 = await w.session(await w.issue('u5e13-pc2', { sub: m, groups: [A], idp: P2 }));
-  const kept = await w.session(await w.issue('u5e13-other', { sub: other, groups: [A] }));
-  // A login of the member on PC1 has exchanged its code (PC1's SSO answered without a form) and waits for its transaction.
-  const begin = await w.call(w.I2, 'login');
-  const gate = w.gate('I2', 'tx.open');
-  const heldC = answerFlow(w, w.I2, begin, await w.issue('u5e13-pc1-again', { sub: m, groups: [A], idp: P1 }));
-  await gate.arrived();
-  // And on a third PC a first login of the member, a NEW provider session no product row knows, has exchanged its code
-  // before the isolation too and commits after the cleanup. The provider lists the
-  // member's live provider sessions: those of PC1, PC2 and PC3.
-  const P3 = 'syn-idp-u5e13-pc3';
-  kc.members[m].sessions = [P1, P2, P3];
-  const I3 = w.instance('I3');
-  const begin3 = await w.call(I3, 'login');
-  const gate3 = w.gate('I3', 'tx.open');
-  const heldNew = answerFlow(w, I3, begin3, await w.issue('u5e13-pc3', { sub: m, groups: [A], idp: P3 }));
-  await gate3.arrived();
-  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
-  const after = await admin.patchUser(m, { enabled: false }, { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' });
-  await w.told();
-  assert.deepEqual([after.enabled, kc.members[m].enabled, kc.userLogouts, [P1, P2, P3].filter(sid => kc.ended.includes(sid))],
-    [false, false, [], [P1, P2, P3]], 'disabled; every listed provider session ended by its own id, no whole-user logout');
-  assert.deepEqual([await w.version(sid1), await w.version(sid2), await w.version(kept)], [null, null, 'u5e13-other']);
-  assert.deepEqual(await w.marks(), [[P1, 'isolation', true], [P2, 'isolation', true], [P3, 'isolation', true]],
-    'a mark for every provider session the provider lists - also the one no product row knows - confirmed');
-  assert.deepEqual(await endsOf(w, m), [['auth.logout', 'isolation', A], ['auth.logout', 'isolation', A]], 'one record per ended session');
-  // Whom the provider was asked to end, not how often: a session the provider still lists while the first end request
-  // is on its way is asked again (designed and idempotent - a repeat is answered 404 and counts as confirmed). How often
-  // that happens depends on the database's round trips, not on a contract.
-  assert.deepEqual([...new Set(kc.endRequests)].sort(), [P1, P2, P3],
-    'every provider session the isolation listed or ended is told (a repeat answered 404 is allowed)');
-  gate.release();
-  const late = await heldC;
-  assert.deepEqual([late.newSid, late.proof, await w.base.authSession.count({ where: { sub: m } })], [null, undefined, 0],
-    'the mark blocks the callback that had exchanged its code before the isolation');
-  assert.equal(rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause, 'idp_session_ended');
-  // The new provider session's callback commits after the cleanup: its provider session is marked (a recorded fact, not
-  // a timing) - no session; its failure row says so.
-  gate3.release();
-  const isolated = await heldNew;
-  assert.deepEqual([isolated.newSid, isolated.proof, await w.base.authSession.count({ where: { sub: m } })],
-    [null, undefined, 0], 'a code exchanged before the isolation makes no session after it');
-  assert.equal(rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause, 'idp_session_ended');
-  // A session of the isolated member that exists anyway (put here directly): its next refresh is refused by this server
-  // at once - ended with cause isolation and its mark - whatever the provider's refresh answer says.
-  const v = await w.issue('u5e13-left', { sub: m, groups: [A], idp: 'syn-idp-u5e13-left' });
-  const left = await w.session(v, { atExpiresAt: lapsed() });
-  kc.auto = () => reply.tokens(v);
-  const refused = await w.call(w.I1, 'get', { sid: left });
-  kc.auto = null;
-  assert.deepEqual([...coded(refused), await w.version(left)], [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED', null]);
-  await w.told();
-  assert.deepEqual([(await w.marks()).find(x => x[0] === 'syn-idp-u5e13-left'), (await endsOf(w, m)).length],
-    [['syn-idp-u5e13-left', 'isolation', true], 3]);
-  // The isolation is our own recorded fact, its provider work done.
-  assert.deepEqual((await w.base.memberIsolation.findMany()).map(r => [r.sub, r.providerDoneAt !== null]), [[m, true]]);
-  // The opposite side: the other member's refresh goes on - also with the admin API out, which the refresh never asks.
-  const ov = await w.issue('u5e13-other-next', { sub: other, groups: [A] });
-  const oldOther = await w.session(await w.issue('u5e13-other-2', { sub: other, groups: [A] }), { atExpiresAt: lapsed() });
-  kc.auto = () => reply.tokens(ov);
-  kc.adminDown = true;
-  const calls = kc.adminCalls.length;
-  assert.deepEqual([(await w.call(w.I1, 'get', { sid: oldOther })).status, kc.adminCalls.length - calls], [200, 0]);
-  kc.adminDown = false;
-  kc.auto = null;
-  await w.finish('U5E-13');
-});
+
 
 // Commander decisions on SEA-F08 (fix round 1): the isolation's marks are a recorded fact - re-activating the member
 // (approval change, cancel, Activate) does not reopen a provider session the isolation listed. Integration round 6 (A):
 // the login path reads no provider state at all - the member's isolation is our own fact (MemberIsolation).
-test('U5E-14 a code exchanged before an isolation stays refused after the member is active again; the login path never asks the admin API', async t => {
-  const w = await world(t);
-  const { AdminService } = require('/app/dist/admin.service');
-  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
-  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
-  const m = 'syn-sub-u5e14', Q = 'syn-idp-u5e14-q';
-  kc.members[m] = { username: 'syn-member-u5e14', email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [Q] };
-  // The member's login has exchanged its code (no product row yet) and is held; the member is suspended and then made
-  // active again before that login commits.
-  const begin = await w.call(w.I2, 'login');
-  const gate = w.gate('I2', 'tx.open');
-  const held = answerFlow(w, w.I2, begin, await w.issue('u5e14-q', { sub: m, groups: [A], idp: Q }));
-  await gate.arrived();
-  try {
-    assert.equal((await admin.patchUser(m, { enabled: false }, caller)).enabled, false);
-    assert.equal((await admin.patchUser(m, { enabled: true }, caller)).enabled, true);
-  } finally {
-    gate.release();
-  }
-  const late = await held;
-  assert.deepEqual([kc.members[m].enabled, late.newSid, late.proof, await w.base.authSession.count({ where: { sub: m } })],
-    [true, null, undefined, 0], 'active again, and still no session from the provider session the isolation marked');
-  assert.deepEqual([(await w.marks()).find(x => x[0] === Q)?.slice(0, 2), rowsOf(await w.rows(), m).at(-1).detail.cause],
-    [[Q, 'isolation'], 'idp_session_ended']);
-  // The re-activation finished: our fact is gone (only a finished re-activation removes it).
-  assert.equal(await w.base.memberIsolation.count({ where: { sub: m } }), 0);
-  // A new login after the re-activation (a new provider session, credentials entered) enters as usual.
-  const again = await login(w, w.I2, await w.issue('u5e14-new', { sub: m, groups: [A], idp: 'syn-idp-u5e14-new' }));
-  assert.deepEqual([again.done.cookie, !!again.done.proof], ['S', true]);
-  // The admin API out: an ordinary login enters, asks it nothing, and its success row is the ordinary one.
-  const u = 'syn-sub-u5e14-out';
-  kc.adminDown = true;
-  const calls = kc.adminCalls.length;
-  const out = await login(w, w.I2, await w.issue('u5e14-u', { sub: u, groups: [A] }));
-  kc.adminDown = false;
-  assert.deepEqual([out.done.cookie, !!out.done.proof, kc.adminCalls.length - calls], ['S', true, 0]);
-  assert.deepEqual(rowsOf(await w.rows(), u).map(r => r.detail.outcome), ['success']);
-  await w.finish('U5E-14');
-});
+
 
 // Integration round 6 (A): the reviewers' counter-example to "an unreadable member state lets the login through" -
 // the disable succeeded, the session listing failed, nothing was marked, the state read fails, and a code exchanged
 // before the isolation passes. The rule now: the isolation FIRST writes our own durable fact, THEN does the provider work;
 // the callback and the refresh read only that fact; the retry cycle finishes unfinished provider work from the fact; only
 // a finished re-activation removes it. Every interleaving the reviewers named makes no session.
-test('U5E-15 isolation is our own fact written before any provider work: listing or disabling fails, a code exchanged before it, a re-activation in between - no session; the cycle finishes the provider work', async t => {
-  const w = await world(t);
-  const { AdminService } = require('/app/dist/admin.service');
-  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
-  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
-  const fact = async sub => (await w.base.memberIsolation.findUnique({ where: { sub } })) ?? null;
-  const sessionsOf = sub => w.base.authSession.count({ where: { sub } });
 
-  for (const failing of ['sessions', 'disable']) {
-    // (1) A code exchanged before the isolation (an SSO no product row knows) waits for its transaction; the member also
-    // has a live product session. The provider fails one step of the isolation: the listing, or the disable.
-    const m = 'syn-sub-u5e15-' + failing, P = 'syn-idp-u5e15-' + failing, L = P + '-live';
-    kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [P, L] };
-    const live = await w.session(await w.issue('u5e15-live-' + failing, { sub: m, groups: [A], idp: L }));
-    const begin = await w.call(w.I2, 'login');
-    const gate = w.gate('I2', 'tx.open');
-    const held = answerFlow(w, w.I2, begin, await w.issue('u5e15-' + failing, { sub: m, groups: [A], idp: P }));
-    await gate.arrived();
-    // The listing is answered 503 (a read: nothing to settle); the disable does not connect (never sent - a 503 to a change
-    // would leave it unknown, and an unknown disable is never finished by anyone: U5E-27).
-    if (failing === 'sessions') kc.adminFail = { sessions: 99 }; else kc.adminRefuse = { disable: 99 };
-    const calls = kc.adminCalls.length;
-    await assert.rejects(admin.patchUser(m, { enabled: false }, caller), error => error?.response?.code === 'USER_ISOLATED' || /USER_ISOLATED/.test(JSON.stringify(error?.response ?? '')),
-      failing + ': the isolation reports that it did not finish');
-    // Our fact was written before any provider call, and its provider work is owed.
-    const owed = await fact(m);
-    assert.deepEqual([!!owed, owed?.providerDoneAt ?? null], [true, null], failing + ': the fact is recorded, provider work owed');
-    assert.ok(kc.adminCalls.slice(calls).includes('GET sessions'), failing + ': the provider work started after the fact');
-    // The member's existing session ended at once (our own data; no provider answer needed), with cause isolation.
-    assert.deepEqual([await w.version(live), (await w.marks()).find(x => x[0] === L)?.slice(0, 2)], [null, [L, 'isolation']]);
-    // (2) The code exchanged before the isolation resumes: no session. With the listing failed nothing marked its
-    // provider session and the provider's state is not read - our fact refuses it (member_isolated); with the disable
-    // failed the listing had already marked it (idp_session_ended).
-    gate.release();
-    const late = await held;
-    assert.deepEqual([late.newSid, late.proof, await sessionsOf(m), rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause],
-      [null, undefined, 0, failing === 'sessions' ? 'member_isolated' : 'idp_session_ended'], failing + ': the earlier code passes no more');
-    // Even with the admin API out entirely, the same: the login path does not depend on it.
-    kc.adminDown = true;
-    const before = kc.adminCalls.length;
-    const again = await login(w, w.I1, await w.issue('u5e15-again-' + failing, { sub: m, groups: [A], idp: P + '-2' }));
-    assert.deepEqual([again.done.newSid, kc.adminCalls.length - before], [null, 0], failing + ': refused without asking the admin API');
-    kc.adminDown = false;
-    // (3) A re-activation while the provider work is owed and still failing: it does not remove the fact - it must
-    // finish the owed provider work first - so the member stays refused.
-    await assert.rejects(admin.patchUser(m, { enabled: true }, caller), undefined, failing + ': Activate over unfinished provider work fails');
-    assert.ok(await fact(m), failing + ': the fact stays after a failed re-activation');
-    // (4) The provider recovers; the end retry cycle finishes the provider work from the fact (no admin action): every
-    // provider session listed is marked and ended by its own id, the member is disabled, the fact says done - and stays.
-    kc.adminFail = {};
-    kc.adminRefuse = {};
-    const restarted = w.instance('R-' + failing);
-    restarted.service.onModuleInit();
-    try {
-      await w.until(failing + ': the owed provider work finished', async () => (await fact(m))?.providerDoneAt != null);
-    } finally {
-      restarted.service.onModuleDestroy();
-    }
-    await w.told();
-    assert.deepEqual([kc.members[m].enabled, kc.userLogouts.includes(m), [P, L].filter(sid => kc.ended.includes(sid)),
-      (await w.marks()).filter(x => x[0] === P || x[0] === L)],
-      [false, false, [P, L], [[P, 'isolation', true], [L, 'isolation', true]]], failing + ': provider work done from the fact');
-    // (5) A finished re-activation removes the fact; the provider session the isolation listed stays closed, a new login enters.
-    assert.equal((await admin.patchUser(m, { enabled: true }, caller)).enabled, true);
-    assert.equal(await fact(m), null, failing + ': only a finished re-activation removes the fact');
-    const old = await login(w, w.I2, await w.issue('u5e15-old-' + failing, { sub: m, groups: [A], idp: P }));
-    assert.equal(old.done.newSid, null, failing + ': the listed provider session stays closed after the re-activation');
-    const fresh = await login(w, w.I2, await w.issue('u5e15-new-' + failing, { sub: m, groups: [A], idp: P + '-new' }));
-    assert.deepEqual([fresh.done.cookie, !!fresh.done.proof], ['S', true], failing + ': a new login enters again');
-  }
-  // (6) Opposite side: another member is untouched by all of this, and its refresh never reads provider state.
-  const o = 'syn-sub-u5e15-other';
-  const ov = await w.issue('u5e15-other-next', { sub: o, groups: [A] });
-  const oldOther = await w.session(await w.issue('u5e15-other', { sub: o, groups: [A] }), { atExpiresAt: lapsed() });
-  kc.auto = () => reply.tokens(ov);
-  kc.adminDown = true;
-  const calls = kc.adminCalls.length;
-  assert.deepEqual([(await w.call(w.I1, 'get', { sid: oldOther })).status, kc.adminCalls.length - calls], [200, 0]);
-  kc.adminDown = false;
-  kc.auto = null;
-  await w.finish('U5E-15');
-});
 
 // Integration review F01 (R2-F02): "a probe never makes a session" holds for every probe of a flow, not only its first.
 // A probe is asked again after an answer that did not identify the SSO (interaction_required), and a probe flow that
@@ -3188,53 +3055,7 @@ async function quiet(w) {
 // On the in-memory stand-in (tmp/.../local-svc) the store fault and the cycle run the same way, so these assertions are
 // not vacuous there; what the stand-in does not model is PostgreSQL's locking (advisory locks, lock_timeout), which this
 // case does not rely on.
-test('U5E-17 a failed second isolation step and a failing provider listing: the retry cycle still ends the member\'s surviving session and disables the member; the fact stays owed until a listing lets it mark and end the other provider session', async t => {
-  const w = await world(t);
-  const { AdminService } = require('/app/dist/admin.service');
-  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
-  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
-  const m = 'syn-sub-u5e17', L = 'syn-idp-u5e17-live', P = 'syn-idp-u5e17-other-pc';
-  kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [L, P] };
-  const live = await w.session(await w.issue('u5e17-live', { sub: m, groups: [A], idp: L }));
-  // Step 2 (the read of the member's product sessions) fails once; the provider's listing fails throughout.
-  w.fault('I1', 'sweepRead', new Error('syn: the store failed'));
-  kc.adminFail = { sessions: 99 };
-  await assert.rejects(admin.patchUser(m, { enabled: false }, caller),
-    error => /USER_ISOLATED/.test(JSON.stringify(error?.response ?? error?.message ?? '')), 'the isolation reports that it did not finish');
-  const fact = await w.base.memberIsolation.findUnique({ where: { sub: m } });
-  assert.deepEqual([!!fact, fact?.providerDoneAt ?? null], [true, null], 'the fact is recorded, its provider work owed');
-  // One retry cycle (a process start resumes every owed isolation), the listing still failing.
-  const cycle = w.instance('C17');
-  cycle.service.onModuleInit();
-  try { await quiet(w); } finally { cycle.service.onModuleDestroy(); }
-  await w.told();
-  // The surviving product session is ended (cause isolation) and refused - it does not keep working until atExpiresAt.
-  const used = await w.call(w.I1, 'get', { sid: live });
-  assert.deepEqual([await w.version(live), used.status, await endsOf(w, m)], [null, 401, [['auth.logout', 'isolation', A]]],
-    'the member\'s surviving session is ended by the cycle and refused');
-  // What needs no listing is done anyway: the member is disabled at the provider, and the provider session of the ended
-  // product row is ended by its id. The other PC's provider session is not known without a listing: neither marked nor ended.
-  assert.deepEqual([kc.members[m].enabled, kc.ended.includes(L), kc.ended.includes(P), (await w.marks()).map(x => x[0]), kc.userLogouts],
-    [false, true, false, [L], []], 'disabled and the known provider session ended without the listing; the unlisted one waits for it');
-  // No listing succeeded: the provider work stays owed.
-  assert.equal((await w.base.memberIsolation.findUnique({ where: { sub: m } }))?.providerDoneAt ?? null, null, 'still owed');
-  // The listing answers again: the next cycle marks the other PC's provider session, ends it by its id and finishes.
-  kc.adminFail = {};
-  const next = w.instance('C17b');
-  next.service.onModuleInit();
-  try {
-    await w.until('the owed provider work finished', async () =>
-      (await w.base.memberIsolation.findUnique({ where: { sub: m } }))?.providerDoneAt != null);
-  } finally {
-    next.service.onModuleDestroy();
-  }
-  await w.told();
-  // (Each listing that still names it asks again - a repeat is answered 404 and is done as well.)
-  const asked = await w.changes(P);
-  assert.deepEqual([kc.ended.includes(P), (await w.marks()).filter(x => x[0] === P), kc.userLogouts, asked.length > 0 && asked.every(state => state === 'done')],
-    [true, [[P, 'isolation', true]], [], true], 'listed, marked and ended by its own id, confirmed by the requests\' own answers');
-  await w.finish('U5E-17');
-});
+
 
 // Integration review F04 (b): an administrator's Activate runs while the retry cycle is inside the isolation's provider
 // work (held after it listed the member's provider sessions). The re-activation finishes the owed work itself, enables
@@ -3242,87 +3063,7 @@ test('U5E-17 a failed second isolation step and a failing provider listing: the 
 // log the member out or end the new session after that Activate.
 // On the stand-in the hold is the harness gate on the cycle's store transaction (not a lock), so the order is the same
 // on both; the assertion is not vacuous there.
-test('U5E-18 an Activate during the isolation retry cycle: the cycle does not disable, log out or end the member after the enable', async t => {
-  const w = await world(t);
-  const { AdminService } = require('/app/dist/admin.service');
-  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
-  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
-  const m = 'syn-sub-u5e18', P = 'syn-idp-u5e18-p';
-  kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [P] };
-  // The isolation's listing fails: the fact stays owed for the cycle.
-  kc.adminFail = { sessions: 99 };
-  await assert.rejects(admin.patchUser(m, { enabled: false }, caller), undefined, 'the isolation did not finish');
-  kc.adminFail = {};
-  // The cycle takes the owed work over (its first store transaction), lists the member's provider sessions and is held at its
-  // next store transaction (marking what the listing named; its disable is still to come).
-  const cycle = w.instance('C18');
-  const taken = w.gate('C18', 'tx.open'), gate = w.gate('C18', 'tx.open');
-  cycle.service.onModuleInit();
-  try {
-    await taken.arrived();
-    taken.release();
-    await gate.arrived();
-    // Activate meanwhile: the owed work is finished by the re-activation itself, the member enabled, the fact cleared.
-    assert.equal((await admin.patchUser(m, { enabled: true }, caller)).enabled, true);
-    assert.equal(await w.base.memberIsolation.count({ where: { sub: m } }), 0, 'the finished re-activation cleared the fact');
-    // The member logs in again (a new provider session, credentials entered).
-    const P2 = 'syn-idp-u5e18-p2';
-    kc.members[m].sessions = [P2];
-    const again = await login(w, w.I2, await w.issue('u5e18-again', { sub: m, groups: [A], idp: P2 }));
-    assert.equal(again.done.cookie, 'S', 'the active member enters');
-    const calls = kc.adminCalls.length;
-    gate.release();
-    await quiet(w);
-    await w.told();
-    // The cycle went on after the Activate: it disabled nobody, logged nobody out and ended nothing of the active member.
-    const after = kc.adminCalls.slice(calls);
-    assert.deepEqual([kc.members[m].enabled, after.filter(c => c === 'PUT disable' || c === 'POST logout'),
-      await w.base.authSession.count({ where: { sub: m } }), kc.ended.includes(P2)], [true, [], 1, false],
-      'the re-activated member stays enabled with its new session');
-  } finally {
-    taken.release();
-    gate.release();
-    cycle.service.onModuleDestroy();
-  }
-  // The same, with the re-activation still in progress when the cycle goes on (the fact not cleared yet): the
-  // re-activation has taken the owed work over, so the older cycle stops at its next step - it does not disable or log
-  // out the member in the middle of the Activate.
-  const m2 = 'syn-sub-u5e18-b', Q = 'syn-idp-u5e18-q';
-  kc.members[m2] = { username: m2, email: m2 + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [Q] };
-  kc.adminFail = { sessions: 99 };
-  await assert.rejects(admin.patchUser(m2, { enabled: false }, caller), undefined, 'the isolation did not finish');
-  kc.adminFail = {};
-  // The older cycle has taken the owed work over and listed; the Activate takes it over in turn (its first store transaction)
-  // and is held at its next one.
-  const older = w.instance('C18b');
-  const oldTaken = w.gate('C18b', 'tx.open'), held = w.gate('C18b', 'tx.open');
-  older.service.onModuleInit();
-  const activateTaken = w.gate('I1', 'tx.open'), activateHeld = w.gate('I1', 'tx.open');
-  let activating = null;
-  try {
-    await oldTaken.arrived();
-    oldTaken.release();
-    await held.arrived();
-    activating = admin.patchUser(m2, { enabled: true }, caller);
-    await activateTaken.arrived();
-    activateTaken.release();
-    await activateHeld.arrived();
-    const calls = kc.adminCalls.length;
-    held.release();
-    await quiet(w);
-    assert.deepEqual(kc.adminCalls.slice(calls).filter(c => c === 'PUT disable' || c === 'POST logout'), [],
-      'the older cycle stopped: the re-activation holds the owed work');
-  } finally {
-    oldTaken.release();
-    held.release();
-    activateTaken.release();
-    activateHeld.release();
-    older.service.onModuleDestroy();
-  }
-  assert.equal((await activating).enabled, true);
-  assert.deepEqual([kc.members[m2].enabled, await w.base.memberIsolation.count({ where: { sub: m2 } })], [true, 0]);
-  await w.finish('U5E-18');
-});
+
 
 // Review of 8c2cf37 (F-04): the cycle asks whether it still holds the owed work immediately before each provider call (and
 // before each product session it ends, which tells the provider), so an Activate that lands in between stops it - it asks
@@ -3334,46 +3075,7 @@ test('U5E-18 an Activate during the isolation retry cycle: the cycle does not di
 // (An Activate that lands while one of the cycle's provider calls is in flight waits for that call: U5E-20.)
 // The Activate finishes the owed work itself, enables the member and clears the fact. On the stand-in the hold is the
 // harness gate on the cycle's store read, not a lock, so the order is the same on both.
-test('U5E-19 an Activate that lands between the isolation retry cycle\'s provider calls stops the cycle: the member ends enabled, the fact cleared, nothing asked or ended after it', async t => {
-  const w = await world(t);
-  const { AdminService } = require('/app/dist/admin.service');
-  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
-  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
-  for (const tag of ['a', 'a2']) {
-    const at = { a: 'before the first listing', a2: 'before the first listing, logged in again' }[tag];
-    const m = 'syn-sub-u5e19' + tag, P = 'syn-idp-u5e19-' + tag, P2 = P + '-again';
-    kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [P] };
-    kc.adminFail = { sessions: 99 };
-    await assert.rejects(admin.patchUser(m, { enabled: false }, caller), undefined, at + ': the isolation did not finish');
-    kc.adminFail = {};
-    const cycle = w.instance('C19' + tag);
-    const { arrived, release } = w.gate('C19' + tag, 'sweepRead');
-    cycle.service.onModuleInit();
-    try {
-      await arrived();
-      assert.equal(kc.members[m].enabled, false, at + ': the member is disabled at the provider');
-      assert.equal((await admin.patchUser(m, { enabled: true }, caller)).enabled, true);
-      assert.equal(await w.base.memberIsolation.count({ where: { sub: m } }), 0, at + ': the finished re-activation cleared the fact');
-      const relogin = tag !== 'a';
-      if (relogin) {
-        kc.members[m].sessions = [P2];
-        const again = await login(w, w.I2, await w.issue('u5e19-again-' + tag, { sub: m, groups: [A], idp: P2 }));
-        assert.equal(again.done.cookie, 'S', at + ': the active member enters');
-      }
-      const calls = kc.adminCalls.length;
-      release();
-      await quiet(w);
-      await w.told();
-      assert.deepEqual([kc.adminCalls.slice(calls), kc.members[m].enabled, await w.base.memberIsolation.count({ where: { sub: m } }),
-        await w.base.authSession.count({ where: { sub: m } }), kc.ended.includes(P2)], [[], true, 0, relogin ? 1 : 0, false],
-        at + ': the cycle stopped - no provider call after the Activate, the member enabled (with its new session)');
-    } finally {
-      release();
-      cycle.service.onModuleDestroy();
-    }
-  }
-  await w.finish('U5E-19');
-});
+
 
 // ── S7-U5 D600 (Astra consultation, fix round 6): every change call to the provider is recorded before it is sent and only
 // its own answer settles it; an Activate answers within 15 s and succeeds only when no change of the member is unknown ──
@@ -3398,25 +3100,6 @@ function activation(admin, m, caller) {
   return run;
 }
 
-/**
- * Holds the next member-administration request `call` ('PUT disable', 'PUT enable', ...) of `member` (any, when not
- * given): before the provider carries it out ('before'), or its answer after it was carried out ('after'). `release(how)`
- * lets it go ('drop' / '500' instead, see the fake). Holds of one world chain; each takes one request.
- */
-function holdAdmin(call, when, member) {
-  const slot = when === 'before' ? 'beforeAdmin' : 'onAdmin';
-  const held = { arrived: deferred(), release: deferred(), taken: false };
-  const previous = kc[slot];
-  kc[slot] = (name, id) => {
-    if (held.taken || name !== call || (member && id !== member)) return previous ? previous(name, id) : undefined;
-    held.taken = true;
-    held.arrived.resolve();
-    return held.release.promise;
-  };
-  return { arrived: () => within(held.arrived.promise, `${call} of ${member ?? 'a member'} reaching the provider`),
-    release: how => held.release.resolve(how) };
-}
-
 /** The same for the next end request (DELETE sessions/{sid}) of one provider session. */
 function holdEnd(sid, when) {
   const slot = when === 'before' ? 'beforeEnd' : 'afterEnd';
@@ -3430,195 +3113,6 @@ function holdEnd(sid, when) {
   };
   return { arrived: () => within(held.arrived.promise, `the end of ${sid} reaching the provider`), release: how => held.release.resolve(how) };
 }
-
-/**
- * A member whose isolation leaves its provider work owed (the listing fails; when `disable` is false the disable does not
- * connect either - never sent, so nothing of it is unknown).
- */
-async function owedIsolation(admin, caller, m, P, { disable = true } = {}) {
-  kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [P] };
-  kc.adminFail = { sessions: 99 };
-  kc.adminRefuse = disable ? {} : { disable: 1 };
-  await assert.rejects(admin.patchUser(m, { enabled: false }, caller), undefined, m + ': the isolation did not finish');
-  kc.adminFail = {};
-  kc.adminRefuse = {};
-}
-
-// Final review part 1, blocker 1, as replaced by S7-U5 D600: an Activate that lands while one of the isolation retry cycle's
-// provider calls is in flight must not be undone by that call. The re-activation takes the owed work over and waits - within
-// its 15 s - until every change call of the member has its own answer (never a lease or a time: the earlier contract "goes
-// on once the call's bound has passed" is withdrawn). Places:
-//   a. the cycle's disable is in flight - not carried out yet (it lands when the case lets it), or carried out with its
-//      answer on its way: the Activate waits for that answer; the member ends enabled, the fact cleared, no disable after the
-//      enable;
-//   e. (inside a) a login while the Activate waits is not delayed: the isolated member's is refused at once, another
-//      member's enters;
-//   b. the cycle's end of one of the member's provider sessions is in flight: the Activate waits for that request's own
-//      answer; the provider session the member makes after the Activate is not ended (there is no whole-user logout);
-//   f. the cycle has passed its last check before its disable when the Activate takes the owed work over: the cycle asks
-//      the provider nothing more (its change cannot be recorded under work that is no longer its own);
-//   d. opposite side: without an Activate the cycle finishes the owed work as before and leaves no change unknown - the
-//      next isolation and Activate of the member go through at once;
-//   c. the side that recorded its disable died before the call came back (its record is all that is left, nobody will
-//      receive its answer): a minute later, from a restarted process, the Activate answers 409 ACTIVATION_UNCONFIRMED within
-//      15 s with the isolation kept and nothing of its own sent.
-// What a case holds is the fake provider's request (beforeAdmin / onAdmin / beforeEnd) or the harness gate on a store read,
-// not a lock, so the order is the same on the stand-in and on PostgreSQL; the waiting itself is the product's on both.
-test('U5E-20 an Activate that lands while the isolation retry cycle\'s provider call is in flight waits for that call\'s own answer: the member ends enabled, its new provider session is not ended, logins are not delayed; a call whose sender died is never settled by time', async t => {
-  const w = await world(t);
-  const { AdminService } = require('/app/dist/admin.service');
-  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
-  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
-  const facts = sub => w.base.memberIsolation.count({ where: { sub } });
-  // What reached the provider after the last enable that would undo it (a whole-user logout never comes at all).
-  const undoing = () => kc.adminCalls.slice(kc.adminCalls.lastIndexOf('PUT enable') + 1).filter(c => c === 'PUT disable' || c === 'POST logout');
-  const own = c => ['GET sessions', 'PUT disable', 'POST logout', 'PUT enable'].includes(c);
-
-  // (a) + (e)
-  for (const when of ['before', 'after']) {
-    const at = 'a, the disable ' + (when === 'before' ? 'not carried out yet' : 'carried out, its answer on its way');
-    const m = 'syn-sub-u5e20a-' + when, P = 'syn-idp-u5e20a-' + when;
-    await owedIsolation(admin, caller, m, P);
-    assert.equal(kc.members[m].enabled, false, m + ': disabled at the provider, the fact owed');
-    const disable = holdAdmin('PUT disable', when, m);
-    const cycle = w.instance('C20a-' + when);
-    cycle.service.onModuleInit();
-    try {
-      await disable.arrived();
-      const run = activation(admin, m, caller);
-      if (when === 'before') {
-        // (e) Meanwhile the isolated member tries to log in: refused at once, from our own fact; another member enters.
-        const refused = await within(login(w, w.I2, await w.issue('u5e20-during', { sub: m, groups: [A], idp: P + '-during' })),
-          'the isolated member\'s login while the Activate waits', 5000);
-        assert.deepEqual([refused.done.newSid, rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause],
-          [null, 'member_isolated'], 'e: the isolated member\'s login is refused at once');
-        const o = 'syn-sub-u5e20-other';
-        const entered = await within(login(w, w.I2, await w.issue('u5e20-other', { sub: o, groups: [A] })),
-          'another member\'s login while the Activate waits', 5000);
-        assert.deepEqual([entered.done.cookie, !!entered.done.proof], ['S', true], 'e: another member\'s login enters');
-      }
-      await pause(600);
-      const waited = !run.settled;
-      disable.release();
-      const result = await run.result;
-      await quiet(w);
-      await w.told();
-      assert.deepEqual([result.status, result.user?.enabled, kc.members[m].enabled, await facts(m), undoing(),
-        (await w.changes(m, 'disable')).every(state => state === 'done')],
-        [200, true, true, 0, [], true], at + ': the member ends enabled, the fact cleared, nothing after the enable undoes it, every disable answered');
-      assert.equal(waited, true, at + ': the Activate waited for the cycle\'s call to have its own answer');
-    } finally {
-      disable.release();
-      cycle.service.onModuleDestroy();
-    }
-  }
-
-  // (b)
-  {
-    const m = 'syn-sub-u5e20b', P = 'syn-idp-u5e20b', P2 = P + '-again';
-    await owedIsolation(admin, caller, m, P);
-    const end = holdEnd(P, 'before');
-    const cycle = w.instance('C20b');
-    cycle.service.onModuleInit();
-    try {
-      await end.arrived();
-      const run = activation(admin, m, caller);
-      await pause(600);
-      const waited = !run.settled;
-      end.release();
-      const result = await run.result;
-      assert.deepEqual([result.status, waited], [200, true], 'b: the Activate waited for the end request\'s own answer');
-      // The member logs in again after the Activate (a new provider session, credentials typed).
-      kc.members[m].sessions = [P2];
-      const again = await login(w, w.I2, await w.issue('u5e20b-again', { sub: m, groups: [A], idp: P2 }));
-      assert.equal(again.done.cookie, 'S', 'b: the active member enters');
-      await quiet(w);
-      await w.told();
-      assert.deepEqual([kc.ended.includes(P2), await w.base.authSession.count({ where: { sub: m } }), kc.members[m].enabled, await facts(m),
-        undoing(), kc.userLogouts], [false, 1, true, 0, [], []], 'b: the provider session made after the Activate is not ended; the member stays enabled');
-    } finally {
-      end.release();
-      cycle.service.onModuleDestroy();
-    }
-  }
-
-  // (f)
-  {
-    const m = 'syn-sub-u5e20f', P = 'syn-idp-u5e20f';
-    await owedIsolation(admin, caller, m, P);
-    const cycle = w.instance('C20f');
-    // The cycle's two reads of the member's product sessions: before its first listing, and after it marked what that
-    // listing named. Held at the second, its last check before the disable is behind it.
-    const early = w.gate('C20f', 'sweepRead'), late = w.gate('C20f', 'sweepRead');
-    const activating = w.gate('I1', 'sweepRead');
-    let run = null;
-    cycle.service.onModuleInit();
-    try {
-      await early.arrived();
-      early.release();
-      await late.arrived();
-      run = activation(admin, m, caller);
-      // The Activate has taken the owed work over and is held at its own first read.
-      await activating.arrived();
-      const calls = kc.adminCalls.length;
-      late.release();
-      await quiet(w);
-      assert.deepEqual(kc.adminCalls.slice(calls), [], 'f: the cycle that lost the owed work asks the provider nothing more');
-    } finally {
-      early.release();
-      late.release();
-      activating.release();
-      cycle.service.onModuleDestroy();
-    }
-    assert.equal((await run.result).status, 200);
-    await quiet(w);
-    assert.deepEqual([kc.members[m].enabled, await facts(m), undoing()], [true, 0, []], 'f: the member ends enabled, the fact cleared');
-  }
-
-  // (d)
-  {
-    const m = 'syn-sub-u5e20d', P = 'syn-idp-u5e20d';
-    await owedIsolation(admin, caller, m, P);
-    const cycle = w.instance('C20d');
-    cycle.service.onModuleInit();
-    try {
-      await w.until('d: the cycle finished the owed provider work', async () =>
-        (await w.base.memberIsolation.findUnique({ where: { sub: m } }))?.providerDoneAt != null);
-    } finally {
-      cycle.service.onModuleDestroy();
-    }
-    await quiet(w);
-    await w.told();
-    assert.deepEqual([kc.members[m].enabled, kc.ended.includes(P), kc.userLogouts, (await w.marks()).filter(x => x[0] === P)],
-      [false, true, [], [[P, 'isolation', true]]], 'd: the cycle marked, ended by its id and disabled as before');
-    assert.equal(await w.base.providerChange.count({ where: { sub: m, state: 'unknown' } }), 0, 'd: no change of the member left unknown');
-    assert.equal((await within(admin.patchUser(m, { enabled: false }, caller), 'd: the next isolation of the member', 5000)).enabled, false);
-    assert.equal((await within(admin.patchUser(m, { enabled: true }, caller), 'd: the Activate after it', 5000)).enabled, true);
-    assert.equal(await facts(m), 0);
-  }
-
-  // (c)
-  {
-    const m = 'syn-sub-u5e20c', P = 'syn-idp-u5e20c';
-    await owedIsolation(admin, caller, m, P);
-    // A side took the owed work over (its generation), recorded its disable and died before the call came back.
-    const row = await w.base.memberIsolation.findUnique({ where: { sub: m } });
-    await w.base.memberIsolation.update({ where: { sub: m }, data: { attempts: row.attempts + 1 } });
-    await w.base.providerChange.create({ data: { kind: 'disable', target: m, sub: m, generation: row.attempts + 1, state: 'unknown', createdAt: new Date() } });
-    // A minute passes and the Activate comes to a process that never saw that call.
-    w.tick(60_000);
-    const restarted = w.instance('R20c');
-    const otherAdmin = new AdminService(restarted.prisma, new KeycloakService(), null, restarted.service);
-    const calls = kc.adminCalls.length;
-    const run = activation(otherAdmin, m, caller);
-    const result = await run.result;
-    assert.deepEqual([...unconfirmedOf(result), run.took < 15_000], [...UNCONFIRMED, true],
-      'c: the record of a call nobody will ever hear from keeps the Activate from succeeding; answered within 15 s');
-    assert.deepEqual([kc.adminCalls.slice(calls).filter(own), await facts(m), await w.changes(m, 'disable'), kc.members[m].enabled],
-      [[], 1, ['done', 'unknown'], false], 'c: nothing of its own was sent, the isolation kept, the record still unknown');
-  }
-  await w.finish('U5E-20');
-});
 
 // S7-U5 CE1 (S1 real-screen counterexample 1, candidate-diag-S1 ce1-diagnosis): Keycloak names an SSO by the browser's
 // authentication-session id, so the next SSO of a browser that kept an unfinished login screen (a login tab closed, the
@@ -3761,11 +3255,12 @@ test('U5E-21 (S7-U5 CE1) a mark covers the ended SSO\'s authentication, not its 
   const late = await refuseFlow(w, w.I1, await w.call(w.I1, 'switch', { body: UNTRUSTED }), 'login_required');
   const lateStart = Date.now();
   assert.ok(lateStart > (await confirmedAt(Z)) + 1000 && lateStart % 1000 !== 0);
+  const endBeforeStale = await confirmedAt(Z);
   const tooEarly = await answerFlow(w, w.I1, late, await w.issue('u5e21-d-too-early', { sub: d, groups: [A], idp: Z, authTime: sec(lateStart) - 1 }));
   assert.deepEqual([tooEarly.newSid, atProvider(tooEarly), promptOf(tooEarly)], [null, true, 'login'],
     'e: authenticated a second before the fresh step\'s own second (after the end, but not by this step): covered, the step restarts');
   const own = await answerFlow(w, w.I1, tooEarly, await w.issue('u5e21-d-own', { sub: d, groups: [A], idp: Z, authTime: sec(Date.now()) }));
-  assert.ok(sec(Date.now()) * 1000 < (await confirmedAt(Z)), 'the restarted step\'s own second began before the re-confirmed end');
+  assert.equal(await confirmedAt(Z), endBeforeStale, 'an old callback cannot re-confirm or reopen the mark');
   assert.equal(own.cookie, 'S', 'e: the restarted fresh step admits an authentication from the second it started');
 
   // ── g. keeping: from the last confirmation ──
@@ -3790,99 +3285,14 @@ test('U5E-21 (S7-U5 CE1) a mark covers the ended SSO\'s authentication, not its 
 // timeout), an Activate comes, and only then does the provider carry the old disable out. While that call's own answer has
 // not come, the Activate does not succeed and the isolation is not cleared. Once that call's own answer has come, the
 // Activate succeeds and the member logs in and refreshes.
-test('U5E-22 (D600 1) a disable whose wait timed out, then an Activate, then the late disable: no success or clear while it is unknown; after its own answer the Activate, a login and a refresh succeed', async t => {
-  const w = await world(t);
-  const { AdminService } = require('/app/dist/admin.service');
-  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
-  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
-  const fact = sub => w.base.memberIsolation.findUnique({ where: { sub } });
-  const m = 'syn-sub-u5e22', L = 'syn-idp-u5e22-live';
-  kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [L] };
-  const live = await w.session(await w.issue('u5e22-live', { sub: m, groups: [A], idp: L }));
-  const effect = holdAdmin('PUT disable', 'before', m), answer = holdAdmin('PUT disable', 'after', m);
-  // The Suspend: the fact, the member's session ended, the listing - and the disable, which the provider holds unexecuted.
-  const from = performance.now();
-  await assert.rejects(admin.patchUser(m, { enabled: false }, caller), error => error?.response?.code === 'USER_ISOLATED',
-    'the Suspend does not say the isolation finished');
-  await effect.arrived();
-  assert.ok(performance.now() - from >= 9_000, 'the product waited for the disable\'s answer until its wait ended');
-  assert.deepEqual([await w.changes(m, 'disable'), kc.members[m].enabled, await w.version(live), !!await fact(m), (await fact(m))?.providerDoneAt],
-    [['unknown'], true, null, true, null], 'client timeout: the disable is unknown (sent, not carried out); the member still enabled at the provider');
-  // The Activate comes; a second in, the provider carries the old disable out - its answer is still on its way.
-  const run = activation(admin, m, caller);
-  await pause(1000);
-  effect.release();
-  await w.until('the late disable carried out', async () => kc.members[m].enabled === false);
-  const first = await run.result;
-  assert.deepEqual([...unconfirmedOf(first), run.took < 15_000], [...UNCONFIRMED, true],
-    'no success while the disable is unknown - 409 ACTIVATION_UNCONFIRMED within 15 s');
-  assert.deepEqual([!!await fact(m), await w.changes(m, 'disable'), kc.adminCalls.includes('PUT enable')], [true, ['unknown'], false],
-    'the isolation is kept, the old disable still unknown, nothing enabled');
-  // That call's own answer comes: it settles it - and only now does the Activate succeed.
-  answer.release();
-  await w.until('the old disable settled by its own answer', async () => (await w.changes(m, 'disable'))[0] === 'done');
-  const second = await activation(admin, m, caller).result;
-  await quiet(w);
-  assert.deepEqual([second.status, second.user?.enabled, kc.members[m].enabled, await fact(m)], [200, true, true, null],
-    'after the old call\'s own answer: activated, enabled at the provider, the fact cleared');
-  // The member logs in (a new provider session) and its session is refreshed.
-  const S = 'syn-idp-u5e22-again';
-  const entered = await login(w, w.I2, await w.issue('u5e22-again', { sub: m, groups: [A], idp: S }));
-  assert.deepEqual([entered.done.cookie, !!entered.done.proof], ['S', true], 'the member logs in again');
-  await w.base.authSession.updateMany({ where: { sid: entered.done.newSid }, data: { atExpiresAt: lapsed() } });
-  const next = await w.issue('u5e22-next', { sub: m, groups: [A], idp: S });
-  kc.auto = () => reply.tokens(next);
-  const refreshed = await w.call(w.I1, 'get', { sid: entered.done.newSid });
-  kc.auto = null;
-  assert.deepEqual([refreshed.status, await w.version(entered.done.newSid)], [200, 'u5e22-next'], 'and its session refreshes');
-  await w.finish('U5E-22');
-});
+
 
 // S7-U5 D600 decisive case 2: the old disable's effect is held past the product's wait and past a re-read of the provider's
 // state (which still says the member is enabled - the disable has not been carried out). The only correct answer within 15 s
 // is 409 ACTIVATION_UNCONFIRMED with the isolation kept. Then the effect is released and the member is disabled at the
 // provider: an implementation that had answered success would now have a cleared isolation and a disabled member; this one
 // still holds the isolation, and once that call has its own answer the next Activate leaves the member enabled for good.
-test('U5E-23 (D600 2) the old disable\'s effect held past the deadline and a re-read: the only answer within 15 s is 409 ACTIVATION_UNCONFIRMED with the isolation kept; released afterwards, nothing contradicts it', async t => {
-  const w = await world(t);
-  const { AdminService } = require('/app/dist/admin.service');
-  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
-  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
-  const fact = sub => w.base.memberIsolation.findUnique({ where: { sub } });
-  const m = 'syn-sub-u5e23', P = 'syn-idp-u5e23';
-  // The isolation's listing fails and its disable does not connect (never sent): the member is still enabled, the work owed.
-  await owedIsolation(admin, caller, m, P, { disable: false });
-  assert.equal(kc.members[m].enabled, true);
-  // The retry cycle sends its disable; the provider holds it unexecuted.
-  const effect = holdAdmin('PUT disable', 'before', m);
-  const cycle = w.instance('C23');
-  cycle.service.onModuleInit();
-  try {
-    await effect.arrived();
-    const run = activation(admin, m, caller);
-    // The provider's state, read meanwhile, says enabled: a re-read is no evidence that the held disable cannot land.
-    assert.equal((await new KeycloakService().getUser(m)).enabled, true, 're-read: enabled');
-    const result = await run.result;
-    assert.deepEqual([...unconfirmedOf(result), run.took < 15_000], [...UNCONFIRMED, true], 'the only answer within 15 s');
-    assert.deepEqual([!!await fact(m), kc.adminCalls.includes('PUT enable')], [true, false], 'the isolation kept; nothing enabled');
-    // The effect lands after the answer: the member is disabled at the provider - and the product still says isolated.
-    effect.release();
-    await w.until('the held disable carried out and answered', async () => (await w.changes(m, 'disable')).every(state => state !== 'unknown'));
-    const login1 = await login(w, w.I2, await w.issue('u5e23-try', { sub: m, groups: [A], idp: P + '-try' }));
-    assert.deepEqual([kc.members[m].enabled, !!await fact(m), login1.done.newSid,
-      rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause], [false, true, null, 'member_isolated'],
-      'consistent after the release: disabled at the provider and isolated here');
-  } finally {
-    effect.release();
-    cycle.service.onModuleDestroy();
-  }
-  // Every change has its own answer now: the Activate succeeds, and nothing disables the member after it.
-  const after = await activation(admin, m, caller).result;
-  await quiet(w);
-  assert.deepEqual([after.status, kc.members[m].enabled, await fact(m),
-    kc.adminCalls.slice(kc.adminCalls.lastIndexOf('PUT enable') + 1).filter(c => c === 'PUT disable')], [200, true, null, []]);
-  await w.finish('U5E-23');
-});
+
 
 // S7-U5 D600 decisive case 3: a late end request of a provider session whose sid the provider gives to the next SSO
 // (D598). Doctor A logs out on a shared PC; the provider holds that end request unexecuted (its outcome unknown) while a
@@ -3953,90 +3363,7 @@ test('U5E-24 (D600 3) a late end request: another request\'s 204 answered first 
 // path and the reset and 500 records stay unknown.) The 15 s bound holds also when the service token must be fetched again
 // after a 401 and that fetch hangs, and when the enable itself is held: answered in time, nothing cleared; a 401 that is
 // re-acquired at once is just a successful Activate.
-test('U5E-25 (D600 4) a lost answer, a 500 and a timed-out request stay unknown across an hour, a restart, a takeover and a re-read; only the request\'s own answer settles it; token fetch, 401 re-acquisition and a held enable stay inside 15 s', async t => {
-  const w = await world(t);
-  const { AdminService } = require('/app/dist/admin.service');
-  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
-  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
-  const fact = sub => w.base.memberIsolation.findUnique({ where: { sub } });
-  const member = m => { kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [] }; return m; };
-  const reset = member('syn-sub-u5e25-reset'), error = member('syn-sub-u5e25-500'), slow = member('syn-sub-u5e25-timeout');
-  const paused = member('syn-sub-u5e25-enable-held');
-  // The paused member's isolation finishes cleanly first.
-  assert.equal((await admin.patchUser(paused, { enabled: false }, caller)).enabled, false);
-  holdAdmin('PUT disable', 'after', reset).release('drop');          // carried out, the answer cut
-  holdAdmin('PUT disable', 'before', error).release('500');          // answered 500
-  const held = holdAdmin('PUT disable', 'before', slow);              // held unexecuted past the wait
-  const suspended = await Promise.all([reset, error, slow].map(m => admin.patchUser(m, { enabled: false }, caller).then(() => 'ok', e => e?.response?.code)));
-  assert.deepEqual(suspended, ['USER_ISOLATED', 'USER_ISOLATED', 'USER_ISOLATED'], 'no Suspend can say its isolation finished');
-  assert.deepEqual([await w.changes(reset, 'disable'), await w.changes(error, 'disable'), await w.changes(slow, 'disable')],
-    [['unknown'], ['unknown'], ['unknown']], 'reset, 500 and timeout: unknown');
-  // An hour later a restarted process's cycle takes the owed work over (and sends its own disables, which are answered).
-  w.tick(HOUR);
-  const restarted = w.instance('R25');
-  restarted.service.onModuleInit();
-  try {
-    await w.until('the restarted cycle took the owed work over', async () =>
-      (await Promise.all([reset, error, slow].map(m => w.changes(m, 'disable')))).every(states => states.length >= 2));
-    await quiet(w);
-  } finally {
-    restarted.service.onModuleDestroy();
-  }
-  // The provider's state read again: all three disabled now - still no evidence about the first requests.
-  for (const m of [reset, error, slow]) assert.equal((await new KeycloakService().getUser(m)).enabled, false, m + ': re-read');
-  // Another process's Activates (and the held enable of the paused member, in the same 15 s).
-  const enableHeld = holdAdmin('PUT enable', 'before', paused);
-  const takeover = w.instance('T25');
-  const otherAdmin = new AdminService(takeover.prisma, new KeycloakService(), null, takeover.service);
-  const runs = [reset, error, slow, paused].map(m => activation(otherAdmin, m, caller));
-  // While the paused member's own enable is unknown, a second Activate of it is no different: its own enable cannot settle
-  // the first one.
-  await enableHeld.arrived();
-  runs.push(activation(admin, paused, caller));
-  const results = await Promise.all(runs.map(run => run.result));
-  for (const [n, m] of [reset, error, slow, paused, paused].entries())
-    assert.deepEqual([...unconfirmedOf(results[n]), runs[n].took < 15_000, !!await fact(m)], [...UNCONFIRMED, true, true],
-      m + ': 409 ACTIVATION_UNCONFIRMED within 15 s, the isolation kept');
-  assert.deepEqual([(await w.changes(reset, 'disable'))[0], (await w.changes(error, 'disable'))[0], (await w.changes(slow, 'disable'))[0]],
-    ['unknown', 'unknown', 'unknown'], 'an hour, a restart, a takeover and a re-read settled nothing');
-  // The held enable is released after the answer: it lands (its own answer settles it); the paused member stays isolated
-  // here (its login refused) until an Activate confirms everything.
-  enableHeld.release();
-  await w.until('the held enable settled', async () => (await w.changes(paused, 'enable'))[0] === 'done');
-  const refused = await login(w, w.I2, await w.issue('u5e25-paused', { sub: paused, groups: [A], idp: 'syn-idp-u5e25-paused' }));
-  assert.deepEqual([kc.members[paused].enabled, refused.done.newSid], [true, null], 'enabled at the provider by the late enable, still isolated here');
-  assert.equal((await activation(admin, paused, caller).result).status, 200, 'then an Activate confirms it');
-  // The timed-out request's own answer comes at last: that, and only that, settles it.
-  held.release();
-  await w.until('the timed-out disable settled by its own answer', async () => (await w.changes(slow, 'disable'))[0] === 'done');
-  const settled = await activation(admin, slow, caller).result;
-  assert.deepEqual([settled.status, kc.members[slow].enabled, await fact(slow)], [200, true, null], 'after its own answer: activated');
-  // 401 then a working token endpoint: re-acquired inside the bound, a plain success.
-  const stale = member('syn-sub-u5e25-401');
-  assert.equal((await admin.patchUser(stale, { enabled: false }, caller)).enabled, false);
-  kc.adminStale = { enable: 1 };
-  const tokens = kc.serviceTokens;
-  const reacquired = activation(admin, stale, caller);
-  assert.deepEqual([(await reacquired.result).status, kc.serviceTokens - tokens, reacquired.took < 15_000], [200, 1, true],
-    '401: the service token is fetched again and the enable sent again inside the bound');
-  // 401 and a token endpoint that does not answer: the enable is never sent (no token), the Activate answers in time. In the
-  // same 15 s the reset member's Activate again: nothing will ever answer that request, so it stays unconfirmed.
-  const hang = member('syn-sub-u5e25-token-hang');
-  assert.equal((await admin.patchUser(hang, { enabled: false }, caller)).enabled, false);
-  kc.adminStale = { enable: 1 };
-  kc.serviceMode = 'hang';
-  try {
-    const still = activation(admin, reset, caller);
-    const run = activation(admin, hang, caller);
-    const result = await run.result;
-    assert.deepEqual([...unconfirmedOf(await still.result), still.took < 15_000], [...UNCONFIRMED, true], 'the reset stays unknown');
-    assert.deepEqual([...unconfirmedOf(result), run.took < 15_000, !!await fact(hang), kc.members[hang].enabled, await w.changes(hang, 'enable')],
-      [...UNCONFIRMED, true, true, false, ['void']], 'a token fetch that hangs: not sent (void), 409 within 15 s, isolation kept');
-  } finally {
-    kc.serviceMode = 'ok';
-  }
-  await w.finish('U5E-25');
-});
+
 
 // S7-U5 D600 decisive case 5: the opposite side, and the latest command.
 //   a. The admin API freezes while an isolation's disable is in flight. An unrelated doctor's login, refresh and Log out
@@ -4045,85 +3372,7 @@ test('U5E-25 (D600 4) a lost answer, a 500 and a timed-out request stay unknown 
 //   b. An Activate's enable is held; a new Suspend arrives before the Activate completes. The old Activate cannot clear the
 //      new isolation (its generation is gone) nor leave the member active: it answers a conflict, the member stays isolated
 //      here, and the retry cycle - once the late enable has its own answer - disables the member and finishes.
-test('U5E-26 (D600 5) with the admin API frozen ordinary doctors log in, refresh and log out at once and the isolated member is refused at once; a Suspend just before an Activate completes is not undone by it', async t => {
-  const w = await world(t);
-  const { AdminService } = require('/app/dist/admin.service');
-  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
-  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
-  const fact = sub => w.base.memberIsolation.findUnique({ where: { sub } });
-  const quick = async (what, work) => {
-    const from = performance.now();
-    const out = await within(work(), what, 5000);
-    return [out, performance.now() - from];
-  };
 
-  // (a)
-  const m = 'syn-sub-u5e26-a', o = 'syn-sub-u5e26-other';
-  kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [] };
-  const disable = holdAdmin('PUT disable', 'before', m);
-  const suspending = admin.patchUser(m, { enabled: false }, caller);
-  await disable.arrived();
-  // From here the whole admin API is frozen: every member-administration request and every provider end request waits.
-  const thaw = deferred();
-  const frozen = { before: kc.beforeAdmin, end: kc.beforeEnd };
-  kc.beforeAdmin = (name, id) => thaw.promise.then(() => frozen.before ? frozen.before(name, id) : undefined);
-  kc.beforeEnd = id => thaw.promise.then(() => frozen.end ? frozen.end(id) : undefined);
-  const calls = kc.adminCalls.length;
-  try {
-    const [isolated, isolatedMs] = await quick('the isolated member\'s login', async () =>
-      login(w, w.I2, await w.issue('u5e26-isolated', { sub: m, groups: [A], idp: 'syn-idp-u5e26-isolated' })));
-    assert.deepEqual([isolated.done.newSid, rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause, isolatedMs < 2000],
-      [null, 'member_isolated', true], 'a: the isolated member is refused at once from our own fact');
-    const [entered, enteredMs] = await quick('another doctor\'s login', async () =>
-      login(w, w.I2, await w.issue('u5e26-other', { sub: o, groups: [A], idp: 'syn-idp-u5e26-other' })));
-    assert.deepEqual([entered.done.cookie, !!entered.done.proof, enteredMs < 2000], ['S', true, true], 'a: an unrelated doctor logs in at once');
-    await w.base.authSession.updateMany({ where: { sid: entered.done.newSid }, data: { atExpiresAt: lapsed() } });
-    const next = await w.issue('u5e26-other-next', { sub: o, groups: [A], idp: 'syn-idp-u5e26-other' });
-    kc.auto = () => reply.tokens(next);
-    const [refreshed, refreshMs] = await quick('another doctor\'s refresh', () => w.call(w.I1, 'get', { sid: entered.done.newSid }));
-    kc.auto = null;
-    assert.deepEqual([refreshed.status, await w.version(entered.done.newSid), refreshMs < 2000], [200, 'u5e26-other-next', true],
-      'a: and refreshes at once');
-    const [loggedOut, logoutMs] = await quick('another doctor\'s Log out', () => w.call(w.I1, 'logout', { sid: entered.done.newSid }));
-    assert.deepEqual([loggedOut.status, await w.version(entered.done.newSid), logoutMs < 2000], [204, null, true],
-      'a: and logs out at once (the provider end waits in the background)');
-    assert.deepEqual(kc.adminCalls.slice(calls), [], 'a: none of them asked the member administration');
-  } finally {
-    thaw.resolve();
-    disable.release();
-  }
-  assert.equal((await suspending).enabled, false, 'a: the Suspend finishes once the admin API answers');
-  await w.told();
-
-  // (b)
-  const n = 'syn-sub-u5e26-b';
-  kc.members[n] = { username: n, email: n + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [] };
-  assert.equal((await admin.patchUser(n, { enabled: false }, caller)).enabled, false);
-  const enable = holdAdmin('PUT enable', 'before', n);
-  const run = activation(admin, n, caller);
-  await enable.arrived();
-  // The new Suspend lands before the Activate completes: our fact is the newest command at once; its provider work cannot
-  // be called finished while the old enable is unknown.
-  const again = await admin.patchUser(n, { enabled: false }, caller).then(() => 'ok', e => e?.response?.code);
-  assert.deepEqual([again, !!await fact(n), (await fact(n))?.providerDoneAt], ['USER_ISOLATED', true, null], 'b: the new Suspend is recorded, its work owed');
-  // The old enable lands and is answered: the old Activate may not clear the new isolation or report success.
-  enable.release();
-  const old = await run.result;
-  assert.deepEqual([old.status === 200, old.body?.code, !!await fact(n)], [false, 'USER_ISOLATED', true],
-    'b: the old Activate answers a conflict; the new isolation stays');
-  const refused = await login(w, w.I2, await w.issue('u5e26-b-try', { sub: n, groups: [A], idp: 'syn-idp-u5e26-b-try' }));
-  assert.equal(refused.done.newSid, null, 'b: the member is refused (isolated here) although the late enable enabled it at the provider');
-  // The retry cycle, the old enable now answered, disables the member and finishes the new isolation.
-  const cycle = w.instance('C26');
-  cycle.service.onModuleInit();
-  try {
-    await w.until('b: the cycle finished the new isolation', async () => (await fact(n))?.providerDoneAt != null);
-  } finally {
-    cycle.service.onModuleDestroy();
-  }
-  assert.deepEqual([kc.members[n].enabled, !!await fact(n)], [false, true], 'b: disabled and isolated - the latest command stands');
-  await w.finish('U5E-26');
-});
 
 // S7-U5 fix round 7 (Astra, fix-6 decision b): a 503 to a CHANGE request is not proof that the provider turned it away
 // before carrying it out - Keycloak sheds queued requests with 503, but its error handler also answers the status of an
@@ -4136,128 +3385,457 @@ test('U5E-26 (D600 5) with the admin API frozen ordinary doctors log in, refresh
 //      is kept and the member's login refused.
 //   c. Opposite side: a 503 to the service account's TOKEN request means the change was never sent - void, nothing reaches
 //      the provider, and nothing is left that blocks: the next answered request confirms the end / the next Activate succeeds.
-test('U5E-27 (fix round 7) a 503 to a change request leaves it unknown whether or not it was carried out: no other request, re-read, restart or hour settles it; a 503 to the token request means not sent (void)', async t => {
-  const w = await world(t);
+
+
+const R10_CALLER = { roles: ['admin'], actor: 'syn-r10-admin@synthetic.test', sub: 'syn-r10-admin' };
+function r10Admin(w, inst = w.I1) {
   const { AdminService } = require('/app/dist/admin.service');
-  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service);
-  const caller = { roles: ['admin'], actor: 'syn-admin@synthetic.test', sub: 'syn-admin' };
-  const fact = sub => w.base.memberIsolation.findUnique({ where: { sub } });
-  const member = m => { kc.members[m] = { username: m, email: m + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'], sessions: [] }; return m; };
-  // The answer of a record has come in (its summary noted) - its state is what the answer decided.
-  const answered = async (target, kind) => (await w.base.providerChange.findMany({ where: kind ? { target, kind } : { target }, orderBy: { id: 'asc' } }))
-    .map(row => row.outcome !== null);
-  const refusedLogin = async (label, sub, idp) => {
-    const begin = await w.call(w.I2, 'login');
-    return answerFlow(w, w.I2, begin, await w.issue(label, { sub, groups: [A], idp }));
-  };
+  return new AdminService(inst.prisma, new KeycloakService(), null, inst.service);
+}
+function r10Member(sub, sessions = [], groups = [A], roles = ['radiologist']) {
+  kc.members[sub] = { username: sub, email: sub + '@synthetic.test', enabled: true, groups, roles, sessions };
+  return sub;
+}
+const r10Answer = p => p.then(user => ({ status: 200, user }), error => ({ status: error.getStatus?.() ?? 500, body: error.getResponse?.() ?? {} }));
+const r10Patch = (admin, sub, body) => r10Answer(admin.patchUser(sub, body, R10_CALLER));
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function r10Survives(w, sub, idpSid, entered, label) {
+  assert.ok(await w.base.authSession.findUnique({ where: { sid: entered.newSid } }), label + ': product row survives');
+  assert.equal(kc.ended.includes(idpSid), false, label + ': provider SSO survives');
+  await w.base.authSession.update({ where: { sid: entered.newSid }, data: { atExpiresAt: lapsed() } });
+  const renewed = await w.issue(label + '-refresh', { sub, idp: idpSid });
+  kc.auto = () => kc.ended.includes(idpSid) ? reply.reject() : reply.tokens(renewed);
+  assert.equal((await w.call(w.I2, 'get', { sid: entered.newSid })).status, 200, label + ': refresh survives');
+  kc.auto = null;
+}
+async function r10Refuses(w, sub, token, sid, label) {
+  const calls = kc.adminCalls.length, ends = kc.endRequests.length, tokens = kc.tokens;
+  assert.equal((await w.call(w.I2, 'get', { sid })).status, 401, label + ': cookie');
+  assert.equal((await w.call(w.I2, 'get', { bearer: token.access })).status, 401, label + ': Bearer');
+  await assert.rejects(w.I2.service.authenticateSession(sid, {}), e => e.getStatus?.() === 401, label + ': direct authentication');
+  await w.base.authSession.update({ where: { sid }, data: { atExpiresAt: lapsed() } });
+  assert.equal((await w.call(w.I2, 'get', { sid })).status, 401, label + ': expired refresh');
+  assert.equal(kc.tokens, tokens, label + ': no provider exchange for the blocked refresh');
+  const callback = await login(w, w.I2, token);
+  assert.equal(callback.done.newSid, null, label + ': callback');
+  assert.equal(kc.adminCalls.length, calls, label + ': no administration on any authentication path');
+  assert.equal(kc.endRequests.length, ends, label + ': no DELETE on callback');
+}
 
-  // (a)
-  const a = 'syn-sub-u5e27-a', X = 'syn-idp-u5e27-carried', b = 'syn-sub-u5e27-b', Y = 'syn-idp-u5e27-shed';
-  const sidA = await w.session(await w.issue('u5e27-a', { sub: a, groups: [A], idp: X }));
-  const sidB = await w.session(await w.issue('u5e27-b', { sub: b, groups: [A], idp: Y }));
-  holdEnd(X, 'after').release('503');
-  assert.equal((await w.call(w.I1, 'logout', { sid: sidA })).status, 204);
-  // (The end request goes out after the Log out's answer: X's answer is taken in before the next mode.)
-  await w.until('a: X\'s 503 taken in', async () => (await answered(X)).every(Boolean) && (await answered(X)).length === 1);
-  kc.logoutMode = 'error';
-  assert.equal((await w.call(w.I1, 'logout', { sid: sidB })).status, 204);
-  await w.until('a: Y\'s 503 taken in', async () => (await answered(Y)).every(Boolean) && (await answered(Y)).length === 1);
-  kc.logoutMode = 'ok';
-  assert.deepEqual([kc.ended.includes(X), kc.ended.includes(Y), await w.changes(X), await w.changes(Y), (await w.mark(X)).confirmedAt, (await w.mark(Y)).confirmedAt],
-    [true, false, ['unknown'], ['unknown'], null, null], 'a: carried out or not, a 503 leaves the end unknown and unconfirmed');
-  // A new process asks again: X is answered "no such session" (404), Y is ended now (204) - those requests only.
-  const asked = kc.endRequests.length;
-  const restarted = w.instance('R27');
-  restarted.service.onModuleInit();
-  try {
-    await w.until('a: the ends asked again and answered', async () =>
-      (await w.changes(X)).length >= 2 && (await w.changes(Y)).length >= 2 && (await answered(X)).concat(await answered(Y)).every(Boolean));
-    w.tick(HOUR);
-    await quiet(w);
-  } finally {
-    restarted.service.onModuleDestroy();
-  }
-  assert.ok(kc.endRequests.length > asked && kc.ended.includes(Y), 'a: the later requests reached the provider; Y is ended now');
-  for (const sid of [X, Y]) {
-    const states = await w.changes(sid);
-    assert.deepEqual([states[0], states.slice(1).every(state => state === 'done'), (await w.mark(sid)).confirmedAt], ['unknown', true, null],
-      sid + ': another request\'s 404/204, a restart and an hour settle nothing; the end stays unconfirmed');
-  }
-  for (const [label, sub, sid] of [['u5e27-a-again', a, X], ['u5e27-b-again', b, Y]]) {
-    const again = await refusedLogin(label, sub, sid);
-    assert.deepEqual([again.location, again.newSid], [landing('end_unconfirmed'), null], sid + ': the sid\'s next login is refused');
-  }
 
-  // (b)
-  const d = member('syn-sub-u5e27-disable'), e = member('syn-sub-u5e27-enable');
-  holdAdmin('PUT disable', 'after', d).release('503');                  // carried out, answered 503
-  assert.equal(await admin.patchUser(d, { enabled: false }, caller).then(() => 'ok', error => error?.response?.code), 'USER_ISOLATED',
-    'b: the Suspend does not say its isolation finished');
-  await w.until('b: the disable\'s 503 taken in', async () => (await answered(d, 'disable')).every(Boolean));
-  assert.deepEqual([await w.changes(d, 'disable'), kc.members[d].enabled], [['unknown'], false], 'b: disabled at the provider, the record unknown');
-  const cycle = w.instance('C27');
-  cycle.service.onModuleInit();
-  try {
-    await w.until('b: the cycle\'s own disable answered', async () => (await w.changes(d, 'disable')).length >= 2
-      && (await w.changes(d, 'disable')).slice(1).every(state => state === 'done'));
-    await quiet(w);
-  } finally {
-    cycle.service.onModuleDestroy();
+test('R10-06 old plain/probe callbacks refuse without reopening an ended authentication or deleting its successor', async t => {
+  const w = await world(t, { now: START + 400 });
+  for (const probe of [false, true]) for (const same of [false, true]) {
+    const m = 'syn-r1006-' + probe + same, n = same ? m : m + '-next', P = m + '-idp';
+    const old = await w.issue(m + '-old', { sub: m, idp: P, authTime: Math.floor(Date.now() / 1000) });
+    const sid = await w.session(old);
+    const begin = await w.call(w.I1, probe ? 'switch' : 'login', probe ? { body: SWITCH } : {});
+    const hold = w.gate('I1', 'tx.open'), run = answerFlow(w, w.I1, begin, old); await hold.arrived();
+    assert.equal((await w.call(w.I2, 'logout', { sid })).status, 204); await w.told();
+    const mark = await w.mark(P); w.tick(1000); kc.ended = kc.ended.filter(s => s !== P);
+    const entered = (await login(w, w.I2, await w.issue(n + '-new', { sub: n, idp: P, authTime: Math.floor(Date.now() / 1000) }))).done;
+    assert.ok(entered.newSid); const sent = kc.endRequests.length;
+    hold.release(); const out = await run; await quiet(w);
+    assert.equal(out.newSid, null, 'old authentication only refuses');
+    assert.equal(kc.endRequests.length, sent, 'no new DELETE');
+    assert.deepEqual(await w.mark(P), mark, 'confirmed mark is not reopened');
+    await r10Survives(w, n, P, entered, n);
   }
-  assert.equal((await new KeycloakService().getUser(d)).enabled, false, 'b: re-read: disabled - no evidence about the first request');
-  assert.equal((await admin.patchUser(e, { enabled: false }, caller)).enabled, false);
-  kc.adminFail = { enable: 1 };                                          // answered 503, not carried out
-  const first = await activation(admin, e, caller).result;
-  kc.adminFail = {};
-  assert.deepEqual([...unconfirmedOf(first), await w.changes(e, 'enable'), kc.members[e].enabled, !!await fact(e)],
-    [...UNCONFIRMED, ['unknown'], false, true], 'b: the enable answered 503 is unknown; 409, the isolation kept');
-  const runs = [d, e].map(m => activation(admin, m, caller));
-  const results = await Promise.all(runs.map(run => run.result));
-  for (const [n, m] of [d, e].entries()) {
-    assert.deepEqual([...unconfirmedOf(results[n]), runs[n].took < 15_000, !!await fact(m)], [...UNCONFIRMED, true, true],
-      m + ': 409 ACTIVATION_UNCONFIRMED within 15 s, the isolation kept');
-    const tried = await refusedLogin(m + '-try', m, 'syn-idp-' + m + '-try');
-    assert.deepEqual([tried.newSid, rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause],
-      [null, 'member_isolated'], m + ': its login refused');
-  }
-  assert.deepEqual([(await w.changes(d, 'disable'))[0], (await w.changes(e, 'enable'))[0]], ['unknown', 'unknown'], 'b: still unknown');
+  await w.finish('R10-06');
+});
 
-  // (c) the token request answered 503: nothing sent.
-  const q = member('syn-sub-u5e27-token');
-  assert.equal((await admin.patchUser(q, { enabled: false }, caller)).enabled, false);
-  const enables = kc.adminCalls.length;
-  kc.adminStale = { enable: 1 };                                         // the held token refused: a new one is asked for
-  kc.serviceMode = 'error';
-  let refused;
-  try {
-    refused = await activation(admin, q, caller).result;
-  } finally {
-    kc.serviceMode = 'ok';
+test('R10-09 same-second Bearer exception belongs only to the token actually admitted', async t => {
+  const w = await world(t, { now: START + 400 }), m = 'syn-r1009', P = m + '-idp', authTime = Math.floor(Date.now() / 1000);
+  const old = await w.issue(m + '-old', { sub: m, idp: P, authTime }), sid = await w.session(old);
+  const start = await w.call(w.I1, 'switch', { sid, body: UNFINISHED });
+  const next = await w.issue(m + '-new', { sub: m, idp: P, authTime });
+  const entered = await answerFlow(w, w.I2, start, next);
+  assert.ok(entered.newSid, 'new authentication admitted in the very same second');
+  assert.equal((await w.call(w.I2, 'get', { bearer: next.access })).status, 200);
+  assert.equal((await w.call(w.I1, 'get', { bearer: old.access })).status, 401, 'same sub/sid/auth_time cannot resurrect old JWT');
+  await w.finish('R10-09');
+});
+
+test('U1 HTTP-OUTCOMES: DELETE non-204 2xx, 404, final 401, other 4xx, 501 and uncertain 5xx', async t => {
+  const w = await world(t);
+  for (const kind of ['end_session']) for (const status of [200, 202, 204, 404, 401, 403, 409, 501, 502, 504]) {
+    const m = r10Member('syn-u1-' + kind + status), P = m + '-idp';
+
+      kc.afterEnd = () => status;
+      const sid = await w.session(await w.issue(m, { sub: m, idp: P }));
+      assert.equal((await w.call(w.I1, 'logout', { sid })).status, 204); await w.told();
+
+    const state = status < 300 || (status === 404 && kind === 'end_session') ? 'done' : status < 500 || status === 501 ? 'void' : 'unknown';
+    await w.until('HTTP outcome persisted', async () => (await w.base.providerChange.findFirst({ where: { sub: m, kind }, orderBy: { id: 'desc' } }))?.outcome != null);
+    const changes = await w.base.providerChange.findMany({ where: { sub: m, kind } });
+    assert.ok(changes.length > 0); assert.ok(changes.every(c => c.state === state), kind + ' ' + status + ': own response classification');
+    assert.equal(!!(await w.mark(P))?.confirmedAt, state === 'done');
+    kc.onAdmin = null; kc.afterEnd = null;
   }
-  assert.deepEqual([...unconfirmedOf(refused), await w.changes(q, 'enable'), kc.adminCalls.slice(enables).filter(c => c === 'PUT enable').length],
-    [...UNCONFIRMED, ['void'], 1], 'c: the enable after the refused token was never sent (void); only the 401-answered one arrived');
-  assert.deepEqual([(await activation(admin, q, caller).result).status, kc.members[q].enabled, await fact(q)], [200, true, null],
-    'c: nothing unknown is left: the next Activate succeeds');
-  const r = 'syn-sub-u5e27-token-end', Z = 'syn-idp-u5e27-token-end';
-  const sidR = await w.session(await w.issue('u5e27-token-end', { sub: r, groups: [A], idp: Z }));
-  w.tick(10 * 60_000);                                                   // the held service token has expired
-  const arrived = kc.logouts;
-  kc.serviceMode = 'error';
-  try {
-    assert.equal((await w.call(w.I1, 'logout', { sid: sidR })).status, 204);
-    await w.until('c: the end settled without being sent', async () => (await w.changes(Z))[0] === 'void');
-  } finally {
-    kc.serviceMode = 'ok';
+  await w.finish('U1');
+});
+
+test('U2 401-THEN-CHANGE-503: the second mutation, not service-token acquisition, answers 503', async t => {
+  const w = await world(t);
+  for (const kind of ['end_session']) {
+    const m = r10Member('syn-u2-' + kind), P = m + '-idp';
+
+      kc.serviceMode = 'stale'; kc.afterEnd = () => '503';
+      const sid = await w.session(await w.issue(m, { sub: m, idp: P }));
+      await w.call(w.I2, 'logout', { sid }); await w.told();
+      assert.equal((await w.mark(P)).confirmedAt, null);
+
+    await w.until('second change 503 persisted', async () => (await w.base.providerChange.findFirst({ where: { sub: m, kind } }))?.outcome === 'http_503');
+    assert.equal(await w.base.providerChange.count({ where: { sub: m, kind, state: 'unknown' } }), 1);
+    kc.onAdmin = null; kc.afterEnd = null;
   }
-  assert.deepEqual([kc.logouts - arrived, kc.endRequests.includes(Z), (await w.mark(Z)).confirmedAt], [0, false, null],
-    'c: nothing reached the provider; the end is not confirmed yet');
-  const resumer = w.instance('Z27');
-  resumer.service.onModuleInit();
-  try {
-    await w.until('c: the end asked again and confirmed', async () => (await w.mark(Z)).confirmedAt !== null);
-  } finally {
-    resumer.service.onModuleDestroy();
+  await w.finish('U2');
+});
+
+test('U3 HEADERS-TIMEOUT: provider effect with no headers reaches transport timeout and stays unknown', async t => {
+  const w = await world(t);
+  for (const kind of ['end_session']) {
+    const m = r10Member('syn-u3-' + kind), P = m + '-idp';
+    const held = holdEnd(P, 'after');
+    kc.transportTimeoutMs = 250;
+    let run;
+    run = w.call(w.I1, 'logout', { sid: await w.session(await w.issue(m, { sub: m, idp: P })) });
+    await held.arrived();
+    assert.equal(kc.ended.includes(P), true, 'effect precedes missing headers');
+    await run;
+    await w.until('transport failure persisted', async () => (await w.base.providerChange.findFirst({ where: { sub: m, kind } }))?.outcome != null);
+    assert.equal((await w.base.providerChange.findFirst({ where: { sub: m, kind } }))?.outcome, 'transport');
+    held.release(); kc.transportTimeoutMs = 0; await quiet(w);
+    assert.equal(await w.base.providerChange.count({ where: { sub: m, kind, state: 'unknown' } }), 1, 'late inaccessible response cannot settle the call');
+    assert.equal((await w.mark(P)).confirmedAt, null);
   }
-  assert.deepEqual(await w.changes(Z), ['void', 'done'], 'c: a request never sent blocks nothing');
-  await w.finish('U5E-27');
+  await w.finish('U3');
+});
+
+test('U4 CRASH-CUTS: sid end records preserve recorded uncertainty across store/send/settle cuts and second-instance recovery', async t => {
+  const w = await world(t);
+  for (const kind of ['end_session']) {
+    for (const cut of ['before-record', 'after-record-before-commit', 'after-commit-before-send', 'before-effect', 'after-effect', 'settle-fails-three', 'after-settle']) {
+      const m = r10Member('syn-u4-' + kind + '-' + cut), P = m + '-idp';
+      let armed = true, committedChange = false, failures = 0;
+      w.observe({ inst: 'I1', model: 'providerChange', method: 'create', phase: cut === 'after-record-before-commit' ? 'after' : 'before' }, e => {
+        if (!armed || e.args.data.sub !== m || e.args.data.kind !== kind) return;
+        if (cut === 'before-record' || cut === 'after-record-before-commit') { armed = false; throw new Error('synthetic process cut'); }
+      });
+      w.observe({ inst: 'I1', model: 'providerChange', method: 'create', phase: 'after' }, e => {
+        if (e.args.data.sub === m && e.args.data.kind === kind) committedChange = true;
+      });
+      w.observe({ inst: 'I1', model: '$transaction', phase: 'after' }, () => {
+        if (armed && committedChange && cut === 'after-commit-before-send') { armed = false; throw new Error('synthetic process lost after commit'); }
+      });
+      w.observe({ inst: 'I1', model: 'providerChange', method: 'updateMany', phase: cut === 'after-settle' ? 'after' : 'before' }, async e => {
+        if (!armed || !['settle-fails-three', 'after-settle'].includes(cut)) return;
+        const record = await w.base.providerChange.findUnique({ where: { id: e.args.where.id } });
+        if (record?.sub !== m || record.kind !== kind) return;
+        if (++failures <= (cut === 'after-settle' ? 1 : 3)) throw new Error('synthetic settlement storage loss');
+      });
+      let effect;
+      if (cut === 'before-effect' || cut === 'after-effect') effect = holdEnd(P, cut === 'before-effect' ? 'before' : 'after');
+      const sent = kc.endRequests.length + kc.adminCalls.filter(c => c.startsWith('PUT ')).length;
+      let run;
+      run = w.call(w.I1, 'logout', { sid: await w.session(await w.issue(m, { sub: m, idp: P })) });
+      if (effect) { await effect.arrived(); effect.release('drop'); }
+      await run; await w.told();
+      const records = await w.base.providerChange.findMany({ where: { sub: m, kind } });
+      if (cut === 'before-record' || cut === 'after-record-before-commit') {
+        assert.equal(records.length, 0, kind + '/' + cut + ': rolled back');
+        assert.equal(kc.endRequests.length + kc.adminCalls.filter(c => c.startsWith('PUT ')).length, sent, 'nothing sent before committed intent');
+      } else {
+        assert.equal(records.length, 1);
+        if (cut === 'after-settle') assert.equal(records[0].state, 'done', 'a committed answer survives sender loss');
+        else {
+          assert.equal(records[0].state, 'unknown', kind + '/' + cut + ': unknown survives');
+          const restarted = w.instance('U4-' + m);
+          // Recovery is a new instance over the same facts, never a guessed terminal state.
+          const token = await w.issue(m + '-probe', { sub: m, idp: P });
+          assert.equal((await w.call(restarted, 'get', { bearer: token.access })).status, 401);
+          assert.equal((await w.mark(P)).confirmedAt, null);
+        }
+      }
+      if (cut === 'settle-fails-three') assert.equal(failures, 3, 'all three settlement attempts actually failed');
+      armed = false;
+    }
+  }
+  await w.finish('U4');
+});
+
+test('U5 SID-RETRY-STALE: confirmation and admission after retry CAS forbid a stale retry send', async t => {
+  const w = await world(t, { now: START + 400 }), m = 'syn-u5', P = m + '-idp';
+  const pending = holdEnd(P, 'before');
+  await w.call(w.I1, 'logout', { sid: await w.session(await w.issue(m, { sub: m, idp: P })) }); await pending.arrived();
+  const retry = w.instance('U5retry');
+  const held = w.pause({ inst: 'U5retry', model: 'idpSessionEnd', method: 'updateMany', scope: 'root', phase: 'after' }, e => typeof e.args.data.attempts === 'number');
+  retry.service.onModuleInit(); await held.arrived();
+  pending.release(); await w.told(); await w.until('confirmed', async () => !!(await w.mark(P))?.confirmedAt);
+  w.tick(1000); kc.ended = [];
+  const entered = (await login(w, w.I2, await w.issue(m + '-new', { sub: m, idp: P, authTime: Date.now() / 1000 }))).done;
+  assert.ok(entered.newSid); const calls = kc.endRequests.length;
+  held.release(); await quiet(w); retry.service.onModuleDestroy();
+  assert.equal(kc.endRequests.length, calls); await r10Survives(w, m, P, entered, m);
+  await w.finish('U5');
+});
+
+test('U9 UNKNOWN-GC-13H: old terminal records are collected; old unknown records and blocking survive', async t => {
+  const w = await world(t), m = r10Member('syn-u9'), P = m + '-idp', at = new Date(Date.now() - 14 * HOUR);
+  // A persisted call from a process no longer present: explicit storage fixture for restart/GC, not a provider answer.
+  const unknown = await w.base.providerChange.create({ data: { sub: m, kind: 'end_session', target: P, generation: 1, state: 'unknown', createdAt: at } });
+  for (const state of ['done', 'void']) await w.base.providerChange.create({ data: { sub: m, kind: 'end_session', target: P, generation: 1, state, createdAt: at, settledAt: at } });
+  await w.base.idpSessionEnd.create({ data: { idpSid: P, cause: 'logout', decidedAt: at, nextAttemptAt: new Date(Date.now() + 2 * HOUR) } });
+  const sweeper = w.instance('U9gc'); sweeper.service.onModuleInit(); w.tick(HOUR);
+  await w.until('terminal rows collected', async () => await w.base.providerChange.count({ where: {
+    sub: m, state: { in: ['done', 'void'] }, createdAt: { lt: new Date(Date.now() - 13 * HOUR) },
+  } }) === 0);
+  sweeper.service.onModuleDestroy();
+  assert.equal((await w.base.providerChange.findUnique({ where: { id: unknown.id } }))?.state, 'unknown');
+  assert.equal((await w.mark(P)).confirmedAt, null);
+  assert.equal((await login(w, w.I2, await w.issue(m, { sub: m, idp: P }))).done.newSid, null);
+  await w.finish('U9');
+});
+
+// REQ-S7-U5-DB-RIGHTS -> RISK-STALE-CREDENTIAL / LOST-REVOCATION -> CORE tests, D621/D623.
+async function coreMember(w, sub) {
+  r10Member(sub); kc.members[sub].emailVerified = true;
+  const token = await w.issue(sub, { sub, authTime: Math.floor(Date.now()/1000) });
+  return { token, sid: await w.session(token), admin: r10Admin(w) };
+}
+async function coreFresh(w, sub, groups = [A]) {
+  const token = await w.issue(sub+'-fresh', { sub, groups, authTime: Math.floor(Date.now()/1000) });
+  const first = await login(w, w.I2, token);
+  assert.equal(first.done.newSid, null, 'a new rights version demands a bound fresh authentication');
+  assert.equal(promptOf(first.done), 'login');
+  const done = await answerFlow(w, w.I2, first.done, token);
+  assert.ok(done.newSid, 'nonce/state/PKCE-bound fresh authentication enters');
+  return { token, done };
+}
+
+test('R10-05 DB block alone refuses every entry including a surviving session; logout remains allowed', async t => {
+  const w = await world(t), m = 'syn-core-r1005', {token,sid,admin} = await coreMember(w,m);
+  const old = await w.base.authSession.findUnique({where:{sid}});
+  assert.equal((await r10Patch(admin,m,{enabled:false})).status,200);
+  // A legacy leftover is deliberately restored: refusal must not depend on deletion succeeding in a past version.
+  await w.base.authSession.create({data:old});
+  const start=performance.now(); await r10Refuses(w,m,token,sid,'blocked');
+  for(const kind of ['me','authz']) assert.notEqual((await w.call(w.I2,kind,{sid})).status,200,kind);
+  assert.ok(performance.now()-start<2000,'no remote wait on refused entry');
+  assert.equal((await w.call(w.I2,'logout',{sid})).status,204);
+  await w.finish('R10-05');
+});
+
+test('U5E-15 Suspend/Activate require fresh authentication and never restore old rights', async t => {
+  const w=await world(t), m='syn-core-u5e15', {token,sid,admin}=await coreMember(w,m);
+  assert.equal((await r10Patch(admin,m,{enabled:false})).status,200);
+  assert.equal((await w.call(w.I2,'get',{bearer:token.access})).status,401);
+  assert.equal((await login(w,w.I2,token)).done.newSid,null);
+  assert.equal((await r10Patch(admin,m,{enabled:true})).status,200);
+  assert.equal((await w.call(w.I1,'get',{sid})).status,401);
+  assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,401);
+  const fresh=await coreFresh(w,m);
+  assert.equal((await w.call(w.I2,'me',{sid:fresh.done.newSid})).status,200);
+  assert.deepEqual(kc.adminCalls,[],'no member provider work in Suspend/Activate or entry');
+  assert.equal(kc.endRequests.length,0);
+  await w.finish('U5E-15');
+});
+
+test('CORE-A-B a callback held across Change and its old A Bearer cannot acquire B rights',async t=>{
+  const w=await world(t),m='syn-core-ab',{token,admin}=await coreMember(w,m);
+  const begin=await w.call(w.I1,'login'), hold=w.gate('I1','tx.open');
+  const pending=answerFlow(w,w.I1,begin,token); await hold.arrived();
+  assert.equal((await r10Patch(r10Admin(w,w.I2),m,{institution:B,roles:['clinician']})).status,200);
+  hold.release(); assert.equal((await pending).newSid,null,'callback rechecks version inside creation transaction');
+  assert.equal((await w.call(w.I2,'get',{bearer:token.access})).status,401,'old A Bearer cannot upgrade to B');
+  const fresh=await coreFresh(w,m,[A]); // provider roster may still be A; identity never supplies rights.
+  const me=await w.call(w.I2,'me',{sid:fresh.done.newSid});
+  assert.equal(me.status,200); assert.equal(me.body.institution,B); assert.deepEqual(me.body.roles,['clinician']);
+  assert.equal((await w.call(w.I2,'me',{bearer:fresh.token.access})).status,200);
+  const other=await w.issue('same-auth-other-token',{sub:m,groups:[A],authTime:Math.floor(Date.now()/1000)});
+  assert.equal((await w.call(w.I1,'me',{bearer:other.access})).status,401,'same claims do not identify the admitted token');
+  await w.finish('CORE-A-B');
+});
+
+test('CORE-CAS two admin connections observe one version: exactly one commits, loser 409, sessions stay ended',async t=>{
+  const w=await world(t),m='syn-core-cas',{admin}=await coreMember(w,m);
+  const firstRead=w.pause({inst:'I1',model:'memberRights',method:'findUnique',scope:'root',phase:'after'});
+  const secondRead=w.pause({inst:'I2',model:'memberRights',method:'findUnique',scope:'root',phase:'after'});
+  const one=r10Patch(admin,m,{enabled:false}),two=r10Patch(r10Admin(w,w.I2),m,{approvalState:'PENDING'});
+  await firstRead.arrived(); await secondRead.arrived();
+  const held=w.pause({inst:'I1',model:'memberRights',method:'updateMany',scope:'tx',phase:'after'});
+  const started=deferred(),pids=[];
+  w.observe({model:'$transaction',phase:'started'},async e=>{
+    if(!process.env.KIN_AUTH_SESSION_DATABASE_URL.includes('local-stand-in')){
+      const rows=await e.client.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'); pids.push(rows[0].pid);
+    }
+    if(e.inst==='I2')started.resolve();
+  });
+  firstRead.release(); await held.arrived(); secondRead.release();
+  if(!process.env.KIN_AUTH_SESSION_DATABASE_URL.includes('local-stand-in'))await within(started.promise,'second PostgreSQL transaction starts');
+  held.release(); const out=await Promise.all([one,two]);
+  assert.deepEqual(out.map(v=>v.status).sort(),[200,409]);
+  if(pids.length) assert.ok(new Set(pids).size>=2,'independent PostgreSQL connections overlap');
+  const current=await w.base.memberRights.findUnique({where:{sub:m}});
+  assert.equal(current.version,2); assert.equal(current.suspended,true);
+  assert.equal(await w.base.authSession.count({where:{sub:m}}),0);
+  assert.equal(kc.endRequests.length,0);
+  await w.finish('CORE-CAS');
+});
+
+test('CORE-R1 a command held after commit cannot end a session admitted by a later Activate',async t=>{
+  const w=await world(t),m='syn-core-r1',{admin}=await coreMember(w,m);
+  const hold=w.pause({inst:'I1',model:'$transaction',phase:'after'},e=>e.result?.after?.id===m);
+  const pending=r10Patch(admin,m,{enabled:false}); await hold.arrived();
+  assert.equal((await r10Patch(r10Admin(w,w.I2),m,{enabled:true})).status,200);
+  const fresh=await coreFresh(w,m); const row=await w.base.authSession.findUnique({where:{sid:fresh.done.newSid}});
+  hold.release(); assert.equal((await pending).status,200);
+  assert.deepEqual(await w.base.authSession.findUnique({where:{sid:fresh.done.newSid}}),row,'no work remains after old commit');
+  assert.equal(kc.endRequests.length,0); await r10Survives(w,m,fresh.token.idp,fresh.done,m);
+  await w.finish('CORE-R1');
+});
+
+test('CORE-COMMIT success waits for commit; deletion and audit failures roll the complete command back',async t=>{
+  const w=await world(t),m='syn-core-commit',{sid,admin}=await coreMember(w,m);
+  for(const point of ['tx.delete','tx.audit']){
+    const before=await w.base.memberRights.findUnique({where:{sub:m}});
+    w.fault('I1',point,new Error('synthetic command failure'));
+    assert.equal((await r10Patch(admin,m,{enabled:false})).status,500);
+    assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
+    assert.ok(await w.base.authSession.findUnique({where:{sid}}));
+  }
+  const hold=w.pause({inst:'I1',model:'auditLog',method:'create',scope:'tx',phase:'after'},e=>e.args.data.action==='admin.user.suspend');
+  let returned=false; const pending=r10Patch(admin,m,{enabled:false}).then(v=>{returned=true;return v;});
+  await hold.arrived(); await delay(30); assert.equal(returned,false,'no success before commit');
+  assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).suspended,false,'uncommitted change is invisible');
+  hold.release(); assert.equal((await pending).status,200);
+  assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).suspended,true);
+  await w.finish('CORE-COMMIT');
+});
+
+test('CORE-COOKIE member revoked while signature verification is held cannot enter from the saved session',async t=>{
+  const w=await world(t),m='syn-core-cookie',{sid,admin}=await coreMember(w,m);
+  const arrived=deferred(),release=deferred(),verify=w.I2.service.verifyAccessToken.bind(w.I2.service);
+  w.I2.service.verifyAccessToken=async raw=>{const p=await verify(raw);arrived.resolve();await release.promise;return p;};
+  const run=w.call(w.I2,'get',{sid});await within(arrived.promise,'verified identity');
+  assert.equal((await r10Patch(admin,m,{enabled:false})).status,200);release.resolve();
+  assert.equal((await run).status,401);await w.finish('CORE-COOKIE');
+});
+
+test('CORE-PROOF proof consumption rechecks DB state inside its transaction',async t=>{
+  const w=await world(t),m='syn-core-proof';await coreMember(w,m);
+  const done=(await login(w,w.I1,await w.issue(m+'-proof',{sub:m}))).done;
+  const hold=w.gate('I2','tx.open'),run=w.call(w.I2,'entry',{sid:done.newSid,body:{proof:done.proof}});await hold.arrived();
+  await w.base.memberRights.update({where:{sub:m},data:{suspended:true,version:{increment:1},newAuthAfter:new Date()}});
+  hold.release();assert.notEqual((await run).status,200);
+  assert.ok((await w.base.authSession.findUnique({where:{sid:done.newSid}})).entryProofHash,'proof remains unconsumed');
+  assert.equal((await w.rows()).filter(r=>r.action==='auth.entry').length,0);await w.finish('CORE-PROOF');
+});
+
+test('CORE-REFRESH member is checked before provider exchange and again before storing the answer',async t=>{
+  const w=await world(t),m='syn-core-refresh',{sid}=await coreMember(w,m);
+  await w.base.authSession.update({where:{sid},data:{atExpiresAt:lapsed()}});
+  const hold=w.pause({inst:'I2',model:'memberRights',method:'findUnique',scope:'root',phase:'after'});
+  const run=w.call(w.I2,'get',{sid});await hold.arrived();
+  await w.base.memberRights.update({where:{sub:m},data:{suspended:true}});hold.release();
+  assert.equal((await run).status,401);assert.equal(kc.tokens,0,'blocked refresh must not be exchanged');
+  await w.base.memberRights.update({where:{sub:m},data:{suspended:false}});
+  const next=await w.issue(m+'-next',{sub:m}),run2=w.call(w.I1,'get',{sid});const exchange=await heldToken(1,'I1');
+  const before=await w.base.authSession.findUnique({where:{sid}});
+  await w.base.memberRights.update({where:{sub:m},data:{version:{increment:1},newAuthAfter:new Date()}});
+  exchange.answer(reply.tokens(next));assert.notEqual((await run2).status,200);
+  assert.equal((await w.base.authSession.findUnique({where:{sid}})).accessToken,before.accessToken,'late tokens cannot be stored');
+  await w.finish('CORE-REFRESH');
+});
+
+test('CORE-MISSING missing DB rights and DB read failures never fall back to JWT roles',async t=>{
+  const w=await world(t),m='syn-core-missing',{token,sid}=await coreMember(w,m);
+  // A missing row models an unimported realm member. TRUNCATE is confined to this disposable fixture.
+  await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
+  assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,401);
+  assert.equal((await w.call(w.I1,'get',{sid})).status,401);
+  let once=true;w.observe({model:'memberRights',method:'findUnique',phase:'before'},()=>{if(once){once=false;throw new Error('synthetic database unavailable');}});
+  assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,500);
+  await w.finish('CORE-MISSING');
+});
+
+test('CORE-CANCEL approval cancellation retains history and cannot be bypassed by Activate',async t=>{
+  const w=await world(t),m='syn-core-cancel',{token,admin}=await coreMember(w,m);
+  assert.equal((await r10Patch(admin,m,{approvalState:'PENDING'})).status,200);
+  const row=await w.base.memberRights.findUnique({where:{sub:m}});
+  assert.deepEqual([row.approved,row.suspended,row.institution,row.roles,row.version],[false,true,null,[],2]);
+  assert.ok(row.newAuthAfter);assert.equal((await r10Patch(admin,m,{enabled:true})).status,400);
+  assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,401);
+  assert.equal((await r10Patch(admin,m,{approvalState:'APPROVED',institution:B,roles:['radiologist'],enabled:true})).status,200);
+  assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).version,3);
+  assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,401);
+  const fresh=await coreFresh(w,m,[A]);assert.equal((await w.call(w.I2,'me',{sid:fresh.done.newSid})).body.institution,B);
+  await w.finish('CORE-CANCEL');
+});
+
+test('CORE-IMPORT every realm member is imported, legacy sessions only retain matching permitted rights, import never overwrites history',async t=>{
+  const w=await world(t),{importMemberRights}=require('/app/dist/member-rights-import');
+  const a=await w.issue('import-a',{sub:'syn-import-a'}),sid=await w.session(a);
+  const bad=await w.issue('import-bad',{sub:'syn-import-bad'}),badSid=await w.session(bad);
+  await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
+  const users=['syn-import-a','syn-import-bad','syn-import-no-session','syn-import-disabled','syn-import-unknown'].map(sub=>({
+    id:sub,username:sub,email:sub+'@synthetic.test',emailVerified:true,firstName:'Synthetic',lastName:'Member',
+    enabled:sub!=='syn-import-disabled',serviceAccountClientId:null,groups:sub==='syn-import-bad'?[B]:[A],roles:['radiologist']}));
+  const unknown=await w.base.providerChange.create({data:{kind:'disable',sub:'syn-import-unknown',target:'syn-import-unknown',generation:1,state:'unknown',createdAt:new Date()}});
+  const provider={listUsers:async page=>({total:users.length,users:users.slice((page-1)*2,page*2)})};
+  await importMemberRights(w.base,provider);
+  assert.equal(await w.base.memberRights.count(),5,'member without session also has a row');
+  assert.equal((await w.call(w.I1,'get',{sid})).status,200,'compatible legacy session keeps working');
+  assert.equal((await w.call(w.I1,'get',{sid:badSid})).status,401,'old A session never becomes B');
+  for(const sub of ['syn-import-disabled','syn-import-unknown'])assert.equal((await w.base.memberRights.findUnique({where:{sub}})).suspended,true);
+  assert.equal((await w.base.providerChange.findUnique({where:{id:unknown.id}})).state,'unknown');
+  await w.base.memberRights.update({where:{sub:'syn-import-a'},data:{version:4,newAuthAfter:new Date(),suspended:true}});
+  await importMemberRights(w.base,{listUsers:()=>{throw new Error('must not reimport authority');}});
+  assert.equal((await w.base.memberRights.findUnique({where:{sub:'syn-import-a'}})).version,4);
+  if(!process.env.KIN_AUTH_SESSION_DATABASE_URL.includes('local-stand-in')) {
+    await assert.rejects(w.base.memberRights.delete({where:{sub:'syn-import-a'}}));
+    await assert.rejects(w.base.memberRights.update({where:{sub:'syn-import-a'},data:{version:1}}));
+  }
+  await w.finish('CORE-IMPORT');
+});
+
+test('CORE-ROSTER unknown credential outcomes never block DB commands or fresh entry',async t=>{
+  const w=await world(t),m='syn-core-roster',{admin}=await coreMember(w,m);
+  const arrived=deferred(),release=deferred();let once=true;
+  kc.beforeAdmin=(name,sub)=>{if(once&&sub===m&&name.startsWith('PUT groups/')){once=false;arrived.resolve();return release.promise;}};
+  t.after(()=>release.resolve('drop'));
+  const changed=await r10Patch(admin,m,{institution:B,roles:['radiologist']});assert.equal(changed.status,200);
+  await within(arrived.promise,'credential write held before its effect');
+  const change=await w.base.providerChange.findFirst({where:{kind:'credentials',sub:m}});
+  assert.equal(change.state,'unknown','intent is committed before send');
+  assert.equal((await r10Patch(r10Admin(w,w.I2),m,{enabled:false})).status,200);
+  assert.equal((await r10Patch(r10Admin(w,w.I2),m,{enabled:true})).status,200);
+  const fresh=await coreFresh(w,m,[A]);assert.equal((await w.call(w.I2,'me',{sid:fresh.done.newSid})).body.institution,B);
+  release.resolve('drop');await w.until('credential unknown outcome recorded',async()=>!!(await w.base.providerChange.findUnique({where:{id:change.id}})).outcome);
+  assert.equal((await w.base.providerChange.findUnique({where:{id:change.id}})).state,'unknown');
+  assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).suspended,false);
+  assert.equal(kc.endRequests.length,0);await w.finish('CORE-ROSTER');
+});
+
+test('CORE-NONCE old authentication cannot enter a new version through a mismatched nonce or an old auth_time',async t=>{
+  const w=await world(t),m='syn-core-nonce',{token,admin}=await coreMember(w,m);
+  w.tick(2000);assert.equal((await r10Patch(admin,m,{institution:B,roles:['radiologist']})).status,200);
+  const first=(await login(w,w.I2,token)).done;assert.equal(first.newSid,null);assert.equal(promptOf(first),'login');
+  const old=await answerFlow(w,w.I2,first,token);assert.equal(old.newSid,null,'fresh flow does not admit an old authentication time');
+  const fresh=await w.issue(m+'-wrong-nonce',{sub:m,authTime:Math.floor(Date.now()/1000)});
+  const flow=(await login(w,w.I2,fresh)).done;
+  const wrong=await answerFlow(w,w.I2,flow,fresh,{nonce:'different-authentication'});
+  assert.equal(wrong.newSid,null,'a fresh authentication with another nonce is not admitted');
+  const good=await coreFresh(w,m);assert.ok(good.done.newSid);await w.finish('CORE-NONCE');
+});
+
+
+test('CORE-LOGOUT-ORDER provider sees only committed revocation and its audit',async t=>{
+  const w=await world(t),m='syn-core-logout-order';const {sid}=await coreMember(w,m);
+  const told=deferred();kc.logoutMode='ok';
+  kc.onLogout=async()=>told.resolve({session:await w.version(sid),rows:await endsOf(w,m)});
+  const out=await w.call(w.I1,'logout',{sid});assert.equal(out.status,204);
+  assert.deepEqual(await within(told.promise,'provider observed committed logout'),
+    {session:null,rows:[['auth.logout','logout',A]]},'remote logout never precedes product commit');
+  await w.finish('CORE-LOGOUT-ORDER');
 });

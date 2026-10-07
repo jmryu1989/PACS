@@ -117,3 +117,15 @@ test('the original error is kept only as the cause, never in the body',async()=>
     assert.ok(!JSON.stringify(seen.getResponse()).includes('SYN-DB-DETAIL'),label);
   }
 });
+
+// REQ-S7-U5-DB-RIGHTS -> RISK-STALE-AFFILIATION -> CORE-ACCESS, D623.
+test('CORE-ACCESS managed affiliation is the current DB member, independent of provider claims',async()=>{
+  const subject='00000000-0000-4000-8000-000000000091',c={...caller,roles:['admin']};
+  const f=service([]),row={sub:subject,approved:true,suspended:false,institution:c.institution,roles:['radiologist'],username:'syn',email:'syn@synthetic.test'};
+  let current=row;f.db.memberRights={findUnique:async()=>current};
+  assert.equal((await f.svc.read(subject,c)).subject,subject);
+  for(const update of [{institution:'old-provider-institution'},{suspended:true},{approved:false},null]){
+    current=update?{...row,...update}:null;
+    await assert.rejects(f.svc.read(subject,c),e=>e.getStatus()===404);
+  }
+});

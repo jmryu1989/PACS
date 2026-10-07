@@ -1,5 +1,5 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
-// setRoles()가 여기 없는 역할을 503으로 거절하고 approve()는 그것을 409 USER_ISOLATED로 끝낸다.
+// setRoles()는 관리 대상 밖의 역할을 거절한다. 명부 반영 실패는 DB 회원 권한을 되돌리지 않는다.
 // 그래서 관리 대상 역할은 guard·회원콘솔과 같은 목록(clinician-policy)이어야 한다.
 import { APP_ROLES as MANAGED_ROLES } from './clinician-policy';
 const USER_PAGE_SIZE = 25;
@@ -45,9 +45,8 @@ export interface KeycloakUser {
  * 판독문을 볼 수 있다. 지정을 자유 입력으로 받으면 오타 하나에 아무도 못 보는 판독문이
  * 생긴다. 접근 권한을 좌우하는 값을 사람이 타이핑하게 두면 안 된다.
  *
- * 사용자와 회원 상태는 이미 Keycloak에 있다. 우리 DB에 복사본을 두면 두 곳이 어긋난다
- * (인계문서 §8의 "상태를 두 곳에 두면 반드시 어긋난다"가 사용자에도 그대로 적용된다).
- * 그래서 물어본다.
+ * D623: 명부 조회는 이 클라이언트에 남지만 PACS 접근 권한의 권위는 MemberRights다.
+ * 명부가 DB와 같아졌다고 보장하지 않으며 수렴·복구는 U5b에서 다룬다.
  *
  * 이 클라이언트는 **서비스 계정**으로 인증한다. manage-users는 피해 반경이 넓으므로
  * 컨트롤러가 경로를 넘기는 범용 메서드는 내보내지 않고, 아래 고정 메서드만 공개한다.
@@ -293,27 +292,6 @@ export class KeycloakService {
   async setEnabled(id: string, enabled: boolean): Promise<void> {
     await this.adm(`/users/${encodeURIComponent(id)}`, 'PUT', { enabled });
     this.cache.clear();
-  }
-
-  /**
-   * 격리·재활성화의 회원 비활성화/활성화 — 변경 호출 하나(`change`). 부른 쪽이 보내기 전에 기록하고 이 답으로 결과를 적는다.
-   * `signal`은 토큰 취득의 기한일 뿐 요청을 끊지 않는다.
-   */
-  async changeEnabled(id: string, enabled: boolean, signal?: AbortSignal): Promise<ChangeAnswer> {
-    const answer = await this.change(`/users/${encodeURIComponent(id)}`, 'PUT', { enabled }, signal, false);
-    this.cache.clear();
-    return answer;
-  }
-
-  /**
-   * 회원 하나의 지금 provider(SSO) 세션 id들 — 격리가 그 전부에 표식을 남기려고 읽는다(서비스 계정의 view-users로 읽을 수
-   * 있음: closure-audit facts.md "GET users/{id}/sessions 200"). 읽지 못하면 던진다 — 격리는 그 자리에서 실패로 끝난다.
-   * 읽기라 기한(`limitMs`)에 끊는다: 늦은 목록은 쓰지 않는다(부른 쪽이 다시 나열한다).
-   */
-  async userSessions(id: string, limitMs?: number): Promise<string[]> {
-    const sessions: any[] = await this.adm(`/users/${encodeURIComponent(id)}/sessions`, 'GET', undefined, true, bound(limitMs)) ?? [];
-    if (!Array.isArray(sessions)) throw new ServiceUnavailableException('Keycloak 사용자 세션 목록을 읽지 못했습니다');
-    return sessions.map(session => session?.id).filter((sid): sid is string => typeof sid === 'string' && !!sid);
   }
 
   /**
