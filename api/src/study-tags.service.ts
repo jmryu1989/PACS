@@ -22,7 +22,7 @@ export class StudyTagsService {
     if(!uids.length)return new Set();
     const rows=await tx.$queryRaw(Prisma.sql`SELECT uid FROM "StudyState" WHERE uid IN (${Prisma.join([...new Set(uids)].sort())})
       AND ("institutionId"=${c.institution} OR "teleInstitutionId"=${c.institution})
-      AND (rs<>'P' OR "preDoc"=${c.actor} OR "preReviewer"=${c.actor}) ORDER BY uid ${lock?Prisma.sql`FOR SHARE`:Prisma.empty}`);
+      AND (rs<>'P' OR (CASE WHEN "preDocSub" IS NOT NULL THEN "preDocSub"=${c.sub} ELSE "preDoc"=${c.actor} END) OR (CASE WHEN "preReviewerSub" IS NOT NULL THEN "preReviewerSub"=${c.sub} ELSE "preReviewer"=${c.actor} END)) ORDER BY uid ${lock?Prisma.sql`FOR SHARE`:Prisma.empty}`);
     return this.studyAccess.allowed(c,rows.map((x:any)=>x.uid),tx);
   }
   private async result(tx:any,c:Caller){

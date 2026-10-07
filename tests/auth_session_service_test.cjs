@@ -4345,8 +4345,12 @@ test('CORE_ROSTER_B_C_RESIDUE U9 late B and completed C leave B+C while DB C and
   w.tick(1000);release.resolve();await w.until('both writes settled',async()=>await w.base.providerChange.count({where:{sub:m,state:'done'}})===2);
   assert.deepEqual([...kc.members[m].groups].sort(),[B,Z].sort());
   const me=await w.call(w.I2,'me',{sid});assert.equal(me.status,200);assert.equal(me.body.institution,Z);assert.deepEqual(me.body.roles,['technician']);
-  // D638: this label reports only the latest credentials outcome; it does not promise provider convergence.
-  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);assert.equal(kc.endRequests.length,0);await w.finish('U9');
+  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,true,'the late older completion is visible');
+  const {retryMemberRoster}=require('/app/dist/member-rights-import');w.tick(1000);
+  assert.deepEqual(await retryMemberRoster(w.I2.prisma,new KeycloakService()),{attempted:1,unconfirmed:0,superseded:0,overlaps:1});
+  assert.deepEqual(kc.members[m].groups,[Z]);assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);
+  assert.deepEqual(await retryMemberRoster(w.I2.prisma,new KeycloakService()),{attempted:0,unconfirmed:0,superseded:0,overlaps:0});
+  assert.equal(kc.endRequests.length,0);await w.finish('U9');
 });
 
 test('CORE_LEGACY_UNKNOWN_RESTART_NO_B01 U11 disable/enable unknown survive import and restart without member reconciliation',async t=>{
@@ -4677,7 +4681,7 @@ test('CORE_RETRY_ROSTER replays unknown and void ordinary groups/roles intents w
   kc.beforeAdmin=name=>armed&&name==='GET groups'?503:undefined;
   assert.equal((await r10Patch(admin,m,{institution:B,roles:['clinician']})).status,200);await coreSettled(w,m);
   const before=await w.base.memberRights.findUnique({where:{sub:m}});kc.beforeAdmin=null;
-  assert.deepEqual(await retryMemberRoster(w.I2.prisma,new KeycloakService()),{attempted:1,unconfirmed:0,superseded:0});
+  assert.deepEqual(await retryMemberRoster(w.I2.prisma,new KeycloakService()),{attempted:1,unconfirmed:0,superseded:0,overlaps:0});
   assert.deepEqual(kc.members[m].groups,[B]);assert.deepEqual(kc.members[m].roles,['clinician']);
   assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
   assert.ok(!kc.adminCalls.some(x=>/enable|disable|sessions|logout/.test(x)));await w.finish('CORE_RETRY_ROSTER');
@@ -4754,13 +4758,13 @@ test(`CORE_R9_RETRY_NEWEST ${olderState}->${newerState}: supersede old intents a
   const provider=new KeycloakService(),groups=provider.setGroups.bind(provider),roles=provider.setRoles.bind(provider);
   provider.setGroups=async(sub,value)=>{sends.push(['groups',sub,value]);return groups(sub,value);};
   provider.setRoles=async(sub,value)=>{sends.push(['roles',sub,value]);return roles(sub,value);};
-  assert.deepEqual(await retryMemberRoster(w.I2.prisma,provider),{attempted:newerState==='done'?0:1,unconfirmed:0,superseded:1});
+  assert.deepEqual(await retryMemberRoster(w.I2.prisma,provider),{attempted:newerState==='done'?0:1,unconfirmed:0,superseded:1,overlaps:0});
   assert.deepEqual(sends,newerState==='done'?[]:[['groups',m,[A]],['roles',m,['radiologist']]]);
   assert.deepEqual([kc.members[m].groups,kc.members[m].roles],[[A],['radiologist']]);
   const old=await w.base.providerChange.findUnique({where:{id:records[0].id}});
   assert.equal(old.outcome,'superseded');assert.ok(old.settledAt);
   assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);
-  assert.deepEqual(await retryMemberRoster(w.I2.prisma,provider),{attempted:0,unconfirmed:0,superseded:0});
+  assert.deepEqual(await retryMemberRoster(w.I2.prisma,provider),{attempted:0,unconfirmed:0,superseded:0,overlaps:0});
   assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),rights);
   await w.finish('CORE_R9_RETRY_NEWEST');
 });
@@ -4802,31 +4806,28 @@ test(`CORE_R9_IDENTITY_COMMAND ${command}: only a command refreshes current prov
   if(command.startsWith('Reset'))await admin.resetPassword(m,{mode:command==='ResetTemp'?'temp':'email'},R10_CALLER);
   else assert.equal((await r10Patch(admin,m,{...coreBody(command),verificationOverride:command==='Change'?true:undefined})).status,200);
   const row=await coreRoster(w,m);
-  assert.deepEqual([row.username,row.email,row.name,row.emailVerified],['renamed','renamed@synthetic.test','Family Given',command==='Approve']);
+  assert.deepEqual([row.username,row.email,row.name,row.emailVerified],command.startsWith('Reset')
+    ? [before.username,before.email,before.name,before.emailVerified] : ['renamed','renamed@synthetic.test','Family Given',command==='Approve']);
   if(command.startsWith('Reset'))assert.deepEqual([row.version,row.roles,row.enabled],[before.version,before.roles,!before.suspended]);
   await w.finish('CORE_R9_IDENTITY_COMMAND '+command);
 });
 
-test('CORE_R9_IDENTITY_FORWARD: an older reset response cannot rewind a later command identity',async t=>{
-  const w=await world(t),m='syn-r9-forward';await coreMember(w,m);
+test('CORE_R9_IDENTITY_FORWARD: an older pre-read loses CAS and cannot rewind a committed command identity',async t=>{
+  const w=await world(t),m='syn-r10-forward';await coreMember(w,m);
   const {AdminService}=require('/app/dist/admin.service'),provider=new KeycloakService();
   const original=provider.getUser.bind(provider),arrived=deferred(),release=deferred();let reads=0;
   t.after(()=>release.resolve());
-  provider.resetPassword=async()=>{};
-  provider.getUser=async(...args)=>{
-    const result=await original(...args);
-    if(++reads===1){arrived.resolve();await release.promise;}
-    return result;
-  };
+  provider.getUser=async(...args)=>{const result=await original(...args);if(++reads===1){arrived.resolve();await release.promise;}return result;};
   const admin=inst=>new AdminService(inst.prisma,provider,null,inst.service);
-  const first=admin(w.I1).resetPassword(m,{mode:'email'},R10_CALLER);await within(arrived.promise,'older identity captured');
+  const first=r10Patch(admin(w.I1),m,coreBody('Change'));await within(arrived.promise,'older identity captured');
   Object.assign(kc.members[m],{email:'newest@synthetic.test',firstName:'Newest',lastName:'Identity'});
-  const second=admin(w.I2).resetPassword(m,{mode:'email'},R10_CALLER);
-  try{await quiet(w);assert.equal(reads,1,'the second identity read waits for the member lock');}
-  finally{release.resolve();await Promise.all([first,second]);}
-  const row=await coreRoster(w,m);
-  assert.deepEqual([row.email,row.name],['newest@synthetic.test','Identity Newest']);
-  await w.finish('CORE_R9_IDENTITY_FORWARD');
+  let second;
+  try { second=await within(r10Patch(admin(w.I2),m,coreBody('Change')),'newer command never waits on remote I/O under lock'); }
+  finally { release.resolve(); }
+  const older=await first;assert.equal(second.status,200);assert.equal(older.status,409);assert.equal(older.body.code,'MEMBER_VERSION_CONFLICT');
+  const row=await coreRoster(w,m);assert.deepEqual([row.email,row.name],['newest@synthetic.test','Identity Newest']);
+  assert.equal(await w.base.providerChange.count({where:{sub:m}}),1);
+  await quiet(w);await w.finish('CORE_R9_IDENTITY_FORWARD');
 });
 
 test('CORE_COMMAND_DB_CLOCK rights boundary uses transaction DB time despite application clock skew',async t=>{
@@ -4837,4 +4838,156 @@ test('CORE_COMMAND_DB_CLOCK rights boundary uses transaction DB time despite app
   const row=await w.base.memberRights.findUnique({where:{sub:m}});assert.equal(row.newAuthAfter.getTime(),dbTime.getTime());
   if(realPG())assert.ok(Math.abs(row.newAuthAfter.getTime()-Date.now())>HOUR,'database and application clocks were independently exercised');
   await w.finish('CORE_COMMAND_DB_CLOCK');
+});
+
+// D640: REQ-S7-U5-DB-RIGHTS/AUDIT -> RISK-REFUSAL-AUDIT/REMOTE-LOCK/IDENTITY-REWIND -> CORE_R10 / ASTRA below.
+test('CORE_R10_UNVERIFIED refusal precedes the command: 400, zero audit or rights change; override is the sole audited bypass',async t=>{
+  const w=await world(t),m='syn-r10-unverified',{admin}=await coreSetup(w,m,'Approve');
+  kc.members[m].emailVerified=false;const before=await w.base.memberRights.findUnique({where:{sub:m}});
+  const refused=await r10Patch(admin,m,coreBody('Approve'));assert.equal(refused.status,400);
+  assert.equal(await w.base.auditLog.count({where:{target:m}}),0);
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
+  assert.equal(await w.base.providerChange.count(),0);
+  const allowed=await r10Patch(admin,m,{...coreBody('Approve'),verificationOverride:true});assert.equal(allowed.status,200);
+  const rows=await w.base.auditLog.findMany({where:{target:m,action:'admin.user.approve'}});
+  assert.equal(rows.length,1);assert.equal(JSON.parse(rows[0].detail).verificationOverride,true);
+  await coreSettled(w,m);await w.finish('CORE_R10_UNVERIFIED');
+});
+
+for(const command of CORE_COMMANDS)test(`ASTRA_KC_DOWN ${command}: outage never blocks DB revocation or activation`,async t=>{
+  const w=await world(t),m='syn-r10-outage-'+command,{admin,sid}=await coreSetup(w,m,command);
+  const before=await w.base.memberRights.findUnique({where:{sub:m}});kc.adminDown=true;
+  const result=await r10Patch(admin,m,coreBody(command));kc.adminDown=false;
+  if(['Approve','Change'].includes(command)){
+    assert.equal(result.status,503);assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
+    assert.ok(await w.base.authSession.findUnique({where:{sid}}));assert.equal(await w.base.auditLog.count({where:{target:m}}),0);
+  }else{
+    assert.equal(result.status,200);const after=await w.base.memberRights.findUnique({where:{sub:m}});
+    assert.equal(after.version,before.version+1);assert.equal(after.suspended,command!=='Activate');
+    if(command==='Cancel'){assert.equal(after.approved,false);assert.deepEqual(after.roles,[]);assert.equal(after.institution,null);}
+    assert.equal(await w.base.authSession.count({where:{sub:m}}),0);
+    assert.equal(await w.base.auditLog.count({where:{target:m,action:'auth.logout'}}),1);
+    assert.equal(await w.base.auditLog.count({where:{target:m,action:'admin.user.'+({Suspend:'suspend',Cancel:'unapprove',Activate:'activate'}[command])}}),1);
+  }
+  assert.equal(await w.base.providerChange.count(),0);await w.finish('ASTRA_KC_DOWN '+command);
+});
+
+test('ASTRA_CAS_KC_DOWN stale observed command is 409 without extra end or publication',async t=>{
+  const w=await world(t),m='syn-r10-cas-down',{admin}=await coreMember(w,m);
+  const hold=w.pause({inst:'I2',scope:'root',model:'memberRights',method:'findUnique',phase:'after'});
+  const loser=r10Patch(r10Admin(w,w.I2),m,coreBody('Cancel'));await hold.arrived();
+  assert.equal((await r10Patch(admin,m,coreBody('Suspend'))).status,200);kc.adminDown=true;hold.release();
+  const result=await loser;kc.adminDown=false;assert.equal(result.status,409);assert.equal(result.body.code,'MEMBER_VERSION_CONFLICT');
+  assert.equal(await w.base.auditLog.count({where:{target:m,action:'auth.logout'}}),1);
+  assert.equal(await w.base.auditLog.count({where:{target:m,action:'admin.user.unapprove'}}),0);
+  assert.equal(await w.base.providerChange.count(),0);await w.finish('ASTRA_CAS_KC_DOWN');
+});
+
+for(const path of ['callback','proof','refresh'])test(`CORE_R10_REMOTE_UNLOCKED ${path} completes while a command pre-read is held`,async t=>{
+  const w=await world(t),m='syn-r10-entry-'+path,f=await coreEntry(w,path,m);
+  const {AdminService}=require('/app/dist/admin.service'),provider=new KeycloakService(),original=provider.getUser.bind(provider);
+  const arrived=deferred(),release=deferred();t.after(()=>release.resolve());
+  provider.getUser=async(...args)=>{const result=await original(...args);arrived.resolve();await release.promise;return result;};
+  const command=r10Patch(new AdminService(w.I1.prisma,provider,null,w.I1.service),m,coreBody('Change'));
+  await within(arrived.promise,'pre-read captured');let out;
+  try{
+    const entry=f.run();
+    if(path==='refresh'){
+      const exchange=await heldToken(1,'I2');exchange.answer(reply.tokens(await w.issue(m+'-refreshed',{sub:m})));
+    }
+    out=await within(entry,'entry cannot wait for a remote read holding the member lock');
+  }
+  finally{release.resolve();await command;}
+  if(path==='callback')assert.ok(out.newSid);else assert.equal(out.status,200);
+  await quiet(w);await w.finish('CORE_R10_REMOTE_UNLOCKED '+path);
+});
+
+test('CORE_R10_RESET_BUSY reset under member contention returns 409 MEMBER_BUSY with no password call',async t=>{
+  const w=await world(t),m='syn-r10-reset-lock';await coreMember(w,m);
+  const {AdminService}=require('/app/dist/admin.service'),provider=new KeycloakService();let sent=0,release,held;
+  provider.resetPassword=async()=>{sent++;};
+  const before=await w.base.memberRights.findUnique({where:{sub:m}});
+  if(realPG()){
+    const arrived=deferred();release=deferred();t.after(()=>release.resolve());
+    held=w.base.$transaction(async tx=>{await require('/app/dist/member-rights').lockMemberRights(tx,m);arrived.resolve();await release.promise;},{timeout:15000});
+    await arrived.promise;
+  }else w.observe({inst:'I1',model:'$executeRaw',phase:'before'},e=>{
+    if(e.args[1]===0x4b494e4d)throw Object.assign(Error('synthetic timeout'),{code:'P2010',meta:{code:'55P03'}});
+  });
+  const result=await r10Answer(new AdminService(w.I1.prisma,provider,null,w.I1.service).resetPassword(m,{mode:'email'},R10_CALLER));
+  release?.resolve();if(held)await held;
+  assert.equal(result.status,409);assert.equal(result.body.code,'MEMBER_BUSY');assert.equal(sent,0);
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);await w.finish('CORE_R10_RESET_BUSY');
+});
+
+test('CORE_R10_LEGACY_LABEL a confirmed ordinary publication cannot hide an uncertain legacy enable',async t=>{
+  const w=await world(t),m='syn-r10-legacy-label',{admin}=await coreMember(w,m);
+  for(const state of ['unknown','void']){
+    const legacy=await w.base.providerChange.create({data:{kind:'credentials',sub:m,target:'legacy-enable:'+m,generation:1,state,createdAt:new Date()}});
+    assert.equal((await r10Patch(admin,m,coreBody('Change'))).status,200);await coreSettled(w,m);
+    assert.equal((await coreRoster(w,m)).rosterUnconfirmed,true);
+    await w.base.providerChange.update({where:{id:legacy.id},data:{state:'done',settledAt:new Date()}});
+    assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);
+  }
+  await w.finish('CORE_R10_LEGACY_LABEL');
+});
+
+test('CORE_R10_IMPORT_DESIGNATION binds unique legacy P subjects atomically, preserving ambiguous and unmatched nulls',async t=>{
+  const w=await world(t,{imported:false});
+  const users=[['syn-bind-one','one@synthetic.test'],['syn-bind-two','duplicate@synthetic.test'],['syn-bind-three','duplicate@synthetic.test']]
+    .map(([id,email])=>({id,email,username:id,emailVerified:true,enabled:true,groups:[A],roles:['radiologist']}));
+  const ids=['2.25.710001','2.25.710002'];
+  t.after(async()=>{for(const uid of ids)await w.base.studyState.deleteMany({where:{uid}});});
+  await w.base.studyState.create({data:{uid:ids[0],rs:'P',preDoc:'one@synthetic.test',preReviewer:'duplicate@synthetic.test'}});
+  await w.base.studyState.create({data:{uid:ids[1],rs:'P',preDoc:'unmatched@synthetic.test',preReviewer:'one@synthetic.test'}});
+  const {importMemberRights}=require('/app/dist/member-rights-import');
+  await importMemberRights(w.I1.prisma,{listUsers:async()=>({total:users.length,users})});
+  const one=await w.base.studyState.findUnique({where:{uid:ids[0]}}),two=await w.base.studyState.findUnique({where:{uid:ids[1]}});
+  assert.deepEqual([one.preDocSub,one.preReviewerSub,two.preDocSub,two.preReviewerSub],['syn-bind-one',null,null,'syn-bind-one']);
+  assert.equal(await w.base.memberRightsImport.count(),1);
+  await importMemberRights(w.I2.prisma,{listUsers:async()=>assert.fail('marker prevents a second import')});
+  assert.deepEqual(await w.base.studyState.findUnique({where:{uid:ids[0]}}),one);
+  await w.finish('CORE_R10_IMPORT_DESIGNATION');
+});
+
+test('CORE_R10_RESET_FORWARD a delayed reset pre-read cannot hold a member lock or refresh an existing identity',async t=>{
+  const w=await world(t),m='syn-r10-reset-forward';await coreMember(w,m);
+  const {AdminService}=require('/app/dist/admin.service'),provider=new KeycloakService(),original=provider.getUser.bind(provider);
+  const arrived=deferred(),release=deferred();let reads=0;t.after(()=>release.resolve());provider.resetPassword=async()=>{};
+  provider.getUser=async(...args)=>{const result=await original(...args);if(++reads===1){arrived.resolve();await release.promise;}return result;};
+  const admin=inst=>new AdminService(inst.prisma,provider,null,inst.service);
+  const reset=r10Answer(admin(w.I1).resetPassword(m,{mode:'email'},R10_CALLER));await within(arrived.promise,'reset identity captured');
+  Object.assign(kc.members[m],{email:'after-reset-read@synthetic.test',firstName:'Newest',lastName:'Identity'});
+  let change,before;
+  try{change=await within(r10Patch(admin(w.I2),m,coreBody('Change')),'command proceeds while reset awaits the provider');before=await w.base.memberRights.findUnique({where:{sub:m}});}
+  finally{release.resolve();}
+  assert.equal((await reset).status,200);assert.equal(change.status,200);
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before,'reset never rewrites identity, version, rights, or boundary');
+  assert.equal(before.email,'after-reset-read@synthetic.test');await quiet(w);await w.finish('CORE_R10_RESET_FORWARD');
+});
+
+for(const command of ['Suspend','Cancel','Activate'])test(`CORE_R10_KC_HANG ${command} does not wait for a provider answer`,async t=>{
+  const w=await world(t),m='syn-r10-hang-'+command,{admin}=await coreSetup(w,m,command),release=deferred();
+  t.after(()=>release.resolve());let held=false;
+  kc.beforeAdmin=(name,sub)=>{if(sub===m&&name==='GET read'){held=true;return release.promise;}};
+  let result;try{result=await within(r10Patch(admin,m,coreBody(command)),'DB command bounds an optional identity read',2500);}
+  finally{release.resolve();}
+  assert.equal(held,true);assert.equal(result.status,200);assert.equal(await w.base.authSession.count({where:{sub:m}}),0);
+  await quiet(w);await w.finish('CORE_R10_KC_HANG '+command);
+});
+
+test('CORE_R10_LATE_SUPERSEDED a publication answered after retry remains visible and can be repaired',async t=>{
+  const w=await world(t),m='syn-r10-late-superseded',{admin}=await coreMember(w,m),arrived=deferred(),release=deferred();let once=true;
+  const {retryMemberRoster}=require('/app/dist/member-rights-import');t.after(()=>release.resolve());
+  kc.beforeAdmin=(name,sub)=>{if(once&&sub===m&&name==='PUT groups/syn-group-'+B){once=false;arrived.resolve();return release.promise;}};
+  assert.equal((await r10Patch(admin,m,{institution:B,roles:['radiologist']})).status,200);await within(arrived.promise,'older publish held');
+  w.tick(1000);assert.equal((await r10Patch(r10Admin(w,w.I2),m,{institution:Z,roles:['technician']})).status,200);await coreSettled(w,m);
+  const old=await w.base.providerChange.findFirst({where:{sub:m},orderBy:{id:'asc'}});
+  assert.deepEqual(await retryMemberRoster(w.I2.prisma,new KeycloakService()),{attempted:0,unconfirmed:0,superseded:1,overlaps:0});
+  w.tick(1000);release.resolve();await quiet(w);
+  assert.equal((await w.base.providerChange.findUnique({where:{id:old.id}})).state,'done','late completion must not disappear behind superseded');
+  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,true);w.tick(1000);
+  assert.deepEqual(await retryMemberRoster(w.I2.prisma,new KeycloakService()),{attempted:1,unconfirmed:0,superseded:0,overlaps:1});
+  assert.deepEqual(kc.members[m].groups,[Z]);assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);
+  assert.equal((await retryMemberRoster(w.I2.prisma,new KeycloakService())).attempted,0);await w.finish('CORE_R10_LATE_SUPERSEDED');
 });

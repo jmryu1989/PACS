@@ -175,6 +175,8 @@ model StudyState {
   /// (HPACS 매뉴얼 7.4.1.3-4.1 — "지정된 판독의만 판독 내용을 볼 수 있다")
   preDoc      String?
   preReviewer String?
+  preDocSub   String?
+  preReviewerSub String?
   ov        String?                           // Match/Modify로 덮어쓴 값 (JSON)
   orig      String?                           // 덮어쓰기 전 원본 (JSON) — Unmatch 복원용
   /// 매칭은 1:1이다. nullable unique라 미매칭(NULL)은 여럿이어도 같은 오더가 두 검사에 붙지는 않는다.

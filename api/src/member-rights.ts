@@ -18,3 +18,10 @@ export function rightsUser(row: any) {
     firstName: row.name, lastName: '', enabled: rightsAllow(row), serviceAccountClientId: null,
     groups: row.institution ? [row.institution] : [], roles: row.approved ? row.roles : [] };
 }
+
+/** An older ordinary publication may have landed after the latest intent was created. */
+export function rosterOverlap(records: { state: string; createdAt: Date; settledAt: Date | null }[]): boolean {
+  const latest = records[0];
+  return !!latest && records.slice(1).some(row => row.state === 'done' && row.settledAt
+    && row.settledAt.getTime() > latest.createdAt.getTime());
+}

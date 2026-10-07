@@ -1,3 +1,4 @@
+import { canReadPreliminary, designationMatches } from './preliminary-reader';
 import { rightsAllow, lockMemberRights } from './member-rights';
 import { StudyAccessService } from './study-access.service';
 import type { AccessSnapshot } from './study-access.service';
@@ -151,10 +152,7 @@ const holdAlive = (s: any) => s?.holder && s.heldAt && Date.now() - new Date(s.h
  * 검사 자체는 워크리스트에 그대로 보인다 — 가리는 건 판독문 내용뿐이다.
  * 검사를 통째로 숨기면 "그 검사 어디 갔냐"가 되고, 그건 다른 종류의 사고다.
  */
-function canReadPrelim(s: any, actor: string) {
-  if (s?.rs !== 'P') return true;
-  return s.preDoc === actor || s.preReviewer === actor;
-}
+
 
 /**
  * 프론트가 그대로 쓸 수 있는 모양으로 되돌린다 (main.html의 appState 한 칸과 같은 구조)
@@ -164,8 +162,9 @@ function canReadPrelim(s: any, actor: string) {
  * 이미 읽은 사람의 머릿속은 안 뒤집힌다 (RS=P를 가리는 것과 같은 이유).
  * 남이 쓰고 있다는 사실은 점유 표시(holder)가 이미 말해준다.
  */
-function toClient(s: any, r: any, actor = '', d: any = null) {
-  const hidden = !canReadPrelim(s, actor);
+function toClient(s: any, r: any, caller: Caller, d: any = null) {
+  const actor = caller.actor;
+  const hidden = !canReadPreliminary(s, caller);
   return {
     rs: s.rs, ss: s.ss, em: s.em, ts: s.ts,
     matched: s.matched, ward: s.ward, reqHosp: s.reqHosp,
@@ -710,7 +709,7 @@ export class PacsService implements OnModuleInit {
       where: { uid }, data: { institutionId, reqHosp: this.instName(institutionId) },
     });
     await audit(c.actor, 'study.assign', uid, { institutionId });
-    return toClient(saved, await tx.report.findUnique({ where: { uid } }), c.actor, await this.myDraft(uid, c.actor, tx));
+    return toClient(saved, await tx.report.findUnique({ where: { uid } }), c, await this.myDraft(uid, c.actor, tx));
     });
   }
 
@@ -1249,7 +1248,8 @@ export class PacsService implements OnModuleInit {
     const changedAccess = (rows: any[]) => rows.length !== pageUids.length || rows.some(state => !this.visible(state, me)
       || state.institutionId !== byUid.get(state.uid)?.institutionId || state.teleInstitutionId !== byUid.get(state.uid)?.teleInstitutionId
       || (byUid.get(state.uid)?.rs !== undefined && (state.rs !== byUid.get(state.uid).rs
-        || state.preDoc !== byUid.get(state.uid).preDoc || state.preReviewer !== byUid.get(state.uid).preReviewer)));
+        || state.preDoc !== byUid.get(state.uid).preDoc || state.preReviewer !== byUid.get(state.uid).preReviewer
+        || state.preDocSub !== byUid.get(state.uid).preDocSub || state.preReviewerSub !== byUid.get(state.uid).preReviewerSub)));
     const accessConflict = () => new ConflictException({ code:'STUDY_LIST_CHANGED', message:'검사 접근 범위가 바뀌었습니다. 새로고침하세요.' });
     if (page) {
       // Enumerate only identity/scope first; report state and overlays belong to the selected page.
@@ -1321,12 +1321,12 @@ export class PacsService implements OnModuleInit {
         institutionName: this.instName(s.institutionId),
         // 이 검사가 우리에게 원격판독으로 넘어온 것인가 (화면에서 구분해 보여준다)
         tele: s.teleInstitutionId === me && s.institutionId !== me,
-        state: toClient(s, repByUid.get(uid), c.actor, draftByUid.get(uid)),
+        state: toClient(s, repByUid.get(uid), c, draftByUid.get(uid)),
       });
     }
     // A concurrent Preliminary transition can change who may read the report too.
     const current = await this.prisma.studyState.findMany({ where: { uid: { in: pageUids } },
-      select: { uid:true, institutionId:true, teleInstitutionId:true, rs:true, preDoc:true, preReviewer:true } });
+      select: { uid:true, institutionId:true, teleInstitutionId:true, rs:true, preDoc:true, preReviewer:true, preDocSub:true, preReviewerSub:true } });
     if (changedAccess(current)) throw accessConflict();
     // S4-U2: the order side is read with the page that completes the list and BEFORE the access
     // re-check below, so a policy change during this request refuses the whole answer.
@@ -1440,7 +1440,7 @@ export class PacsService implements OnModuleInit {
       filters: prefs.filters,
       templates: prefs.templates,
       institutions: this.institutions.map(i => ({ id: i.id, name: i.name, type: i.type })),
-      states: Object.fromEntries(states.map(s => [s.uid, toClient(s, byUid[s.uid], c.actor, draftByUid[s.uid])])),
+      states: Object.fromEntries(states.map(s => [s.uid, toClient(s, byUid[s.uid], c, draftByUid[s.uid])])),
       orders: orders.map(o => ({
         oid: o.oid, id: o.patientId, name: o.name, sex: o.sex, birth: o.birth,
         sched: o.sched, modality: o.modality, desc: o.descr, ward: o.ward,
@@ -2172,7 +2172,7 @@ export class PacsService implements OnModuleInit {
      * 그래서 `PATCH {rs:"T"}` 한 번으로 잠금이 통째로 풀렸다. 응답에 판독문 본문까지
      * 실려 나갔다. **관문은 한 곳만 열려 있어도 관문이 아니다.**
      */
-    if (!canReadPrelim(prev, c.actor))
+    if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 다룰 수 있습니다.`);
 
@@ -2239,7 +2239,7 @@ export class PacsService implements OnModuleInit {
     const saved = await tx.studyState.update({ where: { uid }, data });
     await audit(c.actor, 'state.patch', uid, { ...data, by: me });
     const r = await tx.report.findUnique({ where: { uid } });
-    return toClient(saved, r, c.actor, await this.myDraft(uid,c.actor,tx));
+    return toClient(saved, r, c, await this.myDraft(uid,c.actor,tx));
     });
   }
 
@@ -2270,7 +2270,7 @@ export class PacsService implements OnModuleInit {
     if (heldByOther)
       throw new ConflictException({ code: 'REPORT_HELD', holder: heldByOther, message: `${heldByOther} 님이 판독 중입니다` });
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-    if (!canReadPrelim(prev, c.actor))
+    if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 이어서 판독할 수 있습니다.`);
     return prev;
@@ -2367,7 +2367,7 @@ export class PacsService implements OnModuleInit {
     return this.prisma.$transaction(async tx => {
       const state = await this.gate(uid, c, tx);
       if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');
-      if (!canReadPrelim(state, c.actor))
+      if (!canReadPreliminary(state, c))
         throw new ForbiddenException(
           `예비 판독(RS: P) 중입니다. ${state?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
       return draftEnvelope(uid, owner, state.draftEpoch, await this.myDraft(uid, c.actor, tx));
@@ -2713,7 +2713,7 @@ export class PacsService implements OnModuleInit {
         const cleared = await this.storeDraft(tx, uid, c.actor, row, null);
         await audit(c.actor, 'report.draft.discard', uid, {});
         const rep = await tx.report.findUnique({ where: { uid } });
-        return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, rep, c.actor, cleared) };
+        return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, rep, c, cleared) };
       });
   }
 
@@ -2855,7 +2855,7 @@ export class PacsService implements OnModuleInit {
 
     // 예비 판독 중인 검사는 지정된 두 사람 말고는 쓰지도 못한다.
     // 읽기만 막고 쓰기를 열어두면, 내용을 못 본 채로 덮어쓸 수 있다 — 더 나쁘다.
-    if (!canReadPrelim(prev, c.actor))
+    if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 이어서 판독할 수 있습니다.`);
 
@@ -2934,7 +2934,7 @@ export class PacsService implements OnModuleInit {
 
     // 승인으로 P를 끝내는 것은 **지정된 상급 판독의**의 일이다.
     // 예비 판독을 쓴 사람이 스스로 승인하면 감독이라는 절차 자체가 없어진다.
-    if (action === 'approve' && prev?.rs === 'P' && prev.preReviewer !== c.actor)
+    if (action === 'approve' && prev?.rs === 'P' && !designationMatches(prev.preReviewer, prev.preReviewerSub, c))
       throw new ForbiddenException(
         `예비 판독의 최종 승인은 지정된 상급 판독의(${prev.preReviewer})만 할 수 있습니다`);
 
@@ -2964,6 +2964,8 @@ export class PacsService implements OnModuleInit {
     if (action === 'preliminary') {
       stateData.preDoc = c.actor;
       stateData.preReviewer = reviewer;
+      stateData.preDocSub = c.sub;
+      stateData.preReviewerSub = candidate!.sub;
     }
     // 판독이 되돌아가면 지정도 풀린다. RS는 W인데 "누구에게 맡겨져 있음"이 남아
     // 판독문이 계속 가려지는 상태가 제일 나쁘다.
@@ -2972,6 +2974,7 @@ export class PacsService implements OnModuleInit {
       // 판독의 이름과 확정일이 남아 있으면, 화면은 "누가 읽었다"고 말하면서
       // 동시에 "아직 안 읽었다"고 말하는 셈이다.
       stateData.preDoc = null; stateData.preReviewer = null;
+      stateData.preDocSub = null; stateData.preReviewerSub = null;
       stateData.repDoc = null; stateData.confirm = null;
     }
     if (action === 'approve' || action === 'addendum') {
@@ -3136,7 +3139,7 @@ export class PacsService implements OnModuleInit {
           ...(structureAudit ? { strs: structureAudit } : {}),
         });
 
-        return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, report, c.actor, cleared) };
+        return { ...draftEnvelope(uid, owner, state.draftEpoch, cleared), state: toClient(state, report, c, cleared) };
       });
     } catch (e: any) {
       // CHECK 백스톱도 서버 고장이 아니라 명명된 409다. 우리 제약 이름일 때만 옮긴다.
@@ -3174,7 +3177,7 @@ export class PacsService implements OnModuleInit {
       const prev=rows[0];
       if(!prev||!this.visible(prev,inst(c)))throw new NotFoundException('검사를 찾을 수 없습니다');
       if(prev.ss==='Unverified'&&prev.em!=='E')throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
-      if(!canReadPrelim(prev,c.actor))throw new ForbiddenException('예비 판독(RS: P) 중인 검사입니다');
+      if(!canReadPreliminary(prev,c))throw new ForbiddenException('예비 판독(RS: P) 중인 검사입니다');
       const other=holdAlive(prev)&&prev.holder!==c.actor?prev.holder:null;
       if(!other){
         await tx.studyState.update({where:{uid},data:{holder:c.actor,heldAt:new Date()}});
@@ -3219,7 +3222,7 @@ export class PacsService implements OnModuleInit {
      */
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
     // 본문을 가려놓고 이력에서 읽히면 가린 게 아니다. 같은 규칙을 여기에도 건다.
-    if (!canReadPrelim(prev, c.actor))
+    if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
     /**
@@ -3246,7 +3249,7 @@ export class PacsService implements OnModuleInit {
     const prev = await this.gate(uid, c);
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
     // 본문을 가려놓고 그 증언이 읽히면 가린 게 아니다. `versions()`와 같은 규칙을 건다.
-    if (!canReadPrelim(prev, c.actor))
+    if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
     // 소견 계보의 접근 정책은 트랜잭션 밖에서 준비한다(`putReport`와 같은 이유).
@@ -3304,7 +3307,7 @@ export class PacsService implements OnModuleInit {
   async reportStructure(uid: string, c: Caller) {
     const prev = await this.gate(uid, c);
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-    if (!canReadPrelim(prev, c.actor))
+    if (!canReadPreliminary(prev, c))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
     return this.prisma.$transaction(async tx => {
@@ -3370,7 +3373,7 @@ export class PacsService implements OnModuleInit {
        */
       const prev = await this.gate(uid, c, tx);
       if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-      if (!canReadPrelim(prev, c.actor))
+      if (!canReadPreliminary(prev, c))
         throw new ForbiddenException(
           `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
       const row = await tx.reportVersion.findUnique({
@@ -3623,7 +3626,7 @@ export class PacsService implements OnModuleInit {
     }
     await this.audit(c.actor, 'match', uid, { oid, ov, by: me });
     const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(state, r, c.actor, await this.myDraft(uid, c.actor));
+    return toClient(state, r, c, await this.myDraft(uid, c.actor));
   }
 
   /** Unmatch (8.1.2.1.2): 검사·오더 양쪽을 동시에 해제 */
@@ -3652,7 +3655,7 @@ export class PacsService implements OnModuleInit {
     const [state] = await Promise.all(ops);
     await audit(c.actor, 'unmatch', uid, { oid: prev.orderOid, by: me });
     const r = await tx.report.findUnique({ where: { uid } });
-    return toClient(state, r, c.actor, await this.myDraft(uid,c.actor,tx));
+    return toClient(state, r, c, await this.myDraft(uid,c.actor,tx));
     });
   }
 

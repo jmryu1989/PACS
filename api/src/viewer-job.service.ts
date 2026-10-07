@@ -1,3 +1,4 @@
+import { canReadPreliminary } from './preliminary-reader';
 import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -11,7 +12,7 @@ import { readSnapshot, writeSnapshot } from './viewer-job-snapshot';
 const deny = (): never => { throw new ForbiddenException('비교 작업에 접근할 수 없습니다'); };
 const conflict = (): never => { throw new ConflictException('비교 작업이 변경되었습니다. 목록을 새로 확인하세요'); };
 const annotationKinds = ['arrow', 'length', 'angle', 'ellipse'];
-const allowed = (s: any, c: Caller) => !!s && !!c.institution && typeof s.rs === 'string' && (s.institutionId === c.institution || s.teleInstitutionId === c.institution) && (s.rs !== 'P' || s.preDoc === c.actor || s.preReviewer === c.actor);
+const allowed = (s: any, c: Caller) => !!s && !!c.institution && typeof s.rs === 'string' && (s.institutionId === c.institution || s.teleInstitutionId === c.institution) && canReadPreliminary(s, c);
 const summary = (j: any) => ({ id: j.id, studyUid: j.studyUid, authorSub: j.authorSub, authorActor: j.authorActor, title: j.title,
   description: j.description, hidden: j.hidden, revision: j.revision, createdAt: j.createdAt, updatedAt: j.updatedAt,
   snapshotVersion: j.snapshot?.version });
@@ -38,7 +39,7 @@ export class ViewerJobService {
   }
   private async parents(tx: any, studies: string[], c: Caller, lock = false) {
     await this.studyAccess.snapshot(c,tx);
-    const rows = lock ? await tx.$queryRaw`SELECT uid, "institutionId", "teleInstitutionId", rs, "preDoc", "preReviewer" FROM "StudyState" WHERE uid IN (${Prisma.join([...studies].sort())}) ORDER BY uid FOR UPDATE`
+    const rows = lock ? await tx.$queryRaw`SELECT uid, "institutionId", "teleInstitutionId", rs, "preDoc", "preReviewer", "preDocSub", "preReviewerSub" FROM "StudyState" WHERE uid IN (${Prisma.join([...studies].sort())}) ORDER BY uid FOR UPDATE`
       : await tx.studyState.findMany({ where: { uid: { in: studies } } });
     if (rows.length !== studies.length || rows.some(s => !allowed(s, c))) deny();
     await this.studyAccess.require(c,studies,tx);

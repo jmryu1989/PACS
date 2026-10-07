@@ -37,7 +37,7 @@ LIMITS = combined.LIMITS
 # stack when written - estimated at well under 1 KB of catalog and rows.
 # S7-U5 D600 provider change records (49 tables: ProviderChange, its two rows, its sequence and two indexes; the three
 # in-flight columns of MemberIsolation dropped): not measured on a stack when written - estimated at about 2 KB.
-# S7-U5 core (51 tables, 40 migrations): PG16 observe() plus the pure C12L envelope measures 263,343 bytes
+# S7-U5 core (51 tables, 41 migrations): PG16 observe() plus the pure C12L envelope measures 263,343 bytes
 # with a 43-character UID (213,022 catalog; 41,425 rows; 6,217 migration paths/hashes; 801 snapshot).
 # 512 KiB leaves about 255 KiB for schema/envelope growth while keeping every receipt read bounded.
 RECEIPT_LIMIT = 512*1024
@@ -82,7 +82,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261005130000_member_isolation/migration.sql',
               'api/prisma/migrations/20261006120000_member_isolation_call/migration.sql',
               'api/prisma/migrations/20261007120000_provider_change/migration.sql',
-              'api/prisma/migrations/20261007170000_member_db_rights/migration.sql']
+              'api/prisma/migrations/20261007170000_member_db_rights/migration.sql',
+              'api/prisma/migrations/20261007200000_designation_subjects/migration.sql']
 TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -151,7 +152,7 @@ def expected_rows(uid):
         dicomNames='SYNTHETIC', createdAt=STAMP) for kind in ('hospital', 'tele')]
     rows['StudyState'] = [dict(uid=uid, institutionId='SYNTHETIC-hospital', teleInstitutionId='SYNTHETIC-tele',
         origin='dicom', rs='R', holdReason=None, ss='Verified', em='N', ts='none', matched='U', ward='',
-        reqHosp='SYNTHETIC', repDoc='SYNTHETIC-reader', confirm=None, preDoc=None, preReviewer=None,
+        reqHosp='SYNTHETIC', repDoc='SYNTHETIC-reader', confirm=None, preDoc=None, preReviewer=None, preDocSub="SYNTHETIC-author-sub", preReviewerSub="SYNTHETIC-reviewer-sub",
         ov=None, orig=None, orderOid=None, holder=None, heldAt=None,
         # S7-U5: the draft epoch is a value of the row (rotated by a forced release), not something a restore may re-draw.
         draftEpoch='00000000-0000-4000-8000-0000000000d1', updatedAt=STAMP, createdAt=STAMP)]

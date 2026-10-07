@@ -346,7 +346,7 @@ export class KeycloakService {
       .filter(u => roleIds.has(u.id) && u.enabled !== false)
       .map(u => ({
         // actor와 같은 형태로 맞춘다. AuthGuard가 email을 우선 쓰므로 여기서도 email이 우선이다.
-        // 이 값이 preReviewer 컬럼에 들어가고, 나중에 "이 판독문이 내 것인가"를 이걸로 비교한다.
+        // 표시용 preReviewer와 함께 불변 sub도 저장하여, 이메일 변경 뒤에도 지정 대상이 유지된다.
         sub: u.id,
         id: u.email || u.username,
         username: u.username,

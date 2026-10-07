@@ -1,3 +1,4 @@
+import { canReadPreliminary } from './preliminary-reader';
 import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -18,7 +19,7 @@ function member(c: Caller, write = false) {
 }
 function visible(study: any, c: Caller) {
   if (!study || (study.institutionId !== c.institution && study.teleInstitutionId !== c.institution) ||
-      (study.rs === 'P' && study.preDoc !== c.actor && study.preReviewer !== c.actor)) denied();
+      !canReadPreliminary(study, c)) denied();
 }
 function timestamp(value: Date | string) {
   // PostgreSQL timestamp(3) JSON omits a zone; Prisma writes these columns as UTC.
@@ -125,7 +126,7 @@ export class ViewerService {
     const pageResult = await this.bounded(async tx => {
       const parent = Prisma.sql`SELECT uid FROM "StudyState" WHERE uid = ${uid}
         AND ("institutionId" = ${c.institution} OR "teleInstitutionId" = ${c.institution})
-        AND (rs <> 'P' OR "preDoc" = ${c.actor} OR "preReviewer" = ${c.actor})`;
+        AND (rs <> 'P' OR (CASE WHEN "preDocSub" IS NOT NULL THEN "preDocSub" = ${c.sub} ELSE "preDoc" = ${c.actor} END) OR (CASE WHEN "preReviewerSub" IS NOT NULL THEN "preReviewerSub" = ${c.sub} ELSE "preReviewer" = ${c.actor} END))`;
       // Checking "signed?" before and after a separate read cannot see a reset
       // and re-approval in between; the pinned head is part of this statement.
       const signed = final === null ? null : Prisma.sql`SELECT r.version FROM "Report" r

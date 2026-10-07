@@ -3,7 +3,7 @@ import { APP_ROLES } from './clinician-policy';
 import { Logger } from '@nestjs/common';
 import { KeycloakService, KeycloakUser, RosterWriteFailure } from './keycloak.service';
 import { PrismaService } from './prisma.service';
-import { lockMemberRights } from './member-rights';
+import { lockMemberRights, rosterOverlap } from './member-rights';
 
 /** Run once with member administration stopped, before enabling traffic for the new schema.
  * Reads every realm member, including those without an AuthSession. Never import again over DB rights.
@@ -26,7 +26,7 @@ export async function importMemberRights(prisma: PrismaService, keycloak: Keyclo
   if (users.length !== expectedTotal || new Set(users.map(user => user.id)).size !== users.length) throw new Error('Unstable realm member import');
   const changes = await prisma.$transaction(async tx => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(${0x4b494e4d}::int4, ${0}::int4)`;
-    if (await tx.memberRightsImport.findUnique({ where: { id: 'realm-v1' } })) return [];
+    if (await tx.memberRightsImport.findUnique({ where: { id: 'realm-v1' } })) return { legacy: [], bound: 0 };
     const legacy = [];
     for (const user of users) {
       const isolated = await tx.memberIsolation.findUnique({ where: { sub: user.id } });
@@ -60,6 +60,22 @@ export async function importMemberRights(prisma: PrismaService, keycloak: Keyclo
         } });
       }
     }
+    // Bind legacy P designations only when the imported roster identifies exactly one subject.
+    // Existing bindings are immutable through import; ambiguous/missing identities keep the legacy fallback.
+    const subject = (actor: string | null) => {
+      const matches = users.filter(user => (user.email || user.username) === actor);
+      return matches.length === 1 ? matches[0].id : null;
+    };
+    let bound = 0;
+    const studies = await tx.studyState.findMany({ where: { rs: 'P' } });
+    for (const study of studies) {
+      const preDocSub = study.preDocSub ?? subject(study.preDoc);
+      const preReviewerSub = study.preReviewerSub ?? subject(study.preReviewer);
+      if (preDocSub !== study.preDocSub || preReviewerSub !== study.preReviewerSub) {
+        await tx.studyState.update({ where: { uid: study.uid }, data: { preDocSub, preReviewerSub } });
+        bound++;
+      }
+    }
     // Import is one rights decision: stamp its commit boundary after all member/session work,
     // so a slow import cannot admit a Bearer authenticated between the first and last row.
     const completedAt = new Date();
@@ -67,9 +83,10 @@ export async function importMemberRights(prisma: PrismaService, keycloak: Keyclo
       newAuthAfter: completedAt,
     } });
     await tx.memberRightsImport.create({ data: { id: 'realm-v1', completedAt } });
-    return legacy;
+    return { legacy, bound };
   }, { maxWait: 4000, timeout: 120000 });
-  const publications = changes.map(change => {
+  new Logger('MemberRightsImport').log(`realm-v1 designation rows bound: ${changes.bound}`);
+  const publications = changes.legacy.map(change => {
     // Neither startup, a member command, nor login waits for this one-shot post-commit send.
     return sendMemberRoster(prisma, keycloak, change).catch(() => new Logger('MemberRightsImport').warn('명부 반영 미확인'));
   });
@@ -99,7 +116,7 @@ async function sendMemberRoster(prisma: PrismaService, keycloak: KeycloakService
   } catch (error) {
     answer = error instanceof RosterWriteFailure ? error.answer : { state: 'unknown', outcome: 'credentials_unconfirmed' };
   }
-  await prisma.providerChange.updateMany({ where: { id: change.id, state: 'unknown' }, data: {
+  await prisma.providerChange.updateMany({ where: { id: change.id, OR: [{ state: 'unknown' }, { outcome: 'superseded' }] }, data: {
     ...answer, settledAt: answer.state === 'unknown' ? null : new Date(),
   } });
   return answer.state;
@@ -107,9 +124,9 @@ async function sendMemberRoster(prisma: PrismaService, keycloak: KeycloakService
 
 /** Explicit CLI only: no lifecycle hook or login path calls this recovery. */
 export async function retryMemberRoster(prisma: PrismaService, keycloak: KeycloakService) {
-  const changes = await prisma.providerChange.findMany({ where: { kind: 'credentials', state: { in: ['unknown', 'void'] } }, orderBy: { id: 'asc' } });
+  const changes = await prisma.providerChange.findMany({ where: { kind: 'credentials' }, orderBy: { id: 'asc' } });
   const outcomes: string[] = [];
-  let superseded = 0;
+  let superseded = 0, overlaps = 0;
   const members = new Set<string>();
   for (const change of changes) {
     if (change.target !== 'legacy-enable:' + change.sub && change.sub) {
@@ -120,16 +137,22 @@ export async function retryMemberRoster(prisma: PrismaService, keycloak: Keycloa
         const records = await tx.providerChange.findMany({ where: { kind: 'credentials', sub: change.sub,
           target: change.sub! }, orderBy: { id: 'desc' } });
         const latest = records[0];
-        if (!latest) return { send: null, superseded: 0 };
+        if (!latest) return { send: null, superseded: 0, overlap: false };
         // An older failed publication must never overwrite an already confirmed newer generation.
         const older = records.slice(1).filter(row => ['unknown', 'void'].includes(row.state) && row.outcome !== 'superseded');
         const settled = await tx.providerChange.updateMany({ where: { id: { in: older.map(row => row.id) },
           state: { in: ['unknown', 'void'] } }, data: { state: 'void', outcome: 'superseded', settledAt: new Date() } });
-        const send = ['unknown', 'void'].includes(latest.state) ? latest : null;
+        const overlap = rosterOverlap(records);
+        // A fresh intent preserves history and places the repair after every known late completion.
+        const send = overlap ? await tx.providerChange.create({ data: {
+          kind: 'credentials', target: change.sub!, sub: change.sub, generation: latest.generation,
+          state: 'unknown', createdAt: new Date(),
+        } }) : ['unknown', 'void'].includes(latest.state) ? latest : null;
         if (send) await tx.providerChange.update({ where: { id: send.id }, data: { state: 'unknown', outcome: null, settledAt: null } });
-        return { send, superseded: settled.count };
+        return { send, superseded: settled.count, overlap };
       });
       superseded += claimed.superseded;
+      if (claimed.overlap) overlaps++;
       if (claimed.send) outcomes.push(await sendMemberRoster(prisma, keycloak, claimed.send));
       continue;
     }
@@ -137,5 +160,5 @@ export async function retryMemberRoster(prisma: PrismaService, keycloak: Keycloa
       data: { state: 'unknown', outcome: null, settledAt: null } });
     if (claimed.count) outcomes.push(await sendMemberRoster(prisma, keycloak, change));
   }
-  return { attempted: outcomes.length, unconfirmed: outcomes.filter(state => state !== 'done').length, superseded };
+  return { attempted: outcomes.length, unconfirmed: outcomes.filter(state => state !== 'done').length, superseded, overlaps };
 }

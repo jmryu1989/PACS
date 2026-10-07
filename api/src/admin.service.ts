@@ -7,11 +7,11 @@ import {
   AUDIT_CANDIDATE_ACTIONS, AUDIT_TARGET_ACTIONS, AuditCursor, AuditLogRow, AuditSource, auditMention, auditPageQuery,
   openAuditCursor, readAuditPage, sealAuditCursor,
 } from './admin-audit';
-import { lockMemberRights, rightsAllow } from './member-rights';
+import { lockMemberRights, rightsAllow, rosterOverlap } from './member-rights';
 import { AuthService, lockWaitExceeded } from './auth.service';
 // 역할 목록은 clinician-policy 한 곳에서 온다. 여기서 별도 literal을 두면 guard와 어긋난다.
 import { APP_ROLES } from './clinician-policy';
-import { KeycloakService, KeycloakUser } from './keycloak.service';
+import { KeycloakService, KeycloakUser, within } from './keycloak.service';
 import { Caller } from './pacs.service';
 import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
@@ -125,8 +125,11 @@ export class AdminService {
   }
 
   private async rosterUnconfirmed(id: string, db: any = this.prisma) {
-    const latest = await db.providerChange.findFirst({ where: { kind: 'credentials', sub: id }, orderBy: { id: 'desc' } });
-    return latest?.state === 'unknown' || latest?.state === 'void';
+    const records = await db.providerChange.findMany({ where: { kind: 'credentials', sub: id }, orderBy: { id: 'desc' } });
+    const ordinary = records.filter(row => row.target === id);
+    const uncertain = (row: any) => row?.state === 'unknown' || row?.state === 'void';
+    return uncertain(ordinary[0]) || records.some(row => row.target === 'legacy-enable:' + id && uncertain(row))
+      || rosterOverlap(ordinary);
   }
 
   async createUser(body: any, c: Caller) {
@@ -236,24 +239,25 @@ export class AdminService {
       suspended = false;
     } else throw new BadRequestException('변경할 회원 상태가 없습니다');
 
+    // Validate before the command/audit boundary. Optional identity refresh cannot prevent DB revocation.
+    const identity = identityToRegister ?? (approvalMutation ? await this.managed(id)
+      : await this.managed(id, within(300)).catch(() => null));
+    if (approvalMutation && !identity!.emailVerified && body?.verificationOverride !== true)
+      throw new BadRequestException('이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다');
+
     try {
       const committed = await this.prisma.$transaction(async tx => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await lockMemberRights(tx, id);
-        // Read only after the member lock: a slower earlier command cannot rewind a newer identity.
-        const identity = await this.managed(id);
-        if (approvalMutation && !identity.emailVerified && body?.verificationOverride !== true)
-          throw new BadRequestException('이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다');
-        let version = observed.version;
-        if (!existing) {
-          // The absence was observed before locking. A concurrent registration is a conflict, not a CAS bypass.
-          if (await tx.memberRights.findUnique({ where: { sub: id } }))
-            throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
-          version = (await this.register(tx, identity)).version;
-        }
+        const current = await tx.memberRights.findUnique({ where: { sub: id } });
+        if (existing ? current?.version !== observed.version : !!current)
+          throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
+        // The observed version precedes the remote pre-read. CAS rejects an older command after any
+        // newer command commits, so its captured identity cannot rewind that newer identity. No I/O holds this lock.
+        const version = existing ? observed.version : (await this.register(tx, identity!)).version;
         const [{ boundary }] = await tx.$queryRaw<{ boundary: Date }[]>`SELECT now() AS boundary`;
         const { count } = await tx.memberRights.updateMany({ where: { sub: id, version }, data: {
-          approved, suspended, institution, roles, ...this.identity(identity),
+          approved, suspended, institution, roles, ...(identity ? this.identity(identity) : {}),
           version: { increment: 1 }, newAuthAfter: boundary,
         } });
         if (count !== 1) throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
@@ -290,17 +294,21 @@ export class AdminService {
     if (!['temp', 'email'].includes(body?.mode))
       throw new BadRequestException('mode는 temp 또는 email이어야 합니다');
     const mode: 'temp' | 'email' = body.mode;
-    // A realm registration may still be pending; resetting its password grants no membership.
-    const before = this.row(await this.prisma.$transaction(async tx => {
-      await lockMemberRights(tx, id);
-      const user = await this.managed(id);
-      const current = await tx.memberRights.findUnique({ where: { sub: id } });
-      if (!current) return this.register(tx, user);
-      const identity = this.identity(user);
-      if (Object.entries(identity).some(([key, value]) => current[key] !== value))
-        await tx.memberRights.update({ where: { sub: id }, data: identity });
-      return current;
-    }));
+    // Password reset has no version CAS, so it never refreshes an existing identity or grants rights.
+    // The pre-read validates the realm member and can register a missing pending row without remote I/O under lock.
+    const user = await this.managed(id);
+    let before: any;
+    try {
+      before = this.row(await this.prisma.$transaction(async tx => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+        await lockMemberRights(tx, id);
+        return await tx.memberRights.findUnique({ where: { sub: id } }) ?? await this.register(tx, user);
+      }, { maxWait: 4000, timeout: 8000 }));
+    } catch (error) {
+      if (lockWaitExceeded(error))
+        throw new ConflictException({ code: 'MEMBER_BUSY', message: '다른 요청이 회원 상태를 변경하고 있습니다. 잠시 후 다시 시도하세요' });
+      throw error;
+    }
     if (mode === 'temp') {
       const temporaryPassword = randomBytes(18).toString('base64url') + 'aA1!';
       await this.keycloak.resetPassword(id, mode, temporaryPassword);

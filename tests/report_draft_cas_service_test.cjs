@@ -1189,3 +1189,30 @@ test('CORE_REVIEWER_IDENTITY_LATE_CALLBACK_AND_BEARER roster subject binds fresh
   assert.equal((await w.send('roster-down',route,{as:A,uid,body})).status,503);
   assert.deepEqual(await w.state(uid),before);
 });
+
+// D640 REQ-S7-U5-DESIGNATION-SUB -> RISK-RECYCLED-EMAIL/AMBIGUOUS-REVIEWER -> CORE_R10_REVIEWER.
+test('CORE_R10_REVIEWER_AMBIGUOUS two roster entries sharing an id cannot be designated',async()=>{
+  const w=await world();w.roster=[{id:REVIEWER.actor,sub:REVIEWER.sub},{id:REVIEWER.actor,sub:C.sub}];
+  const uid=await w.study(),token=await w.token(uid,A),[route,body]=request('preliminary',A,{token,head:0,mark:'ambiguous'});
+  const before=await w.state(uid);assert.equal((await w.send('ambiguous',route,{as:A,uid,body})).status,400);
+  assert.deepEqual(await w.state(uid),before);
+});
+
+for(const action of ['approve','reset'])test(`CORE_R10_REVIEWER_RENAME ${action}: stored subject survives rename and refuses recycled email`,async()=>{
+  const w=await world(),uid=await w.study(),token=await w.token(uid,A);
+  let [route,body]=request('preliminary',A,{token,head:0,mark:'designation'});
+  assert.equal((await w.send('designation',route,{as:A,uid,body})).status,200);
+  let state=await w.base.studyState.findUnique({where:{uid}});
+  assert.deepEqual([state.preDocSub,state.preReviewerSub],[A.sub,REVIEWER.sub]);
+  const renamed={...REVIEWER,actor:'renamed-reviewer@synthetic.test'},recycled={...C,actor:REVIEWER.actor,institution:INST};
+  await w.base.memberRights.update({where:{sub:REVIEWER.sub},data:{email:renamed.actor}});
+  await w.base.memberRights.update({where:{sub:C.sub},data:{email:recycled.actor,institution:INST}});
+  w.roster=[{id:renamed.actor,sub:renamed.sub},{id:recycled.actor,sub:recycled.sub}];
+  const before=await w.state(uid);
+  [route,body]=request(action,recycled,{token:await w.token(uid,recycled),head:1,mark:'recycled'});
+  assert.equal((await w.send('recycled',route,{as:recycled,uid,body})).status,403);assert.deepEqual(await w.state(uid),before);
+  [route,body]=request(action,renamed,{token:await w.token(uid,renamed),head:1,mark:'renamed'});
+  assert.equal((await w.send('renamed',route,{as:renamed,uid,body})).status,200);
+  state=await w.base.studyState.findUnique({where:{uid}});assert.equal(state.rs,action==='approve'?'A':'W');
+  if(action==='reset')assert.deepEqual([state.preDoc,state.preReviewer,state.preDocSub,state.preReviewerSub],[null,null,null,null]);
+});

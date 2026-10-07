@@ -232,7 +232,7 @@ export function contextOrder(a: { uid: string; date: string }, b: { uid: string;
 export interface ContextMember {
   source: ContextSourceStudy;
   state: { uid: string; institutionId: string | null; teleInstitutionId: string | null; rs: string;
-    preDoc: string | null; preReviewer: string | null; createdAt: any };
+    preDoc: string | null; preReviewer: string | null; preDocSub?: string | null; preReviewerSub?: string | null; createdAt: any };
   access: ContextAccess;
   reportVersion: number;
   head: { id: number; uid: string; version: number; action: string; author: string; at: any } | null;
@@ -388,7 +388,7 @@ export function contextReadSection(name: ContextSectionName, items: any[], obser
 export interface ContextPins {
   anchor: { uid: string; institutionId: string | null; teleInstitutionId: string | null; techNoteVersion: number };
   members: { uid: string; institutionId: string | null; teleInstitutionId: string | null; rs: string;
-    preDoc: string | null; preReviewer: string | null; reportVersion: number }[];
+    preDoc: string | null; preReviewer: string | null; preDocSub?: string | null; preReviewerSub?: string | null; reportVersion: number }[];
 }
 
 export function contextPins(anchor: any, techNoteVersion: number, members: ContextMember[]): ContextPins {
@@ -396,7 +396,8 @@ export function contextPins(anchor: any, techNoteVersion: number, members: Conte
     anchor: { uid: anchor.uid, institutionId: anchor.institutionId ?? null, teleInstitutionId: anchor.teleInstitutionId ?? null, techNoteVersion },
     members: members.map(m => ({ uid: m.state.uid, institutionId: m.state.institutionId ?? null,
       teleInstitutionId: m.state.teleInstitutionId ?? null, rs: m.state.rs, preDoc: m.state.preDoc ?? null,
-      preReviewer: m.state.preReviewer ?? null, reportVersion: m.reportVersion })),
+      preReviewer: m.state.preReviewer ?? null, preDocSub: m.state.preDocSub ?? null,
+      preReviewerSub: m.state.preReviewerSub ?? null, reportVersion: m.reportVersion })),
   };
 }
 
@@ -429,6 +430,7 @@ export function contextPinsChanged(pins: ContextPins, rows: unknown): boolean {
     const row = byUid.get(pin.uid);
     return !same(row.institutionId, pin.institutionId) || !same(row.teleInstitutionId, pin.teleInstitutionId)
       || !same(row.rs, pin.rs) || !same(row.preDoc, pin.preDoc) || !same(row.preReviewer, pin.preReviewer)
+      || !same(row.preDocSub, pin.preDocSub) || !same(row.preReviewerSub, pin.preReviewerSub)
       || number(row.reportVersion) !== pin.reportVersion;
   });
 }

@@ -1656,6 +1656,7 @@ test('CORE_R9_CVR_PRELIMINARY_IDENTITY: a renamed reviewer receives the R case w
   recipient.email=renamed;recipient.firstName='Current';recipient.lastName='Reviewer';
   // As in F3, the report picker offers the new provider identity, while registration predates the rename.
   const version=await w.commit(UID,'preliminary',{reviewer:renamed});
+  await w.base.studyState.update({where:{uid:UID},data:{preDocSub:SUBS.S,preReviewerSub:SUBS.X}});
   const rights=await w.base.memberRights.findUnique({where:{sub:SUBS.X}});assert.notEqual(rights.email,renamed);
   // A different subject carrying the same frozen email must not become the designated recipient.
   await w.base.memberRights.update({where:{sub:SUBS.Y},data:{email:renamed}});
@@ -1667,12 +1668,12 @@ test('CORE_R9_CVR_PRELIMINARY_IDENTITY: a renamed reviewer receives the R case w
     'the designated subject can receive Preliminary despite its older DB email');
   assert.equal(created.applied.to,'created');
   const record=await w.base.criticalResult.findUnique({where:{id:id(8092)}});
-  assert.deepEqual([record.recipientSub,record.recipientActor,record.recipientName],[SUBS.X,renamed,'Reviewer Current']);
+  assert.deepEqual([record.recipientSub,record.recipientActor,record.recipientName],[SUBS.X,rights.email,rights.name]);
   await assert.rejects(w.svc.create(UID,S(),createBody(S(),id(8093),'Y',version)),code(409,'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'));
   const replacement=await w.svc.supersede(id(8092),S(),supersedeBody(S(),id(8094),1,version));
   assert.equal(replacement.applied.to,'superseded');
   const next=await w.base.criticalResult.findUnique({where:{id:id(8094)}});
-  assert.deepEqual([next.state,next.recipientSub,next.recipientActor],['created',SUBS.X,renamed]);
+  assert.deepEqual([next.state,next.recipientSub,next.recipientActor],['created',SUBS.X,rights.email]);
   assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:SUBS.X}}),rights,'sending never refreshes the DB identity');
   assert.deepEqual(networkInside(w.log),[]);
 });
@@ -1685,4 +1686,52 @@ test('CORE_ROSTER_SOURCE_SPLIT U12 critical candidates use the provider roster; 
   assert.ok(out.recipients.some(x=>x.sub===SUBS.P),'stale provider member is still a roster candidate');
   assert.ok(!out.recipients.some(x=>x.sub===SUBS.P2),'DB-only member is absent from provider roster');
   await assert.rejects(w.svc.create(UID,S(),createBody(S(),id(8091),'P',version)),code(400,'CRITICAL_RESULT_RECIPIENT_INVALID'));
+});
+
+// D640 REQ-S7-U5-DESIGNATION-SUB -> RISK-RECYCLED-EMAIL/PROVIDER-OUTAGE -> CORE_R10_CVR.
+for(const bound of [false,true])test(`CORE_R10_CVR_KC_DOWN P designated reviewer create and supersede, subjects=${bound}`,async()=>{
+  const w=await world(),version=await w.commit(UID,'preliminary',{reviewer:actorOf('X')});
+  if(bound)await w.base.studyState.update({where:{uid:UID},data:{preDocSub:SUBS.S,preReviewerSub:SUBS.X}});
+  w.kcFail=true;w.log.length=0;
+  let created,replaced;
+  await assert.doesNotReject(async()=>{created=await w.svc.create(UID,S(),createBody(S(),id(8101),'X',version));});
+  await assert.doesNotReject(async()=>{replaced=await w.svc.supersede(id(8101),S(),supersedeBody(S(),id(8102),1,version));});
+  assert.equal(created.applied.to,'created');assert.equal(replaced.applied.to,'superseded');
+  assert.equal((await w.record(id(8102))).recipientSub,SUBS.X);
+  assert.ok(!w.log.some(line=>line.startsWith('kc:')),'sending a critical result has no Keycloak dependency');
+});
+
+test('CORE_R10_CVR_RENAME_AFTER_DESIGNATION subjects keep X readable and reject recycled email Y for create and supersede',async()=>{
+  const w=await world(),version=await w.commit(UID,'preliminary',{reviewer:actorOf('X')});
+  await w.base.studyState.update({where:{uid:UID},data:{preDocSub:SUBS.S,preReviewerSub:SUBS.X}});
+  // Seed a Y record while the report is generally readable; the final decision must reject its later supersede in P.
+  await w.base.studyState.update({where:{uid:UID},data:{rs:'T'}});
+  await w.svc.create(UID,S(),createBody(S(),id(8110),'Y',version));
+  await w.base.studyState.update({where:{uid:UID},data:{rs:'P'}});
+  const renamed='renamed-after-designation@synthetic.test';
+  w.users.get(SUBS.X).email=renamed;w.users.get(SUBS.Y).email=actorOf('X');
+  await w.rights('X',{email:renamed});await w.rights('Y',{email:actorOf('X')});
+  const candidates=await w.svc.recipients(UID,S());
+  assert.ok(candidates.recipients.some(row=>row.sub===SUBS.X));assert.ok(!candidates.recipients.some(row=>row.sub===SUBS.Y));
+  await assert.doesNotReject(()=>w.svc.create(UID,S(),createBody(S(),id(8111),'X',version)));
+  await assert.doesNotReject(()=>w.svc.supersede(id(8111),S(),supersedeBody(S(),id(8113),1,version)));
+  await assert.rejects(w.svc.supersede(id(8110),S(),supersedeBody(S(),id(8114),1,version)),code(409,'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'));
+  await w.svc.cancel(id(8110),S(),cancelBody(S(),id(8116)));
+  await assert.rejects(w.svc.create(UID,S(),createBody(S(),id(8112),'Y',version)),code(409,'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'));
+  assert.equal((await w.record(id(8113))).recipientSub,SUBS.X);assert.equal(await w.record(id(8114)),null);
+  const reader={...person('X'),actor:renamed};
+  assert.equal((await w.svc.read(id(8113),reader)).item.view,'full');
+  const listed=await w.svc.list(reader,{view:'received'});assert.ok(listed.items.some(row=>row.id===id(8113)));assert.equal(listed.pending,1);
+  await assert.doesNotReject(()=>w.svc.ack(id(8113),reader,ackBody(reader,id(8115))));
+});
+
+test('CORE_R10_CVR_AMBIGUOUS legacy roster id shared by two subjects admits neither candidate nor final recipient',async()=>{
+  const w=await world(),label=actorOf('X'),version=await w.commit(UID,'preliminary',{reviewer:label});
+  // Email/username collisions are possible even when provider emails themselves are unique.
+  w.users.get(SUBS.Y).email='';w.users.get(SUBS.Y).username=label;
+  await w.rights('Y',{email:'',username:label});
+  const candidates=await w.svc.recipients(UID,S());
+  assert.ok(!candidates.recipients.some(row=>[SUBS.X,SUBS.Y].includes(row.sub)));
+  for(const who of ['X','Y'])await assert.rejects(w.svc.create(UID,S(),createBody(S(),id(who==='X'?8121:8122),who,version)),code(409,'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'));
+  assert.deepEqual(await w.count(),{records:0,events:0,receipts:0,audits:0,updates:0});
 });

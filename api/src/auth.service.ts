@@ -678,7 +678,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       : { state: answer.state, outcome: answer.outcome, settledAt: new Date() };
     for (let tries = 0; ; tries++) {
       try {
-        await this.prisma.providerChange.updateMany({ where: { id: change.id, state: 'unknown' }, data });
+        await this.prisma.providerChange.updateMany({ where: { id: change.id,
+          ...(change.kind === 'credentials' ? { OR: [{ state: 'unknown' }, { outcome: 'superseded' }] } : { state: 'unknown' }),
+        }, data });
         break;
       } catch {
         if (tries === 2) { this.storageWarning('change_write'); return; }
