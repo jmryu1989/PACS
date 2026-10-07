@@ -218,6 +218,7 @@ export class AdminService {
     }
 
     let action = 'update';
+    let preReadError: unknown;
     let institution = observed.institution, roles = observed.roles;
     let approved = observed.approved, suspended = observed.suspended;
     if (body?.approvalState === 'PENDING') {
@@ -226,7 +227,8 @@ export class AdminService {
       action = 'unapprove'; approved = false; suspended = true; institution = null; roles = [];
     } else if (approvalMutation) {
       action = observed.approved ? 'update' : 'approve';
-      institution = await this.institution(body?.institution ?? observed.institution);
+      try { institution = await this.institution(body?.institution ?? observed.institution); }
+      catch (error) { preReadError = error; }
       roles = this.roles(body?.roles ?? observed.roles);
       approved = true;
       if (body?.enabled !== undefined) suspended = !body.enabled;
@@ -239,11 +241,17 @@ export class AdminService {
       suspended = false;
     } else throw new BadRequestException('변경할 회원 상태가 없습니다');
 
-    // Validate before the command/audit boundary. Optional identity refresh cannot prevent DB revocation.
-    const identity = identityToRegister ?? (approvalMutation ? await this.managed(id)
-      : await this.managed(id, within(300)).catch(() => null));
-    if (approvalMutation && !identity!.emailVerified && body?.verificationOverride !== true)
-      throw new BadRequestException('이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다');
+    // Remote reads never hold the member lock. Preserve refusals so a newer committed version
+    // wins even during a provider outage; none of these refusals crosses the command/audit boundary.
+    let identity = identityToRegister;
+    if (!preReadError) {
+      try {
+        identity ??= approvalMutation ? await this.managed(id)
+          : await this.managed(id, within(300)).catch(() => null);
+        if (approvalMutation && !identity!.emailVerified && body?.verificationOverride !== true)
+          throw new BadRequestException('이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다');
+      } catch (error) { preReadError = error; }
+    }
 
     try {
       const committed = await this.prisma.$transaction(async tx => {
@@ -252,6 +260,7 @@ export class AdminService {
         const current = await tx.memberRights.findUnique({ where: { sub: id } });
         if (existing ? current?.version !== observed.version : !!current)
           throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
+        if (preReadError) throw preReadError;
         // The observed version precedes the remote pre-read. CAS rejects an older command after any
         // newer command commits, so its captured identity cannot rewind that newer identity. No I/O holds this lock.
         const version = existing ? observed.version : (await this.register(tx, identity!)).version;
@@ -280,6 +289,7 @@ export class AdminService {
       if (committed.change) this.auth.publishCredentials({ id: committed.change.id, kind: 'credentials', target: id }, institution!, roles);
       return { ...committed.after, rosterUnconfirmed: committed.rosterUnconfirmed };
     } catch (error) {
+      if (error === preReadError) throw error;
       await this.audit(c.actor, 'admin.user.patch.failed', id, {
         before, after: null, verificationOverride: body?.verificationOverride === true, failed: true,
       });

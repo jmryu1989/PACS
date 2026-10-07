@@ -1,6 +1,10 @@
 # coding: utf-8
-"""TEST-S4-U5-STUDY-IDENTITY source (no browser, container, database or network; Node only to run the TypeScript compiler
-api/package-lock.json installs over the controller's route decorators).
+"""TEST-S4-U5-STUDY-IDENTITY source (no browser, container, database or network; the installed Node/TypeScript runtime
+checks controller route decorators and executes service behavior over synthetic stores).
+
+D73 §1-B.14: byte pins apply only to the fixed historical S4 before/after blobs whose
+equality is the preservation requirement. Current bootstrap/toClient/unmatch are exercised
+through their public service methods; current implementation spelling is not that requirement.
 
 What this file proves, and nothing more (review M-2):
   1. tests/study_identity_vectors.json is well formed and carries every named example of the reviewed contract
@@ -10,18 +14,18 @@ What this file proves, and nothing more (review M-2):
      would agree with itself and prove nothing about api/src/study-identity.ts.
   2. Source pins that the shipped files still carry the reviewed decisions: the tenant-pinned second Order read and
      its position, relations only from server-read tags, no Order value in the answer, the M-1/N-1 shape checks after
-     every existing refusal, unchanged write sites and neighbour surfaces, the controller's route table against the one
+     every existing refusal, the controller's route table against the one
      S4-U5 shipped (no route added or dropped since; its handlers' bodies are not pinned), the one new live method, its place in the live selection
      scripts/run-tests.py plans (collected, never run) and the hosted steps that run the real code.
      Client behaviour is covered by study_identity_test.cjs and study_identity_dom_test.py, not source pins here.
 What it cannot see: whether TypeScript compiles, the browser renders, or PostgreSQL/Orthanc behave as the source says.
 """
-import hashlib
 import importlib.util
 import json
 import math
 import re
 import subprocess
+import shutil
 import sys
 import unicodedata
 import unittest
@@ -71,36 +75,6 @@ NEGATION = "같은 환자임을 확인한 것은 아닙니다."
 def between(source, start, end):
     head = source.index(start)
     return source[head:source.index(end, head + len(start))]
-
-
-def sha(value):
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def js_function(source, name):
-    """The DOM harness scanner (tests/worklist_arrivals_dom_test.py); a quote in a comment breaks it there too."""
-    start = source.index("function " + name + "(")
-    brace = source.index("{", start)
-    depth, quote, escaped = 0, None, False
-    for index in range(brace, len(source)):
-        char = source[index]
-        if quote:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-            continue
-        if char in "'\"`":
-            quote = char
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return source[start:index + 1]
-    raise ValueError(name)
 
 
 def forbidden_hits(value):
@@ -207,17 +181,6 @@ class VectorFile(unittest.TestCase):
 
 # ── 2. Server source pins ─────────────────────────────────────────────────────────────────────────────────────
 
-BASE_SHA256 = {
-    # Unchanged at b6a317c (S4-U5 base): the U2 rule/client and the untouched neighbour methods.
-    "u2_rule": "45a916d3d2cfa37b3e4d9dc04d5e7f2ee9dc6a86451249ed799aab40bc300dbd",
-    "u2_client": "47abd1d5a00a69d37a8c7977e5f31c9d3a9ce16ca04a43d5fd8830a4369963d3",
-    "unmatch": "d38480a356f864fb8084bedfe0f632a4d2541047ccff26cdd5dd57f6a7ed92cb",
-    # S7-U5 changed these two on purpose (re-set here, disclosed in fix10s-notes): bootstrap reads the caller's drafts of
-    # the visible studies only (emptied rows stay in the table), and toClient carries the draft boundary and hides an
-    # emptied row. Neither reads or writes an order value, which is what S4-U5's claim about them was.
-    "bootstrap": "ac48f4c6267c609a96d7d28c0b45fba7fa3355b7d3cf5355bbc3d649d50c980c",
-    "toClient": "80cae4499fe2a961f125071ae03be821d44316609d761eddb0b521c9dea3c65f",
-}
 # "S4-U5 left removeState as it was" is a claim about S4-U5's two commits, so (S7-PINS, AGENTS.md 1-B.14; Astra
 # S7-U3a-B-R-001-F02) it is checked on them - the base b6a317c and the main merge fb7dab9 that shipped 4760df0 - read with
 # git show by fixed_file() (tests/report_actions_dom_test.py): a commit that cannot be read, or is not the pinned bytes,
@@ -231,10 +194,6 @@ S4U5_RESULT = "fb7dab9df54e6fe3c835dc6d2add89b1cfd62e0f"
 # LF-normalized UTF-8 sha256 of api/src/pacs.service.ts at each (the whole file as git show reads it).
 S4U5_SERVICE_SHA256 = {S4U5_BASE: "db21d0eaddf15473dbca19712fa49e669cfe1e18e6fbef76d5ee56df661f8d7e",
                        S4U5_RESULT: "c64229b96252eb484e5372fd03cf9ddde39089fd140e16b0baf70937ca8eb173"}
-# StudyState/Order/report write call sites in pacs.service.ts at b6a317c. U5 adds reads only.
-# S7-U5: studyState.update( 8 -> 9 - the forced release rotates the study's draft epoch (its one new write site).
-BASE_WRITES = {"studyState.update(": 9, "studyState.updateMany(": 1, "studyState.create(": 3, "studyState.delete(": 1,
-               "order.update(": 2, "order.updateMany(": 2, "order.createMany(": 1}
 # "S4-U5 adds no route" the same way (S7-U5 fix4, commander decision D506; AGENTS.md 1-B.14/15). Until then this file held
 # the sha256 of the whole live pacs.controller.ts: any later edit of any handler failed it (S7-U5's draft PUT owner check
 # did) and an edit that re-set the digest passed whatever routes it added. S4-U5's claim is about its two commits, whose
@@ -462,26 +421,33 @@ class ServicePins(unittest.TestCase):
         shipped = {commit: fixed_file(commit, "api/src/pacs.controller.ts", S4U5_CONTROLLER_SHA256)
                    for commit in (S4U5_BASE, S4U5_RESULT)}
         self.assertEqual(shipped[S4U5_BASE], shipped[S4U5_RESULT])
+        for path, digest in (
+            ("api/src/order-reconciliation.ts", "45a916d3d2cfa37b3e4d9dc04d5e7f2ee9dc6a86451249ed799aab40bc300dbd"),
+            ("worklist-v0/hpacs-lite/order-reconciliation.js", "47abd1d5a00a69d37a8c7977e5f31c9d3a9ce16ca04a43d5fd8830a4369963d3"),
+        ):
+            self.assertEqual(fixed_file(S4U5_BASE, path, digest), fixed_file(S4U5_RESULT, path, digest))
         # The live controller serves the routes of the one S4-U5 shipped, whatever its handlers do, and the one route a
         # later unit added on purpose: S7-U5's read of the caller's own draft and boundary (no order value in it).
         tables = controller_route_tables({"live": CONTROLLER, "s4u5": shipped[S4U5_RESULT]})
         self.assertTrue(tables["s4u5"])
         self.assertEqual(tables["live"], sorted(tables["s4u5"] + ["GET studies/:uid/draft"]))
-        self.assertEqual(sha(between(SERVICE, "  async bootstrap(c: Caller, query?: any) {", "\n  }\n")), BASE_SHA256["bootstrap"])
-        self.assertEqual(sha(between(SERVICE, "function toClient(", "\n}\n")), BASE_SHA256["toClient"])
-        self.assertNotIn("orderIdentity", between(SERVICE, "  async bootstrap(c: Caller, query?: any) {", "\n  }\n"))
-        self.assertEqual(sha(U2_RULE), BASE_SHA256["u2_rule"])
-        self.assertEqual(sha(U2_CLIENT), BASE_SHA256["u2_client"])
+        self.behaviour("CORE_R11_BOOTSTRAP")
         # The U2 pin on accession-bearing code lines keeps holding: the select lives in the rule module (N-9).
         code = [line.strip() for line in SERVICE.splitlines()
                 if "accession" in line and not line.strip().startswith(("*", "//", "/*"))]
         self.assertEqual(len(code), 2)
         self.assertNotIn("accession", SEED)
 
-    def test_write_sites_and_neighbour_methods_are_unchanged(self):
-        for token, count in BASE_WRITES.items():
-            self.assertEqual(SERVICE.count(token), count, token)
-        self.assertEqual(sha(between(SERVICE, "  async unmatch(uid: string, c: Caller) {", "\n  }\n")), BASE_SHA256["unmatch"])
+    def test_unmatch_releases_both_sides_and_preserves_refusals(self):
+        self.behaviour("CORE_R11_UNMATCH")
+
+    def behaviour(self, pattern):
+        result = subprocess.run([shutil.which("node") or "node", "--require", str(ROOT / "tests/service_test_loader.cjs"),
+                                 "--test", "--test-reporter=tap", "--test-name-pattern", pattern,
+                                 str(ROOT / "tests/study_identity_server_test.cjs")], cwd=ROOT,
+                                capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("# pass 1", result.stdout)
 
     def test_s4u5_left_remove_state_as_it_was(self):
         # Both commits' files are their pinned bytes (fixed_file() fails otherwise); the method is the same text in each.

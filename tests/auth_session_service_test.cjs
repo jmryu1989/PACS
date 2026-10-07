@@ -4991,3 +4991,41 @@ test('CORE_R10_LATE_SUPERSEDED a publication answered after retry remains visibl
   assert.deepEqual(kc.members[m].groups,[Z]);assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);
   assert.equal((await retryMemberRoster(w.I2.prisma,new KeycloakService())).attempted,0);await w.finish('CORE_R10_LATE_SUPERSEDED');
 });
+
+// D642: REQ-S7-U5-DB-RIGHTS -> RISK-CAS-OUTAGE / REFUSAL-AUDIT -> CORE_R11.
+// Each cell separately fails the institution and identity pre-read after the winner commits.
+for (const first of CORE_COMMANDS) for (const second of CORE_COMMANDS)
+test(`CORE_R11_CAS_OUTAGE_MATRIX ${first}->${second}`, async t => {
+  const w = await world(t);
+  for (const failure of ['institution', 'identity']) {
+    const m = 'syn-r11-outage-' + first + '-' + second + '-' + failure;
+    const { admin } = await coreMember(w, m);
+    const provider = new KeycloakService();
+    const { AdminService } = require('/app/dist/admin.service');
+    const contender = new AdminService(w.I2.prisma, provider, null, w.I2.service);
+    const held = w.pause({ inst: 'I2', scope: 'root', model: 'memberRights', method: 'findUnique', phase: 'after' });
+    const loser = r10Patch(contender, m, coreBody(second)); await held.arrived();
+    assert.equal((await r10Patch(admin, m, coreBody(first))).status, 200);
+    if (['Approve', 'Change'].includes(first)) await coreSettled(w, m);
+    if (['Approve', 'Change', 'Activate'].includes(first)) await coreFresh(w, m);
+    const rights = await w.base.memberRights.findUnique({ where: { sub: m } });
+    const sessions = await w.base.authSession.findMany({ where: { sub: m } });
+    assert.equal(sessions.length, ['Approve', 'Change', 'Activate'].includes(first) ? 1 : 0, 'a fresh winner session makes preservation observable');
+    const publications = await w.base.providerChange.findMany({ where: { sub: m } });
+    const successfulAudits = async () => (await w.base.auditLog.findMany({ where: { target: m } }))
+      .filter(row => row.action !== 'admin.user.patch.failed');
+    const audits = await successfulAudits();
+    let reached = 0;
+    provider[failure === 'institution' ? 'institutions' : 'getUser'] = async () => {
+      reached++; throw new (require('/app/node_modules/@nestjs/common').ServiceUnavailableException)('Synthetic provider outage');
+    };
+    held.release(); const result = await loser;
+    assert.equal(result.status, 409, failure); assert.equal(result.body.code, 'MEMBER_VERSION_CONFLICT');
+    if (['Approve', 'Change'].includes(second)) assert.equal(reached, 1, failure + ' was injected');
+    assert.deepEqual(await w.base.memberRights.findUnique({ where: { sub: m } }), rights);
+    assert.deepEqual(await w.base.authSession.findMany({ where: { sub: m } }), sessions);
+    assert.deepEqual(await w.base.providerChange.findMany({ where: { sub: m } }), publications);
+    assert.deepEqual(await successfulAudits(), audits);
+  }
+  await w.finish('CORE_R11_CAS_OUTAGE_MATRIX');
+});

@@ -127,10 +127,10 @@ function world(studies, { policies = {}, orders = true } = {}) {
       // Tech Note version - read from the live store, as one statement after the transaction reads it.
       const anchor = values.find(v => typeof v === 'string');
       const noteVersion = Math.max(0, ...view.notes.filter(n => n.studyUid === anchor).map(n => n.version));
-      const rows = joined.values.filter(uid => view.states.has(uid)).map(uid => {
+      const rows = w.recheckSql ? await w.recheckSql(strings, ...values) : joined.values.filter(uid => view.states.has(uid)).map(uid => {
         const s = view.states.get(uid);
         return { uid, institutionId: s.institutionId, teleInstitutionId: s.teleInstitutionId, rs: s.rs, preDoc: s.preDoc,
-          preReviewer: s.preReviewer, reportVersion: view.reports.get(uid)?.version ?? 0, techNoteVersion: noteVersion };
+          preReviewer: s.preReviewer, preDocSub: s.preDocSub, preReviewerSub: s.preReviewerSub, reportVersion: view.reports.get(uid)?.version ?? 0, techNoteVersion: noteVersion };
       });
       calls.rechecks.push({ scope, uids: [...joined.values], anchor, rows: structuredClone(rows) });
       await log(scope + ':recheck');
@@ -902,4 +902,50 @@ test('CC-S14 the stale baselines are the values R6 read and R7(a) confirmed; no 
   assert.deepEqual(Object.keys(answer.anchor).sort(), ['access', 'institutionName', 'techNoteVersion']);
   assert.ok(!JSON.stringify(answer).includes('ANCHOR-P-BODY'));
   assert.ok(!answer.sections.history.items.some(item => item.studyUid === ANCHOR), 'the anchor has no history row');
+});
+
+// D642: REQ-CONTEXT-CONSISTENCY -> RISK-SUBJECT-ONLY-CHANGE -> CC_S08_SUBJECT_ONLY_CHANGE.
+// Optional real-PG R7 read uses this suite's existing synthetic snapshots/Orthanc; all final SQL is production SQL.
+// Only an empty, explicitly named disposable database is accepted. Never read .env or the default DATABASE_URL.
+let r11Pg;
+async function subjectDatabase() {
+  if (!process.env.KIN_CONTEXT_DATABASE_URL) return null;
+  if (r11Pg) return r11Pg;
+  const url=process.env.KIN_CONTEXT_DATABASE_URL;
+  assert.equal(new URL(url).pathname,'/kin_context_test');process.env.DATABASE_URL=url;
+  const db=new (require('/app/dist/prisma.service').PrismaService)();await db.$connect();
+  const [{tables}]=await db.$queryRaw`SELECT count(*)::int AS tables FROM pg_tables WHERE schemaname='public'`;
+  assert.equal(tables,0,'context subject probe requires an empty throwaway database');
+  require('node:child_process').execFileSync('/app/node_modules/.bin/prisma',['migrate','deploy','--schema','/app/prisma/schema.prisma'],
+    {cwd:'/app',env:{...process.env,DATABASE_URL:url},stdio:'pipe'});
+  for(const id of [A,B,C])await db.institution.create({data:{id,name:'SYN'}});
+  r11Pg=db;return db;
+}
+test.after(async()=>{if(r11Pg)await r11Pg.$disconnect();});
+test('CC_S08_SUBJECT_ONLY_CHANGE either designation subject changes after R6 without a label change',async()=>{
+  const db=await subjectDatabase();
+  for(const field of ['preDocSub','preReviewerSub']) {
+    const w=changeWorld();
+    // A non-null before and after catches missing projections even if both labels remain identical.
+    const member=w.store.states.get(X);member.preDocSub='old-author-sub';member.preReviewerSub='old-reviewer-sub';
+    const before=structuredClone(member);
+    if(db) {
+      for(const row of w.store.states.values()) {
+        const data={institutionId:row.institutionId,teleInstitutionId:row.teleInstitutionId,rs:row.rs,
+          preDoc:row.preDoc,preReviewer:row.preReviewer,preDocSub:row.preDocSub??null,preReviewerSub:row.preReviewerSub??null};
+        await db.studyState.upsert({where:{uid:row.uid},create:{uid:row.uid,...data},update:data});
+      }
+      for(const row of w.store.reports.values())await db.report.upsert({where:{uid:row.uid},create:row,update:row});
+      for(const row of w.store.notes)await db.techNoteRevision.upsert({where:{studyUid_version:{studyUid:row.studyUid,version:row.version}},create:row,update:{}});
+      w.recheckSql=(...args)=>db.$queryRaw(...args);
+    }
+    const stable=await barrier(w,teleReader,200);
+    assert.ok(JSON.stringify(stable).includes('MEMBERX'),'unchanged non-null subject projections remain readable');
+    w.at('tx:end',async()=>{w.store.states.get(X)[field]='replacement-subject';
+      if(db)await db.studyState.update({where:{uid:X},data:{[field]:'replacement-subject'}});});
+    const result=await barrier(w,teleReader);
+    assert.deepEqual([result.status,Object.keys(result.body).sort(),result.body.code],[409,['code','message'],'CLINICAL_CONTEXT_CHANGED']);
+    assert.ok(!JSON.stringify(result.body).includes('MEMBERX'));
+    const after={...w.store.states.get(X)};delete after[field];const prior={...before};delete prior[field];assert.deepEqual(after,prior);
+  }
 });

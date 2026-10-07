@@ -1216,3 +1216,159 @@ for(const action of ['approve','reset'])test(`CORE_R10_REVIEWER_RENAME ${action}
   state=await w.base.studyState.findUnique({where:{uid}});assert.equal(state.rs,action==='approve'?'A':'W');
   if(action==='reset')assert.deepEqual([state.preDoc,state.preReviewer,state.preDocSub,state.preReviewerSub],[null,null,null,null]);
 });
+
+// D642: REQ-S7-U5-SUBJECT-READ -> RISK-LABEL-RECYCLE/STALE-PROJECTION -> seven consumer contracts.
+// This file already requires an empty disposable PostgreSQL and deploys every migration. SQL is never emulated.
+async function r11Payload(db,snapshot) {
+  const [row]=await db.$queryRaw`SELECT octet_length(${JSON.stringify(snapshot)}::jsonb::text)::int AS bytes`;
+  return row.bytes;
+}
+async function r11Consumer() {
+  const db=await database(),uid='2.25.'+BigInt('0x'+randomBytes(12).toString('hex')).toString();
+  const x={kind:'member',institution:INST,sub:'r11-x-'+uid,actor:'r11-old-'+uid,roles:['radiologist']};
+  const renamed={...x,actor:'r11-renamed-'+uid},y={...x,sub:'r11-y-'+uid};
+  await db.studyState.create({data:{uid,institutionId:INST,rs:'P',ss:'Verified',preDoc:x.actor,preDocSub:x.sub}});
+  await db.report.create({data:{uid,findings:'R11-PRIVATE-BODY',version:1}});
+  const tags={StudyInstanceUID:uid,SeriesInstanceUID:uid+'.1',SOPInstanceUID:uid+'.1.1',SOPClassUID:'1.2.840.10008.5.1.4.1.1.2',
+    FrameOfReferenceUID:uid+'.2',PatientID:'SYN-R11',PatientName:'SYNTHETIC^R11',PatientBirthDate:'19700101',PatientSex:'O',
+    StudyDate:'20261007',StudyTime:'000000',StudyID:'R11',AccessionNumber:'R11',SeriesNumber:'1',InstanceNumber:'1',
+    Modality:'CT',Rows:64,Columns:64,ImagePositionPatient:[0,0,0],ImageOrientationPatient:[1,0,0,0,1,0],PixelSpacing:[1,1],
+    _kinSourceDigest:'f'.repeat(64)};
+  let onRemote=null,onTransaction=null,remoteReads=0;
+  const orthanc={reportPreviewStudy:async()=>{remoteReads++;if(onRemote){const f=onRemote;onRemote=null;await f();}return {};},
+    connectStudyIdentity:async()=>({patientId:'SYN-R11'}),viewerReference:async()=>{
+      if(onRemote){const f=onRemote;onRemote=null;await f();}return structuredClone(tags);}};
+  const client=new Proxy(db,{get(target,key){
+    if(key==='$transaction')return async(fn,options)=>{if(onTransaction){const f=onTransaction;onTransaction=null;await f();}return target.$transaction(fn,options);};
+    const value=target[key];return typeof value==='function'?value.bind(target):value;
+  }});
+  const access=new StudyAccessService(client,orthanc,{});
+  const state=data=>db.studyState.update({where:{uid},data});
+  const designate=async(field,sub=x.sub)=>state({rs:'P',preDoc:null,preReviewer:null,preDocSub:null,preReviewerSub:null,[field]:x.actor,[field+'Sub']:sub});
+  const refusal=async(p,status=403)=>assert.rejects(p,e=>{assert.equal(e.getStatus?.(),status);
+    assert.ok(!JSON.stringify(e.getResponse()).includes('R11-PRIVATE'));return true;});
+  const item=async(c,kind='key')=>{
+    const id=randomUUID(),snapshot={kind,hidden:false,seriesUid:tags.SeriesInstanceUID,sopUid:tags.SOPInstanceUID,frame:1,
+      ...(kind==='length'?{frameOfReferenceUid:tags.FrameOfReferenceUID,points:[[1,1,0],[11,1,0]],viewPlaneNormal:[0,0,1],viewUp:[0,1,0],
+        sourceDigest:tags._kinSourceDigest,baseline:{values:[10]},unit:'mm',label:'R11-PRIVATE-MEASUREMENT',calculator:'kin-native-manual-v1'}:{})};
+    await db.viewerItem.create({data:{id,studyUid:uid,authorSub:c.sub,authorActor:c.actor,revision:1,snapshot,updatedAt:new Date()}});
+    await db.viewerRevision.create({data:{itemId:id,revision:1,snapshot,action:'create',reason:'',actor:c.actor,payloadBytes:await r11Payload(db,snapshot)}});
+    return {id,snapshot};
+  };
+  return {db,client,access,orthanc,uid,x,renamed,y,state,designate,refusal,item,tags,get remoteReads(){return remoteReads;},
+    remote:f=>{onRemote=f;},transaction:f=>{onTransaction=f;}};
+}
+test('PREVIEW_DESIGNATION_RENAME_RECYCLE initial and post-Orthanc permission',async()=>{
+  const w=await r11Consumer(),{ReportPreviewController}=require('/app/dist/report-preview.controller');
+  const svc=new ReportPreviewController(w.client,w.orthanc,w.access,{});
+  for(const field of ['preDoc','preReviewer']) {
+    await w.designate(field);
+    for(const c of [w.x,w.renamed])assert.equal((await svc.read(w.uid,c)).report.findings,'R11-PRIVATE-BODY');
+    const reads=w.remoteReads;await w.refusal(svc.read(w.uid,w.y));assert.equal(w.remoteReads,reads,'initial refusal reads no original');
+    await w.designate(field,w.y.sub);w.remote(()=>w.designate(field));
+    await w.refusal(svc.read(w.uid,w.y));
+    await w.designate(field,null);assert.equal((await svc.read(w.uid,w.y)).report.findings,'R11-PRIVATE-BODY');
+    await w.refusal(svc.read(w.uid,w.renamed));
+  }
+});
+test('VIEWER_DESIGNATION_RENAME_RECYCLE list, single recheck and revision SQL',async()=>{
+  const w=await r11Consumer(),{ViewerService}=require('/app/dist/viewer.service'),svc=new ViewerService(w.client,w.orthanc,w.access);
+  const item=await w.item(w.x);
+  const reads=[c=>svc.list(w.uid,{},c),c=>svc.list(w.uid,{recheck:item.id},c),c=>svc.list(w.uid,{},c,item.id)];
+  for(const field of ['preDoc','preReviewer'])for(const read of reads) {
+    await w.designate(field);
+    for(const c of [w.x,w.renamed]){const r=await read(c);assert.equal((r.items??r.revisions).length,1);}
+    await w.refusal(read(w.y));
+    await w.designate(field,w.y.sub);w.transaction(()=>w.designate(field));await w.refusal(read(w.y));
+    await w.designate(field,null);assert.equal(((await read(w.y)).items??(await read(w.y)).revisions).length,1);
+    await w.refusal(read(w.renamed));
+  }
+});
+test('FINDING_DESIGNATION_RENAME_RECYCLE list, history, readableFindings and comparison lineage',async()=>{
+  const w=await r11Consumer(),{FindingService}=require('/app/dist/finding.service'),svc=new FindingService(w.client,w.access,w.orthanc);
+  const item=await w.item(w.x),id=randomUUID(),snapshot={schemaVersion:1,title:'R11-PRIVATE-FINDING',text:'R11-PRIVATE',hidden:false,primary:0,
+    sources:[{kind:'key',studyUid:w.uid,itemId:item.id,revision:1}]};
+  await w.db.finding.create({data:{id,studyUid:w.uid,authorSub:w.x.sub,authorActor:w.x.actor,revision:1,snapshot,updatedAt:new Date()}});
+  await w.db.findingRevision.create({data:{findingId:id,revision:1,snapshot,action:'create',reason:'',actor:w.x.actor,authorSub:w.x.sub,
+    requestId:randomUUID(),fingerprint:'1'.repeat(64),payloadBytes:await r11Payload(w.db,snapshot)}});
+  const reads=[c=>svc.list(w.uid,{},c),c=>svc.list(w.uid,{},c,id)];
+  const readable=c=>w.db.$transaction(tx=>svc.readableFindings(tx,c,w.uid,[id]));
+  for(const field of ['preDoc','preReviewer']) {
+    await w.designate(field);
+    for(const c of [w.x,w.renamed]) {
+      for(const read of reads){const r=await read(c);assert.equal((r.items??r.revisions).length,1);}
+      await w.access.prepare(c);assert.equal((await readable(c)).length,1);
+    }
+    for(const read of reads)await w.refusal(read(w.y));
+    await w.access.prepare(w.y);assert.deepEqual(await readable(w.y),[]);
+    for(const read of reads){await w.designate(field,w.y.sub);w.transaction(()=>w.designate(field));await w.refusal(read(w.y));}
+    await w.designate(field,null);for(const read of reads){const r=await read(w.y);assert.equal((r.items??r.revisions).length,1);}
+    assert.equal((await readable(w.y)).length,1);assert.deepEqual(await readable(w.renamed),[]);
+  }
+  // Public anchor, P comparison: the source filter must withhold the complete finding and all its history.
+  const prior=w.uid+'.9';await w.db.studyState.create({data:{uid:prior,institutionId:INST,rs:'P',preDoc:w.x.actor,preDocSub:w.x.sub}});
+  // Append a new revision, preserving the original (history is append-only).
+  const comparison={...snapshot,sources:[{...snapshot.sources[0],studyUid:prior}]};
+  await w.db.finding.update({where:{id},data:{snapshot:comparison,revision:2}});
+  await w.db.findingRevision.create({data:{findingId:id,revision:2,snapshot:comparison,action:'edit',reason:'',actor:w.x.actor,
+    authorSub:w.x.sub,requestId:randomUUID(),fingerprint:'2'.repeat(64),payloadBytes:await r11Payload(w.db,comparison)}});
+  await w.state({rs:'W'});
+  for(const c of [w.x,w.renamed]) {assert.equal((await svc.list(w.uid,{},c)).items.length,1);assert.equal((await readable(c)).length,1);}
+  assert.deepEqual((await svc.list(w.uid,{},w.y)).items,[]);await w.refusal(svc.list(w.uid,{},w.y,id),404);
+  assert.deepEqual(await readable(w.y),[]);
+  await w.db.studyState.update({where:{uid:prior},data:{preDocSub:null}});assert.equal((await readable(w.y)).length,1);
+});
+function r11Job(w) {
+  return {id:randomUUID(),title:'R11-PRIVATE-JOB',description:'SYNTHETIC',snapshot:{version:1,studies:[w.uid],rows:1,cols:1,active:0,
+    cells:[{study:w.uid,series:w.tags.SeriesInstanceUID,sop:w.tags.SOPInstanceUID,frame:1,
+      camera:{focalPoint:[0,0,0],position:[0,0,10],viewUp:[0,1,0],viewPlaneNormal:[0,0,1],parallelScale:32,rotation:0,flipHorizontal:false,flipVertical:false},
+      properties:{voiRange:{lower:0,upper:100},VOILUTFunction:'LINEAR',invert:false}}]}};
+}
+test('VIEWER_JOB_DESIGNATION_RENAME_RECYCLE reads and locked parents on save',async()=>{
+  const w=await r11Consumer(),{ViewerJobService}=require('/app/dist/viewer-job.service'),svc=new ViewerJobService(w.client,w.orthanc,w.access);
+  for(const field of ['preDoc','preReviewer']) {
+    await w.designate(field);const job=r11Job(w),raw=Buffer.from(JSON.stringify(job));await svc.create(w.uid,raw,w.x);
+    assert.equal((await svc.get(w.uid,job.id,w.renamed)).title,job.title);
+    assert.ok((await svc.list(w.uid,{},w.renamed)).jobs.some(j=>j.id===job.id));
+    await svc.create(w.uid,Buffer.from(JSON.stringify(r11Job(w))),w.renamed);
+    const before=await w.db.viewerJob.count();await w.refusal(svc.get(w.uid,job.id,w.y));await w.refusal(svc.list(w.uid,{},w.y));
+    await w.refusal(svc.create(w.uid,Buffer.from(JSON.stringify(r11Job(w))),w.y));
+    await w.designate(field,w.y.sub);w.transaction(()=>w.designate(field));
+    await w.refusal(svc.create(w.uid,Buffer.from(JSON.stringify(r11Job(w))),w.y));assert.equal(await w.db.viewerJob.count(),before);
+    await w.designate(field,w.y.sub);w.remote(()=>w.designate(field));await w.refusal(svc.get(w.uid,job.id,w.y));
+    await w.designate(field,null);assert.equal((await svc.get(w.uid,job.id,w.y)).title,job.title);
+    await svc.create(w.uid,Buffer.from(JSON.stringify(r11Job(w))),w.y);
+    await w.refusal(svc.get(w.uid,job.id,w.renamed));
+  }
+});
+test('MANUAL_SR_DESIGNATION_RENAME_RECYCLE prepare and locked recheck preserve SR and measurement on refusal',async()=>{
+  const w=await r11Consumer(),{ManualSrService}=require('/app/dist/manual-sr.service'),svc=new ManualSrService(w.client,w.orthanc,w.access);
+  const ix=await w.item(w.x,'length'),iy=await w.item(w.y,'length');
+  const command=id=>Buffer.from(JSON.stringify({requestId:randomUUID(),items:[{id,revision:1}]}));
+  for(const field of ['preDoc','preReviewer']) {
+    await w.designate(field);
+    for(const c of [w.x,w.renamed])assert.ok((await svc.prepare(w.uid,command(ix.id),c)).dicom);
+    const rows=await w.db.manualSr.findMany({where:{studyUid:w.uid}}),items=await w.db.viewerItem.findMany({where:{studyUid:w.uid}});
+    await w.refusal(svc.prepare(w.uid,command(iy.id),w.y));
+    await w.designate(field,w.y.sub);w.remote(()=>w.designate(field));await w.refusal(svc.prepare(w.uid,command(iy.id),w.y));
+    assert.deepEqual(await w.db.manualSr.findMany({where:{studyUid:w.uid}}),rows);
+    assert.deepEqual(await w.db.viewerItem.findMany({where:{studyUid:w.uid}}),items);
+    await w.designate(field,null);assert.ok((await svc.prepare(w.uid,command(iy.id),w.y)).dicom);
+    await w.refusal(svc.prepare(w.uid,command(ix.id),w.renamed));
+  }
+});
+test('STUDY_TAG_DESIGNATION_RENAME_RECYCLE raw SQL read and FOR SHARE write',async()=>{
+  const w=await r11Consumer(),{StudyTagsService}=require('/app/dist/study-tags.service'),svc=new StudyTagsService(w.client,w.access);
+  const id=randomUUID();await w.db.studyTagCatalog.upsert({where:{institution_ownerSub:{institution:INST,ownerSub:''}},
+    create:{institution:INST,ownerSub:'',revision:1,value:JSON.stringify([{id,name:'R11',uids:[w.uid]}])},
+    update:{revision:1,value:JSON.stringify([{id,name:'R11',uids:[w.uid]}]),lastRequest:null,lastFingerprint:null}});
+  const read=async c=>(await svc.read(c)).catalogs.find(c=>c.scope==='institution').tags.find(t=>t.id===id).uids;
+  const write=async c=>svc.write(c,{expectedOwner:[INST,c.sub],scope:'institution',revision:(await svc.read(c)).catalogs.find(c=>c.scope==='institution').revision,
+    requestId:randomUUID(),tagId:id,action:'add',uid:w.uid});
+  for(const field of ['preDoc','preReviewer']) {
+    await w.designate(field);for(const c of [w.x,w.renamed]){assert.deepEqual(await read(c),[w.uid]);await write(c);}
+    assert.deepEqual(await read(w.y),[]);const before=await w.db.studyTagCatalog.findMany({where:{institution:INST}});
+    await w.refusal(write(w.y),404);assert.deepEqual(await w.db.studyTagCatalog.findMany({where:{institution:INST}}),before);
+    await w.designate(field,null);assert.deepEqual(await read(w.y),[w.uid]);await write(w.y);assert.deepEqual(await read(w.renamed),[]);
+  }
+});
