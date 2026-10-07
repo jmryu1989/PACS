@@ -25,8 +25,97 @@ model AuthSession {
   atExpiresAt  DateTime
   createdAt    DateTime @default(now())
   lastSeenAt   DateTime
+  /// S7-U5 진입 증명(U5S-REQ-09): 로그인 직후 그 문서가 한 번 쓰는 증명의 해시와 만료. 원문은 저장하지 않고,
+  /// 쓰면 두 칸을 비운다 — 같은 증명은 다시 통하지 않는다.
+  entryProofHash      String?
+  entryProofExpiresAt DateTime?
+  /// S7-U5 세션 종료(R1): 이 세션이 태어난 provider(Keycloak) 세션의 id — 콜백에서 검증한 토큰의 `sid`. 제품이 이 행을
+  /// 끝낼 때 같은 provider 세션도 끝내고, 그 provider 세션에서 태어난 다른 행도 함께 끝낸다. 이 열이 생기기 전의 행은 null이다.
+  idpSid              String?
+  rightsVersion       Int      @default(1)
+  institution         String?
 
   @@index([sub])
+  @@index([idpSid])
+}
+
+/// S7-U5 "이 provider 세션은 끝내기로 했다"는 표식이자 provider 종료 요청의 대기열(R1).
+/// 표식이 덮는 인증(그 종료가 확인되기 전의 인증)으로는 제품 세션이 다시 만들어지지 않고 그 토큰의 Bearer 호출도 거절된다.
+/// Keycloak은 같은 브라우저의 다음 SSO에 끝난 SSO의 sid를 다시 줄 수 있어, 확인된 종료 뒤의 새 인증은 덮지 않는다(markCovers).
+/// 처음 정한 cause·decidedAt은 뒤의 재시도·재종료가 덮지 않는다. 확인(confirmedAt) 뒤에도 바로 지우지 않는다 —
+/// 그 provider 세션의 토큰이 더 올 수 없을 때(마지막 confirmedAt + SSO 최대 수명 + 여유)까지 남는다. 미확인 행은 시간만으로 지우지 않는다.
+model IdpSessionEnd {
+  idpSid        String    @id
+  cause         String
+  decidedAt     DateTime
+  confirmedAt   DateTime?
+  attempts      Int       @default(0)
+  /// 다음 provider 종료 시도의 가장 이른 시각(실패할수록 늦어지되 상한이 있다).
+  nextAttemptAt DateTime
+
+  @@index([confirmedAt, nextAttemptAt])
+}
+
+/// S7-U5 "이 회원은 격리됐다"는 우리 쪽 사실(관리자의 정지·승인 변경·승인 취소). 격리는 인증 서버에 무엇을 하기 **전에**
+/// 이 행부터 남긴다 — 그 뒤의 인증 서버 일(세션 나열·표식·비활성화·전체 로그아웃)이 어디서 끊겨도 로그인 콜백과 갱신은
+/// 이 행을 보고 막는다(인증 서버의 관리 API를 로그인 길에서 읽지 않는다). `providerDoneAt`이 비어 있으면 그 인증 서버
+/// 일이 아직 끝나지 않았고, 종료 재시도 주기가 `nextAttemptAt`부터 이어서 한다. 행은 다시 활성화하는 일이 끝까지 성공한
+/// 뒤에만 지운다 — 시간이나 다른 경로로 지우지 않는다. `attempts`는 그 일을 지금 쥔 쪽의 번호(세대)다: 정지·재활성화·재시도
+/// 주기가 번호를 올려 넘겨받고, 인증 서버에 보내는 변경 호출(ProviderChange)은 그 번호가 아직 자기 것일 때만 적힌다.
+model MemberIsolation {
+  sub            String    @id
+  decidedAt      DateTime
+  providerDoneAt DateTime?
+  attempts       Int       @default(0)
+  nextAttemptAt  DateTime
+
+  @@index([providerDoneAt, nextAttemptAt])
+}
+
+/// S7-U5 (D600) 인증 서버에 보낸 **변경** 호출 하나: 회원 비활성화(disable)·활성화(enable), provider 세션 하나의 종료
+/// (end_session). 보내기 **전에** 적고(고유 번호 `id`, 보낸 쪽의 세대 `generation`, 대상 `target`, 상태 `state`), 결과는 그
+/// 호출 **자신의** 답으로만 적는다 — 시간·lease·재조회·같은 대상에 보낸 다른 호출의 답으로 적지 않는다.
+///   unknown  결과를 모른다: 아직 답을 기다리거나, 답을 잃었다(연결 끊김·501 밖의 5xx(503 포함)·프로세스 소실). 시간으로 바뀌지 않는다.
+///   done     인증 서버가 그 호출을 했다고 답했다(세션 종료는 204 끝냄 또는 404 "그런 세션이 없다").
+///   void     그 호출이 일어나지 않았다고 확정됐다(보내지 않았다, 또는 인증 서버가 처리하지 않았다고 답했다: 4xx·501).
+/// unknown이 남은 회원은 재활성화가 끝나지 않고, unknown인 세션 종료가 남은 provider 세션의 표식은 확인되지 않는다 — sid가 다시
+/// 쓰이면 늦게 닿은 종료가 다음 SSO를 끝낼 수 있기 때문이다. `sub`은 관련 회원(알 때), `outcome`은 진단용 요약이다.
+/// unknown 행은 시간만으로 지우지 않는다(정해진 행만 오래되면 치운다).
+model ProviderChange {
+  id         Int       @id @default(autoincrement())
+  kind       String
+  target     String
+  sub        String?
+  generation Int
+  state      String
+  outcome    String?
+  createdAt  DateTime
+  settledAt  DateTime?
+
+  @@index([kind, target, state])
+  @@index([sub, state])
+}
+
+/// PACS rights are authoritative here, never in identity-provider claims. Rows are retained on cancellation.
+model MemberRights {
+  sub String @id
+  username String
+  email String
+  name String
+  emailVerified Boolean
+  approved Boolean @default(false)
+  suspended Boolean @default(false)
+  institution String?
+  roles String[]
+  version Int @default(1)
+  newAuthAfter DateTime?
+  updatedAt DateTime @updatedAt
+}
+
+/// One-time realm import; absence refuses import-dependent credentials, never grants from JWTs.
+model MemberRightsImport {
+  id String @id
+  completedAt DateTime @default(now())
 }
 
 /// 기관. 병원 하나, 판독센터 하나가 각각 한 행이다.
@@ -86,12 +175,17 @@ model StudyState {
   /// (HPACS 매뉴얼 7.4.1.3-4.1 — "지정된 판독의만 판독 내용을 볼 수 있다")
   preDoc      String?
   preReviewer String?
+  preDocSub   String?
+  preReviewerSub String?
   ov        String?                           // Match/Modify로 덮어쓴 값 (JSON)
   orig      String?                           // 덮어쓰기 전 원본 (JSON) — Unmatch 복원용
   /// 매칭은 1:1이다. nullable unique라 미매칭(NULL)은 여럿이어도 같은 오더가 두 검사에 붙지는 않는다.
   orderOid  String?  @unique                  // 매칭된 오더
   holder    String?                           // 지금 판독문을 쓰고 있는 사람
   heldAt    DateTime?                         // 마지막 하트비트. TTL이 지나면 점유가 풀린다
+  /// S7-U5 초안 경계의 세대(U5S-REQ-14). 행이 생길 때마다 DB가 새 값을 주고(지웠다 다시 생긴 검사도 새 세대),
+  /// 관리자 강제 해제가 바꾼다. 초안 쓰기는 자기가 본 세대를 함께 보내고, 다르면 거절된다.
+  draftEpoch String  @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
 
@@ -265,6 +359,12 @@ model Report {
 /// 없거나(NULL) 배열이 아니면 "인용 없음"이고, 그것이 이 칸이 생기기 전의 동작이다.
 /// structured: 구조화 서식으로 **고른 값**과 그래서 본문에 들어간 **그 한 줄**. 같은 이유로
 /// 같은 행에 있다. 기록의 본체는 여전히 자유문 세 칸이고 이 칸은 그 옆에 서는 증언이다.
+///
+/// revision·present (S7-U5, U5S-REQ-14): 같은 작성자의 늦게 닿은 쓰기·다른 탭의 쓰기가 나중 글을 덮지 않게 하는
+/// 저장된 경계다. 모든 쓰기·비우기·버리기·확정·강제 해제는 자기가 본 revision일 때만 적용되고 revision을 하나
+/// 올린다. 비운 초안은 행을 지우지 않고 present=false로 두며 내용 칸을 비운다 — 행을 지우면 revision도 사라져
+/// 지운 뒤에 닿은 옛 쓰기가 초안을 되살린다. present=false 행은 초안이 아니다(조회·인용·구조화·이력·삭제 판정에서
+/// 없는 것으로 읽는다). `Report.version`/`baseVersion`과는 별개의 수다.
 model ReportDraft {
   uid            String
   author         String
@@ -274,6 +374,8 @@ model ReportDraft {
   baseVersion    Int      @default(0)
   citations      Json?
   structured     Json?
+  revision       Int      @default(1)
+  present        Boolean  @default(true)
   updatedAt      DateTime @updatedAt
 
   @@id([uid, author])

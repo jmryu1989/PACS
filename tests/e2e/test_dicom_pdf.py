@@ -15,6 +15,7 @@ from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import EncapsulatedPDFStorage, ExplicitVRLittleEndian, generate_uid
 from pynetdicom import AE
 from playwright.sync_api import expect
+from failure_diagnostics import failure_details
 from pypdf import PdfReader
 
 from test_viewer_layout import ViewerLayoutE2E
@@ -50,8 +51,10 @@ def synthetic_pdf(labels):
 
 
 class DicomPdfE2E(ViewerLayoutE2E):
-    # Full Chromium's new headless mode renders PDFs; headless-shell downloads them.
-    browser_channel = "chromium"
+    # Source PDF is now fetched into the viewer's blob-backed dialog. These cases
+    # verify the source bytes, scope and dialog lifecycle; they do not assert the
+    # browser's native PDF controls. Use the same bundled headless browser as OHIF.
+    browser_channel = None
 
     def pdf_source(self, fixture, labels, title, mime="application/pdf", payload=None):
         original = pydicom.dcmread(io.BytesIO(self.stack.orthanc_bytes(
@@ -89,6 +92,11 @@ class DicomPdfE2E(ViewerLayoutE2E):
 
     def launch_pdf_viewer(self, worklist, fixtures):
         page = worklist.context.new_page()
+        # The raw /instances/{id}/pdf address answers only a session-bound request, and the viewer shows the bytes it
+        # read as a blob of its own. What each document shows is therefore checked on the viewer's own reads.
+        self.pdf_reads = reads = []
+        page.on("response", lambda response: reads.append(response)
+                if response.request.method == "GET" and urlsplit(response.url).path.endswith("/pdf") else None)
         page.goto(self.stack.proxy + "/ohif/viewer?StudyInstanceUIDs=" + ",".join(f.uid for f in fixtures))
         page.wait_for_function("()=>typeof services==='object' && services.displaySetService.getActiveDisplaySets().length>0", timeout=60000)
         self.open_layout_tools(page)
@@ -107,13 +115,58 @@ class DicomPdfE2E(ViewerLayoutE2E):
         return display
 
     def object_url(self, page, index=0, expected=None):
+        """The native PDF object's address: a blob of this origin that the viewer still owns."""
         obj = page.locator('[data-cy=viewport-grid] > div').nth(index).locator('object[type="application/pdf"]')
         expect(obj).to_be_attached(timeout=60000)
         if expected:
             page.wait_for_function("([node,url])=>node.data===url", arg=[obj.element_handle(),expected], timeout=60000)
         else:
-            page.wait_for_function("node=>!!node.data", arg=obj.element_handle(), timeout=60000)
+            page.wait_for_function("node=>node.data.startsWith('blob:'+location.origin+'/')&&KinViewerResource.has(node.data)",
+                                   arg=obj.element_handle(), timeout=60000)
         return obj.evaluate("node=>node.data")
+
+    def cell_bytes(self, page, index):
+        """The bytes of the document a PDF cell shows (the Blob behind its object URL), or None."""
+        values = page.evaluate("""async i=>{const cell=document.querySelectorAll('[data-cy=viewport-grid] > div')[i];
+          const url=cell?.querySelector('object[type="application/pdf"]')?.data,blob=url&&window.__kinTestBlobs?.get(url);
+          return blob?Array.from(new Uint8Array(await blob.arrayBuffer())):null;}""", index)
+        return None if values is None else bytes(values)
+
+    def read_paths(self):
+        return {urlsplit(response.url).path for response in self.pdf_reads}
+
+    def bound_read(self, page, source):
+        """The viewer's own session-bound read of this source."""
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            found = [response for response in self.pdf_reads if urlsplit(response.url).path == source["pdf"]]
+            if found: return found[-1]
+            page.wait_for_timeout(100)
+        self.fail("The viewer did not read the source PDF")
+
+    def wait_until(self, page, ready, message):
+        """A route handler runs after the request event; wait for what it records instead of reading it at once."""
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if ready(): return
+            page.wait_for_timeout(50)
+        self.fail(message)
+
+    def source_dialog(self, page):
+        return page.locator('dialog:has(iframe[title="Source PDF"])')
+
+    def assert_source_dialog(self, page, pages):
+        """Source PDF opened inside the viewer on a viewer-owned blob; no window was created."""
+        dialog = self.source_dialog(page); expect(dialog).to_be_visible(timeout=30000)
+        address = dialog.locator("iframe").get_attribute("src")
+        self.assertTrue(address.startswith("blob:" + self.stack.proxy + "/"), address)
+        self.assertTrue(page.evaluate("url=>KinViewerResource.has(url)", address))
+        self.assertEqual(len(page.context.pages), pages)
+        return dialog, address
+
+    def close_source_dialog(self, page, dialog, address):
+        dialog.get_by_role("button", name="Close").click(); expect(dialog).to_have_count(0)
+        self.assertFalse(page.evaluate("url=>KinViewerResource.has(url)", address))
 
     def assert_preserved(self, worklist, fixture, draft, rows, originals, holder):
         expect(worklist.locator("#findings")).to_have_value(draft)
@@ -135,8 +188,9 @@ class DicomPdfE2E(ViewerLayoutE2E):
         page = self.launch_pdf_viewer(work, [fixture]); display = self.place(page, source)
         self.assertEqual(display, dict(id=display["id"], handler="@ohif/extension-dicom-pdf.sopClassHandlerModule.dicom-pdf",
                                       study=source["study"], series=source["series"], sop=source["sop"]))
-        url = self.object_url(page,expected=self.stack.proxy + source["pdf"]); self.assertEqual(url, self.stack.proxy + source["pdf"])
-        response = page.context.request.get(url); self.assertEqual(response.status, 200)
+        self.object_url(page)
+        response = self.bound_read(page, source); self.assertEqual(response.status, 200)
+        self.assertEqual(self.read_paths(), {source["pdf"]})
         self.assertTrue(response.headers.get("content-type", "").startswith("application/pdf")); self.assertEqual(response.body(), source["payload"])
         pdf = PdfReader(io.BytesIO(response.body())); self.assertEqual(len(pdf.pages), 3)
         self.assertEqual([p.extract_text().strip() for p in pdf.pages], source["labels"])
@@ -149,29 +203,46 @@ class DicomPdfE2E(ViewerLayoutE2E):
         fixture = self.ct("PDF-TWO-" + uuid.uuid4().hex[:12], "current", "20260801")
         first = self.pdf_source(fixture, ["FIRST PDF PAGE 1", "FIRST PDF PAGE 2"], "PDF First")
         second = self.pdf_source(fixture, ["SECOND PDF PAGE 1", "SECOND PDF PAGE 2"], "PDF Second")
-        page = self.launch_pdf_viewer(self.login(), [fixture]); self.grid(page, 2)
-        self.place(page, first, 0); self.place(page, second, 1)
-        self.object_url(page, 0, self.stack.proxy + first["pdf"])
-        self.object_url(page, 1, self.stack.proxy + second["pdf"])
+        work = self.login()
+        # Which bytes each cell shows: the Blob behind each object URL the viewer makes (test-owned record, read in the
+        # page; the viewer's CSP has no connect-src for blob: URLs).
+        work.context.add_init_script("""(()=>{const make=URL.createObjectURL;window.__kinTestBlobs=new Map();
+          URL.createObjectURL=function(value){const url=make.call(this,value);if(value instanceof Blob)__kinTestBlobs.set(url,value);return url;};})();""")
+        page = self.launch_pdf_viewer(work, [fixture]); self.grid(page, 2)
+        # A new empty cell is filled by the viewer itself with a series not yet shown - here one of the two PDFs - and a
+        # PDF cell reads its document before it shows it. So the reads are those of this study's two documents (never
+        # another), and each cell is checked by the bytes it shows, not by the order of the reads.
+        self.place(page, first, 0); first_url = self.object_url(page, 0)
+        self.assertIn(first["pdf"], self.read_paths()); self.assertLessEqual(self.read_paths(), {first["pdf"], second["pdf"]})
+        self.assertEqual(self.bound_read(page, first).body(), first["payload"])
+        self.place(page, second, 1); second_url = self.object_url(page, 1)
+        self.assertEqual(self.read_paths(), {first["pdf"], second["pdf"]}); self.assertEqual(self.bound_read(page, second).body(), second["payload"])
         page.wait_for_function("()=>document.querySelectorAll('object[type=\"application/pdf\"]').length===2", timeout=60000)
-        urls = page.locator('object[type="application/pdf"]').evaluate_all("nodes=>nodes.map(n=>n.data).sort()")
-        self.assertEqual(urls, sorted([self.stack.proxy + first["pdf"], self.stack.proxy + second["pdf"]]))
-        expect(page.locator("#kin-source-pdf")).to_contain_text("PDF Second")
+        self.assertNotEqual(first_url, second_url); self.assertEqual(self.object_url(page, 0, first_url), first_url)
+        self.assertEqual((self.cell_bytes(page, 0), self.cell_bytes(page, 1)), (first["payload"], second["payload"]),
+                         "each cell shows its own document's bytes")
+        with failure_details(page,"PDF selection failure","() => ({status:document.querySelector('#kin-source-pdf-status')?.textContent,panel:document.querySelector('#kin-source-pdf')?.textContent,activeViewportId:services.viewportGridService.getState().activeViewportId,cells:[...services.viewportGridService.getState().viewports.values()].map(v=>({id:v.viewportId,displaySets:v.displaySetInstanceUIDs}))})"):
+            expect(page.locator("#kin-source-pdf")).to_contain_text("PDF Second")
         page.evaluate("""s=>{const d=services.displaySetService.getActiveDisplaySets().find(x=>x.SOPInstanceUID===s),original=d.pdfUrl;
           window.pdfLate=new Promise(resolve=>window.releasePdfLate=()=>resolve(original));d.pdfUrl=window.pdfLate;}""", first["sop"])
         self.place(page, first, 1); expect(page.locator("#kin-source-pdf")).to_contain_text("PDF First")
         page.wait_for_function("""()=>{const cell=document.querySelectorAll('[data-cy=viewport-grid] > div')[1],object=cell?.querySelector('object[type="application/pdf"]');return object&&!object.data;}""")
-        self.place(page, second, 1)
-        self.assertEqual(self.object_url(page, 1, self.stack.proxy + second["pdf"]), self.stack.proxy + second["pdf"])
+        # A read document retires with the element that showed it: the replaced cell's blob is gone, and showing
+        # the second document again reads it again.
+        page.wait_for_function("url=>!KinViewerResource.has(url)", arg=second_url, timeout=60000)
+        before = len(self.pdf_reads)
+        self.place(page, second, 1); second_url = self.object_url(page, 1)
+        self.assertEqual([urlsplit(item.url).path for item in self.pdf_reads[before:]], [second["pdf"]])
+        self.assertEqual(self.pdf_reads[-1].body(), second["payload"])
         page.evaluate("""()=>{const cell=document.querySelectorAll('[data-cy=viewport-grid] > div')[1];window.pdfObserved=[];window.pdfObserver=new MutationObserver(()=>{const url=cell.querySelector('object[type="application/pdf"]')?.data;if(url)pdfObserved.push(url)});pdfObserver.observe(cell,{subtree:true,childList:true,attributes:true,attributeFilter:['data']});releasePdfLate();}""")
         page.wait_for_timeout(250)
         expect(page.locator("#kin-source-pdf")).to_contain_text("PDF Second")
-        self.assertEqual(self.object_url(page, 1), self.stack.proxy + second["pdf"])
-        self.assertTrue(all(url==self.stack.proxy+second['pdf'] for url in page.evaluate('pdfObserved')))
+        self.assertEqual(self.object_url(page, 1), second_url)
+        self.assertTrue(all(url==second_url for url in page.evaluate('pdfObserved')))
         page.evaluate('pdfObserver.disconnect()')
         self.shot(page,"source-pdf-two-cells")
 
-    def test_pdf_03_blank_popup_access_sequence_stale_and_denied_sop_splice(self):
+    def test_pdf_03_in_viewer_document_access_sequence_stale_and_denied_sop_splice(self):
         fixture = self.ct("PDF-OPEN-" + uuid.uuid4().hex[:12], "current", "20260801")
         source = self.pdf_source(fixture, ["OPEN PDF PAGE 1", "OPEN PDF PAGE 2"], "PDF Explicit Open")
         denied_fixture = self.fixture(institution="KIN 판독센터", patient_id="PDF-DENIED-" + uuid.uuid4().hex[:12])
@@ -182,42 +253,49 @@ class DicomPdfE2E(ViewerLayoutE2E):
         expect(page.locator("#kin-source-pdf-open")).to_be_enabled(); held = []; requests = []
         def observe(request):
             path = urlsplit(request.url).path
-            if path in ("/api/me", "/api/dicom/lookup", "/api/studies") or path==source["pdf"] and request.headers.get('x-kin-csrf')=='1':
+            if path in ("/api/me", "/api/dicom/lookup", "/api/studies", source["pdf"]):
                 requests.append((request.method, path, request.post_data_json if request.method == "POST" else None))
-        native_url = self.object_url(page, expected=self.stack.proxy + source["pdf"])
+        native_url = self.object_url(page); pages = len(page.context.pages)
         page.on("request", observe)
         page.route("**/api/me", lambda route: held.append(route) if not held else route.continue_())
-        with page.context.expect_page() as opened, page.expect_request(
-                lambda request: request.method == "GET" and urlsplit(request.url).path == "/api/me") as first_me:
+        with page.expect_request(lambda request: request.method == "GET" and urlsplit(request.url).path == "/api/me") as first_me:
             page.locator("#kin-source-pdf-open").click()
-        self.assertEqual(urlsplit(first_me.value.url).path, "/api/me"); self.assertEqual(len(held), 1)
-        popup = opened.value; self.assertEqual(urlsplit(popup.url).scheme, "about"); self.assertTrue(popup.evaluate("opener===null"))
-        held[0].fulfill(response=held[0].fetch()); popup.wait_for_url("**" + source["pdf"], timeout=30000)
-        self.assertEqual(popup.url, self.stack.proxy + source["pdf"])
-        self.assertEqual(requests[:5], [("GET", "/api/me", None),
+        self.assertEqual(urlsplit(first_me.value.url).path, "/api/me")
+        self.wait_until(page, lambda: len(held) == 1, "The first account check of the explicit open was not held")
+        # Nothing is shown and no window exists until the account, the source and the patient were checked.
+        expect(self.source_dialog(page)).to_have_count(0); self.assertEqual(len(page.context.pages), pages)
+        held[0].fulfill(response=held[0].fetch())
+        dialog, address = self.assert_source_dialog(page, pages)
+        expected = [("GET", "/api/me", None),
             ("POST", "/api/dicom/lookup", {"studyUid": source["study"], "sopUid": source["sop"]}),
-            ("GET", "/api/studies", None), ("GET", source["pdf"], None), ("GET", "/api/me", None)])
+            ("GET", "/api/studies", None), ("GET", source["pdf"], None), ("GET", "/api/me", None)]
+        self.assertEqual(requests,expected)
+        self.assertEqual(self.bound_read(page, source).body(), source["payload"])
         expect(page.locator("#kin-source-pdf [data-patient]")).to_have_text("Verified Patient ID: " + fixture.patient_id)
-        self.assertEqual(self.object_url(page), native_url); popup.close(); page.unroute("**/api/me")
-        # A source replacement while lookup is held closes the already-created blank window.
+        self.assertEqual(self.object_url(page), native_url); self.assertNotEqual(address, native_url)
+        self.close_source_dialog(page, dialog, address); page.unroute("**/api/me")
+        # A source replacement while lookup is held shows nothing: the answer belongs to a document no longer selected.
         waiting = []; page.route("**/api/dicom/lookup", lambda route: waiting.append(route))
-        with page.context.expect_page() as stale_opened, page.expect_request("**/api/dicom/lookup"):
+        with page.expect_request("**/api/dicom/lookup"):
             page.locator("#kin-source-pdf-open").click()
-        stale = stale_opened.value; self.assertEqual(len(waiting), 1)
+        self.wait_until(page, lambda: len(waiting) == 1, "The lookup of the explicit open was not held")
         ct = page.evaluate("""()=>services.displaySetService.getActiveDisplaySets().find(d=>d.SOPClassHandlerId==='@ohif/extension-default.sopClassHandlerModule.stack').displaySetInstanceUID""")
         page.evaluate("""id=>{const g=services.viewportGridService,v=g.getState().activeViewportId;g.setDisplaySetsForViewport({viewportId:v,displaySetInstanceUIDs:[id]});}""", ct)
-        waiting[0].fulfill(response=waiting[0].fetch()); expect(page.locator("#kin-source-pdf")).to_be_hidden(); self.assertTrue(stale.is_closed())
-        page.unroute("**/api/dicom/lookup"); self.place(page, source)
+        waiting[0].fulfill(response=waiting[0].fetch()); expect(page.locator("#kin-source-pdf")).to_be_hidden()
+        expect(self.source_dialog(page)).to_have_count(0); self.assertEqual(len(page.context.pages), pages)
+        page.unroute("**/api/dicom/lookup"); self.place(page, source); expect(page.locator("#kin-source-pdf-open")).to_be_enabled()
         page.route("**/api/dicom/lookup", lambda route: route.fulfill(status=denied_reply.status, body=denied_reply.text))
-        with page.context.expect_page() as denied_opened: page.locator("#kin-source-pdf-open").click()
+        page.locator("#kin-source-pdf-open").click()
         expect(page.locator("#kin-source-pdf-status")).to_contain_text("로그인 또는 검사 접근 권한")
-        self.assertTrue(denied_opened.value.is_closed()); page.unroute("**/api/dicom/lookup")
+        expect(self.source_dialog(page)).to_have_count(0); self.assertEqual(len(page.context.pages), pages)
+        page.unroute("**/api/dicom/lookup")
 
     def test_pdf_04_wrong_mime_malformed_bytes_and_failure_guidance(self):
         fixture = self.ct("PDF-FAIL-" + uuid.uuid4().hex[:12], "current", "20260801")
         wrong = self.pdf_source(fixture, ["WRONG MIME"], "PDF Wrong MIME", mime="text/plain")
         malformed = self.pdf_source(fixture, [], "PDF Malformed", payload=b"not a pdf document\n")
-        worklist = self.login(); worklist.context.add_init_script("const pdfNativeOpen=window.open.bind(window);window.pdfBlockPopup=true;window.open=(...args)=>window.pdfBlockPopup?null:pdfNativeOpen(...args)")
+        # The source opens inside the viewer, so a browser that refuses new windows changes nothing; a call would be counted.
+        worklist = self.login(); worklist.context.add_init_script("window.pdfWindowCalls=0;window.open=()=>{window.pdfWindowCalls++;return null}")
         page = self.launch_pdf_viewer(worklist, [fixture]); self.place(page, wrong)
         expect(page.locator("#kin-source-pdf")).to_be_visible()
         expect(page.locator("#kin-source-pdf [data-title]")).to_be_empty()
@@ -226,8 +304,12 @@ class DicomPdfE2E(ViewerLayoutE2E):
         expect(page.locator("#kin-source-pdf-status")).to_have_text(
             "선택한 원본 PDF를 지원하지 않거나 식별 정보가 일치하지 않습니다.")
         expect(page.locator("#kin-source-pdf-open")).to_be_disabled()
-        self.place(page, malformed); expect(page.locator("#kin-source-pdf-open")).to_be_enabled()
-        response = page.context.request.get(self.stack.proxy + malformed["pdf"])
+        self.place(page, malformed)
+        with failure_details(page,"PDF malformed-source failure","() => ({status:document.querySelector('#kin-source-pdf-status')?.textContent,panel:document.querySelector('#kin-source-pdf')?.textContent,activeViewportId:services.viewportGridService.getState().activeViewportId,cells:[...services.viewportGridService.getState().viewports.values()].map(v=>({id:v.viewportId,displaySets:v.displaySetInstanceUIDs}))})"):
+            expect(page.locator("#kin-source-pdf-open")).to_be_enabled()
+        # Core 1.12.5 returns malformed bytes as PDF. Native browser error controls
+        # are not asserted here; the MIME check of the read does not validate PDF syntax.
+        response = self.bound_read(page, malformed)
         self.assertEqual(response.status,200); self.assertTrue(response.headers.get('content-type','').startswith('application/pdf'))
         self.assertEqual(response.body(), malformed['payload'])
         lookup=self.stack.request('POST','/dicom/lookup','doctor',{'studyUid':fixture.uid,'sopUid':malformed['sop']})
@@ -235,15 +317,13 @@ class DicomPdfE2E(ViewerLayoutE2E):
         stored=pydicom.dcmread(io.BytesIO(self.stack.orthanc_bytes('/instances/'+lookup.body['id']+'/file')))
         self.assertEqual(stored.EncapsulatedDocument,malformed['payload'])
         with self.assertRaises(Exception): PdfReader(io.BytesIO(stored.EncapsulatedDocument))
+        pages = len(page.context.pages); before = len(self.pdf_reads)
         page.locator("#kin-source-pdf-open").click()
-        expect(page.locator("#kin-source-pdf-status")).to_contain_text("팝업이 차단")
-        page.evaluate('pdfBlockPopup=false')
-        with page.context.expect_page() as corrupt_opened: page.locator('#kin-source-pdf-open').click()
-        corrupt_opened.value.wait_for_url('**' + malformed['pdf'], timeout=30000)
-        # Core 1.12.5 returns malformed bytes as PDF. Native browser error controls
-        # are not asserted here; MIME preflight does not validate PDF syntax.
-        self.assertEqual(corrupt_opened.value.url, self.stack.proxy + malformed['pdf'])
-        corrupt_opened.value.close()
+        dialog, address = self.assert_source_dialog(page, pages)
+        self.assertEqual(page.evaluate("pdfWindowCalls"), 0)
+        self.assertEqual([urlsplit(item.url).path for item in self.pdf_reads[before:]], [malformed["pdf"]])
+        self.assertEqual(self.pdf_reads[-1].body(), malformed["payload"])
+        self.close_source_dialog(page, dialog, address)
         page.evaluate("""s=>{const d=services.displaySetService.getActiveDisplaySets().find(x=>x.SOPInstanceUID===s);d.pdfUrl=Promise.reject(Error('원본 PDF 경로를 확인할 수 없습니다.'));}""", malformed["sop"])
         ct = page.evaluate("""()=>services.displaySetService.getActiveDisplaySets().find(d=>d.SOPClassHandlerId==='@ohif/extension-default.sopClassHandlerModule.stack').displaySetInstanceUID""")
         page.evaluate("""id=>{const g=services.viewportGridService,v=g.getState().activeViewportId;g.setDisplaySetsForViewport({viewportId:v,displaySetInstanceUIDs:[id]});}""", ct)

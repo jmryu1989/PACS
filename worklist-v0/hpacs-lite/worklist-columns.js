@@ -52,6 +52,7 @@
     return part.order.filter(k => !part.hidden.includes(k)).map(k => columns[mode].find(c => c.k === k));
   }
   function mount({ columns, session, mode, changed }) {
+    const work=root.KinWorkContext,transport=root.KinSessionTransport.page();
     const owner = key(session);
     let storage;
     try { storage = localStorage; } catch (_) {}
@@ -202,38 +203,33 @@
     function refreshServer() {
       for (const action of ['inspect','load','save','clear']) $('server-' + action).disabled = ended || !identity || serverBusy || (['save','clear'].includes(action) && serverRevision === null);
     }
+    let interruptedAction = null;
     async function server(action) {
+      if(work.state()!=='active')return;const at=work.capture('document');
       if (ended || !identity || serverBusy || !dialog.open || (['save','clear'].includes(action) && serverRevision === null)) return;
       if (action === 'load' && !mayLeave()) return;
       if (action === 'clear' && !confirm('계정에 저장된 열 설정만 지울까요? 현재 목록과 브라우저 저장값은 유지합니다.')) return;
       const before = generation, snapshot = action === 'save' ? normalize(draft, columns) : null;
       if (action === 'save' && !snapshot) { $('server-status').textContent = '편집 중인 열 설정 형식이 잘못되었습니다. 다시 불러오거나 기본값으로 설정하세요.'; return; }
-      serverBusy = true; refreshServer(); $('server-status').textContent = '계정 설정 확인 중…';
-      request = new AbortController(); const signal = request.signal, timer = setTimeout(() => request?.abort(), 10000);
+      interruptedAction = action; serverBusy = true; refreshServer(); $('server-status').textContent = '계정 설정 확인 중…';
+      const local = request = new AbortController(); const signal = local.signal, timer = setTimeout(() => local.abort(), 10000);
       const active = () => !ended && dialog.open && !signal.aborted;
       try {
         const method = action === 'save' ? 'PUT' : action === 'clear' ? 'DELETE' : 'GET';
         const body = method === 'GET' ? undefined : { expectedOwner: identity, revision: serverRevision, ...(action === 'save' ? { columns: snapshot } : {}) };
-        const r = await fetch('/api/worklist-columns', { method, credentials: 'same-origin', cache: 'no-store',
+        const r = await transport.request('/api/worklist-columns', { context:at, method, credentials: 'same-origin', cache: 'no-store',
           headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' }, body: body && JSON.stringify(body), signal });
         if (!active()) return;
-        if (r.status === 401 || r.status === 403) { stop(); return; }
         if (!r.ok) {
-          serverRevision = null;
-          const data = await r.json().catch(() => null); if (!active()) return;
-          if (data?.code === 'COLUMNS_OWNER_CHANGED') { stop(); return; }
+          const data = r.body; if (!active()) return;
+          if (data?.code === 'COLUMNS_OWNER_CHANGED') throw new Error('session-unavailable');
           throw new Error(r.status === 409 ? 'conflict' : r.status === 400 ? 'invalid-settings' : 'save-failed');
         }
-        const data = await r.json(); if (!active()) return;
-        if (JSON.stringify(data.owner) !== JSON.stringify(identity)) { stop(); return; }
+        const data = r.body; if (!active()) return;
+        if (JSON.stringify(data?.owner) !== JSON.stringify(identity)) throw new Error('format');
         if (!Number.isInteger(data.revision) || data.revision < 0 || data.revision > 2147483647 ||
             (data.columns !== null && !normalize(data.columns, columns))) throw new Error('format');
-        const me = await fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', signal });
-        if (!active()) return;
-        if (me.status === 401 || me.status === 403) { stop(); return; }
-        if (!me.ok) throw new Error('session-unavailable');
-        const current = await me.json(); if (!active()) return;
-        if (current.kind !== 'member' || JSON.stringify([current.institution, current.sub]) !== JSON.stringify(identity)) { stop(); return; }
+        work.commit(at,()=>{
         if (action === 'load' && generation !== before) {
           $('server-status').textContent = '응답을 기다리는 동안 편집값이 바뀌어 불러오지 않았습니다. 다시 불러오세요.'; return;
         }
@@ -245,8 +241,9 @@
           $('server-status').textContent = generation === before ? '편집값을 계정에 저장했습니다. 목록 반영은 아래 적용 버튼을 누르세요.' : '요청 당시 편집값을 계정에 저장했습니다. 이후 편집은 아직 저장되지 않았습니다.';
         } else if (action === 'clear') $('server-status').textContent = '계정 저장값을 지웠습니다. 현재 목록·편집값·브라우저 저장값은 유지합니다.';
         else $('server-status').textContent = data.columns ? '계정에 저장된 열 설정이 있습니다.' : '계정에 저장된 열 설정이 없습니다. 현재 편집값은 유지합니다.';
+        });
       } catch (error) {
-        serverRevision = null;
+        work.commit(at,()=>{serverRevision = null;
         if (!ended && dialog.open) {
           const messages = {
             conflict: '다른 창에서 계정 설정이 변경됐습니다. 편집 내용은 유지했습니다. 저장 상태를 확인한 뒤 다시 시도하세요.',
@@ -256,13 +253,15 @@
           };
           $('server-status').textContent = messages[error?.message] || '계정 설정 응답을 확인할 수 없습니다. 편집 내용은 유지했습니다. 쓰기는 완료됐을 수 있으니 계정 설정을 불러와 확인하세요.';
         }
-      } finally { clearTimeout(timer); request = null; serverBusy = false; refreshServer(); }
+        });
+      } finally { clearTimeout(timer); if(request===local){request = null; serverBusy = false;} work.commit(at,()=>{interruptedAction=null;refreshServer();}); }
     }
     for (const action of ['inspect','load','save','clear']) $('server-' + action).addEventListener('click', () => server(action));
-    window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') stop(); });
-    let channel;
-    try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', e => { if (e.data?.type === 'session-ended') stop(); }); } catch (_) {}
-    window.addEventListener('pagehide', () => { stop(); channel?.close(); }, { once: true });
+    work.onInvalidate(event=>{
+      if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))stop();
+      if(event.reason==='cancel'){const action=interruptedAction;interruptedAction=null;request=null;serverBusy=false;refreshServer();if(action&&dialog.open)server(action==='load'?'load':'inspect');}
+    });
+    window.addEventListener('pagehide',stop,{once:true});
     window.addEventListener('beforeunload', e => { if (dialog.open && dirty()) { e.preventDefault(); e.returnValue = ''; } });
     document.querySelector('#columnsettings').addEventListener('click', () => {
       if (ended || dialog.open) return;

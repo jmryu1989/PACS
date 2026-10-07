@@ -4,6 +4,7 @@ import sys, unittest, csv, io, math
 from unittest.mock import patch
 import test_viewer_history as history
 from test_measurement_readback import MeasurementReadbackE2E, expect
+from viewer_session import end_viewer
 
 
 def numeric_values(value):
@@ -132,18 +133,17 @@ class MeasurementPanelE2E(MeasurementReadbackE2E):
         self.assertEqual(result['report']['Modality'], 'SR')
         expected = math.dist(*p.evaluate('()=>panelAnnotation.data.handles.points'))
         self.assertTrue(any(abs(value-expected)<.001 for value in numeric_values(result['report'])))
-        p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:'test'}))")
+        p.evaluate("()=>window.endedSrCommands=Object.fromEntries(['downloadReport','storeMeasurements'].map(name=>[name,__d05c1.commands.getCommand(name,'CORNERSTONE_STRUCTURED_REPORT')]))")
+        p=end_viewer(p)
         self.assertEqual(p.evaluate('()=>panelReport().values'), ['재확인 필요'])
         for command in ['downloadReport', 'storeMeasurements']:
-            result = self.sr(p, command)
+            result = p.evaluate('''async name=>{try{return {report:await endedSrCommands[name].commandFn({measurementData:panelCaptured})};}catch(error){return {error:error.message};}}''',command)
             self.assertNotIn('report', result, result)
             self.assertIn('다시 로그인한 뒤 뷰어를 여세요', result['error'])
+        p.assert_quiet()
         self.assertTrue(p.evaluate('''()=>{
-            const plugin=window.config.extensions.find(e=>e.id==='kin.viewer-history');
-            const before=__d05c1.commands.getCommand('storeMeasurements','CORNERSTONE_STRUCTURED_REPORT');
-            plugin.onModeExit();
             return __d05c1.services.measurementService.getMeasurements===__d05c1.originalMeasurements &&
-                __d05c1.commands.getCommand('storeMeasurements','CORNERSTONE_STRUCTURED_REPORT')!==before;
+                __d05c1.commands.getCommand('storeMeasurements','CORNERSTONE_STRUCTURED_REPORT')!==endedSrCommands.storeMeasurements;
         }'''))
 
     def test_04_mixed_tools_and_missing_display_set(self):

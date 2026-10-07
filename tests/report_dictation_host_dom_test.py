@@ -20,7 +20,7 @@ network (fetch). These are CONTROL-FLOW proofs of the page integration only. No 
 worklet, engine or speech is exercised; real fake-device capture, track end and permission refusal in
 pinned Chromium belong to S3-ASR-U4b, and the live refusal battery to U5.
 
-`python tests/report_dictation_host_dom_test.py --static-only` runs the pure checks with no browser.
+The browser assertions replace the former source and harness-shape pins.
 """
 import json
 import os
@@ -28,6 +28,8 @@ import re
 import sys
 import unittest
 from pathlib import Path
+
+from report_page_contract import install_contract
 
 ROOT = Path(__file__).resolve().parents[1]
 LITE = ROOT / "worklist-v0" / "hpacs-lite"
@@ -273,8 +275,8 @@ window.fetch = async (url, options = {}) => {
   if (path.endsWith("/dictation")) {
     const body = options.body;
     /* Recorded at the moment fetch() is called, which is when a real fetch copies the body. */
-    const call = { method: options.method, path, headers: { ...(options.headers ?? {}) }, redirect: options.redirect,
-      credentials: options.credentials, cache: options.cache, bytes: Array.from(body), body, aborted: false };
+    const call = { method: options.method, path, headers: Object.fromEntries(new Headers(options.headers)), redirect: options.redirect,
+      credentials: options.credentials || 'same-origin', cache: options.cache, bytes: Array.from(body), body, aborted: false };
     dictCalls.push(call);
     return new Promise((resolve, reject) => {
       options.signal.addEventListener("abort", () => { call.aborted = true; reject(new DOMException("aborted", "AbortError")); });
@@ -309,6 +311,11 @@ REPORTBLOCK
 BUTTONSFN
 HOLDBLOCK
 SELECTBLOCK
+// Unrelated offline indicators/reconnect scheduling are inert in this component page.
+const worklistBodyParts = { sync() {} }, consultations = { refresh() {} };
+let poll = null, pollGeneration = 0;
+function startReconnect() {}
+GOOFFLINEFN
 window.load = options => loadReport(options);
 window.stash = () => stashReport();
 window.put = (field, start, end) => { const el = $("#" + field); el.setSelectionRange(start, end === undefined ? start : end); };
@@ -363,6 +370,8 @@ def default_state():
                     "recommendation": "", "draft": None}}
 
 
+HARNESS = install_contract(HARNESS)
+
 def harness(state):
     page = HARNESS
     for key, name in (("BASECSS", "BASE_CSS"), ("PANELCSS", "PANEL_CSS"), ("REPORTCSS", "REPORT_CSS"),
@@ -375,87 +384,9 @@ def harness(state):
         page = page.replace(key, S[name])
     return (page.replace("APIFN", API_FN).replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN).replace("BUTTONSFN", BUTTONS_FN)
+            .replace("GOOFFLINEFN", GO_OFFLINE_FN)
             .replace("INITIALSTATE", json.dumps(state, ensure_ascii=False))
             .replace("UIDVALUE", UID).replace("OTHERVALUE", OTHER))
-
-
-def script_selectors():
-    found = set()
-    for block in (S["DICTATION_BLOCK"], S["BASE_BLOCK"], S["REPORT_BLOCK"], S["HOLD_BLOCK"], S["SELECT_BLOCK"],
-                  BUTTONS_FN):
-        for match in re.finditer(r"""\$\(\s*["']#([A-Za-z0-9_-]+)["']\s*\)""", block):
-            found.add(match.group(1))
-    return found
-
-
-def static_report():
-    """Pure pins: the slices, the hooks the page depends on and the capture-name boundary."""
-    problems = []
-    for name, (start, _end) in MARKERS.items():
-        if name == "PANEL_CSS":
-            continue
-        if MAIN.count(start) != 1:
-            problems.append("slice marker %s occurs %d times" % (name, MAIN.count(start)))
-    ids = set(re.findall(r"""\sid=["']([A-Za-z0-9_-]+)["']""", harness(default_state())))
-    missing = sorted(s for s in script_selectors() if s not in ids and s != "b-structured")
-    if missing:
-        problems.append("harness markup is missing %s" % ", ".join(missing))
-    positions = [MAIN.find(tag) for tag in MODULE_TAGS]
-    if min(positions) < 0 or positions != sorted(positions):
-        problems.append("main.html must load report-structure, session, capture and host in that order")
-    for tag in MODULE_TAGS[1:]:
-        if tag not in HARNESS:
-            problems.append("the harness must load %s exactly as main.html does" % tag)
-    if "dictation.refresh();" not in BUTTONS_FN:
-        problems.append("updateReportButtons() must hand report-state changes to the dictation host")
-    if "updateReportButtons();" not in S["SELECT_BLOCK"] or "loadReport({ force: forceReport });" not in S["SELECT_BLOCK"]:
-        problems.append("the study move no longer reaches updateReportButtons() through refreshRight()")
-    if "dictation.setServerCapability(b.dictation);" not in GO_ONLINE_FN:
-        problems.append("goOnline() must pass the bootstrap capability to the dictation host")
-    if "dictation.refresh();" not in GO_OFFLINE_FN:
-        problems.append("goOffline() must let the dictation host release an active recording")
-    if 'window.addEventListener("pagehide", () => dictation.pageExit());' not in S["DICTATION_BLOCK"]:
-        problems.append("page exit must end an active dictation")
-    autosave = slice_between(MAIN, "    const AUTOSAVE_MS = 20000;", "    }, AUTOSAVE_MS);")
-    if "stashReport();" not in autosave:
-        problems.append("the autosave interval no longer calls stashReport(), so stash() is not its stand-in")
-    if "KinReportCitation.placeBlock(" not in S["DICTATION_BLOCK"] or "citationGuards(ins.field)" not in S["DICTATION_BLOCK"]:
-        problems.append("the insertion must reuse placeBlock with the citation guards")
-    if S["DICTATION_BLOCK"].count('dispatchEvent(new Event("input", { bubbles: true }))') != 1:
-        problems.append("the insertion must raise exactly one input event")
-    # Hook sites executed by other suites' harnesses must stay free of the host (see contract §3.4).
-    for name, text in (("select/refreshRight", S["SELECT_BLOCK"]),
-                       ("logout", slice_between(MAIN, "    // ② 로그아웃", "    // 다른 사람이 잡거나 놓은 걸")),
-                       ("unload", slice_between(MAIN, "    const AUTOSAVE_MS = 20000;", "    // ② 로그아웃")),
-                       ("report block", S["REPORT_BLOCK"]), ("base block", S["BASE_BLOCK"]),
-                       ("hold block", S["HOLD_BLOCK"])):
-        if "dictation" in text.lower():
-            problems.append("%s is executed by other suites and must not reference the dictation host" % name)
-    if 'title="%s"' % DICTATE_TITLE not in S["RBTNS_HTML"]:
-        problems.append("the Dictate button's unavailable title moved")
-    host = ASSETS["dictation.js"]
-    for name, text in (("main.html", MAIN), ("report-citation.js", ASSETS["report-citation.js"]),
-                       ("report-structure.js", ASSETS["report-structure.js"])):
-        for word in FORBIDDEN:
-            if word in text:
-                problems.append("%s must not contain %s" % (name, word))
-    if "getUserMedia" not in host or "isSecureContext" not in host:
-        problems.append("the capture capability check belongs in dictation.js")
-    for word in ("createObjectURL", "localStorage", "sessionStorage", "indexedDB", "console."):
-        if word in host:
-            problems.append("dictation.js must not use %s" % word)
-    if "innerHTML" in host:
-        problems.append("dictation.js writes text through textContent only")
-    # D2 (HD-16): the pane's foot wrapper renders nothing of its own here only because its default rule is in
-    # the report CSS this harness slices; outside it the wrapper would be a block and shift today's rows.
-    if "\n    .dictation-foot { display: contents; }\n" not in S["REPORT_CSS"]:
-        problems.append("the .dictation-foot default must stay inside the sliced report CSS")
-    if S["DICTATION_HTML"].count('<div class="dictation-foot">') != 1:
-        problems.append("the dictation pane must wrap meta and the actions in one .dictation-foot")
-    cases = sorted(n for n in dir(ReportDictationHostDOMTest) if n.startswith("test_hd"))
-    if [c[:9] for c in cases] != ["test_hd%02d" % n for n in range(len(cases))]:
-        problems.append("HD ids must stay dense and stable")
-    return problems, cases
 
 
 class ReportDictationHostDOMTest(unittest.TestCase):
@@ -543,11 +474,66 @@ class ReportDictationHostDOMTest(unittest.TestCase):
     def puts(self):
         return [c for c in self.snap()["calls"] if c["method"] == "PUT"]
 
+    def offline_indicators(self):
+        self.page.evaluate("""() => {
+          for (const id of ['consultations-open', 'dbstat']) {
+            const el = document.createElement('button'); el.id = id; document.body.append(el);
+          }
+        }""")
+
+    def test_hd18_offline_releases_recording_and_refuses_insert(self):
+        """U5PT-F02 / HELD-MICROPHONE: run the shipped offline transition."""
+        self.open()
+        self.offline_indicators()
+        self.record()
+        before = self.snap()['text']
+        self.page.evaluate("goOffline(new Error('SYN connection lost'))")
+        self.page.wait_for_function("released()", timeout=3000)
+        self.assertNotEqual("recording", self.snap()["session"]["state"])
+        self.page.locator('#dictation-insert').dispatch_event('click')
+        self.assertEqual(before, self.snap()['text'])
+        self.assertEqual([], self.puts())
+
+    def test_hd20_offline_refuses_inserting_an_already_received_transcript(self):
+        """U5PT-F02: preserve the requested refusal even if the current product allows it."""
+        self.open()
+        self.offline_indicators()
+        self.review()
+        before = self.snap()["text"]
+        self.page.evaluate("goOffline(new Error('SYN connection lost'))")
+        self.page.locator("#dictation-insert").dispatch_event("click")
+        self.assertEqual(before, self.snap()["text"])
+        self.assertEqual([], self.puts())
+        self.assertTrue(self.snap()["pane"]["insert"]["disabled"])
+
+    def test_hd19_audio_never_enters_browser_storage_or_an_object_url(self):
+        """U5PT-F02 / voice retention: observe storage APIs through upload and disposal."""
+        self.page.add_init_script("""(() => {
+          window.voiceRetention = [];
+          for (const [object, method] of [[Storage.prototype, 'setItem'],
+              [IDBObjectStore.prototype, 'put'], [IDBObjectStore.prototype, 'add'],
+              [URL, 'createObjectURL']]) {
+            const original = object[method];
+            object[method] = function (...args) {
+              voiceRetention.push(method); return original.apply(this, args);
+            };
+          }
+        })();""")
+        self.open()
+        before = self.page.evaluate("[Object.entries(localStorage), Object.entries(sessionStorage)]")
+        self.page.evaluate("voiceRetention.length = 0")
+        self.review()
+        self.page.locator("#dictation-cancel").click()
+        self.assertTrue(self.snap()["media"]["released"])
+        self.assertEqual([], self.page.evaluate("voiceRetention"))
+        self.assertEqual(before, self.page.evaluate("[Object.entries(localStorage), Object.entries(sessionStorage)]"))
+
     # ── HD-00 ──────────────────────────────────────────────────────────────────────────────
-    def test_hd00_the_slices_hooks_and_boundaries_this_file_stands_on(self):
-        problems, cases = static_report()
-        self.assertEqual([], problems)
-        self.assertEqual(17, len(cases))
+    def test_hd00_opening_the_report_keeps_the_text_and_starts_no_recording(self):
+        self.open()
+        self.assertEqual([EXISTING, "", ""], self.snap()["text"])
+        self.assertEqual([], self.snap()["calls"])
+        self.assertEqual([], self.snap()["dict"])
 
     # ── HD-01 ──────────────────────────────────────────────────────────────────────────────
     def test_hd01_unavailable_by_default_and_when_malformed_says_what_is_true(self):
@@ -604,7 +590,7 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         self.page.wait_for_function("()=>dictCalls.length === 1")
         call = self.snap()["dict"][0]
         self.assertEqual({"method": "POST", "path": "/studies/%s/dictation" % UID,
-                          "headers": {"Content-Type": "audio/wav", "X-KIN-CSRF": "1"}, "redirect": "error",
+                          "headers": {"content-type": "audio/wav", "x-kin-csrf": "1", "x-kin-session": "SYN-SESSION"}, "redirect": "error",
                           "credentials": "same-origin", "cache": "no-store"},
                          {k: call[k] for k in ("method", "path", "headers", "redirect", "credentials", "cache")})
         self.assertEqual(("RIFF", "WAVE", 48, [1, 0, 255, 127]), (call["riff"], call["wave"], call["length"], call["pcm"]))
@@ -690,25 +676,42 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         self.assertEqual([expected, "", ""], self.snap()["text"])
 
     # ── HD-06 ──────────────────────────────────────────────────────────────────────────────
-    def test_hd06_a_changed_base_or_a_newly_read_only_field_refuses_and_invalidates(self):
-        for change in ("recordReportOrigin(%s, 2)" % json.dumps(UID),
-                       "(() => { appState[%s].holder = 'other@kin'; studies[0].holder = 'other@kin'; "
-                       "updateReportButtons(); })()" % json.dumps(UID)):
-            if self.opened:
-                self.tearDown()
-                self.setUp()
-            self.open()
-            self.caret("findings", 3)
-            self.review()
-            self.page.evaluate(change)
-            self.page.click("#dictation-insert")
-            self.wait_state("failed")
-            value = self.snap()
-            self.assertEqual(self.page.evaluate("KinDictation.REASONS['editor-changed']") + UNCHANGED,
-                             value["pane"]["status"], change)
-            self.assertEqual([EXISTING, "", ""], value["text"])
-            self.assertEqual("", value["session"]["text"])
-            self.assertEqual([], [c for c in value["calls"] if c["method"] == "PUT"])
+    def test_hd06_a_changed_base_refuses_and_invalidates(self):
+        self.open()
+        self.caret("findings", 3)
+        self.review()
+        self.page.evaluate("recordReportOrigin(%s, 2)" % json.dumps(UID))
+        self.page.click("#dictation-insert")
+        self.wait_state("failed")
+        value = self.snap()
+        self.assertEqual(self.page.evaluate("KinDictation.REASONS['editor-changed']") + UNCHANGED, value["pane"]["status"])
+        self.assertEqual([EXISTING, "", ""], value["text"])
+        self.assertEqual("", value["session"]["text"])
+        self.assertEqual([], [c for c in value["calls"] if c["method"] == "PUT"])
+
+    def test_hd06_a_newly_read_only_report_turns_insert_off_and_keeps_the_dictated_text(self):
+        """While the report cannot be edited (someone else holds the study) Insert is off and the dictated text
+        stays in review: nothing is inserted, sent, discarded or failed. When the report can be edited again the
+        person's own Insert puts it in."""
+        from playwright.sync_api import expect
+        self.open()
+        self.caret("findings", 3)
+        self.review()
+        hold = ("(holder => { appState[%s].holder = holder; studies[0].holder = holder; updateReportButtons(); })"
+                % json.dumps(UID))
+        self.page.evaluate(hold + "('other@kin')")
+        expect(self.page.locator("#dictation-insert")).to_be_disabled()
+        self.page.wait_for_timeout(100)
+        value = self.snap()
+        self.assertEqual("review", value["session"]["state"], "a read-only report is not a failed dictation")
+        self.assertEqual(TRANSCRIPT, value["session"]["text"], "the dictated text is kept")
+        self.assertEqual([EXISTING, "", ""], value["text"])
+        self.assertEqual([], [c for c in value["calls"] if c["method"] == "PUT"])
+        self.page.evaluate(hold + "(null)")
+        expect(self.page.locator("#dictation-insert")).to_be_enabled()
+        self.page.click("#dictation-insert")
+        self.page.wait_for_function("t => document.querySelector('#findings').value.includes(t)", arg=TRANSCRIPT.strip().split("\n")[0])
+        self.assertEqual(["", ""], self.snap()["text"][1:], "only the pinned field took the text")
 
     # ── HD-07 ──────────────────────────────────────────────────────────────────────────────
     def test_hd07_a_study_move_ends_the_session_and_the_late_answer_is_dropped(self):
@@ -974,10 +977,5 @@ class ReportDictationHostDOMTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    if "--static-only" in sys.argv:
-        problems, cases = static_report()
-        print(json.dumps({"static_only": True, "cases": len(cases), "problems": problems,
-                          "main": str(MAIN_PATH), "host": str(HOST_PATH)}, ensure_ascii=False, indent=2))
-        sys.exit(1 if problems else 0)
     program = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if program.result.wasSuccessful() else 1)

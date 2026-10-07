@@ -6,6 +6,8 @@ import unittest
 from playwright.sync_api import expect
 from test_viewer_opening import ViewerOpeningE2E
 from test_prior_selection import canvas_ready
+from viewer_session import end_document
+from viewer_session import observe_viewer
 
 
 class ViewerWindowsE2E(ViewerOpeningE2E):
@@ -165,8 +167,10 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
         expect(p.locator('#viewer-windows-status')).to_contain_text('창을 닫지 않았습니다')
         self.assertEqual(self.ids(first), [a.uid])
         self.assertEqual(first.evaluate('window.__windowMarker'), 'unverified-kept')
-        first.evaluate("window.kinViewerWindowOwner=window.__realOwner; const c=new BroadcastChannel('kin-session'); c.postMessage({type:'session-ended'}); c.close()")
-        expect(p.locator('#viewer-windows-dialog')).not_to_be_visible()
+        first.evaluate('window.kinViewerWindowOwner=window.__realOwner')
+        ended=observe_viewer(first)
+        end_document(p);ended.ended();ended.assert_quiet()
+        expect(p.locator('#viewer-windows-dialog')).not_to_be_visible();self.assertFalse(p.locator('#viewer-windows-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
         expect(p.locator('#viewer-windows-open')).to_be_disabled()
 
 

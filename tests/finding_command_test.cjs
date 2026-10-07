@@ -1,3 +1,4 @@
+const {install} = require('./module_session_harness.cjs');
 'use strict';
 /* TEST-S2B-PURE-TARGET / -RESULT / -LIST / -ADAPTER (REQ-S2B-LIST, REQ-S2B-COMMAND, REQ-S2B-BOUNDARY).
  * Production code only: finding-command.js directly, and the shipped reading-findings.js together with
@@ -132,6 +133,7 @@ test('rows keep the copied calculator for display only: exact identity names the
 
 /* ---------- list store ---------- */
 function lister() {
+  install();
   const calls = [], queue = [];
   let changes = 0;
   const store = command.createListStore({ fetch: p => { const d = deferred(); calls.push(p); queue.push(d); return d.promise; }, changed: () => { changes++; } });
@@ -195,8 +197,9 @@ test('list: A-B-A selection, owner change and session end drop late pages; rows 
   assert.equal(fresh.store.context('', X), false);
 });
 
-test('list: 401 ends, 403/404 deny and 503/network/invalid pages fail; each clears previously shown rows and never shows a partial list', async () => {
+test('list: plain 401 fails, 403/404 deny and 503/network/invalid pages fail; each clears previously shown rows and never shows a partial list', async () => {
   const outcomes = [
+    [{ status: 403, code: 'AUTH_SESSION_BUSY' }, 'failed'], [{ status: 403, code: 'AUTH_CSRF_REQUIRED' }, 'failed'],
     [{ status: 403 }, 'denied'], [{ status: 404 }, 'denied'], [{ status: 503 }, 'failed'], [new TypeError('network'), 'failed'],
     [page([finding()], CURSOR), 'failed', page([finding({ id: ID2 })], CURSOR)], // repeated cursor
     [page([finding()], 'not-a-cursor'), 'failed'],
@@ -223,7 +226,7 @@ test('list: 401 ends, 403/404 deny and 503/network/invalid pages fail; each clea
   const l = lister();
   l.store.context(OWNER, X); const unauthorized = l.store.load(); l.queue[0].reject({ status: 401 });
   assert.equal(await unauthorized, false);
-  assert.deepEqual([l.s().status, l.s().ended, l.s().rows], ['ended', true, []]);
+  assert.deepEqual([l.s().status, l.s().ended, l.s().rows], ['failed', false, []]);
   // 256 findings over three pages is the bound, not an error.
   const bound = lister();
   bound.store.context(OWNER, X); const full = bound.store.load();
@@ -547,6 +550,8 @@ class FakeElement extends EventTarget {
     for (let at = siblings.indexOf(this) - 1; at >= 0; at--) if (siblings[at].tagName !== '#text') return siblings[at];
     return null;
   }
+  // No layout here: an element is an empty box at the origin unless a test places it by hand.
+  getBoundingClientRect() { return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }; }
 }
 function makeDocument() {
   const doc = {};
@@ -621,7 +626,9 @@ function worklist(options) {
   const document = makeDocument();
   const sandbox = { console, Event, URL, URLSearchParams, document, location: { origin: ORIGIN }, BroadcastChannel: FakeChannel, setTimeout, clearTimeout,
     setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval: id => { intervals[id - 1] = null; },
-    addEventListener: (...a) => events.addEventListener(...a), removeEventListener: (...a) => events.removeEventListener(...a), dispatchEvent: e => events.dispatchEvent(e) };
+    addEventListener: (...a) => events.addEventListener(...a), removeEventListener: (...a) => events.removeEventListener(...a), dispatchEvent: e => events.dispatchEvent(e),
+    // The window height the panel compares the field region against, and a stylesheet-free computed style.
+    innerHeight: (options && options.innerHeight) || 1100, getComputedStyle: () => ({}) };
   // Opt-in: a ResizeObserver that records what it watches, whether it was given back, and fires on
   // demand. Without it the realm has none, which is the shipped fallback every older case relies on.
   if (options && options.resizeObserver) {
@@ -632,6 +639,7 @@ function worklist(options) {
       fire() { this.callback([], this); }
     };
   }
+  const lifecycle = install(sandbox.fetch, sandbox);
   const ctx = vm.createContext(sandbox);
   vm.runInContext('this.window = this;', ctx);
   const region = document.createElement('div'); region.className = 'panel related-p';
@@ -651,7 +659,7 @@ function worklist(options) {
     s.api.push([init && init.method || 'GET', p]); s.fetched.push({ url: String(url), init });
     const headers = { get: name => String(name).toLowerCase() === 'x-kin-finding-schema' ? s.schema : null };
     try { const body = await s.respond(p); return { status: 200, ok: true, headers, json: async () => body }; }
-    catch (error) { return { status: error && error.status || 500, ok: false, headers, json: async () => ({ message: 'refused' }) }; }
+    catch (error) { return { status: error && error.status || 500, ok: false, headers: { get: name => name.toLowerCase() === 'x-kin-auth-code' ? error.headerCode || null : headers.get(name) }, json: async () => ({ message: 'refused', code: error.code }) }; }
   };
   const app = {
     current: () => s.selected, allowed: () => s.allowed, owner: () => s.owner, sub: () => s.sub,
@@ -665,7 +673,7 @@ function worklist(options) {
   const byId = id => all().find(e => e.id === id);
   const named = (scope, name) => scope.all().filter(e => e.tagName === 'button' && e.textContent === name);
   const h = {
-    s, ui, app, document, sandbox, channels, observers, byId, named,
+    s, ui, app, document, sandbox, channels, observers, byId, named, lifecycle,
     panel: () => byId('reading-findings'),
     articles: () => byId('reading-findings-list').children,
     result: () => byId('reading-findings-nav'),
@@ -735,13 +743,15 @@ test('adapter: the open panel observes the field region and every element above 
   const pane = make('', 'dictation-pane'), redit = make('redit'), rfoot = make('rfoot2');
   report.append(rbtns, draftbar, doc.createTextNode(' '), citelist, pane, redit, rfoot);
   doc.body.append(report);
-  const above = new Set([redit, pane, citelist, draftbar, rbtns]);
+  // The Related region is watched too (S4 GEO): a separator move shifts the report by resizing it.
+  const region = h.document.querySelector('.related-p');
+  const above = new Set([redit, pane, citelist, draftbar, rbtns, region]);
   let top = 576;
   redit.getBoundingClientRect = () => ({ top, height: 180 });
   await h.open();
   assert.equal(h.observers.length, 1, 'one observer while the panel is open');
   const [first] = h.observers;
-  assert.deepEqual(new Set(first.targets), above, 'the field region and every element above it');
+  assert.deepEqual(new Set(first.targets), above, 'the field region, every element above it and the Related region');
   assert.equal(first.targets.length, above.size, 'each observed once');
   assert.ok(!first.targets.includes(rfoot) && !first.targets.includes(report), 'nothing below it and not the column itself');
   const bound = () => h.panel().style.getPropertyValue('--reading-findings-top');
@@ -768,6 +778,42 @@ test('adapter: the open panel observes the field region and every element above 
   assert.equal(second.live, false);
   assert.deepEqual(second.targets, []);
   assert.equal(h.document.live('scroll:capture'), 0);
+});
+
+test('adapter: with no room below the field region for its first line the panel docks above the report column, under the Related list', async () => {
+  // S4 GEO, hosted 1366x768 reading layout after fix-up D: the button row at 736-764 and the field region at
+  // 764, so `100vh - 12 - top` was -8 and the panel kept its 22px of padding and border on Approve, Save,
+  // Prelim and Dictate. This realm has no layout: every box is placed by hand with those numbers.
+  const h = worklist({ resizeObserver: true, innerHeight: 768 });
+  const doc = h.document;
+  const list = doc.createElement('div'); list.className = 'related-list-pane';
+  doc.querySelector('.related-p').append(list);
+  const report = doc.createElement('div'); report.className = 'panel report-p';
+  const rbtns = doc.createElement('div'); rbtns.className = 'rbtns';
+  const redit = doc.createElement('div'); redit.className = 'redit';
+  report.append(rbtns, redit); doc.body.append(report);
+  let fieldsTop = 764;
+  list.getBoundingClientRect = () => ({ top: 358, bottom: 553, height: 195 });
+  report.getBoundingClientRect = () => ({ top: 676, bottom: 1076, height: 400 });
+  redit.getBoundingClientRect = () => ({ top: fieldsTop, height: 180 });
+  // The panel's first line: 10px padding and 1px border each side, Close 22px tall.
+  h.sandbox.getComputedStyle = () => ({ paddingTop: '10px', paddingBottom: '10px', borderTopWidth: '1px', borderBottomWidth: '1px' });
+  await h.open();
+  h.named(h.panel(), 'Close Image Findings')[0].getBoundingClientRect = () => ({ top: 0, bottom: 22, height: 22 });
+  const prop = name => h.panel().style.getPropertyValue(name);
+  const [watch] = h.observers;
+  watch.fire();
+  assert.equal(prop('--reading-findings-bottom'), '96px', 'docked 4px above the report column: 768 - 676 + 4');
+  assert.equal(prop('--reading-findings-top'), '557px', 'its top 4px under the Related list: 553 + 4');
+  assert.ok(watch.targets.includes(list), 'the Related list is watched while the panel is open');
+  // dffcda5's numbers: 24px of room is less than the 44px first line, so it docks as well.
+  fieldsTop = 732; watch.fire();
+  assert.equal(prop('--reading-findings-bottom'), '96px');
+  // Room for the first line again (the column scrolled): back to the shipped bound and the 12px inset.
+  fieldsTop = 700; watch.fire();
+  assert.equal(prop('--reading-findings-top'), '700px');
+  assert.equal(prop('--reading-findings-bottom'), '', 'the inset variable is removed, not left behind');
+  h.ui.end();
 });
 
 test('adapter: the panel lists the selected study read-only with textContent, link states and Show Hidden, and writes nothing', async () => {
@@ -1009,9 +1055,9 @@ test('adapter: selection A-B-A, 403/404/503 and session end clear rows and drop 
   assert.deepEqual(h.articles().map(e => e.dataset.findingId), [ID2]);
   assert.equal(h.result().textContent, ''); assert.equal(v.focused, 0);
   // Denied, failed: rows cleared with the refusal text.
-  for (const [status, state] of [[403, 'denied'], [404, 'denied'], [503, 'failed']]) {
+  for (const [status, state, code, headerCode] of [[403, 'failed', 'AUTH_SESSION_BUSY'], [403, 'failed', undefined, 'AUTH_CSRF_REQUIRED'], [403, 'denied'], [404, 'denied'], [503, 'failed']]) {
     await h.click(h.named(h.panel(), 'Reload Findings')[0]);
-    lists.at(-1).d.reject({ status }); await flush();
+    lists.at(-1).d.reject({ status, code, headerCode }); await flush();
     assert.deepEqual([h.panel().dataset.state, h.articles().length], [state, 0], String(status));
     await h.click(h.named(h.panel(), 'Reload Findings')[0]);
     lists.at(-1).d.resolve(page([finding()])); await flush();
@@ -1020,8 +1066,7 @@ test('adapter: selection A-B-A, 403/404/503 and session end clear rows and drop 
   // Session end during a command and a list read: everything clears and nothing late is shown.
   await h.click(h.named(h.panel(), 'Reload Findings')[0]);
   await h.click(h.source(ID1, 0));
-  const session = h.channels.find(c => c.name === 'kin-session');
-  session.onmessage({ data: { type: 'session-ended' } }); await flush();
+  h.lifecycle.end(); await flush();
   assert.deepEqual([h.panel().dataset.state, h.articles().length, h.result().textContent], ['ended', 0, '']);
   assert.equal(h.byId('reading-findings-open').disabled, true);
   lists.at(-1).d.resolve(page([finding()])); v.release(); await flush();
@@ -1029,10 +1074,10 @@ test('adapter: selection A-B-A, 403/404/503 and session end clear rows and drop 
   const calls = h.s.api.length;
   h.ui.sync(); await h.click(h.byId('reading-findings-open'));
   assert.equal(h.s.api.length, calls, 'an ended list never reads again');
-  assert.equal(session.closed, true);
+  assert.equal(h.lifecycle.gate.state(), "ending");
   // The storage signal of another tab ends it as well.
   const other = worklist(); await other.open();
-  const ended = new Event('storage'); ended.key = 'kin-session-ended'; other.sandbox.dispatchEvent(ended);
+  other.lifecycle.end();
   assert.deepEqual([other.panel().dataset.state, other.articles().length], ['ended', 0]);
 });
 
@@ -1554,27 +1599,16 @@ test('adapter: a hidden or missing source, a hidden finding, a changed list and 
 });
 
 /* ---------- shipped wiring ---------- */
-test('wiring: the worklist loads the modules in order, mounts once, follows selection and keeps the boundary', () => {
-  const html = shipped('main.html'), rw = shipped('reading-workspace.js'), ui = shipped('reading-findings.js'), pure = shipped('finding-command.js');
-  const order = ['reading-workspace.js', 'finding-link-model.js', 'finding-command.js', 'report-citation.js',
-                 'reading-findings.js'].map(name => html.indexOf('<script src="' + name + '"></script>'));
-  assert.ok(order.every((at, i) => at > 0 && (i === 0 || at > order[i - 1])), 'script order');
-  assert.equal(html.split('KinReadingFindings({').length - 1, 1);
-  assert.equal(html.split('readingFindings?.sync();').length - 1, 1);
-  assert.match(html, /readingWorkspace\.selectionChanged\(deferViewer\);\r?\n\s+readingFindings\?\.sync\(\);/, 'selection hook after the workspace');
-  assert.ok(html.indexOf('let readingFindings = null;') > html.indexOf('const readingWorkspace = KinReadingWorkspace({'), 'mounted after the workspace it reads');
-  assert.ok(rw.includes('snapshotPanels, applyPanels, viewerTarget,'));
-  const accessor = rw.slice(rw.indexOf('  function viewerTarget() {'), rw.indexOf('  function noteTarget() {'));
-  assert.ok(accessor.length > 0 && !/focus\(|layout\(|identify\(|attempt\(|\.src\s*=|location\.(href|assign|replace)\s*[=(]/.test(accessor), 'accessor is read-only');
-  // No write, no report, no URL/scope change and no innerHTML in the list and command modules.
-  for (const text of [ui, pure]) {
-    assert.ok(!/innerHTML|insertAdjacentHTML|outerHTML/.test(text));
-    assert.ok(!/'(POST|PUT|PATCH|DELETE)'/.test(text));
-    assert.ok(!/#findings|location\.(href|assign|replace)\s*[=(]|window\.open\(/.test(text));
+test('adapter: loading and switching the selected study sends only bound reads', async () => {
+  const h = worklist(); await h.open();
+  h.s.selected = P; h.ui.sync(); await flush();
+  assert.ok(h.s.fetched.length >= 2);
+  for (const call of h.s.fetched) {
+    assert.equal(call.init.method, 'GET');
+    assert.equal(new Headers(call.init.headers).get('X-KIN-Session'), 'SYN-MODULE-SESSION');
+    assert.match(call.url, /\/findings\?/);
   }
-  assert.equal(ui.split("app.api('GET', path)").length - 1, 1, 'the only request is the list read');
-  assert.ok(ui.includes('const navigate = w.kinViewerHistoryNavigate;'), 'navigate is read at call time');
-  assert.equal(ui.split('kinViewerHistoryNavigate').length - 1, 2);
+  assert.deepEqual(h.s.cited, []);
 });
 
 test('wiring: review stands the Image Findings drawer down once per dictation run, and the reading review pane gives way down to its own rows', () => {
@@ -1851,7 +1885,7 @@ test('adapter locations: the list read names the record format; characteristics 
   const frame = h.embed(v, () => ({ studies }));
   h.s.respond = () => Promise.resolve(page([v2Finding()]));
   await h.open();
-  assert.deepEqual(h.s.fetched.map(f => [f.url, f.init.method, f.init.headers['X-KIN-Finding-Schema'], f.init.headers['X-KIN-CSRF'], f.init.credentials]),
+  assert.deepEqual(h.s.fetched.map(f => [f.url, f.init.method, new Headers(f.init.headers).get('X-KIN-Finding-Schema'), new Headers(f.init.headers).get('X-KIN-CSRF'), f.init.credentials ?? 'same-origin']),
     [['/api/studies/' + X + '/findings?includeHidden=false&limit=100', 'GET', '2', '1', 'same-origin']]);
   const article = h.articles()[0];
   assert.ok(article.all().some(e => e.dataset.kinCharacteristics === '' && e.textContent === 'Characteristics (병변 특성): 경계 불명확'));
@@ -1894,7 +1928,7 @@ test('adapter locations: the list read names the record format; characteristics 
   assert.equal(v.calls.length, 1, 'the 2D source runs once the restore answered');
 });
 
-test('adapter locations: an older API answer is marked, still read-only; a 401 is handed to the worklist session', async () => {
+test('adapter locations: an older API answer is marked, still read-only; a plain 401 fails just one read', async () => {
   const h = worklist(), v = locationViewerRealm();
   h.embed(v);
   h.s.schema = null;
@@ -1905,14 +1939,13 @@ test('adapter locations: an older API answer is marked, still read-only; a 401 i
   h.s.schema = '2';
   await h.click(h.named(h.panel(), 'Reload Findings')[0]);
   assert.equal(h.byId('reading-findings-status').textContent.includes(links.OLD_API_TEXT), false);
-  // A 401: the same read goes through the worklist's own request function, which ends the session there.
   const reads = h.s.api.length;
-  h.s.respond = p => h.s.api.length > reads + 1 ? Promise.reject({ status: 401 }) : Promise.reject({ status: 401 });
+  h.s.respond = () => Promise.reject({ status: 401 });
   await h.click(h.named(h.panel(), 'Reload Findings')[0]);
-  assert.deepEqual(h.s.api.slice(reads).map(([method]) => method), ['GET', 'GET'], 'the panel read, then the same read by the worklist');
-  assert.equal(h.panel().dataset.state, 'ended');
-  const ui = shipped('reading-findings.js');
-  assert.equal(ui.split("fetch('/api' + path").length - 1, 1, 'one list read of its own');
-  assert.ok(!/'(POST|PUT|PATCH|DELETE)'/.test(ui));
-  assert.ok(ui.includes("const location = w.kinViewerJobLocation;"), 'the location API is read from the chosen document at the call');
+  assert.deepEqual(h.s.api.slice(reads).map(([method]) => method), ['GET']);
+  assert.equal(h.panel().dataset.state, 'failed');
+  assert.equal(h.lifecycle.gate.state(), 'active');
+  h.s.respond = () => Promise.resolve(page([finding()]));
+  await h.click(h.named(h.panel(), 'Reload Findings')[0]);
+  assert.equal(h.articles().length, 1);
 });

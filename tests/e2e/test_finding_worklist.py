@@ -12,6 +12,7 @@ import test_worklist as base
 import test_finding_navigation as navigation
 from test_viewer_history import expect, literal, synthetic_ct
 from viewer_precision_support import hook
+from viewer_session import end_document, observe_viewer
 
 ACTIVE = "()=>{const s=__d05c1.services;return s.cornerstoneViewportService.getCornerstoneViewport(s.viewportGridService.getActiveViewportId())?.getCurrentImageId?.()||''}"
 SHOWS = "sop=>{const s=__d05c1.services;return !!s.cornerstoneViewportService.getCornerstoneViewport(s.viewportGridService.getActiveViewportId())?.getCurrentImageId?.().includes('/instances/'+sop+'/frames/1')}"
@@ -25,7 +26,6 @@ HELD = "n=>(window.__held||[]).length===n"
 RELEASE_ONE = "()=>{const q=window.__held||[];const next=q.shift();if(!q.length&&window.__unhold)window.__unhold();if(next)next();return !!next}"
 READY = "uid=>{const h=window.kinViewerHistoryState?.();return !!h&&(uid===null?!!h.scope:h.scope===uid)&&!h.suspended&&!h.ended}"
 MODAL = "()=>{const d=document.createElement('dialog');d.id='s2b-modal';d.textContent='S2-B modal';document.body.append(d);d.showModal()}"
-ENDED = "()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}"
 OWNED_TABLES = ('Finding', 'FindingRevision', 'ViewerItem', 'ViewerRevision', 'Report', 'ReportDraft', 'ReportVersion')
 # A counting stub in place of the clipboard: no permission is granted and no OS write happens, so
 # "the shortcut did not fire" becomes observable instead of being inferred from an empty status line.
@@ -396,10 +396,11 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         # Session end during the load: rows and message clear at once and nothing late is shown.
         self.away(p, 2, sops[0]); p.evaluate(HOLD)
         self.go(w, shown['id'], 0); p.wait_for_function(HELD, arg=1)
-        w.evaluate(ENDED)
+        ended=observe_viewer(p)
+        end_document(w);ended.ended()
         expect(panel).to_have_attribute('data-state', 'ended'); expect(panel.locator('article')).to_have_count(0)
         expect(w.locator('#reading-findings-open')).to_be_disabled()
-        self.assertTrue(p.evaluate(RELEASE_ONE)); w.wait_for_timeout(500)
+        self.assertTrue(ended.evaluate(RELEASE_ONE)); ended.assert_quiet(500)
         expect(w.locator('#reading-findings-nav')).to_have_text(''); expect(panel.locator('article')).to_have_count(0)
         self.assertEqual(self.owned_rows(f, prior, other), rows); self.assertEqual(self.hashes(), original)
 

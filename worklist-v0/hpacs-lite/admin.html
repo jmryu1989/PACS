@@ -306,23 +306,15 @@
   </dialog>
 
   <script src="auth.js"></script>
+  <script src="work-context.js"></script>
+  <script src="session-transport.js"></script>
+  <script>KinWorkContext.follow(KinAuth);</script>
   <script src="study-access-admin.js"></script>
   <script>
-    /*
-     * One end for this page's session (Astra S5-U6a-F01/F02). Log out, a 401 from any request of this page (the first
-     * /api/me included, S5-U6a-F05) and another tab's session end all come here and only the first one acts: every
-     * panel's closer empties it and drops its requests in flight before anything is awaited, then the page leaves once.
-     * KinAuth.logout() clears and moves only after POST /auth/logout answers (no time limit), so a panel that waited for
-     * it kept the last session's studies on screen and painted late answers meanwhile. Another tab's end sends no POST:
-     * the session is already gone, and a POST now could end the one that tab has since started. This page's own logout
-     * reaches the channel too (auth.js sends from a new channel object); it finds the session ended and does nothing, so
-     * the move stays the one KinAuth.logout() makes.
-     * Every module of the page takes part (S5-U6a-F03/F04): the members console, Study Access (study-access-admin.js,
-     * attached below: its own requests and dialog) and Gateway Status each register a closer and send their 401 here.
-     */
+    // Every panel closes synchronously with the page gate, before navigation or a network wait.
     const KinConsoleSession = (() => {
       const closers = [];
-      let ended = false, leaving = false;
+      let ended = false, leaving = false, endingHere = false;
 
       function close() {
         if (ended) return false;
@@ -339,16 +331,18 @@
         location.replace(url);
       }
 
-      function endedElsewhere() {
-        if (close()) go("index.html");
+      KinAuth.onEndedElsewhere(() => { if (!endingHere) KinAuth.leave(); });
+      KinWorkContext.onInvalidate(event => {
+        if (event.reason === "lifecycle" && !["active", "preparing"].includes(event.state)) close();
+      });
+      // Detached or forcibly enabled controls must not start work during a delayed/cancelled navigation.
+      for (const type of ["click", "submit", "input", "change", "keydown"]) {
+        document.addEventListener(type, event => {
+          if (!ended) return;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }, true);
       }
-
-      try {
-        const channel = new BroadcastChannel("kin-session");
-        channel.onmessage = event => { if (event.data?.type === "session-ended") endedElsewhere(); };
-      } catch (_) {}
-      // The fallback where BroadcastChannel is missing; auth.js sends both, and both land here idempotently.
-      addEventListener("storage", event => { if (event.key === "kin-session-ended") endedElsewhere(); });
 
       return {
         ended: () => ended,
@@ -357,20 +351,25 @@
           if (ended) closer();
           else closers.push(closer);
         },
-        // Log out and a 401: the screen empties first, then KinAuth.logout() posts once and makes the one move.
+        // Only explicit intent posts logout; transport signals are handled by KinAuth.
         end() {
-          if (!close()) return;
-          leaving = true;
+          if (ended) return;
+          endingHere = true;
           KinAuth.logout();
         },
       };
     })();
-    KinStudyAccessAdmin.attach(KinConsoleSession);
+    KinStudyAccessAdmin.attach(KinConsoleSession, message => {
+      const box = document.querySelector("#message");
+      box.textContent = message;
+      box.classList.add("show");
+    });
   </script>
   <script>
     (() => {
       const API = `${location.origin}/api`;
       const state = { page: 1, pageSize: 25, total: 0, users: [], editing: null, institutions: new Set() };
+      let membersEpoch = 0, membersDenied = false;
       const $ = selector => document.querySelector(selector);
       // What the console says before its first read, put back when the session ends: the last counts belong to it.
       const opening = { pending: $("#pending-badge").textContent, page: $("#page-label").textContent };
@@ -396,28 +395,19 @@
       }
 
       async function request(method, path, body) {
-        const options = { method, headers: { "X-KIN-CSRF": "1" } };
-        if (body !== undefined) {
-          options.headers["Content-Type"] = "application/json";
-          options.body = JSON.stringify(body);
-        }
-        // Nothing leaves this page after its session ended.
         if (KinConsoleSession.ended()) throw new Error("세션이 종료되었습니다");
-        const response = await fetch(API + path, options);
-        // The 401 is judged before the body is read: the page session ends here, for every panel, not after a body.
-        if (response.status === 401) {
-          KinConsoleSession.end();
-          throw new Error("세션이 만료되었습니다");
-        }
-        const payload = await response.json().catch(() => ({}));
-        // The body can outlast the session (S5-U6a-F03): an answer read after the end is dropped here, and each caller
-        // checks again right before it writes, so neither the member list nor a temporary password comes back.
-        if (KinConsoleSession.ended()) throw new Error("세션이 종료되었습니다");
-        if (response.status === 403) {
-          KinConsoleSession.go("main.html");
-          throw new Error("회원 관리 권한이 없습니다");
-        }
-        if (!response.ok) throw new Error(errorText(payload, response.status));
+        if (membersDenied && method !== "GET") throw new Error("회원 정보를 다시 불러오세요.");
+        const epoch = membersEpoch;
+        const context = KinWorkContext.capture("document");
+        let response;
+        try { response = await KinSessionTransport.page().request(API + path, { method, json: body, context }); }
+        catch (error) { if (epoch !== membersEpoch) error.stale = true; throw error; }
+        if (!KinWorkContext.admits(context)) throw new Error("세션이 종료되었습니다");
+        if (epoch !== membersEpoch) throw Object.assign(new Error("이전 조회의 응답입니다"), { stale: true });
+        const payload = response.body;
+        if (!response.ok || response.incomplete) throw Object.assign(new Error(errorText(payload, response.status)), {
+          status: response.status, code: payload && payload.code,
+        });
         return payload;
       }
 
@@ -456,6 +446,11 @@
           warning.textContent = "기관·역할 설정을 확인하세요";
           cell.append(warning);
         }
+        if (user.rosterUnconfirmed) {
+          const note = document.createElement("div");
+          note.textContent = "명부 반영 미확인";
+          cell.append(note);
+        }
         row.append(cell);
       }
 
@@ -480,10 +475,11 @@
       }
 
       function openMembership(user) {
+        if (membersDenied) return;
         // 저장할 필드는 대화상자가 보여 준 값과 비교해 정한다. 제출 때 state.users를 다시 찾으면 그 사이
         // 목록이 새로 읽혔을 때 화면에 없던 값이 기준이 된다.
         state.editing = {
-          id: user.id, approvalState: user.approvalState, institution: (user.institution || "").trim(),
+          id: user.id, version: user.version, approvalState: user.approvalState, institution: (user.institution || "").trim(),
           roles: [...user.roles], unmanaged: unmanagedRoles(user),
         };
         setDialogMessage("#membership-message", "");
@@ -514,9 +510,10 @@
       async function mutate(user, body) {
         setMessage("");
         try {
-          await request("PATCH", `/admin/users/${encodeURIComponent(user.id)}`, body);
+          await request("PATCH", `/admin/users/${encodeURIComponent(user.id)}`, { ...body, version: user.version });
           await loadUsers();
         } catch (error) {
+          if (KinConsoleSession.ended() || error.stale || membersDenied) return;
           setMessage(error.message);
         }
       }
@@ -529,11 +526,13 @@
           if (mode === "temp") showTemporaryPassword(changed.temporaryPassword);
           else setMessage("비밀번호 변경 메일을 보냈습니다.");
         } catch (error) {
+          if (KinConsoleSession.ended() || error.stale || membersDenied) return;
           setMessage(error.message);
         }
       }
 
       function renderUsers() {
+        if (membersDenied) return;
         const body = $("#users");
         body.replaceChildren();
         const visible = state.users.filter(userMatches);
@@ -601,10 +600,14 @@
       }
 
       async function loadUsers() {
+        if (KinConsoleSession.ended()) return;
         setMessage("");
         try {
           const result = await request("GET", `/admin/users?page=${state.page}`);
           if (KinConsoleSession.ended()) return;
+          membersDenied = false;
+          const session = KinAuth.session();
+          $("#actor").textContent = session.displayName || session.user;
           state.page = result.page;
           state.pageSize = result.pageSize;
           state.total = result.total;
@@ -617,7 +620,10 @@
           $("#previous").disabled = state.page <= 1;
           $("#next").disabled = state.page >= pages;
           renderUsers();
+          for (const control of ["#search", "#institution-filter", "#refresh", "#open-create"]) $(control).disabled = false;
         } catch (error) {
+          if (KinConsoleSession.ended() || error.stale) return;
+          if (error.status === 403) { membersDenied = true; closeMembers(); }
           setMessage(error.message);
         }
       }
@@ -668,6 +674,7 @@
           state.page = 1;
           await loadUsers();
         } catch (error) {
+          if (KinConsoleSession.ended() || error.stale || membersDenied) return;
           setDialogMessage("#create-message", error.message);
         }
       });
@@ -708,12 +715,14 @@
       $("#membership-dialog").addEventListener("close", () => { state.editing = null; });
 
       /*
-       * The page session ended (Log out, a 401 on any request of this page, another tab). Runs before anything is awaited
+       * The page session ended (Log out, a confirmed session end, or a matching notice). Runs before anything is awaited
        * (S5-U6a-F03): the members, the institutions they named, the edit in progress, both forms, the search and a
        * temporary password go, every dialog of this console closes and its controls turn off. An answer still out is
        * dropped by request() after its body and again right before its caller writes, so nothing comes back.
        */
       function closeMembers() {
+        membersEpoch++;
+        KinStudyAccessAdmin.close();
         Object.assign(state, { page: 1, total: 0, users: [], editing: null, institutions: new Set() });
         $("#create-dialog").close();
         $("#membership-dialog").close();
@@ -734,26 +743,18 @@
           $(control).disabled = true;
       }
 
-      /*
-       * The console's controls are off in the markup until a session is known to be an approved admin's (S5-U6a-F05):
-       * before that no member read or write can start, and they turn on after the first list read, where the pages are
-       * known and the search has a list to filter. No session is a 401 on /api/me (auth.js answers null without reading
-       * its body): this page's session end like any other 401, so end() runs every closer before the logout is sent and
-       * makes the one move after it; go() is not called as well. A session that ended while /api/me or the first read was
-       * out has already moved this page: nothing starts and nothing turns on after it, and go() keeps that move the only
-       * one. The other refusals (a failed read, pending, demo, no admin role) only move: they do not end the session.
-       */
+      // Bootstrap alone may enter automatically. An absent session starts login; uncertainty goes to the landing.
       async function boot() {
         try { await KinAuth.init(); }
         catch { KinConsoleSession.go("index.html"); return; }
-        if (KinConsoleSession.ended()) return;
+        if (KinConsoleSession.ended()) { KinAuth.leave(); return; }
         const session = KinAuth.session();
-        if (!session) { KinConsoleSession.end(); return; }
+        if (!session) { if (!KinAuth.autoLogin()) KinConsoleSession.go("index.html"); return; }
         if (session.state !== "approved") { KinConsoleSession.go("index.html"); return; }
         if (session.demo || !KinAuth.has("admin")) { KinConsoleSession.go("main.html"); return; }
         $("#actor").textContent = session.displayName || session.user;
         await loadUsers();
-        if (KinConsoleSession.ended()) return;
+        if (KinConsoleSession.ended() || membersDenied) return;
         for (const control of ["#search", "#institution-filter", "#refresh", "#open-create"]) $(control).disabled = false;
       }
 
@@ -791,30 +792,20 @@
           const script = document.createElement("script");
           script.src = "study-arrivals.js";
           script.onload = () => window.KinStudyArrivals ? resolve() : reject(new Error("rules"));
-          script.onerror = () => { gateway.rules = null; script.remove(); reject(new Error("rules")); };
+          script.onerror = () => { if (KinConsoleSession.ended()) return; gateway.rules = null; script.remove(); reject(new Error("rules")); };
           document.head.append(script);
         });
         return gateway.rules;
       }
 
       async function gatewayRequest(method, path, body) {
-        const options = { method, headers: { "X-KIN-CSRF": "1" } };
-        if (body !== undefined) {
-          options.headers["Content-Type"] = "application/json";
-          options.body = JSON.stringify(body);
-        }
-        if (KinConsoleSession.ended()) throw new Error("session ended");
-        const response = await fetch(API + path, options);
-        // A 401 ends the page session here, before any body is read and before the caller's sequence or token check: the
-        // 401 of an older list read is still this session's end (S5-U6a-F02). The end moves every sequence, so no answer
-        // of this session paints after it, whatever order they arrive in.
-        if (response.status === 401) {
-          KinConsoleSession.end();
-          throw Object.assign(new Error("session"), { status: 401 });
-        }
-        const payload = await response.json().catch(() => null);
-        if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`),
-          { status: response.status, code: typeof payload?.code === "string" ? payload.code : undefined });
+        if (KinConsoleSession.ended()) throw new Error("세션이 종료되었습니다");
+        const context = KinWorkContext.capture("document");
+        const response = await KinSessionTransport.page().request(API + path, { method, json: body, context });
+        if (!KinWorkContext.admits(context)) throw new Error("세션이 종료되었습니다");
+        const payload = response.body;
+        if (!response.ok || response.incomplete) throw Object.assign(new Error(`HTTP ${response.status}`),
+          { status: response.status, code: response.code });
         return payload;
       }
 
@@ -828,11 +819,11 @@
       }
 
       /*
-       * The page session ended (Log out, a 401 on any request of this page, another tab). Runs before anything is awaited:
+       * The page session ended (Log out, a confirmed session end, or a matching notice). Runs before anything is awaited:
        * moving seq drops every list read in flight, the cleared tokens and items drop every retry answer, and the list,
        * the stored requests, the counts and the control go with them. The logout or the move is KinConsoleSession's.
        */
-      KinConsoleSession.onEnd(() => {
+      function closeGateway() {
         gateway.seq++;
         for (const item of gateway.items.values()) item.dataset.request = "";
         gateway.items.clear();
@@ -847,7 +838,8 @@
         $("#gateway-busy").hidden = true;
         $("#gateway-refresh").disabled = true;
         setGatewayMessage("");
-      });
+      }
+      KinConsoleSession.onEnd(closeGateway);
 
       function newItem(uid) {
         const item = document.createElement("li");
@@ -946,12 +938,14 @@
           try { result = await gatewayRequest("GET", "/studies"); }
           catch (e) { error = e ?? new Error("request failed"); }
         }
-        // Only the newest load paints; a session end (a 401 in gatewayRequest too) moves seq, so nothing paints after it.
+        // Only the newest load paints; a session end (a transport end signal too) moves seq, so nothing paints after it.
         if (seq !== gateway.seq) return;
         $("#gateway-busy").hidden = true;
         if (rulesFailed) { setGatewayMessage("화면 규칙(study-arrivals.js)을 불러오지 못했습니다. 다시 시도하세요."); return; }
+        if (error?.status === 403) { closeGateway(); setGatewayMessage(failureText(error)); return; }
         const read = error ? null : window.KinStudyArrivals.gatewayStatusRows(result);
         if (read) {
+          $("#gateway-refresh").disabled = false;
           Object.assign(gateway, { failed: false, observedAt: read.observedAt, absentKnown: read.absentKnown, rows: read.rows });
           setGatewayMessage("");
         } else {
@@ -976,7 +970,7 @@
         let answer = null, error = null;
         try { answer = await gatewayRequest("POST", `/studies/${encodeURIComponent(uid)}/gateway-retry`, {}); }
         catch (e) { error = e ?? new Error("request failed"); }
-        // Its own 401 or any other end while it was out: the closer already dropped the token and the item.
+        // A confirmed session end while it was out: the closer already dropped the token and the item.
         if (KinConsoleSession.ended()) return;
         if (item.dataset.request !== token || item.dataset.key !== key || gateway.items.get(uid) !== item) return;
         const shown = window.KinStudyArrivals.gatewayRetryAnswer(uid, answer, error);
@@ -1173,10 +1167,10 @@
   <script>
     /*
      * S5-U6b Operations panel. One GET /api/admin/metrics per "Refresh Operations" and nothing at page boot, so opening
-     * Members stays /api/me plus the member list. Only the newest request paints (A->B->A). A 401 from any read in
+     * Members stays /api/me plus the member list. Only the newest request paints (A->B->A). A confirmed session end from any read in
      * flight, older ones included, ends the page session before any body is read or any sequence is compared: the panel
      * empties and the logout happens once. The session end is the page's one KinConsoleSession (defined above every
-     * panel), so Log out and a 401 of the members console or Gateway Status close this panel the same way (S5-U6b-F04).
+     * panel), so Log out and a confirmed end in any panel close this panel the same way (S5-U6b-F04).
      * A failed read keeps the last reading, dimmed and marked as the last observation; the server's own wording is never
      * shown.
      */
@@ -1192,20 +1186,13 @@
       }
 
       async function metricsRequest() {
-        if (KinConsoleSession.ended()) throw new Error("session ended");
-        const response = await fetch(API + "/admin/metrics", { headers: { "X-KIN-CSRF": "1" } });
-        // A 401 ends the page session here, before any body is read and before refreshOps compares its sequence: the 401
-        // of an older read is this session's end too (S5-U6b-F03). The end moves ops.seq, so no read of this session paints
-        // after it, whatever order the answers arrive in. The message differs from Gateway Status's on purpose: that block is
-        // a U6a control anchor that must occur once on the page; callers judge only error.status.
-        if (response.status === 401) {
-          KinConsoleSession.end();
-          throw Object.assign(new Error("session ended"), { status: 401 });
-        }
-        if (KinConsoleSession.ended()) throw new Error("session ended");
-        const payload = await response.json().catch(() => null);
-        if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`),
-          { status: response.status, code: typeof payload?.code === "string" ? payload.code : undefined });
+        if (KinConsoleSession.ended()) throw new Error("세션이 종료되었습니다");
+        const context = KinWorkContext.capture("document");
+        const response = await KinSessionTransport.page().request(API + "/admin/metrics", { context });
+        if (!KinWorkContext.admits(context)) throw new Error("세션이 종료되었습니다");
+        const payload = response.body;
+        if (!response.ok || response.incomplete) throw Object.assign(new Error(`HTTP ${response.status}`),
+          { status: response.status, code: response.code });
         return payload;
       }
 
@@ -1259,18 +1246,19 @@
       }
 
       /*
-       * The page session ended (Log out, or a 401 on a request of any panel: this one, the members console, Gateway
+       * The page session ended (Log out, or a confirmed end on a request of any panel: this one, the members console, Gateway
        * Status). Runs before anything is awaited: moving seq drops every read in flight, and the table, the last reading,
        * the message and the control go with them; the state line goes back to Not Loaded. The logout is the session end's.
        */
-      KinConsoleSession.onEnd(() => {
+      function closeOps() {
         ops.seq++;
         Object.assign(ops, { read: null, failed: false });
         $("#metrics-busy").hidden = true;
         $("#metrics-refresh").disabled = true;
         setOpsMessage("");
         drawOps();
-      });
+      }
+      KinConsoleSession.onEnd(closeOps);
 
       async function refreshOps() {
         if (KinConsoleSession.ended()) return;
@@ -1279,11 +1267,13 @@
         let answer = null, error = null;
         try { answer = await metricsRequest(); }
         catch (e) { error = e ?? new Error("request failed"); }
-        // Only the newest load paints; a session end (a 401 in metricsRequest too) moves seq, so nothing paints after it.
+        // Only the newest load paints; a session end (a transport end signal too) moves seq, so nothing paints after it.
         if (seq !== ops.seq) return;
         $("#metrics-busy").hidden = true;
+        if (error?.status === 403) { closeOps(); setOpsMessage(failureText(error)); return; }
         const read = error ? null : window.KinAdminMetrics.readAnswer(answer);
         if (read) {
+          $("#metrics-refresh").disabled = false;
           Object.assign(ops, { read, failed: false });
           setOpsMessage("");
         } else {
@@ -1431,7 +1421,7 @@
      * S5-U5b Audit / Security panel. One GET /api/admin/audit per "Refresh Audit" and one per "Load More" (with the
      * sealed after of the last answer); nothing at page boot, so opening Members stays /api/me plus the member list.
      * Only the newest Refresh paints (A->B->A), and a Load More answer is appended only while the list it continues is
-     * still the one on screen. A 401 from any read, older ones included, ends the page session before any body is read
+     * still the one on screen. A transport end signal from any read, older ones included, closes the page session
      * or any sequence is compared; the end is the page's one session object, whose closers empty every panel, this one
      * included. A failed read is never shown as no events: the last reading stays, dimmed, and the empty sentence goes.
      */
@@ -1439,7 +1429,33 @@
       const API = `${location.origin}/api`;
       const $ = selector => document.querySelector(selector);
       const PAGE_SIZE = 25;
-      const audit = { seq: 0, failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false };
+      const audit = { seq: 0, failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false, accessSeen: false };
+
+      /*
+       * S7-U5 access history (OP-1 A). The card sentence is replaced only once an answer this page session accepted and
+       * painted held an access-record row: a server of the same version, or an answer merely received, confirms nothing.
+       * The rows are append-only, so an empty answer or a failure does not take it back; the session end does.
+       */
+      const ACCESS_ACTIONS = ["auth.login", "auth.logout", "auth.session.expired"];
+      const accessHistory = $("#audit-access-history");
+      const ACCESS_CARD = { text: accessHistory.textContent, title: accessHistory.title };
+      const ACCESS_SEEN = {
+        text: "접속 이력: 로그인·로그아웃·세션 만료 기록이 이 표에 함께 보입니다",
+        title: "로그인 성공·실패, 로그아웃·계정 전환·재인증·관리자 격리, 세션 만료(유휴·갱신 실패·정리)를 기록 시점 기관으로 보입니다. "
+          + "기록 시점 기관이 하나로 정해지지 않은 행과 신원을 모르는 로그인 실패는 보이지 않습니다. "
+          + "Keycloak 로그인 화면의 비밀번호 오류는 수집하지 않습니다. 보존 기간은 2년입니다.",
+      };
+
+      function showAccessHistory() {
+        const shown = audit.accessSeen ? ACCESS_SEEN : ACCESS_CARD;
+        Object.assign(accessHistory, { textContent: shown.text, title: shown.title });
+      }
+
+      function noteAccessRows(rows) {
+        if (audit.accessSeen || !rows.some(row => ACCESS_ACTIONS.includes(row.action))) return;
+        audit.accessSeen = true;
+        showAccessHistory();
+      }
 
       function setAuditMessage(value) {
         const box = $("#audit-message");
@@ -1448,18 +1464,13 @@
       }
 
       async function auditRequest(query) {
-        if (KinConsoleSession.ended()) throw new Error("audit ended");
-        const response = await fetch(`${API}/admin/audit?${query}`, { headers: { "X-KIN-CSRF": "1" } });
-        // A 401 ends the page session here, before any body is read and before the caller compares its sequence: an
-        // older read's 401 is this session's end too. The end moves audit.seq, so nothing of this session paints after.
-        if (response.status === 401) {
-          KinConsoleSession.end();
-          throw Object.assign(new Error("audit ended"), { status: 401 });
-        }
-        if (KinConsoleSession.ended()) throw new Error("audit ended");
-        const payload = await response.json().catch(() => null);
-        if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`),
-          { status: response.status, code: typeof payload?.code === "string" ? payload.code : undefined });
+        if (KinConsoleSession.ended()) throw new Error("세션이 종료되었습니다");
+        const context = KinWorkContext.capture("document");
+        const response = await KinSessionTransport.page().request(`${API}/admin/audit?${query}`, { context });
+        if (!KinWorkContext.admits(context)) throw new Error("세션이 종료되었습니다");
+        const payload = response.body;
+        if (!response.ok || response.incomplete) throw Object.assign(new Error(`HTTP ${response.status}`),
+          { status: response.status, code: response.code });
         return payload;
       }
 
@@ -1528,21 +1539,24 @@
         $("#audit-busy").hidden = !audit.pending && !audit.loadingMore;
         const more = $("#audit-more");
         more.hidden = !read || !audit.next;
-        more.disabled = audit.pending || audit.loadingMore || audit.failed || KinConsoleSession.ended();
+        more.disabled = !read || audit.pending || audit.loadingMore || audit.failed || KinConsoleSession.ended();
       }
 
       /*
-       * The page session ended (Log out, or a 401 on a request of any panel). Runs before anything is awaited: moving seq
+       * The page session ended (Log out, or a confirmed end on a request of any panel). Runs before anything is awaited: moving seq
        * drops every Refresh and Load More in flight, and the rows, the continuation, the message and the controls go with
-       * them; the state line goes back to Not Loaded. The logout is the session end's.
+       * them; the state line goes back to Not Loaded and the access-history sentence to the card's. The logout is the
+       * session end's.
        */
-      KinConsoleSession.onEnd(() => {
+      function closeAudit() {
         audit.seq++;
-        Object.assign(audit, { failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false });
+        Object.assign(audit, { failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false, accessSeen: false });
         $("#audit-refresh").disabled = true;
         setAuditMessage("");
+        showAccessHistory();
         drawAudit();
-      });
+      }
+      KinConsoleSession.onEnd(closeAudit);
 
       async function refreshAudit() {
         if (KinConsoleSession.ended()) return;
@@ -1552,13 +1566,16 @@
         let answer = null, error = null;
         try { answer = await auditRequest(`limit=${PAGE_SIZE}`); }
         catch (e) { error = e ?? new Error("request failed"); }
-        // Only the newest load paints; a session end (a 401 in auditRequest too) moves seq, so nothing paints after it.
+        // Only the newest load paints; a session end (a transport end signal too) moves seq, so nothing paints after it.
         if (seq !== audit.seq) return;
         audit.pending = false;
+        if (error?.status === 403) { closeAudit(); setAuditMessage(failureText(error)); return; }
         const read = error ? null : window.KinAdminAudit.readAnswer(answer);
         if (read) {
+          $("#audit-refresh").disabled = false;
           Object.assign(audit, { read, rows: read.rows, next: read.next, failed: false });
           setAuditMessage("");
+          noteAccessRows(read.rows);
         } else {
           // Nothing is emptied: the last successful reading stays, marked as the last observation.
           audit.failed = true;
@@ -1578,10 +1595,12 @@
         // A Refresh sent meanwhile or the session end moved seq; a newer list carries another continuation.
         if (seq !== audit.seq || audit.next !== cursor) return;
         audit.loadingMore = false;
+        if (error?.status === 403) { closeAudit(); setAuditMessage(failureText(error)); return; }
         const read = error ? null : window.KinAdminAudit.readAnswer(answer);
         if (read && read.institutionId === audit.read.institutionId) {
           Object.assign(audit, { rows: audit.rows.concat(read.rows), next: read.next, read: { ...audit.read, total: read.total } });
           setAuditMessage("");
+          noteAccessRows(read.rows);
         } else {
           // The rows already shown stay valid; only the next page failed. An expired continuation cannot be retried.
           if (error?.code === "ADMIN_AUDIT_CURSOR_EXPIRED") audit.next = null;

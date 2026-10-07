@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 import unittest
 import uuid
@@ -11,6 +12,7 @@ from urllib.parse import urlsplit
 from pydicom.uid import generate_uid
 from playwright.sync_api import expect
 from test_thumbnail_labels import ThumbnailLabelsE2E
+from document_session import document_request
 
 
 class ThumbnailFailuresE2E(ThumbnailLabelsE2E):
@@ -61,33 +63,42 @@ class ThumbnailFailuresE2E(ThumbnailLabelsE2E):
         self.assertEqual(writes,[]);self.assertEqual(self.report_rows(fixture),rows);self.assertEqual(self.originals(),originals)
 
     def test_d02g_02_401_bound_and_real_session_end(self):
-        """AUTH: isolated logout counting followed by a real BFF-revoked session and original logout."""
-        fixture,page,originals,rows=self.setup_page();series,gets=self.variants(page,fixture);calls=[]
-        page.evaluate('() => { window.d02gLogouts=0; KinAuth.logout=async()=>{ d02gLogouts++; }; }')
+        """Plain 401 stops only its wave; a bound ENDED clears the document without a second logout. A session the server
+        ended (not a person's Log out) leaves no landing to stand on: the next document starts the ordinary login by itself
+        and the person meets the provider's form with an empty user name (session-end design v2 section 3.2, A005)."""
+        fixture,page,originals,rows=self.setup_page();series,gets=self.variants(page,fixture);calls=[];logouts=[];logins=[]
+        page.on('request',lambda request:logouts.append(request.url) if request.url.endswith('/api/auth/logout') else None)
+        page.on('request',lambda request:logins.append((request.method,'x-kin-session' in request.headers))
+                if request.url.split('?')[0].endswith('/api/auth/login') else None)
         def unauthorized(route):calls.append(route.request.url);route.fulfill(status=401,json={'message':'arbitrary 401 text'})
         pattern='**/api/dicom/lookup';page.route(pattern,unauthorized)
-        self.refresh_thumbnails(page);self.stopped(page,calls,series,'lookup-401-observer')
-        self.assertEqual(page.evaluate('d02gLogouts'),len(calls));self.assertLessEqual(len(calls),4)
+        self.refresh_thumbnails(page);self.stopped(page,calls,series,'lookup-plain-401')
+        self.assertEqual(page.evaluate('KinWorkContext.state()'),'active');self.assertEqual(logouts,[])
+        expect(page.locator('#findings')).to_have_value('D02G private draft')
         page.unroute(pattern,unauthorized)
-        # Reload removes the observer; the next branch uses actual server401 and the product's unchanged logout.
-        page.reload();page.wait_for_selector('#rows tr[data-uid]');self.select(page,fixture);self.thumbs(page,24)
-        writes=self.source_writes(page);actual=[];logouts=[];navigations=[]
-        page.on('framenavigated',lambda frame:navigations.append(urlsplit(frame.url).path) if frame==page.main_frame else None)
-        page.on('response',lambda r:actual.append(r.status) if r.url.endswith('/api/dicom/lookup') else None)
-        page.on('response',lambda r:logouts.append(r.status) if r.url.endswith('/api/auth/logout') else None)
-        response=page.context.request.post(self.stack.api+'/auth/logout',headers={'X-KIN-CSRF':'1'})
-        self.assertIn(response.status,(200,204));self.assertEqual(page.context.request.get(self.stack.api+'/me').status,401)
-        with page.expect_response(lambda r:r.url.endswith('/api/dicom/lookup') and r.status==401):
+        self.refresh_thumbnails(page);self.thumbs(page,24)
+        writes=self.source_writes(page);actual=[]
+        page.on('response',lambda response:actual.append((response.status,response.headers.get('x-kin-auth-code')))
+                if response.url.endswith('/api/dicom/lookup') else None)
+        response=document_request(page,'POST',self.stack.api+'/auth/logout',headers={'X-KIN-CSRF':'1'})
+        self.assertEqual(response.status,204)
+        self.assertIn('kin_sid',[cookie['name'] for cookie in page.context.cookies()])
+        ended=document_request(page,'GET',self.stack.api+'/me')
+        self.assertEqual(ended.status,401);self.assertEqual(ended.json()['code'],'AUTH_SESSION_ENDED')
+        with page.expect_response(lambda response:response.url.endswith('/api/dicom/lookup') and response.status==401):
             page.evaluate('() => { renderThumbs(); }')
-        # Concurrent401 replies can replace one navigation, and index immediately starts login; observe the final form.
-        expect(page.locator('#username')).to_be_visible()
-        self.assertIn('/worklist/hpacs-lite/index.html',navigations)
-        self.assertTrue(actual);self.assertTrue(all(x==401 for x in actual));self.assertLessEqual(len(actual),4)
-        print('D02G real session '+json.dumps(dict(lookupStatus=actual,logoutStatus=logouts,
-              indexObserved=True,finalPath=urlsplit(page.url).path)),flush=True)
-        # The explicit revocation returned204; further logout calls carry no valid session and the auth guard returns401.
-        self.assertTrue(logouts);self.assertTrue(all(x==401 for x in logouts),logouts)
-        self.assertEqual(page.context.request.get(self.stack.api+'/me').status,401)
+        # The work document closes; the next document goes on to the provider's form by itself.
+        page.wait_for_url(re.compile(r'/auth/realms/kin/'),timeout=30000)
+        name=page.locator('#username')
+        expect(name).to_be_visible();expect(name).to_be_editable();expect(name).to_have_value('')
+        expect(page.locator('#password')).to_be_visible()
+        page.wait_for_timeout(500)
+        # No second logout; one ordinary login start (a plain link, not bound to the ended session, no re-authentication
+        # POST); and no product session came of it.
+        self.assertEqual(logouts,[]);self.assertEqual(logins,[('GET',False)])
+        self.assertEqual(page.context.request.get(self.stack.api+'/me',headers={'X-KIN-CSRF':'1'}).status,401)
+        self.assertTrue(actual);self.assertLessEqual(len(actual),4)
+        self.assertTrue(all(reply==(401,'AUTH_SESSION_ENDED') for reply in actual),actual)
         self.assertEqual(writes,[]);self.assertEqual(self.report_rows(fixture),rows);self.assertEqual(self.originals(),originals)
 
     def test_d02g_03_preview_failures_individual_errors_and_retry(self):

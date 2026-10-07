@@ -264,9 +264,7 @@ class ClinicalContextLive(unittest.TestCase):
         reset = self.stack.kc_admin("PUT", f"/users/{quote(user_id)}/reset-password",
                                     {"type": "password", "value": password, "temporary": False})
         self.assertEqual(reset.status, 204, reset.text)
-        role = self.stack.kc_admin("GET", "/roles/radiologist")
-        self.assertEqual(role.status, 200, role.text)
-        self.assertEqual(self.stack.kc_admin("POST", f"/users/{quote(user_id)}/role-mappings/realm", [role.body]).status, 204)
+        # This new identity has no DB rights; approval-waiting is distinct from a suspended cancellation.
         data = urlencode({"client_id": self.stack.test_client_id, "grant_type": "password", "username": username,
                           "password": password}).encode("ascii")
         request = Request(self.stack.keycloak, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
@@ -549,6 +547,8 @@ class ClinicalContextLive(unittest.TestCase):
         pid = "CCTX-L10-" + uuid.uuid4().hex[:8].upper()
         anchor = self.upload(pid=pid, date="20260130", series=(("CT", {"ReasonForStudy": "SYN L10"}),))
         prior = self.upload(pid=pid, date="20260129")
+        # Tele referral is allowed only at RS W; the owner's later approval supplies the signed provenance below.
+        self.tele(prior.uid)
         self.commit(prior, "doctor", "approve", 0)
         note = self.stack.request("POST", f"/studies/{quote(anchor.uid)}/tech-note", "tech", {"baseVersion": 0, "text": "SYN", "reason": ""})
         self.assertIn(note.status, (200, 201), note.text[:300])
@@ -573,7 +573,6 @@ class ClinicalContextLive(unittest.TestCase):
         self.assertEqual(owner["anchor"]["access"], "owner")
         self.assertEqual({item["access"] for name in ("priorReports", "history") for item in owner["sections"][name]["items"]}, {"owner"})
         self.tele(anchor.uid)
-        self.tele(prior.uid)
         tele = self.context(anchor.uid, "kdoctor").body
         self.assertEqual((tele["anchor"]["access"], tele["anchor"]["institutionName"]), ("tele", HALLYM))
         self.assertEqual({item["access"] for name in ("priorReports", "history") for item in tele["sections"][name]["items"]}, {"tele"})

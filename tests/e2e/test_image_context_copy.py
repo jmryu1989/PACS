@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 from test_viewer_patient_copy import ViewerPatientCopyE2E
 from test_viewer_history import ViewerHistoryE2E
 from test_viewer_tech_note import canvas_ready
+from viewer_session import end_viewer
 
 class ImageContextCopyE2E(ViewerPatientCopyE2E):
  def right_click(self,v,index=0):
@@ -39,7 +40,7 @@ class ImageContextCopyE2E(ViewerPatientCopyE2E):
   a,b=self.pair();p,v=self.popup(a);v.evaluate('()=>navigator.clipboard.writeText("KEEP END CLIPBOARD")');self.right_click(v);expect(self.item(v)).to_be_visible()
   v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeExit()");expect(self.item(v)).to_have_count(0)
   v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeEnter()");expect(v.locator('#kin-viewer-copy-id')).to_be_enabled(timeout=45000);self.right_click(v);expect(self.item(v)).to_have_count(1)
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(self.item(v)).to_have_count(0);expect(v.locator('#kin-viewer-copy-id')).to_be_disabled();self.assertEqual(self.clipboard(v),'KEEP END CLIPBOARD')
+  ended=end_viewer(v, ['#kin-viewer-copy-id']);self.assertEqual(ended.retained('#kin-viewer-copy-id','node => node.disabled'),[True]);self.assertEqual(self.clipboard(ended),'KEEP END CLIPBOARD');ended.assert_quiet()
 
  def test_context_05_right_drag_preserves_native_zoom_without_menu(self):
   a,b=self.pair();p,v=self.popup(a)

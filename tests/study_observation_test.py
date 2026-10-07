@@ -362,7 +362,7 @@ class SourcePins(unittest.TestCase):
     def test_main_reports_observations_only_after_the_generation_checks_and_failures_empty_nothing(self):
         self.assertEqual(3, self.main.count("applyObservation("))              # definition + load + poll
         self.assertEqual(4, self.main.count("markObservationUnavailable("))    # definition + offline + load + poll
-        load = body(self.main, "    async function load(options = {}) {", "      try {\n        const res = await fetch(\"/dicom-web/studies")
+        load = body(self.main, "    async function load(options = {}) {", "      try {\n        const res = await transport.request(\"/dicom-web/studies")
         offline = body(load, "      if (offline) {", "      try {")
         self.assertNotIn("studies = []", offline)
         self.assertIn("markObservationUnavailable();", offline)
@@ -370,7 +370,7 @@ class SourcePins(unittest.TestCase):
                         load.index("applyObservation(r);"))
         self.assertIn("if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') markObservationUnavailable();", load)
         poll = body(self.main, "    function startPolling() {", "    let pollFails = 0;")
-        self.assertLess(poll.index("if (generation !== pollGeneration || commitInFlight || epoch !== commitEpoch) return;\n          pollFails = 0;"),
+        self.assertLess(poll.index("if (!live() || commitInFlight || epoch !== commitEpoch) return;\n          pollFails = 0;"),
                         poll.index("applyObservation(r);"))
         self.assertLess(poll.index("if (e.stale || e.code === 'STUDY_LIST_CHANGED') return;"), poll.index("markObservationUnavailable();"))
         self.assertLess(poll.index("markObservationUnavailable();"), poll.index("if (++pollFails >= 2) goOffline(e);"))
@@ -540,14 +540,100 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S7-U5 browser end (Astra S7-U5-SPEC-B-F02 clause 8, S7-U5-SPEC-C-F02): Log out's draft-preserving preparation, its pause of
+# the page's other work and the page's end coordination; the names are the 4-space top-level functions git diff 9d9794e..
+# adds to main.html (no id, no $('#...') lookup). tests/auth_logout_dom_test.py pins how they behave. This entry keeps the
+# historic inventory current and is no evidence of that behaviour (Astra S7-U5-SPEC-C-F05); the name pin itself stays a
+# D73 structural debt for S9-U0f.
+for _kind, _extra in {
+    "ids": {},
+    "functions": {"resumeWork": 1, "captureReport": 1, "saveForLogout": 1, "failLogout": 1,
+                  "endUse": 1, "forgetCapture": 1, "discardAndLogOut": 1, "returnToEditing": 1, "dropEndedDraft": 1,
+                  "recoverEndedDraft": 1, "logoutStatus": 1, "showLogoutPanel": 1, "closeWork": 1},
+    "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
+# S7-U5 U5S redesign (fix9c/fix10c): the page's work goes through work-context.js / session-transport.js /
+# report-draft-client.js, so the Response-interception pause (workPaused, pauseWork) and endHere are gone and the names
+# below are the 4-space top-level functions git diff dffcda5.. adds; the draft bar gains the two conflict choices
+# (Keep This Text, Load Server Draft). tests/auth_logout_dom_test.py and tests/session_work_gate_test.cjs hold the
+# behaviour; this entry only keeps the historic inventory current (the name pin stays a D73 debt for S9-U0f).
+for _kind, _extra in {
+    "ids": {"b-draft-keep": 1, "b-draft-load": 1},
+    "functions": {"onSessionEnd": 1, "onCommonEnd": 1, "accountReplaced": 1, "staleAnswer": 1, "paintStorage": 1,
+                  "paintDemoList": 1, "noteHeld": 1, "draftFailureText": 1, "draftNotSaved": 1, "openDraftConflict": 1,
+                  "readDraftConflict": 1, "sameDraftText": 1, "workIdle": 1, "wakeIdle": 1, "overwriteServerDraft": 1,
+                  "closeSession": 1},
+    "selectors": {"#b-draft-keep": 3, "#b-draft-load": 3},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
+# S7-U5 integration (corefix rounds 1-6, modules, F12-F14): the report text is kept by recorded edits (one function writes
+# the editor, per-study merge/replace of server states, the autosave of every retained study), the draft bar says when the
+# screen's text is not in the approved report and shows that report (View Approved Report), the logout preparation holds a
+# Web Lock, the page tells its areas of an account change through one function, and a notice about a study that was left
+# stays until it is dismissed. tests/report_text_boundaries_dom_test.py, tests/auth_logout_dom_test.py and
+# tests/session_modules_dom_test.py hold the behaviour; this entry only keeps the historic inventory current (the name
+# pin stays a D73 debt for S9-U0f).
+for _kind, _extra in {
+    "ids": {"b-approved-view": 1, "stale-draft-title": 1, "drafthint": 1, "leftnotes": 1},
+    "functions": {"notifyAccountChanged": 1, "renderLeftNotes": 1, "noteLeftStudy": 1, "dropLeftNote": 1,
+                  "renderDraftHint": 1, "reportApart": 1, "reloadServerReport": 1, "drawApprovedPane": 1,
+                  "viewApprovedReport": 1, "pristineEditor": 1, "insertLeftNoText": 1, "mergeObservedReportState": 1,
+                  "replaceReportState": 1, "saveReportDraft": 1, "unconfirmedReport": 1, "reconcileReportDrafts": 1,
+                  "recordReportEdit": 1, "editReport": 1, "reportEditOf": 1, "keepReportEditor": 1, "studyLabel": 1,
+                  "holdPreparation": 1},
+    "selectors": {"#leftnotes": 1, "#b-approved-view": 2, "#drafthint": 1, "#stale-title": 1, "#stale-draft-title": 1},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
+# S7-U5 closure audit 2026-10-05 (report-draft defects 1-3, A020, A021; A006, A015): a draft write that waited decides
+# what to send at its turn (reportTextToSend), an accepted commit is applied by one function whether its answer came or
+# a read found it (applyAcceptedCommit, announceCommit, learnCommitOutcome, readCommitOutcome), Log out also waits for a
+# discard that is out (workBusy) and asks about unsaved work outside the report draft before the real end
+# (otherUnsavedWork, concludeLogout, logOutAnyway), and a viewer the list opens is handed the list's session
+# (handOverSession, viewerEntryStopped). tests/report_text_boundaries_dom_test.py (rounds 7-8) holds the behaviour; this
+# entry only keeps the historic inventory current (the name pin stays a D73 debt for S9-U0f).
+for _kind, _extra in {
+    "ids": {},
+    "functions": {"workBusy": 1, "reportEditedSince": 1, "reportTextToSend": 1, "applyAcceptedCommit": 1,
+                  "announceCommit": 1, "learnCommitOutcome": 1, "readCommitOutcome": 1, "otherUnsavedWork": 1,
+                  "concludeLogout": 1, "logOutAnyway": 1, "handOverSession": 1, "viewerEntryStopped": 1},
+    "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
+# S7-U5 integration fix-up E (937ecb7): a Tech Note typed in another Worklist tab of the session declares itself unsaved
+# to the session's Log out (declareOwnWork). tests/report_text_boundaries_dom_test.py holds the behaviour; this entry only keeps the
+# historic inventory current.
+for _kind, _extra in {"ids": {}, "functions": {"declareOwnWork": 1}, "selectors": {}}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
+# S7-U5 fix round E (draft resurrection): a Discard Draft whose outcome is unknown lowers the unconfirmed-text marker
+# and is learnt by the next successful read (noteUnknownDiscard, learnDiscardOutcome); its draft-bar line is the
+# #draftmsg recount below. tests/report_text_boundaries_dom_test.py holds the behaviour.
+for _kind, _extra in {"ids": {}, "functions": {"noteUnknownDiscard": 1, "learnDiscardOutcome": 1}, "selectors": {}}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 # Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {
     "ids": {},
-    "functions": {},
+    # S7-U5 U5S: the page-order wait for an insertion (settleStash) is replaced by the draft command path's own ordering.
+    # S7-U5 integration: the poll's merge is mergeObservedReportState (an observation merges, a person's choice replaces).
+    "functions": {"settleStash": (1, 0), "mergePolledState": (1, 0)},
     # S5-U6b (REQ-S5-U6b-OPS-METRICS): the two copies of the list loads' fetch-and-write, which left the '0.0GB / -'
     # default on a failed read, are now one refreshStorage() called from both, so one lookup remains.
-    "selectors": {"#storage": (2, 1)},
+    # S7-U5 U5S: the draft bar's conflict state hides Discard Draft / Reload Report and writes its own line.
+    # S7-U5 integration: Paste, Clear and the three insertions write the editor through editReport (fewer direct lookups
+    # of the three fields); the entry retry and failure lines are written to #err; the approved-report pane is drawn by
+    # one function for the rebase and for View Approved Report; the draft bar reads whether Addendum can be pressed.
+    # S7-U5 integration (845899e): a Log out preparation of another window held -> the boot's onHold writes its line to #err.
+    # S7-U5 fix round E: the draft bar says a discard's outcome is not known yet (#draftmsg 3 -> 4).
+    "selectors": {"#storage": (2, 1), "#b-draft-discard": (2, 3), "#b-report-reload": (2, 3), "#draftmsg": (2, 4),
+                  "#findings": (12, 11), "#conclusion": (6, 5), "#recommendation": (6, 5), "#err": (4, 9),
+                  "#stale-rebase": (6, 7), "#b-addendum": (3, 4)},
 }
 for _kind in RECOUNTED:
     assert not set(RECOUNTED[_kind]) & set(ADDED[_kind]), _kind

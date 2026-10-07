@@ -30,6 +30,7 @@ import sys
 import unittest
 from pathlib import Path
 
+from module_session_harness import activate
 from playwright.sync_api import expect, sync_playwright
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -118,6 +119,7 @@ class Harness:
         return page
 
     def module(self, page, owner, criteria=C1):
+        activate(page)
         page.add_script_tag(content=MODULE.read_text(encoding="utf-8"))
         page.evaluate("() => { window.__synPreMount = window.__synStorageCalls.length; }")
         page.evaluate(MOUNT, owner)
@@ -357,12 +359,14 @@ class WorklistSearchOwnerContract(unittest.TestCase):
         for probe in seen:
             self.assertEqual(before[0], probe["read"], f"owner {owner}: {probe['signal']} changed read()")
         self.assertEqual(before[1], s.controls(), f"owner {owner}: an unrelated signal changed the controls")
-        # The session end (with an extra field, as a later sender may add): empty, controls off.
+        # Unbound legacy notices do not end a document; the authority lifecycle does.
         if signal == "channel":
             b.evaluate("() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type: 'session-ended', at: 1}); c.close(); }")
         else:
             b.evaluate("() => { localStorage.setItem('kin-session-ended', String(Date.now())); localStorage.removeItem('kin-session-ended'); }")
         a.wait_for_function("n => __synProbe.length > n", arg=len(seen), timeout=5000)
+        self.assertEqual(before[1], s.controls(), "an unbound notice closed the module")
+        a.evaluate("synEndPage()")
         expect(s.mode).to_be_disabled()
         expect(s.search).to_be_disabled()
         expect(s.clear_box).to_be_disabled()

@@ -6,9 +6,18 @@ from __future__ import annotations
 
 import json
 import unittest
+import weakref
+from urllib.parse import urlsplit
 from playwright.sync_api import expect
 from test_portrait_workspace import PortraitWorkspaceE2E
 import test_worklist as base
+from document_session import document_request
+
+# Browser profiles whose last session ended with sign_out(): S7-U5 keeps that end until the next explicit login. Kept at
+# module level because other suites borrow sign_in/sign_out as plain functions onto test classes of their own.
+ENDED_CONTEXTS = weakref.WeakSet()
+# The BFF session cookie (api/src/auth.service.ts).
+SESSION_COOKIE = 'kin_sid'
 
 
 class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
@@ -20,12 +29,30 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         self.contexts.append(context)
         return context
 
+    @staticmethod
+    def ended_contexts():
+        """Profiles whose last session ended with sign_out(): S7-U5 keeps that end until the next explicit login."""
+        return ENDED_CONTEXTS
+
     def sign_in(self, context, actor='doctor'):
-        # An empty cookie jar forces a fresh real BFF/Keycloak login, while the
-        # same browser profile's localStorage stays intact for account switching.
-        context.clear_cookies()
         page = context.new_page()
+        logins = []
+        page.on('request', lambda r: logins.append(r.url) if urlsplit(r.url).path == '/api/auth/login' else None)
+        # A second account in this profile starts a fresh credential flow. Cookie
+        # loss is temporary for the older documents; their next bound request
+        # after the callback must detect S1/S2 mismatch, never adopt the new user.
+        context.clear_cookies()
         page.goto(self.stack.proxy + '/')
+        if context in ENDED_CONTEXTS:
+            # S7-U5: after this profile's logout the landing shows the confirmed end and starts no login by itself; the
+            # login is the person's own press of the landing's control. The end record is not cleared behind its back.
+            page.wait_for_url('**/worklist/hpacs-lite/index.html', timeout=30000)
+            expect(page.locator('#signin')).to_be_enabled()
+            self.assertEqual({'state': 'confirmed', 'reason': None}, page.evaluate('KinAuth.endState()'))
+            expect(page.locator('#retry-logout')).to_be_hidden()
+            self.assertEqual([], logins, 'the landing started a login by itself after the logout')
+            page.locator('#signin').click()
+            ENDED_CONTEXTS.discard(context)
         try:
             page.locator('#username').fill(self.stack.username(actor))
             page.locator('#password').fill(self.stack.passwords[actor])
@@ -34,15 +61,18 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
             raise RuntimeError('D02B real login failed') from None
         page.wait_for_url('**/worklist/hpacs-lite/main.html', timeout=30000)
         expect(page.locator('#dbstat')).to_contain_text('DB Connected')
-        me = page.context.request.get(self.stack.api + '/me').json()
+        me = document_request(page, "GET", self.stack.api + '/me').json()
         self.assertEqual(page.evaluate('KinAuth.session().sub'), me['sub'])
         self.assertTrue(me['sub'])
         return page
 
     def sign_out(self, page):
-        page.once('dialog', lambda d: d.accept())
+        dialogs = []
+        page.on('dialog', lambda dialog: (dialogs.append(dialog.message), dialog.dismiss()))
         page.locator('#logout').click()
         page.wait_for_url('**/index.html', timeout=30000)
+        self.assertEqual(dialogs, [], 'Clean logout must not ask for confirmation')
+        ENDED_CONTEXTS.add(page.context)
         page.close()
 
     def owner(self, page):

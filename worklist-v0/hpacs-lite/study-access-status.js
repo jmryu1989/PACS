@@ -1,6 +1,7 @@
 (function(root){
   'use strict';
   function mount(options){
+    const work=root.KinWorkContext,transport=root.KinSessionTransport.page();
     const button=options.button;if(!button)return;
     const owner=()=>{const s=options.session();return s?.state==='approved'&&!s.demo&&s.sub&&s.institution?[s.institution,s.sub]:null;};
     const initial=owner();if(!initial)return;
@@ -16,28 +17,35 @@
       }
     }
     async function check(refresh=false){
-      if(busy||!current())return;busy=true;controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);
+      if(work.state()!=='active'||busy||!current())return;
+      const at=work.capture('document'),local=controller=new AbortController();busy=true;
+      const timer=setTimeout(()=>local.abort(),10000);
       try{
-        const r=await fetch('/api/study-access',{credentials:'same-origin',cache:'no-store',signal:controller.signal});const value=await r.json();
+        const r=await transport.request('/api/study-access',{context:at,cache:'no-store',signal:local.signal});const value=r.body;
         if(!current())return;
-        if(!r.ok||JSON.stringify(value.owner)!==JSON.stringify(initial)||!Number.isInteger(value.revision)||typeof value.restricted!=='boolean'||typeof value.windowOpen!=='boolean'||typeof value.denied!=='boolean')throw Error();
+        if(!r.ok||r.incomplete||JSON.stringify(value?.owner)!==JSON.stringify(initial)||!Number.isInteger(value.revision)||typeof value.restricted!=='boolean'||typeof value.windowOpen!=='boolean'||typeof value.denied!=='boolean')throw Error();
         const changed=lastVerified&&(lastVerified.revision!==value.revision||lastVerified.windowOpen!==value.windowOpen||lastVerified.denied!==value.denied||lastVerified.needsInstitutionReview!==value.needsInstitutionReview);
-        needsRefresh=needsRefresh||!!changed||refresh;last=value;lastVerified=value;render();
+        if(!work.commit(at,()=>{needsRefresh=needsRefresh||!!changed||refresh;last=value;lastVerified=value;render();}))return;
         // Refresh through the worklist's existing owner/epoch and unsaved-editor
         // protection. Never directly replace a report or discard local text.
-        if(needsRefresh)needsRefresh=(await options.refresh())===false;
-      }catch(e){if(current()){last=null;render();}}
-      finally{clearTimeout(timer);busy=false;controller=null;}
+        if(needsRefresh){let pending;work.commit(at,()=>{pending=options.refresh();});const result=await pending;work.commit(at,()=>{needsRefresh=result===false;});}
+      }catch(e){work.commit(at,()=>{if(current()){last=null;render();}});}
+      finally{clearTimeout(timer);if(controller===local){busy=false;controller=null;}}
     }
     button.onclick=()=>{
       if(!current())return;
       if(!dialog){dialog=document.createElement('dialog');dialog.id='study-access-status';dialog.style.cssText='max-width:520px;color:inherit;background:#142237;border:1px solid #355272;padding:20px';dialog.innerHTML='<h2>Study Access</h2><p data-status role="status"></p><p data-period></p><p>검사 목록·영상·판독·저장 참조에 추가 조건이 적용됩니다. 접근 기간이 끝나면 새 요청이 차단됩니다. 작성 중인 판독문은 지우지 않습니다. 조건 변경은 기관 관리자에게 요청하세요.</p><button type="button" data-refresh>Refresh Status</button> <button type="button" data-close>Close</button>';dialog.querySelector('[data-refresh]').onclick=()=>check(true);dialog.querySelector('[data-close]').onclick=()=>dialog.close();document.body.append(dialog);}
       render();dialog.showModal();check();
     };
-    function end(){if(ended)return;ended=true;clearInterval(interval);controller?.abort();last=null;lastVerified=null;needsRefresh=false;dialog?.remove();dialog=null;button.disabled=true;button.textContent='Study Access';channel?.close();}
-    const interval=setInterval(()=>{if(!document.hidden)check();},30000);let channel=null;
-    try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(e){}
-    window.addEventListener('storage',e=>{if(e.key==='kin-session-ended')end();});window.addEventListener('pagehide',end);
+    let interval=null;
+    function start(){clearInterval(interval);const at=work.capture('document');interval=setInterval(()=>work.commit(at,()=>{if(!document.hidden)check();}),30000);}
+    function end(){if(ended)return;ended=true;clearInterval(interval);controller?.abort();last=null;lastVerified=null;needsRefresh=false;dialog?.remove();dialog=null;button.disabled=true;button.textContent='Study Access';}
+    work.onInvalidate(event=>{
+      if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
+      if(event.reason==='prepare')clearInterval(interval);
+      if(event.reason==='cancel'){controller?.abort();controller=null;busy=false;start();check();}
+    });
+    start();window.addEventListener('pagehide',end);
     check();return {check,end};
   }
   root.KinStudyAccessStatus={mount};

@@ -16,6 +16,7 @@ from pynetdicom import AE
 from playwright.sync_api import expect
 import test_return_to_current as previous
 from test_prior_selection import canvas_ready
+from document_session import document_request
 
 
 class ThumbnailSeriesE2E(previous.ReturnToCurrentE2E):
@@ -39,7 +40,7 @@ class ThumbnailSeriesE2E(previous.ReturnToCurrentE2E):
         return fixture
 
     def metadata(self,page,fixture):
-        response=page.request.get(self.stack.proxy+f"/dicom-web/studies/{fixture.uid}/instances")
+        response=document_request(page, "GET", self.stack.proxy+f"/dicom-web/studies/{fixture.uid}/instances")
         self.assertEqual(response.status,200)
         return response.json()
 

@@ -1,25 +1,34 @@
 window.KinReaderAssignment=function(app){
+  const work=window.KinWorkContext;
   const d=document.createElement('dialog');d.id='reader-assignment-dialog';d.setAttribute('aria-labelledby','reader-assignment-title');d.innerHTML=`<h2 id="reader-assignment-title">Assign Reader</h2><p>관리자·기사는 기관 판독의를 배정할 수 있습니다. 판독의는 미배정 검사를 본인에게 배정하거나 본인 배정을 해제할 수 있습니다. 대기·보류 검사만 변경할 수 있으며 판독 중에는 변경할 수 없습니다. 원격판독으로 받은 검사는 받은 기관이 자기 판독의를 따로 배정하며 의뢰 기관의 배정과 서로 보이지 않습니다. 의뢰가 취소되면 받은 기관의 배정은 닫힙니다.</p><p id="ra-study"></p><p id="ra-current"></p><label>Reader<select id="ra-reader"></select></label><button id="ra-save" type="button">Save Assignment</button><h3>Assignment History</h3><ul id="ra-history"></ul><p id="ra-status" role="status"></p><footer><button id="ra-retry" type="button" hidden>Retry Request</button><button id="ra-reload" type="button">Reload Assignment</button><button id="ra-close" type="button">Close</button></footer>`;document.body.append(d);
   const $=id=>d.querySelector('#ra-'+id);let state=null,owner=null,uid=null,readers=[],pending=null,busy=false,ended=false,sequence=0,controller=null,opener=null;
-  const same=()=>!ended&&d.open&&app.allowed()&&JSON.stringify(owner)===JSON.stringify(app.identity());
+  const same=()=>work.state()==='active'&&!ended&&d.open&&app.allowed()&&JSON.stringify(owner)===JSON.stringify(app.identity());
   const canChange=()=>state&&!state.blocked&&(state.canManage||!state.reader||state.reader.sub===owner?.[1]);
   const dirty=()=>state&&$('reader').value!==(state.reader?.sub??'');
   function controls(){for(const x of d.querySelectorAll('button,select'))x.disabled=busy||!!pending||!same();$('reader').disabled=$('save').disabled=busy||!!pending||!same()||!canChange();$('retry').hidden=!pending;$('retry').disabled=busy||!same();$('reload').disabled=$('close').disabled=busy;}
-  function adopt(value){if(JSON.stringify(value?.owner)!==JSON.stringify(owner)||value.studyUid!==uid){end();throw new Error('배정 대상이나 계정이 바뀌었습니다');}if(!Number.isInteger(value.revision)||!Array.isArray(value.history))throw new Error('배정 응답을 확인할 수 없습니다');state=value;app.changed(uid,value);}
+  function adopt(value){if(JSON.stringify(value?.owner)!==JSON.stringify(owner)||value.studyUid!==uid){throw new Error('배정 대상이나 계정이 바뀌었습니다');}if(!Number.isInteger(value.revision)||!Array.isArray(value.history))throw new Error('배정 응답을 확인할 수 없습니다');state=value;app.changed(uid,value);}
   function draw(preserve=false){const selected=$('reader').value;$('reader').replaceChildren();const add=(value,label,disabled=false)=>{const o=document.createElement('option');o.value=value;o.textContent=label;o.disabled=disabled;$('reader').append(o);};add('','Unassigned / Clear Assignment');for(const r of readers)add(r.sub,r.name+' · '+r.actor);if(state?.reader&&!readers.some(r=>r.sub===state.reader.sub))add(state.reader.sub,state.reader.name+' · '+state.reader.actor+' (Current)',true);$('reader').value=preserve&&[...$('reader').options].some(o=>o.value===selected)?selected:state?.reader?.sub??'';
     $('current').textContent='Current Reader: '+(state?.reader?state.reader.name+' · '+state.reader.actor:'Unassigned');$('history').replaceChildren();for(const h of state?.history??[]){const li=document.createElement('li');li.textContent=new Date(h.at).toLocaleString()+' · '+h.actor+' · '+(h.detail.from??'Unassigned')+' → '+(h.detail.to??'Unassigned');$('history').append(li);}controls();}
-  async function request(method,path,body,signal){return app.api(method,path,body,signal);}
+  async function request(method,path,body,signal,at){return app.api(method,path,body,signal,at);}
   const path=()=>'/studies/'+encodeURIComponent(uid)+'/reader-assignment';
-  async function load(){if(busy||!same())return;const ticket=++sequence,unresolved=pending,preserve=!!state;busy=true;controls();$('status').textContent='배정을 읽는 중…';controller=new AbortController();const local=controller,timer=setTimeout(()=>local.abort(),12000);
-    try{const [value,candidates]=await Promise.all([request('GET',path(),undefined,local.signal),request('GET','/reader-candidates',undefined,local.signal)]);if(ticket!==sequence||!same())return;if(JSON.stringify(candidates.owner)!==JSON.stringify(owner)){end();return;}readers=candidates.readers;adopt(value);pending=unresolved&&unresolved.revision===state.revision?unresolved:null;draw(preserve);$('status').textContent=pending?'반영을 확인하지 못했습니다. 같은 요청을 다시 시도하세요.':state.blocked||'최신 배정입니다.';}
-    catch(e){if(ticket===sequence&&same())$('status').textContent='배정 조회 실패: '+e.message;}finally{clearTimeout(timer);if(ticket===sequence){busy=false;controller=null;controls();}}}
-  async function send(){if(busy||!pending||!same())return;const ticket=++sequence,body=pending;busy=true;controls();$('status').textContent='배정을 저장하는 중…';controller=new AbortController();const local=controller,timer=setTimeout(()=>local.abort(),12000);
-    try{const value=await request('POST',path(),body,local.signal);if(ticket!==sequence||!same())return;adopt(value);pending=null;draw();$('status').textContent='배정이 저장되었습니다.';}
-    catch(e){if(ticket===sequence&&same()){if([400,403,404,409].includes(e.status))pending=null;$('status').textContent='저장 확인 실패: '+e.message+' · 선택은 유지했습니다.';}}
-    finally{clearTimeout(timer);if(ticket===sequence){busy=false;controller=null;controls();}}}
+  async function load(){
+    const at=work.capture('document');if(busy||!same())return;const ticket=++sequence,unresolved=pending,preserve=!!state;busy=true;controls();$('status').textContent='배정을 읽는 중…';controller=new AbortController();const local=controller,timer=setTimeout(()=>local.abort(),12000);
+    try{const [value,candidates]=await Promise.all([request('GET',path(),undefined,local.signal,at),request('GET','/reader-candidates',undefined,local.signal,at)]);
+      work.commit(at,()=>{if(ticket!==sequence||!same())return;if(JSON.stringify(candidates.owner)!==JSON.stringify(owner)){throw new Error('배정 계정이 일치하지 않습니다');}readers=candidates.readers;adopt(value);pending=unresolved&&unresolved.revision===state.revision?unresolved:null;draw(preserve);$('status').textContent=pending?'반영을 확인하지 못했습니다. 같은 요청을 다시 시도하세요.':state.blocked||'최신 배정입니다.';});}
+    catch(e){work.commit(at,()=>{if(ticket===sequence&&same())$('status').textContent='배정 조회 실패: '+e.message;});}finally{clearTimeout(timer);work.commit(at,()=>{if(ticket===sequence){busy=false;controller=null;controls();}});}}
+  async function send(){
+    const at=work.capture('document');if(busy||!pending||!same())return;const ticket=++sequence,body=pending;busy=true;controls();$('status').textContent='배정을 저장하는 중…';controller=new AbortController();const local=controller,timer=setTimeout(()=>local.abort(),12000);
+    try{const value=await request('POST',path(),body,local.signal,at);
+      work.commit(at,()=>{if(ticket!==sequence||!same())return;adopt(value);pending=null;draw();$('status').textContent='배정이 저장되었습니다.';});}
+    catch(e){work.commit(at,()=>{if(ticket===sequence&&same()){if([400,403,404,409].includes(e.status))pending=null;$('status').textContent='저장 확인 실패: '+e.message+' · 선택은 유지했습니다.';}});}
+    finally{clearTimeout(timer);work.commit(at,()=>{if(ticket===sequence){busy=false;controller=null;controls();}});}}
   function close(force=false){if(!force&&(busy||(pending||dirty())&&!confirm('확인하지 못한 배정이나 저장하지 않은 선택이 있습니다. 닫을까요?')))return;++sequence;controller?.abort();controller=null;busy=false;pending=state=owner=uid=null;readers=[];$('reader').replaceChildren();$('history').replaceChildren();$('study').textContent=$('current').textContent=$('status').textContent='';if(d.open)d.close();if(!force&&opener?.isConnected)opener.focus();opener=null;}
   function end(){ended=true;close(true);}
   $('save').onclick=()=>{if(busy||pending||!same()||!canChange())return;pending={expectedOwner:owner,revision:state.revision,readerSub:$('reader').value||null,requestId:crypto.randomUUID()};send();};$('retry').onclick=send;$('reload').onclick=load;$('close').onclick=()=>close();d.addEventListener('cancel',e=>{e.preventDefault();close();});
-  let channel;try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}window.addEventListener('storage',e=>{if(e.key==='kin-session-ended')end();});window.addEventListener('pagehide',()=>{end();channel?.close();});
+  work.onInvalidate(event=>{
+    if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
+    if(event.reason==='cancel'){const interrupted=busy;++sequence;busy=false;controls();if(d.open&&(interrupted||!state))load();}
+  });
+  window.addEventListener('pagehide',end);
   return {open(study){if(ended||d.open||!study||!app.allowed())return;owner=app.identity();if(!owner)return;uid=study.uid;opener=document.activeElement;$('study').textContent=[study.name,study.id,study.date,study.desc,uid].filter(Boolean).join(' · ');d.showModal();draw();load();}};
 };

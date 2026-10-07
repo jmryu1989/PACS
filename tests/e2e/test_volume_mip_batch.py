@@ -1,12 +1,13 @@
 # coding: utf-8
 """TEST-MIP-BATCH-DOM (A11-BATCH-1): MIP Viewer Batch, a rotation series of the confirmed MIP display with its nullable VOI Slab and
 orientation, saved beside the three-plane MPR as version 13 and reopened all-or-nothing in a new login."""
+from viewer_session import end_viewer, ended_job_status
 import copy,io,json,math,time,unittest,uuid
 import numpy as np
 from playwright.sync_api import expect
 import test_prior_selection as ct
 from test_volume_mip import HELPERS,SETTLE,VOI_HELPERS,VOI_STUDIES,VOI_CASES,VOI_DELTA,VOI_DISCRIMINATION,SOURCE_PLANES,BLENDS,CENTER,SPACING,TOTAL,mm_text,rodrigues,voi_plan,voi_planes,voi_record
-from test_volume_mip_job import CAPTURE,READ_ONLY_CAPTURE,LAYOUT,JOB,JOBS,SESSION_END,GPU_FAULT,VolumeMipJobE2E,json_keys
+from test_volume_mip_job import CAPTURE,READ_ONLY_CAPTURE,LAYOUT,JOB,JOBS,GPU_FAULT,VolumeMipJobE2E,json_keys
 from test_volume_path import field_differences,job_post
 
 # scripts/run-tests.py accepts only cases whose class is declared in the selected module; load_tests selects exactly these, so the
@@ -339,11 +340,11 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
    v.wait_for_timeout(100)
   self.assertEqual(len(held),1);body=json.loads(held[0].request.post_data)['snapshot'];self.assertEqual([body['version'],body['mipBatch']],[13,A]);expect(summary).to_contain_text('· Saving')
   make.click();expect(status).to_have_text('MIP 작업 저장이 끝난 뒤 MIP Batch를 만드세요.')
-  self.assertTrue(v.evaluate("()=>!!(window.batchHeldSummary=document.querySelector('#kin-volume-mip .kin-mip-voi-state'))"));v.evaluate(SESSION_END)
-  expect(v.locator('#kin-volume-mip[open]')).to_have_count(0,timeout=10000);expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('세션이 변경되었습니다')
+  self.assertTrue(v.evaluate("()=>!!(window.batchHeldSummary=document.querySelector('#kin-volume-mip .kin-mip-voi-state'))"));v=end_viewer(v);v.assert_quiet()
+  v.assert_quiet();self.assertIn('세션이 변경되었습니다',ended_job_status(v))
   try:held[0].abort()
   except Exception:pass
-  v.wait_for_timeout(500);self.assertNotIn('Saved',v.evaluate('()=>batchHeldSummary.textContent'));self.assertNotIn('저장했습니다',v.locator('#kin-viewer-jobs-status').text_content())
+  v.wait_for_timeout(500);self.assertNotIn('Saved',v.evaluate('()=>batchHeldSummary.textContent'));self.assertNotIn('저장했습니다',ended_job_status(v))
   self.assertFalse(v.evaluate('()=>!!batchView()'));self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1)
 
  def test_mip_batch_03_restore_failure_missing_tool_cancel_stale_rollback(self):
@@ -380,9 +381,9 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
    self.rolled_back(v,'MIP 작업 복원을 취소했습니다',previous);self.assertEqual(v.evaluate('()=>mipCount()'),0);self.assertFalse(v.evaluate('()=>!!batchView()'))
    v.evaluate('()=>{batchHoldFrame=null}');v.wait_for_timeout(500);self.assert_unannounced(v)
   # A session ended during regeneration closes the viewer without a success status.
-  v.evaluate('()=>{batchStatuses.length=0;batchHoldFrame=2;batchHeld=0}');self.restore_titled(v,a,'MIP batch VOI job');v.wait_for_function('()=>batchHeld>0',timeout=90000);v.evaluate(SESSION_END)
-  expect(v.locator('#kin-volume-mip[open]')).to_have_count(0,timeout=10000);v.evaluate('()=>{batchHoldFrame=null}');v.wait_for_timeout(500)
-  self.assertNotIn('복원했습니다',status.text_content());self.assert_unannounced(v);self.assertFalse(v.evaluate('()=>!!batchView()'));self.assertEqual(self.originals(),original)
+  v.evaluate('()=>{batchStatuses.length=0;batchHoldFrame=2;batchHeld=0}');self.restore_titled(v,a,'MIP batch VOI job');v.wait_for_function('()=>batchHeld>0',timeout=90000);v=end_viewer(v);v.assert_quiet()
+  v.assert_quiet();v.evaluate('()=>{batchHoldFrame=null}');v.wait_for_timeout(500)
+  self.assertNotIn('복원했습니다',ended_job_status(v));self.assert_unannounced(v);self.assertFalse(v.evaluate('()=>!!batchView()'));self.assertEqual(self.originals(),original)
   # A MIP Batch model that cannot load on a fresh page refuses the version 13 Job with rollback, while the version 12 Job restores
   # there with the MIP Batch panel reporting the missing tool.
   fresh=self.login();fresh.route('**/volume-mip-batch.js',lambda route:route.abort());self.launch(fresh,[a]);self.ready(fresh);before=fresh.evaluate(LAYOUT)

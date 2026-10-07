@@ -196,3 +196,67 @@ test('S4-U5 bootstrap (h) is unchanged: no relation and the same order keys; the
   for(const write of [prisma.studyState.update,prisma.studyState.create,prisma.order.update,prisma.order.updateMany,prisma.auditLog.create])
     await assert.rejects(write({}),/the list must not write/);
 });
+
+// REQ-S4-U5-IDENTITY / SUBJECT-READ -> RISK-ORDER-LEAK/TENANT/P-BODY/ONE-SIDED-UNMATCH -> CORE_R11.
+function r11Store() {
+  const uid='2.25.911', foreign='2.25.912', oid='SYN-R11-ORDER';
+  const states=[S(uid,'hallym','M',oid,{rs:'P',preDoc:'old-label',preDocSub:'subject-x',preReviewer:'reviewer',preReviewerSub:'subject-r'}),
+    S(foreign,'outside','U',null)];
+  const orders=[O(oid,'hallym',uid,{accession:'ORDER-SECRET-ACCESSION',name:'ORDER NAME'}),O('FOREIGN-ORDER','outside',foreign,{name:'FOREIGN-SECRET'})];
+  const reports=[{uid,findings:'P-SECRET-FINDINGS',conclusion:'P-SECRET-CONCLUSION',recommendation:'P-SECRET-RECOMMENDATION',version:1}];
+  const audits=[];
+  const matches=(row,w)=>!w||Object.entries(w).every(([k,v])=>k==='OR'?v.some(x=>matches(row,x)):v&&typeof v==='object'&&'in'in v?v.in.includes(row[k]):row[k]===v);
+  const delegate=rows=>({findMany:async({where,select}={})=>project(structuredClone(rows.filter(r=>matches(r,where))),select),
+    findUnique:async({where})=>structuredClone(rows.find(r=>matches(r,where))||null),
+    update:async({where,data})=>{const row=rows.find(r=>matches(r,where));assert.ok(row);Object.assign(row,data);return structuredClone(row);}});
+  const db={studyState:delegate(states),order:delegate(orders),report:delegate(reports),reportDraft:delegate([]),
+    auditLog:{create:async({data})=>{audits.push(structuredClone(data));return data;}},$executeRaw:async()=>0,
+    $transaction:async fn=>fn(db)};
+  const access={prepare:async()=>{},snapshot:async()=>({policy:{restricted:false}}),allowed:async(c,uids)=>new Set(uids),
+    require:async()=>{},unchanged:async()=>{}};
+  const svc=new PacsService(db,{}, {},access);svc.institutions=[{id:'hallym',name:'hallym'}];svc.prefs=async()=>({filters:[],templates:[]});
+  return {uid,foreign,oid,states,orders,reports,audits,db,svc};
+}
+test('CORE_R11_BOOTSTRAP scoped orders never enter states; subject-bound P serializer survives rename/recycle',async()=>{
+  const w=r11Store(), x={...caller,roles:['radiologist'],sub:'subject-x',actor:'old-label'};
+  for(const c of [x,{...x,actor:'renamed-x'},{...x,sub:'subject-r',actor:'renamed-reviewer'}]) {
+    const result=await w.svc.bootstrap(c);
+    assert.deepEqual(Object.keys(result.states),[w.uid]);
+    assert.equal(result.states[w.uid].prelimHidden,false);
+    assert.equal(result.states[w.uid].findings,'P-SECRET-FINDINGS');
+    assert.ok(!JSON.stringify(result.states).includes('ORDER NAME'));
+    assert.ok(!JSON.stringify(result).includes('ORDER-SECRET-ACCESSION'));
+    assert.ok(!JSON.stringify(result).includes('FOREIGN-SECRET'));
+    assert.ok(!JSON.stringify(result).includes('orderIdentity'));
+  }
+  for(const c of [{...x,sub:'subject-y'}, {...x,sub:'subject-y',actor:'reviewer'}]) {
+    const result=await w.svc.bootstrap(c);assert.equal(result.states[w.uid].prelimHidden,true);
+    assert.ok(!JSON.stringify(result).includes('P-SECRET'));
+  }
+  w.states[0].preDocSub=null;w.states[0].preReviewerSub=null;
+  assert.equal((await w.svc.bootstrap({...x,sub:'legacy'})).states[w.uid].prelimHidden,false);
+  assert.equal((await w.svc.bootstrap({...x,actor:'renamed-x'})).states[w.uid].prelimHidden,true);
+  assert.equal(w.audits.length,0);
+});
+test('CORE_R11_UNMATCH releases study and order together, preserves refusals, audits and returns cleared fields',async()=>{
+  const tech={...caller,roles:['technician']};
+  for(const scenario of ['role','institution','preliminary','unmatched','tele']) {
+    const w=r11Store();w.states[0].rs='W';let c=tech;
+    if(scenario==='role')c={...tech,roles:['clinician']};
+    if(scenario==='institution')c={...tech,institution:'outside'};
+    if(scenario==='preliminary')w.states[0].rs='P';
+    if(scenario==='unmatched')w.states[0].matched='U';
+    if(scenario==='tele'){w.states[0].institutionId='outside';w.states[0].teleInstitutionId='hallym';}
+    const before=structuredClone([w.states,w.orders,w.reports]);
+    await assert.rejects(w.svc.unmatch(w.uid,c),e=>e.getStatus()===({role:403,institution:404,preliminary:400,unmatched:400,tele:403})[scenario]);
+    assert.deepEqual([w.states,w.orders,w.reports],before);assert.deepEqual(w.audits,[]);
+  }
+  const w=r11Store();w.states[0].rs='W';w.states[0].ov='{"name":"overlay"}';
+  const before=structuredClone(w.reports),result=await w.svc.unmatch(w.uid,tech);
+  assert.equal(w.states[0].matched,'U');assert.equal(w.states[0].orderOid,null);assert.equal(w.states[0].ov,null);
+  assert.equal(w.orders[0].matched,'U');assert.equal(w.orders[0].studyUid,null);
+  assert.equal(result.matched,'U');assert.equal(result.oid,null);assert.equal(result.ov,null);
+  assert.equal(result.findings,'P-SECRET-FINDINGS');assert.deepEqual(w.reports,before);
+  assert.equal(w.audits.length,1);assert.equal(w.audits[0].action,'unmatch');assert.equal(w.audits[0].target,w.uid);
+  assert.deepEqual(JSON.parse(w.audits[0].detail),{oid:w.oid,by:'hallym'});
+});

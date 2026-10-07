@@ -1,9 +1,11 @@
 # coding: utf-8
 """TEST-VOLUME-DISPLAY: selected reset preserves reconstructed plane and work."""
+from viewer_session import end_viewer
 import json,re,unittest
 from pathlib import Path
 import numpy as np
 from playwright.sync_api import expect
+from failure_diagnostics import failure_details
 from test_volume_orientation import VolumeOrientationE2E
 from test_embedded_patient_copy import EmbeddedPatientCopyE2E
 from test_volume_cine import VolumeCineE2E
@@ -53,7 +55,7 @@ class VolumeDisplayE2E(VolumeOrientationE2E):
   v.get_by_role('button',name='Reset Windowing',exact=True).click();expect(v.locator('#kin-volume-display [role=status]')).to_contain_text('INJECTED WINDOWING FAILURE');self.preserved_volume(before,self.volume_state(v))
   self.assertTrue(v.evaluate('()=>JSON.stringify(displaySyncBefore)===JSON.stringify(cornerstoneTools.SynchronizerManager.getAllSynchronizers().map(g=>[g.id,g.isDisabled()]))'));self.reset_display(v,'windowing')
   self.open_note(v);expect(v.get_by_role('button',name='Reset Windowing',exact=True)).to_be_disabled();v.locator('#tech-note-close').click();expect(v.get_by_role('button',name='Reset Windowing',exact=True)).to_be_enabled()
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-volume-display')).to_have_count(0)
+  v=end_viewer(v);v.assert_quiet()
  def test_mpr_display_04_embedded_owner_and_plane_selection(self):
   a,b=self.pair();p,f=EmbeddedPatientCopyE2E.opened(self,a);self.mpr(f);self.choose_volume(p,f,0);p.locator('#findings').fill('KEEP EMBEDDED DISPLAY')
   button=f.get_by_role('button',name='Reset Windowing',exact=True,include_hidden=True);expect(button).to_be_enabled();before=self.volume_state(f)
@@ -118,7 +120,11 @@ class VolumeDisplayE2E(VolumeOrientationE2E):
   button=v.get_by_role('button',name='Reset Zoom / Pan',exact=True);expect(button).to_be_disabled();button.dispatch_event('click');count=v.evaluate('()=>cinePositions.length');v.wait_for_function('(n)=>cinePositions.length>n',arg=count);VolumeCineE2E.cine_play(self,v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");expect(button).to_be_enabled()
   v.evaluate("()=>{window.displayOriginalBlob=HTMLCanvasElement.prototype.toBlob;HTMLCanvasElement.prototype.toBlob=function(...args){if(this.closest('[data-kin-batch-render]')){window.displayHeldBlob=()=>args[0](null);return;}return displayOriginalBlob.apply(this,args)}}")
   for label,value in [('Batch Start Offset','0'),('Batch Interval','1'),('Batch Number','3')]:v.get_by_label(label,exact=True).fill(value)
-  v.get_by_role('button',name='Make Batch',exact=True).click();v.wait_for_function('()=>typeof displayHeldBlob==="function"');expect(button).to_be_disabled();v.get_by_role('button',name='Cancel Batch',exact=True).click();v.wait_for_function('()=>!kinVolumeBatchState.busy()');v.evaluate('()=>{displayHeldBlob();HTMLCanvasElement.prototype.toBlob=displayOriginalBlob}');expect(button).to_be_enabled()
+  v.get_by_role('button',name='Make Batch',exact=True).click()
+  with failure_details(v,'BATCH capture failure',"() => ({status:document.querySelector('#kin-volume-batch [role=status]')?.textContent,busy:window.kinVolumeBatchState?.busy(),hookReached:typeof window.displayHeldBlob==='function'})"):
+   v.wait_for_function("()=>typeof window.displayHeldBlob==='function'||(!kinVolumeBatchState.busy()&&!!document.querySelector('#kin-volume-batch [role=status]')?.textContent)")
+   self.assertTrue(v.evaluate("()=>typeof window.displayHeldBlob==='function'"),'Batch ended before the canvas capture hook; see BATCH capture failure')
+  expect(button).to_be_disabled();v.get_by_role('button',name='Cancel Batch',exact=True).click();v.wait_for_function('()=>!kinVolumeBatchState.busy()');v.evaluate('()=>{displayHeldBlob();HTMLCanvasElement.prototype.toBlob=displayOriginalBlob}');expect(button).to_be_enabled()
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeDisplayE2E(n) for n in loader.getTestCaseNames(VolumeDisplayE2E) if n.startswith('test_mpr_display_'))
 if __name__=='__main__':unittest.main(verbosity=2)

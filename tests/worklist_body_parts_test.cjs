@@ -1,6 +1,8 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {create} = require('../worklist-v0/hpacs-lite/worklist-body-parts.js');
+const {create: productCreate} = require('../worklist-v0/hpacs-lite/worklist-body-parts.js');
+const {install} = require('./module_session_harness.cjs');
+const create = options => { install(options.fetcher); return productCreate(options); };
 
 const study = (uid, series = 1, count = 1) => ({uid, series, count});
 const row = (studyUid, seriesUid, body) => ({
@@ -18,8 +20,8 @@ test('verified values are deduplicated and all-missing series produce an empty t
   ]);
   const model = create({owner: () => 'hospital:a', changed() {}, fetcher: (url, options) => {
     assert.match(url, /^\/dicom-web\/studies\/[0-9.]+\/series\?includefield=0020000D,0020000E,00180015&limit=501$/);
-    assert.equal(options.credentials, 'same-origin');assert.equal(options.cache, 'no-store');
-    assert.equal(options.headers.Accept, 'application/dicom+json');assert.ok(options.signal instanceof AbortSignal);
+    assert.equal(options.credentials ?? 'same-origin', 'same-origin');assert.equal(new Headers(options.headers).get('X-KIN-Session'), 'SYN-MODULE-SESSION');assert.equal(options.cache, 'no-store');
+    assert.equal(new Headers(options.headers).get('Accept'), 'application/dicom+json');assert.ok(options.signal instanceof AbortSignal);
     return json(replies.get(url.split('/')[3]));
   }});
   model.sync([study('1.2', 2), study('2.3', 2)]);
@@ -97,7 +99,7 @@ test('owner changes including A-B-A discard old generations and clear metadata',
   assert.equal(model.get('1.2'),undefined);assert.equal(model.snapshot().allowed,true);
 });
 
-test('authorization failure terminates the first wave and clears earlier successes', async()=>{
+test('plain 403 fails each read without ending the document', async()=>{
   let calls=0, deny=false;
   const model=create({owner:()=> 'a',changed(){},fetcher:async url=>{
     calls++;const uid=url.split('/')[3];
@@ -106,7 +108,7 @@ test('authorization failure terminates the first wave and clears earlier success
   model.sync(Array.from({length:8},(_,i)=>study('1.'+(i+2))));await model.load();
   assert.equal(model.snapshot().verified,8);
   deny=true;await model.load({refresh:true});
-  assert.equal(calls,11);assert.equal(model.snapshot().verified,0);assert.match(model.snapshot().note,/권한/);
+  assert.equal(calls,16);assert.equal(model.snapshot().verified,0);assert.equal(model.snapshot().failed,8);assert.equal(globalThis.KinWorkContext.state(),'active');
 });
 
 test('request timeout is failed while whole-load budget leaves aborted work resumable', async()=>{
@@ -126,4 +128,30 @@ test('responses over 2 MiB are rejected without being treated as missing metadat
   const model=create({owner:()=> 'a',changed(){},fetcher:()=>new Response(oversized)});
   model.sync([study('1.2')]);await model.load();
   assert.equal(model.get('1.2'),undefined);assert.equal(model.snapshot().failed,1);
+});
+
+// U5S-REQ-11/22 -> U5S-RISK-APPLY -> worklist body parts lifecycle.
+test('preparation pauses remaining UIDs, cancellation resumes them, and coded end clears all values',async()=>{
+  const calls=[],pending=[];let hold=false;
+  const {gate}=install(url=>{
+    const uid=url.split('/')[3];calls.push(uid);
+    return hold ? new Promise(resolve=>pending.push({uid,resolve})) : json([row(uid,uid+'.1',['CHEST'])]);
+  });
+  const model=productCreate({owner:()=> 'a',changed(){}});
+  model.sync([study('1.2')]);await model.load();assert.deepEqual(model.get('1.2'),['CHEST']);
+  model.sync(Array.from({length:6},(_,i)=>study('1.'+(i+2))));hold=true;
+  const loading=model.load();const preparation=gate.prepare({});const count=calls.length;
+  assert.equal(model.snapshot().busy,false);
+  pending.splice(0).forEach(({uid,resolve})=>resolve(json([row(uid,uid+'.1',['OLD'])])));await loading;
+  assert.equal(calls.length,count);assert.equal(model.get('1.3'),undefined);
+  hold=false;assert.equal(gate.cancelPreparation(preparation),true);
+  for(let n=0;n<50&&model.snapshot().busy;n++)await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(model.snapshot().verified,6);assert.deepEqual(model.get('1.7'),['CHEST']);
+  hold=true;const late=model.load({refresh:true});const endedCalls=calls.length;
+  pending.shift().resolve(json({code:'AUTH_SESSION_ENDED'},{status:401,headers:{'X-KIN-Auth-Code':'AUTH_SESSION_ENDED'}}));
+  for(let n=0;n<50&&gate.state()==='active';n++)await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(gate.state(),'ending');assert.equal(model.snapshot().busy,false);
+  pending.splice(0).forEach(({uid,resolve})=>resolve(json([row(uid,uid+'.1',['LATE'])])));await late;await model.load();
+  assert.equal(calls.length,endedCalls);assert.equal(model.snapshot().verified,0);
+  for(let i=2;i<8;i++)assert.equal(model.get('1.'+i),undefined);
 });

@@ -3,6 +3,7 @@
 import argparse, json, os, re, secrets, shutil, ssl, subprocess, sys, time
 from pathlib import Path
 from urllib.request import urlopen
+from live_admin_credential import ensure_imported_admin_credential
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = ['viewer_api_test.py', 'e2e/test_measurement_readback.py',
@@ -27,6 +28,85 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'CineE2E', 'VolumeCineE2E',
                  'FindingAPI', 'FindingNavigationE2E', 'FindingWorklistE2E', 'DictationLiveE2E']
 PROFILES = {
+    'u5-session-api': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-api-ci',
+        'project_prefix': 'kin-u5-session-api-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        'suite_timeout': 360,
+        'suites': (
+            ('auth_audit_live.py', 'AuthAuditLive', 'ci-u5-auth-audit'),
+            ('live/session_proxy_live.py', 'SessionProxyLive', 'ci-u5-session-proxy'),
+            ('live/logout_order_live.py', 'LogoutOrderLive', 'ci-u5-logout-order'),
+        ),
+    },
+    'u5-session-draft': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-draft-ci',
+        'project_prefix': 'kin-u5-session-draft-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        'suite_timeout': 900,
+        'suites': (
+            ('live/report_draft_cas_live.py', 'ReportDraftCasLive', 'ci-u5-report-draft-cas'),
+        ),
+    },
+    'u5-session-regression': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-regression-ci',
+        'project_prefix': 'kin-u5-session-regression-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        'suite_timeout': 900,
+        'suites': (
+            ('live/server_contract_regression_live.py', None, 'ci-u5-server-contract-regression'),
+        ),
+    },
+    'u5-session-boundaries': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-boundaries-ci',
+        'project_prefix': 'kin-u5-session-boundaries-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        'suite_timeout': 900,
+        'suites': (
+            ('e2e/test_session_draft_boundaries.py', None, 'ci-u5-session-draft-boundaries'),
+        ),
+    },
+    'u5-session-mutants': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-mutants-ci',
+        'project_prefix': 'kin-u5-session-mutants-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        'suite_timeout': 900,
+        'suites': (
+            ('e2e/test_session_draft_mutants.py', None, 'ci-u5-session-draft-mutants'),
+        ),
+    },
+    'u5-session-browser': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-browser-ci',
+        'project_prefix': 'kin-u5-session-browser-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline.
+        'suite_timeout': 540,
+        'suites': (
+            ('e2e/test_session_worklist_regression.py', None, 'ci-u5-session-worklist-regression'),
+            ('e2e/test_document_session.py', None, 'ci-u5-document-session'),
+        ),
+    },
+    'u5-session-end': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-session-end-ci',
+        'project_prefix': 'kin-u5-session-end-ci-',
+        # Admission ceiling, not a measured hosted duration. Setup/cleanup use the same 1500s deadline. Its own profile
+        # (its own empty runner): SE-02 pauses this stack's Keycloak, which must not reach another suite's stack.
+        'suite_timeout': 900,
+        'suites': (
+            ('live/session_end_live.py', 'SessionEndLive', 'ci-u5-session-end'),
+        ),
+    },
+    'u5-fixups': {
+        'out': ROOT / 'tests/e2e/artifacts/u5-fixups-ci',
+        'project_prefix': 'kin-u5-fixups-ci-',
+        # Admission ceiling, not a measured hosted duration: the five cases took about 3.5 minutes in local whole-module
+        # runs. Setup/cleanup use the same 1500s deadline. The module's load_tests is the allowlist: exactly the five
+        # authored cases that pin the S7-U5 fix round (roam_01, roam_04b, job_03, favorite_view_02, display_04), on
+        # local subclasses that declare nothing - no class is passed, so that selection stays authoritative.
+        'suite_timeout': 900,
+        'suites': (
+            ('e2e/test_u5_fixups.py', None, 'ci-u5-fixups'),
+        ),
+    },
     'image-text': {
         'out': ROOT / 'tests/e2e/artifacts/image-text-ci',
         'project_prefix': 'kin-image-text-ci-',
@@ -530,7 +610,7 @@ def seed_source():
         ds.save_as(dest / f'{z}.dcm', write_like_original=False)
 
 
-def main(profile_name):
+def main(profile_name, credential_provider=None):
     if profile_name not in PROFILES:
         raise RuntimeError('Unknown CI profile')
     profile = PROFILES[profile_name]
@@ -544,6 +624,9 @@ def main(profile_name):
     endpoint = subprocess.check_output(['docker','context','inspect','--format','{{.Endpoints.docker.Host}}']).decode().strip()
     if not endpoint.startswith('unix:///') or os.environ.get('DOCKER_HOST'):
         raise RuntimeError('Requires the runner local Docker socket')
+    # Only this disposable hosted driver can attest the stack it is about to create.
+    # Local drivers must explicitly attest their separately isolated synthetic realm.
+    os.environ['KIN_SYNTHETIC_REALM'] = '1'
     out.mkdir(parents=True, exist_ok=False)
     values = {key: secrets.token_hex(32) for key in ['POSTGRES_PASSWORD','ORTHANC_PASS',
               'KC_ADMIN_PASSWORD','KC_CLIENT_SECRET','KC_WEB_SECRET','KIN_COOKIE_SECRET']}
@@ -590,10 +673,18 @@ def main(profile_name):
                 try:
                     with urlopen('https://localhost:9443'+path, context=ssl._create_unverified_context(), timeout=5) as response:
                         assert response.status == 200
+                        if path == '/api/health':
+                            assert json.loads(response.read()).get('memberRights') == 'ready'
                     break
                 except Exception:
                     if time.monotonic() >= ready_by: raise RuntimeError('Stack readiness deadline')
                     time.sleep(1)
+        provider = credential_provider or ensure_imported_admin_credential
+        password = provider('http://127.0.0.1:8080/auth/admin/realms/kin', values['KC_ADMIN_PASSWORD'])
+        # Add before any further command: run() redacts every captured artifact,
+        # including failure/timeout output and final service logs. Do not add-mask/print it.
+        values['KIN_LIVE_IMPORTED_ADMIN_PASSWORD'] = password
+        env['KIN_LIVE_IMPORTED_ADMIN_PASSWORD'] = password
         run('ports', compose+['ps'])
         for suite, class_name, unit in profile['suites']:
             command, outer_timeout = guarded_profile_run(

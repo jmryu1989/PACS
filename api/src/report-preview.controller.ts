@@ -1,3 +1,4 @@
+import { canReadPreliminary } from './preliminary-reader';
 import { StudyAccessService } from './study-access.service';
 import { Controller, ForbiddenException, Get, Param, Query, Req } from '@nestjs/common';
 import { PrismaService } from './prisma.service';
@@ -53,7 +54,7 @@ export class ReportPreviewController {
     const allowed = (state: any) => {
       if (caller.kind !== 'member' || !caller.sub || !caller.actor || !caller.institution || !state ||
           (state.institutionId !== caller.institution && state.teleInstitutionId !== caller.institution) ||
-          (state.rs === 'P' && state.preDoc !== caller.actor && state.preReviewer !== caller.actor))
+          !canReadPreliminary(state, caller))
         throw new ForbiddenException('판독문 미리보기에 접근할 수 없습니다');
     };
     allowed(await this.prisma.studyState.findUnique({ where: { uid } }));

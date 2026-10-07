@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -152,11 +153,16 @@ class ClinicianPolicyLive(unittest.TestCase):
         if cls.critical_study is not None:
             drop_critical_results(cls.critical_study.uid, set(cls.stack.user_ids.values()) | set(cls.owned_users))
 
-    # ── owned member helpers (no group => PENDING, two groups => INVALID) ──
+    # ── owned member helpers (no institution or a refused multi-institution command => PENDING) ──
 
     def create_member(self, logical: str, roles: list[str], groups: list[str]) -> tuple[str, str, str]:
         username = f"kin-test-{uuid.uuid4().hex[:12]}-{logical}"
         self.assertRegex(username, OWNED_USERNAME)
+        template_owner = username + "@local.test"
+        for table, column in (("ReadingTemplate", "owner"), ("UserFilter", "owner"),
+                              ("UserFilterCollection", "owner"), ("AuditLog", "actor")):
+            self.assertEqual(psql(f'SELECT count(*) FROM "{table}" WHERE {column}={lit(template_owner)}'), ["0"],
+                             "temporary actor already has data; refusing reuse")
         password = uuid.uuid4().hex + "Aa1!"
         created = self.stack.kc_admin("POST", "/users", {
             "username": username, "enabled": True, "emailVerified": True,
@@ -165,36 +171,26 @@ class ClinicianPolicyLive(unittest.TestCase):
         self.assertEqual(created.status, 201, created.text)
         user_id = str(created.body)
         self.owned_users.append(user_id)
+        # The existing addClassCleanup runs even after an assertion/setup failure. /prefs can seed templates before
+        # this member is revoked; register its proven-empty owner before any subsequent fixture step can fail.
+        self.stack.template_owners.add(template_owner)
         reset = self.stack.kc_admin("PUT", f"/users/{quote(user_id)}/reset-password", {
             "type": "password", "value": password, "temporary": False,
         })
         self.assertEqual(reset.status, 204, reset.text)
-        for role_name in roles:
-            role = self.stack.kc_admin("GET", "/roles/" + quote(role_name))
-            self.assertEqual(role.status, 200, role.text)
-            assigned = self.stack.kc_admin("POST", f"/users/{quote(user_id)}/role-mappings/realm", [role.body])
-            self.assertEqual(assigned.status, 204, assigned.text)
-        for group in groups:
-            found = self.stack.kc_admin("GET", "/groups?search=" + quote(group))
-            self.assertEqual(found.status, 200, found.text)
-            exact = [row for row in found.body if row.get("name") == group]
-            self.assertEqual(len(exact), 1, group)
-            joined = self.stack.kc_admin("PUT", f"/users/{quote(user_id)}/groups/{quote(exact[0]['id'])}")
-            self.assertEqual(joined.status, 204, joined.text)
+        if len(groups) == 1 and roles:
+            self.stack.set_member_rights(user_id, institution=groups[0], roles=roles, enabled=True, verificationOverride=True)
+        else:
+            # Invalid requested scope is rejected; the unregistered identity keeps waiting without rights.
+            if len(groups) > 1:
+                invalid = self.stack.request("PATCH", f"/admin/users/{quote(user_id)}", "jmryu",
+                                             {"institution": groups, "roles": roles, "enabled": True})
+                self.assertEqual(invalid.status, 400, "multiple institutions cannot become DB rights")
         return user_id, username, password
 
     def grant(self, username: str, password: str) -> str:
-        data = urlencode({
-            "client_id": self.stack.test_client_id, "grant_type": "password",
-            "username": username, "password": password,
-        }).encode("ascii")
-        request = Request(self.stack.keycloak, data=data,
-                          headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
-        try:
-            with self.stack._open(request) as response:
-                return json.loads(response.read().decode("utf-8"))["access_token"]
-        except HTTPError as error:
-            self.fail(f"password grant failed for {username}: {error.code} {error.read()[:200]!r}")
+        time.sleep(1.05)  # Authenticate in a later second after a product member command.
+        return self.stack.interactive_token(username, password)
 
     def bearer(self, method: str, path: str, token: str, body=None):
         return self.stack.bearer_request(method, path, token, body)
@@ -268,7 +264,7 @@ class ClinicianPolicyLive(unittest.TestCase):
 
     def test_02_pending_and_invalid_clinician_keep_membership_codes_and_logout(self) -> None:
         for logical, groups, code in (("cpending", [], "INSTITUTION_PENDING"),
-                                      ("cinvalid", ["hallym", "kin-center"], "INSTITUTION_INVALID")):
+                                      ("cinvalid", ["hallym", "kin-center"], "INSTITUTION_PENDING")):
             with self.subTest(logical=logical):
                 _user_id, username, password = self.create_member(logical, ["clinician"], groups)
                 token = self.grant(username, password)
@@ -286,13 +282,13 @@ class ClinicianPolicyLive(unittest.TestCase):
         self.assertEqual((pending.status, pending.body.get("code")), (403, "INSTITUTION_PENDING"), pending.text)
 
         rejected = self.stack.request("PATCH", path, "jmryu", {
-            "approvalState": "APPROVED", "institution": "hallym", "roles": ["clinicians"],
+            "approvalState": "APPROVED", "enabled": True, "institution": "hallym", "roles": ["clinicians"],
         })
         self.assertEqual(rejected.status, 400, rejected.text)
         self.assertIn("허용되지 않은 역할", rejected.body.get("message", ""))
 
         approved = self.stack.request("PATCH", path, "jmryu", {
-            "approvalState": "APPROVED", "institution": "hallym", "roles": ["clinician"],
+            "approvalState": "APPROVED", "enabled": True, "institution": "hallym", "roles": ["clinician"],
         })
         self.assertEqual(approved.status, 200, approved.text)
         self.assertEqual((approved.body["approvalState"], approved.body["institution"], approved.body["roles"], approved.body["enabled"]),
@@ -320,8 +316,8 @@ class ClinicianPolicyLive(unittest.TestCase):
         self.assertEqual((revoked.body["approvalState"], revoked.body["institution"], revoked.body["roles"]), ("PENDING", None, []))
         token = self.grant(username, password)
         back = self.bearer("GET", "/me", token)
-        self.assertEqual((back.status, back.body.get("code")), (403, "INSTITUTION_PENDING"), back.text)
-        self.assertEqual(self.bearer("GET", "/prefs", token).status, 403)
+        self.assertEqual((back.status, back.body.get("code")), (401, "AUTH_SESSION_ENDED"), back.text)
+        self.assertEqual(self.bearer("GET", "/prefs", token).status, 401)
 
     def test_04_mixed_and_legacy_roles_keep_their_existing_paths(self) -> None:
         for user in ("clinician-radiologist", "clinician-technician"):

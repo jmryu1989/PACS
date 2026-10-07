@@ -5,6 +5,10 @@ from pathlib import Path
 import unittest
 
 from playwright.sync_api import expect, sync_playwright
+try:
+    from viewer_session_fixture import install_viewer_session
+except ImportError:
+    from tests.viewer_session_fixture import install_viewer_session
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "worklist-v0" / "hpacs-lite" / "viewer-dicom-pdf.js"
@@ -24,12 +28,17 @@ const owner={kind:'member',institution:'hospital',sub:'reader'},routes={
  '/api/studies':()=>({studies:[{uid:'1.2',id:'PID-001'}]}),
  'PDF_ROUTE':()=>({status:200,body:null,contentType:'application/pdf'})
 };
-const response=(status,value,url,contentType='application/json')=>({ok:status>=200&&status<300,status,headers:{get:name=>name.toLowerCase()==='content-type'?contentType:null},body:{cancel:()=>{cancels.push(url);return holdCancel&&url==='PDF_ROUTE'?new Promise(resolve=>cancelHeld.push(resolve)):Promise.resolve()}},json:async()=>structuredClone(value)});
-window.fetch=(url,options={})=>{requests.push({url,method:options.method||'GET',body:options.body?JSON.parse(options.body):null});
- const done=()=>{const configured=routes[url],value=typeof configured==='function'?configured():configured;return response(value?.status||200,value?.body??value,url,value?.contentType);};
+const response=(status,value,url,contentType='application/json',headers={})=>new Response(new ReadableStream({start(controller){
+ const finish=()=>{controller.enqueue(new TextEncoder().encode(contentType==='application/pdf'?'%PDF-1.4\n%%EOF':JSON.stringify(value)));controller.close()};
+ if(holdCancel&&url==='PDF_ROUTE')cancelHeld.push(finish);else finish();},cancel(){cancels.push(url)}}),{status,headers:{'Content-Type':contentType,...headers}});
+const nativeFetch=window.fetch.bind(window);
+window.fetch=(url,options={})=>{if(String(url).startsWith('blob:'))return nativeFetch(url,options);if(!new Headers(options.headers).get('X-KIN-Session'))throw Error('Unbound protected request');requests.push({url,method:options.method||'GET',body:options.body?JSON.parse(options.body):null});
+ const done=()=>{const configured=routes[url],value=typeof configured==='function'?configured():configured;return response(value?.status||200,value?.body??value,url,value?.contentType,value?.headers);};
  if(holdPath===url)return new Promise((resolve,reject)=>{const item={resolve:()=>resolve(done()),reject};held.push(item);if(!ignoreAbort)options.signal?.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});});return Promise.resolve(done());};
 window.open=()=>{if(blockPopup)return null;const popup={closed:false,opener:{unsafe:true},navigated:null,close(){this.closed=true},location:{replace(value){if(throwNavigation)throw Error('synthetic navigation detail');popup.navigated=value;}}};popups.push(popup);return popup;};
-const state={activeViewportId:'vp1',viewports:new Map([['vp1',view]])};
+let state={activeViewportId:'vp1',viewports:new Map([['vp1',view]])};
+// OHIF's grid provider hands the service a new state object after its event (React effect), without another event.
+window.commitLater=(next,ms)=>setTimeout(()=>{displaySet=next.displaySet||displaySet;view={viewportId:'vp1',displaySetInstanceUIDs:[displaySet.displaySetInstanceUID]};state={activeViewportId:'vp1',viewports:new Map([['vp1',view]])};},ms);
 window.services={viewportGridService:{EVENTS:{ACTIVE:'active',GRID:'grid'},getState:()=>state,getActiveViewportId:()=>state.activeViewportId,subscribe:(_,fn)=>{subscribers.push(fn);return {unsubscribe(){subscribers=subscribers.filter(x=>x!==fn)}}}},displaySetService:{getDisplaySetByUID:id=>id===displaySet.displaySetInstanceUID?displaySet:null}};
 window.emit=()=>subscribers.forEach(fn=>fn());
 window.mountPdf=(options={})=>{window.pdfController=KinDicomPdf.create(services,options);pdfController.mount();};
@@ -76,12 +85,50 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         self.page = self.browser.new_page()
         self.page.route(URL, lambda route: route.fulfill(body=HARNESS, content_type="text/html"))
         self.page.goto(URL)
+        self.unbound = install_viewer_session(self.page)
         self.page.add_script_tag(path=str(MODULE))
         self.page.evaluate("mountPdf()")
         expect(self.page.locator("#kin-source-pdf-open")).to_be_enabled()
 
     def tearDown(self):
         self.page.close()
+        self.assertEqual(self.unbound, [])
+
+    def test_coded_refusal_all_pdf_reads_allow_retry_plain_refusal_disables(self):
+        button = self.page.locator('#kin-source-pdf-open')
+        status = self.page.locator('#kin-source-pdf-status')
+        for phase in ('resolve', 'verify', 'bytes'):
+            for code in ('AUTH_IDP_UNAVAILABLE', 'AUTH_SESSION_BUSY', 'AUTH_STORAGE_FAILURE', None):
+                with self.subTest(phase=phase, code=code):
+                    self.page.evaluate("""({phase,code,pdf})=>{
+                      pdfController.stop();
+                      routes['/api/dicom/lookup']=()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'});
+                      routes[pdf]=()=>({status:200,body:null,contentType:'application/pdf'});
+                      window.refusalPath=phase==='bytes'?pdf:'/api/dicom/lookup';
+                      window.good=routes[refusalPath];window.bad=()=>({status:403,headers:code?{'X-KIN-Auth-Code':code}:{}});
+                      if(phase==='resolve')routes[refusalPath]=bad;
+                      mountPdf();
+                    }""", {'phase': phase, 'code': code, 'pdf': PDF})
+                    if phase != 'resolve':
+                        expect(button).to_be_enabled()
+                        self.page.evaluate('routes[refusalPath]=bad')
+                        button.click()
+                    if code:
+                        expect(status).to_contain_text('연결을 확인하지 못했습니다')
+                        expect(status).not_to_contain_text('권한')
+                        expect(button).to_have_text('Retry Source PDF')
+                        expect(button).to_be_enabled()
+                        self.page.evaluate('routes[refusalPath]=good')
+                        button.click()
+                        if phase == 'resolve':
+                            expect(button).to_have_text('Open Source PDF')
+                        else:
+                            expect(self.page.get_by_title('Source PDF', exact=True)).to_be_visible()
+                            self.page.get_by_role('button', name='Close', exact=True).click()
+                    else:
+                        expect(status).to_contain_text('권한')
+                        expect(button).to_be_disabled()
+                        expect(button).not_to_have_text('Retry Source PDF')
 
     def test_selected_native_pdf_opens_exact_verified_source_and_preserves_embed(self):
         panel = self.page.locator("#kin-source-pdf")
@@ -98,8 +145,12 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         result = self.page.evaluate("()=>({requests,popups:popups.map(p=>({closed:p.closed,opener:p.opener,navigated:p.navigated}))})")
         self.assertEqual(["/api/me", "/api/dicom/lookup", "/api/studies", PDF, "/api/me"], [r["url"] for r in result["requests"]])
         self.assertEqual({"studyUid": "1.2", "sopUid": "1.4"}, result["requests"][1]["body"])
-        self.assertEqual([{"closed": False, "opener": None, "navigated": PDF}], result["popups"])
-        self.assertEqual([PDF], self.page.evaluate("cancels"))
+        self.assertEqual([], result['popups'])
+        url = self.page.get_by_title('Source PDF', exact=True).get_attribute('src')
+        self.assertTrue(url.startswith('blob:'))
+        self.assertEqual(self.page.evaluate('u=>fetch(u).then(r=>r.text())', url), '%PDF-1.4\n%%EOF')
+        self.page.get_by_role('button', name='Close', exact=True).click()
+        self.assertFalse(self.page.evaluate('u=>KinViewerResource.has(u)', url))
 
     def test_open_rejects_a_lookup_id_spliced_after_source_resolution(self):
         initial = self.page.evaluate("requests.filter(r=>r.url==='/api/dicom/lookup').map(r=>r.body)")
@@ -107,8 +158,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         self.page.evaluate("routes['/api/dicom/lookup']=()=>({id:'11111111-22222222-33333333-44444444-55555555'})")
         self.page.locator("#kin-source-pdf-open").click()
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("원본 PDF 식별을 확인할 수 없습니다")
-        self.assertTrue(self.page.evaluate("popups.at(-1).closed"))
-        self.assertIsNone(self.page.evaluate("popups.at(-1).navigated"))
+        self.assertEqual(0, self.page.locator('dialog[open]').count())
         self.assertNotIn(PDF, self.page.evaluate("requests.map(r=>r.url)"))
 
     def test_late_source_lookup_cannot_replace_a_new_selected_pdf(self):
@@ -128,6 +178,38 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         self.page.wait_for_timeout(0)
         expect(self.page.locator("#kin-source-pdf [data-title]")).to_have_text("New PDF")
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Ready")
+
+    def test_panel_follows_a_grid_state_that_arrives_after_its_event(self):
+        # OHIF announces a grid change before its getState() returns the new cells (live dicom_pdf 02/04). A person who
+        # puts another document, or a supported one after an unsupported one, in the cell sees that one in the panel.
+        title, status = self.page.locator("#kin-source-pdf [data-title]"), self.page.locator("#kin-source-pdf-status")
+        button = self.page.locator("#kin-source-pdf-open")
+        late = ("makeSet({displaySetInstanceUID:'late-pdf',SOPInstanceUID:'1.5',SeriesDescription:'Late PDF',"
+                "pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),"
+                "instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',"
+                "MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}})")
+        with self.subTest("another document"):
+            self.page.evaluate("() => { emit(); commitLater({displaySet:" + late + "}, 200); }")
+            expect(title).to_have_text("Late PDF"); expect(status).to_contain_text("Ready"); expect(button).to_be_enabled()
+        with self.subTest("a supported document after an unsupported one"):
+            self.page.evaluate("""() => { displaySet=makeSet({displaySetInstanceUID:'text-mime'});
+              displaySet.instance.MIMETypeOfEncapsulatedDocument='text/plain'; view.displaySetInstanceUIDs=['text-mime']; emit(); }""")
+            expect(status).to_have_text("선택한 원본 PDF를 지원하지 않거나 식별 정보가 일치하지 않습니다."); expect(button).to_be_disabled()
+            self.page.evaluate("""() => { emit();
+              commitLater({displaySet:makeSet({displaySetInstanceUID:'supported-pdf',SeriesDescription:'Supported PDF'})}, 200); }""")
+            expect(title).to_have_text("Supported PDF"); expect(status).to_contain_text("Ready"); expect(button).to_be_enabled()
+
+    def test_a_new_grid_state_with_the_same_selection_leaves_the_open_document_alone(self):
+        button, patient = self.page.locator("#kin-source-pdf-open"), self.page.locator("#kin-source-pdf [data-patient]")
+        button.click(); dialog = self.page.locator("dialog[open]"); expect(dialog).to_have_count(1)
+        expect(patient).to_have_text("Verified Patient ID: PID-001")
+        url = self.page.get_by_title('Source PDF', exact=True).get_attribute('src'); before = self.page.evaluate("requests.length")
+        # An event, then a new state object holding the same cells (OHIF re-renders, e.g. when a viewport becomes ready).
+        self.page.evaluate("() => { emit(); setTimeout(() => { state={activeViewportId:'vp1',viewports:new Map([['vp1',{...view}]])}; }, 100); }")
+        self.page.wait_for_timeout(400)
+        expect(dialog).to_have_count(1); self.assertTrue(self.page.evaluate("u=>KinViewerResource.has(u)", url))
+        self.assertEqual(self.page.evaluate("requests.length"), before, "the same selection is not checked again")
+        expect(patient).to_have_text("Verified Patient ID: PID-001"); expect(button).to_be_enabled()
 
     def test_source_timeout_exposes_retry_and_ignores_the_late_provider(self):
         self.page.evaluate("""() => {
@@ -153,7 +235,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         }""")
         button = self.page.locator("#kin-source-pdf-open")
         expect(button).to_be_enabled()
-        self.page.evaluate("pdfController.nativeFailure(Error('Synthetic native timeout'),displaySet,displaySet.pdfUrl)")
+        self.page.evaluate("pdfController.nativeFailure(Object.assign(Error('Synthetic native timeout'),{retryable:true}),displaySet,displaySet.pdfUrl)")
         self.page.evaluate("emit()")
         expect(button).to_have_text("Retry Source PDF")
         expect(button).to_be_enabled()
@@ -187,7 +269,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
           mountPdf({onRetry:(value,pdfUrl)=>nativeRetries.push([value.displaySetInstanceUID,pdfUrl])});
         }""")
         button=self.page.locator("#kin-source-pdf-open");expect(button).to_be_enabled()
-        self.page.evaluate("pdfController.nativeFailure(Error('A native failure'),displaySet,displaySet.pdfUrl)")
+        self.page.evaluate("pdfController.nativeFailure(Object.assign(Error('A native failure'),{retryable:true}),displaySet,displaySet.pdfUrl)")
         button.click();expect(button).to_be_disabled();self.assertEqual(1,len(self.page.evaluate("nativeRetries")))
         self.page.evaluate("""() => {
           displaySet=makeSet({displaySetInstanceUID:'source-b',SOPInstanceUID:'1.5',SeriesDescription:'Source B',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});
@@ -195,7 +277,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         }""")
         expect(button).to_have_text("Open Source PDF");expect(button).to_be_enabled()
         button.click();expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Opened source PDF")
-        self.assertEqual(PDF,self.page.evaluate("popups.at(-1).navigated"))
+        self.assertTrue(self.page.get_by_title('Source PDF', exact=True).get_attribute('src').startswith('blob:'))
 
     def test_related_role_and_invalid_mime_identity_or_url_fail_closed(self):
         self.page.evaluate("""() => {displaySet=makeSet({displaySetInstanceUID:'ds-related',StudyInstanceUID:'1.9',SeriesInstanceUID:'1.8',SOPInstanceUID:'1.7',SeriesDescription:'Prior PDF',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.9/series/1.8/instances/1.7/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.9',SeriesInstanceUID:'1.8',SOPInstanceUID:'1.7',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});view.displaySetInstanceUIDs=['ds-related'];emit();}""")
@@ -224,22 +306,21 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         for route in (
             {"status": 400, "body": {"error": "malformed"}, "contentType": "application/json"},
             {"status": 200, "body": "not pdf", "contentType": "application/json"},
+            {"status": 206, "body": "partial pdf", "contentType": "application/pdf"},
         ):
             with self.subTest(route=route):
                 self.page.evaluate("([url,value])=>routes[url]=value", [PDF, route])
                 button.click()
-                expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("원본 PDF 응답을 확인할 수 없습니다")
-                self.assertTrue(self.page.evaluate("popups.at(-1).closed"))
-                self.assertIsNone(self.page.evaluate("popups.at(-1).navigated"))
-                self.assertEqual(PDF, self.page.evaluate("cancels.at(-1)"))
+                message = 'PDF 형식이 아닙니다' if route['status']==200 else '원본 자료 응답을 확인할 수 없습니다'
+                expect(self.page.locator("#kin-source-pdf-status")).to_contain_text(message)
+                self.assertEqual(0, self.page.locator('dialog[open]').count())
 
         self.page.evaluate("([url])=>{routes[url]={status:200,body:null,contentType:'application/pdf'};holdCancel=true}", [PDF])
         button.click(); self.page.wait_for_function("cancelHeld.length===1")
         self.page.evaluate("""() => {displaySet=makeSet({displaySetInstanceUID:'new-after-cancel',SOPInstanceUID:'1.5',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});view.displaySetInstanceUIDs=['new-after-cancel'];emit();holdCancel=false;cancelHeld.shift()();}""")
         expect(button).to_be_enabled()
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Ready")
-        self.assertTrue(self.page.evaluate("popups.at(-1).closed"))
-        self.assertIsNone(self.page.evaluate("popups.at(-1).navigated"))
+        self.assertEqual(0, self.page.locator('dialog[open]').count())
 
     def test_source_or_owner_change_during_verification_closes_only_pending_window(self):
         self.page.evaluate("holdPath='/api/dicom/lookup'")
@@ -247,18 +328,15 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         button.click()
         self.page.wait_for_function("held.length===1")
         button.click(force=True)
-        self.assertEqual(1, self.page.evaluate("popups.length"), "a busy click cannot create a phantom second window")
+        self.assertEqual(0, self.page.locator('dialog').count(), 'verification has not displayed a document')
         self.page.evaluate("() => {displaySet=makeSet({displaySetInstanceUID:'replacement',SOPInstanceUID:'1.5',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});view.displaySetInstanceUIDs=['replacement'];emit();holdPath=null;}")
-        self.assertTrue(self.page.evaluate("popups[0].closed"))
-        self.assertIsNone(self.page.evaluate("popups[0].navigated"))
+        self.assertEqual(0, self.page.locator('dialog[open]').count())
         expect(button).to_be_enabled()
 
         self.page.evaluate("holdPath=null;let calls=0;routes['/api/me']=()=>++calls===2?{kind:'member',institution:'other',sub:'reader'}:owner")
         button.click()
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("계정이 변경")
-        outcome = self.page.evaluate("()=>popups.at(-1)")
-        self.assertTrue(outcome["closed"])
-        self.assertIsNone(outcome["navigated"])
+        self.assertEqual(0, self.page.locator('dialog[open]').count())
 
     def test_late_old_resolve_or_reject_cannot_close_or_overwrite_new_pdf(self):
         button = self.page.locator("#kin-source-pdf-open")
@@ -269,8 +347,8 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Opened source PDF")
         self.page.evaluate("held.shift().resolve()")
         self.page.wait_for_timeout(0)
-        first = self.page.evaluate("()=>popups.map(p=>({closed:p.closed,navigated:p.navigated}))")
-        self.assertEqual([{"closed": True, "navigated": None}, {"closed": False, "navigated": PDF}], first)
+        self.assertEqual(1, self.page.locator('dialog[open]').count())
+        self.assertTrue(self.page.get_by_title('Source PDF', exact=True).get_attribute('src').startswith('blob:'))
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Opened source PDF")
 
         self.page.evaluate("""() => {displaySet=makeSet();view.displaySetInstanceUIDs=['ds-pdf'];emit();}""")
@@ -279,8 +357,8 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         expect(button).to_be_enabled(); button.click(); expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Opened source PDF")
         self.page.evaluate("held.shift().reject(Error('late old rejection'))")
         self.page.wait_for_timeout(0)
-        last = self.page.evaluate("()=>popups.slice(-2).map(p=>({closed:p.closed,navigated:p.navigated}))")
-        self.assertEqual([{"closed": True, "navigated": None}, {"closed": False, "navigated": PDF}], last)
+        self.assertEqual(1, self.page.locator('dialog[open]').count())
+        self.assertTrue(self.page.get_by_title('Source PDF', exact=True).get_attribute('src').startswith('blob:'))
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Opened source PDF")
 
     def test_failed_owner_check_remains_visible_after_grid_refresh(self):
@@ -290,36 +368,55 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         expect(self.page.locator('#kin-source-pdf-status')).to_contain_text('로그인 세션을 확인할 수 없습니다')
         expect(self.page.locator('#kin-source-pdf-open')).to_be_disabled()
 
-    def test_popup_denial_closed_window_http_failure_and_dispose_are_bounded(self):
-        button = self.page.locator("#kin-source-pdf-open")
-        self.page.evaluate("blockPopup=true")
-        before = self.page.evaluate("requests.length")
-        button.click()
-        expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("팝업이 차단")
-        self.assertEqual(before, self.page.evaluate("requests.length"))
+    def test_native_pdf_permanent_failures_are_visible_without_retry_after_grid_refresh(self):
+        self.page.add_script_tag(path=str(CONFIG))
+        for path, status, mime, message in [
+            (PDF,403,'application/json','접근이 거절'),
+            (PDF,404,'application/json','찾을 수 없습니다'),
+            (PDF,200,'text/plain','PDF 형식이 아닙니다'),
+            ('/api/dicom/lookup',403,'application/json','접근이 거절'),
+        ]:
+            with self.subTest(path=path,status=status,mime=mime):
+                self.page.evaluate("""([path,status,mime])=>{
+                  window.pdfExtension?.onModeExit();pdfController.stop();
+                  routes['/api/dicom/lookup']=()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'});
+                  routes[path]={status,body:{},contentType:mime};
+                  displaySet=makeSet();window.nativeOutcome='pending';
+                  const entry={component:props=>{props.displaySets[0].pdfUrl.then(url=>{
+                    document.querySelector('#native-pdf').data=url;nativeOutcome='url';},()=>nativeOutcome='rejected');return {key:props.key};}};
+                  window.pdfExtension=kinCreateDicomPdf();pdfExtension.preRegistration({servicesManager:{services},extensionManager:{getModuleEntry:()=>entry}});
+                  pdfExtension.onModeEnter();entry.component({displaySets:[displaySet]});
+                }""",[path,status,mime])
+                self.page.wait_for_function("nativeOutcome==='rejected'")
+                expect(self.page.locator('#kin-source-pdf-status')).to_contain_text(message)
+                self.page.evaluate('emit()')
+                expect(self.page.locator('#kin-source-pdf-status')).to_contain_text(message)
+                expect(self.page.locator('#kin-source-pdf')).to_be_visible()
+                expect(self.page.locator('#kin-source-pdf-open')).to_be_disabled()
+                self.assertNotIn('Retry',self.page.locator('#kin-source-pdf-open').inner_text())
+                self.assertIsNone(self.page.locator('#native-pdf').get_attribute('data'))
 
-        self.page.evaluate("blockPopup=false;holdPath='/api/me'")
-        button.click(); self.page.wait_for_function("held.length===1")
-        self.page.evaluate("popups.at(-1).close();held.shift().resolve();holdPath=null")
-        expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("PDF 창이 닫혀")
-        self.assertIsNone(self.page.evaluate("popups.at(-1).navigated"))
-
+    def test_document_close_http_failure_and_dispose_are_bounded(self):
+        button = self.page.locator('#kin-source-pdf-open')
         self.page.evaluate("routes['/api/dicom/lookup']={status:403,body:{}}")
         button.click()
-        expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("접근 권한")
-        self.assertTrue(self.page.evaluate("popups.at(-1).closed"))
-
-        self.page.evaluate("routes['/api/dicom/lookup']=()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'});throwNavigation=true")
+        expect(self.page.locator('#kin-source-pdf-status')).to_contain_text('접근 권한')
+        self.assertEqual(0, self.page.locator('dialog').count())
+        expect(button).to_be_disabled()
+        # A fresh selection rechecks access; a definitive refusal has no retry button.
+        self.page.evaluate("routes['/api/dicom/lookup']=()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'});displaySet=makeSet({displaySetInstanceUID:'reselected'});view.displaySetInstanceUIDs=['reselected'];emit()")
+        expect(button).to_be_enabled()
         button.click()
-        expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("PDF 창을 열 수 없습니다")
-        expect(self.page.locator("#kin-source-pdf [data-patient]")).to_be_empty()
-        self.assertTrue(self.page.evaluate("popups.at(-1).closed"))
-
-        self.page.evaluate("holdPath='/api/me'")
-        button.click(); self.page.wait_for_function("held.length===1")
-        self.page.evaluate("pdfController.stop()")
-        expect(self.page.locator("#kin-source-pdf")).to_have_count(0)
-        self.assertTrue(self.page.evaluate("popups.at(-1).closed"))
+        expect(self.page.locator('dialog')).to_be_visible()
+        url = self.page.get_by_title('Source PDF', exact=True).get_attribute('src')
+        self.page.get_by_role('button', name='Close', exact=True).click()
+        self.assertFalse(self.page.evaluate('u=>KinViewerResource.has(u)', url))
+        button.click()
+        expect(self.page.locator('dialog')).to_be_visible()
+        url = self.page.get_by_title('Source PDF', exact=True).get_attribute('src')
+        self.page.evaluate('pdfController.stop()')
+        self.assertEqual(0, self.page.locator('dialog').count())
+        self.assertFalse(self.page.evaluate('u=>KinViewerResource.has(u)', url))
 
     def test_config_loader_uses_factory_and_rejects_late_mode_entry(self):
         page = self.browser.new_page()
@@ -348,8 +445,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         self.page.locator('#kin-source-pdf-open').click();self.page.wait_for_function('held.length===1')
         self.page.evaluate("()=>{expirePdfRequest();held.shift().resolve();holdPath=null;window.setTimeout=originalTimeout;}")
         expect(self.page.locator('#kin-source-pdf-open')).to_be_enabled()
-        self.assertTrue(self.page.evaluate('popups[0].closed'))
-        self.assertIsNone(self.page.evaluate('popups[0].navigated'))
+        self.assertEqual(0, self.page.locator('dialog').count())
 
 
 if __name__ == "__main__":

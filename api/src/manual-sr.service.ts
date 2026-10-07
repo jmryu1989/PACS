@@ -1,3 +1,4 @@
+import { canReadPreliminary } from './preliminary-reader';
 import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, ServiceUnavailableException, GoneException, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -12,7 +13,7 @@ const denied = (): never => { throw new ForbiddenException('이 측정의 SR을 
 const conflict = (): never => { throw new ConflictException('측정 또는 SR 요청이 변경되었습니다. 최신 측정을 확인하세요'); };
 function access(study: any, c: Caller) {
   if (c.kind !== 'member' || !c.sub || !c.actor || !c.roles.includes('radiologist') || !c.institution ||
-      study?.institutionId !== c.institution || (study.rs === 'P' && study.preDoc !== c.actor && study.preReviewer !== c.actor)) denied();
+      study?.institutionId !== c.institution || !canReadPreliminary(study, c)) denied();
 }
 function selection(raw: Buffer) {
   const x = viewerJson(raw);

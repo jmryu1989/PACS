@@ -4,6 +4,7 @@ import os,unittest,json
 from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_workspace import ReadingWorkspaceE2E
+from viewer_session import end_document
 
 class ReadingAppearanceE2E(ReadingWorkspaceE2E):
  def settings(self,p):
@@ -54,8 +55,8 @@ class ReadingAppearanceE2E(ReadingWorkspaceE2E):
   expect(p.locator('#reading-appearance-status')).to_contain_text('이 창에만 적용')
   self.assertEqual(self.stored(p),{})
   box=p.locator('#reading-appearance-dialog').bounding_box();self.assertGreaterEqual(box['x'],0);self.assertLessEqual(box['x']+box['width'],800)
-  p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-  expect(p.locator('#reading-appearance-dialog')).not_to_be_visible();expect(p.locator('#reading-appearance-open')).to_be_disabled()
+  end_document(p)
+  expect(p.locator('#reading-appearance-dialog')).not_to_be_visible();self.assertFalse(p.locator('#reading-appearance-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog');expect(p.locator('#reading-appearance-open')).to_be_disabled()
   p.evaluate("()=>{const s=document.querySelector('#reading-text-current');s.value='18';s.dispatchEvent(new Event('change'));}")
   expect(p.locator('#findings')).to_have_css('font-size','12px');self.assertEqual(self.stored(p),{})
 

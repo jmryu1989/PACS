@@ -81,7 +81,7 @@ const pinnedText = v => 'SYNTHETIC-PINNED-V' + v;
 const DATABASE = 'kin_critical_result_test';
 // Every table a case writes, directly or through the service; CASCADE empties whatever else references them.
 const OWNED_TABLES = ['CriticalResultEvent', 'CriticalResultReceipt', 'CriticalResult', 'AuditLog', 'ReportDraft', 'ReportVersion',
-  'Report', 'StudyAccessRevision', 'StudyAccessPolicy', 'StudyState', 'Institution'];
+  'Report', 'StudyAccessRevision', 'StudyAccessPolicy', 'StudyState', 'Institution', 'MemberRights'];
 let prepared = null;
 
 /** The one PrismaService of this file, on a database this file migrated itself from empty. */
@@ -183,9 +183,10 @@ async function world({ policies = {} } = {}) {
   const txView = tx => view('tx', tx, w.onRecordCreate ? { criticalResult: {
     create: async args => { await w.onRecordCreate(tx, args); return tx.criticalResult.create(args); },
     update: args => tx.criticalResult.update(args) } } : {});
-  const prisma = view('root', base, { $transaction: async (fn, options) => {
+  const prisma = view('root', base, { memberRights: { findUnique: async args => { if(w.rightsFail) throw Error('SYNTHETIC rights unavailable'); return base.memberRights.findUnique(args); } }, $transaction: async (fn, options) => {
     transactions.push(options);
     return base.$transaction(async tx => {
+      if(w.beforeTx) { const work=w.beforeTx;w.beforeTx=null;await work(); }
       log.push('tx:start');
       try {
         const out = await fn(txView(tx));
@@ -200,8 +201,19 @@ async function world({ policies = {} } = {}) {
   w.users = new Map(Object.keys(PEOPLE).map(name => [SUBS[name], { id: SUBS[name], username: 'syn-' + name.toLowerCase(),
     email: actorOf(name), emailVerified: true, firstName: 'SYNTHETIC', lastName: name, enabled: true, serviceAccountClientId: null,
     groups: [PEOPLE[name].group ?? INST], roles: [...PEOPLE[name].roles] }]));
+  // D623: the provider remains a roster. The durable DB member is the permission authority.
+  for(const user of w.users.values()) await base.memberRights.create({data:{sub:user.id,username:user.username,
+    email:user.email,emailVerified:true,name:[user.lastName,user.firstName].join(' '),approved:true,suspended:false,
+    institution:user.groups[0],roles:user.roles}});
+  w.rights = (name,data) => base.memberRights.update({where:{sub:SUBS[name]},data:{...data,version:{increment:1},newAuthAfter:new Date()}});
+  w.rightsFail=false;
   w.kcFail = false;
   const keycloak = {
+    usersInGroupWithRole: async (institution, role) => {
+      log.push('kc:usersInGroupWithRole'); if (w.kcFail) throw new Error('SYNTHETIC Keycloak down');
+      return [...w.users.values()].filter(u => u.enabled && u.groups.includes(institution) && u.roles.includes(role))
+        .map(u => ({ sub: u.id, id: u.email || u.username, username: u.username, name: [u.lastName,u.firstName].join(' ') }));
+    },
     getUser: async sub => { log.push('kc:getUser'); if (w.kcFail) throw new Error('SYNTHETIC Keycloak down'); const u = w.users.get(sub); return u ? structuredClone(u) : null; },
     institutionMembers: async institution => { log.push('kc:institutionMembers'); if (w.kcFail) throw new Error('SYNTHETIC Keycloak down');
       return [...w.users.values()].filter(u => u.enabled && u.groups.length === 1 && u.groups[0] === institution).map(u => structuredClone(u)); },
@@ -375,7 +387,7 @@ test('C2: create, read (the pinned body), explicit ACK; reads never acknowledge 
     replacement: null, at: created.applied.at });
   const row = await w.record(id(11));
   assert.deepEqual([row.senderSub, row.senderActor, row.senderName, row.recipientSub, row.recipientActor, row.recipientName, row.recipientRole],
-    [SUBS.S, actorOf('S'), 'SYNTHETIC S', SUBS.P, actorOf('P'), 'P SYNTHETIC', 'clinician'], 'attribution from the token and Keycloak');
+    [SUBS.S, actorOf('S'), 'SYNTHETIC S', SUBS.P, actorOf('P'), 'P SYNTHETIC', 'clinician'], 'attribution from the request identity and DB member');
   assert.deepEqual([row.institutionId, row.senderInstitutionId, row.sourceVersion, row.sourceAction], [INST, INST, v1, 'approve']);
   assert.deepEqual([row.origName, row.origPatientId, row.origBirth, row.origStudyDate], ['SYNTHETIC ORIGINAL', 'SYN-PID-1', '19700101', '20260928']);
   const before = await w.count();
@@ -425,7 +437,7 @@ test('SV04 / S-CR: every applied requestId replays its stored result before any 
   // S-CR9: P loses clinician (new token); the replay is 403 at the route role
   await assert.rejects(w.svc.ack(id(21), { ...person('P'), roles: [] }, ackBody(person('P'), id(22))), code(403, 'CRITICAL_RESULT_ROLE_REQUIRED'));
   // S-CR11: after S-CR9 the sender's replay still answers the stored result (no recipient content in it)
-  w.users.get(SUBS.P).roles = [];
+  await w.rights('P',{approved:false,roles:[],institution:null});
   const late = await w.svc.create(UID, S(), createBody(S(), id(21), 'P', v1));
   assert.deepEqual([late.replayed, late.applied], [true, r0.applied]);
   // S-CR10: the study's owner moves; the replay is hidden like any read
@@ -449,11 +461,11 @@ test('SV06 Keycloak, Orthanc and source-tag reads end before the transaction; a 
   assert.deepEqual(networkInside(w.log), [], 'no Keycloak or Orthanc call inside any transaction callback');
   assert.ok(w.log.includes('orthanc:studyAccessMetadata') && w.log.includes('orthanc:studyIdentities') && w.log.includes('orthanc:reportPreviewStudy'));
   // failures before the transaction: 503 UNAVAILABLE, no transaction, no write
-  for (const [label, fail] of [['Keycloak', 'kcFail'], ['Orthanc', 'orthancFail']]) {
+  for (const [label, fail] of [['DB rights', 'rightsFail'], ['Orthanc', 'orthancFail']]) {
     const f = await world();
     const v = await approved(f);
     f[fail] = true;
-    await assert.rejects(f.svc.create(UID, S(), createBody(S(), id(36), 'P', v)), code(503, label === 'Keycloak' ? 'CRITICAL_RESULT_UNAVAILABLE' : undefined), label);
+    await assert.rejects(f.svc.create(UID, S(), createBody(S(), id(36), 'P', v)), code(503, label === 'DB rights' ? 'CRITICAL_RESULT_UNAVAILABLE' : undefined), label);
     assert.equal(f.log.includes('tx:start'), false, label);
     assert.deepEqual(await f.count(), { records: 0, events: 0, receipts: 0, audits: 0, updates: 0 }, label);
   }
@@ -464,37 +476,33 @@ test('SV06 Keycloak, Orthanc and source-tag reads end before the transaction; a 
     'no metadata rule: the original identity read is the only Orthanc call and its failure is UNAVAILABLE');
 });
 
-test('SV09 the write-time Keycloak re-check: token AND Keycloak roles; replays found before the transaction skip it', async () => {
+test('SV09 the write-time DB re-check: request AND current member roles; replays found before the transaction skip it', async () => {
   const w = await world();
   const v1 = await approved(w);
   const cases = [
-    ['radiologist removed in Keycloak', u => { u.roles = ['technician']; }],
-    ['disabled', u => { u.enabled = false; }],
-    ['moved to another institution', u => { u.groups = [OTHER]; }],
-    ['two groups', u => { u.groups = [INST, OTHER]; }],
-    ['deleted', null],
+    ['radiologist removed', {roles:['technician']}], ['suspended',{suspended:true}],
+    ['moved institution',{institution:OTHER}], ['approval cancelled',{approved:false,roles:[],institution:null}],
   ];
-  for (const [label, change] of cases) {
-    const saved = structuredClone(w.users.get(SUBS.S));
-    if (change) change(w.users.get(SUBS.S)); else w.users.delete(SUBS.S);
-    await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(41), 'P', v1)), code(403, 'CRITICAL_RESULT_ROLE_REQUIRED'), label);
-    w.users.set(SUBS.S, saved);
+  for(const [label,change] of cases) {
+    await w.rights('S',change);
+    await assert.rejects(w.svc.create(UID,S(),createBody(S(),id(41),'P',v1)),code(403,'CRITICAL_RESULT_ROLE_REQUIRED'),label);
+    await w.rights('S',{roles:['radiologist'],suspended:false,approved:true,institution:INST});
   }
   assert.deepEqual((await w.count()).records, 0);
-  // the ack of a clinician whose Keycloak roles lost clinician while the token keeps it
+  // The request retains clinician, but the current DB member has lost it.
   const created = await w.svc.create(UID, S(), createBody(S(), id(42), 'P', v1));
-  w.users.get(SUBS.P).roles = ['technician'];
+  await w.rights('P',{roles:['technician']});
   await assert.rejects(w.svc.ack(id(42), person('P'), ackBody(person('P'), id(43))), code(403, 'CRITICAL_RESULT_ROLE_REQUIRED'));
-  // reads use the token only (I-10): the stale token still reads while Keycloak says otherwise
+  // Direct service reads trust their admitted caller; AuthGuard owns the DB entry gate.
   assert.equal((await w.svc.read(id(42), person('P'))).item.view, 'full');
-  w.users.get(SUBS.P).roles = ['clinician'];
+  await w.rights('P',{roles:['clinician']});
   // a replay found by the unlocked receipt lookup reads no Keycloak, even when Keycloak is down
   w.kcFail = true;
   const mark = w.log.length;
   const replay = await w.svc.create(UID, S(), createBody(S(), id(42), 'P', v1));
   assert.deepEqual([replay.replayed, replay.applied], [true, created.applied]);
   assert.deepEqual(w.log.slice(mark).filter(e => e.startsWith('kc:') || e.startsWith('orthanc:')), []);
-  await assert.rejects(w.svc.ack(id(42), person('P'), ackBody(person('P'), id(44))), code(503, 'CRITICAL_RESULT_UNAVAILABLE'));
+  assert.equal((await w.svc.ack(id(42), person('P'), ackBody(person('P'), id(44)))).applied.to,'acknowledged','provider outage does not decide DB permission');
 });
 
 test('SV10 / S-RACE a concurrent ACK and cancel of one record: one applies, the other gets the winner terminal code', async () => {
@@ -621,7 +629,7 @@ test('SV11 answers carry the pinned rows only; the service reaches no draft, rep
   for (const marker of [HEAD_BODY, DRAFT_BODY]) assert.equal(text.includes(marker), false, marker);
   assert.equal(responses[2].item.body.findings, pinnedText(v1));
   assert.equal(responses[6].item.body.findings, pinnedText(v1 + 1), 'the replacement shows its own pinned row');
-  const allowed = ['root.$transaction', 'root.$queryRaw', 'root.criticalResultReceipt', 'root.criticalResult', 'root.studyState',
+  const allowed = ['root.$transaction', 'root.$queryRaw', 'root.criticalResultReceipt', 'root.criticalResult', 'root.memberRights', 'tx.memberRights', 'root.studyState',
     'tx.$executeRaw', 'tx.$queryRaw', 'tx.criticalResult', 'tx.criticalResultEvent', 'tx.criticalResultReceipt', 'tx.auditLog'];
   assert.deepEqual([...w.touched].filter(name => !allowed.includes(name)), [], 'no reportDraft, report or other delegate');
   const types = Reflect.getMetadata('design:paramtypes', CriticalResultService).map(type => type.name);
@@ -1011,8 +1019,8 @@ test('ordering, duplicates and boundaries: body before owner, role before body, 
     e => code(409, 'CRITICAL_RESULT_PENDING_EXISTS')(e) && e.getResponse().id === id(132));
   assert.equal((await w.svc.create(UID, person('X'), createBody(person('X'), id(134), 'P', v1))).replayed, false);
   // recipient validation: another institution, a technician, an admin, disabled, service account, unknown -> 400
-  w.users.get(SUBS.Y).enabled = false;
-  w.users.get(SUBS.Z).serviceAccountClientId = 'svc';
+  await w.rights('Y',{suspended:true});
+  await w.rights('Z',{approved:false,roles:[],institution:null});
   for (const who of ['K', 'KC', 'T', 'AD', 'Y', 'Z'])
     await assert.rejects(w.svc.create(UID, S(), createBody(S(), id(135), who, v1)), code(400, 'CRITICAL_RESULT_RECIPIENT_INVALID'), who);
   await assert.rejects(w.svc.create(UID, S(), { ...createBody(S(), id(135), 'P', v1), recipientSub: id(8999) }), code(400, 'CRITICAL_RESULT_RECIPIENT_INVALID'));
@@ -1350,13 +1358,13 @@ test('TSV11 no scope, no reads: a third institution\'s study, an owner study wit
     await assert.rejects(w.svc.create(uid, S(), createBody(S(), id(2012), 'KC', 1)), code(404, 'STUDY_NOT_FOUND'), uid);
     await assert.rejects(w.svc.recipients(uid, S()), code(404, 'STUDY_NOT_FOUND'), uid);
     await assert.rejects(w.svc.forStudy(uid, S()), code(404, 'STUDY_NOT_FOUND'), uid);
-    assert.deepEqual(external(w, mark), ['kc:getUser'], uid + ': only the create\'s own Keycloak re-check');
+    assert.deepEqual(external(w, mark), [], uid + ': DB re-check needs no provider call');
   }
   const mark = w.log.length;
   for (const call of [() => w.svc.create(TELE_UID, person('ZR'), createBody(person('ZR'), id(2013), 'KC', 1)),
     () => w.svc.recipients(TELE_UID, person('ZR')), () => w.svc.forStudy(TELE_UID, person('ZR'))])
     await assert.rejects(call(), code(404, 'STUDY_NOT_FOUND'));
-  assert.deepEqual(external(w, mark), ['kc:getUser'], 'Z on the tele study: no recipient or original read');
+  assert.deepEqual(external(w, mark), [], 'Z on the tele study: no recipient or original read');
   for (const call of [() => w.svc.read(id(2011), person('ZR')), () => w.svc.cancel(id(2011), person('ZR'), cancelBody(person('ZR'), id(2014))),
     () => w.svc.supersede(id(2011), person('ZR'), supersedeBody(person('ZR'), id(2015), 1, 1)),
     () => w.svc.ack(id(2011), person('ZC'), ackBody(person('ZC'), id(2016)))])
@@ -1387,14 +1395,14 @@ test('TSV12 record-time institutions decide: a row with the two institutions swa
   await w.study(TELE_UID2, OTHER, INST);
   const u1 = await w.commit(TELE_UID2, 'approve', { author: actorOf('S') });
   await w.svc.create(TELE_UID2, S(), createBody(S(), id(2022), 'KC', u1));
-  w.users.get(SUBS.S).groups = [OTHER];
+  await w.rights('S',{institution:OTHER});
   const moved = { ...S(), institution: OTHER };
   await assert.rejects(w.svc.read(id(2022), moved), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
   await assert.rejects(w.svc.cancel(id(2022), moved, cancelBody(moved, id(2023))), code(404, 'CRITICAL_RESULT_NOT_FOUND'));
   assert.deepEqual([(await w.svc.list(moved, { view: 'sent' })).items, (await w.svc.forStudy(TELE_UID2, moved)).items], [[], []]);
   assert.equal((await w.svc.read(id(2022), person('KC'))).item.view, 'full', 'the recipient keeps reading (section 17 L-7)');
   // preserving variant: back in INST, S sees it again; the recipient acknowledges
-  w.users.get(SUBS.S).groups = [INST];
+  await w.rights('S',{institution:INST});
   assert.equal((await w.svc.read(id(2022), S())).item.view, 'sender');
   assert.equal((await w.svc.ack(id(2022), person('KC'), ackBody(person('KC'), id(2024)))).applied.to, 'acknowledged');
 });
@@ -1626,4 +1634,104 @@ test('TSV19 a tele record stays with its record institution: when the study\'s o
   await w.move(TELE_UID, OTHER);
   assert.deepEqual([(await w.svc.read(id(2101), person('KC'))).item.view, (await w.svc.read(id(2101), S())).item.view], ['full', 'sender']);
   assert.equal((await w.svc.create(TELE_UID, S(), body)).replayed, true);
+});
+
+// REQ-S7-U5-DB-RIGHTS -> RISK-STALE-RECIPIENT -> final permission at creation, D623.
+test('CORE-CVR stale provider rights never admit a recipient changed before the final decision',async()=>{
+  for(const change of [{suspended:true},{institution:OTHER},{roles:['technician']},{approved:false,roles:[],institution:null}]){
+    const w=await world(),v=await approved(w);
+    w.beforeTx=()=>w.rights('P',change);
+    await assert.rejects(w.svc.create(UID,S(),createBody(S(),id(8001),'P',v)),code(400,'CRITICAL_RESULT_RECIPIENT_INVALID'));
+    assert.deepEqual(await w.count(),{records:0,events:0,receipts:0,audits:0,updates:0});
+  }
+  const w=await world(),v=await approved(w);w.kcFail=true;
+  const sent=await w.svc.create(UID,S(),createBody(S(),id(8002),'P',v));
+  assert.equal(sent.applied.to,'created');assert.ok(!w.log.some(e=>e.startsWith('kc:')));
+});
+
+// REQ-S7-U5-DB-RIGHTS -> RISK-ROSTER-AUTHORITY-CONFUSION -> U12.
+// D638 R9-5 / REQ-S7-U5-DB-RIGHTS -> RISK-FROZEN-IDENTITY: current roster id binds to a subject, never a DB email.
+test('CORE_R9_CVR_PRELIMINARY_IDENTITY: a renamed reviewer receives the R case while DB identity is still old',async()=>{
+  const w=await world(),recipient=w.users.get(SUBS.X),renamed='renamed-reviewer@synthetic.test';
+  recipient.email=renamed;recipient.firstName='Current';recipient.lastName='Reviewer';
+  // As in F3, the report picker offers the new provider identity, while registration predates the rename.
+  const version=await w.commit(UID,'preliminary',{reviewer:renamed});
+  await w.base.studyState.update({where:{uid:UID},data:{preDocSub:SUBS.S,preReviewerSub:SUBS.X}});
+  const rights=await w.base.memberRights.findUnique({where:{sub:SUBS.X}});assert.notEqual(rights.email,renamed);
+  // A different subject carrying the same frozen email must not become the designated recipient.
+  await w.base.memberRights.update({where:{sub:SUBS.Y},data:{email:renamed}});
+  const candidates=await w.svc.recipients(UID,S());
+  assert.ok(candidates.recipients.some(row=>row.sub===SUBS.X));
+  assert.ok(!candidates.recipients.some(row=>row.sub===SUBS.Y));
+  let created;
+  await assert.doesNotReject(async()=>{created=await w.svc.create(UID,S(),createBody(S(),id(8092),'X',version));},
+    'the designated subject can receive Preliminary despite its older DB email');
+  assert.equal(created.applied.to,'created');
+  const record=await w.base.criticalResult.findUnique({where:{id:id(8092)}});
+  assert.deepEqual([record.recipientSub,record.recipientActor,record.recipientName],[SUBS.X,rights.email,rights.name]);
+  await assert.rejects(w.svc.create(UID,S(),createBody(S(),id(8093),'Y',version)),code(409,'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'));
+  const replacement=await w.svc.supersede(id(8092),S(),supersedeBody(S(),id(8094),1,version));
+  assert.equal(replacement.applied.to,'superseded');
+  const next=await w.base.criticalResult.findUnique({where:{id:id(8094)}});
+  assert.deepEqual([next.state,next.recipientSub,next.recipientActor],['created',SUBS.X,rights.email]);
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:SUBS.X}}),rights,'sending never refreshes the DB identity');
+  assert.deepEqual(networkInside(w.log),[]);
+});
+
+test('CORE_ROSTER_SOURCE_SPLIT U12 critical candidates use the provider roster; final create still refuses DB ineligibility',async()=>{
+  const w=await world(),version=await approved(w);
+  await w.rights('P',{suspended:true,institution:OTHER});
+  w.users.delete(SUBS.P2); // DB-only eligible member must not be invented by a picker.
+  const out=await w.svc.recipients(UID,S());
+  assert.ok(out.recipients.some(x=>x.sub===SUBS.P),'stale provider member is still a roster candidate');
+  assert.ok(!out.recipients.some(x=>x.sub===SUBS.P2),'DB-only member is absent from provider roster');
+  await assert.rejects(w.svc.create(UID,S(),createBody(S(),id(8091),'P',version)),code(400,'CRITICAL_RESULT_RECIPIENT_INVALID'));
+});
+
+// D640 REQ-S7-U5-DESIGNATION-SUB -> RISK-RECYCLED-EMAIL/PROVIDER-OUTAGE -> CORE_R10_CVR.
+for(const bound of [false,true])test(`CORE_R10_CVR_KC_DOWN P designated reviewer create and supersede, subjects=${bound}`,async()=>{
+  const w=await world(),version=await w.commit(UID,'preliminary',{reviewer:actorOf('X')});
+  if(bound)await w.base.studyState.update({where:{uid:UID},data:{preDocSub:SUBS.S,preReviewerSub:SUBS.X}});
+  w.kcFail=true;w.log.length=0;
+  let created,replaced;
+  await assert.doesNotReject(async()=>{created=await w.svc.create(UID,S(),createBody(S(),id(8101),'X',version));});
+  await assert.doesNotReject(async()=>{replaced=await w.svc.supersede(id(8101),S(),supersedeBody(S(),id(8102),1,version));});
+  assert.equal(created.applied.to,'created');assert.equal(replaced.applied.to,'superseded');
+  assert.equal((await w.record(id(8102))).recipientSub,SUBS.X);
+  assert.ok(!w.log.some(line=>line.startsWith('kc:')),'sending a critical result has no Keycloak dependency');
+});
+
+test('CORE_R10_CVR_RENAME_AFTER_DESIGNATION subjects keep X readable and reject recycled email Y for create and supersede',async()=>{
+  const w=await world(),version=await w.commit(UID,'preliminary',{reviewer:actorOf('X')});
+  await w.base.studyState.update({where:{uid:UID},data:{preDocSub:SUBS.S,preReviewerSub:SUBS.X}});
+  // Seed a Y record while the report is generally readable; the final decision must reject its later supersede in P.
+  await w.base.studyState.update({where:{uid:UID},data:{rs:'T'}});
+  await w.svc.create(UID,S(),createBody(S(),id(8110),'Y',version));
+  await w.base.studyState.update({where:{uid:UID},data:{rs:'P'}});
+  const renamed='renamed-after-designation@synthetic.test';
+  w.users.get(SUBS.X).email=renamed;w.users.get(SUBS.Y).email=actorOf('X');
+  await w.rights('X',{email:renamed});await w.rights('Y',{email:actorOf('X')});
+  const candidates=await w.svc.recipients(UID,S());
+  assert.ok(candidates.recipients.some(row=>row.sub===SUBS.X));assert.ok(!candidates.recipients.some(row=>row.sub===SUBS.Y));
+  await assert.doesNotReject(()=>w.svc.create(UID,S(),createBody(S(),id(8111),'X',version)));
+  await assert.doesNotReject(()=>w.svc.supersede(id(8111),S(),supersedeBody(S(),id(8113),1,version)));
+  await assert.rejects(w.svc.supersede(id(8110),S(),supersedeBody(S(),id(8114),1,version)),code(409,'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'));
+  await w.svc.cancel(id(8110),S(),cancelBody(S(),id(8116)));
+  await assert.rejects(w.svc.create(UID,S(),createBody(S(),id(8112),'Y',version)),code(409,'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'));
+  assert.equal((await w.record(id(8113))).recipientSub,SUBS.X);assert.equal(await w.record(id(8114)),null);
+  const reader={...person('X'),actor:renamed};
+  assert.equal((await w.svc.read(id(8113),reader)).item.view,'full');
+  const listed=await w.svc.list(reader,{view:'received'});assert.ok(listed.items.some(row=>row.id===id(8113)));assert.equal(listed.pending,1);
+  await assert.doesNotReject(()=>w.svc.ack(id(8113),reader,ackBody(reader,id(8115))));
+});
+
+test('CORE_R10_CVR_AMBIGUOUS legacy roster id shared by two subjects admits neither candidate nor final recipient',async()=>{
+  const w=await world(),label=actorOf('X'),version=await w.commit(UID,'preliminary',{reviewer:label});
+  // Email/username collisions are possible even when provider emails themselves are unique.
+  w.users.get(SUBS.Y).email='';w.users.get(SUBS.Y).username=label;
+  await w.rights('Y',{email:'',username:label});
+  const candidates=await w.svc.recipients(UID,S());
+  assert.ok(!candidates.recipients.some(row=>[SUBS.X,SUBS.Y].includes(row.sub)));
+  for(const who of ['X','Y'])await assert.rejects(w.svc.create(UID,S(),createBody(S(),id(who==='X'?8121:8122),who,version)),code(409,'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'));
+  assert.deepEqual(await w.count(),{records:0,events:0,receipts:0,audits:0,updates:0});
 });

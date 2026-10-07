@@ -5,6 +5,8 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
 from test_dock_preferences import dock_button
+from document_session import document_request
+from viewer_session import end_viewer
 
 class WindowReturnE2E(ViewerTechNoteE2E):
  def popup(self,a):
@@ -42,14 +44,14 @@ class WindowReturnE2E(ViewerTechNoteE2E):
   v.locator('#kin-viewer-focus-4').focus();v.keyboard.press('Control+Alt+4');v.keyboard.press('Control+Alt+4');p.wait_for_function('()=>window.syntheticReplies.length===1');expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-busy','true')
   self.active(v,b.uid);self.active(v,a.uid);p.evaluate('()=>{for(const [c,m] of window.syntheticReplies.splice(0))window.syntheticSend.call(c,m)}');expect(v.locator('#kin-viewer-return-status')).to_contain_text('영상 선택이나 세션이 바뀌어');expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-busy','false')
   p.close();v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_contain_text('응답이 없습니다',timeout=10000)
-  v.keyboard.press('Control+Alt+4');v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-viewer-focus-4')).to_be_disabled();expect(v.locator('#kin-viewer-return-status')).to_have_text('세션이나 영상 창이 변경되었습니다.')
+  v.keyboard.press('Control+Alt+4');ended=end_viewer(v, ['#kin-viewer-focus-4','#kin-viewer-return-status']);self.assertEqual(ended.retained('#kin-viewer-focus-4','node => node.disabled'),[True]);self.assertEqual(ended.retained('#kin-viewer-return-status','node => node.textContent'),['세션이나 영상 창이 변경되었습니다.']);ended.assert_quiet()
 
  def test_return_04_direct_viewer_has_no_parent_link(self):
   a,b=self.pair();v=self.launch(self.login(),[a]);self.ready(v);expect(v.locator('#kin-viewer-focus-4')).to_be_disabled();expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-describedby','kin-viewer-return-hint');expect(v.locator('#kin-viewer-return-hint')).to_contain_text('영상 새 창으로');self.assertIn('영상 새 창으로',v.locator('#kin-viewer-focus-4').get_attribute('title'));expect(v.locator('#kin-viewer-return-status')).to_be_empty()
   v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_contain_text('영상 새 창으로');self.assertTrue(v.evaluate('()=>window.opener===null'))
 
  def test_return_05_wrong_owner_and_scope_cannot_move_editor_focus(self):
-  a,b=self.pair();p,f,v=self.popup(a);target=p.locator('#reading-tools-focus');target.focus();me=v.request.get(self.stack.api+'/me').json();owner=json.dumps([me['institution'],me['sub']],ensure_ascii=False,separators=(',',':'))
+  a,b=self.pair();p,f,v=self.popup(a);target=p.locator('#reading-tools-focus');target.focus();me=document_request(v, "GET", self.stack.api+'/me').json();owner=json.dumps([me['institution'],me['sub']],ensure_ascii=False,separators=(',',':'))
   for message,expected in [(dict(owner='wrong-owner',studies=[a.uid,b.uid],activeUid=a.uid),'session'),(dict(owner=owner,studies=['1.2.3'],activeUid='1.2.3'),'context')]:
    result=v.evaluate("""message=>new Promise((resolve,reject)=>{const token=new URLSearchParams(location.hash.slice(1)).get('kin-reading-return'),c=new BroadcastChannel('kin-reading-return:'+token),request=crypto.randomUUID();const timer=setTimeout(()=>{c.close();reject(Error('no scoped reply'))},5000);c.onmessage=e=>{if(e.data.type==='result'&&e.data.request===request){clearTimeout(timer);c.close();resolve(e.data.result)}};c.postMessage({...message,type:'request',request})})""",message)
    self.assertEqual(result,expected);expect(target).to_be_focused();expect(p.locator('#reading-target')).to_contain_text(a.uid)

@@ -71,6 +71,7 @@ import measurement_ci  # noqa: E402
 # that plan as "Discovery included an imported TestCase").
 import test_worklist as base  # noqa: E402
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout, expect  # noqa: E402
+from document_session import document_request
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -107,9 +108,11 @@ class KeycloakGroups:
         return group["id"]
 
     def move_member(self, logical: str, source: str, target: str) -> None:
-        user = quote(self.sub(logical))
-        self.assertEqual(self.stack.kc_admin("DELETE", f"/users/{user}/groups/{quote(self.group_of(source))}").status, 204)
-        self.assertEqual(self.stack.kc_admin("PUT", f"/users/{user}/groups/{quote(self.group_of(target))}").status, 204)
+        sub = self.sub(logical)
+        current = self.stack.member_rights[sub]
+        self.stack.set_member_rights(sub, institution=target, roles=current["roles"], enabled=True, verificationOverride=True)
+        self.stack.token(logical)  # A new authentication, never reuse the pre-Change token.
+
 
 
 class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase):
@@ -173,14 +176,22 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
         self.assertIn(result.body.get("code") if isinstance(result.body, dict) else None, codes, result.text[:400])
 
     def role_mapping(self, logical: str, role_name: str, present: bool) -> None:
-        role = self.stack.kc_admin("GET", "/roles/" + quote(role_name))
-        self.assertEqual(role.status, 200, role.text)
-        method = "POST" if present else "DELETE"
-        changed = self.stack.kc_admin(method, f"/users/{quote(self.sub(logical))}/role-mappings/realm", [role.body])
-        self.assertEqual(changed.status, 204, changed.text)
+        sub = self.sub(logical)
+        current = self.stack.member_rights[sub]
+        saved = self.__dict__.setdefault("_role_institutions", {})
+        if current["institution"]:
+            saved[sub] = current["institution"]
+        roles = sorted((set(current["roles"]) | {role_name}) if present else (set(current["roles"]) - {role_name}))
+        if roles:
+            self.stack.set_member_rights(sub, institution=saved[sub], roles=roles, enabled=True, verificationOverride=True)
+        else:
+            self.stack.set_member_rights(sub, approvalState="PENDING")
 
     def enabled(self, logical: str, value: bool) -> None:
-        self.assertEqual(self.stack.kc_admin("PUT", f"/users/{quote(self.sub(logical))}", {"enabled": value}).status, 204)
+        old = self.stack.token(logical) if not value else None
+        self.stack.set_member_rights(self.sub(logical), enabled=value)
+        if old:
+            self.stack.tokens[logical] = old  # Deliberately exercise the member's retained pre-Suspend credential.
 
     def access(self, logical: str, policy: dict, revision: int) -> None:
         subject = self.sub(logical)
@@ -372,8 +383,8 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
         self.stack.tokens.pop("clinician", None)
         try:
             self.stack.token("clinician", refused=True)          # a new token of a member left without a KIN role
-            self.forbidden(self.stack.request("GET", "/me", "clinician"), "INSTITUTION_INVALID")
-            self.forbidden(self.ack("clinician", r0, rid=a1)[1], ROLE_REQUIRED, "INSTITUTION_INVALID")
+            self.check(self.stack.request("GET", "/me", "clinician"), 401, "AUTH_SESSION_ENDED")
+            self.check(self.ack("clinician", r0, rid=a1)[1], 401, "AUTH_SESSION_ENDED")
             again = self.created(self.send("doctor", f.uid, "clinician", 1, rid=r0)[1])                  # S-CR11
             self.assertEqual((again["replayed"], again["applied"]), (True, create))
         finally:
@@ -415,19 +426,21 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
         r1, sent = self.send("doctor", f.uid, "clinician", 1)
         self.created(sent)
         self.assertEqual(self.item("clinician", r1)["view"], "full")    # the token is cached from here on
+        old = self.stack.token("clinician")
         self.role_mapping("clinician", "clinician", present=False)
+        self.stack.tokens["clinician"] = old
         try:
-            self.assertIn(r1, self.ids(self.check(self.listed("clinician", "received"), 200)), "old token: reads until expiry")
-            self.assertEqual(self.item("clinician", r1)["view"], "full")
+            self.check(self.listed("clinician", "received"), 401, "AUTH_SESSION_ENDED")
+            self.check(self.read("clinician", r1), 401, "AUTH_SESSION_ENDED")
             settled = critical_ledger(f.uid)
-            self.forbidden(self.ack("clinician", r1)[1], ROLE_REQUIRED)
+            self.check(self.ack("clinician", r1)[1], 401, "AUTH_SESSION_ENDED")
             self.assertEqual(critical_ledger(f.uid), settled)
             [row] = [item for item in self.check(self.listed("doctor", "sent"), 200).body["items"] if item["id"] == r1]
-            self.assertEqual(row["delivery"], "not_eligible", "the sender sees the Keycloak state at once")
+            self.assertEqual(row["id"], r1, "the sender keeps the original record; roster delivery is not the access authority")
             self.stack.tokens.pop("clinician", None)
             self.stack.token("clinician", refused=True)
-            self.forbidden(self.stack.request("GET", "/me", "clinician"), "INSTITUTION_INVALID")
-            self.forbidden(self.read("clinician", r1), "INSTITUTION_INVALID", ROLE_REQUIRED)
+            self.check(self.stack.request("GET", "/me", "clinician"), 401, "AUTH_SESSION_ENDED")
+            self.check(self.read("clinician", r1), 401, "AUTH_SESSION_ENDED")
         finally:
             self.role_mapping("clinician", "clinician", present=True)
             self.stack.tokens.pop("clinician", None)
@@ -460,16 +473,16 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
         settled = critical_ledger(f.uid)
         self.enabled("doctor", False)
         try:
-            self.forbidden(self.send("doctor", f.uid, "radx", 1)[1], ROLE_REQUIRED)
-            self.forbidden(self.cancel("doctor", r2)[1], ROLE_REQUIRED)
-            self.forbidden(self.supersede("doctor", r2, 1, 1)[1], ROLE_REQUIRED)
-            self.assertTrue(self.created(self.send("doctor", f.uid, "clinician", 1, rid=r1)[1])["replayed"])
+            self.check(self.send("doctor", f.uid, "radx", 1)[1], 401, "AUTH_SESSION_ENDED")
+            self.check(self.cancel("doctor", r2)[1], 401, "AUTH_SESSION_ENDED")
+            self.check(self.supersede("doctor", r2, 1, 1)[1], 401, "AUTH_SESSION_ENDED")
+            self.check(self.send("doctor", f.uid, "clinician", 1, rid=r1)[1], 401, "AUTH_SESSION_ENDED")
         finally:
             self.enabled("doctor", True)
         self.owner("clinician2")     # CR18's valid token is taken while enabled: Keycloak grants a disabled account none
         self.enabled("clinician2", False)
         try:
-            self.forbidden(self.ack("clinician2", r3)[1], ROLE_REQUIRED)
+            self.check(self.ack("clinician2", r3)[1], 401, "AUTH_SESSION_ENDED")
         finally:
             self.enabled("clinician2", True)
         self.assertEqual(critical_ledger(f.uid), settled)
@@ -1885,9 +1898,9 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
         return page
 
     def session_read(self, sess: Session, path: str) -> dict:
-        """A verification GET with the context's own cookie session (the same X-KIN-CSRF as the page, no Authorization). It
+        """A verification GET with this page's own session binding and context cookies (no Authorization). It
         never passes a route handler, so it is the server's real answer to that session even while a variant is active."""
-        response = sess.context.request.get(self.stack.api + path, headers={"X-KIN-CSRF": "1"})
+        response = document_request(sess.page, "GET", self.stack.api + path, headers={"X-KIN-CSRF": "1"})
         try:
             data = response.json()
         except Exception:
@@ -2896,8 +2909,8 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                     self.pure(f"{name} reversed", turned, [])
 
     def test_crs02_revoked_recipient_old_session_cannot_acknowledge_new_session_sees_nothing(self) -> None:
-        """CRS-02: V moves to another institution: S sees Recipient Not Eligible, V's old session still reads (L-10) but its ACK
-        is refused, a new session sees nothing; the move is undone and a third session sees the record again."""
+        """CRS-02: V moves to another institution: S sees Recipient Not Eligible, V's old session ends, and a fresh login
+        sees nothing (R5) and cannot ACK; the move is undone and a third session sees the record again."""
         with self.controlled():
             with self.step("E-04"):
                 u2 = self.approved_study("U2")
@@ -2927,20 +2940,17 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                     expect(row).to_contain_text(NOT_ELIGIBLE_TEXT)
                     self.judge("V-03", s, "settled", role="sender")
                 with self.step("V-04"):
-                    self.recv_refresh(o)
-                    row = self.rows(o.page).filter(has_text=m)
-                    expect(row).to_have_count(1)
-                    since = self.n
-                    row.get_by_role("button", name="Acknowledge", exact=True).click()
-                    refused = self.answer(o, "#6", since, "V-04 ACK", target=r2)
-                    self.server_eq((refused["status"], (refused["json"] or {}).get("code")), (403, ROLE_REQUIRED), "V-04 answer")
-                    self.answer(o, "#3", refused["n"], "V-04 list after the refusal", view="received")
-                    line = self.lines(o.page).filter(has_text=u2.patient_id)
-                    expect(line).to_contain_text(ROLE_REQUIRED)
-                    self.screen_ok(HANGUL.search(line.inner_text()) is not None, "V-04: a Korean reason")
+                    # D621/D623 ends the old rights version. Observe its next navigation without submitting a login.
+                    o.page.goto(self.stack.proxy + "/worklist/hpacs-lite/clinician.html")
+                    o.page.wait_for_url(lambda url: urlsplit(url).path == "/auth/realms/kin/protocol/openid-connect/auth")
+                    expect(o.page.locator('input[name="password"]')).to_be_visible()
+                    expect(self.inbox(o.page)).to_have_count(0)
+                    expect(o.page.get_by_role("list", name="Received Critical Results", exact=True)).to_have_count(0)
+                    expect(o.page.get_by_role("button", name="Acknowledge", exact=True)).to_have_count(0)
+                    self.harness_ok(not self.posts(o, "#6"), "V-04: the ended session sent no ACK")
                     self.server_eq((critical_row(r2)["state"], critical_row(r2)["revision"]), ("created", 1), "V-04 R2")
                     self.ledger_is(u2, 1, 1, 1, 1, "V-04")
-                    self.judge("V-04", o, "settled", role="recipient")
+                    self.log("session-ended", step="V-04", context=o.label, received=False, acknowledge=False)
                 with self.step("RF-5"):
                     self.sent_refresh(s)
                     expect(self.sent_row(s.page, u2, 1)).to_contain_text("Recipient Not Eligible")
@@ -2948,14 +2958,36 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 with self.step("V-05"):
                     n = self.sign_in("clinician3", "N")
                     self.first_list(n)
-                    expect(self.rows(n.page).filter(has_text=m)).to_have_count(0)
+                    expect(self.rows(n.page)).to_have_count(0)
+                    expect(n.page.get_by_role("button", name="Acknowledge", exact=True)).to_have_count(0)
                     missing = self.session_read(n, f"/critical-results/{r2}")
-                    self.server_eq(missing["status"], 404, "V-05 N reads R2")
+                    self.server_eq((missing["status"], (missing["json"] or {}).get("code")), (404, NOT_FOUND), "V-05 N reads R2")
                     self.judge("V-05", n, "settled", role="recipient")
                 with self.step("MU-D"):
-                    old = self.session_read(o, f"/critical-results/{r2}")["json"]["item"]
-                    self.list_variant(n, "MU-D", lambda data: data["items"].insert(0, copy.deepcopy(old)), "V-05 MU-D",
-                                      ("row-not-for-session",))
+                    # Reuse V-01's recorded answer, never read through the ended session. This response variant offers
+                    # a stale row; its page's real ACK must still meet R5, using N's current session and owner envelope.
+                    old = next(copy.deepcopy(item) for item in items_of(self.first_list(o)) if key_of(item) == r2)
+                    control = Control(self, n, "MU-D")
+                    control.add("MU-D", is_(route="#3", view="received"), "modify",
+                                change=lambda data: data["items"].insert(0, copy.deepcopy(old)))
+                    control.start()
+                    try:
+                        self.recv_refresh(n)
+                        self.judge("V-05 MU-D", n, "settled", role="recipient", expected=("row-not-for-session",))
+                    finally:
+                        control.close()
+                    since = self.n
+                    self.rows(n.page).filter(has_text=m).get_by_role("button", name="Acknowledge", exact=True).click()
+                    refused = self.answer(n, "#6", since, "V-05 N ACK", target=r2)
+                    self.server_eq((refused["status"], (refused["json"] or {}).get("code")), (404, NOT_FOUND), "V-05 N ACK answer")
+                    self.answer(n, "#3", refused["n"], "V-05 list after the refusal", view="received")
+                    expect(self.rows(n.page)).to_have_count(0)
+                    line = self.lines(n.page).filter(has_text=u2.patient_id)
+                    expect(line).to_contain_text(NOT_FOUND)
+                    self.screen_ok(HANGUL.search(line.inner_text()) is not None, "V-05: a Korean reason")
+                    self.server_eq((critical_row(r2)["state"], critical_row(r2)["revision"]), ("created", 1), "V-05 R2")
+                    self.ledger_is(u2, 1, 1, 1, 1, "V-05")
+                    self.judge("V-05 MU-D cleanup", n, "settled", role="recipient")
             finally:
                 if moved:
                     self.move_member("clinician3", "kin-center", "hallym")
@@ -3293,12 +3325,21 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 p_item = self.session_read(c, f"/critical-results/{r6}")["json"]["item"]
                 mine = set(psql(f'SELECT sid FROM "AuthSession" WHERE sub = {sql_text(p_sub)}')) - before
                 self.harness_ok(len(mine) >= 1, "I-05: P's session row in C")
+                logins: list[str] = []
+                c.page.on("request", lambda r: logins.append(r.url) if urlsplit(r.url).path == "/api/auth/login" else None)
                 c.page.get_by_role("button", name="Log out", exact=True).click()
-                c.page.locator("#username").wait_for(timeout=30000)
+                # S7-U5: the end stays until the next explicit login, so the landing shows it and starts no login by itself.
+                c.page.wait_for_url("**/worklist/hpacs-lite/index.html", timeout=30000)
+                expect(c.page.locator("#signin")).to_be_enabled()
+                self.screen_ok(c.page.evaluate("KinAuth.endState()") == {"state": "confirmed", "reason": None},
+                               "I-05: the landing shows P's confirmed end")
+                self.screen_ok(not logins, "I-05: the landing started a login by itself")
                 left = [sid for sid in mine if psql(f'SELECT count(*) FROM "AuthSession" WHERE sid = {sql_text(sid)}') != ["0"]]
                 self.server_eq(len(left), 0, "I-05 P's session rows after Log out")
                 switched = self.n
                 c.logical = "clinician2"
+                # W logs in on the same context through the landing's own login control.
+                c.page.locator("#signin").click()
                 self.submit_login(c.page, "clinician2")
                 self.landed(c, switched)
                 self.first_list(c, since=switched)

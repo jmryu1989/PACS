@@ -1,5 +1,6 @@
 # coding: utf-8
 """TEST-VOLUME-ORIENTATION: native oblique planes, known voxels, reset and saved job."""
+from viewer_session import end_viewer
 import math,json,unittest
 from pathlib import Path
 import numpy as np
@@ -145,7 +146,7 @@ class VolumeOrientationE2E(VolumeJobsE2E):
   v.get_by_label('MPR Rotation Degrees',exact=True).fill('15');v.evaluate('()=>{const vol=cornerstone.cache.getVolume(projectionVP.getVolumeId());window.obliqueMeta=cornerstone.metaData.get("instance",vol.imageIds.at(-1));window.obliqueSpacing=obliqueMeta.PixelSpacing;obliqueMeta.PixelSpacing=[2,2]}')
   v.get_by_role('button',name='Rotate Three Planes',exact=True).click();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('원본 좌표');self.preserved_volume(before,self.volume_state(v));v.evaluate('()=>obliqueMeta.PixelSpacing=obliqueSpacing')
   self.open_note(v);expect(v.get_by_role('button',name='Rotate Three Planes',exact=True)).to_be_disabled();v.locator('#tech-note-close').click();expect(v.get_by_role('button',name='Rotate Three Planes',exact=True)).to_be_enabled()
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-volume-orientation')).to_have_count(0)
+  v=end_viewer(v);v.assert_quiet()
  def test_orientation_05_missing_asset_keeps_existing_tools(self):
   a,b=self.pair();p=self.login();p.route('**/volume-orientation.js',lambda route:route.abort());v=self.launch(p,[a]);self.ready(v);self.save_volume(v);self.assertEqual(self.get_volume_job(a)['snapshot']['version'],2)
   self.mpr(v);expect(v.locator('#kin-volume-orientation')).to_have_count(0);self.open_note(v);expect(v.locator('#tech-note-target')).to_contain_text(a.uid);v.locator('#tech-note-close').click();self.assertEqual(len(self.versions(a)),1)

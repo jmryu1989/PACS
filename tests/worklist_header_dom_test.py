@@ -110,8 +110,14 @@ def session_block():
 
 def storage_block():
     block = cut(STORAGE_BLOCK_START, STORAGE_BLOCK_END)
-    # Its own scope, like the page script's; only the function is handed out.
-    return block and ('(() => {\n  const $ = s => document.querySelector(s);\n' + block
+    # Its own scope, like the page script's; only the function is handed out. S7-U5: the read leaves through the page's
+    # session transport and its result is applied through the work-context gate, so the two shipped modules are loaded
+    # as they are, following a session that is at work for the whole case.
+    modules = ''.join((ASSETS / name).read_text(encoding='utf-8') + '\n' for name in ('work-context.js', 'session-transport.js'))
+    return block and (modules + '(() => {\n  const $ = s => document.querySelector(s);\n'
+                      + "  const work = KinWorkContext.create();\n"
+                      + "  work.follow({ onLifecycle(listener) { listener({ state: 'active', session: 'SYN-SESSION' }); } });\n"
+                      + "  const transport = KinSessionTransport.create({ gate: work });\n" + block
                       + '\n  window.kinRefreshStorage = refreshStorage;\n})();')
 
 

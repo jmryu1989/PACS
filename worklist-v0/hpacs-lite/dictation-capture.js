@@ -107,7 +107,13 @@
       release();
       if (settle) { settle.reject(error('DICTATION_CAPTURE_CANCELLED')); settle = undefined; }
     }
-    return { start, stop, cancel, get state() { return state; } };
+    function pause() { try { void context?.suspend().catch(() => {}); } catch {} }
+    function resume(callbacks) {
+      onComplete = callbacks.onComplete; onFailure = callbacks.onFailure;
+      if (state === 'done') { onComplete(); return; }
+      try { void context?.resume().catch(() => { fail('DICTATION_CAPTURE_FAILED'); }); } catch { fail('DICTATION_CAPTURE_FAILED'); }
+    }
+    return { start, stop, cancel, pause, resume, get state() { return state; } };
   }
   const api = Object.freeze({ MAX_BYTES, encodeWav, available, createCapture });
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

@@ -164,3 +164,53 @@ test('route parser produces exact bytes, bounds before buffering, rejects encodi
   assert.equal(large.req.body.length, 0);
   const unrelated = await parse(wav(), {}, '/api/studies/1.2/report'); assert.equal(unrelated.req.body, undefined);
 });
+
+// REQ-DICTATION-REFUSAL -> RISK-P-BODY/REFUSAL-AUDIT -> CORE_R11_DICTATION (D642).
+test('CORE_R11_DICTATION role -> institution -> unverified -> hold -> designation; rename/recycle, audit and no-store', async () => {
+  const uid = '2.25.911', original = { uid, institutionId: 'synthetic-institution', teleInstitutionId: null,
+    rs: 'P', ss: 'Unverified', em: 'N', holder: 'other-holder', heldAt: new Date().toISOString(),
+    preDoc: 'old-label', preDocSub: 'subject-x', preReviewer: 'old-reviewer', preReviewerSub: 'reviewer-x' };
+  let state = structuredClone(original), audits = [], inference = 0;
+  const db = { studyState: { findUnique: async () => structuredClone(state) },
+    auditLog: { create: async ({data}) => { audits.push(data); return data; } },
+    $executeRaw: async () => 0, $transaction: async fn => fn(db) };
+  const access = { prepare: async () => {}, require: async () => {} };
+  const pacs = new PacsService(db, {}, {}, access);
+  const asr = { capability: () => ({ maxBytes: 1048576, enginePin: 'synthetic' }),
+    transcribe: async () => { inference++; return {text: 'SYNTHETIC TRANSCRIPT'}; } };
+  const controller = new DictationController(pacs, asr);
+  const x = { sub: 'subject-x', actor: 'renamed-x', roles: ['radiologist'], institution: 'synthetic-institution' };
+  async function call(c) {
+    const parsed = await parse(wav()); const ch = channel();
+    Object.assign(ch.req, c, { body: parsed.req.body });
+    assert.equal(parsed.res.headers['Cache-Control'], 'no-store');
+    const before = structuredClone(state);
+    let result; try { result = { status: 200, body: await controller.dictate(uid, ch.req, ch.res) }; }
+    catch (e) { result = {status: e.getStatus(), body: e.getResponse()}; }
+    assert.deepEqual(state, before, 'dictation stores no report/study changes');
+    return result;
+  }
+  let result = await call({...x, roles:['technician'], institution:'outside'});
+  assert.equal(result.status,403); assert.equal(result.body.message,'판독문 저장은(는) radiologist 권한이 필요합니다');
+  result = await call({...x, institution:'outside'}); assert.equal(result.status,404);
+  result = await call(x); assert.equal(result.status,409); assert.equal(result.body.message,'촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
+  state.ss='Verified'; result=await call(x); assert.equal(result.body.code,'REPORT_HELD');
+  state.holder=null; state.heldAt=null;
+  result=await call({...x,sub:'subject-y',actor:'old-label'}); assert.equal(result.status,403);
+  assert.equal(result.body.message,'예비 판독(RS: P) 중입니다. old-reviewer만 이어서 판독할 수 있습니다.');
+  assert.ok(!JSON.stringify(result).includes('TRANSCRIPT')); assert.equal(audits.length,0); assert.equal(inference,0);
+  for(const c of [x,{...x,sub:'reviewer-x',actor:'renamed-reviewer'}]) {
+    result=await call(c); assert.equal(result.status,200); assert.equal(result.body.text,'SYNTHETIC TRANSCRIPT');
+  }
+  assert.equal(audits.length,2); assert.ok(audits.every(a=>a.action==='dictation.request'));
+  for(const a of audits) assert.deepEqual(Object.keys(JSON.parse(a.detail)).sort(),['bytes','engine','ms','outcome','seconds']);
+  assert.ok(!JSON.stringify(audits).includes('TRANSCRIPT'));
+  state.preDocSub=null; state.preReviewerSub=null;
+  assert.equal((await call({...x,sub:'legacy-sub',actor:'old-label'})).status,200);
+  assert.equal((await call(x)).status,403);
+  // A revocation after inference must withhold the body and still record exactly one metadata audit.
+  state.preDocSub=x.sub; asr.transcribe=async()=>{state.preDocSub='someone-else';return {text:'SYNTHETIC TRANSCRIPT'};};
+  const ch=channel();Object.assign(ch.req,x);const count=audits.length;
+  await assert.rejects(controller.dictate(uid,ch.req,ch.res),e=>e.getStatus()===403&&!JSON.stringify(e.getResponse()).includes('TRANSCRIPT'));
+  assert.equal(audits.length,count+1);
+});

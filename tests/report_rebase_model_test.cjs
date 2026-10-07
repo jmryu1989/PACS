@@ -7,7 +7,7 @@ const { join } = require('node:path');
 const { test } = require('node:test');
 const vm = require('node:vm');
 
-const html = readFileSync(join(__dirname, '../worklist-v0/hpacs-lite/main.html'), 'utf8');
+const html = readFileSync(process.env.KIN_REBASE_MAIN || join(__dirname, '../worklist-v0/hpacs-lite/main.html'), 'utf8');
 
 /** The shipped function body, brace matched, so a test can never drift into a copy. */
 function extractFunction(source, name) {
@@ -48,7 +48,8 @@ function extractFunction(source, name) {
 const blockStart = html.indexOf('    let selectionSeq = 0;');
 const blockEnd = html.indexOf('    function reportSource()', blockStart);
 assert.ok(blockStart >= 0 && blockEnd > blockStart, 'The base-version block moved; re-pin the test');
-const sandbox = vm.createContext({});
+// The selection sequence is counted by the page's work-context gate (S7-U5): the block runs against the shipped module.
+const sandbox = vm.createContext({ work: require(join(__dirname, '../worklist-v0/hpacs-lite/work-context.js')).create() });
 vm.runInContext(html.slice(blockStart, blockEnd), sandbox);
 const call = (expression, value) => { sandbox.__input = value; return vm.runInContext(expression, sandbox); };
 
@@ -143,57 +144,110 @@ test('TEST-S3-U3-PAYLOAD: the approved report shown to the human comes from the 
   assert.equal(head({ body: { draftBaseVersion: '2', head: { version: 1 } } }).draftBaseVersion, null);
 });
 
-test('TEST-S3-U3-WIRING: the shipped callers use the rendered base and the preserved error body', () => {
-  const api = extractFunction(html, 'api');
-  assert.match(api, /body: j \}\);/, 'api() must keep the error body for the approved-report pane');
+/**
+ * A context whose globals are `stand` and, for any other name the running code reaches, main.html's own page-level
+ * function of that name (or a fresh `new Map()` / `new Set()` when the page declares the name as one), taken from the
+ * page when it is first reached. The test names only what it runs and what it stands in for; a page helper on the way
+ * that is renamed, split or inlined changes nothing here (AGENTS 1-B). `reached` lists what was taken.
+ */
+function pageScope(stand) {
+  const target = { ...stand }, reached = [];
+  let context = null;
+  const take = name => {
+    const fn = new RegExp(`^    (async )?function ${name}\\(`, 'm').exec(html);
+    if (fn && html.indexOf(`function ${name}(`) === fn.index + 4 + (fn[1] ? 6 : 0))
+      return vm.runInContext(`(${fn[1] || ''}${extractFunction(html, name)})`, context);
+    const store = new RegExp(`^    (?:const|let) ${name} = new (Map|Set)\\(\\);$`, 'm').exec(html);
+    return store ? new (store[1] === 'Map' ? Map : Set)() : undefined;
+  };
+  const scope = new Proxy(target, {
+    has: (t, name) => name in t || typeof name === 'string' && /^[A-Za-z_$][\w$]*$/.test(name)
+      && new RegExp(`^    (?:(?:async )?function ${name}\\(|(?:const|let) ${name} = new (?:Map|Set)\\(\\);$)`, 'm').test(html),
+    get: (t, name) => {
+      if (name in t || typeof name !== 'string') return t[name];
+      const value = take(name);
+      if (value !== undefined) { t[name] = value; reached.push(name); return value; }
+      // The language's own globals (Set, Promise, JSON, ...): a scope object that is a proxy is asked for those too.
+      return globalThis[name];
+    },
+  });
+  context = vm.createContext(scope);
+  return { context, reached };
+}
 
-  const stash = extractFunction(html, 'stashReport');
-  assert.match(stash, /const baseVersion = reportBaseVersion\(uid,/, 'the first stash must carry the rendered base');
+/**
+ * The shipped stashReport() over the shipped base-version block, executed (AGENTS 1-B, D73: the assertion below looks at
+ * the base version the save carries and keeps, not at how the function reads it). The study was rendered at one version
+ * (the block records it) and `state` is what the page holds for it afterwards (a poll may have moved its version). What
+ * the function reads around itself are stand-ins; `sent` is the body of every draft write it sends.
+ */
+async function stashAfterRender({ rendered, state }) {
+  const UID = '1.2.3', OWNER = { institution: 'SYN-INST', sub: 'syn-sub', author: 'syn-reader' }, sent = [];
+  // The page's own modules, as shipped (S7-U5): the gate at work for one session, the transport over a server that
+  // answers as the wire contract says (a full read of the draft, then the envelope of the write), the draft command path.
+  const lite = join(__dirname, '../worklist-v0/hpacs-lite');
+  const work = require(join(lite, 'work-context.js')).create();
+  work.follow({ onLifecycle(listener) { listener({ state: 'active', session: 'SYN-SESSION' }); } });
+  let revision = 0, stored = null;
+  const envelope = () => ({ uid: UID, owner: OWNER, revision: `SYNEPOCH:${revision}`, present: !!stored, snapshot: stored,
+    updatedAt: stored ? '2026-10-04T00:00:00.000Z' : null });
+  const transport = require(join(lite, 'session-transport.js')).create({ gate: work, fetch: async (url, init) => {
+    if (init.method === 'PUT') {
+      const body = JSON.parse(init.body);
+      sent.push(body);
+      revision += 1;
+      stored = { findings: body.findings, conclusion: body.conclusion, recommendation: body.recommendation,
+        baseVersion: body.baseVersion, citations: body.citationIds, structured: body.structureIds };
+    }
+    return new Response(JSON.stringify(envelope()), { status: 200 });
+  } });
+  const draftClient = require(join(lite, 'report-draft-client.js')).create({ transport, base: '/api' });
+  draftClient.observe(UID, 'SYNEPOCH:0', state.draft ?? null);
+  const { context } = pageScope({
+    work, draftClient, reportConverge: new Set(),
+    citations: { emptied() {} }, structureState: { emptied() {} },
+    $: selector => ({ value: selector === '#findings' ? 'SYN typed findings' : '' }),
+  });
+  vm.runInContext(html.slice(blockStart, blockEnd), context, { filename: 'base-version-block.js' });
+  vm.runInContext([
+    `markSelectionChanged(${JSON.stringify(UID)});`,
+    rendered === undefined ? '' : `recordReportOrigin(${JSON.stringify(UID)}, ${JSON.stringify(rendered)});`,
+    `var appState = {}; appState[selectedUid] = ${JSON.stringify(state)};`,
+    'var insertInFlight = false, serverMode = true, offline = false, demoMode = false, API = "/api";',
+    'var reportSaveFailures = new Map();',
+    `var RFIELDS = ["findings", "conclusion", "recommendation"], draftOwner = ${JSON.stringify(OWNER)};`,
+    'var KinAuth = { has: role => role === "radiologist" };',
+    'function heldByOther() { return false; } function cur() { return null; } function reportNeedsWrite() { return true; }',
+    'function renderDraftBar() {} function saveApp() {} function draftNotSaved() {}',
+    // The scanner above returns the function without its `async` keyword. stashReport keeps the text and hands the
+    // write to the page's draft write (the same one the autosave of every retained study uses); what that reaches on
+    // the page is taken from the page as it is reached (pageScope).
+    'async ' + extractFunction(html, 'stashReport'),
+    'var outcome = stashReport();',
+  ].join('\n'), context, { filename: 'stashReport.js' });
+  const outcome = await context.outcome;
+  const draft = JSON.parse(vm.runInContext('JSON.stringify(appState[selectedUid].draft ?? null)', context));
+  return { sent, outcome, draft };
+}
 
-  const commit = extractFunction(html, 'commitReport');
-  assert.match(commit, /reportBaseVersion\(uid, appState\[uid\]\?\.version \?\? 0\)/);
-  assert.doesNotMatch(commit, /baseVersion: appState\[uid\]\?\.version \?\? 0/,
-    'a commit that carries the polled version defeats the optimistic lock');
-  const captured = commit.indexOf('const seq = selectionSeq;'), sent = commit.indexOf('await api("POST"');
-  assert.ok(captured >= 0 && sent > captured, 'the selection sequence must be captured before the request leaves');
-  const routed = commit.indexOf('commitFailureRoute(e)'), substring = commit.indexOf('저장했습니다');
-  assert.ok(routed >= 0 && substring > routed, 'the code branch must be decided before the substring branch');
-  const stale = commit.slice(commit.indexOf('route === "stale"'), commit.indexOf('route === "reload"'));
-  assert.doesNotMatch(stale, /loadReport|\.value/, 'a stale refusal must not redraw or rewrite the editor');
-  assert.match(stale, /openStaleRebase\(uid, seq, e\)/, 'the pane must be told which selection asked for it');
+test('TEST-S3-U3-WIRING: the shipped callers use the rendered base and the preserved error body', async () => {
 
-  // The old optimistic-lock branch redraws; it must not redraw another study and it
-  // must not claim the server text was loaded while the screen still shows a draft.
-  const reload = commit.slice(commit.indexOf('route === "reload"'), commit.indexOf('toast("저장 실패: "'));
-  const guard = reload.indexOf('uid !== selectedUid || seq !== selectionSeq'), draw = reload.indexOf('loadReport({ force: true })');
-  assert.ok(guard >= 0 && draw > guard, 'the redraw must be behind the selection check');
-  // The statement, not the comment that quotes it.
-  const claim = reload.indexOf('toast("서버 판독문을 불러왔습니다'), kept = reload.indexOf('if (appState[uid]?.draft)');
-  assert.ok(kept >= 0 && claim > kept, 'the surviving draft decides which message is true');
-  assert.match(reload, /화면에 보이는 것은 초안입니다/);
-  assert.match(reload, /Discard Draft/);
+  // Executed: the screen rendered v2; a poll has since put v5 into the page's state. The first stash carries the base the
+  // text was written on (2) and keeps it in the local draft - not the version nobody has seen on this screen.
+  const first = await stashAfterRender({ rendered: 2, state: { version: 5 } });
+  assert.deepEqual([first.sent.length, first.sent[0]?.baseVersion, first.draft?.baseVersion, first.outcome], [1, 2, 2, 'saved'],
+    'the first stash must carry the rendered base');
+  // A later stash of the same screen still stands on the rendered version, whatever the stored draft and the poll say.
+  const again = await stashAfterRender({ rendered: 2, state: { version: 5, draft: { findings: 'SYN earlier', baseVersion: 4 } } });
+  assert.equal(again.sent[0].baseVersion, 2);
+  // Without a recorded render the base falls back to what the page holds: the draft's base first, else the version.
+  assert.equal((await stashAfterRender({ state: { version: 5, draft: { findings: 'SYN earlier', baseVersion: 3 } } })).sent[0].baseVersion, 3);
+  assert.equal((await stashAfterRender({ state: { version: 5 } })).sent[0].baseVersion, 5);
+  // Every draft write carries the whole snapshot and the revision it stands on (S7-U5): the base version is part of it.
+  assert.deepEqual([first.sent[0].expectedRevision, first.sent[0].findings, first.sent[0].citationIds, first.sent[0].structureIds],
+    ['SYNEPOCH:0', 'SYN typed findings', [], []]);
+  // Log out's preparation freezes the text and the base it took when it began; tests/auth_logout_dom_test.py (S01) holds
+  // that capture against the real page, so it is not repeated on a stand-in here.
 
-  const open = extractFunction(html, 'openStaleRebase');
-  const bound = open.indexOf('uid !== selectedUid || seq !== selectionSeq');
-  assert.ok(bound >= 0 && bound < open.indexOf('staleHeadOf(e)'),
-    'a refusal that outlived its selection must be refused before anything is drawn');
-  assert.ok(bound < open.indexOf('$("#stale-'), 'nothing may be written to the pane before that check');
-  assert.match(open, /selSeq: selectionSeq/, 'the pane records the selection it belongs to');
-
-  const load = extractFunction(html, 'loadReport');
-  assert.match(load, /if \(!preserveValue\) recordReportOrigin\(selectedUid, renderedOrigin\(r\)\);/,
-    'only a real render may move the base');
-  assert.equal(load.indexOf('recordReportOrigin') < load.indexOf('el.value = locked'), true,
-    'the recorded version belongs to the values this call is about to write');
-
-  const rebase = extractFunction(html, 'rebaseDraft');
-  assert.match(rebase, /baseVersion: pane\.head\.version/, 'the rebase must carry exactly the displayed version');
-  assert.doesNotMatch(rebase, /appState\[pane\.uid\]\?\.version|loadReport/,
-    'the rebase must not adopt an unseen version nor redraw the editor');
-  assert.match(rebase, /pane\.uid !== selectedUid \|\| pane\.seq !== staleSeq \|\| pane\.selSeq !== selectionSeq/,
-    'the pane is bound to one study, one refusal and one selection');
-
-  const select = extractFunction(html, 'select');
-  assert.match(select, /markSelectionChanged\(uid\)/, 'the product, not the test harness, counts selection changes');
-  assert.doesNotMatch(select, /\n\s+selectedUid = uid;/, 'no selection change may bypass the counter');
+  // The rebase DOM suite checks refusal bodies, selection races, the visible base and unchanged text.
 });

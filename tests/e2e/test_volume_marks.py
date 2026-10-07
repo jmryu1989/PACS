@@ -1,5 +1,6 @@
 # coding: utf-8
 """TEST-MPR-MARKS: patient-coordinate points, retained drafts and source-bound Jobs."""
+from viewer_session import end_viewer
 import copy,json,os,unittest,uuid
 from pathlib import Path
 from playwright.sync_api import expect
@@ -56,7 +57,7 @@ class VolumeMarksE2E(VolumeSyncE2E):
   a,p,v=self.starting();self.add_mark(v);self.save_volume(v);v.evaluate('()=>{kinMprMarks.restore({version:1,visible:true,sync:true,marks:[]});const restore=kinMprMarks.restore;let once=true;kinMprMarks.restore=function(value){restore(value);if(once){once=false;throw Error("MARK RESTORE FAILURE")}}}');before=self.volume_state(v)
   v.get_by_role('button',name='Restore Job',exact=True).click();expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('이전 화면',timeout=45000);expect(v.locator('.kin-mpr-marks-overlay [data-mark-id]')).to_have_count(0);self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'));self.assertEqual([(x['hash'],x['min'],x['max']) for x in before],[(x['hash'],x['min'],x['max']) for x in self.volume_state(v)])
  def test_marks_08_session_end_removes_mark_surfaces_and_rejects_old_capability(self):
-  a,p,v=self.starting();self.add_mark(v);v.evaluate('()=>{window.oldMarks=kinMprMarks;window.dispatchEvent(new StorageEvent("storage",{key:"kin-session-ended",newValue:"test"}))}');expect(v.locator('.kin-mpr-marks-overlay')).to_have_count(0);self.assertTrue(v.evaluate('()=>{try{oldMarks.capture();return false}catch(_){return true}}'))
+  a,p,v=self.starting();self.add_mark(v);v.evaluate('()=>{window.oldMarks=kinMprMarks;}');v=end_viewer(v);v.assert_quiet();self.assertTrue(v.evaluate('()=>{try{oldMarks.capture();return false}catch(_){return true}}'))
  def test_marks_09_layout_change_retains_unsaved_points(self):
   a,p,v=self.starting();marks=self.add_mark(v);v.evaluate('()=>{window.beforeMarksCapability=kinMprMarks}')
   v.locator('[data-cy=Layout]').click();v.locator('[data-cy=Layout-0-0]').click()
@@ -91,7 +92,7 @@ class VolumeMarksE2E(VolumeSyncE2E):
    else:route.continue_()
   v.route(pattern,reject);v.get_by_role('button',name='Save New Job',exact=True).click();expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('Synthetic rejection');self.assertTrue(v.evaluate('()=>kinMprMarks.dirty()'));self.same_marks(v.evaluate('()=>kinMprMarks.capture()'),marks);self.assertEqual(self.jobs(a),[]);v.unroute(pattern,reject);self.save_volume(v);self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'))
  def test_marks_14_owner_change_cancels_armed_pick(self):
-  a,p,v=self.starting();panel=self.marks(v);panel.get_by_label('MPR annotation label',exact=True).fill('Armed before session end');panel.get_by_role('button',name='Pick Point',exact=True).click();self.assertTrue(v.evaluate('()=>kinMprMarks.dirty()'));v.evaluate('()=>{window.retiredMarks=kinMprMarks;window.dispatchEvent(new StorageEvent("storage",{key:"kin-session-ended",newValue:"armed"}))}');expect(v.locator('#kin-mpr-marks')).to_have_count(0);self.assertFalse(v.evaluate('()=>retiredMarks.dirty()'));self.assertTrue(v.evaluate('()=>{try{retiredMarks.capture();return false}catch(_){return true}}'));expect(v.locator('[data-kin-mpr-mark-point]')).to_have_count(0)
+  a,p,v=self.starting();panel=self.marks(v);panel.get_by_label('MPR annotation label',exact=True).fill('Armed before session end');panel.get_by_role('button',name='Pick Point',exact=True).click();self.assertTrue(v.evaluate('()=>kinMprMarks.dirty()'));v.evaluate('()=>{window.retiredMarks=kinMprMarks;}');v=end_viewer(v);v.assert_quiet();self.assertFalse(v.evaluate('()=>retiredMarks.dirty()'));self.assertTrue(v.evaluate('()=>{try{retiredMarks.capture();return false}catch(_){return true}}'));v.assert_quiet()
  def test_marks_15_descending_originals_pick_save_restore(self):
   from unittest.mock import patch
   from pynetdicom.association import Association

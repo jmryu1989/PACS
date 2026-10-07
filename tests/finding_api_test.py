@@ -8,7 +8,7 @@ run's study identities, run-owned readers' SYNTHETIC access policies and lock, f
 setup; every write effect is compared through the persisted rows. No clinical fixture is used.
 """
 from __future__ import annotations
-import io, json, re, subprocess, sys, time, unittest, urllib.error, urllib.request, uuid
+import copy, io, json, re, subprocess, sys, time, unittest, urllib.error, urllib.request, uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +23,31 @@ SNAPSHOT_TABLES = FINDING_TABLES+('ViewerItem', 'ViewerRevision', 'ViewerRequest
 # The StudyState columns that decide who may read a study; comparison tests change and restore only these.
 BOUNDARY_COLUMNS = ('rs', 'preDoc', 'preReviewer', 'institutionId', 'teleInstitutionId')
 
+def payload_differences(old, new, path='$'):
+    """Every path at which two JSON payloads differ, with both values: unittest's diff of two long one-line reprs
+    can be cut or hard to read, and a failed "nothing else moved" check must name all that moved."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        found = []
+        for key in sorted(set(old) | set(new), key=str):
+            where = f'{path}.{key}'
+            if key not in old: found.append(f'{where}: added {new[key]!r}')
+            elif key not in new: found.append(f'{where}: removed {old[key]!r}')
+            else: found += payload_differences(old[key], new[key], where)
+        return found
+    if isinstance(old, list) and isinstance(new, list) and len(old) == len(new):
+        return [line for i, (a, b) in enumerate(zip(old, new)) for line in payload_differences(a, b, f'{path}[{i}]')]
+    return [] if old == new else [f'{path}: {old!r} -> {new!r}']
+
+def psql_input(sql):
+    """invariants_live.psql with the statement on standard input instead of `-c`: a 60 000-byte filler snapshot is longer
+    than a Windows command line (32 767 characters), and stdin has no such limit on either platform."""
+    completed = subprocess.run(['docker', 'compose', 'exec', '-T', '-e', 'PGTZ=UTC', 'db', 'psql', '-U', 'kin', '-d', 'kin',
+                                '-v', 'ON_ERROR_STOP=1', '-qAt'], cwd=ROOT, input=sql+';\n', capture_output=True, text=True,
+                               encoding='utf-8', errors='replace', timeout=30)
+    if completed.returncode:
+        raise RuntimeError('psql 실패: ' + completed.stdout + completed.stderr)
+    return [line for line in completed.stdout.splitlines() if line.strip()]
+
 class FindingStack(ViewerStack):
     """ViewerStack already tears down Finding/FindingRevision before StudyState; this name marks the suites that rely on it."""
     def cleanup_fixture(self, uid):
@@ -34,6 +59,7 @@ class FindingAPI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.stack = FindingStack()
+        cls.addClassCleanup(cls.stack.cleanup_test_identities)
         cls.addClassCleanup(cls.stack.cleanup_all)
         cls.stack.require_stack()
         cls.stack.create_test_identity('adminonly', ['admin'], 'hallym')
@@ -477,7 +503,7 @@ class FindingAPI(unittest.TestCase):
                 kind='length', seriesUid='2.25.1', sopUid='2.25.2', frame=1, frameOfReferenceUid=None, label='', values=None, calculator=None, sourceDigest=None, authorActor='SYNTHETIC')]))
         def seed_findings(count, filler=''):
             snapshot = literal(synthetic_snapshot(filler))
-            psql(f'''INSERT INTO "Finding" (id,"studyUid","authorSub","authorActor",revision,hidden,snapshot,"updatedAt")
+            psql_input(f'''INSERT INTO "Finding" (id,"studyUid","authorSub","authorActor",revision,hidden,snapshot,"updatedAt")
                 SELECT gen_random_uuid(),{uid},'SYNTHETIC','SYNTHETIC',1,false,{snapshot}::jsonb,now() FROM generate_series(1,{count})''')
             psql(f'''INSERT INTO "FindingRevision" ("findingId",revision,snapshot,action,reason,actor,"authorSub","requestId",fingerprint,"payloadBytes")
                 SELECT id,1,snapshot,'create','','SYNTHETIC','SYNTHETIC',gen_random_uuid(),repeat('0',64),octet_length(convert_to(snapshot::text,'UTF8')) FROM "Finding"
@@ -1313,14 +1339,33 @@ class FindingAPI(unittest.TestCase):
             self.assertTrue(state, 'bootstrap must carry this study')
             return state
 
+        # S7-U5 sends my draft boundary beside the draft (`draftRevision` = `<draftEpoch>:<revision>`, toClient in
+        # pacs.service.ts). The citation PUT is the one draft write between the two reads, so the boundary moves by
+        # exactly one, to the revision that PUT answered, inside the same epoch. Everything else in the entry is then
+        # compared whole, and a mismatch prints every differing path so a second change cannot hide behind the first.
+        self.maxDiff = None
+
+        def boundary(token):
+            epoch, _, revision = str(token).rpartition(':')
+            return epoch, int(revision)
+
         for before, after, pick in ((listed_before, listed_after, listed_state), (boot_before, boot_after, boot_state)):
             self.assertNotIn('citation', after.text)
-            new, old = pick(after), pick(before)
+            new, old = copy.deepcopy(pick(after)), copy.deepcopy(pick(before))
+            new_state, old_state = new.get('state', new), old.get('state', old)
+            self.assertIsInstance(new_state, dict); self.assertIsInstance(old_state, dict)
+            self.assertEqual(new_state['draftEpoch'], old_state['draftEpoch'], 'a citation never rotates the draft epoch')
+            old_epoch, old_revision = boundary(old_state['draftRevision'])
+            self.assertEqual(old_epoch, old_state['draftEpoch'])
+            self.assertEqual(boundary(new_state['draftRevision']), (old_epoch, old_revision+1),
+                             'the one citation save advances my draft revision by exactly one')
+            self.assertEqual(new_state['draftRevision'], answer['revision'], 'the payload carries the revision the save answered')
             drafts = []
-            for entry in (new, old):
-                state = entry.get('state', entry)
-                drafts.append(state.pop('draft', None) if isinstance(state, dict) else None)
-            self.assertEqual(new, old, 'nothing but the draft may move when a citation is written')
+            for state in (new_state, old_state):
+                drafts.append(state.pop('draft', None))
+                state.pop('draftRevision')
+            self.assertEqual(new, old, 'nothing but the draft body and its revision may move when a citation is written:\n'
+                             + '\n'.join(payload_differences(old, new)))
             self.assertTrue(any(drafts), 'the draft that carries the citation must be in at least one payload')
             for draft in drafts:
                 if draft is not None:
@@ -1332,6 +1377,18 @@ class FindingAPI(unittest.TestCase):
         self.cite(crossed, 1, text, link=stale, status=409)
         self.cite(crossed, 1, text, revision=crossed['revision']+1, status=409)
         self.assertEqual(self.draft_row(), rows)
+
+        # 17 raw - a client built before S7-U5 sends the old body as it is: no expectedOwner, no expectedRevision, no
+        # citationIds. S7-U5 keeps no compatibility path (tests/README.md "S7-U5 서버 재설계": every draft change
+        # carries owner, boundary and the whole snapshot), and putReport checks the owner before any read, write or
+        # audit. bearer_request bypasses the harness's fill-in (invariants_live.py _as_document), so this is that client.
+        audit = self.state(tables=('AuditLog',))
+        legacy = self.stack.bearer_request('PUT', report, self.stack.token('xauthor'),
+                                           dict(findings=text, conclusion='', recommendation='', baseVersion=0))
+        self.assertEqual(legacy.status, 400, legacy.text)
+        self.assertEqual((legacy.body['code'], legacy.body['field']), ('REPORT_DRAFT_PRECONDITION_REQUIRED', 'expectedOwner'), legacy.text)
+        self.assertEqual(self.draft_row(), rows, 'the refused old write leaves the draft row byte-identical')
+        self.assertEqual(self.state(tables=('AuditLog',)), audit, 'the refused old write is not audited')
 
         # 17 - an old client that knows nothing about citations neither clears nor duplicates them.
         self.call('PUT', dict(findings=text, conclusion='', recommendation='', baseVersion=0), 'xauthor', report)

@@ -219,7 +219,12 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     if(!tool||typeof tool.onResetCamera!=='function')return {release(){}};
     const original=tool.onResetCamera;let held=true;
     const guarded=function(...args){if(!held)return original.apply(this,args);};tool.onResetCamera=guarded;
-    return {group,tool,release(){held=false;if(tool.onResetCamera===guarded)tool.onResetCamera=original;}};
+    // The end of this viewer's session cancels every timer and frame a restore may be parked on, so the restore's
+    // finally never runs then: the same release is also the session end's own (once; withdrawn by a normal release).
+    let withdraw=null;
+    const release=()=>{held=false;const w=withdraw;withdraw=null;w?.();if(tool.onResetCamera===guarded)tool.onResetCamera=original;};
+    withdraw=window.KinViewerSessionBoundary?.onEnd?.(release)??null;
+    return {group,tool,release};
   }
   async function apply(value,current) {
     if(JSON.stringify(value.studies)!==JSON.stringify(studies))throw Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');

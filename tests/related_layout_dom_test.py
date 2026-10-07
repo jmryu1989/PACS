@@ -38,6 +38,8 @@ Cases (the RL ids are test-plan section 3 of the S7-RELATED-LAYOUT diagnosis, PA
   rl04 keyboard: More Filters -> Tab reaches a related row, the arrow keys and End move to visible rows.
   rl05 a stored 400px list height: capped in the small window without being rewritten, back at 400px in a large one;
        a drag in the small window stores what is visible; Reset Layout.
+  rl05b (S7-U5 H1) a stored list height capped while the View group is open (a layout applied inside it) is back in full
+       once the group is closed, with no window resize, and the capped height is not stored.
   rl07 900x700, 1024x600, 1366x600, 1024x700, Technician at 900x600, Layout: Portrait at 900x600, 900x500 (no overlap
        only). 1024x700 (D390) is a window whose work row lands in the band the hosted Linux fonts exposed at 900x700
        (292px there, 270px here): about 300px with either font set, where a short-row rule that ends at 286px lets the
@@ -49,6 +51,10 @@ Cases (the RL ids are test-plan section 3 of the S7-RELATED-LAYOUT diagnosis, PA
        centre reaches it; with no related exam the table's message is visible text (T8); in every prior report state the
        first body text line is T8; the list, the separator and the prior report pane stay inside the panel in that order.
        The hidden-filter notice case is not part of it (follow-up S7-RL-NOTICE-PORTRAIT).
+  rl12 (S7-U5 S4 GEO) Image Findings open in the Reading Workspace (1366x768 as is and with the report's button row at
+       the window's bottom edge, 1280x720, 1920x1080, 900x1200, 768x1024): the panel is apart from Approve, Save, Prelim,
+       Dictate and its own toggle, each of them whole and on top, its Close reachable, and the first Related row apart
+       from it and clickable.
   RelatedLayoutEquivalence rl06/rl08: work rows of 360px or more (1600x1050, 1366x768, 1920x1080, 1280x800, 1024x768),
        portrait (900x1400, 900x1200, 768x1024) and the report window at 900x600/900x700 lay out exactly as on the
        implementation base. Why a fixed-commit comparison (AGENTS 1-B 14): this unit's requirement there IS sameness with
@@ -582,6 +588,31 @@ class RelatedLayoutDOMTest(Base):
         w.assert_context("RL-05 reset", "none", False)
         w.screen.finish()
 
+    def test_rl05b_stored_size_back_when_the_work_area_grows_without_a_resize(self):
+        """RL-05b (S7-U5 H1, review of 8c2cf37 F-02): an open View group is a second toolbar row in the flow, so the work
+        area is smaller while it is open, and a layout applied then (Layout: Portrait, then Layout: Landscape, pressed
+        inside the group) fits the stored list height into that smaller space. Closing the group gives the space back
+        with the window unchanged: the stored size comes back - the Related list is as tall as before the group opened -
+        and the squeezed height was never stored. The stored height is larger than any window, so it is always capped."""
+        stored = {"version": 1, "mode": "auto", "portrait": {}, "landscape": {"prior": 5000}}
+        w = self.boot(harness.Server(rows=rows()), viewport=LARGE, storage={LAYOUT_KEY: json.dumps(stored)})
+        harness.expect(w.page.get_by_text("배치 복원됨 · 이 브라우저", exact=True)).to_be_visible()
+        before = w.list_region.bounding_box()["height"]
+        # The layout button is named by what it shows (Layout: Auto -> Portrait -> Landscape).
+        toggle = w.screen.menu("View").get_by_role("button").filter(has_text=re.compile(r"^Layout: "))
+        for shown in ("Layout: Portrait", "Layout: Landscape"):
+            toggle.click()
+            harness.expect(toggle).to_have_text(shown)
+        w.page.wait_for_timeout(150)
+        squeezed = w.list_region.bounding_box()["height"]
+        measure("RL-05b", before=before, squeezed=squeezed)
+        self.assertLess(squeezed, before - 1, "RL-05b precondition: the open View group leaves the list less room")
+        w.screen.menu("View", open_=False)
+        harness.until(lambda: abs(w.list_region.bounding_box()["height"] - before) <= 1, 5,
+                      "RL-05b the stored size back once the closed View group gave the space back (window unchanged)")
+        self.assertEqual(5000, self.stored_prior(w), "RL-05b the squeezed height was stored")
+        w.screen.finish()
+
     # ── RL-07 ───────────────────────────────────────────────────────────────────────────────────────────────────────
     def test_rl07_window_variants(self):
         for size in ((900, 700), (1024, 600), (1366, 600), (1024, 700)):
@@ -706,6 +737,153 @@ class RelatedLayoutDOMTest(Base):
                     w.assert_panel_stacked(tag)
                     w.screen.finish()
 
+    # ── RL-11 (S7-U5 fix-up D; triage M, stop-rule counterexample 4) ─────────────────────────────────────────────────
+    # The Reading Workspace sizes the Related list itself (reading-workspace.js); its table kept only 40px under the fixed
+    # rows, less than its sticky header and one row, so the header covered the row a click aimed at (six live modules).
+    # Supported windows, landscape and portrait, the narrow stacked layout included.
+    READING_SIZES = [(1280, 720), (1366, 768), (1024, 768), (1600, 1050), (1920, 1080), (900, 1200), (768, 1024), (900, 1400)]
+
+    def open_reading(self, size, row_set=None, target=CURRENT_DESC):
+        """Boot large, choose the reading target, open the Reading Workspace, then size the window."""
+        w = self.boot(harness.Server(rows=row_set or rows()), viewport=LARGE)
+        # The workspace's viewer frame: an empty document here (the viewer is not what this case measures).
+        w.page.route("**/ohif/**", lambda route: route.fulfill(status=200, content_type="text/html",
+                                                               body="<!doctype html><title>SYN viewer</title>"))
+        w.worklist_row(target).click()
+        harness.until(lambda: w.target_label.inner_text().startswith("판독 대상 · "), 10, "reading target chosen")
+        w.page.get_by_role("button", name="Reading Workspace", exact=True).click()
+        harness.until(lambda: w.page.evaluate("() => document.body.classList.contains('reading')"), 10, "reading workspace open")
+        w.page.set_viewport_size({"width": size[0], "height": size[1]})
+        w.page.wait_for_timeout(150)
+        return w
+
+    def table_floor(self, w):
+        """The table's own scroll box against its header and its first row, from layout."""
+        return js(w.page, """
+          const t = arg, grid = t.parentElement, head = t.tHead.getBoundingClientRect(), row = t.tBodies[0].rows[0].getBoundingClientRect();
+          return {box: grid.clientHeight, head: head.height, row: row.height};""", w.related_table.element_handle())
+
+    def test_rl11_reading_workspace_header_never_covers_a_row(self):
+        many = [harness.row(f"2.25.79{i:02d}", PID, date=f"2025{1 + i % 12:02d}{1 + i % 28:02d}", rs="W", modality="CT",
+                            desc=f"SYN RL READ {i:02d}") for i in range(30)]
+        for size in self.READING_SIZES:
+            name = f"{size[0]}x{size[1]}"
+            for label, row_set, targets in [("rows", None, [REPORT_DESC, NOREPORT_DESC, CT_DESC, REPORT_DESC]),
+                                            ("30 rows", rows(many), ["SYN RL READ 00", "SYN RL READ 17", "SYN RL READ 29", "SYN RL READ 03"])]:
+                with self.subTest(size=name, case=label):
+                    w = self.open_reading(size, row_set)
+                    tag = f"RL-11 {name} {label}"
+                    floor = self.table_floor(w)
+                    measure(tag, floor=floor)
+                    self.assertGreaterEqual(floor["box"] + 0.5, floor["head"] + floor["row"],
+                                            f"{tag}: the table shows its header and one whole row")
+                    for desc in targets:
+                        row = w.related_row(desc)
+                        # A wheel or a focus move brings it in (down the list, then back up); then it must be whole and on top.
+                        w.scroll_into_view(row)
+                        self.assert_row_on_top_in_its_table(w, f"{tag} {desc}", row)
+                    w.screen.finish()
+
+    def test_rl11b_related_rows_that_change_without_a_resize_are_measured_again(self):
+        """RL-11b (integration review F05): inside the Reading Workspace at a fixed window size the Related rows change
+        while nothing is resized - Previous Study from a patient with no other study to one with three (0 -> 3), then a
+        Modality filter that matches none (3 -> the one-line notice, which is taller than a row), then all again (0 -> 3).
+        After each change the table's floor follows what it now shows: its header and one whole row (the notice included,
+        so the reader can read it), and a click on a row lands on that row."""
+        for size in [(1366, 768), (1920, 1080), (900, 1200)]:
+            name = f"{size[0]}x{size[1]}"
+            with self.subTest(size=name):
+                w = self.open_reading(size, target="SYN RL OTHER PATIENT")
+                tag = f"RL-11b {name}"
+                harness.expect(w.related_table).to_contain_text("관련 검사 없음")
+                w.page.get_by_role("button", name="Previous Study", exact=True).click()
+                harness.until(lambda: w.related_row(NOREPORT_DESC).count() == 1, 10, f"{tag}: the other study's related rows")
+                for step, choose, shown in (("filtered to none", "Unspecified", "조건에 맞는 관련 검사 없음"),
+                                            ("all again", "All Modalities", NOREPORT_DESC)):
+                    w.select.select_option(label=choose)
+                    harness.expect(w.related_table).to_contain_text(shown)
+                    w.page.wait_for_timeout(300)
+                    floor = self.table_floor(w)
+                    measure(f"{tag} {step}", floor=floor)
+                    self.assertGreaterEqual(floor["box"] + 0.5, floor["head"] + floor["row"],
+                                            f"{tag} {step}: the table shows its header and one whole row")
+                row = w.related_row(NOREPORT_DESC)
+                w.scroll_into_view(row)
+                self.assert_row_on_top_in_its_table(w, f"{tag} {NOREPORT_DESC}", row)
+                w.screen.finish()
+
+    def assert_row_on_top_in_its_table(self, w, tag, row):
+        """In the Reading Workspace the Related table is wider than its column and scrolls sideways, so a row is judged
+        inside the table's own visible box: its full height below the sticky header and above the box's bottom, every
+        sampled point of its visible width on the row itself (nothing painted over it), and a click there reaches it."""
+        seen = js(w.page, """
+          const r = arg, grid = r.closest('table').parentElement, g = grid.getBoundingClientRect(), b = r.getBoundingClientRect();
+          const head = r.closest('table').tHead.getBoundingClientRect();
+          const left = Math.max(b.left, g.left + grid.clientLeft), right = Math.min(b.right, g.left + grid.clientLeft + grid.clientWidth);
+          const top = g.top + grid.clientTop, bottom = top + grid.clientHeight, covered = [];
+          for (const fx of [0.1, 0.5, 0.9]) for (const fy of [0.1, 0.5, 0.9]) {
+            const x = left + (right - left) * fx, y = b.top + b.height * fy;
+            if (!within(document.elementFromPoint(x, y), r)) covered.push([x, y]); }
+          return {row: [b.left, b.top, b.right, b.bottom], head: head.bottom, box: [top, bottom], width: right - left, covered,
+                  centre: [(left + right) / 2, (b.top + b.bottom) / 2]};""", row.element_handle())
+        measure(tag, seen=seen)
+        self.assertGreaterEqual(seen["row"][1] + 0.5, seen["head"], f"{tag}: the row starts below the table header")
+        self.assertLessEqual(seen["row"][3], seen["box"][1] + 0.5, f"{tag}: the row ends inside the table's box")
+        self.assertGreater(seen["width"], 40, f"{tag}: the row is visible across the table's width")
+        self.assertEqual([], seen["covered"], f"{tag}: points of the row under another element")
+        handle = row.element_handle()
+        handle.evaluate("r => { r.landed = null; document.addEventListener('click', e => { r.landed = r.contains(e.target); }, {capture: true, once: true}); }")
+        w.page.mouse.click(*seen["centre"])
+        self.assertTrue(handle.evaluate("r => r.landed"), f"{tag}: a click at the row reached the row")
+        harness.until(lambda: "열람 중" in row.get_by_role("cell").first.inner_text(), 5, f"{tag} row opened")
+
+    # ── RL-12 (S7-U5 S4 GEO) ────────────────────────────────────────────────────────────────────────────────────────────
+    # Image Findings open in the Reading Workspace. After fix-up D raised the table floor, the hosted fonts put the report's
+    # button row at 736-764 of a 768px window and the panel, fixed above a 12px inset with no room left below the report's
+    # fields, sat on Approve/Save/Prelim/Dictate. `long` reads a study whose description wraps the report's target line, so
+    # the row starts below the window and is brought up to its bottom edge, as a reader's wheel over the column does: the
+    # hosted position, whatever this machine's fonts. 1280x720 reaches it without that.
+    LONG_DESC = " ".join(["SYN RL CURRENT CT CHEST ABDOMEN PELVIS WITH CONTRAST ARTERIAL AND PORTAL VENOUS PHASE FOLLOW UP"] * 2)
+    FINDINGS_CASES = [((1366, 768), False), ((1366, 768), True), ((1280, 720), False), ((1920, 1080), False),
+                      ((900, 1200), False), ((768, 1024), False)]
+    REPORT_BUTTONS = ("Approve", "Save", "Prelim", "Dictate")
+
+    def test_rl12_image_findings_never_covers_the_report_buttons_or_the_first_related_row(self):
+        long_rows = [harness.row("2.25.7001", PID, date="20261005", rs="W", modality="CT", desc=self.LONG_DESC)] + rows()[1:]
+        for size, long in self.FINDINGS_CASES:
+            name = f"{size[0]}x{size[1]}" + (" long description" if long else "")
+            with self.subTest(case=name):
+                w = self.open_reading(size, long_rows, self.LONG_DESC) if long else self.open_reading(size)
+                page, tag = w.page, f"RL-12 {name}"
+                toggle = page.get_by_role("button", name="Image Findings", exact=True)
+                toggle.click()
+                panel = page.get_by_role("region", name="Image Findings", exact=True)
+                harness.expect(panel).to_be_visible()
+                buttons = [(label, page.get_by_role("button", name=label, exact=True)) for label in self.REPORT_BUTTONS]
+                # What a wheel over the column does when the row is below the window (the stacked portrait layout too).
+                w.scroll_into_view(buttons[-1][1])
+                page.wait_for_timeout(150)
+                w.assert_no_document_scroll(f"{tag} buttons in view")
+                box = w.visible(panel)["box"]
+                row = w.related_table.get_by_role("row").nth(1)
+                measure(tag, panel=box, toggle=w.visible(toggle)["box"], row=w.visible(row)["box"],
+                        buttons={label: w.visible(button)["box"] for label, button in buttons})
+                apart = lambda b: b[2] <= box[0] + 0.5 or b[0] >= box[2] - 0.5 or b[3] <= box[1] + 0.5 or b[1] >= box[3] - 0.5
+                # The panel itself still shows its title line and Close, so docking did not shrink it out of use.
+                self.assertTrue(w.pointable(panel.get_by_role("button", name="Close Image Findings", exact=True)),
+                                f"{tag}: Close Image Findings reachable")
+                for label, control in buttons:
+                    seen = w.visible(control)
+                    self.assertTrue(apart(seen["box"]), f"{tag}: the panel {box} lies over {label} {seen['box']}")
+                    self.assertGreaterEqual(seen["ratio"], 0.999, f"{tag}: {label} whole in the window")
+                    self.assertEqual([], w.covered_points(control), f"{tag}: points of {label} under another element")
+                # The toggle scrolls with its column (out of view once the button row is brought up); the panel is
+                # never what hides it.
+                self.assertTrue(apart(w.visible(toggle)["box"]), f"{tag}: the panel lies over its own toggle")
+                self.assertTrue(apart(w.visible(row)["box"]), f"{tag}: the panel lies over the first Related row")
+                self.assert_row_on_top_in_its_table(w, f"{tag} first Related row", row)
+                w.screen.finish()
+
 
 # ── RelatedLayoutEquivalence (R-EQ; local record, not in CI) ────────────────────────────────────────────────────────
 BASE_SHA = "0856c1bda1b4a66a5abf59467f4926b7e75c8d78"   # implementation base B (S7-AUDIT-STORE merge)
@@ -795,11 +973,15 @@ def landmarks(w):
     return result
 
 
-def run_snapshot(page_path):
-    """Landmarks of `page_path`, or of this process's own page (the override, if one was given, else the shipped page)."""
+def run_snapshot(page_path, assets_sha=None):
+    """Landmarks of `page_path`, or of this process's own page (the override, if one was given, else the shipped page).
+    `assets_sha`: the commit whose scripts and styles the page runs with (a fixed-commit page runs with its own files)."""
     env = {**os.environ}
+    env.pop("KIN_MULTI_INSTITUTION_ASSETS_SHA", None)
     if page_path:
         env["KIN_MULTI_INSTITUTION_MAIN"] = str(page_path)
+    if assets_sha:
+        env["KIN_MULTI_INSTITUTION_ASSETS_SHA"] = assets_sha
     child = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), "--layout-snapshot"], capture_output=True,
                            text=True, encoding="utf-8", env=env, timeout=1500)
     lines = [ln for ln in child.stdout.splitlines() if ln.startswith("RL-SNAPSHOT ")]
@@ -815,7 +997,7 @@ class RelatedLayoutEquivalence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             base_page = Path(folder) / "main.html"
             base_page.write_text(base_text, encoding="utf-8", newline="\n")
-            base = run_snapshot(base_page)
+            base = run_snapshot(base_page, BASE_SHA)
         cand = run_snapshot(None)
         differences, excepted = [], []
         for key, landmarks_b in base["sizes"].items():

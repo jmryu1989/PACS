@@ -374,6 +374,7 @@ window.kinCreateVolumeCurved=function({target,permitted,alive,owner,host}){
       return {state:stateText.textContent,armed,selected,generation,current:signature(r.value),value:r.value?structuredClone(r.value):null,final:pack(r.final,values),preview:pack(r.preview,values),failed:r.failed?{...r.failed}:null};
     }
   };
+  window.KinViewerSessionBoundary?.guardMethods(capability,['saved','restore','clearForJob']);
   window.kinMprCurved=capability;const timer=setInterval(refresh,250);refresh();
   return {dispose(){ended=true;clearInterval(timer);cancel();unbind();records.clear();if(window.kinMprCurved===capability)delete window.kinMprCurved;window.removeEventListener('beforeunload',beforeUnload);panel.remove();}};
 };

@@ -1,5 +1,7 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');
-const {create}=require('../worklist-v0/hpacs-lite/study-pages.js');
+const {create: productCreate} = require('../worklist-v0/hpacs-lite/study-pages.js');
+const { install } = require("./module_session_harness.cjs");
+const create = options => { install(options?.fetcher); return productCreate(options); };
 const owner=['hallym','subject'],me={kind:'member',institution:owner[0],sub:owner[1]};
 const rows=Array.from({length:201},(_,i)=>({uid:String(i).padStart(4,'0'),state:{}}));
 const page=(offset)=>({studies:rows.slice(offset,offset+100),pagination:{owner,limit:100,offset,total:201,next:offset<200?String(offset+100):null}});

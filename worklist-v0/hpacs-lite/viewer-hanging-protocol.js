@@ -459,9 +459,8 @@
         const method=action==='load'?'GET':'PUT',expectedOwner=site?boundSite:boundOwner;
         const body=method==='GET'?undefined:JSON.stringify({expectedOwner,revision,value:action==='reset'?null:value});
         const response=await fetcher(scopeEndpoints[beforeScope],{method,credentials:'same-origin',cache:'no-store',signal:request.signal,headers:{'X-KIN-CSRF':'1',...(body?{'Content-Type':'application/json'}:{})},body});const raw=await json(response);
-        if(!response.ok)throw Error(response.status===403?'기관 공용 규칙의 저장·초기화는 관리자 전용입니다.'
-          :response.status===409?'다른 창에서 규칙이 바뀌었습니다. 다시 불러오세요.'
-          :site?'기관 저장 여부를 확인하지 못했습니다. 다시 불러오세요.':'계정 저장 여부를 확인하지 못했습니다. 다시 불러오세요.');
+        if(!response.ok)throw root.KinSessionTransport.responseError(response,response.status===409?'다른 창에서 규칙이 바뀌었습니다. 다시 불러오세요.'
+          :site?'기관 저장 여부를 확인하지 못했습니다. 다시 불러오세요.':'계정 저장 여부를 확인하지 못했습니다. 다시 불러오세요.','기관 공용 규칙의 저장·초기화는 관리자 전용입니다.');
         const data=site?siteValue(raw):accountValue(raw);
         await session(request.signal);if(ended||!live())return;
         // A response belongs to the scope that asked for it. Coming back to a different scope
@@ -536,8 +535,8 @@
         library=value;selected=value.activeRuleId||value.rules[0]?.id||null;markChanged();render();status.textContent='규칙을 초안으로 가져왔습니다. Save Draft 또는 Save to Account를 선택하세요.';
       }catch(error){if(!ended)status.textContent=error instanceof SyntaxError?'가져올 JSON 형식이 잘못되었습니다.':error.message;}
     };
-    function end(){ended=true;request?.abort();siteRequest?.abort();channel?.close();subscriptions.splice(0).forEach(value=>{try{value?.unsubscribe?.();}catch(_){}});root.removeEventListener?.('storage',storageEnd);refresh();}
-    const storageEnd=event=>{if(event.key==='kin-session-ended')end();};root.addEventListener?.('storage',storageEnd);try{channel=new BroadcastChannel('kin-session');channel.onmessage=event=>{if(event.data?.type==='session-ended')end();};}catch(_){}
+    function end(){ended=true;request?.abort();siteRequest?.abort();channel?.close();subscriptions.splice(0).forEach(value=>{try{value?.unsubscribe?.();}catch(_){}});refresh();}
+    try{channel = window.kinViewerOnEnd(() => end());}catch(_){}
     const navigationChanged=()=>{if(!busy&&appliedCursor&&appliedFingerprint!==navigationFingerprint()){invalidateApplied();refresh();}};
     for(const service of [grid,displaySets])for(const event of new Set(Object.values(service?.EVENTS||{})))try{subscriptions.push(service.subscribe(event,navigationChanged));}catch(_){}
     describeScope();render();

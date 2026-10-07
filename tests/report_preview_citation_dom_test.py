@@ -24,6 +24,8 @@ import os
 import unittest
 from pathlib import Path
 
+from report_page_contract import install_contract
+
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,12 +149,12 @@ window.fetch = async (url, options = {}) => {
     citeCalls.push({ path, method: options.method ?? "GET" });
     if (citeQueue.length) citeLast = citeQueue.shift();
     const reply = citeLast ?? { status: 500, body: { message: "인용을 확인할 수 없습니다" } };
-    const answer = () => ({ ok: reply.status < 400, status: reply.status, json: async () => reply.body });
+    const answer = () => new Response(JSON.stringify(reply.body), {status: reply.status, headers: reply.headers});
     if (holdCite > 0) { holdCite -= 1; return new Promise(resolve => { heldCite.push(() => resolve(answer())); }); }
     return answer();
   }
   previewCalls.push({ path, method: options.method ?? "GET" });
-  return { ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(previewAnswer)) };
+  return new Response(JSON.stringify(previewAnswer), {status: 200});
 };
 APIFN
 
@@ -239,6 +241,8 @@ def reduced(cid=CID + "5", field="conclusion"):
 def ok(head, version=3):
     return {"status": 200, "body": {"version": version, "head": head, "draft": []}}
 
+
+HARNESS = install_contract(HARNESS)
 
 class ReportPreviewCitationDOMTest(unittest.TestCase):
     @classmethod
@@ -341,6 +345,19 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
         self.assertNotIn(LIMITATION, section)
         self.assertNotIn(UNKNOWN, section)
 
+    def test_printed_report_neither_claims_structure_nor_reads_its_route(self):
+        """U5PT-F02 / P15: output must not imply an unverified structure attestation."""
+        self.open(cite=ok([]))
+        self.require_print()
+        documents = self.print_document()
+        self.assertTrue(documents)
+        for document in documents:
+            text = self.page.evaluate("html => new DOMParser().parseFromString(html, 'text/html').body.textContent", document)
+            self.assertIn(BODY_LINE, text)
+            self.assertNotIn("structured", text.lower())
+        paths = self.page.evaluate("[...previewCalls, ...citeCalls].map(c => c.path)")
+        self.assertFalse(any('/report/structure' in path for path in paths), paths)
+
     # ── D3 · refused ──
 
     def test_a_refused_read_says_so_and_still_prints_the_report(self):
@@ -356,6 +373,23 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
         self.require_print()
 
     # ── D4 · a server failure is unknown, never empty ──
+
+    def test_coded_403_is_unknown_instead_of_outside_study_access(self):
+        for location in ("header", "body"):
+            with self.subTest(location=location):
+                reply = {"status": 403, "body": {"message": "SYN binding failed"}}
+                if location == "header":
+                    reply["headers"] = {"X-KIN-Auth-Code": "AUTH_CSRF_REQUIRED"}
+                else:
+                    reply["body"]["code"] = "AUTH_SESSION_BUSY"
+                self.open(cite=reply)
+                section = self.section()
+                self.assertIn(UNKNOWN, section)
+                self.assertNotIn(REFUSED, section)
+                self.assertIn(BODY_LINE, self.page.evaluate("ui.srcdoc()"))
+                self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
+                self.assertFalse(self.page.evaluate("ui.printDisabled()"))
+                self.page.close()
 
     def test_a_failed_read_is_unknown_and_does_not_blank_the_paper(self):
         self.open(cite={"status": 500, "body": {"message": "인용을 확인할 수 없습니다"}})
@@ -551,13 +585,22 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
 
     # ── D17 · a session that ended takes the paper with it ──
 
-    def test_an_expired_session_blanks_the_paper_instead_of_drawing_unknown(self):
-        self.open(cite={"status": 401, "body": {}}, render=False)
-        self.page.wait_for_function("expired => ui.status() === expired", arg=EXPIRED)
+    def test_an_ended_session_blanks_the_paper_instead_of_drawing_unknown(self):
+        self.open(cite={"status": 401, "body": {"code": "AUTH_SESSION_ENDED"}}, render=False)
+        self.page.wait_for_function("!['active', 'preparing'].includes(KinWorkContext.state())")
         self.assertEqual("", self.page.evaluate("ui.srcdoc()"), "nothing is drawn on a logged-out screen")
-        self.assertEqual(EXPIRED, self.page.evaluate("ui.status()"))
-        self.assertEqual(1, self.page.evaluate("ui.logouts()"), "the shipped api() ended the session")
+        self.assertEqual("", self.page.evaluate("ui.status()"))
+        self.assertEqual(0, self.page.evaluate("ui.logouts()"), "an authoritative end sends no logout request")
         self.assertTrue(self.page.evaluate("ui.printDisabled()"))
+
+    def test_a_plain_401_is_unknown_evidence_and_keeps_the_report_open(self):
+        # Amendment ⑤: a request refusal is not evidence that this session ended.
+        self.open(cite={"status": 401, "body": {"message": "synthetic refusal"}}, render=False)
+        self.page.wait_for_function("() => citeCalls.length === 1 && ui.status() !== '출력 직전 상태를 다시 확인하고 있습니다…'", timeout=3000)
+        self.assertIn(BODY_LINE, self.page.evaluate("ui.srcdoc()"), "a plain 401 must not blank valid report text")
+        self.assertEqual("active", self.page.evaluate("work.state()"))
+        self.assertEqual(0, self.page.evaluate("ui.logouts()"))
+        self.assertIn(UNKNOWN, self.page.evaluate("ui.srcdoc()"))
 
     # ── D14 · a head that was never saved has nothing to attest ──
 

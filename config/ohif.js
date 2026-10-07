@@ -13,6 +13,89 @@
 const KIN_VIEWER_DEFAULT_TITLE = '판독 뷰어 — KOREA IMAGING NETWORK';
 const KIN_VIEWER_PRODUCT = 'KIN Viewer';
 
+// Consume the opener-less handoff before loading any other script. Neither the address nor
+// a later document's window.name retains the expected session; the boundary records it locally.
+const KIN_VIEWER_EXPECTED_SESSION = (() => {
+  const prefix = 'kin-viewer-entry:';
+  if (!window.name?.startsWith(prefix)) return null;
+  const raw = window.name.slice(prefix.length); window.name = '';
+  try {
+    const entry = JSON.parse(raw);
+    window.name = typeof entry.name === 'string' ? entry.name : '';
+    const expected = typeof entry.session === 'string' && entry.session ? entry.session : null;
+    // A fresh list action may reuse the named window and its URL. It starts a new
+    // verification; a reload has no handoff and retains the previous entry instead.
+    history.replaceState({ ...history.state, kinViewerSession: {
+      session: null, ended: false, unresolved: true, expected, entryStopped: !expected,
+    } }, '');
+    return expected;
+  } catch (_) { return null; }
+})();
+
+// The first extension sets the page defaults before shared modules and data sources start work.
+function kinCreateSessionBoundary() {
+  return { id: 'kin.session-boundary', async preRegistration() {
+    for (const name of ['work-context.js', 'session-transport.js', 'viewer-resources.js', 'viewer-session.js']) {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = '/worklist/hpacs-lite/' + name;
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('뷰어 세션 연결을 불러오지 못했습니다.'));
+        document.head.append(script);
+      });
+    }
+    const boundary = window.KinViewerSession.connect(window, KIN_VIEWER_EXPECTED_SESSION);
+    // S7-U5 A006 (added): what this viewer holds unsaved, read from the guards its modules already keep for window
+    // reuse and close - marks (kinViewerHistoryHasUnsaved), finding text (kinViewerFindingsState), Job / MIP edits
+    // (kinViewerJobWorkspaceState), the Tech Note dialog (kinViewerTechNoteState). Log Out reads it before the real end
+    // and asks only when something is there. A save still out counts as unsaved in each of these (the logout preparation
+    // pauses this document, so its answer cannot arrive before the real end): marks count a busy entry, findings count a
+    // pending/busy entry (set only by a save), Jobs count the kept request body from its build until the save is confirmed,
+    // the note counts a save not yet confirmed. Their `busy` is not read here: for Jobs it is also a restore or a list read,
+    // which is not unsaved work. A guard that is missing or throws says nothing: unreadable is not unsaved.
+    boundary.unsaved(() => {
+      const kinds = [], holds = (kind, read) => { try { if (read() === true) kinds.push(kind); } catch (_) {} };
+      holds('marks', () => window.kinViewerHistoryHasUnsaved?.());
+      holds('findings', () => window.kinViewerFindingsState?.().dirty);
+      holds('jobs', () => window.kinViewerJobWorkspaceState?.().dirty);
+      holds('note', () => window.kinViewerTechNoteState?.().dirty);
+      return kinds;
+    });
+    boundary.onEnd(() => {
+      kinViewerSession.refuse('logout');
+      for (const extension of window.config.extensions) {
+        try { extension?.onModeExit?.(); } catch (_) {}
+      }
+      for (const engine of window.cornerstone?.getRenderingEngines?.() || []) { try { engine.destroy(); } catch (_) {} }
+      document.title = KIN_VIEWER_DEFAULT_TITLE;
+      document.body.replaceChildren();
+      try { if (window.frameElement) { window.frameElement.remove(); return; } } catch (_) {}
+      try { window.close(); } catch (_) {}
+      if (!window.closed) window.location.replace('/worklist/hpacs-lite/index.html');
+    });
+    await boundary.ready;
+    window.dispatchEvent(new Event('kin-viewer-session-ready'));
+    await boundary.wait();
+  } };
+}
+
+// A subscription follows the document gate, never a raw cross-document notice.
+function kinViewerOnEnd(run) {
+  let off = null, done = false;
+  const end = () => { if (!done) { done = true; run(); } };
+  const attach = () => {
+    const gate = window.KinWorkContext;
+    if (!gate) return;
+    off = gate.onInvalidate(event => {
+      if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) end();
+    });
+    if (!['active', 'preparing'].includes(gate.state())) end();
+  };
+  if (window.KinWorkContext) attach(); else window.addEventListener?.('kin-viewer-session-ready', attach, { once: true });
+  return { close() { off?.(); window.removeEventListener?.('kin-viewer-session-ready', attach); } };
+}
+window.kinViewerOnEnd = kinViewerOnEnd;
+
 /* S5-UI5 (VUI-04). 고정 뷰어 도구막대의 이름과 설명: aria-label은 영어 이름, title은 한국어 설명이다. 도구 ID·data-cy·명령·
    순서·단축키는 뷰어의 것이라 DOM 속성만 붙인다. 켜고 끄는 도구에는 켜짐 상태(aria-pressed)와 title의 "사용 중"을 더해 색에만
    기대지 않게 한다. 뷰어가 이미 aria-pressed를 주는 버튼은 그 값을 그대로 둔다. 같은 값이면 쓰지 않으므로 여러 번 불러도
@@ -108,18 +191,7 @@ function KinViewerBrand({ React }) {
       document.title = KIN_VIEWER_DEFAULT_TITLE;
     };
 
-    // 공용 판독 PC에서 로그아웃한 워크리스트가 다른 뷰어 탭의 환자명도 함께 지운다.
-    const onSessionMessage = event => {
-      if (event.data?.type === 'session-ended') resetTitle();
-    };
-    const onStorage = event => {
-      if (event.key === 'kin-session-ended') resetTitle();
-    };
-    try {
-      sessionChannel = new BroadcastChannel('kin-session');
-      sessionChannel.addEventListener('message', onSessionMessage);
-    } catch (e) { /* 구형 브라우저는 storage 이벤트만 쓴다. */ }
-    window.addEventListener('storage', onStorage);
+    sessionChannel = kinViewerOnEnd(resetTitle);
 
     // S5-UI4: 톱니 메뉴의 About(업스트림 버전·링크 창)은 판독 화면에서 뺀다. 라이선스 표기는 로그인 페이지 하단에 둔다.
     // OHIF 3.9 머리글은 메뉴 항목을 설정으로 끄는 길이 없어 DOM에서 처리한다. React가 소유한 행을 떼어 내면
@@ -197,9 +269,7 @@ function KinViewerBrand({ React }) {
     return () => {
       document.title = KIN_VIEWER_DEFAULT_TITLE;
       observer.disconnect();
-      window.removeEventListener('storage', onStorage);
       if (sessionChannel) {
-        sessionChannel.removeEventListener('message', onSessionMessage);
         sessionChannel.close();
       }
     };
@@ -385,6 +455,49 @@ const kinStackPrecision = (() => {
     return state;
   }
 
+  /*
+   * A flip stays while the person scrolls the same stack (S7-U5 fix round H2, the commander's decision: the OHIF default
+   * and the expectation of main's Images Only test). The pinned viewer re-centres the camera on every frame it shows
+   * (_updateActorToDisplayImageId -> resetCameraNoEvent, which clears both flips) and then gives back rotation, zoom and
+   * pan (its view presentation) but not the flips, so a flipped image silently un-flipped on the next slice. The flips are
+   * given back only for a frame of the same stack: setStack clears the flips and invalidates the stack before its first
+   * frame, so a new stack starts unflipped, and every explicit reset (Space/Reset, Reset Display, a Job restore, a cell
+   * merge) clears them outside this method. Pinned like the methods above; on another source the stock method stays.
+   * The rotation is given back again after the flips: the frame update re-applies the angle the flipped camera reported
+   * to the unflipped camera, where the same number is another orientation (a 90 degree turn then a flip came back turned
+   * 180 degrees); with the flips back first the angle means what it meant before the frame.
+   */
+  const KEEP = '_updateActorToDisplayImageId';
+  const KEEP_HASH = '1d0c256a7758f34b11ff56cd2a14df83780f318d1c86264c014a0320045b0f91';
+  function keepFlips(original) {
+    return function (image) {
+      const same = !this.stackInvalidated, horizontal = !!this.flipHorizontal, vertical = !!this.flipVertical;
+      const rotation = same && (horizontal || vertical) ? this.getRotation() : null;
+      const result = original.call(this, image);
+      if (same && !this.stackInvalidated) {
+        const flipHorizontal = horizontal && !this.flipHorizontal, flipVertical = vertical && !this.flipVertical;
+        if (flipHorizontal || flipVertical) {
+          this.flip({ flipHorizontal, flipVertical });
+          if (Number.isFinite(rotation)) this.setRotation(rotation);
+        }
+      }
+      return result;
+    };
+  }
+  async function installKeepFlips(target) {
+    const original = Object.hasOwn(target, KEEP) ? target[KEEP] : null;
+    if (typeof original !== 'function' || !Object.isExtensible(target)) return 'unsupported';
+    const bytes = new TextEncoder().encode(Function.prototype.toString.call(original).replace(/\r\n/g, '\n').trim());
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    const actual = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+    if (actual !== KEEP_HASH || target[KEEP] !== original) {
+      console.warn('KIN stack flip keeper: unsupported viewer source; the stock frame update is retained.');
+      return 'unsupported';
+    }
+    Object.defineProperty(target, KEEP, { configurable: true, writable: true, value: keepFlips(original) });
+    return 'ready';
+  }
+
   async function install() {
     const core = window.cornerstone;
     const base = core?.Viewport?.prototype;
@@ -410,6 +523,8 @@ const kinStackPrecision = (() => {
       },
     }]));
     Object.defineProperties(target, descriptors);
+    // The flip keeper relies on the flip installed just above (double precision on GPU stacks).
+    window.kinViewerFlipKeeper = Object.freeze({ version: 1, state: await installKeepFlips(target).catch(() => 'unsupported') });
     return status('ready');
   }
   return { id: 'kin.stack-precision', preRegistration() {
@@ -652,11 +767,11 @@ function kinCreateSRProvenance() {
         if (String(a.annotationUID).startsWith('kin-sr:')) window.cornerstoneTools.annotation.state.removeAnnotation(a.annotationUID);
       for (const entry of window.cornerstone.getEnabledElements()) { try { entry.viewport.render(); } catch (_) {} }
     };
-    const onStorage = event => { if (event.key === 'kin-session-ended') end(); };
-    let channel; try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
-    window.addEventListener('storage', onStorage);
+
+    let channel; try { channel = kinViewerOnEnd(() => end()); } catch (_) {}
+
     window.addEventListener('kin-viewer-access-ended', end);
-    stop = () => { end(); clearInterval(timer); panel.remove(); channel?.close(); window.removeEventListener('storage', onStorage); window.removeEventListener('kin-viewer-access-ended', end); restores.reverse().forEach(restore => restore()); };
+    stop = () => { end(); clearInterval(timer); panel.remove(); channel?.close();  window.removeEventListener('kin-viewer-access-ended', end); restores.reverse().forEach(restore => restore()); };
     refresh();
   }
   return { id: 'kin.sr-provenance', preRegistration({ servicesManager, extensionManager }) { services = servicesManager.services; extensions = extensionManager; },
@@ -751,6 +866,12 @@ function kinCreateViewerHistory() {
   function mount() {
     stop?.();
     const cs = window.cornerstone, ct = window.cornerstoneTools;
+    const annotationManager = ct?.annotation?.state?.getAnnotationManager?.();
+    if (annotationManager && window.KinViewerSessionBoundary) {
+      const state = annotationManager;
+      window.KinViewerSessionBoundary.guardMethods(state,
+        ['addAnnotation', 'removeAnnotation', 'removeAllAnnotations'].filter(name => typeof state[name] === 'function'));
+    }
     if (!cs || !ct?.annotation?.locking) return;
     const entries = new Map(), annotations = new Map(), recovery = new Map();
     let scope = '', subject = '', me, generation = 0, readSequence = 0, shown = null, shownStatus = '', unmatched = false;
@@ -1252,7 +1373,7 @@ function kinCreateViewerHistory() {
     // 이유로 돌지 못했어도(settle은 감시자의 실패를 삼킨다) 전환 뒤에 도착한 작성자 목록은 그려지지 않는다.
     const readPolicy = () => readOnly() ? 'final' : 'author';
     const asked = (ticket, seq, policy) => valid(ticket) && seq === readSequence && readPolicy() === policy;
-    const writable = entry => writer() && !suspended && !recovery.has(scope) && me?.kind === 'member' && me.roles?.includes('radiologist') &&
+    const writable = entry => window.KinViewerSessionBoundary?.active() && writer() && !suspended && !recovery.has(scope) && me?.kind === 'member' && me.roles?.includes('radiologist') &&
       (!entry.head || entry.head.authorSub === subject);
     const render = () => { try { viewport()?.render(); } catch (_) {} };
     const lock = (entry, locked) => { if (entry.annotationUID) ct.annotation.locking.setAnnotationLocked(entry.annotationUID, locked); };
@@ -1319,9 +1440,7 @@ function kinCreateViewerHistory() {
       }
       render();
     }
-    // Astra S5-U2b-X2-R-001 F01. A real end of the login (401/403, a logout broadcast, another account) is the document's end too:
-    // kinViewerSession keeps 'refused', so no /me asked before or after it gives the other extensions a writer back. Mode exit is not.
-    // `reason` says which (kinViewerSession loginEnd): a /me 403 refuses this account, a 401 or a logout ends the login.
+    // Session termination is owned by the page transport and gate.
     function sessionEnded(reason) { kinViewerSession.refuse(reason); end(); }
     async function api(path, options = {}, ticket = generation) {
       // A request of a generation already given up (another study, the clinician-only boundary) is not sent at all: a save that
@@ -1334,18 +1453,14 @@ function kinCreateViewerHistory() {
       try {
       const res = await fetch('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request.signal,
         headers: { 'X-KIN-CSRF': '1', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
-      // Astra S5-U2c-C-R-001 F01: an answer valid() drops (a generation given up: another study, the clinician-only boundary, this
-      // panel's end) is still the document's for what it says about the login: a 401 ends it, and a /me answer of another account
-      // than the document's first one ends it (sameAccount: no verdict). An answer in use reaches the same through sessionEnded
-      // below and authenticate()'s note(); a /me 403 refuses this account without ending the login and is read only then.
+      // Session termination is owned by the page transport and gate.
       const drop = async data => {
-        if (res.status === 401) kinViewerSession.refuse('unauthorized');
-        else if (path === '/me' && res.ok) kinViewerSession.sameAccount(data === undefined ? await res.json().catch(() => null) : data);
+        if (path === '/me' && res.ok) kinViewerSession.sameAccount(data === undefined ? await res.json().catch(() => null) : data);
         return { stale: true };
       };
       if (!valid(ticket)) throw await drop();
-      if (res.status === 401 || res.status === 403 && path === '/me') { sessionEnded(res.status === 401 ? 'unauthorized' : 'forbidden'); throw { stale: true }; }
-      if (res.status === 403) { deny(); throw { stale: true }; }
+      if (window.KinSessionTransport.refusal(res) === 'denied' && res.status === 403) { deny(); throw { stale: true }; }
+      if (window.KinSessionTransport.refusal(res)) throw window.KinSessionTransport.responseError(res);
       const data = await res.json().catch(() => null);
       if (!valid(ticket)) throw await drop(data);
       // `said` (the server's wording) is read only by readOnlyLoad; writer paths keep their own messages (manualSr reads `message`).
@@ -1355,11 +1470,10 @@ function kinCreateViewerHistory() {
     }
     async function authenticate(ticket) {
       const user = await api('/me', {}, ticket);
-      // Another account ends the document's login before its verdict is noted (Astra S5-U2b-X3-R-001 F01, X4-R-001 F01). note()
-      // makes that comparison against the account the document confirmed first — by this mount, an earlier one or another panel —
-      // so a mount that has not confirmed anyone yet (subject is empty after a mode re-entry) is covered too; a refusal there ends
-      // this panel inside note() through the session watcher.
+      // Compare with the account first confirmed in this document, including earlier mounts.
+      // A different account refuses this panel's answer; only the page gate ends the document.
       // The session watcher below runs inside note(): ownAnswer tells it that this panel's own /me is the answer it reacts to.
+      if (kinViewerSession.sameAccount(user) !== true) throw { stale: true };
       ownAnswer = true;
       try { kinViewerSession.note(user); } finally { ownAnswer = false; }
       // `ended`: the answer itself refused (not a viewer member) and the session watcher ended this panel inside note().
@@ -1873,6 +1987,7 @@ function kinCreateViewerHistory() {
       }
     }
     function scan() {
+      if (window.KinWorkContext?.state() === 'preparing') return;
       // The observation tick sees the document's end first (X4-R-001 F02): whichever way it was noted, this panel ends with it.
       if (!ended && kinViewerSession.ended()) end();
       closeAuthoring();
@@ -1936,6 +2051,7 @@ function kinCreateViewerHistory() {
       refreshMeasurementViews(); refreshSrButtons();
     }
     function captureAnnotations() {
+      if (!window.KinViewerSessionBoundary?.active()) return;
       // Not a confirmed writer: a mark drawn with the viewer's own tools never becomes an unsaved item of this panel.
       if (suspended || recovery.has(scope) || !writer()) return;
       for (const a of ct.annotation.state.getAllAnnotations()) {
@@ -1956,7 +2072,7 @@ function kinCreateViewerHistory() {
         }
       }
     }
-    const onStorage = e => { if (e.key === 'kin-session-ended') sessionEnded('logout'); };
+
     const onFocus = () => { lastAuth = 0; tried = 0; };
     // A document that is not a confirmed writer has no mark to save, so an unlocked native mark is not unsaved work there.
     const jobGuard = () => recovery.size > 0 || [...entries.values()].some(x => hasWork(x) || x.busy) || writer() &&
@@ -1981,8 +2097,8 @@ function kinCreateViewerHistory() {
     window.kinViewerHistoryActivate = activateStudy;
     window.kinViewerHistoryState = historyState;
     let channel;
-    try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') sessionEnded('logout'); }; } catch (_) {}
-    window.addEventListener('storage', onStorage); window.addEventListener('focus', onFocus); window.addEventListener('beforeunload', beforeUnload);
+    try { channel = kinViewerOnEnd(() => sessionEnded('logout')); } catch (_) {}
+     window.addEventListener('focus', onFocus); window.addEventListener('beforeunload', beforeUnload);
     // The pinned viewer changes active viewports through several services. A
     // bounded observation timer also covers stack frame changes without patching them.
     const timer = setInterval(() => { try { scan(); } catch (_) { status.textContent = '현재 영상 연결을 확인할 수 없습니다.'; } }, 250);
@@ -1992,7 +2108,7 @@ function kinCreateViewerHistory() {
     const stackEvent = cs.Enums.Events.STACK_NEW_IMAGE;
     document.addEventListener(stackEvent, onImage, true);
     const subscriptions = Object.values(services.viewportGridService.EVENTS).map(event => services.viewportGridService.subscribe(event, onImage));
-    stop = () => { end(true); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe()); window.removeEventListener('storage', onStorage); window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); for (const restores of configured.values()) restores.reverse().forEach(restore => restore()); configured.clear(); panel.remove(); };
+    stop = () => { end(true); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe());  window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); for (const restores of configured.values()) restores.reverse().forEach(restore => restore()); configured.clear(); panel.remove(); };
     // 판정이 바뀌는 순간(이 패널의 /me가 아니어도): writer면 막는 동안 적어 둔 도구 모드·도구막대를 되돌리고, 그 밖이면 작성
     // 경로를 닫고 이 패널이 그리지 않은 표식을 지운다. read-only는 clinicianBoundary를 지난다. 다른 판정은 그려 둔 행의 컨트롤만
     // 다시 그린다. (Astra S5-U2b-X2-R-001 F01) 어느 확장의 /me든 refused가 되면 이 패널도 끝나고, 끝난 패널은 그 뒤 공유 판정이
@@ -2094,53 +2210,17 @@ function kinViewerClinicianOnly(me) {
   return app.length > 0 && app.every(role => role === 'clinician');
 }
 
-/* S5-U2b(Astra S5-U2b-R-001 F02). 이 뷰어 문서의 계정 판정 하나. 측정 패널·배치 패널·쓰기 화면 관문 중 어느 쪽이 받은 /me든
-   여기에 적는다: unconfirmed(성공한 답 없음) · refused(401/403, 또는 뷰어 구성원이 아닌 답) · writer · read-only(clinician-only).
-   read-only는 문서가 끝날 때까지 되돌리지 않는다 — 한 확장의 /me 실패, 뒤이은 다른 답, 모드 재진입이 쓰기 화면을 다시 열지
-   못한다. 쓰기 화면(소견·저장 작업·Tech 메모)은 성공한 /me가 writer라고 답했을 때만 붙는다(decide). 오류·시간 초과·형식
-   오류는 허가도 거절도 아니라서 결정을 미루고, 이 문서의 다음 성공한 /me(다른 확장의 것 포함)가 정한다. 권한 판정이 아니다:
-   쓰기와 작성자 쪽 읽기는 서버가 거절하고, 이 판정은 그 거절을 부를 화면을 붙이지 않을 뿐이다.
-   (Astra S5-U2b-R-002 F01) 기본값은 읽기 전용이다: 측정·표식 작성 경로는 writer일 때만 열리고, unconfirmed·refused에서도
-   영상 조작만 된다. onChange는 판정이 바뀔 때마다 알린다 — 측정 패널이 작성 경로를 열고 닫고, 쓰기 화면은 writer가 아니게
-   되는 순간 내려간다.
-   (Astra S5-U2b-X2-R-001 F01) refused도 문서가 끝날 때까지 되돌리지 않는다. 401/403·로그아웃·다른 계정은 이 문서의 로그인이
-   끝난 것이고(각 패널은 "다시 로그인한 뒤 뷰어를 여세요"라고 알린다), 그 전에 보낸 /me든 그 뒤의 /me든, 어느 확장의 것이든,
-   응답 본문이 늦게 끝난 것이든 writer 답이 작성 경로를 다시 열지 못한다. 돌아가는 길은 새 뷰어다.
-   (Astra S5-U2b-X4-R-001 F01·F02) 문서 수명의 상태는 셋이고 모드 종료·재진입이 어느 것도 지우지 않는다.
-   owner: 이 문서가 처음 확인한 계정([기관, sub]). /me를 받는 곳(측정 패널·배치 패널·쓰기 화면 관문, 재확인·주기 확인 포함)은
-   모두 note()로 적고, note()는 역할 판정을 반영하기 전에 답의 계정을 owner와 비교한다 — 다른 계정은 그 역할이 무엇이든 곧바로
-   종료다. 패널마다 따로 비교하면 새로 붙은 패널·재진입한 패널은 비교할 계정이 없어 다른 계정의 writer 답으로 작성 경로를 다시
-   열었다. ended: 로그인이 끝났다(401/403·로그아웃 방송·다른 계정·구성원이 아닌 답). 역할 판정과 따로 두고 read-only보다
-   앞선다 — read-only 문서도 끝나면 끝나고(그래야 재진입이 목록 읽기를 다시 시작하지 않는다), read-only에서 writer로는 여전히
-   돌아가지 않는다. 조회·작성·마운트·주기 확인의 관문은 ended부터 본다.
-   (Astra S5-U2b-X5-R-001 F01) 쓰기 화면(소견·저장 작업·Tech 메모)이 스스로 묻는 /me(첫 확인·재확인·주기 확인)도 문서의 판정이다:
-   writeModule로 받은 answer()가 그 답을 owner와 비교해 판정을 적은 뒤에야 화면이 계정을 쓰고, 그 화면의 401(또는 /me의 403)은
-   refuse()로 문서를 끝낸다. 로그인이 끝나면 쓰기 화면은 내려가지 않고 제자리에서 끝난다 — onEnd()로 등록한 end가 판정을 알리기
-   전에 돌아, 각 화면이 자기 자리에 "다시 로그인" 안내를 남기고, 화면의 정리(MPR 도구가 도구 그룹을 돌려주는 복원)가 작성 경로를
-   닫는 정책보다 먼저 끝난다. clinician-only는 여전히 쓰기 화면을 내린다(모듈 관문).
-   (Astra S5-U2b-X5-R-001 F02) 로그아웃 방송(storage·BroadcastChannel)은 문서가 받는다: 모든 확장이 모드 종료로 내려간 사이의
-   로그아웃도 ended로 적히고, 모드 종료는 이 수신자·owner·ended를 지우지 않는다.
-   (Astra S5-U2c-B-R-001 F01·F02) 멈춘 이유를 둘로 가른다. /me의 403(forbidden)과 구성원이 아닌 답(not-member)은 이 계정의 거절이고,
-   401(unauthorized)·로그아웃(logout)·다른 계정(account-changed)·이유를 대지 않은 refuse()는 로그인의 종료다. 쓰기 경로는 어느
-   쪽이든 ended로 끝난다. 거절 뒤에 온 종료는 이유만 종료로 올려 문서가 끝날 때까지 남기고 onEnded 구독자(CT 위치 동기)에게 다시
-   알린다 — 쓰기 화면의 제자리 종료를 다시 돌리거나 판정을 바꾸지 않고, 종료를 거절로 되돌리지 않는다. 패널·쓰기 화면은 자기
-   401·/me 403·로그아웃을 refuse(reason)에 구분해 넘긴다. */
+/* Shared viewer role, distinct from the document's session authority. Ordinary HTTP failures
+ * keep this verdict. Only the page gate ends the document; successful role reads cannot reopen it.
+ */
 const kinViewerSession = (() => {
   let role = 'unconfirmed', ended = false, owner = null, read = null, ending = false, why = null;
   const waiting = new Set(), watchers = new Set(), changes = new Set(), enders = new Set(), endings = new Set();
   const state = () => ended ? 'refused' : role;
-  // S5-U2c fix2 (Astra S5-U2c-B-R-001 F01/F02): why the login stopped, for onEnded below; it changes no verdict. Two reasons only
-  // refuse this account's access: 'forbidden' (a /me answered 403, whichever part of the viewer asked it) and 'not-member' (an
-  // answer that is no institution member's). Every other one is the end of the login: 'unauthorized' (a 401), 'logout' (the logout
-  // broadcast), 'account-changed' (an answer of another account than the first one confirmed) and a refuse() that names none.
-  const loginEnd = reason => reason !== 'forbidden' && reason !== 'not-member';
+  // Preserve the reason for existing panel subscribers; the page gate alone authorizes an end.
   const tell = () => { for (const watch of [...endings]) { try { watch(why); } catch (_) {} } };
   function settle(next, reason = 'refused') {
     const previous = state();
-    // F01: after a refusal of this account the end of its login still comes through, at any time of the document's life. Only the
-    // reason moves, and never back: the write paths ended at the refusal, so no end() runs again and no verdict or watcher changes;
-    // onEnded subscribers hear the end now, later ones when they subscribe.
-    if (next === 'refused' && (ended || ending) && !loginEnd(why) && loginEnd(reason)) { why = reason; if (ended) tell(); }
     if (ended) return previous;
     if (ending) return previous;
     if (role === 'read-only' && next !== 'refused') return previous;
@@ -2162,38 +2242,26 @@ const kinViewerSession = (() => {
     ? JSON.stringify([typeof me.institution === 'string' ? me.institution : null, me.sub]) : null;
   function note(me) {
     const who = account(me);
-    if (who !== null && owner !== null && who !== owner) return settle('refused', 'account-changed');
+    if (who !== null && owner !== null && who !== owner) return state();
     if (who !== null && owner === null) owner = who;
-    return who === null ? settle('refused', 'not-member') : settle(kinViewerClinicianOnly(me) ? 'read-only' : 'writer');
+    return who === null ? settle('unconfirmed') : settle(kinViewerClinicianOnly(me) ? 'read-only' : 'writer');
   }
   // F02: the document's own logout receivers, for its whole life (a panel's listener leaves with the panel at mode exit).
   const loggedOut = () => { settle('refused', 'logout'); };
   let logoutChannel = null;
-  try { globalThis.addEventListener?.('storage', e => { if (e?.key === 'kin-session-ended') loggedOut(); }); } catch (_) {}
-  try { if (typeof BroadcastChannel === 'function') { logoutChannel = new BroadcastChannel('kin-session'); logoutChannel.onmessage = e => { if (e?.data?.type === 'session-ended') loggedOut(); }; } } catch (_) {}
-  // S5-U2c fix2 (Astra S5-U2c-B-R-001 F01): an answer of a viewer function that keeps its own access check (CT position sync),
-  // compared with the account this document confirmed first, as note() compares every answer, but without a role verdict. A
-  // mount of that function starts with no account of its own, so its re-entry or Recheck Access answered by another account
-  // would otherwise pass as the first. true: the document's account (the first one, when none was confirmed yet); false: another
-  // account, which ends the document's login here and for its life; null: no account in the answer (that function's refusal).
-  // fix3 (Astra S5-U2c-C-R-001 F01): also a panel's /me answer that the panel drops unused (a generation given up, the panel
-  // ended), whose account the document still compares; fix4: a write module's too (writeModule.sameAccount below).
+  try { logoutChannel = kinViewerOnEnd(loggedOut); } catch (_) {}
+  // Account validation rejects that response locally; it cannot end or rebind the document.
   function sameAccount(me) {
     const who = account(me);
     if (who === null) return null;
     if (owner === null) owner = who;
     if (who === owner) return true;
-    settle('refused', 'account-changed');
     return false;
   }
-  // F01: what a write module is handed. answer(me) is its own successful /me: compared with the document's account and noted before
-  // the module keeps anything of it; true only while the document is still a writer of that account. refuse(reason) is its 401
-  // ('unauthorized') or its /me 403 ('forbidden'). onEnd(end) registers its in-place end for as long as it is mounted.
-  // S5-U2c fix4 (Astra S5-U2c-C-R-001 F01): sameAccount(me) is a successful /me of its own that the module drops unused (its
-  // generation given up, the module ended or off the screen it was asked for), compared as sameAccount above, without a verdict.
+  // A module receives the shared role verdict. Its refusal can only follow a page-gate end.
   const writeModule = Object.freeze({
-    answer(me) { note(me); return state() === 'writer'; },
-    refuse(reason) { settle('refused', reason); },
+    answer(me) { if (sameAccount(me) !== true) return false; note(me); return state() === 'writer'; },
+    refuse(reason) { if (typeof window === 'object' && window.KinViewerSessionBoundary?.ended()) settle('refused', reason); },
     sameAccount,
     ended: () => ended,
     onEnd(end) { enders.add(end); return () => { enders.delete(end); }; },
@@ -2204,21 +2272,18 @@ const kinViewerSession = (() => {
     readOnly: () => state() === 'read-only',
     writer: () => state() === 'writer',
     note,
-    // A panel's 401 ('unauthorized'), its /me 403 ('forbidden') or the logout broadcast it received ('logout').
-    refuse: reason => settle('refused', reason),
+    // Retained for consumers during disposal; ordinary response failures have no authority here.
+    refuse: reason => typeof window === 'object' && window.KinViewerSessionBoundary?.ended() ? settle('refused', reason) : state(),
     writeModule,
     onReadOnly(watch) { watchers.add(watch); return () => { watchers.delete(watch); }; },
     onChange(watch) { changes.add(watch); return () => { changes.delete(watch); }; },
-    // S5-U2c fix1 (Astra S5-U2c-R-001 F01): the end of this document's login with its reason, for a viewer function that keeps its
-    // own access check (CT position sync) but must not outlive that end. watch(reason) runs after the verdict: at the refusal or
-    // end, again when a refusal of this account is followed by the end of its login (fix2), and at once for a subscriber that joins
-    // a document whose login already stopped (with the latest reason). The reasons are those of loginEnd above.
+    // End subscribers follow only the page gate, including subscribers mounted after its end.
     onEnded(watch) {
       endings.add(watch);
       if (ended) { try { watch(why); } catch (_) {} }
       return () => { endings.delete(watch); };
     },
-    // S5-U2c fix2/fix3: see sameAccount above (CT position sync, and the answers a panel drops unused).
+    // An unexpected member answer refuses only the panel reading it.
     sameAccount,
     // 같은 때 붙는 확장끼리 /me 읽기 하나를 나눠 쓴다. 답은 그 읽기나 다른 확장의 성공한 /me 중 먼저 온 쪽이다.
     decide() {
@@ -2227,10 +2292,8 @@ const kinViewerSession = (() => {
       const answer = new Promise(resolve => waiting.add(resolve));
       if (!read && typeof fetch === 'function') {
         read = fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' } }).then(async response => {
-          if (response.status === 401) settle('refused', 'unauthorized');
-          else if (response.status === 403) settle('refused', 'forbidden');
-          else if (response.ok) note(await response.json());
-        }).catch(() => {}).finally(() => { read = null; });
+          if (response.ok) note(await response.json());
+        }).catch(() => {}).finally(() => { read = null; for (const resolve of [...waiting]) { waiting.delete(resolve); resolve(state()); } });
       }
       return answer;
     },
@@ -2256,8 +2319,7 @@ function kinCreateViewerLayout() {
     const live = () => !ended && location.search === search;
     const refresh = () => buttons.forEach(b => { b.disabled = ended || busy || !key || !studies; });
     function end() { if (ended) return; ended = true; controller.abort(); hp?.end(); key = null; status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
-    // Astra S5-U2b-X2-R-001 F01: a 401 or a refused /me of this panel is the end of the document's login (kinViewerSession keeps 'refused').
-    // `reason` says which (kinViewerSession loginEnd): a /me 403 refuses this account, a 401 or a logout ends the login.
+    // Session termination is owned by the page transport and gate.
     function sessionEnded(reason) { kinViewerSession.refuse(reason); end(); }
     async function get(path, signal) {
       const request = new AbortController(), abort = () => request.abort();
@@ -2268,28 +2330,19 @@ function kinCreateViewerLayout() {
       try {
         const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal, headers: { 'X-KIN-CSRF': '1' } });
         if (!live()) {
-          // Astra S5-U2c-C-R-001 F01: this panel no longer uses the answer (it has ended — mode exit too — or the viewer shows other
-          // studies), but what the answer says about the document's login is still the document's: a 401 ends it, and a /me answer
-          // of another account than the document's first one ends it (sameAccount, no verdict). A live answer reaches the same
-          // through sessionEnded below and authenticate()'s note(), with this panel's own wording.
-          if (response.status === 401) kinViewerSession.refuse('unauthorized');
-          else if (path === '/api/me' && response.ok) kinViewerSession.sameAccount(await response.json().catch(() => null));
+          // Session termination is owned by the page transport and gate.
+          if (path === '/api/me' && response.ok) kinViewerSession.sameAccount(await response.json().catch(() => null));
           throw new Error('화면이 변경되어 배치를 적용하지 않았습니다.');
         }
-        if (response.status === 401 || response.status === 403) {
-          if (response.status === 401 || path === '/api/me') sessionEnded(response.status === 401 ? 'unauthorized' : 'forbidden'); else end();
-          throw new Error('검사 접근 권한을 확인할 수 없습니다.');
-        }
+        if (window.KinSessionTransport.refusal(response)) throw window.KinSessionTransport.responseError(response);
         if (!response.ok) throw new Error('서버 연결을 확인한 뒤 다시 시도하세요.');
         return await response.json();
       } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); signal?.removeEventListener('abort', abort); }
     }
     async function authenticate(signal) {
       const me = await get('/api/me', signal), next = model.owner(me);
-      // Astra S5-U2b-X3-R-001 F01 · X4-R-001 F01: another account is the end of the document's login, not only of this panel. The
-      // account check is the shared session's: note() compares this answer with the account the document confirmed first (by any
-      // panel, before any mode exit) before it posts a verdict, and refuses the session on a difference; the watcher below then ends
-      // this panel, so live() is false here. A check of this panel's own key could not see an account confirmed before this mount.
+      // Validate the owner before adopting layout data; a rejected response cannot end the session.
+      if (kinViewerSession.sameAccount(me) !== true) throw new Error('계정 응답이 일치하지 않습니다.');
       kinViewerSession.note(me);
       if (!live() || !next) { end(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }
       key = next;
@@ -2399,10 +2452,10 @@ function kinCreateViewerLayout() {
     const unwatchEnd = kinViewerSession.onChange(next => { if (next === 'refused') end(); });
     // Astra S5-U2b-X4-R-001 F02: the logout broadcast ends the document's session here too, not only this panel — a document whose
     // Measurements panel is not mounted (or has already left) must not open this panel's account controls again on a mode re-entry.
-    const onStorage = e => { if (e.key === 'kin-session-ended') sessionEnded('logout'); };
-    const onMessage = e => { if (e.data?.type === 'session-ended') sessionEnded('logout'); };
-    window.addEventListener('storage', onStorage);
-    try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', onMessage); } catch (_) {}
+
+    const onMessage = () => { sessionEnded('logout'); };
+
+    try { channel = kinViewerOnEnd(() => onMessage()); } catch (_) {}
     // A mode entry in a document whose login already ended starts ended: no /me, no account buttons, no editor.
     if (kinViewerSession.ended()) end();
     else if (studies) authenticate().then(async () => {
@@ -2411,7 +2464,7 @@ function kinCreateViewerLayout() {
       status.textContent = '현재 검사의 배치를 직접 저장하거나 복원하세요.'; await mountProtocols();
     }).catch(error => { if (live()) status.textContent = error?.message || '계정 정보를 확인할 수 없습니다. 뷰어를 다시 여세요.'; }).finally(refresh);
     else status.textContent = '현재 검사 1~2개의 일반 CT 배치만 지원합니다.';
-    stop = () => { unwatch(); unwatchEnd(); end(); window.removeEventListener('storage', onStorage); channel?.close(); panel.remove(); };
+    stop = () => { unwatch(); unwatchEnd(); end();  channel?.close(); panel.remove(); };
   }
   return { id: 'kin.viewer-layout', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
@@ -2487,7 +2540,7 @@ function kinCreateCTSync() {
     const controller = new AbortController(), search = location.search, created = new Set();
     // access: checking · ready · failed (unanswered) · denied (403 or not one institution's member) · changed (the role changed).
     // keys: study UID -> server patient key (sourcePatientKey) from the list the last confirmed round read; never DICOM PatientID.
-    // The account every /me answer must carry is the document's first one (kinViewerSession.sameAccount), not one of this mount.
+    // Panel account checks reject only this access round; only the page gate ends the document.
     let ended = false, channel, checking, clinician = null, keys = new Map(), access = 'checking', round = 0, waiting = false;
     let ready = Promise.resolve(false);
     const say = (text, offer = false) => { waiting = text === TEXT.checking; message.textContent = text; recheck.hidden = !offer; notice.hidden = !text; };
@@ -2497,27 +2550,9 @@ function kinCreateCTSync() {
     const fresh = mine => !ended && mine === round;
     const usable = mine => live() && access === 'ready' && mine === round;
     const end = () => { ended = true; controller.abort(); created.forEach(s => s.setEnabled(false)); say(TEXT.ended); };
-    // S5-U2c fix1 (Astra S5-U2c-R-001 F01): the document's end reaches this mount at any time, not only at its entry. A /me refusal
-    // of this account (403 — the document's own read, a panel's or a write module's, fix2 F02 — or an answer that is no institution
-    // member's) is this account's refusal, as the same answer to this extension's own /me is: the round and the events in flight are
-    // dropped, the synchronizers stay as the user set them, and only Recheck Access asks again. Every other reason (401, another
-    // account, the logout broadcast, a refuse() that names none) ends this mount — also when it follows that refusal (fix2 F01: the
-    // document tells it again), so neither a re-entry nor Recheck Access starts sync after it.
-    function documentEnded(reason) {
-      if (ended) return;
-      if (reason !== 'forbidden' && reason !== 'not-member') { end(); return; }
-      round++; access = 'denied'; keys = new Map(); ready = Promise.resolve(false);
-      // A viewer with sync on (or a notice on screen) hears it at once; one that has not turned sync on, at its next event.
-      if (!notice.hidden || [...created].some(s => !s.isDisabled())) say(TEXT.denied, true);
-    }
-    // Each answer is classified once: 401 ends the login, 403 is this account's refusal, and anything else unanswered (network,
-    // timeout, 409, 5xx, a body that is not JSON) is unconfirmed — neither a permission nor a logout.
-    // fix3 (Astra S5-U2c-C-R-001 F01): what an answer says about the document's login is the document's as soon as it arrives,
-    // whichever round, event or mount asked it and whether or not that one is still in effect — a refusal of this account raises the
-    // round without aborting, and an answer already on the wire outlives mode exit. A 401 (here) and a /me answer of another account
-    // than the document's first one (whoAmI) end the login for the document's life: kinViewerSession promotes a refusal of this
-    // account to that end once (fix2) and no longer tells a mount that has left. The checks after it (fresh, usable, ended) limit
-    // only what this mount does with the answer: its list, role, notice and the images it moves.
+    // Only the document gate publishes an end; a panel's HTTP refusal stays in that panel.
+    function documentEnded() { if (!ended) end(); }
+    // Session termination is owned by the page transport and gate.
     const refusal = (kind, status = 0) => Object.assign(Error(kind), { kind, status });
     async function get(path) {
       const request = new AbortController(), abort = () => request.abort();
@@ -2528,17 +2563,14 @@ function kinCreateCTSync() {
         let r;
         try { r = await fetch(path, { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' }, signal: request.signal }); }
         catch (_) { throw refusal('failed'); }
-        if (r.status === 401) { kinViewerSession.refuse('unauthorized'); throw refusal('ended', 401); }
-        if (r.status === 403) throw refusal('denied', 403);
+        if (window.KinSessionTransport.refusal(r) === 'denied' && r.status === 403) throw refusal('denied', r.status);
         if (!r.ok) throw refusal('failed', r.status);
         try { return await r.json(); } catch (_) { throw refusal('failed', r.status); }
       } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); }
     }
     const session = () => checking ||= whoAmI().finally(() => { checking = null; });
     const ownerOf = me => me?.kind === 'member' && me.institution && me.sub ? JSON.stringify([me.institution, me.sub]) : null;
-    // fix3: a /me answer and its comparison with the document's first account (kinViewerSession.sameAccount), made as it arrives and
-    // before any check of this mount can drop it. An answer that is no member's (ownerOf) is compared with nothing; its reader
-    // refuses it as before.
+    // Comparing a panel answer never changes the page's session authority.
     async function whoAmI() {
       const me = await get('/api/me');
       return { me, same: ownerOf(me) ? kinViewerSession.sameAccount(me) : null };
@@ -2580,24 +2612,20 @@ function kinCreateCTSync() {
     }
     // One access check: the account (/me), the study list its role may read, then the same account and role again. A later round
     // (Recheck Access, a role change) and the end of this mount drop an earlier round's answers.
-    // fix2 (Astra S5-U2c-B-R-001 F01): each /me answer is compared with the document's first account; another one ends the
-    // document's login for its life (sameAccount), and this check's own 401 is kept by the document as the other parts' 401 is, so
-    // a later mount or Recheck Access asks nothing. An answer that is no member's refuses this account (denied), as the first does.
-    // fix3: both are the document's as the answers arrive (get, whoAmI), also for a round a refusal or Recheck Access has dropped
-    // and for a mount that has left; fresh() below limits only this round's list, role and notice.
+    // A mismatched member answer refuses this round; the bound page transport owns real ends.
     function confirm() {
       const mine = ++round; access = 'checking'; keys = new Map();
       ready = (async () => {
         const { me, same } = await whoAmI();
         if (!fresh(mine)) throw refusal('failed');
         if (!ownerOf(me)) throw refusal('denied');
-        if (!same) throw refusal('ended');
+        if (!same) throw refusal('denied');
         const role = kinViewerClinicianOnly(me), found = role ? await clinicianKeys(mine) : await legacyKeys();
         if (!fresh(mine)) throw refusal('failed');
         const again = await whoAmI();
         if (!fresh(mine)) throw refusal('failed');
         if (!ownerOf(again.me)) throw refusal('denied');
-        if (!again.same) throw refusal('ended');
+        if (!again.same) throw refusal('denied');
         if (kinViewerClinicianOnly(again.me) !== role) throw refusal('changed');
         return [role, found];
       })().then(([role, found]) => {
@@ -2607,8 +2635,6 @@ function kinCreateCTSync() {
         return true;
       }, error => {
         if (!fresh(mine)) return false;
-        // The document has already ended its login and, through documentEnded, this mount; this end() is only this mount's own.
-        if (error?.kind === 'ended') { end(); return false; }
         access = error?.kind === 'denied' || error?.kind === 'changed' ? error.kind : 'failed';
         // Said at once only to someone waiting (a sync event or Recheck Access); otherwise at the next sync event.
         if (waiting) say(TEXT[access], true);
@@ -2649,11 +2675,10 @@ function kinCreateCTSync() {
           if (!(await ready) || !usable(mine) || ticket !== serial || !current(sourceInfo, source)) return;
           try {
             const { me, same } = await session();
-            // Another account than the document's first one is the end of its login (sameAccount noted it as the answer arrived —
-            // whoAmI, fix3 — and documentEnded ended this mount); an answer that is no member's refuses this event, as its 403 does.
+            // Member/role refusals are local. Only the page gate can end this mount.
             if (ended) return;
             if (!ownerOf(me)) throw refusal('denied');
-            if (!same) { end(); return; }
+            if (!same) throw refusal('denied');
             if (!usable(mine)) return;
             if (kinViewerClinicianOnly(me) !== clinician) { roleChanged(); return; }
             if (sync.isDisabled() || ticket !== serial || !current(sourceInfo, source)) return;
@@ -2674,8 +2699,7 @@ function kinCreateCTSync() {
             say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 CT 위치 동기');
             return fire.call(sync, sourceInfo, event);
           } catch (error) {
-            // A 401 ends the login whichever event it answers: the document kept it as it arrived (get, fix3), also for a mount that
-            // has ended or left, which says nothing more.
+            // Session termination is owned by the page transport and gate.
             if (error?.kind === 'ended') { if (!ended) end(); return; }
             // fix2 (Astra S5-U2c-B-R-001 F03): any other failure speaks only for an event still in effect — its round, its serial
             // number, its synchronizer and the screen it fired on — so a dropped event's late 403 or network error cannot replace the
@@ -2689,15 +2713,15 @@ function kinCreateCTSync() {
     }
     // This mount's own logout receivers stay beside the document's (which reaches it through onEnded, after a refusal of this
     // account too). pagehide ends the mount as it does the other viewer extensions'.
-    const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
-    const onMessage = e => { if (e.data?.type === 'session-ended') end(); };
-    window.addEventListener('storage', onStorage); window.addEventListener('pagehide', end);
-    try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', onMessage); } catch (_) {}
+
+    const onMessage = () => { end(); };
+     window.addEventListener('pagehide', end);
+    try { channel = kinViewerOnEnd(() => onMessage()); } catch (_) {}
     // Subscribed for the whole mount and dropped at mode exit. A document whose login already ended before this entry answers at
     // once: an end asks nothing; a refusal of this account asks nothing either until Recheck Access. This extension's own /me and
-    // list 403 stay its refusal (they do not end the document); its own 401 and another account end the document's login (fix2).
+    // list refusal, plain 401 and another account stay local failures. Only the page gate ends the document's session.
     const unwatchEnd = kinViewerSession.onEnded(documentEnded);
-    stop = () => { unwatchEnd(); end(); creators.forEach(([type, fn]) => groups.addSynchronizerType(type, fn)); window.removeEventListener('storage', onStorage); window.removeEventListener('pagehide', end); channel?.close(); notice.remove(); };
+    stop = () => { unwatchEnd(); end(); creators.forEach(([type, fn]) => groups.addSynchronizerType(type, fn));  window.removeEventListener('pagehide', end); channel?.close(); notice.remove(); };
     if (!ended && access === 'checking') confirm();
   }
   return { id: 'kin.ct-sync', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
@@ -2965,8 +2989,8 @@ function kinCreateCine() {
     listen(document, 'visibilitychange', () => { if (document.hidden) haltAll(); });
     listen(window, 'pagehide', end);
     listen(window, 'kin-volume-cine-target-ended', () => { records.forEach((_,id)=>{if(viewport(id)?.type==='orthographic')halt(id);});render(); });
-    listen(window, 'storage', e => { if (e.key === 'kin-session-ended') end(); });
-    try { channel = new BroadcastChannel('kin-session'); listen(channel, 'message', e => { if (e.data?.type === 'session-ended') end(); }); } catch (_) {}
+
+    try { channel = kinViewerOnEnd(end); } catch (_) {}
     const timer = setInterval(render, 250); selected = grid.getActiveViewportId(); render();
     dispose = () => { end(); clearInterval(timer); listeners.forEach(off => off()); subscriptions.forEach(s => s.unsubscribe()); channel?.close(); cine.playClip = nativePlay; cine.stopClip = nativeStop; panel.remove(); };
   }
@@ -2995,14 +3019,14 @@ function kinCreateDisplayScope() {
   let ready, current, epoch = 0, ended = false, listening = false, channel;
   function endSession() {
     if (ended) return; ended = true; epoch++; current?.stop(); current = null;
-    window.removeEventListener('storage', storage); window.removeEventListener('pagehide', endSession);
+     window.removeEventListener('pagehide', endSession);
     channel?.close(); channel = null;
   }
-  function storage(event) { if (event.key === 'kin-session-ended') endSession(); }
+
   function watchSession() {
     if (listening) return; listening = true;
-    window.addEventListener('storage', storage); window.addEventListener('pagehide', endSession);
-    try { channel = new window.BroadcastChannel('kin-session'); channel.onmessage = event => { if (event.data?.type === 'session-ended') endSession(); }; } catch (_) { }
+     window.addEventListener('pagehide', endSession);
+    try { channel = kinViewerOnEnd(() => endSession()); } catch (_) { }
   }
   function prepare() {
     if (window.KinViewerDisplayScope) return Promise.resolve(window.KinViewerDisplayScope);
@@ -3032,17 +3056,37 @@ function kinCreateDisplayScope() {
 // mounted into the same panel with its own id, so the Recent Layout and Hanging
 // Protocol sections keep their markup and their own tests.
 function kinCreateCellMerge() {
-  let ready, current, epoch = 0, ended = false, listening = false, channel;
+  let ready, current, epoch = 0, ended = false, listening = false, channel, restoreOneUp;
   function endSession() {
     if (ended) return; ended = true; epoch++; current?.stop(); current = null;
-    window.removeEventListener('storage', storage); window.removeEventListener('pagehide', endSession);
+    restoreOneUp?.(); restoreOneUp = null;
+     window.removeEventListener('pagehide', endSession);
     channel?.close(); channel = null;
   }
-  function storage(event) { if (event.key === 'kin-session-ended') endSession(); }
+  // One double click reaches both the native one-up (on the viewport element) and the cell
+  // merge (on document). The native toggle reads only numRows/numCols, so on a screen the
+  // merge holds - 1x2 with one cell covering it, or still settling - it switches to its own
+  // 1x1 and the merge can no longer put its grid back. While the merge holds the screen the
+  // gesture is the merge's alone; everywhere else (3x3, VR/SR/PDF cells, no merge module)
+  // the native toggle runs unchanged. Only this one command is replaced, so the click
+  // bindings and the right-click menu that share its customization are untouched.
+  function guardOneUp(commandsManager) {
+    restoreOneUp?.(); restoreOneUp = null;
+    const native = commandsManager?.getCommand?.('toggleOneUp', 'DEFAULT');
+    if (typeof native?.commandFn !== 'function') return;
+    const guarded = { ...native, commandFn: options => {
+      const merge = current?.state?.();
+      if (merge && (merge.busy || merge.merged)) return;
+      return native.commandFn(options);
+    } };
+    commandsManager.registerCommand('DEFAULT', 'toggleOneUp', guarded);
+    restoreOneUp = () => { if (commandsManager.getCommand('toggleOneUp', 'DEFAULT') === guarded) commandsManager.registerCommand('DEFAULT', 'toggleOneUp', native); };
+  }
+
   function watchSession() {
     if (listening) return; listening = true;
-    window.addEventListener('storage', storage); window.addEventListener('pagehide', endSession);
-    try { channel = new window.BroadcastChannel('kin-session'); channel.onmessage = event => { if (event.data?.type === 'session-ended') endSession(); }; } catch (_) { }
+     window.addEventListener('pagehide', endSession);
+    try { channel = kinViewerOnEnd(() => endSession()); } catch (_) { }
   }
   function prepare() {
     if (window.KinViewerCellMerge) return Promise.resolve(window.KinViewerCellMerge);
@@ -3056,30 +3100,31 @@ function kinCreateCellMerge() {
     }).catch(error => { ready = null; throw error; });
     return ready;
   }
-  return { id: 'kin.cell-merge', onModeEnter({ servicesManager }) {
+  return { id: 'kin.cell-merge', onModeEnter({ servicesManager, commandsManager }) {
     if (ended) return; watchSession();
     const ticket = ++epoch; current?.stop(); current = null;
+    guardOneUp(commandsManager);
     prepare().then(module => {
       if (ticket !== epoch) return;
       const connected = module.create(servicesManager.services);
       if (!connected.mount()) { connected.stop(); throw new Error('칸 병합 패널을 연결하지 못했습니다.'); }
       current = connected;
     }).catch(error => { if (ticket === epoch) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = error.message; } });
-  }, onModeExit() { epoch++; current?.stop(); current = null; } };
+  }, onModeExit() { epoch++; current?.stop(); current = null; restoreOneUp?.(); restoreOneUp = null; } };
 }
 
 function kinCreateImagesOnly() {
   let ready, current, epoch = 0, ended = false, listening = false, channel;
   function endSession() {
     if (ended) return; ended = true; epoch++; current?.stop(); current = null;
-    window.removeEventListener('storage', storage); window.removeEventListener('pagehide', endSession);
+     window.removeEventListener('pagehide', endSession);
     channel?.close(); channel = null;
   }
-  function storage(event) { if (event.key === 'kin-session-ended') endSession(); }
+
   function watchSession() {
     if (listening) return; listening = true;
-    window.addEventListener('storage', storage); window.addEventListener('pagehide', endSession);
-    try { channel = new window.BroadcastChannel('kin-session'); channel.onmessage = event => { if (event.data?.type === 'session-ended') endSession(); }; } catch (_) { }
+     window.addEventListener('pagehide', endSession);
+    try { channel = kinViewerOnEnd(() => endSession()); } catch (_) { }
   }
   function prepare() {
     if (window.KinViewerImagesOnly) return Promise.resolve(window.KinViewerImagesOnly);
@@ -3109,14 +3154,14 @@ function kinCreateImageText() {
   let ready, current, epoch = 0, ended = false, listening = false, channel;
   function endSession() {
     if (ended) return; ended = true; epoch++; current?.stop(); current = null;
-    window.removeEventListener('storage', storage); window.removeEventListener('pagehide', endSession);
+     window.removeEventListener('pagehide', endSession);
     channel?.close(); channel = null;
   }
-  function storage(event) { if (event.key === 'kin-session-ended') endSession(); }
+
   function watchSession() {
     if (listening) return; listening = true;
-    window.addEventListener('storage', storage); window.addEventListener('pagehide', endSession);
-    try { channel = new window.BroadcastChannel('kin-session'); channel.onmessage = event => { if (event.data?.type === 'session-ended') endSession(); }; } catch (_) { }
+     window.addEventListener('pagehide', endSession);
+    try { channel = kinViewerOnEnd(() => endSession()); } catch (_) { }
   }
   function prepare() {
     if (window.KinViewerImageText) return Promise.resolve(window.KinViewerImageText);
@@ -3170,11 +3215,13 @@ function kinCreateCTPresets() {
 }
 
 function kinCreateViewerJobs() {
-  let ready, current, epoch = 0;
-  // S5-U2b(R-001 F02, R-002 F01): a document that turns clinician-only takes the Job panel down even if a writer answer mounted it
-  // first. (Astra S5-U2b-X5-R-001 F01) The end of the document's login does not: the panel has ended in place through
-  // kinViewerSession.writeModule (its status keeps saying why), a mount still waiting is dropped, and mode exit takes it down.
-  kinViewerSession.onChange(next => { if (next === 'writer') return; epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
+  let ready, current, epoch = 0, active = false;
+  function connect(ticket = epoch) {
+    ready?.then(extension => { if (active && ticket === epoch && !current && kinViewerSession.writer()) { current = extension; current.mount(); } }).catch(error => { if (active && ticket === epoch) { const p = document.querySelector('#kin-viewer-layout-status'); if (p) p.textContent = error.message; } });
+  }
+  // A later successful role check may resolve an initially unconfirmed mount.
+  // Clinician-only transitions remove authoring; the page boundary disposes every module at an end.
+  kinViewerSession.onChange(next => { if (next === 'writer') { connect(); return; } epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
   return { id: 'kin.viewer-jobs', preRegistration({ servicesManager }) {
     const load = name => new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
@@ -3185,21 +3232,26 @@ function kinCreateViewerJobs() {
       .then(() => window.kinViewerJobs(servicesManager.services, kinViewerLayoutModel, kinViewerSession.writeModule));
     ready.catch(() => {});
   }, onModeEnter() {
-    const ticket = ++epoch;
+    const ticket = ++epoch; active = true;
     // S5-U2b: saved jobs are written and read on writer routes; only a /me that answered writer mounts the Job panel.
-    kinViewerSession.decide().then(session => session === 'writer' ? ready : null).then(extension => { if (extension && ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
+    kinViewerSession.decide().then(session => { if (session === 'writer') connect(ticket); }).catch(e => {
       if (ticket === epoch) { const p = document.querySelector('#kin-viewer-layout-status'); if (p) p.textContent = e.message; }
     });
-  }, onModeExit() { epoch++; current?.stop(); current = null; } };
+  }, onModeExit() { epoch++; active = false; current?.stop(); current = null; } };
 }
 
 // Findings live inside the Measurements panel; the dock keeps its two panels unchanged.
 function kinCreateViewerFindings() {
-  let ready, current, epoch = 0;
-  // S5-U2b(R-001 F02, R-002 F01): a document that turns clinician-only takes the Findings section down even if a writer answer
-  // mounted it first. (Astra S5-U2b-X5-R-001 F01) The end of the document's login does not: the section's store has ended in place
-  // through kinViewerSession.writeModule (its status keeps "다시 로그인"), and mode exit takes it down.
-  kinViewerSession.onChange(next => { if (next === 'writer') return; epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
+  let ready, current, epoch = 0, active = false;
+  function connect(ticket = epoch) {
+    ready?.then(extension => { if (active && ticket === epoch && !current && kinViewerSession.writer()) { current = extension; current.mount(); } }).catch(error => {
+      if (!active || ticket !== epoch) return;
+      const host = document.querySelector('#kin-viewer-history');
+      if (host) { const p = document.createElement('p'); p.id = 'kin-viewer-findings-unavailable'; p.textContent = error.message; host.append(p); }
+    });
+  }
+  // Keep the mount eligible for a successful account retry while this mode is active.
+  kinViewerSession.onChange(next => { if (next === 'writer') { connect(); return; } epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
   return { id: 'kin.viewer-findings', preRegistration({ servicesManager }) {
     const load = name => new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
@@ -3215,22 +3267,20 @@ function kinCreateViewerFindings() {
     });
     ready.catch(() => {});
   }, onModeEnter() {
-    const ticket = ++epoch;
+    const ticket = ++epoch; active = true;
     // S5-U2b: findings are written and linked on writer routes; only a /me that answered writer mounts the Findings section.
-    kinViewerSession.decide().then(session => session === 'writer' ? ready : null).then(extension => { if (extension && ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
+    kinViewerSession.decide().then(session => { if (session === 'writer') connect(ticket); }).catch(e => {
       if (ticket !== epoch) return;
       const host = document.querySelector('#kin-viewer-history');
       if (host) { const p = document.createElement('p'); p.id = 'kin-viewer-findings-unavailable'; p.textContent = e.message; host.append(p); }
     });
-  }, onModeExit() { epoch++; current?.stop(); current = null; } };
+  }, onModeExit() { epoch++; active = false; current?.stop(); current = null; } };
 }
 
 function kinCreateViewerTechNote() {
   let ready, current, prepare, epoch=0, active=false, state='stopped';
-  // S5-U2b(R-001 F02, R-002 F01): a document that turns clinician-only drops the note bridge even if a writer answer connected it
-  // first; the bridge state names why ('read-only' or 'refused'). (Astra S5-U2b-X5-R-001 F01) The end of the document's login has
-  // ended the bridge in place through kinViewerSession.writeModule (its status says to open the viewer again); mode exit stops it.
-  kinViewerSession.onChange(next=>{if(next==='writer')return;epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;}});
+  // The bridge follows the verified role; document disposal belongs to the page boundary.
+  kinViewerSession.onChange(next=>{if(next==='writer'){connect();return;}epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;}});
   function connect() {
     if(!active||state==='loading'||state==='ready'||!kinViewerSession.writer())return;
     const ticket=epoch;state='loading';
@@ -3287,7 +3337,7 @@ function kinCreateViewerTechNote() {
   },onModeEnter(){if(!prepare)return;epoch++;active=true;state='unconfirmed';const ticket=epoch;
     // S5-U2b: Tech notes are a technician record the clinician allowlist neither reads nor writes. The bridge connects only
     // after a /me answered writer; until an answer it stays 'unconfirmed', and 'read-only'/'refused' never connect.
-    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer'){state='stopped';connect();}else state=session;});
+    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer')connect();else state=session;});
   },onModeExit(){epoch++;active=false;state='stopped';current?.stop();current=null;}};
 }
 
@@ -3461,15 +3511,15 @@ function kinCreateThreeDCursor() {
   function endSession() {
     if (ended) return; ended = true;
     retire();
-    window.removeEventListener('storage', onStorage); window.removeEventListener('pagehide', endSession);
+     window.removeEventListener('pagehide', endSession);
     channel?.close(); channel = null;
   }
-  function onStorage(event) { if (event.key === 'kin-session-ended') endSession(); }
+
   function watchSession() {
     if (listening) return; listening = true;
     // kinCreateCTSync :1657-1660 + kinCreateImageText :2028-2040의 pagehide 포함 형태.
-    window.addEventListener('storage', onStorage); window.addEventListener('pagehide', endSession);
-    try { channel = new window.BroadcastChannel('kin-session'); channel.onmessage = event => { if (event.data?.type === 'session-ended') endSession(); }; } catch (_) {}
+     window.addEventListener('pagehide', endSession);
+    try { channel = kinViewerOnEnd(() => endSession()); } catch (_) {}
   }
 
   return {
@@ -3517,7 +3567,7 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
   const handlerId = '@ohif/extension-dicom-pdf.sopClassHandlerModule.dicom-pdf';
   const pdfSop = '1.2.840.10008.5.1.4.1.1.104.1';
   const objectIds = new WeakMap(); let nextObjectId = 0, patch = null, active = false, epoch = 0;
-  let cache = new WeakMap(), sessionChannel = null, listening = false; const pending = new Set(), records = new Set(), activationWaiters = new Set();
+  let cache = new WeakMap(), sessionChannel = null, listening = false; const pending = new Set(), records = new Set(), activationWaiters = new Set(), urls = new Set();
   const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
   const validUid = item => typeof item === 'string' && item.length <= 64 && /^\d+(?:\.\d+)+$/.test(item);
   function sourceOf(props) {
@@ -3547,8 +3597,9 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
   async function json(result) { try { return await result.json(); } catch (_) { throw new Error('원본 PDF 확인 응답이 올바르지 않습니다.'); } }
   function requireReply(reply, message) {
     if (reply?.ok) return reply;
-    const error = new Error(message);
-    error.retryable = !reply || reply.status === 429 || reply.status >= 500;
+    const error = window.KinSessionTransport.responseError(reply,
+      reply?.status === 404 ? '원본 PDF를 찾을 수 없습니다.' : message,
+      '원본 PDF 접근이 거절되었습니다. 검사 접근 권한을 확인하세요.');
     throw error;
   }
   function ownerOf(value) {
@@ -3583,7 +3634,9 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
       const lastReply = requireReply(await fetch('/api/me', init()), '로그인 세션을 확인할 수 없습니다.'); assertLive(source, ticket, controller);
       const last = ownerOf(await json(lastReply)); assertLive(source, ticket, controller);
       if (!sameOwner(first, last)) throw new Error('계정이 변경되어 원본 PDF를 표시하지 않았습니다.');
-      return root.origin + '/instances/' + lookup.id + '/pdf';
+      const url = await window.KinViewerResource.read(root.origin + '/instances/' + lookup.id + '/pdf', { signal: controller.signal, type: 'application/pdf' });
+      try { assertLive(source, ticket, controller); } catch (error) { window.KinViewerResource.release(url); throw error; }
+      urls.add(url); return url;
   }
   async function resolve(source, ticket, controller) {
     await waitForActivation(ticket, controller); assertLive(source, ticket, controller);
@@ -3595,14 +3648,17 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
   }
   function start(record) {
     const controller = new AbortController(); record.controller = controller; record.failed = false; pending.add(controller);
-    resolve(record.source, record.ticket, controller).then(value => { if (!record.settled) { record.settled = true; records.delete(record); record.resolve(value); options.onSuccess?.(record.source.value, record.original); } }, error => {
-      if (!record.settled && error?.retryable && active && record.ticket === epoch && matches(record.source)) { record.failed = true; options.onFailure?.(error, record.source.value, record.original); }
-      else if (!record.settled) { record.settled = true; records.delete(record); record.reject(error); }
+    resolve(record.source, record.ticket, controller).then(value => { if (!record.settled) { record.url = value; record.settled = true; records.delete(record); record.resolve(value); options.onSuccess?.(record.source.value, record.original); } else window.KinViewerResource.release(value); }, error => {
+      if (!record.settled && active && record.ticket === epoch && matches(record.source)) {
+        record.failed = !!error?.retryable; options.onFailure?.(error, record.source.value, record.original);
+      }
+      if (!record.settled && !record.failed) { record.settled = true; records.delete(record); record.reject(error); }
     });
   }
   function resolvedSource(source) {
     let record = cache.get(source.value);
-    if (record?.key === source.key && record.original === source.pdfUrl) return record;
+    if (record?.key === source.key && record.original === source.pdfUrl && (!record.url || window.KinViewerResource.has(record.url))) return record;
+    if (record?.url) { window.KinViewerResource.release(record.url); urls.delete(record.url); }
     if (record && !record.settled) { record.controller?.abort(); record.settled = true; records.delete(record); record.reject(new Error('선택한 원본 문서가 변경되었습니다.')); }
     let fulfill, reject; const promise = new Promise((resolve, fail) => { fulfill = resolve; reject = fail; }); promise.catch(() => {});
     record = { key: source.key, original: source.pdfUrl, source, ticket: epoch, promise, resolve: fulfill, reject, failed: false, settled: false, controller: null };
@@ -3625,13 +3681,14 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
   }
   function ownsWrapper() { return !!patch && patch.entry.component === patch.wrapper; }
   function sessionEnded() { deactivate(); options.onSessionEnd?.(); }
-  const storageEnded = event => { if (event.key === 'kin-session-ended') sessionEnded(); };
-  function listen() { if (listening) return; listening = true; globalThis.addEventListener?.('storage', storageEnded); try { sessionChannel = new BroadcastChannel('kin-session'); sessionChannel.onmessage = event => { if (event.data?.type === 'session-ended') sessionEnded(); }; } catch (_) {} }
-  function unlisten() { if (!listening) return; listening = false; globalThis.removeEventListener?.('storage', storageEnded); sessionChannel?.close(); sessionChannel = null; }
+
+  function listen() { if (listening) return; listening = true;  try { sessionChannel = kinViewerOnEnd(() => sessionEnded()); } catch (_) {} }
+  function unlisten() { if (!listening) return; listening = false;  sessionChannel?.close(); sessionChannel = null; }
   function activate() { active = true; listen(); for (const waiter of [...activationWaiters]) { if (waiter.ticket === epoch) waiter.resolve(); else waiter.reject(new Error('원본 PDF 준비가 중단되었습니다.')); activationWaiters.delete(waiter); } }
   function retry(value, pdfUrl) { for (const record of records) if (record.failed && !record.settled && record.ticket === epoch && matches(record.source) && (!value || record.source.value === value && record.original === pdfUrl)) start(record); }
   function deactivate() {
     active = false; epoch++; unlisten(); cache = new WeakMap(); for (const item of pending) item.abort(); pending.clear();
+    for (const url of urls) window.KinViewerResource.release(url); urls.clear();
     for (const waiter of activationWaiters) waiter.reject(new Error('원본 PDF 준비가 중단되었습니다.')); activationWaiters.clear();
     for (const record of records) if (!record.settled) { record.settled = true; record.reject(new Error('원본 PDF 준비가 중단되었습니다.')); } records.clear();
   }
@@ -3681,7 +3738,7 @@ function kinCreateDicomPdf() {
    칸이 빈 채로 끝났다. 설정에서 닿는 재시도 지점이 없으므로 이번 모드 수명주기의 WADO 클라이언트 인스턴스 하나에만
    공개 메서드 retrieveSeriesMetadata를 자기 속성으로 씌우고, 나갈 때 그 속성이 아직 이 확장의 것일 때만 지운다.
    prototype·전역 fetch/XHR은 건드리지 않는다.
-   - 다시 묻는 것은 HTTP 500~599로 거절된 GET뿐이다. 0(중단·연결 오류)·4xx(401/403/404/429 포함)·동기 예외는 원래
+   - 다시 묻는 것은 HTTP 500~599 또는 AUTH_* 일시 실패로 거절된 GET이다. 종료 신호·코드 없는 4xx·0·동기 예외는 원래
      결과를 그대로 돌려준다. (수명주기, 검사, 시리즈)마다 한 번, 고정 1000ms 뒤, 같은 this·options로 보낸다.
    - 로더가 쥐는 약속은 여기서 돌려준 하나뿐이다. 다시 받은 응답으로 그 약속을 한 번 채우므로 storeInstances·표시 세트·
      HP 적용도 한 번만 일어난다. 끝난 실패는 마지막 오류로 거절하고 영상이 준비된 척하지 않는다.
@@ -3693,7 +3750,8 @@ function kinCreateSeriesMetadataRecovery() {
   const retryDelay = 1000, own = (target, key) => Object.prototype.hasOwnProperty.call(target, key);
   let services = null, extensions = null, ticket = null, phase = 'stopped';
   const retryable = error => !!error && typeof error === 'object' && !!error.request &&
-    Number.isInteger(error.status) && error.status >= 500 && error.status <= 599;
+    (window.KinSessionTransport.refusal(error) === 'temporary' ||
+      Number.isInteger(error.status) && error.status >= 500 && error.status <= 599);
   function studiesOf(search) {
     const list = [];
     for (const value of new URLSearchParams(search).getAll('StudyInstanceUIDs'))
@@ -3713,7 +3771,8 @@ function kinCreateSeriesMetadataRecovery() {
   }
   function describe(failure) {
     const code = Number.isInteger(failure.status) && failure.status > 0 ? 'HTTP ' + failure.status : '요청 오류';
-    if (failure.status === 401 || failure.status === 403) return failure.position + '번째 검사의 영상 정보에 접근할 수 없습니다(' + code + '). 이 검사 영상은 표시하지 않았습니다.';
+    if (window.KinSessionTransport.refusal(failure.error) === 'temporary') return failure.position + '번째 검사의 연결을 확인하지 못했습니다. 뷰어를 다시 열어 재시도하세요.';
+    if (window.KinSessionTransport.refusal(failure.error) === 'denied') return failure.position + '번째 검사의 영상 정보에 접근할 수 없습니다(' + code + '). 이 검사 영상은 표시하지 않았습니다.';
     return failure.position + '번째 검사의 영상 정보를 ' + (failure.retried ? '한 번 다시 요청했지만 ' : '') +
       '불러오지 못했습니다(' + code + '). 이 검사 영상은 표시하지 않았습니다. 뷰어를 다시 여세요.';
   }
@@ -3747,7 +3806,7 @@ function kinCreateSeriesMetadataRecovery() {
     const fail = (key, position, error, retried) => {
       if (!live()) return;
       const fresh = !current.failures.has(key);
-      current.failures.set(key, { position, status: error?.status, retried: retried || !!current.failures.get(key)?.retried });
+      current.failures.set(key, { position, status: error?.status, error, retried: retried || !!current.failures.get(key)?.retried });
       render(current);
       if (!fresh) return;
       try { services?.uiNotificationService?.show?.({ title: 'Image Loading', message: describe(current.failures.get(key)), type: 'error' }); } catch (_) {}
@@ -3793,7 +3852,7 @@ function kinCreateSeriesMetadataRecovery() {
 }
 
 window.config = {
-  extensions: [kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

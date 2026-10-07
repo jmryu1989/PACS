@@ -1,3 +1,4 @@
+import { rightsUser, lockMemberRights } from './member-rights';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, HttpException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
@@ -104,19 +105,29 @@ export class CriticalResultService {
   }
 
   /**
-   * 쓰기 전 Keycloak 재확인(T-9, §4 순서 5). 유효 역할 = 토큰 ∩ Keycloak이고 route 역할을 잃었으면 403, Keycloak을 읽지
+   * 쓰기 전 DB 권한 재확인(D623). 요청과 현재 DB 역할에 route 권한이 있어야 하며 철회되었으면 403, DB를 읽지
    * 못하면 503이다. 토큰이 남아 있어도 철회된 사람의 새 쓰기는 여기서 멈춘다(CR18).
    */
   private async recheck(c: CriticalCaller, allowed: (roles: string[]) => boolean): Promise<string[]> {
     let user: KeycloakUser | null;
-    try { user = await this.keycloak.getUser(c.sub); } catch { throw unavailable(); }
+    try { user = rightsUser(await this.prisma.memberRights.findUnique({ where: { sub: c.sub } })); } catch { throw unavailable(); }
     const roles = effectiveRoles(user, c);
     if (!roles || !allowed(roles)) throw roleRequired();
     return roles;
   }
 
   private async user(sub: string): Promise<KeycloakUser | null> {
-    try { return await this.keycloak.getUser(sub); } catch { throw unavailable(); }
+    try { return rightsUser(await this.prisma.memberRights.findUnique({ where: { sub } })); } catch { throw unavailable(); }
+  }
+
+  /** The report picker stores roster ids; only an unambiguous binding to a subject identifies its readers. */
+  private recipientReadState(state: any, roster: { id: string; sub: string }[]) {
+    const subject = (actor: string) => {
+      const matches = roster.filter(user => user.id === actor);
+      return matches.length === 1 ? matches[0].sub : null;
+    };
+    return { ...state, preDoc: null, preReviewer: null, preDocSub: state?.preDocSub ?? subject(state?.preDoc),
+      preReviewerSub: state?.preReviewerSub ?? subject(state?.preReviewer) };
   }
 
   /** 원본 신원 한 건(§3.2). 트랜잭션 밖에서만 부른다. 영상 저장·전송·변경 호출은 없다. */
@@ -180,8 +191,8 @@ export class CriticalResultService {
 
   private async studyRow(tx: any, uid: string, lock: boolean) {
     const rows: any[] = lock
-      ? await tx.$queryRaw`SELECT uid,"institutionId","teleInstitutionId",rs,"preDoc","preReviewer",ov FROM "StudyState" WHERE uid=${uid} FOR UPDATE`
-      : await tx.$queryRaw`SELECT uid,"institutionId","teleInstitutionId",rs,"preDoc","preReviewer",ov FROM "StudyState" WHERE uid=${uid}`;
+      ? await tx.$queryRaw`SELECT uid,"institutionId","teleInstitutionId",rs,"preDoc","preReviewer","preDocSub","preReviewerSub",ov FROM "StudyState" WHERE uid=${uid} FOR UPDATE`
+      : await tx.$queryRaw`SELECT uid,"institutionId","teleInstitutionId",rs,"preDoc","preReviewer","preDocSub","preReviewerSub",ov FROM "StudyState" WHERE uid=${uid}`;
     return rows[0] ?? null;
   }
 
@@ -211,15 +222,15 @@ export class CriticalResultService {
    * 대체 기록(이 기록을 supersedes로 가리키는 기록)의 id. 발신자에게는 늘, 수신자에게는 그 기록을 지금 읽을 수 있을 때만
    * 준다(§13 "호출자가 읽을 수 있는 기록일 때만").
    */
-  private async replacement(tx: any, row: any, reader: null | { cls: RecipientClass; state: any; head: Head; actor: string }) {
+  private async replacement(tx: any, row: any, reader: null | { cls: RecipientClass; state: any; head: Head; actor: string; sub: string }) {
     const rows: any[] = await tx.$queryRaw`SELECT id,"sourceVersion" FROM "CriticalResult" WHERE "supersedesId"=${row.id}::uuid`;
     return this.replacementOf(rows[0] ? { id: rows[0].id, sourceVersion: rows[0].sourceVersion } : null, reader);
   }
 
-  private replacementOf(next: { id: string; sourceVersion: number } | null, reader: null | { cls: RecipientClass; state: any; head: Head; actor: string }) {
+  private replacementOf(next: { id: string; sourceVersion: number } | null, reader: null | { cls: RecipientClass; state: any; head: Head; actor: string; sub: string }) {
     if (!next?.id) return null;
     if (!reader) return next.id;
-    const kase = recipientCase({ cls: reader.cls, visible: true, pin: next.sourceVersion, head: reader.head, state: reader.state, actor: reader.actor });
+    const kase = recipientCase({ cls: reader.cls, visible: true, pin: next.sourceVersion, head: reader.head, state: reader.state, actor: reader.actor, sub: reader.sub });
     return kase.view === null ? null : next.id;
   }
 
@@ -304,10 +315,21 @@ export class CriticalResultService {
    */
   private async judgeRecipient(tx: any, uid: string, institution: string, c: Caller, sub: string, recipient: KeycloakUser | null,
     subject: Caller | null, head: Head, state: any): Promise<RecipientClass> {
+    await lockMemberRights(tx, sub);
+    recipient = rightsUser(await tx.memberRights.findUnique({ where: { sub } }));
     const cls = eligibleRecipient(recipient, { sub, institution, sender: c.sub });
+    // Keep the prepared subject object: StudyAccess binds source metadata to its identity.
+    if (subject && recipient) { subject.roles = recipient.roles; subject.institution = recipient.groups[0]; }
     if (!cls || !subject) throw recipientInvalid();
     const visible = await this.readableBy(subject, uid, tx);
-    const kase = createCase({ cls, visible, head, state, actor: userActor(recipient) });
+    // Legacy rows use DB identity only. A missing/ambiguous label cannot be reassigned by a provider outage.
+    let readState = state;
+    if (state?.rs === 'P' && (state.preDocSub == null || state.preReviewerSub == null)) {
+      const actors = [state.preDoc, state.preReviewer].filter(Boolean);
+      const rows = await tx.memberRights.findMany({ where: { OR: [{ email: { in: actors } }, { username: { in: actors } }] } });
+      readState = this.recipientReadState(state, rows.map(row => ({ id: row.email || row.username, sub: row.sub })));
+    }
+    const kase = createCase({ cls, visible, head, state: readState, actor: userActor(recipient), sub });
     if (kase !== 'C2' && kase !== 'R2') throw cannotRead();
     return cls;
   }
@@ -342,10 +364,12 @@ export class CriticalResultService {
       if (await this.visibleStudy(tx, uid, c, state, studyMissing) !== institution) throw unavailable();
       const head = await this.head(tx, uid);
       const pinnable = !!head && CRITICAL_RESULT_PINNABLE_ACTIONS.includes(head.action as string);
-      const readable = legacyReadable(state, c.actor);
+      const readable = legacyReadable(state, c.actor, c.sub);
       const recipients: any[] = [];
       if (pinnable && readable) for (const x of candidates) {
-        const kase = createCase({ cls: x.cls, visible: await this.readableBy(x.subject, uid, tx), head, state, actor: userActor(x.user) });
+        const roster = members.map(user => ({ id: userActor(user), sub: user.id }));
+        const kase = createCase({ cls: x.cls, visible: await this.readableBy(x.subject, uid, tx), head,
+          state: this.recipientReadState(state, roster), actor: userActor(x.user), sub: x.user.id });
         if (kase === 'C2' || kase === 'R2') recipients.push({ sub: x.user.id, actor: userActor(x.user), name: userName(x.user), role: x.cls });
       }
       return { state, head, pinnable, readable, recipients };
@@ -361,7 +385,7 @@ export class CriticalResultService {
 
   // ── #2 생성 ──
 
-  /** POST studies/:uid/critical-results. 귀속(발신자·기관·이름)은 토큰에서만, 수신자 이름·actor는 Keycloak에서만 온다. */
+  /** POST studies/:uid/critical-results. 발신자는 인증된 요청, 수신자 자격·귀속은 DB 회원에서 온다. */
   async create(uid: string, c: CriticalCaller, b: any) {
     this.member(c);
     if (!holds(c.roles, RADIOLOGIST)) throw roleRequired();
@@ -379,7 +403,9 @@ export class CriticalResultService {
     if (!known) {
       await this.recheck(c, roles => holds(roles, RADIOLOGIST));
       prepared = await this.scope(uid, c);
-      if (prepared) { recipient = await this.user(recipientSub); identity = await this.identity(uid); }
+      if (prepared) {
+        recipient = await this.user(recipientSub); identity = await this.identity(uid);
+      }
     }
     const subject = recipient && prepared ? this.subject(c, prepared, recipientSub) : null;
     await this.studyAccess.prepare(c, [uid]);
@@ -402,7 +428,7 @@ export class CriticalResultService {
         AND "recipientSub"=${recipientSub} AND state='created'`;
       if (pending.length) throw refuse({ status: 409, code: CODE.PENDING_EXISTS, id: pending[0].id });
       const head = await this.head(tx, uid);
-      const source = sourceRefusal({ sourceVersion: b.sourceVersion, head, senderReadable: legacyReadable(state, c.actor) });
+      const source = sourceRefusal({ sourceVersion: b.sourceVersion, head, senderReadable: legacyReadable(state, c.actor, c.sub) });
       if (source) throw refuse(source);
       // 잠금 없는 사전 읽기가 이 검사를 발신 범위로 보지 못해 수신자·원본을 읽지 않았는데 지금은 보이거나(그 사이 기관
       // 배정·통로 열림), 범위의 기관이 달라졌다(그 사이 소유 기관 변경). 준비한 수신자 판정을 다른 기관에 쓰지 않는다.
@@ -443,11 +469,11 @@ export class CriticalResultService {
     return this.run(c, [], async tx => {
       const { row, state, head } = await this.writeTarget(tx, recordId, c, 'recipient');
       const cls = recipientClass(roles);
-      const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head, state, actor: c.actor });
+      const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head, state, actor: c.actor, sub: c.sub });
       if (kase.view === null) throw recordMissing();
       const receipt = await tx.criticalResultReceipt.findUnique({ where: { requestId } });
       if (receipt) return this.replay(receipt, mark, recordId, 'ack', c);
-      const replacedBy = row.state === 'superseded' ? await this.replacement(tx, row, { cls, state, head, actor: c.actor }) : null;
+      const replacedBy = row.state === 'superseded' ? await this.replacement(tx, row, { cls, state, head, actor: c.actor, sub: c.sub }) : null;
       const refusal = ackRefusal(row, b.revision, kase, replacedBy);
       if (refusal) throw refuse(refusal);
       const at = new Date();
@@ -538,7 +564,7 @@ export class CriticalResultService {
       const replacedBy = row.state === 'superseded' ? await this.replacement(tx, row, null) : null;
       const refusal = recordRefusal(row, b.revision, replacedBy);
       if (refusal) throw refuse(refusal);
-      const source = sourceRefusal({ sourceVersion: b.sourceVersion, head, senderReadable: legacyReadable(state, c.actor) });
+      const source = sourceRefusal({ sourceVersion: b.sourceVersion, head, senderReadable: legacyReadable(state, c.actor, c.sub) });
       if (source) throw refuse(source);
       if (recipient === undefined || !identity || (recipient && recipient.id !== row.recipientSub)) throw unavailable();
       const cls = await this.judgeRecipient(tx, row.studyUid, row.institutionId, c, row.recipientSub, recipient, subject, head, state);
@@ -587,7 +613,7 @@ export class CriticalResultService {
         try { allowed = await this.studyAccess.allowed(this.subject(c, institution, sub), [...new Set(items.map(x => x.row.studyUid))]); }
         catch { for (const x of items) out.set(x.row.id, 'unknown'); continue; }
         for (const x of items) out.set(x.row.id, deliveryOf(recipientCase({ cls, visible: allowed.has(x.row.studyUid), pin: x.row.sourceVersion,
-          head: x.head, state: x.state, actor: userActor(user) })));
+          head: x.head, state: x.state, actor: userActor(user), sub })));
       }
     }
     return out;
@@ -597,7 +623,8 @@ export class CriticalResultService {
     return Number.isSafeInteger(row?.headVersion) && row.headVersion > 0 ? { version: row.headVersion, action: row.headAction ?? null } : null;
   }
 
-  private static stateOf(row: any) { return { rs: row.rs, preDoc: row.preDoc ?? null, preReviewer: row.preReviewer ?? null }; }
+  private static stateOf(row: any) { return { rs: row.rs, preDoc: row.preDoc ?? null, preReviewer: row.preReviewer ?? null,
+    preDocSub: row.preDocSub ?? null, preReviewerSub: row.preReviewerSub ?? null }; }
 
   /**
    * GET critical-results. view=sent는 radiologist의 보낸 기록, view=received는 clinician·radiologist의 받은 기록이다. 목록은
@@ -633,7 +660,7 @@ export class CriticalResultService {
     const clinician = cls === 'clinician';
     const { rows, pending } = await this.run(c, [], async tx => {
       if (sent) {
-        const rows: any[] = await tx.$queryRaw`SELECT cr.*,rb.id AS "replacedById",s.ov,s.rs,s."preDoc",s."preReviewer",
+        const rows: any[] = await tx.$queryRaw`SELECT cr.*,rb.id AS "replacedById",s.ov,s.rs,s."preDoc",s."preReviewer",s."preDocSub",s."preReviewerSub",
             r.version AS "headVersion",hv.action AS "headAction"
           FROM "CriticalResult" cr JOIN "StudyState" s ON s.uid=cr."studyUid" AND s."institutionId"=cr."institutionId"
           LEFT JOIN "Report" r ON r.uid=cr."studyUid" LEFT JOIN "ReportVersion" hv ON hv.uid=r.uid AND hv.version=r.version
@@ -653,7 +680,7 @@ export class CriticalResultService {
       }
       // 부류별 C5/R5: 고정 = 머리인데 C는 확정 원천이 아님, R은 P 짝 밖(§6.2). NULL이 행을 떨어뜨리지 않게 모든 항을 참/거짓으로 만든다.
       const rows: any[] = await tx.$queryRaw`SELECT cr.*,rb.id AS "replacedById",rb."sourceVersion" AS "replacedByVersion",s.ov,s.rs,
-          s."preDoc",s."preReviewer",r.version AS "headVersion",hv.action AS "headAction",
+          s."preDoc",s."preReviewer",s."preDocSub",s."preReviewerSub",r.version AS "headVersion",hv.action AS "headAction",
           pv.findings AS "pinFindings",pv.conclusion AS "pinConclusion",pv.recommendation AS "pinRecommendation"
         FROM "CriticalResult" cr JOIN "StudyState" s ON s.uid=cr."studyUid" AND s."institutionId"=cr."institutionId"
         JOIN "ReportVersion" pv ON pv.uid=cr."studyUid" AND pv.version=cr."sourceVersion"
@@ -663,7 +690,7 @@ export class CriticalResultService {
           AND (NOT ${restricted} OR cr."studyUid"=ANY(${scope}::text[]))
           AND NOT (cr."sourceVersion"=COALESCE(r.version,0) AND CASE WHEN ${clinician}
             THEN NOT (s.rs='A' AND COALESCE(hv.action=ANY(ARRAY['approve','addendum']::text[]),false) AND COALESCE(r.version,0)>0)
-            ELSE (s.rs='P' AND NOT (COALESCE(s."preDoc"=${c.actor},false) OR COALESCE(s."preReviewer"=${c.actor},false))) END)
+            ELSE (s.rs='P' AND NOT (COALESCE(CASE WHEN s."preDocSub" IS NOT NULL THEN s."preDocSub"=${c.sub} ELSE s."preDoc"=${c.actor} END,false) OR COALESCE(CASE WHEN s."preReviewerSub" IS NOT NULL THEN s."preReviewerSub"=${c.sub} ELSE s."preReviewer"=${c.actor} END,false))) END)
           AND (${stateValue}::text='all' OR cr.state::text=${stateValue}::text)
           AND (cr."createdAt",cr.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
         ORDER BY cr."createdAt" DESC,cr.id DESC LIMIT 51`;
@@ -674,7 +701,7 @@ export class CriticalResultService {
           AND (NOT ${restricted} OR cr."studyUid"=ANY(${scope}::text[]))
           AND NOT (cr."sourceVersion"=COALESCE(r.version,0) AND CASE WHEN ${clinician}
             THEN NOT (s.rs='A' AND COALESCE(hv.action=ANY(ARRAY['approve','addendum']::text[]),false) AND COALESCE(r.version,0)>0)
-            ELSE (s.rs='P' AND NOT (COALESCE(s."preDoc"=${c.actor},false) OR COALESCE(s."preReviewer"=${c.actor},false))) END)
+            ELSE (s.rs='P' AND NOT (COALESCE(CASE WHEN s."preDocSub" IS NOT NULL THEN s."preDocSub"=${c.sub} ELSE s."preDoc"=${c.actor} END,false) OR COALESCE(CASE WHEN s."preReviewerSub" IS NOT NULL THEN s."preReviewerSub"=${c.sub} ELSE s."preReviewer"=${c.actor} END,false))) END)
           AND cr.state::text='created'`;
       return { rows, pending: counted[0]?.pending ?? 0 };
     }, true);
@@ -687,11 +714,11 @@ export class CriticalResultService {
     }
     const items = page.map(row => {
       const head = CriticalResultService.headOf(row), state = CriticalResultService.stateOf(row);
-      const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head, state, actor: c.actor });
+      const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head, state, actor: c.actor, sub: c.sub });
       const next = row.replacedById ? { id: row.replacedById, sourceVersion: row.replacedByVersion } : null;
       return recipientView(row, kase, studyIdentity(row, row.ov),
         { findings: row.pinFindings, conclusion: row.pinConclusion, recommendation: row.pinRecommendation },
-        this.replacementOf(next, { cls, state, head, actor: c.actor }));
+        this.replacementOf(next, { cls, state, head, actor: c.actor, sub: c.sub }));
     });
     return { owner: this.owner(c), view: 'received', items, nextCursor, pending };
   }
@@ -716,10 +743,10 @@ export class CriticalResultService {
       catch (e) { if (e instanceof NotFoundException) throw recordMissing(); throw e; }
       const head = await this.head(tx, row.studyUid);
       if (sender) return { sender: true as const, row, state, head, replacedBy: await this.replacement(tx, row, null) };
-      const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head, state, actor: c.actor });
+      const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head, state, actor: c.actor, sub: c.sub });
       if (kase.view === null) throw recordMissing();
       const pinned = kase.view === 'full' ? await this.pinnedBody(tx, row.studyUid, row.sourceVersion) : null;
-      const replacedBy = await this.replacement(tx, row, { cls, state, head, actor: c.actor });
+      const replacedBy = await this.replacement(tx, row, { cls, state, head, actor: c.actor, sub: c.sub });
       return { sender: false as const, item: recipientView(row, kase, studyIdentity(row, state.ov), pinned, replacedBy) };
     }, true);
     if (!out.sender) return { owner: this.owner(c), item: out.item };
@@ -744,7 +771,7 @@ export class CriticalResultService {
       const institution = await this.visibleStudy(tx, uid, c, state, studyMissing);
       const head = await this.head(tx, uid);
       // 받은 기록의 C5/R5는 검사 하나라 머리 판·부류가 행마다 같다: 고정 = 머리인 행을 이 조건이면 뺀다.
-      const hide = cls === 'clinician' ? !clinicianFinal(state.rs, head) : !legacyReadable(state, c.actor);
+      const hide = cls === 'clinician' ? !clinicianFinal(state.rs, head) : !legacyReadable(state, c.actor, c.sub);
       const rows: any[] = await tx.$queryRaw`SELECT cr.*,rb.id AS "replacedById",rb."sourceVersion" AS "replacedByVersion",
           pv.findings AS "pinFindings",pv.conclusion AS "pinConclusion",pv.recommendation AS "pinRecommendation"
         FROM "CriticalResult" cr JOIN "ReportVersion" pv ON pv.uid=cr."studyUid" AND pv.version=cr."sourceVersion"
@@ -762,10 +789,10 @@ export class CriticalResultService {
     const study = (row: any) => studyIdentity(row, out.state.ov);
     const items = out.rows.map(row => {
       if (mine(row)) return senderView(row, out.head, study(row), delivery.get(row.id) ?? null, row.replacedById ?? null);
-      const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head: out.head, state: out.state, actor: c.actor });
+      const kase = recipientCase({ cls, visible: true, pin: row.sourceVersion, head: out.head, state: out.state, actor: c.actor, sub: c.sub });
       const next = row.replacedById ? { id: row.replacedById, sourceVersion: row.replacedByVersion } : null;
       return recipientView(row, kase, study(row), { findings: row.pinFindings, conclusion: row.pinConclusion, recommendation: row.pinRecommendation },
-        this.replacementOf(next, { cls, state: out.state, head: out.head, actor: c.actor }));
+        this.replacementOf(next, { cls, state: out.state, head: out.head, actor: c.actor, sub: c.sub }));
     });
     return { owner: this.owner(c), uid, items };
   }

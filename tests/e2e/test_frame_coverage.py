@@ -103,9 +103,14 @@ class FrameCoverageE2E(ViewerWindowsE2E):
         other=self.sign_in(context,'doctor2');self.limit(other,2);third=self.separate(other,a)
         third.wait_for_function("() => document.querySelector('#kin-frame-warning') && !document.querySelector('#kin-frame-warning').disabled")
         self.assertFalse(third.evaluate('kinViewerFrameCoverageState().enabled'))
+        from viewer_session import observe_viewer
+        third.evaluate('()=>window.endedCoverageState=kinViewerFrameCoverageState')
+        ended=observe_viewer(third)
         self.sign_out(other)
-        third.wait_for_function("() => kinViewerFrameCoverageState().phase==='ended'")
-        self.assertFalse(third.evaluate('kinViewerFrameCoverageState().warn'))
+        ended.ended()
+        state=ended.evaluate('()=>endedCoverageState()')
+        self.assertEqual(state['phase'],'ended');self.assertFalse(state['warn'])
+        ended.assert_quiet();self.assertEqual(ended.evaluate('()=>endedCoverageState()'),state)
 
     def test_coverage_05_identity_retry_and_forbidden_metadata_keep_warning(self):
         a,b=self.pair();context=self.device();p=self.sign_in(context);self.limit(p,2)

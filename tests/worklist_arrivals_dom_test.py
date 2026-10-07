@@ -43,7 +43,7 @@ START_POLLING = extract_function(MAIN, "startPolling")
 # harness asserts that the selected study keeps its drawn version and its local draft, and that
 # claim is only worth anything if the product's own rule is what produced it.
 PRESERVE = extract_function(MAIN, "preservedLocal")
-MERGE = extract_function(MAIN, "mergePolledState")
+MERGE = extract_function(MAIN, "mergeObservedReportState")
 # S4-U1b: the poll now reports each observation to these; they are sliced, not re-described, so the
 # cases below judge the shipped labels and the shipped failure rule.
 OBSERVE = "\n".join(extract_function(MAIN, name) for name in ("applyObservation", "markObservationUnavailable", "renderObservation"))
@@ -57,6 +57,12 @@ IDENTITY = "\n".join(extract_function(MAIN, name) for name in ("applyStudyIdenti
 # S4-U4: renderObservation now draws Now Retry, and the request is the shipped function too. The slice starts at
 # `function`, so its `async` is put back here; api() and KinAuth.has() are the harness's recorded stand-ins.
 RETRY = "async " + extract_function(MAIN, "requestGatewayRetry")
+# S7-U5: the sliced functions pass their writes through the page's work-context gate. The shipped module is loaded as it
+# is and follows a session that is at work for the whole case (the gate's own transitions are tests/session_work_gate_test.cjs's
+# and tests/auth_logout_dom_test.py's); accountReplaced() is main.html's bound identity check, which has no server here.
+WORK = ((ROOT / "worklist-v0/hpacs-lite/work-context.js").read_text(encoding="utf-8")
+        + "\nconst work=KinWorkContext;work.follow({onLifecycle(listener){listener({state:'active',session:'SYN-SESSION'})}});"
+        + "async function accountReplaced(){return false}\n")
 CURRENT = {
     "uid": "1.2.3", "count": 5, "series": 2, "acc": "ACC-1", "id": "PID-1", "name": "Patient",
     "sourcePatientKey": "hospital|patient", "birth": "19800101", "date": "20260912", "sex": "O",
@@ -71,6 +77,7 @@ HARNESS = """<!doctype html><html><body>
 <table><tbody id=\"rows\"></tbody></table><textarea id=\"findings\">LOCAL FINDINGS</textarea>
 <textarea id=\"conclusion\">LOCAL CONCLUSION</textarea><textarea id=\"recommendation\">LOCAL RECOMMENDATION</textarea>
 <script>
+WORKCONTEXT
 window.setInterval=fn=>{window.pollCallback=fn;return 7};window.clearInterval=()=>{};
 const $=selector=>document.querySelector(selector);let poll=null,pollGeneration=0,pollFails=0,commitEpoch=4,commitInFlight=false,serverMode=true,offline=false,demoMode=false;
 let studies=INITIAL,selectedUid='1.2.3',heldUid='1.2.3',appState={'1.2.3':{...INITIAL[0].state,version:3,draft:'LOCAL DRAFT'}};
@@ -82,13 +89,15 @@ const assertStudyOwner=()=>{},KinAuth={logout:async()=>{},has:role=>grants.inclu
 function api(method,path,body){apiCalls.push({method,path,body});return new Promise((resolve,reject)=>{window.settleApi=(ok,value)=>ok?resolve(value):reject(value)})}
 function applyState(value){return value}function fmtD(value){return value}
 function updateNoteSummary(){}function updateReaderAssignment(){}
-// Nothing is waiting to converge in these cases; the non-empty set is exercised by
-// tests/report_citation_dom_test.py, which drives the same two functions through applyPoll.
-const reportConverge=new Set();
+// The selected study carries text this document typed and the server has not confirmed: the page records that fact as
+// a mark on the study (it does not compare texts), and the poll keeps the drawn version and the local draft of a marked
+// study only. A study without the mark takes the server's state and hands its draft boundary to the draft client.
+const reportConverge=new Set(['1.2.3']);
+const draftObserved=[],draftClient={observe:(uid,revision,seen)=>{draftObserved.push({uid,revision,seen})}};
 PRESERVELOCAL
 MERGESTATE
 // The shipped fromApi assigns through the same rule, so the rebuild path keeps it too.
-function fromApi(s){appState[s.uid]=mergePolledState(s.uid,s.state);return {...s}}
+function fromApi(s){appState[s.uid]=mergeObservedReportState(s.uid,s.state);return {...s}}
 // Starts null: study-arrivals.js is added after this script, and setUp starts the session model.
 let studyObservationModel=null;function viewed(){return studies.find(s=>s.uid===selectedUid)}
 let orderReconciliationModel=null;
@@ -109,7 +118,7 @@ window.snapshot=()=>({studies:structuredClone(studies),state:structuredClone(app
 render();startPolling();
 </script></body></html>""".replace("INITIAL", json.dumps([CURRENT], ensure_ascii=False)) \
    .replace("PRESERVELOCAL", PRESERVE).replace("MERGESTATE", MERGE).replace("START", START_POLLING) \
-   .replace("OBSERVESTATE", OBSERVE).replace("ORDERSTATE", ORDERS).replace("IDENTITYSTATE", IDENTITY).replace("RETRYSTATE", RETRY)
+   .replace("WORKCONTEXT", WORK).replace("OBSERVESTATE", OBSERVE).replace("ORDERSTATE", ORDERS).replace("IDENTITYSTATE", IDENTITY).replace("RETRYSTATE", RETRY)
 
 OWNER = ["hospital", "reader-sub"]
 

@@ -9,6 +9,8 @@ const path=require('node:path');
 const vm=require('node:vm');
 const hpacs=path.join(__dirname,'../worklist-v0/hpacs-lite');
 const source=fs.readFileSync(path.join(hpacs,'viewer-workspace-dock.js'),'utf8');
+// The dock follows its document's gate (S7-U5): each mounted window gets the shipped gate with a live synthetic session.
+const sessions=require('./module_session_harness.cjs');
 
 class Node{
   constructor(doc,tag){this.ownerDocument=doc;this.tagName=tag.toUpperCase();this.children=[];this.parentNode=null;this.attributes=new Map();this.listeners=[];this.hidden=false;this.disabled=false;this.text='';this.style={};}
@@ -66,10 +68,11 @@ function mount({owner='["inst","sub"]',stored,getThrows=false,setThrows=false}={
   const events=[];
   const w={document:doc,localStorage,frameElement:null,requestAnimationFrame(){},setTimeout(){return 1;},clearTimeout(){},addEventListener(){},removeEventListener(){},
     dispatchEvent:e=>events.push(e),CustomEvent:class{constructor(type,init){this.type=type;this.detail=init?.detail;}},Event:class{constructor(type){this.type=type;}}};
+  const session=sessions.install(undefined,w);
   const context={window:w};vm.createContext(context);vm.runInContext(source,context);
   const dock=w.KinViewerWorkspaceDock(w,{owner:()=>owner,allowed:()=>true});
   const $=id=>doc.getElementById(id);
-  return {w,doc,dock,$,store,writes,events,nav:dock.querySelector('nav'),style:head.children.at(-1).textContent};
+  return {w,doc,dock,$,store,writes,events,end:session.end,nav:dock.querySelector('nav'),style:head.children.at(-1).textContent};
 }
 
 test('row keeps the two panel tabs first with unchanged ids, aria-controls and names',()=>{
@@ -155,7 +158,7 @@ test('a saved settings or account change fills the status that reading-appearanc
 });
 
 test('session end disables every row control including Dock Settings',()=>{
-  const x=mount();x.dock.end();
+  const x=mount();x.end();
   assert.equal(x.dock.querySelector('#kin-workspace-dock nav button:not(:disabled)'),null);
   for(const id of ['kin-dock-settings-toggle','kin-dock-placement','kin-dock-autohide','kin-dock-reset'])assert.equal(x.$(id).disabled,true,id);
 });

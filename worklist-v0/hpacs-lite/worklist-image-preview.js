@@ -29,12 +29,14 @@
     return Number.isFinite(w)&&w>=1&&w<=10000000&&Number.isFinite(c)&&Math.abs(c)<=1000000000?{width:w,center:c}:null;
   }
   function mount(options){
+    const work = root.KinWorkContext, transport = root.KinSessionTransport.page();
+    let resumeLoad = false, scheduled = false;
     const owner=options.owner();let ended=false,dialog=null,study=null,groups=[],series=0,index=0,windowValue=null,epoch=0,controller=null,chain=Promise.resolve(),url=null;
     const live=()=>!ended&&owner&&options.owner()===owner;
     const current=()=>live()&&study&&options.currentUid()===study.uid;
     const el=selector=>dialog.querySelector(selector);
     function release(){controller?.abort();controller=null;epoch++;if(url){URL.revokeObjectURL(url);url=null;}if(dialog){el('img').removeAttribute('src');el('img').hidden=true;}}
-    function close(){release();study=null;groups=[];windowValue=null;if(dialog?.open)dialog.close();}
+    function close(){scheduled=false;release();study=null;groups=[];windowValue=null;if(dialog?.open)dialog.close();}
     function sync(){if(!live())end();else if(study&&!current())close();}
     function controls(){
       const group=groups[series],frame=frameAt(group,index),gray=!!frame?.gray;
@@ -44,41 +46,49 @@
       el('[data-apply]').disabled=el('[data-width]').disabled=el('[data-center]').disabled=!gray;
       el('[data-reset]').disabled=!frame;
     }
+    async function decodeImage(image,signal){
+      let abort;
+      const stopped=new Promise((_,reject)=>{abort=()=>{image.removeAttribute('src');reject(new DOMException('Cancelled','AbortError'));};signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();});
+      try{await Promise.race([image.decode(),stopped]);}finally{signal.removeEventListener('abort',abort);}
+    }
     function schedule(initial=false){
-      if(!current())return;release();const ticket=epoch,selectedStudy=study,selectedSeries=series,selectedIndex=index,selectedWindow=windowValue;
+      if(work.state()!=='active'||!current())return;const at=work.capture('study');release();scheduled=true;const ticket=epoch,selectedStudy=study,selectedSeries=series,selectedIndex=index,selectedWindow=windowValue;
       el('[data-status]').textContent='원본 영상을 불러오는 중…';controls();
       chain=chain.catch(()=>{}).then(async()=>{
-        if(ticket!==epoch||!current())return;
+        if(!work.admits(at)||ticket!==epoch||!current())return;
         const abort=controller=new AbortController(),timer=setTimeout(()=>abort.abort(),15000);
-        const valid=()=>ticket===epoch&&current()&&!abort.signal.aborted;
+        const valid=()=>work.admits(at)&&ticket===epoch&&current()&&!abort.signal.aborted;
         try{
           if(initial){
             const fields='0020000D,0020000E,00080018,0008103E,00200013,00280008,00280010,00280011,00280004';
-            const response=await fetch(`/dicom-web/studies/${selectedStudy.uid}/instances?includefield=${fields}`,{signal:abort.signal,credentials:'same-origin',cache:'no-store'});
+            const response=await transport.request(`/dicom-web/studies/${selectedStudy.uid}/instances?includefield=${fields}`,{context:at,read:'response',signal:abort.signal,credentials:'same-origin',cache:'no-store'});
             if(!response.ok){await response.body?.cancel();throw Error(`영상 목록 HTTP ${response.status}`);}
-            const rows=await response.json();if(!valid())return;groups=inventory(rows,selectedStudy.uid);
+            const rows=await response.json();if(!valid())return;
+            if(!work.commit(at,()=>{groups=inventory(rows,selectedStudy.uid);
             series=groups.findIndex(g=>g.uid===selectedStudy.series);index=0;
             if(series<0)throw Error('선택한 시리즈가 원본 목록에 없습니다.');
             if(selectedStudy.sop){const instances=groups[series].instances,position=instances.findIndex(i=>i.sop===selectedStudy.sop);if(position<0)throw Error('선택한 영상이 원본 목록에 없습니다.');const direct=selectedStudy.frame===undefined?0:selectedStudy.frame;if(!Number.isSafeInteger(direct)||direct<0||direct>=instances[position].frames)throw Error('선택한 프레임이 원본 영상 범위를 벗어났습니다.');index=instances.slice(0,position).reduce((n,i)=>n+i.frames,0)+direct;}
             const select=el('[data-series]');select.replaceChildren();groups.forEach((g,i)=>{const option=document.createElement('option');option.value=String(i);option.textContent=`${i+1} · ${g.label}`;select.append(option);});select.value=String(series);select.disabled=false;
-          }else {series=selectedSeries;index=selectedIndex;}
-          const group=groups[series],frame=frameAt(group,index);if(!frame)throw Error('원본 프레임을 확인할 수 없습니다.');controls();
-          const lookup=await options.api('POST','/dicom/lookup',{studyUid:selectedStudy.uid,sopUid:frame.sop},abort.signal);if(!valid())return;
+            }))return;
+          }else {if(!work.commit(at,()=>{series=selectedSeries;index=selectedIndex;}))return;}
+          const group=groups[series],frame=frameAt(group,index);if(!frame)throw Error('원본 프레임을 확인할 수 없습니다.');work.commit(at,controls);
+          const lookup=await options.api('POST','/dicom/lookup',{studyUid:selectedStudy.uid,sopUid:frame.sop},abort.signal,at);if(!valid())return;
           if(typeof lookup.id!=='string'||!/^([0-9a-f]{8}-){4}[0-9a-f]{8}$/.test(lookup.id))throw Error('원본 식별자를 확인할 수 없습니다.');
           const query=new URLSearchParams({width:'1024',height:'1024'});
           if(selectedWindow&&frame.gray){query.set('window-width',String(selectedWindow.width));query.set('window-center',String(selectedWindow.center));}
-          const response=await fetch(`/instances/${lookup.id}/frames/${frame.frame}/rendered?${query}`,{headers:{Accept:'image/png'},signal:abort.signal,credentials:'same-origin',cache:'no-store'});
+          const response=await transport.request(`/instances/${lookup.id}/frames/${frame.frame}/rendered?${query}`,{context:at,read:'response',headers:{Accept:'image/png'},signal:abort.signal,credentials:'same-origin',cache:'no-store'});
           if(!response.ok){await response.body?.cancel();throw Error(`원본 렌더링 HTTP ${response.status}`);}
           if(!response.headers.get('content-type')?.toLowerCase().startsWith('image/png')){await response.body?.cancel();throw Error('원본 영상 응답 형식이 다릅니다.');}
           const blob=await response.blob();if(!valid())return;if(blob.size>16777216)throw Error('미리보기 영상 크기 한도를 넘었습니다.');
           const objectUrl=URL.createObjectURL(blob),image=new Image();image.src=objectUrl;
-          try{await image.decode();}catch(e){URL.revokeObjectURL(objectUrl);throw Error('원본 영상을 표시하지 못했습니다.');}
+          try{await decodeImage(image,abort.signal);}catch(e){URL.revokeObjectURL(objectUrl);throw Error('원본 영상을 표시하지 못했습니다.');}
           if(!valid()){URL.revokeObjectURL(objectUrl);return;}
-          url=objectUrl;el('img').src=url;el('img').hidden=false;
+          if(!work.commit(at,()=>{url=objectUrl;el('img').src=url;el('img').hidden=false;
           el('img').alt=`${selectedStudy.name||''} · ${group.label} · SOP ${frame.sop} · Frame ${frame.frame+1}`;
           el('[data-status]').textContent=selectedWindow&&frame.gray?`Rendered · W ${selectedWindow.width} / L ${selectedWindow.center}`:'Rendered · Original Window';
-        }catch(error){if(ticket===epoch&&current()){if(initial){groups=[];el('[data-series]').disabled=true;controls();}el('[data-status]').textContent=abort.signal.aborted?'응답 시간이 초과됐습니다. Retry로 다시 확인하세요.':`${error.message} · Retry로 다시 확인하세요.`;}}
-        finally{clearTimeout(timer);if(controller===abort)controller=null;}
+          }))URL.revokeObjectURL(objectUrl);
+        }catch(error){work.commit(at,()=>{if(ticket===epoch&&current()){if(initial){groups=[];el('[data-series]').disabled=true;controls();}el('[data-status]').textContent=abort.signal.aborted?'응답 시간이 초과됐습니다. Retry로 다시 확인하세요.':`${error.message} · Retry로 다시 확인하세요.`;}});}
+        finally{clearTimeout(timer);if(controller===abort){controller=null;scheduled=false;}}
       });
     }
     function ensure(){
@@ -99,9 +109,13 @@
       el('[data-identity]').textContent=`${value.name||''} (${value.id||''}) · ${value.date||''} · Study ${value.uid}`;
       dialog.showModal();schedule(true);
     }
-    const storage=e=>{if(e.key==='kin-session-ended')end();};let channel=null;
-    function end(){if(ended)return;close();ended=true;dialog?.remove();dialog=null;root.removeEventListener('storage',storage);root.removeEventListener('pagehide',end);channel?.close();}
-    root.addEventListener('storage',storage);root.addEventListener('pagehide',end);try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+    function end(){if(ended)return;close();ended=true;dialog?.remove();dialog=null;root.removeEventListener('pagehide',end);}
+    work.onInvalidate(event=>{
+      if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
+      if(event.reason==='prepare'){resumeLoad=scheduled;controller?.abort();}
+      if(event.reason==='cancel'&&resumeLoad){resumeLoad=false;if(current())schedule(!groups.length);}
+    });
+    root.addEventListener('pagehide',end);
     return {open,close,sync,end};
   }
   const api={inventory,frameAt,windowing,mount};if(typeof module==='object'&&module.exports)module.exports=api;else root.KinWorklistImagePreview=api;

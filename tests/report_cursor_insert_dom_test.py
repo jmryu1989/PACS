@@ -22,6 +22,8 @@ import re
 import unittest
 from pathlib import Path
 
+from report_page_contract import install_contract
+
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -237,6 +239,8 @@ window.snapshot = () => ({
 });
 </script></body></html>"""
 
+
+HARNESS = install_contract(HARNESS)
 
 def harness(state, request):
     return (HARNESS

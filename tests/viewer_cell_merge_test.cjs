@@ -77,6 +77,14 @@ mutate('set-average-blind', '        if (ready) viewport.setBlendMode?.(cell.ble
 mutate('setup-outside-try',
   /try \{\r?\n\s*crosshair = holdCrosshairReset\(planes\);\r?\n\s*watch = watchInteraction\(true\);\r?\n/,
   'crosshair = holdCrosshairReset(planes);\n      watch = watchInteraction(true);\n      try {\n');
+// The second double click of a maximize-and-back at reading speed, in both directions: the
+// click that lands while the maximize settles is dropped again (the defect that left the
+// native one-up alone on a merged screen), or more than one is queued, so the screen
+// restores and then maximizes a second time.
+mutate('drop-busy-double-click', 'if (busy) { pendingToggle = true; return; }', 'if (busy) return;');
+mutate('queue-two-toggles', 'if (busy) { pendingToggle = true; return; }', 'if (busy) { pendingToggle = (pendingToggle || 0) + 1; return; }');
+mutate('queue-two-toggles', 'if (toggle && record && !ended && !quarantined) unmerge();',
+  "if (toggle && record && !ended && !quarantined) unmerge().then(() => { if (toggle > 1) run('maximize'); });");
 const moduleBox = { exports: {} };
 new Function('module', 'exports', source)(moduleBox, moduleBox.exports);
 const CellMerge = moduleBox.exports;
@@ -87,6 +95,8 @@ const clone = value => JSON.parse(JSON.stringify(value));
 function makeViewport(id, imageId, seed) {
   return {
     id, type: 'stack', current: imageId, index: 0, renders: 0,
+    // The pane a double click lands in; a target names the cell it was delivered to.
+    element: { isConnected: true, contains: target => target?.cell === id },
     camera: { ...clone(CAMERA), parallelScale: seed },
     properties: { invert: false, voiRange: { lower: 0, upper: 100 } },
     getCurrentImageId() { return this.current; },
@@ -248,7 +258,7 @@ function fixture({ rows = 2, cols = 2, restoresPresentation = false, breakLayout
   const doc = { fullscreenElement: null, querySelector: () => null,
     addEventListener(type, handler) { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(handler); },
     removeEventListener(type, handler) { listeners.get(type)?.delete(handler); },
-    fire(type) { for (const handler of [...(listeners.get(type) || [])]) handler({ type }); } };
+    fire(type, event = {}) { for (const handler of [...(listeners.get(type) || [])]) handler({ ...event, type }); } };
   const win = { setTimeout, clearTimeout, addEventListener() { }, removeEventListener() { },
     cornerstone: nativeGlobal, cornerstoneTools: { ToolGroupManager: { getToolGroup: name => (name === 'mpr' ? toolGroup : null) } } };
   const controller = CellMerge.create(services, { doc, root: win });
@@ -267,17 +277,17 @@ const planCells = (rows, cols, kinds) => kinds.map((kind, index) => ({ viewportI
 // here by name against the file on disk - in every plain run, before any mutation is used.
 test('every declared mutation anchor still matches the shipped module exactly once', () => {
   const shipped = fs.readFileSync(sourcePath, 'utf8');
-  // Seventeen anchors for sixteen mutations: the rollback defect takes two edits to
-  // reintroduce, and the three plane guards, the two Average-projection guards and the
-  // setup boundary take one each.
-  assert.equal(declared.length, 17);
+  // Twenty anchors for eighteen mutations: the rollback defect and the two-click queue take
+  // two edits each to reintroduce, and the three plane guards, the two Average-projection
+  // guards, the setup boundary and the dropped busy double click take one each.
+  assert.equal(declared.length, 20);
   for (const item of declared)
     assert.equal(occurrences(shipped, item.from), item.expected, 'anchor drifted: ' + item.name + ' ' + item.from);
   assert.deepEqual([...new Set(declared.map(item => item.name))].sort(),
     ['adopt-input-baseline', 'adopt-merged-camera', 'claim-foreign-volume', 'claim-refit-as-user', 'claim-restore',
-      'merge-mixed-kinds', 'record-without-recheck', 'release-crosshair-reset', 'rollback-adopts-screen',
-      'set-average-blind', 'setup-outside-try', 'skip-average-precheck', 'skip-kind-guard', 'skip-uniform-guard',
-      'trust-dispatch', 'trust-foreign-screen']);
+      'drop-busy-double-click', 'merge-mixed-kinds', 'queue-two-toggles', 'record-without-recheck',
+      'release-crosshair-reset', 'rollback-adopts-screen', 'set-average-blind', 'setup-outside-try',
+      'skip-average-precheck', 'skip-kind-guard', 'skip-uniform-guard', 'trust-dispatch', 'trust-foreign-screen']);
 });
 
 test('each supported operation asks for exactly one documented rectangle set', () => {
@@ -391,6 +401,52 @@ test('maximizing an MPR plane keeps its volume and orientation and puts every pl
   // The hold belongs to the operation and is given back with it.
   x.crosshairs.onResetCamera();
   assert.equal(x.crosshairs.calls, 1);
+});
+
+// The viewer's session boundary as the module meets it (viewer-session.js onEnd): an end hook runs once at the end,
+// at once when the boundary has already ended, and its returned function withdraws it.
+function sessionBoundary() {
+  const enders = new Set();
+  const boundary = { ended: false, hooks: () => enders.size,
+    onEnd(run) { if (boundary.ended) run(); else enders.add(run); return () => enders.delete(run); },
+    end() { boundary.ended = true; for (const run of [...enders]) run(); enders.clear(); } };
+  return boundary;
+}
+const until = async (what, check) => {
+  for (const end = Date.now() + 5000; Date.now() < end;) { if (check()) return; await new Promise(r => setTimeout(r, 5)); }
+  throw new Error('harness: ' + what + ' not reached within 5 s');
+};
+
+// Integration review F06: the session end cancels every timer and frame an operation may be parked on, so the
+// operation's `finally` never gives the Crosshairs reset back then. The end itself gives it back (the operation is
+// not resumed); the opposite side: an operation that finishes gives it back itself and withdraws its end hook.
+test('an operation parked when the viewer session ends gives the Crosshairs reset back at the end', async () => {
+  const x = fixture({ rows: 1, cols: 3, planes: ['axial', 'sagittal', 'coronal'], slow: 150 });
+  const boundary = sessionBoundary();
+  x.win.KinViewerSessionBoundary = boundary;
+  const native = x.crosshairs.onResetCamera;
+  const merging = x.controller.merge('maximize', 'B');
+  await until('the operation holding the reset', () => x.crosshairs.onResetCamera !== native);
+  assert.equal(boundary.hooks(), 1, 'the hold registered its release with the session end');
+  boundary.end();
+  assert.equal(x.crosshairs.onResetCamera, native, 'the end gave the native reset back although the operation never finished');
+  // Here the parked layout still lands (a real end cancels its timer); the operation's own release then has nothing left.
+  await merging;
+  assert.equal(x.crosshairs.onResetCamera, native);
+});
+
+test('an operation that finishes gives the Crosshairs reset back itself and leaves no end hook behind', async () => {
+  const x = fixture({ rows: 1, cols: 3, planes: ['axial', 'sagittal', 'coronal'] });
+  const boundary = sessionBoundary();
+  x.win.KinViewerSessionBoundary = boundary;
+  const native = x.crosshairs.onResetCamera;
+  assert.equal((await x.controller.merge('maximize', 'B')).ok, true);
+  assert.deepEqual([x.crosshairs.onResetCamera === native, boundary.hooks()], [true, 0], 'released and withdrawn by the operation');
+  // A handler installed afterwards (another module's hold) is not touched by a later end.
+  const later = function () { };
+  x.crosshairs.onResetCamera = later;
+  boundary.end();
+  assert.equal(x.crosshairs.onResetCamera, later);
 });
 
 test('work the user did on a maximized plane is kept while the pane refit is not', async () => {
@@ -976,4 +1032,88 @@ test('a stopped session refuses every operation', async () => {
   assert.equal(result.ok, false);
   assert.match(result.message, /세션이 변경되었습니다/);
   assert.equal(x.calls.length, 0);
+});
+
+// The double click arrives through the module's own document listener, so the panel is
+// mounted; the panel is reduced to the parts mount() and refresh() touch.
+function mountForGestures(x) {
+  const part = () => ({ textContent: '', style: {}, dataset: {} });
+  const status = part(), hint = part();
+  x.doc.createElement = () => ({ style: {}, dataset: {}, set innerHTML(_) { },
+    querySelector: selector => (selector === '[role=status]' ? status : hint), querySelectorAll: () => [],
+    contains: () => false, remove() { } });
+  assert.equal(x.controller.mount({ append() { } }), true);
+  return status;
+}
+// What a person's double click delivers: the pointer press the interaction watch sees, then
+// the dblclick on the pane.
+function doubleClick(x, cell) {
+  x.doc.fire('pointerdown');
+  x.doc.fire('dblclick', { button: 0, detail: 2, defaultPrevented: false, target: { cell, closest: () => null } });
+}
+
+test('a double click that lands while the maximize settles brings the grid back once the maximize is recorded', async () => {
+  const x = fixture({ slow: 30 }), status = mountForGestures(x);
+  const before = layoutOf(x.state);
+  doubleClick(x, 'A');
+  // An idle double click is acted on at once, not deferred.
+  assert.equal(x.calls.length, 1);
+  // The maximize is on screen but not yet recorded: the window the second click lands in.
+  await until('the maximize on screen', () => layoutOf(x.state).length === 1);
+  assert.deepEqual(x.controller.state(), { merged: false, op: null, busy: true, quarantined: false, ended: false });
+  doubleClick(x, 'A');
+  // A third click inside the same window is the same request, not a second toggle.
+  doubleClick(x, 'A');
+  assert.equal(x.calls.length, 1);
+  await until('a restore dispatched and finished', () => x.calls.length >= 2 && !x.controller.state().busy);
+  // Exactly the maximize and the restore, and the grid stays put afterwards.
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(x.calls.length, 2);
+  assert.deepEqual(layoutOf(x.state), before);
+  assert.match(status.textContent, /되돌렸습니다/);
+  assert.deepEqual(x.controller.state(), { merged: false, op: null, busy: false, quarantined: false, ended: false });
+});
+
+test('a double click on a settled screen is not deferred, and one during a restore does not maximize again', async () => {
+  const x = fixture({ slow: 30 }), status = mountForGestures(x);
+  const before = layoutOf(x.state);
+  doubleClick(x, 'B');
+  await until('a recorded maximize', () => x.controller.state().merged && !x.controller.state().busy);
+  assert.deepEqual(layoutOf(x.state).map(row => row[0]), ['B']);
+  // On the merged, settled screen the click starts the restore at once.
+  doubleClick(x, 'B');
+  assert.equal(x.calls.length, 2);
+  assert.equal(x.controller.state().busy, true);
+  // A click while the restore runs is not turned into a new maximize when it finishes. Its
+  // pointer press is left out: that press alone already ends the restore's ownership of the
+  // screen (watchInteraction), and what is checked here is the double click itself.
+  x.doc.fire('dblclick', { button: 0, detail: 2, defaultPrevented: false, target: { cell: 'B', closest: () => null } });
+  await until('the restore reported', () => /되돌렸습니다/.test(status.textContent));
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(x.calls.length, 2);
+  assert.deepEqual(layoutOf(x.state), before);
+  assert.equal(x.controller.state().merged, false);
+  // Nor is it held over to the next maximize: that one stays maximized.
+  doubleClick(x, 'C');
+  assert.equal(x.calls.length, 3);
+  await until('a recorded maximize', () => x.controller.state().merged && !x.controller.state().busy);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(x.calls.length, 3);
+  assert.deepEqual(layoutOf(x.state).map(row => row[0]), ['C']);
+});
+
+test('a double click remembered during a maximize that fails is forgotten with it', async () => {
+  const x = fixture({ breakLayout: true }), status = mountForGestures(x);
+  const before = layoutOf(x.state);
+  const operation = x.controller.merge('maximize', 'A');
+  assert.equal(x.controller.state().busy, true);
+  // The click lands on a pane of the unchanged grid while the request is outstanding.
+  x.doc.fire('dblclick', { button: 0, detail: 2, defaultPrevented: false, target: { cell: 'A', closest: () => null } });
+  assert.equal((await operation).ok, false);
+  assert.match(status.textContent, /이전 배치로 복구했습니다/);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  // Rolled back and nothing else: no restore of a merge that never happened, no new maximize.
+  assert.deepEqual(layoutOf(x.state), before);
+  assert.equal(x.calls.length, 2);
+  assert.deepEqual(x.controller.state(), { merged: false, op: null, busy: false, quarantined: false, ended: false });
 });

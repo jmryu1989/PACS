@@ -101,9 +101,10 @@
   // swallowed. The error's own `name` is not consulted: api() runs its own
   // timer per call, so an AbortError can be that timer rather than this unit's,
   // and only the caller's signal tells the two apart.
-  function citationTerminal({ aborted, live, status } = {}) {
+  function citationTerminal({ aborted, live, status, code } = {}) {
     if (aborted || live === false) return 'rethrow';
-    if (status === 403) return 'refused';
+    const transport = root.KinSessionTransport || require('./session-transport.js');
+    if (transport.refusal({ status, code }) === 'denied') return 'refused';
     return 'unknown';
   }
   // The one source read of every saved-image output: the frame cells here and the version 4-6, 12 and 13 volume loader. A read that
@@ -350,9 +351,9 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     // One dedicated read per printed study, under THAT study's own gate: the
     // preview gate is institution-wide while this endpoint re-applies finding
     // readability, so reading it once for the current study would put sources
-    // on a comparison page that this reader may not see. `foreign: true`
-    // because a read that only looks for evidence must never be the thing that
-    // ends a viewer session.
+    // on a comparison page that this reader may not see. A plain 403 refuses
+    // only that study's evidence; authenticated session-end signals are handled
+    // by the page transport.
     //
     // The result is attached to the entry, so the two equal() comparisons that
     // already exist - prepare()'s re-read and print()'s - carry it with no new
@@ -374,9 +375,9 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         const actor = previewActors.get(target.uid) ?? null;
         let answer;
         try {
-          answer = await api('/studies/' + target.uid + '/report/citations', { signal, foreign: true });
+          answer = await api('/studies/' + target.uid + '/report/citations', { signal });
         } catch (error) {
-          const terminal = identity.citationTerminal({ aborted: signal.aborted, live: live(), status: error?.status });
+          const terminal = identity.citationTerminal({ aborted: signal.aborted, live: live(), status: error?.status, code: error?.code });
           // Caught per entry: one page's failure must not blank the images, the
           // summary and the other study's page along with it.
           if (terminal === 'rethrow') throw error;

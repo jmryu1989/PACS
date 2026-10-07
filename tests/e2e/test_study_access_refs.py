@@ -10,6 +10,7 @@ from test_viewer_jobs import ViewerJobsE2E
 from viewer_api_test import ViewerStack
 from test_worklist import psql
 from invariants_live import past_audit_guard
+from access_assertions import permission_denied
 
 class StudyAccessReferencesE2E(StudyAccessE2E):
     @classmethod
@@ -72,7 +73,7 @@ class StudyAccessReferencesE2E(StudyAccessE2E):
         self.write(policy(rules=[dict(patientId=a.patient_id,modalities=[],dateFrom=None,dateTo=None,studyUids=[a.uid])]))
         r=self.stack.request('GET','/study-tags','doctor');self.assertEqual(r.status,200,r.text);tags=next(c for c in r.body['catalogs'] if c['scope']=='personal')['tags'];self.assertEqual(tags[0]['uids'],[a.uid]);self.assertEqual(tags[0]['unavailable'],0);self.assertNotIn(b.uid,r.text)
         for path in ['/statistics','/instances/'+instance+'/file','/dicom-web/studies?StudyInstanceUID='+a.uid+'&StudyInstanceUID='+b.uid,'/dicom-web/studies?StudyInstanceUID='+a.uid+'&0020000D='+b.uid]:
-            r=self.stack.bearer_request('GET',path,self.stack.token('doctor'),base=self.stack.proxy);self.assertEqual(r.status,403,r.text)
+            r=self.stack.bearer_request('GET',path,self.stack.token('doctor'),base=self.stack.proxy);permission_denied(self,r)
         r=self.stack.request('POST','/dicom/lookup','doctor',dict(studyUid=b.uid,sopUid=sop));self.assertIn(r.status,[403,404],r.text)
 
 def load_tests(loader,tests,pattern):

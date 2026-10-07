@@ -5,6 +5,8 @@ import unittest
 
 from playwright.sync_api import sync_playwright
 
+from module_session_harness import activate
+
 
 ROOT = Path(__file__).resolve().parents[1]
 IDENTITY = ROOT / "worklist-v0" / "hpacs-lite" / "viewer-identity.js"
@@ -80,6 +82,8 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
         self.page = self.browser.new_page(viewport={"width": 1280, "height": 900})
         self.page.route("https://identity.test/", lambda route: route.fulfill(body=HARNESS, content_type="text/html"))
         self.page.goto("https://identity.test/")
+        # viewer-identity.js follows its document's gate (S7-U5): the shipped gate with a live synthetic session.
+        activate(self.page)
         self.page.add_script_tag(path=str(IDENTITY))
 
     def tearDown(self):

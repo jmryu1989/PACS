@@ -1,5 +1,7 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');
-const {create}=require('../worklist-v0/hpacs-lite/study-priority.js');
+const {create: productCreate} = require('../worklist-v0/hpacs-lite/study-priority.js');
+const { install } = require("./module_session_harness.cjs");
+const create = options => { install(options?.fetcher); return productCreate(options); };
 test('pending and ambiguous writes cannot toggle twice or claim success',async()=>{
   let resolve,requests=0,applied=[];
   const model=create({owner:()=> 'a',allowed:()=>true,request:()=>{requests++;return new Promise(r=>resolve=r);},apply:(...a)=>applied.push(a),changed:()=>{},invalidate:()=>{},notify:()=>{}});

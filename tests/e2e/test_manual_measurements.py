@@ -8,6 +8,7 @@ from viewer_precision_fixture import synthetic_ct
 from playwright.sync_api import expect
 from invariants_live import psql
 from viewer_api_test import literal
+from viewer_session import end_viewer
 
 
 class ManualMeasurementE2E(ViewerHistoryE2E):
@@ -197,9 +198,8 @@ class ManualMeasurementE2E(ViewerHistoryE2E):
                 cornerstone.metaData.get('instance',v.getCurrentImageId())[field]=value;}''',[field,old])
         self.assertEqual(self.saved(f),[])
         p.get_by_role('button',name='Length',exact=True).click()
-        p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:'test'}))")
-        p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+50,y+25);p.mouse.up()
-        expect(p.locator('#kin-viewer-history [role=status]')).to_contain_text('다시 로그인한 뒤 뷰어를 여세요')
+        p=end_viewer(p)
+        p.assert_quiet()
         self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>['Length','Angle','EllipticalROI'].includes(a.metadata.toolName)).length"),0)
 
 

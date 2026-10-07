@@ -1706,7 +1706,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertIn("if (state !== 'APPROVED' && !isLogout)", guard)
         membership = guard.index("code: state === 'PENDING' ? 'INSTITUTION_PENDING' : 'INSTITUTION_INVALID'")
         gate = guard.index("req.clinicianOnly = clinicianOnly(req.roles);")
-        csrf = guard.index("req.headers['x-kin-csrf'] !== '1'")
+        # S7-U5: the CSRF check is AuthService.requireCsrf; the guard's last call of it is the one every non-GET cookie
+        # request passes after the membership and clinician gates (the earlier one is the logout's own).
+        csrf = guard.rindex("this.auth.requireCsrf(req)")
         returned = guard.rindex("return true;")
         self.assertLess(membership, gate)
         self.assertLess(gate, csrf)
@@ -1720,19 +1722,10 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertLess(gateway_return, membership, "gateway identities return before the member checks")
 
     def test_07_member_console_and_keycloak_client_share_the_role_list(self):
-        self.assertIn("import { APP_ROLES } from './clinician-policy';", self.admin)
-        self.assertNotIn("new Set(['radiologist'", self.admin)
-        self.assertIn("if (roles.some(role => !APP_ROLES.has(role)))", self.admin)
-        self.assertIn("const roles = user.roles.filter(role => APP_ROLES.has(role)).sort();", self.admin)
-        self.assertIn("import { APP_ROLES as MANAGED_ROLES } from './clinician-policy';", self.keycloak)
-        self.assertNotIn("new Set(['radiologist'", self.keycloak)
-        self.assertIn("if (roles.some(role => !MANAGED_ROLES.has(role)))", self.keycloak)
-        self.assertIn("MANAGED_ROLES.has(role.name) && !wanted.has(role.name)", self.keycloak)
-        # colleagues/reviewer candidates stay radiologist-only; a clinician is never a reviewer candidate
-        self.assertIn("u.roles.includes('radiologist')", self.keycloak)
-        # the self-protection and the admin predicate of the member console are unchanged
-        self.assertIn("if (!c.roles?.includes('admin')) throw new ForbiddenException", self.admin)
-        self.assertIn("!this.roles(body.roles).includes('admin')", self.admin)
+        # D73/D623: DB rows already hold PACS roles; the old row-filter string is no longer a contract.
+        result = subprocess.run(["node", str(ROOT / "tests" / "admin_member_policy_test.cjs")],
+                                cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_08_realm_defines_the_role_without_users_or_secrets(self):
         realm = json.loads(REALM.read_text(encoding="utf-8"))
@@ -1928,10 +1921,14 @@ class ClinicianPolicySpec(unittest.TestCase):
             for run in decorator_runs(path.read_text(encoding="utf-8")):
                 names = [name for name, _start, _end in run["items"]]
                 if "Public" in names:
-                    self.assertEqual((run["kind"], len(names), names[0]), ("member", 2, "Public"), path.name)
+                    # S7-U5: the POST entries answer 200 (@HttpCode) - a decorator that is neither a route nor Public may
+                    # follow the route decorator; @Public() is still first and the route decorator directly below it.
+                    self.assertEqual((run["kind"], names[0]), ("member", "Public"), path.name)
                     self.assertIn(names[1], HTTP_DECORATORS, path.name)
+                    self.assertLessEqual(set(names[2:]), {"HttpCode", "Header"}, path.name)
                     found.append(path.name)
-        self.assertEqual(sorted(found), ["auth.controller.ts"] * 3 + ["pacs.controller.ts"])
+        # health; the link logins and the callback; S7-U5's bound login starts (POST) and the entry of a login
+        self.assertEqual(sorted(found), ["auth.controller.ts"] * 6 + ["pacs.controller.ts"])
 
     def test_12_inventory_readers_see_every_route_decorator_and_method(self):
         """S5-U1c D6 (RequestMethod members, unreadable decorators) and D8 (the invariants_live reader)."""
@@ -2525,7 +2522,7 @@ class ClinicianPolicySpec(unittest.TestCase):
 
         inject = "import { Injectable } from '@nestjs/common';\n"
         # the edits of auth.guard.ts below each change exactly the text they name
-        self.assertEqual(sources[API / "auth.guard.ts"].count("  SetMetadata, UnauthorizedException,\n"), 1)
+        self.assertEqual(sources[API / "auth.guard.ts"].count("  SetMetadata,\n"), 1)
         refused = {
             "reviewer: study-tags Get as Header and Public as HttpCode":
                 ({tags: reviewed}, renamed + r": \[\('Get', 'Header'\), \('Public', 'HttpCode'\)\]"),
@@ -2594,8 +2591,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                 {API / "auth.guard.ts": sources[API / "auth.guard.ts"] + "export default Public;\n"},
                 r"auth\.guard\.ts: Public occurs outside its declaration"),
             "SetMetadata of Public from another module": (
-                {API / "auth.guard.ts": sources[API / "auth.guard.ts"].replace("  SetMetadata, UnauthorizedException,\n",
-                                                                               "  UnauthorizedException,\n", 1)
+                {API / "auth.guard.ts": sources[API / "auth.guard.ts"].replace("  SetMetadata,\n", "", 1)
                  + "import { SetMetadata } from './clinician-policy';\n"},
                 r"auth\.guard\.ts: SetMetadata " + unbound + r" \{ SetMetadata \} from '@nestjs/common'"),
         }
@@ -2852,9 +2848,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
         # S7-U1a: 8 critical result rows, 3 allowed and 5 denied (132 = 4 + 2 + 20 + 106, read from the compiled app's Nest
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
-        # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata)
+        # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
+        # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
+        # (137 = 7 + 2 + 20 + 108)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (133, 4, 2, 20, 107), "the real inventory is unchanged: 133 = 4 + 2 + 20 + 107")
+                         (137, 7, 2, 20, 108), "the real inventory is unchanged: 137 = 7 + 2 + 20 + 108")
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
@@ -3106,9 +3104,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
         # S7-U1a: 8 critical result rows, 3 allowed and 5 denied (132 = 4 + 2 + 20 + 106, read from the compiled app's Nest
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
-        # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata)
+        # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
+        # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
+        # (137 = 7 + 2 + 20 + 108)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (133, 4, 2, 20, 107), "the real inventory is unchanged: 133 = 4 + 2 + 20 + 107")
+                         (137, 7, 2, 20, 108), "the real inventory is unchanged: 137 = 7 + 2 + 20 + 108")
         contract = CONTRACT["regex_or_division"]
         self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
                           sorted(UNREAD_PUNCT)),
@@ -3284,9 +3284,11 @@ class ClinicianPolicySpec(unittest.TestCase):
         # S5-U5b: GET admin/audit denied; S5-U3: GET clinician/studies/:uid/timeline allowed (124 = 4 + 2 + 17 + 101);
         # S7-U1a: 8 critical result rows, 3 allowed and 5 denied (132 = 4 + 2 + 20 + 106, read from the compiled app's Nest
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
-        # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata)
+        # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
+        # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
+        # (137 = 7 + 2 + 20 + 108)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (133, 4, 2, 20, 107), "the real inventory is unchanged: 133 = 4 + 2 + 20 + 107")
+                         (137, 7, 2, 20, 108), "the real inventory is unchanged: 137 = 7 + 2 + 20 + 108")
         contract = CONTRACT["class_heading"]
         # every class keyword of api/src has a heading class_heading reads, and no controller file's class extends
         keywords, extending = 0, set()

@@ -5,6 +5,8 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
 from test_dock_preferences import DockPreferencesE2E,dock_button,dock_settings
+from document_session import document_request
+from viewer_session import end_viewer
 
 class StandaloneDockE2E(ViewerTechNoteE2E):
  def test_standalone_dock_01_parent_popup_preferences_and_work(self):
@@ -32,8 +34,9 @@ class StandaloneDockE2E(ViewerTechNoteE2E):
    self.ready(v);expect(v.locator('#kin-workspace-dock')).to_have_count(1);expect(v.locator('#kin-viewer-tech-note')).to_have_count(1);expect(v.locator('#kin-dock-placement')).to_have_value('top')
   canvas_ready(v,1);self.assertEqual(self.snapshot(v),before)
   saved=DockPreferencesE2E.stored(self,v)
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-  expect(v.locator('#kin-dock-placement')).to_be_disabled();expect(v.locator('#kin-viewer-note-open')).to_be_disabled();expect(v.locator('#kin-viewer-layout')).not_to_be_visible();self.assertEqual(DockPreferencesE2E.stored(self,v),saved)
+  ended=end_viewer(v, ['#kin-dock-placement','#kin-viewer-note-open'])
+  for selector in ['#kin-dock-placement','#kin-viewer-note-open']:self.assertEqual(ended.retained(selector,'node => node.disabled'),[True])
+  self.assertEqual(DockPreferencesE2E.stored(self,ended),saved);ended.assert_quiet()
 
  def test_standalone_dock_03_storage_denial_and_narrow_window(self):
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=800,height=1100))
@@ -43,7 +46,7 @@ class StandaloneDockE2E(ViewerTechNoteE2E):
   self.assertEqual(self.snapshot(v),before);dock_settings(v).locator('#kin-dock-reset').click();expect(v.locator('#kin-dock-placement')).to_have_value('bottom')
 
  def test_standalone_dock_04_native_invalid_read_denial_and_measurement_restore(self):
-  a,b=self.pair();p=self.login();me=p.context.request.get(self.stack.api+'/me').json();key='kin-viewer-dock:v1:'+json.dumps([me['institution'],me['sub']],ensure_ascii=False,separators=(',',':'))
+  a,b=self.pair();p=self.login();me=document_request(p, "GET", self.stack.api+'/me').json();key='kin-viewer-dock:v1:'+json.dumps([me['institution'],me['sub']],ensure_ascii=False,separators=(',',':'))
   p.evaluate('(key)=>localStorage.setItem(key,"{bad")',key);v=self.launch(p,[a]);expect(v.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000)
   expect(v.locator('#kin-workspace-dock')).to_have_count(1);expect(v.locator('#kin-viewer-history')).not_to_be_visible();expect(v.locator('#kin-viewer-layout')).not_to_be_visible();expect(v.locator('#kin-dock-preference-status')).to_contain_text('오류');v.keyboard.press('Control+Alt+7');expect(dock_button(v,'Measurements')).to_be_focused()
   v.evaluate('(key)=>localStorage.setItem(key,JSON.stringify({version:1,placement:"top",panel:0}))',key);v.reload();canvas_ready(v,1)

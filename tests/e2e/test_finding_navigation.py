@@ -15,6 +15,7 @@ import test_worklist as base
 from test_viewer_history import ViewerHistoryE2E, synthetic_ct, expect, literal, canvas_ready
 from viewer_precision_support import hook
 from finding_api_test import FindingStack, BOUNDARY_COLUMNS
+from viewer_session import end_viewer
 
 CURRENT_IMAGE = "sop=>cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails').flatMap(e=>e.getViewports()).some(v=>v.getCurrentImageId?.().includes('/instances/'+sop+'/frames/1'))"
 ACTIVE_IMAGE = "uid=>{const s=__d05c1.services;return s.cornerstoneViewportService.getCornerstoneViewport(s.viewportGridService.getActiveViewportId())?.getCurrentImageId?.().includes('/studies/'+uid+'/')}"
@@ -297,9 +298,9 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         finding_row = self.saved_row(p, saved['id'])
         finding_row.locator('[data-kin-sources] [data-item-id]').get_by_role('button', name='Go to Image', exact=True).click()
         p.wait_for_function("sop=>{const s=__d05c1.services;return s.cornerstoneViewportService.getCornerstoneViewport(s.viewportGridService.getActiveViewportId()).getCurrentImageId().includes('/instances/'+sop+'/frames/1')}", arg=sops[0])
-        p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-        expect(p.locator('#kin-viewer-findings')).to_contain_text('다시 로그인'); self.assertEqual(p.locator('#kin-viewer-findings article').count(), 0)
-        self.assertEqual(p.evaluate("t=>window.kinViewerHistoryNavigate?window.kinViewerHistoryNavigate(t):{ok:false,reason:'tool-missing'}", dict(studyUid=f.uid, seriesUid=saved['item']['sources'][0]['seriesUid'], sopUid=saved['item']['sources'][0]['sopUid'], frame=1)), dict(ok=False, reason='ended'))
+        p.evaluate('()=>window.endedNavigate=kinViewerHistoryNavigate')
+        p=end_viewer(p);p.assert_quiet()
+        self.assertEqual(p.evaluate("t=>endedNavigate(t)", dict(studyUid=f.uid, seriesUid=saved['item']['sources'][0]['seriesUid'], sopUid=saved['item']['sources'][0]['sopUid'], frame=1)), dict(ok=False, reason='ended'))
 
     # ---- S2-B draft protection: guards, clean controls and held drafts ----
     def seed_key(self, f, title):
@@ -466,9 +467,9 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         expect(p.locator('#kin-viewer-findings article[data-saved=true]')).to_have_count(1)
         self.assertTrue(p.evaluate('()=>kinViewerHistoryWorkspaceState().dirty'))
         # Logout destroys the draft; nothing of it remains or is counted.
-        p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-        expect(p.locator('#kin-viewer-findings')).to_contain_text('다시 로그인'); expect(p.locator('#kin-viewer-findings article')).to_have_count(0)
-        self.assertEqual(p.evaluate('()=>[kinViewerHistoryWorkspaceState(),kinViewerFindingsState()]'),
+        p.evaluate('()=>{window.endedHistoryState=kinViewerHistoryWorkspaceState;window.endedFindingsState=kinViewerFindingsState}')
+        p=end_viewer(p);p.assert_quiet()
+        self.assertEqual(p.evaluate('()=>[endedHistoryState(),endedFindingsState()]'),
                          [dict(dirty=False, busy=False), dict(scope=f.uid, dirty=False, busy=False, held=0)])
         self.assertEqual(len(self.findings(f)), 1); self.assertEqual(self.saved(f), keys); self.assertEqual(self.hashes(), original)
 

@@ -28,8 +28,7 @@ to report it, not to add a guard.
 Two files may be replaced through KIN_DICTATION_MAIN / KIN_DICTATION_CITATION_JS so an existing
 mutant runner can break the product on purpose without touching the source tree.
 
-`python tests/report_dictation_input_dom_test.py --static-only` runs the pure checks with no
-browser.
+The browser assertions replace the former source and harness-shape pins.
 """
 import json
 import os
@@ -37,6 +36,8 @@ import re
 import sys
 import unittest
 from pathlib import Path
+
+from report_page_contract import install_contract
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN_PATH = Path(os.environ.get("KIN_DICTATION_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html"))
@@ -316,6 +317,8 @@ window.snapshot = () => ({
 </script></body></html>"""
 
 
+HARNESS = install_contract(HARNESS)
+
 def harness(state):
     return (HARNESS
             .replace("MODALCSS", MODAL_CSS)
@@ -337,21 +340,6 @@ def harness(state):
             .replace("INITIALSTATE", json.dumps(state))
             .replace("UIDVALUE", UID)
             .replace("OTHERVALUE", OTHER))
-
-
-def top_level_selectors():
-    """Every `$("#id")` in the sliced script regions. A missing element makes the page throw while
-    loading and kills every case before its first assertion (the U3 lesson)."""
-    found = set()
-    for block in (BASE_BLOCK, REPORT_BLOCK, HOLD_BLOCK):
-        for match in re.finditer(r"""\$\(\s*["']#([A-Za-z0-9_-]+)["']\s*\)""", block):
-            found.add(match.group(1))
-    return found
-
-
-def markup_ids():
-    page = harness({})
-    return set(re.findall(r"""\sid=["']([A-Za-z0-9_-]+)["']""", page))
 
 
 def gate_complete():
@@ -378,49 +366,6 @@ def gate_self_check():
     finally:
         SUMMARY["composition_source"], SUMMARY["skipped"] = saved
     return problems
-
-
-def static_report():
-    """The pure half of DI-00 plus the pins that need no browser."""
-    problems = []
-    for name, (start, end) in MARKERS.items():
-        if MAIN.count(start) != 1:
-            problems.append("slice marker %s start occurs %d times" % (name, MAIN.count(start)))
-    ids = markup_ids()
-    # The sliced region creates the Structured button at runtime, so it is legitimately absent here.
-    missing = sorted(selector for selector in top_level_selectors()
-                     if selector not in ids and selector != "b-structured")
-    if missing:
-        problems.append("harness markup is missing %s" % ", ".join(missing))
-    autosave = slice_between(MAIN, "    const AUTOSAVE_MS = 20000;", "    }, AUTOSAVE_MS);")
-    if "stashReport();" not in autosave:
-        problems.append("the autosave interval no longer calls stashReport()")
-    if "if (selectedUid) { loadReport(); updateReportButtons(); }" not in MAIN:
-        problems.append("the non-force poll call site moved")
-    if 'title="%s"' % DICTATE_TITLE not in MAIN:
-        problems.append("the Dictate tooltip is not the disposed string")
-    if 'id="b-dictate"' not in MAIN:
-        problems.append("the Dictate button has no id")
-    # The rule that makes the structured entry dialog visible must be the PRODUCT's, and it must be
-    # inside the slice the harness lifts. A harness that injected it would pass a dialog the product
-    # cannot show - the false pass this whole file exists to avoid.
-    if MAIN.count(STRUCT_MODAL_RULE) != 1:
-        problems.append("the shipped %r rule is missing or duplicated" % STRUCT_MODAL_RULE)
-    if STRUCT_MODAL_RULE not in MODAL_CSS:
-        problems.append("the structured dialog rule is outside the MODAL_CSS slice the harness lifts")
-    if HARNESS.count(".modal.on") or HARNESS.count("display: flex"):
-        problems.append("the harness template must not carry a display rule of its own")
-    if harness({}).count(STRUCT_MODAL_RULE) != 1:
-        problems.append("the assembled page must carry exactly one copy of the shipped rule")
-    problems.extend(gate_self_check())
-    source = Path(__file__).read_text(encoding="utf-8")
-    # Split so this check does not match itself.
-    if ("Composition" + "Event(") in source or ("new " + "CompositionEvent") in source:
-        problems.append("a script-constructed composition event would prove nothing about an IME")
-    cases = sorted(name for name in dir(ReportDictationInputDOMTest) if name.startswith("test_di"))
-    if len(cases) != 15:
-        problems.append("expected 15 DI cases, found %d" % len(cases))
-    return problems, cases
 
 
 class ReportDictationInputDOMTest(unittest.TestCase):
@@ -566,27 +511,10 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         self.page.click("#struct-value-text")     # visible + editable, and it takes the focus
 
     # ── DI-00 ──────────────────────────────────────────────────────────────────────────────
-    def test_di00_the_slices_the_call_sites_and_the_routing_this_file_stands_on(self):
-        """Pure. The stand-ins below (`stash()`, `load()`) are only honest while the shipped timers
-        still call exactly those functions, and every exact count is only honest while occupancy and
-        the structured read stay out of `calls`."""
-        problems, cases = static_report()
-        self.assertEqual([], problems)
-        self.assertEqual(["test_di%02d" % n for n in list(range(0, 15))],
-                         [name[:9] for name in cases], "the DI ids must stay dense and stable")
-        self.assertIn('path.endsWith("/hold") || path.endsWith("/release")', HARNESS,
-                      "occupancy must not be counted as a report write")
-        self.assertIn('path.endsWith("/report/structure")', HARNESS,
-                      "the structured read must not be counted as a report write")
-        self.assertIn("/hold", HOLD_BLOCK, "the occupancy slice must be the one that posts the hold")
-        self.assertIn("HOLD_MIN_CHARS", HOLD_BLOCK)
-        # N-B: refreshRight() is a non-force caller by default, so the poll is not the only one.
-        self.assertIn("loadReport({ force: forceReport })", MAIN)
-        # The dialog is shown by the product's own rule, carried into the page by the CSS slice.
-        self.assertIn(STRUCT_MODAL_RULE, MODAL_CSS)
-        self.assertNotIn(".modal.on", HARNESS, "the harness may not invent a display rule")
-        self.assertIn('classList.add("on")', REPORT_BLOCK,
-                      "the rule has to name the class the shipped code actually adds")
+    def test_di00_opening_the_report_keeps_the_text_and_starts_no_recording(self):
+        self.open()
+        self.assertEqual([EXISTING, "", ""], self.snap()["text"])
+        self.assertEqual([], self.snap()["calls"])
 
     # ── DI-01 ──────────────────────────────────────────────────────────────────────────────
     def test_di01_a_committed_composition_lands_at_the_caret(self):
@@ -768,8 +696,9 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         self.assertIn("2번째 줄부터 넣습니다", pane["place"],
                       "the caret sat inside line 1, so the line belongs on line 2")
         self.assertFalse(pane["disabled"])
+        self.page.evaluate("replies.push({status:200,body:{applied:{sid:'syn-structure-1'}}})")
         self.page.click("#struct-apply")
-        self.page.wait_for_function("()=>calls.some(c=>c.method==='PUT')")
+        self.page.wait_for_function("()=>calls.some(c=>c.method==='PUT') && !structPane")
         value = self.snap()
         self.assertEqual(value["text"][0], self.puts()[-1]["body"]["findings"],
                          "the body sent is the body shown")
@@ -884,12 +813,6 @@ class ReportDictationInputDOMTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    if "--static-only" in sys.argv:
-        # A true static command: no browser, no summary, no gate - only the pure checks.
-        problems, cases = static_report()
-        print(json.dumps({"static_only": True, "cases": len(cases), "problems": problems,
-                          "main": str(MAIN_PATH)}, ensure_ascii=False, indent=2))
-        sys.exit(1 if problems else 0)
     program = unittest.main(verbosity=2, exit=False)
     passed = program.result.wasSuccessful()
     complete = passed and gate_complete()

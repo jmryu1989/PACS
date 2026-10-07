@@ -2,7 +2,9 @@
 """Opt-in note opening, local owner setting and editing deferral."""
 import json,unittest
 from playwright.sync_api import expect
+from failure_diagnostics import failure_details
 from test_reading_note import ReadingNoteE2E
+from viewer_session import end_document
 
 class ReadingNoteAutoE2E(ReadingNoteE2E):
  def test_auto_note_01_default_opt_in_once_and_reload(self):
@@ -13,7 +15,9 @@ class ReadingNoteAutoE2E(ReadingNoteE2E):
   stored=p.evaluate("() => Object.keys(localStorage).filter(k=>k.startsWith('kin-reading-note-auto:v1:')).map(k=>[k,localStorage.getItem(k)])")
   self.assertEqual(len(stored),1);self.assertEqual(stored[0][1],'true');self.assertNotIn(a.uid,json.dumps(stored))
   p.reload();expect(p.locator('#dbstat')).to_contain_text('DB Connected');self.workspace(p,a)
-  expect(toggle).to_be_checked();expect(p.locator('#tech-note-text')).to_have_value('AUTO NOTE CURRENT');p.locator('#tech-note-close').click()
+  with failure_details(p,'AUTO NOTE reload failure',"() => ({dialogOpen:document.querySelector('#tech-note-dialog')?.open,noteStatus:document.querySelector('#tech-note-status')?.textContent,noteTarget:document.querySelector('#tech-note-target')?.textContent,readingStatus:document.querySelector('#reading-status')?.textContent,readingTarget:document.querySelector('#reading-target')?.textContent,selected:document.querySelector('#rows tr.sel')?.dataset.uid,sessionState:window.KinWorkContext?.state()})"):
+   expect(toggle).to_be_checked();expect(p.locator('#tech-note-text')).to_have_value('AUTO NOTE CURRENT')
+  p.locator('#tech-note-close').click()
   toggle.uncheck();p.reload();expect(p.locator('#dbstat')).to_contain_text('DB Connected');self.workspace(p,a)
   expect(toggle).not_to_be_checked();expect(p.locator('#tech-note-dialog')).not_to_be_visible()
 
@@ -30,7 +34,7 @@ class ReadingNoteAutoE2E(ReadingNoteE2E):
   p.wait_for_timeout(750);expect(p.locator('#tech-note-dialog')).not_to_be_visible()
   self.note(b,'LATER NOTE');p.locator('#refresh').click();expect(p.locator('#reading-tech-note')).to_contain_text('있음')
   p.wait_for_timeout(750);expect(p.locator('#tech-note-dialog')).not_to_be_visible()
-  p.evaluate("() => {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
+  end_document(p)
   expect(p.locator('#reading-note-auto')).to_be_disabled()
 
  def test_auto_note_03_other_owner_and_storage_failure(self):

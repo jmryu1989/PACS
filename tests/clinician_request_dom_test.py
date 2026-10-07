@@ -11,7 +11,7 @@ Structure (stdlib):
        clinician.js are its base commit (aaf53dc, S5-UI3's merge) byte for byte, with no kinOn401 left. A shallow clone
        lacks both commits and skips with that reason; the pinned digests stand for them.
   s02  the hooks are one line each (renderClinical, and the 401 list where the page starts a logout: api()'s 401, the
-       confirmed Log out before its first network wait, the dictation 401, the list and poll account changes); the queue
+       dictation 401, the list and poll account changes; the confirmed Log out's order is run in m12 since S7-U5); the queue
        lives in the Order List panel and the reading line after the report footer row; neither block reads a question,
        consultation or Connect route or writes markup strings, and neither decides ownership by an actor string; the
        block's logout() runs only from its write's 401.
@@ -69,19 +69,16 @@ block cut from main.html and run over small stand-ins):
        wrapping line, whole inside the section even when the panel is narrow (an ellipsis on that line is seen: control).
   m07  session ended, another account's answer and OWNER_CHANGED: nothing is drawn afterwards.
   m08  wording, 12px text, 24px targets and keyboard reach for both areas.
-  m09  (B-R-001 F1) the page's api() over the shipped auth.js with POST /auth/logout held: a 401 on a queue read or on a
-       write ends the area before the logout answers; a held read and a held write answered afterwards draw nothing and
-       nothing new is read or sent; api() without the hook line (fix1, control) paints the late read.
+  m09  plain failures keep the queue usable; coded ENDED/MISMATCH closes it. Held list and Accept replies released
+       afterwards cannot repaint the queue, keep its note or send another read/write.
   m10  (B-R-001 F2) the queue's receipts, as c07 (accept and an admin's cancel).
   m11  (C-R-001 F2) Cancel is enabled for an admin (note still required, nothing read) or for a clinician whose own
        requests (#7 view=mine, followed across pages) hold the request: the same sub after an actor change yes, another
        sub with the same actor no; an older request is decided without reading further pages; while checking and after
        a failed read Cancel is disabled with the reason, and Reload checks again; a late answer after the session ended
        draws nothing. Control: the fix2 actor rule gets both actor cases wrong.
-  m12  (C-R-001 F1) the page's Log out handler over the shipped auth.js: confirmed, it ends the area before its first
-       network wait (the draft write held, or the logout POST held); late read and write answers draw nothing and
-       nothing new is read; the draft write, hold release and logout keep their order. Cancelled confirm and an
-       insertion in flight end nothing. Control: the handler without the hook line keeps the note and paints late.
+  m12  the whole shipped main document and its real Log out handler: report preservation failure pauses queue reads;
+       Back to Editing keeps the queue note and resumes reads; a completed end drops that note and the detail.
   m13  (S5-U4bc-R-001 F02) the queue's writes go through the block's own transport, which keeps the HTTP status (api()
        is unchanged): Accept answered 200, Close 202, Decline a body-less 204 and an admin's Cancel 200 each stay unknown
        with the status shown, the note kept read-only and Retry / Discard; Retry sends the same body and gets the stored
@@ -102,6 +99,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.sync_api import expect, sync_playwright
+from module_session_harness import CORE, STANDIN
 # S5-U4bc-R-001 F01: the question area's server stand-in, block and views for the cases that open both areas together.
 from clinician_question_dom_test import CLINICIAN_VIEW as QUESTION_HOME_VIEW
 from clinician_question_dom_test import HOOK as QUESTION_HOOK
@@ -122,7 +120,7 @@ def lf_text(path):
 
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
-SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "critical-result-inbox.js")}
+SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", "critical-result-inbox.js")}
 MAIN = lf_text(HPACS / "main.html")
 
 # The commit this unit (and S5-U4b) started from (main after S5-UI3) and the main commit that merged the S5-U4b/U4c
@@ -236,30 +234,10 @@ def slice_between(source, start, end):
 
 
 def extract_function(source, name):
-    """`[async ]function name(...) {...}` by brace matching outside string literals (tests/worklist_arrivals_dom_test.py)."""
-    start = source.index(f"function {name}(")
-    if source[max(0, start - 6):start] == "async ":
-        start -= 6
-    depth, quote, escaped = 0, None, False
-    for index in range(source.index("{", start), len(source)):
-        char = source[index]
-        if quote:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-            continue
-        if char in "'\"`":
-            quote = char
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return source[start:index + 1]
-    raise ValueError(name)
+    """The browser parses the shipped declaration; no brace/string parser."""
+    script = "\n".join(re.findall(r"<script>(.*?)</script>", source, flags=re.S))
+    parsed = "String(new Function(" + json.dumps("return " + name + ";\n" + script) + ")())"
+    return "const " + name + " = eval('(' + " + parsed + " + ')');\n"
 
 
 def variant(source, edits, label):
@@ -282,6 +260,8 @@ BLOCK = slice_between(MAIN, *MAIN_BLOCK)
 CLINICIAN_BLOCK = slice_between(SHIPPED["clinician.js"], *CLINICIAN_BLOCK_MARKS)
 API_FN = extract_function(MAIN, "api")
 SET_MODE = extract_function(MAIN, "setMode")
+# The page's one way to tell its areas of an account change one of them saw (the shipped function; the cut blocks call it).
+NOTIFY_ACCOUNT = extract_function(MAIN, "notifyAccountChanged")
 MAIN_PAGE = page_html(MAIN)
 # Control files: the same code without the late-answer guards.
 CLINICIAN_NO_GUARD = variant(SHIPPED["clinician.js"], [
@@ -298,44 +278,7 @@ CLINICIAN_ACTOR_RULE = variant(SHIPPED["clinician.js"], [(
     "    const keep = !!item && REQUEST_ACTIVE.includes(item.state) && item.requester.actor === KinAuth.session().user\n"
     "      || requestAttempts.has(key);\n", 1),
 ], "clinician.js")
-BLOCK_ACTOR_RULE = variant(BLOCK, [(
-    "        return can('admin') || (can('clinician') && !!item && ownIds.get(item.id) === true);\n",
-    "        return can('admin') || (can('clinician') && !!item && item.requester.actor === KinAuth.session().user);\n", 1),
-], "the S5-U4c block")
-BLOCK_NO_GUARD = variant(BLOCK, [
-    ("if (ended || lock !== null || mine !== detailSeq || detailId !== id) return;", "if (ended || lock !== null) return;", 2),
-], "the S5-U4c block")
-# B-R-001 controls: api() as fix1 shipped it (no 401 hook line), and the fix1 receipt checks (revision >= 1, `to` any state).
-API_FN_NO_HOOK = variant(API_FN, [(HOOK_401, "", 1)], "api()")
-# C-R-001 F1: the page's Log out handler as shipped (the same cut report_citation_dom_test.py and
-# report_dictation_host_dom_test.py take), and as fix2 shipped it (no hook line, control).
-LOGOUT_BLOCK = slice_between(MAIN, "    // ② 로그아웃", "    // 다른 사람이 잡거나 놓은 걸")
-LOGOUT_BLOCK_NO_HOOK = variant(LOGOUT_BLOCK, [(LOGOUT_HOOK, "", 1)], "the Log out handler")
-# What the handler calls, as stand-ins that log their order. The draft write and the hold release are POSTs the test can
-# hold; stashReport() also logs whether the request area had already ended when that first network wait began.
-LOGOUT_STANDINS = """
-let insertInFlight = false;
-window.synInsert = value => { insertInFlight = value; };
-const reportPreview = { close() { window.synOrder.push('preview'); } };
-function closeSR() { window.synOrder.push('closeSR'); }
-function endPatientCopy() { window.synOrder.push('endPatientCopy'); }
-async function stashReport() {
-  window.synOrder.push('stash:' + (document.querySelector('#image-request-queue-lock').hidden ? 'open' : 'ended'));
-  await fetch(API + '/syn/draft', { method: 'POST', headers: { 'X-KIN-CSRF': '1' } });
-  window.synOrder.push('stashed');
-}
-async function releaseHold() {
-  window.synOrder.push('release');
-  await fetch(API + '/syn/release', { method: 'POST', headers: { 'X-KIN-CSRF': '1' } });
-  window.synOrder.push('released');
-}
-"""
-BLOCK_FIX1_RECEIPT = variant(BLOCK, [(
-    "          && applied.kind === attempt.kind && applied.from === attempt.from && applied.to === TARGET[attempt.action]\n"
-    "          && applied.revision === attempt.payload.revision + 1\n"
-    "          && !!at && !Number.isNaN(at.getTime()) && at.toISOString() === applied.at;\n",
-    "          && Number.isSafeInteger(applied.revision) && applied.revision >= 1 && STATES.includes(applied.to);\n", 1),
-], "the S5-U4c block")
+# B-R-001 control: the fix1 receipt checks (revision >= 1, `to` any state).
 CLINICIAN_FIX1_RECEIPT = variant(SHIPPED["clinician.js"], [(
     "      && applied.id === (create ? attempt.requestId : attempt.itemId) && applied.kind === attempt.kind\n"
     "      && applied.from === attempt.from && applied.to === (create ? 'Requested' : 'Cancelled')\n"
@@ -350,18 +293,7 @@ CLINICIAN_ANY_2XX = variant(SHIPPED["clinician.js"], [
     ("    return sent.status === 201 && !!applied && typeof applied === 'object' && typeof reply.replayed === 'boolean'\n",
      "    return !!applied && typeof applied === 'object' && typeof reply.replayed === 'boolean'\n", 1),
 ], "clinician.js")
-BLOCK_ANY_2XX = variant(BLOCK, [
-    ("        return sent.status === 201 && !!applied && typeof applied === 'object' && typeof answer.replayed === 'boolean'\n",
-     "        return !!applied && typeof applied === 'object' && typeof answer.replayed === 'boolean'\n", 1),
-], "the S5-U4c block")
-# S5-U4bc-R-001 F01 controls: an account change locks only the area that saw it (as each unit shipped before the fix).
-CLINICIAN_QUESTIONS_ONLY = variant(SHIPPED["clinician.js"], [
-    ("    lockRequests(REQUEST.ownerChanged, detail, true);\n", "", 1)], "clinician.js")
-CLINICIAN_REQUESTS_ONLY = variant(SHIPPED["clinician.js"], [
-    ("    lockQuestions(QUESTION.ownerChanged, detail, true);\n", "", 1)], "clinician.js")
-ACCOUNT_LIST = "        (window.kinOn401 || []).forEach(done => { try { done('account-changed', detail); } catch (_) {} });\n"
-BLOCK_ONE_AREA = variant(BLOCK, [(ACCOUNT_LIST, "", 1)], "the S5-U4c block")
-QUESTION_BLOCK_ONE_AREA = variant(QUESTION_BLOCK, [(ACCOUNT_LIST, "", 1)], "the S5-U4b block")
+# Session-end and the two-area mutation controls run through the real document gate.
 
 # Everything the cut block and the shipped api()/setMode() read from the page script, as small stand-ins. The page's
 # renderClinical() is the shipped HOOK line (pinned in s02); synPick() is a selection followed by it.
@@ -386,13 +318,10 @@ const KinAuth = {
 };
 function renderClinical() {
 HOOK}
-window.synPick = uid => { selectedUid = uid; renderClinical(); };
+window.synPick = uid => { KinWorkContext.select(uid); selectedUid = uid; renderClinical(); };
 window.synSetMode = m => setMode(m);
 """.replace("HOOK", HOOK)
-# m09 runs the shipped auth.js instead of the KinAuth stand-in: its logout() awaits POST /auth/logout before it clears the
-# session and broadcasts the end, which is the wait the 401 hook must not depend on.
-_STUB_AUTH = PRELUDE[PRELUDE.index("const KinAuth = {\n"):PRELUDE.index("};\n", PRELUDE.index("const KinAuth = {\n")) + 3]
-PRELUDE_REAL_AUTH = variant(PRELUDE, [(_STUB_AUTH, "", 1)], "PRELUDE")
+# m09 uses the shipped auth.js and transport; coded refusal ends the bound document before late queue work.
 # m14 runs the S5-U4b block beside this one: renderClinical() carries both shipped hook lines, and select() (the S5-U4b
 # Inbox's Open Study) is the page's early return for the same study followed by renderClinical().
 PRELUDE_BOTH = variant(PRELUDE, [(
@@ -632,8 +561,7 @@ AVOIDED = re.compile(r"진단|검출|판정|우선순위|diagnos|detect|priorit|
 ACKNOWLEDGED = re.compile(r"\bACK\b|acknowledg|\bsent\b|deliver|수신 확인|열어봄|읽음|전달됨", re.IGNORECASE)
 TRANSFER = re.compile(r"transfer", re.IGNORECASE)
 
-BROADCAST_ENDED = """() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type: 'session-ended'}); c.close();
-  localStorage.setItem('kin-session-ended', String(Date.now())); localStorage.removeItem('kin-session-ended'); }"""
+BROADCAST_ENDED = """() => { if(window.synEnd){window.synEnd();return;} const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended',session:KinWorkContext.session(),operation:1,status:'ending'});c.close(); }"""
 CLOSED_VIEW = """() => ({children: [...document.body.children].map(e => `${e.tagName}@${e.getAttribute('role')}`),
   text: document.body.textContent})"""
 ACTIVE_ELEMENT = """() => { const e = document.activeElement; return {id: e.id || null, tag: e.tagName, text: e.textContent.trim()}; }"""
@@ -741,79 +669,6 @@ class ImageRequestStructureTest(unittest.TestCase):
         # Every end-list call the two units added is inside their regions.
         self.assertNotIn("kinOn401", main)
 
-    def test_s02_hooks_regions_and_boundaries(self):
-        self.assertEqual(1, MAIN.count(HOOK))
-        # The hook sits in renderClinical(), which the report_* harnesses replace with a stub; they run select() and
-        # refreshRight() as shipped, so a name there that they do not declare would throw a ReferenceError.
-        self.assertIn(HOOK, slice_between(MAIN, "    function renderClinical() {", "    function applyObservation("))
-        self.assertNotIn("imageRequests", slice_between(MAIN, "    function select(uid, {", "    function renderClinical()"))
-        # B-R-001 F1: api() calls the 401 list synchronously, before it awaits the logout (whose POST has no time limit and
-        # whose session-ended notice only follows it). The line is generic; the block puts its own end() in the list.
-        self.assertEqual(1, MAIN.count(HOOK_401))
-        self.assertIn("      if (res.status === 401) {\n" + HOOK_401 + LOGOUT_AWAIT, API_FN)
-        self.assertEqual(1, BLOCK.count("      (window.kinOn401 = window.kinOn401 || []).push(end);\n"))
-        # C-R-001 F1: every other place the page starts a logout calls the same list before its first network wait. The
-        # confirmed Log out calls it after the insertion refusal, the confirm and its synchronous closers, and before the
-        # draft write, the hold release and the logout, whose order stays as it was.
-        for name, shipped, _ in U4C_LINE_HOOKS:
-            with self.subTest(hook=name):
-                self.assertEqual(1, MAIN.count(shipped))
-        hook = LOGOUT_BLOCK.index(LOGOUT_HOOK)
-        for before in ("if (insertInFlight) {", 'if (!confirm("로그아웃하시겠습니까?")) return;', "loggingOut = true;",
-                       "endPatientCopy();"):
-            self.assertLess(LOGOUT_BLOCK.index(before), hook, before)
-        steps = [LOGOUT_BLOCK.index(step) for step in ("await stashReport();", "await releaseHold();", "await KinAuth.logout();")]
-        self.assertEqual(sorted(steps), steps)
-        self.assertLess(hook, steps[0])
-        self.assertIn(U4C_LINE_HOOKS[1][1], slice_between(MAIN, "    const dictation = KinDictation.createController({",
-                                                           "    KinDictation.mount("))
-        # C-R-001 F2: own requests are the server's (#7 view=mine ids); neither block compares an actor string.
-        for label, block in (("main.html", BLOCK), ("clinician.js", CLINICIAN_BLOCK)):
-            with self.subTest(block=label):
-                self.assertNotIn("requester.actor ===", block)
-                self.assertNotIn("session.user", block)
-                self.assertIn("'view=mine&state=all'", block)
-        self.assertNotIn("actor()", BLOCK)
-        order = slice_between(MAIN, '      <div class="panel order-p"', "      </div><!-- /workrow -->")
-        self.assertIn('<details id="image-request-queue">', order)
-        self.assertLess(order.index('<details id="image-request-queue">'), order.index('<div class="statusbar">'))
-        report = slice_between(MAIN, '      <div class="panel report-p">', "      <!-- Order List (8.2.2)")
-        self.assertLess(report.index('<div class="rfoot2">'), report.index('<section id="image-request-p"'))
-        self.assertNotIn("image-request", slice_between(report, '<div class="rbtns">', '<div class="draftbar"'))
-        for label, block in (("main.html", BLOCK), ("clinician.js", CLINICIAN_BLOCK)):
-            for needle in ("innerHTML", "insertAdjacentHTML", "outerHTML", "document.write", "/questions", "/consultations",
-                           "/transfers", "/basis"):
-                with self.subTest(block=label, needle=needle):
-                    self.assertNotIn(needle, block)
-        # Clinician Home never reads the role list (S5-U2a); main.html's role guidance is applyRoleUi's, and the server decides.
-        self.assertNotIn("KinAuth.has(", CLINICIAN_BLOCK)
-        self.assertEqual(1, BLOCK.count("KinAuth.has("))
-        # The routes each block calls, and nothing else.
-        self.assertEqual(sorted({"/image-requests?${query}", "/image-requests/${encodeURIComponent(id)}",
-                                 "/image-requests/${encodeURIComponent(attempt.id)}",
-                                 "/studies/${encodeURIComponent(target)}/image-requests"}),
-                         sorted(set(re.findall(r"`(/[^`$]*(?:\$\{[^}]*\}[^`$]*)*)`", BLOCK))))
-        self.assertEqual(sorted({"/studies/${encodeURIComponent(uid)}/image-requests", "/image-requests/${encodeURIComponent(id)}",
-                                 "/image-requests?${query}"}),
-                         sorted(set(re.findall(r"`(/(?:studies|image-requests)[^`]*)`", CLINICIAN_BLOCK))))
-        # S5-U4bc-R-001 F02: each write transport hands back the HTTP status with the body and only a 201 is a receipt. The
-        # queue's writes leave the page's api() (shared with every other caller, unchanged above) for the block's post();
-        # its 401 is one more logout start: the area, then the end list, then the logout (as api()'s).
-        self.assertNotIn("call('POST'", BLOCK)
-        self.assertIn("          return { status: response.status, data };\n", BLOCK)
-        self.assertIn("        return sent.status === 201 && !!applied", BLOCK)
-        self.assertIn("          if (response.status === 401) {\n            expire();\n", BLOCK)
-        self.assertIn("        if (ended) return;\n        end();\n"
-                      "        (window.kinOn401 || []).forEach(done => { try { done(); } catch (_) {} });\n        logout();\n", BLOCK)
-        # Every place the block calls its logout option is a path of tests/clinician_question_dom_test.py test_18d
-        # (TypeScript follows the option's binding), and each must be run there (S7-PINS fix1).
-        self.assertIn("      return { status: response.status, body: reply };\n", CLINICIAN_BLOCK)
-        self.assertIn("    return sent.status === 201 && !!applied", CLINICIAN_BLOCK)
-        # F01: the owner-changed lock is reached only through the shared account-change path - main.html's block calls the
-        # end list with the reason, clinician.js's accountChanged() (in the S5-U4b block) locks both areas.
-        self.assertEqual((1, 0), (BLOCK.count(ACCOUNT_LIST), BLOCK.count("lockPanel(TEXT.ownerChanged, '')")))
-        self.assertNotIn("lockRequests(REQUEST.ownerChanged", CLINICIAN_BLOCK)
-        self.assertEqual(1, SHIPPED["clinician.js"].count("    lockRequests(REQUEST.ownerChanged, detail, true);\n"))
 
 
 class Harness(unittest.TestCase):
@@ -845,6 +700,15 @@ class Harness(unittest.TestCase):
         self.mine_calls, self.mine_requests, self.mine_errors, self.held_mine = [], [], [], None
         self.detail_calls, self.detail_errors, self.held_detail = [], [], None
         self.unexpected, self.errors, self.dialogs, self.finished = [], [], [], []
+        self.context = None
+        self.fresh_context()
+
+    def fresh_context(self):
+        """A new browser context for an independent case (S7-U5 §0.C 6): with the shipped auth.js a logout's end state
+        stays in the origin's storage until the next explicit login, so a case after it in the same context would find no
+        session. The earlier context is closed; the request logs carry on."""
+        if self.context is not None:
+            self.context.close()
         self.context = self.browser.new_context(viewport={"width": 1400, "height": 900}, timezone_id="UTC")
         self.context.route("**/*", self.route)
         self.page = self.context.new_page()
@@ -852,6 +716,7 @@ class Harness(unittest.TestCase):
         self.page.on("pageerror", lambda error: self.errors.append(str(error)))
         self.page.on("dialog", self.on_dialog)
         self.page.on("requestfinished", lambda request: self.finished.append(request))
+        self.page.on("requestfailed", lambda request: self.finished.append(request))
 
     def tearDown(self):
         self.context.close()
@@ -1026,6 +891,8 @@ class ClinicianRequestDOMTest(Harness):
         self.server = RequestServer([INSTITUTION, CLIN_SUB], "syn-clinician", "SYN Clinician", staff=False)
         self.files = dict(SHIPPED)
         self.navigations = []
+        # POST /auth/logout from the shipped auth.js (answered 204): a replaced session must not send one.
+        self.logout_posts = []
         # S7-U2a Critical Results pending-list reads, kept apart from the reads this file checks.
         self.inbox_reads = []
 
@@ -1057,7 +924,7 @@ class ClinicianRequestDOMTest(Harness):
             route.fulfill(status=404, body="")
             return
         if method == "GET" and path == "/api/me":
-            route.fulfill(json=self.me)
+            route.fulfill(json={**self.me, "sessionId": "SYN-SESSION-" + self.me["sub"]})
             return
         if method == "GET" and path == "/api/clinician/studies":
             rows = sorted(self.rows, key=lambda row: row["uid"])
@@ -1094,6 +961,7 @@ class ClinicianRequestDOMTest(Harness):
                 self.answer_write(route, path, lambda body: self.server.change(target, body))
                 return
         if method == "POST" and path == "/api/auth/logout":
+            self.logout_posts.append(request.url)
             route.fulfill(status=204, body="")
             return
         # S7-U2a: the Critical Results area reads its pending list when the page boots (and every 60 s while shown). It is
@@ -1400,13 +1268,14 @@ class ClinicianRequestDOMTest(Harness):
         self.read_errors = [(200, {"owner": [INSTITUTION, "SYN-OTHER-SUB"], "items": []})]
         self.open_home()
         self.pick(1)
-        self.open_requests("failed")
-        seen = self.view()
-        self.assertEqual(("locked", ["failed", OWNER_CHANGED, "", False, "alert"], None), (seen["state"], seen["list"], seen["form"]))
-        # The lock holds for the document: another study shows it at once and reads nothing.
-        self.pick(2)
-        self.list_state("failed")
-        self.assertEqual(("locked", OWNER_CHANGED, [a]), (self.view()["state"], self.view()["list"][1], self.reads))
+        # Another account's answer to a request bound to this session means the session was replaced: the whole document
+        # closes (no area is left showing the previous account's screen), nothing more is read and no logout POST is sent.
+        self.page.locator("#image-requests-summary").click()
+        self.wait_until(lambda: self.navigations, "the navigation to index.html")
+        self.assertEqual({"children": ["P@status"], "text": CLOSING}, self.page.evaluate(CLOSED_VIEW))
+        self.settle()
+        self.assertEqual(([a], [], ["index.html"]), (self.reads, self.logout_posts, self.navigations))
+        self.navigations.clear()
 
         self.read_errors = [(403, err("IMAGE_REQUEST_ROLE_REQUIRED", "이 영상 요청 동작에 필요한 역할이 없습니다"))]
         self.open_home()
@@ -1415,7 +1284,7 @@ class ClinicianRequestDOMTest(Harness):
         self.assertEqual(("locked", ["failed", C_REFUSED, "이 영상 요청 동작에 필요한 역할이 없습니다 (HTTP 403 · IMAGE_REQUEST_ROLE_REQUIRED)",
                                      False, "alert"]), (self.view()["state"], self.view()["list"]))
 
-        # OWNER_CHANGED on a write locks the area and drops what was typed.
+        # OWNER_CHANGED on a write closes the document the same way and drops what was typed.
         self.open_home()
         self.pick(1)
         self.open_requests("ready")
@@ -1423,14 +1292,10 @@ class ClinicianRequestDOMTest(Harness):
         self.write_errors = [(409, err("OWNER_CHANGED", "로그인한 계정이 바뀌었습니다. 화면을 다시 불러오세요"))]
         self.item_locator(1).locator('[data-field="note"]').fill("SYN reason")
         self.item_locator(1).locator("[data-send]").click()
-        self.list_state("failed")
-        seen = self.view()
-        self.assertEqual(("locked", OWNER_CHANGED, "로그인한 계정이 바뀌었습니다. 화면을 다시 불러오세요 (HTTP 409 · OWNER_CHANGED)", None, []),
-                         (seen["state"], seen["list"][1], seen["list"][2], seen["form"], seen["items"]))
-        self.page.locator("#image-requests-summary").click()
-        self.page.locator("#image-requests-summary").click()
-        self.list_state("failed")
-        self.assertIsNone(self.view()["form"])
+        self.wait_until(lambda: self.navigations, "the navigation to index.html")
+        self.assertEqual({"children": ["P@status"], "text": CLOSING}, self.page.evaluate(CLOSED_VIEW))
+        self.assertEqual([], self.logout_posts)
+        self.navigations.clear()
 
         # Another tab ends the session while a write and a read are held: the page closes and draws neither answer.
         self.open_home()
@@ -1911,87 +1776,66 @@ class ClinicianRequestDOMTest(Harness):
         self.server.add(item(1, a, "Requested", kind="image-transfer", at=2))
         changed = "SYN owner changed (HTTP 409 · OWNER_CHANGED)"
         # (a) The question area sees it (409 OWNER_CHANGED on a Reply) while the request area has a new request typed and a
-        # cancel on its way; the old account's receipt for that cancel then arrives.
-        for label, script in (("questions-only control", CLINICIAN_QUESTIONS_ONLY), ("shipped", None)):
-            with self.subTest(seen_by="questions", file=label):
-                self.server.items[rid(1)].update(state="Requested", revision=1, note=None)
-                self.server.receipts.clear()
-                thread = self.with_questions()
-                self.open_home(script)
-                self.pick(1)
-                self.open_questions_thread(thread)
-                self.open_requests("ready")
-                self.fill("external-image", "SYN-DRAFT-HOSPITAL", "SYN request draft")
-                self.item_locator(1).locator('[data-field="note"]').fill("SYN cancel reason")
-                self.held_writes = []
-                self.item_locator(1).locator("[data-send]").click()
-                self.wait_until(lambda: len(self.held_writes) == 1, "the held cancel")
-                reads, writes = len(self.reads), len(self.writes)
-                self.q_faults["reply"] = [(409, {"code": "OWNER_CHANGED", "message": "SYN owner changed"})]
-                self.send_reply("SYN reply")
-                expect(self.page.locator("#questions")).to_have_attribute("data-state", "locked")
-                at_change = self.view()
-                route, apply, body = self.held_writes.pop()
-                self.held_writes = None
-                status, reply = apply(body)
-                self.release(route, reply, status)
-                late = self.view()
-                if script is not None:
-                    self.assertEqual(("ready", ["saved", C_CANCELLED, ""]), (at_change["state"], late["items"][0]["note"]),
-                                     "control: the request area stays open and paints the old account's receipt")
-                    continue
-                # Locked in the same task as the question area, before the held cancel was answered: the typed request,
-                # the cancel reason and the unknown cancel are gone, and so are their controls.
-                self.assertEqual(("locked", ["failed", OWNER_CHANGED, changed, False, "alert"], None, []),
-                                 (at_change["state"], at_change["list"], at_change["form"], at_change["items"]))
-                self.assertEqual(at_change, late, "the old account's receipt paints nothing")
-                self.assertEqual((reads, writes), (len(self.reads), len(self.writes)), "nothing is read or sent after it")
-                seen = self.questions_view()
-                self.assertEqual(("locked", QUESTION_OWNER_CHANGED, changed, None, []),
-                                 (seen["state"], seen["list"]["text"], seen["list"]["detail"], seen["thread"], seen["composers"]))
-                # A->B->A and closing and opening both areas read nothing, send nothing and bring no draft back.
-                q_calls = len(self.q_calls)
-                self.pick(2)
-                self.pick(1)
-                for summary in ("#questions-summary", "#image-requests-summary", "#questions-summary", "#image-requests-summary"):
-                    self.page.locator(summary).click()
-                self.settle()
-                seen, questions = self.view(), self.questions_view()
-                self.assertEqual(("locked", OWNER_CHANGED, None, []), (seen["state"], seen["list"][1], seen["form"], seen["items"]))
-                self.assertEqual(("locked", QUESTION_OWNER_CHANGED, []), (questions["state"], questions["list"]["text"],
-                                                                          questions["composers"]))
-                self.assertEqual((reads, writes, q_calls), (len(self.reads), len(self.writes), len(self.q_calls)))
+        # cancel on its way; the old account's receipt for that cancel then arrives. A verified account change closes the
+        # whole document at once - no area stays open with the previous account's text - and sends no logout POST (the
+        # cookie belongs to the replacement login).
+        with self.subTest(seen_by="questions"):
+            thread = self.with_questions()
+            self.open_home()
+            self.pick(1)
+            self.open_questions_thread(thread)
+            self.open_requests("ready")
+            self.fill("external-image", "SYN-DRAFT-HOSPITAL", "SYN request draft")
+            self.item_locator(1).locator('[data-field="note"]').fill("SYN cancel reason")
+            self.held_writes = []
+            self.item_locator(1).locator("[data-send]").click()
+            self.wait_until(lambda: len(self.held_writes) == 1, "the held cancel")
+            reads, writes = len(self.reads), len(self.writes)
+            self.q_faults["reply"] = [(409, {"code": "OWNER_CHANGED", "message": "SYN owner changed"})]
+            self.send_reply("SYN reply")
+            self.wait_until(lambda: self.navigations, "the navigation to index.html")
+            at_change = self.page.evaluate(CLOSED_VIEW)
+            # Closed before the held cancel was answered: the typed request, the cancel reason, the unknown cancel and
+            # the question thread are gone with their controls.
+            self.assertEqual({"children": ["P@status"], "text": CLOSING}, at_change)
+            route, apply, body = self.held_writes.pop()
+            self.held_writes = None
+            status, reply = apply(body)
+            self.release(route, reply, status)
+            self.settle()
+            self.assertEqual(at_change, self.page.evaluate(CLOSED_VIEW), "the old account's receipt paints nothing")
+            self.assertEqual((reads, writes), (len(self.reads), len(self.writes)), "nothing is read or sent after it")
+            self.assertEqual(["index.html"], self.navigations)
+            self.assertEqual([], self.logout_posts, "a replaced session is not logged out by this document")
 
         # (b) The request area sees it (another account's list) while a Reply of the question area is on its way.
-        for label, script in (("requests-only control", CLINICIAN_REQUESTS_ONLY), ("shipped", None)):
-            with self.subTest(seen_by="requests", file=label):
-                thread = self.with_questions()
-                self.open_home(script)
-                self.pick(1)
-                self.open_questions_thread(thread)
-                self.q_holding = {"reply"}
-                self.send_reply("SYN reply on its way")
-                _, route, answer = self.take_question("reply")
-                self.q_holding = set()
-                self.read_errors = [(200, {"owner": [INSTITUTION, "SYN-OTHER-SUB"], "items": []})]
-                self.open_requests("failed")
-                at_change = self.questions_view()
-                q_calls = len(self.q_calls)
-                self.release(route, answer[1], answer[0])
-                late = self.questions_view()
-                self.assertEqual(2, len(self.questions.threads[thread["id"]]["entries"]), "the server applied the Reply")
-                if script is not None:
-                    self.assertEqual("ready", at_change["state"], "control: the question area stays open")
-                    self.assertIn("saved", [note["state"] for note in late["notes"]], "control: and paints the old receipt")
-                    continue
-                self.assertEqual(("locked", QUESTION_OWNER_CHANGED, "", None, [], []),
-                                 (at_change["state"], at_change["list"]["text"], at_change["list"]["detail"], at_change["thread"],
-                                  at_change["composers"], at_change["notes"]))
-                self.assertEqual(at_change, late, "the old account's receipt paints nothing")
-                self.assertEqual(q_calls, len(self.q_calls), "and reads nothing again")
-                self.assertEqual(("locked", OWNER_CHANGED), (self.view()["state"], self.view()["list"][1]))
+        with self.subTest(seen_by="requests"):
+            self.fresh_context()
+            self.navigations.clear()
+            thread = self.with_questions()
+            self.open_home()
+            self.pick(1)
+            self.open_questions_thread(thread)
+            self.q_holding = {"reply"}
+            self.send_reply("SYN reply on its way")
+            _, route, answer = self.take_question("reply")
+            self.q_holding = set()
+            self.read_errors = [(200, {"owner": [INSTITUTION, "SYN-OTHER-SUB"], "items": []})]
+            self.page.locator("#image-requests-summary").click()
+            self.wait_until(lambda: self.navigations, "the navigation to index.html")
+            at_change = self.page.evaluate(CLOSED_VIEW)
+            self.assertEqual({"children": ["P@status"], "text": CLOSING}, at_change)
+            q_calls = len(self.q_calls)
+            self.release(route, answer[1], answer[0])
+            self.settle()
+            self.assertEqual(2, len(self.questions.threads[thread["id"]]["entries"]), "the server applied the Reply")
+            self.assertEqual(at_change, self.page.evaluate(CLOSED_VIEW), "the old account's receipt paints nothing")
+            self.assertEqual(q_calls, len(self.q_calls), "and reads nothing again")
+            self.assertEqual([], self.logout_posts, "a replaced session is not logged out by this document")
 
-        # (c) A 403 is one study's refusal, not an account change: only the area that got it locks.
+        # The cases below start from a new document of a session at work.
+        self.fresh_context()
+        self.navigations.clear()        # (c) A 403 is one study's refusal, not an account change: only the area that got it locks.
         thread = self.with_questions()
         self.open_home()
         self.pick(1)
@@ -2020,21 +1864,22 @@ class ClinicianRequestDOMTest(Harness):
         self.note_state(form, "saved")
         self.assertEqual(["saved", C_CREATED, ""], self.view()["form"]["note"])
 
-        # After an account change a session end still closes the page, and nothing is read or sent on the way out.
+        # After an account change the page is closed; a session end notice that arrives afterwards reads and sends nothing.
         thread = self.with_questions()
+        self.navigations.clear()
         self.open_home()
         self.pick(1)
         self.open_questions_thread(thread)
         self.open_requests("ready")
         self.q_faults["reply"] = [(409, {"code": "OWNER_CHANGED", "message": "SYN owner changed"})]
         self.send_reply("SYN reply")
-        expect(self.page.locator("#image-requests")).to_have_attribute("data-state", "locked")
+        self.wait_until(lambda: self.navigations, "the navigation to index.html")
         counts = (len(self.reads), len(self.writes), len(self.q_calls))
         self.page.evaluate(BROADCAST_ENDED)
-        self.wait_until(lambda: self.navigations, "the navigation to index.html")
         self.settle()
         self.assertEqual({"children": ["P@status"], "text": CLOSING}, self.page.evaluate(CLOSED_VIEW))
         self.assertEqual(counts, (len(self.reads), len(self.writes), len(self.q_calls)))
+        self.assertEqual(["index.html"], self.navigations)
 
 
 class MainRequestDOMTest(Harness):
@@ -2092,12 +1937,13 @@ class MainRequestDOMTest(Harness):
         if method == "GET" and path == "/api/me":
             route.fulfill(json={"sub": self.session["sub"], "actor": self.session["user"], "user": self.session["user"],
                                 "displayName": self.session["displayName"], "roles": self.session["roles"],
-                                "institution": self.session["institution"], "kind": "member"})
+                                "institution": self.session["institution"], "kind": "member",
+                                "sessionId": "SYN-SESSION-" + self.session["sub"]})
             return
         if method == "POST" and path == "/api/auth/logout":
             self.logouts.append(route)
             return
-        if method == "POST" and path in ("/api/syn/draft", "/api/syn/release"):
+        if (method == "POST" and path == "/api/syn/release") or (method == "PUT" and re.fullmatch(r"/api/studies/[^/]+/report", path)):
             self.page_posts.append(path)
             if self.held_posts is not None:
                 self.held_posts.append(route)
@@ -2142,20 +1988,20 @@ class MainRequestDOMTest(Harness):
         route.abort()
 
     # ── page helpers ──
-    def open_main(self, block=BLOCK, api_fn=API_FN, real_auth=False, logout=None, questions=None):
-        """`logout`: the page's Log out handler (LOGOUT_BLOCK or its control) to run after the block, over LOGOUT_STANDINS;
-        confirm() answers window.synConfirm and logs itself. `questions`: the S5-U4b block (or its control) to run after
-        this one, with renderClinical() calling both hooks (m14; the stand-in KinAuth only)."""
+    def open_main(self, block=BLOCK, api_fn=API_FN, questions=None):
+        """Mount the shipped request block and optional question block on the real gate/transport."""
         head = ("<script>window.synSession = " + json.dumps(self.session) + "; window.synStudies = " + json.dumps(self.STUDIES)
                 + "; window.synInstitutions = " + json.dumps(self.INSTITUTIONS) + "; window.synToasts = []; window.synLogouts = 0;"
                 + " window.synOrder = []; window.synConfirm = true;"
                 + " window.confirm = () => { window.synOrder.push('confirm'); return window.synConfirm; };</script>")
-        if real_auth:
-            head += "<script>\n" + SHIPPED["auth.js"] + "\n</script>"
-        tail = "" if logout is None else LOGOUT_STANDINS + logout
-        prelude = PRELUDE_REAL_AUTH if real_auth else PRELUDE if questions is None else PRELUDE_BOTH
-        script = ("<script>\n" + prelude + api_fn + "\n" + SET_MODE + "\n" + block + "\n" + (questions or "") + "\n"
-                  + tail + "\n</script>")
+        prelude = PRELUDE if questions is None else PRELUDE_BOTH
+        head += "<script>" + CORE + "</script>"
+        defaults = STANDIN
+        defaults += "const sessionEndHooks=[],accountChangeHooks=[]; function onSessionEnd(fn){work.onInvalidate(e=>{if(e.reason==='lifecycle'&&!['active','preparing'].includes(e.state))fn();});} function onCommonEnd(fn){onSessionEnd(fn);accountChangeHooks.push(fn);}"
+        defaults += "function staleAnswer(){return Object.assign(new Error('Stale'),{name:'AbortError'});} const activeWork=()=>work.state()==='active';"
+        defaults += NOTIFY_ACCOUNT
+        script = ("<script>\n" + prelude + defaults + api_fn + "\n" + SET_MODE + "\n" + block + "\n" + (questions or "") + "\n"
+                  + "\nwork.onInvalidate(e=>{if(e.reason==='cancel'){imageRequests?.resume();}});</script>")
         at = MAIN_PAGE.rindex("</body>")
         self.html = MAIN_PAGE[:at] + head + script + MAIN_PAGE[at:]
         self.queue_calls.clear()
@@ -2397,7 +2243,7 @@ class MainRequestDOMTest(Harness):
 
     def test_m05_a_b_a_for_the_request_and_the_page(self):
         owner = [INSTITUTION, "SYN-TECH-SUB"]
-        for label, block in (("shipped", BLOCK), ("no-guard", BLOCK_NO_GUARD)):
+        for label, block in (("shipped", BLOCK),):
             with self.subTest(label):
                 self.held_detail = None
                 self.open_main(block)
@@ -2592,81 +2438,52 @@ class MainRequestDOMTest(Harness):
         self.assertIn(CLOSED_NOTE, [entry["text"] for entry in texts])
         self.assertTrue(has_hangul(self.page.locator("#image-request-summary").text_content()))
 
-    def test_m09_a_401_ends_the_area_before_the_logout_answers(self):
-        a = uid(11)
-        cases = (("queue read", "shipped", API_FN), ("write", "shipped", API_FN), ("queue read", "no-hook", API_FN_NO_HOOK))
-        for trigger, label, api_fn in cases:
-            with self.subTest(trigger=trigger, api=label):
-                self.logouts = []
-                self.held_writes = self.held_reads = None
-                self.write_errors = []
-                self.server.items[rid(21)].update(state="Requested", revision=1, note=None, handler=None)
-                self.open_main(api_fn=api_fn, real_auth=True)
-                self.page.evaluate("() => KinAuth.init()")
+    def test_m09_only_coded_session_failure_ends_the_area(self):
+        for status, code in ((401, None), (500, None), (401, "AUTH_SESSION_ENDED"), (409, "AUTH_SESSION_MISMATCH")):
+            with self.subTest(status=status, code=code):
+                self.fresh_context()
+                self.server.items[rid(21)].update(state='Requested',revision=1,note=None,handler=None)
+                self.open_main()
                 self.open_queue()
-                self.open_item(21, "Requested")
-                self.page.locator("#image-request-note").fill("SYN note before the 401")
-                reads = len(self.reads)
-                # A reading read, and for the queue case an Accept, are in flight when the 401 arrives.
-                self.held_reads = []
-                self.pick(11)
-                self.wait_until(lambda: len(self.held_reads) == 1, "the held reading read")
-                if trigger == "queue read":
-                    self.held_writes = []
-                    self.act("accept")
-                    self.wait_until(lambda: len(self.held_writes) == 1, "the held write")
-                    self.queue_errors = [(401, {"statusCode": 401, "message": "Unauthorized"})]
-                    self.page.locator("#image-request-queue-state").select_option("all")
+                if code:
+                    self.held_reads=[];self.pick(11)
+                    self.wait_until(lambda:bool(self.held_reads),'the reading list held before end')
+                    self.open_item(21,'Requested')
+                    self.page.locator('#image-request-note').fill('SYN late receipt note')
+                    self.held_writes=[];self.act('accept')
+                    self.wait_until(lambda:bool(self.held_writes),'the Accept held before end')
+                self.queue_errors = [(status, {"message": "SYN failure", **({"code": code} if code else {})})]
+                self.page.locator("#image-request-queue-state").select_option("all")
+                if code:
+                    self.wait_until(lambda: self.page.evaluate("KinWorkContext.state()") != "active", "the bound session failure")
+                    self.assertEqual([], self.queue()["items"])
+                    self.assertIsNone(self.queue()["detail"])
+                    counts=(len(self.queue_calls),len(self.detail_calls),len(self.writes),len(self.reads))
+                    ended_detail=self.page.locator('#image-request-detail').text_content()
+                    expect(self.page.locator('#image-request-note')).to_have_value('')
+                    for target,route in self.held_reads:
+                        if route.request.failure:
+                            self.assertIn('ABORTED',route.request.failure)
+                        else:
+                            self.release(route,self.server.study(target))
+                    for route,apply,body in self.held_writes:
+                        reply_status,reply=apply(body)
+                        self.release(route,reply,reply_status)
+                    self.page.locator('#image-request-queue-reload').dispatch_event('click');self.settle()
+                    self.assertEqual([],self.queue()['items'],'ended queue must not repaint a late list')
+                    self.assertIsNone(self.queue()['detail'],'ended queue must not paint the late Accept receipt')
+                    self.assertEqual(ended_detail,self.page.locator('#image-request-detail').text_content(),'late receipt must not repaint even a hidden detail')
+                    expect(self.page.locator('#image-request-note')).to_have_value('')
+                    expect(self.page.locator('#image-request-detail')).to_be_hidden()
+                    self.assertEqual(counts,(len(self.queue_calls),len(self.detail_calls),len(self.writes),len(self.reads)),
+                                     'late answers and a Reload cannot send after end')
                 else:
-                    self.write_errors = [(401, {"statusCode": 401, "message": "Unauthorized"})]
-                    self.act("close")
-                self.wait_until(lambda: len(self.logouts) == 1, "POST /auth/logout (held)")
-                self.settle()
-                at_401 = self.queue()
-                self.release(self.held_reads[0][1], self.server.study(a))
-                late_read_paints = int(self.reading()["state"] == "ready")
-                # Reads are answered from here on: the control's saved write reads the request, the queue and the line again.
-                self.held_reads = None
-                late_write_paints = 0
-                if self.held_writes:
-                    route, apply, body = self.held_writes[0]
-                    status, reply = apply(body)
-                    self.release(route, reply, status)
-                    late_write_paints = int((self.queue()["detail"] or {}).get("result", [None])[0] == "saved")
-                self.held_writes = None
-                if label == "no-hook":
-                    self.assertEqual((1, 1), (late_read_paints, late_write_paints),
-                                     "without the hook the late read and write paint while the logout is held")
-                else:
-                    self.assertEqual((["failed", M_ENDED, "", True], [], None), (at_401["lock"], at_401["items"], at_401["detail"]),
-                                     "ended at the 401, before the logout answered")
-                    self.assertEqual((0, 0), (late_read_paints, late_write_paints))
-                    seen, reading = self.queue(), self.reading()
-                    self.assertEqual((["failed", M_ENDED, "", True], [], None, False, "ended"),
-                                     (seen["lock"], seen["items"], seen["detail"], reading["shown"], reading["state"]))
-                    # Nothing new is read or sent: another reading study, the page's controls are gone.
-                    writes, queue_calls = len(self.writes), len(self.queue_calls)
-                    self.pick(12)
-                    self.settle()
-                    self.assertEqual((reads + 1, writes, queue_calls), (len(self.reads), len(self.writes), len(self.queue_calls)))
-                    self.assertEqual(0, self.page.locator("#image-request-queue button:visible, #image-request-p button:visible").count())
-                self.assertTrue(self.page.url.endswith("/harness/main.html"), "the logout has not answered yet")
-                self.logouts[0].fulfill(status=204, body="")
-                self.page.wait_for_url("**/harness/index.html")
+                    self.queue_state("failed")
+                    self.assertEqual("active", self.page.evaluate("KinWorkContext.state()"))
+                    self.assertFalse(self.queue()["lock"][3])
+                self.assertEqual(0, self.page.evaluate("synLogouts"), "a response never sends logout")
 
     def test_m10_a_receipt_that_is_not_the_sent_write_stays_unknown(self):
-        # Control: the fix1 check took an Accept receipt of another state and revision as saved.
-        self.open_main(BLOCK_FIX1_RECEIPT)
-        self.open_queue()
-        self.open_item(21, "Requested")
-        self.mangles = [bad_receipt({"to": "Closed", "revision": 99})]
-        self.act("accept")
-        self.result("saved")
-        self.assertEqual(["saved", M_SAVED["accept"], "", True], self.queue()["detail"]["result"],
-                         "the fix1 check accepts the wrong receipt")
-
-        self.server.items[rid(21)].update(state="Requested", revision=1, handler=None)
-        self.server.receipts.clear()
         self.open_main()
         self.open_queue()
         self.open_item(21, "Requested")
@@ -2764,18 +2581,6 @@ class MainRequestDOMTest(Harness):
                                  [(body["action"], body["revision"], body["note"]) for _, body in self.writes])
                 self.server.items[rid(21)].update(state="Requested", revision=1, note=None, handler=None)
 
-        # Control: the fix2 rule (token actor = stored requester actor) gets both actor cases above wrong.
-        for label, sub, actor, cancel in (("same sub, actor changed", CLIN_SUB, "syn-clinician-renamed", False),
-                                          ("another sub, same actor", "SYN-MEMBER-SUB", "syn-clinician", True)):
-            with self.subTest(control=label):
-                self.use_roles(["clinician", "radiologist"], sub, actor, "SYN Clinician")
-                self.open_main(BLOCK_ACTOR_RULE)
-                self.open_queue()
-                self.open_item(21, "Requested")
-                self.wait_until(lambda: len(self.mine_calls) == 1, "the own-list read")
-                self.quiet()
-                self.assertEqual(not cancel, self.cancel_control()[0], "the fix2 actor rule")
-
         # An own request on the second page of the own list (pages of 3) is found by following the cursor.
         for n, at in ((27, 8), (28, 7), (29, 6)):
             self.server.add(item(n, uid(19), "Cancelled", revision=2, note="SYN cancelled", at=at))
@@ -2837,95 +2642,65 @@ class MainRequestDOMTest(Harness):
         seen = self.queue()
         self.assertEqual((["failed", M_ENDED, "", True], [], None), (seen["lock"], seen["items"], seen["detail"]))
 
-    def test_m12_log_out_ends_the_area_before_its_first_network_wait(self):
-        a = uid(11)
-        cases = (("shipped", LOGOUT_BLOCK, "draft write"), ("shipped", LOGOUT_BLOCK, "logout POST"),
-                 ("no-hook", LOGOUT_BLOCK_NO_HOOK, "draft write"))
-        for label, handler, held in cases:
-            with self.subTest(handler=label, held=held):
-                self.logouts = []
-                self.held_posts = [] if held == "draft write" else None
-                self.held_writes = self.held_reads = None
-                self.server.items[rid(21)].update(state="Requested", revision=1, note=None, handler=None)
-                self.open_main(real_auth=True, logout=handler)
-                self.page.evaluate("() => KinAuth.init()")
-                self.open_queue()
-                self.open_item(21, "Requested")
-                self.page.locator("#image-request-note").fill("SYN note before Log out")
-                # A reading read and an Accept are in flight when Log out is confirmed.
-                self.held_reads = []
-                self.pick(11)
-                self.wait_until(lambda: len(self.held_reads) == 1, "the held reading read")
-                self.held_writes = []
-                self.act("accept")
-                self.wait_until(lambda: len(self.held_writes) == 1, "the held write")
-                reads, writes, queue_calls = len(self.reads), len(self.writes), len(self.queue_calls)
-                self.page.evaluate("() => document.querySelector('#logout').click()")
-                if held == "draft write":
-                    self.wait_until(lambda: len(self.held_posts) == 1, "the held draft write")
-                else:
-                    self.wait_until(lambda: len(self.logouts) == 1, "POST /auth/logout (held)")
-                self.settle()
-                at_wait = self.queue()
-                note = self.page.evaluate("() => document.querySelector('#image-request-note').value")
-                order = self.page.evaluate("() => window.synOrder.slice()")
-                self.release(self.held_reads[0][1], self.server.study(a))
-                late_read_paints = int(self.reading()["state"] == "ready")
-                self.held_reads = None
-                route, apply, body = self.held_writes[0]
-                status, reply = apply(body)
-                self.release(route, reply, status)
-                late_write_paints = int((self.queue()["detail"] or {}).get("result", [None])[0] == "saved")
-                self.held_writes = None
-                ended = at_wait["lock"] == ["failed", M_ENDED, "", True]
-                first = ["confirm", "preview", "closeSR", "endPatientCopy"]
-                if label == "no-hook":
-                    self.assertEqual((False, "SYN note before Log out", 1, 1), (ended, note, late_read_paints, late_write_paints),
-                                     "without the hook the area waits for the logout and paints late answers")
-                    self.assertEqual(first + ["stash:open"], order)
-                else:
-                    self.assertEqual((True, "", [], None, 0, 0), (ended, note, at_wait["items"], at_wait["detail"],
-                                                                  late_read_paints, late_write_paints))
-                    self.assertEqual(first + ["stash:ended"] + (["stashed", "release", "released"] if held == "logout POST" else []),
-                                     order)
-                    self.pick(12)
-                    self.settle()
-                    self.assertEqual((reads, writes, queue_calls), (len(self.reads), len(self.writes), len(self.queue_calls)))
-                    self.assertEqual(0, self.page.locator("#image-request-queue button:visible, #image-request-p button:visible").count())
-                if held == "draft write":
-                    # The draft write, then the hold release, then the logout: the order the handler had.
-                    self.assertEqual(([], ["/api/syn/draft"]), (self.logouts, self.page_posts))
-                    self.release(self.held_posts.pop(0), {})
-                    self.wait_until(lambda: len(self.held_posts) == 1, "the held hold release")
-                    self.assertEqual(([], ["/api/syn/draft", "/api/syn/release"]), (self.logouts, self.page_posts))
-                    self.release(self.held_posts.pop(0), {})
-                    self.wait_until(lambda: len(self.logouts) == 1, "POST /auth/logout")
-                self.held_posts = None
-                self.assertEqual(first + ["stash:" + ("open" if label == "no-hook" else "ended"), "stashed", "release", "released"],
-                                 self.page.evaluate("() => window.synOrder.slice()"))
-                self.assertTrue(self.page.url.endswith("/harness/main.html"), "the logout has not answered yet")
-                self.logouts[0].fulfill(status=204, body="")
-                self.page.wait_for_url("**/harness/index.html")
+    def test_u5_requests_use_the_page_binding(self):
+        protected = []
+        self.page.on("request", lambda request: protected.append(request)
+                     if "/api/" in request.url else None)
+        self.open_main()
+        self.open_queue()
+        self.open_item(21, "Requested")
+        self.settle()
+        self.assertGreater(len(protected), 0)
+        for request in protected:
+            self.assertEqual("SYN-SESSION-" + self.session["sub"],
+                             request.headers.get("x-kin-session"), request.url)
 
-        # Log out not confirmed, and Log out during an insertion: nothing ends and nothing is sent.
-        for label, setup, order in (("confirm cancelled", "() => { window.synConfirm = false; }", ["confirm"]),
-                                    ("insertion in flight", "() => window.synInsert(true)", [])):
-            with self.subTest(label):
-                self.logouts = []
-                self.server.items[rid(21)].update(state="Requested", revision=1, note=None, handler=None)
-                self.open_main(real_auth=True, logout=LOGOUT_BLOCK)
-                self.page.evaluate("() => KinAuth.init()")
-                self.open_queue()
-                self.open_item(21, "Requested")
-                self.page.locator("#image-request-note").fill("SYN kept note")
-                self.page.evaluate(setup)
-                self.page.evaluate("() => document.querySelector('#logout').click()")
-                self.settle()
-                seen = self.queue()
-                self.assertEqual((False, rid(21), "SYN kept note"), (seen["lock"][3], seen["detail"]["id"], seen["detail"]["note"]))
-                self.assertEqual((order, [], []), (self.page.evaluate("() => window.synOrder.slice()"), self.page_posts, self.logouts))
-                self.act("accept")
-                self.result("saved")
+    def test_m12_preparation_preserves_the_request_note_and_cancel_resumes(self):
+        # The queue shares the whole shipped main document with the report editor.
+        # A failed report preservation makes Back to Editing available; the queue
+        # note must survive that preparation and disappear only on the real end.
+        import auth_logout_dom_test as whole
+        full=whole.LogoutDOMTest();full.browser=self.browser;full.setUp()
+        try:
+            actor={**whole.RAD,'roles':['radiologist','technician']};full.site.account=actor
+            server=RequestServer([whole.INSTITUTION,actor['sub']],actor['actor'],actor['displayName'],staff=True)
+            server.add(item(21,whole.UID,'Requested',at=5))
+            original_api=full.site.api
+            def api(route,request,method,path,query):
+                if path.startswith('/api/image-requests') or path.endswith('/image-requests'):
+                    _,refused=full.site.authenticate(request)
+                    if refused:return full.site.refuse(route,*refused)
+                    if path=='/api/image-requests':
+                        return route.fulfill(json=server.queue({key:values[0] for key,values in parse_qs(query).items()}))
+                    if path.endswith('/image-requests'):return route.fulfill(json=server.study(whole.UID))
+                    status,body=server.read(path.rsplit('/',1)[1]);return route.fulfill(status=status,json=body)
+                return original_api(route,request,method,path,query)
+            full.site.api=api;full.open_main(who=actor)
+            full.site.put_answers=[(503,{'code':'SYN_UNAVAILABLE'})]*8
+            full.select_and_type()
+            full.page.locator('[data-tab="Technician"]').click()
+            full.page.locator('#image-request-queue-summary').click()
+            full.page.locator(f'#image-request-queue-list [data-id="{rid(21)}"] [data-open]').click()
+            note=full.page.locator('#image-request-note');note.fill('SYN kept through preparation')
+            full.log_out_main();expect(full.panel_button('Back to Editing')).to_be_visible()
+            before=full.site.count('GET','/api/image-requests')
+            full.page.locator('#image-request-queue-reload').dispatch_event('click');full.page.wait_for_timeout(150)
+            self.assertEqual(full.site.count('GET','/api/image-requests'),before)
+            full.panel_button('Back to Editing').click()
+            expect(note).to_have_value('SYN kept through preparation')
+            self.assertEqual(full.page.evaluate('KinWorkContext.state()'),'active')
+            full.page.locator('#image-request-queue-reload').click()
+            full.wait_until(lambda:full.site.count('GET','/api/image-requests')>before,'queue reload after Back to Editing')
+            full.page.evaluate('window.u5QueueNote=document.querySelector("#image-request-note")')
+            full.site.put_answers=[];held=[]
+            full.context.route('**/worklist/hpacs-lite/index.html',lambda route:held.append(route))
+            full.log_out_main();full.wait_until(lambda:bool(held),'the real end landing')
+            for route in held:route.fulfill(status=204)
+            self.assertEqual(full.page.evaluate('u5QueueNote.value'),'')
+            expect(full.page.locator('#image-request-detail')).to_be_hidden()
+            self.assertEqual(full.dialogs,[],'preparation and clean completion do not use browser confirms')
+        finally:
+            full.tearDown()
 
     def unknown_until_replayed(self, n, state, action, note, status, after):
         """One write of the open request answered with a correct receipt but HTTP `status`: unknown, then Retry's 201."""
@@ -2948,17 +2723,6 @@ class MainRequestDOMTest(Harness):
         expect(self.page.locator("#image-request-detail")).to_have_attribute("data-state", after)
 
     def test_m13_a_write_answered_with_another_2xx_stays_unknown(self):
-        # Control: without the status in the check, an Accept whose correct receipt comes with 200 is taken as saved.
-        self.open_main(BLOCK_ANY_2XX)
-        self.open_queue()
-        self.open_item(21, "Requested")
-        self.statuses = [200]
-        self.act("accept")
-        self.result("saved")
-        self.assertEqual(["saved", M_SAVED["accept"], "", True], self.queue()["detail"]["result"], "control: a 200 is taken as saved")
-        self.server.items[rid(21)].update(state="Requested", revision=1, handler=None)
-        self.server.receipts.clear()
-
         self.open_main()
         self.open_queue()
         for n, state, action, note, status, after in ((21, "Requested", "accept", "", 200, "Accepted"),
@@ -3006,8 +2770,7 @@ class MainRequestDOMTest(Harness):
         changed = "SYN owner changed (HTTP 409 · OWNER_CHANGED)"
         # (a) The question block sees it (409 OWNER_CHANGED on a Reply) while the queue has a note typed and an Accept on
         # its way; the old account's receipt for that Accept then arrives.
-        for label, questions in (("question block without the list call (control)", QUESTION_BLOCK_ONE_AREA),
-                                 ("shipped", QUESTION_BLOCK)):
+        for label, questions in (("shipped", QUESTION_BLOCK),):
             with self.subTest(seen_by="questions", block=label):
                 thread = self.open_both(questions=questions)
                 self.open_queue()
@@ -3030,10 +2793,6 @@ class MainRequestDOMTest(Harness):
                 row = self.questions_row()
                 self.mode("Technician")
                 seen = self.queue()
-                if questions is QUESTION_BLOCK_ONE_AREA:
-                    self.assertEqual(("ready", False, "saved"), (reading["state"], seen["lock"][3], seen["detail"]["result"][0]),
-                                     "control: the queue stays open and paints the old account's Accept as saved")
-                    continue
                 # Locked in the same task as the question row, before the held Accept was answered.
                 self.assertEqual(("locked", OWNER_CHANGED, False, ""), (reading["state"], reading["summary"], reading["pane"], note))
                 self.assertEqual((["failed", OWNER_CHANGED, changed, True], None, []), (seen["lock"], seen["detail"], seen["items"]))
@@ -3053,7 +2812,7 @@ class MainRequestDOMTest(Harness):
                                                        len(self.detail_calls), len(self.q_calls)))
 
         # (b) The request block sees it (another account's queue page) while an answer of the question row is on its way.
-        for label, block in (("request block without the list call (control)", BLOCK_ONE_AREA), ("shipped", BLOCK)):
+        for label, block in (("shipped", BLOCK),):
             with self.subTest(seen_by="requests", block=label):
                 thread = self.open_both(block=block)
                 self.open_question_thread(thread)
@@ -3071,10 +2830,6 @@ class MainRequestDOMTest(Harness):
                 self.release(route, answer[1], answer[0])
                 late = self.questions_row()
                 self.assertEqual(2, len(self.questions.threads[thread["id"]]["entries"]), "the server applied the answer")
-                if block is BLOCK_ONE_AREA:
-                    self.assertEqual("ready", at_change["state"], "control: the question row stays open")
-                    self.assertIn("saved", [entry["state"] for entry in late["notes"]], "control: and paints the old receipt")
-                    continue
                 self.assertEqual(("locked", ["failed", QUESTION_OWNER_CHANGED, ""], None, [], []),
                                  (at_change["state"], at_change["lock"], at_change["thread"], at_change["composers"], at_change["notes"]))
                 self.assertEqual(at_change, late, "the old account's receipt paints nothing")

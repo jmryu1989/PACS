@@ -44,6 +44,8 @@ const stored = (over = {}) => ({ v: 1, sid: 's-head', field: 'findings', templat
 
 const body = (over = {}) => ({ findings: CHOICE_LINE, conclusion: '', recommendation: '', baseVersion: 4, ...over });
 
+const EPOCH = '0a1b2c3d-0000-4000-8000-00000000000a';
+
 function fixture({ state = STATE,
   report = { version: 4, updatedBy: 'doctor2@synthetic', findings: CHOICE_LINE, conclusion: '', recommendation: '' },
   versions = new Map(), draft = null, drafts = null, bytes = null, failWith = null, catalog = CATALOG,
@@ -52,34 +54,42 @@ function fixture({ state = STATE,
   // Successive answers for reportVersion.createMany, so the forced-release RETRY leg can be driven:
   // [P2002, CHECK] makes the first attempt lose the version race and the second raise our CHECK.
   const manyFails = createManyFails.slice();
-  const draftRaw = () => (draft ? [{ citations: draft.citations ?? null, structured: draft.structured ?? null }] : []);
+  // S7-U5: the caller's draft row as the store holds it, with its boundary; the study row carries the draft epoch.
+  let row = draft ? { uid: UID, author: CALLER.actor, findings: '', conclusion: '', recommendation: '', baseVersion: 0, citations: null,
+    structured: null, revision: 1, present: true, updatedAt: 'then', ...draft } : null;
+  const stored = state ? { ...state, draftEpoch: EPOCH } : null;
   const tx = {
     $executeRaw: async () => 0,
     $queryRaw: async (strings, ...values) => {
       const sql = strings.join('?').replace(/\s+/g, ' ').trim();
       raw.push(sql);
-      if (sql.includes('FROM "StudyState"')) return state ? [state] : [];
+      if (sql.includes('FROM "StudyState"')) return stored ? [stored] : [];
       if (sql.includes('FROM "Report" WHERE')) return report ? [report] : [];
+      // The caller's own row (by author) before the forced release's read of every present draft of the study.
+      if (sql.includes('FROM "ReportDraft"') && sql.includes('AND author')) return row ? [row] : [];
       if (sql.includes('SELECT uid, author')) return drafts ?? [];
-      if (sql.includes('FROM "ReportDraft"')) return draftRaw();
       if (sql.includes('octet_length')) return [{ bytes: bytes ?? Buffer.byteLength(String(values[0] ?? ''), 'utf8') }];
       throw new Error('unexpected raw query: ' + sql);
     },
-    studyState: { findUnique: async () => state, update: async () => { writes.push('studyState.update'); return state; } },
+    studyState: { findUnique: async () => stored, update: async () => { writes.push('studyState.update'); return stored; } },
     report: {
       findUnique: async a => (report ? (a?.select?.findings ? report : { version: report.version }) : null),
       upsert: async a => writes.push('report.upsert:v' + a.create.version),
     },
-    reportDraft: {
-      findUnique: async () => draft,
-      upsert: async a => {
-        if (failWith) throw failWith;
-        writes.push('reportDraft.upsert');
-        created.push({ call: 'draft', create: a.create, update: a.update });
-        return { uid: UID, author: CALLER.actor, baseVersion: a.update.baseVersion, updatedAt: 'now' };
-      },
-      deleteMany: async () => { writes.push('reportDraft.deleteMany'); return { count: draft ? 1 : 0 }; },
-    },
+    // The draft row is written once per mutation, whichever statement the service uses for it. A write that leaves a
+    // draft is recorded as `reportDraft.upsert` with what it stored (`create` and `update` name the same stored row);
+    // one that leaves none (commit, clear, forced release) as `reportDraft.deleteMany`.
+    reportDraft: new Proxy({}, { get: (_target, method) => async a => {
+      if (method === 'findUnique') return row;
+      const data = a.data ?? a.create ?? a.update;
+      if (data.present === false) { writes.push('reportDraft.deleteMany'); return method === 'updateMany' ? { count: 1 } : { ...data }; }
+      if (failWith) throw failWith;
+      writes.push('reportDraft.upsert');
+      created.push({ call: 'draft', create: data, update: data });
+      row = { ...(row ?? { uid: UID, author: CALLER.actor }), ...data, updatedAt: 'now' };
+      for (const key of ['citations', 'structured']) if (!Array.isArray(row[key])) row[key] = null;
+      return method === 'updateMany' ? { count: 1 } : row;
+    } }),
     reportVersion: {
       findFirst: async () => { const all = [...versions.keys()]; return all.length ? { version: Math.max(...all) } : null; },
       findUnique: async a => (a.where.uid_version.uid === UID ? versions.get(a.where.uid_version.version) : null) ?? null,
@@ -94,7 +104,7 @@ function fixture({ state = STATE,
     $transaction: async work => work(tx),
     studyState: { findUnique: async () => state },
     report: { findUnique: async () => report },
-    reportDraft: { findUnique: async () => draft },
+    reportDraft: { findUnique: async () => row },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   const studyAccess = { prepare: async () => {}, require: async () => {}, allowed: async () => new Set() };
@@ -103,7 +113,19 @@ function fixture({ state = STATE,
   // P7: the ONLY injection seam. No env var, no header, no route - a test overwrites the field on
   // its own instance, and the product instance keeps the empty constant.
   svc.structureCatalog = catalog;
-  return { svc, writes, audits, raw, created, tx };
+  // The document that read this fixture's study: every mutation carries its account and the boundary it read, and a
+  // draft PUT the whole snapshot - a keep list the case does not name is the draft's current list (nothing dropped).
+  const pre = c => ({ expectedOwner: { institution: c.institution, sub: c.sub, author: c.actor }, expectedRevision: `${EPOCH}:${row?.revision ?? 0}` });
+  const ids = (key, id) => (Array.isArray(row?.[key]) ? row[key].map(entry => entry[id]) : []);
+  const asDocument = new Proxy(svc, { get(target, name) {
+    if (name === 'putReport') return (uid, body, c) => target.putReport(uid, { findings: '', conclusion: '', recommendation: '', baseVersion: 0,
+      citationIds: ids('citations', 'cid'), structureIds: ids('structured', 'sid'), ...pre(c), ...body }, c, null);
+    if (name === 'commitReport') return (uid, body, c) => target.commitReport(uid, { ...pre(c), ...body }, c, null);
+    if (name === 'forceDiscardDrafts') return (uid, c) => target.forceDiscardDrafts(uid, { expectedOwner: pre(c).expectedOwner, expectedEpoch: EPOCH }, c, null);
+    const value = target[name];
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  return { svc: asDocument, writes, audits, raw, created, tx };
 }
 
 const checkError = name => Object.assign(
@@ -533,9 +555,10 @@ test('an apply stores the value, the sentence and the attestation the server own
   assert.equal(written[0].value, 'c1');
   assert.equal(written[0].renderedText, CHOICE_LINE);
   assert.equal(written[0].v, 1);
-  // P9: the answer carries the sid and nothing else new.
-  assert.deepEqual(Object.keys(answer.structured).sort(), ['enteredAt', 'field', 'sid']);
-  assert.equal(answer.structured.sid, written[0].sid);
+  // P9: the answer carries the sid and nothing else new. (S7-U5: under `applied`; `snapshot.structured` is the id list.)
+  assert.deepEqual(Object.keys(answer.applied).sort(), ['enteredAt', 'field', 'sid']);
+  assert.equal(answer.applied.sid, written[0].sid);
+  assert.deepEqual(answer.snapshot.structured, [written[0].sid]);
 });
 
 test('an apply whose sentence is not in this request body is refused and writes nothing', async () => {
@@ -599,25 +622,29 @@ test('replace refuses a sid that is neither mine nor the head, and a different i
 
 /* ── A1: omission is not a clear ─────────────────────────────────────────────────────────── */
 
-test('A1 an explicit empty keep list clears the column to SQL NULL, never by omission', async () => {
+test('A1 an explicit empty keep list clears the column to SQL NULL', async () => {
   const { svc, created } = fixture({ draft: { structured: [stored({ sid: 's-mine' })] } });
   await svc.putReport(UID, { ...body(), structureIds: [] }, CALLER);
   const write = created.find(c => c.call === 'draft');
-  assert.equal(write.update.structured, Prisma.DbNull, 'an UPDATE must say NULL out loud');
+  assert.equal(write.update.structured, Prisma.DbNull, 'the write must say NULL out loud');
   assert.notEqual(write.update.structured, null, 'a JS null would be the Prisma JSON-null trap');
-  assert.equal('structured' in write.create, false, 'CREATE has nothing to clear, so it omits');
+  // A first write with nothing to keep stores no empty array either: the column is not named at all.
+  const first = fixture();
+  await first.svc.putReport(UID, { ...body(), structureIds: [] }, CALLER);
+  assert.equal('structured' in first.created.find(c => c.call === 'draft').create, false, 'a new row has nothing to clear, so it omits');
 });
 
-test('A1 a request that does not mention structure leaves the column untouched', async () => {
-  const { svc, created, raw } = fixture({ draft: { structured: [stored({ sid: 's-mine' })] } });
-  await svc.putReport(UID, body(), CALLER);
-  const write = created.find(c => c.call === 'draft');
-  assert.equal('structured' in write.update, false, 'omission is "leave it alone"');
-  assert.equal('structured' in write.create, false);
-  assert.equal(raw.some(sql => sql.startsWith('SELECT structured')), false,
-    'a legacy write must not even read the column');
+test('A1 a keep list that is not sent is refused, never read as "leave it alone"', async () => {
+  // S7-U5: omission used to mean "unchanged", so a write that did not know the list kept or dropped what it never saw.
+  // The draft PUT is the whole snapshot now: without the list nothing is written; with the full list all is kept.
+  const absent = fixture({ draft: { structured: [stored({ sid: 's-mine' })] } });
+  const answer = await refusal(absent.svc.putReport(UID, { ...body(), structureIds: undefined }, CALLER), 400);
+  assert.deepEqual([answer.code, answer.field], ['REPORT_DRAFT_PRECONDITION_REQUIRED', 'structureIds']);
+  assert.deepEqual(absent.writes, []);
+  const kept = fixture({ draft: { structured: [stored({ sid: 's-mine' })] } });
+  await kept.svc.putReport(UID, { ...body(), structureIds: ['s-mine'] }, CALLER);
+  assert.deepEqual(kept.created.find(c => c.call === 'draft').update.structured.map(e => e.sid), ['s-mine']);
 });
-
 test('A1 a keep list that keeps something still writes the array', async () => {
   const { svc, created } = fixture({ draft: { structured: [stored({ sid: 'a' }), stored({ sid: 'b' })] } });
   await svc.putReport(UID, { ...body(), structureIds: ['a'] }, CALLER);
@@ -630,7 +657,8 @@ test('a structureIds-only request gets no structured key in the answer', async (
   // P9: the key exists only when the request carried `structure`.
   const { svc } = fixture({ draft: { structured: [stored({ sid: 'a' })] } });
   const answer = await svc.putReport(UID, { ...body(), structureIds: ['a'] }, CALLER);
-  assert.equal('structured' in answer, false);
+  assert.equal('applied' in answer, false);
+  assert.deepEqual(answer.snapshot.structured, ['a'], 'the snapshot names what the draft keeps');
 });
 
 test('the draft audit carries counts and sids only', async () => {
@@ -718,32 +746,24 @@ test('force discard preserves the typed evidence with the body, and omits it whe
 
 /* ── limits and the read ─────────────────────────────────────────────────────────────────── */
 
-test('B1 the forced release maps our CHECK on the first leg and on the P2002 retry leg', async () => {
+test('B1 the forced release maps our CHECK; it runs once under the study lock, so no retry leg can answer differently', async () => {
   /**
-   * This is the path the candidate could not even compile: forceDiscardDrafts wraps BOTH its first
-   * attempt and its version-race retry in the same limit mapping. A CHECK raised by the retry would
-   * otherwise leave as a 500, and the same request would have two different answers.
+   * Before S7-U5 a forced release could lose a version-number race against a concurrent commit and ran a second time;
+   * a CHECK raised by that retry needed the same mapping or the same request had two answers. The release and the
+   * commit now stand in line on the study row, so there is one leg and one mapping.
    */
   const drafts = [{ uid: UID, author: 'a@synthetic', findings: CHOICE_LINE, conclusion: '', recommendation: '',
-    baseVersion: 4, citations: null, structured: [stored({ sid: 's-a' })], updatedAt: 'now' }];
-  const legs = {
-    'first leg': [checkError('ReportVersion_structured_check')],
-    'P2002 retry leg': [Object.assign(new Error('unique'), { code: 'P2002' }),
-                        checkError('ReportVersion_structured_check')],
-  };
-  for (const [name, fails] of Object.entries(legs)) {
-    const { svc } = fixture({ drafts, createManyFails: fails });
-    const answer = await refusal(svc.forceDiscardDrafts(UID, ADMIN), 409);
-    assert.equal(answer.code, 'REPORT_STRUCTURE_LIMIT', name);
-  }
-  // A version race with no CHECK behind it still succeeds on the retry, unchanged.
-  const { svc, created } = fixture({ drafts,
-    createManyFails: [Object.assign(new Error('unique'), { code: 'P2002' })] });
+    baseVersion: 4, citations: null, structured: [stored({ sid: 's-a' })], revision: 1, present: true, updatedAt: 'now' }];
+  const refused = fixture({ drafts, createManyFails: [checkError('ReportVersion_structured_check')] });
+  const answer = await refusal(refused.svc.forceDiscardDrafts(UID, ADMIN), 409);
+  assert.equal(answer.code, 'REPORT_STRUCTURE_LIMIT');
+  assert.match(refused.raw[0], /FROM "StudyState".*FOR UPDATE/, 'the study row is locked before the drafts are read');
+  const { svc, created, writes } = fixture({ drafts });
   const ok = await svc.forceDiscardDrafts(UID, ADMIN);
   assert.equal(ok.count, 1);
   assert.deepEqual(created.find(c => c.call === 'many').data[0].structured.map(e => e.sid), ['s-a']);
+  assert.deepEqual(writes.filter(w => w === 'reportVersion.createMany').length, 1, 'one attempt');
 });
-
 test('B3 a superseded head entry is not live, so the same item can be changed again', async () => {
   /**
    * Save (sid1) -> replace to sid2 -> change again BEFORE the next commit. sid1 is still on the

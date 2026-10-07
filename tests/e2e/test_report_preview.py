@@ -7,6 +7,8 @@ from pydicom import dcmread
 from pydicom.uid import generate_uid
 from pypdf import PdfReader
 from test_viewer_history import ViewerHistoryE2E, expect, base, literal
+from document_session import document_request
+from viewer_session import end_document
 
 
 def flat(text):return re.sub(r'\s+','',text)
@@ -76,7 +78,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
         other=self.stack.request('PUT','/studies/'+f.uid+'/report','doctor2',dict(baseVersion=1,findings='OTHER PRIVATE',conclusion='',recommendation=''))
         self.assertEqual(other.status,200,other.text)
         p=self.login();self.select(p,f);before=self.saved_rows(f);original=self.hashes(); writes=[]
-        response=p.request.get(self.stack.proxy+'/api/studies/'+f.uid+'/report-preview')
+        response=document_request(p, "GET", self.stack.proxy+'/api/studies/'+f.uid+'/report-preview')
         self.assertEqual(response.status,200);self.assertEqual(response.headers.get('cache-control'),'no-store')
         p.on('request',lambda r:writes.append(r.url) if r.method in ['POST','PUT','PATCH','DELETE'] and '/report' in r.url else None)
         self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();paper=self.ready(p)
@@ -156,8 +158,8 @@ class ReportPreviewE2E(ViewerHistoryE2E):
             except Exception:pass
         p.unroute('**/report-preview');expect(p.locator('#report-preview')).not_to_be_visible()
         self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
-        p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:'test'}))")
-        expect(p.locator('#report-preview')).not_to_be_visible()
+        end_document(p)
+        expect(p.locator('#report-preview')).not_to_be_visible();self.assertFalse(p.locator('#report-preview').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
         self.assertEqual(p.locator('#report-preview iframe').get_attribute('srcdoc'),'')
 
     def test_05_source_change_hidden_key_and_oversized_image(self):
@@ -227,8 +229,6 @@ class ReportPreviewE2E(ViewerHistoryE2E):
         printed=opened.value;printed.wait_for_function('()=>window.__printCalled===true')
         expect(printed.locator('header')).to_contain_text(f.patient_id);self.assertEqual(printed.locator('img').count(),0)
         printed.close()
-        p.once('dialog',lambda d:d.dismiss())
-        p.locator('#logout').evaluate('e=>e.click()')
         expect(p.locator('#report-preview')).to_be_visible()
         # Simulate a parser without page-margin support, without claiming a
         # Firefox/Safari run. The supported path above uses the real engine.

@@ -1,5 +1,6 @@
 # coding: utf-8
 """TEST-VR-DISPLAY: separate native 3D actor and retained MPR workspace."""
+from viewer_session import end_viewer
 import os,unittest
 from pathlib import Path
 from playwright.sync_api import expect
@@ -27,7 +28,7 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
   for left,right in zip(initial['nodes'],changed['nodes']):self.assertEqual(left[0],right[0]);self.assertAlmostEqual(left[1]/2,right[1],delta=1e-10)
   self.assertTrue(changed['shade']);dialog.get_by_role('button',name='Reset VR',exact=True).click();self.assertEqual(self.vr_state(v),initial);self.preserved_volume(state,self.volume_state(v));self.assertEqual(self.native_pixels(v),native);self.same_marks(v.evaluate('()=>kinMprMarks.capture(true)'),marks);self.assertTrue(v.evaluate('()=>kinMprMarks.dirty()'));self.unchanged_rows(before);self.assertEqual(self.originals(),original)
   if os.environ.get('KIN_EVIDENCE_DIR'):v.screenshot(path=str(Path(os.environ['KIN_EVIDENCE_DIR'])/'volume-rendering.png'))
-  dialog.get_by_role('button',name='Close VR',exact=True).click();expect(dialog).not_to_be_visible();self.assertEqual(v.evaluate("()=>projectionVP.getRenderingEngine().getViewports().filter(v=>v.id.startsWith('kin-vr-')).length"),0);self.assertEqual(self.native_pixels(v),native)
+  dialog.get_by_role('button',name='Close VR',exact=True).click();expect(dialog).not_to_be_visible();self.assertEqual(v.evaluate("()=>cornerstone.getRenderingEngines().flatMap(e=>e.getViewports()).filter(v=>v.id.startsWith('kin-vr-')).length"),0);self.assertEqual(self.native_pixels(v),native)
  def test_vr_02_known_box_geometry_opacity_and_preset_isolation(self):
   a,p,v=self.opened_projection(constant=True);native=self.native_pixels(v);before=self.volume_state(v);dialog=self.vr(v);baseline=self.vr_state(v);front=self.vr_pixels(v);self.assertGreater(front['count'],1000);self.assertAlmostEqual(front['width']/front['height'],64/33,delta=.12)
   dialog.get_by_label('View From',exact=True).select_option('Superior');top=self.vr_pixels(v);self.assertGreater(top['count'],1000);self.assertAlmostEqual(top['width']/top['height'],1,delta=.04);print('VR_BOX',{'front':front,'top':top},flush=True)
@@ -37,7 +38,7 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
  def test_vr_03_missing_asset_and_renderer_failure_retry(self):
   a,p,v=self.starting();native=self.native_pixels(v);before=self.rows();v.route('**/viewer-volume-rendering.js',lambda route:route.abort());v.get_by_role('button',name='Open Volume Rendering',exact=True).click();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('VR 도구를 불러오지 못했습니다');v.unroute('**/viewer-volume-rendering.js')
   v.evaluate("()=>{const e=projectionVP.getRenderingEngine(),enable=e.enableElement;e.enableElement=function(options){const r=enable.call(this,options);if(options.type==='volume3d'){e.enableElement=enable;this.getViewport(options.viewportId).setVolumes=async()=>{throw Error('INJECTED VR VOLUME FAILURE')}}return r}}")
-  v.get_by_role('button',name='Open Volume Rendering',exact=True).click();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('INJECTED VR VOLUME FAILURE');expect(v.locator('#kin-volume-rendering')).not_to_be_visible();self.assertEqual(v.evaluate("()=>projectionVP.getRenderingEngine().getViewports().filter(v=>v.id.startsWith('kin-vr-')).length"),0);self.assertEqual(self.native_pixels(v),native);self.vr(v);self.unchanged_rows(before)
+  v.get_by_role('button',name='Open Volume Rendering',exact=True).click();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('INJECTED VR VOLUME FAILURE');expect(v.locator('#kin-volume-rendering')).not_to_be_visible();self.assertEqual(v.evaluate("()=>cornerstone.getRenderingEngines().flatMap(e=>e.getViewports()).filter(v=>v.id.startsWith('kin-vr-')).length"),0);self.assertEqual(self.native_pixels(v),native);self.vr(v);self.unchanged_rows(before)
  def test_vr_04_pending_annotation_readonly_and_access_revocation(self):
   a,p,v=self.starting();panel=self.marks(v);panel.get_by_label('MPR annotation label',exact=True).fill('KEEP VR PENDING');dialog=self.vr(v);dialog.get_by_role('button',name='Close VR',exact=True).click();expect(panel.get_by_label('MPR annotation label',exact=True)).to_have_value('KEEP VR PENDING');self.assertTrue(v.evaluate('()=>kinMprMarks.dirty()'))
   fresh=self.launch(self.login('tech'),[a]);self.ready(fresh);self.mpr(fresh);self.choose_volume(fresh,fresh,0);before=self.rows();dialog=self.vr(fresh)
@@ -46,7 +47,7 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
   a,p,v=self.starting();native=self.native_pixels(v);marks=self.add_mark(v);before=self.rows()
   v.evaluate("()=>{const f=window.fetch;window.fetch=async(...args)=>{if(String(args[0]).includes('/viewer-jobs')){window.vrWaiting=true;await new Promise(r=>window.releaseVR=r)}return f(...args)};window.restoreVRFetch=()=>window.fetch=f}")
   v.get_by_role('button',name='Open Volume Rendering',exact=True).click();v.wait_for_function('()=>window.vrWaiting');v.locator('#kin-volume-rendering').get_by_role('button',name='Close VR',exact=True).click();v.evaluate('()=>{window.restoreVRFetch();window.releaseVR()}');expect(v.get_by_role('button',name='Open Volume Rendering',exact=True)).to_be_enabled();dialog=self.vr(v);self.same_marks(v.evaluate('()=>kinMprMarks.capture(true)'),marks);self.assertEqual(self.native_pixels(v),native)
-  v.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:String(Date.now())}))");expect(dialog).not_to_be_visible();self.assertEqual(v.evaluate("()=>projectionVP.getRenderingEngine().getViewports().filter(v=>v.id.startsWith('kin-vr-')).length"),0);self.unchanged_rows(before)
+  v=end_viewer(v);v.assert_quiet();self.assertEqual(v.evaluate("()=>cornerstone.getRenderingEngines().flatMap(e=>e.getViewports()).filter(v=>v.id.startsWith('kin-vr-')).length"),0);self.unchanged_rows(before)
  def test_vr_06_partial_native_failure_closes_only_vr(self):
   a,p,v=self.starting();native=self.native_pixels(v);state=self.volume_state(v);marks=self.add_mark(v);before=self.rows();dialog=self.vr(v)
   v.evaluate("()=>{const vp=cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport,apply=vp.setProperties;vp.setProperties=function(...args){vp.setProperties=apply;apply.apply(this,args);const c=vp.getActors()[0].actor.getProperty().getScalarOpacity(0),node=[];c.getNodeValue(c.getSize()-1,node);node[1]*=.5;c.setNodeValue(c.getSize()-1,node);window.vrPartialFailureInjected=true;throw Error('PARTIAL VR OPACITY FAILURE')}}")

@@ -17,6 +17,7 @@
   }
 
   function create(options) {
+    const work = globalThis.KinWorkContext;
     if (!options || typeof options.readContext !== 'function' ||
         typeof options.validateTranscript !== 'function' || typeof options.insert !== 'function') {
       throw new TypeError('readContext, validateTranscript and synchronous insert are required');
@@ -26,12 +27,14 @@
     let available = false, state = 'unavailable', seq = 0, pin = null, text = '';
     let needsRepin = false, pending = false, ownsResources = false, error = null;
     let finishing = false, pinnedValue = null, cleanupFailed = false;
+    let pendingHash = null;
 
     function snapshot() {
       return Object.freeze({ state, asrSeq: seq, text, needsRepin, pending, error, cleanupFailed,
         pin: pin ? Object.freeze({ ...pin, caret: Object.freeze({ ...pin.caret }) }) : null });
     }
     function reply(ok, reason) { return { ok, reason: reason || null, token: seq, snapshot: snapshot() }; }
+    function apply(at, effect) { let result = reply(false, 'stale'); work.commit(at, () => { result = effect(); }); return result; }
     function release(reason) {
       if (!ownsResources) return;
       ownsResources = false; // Clear before the callback, including reentrant cleanup.
@@ -46,7 +49,7 @@
       } finally { finishing = alreadyFinishing; }
     }
     function end(next, reason) {
-      seq += 1; pending = false; pin = null; pinnedValue = null; text = ''; needsRepin = false;
+      seq += 1; pendingHash = null; pending = false; pin = null; pinnedValue = null; text = ''; needsRepin = false;
       state = next; error = reason || null; release(reason || next);
       return reply(next === 'inserted' && state === 'inserted', reason);
     }
@@ -77,6 +80,25 @@
       if (typeof result !== 'string' || !/^[a-f0-9]{64}$/.test(result)) throw new Error('Invalid SHA-256');
       return result;
     }
+    async function hashAndApply(start, token, at, effect) {
+      const recovery = work.capture('study'), operation = {};
+      pendingHash = operation; pending = true;
+      let h, failed = false, ownsPending = false;
+      try { h = await hashed(start.value); }
+      catch (_) { failed = true; }
+      finally {
+        // A cancelled hash may finish after a new attempt has taken this flag.
+        ownsPending = pendingHash === operation;
+        if (ownsPending) { pendingHash = null; pending = false; }
+      }
+      if (!ownsPending || !current(token)) return reply(false, 'stale');
+      if (!work.admits(at)) return apply(recovery, () => {
+        if (state === 'requesting-permission') return end('failed', 'editor-changed');
+        needsRepin = true; error = 'field-changed';
+        return reply(false, 'field-changed');
+      });
+      return apply(at, () => failed ? end('failed', 'hash-failed') : effect(h));
+    }
     function makePin(v, fieldValueHash) {
       return { uid: v.uid, selectionSeq: v.selectionSeq, baseVersion: v.baseVersion,
         field: v.field, caret: { ...v.caret }, asrSeq: seq, fieldValueHash };
@@ -91,6 +113,8 @@
       return snapshot();
     }
     async function begin() {
+      const at = work.capture('editor');
+      if (!work.admits(at)) return reply(false, 'stale');
       if (finishing) return reply(false, 'busy');
       if (!available) return reply(false, 'unavailable');
       if (ACTIVE.has(state)) return reply(false, 'busy');
@@ -98,15 +122,14 @@
       if (!start) return reply(false, 'editor-blocked');
       const token = ++seq;
       state = 'requesting-permission'; error = null; cleanupFailed = false; text = ''; pin = null; pinnedValue = null;
-      needsRepin = false; pending = true; ownsResources = true;
-      let h;
-      try { h = await hashed(start.value); }
-      catch (_) { return current(token) ? end('failed', 'hash-failed') : reply(false, 'stale'); }
+      needsRepin = false; ownsResources = true;
+      return hashAndApply(start, token, at, h => {
       if (!current(token)) return reply(false, 'stale');
       const live = context(start.field);
       if (!sameScope(live, start) || live.value !== start.value) return end('failed', 'editor-changed');
-      pin = makePin(start, h); pinnedValue = start.value; pending = false;
+      pin = makePin(start, h); pinnedValue = start.value;
       return reply(true);
+      });
     }
     function advance(token, from, to) {
       if (!current(token) || state !== from || pending || !pin) return reply(false, 'stale');
@@ -123,41 +146,44 @@
       text = transcript; state = 'review'; return reply(true);
     }
     async function repin(token) {
+      const at = work.capture('editor');
+      if (!work.admits(at)) return reply(false, 'stale');
       if (!current(token) || state !== 'review') return reply(false, 'stale');
       if (pending) return reply(false, 'busy');
       if (!needsRepin) return reply(false, 'repin-not-required');
       const start = checkScope(token); // An explicit field selection may choose another permitted field.
       if (!start) return reply(false, 'editor-changed');
-      pending = true;
-      let h;
-      try { h = await hashed(start.value); }
-      catch (_) { return current(token) ? end('failed', 'hash-failed') : reply(false, 'stale'); }
+      return hashAndApply(start, token, at, h => {
       if (!current(token)) return reply(false, 'stale');
       const live = checkScope(token, start.field);
       if (!live) return reply(false, 'editor-changed');
-      pending = false;
       if (live.value !== start.value) return reply(false, 'field-changed');
       pin = makePin(start, h); pinnedValue = start.value; needsRepin = false; error = null;
       return reply(true); // Never inserts. A fresh, explicit Insert must follow.
+      });
+    }
+    // A transient connection/save barrier must not consume an already reviewed transcript.
+    function insertionAllowed() {
+      try { return !options.canInsert || options.canInsert() === true; } catch (_) { return false; }
     }
     async function insert(token) {
+      const at = work.capture('editor');
+      if (!work.admits(at)) return reply(false, 'stale');
       if (!current(token) || state !== 'review') return reply(false, 'stale');
       if (pending) return reply(false, 'busy');
       const start = checkScope(token, pin.field);
       if (!start) return reply(false, 'editor-changed');
       if (needsRepin) return reply(false, 'field-changed');
-      pending = true;
-      let h;
-      try { h = await hashed(start.value); }
-      catch (_) { return current(token) ? end('failed', 'hash-failed') : reply(false, 'stale'); }
+      if (!insertionAllowed()) return reply(false, 'insertion-blocked');
+      return hashAndApply(start, token, at, h => {
       if (!current(token)) return reply(false, 'stale');
       const live = checkScope(token, pin.field);
       if (!live) return reply(false, 'editor-changed');
-      pending = false;
       // UTF-8 replaces lone UTF-16 surrogates; keep exact string identity as well as the hash.
       if (live.value !== start.value || start.value !== pinnedValue || h !== pin.fieldValueHash) {
         needsRepin = true; error = 'field-changed'; return reply(false, 'field-changed');
       }
+      if (!insertionAllowed()) return reply(false, 'insertion-blocked');
       const insertion = Object.freeze({ ...pin, caret: Object.freeze({ ...pin.caret }), text,
         expectedValue: start.value });
       // Consume before calling out: duplicate/reentrant Insert cannot use this session.
@@ -173,6 +199,7 @@
       release(state);
       finishing = false;
       return { ...reply(inserted, error), inserted };
+      });
     }
     function cancel(reason) {
       if (!ACTIVE.has(state)) return reply(false, 'inactive');
@@ -183,6 +210,13 @@
       if (!current(token) || state === 'review') return reply(false, 'stale');
       return end('failed', reason || 'failed');
     }
+    work.onInvalidate(({ reason, state: lifecycle }) => {
+      if (reason === 'cancel') {
+        pendingHash = null; pending = false;
+        if (state === 'requesting-permission' && !pin) { seq++; state = available ? 'idle' : 'unavailable'; release('cancelled'); }
+      } else if (reason === 'select') cancel('study-changed');
+      else if (reason === 'lifecycle' && lifecycle !== 'active' && lifecycle !== 'preparing') end('cancelled', 'logged-out');
+    });
     return Object.freeze({ snapshot, setAvailable, begin, receive, repin, insert, cancel, fail,
       recording: token => advance(token, 'requesting-permission', 'recording'),
       uploading: token => advance(token, 'recording', 'uploading'),

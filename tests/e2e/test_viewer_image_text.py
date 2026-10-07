@@ -7,6 +7,7 @@ import unittest
 from playwright.sync_api import expect
 
 from test_display_controls import DisplayControlsE2E
+from viewer_session import end_viewer
 
 
 class ViewerImageTextE2E(DisplayControlsE2E):
@@ -205,10 +206,11 @@ class ViewerImageTextE2E(DisplayControlsE2E):
         self.assert_automatic_show(page)
         page.evaluate("()=>{window.kinViewerWindowOwner=imageTextOwner;}")
         self.hide(page)
-        page.evaluate("()=>dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))")
-        expect(page.locator("#kin-image-text")).to_have_count(0)
-        expect(page.locator("[data-kin-image-text-hidden]")).to_have_count(0)
-        self.assertFalse(page.evaluate("()=>kinViewerImageTextHidden()"))
+        page.evaluate('()=>window.endedImageTextState=kinViewerImageTextHidden')
+        ended=end_viewer(page, ['[data-kin-image-text-hidden]'])
+        self.assertTrue(all(ended.retained('[data-kin-image-text-hidden]', 'node => !node.hasAttribute("data-kin-image-text-hidden")')))
+        self.assertFalse(ended.evaluate('()=>endedImageTextState()'))
+        ended.assert_quiet()
 
     def test_image_text_04_pre_hidden_native_overlay_annotation_and_reentry_are_preserved(self):
         _, page = self.open_pair(); self.annotate(page)

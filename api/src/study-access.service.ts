@@ -1,3 +1,4 @@
+import { rightsUser } from './member-rights';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
@@ -111,7 +112,7 @@ export class StudyAccessService {
     this.owner(c);
     if(!c.roles.includes('admin'))throw new ForbiddenException('접근 조건 관리는 admin 권한이 필요합니다');
     if(!uuid(subject))throw new BadRequestException('사용자를 확인하세요');
-    const user=await this.keycloak.getUser(subject);
+    const user=rightsUser(await this.prisma.memberRights.findUnique({where:{sub:subject}}));
     if(!user||user.id!==subject||!user.enabled||user.serviceAccountClientId||user.groups.length!==1||user.groups[0]!==c.institution||!user.roles.some(r=>['admin','radiologist','technician'].includes(r)))
       throw new NotFoundException('같은 기관의 활성 사용자를 찾을 수 없습니다');
     return user;

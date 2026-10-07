@@ -7,6 +7,7 @@ import numpy as np
 from pypdf import PdfReader
 from playwright.sync_api import expect
 from test_viewer_job_print import ViewerJobPrintE2E, canvas_ready, psql, literal
+from viewer_session import end_viewer
 
 
 class LivePrintE2E(ViewerJobPrintE2E):
@@ -15,7 +16,9 @@ class LivePrintE2E(ViewerJobPrintE2E):
   self.assertEqual(r.status,status,r.text);return r
 
  def rows(self):
-  return {t:psql('SELECT to_jsonb(t)::text FROM "'+t+'" t ORDER BY to_jsonb(t)::text COLLATE "C"') for t in
+  # Session entry/end has its own audit contract. Printing must leave every
+  # clinical record and its audit rows unchanged across those identity events.
+  return {t:psql('SELECT to_jsonb(t)::text FROM "'+t+'" t '+("WHERE action NOT LIKE 'auth.%' " if t=='AuditLog' else '')+'ORDER BY to_jsonb(t)::text COLLATE "C"') for t in
    ['ViewerJob','ViewerJobRevision','ViewerItem','ViewerRevision','ViewerRequest','Report','ReportVersion','ReportDraft','AuditLog']}
 
  def live_output(self,p):
@@ -122,8 +125,7 @@ class LivePrintE2E(ViewerJobPrintE2E):
   for a,b in zip(initial,self.output_arrays(p,paper)):self.assertTrue(np.array_equal(a,b))
   self.assertEqual(self.pngs(p),pixels);self.assertEqual(self.rows(),before)
   p.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click();expect(row.get_by_label('Annotation Text')).to_have_value('보존할 미저장 표식')
-  self.live_output(p);p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:String(Date.now())}))")
-  expect(p.locator('#kin-job-print')).not_to_be_visible();self.assertEqual(self.rows(),before)
+  self.live_output(p);ended=end_viewer(p, ['#kin-job-print']);self.assertEqual(ended.retained('#kin-job-print','node => node.open'),[False]);ended.assert_quiet();self.assertEqual(self.rows(),before)
 
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(LivePrintE2E(n) for n in loader.getTestCaseNames(LivePrintE2E) if n.startswith('test_live_'))

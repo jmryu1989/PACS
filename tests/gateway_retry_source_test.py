@@ -659,12 +659,23 @@ class MigrationPins(unittest.TestCase):
         questions, image_requests = "20260926120000_study_questions", "20260926130000_study_image_requests"
         critical, assignment_scope = "20260928120000_critical_result", "20260928130000_reader_assignment_scope"
         audit_guard = "20260930120000_audit_log_append_only"
-        self.assertEqual(names[-7:], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope,
-                                      audit_guard],
+        # S7-U5: 20261004120000_draft_revision_session_entry (the draft boundary and the entry proof columns) follows that; 34 -> 35.
+        draft_boundary = "20261004120000_draft_revision_session_entry"
+        # S7-U5 session end: 20261005120000_idp_session_end (IdpSessionEnd, AuthSession.idpSid) follows that; 35 -> 36.
+        session_end = "20261005120000_idp_session_end"
+        # S7-U5 member isolation: 20261005130000_member_isolation (MemberIsolation) follows that; 36 -> 37.
+        isolation = "20261005130000_member_isolation"
+        # S7-U5 member isolation's call in flight: 20261006120000_member_isolation_call (three columns) follows that; 37 -> 38.
+        isolation_call = "20261006120000_member_isolation_call"
+        # S7-U5 D600: 20261007120000_provider_change (ProviderChange; the in-flight columns dropped) follows that; 38 -> 39.
+        provider_change = "20261007120000_provider_change"
+        self.assertEqual(names[-14:], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope,
+                                       audit_guard, draft_boundary, session_end, isolation, isolation_call, provider_change, '20261007170000_member_db_rights', '20261007200000_designation_subjects'],
                          "U3 immediately before U4, U4 immediately before S5-U4a's study_questions, then S5-U4c's "
                          "study_image_requests, S7-U1a's critical_result, S7-U3a's reader_assignment_scope and "
-                         "S7-AUDIT-STORE's audit_log_append_only, which is last")
-        self.assertEqual(len(names), 34)
+                         "S7-AUDIT-STORE's audit_log_append_only, S7-U5's draft_revision_session_entry and its "
+                         "idp_session_end, member_isolation, member_isolation_call, provider_change, member_db_rights and designation_subjects")
+        self.assertEqual(len(names), 41)
         self.assertIn("'" + MIGRATION_NAME + "'", text("tests", "production_image_test.py"))
         # the restore fixture applies exactly these migrations in this order: its list compared as data, so the order
         # above (U3, U4, study_questions, study_image_requests, critical_result, reader_assignment_scope last) is the fixture's too
@@ -689,11 +700,15 @@ class MigrationPins(unittest.TestCase):
         # 7 events + 6 receipts, 79 rows in all.
         # S7-U3a: 33 migrations, the same 46 tables, rows + the tele institution's closed ReaderAssignment row, 80 in all.
         # S7-AUDIT-STORE: 34 migrations (a trigger only), the same 46 tables and 80 rows.
+        # S7-U5 session end: 36 migrations, 47 tables (IdpSessionEnd), rows + the pending and the confirmed end mark, 83.
+        # S7-U5 member isolation: 37 migrations, 48 tables (MemberIsolation), rows + the owed and the done fact, 85.
+        # S7-U5 member isolation's call in flight: 38 migrations (three columns), the same 48 tables and 85 rows.
+        # S7-U5 D600 provider change records: 39 migrations, 49 tables (ProviderChange), rows + the unknown and the settled record, 87.
         rows = restore_fixture.expected_rows("2.25.1")
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 34)
-        self.assertEqual(len(restore_fixture.TABLES), 46)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 41)
+        self.assertEqual(len(restore_fixture.TABLES), 51)
         self.assertEqual(set(rows), set(restore_fixture.TABLES))
-        self.assertEqual(sum(len(value) for value in rows.values()), 80)
+        self.assertEqual(sum(len(value) for value in rows.values()), 89)   # S7-U5: + the emptied draft row (tombstone); + 2 end marks; + 2 isolation facts; + 2 change records
         self.assertEqual({table: len(rows[table]) for table in ("GatewayRetryRequest", "CriticalResult", "CriticalResultEvent",
                                                                 "CriticalResultReceipt")},
                          {"GatewayRetryRequest": 1, "CriticalResult": 4, "CriticalResultEvent": 7, "CriticalResultReceipt": 6})
@@ -704,7 +719,8 @@ class MigrationPins(unittest.TestCase):
 def request_problems(main):
     body = js_function(main, "requestGatewayRetry")
     problems = []
-    if body.count("api(") != 1 or 'api("POST", `/studies/${encodeURIComponent(uid)}/gateway-retry`, {})' not in body:
+    # S7-U5: the same one empty POST, now sent under the work context captured when the press started (`at`).
+    if body.count("api(") != 1 or 'api("POST", `/studies/${encodeURIComponent(uid)}/gateway-retry`, {}, undefined, at)' not in body:
         problems.append("one empty POST")
     guard = "if (button.dataset.request !== token || button.dataset.uid !== uid || button.dataset.key !== key) return;"
     try:
@@ -744,8 +760,9 @@ class ClientPins(unittest.TestCase):
         self.assertEqual(request_problems(MAIN), [])
         mutants = {"no role gate": MAIN.replace(' && KinAuth.has("technician"));', ');'),
                    "no stale check": MAIN.replace("      if (button.dataset.request !== token || button.dataset.uid !== uid || button.dataset.key !== key) return;\n", ""),
-                   "a client epoch in the body": MAIN.replace("/gateway-retry`, {});", "/gateway-retry`, { key });"),
-                   "a toast": MAIN.replace("      renderObservation();\n    }\n    $(\"#receipt-retry\")", "      renderObservation(); toast(shown.text);\n    }\n    $(\"#receipt-retry\")")}
+                   "a client epoch in the body": MAIN.replace("/gateway-retry`, {}, undefined, at);", "/gateway-retry`, { key }, undefined, at);"),
+                   "a toast": MAIN.replace("        renderObservation();\n      });\n    }\n    $(\"#receipt-retry\")",
+                                           "        renderObservation(); toast(shown.text);\n      });\n    }\n    $(\"#receipt-retry\")")}
         for wrong, source in mutants.items():
             with self.subTest(wrong=wrong):
                 self.assertNotEqual(source, MAIN)

@@ -161,8 +161,7 @@
   // 목록을 다시 확인하느라 내려 둔 검사. 새 목록과 계정 확인이 끝난 뒤에만 다시 읽는다(setAside/applyList).
   let resume = null;
   let refocus = null;
-  let channel = null;
-  let leaving = false;
+  let leaving = false, endingHere = false;
   // S7-U2a 받은 중요 결과 영역(critical-result-inbox.js mount의 반환값). 승인된 세션에서만 붙는다.
   let criticalInbox = null;
   // 사용자가 Show Timeline을 누른 뒤에만 참이다. 그 뒤 고르는 검사는 타임라인을 이어서 읽는다(이 문서 안에서만).
@@ -248,24 +247,16 @@
   }
 
   async function request(path) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    const context = KinWorkContext.capture('document');
     try {
-      const response = await fetch(API + path, { headers: { 'X-KIN-CSRF': '1' }, signal: controller.signal });
-      // 401은 상태 줄에서 바로 끝낸다. 본문을 기다리는 동안에는 leaving과 요청 번호가 그대로라 그사이 도착한 다른
-      // 읽기의 답(확정 판독문·key image)이 그려진다. 떠나는 문서는 이 오류를 보이지 않으므로 본문은 읽지 않는다.
-      if (response.status === 401) {
-        logout();
-        throw failure(401, null, '세션이 만료되었습니다. 다시 로그인하세요.');
-      }
-      const body = await response.json().catch(() => null);
-      if (!response.ok) throw failure(response.status, body);
-      return body;
+      const response = await KinSessionTransport.page().request(API + path,
+        { context, deadlineMs: TIMEOUT_MS });
+      if (!KinWorkContext.admits(context)) throw failure(0, null, '세션이 종료되었습니다.');
+      if (!response.ok) throw failure(response.status, response.body);
+      return response.body;
     } catch (error) {
       if (error && error.kin) throw error;
-      throw failure(0, null, error && error.name === 'AbortError' ? '응답이 없어 요청을 멈췄습니다.' : '서버에 연결하지 못했습니다.');
-    } finally {
-      clearTimeout(timer);
+      throw failure(0, null, error && error.transport === 'timeout' ? '응답이 없어 요청을 멈췄습니다.' : '서버에 연결하지 못했습니다.');
     }
   }
 
@@ -341,13 +332,25 @@
       // 목록을 읽는 사이 이 브라우저의 세션이 다른 계정으로 바뀌었으면 머리글의 사람과 목록의 주인이 다르다.
       const me = await request('/me');
       if (!listFresh(mine)) return;
-      if (!me || me.kind !== 'member' || me.institution !== owner[0] || me.sub !== owner[1]) {
-        leave();
+      if (!me || me.kind !== 'member' || typeof me.institution !== 'string' || typeof me.sub !== 'string')
+        throw new Error('계정 확인 응답을 읽지 못했습니다. 다시 조회하세요.');
+      if (me.institution !== owner[0] || me.sub !== owner[1]) {
+        accountChanged('');
         return;
       }
       applyList(loaded);
     } catch (error) {
       if (!listFresh(mine)) return;
+      if (error.status === 403) {
+        // A denied list also withdraws the selected study and its retained editors.
+        byUid.clear();
+        resume = null;
+        requestDrafts.clear(); requestAttempts.clear(); requestNotes.clear(); requestOwn.clear();
+        questionDrafts.clear(); questionAttempts.clear(); questionNotes.clear();
+        clearDetail(describe(error));
+        $('#refresh').disabled = true;
+        $('#list-retry').disabled = true;
+      }
       setListState('failed', TEXT.listFailed, describe(error));
       if (resume !== null) clearDetail(TEXT.unverified);
     }
@@ -372,6 +375,8 @@
   }
 
   function applyList(rows) {
+    $('#refresh').disabled = false;
+    $('#list-retry').disabled = false;
     studies = [...rows].sort(byStudyDate);
     byUid = new Map(studies.map(row => [row.uid, row]));
     const focusUid = refocus;
@@ -569,14 +574,17 @@
     }
     // main.html openOhifWindow와 같은 주소 모양: 첫 검사가 현재 검사, 둘째가 비교 검사이고 비교 배치로 연다.
     const url = `/ohif/viewer?StudyInstanceUIDs=${uids.join(',')}${other ? '&hangingProtocolId=@ohif/hpCompare' : ''}`;
+    const expectedSession = KinAuth.sessionId();
+    if (!expectedSession) { note.textContent = '세션을 확인할 수 없습니다. 목록을 다시 열어 주세요.'; return; }
     let popup = null;
     try { popup = root.open(url, VIEWER_WINDOW); } catch (_) {}
     if (!popup) {
       note.textContent = TEXT.viewerBlocked;
       return;
     }
-    // 뷰어 문서가 이 화면을 되짚지 못하게 끊는다(워크리스트의 뷰어 창과 같다).
-    try { popup.opener = null; } catch (_) {}
+    // name은 서버/URL 이력에 남지 않는다. 새 뷰어의 첫 설정 스크립트가 읽고 원래 창 이름으로 돌린다.
+    try { popup.name = 'kin-viewer-entry:' + JSON.stringify({ session: expectedSession, name: VIEWER_WINDOW }); popup.opener = null; }
+    catch (_) { try { popup.close(); } catch (_) {} note.textContent = TEXT.viewerBlocked; return; }
     try { popup.focus(); } catch (_) {}
     note.textContent = other ? TEXT.compareAsked : TEXT.viewerAsked;
   }
@@ -706,6 +714,7 @@
     paintTimelineShell(row);
     paintQuestionsShell(row);
     clearReport();
+    $('#report-retry').disabled = false;
     setReport('loading', TEXT.reportLoading);
     setKeys(TEXT.keysLoading, null);
     paintRequestsShell(row);
@@ -722,6 +731,10 @@
       paintReport(view);
     }, error => {
       if (!reportFresh(mine, uid)) return;
+      if (error.status === 403) {
+        clearReport();
+        $('#report-retry').disabled = true;
+      }
       setReport('failed', TEXT.reportFailed, describe(error));
       setKeys(TEXT.keysFailed, null);
     });
@@ -853,30 +866,19 @@
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
-  /**
-   * 요청 쓰기(POST). 읽기(request)처럼 401은 본문을 기다리지 않고 세션을 끝낸다. 연결 실패·제한 시간은 status 0이다 —
-   * 서버가 적용했는지 모르는 결과라 부르는 쪽이 같은 requestId로 다시 보낼 수 있게 남긴다. 성공 응답은 HTTP 상태와 함께
-   * 돌려준다: 적용 결과는 201뿐이라(U4p §3.4) 200·202·204 같은 다른 성공 상태는 부르는 쪽이 결과를 모르는 응답으로 둔다
-   * (Astra S5-U4bc-R-001 F02, 질문 쓰기 questionPost와 같은 규칙).
-   */
+  /** POST results retain their HTTP status: only a validated 201 receipt proves the mutation.
+   * Transport failures leave the attempt uncertain for an explicit retry. */
   async function requestSend(path, payload) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    const context = KinWorkContext.capture('document');
     try {
-      const response = await fetch(API + path, { method: 'POST', signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' }, body: JSON.stringify(payload) });
-      if (response.status === 401) {
-        logout();
-        throw failure(401, null, '세션이 만료되었습니다. 다시 로그인하세요.');
-      }
-      const reply = await response.json().catch(() => null);
-      if (!response.ok) throw failure(response.status, reply);
-      return { status: response.status, body: reply };
+      const response = await KinSessionTransport.page().request(API + path,
+        { method: 'POST', json: payload, context, deadlineMs: TIMEOUT_MS });
+      if (!KinWorkContext.admits(context)) throw failure(0, null, '세션이 종료되었습니다.');
+      if (!response.ok) throw failure(response.status, response.body);
+      return { status: response.status, body: response.body };
     } catch (error) {
       if (error && error.kin) throw error;
-      throw failure(0, null, error && error.name === 'AbortError' ? '응답이 없어 요청을 멈췄습니다.' : '서버에 연결하지 못했습니다.');
-    } finally {
-      clearTimeout(timer);
+      throw failure(0, null, error && error.transport === 'timeout' ? '응답이 없어 요청을 멈췄습니다.' : '서버에 연결하지 못했습니다.');
     }
   }
 
@@ -1265,7 +1267,7 @@
     field.style.cssText = 'display:block;width:100%;min-height:28px;padding:6px 8px;border:1px solid var(--line);border-radius:7px;'
       + 'background:var(--panel2);color:var(--text);font:inherit;resize:vertical';
     const key = wrap.dataset.key;
-    const keep = () => { if (!requestAttempts.has(key)) requestDrafts.set(key, requestFields(wrap)); };
+    const keep = () => { if (!leaving && !requestAttempts.has(key)) requestDrafts.set(key, requestFields(wrap)); };
     field.addEventListener('input', keep);
     field.addEventListener('change', keep);
     return [title, field];
@@ -1523,7 +1525,6 @@
    */
   function requestWriteFailed(attempt, error) {
     const key = attempt.key;
-    if (error.status === 401) return;
     if (error.code === 'OWNER_CHANGED') {
       accountChanged(describe(error));
       return;
@@ -1722,6 +1723,7 @@
     if (leaving || selected !== uid || !$('#timeline')) return;
     const mine = ++timelineSeq;
     resetTimelineBody();
+    $('#timeline-retry').disabled = false;
     setTimelineState('loading', TIMELINE.loading);
     const loaded = [];
     let total = null;
@@ -1747,6 +1749,10 @@
     } catch (error) {
       if (!timelineFresh(mine, uid)) return;
       resetTimelineBody();
+      if (error.status === 403) {
+        $('#timeline-toggle').disabled = true;
+        $('#timeline-retry').disabled = true;
+      }
       setTimelineState('failed', TIMELINE.failed, describe(error));
     }
   }
@@ -1889,29 +1895,18 @@
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
-  /**
-   * 질문 쓰기. 읽기(request)와 같이 401은 본문을 기다리지 않고 세션을 끝낸다. 연결 실패·제한 시간은 status 0이다 —
-   * 서버가 적용했는지 모르는 결과라 부르는 쪽이 같은 requestId로 다시 보낼 수 있게 남긴다. 성공 응답은 HTTP 상태와 함께
-   * 돌려준다: 적용 결과는 201뿐이라(계약 §3.4) 200·202 같은 다른 성공 상태는 부르는 쪽이 결과를 모르는 응답으로 둔다.
-   */
+  /** Question writes share the page transport and preserve uncertain outcomes for an explicit retry. */
   async function questionPost(path, payload) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    const context = KinWorkContext.capture('document');
     try {
-      const response = await fetch(API + path, { method: 'POST', signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' }, body: JSON.stringify(payload) });
-      if (response.status === 401) {
-        logout();
-        throw failure(401, null, '세션이 만료되었습니다. 다시 로그인하세요.');
-      }
-      const answer = await response.json().catch(() => null);
-      if (!response.ok) throw failure(response.status, answer);
-      return { status: response.status, body: answer };
+      const response = await KinSessionTransport.page().request(API + path,
+        { method: 'POST', json: payload, context, deadlineMs: TIMEOUT_MS });
+      if (!KinWorkContext.admits(context)) throw failure(0, null, '세션이 종료되었습니다.');
+      if (!response.ok) throw failure(response.status, response.body);
+      return { status: response.status, body: response.body };
     } catch (error) {
       if (error && error.kin) throw error;
-      throw failure(0, null, error && error.name === 'AbortError' ? '응답이 없어 요청을 멈췄습니다.' : '서버에 연결하지 못했습니다.');
-    } finally {
-      clearTimeout(timer);
+      throw failure(0, null, error && error.transport === 'timeout' ? '응답이 없어 요청을 멈췄습니다.' : '서버에 연결하지 못했습니다.');
     }
   }
 
@@ -2378,7 +2373,7 @@
     field.style.cssText = 'display:block;width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:7px;'
       + 'background:var(--panel2);color:var(--text);font:inherit;resize:vertical';
     field.addEventListener('input', () => {
-      if (!questionAttempts.has(key)) questionDrafts.set(key, field.value);
+      if (!leaving && !questionAttempts.has(key)) questionDrafts.set(key, field.value);
     });
     const actions = node('div');
     actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px';
@@ -2565,7 +2560,6 @@
    * 결과라 Retry(같은 requestId)를 남긴다. 그 밖의 거절은 요청을 버리고 쓰던 글은 칸에 둔다. OWNER_CHANGED는 계정이 바뀐 것이다.
    */
   function questionWriteFailed(key, attempt, error) {
-    if (error.status === 401) return;
     if (error.code === 'OWNER_CHANGED') {
       accountChanged(describe(error));
       return;
@@ -2585,16 +2579,10 @@
     if (error.status === 404 || error.status === 409) refreshQuestions(attempt.uid);
   }
 
-  /**
-   * 확인된 계정 변경(다른 계정의 봉투 owner·OWNER_CHANGED)은 알아챈 칸만의 일이 아니다. 같은 문서의 질문·영상 요청 두 영역을
-   * 이 자리에서 함께 잠가, 네트워크를 기다리기 전에 두 영역의 쓰던 글·결과를 모르는 요청·읽기/쓰기 번호를 버린다 — 한쪽만 잠그면
-   * 다른 쪽에 이전 계정의 글과 Retry가 남고, 나가 있던 쓰기의 늦은 영수증이 저장 결과로 그려진다(Astra S5-U4bc-R-001 F01).
-   * 한 검사의 읽기를 서버가 403으로 거절한 것은 계정 변경이 아니라서 그 영역만 잠근다(lockQuestions·lockRequests를 직접 부른다).
-   */
+  /** A verified different owner closes the whole document without revoking the replacement login. */
   function accountChanged(detail) {
-    lockQuestions(QUESTION.ownerChanged, detail, true);
-    lockRequests(REQUEST.ownerChanged, detail, true);
-    if (criticalInbox) criticalInbox.lock(detail);
+    if (leaving) return;
+    KinAuth.replaced({ session: KinWorkContext.session() });
   }
 
   /**
@@ -2634,6 +2622,18 @@
    * 이전 세션의 판독문이 남고 늦게 온 답이 다시 그려진다. 이동이 늦어도 빈 화면이 되지 않게 이유 한 줄만 남긴다.
    */
   function close() {
+    if (leaving) return;
+    leaving = true;
+    owner = null;
+    timelineSeq++;
+    requestsEpoch++;
+    questionEpoch++;
+    requestDrafts.clear();
+    requestAttempts.clear();
+    requestNotes.clear();
+    questionDrafts.clear();
+    questionAttempts.clear();
+    questionNotes.clear();
     // 받은 중요 결과 영역도 같은 자리에서 끝낸다: 나간 요청을 멈추고 늦은 답·주기 읽기를 그리지 않는다.
     if (criticalInbox) criticalInbox.end();
     listSeq++;
@@ -2647,42 +2647,33 @@
     document.body.replaceChildren(note);
   }
 
-  /**
-   * 이 문서의 이동은 한 번뿐이다. 진행 중인 이동 위에서 location.replace를 다시 부르면 첫 이동이 취소된다(net::ERR_ABORTED).
-   * 세션 종료 소식은 한 번에 여러 번 온다 — 다른 탭의 로그아웃은 BroadcastChannel 한 번과 storage 두 번(set·remove)이고,
-   * 이 문서의 로그아웃도 auth.js clearLocal()이 새 채널 객체로 보내므로 이 문서의 채널이 받는다(제외되는 것은 보낸 객체뿐이다).
-   */
+  /** Navigation outside work is issued once. */
   function go(url) {
     if (leaving) return;
     leaving = true;
     location.replace(url);
   }
 
-  /**
-   * Log out과 401. 화면을 먼저 지우고(close) 이동은 KinAuth.logout()이 한다 — 그 이동은 POST /auth/logout이 끝난 뒤라
-   * (제한 시간 없음) 기다리는 동안 이전 세션의 판독문이 남거나 늦은 답이 그려지면 안 된다. 그 뒤에 오는 자기 종료 소식·
-   * 두 번째 401은 화면만 다시 지운다.
-   */
+  /** Only explicit intent posts logout. The lifecycle closes work synchronously before the POST. */
   function logout() {
-    close();
     if (leaving) return;
-    leaving = true;
+    endingHere = true;
     KinAuth.logout();
   }
 
-  /** 세션이 끝났거나 다른 계정이 되었다. 이 계정의 검사·판독문을 화면에서 먼저 지우고 진입 화면이 다시 정하게 한다. */
-  function leave() {
-    close();
-    go('index.html');
-  }
-
   function listen() {
-    try {
-      channel = new BroadcastChannel('kin-session');
-      channel.onmessage = event => { if (event.data && event.data.type === 'session-ended') leave(); };
-    } catch (_) {}
-    root.addEventListener('storage', event => { if (event.key === 'kin-session-ended') leave(); });
-    root.addEventListener('pagehide', () => { if (channel) channel.close(); });
+    KinAuth.onEndedElsewhere(() => { if (!endingHere) KinAuth.leave(); });
+    KinWorkContext.onInvalidate(event => {
+      if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) close();
+    });
+    // Block queued input as well as ordinary input while the closed document is still alive.
+    for (const type of ['click', 'submit', 'input', 'change', 'keydown']) {
+      document.addEventListener(type, event => {
+        if (!leaving) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }, true);
+    }
   }
 
   function showMembership(state) {
@@ -2716,6 +2707,7 @@
   }
 
   async function boot() {
+    listen();
     wire();
     try {
       await KinAuth.init();
@@ -2723,12 +2715,12 @@
       go('index.html');
       return;
     }
+    if (leaving) { KinAuth.leave(); return; }
     const session = KinAuth.session();
     if (!session) {
-      go('index.html');
+      if (!KinAuth.autoLogin()) go('index.html');
       return;
     }
-    listen();
     if (session.state === 'pending' || session.state === 'invalid') {
       showMembership(session.state);
       return;
@@ -2742,11 +2734,10 @@
     $('#actor').textContent = session.displayName || session.user || '';
     clearDetail();
     loadList();
-    // S7-U2a: 받는 사람인지는 서버가 정한다(역할 목록을 읽지 않는다). 이 영역의 401은 이 파일의 logout()으로, 이 영역이 알아챈
-    // 계정 변경은 accountChanged()로 온다. 영역을 준비하지 못해도 검사 목록은 그대로 쓴다.
+    // The shared inbox uses this document's defaults; verified owner replacement closes all work.
     try {
       criticalInbox = KinCriticalResultInbox.mount({ apiBase: API, root: 'critical-results', prefix: 'critical-results',
-        logout: () => logout(), owner: () => owner, eligible: () => owner !== null, onAccountChanged: detail => accountChanged(detail) });
+        owner: () => owner, eligible: () => owner !== null, onAccountChanged: detail => accountChanged(detail) });
     } catch (_) { criticalInbox = null; }
   }
 

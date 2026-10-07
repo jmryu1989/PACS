@@ -2,12 +2,13 @@
 """REQ-D01-TECH-NOTE / RISK-D01-NOTE-IDENTITY/HISTORY / TEST-D01-TECH-NOTE."""
 # List integration also covers badge-only payloads, preserved report selection,
 # keyboard opening, clear/history status and rejection of older list versions.
-import json, os, sys, unittest, subprocess, time
+import json, os, sys, unittest, subprocess, time, uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from playwright.sync_api import expect
 from test_worklist import WorklistE2E, psql, ROOT
-from test_prior_selection import canvas_ready
+from test_prior_selection import canvas_ready, synthetic_ct
+from viewer_session import release_after_end, end_document
 
 
 class TechNoteE2E(WorklistE2E):
@@ -83,11 +84,11 @@ class TechNoteE2E(WorklistE2E):
   p.route('**/tech-note',lambda route:pending.append(route))
   p.locator('#tech-note-open').click();expect(p.locator('#tech-note-status')).to_contain_text('불러오는 중')
   p.wait_for_function("() => document.querySelector('#tech-note-save').disabled")
-  p.evaluate("() => {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-  expect(p.locator('#tech-note-dialog')).not_to_be_visible()
+  end_document(p)
+  expect(p.locator('#tech-note-dialog')).not_to_be_visible();self.assertFalse(p.locator('#tech-note-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
   self.assertEqual(len(pending),1)
-  pending[0].fulfill(status=200,content_type='application/json',body=json.dumps(dict(uid=f.uid,writable=True,note=dict(studyUid=f.uid,version=1,text='LATE SECRET',author='SYNTHETIC',createdAt='2026-09-09T00:00:00Z'))))
-  expect(p.locator('#tech-note-text')).to_have_value('');expect(p.locator('#tech-note-dialog')).not_to_be_visible()
+  release_after_end(pending[0],status=200,content_type='application/json',body=json.dumps(dict(uid=f.uid,writable=True,note=dict(studyUid=f.uid,version=1,text='LATE SECRET',author='SYNTHETIC',createdAt='2026-09-09T00:00:00Z'))))
+  expect(p.locator('#tech-note-text')).to_have_value('');expect(p.locator('#tech-note-dialog')).not_to_be_visible();self.assertFalse(p.locator('#tech-note-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
 
  def test_note_02_real_save_reopen_reader_and_failed_input(self):
   f=self.fixture();p=self.login('tech');self.select(p,f)
@@ -110,11 +111,14 @@ class TechNoteE2E(WorklistE2E):
   expect(reader.locator('#tech-note-save')).to_be_disabled();expect(reader.locator('#tech-note-text')).to_have_value('SYNTHETIC revised')
   p.locator('#tech-note-text').fill('UNSAVED');p.once('dialog',lambda d:d.dismiss());p.locator('#tech-note-close').click()
   expect(p.locator('#tech-note-dialog')).to_be_visible()
-  p.evaluate("() => {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-  expect(p.locator('#tech-note-dialog')).not_to_be_visible();expect(p.locator('#tech-note-text')).to_have_value('')
+  end_document(p)
+  expect(p.locator('#tech-note-dialog')).not_to_be_visible();self.assertFalse(p.locator('#tech-note-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog');expect(p.locator('#tech-note-text')).to_have_value('')
 
  def test_note_05_reading_workspace_report_return(self):
-  f=self.fixture();self.assertEqual(self.write(f,'SYNTHETIC reading context note').status,201)
+  # The shared seed's narrow pixel range cannot satisfy this image-readiness
+  # oracle. Use the same contrast phantom as the reading workspace cases.
+  f=synthetic_ct(self.stack,'U5NOTE'+uuid.uuid4().hex[:12],'NOTE-RETURN','20220102',slices=1)
+  self.assertEqual(self.write(f,'SYNTHETIC reading context note').status,201)
   p=self.login();self.select(p,f);p.locator('#m-reading').click()
   expect(p.locator('#reading-status')).to_have_text('영상 작업공간 연결됨',timeout=60000)
   frame=p.locator('#reading-frame').element_handle().content_frame();canvas_ready(frame,1)

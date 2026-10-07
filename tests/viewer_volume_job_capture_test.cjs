@@ -1,3 +1,4 @@
+const { pageDefaults, response: sessionResponse }=require('./viewer_session_fixture.cjs');
 // TEST-VOLUME-JOB: browser-side snapshot capture over the real viewer-volume-job.js.
 // The v7 layout (Hanging Protocol 1x1/1x2/2x2 plus the existing 1x3/3x1) is chosen here,
 // so the grid, the vacancy cells, the per-cell orientation and the version selection are
@@ -41,7 +42,7 @@ const frameHelper=(size={width:256,height:256})=>({cell:(g,measure)=>{measure(si
 // cell, null a vacancy, and {normal} a plane whose request carries no orientation at all.
 // `rects` places the cells in explicit fractional rectangles instead of the uniform grid,
 // which is what a merged screen is; without it every cell fills its own grid position.
-function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null,curved,path,mip}={}){
+function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null,curved,path,mip,setLayout}={}){
   // The curved tool's own capture rules are proved in viewer_volume_curved_dom_test.py; here it
   // is the capability shape this module consumes: capture() on a target, dirty() without one.
   // The 3D path tool (viewer_volume_path_dom_test.py) is consumed through the same shape, and so is
@@ -65,7 +66,7 @@ function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,
     ?{capture:()=>{if(cells.some(c=>c==='frame'))throw Error('표식 입력을 마친 뒤 저장하세요.');return marks;},dirty:()=>dirtyMarks}
     :undefined;
   return context.window.kinCreateVolumeJob({
-    grid:{getState:()=>({layout:{numRows:rows,numCols:cols,layoutType:'grid'},viewports,activeViewportId:'vp-'+active})},
+    grid:{getState:()=>({layout:{numRows:rows,numCols:cols,layoutType:'grid'},viewports,activeViewportId:'vp-'+active}),setLayout},
     cs:{getCornerstoneViewport:id=>lookup.get(id)},
     ds:{getActiveDisplaySets:()=>[{StudyInstanceUID:STUDY,SeriesInstanceUID:SERIES,displaySetInstanceUID:SET,
       images:SOPS.map(sop=>({SOPInstanceUID:sop,SOPClassUID:'1.2.840.10008.5.1.4.1.1.2'}))}]},
@@ -560,12 +561,12 @@ async function mipSaveWorld(){
   if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};
   else if(url===jobs&&options.method==='POST'){const sent=JSON.parse(options.body);posts.push(sent);body={id:sent.id,snapshotVersion:sent.snapshot.version};}
   else if(url.startsWith(jobs+'?'))body={jobs:[]};
-  return {status:body?200:404,ok:!!body,json:async()=>body};};
+  return sessionResponse(body?200:404,body);};
  const sandbox={document:{createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
   location:{search:'?StudyInstanceUIDs='+STUDY,origin:'https://kin.test'},fetch,crypto,AbortController,URL,URLSearchParams,setTimeout,clearTimeout,clearInterval,
   setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},addEventListener(){},removeEventListener(){},
   kinCreateVolumeJob:real,kinMprMarks:marks,kinVolumeMipJob:mip};
- sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ sandbox.window=sandbox.top=sandbox;pageDefaults(sandbox,fetch);const realm=vm.createContext(sandbox);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
  const panel=sandbox.kinViewerJobs({viewportGridService:parts.grid,cornerstoneViewportService:parts.cs,displaySetService:parts.ds},{scope:()=>({})});
  panel.mount();const command=sandbox.kinViewerJobCommand,idle=async()=>{for(let n=0;n<200&&command.busy();n++)await new Promise(r=>setTimeout(r,0));};
@@ -896,12 +897,12 @@ async function batchSaveWorld(){
    if(network.lose){network.lose=false;const error=new Error('receipt lost after commit');error.name='AbortError';throw error;}
    body={id:sent.id,snapshotVersion:sent.snapshot.version};
   }else if(url.startsWith(jobs+'?'))body={jobs:rows.map(row=>({...row}))};
-  return {status:body?200:404,ok:!!body,json:async()=>body};};
+  return sessionResponse(body?200:404,body);};
  const sandbox={document:{createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
   location:{search:'?StudyInstanceUIDs='+STUDY,origin:'https://kin.test'},fetch,crypto,AbortController,URL,URLSearchParams,setTimeout,clearTimeout,clearInterval,
   setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},addEventListener(){},removeEventListener(){},
   kinCreateVolumeJob:real,kinVolumeMipJob:mip,KinVolumeMipJob:require('../worklist-v0/hpacs-lite/volume-mip-job.js')};
- sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ sandbox.window=sandbox.top=sandbox;pageDefaults(sandbox,fetch);const realm=vm.createContext(sandbox);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
  const panel=sandbox.kinViewerJobs({viewportGridService:parts.grid,cornerstoneViewportService:parts.cs,displaySetService:parts.ds},{scope:()=>({})});
  panel.mount();const command=sandbox.kinViewerJobCommand,idle=async()=>{for(let n=0;n<200&&command.busy();n++)await new Promise(r=>setTimeout(r,0));};
@@ -971,14 +972,14 @@ async function printWorld({versions,present={},answer=(file,s)=>PRINT_FILES[file
   setTimeout(()=>{let failed;try{failed=answer(file,sandbox)==='error';}catch(_){failed=true;}(failed?script.onerror:script.onload)?.();},0);}};
  const rows=versions.map((version,i)=>({id:'00000000-0000-4000-8000-'+String(i).padStart(12,'0'),title:'Job v'+version,description:'',snapshotVersion:version,hidden:false,authorActor:'dr.synthetic',authorSub:'u1',createdAt:0,revision:1}));
  const jobs='/api/studies/'+STUDY+'/viewer-jobs';
- const base=async url=>{let body=null;if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};else if(url.startsWith(jobs+'?'))body={jobs:rows.map(row=>({...row}))};return {status:body?200:404,ok:!!body,json:async()=>body};};
+ const base=async url=>{let body=null;if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};else if(url.startsWith(jobs+'?'))body={jobs:rows.map(row=>({...row}))};return sessionResponse(body?200:404,body);};
  // A test may stand between the panel and these answers, as the network does.
  const fetch=transport?(url,init={})=>transport(url,init,base):base;
  sandbox={document:{createElement:element,head,querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
   location:{search:'?StudyInstanceUIDs='+STUDY,origin:'https://kin.test'},fetch,crypto,AbortController,URL,URLSearchParams,setTimeout,clearTimeout,clearInterval,
   setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},addEventListener(){},removeEventListener(){},
   kinCreateVolumeJob:capture?()=>({capture,apply(){},resolve(){}}):real,printOpened:[],...present};
- sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ sandbox.window=sandbox.top=sandbox;pageDefaults(sandbox,fetch);const realm=vm.createContext(sandbox);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
  const panel=sandbox.kinViewerJobs({viewportGridService:parts.grid,cornerstoneViewportService:parts.cs,displaySetService:parts.ds},{scope:()=>({})});
  panel.mount();
@@ -999,7 +1000,7 @@ async function printWorld({versions,present={},answer=(file,s)=>PRINT_FILES[file
 // arrived before the request's stream existed, with ERR_FAILED and no resend of its own, so fetch() rejected it with a TypeError before
 // any response. The real viewer-jobs.js api() sends such a read once more; a write, an abort and an HTTP answer are never sent again.
 test('api() sends a read rejected before any response once more, a declared read-only POST too, and never a write, an abort or an HTTP answer',async()=>{
- const sends=[],rejected=()=>Promise.reject(new TypeError('Failed to fetch')),ok=value=>({status:200,ok:true,json:async()=>value});
+ const sends=[],rejected=()=>Promise.reject(new TypeError('Failed to fetch')),ok=value=>sessionResponse(200,value);
  let rule=()=>undefined,factory=null;
  const transport=(url,init,base)=>{sends.push({url,init});const answer=rule(url,init,sends.filter(s=>s.url===url).length);return answer===undefined?base(url):answer;};
  const count=url=>sends.filter(s=>s.url===url).length;
@@ -1009,7 +1010,7 @@ test('api() sends a read rejected before any response once more, a declared read
   answer:(file,s)=>file==='viewer-job-print.js'?void(s.kinViewerJobPrint=args=>{factory=args;return {open(){},openCurrent(){},close(){},destroy(){}};}):PRINT_FILES[file](s)});
  try{
   const account=sends.filter(s=>s.url==='/api/me');
-  assert.ok(account.length>=2,'the rejected account read was sent once more');assert.equal(account[1].init.signal,account[0].init.signal,'on the same request signal');
+  assert.ok(account.length>=2,'the rejected account read was sent once more');assert.ok(account.slice(0,2).every(s=>new Headers(s.init.headers).get('X-KIN-Session')==='S1'),'both attempts stay bound to this document');
   assert.ok(!w.status().includes('Failed to fetch'),w.status());
   rule=()=>undefined;await w.print(12);assert.ok(factory,'the print dialog received the panel api');const api=factory.api;
   // A POST its caller declares read-only (the source lookup) is sent once more, and the declaration never reaches fetch.
@@ -1019,11 +1020,11 @@ test('api() sends a read rejected before any response once more, a declared read
   // A write is never sent again.
   const write='/api/studies/'+STUDY+'/viewer-jobs/00000000-0000-4000-8000-000000000000/revisions';
   rule=url=>url===write?rejected():undefined;
-  await assert.rejects(api(write.slice(4),{method:'POST',body:'{}'}),{name:'TypeError',message:'Failed to fetch'});assert.equal(count(write),1);
+  await assert.rejects(api(write.slice(4),{method:'POST',body:'{}'}),{name:'TypeError',transport:'network'});assert.equal(count(write),1);
   // A read rejected on both sends is sent exactly twice and keeps the browser's own error in this panel.
   const job='/api/studies/'+STUDY+'/viewer-jobs/00000000-0000-4000-8000-000000000000';
   rule=url=>url===job?rejected():undefined;
-  await assert.rejects(api(job.slice(4)),{name:'TypeError',message:'Failed to fetch'});assert.equal(count(job),2);
+  await assert.rejects(api(job.slice(4)),{name:'TypeError',transport:'network'});assert.equal(count(job),2);
   // An abort is never sent again: one while the read was pending, and a rejection that arrives after its caller aborted.
   const held='/api/studies/'+STUDY+'/report-preview',controller=new AbortController();
   rule=(url,init)=>url===held?new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(Object.assign(Error('aborted'),{name:'AbortError'})),{once:true})):undefined;
@@ -1031,10 +1032,18 @@ test('api() sends a read rejected before any response once more, a declared read
   await assert.rejects(pending,{name:'AbortError'});assert.equal(count(held),1);
   const late='/api/studies/'+STUDY+'/viewer-jobs/preview',gone=new AbortController();
   rule=url=>url===late?(gone.abort(),rejected()):undefined;
-  await assert.rejects(api(late.slice(4),{method:'POST',idempotent:true,body:'{}',signal:gone.signal}),{name:'TypeError'});assert.equal(count(late),1);
+  await assert.rejects(api(late.slice(4),{method:'POST',idempotent:true,body:'{}',signal:gone.signal}),{name:'AbortError'});assert.equal(count(late),1);
+  // Cancelling the caller while the second attempt waits must cancel that attempt too.
+  const retried='/api/studies/'+STUDY+'/retried-read',stopRetry=new AbortController();
+  rule=(url,init,n)=>url!==retried?undefined:n===1?rejected():new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(Object.assign(Error('aborted'),{name:'AbortError'})),{once:true}));
+  const retryPending=api(retried.slice(4),{signal:stopRetry.signal});
+  for(let n=0;n<100&&count(retried)<2;n++)await new Promise(setImmediate);
+  assert.equal(count(retried),2);stopRetry.abort();
+  await assert.rejects(retryPending,{name:'AbortError'});
+  assert.equal(count(retried),2);assert.equal(sends.filter(s=>s.url===retried)[1].init.signal.aborted,true);
   // An HTTP answer is final.
   const study='/api/studies/'+STUDY;
-  rule=url=>url===study?{status:503,ok:false,json:async()=>({})}:undefined;
+  rule=url=>url===study?sessionResponse(503,{}):undefined;
   await assert.rejects(api(study.slice(4)),{message:'서버 연결을 확인한 뒤 다시 시도하세요.'});assert.equal(count(study),1);
  }finally{w.stop();}
 });
@@ -1311,7 +1320,7 @@ async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
   list:null,hold:null};
  server.job=server.good=()=>({status:200,body:{id:L_JOB,revision:server.row.revision,snapshotVersion:snapshot.version,snapshot:structuredClone(snapshot)}});
  const jobsPath='/api/studies/'+L_STUDY+'/viewer-jobs';
- const answer=(status,body)=>({status,ok:status>=200&&status<300,json:async()=>body});
+ const answer=sessionResponse;
  const fetch=async url=>{
   calls.push(url);
   if(server.hold)await server.hold(url);
@@ -1323,8 +1332,19 @@ async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
  const w={shows:L_STACK_SOP,apply:[],captured:{version:4,studies:[L_STUDY],cells:[]}};
  // The screen: three orthographic planes (captured by the MPR Job stub) or the stack cells a version 2 restore laid out.
  const views=new Map(),lookup=new Map();
- const stackView=()=>{let index=0;return {type:'stack',getImageIds:()=>['img:'+L_STACK_SOP],getCurrentImageId:()=>'img:'+w.shows,
-  setImageIdIndex:async i=>{index=i;},scroll(){},getTargetImageIdIndex:()=>index,setProperties(){},setCamera(){},render(){},getDefaultActor:()=>({actor:{}})};};
+ // `w.nativeResets` (n): the native viewer sets the cell's stack again just after each of the next n frame applies, so the
+ // cell shows another original (`w.resetShown`) until the next apply; `w.setIndexCalls` counts the applies.
+ // `w.nativeCameraResets` (n): the native viewer resets the cell's camera (zoom and pan; the frame stays) just after each of the
+ // next n camera writes; `w.cameraWrites` counts the writes that carry a camera. `w.stackView` is the last stack cell made, and
+ // its `person(camera)` is the person zooming or panning it.
+ const stackView=()=>{let index=0,camera={};const view={type:'stack',getImageIds:()=>['img:'+L_STACK_SOP],getCurrentImageId:()=>'img:'+(w.resetShown||w.shows),
+  setImageIdIndex:async i=>{index=i;w.setIndexCalls=(w.setIndexCalls||0)+1;w.resetShown=null;
+   if(w.nativeResets>0){w.nativeResets--;setImmediate(()=>{w.resetShown='1.2.99';});}},
+  scroll(){},getTargetImageIdIndex:()=>index,setProperties(){},render(){},getDefaultActor:()=>({actor:{}}),
+  getCamera:()=>structuredClone(camera),
+  setCamera:value=>{camera={...camera,...structuredClone(value)};if(!value.focalPoint)return;w.cameraWrites=(w.cameraWrites||0)+1;
+   if(w.nativeCameraResets>0){w.nativeCameraResets--;setImmediate(()=>{camera={...camera,focalPoint:[9,9,9],parallelScale:50};});}},
+  person:value=>{camera={...camera,...structuredClone(value)};}};w.stackView=view;return view;};
  const grid={active:'vp-0',
   getState:()=>({layout:{numRows:1,numCols:views.size,layoutType:'grid'},viewports:views,activeViewportId:grid.active}),
   setLayout:async opts=>{log.push('setLayout');views.clear();lookup.clear();const n=opts.numRows*opts.numCols;
@@ -1354,7 +1374,7 @@ async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
   addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener(){},
   kinCreateVolumeJob:()=>volumeJob,kinMprMarks:marks,KinVolumeMarks:{normalize:v=>structuredClone(v)},
   cornerstone:{metaData:{get:(type,id)=>type==='instance'&&typeof id==='string'?{StudyInstanceUID:L_STUDY,SeriesInstanceUID:L_STACK_SERIES,SOPInstanceUID:id.slice(4)}:null}}};
- sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ sandbox.window=sandbox.top=sandbox;const page=pageDefaults(sandbox,fetch);const realm=vm.createContext(sandbox);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
  const panel=sandbox.kinViewerJobs({viewportGridService:grid,cornerstoneViewportService:cs,displaySetService:ds},{scope:()=>({})});
  panel.mount();
@@ -1363,7 +1383,7 @@ async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
  assert.equal(typeof sandbox.kinViewerJobLocation?.restore,'function','the location API is exported');
  return Object.assign(w,{c,log,calls,assigned,storage,server,marks,sandbox,planes,
   location:()=>sandbox.kinViewerJobLocation,restore:req=>sandbox.kinViewerJobLocation.restore(req),
-  endSession:()=>listeners.get('storage')({key:'kin-session-ended'}),
+  endSession:page.end,
   status:()=>find(layout,e=>e.id==='kin-viewer-jobs-status').textContent,button:label=>find(layout,e=>e.tagName==='button'&&e.textContent===label),
   gets:()=>calls.filter(u=>u.endsWith('/viewer-jobs/'+L_JOB)).length,stop:()=>panel.stop()});
 }
@@ -1581,6 +1601,53 @@ test('S2-L2a continuation: another study set continues in a new page with a one-
  }finally{pair.stop();}
 });
 
+// S7-U5 fix round H3 (job_03 observed alone twice: the second study's cell showed its first frame when "restored" was
+// reported - the native viewer had set that cell's stack again after the saved frame was applied). A version 1-3 restore
+// reads its cells back once the native viewer has settled; a cell the native viewer moved is applied once more; one that
+// stays moved fails the restore (rolled back); and nothing applies the saved frame again after the restore has reported.
+test('S7-U5 a version 1-3 restore is read back after the native viewer settles: a late reset is applied once more, one that stays is rolled back, nothing re-applies afterwards',async()=>{
+ const w=await locationWorld();
+ try{
+  w.server.job=()=>({status:200,body:{id:L_JOB,revision:1,snapshotVersion:2,snapshot:lStack()}});w.server.row.snapshotVersion=2;
+  w.nativeResets=1;w.setIndexCalls=0;
+  w.button('Restore Job').onclick();await lSettle(600);
+  assert.equal(w.status(),'비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.');
+  assert.deepEqual([w.setIndexCalls,w.resetShown],[2,null],'the cell the native viewer moved was applied once more and shows the saved original');
+  // The person moves the cell afterwards: the saved frame is not applied again.
+  w.resetShown='1.2.98';const calls=w.setIndexCalls;await lSettle(600);
+  assert.deepEqual([w.setIndexCalls,w.resetShown],[calls,'1.2.98'],'no re-apply after the restore reported');
+  // The native reset comes back after the one re-apply: the restore fails and the previous screen is put back.
+  w.resetShown=null;w.planes();w.log.length=0;w.nativeResets=2;
+  w.button('Restore Job').onclick();await lSettle(600);
+  assert.equal(w.status(),'저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요. 입력은 유지됩니다.');
+  assert.deepEqual(w.log,['setLayout','apply:4'],'the saved layout, then the previous screen');
+ }finally{w.stop();}
+});
+
+// S7-U5 review of 8c2cf37 (F-03): the read-back proves each cell's camera too - its focal point (pan) and parallel scale (zoom).
+// A native step that resets only the camera after the saved one was applied (the frame stays) is applied once more; one that
+// stays fails the restore (rolled back); a camera the person changes after the restore has reported is not applied again.
+test('S7-U5 a version 1-3 restore reads each cell\'s camera back: a late camera-only reset is applied once more, one that stays is rolled back, a later zoom is kept',async()=>{
+ const w=await locationWorld();
+ try{
+  const saved=lStack().cells[0].camera,shown=()=>{const c=w.stackView.getCamera();return [c.focalPoint,c.parallelScale];};
+  w.server.job=()=>({status:200,body:{id:L_JOB,revision:1,snapshotVersion:2,snapshot:lStack()}});w.server.row.snapshotVersion=2;
+  w.nativeCameraResets=1;w.cameraWrites=0;w.setIndexCalls=0;
+  w.button('Restore Job').onclick();await lSettle(600);
+  assert.equal(w.status(),'비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.');
+  assert.deepEqual([w.cameraWrites,w.setIndexCalls,shown()],[2,2,[saved.focalPoint,saved.parallelScale]],
+   'the cell whose camera the native viewer reset was applied once more and shows the saved camera');
+  // The person zooms and pans the cell afterwards: the saved camera is not applied again.
+  w.stackView.person({focalPoint:[5,5,5],parallelScale:7});const writes=w.cameraWrites;await lSettle(600);
+  assert.deepEqual([w.cameraWrites,shown()],[writes,[[5,5,5],7]],'no re-apply after the restore reported');
+  // The camera reset comes back after the one re-apply: the restore fails and the previous screen is put back.
+  w.planes();w.log.length=0;w.nativeCameraResets=2;
+  w.button('Restore Job').onclick();await lSettle(600);
+  assert.equal(w.status(),'저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요. 입력은 유지됩니다.');
+  assert.deepEqual(w.log,['setLayout','apply:4'],'the saved layout, then the previous screen');
+ }finally{w.stop();}
+});
+
 test('S2-L2a the Restore Job button keeps its texts and never moves a point, pre-reads or writes a continuation nonce',async()=>{
  const w=await locationWorld();
  try{
@@ -1598,10 +1665,12 @@ test('S2-L2a the Restore Job button keeps its texts and never moves a point, pre
   assert.equal(next.searchParams.get('kinJob'),L_JOB);assert.equal(next.searchParams.get('kinFindingNonce'),null);
   assert.equal(w.storage.size,0);
   assert.equal(w.status(),'저장한 비교 검사를 함께 여는 중…');
-  // A 403 on the button path still ends the panel, as it always did.
+  // An ordinary 403 refuses this restore and preserves the panel for a later attempt.
   w.server.job=()=>({status:403,body:{message:'no'}});
   w.button('Restore Job').onclick();await lSettle();
-  assert.equal(w.status(),'세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.');
+  assert.equal(w.status(),'검사 접근이 거절되었습니다. 접근 권한을 확인하세요. 입력은 유지됩니다.');
+  w.server.job=w.server.good;w.button('Restore Job').onclick();await lSettle();
+  assert.equal(w.status(),'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.');
  }finally{w.stop();}
 });
 
@@ -1700,4 +1769,56 @@ test('S2-L2a marks goTo: exact expected copy, refusals change nothing, a failure
   assert.equal(w.panel.parts.status.textContent,'현재 MPR 원본과 작업 상태를 확인하세요.');
   assert.equal(start.length,3);
  }finally{w.dispose();}
+});
+// S7-U5 (triage P, volume_crosshair 07): a restore parks on its own timers and frames; the end of the viewer's session
+// cancels every one of them (viewer-session.js end()), so the restore's `finally` never runs. The temporary hold on the
+// Crosshairs reset must still be given back at that end, through the session boundary's end hook - and only once, and
+// never on top of a reset handler somebody else installed after a normal finish.
+function crosshairWorld(){
+  const enders=new Set();let ended=false;
+  const boundary={onEnd(run){if(ended)run();else enders.add(run);return ()=>enders.delete(run);},
+    end(){ended=true;for(const run of [...enders]){try{run();}catch(_){}}enders.clear();}};
+  const native=function(){native.calls++;};native.calls=0;
+  const tool={onResetCamera:native};
+  const group={getToolInstance:name=>name==='Crosshairs'?tool:null,getToolOptions:()=>({mode:'Active'})};
+  context.window.KinViewerSessionBoundary=boundary;
+  context.window.cornerstoneTools={ToolGroupManager:{getToolGroup:id=>id==='mpr'?group:null}};
+  return {boundary,enders,native,tool,dispose(){delete context.window.KinViewerSessionBoundary;delete context.window.cornerstoneTools;}};
+}
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+
+test('a restore parked when the session ends gives the Crosshairs reset back at the end, once',async()=>{
+  const x=crosshairWorld();
+  try{
+    const value=world(1,3,PLANES).capture();
+    // The layout change never settles: the restore stays parked as it does on a timer the end cancels.
+    let layouts=0;
+    const job=world(1,3,PLANES,{setLayout:()=>{layouts++;return new Promise(()=>{});}});
+    void job.apply(value,()=>true);
+    await settle();
+    assert.equal(layouts,1,'the restore reached the layout change');
+    assert.notEqual(x.tool.onResetCamera,x.native,'while it restores, the native reset is held');
+    x.tool.onResetCamera();
+    assert.equal(x.native.calls,0,'a held reset does not reach the native handler');
+    x.boundary.end();
+    assert.equal(x.tool.onResetCamera,x.native,'the end gave the native reset back although the restore never finished');
+    assert.equal(x.enders.size,0);
+    x.tool.onResetCamera();
+    assert.equal(x.native.calls,1);
+  }finally{x.dispose();}
+});
+
+test('a restore that finishes releases the hold itself and leaves nothing for the end to undo',async()=>{
+  const x=crosshairWorld();
+  try{
+    const value=world(1,3,PLANES).capture();
+    const job=world(1,3,PLANES,{setLayout:async()=>{throw Error('SYN layout refused');}});
+    await assert.rejects(job.apply(value,()=>true),/SYN layout refused/);
+    assert.equal(x.tool.onResetCamera,x.native,'the finally released the hold');
+    assert.equal(x.enders.size,0,'the release withdrew its end hook');
+    // Another handler installed afterwards is not touched by a later end.
+    const later=function(){};x.tool.onResetCamera=later;
+    x.boundary.end();
+    assert.equal(x.tool.onResetCamera,later);
+  }finally{x.dispose();}
 });

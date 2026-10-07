@@ -835,6 +835,7 @@ class ReportActionsDOMTest(unittest.TestCase):
         from playwright.sync_api import expect
         from critical_result_sender_dom_test import (A, BLOCK, HEADS, HOOK_LINES, INSTITUTION, JS_NAME, P, PRELUDE, RAD,
                                                      REASONS, SETUP, SHIPPED_JS, STUDIES, TAIL, me)
+        from module_session_harness import STANDIN, setup_standin
         origin, owner = 'https://report.test', [INSTITUTION, RAD['sub']]
         sendable = {'sendable': True, 'reason': None, 'source': {**HEADS[A], 'final': True},
                     'recipients': [{key: P[key] for key in ('sub', 'actor', 'name', 'role')}]}
@@ -865,7 +866,9 @@ class ReportActionsDOMTest(unittest.TestCase):
             page.evaluate(SETUP, {'session': me(RAD, ['radiologist']), 'studies': STUDIES, 'app': {A: {'version': 3, 'rs': 'A'}},
                                   'names': {}, 'mode': {'serverMode': True, 'offline': False}})
             page.add_script_tag(url=origin + '/worklist/hpacs-lite/' + JS_NAME)
-            page.add_script_tag(content=PRELUDE + BLOCK + TAIL.replace('HOOK', '\n'.join(HOOK_LINES)))
+            # The sender block follows the page gate: the shipped gate and transport with the sender test's stand-in authority.
+            setup_standin(page)
+            page.add_script_tag(content=PRELUDE + STANDIN + BLOCK + TAIL.replace('HOOK', '\n'.join(HOOK_LINES)))
             mark = page.locator('#b-mark-cvr')
             expect(mark).to_be_disabled()
             page.evaluate('u => window.synPick(u)', A)

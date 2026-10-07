@@ -117,6 +117,16 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
 
     def test_02_migrate_boot_restart_preserves_data_and_history(self):
         """TEST-C1-02/03: real Prisma engines, empty migration, auth guard and exec signal path."""
+        # This image-only fixture has no realm server. Exercise the supported operator import with an empty realm
+        # before boot; onModuleInit must see its real completion marker and never contact the unreachable provider.
+        ops.run(["docker", "run", "--rm", "--network", "container:" + self.db,
+                 "-e", "DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin",
+                 "--entrypoint", "node", self.image_id, "-e",
+                 "require('child_process').execFileSync('node',['node_modules/prisma/build/index.js','migrate','deploy'],{stdio:'inherit'});"
+                 "const {PrismaService}=require('./dist/prisma.service');const db=new PrismaService();"
+                 "require('./dist/member-rights-import').importMemberRights(db,{listUsers:async()=>({total:0,users:[]})})"
+                 ".finally(()=>db.$disconnect()).catch(()=>process.exit(1));"])
+        self.assertEqual(self.psql('SELECT id FROM "MemberRightsImport";'), "realm-v1")
         name = self.api("healthy")
         # A failed migration assertion must not leave port3000 occupied for the drain test.
         self.addCleanup(ops.run, ["docker", "stop", "--time", "10", name])
@@ -131,7 +141,9 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
                           '20260908081500_connect_gate', '20260908120000_manual_sr',
                           '20260908180000_viewer_jobs', '20260908200000_manual_sr_recovery',
                           '20260909060000_saved_filter_organization', '20260909100000_tech_note_revision',
-                           '20260909180000_worklist_columns', '20260909220000_favorite_workspace', '20260909233000_study_tags', '20260910000500_reader_assignment', '20260910013000_reading_preferences', '20260910023000_reading_appearance', '20260910044500_workspace_shortcuts', '20260910090000_filter_folders', '20260910100000_shared_filters', '20260910110000_study_consultation', '20260910123000_consultation_predicates', '20260910130000_study_access', '20260910133000_study_access_subject', '20260912100000_hanging_protocol_preferences', '20260917120000_findings', '20260920120000_report_citations', '20260921120000_report_structure', '20260924120000_order_accession', '20260924130000_gateway_receipt', '20260924140000_gateway_retry_request', '20260926120000_study_questions', '20260926130000_study_image_requests', '20260928120000_critical_result', '20260928130000_reader_assignment_scope', '20260930120000_audit_log_append_only'])
+                           '20260909180000_worklist_columns', '20260909220000_favorite_workspace', '20260909233000_study_tags', '20260910000500_reader_assignment', '20260910013000_reading_preferences', '20260910023000_reading_appearance', '20260910044500_workspace_shortcuts', '20260910090000_filter_folders', '20260910100000_shared_filters', '20260910110000_study_consultation', '20260910123000_consultation_predicates', '20260910130000_study_access', '20260910133000_study_access_subject', '20260912100000_hanging_protocol_preferences', '20260917120000_findings', '20260920120000_report_citations', '20260921120000_report_structure', '20260924120000_order_accession', '20260924130000_gateway_receipt', '20260924140000_gateway_retry_request', '20260926120000_study_questions', '20260926130000_study_image_requests', '20260928120000_critical_result', '20260928130000_reader_assignment_scope', '20260930120000_audit_log_append_only', '20261004120000_draft_revision_session_entry',
+                          '20261005120000_idp_session_end', '20261005130000_member_isolation',
+                          '20261006120000_member_isolation_call', '20261007120000_provider_change', '20261007170000_member_db_rights', '20261007200000_designation_subjects'])
         self.psql("CREATE TABLE c1_probe(value text); INSERT INTO c1_probe VALUES ('preserved');")
         ops.run(["docker", "exec", name, "node", "-e",
             "fetch('http://127.0.0.1:3000/api/me').then(r=>{if(r.status!==401)process.exit(1)})"

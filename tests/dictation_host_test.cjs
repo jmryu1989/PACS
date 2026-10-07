@@ -3,6 +3,7 @@
 // engine or speech. Real Chromium capture is U4b; page integration is report_dictation_host_dom_test.py.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const {install} = require('./module_session_harness.cjs');
 const D = require('../worklist-v0/hpacs-lite/dictation.js');
 const Session = require('../worklist-v0/hpacs-lite/dictation-session.js');
 const Capture = require('../worklist-v0/hpacs-lite/dictation-capture.js');
@@ -32,7 +33,8 @@ function fakeMedia({ denied = false, media = null, secure = true, gum = true, ra
   class Context {
     constructor(options) { rec.contexts.push(this); this.options = options; this.sampleRate = rate; this.destination = {};
       this.audioWorklet = { addModule: async path => { rec.module = path; } }; }
-    async resume() {}
+    async resume() { this.resumes=(this.resumes||0)+1; }
+    async suspend() { this.suspends=(this.suspends||0)+1; }
     async close() { this.closed = true; }
     createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
   }
@@ -59,7 +61,7 @@ function fakeFetch() {
     net.calls.push(call);
     return new Promise((resolve, reject) => {
       init.signal.addEventListener('abort', () => { call.aborted = true; reject(new DOMException('aborted', 'AbortError')); });
-      call.respond = (status, raw) => resolve({ status, ok: status >= 200 && status < 300, text: async () => raw });
+      call.respond = (status, raw, code) => resolve({ status, ok: status >= 200 && status < 300, headers:new Headers(code?{'X-KIN-Auth-Code':code}:{}), text: async () => raw });
       call.reject = error => reject(error);
     });
   };
@@ -87,6 +89,7 @@ function editor() {
     if (e.refuse) return false;
     const v = e.values[ins.field];
     e.values[ins.field] = v.slice(0, ins.caret.end) + ins.text + v.slice(ins.caret.end);
+    e.edited();
     return true;
   };
   return e;
@@ -104,16 +107,18 @@ function spySession() {
   };
   return spy;
 }
-function setup({ capability = CAP, media = {}, capture = Capture } = {}) {
+function setup({ capability = CAP, media = {}, capture = Capture, hashText } = {}) {
   const m = fakeMedia(media), ed = editor(), net = fakeFetch(), timers = fakeTimers(), spy = spySession();
+  const lifecycle = install(net.fetch);
+  ed.edited = () => lifecycle.gate.edited();
   let logouts = 0;
   const c = D.createController({ session: spy, capture, env: m.env, apiBase: '/api', fetch: net.fetch,
     // The start gate is the editor gate plus the server connection (main.html dictationBlock).
     readContext: ed.readContext, insert: ed.insert, block: () => (ed.blocked ? '막힘' : ed.serverDown ? '서버 없음' : null),
     busy: () => ed.busy, placement: (pin, text) => `${pin.field}@${pin.caret.end}:${text.length}`,
-    onUnauthorized: () => { logouts += 1; }, timers });
+    onUnauthorized: () => { logouts += 1; }, timers, hashText });
   c.setServerCapability(capability);
-  return { c, m, ed, net, timers, spy, logouts: () => logouts };
+  return { c, m, ed, net, timers, spy, lifecycle, logouts: () => logouts };
 }
 async function toUpload(t) {
   await t.c.start();
@@ -206,10 +211,10 @@ test('record -> stop -> one bounded request -> review; the report is untouched u
   assert.equal(t.net.calls.length, 1);
   const call = t.net.calls[0];
   assert.equal(call.url, '/api/studies/' + encodeURIComponent(UID) + '/dictation');
-  assert.deepEqual({ method: call.init.method, credentials: call.init.credentials, cache: call.init.cache,
-    redirect: call.init.redirect, headers: call.init.headers },
+  assert.deepEqual({ method: call.init.method, credentials: call.init.credentials ?? "same-origin", cache: call.init.cache,
+    redirect: call.init.redirect, headers: Object.fromEntries(new Headers(call.init.headers)) },
   { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
-    headers: { 'Content-Type': 'audio/wav', 'X-KIN-CSRF': '1' } });
+    headers: { 'content-type': 'audio/wav', 'x-kin-csrf': '1', 'x-kin-session': 'SYN-MODULE-SESSION' } });
   assert.equal(call.sent.toString('ascii', 0, 4), 'RIFF'); assert.equal(call.sent.length, 48);
   assert.deepEqual([...call.sent.subarray(44)], [1, 0, 255, 127]);
   assert.ok(call.init.body.every(b => b === 0), 'the page keeps no audio once fetch() has copied it');
@@ -303,7 +308,14 @@ test('a lost connection closes an open microphone but never costs a reviewed tra
   const rev = setup(); await toReview(rev);
   rev.ed.serverDown = true; rev.c.refresh();
   assert.equal(rev.c.snapshot().state, 'review');
-  assert.equal((await rev.c.insert()).inserted, true, 'inserting is local, like a template');
+  const before=rev.ed.values.findings, text=rev.c.snapshot().text, requests=rev.net.calls.length;
+  assert.equal((await rev.c.insert()).inserted, false);
+  assert.equal(rev.c.view().controls.insert, 'disabled');
+  assert.equal(rev.ed.values.findings,before);assert.equal(rev.ed.inserts.length,0);
+  assert.equal(rev.net.calls.length,requests);assert.equal(rev.c.snapshot().text,text);
+  rev.ed.serverDown=false;rev.c.refresh();
+  assert.equal(rev.c.view().controls.insert, 'enabled');
+  assert.equal((await rev.c.insert()).inserted, true);
 });
 
 test('automatic capture cap sends once without Stop and says so', async () => {
@@ -362,10 +374,10 @@ test('server and transport failures end in failed with the report unchanged', as
   assert.equal(exact.c.snapshot().text.length, D.TEXT_CAP);
 });
 
-test('401 ends the run and signs out once; the client timeout aborts and a late answer is ignored', async () => {
+test('plain 401 fails only the run; the client timeout aborts and a late answer is ignored', async () => {
   const t = setup(); const call = await toUpload(t);
   call.respond(401, ''); await flush();
-  assert.equal(t.c.snapshot().state, 'failed'); assert.equal(t.logouts(), 1);
+  assert.equal(t.c.snapshot().state, 'failed'); assert.equal(t.logouts(), 0);assert.equal(t.lifecycle.gate.state(), 'active');
 
   const u = setup(); const late = await toUpload(u);
   u.timers.fire(); await flush();
@@ -457,4 +469,75 @@ test('a second Dictate press while the first is starting starts nothing', async 
   const a = t.c.start(), b = t.c.start();
   await Promise.all([a, b]); await flush();
   assert.equal(t.m.gumCalls, 1); assert.equal(t.m.contexts.length, 1);
+});
+
+// U5S-REQ-11/12/24: a cancelled logout keeps microphone work and ignores the old upload.
+test('preparation pauses recording and resumes it with the same edit pin',async()=>{
+  const t=setup();await t.c.start();const pin=t.c.snapshot().pin;
+  const p=t.lifecycle.gate.prepare({});assert.equal(t.m.contexts[0].suspends,1);
+  assert.equal(t.c.snapshot().state,'recording');assert.equal(t.net.calls.length,0);
+  t.lifecycle.gate.cancelPreparation(p);assert.deepEqual(t.c.snapshot().pin,pin);
+  assert.equal(t.c.snapshot().state,'recording');t.c.cancel();assert.ok(t.m.allEnded());
+});
+test('preparation during upload resumes from owned RAM audio and never accepts the old result',async()=>{
+  const t=setup(),old=await toUpload(t),p=t.lifecycle.gate.prepare({});await flush();
+  old.respond(200,REPLY('OLD'));await flush();assert.equal(t.c.snapshot().text,'');
+  t.lifecycle.gate.cancelPreparation(p);await flush();assert.equal(t.net.calls.length,2);
+  assert.deepEqual(t.net.calls[1].sent,old.sent);
+  t.net.calls[1].respond(200,REPLY('RESUMED'));await flush();
+  assert.equal(t.c.snapshot().state,'review');assert.equal(t.c.snapshot().text,'RESUMED');
+  assert.deepEqual(t.ed.inserts,[]);t.c.cancel();
+});
+test('preparation during microphone acquisition resumes the owned device without another permission request',async()=>{
+  let grant;const t=setup({media:{media:()=>new Promise(r=>grant=r)}});
+  const starting=t.c.start();await until(()=>!!grant,'permission request');
+  const p=t.lifecycle.gate.prepare({});grant(t.m.stream);await starting;
+  assert.equal(t.c.snapshot().state,'requesting-permission');
+  t.lifecycle.gate.cancelPreparation(p);await flush();
+  assert.equal(t.c.snapshot().state,'recording');assert.equal(t.m.gumCalls,1);t.c.cancel();
+});
+test('coded session end drops a pending upload and releases all recording resources',async()=>{
+  const t=setup(),call=await toUpload(t);call.respond(401,'','AUTH_SESSION_ENDED');await flush();
+  assert.equal(t.lifecycle.gate.state(),'ending');assert.equal(t.c.snapshot().state,'cancelled');
+  assert.deepEqual(t.ed.inserts,[]);assert.ok(t.m.allEnded());assert.equal(t.logouts(),0);
+});
+
+// U5MOD-F01: the page fires input -> gate.edited() inside the synchronous write.
+test('Insert returns its result and emits completion after its own editor write', async () => {
+  const t = setup(); await toReview(t);
+  const states = []; t.c.subscribe(() => states.push(t.c.view().state));
+  const result = await t.c.insert();
+  assert.equal(result.inserted, true);
+  assert.equal(result.field, 'findings');
+  assert.equal(t.ed.inserts.length, 1);
+  assert.equal(t.c.view().state, 'inserted');
+  assert.equal(states.at(-1), 'inserted');
+});
+
+test('a study change during the start hash releases the owned start flag', async () => {
+  let release, once = true;
+  const t = setup({hashText: async value => {
+    if (once) { once = false; await new Promise(resolve => { release = resolve; }); }
+    return Session.hashText(value);
+  }});
+  const first = t.c.start();
+  t.ed.uid = 'study-B'; t.ed.selectionSeq++;
+  t.lifecycle.gate.select('study-B'); release(); await first;
+  assert.equal(t.c.snapshot().pending, false);
+  await t.c.start();
+  assert.equal(t.c.snapshot().state, 'recording');
+  assert.equal(t.m.gumCalls, 1);
+  t.c.cancel();
+});
+
+test('HD06 read-only report disables Insert and preserves review without a failed outcome', async () => {
+  const t = setup(); await toReview(t, 'SYN retained transcript');
+  t.ed.blocked = true; t.c.refresh();
+  assert.equal(t.c.snapshot().state, 'review');
+  assert.equal(t.c.view().text, 'SYN retained transcript');
+  assert.equal(t.c.view().controls.insert, 'disabled');
+  assert.equal(t.ed.inserts.length, 0);
+  t.ed.blocked = false; t.c.refresh();
+  assert.equal(t.c.view().controls.insert, 'enabled');
+  assert.equal((await t.c.insert()).inserted, true);
 });

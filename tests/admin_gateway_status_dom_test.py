@@ -1,3 +1,4 @@
+# S7-U5: session termination cases moved to admin_session_dom_test.py (named signals, all panels and delayed navigation).
 # coding: utf-8
 """REQ-S5-U6a-GATEWAY-STATUS -> RISK-S5-U6a-TENANT/FALSE-DELIVERY/OVERSIZED-CLAIM -> TEST-S5-U6a-DOM.
 
@@ -119,10 +120,11 @@ ORIGIN = "https://members.test"
 BASE = "/worklist/hpacs-lite/"
 PAGE_PATH = BASE + "admin.html"
 ARRIVALS_PATH = BASE + "study-arrivals.js"
-SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "study-access-admin.js", "study-arrivals.js")}
+SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "work-context.js", "session-transport.js", "study-access-admin.js", "study-arrivals.js")}
 INDEX = "<!doctype html><title>SYN index</title><p id=index>SYN INDEX</p>"
 INSTITUTION = "SYN-INST-A"
-ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"], "institution": INSTITUTION}
+ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"], "institution": INSTITUTION,
+      "sessionId": "SYN-SESSION-ADMIN"}
 MEMBERS = {"page": 1, "pageSize": 25, "total": 1, "pendingCount": 0, "users": [
     {"id": "SYN-U-1", "username": "syn-member", "email": "syn-member@members.test", "emailVerified": True,
      "name": "SYN Member", "institution": INSTITUTION, "roles": ["technician"], "enabled": True, "approvalState": "APPROVED"}]}
@@ -137,8 +139,9 @@ INIT = """(() => {
   window.__jsonDone = [];
   window.__jsonHold = [];
   window.__jsonHeld = [];
-  const json = Response.prototype.json;
-  Response.prototype.json = function () {
+  for (const method of ['json', 'text']) {
+  const json = Response.prototype[method];
+  Response.prototype[method] = function () {
     const path = new URL(this.url).pathname;
     let read = json.call(this);
     const hold = window.__jsonHold.indexOf(path);
@@ -151,6 +154,7 @@ INIT = """(() => {
     }
     return read.finally(() => { window.__jsonDone.push(path); });
   };
+  }
   window.__fetchDone = [];
   const fetch0 = window.fetch;
   window.fetch = function (input, init) {
@@ -430,6 +434,15 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         self.admin_replies, self.access_replies, self.held_access, self.access_calls = [], [], [], []
         self.scripts = dict(SCRIPTS)
         self.held_me, self.cancel_moves = None, False
+        self.context = None
+        self.fresh_context()
+
+    def fresh_context(self):
+        """A new browser context for an independent case (S7-U5 §0.C 6): a logout's end state stays in the origin's storage
+        until the next explicit login, so a case that follows a logout in the same context would open a closed page.
+        The earlier context is closed; counters and queues carry on."""
+        if self.context is not None:
+            self.context.close()
         self.context = self.browser.new_context(timezone_id="UTC", viewport={"width": 1280, "height": 900})
         self.context.add_init_script(INIT)
         self.page = self.context.new_page()
@@ -1029,26 +1042,6 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         expect(self.item("1.2.12").locator(".gw-note")).to_have_text("Retry Requested (%s)" % shown(7))
         self.assertEqual("retry_requested", self.row("1.2.12")["status"])
 
-    def test_07_a_401_empties_the_section_before_logout_and_drops_late_answers(self):
-        self.open()
-        self.refresh((200, FIVE))
-        self.retry_replies.append("hold")
-        self.item("1.2.12").locator("button").click()
-        self.wait_until(lambda: len(self.held_retries) == 1, "the retry POST")
-        self.held_logouts = []
-        self.study_replies.append((401, {"message": SERVER_WORDING}))
-        self.page.locator("#gateway-refresh").click()
-        self.wait_until(lambda: self.logouts == 1, "the logout request")
-        summary = self.summary()
-        self.assertEqual((0, True, False, False), (summary["rows"], summary["refreshDisabled"], summary["busy"], summary["messageShown"]))
-        self.held_retries.pop().fulfill(json={"studyUid": "1.2.12", "result": "requested", "requestedAt": at(7)})
-        self.wait_until(lambda: self.json_done(retry_path("1.2.12")) == 1, "the late retry answer read")
-        self.assertEqual(0, self.summary()["rows"], "nothing is painted after the session ended")
-        self.held_logouts.pop().fulfill(status=204, body="")
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        expect(self.page.locator("#index")).to_have_text("SYN INDEX")
-        self.assertEqual(1, self.logouts)
-        self.assertEqual(1, [c["path"] for c in self.calls].count(BASE + "index.html"), "one navigation")
 
     def test_08_wording_sizes_keyboard_and_no_dialog(self):
         self.open()
@@ -1139,478 +1132,13 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         ], result["summaries"])
         self.assertTrue(result["frozen"])
 
-    def test_10_log_out_and_a_member_401_empty_the_section_before_the_logout_answers(self):
-        for how in ("Log out", "member list 401"):
-            with self.subTest(how=how):
-                self.open()
-                self.list_and_retry_in_flight()
-                logouts, moves = self.logouts, self.moves()
-                self.held_logouts = []
-                if how == "Log out":
-                    self.page.locator("#logout").click()
-                else:
-                    self.member_replies.append((401, {"message": SERVER_WORDING}))
-                    self.page.locator("#refresh").click()
-                self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
-                self.assert_closed()
-                self.assert_members_closed()
-                self.release_late()
-                self.assert_nothing_leaves()
-                # Log out again adds nothing; after the POST answers, auth.js's end broadcast reaches this page too.
-                self.page.locator("#logout").click()
-                self.assertEqual((logouts + 1, moves), (self.logouts, self.moves()))
-                self.held_logouts.pop().fulfill(status=204, body="")
-                self.held_logouts = None
-                self.arrive_at_index()
-                self.assert_closed_away(logouts + 1, moves + 1)
 
-        # Control: Log out wired to KinAuth.logout() with no end listener (cafc72c) keeps the list and the control
-        # while the POST is out.
-        self.open(edited([(LOGOUT_WIRING, CAFC72C_LOGOUT_WIRING), (END_LISTENERS, "")]))
-        self.refresh((200, FIVE))
-        logouts = self.logouts
-        self.held_logouts = []
-        self.page.locator("#logout").click()
-        self.wait_until(lambda: self.logouts == logouts + 1, "the control's logout request")
-        summary = self.summary()
-        self.assertEqual((6, False, "gstate observed"), (summary["rows"], summary["refreshDisabled"], summary["stateClass"]))
-        self.held_logouts.pop().fulfill(status=204, body="")
-        self.held_logouts = None
-        self.arrive_at_index()
 
-    def test_11_another_tabs_end_empties_the_section_without_a_logout_post(self):
-        other = self.other_tab()
-        # Control first, both signals: the page without the two listeners keeps the list and stays.
-        self.open(variant(END_LISTENERS))
-        self.page.evaluate(PROBE)
-        self.refresh((200, FIVE))
-        moves, logouts = self.moves(), self.logouts
-        self.send(other, CHANNEL_SIGNAL)
-        self.send(other, STORAGE_SIGNAL)
-        self.page.wait_for_timeout(200)
-        summary = self.summary()
-        self.assertEqual((6, False, moves, logouts), (summary["rows"], summary["refreshDisabled"], self.moves(), self.logouts))
 
-        for signal, channel_here in ((CHANNEL_SIGNAL, True), (STORAGE_SIGNAL, False)):
-            with self.subTest(signal="BroadcastChannel" if channel_here else "storage, no BroadcastChannel here"):
-                if not channel_here:
-                    # From here on this tab has no BroadcastChannel: the storage pair is the only signal it can get.
-                    self.page.add_init_script("delete window.BroadcastChannel;")
-                self.open(ADMIN_HTML)
-                self.assertEqual(channel_here, self.page.evaluate("() => typeof BroadcastChannel === 'function'"))
-                self.page.evaluate(PROBE)
-                self.list_and_retry_in_flight()
-                moves, logouts, reads = self.moves(), self.logouts, self.count("GET", "/api/admin/users")
-                self.cancel_moves = True
-                self.send(other, signal)
-                self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
-                self.assert_closed()
-                self.assert_members_closed()
-                self.release_late()
-                self.assert_nothing_leaves()
-                # The signals again: no second move, no logout POST, no request.
-                for again in (CHANNEL_SIGNAL, STORAGE_SIGNAL) if channel_here else (STORAGE_SIGNAL,):
-                    self.send(other, again)
-                self.page.wait_for_timeout(200)
-                self.assertEqual(reads, self.count("GET", "/api/admin/users"))
-                self.assert_closed()
-                self.assert_closed_away(logouts, moves + 1)
-                self.cancel_moves = False
 
-    def test_12_an_end_while_the_session_is_read_starts_nothing(self):
-        other = self.other_tab()
-        for status in (200, 401):
-            with self.subTest(me=status):
-                moves, logouts, reads = self.moves(), self.logouts, self.count("GET", "/api/admin/users")
-                self.held_me, self.cancel_moves = [], True
-                self.page.goto(ORIGIN + PAGE_PATH)
-                self.wait_until(lambda: len(self.held_me) == 1, "the session read")
-                self.page.evaluate(PROBE)
-                self.send(other, CHANNEL_SIGNAL)
-                self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
-                me, self.held_me = self.held_me.pop(), None
-                if status == 200:
-                    me.fulfill(json=ME)
-                    self.wait_until(lambda: self.json_done("/api/me") == 1, "the session answer read")
-                else:
-                    me.fulfill(status=401, json={"message": SERVER_WORDING})
-                    self.wait_until(lambda: self.fetch_done("/api/me") == 1, "the session answer")
-                self.page.wait_for_timeout(200)
-                summary = self.summary()
-                self.assertEqual((True, 0, "Not Loaded", "Counts Unknown"),
-                                 (summary["refreshDisabled"], summary["rows"], summary["state"], summary["counts"]))
-                self.assertEqual(["", ""], self.page.evaluate(
-                    "() => [document.querySelector('#actor').textContent, document.querySelector('#message').textContent]"))
-                self.assert_members_closed()
-                self.assertEqual(reads, self.count("GET", "/api/admin/users"))
-                self.assert_closed_away(logouts, moves + 1)
-                self.cancel_moves = False
 
-    def test_13_an_older_reads_401_ends_the_session_whatever_the_order(self):
-        self.open()
-        self.refresh((200, FIVE))
-        self.retry_replies.append("hold")
-        self.item("1.2.12").locator("button").click()
-        self.wait_until(lambda: len(self.held_retries) == 1, "the retry POST")
-        older, newer = self.two_reads()
-        logouts, moves = self.logouts, self.moves()
-        self.held_logouts = []
-        older.fulfill(status=401, json={"message": SERVER_WORDING})
-        self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
-        self.assert_closed()
-        done = self.json_done("/api/studies")
-        newer.fulfill(json=FIVE)
-        self.wait_until(lambda: self.json_done("/api/studies") > done, "the newer answer read")
-        self.assert_closed()
-        # A second 401 (the retry answer) adds no POST and no move.
-        self.held_retries.pop().fulfill(status=401, json={"message": SERVER_WORDING})
-        self.wait_until(lambda: self.fetch_done(retry_path("1.2.12")) == 1, "the retry 401")
-        self.assert_closed()
-        self.assertEqual((logouts + 1, moves), (self.logouts, self.moves()))
-        self.held_logouts.pop().fulfill(status=204, body="")
-        self.held_logouts = None
-        self.arrive_at_index()
-        self.assert_closed_away(logouts + 1, moves + 1)
 
-        # Control: the 401 judged after the sequence check (cafc72c) drops the older read's 401 with its answer.
-        self.open(edited([(GATEWAY_401, CAFC72C_GATEWAY_401), (AFTER_SEQUENCE, CAFC72C_AFTER_SEQUENCE)]))
-        self.refresh((200, FIVE))
-        older, newer = self.two_reads()
-        logouts = self.logouts
-        done = self.fetch_done("/api/studies")
-        older.fulfill(status=401, json={"message": SERVER_WORDING})
-        self.wait_until(lambda: self.fetch_done("/api/studies") > done, "the control's older 401")
-        summary = self.summary()
-        self.assertEqual((6, False, logouts), (summary["rows"], summary["refreshDisabled"], self.logouts))
-        done = self.json_done("/api/studies")
-        newer.fulfill(json=FIVE)
-        self.wait_until(lambda: self.json_done("/api/studies") > done, "the control's newer answer read")
-        summary = self.summary()
-        self.assertEqual((6, False, logouts), (summary["rows"], summary["refreshDisabled"], self.logouts))
 
-    def test_14_member_answers_read_after_the_end_are_dropped(self):
-        other = self.other_tab()
-        for how in ("Log out", "another tab", "a Gateway 401 over the membership dialog"):
-            with self.subTest(how=how):
-                self.open()
-                self.page.evaluate(PROBE)
-                logouts, moves = self.logouts, self.moves()
-                if how == "a Gateway 401 over the membership dialog":
-                    self.study_replies.append("hold")
-                    self.page.locator("#gateway-refresh").click()
-                    self.wait_until(lambda: len(self.held_studies) == 1, "the list read")
-                    self.member_button("Change Membership").click()
-                    self.page.wait_for_function("() => document.querySelector('#membership-dialog').open")
-                    self.page.locator('#membership-form input[name="institution"]').fill("SYN-INST-EDIT")
-                    self.page.locator('#membership-roles input[value="radiologist"]').check()
-                    self.held_logouts = []
-                    self.hold_body("/api/studies")
-                    self.held_studies.pop().fulfill(status=401, json={"message": SERVER_WORDING})
-                    self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
-                    self.assert_401_bodies_unread("/api/studies")
-                    self.assert_closed()
-                    self.assert_members_closed()
-                else:
-                    self.start_member_answers(create=how == "another tab")
-                    if how == "Log out":
-                        self.held_logouts = []
-                        self.page.locator("#logout").click()
-                        self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
-                    else:
-                        self.cancel_moves = True
-                        self.send(other, CHANNEL_SIGNAL)
-                        self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
-                    self.assert_members_closed()
-                    reads = self.count("GET", LIST_PATH)
-                    for path in (RESET_PATH, MEMBER_PATH, LIST_PATH):
-                        self.release_bodies(path)
-                    members = self.assert_members_closed()
-                    self.assertEqual(ENDED, members["message"], "a late answer only says that the session ended")
-                    self.assertEqual(reads, self.count("GET", LIST_PATH), "no list read after the suspension or the creation")
-                self.assert_nothing_leaves()
-                if how == "another tab":
-                    self.assert_closed_away(logouts, moves + 1)
-                    self.cancel_moves = False
-                    continue
-                self.page.locator("#logout").click()
-                self.assertEqual((logouts + 1, moves), (self.logouts, self.moves()))
-                self.held_logouts.pop().fulfill(status=204, body="")
-                self.held_logouts = None
-                self.arrive_at_index()
-                self.assert_closed_away(logouts + 1, moves + 1)
-
-        # Control: without the closer and the end checks the late list paints again and the temporary password opens.
-        self.open(members_unguarded())
-        logouts = self.logouts
-        self.start_member_answers()
-        self.held_logouts = []
-        self.page.locator("#logout").click()
-        self.wait_until(lambda: self.logouts == logouts + 1, "the control's logout request")
-        for path in (RESET_PATH, MEMBER_PATH, LIST_PATH):
-            self.release_bodies(path)
-        members = self.members()
-        self.assertEqual((1, ["password-dialog"], SECRET), (members["rows"], members["dialogs"], members["secret"]))
-        self.held_logouts.pop().fulfill(status=204, body="")
-        self.held_logouts = None
-        self.arrive_at_index()
-
-    def test_15_study_access_takes_the_page_session_end(self):
-        other = self.other_tab()
-        for how in ("GET 401", "POST 401", "GET held across another tab's end"):
-            with self.subTest(how=how):
-                self.open()
-                self.page.evaluate(PROBE)
-                self.list_and_retry_in_flight()
-                logouts, moves = self.logouts, self.moves()
-                held = self.open_study_access()
-                shown = "Loading"
-                if how == "POST 401":
-                    held.fulfill(json=ACCESS)
-                    status = self.page.locator("#study-access-dialog [data-status]")
-                    expect(status).to_have_text("Revision 0 · No Additional Restriction")
-                    self.page.locator('#study-access-dialog select[name="mode"]').select_option("none")
-                    self.page.locator('#study-access-dialog input[name="reason"]').fill("SYN reason")
-                    self.access_replies.append("hold")
-                    self.page.locator("#study-access-dialog [data-save]").click()
-                    self.wait_until(lambda: len(self.held_access) == 1, "the Study Access save")
-                    held, shown = self.held_access.pop(), "Saving"
-                if how == "GET held across another tab's end":
-                    self.cancel_moves = True
-                    self.send(other, CHANNEL_SIGNAL)
-                    self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
-                else:
-                    self.held_logouts = []
-                    self.hold_body(ACCESS_PATH)
-                    held.fulfill(status=401, json={"message": SERVER_WORDING})
-                    self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
-                    self.assert_401_bodies_unread(ACCESS_PATH)
-                # Everything closed before the logout answers: the Gateway list, the members console and the dialog.
-                self.assert_closed()
-                self.assert_members_closed()
-                self.assertEqual({"connected": False, "open": False, "status": shown, "inDocument": 0},
-                                 self.page.evaluate(ACCESS_STATE))
-                self.release_late()
-                if how == "GET held across another tab's end":
-                    done = self.json_done(ACCESS_PATH)
-                    held.fulfill(json=ACCESS)
-                    self.wait_until(lambda: self.json_done(ACCESS_PATH) > done, "the late Study Access answer read")
-                    self.assertEqual(shown, self.page.evaluate(ACCESS_STATE)["status"], "the late answer draws nothing")
-                calls = len(self.access_calls)
-                self.assertEqual(0, self.page.evaluate(ATTEMPT_ACCESS, MEMBER))
-                self.page.wait_for_timeout(200)
-                self.assertEqual(calls, len(self.access_calls), "no open, reload, retry or save after the end")
-                self.assertEqual(shown, self.page.evaluate(ACCESS_STATE)["status"])
-                self.assert_members_closed()
-                if how == "GET held across another tab's end":
-                    self.assert_closed_away(logouts, moves + 1)
-                    self.cancel_moves = False
-                    continue
-                self.page.locator("#logout").click()
-                self.assertEqual((logouts + 1, moves), (self.logouts, self.moves()))
-                self.held_logouts.pop().fulfill(status=204, body="")
-                self.held_logouts = None
-                self.arrive_at_index()
-                self.assert_closed_away(logouts + 1, moves + 1)
-
-        # Control: without its 401 line and its closer the module reads the 401 as an error: the Gateway list stays and
-        # nothing logs out; then another tab's end closes the page's other sections while the dialog stays open.
-        self.scripts[ACCESS_SCRIPT] = access_unattached()
-        self.open()
-        self.page.evaluate(PROBE)
-        self.refresh((200, FIVE))
-        logouts, moves, done = self.logouts, self.moves(), self.json_done(ACCESS_PATH)
-        self.open_study_access().fulfill(status=401, json={"message": SERVER_WORDING})
-        self.wait_until(lambda: self.json_done(ACCESS_PATH) > done, "the control reads the 401 body")
-        expect(self.page.locator("#study-access-dialog [data-status]")).to_have_text(SERVER_WORDING)
-        summary = self.summary()
-        self.assertEqual((6, False, logouts), (summary["rows"], summary["refreshDisabled"], self.logouts))
-        self.cancel_moves = True
-        self.send(other, CHANNEL_SIGNAL)
-        self.wait_until(lambda: self.moves() == moves + 1, "the control's move")
-        self.assertEqual(0, self.summary()["rows"])
-        self.assertTrue(self.page.evaluate("() => document.querySelector('#study-access-dialog')?.open === true"),
-                        "the control's dialog outlives the end")
-        self.cancel_moves = False
-
-    def test_16_every_modules_401_and_another_tabs_end_together(self):
-        other = self.other_tab()
-        for first in ("a 401", "another tab"):
-            with self.subTest(first=first):
-                self.open()
-                self.page.evaluate(PROBE)
-                self.refresh((200, FIVE))
-                # One request of each module out: a Gateway retry, a member-list read and a Study Access read.
-                self.retry_replies.append("hold")
-                self.item("1.2.12").locator("button").click()
-                self.wait_until(lambda: len(self.held_retries) == 1, "the retry POST")
-                self.member_replies.append("hold")
-                self.page.locator("#refresh").click()
-                self.wait_until(lambda: len(self.held_members) == 1, "the member-list read")
-                routes = [self.open_study_access(), self.held_retries.pop(), self.held_members.pop()]
-                paths = (ACCESS_PATH, retry_path("1.2.12"), LIST_PATH)
-                for path in paths:
-                    self.hold_body(path)
-                logouts, moves = self.logouts, self.moves()
-                if first == "another tab":
-                    self.cancel_moves = True
-                    self.send(other, CHANNEL_SIGNAL)
-                    self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
-                else:
-                    self.held_logouts = []
-                for route, path in zip(routes, paths):
-                    done = self.fetch_done(path)
-                    route.fulfill(status=401, json={"message": SERVER_WORDING})
-                    self.wait_until(lambda: self.fetch_done(path) > done, f"the 401 on {path}")
-                    if first == "a 401" and path == ACCESS_PATH:
-                        self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
-                self.send(other, CHANNEL_SIGNAL)
-                self.send(other, STORAGE_SIGNAL)
-                self.page.wait_for_timeout(200)
-                self.assert_401_bodies_unread(*paths)
-                self.assert_closed()
-                self.assert_members_closed()
-                if first == "another tab":
-                    self.assert_closed_away(logouts, moves + 1)
-                    self.cancel_moves = False
-                    continue
-                self.assert_closed_away(logouts + 1, moves)
-                self.held_logouts.pop().fulfill(status=204, body="")
-                self.held_logouts = None
-                self.arrive_at_index()
-                self.assert_closed_away(logouts + 1, moves + 1)
-
-    def test_17_a_first_session_401_ends_the_page_before_anything_paints_or_writes(self):
-        other = self.other_tab()
-        with self.subTest(me="200, an approved admin"):
-            me, enabled = self.boot_held()
-            self.assertEqual([], enabled)
-            self.member_replies.append("hold")
-            me.fulfill(json=ME)
-            self.wait_until(lambda: len(self.held_members) == 1, "the first list read")
-            expect(self.page.locator("#gateway-refresh")).to_be_enabled()
-            members = self.members()
-            self.assertEqual(([], "SYN Admin"), (members["enabled"], members["actor"]), "the controls wait for the first read")
-            self.held_members.pop().fulfill(json=MEMBERS)
-            expect(self.page.locator("#users td.username")).to_have_count(1)
-            expect(self.page.locator("#open-create")).to_be_enabled()
-            self.assertEqual(OPENED, self.members()["enabled"], "one page: Previous and Next stay off")
-
-        with self.subTest(me="200, the first list read 401"):
-            logouts, moves = self.logouts, self.moves()
-            me, _ = self.boot_held()
-            self.held_logouts = []
-            self.member_replies.append((401, {"message": SERVER_WORDING}))
-            me.fulfill(json=ME)
-            self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
-            self.page.wait_for_timeout(200)
-            self.assertTrue(self.ended())
-            self.assert_closed()
-            self.assert_members_closed()
-            self.release_logout_and_move(other, logouts, moves)
-
-        with self.subTest(me="403 pending"):
-            logouts, moves, reads = self.logouts, self.moves(), self.count("GET", LIST_PATH)
-            me, _ = self.boot_held()
-            self.cancel_moves = True
-            me.fulfill(status=403, json={"code": "INSTITUTION_PENDING"})
-            self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
-            self.page.wait_for_timeout(200)
-            self.assertFalse(self.ended(), "a pending account is not a session end: nothing opened, no logout")
-            self.assertEqual([], self.members()["enabled"])
-            self.assertTrue(self.summary()["refreshDisabled"])
-            self.assertEqual(reads, self.count("GET", LIST_PATH))
-            self.assert_closed_away(logouts, moves + 1)
-            self.cancel_moves = False
-
-        with self.subTest(me="401 first, with a list read, a list body and Create Member out"):
-            logouts, moves = self.logouts, self.moves()
-            me, _ = self.boot_held()
-            held = self.race_before_the_session()
-            reads = self.count("GET", LIST_PATH)
-            self.held_logouts = []
-            self.hold_body("/api/me")
-            me.fulfill(status=401, json={"message": SERVER_WORDING})
-            self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
-            # Ended and closed before the logout answers and before any move.
-            self.assertEqual((True, moves), (self.ended(), self.moves()))
-            self.assert_closed()
-            self.assert_members_closed()
-            # The body held from before comes back: nothing paints and nothing is read again.
-            self.release_bodies(LIST_PATH)
-            self.assertEqual(ENDED, self.assert_members_closed()["message"])
-            # The read held from before answers 401, body never read: no second POST and no move.
-            self.hold_body(LIST_PATH)
-            done = self.fetch_done(LIST_PATH)
-            held.fulfill(status=401, json={"message": SERVER_WORDING})
-            self.wait_until(lambda: self.fetch_done(LIST_PATH) > done, "the held read's 401")
-            self.assert_401_bodies_unread("/api/me", LIST_PATH)
-            # Log out and another tab's end add nothing either.
-            self.page.locator("#logout").click()
-            self.send(other, CHANNEL_SIGNAL)
-            self.send(other, STORAGE_SIGNAL)
-            self.page.wait_for_timeout(200)
-            self.assertEqual((logouts + 1, moves), (self.logouts, self.moves()))
-            self.assert_members_closed()
-            self.assert_nothing_leaves()
-            self.page.evaluate(ATTEMPT_CREATE, CREATE_VALUES)
-            expect(self.page.locator("#create-message")).to_have_text(ENDED)
-            self.assertEqual((0, reads), (self.count("POST", LIST_PATH), self.count("GET", LIST_PATH)))
-            self.release_logout_and_move(other, logouts, moves)
-
-        with self.subTest(me="Log out first, then /api/me 401"):
-            logouts, moves, reads = self.logouts, self.moves(), self.count("GET", LIST_PATH)
-            me, _ = self.boot_held()
-            self.held_logouts = []
-            self.page.locator("#logout").click()
-            self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
-            self.assertTrue(self.ended())
-            self.assert_closed()
-            self.assert_members_closed()
-            self.hold_body("/api/me")
-            done = self.fetch_done("/api/me")
-            me.fulfill(status=401, json={"message": SERVER_WORDING})
-            self.wait_until(lambda: self.fetch_done("/api/me") > done, "the session 401")
-            self.page.wait_for_timeout(200)
-            self.assert_401_bodies_unread("/api/me")
-            self.assertEqual((logouts + 1, moves, reads), (self.logouts, self.moves(), self.count("GET", LIST_PATH)))
-            self.release_logout_and_move(other, logouts, moves)
-
-        # Control: the b95bc17 markup has every member control on before /api/me answers.
-        me, enabled = self.boot_held(edited(CONTROLS_MARKUP))
-        self.assertEqual(MEMBER_CONTROLS, enabled)
-        me.fulfill(json=ME)
-        expect(self.page.locator("#users td.username")).to_have_count(1)
-
-        # Control: the boot without its check after the first read turns the controls on after that read's 401 ended it.
-        logouts, moves = self.logouts, self.moves()
-        me, _ = self.boot_held(edited([(AFTER_FIRST_READ, "        await loadUsers();\n")]))
-        self.cancel_moves = True
-        self.member_replies.append((401, {"message": SERVER_WORDING}))
-        me.fulfill(json=ME)
-        self.wait_until(lambda: self.moves() == moves + 1, "the control's move after its logout")
-        self.assertEqual((True, logouts + 1), (self.ended(), self.logouts))
-        self.assertEqual(OPENED, self.members()["enabled"])
-        self.cancel_moves = False
-
-        # Control, last (its Create Member answer reads the list again): the b95bc17 boot answers the null session with the
-        # move alone. Nothing ends and no logout is sent, the dialog stays open, the late list paints and the submit goes.
-        logouts, moves = self.logouts, self.moves()
-        me, _ = self.boot_held(edited([(NO_SESSION, B95BC17_NO_SESSION)]))
-        held = self.race_before_the_session()
-        self.cancel_moves = True
-        me.fulfill(status=401, json={"message": SERVER_WORDING})
-        self.wait_until(lambda: self.moves() == moves + 1, "the control's move")
-        self.page.wait_for_timeout(200)
-        members = self.members()
-        self.assertEqual((False, logouts, ["create-dialog"], ["#refresh", "#open-create"]),
-                         (self.ended(), self.logouts, members["dialogs"], members["enabled"]))
-        self.release_bodies(LIST_PATH)
-        expect(self.page.locator("#users td.username")).to_have_count(1)
-        self.admin_replies.append((200, CREATED))
-        self.page.evaluate(ATTEMPT_CREATE, CREATE_VALUES)
-        self.wait_until(lambda: self.count("POST", LIST_PATH) == 1, "the control's Create Member POST")
-        held.fulfill(json=MEMBERS)
-        self.cancel_moves = False
 
 
 if __name__ == "__main__":

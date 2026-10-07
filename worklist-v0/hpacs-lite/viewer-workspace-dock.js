@@ -2,6 +2,9 @@
  * survive panel switches. Reserve space instead of covering diagnostic pixels. */
 window.KinViewerWorkspaceDock = function (w, preferences) {
   'use strict';
+  const work=w.KinWorkContext;
+  if(!work)return;
+  const guarded=fn=>{const at=work.capture('document');return(...args)=>work.commit(at,()=>fn(...args));};
   preferences=preferences||{};
   const d = w.document;
   const existing = d.getElementById('kin-workspace-dock');
@@ -12,7 +15,7 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   const origins=panels.map(p=>({panel:p,parent:p.parentNode,next:p.nextSibling,open:p.open,hidden:p.hidden}));
   const initialOwner=preferences.owner?.(),key=initialOwner?'kin-viewer-dock:v1:'+initialOwner:null;
   const normalize=window.KinViewerWorkspaceDock.normalize;
-  let ended=false,placement='bottom',selected=-1,autoHide=false,autoHidden=false,hover=false,held=false,pointerButton=null,timer,storage,channel,initialMessage='도구 영역 · 이 창';
+  let ended=false,placement='bottom',selected=-1,autoHide=false,autoHidden=false,hover=false,held=false,pointerButton=null,timer,storage,initialMessage='도구 영역 · 이 창';
   const live=()=>!ended&&preferences.allowed?.()!==false&&(!initialOwner||preferences.owner?.()===initialOwner);
   // Mount and tab clicks stay silent: the Dock Settings note says where preferences live.
   // A settings or account change confirms itself (reading-appearance copies this status),
@@ -74,7 +77,7 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     const b = d.createElement('button'); b.type = 'button'; b.textContent = label;
     b.setAttribute('aria-controls', panels[i].id); b.setAttribute('aria-expanded', 'false');
     b.onclick = () => {
-      if(!live()){end();return;}
+      if(work.state()!=='active')return;if(!live()){end();return;}
       pointerButton=null;selected = selected === i && !autoHidden ? -1 : i;autoHidden=false;
       apply();save();
     };
@@ -94,13 +97,13 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   const label=d.createElement('label');label.textContent='Dock Position ';group.append(label);
   const location=d.createElement('select');location.id='kin-dock-placement';location.setAttribute('aria-label','Dock Position');label.append(location);
   for(const [value,text] of [['bottom','Bottom'],['top','Top']]){const option=d.createElement('option');option.value=value;option.textContent=text;location.append(option);}
-  location.onchange=()=>{if(!live()){end();return;}if(!['bottom','top'].includes(location.value))return;placement=location.value;apply();save(true);};
+  location.onchange=()=>{if(work.state()!=='active')return;if(!live()){end();return;}if(!['bottom','top'].includes(location.value))return;placement=location.value;apply();save(true);};
   const autoLabel=d.createElement('label');autoLabel.textContent='Auto-hide ';group.append(autoLabel);
   const auto=d.createElement('input');auto.type='checkbox';auto.id='kin-dock-autohide';auto.setAttribute('aria-label','Auto-hide Panels');autoLabel.append(auto);
   autoLabel.title='영상 화면 안에서 도구 밖 조작을 마치면 패널을 접습니다. 버튼이나 키보드로 다시 열 수 있습니다.';
-  auto.onchange=()=>{if(!live()){end();return;}autoHide=auto.checked;autoHidden=false;apply();save(true);};
+  auto.onchange=()=>{if(work.state()!=='active')return;if(!live()){end();return;}autoHide=auto.checked;autoHidden=false;apply();save(true);};
   const reset=d.createElement('button');reset.type='button';reset.id='kin-dock-reset';reset.textContent='Reset Dock';group.append(reset);
-  reset.onclick=()=>{if(!live()){end();return;}placement='bottom';selected=-1;autoHide=false;autoHidden=false;apply();save(true);};
+  reset.onclick=()=>{if(work.state()!=='active')return;if(!live()){end();return;}placement='bottom';selected=-1;autoHide=false;autoHidden=false;apply();save(true);};
   const note=d.createElement('span');note.id='kin-dock-settings-note';note.textContent=key?'이 브라우저·이 계정에 저장됩니다.':'이 창에만 적용됩니다.';group.append(note);
   function resizeVisible(){
     // Resizing a hidden iframe's zero-size image can corrupt its camera scale.
@@ -112,7 +115,7 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     const visible=autoHidden?-1:selected;
     panels.forEach((p,n)=>{p.hidden=visible!==n;p.open=true;buttons[n].setAttribute('aria-expanded',String(visible===n));});
     d.body.classList.toggle('kin-dock-open',visible!==-1);d.body.classList.toggle('kin-dock-top',placement==='top');location.value=placement;auto.checked=autoHide;
-    w.requestAnimationFrame(resizeVisible);
+    w.requestAnimationFrame(guarded(resizeVisible));
     schedule();
   }
   const value=()=>({version:2,placement,panel:selected,autoHide});
@@ -123,13 +126,13 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     catch(_){status.textContent='저장하지 못해 이 창에만 적용합니다.';}
   }
   function schedule(){
-    w.clearTimeout(timer);if(ended||!autoHide||autoHidden||selected<0)return;
-    timer=w.setTimeout(()=>{
+    w.clearTimeout(timer);if(work.state()!=='active'||ended||!autoHide||autoHidden||selected<0)return;
+    timer=w.setTimeout(guarded(()=>{
       let blocked=true;
       try{blocked=!live()||hover||held||dock.contains(d.activeElement)||d.hidden||!d.hasFocus()||!!d.querySelector('dialog[open],[role="dialog"][aria-modal="true"]')||!!dock.querySelector('[aria-busy="true"]')||!!w.kinViewerJobWorkspaceState?.().busy||!!w.kinViewerHistoryWorkspaceState?.().busy;}catch(_){}
       if(blocked){schedule();return;}
       autoHidden=true;apply();
-    },1200);
+    }),1200);
   }
   const enter=e=>{if(e.target===dock){hover=true;schedule();}},leave=e=>{if(e.target===dock){hover=false;schedule();}};
   // Pointer focus must not pre-toggle the subsequent click. Keyboard focus
@@ -139,13 +142,13 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   const move=e=>{if(held&&e.buttons===0){held=false;pointerButton=null;schedule();}},keyboardActivity=()=>{pointerButton=null;schedule();};
   const listeners=[[dock,'pointerenter',enter],[dock,'pointerleave',leave],[dock,'focusin',focus],[dock,'focusout',schedule],[d,'pointerdown',down],[d,'pointerup',up],[d,'pointercancel',up],[d,'pointermove',move],[d,'wheel',schedule],[d,'keydown',keyboardActivity],[w,'blur',blur],[w,'focus',schedule]];
   for(const [target,event,handler] of listeners)target.addEventListener(event,handler,true);
-  function end(){if(ended)return;ended=true;w.clearTimeout(timer);for(const [target,event,handler] of listeners)target.removeEventListener(event,handler,true);placement='bottom';selected=-1;autoHide=false;autoHidden=false;apply();for(const b of buttons)b.disabled=true;location.disabled=reset.disabled=auto.disabled=toggle.disabled=true;w.removeEventListener('storage',onStorage);w.removeEventListener('pagehide',end);channel?.close();}
-  function onStorage(e){if(e.key==='kin-session-ended')end();else if(e.key===key)status.textContent='다른 창의 설정 변경 · 현재 창 유지';}
+  function end(){if(ended)return;ended=true;w.clearTimeout(timer);for(const [target,event,handler] of listeners)target.removeEventListener(event,handler,true);placement='bottom';selected=-1;autoHide=false;autoHidden=false;apply();for(const b of buttons)b.disabled=true;location.disabled=reset.disabled=auto.disabled=toggle.disabled=true;w.removeEventListener('storage',storageListener);w.removeEventListener('pagehide',end);}
+  function onStorage(e){if(e.key===key)status.textContent='다른 창의 설정 변경 · 현재 창 유지';}
   panels.forEach(p => { p.hidden = true; dock.append(p); });
   // OHIF can re-enter a mode without replacing the document. Adopt replacement
   // panels after their owners mount them, retaining the selected tool category.
   dock.refreshPanels = () => {
-    if(!live()){end();return;}
+    if(work.state()!=='active')return;if(!live()){end();return;}
     ['kin-viewer-history', 'kin-viewer-layout'].forEach((id, i) => {
       const next = d.getElementById(id);
       if (next && next !== panels[i]) {
@@ -155,17 +158,23 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     });
   };
   dock.end=end;
-  dock.applyPreference=next=>{const clean=normalize(next);if(!live()||!clean)return false;placement=clean.placement;selected=clean.panel;autoHide=clean.autoHide??autoHide;autoHidden=false;apply();save(true);return true;};
+  dock.applyPreference=next=>{const clean=normalize(next);if(work.state()!=='active'||!live()||!clean)return false;placement=clean.placement;selected=clean.panel;autoHide=clean.autoHide??autoHide;autoHidden=false;apply();save(true);return true;};
   dock.preference=()=>live()?value():null;
   dock.dispose=()=>{
     end();
     for(const origin of origins){const p=origin.panel;if(p.parentNode!==dock)continue;const parent=origin.parent.isConnected?origin.parent:d.body;parent.insertBefore(p,origin.next?.parentNode===parent?origin.next:null);p.open=origin.open;p.hidden=origin.hidden;}
     dock.remove();style.remove();d.body.classList.remove('kin-docked','kin-dock-open','kin-dock-top');
-    w.requestAnimationFrame(resizeVisible);
+    w.requestAnimationFrame(guarded(resizeVisible));
   };
   d.body.append(dock); d.body.classList.add('kin-docked');
-  apply();w.addEventListener('storage',onStorage);w.addEventListener('pagehide',end);
-  try{channel=new w.BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+  let storageListener;
+  function subscribe(){if(storageListener)w.removeEventListener('storage',storageListener);storageListener=guarded(onStorage);w.addEventListener('storage',storageListener);schedule();}
+  work.onInvalidate(event=>{
+    if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state))end();
+    if(event.reason==='prepare')w.clearTimeout(timer);
+    if(event.reason==='cancel'||event.reason==='lifecycle'&&event.state==='active')subscribe();
+  });
+  apply();subscribe();w.addEventListener('pagehide',end);
   window.dispatchEvent(new window.CustomEvent('kin-dock-preference-mounted',{detail:{owner:initialOwner,value:value()}}));
   return dock;
 };

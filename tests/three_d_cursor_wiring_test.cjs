@@ -12,8 +12,12 @@ const assert={ok:strict.ok,equal:strict.equal,
   deepEqual:(actual,expected,message)=>strict.deepEqual(plain(actual),plain(expected),message)};
 const fs=require('node:fs'),vm=require('node:vm');
 const source=fs.readFileSync('config/ohif.js','utf8');
-const slice=source.slice(source.indexOf('function kinCreateThreeDCursor'),
-                         source.indexOf('function kinDicomPdfViewportGuard'));
+// The host ends with its document's session through the viewer's own subscription (kinViewerOnEnd follows the document
+// gate, S7-U5), so that shipped function is sliced beside the host and the sandbox window carries the shipped gate.
+const onEnd=source.slice(source.indexOf('function kinViewerOnEnd'),source.indexOf('window.kinViewerOnEnd = kinViewerOnEnd;'));
+const slice=onEnd+source.slice(source.indexOf('function kinCreateThreeDCursor'),
+                               source.indexOf('function kinDicomPdfViewportGuard'));
+const sessions=require('./module_session_harness.cjs');
 
 const deferred=()=>{let resolve,reject;
   const promise=new Promise((res,rej)=>{resolve=res;reject=rej;});
@@ -112,6 +116,7 @@ function harness(options){
   sandbox.__windowListeners=winListeners;
   sandbox.__channels=channels;
   sandbox.__studyGates=studyGates;
+  sandbox.__session=sessions.install(undefined,sandbox.window);
   const extension=vm.runInNewContext(slice+';kinCreateThreeDCursor()',sandbox);
   return {extension,scripts,sandbox};
 }
@@ -220,7 +225,7 @@ async function started(options){
 }
 
 test('소스 추출 앵커는 각각 정확히 한 번이다',()=>{
-  for(const anchor of ['function kinCreateThreeDCursor','function kinDicomPdfViewportGuard'])
+  for(const anchor of ['function kinViewerOnEnd','window.kinViewerOnEnd = kinViewerOnEnd;','function kinCreateThreeDCursor','function kinDicomPdfViewportGuard'])
     assert.equal(source.split(anchor).length-1,1,anchor+' 앵커가 한 번이 아니다');
   assert.ok(slice.length>1000&&slice.includes('onModeExit'),'추출한 조각이 호스트 전체가 아니다');
 });
@@ -496,12 +501,11 @@ test('컨트롤러 상태를 읽지 못하면 재마운트를 허용하지 않�
   assert.equal(status(sandbox).mounts,1);
 });
 
+// 세션 종료가 이 호스트에 닿는 길은 둘이다: 이 문서의 관문이 닫히는 것(로그아웃·서버가 알린 종료·같은 세션의 다른 문서의
+// 종료를 뷰어 세션 경계가 관문에 알린다)과 pagehide. 세션을 대조하지 않는 통지(BroadcastChannel의 맨 session-ended, 저장소의
+// kin-session-ended)는 더 이상 이 호스트를 끝내지 않는다 — 아래 별도 사례.
 const endings=[
-  {label:'BroadcastChannel session-ended',fire:sandbox=>{
-    assert.equal(sandbox.__channels.length,1,'세션 채널이 열리지 않았다');
-    sandbox.__channels[0].onmessage({data:{type:'session-ended'}});}},
-  {label:'storage kin-session-ended',fire:sandbox=>{
-    for(const handler of (sandbox.__windowListeners.storage||[]).slice())handler({key:'kin-session-ended'});}},
+  {label:'문서 관문의 세션 종료',fire:sandbox=>{sandbox.__session.end();}},
   {label:'pagehide',fire:sandbox=>{
     for(const handler of (sandbox.__windowListeners.pagehide||[]).slice())handler({});}}];
 for(const item of endings)
@@ -515,7 +519,7 @@ for(const item of endings)
     await idle();
     assert.deepEqual(sandbox.__controllers[0].calls,['disable']);
     // 남은 두 경로를 더 밟아도 ended는 단조롭고 컨트롤러는 늘지 않는다.
-    for(const other of endings)if(other!==item&&other.label!=='BroadcastChannel session-ended')other.fire(sandbox);
+    for(const other of endings)if(other!==item)other.fire(sandbox);
     extension.onModeEnter();
     await idle();
     assert.equal(status(sandbox).ended,true);
@@ -526,5 +530,14 @@ for(const item of endings)
     await idle();
     assert.equal(sandbox.__controllers.length,1,'종료가 끝난 뒤에도 세션은 다시 열리지 않는다');
     assert.equal(status(sandbox).mounts,1);
-    assert.equal(sandbox.__channels[0].closed,true,'세션 채널이 닫히지 않았다');
   });
+
+test('세션을 대조하지 않는 통지와 저장소 알림은 이 호스트를 끝내지 않는다',async()=>{
+  const {sandbox}=await started({channel:true,controllers:[{}]});
+  assert.equal(sandbox.__channels.length,0,'호스트가 세션 채널을 직접 열었다');
+  for(const handler of (sandbox.__windowListeners.storage||[]).slice())handler({key:'kin-session-ended'});
+  await idle();
+  assert.equal(status(sandbox).ended,false);
+  assert.equal(status(sandbox).mounted,true);
+  assert.deepEqual(sandbox.__controllers[0].calls,[]);
+});

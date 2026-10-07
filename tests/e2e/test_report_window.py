@@ -8,6 +8,7 @@ from pypdf import PdfReader
 from pydicom.dataset import FileDataset,FileMetaDataset
 from pydicom.uid import generate_uid,CTImageStorage,ExplicitVRLittleEndian
 from test_report_preview import ReportPreviewE2E,expect
+from document_session import document_request
 
 class ReportWindowE2E(ReportPreviewE2E):
     def window_key(self,f,slope=2,intercept=-1024,signed=True,size=64):
@@ -43,13 +44,13 @@ class ReportWindowE2E(ReportPreviewE2E):
         f=self.fixture();ds,pixels,orth,key=self.window_key(f);p=self.login()
         before=self.saved_rows(f);original=self.hashes()
         images=[]
-        raw=p.request.get(self.stack.proxy+'/instances/'+orth+'/frames/0/image-int16',headers={'Accept':'image/x-portable-arbitrarymap'})
+        raw=document_request(p, "GET", self.stack.proxy+'/instances/'+orth+'/frames/0/image-int16',headers={'Accept':'image/x-portable-arbitrarymap'})
         self.assertEqual(raw.status,200)
         header,body=raw.body().split(b'ENDHDR\n',1)
         self.assertIn(b'MAXVAL 65535',header)
         self.assertTrue(np.array_equal(np.frombuffer(body,dtype='>i2').reshape(64,64),pixels))
         for center,width in [(40,400),(-100,1000),(40,2),(40.5,2),(40,20000)]:
-            r=p.request.get(self.stack.proxy+'/instances/'+orth+'/frames/0/rendered?window-center='+str(center-.5)+'&window-width='+str(width-1),headers={'Accept':'image/png'})
+            r=document_request(p, "GET", self.stack.proxy+'/instances/'+orth+'/frames/0/rendered?window-center='+str(center-.5)+'&window-width='+str(width-1),headers={'Accept':'image/png'})
             self.assertEqual(r.status,200);self.assertTrue(r.headers['content-type'].startswith('image/png'))
             actual=np.asarray(Image.open(io.BytesIO(r.body()))).astype(float)
             self.assertEqual(actual.shape,pixels.shape)

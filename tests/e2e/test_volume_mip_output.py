@@ -1,6 +1,7 @@
 # coding: utf-8
 """TEST-MIP-OUTPUT-DOM (A11-OUTPUT-1): Print Saved Images for a saved version 12 MIP Viewer Job and every frame of a version 13 MIP
 Batch Job, rebuilt from freshly read, digest-verified CT pixels under analytic cameras in a private print engine, all or nothing."""
+from viewer_session import end_viewer, ended_job_status
 import copy,io,json,math,os,time,unittest,uuid
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -9,7 +10,7 @@ from pypdf import PdfReader
 from playwright.sync_api import expect
 import test_prior_selection as ct
 from test_volume_mip import VOI_STUDIES,VOI_CASES,VOI_DELTA,VOI_DISCRIMINATION,SOURCE_PLANES,BLENDS,SPACING,COUNTS,mm_text,rodrigues,voi_plan,voi_planes,voi_record
-from test_volume_mip_job import CAPTURE,LAYOUT,SESSION_END
+from test_volume_mip_job import CAPTURE,LAYOUT
 from test_volume_mip_batch import BATCH_HELPERS,SIZE,VolumeMipBatchE2E,any_case_probes,canvas_point,ray_orientation,recipe_of
 from test_volume_path import field_differences
 
@@ -46,8 +47,9 @@ PRESET_VALUES="()=>Object.fromEntries(['axial','sagittal','coronal'].map(k=>[k,[
 WAIT_STATUS="()=>{const t=document.querySelector('#kin-job-print [role=status]')?.textContent;return !!t&&t!=='저장한 영상 상태를 확인하는 중…'}"
 NO_LEAKS="()=>{const l=printLeaks();return !l.elements&&!l.volumes&&!l.images&&!l.engines}"
 TAKE='()=>({frames:printFrames.splice(0),events:printEvents.splice(0),volumeInfo:printVolumeInfo.splice(0),faults:printFault.splice(0)})'
-# The browser's own messages for a request rejected in transport (fetch) or a body cut in transport (body read).
-TRANSPORT_TEXTS=('Failed to fetch','network error')
+# Both native body failures and the bound transport's connection failure still
+# require an independent requestfailed record before the guarded retry below.
+TRANSPORT_TEXTS=('Failed to fetch','network error','서버에 연결하지 못했습니다.')
 TRACE_COUNTS='()=>window.printReady?{enables:printEnables,faults:printFault.length,held:printHeld}:null'
 # Installed once per page, before or after the MIP models load (a fresh page loads them inside the print). It only records, except
 # where a test arms one of its hooks:
@@ -562,7 +564,7 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
     if report:print('MIP_OUTPUT_03_TRANSPORT',json.dumps(report),flush=True)
     self.assertEqual(problems,[],(fragment,report))
    else:
-    self.refused(v,MESSAGES['source_read']);self.assertNotIn('Failed to fetch',status.text_content());self.assertEqual(sent,[sent[0]]*2,'exactly two sends of the rejected read')
+    self.refused(v,MESSAGES['source_read']);expect(status).to_have_text(MESSAGES['source_read']);self.assertEqual(sent,[sent[0]]*2,'exactly two sends of the rejected read')
    v.evaluate(TAKE)
   # Intercepted GET: a Frame of Reference or VOI Slab that does not fit the fresh volume refuses after the read; an algorithm this
   # viewer cannot reproduce refuses before any source read.
@@ -609,10 +611,10 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   self.close_output(v);after=v.evaluate(CAPTURE);self.assertEqual(after['version'],before['version']);self.assert_cells(after['cells'],before['cells']);self.assertEqual(v.evaluate(SOURCE_PLANES),planes)
   v.evaluate(TAKE)
   # Session end during prepare closes the print dialog through the Jobs panel; the held loader is aborted and cleaned.
-  v.evaluate('()=>{fetchHold=true}');self.print_titled(v,a,V12);v.wait_for_function('()=>fetchHeld.length>0',timeout=60000);v.evaluate(SESSION_END)
-  expect(v.locator('#kin-job-print[open]')).to_have_count(0,timeout=10000);expect(jobs_status).to_contain_text('세션이 변경되었습니다')
+  v.evaluate('()=>{fetchHold=true}');self.print_titled(v,a,V12);v.wait_for_function('()=>fetchHeld.length>0',timeout=60000);v=end_viewer(v,('#kin-job-print iframe',));v.assert_quiet()
+  v.assert_quiet();self.assertIn('세션이 변경되었습니다',ended_job_status(v))
   self.assertTrue(v.evaluate('()=>fetchHeld.every(held=>held.signal?.aborted)'));v.evaluate(RELEASE);v.wait_for_function(NO_LEAKS,timeout=10000)
-  self.assertEqual(v.evaluate("()=>document.querySelector('#kin-job-print iframe')?.srcdoc??''"),'')
+  self.assertEqual(v.retained('#kin-job-print iframe','node => node.srcdoc'),[''])
   self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1)
   # Access: an account without study access gets 403; a technologist prints a readable row but cannot save a MIP Job.
   self.assertEqual(self.stack.request('GET',f"/studies/{a.uid}/viewer-jobs/{rows[V12]['id']}",'kdoctor').status,403)
@@ -632,11 +634,13 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   finally:assoc.release()
   self.assertEqual(self.stack.request('GET',f"/studies/{a.uid}/viewer-jobs/{rows[V12]['id']}",'doctor').status,409)
   self.open_output(tech,a,V12,'저장 당시 볼륨 원본과 달라');self.refused(tech,'저장 당시 볼륨 원본과 달라')
-  # A 403 on the Job read ends the session in that viewer and closes the print dialog before any page.
+  # An uncoded 403 refuses this output, keeps the session, and permits a real retry.
+  session=tech.evaluate('KinWorkContext.session()')
   pattern=f"**/api/studies/{a.uid}/viewer-jobs/{rows[V13]['id']}"
   tech.route(pattern,lambda route:route.fulfill(status=403,content_type='application/json',body=json.dumps({'message':'INJECTED MIP OUTPUT 403'})))
-  self.print_titled(tech,a,V13);expect(tech.locator('#kin-job-print[open]')).to_have_count(0,timeout=30000);expect(tech.locator('#kin-viewer-jobs-status')).to_contain_text('세션이 변경되었습니다',timeout=30000)
-  tech.wait_for_function(NO_LEAKS,timeout=10000);self.assertEqual(tech.evaluate("()=>document.querySelector('#kin-job-print iframe')?.srcdoc??''"),'')
+  self.open_output(tech,a,V13,'검사 접근이 거절되었습니다');self.refused(tech,'검사 접근이 거절되었습니다')
+  self.assertEqual(tech.evaluate('[KinWorkContext.state(),KinWorkContext.session()]'),['active',session])
+  tech.unroute(pattern);self.refresh_output(tech,'저장 당시 볼륨 원본과 달라');self.refused(tech,'저장 당시 볼륨 원본과 달라')
   self.assertEqual(len(self.versions(a)),1)
   print('MIP_OUTPUT_03',json.dumps({'hidden_status':hidden_status}),flush=True)
 

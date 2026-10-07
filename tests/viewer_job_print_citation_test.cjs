@@ -61,13 +61,16 @@ test('P1: the printed entries decide which pages need a read, and an unsaved bod
     [{ uid: 'a', mode: 'editor' }]);
 });
 
-test('P2: every api() failure maps to one named outcome, and the product rule the stub imitates still reads that way', () => {
+test('P2: citation failures distinguish access refusal from temporary authentication failure', () => {
   const cases = [
     [{ aborted: true }, 'rethrow'],
     [{ aborted: true, status: 403 }, 'rethrow'],
     [{ live: false }, 'rethrow'],
     [{ live: false, status: 404 }, 'rethrow'],
     [{ aborted: false, live: true, status: 403 }, 'refused'],
+    [{ aborted: false, live: true, status: 403, code: 'AUTH_IDP_UNAVAILABLE' }, 'unknown'],
+    [{ aborted: false, live: true, status: 403, code: 'AUTH_SESSION_BUSY' }, 'unknown'],
+    [{ aborted: false, live: true, status: 403, code: 'AUTH_STORAGE_FAILURE' }, 'unknown'],
     [{ aborted: false, live: true, status: 404 }, 'unknown'],
     [{ aborted: false, live: true, status: 500 }, 'unknown'],
     [{ aborted: false, live: true, status: 409 }, 'unknown'],
@@ -81,14 +84,7 @@ test('P2: every api() failure maps to one named outcome, and the product rule th
   ];
   for (const [input, expected] of cases)
     assert.equal(identity.citationTerminal(input), expected, JSON.stringify(input));
-  // The browser case for 'refused' runs against a re-typed copy of this line,
-  // so if the product stops attaching .status to a foreign 403 the stub would
-  // keep passing on its own. Pin the shipped text instead.
-  const jobs = readFileSync(path.join(ROOT, 'worklist-v0', 'hpacs-lite', 'viewer-jobs.js'), 'utf8');
-  assert.ok(jobs.includes("r.status === 401 || r.status === 403 && !foreign"),
-    'viewer-jobs.js no longer ends the panel on 401 / non-foreign 403 in the form the stub imitates');
-  assert.ok(jobs.includes("const { idempotent = false, foreign = false, ...request } = options;"),
-    'viewer-jobs.js no longer accepts the foreign option');
+  // The real reader's status/code propagation is exercised in viewer_jobs_session_test.
 });
 
 test('P3: the pure record the viewer reads is the same object the node tests receive', () => {

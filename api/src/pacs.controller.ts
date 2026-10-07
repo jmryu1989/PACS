@@ -1,6 +1,7 @@
 import { ForbiddenException, BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
 import { PacsService, Caller } from './pacs.service';
 import { Public } from './auth.guard';
+import { AuthService } from './auth.service';
 
 /**
  * URL의 `:id`를 정수로. **`+id`를 그대로 쓰면 안 된다.**
@@ -37,19 +38,31 @@ const caller = (req: any): Caller => ({
   kind: req.kind ?? 'member',
 });
 
+/**
+ * 초안을 바꾸는 요청이 온 쿠키 세션(S7-U5, U5S-REQ-16). 서비스는 이 세션 행을 잠근 채 쓰므로, 로그아웃된 세션의 쓰기가
+ * 뒤늦게 저장되지 않는다. Bearer 호출에는 세션이 없다(null) — 토큰이 곧 신원이다. `caller()`에 넣지 않는 이유: 그 값은
+ * `GET me`의 답과 서비스 전반으로 퍼지고, 세션 키는 초안 경로 밖으로 나가서는 안 된다.
+ */
+const draftSession = (req: any): string | null => (req.authMethod === 'session' && typeof req.sid === 'string' ? req.sid : null);
+
 @Controller()
 export class PacsController {
-  constructor(private svc: PacsService) {}
+  constructor(private svc: PacsService, private auth: AuthService) {}
 
   @Public()
   @Get('health')
-  health() {
-    return { ok: true, at: new Date().toISOString(), auth: process.env.AUTH_REQUIRED !== 'false' };
+  async health() {
+    return { ok: true, at: new Date().toISOString(), auth: process.env.AUTH_REQUIRED !== 'false', memberRights: await this.auth.memberRightsState() };
   }
 
+  /**
+   * `sessionId`는 이 로그인 세션의 비밀 아닌 식별값이다(S7-U5, U5S-REQ-08). 화면은 이 값을 받아 둔 뒤 그 세션으로 보내는
+   * 모든 요청에 `X-KIN-Session`으로 싣는다. Bearer 호출에는 세션이 없어 null이다.
+   */
   @Get('me')
+  @Header('Cache-Control', 'no-store')
   me(@Req() req: any) {
-    return { ...caller(req), user: req.actor, displayName: req.displayName ?? req.actor };
+    return { ...caller(req), user: req.actor, displayName: req.displayName ?? req.actor, sessionId: req.sessionId ?? null };
   }
 
   /** nginx auth_request 전용. 204=통과, 403=기관 경계 밖. PHI 본문은 싣지 않는다. */
@@ -258,28 +271,39 @@ export class PacsController {
     return this.svc.techNote(uid, noteCaller(req), before ?? '2147483647');
   }
 
-  /** 초안 저장 — 내 것에만 쓴다. 판(version)도 안 올리고 확정본도 안 건드린다 */
+  /**
+   * 초안 저장 — 내 것에만 쓴다. 판(version)도 안 올리고 확정본도 안 건드린다.
+   * 본문은 작성자(`expectedOwner`)·경계(`expectedRevision`)·전체 스냅숏을 싣는다(S7-U5). 대조와 조건부 쓰기는 서비스의
+   * 한 트랜잭션에 있다 — 이 처리기는 순서를 기억하거나 줄을 세우지 않는다.
+   */
   @Put('studies/:uid/report')
   report(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.putReport(uid, body, caller(req));
+    return this.svc.putReport(uid, body, caller(req), draftSession(req));
   }
 
-  /** 초안 버리기 — 확정본으로 돌아간다. 내 초안만 지운다 */
+  /** 내 초안의 권위 있는 읽기 — 충돌이나 답을 받지 못한 저장 뒤에 무엇이 저장돼 있는지 확인한다 */
+  @Get('studies/:uid/draft')
+  @Header('Cache-Control', 'no-store')
+  draft(@Param('uid') uid: string, @Req() req: any) {
+    return this.svc.readDraft(uid, caller(req));
+  }
+
+  /** 초안 버리기 — 확정본으로 돌아간다. 내 초안만 비운다 */
   @Delete('studies/:uid/draft')
-  discardDraft(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.discardDraft(uid, caller(req));
+  discardDraft(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
+    return this.svc.discardDraft(uid, body, caller(req), draftSession(req));
   }
 
-  /** 관리자 강제 해제 — 모든 초안을 폐기 이력으로 보존한 뒤 지운다 */
+  /** 관리자 강제 해제 — 모든 초안을 폐기 이력으로 보존한 뒤 비우고 검사의 초안 세대를 바꾼다 */
   @Delete('studies/:uid/draft/force')
-  forceDiscardDrafts(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.forceDiscardDrafts(uid, caller(req));
+  forceDiscardDrafts(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
+    return this.svc.forceDiscardDrafts(uid, body, caller(req), draftSession(req));
   }
 
   /** 확정 — save / approve / addendum / reset / preliminary. 내용·버전·RS를 한 트랜잭션으로 */
   @Post('studies/:uid/report/commit')
   commit(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.commitReport(uid, body, caller(req));
+    return this.svc.commitReport(uid, body, caller(req), draftSession(req));
   }
 
   /** 판독문 이력 */

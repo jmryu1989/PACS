@@ -6,6 +6,8 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_viewer_identity import ViewerIdentityE2E
 from test_viewer_tech_note import canvas_ready
+from document_session import document_request
+from viewer_session import end_viewer
 
 
 class ViewerIdentityPositionE2E(ViewerIdentityE2E):
@@ -110,7 +112,7 @@ class ViewerIdentityPositionE2E(ViewerIdentityE2E):
         expect(page.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…')
         page.locator('#viewer-identity-current-position').select_option('bottom-right')
         self.assertEqual(len(pending), 1)
-        pending.pop().fulfill(response=page.request.get(self.stack.api+'/reading-appearance'))
+        pending.pop().fulfill(response=document_request(page, "GET", self.stack.api+'/reading-appearance'))
         expect(page.locator('#appearance-account-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다')
         expect(page.locator('#viewer-identity-current-position')).to_have_value('bottom-right')
         self.positioned(self.label(viewer, current.uid), 'bottom-right')
@@ -131,8 +133,8 @@ class ViewerIdentityPositionE2E(ViewerIdentityE2E):
         expect(self.label(viewer, prior.uid)).to_contain_text(prior.patient_id)
         viewer.evaluate('()=>positionMetadata.SOPInstanceUID=positionSop')
         expect(self.label(viewer, current.uid)).to_contain_text(current.patient_id)
-        viewer.evaluate("""() => {const channel=new BroadcastChannel('kin-session');channel.postMessage({type:'session-ended'});channel.close()}""")
-        expect(viewer.locator('.kin-viewer-identity')).to_have_count(0)
+        ended=end_viewer(viewer, ['.kin-viewer-identity'])
+        self.assertTrue(all(ended.retained('.kin-viewer-identity')));ended.assert_quiet()
 
 
 def load_tests(loader, tests, pattern):

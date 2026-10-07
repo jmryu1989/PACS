@@ -5,7 +5,7 @@ const {of,lastValueFrom,tap}=require('/app/node_modules/rxjs');
 const caller={kind:'member',institution:'synthetic',sub:'synthetic-sub',actor:'synthetic-actor',roles:['radiologist']};
 const policy=()=>({version:1,restricted:true,startsAt:null,endsAt:null,rules:[{patientId:'SYNTHETIC',modalities:[],dateFrom:null,dateTo:null,studyUids:[]}]});
 const uid='2.25.1234';
-function service(initial){const normalized=v=>v.map(r=>({institution:caller.institution,...r}));let rows=normalized(initial),rootQueries=0;const db={$queryRaw:async()=>{rootQueries++;return rows;}};const orth={studyAccessMetadata:async()=>null,studyIdentities:async()=>[]};return {svc:new StudyAccessService(db,orth,{}),orth,db,set:v=>{rows=normalized(v);},queries:()=>rootQueries};}
+function service(initial){const normalized=v=>v.map(r=>({institution:caller.institution,...r}));let rows=normalized(initial),rootQueries=0;const db={$queryRaw:async()=>{rootQueries++;return rows;}};const orth={studyAccessMetadata:async()=>null,studyIdentities:async()=>[]};return {svc:new StudyAccessService(db,orth,{getUser:async id=>({id,enabled:true,groups:[caller.institution],roles:['radiologist'],serviceAccountClientId:null})}),orth,db,set:v=>{rows=normalized(v);},queries:()=>rootQueries};}
 test('malformed/missing storage fails closed; absent policy preserves default scope',async()=>{
   const f=service([]);assert.deepEqual([...await f.svc.allowed(caller,[uid])],[uid]);
   f.set([{revision:1,policy:{}}]);await assert.rejects(f.svc.allowed(caller,[uid]),e=>e.getStatus()===503);
@@ -115,5 +115,33 @@ test('the original error is kept only as the cause, never in the body',async()=>
     let seen=null;try{await f.svc.snapshot(caller);}catch(e){seen=e;}
     assert.equal(seen?.cause,error,label);
     assert.ok(!JSON.stringify(seen.getResponse()).includes('SYN-DB-DETAIL'),label);
+  }
+});
+
+// REQ-S7-U5-DB-RIGHTS -> RISK-STALE-AFFILIATION -> CORE-ACCESS, D623.
+test('CORE-ACCESS managed affiliation is the current DB member, independent of provider claims',async()=>{
+  const subject='00000000-0000-4000-8000-000000000091',c={...caller,roles:['admin']};
+  const f=service([]),row={sub:subject,approved:true,suspended:false,institution:c.institution,roles:['radiologist'],username:'syn',email:'syn@synthetic.test'};
+  let current=row;f.db.memberRights={findUnique:async()=>current};
+  assert.equal((await f.svc.read(subject,c)).subject,subject);
+  for(const update of [{institution:'old-provider-institution'},{suspended:true},{approved:false},null]){
+    current=update?{...row,...update}:null;
+    await assert.rejects(f.svc.read(subject,c),e=>e.getStatus()===404);
+  }
+});
+
+// REQ-S7-U5-DB-RIGHTS -> RISK-STALE-AFFILIATION -> U10 CORE_ACCESS_WRITE_DB_TARGET.
+test('CORE_ACCESS_WRITE_DB_TARGET refuses a stale-provider eligible target before any policy write',async()=>{
+  const subject='00000000-0000-4000-8000-000000000092',c={...caller,roles:['admin']},f=service([]);
+  const row={sub:subject,approved:true,suspended:false,institution:c.institution,roles:['radiologist']};
+  let current=row,commits=0;
+  f.db.memberRights={findUnique:async()=>current};
+  f.db.$transaction=async work=>{commits++;return work({$executeRaw:async()=>1,$queryRaw:async()=>[],auditLog:{create:async()=>({})}});};
+  const body={expectedOwner:f.svc.owner(c),revision:0,policy:{version:1,restricted:false,startsAt:null,endsAt:null,rules:[]},reason:'Synthetic change',requestId:'00000000-0000-4000-8000-000000000093'};
+  assert.equal((await f.svc.write(subject,c,body)).revision,1,'eligible control writes');
+  for(const patch of [null,{approved:false},{suspended:true},{institution:'elsewhere'}]){
+    current=patch?{...row,...patch}:null;const before=commits;
+    await assert.rejects(f.svc.write(subject,c,body),e=>e.getStatus()===404);
+    assert.equal(commits,before,'ineligible target cannot start a policy write');
   }
 });

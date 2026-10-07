@@ -3,6 +3,7 @@ import json, os, tempfile, unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import measurement_ci as ci
+from live_admin_credential_test import ImportedAdminCredentialTests
 
 
 class MeasurementCiTests(unittest.TestCase):
@@ -125,6 +126,7 @@ class MeasurementCiTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 response = MagicMock(); response.__enter__.return_value.status = 200
+                response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
                 with patch.dict(os.environ, {'GITHUB_ACTIONS':'true', 'RUNNER_ENVIRONMENT':'github-hosted'}, clear=True), \
                      patch.object(ci, 'ROOT', root), \
                      patch.dict(ci.PROFILES, {'u2b-regressions': {**profile, 'out': root/'artifacts'}}), \
@@ -132,7 +134,9 @@ class MeasurementCiTests(unittest.TestCase):
                      patch.object(ci, 'seed_source', side_effect=slow_setup), \
                      patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']), \
                      patch.object(ci.subprocess, 'run', side_effect=fake_run), \
-                     patch.object(ci, 'urlopen', return_value=response):
+                     patch.object(ci.ssl, '_create_unverified_context', return_value=None), \
+                     patch.object(ci, 'urlopen', return_value=response), \
+                     patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'):
                     ci.main('u2b-regressions')
                 self.assertTrue((root/'artifacts'/'results.json').exists())
             return granted
@@ -583,7 +587,24 @@ class MeasurementCiTests(unittest.TestCase):
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
                           'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
-                          'gateway-e2e', 'critical-result-screens'})
+                          'gateway-e2e', 'critical-result-screens',
+                          # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
+                          # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).
+                          'u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',
+                          'u5-session-mutants', 'u5-session-browser', 'u5-session-end', 'u5-fixups'})
+        validate = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        self.assertIn('profile: [u5-session-api, u5-session-draft, u5-session-regression, u5-session-boundaries, '
+                      'u5-session-mutants, u5-session-browser, u5-session-end, u5-fixups]', validate)
+        self.assertEqual(ci.PROFILES['u5-session-end']['suites'],
+                         (('live/session_end_live.py', 'SessionEndLive', 'ci-u5-session-end'),))
+        self.assertEqual(ci.PROFILES['u5-fixups']['suites'], (('e2e/test_u5_fixups.py', None, 'ci-u5-fixups'),))
+        self.assertEqual(ci.PROFILES['u5-fixups']['suite_timeout'], 900)
+        self.assertNotIn('suite_budgets', ci.PROFILES['u5-fixups'])
+        self.assertEqual(ci.PROFILES['u5-fixups']['out'].name, 'u5-fixups-ci')
+        for name in ('u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',
+                     'u5-session-mutants', 'u5-session-browser', 'u5-session-end', 'u5-fixups'):
+            for suite in ci.PROFILES[name]['suites']:
+                self.assertTrue((ci.ROOT/'tests'/suite[0]).is_file(), (name, suite[0]))
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
@@ -2229,6 +2250,7 @@ class MeasurementCiTests(unittest.TestCase):
             profile={**ci.PROFILES['volume-rendering'], 'out':root/'artifacts'}
             completed=MagicMock(returncode=0,stdout=b'',stderr=b'')
             response=MagicMock();response.__enter__.return_value.status=200
+            response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
             checks=[b'',b'',b'unix:///var/run/docker.sock']
             with patch.dict(os.environ, {'GITHUB_ACTIONS':'true',
                     'RUNNER_ENVIRONMENT':'github-hosted','RUNNER_TEMP':folder}, clear=True), \
@@ -2237,8 +2259,10 @@ class MeasurementCiTests(unittest.TestCase):
                  patch.object(ci,'seed_source'), \
                  patch.object(ci.subprocess,'check_output',side_effect=checks), \
                  patch.object(ci.subprocess,'run',return_value=completed) as run, \
+                 patch.object(ci.ssl, '_create_unverified_context', return_value=None), \
                  patch.object(ci,'urlopen',return_value=response), \
-                 patch.object(ci,'publish_vr_evidence'):
+                 patch.object(ci,'publish_vr_evidence'), \
+                 patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'):
                 ci.main('volume-rendering')
             invocation=next(call for call in run.call_args_list
                             if 'run-tests.py' in ' '.join(map(str,call.args[0])))
@@ -2561,13 +2585,16 @@ class MeasurementCiTests(unittest.TestCase):
                 return MagicMock(returncode=0, stdout=listings.get(seen[-1], b''), stderr=b'')
 
             response = MagicMock(); response.__enter__.return_value.status = 200
+            response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
             with patch.dict(os.environ, {'GITHUB_ACTIONS':'true', 'RUNNER_ENVIRONMENT':'github-hosted'}, clear=True), \
                  patch.object(ci, 'ROOT', root), \
                  patch.dict(ci.PROFILES, {'gateway-e2e': profile}), \
                  patch.object(ci, 'seed_source'), \
                  patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']), \
                  patch.object(ci.subprocess, 'run', side_effect=fake_run), \
-                 patch.object(ci, 'urlopen', return_value=response):
+                 patch.object(ci.ssl, '_create_unverified_context', return_value=None), \
+                 patch.object(ci, 'urlopen', return_value=response), \
+                 patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'):
                 with self.assertRaisesRegex(RuntimeError, 'gateway_pipeline_live failed'):
                     ci.main('gateway-e2e')
             logs = next(index for index, command in enumerate(seen) if 'logs' in command and '--timestamps' in command)

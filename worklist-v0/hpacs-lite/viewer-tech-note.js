@@ -38,7 +38,7 @@ window.kinCreateViewerPatientCopy=function(options){
       try{
         // Keep the explicit gesture and loaded image identity together. A completed
         // OS write cannot be recalled; navigation invalidates only its late UI result.
-        await navigator.clipboard.writeText(current.patientId);refreshCopy();
+        await window.KinViewerSessionBoundary.wait(navigator.clipboard.writeText(current.patientId));refreshCopy();
         if(ticket===copyEpoch&&live())announce('환자 ID를 복사했습니다.');
       }catch(_){refreshCopy();if(ticket===copyEpoch&&live())announce('복사가 허용되지 않았거나 실패했습니다. 다시 시도하세요.');}
       finally{copyBusy=false;refreshCopy();}
@@ -102,9 +102,9 @@ window.kinCreateViewerPatientCopy=function(options){
   const key=e=>{if(e.defaultPrevented||e.repeat||e.isComposing||e.getModifierState('AltGraph')||!e.ctrlKey||!e.altKey||e.shiftKey||e.metaKey||e.code!=='KeyC'||blocked()||e.target.closest?.('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]'))return;e.preventDefault();copyPatientId();};
   document.addEventListener('keydown',key);
   const timer=setInterval(refreshCopy,500);
-  const storage=e=>{if(e.key==='kin-session-ended')end();};window.addEventListener('storage',storage);window.addEventListener('pagehide',end);
-  try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
-  function end(){if(ended)return;ended=true;identity?.dispose();copyTracked=false;clearInterval(timer);restoreCopyMenu();document.removeEventListener('keydown',key);window.removeEventListener('storage',storage);window.removeEventListener('pagehide',end);if(copyStackEvent)document.removeEventListener(copyStackEvent,copyChanged,true);for(const event of volumeEvents)document.removeEventListener(event,volumeChanged,true);copySubscriptions.forEach(s=>s.unsubscribe());channel?.close();refreshCopy();}
+  window.addEventListener('pagehide',end);
+  try{channel = window.kinViewerOnEnd(() => end());}catch(_){}
+  function end(){if(ended)return;ended=true;identity?.dispose();copyTracked=false;clearInterval(timer);restoreCopyMenu();document.removeEventListener('keydown',key);window.removeEventListener('pagehide',end);if(copyStackEvent)document.removeEventListener(copyStackEvent,copyChanged,true);for(const event of volumeEvents)document.removeEventListener(event,volumeChanged,true);copySubscriptions.forEach(s=>s.unsubscribe());channel?.close();refreshCopy();}
   refreshCopy();return {refresh:refreshCopy,tracked:()=>copyTracked,end,dispose(){end();toolBar.remove();}};
 };
 
@@ -176,11 +176,11 @@ window.kinCreateViewerToolbarPreferences=function(options){
     if(same(read(),applied)&&!same(applied,baseline)){applying=true;try{service.clearButtonSection('primary');service.createButtonSection('primary',baseline.slice());}catch(_){}finally{applying=false;}}
     dialog.remove();box.remove();
   }
-  function storage(e){if(e.key==='kin-session-ended')end();else if(e.key===key){let matches=false;try{matches=e.newValue?.length<=2048&&same(normalize(JSON.parse(e.newValue)),current);}catch(_){}if(!matches)status.textContent='다른 창의 도구 설정 변경 · 현재 창 유지';}}
+  function storage(e){if(e.key===key){let matches=false;try{matches=e.newValue?.length<=2048&&same(normalize(JSON.parse(e.newValue)),current);}catch(_){}if(!matches)status.textContent='다른 창의 도구 설정 변경 · 현재 창 유지';}}
   try{const raw=localStorage.getItem(key);if(raw!==null){const value=raw.length<=2048?normalize(JSON.parse(raw)):null;if(value){if(write(value))status.textContent='기억한 도구 모음 · 이 브라우저';}else status.textContent='저장값 오류 · 기본 도구 모음';}}catch(_){status.textContent='저장소 사용 불가 · 이 창';}
   subscription=service.subscribe(service.EVENTS.TOOL_BAR_MODIFIED,()=>{if(!ended&&!applying&&!same(read(),applied)){suspended=true;button.disabled=true;status.textContent='도구 모음이 변경되었습니다. 영상을 다시 연 뒤 편집하세요.';}});
   window.addEventListener('storage',storage);
-  try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+  try{channel = window.kinViewerOnEnd(() => end());}catch(_){}
   const canApply=next=>live()&&!suspended&&!dialog.open&&!!normalize(next)&&same(read(),applied);
   const controller={dispose:end,preference:()=>ended?null:normalize(current),canApply,
     applyPreference:next=>{if(!canApply(next)||!write(normalize(next)))return false;persist();return true;}};
@@ -508,26 +508,22 @@ window.kinViewerTechNote=function(services,session=null){
       target.focus({preventScroll:true});target.scrollIntoView({block:'nearest'});
     }
     function refresh(){button.disabled=!live()||busy||!owner;arrange.disabled=!live()||!owner;retry.disabled=!live()||busy;for(const [code,b] of toolButtons){b.disabled=!live()||!owner||(code==='Digit4'&&(!readingChannel||!patientCopy.tracked()));if(code==='Digit4'){b.setAttribute('aria-busy',String(!!pendingReturn));b.setAttribute('aria-disabled',String(b.disabled||!!pendingReturn));}}patientCopy.refresh();}
-    function end(){if(ended)return;ended=true;projection?.dispose();orientation?.dispose();windowLink?.dispose();owner=null;toolbarPreferences?.dispose();disposeNativeFocus();patientCopy.end();readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;returnStatus.textContent='세션이나 영상 창이 변경되었습니다.';window.removeEventListener('hashchange',bindReturn);window.removeEventListener('kin-reading-link-changed',bindReturn);dock?.end();for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
+    function end(){if(ended)return;ended=true;projection?.dispose();orientation?.dispose();windowLink?.dispose();owner=null;toolbarPreferences?.dispose();disposeNativeFocus();patientCopy.end();readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;returnStatus.textContent='세션이나 영상 창이 변경되었습니다.';window.removeEventListener('hashchange',bindReturn);window.removeEventListener('kin-reading-link-changed',bindReturn);dock?.end();for(const c of requests)c.abort();note.dispose();if(window.kinViewerTechNoteState===noteState)delete window.kinViewerTechNoteState;refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
     async function raw(method,path,body){
       if(!live())throw new Error('영상창이 변경되었습니다');
       const controller=new AbortController();requests.add(controller);const timer=setTimeout(()=>controller.abort(),12000);
       try{const r=await fetch('/api'+path,{method,credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-KIN-CSRF':'1',...(owner?{'X-KIN-Subject':owner[1],'X-KIN-Institution':owner[0]}:{}),...(body===undefined?{}:{'Content-Type':'application/json'})},...(body===undefined?{}:{body:JSON.stringify(body)})});
-        // S5-U2c fix4 (Astra S5-U2c-C-R-001 F01): an answer live() drops (this bridge ended — mode exit too —, the document ended, or
-        // the viewer shows other studies) is still the document's for what it says about the login, also when it came in just before
-        // the abort that ended the bridge: its 401 ends the login, and a /me answer of another account than the document's first one
-        // ends it (session.sameAccount: no verdict). An answer in use reaches the same below and through authenticate()'s answer();
-        // a /me 403 refuses this account without ending the login and is read only then.
-        if(!live()){if(r.status===401)session?.refuse('unauthorized');else if(path==='/me'&&r.ok)session?.sameAccount(await r.json().catch(()=>null));throw new Error('영상창이 변경되었습니다');}
-        // A 401, or a 403 on /me, is the end of the document's login; a 403 on a note still ends this bridge only.
-        if([401,403].includes(r.status)){if(r.status===401||path==='/me')session?.refuse(r.status===401?'unauthorized':'forbidden');end();throw new Error('메모 계정 또는 접근 권한을 확인하세요');}
+        // Session termination is owned by the page transport and gate.
+        if(!live()){if(path==='/me'&&r.ok)session?.sameAccount(await r.json().catch(()=>null));throw new Error('영상창이 변경되었습니다');}
+        if(window.KinSessionTransport.refusal(r))throw window.KinSessionTransport.responseError(r,undefined,'메모 계정 또는 접근 권한을 확인하세요');
         const value=await r.json().catch(()=>null);if(!r.ok||!value)throw Object.assign(new Error(typeof value?.message==='string'?value.message:'서버 응답을 확인하세요'),{status:r.status});return value;
       }finally{clearTimeout(timer);requests.delete(controller);}
     }
-    // The document's account first: another account (or a refused answer) has ended the document and this bridge with it, a
-    // clinician-only answer has taken the bridge down; neither becomes the bridge's owner.
+    // Reject an invalid owner locally before retaining it. Only the page transport can end the document.
     async function authenticate(){const me=await raw('GET','/me');if(session&&!session.answer(me)){end();throw new Error('메모 계정이 변경되었습니다');}const next=[me.institution,me.sub];if(me.kind!=='member'||next.some(v=>typeof v!=='string'||!v)||owner&&!same(owner,next)){end();throw new Error('메모 계정이 변경되었습니다');}owner=next;return next;}
-    const note=KinTechNote({allowed:()=>live()&&!!owner,api:async(method,path,body)=>{const before=await authenticate();const result=await raw(method,path,body);if(!live()||!same(before,await authenticate()))throw new Error('메모 계정이 변경되었습니다');return result;}});
+    const note=KinTechNote({allowed:()=>window.KinWorkContext.state()==='active'&&live()&&!!owner,api:async(method,path,body)=>{const before=await authenticate();const result=await raw(method,path,body);if(!live()||!same(before,await authenticate()))throw new Error('메모 계정이 변경되었습니다');return result;}});
+    // S7-U5 A006: the note this window holds unsaved (or still saving), for Log Out's unsaved-work question (config/ohif.js).
+    const noteState=()=>({dirty:note.dirty()});window.kinViewerTechNoteState=noteState;
     async function open(){
       if(!live()||busy||!owner||document.querySelector('dialog[open]'))return;
       const focus=document.activeElement,target=selectedStudy();if(!target){status.textContent='원본 검사가 확인되는 영상 칸을 선택하세요. 메모 대상을 확인할 수 없습니다.';return;}
@@ -555,11 +551,11 @@ window.kinViewerTechNote=function(services,session=null){
       e.preventDefault();if(code==='Digit6')open();else focusTool(code);
     };
     button.onclick=open;document.addEventListener('keydown',key);
-    const storage=e=>{if(e.key==='kin-session-ended')end();};window.addEventListener('storage',storage);window.addEventListener('pagehide',end);
-    try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+    window.addEventListener('pagehide',end);
+    try{channel = window.kinViewerOnEnd(() => end());}catch(_){}
     const offEnd=session?.onEnd(end)||(()=>{});
     const timer=setInterval(()=>{if(!live())end();else refreshReturnSelection();},500);
-    stop=()=>{offEnd();end();dock?.dispose();dock=null;clearInterval(timer);document.removeEventListener('keydown',key);window.removeEventListener('storage',storage);window.removeEventListener('pagehide',end);patientCopy.dispose();channel?.close();returnStatus.remove();panel.remove();};
+    stop=()=>{offEnd();end();dock?.dispose();dock=null;clearInterval(timer);document.removeEventListener('keydown',key);window.removeEventListener('pagehide',end);patientCopy.dispose();channel?.close();returnStatus.remove();panel.remove();};
     async function connect(){
       if(!live()||busy)return;
       const restore=document.activeElement===retry;busy=true;refresh();status.textContent='메모 연결 확인 중…';

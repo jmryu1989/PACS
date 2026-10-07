@@ -86,9 +86,10 @@ class CTSyncE2E(ViewerLayoutE2E):
   self.jump(p,0,8);p.wait_for_timeout(150);self.assertTrue(pending);self.drag(p,'D03A past',1);canvas_ready(p,2);before=self.snapshot(p)[1]
   for r in pending:r.fulfill(response=r.fetch())
   p.unroute(pattern);p.wait_for_timeout(400);self.assertEqual(self.snapshot(p)[1],before)
-  work=p.context.new_page();work.goto(self.stack.proxy+'/worklist/hpacs-lite/main.html');expect(work.locator('#dbstat')).to_contain_text('DB Connected');work.once('dialog',lambda d:d.accept());work.locator('#logout').click();work.wait_for_url('**/index.html')
-  expect(p.locator('#kin-ct-sync-status')).to_contain_text('세션이 변경')
-  self.jump(p,0,9);p.wait_for_timeout(250);self.assertEqual(self.snapshot(p)[1],before)
+  from viewer_session import observe_viewer
+  ended=observe_viewer(p);dialogs=[]
+  work=p.context.new_page();work.goto(self.stack.proxy+'/worklist/hpacs-lite/main.html');expect(work.locator('#dbstat')).to_contain_text('DB Connected');work.on('dialog',lambda d:(dialogs.append(d.message),d.dismiss()));work.locator('#logout').click();work.wait_for_url('**/index.html')
+  ended.ended();ended.assert_quiet();self.assertEqual(dialogs,[])
   self.assertEqual(self.report_rows(f),rows);self.assertEqual(self.originals(),originals)
 
  def test_sync_05_orthogonal_ct_geometry(self):
@@ -118,19 +119,20 @@ class CTSyncE2E(ViewerLayoutE2E):
   self.assertEqual(self.originals(),originals)
 
  def test_sync_06b_panel_refusal_is_not_a_logout_then_own_event_refusal(self):
-  # A panel's /me 403 (the Measurements panel's check on window focus; the write modules' 15 s checks answer the same) refuses
-  # this account for the whole document: CT sync stops with its refusal words and Recheck Access — never the session words — and
-  # asks nothing until then. No sync event runs while that 403 is served, so CT sync does not ask first. That refusal ends every
-  # other part that asks /me with a refusal, so afterwards CT sync's own event /me is the only one that can: its 403 fails that
-  # event alone, and the next event applies.
+  # Another panel's uncoded refusal cannot invalidate CT sync. Its own denied
+  # event must still preserve the peer position, and the next healthy event applies.
   f,series,refs=self.pair();originals=self.originals();p=self.pair_page(f);self.toggle(p);self.jump(p,0,4);self.wait_z(p,1,8)
   status=p.locator('#kin-ct-sync-status');before=self.snapshot(p)[1];pattern='**/api/me'
   p.route(pattern,lambda r:r.fulfill(status=403,json={'message':'Synthetic denied'}))
-  p.evaluate("()=>window.dispatchEvent(new Event('focus'))")
-  expect(status).to_contain_text('이 계정으로 검사 접근 정보를 확인할 수 없어',timeout=30000);expect(p.locator('#kin-ct-sync-recheck')).to_be_visible()
+  previous=status.locator('span').inner_text();self.open_layout_tools(p)
+  with p.expect_response(lambda r:r.url.endswith('/api/me') and r.status==403):
+   p.get_by_role('button',name='Refresh Jobs',exact=True).click()
+  expect(p.locator('#kin-viewer-jobs-status')).to_contain_text('접근')
+  self.assertEqual(p.evaluate('KinWorkContext.state()'),'active')
+  expect(status.locator('span')).to_have_text(previous);expect(p.locator('#kin-ct-sync-recheck')).to_be_hidden()
   expect(status).not_to_contain_text('세션이 변경')
-  self.jump(p,0,6);p.wait_for_timeout(300);self.assertEqual(self.snapshot(p)[1],before);expect(status).to_contain_text('이 계정으로 검사 접근 정보를 확인할 수 없어')
-  p.unroute(pattern);p.locator('#kin-ct-sync-recheck').click();expect(status).to_contain_text('검사 접근 정보를 확인했습니다')
+  self.jump(p,0,6);expect(status).to_contain_text('적용하지 못했습니다');self.assertEqual(self.snapshot(p)[1],before)
+  p.unroute(pattern)
   self.jump(p,0,8);self.wait_z(p,1,16);before=self.snapshot(p)[1]
   p.route(pattern,lambda r:r.fulfill(status=403,json={'message':'Synthetic denied'}))
   self.jump(p,0,10);expect(status).to_contain_text('적용하지 못했습니다');expect(status).not_to_contain_text('세션이 변경')

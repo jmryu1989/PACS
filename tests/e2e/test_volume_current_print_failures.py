@@ -5,12 +5,16 @@ from pathlib import Path
 from pypdf import PdfReader
 from playwright.sync_api import expect
 from test_volume_current_print import VolumeCurrentPrintE2E
+from viewer_session import observe_viewer
 
 class VolumeCurrentPrintFailuresE2E(VolumeCurrentPrintE2E):
  def test_current_extra_06_pdf_saved_report_preserves_draft(self):
   a,p,v=self.starting();self.add_mark(v,'Unsaved PDF point')
   with p.expect_response(lambda r:r.url.endswith('/hold') and r.request.method=='POST') as held:p.locator('#findings').fill('DO NOT PRINT UNSAVED REPORT')
-  self.assertEqual(held.value.status,201);before=self.rows();state=self.volume_state(v);paper=self.current_output(v);v.get_by_label('함께 출력할 판독문',exact=True).select_option('saved');expect(v.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=120000);expect(paper.locator('.report')).to_contain_text(a.secret);expect(paper.locator('main')).not_to_contain_text('DO NOT PRINT UNSAVED REPORT')
+  self.assertEqual(held.value.status,201)
+  # Compare output preservation only after the pending autosave has reached the server.
+  self.wait_state(p,a,lambda state:(state.get('draft') or {}).get('findings')=='DO NOT PRINT UNSAVED REPORT',timeout=30000)
+  before=self.rows();state=self.volume_state(v);paper=self.current_output(v);v.get_by_label('함께 출력할 판독문',exact=True).select_option('saved');expect(v.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=120000);expect(paper.locator('.report')).to_contain_text(a.secret);expect(paper.locator('main')).not_to_contain_text('DO NOT PRINT UNSAVED REPORT')
   v.evaluate('''()=>{const open=window.open;window.open=(...args)=>{const w=open(...args);if(w)w.print=()=>w.__printCalled=true;return w}}''')
   with v.expect_popup() as opened:v.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF').click()
   printed=opened.value;printed.wait_for_function('()=>window.__printCalled===true',timeout=120000);output=Path(os.environ['KIN_EVIDENCE_DIR'])/'current-mpr.pdf';printed.pdf(path=str(output),prefer_css_page_size=True);pdf=PdfReader(output);self.assertGreaterEqual(len(pdf.pages),3);text='\n'.join(page.extract_text() for page in pdf.pages)
@@ -26,9 +30,19 @@ class VolumeCurrentPrintFailuresE2E(VolumeCurrentPrintE2E):
   v.evaluate('''()=>{const fetch=window.fetch;window.fetch=async(...args)=>{if(String(args[0]).endsWith('/viewer-jobs/preview')){window.__waiting=true;await new Promise(r=>window.__release=r)}return fetch(...args)};window.__restore=()=>window.fetch=fetch}''');v.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click();v.wait_for_function('()=>window.__waiting');v.evaluate('()=>{projectionVP.setCamera({parallelScale:projectionVP.getCamera().parallelScale*1.1});projectionVP.render();window.__restore();window.__release()}');expect(v.locator('#kin-job-print [role=status]')).to_contain_text('현재 영상 표시가 바뀌었습니다',timeout=120000);expect(v.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF')).to_be_disabled()
   v.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click();self.same_marks(v.evaluate('()=>kinMprMarks.capture()'),marks);self.current_output(v)
   endpoint='**/viewer-jobs/preview';v.route(endpoint,lambda route:route.fulfill(status=500,content_type='application/json',body='{"message":"CURRENT SOURCE FAILED"}'));v.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click();expect(v.locator('#kin-job-print [role=status]')).to_contain_text('CURRENT SOURCE FAILED');expect(v.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF')).to_be_disabled();v.unroute(endpoint);v.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click();self.current_output(v);self.unchanged_rows(before)
-  # The shared jobs client ends the workspace on 403; it cannot retry a denied
-  # session in place. A recoverable 500 above must retain the retry path.
-  v.route(endpoint,lambda route:route.fulfill(status=403,content_type='application/json',body='{"message":"CURRENT SOURCE DENIED"}'));v.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click();expect(v.locator('#kin-job-print')).not_to_be_visible();self.unchanged_rows(before)
+  # Refusal withdraws this output; only a named session signal closes the viewer.
+  for code in (None,'AUTH_SESSION_BUSY'):
+   v.route(endpoint,lambda route:route.fulfill(status=403,json={'message':'CURRENT SOURCE DENIED','code':code},headers={'X-KIN-Auth-Code':code} if code else {}))
+   v.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click()
+   expect(v.locator('#kin-job-print [role=status]')).to_have_text('연결을 확인하지 못했습니다. 잠시 뒤 다시 시도하세요.' if code else '검사 접근이 거절되었습니다. 접근 권한을 확인하세요.')
+   self.assertEqual(v.evaluate('KinWorkContext.state()'),'active')
+   expect(v.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF')).to_be_disabled()
+   v.unroute(endpoint);v.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click()
+   expect(v.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=120000)
+  ended=observe_viewer(v,['#kin-job-print'])
+  v.route(endpoint,lambda route:route.fulfill(status=409,json={'code':'AUTH_SESSION_MISMATCH'},headers={'X-KIN-Auth-Code':'AUTH_SESSION_MISMATCH'}))
+  v.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click()
+  ended.ended();self.assertEqual(ended.retained('#kin-job-print','node=>node.open'),[False]);ended.assert_quiet();self.unchanged_rows(before)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeCurrentPrintFailuresE2E(n) for n in loader.getTestCaseNames(VolumeCurrentPrintFailuresE2E) if n.startswith('test_current_extra_'))
 if __name__=='__main__':unittest.main(verbosity=2)

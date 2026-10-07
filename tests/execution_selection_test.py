@@ -106,6 +106,31 @@ class ExecutionSelectionTests(unittest.TestCase):
         self.assertEqual(len(plan['tests']),5)
         self.assertEqual(runner.collect(plan).countTestCases(),5)
 
+    def test_u5_fixups_profile_selects_exactly_the_five_fix_round_cases(self):
+        # S7-U5 final review part 1, blocker 3: the five authored cases that pin the fix round, each once. run-tests.py
+        # collects no imported class, so the module carries them on local subclasses that declare nothing; each selected
+        # method is the one its source class declares itself (not an inherited case of that class).
+        (filename,class_name,unit),=ci.PROFILES['u5-fixups']['suites']
+        self.assertIsNone(class_name)
+        plan=runner.module_plan('tests/'+filename,unit,'live',ci.PROFILES['u5-fixups']['suite_timeout'],class_name)
+        self.assertEqual([row['case'] for row in plan['tests']],[
+            'U5FixupRoamingE2E.test_roam_01_two_browsers_all_panels_and_report',
+            'U5FixupRoamingE2E.test_roam_04b_write_failure_starts_from_a_normal_read',
+            'U5FixupJobsE2E.test_job_03_two_study_native_display_new_browser_restore',
+            'U5FixupFavoriteViewE2E.test_favorite_view_02_connect_cross_browser_and_restore',
+            'U5FixupDisplayE2E.test_display_04_input_annotation_and_reporting_preservation'])
+        self.assertEqual(runner.collect(plan).countTestCases(),5)
+        module=runner.load_module(ROOT/'tests'/filename)
+        sources={'U5FixupRoamingE2E':'WorkspaceRoamingE2E','U5FixupJobsE2E':'ViewerJobsE2E',
+                 'U5FixupFavoriteViewE2E':'FavoriteViewE2E','U5FixupDisplayE2E':'DisplayControlsE2E'}
+        for local,source in sources.items():
+            cls=getattr(module,local)
+            self.assertEqual(([base.__name__ for base in cls.__bases__],[n for n in cls.__dict__ if n.startswith('test_')]),
+                             ([source],[]),local)
+        for row in plan['tests']:
+            local,method=row['case'].split('.')
+            self.assertIn(method,getattr(module,local).__bases__[0].__dict__,row['case'])
+
     def test_u2b_regressions_profile_selects_each_module_declared_cases_only(self):
         # S5-CIE: each module's own load_tests selection, never the inherited WorklistE2E or RelatedFilterE2E cases.
         profile=ci.PROFILES['u2b-regressions']

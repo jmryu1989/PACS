@@ -179,7 +179,7 @@ export class ClinicalContextService {
       // V-ACCESS: 같은 정책 스냅샷이어야 R3에서 고정한 규칙으로 구성원을 거를 수 있다(study-access.service.ts의 digest와 같은 비교).
       if (JSON.stringify(await this.studyAccess.snapshot(c, tx)) !== JSON.stringify(access)) throw accessChanged();
       const states = await tx.studyState.findMany({ where: { uid: { in: [uid, ...candidates.map(source => source.uid)] } },
-        select: { uid: true, institutionId: true, teleInstitutionId: true, rs: true, preDoc: true, preReviewer: true, createdAt: true } });
+        select: { uid: true, institutionId: true, teleInstitutionId: true, rs: true, preDoc: true, preReviewer: true, preDocSub: true, preReviewerSub: true, createdAt: true } });
       const stateOf = new Map<string, any>(states.map(state => [state.uid, state]));
       const anchor = stateOf.get(uid);
       const anchorAccess = contextAccess(anchor, me);
@@ -222,7 +222,7 @@ export class ClinicalContextService {
    */
   private recheck(uid: string, uids: string[]) {
     return this.prisma.$queryRaw<any[]>`
-      SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."preDoc", s."preReviewer",
+      SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."preDoc", s."preReviewer", s."preDocSub", s."preReviewerSub",
         COALESCE(r.version, 0) AS "reportVersion",
         (SELECT COALESCE(MAX(n.version), 0) FROM "TechNoteRevision" n WHERE n."studyUid" = ${uid}) AS "techNoteVersion"
       FROM "StudyState" s LEFT JOIN "Report" r ON r.uid = s.uid

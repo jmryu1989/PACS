@@ -95,6 +95,8 @@
     const grid = services?.viewportGridService, cornerstone = services?.cornerstoneViewportService, sets = services?.displaySetService;
     const live = () => !ended && options.live?.() !== false;
     let ended = false, busy = false, quarantined = false, record = null, panel = null, status = null, hint = null;
+    // One double click that arrived while an operation was still settling (onDoubleClick).
+    let pendingToggle = false;
     const subscriptions = []; let listening = false, channel = null, workspace = null;
 
     const ordered = () => [...(grid?.getState?.().viewports?.values?.() || [])]
@@ -560,12 +562,21 @@
       const original = tool.onResetCamera; let held = true;
       const guarded = function (...args) { if (!held) return original.apply(this, args); };
       tool.onResetCamera = guarded;
+      // The end of this viewer's session cancels every timer and frame an operation may be
+      // parked on, so its `finally` never runs then: the same release is also the session
+      // end's own (once; withdrawn by a normal release). The operation itself is not resumed.
+      let withdraw = null;
+      const release = () => {
+        held = false; const hook = withdraw; withdraw = null; hook?.();
+        if (tool.onResetCamera === guarded) tool.onResetCamera = original;
+      };
+      try { withdraw = (win?.KinViewerSessionBoundary || root.KinViewerSessionBoundary)?.onEnd?.(release) ?? null; } catch (_) { withdraw = null; }
       return {
         // Once the cameras are confirmed, the crosshair widget is placed on them. Its centre
         // is derived from those cameras, so it lands on the position the user last set rather
         // than on a reset one; this is the only crosshair write this module makes.
         center() { try { if (group.getToolOptions?.('Crosshairs')?.mode !== 'Disabled') tool.computeToolCenter?.(); } catch (_) { } },
-        release() { held = false; if (tool.onResetCamera === guarded) tool.onResetCamera = original; },
+        release,
       };
     }
 
@@ -649,7 +660,14 @@
         // out of the operation, which would leave the caller with no answer at all.
         if (!dispatched) return { ok: false, message: note('칸 배치를 시작하지 못했습니다. 잠시 후 다시 시도하세요.') };
         return await rollback('칸 배치에 실패해 이전 배치로 복구했습니다.');
-      } finally { crosshair?.release(); watch?.release(); busy = false; refresh(); }
+      } finally {
+        crosshair?.release(); watch?.release(); busy = false; refresh();
+        // The double click remembered while this operation settled is answered now, and
+        // only by the restore the panel promises; a failed, ended or quarantined operation
+        // left nothing to restore, so it is forgotten.
+        const toggle = pendingToggle; pendingToggle = false;
+        if (toggle && record && !ended && !quarantined) unmerge();
+      }
     }
 
     async function unmerge() {
@@ -693,7 +711,11 @@
         // claimed or the merge record being dropped.
         if (!started) return { ok: false, message: note('되돌리기를 시작하지 못했습니다. 잠시 후 다시 시도하세요.') };
         return { ok: false, message: quarantine() };
-      } finally { crosshair?.release(); watch?.release(); busy = false; refresh(); }
+      } finally {
+        crosshair?.release(); watch?.release(); busy = false; refresh();
+        // A double click during a restore is not turned into a new maximize afterwards.
+        pendingToggle = false;
+      }
     }
 
     // A double click a native tool consumed never reaches document: the pinned
@@ -701,7 +723,7 @@
     // tool-handled and drag-ignored double clicks, so this handler cannot double-handle
     // a measurement gesture. Images Only blocks the same event for 400ms after exit.
     function onDoubleClick(event) {
-      if (ended || busy || event.defaultPrevented || event.button !== 0 || (event.detail || 0) < 2) return;
+      if (ended || event.defaultPrevented || event.button !== 0 || (event.detail || 0) < 2) return;
       if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
       const target = event.target;
       if (!target || panel?.contains?.(target) || target.closest?.('#kin-viewer-layout,#kin-workspace-dock,dialog,[role="dialog"]')) return;
@@ -710,6 +732,11 @@
         return element?.isConnected && element.contains(target);
       });
       if (matches.length !== 1) return;
+      // A second double click at reading speed can land while the maximize is still
+      // settling. Dropping it left the native one-up acting alone on a merged screen, so it
+      // is remembered - once: a third click is the same request, not another toggle - and
+      // answered when the operation finishes.
+      if (busy) { pendingToggle = true; return; }
       if (record) { unmerge(); return; }
       run('maximize', matches[0].viewportId);
     }
@@ -737,13 +764,13 @@
       }
     }
 
-    const sessionEnd = event => { if (event.key === 'kin-session-ended') stop(); };
+
     function stop() {
-      if (ended) return; ended = true; record = null;
+      if (ended) return; ended = true; record = null; pendingToggle = false;
       subscriptions.splice(0).forEach(item => item?.unsubscribe?.());
       doc.removeEventListener('dblclick', onDoubleClick);
       channel?.close(); channel = null;
-      if (listening) { win.removeEventListener?.('storage', sessionEnd); win.removeEventListener?.('pagehide', stop); listening = false; }
+      if (listening) {  win.removeEventListener?.('pagehide', stop); listening = false; }
       if (workspace && win.kinCellMergeWorkspaceState === workspace) delete win.kinCellMergeWorkspaceState;
       workspace = null;
       panel?.remove(); panel = status = hint = null;
@@ -776,8 +803,8 @@
       win.kinCellMergeWorkspaceState = workspace;
       if (!listening) {
         listening = true;
-        win.addEventListener?.('storage', sessionEnd); win.addEventListener?.('pagehide', stop);
-        try { channel = new win.BroadcastChannel('kin-session'); channel.onmessage = event => { if (event.data?.type === 'session-ended') stop(); }; } catch (_) { }
+         win.addEventListener?.('pagehide', stop);
+        try { channel = window.kinViewerOnEnd(() => stop()); } catch (_) { }
       }
       refresh(); note('칸을 선택한 뒤 확대·병합하거나 영상 칸을 더블클릭하세요.');
       return true;

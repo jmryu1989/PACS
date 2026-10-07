@@ -11,6 +11,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from playwright.sync_api import expect
 from test_worklist import WorklistE2E,psql
+from viewer_session import release_after_end, end_document
 
 def lit(x):return "'"+str(x).replace("'","''")+"'"
 class ReaderAssignmentE2E(WorklistE2E):
@@ -76,8 +77,8 @@ class ReaderAssignmentE2E(WorklistE2E):
   p.route('**/reader-assignment',lambda r:lost(r) if r.request.method=='POST' else r.continue_());p.locator('#ra-reader').select_option(self.stack.user_ids['doctor']);p.locator('#ra-save').click();expect(p.locator('#ra-status')).to_contain_text('저장 확인 실패');expect(p.locator('#ra-retry')).to_be_enabled()
   p.unroute('**/reader-assignment');p.locator('#ra-retry').click();expect(p.locator('#ra-status')).to_contain_text('저장되었습니다');self.assertEqual(len(self.read(a)['history']),1)
   self.change(a,self.body(self.read(a),'doctor2'));p.locator('#ra-reader').select_option('');p.locator('#ra-save').click();expect(p.locator('#ra-status')).to_contain_text('바뀌었습니다');expect(p.locator('#ra-reader')).to_have_value('');p.locator('#ra-reload').click();expect(p.locator('#ra-current')).to_contain_text(self.stack.actor('doctor2'));expect(p.locator('#ra-reader')).to_have_value('');p.locator('#ra-save').click();expect(p.locator('#ra-status')).to_contain_text('저장되었습니다');self.assertIsNone(self.read(a)['reader']);p.locator('#ra-close').click()
-  waiting=[];p.route('**/reader-assignment',lambda r:waiting.append(r));p.locator(f'[data-reader-assignment="{a.uid}"]').click();expect(p.locator('#ra-status')).to_contain_text('읽는 중');p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(p.locator('#reader-assignment-dialog')).not_to_be_visible()
-  for route in waiting:route.fulfill(status=200,content_type='application/json',body=json.dumps(self.read(a)))
+  waiting=[];p.route('**/reader-assignment',lambda r:waiting.append(r));p.locator(f'[data-reader-assignment="{a.uid}"]').click();expect(p.locator('#ra-status')).to_contain_text('읽는 중');end_document(p);expect(p.locator('#reader-assignment-dialog')).not_to_be_visible();self.assertFalse(p.locator('#reader-assignment-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
+  for route in waiting:release_after_end(route,status=200,content_type='application/json',body=json.dumps(self.read(a)))
   expect(p.locator('#ra-history')).to_be_empty();expect(p.locator('#ra-reader')).to_be_empty()
  def test_assignment_05_concurrent_hold_is_serialized(self):
   a=self.fixture();s=self.read(a);self.account('doctor');self.account('doctor2');body=self.body(s,'doctor')
@@ -98,7 +99,10 @@ class ReaderAssignmentE2E(WorklistE2E):
   r=self.stack.request('GET',f'/audit?uid={f.uid}&take=500',role);self.assertEqual(r.status,200,r.text)
   return sorted({json.loads(x['detail'])['institution'] for x in r.body if x['action']=='reader.assignment'})
  def test_assignment_06_tele_receiver_owner_and_third_institution(self):
-  a=self.fixture();unknown=self.stack.request('GET',f'/studies/{a.uid}.9/reader-assignment','kdoctor');self.assertEqual(unknown.status,404)
+  # Appending to a 64-character generated UID tests invalid syntax, not an
+  # unknown study. Use a separate valid UID for the non-disclosure comparison.
+  a=self.fixture();missing='2.25.'+str(uuid.uuid4().int)
+  unknown=self.stack.request('GET',f'/studies/{missing}/reader-assignment','kdoctor');self.assertEqual(unknown.status,404)
   def refused(role,revision=0):
    self.account(role);request=str(uuid.uuid4());self.requests.add(request)
    write=dict(expectedOwner=['kin-center',self.stack.user_ids[role]],revision=revision,readerSub=None,requestId=request)

@@ -547,9 +547,15 @@ class MigrationPins(unittest.TestCase):
         # 32 -> 33, tables unchanged: S7-U3a added 20260928130000_reader_assignment_scope (ReaderAssignment keyed by
         # study and institution).
         # 33 -> 34, tables unchanged: S7-AUDIT-STORE added 20260930120000_audit_log_append_only (the AuditLog guard trigger).
+        # 34 -> 35, tables unchanged: S7-U5 added 20261004120000_draft_revision_session_entry (ReportDraft revision/present, StudyState
+        # draftEpoch, AuthSession entry proof columns).
+        # 35 -> 36, one table: S7-U5 session end added 20261005120000_idp_session_end (IdpSessionEnd, AuthSession.idpSid).
+        # 36 -> 37, one table: S7-U5 member isolation added 20261005130000_member_isolation (MemberIsolation).
+        # 37 -> 38, tables unchanged: S7-U5 added 20261006120000_member_isolation_call (MemberIsolation's call in flight).
+        # 38 -> 39, one table: S7-U5 D600 added 20261007120000_provider_change (ProviderChange; the in-flight columns dropped).
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 34)
-        self.assertEqual(len(restore_fixture.TABLES), 46)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 41)
+        self.assertEqual(len(restore_fixture.TABLES), 51)
         self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 
 
@@ -560,7 +566,12 @@ class WorkflowPins(unittest.TestCase):
                        "--entrypoint node kin-api:ci --test /tests/gateway_receipt_server_test.cjs",
                        "tmp/runtime-ci/gateway-receipt-server/"):
             self.assertEqual(1, WORKFLOW.count(needle), needle)
-        self.assertEqual(1, WORKFLOW.count("-r gateway/agent/requirements.txt numpy"), "the invariants interpreter keeps the agent dependency")
+        # Each live-stack interpreter that reaches the gateway keeps the agent dependency: the invariants one, and since
+        # S7-U5 the session contract job's (s7-u5-session-contracts, the same requirement line).
+        for interpreter in ("hp-python", "u5-python"):
+            self.assertEqual(1, WORKFLOW.count('"$RUNNER_TEMP/%s/bin/python" -m pip install -r tests/e2e/requirements.txt '
+                                               '-r gateway/agent/requirements.txt numpy' % interpreter), interpreter)
+        self.assertEqual(2, WORKFLOW.count("-r gateway/agent/requirements.txt numpy"), "no other interpreter installs it")
 
 
 class Encoding(unittest.TestCase):

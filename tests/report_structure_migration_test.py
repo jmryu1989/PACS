@@ -113,19 +113,18 @@ class ReportStructureMigration(unittest.TestCase):
                 self.assertIn("slice(", render)
 
     def test_an_empty_list_is_cleared_with_DbNull_and_never_by_omission(self) -> None:
-        # A1. `Prisma.JsonNull` would store the JSON value null - neither an array nor SQL NULL - and
-        # `{}` on an update preserves whatever was there, so "I cleared it" would be false.
-        self.assertEqual(SERVICE.count("{ structured: Prisma.DbNull }"), 1, "the explicit clear")
+        # A1. `Prisma.JsonNull` would store the JSON value null - neither an array nor SQL NULL - and a key left out of
+        # an update preserves whatever was there, so "I cleared it" would be false.
+        # S7-U5: the draft is written in one place (`storeDraft`) from the whole snapshot, so there is no "request did
+        # not mention it" branch left: an update always names the column, a new row omits an empty one.
+        store = SERVICE[SERVICE.index("private async storeDraft("):]
+        store = store[:store.index("\n  }\n")]
+        self.assertEqual(store.count("structured: structured ?? Prisma.DbNull"), 1, "the update says NULL out loud")
         self.assertEqual(SERVICE.count("structured: Prisma.JsonNull"), 0, "JsonNull is the trap")
         self.assertEqual(SERVICE.count("structured: null"), 0, "a JS null is the same trap")
-        update = re.search(r"const structuredUpdate = (.*?);\n", SERVICE, re.S)
-        self.assertIsNotNone(update)
-        self.assertIn("!structure ? {}", update.group(1), "no request change must omit")
-        create = re.search(r"const structuredCreate = (.*?);\n", SERVICE, re.S)
-        self.assertIsNotNone(create)
-        self.assertIn("entries.length", create.group(1))
-        self.assertIn("{}", create.group(1), "create has nothing to clear, so it omits")
-
+        self.assertIn("content?.structured.length ? content.structured : null", store, "an empty list is no list")
+        self.assertIn("...(structured ? { structured } : {})", store, "a new row has nothing to clear, so it omits")
+        self.assertEqual(SERVICE.count("reportDraft.upsert("), 0, "no second, unconditional draft write beside it")
     def test_every_writer_of_a_version_row_carries_the_column(self) -> None:
         # P1/P2: three writers exist - commit, reset's preserved row, and the admin force discard.
         self.assertIn("...(structured.length ? { structured } : {})", SERVICE)
@@ -143,8 +142,14 @@ class ReportStructureMigration(unittest.TestCase):
         self.assertIn("citations", select.group(1))
 
     def test_the_commit_lock_reads_both_json_columns_in_one_statement(self) -> None:
-        self.assertIn('SELECT citations, structured FROM "ReportDraft"', SERVICE)
-        self.assertIn('SELECT structured FROM "ReportDraft"', SERVICE)
+        # S7-U5: the caller's row is locked and read once (`ownDraft`), by the draft write and the commit alike.
+        own = SERVICE[SERVICE.index("private async ownDraft("):]
+        own = own[:own.index("\n  }\n")]
+        select = re.search(r'SELECT (.*?)FROM "ReportDraft" WHERE uid = \$\{uid\} AND author = \$\{c\.actor\} FOR UPDATE', own, re.S)
+        self.assertIsNotNone(select)
+        for column in ("citations", "structured", "revision", "present"):
+            self.assertIn(column, select.group(1))
+        self.assertEqual(own.count("FOR UPDATE"), 1, "one statement locks the row and reads both columns")
 
     def test_no_existing_response_gained_the_column(self) -> None:
         # P9/P15: `versions()` selects by name and `toClient` projects five draft fields. If either
@@ -153,10 +158,9 @@ class ReportStructureMigration(unittest.TestCase):
         versions = re.search(r"return this\.prisma\.reportVersion\.findMany\((.*?)\}\);", SERVICE, re.S)
         self.assertIsNotNone(versions)
         self.assertNotIn("structured", versions.group(1))
-        to_client = re.search(r"draft: \(hidden \|\| !d\) \? null : \{(.*?)\},\n", SERVICE, re.S)
+        to_client = re.search(r"draft: \(hidden \|\| !d \|\| !d\.present\) \? null : \{(.*?)\},\n", SERVICE, re.S)
         self.assertIsNotNone(to_client)
         self.assertNotIn("structured", to_client.group(1))
-
     def test_the_one_new_route_is_declared_where_the_live_suite_checks_it(self) -> None:
         self.assertIn("@Get('studies/:uid/report/structure')", CONTROLLER)
         self.assertIn('("GET", "studies/:uid/report/structure"): Route(Kind.REPORT, "structure")', INVARIANTS)
@@ -183,10 +187,15 @@ class ReportStructureMigration(unittest.TestCase):
         # S7-U1a's 20260928120000_critical_result (CriticalResult, CriticalResultEvent, CriticalResultReceipt) from 31 to 32.
         # S7-U3a's 20260928130000_reader_assignment_scope (ReaderAssignment keyed by study and institution) from 32 to 33.
         # S7-AUDIT-STORE's 20260930120000_audit_log_append_only (the AuditLog guard trigger) from 33 to 34.
+        # S7-U5's 20261004120000_draft_revision_session_entry (draft boundary and entry proof columns) from 34 to 35.
+        # S7-U5 session end's 20261005120000_idp_session_end (IdpSessionEnd, AuthSession.idpSid) from 35 to 36.
+        # S7-U5 member isolation's 20261005130000_member_isolation (MemberIsolation) from 36 to 37.
+        # S7-U5's 20261006120000_member_isolation_call (MemberIsolation's call in flight, three columns) from 37 to 38.
+        # S7-U5 D600's 20261007120000_provider_change (ProviderChange; the in-flight columns dropped) from 38 to 39.
         names = sorted(p.name for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
         self.assertIn(MIGRATION_DIR.name, names)
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 34)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 41)
 
     def test_the_synthetic_catalog_never_reaches_product_code(self) -> None:
         # P6/P7. The seam is one instance property a test overwrites on its own instance; anything

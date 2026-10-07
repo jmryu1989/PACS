@@ -119,9 +119,8 @@ window.kinViewerJobs = function (services, model, session = null) {
     }
     function end() { ended = true; serial++; printer?.close(); abort.abort(); me = null; pending = editRow = null; title.value = description.value = ''; list.replaceChildren(); status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
     async function api(url, options = {}) {
-      // `foreign`: a saved-location restore reads a Job that may name a comparison study; its 403 is that Job's refusal,
-      // and only the anchor list read that follows may end the panel.
-      const { idempotent = false, foreign = false, ...request } = options;
+      // A plain 403 refuses this resource. Session termination belongs to the page transport's authenticated end signals.
+      const { idempotent = false, ...request } = options;
       const controller = new AbortController(), cancel = () => controller.abort(); abort.signal.addEventListener('abort', cancel, { once: true });
       options.signal?.addEventListener('abort', cancel, { once: true });
       if (options.signal?.aborted || abort.signal.aborted) cancel();
@@ -139,22 +138,13 @@ window.kinViewerJobs = function (services, model, session = null) {
         if (session?.ended()) throw new Error('세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.');
         let r;
         try { r = await send(); } catch (error) { if (!read || controller.signal.aborted || error?.name !== 'TypeError' || !live()) throw error; r = await send(); }
-        // S5-U2c fix4 (Astra S5-U2c-C-R-001 F01): an answer live() drops (this panel ended — mode exit too —, the document ended, or
-        // the viewer shows other studies) is still the document's for what it says about the login, also when it came in just
-        // before the abort that ended the panel: its 401 ends the login, and a /me answer of another account than the document's
-        // first one ends it (session.sameAccount: no verdict). An answer in use reaches the same below and through authenticate()'s
-        // answer(); a /me 403 refuses this account without ending the login and is read only then.
+        // Session termination is owned by the page transport and gate.
         const drop = async value => {
-          if (r.status === 401) session?.refuse('unauthorized');
-          else if (url === '/me' && r.ok) session?.sameAccount(value === undefined ? await r.json().catch(() => null) : value);
+          if (url === '/me' && r.ok) session?.sameAccount(value === undefined ? await r.json().catch(() => null) : value);
           return new Error('화면이 변경되었습니다.');
         };
         if (!live()) throw await drop();
-        if (r.status === 401 || r.status === 403 && !foreign) {
-          // A 401, or a 403 on /me, is the end of the document's login; a 403 on this study's Jobs still ends this panel only.
-          if (r.status === 401 || url === '/me') session?.refuse(r.status === 401 ? 'unauthorized' : 'forbidden');
-          end(); throw new Error('검사 접근 권한을 확인할 수 없습니다.');
-        }
+        if (window.KinSessionTransport.refusal(r)) throw window.KinSessionTransport.responseError(r);
         const value = await r.json().catch(() => null);
         if (!live()) throw await drop(value);
         if (!r.ok || !value) { const e = new Error(typeof value?.message === 'string' ? value.message : '서버 연결을 확인한 뒤 다시 시도하세요.'); e.status = r.status; throw e; }
@@ -282,17 +272,56 @@ window.kinViewerJobs = function (services, model, session = null) {
       if (!current()) throw new Error('화면이 변경되었습니다.'); grid.setActiveViewportId(ids[value.active]);
       return ids;
     }
-    // A saved-location restore of a version 1-3 layout proves what the stack cells show before it reports a restore: every
-    // saved cell's original instance and the active cell. Versions 4 and later are proved inside the MPR apply.
+    // A restore of a version 1-3 layout (Restore Job, the kinJob page and a saved location) proves what the stack cells show
+    // before it reports a restore: every saved cell's original instance and camera, and the active cell (confirmStack below).
+    // Versions 4 and later are proved inside the MPR apply. The camera is its focal point (pan) and parallel scale (zoom), with
+    // the MPR read-back's tolerance: a native step that resets only the camera keeps the frame, so the instance alone would
+    // report a restore whose saved zoom and pan are gone (S7-U5 review of 8c2cf37, F-03).
+    const sameCamera = (shown, saved) => !!shown && Array.isArray(shown.focalPoint) && Math.abs(shown.parallelScale - saved.parallelScale) < 1e-6 &&
+      saved.focalPoint.every((n, i) => Math.abs(n - shown.focalPoint[i]) < 1e-6);
+    function showsCell(viewportId, cell) {
+      const v = cs.getCornerstoneViewport(viewportId), shown = window.cornerstone.metaData.get('instance', v?.getCurrentImageId?.());
+      return shown?.StudyInstanceUID === cell.study && shown?.SeriesInstanceUID === cell.series && shown?.SOPInstanceUID === cell.sop &&
+        sameCamera(v.getCamera?.(), cell.camera);
+    }
     function readBack(value, ids) {
       if (!Array.isArray(ids)) return;
       value.cells.forEach((cell, i) => {
-        if (!cell) return;
-        const v = cs.getCornerstoneViewport(ids[i]), shown = window.cornerstone.metaData.get('instance', v?.getCurrentImageId?.());
-        if (shown?.StudyInstanceUID !== cell.study || shown?.SeriesInstanceUID !== cell.series || shown?.SOPInstanceUID !== cell.sop)
-          throw new Error('저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
+        if (cell && !showsCell(ids[i], cell)) throw new Error('저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
       });
       if (grid.getState().activeViewportId !== ids[value.active]) throw new Error('저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
+    }
+    /**
+     * A restore of a version 1-3 layout reports only what the stack cells show once the native viewer has stopped changing
+     * them. Observed (S7-U5 fix round, job_03 alone twice): the second study's cell showed its first frame and initial
+     * camera when "restored" was reported and stayed so - the native viewer had set that cell's stack again after the
+     * saved frame was applied. So: wait until no cell's viewport, stack, shown frame or camera has changed for a few samples
+     * (bounded), read every cell back, apply a cell the native viewer moved once more, wait again, and if a cell still is
+     * not the saved one the restore fails (and is rolled back like any failed apply). Input outside the panel is swallowed
+     * while the restore applies (interaction), so this never overrides the person's own work, and nothing re-applies after
+     * the restore has reported.
+     */
+    async function settleStack(ids) {
+      const look = () => ids.map(id => { const v = cs.getCornerstoneViewport(id), stack = v?.getImageIds?.() || [], camera = v?.getCamera?.();
+        return [v, stack.length, stack[0], v?.getCurrentImageId?.(), JSON.stringify([camera?.focalPoint, camera?.parallelScale])]; });
+      let last = look(), still = 0;
+      for (let n = 0; n < 60 && still < 6; n++) {
+        await new Promise(r => setTimeout(r, 50));
+        const now = look();
+        still = now.every((cell, i) => cell.every((part, j) => part === last[i][j])) ? still + 1 : 0;
+        last = now;
+      }
+    }
+    async function confirmStack(value, ids, ticket) {
+      const current = () => live() && serial === ticket;
+      await settleStack(ids);
+      const moved = value.cells.map((cell, i) => cell && !showsCell(ids[i], cell) ? i : -1).filter(i => i >= 0);
+      if (moved.length) {
+        for (const i of moved) await applyStackCell(ids[i], value.cells[i], current);
+        await settleStack(ids);
+      }
+      if (!current()) throw new Error('화면이 변경되었습니다.');
+      readBack(value, ids);
     }
     /* One restore for Restore Job, the kinJob page and a finding's saved location (S2-L2a). It returns {state:'restored'|'continuing',
        message} or throws an Error carrying kinRestore {state, reason}: 'refused' changed nothing on screen, 'rolled-back' applied the
@@ -354,7 +383,7 @@ window.kinViewerJobs = function (services, model, session = null) {
         if (listed.snapshotVersion !== located.request.snapshotVersion) throw refusal('source-changed', LOCATION_TEXT['source-changed']);
         located.ensure();
       }
-      const job = await api(path + '/' + row.id, located ? { signal: located.signal, foreign: true } : {}); await authenticate(located?.signal);
+      const job = await api(path + '/' + row.id, located ? { signal: located.signal } : {}); await authenticate(located?.signal);
       // On a fresh kinJob document, native hanging-protocol initialization
       // can change the grid while the saved job is fetched. User interaction
       // still advances serial; only that initial automatic layout is allowed.
@@ -425,7 +454,7 @@ window.kinViewerJobs = function (services, model, session = null) {
       catch (e) { throw refusal(/도구/.test(e.message) ? 'tool-missing' : 'job-studies', e.message); }
       located?.ensure();
       ctx.mutating = true; applying = true;
-      try { const ids = await apply(job.snapshot, ticket); if (located && !VOLUME_VERSIONS.includes(job.snapshot.version)) readBack(job.snapshot, ids); }
+      try { const ids = await apply(job.snapshot, ticket); if (!VOLUME_VERSIONS.includes(job.snapshot.version)) await confirmStack(job.snapshot, ids, ticket); }
       catch (e) {
         const message = /[가-힣]/.test(e.message) ? e.message : '영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.';
         if (!(live() && serial === ticket)) throw outcome('screen-unknown', 'apply-failed', message);
@@ -530,7 +559,7 @@ window.kinViewerJobs = function (services, model, session = null) {
         else if (ctx.mutating) result = { state: 'screen-unknown', reason: 'apply-failed', message: '복원 결과를 확인하지 못했습니다. 현재 영상을 확인하세요.' };
         else if (!live()) result = { state: 'refused', reason: 'ended', message: LOCATION_TEXT.ended };
         else if (e?.name === 'AbortError' || controller.signal.aborted) result = { state: 'refused', reason: 'timeout', message: LOCATION_TEXT.timeout };
-        else if (e?.status === 403 || e?.status === 404) {
+        else if (window.KinSessionTransport.refusal(e) === 'denied' || e?.status === 404) {
           result = { state: 'refused', reason: 'job-unavailable', message: LOCATION_TEXT['job-unavailable'] };
           // A refused Job may mean a withdrawn comparison study: the anchor list decides whether this panel ends.
           if (e.status === 403) load().catch(() => {});
@@ -559,6 +588,7 @@ window.kinViewerJobs = function (services, model, session = null) {
     // `fields` and `outcome` belong to the MIP Viewer's own Save MIP Job and Retry MIP Save: the same request path with
     // the MIP Viewer's title and description, reporting what actually happened to the request instead of only status text.
     async function run(action, row, reason, initialRestore = false, fields = null, outcome = null) {
+      if (window.KinViewerSessionBoundary && !window.KinViewerSessionBoundary.active()) return;
       if (!live() || busy || !me) { if (outcome) outcome.message = busy ? '영상 작업 처리가 끝난 뒤 다시 저장하세요.' : '계정이나 화면을 확인할 수 없어 저장하지 않았습니다.'; return; }
       busy = true; refresh(); const ticket = ++serial, edit = editSerial, before = signature(action === 'saveMip'); status.textContent = '비교 작업 확인 중…';
       let dispatched = false;
@@ -664,8 +694,8 @@ window.kinViewerJobs = function (services, model, session = null) {
       if (effect === 'swallow') { e.preventDefault(); e.stopImmediatePropagation(); } else if (effect === 'advance') serial++;
     };
     for (const event of ['pointerdown', 'wheel', 'keydown']) document.addEventListener(event, interaction, { capture: true, passive: false });
-    const storage = e => { if (e.key === 'kin-session-ended') end(); }; window.addEventListener('storage', storage);
-    try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
+
+    try { channel = window.kinViewerOnEnd(() => end()); } catch (_) {}
     const offEnd = session?.onEnd(end) || (() => {});
     const timer = setInterval(() => {
       if (!live()) { end(); return; }
@@ -689,7 +719,7 @@ window.kinViewerJobs = function (services, model, session = null) {
       status.textContent = '비교 영상 로딩을 완료하지 못했습니다. 목록의 이 작업 복원으로 다시 시도하세요.';
     }
     initialize().catch(e => { if (live()) status.textContent = e.message; }).finally(refresh);
-    stop = () => { if (window.kinViewerJobWorkspaceState === workspaceState) delete window.kinViewerJobWorkspaceState; if (window.kinViewerJobCommand === mipCommand) delete window.kinViewerJobCommand; if (window.kinViewerJobLocation === jobLocation) delete window.kinViewerJobLocation; offEnd(); end(); printer?.destroy(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); if (ownsWindowUnload) window.removeEventListener('beforeunload', beforeUnload); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
+    stop = () => { if (window.kinViewerJobWorkspaceState === workspaceState) delete window.kinViewerJobWorkspaceState; if (window.kinViewerJobCommand === mipCommand) delete window.kinViewerJobCommand; if (window.kinViewerJobLocation === jobLocation) delete window.kinViewerJobLocation; offEnd(); end(); printer?.destroy(); clearInterval(timer); channel?.close();  if (ownsWindowUnload) window.removeEventListener('beforeunload', beforeUnload); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
   }
   return { mount, stop: () => stop() };
 };

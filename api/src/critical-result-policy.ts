@@ -1,3 +1,4 @@
+import { canReadPreliminary } from './preliminary-reader';
 import { createHash } from 'node:crypto';
 import { CLINICIAN_ROLE, clinicianFinal } from './clinician-policy';
 
@@ -24,7 +25,7 @@ export const CRITICAL_RESULT_TRANSITIONS: Readonly<Record<string, { from: string
 export type RecipientClass = 'clinician' | 'radiologist';
 export type Refusal = { status: 400 | 403 | 404 | 409 | 503; code: string; id?: string; replacedBy?: string };
 export type Head = { version: number; action: string | null; author?: string | null; at?: any } | null;
-export type StudyReadState = { rs?: string | null; preDoc?: string | null; preReviewer?: string | null };
+export type StudyReadState = { rs?: string | null; preDoc?: string | null; preReviewer?: string | null; preDocSub?: string | null; preReviewerSub?: string | null };
 export type RecipientCase = {
   case: 'C2' | 'C3' | 'C4' | 'C5' | 'R2' | 'R3' | 'R4' | 'R5';
   /** full: 메시지·고정 판·본문, stub: 기록 칸만, null: 행이 없다(C5/R5). */
@@ -124,19 +125,18 @@ export function recipientSees(record: RecordSides, state: StudyScopeState | null
 }
 
 /** 판독의의 기존 읽기 규칙(report-preview·versions(), F-8·F-9): P면 preDoc·preReviewer만. 가시성은 따로 본다. */
-export function legacyReadable(state: StudyReadState | null | undefined, actor: string): boolean {
+export function legacyReadable(state: StudyReadState | null | undefined, actor: string, sub?: string): boolean {
   if (!state) return false;
-  if (state.rs !== 'P') return true;
-  return !!actor && (state.preDoc === actor || state.preReviewer === actor);
+  return canReadPreliminary(state, { actor, sub });
 }
 
 /**
  * 생성·대체 때의 수신자 판정(M-S7-CVR C1/C2, R1/R2). 고정 = 지금 머리이므로 C는 확정 원천(clinicianFinal)일 때만,
  * R은 기존 읽기 규칙이 그 머리를 줄 때만 받는다. visible은 수신자에게 지금 검사가 보이는가(기관·StudyAccess)다.
  */
-export function createCase(input: { cls: RecipientClass; visible: boolean; head: Head; state: StudyReadState; actor: string }) {
+export function createCase(input: { cls: RecipientClass; visible: boolean; head: Head; state: StudyReadState; actor: string; sub?: string }) {
   if (input.cls === 'clinician') return input.visible && clinicianFinal(input.state?.rs, input.head) ? 'C2' : 'C1';
-  return input.visible && legacyReadable(input.state, input.actor) ? 'R2' : 'R1';
+  return input.visible && legacyReadable(input.state, input.actor, input.sub) ? 'R2' : 'R1';
 }
 
 /**
@@ -147,7 +147,7 @@ export function createCase(input: { cls: RecipientClass; visible: boolean; head:
  * ACK는 C2·R2뿐이다 — 옛 판에 대한 확인은 새 판의 확인으로 읽힐 수 있다.
  */
 export function recipientCase(input: { cls: RecipientClass; visible: boolean; pin: number; head: Head; state: StudyReadState;
-  actor: string }): RecipientCase {
+  actor: string; sub?: string }): RecipientCase {
   const clinician = input.cls === 'clinician';
   const head = input.head;
   const current = !!head && Number.isSafeInteger(head.version) && head.version > 0 && input.pin === head.version;
@@ -160,7 +160,7 @@ export function recipientCase(input: { cls: RecipientClass; visible: boolean; pi
       : { case: 'C5', view: null, ack: false, current, reason };
     return { case: reason === 'reset' ? 'C4' : 'C3', view: 'stub', ack: false, current, reason };
   }
-  const legacy = legacyReadable(input.state, input.actor);
+  const legacy = legacyReadable(input.state, input.actor, input.sub);
   if (current) return legacy ? { case: 'R2', view: 'full', ack: true, current, reason } : { case: 'R5', view: null, ack: false, current, reason };
   return { case: reason === 'reset' ? 'R4' : 'R3', view: legacy ? 'full' : 'stub', ack: false, current, reason };
 }

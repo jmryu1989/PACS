@@ -1,6 +1,7 @@
 # coding: utf-8
 """Isolated Chromium coverage for cell merge: double-click ownership, panel and loader."""
 from pathlib import Path
+from viewer_session_fixture import install_viewer_session
 import json
 import time
 import unittest
@@ -18,9 +19,17 @@ URL = "https://cellmerge.test/ohif/viewer?StudyInstanceUIDs=1.2.1"
 def extract_function(source, name):
     start = source.index(f"function {name}(")
     brace = source.index("{", start)
-    depth, quote, escaped = 0, None, False
+    depth, quote, escaped, comment = 0, None, False, None
     for index in range(brace, len(source)):
         char = source[index]
+        # A comment is prose: an apostrophe in it opens no string.
+        if comment:
+            if (comment == "//" and char == "\n") or (comment == "/*" and source[index - 1:index + 1] == "*/"):
+                comment = None
+            continue
+        if not quote and source[index:index + 2] in ("//", "/*"):
+            comment = source[index:index + 2]
+            continue
         if quote:
             if escaped:
                 escaped = False
@@ -54,6 +63,12 @@ const camera=()=>({focalPoint:[0,0,0],position:[0,0,10],viewUp:[0,1,0],viewPlane
 function makeViewport(id,seed){
   const element=document.createElement('div');element.dataset.cell=id;element.style.cssText='position:absolute;background:#234;color:#fff';
   element.textContent=id;host.append(element);
+  // What the pinned viewer attaches to every enabled viewport element (1185.bundle initDoubleClick and
+  // initContextMenu): a double click runs toggleOneUp, a right click the context menu command. Inert
+  // unless a test installs the command manager.
+  element.addEventListener('dblclick',()=>window.nativeCommands?.run({commandName:'toggleOneUp',commandOptions:{}}));
+  element.addEventListener('contextmenu',event=>{if(!window.nativeCommands)return;event.preventDefault();
+    window.nativeCommands.run({commandName:'showCornerstoneContextMenu',commandOptions:{}});});
   return {id,type:'stack',element,current:'wadors:'+id+':0',index:0,renders:0,
     camera:Object.assign(camera(),{parallelScale:seed}),properties:{invert:false,voiRange:{lower:0,upper:100}},
     getCurrentImageId(){return this.current},getCurrentImageIdIndex(){return this.index},
@@ -107,6 +122,29 @@ window.mountDirect=()=>{window.mergeController=KinViewerCellMerge.create(service
 window.enterMerge=()=>mergeExtension.onModeEnter({servicesManager:{services}});
 </script></body></html>"""
 CAPTURE_TIMEOUT_MS = 10_000
+
+# The pinned CommandsManager (app.bundle) reduced to its resolution rules: commands live per
+# context, a run without a context takes whichever context registers the name. toggleOneUp is
+# the default extension's (1520.bundle, defaultContext 'DEFAULT'); the native one-up is
+# recorded instead of performed, because this harness grid applies a layout synchronously and
+# the native one would land before the merge reads the grid. `holdNextLayout` keeps the next
+# layout request in flight until `releaseLayout()`, which is the window in which the merge is
+# busy with a maximize that is not on screen yet.
+GESTURES = r"""(()=>{
+const contexts={DEFAULT:{},CORNERSTONE:{}};window.oneUpCalls=[];window.menuCalls=0;
+window.nativeOneUp={commandFn:()=>{oneUpCalls.push(gridState.viewports.size)}};
+contexts.DEFAULT.toggleOneUp=nativeOneUp;
+contexts.CORNERSTONE.showCornerstoneContextMenu={commandFn:()=>{menuCalls++}};
+window.nativeCommands={
+  getCommand(name,context){let found;for(const key of context?[context]:Object.keys(contexts))if(contexts[key]?.[name])found=contexts[key][name];return found},
+  registerCommand(context,name,definition){if(typeof definition==='object'&&contexts[context])contexts[context][name]=definition},
+  run(toRun){const definition=this.getCommand(toRun.commandName);
+    return typeof definition?.commandFn==='function'?definition.commandFn({...definition.options,...toRun.commandOptions}):undefined}};
+const original=grid.setLayout;window.holdNextLayout=false;
+grid.setLayout=function(payload){
+  if(!window.holdNextLayout)return original.call(this,payload);
+  window.holdNextLayout=false;window.releaseLayout=()=>original.call(grid,payload);return Promise.resolve();};
+})();"""
 
 # The saved Jobs panel over the same fake grid. Each stack cell gets the frame, actor and
 # canvas reads viewer-jobs.js needs to capture and restore it, so a restore really dispatches
@@ -170,6 +208,7 @@ class ViewerCellMergeDOMTest(unittest.TestCase):
         page = self.browser.new_page(viewport={"width": 900, "height": 700})
         page.route(URL, lambda route: route.fulfill(body=HARNESS, content_type="text/html; charset=utf-8"))
         page.goto(URL)
+        install_viewer_session(page)
         if module:
             page.add_script_tag(content=MODULE)
         if factory:
@@ -425,10 +464,10 @@ class ViewerCellMergeDOMTest(unittest.TestCase):
         finally:
             page.close()
 
-    def test_session_storage_and_pagehide_each_remove_the_panel_and_the_gesture(self):
+    def test_session_code_and_pagehide_each_remove_the_panel_and_the_gesture(self):
         dispatches = [
-            "new BroadcastChannel('kin-session').postMessage({type:'session-ended'})",
-            "dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))",
+            "new BroadcastChannel('kin-session').postMessage({type:'session-ended',session:'S1'})",
+            "KinViewerSessionBoundary.authFailure({session:'S1',status:401,code:'AUTH_SESSION_ENDED'})",
             "dispatchEvent(new Event('pagehide'))",
         ]
         for dispatch in dispatches:
@@ -490,6 +529,68 @@ class ViewerCellMergeDOMTest(unittest.TestCase):
                     route.abort()
                 except PlaywrightError:
                     pass
+            page.close()
+
+    def test_the_native_one_up_runs_only_while_the_merge_does_not_hold_the_screen(self):
+        """S1 images_only 04: one double click reaches both the native one-up and the merge. While the
+        merge holds the screen (settling or merged) the gesture is the merge's alone, including a second
+        double click that lands while the maximize settles; otherwise the native one-up and the right-click
+        menu run as before, and mode exit or session end hands the native command back."""
+        page = self.new_page(factory=True)
+        try:
+            page.add_script_tag(content=GESTURES)
+            page.evaluate("mergeExtension.onModeEnter({servicesManager:{services},commandsManager:nativeCommands})")
+            panel = page.locator("#kin-cell-merge")
+            expect(panel).to_be_visible()
+            before = page.evaluate("geometry()")
+            cell = page.locator('[data-cell="C"]')
+
+            page.locator('[data-cell="A"]').click(button="right")
+            self.assertEqual(1, page.evaluate("menuCalls"))
+            # Nothing held: the native one-up runs, and the merge maximizes the cell.
+            cell.dblclick()
+            expect(panel.locator("[role=status]")).to_contain_text("확대했습니다")
+            self.assertEqual([4], page.evaluate("oneUpCalls"))
+            # Merged: the right-click menu still opens, the double click is the merge's restore alone.
+            cell.click(button="right")
+            self.assertEqual(2, page.evaluate("menuCalls"))
+            cell.dblclick()
+            expect(panel.locator("[role=status]")).to_contain_text("되돌렸습니다", timeout=15000)
+            self.assertEqual(before, page.evaluate("geometry()"))
+            self.assertEqual([4], page.evaluate("oneUpCalls"))
+            self.assertEqual(2, len(page.evaluate("layoutCalls")))
+
+            # The second double click of the pair lands while the maximize is still in flight.
+            page.evaluate("holdNextLayout=true")
+            cell.dblclick()
+            page.wait_for_function("()=>kinCellMergeWorkspaceState().busy&&typeof releaseLayout==='function'")
+            self.assertEqual([4, 4], page.evaluate("oneUpCalls"))
+            cell.dblclick()
+            self.assertEqual([4, 4], page.evaluate("oneUpCalls"))
+            self.assertTrue(page.evaluate("kinCellMergeWorkspaceState().busy"))
+            page.evaluate("releaseLayout()")
+            # The maximize lands and is recorded, then the remembered click restores the grid - once.
+            page.wait_for_function("()=>layoutCalls.length>=4&&!kinCellMergeWorkspaceState().busy", timeout=15000)
+            page.wait_for_timeout(300)
+            self.assertEqual(4, len(page.evaluate("layoutCalls")))
+            self.assertEqual(before, page.evaluate("geometry()"))
+            self.assertEqual(dict(merged=False, busy=False), page.evaluate("kinCellMergeWorkspaceState()"))
+            expect(panel.locator("[role=status]")).to_contain_text("되돌렸습니다")
+            self.assertEqual([4, 4], page.evaluate("oneUpCalls"))
+
+            # Mode exit hands the native command back; the native gestures are as before.
+            page.evaluate("mergeExtension.onModeExit()")
+            self.assertTrue(page.evaluate("nativeCommands.getCommand('toggleOneUp','DEFAULT')===nativeOneUp"))
+            cell.dblclick()
+            self.assertEqual([4, 4, 4], page.evaluate("oneUpCalls"))
+            cell.click(button="right")
+            self.assertEqual(3, page.evaluate("menuCalls"))
+            # So does the end of the viewer session.
+            page.evaluate("mergeExtension.onModeEnter({servicesManager:{services},commandsManager:nativeCommands})")
+            self.assertFalse(page.evaluate("nativeCommands.getCommand('toggleOneUp','DEFAULT')===nativeOneUp"))
+            page.evaluate("KinViewerSessionBoundary.authFailure({session:'S1',status:401,code:'AUTH_SESSION_ENDED'})")
+            page.wait_for_function("()=>nativeCommands.getCommand('toggleOneUp','DEFAULT')===nativeOneUp")
+        finally:
             page.close()
 
 

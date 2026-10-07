@@ -3,6 +3,7 @@
 from pathlib import Path
 import hashlib
 import os
+import re
 import sys
 import unittest
 
@@ -58,6 +59,27 @@ def extract_function(source, name):
     raise AssertionError(f"unterminated function {name}")
 
 
+def page_functions_called_by(source, root, provided):
+    """`root` and the page-level functions of main.html it calls, directly or through each other (a call is the name
+    followed by `(`), leaving out every name `provided` mentions. Order: root first, then as found."""
+    defined = set(re.findall(r"^    function ([A-Za-z_$][\w$]*)\(", source, re.M))
+    mentioned = set(re.findall(r"[A-Za-z_$][\w$]*", provided))
+    found, queue = [root], [extract_function(source, root)]
+    while queue:
+        body = queue.pop(0)
+        for name in sorted(defined - mentioned - set(found)):
+            if re.search(r"(?<![\w$.])" + re.escape(name) + r"\s*\(", body):
+                found.append(name)
+                queue.append(extract_function(source, name))
+    return found
+
+
+# S7-U5: the sliced page code passes its writes through the page's work-context gate and registers its end with the
+# page's session-end coordination. The shipped gate is loaded as it is, following a session that is at work for the whole
+# case; onSessionEnd() is main.html's two-line registry (the end coordination itself is tests/auth_logout_dom_test.py's).
+WORK_CONTEXT = ((Path(__file__).resolve().parents[1] / "worklist-v0/hpacs-lite/work-context.js").read_text(encoding="utf-8")
+                + "\nconst work=KinWorkContext;work.follow({onLifecycle(listener){listener({state:'active',session:'SYN-SESSION'})}});"
+                + "const sessionEndHooks=[];function onSessionEnd(end){sessionEndHooks.push(end)}\n")
 HARNESS = r"""
 <button id="viewer-windows-open" disabled></button>
 <script>
@@ -130,7 +152,7 @@ window.__makePopup = ({href='https://example.test/ohif/viewer?StudyInstanceUIDs=
   window.__popups.push(popup);return {popup,index:choice.index};
 };
 </script>
-"""
+""".replace("<script>\nconst $ = value", "<script>\n" + WORK_CONTEXT + "const $ = value", 1)
 
 
 class ViewerWindowManagerDOMTest(unittest.TestCase):
@@ -146,9 +168,12 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
               f"lf_sha256={hashlib.sha256(main_lf).hexdigest()}")
         cls.main_source = main_bytes.decode("utf-8-sig")
         cls.manager_source = extract_function(cls.main_source, "mountViewerWindows")
-        cls.open_source = "\n".join(extract_function(cls.main_source, name)
-                                    for name in ("ohifScope", "sameOhifScope", "openOhifWindow"))
         cls.windows_source = WINDOWS.read_text(encoding="utf-8")
+        # openOhifWindow runs with the page functions it calls, found from its body rather than named here: a helper of
+        # the open path that is renamed, split or inlined changes nothing for these cases (AGENTS 1-B). What the harness
+        # stands in for (any name it mentions) is not taken from the page.
+        cls.open_source = "\n".join(extract_function(cls.main_source, name) for name in page_functions_called_by(
+            cls.main_source, "openOhifWindow", HARNESS + cls.windows_source))
 
     @classmethod
     def tearDownClass(cls):

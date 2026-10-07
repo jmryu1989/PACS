@@ -181,8 +181,16 @@ class ViewerJobsE2E(DisplayControlsE2E):
   held[0][0].fulfill(response=held[0][1]);expect(p.locator('#kin-viewer-jobs-status')).to_contain_text('영상 조작이 변경')
   self.assertEqual(self.display(p),changed);p.unroute('**/api/studies/*/viewer-jobs/*',hold)
   p.get_by_label('Job Title',exact=True).fill('logout clears this')
+  from viewer_session import observe_viewer
+  session=p.evaluate('KinWorkContext.session()');requests=[];replies=[]
+  p.on('request',lambda request:requests.append((request.method,request.headers.get('x-kin-session'))) if '/viewer-jobs' in request.url else None)
+  p.on('response',lambda response:replies.append((response.status,response.headers.get('x-kin-auth-code'))) if '/viewer-jobs' in response.url or response.url.endswith('/api/me') else None)
+  ended=observe_viewer(p,['[aria-label="Job Title"]'])
   work=p.context.new_page();self.relog(work,'doctor2')
-  self.click_job(p,'Refresh Jobs','세션이 변경');expect(p.get_by_label('Job Title',exact=True)).to_have_value('');self.assertEqual(len(self.jobs(f)),1)
+  p.get_by_role('button',name='Refresh Jobs',exact=True).click();ended.ended();ended.assert_quiet()
+  self.assertIn((409,'AUTH_SESSION_MISMATCH'),replies)
+  self.assertTrue(all(method=='GET' and bound==session for method,bound in requests),requests)
+  self.assertEqual(ended.retained('[aria-label="Job Title"]','node => node.value'),['']);self.assertEqual(len(self.jobs(f)),1)
 
  def test_job_05_locked_permission_recheck_and_audit_rollback(self):
   f=self.ct('JOB-'+uuid.uuid4().hex[:12],'current','20260801');self.uid=f.uid;c=self.command([f]);originals=self.originals()

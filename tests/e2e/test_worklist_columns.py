@@ -4,9 +4,12 @@ import os
 from pathlib import Path
 import re
 import unittest
+from urllib.parse import urlsplit
 import uuid
 from playwright.sync_api import expect
 import test_worklist as base
+from document_session import document_request
+from viewer_session import end_document
 
 
 class WorklistColumnsE2E(base.WorklistE2E):
@@ -22,9 +25,19 @@ class WorklistColumnsE2E(base.WorklistE2E):
         old_sid=next(c['value'] for c in page.context.cookies() if c['name']=='kin_sid')
         page.once('dialog',lambda d:d.accept());page.locator('#logout').click()
         page.wait_for_url('**/worklist/hpacs-lite/index.html')
+        logins=[]
+        listen=lambda r:logins.append(r.url) if urlsplit(r.url).path=='/api/auth/login' else None
+        page.on('request',listen)
         page.goto(self.stack.proxy+'/')
-        # The root page redirects asynchronously; wait for the actual login
-        # controls instead of checking visibility before that navigation.
+        # S7-U5: the confirmed end stays until the next explicit login, so the landing starts no login by itself; the
+        # same browser logs in through the landing's own control (its storage is not cleared to get past the end).
+        page.wait_for_url('**/worklist/hpacs-lite/index.html')
+        expect(page.locator('#signin')).to_be_enabled()
+        self.assertEqual({'state':'confirmed','reason':None},page.evaluate('KinAuth.endState()'))
+        self.assertEqual([],logins,'the landing started a login by itself after the logout')
+        page.remove_listener('request',listen)
+        page.locator('#signin').click()
+        # The landing's control leaves for the login page; wait for the actual login controls.
         try:
             page.locator('#username').fill(self.stack.username(actor))
             page.locator('#password').fill(self.stack.passwords[actor])
@@ -33,7 +46,7 @@ class WorklistColumnsE2E(base.WorklistE2E):
         page.wait_for_url('**/worklist/hpacs-lite/main.html',timeout=30000)
         expect(page.locator('#dbstat')).to_contain_text('DB Connected')
         self.assertNotEqual(next(c['value'] for c in page.context.cookies() if c['name']=='kin_sid'),old_sid)
-        self.assertEqual(page.context.request.get(self.stack.api+'/me').json()['actor'],self.stack.actor(actor))
+        self.assertEqual(document_request(page, "GET", self.stack.api+'/me').json()['actor'],self.stack.actor(actor))
 
     def test_columns_01_hide_order_restore_filter_and_report(self):
         prefix='COL-'+uuid.uuid4().hex[:8]
@@ -144,8 +157,8 @@ class WorklistColumnsE2E(base.WorklistE2E):
         for selector in ('#wc-close','#wc-list','#wc-save'):
             page.locator(selector).scroll_into_view_if_needed();expect(page.locator(selector)).to_be_in_viewport()
         self.assertTrue(page.locator('#column-manager').evaluate('e=>e.scrollWidth<=e.clientWidth+1'))
-        page.evaluate("() => {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close();}")
-        expect(page.locator('#column-manager')).not_to_be_visible()
+        end_document(page)
+        expect(page.locator('#column-manager')).not_to_be_visible();self.assertFalse(page.locator('#column-manager').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog')
         expect(page.locator('#columnsettings')).to_be_disabled()
 
 

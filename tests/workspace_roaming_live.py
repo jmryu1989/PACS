@@ -81,9 +81,7 @@ class WorkspaceRoamingLive(unittest.TestCase):
             self.assertEqual(self.stack.request(method,'/workspace-layout',body=body if method!='GET' else None).status,401)
             token=self.stack.service_token('gateway')
             self.assertEqual(self.stack.bearer_request(method,'/workspace-layout',token,body if method!='GET' else None).status,403)
-        sub=self.stack.create_test_identity('roam-pending',['radiologist'],'hallym')
-        groups=self.stack.kc_admin('GET','/users/'+sub+'/groups').body
-        for group in groups:self.assertEqual(self.stack.kc_admin('DELETE','/users/'+sub+'/groups/'+group['id']).status,204)
+        self.stack.create_test_identity('roam-pending',[],'')
         data=urlencode(dict(client_id=self.stack.test_client_id,grant_type='password',username=self.stack.username('roam-pending'),password=self.stack.passwords['roam-pending'])).encode()
         with self.stack._open(Request(self.stack.keycloak,data=data,headers={'Content-Type':'application/x-www-form-urlencoded'})) as response:
             token=json.loads(response.read())['access_token']

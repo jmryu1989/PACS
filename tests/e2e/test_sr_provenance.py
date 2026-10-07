@@ -8,6 +8,7 @@ from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
 from pydicom.uid import ComprehensiveSRStorage, ExplicitVRLittleEndian, generate_uid
 from pynetdicom import AE
 import test_viewer_history as history
+from viewer_session import end_viewer, observe_viewer
 from test_measurement_readback import MeasurementReadbackE2E, expect
 
 
@@ -135,14 +136,12 @@ class SRProvenanceE2E(MeasurementReadbackE2E):
         }''')
         self.assertIn('외부 SR 원문은 읽기 전용',result['error']); self.assertTrue(result['unchanged']); self.assertEqual(result['measurements'],0); self.assertEqual(result['tools'],0)
         self.assertEqual(self.saved(f),[])
-        p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:'test'}))")
-        expect(p.locator('#kin-sr-provenance')).not_to_be_visible(); expect(p.locator('#kin-sr-provenance')).to_be_empty()
-        expect(p.locator('svg.svg-layer')).not_to_contain_text('외부 SR 원문')
+        p=end_viewer(p, ['#kin-sr-provenance'])
+        self.assertEqual(p.retained('#kin-sr-provenance','node => node.textContent'),[''])
         self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>String(a.annotationUID).startsWith('kin-sr:')).length"),0)
-        p.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.sr-provenance').onModeExit()")
-        expect(p.locator('#kin-sr-provenance')).to_have_count(0)
         self.assertFalse(p.evaluate("()=>!!Object.getOwnPropertyDescriptor(sourceDS,'isRehydratable')?.get"))
         self.assertIsNone(p.evaluate("()=>__d05c1.services.customizationService.get('onBeforeSRHydration')?.value"))
+        p.assert_quiet()
 
     def test_04_same_series_uses_selected_document_and_delivered_numbers(self):
         f=self.specimen(); series=generate_uid(); ids=[generate_uid(),generate_uid(),generate_uid()]
@@ -163,15 +162,15 @@ class SRProvenanceE2E(MeasurementReadbackE2E):
     def test_05_access_failure_clears_source_panel_and_overlays(self):
         f=self.specimen(); source=self.source(f); original=self.hashes(); p=self.observed(f); self.open_sr(p,source)
         expect(p.locator('svg.svg-layer')).to_contain_text('외부 SR 원문')
-        # Explicit transport fault at the existing authenticated /me boundary.
-        # The viewer history gate must notify source views, not just manual rows.
-        p.route('**/api/me',lambda route:route.fulfill(status=401,body='ended'))
-        p.evaluate("()=>window.dispatchEvent(new Event('focus'))")
-        expect(p.locator('#kin-viewer-history [role=status]')).to_contain_text('로그인이 종료')
-        expect(p.locator('#kin-sr-provenance')).to_be_empty()
-        expect(p.locator('svg.svg-layer')).not_to_contain_text('외부 SR 원문')
-        self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>String(a.annotationUID).startsWith('kin-sr:')).length"),0)
-        self.assertEqual(self.saved(f),[]); self.assertEqual(self.hashes(),original)
+        # A session-bound server end tears down source views and their annotations.
+        ended=observe_viewer(p, ['#kin-sr-provenance'])
+        p.route('**/api/me',lambda route:route.fulfill(status=401,headers={'X-KIN-Auth-Code':'AUTH_SESSION_ENDED'},json={'code':'AUTH_SESSION_ENDED'}))
+        p.get_by_role('button',name='Refresh',exact=True).click()
+        ended.ended();ended.assert_quiet()
+        self.assertEqual(ended.retained('#kin-sr-provenance','node => node.textContent'),[''])
+        self.assertEqual(ended.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>String(a.annotationUID).startsWith('kin-sr:')).length"),0)
+        self.assertEqual(self.saved(f),[]);self.assertEqual(self.hashes(),original)
+
 
 
 if __name__=='__main__':

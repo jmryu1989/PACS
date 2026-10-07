@@ -304,11 +304,14 @@ class ClinicianRequestLive(unittest.TestCase):
                              ["1"])
 
     def remove_role(self, logical, role_name) -> None:
-        role = self.stack.kc_admin("GET", "/roles/" + quote(role_name))
-        self.assertEqual(role.status, 200, role.text)
-        removed = self.stack.kc_admin("DELETE", f"/users/{quote(self.stack.user_ids[logical])}/role-mappings/realm", [role.body])
-        self.assertEqual(removed.status, 204, removed.text)
-        self.stack.tokens.pop(logical, None)   # the next call takes a token without the role
+        sub = self.stack.user_ids[logical]
+        current = self.stack.member_rights[sub]
+        roles = [role for role in current["roles"] if role != role_name]
+        if roles:
+            self.stack.set_member_rights(sub, institution=current["institution"], roles=roles,
+                                         enabled=True, verificationOverride=True)
+        else:
+            self.stack.set_member_rights(sub, approvalState="PENDING")
 
     def cursor(self, at, rid, revision) -> str:
         raw = json.dumps({"at": at, "id": rid, "r": revision}, separators=(",", ":")).encode("utf-8")
@@ -332,10 +335,7 @@ class ClinicianRequestLive(unittest.TestCase):
         reset = self.stack.kc_admin("PUT", f"/users/{quote(user_id)}/reset-password",
                                     {"type": "password", "value": password, "temporary": False})
         self.assertEqual(reset.status, 204, reset.text)
-        role = self.stack.kc_admin("GET", "/roles/clinician")
-        self.assertEqual(role.status, 200, role.text)
-        assigned = self.stack.kc_admin("POST", f"/users/{quote(user_id)}/role-mappings/realm", [role.body])
-        self.assertEqual(assigned.status, 204, assigned.text)
+        # This new identity has no DB rights; approval-waiting is distinct from a suspended cancellation.
         data = urlencode({"client_id": self.stack.test_client_id, "grant_type": "password",
                           "username": username, "password": password}).encode("ascii")
         request = Request(self.stack.keycloak, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")

@@ -1,15 +1,20 @@
 import {
   CanActivate, ExecutionContext, ForbiddenException, Injectable,
-  SetMetadata, UnauthorizedException,
+  SetMetadata,
 } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { Reflector } from '@nestjs/core';
-import { AuthService } from './auth.service';
+import { AuthService, markAuthCode } from './auth.service';
+import { rightsAllow } from './member-rights';
 import {
   APP_ROLES, CLINICIAN_ROUTE_DENIED, clinicianOnly, clinicianRouteAllowed, routeKey,
 } from './clinician-policy';
 
-/** 토큰 없이 부를 수 있는 네 진입점에만 붙인다: health, login, register, callback. */
+/**
+ * 이 가드의 토큰·결속 검사를 받지 않는 진입점에만 붙인다: health, 로그인·가입 개시(GET·POST), callback, 로그인 뒤 진입.
+ * 로그인 개시의 POST와 진입(auth/entry)은 세션이 아직 없거나 그 식별값을 아직 모르는 문서가 부르므로 여기 속하고,
+ * 쿠키·CSRF·결속·진입 증명은 AuthService가 직접 확인한다.
+ */
 export const Public = () => SetMetadata('public', true);
 
 type MemberState = 'PENDING' | 'APPROVED' | 'INVALID';
@@ -45,6 +50,31 @@ export class AuthGuard implements CanActivate {
     if (this.reflector.getAllAndOverride<boolean>('public', [ctx.getHandler(), ctx.getClass()]))
       return true;
 
+    const res = ctx.switchToHttp().getResponse();
+    try {
+      return await this.admit(ctx, req, res);
+    } catch (error) {
+      const answer = this.subrequestAnswer(req, error);
+      markAuthCode(res, answer);
+      throw answer;
+    }
+  }
+
+  /**
+   * 프록시의 DICOM 인증 서브요청(`GET authz/dicom`)은 401과 403만 원 요청에 전달할 수 있다 — 그 밖의 상태는 500이 된다
+   * (U5S-REQ-12). 그래서 그 경로에서만 결속 누락(428)·다른 세션(409) 같은 `AUTH_*` 거절을 403으로 낸다. 어느 거절인지는
+   * `X-KIN-Auth-Code` 헤더가 말하고, 코드 없는 403은 평범한 열람 거절이다.
+   */
+  private subrequestAnswer(req: any, error: any) {
+    const path = String(req.originalUrl ?? '').split('?')[0];
+    if (path !== '/api/authz/dicom' || typeof error?.getStatus !== 'function') return error;
+    const status = error.getStatus(), body = error.getResponse();
+    const code = body && typeof body === 'object' ? (body as any).code : undefined;
+    if (status === 401 || status === 403 || typeof code !== 'string' || !code.startsWith('AUTH_')) return error;
+    return new ForbiddenException(body);
+  }
+
+  private async admit(ctx: ExecutionContext, req: any, res: any): Promise<boolean> {
     // 인증을 끄고 돌리는 개발 모드. compose 기본값은 켜짐이고, 끄면 로그로 경고한다.
     if (process.env.AUTH_REQUIRED === 'false') {
       req.actor = req.headers['x-kin-user'] || 'dev';
@@ -58,19 +88,41 @@ export class AuthGuard implements CanActivate {
       return true;
     }
 
+    const path = String(req.originalUrl ?? '').split('?')[0];
+    const isLogout = req.method === 'POST' && path === '/api/auth/logout';
     const header = req.headers.authorization ?? '';
     let raw = header.startsWith('Bearer ') ? header.slice(7) : '';
     let method: 'bearer' | 'session' | null = raw ? 'bearer' : null;
+    let admittedSession: any;
     if (!raw) {
       const sid = this.auth.sessionId(req);
       if (sid) {
-        const session = await this.auth.authenticateSession(sid, ctx.switchToHttp().getResponse());
+        /**
+         * 세션 결속(S7-U5, U5S-REQ-08). 쿠키는 브라우저의 **지금** 세션을 싣고 오지만, 요청을 시작한 문서가 본 세션은
+         * 그것과 다를 수 있다(다른 탭의 새 로그인). 그래서 쿠키 요청은 자기가 시작할 때 본 세션의 식별값을 함께 보내고,
+         * 다르면 토큰 갱신도 처리기도 돌기 전에 거절한다 — 옛 문서의 요청이 새 세션의 이름으로 실행되지 않는다.
+         * 식별값을 아직 모르는 첫 `GET me` 하나만 결속 없이 받는다(그 답이 식별값을 준다).
+         */
+        const bootstrap = req.method === 'GET' && path === '/api/me' && this.auth.binding(req, sid) === 'missing';
+        if (!bootstrap) this.auth.requireBinding(req, sid);
         req.sid = sid;
+        req.sessionId = this.auth.sessionRef(sid);
+        req.authMethod = 'session';
+        /**
+         * 로그아웃은 토큰 갱신을 기다리지 않는다(U5S-REQ-05). 저장된 access token이 만료됐거나 Keycloak이 멈춰 있어도
+         * 결속과 CSRF가 맞으면 세션을 끝낼 수 있어야 한다 — 끝내려는 세션을 살리려고 Keycloak을 먼저 부르지 않는다.
+         */
+        if (isLogout) {
+          this.auth.requireCsrf(req);
+          return true;
+        }
+        const session = await this.auth.authenticateSession(sid, res);
+        admittedSession = session;
         raw = session.accessToken;
         method = 'session';
       }
     }
-    if (!raw) throw new UnauthorizedException('인증 정보가 없습니다');
+    if (!raw) throw this.auth.credentialsMissing();
 
     const payload = await this.auth.verifyAccessToken(raw);
 
@@ -116,7 +168,6 @@ export class AuthGuard implements CanActivate {
         throw new ForbiddenException({ code: 'GATEWAY_IDENTITY_INVALID' });
 
       req.kind = 'gateway';
-      const path = String(req.originalUrl ?? '').split('?')[0];
       const originalMethod = String(req.headers['x-original-method'] ?? '').toUpperCase();
       const gatewayApi = path.startsWith('/api/gateway/');
       const stowAuthorization = path === '/api/authz/dicom' && originalMethod === 'POST';
@@ -126,14 +177,27 @@ export class AuthGuard implements CanActivate {
     }
 
     req.kind = 'member';
+    // Logout grants no rights; a Bearer still passed signature/issuer/audience/expiry verification.
+    if (isLogout) return true;
 
-    const state = memberState(groups, req.roles);
+    /**
+     * Bearer로 온 사용자 토큰도 종료 표식을 본다(S7-U5 R1). 쿠키 요청은 제품 세션 행이 지워진 순간 거절되지만, 이미 발급된
+     * access token은 만료까지 서명이 유효하다 — 제품이 끝내기로 한 provider 세션의 토큰은 여기서 끝난 세션으로 답한다.
+     * gateway·서비스 계정의 토큰(위에서 갈렸거나 `sid`가 없다)은 대상이 아니다.
+     */
+    const rights = method === 'bearer' ? await this.auth.bearerRights(payload, raw)
+      : await this.auth.sessionRights(admittedSession);
+    req.roles = rightsAllow(rights) ? rights.roles : [];
+    req.institution = rights.institution;
+    req.groups = rights.institution ? [rights.institution] : [];
+
+    const state = memberState(req.groups, req.roles);
     req.memberState = state;
-    const path = String(req.originalUrl ?? '').split('?')[0];
-    const isLogout = req.method === 'POST' && path === '/api/auth/logout';
     if (state !== 'APPROVED' && !isLogout)
       throw new ForbiddenException({
         code: state === 'PENDING' ? 'INSTITUTION_PENDING' : 'INSTITUTION_INVALID',
+        // 승인 전 회원도 로그아웃할 수 있어야 하고, 로그아웃은 세션 식별값을 요구한다 — 첫 `GET me`의 이 거절이 그 값을 준다.
+        ...(method === 'session' && path === '/api/me' ? { sessionId: req.sessionId } : {}),
       });
 
     /**
@@ -157,8 +221,7 @@ export class AuthGuard implements CanActivate {
     }
 
     // Bearer 호출은 CSRF 대상이 아니다. 브라우저가 자동으로 싣는 쿠키 호출만 헤더를 요구한다.
-    if (method !== 'bearer' && !['GET', 'HEAD'].includes(req.method) && req.headers['x-kin-csrf'] !== '1')
-      throw new ForbiddenException('X-KIN-CSRF 헤더가 필요합니다');
+    if (method !== 'bearer' && !['GET', 'HEAD'].includes(req.method)) this.auth.requireCsrf(req);
     return true;
   }
 }

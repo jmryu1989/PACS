@@ -9,6 +9,7 @@ from playwright.sync_api import expect
 
 from test_display_controls import DisplayControlsE2E
 from test_prior_selection import canvas_ready
+from viewer_session import end_viewer
 
 
 class ViewerImagesOnlyE2E(DisplayControlsE2E):
@@ -167,15 +168,16 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
         other = 1 - active
         canvas = page.locator('[data-viewport-uid="' + before["active"] + '"] canvas')
         box = canvas.bounding_box()
+        # The person clicks the image and types; the test does not move the keyboard focus itself. (Focus put on the
+        # cornerstone element by script makes that element cancel every keydown, so a one-letter shortcut never reaches
+        # the viewer's command - not what a person meets: a click on the canvas does not focus it.)
         canvas.click(position={"x": box["width"] / 2, "y": box["height"] / 2})
-        focus = page.evaluate("""id=>{const element=services.cornerstoneViewportService.getCornerstoneViewport(id).element;
-          element.focus();const active=document.activeElement;return {tag:active?.tagName||null,id:active?.id||null,
-            classes:typeof active?.className==='string'?active.className:null,within:!!active&&element.contains(active),
+        focus = page.evaluate("""id=>{const active=document.activeElement;return {tag:active?.tagName||null,id:active?.id||null,
+            classes:typeof active?.className==='string'?active.className:null,
             blocked:['INPUT','SELECT','TEXTAREA'].includes(active?.tagName)||!!active?.isContentEditable,
             viewportIsActive:services.viewportGridService.getState().activeViewportId===id}}""",
                               before["active"])
         print("IMAGES ONLY native focus " + json.dumps(focus), flush=True)
-        self.assertTrue(focus["within"])
         self.assertTrue(focus["viewportIsActive"])
         self.assertFalse(focus["blocked"])
         page.keyboard.press("2"); page.wait_for_timeout(150)
@@ -206,7 +208,11 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
         self.assertNotEqual(changed["rows"][active]["camera"]["flipHorizontal"],
                             before["rows"][active]["camera"]["flipHorizontal"])
         self.assertEqual(changed["rows"][other], before["rows"][other])
-        page.keyboard.press("Escape"); page.wait_for_function("()=>document.fullscreenElement === null")
+        # The person leaves with Escape, which the browser itself handles: it exits fullscreen (the page only sees
+        # fullscreenchange). Headless Chromium never turns a key press into that exit (checked on this PC with a bare
+        # fullscreen page: still fullscreen after Escape, focus on the body or on the element), so the browser's exit is
+        # made directly - the same document.exitFullscreen() the browser performs.
+        page.evaluate("()=>document.exitFullscreen()"); page.wait_for_function("()=>document.fullscreenElement === null")
         after = self.stable_state(page)
         self.assertEqual(after["rows"][active]["properties"], changed["rows"][active]["properties"])
         self.assertEqual(after["rows"][active]["presentation"], changed["rows"][active]["presentation"])
@@ -233,9 +239,9 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
         page.evaluate("""()=>{const id=services.viewportGridService.getState().activeViewportId;
           services.cornerstoneViewportService.getCornerstoneViewport(id).element.requestFullscreen=__imagesOnlyRequestFullscreen;}""")
         page.locator("#kin-images-only-enter").click(); page.wait_for_function("()=>document.fullscreenElement !== null")
-        page.evaluate("window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:String(Date.now())}))")
-        page.wait_for_function("()=>document.fullscreenElement === null")
-        expect(page.locator("#kin-images-only")).to_have_count(0)
+        ended=end_viewer(page)
+        ended.wait_for_function('()=>document.fullscreenElement === null')
+        ended.assert_quiet()
 
     def test_images_only_04_native_double_click_one_up_restores_grid_without_fullscreen(self):
         _, page = self.open_pair(); self.panel(page); before = self.stable_state(page)
@@ -244,8 +250,15 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
           Element.prototype.requestFullscreen=function(...args){__imagesOnlyFullscreenCalls++;return __imagesOnlyNativeRequest.apply(this,args)};}""")
         canvas = page.locator('[data-cy=viewport-grid] > div').first.locator("canvas")
         canvas.dblclick()
+        # What the person sees: one cell over the whole grid. (The viewer may keep its 1x2 grid underneath and lay one
+        # cell over it - the cell merge's one-up - rather than switch to a 1x1 grid; that is not what is asserted.)
         page.wait_for_function("""()=>{const s=services.viewportGridService.getState();
-          return s.viewports.size===1&&s.layout.numRows===1&&s.layout.numCols===1}""")
+          if(s.viewports.size!==1)return false;const cell=[...s.viewports.values()][0];
+          if(cell.x!==0||cell.y!==0||cell.width!==1||cell.height!==1)return false;
+          const grid=document.querySelector('[data-cy=viewport-grid]')?.getBoundingClientRect();
+          const pane=[...document.querySelectorAll('[data-cy=viewport-grid] > div')]
+            .find(div=>div.querySelector('[data-viewport-uid="'+cell.viewportId+'"]'))?.getBoundingClientRect();
+          return !!grid&&!!pane&&pane.width>grid.width*.99&&pane.height>grid.height*.99}""")
         canvas_ready(page, 1); one = self.native_state(page)
         selected = next(row for row in before["rows"] if row["id"] == before["active"])
         self.assertEqual((one["rows"][0]["study"], one["rows"][0]["series"], one["rows"][0]["sop"],

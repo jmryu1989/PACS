@@ -66,6 +66,21 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = Path(__file__).resolve().parents[1]
 HPACS = ROOT / "worklist-v0" / "hpacs-lite"
 MAIN = Path(os.environ.get("KIN_MULTI_INSTITUTION_MAIN") or HPACS / "main.html")
+# A page of a fixed commit runs with the files of that commit: its scripts and styles are read from the repository at
+# KIN_MULTI_INSTITUTION_ASSETS_SHA instead of the working tree (a page from before S7-U5 cannot boot on the later auth.js
+# and modules, which expect the page's gate and transport). Used by the layout equivalence of related_layout_dom_test.py.
+ASSETS_SHA = os.environ.get("KIN_MULTI_INSTITUTION_ASSETS_SHA") or None
+_FIXED_ASSETS = {}
+
+
+def fixed_asset(path):
+    """`worklist-v0/hpacs-lite/<path>` at ASSETS_SHA as `git show` reads it, or None when that commit has no such file."""
+    if path not in _FIXED_ASSETS:
+        import subprocess
+        shown = subprocess.run(["git", "show", f"{ASSETS_SHA}:worklist-v0/hpacs-lite/{path}"], cwd=str(ROOT),
+                               capture_output=True, timeout=60)
+        _FIXED_ASSETS[path] = shown.stdout if shown.returncode == 0 else None
+    return _FIXED_ASSETS[path]
 VECTORS = json.loads((ROOT / "tests" / "worklist_columns_vectors.json").read_text(encoding="utf-8"))
 V = {v["id"]: v for v in VECTORS["accepted"] + VECTORS["refused"] + VECTORS["idempotent"]}
 TITLES = VECTORS["titles"]["Radiology"]
@@ -157,6 +172,7 @@ class Server:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.ledger, self.violations, self.held, self.hold_lists = [], [], [], 0
         self.held_qido, self.hold_qido = [], 0   # the demo QIDO list answer, held like hold_lists (off by default)
+        self.hold_landing = False                # set by a case that ends the session and then reads the closed document
         self.column_answers, self.filter_posts, self.patches = [], [], []
 
     def iso(self):
@@ -225,9 +241,19 @@ class Server:
         return self.static(route, path, entry, strict=True)
 
     def static(self, route, path, entry, strict):
+        if path == "/index.html" and self.hold_landing:
+            # The move to the landing after a session end: 204 keeps the closed document readable for the case.
+            entry["status"] = 204
+            return route.fulfill(status=204, body="")
         if path.startswith("/kin-brand/") or path == "/favicon.ico":
             entry["status"] = 404
             return route.fulfill(status=404, body="")
+        if ASSETS_SHA and path != "/main.html":
+            name = path.lstrip("/")
+            data = fixed_asset(name) if re.fullmatch(r"[A-Za-z0-9_.-]+", name) else None
+            entry["status"] = 200 if data is not None else 404
+            return route.fulfill(status=entry["status"], body=data if data is not None else "",
+                                 content_type=TYPES.get(Path(name).suffix, "application/octet-stream"))
         target = MAIN if path == "/main.html" else HPACS / path.lstrip("/")
         inside = path == "/main.html" or (target.is_file() and target.resolve().parent == HPACS.resolve())
         if not inside:
@@ -242,7 +268,7 @@ class Server:
 
     def api(self, route, method, path, query, body, entry, answer):
         if method == "GET" and path == "/api/me":
-            return answer(200, self.session)
+            return answer(200, {**self.session, "sessionId": "SYN-SESSION-" + self.session["sub"]})
         if method == "GET" and path == "/api/bootstrap":
             if query != "states=omit":
                 self.violations.append("bootstrap query: " + query)
@@ -652,20 +678,34 @@ class MultiInstitutionWorklist(unittest.TestCase):
         until(lambda: sorted(screen.column("ID")) == QIDO_IDS, 10, message)
 
     def end_session_elsewhere(self, screen, signal):
-        """Another page of the same browser context and origin ends the session (another tab's logout)."""
+        """Another page of the same browser context and origin ends the session (another tab's logout). First the pulse
+        that names no session (the bare channel message or the old storage key): it ends nothing. Then the notice of
+        this document's own session, as auth.js posts it: the document closes."""
         screen.page.evaluate(self.SESSION_PROBE)
+        before = screen.column("ID")
+        session = screen.page.evaluate("() => KinAuth.sessionId()")
+        screen.server.hold_landing = True
         peer = screen.page.context.new_page()
         peer.goto(ORIGIN + "/kin-emblem-j1.svg")
         if signal == "channel":
             peer.evaluate("() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type: 'session-ended'}); c.close(); }")
         else:
             peer.evaluate("() => { localStorage.setItem('kin-session-ended', String(Date.now())); localStorage.removeItem('kin-session-ended'); }")
-        until(lambda: screen.page.evaluate("() => window.__synSessionSignals.length") > 0, 10, f"{signal} session end delivered")
+        until(lambda: screen.page.evaluate("() => window.__synSessionSignals.length") > 0, 10, f"{signal} pulse delivered")
+        self.assertEqual(before, screen.column("ID"), f"a {signal} pulse that names no session changed the list")
+        self.assertEqual("active", screen.page.evaluate("() => KinWorkContext.state()"))
+        peer.evaluate("""session => { const c = new BroadcastChannel('kin-session');
+          c.postMessage({type: 'session-ended', session, operation: Date.now(), status: 'ending'}); c.close(); }""", session)
+        until(lambda: screen.page.evaluate("() => KinWorkContext.state()") not in ("active", "preparing"), 10,
+              "the session end delivered")
 
-    def wait_no_rows(self, screen, message):
-        until(lambda: screen.column("ID") == [] and screen.table().get_by_text("No records found", exact=True).count() == 1,
-              10, message)
+    CLOSED_SCREEN = """() => ({ rows: document.querySelectorAll('#rows tr').length,
+      shown: [...document.body.children].filter(e => getComputedStyle(e).display !== 'none').map(e => e.className) })"""
 
+    def wait_closed(self, screen, message):
+        """After the session end: the work screen is closed - no study row is left and nothing of the worklist (list,
+        filters, search controls) is shown; only the closing line is."""
+        until(lambda: screen.page.evaluate(self.CLOSED_SCREEN) == {"rows": 0, "shown": ["kin-closed-note"]}, 10, message)
     def qido_finished(self, screen):
         """The re-read QIDO answers that reached the page (their bodies arrived), in order."""
         finished = []
@@ -695,19 +735,14 @@ class MultiInstitutionWorklist(unittest.TestCase):
         screen = self.boot(Server(rows=[row("2.25.2101", "SYN-END-01"), row("2.25.2102", "SYN-END-02")]))
         screen.wait_rows(["SYN-END-01", "SYN-END-02"])
         self.end_session_elsewhere(screen, "channel")
-        self.type_filter(screen, "ID", "SYN")
-        self.wait_no_rows(screen, "DR-19 server mode list after the session end")
-        controls = self.search_controls(screen)
-        self.assertEqual((True, True, True), (controls["mode_disabled"], controls["search_disabled"], controls["clear_disabled"]))
+        self.wait_closed(screen, "DR-19 server mode list after the session end")
         screen.finish()
         # (a) demo, BroadcastChannel; (b) demo, the storage event.
         for signal in ("channel", "storage"):
             screen = self.boot(Server(demo=True), entry="demo")
             self.wait_demo_rows(screen, f"DR-17/18 demo rows before the {signal} end")
             self.end_session_elsewhere(screen, signal)
-            self.type_filter(screen, "ID", "SYN")
-            self.wait_no_rows(screen, f"DR-17/18 demo list after the {signal} end")
-            self.assertEqual(self.SEARCH_OFF, self.search_controls(screen))
+            self.wait_closed(screen, f"DR-17/18 demo list after the {signal} end")
             screen.finish()
 
     def test_dr03_demo_fallback_rows_and_reentry(self):
@@ -733,8 +768,7 @@ class MultiInstitutionWorklist(unittest.TestCase):
         screen = self.boot(Server(demo=True), entry="demo")
         self.wait_demo_rows(screen, "DR-28 rows before the end")
         self.end_session_elsewhere(screen, "channel")
-        self.type_filter(screen, "ID", "SYN")
-        self.wait_no_rows(screen, "DR-28 list after the end")
+        self.wait_closed(screen, "DR-28 list after the end")
         screen.page.reload()
         until(lambda: sorted(screen.column("ID")) == QIDO_IDS, 15, "DR-28 rows after the reload")
         self.assertEqual(self.SEARCH_OFF, self.search_controls(screen))
@@ -819,10 +853,14 @@ class MultiInstitutionWorklist(unittest.TestCase):
             screen.refresh()
             until(lambda: server.held_qido, 10, "read A held")
             self.end_session_elsewhere(screen, "channel")
-            server.release_qido(0, status, QIDO)
-            until(lambda: finished, 10, "answer A reached the page")
-            self.wait_no_rows(screen, f"DR-35 answer {status} after the end")
-            self.assertEqual(self.SEARCH_OFF, self.search_controls(screen))
+            # The read was cancelled when its document closed; the answer, if the browser still takes it, draws nothing.
+            try:
+                server.release_qido(0, status, QIDO)
+            except PlaywrightError:
+                pass
+            screen.page.wait_for_timeout(500)   # observation window
+            self.wait_closed(screen, f"DR-35 answer {status} after the end")
+
             self.assertNotIn("P-1001", screen.page.locator("body").inner_text())
             screen.finish()
         # (4) a failed boot (built-in rows), then one Refresh that succeeds: its rows (DR-36); the notice is observed only.

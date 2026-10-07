@@ -334,9 +334,11 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         context = self.browser.new_context(viewport={'width': 1000, 'height': 850})
         self.contexts.append(context);page = context.new_page()
         page.set_content('<button id="opener">Open Manager</button>')
+        from module_session_harness import activate
+        activate(page)
         assets = base.ROOT / 'worklist-v0' / 'hpacs-lite'
         page.add_style_tag(path=str(assets / 'saved-filter-manager.css'))
-        for name in ('compound-filter.js', 'saved-filter-manager.js'):
+        for name in ('compound-filter.js', 'shared-filter-manager.js', 'saved-filter-manager.js'):
             page.add_script_tag(path=str(assets / name))
         page.evaluate('''({filters, failApply}) => {
           const clone = value => JSON.parse(JSON.stringify(value));
@@ -346,6 +348,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
           window.testManager = KinSavedFilterManager.mount({
             columns:{Radiology:[{k:'id',t:'Patient ID',f:'text'}],Technician:[{k:'id',t:'Patient ID',f:'text'}]},
             days:value => value, list:() => state.filters, snapshot:() => clone(snapshot), count:() => 0,
+            async readFolders() {return {owner:['SYN-INST','SYN-READER'],revision:0,folders:[],filters:clone(state.filters)};},
             async save(value) {
               const saved = clone(value);delete saved.createOnly;state.saved.push(clone(saved));
               state.filters = [...state.filters.filter(item => item.name !== saved.name), saved];return saved;

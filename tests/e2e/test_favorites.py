@@ -5,6 +5,7 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_worklist import WorklistE2E,psql
 from invariants_live import AUDIT_GUARD_OFF,AUDIT_GUARD_ON
+from viewer_session import release_after_end, end_document, hold_landing
 
 class FavoritesE2E(WorklistE2E):
  def setUp(self):
@@ -95,9 +96,9 @@ class FavoritesE2E(WorklistE2E):
   p.locator('#favorite-close').click();pending=[];p.route('**/api/favorite-folders',lambda route:pending.append(route))
   self.open_toolbar_group(p,'#favorite-open')
   p.locator('#favorite-open').click();expect(p.locator('#favorite-status')).to_contain_text('읽는 중')
-  p.evaluate("() => {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
-  expect(p.locator('#favorite-dialog')).not_to_be_visible();self.assertEqual(len(pending),1)
-  s['folders'][0]['name']='LATE FAVORITE SECRET';pending[0].fulfill(status=200,content_type='application/json',body=json.dumps(s))
+  end_document(p)
+  expect(p.locator('#favorite-dialog')).not_to_be_visible();self.assertFalse(p.locator('#favorite-dialog').evaluate_all('nodes => nodes.some(node => node.open)'),'An ended document retained an open dialog');self.assertEqual(len(pending),1)
+  s['folders'][0]['name']='LATE FAVORITE SECRET';release_after_end(pending[0],status=200,content_type='application/json',body=json.dumps(s))
   expect(p.locator('#favorite-folders')).to_be_empty();expect(p.locator('body')).not_to_contain_text('LATE FAVORITE SECRET')
 
  def test_favorite_06_unsaved_name_and_mismatched_owner_clear(self):
@@ -106,8 +107,21 @@ class FavoritesE2E(WorklistE2E):
   p.locator('#favorite-name').fill('UNSAVED NAME');p.once('dialog',lambda d:d.dismiss());p.locator('#favorite-close').click()
   expect(p.locator('#favorite-dialog')).to_be_visible();expect(p.locator('#favorite-name')).to_have_value('UNSAVED NAME')
   s['owner']=['hallym',str(uuid.uuid4())];s['folders'][0]['name']='OTHER OWNER SECRET'
-  p.route('**/api/favorite-folders',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(s)))
-  p.locator('#favorite-reload').click();expect(p.locator('#favorite-dialog')).not_to_be_visible()
+  pattern='**/api/favorite-folders';session=p.evaluate('KinWorkContext.session()')
+  p.route(pattern,lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(s)))
+  p.locator('#favorite-reload').click();expect(p.locator('#favorite-status')).to_contain_text('조회 실패')
+  self.assertEqual(p.evaluate('[KinWorkContext.state(),KinWorkContext.session()]'),['active',session])
+  expect(p.locator('#favorite-name')).to_have_value('UNSAVED NAME')
+  expect(p.locator('#favorite-folders')).to_contain_text('SYNTHETIC private folder')
+  expect(p.locator('body')).not_to_contain_text('OTHER OWNER SECRET')
+  p.unroute(pattern);hold_landing(p);bindings=[]
+  def replaced(route):
+   bindings.append(route.request.headers.get('x-kin-session'))
+   route.fulfill(status=409,headers={'X-KIN-Auth-Code':'AUTH_SESSION_MISMATCH'},json={'code':'AUTH_SESSION_MISMATCH'})
+  p.route(pattern,replaced);p.locator('#favorite-reload').click()
+  p.wait_for_function("KinWorkContext.state() !== 'active'");self.assertEqual(bindings,[session])
+  expect(p.locator('#favorite-dialog')).not_to_be_visible()
+  self.assertFalse(p.locator('#favorite-dialog').evaluate_all('nodes => nodes.some(node => node.open)'))
   expect(p.locator('#favorite-folders')).to_be_empty();expect(p.locator('#favorite-name')).to_have_value('');expect(p.locator('body')).not_to_contain_text('OTHER OWNER SECRET')
 
 

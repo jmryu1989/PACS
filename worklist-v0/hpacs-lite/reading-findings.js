@@ -7,6 +7,8 @@
  * textContent. Control names English, messages Korean. */
 window.KinReadingFindings = function (app) {
   'use strict';
+  const work = window.KinWorkContext, transport = window.KinSessionTransport.page();
+  const effect = (fn, scope = 'document') => { const at = work.capture(scope); return (...args) => { work.commit(at, () => { fn(...args); }); }; };
   const command = window.kinFindingCommand, links = window.kinFindingLinkModel, citation = window.KinReportCitation;
   const header = document.querySelector('#reltabs'), region = document.querySelector('.related-p');
   if (!command || !links || !citation || !header || !region) throw new Error('Image Findings unavailable');
@@ -53,15 +55,15 @@ window.KinReadingFindings = function (app) {
   const current = () => guarded(() => app.current() || null, null);
   const live = () => !ended && guarded(() => app.allowed() === true, false) && !!owner() && !!sub();
   // R5: the list read names the record format this panel reads (the worklist's shared request function has no header option),
-  // same-origin like the viewer's findings reads. A 401 is handed to that shared function, which ends the session as it always
-  // does. Only a successful answer without the API's own header marks an older API; this panel never writes either way.
-  async function listRead(path) {
-    const response = await fetch('/api' + path, { method: 'GET', credentials: 'same-origin', cache: 'no-store',
+  // same-origin like the viewer's findings reads. The page transport owns session responses.
+  // Only a successful answer without the API's own header marks an older API; this panel never writes either way.
+  async function listRead(path, at) {
+    const response = await transport.request('/api' + path, { context: at, read: 'response', method: 'GET', credentials: 'same-origin', cache: 'no-store',
       headers: { 'X-KIN-CSRF': '1', [links.SCHEMA_HEADER]: String(links.SCHEMA) } });
-    if (response.status === 401) return app.api('GET', path);
     const data = await response.json().catch(() => null);
-    if (!response.ok || !data) throw { status: response.status, code: data && data.code };
-    oldApi = links.schemaOf(response) !== String(links.SCHEMA);
+    const headerCode = response.headers?.get('X-KIN-Auth-Code');
+    if (!response.ok || !data) throw { status: response.status, code: String(headerCode || '').startsWith('AUTH_') ? headerCode : data?.code };
+    work.commit(at, () => { oldApi = links.schemaOf(response) !== String(links.SCHEMA); });
     return data;
   }
   const store = command.createListStore({ fetch: listRead, changed: () => render() });
@@ -83,19 +85,47 @@ window.KinReadingFindings = function (app) {
    *
    * There is no feedback loop to guard against: the panel is out of flow, so resizing it cannot
    * move or resize the field region it measures.
+   *
+   * That bound alone has an edge: when the field region starts less than the panel's own first line
+   * above the bottom inset, `max-height` reaches 0 and the panel still keeps its padding and border
+   * (22px) at `bottom: 12px` - over the button row. A Related table floor of header + one row (S7-U5
+   * fix-up D) put the reading layout's button row at 736-764 of 768 on the hosted fonts, and that
+   * 22px panel then sat on Approve, Save, Prelim and Dictate. In that case the panel docks above the
+   * report column instead (`--reading-findings-bottom`), with its top under the Related list, so
+   * neither the report's controls nor the Related rows and the Image Findings toggle are under it;
+   * what it covers is the read-only Related Report pane of the region it belongs to.
    */
   const fields = () => document.querySelector('.report-p .redit');
-  let boundTop = '';
+  const reportColumn = () => document.querySelector('.report-p');
+  const relatedList = () => document.querySelector('.related-p .related-list-pane');
+  // Padding, border and the title line with Close: less than this shows nothing a reader can use.
+  function leastHeight() {
+    const style = getComputedStyle(panel), px = name => parseFloat(style[name]) || 0;
+    return px('paddingTop') + px('paddingBottom') + px('borderTopWidth') + px('borderBottomWidth') +
+      Math.max(title.getBoundingClientRect().height, close.getBoundingClientRect().height);
+  }
+  let bound = '';
   function bindTop() {
     if (panel.hidden) return;
     const box = fields()?.getBoundingClientRect();
     // Not laid out, or a mode without a report column: fall back to the shipped behaviour rather
     // than writing a bound nobody measured.
-    const next = box && box.height ? Math.max(0, Math.round(box.top)) + 'px' : '';
-    if (next === boundTop) return;          // the common case: measure, change nothing
-    boundTop = next;
-    if (next) panel.style.setProperty('--reading-findings-top', next);
-    else panel.style.removeProperty('--reading-findings-top');
+    let top = '', bottom = '';
+    if (box && box.height) {
+      if (innerHeight - 12 - box.top >= leastHeight()) top = Math.max(0, Math.round(box.top)) + 'px';
+      else {
+        const report = reportColumn().getBoundingClientRect(), list = relatedList()?.getBoundingClientRect();
+        bottom = Math.max(12, Math.round(innerHeight - report.top + 4)) + 'px';
+        top = Math.max(0, Math.round(list && list.height ? list.bottom + 4 : 0)) + 'px';
+      }
+    }
+    const next = top + ' ' + bottom;
+    if (next === bound) return;             // the common case: measure, change nothing
+    bound = next;
+    for (const [name, value] of [['--reading-findings-top', top], ['--reading-findings-bottom', bottom]]) {
+      if (value) panel.style.setProperty(name, value);
+      else panel.style.removeProperty(name);
+    }
   }
   /**
    * Three sources:
@@ -109,24 +139,30 @@ window.KinReadingFindings = function (app) {
    *             resizing it. That is not hypothetical - at 1366x768 the review pane grew from 68 to
    *             168px, the bound stayed 100px stale, and this panel covered Insert and Cancel. Each
    *             element above `.redit` changes size when it causes such a move, so observing them
-   *             catches it.
-   * Known limit: in the reading layout, content outside the report column (above `.report-p` in
-   * the scrolling `.right` column) that changes height while `.report-p` sits at its own minimum
+   *             catches it. The Related region and its list are observed too: the docked panel
+   *             is bounded by the list's bottom and the report column's top, and a separator
+   *             move changes both by resizing exactly those two.
+   * Known limit: in the reading layout, other content outside the report column (above `.report-p`
+   * in the scrolling `.right` column) that changes height while `.report-p` sits at its own minimum
    * moves the field region without any of these firing. It is not observed here; broader layout
    * observers would be guessing at a cause nothing has measured.
    */
-  const onLayout = () => bindTop();
+  let onLayout;
   let watching = false, sizeWatch = null;
   function watchLayout(on) {
     if (on === watching) return;
     watching = on;
     if (on) {
+      onLayout = effect(bindTop);
       window.addEventListener('resize', onLayout);
       document.addEventListener('scroll', onLayout, { capture: true, passive: true });
       const el = fields();
       if (el && window.ResizeObserver) {
         sizeWatch = new ResizeObserver(onLayout);
         for (let node = el; node; node = node.previousElementSibling) sizeWatch.observe(node);
+        // A Related height or list/report separator move shifts the report and the list's bottom
+        // without resizing anything above `.redit`; the docked panel reads both.
+        for (const node of [region, relatedList()]) if (node) sizeWatch.observe(node);
       }
     } else {
       window.removeEventListener('resize', onLayout);
@@ -146,7 +182,7 @@ window.KinReadingFindings = function (app) {
   }
   // Selection and session follow the worklist; a change drops any in-flight command and its message.
   function sync() {
-    if (ended) return;
+    if (ended || work.state() !== 'active') return;
     const ok = live();
     if (store.context(ok ? owner() : null, ok ? current() : null)) {
       commands.cancel(); last = null; setResult('', '', false);
@@ -253,6 +289,7 @@ window.KinReadingFindings = function (app) {
   /* ---------- commands ---------- */
   // A retry passes the pin of the source first pressed; a reloaded row that no longer matches it is list-changed.
   async function go(id, index, pinned) {
+    const at = work.capture('study'); if (!work.admits(at)) return;
     sync();
     const st = store.state(), row = st.rows.find(r => r.id === id), pin = command.pinSource(row, index, st.generation);
     const source = pin && (!pinned || command.samePin(pinned, pin)) ? row.sources[index] : null;
@@ -266,7 +303,7 @@ window.KinReadingFindings = function (app) {
       expected: { owner: live() ? owner() : null, sub: sub(), uid: st.uid, generation: st.generation },
       source: source || null, comparison,
       choose: () => choose(st.uid, comparison, located ? source.studies : null),
-      announce: (value, choice) => {
+      announce: (value, choice) => { work.commit(at, () => {
         if (located) {
           // N1: 'ok' only when the requested point was reached; a restored view with a failed point is 'point-failed'. A restored
           // screen is not retried (as before) and its viewer still gets the focus, since that screen did change.
@@ -279,7 +316,7 @@ window.KinReadingFindings = function (app) {
         // The comparison history refused after activation: re-read the list so no withdrawn row stays shown.
         if (comparison && value.reason === 'busy' && value.phase !== 'before' && live()) store.load();
         renderReadiness();
-      },
+      }); },
     });
   }
   /* S3-U2b: hand one source's assembled block to the worklist.
@@ -320,7 +357,7 @@ window.KinReadingFindings = function (app) {
       // buttons. So an ACCEPTED insertion stands this panel down through its own close path, which
       // is what keeps aria-expanded and the toggle honest. A refusal or the duplicate warning does
       // not: the next press comes from this same list, on the revision it is still showing.
-      inserted: () => { show(false); } },
+      inserted: effect(() => { show(false); }, 'study') },
       origin || null);
     if (opened) setResult('판독문에 넣을 내용을 미리보기에서 확인하세요.', 'cite-preview', false);
   }
@@ -418,9 +455,14 @@ window.KinReadingFindings = function (app) {
     if (!st.uid || st.loading || Date.now() - lastFocusLoad < 15000) return;
     lastFocusLoad = Date.now(); store.load();
   };
-  window.addEventListener('focus', onFocus);
   // While open, readiness follows the viewers and an offline or expired worklist session clears the rows.
-  const timer = setInterval(() => { if (!panel.hidden && !ended) render(); }, 1000);
+  let timer, focusListener;
+  function watch() {
+    clearInterval(timer); window.removeEventListener('focus', focusListener);
+    timer = setInterval(effect(() => { if (!panel.hidden && !ended) render(); }), 1000);
+    focusListener = effect(onFocus); window.addEventListener('focus', focusListener);
+  }
+  watch();
   // Session invalidation clears rows and drops every in-flight list read and command at once.
   function end() {
     if (ended) return;
@@ -428,12 +470,14 @@ window.KinReadingFindings = function (app) {
     // Same reason the focus listener goes: nothing of this module may outlive the session. The
     // bound already written stays on the element and is still right for the layout on screen; a
     // resize after the session ended is not worth keeping a document-wide scroll listener for.
-    window.removeEventListener('focus', onFocus); watchLayout(false); channel?.close();
+    window.removeEventListener('focus', focusListener); watchLayout(false);
     setResult('', '', false); render();
   }
-  let channel;
-  try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
-  window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
+  work.onInvalidate(({ reason, state }) => {
+    if (state === 'preparing') { clearInterval(timer); commands.cancel(); watchLayout(false); window.removeEventListener('focus', focusListener); }
+    else if (reason === 'cancel' || (reason === 'lifecycle' && state === 'active')) { watch(); watchLayout(!panel.hidden); }
+    else if (reason === 'lifecycle') end();
+  });
   window.addEventListener('pagehide', end);
   render();
   return { sync, end, open: () => show(true), close: () => show(false) };

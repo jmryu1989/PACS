@@ -1,4 +1,5 @@
 // TEST-S3-U3-STALE-ADDENDUM: the compiled commitReport/putReport guards.
+// (S7-U5: the requests carry the draft owner and boundary; the caller's draft row is locked and kept as a tombstone.)
 //
 // Runs against the built image (/app/dist) exactly like study_access_service_test.cjs:
 //   docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" \
@@ -14,30 +15,43 @@ const STATE = { uid: UID, institutionId: 'synthetic', teleInstitutionId: null, r
   holder: null, heldAt: null, preDoc: null, preReviewer: null, repDoc: 'doctor2', confirm: '2026-09-19' };
 const BODY = { findings: 'MY ADDENDUM', conclusion: '', recommendation: '' };
 
+// S7-U5: every draft mutation carries the account and the boundary its document read, and a draft PUT the whole
+// snapshot. `asDocument` is that document: it sends what a page that has just read this fixture's study would send.
+const EPOCH = '0a1b2c3d-0000-4000-8000-00000000000a';
+const OWNER = { institution: CALLER.institution, sub: CALLER.sub, author: CALLER.actor };
+
 function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
   const writes = [], audits = [], raw = [], reads = [];
   const record = (list, value) => { list.push(value); return value; };
+  // The caller's draft row as the store holds it (the fixture's `draft` names only its base version).
+  let row = draft ? { uid: UID, author: CALLER.actor, findings: 'SYN DRAFT', conclusion: '', recommendation: '', citations: null,
+    structured: null, revision: 1, present: true, updatedAt: new Date(0), ...draft } : null;
+  const stored = { ...state, draftEpoch: EPOCH };
   const tx = {
     $executeRaw: async () => 0,
     $queryRaw: async strings => {
       const sql = strings.join('?').replace(/\s+/g, ' ').trim();
       raw.push(sql);
-      if (sql.includes('FROM "StudyState"')) return [{ uid: UID }];
+      if (sql.includes('FROM "StudyState"')) return [stored];
       // Order matters: the draft table name also starts with "Report".
-      if (sql.includes('FROM "ReportDraft"')) return draft ? [{ citations: null }] : [];
+      if (sql.includes('FROM "ReportDraft"')) return row ? [row] : [];
       if (sql.includes('FROM "Report"')) return head ? [head] : [];
       throw new Error('unexpected raw query: ' + sql);
     },
-    studyState: { findUnique: async () => state, update: async a => record(writes, 'studyState.update') && state },
+    studyState: { findUnique: async () => stored, update: async a => record(writes, 'studyState.update') && stored },
     report: {
       findUnique: async () => { reads.push('report.findUnique'); return head ? { version: head.version } : null; },
       upsert: async a => record(writes, 'report.upsert:v' + a.create.version),
     },
-    reportDraft: {
-      findUnique: async () => { reads.push('reportDraft.findUnique'); return draft; },
-      upsert: async a => { record(writes, 'reportDraft.upsert:base' + (a.update.baseVersion ?? a.create.baseVersion)); return { uid: UID, author: CALLER.actor, ...a.update }; },
-      deleteMany: async () => { record(writes, 'reportDraft.deleteMany'); return { count: draft ? 1 : 0 }; },
-    },
+    // The draft row is written once per mutation, whichever statement the service uses for it: a text write names its
+    // base version, a write that leaves no draft (commit, clear) is a tombstone.
+    reportDraft: new Proxy({}, { get: (_target, method) => async a => {
+      if (method === 'findUnique') { reads.push('reportDraft.findUnique'); return row; }
+      const data = a.data ?? a.create ?? a.update;
+      record(writes, data.present === false ? 'reportDraft.tombstone' : 'reportDraft.store:base' + data.baseVersion);
+      row = { ...(row ?? { uid: UID, author: CALLER.actor }), ...data, updatedAt: new Date(0) };
+      return method === 'updateMany' ? { count: 1 } : row;
+    } }),
     reportVersion: {
       findFirst: async () => (head ? { version: head.version } : null),
       // The commit path now reads the head version row for its citations. The shape grows; every
@@ -49,9 +63,9 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
   };
   const prisma = {
     $transaction: async work => work(tx),
-    studyState: { findUnique: async () => state },
+    studyState: { findUnique: async () => stored },
     report: { findUnique: async () => head },
-    reportDraft: { findUnique: async () => draft },
+    reportDraft: { findUnique: async () => row },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   const studyAccess = { prepare: async () => {}, require: async () => {} };
@@ -59,9 +73,14 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
   // The citation gate is a fifth collaborator; no test in this file cites anything, so an empty
   // readable set is the honest stub — reaching it at all would be the defect.
   const findings = { readableFindings: async () => { throw new Error('the stale-draft paths must not ask about findings'); } };
-  return { svc: new PacsService(prisma, {}, keycloak, studyAccess, findings), writes, audits, raw, reads, tx };
+  const real = new PacsService(prisma, {}, keycloak, studyAccess, findings);
+  const pre = c => ({ expectedOwner: { institution: c.institution, sub: c.sub, author: c.actor }, expectedRevision: `${EPOCH}:${row?.revision ?? 0}` });
+  const svc = {
+    commitReport: (uid, body, c) => real.commitReport(uid, { ...pre(c), ...body }, c, null),
+    putReport: (uid, body, c) => real.putReport(uid, { citationIds: [], structureIds: [], ...pre(c), ...body }, c, null),
+  };
+  return { svc, writes, audits, raw, reads, tx };
 }
-
 const refusal = async (promise, status) => {
   const e = await promise.then(() => null, error => error);
   assert.ok(e, 'the call resolved instead of being refused');
@@ -82,7 +101,7 @@ test('a draft written against an older version cannot become an addendum, and th
   assert.match(body.message, /v2/);
   assert.match(body.message, /v4/);
   assert.deepEqual(f.writes, [], 'a refusal must not touch the report, the history or the draft');
-  assert.equal(f.raw.length, 2, 'StudyState and Report are locked once each');
+  assert.deepEqual(f.raw.map(sql => sql.match(/FROM "(\w+)"/)[1]), ['StudyState', 'Report', 'ReportDraft'], 'the study, the report and the caller\'s draft are locked once each');
   assert.equal(f.reads.filter(r => r === 'report.findUnique').length, 0, 'the payload comes from the already locked row');
 });
 
@@ -99,7 +118,7 @@ test('callers without a draft, and drafts standing on the head, keep the existin
   for (const draft of [null, { baseVersion: 4 }, { baseVersion: 5 }]) {
     const f = fixture({ draft });
     await f.svc.commitReport(UID, { action: 'addendum', baseVersion: 4, ...BODY }, CALLER);
-    assert.deepEqual(f.writes, ['studyState.update', 'report.upsert:v5', 'reportVersion.create:v5:addendum', 'reportDraft.deleteMany'],
+    assert.deepEqual(f.writes, ['studyState.update', 'report.upsert:v5', 'reportVersion.create:v5:addendum', 'reportDraft.tombstone'],
       `draft ${JSON.stringify(draft)}`);
     // Was a bare count of 2. A commit now also locks the draft row it is about to delete, so that a
     // same-author insertion from another tab cannot be read past and then deleted; name the three
@@ -127,7 +146,7 @@ test('role, institution and preliminary gates still answer first — the approve
   const hidden = fixture({ state: { ...STATE, rs: 'P', preDoc: 'other@synthetic', preReviewer: 'boss@synthetic' }, draft });
   const prelim = await refusal(hidden.svc.commitReport(UID, { action: 'addendum', baseVersion: 4, ...BODY }, CALLER), 403);
   assert.doesNotMatch(JSON.stringify(prelim), /HEAD/);
-  assert.equal(hidden.raw.length, 0, 'a refused caller never reaches the locked row');
+  assert.deepEqual(hidden.raw.map(sql => sql.match(/FROM "(\w+)"/)[1]), ['StudyState'], 'a refused caller never reaches the locked report row');
 
   const foreign = fixture({ state: { ...STATE, institutionId: 'other' }, draft });
   await refusal(foreign.svc.commitReport(UID, { action: 'addendum', baseVersion: 4, ...BODY }, CALLER), 404);
@@ -149,10 +168,10 @@ test('a draft cannot be based on a version that does not exist yet', async () =>
 test('an explicit rebase is audited apart from the twenty-second autosave, and never locks the report', async () => {
   const advanced = fixture({ draft: { baseVersion: 2 } });
   await advanced.svc.putReport(UID, { ...BODY, baseVersion: 4 }, CALLER);
-  assert.deepEqual(advanced.writes, ['reportDraft.upsert:base4']);
+  assert.deepEqual(advanced.writes, ['reportDraft.store:base4']);
   assert.deepEqual(advanced.audits.map(a => a.action), ['report.draft', 'report.draft.rebase']);
   assert.deepEqual(JSON.parse(advanced.audits[1].detail), { from: 2, to: 4 });
-  assert.equal(advanced.raw.length, 0, 'putReport must not take a FOR UPDATE lock on Report');
+  assert.deepEqual(advanced.raw.map(sql => sql.match(/FROM "(\w+)"/)[1]), ['StudyState', 'ReportDraft'], 'putReport must not take a FOR UPDATE lock on Report');
 
   for (const draft of [null, { baseVersion: 4 }, { baseVersion: 2 }]) {
     const f = fixture({ draft });
@@ -164,6 +183,6 @@ test('an explicit rebase is audited apart from the twenty-second autosave, and n
 test('clearing a draft is never refused for its base version', async () => {
   const f = fixture({ draft: { baseVersion: 2 } });
   const result = await f.svc.putReport(UID, { findings: '', conclusion: '', recommendation: '', baseVersion: 99 }, CALLER);
-  assert.equal(result.cleared, true);
+  assert.deepEqual([result.present, result.snapshot, result.revision], [false, null, EPOCH + ':2']);
   assert.deepEqual(f.audits.map(a => a.action), ['report.draft.clear']);
 });

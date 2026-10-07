@@ -37,6 +37,7 @@ leaves out, and records every PATCH body:
   09  control: the c59e039 submit (all four fields on every Save) is served through the same route and
       must PATCH on an unchanged Save and overwrite the newer roles, so cases 01 and 08 cannot pass on a
       harness that misses the request or a store that ignores it.
+  10  S7-U5 D623: uncertain roster work is Korean text; a DB version conflict adds no retry button.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does
 not answer is aborted and fails the case. The service half (approve [clinician] -> mixed -> revoke on
@@ -67,11 +68,13 @@ ORIGIN = "https://members.test"
 PAGE_PATH = "/worklist/hpacs-lite/admin.html"
 SCRIPTS = {
     "/worklist/hpacs-lite/auth.js": lf_text(HPACS / "auth.js"),
+    "/worklist/hpacs-lite/work-context.js": lf_text(HPACS / "work-context.js"),
+    "/worklist/hpacs-lite/session-transport.js": lf_text(HPACS / "session-transport.js"),
     "/worklist/hpacs-lite/study-access-admin.js": lf_text(HPACS / "study-access-admin.js"),
 }
 INSTITUTION = "SYN-INST-A"
 ME = {"sub": "SYN-ADMIN-SUB", "user": "syn-admin", "displayName": "SYN Admin", "roles": ["admin"],
-      "institution": INSTITUTION}
+      "institution": INSTITUTION, "sessionId": "SYN-SESSION-ADMIN"}
 FUTURE_ROLE = "syn-future-role"
 # A role name is data. AdminService.row() filters roles to APP_ROLES today, so this cannot arrive
 # from the real server; it checks that the new read-only role display renders text, not markup.
@@ -660,6 +663,21 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         self.assertEqual(["radiologist", "clinician"], self.save()["roles"])
         self.assertEqual(["clinician", "radiologist"], self.user("syn-mixed")["roles"],
                          "full-body: the technician another admin added is overwritten")
+
+    def test_10_roster_unknown_is_text_and_activation_conflict_never_adds_a_retry_button(self):
+        # REQ-S7-U5-D623 -> RISK-ROSTER-UNCERTAIN -> no new recovery control in core.
+        self.user("syn-suspended")["rosterUnconfirmed"] = True
+        self.user("syn-suspended")["version"] = 7
+        self.load()
+        expect(self.row("syn-suspended")).to_contain_text("명부 반영 미확인")
+        expect(self.page.get_by_role("button", name="Retry Activate", exact=True)).to_have_count(0)
+        self.patch_error = (409, {"code": "MEMBER_VERSION_CONFLICT", "message": "회원 상태가 바뀌었습니다. 새로고침하세요"})
+        self.row("syn-suspended").get_by_role("button", name="Activate", exact=True).click()
+        self.wait_until(lambda: len(self.patches) == 1, "the Activate PATCH")
+        expect(self.page.locator("#message")).to_have_text("회원 상태가 바뀌었습니다. 새로고침하세요")
+        expect(self.page.get_by_role("button", name="Retry Activate", exact=True)).to_have_count(0)
+        self.assertEqual([("SYN-U-SUSPENDED", {"enabled": True, "version": 7})], self.patches)
+
 
 
 if __name__ == "__main__":

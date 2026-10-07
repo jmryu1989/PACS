@@ -1,3 +1,4 @@
+import { canReadPreliminary } from './preliminary-reader';
 import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -85,7 +86,7 @@ function member(c: Caller, write = false) {
 }
 function viewable(study: any, c: Caller) {
   return !!study && (study.institutionId === c.institution || study.teleInstitutionId === c.institution) &&
-    (study.rs !== 'P' || study.preDoc === c.actor || study.preReviewer === c.actor);
+    canReadPreliminary(study, c);
 }
 function visible(study: any, c: Caller) {
   if (!viewable(study, c)) denied();
@@ -188,7 +189,7 @@ export class FindingService {
     return this.bounded(async tx => {
       const parent = Prisma.sql`SELECT uid FROM "StudyState" WHERE uid = ${uid}
         AND ("institutionId" = ${c.institution} OR "teleInstitutionId" = ${c.institution})
-        AND (rs <> 'P' OR "preDoc" = ${c.actor} OR "preReviewer" = ${c.actor})`;
+        AND (rs <> 'P' OR (CASE WHEN "preDocSub" IS NOT NULL THEN "preDocSub" = ${c.sub} ELSE "preDoc" = ${c.actor} END) OR (CASE WHEN "preReviewerSub" IS NOT NULL THEN "preReviewerSub" = ${c.sub} ELSE "preReviewer" = ${c.actor} END))`;
       // The same snapshot names every comparison study in scope and decides which of them this
       // caller may read; the page statement then drops findings whose lineage leaves that set.
       const scope = id === undefined ? Prisma.empty : Prisma.sql`AND f.id = ${id}::uuid`;
@@ -264,7 +265,7 @@ export class FindingService {
     const keys = Prisma.join(unique.map(id => Prisma.sql`${id}::uuid`));
     const parent = Prisma.sql`SELECT uid FROM "StudyState" WHERE uid = ${uid}
       AND ("institutionId" = ${c.institution} OR "teleInstitutionId" = ${c.institution})
-      AND (rs <> 'P' OR "preDoc" = ${c.actor} OR "preReviewer" = ${c.actor})`;
+      AND (rs <> 'P' OR (CASE WHEN "preDocSub" IS NOT NULL THEN "preDocSub" = ${c.sub} ELSE "preDoc" = ${c.actor} END) OR (CASE WHEN "preReviewerSub" IS NOT NULL THEN "preReviewerSub" = ${c.sub} ELSE "preReviewer" = ${c.actor} END))`;
     // The same snapshot names every comparison study these findings reach and decides which of them
     // this caller may read; the row statement then drops findings whose lineage leaves that set.
     const foreign = comparisonStudies(uid, (await tx.$queryRaw`SELECT DISTINCT l.uid

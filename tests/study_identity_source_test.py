@@ -1,5 +1,10 @@
 # coding: utf-8
-"""TEST-S4-U5-STUDY-IDENTITY source (stdlib only; no browser, container, database, Node or network).
+"""TEST-S4-U5-STUDY-IDENTITY source (no browser, container, database or network; the installed Node/TypeScript runtime
+checks controller route decorators and executes service behavior over synthetic stores).
+
+D73 §1-B.14: byte pins apply only to the fixed historical S4 before/after blobs whose
+equality is the preservation requirement. Current bootstrap/toClient/unmatch are exercised
+through their public service methods; current implementation spelling is not that requirement.
 
 What this file proves, and nothing more (review M-2):
   1. tests/study_identity_vectors.json is well formed and carries every named example of the reviewed contract
@@ -9,17 +14,18 @@ What this file proves, and nothing more (review M-2):
      would agree with itself and prove nothing about api/src/study-identity.ts.
   2. Source pins that the shipped files still carry the reviewed decisions: the tenant-pinned second Order read and
      its position, relations only from server-read tags, no Order value in the answer, the M-1/N-1 shape checks after
-     every existing refusal, unchanged write sites and neighbour surfaces, the client allowlist/escaping, the truthful
-     Modify path, the QIDO restore after Unmatch, list invalidation, the guarded Order List refresh, the M-3 wording,
-     the forbidden-word table, the one new live method, its place in the live selection scripts/run-tests.py plans
-     (collected, never run) and the hosted steps that run the real code.
+     every existing refusal, the controller's route table against the one
+     S4-U5 shipped (no route added or dropped since; its handlers' bodies are not pinned), the one new live method, its place in the live selection
+     scripts/run-tests.py plans (collected, never run) and the hosted steps that run the real code.
+     Client behaviour is covered by study_identity_test.cjs and study_identity_dom_test.py, not source pins here.
 What it cannot see: whether TypeScript compiles, the browser renders, or PostgreSQL/Orthanc behave as the source says.
 """
-import hashlib
 import importlib.util
 import json
 import math
 import re
+import subprocess
+import shutil
 import sys
 import unicodedata
 import unittest
@@ -69,36 +75,6 @@ NEGATION = "같은 환자임을 확인한 것은 아닙니다."
 def between(source, start, end):
     head = source.index(start)
     return source[head:source.index(end, head + len(start))]
-
-
-def sha(value):
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def js_function(source, name):
-    """The DOM harness scanner (tests/worklist_arrivals_dom_test.py); a quote in a comment breaks it there too."""
-    start = source.index("function " + name + "(")
-    brace = source.index("{", start)
-    depth, quote, escaped = 0, None, False
-    for index in range(brace, len(source)):
-        char = source[index]
-        if quote:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-            continue
-        if char in "'\"`":
-            quote = char
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return source[start:index + 1]
-    raise ValueError(name)
 
 
 def forbidden_hits(value):
@@ -205,15 +181,6 @@ class VectorFile(unittest.TestCase):
 
 # ── 2. Server source pins ─────────────────────────────────────────────────────────────────────────────────────
 
-BASE_SHA256 = {
-    # Unchanged at b6a317c (S4-U5 base): route table, the U2 rule/client and the untouched neighbour methods.
-    "controller": "8a862bd2db7bee98406f89d89289e04d4665213c91830fa416cf968bd5b0db23",
-    "u2_rule": "45a916d3d2cfa37b3e4d9dc04d5e7f2ee9dc6a86451249ed799aab40bc300dbd",
-    "u2_client": "47abd1d5a00a69d37a8c7977e5f31c9d3a9ce16ca04a43d5fd8830a4369963d3",
-    "unmatch": "d38480a356f864fb8084bedfe0f632a4d2541047ccff26cdd5dd57f6a7ed92cb",
-    "bootstrap": "2c8ae6afa501225b6b9c808f75065daafc5afd5e93013e43909b5bf4f200fbd9",
-    "toClient": "7a10e0e6f6cc5e487140f4b55d3a55b4b01214236b886819b2cf7e7ead7682a3",
-}
 # "S4-U5 left removeState as it was" is a claim about S4-U5's two commits, so (S7-PINS, AGENTS.md 1-B.14; Astra
 # S7-U3a-B-R-001-F02) it is checked on them - the base b6a317c and the main merge fb7dab9 that shipped 4760df0 - read with
 # git show by fixed_file() (tests/report_actions_dom_test.py): a commit that cannot be read, or is not the pinned bytes,
@@ -227,9 +194,146 @@ S4U5_RESULT = "fb7dab9df54e6fe3c835dc6d2add89b1cfd62e0f"
 # LF-normalized UTF-8 sha256 of api/src/pacs.service.ts at each (the whole file as git show reads it).
 S4U5_SERVICE_SHA256 = {S4U5_BASE: "db21d0eaddf15473dbca19712fa49e669cfe1e18e6fbef76d5ee56df661f8d7e",
                        S4U5_RESULT: "c64229b96252eb484e5372fd03cf9ddde39089fd140e16b0baf70937ca8eb173"}
-# StudyState/Order/report write call sites in pacs.service.ts at b6a317c. U5 adds reads only.
-BASE_WRITES = {"studyState.update(": 8, "studyState.updateMany(": 1, "studyState.create(": 3, "studyState.delete(": 1,
-               "order.update(": 2, "order.updateMany(": 2, "order.createMany(": 1}
+# "S4-U5 adds no route" the same way (S7-U5 fix4, commander decision D506; AGENTS.md 1-B.14/15). Until then this file held
+# the sha256 of the whole live pacs.controller.ts: any later edit of any handler failed it (S7-U5's draft PUT owner check
+# did) and an edit that re-set the digest passed whatever routes it added. S4-U5's claim is about its two commits, whose
+# controller is one pinned file (LF sha256, read by fixed_file()). What must hold of the live controller is its route
+# table: the same (method, path) pairs as the controller S4-U5 shipped, both read by the TypeScript compiler and checker
+# that api/package-lock.json installs (npm ci --prefix api --ignore-scripts; the measurements step runs after that step).
+S4U5_CONTROLLER_SHA256 = "8a862bd2db7bee98406f89d89289e04d4665213c91830fa416cf968bd5b0db23"
+# Run by node with {"api": <api dir>, "tables": {label: controller text}} on stdin; answers {label: {routes, problems}}.
+# Each text is judged as api/src/pacs.controller.ts in a program that holds only it and api/src/auth.guard.ts (the module
+# its one local decorator comes from); every other api/src file does not exist for it, node_modules and lib are read from
+# disk. A decorator is what the checker resolves it to through every import and alias: @nestjs/common's route decorators
+# and Controller are read, its other exports (Param, Body, Req, HttpCode, ...) and auth.guard's Public are not routes, and
+# anything else - RequestMapping, applyDecorators, SetMetadata, a decorator it cannot resolve, a route decorator anywhere
+# but directly on an instance method of the one @Controller() class, a path that is not one string literal, a second route
+# decorator on a method, an extends clause - is a problem, never left out of the table.
+ROUTE_TABLE_JS = r"""
+'use strict';
+const path = require('path');
+const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const slash = file => path.resolve(file).split(path.sep).join('/');
+const API = slash(input.api), SRC = API + '/src';
+const CONTROLLER = SRC + '/pacs.controller.ts', GUARD = SRC + '/auth.guard.ts';
+const ts = require(require.resolve('typescript', { paths: [API] }));
+const config = ts.readConfigFile(API + '/tsconfig.json', ts.sys.readFile);
+if (config.error) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'));
+const options = { ...ts.parseJsonConfigFileContent(config.config, ts.sys, API).options, noEmit: true,
+                  incremental: false };
+const METHODS = { Get: 'GET', Post: 'POST', Put: 'PUT', Delete: 'DELETE', Patch: 'PATCH', Options: 'OPTIONS', Head: 'HEAD',
+                  All: 'ALL', Search: 'SEARCH', Sse: 'GET' };
+const REFUSED = ['RequestMapping', 'applyDecorators', 'SetMetadata'];
+const under = file => file.startsWith(SRC + '/');
+
+function table(text) {
+  const texts = new Map([[CONTROLLER, text], [GUARD, ts.sys.readFile(GUARD)]]);
+  const base = ts.createCompilerHost(options, true);
+  const host = { ...base,
+    fileExists: f => under(slash(f)) ? texts.has(slash(f)) : base.fileExists(f),
+    readFile: f => under(slash(f)) ? texts.get(slash(f)) : base.readFile(f),
+    directoryExists: d => slash(d) === SRC || under(slash(d)) ? [...texts.keys()].some(k => k.startsWith(slash(d) + '/'))
+                                                             : !base.directoryExists || base.directoryExists(d),
+    getSourceFile: (f, version, onError, create) => !under(slash(f)) ? base.getSourceFile(f, version, onError, create)
+      : texts.has(slash(f)) ? ts.createSourceFile(f, texts.get(slash(f)), version, true) : undefined };
+  const program = ts.createProgram({ rootNames: [CONTROLLER, GUARD], options, host });
+  const checker = program.getTypeChecker();
+  const resolve = symbol => symbol && symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+  const exportsOf = (specifier, from) => {
+    const found = ts.resolveModuleName(specifier, from, options, host).resolvedModule;
+    const file = found && program.getSourceFile(found.resolvedFileName);
+    const module = file && checker.getSymbolAtLocation(file);
+    if (!module) throw new Error(specifier + ' does not resolve from api/src (npm ci --prefix api)');
+    return new Map(checker.getExportsOfModule(module).map(symbol => [symbol.name, resolve(symbol)]));
+  };
+  const nest = exportsOf('@nestjs/common', CONTROLLER), guard = exportsOf('./auth.guard', CONTROLLER);
+  const route = new Map(Object.keys(METHODS).map(name => [nest.get(name), METHODS[name]]));
+  const controller = nest.get('Controller'), refused = new Set(REFUSED.map(name => nest.get(name)));
+  const nestOwn = new Set(nest.values()), publicMark = guard.get('Public');
+  if ([...route.keys(), controller, ...refused, publicMark].some(symbol => !symbol))
+    throw new Error('a decorator export is missing');
+  const file = program.getSourceFile(CONTROLLER), problems = [], routes = [];
+  const where = node => 'line ' + (file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1);
+  if (program.getSyntacticDiagnostics(file).length) problems.push('the controller does not parse');
+  const symbolOf = node => resolve(checker.getSymbolAtLocation(ts.isPropertyAccessExpression(node) ? node.name : node));
+  const decorated = mark => symbolOf(ts.isCallExpression(mark.expression) ? mark.expression.expression : mark.expression);
+  const literal = (call, node) => {
+    if (call.arguments.length === 0) return '';
+    if (call.arguments.length === 1 && ts.isStringLiteralLike(call.arguments[0])) return call.arguments[0].text;
+    problems.push(where(node) + ': a path that is not one string literal');
+    return null;
+  };
+  const prefixOf = new Map();
+  const visit = node => {
+    if (ts.isIdentifier(node) && !ts.isImportSpecifier(node.parent)) {
+      const symbol = resolve(checker.getSymbolAtLocation(node));
+      if (symbol && (route.has(symbol) || symbol === controller || refused.has(symbol))) {
+        const callee = ts.isPropertyAccessExpression(node.parent) && node.parent.name === node ? node.parent : node;
+        const call = callee.parent;
+        const decorator = ts.isCallExpression(call) && call.expression === callee && ts.isDecorator(call.parent);
+        if (refused.has(symbol) || !decorator)
+          problems.push(where(node) + ': ' + node.text + ' used other than as a route or controller decorator');
+      }
+    }
+    if (ts.isDecorator(node)) {
+      const call = node.expression, owner = node.parent, symbol = decorated(node);
+      if (route.has(symbol)) {
+        const cls = owner.parent;
+        const instance = ts.isMethodDeclaration(owner) && !(ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Static);
+        if (!ts.isCallExpression(call)) problems.push(where(node) + ': a route decorator that is not called');
+        else if (!instance || !ts.isClassDeclaration(cls) || !prefixOf.has(cls))
+          problems.push(where(node) + ': a route decorator not on an instance method of the @Controller() class');
+        else if (ts.getDecorators(owner).filter(d => route.has(decorated(d))).length !== 1)
+          problems.push(where(node) + ': more than one route decorator on a method');
+        else {
+          const child = literal(call, node), prefix = prefixOf.get(cls);
+          const parts = [prefix, child].map(part => (part || '').replace(/^\/+|\/+$/g, '')).filter(Boolean);
+          if (child !== null && prefix !== null) routes.push(route.get(symbol) + ' ' + parts.join('/'));
+        }
+      } else if (symbol !== controller && symbol !== publicMark && !(nestOwn.has(symbol) && !refused.has(symbol)))
+        problems.push(where(node) + ': a decorator that is neither @nestjs/common\'s nor auth.guard\'s Public');
+    }
+    if (ts.isClassDeclaration(node)) {
+      const marks = (ts.getDecorators(node) || []).filter(d => ts.isCallExpression(d.expression) && decorated(d) === controller);
+      if (marks.length > 1) problems.push(where(node) + ': two @Controller() decorators on a class');
+      if (marks.length) {
+        if (prefixOf.size) problems.push(where(node) + ': a second @Controller() class');
+        if ((node.heritageClauses || []).some(clause => clause.token === ts.SyntaxKind.ExtendsKeyword))
+          problems.push(where(node) + ': the controller extends a class');
+        prefixOf.set(node, literal(marks[0].expression, marks[0]));
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  if (!prefixOf.size) problems.push('no @Controller() class');
+  const seen = new Set(), repeated = routes.filter(key => seen.has(key) || !seen.add(key));
+  if (repeated.length) problems.push('a route declared twice: ' + repeated.join(', '));
+  return { routes: routes.sort(), problems };
+}
+
+const out = { typescript: ts.version, tables: {} };
+for (const [label, text] of Object.entries(input.tables)) out.tables[label] = table(text);
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def controller_route_tables(texts):
+    """{label: sorted ['METHOD path']} of each controller text, as ROUTE_TABLE_JS reads it; any problem fails the case."""
+    try:
+        run = subprocess.run(["node", "-e", ROUTE_TABLE_JS], capture_output=True, text=True, encoding="utf-8",
+                             input=json.dumps({"api": str(ROOT / "api"), "tables": texts}), timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AssertionError(f"node did not run ({error}), so the controller's route table was not read") from error
+    if run.returncode != 0:
+        raise AssertionError(f"the route table reader failed (exit {run.returncode}): {run.stderr.strip()[-600:]}")
+    answer = json.loads(run.stdout)
+    problems = {label: table["problems"] for label, table in answer["tables"].items() if table["problems"]}
+    if problems:
+        raise AssertionError(f"route decorators the reader refuses: {problems}")
+    print("S4U5-CONTROLLER-ROUTES", json.dumps({"typescript": answer["typescript"],
+                                                **{label: len(t["routes"]) for label, t in answer["tables"].items()}}))
+    return {label: table["routes"] for label, table in answer["tables"].items()}
 
 
 class RulePins(unittest.TestCase):
@@ -313,22 +417,37 @@ class ServicePins(unittest.TestCase):
                       listing)
 
     def test_no_order_value_leaves_and_no_new_route_or_bootstrap_change(self):
-        self.assertEqual(sha(CONTROLLER), BASE_SHA256["controller"])
-        self.assertEqual(sha(between(SERVICE, "  async bootstrap(c: Caller, query?: any) {", "\n  }\n")), BASE_SHA256["bootstrap"])
-        self.assertEqual(sha(between(SERVICE, "function toClient(", "\n}\n")), BASE_SHA256["toClient"])
-        self.assertNotIn("orderIdentity", between(SERVICE, "  async bootstrap(c: Caller, query?: any) {", "\n  }\n"))
-        self.assertEqual(sha(U2_RULE), BASE_SHA256["u2_rule"])
-        self.assertEqual(sha(U2_CLIENT), BASE_SHA256["u2_client"])
+        # S4-U5 left the controller as it was: both of its commits hold the one pinned file (fixed_file() fails otherwise).
+        shipped = {commit: fixed_file(commit, "api/src/pacs.controller.ts", S4U5_CONTROLLER_SHA256)
+                   for commit in (S4U5_BASE, S4U5_RESULT)}
+        self.assertEqual(shipped[S4U5_BASE], shipped[S4U5_RESULT])
+        for path, digest in (
+            ("api/src/order-reconciliation.ts", "45a916d3d2cfa37b3e4d9dc04d5e7f2ee9dc6a86451249ed799aab40bc300dbd"),
+            ("worklist-v0/hpacs-lite/order-reconciliation.js", "47abd1d5a00a69d37a8c7977e5f31c9d3a9ce16ca04a43d5fd8830a4369963d3"),
+        ):
+            self.assertEqual(fixed_file(S4U5_BASE, path, digest), fixed_file(S4U5_RESULT, path, digest))
+        # The live controller serves the routes of the one S4-U5 shipped, whatever its handlers do, and the one route a
+        # later unit added on purpose: S7-U5's read of the caller's own draft and boundary (no order value in it).
+        tables = controller_route_tables({"live": CONTROLLER, "s4u5": shipped[S4U5_RESULT]})
+        self.assertTrue(tables["s4u5"])
+        self.assertEqual(tables["live"], sorted(tables["s4u5"] + ["GET studies/:uid/draft"]))
+        self.behaviour("CORE_R11_BOOTSTRAP")
         # The U2 pin on accession-bearing code lines keeps holding: the select lives in the rule module (N-9).
         code = [line.strip() for line in SERVICE.splitlines()
                 if "accession" in line and not line.strip().startswith(("*", "//", "/*"))]
         self.assertEqual(len(code), 2)
         self.assertNotIn("accession", SEED)
 
-    def test_write_sites_and_neighbour_methods_are_unchanged(self):
-        for token, count in BASE_WRITES.items():
-            self.assertEqual(SERVICE.count(token), count, token)
-        self.assertEqual(sha(between(SERVICE, "  async unmatch(uid: string, c: Caller) {", "\n  }\n")), BASE_SHA256["unmatch"])
+    def test_unmatch_releases_both_sides_and_preserves_refusals(self):
+        self.behaviour("CORE_R11_UNMATCH")
+
+    def behaviour(self, pattern):
+        result = subprocess.run([shutil.which("node") or "node", "--require", str(ROOT / "tests/service_test_loader.cjs"),
+                                 "--test", "--test-reporter=tap", "--test-name-pattern", pattern,
+                                 str(ROOT / "tests/study_identity_server_test.cjs")], cwd=ROOT,
+                                capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("# pass 1", result.stdout)
 
     def test_s4u5_left_remove_state_as_it_was(self):
         # Both commits' files are their pinned bytes (fixed_file() fails otherwise); the method is the same text in each.
@@ -385,141 +504,11 @@ class ServicePins(unittest.TestCase):
 
 # ── 3. Client source pins ─────────────────────────────────────────────────────────────────────────────────────
 
-class ClientPins(unittest.TestCase):
-    def test_the_module_reads_only_the_answer_and_the_response_row(self):
-        code = "\n".join(line for line in CLIENT.splitlines() if not line.strip().startswith(("*", "//", "/*")))
-        for banned in ("localStorage", "sessionStorage", "SEED_ORDERS", "kin-orders", "fetch(", "XMLHttpRequest",
-                       "document.", "innerHTML", ".ov", ".orig", "window."):
-            self.assertNotIn(banned, code, banned)
-        self.assertIsNone(re.search(r"\borders\b", code))
-        self.assertIn("const SOURCE='engineering_only',MARKER='Engineering Only',OBSERVATION_UNAVAILABLE='관측 불가';", CLIENT)
-        self.assertIn("const IDENTITY_KEYS=['accession','birth','oid','patientId','patientName','sex','source'];", CLIENT)
-        self.assertIn("rows.set(row.uid,{tags:{uid:row.uid,acc:textOf(row.acc),id:textOf(row.id),name:textOf(row.name),", CLIENT)
-        view = js_function(CLIENT, "view")
-        self.assertIn("else if(matched==='U')key='no_linked_order';", view)
-        self.assertIn("else if(matched==='M'&&row.order.state==='identity'&&row.order.identity.oid===own.oid)key='linked';", view)
-        self.assertIn("else key='unknown';", view)
-
-    def test_m3_the_pn_row_names_its_group(self):
-        self.assertIn("label:'Patient Name · Alphabetic',field:'patientName',absent:'Alphabetic Absent',", CLIENT)
-        self.assertIn("const NAME_SCOPE='Patient Name은 Alphabetic 그룹만 읽고 표시하고 비교합니다. Ideographic·Phonetic 표기는 표시하지도 비교하지도 않습니다.';", CLIENT)
-        self.assertIn("title=RELATION_TITLE[identity[tag.field]]+(tag.key==='name'?' '+NAME_SCOPE:'');", CLIENT)
-        self.assertEqual(CLIENT.count("absent:'Absent'"), 6)
-
-    def test_labels_titles_and_guidance_carry_no_forbidden_word(self):
-        literals = re.findall(r"'((?:[^'\\\n]|\\.)*)'", CLIENT)
-        self.assertTrue(any("Same Value" in item for item in literals))
-        for item in literals:
-            self.assertEqual(forbidden_hits(item), [], item)
-        self.assertEqual(CLIENT.count(NEGATION), 1)
-        panel = between(MAIN, '<details id="study-identity"', "</details>")
-        note = between(MAIN, '<div class="note">※ 판독 전(RS: W)인 검사만 수정 가능.', "</div>")
-        for item in (panel, note):
-            self.assertEqual(forbidden_hits(item), [], item)
-        # The seeded mutation of the review (M14/M15) must be caught by this very check.
-        self.assertEqual(forbidden_hits("판독 취소(Reset) 후 다시 매칭하세요"), ["Reset", "판독 취소"])
-        self.assertEqual(forbidden_hits("다른 환자입니다"), ["다른 환자입니다"])
-
-    def test_main_wires_the_panel_through_the_observation_only(self):
-        self.assertIn('  <script src="order-reconciliation.js"></script>\n  <script src="study-identity.js"></script>\n', MAIN)
-        self.assertIn("    let studyIdentityModel = window.KinStudyIdentity?.start?.() ?? null;", MAIN)
-        self.assertEqual(MAIN.count("studyIdentityModel = "), 3)   # declaration + apply + correction
-        apply = js_function(MAIN, "applyObservation")
-        self.assertLess(apply.index("applyStudyIdentity(next.ok ? result : null);"), apply.index("renderObservation();"))
-        failure = js_function(MAIN, "markObservationUnavailable")
-        self.assertLess(failure.index("applyStudyIdentity(null);"), failure.index("renderObservation();"))
-        self.assertEqual(MAIN.count("applyStudyIdentity("), 3)
-        self.assertIn('</table>` : "No clinical information provided.";\n      renderStudyIdentity();\n      renderObservation();\n    }\n', MAIN)
-        # render() redraws the panel last: the poll merges row state after it reports the observation.
-        self.assertIn("      renderChips();\n      // S4-U5: the poll merges row state after it reports the observation, so the identity panel is redrawn here\n"
-                      "      // too; its stale rule reads that merged state (a correction answer or a newer poll), never an older one.\n"
-                      "      renderStudyIdentity();\n    }\n", MAIN)
-        self.assertEqual(MAIN.count("renderStudyIdentity();"), 4)   # applyStudyIdentity, renderClinical, render, correction
-        render = js_function(MAIN, "renderStudyIdentity")
-        for banned in ("innerHTML", "api(", "fetch(", "toast(", "localStorage", "sessionStorage", "saveApp(", "SEED_ORDERS"):
-            self.assertNotIn(banned, render)
-        self.assertIn("KinStudyIdentity.view(studyIdentityModel, s.uid, appState[s.uid] ?? {})", render)
-        self.assertIn("if (!box || !studyIdentityModel) return;", render)
-        self.assertIn("value.textContent = `${row.tag} ${row.label}: ${row.value}`;", render)
-        panel = between(MAIN, '<div id="study-receipt"', "</section>")
-        self.assertRegex(panel, r'<details id="study-identity" [^>]*hidden>')
-        for child in ("study-identity-summary", "study-identity-order", "study-identity-tags", "study-identity-guidance"):
-            self.assertIn('id="%s"' % child, panel)
-        self.assertNotIn("<button", between(MAIN, '<details id="study-identity"', "</details>"))
-
-    def test_m1_client_containment_overlay_allowlist_and_escaped_cells(self):
-        state = js_function(MAIN, "applyState")
-        self.assertNotIn("Object.assign(s, a.ov)", state)
-        self.assertIn("for (const key of OVERLAY_KEYS) if (overlayValue(key, a.ov?.[key])) s[key] = a.ov[key];", state)
-        self.assertTrue(state.rstrip().endswith("s[key] = a.ov[key];\n      return s;\n    }"))
-        self.assertIn('    const overlayValue = (key, value) => typeof value === "string" || (key === "age" && Number.isFinite(value));', MAIN)
-        self.assertIn('      ts: s => `<span class="ts ts-${esc(s.ts)}">${esc(s.ts)}</span>`,', MAIN)
-        self.assertIn('      matched: s => `<span class="mt ${esc(s.matched)}">${esc(s.matched)}</span>`,', MAIN)
-        cells = between(MAIN, "    const CELL = {", "\n    };")
-        self.assertIsNone(re.search(r"\$\{s\.(ts|matched)\}", cells))
-
-    def test_modify_waits_for_the_answer_and_repaints_from_the_server(self):
-        save = js_function(MAIN, "saveModify")
-        server = save[save.index("if (serverMode || offline) {"):save.index("} else {")]
-        wait = server.index("ok = await saveApp(uid, { ov }) === true;")
-        for later in ("if (!ok) {", "applyState(row);", "noteIdentityCorrection(uid, true);"):
-            self.assertLess(wait, server.index(later), later)
-        for early in ("Object.assign(s", "a.ov =", "a.orig", "toast(", "render("):
-            self.assertNotIn(early, server[:wait], early)
-        self.assertLess(save.index("} else {"), save.index('toast("검사 정보를 수정했습니다");'))
-        self.assertIn('if (serverMode) { commitEpoch++; listLoadSequence++; load(); }', save)
-        self.assertEqual(MAIN.count('$("#m-save").addEventListener("click", saveModify);'), 1)
-        self.assertEqual(MAIN.count('$("#m-save")'), 1)
-        app = js_function(MAIN, "saveApp")
-        self.assertIn("return api(\"PATCH\", `/studies/${encodeURIComponent(uid)}`, body)\n"
-                      "        .then(st => { appState[uid] = mergePolledState(uid, st); syncStudy(uid); render(); })\n"
-                      "        .then(() => true)", app)
-        self.assertIn("render(); refreshRight();\n          return false;", app)
-        self.assertNotIn("localStorage에만", MAIN)
-        self.assertIn("수정 내용은 화면 표시용 덮어쓰기로 서버에 저장되며 Orthanc 원본 DICOM과 오더 비교 결과는 바뀌지 않습니다.", MAIN)
-
-    def test_match_and_unmatch_invalidate_lists_and_unmatch_repaints_from_qido(self):
-        match = js_function(MAIN, "doMatch")
-        unmatch = js_function(MAIN, "doUnmatch")
-        for body in (match, unmatch):
-            server = body[body.index("if (serverMode) {"):body.index("} else {")]
-            self.assertLess(server.index("} catch (e) {"), server.index("commitEpoch++; listLoadSequence++;"))
-            self.assertIn("noteIdentityCorrection(s.uid, true); load(); refreshOrders();", server)
-            self.assertIn("noteIdentityCorrection(s.uid, false);", server)
-        # M-4.6: the two projection literals stay verbatim.
-        self.assertIn("appState[s.uid] = { ...a, ...st };", match)
-        self.assertIn("appState[s.uid] = { ...a, ...st, ov: undefined };", unmatch)
-        self.assertNotIn("st.orig", unmatch)
-        self.assertIn("KinStudyIdentity.tags(studyIdentityModel, s.uid)", unmatch)
-        self.assertIn("age: ageOf(fmtD(read.birth), s.date), desc: read.desc });", unmatch)
-        self.assertIn('alert("매칭 실패: " + e.message);', match)
-        self.assertIn('alert("매칭 해제 실패: " + e.message);', unmatch)
-        self.assertIn("patient: { age: ov.age, orig: claimed } });", match)
-        self.assertIn("for (const key of OVERLAY_KEYS) if (overlayValue(key, orig?.[key])) claimed[key] = orig[key];", match)
-
-    def test_order_list_refresh_is_server_only_guarded_and_latest_wins(self):
-        refresh = js_function(MAIN, "refreshOrders")
-        self.assertTrue(refresh.startswith("function refreshOrders() {\n      if (!serverMode) { renderOrders(); return; }"))
-        for needle in ("const token = ++orderRefreshSequence;", 'answer = await api("GET", "/bootstrap?states=omit");',
-                       "if (token !== orderRefreshSequence || !serverMode) return;",
-                       "answer.me?.institution !== myInstitution", "orders = answer.orders;",
-                       "if (!orders.some(o => o.oid === selectedOid)) selectedOid = null;"):
-            self.assertEqual(1, refresh.count(needle), needle)
-        for banned in ("SEED_ORDERS", "localStorage", "saveOrders", "markObservationUnavailable", "kin-orders"):
-            self.assertNotIn(banned, refresh)
-        self.assertEqual(MAIN.count('$("#o-refresh").addEventListener("click", refreshOrders);'), 1)
-        self.assertEqual(MAIN.count('$("#o-refresh")'), 1)
-
-    def test_m4_pinned_tokens_do_not_move(self):
-        # gatewayReceipt 5 -> 6 at S4-F01V: the Not Observed item reads its own receipt (gateway_retry_source_test.py).
-        for token, count in (("gatewayReceipt", 6), ("SEED_ORDERS", 2), ("applyObservation(", 3),
-                             ("markObservationUnavailable(", 4), ("applyOrderReconciliation(", 3),
-                             ("renderOrderReconciliation(", 2), ("orderReconciliationModel =", 2), ('id="b-print"', 1),
-                             ("mergePolledState(", 7)):
-            self.assertEqual(MAIN.count(token), count, token)
-
-
-# ── 4. Live method and hosted wiring ──────────────────────────────────────────────────────────────────────────
+# The former nine ClientPins cases asserted source spelling. Their behaviour runs in
+# study_identity_test.cjs (closed answer/labels/guidance) and study_identity_dom_test.py:
+# 01-03 observation-only labels, 04/04c/05b stale lists, 05/05-success truthful Modify,
+# 06 QIDO restoration, 07 containment/escaping, 08 latest Order refresh, 09 guidance.
+# Fixed token/history checks remain in report_actions_dom_test.py.
 
 class LiveAndWorkflowPins(unittest.TestCase):
     def test_the_one_live_method_holds_the_required_cells(self):

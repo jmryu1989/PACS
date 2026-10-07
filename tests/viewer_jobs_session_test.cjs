@@ -1,38 +1,20 @@
 'use strict';
-/* S5-U2c fix4 (Astra S5-U2c-C-R-001 F01) at the Job panel's own requests (worklist-v0/hpacs-lite/viewer-jobs.js api()).
- * fix3's rule for the viewer document's session: a 401, or a /me answer of another account than the document's first one, is the
- * document's end whichever part of the viewer asked it and whether or not that part still uses the answer. Here the answer reaches
- * a panel that let its request go: the viewer shows other studies (live() false, the panel not ended yet), the document refused
- * this account first (another panel's /me 403 ends the panel in place), or mode exit stopped the panel. The document's login ends
- * ('unauthorized' / 'account-changed', promoted once over the refusal); the panel applies none of it, a panel that ended or was
- * stopped shows nothing new, and the write modules' in-place end (enders) is not run again.
- * The shipped viewer-jobs.js runs in a vm realm with a minimal DOM (the shape tests/viewer_volume_job_capture_test.cjs printWorld
- * mounts it with), handed the shipped kinViewerSession.writeModule sliced from config/ohif.js. The transport holds the requests a
- * case names and does not honour the panel's abort, so an answer already on the wire when the panel let it go still arrives.
- * tests/viewer_note_connection_test.cjs requires this file, so its hosted Validate step runs these cases too. */
+/* U5S-REQ-04/08/12: all Job requests pass the page transport. Only authenticated
+ * session-end codes terminate the document, including a late response from a panel
+ * that changed study or stopped. Ordinary failures preserve the document and inputs. */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 
 const ROOT = path.join(__dirname, '..');
-const CONFIG = fs.readFileSync(path.join(ROOT, 'config', 'ohif.js'), 'utf8');
-const JOBS = fs.readFileSync(path.join(ROOT, 'worklist-v0', 'hpacs-lite', 'viewer-jobs.js'), 'utf8');
+const { sessionWorld, response } = require('./viewer_session_fixture.cjs');
+const JOBS = fs.readFileSync(process.env.KIN_VIEWER_JOBS_JS || path.join(ROOT, 'worklist-v0', 'hpacs-lite', 'viewer-jobs.js'), 'utf8');
 const STUDY = '1.2.840.99.1', OTHER_STUDY = '1.2.840.99.2';
 const FIRST = { kind: 'member', institution: 'SYN-INST', sub: 'SYN-READER-1', roles: ['radiologist'] };
 const OTHER = { ...FIRST, sub: 'SYN-READER-2' };
 // viewer-jobs.js end() and run('list') wording.
 const ENDED = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.';
 const LISTED = '현재 판독 대상의 저장 작업 목록입니다.';
-const LATE = { '401': [401, { message: 'SYN unauthorized' }, 'unauthorized'], 'another account': [200, OTHER, 'account-changed'] };
-
-// config/ohif.js kinViewerSession as shipped, in a context without a window or fetch (its logout receivers and decide()'s read stay off).
-function viewerSession() {
-  const from = CONFIG.indexOf('function kinViewerClinicianOnly('), to = CONFIG.indexOf('function kinCreateViewerLayout()');
-  assert.ok(from > 0 && to > from, 'the session anchors are present');
-  const context = vm.createContext({});
-  vm.runInContext(CONFIG.slice(from, to), context);
-  return vm.runInContext('kinViewerSession', context);
-}
 const element = tag => { const children = []; return { tagName: tag, children, style: {}, dataset: {}, textContent: '', value: '', checked: false,
   disabled: false, hidden: false, isConnected: true, id: '',
   append: (...items) => { children.push(...items); }, prepend: (...items) => { children.unshift(...items); }, insertBefore: item => { children.push(item); },
@@ -43,14 +25,8 @@ const tick = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise(r
 // A writer document (FIRST confirmed by the other panels) with the Job panel mounted and listing; `hold(url)` names the requests the
 // case answers itself.
 async function jobsWorld(source = JOBS) {
-  const session = viewerSession(), reasons = [], held = [], log = [];
-  assert.equal(session.note(FIRST), 'writer');
-  session.onEnded(reason => { reasons.push(reason); });
-  // Another write module of the document: its in-place end runs once, at the document's first refusal or end.
-  let enders = 0; session.writeModule.onEnd(() => { enders++; });
+  const reasons = [], held = [], log = [];
   let hold = () => false;
-  const response = (status, body, bad) => ({ status, ok: status >= 200 && status < 300,
-    json: async () => { if (bad) throw new SyntaxError('SYN not JSON'); return JSON.parse(JSON.stringify(body)); } });
   const answer = url => url === '/api/me' ? response(200, FIRST)
     : url.startsWith('/api/studies/' + STUDY + '/viewer-jobs?') ? response(200, { jobs: [] }) : response(404, { message: 'SYN not here' });
   const fetch = async url => {
@@ -66,7 +42,11 @@ async function jobsWorld(source = JOBS) {
     // The panel's 1 s check never runs on its own here: a case that leaves the screen sees the answer before any tick would end it.
     setInterval: () => 0, clearInterval() {}, addEventListener() {}, removeEventListener() {} };
   sandbox.window = sandbox.top = sandbox;
-  vm.runInContext(source, vm.createContext(sandbox), { filename: 'viewer-jobs.js' });
+  const world = sessionWorld(sandbox, fetch), session = world.session;
+  assert.equal(session.note(FIRST), 'writer');
+  session.onEnded(reason => reasons.push(reason));
+  let enders = 0; session.writeModule.onEnd(() => { enders++; });
+  vm.runInContext(source, world.context, { filename: 'viewer-jobs.js' });
   const grid = { getState: () => ({ viewports: new Map(), layout: { numRows: 1, numCols: 1 }, activeViewportId: null }) };
   const panel = sandbox.kinViewerJobs({ viewportGridService: grid, cornerstoneViewportService: {}, displaySetService: { getActiveDisplaySets: () => [] } },
     { scope: () => ({}) }, session.writeModule);
@@ -75,7 +55,7 @@ async function jobsWorld(source = JOBS) {
   const find = (root, match) => match(root) ? root : root.children.map(c => find(c, match)).find(Boolean) || null;
   const status = () => find(layout, e => e.id === 'kin-viewer-jobs-status').textContent;
   assert.equal(status(), LISTED, 'the panel works for the document\'s account');
-  return { session, reasons, held, log, enders: () => enders, holdWhen: fn => { hold = fn; }, sandbox, panel, status,
+  return { session, end: world.end, reasons, held, log, enders: () => enders, holdWhen: fn => { hold = fn; }, sandbox, panel, status,
     // Everything the panel shows (texts, values, disabled and hidden controls), as one comparable value.
     view: () => JSON.stringify(layout),
     refresh: () => find(layout, e => e.tagName === 'button' && e.textContent === 'Refresh Jobs').onclick() };
@@ -89,80 +69,70 @@ async function heldRead(w, at) {
   w.holdWhen(() => false);
   return { run };
 }
-// How the panel lets the held request go: the viewer shows other studies (the panel not ended), the document refuses this account
-// (another panel's /me 403, which ends the panel in place), or mode exit stops the panel.
+// Lose the study, end the bound session, or exit the mode before the response arrives.
 function letGo(w, drop) {
   if (drop === 'screen') w.sandbox.location.search = '?StudyInstanceUIDs=' + OTHER_STUDY;
-  else if (drop === 'refusal') w.session.refuse('forbidden');
+  else if (drop === 'end') w.end();
   else w.panel.stop();
 }
 
-test('S5-U2c fix4 (a)(b): a late 401 or another account reaching a Job panel that let its request go is the document\'s end; the panel applies none of it', async () => {
-  for (const drop of ['screen', 'refusal', 'exit']) {
-    for (const late of ['401', 'another account']) {
-      for (const at of late === '401' ? ['/me', 'list read'] : ['/me']) {
-        const label = [drop, late, at].join(' / ');
-        const w = await jobsWorld();
-        const { run } = await heldRead(w, at);
+test('U5 Job: coded end on a late request ends the session once, even after panel departure', async () => {
+  for (const drop of ['screen', 'end', 'exit']) {
+    for (const [status, code] of [[401, 'AUTH_SESSION_ENDED'], [403, 'AUTH_SESSION_MISMATCH'], [409, 'AUTH_SESSION_MISMATCH']]) {
+      for (const at of ['/me', 'list read']) {
+        const w = await jobsWorld(), { run } = await heldRead(w, at);
         letGo(w, drop); await tick();
-        assert.deepEqual([w.session.state(), w.reasons.join(), w.enders()], drop === 'refusal' ? ['refused', 'forbidden', 1] : ['writer', '', 0], label);
-        const [status, body, reason] = LATE[late];
         const seen = w.view(), asked = w.log.length;
-        w.held[0].release(status, body); await run; await tick();
-        assert.deepEqual([w.session.state(), w.reasons.join(), w.enders(), w.log.length],
-          ['refused', drop === 'refusal' ? 'forbidden,' + reason : reason, 1, asked], label);
-        if (drop === 'screen') assert.equal(w.status(), ENDED, label + ': the document\'s end reaches the panel still mounted');
-        else assert.equal(w.view(), seen, label + ': the panel that had ended or stopped shows nothing new');
-        const later = []; w.session.onEnded(r => { later.push(r); });
-        assert.deepEqual([later.join(), w.enders(), w.session.writeModule.answer(FIRST)], [reason, 1, false], label);
+        w.held[0].release(status, { code }); await run; await tick();
+        assert.equal(w.session.state(), 'refused', [drop, code, at].join('/'));
+        assert.equal(w.reasons.length, 1);
+        assert.equal(w.enders(), 1);
+        assert.equal(w.log.length, asked);
+        if (drop === 'screen') assert.equal(w.status(), ENDED);
+        else assert.equal(w.view(), seen);
+        assert.equal(w.session.writeModule.answer(FIRST), false);
       }
     }
   }
 });
 
-test('S5-U2c fix4 (c): what else a dropped answer says changes nothing, and the answers the panel uses go as before', async () => {
-  // Off the screen it was asked for: a dropped /me of the document's own account (a writer, or clinician-only) gives no verdict; a
-  // dropped /me 403, 500 or body that is not JSON, and a dropped list read's 403, end nothing. Back on that screen the panel lists.
-  const cases = [['/me', 200, FIRST, false, 'same account'], ['/me', 200, { ...FIRST, roles: ['clinician'] }, false, 'same account, clinician-only'],
-    ['/me', 403, { message: 'SYN forbidden' }, false, '/me 403'], ['/me', 500, { message: 'SYN' }, false, '/me 500'],
-    ['/me', 200, null, true, '/me not JSON'], ['list read', 403, { message: 'SYN forbidden' }, false, 'list 403']];
-  for (const [at, status, body, bad, label] of cases) {
-    const w = await jobsWorld();
-    const { run } = await heldRead(w, at);
-    letGo(w, 'screen');
-    w.held[0].release(status, body, bad); await run; await tick();
-    assert.deepEqual([w.session.state(), w.reasons.join(), w.enders()], ['writer', '', 0], label);
-    w.sandbox.location.search = '?StudyInstanceUIDs=' + STUDY;
-    await w.refresh(); await tick();
-    assert.equal(w.status(), LISTED, label + ': the panel works again on its screen');
+test('U5 Job: plain failures, including dropped answers, do not end the document and retry works', async () => {
+  for (const departed of [false, true]) for (const at of ['/me', 'list read']) {
+    for (const status of [401, 403, 409, 428, 500, 503]) {
+      const w = await jobsWorld(), { run } = await heldRead(w, at);
+      if (departed) letGo(w, 'screen');
+      w.held[0].release(status, { message: 'Synthetic failure' }); await run; await tick();
+      assert.deepEqual([w.session.state(), w.reasons.length, w.enders()], ['writer', 0, 0]);
+      assert.notEqual(w.status(), ENDED, 'a plain refusal must not end the viewer panel');
+      w.sandbox.location.search = '?StudyInstanceUIDs=' + STUDY;
+      await w.refresh(); await tick();
+      assert.equal(w.status(), LISTED);
+    }
   }
-  // The answers the panel uses: Refresh Jobs' /me answering 401, 403 or another account ends the document with that reason once
-  // (the panel in place, nothing more asked); the same account lists.
-  for (const [status, body, reason] of [[401, { message: 'SYN' }, 'unauthorized'], [403, { message: 'SYN' }, 'forbidden'], [200, OTHER, 'account-changed']]) {
-    const w = await jobsWorld();
-    const { run } = await heldRead(w, '/me'), asked = w.log.length;
-    w.held[0].release(status, body); await run; await tick();
-    assert.deepEqual([w.session.state(), w.reasons.join(), w.enders(), w.status(), w.log.length], ['refused', reason, 1, ENDED, asked], reason);
-  }
-  const same = await jobsWorld();
-  const { run } = await heldRead(same, '/me');
-  same.held[0].release(200, FIRST); await run; await tick();
-  assert.deepEqual([same.session.state(), same.reasons.join(), same.enders(), same.status(), same.log.at(-1).startsWith('/api/studies/' + STUDY + '/viewer-jobs?')],
-    ['writer', '', 0, LISTED, true]);
 });
 
-test('S5-U2c fix4 control: with the panel dropping those answers unread (the file before fix4), the late 401 or account is lost', async () => {
-  let text = JOBS;
-  for (const at of ['if (!live()) throw await drop();', 'if (!live()) throw await drop(value);']) {
-    assert.equal(text.split(at).length - 1, 1, at);
-    text = text.replace(at, "if (!live()) throw new Error('화면이 변경되었습니다.');");
+test('U5 Job: a current matching identity proceeds; invalid or dropped identities never globally end work', async () => {
+  for (const [body, bad] of [[FIRST, false], [{ ...FIRST, roles: ['clinician'] }, false], [OTHER, false], [null, true]]) {
+    const w = await jobsWorld(), { run } = await heldRead(w, '/me');
+    letGo(w, 'screen'); w.held[0].release(200, body, bad); await run; await tick();
+    assert.deepEqual([w.session.state(), w.reasons.length, w.enders()], ['writer', 0, 0]);
   }
-  for (const [drop, late, at, before] of [['screen', '401', '/me', ['writer', '', 0]], ['screen', '401', 'list read', ['writer', '', 0]],
-    ['refusal', '401', '/me', ['refused', 'forbidden', 1]], ['exit', 'another account', '/me', ['writer', '', 0]]]) {
-    const w = await jobsWorld(text);
-    const { run } = await heldRead(w, at);
-    letGo(w, drop); await tick();
-    w.held[0].release(...LATE[late].slice(0, 2)); await run; await tick();
-    assert.deepEqual([w.session.state(), w.reasons.join(), w.enders()], before, [drop, late, at].join(' / '));
+  const w = await jobsWorld(), { run } = await heldRead(w, '/me');
+  w.held[0].release(200, FIRST); await run; await tick();
+  assert.equal(w.status(), LISTED);
+  assert.equal(w.session.state(), 'writer');
+});
+
+test('U5INT-F01: temporary coded refusal preserves the job panel and its retry', async () => {
+  for (const code of ['AUTH_IDP_UNAVAILABLE', 'AUTH_SESSION_BUSY', 'AUTH_STORAGE_FAILURE']) {
+    for (const at of ['/me', 'list read']) {
+      const w = await jobsWorld(), { run } = await heldRead(w, at);
+      w.held[0].release(403, { code }); await run; await tick();
+      assert.match(w.status(), /연결을 확인하지 못했습니다/);
+      assert.doesNotMatch(w.status(), /권한|거절/);
+      assert.deepEqual([w.session.state(), w.enders()], ['writer', 0]);
+      await w.refresh(); await tick();
+      assert.equal(w.status(), LISTED);
+    }
   }
 });

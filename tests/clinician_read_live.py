@@ -41,7 +41,8 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 
-from invariants_live import HttpResult, LiveStack, _json_or_text, psql, purge_user_audit
+from invariants_live import AUTH_TIME_MAPPER, HttpResult, LiveStack, _json_or_text, psql, purge_user_audit
+from document_session import session_headers
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -55,6 +56,7 @@ OWNED_USERNAME = re.compile(r"kin-test-[0-9a-f]{12}-[a-z0-9_-]+")
 # that Bearer comes from a run-owned client whose only difference is this lifespan; the guard never reads azp for members.
 SHORT_BEARER_SECONDS = 120
 CLIENT_MAPPERS = (
+    AUTH_TIME_MAPPER,
     {"name": "kin-api-audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper",
      "consentRequired": False, "config": {"included.custom.audience": "kin-api", "id.token.claim": "false",
                                           "access.token.claim": "true"}},
@@ -343,26 +345,21 @@ class ClinicianReadLive(unittest.TestCase):
         reset = self.stack.kc_admin("PUT", f"/users/{quote(user_id)}/reset-password",
                                     {"type": "password", "value": password, "temporary": False})
         self.assertEqual(reset.status, 204, reset.text)
+        self.stack.set_member_rights(user_id, approvalState="PENDING")
         return user_id, username, password
 
     def grant(self, username: str, password: str, client_id: str | None = None) -> str:
-        data = urlencode({"client_id": client_id or self.stack.test_client_id, "grant_type": "password",
-                          "username": username, "password": password}).encode("ascii")
-        request = Request(self.stack.keycloak, data=data,
-                          headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
-        try:
-            with self.stack._open(request) as response:
-                return json.loads(response.read().decode("utf-8"))["access_token"]
-        except HTTPError as error:
-            self.fail(f"password grant failed for {username}: {error.code} {error.read()[:200]!r}")
+        time.sleep(1.05)  # Authenticate in a later second after a product member command.
+        return self.stack.interactive_token(username, password, client_id)
 
     def short_lived_client(self) -> str:
-        """A run-owned password-grant client identical to the run's own except for SHORT_BEARER_SECONDS."""
+        """A run-owned interactive client identical to the run's own except for SHORT_BEARER_SECONDS."""
         self.stack._admin_login()
         client_id = "kin-u1b-revoke-" + uuid.uuid4().hex[:12]
         created = self.stack.kc_admin("POST", "/clients", {
             "clientId": client_id, "name": "KIN S5-U1b revocation probe", "enabled": True, "publicClient": True,
-            "standardFlowEnabled": False, "directAccessGrantsEnabled": True, "serviceAccountsEnabled": False,
+            "standardFlowEnabled": True, "directAccessGrantsEnabled": True, "serviceAccountsEnabled": False,
+            "redirectUris": [self.stack.proxy + "/worklist/hpacs-lite/index.html"],
             "protocol": "openid-connect", "attributes": {"access.token.lifespan": str(SHORT_BEARER_SECONDS)},
         })
         self.assertEqual(created.status, 201, created.text)
@@ -379,8 +376,9 @@ class ClinicianReadLive(unittest.TestCase):
         if deleted.status not in (204, 404):
             raise RuntimeError(f"revocation probe client cleanup failed: {deleted.status}")
 
-    def bff_session(self, username: str, password: str) -> str:
+    def bff_session(self, username: str, password: str) -> tuple[str, str]:
         """The browser's own login (BffInvariantTests.bff_login): /api/auth/login -> Keycloak form -> callback."""
+        time.sleep(1.05)  # The login must be after the new-authentication boundary second.
         jar = http.cookiejar.CookieJar()
         opener = build_opener(HTTPCookieProcessor(jar), HTTPSHandler(context=self.stack.context))
         with opener.open(Request(self.stack.proxy + "/api/auth/login", headers={"Accept": "application/json"},
@@ -394,11 +392,17 @@ class ClinicianReadLive(unittest.TestCase):
             response.read()
         sid = next((cookie.value for cookie in jar if cookie.name == "kin_sid"), None)
         self.assertIsNotNone(sid, "no kin_sid after the BFF login")
-        return sid
+        # 같은 cookie jar의 최초 문서 부트스트랩만 읽고 이후에는 이 결속값을 보존한다.
+        with opener.open(self.stack.proxy + "/api/me", timeout=30) as response:
+            session = json.load(response)["sessionId"]
+        session_headers(session)
+        return sid, session
 
-    def session_call(self, sid: str, method: str, path: str, body: Any = None) -> HttpResult:
+    def session_call(self, document: tuple[str, str], method: str, path: str, body: Any = None) -> HttpResult:
         """One call on the kept session id. No cookie jar: an expiring Set-Cookie must not swap the credential."""
-        headers = {"Accept": "application/json" if path.startswith("/api/") else "*/*", "Cookie": "kin_sid=" + sid}
+        sid, session = document
+        headers = session_headers(session, {"Accept": "application/json" if path.startswith("/api/") else "*/*"})
+        headers["Cookie"] = "kin_sid=" + sid
         data = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
@@ -412,7 +416,7 @@ class ClinicianReadLive(unittest.TestCase):
             payload, text = _json_or_text(error.read())
             return HttpResult(error.code, payload, text)
 
-    def through(self, kind: str, secret: str, row: tuple) -> HttpResult:
+    def through(self, kind: str, secret: str | tuple[str, str], row: tuple) -> HttpResult:
         _name, method, path, body = row
         if kind == "session":
             return self.session_call(secret, method, path, body)
@@ -615,12 +619,7 @@ class ClinicianReadLive(unittest.TestCase):
             self.assertEqual(self.report(uid).body["keys"], [])
 
     def test_04_revocation_ends_the_kept_session_and_new_tokens_and_reports_the_kept_bearer_until_exp(self) -> None:
-        """S5-U1b-F03: the member's OWN credentials from before the revocation, on all five allow rows.
-
-        Counted as revoked: the kept BFF session (refused at once) and any token issued after (PENDING). A Bearer issued
-        before the revocation carries signed claims the guard trusts until exp; its answers before and after exp are
-        reported in the S5-U1B-REVOCATION marker and are never counted as an immediate revocation.
-        """
+        """D621: revocation refuses BFF, kept Bearer and newly authenticated Bearer on every read route."""
         with self.stack.fixture() as fixture:
             uid = fixture.uid
             key = self.add_key(uid, "S5-U1b revocation key")
@@ -638,7 +637,7 @@ class ClinicianReadLive(unittest.TestCase):
             user_id, username, password = self.create_member("crevoke")
             path = f"/admin/users/{quote(user_id)}"
             approved = self.stack.request("PATCH", path, "jmryu",
-                                          {"approvalState": "APPROVED", "institution": "hallym", "roles": ["clinician"]})
+                                          {"approvalState": "APPROVED", "enabled": True, "institution": "hallym", "roles": ["clinician"]})
             self.assertEqual(approved.status, 200, approved.text)
             sid = self.bff_session(username, password)
             self.addCleanup(self.session_call, sid, "POST", "/api/auth/logout", {})
@@ -647,7 +646,7 @@ class ClinicianReadLive(unittest.TestCase):
             self.assertLessEqual(claims["exp"] - claims["iat"], SHORT_BEARER_SECONDS,
                                  "the probe client's lifespan was not applied; the post-exp answer cannot be observed")
 
-            def observe(kind: str, secret: str) -> dict[str, HttpResult]:
+            def observe(kind: str, secret: str | tuple[str, str]) -> dict[str, HttpResult]:
                 return {row[0]: self.through(kind, secret, row) for row in rows}
 
             def summary(results: dict[str, HttpResult]) -> dict[str, list]:
@@ -672,9 +671,7 @@ class ClinicianReadLive(unittest.TestCase):
                 "realm_access_token_lifespan_seconds": realm.body.get("accessTokenLifespan") if isinstance(realm.body, dict) else None,
                 "bff_session": {"before": before["session"]},
                 "kept_bearer": {"lifespan_seconds": claims["exp"] - claims["iat"], "before_revocation": before["bearer"]},
-                "limit": ("A Bearer issued before the revocation keeps its signed groups/roles until exp. The revocation "
-                          "deletes the member's BFF sessions and makes tokens issued after it PENDING; it does not recall "
-                          "an issued Bearer. Only the first two are counted as revocation."),
+                "limit": "DB revocation immediately refuses both kept and newly issued Bearer tokens.",
             }
             try:
                 revoked = self.stack.request("PATCH", path, "jmryu", {"approvalState": "PENDING"})
@@ -709,11 +706,11 @@ class ClinicianReadLive(unittest.TestCase):
             for name, result in fresh.items():
                 with self.subTest(new_token=name):
                     # nginx answers the auth_request refusal itself (status only); the API rows carry the code
-                    expected = (403, "INSTITUTION_PENDING") if name != "authz-dicom" else (403, None)
+                    expected = (401, "AUTH_SESSION_ENDED") if name != "authz-dicom" else (401, None)
                     self.assertEqual((result.status, code(result) if name != "authz-dicom" else None), expected, result.text[:300])
             self.assertGreater(kept_seconds_left, 5, "the kept-Bearer batch ran into its exp; its before-exp answer is not observed")
             self.assertEqual(len(kept_class), 1, f"the five rows disagree on the same kept Bearer: {summary(kept)}")
-            self.assertIn(kept_class[0], ("allowed", "denied"), summary(kept))
+            self.assertEqual(kept_class, ["denied"], summary(kept))
             for name, result in expired.items():
                 with self.subTest(kept_bearer_after_exp=name):
                     self.assertEqual(result.status, 401, result.text[:300])

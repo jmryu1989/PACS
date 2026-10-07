@@ -1,5 +1,6 @@
 # coding: utf-8
 """TEST-VOLUME-GESTURE: real native toolbar/pointer input and patient-space oracle."""
+from viewer_session import end_viewer
 import math,unittest
 import numpy as np
 from playwright.sync_api import expect
@@ -50,10 +51,15 @@ class VolumeGestureE2E(VolumeCrosshairE2E):
    print('GESTURE_REOPEN_PHANTOM',pixels,flush=True)
   expect(p.locator('#findings')).to_have_value('KEEP GESTURE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1)
  def test_gesture_02_cancel_during_drag(self):
-  a,p,v=self.starting();self.activate(v);data=self.handles(v);start=data['rotation'][0];v.evaluate('()=>window.dragWrapper=gestureTool._dragCallback');self.drag(v,start,[start[0]-10,start[1]],release=False)
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-volume-crosshair')).to_have_count(0);self.assertTrue(v.evaluate('()=>gestureTool._dragCallback!==dragWrapper&&gestureTool.editData===null'))
-  v.wait_for_timeout(500) # Disposal schedules a native render; sample its completed pixels.
-  before=self.volume_state(v);errors=[];v.on('pageerror',lambda e:errors.append(str(e)));v.mouse.move(500,500,steps=8);v.mouse.up();v.wait_for_timeout(450);self.preserved_volume(before,self.volume_state(v));self.assertEqual(errors,[]);self.assertEqual(len(self.versions(a)),1)
+  a,p,v=self.starting();original=self.originals();self.activate(v);data=self.handles(v);start=data['rotation'][0];v.evaluate('()=>window.dragWrapper=gestureTool._dragCallback');self.drag(v,start,[start[0]-10,start[1]],release=False)
+  v.evaluate("""()=>{window.lateDragMove=new MouseEvent('mousemove',{clientX:500,clientY:500,buttons:1,bubbles:true});window.lateDragUp=new MouseEvent('mouseup',{clientX:500,clientY:500,bubbles:true});window.lateDragErrors=[];addEventListener('error',e=>lateDragErrors.push(e.message));window.lateCameraWrites=0;
+   for(const id of services.viewportGridService.getState().viewports.keys()){const view=services.cornerstoneViewportService.getCornerstoneViewport(id),write=view.setCamera;view.setCamera=function(...args){lateCameraWrites++;return write.apply(this,args)}}}""")
+  v=end_viewer(v);v.assert_quiet();self.assertTrue(v.evaluate('()=>gestureTool._dragCallback!==dragWrapper&&gestureTool.editData===null'))
+  # The actual window is closed: dispatch late input on its retained document,
+  # then prove that no camera work or render target survives that input.
+  writes=v.evaluate('lateCameraWrites');v.evaluate('()=>{document.dispatchEvent(lateDragMove);document.dispatchEvent(lateDragUp)}');v.wait_for_timeout(450)
+  self.assertEqual(v.evaluate('lateCameraWrites'),writes);self.assertEqual(v.evaluate('lateDragErrors'),[]);self.assertEqual(v.evaluate('()=>cornerstone.getRenderingEngines().flatMap(e=>e.getViewports()).map(v=>v.id)'),[])
+  self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1)
  def test_gesture_03_line_and_slab_patient_geometry(self):
   a,p,v=self.starting();original=self.originals();self.activate(v);data=self.handles(v);cx,cy=data['center'];before=self.volume_state(v)
   self.drag(v,[cx+45,cy],[cx+45,cy+18]);events=v.evaluate('()=>gestureEvents');self.assertTrue(events);self.assertTrue(all(e['op']==1 for e in events));delta=np.sum([e['delta'] for e in events],axis=0);after=self.volume_state(v)

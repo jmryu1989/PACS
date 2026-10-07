@@ -21,16 +21,17 @@ async function bootstrap() {
 
   const app = await NestFactory.create(AppModule, { rawBody: true });
   app.use(dictationParser());
-  // Register before Nest's body parser: malformed JSON can fail before controller
-  // middleware, and even display/evidence error responses must not be cached.
+  /**
+   * 모든 `/api/` 응답의 기본값은 `no-store`다(S7-U5 A016). 예전에는 경로 목록에 든 곳만 그랬고, 목록에 없는 GET(판독 이력·
+   * 인용·구조·감사 등)은 브라우저 캐시가 요청 없이 다시 내주었다 — Log out 뒤의 뒤로 가기나 다음 사람의 같은 주소가 서버에
+   * 묻지 않고 앞사람의 답을 읽는다. 경로를 하나씩 더하는 목록은 새 경로를 빠뜨리므로 기본값을 뒤집는다.
+   * Nest의 body parser·라우팅·인증 가드보다 먼저 등록한다: 잘못된 JSON(400)·인증 거절(401·403)·없는 경로(404)의 답도 같다.
+   * 영상 화소(/dicom-web)와 뷰어 번들(/ohif)은 이 서버의 `/api/` 밖이라 해당하지 않는다. nginx의 `location /api/`에 두지
+   * 않는 이유: 그 수준의 add_header는 서버 수준 보안 헤더의 상속을 끊는다.
+   */
   app.use((req: any, res: any, next: () => void) => {
     const path = String(req.originalUrl ?? '').split('?')[0];
-    if (/^\/api\/studies\/[^/]+\/tech-note(?:\/history)?\/?$/.test(path)) res.setHeader('Cache-Control', 'no-store');
-    if (/^\/api\/studies\/[^/]+\/report-preview\/?$/.test(path)) res.setHeader('Cache-Control', 'no-store');
-    if (/^\/api\/studies\/[^/]+\/manual-sr(?:\/[^/]+\/store)?\/?$/.test(path)) res.setHeader('Cache-Control', 'no-store');
-    if (/^\/api\/studies\/[^/]+\/(?:viewer-items(?:\/[^/]+\/revisions)?|viewer-jobs(?:\/[^/]+(?:\/revisions)?)?)\/?$/.test(path) ||
-        /^\/api\/(?:admin\/agreements(?:\/[^/]+)?|studies\/[^/]+\/(?:basis(?:\/[^/]+\/revoke)?|transfers)|transfers(?:\/[^/]+\/revoke)?)\/?$/.test(path))
-      res.setHeader('Cache-Control', 'no-store');
+    if (path === '/api' || path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
     next();
   });
   // PID 1 Node가 SIGTERM을 무시하면 Docker가 제한 시간 뒤 SIGKILL한다.

@@ -4,6 +4,7 @@ import os,unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
+from viewer_session import end_viewer
 
 class ViewerToolFocusE2E(ViewerTechNoteE2E):
  def test_tool_01_standalone_tools_image_and_edit_roundtrip(self):
@@ -28,7 +29,7 @@ class ViewerToolFocusE2E(ViewerTechNoteE2E):
   self.open_note(v);active=v.evaluate('()=>document.activeElement.id');v.keyboard.press('Control+Alt+7');self.assertEqual(v.evaluate('()=>document.activeElement.id'),active)
   v.locator('#tech-note-close').click();v.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-history"]').evaluate('(e)=>e.style.display="none"');v.locator('#kin-viewer-focus-7').click();expect(v.locator('#kin-viewer-note-status')).to_contain_text('영상 도구 연결을 확인')
   expect(field).to_have_value('KEEP INPUT')
-  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-viewer-focus-7')).to_be_disabled();expect(v.locator('#kin-viewer-layout')).not_to_be_visible();v.locator('body').evaluate('(e)=>{e.tabIndex=-1;e.focus()}');v.keyboard.press('Control+Alt+8');expect(v.locator('body')).to_be_focused();expect(field).to_have_value('')
+  ended=end_viewer(v, ['#kin-viewer-focus-7','[aria-label="Job Title"]']);self.assertEqual(ended.retained('#kin-viewer-focus-7','node => node.disabled'),[True]);self.assertEqual(ended.retained('[aria-label="Job Title"]','node => node.value'),['']);ended.dispatch_key('Digit8',ctrlKey=True,altKey=True);ended.assert_quiet()
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(ViewerToolFocusE2E(n) for n in loader.getTestCaseNames(ViewerToolFocusE2E) if n.startswith('test_tool_'))
 if __name__=='__main__':unittest.main(verbosity=2)

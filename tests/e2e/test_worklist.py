@@ -22,6 +22,7 @@ from playwright.sync_api import expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from invariants_live import LiveStack, ROOT, psql  # noqa: E402
+from document_session import document_request
 
 
 def require_local_targets(stack):
@@ -238,7 +239,7 @@ class WorklistE2E(unittest.TestCase):
                                   and r.url.endswith(f"/studies/{fixture.uid}/report/commit")) as reply:
             page.locator(button).click()
         self.assertEqual(reply.value.status, 201)
-        self.assertEqual(reply.value.json()["rs"], rs)
+        self.assertEqual(reply.value.json()["state"]["rs"], rs)
         self.assertEqual(self.state(fixture)["rs"], rs)
 
     def locked(self, page):
@@ -253,7 +254,7 @@ class WorklistE2E(unittest.TestCase):
     def test_01_bff_login_logout(self):
         """E2E-B2-01: real PKCE login, cookie flags, browser logout revokes session."""
         page = self.login()
-        response = page.context.request.get(self.stack.api + "/me")
+        response = document_request(page, "GET", self.stack.api + "/me")
         self.assertEqual(response.status, 200)
         self.assertEqual(response.json()["actor"], self.stack.actor("doctor"))
         sid = next(c for c in page.context.cookies() if c["name"] == "kin_sid")

@@ -8,6 +8,7 @@ import unittest
 from urllib.parse import unquote
 
 from playwright.sync_api import sync_playwright
+from module_session_harness import CORE, activate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +49,12 @@ def extract_function(source, name):
     raise AssertionError(f"unterminated function {name}")
 
 
+# S7-U5: the sliced page code passes its writes through the page's work-context gate and registers its end with the
+# page's session-end coordination. The shipped gate is loaded as it is, following a session that is at work for the whole
+# case; onSessionEnd() is main.html's two-line registry (the end coordination itself is tests/auth_logout_dom_test.py's).
+WORK_CONTEXT = (CORE
+                + "\nconst work=KinWorkContext;work.follow({onLifecycle(listener){listener({state:'active',session:'SYN-SESSION'})}});"
+                + "const sessionEndHooks=[];function onSessionEnd(end){sessionEndHooks.push(end)}\n")
 MAIN_HARNESS = r"""
 <button id="body-parts-load"></button><button id="body-parts-refresh"></button>
 <button id="body-parts-cancel"></button><small id="body-parts-status"></small>
@@ -70,7 +77,7 @@ let fval={name:'manual criterion'},activeFilterName=null,renderCalls=0,managerRe
 const bodyRule=(op,value)=>({version:1,join:'and',rules:[{field:'bodyPart',op,...(value===undefined?{}:{value})}]});
 let userFilters=[{id:7,name:'Chest saved',mode:'Radiology',days:-1,quick:'',cols:{$compound:bodyRule('eq','chest')},sortKey:null,sortDir:0,isDefault:false}];
 const KinViewerOpening={key:()=> '["hospital","reader"]'};
-const KinAuth={session:()=>({sub:'reader'})};
+const KinAuth={session:()=>({sub:'reader'}),authFailure(){}};
 const savedFilterManager={refreshCounts:()=>managerRefreshes++};
 const withinDays=()=>true;
 function testCol(study,column,values){const value=values?.[column.k]??'';if(value==='')return true;
@@ -80,7 +87,7 @@ const renderActiveFilter=()=>{};
 const focusFilterChip=()=>{};
 function render(){renderCalls++;renderBodyParts();renderChips()}
 </script>
-"""
+""".replace("<script>\nconst $ = value", "<script>\n" + WORK_CONTEXT + "const $ = value", 1)
 
 
 MANAGER_HARNESS = r"""
@@ -217,6 +224,8 @@ render();
         self.responses["1.2.3"] = (200, dicom_series("1.2.3", "PELVIS"))
         page.locator("#body-parts-load").click()
         page.wait_for_function("!__body.model.snapshot().busy && __body.model.snapshot().verified === 3")
+        # The chip is redrawn by the page when the model reports the change (after the model's own state is set).
+        page.wait_for_function("document.querySelector('#chips').innerText === 'Chest saved (1)'")
         self.assertEqual(page.locator("#chips").inner_text(), "Chest saved (1)")
         self.assertNotIn("Partial", page.locator("#chips button").get_attribute("aria-label"))
 
@@ -245,6 +254,7 @@ render();
         page.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8", body=MANAGER_HARNESS)
                    if route.request.url == "https://example.test/manager" else route.abort())
         page.goto("https://example.test/manager")
+        activate(page)
         page.add_style_tag(content=self.manager_css)
         page.add_script_tag(content=self.compound_source)
         page.add_script_tag(content=self.manager_source)

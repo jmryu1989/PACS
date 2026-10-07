@@ -20,8 +20,9 @@
     "POST studies/:uid/report/commit", "POST studies/:uid/hold", "GET colleagues", "GET unassigned"
   ],
   "denied_code": "CLINICIAN_ROUTE_DENIED",
-  "public_routes": ["GET health", "GET auth/login", "GET auth/register", "GET auth/callback"],
+  "public_routes": ["GET health", "GET auth/login", "GET auth/register", "GET auth/callback", "POST auth/login", "POST auth/register", "POST auth/entry"],
   "request_method_enum": {"0": "GET", "1": "POST", "2": "PUT", "3": "DELETE", "4": "PATCH", "5": "ALL", "6": "OPTIONS", "7": "HEAD", "8": "SEARCH"},
+  "tokens_basis": "Pure memberState/clinicianOnly argument vectors, including malformed inputs, not provider-to-DB rights mapping. At C1 the guard supplies institution and roles from DB rights; an unregistered identity has neither, even if a multi-institution command was requested.",
   "tokens": [
     {"id": "clinician-approved", "groups": ["hallym"], "roles": ["default-roles-kin", "offline_access", "clinician"], "state": "APPROVED", "clinicianOnly": true},
     {"id": "clinician-approved-duplicate-role", "groups": ["hallym"], "roles": ["clinician", "clinician"], "state": "APPROVED", "clinicianOnly": true},
@@ -142,7 +143,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 133, "public": 4, "session": 2, "business": 20, "denied": 107},
+    "counts": {"routes": 137, "public": 7, "session": 2, "business": 20, "denied": 108},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -160,7 +161,7 @@
         "DELETE studies/:uid/draft/force", "POST studies/:uid/hold", "POST studies/:uid/release", "POST studies/:uid/release/force",
         "PUT studies/:uid/report", "POST studies/:uid/report/commit", "GET studies/:uid/report/versions",
         "GET studies/:uid/report/citations", "GET studies/:uid/report/versions/:version/citations",
-        "GET studies/:uid/report/structure", "GET studies/:uid/report-preview", "POST studies/:uid/dictation",
+        "GET studies/:uid/report/structure", "GET studies/:uid/draft", "GET studies/:uid/report-preview", "POST studies/:uid/dictation",
         "GET studies/:uid/clinical-context"
       ],
       "viewer": [
@@ -235,7 +236,11 @@
       "GET studies/:uid/critical-results": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "per-study records beside the reading workflow (sender and recipient views); the clinician's inbox is GET critical-results"},
       "POST critical-results/:id/ack": {"decision": "business", "unit": "S7-U1a", "commit": "e9bb028", "basis": "explicit acknowledgement by the named recipient only, of a record whose pinned source it can read now (C2/R2); reads never acknowledge; per-request receipt and one audit row; declared in allowed_additions"},
       "POST critical-results/:id/cancel": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "cancel by the sender (radiologist) with a reason; not a recipient action"},
-      "POST critical-results/:id/supersede": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "supersede by the sender onto the current head for the same recipient; not a recipient action"}
+      "POST critical-results/:id/supersede": {"decision": "denied", "unit": "S7-U1a", "commit": "e9bb028", "basis": "supersede by the sender onto the current head for the same recipient; not a recipient action"},
+      "GET studies/:uid/draft": {"decision": "denied", "unit": "S7-U5", "commit": "aafc2d9", "basis": "the authoritative read of the caller's own report draft and its stored revision (the draft boundary of the reading workflow); a clinician reads final reports only"},
+      "POST auth/entry": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "consumes the one-time entry proof of the login that just finished, for the cookie's own session; it answers the session id a document binds to, so it runs before any role or member check"},
+      "POST auth/login": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "starts a login from a document that names the session it replaces; that session is ended with its audit row first, and a binding that is not the cookie's session is refused"},
+      "POST auth/register": {"decision": "public", "unit": "S7-U5", "commit": "aafc2d9", "basis": "starts a registration from a document that names the session it replaces, under the same binding rule as POST auth/login"}
     }
   },
   "controller_decorators": {
@@ -268,7 +273,7 @@
       "Object and Array only as <Name>.<member>, <Name><type arguments> or new <Name>(...), and never after a declaring keyword; process only as process.<process_members>; Reflect only as Reflect.<reflect_members>; prototype only as <prototype_owners>.prototype; getPrototypeOf only as Object.getPrototypeOf(...) compared by === or !==; constructor only as a declaration whose body holds no return; no class heading in a *.controller.ts file has extends, the heading read to the '{' of its body past type parameters and heritage clauses as class_heading lists (S5-U1c-F08)",
       "a '/' outside a comment or literal only where regex_or_division reads it as a regex literal or a division from the token before it; a '/' whose reading turns on grammar the lexer does not track refuses the file, and a regex literal spells no name the name checks read (S5-U1c-F07)"
     ],
-    "packages": ["@nestjs/common", "@nestjs/common/constants", "@nestjs/core", "@prisma/client", "crypto", "express", "jose", "node:crypto", "node:http", "rxjs"],
+    "packages": ["@nestjs/common", "@nestjs/common/constants", "@nestjs/core", "@prisma/client", "crypto", "express", "jose", "net", "node:crypto", "node:http", "rxjs"],
     "loaded_packages": ["express", "node:crypto"],
     "sealed_words": ["Function", "Proxy", "__proto__", "defineProperties", "defineProperty", "eval", "global", "globalThis", "module", "setPrototypeOf"],
     "sealed_strings": ["Reflect", "constructor", "createDecorator", "decorate", "defineMetadata", "getPrototypeOf", "process", "prototype", "require"],
@@ -465,8 +470,9 @@
   "role_composition": {
     "unit": "S5-U1c",
     "rule": "RISK-S5-U1c-MIXED-DOWNGRADE: only clinicianOnly() narrows, and only where listed. A token with any legacy role never meets the clinician gate or a clinician projection; a clinician-only token never passes a denied row. A new narrowing site is a new decision and must be listed here. Since D73 (AGENTS.md section 1-B) a new site is listed by file and call count in clinician_only_call_sites and in behaviour_checked_sites with the test cases that run it; no statement text of it is pinned. The four older statement pins in test_13 are S9-U0f carry-over.",
-    "clinician_only_call_sites": {"auth.guard.ts": 1, "clinical-context.controller.ts": 1, "pacs.service.ts": 1, "report-preview.controller.ts": 1, "viewer.controller.ts": 1},
+    "clinician_only_call_sites": {"auth.guard.ts": 1, "auth.service.ts": 1, "clinical-context.controller.ts": 1, "pacs.service.ts": 1, "report-preview.controller.ts": 1, "viewer.controller.ts": 1},
     "behaviour_checked_sites": {
+      "auth.service.ts": {"unit": "S7-U5", "test": "tests/auth_session_service_test.cjs", "cases": ["U5S-ENTRY-01", "U5S-ENTRY-02"]},
       "clinical-context.controller.ts": {"unit": "S7-U4a", "test": "tests/clinical_context_service_test.cjs", "cases": ["CC-S02"]}
     },
     "live_test": "test_04_mixed_and_legacy_roles_keep_their_existing_paths",
@@ -496,18 +502,18 @@
       "doctor": "radiologist-only member of hallym (LiveStack)",
       "tech": "technician-only member of hallym (LiveStack)",
       "gateway": "valid gateway client-credentials identity of kin-center (LiveStack.service_token)",
-      "cinvalid": "clinician-only member with two institution groups, created by the case"
+      "cinvalid": "run-created identity whose two-institution rights command is refused; no DB institution or roles, so it remains pending"
     },
     "rows": {
       "GET me": {
         "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
         "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
-        "wrong_tenant": {"as": "cinvalid", "expect": "denied", "status": 403, "code": "INSTITUTION_INVALID", "basis": "a session row names no study; its tenant axis is the membership check (exactly one institution group)"}
+        "wrong_tenant": {"as": "cinvalid", "expect": "denied", "status": 403, "code": "INSTITUTION_PENDING", "basis": "a session row names no study; the refused multi-institution command leaves this identity without DB rights, so membership remains pending"}
       },
       "POST auth/logout": {
         "positive": {"as": "clinician", "expect": "allowed", "status": 204, "code": null},
         "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
-        "wrong_tenant": {"as": "cinvalid", "expect": "allowed", "status": 204, "code": null, "basis": "by design, not a leak: the pending/invalid logout exception (auth.guard.ts isLogout) ends only the caller's own session and answers no data"}
+        "wrong_tenant": {"as": "cinvalid", "expect": "allowed", "status": 204, "code": null, "basis": "by design, not a leak: pending identities may log out without gaining rights or reading data; this Bearer call has no BFF session to end"}
       },
       "GET authz/dicom": {
         "via": "nginx auth_request of GET /dicom-web/studies/{uid}/metadata, its only caller; nginx answers the refusal with a status only",

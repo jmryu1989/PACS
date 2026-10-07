@@ -457,6 +457,11 @@ class MigrationPins(unittest.TestCase):
         # S7-U1a's 20260928120000_critical_result (CriticalResult, CriticalResultEvent, CriticalResultReceipt): 32 files.
         # S7-U3a's 20260928130000_reader_assignment_scope (ReaderAssignment keyed by study and institution): 33 files.
         # S7-AUDIT-STORE's 20260930120000_audit_log_append_only (the AuditLog guard trigger): 34 files.
+        # S7-U5's 20261004120000_draft_revision_session_entry (draft boundary and entry proof columns): 35 files.
+        # S7-U5 session end's 20261005120000_idp_session_end (IdpSessionEnd, AuthSession.idpSid): 36 files.
+        # S7-U5 member isolation's 20261005130000_member_isolation (MemberIsolation): 37 files.
+        # S7-U5's 20261006120000_member_isolation_call (MemberIsolation's call in flight, three columns): 38 files.
+        # S7-U5 D600's 20261007120000_provider_change (ProviderChange; the in-flight columns dropped): 39 files.
         self.assertIn("'api/prisma/migrations/" + MIGRATION_NAME + "/migration.sql',", fixture)
         self.assertIn("accession='SYNTHETIC-ACC-1'", fixture)
         self.assertIn("'ReportDraft', 'Order', 'UserFilter',", fixture)
@@ -464,7 +469,7 @@ class MigrationPins(unittest.TestCase):
         # the restore fixture applies every migration directory, in order: its list compared as data
         # (S7-U1a-B-R-001-F03: not the text of ops_product_transfer_test.py's count assertion)
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 34)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 41)
         later =[MIGRATION_NAME, "20260924130000_gateway_receipt", "20260924140000_gateway_retry_request"]
         self.assertEqual(names[names.index(MIGRATION_NAME):names.index(MIGRATION_NAME) + 3], later)
 

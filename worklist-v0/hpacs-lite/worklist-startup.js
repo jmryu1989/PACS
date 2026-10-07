@@ -32,15 +32,19 @@
     const initial=once({enabled:state.selectFirst,current,select,rows,allowed:active});
     for(const event of ['pointerdown','keydown','input'])document.addEventListener(event,()=>initial.touch(),{capture:true,once:true});
     checkbox.onchange=()=>{
-      if(ended||!bound||owner()!==bound){checkbox.disabled=true;return;}
+      if(work.state()!=='active'||ended||!bound||owner()!==bound){checkbox.disabled=true;return;}
       state={version:1,selectFirst:checkbox.checked};
       try{root.localStorage.setItem(key,JSON.stringify(state));status.textContent='설정을 저장했습니다. 다음 로그인부터 적용합니다.';}
       catch(_){status.textContent='시작 설정을 저장하지 못했습니다. 다음 로그인에는 적용되지 않습니다.';}
     };
     host.querySelector('#image-opening-reset').addEventListener('click',()=>{if(!ended&&bound&&owner()===bound){checkbox.checked=false;checkbox.onchange();}});
+    const work = root.KinWorkContext;
+    work.onInvalidate(event => {
+      if (event.reason === 'lifecycle' && !['active', 'preparing'].includes(event.state)) end();
+    });
     function end(){ended=true;checkbox.disabled=true;initial.touch();}
-    let channel;try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
-    root.addEventListener('storage',e=>{if(e.key==='kin-session-ended')end();});root.addEventListener('pagehide',()=>{end();channel?.close();});
+
+    root.addEventListener('pagehide',()=>{end();});
     return {afterList:()=>initial.afterList()};
   }
   const api={normalize,once,mount};

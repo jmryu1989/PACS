@@ -46,6 +46,18 @@ class Pure(unittest.TestCase):
         catalog['constraints']=[dict(name='synthetic') for _ in range(257)]
         with self.assertRaises(ValueError):transfer.catalog_contract(catalog)
 
+    def test_member_rights_restore_preserves_boundary_and_authority(self):
+        body, _, _, _ = fixture(); expected = body['product']
+        for table, field, value in [('MemberRights', 'approved', False), ('MemberRights', 'suspended', True),
+                ('MemberRights', 'institution', 'SYNTHETIC-tele'), ('MemberRights', 'roles', []),
+                ('MemberRights', 'version', 1), ('MemberRights', 'newAuthAfter', None),
+                ('MemberRightsImport', 'id', 'wrong-import'),
+                ('StudyState', 'preDocSub', None), ('StudyState', 'preReviewerSub', 'wrong-reviewer')]:
+            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog', 'rows', 'sequences')}
+            actual['rows'][table][0][field] = value
+            with self.subTest(table=table, field=field), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned', 'kin', expected)
+
     def test_current_git_migrations_are_covered(self):
         self.assertEqual(len(transfer.migration_sources()),len(transfer.MIGRATIONS))
 
@@ -245,8 +257,16 @@ class Pure(unittest.TestCase):
         # S7-U3a keyed ReaderAssignment by (study, institution) (D-S7-09 a): 33 files, still 46 tables, and a second
         # ReaderAssignment row, the tele institution's closed one, on the same study.
         # S7-AUDIT-STORE made AuditLog append-only (a trigger, no table): 34 files, still 46 tables.
-        self.assertEqual(len(transfer.MIGRATIONS), 34)
-        self.assertEqual(len(transfer.TABLES), 46)
+        # S7-U5 added the draft boundary and entry proof columns (no table): 35 files, still 46 tables.
+        # S7-U5 session end added IdpSessionEnd and AuthSession.idpSid: 36 files, 47 tables, and two end marks (one the
+        # provider has not confirmed yet, one confirmed).
+        # S7-U5 member isolation added MemberIsolation: 37 files, 48 tables, and two isolation facts (one with provider
+        # work still owed, one done).
+        # S7-U5 then added the provider call in flight to MemberIsolation (three columns): 38 files, still 48 tables and the
+        # same rows. S7-U5 D600 replaced it by the provider change records (ProviderChange, the three columns dropped): 39 files,
+        # 49 tables, and two records (an unknown disable of the owed member, a settled end of a provider session).
+        self.assertEqual(len(transfer.MIGRATIONS), 41)
+        self.assertEqual(len(transfer.TABLES), 51)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
         self.assertEqual([(r['oid'], r['accession'], r['studyUid']) for r in rows['Order']],
@@ -256,7 +276,22 @@ class Pure(unittest.TestCase):
         [receipt] = rows['GatewayReceipt']
         self.assertEqual([(r['studyUid'], r['epoch'], r['seq']) for r in rows['GatewayRetryRequest']],
                          [(receipt['studyUid'], receipt['epoch'], receipt['seq'])])
-        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4 + 4 + 7 + 6 + 1)
+        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4 + 4 + 7 + 6 + 1
+                         + 1    # S7-U5: the emptied draft row (tombstone) beside the two present drafts
+                         + 2    # S7-U5 session end: the pending and the confirmed end mark
+                         + 2    # S7-U5 member isolation: the owed and the done isolation fact
+                         + 2    # S7-U5 member rights/import
+                         + 2)   # S7-U5 D600: the unknown and the settled provider change record
+        self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),
+                         [('SYNTHETIC-member-isolation-done', False, 0), ('SYNTHETIC-member-isolation-owed', True, 2)])
+        self.assertEqual(sorted(rows['MemberIsolation'][0]), ['attempts', 'decidedAt', 'nextAttemptAt', 'providerDoneAt', 'sub'])
+        self.assertEqual(sorted((r['kind'], r['target'], r['state'], r['settledAt'] is None) for r in rows['ProviderChange']),
+                         [('disable', 'SYNTHETIC-member-isolation-owed', 'unknown', True),
+                          ('end_session', 'SYNTHETIC-idp-session-confirmed', 'done', False)])
+        self.assertEqual(transfer.expected_sequences()['ProviderChange_id_seq'], dict(last_value=2, is_called=True))
+        self.assertEqual(sorted((r['idpSid'], r['cause'], r['confirmedAt'] is None, r['attempts']) for r in rows['IdpSessionEnd']),
+                         [('SYNTHETIC-idp-session-confirmed', 'reauthentication', False, 1),
+                          ('SYNTHETIC-idp-session-pending', 'logout', True, 3)])
         [question] = rows['StudyQuestion']
         receipts = sorted(rows['StudyQuestionEntry'], key=lambda r: r['seq'])
         self.assertEqual((question['studyUid'], question['state'], question['revision'], question['entryCount']), (UID, 'Closed', 3, 3))
@@ -337,6 +372,11 @@ class Pure(unittest.TestCase):
         self.assertEqual(json.loads(workspaces[0]['value'])['landscape']['main'],720)
         self.assertIsNone(workspaces[1]['value']);self.assertEqual(workspaces[1]['revision'],3)
         self.assertEqual({row['uid'] for table in ('StudyState', 'Report', 'ReportVersion', 'ReportDraft') for row in rows[table]}, {UID})
+        # S7-U5: the stored draft boundary travels as data - two present drafts at their revisions, an emptied row
+        # (tombstone) that keeps its revision, and the study's draft epoch.
+        self.assertEqual({row['author']: (row['revision'], row['present'], row['findings'] != '') for row in rows['ReportDraft']},
+            {'SYNTHETIC-reader1': (3, True, True), 'SYNTHETIC-reader2': (2, True, True), 'SYNTHETIC-reader3': (5, False, False)})
+        self.assertEqual(rows['StudyState'][0]['draftEpoch'], '00000000-0000-4000-8000-0000000000d1')
 
     def test_07_actual_observation_compares_every_section(self):
         body, _, _, _ = fixture(); product = body['product']
@@ -433,9 +473,9 @@ class Pure(unittest.TestCase):
     def test_expanded_catalog_receipt_roundtrips_above_old_cap(self):
         body, _, _, _ = fixture()
         body['product']['catalog']['columns'] = [dict(column_name='synthetic-'+str(i),
-            column_default='X'*450) for i in range(293)]
+            column_default='X'*800) for i in range(293)]
         raw = transfer.canonical(body)
-        self.assertGreater(len(raw), 128*1024)
+        self.assertGreater(len(raw), 256*1024)
         self.assertLessEqual(len(raw), transfer.RECEIPT_LIMIT)
         self.assertEqual(check(body), body)
 

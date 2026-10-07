@@ -1,9 +1,11 @@
+from viewer_session import hold_landing
 """Actual BFF/browser column roaming; explicit apply and stale response protection."""
 import os,unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_worklist_columns import WorklistColumnsE2E
 from workspace_roaming_support import cleanup_workspace
+from document_session import document_request
 
 class ColumnsRoamingE2E(WorklistColumnsE2E):
     @classmethod
@@ -16,7 +18,7 @@ class ColumnsRoamingE2E(WorklistColumnsE2E):
         expect(page.locator('#wc-server-status')).to_contain_text(message)
         expect(button).to_be_enabled()
     def remote(self,page):
-        r=page.request.get(self.stack.api+'/worklist-columns');self.assertEqual(r.status,200);return r.json()
+        r=document_request(page, "GET", self.stack.api+'/worklist-columns');self.assertEqual(r.status,200);return r.json()
     def test_roam_columns_01_two_browsers_explicit_apply_and_clear(self):
         f=self.fixture();self.seed_report(f);page=self.login();self.select(page,f)
         page.locator('#findings').fill('Column roaming unsaved report')
@@ -70,12 +72,13 @@ class ColumnsRoamingE2E(WorklistColumnsE2E):
     def test_roam_columns_04_transient_identity_check_keeps_draft_and_recovers(self):
         page=self.login();self.open_columns(page);self.action(page,'inspect','저장된 열 설정이 없습니다')
         self.column(page,'desc').locator('input[type=checkbox]').uncheck()
-        page.route('**/api/me',lambda r:r.fulfill(status=503,body='temporary failure'))
+        page.route('**/api/worklist-columns',lambda r:r.fulfill(status=503,body='temporary failure'))
         page.locator('#wc-server-save').click()
-        expect(page.locator('#wc-server-status')).to_contain_text('계정 상태를 일시적으로 확인하지 못했습니다')
+        expect(page.locator('#wc-server-status')).to_contain_text('계정 설정 응답을 확인할 수 없습니다')
         expect(page.locator('#column-manager')).to_be_visible();expect(page.locator('#columnsettings')).to_be_enabled()
         expect(self.column(page,'desc').locator('input[type=checkbox]')).not_to_be_checked()
-        page.unroute('**/api/me');self.action(page,'inspect','저장된 열 설정이 있습니다')
+        page.unroute('**/api/worklist-columns');self.action(page,'inspect','저장된 열 설정이 없습니다')
+        self.action(page,'save','편집값을 계정에 저장했습니다')
         self.assertEqual(self.remote(page)['columns']['modes']['Radiology']['hidden'],['desc'])
         page.route('**/api/worklist-columns',lambda r:r.fulfill(status=400,body='invalid',content_type='text/plain'))
         page.locator('#wc-server-save').click();expect(page.locator('#wc-server-status')).to_contain_text('형식을 거절했습니다')
@@ -101,8 +104,9 @@ class ColumnsRoamingE2E(WorklistColumnsE2E):
         page.once('dialog',lambda d:d.accept());page.locator('#wc-close').click();route,response=held.pop();route.fulfill(response=response)
         self.open_columns(page);expect(self.column(page,'desc').locator('input[type=checkbox]')).to_be_checked()
         page.locator('#wc-server-load').click();page.wait_for_timeout(500);self.assertEqual(len(held),1)
-        page.route('**/api/me',lambda r:r.fulfill(json=dict(kind='member',institution='different',sub='different')))
-        route,response=held.pop();route.fulfill(response=response)
+        landing=hold_landing(page)
+        route,response=held.pop();route.fulfill(status=409,json={'code':'AUTH_SESSION_MISMATCH'},headers={'X-KIN-Auth-Code':'AUTH_SESSION_MISMATCH'})
+        page.wait_for_function("KinWorkContext.state() !== 'active'");self.assertTrue(landing)
         expect(page.locator('#column-manager')).not_to_be_visible();expect(page.locator('#columnsettings')).to_be_disabled()
         expect(page.locator('#heads [data-key="desc"]')).to_have_count(1)
 
