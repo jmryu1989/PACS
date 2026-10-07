@@ -176,6 +176,7 @@ async function keycloak() {
           // until the case releases it (kc.hung); 'lost' ends the session and cuts the answer. `how` is what a case's
           // beforeEnd hook said: 'drop' / '500' before the effect, or nothing (carry it out now).
           if (how === 'drop' || mode === 'drop') return cut();
+          if (typeof how === 'number') return send(how);
           if (how === '500' || mode === 'error500') return send(500, { error: 'unknown_error' });
           if (mode === 'hang') return void kc.hung.push(() => carry('ok'));
           if (mode === 'error') return send(503, { error: 'unavailable' });
@@ -186,7 +187,7 @@ async function keycloak() {
           const reply = () => present ? send(204) : send(404, { error: 'Sesssion not found' });
           // afterEnd (when a case sets it): the effect is done; the answer waits for what it returns ('drop' cuts it).
           if (kc.afterEnd)
-            return void Promise.resolve(kc.afterEnd(idpSid)).then(after => after === 'drop' ? cut()
+            return void Promise.resolve(kc.afterEnd(idpSid)).then(after => typeof after === 'number' ? send(after) : after === 'drop' ? cut()
               : after === '500' ? send(500, { error: 'unknown_error' }) : after === '503' ? send(503, { error: 'unavailable' }) : reply());
           return reply();
         };
@@ -200,7 +201,10 @@ async function keycloak() {
       // The member administration the admin isolation reaches (read a member, disable or enable it, list its provider sessions;
       // a whole-user logout is answered but must never be asked). `sessions` of an account are its live provider sessions
       // (GET users/{id}/sessions).
-      const member = /^\/admin\/realms\/kin\/users\/([^/]+)(\/groups|\/role-mappings\/realm|\/logout|\/sessions)?$/.exec(path);
+      if (path === '/admin/realms/kin/groups') return send(200, [A, B, Z].map(name => ({ id: 'syn-group-' + name, name })));
+      const role = /^\/admin\/realms\/kin\/roles\/([^/]+)$/.exec(path);
+      if (role) return send(200, { id: 'syn-role-' + role[1], name: role[1] });
+      const member = /^\/admin\/realms\/kin\/users\/([^/]+)(\/groups(?:\/[^/]+)?|\/role-mappings\/realm|\/logout|\/sessions)?$/.exec(path);
       if (member) {
         if (req.headers.authorization !== 'Bearer ' + SECRETS.serviceToken) return send(403, { error: 'forbidden' });
         const id = decodeURIComponent(member[1]);
@@ -217,7 +221,7 @@ async function keycloak() {
           const account = kc.members[id] ?? (kc.members[id] = { username: id, email: id + '@synthetic.test', enabled: true, groups: [A], roles: ['radiologist'] });
           // onAdmin resolving to 'drop' cuts the answer of a request already carried out, '500' / '503' answers it so.
           const done = (status, value) => kc.onAdmin
-            ? void Promise.resolve(kc.onAdmin(req.method + ' ' + kind, id)).then(how => how === 'drop' ? req.socket.destroy()
+            ? void Promise.resolve(kc.onAdmin(req.method + ' ' + kind, id)).then(how => typeof how === 'number' ? send(how) : how === 'drop' ? req.socket.destroy()
               : how === '500' ? send(500, { error: 'unknown_error' }) : how === '503' ? send(503, { error: 'unavailable' })
                 : send(status, value)) : send(status, value);
           if (!member[2] && req.method === 'GET')
@@ -225,6 +229,18 @@ async function keycloak() {
           if (!member[2] && req.method === 'PUT') { Object.assign(account, sent); return done(204); }
           if (member[2] === '/groups' && req.method === 'GET') return done(200, account.groups.map(name => ({ id: 'syn-group-' + name, name, path: '/' + name })));
           if (member[2] === '/role-mappings/realm' && req.method === 'GET') return done(200, account.roles.map(name => ({ name })));
+          if (member[2]?.startsWith('/groups/') && ['PUT', 'DELETE'].includes(req.method)) {
+            const name = decodeURIComponent(member[2].slice('/groups/syn-group-'.length));
+            account.groups = account.groups.filter(g => g !== name);
+            if (req.method === 'PUT') account.groups.push(name);
+            return done(204);
+          }
+          if (member[2] === '/role-mappings/realm' && ['POST', 'DELETE'].includes(req.method)) {
+            const names = sent.map(r => r.name);
+            account.roles = account.roles.filter(r => !names.includes(r));
+            if (req.method === 'POST') account.roles.push(...names);
+            return done(204);
+          }
           if (member[2] === '/sessions' && req.method === 'GET')
             return done(200, (account.sessions ?? []).filter(sid => !kc.ended.includes(sid)).map(sid => ({ id: sid, userId: id })));
           if (member[2] === '/logout' && req.method === 'POST') {
@@ -235,7 +251,7 @@ async function keycloak() {
           return send(404, { error: 'not_found' });
         };
         if (kc.beforeAdmin)
-          return void Promise.resolve(kc.beforeAdmin(req.method + ' ' + kind, id)).then(how => how === 'drop' ? req.socket.destroy()
+          return void Promise.resolve(kc.beforeAdmin(req.method + ' ' + kind, id)).then(how => typeof how === 'number' ? send(how) : how === 'drop' ? req.socket.destroy()
             : how === '500' ? send(500, { error: 'unknown_error' }) : carry());
         return carry();
       }
@@ -286,6 +302,8 @@ globalThis.fetch = (input, init) => {
   const url = String(input);
   const end = /\/admin\/realms\/kin\/sessions\/([^/]+)$/.exec(url);
   const change = !end && init?.method === 'PUT' && /\/admin\/realms\/kin\/users\/[^/?]+$/.test(url) ? changeKind(init.body) : null;
+  // Configure the HTTP transport's header wait in U3; distinct from the application's response budget.
+  if ((end || change) && kc.transportTimeoutMs) init = { ...init, signal: AbortSignal.timeout(kc.transportTimeoutMs) };
   if (end ? kc.logoutMode === 'refused' : kc.adminRefuse[change] > 0) {
     if (end) kc.endRequests.push(decodeURIComponent(end[1]));
     else { kc.adminRefuse[change]--; kc.adminCalls.push('PUT ' + change); }
@@ -324,7 +342,567 @@ const reply = {
 
 test.after(async () => {
   if (prepared) await (await prepared).$disconnect();
-  if (kc.server) await new Promise(resolve => kc.server.close(resolve));
+  if (kc.server) {
+    // A failed behavioural assertion can leave a deliberately held HTTP response. Teardown must still report the failure.
+    kc.server.closeAllConnections();
+    await new Promise(resolve => kc.server.close(resolve));
+  }
+});
+
+// Round 10: D600/D604 -> revoked authority, supersession, unknown effects and bounded activation risks
+// -> R10-01..R10-11 and U1..U9 below. Assertions concern accepted requests, surviving sessions/provider effects,
+// durable facts and audit outcomes. Store hooks only schedule statements; no product source is inspected.
+const R10_CALLER = { roles: ['admin'], actor: 'syn-r10-admin@synthetic.test', sub: 'syn-r10-admin' };
+function r10Admin(w, inst = w.I1) {
+  const { AdminService } = require('/app/dist/admin.service');
+  return new AdminService(inst.prisma, new KeycloakService(), null, inst.service);
+}
+function r10Member(sub, sessions = [], groups = [A], roles = ['radiologist']) {
+  kc.members[sub] = { username: sub, email: sub + '@synthetic.test', enabled: true, groups, roles, sessions };
+  return sub;
+}
+const r10Answer = p => p.then(user => ({ status: 200, user }), error => ({ status: error.getStatus?.() ?? 500, body: error.getResponse?.() ?? {} }));
+const r10Patch = (admin, sub, body) => r10Answer(admin.patchUser(sub, body, R10_CALLER));
+const r10Fact = (w, sub) => w.base.memberIsolation.findUnique({ where: { sub } });
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function r10Survives(w, sub, idpSid, entered, label) {
+  assert.ok(await w.base.authSession.findUnique({ where: { sid: entered.newSid } }), label + ': product row survives');
+  assert.equal(kc.ended.includes(idpSid), false, label + ': provider SSO survives');
+  await w.base.authSession.update({ where: { sid: entered.newSid }, data: { atExpiresAt: lapsed() } });
+  const renewed = await w.issue(label + '-refresh', { sub, idp: idpSid });
+  kc.auto = () => kc.ended.includes(idpSid) ? reply.reject() : reply.tokens(renewed);
+  assert.equal((await w.call(w.I2, 'get', { sid: entered.newSid })).status, 200, label + ': refresh survives');
+  kc.auto = null;
+}
+async function r10Refuses(w, sub, token, sid, label) {
+  const calls = kc.adminCalls.length, ends = kc.endRequests.length, tokens = kc.tokens;
+  assert.equal((await w.call(w.I2, 'get', { sid })).status, 401, label + ': cookie');
+  assert.equal((await w.call(w.I2, 'get', { bearer: token.access })).status, 401, label + ': Bearer');
+  await assert.rejects(w.I2.service.authenticateSession(sid, {}), e => e.getStatus?.() === 401, label + ': direct authentication');
+  await w.base.authSession.update({ where: { sid }, data: { atExpiresAt: lapsed() } });
+  assert.equal((await w.call(w.I2, 'get', { sid })).status, 401, label + ': expired refresh');
+  assert.equal(kc.tokens, tokens, label + ': no provider exchange for the blocked refresh');
+  const callback = await login(w, w.I2, token);
+  assert.equal(callback.done.newSid, null, label + ': callback');
+  assert.equal(kc.adminCalls.length, calls, label + ': no administration on any authentication path');
+  assert.equal(kc.endRequests.length, ends, label + ': no DELETE on callback');
+}
+
+test('R10-01 initial Suspend keeps its first generation across product-row discovery, same/different sid', async t => {
+  const w = await world(t), first = r10Admin(w), other = r10Admin(w, w.I2);
+  for (const reuse of [true, false]) {
+    const m = r10Member('syn-r1001-' + reuse), P = 'syn-r1001-idp-' + reuse;
+    kc.members[m].sessions = [P];
+    const old = await w.session(await w.issue(m + '-old', { sub: m, idp: P }));
+    const held = w.pause({ inst: 'I1', model: '$transaction', phase: 'after' }, e => e.result?.sub === m);
+    const suspended = r10Patch(first, m, { enabled: false });
+    await held.arrived();
+    assert.ok(await r10Fact(w, m), 'fact committed before product discovery');
+    assert.equal((await r10Patch(other, m, { enabled: true })).status, 200);
+    const Q = reuse ? P : P + '-new';
+    w.tick(1000); kc.ended = kc.ended.filter(s => s !== Q); kc.members[m].sessions = [Q];
+    const fresh = (await login(w, w.I2, await w.issue(m + '-new', { sub: m, idp: Q, authTime: Date.now() / 1000 }))).done;
+    assert.ok(fresh.newSid);
+    const asks = kc.endRequests.length;
+    held.release();
+    const answer = await suspended;
+    assert.deepEqual([answer.status, answer.body?.code], [409, 'USER_ISOLATED']);
+    await quiet(w);
+    assert.equal(kc.endRequests.length, asks, 'old initial command sends no late DELETE');
+    assert.equal(await w.version(old), null);
+    await r10Survives(w, m, Q, fresh, m);
+  }
+  await w.finish('R10-01');
+});
+
+test('R10-02 Activate cannot claim a Suspend created after its first read', async t => {
+  const w = await world(t), admin = r10Admin(w), other = r10Admin(w, w.I2), m = r10Member('syn-r1002');
+  assert.equal((await r10Patch(admin, m, { enabled: false })).status, 200);
+  const held = w.pause({ inst: 'I1', model: '$transaction', phase: 'after' }, e => e.result?.sub === m);
+  const run = r10Patch(admin, m, { enabled: true }); await held.arrived();
+  assert.equal((await r10Patch(other, m, { enabled: false })).status, 200);
+  const current = await r10Fact(w, m), calls = kc.adminCalls.length;
+  held.release(); const answer = await run;
+  assert.deepEqual([answer.status, answer.body?.code, await r10Fact(w, m)], [409, 'USER_ISOLATED', current]);
+  assert.equal(kc.adminCalls.slice(calls).includes('PUT enable'), false);
+  await w.finish('R10-02');
+});
+
+test('R10-03 approve/cancel carry their own isolation through reactivation; a newer Suspend wins', async t => {
+  const w = await world(t), admin = r10Admin(w), other = r10Admin(w, w.I2);
+  for (const cancel of [false, true]) {
+    const m = r10Member('syn-r1003-' + cancel);
+    let changed = false;
+    w.observe({ inst: 'I1', model: 'memberCredential', method: 'upsert', phase: 'after' }, e => { if (e.args.where.sub === m) changed = true; });
+    const held = w.pause({ inst: 'I1', model: '$transaction', phase: 'after' }, () => changed);
+    const run = r10Patch(admin, m, cancel ? { approvalState: 'PENDING' } : { institution: B, roles: ['clinician'] });
+    await held.arrived();
+    assert.equal((await r10Patch(other, m, { enabled: false })).status, 200);
+    const current = await r10Fact(w, m), n = kc.adminCalls.length;
+    held.release(); const out = await run;
+    assert.deepEqual([out.status, out.body?.code, await r10Fact(w, m)], [409, 'USER_ISOLATED', current]);
+    assert.equal(kc.adminCalls.slice(n).includes('PUT enable'), false);
+    assert.equal(await w.base.auditLog.count({ where: { target: m, action: 'admin.user.patch.failed' } }), 1);
+  }
+  await w.finish('R10-03');
+});
+
+test('R10-04 no-fact Activate blocks locally before enable, including effect followed by 503/reset/no response', async t => {
+  const w = await world(t), admin = r10Admin(w);
+  for (const outcome of ['503', 'drop', 'held']) {
+    const m = r10Member('syn-r1004-' + outcome), token = await w.issue(m, { sub: m }), sid = await w.session(token);
+    kc.members[m].enabled = false;
+    const held = holdAdmin('PUT enable', 'after', m), run = activation(admin, m, R10_CALLER);
+    await held.arrived();
+    assert.equal(kc.members[m].enabled, true, 'external effect already applied');
+    assert.ok(await r10Fact(w, m), 'local fact precedes enable');
+    if (outcome !== 'held') held.release(outcome);
+    const out = await run.result;
+    assert.deepEqual([out.status, out.body?.code, run.took < 15000], [409, 'ACTIVATION_UNCONFIRMED', true]);
+    await r10Refuses(w, m, token, sid, outcome);
+    const restarted = w.instance('R04-' + outcome);
+    await assert.rejects(restarted.service.authenticateSession(sid, {}), e => e.getStatus?.() === 401);
+    assert.equal(await w.base.providerChange.count({ where: { sub: m, kind: 'enable', state: 'unknown' } }), 1);
+    held.release(outcome === 'held' ? 'drop' : undefined);
+    await quiet(w);
+  }
+  await w.finish('R10-04');
+});
+
+test('R10-05 a committed DB fact alone refuses cookie/Bearer/authenticateSession/refresh/covered callback on another instance', async t => {
+  const w = await world(t), admin = r10Admin(w), m = r10Member('syn-r1005');
+  const token = await w.issue(m, { sub: m }), sid = await w.session(token);
+  w.fault('I1', 'tx.delete', new Error('synthetic row deletion failure'));
+  assert.equal((await r10Patch(admin, m, { enabled: false })).status, 409);
+  assert.ok(await w.base.authSession.findUnique({ where: { sid } }), 'product row survived the failed deletion');
+  await w.base.idpSessionEnd.create({ data: { idpSid: token.idp, cause: 'isolation', decidedAt: new Date(), confirmedAt: new Date(), nextAttemptAt: new Date() } });
+  const start = performance.now();
+  await r10Refuses(w, m, token, sid, 'committed fact');
+  assert.ok(performance.now() - start < 2000, 'covering mark adds no five-second provider wait');
+  assert.equal((await w.call(w.I2, 'logout', { sid })).status, 204, 'ending remains allowed');
+  await w.finish('R10-05');
+});
+
+test('R10-06 old plain/probe callbacks refuse without reopening an ended authentication or deleting its successor', async t => {
+  const w = await world(t, { now: START + 400 });
+  for (const probe of [false, true]) for (const same of [false, true]) {
+    const m = 'syn-r1006-' + probe + same, n = same ? m : m + '-next', P = m + '-idp';
+    const old = await w.issue(m + '-old', { sub: m, idp: P, authTime: Math.floor(Date.now() / 1000) });
+    const sid = await w.session(old);
+    const begin = await w.call(w.I1, probe ? 'switch' : 'login', probe ? { body: SWITCH } : {});
+    const hold = w.gate('I1', 'tx.open'), run = answerFlow(w, w.I1, begin, old); await hold.arrived();
+    assert.equal((await w.call(w.I2, 'logout', { sid })).status, 204); await w.told();
+    const mark = await w.mark(P); w.tick(1000); kc.ended = kc.ended.filter(s => s !== P);
+    const entered = (await login(w, w.I2, await w.issue(n + '-new', { sub: n, idp: P, authTime: Math.floor(Date.now() / 1000) }))).done;
+    assert.ok(entered.newSid); const sent = kc.endRequests.length;
+    hold.release(); const out = await run; await quiet(w);
+    assert.equal(out.newSid, null, 'old authentication only refuses');
+    assert.equal(kc.endRequests.length, sent, 'no new DELETE');
+    assert.deepEqual(await w.mark(P), mark, 'confirmed mark is not reopened');
+    await r10Survives(w, n, P, entered, n);
+  }
+  await w.finish('R10-06');
+});
+
+test('R10-07 late first/second/retry session lists are discarded when the same sid has a later admitted authentication', async t => {
+  const w = await world(t, { now: START + 400 }), admin = r10Admin(w);
+  for (const stage of ['first', 'second', 'retry']) {
+    const m = r10Member('syn-r1007-' + stage), n = m + '-next', P = m + '-idp';
+    const old = await w.session(await w.issue(m, { sub: m, idp: P, authTime: Math.floor(Date.now() / 1000) - 60 }));
+    const end = holdEnd(P, 'before');
+    await w.call(w.I2, 'logout', { sid: old }); await end.arrived();
+    // The listing snapshots M's P while its first DELETE is still pending.
+    kc.members[m].sessions = [P]; let listing, run, cycle;
+    if (stage === 'retry') {
+      kc.adminFail = { sessions: 2 };
+      await r10Patch(admin, m, { enabled: false }); kc.adminFail = {};
+      listing = holdAdmin('GET sessions', 'after', m);
+      cycle = w.instance('R07'); cycle.service.onModuleInit();
+    } else if (stage === 'second') {
+      // First list is empty; add P only once disable is answered.
+      kc.members[m].sessions = [];
+      const disabled = holdAdmin('PUT disable', 'after', m);
+      run = r10Patch(admin, m, { enabled: false }); await disabled.arrived();
+      kc.members[m].sessions = [P]; listing = holdAdmin('GET sessions', 'after', m); disabled.release();
+    } else {
+      listing = holdAdmin('GET sessions', 'after', m); run = r10Patch(admin, m, { enabled: false });
+    }
+    await listing.arrived(); end.release(); await w.told();
+    await w.until('original end confirmed', async () => !!(await w.mark(P))?.confirmedAt);
+    w.tick(1000); kc.ended = kc.ended.filter(s => s !== P); kc.members[m].sessions = [];
+    const next = (await login(w, w.I2, await w.issue(n, { sub: n, idp: P, authTime: Math.floor(Date.now() / 1000) }))).done;
+    assert.ok(next.newSid); const asks = kc.endRequests.length, lists = kc.adminCalls.filter(c => c === 'GET sessions').length;
+    listing.release(); if (run) assert.equal((await run).status, 200);
+    if (cycle) { await w.until('retry finished', async () => !!(await r10Fact(w, m))?.providerDoneAt); cycle.service.onModuleDestroy(); }
+    await quiet(w);
+    assert.equal(kc.endRequests.length, asks, stage + ': stale list never sends a new DELETE');
+    assert.ok(kc.adminCalls.filter(c => c === 'GET sessions').length > lists, stage + ': member is re-listed');
+    await r10Survives(w, n, P, next, n);
+  }
+  await w.finish('R10-07');
+});
+
+test('R10-08 one absolute activation deadline covers actual DB contention and success audit; never clears after the answer', async t => {
+  const w = await world(t), admin = r10Admin(w);
+  for (const table of ['MemberIsolation', 'AuditLog']) {
+    const m = r10Member('syn-r1008-' + table);
+    assert.equal((await r10Patch(admin, m, { enabled: false })).status, 200);
+    const enabled = holdAdmin('PUT enable', 'after', m), run = activation(admin, m, R10_CALLER);
+    await enabled.arrived();
+    await delay(12500);
+    const locked = deferred(), release = deferred();
+    const lock = w.base.$transaction(async tx => {
+      await tx.$executeRawUnsafe('LOCK TABLE "' + table + '" IN ACCESS EXCLUSIVE MODE');
+      locked.resolve(); await release.promise;
+    }, { maxWait: 1000, timeout: 10000 });
+    await locked.promise; enabled.release();
+    try {
+      const out = await run.result;
+      assert.deepEqual([out.status, out.body?.code], [409, 'ACTIVATION_UNCONFIRMED']);
+      assert.ok(run.took <= 15000, table + ': complete response <= 15 seconds');
+    } finally { release.resolve(); await lock; }
+    await delay(300);
+    assert.ok(await r10Fact(w, m), table + ': no deferred clear');
+    assert.equal(await w.base.auditLog.count({ where: { target: m, action: 'admin.user.activate' } }), 0, 'no success audit after rollback');
+  }
+  await w.finish('R10-08');
+});
+
+test('R10-09 same-second Bearer exception belongs only to the token actually admitted', async t => {
+  const w = await world(t, { now: START + 400 }), m = 'syn-r1009', P = m + '-idp', authTime = Math.floor(Date.now() / 1000);
+  const old = await w.issue(m + '-old', { sub: m, idp: P, authTime }), sid = await w.session(old);
+  const start = await w.call(w.I1, 'switch', { sid, body: UNFINISHED });
+  const next = await w.issue(m + '-new', { sub: m, idp: P, authTime });
+  const entered = await answerFlow(w, w.I2, start, next);
+  assert.ok(entered.newSid, 'new authentication admitted in the very same second');
+  assert.equal((await w.call(w.I2, 'get', { bearer: next.access })).status, 200);
+  assert.equal((await w.call(w.I1, 'get', { bearer: old.access })).status, 401, 'same sub/sid/auth_time cannot resurrect old JWT');
+  await w.finish('R10-09');
+});
+
+test('R10-10 approval credential effects remain blocking until complete; old-institution tokens and callbacks stay revoked', async t => {
+  const w = await world(t), admin = r10Admin(w), other = r10Admin(w, w.I2);
+  for (const stage of ['group', 'role-remove', 'role-add'])
+  for (const [phase, lost] of [['before', false], ['before', true], ['after', false], ['after', true], ['planning', false]]) {
+    const m = r10Member('syn-r1010-' + stage + phase + lost);
+    const token = await w.issue(m + '-old', { sub: m, groups: [A], idp: m + '-unlisted' });
+    const begin = await w.call(w.I2, 'login');
+    let held, run;
+    if (phase === 'planning') {
+      const disabled = holdAdmin('PUT disable', 'after', m);
+      run = r10Patch(admin, m, { institution: B, roles: ['clinician'] }); await disabled.arrived();
+      held = holdAdmin(stage === 'group' ? 'GET groups' : 'GET role-mappings/realm', 'before', m); disabled.release();
+    } else {
+      held = holdAdmin(stage === 'group' ? 'PUT groups/syn-group-' + B
+        : (stage === 'role-remove' ? 'DELETE' : 'POST') + ' role-mappings/realm', phase, m);
+      run = r10Patch(admin, m, { institution: B, roles: ['clinician'] });
+    }
+    await held.arrived();
+    const act = await r10Patch(other, m, { enabled: true });
+    assert.ok([400, 409].includes(act.status), 'pending credentials must refuse Activate, including an intermediate INVALID role set');
+    if (act.status === 409) assert.equal(act.body?.code, 'ACTIVATION_UNCONFIRMED');
+    assert.ok(await r10Fact(w, m));
+    const middle = await w.issue(m + '-middle', { sub: m, groups: [...kc.members[m].groups], roles: [...kc.members[m].roles] });
+    assert.equal((await login(w, w.I2, middle)).done.newSid, null, 'no intermediate-credential session');
+    assert.equal(kc.adminCalls.includes('PUT enable'), false, 'no enable while credential stage pending');
+    held.release(lost ? 'drop' : undefined);
+    const answer = await run;
+    if (lost) {
+      assert.deepEqual([answer.status, answer.body?.code], [409, 'USER_ISOLATED']);
+      assert.ok(await r10Fact(w, m));
+      assert.equal(await w.base.providerChange.count({ where: { sub: m, kind: 'credentials', state: 'unknown' } }), 1);
+    } else {
+      assert.equal(answer.status, 200);
+      assert.equal(await r10Fact(w, m), null);
+      assert.equal((await w.call(w.I2, 'get', { bearer: token.access })).status, 401, 'old A rights revoked after A -> B');
+      assert.equal((await answerFlow(w, w.I2, begin, token)).newSid, null, 'old callback carrying A rights revoked');
+      const current = await w.issue(m + '-current', { sub: m, groups: [B], roles: ['clinician'] });
+      const entered = (await login(w, w.I2, current)).done;
+      assert.ok(entered.newSid, 'B credentials admitted without an administration check');
+      assert.equal((await w.call(w.I2, 'me', { sid: entered.newSid })).status, 200);
+    }
+    kc.adminCalls = [];
+  }
+  await w.finish('R10-10');
+});
+
+test('R10-11 end-record commits and completion/clear share the member gate on real PostgreSQL', async t => {
+  const w = await world(t), admin = r10Admin(w);
+  for (const finisher of [false, true]) {
+    const m = r10Member('syn-r1011-' + finisher), P = m + '-idp';
+    assert.equal((await r10Patch(admin, m, { enabled: false })).status, 200);
+    // A surviving row represents an already-started logout concurrent with administrative completion.
+    const sid = await w.session(await w.issue(m, { sub: m, idp: P }));
+    const pending = w.pause({ inst: 'I2', model: 'providerChange', method: 'create', phase: 'before' }, e => e.args.data.sub === m);
+    kc.logoutMode = 'drop';
+    const end = w.call(w.I2, 'logout', { sid }); await pending.arrived();
+    let completed = false;
+    const run = r10Patch(admin, m, { enabled: !finisher }).finally(() => { completed = true; });
+    if (process.env.KIN_R10_REAL_PG === '1') {
+      // Wait for a real database wait or the competing HTTP answer, not an assumed scheduling delay.
+      await w.until('completion waits for the end transaction', async () => completed ||
+        (await w.base.$queryRawUnsafe("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND locktype = 'advisory') AS waiting"))[0].waiting);
+    } else await delay(100);
+    assert.equal(completed, false, 'a completion cannot cross an uncommitted known-member end record');
+    pending.release(); assert.equal((await end).status, 204);
+    const out = await run;
+    assert.equal(out.status, 409, 'unknown committed first: neither completion nor clear succeeds');
+    const fact = await r10Fact(w, m); assert.ok(fact);
+    if (finisher) assert.equal(fact.providerDoneAt, null, 'finisher cannot record completion over unknown');
+    assert.equal(await w.base.providerChange.count({ where: { sub: m, state: 'unknown' } }) > 0, true);
+  }
+  for (const finisher of [false, true]) {
+    const m = r10Member('syn-r1011-last-gap-' + finisher), P = m + '-idp';
+    assert.equal((await r10Patch(admin, m, { enabled: false })).status, 200);
+    // A durable end answer whose confirmation was interrupted; the sid retry still owes a request.
+    await w.base.idpSessionEnd.create({ data: { idpSid: P, cause: 'logout', decidedAt: new Date(), nextAttemptAt: new Date() } });
+    await w.base.providerChange.create({ data: { sub: m, kind: 'end_session', target: P, generation: 0, state: 'done', createdAt: new Date(), settledAt: new Date() } });
+    const gap = w.pause({ inst: 'I1', model: 'memberIsolation', method: finisher ? 'update' : 'delete', phase: 'before' },
+      e => e.args.where.sub === m && (!finisher || e.args.data.providerDoneAt instanceof Date));
+    const run = r10Patch(admin, m, { enabled: !finisher }); await gap.arrived();
+    kc.logoutMode = 'drop';
+    const retry = w.instance('R11-gap-' + finisher); retry.service.onModuleInit();
+    if (process.env.KIN_R10_REAL_PG === '1') {
+      await w.until('retry waits in the final unknown-read/write gap', async () =>
+        await w.base.providerChange.count({ where: { sub: m, state: 'unknown' } }) > 0 ||
+        (await w.base.$queryRawUnsafe("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND locktype = 'advisory') AS waiting"))[0].waiting);
+    } else await delay(100);
+    assert.equal(await w.base.providerChange.count({ where: { sub: m, state: 'unknown' } }), 0,
+      'new end intent cannot commit between the final unknown read and completion/clear');
+    gap.release();
+    assert.equal((await run).status, 200, 'completion ordered first may finish');
+    await w.until('the ordered-later end is durably recorded', async () =>
+      await w.base.providerChange.count({ where: { sub: m, state: 'unknown' } }) > 0);
+    retry.service.onModuleDestroy();
+  }
+  await w.finish('R10-11');
+});
+
+test('U1 HTTP-OUTCOMES: PUT/DELETE non-204 2xx, 404, final 401, other 4xx, 501 and uncertain 5xx', async t => {
+  const w = await world(t), admin = r10Admin(w);
+  for (const kind of ['enable', 'end_session']) for (const status of [200, 202, 204, 404, 401, 403, 409, 501, 502, 504]) {
+    const m = r10Member('syn-u1-' + kind + status), P = m + '-idp';
+    if (kind === 'enable') {
+      kc.onAdmin = name => name === 'PUT enable' ? status : undefined;
+      const out = await r10Patch(admin, m, { enabled: true });
+      assert.equal(out.status, status < 300 ? 200 : 409, kind + ' ' + status);
+    } else {
+      kc.afterEnd = () => status;
+      const sid = await w.session(await w.issue(m, { sub: m, idp: P }));
+      assert.equal((await w.call(w.I1, 'logout', { sid })).status, 204); await w.told();
+    }
+    const state = status < 300 || (status === 404 && kind === 'end_session') ? 'done' : status < 500 || status === 501 ? 'void' : 'unknown';
+    await w.until('HTTP outcome persisted', async () => (await w.base.providerChange.findFirst({ where: { sub: m, kind }, orderBy: { id: 'desc' } }))?.outcome != null);
+    const changes = await w.base.providerChange.findMany({ where: { sub: m, kind } });
+    assert.ok(changes.length > 0); assert.ok(changes.every(c => c.state === state), kind + ' ' + status + ': own response classification');
+    if (kind === 'end_session') assert.equal(!!(await w.mark(P))?.confirmedAt, state === 'done');
+    else assert.equal(!!await r10Fact(w, m), state !== 'done', 'failure never clears the fact');
+    kc.onAdmin = null; kc.afterEnd = null;
+  }
+  await w.finish('U1');
+});
+
+test('U2 401-THEN-CHANGE-503: the second mutation, not service-token acquisition, answers 503', async t => {
+  const w = await world(t), admin = r10Admin(w);
+  for (const kind of ['enable', 'end_session']) {
+    const m = r10Member('syn-u2-' + kind), P = m + '-idp';
+    if (kind === 'enable') {
+      kc.adminStale = { enable: 1 }; kc.onAdmin = name => name === 'PUT enable' ? '503' : undefined;
+      assert.equal((await r10Patch(admin, m, { enabled: true })).status, 409);
+      assert.equal(kc.adminCalls.filter(c => c === 'PUT enable').length, 2, 'second PUT actually sent');
+    } else {
+      kc.serviceMode = 'stale'; kc.afterEnd = () => '503';
+      const sid = await w.session(await w.issue(m, { sub: m, idp: P }));
+      await w.call(w.I2, 'logout', { sid }); await w.told();
+      assert.equal((await w.mark(P)).confirmedAt, null);
+    }
+    await w.until('second change 503 persisted', async () => (await w.base.providerChange.findFirst({ where: { sub: m, kind } }))?.outcome === 'http_503');
+    assert.equal(await w.base.providerChange.count({ where: { sub: m, kind, state: 'unknown' } }), 1);
+    kc.onAdmin = null; kc.afterEnd = null;
+  }
+  await w.finish('U2');
+});
+
+test('U3 HEADERS-TIMEOUT: provider effect with no headers reaches transport timeout and stays unknown', async t => {
+  const w = await world(t), admin = r10Admin(w);
+  for (const kind of ['enable', 'end_session']) {
+    const m = r10Member('syn-u3-' + kind), P = m + '-idp';
+    const held = kind === 'enable' ? holdAdmin('PUT enable', 'after', m) : holdEnd(P, 'after');
+    kc.transportTimeoutMs = 250;
+    let run;
+    if (kind === 'enable') run = r10Patch(admin, m, { enabled: true });
+    else run = w.call(w.I1, 'logout', { sid: await w.session(await w.issue(m, { sub: m, idp: P })) });
+    await held.arrived();
+    assert.equal(kind === 'enable' ? kc.members[m].enabled : kc.ended.includes(P), true, 'effect precedes missing headers');
+    await run;
+    await w.until('transport failure persisted', async () => (await w.base.providerChange.findFirst({ where: { sub: m, kind } }))?.outcome != null);
+    assert.equal((await w.base.providerChange.findFirst({ where: { sub: m, kind } }))?.outcome, 'transport');
+    held.release(); kc.transportTimeoutMs = 0; await quiet(w);
+    assert.equal(await w.base.providerChange.count({ where: { sub: m, kind, state: 'unknown' } }), 1, 'late inaccessible response cannot settle the call');
+    if (kind === 'enable') assert.ok(await r10Fact(w, m));
+    else assert.equal((await w.mark(P)).confirmedAt, null);
+  }
+  await w.finish('U3');
+});
+
+test('U4 CRASH-CUTS: all change kinds preserve recorded uncertainty across store/send/settle cuts and second-instance recovery', async t => {
+  const w = await world(t), admin = r10Admin(w);
+  for (const kind of ['disable', 'enable', 'end_session']) {
+    for (const cut of ['before-record', 'after-record-before-commit', 'after-commit-before-send', 'before-effect', 'after-effect', 'settle-fails-three', 'after-settle']) {
+      const m = r10Member('syn-u4-' + kind + '-' + cut), P = m + '-idp';
+      let armed = true, committedChange = false, failures = 0;
+      w.observe({ inst: 'I1', model: 'providerChange', method: 'create', phase: cut === 'after-record-before-commit' ? 'after' : 'before' }, e => {
+        if (!armed || e.args.data.sub !== m || e.args.data.kind !== kind) return;
+        if (cut === 'before-record' || cut === 'after-record-before-commit') { armed = false; throw new Error('synthetic process cut'); }
+      });
+      w.observe({ inst: 'I1', model: 'providerChange', method: 'create', phase: 'after' }, e => {
+        if (e.args.data.sub === m && e.args.data.kind === kind) committedChange = true;
+      });
+      w.observe({ inst: 'I1', model: '$transaction', phase: 'after' }, () => {
+        if (armed && committedChange && cut === 'after-commit-before-send') { armed = false; throw new Error('synthetic process lost after commit'); }
+      });
+      w.observe({ inst: 'I1', model: 'providerChange', method: 'updateMany', phase: cut === 'after-settle' ? 'after' : 'before' }, async e => {
+        if (!armed || !['settle-fails-three', 'after-settle'].includes(cut)) return;
+        const record = await w.base.providerChange.findUnique({ where: { id: e.args.where.id } });
+        if (record?.sub !== m || record.kind !== kind) return;
+        if (++failures <= (cut === 'after-settle' ? 1 : 3)) throw new Error('synthetic settlement storage loss');
+      });
+      let effect;
+      if (cut === 'before-effect' || cut === 'after-effect') effect = kind === 'end_session'
+        ? holdEnd(P, cut === 'before-effect' ? 'before' : 'after') : holdAdmin('PUT ' + kind, cut === 'before-effect' ? 'before' : 'after', m);
+      const sent = kc.endRequests.length + kc.adminCalls.filter(c => c.startsWith('PUT ')).length;
+      let run;
+      if (kind === 'end_session') run = w.call(w.I1, 'logout', { sid: await w.session(await w.issue(m, { sub: m, idp: P })) });
+      else run = r10Patch(admin, m, { enabled: kind === 'enable' });
+      if (effect) { await effect.arrived(); effect.release('drop'); }
+      await run; await w.told();
+      const records = await w.base.providerChange.findMany({ where: { sub: m, kind } });
+      if (cut === 'before-record' || cut === 'after-record-before-commit') {
+        assert.equal(records.length, 0, kind + '/' + cut + ': rolled back');
+        assert.equal(kc.endRequests.length + kc.adminCalls.filter(c => c.startsWith('PUT ')).length, sent, 'nothing sent before committed intent');
+      } else {
+        assert.equal(records.length, 1);
+        if (cut === 'after-settle') assert.equal(records[0].state, 'done', 'a committed answer survives sender loss');
+        else {
+          assert.equal(records[0].state, 'unknown', kind + '/' + cut + ': unknown survives');
+          const restarted = w.instance('U4-' + m);
+          // Recovery is a new instance over the same facts, never a guessed terminal state.
+          const token = await w.issue(m + '-probe', { sub: m, idp: P });
+          assert.equal((await w.call(restarted, 'get', { bearer: token.access })).status, 401);
+          if (kind === 'end_session') assert.equal((await w.mark(P)).confirmedAt, null);
+          else assert.ok(await r10Fact(w, m));
+        }
+      }
+      if (cut === 'settle-fails-three') assert.equal(failures, 3, 'all three settlement attempts actually failed');
+      armed = false;
+    }
+  }
+  await w.finish('U4');
+});
+
+test('U5 SID-RETRY-STALE: confirmation and admission after retry CAS forbid a stale retry send', async t => {
+  const w = await world(t, { now: START + 400 }), m = 'syn-u5', P = m + '-idp';
+  const pending = holdEnd(P, 'before');
+  await w.call(w.I1, 'logout', { sid: await w.session(await w.issue(m, { sub: m, idp: P })) }); await pending.arrived();
+  const retry = w.instance('U5retry');
+  const held = w.pause({ inst: 'U5retry', model: 'idpSessionEnd', method: 'updateMany', scope: 'root', phase: 'after' }, e => typeof e.args.data.attempts === 'number');
+  retry.service.onModuleInit(); await held.arrived();
+  pending.release(); await w.told(); await w.until('confirmed', async () => !!(await w.mark(P))?.confirmedAt);
+  w.tick(1000); kc.ended = [];
+  const entered = (await login(w, w.I2, await w.issue(m + '-new', { sub: m, idp: P, authTime: Date.now() / 1000 }))).done;
+  assert.ok(entered.newSid); const calls = kc.endRequests.length;
+  held.release(); await quiet(w); retry.service.onModuleDestroy();
+  assert.equal(kc.endRequests.length, calls); await r10Survives(w, m, P, entered, m);
+  await w.finish('U5');
+});
+
+test('U6 ABA-ENABLE-CLEAR: reused attempts on a recreated isolation never authorise old enable or clear', async t => {
+  const w = await world(t), admin = r10Admin(w), other = r10Admin(w, w.I2);
+  for (const edge of ['enable', 'clear']) {
+    const m = r10Member('syn-u6-' + edge); await r10Patch(admin, m, { enabled: false });
+    let ready = false, held;
+    if (edge === 'enable') {
+      w.observe({ inst: 'I1', model: 'providerChange', method: 'findFirst', phase: 'after' }, e => {
+        if (e.args.where.sub === m && e.args.where.state === 'unknown' && !e.args.where.kind) ready = true;
+      });
+      held = w.pause({ inst: 'I1', model: '$transaction', phase: 'after' }, () => ready);
+    } else {
+      let enabled = false, taken = false;
+      const previous = kc.onAdmin;
+      const arrived = deferred(), release = deferred();
+      kc.onAdmin = (name, sub) => {
+        if (sub === m && name === 'PUT enable') enabled = true;
+        if (sub === m && name === 'GET read' && enabled && !taken) { taken = true; arrived.resolve(); return release.promise; }
+        return previous?.(name, sub);
+      };
+      held = { arrived: () => within(arrived.promise, 'enabled re-read'), release: () => release.resolve() };
+    }
+    const run = r10Patch(admin, m, { enabled: true }); await held.arrived();
+    const old = await r10Fact(w, m);
+    // Another activation clears the old fact; another suspension creates the next fact with a reused attempt number.
+    assert.equal((await r10Patch(other, m, { enabled: true })).status, 200);
+    assert.equal((await r10Patch(other, m, { enabled: false })).status, 200);
+    const current = await r10Fact(w, m);
+    // Aligning only the attempt counter makes the ABA explicit; epoch is assigned solely by PostgreSQL's sequence.
+    await w.base.memberIsolation.update({ where: { sub: m }, data: { attempts: old.attempts } });
+    assert.notEqual(current.epoch, old.epoch);
+    const calls = kc.adminCalls.length; held.release(); const out = await run;
+    assert.deepEqual([out.status, out.body?.code], [409, 'USER_ISOLATED']);
+    assert.equal((await r10Fact(w, m)).epoch, current.epoch);
+    assert.equal(kc.adminCalls.slice(calls).includes('PUT enable'), false);
+    kc.onAdmin = null;
+  }
+  await w.finish('U6');
+});
+
+test('U7 APPROVAL-ENABLE-LOST: approve/cancel keep USER_ISOLATED, failure audit and entry blocking when enable reply is lost', async t => {
+  const w = await world(t), admin = r10Admin(w);
+  for (const cancel of [false, true]) {
+    const m = r10Member('syn-u7-' + cancel);
+    kc.onAdmin = name => name === 'PUT enable' ? 'drop' : undefined;
+    const out = await r10Patch(admin, m, cancel ? { approvalState: 'PENDING' } : { institution: B, roles: ['clinician'] });
+    assert.deepEqual([out.status, out.body?.code], [409, 'USER_ISOLATED']);
+    assert.ok(await r10Fact(w, m));
+    assert.equal(await w.base.auditLog.count({ where: { target: m, action: 'admin.user.patch.failed' } }), 1);
+    const token = await w.issue(m, { sub: m, groups: cancel ? [] : [B], roles: cancel ? [] : ['clinician'] });
+    assert.equal((await login(w, w.I2, token)).done.newSid, null);
+    assert.equal((await w.call(w.I2, 'get', { bearer: token.access })).status, 401);
+    kc.onAdmin = null;
+  }
+  await w.finish('U7');
+});
+
+test('U8 ROW-END-LAST-GAP: conditional row end rechecks ownership after its last outer check', async t => {
+  const w = await world(t), admin = r10Admin(w), other = r10Admin(w, w.I2), m = r10Member('syn-u8'), P = m + '-idp';
+  const old = await w.session(await w.issue(m, { sub: m, idp: P }));
+  let rowsRead = false;
+  w.observe({ inst: 'I1', model: 'authSession', method: 'findMany', scope: 'root', phase: 'after' }, e => {
+    if (e.args.where?.sub === m && e.result.length) rowsRead = true;
+  });
+  const held = w.pause({ inst: 'I1', model: '$transaction', phase: 'before' }, () => rowsRead);
+  const run = r10Patch(admin, m, { enabled: false }); await held.arrived();
+  assert.equal((await r10Patch(other, m, { enabled: true })).status, 200);
+  w.tick(1000); kc.ended = [];
+  const entered = (await login(w, w.I2, await w.issue(m + '-new', { sub: m, idp: P, authTime: Date.now() / 1000 }))).done;
+  assert.ok(entered.newSid); const sent = kc.endRequests.length;
+  held.release(); assert.equal((await run).status, 409); await quiet(w);
+  assert.equal(await w.version(old), null); assert.equal(kc.endRequests.length, sent);
+  await r10Survives(w, m, P, entered, m); await w.finish('U8');
+});
+
+test('U9 UNKNOWN-GC-13H: old terminal records are collected; old unknown records and blocking survive', async t => {
+  const w = await world(t), m = r10Member('syn-u9'), P = m + '-idp', at = new Date(Date.now() - 14 * HOUR);
+  // A persisted call from a process no longer present: explicit storage fixture for restart/GC, not a provider answer.
+  await w.base.memberIsolation.create({ data: { sub: m, decidedAt: at, nextAttemptAt: new Date(Date.now() + 2 * HOUR), providerDoneAt: at } });
+  const unknown = await w.base.providerChange.create({ data: { sub: m, kind: 'enable', target: m, generation: 1, state: 'unknown', createdAt: at } });
+  for (const state of ['done', 'void']) await w.base.providerChange.create({ data: { sub: m, kind: 'disable', target: m, generation: 1, state, createdAt: at, settledAt: at } });
+  const sweeper = w.instance('U9gc'); sweeper.service.onModuleInit(); w.tick(HOUR);
+  await w.until('terminal rows collected', async () => await w.base.providerChange.count({ where: { sub: m, state: { in: ['done', 'void'] } } }) === 0);
+  sweeper.service.onModuleDestroy();
+  assert.equal((await w.base.providerChange.findUnique({ where: { id: unknown.id } }))?.state, 'unknown');
+  assert.ok(await r10Fact(w, m));
+  assert.equal((await login(w, w.I2, await w.issue(m, { sub: m, idp: P }))).done.newSid, null);
+  await w.finish('U9');
 });
 
 // U5S-REQ-06/09 + amendments 1/2 -> U5S-RISK-SESSION -> U5S-ENTRY-01/02.
@@ -472,6 +1050,7 @@ async function world(t, { now = START } = {}) {
   await base.$executeRawUnsafe('TRUNCATE "AuthSession"');
   await base.$executeRawUnsafe('TRUNCATE "IdpSessionEnd"');
   await base.$executeRawUnsafe('TRUNCATE "MemberIsolation"');
+  await base.$executeRawUnsafe('TRUNCATE "MemberCredential"');
   await base.$executeRawUnsafe('TRUNCATE "ProviderChange" RESTART IDENTITY');
   await base.$transaction([base.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
     base.$executeRawUnsafe(`TRUNCATE "AuditLog" RESTART IDENTITY`)]);
@@ -480,10 +1059,23 @@ async function world(t, { now = START } = {}) {
   Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
     certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
     members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null,
-    beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {} });
+    beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {}, transportTimeoutMs: 0 });
   idp.started = 0;
 
-  const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [] };
+const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [], observations: [] };
+  // Store-operation boundaries, independent of service method names or implementation text. Hooks may observe or hold
+  // an actual Prisma statement before/after it executes; PG cases still use real transactions and real connections.
+  w.observe = (match, work) => w.observations.push({ match, work });
+  const observe = async event => {
+    for (const hook of w.observations)
+      if (Object.entries(hook.match).every(([k, v]) => event[k] === v)) await hook.work(event);
+  };
+  w.pause = (match, predicate = () => true) => {
+    const arrived = deferred(), release = deferred(); let taken = false;
+    w.observe(match, async event => { if (!taken && predicate(event)) { taken = true; arrived.resolve(event); await release.promise; } });
+    t.after(() => release.resolve());
+    return { arrived: () => within(arrived.promise, 'store boundary'), release: () => release.resolve() };
+  };
   w.secret = (kind, value) => { for (const entry of secretEntries(kind, value)) w.secrets.push(entry); };
   w.secret('client-secret', SECRETS.client);
   w.secret('cookie-secret', SECRETS.cookie);
@@ -508,27 +1100,35 @@ async function world(t, { now = START } = {}) {
   // of the end mark (IdpSessionEnd): tx.mark (the end's write), tx.markRead (the callback's check), tx.markWake, and
   // outside a transaction mark.<method> (the confirmation and retry writes, the Bearer path's read).
   const pointOf = (scope, model, method, args) => {
+    if (model === 'memberIsolation' || model === 'memberCredential' || model === 'providerChange') return model + '.' + method;
     if (model === 'auditLog') return scope === 'tx' ? 'tx.audit' : 'audit';
     if (model === 'idpSessionEnd')
       return scope !== 'tx' ? 'mark.' + method : method === 'upsert' ? 'tx.mark' : method === 'findUnique' ? 'tx.markRead' : 'tx.markWake';
     if (scope === 'tx') return method === 'deleteMany' ? 'tx.delete' : method === 'create' ? 'tx.create' : 'tx.' + method;
     if (method === 'findUnique') return 'read';
-    if (method === 'findMany') return 'sweepRead';
+    if (method === 'findMany') return args?.select?.sid ? 'admissions' : 'sweepRead';
     if (method === 'updateMany') return Object.keys(args?.data ?? {}).join() === 'lastSeenAt' ? 'touch' : 'store';
     return method;
   };
   const delegate = (inst, client, model, scope) => new Proxy({}, { get(_target, method) {
     const real = client[model][method];
     if (typeof real !== 'function') return real;
-    return async args => { await hit(inst, pointOf(scope, model, method, args)); return real.call(client[model], args); };
+    return async args => {
+      if (['authSession', 'auditLog', 'idpSessionEnd'].includes(model)) await hit(inst, pointOf(scope, model, method, args));
+      await observe({ inst, scope, model, method, args, phase: 'before' });
+      const result = await real.call(client[model], args);
+      await observe({ inst, scope, model, method, args, result, phase: 'after' });
+      return result;
+    };
   } });
   const recorder = inst => new Proxy({}, { get(_target, key) {
     if (key === '$transaction') return async (fn, options) => {
       await hit(inst, 'tx.open');
-      return base.$transaction(async tx => {
+      await observe({ inst, model: '$transaction', phase: 'before' });
+      const result = await base.$transaction(async tx => {
         w.calls.push(inst + ':tx:start');
         const view = new Proxy({}, { get(_t, k) {
-          if (k === 'authSession' || k === 'auditLog' || k === 'idpSessionEnd') return delegate(inst, tx, k, 'tx');
+          if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberCredential', 'providerChange'].includes(k)) return delegate(inst, tx, k, 'tx');
           const value = tx[k];
           return typeof value === 'function' ? value.bind(tx) : value;
         } });
@@ -536,8 +1136,10 @@ async function world(t, { now = START } = {}) {
         w.calls.push(inst + ':tx:end');
         return out;
       }, options);
+      await observe({ inst, model: '$transaction', phase: 'after', result });
+      return result;
     };
-    if (key === 'authSession' || key === 'auditLog' || key === 'idpSessionEnd') return delegate(inst, base, key, 'root');
+    if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberCredential', 'providerChange'].includes(key)) return delegate(inst, base, key, 'root');
     const value = base[key];
     return typeof value === 'function' ? value.bind(base) : value;
   } });
@@ -1289,7 +1891,7 @@ test('AS-09 a DB failure on any path is a fixed 500 with nothing committed and n
     const s = sub(), sid = await w.session(await w.issue(s, { sub: s, groups: [A] }), { atExpiresAt: lapsed() });
     const next = await w.issue(s + '-next', { sub: s, groups: [A] }), later = await w.issue(s + '-later', { sub: s, groups: [A] });
     kc.auto = () => reply.tokens(next);
-    w.fault('I1', 'store', dbError('store-' + nextAnswer));
+    w.fault('I1', 'tx.updateMany', dbError('store-' + nextAnswer));
     const out = await w.call(w.I1, 'get', { sid });
     assert.ok(storageFailure(out), nextAnswer);
     assert.deepEqual([out.cookie, await w.version(sid)], ['K', s], nextAnswer);
@@ -1377,7 +1979,7 @@ test('AS-10 (b) synthetic DB error markers never reach a response, the logger, s
     await run('store', async tag => {
       const sid = await session(tag, { atExpiresAt: lapsed() }), next = await w.issue(tag + '-next', { sub: 'syn-sub-' + tag, groups: [A] });
       kc.auto = () => reply.tokens(next);
-      w.fault('I1', 'store', dbError(tag));
+      w.fault('I1', 'tx.updateMany', dbError(tag));
       const out = await w.call(w.I1, 'get', { sid });
       kc.auto = null;
       assert.ok(storageFailure(out));
@@ -1839,12 +2441,12 @@ test('AS-12 T11 (RT-15, X-26, X-33): a request whose every refresh write loses t
     };
     const sid = await w.session(versions[0]);
     const tokens = kc.tokens, handled = w.I1.handled;
-    let gate = w.gate('I1', 'store');
+    let gate = w.gate('I1', 'tx.open');
     const held = w.call(w.I1, 'get', { sid });
     for (let n = 1; n <= 3; n++) {
       await gate.arrived();
       const current = gate;
-      if (n < 3) gate = w.gate('I1', 'store');
+      if (n < 3) gate = w.gate('I1', 'tx.open');
       if (n === 3 && last) await last(sid);
       else assert.equal((await w.call(w.I2, 'get', { sid })).status, 200, 'I2 stores first in round ' + n);
       current.release();
@@ -2804,7 +3406,7 @@ test('U5E-10 a callback is never answered with an error body: a stray one enters
 // SEA-F02 (review A of 757e37f): design 5-0 item 4 - the first cause and decidedAt of a mark are never overwritten by a
 // later end or a retry (the 13 h keep window counts from the last confirmation, U5E-21 g). The opposite side: a later end still re-wakes the
 // provider end of a mark whose provider session produced a code again.
-test('U5E-11 a later end of the same provider session for another cause keeps the first cause and time, and still wakes the provider end', async t => {
+test('U5E-11 a later end keeps the first cause; an already-ended authentication never reopens its mark', async t => {
   const w = await world(t);
   const s = 'syn-sub-u5e11', X = idpOf(s);
   const sid = await w.session(await w.issue('u5e11-v1', { sub: s, groups: [A] }));
@@ -2823,17 +3425,16 @@ test('U5E-11 a later end of the same provider session for another cause keeps th
   let mark = await w.mark(X);
   assert.deepEqual([mark.cause, mark.decidedAt.getTime(), mark.confirmedAt !== null], ['logout', first.decidedAt.getTime(), true],
     'the first cause and decision time stay; the end is now confirmed');
-  // The confirmed mark's SSO answers once more (another recovery start, record_unreadable) while the admin API is down: the
-  // end re-wakes the mark (unconfirmed again, asked again) and still keeps the first cause and time.
+  // R10-O6: a delayed code of the confirmed authentication is refused without reopening the mark or sending a new DELETE.
   w.tick(60_000);
   kc.logoutMode = 'refused';
   const asked = kc.endRequests.filter(x => x === X).length;
   const begin2 = await w.call(w.I2, 'switch', { body: UNREADABLE });
   const probed2 = await answerFlow(w, w.I2, begin2, await w.issue('u5e11-v3', { sub: s, groups: [A] }));
-  assert.deepEqual([probed2.location, probed2.newSid], [landing('end_unconfirmed'), null]);
+  assert.deepEqual([probed2.location, probed2.newSid], [landing('stale'), null]);
   mark = await w.mark(X);
-  assert.deepEqual([mark.cause, mark.decidedAt.getTime(), mark.confirmedAt, kc.endRequests.filter(x => x === X).length - asked],
-    ['logout', first.decidedAt.getTime(), null, 1], 'woken: unconfirmed again and asked again; the first cause and time stay');
+  assert.deepEqual([mark.cause, mark.decidedAt.getTime(), mark.confirmedAt !== null, kc.endRequests.filter(x => x === X).length - asked],
+    ['logout', first.decidedAt.getTime(), true, 0], 'confirmed authentication stays ended; no new DELETE');
   kc.logoutMode = 'ok';
   assert.deepEqual(await endsOf(w, s), [['auth.logout', 'logout', A]], 'one record: the probes ended no product session');
   await w.finish('U5E-11');
@@ -2955,17 +3556,20 @@ test('U5E-13 an administrator\'s isolation ends every session of the member thro
   assert.deepEqual([isolated.newSid, isolated.proof, await w.base.authSession.count({ where: { sub: m } })],
     [null, undefined, 0], 'a code exchanged before the isolation makes no session after it');
   assert.equal(rowsOf(await w.rows(), m).filter(r => r.action === 'auth.login').at(-1).detail.cause, 'idp_session_ended');
-  // A session of the isolated member that exists anyway (put here directly): its next refresh is refused by this server
-  // at once - ended with cause isolation and its mark - whatever the provider's refresh answer says.
+  // A surviving row is refused from the local fact before refresh. Authentication itself does not send a new DELETE;
+  // an explicit ending remains available and uses the normal recorded ending path.
   const v = await w.issue('u5e13-left', { sub: m, groups: [A], idp: 'syn-idp-u5e13-left' });
   const left = await w.session(v, { atExpiresAt: lapsed() });
+  const refreshRequests = kc.tokens, endRequests = kc.endRequests.length;
   kc.auto = () => reply.tokens(v);
   const refused = await w.call(w.I1, 'get', { sid: left });
   kc.auto = null;
-  assert.deepEqual([...coded(refused), await w.version(left)], [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED', null]);
+  assert.deepEqual([...coded(refused), await w.version(left)], [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED', 'u5e13-left']);
+  assert.deepEqual([kc.tokens, kc.endRequests.length], [refreshRequests, endRequests], 'DB refusal precedes every provider exchange');
+  assert.equal((await w.call(w.I1, 'logout', { sid: left })).status, 204);
   await w.told();
   assert.deepEqual([(await w.marks()).find(x => x[0] === 'syn-idp-u5e13-left'), (await endsOf(w, m)).length],
-    [['syn-idp-u5e13-left', 'isolation', true], 3]);
+    [['syn-idp-u5e13-left', 'logout', true], 3]);
   // The isolation is our own recorded fact, its provider work done.
   assert.deepEqual((await w.base.memberIsolation.findMany()).map(r => [r.sub, r.providerDoneAt !== null]), [[m, true]]);
   // The opposite side: the other member's refresh goes on - also with the admin API out, which the refresh never asks.
@@ -3297,15 +3901,13 @@ test('U5E-18 an Activate during the isolation retry cycle: the cycle does not di
   const older = w.instance('C18b');
   const oldTaken = w.gate('C18b', 'tx.open'), held = w.gate('C18b', 'tx.open');
   older.service.onModuleInit();
-  const activateTaken = w.gate('I1', 'tx.open'), activateHeld = w.gate('I1', 'tx.open');
+  const activateHeld = w.pause({ inst: 'I1', model: '$transaction', phase: 'after' }, e => e.result?.epoch && !e.result?.sub);
   let activating = null;
   try {
     await oldTaken.arrived();
     oldTaken.release();
     await held.arrived();
     activating = admin.patchUser(m2, { enabled: true }, caller);
-    await activateTaken.arrived();
-    activateTaken.release();
     await activateHeld.arrived();
     const calls = kc.adminCalls.length;
     held.release();
@@ -3315,7 +3917,6 @@ test('U5E-18 an Activate during the isolation retry cycle: the cycle does not di
   } finally {
     oldTaken.release();
     held.release();
-    activateTaken.release();
     activateHeld.release();
     older.service.onModuleDestroy();
   }
@@ -3550,7 +4151,7 @@ test('U5E-20 an Activate that lands while the isolation retry cycle\'s provider 
     // The cycle's two reads of the member's product sessions: before its first listing, and after it marked what that
     // listing named. Held at the second, its last check before the disable is behind it.
     const early = w.gate('C20f', 'sweepRead'), late = w.gate('C20f', 'sweepRead');
-    const activating = w.gate('I1', 'sweepRead');
+    const activating = w.pause({ inst: 'I1', model: '$transaction', phase: 'after' }, e => e.result?.epoch && !e.result?.sub);
     let run = null;
     cycle.service.onModuleInit();
     try {
@@ -3761,11 +4362,12 @@ test('U5E-21 (S7-U5 CE1) a mark covers the ended SSO\'s authentication, not its 
   const late = await refuseFlow(w, w.I1, await w.call(w.I1, 'switch', { body: UNTRUSTED }), 'login_required');
   const lateStart = Date.now();
   assert.ok(lateStart > (await confirmedAt(Z)) + 1000 && lateStart % 1000 !== 0);
+  const endBeforeStale = await confirmedAt(Z);
   const tooEarly = await answerFlow(w, w.I1, late, await w.issue('u5e21-d-too-early', { sub: d, groups: [A], idp: Z, authTime: sec(lateStart) - 1 }));
   assert.deepEqual([tooEarly.newSid, atProvider(tooEarly), promptOf(tooEarly)], [null, true, 'login'],
     'e: authenticated a second before the fresh step\'s own second (after the end, but not by this step): covered, the step restarts');
   const own = await answerFlow(w, w.I1, tooEarly, await w.issue('u5e21-d-own', { sub: d, groups: [A], idp: Z, authTime: sec(Date.now()) }));
-  assert.ok(sec(Date.now()) * 1000 < (await confirmedAt(Z)), 'the restarted step\'s own second began before the re-confirmed end');
+  assert.equal(await confirmedAt(Z), endBeforeStale, 'an old callback cannot re-confirm or reopen the mark');
   assert.equal(own.cookie, 'S', 'e: the restarted fresh step admits an authentication from the second it started');
 
   // ── g. keeping: from the last confirmation ──
@@ -4030,6 +4632,8 @@ test('U5E-25 (D600 4) a lost answer, a 500 and a timed-out request stay unknown 
     const run = activation(admin, hang, caller);
     const result = await run.result;
     assert.deepEqual([...unconfirmedOf(await still.result), still.took < 15_000], [...UNCONFIRMED, true], 'the reset stays unknown');
+    // The bounded HTTP answer may win the event-loop turn before the aborted token fetch records its own not-sent answer.
+    await w.until('the token acquisition records its own terminal answer', async () => (await w.changes(hang, 'enable'))[0] === 'void');
     assert.deepEqual([...unconfirmedOf(result), run.took < 15_000, !!await fact(hang), kc.members[hang].enabled, await w.changes(hang, 'enable')],
       [...UNCONFIRMED, true, true, false, ['void']], 'a token fetch that hangs: not sent (void), 409 within 15 s, isolation kept');
   } finally {

@@ -81,8 +81,9 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261005130000_member_isolation/migration.sql',
               'api/prisma/migrations/20261006120000_member_isolation_call/migration.sql',
               'api/prisma/migrations/20261007120000_provider_change/migration.sql',
-              'api/prisma/migrations/20261007130000_member_isolation_epoch/migration.sql']
-TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'Institution', 'StudyState', 'Report', 'ReportVersion',
+              'api/prisma/migrations/20261007130000_member_isolation_epoch/migration.sql',
+              'api/prisma/migrations/20261007150000_isolation_authentication_boundary/migration.sql']
+TABLES = sorted(['AuthSession', 'MemberCredential', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
@@ -401,13 +402,14 @@ def expected_rows(uid):
     # member gets no session, and an unfinished one is provider work still owed. One of each, every column with a value
     # (providerDoneAt NULL on the owed one). The row's own number (epoch) comes from its sequence, in insertion order.
     rows['MemberIsolation'] = [
-        dict(sub='SYNTHETIC-member-isolation-owed',epoch=1,decidedAt=STAMP,providerDoneAt=None,attempts=2,
+        dict(sub='SYNTHETIC-member-isolation-owed',credentialsPending=True,epoch=1,decidedAt=STAMP,providerDoneAt=None,attempts=2,
              nextAttemptAt='2026-10-06T00:00:00.456'),
-        dict(sub='SYNTHETIC-member-isolation-done',epoch=2,decidedAt=STAMP,providerDoneAt=STAMP,attempts=0,nextAttemptAt=STAMP)]
+        dict(sub='SYNTHETIC-member-isolation-done',credentialsPending=False,epoch=2,decidedAt=STAMP,providerDoneAt=STAMP,attempts=0,nextAttemptAt=STAMP)]
     # S7-U5 D600: the provider change records are state a restore must keep - an unknown one (here the owed member's disable
     # whose answer was lost) keeps that member's re-activation from succeeding until that call's own answer settles it, and
     # a settled one is the newest end request of a provider session (its mark may be confirmed). One of each, every column
     # with a value (sub, outcome and settledAt NULL where a record has none); the ids come from the sequence.
+    rows['MemberCredential'] = [dict(sub='SYNTHETIC-member-isolation-done', groups=['SYNTHETIC-hospital'], roles=['radiologist'])]
     rows['ProviderChange'] = [
         dict(id=1,kind='disable',target='SYNTHETIC-member-isolation-owed',sub='SYNTHETIC-member-isolation-owed',generation=2,
              state='unknown',outcome='transport',createdAt='2026-10-06T00:00:00.789',settledAt=None),
@@ -461,7 +463,7 @@ def create_product(name, db, uid):
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
                   'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
-                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange',
+                  'CriticalResult', 'CriticalResultEvent', 'CriticalResultReceipt', 'IdpSessionEnd', 'MemberIsolation', 'MemberCredential', 'ProviderChange',
                   'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:

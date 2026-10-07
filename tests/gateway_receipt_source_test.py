@@ -555,8 +555,8 @@ class MigrationPins(unittest.TestCase):
         # 38 -> 39, one table: S7-U5 D600 added 20261007120000_provider_change (ProviderChange; the in-flight columns dropped).
         # 39 -> 40, tables unchanged: S7-U5 round 9 added 20261007130000_member_isolation_epoch (MemberIsolation.epoch).
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 40)
-        self.assertEqual(len(restore_fixture.TABLES), 49)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 41)
+        self.assertEqual(len(restore_fixture.TABLES), 50)
         self.assertEqual(len(restore_fixture.expected_rows("2.25.1")["GatewayReceipt"]), 1)
 
 

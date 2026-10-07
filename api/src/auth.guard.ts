@@ -180,7 +180,8 @@ export class AuthGuard implements CanActivate {
      * access token은 만료까지 서명이 유효하다 — 제품이 끝내기로 한 provider 세션의 토큰은 여기서 끝난 세션으로 답한다.
      * gateway·서비스 계정의 토큰(위에서 갈렸거나 `sid`가 없다)은 대상이 아니다.
      */
-    if (method === 'bearer') await this.auth.refuseEndedIdpSession(payload);
+    if (!isLogout) await this.auth.refuseIsolatedMember(payload);
+    if (method === 'bearer' && !isLogout) await this.auth.refuseEndedIdpSession(payload, raw);
 
     const state = memberState(groups, req.roles);
     req.memberState = state;

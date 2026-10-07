@@ -255,8 +255,8 @@ class Pure(unittest.TestCase):
         # 49 tables, and two records (an unknown disable of the owed member, a settled end of a provider session).
         # S7-U5 round 9 gave MemberIsolation its own row number from a sequence (epoch: a re-created fact never takes an
         # earlier number): 40 files, still 49 tables and the same rows, numbered 1 and 2 in insertion order.
-        self.assertEqual(len(transfer.MIGRATIONS), 40)
-        self.assertEqual(len(transfer.TABLES), 49)
+        self.assertEqual(len(transfer.MIGRATIONS), 41)
+        self.assertEqual(len(transfer.TABLES), 50)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
         self.assertEqual([(r['oid'], r['accession'], r['studyUid']) for r in rows['Order']],
@@ -270,10 +270,14 @@ class Pure(unittest.TestCase):
                          + 1    # S7-U5: the emptied draft row (tombstone) beside the two present drafts
                          + 2    # S7-U5 session end: the pending and the confirmed end mark
                          + 2    # S7-U5 member isolation: the owed and the done isolation fact
-                         + 2)   # S7-U5 D600: the unknown and the settled provider change record
+                         + 2    # S7-U5 D600: the unknown and the settled provider change record
+                         + 1)   # S7-U5 round 10: last completed membership credentials
+        self.assertEqual(rows['MemberCredential'], [dict(sub='SYNTHETIC-member-isolation-done',
+                         groups=['SYNTHETIC-hospital'], roles=['radiologist'])])
+        self.assertEqual([r['credentialsPending'] for r in rows['MemberIsolation']], [True, False])
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),
                          [('SYNTHETIC-member-isolation-done', False, 0), ('SYNTHETIC-member-isolation-owed', True, 2)])
-        self.assertEqual(sorted(rows['MemberIsolation'][0]), ['attempts', 'decidedAt', 'epoch', 'nextAttemptAt', 'providerDoneAt', 'sub'])
+        self.assertEqual(sorted(rows['MemberIsolation'][0]), ['attempts', 'credentialsPending', 'decidedAt', 'epoch', 'nextAttemptAt', 'providerDoneAt', 'sub'])
         self.assertEqual(sorted((r['sub'], r['epoch']) for r in rows['MemberIsolation']),
                          [('SYNTHETIC-member-isolation-done', 2), ('SYNTHETIC-member-isolation-owed', 1)])
         self.assertEqual(transfer.expected_sequences()['MemberIsolation_epoch_seq'], dict(last_value=2, is_called=True))

@@ -6,8 +6,8 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { isIP } from 'net';
 import { createRemoteJWKSet, decodeJwt, jwtVerify, JWTPayload } from 'jose';
 import { PrismaService } from './prisma.service';
-import { ChangeAnswer, KeycloakService, KeycloakUser, within } from './keycloak.service';
-import { clinicianOnly } from './clinician-policy';
+import { ChangeAnswer, CredentialWriter, KeycloakService, KeycloakUser, within } from './keycloak.service';
+import { APP_ROLES, clinicianOnly } from './clinician-policy';
 
 const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
 const SESSION_TOUCH_MS = 5 * 60 * 1000;
@@ -120,14 +120,15 @@ type StorageStep = 'session_read' | 'session_write' | 'end_transaction' | 'login
   | 'idp_end_read' | 'idp_end_write' | 'idp_end_cycle'
   | 'isolation_read' | 'isolation_write' | 'isolation_cycle' | 'change_write';
 /** 보내기 전에 기록한 변경 호출 하나(ProviderChange 행). */
-type Change = { id: number; kind: 'disable' | 'enable' | 'end_session'; target: string };
+type Change = { id: number; kind: 'disable' | 'enable' | 'end_session' | 'credentials'; target: string };
 type EndResult = { ended: boolean; idpSid: string | null; change: Change | null };
 /**
  * 격리의 세대: 사실 행 자체의 번호(`epoch`, DB 순번 — 재활성화가 지운 뒤 다시 만든 행도 앞의 번호를 받지 않는다)와 그 행에서
  * 일을 쥔 번호(`attempts`, 새 행에서 0부터 다시 센다). 둘 다 같아야 같은 세대다: attempts만 보면 앞선 격리의 일을 쥐었던
  * 쪽이 다시 만들어진 행의 같은 번호를 자기 것으로 안다.
  */
-type Generation = { epoch: number; attempts: number };
+export type Generation = { epoch: number; attempts: number };
+type SessionList = { sids: string[]; admissions: string[] };
 const sameGeneration = <T extends Generation>(row: T | null, claim: Generation): row is T =>
   !!row && row.epoch === claim.epoch && row.attempts === claim.attempts;
 /** 재활성화의 답: 끝났다(그때 다시 읽은 회원), 기한 안에 확정하지 못했다(격리 유지), 더 새 정지가 넘겨받았다. */
@@ -431,8 +432,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const authTime = Number(claims?.auth_time);
     if (!mark.confirmedAt || !Number.isFinite(authTime)) return true;
     const ended = mark.confirmedAt.getTime();
-    const since = flow?.phase === 'fresh' && flow.issuedAt >= ended ? Math.floor(flow.issuedAt / 1000) * 1000 : ended;
-    return authTime * 1000 < since;
+    if (flow?.phase === 'fresh' && flow.issuedAt >= ended)
+      return authTime * 1000 < Math.floor(flow.issuedAt / 1000) * 1000;
+    return authTime * 1000 <= ended;
   }
 
   /** 이 세션이 태어난 provider 세션. 열이 생기기 전의 행은 저장된 access token(저장 전에 검증한 토큰)에서 읽는다. */
@@ -461,6 +463,62 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       this.storageWarning(step);
       throw this.storageFailure();
     }
+  }
+
+  /** Every DB wait consumes the same request budget. Expiry throws inside the transaction: it cannot clear later. */
+  async deadlineTx<T>(work: (tx: any) => Promise<T>, until = Number.POSITIVE_INFINITY): Promise<T> {
+    const remaining = () => {
+      const ms = Math.floor(until - performance.now());
+      if (ms <= 0) throw this.isolationUnfinished();
+      return ms;
+    };
+    const initial = remaining();
+    return this.prisma.$transaction(async tx => {
+      const ms = Math.min(8000, remaining());
+      await tx.$executeRaw`SELECT set_config('statement_timeout', ${String(ms)}, true)`;
+      await tx.$executeRaw`SELECT set_config('lock_timeout', ${String(Math.min(3000, ms))}, true)`;
+      // Prisma's transaction timeout starts after pool admission. Recompute the SQL wait before each statement too,
+      // so pool wait and a series of individually slow statements cannot each spend the original budget again.
+      const bounded = Number.isFinite(until) ? new Proxy(tx, { get: (target, key) => {
+        const value = target[key];
+        const call = (owner: any, fn: any) => async (...args: any[]) => {
+          const left = remaining();
+          await tx.$executeRaw`SELECT set_config('statement_timeout', ${String(left)}, true)`;
+          await tx.$executeRaw`SELECT set_config('lock_timeout', ${String(Math.min(3000, left))}, true)`;
+          return fn.apply(owner, args);
+        };
+        if (typeof value === 'function') return call(target, value);
+        if (value && typeof value === 'object') return new Proxy(value, { get: (model, method) =>
+          typeof model[method] === 'function' ? call(model, model[method]) : model[method] });
+        return value;
+      } }) : tx;
+      const out = await work(bounded);
+      remaining();
+      return out;
+    }, { maxWait: Math.min(4000, initial), timeout: Math.min(8000, initial) });
+  }
+
+  private async budgetRead<T>(work: (db: any) => Promise<T>, until: number): Promise<T> {
+    return Number.isFinite(until) ? this.deadlineTx(work, until) : work(this.prisma);
+  }
+
+  /** Local authority for isolation and the last completed membership change, shared by every member entry path. */
+  private async memberPermitted(db: any, claims: Record<string, any>): Promise<boolean> {
+    const sub = String(claims.sub);
+    if (await db.memberIsolation.findUnique({ where: { sub } })) return false;
+    const credential = await db.memberCredential.findUnique({ where: { sub } });
+    if (!credential) return true;
+    const groups = (Array.isArray(claims.groups) ? claims.groups : [])
+      .filter((g: any) => typeof g === 'string').map((g: string) => g.replace(/^\//, '')).sort();
+    const roles = (Array.isArray(claims.realm_access?.roles) ? claims.realm_access.roles : [])
+      .filter((r: any) => APP_ROLES.has(r)).sort();
+    return JSON.stringify(groups) === JSON.stringify([...credential.groups].sort())
+      && JSON.stringify(roles) === JSON.stringify([...credential.roles].sort());
+  }
+
+  async refuseIsolatedMember(claims: Record<string, any>): Promise<void> {
+    if (!await this.storage('isolation_read', () => this.memberPermitted(this.prisma, claims)))
+      throw this.ended('인증 세션이 없습니다');
   }
 
   private conflict() {
@@ -514,20 +572,22 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 기다린다 — 그 쓰기는 종료보다 먼저 commit되거나, 종료 뒤에 실패한다. 잠금을 제때 얻지 못하면 끝내지 않고 409다.
    */
   private async endSession(
-    session: Session, cause: EndCause, ip: string | null, options: { idleCutoff?: Date; trigger?: Reason } = {},
+    session: Session, cause: EndCause, ip: string | null,
+    options: { idleCutoff?: Date; trigger?: Reason; still?: (tx: any) => Promise<boolean>; until?: number } = {},
   ): Promise<EndResult> {
     const idpSid = this.idpSidOf(session);
     const where = options.idleCutoff
       ? { ...this.version(session), lastSeenAt: { lt: options.idleCutoff } } : this.version(session);
     try {
-      return await this.prisma.$transaction(async tx => {
-        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      return await this.deadlineTx(async tx => {
         if (idpSid) await this.lockIdpSession(tx, idpSid);
+        await this.lockMember(tx, session.sub);
+        if (options.still && !await options.still(tx)) return { ended: false, idpSid: null, change: null };
         const { count } = await tx.authSession.deleteMany({ where });
         if (count !== 1) return { ended: false, idpSid: null, change: null };
         const change = await this.endRows(tx, idpSid, [session], cause, ip, options.trigger);
         return { ended: true, idpSid, change };
-      }, { maxWait: 4000, timeout: 8000 });
+      }, options.until);
     } catch (error: any) {
       if (lockWaitExceeded(error)) throw this.conflict();
       this.storageWarning('end_transaction');
@@ -577,6 +637,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   /** provider 세션 하나의 종료 요청을 보내기 **전에** 기록한다(그 sid의 잠금을 쥔 트랜잭션 안에서). */
   private async recordEnd(tx: any, idpSid: string, sub: string | null, generation: number): Promise<Change> {
+    if (sub) await this.lockMember(tx, sub);
     const row = await tx.providerChange.create({ data: {
       kind: 'end_session', target: idpSid, sub, generation, state: 'unknown', createdAt: new Date(),
     } });
@@ -601,16 +662,49 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    *   3. 인증 서버 일(finishIsolation). 어디서 끊기면 던지고, 사실은 "인증 서버 일이 남음"으로 남아 종료 재시도 주기가 잇는다.
    * 이미 사실이 있으면(앞선 격리가 끝나지 않았거나 정지된 회원을 다시 격리) 남은 인증 서버 일을 다시 하도록 되돌린다.
    */
-  async isolateMember(sub: string): Promise<void> {
+  async isolateMember(sub: string, credentialsPending = false): Promise<Generation> {
     const now = new Date();
-    await this.memberTx(sub, tx => tx.memberIsolation.upsert({
+    const claim: Generation = await this.memberTx(sub, tx => tx.memberIsolation.upsert({
       where: { sub },
-      create: { sub, decidedAt: now, nextAttemptAt: new Date(now.getTime() + IDP_END_BACKOFF_MS[0]) },
-      update: { providerDoneAt: null, attempts: { increment: 1 }, nextAttemptAt: new Date(now.getTime() + IDP_END_BACKOFF_MS[0]) },
+      create: { sub, credentialsPending, decidedAt: now, nextAttemptAt: new Date(now.getTime() + IDP_END_BACKOFF_MS[0]) },
+      update: { ...(credentialsPending ? { credentialsPending: true } : {}), providerDoneAt: null,
+        attempts: { increment: 1 }, nextAttemptAt: new Date(now.getTime() + IDP_END_BACKOFF_MS[0]) },
     }));
-    await this.endMemberSessions(sub);
     // 그사이 재활성화가 남은 일을 넘겨받았으면 이 격리는 끝났다고 답하지 않는다(부른 쪽이 격리 충돌로 답한다).
-    if (!await this.finishIsolation(sub)) throw this.conflict();
+    if (!await this.finishIsolation(sub, claim)) throw this.conflict();
+    return claim;
+  }
+
+  /** The compound command remains blocking across process loss and unknown group/role effects. */
+  async changeMemberCredentials(sub: string, claim: Generation, groups: string[], roles: string[]): Promise<void> {
+    const owned = async (tx: any) => {
+      const fact = await tx.memberIsolation.findUnique({ where: { sub } });
+      if (!sameGeneration(fact, claim) || !fact.credentialsPending
+        || await tx.providerChange.findFirst({ where: { sub, kind: 'credentials', state: 'unknown' } })) throw this.conflict();
+    };
+    await this.memberTx(sub, owned);
+    const until = performance.now() + ISOLATION_CALL_MS;
+    const write: CredentialWriter = async (path, method, body) => {
+      const change: Change = await this.memberTx(sub, async tx => {
+        await owned(tx);
+        const row = await tx.providerChange.create({ data: {
+          kind: 'credentials', target: path, sub, generation: claim.attempts, state: 'unknown', createdAt: new Date(),
+        } });
+        return { id: row.id, kind: 'credentials', target: path };
+      }, until);
+      const left = Math.max(0, until - performance.now());
+      const answer = await this.sendChange(change, 'member:' + sub,
+        () => this.keycloak.changeCredential(path, method, body, within(left)), left);
+      if (answer !== 'done') throw this.isolationUnfinished();
+    };
+    const signal = within(until - performance.now());
+    await this.keycloak.setGroups(sub, groups, signal, write);
+    await this.keycloak.setRoles(sub, roles, signal, write);
+    await this.memberTx(sub, async tx => {
+      await owned(tx);
+      await tx.memberCredential.upsert({ where: { sub }, create: { sub, groups, roles }, update: { groups, roles } });
+      await tx.memberIsolation.update({ where: { sub }, data: { credentialsPending: false } });
+    }, until);
   }
 
   /**
@@ -634,45 +728,41 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 완료(providerDoneAt)는 이 처리를 시작할 때 이 회원에게 답을 모르는 변경 호출이 없었고 끝날 때도 없을 때만 적는다: 앞선
    * 재활성화의 활성화가 늦게 닿으면 이 처리의 비활성화 뒤에 회원이 다시 활성이 된다. 그때는 일은 하되 완료를 적지 않고, 그
    * 호출이 자기 답을 받은 뒤의 주기가 처음부터 다시 한다(그 답을 기다리는 동안에도 비활성화는 다시 보낸다 — 격리 쪽으로만 움직인다).
-   * `claimed`는 이미 세대를 올린 쪽(주기·재활성화)이 넘기는 그 세대, `until`은 기다림의 기한(이 프로세스 단조 시계)이다.
+   * `claim`은 최초 명령 또는 조건부 넘겨받기가 반환한 세대, `until`은 기다림의 기한(이 프로세스 단조 시계)이다.
    * 완료를 적었으면 true, 사실이 없거나 넘겨받혀 멈췄으면 false, 인증 서버 일이 끝나지 않았으면 던진다.
    */
-  async finishIsolation(sub: string, claimed?: Generation, until = Number.POSITIVE_INFINITY): Promise<boolean> {
-    const claim = claimed ?? await this.claimIsolation(sub);
-    if (claim === null) return false;
+  async finishIsolation(sub: string, claim: Generation, until = Number.POSITIVE_INFINITY): Promise<boolean> {
     // `tx`를 주면 그 트랜잭션(회원 잠금을 쥔) 안에서 읽는다.
     const owned = async (tx?: any) => {
       const row = tx ? await tx.memberIsolation.findUnique({ where: { sub } })
-        : await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
+        : await this.budgetRead<any>(db => db.memberIsolation.findUnique({ where: { sub } }), until);
       return sameGeneration(row, claim) && row.providerDoneAt === null;
     };
     const left = () => Math.min(ISOLATION_CALL_MS, until - performance.now());
     // 시작할 때 답을 모르는 회원 상태 변경(앞선 쪽의 비활성화·활성화)이 있었는가. 세션 종료는 아래 기다림이 따로 본다.
-    const clean = !await this.changeOpen(sub, 'member');
-    if (!await this.endMemberSessions(sub, [], owned)) return false;
-    const first = await this.listSessions(sub, owned, left());
+    const clean = !await this.changeOpen(sub, 'member', until);
+    if (!await this.endMemberSessions(sub, [], owned, until)) return false;
+    const first = await this.listAndEndSessions(sub, owned, until);
     if (!first) return false;
-    if (!('error' in first) && !await this.endMemberSessions(sub, first.value, owned)) return false;
-    const disabled = await this.memberChange(sub, claim, false, left());
+    const disabled = await this.memberChange(sub, claim, false, left(), until);
     if (disabled === null) return false;
     if (disabled !== 'done') throw this.isolationUnfinished();
     if ('error' in first) throw first.error;
-    const second = await this.listSessions(sub, owned, left());
+    const second = await this.listAndEndSessions(sub, owned, until);
     if (!second) return false;
     if ('error' in second) throw second.error;
-    if (!await this.endMemberSessions(sub, second.value, owned)) return false;
     const listed = [...new Set([...first.value, ...second.value])];
     // 세션 종료들의 답만 기다린다: 답을 모르는 앞선 비활성화·활성화는 기다려도 이 처리가 완료를 적게 하지 못한다(clean).
     if (!await this.changesSettled(sub, listed, Math.min(performance.now() + ISOLATION_CALL_MS, until), true))
       throw this.isolationUnfinished();
-    if (!await this.endMemberSessions(sub, [], owned)) return false;
+    if (!await this.endMemberSessions(sub, [], owned, until)) return false;
     if (!clean) throw this.isolationUnfinished();
     const done = await this.memberTx(sub, async tx => {
       if (!await owned(tx)) return 'lost';
       if (await tx.providerChange.findFirst({ where: { sub, state: 'unknown' }, select: { id: true } })) return 'open';
       await tx.memberIsolation.update({ where: { sub }, data: { providerDoneAt: new Date() } });
       return 'done';
-    });
+    }, until);
     if (done === 'open') throw this.isolationUnfinished();
     return done === 'done';
   }
@@ -682,13 +772,12 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 회원 잠금을 쥔 짧은 트랜잭션(그 안에서 인증 서버를 부르지 않는다). 잠금을 제때 얻지 못하면 409, 저장소 오류는 고정 500. */
-  private async memberTx<T>(sub: string, work: (tx: any) => Promise<T>): Promise<T> {
+  private async memberTx<T>(sub: string, work: (tx: any) => Promise<T>, until = Number.POSITIVE_INFINITY): Promise<T> {
     try {
-      return await this.prisma.$transaction(async tx => {
-        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      return await this.deadlineTx(async tx => {
         await this.lockMember(tx, sub);
         return work(tx);
-      }, { maxWait: 4000, timeout: 8000 });
+      }, until);
     } catch (error: any) {
       if (lockWaitExceeded(error)) throw this.conflict();
       this.storageWarning('isolation_write');
@@ -703,48 +792,65 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 주기가 읽은 행의 세대)이면 사실이 아직 그 세대이고 일이 남았을 때만 쥔다 — 읽은 뒤 재활성화가 지우고 새 정지가 다시 만든
    * 행은 attempts가 같아도 쥐지 않는다(그 행의 일은 그 정지가 하고 있다). 쥐지 못하면 null.
    */
-  private async claimIsolation(sub: string, owedAt?: Generation): Promise<Generation | null> {
+  private async claimIsolation(sub: string, owedAt: Generation, includeDone = false, until = Number.POSITIVE_INFINITY): Promise<Generation | null> {
     return this.memberTx(sub, async tx => {
       const row = await tx.memberIsolation.findUnique({ where: { sub } });
-      if (!row || (owedAt !== undefined && (!sameGeneration(row, owedAt) || row.providerDoneAt !== null))) return null;
+      if (!sameGeneration(row, owedAt) || (!includeDone && row.providerDoneAt !== null)) return null;
       const next = row.attempts + 1;
       await tx.memberIsolation.update({ where: { sub }, data: { attempts: next,
         nextAttemptAt: new Date(Date.now() + IDP_END_BACKOFF_MS[Math.min(next, IDP_END_BACKOFF_MS.length - 1)]) } });
       return { epoch: row.epoch, attempts: next };
-    });
+    }, until);
   }
 
   /**
    * 나열 한 번: 몫을 쥔 동안만 묻는다(null = 넘겨받혔다). 읽기라 한도에 끊고, 실패는 `error`로 돌려준다(변경 결과 불명이 아니다).
    * 늦게 온 목록은 쓰기 직전의 몫 확인(endMemberSessions의 still — 표식과 같은 commit)이 버린다.
    */
-  private async listSessions(sub: string, owned: () => Promise<boolean>, limitMs: number)
-    : Promise<{ value: string[] } | { error: unknown } | null> {
+  private async listSessions(sub: string, owned: () => Promise<boolean>, until: number)
+    : Promise<{ value: SessionList } | { error: unknown } | null> {
     if (!await owned()) return null;
+    // Use identities of committed admissions, not a sequence high-water mark: a lower sequence can commit after a higher one.
+    const admitted = await this.budgetRead<{ sid: string }[]>(db => db.authSession.findMany({ select: { sid: true } }), until);
+    const limitMs = Math.min(ISOLATION_CALL_MS, until - performance.now());
     if (limitMs <= 0) return { error: this.isolationUnfinished() };
-    try { return { value: await this.keycloak.userSessions(sub, limitMs) }; }
+    try { return { value: { sids: await this.keycloak.userSessions(sub, limitMs), admissions: admitted.map(row => row.sid) } }; }
     catch (error) { return { error }; }
+  }
+
+  private async listAndEndSessions(sub: string, owned: (tx?: any) => Promise<boolean>, until: number)
+    : Promise<{ value: string[] } | { error: unknown } | null> {
+    for (let tries = 0; tries < TRANSITION_LIMIT; tries++) {
+      const listed = await this.listSessions(sub, owned, until);
+      if (!listed) return null;
+      if ('error' in listed) return { error: listed.error };
+      const ended = await this.endMemberSessions(sub, listed.value.sids, owned, until, listed.value.admissions);
+      if (ended === 'relist') continue;
+      return ended ? { value: listed.value.sids } : null;
+    }
+    return { error: this.isolationUnfinished() };
   }
 
   /**
    * 회원 비활성화/활성화 — 변경 호출 하나. 회원 잠금 안에서 세대가 아직 `claim`일 때만(사실 없이 하는 재활성화는 `claim`
-   * null: 사실이 여전히 없을 때만; 비활성화는 일이 남은 사실일 때만) 보내기 전에 기록하고, commit 뒤에 보낸다. 기록하지
+   * 세대와 일치할 때만; 비활성화는 일이 남은 사실일 때만) 보내기 전에 기록하고, commit 뒤에 보낸다. 기록하지
    * 못했으면 null(넘겨받혔다 또는 새 정지가 왔다). 기다림(`waitMs`)이 끝나면 'pending' — 그 호출은 자기 답이 올 때까지 남는다.
    * 남은 시간이 없으면 기록하지도 보내지도 않고 'pending'이다.
    */
-  private async memberChange(sub: string, claim: Generation | null, enabled: boolean, waitMs: number)
+  private async memberChange(sub: string, claim: Generation, enabled: boolean, waitMs: number, until = Number.POSITIVE_INFINITY)
     : Promise<'done' | 'void' | 'unknown' | 'pending' | null> {
     if (waitMs <= 0) return 'pending';
     const kind = enabled ? 'enable' : 'disable';
     const change: Change | null = await this.memberTx(sub, async tx => {
       const fact = await tx.memberIsolation.findUnique({ where: { sub } });
-      if (claim === null ? fact !== null : !sameGeneration(fact, claim) || (!enabled && fact.providerDoneAt !== null)) return null;
+      if (!sameGeneration(fact, claim) || (!enabled && fact.providerDoneAt !== null) || (enabled && fact.credentialsPending)) return null;
       const row = await tx.providerChange.create({ data: {
-        kind, target: sub, sub, generation: claim?.attempts ?? 0, state: 'unknown', createdAt: new Date(),
+        kind, target: sub, sub, generation: claim.attempts, state: 'unknown', createdAt: new Date(),
       } });
       return { id: row.id, kind, target: sub };
-    });
+    }, until);
     if (!change) return null;
+    waitMs = Math.max(0, Math.min(waitMs, until - performance.now()));
     const signal = within(waitMs);
     return this.sendChange(change, 'member:' + sub, () => this.keycloak.changeEnabled(sub, enabled, signal), waitMs);
   }
@@ -797,10 +903,10 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 그 회원에게 보낸 변경 호출 중 답을 모르는 것이 있는가 — `only`가 'member'면 비활성화·활성화만, 'ends'면 그 회원 세션의
    * 종료만, 없으면 전부.
    */
-  private async changeOpen(sub: string, only?: 'member' | 'ends'): Promise<boolean> {
+  private async changeOpen(sub: string, only?: 'member' | 'ends', until = Number.POSITIVE_INFINITY): Promise<boolean> {
     const kind = only === 'member' ? { kind: { in: ['disable', 'enable'] } } : only === 'ends' ? { kind: 'end_session' } : {};
-    return !!await this.storage('isolation_read', () =>
-      this.prisma.providerChange.findFirst({ where: { sub, state: 'unknown', ...kind }, select: { id: true } }));
+    return !!await this.budgetRead(db =>
+      db.providerChange.findFirst({ where: { sub, state: 'unknown', ...kind }, select: { id: true } }), until);
   }
 
   /**
@@ -809,12 +915,13 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    */
   private async changesSettled(sub: string, sids: string[], until: number, endsOnly = false): Promise<boolean> {
     for (;;) {
-      const open = await this.changeOpen(sub, endsOnly ? 'ends' : undefined);
-      const confirmed = open || !sids.length ? 0 : await this.storage('idp_end_read', () =>
-        this.prisma.idpSessionEnd.count({ where: { idpSid: { in: sids }, confirmedAt: { not: null } } }));
+      if (performance.now() >= until) return false;
+      const open = await this.changeOpen(sub, endsOnly ? 'ends' : undefined, until);
+      const confirmed = open || !sids.length ? 0 : await this.budgetRead(db =>
+        db.idpSessionEnd.count({ where: { idpSid: { in: sids }, confirmedAt: { not: null } } }), until);
       if (!open && confirmed === sids.length) return true;
       if (performance.now() >= until) return false;
-      await new Promise(resolve => setTimeout(resolve, CHANGE_POLL_MS));
+      await new Promise(resolve => setTimeout(resolve, Math.min(CHANGE_POLL_MS, Math.max(0, until - performance.now()))));
     }
   }
 
@@ -832,13 +939,22 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 'superseded'. 기한이 지나도 이미 보낸 호출은 그대로 둔다(그 답이 기록을 정한다). 사실이 없으면(우리가 격리하지 않은 비활성
    * 회원) 2·4·5를 하고, 6에서 그사이 사실이 생기지 않았는지 본다. 로그인·갱신 길은 이 일을 기다리지 않는다.
    */
-  async reactivateMember(sub: string, until: number): Promise<Reactivation> {
-    const known = await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
-    const claim = known ? await this.claimIsolation(sub) : null;
+  async reactivateMember(sub: string, until: number, expected?: Generation,
+    completed?: (tx: any, user: KeycloakUser) => Promise<void>): Promise<Reactivation> {
+    const known = await this.budgetRead<any>(db => db.memberIsolation.findUnique({ where: { sub } }), until);
+    if (expected && !sameGeneration(known, expected)) return { outcome: 'superseded' };
+    if (known?.credentialsPending) return { outcome: 'unconfirmed' };
+    // Even a provider-only disabled account acquires a local fact before any enable can escape.
+    const claim = known ? await this.claimIsolation(sub, expected ?? known, true, until)
+      : await this.memberTx<Generation | null>(sub, async tx => {
+        if (await tx.memberIsolation.findUnique({ where: { sub } })) return null;
+        return tx.memberIsolation.create({ data: { sub, decidedAt: new Date(), providerDoneAt: new Date(), nextAttemptAt: new Date() } });
+      }, until);
+    if (!claim) return { outcome: 'superseded' };
     if (!await this.changesSettled(sub, [], until)) return { outcome: 'unconfirmed' };
     if (claim !== null) {
       // 세대를 쥔 뒤에 다시 읽는다: 그 전에 주기가 남은 일을 끝냈을 수 있고, 쥔 뒤에는 이 쪽만 완료를 적는다.
-      const owed = await this.storage('isolation_read', () => this.prisma.memberIsolation.findUnique({ where: { sub } }));
+      const owed = await this.budgetRead<any>(db => db.memberIsolation.findUnique({ where: { sub } }), until);
       if (!sameGeneration(owed, claim)) return { outcome: 'superseded' };
       if (owed.providerDoneAt === null) {
         try {
@@ -848,20 +964,23 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         }
       }
     }
-    const enabled = await this.memberChange(sub, claim, true, until - performance.now());
+    const enabled = await this.memberChange(sub, claim, true, until - performance.now(), until);
     if (enabled === null) return { outcome: 'superseded' };
     if (enabled !== 'done') return { outcome: 'unconfirmed' };
     let user: KeycloakUser | null;
     try { user = await this.keycloak.getUser(sub, within(until - performance.now())); }
     catch { return { outcome: 'unconfirmed' }; }
-    if (!user?.enabled) return { outcome: 'unconfirmed' };
     const cleared = await this.memberTx(sub, async tx => {
       const fact = await tx.memberIsolation.findUnique({ where: { sub } });
-      if (claim === null ? fact !== null : !!fact && !sameGeneration(fact, claim)) return 'superseded' as const;
+      if (!sameGeneration(fact, claim)) return 'superseded' as const;
+      if (!user?.enabled) return 'unconfirmed' as const;
+      if (fact.credentialsPending) return 'unconfirmed' as const;
       if (await tx.providerChange.findFirst({ where: { sub, state: 'unknown' }, select: { id: true } })) return 'unconfirmed' as const;
-      if (fact) await tx.memberIsolation.delete({ where: { sub } });
+      if (completed) await completed(tx, user!);
+      if (performance.now() >= until) throw this.isolationUnfinished();
+      await tx.memberIsolation.delete({ where: { sub } });
       return 'activated' as const;
-    });
+    }, until);
     return cleared === 'activated' ? { outcome: 'activated', user } : { outcome: cleared };
   }
 
@@ -875,7 +994,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 묻고, 아니면 멈춰 false를 돌려준다 — 그사이 재활성화된 회원의 새 세션을 옛 격리가 끝내지 않는다. 표식 앞의 물음은 그
    * 표식의 트랜잭션 안에서 회원 잠금을 쥐고 한다(`still(tx)`).
    */
-  async endMemberSessions(sub: string, idpSids: string[] = [], still: (tx?: any) => Promise<boolean> = async () => true): Promise<boolean> {
+  async endMemberSessions(sub: string, idpSids: string[] = [], still: (tx?: any) => Promise<boolean> = async () => true,
+    until = Number.POSITIVE_INFINITY, admissions?: string[]): Promise<boolean | 'relist'> {
     /**
      * 먼저, 부른 쪽이 인증 서버에서 읽어 온 그 회원의 provider 세션 **전부**에 표식을 남긴다(제품 행이 아직 없는 것까지 —
      * 격리 전에 code를 교환해 둔 콜백의 SSO도 여기 있다). 기록된 사실이라 시점에 기대지 않는다: 그 콜백은 언제 commit하든,
@@ -886,32 +1006,37 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
      * 재활성화가 끝나고 그 sid를 다시 받은 새 SSO로 회원이 들어올 수 있다 — 그러면 옛 목록이 그 새 세션을 끝낸다.
      */
     for (const idpSid of new Set(idpSids)) {
-      let change: Change | null | 'lost';
+      let change: Change | null | 'lost' | 'relist';
       try {
-        change = await this.prisma.$transaction(async tx => {
-          await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+        change = await this.deadlineTx(async tx => {
           await this.lockIdpSession(tx, idpSid);
           await this.lockMember(tx, sub);
           if (!await still(tx)) return 'lost' as const;
+          if (admissions) {
+            const current: { sid: string; sub: string }[] = await tx.authSession.findMany({ where: { idpSid }, select: { sid: true, sub: true } });
+            if (current.some(row => row.sub !== sub || !admissions.includes(row.sid))) return 'relist' as const;
+          }
           return this.endRows(tx, idpSid, [], 'isolation', null, undefined, sub);
-        }, { maxWait: 4000, timeout: 8000 });
+        }, until);
       } catch (error: any) {
         if (lockWaitExceeded(error)) throw this.conflict();
         this.storageWarning('end_transaction');
         throw this.storageFailure();
       }
       if (change === 'lost') return false;
+      if (change === 'relist') return 'relist';
       if (change) this.tellIdp(change);
     }
     for (let rounds = 0; ; rounds++) {
       if (!await still()) return false;
-      const rows: Session[] = await this.storage('session_read', () => this.prisma.authSession.findMany({ where: { sub } }));
+      const rows: Session[] = await this.budgetRead(db => db.authSession.findMany({ where: { sub } }), until);
       if (!rows.length) return true;
       if (rounds === TRANSITION_LIMIT) throw this.conflict();
       // 읽은 뒤에도 행마다 다시 묻는다: 읽는 동안 재활성화가 끝나고 회원이 다시 로그인했으면 읽힌 것은 그 새 세션이다.
       for (const row of rows) {
         if (!await still()) return false;
-        await this.endAndTell(row, 'isolation', null);
+        const result = await this.endSession(row, 'isolation', null, { still, until });
+        if (result.ended && result.change) this.tellIdp(result.change);
       }
     }
   }
@@ -1072,7 +1197,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 들였으면 받는다: 표식이 있는 sid의 제품 세션은 종료(그 sid의 행을 모두 지운다) 뒤에 콜백이 덮지 않는다고 판정한 인증으로만
    * 생기므로, 그 sid에 살아 있는 세션의 토큰과 사람·auth_time이 같으면 같은 인증이다.
    */
-  async refuseEndedIdpSession(claims: Record<string, any>): Promise<void> {
+  async refuseEndedIdpSession(claims: Record<string, any>, raw?: string): Promise<void> {
     const idpSid = this.idpSidOfClaims(claims);
     if (!idpSid) return;
     const mark = await this.storage('idp_end_read', () =>
@@ -1083,10 +1208,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       const admitted = await this.storage('idp_end_read', () => this.prisma.authSession.findMany({
         where: { idpSid, sub: String(claims.sub) }, select: { accessToken: true },
       }));
-      if (admitted.some(row => {
-        try { return Number(decodeJwt(row.accessToken).auth_time) === authTime; }
-        catch { return false; }
-      })) return;
+      if (raw && admitted.some(row => row.accessToken === raw)) return;
     }
     throw this.ended('인증 세션이 없습니다');
   }
@@ -1348,6 +1470,12 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       await this.loginFailureRow(req, 'token_invalid', null);
       return { kind: 'landing', error: 'login_failed' };
     }
+    if (!await this.storage('isolation_read', () => this.memberPermitted(this.prisma, payload))) {
+      const mark = await this.storage('idp_end_read', () => this.prisma.idpSessionEnd.findUnique({ where: { idpSid } }));
+      await this.loginFailureRow(req, mark && this.markCovers(mark, payload, flow) ? 'idp_session_ended' : 'member_isolated',
+        this.identity(payload, String(payload.sub)));
+      return { kind: 'landing', error: 'login_failed' };
+    }
     const ip = this.requestIp(req);
 
     // 받아 둔 복구 의도는 먼저 시작해 둔 평범한 흐름의 콜백도 낮추지 못한다: 그 콜백은 probe로 다뤄진다.
@@ -1356,17 +1484,23 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         : null;
     if (flow.phase === 'probe' || (flow.phase === 'plain' && intent)) {
       const reason = (flow.reason ?? intent?.reason)!;
-      let change: Change | null;
+      let change: Change | null | 'ended' | 'isolated';
       try {
         change = await this.prisma.$transaction(async tx => {
           await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
           await this.lockIdpSession(tx, idpSid!);
+          await this.lockMember(tx, String(payload.sub));
+          if (!await this.memberPermitted(tx, payload)) return 'isolated' as const;
+          const mark = await tx.idpSessionEnd.findUnique({ where: { idpSid: idpSid! } });
+          if (mark?.confirmedAt && this.markCovers(mark, payload, flow)) return 'ended' as const;
           return this.endRows(tx, idpSid, [], REASON_CAUSE[reason], ip, reason, String(payload.sub));
         }, { maxWait: 4000, timeout: 8000 });
       } catch {
         this.storageWarning('end_transaction');
         return { kind: 'landing', error: 'login_failed' };
       }
+      if (change === 'isolated') return { kind: 'landing', error: 'login_failed' };
+      if (change === 'ended') return { kind: 'landing', error: 'stale' };
       // 끝났다는 답 없이 fresh로 가면 앞사람의 이름이 고정된 재인증 화면에 선다. 확인될 때까지 랜딩의 같은 버튼이 다시 한다.
       if (!change || !await this.confirmIdpEnd(change, IDP_END_WAIT_MS)) return { kind: 'landing', error: 'end_unconfirmed' };
       return { kind: 'redirect', location: this.startFlow(req, res,
@@ -1382,9 +1516,10 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const sid = randomBytes(32).toString('base64url');
     const proof = randomBytes(32).toString('base64url');
     const detail = JSON.stringify({ institution: who.institution, ip, dataSubject: null, outcome: 'success' });
-    let outcome: 'created' | 'blocked' | 'expired' | 'isolated';
+    let outcome: 'created' | 'blocked' | 'expired' | 'isolated' | 'isolated_ended';
     // 막힌 code가 깨운 표식의 새 종료 요청(깨우기와 한 commit으로 기록된다).
     let blocked = null as Change | null;
+    let alreadyEnded = false;
     try {
       /**
        * 표식 검사와 세션 생성은 그 provider 세션의 잠금 안에서 한 번에 한다: 교환과 잠금 사이에 완료된 Log out은 표식으로
@@ -1397,18 +1532,24 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       outcome = await this.prisma.$transaction(async tx => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await this.lockIdpSession(tx, idpSid!);
+        await this.lockMember(tx, String(payload.sub));
+        if (!await this.memberPermitted(tx, payload)) {
+          // Preserve the already-ended authentication as the audit cause, without reopening its mark or asking the provider.
+          const prior = await tx.idpSessionEnd.findUnique({ where: { idpSid: idpSid! } });
+          return prior && this.markCovers(prior, payload, flow) ? 'isolated_ended' : 'isolated';
+        }
         const now = new Date();
         if (Number(payload.exp) * 1000 <= now.getTime() || now.getTime() - flow.issuedAt > PENDING_VALID_MS) return 'expired';
         const mark = await tx.idpSessionEnd.findUnique({ where: { idpSid: idpSid! } });
         if (mark && this.markCovers(mark, payload, flow)) {
+          alreadyEnded = !!mark.confirmedAt;
           // 끝내기로 한 SSO의 인증이 code를 냈다: 그 SSO가 아직 살아 있다. 확인돼 있었더라도 종료 요청을 다시 깨운다.
           // 덮지 않는 인증(확인된 종료 뒤에 그 sid를 다시 받은 새 SSO)은 표식을 그대로 두고 지나간다 — 옛 인증은 계속 막힌다.
-          await tx.idpSessionEnd.update({ where: { idpSid: idpSid! }, data: { confirmedAt: null, nextAttemptAt: now } });
-          blocked = await this.recordEnd(tx, idpSid!, String(payload.sub), mark.attempts);
+          if (!mark.confirmedAt) {
+            blocked = await this.recordEnd(tx, idpSid!, String(payload.sub), mark.attempts);
+          }
           return 'blocked';
         }
-        await this.lockMember(tx, String(payload.sub));
-        if (await tx.memberIsolation.findUnique({ where: { sub: String(payload.sub) } })) return 'isolated';
         await tx.authSession.create({ data: {
           sid,
           sub: String(payload.sub),
@@ -1429,8 +1570,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       return { kind: 'landing', error: 'login_failed' };
     }
 
-    if (outcome === 'isolated') {
-      await this.loginFailureRow(req, 'member_isolated', who);
+    if (outcome === 'isolated' || outcome === 'isolated_ended') {
+      await this.loginFailureRow(req, outcome === 'isolated_ended' ? 'idp_session_ended' : 'member_isolated', who);
       return { kind: 'landing', error: 'login_failed' };
     }
     const again = { phase: flow.phase, reason: flow.reason, prompt: flow.prompt, restarts: flow.restarts + 1 };
@@ -1441,7 +1582,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       await this.loginFailureRow(req, 'idp_session_ended', who);
       // provider 세션을 끝낸 뒤 로그인을 처음부터 다시 시작한다 — 이번에는 폼이 나온다. 끝났다는 답이 없거나 같은 흐름에서
       // 두 번째면 랜딩으로 보낸다(같은 버튼으로 다시 할 수 있다). 되돌이 고리를 만들지 않는다.
-      const confirmed = !!blocked && await this.confirmIdpEnd(blocked, IDP_END_WAIT_MS);
+      const confirmed = alreadyEnded || (!!blocked && await this.confirmIdpEnd(blocked, IDP_END_WAIT_MS));
       if (!confirmed || flow.restarts > 0) return { kind: 'landing', error: 'end_unconfirmed' };
       return { kind: 'redirect', location: this.startFlow(req, res, again) };
     }
@@ -1468,6 +1609,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const hash = this.proofHash(proof);
     const session = await this.readSession(sid);
     if (!session?.entryProofHash || !session.entryProofExpiresAt) throw refused();
+    await this.refuseIsolatedMember(decodeJwt(session.accessToken));
     const stored = Buffer.from(session.entryProofHash), given = Buffer.from(hash);
     if (stored.length !== given.length || !timingSafeEqual(stored, given)) throw refused();
     const who = this.storedIdentity(session);
@@ -1539,6 +1681,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   /** 응답은 그 요청을 시작한 관찰 S에만 적용한다: 성공은 S 조건부 저장이 count 1일 때만, 거절은 S 조건부 종료. */
   private async doRefresh(session: Session, ip: string | null): Promise<RefreshOutcome> {
+    await this.refuseIsolatedMember(decodeJwt(session.accessToken));
     const answer = await this.exchangeRefresh(session.refreshToken);
     if (answer.kind === 'unavailable') return { kind: 'unavailable' };
     if (answer.kind === 'refused')
@@ -1550,18 +1693,16 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       return { kind: 'unavailable' };
     // 격리된 회원의 세션은 갱신하지 않고 그 자리에서 끝낸다(원인 isolation) — 인증 서버의 갱신 답을 믿지 않는다. 격리는
     // 우리 쪽 사실로 본다(콜백과 같은 규칙): 인증 서버의 관리 API는 이 길에서 읽지 않는다.
-    const isolated = await this.storage('isolation_read', () =>
-      this.prisma.memberIsolation.findUnique({ where: { sub: session.sub }, select: { sub: true } }));
-    if (isolated)
-      return await this.endAndTell(session, 'isolation', ip) ? { kind: 'ended' } : { kind: 'conflict' };
     const data = {
       accessToken: answer.tokens.access_token as string,
       refreshToken: (answer.tokens.refresh_token ?? session.refreshToken) as string,
       atExpiresAt: new Date(Number(answer.payload.exp) * 1000 - REFRESH_LEAD_MS),
       idpSid,
     };
-    const { count } = await this.storage('session_write', () =>
-      this.prisma.authSession.updateMany({ where: this.version(session), data }));
+    const count = await this.memberTx(session.sub, async tx => {
+      if (!await this.memberPermitted(tx, answer.payload)) return 0;
+      return (await tx.authSession.updateMany({ where: this.version(session), data })).count;
+    });
     // 0행이면 늦은 성공 토큰을 버린다 — 끝난 세션을 되살리거나 새 버전을 덮지 않는다.
     return count === 1 ? { kind: 'stored', session: { ...session, ...data } } : { kind: 'conflict' };
   }
@@ -1592,6 +1733,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     // idle → refresh → 진행을 관찰마다 판정한다. 조건부 전이가 0행이면 그 관찰(과 늦은 성공 토큰)을 버리고 다시 읽는다.
     let refreshAhead = false;
     for (let writes = 0; ;) {
+      await this.refuseIsolatedMember(decodeJwt(session.accessToken));
       const now = Date.now();
       const cutoff = new Date(now - SESSION_IDLE_MS);
       let ended: string;
@@ -1633,6 +1775,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
      * 요청을 바꾸지 않고, 저장소 실패는 `storage`가 고정 분류로 남겼다.
      */
     if (refreshAhead) this.refresh(session, ip).catch(() => undefined);
+    await this.refuseIsolatedMember(decodeJwt(session.accessToken));
     return session;
   }
 

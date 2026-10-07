@@ -70,8 +70,18 @@ model MemberIsolation {
   providerDoneAt DateTime?
   attempts       Int       @default(0)
   nextAttemptAt  DateTime
+  /// A compound approval owns the remaining credential changes; Activate cannot skip them.
+  credentialsPending Boolean @default(false)
 
   @@index([providerDoneAt, nextAttemptAt])
+}
+
+/// Last completed membership change. Tokens carrying the previous institution/roles remain invalid after activation.
+/// Read locally on every authentication path; no provider administration call is needed during login or refresh.
+model MemberCredential {
+  sub    String @id
+  groups String[]
+  roles  String[]
 }
 
 /// S7-U5 (D600) 인증 서버에 보낸 **변경** 호출 하나: 회원 비활성화(disable)·활성화(enable), provider 세션 하나의 종료

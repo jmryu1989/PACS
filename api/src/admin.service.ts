@@ -1,5 +1,5 @@
 import {
-  BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException,
+  BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomBytes } from 'crypto';
@@ -8,7 +8,7 @@ import {
   openAuditCursor, readAuditPage, sealAuditCursor,
 } from './admin-audit';
 import { memberState } from './auth.guard';
-import { AuthService, Reactivation } from './auth.service';
+import { AuthService, Generation, Reactivation } from './auth.service';
 // 역할 목록은 clinician-policy 한 곳에서 온다. 여기서 별도 literal을 두면 guard와 어긋난다.
 import { APP_ROLES } from './clinician-policy';
 import { KeycloakService, KeycloakUser, within } from './keycloak.service';
@@ -37,6 +37,7 @@ function text(value: unknown, field: string, max: number, required = true): stri
 
 @Injectable()
 export class AdminService {
+  private readonly logger = new Logger('Admin');
   constructor(
     private prisma: PrismaService,
     private keycloak: KeycloakService,
@@ -106,10 +107,11 @@ export class AdminService {
    * 어디서 끊겨도 로그인 콜백과 갱신은 그 사실을 보고 막고, 남은 인증 서버 일은 종료 재시도 주기가 잇는다. 사실은 재활성화가
    * 끝까지 성공한 뒤에만 지운다(auth.reactivateMember).
    */
-  private async isolate(id: string): Promise<void> {
-    await this.auth.isolateMember(id);
+  private async isolate(id: string, credentialsPending = false): Promise<Generation> {
+    const generation = await this.auth.isolateMember(id, credentialsPending);
     const remaining = await this.prisma.authSession.count({ where: { sub: id } });
     if (remaining !== 0) throw new Error('AuthSession 격리 확인 실패');
+    return generation;
   }
 
   /**
@@ -117,8 +119,8 @@ export class AdminService {
    * 사실 지움). 기한 안에 끝내지 못했거나 새 정지가 넘겨받았으면 던진다 — 사실은 남아 로그인을 계속 막는다(승인 변경·승인
    * 취소는 격리 충돌로 답한다). 성공하면 그때 다시 읽은 회원을 돌려준다.
    */
-  private async reactivate(id: string, until = performance.now() + ACTIVATE_LIMIT_MS): Promise<KeycloakUser> {
-    const result = await this.auth.reactivateMember(id, until);
+  private async reactivate(id: string, generation: Generation, until = performance.now() + ACTIVATE_LIMIT_MS): Promise<KeycloakUser> {
+    const result = await this.auth.reactivateMember(id, until, generation);
     if (result.outcome !== 'activated') throw new Error('재활성화를 확정하지 못했습니다');
     return result.user;
   }
@@ -162,14 +164,13 @@ export class AdminService {
     if (!before.emailVerified && !verificationOverride)
       throw new BadRequestException('이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다');
     try {
-      await this.isolate(id);
-      await this.keycloak.setGroups(id, [institution]);
-      await this.keycloak.setRoles(id, roles);
+      const generation = await this.isolate(id, true);
+      await this.auth.changeMemberCredentials(id, generation, [institution], roles);
       const changed = await this.managed(id);
       if (memberState(changed.groups, changed.roles) !== 'APPROVED')
         throw new Error('승인 상태 재검증 실패');
       // 비활성으로 남기는 승인은 격리 사실도 남긴다 — 나중의 Activate가 지운다.
-      if (targetEnabled) await this.reactivate(id);
+      if (targetEnabled) await this.reactivate(id, generation);
       return this.row(await this.managed(id));
     } catch {
       return this.isolatedConflict(id);
@@ -178,14 +179,13 @@ export class AdminService {
 
   private async cancelApproval(id: string) {
     try {
-      await this.isolate(id);
-      await this.keycloak.setGroups(id, []);
-      await this.keycloak.setRoles(id, []);
+      const generation = await this.isolate(id, true);
+      await this.auth.changeMemberCredentials(id, generation, [], []);
       const changed = await this.managed(id);
       if (memberState(changed.groups, changed.roles) !== 'PENDING')
         throw new Error('대기 상태 재검증 실패');
       // BFF는 PENDING 세션을 허용해 승인 대기 안내를 보여 준다.
-      await this.reactivate(id);
+      await this.reactivate(id, generation);
       return this.row(await this.managed(id));
     } catch {
       return this.isolatedConflict(id);
@@ -328,7 +328,11 @@ export class AdminService {
         if (before.approvalState === 'INVALID')
           throw new BadRequestException('INVALID 사용자는 자격을 바로잡기 전 활성화할 수 없습니다');
         let result: Reactivation;
-        try { result = await this.auth.reactivateMember(id, until); }
+        try { result = await this.auth.reactivateMember(id, until, undefined, async (tx, user) => {
+          // The success audit and clear commit together. An audit timeout must leave the blocking fact intact.
+          await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: 'admin.user.activate', target: id,
+            detail: JSON.stringify({ before, after: this.row(user), verificationOverride: body?.verificationOverride === true }) } });
+        }); }
         catch { result = { outcome: 'unconfirmed' }; }
         if (result.outcome !== 'activated') {
           // 새 정지가 넘겨받았으면 그 정지가 지금 상태다(격리 충돌), 아니면 확정하지 못한 채 이용 제한을 유지한다.
@@ -339,17 +343,22 @@ export class AdminService {
       } else {
         throw new BadRequestException('변경할 회원 상태가 없습니다');
       }
-      await this.audit(c.actor, `admin.user.${action}`, id, {
+      if (!activating) await this.audit(c.actor, `admin.user.${action}`, id, {
         before, after, verificationOverride: body?.verificationOverride === true,
       });
       return after;
     } catch (error) {
       if (!(error instanceof ConflictException)) throw error;
       let current: any = null;
-      try { current = this.row(await this.managed(id, bounded())); } catch {}
-      await this.audit(c.actor, 'admin.user.patch.failed', id, {
-        before, after: current, verificationOverride: body?.verificationOverride === true, failed: true,
-      });
+      if (!activating || performance.now() < until) {
+        try { current = this.row(await this.managed(id, bounded())); } catch {}
+      }
+      const data = { actor: c.actor || 'unknown', action: 'admin.user.patch.failed', target: id,
+        detail: JSON.stringify({ before, after: current, verificationOverride: body?.verificationOverride === true, failed: true }) };
+      if (activating) {
+        try { await this.auth.deadlineTx(tx => tx.auditLog.create({ data }), until); }
+        catch { this.logger.warn('admin_activation_failure_audit_unavailable'); }
+      } else await this.prisma.auditLog.create({ data });
       throw error;
     }
   }

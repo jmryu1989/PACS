@@ -16,6 +16,7 @@ const bound = (limitMs?: number) => limitMs === undefined ? undefined : within(l
  * `unknown` 모른다. `outcome`은 진단용 요약(상태 코드·`not_sent`·`transport`)이며 판정에 쓰지 않는다.
  */
 export type ChangeAnswer = { state: 'done' | 'void' | 'unknown'; outcome: string };
+export type CredentialWriter = (path: string, method: 'PUT' | 'DELETE' | 'POST', body?: any) => Promise<void>;
 
 /** 연결 자체가 이루어지지 않은 오류: 요청의 바이트가 인증 서버에 닿지 않았다. */
 const NOT_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
@@ -135,7 +136,7 @@ export class KeycloakService {
    * 코드로 돌려줄 수 있고(오류 처리기가 예외의 상태를 그대로 쓴다) 이 답만으로는 둘을 가르지 못한다 — 처리 전 거절이라고
    * 믿으면 실제로 수행된 변경을 "하지 않았다"로 지운다. 토큰 취득의 503은 다르다: 변경 요청이 나가지 않았다(void).
    */
-  private async change(path: string, method: 'PUT' | 'DELETE', body: any, signal: AbortSignal | undefined, absentIsDone: boolean)
+  private async change(path: string, method: 'PUT' | 'DELETE' | 'POST', body: any, signal: AbortSignal | undefined, absentIsDone: boolean)
     : Promise<ChangeAnswer> {
     for (let attempt = 0; attempt < 2; attempt++) {
       let token: string;
@@ -239,43 +240,57 @@ export class KeycloakService {
     return created;
   }
 
-  async setGroups(id: string, institutions: string[]): Promise<void> {
-    const groups: any[] = await this.adm('/groups?briefRepresentation=true&first=0&max=500') ?? [];
+  private async credentialWrite(path: string, method: 'PUT' | 'DELETE' | 'POST', body: any, signal?: AbortSignal): Promise<void> {
+    const answer = await this.change(path, method, body, signal, false);
+    if (answer.state !== 'done') throw new ServiceUnavailableException('Keycloak 자격 변경을 확인하지 못했습니다');
+  }
+
+  /** A credential request recorded by the compound membership command before it is sent. */
+  async changeCredential(path: string, method: 'PUT' | 'DELETE' | 'POST', body: any, signal?: AbortSignal): Promise<ChangeAnswer> {
+    const answer = await this.change(path, method, body, signal, false);
+    this.cache.clear();
+    return answer;
+  }
+
+  async setGroups(id: string, institutions: string[], signal?: AbortSignal, write: CredentialWriter =
+    (path, method, body) => this.credentialWrite(path, method, body, signal)): Promise<void> {
+    const groups: any[] = await this.adm('/groups?briefRepresentation=true&first=0&max=500', 'GET', undefined, true, signal) ?? [];
     const byName = new Map(groups.map(group => [String(group.name), group]));
     if (institutions.some(institution => !byName.has(institution)))
       throw new ServiceUnavailableException('허용되지 않은 Keycloak 그룹 변경입니다');
-    const current: any[] = await this.adm(`/users/${encodeURIComponent(id)}/groups?max=500`) ?? [];
+    const current: any[] = await this.adm(`/users/${encodeURIComponent(id)}/groups?max=500`, 'GET', undefined, true, signal) ?? [];
     const wanted = new Set(institutions);
     for (const group of current)
       if (!wanted.has(String(group.name)))
-        await this.adm(`/users/${encodeURIComponent(id)}/groups/${encodeURIComponent(group.id)}`, 'DELETE');
+        await write(`/users/${encodeURIComponent(id)}/groups/${encodeURIComponent(group.id)}`, 'DELETE');
     const currentNames = new Set(current.map(group => String(group.name)));
     for (const institution of wanted) {
       if (currentNames.has(institution)) continue;
       const group = byName.get(institution);
-      await this.adm(`/users/${encodeURIComponent(id)}/groups/${encodeURIComponent(group.id)}`, 'PUT');
+      await write(`/users/${encodeURIComponent(id)}/groups/${encodeURIComponent(group.id)}`, 'PUT');
     }
     this.cache.clear();
   }
 
-  async setRoles(id: string, roles: string[]): Promise<void> {
+  async setRoles(id: string, roles: string[], signal?: AbortSignal, write: CredentialWriter =
+    (path, method, body) => this.credentialWrite(path, method, body, signal)): Promise<void> {
     if (roles.some(role => !MANAGED_ROLES.has(role)))
       throw new ServiceUnavailableException('허용되지 않은 Keycloak 역할 변경입니다');
-    const current: any[] = await this.adm(`/users/${encodeURIComponent(id)}/role-mappings/realm`) ?? [];
+    const current: any[] = await this.adm(`/users/${encodeURIComponent(id)}/role-mappings/realm`, 'GET', undefined, true, signal) ?? [];
     const wanted = new Set(roles);
     const remove = current.filter(role => MANAGED_ROLES.has(role.name) && !wanted.has(role.name));
     if (remove.length)
-      await this.adm(`/users/${encodeURIComponent(id)}/role-mappings/realm`, 'DELETE', remove);
+      await write(`/users/${encodeURIComponent(id)}/role-mappings/realm`, 'DELETE', remove);
     const currentNames = new Set(current.map(role => role.name));
     const add: any[] = [];
     for (const role of wanted) {
       if (currentNames.has(role)) continue;
-      const representation = await this.adm(`/roles/${encodeURIComponent(role)}`);
+      const representation = await this.adm(`/roles/${encodeURIComponent(role)}`, 'GET', undefined, true, signal);
       if (!representation) throw new ServiceUnavailableException(`Keycloak 역할이 없습니다: ${role}`);
       add.push(representation);
     }
     if (add.length)
-      await this.adm(`/users/${encodeURIComponent(id)}/role-mappings/realm`, 'POST', add);
+      await write(`/users/${encodeURIComponent(id)}/role-mappings/realm`, 'POST', add);
     this.cache.clear();
   }
 

@@ -1,5 +1,19 @@
 # 살아 있는 불변조건 테스트
 
+## S7-U5 격리 경합 회귀 (D600·D604, round 10)
+
+REQ-S7-U5-ISOLATION → RISK-S7-U5-STALE-COMMAND/OLD-CREDENTIAL/UNKNOWN-EFFECT/DEADLINE →
+`auth_session_service_test.cjs`의 R10-01~11 및 U1~U9. 기존 D600·U5E-15·U5E-28 회귀와 같은 모듈에서 실행한다.
+
+- R10-01/02/03: 최초 Suspend·Activate·승인/취소의 세대를 끝까지 보존하고 최신 정지를 이전 명령이 뒤집지 않는다.
+- R10-04/05: 사실 없는 Activate도 송신 전에 차단 사실을 만들며 cookie·Bearer·직접 인증·refresh 교환 전·표식 있는 callback이 DB만으로 거절된다. 종료는 허용한다.
+- R10-06/07/09: 이미 종료된 callback/probe, 늦은 세션 목록, 같은 초의 옛 Bearer가 후속 인증을 지우거나 다시 허용하지 않는다. 목록은 읽기 전의 실제 제품 세션 식별값 집합과 적용 시점의 집합을 대조한다.
+- R10-08/11: 실제 PostgreSQL 두 연결 이상의 경합에서 DB 조회·잠금·감사까지 전체 15초 기한, 만료 후 clear 금지, 종료 기록과 최종 완료/clear의 회원별 직렬화를 검사한다. 대역만으로 이 순서를 입증하지 않는다.
+- R10-10: 승인 자격 변경의 단계와 개별 외부 변경 호출이 격리에 결속되며 별도 Activate가 중간에 성공하지 않는다. A→B 변경 뒤 A 권한의 토큰·callback은 계속 거절되고 B 자격은 정상 진입한다.
+- U1 `HTTP-OUTCOMES`, U2 `401-THEN-CHANGE-503`, U3 `HEADERS-TIMEOUT`, U4 `CRASH-CUTS`, U5 `SID-RETRY-STALE`, U6 `ABA-ENABLE-CLEAR`, U7 `APPROVAL-ENABLE-LOST`, U8 `ROW-END-LAST-GAP`, U9 `UNKNOWN-GC-13H`는 HTTP 효과/응답과 저장 경계를 각각 제어한다. U4는 저장 전/후, commit 후 송신 전, 효과 전/후, settle 실패 3회와 settle 후 중단을 세 변경 종류에 적용한다.
+
+전진 migration `20261007150000_isolation_authentication_boundary`는 `MemberIsolation.credentialsPending`과 완료한 자격의 `MemberCredential`을 추가한다(전체 41개). 복원 fixture는 진행 중 단계와 완료 자격을 보존한다. 로그인·refresh에 관리 API나 사용자 클릭을 추가하지 않는다. 실스택·실제 Keycloak 동일 sid·PR CI·G3·독립 검수는 이 순수/일회용 PG 실행과 별도의 후보 관문이다.
+
 REQ-D02-IDENTITY-POSITION → RISK-D02-WRONG-IDENTITY/OCCLUSION/PREFERENCE-LOSS/STALE → TEST-VIEWER-IDENTITY-POSITION: `viewer_identity_position_dom_test.py`는 현재/비교 정보 묶음의 네 모서리 배치·복사, 작은 viewport와 native overlay 겹침, 원본 식별/교체/소유자 경계 및 이전 설정 이행을 격리 DOM에서 검사한다. `reading_appearance_position_live.py`는 v7→v8 계정 왕복, viewer v2 위치의 엄격한 형식, 원자적 거절·구버전 작성자와 소유자 분리를 검사한다. `e2e/test_viewer_identity_position.py`는 실제 영상에서 위치 변경→복사→계정 저장/다른 브라우저 복원과 영상·편집 보존, 기존 로컬 설정·늦은 응답을 검사한다. 두 live 모듈은 각각 선언한 시험만 선택하며 fresh hosted CI가 기존 표시 설정 API 회귀와 함께 실행한다. 로컬 원본 연결 fixture는 실행하지 않는다. 필드별/modality별 배치·발표 모드·물리 모니터는 별도 잔여다.
 
 ## 실행 입구와 중단 조건 (2026-09-11)
