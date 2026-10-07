@@ -300,7 +300,11 @@ export class AdminService {
     if (!['temp', 'email'].includes(body?.mode))
       throw new BadRequestException('mode는 temp 또는 email이어야 합니다');
     const mode: 'temp' | 'email' = body.mode;
-    const before = this.row(await this.member(id));
+    // A realm registration may still be pending; resetting its password grants no membership.
+    const before = this.row(await this.prisma.$transaction(async tx => {
+      await lockMemberRights(tx, id);
+      return await tx.memberRights.findUnique({ where: { sub: id } }) ?? await this.register(tx, user);
+    }));
     if (mode === 'temp') {
       const temporaryPassword = randomBytes(18).toString('base64url') + 'aA1!';
       await this.keycloak.resetPassword(id, mode, temporaryPassword);

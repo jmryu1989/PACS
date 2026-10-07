@@ -193,7 +193,12 @@ class SessionEndLive(unittest.TestCase):
 
     def credentials(self, page, who: str, name: bool = True) -> str:
         if name:
-            page.fill("#username", self.stack.username(self.logins[who]))
+            if page.locator("#username").is_visible():
+                page.fill("#username", self.stack.username(self.logins[who]))
+            else:
+                # prompt=login with retained SSO fixes the username and asks only for the password.
+                self.assertEqual(page.locator("#kc-attempted-username").inner_text().strip(),
+                                 self.stack.username(self.logins[who]))
         page.fill("#password", self.stack.passwords[self.logins[who]])
         page.click("#kc-login")
         page.wait_for_function("() => !location.pathname.startsWith('/auth/realms/kin/login-actions/authenticate') || !!document.querySelector('#input-error')")
@@ -249,6 +254,13 @@ class SessionEndLive(unittest.TestCase):
         body = answer.json() if "json" in (answer.headers.get("content-type") or "") else {}
         return answer.status, body.get("sub")
 
+    def assert_latest_rights(self, context, member):
+        answer = context.request.get(self.stack.proxy + "/api/me")
+        self.assertEqual(answer.status, 200)
+        body = answer.json()
+        self.assertEqual((body["sub"], body["institution"], sorted(body["roles"])),
+                         (member["id"], member["institution"], sorted(member["roles"])))
+
     def bearer_me(self, token: str) -> tuple:
         """`GET /api/me` with the access token as Bearer and no cookie (the guard's Bearer path): (status, sub or code)."""
         api = self.playwright.request.new_context(ignore_https_errors=True)
@@ -303,7 +315,11 @@ class SessionEndLive(unittest.TestCase):
 
     def admin_sets_enabled(self, who: str, enabled: bool):
         """The administrator's Suspend / Activate through the product's admin route (the stack's admin identity)."""
-        return self.stack.request("PATCH", f"/admin/users/{self.ids[who]}", "jmryu", {"enabled": enabled})
+        result = self.stack.request("PATCH", f"/admin/users/{self.ids[who]}", "jmryu", {"enabled": enabled})
+        if result.status == 200:
+            # auth_time is in whole seconds; a new login must be strictly after this command's boundary.
+            time.sleep(1.05)
+        return result
 
     def callbacks(self, context) -> list:
         """The product callbacks this browser makes from now on: whether each carried a code, and the provider's error."""
@@ -595,12 +611,15 @@ class SessionEndLive(unittest.TestCase):
             self.assertEqual((self.provider_alive("A"), self.provider_enabled("A")), (before, True))
             self.assertEqual(self.end_requests(provider), [], "Suspend schedules no provider session end")
             self.assertEqual(self.ends("A"), [("auth.logout", "isolation")])
-            self.stack.set_member_rights(self.ids["A"], enabled=True)
+            activated = self.stack.set_member_rights(self.ids["A"], enabled=True)
             self.assertEqual(self.stack.bearer_request("GET", "/me", old).status, 401)
             page.goto(self.stack.proxy + "/api/auth/login")
             self.assertEqual(self.settle(page), "keycloak", "old SSO requires one fresh login")
+            asked = len(context.asked)
             self.assertEqual(self.credentials(page, "A"), "main")
+            self.assertEqual(context.asked[asked:], [], "one password submission must enter without another prompt")
             self.assertEqual(self.me(context), (200, self.ids["A"]))
+            self.assert_latest_rights(context, activated)
             self.report("SE-09", product_revoked=True, provider_untouched=True, fresh_login=True)
         finally:
             self.stack.set_member_rights(self.ids["A"], enabled=True)
@@ -620,11 +639,14 @@ class SessionEndLive(unittest.TestCase):
             self.assertEqual(self.product_sessions("A"), 0)
             self.assertEqual((self.provider_alive("A"), self.provider_enabled("A")), (alive, True))
             self.assertEqual(self.ends("A"), [("auth.logout", "isolation")] * 2)
-            self.stack.set_member_rights(self.ids["A"], enabled=True)
+            activated = self.stack.set_member_rights(self.ids["A"], enabled=True)
             page2.goto(self.stack.proxy + "/api/auth/login")
             self.assertEqual(self.settle(page2), "keycloak")
+            asked = len(second.asked)
             self.assertEqual(self.credentials(page2, "A"), "main")
+            self.assertEqual(second.asked[asked:], [], "one password submission must enter without another prompt")
             self.assertEqual(self.me(second), (200, self.ids["A"]))
+            self.assert_latest_rights(second, activated)
             self.assertEqual(self.me(first), (401, None), "Activate cannot revive the other PC's product session")
             self.report("SE-10", refused_browsers=2, provider_untouched=True)
         finally:
@@ -649,6 +671,9 @@ class SessionEndLive(unittest.TestCase):
         self.wait("provider logout confirmed", lambda: self.provider_alive("A") == 0, 30)
         self.assertEqual(self.product_sessions("A"), 0)
         self.assertTrue(self.end_requests(a_sid) and all(state == "done" for state in self.end_requests(a_sid)))
+        # This direct API logout has no browser fresh-flow proof. Separate its confirmed end from the
+        # next plain authentication's whole second; U5E-21 tests same-second admission with a fresh proof.
+        time.sleep(1.05)
         page.goto(self.stack.proxy + APP + "index.html")
         at = self.settle(page)
         if at == "landing":
@@ -656,7 +681,13 @@ class SessionEndLive(unittest.TestCase):
         self.assertEqual(at, "keycloak")
         self.assert_editable_form(page, "the next person's Login after Log out")
         asked = len(context.asked)
-        self.assertEqual(self.credentials(page, "B"), "main")
+        entered = self.credentials(page, "B")
+        if entered != "main":
+            causes = psql('SELECT detail::jsonb->>\'cause\' FROM "AuditLog" WHERE target=\'' + self.ids["B"] +
+                          '\' AND action=\'auth.login\' AND id > ' + str(self.audit_floor) + ' ORDER BY id;')
+            self.report("SE-11-refused", sequence=["logout-confirmed", "plain-login", "password", entered],
+                        asked=context.asked[asked:], causes=causes, path=urlparse(page.url).path)
+        self.assertEqual(entered, "main")
         self.assertEqual(context.asked[asked:], [], "no second credential form")
         self.assertEqual(self.me(context), (200, self.ids["B"]))
         b_sid, _ = self.provider_session_and_token("B")

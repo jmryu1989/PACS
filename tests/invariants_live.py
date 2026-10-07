@@ -1721,31 +1721,30 @@ class BffInvariantTests(unittest.TestCase):
 
     def test_member_xss_value_stays_text_and_temporary_password_is_one_time(self) -> None:
         payload = '<img src=x onerror="document.body.dataset.pwned=1">'
-        script = """
-const { AdminService } = require('/app/dist/admin.service.js');
-const payload = process.argv[1];
-const value = new AdminService({}, {}).row({
-  id: 'x', username: 'x', email: 'x@local.test', emailVerified: true,
-  firstName: payload, lastName: '', enabled: true, serviceAccountClientId: null,
-  groups: ['hallym'], roles: ['radiologist'],
-});
-process.stdout.write(JSON.stringify(value));
-"""
-        mapped = subprocess.run(
-            ["docker", "compose", "exec", "-T", "api", "node", "-e", script, payload],
-            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
-        )
-        self.assertEqual(mapped.returncode, 0, mapped.stderr)
-        self.assertEqual(json.loads(mapped.stdout)["name"], payload)
-
-        source = (ROOT / "worklist-v0" / "hpacs-lite" / "admin.html").read_text(encoding="utf-8")
-        self.assertNotIn("innerHTML", source)
-        self.assertNotIn("localStorage", source)
-        self.assertNotIn("sessionStorage", source)
-        self.assertIn("cell.textContent = value", source)
-        self.assertIn("box.textContent = value", source)
-        self.assertIn('value.textContent = password;', source)
-        self.assertIn('$("#temporary-password").textContent = "";', source)
+        username = "kin-test-xss-" + uuid.uuid4().hex
+        user_id = None
+        try:
+            created = self.admin("POST", "/users", {
+                "username": username, "enabled": True, "emailVerified": True,
+                "email": username + "@local.test", "firstName": payload, "lastName": "",
+            })
+            self.assertEqual(created.status, 201, created.text)
+            user_id = str(created.body)
+            self.stack.set_member_rights(user_id, institution="hallym", roles=["radiologist"], enabled=True)
+            listed = self.admin_row(username)
+            self.assertEqual(listed["name"], payload)
+            self.assertNotIn("temporaryPassword", listed)
+            reset = self.stack.request("POST", f"/admin/users/{quote(user_id)}/reset-password", "jmryu", {"mode": "temp"})
+            self.assertEqual(reset.status, 200, reset.text)
+            self.assertRegex(reset.body["temporaryPassword"], TEMPORARY_PASSWORD_RE)
+            listed_again = self.admin_row(username)
+            self.assertEqual(listed_again["name"], payload)
+            self.assertNotIn("temporaryPassword", listed_again, "임시 비밀번호는 발급 응답에만 있습니다")
+            self.assertNotIn(reset.body["temporaryPassword"], json.dumps(user_audit(user_id), ensure_ascii=False))
+            # Browser text rendering and clearing the one-time dialog are exercised by
+            # admin_member_roles_dom_test.py test_03 and test_06; no implementation-string pins here.
+        finally:
+            self.delete_member(user_id)
 
     def test_member_names_have_one_separator_between_family_and_given_name(self) -> None:
         me = self.stack.request("GET", "/me", "doctor")

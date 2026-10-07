@@ -2458,6 +2458,8 @@ test('U5E-01 (acceptance 1) a callback that exchanged its code before a Log out 
   // L: the Log out of S1 completes meanwhile.
   const out = await w.call(w.I1, 'logout', { sid });
   assert.deepEqual([out.status, await w.sessions(), (await w.marks()).map(m => m.slice(0, 2))], [204, 0, [[X, 'logout']]]);
+  // This case resumes after the provider confirmed the end; 204 only confirms the product commit.
+  await w.until('the preceding provider end is confirmed', async () => !!(await w.mark(X))?.confirmedAt);
   gate.release();
   const done = await heldC;
   // C resumes after L: no product session, no kin_sid, no entry proof. The provider session is ended (again) and the
@@ -4061,6 +4063,71 @@ test('CORE-R2-LIST GET leaves rights unchanged; PATCH registers and approves ato
   assert.equal(await w.base.memberRights.count(),before+1);
   assert.equal((await r10Patch(admin,m,{enabled:false,version:null})).status,409,'existing row requires CAS');
   await w.finish('CORE-R2-LIST');
+});
+
+// R8-1 / REQ-S7-U5-DB-RIGHTS -> RISK-PENDING-RESET / SECRET-IN-LOG / RIGHTS-ESCALATION.
+for (const mode of ['temp', 'email']) test(`CORE_R8_PENDING_RESET ${mode}: register without granting rights or moving the boundary; one-time secret`, async t => {
+  const w = await world(t), sub = r10Member('syn-r8-reset-' + mode), calls = [];
+  const { AdminService } = require('/app/dist/admin.service');
+  const provider = new KeycloakService();
+  provider.resetPassword = async (id, sentMode, password) => { calls.push({ id, mode: sentMode, password }); };
+  const admin = new AdminService(w.I1.prisma, provider, null, w.I1.service);
+  const reset = caller => r10Answer(admin.resetPassword(sub, { mode }, caller));
+  assert.equal((await reset({ actor: 'syn-doctor', roles: ['radiologist'] })).status, 403);
+  assert.equal(await w.base.memberRights.count({ where: { sub } }), 0);
+  assert.equal(calls.length, 0);
+  const before = (await admin.listUsers(1, R10_CALLER)).users.find(row => row.id === sub);
+  const result = await reset(R10_CALLER);
+  assert.equal(result.status, 200);
+  assert.deepEqual([result.user.approvalState, result.user.institution, result.user.roles, result.user.enabled],
+    ['PENDING', null, [], true]);
+  const stored = await w.base.memberRights.findUnique({ where: { sub } });
+  assert.equal(stored.newAuthAfter, null);
+  assert.equal(stored.version, 1);
+  assert.equal(await w.base.providerChange.count({ where: { sub } }), 0);
+  const audit = await w.base.auditLog.findMany({ where: { target: sub, action: 'admin.user.reset-password' } });
+  assert.equal(audit.length, 1);
+  const detail = JSON.parse(audit[0].detail);
+  assert.equal(detail.mode, mode);
+  const { rosterUnconfirmed, ...shape } = before;
+  assert.deepEqual(detail.before, { ...shape, version: 1 });
+  assert.deepEqual(detail.after, detail.before);
+  const after = (await admin.listUsers(1, R10_CALLER)).users.find(row => row.id === sub);
+  assert.equal('temporaryPassword' in after, false);
+  assert.equal(calls.length, 1);
+  assert.deepEqual([calls[0].id, calls[0].mode], [sub, mode]);
+  if (mode === 'temp') {
+    assert.match(result.user.temporaryPassword, /^[A-Za-z0-9_-]{24}aA1!$/);
+    assert.equal(calls[0].password, result.user.temporaryPassword);
+    assert.ok(!JSON.stringify(await w.base.auditLog.findMany()).includes(result.user.temporaryPassword));
+  } else assert.equal('temporaryPassword' in result.user, false);
+  await w.finish('CORE_R8_PENDING_RESET ' + mode);
+});
+
+test('CORE_R8_RESET_EXISTING_AND_RACE: reset preserves suspended rights, sessions and boundary; overlapping registrations converge', async t => {
+  const w = await world(t), sub = 'syn-r8-existing', { sid } = await coreMember(w, sub);
+  const { AdminService } = require('/app/dist/admin.service');
+  const provider = new KeycloakService();
+  provider.resetPassword = async () => {};
+  const make = inst => new AdminService(inst.prisma, provider, null, inst.service);
+  await w.base.memberRights.update({ where: { sub }, data: { suspended: true, newAuthAfter: new Date(START), version: 9 } });
+  const before = await w.base.memberRights.findUnique({ where: { sub } });
+  const session = await w.base.authSession.findUnique({ where: { sid } });
+  await make(w.I1).resetPassword(sub, { mode: 'temp' }, R10_CALLER);
+  assert.deepEqual(await w.base.memberRights.findUnique({ where: { sub } }), before);
+  assert.deepEqual(await w.base.authSession.findUnique({ where: { sid } }), session);
+  const pending = r10Member('syn-r8-concurrent');
+  const held = w.pause({ inst: 'I1', scope: 'tx', model: 'memberRights', method: 'create', phase: 'after' });
+  const first = r10Answer(make(w.I1).resetPassword(pending, { mode: 'temp' }, R10_CALLER));
+  await held.arrived();
+  const second = r10Answer(make(w.I2).resetPassword(pending, { mode: 'email' }, R10_CALLER));
+  held.release();
+  assert.deepEqual((await Promise.all([first, second])).map(r => r.status), [200, 200]);
+  assert.equal(await w.base.memberRights.count({ where: { sub: pending } }), 1);
+  assert.equal((await w.base.memberRights.findUnique({ where: { sub: pending } })).newAuthAfter, null);
+  assert.equal(await w.base.auditLog.count({ where: { target: pending, action: 'admin.user.reset-password' } }), 2);
+  assert.equal(await w.base.providerChange.count(), 0);
+  await w.finish('CORE_R8_RESET_EXISTING_AND_RACE');
 });
 
 // D628 / REQ-S7-U5-DB-RIGHTS -> RISK-STALE-CREDENTIAL / PARTIAL-COMMIT / MISATTRIBUTED-END.

@@ -22,6 +22,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
 const { PacsService } = require('/app/dist/pacs.service');
+const { AuthService } = require('/app/dist/auth.service');
 const { AppModule } = require('/app/dist/app.module');
 // Nest's own metadata names, from the copy of @nestjs/common the compiled controllers use.
 const nest = createRequire('/app/dist/app.module.js');
@@ -110,9 +111,10 @@ function send(f, route, body, caller, uid = UID) {
   const [{ controller, key }] = ROUTES[route];
   if (!f.controllers.has(controller)) {
     const types = Reflect.getMetadata('design:paramtypes', controller) ?? [];
+    const providers = new Map([[PacsService, f.svc], [AuthService, { memberRightsState: async () => 'ready' }]]);
     f.controllers.set(controller, new controller(...types.map(type => {
-      assert.equal(type, PacsService, `${controller.name} needs ${type?.name}, which these cases do not provide`);
-      return f.svc;
+      assert.ok(providers.has(type), `${controller.name} needs ${type?.name}, which these cases do not provide`);
+      return providers.get(type);
     })));
   }
   const req = { sub: caller.sub, actor: caller.actor, roles: caller.roles, institution: caller.institution, kind: caller.kind,
