@@ -578,7 +578,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
         w.calls.push(inst + ':tx:start');
         await observe({ inst, model: '$transaction', phase: 'started', client: tx });
         const view = new Proxy({}, { get(_t, k) {
-          if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'providerChange'].includes(k)) return delegate(inst, tx, k, 'tx');
+          if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'memberRightsImport', 'providerChange'].includes(k)) return delegate(inst, tx, k, 'tx');
           const value = tx[k];
           return typeof value === 'function' ? value.bind(tx) : value;
         } });
@@ -589,7 +589,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
       await observe({ inst, model: '$transaction', phase: 'after', result });
       return result;
     };
-    if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'providerChange'].includes(key)) return delegate(inst, base, key, 'root');
+    if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'memberRightsImport', 'providerChange'].includes(key)) return delegate(inst, base, key, 'root');
     const value = base[key];
     return typeof value === 'function' ? value.bind(base) : value;
   } });
@@ -3782,26 +3782,74 @@ test('CORE-CANCEL approval cancellation retains history and cannot be bypassed b
   await w.finish('CORE-CANCEL');
 });
 
-test('CORE-IMPORT every realm member is imported, legacy sessions only retain matching permitted rights, import never overwrites history',async t=>{
-  const w=await world(t,{imported:false}),{importMemberRights}=require('/app/dist/member-rights-import');
-  const a=await w.issue('import-a',{sub:'syn-import-a'}),sid=await w.session(a);
-  const bad=await w.issue('import-bad',{sub:'syn-import-bad'}),badSid=await w.session(bad);
+// D627: REQ-S7-U5-DB-RIGHTS -> RISK-STALE-CREDENTIAL / RISK-S7-U5-CROSS-INSTITUTION
+// -> CORE-IMPORT / CORE-R2-BOOT: one atomic import boundary, compatible cookie continuity.
+test('CORE-IMPORT all imported members share a commit boundary; old Bearers fail, compatible cookies and fresh DB rights enter', async t => {
+  const w = await world(t, {imported:false}), {importMemberRights} = require('/app/dist/member-rights-import');
+  const oldTime = Math.floor(Date.now() / 1000);
+  const a = await w.issue('import-a', {sub:'syn-import-a', authTime:oldTime}), sid = await w.session(a);
+  const bad = await w.issue('import-bad', {sub:'syn-import-bad', authTime:oldTime}), badSid = await w.session(bad);
+  const users = ['syn-import-a','syn-import-bad','syn-import-no-session','syn-import-disabled','syn-import-unknown'].map(sub => ({
+    id:sub, username:sub, email:sub+'@synthetic.test', emailVerified:true, firstName:'Synthetic', lastName:'Member',
+    enabled:sub !== 'syn-import-disabled', serviceAccountClientId:null, groups:sub === 'syn-import-bad' ? [B] : [A], roles:['radiologist']}));
+  const oldTokens = [a, bad];
+  for (const user of users.slice(2)) oldTokens.push(await w.issue(user.id+'-old', {sub:user.id, authTime:oldTime}));
   await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
-  const users=['syn-import-a','syn-import-bad','syn-import-no-session','syn-import-disabled','syn-import-unknown'].map(sub=>({
-    id:sub,username:sub,email:sub+'@synthetic.test',emailVerified:true,firstName:'Synthetic',lastName:'Member',
-    enabled:sub!=='syn-import-disabled',serviceAccountClientId:null,groups:sub==='syn-import-bad'?[B]:[A],roles:['radiologist']}));
-  const unknown=await w.base.providerChange.create({data:{kind:'disable',sub:'syn-import-unknown',target:'syn-import-unknown',generation:1,state:'unknown',createdAt:new Date()}});
-  const provider={listUsers:async page=>({total:users.length,users:users.slice((page-1)*2,page*2)})};
-  await importMemberRights(w.base,provider);
-  assert.equal(await w.base.memberRights.count(),5,'member without session also has a row');
-  assert.equal((await w.call(w.I1,'get',{sid})).status,200,'compatible legacy session keeps working');
-  assert.equal((await w.call(w.I1,'get',{sid:badSid})).status,401,'old A session never becomes B');
-  for(const sub of ['syn-import-disabled','syn-import-unknown'])assert.equal((await w.base.memberRights.findUnique({where:{sub}})).suspended,true);
-  assert.equal((await w.base.providerChange.findUnique({where:{id:unknown.id}})).state,'unknown');
+  const unknown = await w.base.providerChange.create({data:{kind:'disable',sub:'syn-import-unknown',target:'syn-import-unknown',generation:1,state:'unknown',createdAt:new Date()}});
+  // Advance the clock across real store operations: the decision must cover the whole import,
+  // not page-fetch time, transaction start or a different instant for each member.
+  w.observe({inst:'I1', scope:'tx', model:'memberRights', method:'upsert', phase:'after'}, () => w.tick(1100));
+  const provider = {listUsers:async page => ({total:users.length, users:users.slice((page-1)*2,page*2)})};
+  await importMemberRights(w.I1.prisma, provider);
+  assert.equal(await w.base.memberRights.count(), 5, 'member without session also has a row');
+  assert.equal(await w.base.idpSessionEnd.count(), 0, 'refusal must not depend on an ended-SSO mark');
+  const cookie = await w.call(w.I1, 'get', {sid});
+  assert.equal(cookie.status, 200, 'compatible legacy session keeps working');
+  assert.equal(cookie.location, null, 'no login prompt or redirect for the compatible cookie');
+  assert.equal(cookie.newSid, null, 'no replacement session is required');
+  assert.equal((await w.base.authSession.findUnique({where:{sid}})).rightsVersion,
+    (await w.base.memberRights.findUnique({where:{sub:a.sub}})).version);
+  assert.equal((await w.base.authSession.findUnique({where:{sid:badSid}})).rightsVersion, 0);
+  assert.equal((await w.call(w.I1, 'get', {sid:badSid})).status, 401, 'old A session never becomes B');
+  for (const token of oldTokens) {
+    const out = await w.call(w.I1, 'get', {bearer:token.access});
+    assert.equal(out.status, 401, token.label+': the same old token cannot gain imported rights through Bearer');
+    assert.equal(out.body.code, 'AUTH_SESSION_ENDED');
+  }
+  const marker = await w.base.memberRightsImport.findUnique({where:{id:'realm-v1'}});
+  assert.equal(marker.completedAt.getTime(), Date.now(), 'import decision time is after the last member, not its first row');
+  for (const row of await w.base.memberRights.findMany())
+    assert.equal(row.newAuthAfter?.getTime(), marker.completedAt.getTime(), 'every imported row shares the committed decision time');
+  const importSecond = Math.floor(marker.completedAt.getTime() / 1000);
+  for (const user of users) {
+    const token = await w.issue(user.id+'-same', {sub:user.id, groups:user.groups, authTime:importSecond});
+    const out = await w.call(w.I2, 'get', {bearer:token.access});
+    assert.equal(out.status, 401, 'matching claims at the import second are still refused');
+    assert.equal(out.body.code, 'AUTH_SESSION_ENDED');
+  }
+  w.tick(1000);
+  for (const user of users) {
+    // Fresh A/technician claims deliberately differ: the DB remains the authority after admission.
+    const token = await w.issue(user.id+'-fresh', {sub:user.id, groups:[A], roles:['technician'], authTime:importSecond+1});
+    const out = await w.call(w.I2, 'me', {bearer:token.access});
+    const blocked = ['syn-import-disabled','syn-import-unknown'].includes(user.id);
+    assert.equal(out.status, blocked ? 401 : 200);
+    if (blocked) assert.equal(out.body.code, 'AUTH_SESSION_ENDED');
+    else {
+      assert.equal(out.body.institution, user.groups[0]);
+      assert.deepEqual(out.body.roles, ['radiologist']);
+    }
+  }
+  assert.equal(await w.base.authSession.count({where:{sub:'syn-import-no-session'}}), 0, 'Bearer-only member needs no cookie session');
+  assert.equal(kc.tokens, 0, 'import and cookie continuity require no provider authentication');
+  for (const sub of ['syn-import-disabled','syn-import-unknown']) assert.equal((await w.base.memberRights.findUnique({where:{sub}})).suspended, true);
+  assert.equal((await w.base.providerChange.findUnique({where:{id:unknown.id}})).state, 'unknown');
   await w.base.memberRights.update({where:{sub:'syn-import-a'},data:{version:4,newAuthAfter:new Date(),suspended:true}});
-  await importMemberRights(w.base,{listUsers:()=>{throw new Error('must not reimport authority');}});
-  assert.equal((await w.base.memberRights.findUnique({where:{sub:'syn-import-a'}})).version,4);
-  if(!process.env.KIN_AUTH_SESSION_DATABASE_URL.includes('local-stand-in')) {
+  const retained = await w.base.memberRights.findMany({orderBy:{sub:'asc'}});
+  await importMemberRights(w.base, {listUsers:() => {throw new Error('must not reimport authority');}});
+  assert.deepEqual(await w.base.memberRights.findMany({orderBy:{sub:'asc'}}), retained, 'restart preserves the rights and their boundaries');
+  assert.deepEqual(await w.base.memberRightsImport.findUnique({where:{id:'realm-v1'}}), marker);
+  if (!process.env.KIN_AUTH_SESSION_DATABASE_URL.includes('local-stand-in')) {
     await assert.rejects(w.base.memberRights.delete({where:{sub:'syn-import-a'}}));
     await assert.rejects(w.base.memberRights.update({where:{sub:'syn-import-a'},data:{version:1}}));
   }
@@ -3851,29 +3899,48 @@ test('CORE-LOGOUT-ORDER provider sees only committed revocation and its audit',a
 });
 
 // REQ-S7-U5-DB-RIGHTS -> RISK-PARTIAL-IMPORT / STALE-SSO / READ-MUTATION -> CORE-R2.
-test('CORE-R2-BOOT startup retries a failed realm page without admitting a partial import; restart skips Keycloak', async t => {
+test('CORE-R2-BOOT startup retries page and commit failures with no partial boundary or marker; restart skips Keycloak', async t => {
   const w = await world(t, {imported:false}), m = 'syn-r2-import';
-  const token = await w.issue(m, {sub:m});
+  const token = await w.issue(m, {sub:m, authTime:Math.floor(Date.now()/1000)});
   await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
   const user = {id:m,username:m,email:m+'@synthetic.test',firstName:'SYN',lastName:'R2',
     emailVerified:true,enabled:true,groups:[A],roles:['radiologist']};
-  let calls = 0;
+  let calls = 0, failedCommit = false, importTx;
+  w.observe({inst:'I1', model:'$transaction', phase:'started'}, event => { importTx = event.client; });
+  w.observe({inst:'I1', scope:'tx', model:'memberRightsImport', method:'create', phase:'after'}, async event => {
+    if (failedCommit) return;
+    const row = await importTx.memberRights.findUnique({where:{sub:m}});
+    assert.equal(row.newAuthAfter?.getTime(), event.result.completedAt.getTime(), 'boundary and marker are written in the same transaction');
+    assert.equal(await w.base.memberRights.count(), 0, 'boundary is not visible before commit');
+    assert.equal(await w.base.memberRightsImport.count(), 0, 'marker is not visible before commit');
+    failedCommit = true;
+    throw new Error('synthetic failure after marker write before commit');
+  });
   const provider = {listUsers:async (page, signal) => {
     calls++; assert.ok(signal instanceof AbortSignal, 'realm reads have a deadline');
     assert.equal(await w.base.memberRights.count(), 0, 'no partial realm is admitted');
+    assert.equal(await w.base.memberRightsImport.count(), 0, 'failed import leaves no marker');
     assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status, 401);
     if (calls === 1) return {total:2,users:[user]};
     if (calls === 2) throw new Error('synthetic failed second page');
     return {total:1,users:[user]};
   }};
-  const first = new AuthService(w.base, provider); t.after(()=>first.onModuleDestroy());
+  const first = new AuthService(w.I1.prisma, provider); t.after(()=>first.onModuleDestroy());
   await first.onModuleInit();
-  assert.equal(calls,3,'retry rereads the whole realm');
+  assert.equal(failedCommit, true, 'the failed import reached both writes');
+  assert.equal(calls,4,'both failures retry the whole realm');
   assert.equal(await w.base.memberRights.count(),1);
-  assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,200);
+  const marker = await w.base.memberRightsImport.findUnique({where:{id:'realm-v1'}});
+  assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).newAuthAfter?.getTime(), marker.completedAt.getTime());
+  const old = await w.call(w.I1,'get',{bearer:token.access});
+  assert.equal(old.status,401); assert.equal(old.body.code,'AUTH_SESSION_ENDED');
+  w.tick(1000);
+  const fresh = await w.issue(m+'-fresh', {sub:m,authTime:Math.floor(marker.completedAt.getTime()/1000)+1});
+  assert.equal((await w.call(w.I1,'get',{bearer:fresh.access})).status,200);
   const restart = new AuthService(w.base,{listUsers:async()=>{calls++;throw new Error('no provider on restart');}});
   t.after(()=>restart.onModuleDestroy()); await restart.onModuleInit();
-  assert.equal(calls,3,'completed import skips Keycloak entirely');
+  assert.equal(calls,4,'completed import skips Keycloak entirely');
+  assert.deepEqual(await w.base.memberRightsImport.findUnique({where:{id:'realm-v1'}}), marker);
   await w.finish('CORE-R2-BOOT');
 });
 

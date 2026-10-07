@@ -50,6 +50,12 @@ export async function importMemberRights(prisma: PrismaService, keycloak: Keyclo
         } });
       }
     }
-    await tx.memberRightsImport.create({ data: { id: 'realm-v1' } });
+    // Import is one rights decision: stamp its commit boundary after all member/session work,
+    // so a slow import cannot admit a Bearer authenticated between the first and last row.
+    const completedAt = new Date();
+    await tx.memberRights.updateMany({ where: { sub: { in: users.map(user => user.id) } }, data: {
+      newAuthAfter: completedAt,
+    } });
+    await tx.memberRightsImport.create({ data: { id: 'realm-v1', completedAt } });
   }, { maxWait: 4000, timeout: 120000 });
 }
