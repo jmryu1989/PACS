@@ -17,6 +17,11 @@ const bound = (limitMs?: number) => limitMs === undefined ? undefined : within(l
  */
 export type ChangeAnswer = { state: 'done' | 'void' | 'unknown'; outcome: string };
 
+/** Preserve a roster HTTP refusal in its recorded credentials outcome. */
+export class RosterWriteFailure extends ServiceUnavailableException {
+  constructor(readonly answer: ChangeAnswer) { super(`Keycloak roster ${answer.outcome}`); }
+}
+
 /** 연결 자체가 이루어지지 않은 오류: 요청의 바이트가 인증 서버에 닿지 않았다. */
 const NOT_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
 function notSent(error: any): boolean {
@@ -114,8 +119,11 @@ export class KeycloakService {
       this.token = null;
       return this.adm(path, method, body, false, signal);
     }
-    if (res.status === 404) return null;
-    if (!res.ok) throw new ServiceUnavailableException(`Keycloak Admin API HTTP ${res.status} (${path})`);
+    // Only a single-user lookup has an "absent" result. A missing realm/list/roster endpoint is a failed read.
+    if (res.status === 404 && method === 'GET' && /^\/users\/[^/?]+$/.test(path)) return null;
+    if (!res.ok) throw new RosterWriteFailure({
+      state: res.status >= 400 && res.status < 500 ? 'void' : 'unknown', outcome: 'http_' + res.status,
+    });
     if (res.status === 204) return null;
     const text = await res.text();
     if (!text) return null;
@@ -288,7 +296,7 @@ export class KeycloakService {
     await this.adm(`/users/${encodeURIComponent(id)}/execute-actions-email`, 'PUT', ['UPDATE_PASSWORD']);
   }
 
-  /** 기록하지 않는 활성화(새로 만든 회원의 첫 활성화 — 격리와 무관하다). 격리·재활성화의 변경은 `changeEnabled`다. */
+  /** Creation and the recorded post-commit credentials write may enable an account; rights stay in the DB. */
   async setEnabled(id: string, enabled: boolean): Promise<void> {
     await this.adm(`/users/${encodeURIComponent(id)}`, 'PUT', { enabled });
     this.cache.clear();
@@ -296,8 +304,7 @@ export class KeycloakService {
 
   /**
    * provider 세션 **하나**를 끝낸다(S7-U5 R1) — 변경 호출 하나(`change`). 고정 동작이다: 대상은 그 세션 id 하나뿐이고, 사용자
-   * 전체 로그아웃으로 대신하지 않는다 — 다른 PC에서 일하는 같은 의사의 세션은 건드리지 않고, 격리도 회원의 provider 세션을
-   * 나열해 하나씩 끝낸다. 끝나는 것은 그 SSO 세션 전체다(같은 SSO에 묶인 다른 client도 함께 끝난다).
+   * 전체 로그아웃으로 대신하지 않는다 — 다른 PC에서 일하는 같은 의사의 세션은 건드리지 않는다. 끝나는 것은 그 SSO 세션 전체다(같은 SSO에 묶인 다른 client도 함께 끝난다).
    * 인증 서버는 같은 브라우저의 다음 SSO에 끝난 SSO의 sid를 다시 줄 수 있고, 이 요청은 처리될 때 그 sid의 세션을 끝낸다
    * (인증 세대를 조건으로 받지 않는다) — 그래서 답을 잃은 요청은 "모른다"로 남고 부른 쪽은 그 sid의 끝을 확인하지 않는다.
    * `signal`은 토큰 취득의 기한일 뿐 요청을 끊지 않는다. 404는 "그런 세션이 없다"(done)다.

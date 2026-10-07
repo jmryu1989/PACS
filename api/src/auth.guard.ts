@@ -5,6 +5,7 @@ import {
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { Reflector } from '@nestjs/core';
 import { AuthService, markAuthCode } from './auth.service';
+import { rightsAllow } from './member-rights';
 import {
   APP_ROLES, CLINICIAN_ROUTE_DENIED, clinicianOnly, clinicianRouteAllowed, routeKey,
 } from './clinician-policy';
@@ -176,6 +177,8 @@ export class AuthGuard implements CanActivate {
     }
 
     req.kind = 'member';
+    // Logout grants no rights; a Bearer still passed signature/issuer/audience/expiry verification.
+    if (isLogout) return true;
 
     /**
      * Bearer로 온 사용자 토큰도 종료 표식을 본다(S7-U5 R1). 쿠키 요청은 제품 세션 행이 지워진 순간 거절되지만, 이미 발급된
@@ -184,9 +187,9 @@ export class AuthGuard implements CanActivate {
      */
     const rights = method === 'bearer' ? await this.auth.bearerRights(payload, raw)
       : await this.auth.sessionRights(admittedSession);
-    req.roles = rights.roles;
+    req.roles = rightsAllow(rights) ? rights.roles : [];
     req.institution = rights.institution;
-    req.groups = [rights.institution];
+    req.groups = rights.institution ? [rights.institution] : [];
 
     const state = memberState(req.groups, req.roles);
     req.memberState = state;

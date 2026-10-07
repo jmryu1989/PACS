@@ -335,7 +335,7 @@ class ClinicianRequestLive(unittest.TestCase):
         reset = self.stack.kc_admin("PUT", f"/users/{quote(user_id)}/reset-password",
                                     {"type": "password", "value": password, "temporary": False})
         self.assertEqual(reset.status, 204, reset.text)
-        self.stack.set_member_rights(user_id, approvalState="PENDING")
+        # This new identity has no DB rights; approval-waiting is distinct from a suspended cancellation.
         data = urlencode({"client_id": self.stack.test_client_id, "grant_type": "password",
                           "username": username, "password": password}).encode("ascii")
         request = Request(self.stack.keycloak, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
@@ -731,7 +731,7 @@ class ClinicianRequestLive(unittest.TestCase):
             return {"requestId": str(uuid.uuid4()), "expectedOwner": owner_of(identity), "revision": revision, "action": action,
                     "note": note}
 
-        guard = [("gateway", 403, None, "게이트웨이에 허용되지 않는 경로입니다"), ("pending", 401, "AUTH_SESSION_ENDED", None)]
+        guard = [("gateway", 403, None, "게이트웨이에 허용되지 않는 경로입니다"), ("pending", 403, "INSTITUTION_PENDING", None)]
         # RM-R1 create
         own = call("RM-R1", "clinician", "POST", f"/studies/{uid}/image-requests", create("clinician", "image-transfer"), 201)
         mixed = call("RM-R1", "clinrad", "POST", f"/studies/{uid}/image-requests", create("clinrad", "image-transfer"), 201)

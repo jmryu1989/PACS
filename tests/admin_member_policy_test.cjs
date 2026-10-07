@@ -15,7 +15,7 @@ const { KeycloakService } = require('../api/src/keycloak.service.ts');
   let writes = 0, changed;
   const db = { memberRights: { findUnique: async () => member, updateMany: async ({data}) => { writes++; changed = data; return {count:1}; } },
     authSession: { findMany: async () => [], deleteMany: async () => ({count:0}) },
-    auditLog: { create: async () => ({}) }, providerChange: { create: async () => ({id:1}) }, $executeRaw: async () => 0 };
+    auditLog: { create: async () => ({}), findFirst: async () => null }, providerChange: { create: async () => ({id:1}), findFirst: async () => null }, $executeRaw: async () => 0 };
   db.$transaction = async work => work(db);
   const kc = { institutions: async () => ['synthetic-hospital'], getUser: async () => ({id:member.sub,emailVerified:true}) };
   const service = new AdminService(db,kc,null,{publishCredentials() {}});

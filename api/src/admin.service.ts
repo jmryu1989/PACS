@@ -8,7 +8,7 @@ import {
   openAuditCursor, readAuditPage, sealAuditCursor,
 } from './admin-audit';
 import { lockMemberRights, rightsAllow } from './member-rights';
-import { AuthService } from './auth.service';
+import { AuthService, lockWaitExceeded } from './auth.service';
 // 역할 목록은 clinician-policy 한 곳에서 온다. 여기서 별도 literal을 두면 guard와 어긋난다.
 import { APP_ROLES } from './clinician-policy';
 import { KeycloakService, KeycloakUser } from './keycloak.service';
@@ -109,18 +109,26 @@ export class AdminService {
         users.push({ ...this.row(this.pendingMember(user)), rosterUnconfirmed: false });
         continue;
       }
-      const latest = await this.prisma.providerChange.findFirst({ where: { kind: 'credentials', sub: user.id }, orderBy: { id: 'desc' } });
-      const unknown = await this.prisma.providerChange.findFirst({ where: { kind: 'credentials', sub: user.id, state: 'unknown' } });
-      const overlap = latest && await this.prisma.providerChange.findFirst({ where: {
-        kind: 'credentials', sub: user.id, id: { lt: latest.id }, settledAt: { gte: latest.createdAt },
-      } });
-      users.push({ ...this.row(rights), rosterUnconfirmed: !!unknown || !!overlap || (!!latest && latest.generation !== rights.version) });
+      users.push({ ...this.row(rights), rosterUnconfirmed: await this.rosterUnconfirmed(user.id) });
     }
     const response = { ...result, pendingCount: await this.prisma.memberRights.count({ where: { approved: false } }), users };
     await this.audit(c.actor, 'admin.user.list', 'admin-users', {
       page, count: response.users.length, pendingCount: response.pendingCount,
     });
     return response;
+  }
+
+  private async rosterUnconfirmed(id: string, db: any = this.prisma) {
+    const latest = await db.providerChange.findFirst({ where: { kind: 'credentials', sub: id }, orderBy: { id: 'desc' } });
+    const unknown = await db.providerChange.findFirst({ where: { kind: 'credentials', sub: id, state: 'unknown' } });
+    const overlap = latest && await db.providerChange.findFirst({ where: {
+      kind: 'credentials', sub: id, id: { lt: latest.id }, settledAt: { gte: latest.createdAt },
+    } });
+    // Suspend/Activate only change blocking. The existing atomic audit supplies the last roster-affecting version.
+    const decision = await db.auditLog.findFirst({ where: { target: id,
+      action: { in: ['admin.user.approve', 'admin.user.update', 'admin.user.unapprove'] } }, orderBy: { id: 'desc' } });
+    const generation = decision ? JSON.parse(decision.detail).after.version : 0;
+    return !!unknown || !!overlap || (!!latest && latest.state !== 'done') || (latest?.generation ?? 0) < generation;
   }
 
   async createUser(body: any, c: Caller) {
@@ -139,12 +147,7 @@ export class AdminService {
       throw new BadRequestException('기관·역할을 함께 지정하려면 verificationOverride:true가 필요합니다');
     if (verificationOverride && (body?.institution === undefined || body?.roles === undefined))
       throw new BadRequestException('대면 확인 생성에는 institution과 roles가 모두 필요합니다');
-    /**
-     * 기관·역할의 실제 검증(화이트리스트)은 Keycloak에 쓰기 **전에** 끝낸다.
-     * approve() 안에서만 검사하던 때는 잘못된 입력마다 비활성 고아 계정이 하나씩 남고 응답은
-     * 409 USER_ISOLATED였다(v0.6.3 회귀 확충에서 발견). 존재 여부만 보던 위 검사와 달리 값을 본다.
-     * approve()의 재검사는 그대로 둔다 — PATCH 승인이 같은 함수를 지나므로 그쪽 관문이기도 하다.
-     */
+    // Validate scope before provider creation, so invalid input cannot leave a disabled orphan.
     if (verificationOverride) {
       await this.institution(body.institution);
       this.roles(body.roles);
@@ -257,25 +260,28 @@ export class AdminService {
         if (count !== 1) throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
         // No remote end is scheduled here: this deletion cannot outlive this version's commit.
         const sessions = await tx.authSession.findMany({ where: { sub: id } });
-        await tx.authSession.deleteMany({ where: { sub: id } });
         for (const session of sessions) {
+          const deleted = await tx.authSession.deleteMany({ where: { sid: session.sid } });
+          if (deleted.count !== 1) continue;
           await tx.auditLog.create({ data: { actor: observed.email || observed.username, action: 'auth.logout', target: id,
             detail: JSON.stringify({ institution: session.institution, ip: null, dataSubject: null, cause: 'isolation' }) } });
         }
         const after = this.row(await tx.memberRights.findUnique({ where: { sub: id } }));
         await tx.auditLog.create({ data: { actor: c.actor, action: `admin.user.${action}`, target: id,
           detail: JSON.stringify({ before, after, verificationOverride: body?.verificationOverride === true }) } });
-        const change = approvalMutation ? await tx.providerChange.create({ data: {
+        const change = approvalMutation || action === 'activate' ? await tx.providerChange.create({ data: {
           kind: 'credentials', target: id, sub: id, generation: after.version, state: 'unknown', createdAt: new Date(),
         } }) : null;
-        return { after, change };
+        return { after, change, rosterUnconfirmed: !!change || await this.rosterUnconfirmed(id, tx) };
       }, { maxWait: 4000, timeout: 8000 });
       if (committed.change) this.auth.publishCredentials({ id: committed.change.id, kind: 'credentials', target: id }, institution!, roles);
-      return { ...committed.after, rosterUnconfirmed: !!committed.change };
+      return { ...committed.after, rosterUnconfirmed: committed.rosterUnconfirmed };
     } catch (error) {
       await this.audit(c.actor, 'admin.user.patch.failed', id, {
         before, after: null, verificationOverride: body?.verificationOverride === true, failed: true,
       });
+      if (lockWaitExceeded(error))
+        throw new ConflictException({ code: 'MEMBER_BUSY', message: '다른 요청이 회원 상태를 변경하고 있습니다. 잠시 후 다시 시도하세요' });
       throw error;
     }
   }

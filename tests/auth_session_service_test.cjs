@@ -202,6 +202,7 @@ async function keycloak() {
       // (GET users/{id}/sessions).
       if (path === '/admin/realms/kin/groups') return send(200, [A, B, Z].map(name => ({ id: 'syn-group-' + name, name })));
       if (path === '/admin/realms/kin/users' && req.method === 'GET') {
+        if(kc.realmReadStatus)return send(kc.realmReadStatus,{error:'realm_unavailable'});
         const query = new URL(req.url, 'http://synthetic.test').searchParams;
         const first = Number(query.get('first') || 0), max = Number(query.get('max') || 100);
         return send(200, Object.entries(kc.members).map(([id, user]) => ({id,...user})).slice(first,first+max));
@@ -374,7 +375,6 @@ test('U5S-ENTRY-01 callback delivers a single-use proof to the approved member f
     const sub = 'syn-entry-' + label;
     const { done } = await login(w, w.I1, await w.issue(label, { sub, groups, roles }));
     assert.equal(done.status, 302, label);
-    if (status !== 200) { assert.equal(done.newSid, null, label + ': unapproved identity is refused'); continue; }
     const target = new URL(done.location);
     assert.equal(target.origin + target.pathname, ORIGIN + '/worklist/hpacs-lite/' + document, label);
     assert.equal(target.search, '', 'proof never rides in the query');
@@ -507,7 +507,7 @@ async function world(t, { now = START, imported = true } = {}) {
   Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
     certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
     members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null,
-    beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {}, transportTimeoutMs: 0 });
+    beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {}, transportTimeoutMs: 0, realmReadStatus:0 });
   if (imported) await base.memberRightsImport.create({ data: { id: 'realm-v1' } });
   idp.started = 0;
 
@@ -580,6 +580,12 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
         const view = new Proxy({}, { get(_t, k) {
           if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'memberRightsImport', 'providerChange'].includes(k)) return delegate(inst, tx, k, 'tx');
           const value = tx[k];
+          if (k === '$executeRaw') return async (...args) => {
+            await observe({ inst, scope:'tx', model:'$executeRaw', method:'execute', args, phase:'before' });
+            const result = await value.apply(tx,args);
+            await observe({ inst, scope:'tx', model:'$executeRaw', method:'execute', args, result, phase:'after' });
+            return result;
+          };
           return typeof value === 'function' ? value.bind(tx) : value;
         } });
         const out = await fn(view);
@@ -624,6 +630,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
   w.call = async (inst, kind, { sid, cookie, ip = IP, headers = {}, query = {}, body, bearer, binding, csrf = true } = {}) => {
     const routes = {
       get: ['GET', '/api/syn/protected', SynProtectedController, SynProtectedController.prototype.read],
+      health: ['GET', '/api/health', PacsController, PacsController.prototype.health],
       me: ['GET', '/api/me', PacsController, PacsController.prototype.me],
       authz: ['GET', '/api/authz/dicom', PacsController, PacsController.prototype.authzDicom],
       logout: ['POST', '/api/auth/logout', AuthController, AuthController.prototype.logout],
@@ -652,6 +659,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
       await inst.guard.canActivate(new ExecutionContextHost([req, res], cls, handler));
       if (kind === 'get') { inst.handled++; res.status(200).send({ ok: true }); }
       else if (kind === 'authz') { inst.handled++; res.status(204).send(); }
+      else if (kind === 'health') res.status(200).send(await new PacsController(null, inst.service).health());
       else if (kind === 'me') res.status(200).send(new PacsController(null).me(req));
       else if (kind === 'logout') await inst.controller.logout(req, res);
       else if (kind === 'login') await inst.controller.login(req, res, query.prompt);
@@ -701,7 +709,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
    * a token without the claim. `authTime` (seconds, as Keycloak truncates it) is the `auth_time` claim: when the provider
    * authenticated that SSO; without it the token carries none (U5E-21 is the case about it).
    */
-  w.issue = async (label, { sub, groups = [A], email, roles = ['radiologist'], expIn = HOUR / 1000, key = 'main', same, idp, authTime } = {}) => {
+  w.issue = async (label, { sub, groups = [A], email, roles = ['radiologist'], expIn = HOUR / 1000, key = 'main', same, idp, authTime, identity = {} } = {}) => {
     // Provisioning fixture, independent of token issuance after the first version. JWT changes never change this row.
     const cleanGroups = groups.filter(g => typeof g === 'string').map(g => g.replace(/^\//, ''));
     const managedRoles = roles.filter(role => ['admin','radiologist','technician','clinician'].includes(role));
@@ -711,8 +719,8 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
     const now = Math.floor(Date.now() / 1000);
     const jti = label + '-' + randomUUID();
     const sid = idp === undefined ? 'syn-idp-' + sub : idp;
-    const access = await new jose.SignJWT({ email: email ?? sub + '@synthetic.test', groups, realm_access: { roles }, azp: 'kin-bff', jti,
-      ...(sid === null ? {} : { sid }), ...(authTime === undefined ? {} : { auth_time: authTime }) })
+    const access = await new jose.SignJWT({ email: email ?? sub + '@synthetic.test', groups, realm_access: { roles }, azp: 'kin-bff', jti, preferred_username:sub, name:sub, email_verified:true,
+      ...(sid === null ? {} : { sid }), ...(authTime === undefined ? {} : { auth_time: authTime }), ...identity })
       .setProtectedHeader({ alg: 'RS256', kid: KEYS[key].kid }).setIssuer(ISSUER).setAudience('kin-api').setSubject(sub)
       .setIssuedAt(now).setExpirationTime(same?.exp ?? now + expIn).sign(KEYS[key].privateKey);
     const v = { label, sub, access, refresh: 'syn-rt-' + randomUUID(), jti, exp: same?.exp ?? now + expIn, idp: sid };
@@ -932,8 +940,9 @@ test('AS-02 the record-time institution is the token\'s one group, as the guard 
     assert.equal((await guardView(w, v.access)).institution, expected, label + ': the guard rule');
     const result = await login(w, w.I1, v);
     if (!expected || !roles.length) {
-      assert.equal(result.done.newSid, null, label + ': invalid DB member cannot authenticate');
-      assert.equal((await w.call(w.I2, 'get', { bearer: v.access })).status, 401, label);
+      assert.ok(result.done.newSid, label + ': waiting identity has a session but no rights');
+      assert.equal((await w.call(w.I2, 'get', { bearer: v.access })).status, 403, label);
+      assert.equal((await w.call(w.I1, 'me', {sid:result.done.newSid})).status,403,label);
       continue;
     }
     // Three logins of one account on three PCs (three provider sessions): each ends by itself.
@@ -2402,11 +2411,15 @@ test('U5S-REQ-09 entry proof: a login is entered once, by the document that hold
   assert.deepEqual(coded(await w.call(w.I2, 'entry', { sid: second.done.newSid, body: { proof: second.done.proof } })), [403, 'AUTH_ENTRY_REFUSED', 'AUTH_ENTRY_REFUSED']);
   const tab = await w.call(w.I2, 'me', { sid: second.done.newSid });
   assert.deepEqual([tab.status, typeof tab.body.sessionId, await entries('syn-sub-e2')], [200, 'string', []]);
-  // Pending membership does not create an authentication or an entry proof (D621).
+  // D628 restores the waiting identity: proof and session allow guidance and logout, never protected work.
   const pending = await login(w, w.I1, await w.issue('e3', { sub: 'syn-sub-e3', groups: [] }));
-  assert.equal(pending.done.newSid, null);
-  assert.equal(pending.done.proof, undefined);
-  assert.equal(await w.base.authSession.count({where:{sub:'syn-sub-e3'}}),0);
+  assert.ok(pending.done.newSid);
+  assert.ok(pending.done.proof);
+  const waiting = await w.call(w.I1, 'me', {sid:pending.done.newSid});
+  assert.equal(waiting.status,403); assert.equal(waiting.body.code,'INSTITUTION_PENDING');
+  assert.equal(typeof waiting.body.sessionId,'string');
+  assert.equal((await w.call(w.I1,'get',{sid:pending.done.newSid})).status,403);
+  assert.equal((await w.call(w.I1,'logout',{sid:pending.done.newSid})).status,204);
   assert.equal(w.faults.length, 0, 'the injected failure was reached');
   await w.finish('U5S-REQ-09', { output: markers('entry') });
 });
@@ -2555,7 +2568,7 @@ test('U5E-04 the end marks a provider session only after its end condition holds
   gate.release();
   assert.equal((await held).status, 204);
   const blocked = await heldC;
-  assert.deepEqual([blocked.newSid, blocked.cookie, atProvider(blocked), await w.base.authSession.count({ where: { sub: s } })], [null, 'P', true, 0]);
+  assert.deepEqual([blocked.newSid, blocked.cookie, atProvider(blocked), await w.base.authSession.count({ where: { sub: s } })], [null, 'P', true, 0], blocked.location);
   // (e) the lock, C first: the callback is inside its critical section (mark read: none; before its create). The Log
   // out of the sibling does not delete until C commits - then it ends both rows.
   s = 'syn-sub-u5e4-c-first';
@@ -3645,7 +3658,9 @@ test('U5E-15 Suspend/Activate require fresh authentication and never restore old
   assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,401);
   const fresh=await coreFresh(w,m);
   assert.equal((await w.call(w.I2,'me',{sid:fresh.done.newSid})).status,200);
-  assert.deepEqual(kc.adminCalls,[],'no member provider work in Suspend/Activate or entry');
+  await quiet(w);
+  assert.ok(kc.adminCalls.includes('PUT enable'),'Activate records a non-gating enabled roster write');
+  assert.ok(!kc.adminCalls.some(x => /disable|sessions|logout/.test(x)),'no B01-B08 work');
   assert.equal(kc.endRequests.length,0);
   await w.finish('U5E-15');
 });
@@ -3761,7 +3776,7 @@ test('CORE-MISSING missing DB rights and DB read failures never fall back to JWT
   const w=await world(t),m='syn-core-missing',{token,sid}=await coreMember(w,m);
   // A missing row models an unimported realm member. TRUNCATE is confined to this disposable fixture.
   await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
-  assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,401);
+  assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,403);
   assert.equal((await w.call(w.I1,'get',{sid})).status,401);
   let once=true;w.observe({model:'memberRights',method:'findUnique',phase:'before'},()=>{if(once){once=false;throw new Error('synthetic database unavailable');}});
   assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,500);
@@ -3899,49 +3914,66 @@ test('CORE-LOGOUT-ORDER provider sees only committed revocation and its audit',a
 });
 
 // REQ-S7-U5-DB-RIGHTS -> RISK-PARTIAL-IMPORT / STALE-SSO / READ-MUTATION -> CORE-R2.
-test('CORE-R2-BOOT startup retries page and commit failures with no partial boundary or marker; restart skips Keycloak', async t => {
-  const w = await world(t, {imported:false}), m = 'syn-r2-import';
-  const token = await w.issue(m, {sub:m, authTime:Math.floor(Date.now()/1000)});
-  await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
-  const user = {id:m,username:m,email:m+'@synthetic.test',firstName:'SYN',lastName:'R2',
-    emailVerified:true,enabled:true,groups:[A],roles:['radiologist']};
-  let calls = 0, failedCommit = false, importTx;
-  w.observe({inst:'I1', model:'$transaction', phase:'started'}, event => { importTx = event.client; });
-  w.observe({inst:'I1', scope:'tx', model:'memberRightsImport', method:'create', phase:'after'}, async event => {
-    if (failedCommit) return;
-    const row = await importTx.memberRights.findUnique({where:{sub:m}});
-    assert.equal(row.newAuthAfter?.getTime(), event.result.completedAt.getTime(), 'boundary and marker are written in the same transaction');
-    assert.equal(await w.base.memberRights.count(), 0, 'boundary is not visible before commit');
-    assert.equal(await w.base.memberRightsImport.count(), 0, 'marker is not visible before commit');
-    failedCommit = true;
-    throw new Error('synthetic failure after marker write before commit');
-  });
-  const provider = {listUsers:async (page, signal) => {
-    calls++; assert.ok(signal instanceof AbortSignal, 'realm reads have a deadline');
-    assert.equal(await w.base.memberRights.count(), 0, 'no partial realm is admitted');
-    assert.equal(await w.base.memberRightsImport.count(), 0, 'failed import leaves no marker');
-    assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status, 401);
-    if (calls === 1) return {total:2,users:[user]};
-    if (calls === 2) throw new Error('synthetic failed second page');
-    return {total:1,users:[user]};
+test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with capped backoff; admission waits for atomic import', async t => {
+  const w=await world(t,{imported:false}),m='syn-r4-boot';
+  const old=await w.issue(m,{sub:m,authTime:Math.floor(Date.now()/1000)});
+  const sid=await w.session(old);
+  const queued=[],delays=[],realTimer=global.setTimeout;
+  t.after(()=>{global.setTimeout=realTimer;});
+  let calls=0,active=0,maxActive=0,failedCommit=false,tx;
+  const user={id:m,username:m,email:m+'@synthetic.test',emailVerified:true,enabled:true,groups:[A],roles:['radiologist'],firstName:'SYN',lastName:'BOOT'};
+  const provider={listUsers:async(page,signal)=>{
+    calls++;active++;maxActive=Math.max(maxActive,active);
+    try {
+      assert.ok(signal instanceof AbortSignal);
+      if(calls<=7)throw new Error('synthetic realm unreachable');
+      if(calls===8)return {total:2,users:[user]};
+      if(calls===9)throw new Error('synthetic second page unreadable');
+      return {total:1,users:[user]};
+    }finally{active--;}
   }};
-  const first = new AuthService(w.I1.prisma, provider); t.after(()=>first.onModuleDestroy());
-  await first.onModuleInit();
-  assert.equal(failedCommit, true, 'the failed import reached both writes');
-  assert.equal(calls,4,'both failures retry the whole realm');
-  assert.equal(await w.base.memberRights.count(),1);
-  const marker = await w.base.memberRightsImport.findUnique({where:{id:'realm-v1'}});
-  assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).newAuthAfter?.getTime(), marker.completedAt.getTime());
-  const old = await w.call(w.I1,'get',{bearer:token.access});
-  assert.equal(old.status,401); assert.equal(old.body.code,'AUTH_SESSION_ENDED');
-  w.tick(1000);
-  const fresh = await w.issue(m+'-fresh', {sub:m,authTime:Math.floor(marker.completedAt.getTime()/1000)+1});
-  assert.equal((await w.call(w.I1,'get',{bearer:fresh.access})).status,200);
-  const restart = new AuthService(w.base,{listUsers:async()=>{calls++;throw new Error('no provider on restart');}});
-  t.after(()=>restart.onModuleDestroy()); await restart.onModuleInit();
-  assert.equal(calls,4,'completed import skips Keycloak entirely');
-  assert.deepEqual(await w.base.memberRightsImport.findUnique({where:{id:'realm-v1'}}), marker);
-  await w.finish('CORE-R2-BOOT');
+  w.observe({inst:'I1',model:'$transaction',phase:'started'},e=>{tx=e.client;});
+  w.observe({inst:'I1',scope:'tx',model:'memberRightsImport',method:'create',phase:'after'},async e=>{
+    if(failedCommit)return;
+    assert.equal((await tx.memberRights.findUnique({where:{sub:m}})).newAuthAfter.getTime(),e.result.completedAt.getTime());
+    assert.equal(await w.base.memberRightsImport.count(),0,'marker invisible before commit');
+    failedCommit=true;throw new Error('synthetic failure after marker before commit');
+  });
+  const service=new AuthService(w.I1.prisma,provider); t.after(()=>service.onModuleDestroy());
+  // Only the import scheduler is controlled: no network/readiness sleeps are elided.
+  const schedule=()=>{global.setTimeout=(fn,ms,...args)=>{if(![1000,2000,4000,8000,16000,30000].includes(ms))return realTimer(fn,ms,...args);delays.push(ms);queued.push(fn);return {unref(){}};};};
+  const flush=async()=>{for(let i=0;i<100;i++)await new Promise(resolve=>setImmediate(resolve));};
+  schedule();
+  try {
+    let started=false,startError;
+    const start=service.onModuleInit().then(()=>{started=true;},e=>{startError=e;});
+    await flush();
+    assert.equal(startError,undefined);assert.equal(started,true,'realm failure must never refuse or delay API startup');
+    await start;
+  }finally{ /* Scheduler stays controlled until the asynchronous DB attempt finishes. */ }
+  await w.until('first attempt settles',async()=>queued.length>0||capture.texts.some(([,line])=>line.includes('import attempt 1: ready')));
+  assert.equal(queued.length,1,'failed import must schedule its retry');
+  assert.deepEqual((await w.call(w.I1,'health')).body.memberRights,'pending');
+  assert.equal((await w.call(w.I1,'health')).status,200);
+  assert.equal((await w.call(w.I1,'get',{sid})).status,401,'even preexisting member rows cannot enter before marker');
+  assert.equal((await login(w,w.I1,old)).done.newSid,null);
+  for(let i=0;i<9;i++){
+    assert.equal(queued.length,1,'one retry in flight');
+    queued.shift()();await flush();
+    await w.until('attempt settled',async()=>queued.length===1||!!await w.base.memberRightsImport.findUnique({where:{id:'realm-v1'}}));
+    if(i<8)assert.equal(await w.base.memberRightsImport.count(),0);
+  }
+  assert.deepEqual(delays,[1000,2000,4000,8000,16000,30000,30000,30000,30000]);
+  global.setTimeout=realTimer;
+  assert.equal(maxActive,1);assert.equal(failedCommit,true);assert.equal(calls,11);
+  assert.equal((await w.call(w.I2,'health')).body.memberRights,'ready');
+  assert.equal((await w.call(w.I1,'get',{bearer:old.access})).status,401);
+  w.tick(1000);const fresh=await w.issue(m+'-fresh',{sub:m,authTime:Math.floor(Date.now()/1000)});
+  assert.ok((await login(w,w.I2,fresh)).done.newSid);
+  const restart=new AuthService(w.base,{listUsers:async()=>{calls++;throw Error('must skip provider');}});
+  t.after(()=>restart.onModuleDestroy());await restart.onModuleInit();await flush();assert.equal(calls,11);
+  const logs=await w.finish('CORE-R2-BOOT');
+  assert.ok(logs.some(([,line])=>line.includes('synthetic realm unreachable')),'retry reason is logged');
 });
 
 test('CORE-R2-IMPORTED existing realm-v1 starts while the member admin API is down', async t => {
@@ -4005,4 +4037,479 @@ test('CORE-R2-LIST GET leaves rights unchanged; PATCH registers and approves ato
   assert.equal(await w.base.memberRights.count(),before+1);
   assert.equal((await r10Patch(admin,m,{enabled:false,version:null})).status,409,'existing row requires CAS');
   await w.finish('CORE-R2-LIST');
+});
+
+// D628 / REQ-S7-U5-DB-RIGHTS -> RISK-STALE-CREDENTIAL / PARTIAL-COMMIT / MISATTRIBUTED-END.
+// U1–U13 enumerate independent decisions; PG runs use actual transaction/statement boundaries.
+const CORE_COMMANDS=['Suspend','Approve','Change','Cancel','Activate'];
+const coreBody=name=>({Suspend:{enabled:false},Approve:{approvalState:'APPROVED',institution:B,roles:['radiologist'],enabled:true},
+  Change:{institution:B,roles:['technician']},Cancel:{approvalState:'PENDING'},Activate:{enabled:true}}[name]);
+const realPG=()=>!process.env.KIN_AUTH_SESSION_DATABASE_URL.includes('local-stand-in');
+async function coreSetup(w,m,command){
+  const setup=await coreMember(w,m);
+  if(command==='Approve')await w.base.memberRights.update({where:{sub:m},data:{approved:false,institution:null,roles:[]}});
+  if(command==='Activate')await w.base.memberRights.update({where:{sub:m},data:{suspended:true}});
+  return setup;
+}
+async function coreRoster(w,m){
+  const out=await r10Admin(w).listUsers(1,R10_CALLER);return out.users.find(u=>u.id===m);
+}
+async function coreSettled(w,m){
+  await w.until('recorded credentials settled',async()=>{
+    const row=await w.base.providerChange.findFirst({where:{sub:m,kind:'credentials'},orderBy:{id:'desc'}});
+    return row&&row.outcome;
+  });
+}
+
+for(const first of CORE_COMMANDS)for(const second of CORE_COMMANDS){
+  if(first==='Suspend'&&second==='Cancel')continue; // CORE-CAS covers this cell.
+  test(`CORE_COMMAND_CAS_MATRIX U1 ${first}->${second}`,async t=>{
+    const w=await world(t),m='syn-cas-'+first+'-'+second,{admin}=await coreMember(w,m);
+    // Both requests observe a valid version. Approval is a full scope replacement even if already approved.
+    const r1=w.pause({inst:'I1',model:'memberRights',method:'findUnique',scope:'root',phase:'after'});
+    const r2=w.pause({inst:'I2',model:'memberRights',method:'findUnique',scope:'root',phase:'after'});
+    const a=r10Patch(admin,m,coreBody(first)),b=r10Patch(r10Admin(w,w.I2),m,coreBody(second));
+    await r1.arrived();await r2.arrived();
+    const hold=w.pause({inst:'I1',model:'memberRights',method:'updateMany',scope:'tx',phase:'after'});
+    const started=deferred(),pids=[];
+    w.observe({model:'$transaction',phase:'started'},async e=>{
+      if(realPG())pids.push((await e.client.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid);
+      if(e.inst==='I2')started.resolve();
+    });
+    r1.release();await hold.arrived();r2.release();if(realPG())await within(started.promise,'second command connection');
+    hold.release();const results=await Promise.all([a,b]);
+    assert.deepEqual(results.map(x=>x.status),[200,409],`${first}->${second}: only the first observed version commits`);
+    if(realPG())assert.ok(new Set(pids).size>=2);
+    assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).version,2);
+    assert.equal(await w.base.authSession.count({where:{sub:m}}),0);
+    const audits=await w.base.auditLog.findMany({where:{target:m}});
+    assert.equal(audits.filter(r=>r.action.startsWith('admin.user.')&&!r.action.endsWith('.failed')).length,1);
+    await quiet(w);assert.equal(kc.endRequests.length,0);await w.finish(`U1 ${first}->${second}`);
+  });
+}
+for(const first of CORE_COMMANDS)for(const second of CORE_COMMANDS){
+  if(first==='Suspend'&&second==='Activate')continue; // CORE-R1 covers this cell.
+  test(`CORE_POSTCOMMIT_MATRIX U2 ${first}->${second}`,async t=>{
+    const w=await world(t),m='syn-post-'+first+'-'+second,{admin}=await coreSetup(w,m,first);
+    const pids=[];w.observe({model:'$transaction',phase:'started'},async e=>{
+      if(realPG())pids.push((await e.client.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid);
+    });
+    // The first connection remains occupied AFTER commit: this is a delayed response, never an open transaction.
+    const hold=w.pause({inst:'I1',model:'$transaction',phase:'after'},e=>e.result?.after?.id===m);
+    const old=r10Patch(admin,m,coreBody(first));await hold.arrived();
+    let reserved,release;
+    if(realPG()){
+      const arrived=deferred();release=deferred();
+      reserved=w.base.$transaction(async tx=>{pids.push((await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid);arrived.resolve();await release.promise;});
+      await arrived.promise;t.after(()=>release.resolve());
+      pids.push((await w.base.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid);
+    }
+    const next=await r10Patch(r10Admin(w,w.I2),m,coreBody(second));
+    const invalid=first==='Cancel'&&second==='Activate';
+    assert.equal(next.status,invalid?400:200);
+    release?.resolve();if(reserved)await reserved;
+    if(realPG())assert.ok(new Set(pids).size>=2,'ordering is exercised across two PG connections');
+    const current=await w.base.memberRights.findUnique({where:{sub:m}});
+    w.tick(1000);const token=await w.issue(m+'-new',{sub:m,authTime:Math.floor(Date.now()/1000)});
+    const fresh=(await login(w,w.I2,token)).done;
+    const blocked=second==='Suspend'||second==='Cancel'||invalid||(second==='Change'&&['Suspend','Cancel'].includes(first));
+    assert.equal(!!fresh.newSid,!blocked,'latest command alone decides entry');
+    const snapshot=fresh.newSid?await w.base.authSession.findUnique({where:{sid:fresh.newSid}}):null;
+    const admittedRights=await w.base.memberRights.findUnique({where:{sub:m}});
+    for(const key of ['version','approved','suspended','institution','roles','newAuthAfter'])
+      assert.deepEqual(admittedRights[key],current[key],'callback preserves '+key);
+    hold.release();assert.equal((await old).status,200);await quiet(w);
+    assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),admittedRights,'late roster never changes rights or identity');
+    if(snapshot){
+      assert.deepEqual(await w.base.authSession.findUnique({where:{sid:fresh.newSid}}),snapshot);
+      assert.equal((await w.call(w.I2,'me',{sid:fresh.newSid})).body.institution,current.institution);
+    }else assert.equal((await w.call(w.I2,'get',{bearer:token.access})).status,401);
+    assert.equal(kc.endRequests.length,0);await w.finish(`U2 ${first}->${second}`);
+  });
+}
+for(const command of ['Approve','Change','Cancel','Activate'])test(`CORE_COMMAND_ATOMIC_AUDIT U3 ${command}`,async t=>{
+  const w=await world(t),m='syn-atomic-'+command,{admin,sid}=await coreSetup(w,m,command);
+  const before=await w.base.memberRights.findUnique({where:{sub:m}});
+  for(const failure of ['authSession','auditLog','providerChange']){
+    if(failure==='providerChange'&&command==='Cancel')continue;
+    let reached=false;
+    w.observe({inst:'I1',scope:'tx',model:failure,method:failure==='authSession'?'deleteMany':'create',phase:'after'},()=>{
+      if(!reached){reached=true;throw Error('synthetic atomic command failure');}
+    });
+    assert.equal((await r10Patch(admin,m,coreBody(command))).status,500);
+    assert.equal(reached,true);assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
+    assert.ok(await w.base.authSession.findUnique({where:{sid}}));
+    assert.equal(await w.base.providerChange.count(),0);
+    assert.equal((await w.base.auditLog.findMany({where:{target:m}})).filter(r=>!r.action.endsWith('.failed')).length,0);
+    assert.ok(!kc.adminCalls.some(x=>/^(PUT|POST|DELETE) /.test(x)),'rollback sends nothing');
+  }
+  const hold=w.pause({inst:'I1',scope:'tx',model:'auditLog',method:'create',phase:'after'},e=>e.args.data.action.startsWith('admin.user.'));
+  let returned=false;const run=r10Patch(admin,m,coreBody(command)).then(out=>{returned=true;return out;});await hold.arrived();
+  assert.equal(returned,false);assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
+  hold.release();assert.equal((await run).status,200);
+  const after=await w.base.memberRights.findUnique({where:{sub:m}});
+  const audit=(await w.base.auditLog.findMany({where:{target:m}})).find(r=>r.action.startsWith('admin.user.')&&!r.action.endsWith('.failed'));
+  const detail=JSON.parse(audit.detail);
+  assert.equal(detail.before.version,before.version);assert.equal(detail.after.version,after.version);
+  assert.equal(detail.after.institution,after.institution);assert.deepEqual(detail.after.roles,after.roles);
+  assert.equal(await w.base.authSession.count({where:{sub:m}}),0);await quiet(w);await w.finish('U3 '+command);
+});
+for(const command of CORE_COMMANDS)test(`CORE_COMMAND_READ_FAILURE U4 ${command}`,async t=>{
+  const w=await world(t),m='syn-read-'+command,{admin,sid}=await coreSetup(w,m,command);
+  const before=await w.base.memberRights.findUnique({where:{sub:m}});
+  for(const scope of ['root','tx']){
+    let reached=false;
+    w.observe({inst:'I1',scope,model:'memberRights',method:'findUnique',phase:'before'},()=>{if(!reached){reached=true;throw Error('synthetic rights read down');}});
+    assert.equal((await r10Patch(admin,m,coreBody(command))).status,500);assert.equal(reached,true);
+    assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
+    assert.ok(await w.base.authSession.findUnique({where:{sid}}));assert.equal(await w.base.providerChange.count(),0);
+    assert.ok(!kc.adminCalls.some(x=>/^(PUT|POST|DELETE) /.test(x)));
+  }
+  await w.finish('U4 '+command);
+});
+
+async function coreEntry(w,path,m){
+  const setup=await coreMember(w,m),done=(await login(w,w.I1,setup.token)).done;
+  const sid=done.newSid;
+  if(path==='refresh')await w.base.authSession.update({where:{sid},data:{atExpiresAt:lapsed()}});
+  const run=async()=>{
+    if(path==='callback')return (await login(w,w.I2,setup.token)).done;
+    if(path==='proof')return w.call(w.I2,'entry',{sid,body:{proof:done.proof}});
+    if(path==='hasSession')return w.call(w.I2,'login',{sid});
+    if(path==='authenticateSession')return r10Answer(w.I2.service.authenticateSession(sid,{}));
+    return w.call(w.I2,'get',{sid});
+  };
+  return {...setup,sid,done,run};
+}
+for(const path of ['callback','proof','refresh','hasSession'])test(`CORE_ENTRY_MISSING_ROW U5 ${path}`,async t=>{
+  const w=await world(t),m='syn-missing-'+path,f=await coreEntry(w,path,m);
+  await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
+  const before=await w.base.authSession.findUnique({where:{sid:f.sid}}),tokens=kc.tokens;
+  const result=await f.run();
+  if(path==='callback'){
+    assert.ok(result.newSid,'missing member gets waiting identity');
+    const me=await w.call(w.I2,'me',{sid:result.newSid});assert.equal(me.status,403);assert.equal(me.body.code,'INSTITUTION_PENDING');
+    assert.equal((await w.call(w.I2,'get',{sid:result.newSid})).status,403);
+  }else if(path==='hasSession'){
+    assert.ok(atProvider(result));
+    assert.notEqual((await w.call(w.I2,'callback',{sid:f.sid})).location,ORIGIN+'/worklist/hpacs-lite/main.html');
+  }else{
+    assert.ok([401,500].includes(result.status));assert.deepEqual(await w.base.authSession.findUnique({where:{sid:f.sid}}),before);
+    assert.equal(kc.tokens,tokens,'no refresh request or token storage');
+  }
+  await w.finish('U5 '+path);
+});
+for(const path of ['callback','proof','refresh','document','authenticateSession','hasSession'])test(`CORE_ENTRY_DB_DOWN U6 ${path}`,async t=>{
+  const w=await world(t),m='syn-down-'+path,f=await coreEntry(w,path,m);
+  const before=await w.base.authSession.findUnique({where:{sid:f.sid}}),tokens=kc.tokens;
+  let reached=false;w.observe({inst:'I2',model:'memberRights',method:'findUnique',phase:'before'},()=>{reached=true;throw Error('synthetic member storage outage');});
+  const result=await f.run();assert.equal(reached,true);
+  if(path==='callback'){
+    assert.equal(result.newSid,null);assert.equal(result.location,landing('login_failed'));
+    assert.equal((await w.rows()).filter(r=>r.detail.outcome==='failure').at(-1).detail.cause,'storage_failure');
+  }else assert.equal(result.status,500);
+  assert.deepEqual(await w.base.authSession.findUnique({where:{sid:f.sid}}),before);
+  if(path!=='callback')assert.equal(kc.tokens,tokens);
+  await w.finish('U6 '+path);
+});
+
+for(const [outcome,state] of [[204,'done'],[404,'void'],[403,'void'],[503,'unknown'],['drop','unknown']])test(`CORE_ROSTER_HTTP_OUTCOMES U7 ${outcome}`,async t=>{
+  const w=await world(t),m='syn-http-'+outcome,{admin}=await coreMember(w,m);
+  kc.onAdmin=(name,sub)=>sub===m&&name.startsWith('PUT groups/')?outcome:undefined;
+  assert.equal((await r10Patch(admin,m,coreBody('Change'))).status,200);await coreSettled(w,m);
+  const record=await w.base.providerChange.findFirst({where:{sub:m,kind:'credentials'}});
+  assert.equal(record.state,state);if(typeof outcome==='number'&&outcome!==204)assert.equal(record.outcome,'http_'+outcome);
+  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,state!=='done');
+  const fresh=await coreFresh(w,m);assert.equal((await w.call(w.I2,'me',{sid:fresh.done.newSid})).body.institution,B);
+  assert.equal(kc.endRequests.length,0);await w.finish('U7 '+outcome);
+});
+
+test('CORE_CREDENTIALS_COMMIT_CRASH_SECOND_API U8 intent survives crash before send; another API admits DB rights',async t=>{
+  const w=await world(t),m='syn-crash-credentials',{admin}=await coreMember(w,m);
+  let crashed=false;w.observe({inst:'I1',model:'$transaction',phase:'after'},e=>{
+    if(e.result?.change?.kind==='credentials'&&!crashed){crashed=true;throw Error('synthetic process lost after commit');}
+  });
+  assert.equal((await r10Patch(admin,m,coreBody('Change'))).status,500);assert.equal(crashed,true);
+  const record=await w.base.providerChange.findFirst({where:{sub:m,kind:'credentials'}});assert.equal(record.state,'unknown');assert.equal(record.outcome,null);
+  assert.ok(!kc.adminCalls.some(x=>/^(PUT|POST|DELETE) /.test(x)));
+  const second=w.instance('crash-restart');await second.service.onModuleInit();t.after(()=>second.service.onModuleDestroy());
+  w.tick(1000);const token=await w.issue(m+'-new',{sub:m,authTime:Math.floor(Date.now()/1000)});
+  const entered=(await login(w,second,token)).done;assert.ok(entered.newSid);
+  assert.equal((await w.call(second,'me',{sid:entered.newSid})).body.institution,B);
+  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,true);await quiet(w);
+  assert.equal((await w.base.providerChange.findUnique({where:{id:record.id}})).state,'unknown');
+  assert.ok(!kc.adminCalls.some(x=>/^(PUT|POST|DELETE) /.test(x)));await w.finish('U8');
+});
+
+test('CORE_ROSTER_B_C_RESIDUE U9 late B and completed C leave B+C while DB C and the new session survive',async t=>{
+  const w=await world(t),m='syn-residue',{admin}=await coreMember(w,m),arrived=deferred(),release=deferred();let once=true;
+  t.after(()=>release.resolve());kc.beforeAdmin=(name,sub)=>{
+    if(once&&sub===m&&name==='PUT groups/syn-group-'+B){once=false;arrived.resolve();return release.promise;}
+  };
+  assert.equal((await r10Patch(admin,m,{institution:B,roles:['radiologist']})).status,200);await within(arrived.promise,'B held after A removal');
+  assert.deepEqual(kc.members[m].groups,[]);w.tick(1000);
+  assert.equal((await r10Patch(r10Admin(w,w.I2),m,{institution:Z,roles:['technician']})).status,200);await coreSettled(w,m);
+  assert.deepEqual(kc.members[m].groups,[Z]);const entered=await coreFresh(w,m),sid=entered.done.newSid;
+  w.tick(1000);release.resolve();await w.until('both writes settled',async()=>await w.base.providerChange.count({where:{sub:m,state:'done'}})===2);
+  assert.deepEqual([...kc.members[m].groups].sort(),[B,Z].sort());
+  const me=await w.call(w.I2,'me',{sid});assert.equal(me.status,200);assert.equal(me.body.institution,Z);assert.deepEqual(me.body.roles,['technician']);
+  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,true);assert.equal(kc.endRequests.length,0);await w.finish('U9');
+});
+
+test('CORE_LEGACY_UNKNOWN_RESTART_NO_B01 U11 disable/enable unknown survive import and restart without member reconciliation',async t=>{
+  const w=await world(t,{imported:false}),m=r10Member('syn-legacy-unknown');
+  for(const kind of ['disable','enable'])await w.base.providerChange.create({data:{kind,sub:m,target:m,generation:1,state:'unknown',createdAt:new Date()}});
+  const before=await w.base.providerChange.findMany();
+  await w.I1.service.onModuleInit();t.after(()=>w.I1.service.onModuleDestroy());
+  await w.until('legacy import completes',async()=>await w.base.memberRightsImport.count()===1);
+  assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).suspended,true);
+  await quiet(w);const calls=kc.adminCalls.length;
+  await w.I2.service.onModuleInit();t.after(()=>w.I2.service.onModuleDestroy());w.tick(300000);await quiet(w);
+  assert.deepEqual(await w.base.providerChange.findMany(),before);assert.equal(kc.adminCalls.length,calls);
+  assert.ok(!kc.adminCalls.some(x=>/^(PUT|POST|DELETE) |sessions/.test(x)));await w.finish('U11');
+});
+
+for(const path of ['callback','proof','refresh'])test(`CORE_ENTRY_MEMBER_LOCK_TIMEOUT U13 ${path}`,async t=>{
+  const w=await world(t),m='syn-lock-'+path,f=await coreEntry(w,path,m);
+  const before=await w.base.authSession.findUnique({where:{sid:f.sid}});
+  let reached=false,release,held;
+  if(realPG()){
+    release=deferred();const arrived=deferred();
+    held=w.base.$transaction(async tx=>{await require('/app/dist/member-rights').lockMemberRights(tx,m);arrived.resolve();await release.promise;},{timeout:15000});
+    await arrived.promise;t.after(()=>release.resolve());
+  }else w.observe({inst:'I2',model:'$executeRaw',scope:'tx',phase:'before'},e=>{
+    if(e.args[1]===0x4b494e4d){reached=true;throw Object.assign(Error('synthetic member lock timeout'),{code:'P2010',meta:{code:'55P03'}});}
+  });
+  if(path==='refresh'){const next=await w.issue(m+'-renewed',{sub:m});kc.auto=()=>reply.tokens(next);}
+  const result=await f.run();release?.resolve();if(held)await held;
+  if(path==='callback')assert.equal(result.newSid,null);else assert.equal(result.status,500);
+  assert.deepEqual(await w.base.authSession.findUnique({where:{sid:f.sid}}),before,'proof/token unchanged on lock timeout');
+  if(!realPG())assert.equal(reached,true);
+  assert.equal((await w.rows()).filter(r=>r.action==='auth.entry').length,0);await w.finish('U13 '+path);
+});
+
+for(const command of CORE_COMMANDS)test(`CORE_MEMBER_LOCK_TIMEOUT O4 ${command}`,async t=>{
+  const w=await world(t),m='syn-command-lock-'+command,{admin,sid}=await coreSetup(w,m,command);
+  const before=await w.base.memberRights.findUnique({where:{sub:m}});let release,held,reached=false;
+  if(realPG()){
+    release=deferred();const arrived=deferred();held=w.base.$transaction(async tx=>{
+      await require('/app/dist/member-rights').lockMemberRights(tx,m);arrived.resolve();await release.promise;
+    },{timeout:15000});await arrived.promise;t.after(()=>release.resolve());
+  }else w.observe({inst:'I1',model:'$executeRaw',phase:'before'},e=>{
+    if(e.args[1]===0x4b494e4d){reached=true;throw Object.assign(Error('synthetic timeout'),{code:'P2010',meta:{code:'55P03'}});}
+  });
+  const out=await r10Patch(admin,m,coreBody(command));release?.resolve();if(held)await held;
+  assert.equal(out.status,409);assert.equal(out.body.code,'MEMBER_BUSY');if(!realPG())assert.equal(reached,true);
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);assert.ok(await w.base.authSession.findUnique({where:{sid}}));
+  assert.equal(await w.base.providerChange.count(),0);assert.ok(!kc.adminCalls.some(x=>/^(PUT|POST|DELETE) /.test(x)));await w.finish('O4 '+command);
+});
+
+for(const blocked of ['Suspend','Cancel','missing'])test(`CORE_BLOCKED_SSO_SWITCH O2 ${blocked}`,async t=>{
+  const w=await world(t),m='syn-switch-'+blocked,{token,admin}=await coreMember(w,m);
+  if(blocked==='missing')await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
+  else assert.equal((await r10Patch(admin,m,coreBody(blocked))).status,200);
+  const probe=await w.call(w.I1,'switch',{body:SWITCH});assert.equal(promptOf(probe),'none');
+  const fresh=await answerFlow(w,w.I1,probe,token);assert.equal(promptOf(fresh),'login');assert.equal(fresh.newSid,null);
+  assert.deepEqual(kc.ended,[token.idp]);
+  const b=await w.issue(m+'-b',{sub:m+'-b',idp:m+'-b-sso'});
+  const entered=await answerFlow(w,w.I1,fresh,b);assert.ok(entered.newSid);
+  assert.equal((await w.call(w.I1,'me',{sid:entered.newSid})).body.sub,b.sub);await w.finish('O2 '+blocked);
+});
+
+for(const via of ['probe','login_required'])test(`CORE_PROBE_FRESH RV-02 ${via} rights changed has exactly one credential prompt`,async t=>{
+  const w=await world(t),m='syn-fresh-'+via,{token,admin}=await coreMember(w,m);
+  assert.equal((await r10Patch(admin,m,coreBody('Change'))).status,200);await quiet(w);
+  const probe=await w.call(w.I1,'switch',{body:SWITCH});
+  const fresh=via==='probe'?await answerFlow(w,w.I1,probe,token):await refuseFlow(w,w.I1,probe,'login_required');
+  assert.equal(promptOf(fresh),'login');w.tick(1000);
+  const next=await w.issue(m+'-fresh',{sub:m,idp:m+'-new-sso',authTime:Math.floor(Date.now()/1000)});
+  const entered=await answerFlow(w,w.I1,fresh,next);assert.ok(entered.newSid,'first fresh authentication enters');
+  assert.equal(atProvider(entered),false,'no second credential prompt');await w.finish('RV-02 '+via);
+});
+
+test('CORE_PENDING_CONTRACT RV-01 pending/invalid/missing and registration get no-rights guidance; suspended only logout',async t=>{
+  const w=await world(t);
+  for(const state of ['pending','invalid','missing','register','suspended']){
+    const m='syn-wait-'+state,token=await w.issue(m,{sub:m,groups:[],identity:{preferred_username:m,email_verified:true}});
+    if(state==='missing')await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
+    if(state==='invalid')await w.base.memberRights.update({where:{sub:m},data:{institution:A,roles:[],approved:false}});
+    if(state==='suspended')await w.base.memberRights.update({where:{sub:m},data:{suspended:true}});
+    const begin=await w.call(w.I1,state==='register'?'register':'login');
+    const done=await answerFlow(w,w.I1,begin,token);
+    if(state==='suspended'){assert.equal(done.newSid,null);continue;}
+    assert.ok(done.newSid);assert.ok(done.proof);
+    assert.equal((await w.call(w.I1,'entry',{sid:done.newSid,body:{proof:done.proof}})).status,200);
+    const me=await w.call(w.I1,'me',{sid:done.newSid});assert.equal(me.status,403);
+    assert.equal(me.body.code,state==='invalid'?'INSTITUTION_INVALID':'INSTITUTION_PENDING');assert.equal(typeof me.body.sessionId,'string');
+    for(const route of ['get','authz'])assert.equal((await w.call(w.I2,route,{sid:done.newSid})).status,403);
+    assert.equal((await w.call(w.I2,'logout',{sid:done.newSid})).status,204);
+  }
+  await w.finish('RV-01');
+});
+
+test('CORE_LOGOUT_BEARER RV-03 blocked identities may logout only after full token verification',async t=>{
+  const w=await world(t),m='syn-bearer-logout',{token,admin}=await coreMember(w,m);
+  for(const patch of [{suspended:true},{suspended:false,approved:false,institution:null,roles:[]}]){
+    await w.base.memberRights.update({where:{sub:m},data:patch});
+    assert.equal((await w.call(w.I1,'logout',{bearer:token.access,csrf:false})).status,204);
+  }
+  const claims=jose.decodeJwt(token.access);
+  for(const variant of ['signature','issuer','audience','expiry']){
+    const value={...claims,...({issuer:{iss:'https://wrong.test'},audience:{aud:'wrong'},expiry:{exp:Math.floor(Date.now()/1000)-1}}[variant]??{})};
+    const bad=await new jose.SignJWT(value).setProtectedHeader({alg:'RS256',kid:KEYS.main.kid}).sign(KEYS[variant==='signature'?'other':'main'].privateKey);
+    assert.equal((await w.call(w.I1,'logout',{bearer:bad,csrf:false})).status,401,variant);
+  }
+  await w.finish('RV-03');
+});
+
+test('CORE_ROSTER_STATUS RV-04 Suspend and settled Activate do not invent roster drift; Cancel is still unconfirmed',async t=>{
+  const w=await world(t),m='syn-roster-note',{admin}=await coreMember(w,m);
+  assert.equal((await r10Patch(admin,m,coreBody('Change'))).status,200);await coreSettled(w,m);
+  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);w.tick(1000);
+  const suspend=await r10Patch(admin,m,coreBody('Suspend'));assert.equal(suspend.status,200);assert.equal(suspend.user.rosterUnconfirmed,false);
+  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);w.tick(1000);
+  assert.equal((await r10Patch(admin,m,coreBody('Activate'))).status,200);await coreSettled(w,m);
+  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);w.tick(1000);
+  assert.equal((await r10Patch(admin,m,coreBody('Cancel'))).status,200);assert.equal((await coreRoster(w,m)).rosterUnconfirmed,true);
+  await w.finish('RV-04');
+});
+
+test('CORE_HASSESSION RV-05 refused or stale-version cookie starts login; unrelated callback never answers work',async t=>{
+  const w=await world(t),m='syn-hassession',{sid}=await coreMember(w,m);
+  for(const patch of [{suspended:true},{suspended:false,version:2}]){
+    await w.base.memberRights.update({where:{sub:m},data:patch});
+    assert.equal(atProvider(await w.call(w.I1,'login',{sid})),true,'refused cookie must start a flow');
+    const stray=await w.call(w.I1,'callback',{sid,query:{code:'unowned',state:'unowned'}});
+    assert.equal(atProvider(stray),true,'unowned state cannot answer work');assert.equal(stray.newSid,null);
+  }
+  await w.finish('RV-05');
+});
+
+test('CORE_IDENTITY_REFRESH RV-08 callback transaction refreshes identity only and rolls it back on admission failure',async t=>{
+  const w=await world(t),m='syn-identity',{token}=await coreMember(w,m),before=await w.base.memberRights.findUnique({where:{sub:m}});
+  const changed=await w.issue(m+'-changed',{sub:m,email:'new@synthetic.test',groups:[B],roles:['admin'],identity:{preferred_username:'new-username',name:'New Name',email_verified:false}});
+  w.fault('I1','tx.audit',Error('synthetic failed login commit'));
+  assert.equal((await login(w,w.I1,changed)).done.newSid,null);
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
+  assert.ok((await login(w,w.I1,changed)).done.newSid);
+  const row=await w.base.memberRights.findUnique({where:{sub:m}});
+  assert.deepEqual([row.username,row.email,row.name,row.emailVerified],['new-username','new@synthetic.test','New Name',false]);
+  for(const key of ['institution','roles','approved','suspended','version','newAuthAfter'])assert.deepEqual(row[key],before[key],key+' stays a DB decision');
+  await w.finish('RV-08');
+});
+
+test('CORE_LEGACY_DISABLED_ACTIVATE_LOGIN O6 import keeps suspension; Activate publishes enabled after commit without waiting',async t=>{
+  const w=await world(t,{imported:false}),m=r10Member('syn-legacy-disabled');kc.members[m].enabled=false;kc.members[m].emailVerified=true;
+  await w.I1.service.onModuleInit();t.after(()=>w.I1.service.onModuleDestroy());
+  await w.until('disabled member imported',async()=>await w.base.memberRightsImport.count()===1);
+  assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).suspended,true);
+  const arrived=deferred(),release=deferred();t.after(()=>release.resolve());
+  kc.beforeAdmin=async(name,sub)=>{if(sub===m&&name==='PUT enable'){
+    assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).suspended,false,'enable sent only after commit');arrived.resolve();return release.promise;
+  }};
+  const activated=await r10Patch(r10Admin(w),m,{enabled:true});assert.equal(activated.status,200);await within(arrived.promise,'enable queued');
+  assert.equal(kc.members[m].enabled,false,'response never waits for provider');release.resolve();await coreSettled(w,m);
+  assert.equal(kc.members[m].enabled,true);const fresh=await coreFresh(w,m);assert.equal((await w.call(w.I1,'me',{sid:fresh.done.newSid})).status,200);
+  assert.ok(!kc.adminCalls.some(x=>/disable|sessions|logout/.test(x)));await w.finish('O6');
+});
+
+for(const command of CORE_COMMANDS)for(const ending of ['logout','idle','sweep'])for(const order of ['end-first','command-first'])
+test(`CORE_COMMAND_END_RACE O3 ${command}/${ending}/${order}`,async t=>{
+  const w=await world(t),m='syn-end-'+command+'-'+ending+'-'+order,{admin,sid}=await coreMember(w,m);
+  if(ending!=='logout')await w.base.authSession.update({where:{sid},data:{lastSeenAt:past(IDLE+1)}});
+  let finishedSweep=false;
+  w.observe({inst:'I2',model:'$transaction',phase:'after'},()=>{finishedSweep=true;});
+  const end=async()=>{
+    if(ending==='sweep'){
+      await w.I2.service.onModuleInit();t.after(()=>w.I2.service.onModuleDestroy());w.tick(HOUR);
+      await w.until('sweep completed',async()=>finishedSweep||!await w.base.authSession.findUnique({where:{sid}}));
+      await quiet(w);return;
+    }
+    return w.call(w.I2,ending==='idle'?'get':'logout',{sid});
+  };
+  if(order==='end-first'){
+    // In PG the command has read its list while the other connection deletes and commits.
+    // The stand-in serializes whole transactions: hold before TX there, then run the same order.
+    const hold=realPG()?w.pause({inst:'I1',scope:'tx',model:'authSession',method:'findMany',phase:'after'})
+      :w.pause({inst:'I1',model:'$transaction',phase:'before'});
+    const run=r10Patch(admin,m,coreBody(command));await hold.arrived();await end();
+    assert.equal(await w.base.authSession.count({where:{sid}}),0);hold.release();assert.equal((await run).status,200);
+  }else{
+    const hold=ending==='sweep'?w.pause({inst:'I2',scope:'root',model:'authSession',method:'findMany',phase:'after'})
+      :w.pause({inst:'I2',scope:'root',model:'authSession',method:'findUnique',phase:'after'});
+    const run=end();await hold.arrived();assert.equal((await r10Patch(admin,m,coreBody(command))).status,200);hold.release();await run;
+  }
+  await quiet(w);
+  const ended=(await w.rows()).filter(r=>r.target===m&&['auth.logout','auth.session.expired'].includes(r.action));
+  assert.equal(ended.length,1,'exactly the actual delete writes one end audit');
+  assert.equal(ended[0].detail.cause,order==='command-first'?'isolation':ending==='logout'?'logout':ending==='idle'?'idle':'sweep');
+  assert.equal(await w.base.authSession.count({where:{sid}}),0);await w.finish('O3 '+command+'/'+ending+'/'+order);
+});
+
+for(const source of ['consultation','colleagues'])test(`CORE_ROSTER_SOURCE_SPLIT U12 ${source}`,async t=>{
+  const w=await world(t),caller={kind:'member',institution:A,sub:'syn-sender',actor:'sender@synthetic.test',roles:['radiologist']};
+  const provider={id:'syn-roster-only',username:'roster',email:'roster@synthetic.test',enabled:true,serviceAccountClientId:null,groups:[A],roles:['radiologist']};
+  await coreMember(w,provider.id);await w.base.memberRights.update({where:{sub:provider.id},data:{suspended:true,institution:B}});
+  await coreMember(w,'syn-db-only');
+  const kcStub={assignmentReaders:async()=>[provider],usersInGroupWithRole:async()=>[{id:provider.email,name:'Roster'}]};
+  if(source==='consultation'){
+    const {ConsultationService}=require('/app/dist/consultation.service');
+    const out=await new ConsultationService(w.I1.prisma,kcStub,null).candidates(caller);
+    assert.deepEqual(out.readers.map(x=>x.sub),[provider.id],'picker follows provider, including its stale member');
+  }else{
+    const {PacsService}=require('/app/dist/pacs.service');
+    const out=await new PacsService(w.I1.prisma,null,kcStub,null,null).colleagues(caller);
+    assert.deepEqual(out.map(x=>x.id),[provider.email]);
+  }
+  await w.finish('U12 '+source);
+});
+
+test('CORE_IMPORT_OLD_A_CALLBACK_BEARER O1 existing-session and Bearer-only old A authentications never acquire imported B rights',async t=>{
+  const w=await world(t,{imported:false}),users=[],tokens=[];
+  for(const suffix of ['cookie','bearer-only']){
+    const sub='syn-import-old-'+suffix,token=await w.issue(sub,{sub,authTime:Math.floor(Date.now()/1000)});
+    tokens.push(token);if(suffix==='cookie')await w.session(token);
+    users.push({id:sub,username:sub,email:sub+'@synthetic.test',emailVerified:true,enabled:true,groups:[B],roles:['radiologist'],firstName:'SYN',lastName:'Import'});
+  }
+  await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
+  await require('/app/dist/member-rights-import').importMemberRights(w.I1.prisma,{listUsers:async()=>({total:users.length,users})});
+  for(const token of tokens){
+    assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,401);
+    const old=(await login(w,w.I2,token)).done;
+    assert.equal(old.newSid,null);assert.equal(promptOf(old),'login','old authentication must become a fresh flow');
+    assert.equal(await w.base.authSession.count({where:{sub:token.sub,rightsVersion:1}}),0);
+  }
+  await w.finish('O1');
+});
+
+test('CORE_FRESH_FLOW_TIME fresh recovery cannot reuse authentication older than its own flow even after the rights boundary',async t=>{
+  const w=await world(t),m='syn-fresh-time',{admin}=await coreMember(w,m);
+  assert.equal((await r10Patch(admin,m,coreBody('Change'))).status,200);await quiet(w);
+  w.tick(1000);const old=await w.issue(m+'-old',{sub:m,authTime:Math.floor(Date.now()/1000)});w.tick(4000);
+  const probe=await w.call(w.I1,'switch',{body:SWITCH}),fresh=await refuseFlow(w,w.I1,probe,'login_required');
+  assert.equal(promptOf(fresh),'login');assert.equal((await answerFlow(w,w.I1,fresh,old)).newSid,null);
+  const probe2=await w.call(w.I1,'switch',{body:SWITCH}),fresh2=await refuseFlow(w,w.I1,probe2,'login_required');
+  const now=await w.issue(m+'-now',{sub:m,authTime:Math.floor(Date.now()/1000)});
+  assert.ok((await answerFlow(w,w.I1,fresh2,now)).newSid);await w.finish('CORE_FRESH_FLOW_TIME');
+});
+
+test('CORE_REALM_404 a realm read 404 is a failed import, never a ready empty realm',async t=>{
+  const w=await world(t,{imported:false});kc.realmReadStatus=404;
+  await assert.rejects(require('/app/dist/member-rights-import').importMemberRights(w.I1.prisma,new KeycloakService()),e=>e.getStatus?.()===503);
+  assert.equal(await w.base.memberRightsImport.count(),0);assert.equal((await w.call(w.I1,'health')).body.memberRights,'pending');
+  kc.beforeAdmin=name=>name==='GET read'?404:undefined;
+  assert.equal(await new KeycloakService().getUser('syn-absent'),null,'single-user lookup retains its absence contract');
+  await w.finish('CORE_REALM_404');
+});
+
+for(const stage of ['GET groups','GET role-mappings/realm','POST role-mappings/realm','PUT enable'])
+test(`CORE_ROSTER_HTTP_STAGE ${stage} 404 records void with its HTTP outcome`,async t=>{
+  const w=await world(t),m='syn-stage-'+stage.replace(/\W/g,'-'),{admin}=await coreMember(w,m);let armed=false;
+  w.observe({inst:'I1',scope:'tx',model:'providerChange',method:'create',phase:'after'},()=>{armed=true;});
+  kc.beforeAdmin=(name,sub)=>armed&&sub===m&&name===stage?404:undefined;
+  assert.equal((await r10Patch(admin,m,coreBody('Change'))).status,200);await coreSettled(w,m);
+  const record=await w.base.providerChange.findFirst({where:{sub:m,kind:'credentials'}});
+  assert.deepEqual([record.state,record.outcome],['void','http_404']);
+  kc.beforeAdmin=null;assert.equal((await coreRoster(w,m)).rosterUnconfirmed,true);
+  assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).institution,B);await w.finish('CORE_ROSTER_HTTP_STAGE '+stage);
 });

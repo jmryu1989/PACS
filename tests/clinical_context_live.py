@@ -264,7 +264,7 @@ class ClinicalContextLive(unittest.TestCase):
         reset = self.stack.kc_admin("PUT", f"/users/{quote(user_id)}/reset-password",
                                     {"type": "password", "value": password, "temporary": False})
         self.assertEqual(reset.status, 204, reset.text)
-        self.stack.set_member_rights(user_id, approvalState="PENDING")
+        # This new identity has no DB rights; approval-waiting is distinct from a suspended cancellation.
         data = urlencode({"client_id": self.stack.test_client_id, "grant_type": "password", "username": username,
                           "password": password}).encode("ascii")
         request = Request(self.stack.keycloak, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
@@ -317,7 +317,7 @@ class ClinicalContextLive(unittest.TestCase):
         clinician = self.context(anchor.uid, "ccclinician", 403)
         self.assertEqual(clinician.body.get("code"), DENIED)
         pending = self.stack.bearer_request("GET", f"/studies/{quote(anchor.uid)}/clinical-context", self.pending_token())
-        self.assertEqual((pending.status, pending.body.get("code")), (401, "AUTH_SESSION_ENDED"))
+        self.assertEqual((pending.status, pending.body.get("code")), (403, "INSTITUTION_PENDING"))
         request = Request(self.stack.api + f"/studies/{quote(anchor.uid)}/clinical-context",
                           headers={"Accept": "application/json", "Authorization": "Bearer " + self.stack.token("doctor")})
         with self.stack._open(request) as response:

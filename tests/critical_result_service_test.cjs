@@ -1643,3 +1643,14 @@ test('CORE-CVR stale provider rights never admit a recipient changed before the 
   const sent=await w.svc.create(UID,S(),createBody(S(),id(8002),'P',v));
   assert.equal(sent.applied.to,'created');assert.ok(!w.log.some(e=>e.startsWith('kc:')));
 });
+
+// REQ-S7-U5-DB-RIGHTS -> RISK-ROSTER-AUTHORITY-CONFUSION -> U12.
+test('CORE_ROSTER_SOURCE_SPLIT U12 critical candidates use the provider roster; final create still refuses DB ineligibility',async()=>{
+  const w=await world(),version=await approved(w);
+  await w.rights('P',{suspended:true,institution:OTHER});
+  w.users.delete(SUBS.P2); // DB-only eligible member must not be invented by a picker.
+  const out=await w.svc.recipients(UID,S());
+  assert.ok(out.recipients.some(x=>x.sub===SUBS.P),'stale provider member is still a roster candidate');
+  assert.ok(!out.recipients.some(x=>x.sub===SUBS.P2),'DB-only member is absent from provider roster');
+  await assert.rejects(w.svc.create(UID,S(),createBody(S(),id(8091),'P',version)),code(400,'CRITICAL_RESULT_RECIPIENT_INVALID'));
+});

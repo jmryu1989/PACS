@@ -686,7 +686,8 @@ class LiveStack:
         })
         if reset.status != 204:
             raise RuntimeError(f"로컬 시험 사용자 비밀번호 설정 실패({logical}): {reset.status}")
-        self.set_member_rights(user_id, institution=group, roles=roles, enabled=True, verificationOverride=True)
+        if group and roles:
+            self.set_member_rights(user_id, institution=group, roles=roles, enabled=True, verificationOverride=True)
         purge_user_audit(user_id)  # Scenarios measure their own commands after the owned fixture setup.
         return user_id
 
@@ -1476,8 +1477,7 @@ class BffInvariantTests(unittest.TestCase):
         self.assertEqual(reset.status, 204, reset.text)
         if with_group:
             self.stack.set_member_rights(user_id, institution="hallym", roles=["radiologist"], enabled=True, verificationOverride=True)
-        else:
-            self.stack.set_member_rights(user_id, approvalState="PENDING")
+        # An unregistered identity is pending with no rights. Cancel would explicitly suspend it.
         purge_user_audit(user_id)
         return user_id, username, password
 
@@ -1586,9 +1586,12 @@ class BffInvariantTests(unittest.TestCase):
                     invalid = self.stack.request("PATCH", f"/admin/users/{quote(user_id)}", "jmryu",
                                                  {"institution": ["hallym", "kin-center"], "roles": ["radiologist"]})
                     self.assertEqual(invalid.status, 400)
-                opener, sid = self.bff_login(username, password, refused=True)
-                self.assertIsNone(sid)
-                self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 401)
+                opener, sid = self.bff_login(username, password)
+                self.assertIsNotNone(sid)
+                me = self.proxy(opener, "GET", "/api/me")
+                self.assertEqual((me.status, me.body.get("code")), (403, "INSTITUTION_PENDING"))
+                self.assertTrue(me.body.get("sessionId"))
+                self.assertEqual(self.proxy(opener, "GET", "/api/studies").status, 403)
                 self.assertEqual(self.proxy(opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"}).status, 204)
             finally:
                 self.delete_member(user_id)
@@ -1811,7 +1814,8 @@ process.stdout.write(JSON.stringify(value));
         user_id = None
         try:
             user_id, username, password = self.create_member(with_group=False)
-            self.bff_login(username, password, refused=True)
+            waiting, _ = self.bff_login(username, password)
+            self.assertEqual(self.proxy(waiting, "GET", "/api/me").body.get("code"), "INSTITUTION_PENDING")
             approved = self.stack.set_member_rights(user_id, institution="hallym", roles=["radiologist"], enabled=True,
                                                      verificationOverride=True)
             self.assertEqual((approved["approvalState"], approved["institution"], approved["roles"]),
@@ -1881,7 +1885,8 @@ process.stdout.write(JSON.stringify(value));
                 self.assertEqual(self.stack.request("PATCH", path, "jmryu", invalid).status, 400)
                 self.assertEqual(self.admin_row(username), before, "invalid rights cannot change the DB version")
                 self.assertEqual(self.stack.request("PATCH", path, "jmryu", {"enabled": True}).status, 400)
-                self.bff_login(username, password, refused=True)
+                waiting, _ = self.bff_login(username, password)
+                self.assertEqual(self.proxy(waiting, "GET", "/api/me").body.get("code"), "INSTITUTION_PENDING")
                 fixed = self.stack.set_member_rights(user_id, institution="hallym", roles=["radiologist"], enabled=True,
                                                       verificationOverride=True)
                 self.assertEqual((fixed["approvalState"], fixed["institution"]), ("APPROVED", "hallym"))

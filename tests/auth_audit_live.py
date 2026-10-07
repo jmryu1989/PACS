@@ -195,8 +195,7 @@ class AuthAuditLive(unittest.TestCase):
         if len(groups) == 1 and roles:
             cls.stack.set_member_rights(user_id, institution=cls.groups[groups][0], roles=roles,
                                         enabled=True, verificationOverride=True)
-        else:
-            cls.stack.set_member_rights(user_id, approvalState="PENDING")
+        # Unregistered identities wait without rights; cancellation would additionally suspend them.
         cls.secrets += [("password", password)]
 
     @classmethod
@@ -265,7 +264,7 @@ class AuthAuditLive(unittest.TestCase):
         return address
 
     # ── the BFF login, one redirect at a time ──
-    def login(self, name: str, browser: Browser | None = None, *, refused: bool = False) -> Browser:
+    def login(self, name: str, browser: Browser | None = None) -> Browser:
         time.sleep(1.05)  # Authenticate after any just-committed rights boundary.
         member = self.members[name]
         browser = browser or Browser(self.stack)
@@ -286,11 +285,6 @@ class AuthAuditLive(unittest.TestCase):
         callback = headers.get("Location", "")
         self.secret("code", parse_qs(urlparse(callback).query).get("code", [""])[0])
         status, headers, _ = browser.call("GET", callback)
-        if refused:
-            self.assertEqual((status, urlparse(headers.get("Location", "")).path), (302, "/worklist/hpacs-lite/index.html"))
-            self.assertIsNone(browser.sid(), "pending member receives no product session")
-            self.assertEqual(browser.call("GET", "/api/me")[0], 401)
-            return browser
         self.assertEqual((status, urlparse(headers.get("Location", "")).path), (302, "/worklist/hpacs-lite/main.html"))
         self.assertIsNotNone(browser.sid())
         self.secret("sid", browser.sid())
@@ -520,7 +514,10 @@ class AuthAuditLive(unittest.TestCase):
     def test_07_admins_read_record_time_institutions_only(self):
         a, b = self.groups["A"][0], self.groups["B"][0]
         for name in ("mp", "mi2", "mi1"):
-            self.assertEqual(204, self.logout(self.login(name, refused=True)), name)
+            waiting = self.login(name)
+            status, _, body = waiting.call("GET", "/api/me")
+            self.assertEqual((status, json.loads(body).get("code")), (403, "INSTITUTION_PENDING"))
+            self.assertEqual(204, self.logout(waiting), name)
         self.assertEqual(204, self.logout(self.login("mm")))
         # Z's admin moves mm from A to B (an isolation: its sessions end without an access row), then mm logs in in B.
         mm = self.members["mm"]["id"]

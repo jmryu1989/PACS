@@ -1,6 +1,7 @@
 import { ForbiddenException, BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
 import { PacsService, Caller } from './pacs.service';
 import { Public } from './auth.guard';
+import { AuthService } from './auth.service';
 
 /**
  * URL의 `:id`를 정수로. **`+id`를 그대로 쓰면 안 된다.**
@@ -46,12 +47,12 @@ const draftSession = (req: any): string | null => (req.authMethod === 'session' 
 
 @Controller()
 export class PacsController {
-  constructor(private svc: PacsService) {}
+  constructor(private svc: PacsService, private auth: AuthService) {}
 
   @Public()
   @Get('health')
-  health() {
-    return { ok: true, at: new Date().toISOString(), auth: process.env.AUTH_REQUIRED !== 'false' };
+  async health() {
+    return { ok: true, at: new Date().toISOString(), auth: process.env.AUTH_REQUIRED !== 'false', memberRights: await this.auth.memberRightsState() };
   }
 
   /**

@@ -173,7 +173,7 @@ class ClinicianPolicyLive(unittest.TestCase):
         if len(groups) == 1 and roles:
             self.stack.set_member_rights(user_id, institution=groups[0], roles=roles, enabled=True, verificationOverride=True)
         else:
-            self.stack.set_member_rights(user_id, approvalState="PENDING")
+            # Invalid requested scope is rejected; the unregistered identity keeps waiting without rights.
             if len(groups) > 1:
                 invalid = self.stack.request("PATCH", f"/admin/users/{quote(user_id)}", "jmryu",
                                              {"institution": groups, "roles": roles, "enabled": True})
@@ -255,15 +255,15 @@ class ClinicianPolicyLive(unittest.TestCase):
               "newly_classified": sorted(FIXTURES["route_matrix"]["post_baseline"])}, ensure_ascii=True, sort_keys=True))
 
     def test_02_pending_and_invalid_clinician_keep_membership_codes_and_logout(self) -> None:
-        for logical, groups, code in (("cpending", [], "AUTH_SESSION_ENDED"),
-                                      ("cinvalid", ["hallym", "kin-center"], "AUTH_SESSION_ENDED")):
+        for logical, groups, code in (("cpending", [], "INSTITUTION_PENDING"),
+                                      ("cinvalid", ["hallym", "kin-center"], "INSTITUTION_PENDING")):
             with self.subTest(logical=logical):
                 _user_id, username, password = self.create_member(logical, ["clinician"], groups)
                 token = self.grant(username, password)
                 me = self.bearer("GET", "/me", token)
-                self.assertEqual((me.status, me.body.get("code")), (401, code), me.text)
+                self.assertEqual((me.status, me.body.get("code")), (403, code), me.text)
                 prefs = self.bearer("GET", "/prefs", token)
-                self.assertEqual((prefs.status, prefs.body.get("code")), (401, code), prefs.text)
+                self.assertEqual((prefs.status, prefs.body.get("code")), (403, code), prefs.text)
                 logout = self.bearer("POST", "/auth/logout", token)
                 self.assertEqual(logout.status, 204, logout.text)
 
@@ -271,7 +271,7 @@ class ClinicianPolicyLive(unittest.TestCase):
         user_id, username, password = self.create_member("crevoke", [], [])
         path = f"/admin/users/{quote(user_id)}"
         pending = self.bearer("GET", "/me", self.grant(username, password))
-        self.assertEqual((pending.status, pending.body.get("code")), (401, "AUTH_SESSION_ENDED"), pending.text)
+        self.assertEqual((pending.status, pending.body.get("code")), (403, "INSTITUTION_PENDING"), pending.text)
 
         rejected = self.stack.request("PATCH", path, "jmryu", {
             "approvalState": "APPROVED", "enabled": True, "institution": "hallym", "roles": ["clinicians"],

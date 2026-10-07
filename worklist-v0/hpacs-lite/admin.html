@@ -406,7 +406,7 @@
         if (epoch !== membersEpoch) throw Object.assign(new Error("이전 조회의 응답입니다"), { stale: true });
         const payload = response.body;
         if (!response.ok || response.incomplete) throw Object.assign(new Error(errorText(payload, response.status)), {
-          status: response.status, code: payload && payload.code, retryAfterSeconds: payload && payload.retryAfterSeconds,
+          status: response.status, code: payload && payload.code,
         });
         return payload;
       }
