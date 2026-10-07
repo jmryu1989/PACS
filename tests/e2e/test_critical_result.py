@@ -2943,7 +2943,7 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                     # D621/D623 ends the old rights version. Observe its next navigation without submitting a login.
                     o.page.goto(self.stack.proxy + "/worklist/hpacs-lite/clinician.html")
                     o.page.wait_for_url(lambda url: urlsplit(url).path == "/auth/realms/kin/protocol/openid-connect/auth")
-                    expect(o.page.locator('input[name="username"]')).to_be_visible()
+                    expect(o.page.locator('input[name="password"]')).to_be_visible()
                     expect(self.inbox(o.page)).to_have_count(0)
                     expect(o.page.get_by_role("list", name="Received Critical Results", exact=True)).to_have_count(0)
                     expect(o.page.get_by_role("button", name="Acknowledge", exact=True)).to_have_count(0)
