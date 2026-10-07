@@ -120,6 +120,21 @@ export class CriticalResultService {
     try { return rightsUser(await this.prisma.memberRights.findUnique({ where: { sub } })); } catch { throw unavailable(); }
   }
 
+  private async preliminaryRoster(uid: string, institution: string) {
+    const state = await this.prisma.studyState.findUnique({ where: { uid }, select: { rs: true } });
+    if (state?.rs !== 'P') return [];
+    try { return await this.keycloak.usersInGroupWithRole(institution, RADIOLOGIST, true); } catch { throw unavailable(); }
+  }
+
+  /** The report picker stores roster ids; only an unambiguous binding to a subject identifies its readers. */
+  private recipientReadState(state: any, roster: { id: string; sub: string }[]) {
+    const subject = (actor: string) => {
+      const matches = roster.filter(user => user.id === actor);
+      return matches.length === 1 ? matches[0].sub : null;
+    };
+    return { ...state, preDoc: subject(state?.preDoc), preReviewer: subject(state?.preReviewer) };
+  }
+
   /** 원본 신원 한 건(§3.2). 트랜잭션 밖에서만 부른다. 영상 저장·전송·변경 호출은 없다. */
   private async identity(uid: string) {
     try {
@@ -304,7 +319,7 @@ export class CriticalResultService {
    * 읽는가(C2/R2) → 409. 수신자 주체(기록 기관)의 StudyAccess는 트랜잭션 전에 준비한 태그로 같은 트랜잭션에서 판정한다.
    */
   private async judgeRecipient(tx: any, uid: string, institution: string, c: Caller, sub: string, recipient: KeycloakUser | null,
-    subject: Caller | null, head: Head, state: any): Promise<RecipientClass> {
+    subject: Caller | null, head: Head, state: any, roster: { id: string; sub: string }[]): Promise<RecipientClass> {
     await lockMemberRights(tx, sub);
     recipient = rightsUser(await tx.memberRights.findUnique({ where: { sub } }));
     const cls = eligibleRecipient(recipient, { sub, institution, sender: c.sub });
@@ -312,7 +327,7 @@ export class CriticalResultService {
     if (subject && recipient) { subject.roles = recipient.roles; subject.institution = recipient.groups[0]; }
     if (!cls || !subject) throw recipientInvalid();
     const visible = await this.readableBy(subject, uid, tx);
-    const kase = createCase({ cls, visible, head, state, actor: userActor(recipient) });
+    const kase = createCase({ cls, visible, head, state: this.recipientReadState(state, roster), actor: sub });
     if (kase !== 'C2' && kase !== 'R2') throw cannotRead();
     return cls;
   }
@@ -350,7 +365,9 @@ export class CriticalResultService {
       const readable = legacyReadable(state, c.actor);
       const recipients: any[] = [];
       if (pinnable && readable) for (const x of candidates) {
-        const kase = createCase({ cls: x.cls, visible: await this.readableBy(x.subject, uid, tx), head, state, actor: userActor(x.user) });
+        const roster = members.map(user => ({ id: userActor(user), sub: user.id }));
+        const kase = createCase({ cls: x.cls, visible: await this.readableBy(x.subject, uid, tx), head,
+          state: this.recipientReadState(state, roster), actor: x.user.id });
         if (kase === 'C2' || kase === 'R2') recipients.push({ sub: x.user.id, actor: userActor(x.user), name: userName(x.user), role: x.cls });
       }
       return { state, head, pinnable, readable, recipients };
@@ -381,10 +398,18 @@ export class CriticalResultService {
     // 순서 4: 적용된 요청의 재전송이면 Keycloak·Orthanc를 읽지 않는다(Keycloak이 멈춰도 재전송은 답한다).
     const known = await this.prisma.criticalResultReceipt.findUnique({ where: { requestId } });
     let recipient: KeycloakUser | null | undefined, identity: any = null, prepared: string | null = null;
+    let roster: Awaited<ReturnType<KeycloakService['usersInGroupWithRole']>> = [];
     if (!known) {
       await this.recheck(c, roles => holds(roles, RADIOLOGIST));
       prepared = await this.scope(uid, c);
-      if (prepared) { recipient = await this.user(recipientSub); identity = await this.identity(uid); }
+      if (prepared) {
+        recipient = await this.user(recipientSub); identity = await this.identity(uid);
+        if (recipient?.roles.includes(RADIOLOGIST)) {
+          roster = await this.preliminaryRoster(uid, prepared);
+          const current = roster.find(user => user.sub === recipientSub);
+          if (current) recipient = { ...recipient, email: current.id, username: current.username, firstName: current.name, lastName: '' };
+        }
+      }
     }
     const subject = recipient && prepared ? this.subject(c, prepared, recipientSub) : null;
     await this.studyAccess.prepare(c, [uid]);
@@ -412,7 +437,7 @@ export class CriticalResultService {
       // 잠금 없는 사전 읽기가 이 검사를 발신 범위로 보지 못해 수신자·원본을 읽지 않았는데 지금은 보이거나(그 사이 기관
       // 배정·통로 열림), 범위의 기관이 달라졌다(그 사이 소유 기관 변경). 준비한 수신자 판정을 다른 기관에 쓰지 않는다.
       if (recipient === undefined || !identity || prepared !== institution) throw unavailable();
-      const cls = await this.judgeRecipient(tx, uid, institution, c, recipientSub, recipient, subject, head, state);
+      const cls = await this.judgeRecipient(tx, uid, institution, c, recipientSub, recipient, subject, head, state, roster);
       const at = new Date(), name = this.name(c);
       // 기록 기관 = 검사 소유 기관, 발신 기관 = caller 기관(tele면 둘이 다르다). 둘 다 기록 시점 값으로 남는다.
       const record = this.newRecord({ id: requestId, uid, institution, senderInstitution: c.institution, c, name,
@@ -519,6 +544,7 @@ export class CriticalResultService {
       sourceVersion: b.sourceVersion, message: b.message });
     const known = await this.prisma.criticalResultReceipt.findUnique({ where: { requestId } });
     let recipient: KeycloakUser | null | undefined, identity: any = null, subject: Caller | null = null;
+    let roster: Awaited<ReturnType<KeycloakService['usersInGroupWithRole']>> = [];
     if (!known) {
       await this.recheck(c, roles => holds(roles, RADIOLOGIST));
       // 수신자·검사·기록 기관은 옛 기록의 것이다. 남의 기록이거나 기록 기관이 지금 발신 범위가 아니면(tele 통로 닫힘
@@ -529,6 +555,11 @@ export class CriticalResultService {
         && await this.scope(prior.studyUid, c) === prior.institutionId) {
         recipient = await this.user(prior.recipientSub);
         identity = await this.identity(prior.studyUid);
+        if (recipient?.roles.includes(RADIOLOGIST)) {
+          roster = await this.preliminaryRoster(prior.studyUid, prior.institutionId);
+          const current = roster.find(user => user.sub === prior.recipientSub);
+          if (current) recipient = { ...recipient, email: current.id, username: current.username, firstName: current.name, lastName: '' };
+        }
         if (recipient) {
           subject = this.subject(c, prior.institutionId, prior.recipientSub);
           await this.studyAccess.prepare(subject, [prior.studyUid]);
@@ -546,7 +577,7 @@ export class CriticalResultService {
       const source = sourceRefusal({ sourceVersion: b.sourceVersion, head, senderReadable: legacyReadable(state, c.actor) });
       if (source) throw refuse(source);
       if (recipient === undefined || !identity || (recipient && recipient.id !== row.recipientSub)) throw unavailable();
-      const cls = await this.judgeRecipient(tx, row.studyUid, row.institutionId, c, row.recipientSub, recipient, subject, head, state);
+      const cls = await this.judgeRecipient(tx, row.studyUid, row.institutionId, c, row.recipientSub, recipient, subject, head, state, roster);
       const at = new Date(), name = this.name(c);
       await tx.criticalResult.update({ where: { id: row.id }, data: { state: 'superseded', revision: 2, supersededAt: at,
         changedBy: c.actor, updatedAt: at } });

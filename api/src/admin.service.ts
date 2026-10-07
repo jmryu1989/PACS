@@ -55,11 +55,14 @@ export class AdminService {
 
   private pendingMember(user: KeycloakUser) {
     return {
-      sub: user.id, username: user.username, email: user.email,
-      name: [user.lastName, user.firstName].filter(Boolean).join(' ') || user.username,
-      emailVerified: user.emailVerified, approved: false, suspended: false, institution: null, roles: [],
+      sub: user.id, ...this.identity(user), approved: false, suspended: false, institution: null, roles: [],
       version: null,
     };
+  }
+
+  private identity(user: KeycloakUser) {
+    return { username: user.username, email: user.email, emailVerified: user.emailVerified,
+      name: [user.lastName, user.firstName].filter(Boolean).join(' ') || user.username };
   }
 
   private async register(tx: any, user: KeycloakUser) {
@@ -101,11 +104,7 @@ export class AdminService {
     this.admin(c);
     const page = pageValue == null || pageValue === '' ? 1 : Number(pageValue);
     if (!Number.isInteger(page) || page < 1) throw new BadRequestException('page는 1 이상의 정수여야 합니다');
-    const result = await this.keycloak.listUsers(page);
-    const realmUsers = [...result.users];
-    for (let other = 1; other <= Math.ceil(result.total / result.pageSize); other++) {
-      if (other !== page) realmUsers.push(...(await this.keycloak.listUsers(other)).users);
-    }
+    const { realmUsers, ...result } = await this.keycloak.listUsers(page);
     const rightsRows = await this.prisma.memberRights.findMany({ where: { sub: { in: realmUsers.map(user => user.id) } } });
     const bySub = new Map(rightsRows.map(row => [row.sub, row]));
     const users = [];
@@ -127,15 +126,7 @@ export class AdminService {
 
   private async rosterUnconfirmed(id: string, db: any = this.prisma) {
     const latest = await db.providerChange.findFirst({ where: { kind: 'credentials', sub: id }, orderBy: { id: 'desc' } });
-    const unknown = await db.providerChange.findFirst({ where: { kind: 'credentials', sub: id, state: { in: ['unknown', 'void'] } } });
-    const overlap = latest && await db.providerChange.findFirst({ where: {
-      kind: 'credentials', sub: id, id: { lt: latest.id }, settledAt: { gte: latest.createdAt },
-    } });
-    // Suspend/Activate only change blocking. The existing atomic audit supplies the last roster-affecting version.
-    const decision = await db.auditLog.findFirst({ where: { target: id,
-      action: { in: ['admin.user.approve', 'admin.user.update', 'admin.user.unapprove'] } }, orderBy: { id: 'desc' } });
-    const generation = decision ? JSON.parse(decision.detail).after.version : 0;
-    return !!unknown || !!overlap || (!!latest && latest.state !== 'done') || (latest?.generation ?? 0) < generation;
+    return latest?.state === 'unknown' || latest?.state === 'void';
   }
 
   async createUser(body: any, c: Caller) {
@@ -225,7 +216,7 @@ export class AdminService {
 
     let action = 'update';
     let institution = observed.institution, roles = observed.roles;
-    let approved = observed.approved, suspended = observed.suspended, emailVerified = observed.emailVerified;
+    let approved = observed.approved, suspended = observed.suspended;
     if (body?.approvalState === 'PENDING') {
       if (body?.institution !== undefined || body?.roles !== undefined)
         throw new BadRequestException('승인 취소와 기관·역할 변경을 한 요청에 섞을 수 없습니다');
@@ -234,10 +225,6 @@ export class AdminService {
       action = observed.approved ? 'update' : 'approve';
       institution = await this.institution(body?.institution ?? observed.institution);
       roles = this.roles(body?.roles ?? observed.roles);
-      const identity = await this.managed(id);
-      emailVerified = identity.emailVerified;
-      if (!emailVerified && body?.verificationOverride !== true)
-        throw new BadRequestException('이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다');
       approved = true;
       if (body?.enabled !== undefined) suspended = !body.enabled;
     } else if (body?.enabled === false) {
@@ -253,16 +240,20 @@ export class AdminService {
       const committed = await this.prisma.$transaction(async tx => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await lockMemberRights(tx, id);
+        // Read only after the member lock: a slower earlier command cannot rewind a newer identity.
+        const identity = await this.managed(id);
+        if (approvalMutation && !identity.emailVerified && body?.verificationOverride !== true)
+          throw new BadRequestException('이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다');
         let version = observed.version;
         if (!existing) {
           // The absence was observed before locking. A concurrent registration is a conflict, not a CAS bypass.
           if (await tx.memberRights.findUnique({ where: { sub: id } }))
             throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
-          version = (await this.register(tx, identityToRegister!)).version;
+          version = (await this.register(tx, identity)).version;
         }
         const [{ boundary }] = await tx.$queryRaw<{ boundary: Date }[]>`SELECT now() AS boundary`;
         const { count } = await tx.memberRights.updateMany({ where: { sub: id, version }, data: {
-          approved, suspended, institution, roles, emailVerified,
+          approved, suspended, institution, roles, ...this.identity(identity),
           version: { increment: 1 }, newAuthAfter: boundary,
         } });
         if (count !== 1) throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
@@ -296,14 +287,19 @@ export class AdminService {
 
   async resetPassword(id: string, body: any, c: Caller) {
     this.admin(c);
-    const user = await this.managed(id);
     if (!['temp', 'email'].includes(body?.mode))
       throw new BadRequestException('mode는 temp 또는 email이어야 합니다');
     const mode: 'temp' | 'email' = body.mode;
     // A realm registration may still be pending; resetting its password grants no membership.
     const before = this.row(await this.prisma.$transaction(async tx => {
       await lockMemberRights(tx, id);
-      return await tx.memberRights.findUnique({ where: { sub: id } }) ?? await this.register(tx, user);
+      const user = await this.managed(id);
+      const current = await tx.memberRights.findUnique({ where: { sub: id } });
+      if (!current) return this.register(tx, user);
+      const identity = this.identity(user);
+      if (Object.entries(identity).some(([key, value]) => current[key] !== value))
+        await tx.memberRights.update({ where: { sub: id }, data: identity });
+      return current;
     }));
     if (mode === 'temp') {
       const temporaryPassword = randomBytes(18).toString('base64url') + 'aA1!';

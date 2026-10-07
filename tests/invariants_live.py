@@ -1720,7 +1720,8 @@ class BffInvariantTests(unittest.TestCase):
         self.assertRegex(keycloak, r"private async adm\(")
 
     def test_member_xss_value_stays_text_and_temporary_password_is_one_time(self) -> None:
-        payload = '<img src=x onerror="document.body.dataset.pwned=1">'
+        # Keycloak 26 rejects markup in person names; preserve its accepted punctuation and Unicode exactly.
+        payload = "O'Neil-Ž."
         username = "kin-test-xss-" + uuid.uuid4().hex
         user_id = None
         try:

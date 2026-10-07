@@ -2835,12 +2835,17 @@ export class PacsService implements OnModuleInit {
      * 명부 반영이 늦어도 철회된 판독의나 다른 기관 회원을 지정할 수 없다.
      */
     const wanted = action === 'preliminary' ? String(body.reviewer ?? '').trim() : '';
-
+    let candidate: { sub: string } | null = null;
 
     try {
       return await this.draftTransaction(uid, c, session, expected.epoch, async () => {
         await this.studyAccess.prepare(c,[uid]);
-
+        if (action === 'preliminary') {
+          // Resolve the current picker identity before holding study/session locks over network I/O.
+          const roster = await this.keycloak.usersInGroupWithRole(me, 'radiologist', true);
+          const candidates = roster.filter(user => user.id === wanted);
+          candidate = candidates.length === 1 ? candidates[0] : null;
+        }
       }, async (tx, prev, audit) => {
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
       throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
@@ -2920,10 +2925,6 @@ export class PacsService implements OnModuleInit {
       reviewer = wanted;
       if (!reviewer) throw new BadRequestException('상급 판독의를 지정해야 합니다');
       if (reviewer === c.actor) throw new BadRequestException('자기 자신을 상급 판독의로 지정할 수 없습니다');
-      // Resolve exactly the identity offered by colleagues(); only its stable subject selects DB rights.
-      const roster = await this.keycloak.usersInGroupWithRole(me, 'radiologist', true);
-      const candidates = roster.filter(user => user.id === reviewer);
-      const candidate = candidates.length === 1 ? candidates[0] : null;
       if (candidate?.sub === c.sub) throw new BadRequestException('자기 자신을 상급 판독의로 지정할 수 없습니다');
       if (candidate) await lockMemberRights(tx, candidate.sub);
       const current = candidate && await tx.memberRights.findUnique({ where: { sub: candidate.sub } });

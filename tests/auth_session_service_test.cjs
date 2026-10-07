@@ -230,7 +230,8 @@ async function keycloak() {
               : how === '500' ? send(500, { error: 'unknown_error' }) : how === '503' ? send(503, { error: 'unavailable' })
                 : send(status, value)) : send(status, value);
           if (!member[2] && req.method === 'GET')
-            return done(200, { id, username: account.username, email: account.email, enabled: account.enabled, emailVerified: true });
+            return done(200, { id, username: account.username, email: account.email, enabled: account.enabled,
+              firstName: account.firstName ?? '', lastName: account.lastName ?? '', emailVerified: account.emailVerified ?? true });
           if (!member[2] && req.method === 'PUT') { Object.assign(account, sent); return done(204); }
           if (member[2] === '/groups' && req.method === 'GET') return done(200, account.groups.map(name => ({ id: 'syn-group-' + name, name, path: '/' + name })));
           if (member[2] === '/role-mappings/realm' && req.method === 'GET') return done(200, account.roles.map(name => ({ name })));
@@ -4344,7 +4345,8 @@ test('CORE_ROSTER_B_C_RESIDUE U9 late B and completed C leave B+C while DB C and
   w.tick(1000);release.resolve();await w.until('both writes settled',async()=>await w.base.providerChange.count({where:{sub:m,state:'done'}})===2);
   assert.deepEqual([...kc.members[m].groups].sort(),[B,Z].sort());
   const me=await w.call(w.I2,'me',{sid});assert.equal(me.status,200);assert.equal(me.body.institution,Z);assert.deepEqual(me.body.roles,['technician']);
-  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,true);assert.equal(kc.endRequests.length,0);await w.finish('U9');
+  // D638: this label reports only the latest credentials outcome; it does not promise provider convergence.
+  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);assert.equal(kc.endRequests.length,0);await w.finish('U9');
 });
 
 test('CORE_LEGACY_UNKNOWN_RESTART_NO_B01 U11 disable/enable unknown survive import and restart without member reconciliation',async t=>{
@@ -4453,7 +4455,7 @@ test('CORE_LOGOUT_BEARER RV-03 blocked identities may logout only after full tok
   await w.finish('RV-03');
 });
 
-test('CORE_ROSTER_STATUS RV-04 Suspend and settled Activate do not invent roster drift; Cancel is still unconfirmed',async t=>{
+test('CORE_ROSTER_STATUS RV-04 commands without a new credentials record preserve the latest roster outcome',async t=>{
   const w=await world(t),m='syn-roster-note',{admin}=await coreMember(w,m);
   assert.equal((await r10Patch(admin,m,coreBody('Change'))).status,200);await coreSettled(w,m);
   assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);w.tick(1000);
@@ -4461,7 +4463,7 @@ test('CORE_ROSTER_STATUS RV-04 Suspend and settled Activate do not invent roster
   assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);w.tick(1000);
   assert.equal((await r10Patch(admin,m,coreBody('Activate'))).status,200);await coreSettled(w,m);
   assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);w.tick(1000);
-  assert.equal((await r10Patch(admin,m,coreBody('Cancel'))).status,200);assert.equal((await coreRoster(w,m)).rosterUnconfirmed,true);
+  assert.equal((await r10Patch(admin,m,coreBody('Cancel'))).status,200);assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);
   await w.finish('RV-04');
 });
 
@@ -4584,7 +4586,7 @@ test('CORE_PENDING_COUNT_UNREGISTERED_PAGED_DELETED counts the merged realm, wit
   for(const sub of [ids[1],ids[3],ids[4]])await w.base.memberRights.update({where:{sub},data:{approved:false,institution:null,roles:[],suspended:sub===ids[1]}});
   // Two new users and one deleted row cannot accidentally cancel each other's count error.
   const users=[...ids.slice(0,4),'syn-count-new-second'].map(id=>({id,username:id,email:id+'@synthetic.test',emailVerified:true,groups:[],roles:[],enabled:true}));
-  const provider={listUsers:async page=>({page,pageSize:2,total:users.length,users:users.slice((page-1)*2,page*2)})};
+  const provider={listUsers:async page=>({page,pageSize:2,total:users.length,realmUsers:users,users:users.slice((page-1)*2,page*2)})};
   const {AdminService}=require('/app/dist/admin.service'),admin=new AdminService(w.I1.prisma,provider,null,w.I1.service);
   const before=await w.base.memberRights.findMany({orderBy:{sub:'asc'}}),listed=[];
   for(const page of [1,2,3]){
@@ -4675,7 +4677,7 @@ test('CORE_RETRY_ROSTER replays unknown and void ordinary groups/roles intents w
   kc.beforeAdmin=name=>armed&&name==='GET groups'?503:undefined;
   assert.equal((await r10Patch(admin,m,{institution:B,roles:['clinician']})).status,200);await coreSettled(w,m);
   const before=await w.base.memberRights.findUnique({where:{sub:m}});kc.beforeAdmin=null;
-  assert.deepEqual(await retryMemberRoster(w.I2.prisma,new KeycloakService()),{attempted:1,unconfirmed:0});
+  assert.deepEqual(await retryMemberRoster(w.I2.prisma,new KeycloakService()),{attempted:1,unconfirmed:0,superseded:0});
   assert.deepEqual(kc.members[m].groups,[B]);assert.deepEqual(kc.members[m].roles,['clinician']);
   assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
   assert.ok(!kc.adminCalls.some(x=>/enable|disable|sessions|logout/.test(x)));await w.finish('CORE_RETRY_ROSTER');
@@ -4729,6 +4731,102 @@ for(const stage of ['groups','role-mappings/realm'])test(`CORE_ROSTER_DISAPPEARS
   assert.equal(member,null);
   kc.beforeAdmin=name=>name==='GET '+stage?503:undefined;
   await assert.rejects(provider.getUser(m),e=>e.getStatus?.()===503);await w.finish('CORE_ROSTER_DISAPPEARS '+stage);
+});
+
+// D638 R9 / REQ-S7-U5-DB-RIGHTS -> RISK-STALE-ROSTER / FALSE-STATUS / IDENTITY-REWIND.
+for (const olderState of ['unknown','void']) for (const newerState of ['done','unknown','void'])
+test(`CORE_R9_RETRY_NEWEST ${olderState}->${newerState}: supersede old intents and send only the latest`,async t=>{
+  const w=await world(t),m='syn-r9-retry',{admin}=await coreMember(w,m);
+  const {retryMemberRoster}=require('/app/dist/member-rights-import');
+  let armed=false;
+  w.observe({inst:'I1',scope:'tx',model:'providerChange',method:'create',phase:'after'},()=>{armed=true;});
+  const fail=state=>name=>armed&&name==='GET groups'?(state==='void'?404:503):undefined;
+  kc.beforeAdmin=fail(olderState);
+  assert.equal((await r10Patch(admin,m,{institution:B,roles:['clinician']})).status,200);
+  await coreSettled(w,m);
+  armed=false;kc.beforeAdmin=newerState==='done'?null:fail(newerState);
+  assert.equal((await r10Patch(admin,m,{institution:A,roles:['radiologist']})).status,200);
+  await coreSettled(w,m);kc.beforeAdmin=null;
+  const records=await w.base.providerChange.findMany({where:{sub:m,kind:'credentials'},orderBy:{id:'asc'}});
+  assert.deepEqual(records.map(r=>r.state),[olderState,newerState]);
+  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,newerState!=='done','only the latest outcome decides the label, including void');
+  const rights=await w.base.memberRights.findUnique({where:{sub:m}}),sends=[];
+  const provider=new KeycloakService(),groups=provider.setGroups.bind(provider),roles=provider.setRoles.bind(provider);
+  provider.setGroups=async(sub,value)=>{sends.push(['groups',sub,value]);return groups(sub,value);};
+  provider.setRoles=async(sub,value)=>{sends.push(['roles',sub,value]);return roles(sub,value);};
+  assert.deepEqual(await retryMemberRoster(w.I2.prisma,provider),{attempted:newerState==='done'?0:1,unconfirmed:0,superseded:1});
+  assert.deepEqual(sends,newerState==='done'?[]:[['groups',m,[A]],['roles',m,['radiologist']]]);
+  assert.deepEqual([kc.members[m].groups,kc.members[m].roles],[[A],['radiologist']]);
+  const old=await w.base.providerChange.findUnique({where:{id:records[0].id}});
+  assert.equal(old.outcome,'superseded');assert.ok(old.settledAt);
+  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,false);
+  assert.deepEqual(await retryMemberRoster(w.I2.prisma,provider),{attempted:0,unconfirmed:0,superseded:0});
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),rights);
+  await w.finish('CORE_R9_RETRY_NEWEST');
+});
+
+test('CORE_R9_LIST_ONE_SCAN page selection never multiplies realm admin requests',async t=>{
+  const w=await world(t),provider=new KeycloakService(),calls=[];
+  const members=Array.from({length:60},(_,i)=>({id:'syn-r9-list-'+i,username:'u'+i,email:'u'+i+'@synthetic.test',enabled:true,emailVerified:true}));
+  provider.adm=async(route,method='GET')=>{
+    calls.push([method,route]);assert.equal(method,'GET');
+    if(route.startsWith('/users?'))return members;
+    const user=members.find(u=>route==='/users/'+u.id);if(user)return user;
+    if(route.includes('/groups?')||route.endsWith('/role-mappings/realm'))return [];
+    assert.fail('unexpected admin request '+route);
+  };
+  const {AdminService}=require('/app/dist/admin.service'),admin=new AdminService(w.I1.prisma,provider,null,w.I1.service);
+  const before=await w.base.memberRights.findMany();
+  for(const page of [1,2,3,4]){
+    calls.length=0;const result=await admin.listUsers(page,R10_CALLER);
+    assert.equal(calls.filter(([,route])=>route.startsWith('/users?')).length,1,'one brief realm scan');
+    assert.equal(calls.length,181,'one scan plus three detail requests per member, independent of page');
+    assert.equal(result.total,60);assert.equal(result.pendingCount,60);
+    assert.equal(result.users.length,[25,25,10,0][page-1]);
+    assert.equal('realmUsers' in result,false,'internal full list is not exposed on the paginated API');
+  }
+  assert.deepEqual(await w.base.memberRights.findMany(),before);
+  assert.equal(await w.base.providerChange.count(),0);
+  await w.finish('CORE_R9_LIST_ONE_SCAN');
+});
+
+for(const command of ['Approve','Change','Suspend','Activate','ResetTemp','ResetEmail'])
+test(`CORE_R9_IDENTITY_COMMAND ${command}: only a command refreshes current provider identity`,async t=>{
+  const w=await world(t),m='syn-r9-identity',setup=await coreSetup(w,m,command),provider=new KeycloakService();
+  const {AdminService}=require('/app/dist/admin.service');provider.resetPassword=async()=>{};
+  const admin=new AdminService(w.I1.prisma,provider,null,w.I1.service);
+  const before=await w.base.memberRights.findUnique({where:{sub:m}});
+  Object.assign(kc.members[m],{username:'renamed',email:'renamed@synthetic.test',firstName:'Given',lastName:'Family',emailVerified:command==='Approve'});
+  assert.equal((await coreRoster(w,m)).email,before.email,'GET cannot refresh a registered row');
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
+  if(command.startsWith('Reset'))await admin.resetPassword(m,{mode:command==='ResetTemp'?'temp':'email'},R10_CALLER);
+  else assert.equal((await r10Patch(admin,m,{...coreBody(command),verificationOverride:command==='Change'?true:undefined})).status,200);
+  const row=await coreRoster(w,m);
+  assert.deepEqual([row.username,row.email,row.name,row.emailVerified],['renamed','renamed@synthetic.test','Family Given',command==='Approve']);
+  if(command.startsWith('Reset'))assert.deepEqual([row.version,row.roles,row.enabled],[before.version,before.roles,!before.suspended]);
+  await w.finish('CORE_R9_IDENTITY_COMMAND '+command);
+});
+
+test('CORE_R9_IDENTITY_FORWARD: an older reset response cannot rewind a later command identity',async t=>{
+  const w=await world(t),m='syn-r9-forward';await coreMember(w,m);
+  const {AdminService}=require('/app/dist/admin.service'),provider=new KeycloakService();
+  const original=provider.getUser.bind(provider),arrived=deferred(),release=deferred();let reads=0;
+  t.after(()=>release.resolve());
+  provider.resetPassword=async()=>{};
+  provider.getUser=async(...args)=>{
+    const result=await original(...args);
+    if(++reads===1){arrived.resolve();await release.promise;}
+    return result;
+  };
+  const admin=inst=>new AdminService(inst.prisma,provider,null,inst.service);
+  const first=admin(w.I1).resetPassword(m,{mode:'email'},R10_CALLER);await within(arrived.promise,'older identity captured');
+  Object.assign(kc.members[m],{email:'newest@synthetic.test',firstName:'Newest',lastName:'Identity'});
+  const second=admin(w.I2).resetPassword(m,{mode:'email'},R10_CALLER);
+  try{await quiet(w);assert.equal(reads,1,'the second identity read waits for the member lock');}
+  finally{release.resolve();await Promise.all([first,second]);}
+  const row=await coreRoster(w,m);
+  assert.deepEqual([row.email,row.name],['newest@synthetic.test','Identity Newest']);
+  await w.finish('CORE_R9_IDENTITY_FORWARD');
 });
 
 test('CORE_COMMAND_DB_CLOCK rights boundary uses transaction DB time despite application clock skew',async t=>{

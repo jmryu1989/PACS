@@ -220,6 +220,7 @@ export class KeycloakService {
       total: detailed.length,
       pendingCount: detailed.filter(user => user.groups.length === 0).length,
       users: detailed.slice(first, first + USER_PAGE_SIZE),
+      realmUsers: detailed,
     };
   }
 

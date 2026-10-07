@@ -209,6 +209,11 @@ async function world({ policies = {} } = {}) {
   w.rightsFail=false;
   w.kcFail = false;
   const keycloak = {
+    usersInGroupWithRole: async (institution, role) => {
+      log.push('kc:usersInGroupWithRole'); if (w.kcFail) throw new Error('SYNTHETIC Keycloak down');
+      return [...w.users.values()].filter(u => u.enabled && u.groups.includes(institution) && u.roles.includes(role))
+        .map(u => ({ sub: u.id, id: u.email || u.username, username: u.username, name: [u.lastName,u.firstName].join(' ') }));
+    },
     getUser: async sub => { log.push('kc:getUser'); if (w.kcFail) throw new Error('SYNTHETIC Keycloak down'); const u = w.users.get(sub); return u ? structuredClone(u) : null; },
     institutionMembers: async institution => { log.push('kc:institutionMembers'); if (w.kcFail) throw new Error('SYNTHETIC Keycloak down');
       return [...w.users.values()].filter(u => u.enabled && u.groups.length === 1 && u.groups[0] === institution).map(u => structuredClone(u)); },
@@ -1645,6 +1650,33 @@ test('CORE-CVR stale provider rights never admit a recipient changed before the 
 });
 
 // REQ-S7-U5-DB-RIGHTS -> RISK-ROSTER-AUTHORITY-CONFUSION -> U12.
+// D638 R9-5 / REQ-S7-U5-DB-RIGHTS -> RISK-FROZEN-IDENTITY: current roster id binds to a subject, never a DB email.
+test('CORE_R9_CVR_PRELIMINARY_IDENTITY: a renamed reviewer receives the R case while DB identity is still old',async()=>{
+  const w=await world(),recipient=w.users.get(SUBS.X),renamed='renamed-reviewer@synthetic.test';
+  recipient.email=renamed;recipient.firstName='Current';recipient.lastName='Reviewer';
+  // As in F3, the report picker offers the new provider identity, while registration predates the rename.
+  const version=await w.commit(UID,'preliminary',{reviewer:renamed});
+  const rights=await w.base.memberRights.findUnique({where:{sub:SUBS.X}});assert.notEqual(rights.email,renamed);
+  // A different subject carrying the same frozen email must not become the designated recipient.
+  await w.base.memberRights.update({where:{sub:SUBS.Y},data:{email:renamed}});
+  const candidates=await w.svc.recipients(UID,S());
+  assert.ok(candidates.recipients.some(row=>row.sub===SUBS.X));
+  assert.ok(!candidates.recipients.some(row=>row.sub===SUBS.Y));
+  let created;
+  await assert.doesNotReject(async()=>{created=await w.svc.create(UID,S(),createBody(S(),id(8092),'X',version));},
+    'the designated subject can receive Preliminary despite its older DB email');
+  assert.equal(created.applied.to,'created');
+  const record=await w.base.criticalResult.findUnique({where:{id:id(8092)}});
+  assert.deepEqual([record.recipientSub,record.recipientActor,record.recipientName],[SUBS.X,renamed,'Reviewer Current']);
+  await assert.rejects(w.svc.create(UID,S(),createBody(S(),id(8093),'Y',version)),code(409,'CRITICAL_RESULT_RECIPIENT_CANNOT_READ'));
+  const replacement=await w.svc.supersede(id(8092),S(),supersedeBody(S(),id(8094),1,version));
+  assert.equal(replacement.applied.to,'superseded');
+  const next=await w.base.criticalResult.findUnique({where:{id:id(8094)}});
+  assert.deepEqual([next.state,next.recipientSub,next.recipientActor],['created',SUBS.X,renamed]);
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:SUBS.X}}),rights,'sending never refreshes the DB identity');
+  assert.deepEqual(networkInside(w.log),[]);
+});
+
 test('CORE_ROSTER_SOURCE_SPLIT U12 critical candidates use the provider roster; final create still refuses DB ineligibility',async()=>{
   const w=await world(),version=await approved(w);
   await w.rights('P',{suspended:true,institution:OTHER});

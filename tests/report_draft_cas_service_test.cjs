@@ -177,6 +177,7 @@ async function world() {
   } });
   const recorder = new Proxy({}, { get(_t, key) {
     if (key === '$transaction') return (fn, options) => base.$transaction(async tx => {
+      await hit('tx-start');
       const out = await fn(view(tx));
       // the work is done and nothing is committed yet: the request holds the study row here
       await hit('commit', async () => { w.backend = (await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid; });
@@ -190,7 +191,7 @@ async function world() {
     const access = new StudyAccessService(recorder, orthanc, {});
     const realPrepare = access.prepare.bind(access);
     access.prepare = async (...args) => { await hit('prepare'); return realPrepare(...args); };
-    const keycloak = { usersInGroupWithRole: async () => {
+    const keycloak = w.provider ?? { usersInGroupWithRole: async () => {
       if(w.rosterError) throw w.rosterError;
       return w.roster ?? [REVIEWER,A,B].map(p=>({id:p.actor,sub:p.sub}));
     } };
@@ -205,6 +206,12 @@ async function world() {
   /** A new process: nothing of the old one's memory, the same database. */
   w.restart = () => { w.app = build(); };
   w.auth = new AuthService(recorder);
+  w.suspendReviewer = () => flow.run({label:'suspend'}, async () => {
+    const {AdminService}=require('/app/dist/admin.service');
+    const provider={getUser:async()=>({id:REVIEWER.sub,username:'reviewer',email:REVIEWER.actor,
+      emailVerified:true,firstName:'Synthetic',lastName:'Reviewer',groups:[INST],roles:['radiologist'],enabled:true})};
+    return new AdminService(recorder,provider,null,w.auth).patchUser(REVIEWER.sub,{enabled:false},ADMIN);
+  });
 
   /** One request through its routed handler. The answer is what the HTTP layer would send: status, code, body. */
   w.send = (label, route, { as, sid = null, uid, body }) => flow.run({ label }, async () => {
@@ -1116,6 +1123,49 @@ test('CORE-REVIEWER preliminary assignment uses current DB eligibility while the
   const [route,body]=request('preliminary',A,{token,head:0,mark:'rights-admitted'});
   assert.equal((await w.send('rights',route,{as:A,uid,body})).status,200);
   assert.equal((await w.state(uid)).study.preReviewer,REVIEWER.actor);
+});
+
+// D638 R9-3/4: REQ-S7-U5-DB-RIGHTS -> RISK-STALE-REVIEWER / SELF-APPROVAL / LOCK-SCOPE.
+test('CORE_R9_REVIEWER_FRESH: a cached colleague read cannot decide designation, and fresh I/O precedes the transaction',async()=>{
+  const w=await world(),{KeycloakService}=require('/app/dist/keycloak.service');
+  const provider=new KeycloakService();let current=[{id:REVIEWER.sub,email:REVIEWER.actor,username:'reviewer',enabled:true}];
+  provider.adm=async route=>{
+    assert.ok(!w.points.includes('fresh:tx-start'),'roster I/O must finish before the report transaction opens');
+    return route==='/groups'?[{id:'syn-group',name:INST}]:current;
+  };
+  assert.equal((await provider.usersInGroupWithRole(INST,'radiologist'))[0].sub,REVIEWER.sub);
+  // A different eligible member now owns this roster id; the fresh binding resolves to the caller's subject.
+  current=[{id:A.sub,email:REVIEWER.actor,username:'caller-alias',enabled:true}];
+  w.provider=provider;w.restart();
+  const uid=await w.study(),token=await w.token(uid,A),[route,body]=request('preliminary',A,{token,head:0,mark:'fresh'});
+  const before=await w.state(uid);
+  assert.equal((await w.send('fresh',route,{as:A,uid,body})).status,400,'fresh roster wins over cached eligible reviewer');
+  assert.deepEqual(await w.state(uid),before);
+});
+
+test('CORE_R9_REVIEWER_SELF_ALIAS: different actor text with the caller subject is refused without a report change',async()=>{
+  const w=await world();w.roster=[{id:'my-other-address@synthetic.test',sub:A.sub}];
+  const uid=await w.study(),token=await w.token(uid,A),[route,body]=request('preliminary',A,{token,head:0,mark:'self-alias'});
+  body.reviewer=w.roster[0].id;assert.notEqual(body.reviewer,A.actor);
+  const before=await w.state(uid);
+  assert.equal((await w.send('self-alias',route,{as:A,uid,body})).status,400);
+  assert.deepEqual(await w.state(uid),before);
+});
+
+test('CORE_R9_REVIEWER_SUSPEND_RACE: designation waits on the member lock and sees Suspend commit',async()=>{
+  const w=await world(),uid=await w.study(),token=await w.token(uid,A);
+  const [route,body]=request('preliminary',A,{token,head:0,mark:'concurrent-suspend'}),before=await w.state(uid);
+  const hold=w.gate('suspend','commit'),suspend=w.suspendReviewer();await hold.arrived();
+  const designation=w.send('designation',route,{as:A,uid,body});
+  try{
+    const blocked=(async()=>{for(let n=0;n<100;n++){if(await w.blocked())return 'blocked';await new Promise(r=>setTimeout(r,10));}return 'no-lock-wait';})();
+    assert.equal(await Promise.race([designation.then(()=> 'answered-before-suspend'),blocked]),'blocked',
+      'two PostgreSQL connections contend on the member lock before the suspension commits');
+  }finally{hold.release();await suspend;}
+  assert.equal((await designation).status,400);
+  assert.deepEqual(await w.state(uid),before);
+  assert.equal((await w.base.memberRights.findUnique({where:{sub:REVIEWER.sub}})).suspended,true);
+  await w.base.memberRights.update({where:{sub:REVIEWER.sub},data:{suspended:false}});
 });
 
 test('CORE_REVIEWER_IDENTITY_LATE_CALLBACK_AND_BEARER roster subject binds fresh email/username to DB rights despite old identity rows',async()=>{

@@ -3,6 +3,7 @@ import { APP_ROLES } from './clinician-policy';
 import { Logger } from '@nestjs/common';
 import { KeycloakService, KeycloakUser, RosterWriteFailure } from './keycloak.service';
 import { PrismaService } from './prisma.service';
+import { lockMemberRights } from './member-rights';
 
 /** Run once with member administration stopped, before enabling traffic for the new schema.
  * Reads every realm member, including those without an AuthSession. Never import again over DB rights.
@@ -108,10 +109,33 @@ async function sendMemberRoster(prisma: PrismaService, keycloak: KeycloakService
 export async function retryMemberRoster(prisma: PrismaService, keycloak: KeycloakService) {
   const changes = await prisma.providerChange.findMany({ where: { kind: 'credentials', state: { in: ['unknown', 'void'] } }, orderBy: { id: 'asc' } });
   const outcomes: string[] = [];
+  let superseded = 0;
+  const members = new Set<string>();
   for (const change of changes) {
+    if (change.target !== 'legacy-enable:' + change.sub && change.sub) {
+      if (members.has(change.sub)) continue;
+      members.add(change.sub);
+      const claimed = await prisma.$transaction(async tx => {
+        await lockMemberRights(tx, change.sub!);
+        const records = await tx.providerChange.findMany({ where: { kind: 'credentials', sub: change.sub,
+          target: change.sub! }, orderBy: { id: 'desc' } });
+        const latest = records[0];
+        if (!latest) return { send: null, superseded: 0 };
+        // An older failed publication must never overwrite an already confirmed newer generation.
+        const older = records.slice(1).filter(row => ['unknown', 'void'].includes(row.state) && row.outcome !== 'superseded');
+        const settled = await tx.providerChange.updateMany({ where: { id: { in: older.map(row => row.id) },
+          state: { in: ['unknown', 'void'] } }, data: { state: 'void', outcome: 'superseded', settledAt: new Date() } });
+        const send = ['unknown', 'void'].includes(latest.state) ? latest : null;
+        if (send) await tx.providerChange.update({ where: { id: send.id }, data: { state: 'unknown', outcome: null, settledAt: null } });
+        return { send, superseded: settled.count };
+      });
+      superseded += claimed.superseded;
+      if (claimed.send) outcomes.push(await sendMemberRoster(prisma, keycloak, claimed.send));
+      continue;
+    }
     const claimed = await prisma.providerChange.updateMany({ where: { id: change.id, state: { in: ['unknown', 'void'] } },
       data: { state: 'unknown', outcome: null, settledAt: null } });
     if (claimed.count) outcomes.push(await sendMemberRoster(prisma, keycloak, change));
   }
-  return { attempted: outcomes.length, unconfirmed: outcomes.filter(state => state !== 'done').length };
+  return { attempted: outcomes.length, unconfirmed: outcomes.filter(state => state !== 'done').length, superseded };
 }
