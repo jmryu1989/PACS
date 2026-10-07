@@ -90,6 +90,10 @@ jobs:
         run: |
           node --version
           npm ci --prefix api --ignore-scripts --no-audit --no-fund
+      - name: Generate the Prisma client for source-level tests
+        if: ${{ !cancelled() }}
+        working-directory: api
+        run: ./node_modules/.bin/prisma generate
       - name: S5-U1a clinician-only default denial fixtures, route classification and role-list source pins
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-policy --cwd . --file tests/clinician_policy_fixtures.json --file tests/clinician_policy_test.py --file tests/route_inventory_ts.js --file api/package-lock.json --file api/tsconfig.json --file api/src/clinician-policy.ts --file api/src/auth.guard.ts --file api/src/admin.service.ts --file api/src/keycloak.service.ts --file keycloak/kin-realm.json --file tests/invariants_live.py --file api/src/worklist-columns.ts --file api/src/critical-result.service.ts --file api/src/critical-result-policy.ts --file tests/clinician_question_live.py --file tests/clinician_request_live.py --file api/src/auth.service.ts --file api/src/auth.controller.ts --file api/src/admin-audit.ts --file api/src/pacs.controller.ts -- python3 -B tests/clinician_policy_test.py

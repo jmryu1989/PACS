@@ -37,7 +37,10 @@ LIMITS = combined.LIMITS
 # stack when written - estimated at well under 1 KB of catalog and rows.
 # S7-U5 D600 provider change records (49 tables: ProviderChange, its two rows, its sequence and two indexes; the three
 # in-flight columns of MemberIsolation dropped): not measured on a stack when written - estimated at about 2 KB.
-RECEIPT_LIMIT = 256*1024
+# S7-U5 core (51 tables, 40 migrations): PG16 observe() plus the pure C12L envelope measures 263,343 bytes
+# with a 43-character UID (213,022 catalog; 41,425 rows; 6,217 migration paths/hashes; 801 snapshot).
+# 512 KiB leaves about 255 KiB for schema/envelope growth while keeping every receipt read bounded.
+RECEIPT_LIMIT = 512*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
 MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',

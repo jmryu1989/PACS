@@ -472,9 +472,9 @@ class Pure(unittest.TestCase):
     def test_expanded_catalog_receipt_roundtrips_above_old_cap(self):
         body, _, _, _ = fixture()
         body['product']['catalog']['columns'] = [dict(column_name='synthetic-'+str(i),
-            column_default='X'*450) for i in range(293)]
+            column_default='X'*800) for i in range(293)]
         raw = transfer.canonical(body)
-        self.assertGreater(len(raw), 128*1024)
+        self.assertGreater(len(raw), 256*1024)
         self.assertLessEqual(len(raw), transfer.RECEIPT_LIMIT)
         self.assertEqual(check(body), body)
 
