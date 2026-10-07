@@ -1,4 +1,3 @@
-import { ForbiddenException } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { APP_ROLES } from './clinician-policy';
 
@@ -11,12 +10,6 @@ export async function lockMemberRights(tx: any, sub: string): Promise<void> {
 export function rightsAllow(row: any): boolean {
   return !!row && row.approved && !row.suspended && !!row.institution
     && row.roles.length > 0 && row.roles.every((role: string) => APP_ROLES.has(role));
-}
-
-export async function currentRights(db: any, sub: string) {
-  const row = await db.memberRights.findUnique({ where: { sub } });
-  if (!rightsAllow(row)) throw new ForbiddenException({ code: 'MEMBER_ACCESS_REFUSED', message: '현재 회원 자격으로 접근할 수 없습니다' });
-  return row;
 }
 
 // The roster keeps provider names; eligibility comes only from this durable authority.

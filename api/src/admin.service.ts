@@ -102,16 +102,23 @@ export class AdminService {
     const page = pageValue == null || pageValue === '' ? 1 : Number(pageValue);
     if (!Number.isInteger(page) || page < 1) throw new BadRequestException('page는 1 이상의 정수여야 합니다');
     const result = await this.keycloak.listUsers(page);
+    const realmUsers = [...result.users];
+    for (let other = 1; other <= Math.ceil(result.total / result.pageSize); other++) {
+      if (other !== page) realmUsers.push(...(await this.keycloak.listUsers(other)).users);
+    }
+    const rightsRows = await this.prisma.memberRights.findMany({ where: { sub: { in: realmUsers.map(user => user.id) } } });
+    const bySub = new Map(rightsRows.map(row => [row.sub, row]));
     const users = [];
     for (const user of result.users) {
-      const rights = await this.prisma.memberRights.findUnique({ where: { sub: user.id } });
+      const rights = bySub.get(user.id);
       if (!rights) {
         users.push({ ...this.row(this.pendingMember(user)), rosterUnconfirmed: false });
         continue;
       }
       users.push({ ...this.row(rights), rosterUnconfirmed: await this.rosterUnconfirmed(user.id) });
     }
-    const response = { ...result, pendingCount: await this.prisma.memberRights.count({ where: { approved: false } }), users };
+    const pendingCount = new Set(realmUsers.filter(user => !bySub.get(user.id)?.approved).map(user => user.id)).size;
+    const response = { ...result, pendingCount, users };
     await this.audit(c.actor, 'admin.user.list', 'admin-users', {
       page, count: response.users.length, pendingCount: response.pendingCount,
     });
@@ -120,7 +127,7 @@ export class AdminService {
 
   private async rosterUnconfirmed(id: string, db: any = this.prisma) {
     const latest = await db.providerChange.findFirst({ where: { kind: 'credentials', sub: id }, orderBy: { id: 'desc' } });
-    const unknown = await db.providerChange.findFirst({ where: { kind: 'credentials', sub: id, state: 'unknown' } });
+    const unknown = await db.providerChange.findFirst({ where: { kind: 'credentials', sub: id, state: { in: ['unknown', 'void'] } } });
     const overlap = latest && await db.providerChange.findFirst({ where: {
       kind: 'credentials', sub: id, id: { lt: latest.id }, settledAt: { gte: latest.createdAt },
     } });
@@ -253,9 +260,10 @@ export class AdminService {
             throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
           version = (await this.register(tx, identityToRegister!)).version;
         }
+        const [{ boundary }] = await tx.$queryRaw<{ boundary: Date }[]>`SELECT now() AS boundary`;
         const { count } = await tx.memberRights.updateMany({ where: { sub: id, version }, data: {
           approved, suspended, institution, roles, emailVerified,
-          version: { increment: 1 }, newAuthAfter: new Date(),
+          version: { increment: 1 }, newAuthAfter: boundary,
         } });
         if (count !== 1) throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
         // No remote end is scheduled here: this deletion cannot outlive this version's commit.
@@ -269,7 +277,7 @@ export class AdminService {
         const after = this.row(await tx.memberRights.findUnique({ where: { sub: id } }));
         await tx.auditLog.create({ data: { actor: c.actor, action: `admin.user.${action}`, target: id,
           detail: JSON.stringify({ before, after, verificationOverride: body?.verificationOverride === true }) } });
-        const change = approvalMutation || action === 'activate' ? await tx.providerChange.create({ data: {
+        const change = approvalMutation ? await tx.providerChange.create({ data: {
           kind: 'credentials', target: id, sub: id, generation: after.version, state: 'unknown', createdAt: new Date(),
         } }) : null;
         return { after, change, rosterUnconfirmed: !!change || await this.rosterUnconfirmed(id, tx) };

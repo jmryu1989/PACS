@@ -694,38 +694,71 @@ class LiveStack:
     def set_member_rights(self, user_id: str, **changes) -> dict:
         """The realm administrator uses the product PATCH, including its version, audit and authentication boundary.
 
-        Impersonation gives the imported realm admin a BFF session without changing any existing password/client.
+        A real credential login gives the imported realm admin an auth_time-bearing BFF session.
         Synthetic members keep their Keycloak identity creation; no MemberRights row is seeded by the harness.
         """
         if not re.fullmatch(r"[0-9a-fA-F-]{36}", user_id):
             raise RuntimeError("Invalid member id")
         if not getattr(self, "_rights_admin", None):
+            deadline = time.monotonic() + 60
+            while self.request("GET", "/health").body.get("memberRights") != "ready":
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Fixture cannot admit its administrator before realm import is ready")
+                time.sleep(0.2)
+            # The boundary and auth_time use whole-second admission. This wait belongs only to fixture setup.
+            time.sleep(1.05)
             found = self.kc_admin("GET", "/users?username=jmryu&exact=true")
             matches = [u for u in (found.body if isinstance(found.body, list) else []) if u.get("username") == "jmryu"]
-            if found.status != 200 or len(matches) != 1:
+            if found.status != 200 or len(matches) != 1 or not re.fullmatch(r"[0-9a-fA-F-]{36}", matches[0].get("id", "")):
                 raise RuntimeError("Imported realm administrator is unavailable")
+            password = os.environ.get("KIN_LIVE_IMPORTED_ADMIN_PASSWORD")
+            if not password:
+                raise RuntimeError("The imported synthetic administrator needs a real login credential; set KIN_LIVE_IMPORTED_ADMIN_PASSWORD")
+            public = urlparse(self.proxy)
             jar = http.cookiejar.CookieJar()
-            opener = build_opener(HTTPCookieProcessor(jar), HTTPSHandler(context=self.context))
-            # The public proxy deliberately hides /auth/admin. Only the fixture's existing admin transport reaches it.
-            provider = self.keycloak.partition('/realms/')[0]
-            request = Request(provider + "/admin/realms/kin/users/" + quote(matches[0]["id"]) + "/impersonation",
-                              data=b"", headers={"Authorization": "Bearer " + str(self.admin_token)}, method="POST")
-            with opener.open(request, timeout=30) as response:
-                if response.status != 200:
-                    raise RuntimeError("Realm administrator impersonation failed")
-                response.read()
-            # Both addresses name this guarded synthetic realm; carry its signed SSO cookie onto the public origin.
-            host = urlparse(self.proxy).hostname
-            public_jar = http.cookiejar.CookieJar()
-            for cookie in jar:
-                if cookie.path.startswith('/auth/realms/kin'):
-                    cookie.domain = host if '.' in host else host + '.local'
-                    cookie.domain_specified = False
-                    cookie.domain_initial_dot = False
-                    public_jar.set_cookie(cookie)
-            opener = build_opener(HTTPCookieProcessor(public_jar), HTTPSHandler(context=self.context))
+            trace = []
+
+            class PublicRedirects(HTTPRedirectHandler):
+                def redirect_request(handler, req, fp, code, msg, headers, newurl):
+                    target = urlparse(newurl)
+                    if (target.scheme, target.netloc) != (public.scheme, public.netloc):
+                        raise RuntimeError("Fixture BFF login redirected outside the public origin")
+                    # Paths and statuses only: code/state, cookies and the entry proof are secrets.
+                    trace.append((urlparse(req.full_url).path, code, target.path))
+                    return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+            opener = build_opener(HTTPCookieProcessor(jar), HTTPSHandler(context=self.context), PublicRedirects())
+            # Impersonation reaches the callback but has no auth_time. The product correctly refuses that token.
+            # Use the real form on the public origin, with the same jar for every redirect and callback.
             with opener.open(self.proxy + "/api/auth/login", timeout=30) as response:
+                page = response.read().decode("utf-8")
+            form = re.search(r'<form[^>]+action="([^"]+)"', page, re.I)
+            if not form:
+                raise RuntimeError("Fixture BFF login did not reach the credential form")
+            action = html.unescape(form.group(1))
+            target = urlparse(action)
+            if (target.scheme, target.netloc) != (public.scheme, public.netloc):
+                raise RuntimeError("Fixture credential form left the public origin")
+            request = Request(action, data=urlencode({"username": "jmryu", "password": password, "credentialId": ""}).encode("utf-8"),
+                              headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
+            with opener.open(request, timeout=30) as response:
+                landed = urlparse(response.geturl())
                 response.read()
+            if not any(path == "/api/auth/callback" for path, _, _ in trace) or landed.path != "/worklist/hpacs-lite/main.html":
+                # Audit causes are allowlisted classifications, never the audit body or credentials.
+                causes = psql('SELECT detail::jsonb->>\'cause\' FROM "AuditLog" WHERE action=\'auth.login\' '
+                              'AND target=\'' + matches[0]["id"] + '\' ORDER BY id DESC LIMIT 3')
+                allowed = {"rights_pending", "member_isolated", "storage_failure", "token_invalid", "state_mismatch", "exchange_failed"}
+                causes = [value if value in allowed else "unclassified" for value in causes]
+                raise RuntimeError(f"Fixture BFF callback not admitted: paths={trace}, landing={landed.path}, causes={causes}")
+            proof = parse_qs(landed.fragment).get("kin-entry", [None])[0]
+            if not proof:
+                raise RuntimeError("Fixture BFF callback did not return an entry proof")
+            entry = Request(self.proxy + "/api/auth/entry", data=json.dumps({"proof": proof}).encode("utf-8"), method="POST",
+                            headers={"Content-Type": "application/json", "X-KIN-CSRF": "1"})
+            with opener.open(entry, timeout=30) as response:
+                if response.status != 200 or not json.loads(response.read()).get("sessionId"):
+                    raise RuntimeError("Fixture BFF entry proof was not admitted")
             with opener.open(self.proxy + "/api/me", timeout=30) as response:
                 me = json.loads(response.read())
             if me.get("sub") != matches[0]["id"] or "admin" not in me.get("roles", []) or not me.get("sessionId"):

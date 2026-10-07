@@ -190,7 +190,10 @@ async function world() {
     const access = new StudyAccessService(recorder, orthanc, {});
     const realPrepare = access.prepare.bind(access);
     access.prepare = async (...args) => { await hit('prepare'); return realPrepare(...args); };
-    const keycloak = { usersInGroupWithRole: async () => [{ id: REVIEWER.actor }, { id: A.actor }, { id: B.actor }] };
+    const keycloak = { usersInGroupWithRole: async () => {
+      if(w.rosterError) throw w.rosterError;
+      return w.roster ?? [REVIEWER,A,B].map(p=>({id:p.actor,sub:p.sub}));
+    } };
     const findings = { readableFindings: async (_tx, _c, _uid, ids) => ids.includes(FINDING) ? [{ id: FINDING, revision: 1, hidden: false,
       sources: [{ kind: 'item', itemId: '0f0f0f0f-0000-4000-8000-00000000000b', revision: 1 }],
       links: [{ linkState: 'current', headRevision: 1 }] }] : [] };
@@ -1113,4 +1116,26 @@ test('CORE-REVIEWER preliminary assignment uses current DB eligibility while the
   const [route,body]=request('preliminary',A,{token,head:0,mark:'rights-admitted'});
   assert.equal((await w.send('rights',route,{as:A,uid,body})).status,200);
   assert.equal((await w.state(uid)).study.preReviewer,REVIEWER.actor);
+});
+
+test('CORE_REVIEWER_IDENTITY_LATE_CALLBACK_AND_BEARER roster subject binds fresh email/username to DB rights despite old identity rows',async()=>{
+  const w=await world();
+  // The callback/Bearer race is exercised by the auth suite. Here its persisted stale identity is the input
+  // to the real report transaction: text never chooses the DB authority, including an email held by another row.
+  const stale=await w.base.memberRights.findUnique({where:{sub:REVIEWER.sub}});
+  await w.base.memberRights.update({where:{sub:C.sub},data:{email:'renamed@synthetic.test',institution:OTHER}});
+  for(const identity of ['renamed@synthetic.test','renamed-without-email']){
+    w.roster=[{id:identity,sub:REVIEWER.sub}];
+    const uid=await w.study(),token=await w.token(uid,A),[route,body]=request('preliminary',A,{token,head:0,mark:'stable-reviewer'});
+    body.reviewer=identity;
+    assert.equal((await w.send('stable-sub',route,{as:A,uid,body})).status,200);
+    assert.equal((await w.state(uid)).study.preReviewer,identity);
+    assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:REVIEWER.sub}}),stale);
+  }
+  const {ServiceUnavailableException}=require('/app/node_modules/@nestjs/common');
+  w.rosterError=new ServiceUnavailableException('synthetic roster outage');
+  const uid=await w.study(),token=await w.token(uid,A),[route,body]=request('preliminary',A,{token,head:0,mark:'roster-down'});
+  const before=await w.state(uid);
+  assert.equal((await w.send('roster-down',route,{as:A,uid,body})).status,503);
+  assert.deepEqual(await w.state(uid),before);
 });

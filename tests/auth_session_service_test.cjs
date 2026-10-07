@@ -580,6 +580,13 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
         const view = new Proxy({}, { get(_t, k) {
           if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'memberRightsImport', 'providerChange'].includes(k)) return delegate(inst, tx, k, 'tx');
           const value = tx[k];
+          // The scenarios advance a virtual provider/application clock. Project DB timestamps onto that timeline;
+          // CORE_COMMAND_DB_CLOCK opts out and proves the boundary against the actual PG transaction clock.
+          if (k === '$queryRaw') return async (...args) => {
+            const result = await value.apply(tx,args);
+            if (w.realDatabaseClock) return result;
+            return result.map(row => Object.fromEntries(Object.entries(row).map(([key,v]) => [key,v instanceof Date ? new Date() : v])));
+          };
           if (k === '$executeRaw') return async (...args) => {
             await observe({ inst, scope:'tx', model:'$executeRaw', method:'execute', args, phase:'before' });
             const result = await value.apply(tx,args);
@@ -2562,11 +2569,18 @@ test('U5E-04 the end marks a provider session only after its end condition holds
   held = w.call(w.I1, 'logout', { sid });
   await gate.arrived();
   let reads = w.calls.filter(c => c === 'I2:tx.markRead').length;
+  const callbackDecision = w.gate('I2', 'audit');
   const heldC = answerFlow(w, w.I2, begin, await w.issue(s + '-v2', { sub: s, groups: [A] }));
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(w.calls.filter(c => c === 'I2:tx.markRead').length, reads, 'the callback waits for the lock the Log out holds');
   gate.release();
   assert.equal((await held).status, 204);
+  await callbackDecision.arrived();
+  // The callback has observed the committed mark, outside its lock. Its own retry can only confirm the mark
+  // once the older Log out request has a known answer too (C10); arrange that answer before asking for a redirect.
+  await w.until('older logout request acknowledged',async()=>
+    (await w.base.providerChange.findFirst({where:{kind:'end_session',target:idpOf(s)},orderBy:{id:'asc'}}))?.state==='done');
+  callbackDecision.release();
   const blocked = await heldC;
   assert.deepEqual([blocked.newSid, blocked.cookie, atProvider(blocked), await w.base.authSession.count({ where: { sub: s } })], [null, 'P', true, 0], blocked.location);
   // (e) the lock, C first: the callback is inside its critical section (mark read: none; before its create). The Log
@@ -3201,6 +3215,11 @@ test('U5E-21 (S7-U5 CE1) a mark covers the ended SSO\'s authentication, not its 
   const during = await w.call(w.I2, 'login');
   const refusedDuring = await answerFlow(w, w.I2, during, await w.issue('u5e21-during', { sub: b, groups: [B], idp: X, authTime: sec(Date.now()) }));
   assert.deepEqual([refusedDuring.location, refusedDuring.newSid], [landing('end_unconfirmed'), null], 'f: a code of this second, while unconfirmed: no session');
+  // Complete the refused-transport stage before making the provider reachable. Unknown old sends are tested
+  // separately and intentionally prevent confirmation even after a later successful retry.
+  await w.told();
+  await w.until('refused transport attempts recorded',async()=>
+    await w.base.providerChange.count({where:{kind:'end_session',target:X,state:'unknown'}})===0);
   kc.logoutMode = 'ok';
   w.tick(1000);
   const resumer = w.instance('R21');
@@ -3659,8 +3678,8 @@ test('U5E-15 Suspend/Activate require fresh authentication and never restore old
   const fresh=await coreFresh(w,m);
   assert.equal((await w.call(w.I2,'me',{sid:fresh.done.newSid})).status,200);
   await quiet(w);
-  assert.ok(kc.adminCalls.includes('PUT enable'),'Activate records a non-gating enabled roster write');
-  assert.ok(!kc.adminCalls.some(x => /disable|sessions|logout/.test(x)),'no B01-B08 work');
+  assert.equal(await w.base.providerChange.count({where:{sub:m,kind:'credentials'}}),0,'Suspend/Activate record no roster write');
+  assert.ok(!kc.adminCalls.some(x => /enable|disable|sessions|logout/.test(x)),'no B01-B08 work');
   assert.equal(kc.endRequests.length,0);
   await w.finish('U5E-15');
 });
@@ -3977,10 +3996,15 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
 });
 
 test('CORE-R2-IMPORTED existing realm-v1 starts while the member admin API is down', async t => {
-  const w=await world(t); kc.adminDown=true;
-  await w.I1.service.onModuleInit();
-  assert.deepEqual(kc.adminCalls,[]); assert.equal(kc.serviceTokens,0);
-  w.I1.service.onModuleDestroy(); await w.finish('CORE-R2-IMPORTED');
+  const w=await world(t);let read=false,calls=0;
+  w.observe({inst:'I1',scope:'root',model:'memberRightsImport',method:'findUnique',phase:'after'},()=>{read=true;});
+  const service=new AuthService(w.I1.prisma,{listUsers:async()=>{calls++;throw Error('synthetic realm down');}});
+  t.after(()=>service.onModuleDestroy());await service.onModuleInit();
+  await w.until('import read or provider attempt completed',async()=>read||calls>0);
+  // The stub fails synchronously, so draining this completed read's continuations settles the import attempt too.
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls,0);assert.equal(kc.serviceTokens,0);
+  service.onModuleDestroy();await w.finish('CORE-R2-IMPORTED');
 });
 
 test('CORE-R2-SSO authentication after Change enters plain login without another prompt or admin read', async t => {
@@ -4131,7 +4155,7 @@ for(const command of ['Approve','Change','Cancel','Activate'])test(`CORE_COMMAND
   const w=await world(t),m='syn-atomic-'+command,{admin,sid}=await coreSetup(w,m,command);
   const before=await w.base.memberRights.findUnique({where:{sub:m}});
   for(const failure of ['authSession','auditLog','providerChange']){
-    if(failure==='providerChange'&&command==='Cancel')continue;
+    if(failure==='providerChange'&&['Cancel','Activate'].includes(command))continue;
     let reached=false;
     w.observe({inst:'I1',scope:'tx',model:failure,method:failure==='authSession'?'deleteMany':'create',phase:'after'},()=>{
       if(!reached){reached=true;throw Error('synthetic atomic command failure');}
@@ -4385,34 +4409,6 @@ test('CORE_HASSESSION RV-05 refused or stale-version cookie starts login; unrela
   await w.finish('RV-05');
 });
 
-test('CORE_IDENTITY_REFRESH RV-08 callback transaction refreshes identity only and rolls it back on admission failure',async t=>{
-  const w=await world(t),m='syn-identity',{token}=await coreMember(w,m),before=await w.base.memberRights.findUnique({where:{sub:m}});
-  const changed=await w.issue(m+'-changed',{sub:m,email:'new@synthetic.test',groups:[B],roles:['admin'],identity:{preferred_username:'new-username',name:'New Name',email_verified:false}});
-  w.fault('I1','tx.audit',Error('synthetic failed login commit'));
-  assert.equal((await login(w,w.I1,changed)).done.newSid,null);
-  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
-  assert.ok((await login(w,w.I1,changed)).done.newSid);
-  const row=await w.base.memberRights.findUnique({where:{sub:m}});
-  assert.deepEqual([row.username,row.email,row.name,row.emailVerified],['new-username','new@synthetic.test','New Name',false]);
-  for(const key of ['institution','roles','approved','suspended','version','newAuthAfter'])assert.deepEqual(row[key],before[key],key+' stays a DB decision');
-  await w.finish('RV-08');
-});
-
-test('CORE_LEGACY_DISABLED_ACTIVATE_LOGIN O6 import keeps suspension; Activate publishes enabled after commit without waiting',async t=>{
-  const w=await world(t,{imported:false}),m=r10Member('syn-legacy-disabled');kc.members[m].enabled=false;kc.members[m].emailVerified=true;
-  await w.I1.service.onModuleInit();t.after(()=>w.I1.service.onModuleDestroy());
-  await w.until('disabled member imported',async()=>await w.base.memberRightsImport.count()===1);
-  assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).suspended,true);
-  const arrived=deferred(),release=deferred();t.after(()=>release.resolve());
-  kc.beforeAdmin=async(name,sub)=>{if(sub===m&&name==='PUT enable'){
-    assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).suspended,false,'enable sent only after commit');arrived.resolve();return release.promise;
-  }};
-  const activated=await r10Patch(r10Admin(w),m,{enabled:true});assert.equal(activated.status,200);await within(arrived.promise,'enable queued');
-  assert.equal(kc.members[m].enabled,false,'response never waits for provider');release.resolve();await coreSettled(w,m);
-  assert.equal(kc.members[m].enabled,true);const fresh=await coreFresh(w,m);assert.equal((await w.call(w.I1,'me',{sid:fresh.done.newSid})).status,200);
-  assert.ok(!kc.adminCalls.some(x=>/disable|sessions|logout/.test(x)));await w.finish('O6');
-});
-
 for(const command of CORE_COMMANDS)for(const ending of ['logout','idle','sweep'])for(const order of ['end-first','command-first'])
 test(`CORE_COMMAND_END_RACE O3 ${command}/${ending}/${order}`,async t=>{
   const w=await world(t),m='syn-end-'+command+'-'+ending+'-'+order,{admin,sid}=await coreMember(w,m);
@@ -4502,7 +4498,7 @@ test('CORE_REALM_404 a realm read 404 is a failed import, never a ready empty re
   await w.finish('CORE_REALM_404');
 });
 
-for(const stage of ['GET groups','GET role-mappings/realm','POST role-mappings/realm','PUT enable'])
+for(const stage of ['GET groups','GET role-mappings/realm','POST role-mappings/realm'])
 test(`CORE_ROSTER_HTTP_STAGE ${stage} 404 records void with its HTTP outcome`,async t=>{
   const w=await world(t),m='syn-stage-'+stage.replace(/\W/g,'-'),{admin}=await coreMember(w,m);let armed=false;
   w.observe({inst:'I1',scope:'tx',model:'providerChange',method:'create',phase:'after'},()=>{armed=true;});
@@ -4512,4 +4508,168 @@ test(`CORE_ROSTER_HTTP_STAGE ${stage} 404 records void with its HTTP outcome`,as
   assert.deepEqual([record.state,record.outcome],['void','http_404']);
   kc.beforeAdmin=null;assert.equal((await coreRoster(w,m)).rosterUnconfirmed,true);
   assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).institution,B);await w.finish('CORE_ROSTER_HTTP_STAGE '+stage);
+});
+
+// D632 / REQ-S7-U5-DB-RIGHTS -> RISK-LEGACY-LOCKOUT / IDENTITY-REBIND / LOST-CAS / FALSE-PENDING -> CORE_* below.
+test('CORE_PENDING_COUNT_UNREGISTERED_PAGED_DELETED counts the merged realm, without rights writes on any page',async t=>{
+  const w=await world(t),ids=['syn-count-new','syn-count-cancel','syn-count-approved','syn-count-pending','syn-count-deleted'];
+  for(const sub of ids.slice(1))await coreMember(w,sub);
+  for(const sub of [ids[1],ids[3],ids[4]])await w.base.memberRights.update({where:{sub},data:{approved:false,institution:null,roles:[],suspended:sub===ids[1]}});
+  // Two new users and one deleted row cannot accidentally cancel each other's count error.
+  const users=[...ids.slice(0,4),'syn-count-new-second'].map(id=>({id,username:id,email:id+'@synthetic.test',emailVerified:true,groups:[],roles:[],enabled:true}));
+  const provider={listUsers:async page=>({page,pageSize:2,total:users.length,users:users.slice((page-1)*2,page*2)})};
+  const {AdminService}=require('/app/dist/admin.service'),admin=new AdminService(w.I1.prisma,provider,null,w.I1.service);
+  const before=await w.base.memberRights.findMany({orderBy:{sub:'asc'}}),listed=[];
+  for(const page of [1,2,3]){
+    const out=await admin.listUsers(page,R10_CALLER);assert.equal(out.pendingCount,4);assert.equal(out.total,5);listed.push(...out.users);
+  }
+  assert.equal(listed.filter(u=>u.approvalState==='PENDING').length,4);
+  assert.equal(listed.find(u=>u.id===ids[0]).version,null);assert.ok(!listed.some(u=>u.id===ids[4]));
+  assert.deepEqual(await w.base.memberRights.findMany({orderBy:{sub:'asc'}}),before);
+  assert.equal(await w.base.providerChange.count(),0);await w.finish('CORE_PENDING_COUNT');
+});
+
+test('CORE_REGISTER_APPROVE_CAS two APIs observe a missing row; loser is 409, with one rights audit and one publication',async t=>{
+  const w=await world(t),m=r10Member('syn-register-race');kc.members[m].emailVerified=true;
+  const a=w.pause({inst:'I1',scope:'root',model:'memberRights',method:'findUnique',phase:'after'});
+  const b=w.pause({inst:'I2',scope:'root',model:'memberRights',method:'findUnique',phase:'after'});
+  const body={approvalState:'APPROVED',institution:A,roles:['radiologist'],enabled:true,version:null};
+  const first=r10Patch(r10Admin(w),m,body),second=r10Patch(r10Admin(w,w.I2),m,body);
+  await Promise.all([a.arrived(),b.arrived()]);assert.equal(await w.base.memberRights.count({where:{sub:m}}),0);
+  a.release();b.release();const results=await Promise.all([first,second]);
+  assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);
+  assert.equal(results.find(r=>r.status===409).body.code,'MEMBER_VERSION_CONFLICT');
+  await coreSettled(w,m);
+  assert.equal(await w.base.memberRights.count({where:{sub:m}}),1);
+  assert.equal(await w.base.auditLog.count({where:{target:m,action:'admin.user.approve'}}),1);
+  assert.equal(await w.base.providerChange.count({where:{sub:m,kind:'credentials'}}),1,'loser records/sends no publication');
+  assert.ok(!kc.adminCalls.some(x=>/enable|disable|sessions|logout/.test(x)));
+  await w.finish('CORE_REGISTER_APPROVE_CAS');
+});
+
+test('CORE_IMPORT_TWO_INSTANCES_FIRST_BOOT overlapping first imports commit one marker, boundary and legacy intent',async t=>{
+  const w=await world(t,{imported:false}),m='syn-two-imports',arrived=deferred(),release=deferred();t.after(()=>release.resolve());
+  let readers=0,sends=0,commits=0;
+  const user={id:m,username:m,email:m+'@synthetic.test',emailVerified:true,enabled:false,groups:[A],roles:['radiologist']};
+  const provider={listUsers:async()=>{if(++readers===2)arrived.resolve();await release.promise;return {total:1,users:[user]};},
+    setEnabled:async(sub,enabled)=>{sends++;assert.equal(sub,m);assert.equal(enabled,true);assert.equal(await w.base.memberRightsImport.count(),1);}};
+  for(const inst of ['I1','I2'])w.observe({inst,scope:'tx',model:'memberRightsImport',method:'create',phase:'after'},()=>{commits++;});
+  const {importMemberRights}=require('/app/dist/member-rights-import');
+  const first=importMemberRights(w.I1.prisma,provider),second=importMemberRights(w.I2.prisma,provider);
+  await within(arrived.promise,'both APIs read the missing marker');release.resolve();await Promise.all([first,second]);
+  await coreSettled(w,m);const marker=await w.base.memberRightsImport.findUnique({where:{id:'realm-v1'}});
+  assert.equal(commits,1);assert.equal(sends,1);assert.equal(await w.base.memberRightsImport.count(),1);
+  assert.equal(await w.base.providerChange.count({where:{sub:m,kind:'credentials'}}),1);
+  const row=await w.base.memberRights.findUnique({where:{sub:m}});assert.equal(row.suspended,true);assert.equal(row.newAuthAfter.getTime(),marker.completedAt.getTime());
+  await importMemberRights(w.I1.prisma,provider);assert.equal(readers,2);assert.equal(sends,1);await w.finish('CORE_IMPORT_TWO_INSTANCES');
+});
+
+for(const cut of ['503','crash','404','held'])test(`CORE_LEGACY_DISABLED_RECOVERY_503_CRASH_LATE_DISABLE ${cut}`,async t=>{
+  const w=await world(t,{imported:false}),m=r10Member('syn-legacy-'+cut);kc.members[m].enabled=false;kc.members[m].emailVerified=true;
+  const {importMemberRights,retryMemberRoster}=require('/app/dist/member-rights-import'),provider=new KeycloakService();
+  const held=deferred(),arrived=deferred();t.after(()=>held.resolve());let crashed=false;
+  if(cut==='crash')w.observe({inst:'I1',model:'$transaction',phase:'after'},()=>{if(!crashed){crashed=true;throw Error('synthetic process lost after import commit');}});
+  kc.beforeAdmin=async(name,sub)=>{if(name!=='PUT enable'||sub!==m)return;
+    assert.equal(await w.base.memberRightsImport.count(),1);assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).suspended,true);
+    if(cut==='held'){arrived.resolve();await held.promise;}else if(cut==='503')return 503;else if(cut==='404')return 404;
+  };
+  if(cut==='crash')await assert.rejects(importMemberRights(w.I1.prisma,provider),/synthetic process/);
+  else await importMemberRights(w.I1.prisma,provider);
+  assert.equal(await w.base.providerChange.count({where:{sub:m,kind:'credentials'}}),1,'commit durably records the sole legacy intent before any answer');
+  if(cut==='held'){await within(arrived.promise,'legacy enable pending');assert.equal((await coreRoster(w,m)).rosterUnconfirmed,true);held.resolve();}
+  if(cut!=='crash')await coreSettled(w,m);
+  const records=await w.base.providerChange.findMany({where:{sub:m,kind:'credentials'}});assert.equal(records.length,1);
+  assert.equal(records[0].state,cut==='404'?'void':cut==='held'?'done':'unknown');
+  assert.equal((await coreRoster(w,m)).rosterUnconfirmed,cut!=='held');
+  assert.equal((await w.base.memberRights.findUnique({where:{sub:m}})).suspended,true);
+  const sent=kc.adminCalls.filter(c=>c==='PUT enable').length;
+  await w.I2.service.onModuleInit();await quiet(w);w.I2.service.onModuleDestroy();
+  assert.equal(kc.adminCalls.filter(c=>c==='PUT enable').length,sent,'restart never retries the transition in background');
+  kc.beforeAdmin=null;const rights=await w.base.memberRights.findUnique({where:{sub:m}});
+  const result=await retryMemberRoster(w.I2.prisma,provider);assert.equal(result.unconfirmed,0);assert.equal(result.attempted,cut==='held'?0:1);
+  assert.equal((await retryMemberRoster(w.I2.prisma,provider)).attempted,0,'operator retry is idempotent');
+  assert.equal(await w.base.providerChange.count({where:{sub:m,kind:'credentials'}}),1,'retry retains the one intent');
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),rights,'publication cannot change rights');
+  assert.equal(kc.members[m].enabled,true);
+  // A late legacy disable (from a pre-transition caller) cannot grant or remove DB rights.
+  kc.members[m].enabled=false;w.tick(1000);const old=await w.issue(m+'-late',{sub:m,authTime:Math.floor(Date.now()/1000)});
+  assert.equal((await w.call(w.I2,'me',{bearer:old.access})).status,401);assert.equal((await login(w,w.I2,old)).done.newSid,null);
+  assert.equal((await r10Patch(r10Admin(w),m,{enabled:true})).status,200);await quiet(w);
+  const enabledCalls=kc.adminCalls.filter(c=>c==='PUT enable').length;
+  assert.equal(enabledCalls,cut==='held'?1:cut==='crash'?1:2,'Activate adds no provider command');
+  assert.equal(kc.members[m].enabled,false,'late disable is not repaired by a normal command');
+  assert.equal((await w.call(w.I2,'me',{bearer:old.access})).status,401,'neither the late effect nor Activate reopens an older authentication');
+  await w.finish('CORE_LEGACY_DISABLED '+cut);
+});
+
+test('CORE_RETRY_ROSTER replays unknown and void ordinary groups/roles intents without enable or DB rights changes',async t=>{
+  const w=await world(t),m='syn-roster-retry',{admin}=await coreMember(w,m),{retryMemberRoster}=require('/app/dist/member-rights-import');
+  let armed=false;w.observe({inst:'I1',scope:'tx',model:'providerChange',method:'create',phase:'after'},()=>{armed=true;});
+  kc.beforeAdmin=name=>armed&&name==='GET groups'?503:undefined;
+  assert.equal((await r10Patch(admin,m,{institution:B,roles:['clinician']})).status,200);await coreSettled(w,m);
+  const before=await w.base.memberRights.findUnique({where:{sub:m}});kc.beforeAdmin=null;
+  assert.deepEqual(await retryMemberRoster(w.I2.prisma,new KeycloakService()),{attempted:1,unconfirmed:0});
+  assert.deepEqual(kc.members[m].groups,[B]);assert.deepEqual(kc.members[m].roles,['clinician']);
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);
+  assert.ok(!kc.adminCalls.some(x=>/enable|disable|sessions|logout/.test(x)));await w.finish('CORE_RETRY_ROSTER');
+});
+
+for(const command of CORE_COMMANDS)test(`CORE_COMMAND_NO_PROVIDER_ENABLE ${command}`,async t=>{
+  const w=await world(t),m='syn-no-enable-'+command,{admin}=await coreSetup(w,m,command);
+  assert.equal((await r10Patch(admin,m,coreBody(command))).status,200);await quiet(w);
+  assert.ok(!kc.adminCalls.some(x=>/enable|disable|sessions|logout/.test(x)));assert.equal(kc.endRequests.length,0);
+  assert.equal(await w.base.providerChange.count({where:{sub:m,kind:'credentials'}}),['Approve','Change'].includes(command)?1:0);
+  await w.finish('CORE_COMMAND_NO_PROVIDER_ENABLE '+command);
+});
+
+test('CORE_REVIEWER_IDENTITY_LATE_CALLBACK_AND_BEARER delayed old identity never rewrites DB identity; Bearer uses current token identity',async t=>{
+  const w=await world(t),m='syn-late-identity',{token}=await coreMember(w,m),before=await w.base.memberRights.findUnique({where:{sub:m}});
+  const begin=await w.call(w.I1,'login'),hold=w.gate('I1','tx.open'),old=answerFlow(w,w.I1,begin,token);await hold.arrived();
+  const changed=await w.issue(m+'-new',{sub:m,email:'new-reviewer@synthetic.test',identity:{preferred_username:'new-reviewer'}});
+  const fresh=await login(w,w.I2,changed);assert.ok(fresh.done.newSid);
+  const afterFresh=await w.base.memberRights.findUnique({where:{sub:m}});
+  hold.release();assert.ok((await old).newSid);
+  assert.deepEqual(afterFresh,before,'the newer callback is not an identity writer either');
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before,'callbacks are not identity-roster writers');
+  const me=await w.call(w.I2,'me',{bearer:changed.access});assert.equal(me.status,200);assert.equal((await guardView(w,changed.access)).actor,'new-reviewer@synthetic.test');
+  assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);await w.finish('CORE_REVIEWER_IDENTITY');
+});
+
+for(const state of ['missing','pending','invalid'])test(`CORE_GUIDANCE_HASSESSION ${state} returns work without a new IdP flow but work stays forbidden`,async t=>{
+  const w=await world(t),m='syn-guidance-'+state,token=await w.issue(m,{sub:m}),sid=await w.session(token);
+  if(state==='missing'){await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');await w.base.authSession.update({where:{sid},data:{rightsVersion:0}});}
+  // Even a retained, inconsistent pending row carrying stale scope cannot become work authority.
+  else await w.base.memberRights.update({where:{sub:m},data:{approved:false,institution:state==='invalid'?A:null,roles:state==='invalid'?['radiologist']:[]}});
+  const before=await w.base.authSession.count(),out=await w.call(w.I1,'login',{sid});
+  assert.equal(atProvider(out),false);assert.equal(out.location,landing('session_active'));
+  assert.equal((await w.call(w.I1,'callback',{sid,query:{code:'unowned',state:'unowned'}})).location,ORIGIN+'/worklist/hpacs-lite/main.html');
+  assert.equal(await w.base.authSession.count(),before);assert.equal((await w.call(w.I2,'get',{sid})).status,403);
+  assert.equal(kc.tokens,0);await w.finish('CORE_GUIDANCE_HASSESSION '+state);
+});
+
+test('CORE_LOGIN_RIGHTS_PENDING import absence is 401 AUTH_RIGHTS_PENDING and a distinct audit failure cause',async t=>{
+  const w=await world(t,{imported:false}),token=await w.issue('syn-rights-pending',{sub:'syn-rights-pending'}),sid=await w.session(token);
+  const out=await w.call(w.I1,'get',{sid});assert.equal(out.status,401);assert.equal(out.body.code,'AUTH_RIGHTS_PENDING');
+  assert.equal((await login(w,w.I2,token)).done.newSid,null);
+  const failed=(await w.rows()).filter(row=>row.action==='auth.login'&&row.detail.outcome==='failure');
+  assert.equal(failed.length,1);assert.equal(failed[0].detail.cause,'rights_pending');await w.finish('CORE_LOGIN_RIGHTS_PENDING');
+});
+
+for(const stage of ['groups','role-mappings/realm'])test(`CORE_ROSTER_DISAPPEARS ${stage} returns absent, while other HTTP failures stay 503`,async t=>{
+  const w=await world(t),m=r10Member('syn-gone'),provider=new KeycloakService();
+  kc.beforeAdmin=name=>name==='GET '+stage?404:undefined;
+  let member;await assert.doesNotReject(async()=>{member=await provider.getUser(m);},'a deleted user is an absence, not a provider outage');
+  assert.equal(member,null);
+  kc.beforeAdmin=name=>name==='GET '+stage?503:undefined;
+  await assert.rejects(provider.getUser(m),e=>e.getStatus?.()===503);await w.finish('CORE_ROSTER_DISAPPEARS '+stage);
+});
+
+test('CORE_COMMAND_DB_CLOCK rights boundary uses transaction DB time despite application clock skew',async t=>{
+  const w=await world(t),m='syn-db-clock',{admin}=await coreMember(w,m);w.realDatabaseClock=true;let dbTime;
+  w.observe({inst:'I1',model:'$transaction',phase:'started'},async e=>{dbTime=(await e.client.$queryRaw`SELECT now() AS boundary`)[0].boundary;});
+  if(realPG())w.tick(7*24*HOUR);
+  assert.equal((await r10Patch(admin,m,{enabled:false})).status,200);
+  const row=await w.base.memberRights.findUnique({where:{sub:m}});assert.equal(row.newAuthAfter.getTime(),dbTime.getTime());
+  if(realPG())assert.ok(Math.abs(row.newAuthAfter.getTime()-Date.now())>HOUR,'database and application clocks were independently exercised');
+  await w.finish('CORE_COMMAND_DB_CLOCK');
 });

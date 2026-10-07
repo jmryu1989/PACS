@@ -6,10 +6,22 @@ for (const name of ['DATABASE_URL', 'KC_ADMIN_URL', 'KC_REALM', 'KC_ISSUER', 'KC
 }
 const { PrismaService } = require('../dist/prisma.service');
 const { KeycloakService } = require('../dist/keycloak.service');
-const { importMemberRights } = require('../dist/member-rights-import');
+const { importMemberRights, retryMemberRoster } = require('../dist/member-rights-import');
+const args = process.argv.slice(2);
+if (args.length > 1 || (args.length && args[0] !== '--retry-roster')) throw new Error('Usage: import-member-rights.cjs [--retry-roster]');
 const db = new PrismaService();
 (async () => {
-  try { await importMemberRights(db, new KeycloakService()); process.stdout.write('Member rights import completed\n'); }
-  catch { process.stderr.write('Member rights import failed; traffic must remain stopped\n'); process.exitCode = 1; }
+  try {
+    if (args[0] === '--retry-roster') {
+      const result = await retryMemberRoster(db, new KeycloakService());
+      process.stdout.write(JSON.stringify(result) + '\n');
+      if (result.unconfirmed) process.exitCode = 1;
+    } else {
+      const imported = await importMemberRights(db, new KeycloakService());
+      await imported?.publication;
+      process.stdout.write('Member rights import completed; roster outcomes are recorded separately\n');
+    }
+  }
+  catch { process.stderr.write('Member rights import/roster operation failed; inspect the recorded outcome\n'); process.exitCode = 1; }
   finally { await db.$disconnect(); }
 })();

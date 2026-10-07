@@ -175,10 +175,15 @@ export class KeycloakService {
   private async user(raw: any, signal?: AbortSignal): Promise<KeycloakUser | null> {
     const detail = await this.adm(`/users/${encodeURIComponent(raw.id)}`, 'GET', undefined, true, signal);
     if (!detail) return null;
-    const [groups, roles] = await Promise.all([
+    let groups: any[], roles: any[];
+    try { [groups, roles] = await Promise.all([
       this.adm(`/users/${encodeURIComponent(raw.id)}/groups?briefRepresentation=true&max=500`, 'GET', undefined, true, signal),
       this.adm(`/users/${encodeURIComponent(raw.id)}/role-mappings/realm`, 'GET', undefined, true, signal),
-    ]);
+    ]); } catch (error) {
+      // Deletion between the detail and its two owned resources means this member is absent.
+      if (error instanceof RosterWriteFailure && error.answer.outcome === 'http_404') return null;
+      throw error;
+    }
     const username = detail.username ?? '';
     // Admin REST는 export와 달리 serviceAccountClientId를 사용자 표현에서 생략한다.
     // Keycloak이 서비스 사용자에 강제하는 예약 이름도 함께 봐야 쓰기 전에 알아챌 수 있다.
@@ -321,10 +326,10 @@ export class KeycloakService {
    *   롤 보유자  — 판독의인가
    * 멤버마다 롤을 따로 묻는 방법도 있지만 사람 수만큼 요청이 늘어난다.
    */
-  async usersInGroupWithRole(group: string, role: string) {
+  async usersInGroupWithRole(group: string, role: string, fresh = false) {
     const key = `${group}|${role}`;
     const hit = this.cache.get(key);
-    if (hit && Date.now() - hit.at < KeycloakService.TTL) return hit.users;
+    if (!fresh && hit && Date.now() - hit.at < KeycloakService.TTL) return hit.users;
 
     const groups: any[] = await this.adm('/groups');
     const g = groups.find(x => x.name === group || x.path === '/' + group);
@@ -341,7 +346,8 @@ export class KeycloakService {
       .map(u => ({
         // actor와 같은 형태로 맞춘다. AuthGuard가 email을 우선 쓰므로 여기서도 email이 우선이다.
         // 이 값이 preReviewer 컬럼에 들어가고, 나중에 "이 판독문이 내 것인가"를 이걸로 비교한다.
-        id: u.email ?? u.username,
+        sub: u.id,
+        id: u.email || u.username,
         username: u.username,
         name: [u.lastName, u.firstName].filter(Boolean).join(' ') || u.username,
       }))

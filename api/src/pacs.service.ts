@@ -2920,8 +2920,11 @@ export class PacsService implements OnModuleInit {
       reviewer = wanted;
       if (!reviewer) throw new BadRequestException('상급 판독의를 지정해야 합니다');
       if (reviewer === c.actor) throw new BadRequestException('자기 자신을 상급 판독의로 지정할 수 없습니다');
-      const candidates = await tx.memberRights.findMany({ where: { OR: [{ email: reviewer }, { email: '', username: reviewer }] }, take: 2 });
+      // Resolve exactly the identity offered by colleagues(); only its stable subject selects DB rights.
+      const roster = await this.keycloak.usersInGroupWithRole(me, 'radiologist', true);
+      const candidates = roster.filter(user => user.id === reviewer);
       const candidate = candidates.length === 1 ? candidates[0] : null;
+      if (candidate?.sub === c.sub) throw new BadRequestException('자기 자신을 상급 판독의로 지정할 수 없습니다');
       if (candidate) await lockMemberRights(tx, candidate.sub);
       const current = candidate && await tx.memberRights.findUnique({ where: { sub: candidate.sub } });
       if (!rightsAllow(current) || current.institution !== me || !current.roles.includes('radiologist'))

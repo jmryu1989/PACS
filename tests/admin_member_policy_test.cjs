@@ -15,7 +15,8 @@ const { KeycloakService } = require('../api/src/keycloak.service.ts');
   let writes = 0, changed;
   const db = { memberRights: { findUnique: async () => member, updateMany: async ({data}) => { writes++; changed = data; return {count:1}; } },
     authSession: { findMany: async () => [], deleteMany: async () => ({count:0}) },
-    auditLog: { create: async () => ({}), findFirst: async () => null }, providerChange: { create: async () => ({id:1}), findFirst: async () => null }, $executeRaw: async () => 0 };
+    auditLog: { create: async () => ({}), findFirst: async () => null }, providerChange: { create: async () => ({id:1}), findFirst: async () => null },
+    $executeRaw: async () => 0, $queryRaw: async () => [{boundary:new Date()}] };
   db.$transaction = async work => work(db);
   const kc = { institutions: async () => ['synthetic-hospital'], getUser: async () => ({id:member.sub,emailVerified:true}) };
   const service = new AdminService(db,kc,null,{publishCredentials() {}});
@@ -53,5 +54,17 @@ const { KeycloakService } = require('../api/src/keycloak.service.ts');
   roster.getUser=async id=>({id,enabled:true,groups:['synthetic-hospital'],roles:[id==='reader'?'radiologist':'clinician']});
   assert.deepEqual((await roster.assignmentReaders('synthetic-hospital')).map(u=>u.id),['reader'],
     'the unchanged roster still excludes a clinician-only reviewer');
+  const colleagues=new KeycloakService();let down=false;
+  const {ServiceUnavailableException}=require(path.join(root,'api/node_modules/@nestjs/common'));
+  colleagues.adm=async route=>{
+    if(down)throw new ServiceUnavailableException('synthetic roster outage');
+    if(route==='/groups')return [{id:'group',name:'synthetic-hospital'}];
+    return [{id:'stable-sub',username:'reader-without-email',email:'',enabled:true}];
+  };
+  const offered=await colleagues.usersInGroupWithRole('synthetic-hospital','radiologist');
+  assert.deepEqual(offered.map(u=>({sub:u.sub,id:u.id})),[{sub:'stable-sub',id:'reader-without-email'}]);
+  down=true;
+  await assert.rejects(colleagues.usersInGroupWithRole('synthetic-hospital','radiologist',true),e=>e.getStatus()===503,
+    'a report commit resolves the current roster even if the earlier picker cached it');
   process.stdout.write('Member role contracts passed\n');
 })().catch(e=>{console.error(e);process.exitCode=1;});

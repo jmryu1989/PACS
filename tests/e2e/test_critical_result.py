@@ -384,7 +384,7 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
         try:
             self.stack.token("clinician", refused=True)          # a new token of a member left without a KIN role
             self.check(self.stack.request("GET", "/me", "clinician"), 401, "AUTH_SESSION_ENDED")
-            self.forbidden(self.ack("clinician", r0, rid=a1)[1], ROLE_REQUIRED, "INSTITUTION_INVALID")
+            self.check(self.ack("clinician", r0, rid=a1)[1], 401, "AUTH_SESSION_ENDED")
             again = self.created(self.send("doctor", f.uid, "clinician", 1, rid=r0)[1])                  # S-CR11
             self.assertEqual((again["replayed"], again["applied"]), (True, create))
         finally:

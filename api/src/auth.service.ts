@@ -108,7 +108,7 @@ type Who = { actor: string; target: string; institution: string | null };
 export type LoginFailureCause =
   'provider_error' | 'state_mismatch' | 'no_code' | 'exchange_failed' | 'token_invalid' | 'session_failed' | 'idp_session_ended'
   // 격리된 회원(우리 쪽 격리 사실이 있는 회원)의 로그인: 세션을 만들지 않는다.
-  | 'member_isolated' | 'storage_failure';
+  | 'member_isolated' | 'rights_pending' | 'storage_failure';
 type StorageStep = 'session_read' | 'session_write' | 'end_transaction' | 'login_transaction' | 'login_failure_row'
   | 'entry_transaction' | 'sweep_read' | 'sweep_target' | 'sweep_cycle'
   | 'idp_end_read' | 'idp_end_write' | 'idp_end_cycle'
@@ -246,7 +246,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   /** Waiting sessions carry identity only. Before realm import, no member session can enter. */
   private async entryRights(sub: string, db: any = this.prisma) {
     const marker = await this.storage('session_read', () => db.memberRightsImport.findUnique({ where: { id: 'realm-v1' } }));
-    if (!marker) throw this.ended('회원 권한을 준비하고 있습니다');
+    if (!marker) throw authRefusal(401, 'AUTH_RIGHTS_PENDING', '회원 권한을 준비하고 있습니다');
     const row: any = await this.storage('session_read', () => db.memberRights.findUnique({ where: { sub } }));
     if (row?.suspended) throw this.ended('현재 회원 자격으로 접근할 수 없습니다');
     return row ?? { sub, version: 0, approved: false, suspended: false, institution: null, roles: [], newAuthAfter: null };
@@ -636,7 +636,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       try {
         await this.keycloak.setGroups(change.target, [institution]);
         await this.keycloak.setRoles(change.target, roles);
-        await this.keycloak.setEnabled(change.target, true);
         return { state: 'done', outcome: 'completed' };
       } catch (error) {
         return error instanceof RosterWriteFailure ? error.answer : { state: 'unknown', outcome: 'credentials_unconfirmed' };
@@ -956,7 +955,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     if (!session || session.lastSeenAt.getTime() < Date.now() - SESSION_IDLE_MS) return false;
     if (await this.memberRightsState() !== 'ready') return false;
     const rights = await this.storage('session_read', () => this.prisma.memberRights.findUnique({ where: { sub: session.sub } }));
-    return rightsAllow(rights) && rights.version === session.rightsVersion;
+    return !rights?.suspended && (rights?.version ?? 0) === session.rightsVersion;
   }
 
   /**
@@ -1125,7 +1124,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     let observed: any;
     try { observed = await this.entryRights(String(payload.sub)); }
     catch (error: any) {
-      await this.loginFailureRow(req, error?.getStatus?.() === 401 ? 'member_isolated' : 'storage_failure', this.identity(payload, String(payload.sub)));
+      const cause = error?.getResponse?.()?.code === 'AUTH_RIGHTS_PENDING' ? 'rights_pending'
+        : error?.getStatus?.() === 401 ? 'member_isolated' : 'storage_failure';
+      await this.loginFailureRow(req, cause, this.identity(payload, String(payload.sub)));
       return { kind: 'landing', error: 'login_failed' };
     }
     if (observed.newAuthAfter) {
@@ -1139,6 +1140,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         if (flow.phase !== 'fresh' && !this.authenticationAfter(identity.auth_time, observed.newAuthAfter))
           return { kind: 'redirect', location: this.startFlow(req, res, { phase: 'fresh', reason: flow.reason,
             prompt: 'login', memberSub: String(payload.sub), rightsVersion: observed.version }) };
+        // The member/issuedAt clauses also defend against a mismatched fresh-flow cookie, beyond the time/version gates.
         if (flow.phase === 'fresh' && (!this.authenticationAfter(identity.auth_time, observed.newAuthAfter) ||
             (flow.memberSub !== undefined && (flow.memberSub !== payload.sub || flow.rightsVersion !== observed.version)) ||
             identity.auth_time < Math.floor(flow.issuedAt / 1000) || flow.issuedAt < observed.newAuthAfter.getTime()))
@@ -1187,13 +1189,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
           }
           return 'blocked';
         }
-        // Authenticated identity follows the provider; approval, scope and version remain DB decisions.
-        await tx.memberRights.updateMany({ where: { sub: String(payload.sub) }, data: {
-          username: typeof payload.preferred_username === 'string' ? payload.preferred_username : '',
-          email: typeof payload.email === 'string' ? payload.email : '',
-          name: [payload.family_name, payload.given_name].filter(Boolean).join(' ') || payload.name || payload.preferred_username || String(payload.sub),
-          emailVerified: payload.email_verified === true,
-        } });
         await tx.authSession.create({ data: {
           sid,
           sub: String(payload.sub),
