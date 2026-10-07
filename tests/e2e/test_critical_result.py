@@ -2909,8 +2909,8 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                     self.pure(f"{name} reversed", turned, [])
 
     def test_crs02_revoked_recipient_old_session_cannot_acknowledge_new_session_sees_nothing(self) -> None:
-        """CRS-02: V moves to another institution: S sees Recipient Not Eligible, V's old session still reads (L-10) but its ACK
-        is refused, a new session sees nothing; the move is undone and a third session sees the record again."""
+        """CRS-02: V moves to another institution: S sees Recipient Not Eligible, V's old session ends, and a fresh login
+        sees nothing (R5) and cannot ACK; the move is undone and a third session sees the record again."""
         with self.controlled():
             with self.step("E-04"):
                 u2 = self.approved_study("U2")
@@ -2940,20 +2940,17 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                     expect(row).to_contain_text(NOT_ELIGIBLE_TEXT)
                     self.judge("V-03", s, "settled", role="sender")
                 with self.step("V-04"):
-                    self.recv_refresh(o)
-                    row = self.rows(o.page).filter(has_text=m)
-                    expect(row).to_have_count(1)
-                    since = self.n
-                    row.get_by_role("button", name="Acknowledge", exact=True).click()
-                    refused = self.answer(o, "#6", since, "V-04 ACK", target=r2)
-                    self.server_eq((refused["status"], (refused["json"] or {}).get("code")), (403, ROLE_REQUIRED), "V-04 answer")
-                    self.answer(o, "#3", refused["n"], "V-04 list after the refusal", view="received")
-                    line = self.lines(o.page).filter(has_text=u2.patient_id)
-                    expect(line).to_contain_text(ROLE_REQUIRED)
-                    self.screen_ok(HANGUL.search(line.inner_text()) is not None, "V-04: a Korean reason")
+                    # D621/D623 ends the old rights version. Observe its next navigation without submitting a login.
+                    o.page.goto(self.stack.proxy + "/worklist/hpacs-lite/clinician.html")
+                    o.page.wait_for_url(lambda url: urlsplit(url).path == "/auth/realms/kin/protocol/openid-connect/auth")
+                    expect(o.page.locator('input[name="username"]')).to_be_visible()
+                    expect(self.inbox(o.page)).to_have_count(0)
+                    expect(o.page.get_by_role("list", name="Received Critical Results", exact=True)).to_have_count(0)
+                    expect(o.page.get_by_role("button", name="Acknowledge", exact=True)).to_have_count(0)
+                    self.harness_ok(not self.posts(o, "#6"), "V-04: the ended session sent no ACK")
                     self.server_eq((critical_row(r2)["state"], critical_row(r2)["revision"]), ("created", 1), "V-04 R2")
                     self.ledger_is(u2, 1, 1, 1, 1, "V-04")
-                    self.judge("V-04", o, "settled", role="recipient")
+                    self.log("session-ended", step="V-04", context=o.label, received=False, acknowledge=False)
                 with self.step("RF-5"):
                     self.sent_refresh(s)
                     expect(self.sent_row(s.page, u2, 1)).to_contain_text("Recipient Not Eligible")
@@ -2961,14 +2958,36 @@ class CriticalResultScreensE2E(KeycloakGroups, CriticalResultHarness, base.Workl
                 with self.step("V-05"):
                     n = self.sign_in("clinician3", "N")
                     self.first_list(n)
-                    expect(self.rows(n.page).filter(has_text=m)).to_have_count(0)
+                    expect(self.rows(n.page)).to_have_count(0)
+                    expect(n.page.get_by_role("button", name="Acknowledge", exact=True)).to_have_count(0)
                     missing = self.session_read(n, f"/critical-results/{r2}")
-                    self.server_eq(missing["status"], 404, "V-05 N reads R2")
+                    self.server_eq((missing["status"], (missing["json"] or {}).get("code")), (404, NOT_FOUND), "V-05 N reads R2")
                     self.judge("V-05", n, "settled", role="recipient")
                 with self.step("MU-D"):
-                    old = self.session_read(o, f"/critical-results/{r2}")["json"]["item"]
-                    self.list_variant(n, "MU-D", lambda data: data["items"].insert(0, copy.deepcopy(old)), "V-05 MU-D",
-                                      ("row-not-for-session",))
+                    # Reuse V-01's recorded answer, never read through the ended session. This response variant offers
+                    # a stale row; its page's real ACK must still meet R5, using N's current session and owner envelope.
+                    old = next(copy.deepcopy(item) for item in items_of(self.first_list(o)) if key_of(item) == r2)
+                    control = Control(self, n, "MU-D")
+                    control.add("MU-D", is_(route="#3", view="received"), "modify",
+                                change=lambda data: data["items"].insert(0, copy.deepcopy(old)))
+                    control.start()
+                    try:
+                        self.recv_refresh(n)
+                        self.judge("V-05 MU-D", n, "settled", role="recipient", expected=("row-not-for-session",))
+                    finally:
+                        control.close()
+                    since = self.n
+                    self.rows(n.page).filter(has_text=m).get_by_role("button", name="Acknowledge", exact=True).click()
+                    refused = self.answer(n, "#6", since, "V-05 N ACK", target=r2)
+                    self.server_eq((refused["status"], (refused["json"] or {}).get("code")), (404, NOT_FOUND), "V-05 N ACK answer")
+                    self.answer(n, "#3", refused["n"], "V-05 list after the refusal", view="received")
+                    expect(self.rows(n.page)).to_have_count(0)
+                    line = self.lines(n.page).filter(has_text=u2.patient_id)
+                    expect(line).to_contain_text(NOT_FOUND)
+                    self.screen_ok(HANGUL.search(line.inner_text()) is not None, "V-05: a Korean reason")
+                    self.server_eq((critical_row(r2)["state"], critical_row(r2)["revision"]), ("created", 1), "V-05 R2")
+                    self.ledger_is(u2, 1, 1, 1, 1, "V-05")
+                    self.judge("V-05 MU-D cleanup", n, "settled", role="recipient")
             finally:
                 if moved:
                     self.move_member("clinician3", "kin-center", "hallym")

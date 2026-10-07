@@ -547,6 +547,8 @@ class ClinicalContextLive(unittest.TestCase):
         pid = "CCTX-L10-" + uuid.uuid4().hex[:8].upper()
         anchor = self.upload(pid=pid, date="20260130", series=(("CT", {"ReasonForStudy": "SYN L10"}),))
         prior = self.upload(pid=pid, date="20260129")
+        # Tele referral is allowed only at RS W; the owner's later approval supplies the signed provenance below.
+        self.tele(prior.uid)
         self.commit(prior, "doctor", "approve", 0)
         note = self.stack.request("POST", f"/studies/{quote(anchor.uid)}/tech-note", "tech", {"baseVersion": 0, "text": "SYN", "reason": ""})
         self.assertIn(note.status, (200, 201), note.text[:300])
@@ -571,7 +573,6 @@ class ClinicalContextLive(unittest.TestCase):
         self.assertEqual(owner["anchor"]["access"], "owner")
         self.assertEqual({item["access"] for name in ("priorReports", "history") for item in owner["sections"][name]["items"]}, {"owner"})
         self.tele(anchor.uid)
-        self.tele(prior.uid)
         tele = self.context(anchor.uid, "kdoctor").body
         self.assertEqual((tele["anchor"]["access"], tele["anchor"]["institutionName"]), ("tele", HALLYM))
         self.assertEqual({item["access"] for name in ("priorReports", "history") for item in tele["sections"][name]["items"]}, {"tele"})

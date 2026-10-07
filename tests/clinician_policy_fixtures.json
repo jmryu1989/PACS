@@ -22,6 +22,7 @@
   "denied_code": "CLINICIAN_ROUTE_DENIED",
   "public_routes": ["GET health", "GET auth/login", "GET auth/register", "GET auth/callback", "POST auth/login", "POST auth/register", "POST auth/entry"],
   "request_method_enum": {"0": "GET", "1": "POST", "2": "PUT", "3": "DELETE", "4": "PATCH", "5": "ALL", "6": "OPTIONS", "7": "HEAD", "8": "SEARCH"},
+  "tokens_basis": "Pure memberState/clinicianOnly argument vectors, including malformed inputs, not provider-to-DB rights mapping. At C1 the guard supplies institution and roles from DB rights; an unregistered identity has neither, even if a multi-institution command was requested.",
   "tokens": [
     {"id": "clinician-approved", "groups": ["hallym"], "roles": ["default-roles-kin", "offline_access", "clinician"], "state": "APPROVED", "clinicianOnly": true},
     {"id": "clinician-approved-duplicate-role", "groups": ["hallym"], "roles": ["clinician", "clinician"], "state": "APPROVED", "clinicianOnly": true},
@@ -501,18 +502,18 @@
       "doctor": "radiologist-only member of hallym (LiveStack)",
       "tech": "technician-only member of hallym (LiveStack)",
       "gateway": "valid gateway client-credentials identity of kin-center (LiveStack.service_token)",
-      "cinvalid": "clinician-only member with two institution groups, created by the case"
+      "cinvalid": "run-created identity whose two-institution rights command is refused; no DB institution or roles, so it remains pending"
     },
     "rows": {
       "GET me": {
         "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
         "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
-        "wrong_tenant": {"as": "cinvalid", "expect": "denied", "status": 403, "code": "INSTITUTION_INVALID", "basis": "a session row names no study; its tenant axis is the membership check (exactly one institution group)"}
+        "wrong_tenant": {"as": "cinvalid", "expect": "denied", "status": 403, "code": "INSTITUTION_PENDING", "basis": "a session row names no study; the refused multi-institution command leaves this identity without DB rights, so membership remains pending"}
       },
       "POST auth/logout": {
         "positive": {"as": "clinician", "expect": "allowed", "status": 204, "code": null},
         "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
-        "wrong_tenant": {"as": "cinvalid", "expect": "allowed", "status": 204, "code": null, "basis": "by design, not a leak: the pending/invalid logout exception (auth.guard.ts isLogout) ends only the caller's own session and answers no data"}
+        "wrong_tenant": {"as": "cinvalid", "expect": "allowed", "status": 204, "code": null, "basis": "by design, not a leak: pending identities may log out without gaining rights or reading data; this Bearer call has no BFF session to end"}
       },
       "GET authz/dicom": {
         "via": "nginx auth_request of GET /dicom-web/studies/{uid}/metadata, its only caller; nginx answers the refusal with a status only",

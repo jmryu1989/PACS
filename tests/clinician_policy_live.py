@@ -153,11 +153,16 @@ class ClinicianPolicyLive(unittest.TestCase):
         if cls.critical_study is not None:
             drop_critical_results(cls.critical_study.uid, set(cls.stack.user_ids.values()) | set(cls.owned_users))
 
-    # ── owned member helpers (no group => PENDING, two groups => INVALID) ──
+    # ── owned member helpers (no institution or a refused multi-institution command => PENDING) ──
 
     def create_member(self, logical: str, roles: list[str], groups: list[str]) -> tuple[str, str, str]:
         username = f"kin-test-{uuid.uuid4().hex[:12]}-{logical}"
         self.assertRegex(username, OWNED_USERNAME)
+        template_owner = username + "@local.test"
+        for table, column in (("ReadingTemplate", "owner"), ("UserFilter", "owner"),
+                              ("UserFilterCollection", "owner"), ("AuditLog", "actor")):
+            self.assertEqual(psql(f'SELECT count(*) FROM "{table}" WHERE {column}={lit(template_owner)}'), ["0"],
+                             "temporary actor already has data; refusing reuse")
         password = uuid.uuid4().hex + "Aa1!"
         created = self.stack.kc_admin("POST", "/users", {
             "username": username, "enabled": True, "emailVerified": True,
@@ -166,6 +171,9 @@ class ClinicianPolicyLive(unittest.TestCase):
         self.assertEqual(created.status, 201, created.text)
         user_id = str(created.body)
         self.owned_users.append(user_id)
+        # The existing addClassCleanup runs even after an assertion/setup failure. /prefs can seed templates before
+        # this member is revoked; register its proven-empty owner before any subsequent fixture step can fail.
+        self.stack.template_owners.add(template_owner)
         reset = self.stack.kc_admin("PUT", f"/users/{quote(user_id)}/reset-password", {
             "type": "password", "value": password, "temporary": False,
         })
