@@ -117,6 +117,16 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
 
     def test_02_migrate_boot_restart_preserves_data_and_history(self):
         """TEST-C1-02/03: real Prisma engines, empty migration, auth guard and exec signal path."""
+        # This image-only fixture has no realm server. Exercise the supported operator import with an empty realm
+        # before boot; onModuleInit must see its real completion marker and never contact the unreachable provider.
+        ops.run(["docker", "run", "--rm", "--network", "container:" + self.db,
+                 "-e", "DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin",
+                 "--entrypoint", "node", self.image_id, "-e",
+                 "require('child_process').execFileSync('node',['node_modules/prisma/build/index.js','migrate','deploy'],{stdio:'inherit'});"
+                 "const {PrismaService}=require('./dist/prisma.service');const db=new PrismaService();"
+                 "require('./dist/member-rights-import').importMemberRights(db,{listUsers:async()=>({total:0,users:[]})})"
+                 ".finally(()=>db.$disconnect()).catch(()=>process.exit(1));"])
+        self.assertEqual(self.psql('SELECT id FROM "MemberRightsImport";'), "realm-v1")
         name = self.api("healthy")
         # A failed migration assertion must not leave port3000 occupied for the drain test.
         self.addCleanup(ops.run, ["docker", "stop", "--time", "10", name])

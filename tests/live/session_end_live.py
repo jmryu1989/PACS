@@ -10,9 +10,9 @@ Design: session-end design v2 (2026-10-05) section 5, acceptance cases 6 and 7, 
 the provider frozen during a Log out (F6-C), the next person at an unfinished-logout landing and at Switch account (an
 editable user name, never the previous doctor's fixed re-authentication screen - F5), the probe and fresh steps, the
 same doctor's other PC untouched, a provider end racing a refresh (F2), and what `auth_time` does across a refresh.
-SE-09/SE-10 (integration review F02, review of 8c2cf37 F-05): the administrator's isolation of a signed-in member on the
-real provider (prompt=none, credentials and refresh refused; Activate lets the member in again), and the provider side of
-the failed-listing path - a member disabled at the provider whose provider session was not logged out.
+SE-09/SE-10 (superseded provider-isolation expectations, adapted to D621): an administrator suspends a signed-in member.
+DB rights refuse the browser and old Bearer while provider sessions remain alive. Activate requires a later authentication.
+SE-11 keeps the C10 same-sid end contract using explicit Log out; provider member reconciliation belongs to U5b.
 SE-03b/SE-03c (S1 real-screen counterexample 1, candidate-diag-S1 ce1-diagnosis): Keycloak names a new SSO by the browser's
 authentication-session id, and a login screen left unfinished in that browser keeps the id alive past a login - the next
 SSO of the browser, the next person's or the same doctor's, gets the ENDED SSO's id. The end mark must not refuse it
@@ -26,7 +26,7 @@ Hosted CI: the `u5-session-end` profile of tests/measurement_ci.py (validate.yml
 its own empty runner because SE-02 pauses Keycloak.
 SE-02 pauses and unpauses the stack's own keycloak service for about four seconds (`docker compose pause keycloak`,
 no restart, no configuration change). SE-09 suspends and activates doctor A through the product's admin route (as the
-LiveStack admin identity jmryu) and SE-10 disables and enables doctor A through Keycloak's admin API; both put A back
+LiveStack admin identity jmryu) and SE-10 changes A through the same product member API; both put A back
 enabled. Every other case only reads Keycloak and the database.
 
 Owned data: the LiveStack test identities doctor (A) and doctor2 (B), their product sessions, their access rows, the
@@ -581,148 +581,93 @@ class SessionEndLive(unittest.TestCase):
                     auth_time_same=before.get("auth_time") == after.get("auth_time"))
 
     def test_09_an_isolated_member_cannot_come_back_until_activated(self):
-        """Integration review F02 / review of 8c2cf37 F-05: an administrator suspends doctor A while A is signed in, with
-        the provider answering. The product records its fact first, ends A's product session and finishes the provider
-        work in the same request - A's provider sessions end and A is disabled at the provider (the fact says done). A's
-        browser is refused; its recovery Login probes with prompt=none and gets no code; A's correct credentials are
-        refused by the provider. Activate clears the fact and A's credentials let A in again."""
-        context, page = self.profile(STORAGE_DENIED)
+        """D621: Suspend ends product access; Activate still refuses the old authentication."""
+        context, page = self.profile()
         self.sign_in(page, "A")
-        callbacks = self.callbacks(context)
+        provider, old = self.provider_session_and_token("A")
+        before = self.provider_alive("A")
         try:
-            changed = self.admin_sets_enabled("A", False)
-            self.assertEqual((changed.status, (changed.body or {}).get("enabled")), (200, False), changed.text)
-            self.assertEqual(self.isolation("A"), (True, True), "the fact is recorded and its provider work is done")
-            self.assertEqual(self.me(context), (401, None), "A's browser session is refused")
-            self.assertEqual((self.product_sessions("A"), self.provider_alive("A"), self.provider_enabled("A")), (0, 0, False),
-                             "A's product and provider sessions ended, A disabled at the provider")
+            changed = self.stack.set_member_rights(self.ids["A"], enabled=False)
+            self.assertFalse(changed["enabled"])
+            self.assertEqual(self.me(context), (401, None))
+            self.assertEqual(self.product_sessions("A"), 0)
+            self.assertEqual(self.stack.bearer_request("GET", "/me", old).status, 401)
+            self.assertEqual((self.provider_alive("A"), self.provider_enabled("A")), (before, True))
+            self.assertEqual(self.end_requests(provider), [], "Suspend schedules no provider session end")
             self.assertEqual(self.ends("A"), [("auth.logout", "isolation")])
-            self.assertEqual([cause for cause, _ in self.marks("A")], ["isolation"], "A's provider session is marked ended")
-            self.assertEqual(self.probe_at_the_landing(context, page), "keycloak")
-            self.assertEqual([c for c in callbacks if c["code"]], [], "prompt=none gave no code for the isolated member")
-            self.assertTrue(self.refused_credentials(page, "A"), "the provider refuses the isolated member's credentials")
-            self.assertEqual((self.product_sessions("A"), [c for c in callbacks if c["code"]]), (0, []))
-            activated = self.admin_sets_enabled("A", True)
-            self.assertEqual((activated.status, (activated.body or {}).get("enabled")), (200, True), activated.text)
-            self.assertEqual((self.isolation("A"), self.provider_enabled("A")), ((False, False), True),
-                             "Activate cleared the fact and enabled A at the provider")
-            self.assertEqual(self.credentials(page, "A", name=True), "main", "A's credentials let A in again")
+            self.stack.set_member_rights(self.ids["A"], enabled=True)
+            self.assertEqual(self.stack.bearer_request("GET", "/me", old).status, 401)
+            page.goto(self.stack.proxy + "/api/auth/login")
+            self.assertEqual(self.settle(page), "keycloak", "old SSO requires one fresh login")
+            self.assertEqual(self.credentials(page, "A"), "main")
             self.assertEqual(self.me(context), (200, self.ids["A"]))
-            self.report("SE-09", probe_errors=[c["error"] for c in callbacks if not c["code"]], ends=self.ends("A"))
+            self.report("SE-09", product_revoked=True, provider_untouched=True, fresh_login=True)
         finally:
-            # A case that stopped before its Activate must not leave A suspended for the next case (owned data only).
-            if self.isolation("A")[0] or self.provider_enabled("A") is False:
-                psql(f'DELETE FROM "MemberIsolation" WHERE sub=\'{self.ids["A"]}\';')
-                self.stack.kc_admin("PUT", f"/users/{self.ids['A']}", {"enabled": True})
+            self.stack.set_member_rights(self.ids["A"], enabled=True)
 
     def test_10_a_member_disabled_at_the_provider_gets_nothing_from_a_live_provider_session(self):
-        """Review of 8c2cf37 F-05, the provider side of the failed-listing path (the F deviation, D592): when the
-        isolation's session listing fails, the cycle still disables the member but does not log it out as a whole, so the
-        member's provider session (SSO) may live on while the member is disabled. The deviation's safety rests on the
-        provider refusing that member. That state is made here through Keycloak's own admin API (disable, no logout): the
-        harness can pause the whole of Keycloak (SE-02), not its admin API alone, and while Keycloak is paused every
-        admin call of the product waits (an isolation's call until its bound) - the listing cannot fail while the disable
-        succeeds - so the product path into this state is not coverable on this stack; the product half (fact first, rows
-        ended, the cycle, one finisher, the Activate that waits for a call in flight) is U5E-13..U5E-20 of
-        tests/auth_session_service_test.cjs. Asserted: with a provider session of A alive in
-        each of two browsers, A's recovery Login probes with prompt=none and gets no code, A's credentials are refused,
-        and the product's refresh of A's other session is refused (the session ends). Enabled again, A logs in."""
+        """Core: two retained browser credentials are refused by DB suspension while their provider SSO stays alive."""
         first, page1 = self.profile()
-        second, page2 = self.profile(STORAGE_DENIED)
+        second, page2 = self.profile()
         self.sign_in(page1, "A")
         self.sign_in(page2, "A")
-        callbacks = self.callbacks(second)
+        alive = self.provider_alive("A")
+        self.assertEqual(alive, 2)
         try:
-            self.assertEqual(self.stack.kc_admin("PUT", f"/users/{self.ids['A']}", {"enabled": False}).status, 204)
-            alive = self.provider_alive("A")   # an observation: whether the provider keeps a disabled member's sessions
-            self.assertEqual(self.probe_at_the_landing(second, page2), "keycloak")
-            self.assertEqual([c for c in callbacks if c["code"]], [], "prompt=none gave no code from the disabled member's provider session")
-            self.assertTrue(self.refused_credentials(page2, "A"), "the provider refuses the disabled member's credentials")
-            self.assertEqual([c for c in callbacks if c["code"]], [])
-            psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["A"]}\';')
-            self.assertEqual(self.me(first), (401, None), "the provider refused the refresh: the other browser's session ended")
-            self.assertIn(("auth.session.expired", "refresh_failed"), self.ends("A"))
-            self.assertEqual(self.stack.kc_admin("PUT", f"/users/{self.ids['A']}", {"enabled": True}).status, 204)
-            self.assertEqual(self.credentials(page2, "A"), "main", "enabled again, A's credentials let A in")
+            self.stack.set_member_rights(self.ids["A"], enabled=False)
+            self.assertEqual(self.me(first), (401, None))
+            self.assertEqual(self.me(second), (401, None))
+            self.assertEqual(self.product_sessions("A"), 0)
+            self.assertEqual((self.provider_alive("A"), self.provider_enabled("A")), (alive, True))
+            self.assertEqual(self.ends("A"), [("auth.logout", "isolation")] * 2)
+            self.stack.set_member_rights(self.ids["A"], enabled=True)
+            page2.goto(self.stack.proxy + "/api/auth/login")
+            self.assertEqual(self.settle(page2), "keycloak")
+            self.assertEqual(self.credentials(page2, "A"), "main")
             self.assertEqual(self.me(second), (200, self.ids["A"]))
-            self.report("SE-10", provider_sessions_after_disable=alive, probe_errors=[c["error"] for c in callbacks if not c["code"]])
+            self.assertEqual(self.me(first), (401, None), "Activate cannot revive the other PC's product session")
+            self.report("SE-10", refused_browsers=2, provider_untouched=True)
         finally:
-            if self.provider_enabled("A") is False:
-                self.stack.kc_admin("PUT", f"/users/{self.ids['A']}", {"enabled": True})
+            self.stack.set_member_rights(self.ids["A"], enabled=True)
 
     def activate(self, who: str):
-        """Activate through the product's admin route; an answer that could not be confirmed (409 ACTIVATION_UNCONFIRMED,
-        retryAfterSeconds) is pressed again after the interval it names, as the console lets the administrator do."""
-        for _ in range(4):
-            answer = self.admin_sets_enabled(who, True)
-            body = answer.body if isinstance(answer.body, dict) else {}
-            if answer.status != 409 or body.get("code") != "ACTIVATION_UNCONFIRMED":
-                return answer
-            time.sleep(float(body.get("retryAfterSeconds") or 5))
-        return answer
+        return self.admin_sets_enabled(who, True)
 
     def test_11_an_isolation_ends_each_provider_session_by_its_id_and_the_next_sso_given_that_id_lives(self):
-        """S7-U5 D600 (fix round 6) on the real Keycloak, with the sid reuse of D598: doctor A is signed in on two PCs, one
-        a profile that once closed a login page (so Keycloak gives that browser's next SSO the same id, SE-03b). The
-        administrator suspends A: each of A's provider sessions is ended by its own id (an end request recorded per id and
-        settled by its own answer; there is no whole-user logout). The next person B signs in in A's browser: B's new SSO
-        gets the ended SSO's id, B enters with one credential entry and B's session survives a refresh - no end request of
-        that id is left to land on it. The premise, shown on the real Keycloak: an end request of that id issued now ends
-        B's SSO and B's refresh fails - which is why the product keeps an id closed while an end request of it is unknown.
-        Not coverable here: an end request HELD while B's new SSO is made and released afterwards. This stack can pause only
-        the whole Keycloak (SE-02), so no new SSO can be made while a request is held, and a Suspend reads the member from
-        Keycloak before it ends a session, so a pause before it holds the Suspend itself; that order is U5E-24 of
-        tests/auth_session_service_test.cjs (real PostgreSQL, a fake provider holding the request's effect and answer)."""
+        """C10/D598: explicit Log out ends its own sid; the next person's SSO with that sid survives."""
         context, page = self.profile()
         spare = context.new_page()
         spare.goto(self.stack.proxy + "/api/auth/login")
         self.assertEqual(self.settle(spare), "keycloak")
         spare.close()
         self.sign_in(page, "A")
-        self.assertTrue(self.keycloak_kept_the_login_screen(context), "precondition: the abandoned login screen outlived A's login")
-        a_sid, _ = self.provider_session_and_token("A")
-        other, page2 = self.profile()
-        self.sign_in(page2, "A")
-        a_sids = list(dict.fromkeys(self.case_sessions["A"]))
-        self.assertEqual((len(a_sids), self.provider_alive("A")), (2, 2), "A has two provider sessions")
-        try:
-            changed = self.admin_sets_enabled("A", False)
-            self.assertEqual((changed.status, (changed.body or {}).get("enabled")), (200, False), changed.text)
-            self.assertEqual((self.isolation("A"), self.product_sessions("A"), self.provider_alive("A")), ((True, True), 0, 0),
-                             "isolated: the fact done, no product or provider session of A left")
-            for sid in a_sids:
-                requests = self.end_requests(sid)
-                self.assertTrue(requests and all(state == "done" for state in requests), (sid, requests))
-            # B in A's browser: the landing, Login, B's credentials.
-            page.goto(self.stack.proxy + APP + "index.html")
-            at = self.settle(page)
-            if at == "landing":
-                at = self.press(page, "#signin")
-            self.assertEqual(at, "keycloak")
-            self.assert_editable_form(page, "the next person's Login after the isolation")
-            asked = len(context.asked)
-            self.assertEqual(self.credentials(page, "B"), "main", "B enters with one credential entry")
-            self.assertEqual(context.asked[asked:], [], "no second form, no restarted flow")
-            self.assertEqual(self.me(context), (200, self.ids["B"]))
-            b_sid, _ = self.provider_session_and_token("B")
-            self.assertEqual(b_sid, a_sid, "precondition: Keycloak gave B's new SSO the ended SSO's id - else this case proves nothing")
-            # B's session survives a refresh: nothing of the isolation is left to end that id.
-            psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["B"]}\';')
-            self.assertEqual((self.me(context), self.provider_alive("B"), self.refusals("B")), ((200, self.ids["B"]), 1, 0),
-                             "B refreshes and B's provider session lives")
-            # The premise on the real Keycloak: an end request of that id issued now ends B's SSO, and B's refresh fails.
-            premise = self.stack.kc_admin("DELETE", f"/sessions/{b_sid}")
-            psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["B"]}\';')
-            ended_b = (premise.status, self.provider_alive("B"), self.me(context))
-            self.assertEqual(ended_b, (204, 0, (401, None)), "a late end request of that id would end the next person's SSO")
-            activated = self.activate("A")
-            self.assertEqual((activated.status, (activated.body or {}).get("enabled")), (200, True), activated.text)
-            self.assertEqual((self.isolation("A"), self.provider_enabled("A")), ((False, False), True))
-            self.report("SE-11", same_sid=True, a_provider_sessions=len(a_sids), held_end_released_after_new_sso="not coverable here")
-        finally:
-            if self.isolation("A")[0] or self.provider_enabled("A") is False:
-                psql(f'DELETE FROM "MemberIsolation" WHERE sub=\'{self.ids["A"]}\';')
-                self.stack.kc_admin("PUT", f"/users/{self.ids['A']}", {"enabled": True})
+        self.assertTrue(self.keycloak_kept_the_login_screen(context))
+        a_sid, old = self.provider_session_and_token("A")
+        self.assertEqual(self.me(context), (200, self.ids["A"]))
+        self.assertEqual(context.request.post(self.stack.proxy + "/api/auth/logout", headers={
+            "X-KIN-CSRF": "1", "X-KIN-Session": page.evaluate("KinAuth.sessionId()")}).status, 204)
+        self.wait("provider logout confirmed", lambda: self.provider_alive("A") == 0, 30)
+        self.assertEqual(self.product_sessions("A"), 0)
+        self.assertTrue(self.end_requests(a_sid) and all(state == "done" for state in self.end_requests(a_sid)))
+        page.goto(self.stack.proxy + APP + "index.html")
+        at = self.settle(page)
+        if at == "landing":
+            at = self.press(page, "#signin")
+        self.assertEqual(at, "keycloak")
+        self.assert_editable_form(page, "the next person's Login after Log out")
+        asked = len(context.asked)
+        self.assertEqual(self.credentials(page, "B"), "main")
+        self.assertEqual(context.asked[asked:], [], "no second credential form")
+        self.assertEqual(self.me(context), (200, self.ids["B"]))
+        b_sid, _ = self.provider_session_and_token("B")
+        self.assertEqual(b_sid, a_sid, "same-sid reuse is the required premise")
+        self.assertEqual(self.stack.bearer_request("GET", "/me", old).status, 401)
+        psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["B"]}\';')
+        self.assertEqual((self.me(context), self.provider_alive("B"), self.refusals("B")), ((200, self.ids["B"]), 1, 0))
+        premise = self.stack.kc_admin("DELETE", f"/sessions/{b_sid}")
+        psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["B"]}\';')
+        self.assertEqual((premise.status, self.provider_alive("B"), self.me(context)), (204, 0, (401, None)))
+        self.report("SE-11", same_sid=True, ended_old_bearer_refused=True, held_end_released_after_new_sso="not coverable here")
 
 
 if __name__ == "__main__":

@@ -304,11 +304,14 @@ class ClinicianRequestLive(unittest.TestCase):
                              ["1"])
 
     def remove_role(self, logical, role_name) -> None:
-        role = self.stack.kc_admin("GET", "/roles/" + quote(role_name))
-        self.assertEqual(role.status, 200, role.text)
-        removed = self.stack.kc_admin("DELETE", f"/users/{quote(self.stack.user_ids[logical])}/role-mappings/realm", [role.body])
-        self.assertEqual(removed.status, 204, removed.text)
-        self.stack.tokens.pop(logical, None)   # the next call takes a token without the role
+        sub = self.stack.user_ids[logical]
+        current = self.stack.member_rights[sub]
+        roles = [role for role in current["roles"] if role != role_name]
+        if roles:
+            self.stack.set_member_rights(sub, institution=current["institution"], roles=roles,
+                                         enabled=True, verificationOverride=True)
+        else:
+            self.stack.set_member_rights(sub, approvalState="PENDING")
 
     def cursor(self, at, rid, revision) -> str:
         raw = json.dumps({"at": at, "id": rid, "r": revision}, separators=(",", ":")).encode("utf-8")
@@ -332,10 +335,7 @@ class ClinicianRequestLive(unittest.TestCase):
         reset = self.stack.kc_admin("PUT", f"/users/{quote(user_id)}/reset-password",
                                     {"type": "password", "value": password, "temporary": False})
         self.assertEqual(reset.status, 204, reset.text)
-        role = self.stack.kc_admin("GET", "/roles/clinician")
-        self.assertEqual(role.status, 200, role.text)
-        assigned = self.stack.kc_admin("POST", f"/users/{quote(user_id)}/role-mappings/realm", [role.body])
-        self.assertEqual(assigned.status, 204, assigned.text)
+        self.stack.set_member_rights(user_id, approvalState="PENDING")
         data = urlencode({"client_id": self.stack.test_client_id, "grant_type": "password",
                           "username": username, "password": password}).encode("ascii")
         request = Request(self.stack.keycloak, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
@@ -731,7 +731,7 @@ class ClinicianRequestLive(unittest.TestCase):
             return {"requestId": str(uuid.uuid4()), "expectedOwner": owner_of(identity), "revision": revision, "action": action,
                     "note": note}
 
-        guard = [("gateway", 403, None, "게이트웨이에 허용되지 않는 경로입니다"), ("pending", 403, "INSTITUTION_PENDING", None)]
+        guard = [("gateway", 403, None, "게이트웨이에 허용되지 않는 경로입니다"), ("pending", 401, "AUTH_SESSION_ENDED", None)]
         # RM-R1 create
         own = call("RM-R1", "clinician", "POST", f"/studies/{uid}/image-requests", create("clinician", "image-transfer"), 201)
         mixed = call("RM-R1", "clinrad", "POST", f"/studies/{uid}/image-requests", create("clinrad", "image-transfer"), 201)

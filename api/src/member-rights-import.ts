@@ -7,12 +7,12 @@ import { PrismaService } from './prisma.service';
  * Reads every realm member, including those without an AuthSession. Never import again over DB rights.
  * Missing/disabled/uncertain legacy accounts remain refused; old provider records are retained untouched.
  */
-export async function importMemberRights(prisma: PrismaService, keycloak: KeycloakService) {
+export async function importMemberRights(prisma: PrismaService, keycloak: KeycloakService, signal?: AbortSignal) {
   if (await prisma.memberRightsImport.findUnique({ where: { id: 'realm-v1' } })) return;
   const users: KeycloakUser[] = [];
   let expectedTotal: number | null = null;
   for (let page = 1; ; page++) {
-    const result = await keycloak.listUsers(page);
+    const result = await keycloak.listUsers(page, signal);
     if (!Number.isInteger(result.total) || result.total < 0 || (expectedTotal !== null && result.total !== expectedTotal))
       throw new Error('Unstable realm member import');
     expectedTotal = result.total;

@@ -8,6 +8,7 @@ import { createRemoteJWKSet, decodeJwt, jwtVerify, JWTPayload } from 'jose';
 import { PrismaService } from './prisma.service';
 import { ChangeAnswer, KeycloakService, within } from './keycloak.service';
 import { currentRights, rightsAllow, lockMemberRights } from './member-rights';
+import { importMemberRights } from './member-rights-import';
 import { clinicianOnly } from './clinician-policy';
 
 const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
@@ -198,7 +199,21 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   constructor(private prisma: PrismaService, private keycloak: KeycloakService) {}
 
-  onModuleInit() {
+  async onModuleInit() {
+    // Nest awaits this hook before listening. A failed realm read cannot expose a partial authority.
+    if (!await this.prisma.memberRightsImport.findUnique({ where: { id: 'realm-v1' } })) {
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        this.logger.log(`Member rights import attempt ${attempt}/5`);
+        try {
+          await importMemberRights(this.prisma, this.keycloak, AbortSignal.timeout(30000));
+          break;
+        } catch {
+          this.logger.warn(`Member rights import attempt ${attempt}/5 failed`);
+          if (attempt === 5) throw new Error('Member rights import failed; API startup refused');
+          await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** (attempt - 1)));
+        }
+      }
+    }
     // 조회 시 idle 검사가 본체다. 타이머는 다시 오지 않는 세션 행을 치우는 수거원이고, 치운 세션도 접속기록에 남긴다.
     this.cleanupTimer = setInterval(() => {
       this.sweep().catch(() => this.storageWarning('sweep_cycle'));
@@ -584,14 +599,15 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   async bearerRights(claims: Record<string, any>, raw: string) {
     const rights = await this.storage('session_read', () => this.prisma.memberRights.findUnique({ where: { sub: String(claims.sub) } }));
     if (!rightsAllow(rights)) throw this.ended('현재 회원 자격으로 접근할 수 없습니다');
-    if (rights.newAuthAfter) {
-      const admitted = await this.storage('session_read', () => this.prisma.authSession.findFirst({
-        where: { sub: rights.sub, rightsVersion: rights.version, accessToken: raw },
-      }));
-      if (!admitted) throw this.ended('회원 자격이 바뀌었습니다. 다시 로그인해 주십시오');
-    }
+    if (rights.newAuthAfter && !this.authenticationAfter(claims.auth_time, rights.newAuthAfter))
+      throw this.ended('회원 자격이 바뀌었습니다. 다시 로그인해 주십시오');
     await this.refuseEndedIdpSession(claims, raw);
     return rights;
+  }
+
+  private authenticationAfter(authTime: unknown, boundary: Date): boolean {
+    return typeof authTime === 'number' && Number.isSafeInteger(authTime)
+      && authTime > Math.floor(boundary.getTime() / 1000);
   }
 
   /** A roster write is already recorded by the committing command. Its answer cannot change PACS rights. */
@@ -1062,17 +1078,20 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       await this.loginFailureRow(req, 'member_isolated', this.identity(payload, String(payload.sub)));
       return { kind: 'landing', error: 'login_failed' };
     }
-    if (observed.newAuthAfter && flow.phase !== 'probe') {
-      if (flow.memberSub !== payload.sub || flow.rightsVersion !== observed.version || flow.phase !== 'fresh')
-        return { kind: 'redirect', location: this.startFlow(req, res, { phase: 'fresh', reason: flow.reason,
-          prompt: 'login', memberSub: String(payload.sub), rightsVersion: observed.version }) };
+    if (observed.newAuthAfter) {
       try {
         const { payload: identity } = await jwtVerify(tokens.id_token, this.jwks!, {
           issuer: process.env.KC_ISSUER, audience: 'kin-bff', algorithms: ['RS256'],
         });
         if (identity.sub !== payload.sub || identity.nonce !== flow.state ||
-            Number(identity.auth_time) < Math.floor(flow.issuedAt / 1000) ||
-            !Number.isFinite(Number(identity.auth_time)) || flow.issuedAt < observed.newAuthAfter.getTime())
+            typeof identity.auth_time !== 'number' || !Number.isSafeInteger(identity.auth_time))
+          throw new Error('Invalid authentication identity');
+        if (flow.phase !== 'fresh' && !this.authenticationAfter(identity.auth_time, observed.newAuthAfter))
+          return { kind: 'redirect', location: this.startFlow(req, res, { phase: 'fresh', reason: flow.reason,
+            prompt: 'login', memberSub: String(payload.sub), rightsVersion: observed.version }) };
+        if (flow.phase === 'fresh' && (!this.authenticationAfter(identity.auth_time, observed.newAuthAfter) ||
+            (flow.memberSub !== undefined && (flow.memberSub !== payload.sub || flow.rightsVersion !== observed.version)) ||
+            identity.auth_time < Math.floor(flow.issuedAt / 1000) || flow.issuedAt < observed.newAuthAfter.getTime()))
           throw new Error('Fresh authentication required');
       } catch {
         await this.loginFailureRow(req, 'token_invalid', this.identity(payload, String(payload.sub)));

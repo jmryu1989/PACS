@@ -13,8 +13,11 @@ class StudyAccessRecoveryE2E(StudyAccessE2E):
         self.fixture();foreign=self.fixture(institution='KIN 판독센터');self.owner('doctor');self.owner('kdoctor')
         doctor=self.stack.user_ids['doctor'];other=self.stack.user_ids['kdoctor']
         def membership(subject,institution,roles):
-            r=self.stack.request('PATCH','/admin/users/'+subject,'jmryu',dict(approvalState='APPROVED',institution=institution,roles=roles))
-            self.assertEqual(r.status,200,r.text);self.stack.tokens.clear()
+            logical=next(name for name,sub in self.stack.user_ids.items() if sub==subject)
+            old=self.stack.token(logical)
+            self.stack.set_member_rights(subject,institution=institution,roles=roles,enabled=True,verificationOverride=True)
+            self.assertEqual(self.stack.bearer_request('GET','/me',old).status,401)
+            # The next request authenticates again; a retained credential cannot acquire the new institution.
         def restore():
             membership(doctor,'hallym',['radiologist']);membership(other,'kin-center',['radiologist'])
         self.addCleanup(restore)

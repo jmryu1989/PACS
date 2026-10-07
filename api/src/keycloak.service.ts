@@ -191,14 +191,14 @@ export class KeycloakService {
   }
 
   /** 관리 콘솔의 한 페이지와 전체 대기 수. 서비스 계정은 이 경계에서 제거한다. */
-  async listUsers(page: number) {
+  async listUsers(page: number, signal?: AbortSignal) {
     const raw: any[] = [];
     for (let first = 0; ; first += USER_SCAN_SIZE) {
-      const batch: any[] = await this.adm(`/users?first=${first}&max=${USER_SCAN_SIZE}`) ?? [];
+      const batch: any[] = await this.adm(`/users?first=${first}&max=${USER_SCAN_SIZE}`, 'GET', undefined, true, signal) ?? [];
       raw.push(...batch);
       if (batch.length < USER_SCAN_SIZE) break;
     }
-    const detailed = (await Promise.all(raw.map(user => this.user(user))))
+    const detailed = (await Promise.all(raw.map(user => this.user(user, signal))))
       .filter((user): user is KeycloakUser => !!user && !user.serviceAccountClientId);
     const first = (page - 1) * USER_PAGE_SIZE;
     return {

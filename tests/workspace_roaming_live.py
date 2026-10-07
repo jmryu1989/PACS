@@ -82,14 +82,13 @@ class WorkspaceRoamingLive(unittest.TestCase):
             token=self.stack.service_token('gateway')
             self.assertEqual(self.stack.bearer_request(method,'/workspace-layout',token,body if method!='GET' else None).status,403)
         sub=self.stack.create_test_identity('roam-pending',['radiologist'],'hallym')
-        groups=self.stack.kc_admin('GET','/users/'+sub+'/groups').body
-        for group in groups:self.assertEqual(self.stack.kc_admin('DELETE','/users/'+sub+'/groups/'+group['id']).status,204)
+        self.stack.set_member_rights(sub, approvalState="PENDING")
         data=urlencode(dict(client_id=self.stack.test_client_id,grant_type='password',username=self.stack.username('roam-pending'),password=self.stack.passwords['roam-pending'])).encode()
         with self.stack._open(Request(self.stack.keycloak,data=data,headers={'Content-Type':'application/x-www-form-urlencoded'})) as response:
             token=json.loads(response.read())['access_token']
         for method in ['GET','PUT','DELETE']:
             r=self.stack.bearer_request(method,'/workspace-layout',token,body if method!='GET' else None)
-            self.assertEqual(r.status,403,r.text);self.assertEqual(r.body.get('code'),'INSTITUTION_PENDING')
+            self.assertEqual(r.status,401,r.text);self.assertEqual(r.body.get('code'),'AUTH_SESSION_ENDED')
 
     def test_06_v2_upgrade_roundtrip_and_legacy_load_remains_v1(self):
         legacy=self.body();saved=self.write(legacy);self.assertEqual(saved.status,200,saved.text)

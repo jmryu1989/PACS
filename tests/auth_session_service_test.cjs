@@ -201,6 +201,11 @@ async function keycloak() {
       // a whole-user logout is answered but must never be asked). `sessions` of an account are its live provider sessions
       // (GET users/{id}/sessions).
       if (path === '/admin/realms/kin/groups') return send(200, [A, B, Z].map(name => ({ id: 'syn-group-' + name, name })));
+      if (path === '/admin/realms/kin/users' && req.method === 'GET') {
+        const query = new URL(req.url, 'http://synthetic.test').searchParams;
+        const first = Number(query.get('first') || 0), max = Number(query.get('max') || 100);
+        return send(200, Object.entries(kc.members).map(([id, user]) => ({id,...user})).slice(first,first+max));
+      }
       const role = /^\/admin\/realms\/kin\/roles\/([^/]+)$/.exec(path);
       if (role) return send(200, { id: 'syn-role-' + role[1], name: role[1] });
       const member = /^\/admin\/realms\/kin\/users\/([^/]+)(\/groups(?:\/[^/]+)?|\/role-mappings\/realm|\/logout|\/sessions)?$/.exec(path);
@@ -485,7 +490,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function world(t, { now = START } = {}) {
+async function world(t, { now = START, imported = true } = {}) {
   const base = await database();
   await keycloak();
   t.mock.timers.enable({ apis: ['setInterval', 'Date'], now });
@@ -503,6 +508,7 @@ async function world(t, { now = START } = {}) {
     certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
     members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null,
     beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {}, transportTimeoutMs: 0 });
+  if (imported) await base.memberRightsImport.create({ data: { id: 'realm-v1' } });
   idp.started = 0;
 
 const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new Map(), rejections: [], observations: [] };
@@ -1191,7 +1197,7 @@ test('AS-07 refresh: a refusal ends the session once, a success adds no row and 
 
 test('AS-08 (a) the hourly sweep ends every idle session with one sweep row; (c) 13 h idle never reaches Keycloak; (d) an idle request first leaves the sweep nothing', async t => {
   const w = await world(t);
-  w.I2.service.onModuleInit();
+  await w.I2.service.onModuleInit();
   try {
     for (const [sub, inst] of [['syn-sub-w1', A], ['syn-sub-w2', B], ['syn-sub-w3', Z]])
       await w.session(await w.issue(sub, { sub, groups: [inst] }), { lastSeenAt: past(13 * HOUR) });
@@ -1367,7 +1373,7 @@ test('AS-09 a DB failure on any path is a fixed 500 with nothing committed and n
     }
   }
   // (7) the sweep: one target's end fails and rolls back alone; the others end; the next run ends it.
-  w.I2.service.onModuleInit();
+  await w.I2.service.onModuleInit();
   try {
     const before = (await w.rows()).length;
     const subs = [];
@@ -1452,7 +1458,7 @@ test('AS-10 (b) synthetic DB error markers never reach a response, the logger, s
       assert.equal(done.location, ORIGIN + '/worklist/hpacs-lite/index.html?auth_error=login_failed');
     });
     await run('callback-read', async tag => { const sid = await session(tag); w.fault('I1', 'read', dbError(tag)); const out = await w.call(w.I1, 'callback', { sid, query: {} }); assert.deepEqual([out.status, out.location], [302, landing('login_failed')], 'a callback is a top-level navigation: it is sent to the landing, never answered with an error body'); });
-    w.I2.service.onModuleInit();
+    await w.I2.service.onModuleInit();
     try {
       await run('sweep-read', async tag => {
         await session(tag, { lastSeenAt: past(13 * HOUR) });
@@ -1527,7 +1533,7 @@ test('AS-12 T1 (RT-01, X-11) and its sequential attribution variants (X-18)', as
   // X-18: after a completed refresh v1 (A) -> v2 (B), every way of ending the session records B.
   const chain = new Map();
   kc.auto = chainAnswers(chain);
-  w.I2.service.onModuleInit();
+  await w.I2.service.onModuleInit();
   try {
     for (const [end, row] of [['switch', ['auth.logout', 'account_switch', A]], ['logout', ['auth.logout', 'logout', A]],
       ['idle', ['auth.session.expired', 'idle', A]], ['sweep', ['auth.session.expired', 'sweep', A]]]) {
@@ -1661,7 +1667,7 @@ test('AS-12 T5 (RT-07, X-15/X-16): the sweep or another request ends v1 idle whi
     assert.deepEqual(rowsOf(await w.rows(), s).map(r => r.detail.ip), ['198.51.100.9'], 'the address of the request that ended it');
   }
   // sweep variants (X-15): the timer runs while R1's refresh is held.
-  w.I2.service.onModuleInit();
+  await w.I2.service.onModuleInit();
   let due = Date.now() + HOUR;
   try {
     for (const late of ['success', 'refusal']) {
@@ -1689,7 +1695,7 @@ test('AS-12 T5 (RT-07, X-15/X-16): the sweep or another request ends v1 idle whi
 for (const fixture of ['different-exp', 'same-exp']) {
   test(`AS-08 (b) = AS-12 T6 (RT-08, X-17) ${fixture}: the sweep read v1, R stored v2 and waits before its touch; the sweep deletes nothing`, async t => {
     const w = await world(t);
-    w.I2.service.onModuleInit();
+    await w.I2.service.onModuleInit();
     const T = Date.now() + HOUR;          // the timer's next expiry
     try {
       w.tick(HOUR - 1000);                // R starts at T - 1 s
@@ -1985,7 +1991,7 @@ test('AS-12 T13 (RT-10, X-30): a touch makes v1 fresh before a held idle or swee
   const o2 = await r2;
   assert.deepEqual([o2.status, o2.cookie, await w.version(sid), await endsOf(w, s)], [200, 'K', s + '-v1', []]);
   // sweep variant
-  w.I2.service.onModuleInit();
+  await w.I2.service.onModuleInit();
   try {
     w.tick(HOUR - 500);
     s = 'syn-sub-t13s';
@@ -2022,7 +2028,7 @@ test('AS-12 T14 (RT-11, X-31): idle or sweep ends v1 before the touch of an adop
   assert.deepEqual([o.status, o.cookie], [200, 'K'], 'the adopted request completes');
   o = await w.call(w.I1, 'get', { sid });
   assert.deepEqual([o.status, o.body?.message, o.cookie, await endsOf(w, s)], [401, ABSENT, 'K', [['auth.session.expired', 'idle', A]]]);
-  w.I2.service.onModuleInit();
+  await w.I2.service.onModuleInit();
   try {
     w.tick(HOUR - 500);
     s = 'syn-sub-t14s';
@@ -2069,7 +2075,7 @@ test('AS-12 T15 (RT-12, X-32): two end transitions overlap; the one that deleted
   assert.deepEqual([late.status, late.cookie, await endsOf(w, s)], [204, 'K', [['auth.logout', 'logout', A]]]);
   // (a) a logout past its guard waits before its delete; the sweep ends the session first; the logout completes on the
   // absence and adds no row.
-  w.I2.service.onModuleInit();
+  await w.I2.service.onModuleInit();
   try {
     const s2 = 'syn-sub-t15a';
     const sid2 = await w.session(await w.issue(s2 + '-v1', { sub: s2, groups: [A], expIn: 24 * 3600 }));
@@ -2591,7 +2597,7 @@ test('U5E-05 (acceptance 5) an end the provider did not confirm survives a resta
   kc.logoutMode = 'ok';
   const asked = kc.logouts;
   const restarted = w.instance('R');
-  restarted.service.onModuleInit();
+  await restarted.service.onModuleInit();
   try {
     await w.until('the resumed provider end', async () => (await w.mark(X)).confirmedAt !== null);
     assert.deepEqual([kc.ended, kc.logouts - asked, (await w.rows()).length], [[X], 1, rows], 'ended at the provider by one request; no record added');
@@ -2662,7 +2668,7 @@ test('U5E-06 a lost answer of the provider end stays unknown: the end is asked a
   kc.logoutMode = 'ok';
   w.tick(60_000);
   const restarted = w.instance('R');
-  restarted.service.onModuleInit();
+  await restarted.service.onModuleInit();
   try {
     // A new process asks again: "no such session" answers that request - and only that one.
     await w.until('the end asked again and answered', async () => (await w.changes(X)).length === 2 && (await w.changes(X))[1] === 'done');
@@ -3185,7 +3191,7 @@ test('U5E-21 (S7-U5 CE1) a mark covers the ended SSO\'s authentication, not its 
   kc.logoutMode = 'ok';
   w.tick(1000);
   const resumer = w.instance('R21');
-  resumer.service.onModuleInit();
+  await resumer.service.onModuleInit();
   try {
     await w.until('the re-ended SSO confirmed', async () => (await confirmedAt(X)) !== null);
   } finally {
@@ -3269,7 +3275,7 @@ test('U5E-21 (S7-U5 CE1) a mark covers the ended SSO\'s authentication, not its 
     await w.base.idpSessionEnd.create({ data: { idpSid: idp, cause: 'logout', decidedAt: at(decided), confirmedAt: at(confirmed),
       attempts: 1, nextAttemptAt: at(decided) } });
   const sweeper = w.instance('S21');
-  sweeper.service.onModuleInit();
+  await sweeper.service.onModuleInit();
   try {
     w.tick(HOUR);
     await w.until('the sweep of old confirmed marks', async () => (await w.mark('syn-idp-u5e21-old')) === null);
@@ -3311,7 +3317,7 @@ test('U5E-24 (D600 3) a late end request: another request\'s 204 answered first 
   await late.arrived();
   // A new process retries the unconfirmed end: that second request is carried out and answered 204 first.
   const retry = w.instance('R24');
-  retry.service.onModuleInit();
+  await retry.service.onModuleInit();
   try {
     await w.until('the second end request answered', async () => (await w.changes(X)).length === 2 && (await w.changes(X))[1] === 'done');
   } finally {
@@ -3570,7 +3576,7 @@ test('U5 SID-RETRY-STALE: confirmation and admission after retry CAS forbid a st
   await w.call(w.I1, 'logout', { sid: await w.session(await w.issue(m, { sub: m, idp: P })) }); await pending.arrived();
   const retry = w.instance('U5retry');
   const held = w.pause({ inst: 'U5retry', model: 'idpSessionEnd', method: 'updateMany', scope: 'root', phase: 'after' }, e => typeof e.args.data.attempts === 'number');
-  retry.service.onModuleInit(); await held.arrived();
+  await retry.service.onModuleInit(); await held.arrived();
   pending.release(); await w.told(); await w.until('confirmed', async () => !!(await w.mark(P))?.confirmedAt);
   w.tick(1000); kc.ended = [];
   const entered = (await login(w, w.I2, await w.issue(m + '-new', { sub: m, idp: P, authTime: Date.now() / 1000 }))).done;
@@ -3586,7 +3592,7 @@ test('U9 UNKNOWN-GC-13H: old terminal records are collected; old unknown records
   const unknown = await w.base.providerChange.create({ data: { sub: m, kind: 'end_session', target: P, generation: 1, state: 'unknown', createdAt: at } });
   for (const state of ['done', 'void']) await w.base.providerChange.create({ data: { sub: m, kind: 'end_session', target: P, generation: 1, state, createdAt: at, settledAt: at } });
   await w.base.idpSessionEnd.create({ data: { idpSid: P, cause: 'logout', decidedAt: at, nextAttemptAt: new Date(Date.now() + 2 * HOUR) } });
-  const sweeper = w.instance('U9gc'); sweeper.service.onModuleInit(); w.tick(HOUR);
+  const sweeper = w.instance('U9gc'); await sweeper.service.onModuleInit(); w.tick(HOUR);
   await w.until('terminal rows collected', async () => await w.base.providerChange.count({ where: {
     sub: m, state: { in: ['done', 'void'] }, createdAt: { lt: new Date(Date.now() - 13 * HOUR) },
   } }) === 0);
@@ -3604,10 +3610,13 @@ async function coreMember(w, sub) {
   return { token, sid: await w.session(token), admin: r10Admin(w) };
 }
 async function coreFresh(w, sub, groups = [A]) {
-  const token = await w.issue(sub+'-fresh', { sub, groups, authTime: Math.floor(Date.now()/1000) });
-  const first = await login(w, w.I2, token);
-  assert.equal(first.done.newSid, null, 'a new rights version demands a bound fresh authentication');
+  const rights = await w.base.memberRights.findUnique({where:{sub}});
+  const old = await w.issue(sub+'-old', { sub, groups, authTime: Math.floor(rights.newAuthAfter.getTime()/1000) });
+  const first = await login(w, w.I2, old);
+  assert.equal(first.done.newSid, null, 'authentication at the boundary cannot enter');
   assert.equal(promptOf(first.done), 'login');
+  w.tick(1000);
+  const token = await w.issue(sub+'-fresh', { sub, groups, authTime: Math.floor(Date.now()/1000) });
   const done = await answerFlow(w, w.I2, first.done, token);
   assert.ok(done.newSid, 'nonce/state/PKCE-bound fresh authentication enters');
   return { token, done };
@@ -3653,7 +3662,7 @@ test('CORE-A-B a callback held across Change and its old A Bearer cannot acquire
   assert.equal(me.status,200); assert.equal(me.body.institution,B); assert.deepEqual(me.body.roles,['clinician']);
   assert.equal((await w.call(w.I2,'me',{bearer:fresh.token.access})).status,200);
   const other=await w.issue('same-auth-other-token',{sub:m,groups:[A],authTime:Math.floor(Date.now()/1000)});
-  assert.equal((await w.call(w.I1,'me',{bearer:other.access})).status,401,'same claims do not identify the admitted token');
+  assert.equal((await w.call(w.I1,'me',{bearer:other.access})).status,200,'a later interactive token does not need a BFF session');
   await w.finish('CORE-A-B');
 });
 
@@ -3774,7 +3783,7 @@ test('CORE-CANCEL approval cancellation retains history and cannot be bypassed b
 });
 
 test('CORE-IMPORT every realm member is imported, legacy sessions only retain matching permitted rights, import never overwrites history',async t=>{
-  const w=await world(t),{importMemberRights}=require('/app/dist/member-rights-import');
+  const w=await world(t,{imported:false}),{importMemberRights}=require('/app/dist/member-rights-import');
   const a=await w.issue('import-a',{sub:'syn-import-a'}),sid=await w.session(a);
   const bad=await w.issue('import-bad',{sub:'syn-import-bad'}),badSid=await w.session(bad);
   await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
@@ -3822,8 +3831,9 @@ test('CORE-NONCE old authentication cannot enter a new version through a mismatc
   w.tick(2000);assert.equal((await r10Patch(admin,m,{institution:B,roles:['radiologist']})).status,200);
   const first=(await login(w,w.I2,token)).done;assert.equal(first.newSid,null);assert.equal(promptOf(first),'login');
   const old=await answerFlow(w,w.I2,first,token);assert.equal(old.newSid,null,'fresh flow does not admit an old authentication time');
+  const flow=(await login(w,w.I2,token)).done;
+  w.tick(1000);
   const fresh=await w.issue(m+'-wrong-nonce',{sub:m,authTime:Math.floor(Date.now()/1000)});
-  const flow=(await login(w,w.I2,fresh)).done;
   const wrong=await answerFlow(w,w.I2,flow,fresh,{nonce:'different-authentication'});
   assert.equal(wrong.newSid,null,'a fresh authentication with another nonce is not admitted');
   const good=await coreFresh(w,m);assert.ok(good.done.newSid);await w.finish('CORE-NONCE');
@@ -3838,4 +3848,94 @@ test('CORE-LOGOUT-ORDER provider sees only committed revocation and its audit',a
   assert.deepEqual(await within(told.promise,'provider observed committed logout'),
     {session:null,rows:[['auth.logout','logout',A]]},'remote logout never precedes product commit');
   await w.finish('CORE-LOGOUT-ORDER');
+});
+
+// REQ-S7-U5-DB-RIGHTS -> RISK-PARTIAL-IMPORT / STALE-SSO / READ-MUTATION -> CORE-R2.
+test('CORE-R2-BOOT startup retries a failed realm page without admitting a partial import; restart skips Keycloak', async t => {
+  const w = await world(t, {imported:false}), m = 'syn-r2-import';
+  const token = await w.issue(m, {sub:m});
+  await w.base.$executeRawUnsafe('TRUNCATE "MemberRights"');
+  const user = {id:m,username:m,email:m+'@synthetic.test',firstName:'SYN',lastName:'R2',
+    emailVerified:true,enabled:true,groups:[A],roles:['radiologist']};
+  let calls = 0;
+  const provider = {listUsers:async (page, signal) => {
+    calls++; assert.ok(signal instanceof AbortSignal, 'realm reads have a deadline');
+    assert.equal(await w.base.memberRights.count(), 0, 'no partial realm is admitted');
+    assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status, 401);
+    if (calls === 1) return {total:2,users:[user]};
+    if (calls === 2) throw new Error('synthetic failed second page');
+    return {total:1,users:[user]};
+  }};
+  const first = new AuthService(w.base, provider); t.after(()=>first.onModuleDestroy());
+  await first.onModuleInit();
+  assert.equal(calls,3,'retry rereads the whole realm');
+  assert.equal(await w.base.memberRights.count(),1);
+  assert.equal((await w.call(w.I1,'get',{bearer:token.access})).status,200);
+  const restart = new AuthService(w.base,{listUsers:async()=>{calls++;throw new Error('no provider on restart');}});
+  t.after(()=>restart.onModuleDestroy()); await restart.onModuleInit();
+  assert.equal(calls,3,'completed import skips Keycloak entirely');
+  await w.finish('CORE-R2-BOOT');
+});
+
+test('CORE-R2-IMPORTED existing realm-v1 starts while the member admin API is down', async t => {
+  const w=await world(t); kc.adminDown=true;
+  await w.I1.service.onModuleInit();
+  assert.deepEqual(kc.adminCalls,[]); assert.equal(kc.serviceTokens,0);
+  w.I1.service.onModuleDestroy(); await w.finish('CORE-R2-IMPORTED');
+});
+
+test('CORE-R2-SSO authentication after Change enters plain login without another prompt or admin read', async t => {
+  const w=await world(t),m='syn-r2-after',{admin}=await coreMember(w,m);
+  assert.equal((await r10Patch(admin,m,{institution:B,roles:['clinician']})).status,200);
+  await quiet(w); const calls=kc.adminCalls.length; kc.adminDown=true;
+  w.tick(1000); const token=await w.issue(m+'-new',{sub:m,authTime:Math.floor(Date.now()/1000)});
+  const begin=await w.call(w.I2,'login');
+  assert.equal((await answerFlow(w,w.I2,begin,token,{nonce:'another-flow'})).newSid,null,'plain SSO must bind its nonce');
+  const first=await login(w,w.I2,token);
+  assert.ok(first.done.newSid,'plain login accepts the post-change SSO without prompt=login');
+  assert.equal((await w.call(w.I2,'me',{sid:first.done.newSid})).body.institution,B);
+  assert.equal(kc.adminCalls.length,calls,'no admin request in login');
+  await w.finish('CORE-R2-SSO');
+});
+
+test('CORE-R2-BOUNDARY older and same-second SSO redirect once; fresh after boundary enters', async t => {
+  const w=await world(t),m='syn-r2-boundary',{token,admin}=await coreMember(w,m);
+  w.tick(1000); assert.equal((await r10Patch(admin,m,{enabled:false})).status,200);
+  assert.equal((await r10Patch(admin,m,{enabled:true})).status,200);
+  const before=(await login(w,w.I2,token)).done;
+  assert.equal(before.newSid,null); assert.equal(promptOf(before),'login');
+  const same=await w.issue(m+'-same',{sub:m,authTime:Math.floor(Date.now()/1000)});
+  assert.equal((await answerFlow(w,w.I2,before,same)).newSid,null,'fresh same-second authentication is refused');
+  await coreFresh(w,m); await w.finish('CORE-R2-BOUNDARY');
+});
+
+test('CORE-R2-BEARER interactive grants after boundary need no product session; old, same, unusable time refused', async t => {
+  const w=await world(t),m='syn-r2-bearer',{admin}=await coreMember(w,m);
+  assert.equal((await r10Patch(admin,m,{enabled:false})).status,200);
+  assert.equal((await r10Patch(admin,m,{enabled:true})).status,200);
+  const boundary=Math.floor(Date.now()/1000); w.tick(1000);
+  for(const [label,time,status] of [['before',boundary-1,401],['same',boundary,401],['after',boundary+1,200],
+    ['missing',undefined,401],['null',null,401],['string',String(boundary+1),401]]) {
+    const token=await w.issue(m+label,{sub:m,authTime:time});
+    assert.equal((await w.call(w.I1,'me',{bearer:token.access})).status,status,label);
+  }
+  assert.equal(await w.base.authSession.count({where:{sub:m}}),0);
+  await w.finish('CORE-R2-BEARER');
+});
+
+test('CORE-R2-LIST GET leaves rights unchanged; PATCH registers and approves atomically', async t => {
+  const w=await world(t),m='syn-r2-unregistered'; r10Member(m); kc.members[m].emailVerified=true;
+  const admin=r10Admin(w), before=await w.base.memberRights.count();
+  const list=await admin.listUsers(1,{actor:'syn-admin',roles:['admin']});
+  const shown=list.users.find(u=>u.id===m); assert.ok(shown);
+  assert.equal(shown.approvalState,'PENDING'); assert.equal(shown.version,null); assert.equal(shown.rosterUnconfirmed,false);
+  assert.equal(await w.base.memberRights.count(),before,'GET cannot register');
+  w.fault('I1','tx.audit',new Error('synthetic audit failure'));
+  assert.notEqual((await r10Patch(admin,m,{institution:A,roles:['radiologist'],verificationOverride:true})).status,200);
+  assert.equal(await w.base.memberRights.count(),before,'registration rolls back with the failed command');
+  const out=await r10Patch(admin,m,{institution:A,roles:['radiologist'],enabled:true,verificationOverride:true,version:null});
+  assert.equal(out.status,200); assert.equal(out.user.approvalState,'APPROVED');
+  assert.equal(await w.base.memberRights.count(),before+1);
+  assert.equal((await r10Patch(admin,m,{enabled:false,version:null})).status,409,'existing row requires CAS');
+  await w.finish('CORE-R2-LIST');
 });

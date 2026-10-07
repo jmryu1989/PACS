@@ -192,15 +192,11 @@ class AuthAuditLive(unittest.TestCase):
         reset = cls.stack.kc_admin("PUT", f"/users/{user_id}/reset-password", {"type": "password", "value": password, "temporary": False})
         if reset.status != 204:
             raise RuntimeError(f"synthetic member password failed: {reset.status}")
-        for key in groups:
-            joined = cls.stack.kc_admin("PUT", f"/users/{user_id}/groups/{cls.groups[key][1]}")
-            if joined.status != 204:
-                raise RuntimeError(f"synthetic member group failed: {joined.status}")
-        for role_name in roles:
-            role = cls.stack.kc_admin("GET", "/roles/" + quote(role_name))
-            assigned = cls.stack.kc_admin("POST", f"/users/{user_id}/role-mappings/realm", [role.body])
-            if role.status != 200 or assigned.status != 204:
-                raise RuntimeError(f"synthetic member role failed: {role.status}/{assigned.status}")
+        if len(groups) == 1 and roles:
+            cls.stack.set_member_rights(user_id, institution=cls.groups[groups][0], roles=roles,
+                                        enabled=True, verificationOverride=True)
+        else:
+            cls.stack.set_member_rights(user_id, approvalState="PENDING")
         cls.secrets += [("password", password)]
 
     @classmethod
@@ -269,7 +265,8 @@ class AuthAuditLive(unittest.TestCase):
         return address
 
     # ── the BFF login, one redirect at a time ──
-    def login(self, name: str, browser: Browser | None = None) -> Browser:
+    def login(self, name: str, browser: Browser | None = None, *, refused: bool = False) -> Browser:
+        time.sleep(1.05)  # Authenticate after any just-committed rights boundary.
         member = self.members[name]
         browser = browser or Browser(self.stack)
         status, headers, _ = browser.call("GET", "/api/auth/login")
@@ -289,6 +286,11 @@ class AuthAuditLive(unittest.TestCase):
         callback = headers.get("Location", "")
         self.secret("code", parse_qs(urlparse(callback).query).get("code", [""])[0])
         status, headers, _ = browser.call("GET", callback)
+        if refused:
+            self.assertEqual((status, urlparse(headers.get("Location", "")).path), (302, "/worklist/hpacs-lite/index.html"))
+            self.assertIsNone(browser.sid(), "pending member receives no product session")
+            self.assertEqual(browser.call("GET", "/api/me")[0], 401)
+            return browser
         self.assertEqual((status, urlparse(headers.get("Location", "")).path), (302, "/worklist/hpacs-lite/main.html"))
         self.assertIsNotNone(browser.sid())
         self.secret("sid", browser.sid())
@@ -518,7 +520,7 @@ class AuthAuditLive(unittest.TestCase):
     def test_07_admins_read_record_time_institutions_only(self):
         a, b = self.groups["A"][0], self.groups["B"][0]
         for name in ("mp", "mi2", "mi1"):
-            self.assertEqual(204, self.logout(self.login(name)), name)
+            self.assertEqual(204, self.logout(self.login(name, refused=True)), name)
         self.assertEqual(204, self.logout(self.login("mm")))
         # Z's admin moves mm from A to B (an isolation: its sessions end without an access row), then mm logs in in B.
         mm = self.members["mm"]["id"]
@@ -528,7 +530,7 @@ class AuthAuditLive(unittest.TestCase):
         expected_rows = lambda name, inst: {(r["action"], r["target"], json.loads(r["detail"]).get("cause") or json.loads(r["detail"]).get("outcome"), inst)
                                             for r in self.rows_of(name) if json.loads(r["detail"]).get("institution") == inst}
         expected = {
-            "A": expected_rows("ma", a) | expected_rows("mm", a) | expected_rows("mi1", a),
+            "A": expected_rows("ma", a) | expected_rows("mm", a),
             "B": expected_rows("mb", b) | expected_rows("mm", b),
             "Z": set(),
         }
@@ -537,7 +539,7 @@ class AuthAuditLive(unittest.TestCase):
             seen = {row for row in self.admin_view(key) if row[1] in self.owned_ids()}
             self.assertEqual(expected[key], seen, key)
             self.assertEqual(seen, {row for row in self.admin_view(key, limit=2) if row[1] in self.owned_ids()}, key + " paged")
-        for name in ("mp", "mi2"):
+        for name in ("mp", "mi2", "mi1"):
             self.assertTrue(all(json.loads(r["detail"])["institution"] is None for r in self.rows_of(name)), name)
         self.check_rows("AL-07", [r for name in ("mp", "mi2", "mi1", "mm") for r in self.rows_of(name)])
 

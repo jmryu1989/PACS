@@ -108,9 +108,11 @@ class KeycloakGroups:
         return group["id"]
 
     def move_member(self, logical: str, source: str, target: str) -> None:
-        user = quote(self.sub(logical))
-        self.assertEqual(self.stack.kc_admin("DELETE", f"/users/{user}/groups/{quote(self.group_of(source))}").status, 204)
-        self.assertEqual(self.stack.kc_admin("PUT", f"/users/{user}/groups/{quote(self.group_of(target))}").status, 204)
+        sub = self.sub(logical)
+        current = self.stack.member_rights[sub]
+        self.stack.set_member_rights(sub, institution=target, roles=current["roles"], enabled=True, verificationOverride=True)
+        self.stack.token(logical)  # A new authentication, never reuse the pre-Change token.
+
 
 
 class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase):
@@ -174,14 +176,22 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
         self.assertIn(result.body.get("code") if isinstance(result.body, dict) else None, codes, result.text[:400])
 
     def role_mapping(self, logical: str, role_name: str, present: bool) -> None:
-        role = self.stack.kc_admin("GET", "/roles/" + quote(role_name))
-        self.assertEqual(role.status, 200, role.text)
-        method = "POST" if present else "DELETE"
-        changed = self.stack.kc_admin(method, f"/users/{quote(self.sub(logical))}/role-mappings/realm", [role.body])
-        self.assertEqual(changed.status, 204, changed.text)
+        sub = self.sub(logical)
+        current = self.stack.member_rights[sub]
+        saved = self.__dict__.setdefault("_role_institutions", {})
+        if current["institution"]:
+            saved[sub] = current["institution"]
+        roles = sorted((set(current["roles"]) | {role_name}) if present else (set(current["roles"]) - {role_name}))
+        if roles:
+            self.stack.set_member_rights(sub, institution=saved[sub], roles=roles, enabled=True, verificationOverride=True)
+        else:
+            self.stack.set_member_rights(sub, approvalState="PENDING")
 
     def enabled(self, logical: str, value: bool) -> None:
-        self.assertEqual(self.stack.kc_admin("PUT", f"/users/{quote(self.sub(logical))}", {"enabled": value}).status, 204)
+        old = self.stack.token(logical) if not value else None
+        self.stack.set_member_rights(self.sub(logical), enabled=value)
+        if old:
+            self.stack.tokens[logical] = old  # Deliberately exercise the member's retained pre-Suspend credential.
 
     def access(self, logical: str, policy: dict, revision: int) -> None:
         subject = self.sub(logical)
@@ -373,7 +383,7 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
         self.stack.tokens.pop("clinician", None)
         try:
             self.stack.token("clinician", refused=True)          # a new token of a member left without a KIN role
-            self.forbidden(self.stack.request("GET", "/me", "clinician"), "INSTITUTION_INVALID")
+            self.check(self.stack.request("GET", "/me", "clinician"), 401, "AUTH_SESSION_ENDED")
             self.forbidden(self.ack("clinician", r0, rid=a1)[1], ROLE_REQUIRED, "INSTITUTION_INVALID")
             again = self.created(self.send("doctor", f.uid, "clinician", 1, rid=r0)[1])                  # S-CR11
             self.assertEqual((again["replayed"], again["applied"]), (True, create))
@@ -416,19 +426,21 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
         r1, sent = self.send("doctor", f.uid, "clinician", 1)
         self.created(sent)
         self.assertEqual(self.item("clinician", r1)["view"], "full")    # the token is cached from here on
+        old = self.stack.token("clinician")
         self.role_mapping("clinician", "clinician", present=False)
+        self.stack.tokens["clinician"] = old
         try:
-            self.assertIn(r1, self.ids(self.check(self.listed("clinician", "received"), 200)), "old token: reads until expiry")
-            self.assertEqual(self.item("clinician", r1)["view"], "full")
+            self.check(self.listed("clinician", "received"), 401, "AUTH_SESSION_ENDED")
+            self.check(self.read("clinician", r1), 401, "AUTH_SESSION_ENDED")
             settled = critical_ledger(f.uid)
-            self.forbidden(self.ack("clinician", r1)[1], ROLE_REQUIRED)
+            self.check(self.ack("clinician", r1)[1], 401, "AUTH_SESSION_ENDED")
             self.assertEqual(critical_ledger(f.uid), settled)
             [row] = [item for item in self.check(self.listed("doctor", "sent"), 200).body["items"] if item["id"] == r1]
-            self.assertEqual(row["delivery"], "not_eligible", "the sender sees the Keycloak state at once")
+            self.assertEqual(row["id"], r1, "the sender keeps the original record; roster delivery is not the access authority")
             self.stack.tokens.pop("clinician", None)
             self.stack.token("clinician", refused=True)
-            self.forbidden(self.stack.request("GET", "/me", "clinician"), "INSTITUTION_INVALID")
-            self.forbidden(self.read("clinician", r1), "INSTITUTION_INVALID", ROLE_REQUIRED)
+            self.check(self.stack.request("GET", "/me", "clinician"), 401, "AUTH_SESSION_ENDED")
+            self.check(self.read("clinician", r1), 401, "AUTH_SESSION_ENDED")
         finally:
             self.role_mapping("clinician", "clinician", present=True)
             self.stack.tokens.pop("clinician", None)
@@ -461,16 +473,16 @@ class CriticalResultE2E(KeycloakGroups, CriticalResultHarness, unittest.TestCase
         settled = critical_ledger(f.uid)
         self.enabled("doctor", False)
         try:
-            self.forbidden(self.send("doctor", f.uid, "radx", 1)[1], ROLE_REQUIRED)
-            self.forbidden(self.cancel("doctor", r2)[1], ROLE_REQUIRED)
-            self.forbidden(self.supersede("doctor", r2, 1, 1)[1], ROLE_REQUIRED)
-            self.assertTrue(self.created(self.send("doctor", f.uid, "clinician", 1, rid=r1)[1])["replayed"])
+            self.check(self.send("doctor", f.uid, "radx", 1)[1], 401, "AUTH_SESSION_ENDED")
+            self.check(self.cancel("doctor", r2)[1], 401, "AUTH_SESSION_ENDED")
+            self.check(self.supersede("doctor", r2, 1, 1)[1], 401, "AUTH_SESSION_ENDED")
+            self.check(self.send("doctor", f.uid, "clinician", 1, rid=r1)[1], 401, "AUTH_SESSION_ENDED")
         finally:
             self.enabled("doctor", True)
         self.owner("clinician2")     # CR18's valid token is taken while enabled: Keycloak grants a disabled account none
         self.enabled("clinician2", False)
         try:
-            self.forbidden(self.ack("clinician2", r3)[1], ROLE_REQUIRED)
+            self.check(self.ack("clinician2", r3)[1], 401, "AUTH_SESSION_ENDED")
         finally:
             self.enabled("clinician2", True)
         self.assertEqual(critical_ledger(f.uid), settled)

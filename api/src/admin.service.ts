@@ -53,12 +53,18 @@ export class AdminService {
     return row;
   }
 
-  private async register(user: KeycloakUser) {
-    return this.prisma.memberRights.upsert({ where: { sub: user.id }, update: {}, create: {
+  private pendingMember(user: KeycloakUser) {
+    return {
       sub: user.id, username: user.username, email: user.email,
       name: [user.lastName, user.firstName].filter(Boolean).join(' ') || user.username,
       emailVerified: user.emailVerified, approved: false, suspended: false, institution: null, roles: [],
-    } });
+      version: null,
+    };
+  }
+
+  private async register(tx: any, user: KeycloakUser) {
+    const { version, ...create } = this.pendingMember(user);
+    return tx.memberRights.create({ data: create });
   }
 
   private async managed(id: string, signal?: AbortSignal): Promise<KeycloakUser> {
@@ -98,7 +104,11 @@ export class AdminService {
     const result = await this.keycloak.listUsers(page);
     const users = [];
     for (const user of result.users) {
-      const rights = await this.register(user);
+      const rights = await this.prisma.memberRights.findUnique({ where: { sub: user.id } });
+      if (!rights) {
+        users.push({ ...this.row(this.pendingMember(user)), rosterUnconfirmed: false });
+        continue;
+      }
       const latest = await this.prisma.providerChange.findFirst({ where: { kind: 'credentials', sub: user.id }, orderBy: { id: 'desc' } });
       const unknown = await this.prisma.providerChange.findFirst({ where: { kind: 'credentials', sub: user.id, state: 'unknown' } });
       const overlap = latest && await this.prisma.providerChange.findFirst({ where: {
@@ -148,13 +158,16 @@ export class AdminService {
       await this.keycloak.setGroups(created.id, []);
       await this.keycloak.setRoles(created.id, []);
       await this.keycloak.resetPassword(created.id, 'temp', temporaryPassword);
-      await this.register(created);
       await this.keycloak.setEnabled(created.id, true);
       let after;
       if (verificationOverride) {
         after = await this.patchUser(created.id, { institution: body.institution, roles: body.roles, verificationOverride: true, enabled: true }, c);
       } else {
-        after = this.row(await this.member(created.id));
+        after = await this.prisma.$transaction(async tx => {
+          await lockMemberRights(tx, created!.id);
+          return this.row(await tx.memberRights.findUnique({ where: { sub: created!.id } })
+            ?? await this.register(tx, created!));
+        });
       }
       await this.audit(c.actor, 'admin.user.create', created.id, {
         before: null, after, verificationOverride,
@@ -174,9 +187,11 @@ export class AdminService {
 
   async patchUser(id: string, body: any, c: Caller) {
     this.admin(c);
-    const observed = await this.member(id);
+    const existing = await this.prisma.memberRights.findUnique({ where: { sub: id } });
+    const identityToRegister = existing ? null : await this.managed(id);
+    const observed = existing ?? this.pendingMember(identityToRegister!);
     const before = this.row(observed);
-    if (body?.version !== undefined && body.version !== observed.version)
+    if (existing && body?.version !== undefined && body.version !== observed.version)
       throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
     if (body?.enabled !== undefined && typeof body.enabled !== 'boolean')
       throw new BadRequestException('enabled는 boolean이어야 합니다');
@@ -228,7 +243,14 @@ export class AdminService {
       const committed = await this.prisma.$transaction(async tx => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await lockMemberRights(tx, id);
-        const { count } = await tx.memberRights.updateMany({ where: { sub: id, version: observed.version }, data: {
+        let version = observed.version;
+        if (!existing) {
+          // The absence was observed before locking. A concurrent registration is a conflict, not a CAS bypass.
+          if (await tx.memberRights.findUnique({ where: { sub: id } }))
+            throw new ConflictException({ code: 'MEMBER_VERSION_CONFLICT', message: '회원 상태가 바뀌었습니다. 새로고침하세요' });
+          version = (await this.register(tx, identityToRegister!)).version;
+        }
+        const { count } = await tx.memberRights.updateMany({ where: { sub: id, version }, data: {
           approved, suspended, institution, roles, emailVerified,
           version: { increment: 1 }, newAuthAfter: new Date(),
         } });

@@ -9,6 +9,7 @@ REPORT라고 선언하는 순간 실제 Keycloak 토큰·Orthanc 검사·Postgre
 from __future__ import annotations
 
 import base64
+import hashlib
 import html
 import http.cookiejar
 import json
@@ -30,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from unittest.mock import patch
 from urllib.error import HTTPError
-from urllib.parse import quote, unquote, urlencode
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import (
     HTTPCookieProcessor, HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen,
 )
@@ -49,6 +50,14 @@ except Exception:
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTROLLER_GLOB = "*.controller.ts"
+
+# Read only the authentication time recorded by Keycloak's successful interactive flow, never iat or a test value.
+AUTH_TIME_MAPPER = {
+    "name": "kin-authentication-time", "protocol": "openid-connect", "consentRequired": False,
+    "protocolMapper": "oidc-usersessionmodel-note-mapper",
+    "config": {"user.session.note": "AUTH_TIME", "claim.name": "auth_time", "jsonType.label": "long",
+               "access.token.claim": "true", "id.token.claim": "true"},
+}
 
 
 def load_local_env() -> None:
@@ -496,7 +505,8 @@ class LiveStack:
             "name": "KIN local invariant runner",
             "enabled": True,
             "publicClient": True,
-            "standardFlowEnabled": False,
+            "standardFlowEnabled": True,
+            "redirectUris": [self.proxy + "/worklist/hpacs-lite/index.html"],
             "directAccessGrantsEnabled": True,
             "serviceAccountsEnabled": False,
             "protocol": "openid-connect",
@@ -505,6 +515,7 @@ class LiveStack:
             raise RuntimeError(f"로컬 시험 클라이언트 생성 실패: {created.status} {created.text}")
         self.test_client_uuid = str(created.body)
         mappers = (
+            AUTH_TIME_MAPPER,
             {
                 "name": "kin-api-audience", "protocol": "openid-connect",
                 "protocolMapper": "oidc-audience-mapper", "consentRequired": False,
@@ -675,25 +686,82 @@ class LiveStack:
         })
         if reset.status != 204:
             raise RuntimeError(f"로컬 시험 사용자 비밀번호 설정 실패({logical}): {reset.status}")
-        for role_name in roles:
-            role = self.kc_admin("GET", "/roles/" + quote(role_name))
-            if role.status != 200:
-                raise RuntimeError(f"로컬 시험 역할 조회 실패({role_name}): {role.status}")
-            assigned = self.kc_admin(
-                "POST", f"/users/{quote(user_id)}/role-mappings/realm", [role.body],
-            )
-            if assigned.status != 204:
-                raise RuntimeError(f"로컬 시험 역할 설정 실패({logical}/{role_name}): {assigned.status}")
-        groups = self.kc_admin("GET", "/groups?search=" + quote(group))
-        if groups.status != 200 or not isinstance(groups.body, list):
-            raise RuntimeError(f"로컬 시험 그룹 조회 실패({group}): {groups.status}")
-        exact = [row for row in groups.body if row.get("name") == group]
-        if len(exact) != 1:
-            raise RuntimeError(f"로컬 시험 그룹 조회 실패({group})")
-        joined = self.kc_admin("PUT", f"/users/{quote(user_id)}/groups/{quote(exact[0]['id'])}")
-        if joined.status != 204:
-            raise RuntimeError(f"로컬 시험 그룹 설정 실패({logical}/{group}): {joined.status}")
+        self.set_member_rights(user_id, institution=group, roles=roles, enabled=True, verificationOverride=True)
+        purge_user_audit(user_id)  # Scenarios measure their own commands after the owned fixture setup.
         return user_id
+
+    def set_member_rights(self, user_id: str, **changes) -> dict:
+        """The realm administrator uses the product PATCH, including its version, audit and authentication boundary.
+
+        Impersonation gives the imported realm admin a BFF session without changing any existing password/client.
+        Synthetic members keep their Keycloak identity creation; no MemberRights row is seeded by the harness.
+        """
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", user_id):
+            raise RuntimeError("Invalid member id")
+        if not getattr(self, "_rights_admin", None):
+            found = self.kc_admin("GET", "/users?username=jmryu&exact=true")
+            matches = [u for u in (found.body if isinstance(found.body, list) else []) if u.get("username") == "jmryu"]
+            if found.status != 200 or len(matches) != 1:
+                raise RuntimeError("Imported realm administrator is unavailable")
+            jar = http.cookiejar.CookieJar()
+            opener = build_opener(HTTPCookieProcessor(jar), HTTPSHandler(context=self.context))
+            # The public proxy deliberately hides /auth/admin. Only the fixture's existing admin transport reaches it.
+            provider = self.keycloak.partition('/realms/')[0]
+            request = Request(provider + "/admin/realms/kin/users/" + quote(matches[0]["id"]) + "/impersonation",
+                              data=b"", headers={"Authorization": "Bearer " + str(self.admin_token)}, method="POST")
+            with opener.open(request, timeout=30) as response:
+                if response.status != 200:
+                    raise RuntimeError("Realm administrator impersonation failed")
+                response.read()
+            # Both addresses name this guarded synthetic realm; carry its signed SSO cookie onto the public origin.
+            host = urlparse(self.proxy).hostname
+            public_jar = http.cookiejar.CookieJar()
+            for cookie in jar:
+                if cookie.path.startswith('/auth/realms/kin'):
+                    cookie.domain = host if '.' in host else host + '.local'
+                    cookie.domain_specified = False
+                    cookie.domain_initial_dot = False
+                    public_jar.set_cookie(cookie)
+            opener = build_opener(HTTPCookieProcessor(public_jar), HTTPSHandler(context=self.context))
+            with opener.open(self.proxy + "/api/auth/login", timeout=30) as response:
+                response.read()
+            with opener.open(self.proxy + "/api/me", timeout=30) as response:
+                me = json.loads(response.read())
+            if me.get("sub") != matches[0]["id"] or "admin" not in me.get("roles", []) or not me.get("sessionId"):
+                raise RuntimeError("Product did not admit the imported realm administrator")
+            self._rights_admin = (opener, me["sessionId"])
+        opener, session = self._rights_admin
+        request = Request(self.proxy + "/api/admin/users/" + quote(user_id),
+                          data=json.dumps(changes).encode("utf-8"), method="PATCH",
+                          headers={"Content-Type": "application/json", "X-KIN-CSRF": "1", "X-KIN-Session": session})
+        with opener.open(request, timeout=30) as response:
+            result = json.loads(response.read())
+            if response.status != 200 or result.get("id") != user_id or not isinstance(result.get("version"), int):
+                raise RuntimeError("Product member command was not committed")
+        self.__dict__.setdefault("member_rights", {})[user_id] = result
+        if "institution" in changes or "roles" in changes:
+            # The retained roster consumers use Keycloak. Fixture setup observes the asynchronous publication;
+            # this never supplies DB rights or turns a refused authentication into a pass.
+            deadline = time.monotonic() + 10
+            while True:
+                groups = self.kc_admin("GET", f"/users/{quote(user_id)}/groups")
+                roles = self.kc_admin("GET", f"/users/{quote(user_id)}/role-mappings/realm")
+                if groups.status != 200 or roles.status != 200:
+                    raise RuntimeError("Cannot observe fixture roster publication")
+                assigned = sorted(r["name"] for r in roles.body if r["name"] in policy_app_roles())
+                if sorted(g["name"] for g in groups.body) == [result["institution"]] and assigned == sorted(result["roles"]):
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Fixture roster publication did not settle")
+                time.sleep(0.05)
+        for logical, sub in self.user_ids.items():
+            if sub == user_id:
+                self.tokens.pop(logical, None)
+                self.actors.pop(logical, None)
+                self.__dict__.get("_draft_owners", {}).pop(logical, None)
+        # auth_time has whole-second resolution. Authenticate in a later second, as a new interactive login must.
+        time.sleep(1.05)
+        return result
 
     def provision_test_identities(self) -> None:
         if self.test_client_uuid:
@@ -775,6 +843,14 @@ class LiveStack:
                 failures.append(f"gateway 역할: {deleted.status}")
         self.created_gateway_role = False
         self.tokens.clear()
+        if getattr(self, "_rights_admin", None):
+            opener, session = self._rights_admin
+            request = Request(self.proxy + "/api/auth/logout", data=b"", method="POST",
+                              headers={"X-KIN-CSRF": "1", "X-KIN-Session": session})
+            with opener.open(request, timeout=30) as response:
+                if response.status != 204:
+                    failures.append("Product realm administrator session cleanup failed")
+            self._rights_admin = None
         if failures:
             raise RuntimeError("로컬 시험 계정 정리 실패: " + "; ".join(failures))
 
@@ -884,12 +960,12 @@ class LiveStack:
         token, keeps it for the step's next requests and records no actor; the step asserts /me and the refused route
         itself (S7-CR-E2E-HARNESS)."""
         if refused:
-            self.tokens[user] = self._password_token(user)
+            self.tokens[user] = self._interactive_token(user)
             self.actors.pop(user, None)
             return self.tokens[user]
         if user in self.tokens:
             return self.tokens[user]
-        token = self._password_token(user)
+        token = self._interactive_token(user)
         self.tokens[user] = token
         me = self.request("GET", "/me", user)
         if me.status != 200:
@@ -899,20 +975,66 @@ class LiveStack:
         self.actors[user] = me.body["actor"]
         return token
 
-    def _password_token(self, user: str) -> str:
+    def _interactive_token(self, user: str) -> str:
         password = self.passwords.get(user)
         if not password:
             raise RuntimeError(f"Keycloak 개발 계정 비밀번호를 찾을 수 없습니다: {user}")
+        return self.interactive_token(self.username(user), password)
+
+    def interactive_token(self, username: str, password: str, client_id: str | None = None) -> str:
+        """A real non-BFF authorization-code login, so Keycloak supplies the authentication time itself.
+
+        Keycloak 26.7.3 direct grants do not finish the browser authentication flow that sets AUTH_TIME. A refreshed
+        iat or a harness-written session note cannot stand in for it. Only this run's temporary clients enable PKCE.
+        """
+        redirect = self.proxy + "/worklist/hpacs-lite/index.html"
+        class Callback(HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                if newurl.split("?", 1)[0] == redirect:
+                    return None
+                return super().redirect_request(req, fp, code, msg, headers, newurl)
+        opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()), HTTPSHandler(context=self.context), Callback())
+        state, verifier = uuid.uuid4().hex, uuid.uuid4().hex + uuid.uuid4().hex
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
+        client = client_id or self.test_client_id
+        query = urlencode({"client_id": client, "response_type": "code", "scope": "openid profile email",
+                           "redirect_uri": redirect, "state": state, "nonce": state,
+                           "code_challenge": challenge, "code_challenge_method": "S256"})
+        # Front-channel cookies and the form action must share the public origin configured in Keycloak.
+        authorize = self.proxy + urlparse(self.keycloak).path.rsplit("/", 1)[0] + "/auth"
+        with opener.open(authorize + "?" + query, timeout=30) as response:
+            page = response.read().decode("utf-8")
+        form = re.search(r'<form[^>]+action="([^"]+)"', page, re.I)
+        if not form:
+            raise RuntimeError("Interactive test client did not receive the credential form")
+        request = Request(html.unescape(form.group(1)), method="POST",
+                          data=urlencode({"username": username, "password": password, "credentialId": ""}).encode("utf-8"),
+                          headers={"Content-Type": "application/x-www-form-urlencoded"})
+        try:
+            with opener.open(request, timeout=30) as response:
+                response.read()
+            raise RuntimeError("Interactive credentials did not return an authorization code")
+        except HTTPError as response:
+            if response.code != 302:
+                raise RuntimeError("Interactive authorization failed") from None
+            callback = urlparse(response.headers.get("Location", ""))
+        params = parse_qs(callback.query)
+        if callback._replace(query="", fragment="").geturl() != redirect or params.get("state") != [state] or len(params.get("code", [])) != 1:
+            raise RuntimeError("Interactive authorization callback is not bound to this login")
         data = urlencode({
-            "client_id": self.test_client_id, "grant_type": "password",
-            "username": self.username(user), "password": password,
+            "client_id": client, "grant_type": "authorization_code", "code": params["code"][0],
+            "redirect_uri": redirect, "code_verifier": verifier,
         }).encode("ascii")
         request = Request(
             self.keycloak, data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
         )
         with self._open(request) as response:
-            return json.loads(response.read().decode("utf-8"))["access_token"]
+            token = json.loads(response.read().decode("utf-8"))["access_token"]
+        claim = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "=" * (-len(token.split(".")[1]) % 4)))
+        if type(claim.get("auth_time")) is not int or claim["auth_time"] <= 0:
+            raise RuntimeError("Keycloak did not provide the interactive authentication time")
+        return token
 
     def actor(self, user: str) -> str:
         self.token(user)
@@ -1308,7 +1430,8 @@ class BffInvariantTests(unittest.TestCase):
             cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
 
-    def bff_login(self, username: str, password: str):
+    def bff_login(self, username: str, password: str, *, refused: bool = False):
+        time.sleep(1.05)  # Credentials entered after any preceding product boundary.
         jar = http.cookiejar.CookieJar()
         opener = build_opener(HTTPCookieProcessor(jar), HTTPSHandler(context=self.context))
         login = self.proxy(opener, "GET", "/api/auth/login")
@@ -1325,6 +1448,10 @@ class BffInvariantTests(unittest.TestCase):
         with opener.open(submitted, timeout=30) as response:
             response.read()
         sid = next((cookie.value for cookie in jar if cookie.name == "kin_sid"), None)
+        if refused:
+            self.assertIsNone(sid, "DB-refused member must not receive a product session")
+            self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 401)
+            return opener, None
         self.assertIsNotNone(sid, "BFF 로그인 뒤 kin_sid가 없습니다")
         # S7-U5: the document's bootstrap - the one cookie request without a binding. Its answer (200, or the 403 of a
         # member awaiting approval) carries the session id every later request of this opener sends as X-KIN-Session.
@@ -1348,8 +1475,10 @@ class BffInvariantTests(unittest.TestCase):
         })
         self.assertEqual(reset.status, 204, reset.text)
         if with_group:
-            joined = self.admin("PUT", f"/users/{user_id}/groups/{self.hallym_group_id}")
-            self.assertEqual(joined.status, 204, joined.text)
+            self.stack.set_member_rights(user_id, institution="hallym", roles=["radiologist"], enabled=True, verificationOverride=True)
+        else:
+            self.stack.set_member_rights(user_id, approvalState="PENDING")
+        purge_user_audit(user_id)
         return user_id, username, password
 
     def test_cookie_session_security_and_legacy_cookie_rejection(self) -> None:
@@ -1449,29 +1578,20 @@ class BffInvariantTests(unittest.TestCase):
                 self.assertEqual(result.status, public.get((method, route), 401), result.text)
 
     def test_pending_and_invalid_have_codes_but_can_logout(self) -> None:
-        for with_group, code in (
-            (False, "INSTITUTION_PENDING"),
-            (True, "INSTITUTION_INVALID"),
-        ):
-            user_id = username = password = None
-            opener = None
+        for with_group in (False, True):
+            user_id = None
             try:
-                user_id, username, password = self.create_member(with_group)
-                opener, _sid = self.bff_login(username, password)
-                me = self.proxy(opener, "GET", "/api/me")
-                self.assertEqual(me.status, 403, me.text)
-                self.assertEqual(me.body.get("code"), code, me.text)
-                logout = self.proxy(
-                    opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"},
-                )
-                self.assertEqual(logout.status, 204, logout.text)
+                user_id, username, password = self.create_member(with_group=False)
+                if with_group:
+                    invalid = self.stack.request("PATCH", f"/admin/users/{quote(user_id)}", "jmryu",
+                                                 {"institution": ["hallym", "kin-center"], "roles": ["radiologist"]})
+                    self.assertEqual(invalid.status, 400)
+                opener, sid = self.bff_login(username, password, refused=True)
+                self.assertIsNone(sid)
+                self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 401)
+                self.assertEqual(self.proxy(opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"}).status, 204)
             finally:
-                if opener is not None:
-                    self.proxy(opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"})
-                if user_id is not None:
-                    deleted = self.admin("DELETE", f"/users/{user_id}")
-                    self.assertIn(deleted.status, (204, 404), deleted.text)
-                    purge_user_audit(user_id)
+                self.delete_member(user_id)
 
     def test_member_service_account_is_hidden_and_unwritable(self) -> None:
         page = 1
@@ -1533,8 +1653,8 @@ class BffInvariantTests(unittest.TestCase):
             self.assertEqual([group["name"] for group in groups.body], ["hallym"])
             self.assertIn("radiologist", [role["name"] for role in roles.body])
         finally:
-            restored = self.admin("PUT", f"/users/{quote(target_id)}", {"enabled": True})
-            self.assertIn(restored.status, (204, 404), restored.text)
+            restored = self.stack.set_member_rights(target_id, enabled=True)
+            self.assertTrue(restored["enabled"])
             self.stack.tokens.pop("doctor", None)
             self.stack.actors.pop("doctor", None)
 
@@ -1620,6 +1740,8 @@ process.stdout.write(JSON.stringify(value));
             "email": username + "@local.test", "firstName": "Unverified", "lastName": "KIN",
         })
         self.assertEqual(created.status, 201, created.text)
+        self.stack.set_member_rights(str(created.body), approvalState="PENDING")
+        purge_user_audit(str(created.body))
         try:
             blocked = self.stack.request(
                 "PATCH", f"/admin/users/{quote(str(created.body))}", "jmryu",
@@ -1687,52 +1809,22 @@ process.stdout.write(JSON.stringify(value));
 
     def test_member_approval_round_trip_grants_and_revokes_access(self) -> None:
         user_id = None
-        opener = None
         try:
             user_id, username, password = self.create_member(with_group=False)
-            path = f"/admin/users/{quote(user_id)}"
-            opener, _sid = self.bff_login(username, password)
-            pending = self.proxy(opener, "GET", "/api/me")
-            self.assertEqual((pending.status, pending.body.get("code")), (403, "INSTITUTION_PENDING"), pending.text)
-
-            approved = self.stack.request("PATCH", path, "jmryu", {
-                "approvalState": "APPROVED", "institution": "hallym", "roles": ["radiologist"],
-            })
-            self.assertEqual(approved.status, 200, approved.text)
-            self.assertEqual(
-                (approved.body["approvalState"], approved.body["institution"], approved.body["roles"], approved.body["enabled"]),
-                ("APPROVED", "hallym", ["radiologist"], True),
-            )
-            # 자격이 바뀌면 그 전에 만든 세션은 죽는다 — isolate()가 승인 앞에 선다
+            self.bff_login(username, password, refused=True)
+            approved = self.stack.set_member_rights(user_id, institution="hallym", roles=["radiologist"], enabled=True,
+                                                     verificationOverride=True)
+            self.assertEqual((approved["approvalState"], approved["institution"], approved["roles"]),
+                             ("APPROVED", "hallym", ["radiologist"]))
+            opener, sid = self.bff_login(username, password)
+            self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 200)
+            cancelled = self.stack.set_member_rights(user_id, approvalState="PENDING")
+            self.assertEqual((cancelled["approvalState"], cancelled["institution"], cancelled["roles"], cancelled["enabled"]),
+                             ("PENDING", None, [], False))
             self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 401)
-            opener, _sid = self.bff_login(username, password)
-            me = self.proxy(opener, "GET", "/api/me")
-            self.assertEqual(me.status, 200, me.text)
-            self.assertEqual(me.body["institution"], "hallym")
-            self.assertIn("radiologist", me.body["roles"])
-            self.assertEqual(self.kc_user_summary(user_id), (["hallym"], ["radiologist"]))
-            audit = user_audit(user_id)
-            self.assertEqual([action for action, _ in audit], ["admin.user.approve"])
-            self.assertEqual(
-                (audit[0][1]["before"]["approvalState"], audit[0][1]["after"]["approvalState"]),
-                ("PENDING", "APPROVED"),
-            )
-
-            cancelled = self.stack.request("PATCH", path, "jmryu", {"approvalState": "PENDING"})
-            self.assertEqual(cancelled.status, 200, cancelled.text)
-            self.assertEqual(
-                (cancelled.body["approvalState"], cancelled.body["institution"], cancelled.body["roles"], cancelled.body["enabled"]),
-                ("PENDING", None, [], True),
-            )
-            self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 401)
-            opener, _sid = self.bff_login(username, password)
-            back = self.proxy(opener, "GET", "/api/me")
-            self.assertEqual((back.status, back.body.get("code")), (403, "INSTITUTION_PENDING"), back.text)
-            self.assertEqual(self.kc_user_summary(user_id), ([], []))
+            self.bff_login(username, password, refused=True)
             self.assertEqual([action for action, _ in user_audit(user_id)], ["admin.user.approve", "admin.user.unapprove"])
         finally:
-            if opener is not None:
-                self.proxy(opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"})
             self.delete_member(user_id)
 
     def test_member_management_rejects_invalid_inputs_without_side_effects(self) -> None:
@@ -1747,7 +1839,7 @@ process.stdout.write(JSON.stringify(value));
                 ({"approvalState": "APPROVED", "institution": "hallym", "roles": ["gateway"]}, "허용되지 않은 역할"),
                 ({"approvalState": "BANNED"}, "approvalState"),
                 ({"approvalState": "PENDING", "institution": "hallym"}, "섞을 수 없습니다"),
-                ({"approvalState": "PENDING", "enabled": True}, "enabled=true"),
+                ({"approvalState": "PENDING", "enabled": True}, "섞을 수 없습니다"),
                 ({"enabled": "yes"}, "boolean"),
                 ({}, "변경할 회원 상태가 없습니다"),
                 ({"verificationOverride": True}, "승인·자격 변경"),
@@ -1779,48 +1871,24 @@ process.stdout.write(JSON.stringify(value));
             self.delete_member(user_id)
 
     def test_member_invalid_states_cannot_be_activated_until_fixed(self) -> None:
-        for axis in ("group-without-roles", "two-groups"):
+        for invalid in ({"institution": "hallym", "roles": []},
+                        {"institution": ["hallym", "kin-center"], "roles": ["radiologist"]}):
             user_id = None
-            opener = None
-            with self.subTest(axis=axis):
-                try:
-                    user_id, username, password = self.create_member(with_group=True)
-                    path = f"/admin/users/{quote(user_id)}"
-                    if axis == "two-groups":
-                        joined = self.admin("PUT", f"/users/{quote(user_id)}/groups/{quote(self.group_id('kin-center'))}")
-                        self.assertEqual(joined.status, 204, joined.text)
-                        role = self.admin("GET", "/roles/radiologist")
-                        assigned = self.admin("POST", f"/users/{quote(user_id)}/role-mappings/realm", [role.body])
-                        self.assertEqual(assigned.status, 204, assigned.text)
-                    opener, _sid = self.bff_login(username, password)
-                    me = self.proxy(opener, "GET", "/api/me")
-                    self.assertEqual((me.status, me.body.get("code")), (403, "INSTITUTION_INVALID"), me.text)
-                    row = self.admin_row(username)
-                    # 그룹이 하나면 기관은 보이되 역할이 없어 INVALID, 둘이면 기관 자체가 정해지지 않는다
-                    expected_institution = "hallym" if axis == "group-without-roles" else None
-                    self.assertEqual((row["approvalState"], row["institution"]), ("INVALID", expected_institution), row)
-                    blocked = self.stack.request("PATCH", path, "jmryu", {"enabled": True})
-                    self.assertEqual(blocked.status, 400, blocked.text)
-                    self.assertIn("INVALID", blocked.body["message"])
-
-                    fixed = self.stack.request("PATCH", path, "jmryu", {
-                        "approvalState": "APPROVED", "institution": "hallym", "roles": ["radiologist"],
-                    })
-                    self.assertEqual(fixed.status, 200, fixed.text)
-                    self.assertEqual((fixed.body["approvalState"], fixed.body["institution"]), ("APPROVED", "hallym"))
-                    self.assertEqual(self.kc_user_summary(user_id), (["hallym"], ["radiologist"]), "그룹이 하나로 수렴하지 않았습니다")
-                    self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 401)
-                    opener, _sid = self.bff_login(username, password)
-                    me = self.proxy(opener, "GET", "/api/me")
-                    self.assertEqual((me.status, me.body.get("institution")), (200, "hallym"), me.text)
-                    audit = user_audit(user_id)
-                    # INVALID → APPROVED는 '승인'이 아니라 '교정'이다(action은 before가 PENDING일 때만 approve)
-                    self.assertEqual([action for action, _ in audit], ["admin.user.update"])
-                    self.assertEqual(audit[0][1]["before"]["approvalState"], "INVALID")
-                finally:
-                    if opener is not None:
-                        self.proxy(opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"})
-                    self.delete_member(user_id)
+            try:
+                user_id, username, password = self.create_member(with_group=False)
+                path = f"/admin/users/{quote(user_id)}"
+                before = self.admin_row(username)
+                self.assertEqual(self.stack.request("PATCH", path, "jmryu", invalid).status, 400)
+                self.assertEqual(self.admin_row(username), before, "invalid rights cannot change the DB version")
+                self.assertEqual(self.stack.request("PATCH", path, "jmryu", {"enabled": True}).status, 400)
+                self.bff_login(username, password, refused=True)
+                fixed = self.stack.set_member_rights(user_id, institution="hallym", roles=["radiologist"], enabled=True,
+                                                      verificationOverride=True)
+                self.assertEqual((fixed["approvalState"], fixed["institution"]), ("APPROVED", "hallym"))
+                opener, _ = self.bff_login(username, password)
+                self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 200)
+            finally:
+                self.delete_member(user_id)
 
     def test_member_create_starts_pending_or_approved_with_override(self) -> None:
         created: list[str] = []
@@ -1849,7 +1917,7 @@ process.stdout.write(JSON.stringify(value));
                 (override.body["approvalState"], override.body["institution"], override.body["roles"], override.body["emailVerified"], override.body["enabled"]),
                 ("APPROVED", "hallym", ["radiologist"], False, True),
             )
-            self.assertEqual(self.kc_user_summary(override.body["id"]), (["hallym"], ["radiologist"]))
+            self.assertEqual((self.admin_row(override.body["username"])["institution"], override.body["roles"]), ("hallym", ["radiologist"]))
 
             rejected = (
                 (body_for("kin-test-create-" + uuid.uuid4().hex[:10], institution="hallym"), "verificationOverride"),
@@ -1869,7 +1937,7 @@ process.stdout.write(JSON.stringify(value));
             secrets = {plain.body["temporaryPassword"], override.body["temporaryPassword"]}
             for user_id in created:
                 audit = user_audit(user_id)
-                self.assertEqual([action for action, _ in audit], ["admin.user.create"])
+                self.assertEqual([action for action, _ in audit], (["admin.user.approve"] if user_id == override.body["id"] else []) + ["admin.user.create"])
                 text = json.dumps(audit, ensure_ascii=False)
                 for secret in secrets:
                     self.assertNotIn(secret, text, "감사로그에 임시 비밀번호가 남았습니다")
@@ -1919,9 +1987,11 @@ process.stdout.write(JSON.stringify(value));
         })
         self.assertEqual(created.status, 201, created.text)
         user_id = str(created.body)
+        self.stack.set_member_rights(user_id, approvalState="PENDING")
+        purge_user_audit(user_id)
         try:
             path = f"/admin/users/{quote(user_id)}"
-            approve = {"approvalState": "APPROVED", "institution": "hallym", "roles": ["radiologist"]}
+            approve = {"approvalState": "APPROVED", "enabled": True, "institution": "hallym", "roles": ["radiologist"]}
             self.assertEqual(self.stack.request("PATCH", path, "jmryu", approve).status, 400)
             self.assertEqual(self.stack.request("PATCH", path, "jmryu", {**approve, "verificationOverride": "yes"}).status, 400)
             self.assertEqual(self.stack.request("PATCH", path, "jmryu", {"verificationOverride": True}).status, 400)
@@ -1959,7 +2029,7 @@ process.stdout.write(JSON.stringify(value));
                 (["radiologist", "technician"], "hallym", "APPROVED", True),
             )
             self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 401, "자격 변경이 기존 세션을 끊지 않았습니다")
-            self.assertEqual(self.kc_user_summary(target), (["hallym"], ["radiologist", "technician"]))
+            self.assertEqual(self.admin_row(self.stack.username("doctor2"))["roles"], ["radiologist", "technician"])
             audit = user_audit(target)
             self.assertEqual([action for action, _ in audit], ["admin.user.update"])
             self.assertEqual((audit[0][1]["before"]["roles"], audit[0][1]["after"]["roles"]), (["radiologist"], ["radiologist", "technician"]))
@@ -1984,8 +2054,8 @@ process.stdout.write(JSON.stringify(value));
                 self.proxy(opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"})
             restored = self.stack.request("PATCH", path, "jmryu", {"roles": ["radiologist"], "enabled": True})
             self.assertEqual(restored.status, 200, restored.text)
-            self.admin("PUT", f"/users/{quote(target)}", {"enabled": True})
-            # 캐시된 Bearer는 서명만 검사되므로 살아 있지만 realm_access.roles가 낡았다 — 다음 사용자가 새로 받게 한다
+            time.sleep(1.05)
+            # The old Bearer is refused by the changed boundary; the next request must authenticate again.
             self.stack.tokens.pop("doctor2", None)
             self.stack.actors.pop("doctor2", None)
             purge_user_audit(target)
@@ -2017,38 +2087,22 @@ process.stdout.write(JSON.stringify(value));
             self.delete_member(user_id)
 
     def test_zzz_break_glass_recovers_dedicated_admin_set(self) -> None:
+        """Realm admin recovery must change DB rights through the product, not merely re-enable the provider account."""
         recovered_id = self.stack.user_ids["jmryu"]
         other_id = self.stack.create_test_identity("breakglass", ["admin"], "hallym")
-        ids = (recovered_id, other_id)
-        for user_id in ids:
-            self.assertRegex(user_id, r"^[0-9a-f-]{36}$")
-        config = "/tmp/kin-breakglass-" + uuid.uuid4().hex + ".config"
-        logged_in = self.kcadm(config, login=True)
-        self.assertEqual(logged_in.returncode, 0, "kcadm loopback 인증 실패")
+        old = {"jmryu": self.stack.token("jmryu"), "breakglass": self.stack.token("breakglass")}
         try:
-            for user_id in ids:
-                disabled = self.kcadm(config, "update", f"users/{user_id}", "-r", "kin", "-s", "enabled=false")
-                self.assertEqual(disabled.returncode, 0, "전용 시험 관리자 비활성화 실패")
-            for user_id in ids:
-                current = self.admin("GET", f"/users/{user_id}")
-                self.assertEqual(current.status, 200, current.text)
-                self.assertFalse(current.body.get("enabled"), current.text)
-
-            recovered = self.kcadm(
-                config, "update", f"users/{recovered_id}", "-r", "kin", "-s", "enabled=true",
-            )
-            self.assertEqual(recovered.returncode, 0, "kcadm break-glass 복구 실패")
-            self.stack.tokens.pop("jmryu", None)
-            self.stack.actors.pop("jmryu", None)
+            for sub in (recovered_id, other_id):
+                self.assertFalse(self.stack.set_member_rights(sub, enabled=False)["enabled"])
+            for token in old.values():
+                self.assertEqual(self.stack.bearer_request("GET", "/me", token).status, 401)
+            self.assertTrue(self.stack.set_member_rights(recovered_id, enabled=True)["enabled"])
+            self.assertEqual(self.stack.bearer_request("GET", "/me", old["jmryu"]).status, 401)
             self.assertEqual(self.stack.request("GET", "/me", "jmryu").status, 200)
+            self.assertEqual(self.stack.bearer_request("GET", "/me", old["breakglass"]).status, 401)
         finally:
-            for user_id in ids:
-                self.kcadm(config, "update", f"users/{user_id}", "-r", "kin", "-s", "enabled=true")
-                self.admin("PUT", f"/users/{user_id}", {"enabled": True})
-            subprocess.run(
-                ["docker", "compose", "exec", "-T", "keycloak", "rm", "-f", config],
-                cwd=ROOT, capture_output=True, timeout=30,
-            )
+            for sub in (recovered_id, other_id):
+                self.stack.set_member_rights(sub, enabled=True)
 
 
 class LiveInvariantTests(unittest.TestCase):
@@ -5229,11 +5283,11 @@ class CriticalResultInvariantTests(CriticalResultHarness, unittest.TestCase):
             self.check(self.send("doctor", f.uid, user, 2)[1], 400, "CRITICAL_RESULT_RECIPIENT_INVALID")
         self.check(self.send("doctor", f.uid, "clinician", 2, recipient_sub=str(uuid.uuid4()))[1], 400, "CRITICAL_RESULT_RECIPIENT_INVALID")
         target = self.sub("clinician2")
-        self.assertEqual(self.stack.kc_admin("PUT", f"/users/{quote(target)}", {"enabled": False}).status, 204)
+        self.stack.set_member_rights(target, enabled=False)
         try:
             self.check(self.send("doctor", f.uid, "clinician2", 2)[1], 400, "CRITICAL_RESULT_RECIPIENT_INVALID")
         finally:
-            self.assertEqual(self.stack.kc_admin("PUT", f"/users/{quote(target)}", {"enabled": True}).status, 204)
+            self.stack.set_member_rights(target, enabled=True)
         self.assertEqual(critical_ledger(f.uid), {"records": 3, "events": 3, "receipts": 3, "audits": 3})
 
     def test_cr_inv_06_study_delete_refused_while_records_exist(self) -> None:
