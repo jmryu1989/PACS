@@ -139,20 +139,24 @@ def run(target, candidate_sha):
     target, github_sha = hosted_target(target, candidate_sha)
     sys.path.insert(0, str(target / "tests"))
     runner = load(target / "scripts/run-tests.py", "candidate_run_tests")
+    credential = load(target / "tests/live_admin_credential.py", "live_admin_credential")
     ci = load(target / "tests/measurement_ci.py", "candidate_measurement_ci")
     runner_temp = os.environ.get("RUNNER_TEMP")
     require(runner_temp and Path(runner_temp).is_absolute(), "RUNNER_TEMP must be absolute")
     plan_dir = Path(runner_temp) / "kin-candidate-exact-plans"
     require(not plan_dir.exists(), "Candidate plan directory already exists")
     out, selected = configure(target, ci, runner, plan_dir)
-    sources = sorted({row["file"] for row in selected} | {"tests/measurement_ci.py", "scripts/run-tests.py"})
+    sources = sorted({row["file"] for row in selected} | {
+        "tests/measurement_ci.py", "tests/live_admin_credential.py", "scripts/run-tests.py"})
     provenance = {"schema": 1, "requirement": "REQ-SERVER-UPDATE-20260911",
         "risks": ["RISK-DATA", "RISK-SOURCE", "RISK-ROLLBACK"], "test": "TEST-SERVER-UPDATE",
         "candidate_sha": candidate_sha, "tools_sha": github_sha,
         "sequence": selected, "source_sha256": {name: sha256(target / name) for name in sources},
         "synthetic_only": True, "github_hosted": True}
     try:
-        ci.main("measurements")
+        # Shared lifecycle invokes the target helper after readiness, then supplies
+        # the same credential/redaction list to both base suites and every flow.
+        ci.main("measurements", credential_provider=credential.ensure_imported_admin_credential)
     finally:
         if out.is_dir():
             (out / "candidate-provenance.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")

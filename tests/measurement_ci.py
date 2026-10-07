@@ -3,6 +3,7 @@
 import argparse, json, os, re, secrets, shutil, ssl, subprocess, sys, time
 from pathlib import Path
 from urllib.request import urlopen
+from live_admin_credential import ensure_imported_admin_credential
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = ['viewer_api_test.py', 'e2e/test_measurement_readback.py',
@@ -609,7 +610,7 @@ def seed_source():
         ds.save_as(dest / f'{z}.dcm', write_like_original=False)
 
 
-def main(profile_name):
+def main(profile_name, credential_provider=None):
     if profile_name not in PROFILES:
         raise RuntimeError('Unknown CI profile')
     profile = PROFILES[profile_name]
@@ -623,6 +624,9 @@ def main(profile_name):
     endpoint = subprocess.check_output(['docker','context','inspect','--format','{{.Endpoints.docker.Host}}']).decode().strip()
     if not endpoint.startswith('unix:///') or os.environ.get('DOCKER_HOST'):
         raise RuntimeError('Requires the runner local Docker socket')
+    # Only this disposable hosted driver can attest the stack it is about to create.
+    # Local drivers must explicitly attest their separately isolated synthetic realm.
+    os.environ['KIN_SYNTHETIC_REALM'] = '1'
     out.mkdir(parents=True, exist_ok=False)
     values = {key: secrets.token_hex(32) for key in ['POSTGRES_PASSWORD','ORTHANC_PASS',
               'KC_ADMIN_PASSWORD','KC_CLIENT_SECRET','KC_WEB_SECRET','KIN_COOKIE_SECRET']}
@@ -669,10 +673,18 @@ def main(profile_name):
                 try:
                     with urlopen('https://localhost:9443'+path, context=ssl._create_unverified_context(), timeout=5) as response:
                         assert response.status == 200
+                        if path == '/api/health':
+                            assert json.loads(response.read()).get('memberRights') == 'ready'
                     break
                 except Exception:
                     if time.monotonic() >= ready_by: raise RuntimeError('Stack readiness deadline')
                     time.sleep(1)
+        provider = credential_provider or ensure_imported_admin_credential
+        password = provider('http://127.0.0.1:8080/auth/admin/realms/kin', values['KC_ADMIN_PASSWORD'])
+        # Add before any further command: run() redacts every captured artifact,
+        # including failure/timeout output and final service logs. Do not add-mask/print it.
+        values['KIN_LIVE_IMPORTED_ADMIN_PASSWORD'] = password
+        env['KIN_LIVE_IMPORTED_ADMIN_PASSWORD'] = password
         run('ports', compose+['ps'])
         for suite, class_name, unit in profile['suites']:
             command, outer_timeout = guarded_profile_run(
