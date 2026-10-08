@@ -265,7 +265,7 @@ class Pure(unittest.TestCase):
         # S7-U5 then added the provider call in flight to MemberIsolation (three columns): 38 files, still 48 tables and the
         # same rows. S7-U5 D600 replaced it by the provider change records (ProviderChange, the three columns dropped): 39 files,
         # 49 tables, and two records (an unknown disable of the owed member, a settled end of a provider session).
-        self.assertEqual(len(transfer.MIGRATIONS), 41)
+        self.assertEqual(len(transfer.MIGRATIONS), 42)
         self.assertEqual(len(transfer.TABLES), 51)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
@@ -281,6 +281,7 @@ class Pure(unittest.TestCase):
                          + 2    # S7-U5 session end: the pending and the confirmed end mark
                          + 2    # S7-U5 member isolation: the owed and the done isolation fact
                          + 2    # S7-U5 member rights/import
+                         + 1    # S8-CTX: revision with save attempt id, beside the legacy revision
                          + 2)   # S7-U5 D600: the unknown and the settled provider change record
         self.assertEqual(sorted((r['sub'], r['providerDoneAt'] is None, r['attempts']) for r in rows['MemberIsolation']),
                          [('SYNTHETIC-member-isolation-done', False, 0), ('SYNTHETIC-member-isolation-owed', True, 2)])
@@ -355,7 +356,8 @@ class Pure(unittest.TestCase):
         self.assertEqual(len({(r['institution'], r['subject']) for r in hp}), 3)
         self.assertEqual(sum(r['value'] is None for r in hp), 1)
         self.assertEqual([(r['revision'],r['value'] is None) for r in rows['WorklistColumns']],[(2,False),(3,True)])
-        self.assertEqual([(r['studyUid'],r['version'],r['text']) for r in rows['TechNoteRevision']],[(UID,1,'SYNTHETIC tech note')])
+        self.assertEqual(sorted((r['studyUid'],r['version'],r['text'],r['attemptId']) for r in rows['TechNoteRevision']),
+                         [(UID,1,'SYNTHETIC tech note',None),(UID,2,'SYNTHETIC tech note v2','00000000-0000-4000-8000-000000000d01')])
         job=rows['ViewerJob'][0]
         self.assertEqual(job['snapshot']['cells'][0]['sop'],UID+'.2')
         self.assertEqual(job['studies'],[UID]);self.assertTrue(job['hidden'])

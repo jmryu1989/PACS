@@ -29,6 +29,10 @@ FLOWS = (
     ("e2e/test_related_keyboard.py", "RelatedKeyboardE2E", "test_related_keyboard_01_preview_compare_and_report_draft", "test_related_keyboard_01_"),
     ("e2e/test_viewer_windows.py", "ViewerWindowsE2E", "test_windows_01_limit_dirty_close_focus_and_slot_reuse", "test_windows_01_"),
     ("e2e/test_frame_coverage.py", "FrameCoverageE2E", "test_coverage_01_real_frames_cancel_close_then_all_shown", "test_coverage_01_"),
+    # S8-CTX contract 5-7: the server save attempt contract on the real API and database, and the viewer window's save,
+    # conflict and history flow (the selection 112 -> 114).
+    ("e2e/test_tech_note.py", "TechNoteE2E", "test_note_09_attempt_ids_idempotent_resend_reuse_and_reads", "test_note_09_"),
+    ("e2e/test_viewer_tech_note.py", "ViewerTechNoteE2E", "test_viewer_note_02_technician_save_conflict_and_history", "test_viewer_note_02_"),
 )
 
 
@@ -87,8 +91,8 @@ def exact_selection(target, runner):
         unit = "candidate-flow-" + filename.rsplit("/", 1)[-1].removeprefix("test_").removesuffix(".py").replace("_", "-")
         rows.append((filename, class_name, unit))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
-    require(len(selected) == 112 and len({(x["file"], x["case"]) for x in selected}) == 112,
-            "Candidate selection must contain 112 unique exact cases")
+    require(len(selected) == 114 and len({(x["file"], x["case"]) for x in selected}) == 114,
+            "Candidate selection must contain 114 unique exact cases")
     return rows, selected
 
 

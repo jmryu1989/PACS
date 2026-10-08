@@ -94,14 +94,15 @@ class TechNoteE2E(WorklistE2E):
   f=self.fixture();p=self.login('tech');self.select(p,f)
   p.locator('#tech-note-open').click();expect(p.locator('#tech-note-text')).to_be_editable()
   p.locator('#tech-note-text').fill('SYNTHETIC Tech communication <b>literal</b>')
-  p.locator('#tech-note-save').click();expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+  p.locator('#tech-note-save').click();expect(p.locator('#tech-note-status')).to_have_text('입력이 v1로 저장되었습니다.')
   p.locator('#tech-note-close').click();p.locator('#tech-note-open').click()
   expect(p.locator('#tech-note-text')).to_have_value('SYNTHETIC Tech communication <b>literal</b>')
   p.locator('#tech-note-text').fill('SYNTHETIC revised');p.locator('#tech-note-reason').fill('correct communication')
   p.route('**/tech-note',lambda route: route.abort() if route.request.method=='POST' else route.continue_())
-  p.locator('#tech-note-save').click();expect(p.locator('#tech-note-status')).to_contain_text('저장 확인 실패')
+  p.locator('#tech-note-save').click();expect(p.locator('#tech-note-status')).to_contain_text('저장 결과를 알 수 없으며')
   expect(p.locator('#tech-note-text')).to_have_value('SYNTHETIC revised')
-  p.unroute('**/tech-note');p.locator('#tech-note-save').click();expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v2')
+  # S8-CTX T08: the read still shows v1, so Save sends the same attempt (same id) once more.
+  p.unroute('**/tech-note');p.locator('#tech-note-save').click();expect(p.locator('#tech-note-status')).to_have_text('입력이 v2로 저장되었습니다.')
   p.locator('#tech-note-history').click();expect(p.locator('#tech-note-history-items section')).to_have_count(2)
   expect(p.locator('#tech-note-history-items')).to_contain_text('<b>literal</b>')
   self.assertEqual(p.locator('#tech-note-history-items b').count(),0)
@@ -137,11 +138,11 @@ class TechNoteE2E(WorklistE2E):
   expect(p.locator('#tech-note-target')).to_contain_text(b.uid)
   expect(p.locator('#rows tr.sel')).to_have_attribute('data-uid',a.uid)
   p.locator('#tech-note-text').fill('SYNTHETIC LIST NOTE');p.locator('#tech-note-save').click()
-  expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+  expect(p.locator('#tech-note-status')).to_have_text('입력이 v1로 저장되었습니다.')
   expect(badge).to_have_text('있음');p.locator('#tech-note-close').click();expect(badge).to_be_focused()
   badge.click();expect(p.locator('#tech-note-text')).to_have_value('SYNTHETIC LIST NOTE')
   p.locator('#tech-note-text').fill('');p.locator('#tech-note-reason').fill('clear list note');p.locator('#tech-note-save').click()
-  expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v2');expect(badge).to_have_text('비움·이력')
+  expect(p.locator('#tech-note-status')).to_have_text('입력이 v2로 저장되었습니다.');expect(badge).to_have_text('비움·이력')
   p.locator('#tech-note-close').click();p.reload();expect(p.locator('#dbstat')).to_contain_text('DB Connected');p.locator('#quick').fill(a.patient_id)
   expect(badge).to_have_text('비움·이력')
   reader=self.login();self.select(reader,a);reader.locator('#findings').fill('UNSAVED READING TARGET')
@@ -163,7 +164,7 @@ class TechNoteE2E(WorklistE2E):
   f=self.fixture();p=self.login('tech');self.select(p,f)
   badge=p.locator(f'[data-tech-note="{f.uid}"]');badge.click()
   p.locator('#tech-note-text').fill('SYNTHETIC local save');p.locator('#tech-note-save').click()
-  expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1');p.locator('#tech-note-close').click()
+  expect(p.locator('#tech-note-status')).to_have_text('입력이 v1로 저장되었습니다.');p.locator('#tech-note-close').click()
   def old_list(route):
    response=route.fetch();body=response.json()
    row=next(r for r in body['studies'] if r['uid']==f.uid)
@@ -172,6 +173,27 @@ class TechNoteE2E(WorklistE2E):
   p.route('**/api/studies?*',old_list);p.locator('#refresh').click()
   expect(p.locator(f'#rows tr[data-uid="{f.uid}"]')).to_contain_text('SYNTHETIC stale list applied')
   expect(badge).to_have_text('있음');p.unroute('**/api/studies?*')
+
+
+ def test_note_09_attempt_ids_idempotent_resend_reuse_and_reads(self):
+  # S8-CTX section 2 on the real API and database: TEST-S8-NOTE-SVR-01..06 against the stack.
+  f=self.fixture();path=self.path(f);attempt=str(uuid.uuid4())
+  body=dict(text='SYNTHETIC attempt note',baseVersion=0,reason='',attemptId=attempt)
+  first=self.stack.request('POST',path,'tech',body);self.assertEqual(first.status,201,first.text)
+  self.assertEqual((first.body['note']['attemptId'],first.body['note']['isOwnAttempt'],first.body['latestNote']['version']),(attempt,True,1))
+  again=self.stack.request('POST',path,'tech',body);self.assertEqual(again.status,201,again.text)
+  self.assertEqual(again.body['note'],first.body['note'])
+  self.assertEqual(psql(f'''SELECT count(*) FROM "TechNoteRevision" WHERE "studyUid"='{f.uid}' '''),['1'])
+  self.assertEqual(psql(f'''SELECT count(*) FROM "AuditLog" WHERE target='{f.uid}' AND action='tech-note.revise' '''),['1'])
+  self.assertEqual(psql(f'''SELECT detail::jsonb->>'attemptId' FROM "AuditLog" WHERE target='{f.uid}' AND action='tech-note.revise' '''),[attempt])
+  self.assertEqual(self.stack.request('POST',path,'tech',dict(body,text='SYNTHETIC other text')).status,400)
+  for bad in ['not-a-uuid',None,attempt.upper()]:
+   self.assertEqual(self.stack.request('POST',path,'tech',dict(text='x',baseVersion=1,reason='r',attemptId=bad)).status,400)
+  other=self.stack.request('POST',path,'tech',dict(text='SYNTHETIC v2',baseVersion=1,reason='second',attemptId=str(uuid.uuid4())));self.assertEqual(other.status,201)
+  latest=self.stack.request('GET',path,'doctor').body['note'];self.assertEqual(latest['isOwnAttempt'],False);self.assertNotIn('authorSub',latest)
+  mine=self.stack.request('GET',path+'/history?before=2','tech').body['items'];self.assertEqual([(i['version'],i['attemptId'],i['isOwnAttempt']) for i in mine],[(1,attempt,True)])
+  late=self.stack.request('POST',path,'tech',body);self.assertEqual((late.status,late.body['note']['version'],late.body['latestNote']['version']),(201,1,2))
+  self.assertEqual(psql(f'''SELECT count(*) FROM "TechNoteRevision" WHERE "studyUid"='{f.uid}' '''),['2'])
 
 
 def load_tests(loader,tests,pattern):

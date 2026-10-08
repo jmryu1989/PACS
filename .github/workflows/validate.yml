@@ -515,7 +515,7 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 8
         run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-session-dom --cwd . --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/finding-link-model.js --file worklist-v0/hpacs-lite/index.html --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/tech-note.js --file worklist-v0/hpacs-lite/viewer-dicom-pdf.js --file worklist-v0/hpacs-lite/viewer-findings.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/volume-mip-job.js --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/work-context.js --file config/ohif.js --file tests/viewer_session_fixture.py --file tests/viewer_session_dom_test.py --file worklist-v0/hpacs-lite/session-transport.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_session_dom_test.py -v
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-session-dom --cwd . --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/finding-link-model.js --file worklist-v0/hpacs-lite/index.html --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/tech-note.js --file worklist-v0/hpacs-lite/viewer-tech-note.js --file worklist-v0/hpacs-lite/viewer-dicom-pdf.js --file worklist-v0/hpacs-lite/viewer-findings.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/volume-mip-job.js --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/work-context.js --file config/ohif.js --file tests/viewer_session_fixture.py --file tests/viewer_session_dom_test.py --file worklist-v0/hpacs-lite/session-transport.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_session_dom_test.py -v
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-resource-guard-dom --cwd . --file tests/viewer_session_fixture.py --file tests/viewer_resource_guard_dom_test.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_resource_guard_dom_test.py
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-clinician-entry-dom --cwd . --file config/ohif.js --file tests/viewer_clinician_entry_dom_test.py --file worklist-v0/hpacs-lite/clinician.html --file proxy/branding/kin-emblem-j1.svg --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/critical-result-inbox.js --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js --file tests/clinician_home_dom_test.py --file worklist-v0/hpacs-lite/index.html -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_clinician_entry_dom_test.py
       - name: S7 stage-exit verdict tool - required-test list resolution and per-requirement verdict (pure)
@@ -528,6 +528,12 @@ jobs:
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-viewer-mutants --file tests/clinician_viewer_mutants.py --file tests/clinician_viewer_dom_test.py --file config/ohif.js --file worklist-v0/hpacs-lite/clinician.js --file tests/document_session.py --file tests/module_session_harness.py --file tests/viewer_session_fixture.py --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/viewer-session.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_viewer_mutants.py
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-request-mutants --file tests/clinician_request_mutants.py --file tests/clinician_request_dom_test.py --file tests/clinician_question_dom_test.py --file worklist-v0/hpacs-lite/main.html --file tests/document_session.py --file tests/module_session_harness.py --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_request_mutants.py
+      - name: S8-CTX viewer context loss and note recovery DOM
+        timeout-minutes: 4
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-context-loss-dom --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js --file worklist-v0/hpacs-lite/viewer-context-loss.js --file worklist-v0/hpacs-lite/viewer-frame-coverage.js --file worklist-v0/hpacs-lite/tech-note.js --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/volume-mip-job.js --file worklist-v0/hpacs-lite/volume-mip-batch.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file tests/viewer_context_loss_fixture.js --file tests/viewer_context_loss_dom_test.py --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-rendering.js --file worklist-v0/hpacs-lite/viewer-volume-sculpt.js --file worklist-v0/hpacs-lite/volume-rendering.js --file worklist-v0/hpacs-lite/volume-sculpt.js --file tests/viewer_vr_binding_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_context_loss_dom_test.py
+      - name: S8-CTX viewer Tech Note write outcomes DOM
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-tech-note-dom --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js --file worklist-v0/hpacs-lite/workspace-shortcuts.js --file worklist-v0/hpacs-lite/tech-note.js --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/viewer_session_fixture.py --file tests/viewer_tech_note_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_tech_note_dom_test.py
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         if: ${{ !cancelled() }}
         timeout-minutes: 28
@@ -1112,6 +1118,37 @@ jobs:
           path: tests/e2e/artifacts/${{ matrix.profile }}-ci/
           if-no-files-found: error
           retention-days: 7
+  context-loss:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
+      - name: Install pinned synthetic stack test dependencies
+        timeout-minutes: 15
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ctx-python"
+          "$RUNNER_TEMP/ctx-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/ctx-python/bin/python" -m playwright install --with-deps chromium
+      - name: Run context recovery profile on an empty hosted daemon
+        timeout-minutes: 28
+        run: '"$RUNNER_TEMP/ctx-python/bin/python" tests/measurement_ci.py --profile context-loss'
+      - name: Sanitized context recovery evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-context-loss
+          path: tests/e2e/artifacts/context-loss-ci/
+          if-no-files-found: error
+          retention-days: 7
   hanging-protocols:
     # A separate job, not extra suites inside measurements: the four hanging-protocol
     # suites must not consume that job's budget, and each profile needs its own fresh
@@ -1534,6 +1571,22 @@ jobs:
             sleep 1
           done
           python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-draft-cas --cwd . --file api/src/pacs.service.ts --file api/src/pacs.controller.ts --file api/src/auth.service.ts --file api/prisma/schema.prisma --file api/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql --file tests/report_draft_cas_service_test.cjs -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_REPORT_DRAFT_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_report_draft_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_draft_cas_service_test.cjs
+      - name: S8-CTX context event admission and audit attribution
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/viewer-context-event --file api/src/viewer-context-event.service.ts --file api/src/viewer.controller.ts --file api/src/viewer-input.ts --file api/src/pacs.service.ts --file api/src/study-access.service.ts --file api/src/clinician-policy.ts --file api/src/admin-audit.ts --file tests/viewer_context_event_service_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_context_event_service_test.cjs
+      # S8-CTX (TEST-S8-NOTE-SVR-01..14): the compiled Tech Note handlers and PacsService over a disposable postgres:16-alpine
+      # of the same shape as the step above - a revision keeps its save attempt id, the same attempt resent answers its
+      # revision without a new revision or audit row, the id reused for another request is 400, one id on two studies meets
+      # the unique index (400, never 500), the id lookup after the permission checks, revision and audit row in one
+      # transaction. The run directory is also named in the upload list below.
+      - name: S8-CTX compiled Tech Note save attempts - attempt id, idempotent resend, id reuse, unique index, audit in the transaction
+        run: |
+          db="$(docker run -d --network none --tmpfs /var/lib/postgresql/data -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=kin_tech_note_test postgres:16-alpine)"
+          trap 'docker rm -f "$db" > /dev/null' EXIT
+          for attempt in $(seq 1 90); do
+            if docker exec "$db" psql -h 127.0.0.1 -U postgres -d kin_tech_note_test -c 'SELECT 1' > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          python3 scripts/record-run.py --run-dir tmp/runtime-ci/tech-note-attempt --cwd . --file api/src/pacs.service.ts --file api/src/pacs.controller.ts --file api/src/study-access.service.ts --file api/src/admin-audit.ts --file api/prisma/schema.prisma --file api/prisma/migrations/20261006000000_tech_note_attempt_id/migration.sql --file tests/tech_note_attempt_service_test.cjs -- docker run --rm --network "container:$db" --read-only --tmpfs /tmp:rw,size=64m -e KIN_TECH_NOTE_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin_tech_note_test -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/tech_note_attempt_service_test.cjs
       # S7-U1a SV11, the source half (S7-U1a-R-001-F03): TypeScript's compiler API reads api/src/critical-result*.ts in the
       # development target (its build layers are the ones the production build above just made) and PostgreSQL 16 plans
       # each raw query on a disposable postgres:16-alpine holding every migration.
@@ -1651,6 +1704,8 @@ jobs:
             tmp/runtime-ci/audit-store-db/
             tmp/runtime-ci/auth-session-service/
             tmp/runtime-ci/report-draft-cas/
+            tmp/runtime-ci/tech-note-attempt/
+            tmp/runtime-ci/viewer-context-event/
           if-no-files-found: error
           retention-days: 7
       # The list above names directories one by one and missed later record-run steps (display-scope, viewer-branding,

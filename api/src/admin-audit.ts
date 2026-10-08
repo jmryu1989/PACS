@@ -40,6 +40,7 @@ export const AUDIT_FIELD_RULES: Readonly<Record<string, AuditFieldSource>> = Obj
   "reader.assignment": 'detail.institution',      // 소유 기관만 배정한다
   "study.access": 'detail.institution',           // 정책 기관, 쓸 때 대상 회원이 그 기관 소속이었다
   "study.consultation": 'detail.institution',     // 소유 기관만 의뢰한다
+  "viewer-context.event": 'detail.institution',
   "hanging-protocol.site.save": 'target',         // target이 기관 id다
   "hanging-protocol.site.reset": 'target',
   // S7-U5 접속기록: 사건 시점 토큰의 그룹이 정확히 하나일 때의 기관(로그인은 검증한 토큰, 종료는 지운 세션의 저장 토큰,

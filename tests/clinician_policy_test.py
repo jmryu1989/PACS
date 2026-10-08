@@ -1598,7 +1598,7 @@ class ClinicianPolicySpec(unittest.TestCase):
         # (contract S7-U1p section 6.3); anything else that is not a GET is a new decision.
         self.assertEqual(len(FIXTURES["business_routes"]), len(set(FIXTURES["business_routes"])))
         self.assertEqual([k for k in FIXTURES["business_routes"] if not k.startswith("GET ")],
-                         ["POST dicom/lookup", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
+                         ["POST studies/:uid/viewer-context-events", "POST dicom/lookup", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
                           "POST studies/:uid/image-requests", "POST image-requests/:id", "POST critical-results/:id/ack"])
         self.assertTrue({"GET authz/dicom", "POST dicom/lookup"} <= set(FIXTURES["business_routes"]),
                         "the viewer read pair is allowed together or not at all")
@@ -2862,9 +2862,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
         # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
         # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
-        # (137 = 7 + 2 + 20 + 108)
+        # (138 = 7 + 2 + 21 + 108)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (137, 7, 2, 20, 108), "the real inventory is unchanged: 137 = 7 + 2 + 20 + 108")
+                         (138, 7, 2, 21, 108), "the real inventory is unchanged: 138 = 7 + 2 + 21 + 108")
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
@@ -3130,9 +3130,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
         # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
         # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
-        # (137 = 7 + 2 + 20 + 108)
+        # (138 = 7 + 2 + 21 + 108)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (137, 7, 2, 20, 108), "the real inventory is unchanged: 137 = 7 + 2 + 20 + 108")
+                         (138, 7, 2, 21, 108), "the real inventory is unchanged: 138 = 7 + 2 + 21 + 108")
         contract = CONTRACT["regex_or_division"]
         self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
                           sorted(UNREAD_PUNCT)),
@@ -3310,9 +3310,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         # route metadata in the S7-U1a fix1 evidence); S7-U4a: GET studies/:uid/clinical-context denied (125 = 4 + 2 + 17 + 102);
         # both, after the S7-U1a merge of main 3ef7a2c: 133 = 4 + 2 + 20 + 107 (the compiled merged app's Nest route metadata);
         # S7-U5: POST auth/entry, POST auth/login and POST auth/register public, GET studies/:uid/draft denied
-        # (137 = 7 + 2 + 20 + 108)
+        # (138 = 7 + 2 + 21 + 108)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (137, 7, 2, 20, 108), "the real inventory is unchanged: 137 = 7 + 2 + 20 + 108")
+                         (138, 7, 2, 21, 108), "the real inventory is unchanged: 138 = 7 + 2 + 21 + 108")
         contract = CONTRACT["class_heading"]
         # every class keyword of api/src has a heading class_heading reads, and no controller file's class extends
         keywords, extending = 0, set()

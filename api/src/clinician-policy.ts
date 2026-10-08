@@ -44,6 +44,7 @@ export const CLINICIAN_SESSION_ROUTES: readonly string[] = Object.freeze(['GET m
  * 초안·오더·상용구·작성자 칸이나 확정 전 본문을 싣는 응답이다.
  */
 export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([
+  'POST studies/:uid/viewer-context-events',
   'GET authz/dicom', 'POST dicom/lookup', 'GET studies/:uid/viewer-items',
   'GET clinician/studies', 'GET clinician/studies/:uid/report', 'GET clinician/studies/:uid/timeline',
   // S5-U4a

@@ -250,6 +250,8 @@ model TechNoteRevision {
   authorSub String
   institutionId String
   createdAt DateTime @default(now())
+  /// The screen's save attempt that wrote this revision (S8-CTX); NULL for revisions written before attempts had ids.
+  attemptId String? @unique @db.Uuid
   study StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict)
   @@id([studyUid, version])
 }

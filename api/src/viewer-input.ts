@@ -87,6 +87,27 @@ function positive(value: any): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > 2147483647) invalid();
   return value;
 }
+// Fixed vocabulary only: no report, note, description, arbitrary error or caller identity.
+export function viewerContextEvent(raw: Buffer) {
+  const body = viewerJson(raw);
+  object(body, ['eventId', 'faultId', 'stage', 'occurredAt', 'engine', 'viewport', 'cause', 'repeatCount', 'attempt', 'reason', 'result']);
+  viewerUuid(body.eventId); viewerUuid(body.faultId);
+  const oneOf = (value: any, values: string[]) => { if (!values.includes(value)) invalid('영상 장애 기록 필드가 올바르지 않습니다'); };
+  oneOf(body.stage, ['loss', 'manual-retry', 'refused', 'recovery-result']);
+  oneOf(body.engine, ['webgl', 'unknown']);
+  oneOf(body.viewport, ['stack', 'orthographic', 'volume3d', 'unknown']);
+  oneOf(body.cause, ['context-lost', 'unknown']);
+  oneOf(body.reason, ['none', 'session-ended', 'preparing', 'unknown', 'busy', 'save-unknown', 'guard-unavailable', 'dirty', 'account', 'request', 'coverage', 'marker']);
+  oneOf(body.result, ['succeeded', 'failed', 'unknown']);
+  if (typeof body.occurredAt !== 'string' || body.occurredAt.length !== 24 ||
+      !Number.isFinite(Date.parse(body.occurredAt)) || new Date(body.occurredAt).toISOString() !== body.occurredAt) invalid();
+  positive(body.repeatCount);
+  if (!Number.isSafeInteger(body.attempt) || body.attempt < 0 || body.attempt > 2147483647) invalid();
+  return { eventId: body.eventId as string, faultId: body.faultId as string, stage: body.stage as string,
+    occurredAt: body.occurredAt as string, engine: body.engine as string, viewport: body.viewport as string,
+    cause: body.cause as string, repeatCount: body.repeatCount as number, attempt: body.attempt as number,
+    reason: body.reason as string, result: body.result as string };
+}
 export interface ViewerItemInput {
   schemaVersion: 1; kind: 'arrow' | 'key' | 'length' | 'angle' | 'ellipse'; seriesUid: string; sopUid: string; frame: number;
   frameOfReferenceUid?: string; label?: string; points?: number[][]; title?: string; description?: string;

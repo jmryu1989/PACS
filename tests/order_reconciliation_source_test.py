@@ -469,7 +469,7 @@ class MigrationPins(unittest.TestCase):
         # the restore fixture applies every migration directory, in order: its list compared as data
         # (S7-U1a-B-R-001-F03: not the text of ops_product_transfer_test.py's count assertion)
         self.assertEqual(restore_fixture.MIGRATIONS, ["api/prisma/migrations/" + name + "/migration.sql" for name in names])
-        self.assertEqual(len(restore_fixture.MIGRATIONS), 41)
+        self.assertEqual(len(restore_fixture.MIGRATIONS), 42)
         later =[MIGRATION_NAME, "20260924130000_gateway_receipt", "20260924140000_gateway_retry_request"]
         self.assertEqual(names[names.index(MIGRATION_NAME):names.index(MIGRATION_NAME) + 3], later)
 

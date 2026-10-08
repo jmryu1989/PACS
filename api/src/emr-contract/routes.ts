@@ -83,6 +83,11 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['GET studies/:uid/reader-assignment'] },
   { kinds: ['access-audit'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET audit', 'GET admin/audit'] },
+  // S8-CTX: the viewer reports a context-loss/recovery event about a study it was admitted to read; the server keeps one
+  // access-audit row (viewer-context.event) and writes no clinical record. The page posts it on its own after the loss or
+  // on the person's recovery action, so both causes are real.
+  { kinds: ['access-audit'], operation: 'write', causes: ['user-view', 'background-fetch'],
+    routes: ['POST studies/:uid/viewer-context-events'] },
   { kinds: ['clinical-context', 'report-version', 'tech-note', 'study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET studies/:uid/clinical-context'] },
   { kinds: ['report-version', 'report-head', 'key-image', 'study-metadata'], operation: 'read', causes: ['user-view', 'background-fetch'],

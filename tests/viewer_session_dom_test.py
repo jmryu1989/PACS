@@ -1444,7 +1444,8 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.notice("session-preparing")
         view.wait_for_timeout(50)
         stored["note"]={"studyUid": "1.2.3", "text": "unsaved original", "version": 1,
-                        "author": "synthetic", "createdAt": "2026-10-04T00:00:00Z"}
+                        "author": "synthetic", "createdAt": "2026-10-04T00:00:00Z",
+                        "attemptId": held[-1].request.post_data_json["attemptId"], "isOwnAttempt": True}
         held.pop().fulfill(json={"uid": "1.2.3", "writable": True, **stored})
         view.wait_for_timeout(100)
         self.assertEqual(view.locator("#tech-note-text").input_value(), "unsaved original")
@@ -1454,7 +1455,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.assertEqual(view.locator("#tech-note-text").input_value(), "unsaved original")
         # The resumed document confirms the old write by reading it, without a repair prompt.
         status = view.locator("#tech-note-status").inner_text()
-        self.assertEqual("저장되었습니다. v1", status)
+        self.assertEqual("앞선 입력은 v1로 저장되었습니다.", status)  # S8-CTX T15 sentence
         self.assertTrue(view.get_by_role("button", name="Save Note", exact=True).is_enabled())
 
     def test_pause_retires_cancelled_timers_and_defers_an_xhr_completion(self):
@@ -1740,7 +1741,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.assertEqual((self.unsaved_declared(), self.ask_unsaved()), ([], [['S1', []]]),
                          "a Tech Note window that is only opening would be asked about at Log out")
         opening.fulfill(json={"uid": "1.2.3", "writable": True, "note": None})
-        view.wait_for_function("document.querySelector('#tech-note-status')?.textContent.includes('명시적으로 저장')")
+        view.wait_for_function("document.querySelector('#tech-note-status')?.textContent.includes('마지막으로 확인한 메모')")
         # Its history is loading: still nothing.
         view.locator("#tech-note-history").click()
         history = held_read()
@@ -1748,7 +1749,7 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.assertEqual((self.unsaved_declared(), self.ask_unsaved()), ([], [['S1', []]]),
                          "a Tech Note window loading its history would be asked about at Log out")
         history.fulfill(json={"uid": "1.2.3", "items": [], "nextBefore": None})
-        view.wait_for_function("document.querySelector('#tech-note-status')?.textContent.includes('이력이 없습니다')")
+        view.wait_for_function("document.querySelector('#tech-note-status')?.textContent.includes('저장 이력이 없으며')")
         # Open and clean: nothing is declared, so Log out would ask nothing.
         view.wait_for_timeout(700)
         self.assertEqual((self.unsaved_declared(), self.ask_unsaved()), ([], [['S1', []]]))
@@ -1771,8 +1772,10 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.assertEqual(1, len(held))
         view.wait_for_timeout(700)
         self.assertEqual(self.unsaved_declared(), ['note'], "DR-F04: the Tech Note save that is out was not declared")
-        held.pop().fulfill(json={"uid": "1.2.3", "writable": True, "note": {
-            "studyUid": "1.2.3", "text": "SYN unsaved note", "version": 1, "author": "syn", "createdAt": "2026-10-05T00:00:00Z"}})
+        write = held.pop()
+        receipt = {"studyUid": "1.2.3", "text": "SYN unsaved note", "reason": "", "version": 1, "author": "syn",
+                   "createdAt": "2026-10-05T00:00:00Z", "attemptId": write.request.post_data_json["attemptId"], "isOwnAttempt": True}
+        write.fulfill(json={"uid": "1.2.3", "writable": True, "note": receipt, "latestNote": receipt})
         view.wait_for_function("document.querySelector('#tech-note-status')?.textContent.includes('저장되었습니다')")
         self.wait_declared([])
         # Typed again, then the session ends: nothing stays declared and the window no longer offers the note's state.
@@ -1781,6 +1784,47 @@ class ViewerSessionDOMTest(unittest.TestCase):
         self.notice('session-ended')
         self.wait_declared([])
         self.assertEqual(self.ask_unsaved(), [])
+
+    def test_a_tech_note_save_answered_5xx_stays_declared_until_a_read_settles_it(self):
+        """S8-CTX rebase of DR-F01: a save whose answer is a 5xx has an unknown result (it may be stored). The viewer's
+        note stays declared to Log out until a read finds the revision carrying that attempt's id; an older read does
+        not settle it. No write is repeated by itself."""
+        self.extra_html = '<div id="kin-viewer-layout"></div>'
+        view = self.open_viewer()
+        view.wait_for_function('window.started===true')
+        server = {"note": None, "visible": False, "posts": []}
+        def note(route):
+            if route.request.method == "POST":
+                body = route.request.post_data_json
+                server["posts"].append(body)
+                server["note"] = {"studyUid": "1.2.3", "version": 1, "text": body["text"], "reason": "", "author": "syn",
+                                  "createdAt": "2026-10-05T00:00:00Z", "attemptId": body["attemptId"], "isOwnAttempt": True}
+                return route.fulfill(status=503, json={"message": "SYN gateway"})
+            route.fulfill(json={"uid": "1.2.3", "writable": True, "note": server["note"] if server["visible"] else None})
+        view.route(BASE + "/api/me", lambda route: route.fulfill(json=self.ME))
+        view.route(BASE + "/api/studies/1.2.3/tech-note", note)
+        for name in ("tech-note.js", "viewer-tech-note.js"):
+            view.add_script_tag(path=str(HPACS / name))
+        self.assertTrue(view.evaluate(self.NOTE_SERVICES))
+        view.wait_for_function("document.querySelector('#kin-viewer-note-status')?.textContent.includes('검사 메모')")
+        view.locator("#kin-viewer-note-open").click()
+        view.wait_for_function("document.querySelector('#tech-note-status')?.textContent.includes('마지막으로 확인한 메모')")
+        view.locator("#tech-note-text").fill("SYN note answered 503")
+        view.locator("#tech-note-save").click()
+        view.wait_for_function("document.querySelector('#tech-note-status')?.textContent.includes('저장 결과를 알 수 없으며')")
+        self.wait_declared(['note'])
+        self.assertEqual(self.ask_unsaved(), [['S1', ['note']]])
+        # An older read (the revision not visible yet) leaves the result unknown: still declared.
+        view.locator("#tech-note-reload").click()
+        view.wait_for_function("document.querySelector('#tech-note-status')?.textContent.includes('아직 확인되지 않았으며')")
+        view.wait_for_timeout(700)
+        self.assertEqual(self.unsaved_declared(), ['note'])
+        # The read that shows this attempt's revision settles it: the declaration is withdrawn.
+        server["visible"] = True
+        view.locator("#tech-note-reload").click()
+        view.wait_for_function("document.querySelector('#tech-note-status')?.textContent.includes('앞선 입력은 v1로 저장되었습니다')")
+        self.wait_declared([])
+        self.assertEqual(len(server["posts"]), 1)
 
 
 if __name__ == "__main__":

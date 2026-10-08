@@ -114,6 +114,7 @@ CONTRACT.synthetic_vectors.push({"row":31,"action":"study.question","rule":"hidd
  * the stored token of the session that ended), never the member's group now. Vectors 32-41 continue the numbering; the
  * card block above stays verbatim. */
 const AUTH_MEANING = "record-time institution from the token groups at the event";
+CONTRACT.field_rules['viewer-context.event'] = {source:'detail.institution',meaning:'verified viewer actor institution at event receipt'};
 Object.assign(CONTRACT.field_rules, {"auth.login":{"source":"detail.institution","meaning":AUTH_MEANING},
   "auth.logout":{"source":"detail.institution","meaning":AUTH_MEANING},
   "auth.session.expired":{"source":"detail.institution","meaning":AUTH_MEANING},
@@ -993,6 +994,15 @@ function typescript() {
     previous: undefined, product: null };
   return compiler;
 }
+
+// A context event belongs to its recorded institution, regardless of current ownership or source spelling.
+test('context event audit projection uses the recorded institution and withholds unscoped rows', () => {
+  const event = row(42, 'viewer-context.event', S1, {institution:'inst-a', stage:'loss', cause:'context-lost'});
+  assert.equal(A.projectAuditRow(event, 'inst-b'), null);
+  assert.equal(A.projectAuditRow(event, 'inst-a').detail.stage, 'loss');
+  for (const detail of [{}, {institution:null}, {institution:''}, {by:'inst-a'}])
+    assert.equal(A.projectAuditRow({...event, detail:JSON.stringify(detail)}, 'inst-a'), null);
+});
 
 /** Every entry under `dir` as found on the disk (anything that is neither a file nor a directory is named as such). */
 function onDisk(dir) {

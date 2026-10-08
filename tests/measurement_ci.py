@@ -30,6 +30,12 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'CineE2E', 'VolumeCineE2E',
                  'FindingAPI', 'FindingNavigationE2E', 'FindingWorklistE2E', 'DictationLiveE2E']
 PROFILES = {
+    'context-loss': {
+        'out': ROOT / 'tests/e2e/artifacts/context-loss-ci',
+        'project_prefix': 'kin-context-loss-ci-',
+        'suite_timeout': 1200,
+        'suites': (('e2e/test_context_loss.py', 'ContextLossE2E', 'ci-context-loss'),),
+    },
     'u5-session-api': {
         'out': ROOT / 'tests/e2e/artifacts/u5-session-api-ci',
         'project_prefix': 'kin-u5-session-api-ci-',
