@@ -148,7 +148,7 @@
     },
     {
       "id": "REQ-S7-U5-AUTH-AUDIT",
-      "statement": "로그인·진입·로그아웃·만료와 DB 회원 권한 명령은 주체·기관·결과를 감사와 함께 확정하고 자격증명은 기록하지 않는다. 접속 IP는 프록시에서 오며 보존 체크포인트의 retain_until은 최소 달력 2년이다.",
+      "statement": "로그인·진입·로그아웃·만료와 DB 회원 권한 명령은 주체·기관·결과와 서버 시각을 감사에 남기고 조회 시 시간대를 명시하며 자격증명은 기록하지 않는다. 로그인·로그아웃의 저장 시각은 서버 관측 시각 및 사건 순서와 일치한다. 접속 IP는 프록시에서 오며 보존 체크포인트의 retain_until은 최소 달력 2년이다.",
       "tests": [
         "node:tests/auth_session_service_test.cjs",
         "auth_audit_live.AuthAuditLive.test_01_login_success_row_and_no_secret",
@@ -160,6 +160,7 @@
         "auth_audit_live.AuthAuditLive.test_07_admins_read_record_time_institutions_only",
         "auth_audit_live.AuthAuditLive.test_08_login_failures_of_this_servers_logins_only",
         "auth_audit_live.AuthAuditLive.test_10_a_session_ended_on_the_dicom_path_records_the_proxys_address",
+        "auth_audit_live.AuthAuditLive.test_11b_login_logout_server_time_and_timezone",
         "admin_audit_dom_test.AdminAuditDOMTest.test_ad01_access_rows_are_drawn_like_any_field_row",
         "admin_audit_dom_test.AdminAuditDOMTest.test_ad02_the_access_history_sentence_follows_what_this_page_session_painted",
         "ops_audit_integrity_test.AuditIntegrityPure.test_pv06_calendar_retention_and_plan_years"
