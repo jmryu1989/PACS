@@ -971,11 +971,11 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         page=self.access_page()
         page.evaluate('async()=>{await sim.advance(3000);sim.delay=500;}')
         peer=self.session_preparation_peer(page)
-        page.wait_for_function("KinWorkContext.state()==='preparing'", polling=20)
+        self.wait_for_session_state(page, 'preparing')
         self.assert_surface(page,True)
         page.evaluate('async()=>{await sim.advance(1000);window.beforeResume=sim.requests.length;}')
         peer.evaluate("release();channel.postMessage({type:'session-resumed',session:'S1',preparation:'P1'})")
-        page.wait_for_function("KinWorkContext.state()==='active'", polling=20)
+        self.wait_for_session_state(page, 'active')
         result=page.evaluate("""async()=>{
           const atResume=sim.covered();sim.frame();const drawnAtResume=frameLog.at(-1).drawn;
           const requested=sim.requests.slice(beforeResume).map(r=>r.at-sim.now);
@@ -1095,13 +1095,13 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                 }""",transition)
                 if transition=='session':
                     peer=self.session_preparation_peer(page)
-                    page.wait_for_function("KinWorkContext.state()==='preparing'", polling=20)
+                    self.wait_for_session_state(page, 'preparing')
                 self.assert_surface(page,True)
                 page.evaluate('async()=>await sim.advance(6000)')
                 self.assertEqual(page.evaluate('before'),page.evaluate('sim.requests.length'))
                 if transition=='session':
                     peer.evaluate("release();channel.postMessage({type:'session-resumed',session:'S1',preparation:'P1'})")
-                    page.wait_for_function("KinWorkContext.state()==='active'", polling=20)
+                    self.wait_for_session_state(page, 'active')
                 result=page.evaluate("""async transition=>{
                   if(transition==='page')window.dispatchEvent(new Event('pageshow'));
                   if(transition==='visibility')sim.visibility('visible');
@@ -1126,9 +1126,20 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         }""")
         self.assertEqual({'hiddenCovered':True,'covered':True,'requests':2,'afterAnswer':False},result)
 
+    def wait_for_session_state(self, page, expected):
+        # ACCESS_CLOCK owns both rAF and setTimeout. wait_for_function can queue
+        # its next poll on that frozen clock even after the real session resumed.
+        # Observe from the host without advancing access expiry or releasing frames.
+        deadline = time.monotonic() + 30
+        while True:
+            actual = page.evaluate('KinWorkContext.state()')
+            if actual == expected:
+                return
+            if time.monotonic() >= deadline:
+                self.fail(f'session state stayed {actual!r}; expected {expected!r}')
+            time.sleep(.02)
+
     def session_preparation_peer(self,page):
-        # Poll session transitions on wall time: ACCESS_CLOCK deliberately owns
-        # requestAnimationFrame, so an rAF-based assertion can itself stay paused.
         peer=page.context.new_page();self.addCleanup(peer.close)
         peer.route('https://vr-binding.test/peer',lambda r:r.fulfill(body='<p>peer</p>',content_type='text/html'))
         peer.goto('https://vr-binding.test/peer')
@@ -1351,7 +1362,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
             window.release=release;done();})));
           channel.postMessage({type:'session-preparing',session:'S1',preparation:'P1'});
         }""")
-        page.wait_for_function("KinWorkContext.state()==='preparing'", polling=20)
+        self.wait_for_session_state(page, 'preparing')
         expect(page.get_by_role('alert')).to_contain_text('세션 변경')
         self.assert_surface(page,True)
         result=page.evaluate("""async()=>{
@@ -1362,7 +1373,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         self.assertEqual({'requests':0,'frames':0,'open':True,'message':''},result)
         page.evaluate('sim.jobsBodyDelay=0')
         other.evaluate("release();channel.postMessage({type:'session-resumed',session:'S1',preparation:'P1'})")
-        page.wait_for_function("KinWorkContext.state()==='active'", polling=20)
+        self.wait_for_session_state(page, 'active')
         page.evaluate("async()=>{await sim.flush();sim.frames()}")
         self.assert_surface(page,True)
         page.evaluate("async()=>{await sim.advance(2000);sim.frames()}")
@@ -1394,7 +1405,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                   inputs:[...document.querySelectorAll('#kin-volume-rendering input')].map(e=>e.value)})"""
                 before=page.evaluate(snapshot)
                 peer=self.session_preparation_peer(page)
-                page.wait_for_function("KinWorkContext.state()==='preparing'",polling=20)
+                self.wait_for_session_state(page, 'preparing')
                 page.mouse.up()
                 page.evaluate("""clock=>{
                   sim.silent=true;window.beforePause=sim.requests.length;
@@ -1405,7 +1416,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                 self.assertEqual(page.evaluate('beforePause'),page.evaluate('sim.requests.length'))
                 self.assertEqual(before,page.evaluate(snapshot))
                 peer.evaluate("release();channel.postMessage({type:'session-resumed',session:'S1',preparation:'P1'})")
-                page.wait_for_function("KinWorkContext.state()==='active'",polling=20)
+                self.wait_for_session_state(page, 'active')
                 page.evaluate("sim.wallOffset=0;dispatchEvent(new Event('pageshow'));sim.frame()")
                 self.assert_surface(page,True,outline=True)
                 self.assertFalse(page.evaluate('frameLog.at(-1).drawn'))
@@ -1435,7 +1446,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         self.addCleanup(page.close);self.open_ready(page)
         page.evaluate('async()=>{sim.jobsBodyDelay=5000;await sim.advance(10000)}')
         peer=self.session_preparation_peer(page)
-        page.wait_for_function("KinWorkContext.state()==='preparing'",polling=20)
+        self.wait_for_session_state(page, 'preparing')
         self.assert_surface(page,True)
         peer.evaluate("""()=>{
           localStorage.setItem('kin-session-end:S1',JSON.stringify({session:'S1',operation:1,status:'confirmed'}));
