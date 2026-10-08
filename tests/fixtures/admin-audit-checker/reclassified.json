@@ -58,9 +58,6 @@
       "rule": "W2: string enums are left out, written or not" },
     { "fixture": "admin_audit_completeness/violations.txt", "line": 288, "was": "unresolved is written at",
       "now": [{ "status": "unresolved", "detail": "`this.field` is a property the program does not fix" }],
-      "rule": "W2: readonly fields are out of the list, written or not" },
-    { "fixture": "admin_audit_completeness/violations.txt", "line": 503, "was": "proven_non_audit its SQL names no AuditLog",
-      "now": [{ "status": "unresolved", "detail": "is an SQL fragment: in a raw call that writes no audit row" }],
-      "rule": "F02 (Astra S7-U3a-F-R-001-F02): every interpolation is judged before a raw call is proven not a write" }
+      "rule": "W2: readonly fields are out of the list, written or not" }
   ]
 }

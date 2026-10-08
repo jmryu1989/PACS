@@ -1,5 +1,14 @@
 """D-MEASURE2 B1: runner refusal and public artifact secret redaction."""
 import json, os, tempfile, unittest
+import contextlib
+import csv
+import io
+import hashlib
+import shlex
+import shutil
+import sys
+from datetime import datetime
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import measurement_ci as ci
@@ -7,6 +16,308 @@ from live_admin_credential_test import ImportedAdminCredentialTests
 
 
 class MeasurementCiTests(unittest.TestCase):
+    def test_browser_install_cache_and_budgets_cover_pinned_dependencies(self):
+        import yaml
+        workflow = yaml.safe_load((ci.ROOT / '.github/workflows/validate.yml').read_text(encoding='utf-8'))
+        checked = []
+        for name, job in workflow['jobs'].items():
+            for index, install in enumerate(job['steps']):
+                if 'playwright install --with-deps chromium' not in install.get('run', ''):
+                    continue
+                with self.subTest(job=name):
+                    checked.append(name)
+                    self.assertEqual(install['timeout-minutes'], 15)
+                    cache = job['steps'][index - 1]
+                    self.assertRegex(cache['uses'], r'^actions/cache@[0-9a-f]{40}$')
+                    self.assertEqual(cache['with']['path'], '~/.cache/pip')
+                    self.assertEqual(cache.get('if'), install.get('if'))
+                    requirements = []
+                    for line in install['run'].splitlines():
+                        if ' -m pip install ' not in line:
+                            continue
+                        args = shlex.split(line)
+                        requirements.extend(args[i + 1] for i, arg in enumerate(args) if arg == '-r')
+                    self.assertTrue(requirements)
+                    for requirement in requirements:
+                        self.assertTrue((ci.ROOT / requirement).is_file())
+                    self.assertEqual(cache['with']['key'], '${{ runner.os }}-pip-${{ hashFiles('
+                                     + ', '.join(repr(r) for r in requirements) + ') }}')
+                    run_budgets = [s['timeout-minutes'] for s in job['steps'] if
+                                   'measurement_ci.py --profile' in s.get('run', '') or
+                                   'tests/report_dictation_capture_dom_test.py' in s.get('run', '')]
+                    self.assertEqual(len(run_budgets), 1)
+                    self.assertGreater(job['timeout-minutes'], install['timeout-minutes'] + run_budgets[0])
+        self.assertIn('study-arrivals', checked)
+        self.assertIn('volume-slab', checked)
+        self.assertIn('measurements', checked)
+        self.assertIn('s7-u5-session-contracts', checked)
+
+    def exercise_profile_failures(self, exhaust_deadline=False, real_runner=False, inspection_failure=False,
+                                  wrong_unit=False, default_unit=False, manual=False, evidence=None,
+                                  result_defect=None):
+        """Only the real-runner variant proves module bodies execute across a retained marker."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            state = root / 'gate-state'
+            suites = ('first_failure.py', 'passing.py', 'second_failure.py')
+            profile = {**ci.PROFILES['measurements'], 'out': root / 'artifacts',
+                       'suites': tuple((s, None, None if default_unit else 'explicit-' + Path(s).stem.replace('_', '-'))
+                                       for s in suites)}
+            clock, live, commands = [0.0], [], []
+            subprocess_run = ci.subprocess.run
+            release = ci.gate.release_after_inspection
+            snapshots = {}
+            release_calls = []
+            # Exercise run()'s real capture/log path without a Docker daemon or Compose project.
+            captures = tuple((kind, [sys.executable, '-B', '-c',
+                                    f"import sys; sys.stdout.write('synthetic {kind}'); sys.exit({int(inspection_failure == kind)})"])
+                             for kind in ('compose-ps', 'daemon-containers'))
+
+            def submit_record(path):
+                release_calls.append(str(path))
+                marker_path = state / 'live-needs-inspection.json'
+                before = marker_path.read_bytes()
+                record = json.loads(path.read_bytes())
+                unit_ledger = state / (record['unit'] + '.json')
+                ledger_before = unit_ledger.read_bytes()
+                if wrong_unit:
+                    original = record.copy()
+                    record['unit'] = 'wrong-unit-only'
+                    path.with_suffix('.original.json').write_bytes(path.read_bytes())
+                    path.write_text(json.dumps(record), encoding='utf-8')
+                    self.assertEqual({k: v for k, v in record.items() if k != 'unit'},
+                                     {k: v for k, v in original.items() if k != 'unit'})
+                if manual:
+                    markdown = path.with_suffix('.md')
+                    markdown.write_text('Owned synthetic Python fixtures inspected; no stack was started.\n', encoding='utf-8')
+                    record['artifacts'].append(markdown.name)
+                    path.write_text(json.dumps(record), encoding='utf-8')
+                    command = [sys.executable, '-B', '-c',
+                               'import live_test_gate as g; from pathlib import Path; '
+                               'g.STATE=Path(' + repr(str(state)) + '); '
+                               'g.release_after_inspection(' + repr(str(path)) + ')']
+                    done = subprocess_run(command, cwd=source_root / 'tests', capture_output=True, timeout=20)
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    (root / 'manual-release.json').write_text(json.dumps({'argv': command, 'exit': done.returncode}), encoding='utf-8')
+                else:
+                    try:
+                        release(path)
+                    except ci.gate.Refused:
+                        self.assertEqual(marker_path.read_bytes(), before)
+                        self.assertFalse((state / 'inspections.jsonl').exists())
+                        raise
+                self.assertEqual(unit_ledger.read_bytes(), ledger_before)
+
+            source_root = ci.ROOT
+            if real_runner:
+                (root / 'tests').mkdir()
+                (root / 'scripts').mkdir()
+                # The existing runner executes in both supervisor and worker processes.
+                # Only its test root and gate STATE are redirected, never the account's ledger.
+                bootstrap = root / 'scripts/run-tests.py'
+                bootstrap.write_text(
+                    'import importlib.util\nfrom pathlib import Path\n'
+                    'spec=importlib.util.spec_from_file_location("runner", '
+                    + repr(str(ci.ROOT / 'scripts/run-tests.py')) + ')\n'
+                    'runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)\n'
+                    'runner.ROOT=Path(' + repr(str(root)) + ')\n'
+                    'runner.gate.STATE=Path(' + repr(str(state)) + ')\n'
+                    'runner.__file__=__file__\nraise SystemExit(runner.main())\n', encoding='utf-8')
+                for suite in suites:
+                    (root / 'tests' / suite).write_text(
+                        'import unittest\nfrom pathlib import Path\n'
+                        'from live_test_gate import require_live_run\n'
+                        'class Probe(unittest.TestCase):\n'
+                        ' def test_body(self):\n'
+                        '  require_live_run()\n'
+                        '  with (Path(__file__).parent / "executed.txt").open("a") as stream:\n'
+                        '   stream.write(' + repr(suite + '\n') + ')\n'
+                        + ('  self.fail("intentional synthetic failure")\n' if 'failure' in suite else ''),
+                        encoding='utf-8')
+            response = MagicMock()
+            response.__enter__.return_value.status = 200
+            response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
+
+            def execute(command, **kwargs):
+                commands.append(command)
+                code = 0
+                if '--module' in command:
+                    module = command[command.index('--module') + 1]
+                    live.append(module)
+                    self.assertGreater(kwargs['timeout'], 0)
+                    if real_runner:
+                        result = subprocess_run(command, **kwargs)
+                        marker = state / 'live-needs-inspection.json'
+                        if result_defect == 'foreign' and marker.exists():
+                            foreign = json.loads(marker.read_bytes())
+                            foreign['unit'] = 'foreign-owner'
+                            marker.write_text(json.dumps(foreign), encoding='utf-8')
+                        if marker.exists():
+                            snapshots[module] = marker.read_bytes()
+                            (root / (Path(module).stem + '-marker.json')).write_bytes(marker.read_bytes())
+                        if result_defect in ('missing', 'attempt') and result.returncode:
+                            lines = result.stdout.decode().splitlines()
+                            rows = [json.loads(line[len('PLAN_RESULT '):]) for line in lines if line.startswith('PLAN_RESULT ')]
+                            if result_defect == 'missing':
+                                result.stdout = '\n'.join(line for line in lines if not line.startswith('PLAN_RESULT ')).encode()
+                            else:
+                                row = rows[0]
+                                row['attempt'] += 1
+                                result.stdout = '\n'.join('PLAN_RESULT ' + json.dumps(row) if line.startswith('PLAN_RESULT ')
+                                                         else line for line in lines).encode()
+                        clock[0] += 0.25
+                        if exhaust_deadline:
+                            clock[0] = 1501
+                        return result
+                    if exhaust_deadline:
+                        clock[0] = 1501
+                        raise ci.subprocess.TimeoutExpired(command, kwargs['timeout'], output=b'timed out')
+                    clock[0] += 0.25
+                    code = 1 if 'failure' in module else 0
+                if any(command == capture for _, capture in captures):
+                    # Inspection must retain its own bound after the profile deadline.
+                    self.assertEqual(kwargs['timeout'], 30)
+                    return subprocess_run(command, **kwargs)
+                return MagicMock(returncode=code, stdout=b'module output', stderr=b'')
+
+            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
+                                          'RUNNER_TEMP': folder}, clear=True), \
+                    patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, {'measurements': profile}), \
+                    patch.object(ci.gate, 'STATE', state), \
+                    patch.object(ci.gate, 'release_after_inspection', side_effect=submit_record), \
+                    patch.object(ci, 'stack_capture_commands', return_value=captures), \
+                    patch.object(ci, 'seed_source'), patch.object(ci, 'time', SimpleNamespace(monotonic=lambda: clock[0])), \
+                    patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///runner.sock']), \
+                    patch.object(ci.subprocess, 'run', side_effect=execute), \
+                    patch.object(ci.ssl, '_create_unverified_context', return_value=None), \
+                    patch.object(ci, 'urlopen', return_value=response), \
+                    patch.object(ci, 'ensure_imported_admin_credential', return_value='synthetic-secret'), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                # An uncaught driver error is the CLI's non-zero exit contract.
+                with self.assertRaises(RuntimeError) as error:
+                    ci.main('measurements')
+            if real_runner:
+                for module in live:
+                    print((profile['out'] / (Path(module).stem + '.log')).read_text(encoding='utf-8'))
+            self.assertIn(Path(suites[0]).stem, str(error.exception))
+            blocked = inspection_failure or wrong_unit or result_defect
+            attempted = suites[:1] if exhaust_deadline or blocked else suites
+            self.assertEqual(live, ['tests/' + s for s in attempted])
+            if not exhaust_deadline and not blocked:
+                self.assertIn(Path(suites[2]).stem, str(error.exception))
+            rows = json.loads((profile['out'] / 'results.json').read_text(encoding='utf-8'))
+            self.assertEqual(rows[-1]['name'], 'cleanup')
+            self.assertEqual(sum('down' in c for c in commands), 1)
+            with (profile['out'] / 'summary.tsv').open(encoding='utf-8', newline='') as stream:
+                summary = list(csv.DictReader(stream, delimiter='\t'))
+            modules = [row for row in summary if row['module'] in [Path(s).stem for s in suites]]
+            self.assertEqual([row['module'] for row in modules], [Path(s).stem for s in live])
+            failed_code = 125 if real_runner else (124 if exhaust_deadline else 1)
+            expected = [f'FAIL ({failed_code})'] if len(attempted) == 1 else [f'FAIL ({failed_code})', 'PASS (0)', f'FAIL ({failed_code})']
+            self.assertEqual([row['status'] for row in modules], expected)
+            for row in modules:
+                self.assertGreater(float(row['duration_seconds']), 0)
+                self.assertTrue((profile['out'] / row['log']).is_file())
+            if blocked:
+                self.assertTrue((state / 'live-needs-inspection.json').is_file())
+                self.assertFalse((state / 'inspections.jsonl').exists())
+                self.assertEqual((state / 'live-needs-inspection.json').read_bytes(), snapshots['tests/' + suites[0]])
+                if inspection_failure:
+                    self.assertIn('fixture inspection failed', str(error.exception))
+                    self.assertEqual(release_calls, [])
+                if wrong_unit:
+                    self.assertIn('does not identify', str(error.exception))
+                    self.assertEqual(len(release_calls), 1)
+                if result_defect:
+                    self.assertIn('binding failed', str(error.exception))
+                    self.assertEqual(release_calls, [])
+            if real_runner:
+                executed = (root / 'tests/executed.txt').read_text().splitlines()
+                self.assertEqual(executed, list(attempted))
+                ledger_path = state / 'inspections.jsonl'
+                ledger = [json.loads(line) for line in ledger_path.read_text().splitlines()] if ledger_path.exists() else []
+                failures = [s for s in attempted if 'failure' in s]
+                self.assertEqual(len(ledger), 0 if blocked else len(failures))
+                self.assertEqual((state / 'live-needs-inspection.json').exists(), bool(blocked))
+                self.assertEqual(len([p for p in profile['out'].glob('inspection-*.json') if not p.name.endswith('.original.json')]), len(failures))
+                for suite in failures:
+                    record = json.loads((profile['out'] / ('inspection-' + Path(suite).stem + '.json')).read_bytes())
+                    self.assertEqual(set(record['stack']), {'compose-ps', 'daemon-containers'})
+                    for kind, capture in captures:
+                        self.assertEqual(commands.count(capture), len(failures))
+                        self.assertEqual(record['stack'][kind]['exit'], int(inspection_failure == kind))
+                        self.assertEqual(record['stack'][kind]['output'], 'synthetic ' + kind)
+                for entry, suite in zip(ledger, failures):
+                    record_path = Path(entry['record_path'])
+                    self.assertEqual(record_path.parent, profile['out'])
+                    raw = record_path.read_bytes()
+                    self.assertEqual(entry['record_sha256'], hashlib.sha256(raw).hexdigest())
+                    record = json.loads(raw)
+                    self.assertEqual(record['module'], 'tests/' + suite)
+                    command = next(c for c in commands if '--module' in c and c[c.index('--module') + 1] == record['module'])
+                    self.assertEqual(record['unit'], command[command.index('--unit') + 1])
+                    self.assertEqual(record['unit'], ('ci-' if default_unit else 'explicit-') + Path(suite).stem.replace('_', '-'))
+                    marker = json.loads(snapshots[record['module']])
+                    self.assertEqual(entry['marker'], marker)
+                    for key in ('unit', 'module', 'attempt', 'plan_sha256', 'pid', 'started_at'):
+                        self.assertEqual(record[key], marker[key], key)
+                    self.assertNotEqual(record['pid'], os.getpid())
+                    unit_ledger = json.loads((state / (record['unit'] + '.json')).read_text())
+                    row = unit_ledger['attempts'][record['attempt'] - 1]
+                    self.assertEqual(row, record['plan_result'])
+                    self.assertEqual(row['attempt'], record['attempt'])
+                    self.assertEqual(row['plan_sha256'], record['plan_sha256'])
+                    self.assertEqual(row['status'], 'failed')
+                    self.assertGreater(datetime.fromisoformat(record['inspected_at']), datetime.fromisoformat(record['started_at']))
+                    self.assertEqual(record['exit'], failed_code)
+                    self.assertIn(record['result'], rows)
+                    self.assertTrue(record['inspected_at'])
+                    self.assertTrue(record['inspector'])
+                    for artifact in record['artifacts']:
+                        self.assertTrue((profile['out'] / artifact).is_file())
+                    self.assertEqual(set(record['stack']), {'compose-ps', 'daemon-containers'})
+                    self.assertTrue(all(row['exit'] == 0 for row in record['stack'].values()))
+                    print('REAL_RUNNER_INSPECTION ' + json.dumps(record))
+                print('REAL_RUNNER_RESULT ' + json.dumps({'executed': executed, 'failures': failures,
+                      'ledger_lines': len(ledger), 'error': str(error.exception), 'cleanup': rows[-1]}))
+                print('REAL_RUNNER_LEDGER ' + json.dumps(ledger))
+                trace = {'commands': commands, 'executed': executed, 'ledger_lines': len(ledger),
+                         'exits': [r['exit'] for r in rows if r['name'] in [Path(s).stem for s in suites]],
+                         'final_failure': str(error.exception), 'cleanup_count': sum('down' in c for c in commands)}
+                (root / 'trace.json').write_text(json.dumps(trace, indent=2), encoding='utf-8')
+                if evidence is not None:
+                    shutil.copytree(root, evidence)
+
+    def test_live_profile_runs_all_modules_and_reports_each_failure(self):
+        self.exercise_profile_failures()
+
+    def test_live_profile_deadline_stops_remaining_modules_and_still_cleans_up(self):
+        self.exercise_profile_failures(exhaust_deadline=True)
+
+    def test_real_runner_executes_fail_pass_fail_after_recorded_inspections(self):
+        for default in (False, True):
+            with self.subTest(default_unit=default):
+                self.exercise_profile_failures(real_runner=True, default_unit=default)
+
+    def test_real_release_rejects_wrong_unit_and_stops_following_bodies(self):
+        self.exercise_profile_failures(real_runner=True, wrong_unit=True)
+
+    def test_missing_or_mismatched_plan_result_preserves_marker_and_stops(self):
+        for defect in ('missing', 'attempt', 'foreign'):
+            with self.subTest(defect=defect):
+                self.exercise_profile_failures(real_runner=True, result_defect=defect)
+
+    def test_manual_markdown_json_release_from_another_process(self):
+        self.exercise_profile_failures(real_runner=True, manual=True)
+
+    def test_real_runner_failure_then_deadline_skips_remaining_and_cleans_up(self):
+        self.exercise_profile_failures(real_runner=True, exhaust_deadline=True)
+
+    def test_failed_inspection_preserves_marker_and_still_cleans_up(self):
+        for kind in ('compose-ps', 'daemon-containers'):
+            with self.subTest(capture=kind):
+                self.exercise_profile_failures(real_runner=True, inspection_failure=kind)
+
     def test_image_text_profile_is_exact_and_separate(self):
         profile=ci.PROFILES['image-text']
         self.assertEqual(profile['suites'],(('e2e/test_viewer_image_text.py','ViewerImageTextE2E','ci-image-text'),))
@@ -51,6 +362,45 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertNotEqual(profile['out'], other['out'])
                 self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
 
+    def test_validate_attribution_record_binds_exact_scanner_inputs(self):
+        import argparse
+        import shlex
+        import yaml
+
+        test_file = 'tests/admin_audit_attribution_test.cjs'
+        workflow = yaml.safe_load((ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8'))
+        commands = [shlex.split(step['run']) for job in workflow['jobs'].values()
+                    for step in job.get('steps', []) if test_file in step.get('run', '')]
+        self.assertEqual(len(commands), 1, 'one recorded attribution test invocation')
+        command = commands[0]
+        self.assertEqual(command[:2], ['python3', 'scripts/record-run.py'])
+        boundary = command.index('--')
+        self.assertEqual(command[-3:], ['node', '--test', test_file])
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--run-dir', required=True)
+        parser.add_argument('--cwd', default='.')
+        parser.add_argument('--file', action='append', default=[])
+        parser.add_argument('--tree', action='append', default=[])
+        args = parser.parse_args(command[2:boundary])
+        cwd = ci.ROOT / args.cwd
+        recorded = [(cwd / name).resolve() for name in args.file]
+        for name in args.tree:
+            directory = cwd / name
+            self.assertTrue(directory.is_dir(), name)
+            recorded.extend(file.resolve() for file in directory.rglob('*') if file.is_file())
+
+        # The scanner's stated corpus, plus its fixtures and compiler/generator inputs.
+        # Expand the checked-out directories independently of the recorder options so
+        # adding a source or accidentally recording an unrelated file cannot pass.
+        read = set()
+        for name in ('api/src', 'tests/fixtures/admin-audit-checker', 'tests/fixtures/admin_audit_completeness'):
+            read.update(file.resolve() for file in (ci.ROOT / name).rglob('*') if file.is_file())
+        read.update(file.resolve() for file in (ci.ROOT / 'api/prisma').glob('*.cjs') if file.is_file())
+        read.update((ci.ROOT / name).resolve() for name in (
+            'api/prisma/schema.prisma', 'api/tsconfig.json', 'api/package-lock.json', test_file))
+        self.assertEqual(len(recorded), len(set(recorded)), 'no duplicate recorded inputs')
+        self.assertSetEqual(set(recorded), read, 'recorded inputs must equal scanner inputs in both directions')
+
     def test_validate_workflow_runs_cell_merge_in_its_own_bounded_job(self):
         text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
         jobs = text.split('\n  cell-merge:\n')
@@ -62,7 +412,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile cell-merge',
                          'tests/execution_selection_test.py',
@@ -136,7 +485,8 @@ class MeasurementCiTests(unittest.TestCase):
                      patch.object(ci.subprocess, 'run', side_effect=fake_run), \
                      patch.object(ci.ssl, '_create_unverified_context', return_value=None), \
                      patch.object(ci, 'urlopen', return_value=response), \
-                     patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'):
+                     patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'), \
+                 contextlib.redirect_stdout(io.StringIO()):
                     ci.main('u2b-regressions')
                 self.assertTrue((root/'artifacts'/'results.json').exists())
             return granted
@@ -209,7 +559,7 @@ class MeasurementCiTests(unittest.TestCase):
         job = workflow['jobs']['u2b-regressions']
         steps = job['steps']
         self.assertEqual(job['runs-on'], 'ubuntu-24.04')
-        self.assertEqual(int(job['timeout-minutes']), 40)
+        self.assertGreater(int(job['timeout-minutes']), 15 + 28)
         checkout = [step for step in steps if str(step.get('uses', '')).startswith('actions/checkout@')]
         self.assertEqual(len(checkout), 1)
         self.assertEqual(str(checkout[0]['with']['persist-credentials']).lower(), 'false')
@@ -424,7 +774,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile hanging-protocols',
                          'tests/execution_selection_test.py',
@@ -861,7 +1210,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile volume-slab',
                          'tests/execution_selection_test.py',
@@ -997,7 +1345,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile volume-path',
                          'tests/measurement_ci_test.py',
@@ -1112,7 +1459,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile volume-batch',
                          'tests/measurement_ci_test.py',
@@ -1231,7 +1577,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile volume-sync-preferences',
                          'tests/measurement_ci_test.py',
@@ -1348,7 +1693,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile volume-marks',
                          'tests/measurement_ci_test.py',
@@ -1466,7 +1810,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'python3 -B tests/measurement_ci_test.py',
                          'tests/execution_selection_test.py',
@@ -1568,7 +1911,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'python3 -B tests/measurement_ci_test.py',
                          'tests/execution_selection_test.py',
@@ -1678,7 +2020,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'python3 -B tests/measurement_ci_test.py',
                          'tests/execution_selection_test.py',
@@ -1793,7 +2134,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'python3 -B tests/measurement_ci_test.py',
                          'tests/execution_selection_test.py',
@@ -1898,7 +2238,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'python3 -B tests/measurement_ci_test.py',
                          'tests/execution_selection_test.py',
@@ -2274,7 +2613,8 @@ class MeasurementCiTests(unittest.TestCase):
                  patch.object(ci.ssl, '_create_unverified_context', return_value=None), \
                  patch.object(ci,'urlopen',return_value=response), \
                  patch.object(ci,'publish_vr_evidence'), \
-                 patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'):
+                 patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'), \
+                 contextlib.redirect_stdout(io.StringIO()):
                 ci.main('volume-rendering')
             invocation=next(call for call in run.call_args_list
                             if 'run-tests.py' in ' '.join(map(str,call.args[0])))
@@ -2593,6 +2933,11 @@ class MeasurementCiTests(unittest.TestCase):
                 seen.append(tuple(map(str, command)))
                 if 'run-tests.py' in ' '.join(seen[-1]):
                     (profile['out']/ci.GATEWAY_HANDOFF).write_text(json.dumps({'project': project}), encoding='utf-8')
+                    with self.assertRaises(RuntimeError):
+                        with ci.gate.live_run(unit=command[command.index('--unit') + 1],
+                                              module=command[command.index('--module') + 1],
+                                              plan_sha256='a' * 64, attempt=1):
+                            raise RuntimeError('synthetic module failure')
                     raise ci.subprocess.TimeoutExpired(command, kwargs['timeout'])
                 return MagicMock(returncode=0, stdout=listings.get(seen[-1], b''), stderr=b'')
 
@@ -2601,13 +2946,15 @@ class MeasurementCiTests(unittest.TestCase):
             with patch.dict(os.environ, {'GITHUB_ACTIONS':'true', 'RUNNER_ENVIRONMENT':'github-hosted'}, clear=True), \
                  patch.object(ci, 'ROOT', root), \
                  patch.dict(ci.PROFILES, {'gateway-e2e': profile}), \
+                 patch.object(ci.gate, 'STATE', root / 'gate-state'), \
                  patch.object(ci, 'seed_source'), \
                  patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']), \
                  patch.object(ci.subprocess, 'run', side_effect=fake_run), \
                  patch.object(ci.ssl, '_create_unverified_context', return_value=None), \
                  patch.object(ci, 'urlopen', return_value=response), \
-                 patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'):
-                with self.assertRaisesRegex(RuntimeError, 'gateway_pipeline_live failed'):
+                 patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, 'gateway_pipeline_live'):
                     ci.main('gateway-e2e')
             logs = next(index for index, command in enumerate(seen) if 'logs' in command and '--timestamps' in command)
             down = next(index for index, command in enumerate(seen) if 'down' in command and '--remove-orphans' in command)

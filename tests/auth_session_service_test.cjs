@@ -129,7 +129,7 @@ const KEYS = {};
 // `userLogouts` stays empty unless the product asks for a whole-user logout (it must not: S7-U5 D600).
 const kc = { server: null, port: 0, held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
   certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
-  members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null,
+  members: {}, userLogouts: [], adminDown: false, institutionsDown: false, institutionReads: 0, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null,
   beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {}, transportTimeoutMs: 0, closedPort: 0 };
 
 async function keycloak() {
@@ -200,7 +200,12 @@ async function keycloak() {
       // The member administration the admin isolation reaches (read a member, disable or enable it, list its provider sessions;
       // a whole-user logout is answered but must never be asked). `sessions` of an account are its live provider sessions
       // (GET users/{id}/sessions).
-      if (path === '/admin/realms/kin/groups') return send(200, [A, B, Z].map(name => ({ id: 'syn-group-' + name, name })));
+      // Fail the institution list independently: member identity and memberships still answer normally.
+      if (path === '/admin/realms/kin/groups') {
+        kc.institutionReads++;
+        return kc.institutionsDown ? send(503, { error: 'unavailable' })
+          : send(200, [A, B, Z].map(name => ({ id: 'syn-group-' + name, name })));
+      }
       if (path === '/admin/realms/kin/users' && req.method === 'GET') {
         if(kc.realmReadStatus)return send(kc.realmReadStatus,{error:'realm_unavailable'});
         const query = new URL(req.url, 'http://synthetic.test').searchParams;
@@ -507,7 +512,7 @@ async function world(t, { now = START, imported = true } = {}) {
   assert.equal(Number(left), 0, 'every world starts with no session, no end mark, no isolation fact, no provider change record and no audit row');
   Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
     certs: 'ok', certRequests: 0, abandoned: 0, ended: [], alive: null, serviceTokens: 0, serviceMode: 'ok', endRequests: [],
-    members: {}, userLogouts: [], adminDown: false, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null,
+    members: {}, userLogouts: [], adminDown: false, institutionsDown: false, institutionReads: 0, adminFail: {}, adminCalls: [], onAdmin: null, beforeAdmin: null,
     beforeEnd: null, afterEnd: null, hung: [], adminStale: {}, adminRefuse: {}, transportTimeoutMs: 0, realmReadStatus:0 });
   if (imported) await base.memberRightsImport.create({ data: { id: 'realm-v1' } });
   idp.started = 0;
@@ -4852,6 +4857,35 @@ test('CORE_R10_UNVERIFIED refusal precedes the command: 400, zero audit or right
   const rows=await w.base.auditLog.findMany({where:{target:m,action:'admin.user.approve'}});
   assert.equal(rows.length,1);assert.equal(JSON.parse(rows[0].detail).verificationOverride,true);
   await coreSettled(w,m);await w.finish('CORE_R10_UNVERIFIED');
+});
+
+// RV5-01: REQ-S7-U5-DB-RIGHTS -> RISK-UNVALIDATED-INSTITUTION / REFUSAL-AUDIT.
+test('CORE_INSTITUTION_ONLY_OUTAGE_NO_CONFLICT', async t => {
+  const w = await world(t);
+  for (const command of ['Approve', 'Change']) for (const refusal of ['outage', 'absent']) {
+    const m = 'syn-institution-only-' + command + '-' + refusal;
+    const { admin } = await coreMember(w, m); // Already approved, with a live session; no competing command.
+    const rights = await w.base.memberRights.findUnique({ where: { sub: m } });
+    const sessions = await w.base.authSession.findMany({ where: { sub: m } });
+    assert.equal(rights.approved, true); assert.equal(sessions.length, 1);
+    kc.institutionsDown = refusal === 'outage';
+    // The identity endpoints remain healthy while ONLY /groups fails.
+    assert.equal((await new KeycloakService().getUser(m)).id, m);
+    const reads = kc.institutionReads, calls = kc.adminCalls.length;
+    const result = await r10Patch(admin, m, { ...coreBody(command),
+      institution: refusal === 'absent' ? 'syn-institution-not-listed' : B });
+    assert.equal(result.status, refusal === 'outage' ? 503 : 400, command + '/' + refusal);
+    assert.equal(kc.institutionReads, reads + 1, 'the command consulted the institution list');
+    await quiet(w);
+    assert.deepEqual(await w.base.memberRights.findUnique({ where: { sub: m } }), rights);
+    assert.deepEqual(await w.base.authSession.findMany({ where: { sub: m } }), sessions);
+    assert.equal(await w.base.auditLog.count(), 0, 'input refusal creates no audit, including failure audits');
+    assert.equal(await w.base.providerChange.count(), 0, 'no roster/credentials intent');
+    assert.ok(kc.adminCalls.slice(calls).every(call => call.startsWith('GET ')), 'no provider publication');
+    assert.equal(kc.endRequests.length, 0); assert.equal(kc.userLogouts.length, 0);
+    kc.institutionsDown = false;
+  }
+  await w.finish('CORE_INSTITUTION_ONLY_OUTAGE_NO_CONFLICT');
 });
 
 for(const command of CORE_COMMANDS)test(`ASTRA_KC_DOWN ${command}: outage never blocks DB revocation or activation`,async t=>{
