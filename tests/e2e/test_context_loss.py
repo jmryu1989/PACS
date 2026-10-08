@@ -7,6 +7,7 @@ is authorized for S8-CTX. Known voxels and source identity are the recovery orac
 import unittest
 from playwright.sync_api import expect
 import test_volume_mip as mip
+from test_prior_selection import canvas_ready
 
 LOSS = '''() => {
  const view=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId);
@@ -17,11 +18,19 @@ LOSS = '''() => {
 
 
 class ContextLossE2E(mip.VolumeMipE2E):
+    def recovery_ready(self, viewer):
+        # Cache a function predicate: re-evaluating a bare expression on the next
+        # animation frame is blocked by the viewer's CSP when it starts false.
+        viewer.wait_for_function('() => !!window.kinViewerContextLoss && !!window.cornerstone && cornerstone.getEnabledElements().some(e=>e.viewport.type==="stack"&&e.viewport.csImage)', timeout=60000)
+        canvas_ready(viewer, 1)
+
     def recover(self, viewer):
         expect(viewer.get_by_role('heading', name='Viewer Recovery').last).to_be_visible()
-        viewer.get_by_role('button', name='Reload Viewer', exact=True).last.click()
-        viewer.wait_for_function('!!window.kinViewerContextLoss && !!window.cornerstone && cornerstone.getEnabledElements().some(e=>e.viewport.type==="stack"&&e.viewport.csImage)', timeout=60000)
-        self.ready(viewer)
+        # Observe navigation before testing readiness, so the old document's
+        # loaded stack cannot satisfy the recovery check ahead of the reload.
+        with viewer.expect_navigation(wait_until='domcontentloaded', timeout=60000):
+            viewer.get_by_role('button', name='Reload Viewer', exact=True).last.click()
+        self.recovery_ready(viewer)
 
     def assert_original_stack(self, viewer, study):
         state = viewer.evaluate('''() => {
@@ -52,6 +61,7 @@ class ContextLossE2E(mip.VolumeMipE2E):
         self.recover(viewer)
         source = self.assert_original_stack(viewer, study)
         self.assertEqual(viewer.evaluate('KinViewerSessionBoundary.session()'), session)
+        self.ready(viewer)
         self.mpr(viewer); self.choose_volume(viewer, viewer, 0)
         viewer.evaluate('''([lower,upper])=>{for(const id of services.viewportGridService.getState().viewports.keys()){
           const v=services.cornerstoneViewportService.getCornerstoneViewport(id);v.setProperties({voiRange:{lower,upper},VOILUTFunction:'LINEAR',interpolationType:0,invert:false});v.render();}}''', list(voi))
@@ -66,7 +76,9 @@ class ContextLossE2E(mip.VolumeMipE2E):
         study = mip.mip_phantom(self.stack)
         self.seed_report(study)
         parent = self.login(); viewer = self.workspace(parent, study, count=1)
-        self.ready(viewer)
+        # The embedded viewer keeps Tech Note in its parent worklist; the
+        # standalone note button is not a readiness signal for this document.
+        self.recovery_ready(viewer)
         parent.locator('#findings').fill('SYN retained report after viewer recovery')
         before = self.assert_original_stack(viewer, study)
         binding = viewer.evaluate('KinViewerSessionBoundary.session()')
@@ -92,7 +104,7 @@ class ContextLossE2E(mip.VolumeMipE2E):
         for label, value in [('Batch Start Offset', '0'), ('Batch Interval', '1'), ('Batch Number', '2')]:
             viewer.get_by_label(label, exact=True).fill(value)
         viewer.get_by_role('button', name='Make Batch', exact=True).click()
-        viewer.wait_for_function('!!window.releaseContextBlob')
+        viewer.wait_for_function('() => !!window.releaseContextBlob')
         viewer.evaluate(LOSS); viewer.evaluate('releaseContextBlob()')
         expect(viewer.locator('#kin-volume-batch [role=status]')).to_contain_text('취소')
         expect(viewer.locator('#kin-volume-batch .result')).to_be_hidden()
@@ -105,7 +117,7 @@ class ContextLossE2E(mip.VolumeMipE2E):
         self.held_batch(viewer, '[data-kin-mip-batch-render]')
         dialog.get_by_label('MIP Batch Number', exact=True).fill('2')
         dialog.get_by_role('button', name='Make MIP Batch', exact=True).click()
-        viewer.wait_for_function('!!window.releaseContextBlob')
+        viewer.wait_for_function('() => !!window.releaseContextBlob')
         viewer.evaluate(LOSS); viewer.evaluate('releaseContextBlob()')
         expect(dialog.locator('.kin-mip-batch-result')).to_be_hidden()
         expect(dialog.get_by_label('MIP Job Title', exact=True)).to_have_value('SYN preserved title')
