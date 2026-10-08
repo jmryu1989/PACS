@@ -23,6 +23,14 @@ ORIENTATION = Path(os.environ.get("KIN_VR_ORIENTATION_SOURCE", ROOT / "worklist-
 RENDERING = Path(os.environ.get("KIN_VR_RENDERING_SOURCE", ROOT / "worklist-v0" / "hpacs-lite" / "viewer-volume-rendering.js"))
 MODEL = ROOT / "worklist-v0" / "hpacs-lite" / "volume-rendering.js"
 
+# PacsController.me()/caller() and AuthGuard's cookie-session branch. Keep the
+# complete public response here; sessionId is present for a cookie login (null
+# for Bearer), not an extra field invented by this harness.
+def member_me(session='S1', sub='reader'):
+    return {'sub': sub, 'actor': sub + '@local.test', 'roles': ['radiologist'],
+            'institution': 'hospital', 'kind': 'member', 'user': sub + '@local.test',
+            'displayName': 'Synthetic Reader', 'sessionId': session}
+
 HARNESS = r"""
 <div id="host"></div><div id="sources"></div>
 <script>
@@ -66,11 +74,15 @@ window.kinViewerJobWorkspaceState=()=>({busy:false});window.kinVolumeBatchState=
 
 const intervalCallbacks=new Map(),nativeSetInterval=window.setInterval;window.setInterval=(fn,ms)=>{const list=intervalCallbacks.get(ms)||[];list.push(fn);intervalCallbacks.set(ms,list);return {ms,fn}};window.clearInterval=()=>{};window.tick=ms=>(intervalCallbacks.get(ms)||[]).forEach(fn=>fn());
 window.mountOrientation=()=>window.kinCreateVolumeOrientation({services,selected:()=>source,live:()=>true,allowed:()=>true,owner:()=>currentOwner,host:document.querySelector('#host')});
-window.openVr=async()=>document.querySelector('#kin-volume-orientation button:last-of-type').onclick();
+// A user click returns before access completes. Observe readiness in assertions,
+// so an indefinitely pending access check fails instead of hanging evaluate().
+window.openVr=()=>document.querySelector('#kin-volume-orientation button:last-of-type').click();
 window.closeVr=()=>document.querySelector('#kin-volume-rendering .kin-vr-close').click();
 window.sourceState=()=>JSON.stringify({source,cameras:[...views.values()].map(v=>v.getCamera()),viewRefs:[...views.values()].map(v=>v.id)});
 </script>
 """
+
+HARNESS += '<script>window.memberMe=' + json.dumps(member_me()) + ';</script>'
 
 ACCESS_CLOCK = r"""
 window.sim={now:1,wallOffset:0,requests:[],tasks:[],raf:[],delay:0,bodyDelay:0,jobsBodyDelay:0,
@@ -93,13 +105,15 @@ window.fetch=(url,options={})=>{
   const record={url:name,path,at:started,session:headers.get('X-KIN-Session'),csrf:headers.get('X-KIN-CSRF')};
   sim.requests.push(record);
   if(sim.offline||sim.failJobs&&!isMe)return Promise.reject(new TypeError('Failed to fetch'));
-  let status=200,body=isMe?{kind:'member',institution:'hospital',sub:sim.account,sessionId:'S1'}:[];
+  // ViewerJobService.list() returns an envelope, including when no jobs exist.
+  let status=200,body=isMe?{...memberMe,sub:sim.account}:{jobs:[]};
   if(!record.session&&!isMe){status=428;body={code:'AUTH_SESSION_REQUIRED'};}
   else if(record.session&&record.session!=='S1'){status=409;body={code:'AUTH_SESSION_MISMATCH'};}
   else if(sim.deny){status=403;body={};}
   else if(isMe&&sim.meStatus){status=sim.meStatus;body={};}
   else if(sim.httpStatus){status=sim.httpStatus;body={};}
   else if(sim.invalidBody){body=isMe?null:{};}
+  else if(!isMe&&Object.hasOwn(sim,'jobsBody')){body=sim.jobsBody;}
   else if(!isMe&&[...new URL(name).searchParams].some(([k,v])=>!['mine','includeHidden'].includes(k)||!['true','false'].includes(v))){status=400;body={};}
   if(sim.silent||sim.jobsSilent&&!isMe)return new Promise(()=>{});
   const delay=sim.delay,bodyDelay=isMe?sim.bodyDelay:sim.jobsBodyDelay;
@@ -153,7 +167,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.browser.close();cls.pw.stop()
 
-    def page_with_vr(self, controlled=False, missing_gate=None, csp=None, real_sculpt=False, real_resize=False, full_session=False):
+    def page_with_vr(self, controlled=False, missing_gate=None, csp=None, real_sculpt=False, real_resize=False, full_session=False, bootstrap=False):
         context = self.browser.new_context()
         self.addCleanup(context.close)
         page = context.new_page()
@@ -179,15 +193,14 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                     len(values)!=1 or values[0] not in ('true','false')
                     for k,values in parse_qs(urlparse(request.url).query).items()):
                 return route.fulfill(status=400,json={})
-            route.fulfill(json={'kind': 'member', 'institution': 'hospital', 'sub': 'reader',
-                                'sessionId': state['session']} if path == '/api/me' else [])
+            route.fulfill(json=member_me(state['session']) if path == '/api/me' else {'jobs': []})
         page.route("**/api/**", server)
         page.goto("https://vr-binding.test/")
         if controlled:
             if real_resize:page.evaluate('()=>{window.nativeResizeObserver=ResizeObserver;}')
             page.add_script_tag(content=ACCESS_CLOCK)
             if real_resize:page.evaluate('()=>{window.ResizeObserver=nativeResizeObserver;}')
-        self.install_session(page, full=full_session)
+        self.install_session(page, full=full_session, bootstrap=bootstrap)
         if missing_gate:
             page.evaluate("key=>delete engine[key]", missing_gate)
         if real_sculpt:
@@ -203,7 +216,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         }""")
         return page
 
-    def install_session(self, page, full=False):
+    def install_session(self, page, full=False, bootstrap=False):
         page.evaluate('()=>{window.unboundFetch=window.fetch.bind(window);}')
         if full:
             # Run the shipped document teardown as well as its transport. Only the
@@ -213,18 +226,24 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                 content_type='application/javascript'))
             page.route('**/worklist/hpacs-lite/index.html', lambda route: route.fulfill(
                 body='<p>Session ended landing</p>', content_type='text/html'))
-            page.evaluate("history.replaceState({kinViewerSession:{session:'S1',ended:false}},'')")
+            if not bootstrap:
+                page.evaluate("history.replaceState({kinViewerSession:{session:'S1',ended:false}},'')")
             page.add_script_tag(content=(ROOT/'config/ohif.js').read_text(encoding='utf-8'))
             page.evaluate("config.extensions.find(e=>e.id==='kin.session-boundary').preRegistration()")
             return
         for name in ('work-context.js', 'session-transport.js', 'viewer-resources.js', 'viewer-session.js'):
             page.add_script_tag(content=(MODEL.parent/name).read_text(encoding='utf-8'))
-        page.evaluate("""async()=>{
-          history.replaceState({kinViewerSession:{session:'S1',ended:false}},'');
+        page.evaluate("""async bootstrap=>{
+          if(!bootstrap)history.replaceState({kinViewerSession:{session:'S1',ended:false}},'');
           const boundary=KinViewerSession.connect(window);
+          window.sessionStates=[];
+          // onState reports pause/resume/end; initial activation belongs to the
+          // work-context lifecycle and is not an onState notification.
+          const recordState=()=>sessionStates.push({state:KinWorkContext.state(),active:boundary.active()});
+          recordState();KinWorkContext.onInvalidate(recordState);
           window.kinViewerOnEnd=run=>({close:boundary.onEnd(run)});
           await boundary.ready;
-        }""")
+        }""", bootstrap)
 
     def open_ready(self, page):
         if page.evaluate("!!window.sim"):
@@ -408,7 +427,10 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                 result=page.evaluate("""async deny=>{
                   sim.delay=100;sim.deny=deny;await sim.advance(10000);closeVr();
                   sim.deny=false;sim.account='other-reader';currentOwner=['hospital','other-reader'];
-                  const otherOpening=openVr();await sim.flush();await sim.advance(10);closeVr();await otherOpening;
+                  openVr();await sim.flush();await sim.advance(10);closeVr();
+                  // Close rejects the pending open; its finally re-enables the
+                  // user button. Settle that delivery without advancing time.
+                  await sim.flush();
                   sim.account='reader';currentOwner=['hospital','reader'];sim.silent=true;void openVr();
                   await sim.advance(100);sim.frames();
                   const stale={open:sim.open(),covered:sim.covered(),views:engine.privateViews.size};
@@ -1265,6 +1287,39 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
         for request in wire:
             self.assertEqual('S1',request['session']);self.assertEqual('1',request['csrf'])
 
+    def test_session_bootstrap_member_and_jobs_envelope_open_vr(self):
+        """REQ-S8-D-A/U5S-REQ-08 -> RISK-S8-FALSE-CLOSE/SESSION: real entry states."""
+        for full in (False, True):
+            with self.subTest(full_session=full):
+                page=self.page_with_vr(bootstrap=True,full_session=full)
+                self.addCleanup(page.close)
+                self.assertTrue(page.evaluate('KinViewerSessionBoundary.active()'))
+                self.assertEqual('S1',page.evaluate('KinViewerSessionBoundary.session()'))
+                if not full:
+                    self.assertEqual([{'state':'unknown','active':False},{'state':'active','active':True}],
+                                     page.evaluate('sessionStates'))
+                self.open_ready(page)
+                wire=page.server_state['wire']
+                self.assertEqual({'path':'/api/me','session':None,'csrf':'1'},wire[0])
+                self.assertEqual(['/api/me','/api/studies/study-1/viewer-jobs'],sorted(r['path'] for r in wire[1:]))
+                self.assertTrue(all(r['session']=='S1' and r['csrf']=='1' for r in wire[1:]))
+
+    def test_access_malformed_jobs_body_cannot_confirm_and_recovery_preserves_edits(self):
+        """An HTTP 200 without the list envelope is not an access confirmation."""
+        for body in (None, [], {}, {'jobs':None}, {'jobs':{}}, {'jobs':'invalid'}):
+            with self.subTest(body=body):
+                page=self.access_page()
+                page.get_by_label('VR Opacity',exact=True).fill('45')
+                before=page.evaluate('sourceState()')
+                page.evaluate('async body=>{sim.jobsBody=body;await sim.advance(30000);sim.frame()}',body)
+                self.assert_surface(page,True)
+                self.assertFalse(page.evaluate('frameLog.at(-1).drawn'))
+                self.assertTrue(page.evaluate('sim.open()'))
+                page.evaluate('async()=>{delete sim.jobsBody;await sim.advance(2000);sim.frames()}')
+                self.assert_surface(page,False)
+                expect(page.get_by_label('VR Opacity',exact=True)).to_have_value('45')
+                self.assertEqual(before,page.evaluate('sourceState()'))
+
     def test_session_same_account_relogin_in_another_tab_ends_viewer(self):
         page = self.page_with_vr();self.addCleanup(page.close);self.open_ready(page)
         other = page.context.new_page();self.addCleanup(other.close)
@@ -1433,7 +1488,7 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                         self.send_response(428);self.end_headers();return
                     if self.headers.get('X-KIN-Session') and self.headers.get('X-KIN-Session')!='S1':
                         self.send_response(409);self.send_header('X-KIN-Auth-Code','AUTH_SESSION_MISMATCH');self.end_headers();return
-                    body=json.dumps({'kind':'member','institution':'hospital','sub':'reader','sessionId':'S1'} if path=='/api/me' else []).encode()
+                    body=json.dumps(member_me() if path=='/api/me' else {'jobs': []}).encode()
                     kind='application/json'
                 self.send_response(200);self.send_header('Content-Type',kind);self.send_header('Content-Length',str(len(body)))
                 self.end_headers()

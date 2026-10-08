@@ -78,7 +78,7 @@ window.kinCreateVolumeRendering=function({target,permitted,alive,owner,notice=()
         if(JSON.stringify([body.institution,body.sub])!==op.owner){fail(op,Error('VR 계정이 변경되었습니다.'));return false;}
         if(op.session!==undefined&&typeof body.sessionId!=='string')return false;
         if(op.session!==undefined&&body.sessionId!==op.session){fail(op,Error('VR 세션이 변경되었습니다.'));return false;}
-      }else if(!Array.isArray(body))return false;
+      }else if(!Array.isArray(body?.jobs))return false;
       return true;
     };
     // Both bodies must complete. Failure of one half never hides the other's refusal.
