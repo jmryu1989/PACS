@@ -71,9 +71,11 @@ D621에 따라 provider reconciliation은 U5b 범위다. DB Suspend 뒤 살아 �
 | `u5-fixups` / `synthetic-u5-fixups` | `tests/e2e/artifacts/u5-fixups-ci/` | `test_u5_fixups.log`: SESSION-UI / DRAFT-SAFETY 관련 다섯 화면 회귀, 별도 PR CI |
 
 접속기록 필드와 비밀 제외는 U5 시험, 체크포인트의 달력 2년 `retain_until`은 PV-06,
-변조·유실·복원은 기존 `REQ-S7-AUDIT-STORE`가 맡는다. 확인한 U5 서버/live 시험은
-`AuditLog.at` 자체의 시각 정확성을 직접 단언하지 않는다. 이 공백과 실제 2년 운영 보관의
-이행 여부는 이 표의 PASS로 닫지 않는다.
+변조·유실·복원은 기존 `REQ-S7-AUDIT-STORE`가 맡는다. `AuthAuditLive` AL-13은 실제 로그인·로그아웃의
+`AuditLog.at`을 사건 전후 `/api/health.at`(최대 5초 구간, 양끝 ±1초)과 대조하고 관리자 콘솔 API의
+명시적 시간대·DB와 같은 시각·사건 순서를 검증하며, AS-01은 실제 DB 사건 구간(전후 CURRENT_TIMESTAMP ±1초)
+안의 저장 시각 + UTC 순간을 단언한다. 둘은 `REQ-S7-U5-AUTH-AUDIT` 필수 시험에 결속한다.
+실제 2년 운영 보관의 이행 여부는 이 표의 PASS로 닫지 않는다.
 
 최종 main을 깨끗하게 checkout한 **원본과 분리된 합성 환경**에서 다음 PowerShell 명령을 쓴다.
 이 문서의 실행 예시는 환경 기동이나 원본 연결을 허가하지 않는다. `record-run.py`는 HEAD와
