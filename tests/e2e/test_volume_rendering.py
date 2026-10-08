@@ -290,20 +290,28 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
   for covered_resize in (False,True):
    self.sculpt_region(v,dialog)
    edits=v.evaluate('vrReaderState()');edits.pop('draft')
-   if covered_resize:v.evaluate("window.dispatchEvent(new Event('pagehide'))")
+   # pagehide retires the full OHIF workspace, including this VR. A failed
+   # access refresh covers a live workspace and is the condition under test.
+   if covered_resize:v.route(route_pattern,unavailable)
    try:
+    if covered_resize:
+     expect(dialog.get_by_role('alert')).to_be_visible(timeout=45000)
+     expect(dialog.locator('.kin-vr-identity')).not_to_be_visible()
     frames=v.evaluate('vrGateEvents')
     v.set_viewport_size({'width':size['width']-30,'height':size['height']-30})
     expect(dialog.locator('[data-kin-vr-sculpt]')).to_have_count(0)
     v.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+    expect(dialog).to_be_visible()
     actual=v.evaluate('vrReaderState()');actual.pop('draft',None);self.assertEqual(edits,actual)
     if covered_resize:
      self.assertEqual(frames,v.evaluate('vrGateEvents'))
      expect(dialog.locator('.kin-vr-identity')).not_to_be_visible()
    finally:
-    if covered_resize:v.evaluate("window.dispatchEvent(new Event('pageshow'))")
+    if covered_resize:v.unroute(route_pattern,unavailable)
     v.set_viewport_size(size)
+   if covered_resize:v.wait_for_function('frames=>vrGateEvents>frames',arg=frames,timeout=20000)
    expect(dialog.locator('.kin-vr-identity')).to_be_visible()
+   actual=v.evaluate('vrReaderState()');actual.pop('draft',None);self.assertEqual(edits,actual)
    expect(dialog.get_by_role('button',name='Apply Sculpt',exact=True)).to_be_disabled()
   v.evaluate('()=>vrGateView.element.removeEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,vrGateListener)')
   dialog.get_by_role('button',name='Close VR',exact=True).click()
