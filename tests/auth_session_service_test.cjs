@@ -919,12 +919,20 @@ const lapsed = () => past(LEAD + 1000);
 test('AS-01 a login writes its session and one success row in one transaction', async t => {
   const w = await world(t);
   const v = await w.issue('ma', { sub: 'syn-sub-ma', groups: ['/' + A], email: 'syn-ma@synthetic.test' });
+  const [{ before }] = await w.base.$queryRaw`SELECT CURRENT_TIMESTAMP(3) AS before`;
   const first = await login(w, w.I1, v);
+  const [{ after }] = await w.base.$queryRaw`SELECT CURRENT_TIMESTAMP(3) AS after`;
   assert.deepEqual([first.done.status, first.done.location.split('#kin-entry=')[0], !!first.done.proof, !!first.done.newSid],
     [302, ORIGIN + '/worklist/hpacs-lite/main.html', true, true], 'the callback is the one answer that sets kin_sid; the entry proof rides in the fragment');
   assert.equal(await w.sessions(), 1);
   assert.deepEqual(await w.rows(), [{ actor: 'syn-ma@synthetic.test', action: 'auth.login', target: 'syn-sub-ma',
     detail: { institution: A, ip: IP, dataSubject: null, outcome: 'success' } }]);
+  const [stored] = await w.base.auditLog.findMany({ where: { action: 'auth.login', target: 'syn-sub-ma' }, select: { at: true } });
+  assert.ok(stored.at instanceof Date, 'the persisted audit time is a Date instant');
+  // The ±1 s margin covers engine/DB clock rounding around the server-observed event window.
+  assert.ok(before.getTime() - 1000 <= stored.at.getTime(), 'the stored login time is not stale');
+  assert.ok(stored.at.getTime() <= after.getTime() + 1000, 'the stored login time is not in the future');
+  assert.ok(stored.at.toISOString().endsWith('Z'), 'the stored login time is a UTC instant');
   const start = w.calls.indexOf('I1:tx:start');
   assert.deepEqual(w.calls.slice(start, w.calls.indexOf('I1:tx:end', start) + 1),
     ['I1:tx:start', 'I1:tx.markRead', 'I1:tx.create', 'I1:tx.audit', 'I1:tx:end'],

@@ -33,6 +33,7 @@ import sys
 import time
 import unittest
 import uuid
+from datetime import datetime, timedelta
 from ipaddress import ip_address
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
@@ -54,6 +55,7 @@ CASES = (
     "test_09_bearer_logout_writes_nothing",
     "test_10_a_session_ended_on_the_dicom_path_records_the_proxys_address",
     "test_11_api_answers_are_not_stored_and_the_account_console_is_closed",
+    "test_11b_login_logout_server_time_and_timezone",
     "test_12_cleanup_leaves_no_owned_row_or_session",
 )
 AUTH = ("auth.login", "auth.logout", "auth.session.expired")
@@ -265,7 +267,7 @@ class AuthAuditLive(unittest.TestCase):
         return address
 
     # ── the BFF login, one redirect at a time ──
-    def login(self, name: str, browser: Browser | None = None) -> Browser:
+    def login(self, name: str, browser: Browser | None = None, server_window: list | None = None) -> Browser:
         time.sleep(1.05)  # Authenticate after any just-committed rights boundary.
         member = self.members[name]
         browser = browser or Browser(self.stack)
@@ -285,8 +287,12 @@ class AuthAuditLive(unittest.TestCase):
         self.assertEqual(status, 302, "Keycloak sends the browser back to the callback")
         callback = headers.get("Location", "")
         self.secret("code", parse_qs(urlparse(callback).query).get("code", [""])[0])
+        if server_window is not None:
+            server_window.append(self.server_time(browser))
         status, headers, _ = browser.call("GET", callback)
         self.assertEqual((status, urlparse(headers.get("Location", "")).path), (302, "/worklist/hpacs-lite/main.html"))
+        if server_window is not None:
+            server_window.append(self.server_time(browser))
         self.assertIsNotNone(browser.sid())
         self.secret("sid", browser.sid())
         # S7-U5: the single-use entry proof rides in the fragment; the document then learns its session id from its
@@ -320,7 +326,7 @@ class AuthAuditLive(unittest.TestCase):
     def rows_of(self, name: str) -> list[dict]:
         user_id = self.members[name]["id"]
         actions = ",".join(f"'{a}'" for a in AUTH)
-        out = psql(f'SELECT json_build_object(\'id\', id, \'actor\', actor, \'action\', action, \'target\', target, \'detail\', detail)::text '
+        out = psql(f'SELECT json_build_object(\'id\', id, \'at\', at AT TIME ZONE \'UTC\', \'actor\', actor, \'action\', action, \'target\', target, \'detail\', detail)::text '
                    f'FROM "AuditLog" WHERE target=\'{user_id}\' AND action IN ({actions}) ORDER BY id;')
         return [json.loads(line) for line in out]
 
@@ -337,22 +343,41 @@ class AuthAuditLive(unittest.TestCase):
         return [(r["action"], json.loads(r["detail"]).get("cause") or json.loads(r["detail"]).get("outcome"),
                  json.loads(r["detail"]).get("institution"), json.loads(r["detail"]).get("ip")) for r in self.rows_of(name)]
 
-    def admin_view(self, key: str, limit: int = 100) -> set:
-        """(action, target, cause/outcome, institution) of the access rows admin `key` reads, every page."""
-        seen, after = set(), None
+    def admin_rows(self, key: str, limit: int = 100) -> list[dict]:
+        """The console's GET /api/admin/audit readback, retaining fields and page order."""
+        seen, after = [], None
         for _ in range(50):
             query = f"limit={limit}" + (f"&after={quote(after)}" if after else "")
             answer = self.stack.request("GET", "/admin/audit?" + query, f"u5-admin-{key.lower()}")
             self.assertEqual(answer.status, 200, answer.text)
-            for row in answer.body["rows"]:
-                if row["action"] in AUTH:
-                    self.assertEqual(sorted(row["detail"]), KEYS[shape_of(row["action"], row["detail"])])
-                    seen.add((row["action"], row["target"], row["detail"].get("cause") or row["detail"].get("outcome"),
-                              row["detail"].get("institution")))
+            seen.extend(answer.body["rows"])
             after = answer.body.get("next")
             if not after:
                 return seen
         raise RuntimeError("harness: the admin audit read did not end")
+
+    def admin_view(self, key: str, limit: int = 100) -> set:
+        """(action, target, cause/outcome, institution) of the access rows admin `key` reads, every page."""
+        seen = set()
+        for row in self.admin_rows(key, limit):
+            if row["action"] in AUTH:
+                self.assertEqual(sorted(row["detail"]), KEYS[shape_of(row["action"], row["detail"])])
+                seen.add((row["action"], row["target"], row["detail"].get("cause") or row["detail"].get("outcome"),
+                          row["detail"].get("institution")))
+        return seen
+
+    def explicit_time(self, value, label: str) -> datetime:
+        self.assertIsInstance(value, str, label + ": a time is present")
+        self.assertRegex(value, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$",
+                         label + ": ISO-8601 with an explicit timezone")
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        self.assertIsNotNone(parsed.utcoffset(), label + ": timezone-aware")
+        return parsed
+
+    def server_time(self, browser: Browser) -> datetime:
+        status, _, body = browser.call("GET", "/api/health")
+        self.assertEqual(status, 200, "the server time probe succeeded")
+        return self.explicit_time(json.loads(body).get("at"), "health.at")
 
     # ── cases ──
     def test_01_login_success_row_and_no_secret(self):
@@ -629,6 +654,47 @@ class AuthAuditLive(unittest.TestCase):
         self.assertEqual(200, anonymous.call("GET", "/auth/realms/kin/.well-known/openid-configuration")[0])
         self.assertEqual(204, self.logout(browser))
         print("S7-U5-AUTH-LIVE " + json.dumps({"case": "AL-11", "rows": 0, "hits": [], "ip_ok": True}))
+
+    def test_11b_login_logout_server_time_and_timezone(self):
+        """AL-13: D195 server time + timezone, from real events through DB and console readback.
+
+        Bracket only the BFF callback/logout with health.at (never the client clock). Each bracket must be <= 5 s;
+        a 1 s margin allows bounded API/DB clock skew and millisecond rounding, not a slow or stale event.
+        A fresh owned member makes the two records unambiguous even though the console does not expose row ids.
+        This runs before AL-12 so its rows also pass the owned-fixture cleanup assertions.
+        """
+        type(self).create_member("mt", "A", ["radiologist"])
+        login_window = []
+        browser = self.login("mt", server_window=login_window)
+        logout_window = [self.server_time(browser)]
+        self.assertEqual(204, self.logout(browser))
+        logout_window.append(self.server_time(browser))
+        rows = self.rows_of("mt")
+        self.assertEqual([r["action"] for r in rows], ["auth.login", "auth.logout"], "one row per real event")
+        self.assertEqual([json.loads(r["detail"]).get("outcome") or json.loads(r["detail"]).get("cause") for r in rows],
+                         ["success", "logout"])
+        stored_times = []
+        for row, (before, after) in zip(rows, (login_window, logout_window)):
+            with self.subTest(action=row["action"]):
+                self.assertGreaterEqual(after, before, "server clock does not go backwards during the event")
+                self.assertLessEqual(after - before, timedelta(seconds=5), "a tight server-observed event window")
+                # Prisma stores UTC in a timestamp column; the SQL read gives that value its UTC timezone,
+                # without changing the stored value. The independent product readback must supply its own offset.
+                stored = self.explicit_time(row.get("at"), "AuditLog.at")
+                self.assertGreaterEqual(stored, before - timedelta(seconds=1), "stored at is not stale")
+                self.assertLessEqual(stored, after + timedelta(seconds=1), "stored at is not in the future")
+                stored_times.append(stored)
+        self.assertLess(stored_times[0], stored_times[1], "login precedes logout by stored at")
+        visible = [r for r in self.admin_rows("A", limit=2) if r["target"] == self.members["mt"]["id"]]
+        self.assertEqual([r["action"] for r in visible], ["auth.logout", "auth.login"], "console returns newest first")
+        read_times = []
+        for read, stored in zip(visible, reversed(rows)):
+            self.assertEqual((read["actor"], read["target"], read["detail"]),
+                             (stored["actor"], stored["target"], json.loads(stored["detail"])), "the same event")
+            read_times.append(self.explicit_time(read.get("at"), "admin audit at"))
+        self.assertEqual(read_times, list(reversed(stored_times)), "console times are the stored event times")
+        self.assertGreater(read_times[0], read_times[1], "console time order agrees with event order")
+        self.check_rows("AL-13", rows)
 
     def test_12_cleanup_leaves_no_owned_row_or_session(self):
         type(self).purge_owned_rows()
