@@ -18,6 +18,21 @@ LOSS = '''() => {
 
 
 class ContextLossE2E(mip.VolumeMipE2E):
+    def login(self, *args, **kwargs):
+        page = super().login(*args, **kwargs)
+        # Observe each new viewer document before its first paint. A resize can
+        # clear the canvas while Cornerstone still reports the old RENDERED state.
+        page.context.add_init_script('''(() => {
+          window.contextLossRendered = new WeakMap();
+          document.addEventListener('CORNERSTONE_IMAGE_RENDERED', event => {
+            const v=window.cornerstone?.getEnabledElements().map(e=>e.viewport).find(v=>v.element===event.target);
+            if(v?.type!=='stack'||!v.csImage)return;
+            const canvas=v.getCanvas();
+            contextLossRendered.set(v.element,{canvas,width:canvas.width,height:canvas.height,imageId:v.csImage.imageId});
+          },true);
+        })()''')
+        return page
+
     def recovery_ready(self, viewer):
         # Cache a function predicate: re-evaluating a bare expression on the next
         # animation frame is blocked by the viewer's CSP when it starts false.
@@ -34,14 +49,29 @@ class ContextLossE2E(mip.VolumeMipE2E):
         self.recovery_ready(viewer)
 
     def assert_original_stack(self, viewer, study):
-        state = viewer.evaluate('''() => {
+        state = viewer.evaluate('''() => new Promise((resolve,reject) => {
           const v=cornerstone.getEnabledElements().map(e=>e.viewport).find(v=>v.type==='stack'&&v.csImage);
-          const image=v.csImage,m=cornerstone.metaData.get('instance',v.getCurrentImageId()),canvas=v.getCanvas();
-          return {study:m.StudyInstanceUID,series:m.SeriesInstanceUID,z:Number(m.ImagePositionPatient[2])/2.5,
-            raw:image.getPixelData()[32*64+32],voi:v.getProperties().voiRange,
-            pixel:canvas.getContext('2d').getImageData(Math.floor(canvas.width/2),Math.floor(canvas.height/2),1,1).data[0],
-            lost:v.getRenderingEngine().offscreenMultiRenderWindow.getOpenGLRenderWindow().getContext().isContextLost()};
-        }''')
+          const event=cornerstone.Enums.Events.IMAGE_RENDERED;
+          const stop=()=>{clearTimeout(timer);v.element.removeEventListener(event,sample)};
+          const timer=setTimeout(()=>{stop();reject(Error('Current stack canvas did not report IMAGE_RENDERED'))},60000);
+          function sample(){
+            try{
+              const image=v.csImage,canvas=v.getCanvas(),receipt=contextLossRendered.get(v.element);
+              if(v.viewportStatus!==cornerstone.Enums.ViewportStatus.RENDERED||!image||image.imageId!==v.getCurrentImageId()
+                  ||!receipt||receipt.canvas!==canvas||receipt.imageId!==image.imageId
+                  ||!canvas.width||!canvas.height||receipt.width!==canvas.width||receipt.height!==canvas.height)return;
+              // Read in the same task as the matching render receipt so a resize
+              // cannot clear the canvas between readiness and the pixel oracle.
+              const m=cornerstone.metaData.get('instance',v.getCurrentImageId());
+              const state={study:m.StudyInstanceUID,series:m.SeriesInstanceUID,z:Number(m.ImagePositionPatient[2])/2.5,
+                raw:image.getPixelData()[32*64+32],voi:v.getProperties().voiRange,
+                pixel:canvas.getContext('2d').getImageData(Math.floor(canvas.width/2),Math.floor(canvas.height/2),1,1).data[0],
+                lost:v.getRenderingEngine().offscreenMultiRenderWindow.getOpenGLRenderWindow().getContext().isContextLost()};
+              stop();resolve(state);
+            }catch(error){stop();reject(error)}
+          }
+          v.element.addEventListener(event,sample);sample();
+        })''')
         self.assertEqual(state['study'], study.uid)
         self.assertFalse(state['lost'])
         expected = mip.BASE + mip.Z[mip.band(round(state['z']), 33)]
