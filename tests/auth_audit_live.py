@@ -17,10 +17,11 @@ the secret set the rows are searched for; nothing secret is printed - each case 
 `S7-U5-AUTH-LIVE {case, rows, hits:[kinds], ip_ok}`.
 
 Owned data: Keycloak groups kin-test-<run>-a/-b/-z; admins of A, B and Z (LiveStack test identities, Bearer); members ma
-(A, radiologist), mb (B, technician), mm (A, moved to B), mp (no group: PENDING), mi2 (two groups: INVALID) and mi1 (one
-group, no role: INVALID), created with passwords through the Keycloak admin API. Cleanup: the members' and admins' access
+(A, radiologist), mt (A, radiologist; AL-13), mb (B, technician), mm (A, moved to B), mp (no group: PENDING), mi2 (two
+groups: INVALID) and mi1 (one group, no role: INVALID), created with passwords through the Keycloak admin API.
+Cleanup: the members' and admins' access
 rows by target and actor (past the AuditLog append-only guard, as the owned-row cleanup of tests/invariants_live.py does),
-their sessions by sub, the members and the groups.
+their sessions, ProviderChange and retained MemberRights by exact owned sub, the members and the groups.
 """
 from __future__ import annotations
 
@@ -211,10 +212,17 @@ class AuthAuditLive(unittest.TestCase):
     @classmethod
     def purge_owned_rows(cls) -> None:
         """Access rows whose target or actor is an owned account (the failure rows of AL-08 have target '' and actor
-        'unknown': they are removed by the run's own failure-row ids, kept in cls.failure_ids), then the sessions."""
+        'unknown': they are removed by the run's own failure-row ids, kept in cls.failure_ids), then the sessions and
+        provider changes before retained rights, for all owned members and admins."""
         for user_id in cls.owned_ids():
             purge_user_audit(user_id)
             psql(f'DELETE FROM "AuthSession" WHERE sub=\'{user_id}\';')
+            # The product retains cancelled rights and has no member removal API. Bypass its retention trigger
+            # only in this owned-fixture transaction; ProviderChange ownership is sub, not its call target.
+            psql(f'BEGIN; DELETE FROM "ProviderChange" WHERE sub=\'{user_id}\'; '
+                 'SET LOCAL session_replication_role = replica; '
+                 f'DELETE FROM "MemberRights" WHERE sub=\'{user_id}\'; '
+                 'SET LOCAL session_replication_role = origin; COMMIT;')
         # The end marks of this run's own provider sessions (ids read from this run's own session rows).
         owned = [value for value in cls.provider_sessions if re.fullmatch(r"[0-9A-Za-z-]{8,64}", value)]
         if owned:
@@ -687,7 +695,9 @@ class AuthAuditLive(unittest.TestCase):
         self.assertLess(stored_times[0], stored_times[1], "login precedes logout by stored at")
         # The console also lists the member's approval row (its target is the same account); only the
         # two access rows of this case are compared, in the console's own order.
-        visible = [r for r in self.admin_rows("A", limit=2) if r["target"] == self.members["mt"]["id"] and r["action"] in AUTH]
+        member_rows = [r for r in self.admin_rows("A", limit=2) if r["target"] == self.members["mt"]["id"]]
+        self.assertIn("admin.user.approve", [r["action"] for r in member_rows], "console retains the member approval row")
+        visible = [r for r in member_rows if r["action"] in AUTH]
         self.assertEqual([r["action"] for r in visible], ["auth.logout", "auth.login"], "console returns newest first")
         read_times = []
         for read, stored in zip(visible, reversed(rows)):
@@ -705,6 +715,8 @@ class AuthAuditLive(unittest.TestCase):
         actions = ",".join(f"'{a}'" for a in AUTH + ("auth.entry",))
         self.assertEqual(["0"], psql(f'SELECT count(*) FROM "AuditLog" WHERE target IN ({listed}) AND action IN ({actions});'))
         self.assertEqual(["0"], psql(f'SELECT count(*) FROM "AuthSession" WHERE sub IN ({listed});'))
+        self.assertEqual(["0"], psql(f'SELECT count(*) FROM "ProviderChange" WHERE sub IN ({listed});'))
+        self.assertEqual(["0"], psql(f'SELECT count(*) FROM "MemberRights" WHERE sub IN ({listed});'))
         if getattr(type(self), "failure_ids", None):
             self.assertEqual(["0"], psql('SELECT count(*) FROM "AuditLog" WHERE id IN (' + ",".join(map(str, self.failure_ids)) + ");"))
         print("S7-U5-AUTH-LIVE " + json.dumps({"case": "AL-12", "rows": 0, "hits": [], "ip_ok": True}))
