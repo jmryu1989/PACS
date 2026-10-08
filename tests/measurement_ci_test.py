@@ -2555,14 +2555,26 @@ class MeasurementCiTests(unittest.TestCase):
             root=Path(folder);stage=root/'private';out=root/'public'
             stage.mkdir();out.mkdir()
             (stage/'volume-rendering.png').write_bytes(b'\x89PNG\r\n\x1a\nsynthetic')
+            # The declared set is both PNGs: one alone is missing evidence, not a pass.
+            with self.assertRaisesRegex(RuntimeError,'Unexpected or missing'):
+                ci.publish_vr_evidence(stage,out)
+            self.assertEqual(list(out.iterdir()),[])
+            (stage/'vr-access-covered.png').write_bytes(b'\x89PNG\r\n\x1a\ncovered')
             (stage/'raw.txt').write_text('Authorization: Bearer raw-secret',encoding='utf-8')
             with self.assertRaisesRegex(RuntimeError,'Unexpected or missing'):
                 ci.publish_vr_evidence(stage,out)
             self.assertEqual(list(out.iterdir()),[])
             (stage/'raw.txt').unlink()
+            (stage/'vr-access-covered.png').write_bytes(b'not a png')
+            with self.assertRaisesRegex(RuntimeError,'not a PNG'):
+                ci.publish_vr_evidence(stage,out)
+            self.assertEqual(list(out.iterdir()),[])
+            (stage/'vr-access-covered.png').write_bytes(b'\x89PNG\r\n\x1a\ncovered')
             ci.publish_vr_evidence(stage,out)
             self.assertEqual((out/'volume-rendering.png').read_bytes(),
                              b'\x89PNG\r\n\x1a\nsynthetic')
+            self.assertEqual((out/'vr-access-covered.png').read_bytes(),
+                             b'\x89PNG\r\n\x1a\ncovered')
 
     def test_inner_deadline_leaves_time_to_terminate_descendants(self):
         for remaining, expected in [(1000,540), (100,65), (36,1)]:
