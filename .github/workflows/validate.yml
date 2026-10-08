@@ -118,15 +118,21 @@ jobs:
       # synthetic stack.
       - name: S5-U5b admin audit record-time attribution vectors, negative control and action-table completeness
         if: ${{ !cancelled() }}
-        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-audit-attribution --cwd . --file api/src/admin-audit.ts --file api/src/admin.service.ts --file tests/admin_audit_attribution_test.cjs --file api/tsconfig.json --file api/package-lock.json --file tests/fixtures/admin_audit_completeness/contract.json --file tests/fixtures/admin_audit_completeness/actions.ts --file tests/fixtures/admin_audit_completeness/forward.ts --file tests/fixtures/admin_audit_completeness/baseline.ts --file tests/fixtures/admin_audit_completeness/equivalent.ts --file tests/fixtures/admin_audit_completeness/sql-positions.ts --file tests/fixtures/admin_audit_completeness/violations.txt --file api/src/worklist-columns.ts --file tests/admin-audit-deferrals.cjs --file tests/admin-audit-nonwrite-deferrals.json --file api/src/critical-result.service.ts --file api/src/critical-result-policy.ts --file api/src/auth.service.ts --file api/src/auth.controller.ts --file api/src/pacs.controller.ts -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src -e KIN_ADMIN_AUDIT_MODULE=api/src/admin-audit.ts node:22-alpine node --test tests/admin_audit_attribution_test.cjs
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-audit-attribution --cwd . --tree api/src --tree tests/fixtures/admin-audit-checker --tree tests/fixtures/admin_audit_completeness --file api/tsconfig.json --file api/package-lock.json --file tests/admin_audit_attribution_test.cjs --file api/prisma/schema.prisma --file api/prisma/import-member-rights.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src -e KIN_ADMIN_AUDIT_MODULE=api/src/admin-audit.ts node:22-alpine node --test tests/admin_audit_attribution_test.cjs
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         if: ${{ !cancelled() }}
         run: |
           python3 tests/ci_browser_apt_test.py
           sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        if: ${{ !cancelled() }}
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
         if: ${{ !cancelled() }}
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/measurement-python"
           "$RUNNER_TEMP/measurement-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -504,9 +510,13 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 8
         run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-session-dom --cwd . --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/finding-link-model.js --file worklist-v0/hpacs-lite/index.html --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/tech-note.js --file worklist-v0/hpacs-lite/viewer-dicom-pdf.js --file worklist-v0/hpacs-lite/viewer-findings.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/volume-mip-job.js --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/work-context.js --file config/ohif.js --file tests/viewer_session_fixture.py --file tests/viewer_session_dom_test.py --file worklist-v0/hpacs-lite/session-transport.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_session_dom_test.py
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-session-dom --cwd . --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/finding-link-model.js --file worklist-v0/hpacs-lite/index.html --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/tech-note.js --file worklist-v0/hpacs-lite/viewer-dicom-pdf.js --file worklist-v0/hpacs-lite/viewer-findings.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/volume-mip-job.js --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/work-context.js --file config/ohif.js --file tests/viewer_session_fixture.py --file tests/viewer_session_dom_test.py --file worklist-v0/hpacs-lite/session-transport.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_session_dom_test.py -v
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-resource-guard-dom --cwd . --file tests/viewer_session_fixture.py --file tests/viewer_resource_guard_dom_test.py --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_resource_guard_dom_test.py
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-clinician-entry-dom --cwd . --file config/ohif.js --file tests/viewer_clinician_entry_dom_test.py --file worklist-v0/hpacs-lite/clinician.html --file proxy/branding/kin-emblem-j1.svg --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/critical-result-inbox.js --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/viewer-resources.js --file worklist-v0/hpacs-lite/viewer-session.js --file tests/clinician_home_dom_test.py --file worklist-v0/hpacs-lite/index.html -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_clinician_entry_dom_test.py
+      - name: S7 stage-exit verdict tool - required-test list resolution and per-requirement verdict (pure)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/stage-exit --cwd . --file scripts/stage-exit.py --file tests/stage7-exit.json --file tests/stage-exit.md --file tests/stage_exit_test.py --file tests/README.md --file .github/workflows/validate.yml --file tests/candidate_ci.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/stage_exit_test.py
       - name: S7-U5 clinician negative controls on served copies
         if: ${{ !cancelled() }}
         timeout-minutes: 5
@@ -537,7 +547,7 @@ jobs:
           retention-days: 7
   volume-rendering:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -550,14 +560,19 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-volume-models --cwd . --file worklist-v0/hpacs-lite/volume-display.js --file tests/volume_display_test.cjs --file worklist-v0/hpacs-lite/volume-batch.js --file tests/volume_batch_test.cjs --file worklist-v0/hpacs-lite/volume-batch-scout.js --file tests/volume_batch_scout_test.cjs --file worklist-v0/hpacs-lite/volume-crosshair.js --file tests/volume_crosshair_test.cjs --file worklist-v0/hpacs-lite/volume-marks.js --file tests/volume_marks_test.cjs --file worklist-v0/hpacs-lite/volume-curved.js --file tests/volume_curved_test.cjs --file worklist-v0/hpacs-lite/volume-path.js --file tests/volume_path_test.cjs --file worklist-v0/hpacs-lite/volume-orientation.js --file tests/volume_orientation_test.cjs --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/volume_preferences_test.cjs --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/volume_average_shader_test.cjs --file worklist-v0/hpacs-lite/volume-mip.js --file tests/volume_mip_test.cjs --file worklist-v0/hpacs-lite/volume-voi.js --file tests/volume_voi_test.cjs --file worklist-v0/hpacs-lite/volume-mip-job.js --file tests/volume_mip_job_test.cjs --file worklist-v0/hpacs-lite/volume-mip-batch.js --file tests/volume_mip_batch_test.cjs --file worklist-v0/hpacs-lite/volume-mip-output.js --file tests/volume_mip_output_test.cjs --file worklist-v0/hpacs-lite/viewer-volume-job.js --file tests/viewer_volume_job_capture_test.cjs --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file tests/viewer_session_fixture.cjs --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/viewer-session.js --file worklist-v0/hpacs-lite/viewer-resources.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_display_test.cjs tests/volume_batch_test.cjs tests/volume_batch_scout_test.cjs tests/volume_crosshair_test.cjs tests/volume_marks_test.cjs tests/volume_curved_test.cjs tests/volume_path_test.cjs tests/volume_orientation_test.cjs tests/volume_preferences_test.cjs tests/volume_average_shader_test.cjs tests/volume_mip_test.cjs tests/volume_voi_test.cjs tests/volume_mip_job_test.cjs tests/volume_mip_batch_test.cjs tests/volume_mip_output_test.cjs tests/viewer_volume_job_capture_test.cjs
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/vr-python"
           "$RUNNER_TEMP/vr-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/vr-python/bin/python" -m playwright install --with-deps chromium
       - name: VR source binding survives transient MPR layout readiness
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/binding-dom --cwd . --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-rendering.js --file tests/viewer_vr_binding_dom_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_vr_binding_dom_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/binding-dom --cwd . --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-rendering.js --file worklist-v0/hpacs-lite/viewer-volume-sculpt.js --file worklist-v0/hpacs-lite/volume-rendering.js --file worklist-v0/hpacs-lite/volume-sculpt.js --file worklist-v0/hpacs-lite/work-context.js --file worklist-v0/hpacs-lite/session-transport.js --file worklist-v0/hpacs-lite/viewer-session.js --file worklist-v0/hpacs-lite/viewer-resources.js --file config/ohif.js --file tests/viewer_vr_binding_dom_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_vr_binding_dom_test.py
       - name: MPR Basic Orthogonal stays distinct from Reset Planes
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/orientation-basic-dom --cwd . --file worklist-v0/hpacs-lite/volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file tests/viewer_volume_orientation_dom_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_volume_orientation_dom_test.py
       - name: Confirm exact declared VR-only selection
@@ -585,7 +600,7 @@ jobs:
     # 28-minute live step as the existing e2e jobs; measurement_ci.py's own
     # 25-minute deadline and the profile's 540s per-suite cap bound the run.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -594,8 +609,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/mpr-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/mpr-python"
           "$RUNNER_TEMP/mpr-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -624,7 +644,7 @@ jobs:
     # suites already commit 1325s of measurement_ci.py's 1500s deadline. The same
     # 40-minute job policy and 28-minute live step; the profile's per-suite caps bound it.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -633,8 +653,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/slab-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/slab-python"
           "$RUNNER_TEMP/slab-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -661,7 +686,7 @@ jobs:
     # runner, and so does the finding 3D point location suite; the profile's per-suite caps
     # (420+35)+(300+35)+(360+35) = 1185s bound the live step.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -670,8 +695,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/path-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/path-python"
           "$RUNNER_TEMP/path-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -702,7 +732,7 @@ jobs:
     # (240+35)+(240+35)+(360+35)+(240+35) = 1220s bound the live step. The pure batch and scout
     # models and the recipe precision check stay registered in the volume-rendering job.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -711,8 +741,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/batch-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/batch-python"
           "$RUNNER_TEMP/batch-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -744,7 +779,7 @@ jobs:
     # per-suite caps (420+35)+(480+35) = 970s bound the live step. The pure preference model stays
     # registered in the volume-rendering job.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -753,8 +788,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/syncpref-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/syncpref-python"
           "$RUNNER_TEMP/syncpref-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -787,7 +827,7 @@ jobs:
     # three-plane/batch output suite share this runner; the profile's per-suite caps (660+35)+(420+35) = 1150s
     # bound the live step. The pure annotation model stays registered in the volume-rendering job.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -796,8 +836,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/marks-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/marks-python"
           "$RUNNER_TEMP/marks-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -826,7 +871,7 @@ jobs:
     # commit 1340s of measurement_ci.py's 1500s deadline and keep their caps. The same 40-minute job policy and
     # 28-minute live step; the profile's single cap (1200+35) = 1235s bounds the live step.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -835,8 +880,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/mipvoi-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/mipvoi-python"
           "$RUNNER_TEMP/mipvoi-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -862,7 +912,7 @@ jobs:
     # volume-slab, whose caps stay as they are. The same 40-minute job policy and 28-minute live step; the profile's
     # single cap (1200+35) = 1235s bounds the live step.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -871,8 +921,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/mipjob-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/mipjob-python"
           "$RUNNER_TEMP/mipjob-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -898,7 +953,7 @@ jobs:
     # volume-slab, whose caps stay as they are. The same 40-minute job policy and 28-minute live step; the profile's single
     # cap (1200+35) = 1235s bounds the live step.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -907,8 +962,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/mipbatch-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/mipbatch-python"
           "$RUNNER_TEMP/mipbatch-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -934,7 +994,7 @@ jobs:
     # volume-mip-voi or volume-slab, whose caps stay as they are. The same 40-minute job policy and 28-minute live step; the
     # profile's single cap (1200+35) = 1235s bounds the live step.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -943,8 +1003,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/mipout-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/mipout-python"
           "$RUNNER_TEMP/mipout-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -971,7 +1036,7 @@ jobs:
     # volume-mip-batch, volume-mip-job, volume-mip-voi or volume-slab, whose caps stay as they are. The same 40-minute job policy
     # and 28-minute live step; the profile's single cap (900+35) = 935s bounds the live step.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -980,8 +1045,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/miporient-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/miporient-python"
           "$RUNNER_TEMP/miporient-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -1004,7 +1074,7 @@ jobs:
           retention-days: 7
   s7-u5-session-contracts:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -1015,8 +1085,13 @@ jobs:
           persist-credentials: false
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt', 'gateway/agent/requirements.txt') }}
       - name: Install pinned synthetic stack test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/u5-python"
           "$RUNNER_TEMP/u5-python/bin/python" -m pip install -r tests/e2e/requirements.txt -r gateway/agent/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -1041,7 +1116,7 @@ jobs:
     # 25-minute deadline, so the trailing hanging-protocol flows keep their slice
     # even if the shared invariants and worklist suites run to their caps.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1050,8 +1125,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/hp-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt', 'gateway/agent/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/hp-python"
           # invariants_live.py runs gateway/agent/test_agent.py with sys.executable, so this
@@ -1092,7 +1172,7 @@ jobs:
     # jobs; measurement_ci.py's own 25-minute deadline and the profile's single 900s
     # per-suite cap bound the run.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1101,8 +1181,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/cell-merge-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/cell-merge-python"
           "$RUNNER_TEMP/cell-merge-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -1139,7 +1224,7 @@ jobs:
     # existing e2e jobs; cleanup failure still fails the profile and the artifact is
     # uploaded on every outcome.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1148,8 +1233,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/study-arrivals-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/study-arrivals-python"
           "$RUNNER_TEMP/study-arrivals-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -1178,7 +1268,7 @@ jobs:
     # 25-minute deadline. Two suites at the 540s cap plus margins are 1150s of the 1500s
     # deadline. Same 40-minute job policy and 28-minute live step as the existing e2e jobs.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1187,8 +1277,13 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/u2b-regressions-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/u2b-regressions-python"
           "$RUNNER_TEMP/u2b-regressions-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -1280,7 +1375,7 @@ jobs:
       - name: Personal Hanging Protocol shared schema and owner model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/hanging-protocols --cwd . --file api/src/hanging-protocol.ts --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file tests/hanging_protocol_contract_cases.json --file tests/hanging_protocol_model_test.cjs --file tests/hanging_protocol_validator_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --experimental-strip-types --test tests/hanging_protocol_model_test.cjs tests/hanging_protocol_validator_test.cjs
       - name: Backup safety regressions
-        run: python3 tests/ops_backup_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/backup-safety --cwd . --file scripts/ops_backup.py --file scripts/ops_audit_integrity.py --file scripts/ops_monitor.py --file tests/ops_audit_integrity_test.py --file tests/ops_backup_test.py -- python3 tests/ops_backup_test.py
       # S7-AUDIT-STORE (TEST-S7-AUDIT-STORE-PURE, PV-01..PV-07): the verdicts, exit codes, checkpoint and ledger files,
       # previous-checkpoint comparison, calendar retention and ledger lifecycle of scripts/ops_audit_integrity.py with
       # the isolated verifier answered by synthetic digest streams (no Docker). The run directory is also named in the
@@ -1495,7 +1590,7 @@ jobs:
         env:
           KIN_TEST_API_IMAGE: kin-api:ci
           KIN_EXPECTED_REVISION: ${{ github.sha }}
-        run: python3 tests/production_image_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/production-image --cwd . --file api/Dockerfile --file api/prisma/schema.prisma --file scripts/ops_backup.py --file tests/production_image_test.py -- python3 tests/production_image_test.py
       - name: Disposable host adapter API replacement and database preservation
         run: sudo env KIN_TEST_API_IMAGE=kin-api:ci python3 -B tests/ops_deploy_host_container_test.py
       - name: Record exact image identity
@@ -1708,7 +1803,7 @@ jobs:
     # (S3-ASR-U4L G-LIVE-PATH / G-LIVE-GEO), the live refusal battery (U5) or recognition of speech.
     # Adjudicate from the raw `U4B-CAP` lines in capture/stdout.log before the exit code.
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1717,8 +1812,13 @@ jobs:
         run: |
           python3 tests/ci_browser_apt_test.py
           sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install pinned browser test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/capture-python"
           "$RUNNER_TEMP/capture-python/bin/python" -m pip install -r tests/e2e/requirements.txt
