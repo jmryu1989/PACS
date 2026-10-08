@@ -1,6 +1,7 @@
 name: Validate immutable deployment candidate
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       candidate_sha:
@@ -12,15 +13,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: candidate-${{ inputs.candidate_sha }}
+  group: candidate-${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
   cancel-in-progress: false
 
 jobs:
   candidate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
-      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
     steps:
       - name: Checkout reviewed runner tools
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -33,15 +34,20 @@ jobs:
       - name: Checkout immutable candidate separately
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ env.CANDIDATE_SHA }}
           path: target
           persist-credentials: false
       - name: Keep browser install independent of unused Chrome APT repository
         run: |
           python3 -B tools/tests/ci_browser_apt_test.py
           sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 tools/scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('target/tests/e2e/requirements.txt', 'target/gateway/agent/requirements.txt') }}
       - name: Install candidate pinned synthetic test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           python3 -m venv "$RUNNER_TEMP/candidate-python"
           "$RUNNER_TEMP/candidate-python/bin/python" -m pip install -r target/tests/e2e/requirements.txt -r target/gateway/agent/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
@@ -57,7 +63,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: candidate-${{ inputs.candidate_sha }}
+          name: candidate-${{ env.CANDIDATE_SHA }}
           path: target/tests/e2e/artifacts/candidate-ci/
           if-no-files-found: error
           retention-days: 7
