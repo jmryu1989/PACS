@@ -1,6 +1,7 @@
 """Synthetic subprocess regressions; never start Docker, a browser or a live stack."""
 import ast
 from collections import namedtuple
+from datetime import datetime, timedelta, timezone
 import functools
 import hashlib
 import importlib.util
@@ -453,16 +454,34 @@ class InspectionReleaseTests(unittest.TestCase):
         self.marker = self.state / 'live-needs-inspection.json'
         self.ledger = self.state / 'inspections.jsonl'
         self.record = self.state / 'inspection.json'
-        self.inspection = {'unit': 'owned-probe', 'module': 'probe.py', 'exit': 125,
-                           'artifacts': ['probe.log'], 'stack': {'containers': []},
-                           'inspected_at': '2026-10-08T02:00:00+00:00', 'inspector': 'fixture-owner'}
-        self.record.write_text(json.dumps(self.inspection), encoding='utf-8')
+        self.identity = dict(unit='owned-probe', module='tests/probe.py', plan_sha256='a' * 64, attempt=1)
+
+    def write_record(self, value=None):
+        self.record.write_text(json.dumps(value if value is not None else self.inspection), encoding='utf-8')
+        # Ensure distinct mtimes even on a filesystem with coarse write timestamps.
+        stamp = max(time.time_ns(), self.marker.stat().st_mtime_ns + 1_000_000)
+        os.utime(self.record, ns=(stamp, stamp))
+
+    def assert_closed(self, action, exception=gate.Refused):
+        marker = self.marker.read_bytes()
+        ledger = self.ledger.read_bytes() if self.ledger.is_file() else None
+        with self.assertRaises(exception):
+            action()
+        self.assertEqual(self.marker.read_bytes(), marker)
+        self.assertEqual(self.ledger.read_bytes() if self.ledger.is_file() else None, ledger)
+        with self.assertRaises(gate.Refused):
+            with gate.live_run(**self.identity):
+                self.fail('Uninspected gate admitted a run')
 
     def fail_live_run(self):
         with self.assertRaisesRegex(RuntimeError, 'synthetic failure'):
-            with gate.live_run():
+            with gate.live_run(**self.identity):
                 raise RuntimeError('synthetic failure')
         self.assertTrue(self.marker.is_file())
+        self.inspection = {**json.loads(self.marker.read_bytes()), 'exit': 125,
+                           'artifacts': ['probe.log'], 'stack': {'containers': []},
+                           'inspected_at': datetime.now(timezone.utc).isoformat(), 'inspector': 'fixture-owner'}
+        self.write_record()
 
     def test_inspection_requires_a_marker(self):
         with self.assertRaises(gate.Refused):
@@ -471,31 +490,69 @@ class InspectionReleaseTests(unittest.TestCase):
 
     def test_missing_and_malformed_records_keep_gate_closed(self):
         self.fail_live_run()
-        original = self.marker.read_bytes()
         self.record.unlink()
         invalid = [None, '{', '[]']
         invalid += [json.dumps({k: v for k, v in self.inspection.items() if k != key})
                     for key in self.inspection]
         invalid += [json.dumps({**self.inspection, key: value}) for key, value in (
-            ('unit', ''), ('module', []), ('exit', True), ('artifacts', 'probe.log'),
+            ('unit', ''), ('module', []), ('attempt', True), ('pid', 0), ('plan_sha256', 'bad'),
+            ('exit', True), ('artifacts', 'probe.log'),
             ('artifacts', [None]), ('stack', []), ('inspected_at', None), ('inspector', ''))]
         for value in invalid:
             with self.subTest(record=value):
                 if value is not None:
                     self.record.write_text(value, encoding='utf-8')
-                with self.assertRaises(gate.Refused):
-                    gate.release_after_inspection(self.record)
-                self.assertEqual(self.marker.read_bytes(), original)
-                self.assertFalse(self.ledger.exists())
-                with self.assertRaises(gate.Refused):
-                    with gate.live_run():
-                        self.fail('Uninspected gate admitted a run')
+                self.assert_closed(lambda: gate.release_after_inspection(self.record))
+
+    def test_single_field_mismatches_and_bad_times_keep_gate_closed(self):
+        self.fail_live_run()
+        self.ledger.write_text(json.dumps({'record_sha256': '0' * 64}) + '\n', encoding='utf-8')
+        for key, value in (
+                ('unit', 'another-unit'), ('module', 'tests/another.py'), ('attempt', 2),
+                ('plan_sha256', 'b' * 64), ('pid', self.inspection['pid'] + 1),
+                ('started_at', (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()),
+                ('inspected_at', 'not-a-time'), ('inspected_at', '2026-02-30T00:00:00+00:00'),
+                ('inspected_at', '2026-01-01T00:00:00'),
+                ('inspected_at', self.inspection['started_at']),
+                ('inspected_at', (datetime.now(timezone.utc) + timedelta(days=1)).isoformat())):
+            with self.subTest(field=key, value=value):
+                self.write_record({**self.inspection, key: value})
+                self.assert_closed(lambda: gate.release_after_inspection(self.record))
+
+    def test_stale_record_mtime_is_refused_independently_of_its_valid_time(self):
+        self.fail_live_run()
+        stamp = self.marker.stat().st_mtime_ns
+        os.utime(self.record, ns=(stamp, stamp))
+        self.assert_closed(lambda: gate.release_after_inspection(self.record))
+
+    def test_fresh_matching_record_hash_cannot_be_reused_under_another_path(self):
+        self.fail_live_run()
+        raw = self.record.read_bytes()
+        self.ledger.write_text(json.dumps({'record_sha256': hashlib.sha256(raw).hexdigest(),
+                                          'record_path': 'previous-name.json'}) + '\n', encoding='utf-8')
+        copied = self.state / 'copied.json'
+        copied.write_bytes(raw)
+        stamp = self.record.stat().st_mtime_ns
+        os.utime(copied, ns=(stamp, stamp))
+        for path in (self.record, copied):
+            self.assert_closed(lambda: gate.release_after_inspection(path))
+
+    def test_legacy_pid_only_marker_is_not_accepted(self):
+        self.fail_live_run()
+        self.marker.write_text(json.dumps({'pid': os.getpid()}), encoding='utf-8')
+        self.write_record()
+        self.assert_closed(lambda: gate.release_after_inspection(self.record))
 
     def test_inspection_appends_evidence_then_admits_following_live_run(self):
         previous = b''
+        hashes = set()
         for index in range(2):
+            self.identity['attempt'] = index + 1
             self.fail_live_run()
             marker = json.loads(self.marker.read_bytes())
+            digest = hashlib.sha256(self.record.read_bytes()).hexdigest()
+            self.assertNotIn(digest, hashes)
+            hashes.add(digest)
             gate.release_after_inspection(self.record)
             self.assertFalse(self.marker.exists())
             current = self.ledger.read_bytes()
@@ -506,13 +563,13 @@ class InspectionReleaseTests(unittest.TestCase):
             self.assertEqual(Path(rows[-1]['record_path']), self.record.resolve())
             self.assertEqual(rows[-1]['record_sha256'], hashlib.sha256(self.record.read_bytes()).hexdigest())
             self.assertTrue(rows[-1]['released_at'])
-            with gate.live_run():
+            with gate.live_run(**self.identity):
                 gate.require_live_run()
             self.assertEqual(self.ledger.read_bytes(), current)
             previous = current
 
     def test_active_lease_prevents_inspection_release(self):
-        with gate.live_run():
+        with gate.live_run(**self.identity):
             with self.assertRaises(gate.Refused):
                 gate.release_after_inspection(self.record)
             self.assertTrue(self.marker.exists())
@@ -521,9 +578,34 @@ class InspectionReleaseTests(unittest.TestCase):
     def test_ledger_write_failure_keeps_marker(self):
         self.fail_live_run()
         self.ledger.mkdir()
-        with self.assertRaises(OSError):
-            gate.release_after_inspection(self.record)
-        self.assertTrue(self.marker.exists())
+        self.assert_closed(lambda: gate.release_after_inspection(self.record), OSError)
+
+    def test_ledger_append_or_fsync_failure_keeps_marker(self):
+        for target in ('write', 'fsync'):
+            with self.subTest(target=target):
+                if not self.marker.exists():
+                    self.fail_live_run()
+                original = self.marker.read_bytes()
+                if target == 'write':
+                    real_open = Path.open
+                    def fail_append(path, *args, **kwargs):
+                        if path == self.ledger and args and args[0] == 'a':
+                            raise OSError('synthetic append failure')
+                        return real_open(path, *args, **kwargs)
+                    with patch.object(Path, 'open', fail_append):
+                        self.assert_closed(lambda: gate.release_after_inspection(self.record), OSError)
+                else:
+                    with patch.object(gate.os, 'fsync', side_effect=OSError('synthetic fsync failure')):
+                        with self.assertRaises(OSError):
+                            gate.release_after_inspection(self.record)
+                    self.assertEqual(self.marker.read_bytes(), original)
+                    with self.assertRaises(gate.Refused):
+                        gate.preflight_live()
+
+    def test_unreadable_ledger_keeps_marker(self):
+        self.fail_live_run()
+        self.ledger.write_text('not json\n', encoding='utf-8')
+        self.assert_closed(lambda: gate.release_after_inspection(self.record))
 
 
 class ExecutionGuardTests(unittest.TestCase):
@@ -666,6 +748,62 @@ class Probe(unittest.TestCase):
         self.assertIn(b'fixture inspection', result.stderr)
         self.assertFalse((self.state/'next.json').exists())
         self.assertFalse((self.tests/'live').exists())
+
+    def test_real_module_and_single_or_multi_file_plan_bind_marker_and_attempt(self):
+        for filename in ('failure.py', 'other.py'):
+            (self.tests / filename).write_text(
+                'import unittest\nfrom live_test_gate import require_live_run\n'
+                'class Failure(unittest.TestCase):\n'
+                ' def test_body(self):\n  require_live_run()\n  self.fail("synthetic failure")\n', encoding='utf-8')
+        for attempt, selection in enumerate(('module', 'single-plan', 'multi-plan'), 1):
+            with self.subTest(selection=selection):
+                command = [sys.executable, '-B', str(self.bootstrap)]
+                if selection == 'module':
+                    command += ['--module', 'tests/../tests/failure.py', '--mode', 'live', '--unit', 'bound-probe']
+                else:
+                    plan = json.loads(self.plan(unit='bound-probe', mode='live').read_text())
+                    plan['tests'] = [dict(file='tests/../tests/failure.py', case='Failure.test_body')]
+                    if selection == 'multi-plan':
+                        plan['tests'].append(dict(file='tests/other.py', case='Failure.test_body'))
+                    path = self.path / 'bound-input.json'
+                    path.write_text(json.dumps(plan), encoding='utf-8')
+                    command += ['--plan', str(path)]
+                completed = subprocess.run(command, capture_output=True, timeout=20)
+                self.assertEqual(completed.returncode, 125, completed.stderr)
+                row = json.loads(next(line[len('PLAN_RESULT '):] for line in completed.stdout.decode().splitlines()
+                                      if line.startswith('PLAN_RESULT ')))
+                marker_path = self.state / 'live-needs-inspection.json'
+                marker = json.loads(marker_path.read_bytes())
+                self.assertEqual(set(marker), {'unit', 'module', 'attempt', 'plan_sha256', 'pid', 'started_at'})
+                self.assertEqual(marker['unit'], 'bound-probe')
+                self.assertEqual(marker['attempt'], attempt)
+                self.assertEqual(row['attempt'], attempt)
+                frozen = self.state / ('bound-probe-attempt-' + str(attempt) + '.json')
+                self.assertEqual(marker['plan_sha256'], hashlib.sha256(frozen.read_bytes()).hexdigest())
+                self.assertEqual(marker['plan_sha256'], row['plan_sha256'])
+                self.assertEqual(marker['module'], 'plan:' + row['plan_sha256'] if selection == 'multi-plan'
+                                 else 'tests/failure.py')
+                self.assertEqual(datetime.fromisoformat(marker['started_at']).utcoffset(), timedelta(0))
+                self.assertIs(type(marker['pid']), int)
+                # The parent test is a separate commander, not the worker that failed.
+                self.assertNotEqual(marker['pid'], os.getpid())
+                record = self.path / ('inspection-' + str(attempt) + '.json')
+                record.write_text(json.dumps({**marker, 'exit': completed.returncode,
+                    'artifacts': ['inspection.md', 'run.log', 'stack.log'], 'stack': {'containers': []},
+                    'inspected_at': datetime.now(timezone.utc).isoformat(), 'inspector': 'commander'}), encoding='utf-8')
+                stamp = max(time.time_ns(), marker_path.stat().st_mtime_ns + 1_000_000)
+                os.utime(record, ns=(stamp, stamp))
+                ledger_path = self.state / 'bound-probe.json'
+                unit_before = ledger_path.read_bytes()
+                with patch.object(gate, 'STATE', self.state):
+                    gate.release_after_inspection(record)
+                self.assertEqual(ledger_path.read_bytes(), unit_before)
+                self.assertFalse(marker_path.exists())
+                entries = [json.loads(line) for line in (self.state / 'inspections.jsonl').read_text().splitlines()]
+                self.assertEqual(len(entries), attempt)
+                self.assertEqual(entries[-1]['marker'], marker)
+                self.assertEqual(entries[-1]['record_sha256'], hashlib.sha256(record.read_bytes()).hexdigest())
+        self.assertEqual(self.run_plan(self.plan(unit='admitted', case='test_live', mode='live')).returncode, 0)
 
     def test_timeout_kills_owned_descendants_and_blocks_retry(self):
         path = self.plan(case='test_timeout', mode='live', timeout=1)

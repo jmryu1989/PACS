@@ -5,6 +5,9 @@ import csv
 import io
 import hashlib
 import shlex
+import shutil
+import sys
+from datetime import datetime
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -49,16 +52,59 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertIn('measurements', checked)
         self.assertIn('s7-u5-session-contracts', checked)
 
-    def exercise_profile_failures(self, exhaust_deadline=False, real_runner=False, inspection_failure=False):
+    def exercise_profile_failures(self, exhaust_deadline=False, real_runner=False, inspection_failure=False,
+                                  wrong_unit=False, default_unit=False, manual=False, evidence=None,
+                                  result_defect=None):
         """Only the real-runner variant proves module bodies execute across a retained marker."""
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             state = root / 'gate-state'
             suites = ('first_failure.py', 'passing.py', 'second_failure.py')
             profile = {**ci.PROFILES['measurements'], 'out': root / 'artifacts',
-                       'suites': tuple((s, None, 'ci-' + Path(s).stem.replace('_', '-')) for s in suites)}
+                       'suites': tuple((s, None, None if default_unit else 'explicit-' + Path(s).stem.replace('_', '-'))
+                                       for s in suites)}
             clock, live, commands = [0.0], [], []
             subprocess_run = ci.subprocess.run
+            release = ci.gate.release_after_inspection
+            snapshots = {}
+            release_calls = []
+
+            def submit_record(path):
+                release_calls.append(str(path))
+                marker_path = state / 'live-needs-inspection.json'
+                before = marker_path.read_bytes()
+                record = json.loads(path.read_bytes())
+                unit_ledger = state / (record['unit'] + '.json')
+                ledger_before = unit_ledger.read_bytes()
+                if wrong_unit:
+                    original = record.copy()
+                    record['unit'] = 'wrong-unit-only'
+                    path.with_suffix('.original.json').write_bytes(path.read_bytes())
+                    path.write_text(json.dumps(record), encoding='utf-8')
+                    self.assertEqual({k: v for k, v in record.items() if k != 'unit'},
+                                     {k: v for k, v in original.items() if k != 'unit'})
+                if manual:
+                    markdown = path.with_suffix('.md')
+                    markdown.write_text('Owned synthetic Python fixtures inspected; no stack was started.\n', encoding='utf-8')
+                    record['artifacts'].append(markdown.name)
+                    path.write_text(json.dumps(record), encoding='utf-8')
+                    command = [sys.executable, '-B', '-c',
+                               'import live_test_gate as g; from pathlib import Path; '
+                               'g.STATE=Path(' + repr(str(state)) + '); '
+                               'g.release_after_inspection(' + repr(str(path)) + ')']
+                    done = subprocess_run(command, cwd=source_root / 'tests', capture_output=True, timeout=20)
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    (root / 'manual-release.json').write_text(json.dumps({'argv': command, 'exit': done.returncode}), encoding='utf-8')
+                else:
+                    try:
+                        release(path)
+                    except ci.gate.Refused:
+                        self.assertEqual(marker_path.read_bytes(), before)
+                        self.assertFalse((state / 'inspections.jsonl').exists())
+                        raise
+                self.assertEqual(unit_ledger.read_bytes(), ledger_before)
+
+            source_root = ci.ROOT
             if real_runner:
                 (root / 'tests').mkdir()
                 (root / 'scripts').mkdir()
@@ -97,14 +143,28 @@ class MeasurementCiTests(unittest.TestCase):
                     self.assertGreater(kwargs['timeout'], 0)
                     if real_runner:
                         result = subprocess_run(command, **kwargs)
+                        marker = state / 'live-needs-inspection.json'
+                        if result_defect == 'foreign' and marker.exists():
+                            foreign = json.loads(marker.read_bytes())
+                            foreign['unit'] = 'foreign-owner'
+                            marker.write_text(json.dumps(foreign), encoding='utf-8')
+                        if marker.exists():
+                            snapshots[module] = marker.read_bytes()
+                            (root / (Path(module).stem + '-marker.json')).write_bytes(marker.read_bytes())
+                        if result_defect in ('missing', 'attempt') and result.returncode:
+                            lines = result.stdout.decode().splitlines()
+                            rows = [json.loads(line[len('PLAN_RESULT '):]) for line in lines if line.startswith('PLAN_RESULT ')]
+                            if result_defect == 'missing':
+                                result.stdout = '\n'.join(line for line in lines if not line.startswith('PLAN_RESULT ')).encode()
+                            else:
+                                row = rows[0]
+                                row['attempt'] += 1
+                                result.stdout = '\n'.join('PLAN_RESULT ' + json.dumps(row) if line.startswith('PLAN_RESULT ')
+                                                         else line for line in lines).encode()
                         clock[0] += 0.25
                         if exhaust_deadline:
                             clock[0] = 1501
                         return result
-                    if 'failure' in module:
-                        with self.assertRaises(RuntimeError):
-                            with ci.gate.live_run():
-                                raise RuntimeError('synthetic module failure')
                     if exhaust_deadline:
                         clock[0] = 1501
                         raise ci.subprocess.TimeoutExpired(command, kwargs['timeout'], output=b'timed out')
@@ -121,6 +181,7 @@ class MeasurementCiTests(unittest.TestCase):
                                           'RUNNER_TEMP': folder}, clear=True), \
                     patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, {'measurements': profile}), \
                     patch.object(ci.gate, 'STATE', state), \
+                    patch.object(ci.gate, 'release_after_inspection', side_effect=submit_record), \
                     patch.object(ci, 'seed_source'), patch.object(ci, 'time', SimpleNamespace(monotonic=lambda: clock[0])), \
                     patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///runner.sock']), \
                     patch.object(ci.subprocess, 'run', side_effect=execute), \
@@ -135,9 +196,10 @@ class MeasurementCiTests(unittest.TestCase):
                 for module in live:
                     print((profile['out'] / (Path(module).stem + '.log')).read_text(encoding='utf-8'))
             self.assertIn(Path(suites[0]).stem, str(error.exception))
-            attempted = suites[:1] if exhaust_deadline or inspection_failure else suites
+            blocked = inspection_failure or wrong_unit or result_defect
+            attempted = suites[:1] if exhaust_deadline or blocked else suites
             self.assertEqual(live, ['tests/' + s for s in attempted])
-            if not exhaust_deadline and not inspection_failure:
+            if not exhaust_deadline and not blocked:
                 self.assertIn(Path(suites[2]).stem, str(error.exception))
             rows = json.loads((profile['out'] / 'results.json').read_text(encoding='utf-8'))
             self.assertEqual(rows[-1]['name'], 'cleanup')
@@ -152,26 +214,49 @@ class MeasurementCiTests(unittest.TestCase):
             for row in modules:
                 self.assertGreater(float(row['duration_seconds']), 0)
                 self.assertTrue((profile['out'] / row['log']).is_file())
-            if inspection_failure:
+            if blocked:
                 self.assertTrue((state / 'live-needs-inspection.json').is_file())
                 self.assertFalse((state / 'inspections.jsonl').exists())
-                self.assertIn('fixture inspection failed', str(error.exception))
+                self.assertEqual((state / 'live-needs-inspection.json').read_bytes(), snapshots['tests/' + suites[0]])
+                if inspection_failure:
+                    self.assertIn('fixture inspection failed', str(error.exception))
+                if wrong_unit:
+                    self.assertIn('does not identify', str(error.exception))
+                    self.assertEqual(len(release_calls), 1)
+                if result_defect:
+                    self.assertIn('binding failed', str(error.exception))
+                    self.assertEqual(release_calls, [])
             if real_runner:
                 executed = (root / 'tests/executed.txt').read_text().splitlines()
                 self.assertEqual(executed, list(attempted))
-                ledger = [json.loads(line) for line in (state / 'inspections.jsonl').read_text().splitlines()]
+                ledger_path = state / 'inspections.jsonl'
+                ledger = [json.loads(line) for line in ledger_path.read_text().splitlines()] if ledger_path.exists() else []
                 failures = [s for s in attempted if 'failure' in s]
-                self.assertEqual(len(ledger), len(failures))
-                self.assertFalse((state / 'live-needs-inspection.json').exists())
-                self.assertEqual(len(list(profile['out'].glob('inspection-*.json'))), len(failures))
+                self.assertEqual(len(ledger), 0 if blocked else len(failures))
+                self.assertEqual((state / 'live-needs-inspection.json').exists(), bool(blocked))
+                self.assertEqual(len([p for p in profile['out'].glob('inspection-*.json') if not p.name.endswith('.original.json')]), len(failures))
                 for entry, suite in zip(ledger, failures):
                     record_path = Path(entry['record_path'])
                     self.assertEqual(record_path.parent, profile['out'])
                     raw = record_path.read_bytes()
                     self.assertEqual(entry['record_sha256'], hashlib.sha256(raw).hexdigest())
                     record = json.loads(raw)
-                    self.assertEqual(record['module'], suite)
-                    self.assertEqual(record['unit'], 'ci-' + Path(suite).stem.replace('_', '-'))
+                    self.assertEqual(record['module'], 'tests/' + suite)
+                    command = next(c for c in commands if '--module' in c and c[c.index('--module') + 1] == record['module'])
+                    self.assertEqual(record['unit'], command[command.index('--unit') + 1])
+                    self.assertEqual(record['unit'], ('ci-' if default_unit else 'explicit-') + Path(suite).stem.replace('_', '-'))
+                    marker = json.loads(snapshots[record['module']])
+                    self.assertEqual(entry['marker'], marker)
+                    for key in ('unit', 'module', 'attempt', 'plan_sha256', 'pid', 'started_at'):
+                        self.assertEqual(record[key], marker[key], key)
+                    self.assertNotEqual(record['pid'], os.getpid())
+                    unit_ledger = json.loads((state / (record['unit'] + '.json')).read_text())
+                    row = unit_ledger['attempts'][record['attempt'] - 1]
+                    self.assertEqual(row, record['plan_result'])
+                    self.assertEqual(row['attempt'], record['attempt'])
+                    self.assertEqual(row['plan_sha256'], record['plan_sha256'])
+                    self.assertEqual(row['status'], 'failed')
+                    self.assertGreater(datetime.fromisoformat(record['inspected_at']), datetime.fromisoformat(record['started_at']))
                     self.assertEqual(record['exit'], failed_code)
                     self.assertIn(record['result'], rows)
                     self.assertTrue(record['inspected_at'])
@@ -184,6 +269,12 @@ class MeasurementCiTests(unittest.TestCase):
                 print('REAL_RUNNER_RESULT ' + json.dumps({'executed': executed, 'failures': failures,
                       'ledger_lines': len(ledger), 'error': str(error.exception), 'cleanup': rows[-1]}))
                 print('REAL_RUNNER_LEDGER ' + json.dumps(ledger))
+                trace = {'commands': commands, 'executed': executed, 'ledger_lines': len(ledger),
+                         'exits': [r['exit'] for r in rows if r['name'] in [Path(s).stem for s in suites]],
+                         'final_failure': str(error.exception), 'cleanup_count': sum('down' in c for c in commands)}
+                (root / 'trace.json').write_text(json.dumps(trace, indent=2), encoding='utf-8')
+                if evidence is not None:
+                    shutil.copytree(root, evidence)
 
     def test_live_profile_runs_all_modules_and_reports_each_failure(self):
         self.exercise_profile_failures()
@@ -192,13 +283,26 @@ class MeasurementCiTests(unittest.TestCase):
         self.exercise_profile_failures(exhaust_deadline=True)
 
     def test_real_runner_executes_fail_pass_fail_after_recorded_inspections(self):
-        self.exercise_profile_failures(real_runner=True)
+        for default in (False, True):
+            with self.subTest(default_unit=default):
+                self.exercise_profile_failures(real_runner=True, default_unit=default)
+
+    def test_real_release_rejects_wrong_unit_and_stops_following_bodies(self):
+        self.exercise_profile_failures(real_runner=True, wrong_unit=True)
+
+    def test_missing_or_mismatched_plan_result_preserves_marker_and_stops(self):
+        for defect in ('missing', 'attempt', 'foreign'):
+            with self.subTest(defect=defect):
+                self.exercise_profile_failures(real_runner=True, result_defect=defect)
+
+    def test_manual_markdown_json_release_from_another_process(self):
+        self.exercise_profile_failures(real_runner=True, manual=True)
 
     def test_real_runner_failure_then_deadline_skips_remaining_and_cleans_up(self):
         self.exercise_profile_failures(real_runner=True, exhaust_deadline=True)
 
     def test_failed_inspection_preserves_marker_and_still_cleans_up(self):
-        self.exercise_profile_failures(inspection_failure=True)
+        self.exercise_profile_failures(real_runner=True, inspection_failure=True)
 
     def test_image_text_profile_is_exact_and_separate(self):
         profile=ci.PROFILES['image-text']
@@ -2765,7 +2869,9 @@ class MeasurementCiTests(unittest.TestCase):
                 if 'run-tests.py' in ' '.join(seen[-1]):
                     (profile['out']/ci.GATEWAY_HANDOFF).write_text(json.dumps({'project': project}), encoding='utf-8')
                     with self.assertRaises(RuntimeError):
-                        with ci.gate.live_run():
+                        with ci.gate.live_run(unit=command[command.index('--unit') + 1],
+                                              module=command[command.index('--module') + 1],
+                                              plan_sha256='a' * 64, attempt=1):
                             raise RuntimeError('synthetic module failure')
                     raise ci.subprocess.TimeoutExpired(command, kwargs['timeout'])
                 return MagicMock(returncode=0, stdout=listings.get(seen[-1], b''), stderr=b'')

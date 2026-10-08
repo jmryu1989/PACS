@@ -87,14 +87,37 @@ class CandidateCiTests(unittest.TestCase):
             self.assertEqual(len(selected), 112)
 
     def assert_candidate_workflow(self, workflow):
-        # This checks the declared SHA dependencies, not GitHub's expression evaluator.
-        # PR and dispatch resolution are evidenced by hosted runs, separately.
-        def tokens(value, template=False):
-            if not template:
-                self.assertRegex(value, r'^\s*\$\{\{.*?\}\}\s*$')
-            expressions = re.findall(r'\$\{\{(.*?)\}\}', value)
-            self.assertEqual(len(expressions), 1)
-            return set(re.findall(r'[\w.]+|\|\||[^\s()]', expressions[0]))
+        # Limited declaration normalisation, not a GitHub expression engine.
+        # Actual PR/dispatch choice: hosted runs 37711559409/37714866220/37711563733.
+        # env["X"] is an input contract here, not a claim that GitHub accepts
+        # double-quoted strings inside ${{ }} expressions.
+        def expression(value):
+            match = re.fullmatch(r'\s*\$\{\{(.*?)\}\}\s*', value)
+            self.assertIsNotNone(match)
+            text = re.sub(r'''\[\s*(['"])([A-Za-z_]\w*)\1\s*\]''', r'.\2', match[1])
+            text = re.sub(r'[\s()]', '', text)
+            parts = tuple(text.split('||'))
+            for part in parts:
+                self.assertRegex(part, r'^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$')
+            return parts
+
+        def resolve(value, scopes):
+            if isinstance(value, tuple):
+                return value
+            self.assertIsInstance(value, str)
+            if '${{' not in value:
+                return value
+            parts = expression(value)
+            if len(parts) == 1 and parts[0].startswith('env.'):
+                key = parts[0][4:]
+                for index in reversed(range(len(scopes))):
+                    if key in scopes[index]:
+                        # Declarations read their enclosing scope, including a
+                        # same-name override that reuses its parent's value.
+                        return resolve(scopes[index][key], scopes[:index])
+                self.fail('Undefined SHA variable: ' + key)
+            self.assertFalse(any(part.startswith('env.') for part in parts))
+            return parts
 
         triggers = workflow.get('on', workflow.get(True)) # YAML 1.1 spells `on` as a boolean.
         self.assertEqual(set(triggers), {'pull_request', 'workflow_dispatch'})
@@ -102,27 +125,45 @@ class CandidateCiTests(unittest.TestCase):
         self.assertEqual(triggers['workflow_dispatch']['inputs']['candidate_sha']['required'], True)
         job = workflow['jobs']['candidate']
         self.assertEqual(job.get('name', 'candidate'), 'candidate')
-        resolved = tokens(job['env']['CANDIDATE_SHA'])
-        self.assertEqual(resolved, {'inputs.candidate_sha', '||', 'github.event.pull_request.head.sha'})
+        job_env = [workflow.get('env', {}), job.get('env', {})]
+        source = expression(job['env']['CANDIDATE_SHA'])
+        self.assertEqual(source, ('inputs.candidate_sha', 'github.event.pull_request.head.sha'))
+        reference = resolve('${{ env.CANDIDATE_SHA }}', job_env)
+
+        def environment(step):
+            return job_env + [step.get('env', {})]
+
+        def command(flag):
+            found = [(step, shlex.split(line, comments=True)) for step in job['steps']
+                     for line in step.get('run', '').splitlines() if flag in line]
+            self.assertEqual(len(found), 1)
+            step, argv = found[0]
+            self.assertIn(flag, argv)
+            self.assertTrue(any(Path(arg).name == 'candidate_ci.py' for arg in argv))
+            argument = argv[argv.index(flag) + 1]
+            shell = re.fullmatch(r'\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})', argument)
+            if shell:
+                argument = '${{ env.' + (shell[1] or shell[2]) + ' }}'
+            self.assertEqual(resolve(argument, environment(step)), reference, flag)
+            return step
         self.assertFalse(workflow['concurrency']['cancel-in-progress'])
         checkouts = {s['with']['path']: s for s in job['steps'] if s.get('uses', '').startswith('actions/checkout@')}
         self.assertEqual(set(checkouts), {'tools', 'target'})
-        self.assertEqual(tokens(checkouts['tools']['with']['ref']), {'github.sha'})
+        self.assertEqual(expression(checkouts['tools']['with']['ref']), ('github.sha',))
         for checkout in checkouts.values():
             self.assertEqual(checkout['with']['persist-credentials'], False)
-        validations = [(step, shlex.split(line, comments=True)) for step in job['steps']
-                       for line in step.get('run', '').splitlines() if '--check-sha' in line]
-        self.assertEqual(len(validations), 1)
-        validation, argv = validations[0]
-        self.assertIn('--check-sha', argv)
-        self.assertTrue(any(Path(arg).name == 'candidate_ci.py' for arg in argv))
-        with patch.dict(os.environ, {'CANDIDATE_SHA': 'c' * 40}, clear=True):
-            self.assertEqual(os.path.expandvars(argv[argv.index('--check-sha') + 1]), 'c' * 40)
+        validation = command('--check-sha')
+        command('--candidate-sha')
         self.assertLess(job['steps'].index(validation), job['steps'].index(checkouts['target']))
         artifact = next(s for s in job['steps'] if s.get('uses', '').startswith('actions/upload-artifact@'))
-        self.assertIn(tokens(checkouts['target']['with']['ref']), ({'env.CANDIDATE_SHA'}, resolved))
-        for value in (workflow['concurrency']['group'], artifact['with']['name']):
-            self.assertIn(tokens(value, template=True), ({'env.CANDIDATE_SHA'}, resolved))
+        target = checkouts['target']
+        self.assertEqual(resolve(target['with']['ref'], environment(target)), reference)
+        self.assertTrue(artifact['with']['name'].startswith('candidate-'))
+        self.assertEqual(resolve(artifact['with']['name'][len('candidate-'):], environment(artifact)), reference)
+        # Workflow concurrency has no job/step env context.
+        group = workflow['concurrency']['group']
+        self.assertTrue(group.startswith('candidate-'))
+        self.assertEqual(expression(group[len('candidate-'):]), source)
         self.assertEqual(artifact['with']['path'], 'target/tests/e2e/artifacts/candidate-ci/')
 
     def test_workflow_keeps_tool_and_candidate_checkouts_separate(self):
@@ -136,7 +177,7 @@ class CandidateCiTests(unittest.TestCase):
         import yaml
         workflow = yaml.safe_load((candidate.TOOLS_ROOT / '.github/workflows/candidate.yml').read_text(encoding='utf-8'))
         job = workflow['jobs']['candidate']
-        job['env']['CANDIDATE_SHA'] = '${{ (github.event.pull_request.head.sha) || (inputs.candidate_sha) }}'
+        job['env']['CANDIDATE_SHA'] = '${{ (inputs.candidate_sha) || (github.event.pull_request.head.sha) }}'
         target = next(s for s in job['steps'] if s.get('with', {}).get('path') == 'target')
         target['with']['ref'] = job['env']['CANDIDATE_SHA']
         validation = next(s for s in job['steps'] if '--check-sha' in s.get('run', ''))
@@ -146,7 +187,8 @@ class CandidateCiTests(unittest.TestCase):
     def test_workflow_rejects_divergent_sha_consumers_and_unsafe_checkout_order(self):
         import yaml
         original = yaml.safe_load((candidate.TOOLS_ROOT / '.github/workflows/candidate.yml').read_text(encoding='utf-8'))
-        for defect in ('source', 'target', 'concurrency', 'artifact', 'validation-input', 'validation-order',
+        for defect in ('source', 'target', 'concurrency', 'artifact', 'artifact-prefix', 'validation-input',
+                       'candidate-input', 'validation-order',
                        'tools-credentials', 'target-credentials'):
             with self.subTest(defect=defect):
                 workflow = copy.deepcopy(original)
@@ -163,8 +205,13 @@ class CandidateCiTests(unittest.TestCase):
                     workflow['concurrency']['group'] = 'candidate-${{ github.sha }}'
                 elif defect == 'artifact':
                     artifact['with']['name'] = 'candidate-${{ github.sha }}'
+                elif defect == 'artifact-prefix':
+                    artifact['with']['name'] = 'other-${{ env.CANDIDATE_SHA }}'
                 elif defect == 'validation-input':
                     validation['run'] = 'python3 tools/tests/candidate_ci.py --check-sha "$GITHUB_SHA"'
+                elif defect == 'candidate-input':
+                    step = next(s for s in steps if '--candidate-sha' in s.get('run', ''))
+                    step['run'] = 'python3 tools/tests/candidate_ci.py --candidate-sha "$GITHUB_SHA"'
                 elif defect == 'validation-order':
                     steps.remove(validation)
                     steps.append(validation)
@@ -172,6 +219,44 @@ class CandidateCiTests(unittest.TestCase):
                     checkouts[defect.split('-')[0]]['with']['persist-credentials'] = True
                 with self.assertRaises(AssertionError):
                     self.assert_candidate_workflow(workflow)
+
+    def test_each_sha_consumer_uses_its_effective_environment(self):
+        import yaml
+        original = yaml.safe_load((candidate.TOOLS_ROOT / '.github/workflows/candidate.yml').read_text(encoding='utf-8'))
+        for consumer in ('target', 'artifact', '--check-sha', '--candidate-sha'):
+            for same_value in (False, True, 'parent-reference'):
+                with self.subTest(consumer=consumer, same_value=same_value):
+                    workflow = copy.deepcopy(original)
+                    job = workflow['jobs']['candidate']
+                    step = next(s for s in job['steps'] if
+                                (consumer == 'target' and s.get('with', {}).get('path') == 'target') or
+                                (consumer == 'artifact' and s.get('uses', '').startswith('actions/upload-artifact@')) or
+                                (consumer.startswith('--') and consumer in s.get('run', '')))
+                    step['env'] = {'CANDIDATE_SHA': job['env']['CANDIDATE_SHA'] if same_value else 'd' * 40}
+                    if same_value == 'parent-reference':
+                        step['env'] = {'CANDIDATE_SHA': "${{ env['CANDIDATE_SHA'] }}"}
+                    if same_value:
+                        self.assert_candidate_workflow(workflow)
+                    else:
+                        with self.assertRaises(AssertionError):
+                            self.assert_candidate_workflow(workflow)
+
+    def test_equivalent_references_shadowed_and_unused_environment_values_pass(self):
+        import yaml
+        original = yaml.safe_load((candidate.TOOLS_ROOT / '.github/workflows/candidate.yml').read_text(encoding='utf-8'))
+        for reference in ('env.CANDIDATE_SHA', "env['CANDIDATE_SHA']", 'env["CANDIDATE_SHA"]'):
+            with self.subTest(reference=reference):
+                workflow = copy.deepcopy(original)
+                workflow['env'] = {'CANDIDATE_SHA': 'shadowed-value', 'UNUSED': 'workflow'}
+                for step in workflow['jobs']['candidate']['steps']:
+                    step['env'] = {'UNUSED': "${{ hashFiles('irrelevant.txt') }}"}
+                    if step.get('with', {}).get('path') == 'target':
+                        step['with']['ref'] = '${{ (' + reference + ') }}'
+                    if step.get('uses', '').startswith('actions/upload-artifact@'):
+                        step['with']['name'] = 'candidate-${{ ' + reference + ' }}'
+                    if '--check-sha' in step.get('run', '') or '--candidate-sha' in step.get('run', ''):
+                        step['run'] = step['run'].replace('$CANDIDATE_SHA', '${CANDIDATE_SHA}')
+                self.assert_candidate_workflow(workflow)
 
     def test_candidate_install_is_cached_and_fits_the_job_budget(self):
         import yaml
@@ -184,9 +269,6 @@ class CandidateCiTests(unittest.TestCase):
         self.assertEqual(cache['with']['path'], '~/.cache/pip')
         self.assertEqual(cache['with']['key'], "${{ runner.os }}-pip-${{ hashFiles('target/tests/e2e/requirements.txt', 'target/gateway/agent/requirements.txt') }}")
         run = next(s for s in job['steps'] if '--candidate-sha' in s.get('run', ''))
-        argv = shlex.split(run['run'], comments=True)
-        with patch.dict(os.environ, {'CANDIDATE_SHA': 'c' * 40}, clear=True):
-            self.assertEqual(os.path.expandvars(argv[argv.index('--candidate-sha') + 1]), 'c' * 40)
         self.assertEqual(run['timeout-minutes'], 26)
         self.assertGreater(job['timeout-minutes'], install['timeout-minutes'] + run['timeout-minutes'])
 
@@ -217,10 +299,8 @@ class CandidateCiTests(unittest.TestCase):
                 self.assertEqual(events[-1], "credential")
                 self.assertEqual(kwargs['env'].get('KIN_LIVE_IMPORTED_ADMIN_PASSWORD'), secret)
                 live.append(command)
-                if failure:
-                    with self.assertRaises(RuntimeError):
-                        with ci.gate.live_run():
-                            raise RuntimeError('synthetic module failure')
+                # This redaction probe returns before live admission. Real marker
+                # lifecycle coverage belongs to the real-runner driver regression.
                 if failure == 'timeout':
                     raise subprocess.TimeoutExpired(command, 1, output=secret.encode(), stderr=secret.encode())
                 if failure == 'exit':
