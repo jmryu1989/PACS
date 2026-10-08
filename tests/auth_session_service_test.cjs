@@ -2477,9 +2477,10 @@ test('U5E-01 (acceptance 1) a callback that exchanged its code before a Log out 
   gate.release();
   const done = await heldC;
   // C resumes after L: no product session, no kin_sid, no entry proof. The provider session is ended (again) and the
-  // login starts over once - this time the provider has no session, so the person meets the form.
+  // login starts over once as the fresh step (prompt=login): the person meets the form even while the ended SSO could
+  // still answer (S7-U5-LOGIN-RECOVERY; a plain restart let it answer again - U5E-LR).
   assert.deepEqual([done.status, atProvider(done), promptOf(done), done.newSid, done.proof, done.cookie, await w.sessions()],
-    [302, true, null, null, undefined, 'P', 0]);
+    [302, true, 'login', null, undefined, 'P', 0]);
   assert.deepEqual(summary(rowsOf(await w.rows(), s)), [['auth.login', 'idp_session_ended', A], ['auth.logout', 'logout', A]]);
   assert.ok(kc.ended.includes(X) && (await w.mark(X)).confirmedAt, 'the provider session is ended and the mark says so');
   // The restarted flow: if the same ended provider session answers again (it survived its end), the person is sent to
@@ -3405,6 +3406,85 @@ test('U5E-24 (D600 3) a late end request: another request\'s 204 answered first 
   assert.deepEqual([kc.endRequests.length - asked, kc.ended.includes(X), kc.ended.includes(Y)], [0, false, false],
     'nothing ends B\'s or C\'s provider session after their admission');
   await w.finish('U5E-24');
+});
+
+// S7-U5-LOGIN-RECOVERY (ledger 150, D700; the SE-11 failure under load): a doctor logs out explicitly and the product
+// confirms the provider end. The next person presses Login on the landing - a plain start - and the provider, whose
+// browser SSO can still answer while its server-side logout spreads, sends back the ENDED authentication without a form.
+// The design (markCovers): the restart after a confirmed end is a fresh flow (prompt=login) whose code is accepted from
+// the second that flow started, so the next person meets an editable form and enters with one credential entry. Only an
+// authentication that is still covered on that fresh flow is the dead end of the landing notice (end_unconfirmed), and
+// an end that is not confirmed is that notice at once (R3). The clock starts 400 ms into a second so that "the second
+// of the confirmation" and "the confirmation instant" differ.
+test('U5E-LR R1-R3 after a confirmed Log out a plain Login that brings back the ended authentication restarts once as the fresh step (prompt=login): credentials from its start enter, a still-ended authentication is the dead end, an unconfirmed end is the landing at once', async t => {
+  const w = await world(t, { now: START + 400 });
+  const sec = ms => Math.floor(ms / 1000);
+  const confirmedAt = async idp => (await w.mark(idp))?.confirmedAt?.getTime() ?? null;
+  // A doctor's session authenticated ten minutes ago, logged out explicitly; answers that authentication's time.
+  const loggedOut = async (sub, idp, label) => {
+    const authTime = sec(Date.now()) - 600;
+    const old = await w.issue(label, { sub, groups: [A], idp, authTime });
+    assert.equal((await w.call(w.I1, 'logout', { sid: await w.session(old) })).status, 204);
+    await w.told();
+    return authTime;
+  };
+
+  // R1. Doctor A logs out; the end is confirmed (400 ms into a second).
+  const a = 'syn-sub-u5elr-a', b = 'syn-sub-u5elr-b', X = 'syn-idp-u5elr-pc1';
+  const aAuth = await loggedOut(a, X, 'u5elr-a');
+  await w.until('A\'s provider end confirmed', async () => (await confirmedAt(X)) !== null);
+  const endX = await confirmedAt(X);
+  assert.equal(endX % 1000, 400, 'the end is confirmed inside a second');
+  // B presses Login: a plain start. The provider answers without a form with A's ended authentication.
+  const press = await w.call(w.I2, 'login');
+  assert.deepEqual([press.status, promptOf(press)], [302, null], 'the landing\'s Login is a plain start');
+  const asked = kc.endRequests.length;
+  const silent = await answerFlow(w, w.I2, press, await w.issue('u5elr-a-sso', { sub: a, groups: [A], idp: X, authTime: aAuth }));
+  assert.deepEqual([silent.status, atProvider(silent), promptOf(silent), silent.newSid, silent.proof, silent.cookie, await w.sessions()],
+    [302, true, 'login', null, undefined, 'P', 0],
+    'R1: the ended authentication makes no session; the login starts over once as the fresh step - the form, credentials required');
+  // B types credentials at once - in the second of the confirmation - and the provider names B's new SSO by the reused sid.
+  const bv = await w.issue('u5elr-b', { sub: b, groups: [B], idp: X, authTime: sec(Date.now()) });
+  const entered = await answerFlow(w, w.I2, silent, bv);
+  assert.deepEqual([entered.status, entered.cookie, !!entered.proof, entered.location.split('#')[0], await w.sessions()],
+    [302, 'S', true, ORIGIN + '/worklist/hpacs-lite/main.html', 1], 'R1: B enters with one credential entry, one session');
+  assert.deepEqual([(await w.base.authSession.findUnique({ where: { sid: entered.newSid } })).sub, summary(rowsOf(await w.rows(), b))],
+    [b, [['auth.login', 'success', B]]], 'R1: the session is B\'s; one auth.login row, outcome success');
+  assert.deepEqual([await w.base.authSession.count({ where: { sub: a } }), summary(rowsOf(await w.rows(), a))],
+    [0, [['auth.login', 'idp_session_ended', A], ['auth.logout', 'logout', A]]], 'R1: the ended authentication is never admitted');
+  assert.deepEqual([await confirmedAt(X), kc.endRequests.length - asked], [endX, 0], 'R1: the mark stays; B\'s new SSO is not ended');
+
+  // R2. Doctor C logs out (confirmed); the next Login meets the fresh step - and the provider still answers that step with
+  // an authentication from before its start (the ended one): now that is the dead end. No session.
+  const c = 'syn-sub-u5elr-c', Y = 'syn-idp-u5elr-pc2';
+  w.tick(1000);
+  const cAuth = await loggedOut(c, Y, 'u5elr-c');
+  await w.until('C\'s provider end confirmed', async () => (await confirmedAt(Y)) !== null);
+  const endY = await confirmedAt(Y);
+  const cPress = await w.call(w.I2, 'login');
+  const cSilent = await answerFlow(w, w.I2, cPress, await w.issue('u5elr-c-sso', { sub: c, groups: [A], idp: Y, authTime: cAuth }));
+  assert.deepEqual([atProvider(cSilent), promptOf(cSilent), cSilent.newSid], [true, 'login', null], 'R2: the fresh step first');
+  w.tick(1000);
+  const dead = await answerFlow(w, w.I2, cSilent, await w.issue('u5elr-c-sso2', { sub: c, groups: [A], idp: Y, authTime: cAuth }));
+  assert.deepEqual([dead.status, dead.location, dead.newSid, dead.proof, await w.base.authSession.count({ where: { sub: c } }), await w.sessions()],
+    [302, landing('end_unconfirmed'), null, undefined, 0, 1], 'R2: covered on the fresh step - the landing notice, no session');
+  assert.equal(await confirmedAt(Y), endY, 'R2: the confirmed mark stays as it was');
+
+  // R3. Doctor D logs out and the provider end cannot be confirmed (the admin API refuses connections): the next Login's
+  // callback with D's authentication is the landing notice at once - no restart, no session.
+  const d = 'syn-sub-u5elr-d', Z = 'syn-idp-u5elr-pc3';
+  kc.logoutMode = 'refused';
+  try {
+    await loggedOut(d, Z, 'u5elr-d');
+    assert.equal(await confirmedAt(Z), null, 'R3: the end is not confirmed');
+    const dPress = await w.call(w.I2, 'login');
+    const unconfirmed = await answerFlow(w, w.I2, dPress, await w.issue('u5elr-d-sso', { sub: d, groups: [A], idp: Z, authTime: sec(Date.now()) }));
+    assert.deepEqual([unconfirmed.location, atProvider(unconfirmed), unconfirmed.newSid, await w.base.authSession.count({ where: { sub: d } })],
+      [landing('end_unconfirmed'), false, null, 0], 'R3: unconfirmed - the landing notice on the first callback, no restart');
+  } finally {
+    kc.logoutMode = 'ok';
+  }
+  await w.finish('U5E-LR');
 });
 
 // S7-U5 D600 decisive case 4: what does and does not settle an unknown change. Three members' disables whose outcome is

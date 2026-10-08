@@ -1225,7 +1225,16 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       await this.loginFailureRow(req, 'idp_session_ended', who);
       const confirmed = alreadyEnded || (!!blocked && await this.confirmIdpEnd(blocked, IDP_END_WAIT_MS));
       if (!confirmed || flow.restarts > 0) return { kind: 'landing', error: 'end_unconfirmed' };
-      return { kind: 'redirect', location: this.startFlow(req, res, again) };
+      /**
+       * 확인된 종료 뒤의 다시 시작은 fresh 흐름(prompt=login)이다. 평범한 흐름으로 다시 시작하면 인증 서버가 그 브라우저의
+       * 끝난 SSO로 폼 없이 같은 인증을 다시 내줄 수 있고(부하 중 서버 쪽 종료가 퍼지는 동안), 그 code는 또 덮여 다음 사람이
+       * 폼을 보지 못한 채 end_unconfirmed 안내에 선다. fresh는 인증 서버에 자격 입력을 요구하고 markCovers가 그 code를 이
+       * 흐름이 시작된 초부터 받는다. 흐름의 시작(issuedAt)은 confirmedAt을 적고 읽은 뒤에 같은 시계로 정해지므로 확인된 종료보다
+       * 이르지 않다(시계가 뒤로 가면 markCovers는 confirmedAt부터 세므로 끝난 인증은 여전히 덮인다). 이 흐름에서도 덮이는 인증이
+       * 오면(restarts > 0) 그때가 진짜 막다른 길이다.
+       */
+      return { kind: 'redirect', location: this.startFlow(req, res,
+        { phase: 'fresh', reason: flow.reason, prompt: flow.prompt ?? 'login', restarts: 1 }) };
     }
     // 자격을 입력한 이 로그인이 받아 둔 복구 의도를 채웠다: 그 의도를 실은 다른 흐름은 더 필요 없다.
     if (flow.reason)
