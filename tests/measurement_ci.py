@@ -612,6 +612,12 @@ def seed_source():
         ds.save_as(dest / f'{z}.dcm', write_like_original=False)
 
 
+def stack_capture_commands(compose):
+    """Keep stack observation injectable without replacing runner or gate behavior."""
+    return (('compose-ps', compose + ['ps', '--all']),
+            ('daemon-containers', ['docker', 'ps', '-a', '--format', '{{json .}}']))
+
+
 def inspect_failed_module(run, out, compose, unit, suite, result):
     """The disposable stack owner records current state before admitting another module."""
     name = 'inspection-' + Path(suite).stem
@@ -641,8 +647,7 @@ def inspect_failed_module(run, out, compose, unit, suite, result):
             binding_error = str(error)
     stack = {}
     artifacts = [result['name'] + '.log', 'results.json']
-    for kind, command in (('compose-ps', compose + ['ps', '--all']),
-                          ('daemon-containers', ['docker', 'ps', '-a', '--format', '{{json .}}'])):
+    for kind, command in stack_capture_commands(compose):
         log = name + '-' + kind
         code = run(log, command, timeout=30, finalizing=True)
         artifacts.append(log + '.log')

@@ -68,6 +68,10 @@ class MeasurementCiTests(unittest.TestCase):
             release = ci.gate.release_after_inspection
             snapshots = {}
             release_calls = []
+            # Exercise run()'s real capture/log path without a Docker daemon or Compose project.
+            captures = tuple((kind, [sys.executable, '-B', '-c',
+                                    f"import sys; sys.stdout.write('synthetic {kind}'); sys.exit({int(inspection_failure == kind)})"])
+                             for kind in ('compose-ps', 'daemon-containers'))
 
             def submit_record(path):
                 release_calls.append(str(path))
@@ -170,11 +174,10 @@ class MeasurementCiTests(unittest.TestCase):
                         raise ci.subprocess.TimeoutExpired(command, kwargs['timeout'], output=b'timed out')
                     clock[0] += 0.25
                     code = 1 if 'failure' in module else 0
-                if '--all' in command or '{{json .}}' in command:
+                if any(command == capture for _, capture in captures):
                     # Inspection must retain its own bound after the profile deadline.
                     self.assertEqual(kwargs['timeout'], 30)
-                    if inspection_failure:
-                        code = 1
+                    return subprocess_run(command, **kwargs)
                 return MagicMock(returncode=code, stdout=b'module output', stderr=b'')
 
             with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
@@ -182,6 +185,7 @@ class MeasurementCiTests(unittest.TestCase):
                     patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, {'measurements': profile}), \
                     patch.object(ci.gate, 'STATE', state), \
                     patch.object(ci.gate, 'release_after_inspection', side_effect=submit_record), \
+                    patch.object(ci, 'stack_capture_commands', return_value=captures), \
                     patch.object(ci, 'seed_source'), patch.object(ci, 'time', SimpleNamespace(monotonic=lambda: clock[0])), \
                     patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///runner.sock']), \
                     patch.object(ci.subprocess, 'run', side_effect=execute), \
@@ -220,6 +224,7 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertEqual((state / 'live-needs-inspection.json').read_bytes(), snapshots['tests/' + suites[0]])
                 if inspection_failure:
                     self.assertIn('fixture inspection failed', str(error.exception))
+                    self.assertEqual(release_calls, [])
                 if wrong_unit:
                     self.assertIn('does not identify', str(error.exception))
                     self.assertEqual(len(release_calls), 1)
@@ -235,6 +240,13 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertEqual(len(ledger), 0 if blocked else len(failures))
                 self.assertEqual((state / 'live-needs-inspection.json').exists(), bool(blocked))
                 self.assertEqual(len([p for p in profile['out'].glob('inspection-*.json') if not p.name.endswith('.original.json')]), len(failures))
+                for suite in failures:
+                    record = json.loads((profile['out'] / ('inspection-' + Path(suite).stem + '.json')).read_bytes())
+                    self.assertEqual(set(record['stack']), {'compose-ps', 'daemon-containers'})
+                    for kind, capture in captures:
+                        self.assertEqual(commands.count(capture), len(failures))
+                        self.assertEqual(record['stack'][kind]['exit'], int(inspection_failure == kind))
+                        self.assertEqual(record['stack'][kind]['output'], 'synthetic ' + kind)
                 for entry, suite in zip(ledger, failures):
                     record_path = Path(entry['record_path'])
                     self.assertEqual(record_path.parent, profile['out'])
@@ -302,7 +314,9 @@ class MeasurementCiTests(unittest.TestCase):
         self.exercise_profile_failures(real_runner=True, exhaust_deadline=True)
 
     def test_failed_inspection_preserves_marker_and_still_cleans_up(self):
-        self.exercise_profile_failures(real_runner=True, inspection_failure=True)
+        for kind in ('compose-ps', 'daemon-containers'):
+            with self.subTest(capture=kind):
+                self.exercise_profile_failures(real_runner=True, inspection_failure=kind)
 
     def test_image_text_profile_is_exact_and_separate(self):
         profile=ci.PROFILES['image-text']
