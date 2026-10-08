@@ -518,14 +518,20 @@ def profile_environment(profile_name, out, values, evidence_stage=None):
     return env
 
 
+# The VR suite's declared evidence: the rendered VR (vr_01) and the covered VR under a failed access refresh (vr_22).
+# Exactly these files, each a PNG; anything else in private staging is refused so no raw text leaves the runner.
+VR_EVIDENCE = ['volume-rendering.png', 'vr-access-covered.png']
+
+
 def publish_vr_evidence(stage, out):
-    expected = stage/'volume-rendering.png'
     files = sorted(path.relative_to(stage).as_posix() for path in stage.rglob('*') if path.is_file())
-    if files != ['volume-rendering.png']:
+    if files != sorted(VR_EVIDENCE):
         raise RuntimeError('Unexpected or missing VR suite evidence: '+', '.join(files))
-    if expected.read_bytes()[:8] != b'\x89PNG\r\n\x1a\n':
-        raise RuntimeError('VR suite evidence is not a PNG')
-    shutil.copyfile(expected, out/expected.name)
+    for name in VR_EVIDENCE:
+        if (stage/name).read_bytes()[:8] != b'\x89PNG\r\n\x1a\n':
+            raise RuntimeError('VR suite evidence is not a PNG: '+name)
+    for name in VR_EVIDENCE:
+        shutil.copyfile(stage/name, out/name)
 
 
 def gateway_listing(run, out, name, command):
