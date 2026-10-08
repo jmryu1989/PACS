@@ -68,6 +68,12 @@ window.kinCreateVolumeSculpt=function({controlsPane,canvasPane,canvasHost,getOpe
   }
   function refresh(){const active=!!draft;tool.disabled=active;draw.disabled=active;finish.disabled=!active||!!draft.region;apply.disabled=!draft?.region;cancelButton.disabled=!active;undo.disabled=active;clear.disabled=active;}
   function cleanup(){overlay?.remove();overlay=null;draft=null;try{setDrawing(false);}catch(_){}refresh();}
+  function pause(){
+    // Losing access visibility ends only the pointer gesture, not the reader's draft.
+    if(!draft||draft.pointer===null)return;
+    const pointer=draft.pointer;draft.pointer=null;
+    try{overlay.releasePointerCapture(pointer);}catch(_){}
+  }
   function complete(){
     if(!draft||draft.region)return;const op=draft.op;try{verify(op);draft.region=geometry(()=>model.makeRegion(draft.mode,draft.points,.002));preview();status.textContent='조각 제거 영역을 미리 봅니다. Apply Sculpt로 적용하세요.';}catch(error){if(error.kinSculptStale||getOperation?.()!==op)report(op,Object.assign(error,{kinSculptStale:true}));else status.textContent=error.message;}
   }
@@ -96,5 +102,5 @@ window.kinCreateVolumeSculpt=function({controlsPane,canvasPane,canvasHost,getOpe
   canvasPane.addEventListener('pointerdown',pointerDown);canvasPane.addEventListener('pointermove',pointerMove);canvasPane.addEventListener('pointerup',endPointer);canvasPane.addEventListener('pointercancel',cancelPointer);canvasPane.addEventListener('contextmenu',contextMenu);
   side.onchange=()=>{let op;try{op=ready();if(draft?.op===op){draft.side=side.value;preview();}}catch(error){if(op)report(op,error);else status.textContent=error.message;}};
   refresh();
-  return {fieldset,reset(op){cleanup();if(!op)return;const operations=Array.isArray(op.sculptOperations)?op.sculptOperations:[];if(!operations.length){op.sculptOperations=[];return;}if(!restore(op,[],null))throw Error('VR 조각 제거를 초기화하지 못했습니다.');},cancel:cleanup,dispose(){ended=true;cleanup();for(const [name,handler] of [['pointerdown',pointerDown],['pointermove',pointerMove],['pointerup',endPointer],['pointercancel',cancelPointer],['contextmenu',contextMenu]])canvasPane.removeEventListener(name,handler);fieldset.remove();if(changedPosition)canvasPane.style.position=originalPosition;}};
+  return {fieldset,pause,reset(op){cleanup();if(!op)return;const operations=Array.isArray(op.sculptOperations)?op.sculptOperations:[];if(!operations.length){op.sculptOperations=[];return;}if(!restore(op,[],null))throw Error('VR 조각 제거를 초기화하지 못했습니다.');},cancel:cleanup,dispose(){ended=true;cleanup();for(const [name,handler] of [['pointerdown',pointerDown],['pointermove',pointerMove],['pointerup',endPointer],['pointercancel',cancelPointer],['contextmenu',contextMenu]])canvasPane.removeEventListener(name,handler);fieldset.remove();if(changedPosition)canvasPane.style.position=originalPosition;}};
 };
