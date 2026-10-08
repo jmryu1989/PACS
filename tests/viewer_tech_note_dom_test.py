@@ -228,6 +228,12 @@ class Harness:
         route.fulfill(body='<div id="root"><div id="image"></div><section id="kin-viewer-layout"></section></div>', content_type='text/html')
 
     def finish(self, index, commit=True, status=None):
+        # The page reports busy when its fetch starts; the route callback that parks the request in `held`
+        # runs a moment later (slow hosted runners showed the gap). Wait for the held request itself.
+        waited = 0
+        while index not in self.api.held and waited < 10_000:
+            self.page.wait_for_timeout(20)  # pumps Playwright's event loop so the route callback can run
+            waited += 20
         route = self.api.held.pop(index)
         if not commit:
             return route.fulfill(status=status or 500, json={'message': 'SYN not stored'})
