@@ -10,9 +10,10 @@ REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> T
 here) and TEST-S5-U1c-LIVE-MATRIX (clinician_policy_live.py test_01/test_04/test_05): every controller route has exactly one
 route_matrix row, nothing is denied by subtraction, and review notes D3/D5/D6/D8 of S5-U1a are closed by pins.
 
-No Nest, no browser, no stack. Node runs for one question only: the TypeScript compiler api/package-lock.json installs
+No Nest, no browser, no stack. The TypeScript compiler api/package-lock.json installs
 (npm ci --prefix api --ignore-scripts) says which names spelled like a decorator are the decorator (Compiler,
-tests/route_inventory_ts.js); without node or it the test fails. Three kinds of evidence and nothing more:
+tests/route_inventory_ts.js), follows relative loaders and reads fixed prototype comparisons; without node or it the
+test fails. Three kinds of evidence and nothing more:
   1. tests/clinician_policy_fixtures.json judged by an independent Python model of the guard rules
      (member state, clinician-only detection, gateway identity closure, route key from Nest metadata,
      allowlist decision). The shipped TypeScript is judged against the same fixtures only by the hosted
@@ -775,7 +776,7 @@ class Compiler:
             self.process = None
 
     def bindings(self, sources):
-        """{path: {offset: binding}} of the .ts files of sources ({path: text} under api/src), offsets in the text."""
+        """Per-file name bindings and AST contract facts for sources; offsets are code points in the source text."""
         files = {path.relative_to(API).as_posix(): text for path, text in sources.items()
                  if path.suffix == ".ts" and API in path.parents}
         key = tuple(sorted(files.items()))
@@ -796,6 +797,10 @@ class Compiler:
             self.versions = {name: reply[name] for name in ("typescript", "node", "decorators")}
             self.answers[key] = {API / name: {offset: kind for offset, _name, kind in found}
                                  for name, found in reply["files"].items()}
+            for name, contract in reply["contracts"].items():
+                self.answers[key].setdefault(API / name, {}).update(
+                    relative_loads=dict(contract["relative_loads"]),
+                    prototype_comparisons=set(contract["prototype_comparisons"]))
         return self.answers[key]
 
 
@@ -1156,18 +1161,19 @@ def regex_names(path, source):
                              f"as a regex where TypeScript divides would hide from them: {found}")
 
 
-def module_loads(path, source, code):
-    """[package] of the loader calls source_contract supports; raises on every other require or import (S5-U1c-F05/F06).
+def module_loads(path, source, code, bindings=None):
+    """[package] of supported package loads; relative loads must be followed by the compiler in the checked source set.
 
     import is a statement keyword, which module_statements reads, or 'import(...)'. require is 'require(...)', a method
     declared in a class body, or this.require(...) and this.<field>.require(...), how the services call StudyAccess. A
-    loader call is the bare callee with one plain string literal naming a loaded package and nothing else: the reader
+    loader call is the bare callee with one plain string literal naming a loaded package or followed module: the reader
     before this took 'require('@nest' + 'js/common')' by its first string, 'true ? require(name) : null' by the ':'
     after the call as a method's return type, 'module.require(name)' as a method call, and module['require'] was a
     string, so each loaded Nest's common unread (S5-U1c-F06). code is the property_names text, where module['require']
     is module.require; 'import x = require('m')' is a loader call too.
     """
     found, loaded = [], []
+    bindings = judged(path, source) if bindings is None else bindings
     for match in words(LOADER_NAME, code):
         word, at = match.group(1), match.start()
         paren = skip_gap(code, match.end())
@@ -1189,6 +1195,11 @@ def module_loads(path, source, code):
         kind, module = loader_argument(source, paren, end)
         if kind == "plain" and module in LOADED_PACKAGES:
             loaded.append(module)
+        elif kind == "plain" and module.startswith(("./", "../")):
+            # The compiler resolves against exactly the source set the inventory checks, not the filesystem alone.
+            followed = bindings.get("relative_loads", {}).get(at)
+            if followed != "followed":
+                found.append((line_of(code, at), f"{word}({module!r}): {followed or 'relative binding not followed'}"))
         elif kind == "plain":
             found.append((line_of(code, at), f"{word}({module!r}): not a package the loaders may take"))
         elif kind == "template":
@@ -1198,11 +1209,11 @@ def module_loads(path, source, code):
                                              f"plain string literal: {text}"))
     if found:
         raise AssertionError(f"{path.name}: a module loader the binding check does not follow (source_contract: the "
-                             f"bare callee and one plain string literal naming a loaded package): {found}")
+                             f"bare callee and one plain string literal naming a loaded package or followed module): {found}")
     return loaded
 
 
-def contract_names(path, code):
+def contract_names(path, code, bindings=None):
     """Raise on a sealed word anywhere and on Object, Array, process, prototype, getPrototypeOf and constructor outside
     the forms source_contract lists (S5-U1c-F06); code is the property_names text.
 
@@ -1237,8 +1248,9 @@ def contract_names(path, code):
     for match in words(GET_PROTOTYPE_NAME, code):
         base, paren = owner(code, match.start()), skip_gap(code, match.end())
         compared = code.startswith("(", paren) and code.startswith(("===", "!=="), skip_gap(code, call_end(code, paren)))
+        compared = compared or match.start() in (bindings or {}).get("prototype_comparisons", ())
         if not (base is not None and base[0] == "Object" and not is_property(code, base[1]) and compared):
-            add(match, "getPrototypeOf other than compared by === or !==")
+            add(match, "getPrototypeOf other than compared by ===, !== or fixed-list includes")
     for match in words(CONSTRUCTOR_NAME, code):
         paren = skip_gap(code, match.end())
         body = skip_gap(code, call_end(code, paren)) if code.startswith("(", paren) else paren
@@ -1314,8 +1326,8 @@ def decorator_bindings(path, source, runs, bindings=None):
     The runs alone name what is checked, so 'import { Put }' and 'Put('unlisted')(target, 'unlisted', descriptor)' after
     the class made a public route both inventories missed. Then, also in every file: a STRICT_NAMES name occurs only as
     its import and its decorators (undecorated_names) and is bound by its own import from STRICT_MODULE even when no
-    decorator uses it, no metadata writer occurs (metadata_writes), and no loader reaches a project file or a Nest
-    package (module_loads).
+    decorator uses it, no metadata writer occurs (metadata_writes), and relative loaders are followed only within
+    the checked source set without exposing decorator exports; Nest package loaders stay refused (module_loads).
 
     S5-U1c-F06: those name checks read the property_names text, so a literal key (common['Put'], module['require']) is
     the member it names, and source_contract closes the rest: loader calls (module_loads), sealed words and the listed
@@ -1345,12 +1357,12 @@ def decorator_bindings(path, source, runs, bindings=None):
     named = literal_keys(source)[0]
     for name, offsets in sorted(uses.items()):
         gathered(problems, own_import, path, named, statements, name, DECORATOR_MODULE.get(name), offsets)
-    present = gathered(problems, undecorated_names, path, source, named, statements, uses,
-                       judged(path, source) if bindings is None else bindings)
+    bindings = judged(path, source) if bindings is None else bindings
+    present = gathered(problems, undecorated_names, path, source, named, statements, uses, bindings)
     gathered(problems, metadata_writes, path, code, named)
     gathered(problems, regex_names, path, source)
-    gathered(problems, module_loads, path, source, named)
-    gathered(problems, contract_names, path, named)
+    gathered(problems, module_loads, path, source, named, bindings)
+    gathered(problems, contract_names, path, named, bindings)
     gathered(problems, module_sources, path, statements)
     for name in sorted((present or set()) - set(uses)):
         gathered(problems, own_import, path, named, statements, name, STRICT_MODULE[name], set(), False)
@@ -3079,10 +3091,22 @@ class ClinicianPolicySpec(unittest.TestCase):
         for label, files in accepted.items():
             with self.subTest(accepted=label):
                 self.assertEqual(controller_inventory({**sources, **files}), baseline)
+        # OL-01: behavior fixtures for followed bindings and comparison-only prototype access.
+        # Paths are virtual api/src inputs; no product source is changed to exercise a refusal.
+        extensions = json.loads((ROOT / "tests/fixtures/clinician-source-contract-loads.json").read_text(encoding="utf-8"))
+        for case in extensions:
+            files = {API / name: text for name, text in case["files"].items()}
+            with self.subTest(source_contract_extension=case["name"]):
+                if "refused" in case:
+                    self.assertIn(case["refused"], refusal(files))
+                else:
+                    self.assertEqual(controller_inventory({**sources, **files}), baseline)
         print("CLINICIAN_POLICY_SOURCE_CONTRACT " + json.dumps({
             "f06_refused": f06, "refused": sorted(refused), "accepted": sorted(accepted), "packages": sorted(PACKAGES),
             "loaded_packages": sorted(LOADED_PACKAGES), "sealed_words": sorted(CONTRACT["sealed_words"]),
             "real_routes": len(baseline), "real_public": len(PUBLIC),
+            "extension_accepted": [case["name"] for case in extensions if "refused" not in case],
+            "extension_refused": [case["name"] for case in extensions if "refused" in case],
         }, ensure_ascii=True, sort_keys=True))
 
     def test_22_regex_and_division_are_told_apart_by_the_token_before(self):

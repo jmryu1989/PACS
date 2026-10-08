@@ -1,0 +1,84 @@
+[
+  {
+    "name": "listed IP parser and fixed prototype comparisons",
+    "files": {"probe.ts": "import { isIP } from 'node:net';\nexport const valid = (value: any) => isIP(value) !== 0;\nexport const plain = (value: any) => [null, Object.prototype, Array.prototype].includes(Object.getPrototypeOf(value));\n"}
+  },
+  {
+    "name": "relative require import and import type follow a sibling",
+    "files": {
+      "probes/value.ts": "export const value = 1;\n",
+      "probes/consumer.ts": "const { value } = require('./value') as typeof import('./value');\nexport const read = async () => (await import('./value')).value + value;\n"
+    }
+  },
+  {
+    "name": "relative parent and directory index stay inside the scope",
+    "files": {
+      "probes/index.ts": "export const value = 1;\n",
+      "probes/nested/consumer.ts": "export const read = () => require('../index').value;\n",
+      "probe.ts": "export const read = async () => (await import('./probes')).value;\n"
+    }
+  },
+  {
+    "name": "unlisted package is still refused",
+    "files": {"probe.ts": "import { createRequire } from 'node:module';\nexport const load = createRequire;\n"},
+    "refused": "a module the source contract does not list"
+  },
+  {
+    "name": "require outside api src is refused",
+    "files": {"probe.ts": "export const load = () => require('../../tests/route_inventory_ts.js');\n"},
+    "refused": "relative module is missing or outside the checked api/src scope"
+  },
+  {
+    "name": "dynamic import outside api src is refused",
+    "files": {"probe.ts": "export const load = () => import('./../../tests/route_inventory_ts.js');\n"},
+    "refused": "relative module is missing or outside the checked api/src scope"
+  },
+  {
+    "name": "missing relative implementation is refused",
+    "files": {"probe.ts": "export const load = () => require('./absent-probe');\n"},
+    "refused": "relative module is missing or outside the checked api/src scope"
+  },
+  {
+    "name": "relative decorator export cannot bypass binding checks",
+    "files": {"probe.ts": "const { Public: open } = require('./auth.guard');\nexport const apply = open;\n"},
+    "refused": "relative module exports a route or public metadata decorator"
+  },
+  {
+    "name": "dynamic import of decorator exports is refused",
+    "files": {"probe.ts": "export const load = () => import('./auth.guard');\n"},
+    "refused": "relative module exports a route or public metadata decorator"
+  },
+  {
+    "name": "followed destination is checked for metadata writes",
+    "files": {
+      "probe.ts": "export const load = () => require('./probes/writer');\n",
+      "probes/writer.ts": "Reflect.defineMetadata('path', 'hidden', {});\nexport const value = 1;\n"
+    },
+    "refused": "writer.ts: a metadata writer"
+  },
+  {
+    "name": "prototype captured before includes is refused",
+    "files": {"probe.ts": "export const plain = (value: any) => { const captured = Object.getPrototypeOf(value); return [Object.prototype, null].includes(captured); };\n"},
+    "refused": "getPrototypeOf other than compared"
+  },
+  {
+    "name": "prototype assigned inside includes is refused",
+    "files": {"probe.ts": "let captured: any;\nexport const plain = (value: any) => [Object.prototype, null].includes(captured = Object.getPrototypeOf(value));\n"},
+    "refused": "getPrototypeOf other than compared"
+  },
+  {
+    "name": "prototype mutation inside includes is refused",
+    "files": {"probe.ts": "export const plain = (value: any) => [Object.prototype, null].includes(Object.assign(Object.getPrototypeOf(value), { hidden: true }));\n"},
+    "refused": "getPrototypeOf other than compared"
+  },
+  {
+    "name": "variable comparison receiver is refused",
+    "files": {"probe.ts": "export const plain = (list: any, value: any) => list.includes(Object.getPrototypeOf(value));\n"},
+    "refused": "getPrototypeOf other than compared"
+  },
+  {
+    "name": "spread comparison list is refused",
+    "files": {"probe.ts": "export const plain = (list: any, value: any) => [...list, null].includes(Object.getPrototypeOf(value));\n"},
+    "refused": "getPrototypeOf other than compared"
+  }
+]
